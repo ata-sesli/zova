@@ -1,0 +1,3 @@
+zig-out/bin
+.zig-cache
+.DS_STORE
