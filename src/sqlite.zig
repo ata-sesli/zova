@@ -18,6 +18,7 @@ pub const Error = error{
     Busy,
     Locked,
     Constraint,
+    CantOpen,
     Misuse,
 };
 
@@ -335,9 +336,14 @@ fn mapResultCode(rc: c_int) Error {
         c.SQLITE_BUSY => error.Busy,
         c.SQLITE_LOCKED => error.Locked,
         c.SQLITE_CONSTRAINT => error.Constraint,
+        c.SQLITE_CANTOPEN => error.CantOpen,
         c.SQLITE_MISUSE => error.Misuse,
         else => error.SqliteError,
     };
+}
+
+fn testingDbPath(buffer: []u8, sub_path: []const u8, filename: []const u8) ![:0]u8 {
+    return std.fmt.bufPrintZ(buffer, ".zig-cache/tmp/{s}/{s}", .{ sub_path, filename });
 }
 
 test "database opens memory database and exposes sqlite version" {
@@ -356,6 +362,133 @@ test "database exec creates table and writes row" {
 
     try std.testing.expectEqual(@as(i64, 1), db.changes());
     try std.testing.expectEqual(@as(i64, 1), db.lastInsertRowId());
+}
+
+test "database open maps missing parent directory to CantOpen" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(
+        &path_buffer,
+        ".zig-cache/tmp/{s}/missing-parent/missing.db",
+        .{tmp.sub_path[0..]},
+    );
+
+    try std.testing.expectError(error.CantOpen, Database.open(db_path));
+}
+
+test "file-backed database persists rows across reopen" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "persist.db");
+
+    {
+        var db = try Database.open(db_path);
+        defer db.deinit();
+
+        try db.exec("create table messages (id integer primary key, body text not null)");
+        try db.exec("insert into messages (body) values ('alpha')");
+        try db.exec("insert into messages (body) values ('beta')");
+    }
+
+    {
+        var db = try Database.open(db_path);
+        defer db.deinit();
+
+        var select = try db.prepare("select id, body from messages order by id");
+        defer select.deinit();
+
+        try std.testing.expectEqual(Step.row, try select.step());
+        try std.testing.expectEqual(@as(i64, 1), select.columnInt64(0));
+        try std.testing.expectEqualStrings("alpha", select.columnText(1));
+
+        try std.testing.expectEqual(Step.row, try select.step());
+        try std.testing.expectEqual(@as(i64, 2), select.columnInt64(0));
+        try std.testing.expectEqualStrings("beta", select.columnText(1));
+
+        try std.testing.expectEqual(Step.done, try select.step());
+    }
+}
+
+test "existing sqlite file remains usable through zova" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "existing.db");
+
+    {
+        var db = try Database.open(db_path);
+        defer db.deinit();
+
+        try db.exec("create table settings (key text primary key, value text not null)");
+        try db.exec("insert into settings (key, value) values ('theme', 'light')");
+    }
+
+    {
+        var db = try Database.open(db_path);
+        defer db.deinit();
+
+        try db.exec("insert into settings (key, value) values ('density', 'compact')");
+
+        var count = try db.prepare("select count(*) from settings");
+        defer count.deinit();
+        try std.testing.expectEqual(Step.row, try count.step());
+        try std.testing.expectEqual(@as(i64, 2), count.columnInt64(0));
+    }
+}
+
+test "database error message describes failing sql" {
+    var db = try Database.open(":memory:");
+    defer db.deinit();
+
+    try std.testing.expectError(error.SqliteError, db.exec("select * from missing_table"));
+    try std.testing.expect(std.mem.indexOf(u8, db.errorMessage(), "no such table") != null);
+}
+
+test "database open does not create zova schema" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "schema.db");
+
+    {
+        var db = try Database.open(db_path);
+        defer db.deinit();
+
+        try db.exec("create table app_data (id integer primary key, value text not null)");
+    }
+
+    {
+        var db = try Database.open(db_path);
+        defer db.deinit();
+
+        var user_tables = try db.prepare(
+            \\select name
+            \\from sqlite_master
+            \\where type = 'table' and name not like 'sqlite_%'
+            \\order by name
+        );
+        defer user_tables.deinit();
+
+        try std.testing.expectEqual(Step.row, try user_tables.step());
+        try std.testing.expectEqualStrings("app_data", user_tables.columnText(0));
+        try std.testing.expectEqual(Step.done, try user_tables.step());
+
+        var zova_tables = try db.prepare(
+            \\select count(*)
+            \\from sqlite_master
+            \\where type = 'table' and (name like 'zova%' or name like '_zova%')
+        );
+        defer zova_tables.deinit();
+
+        try std.testing.expectEqual(Step.row, try zova_tables.step());
+        try std.testing.expectEqual(@as(i64, 0), zova_tables.columnInt64(0));
+    }
 }
 
 test "statement binds values and reads a row" {
