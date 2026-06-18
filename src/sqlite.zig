@@ -69,6 +69,9 @@ pub const Database = struct {
     }
 
     /// Start a deferred SQLite transaction.
+    ///
+    /// This is a thin wrapper over `begin`; nested transaction behavior,
+    /// locking, and failure modes are SQLite's normal semantics.
     pub fn begin(self: *Database) Error!void {
         try self.exec("begin");
     }
@@ -76,17 +79,18 @@ pub const Database = struct {
     /// Start an immediate SQLite transaction.
     ///
     /// This acquires the write lock up front, which is often the clearer
-    /// default for storage code that knows it is about to write.
+    /// default for storage code that knows it is about to write. Locking and
+    /// busy behavior follow SQLite's normal `begin immediate` semantics.
     pub fn beginImmediate(self: *Database) Error!void {
         try self.exec("begin immediate");
     }
 
-    /// Commit the active transaction.
+    /// Commit the active transaction using SQLite's normal `commit` semantics.
     pub fn commit(self: *Database) Error!void {
         try self.exec("commit");
     }
 
-    /// Roll back the active transaction.
+    /// Roll back the active transaction using SQLite's normal `rollback` semantics.
     pub fn rollback(self: *Database) Error!void {
         try self.exec("rollback");
     }
@@ -346,6 +350,12 @@ fn testingDbPath(buffer: []u8, sub_path: []const u8, filename: []const u8) ![:0]
     return std.fmt.bufPrintZ(buffer, ".zig-cache/tmp/{s}/{s}", .{ sub_path, filename });
 }
 
+test "result code mapping covers locked misuse and generic errors" {
+    try std.testing.expectEqual(error.Locked, mapResultCode(c.SQLITE_LOCKED));
+    try std.testing.expectEqual(error.Misuse, mapResultCode(c.SQLITE_MISUSE));
+    try std.testing.expectEqual(error.SqliteError, mapResultCode(c.SQLITE_ERROR));
+}
+
 test "database opens memory database and exposes sqlite version" {
     var db = try Database.open(":memory:");
     defer db.deinit();
@@ -585,6 +595,17 @@ test "statement reports parameter count and named parameter index" {
     try std.testing.expectEqual(@as(c_int, 2), select.parameterIndex(":name"));
 }
 
+test "invalid parameter indexes map to generic sqlite error" {
+    var db = try Database.open(":memory:");
+    defer db.deinit();
+
+    var select = try db.prepare("select ?");
+    defer select.deinit();
+
+    try std.testing.expectError(error.SqliteError, select.bindInt64(0, 1));
+    try std.testing.expectError(error.SqliteError, select.bindInt64(2, 1));
+}
+
 test "statement reset and clear bindings prevent stale values" {
     var db = try Database.open(":memory:");
     defer db.deinit();
@@ -600,6 +621,36 @@ test "statement reset and clear bindings prevent stale values" {
     try select.clearBindings();
     try std.testing.expectEqual(Step.row, try select.step());
     try std.testing.expectEqualStrings("fallback", select.columnText(0));
+}
+
+test "deferred transaction begin commits writes" {
+    var db = try Database.open(":memory:");
+    defer db.deinit();
+
+    try db.exec("create table items (id integer primary key, name text not null)");
+    try db.begin();
+    try db.exec("insert into items (name) values ('deferred')");
+    try db.commit();
+
+    var count = try db.prepare("select count(*) from items where name = 'deferred'");
+    defer count.deinit();
+    try std.testing.expectEqual(Step.row, try count.step());
+    try std.testing.expectEqual(@as(i64, 1), count.columnInt64(0));
+}
+
+test "immediate transaction begin commits writes" {
+    var db = try Database.open(":memory:");
+    defer db.deinit();
+
+    try db.exec("create table items (id integer primary key, name text not null)");
+    try db.beginImmediate();
+    try db.exec("insert into items (name) values ('immediate')");
+    try db.commit();
+
+    var count = try db.prepare("select count(*) from items where name = 'immediate'");
+    defer count.deinit();
+    try std.testing.expectEqual(Step.row, try count.step());
+    try std.testing.expectEqual(@as(i64, 1), count.columnInt64(0));
 }
 
 test "transaction commit keeps writes" {
@@ -630,4 +681,61 @@ test "transaction rollback discards writes" {
     defer count.deinit();
     try std.testing.expectEqual(Step.row, try count.step());
     try std.testing.expectEqual(@as(i64, 0), count.columnInt64(0));
+}
+
+test "commit without active transaction maps to generic sqlite error" {
+    var db = try Database.open(":memory:");
+    defer db.deinit();
+
+    try std.testing.expectError(error.SqliteError, db.commit());
+    try std.testing.expect(std.mem.indexOf(u8, db.errorMessage(), "no transaction is active") != null);
+}
+
+test "rollback without active transaction maps to generic sqlite error" {
+    var db = try Database.open(":memory:");
+    defer db.deinit();
+
+    try std.testing.expectError(error.SqliteError, db.rollback());
+    try std.testing.expect(std.mem.indexOf(u8, db.errorMessage(), "no transaction is active") != null);
+}
+
+test "nested transaction keeps sqlite semantics and leaves connection usable" {
+    var db = try Database.open(":memory:");
+    defer db.deinit();
+
+    try db.exec("create table items (id integer primary key, name text not null)");
+    try db.begin();
+    try std.testing.expectError(error.SqliteError, db.begin());
+    try std.testing.expect(std.mem.indexOf(u8, db.errorMessage(), "within a transaction") != null);
+    try db.rollback();
+
+    try db.exec("insert into items (name) values ('usable')");
+    var count = try db.prepare("select count(*) from items where name = 'usable'");
+    defer count.deinit();
+    try std.testing.expectEqual(Step.row, try count.step());
+    try std.testing.expectEqual(@as(i64, 1), count.columnInt64(0));
+}
+
+test "beginImmediate maps busy when another connection holds write lock" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "busy.db");
+
+    {
+        var setup = try Database.open(db_path);
+        defer setup.deinit();
+        try setup.exec("create table items (id integer primary key, name text not null)");
+    }
+
+    var first = try Database.open(db_path);
+    defer first.deinit();
+    var second = try Database.open(db_path);
+    defer second.deinit();
+
+    try first.beginImmediate();
+    defer first.rollback() catch {};
+
+    try std.testing.expectError(error.Busy, second.beginImmediate());
 }
