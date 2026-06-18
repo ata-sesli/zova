@@ -1,3 +1,15 @@
+//! Thin SQLite wrapper for Zova v0.
+//!
+//! This module deliberately stays close to SQLite's C API. It owns database
+//! and statement handles, maps a small set of common result codes into Zig
+//! errors, exposes explicit transaction helpers, and keeps raw SQLite access
+//! available through `sqlite.c`.
+//!
+//! Object storage, vector storage, migrations, Zova system tables, ORM
+//! behavior, query building, async behavior, and connection pooling are
+//! intentionally absent from this module today. Plain SQLite usage should not
+//! require Zova-specific schema setup.
+
 const std = @import("std");
 
 /// Raw SQLite C bindings.
