@@ -131,6 +131,18 @@ pub const Step = enum {
     done,
 };
 
+/// SQLite's five fundamental runtime column types.
+///
+/// This is the Zig shape of `sqlite3_column_type`. The value is most useful
+/// before calling accessors that may perform SQLite type conversion.
+pub const ColumnType = enum {
+    integer,
+    float,
+    text,
+    blob,
+    null,
+};
+
 /// Owns one prepared SQLite statement.
 ///
 /// A statement borrows its parent database and must be finalized with
@@ -155,6 +167,18 @@ pub const Statement = struct {
         if (rc != c.SQLITE_OK) return mapResultCode(rc);
     }
 
+    /// Bind SQL NULL to a 1-based SQL parameter index.
+    pub fn bindNull(self: *Statement, index: c_int) Error!void {
+        const rc = c.sqlite3_bind_null(self.handle, index);
+        if (rc != c.SQLITE_OK) return mapResultCode(rc);
+    }
+
+    /// Bind a 64-bit floating point value to a 1-based SQL parameter index.
+    pub fn bindDouble(self: *Statement, index: c_int, value: f64) Error!void {
+        const rc = c.sqlite3_bind_double(self.handle, index, value);
+        if (rc != c.SQLITE_OK) return mapResultCode(rc);
+    }
+
     /// Bind UTF-8 text to a 1-based SQL parameter index.
     ///
     /// The input slice does not need to outlive this call. Zig cannot safely
@@ -173,6 +197,32 @@ pub const Statement = struct {
             @intCast(value.len),
             c.sqlite3_free,
             c.SQLITE_UTF8,
+        );
+        if (rc != c.SQLITE_OK) return mapResultCode(rc);
+    }
+
+    /// Bind blob bytes to a 1-based SQL parameter index.
+    ///
+    /// The input slice does not need to outlive this call. Non-empty blobs are
+    /// copied into SQLite-owned memory. Empty blobs use SQLite's zeroblob API
+    /// so they stay zero-length blobs instead of becoming SQL NULL.
+    pub fn bindBlob(self: *Statement, index: c_int, value: []const u8) Error!void {
+        if (value.len == 0) {
+            const rc = c.sqlite3_bind_zeroblob64(self.handle, index, 0);
+            if (rc != c.SQLITE_OK) return mapResultCode(rc);
+            return;
+        }
+
+        const raw_copy = c.sqlite3_malloc64(@intCast(value.len)) orelse return error.SqliteError;
+        const copy: [*]u8 = @ptrCast(raw_copy);
+        @memcpy(copy[0..value.len], value);
+
+        const rc = c.sqlite3_bind_blob64(
+            self.handle,
+            index,
+            copy,
+            @intCast(value.len),
+            c.sqlite3_free,
         );
         if (rc != c.SQLITE_OK) return mapResultCode(rc);
     }
@@ -205,12 +255,17 @@ pub const Statement = struct {
         if (rc != c.SQLITE_OK) return mapResultCode(rc);
     }
 
-    /// Read a column from the current row as a signed 64-bit integer.
+    /// Read a 0-based column from the current row as a signed 64-bit integer.
     pub fn columnInt64(self: *Statement, index: c_int) i64 {
         return c.sqlite3_column_int64(self.handle, index);
     }
 
-    /// Read a column from the current row as UTF-8 text.
+    /// Read a 0-based column from the current row as a 64-bit floating point value.
+    pub fn columnDouble(self: *Statement, index: c_int) f64 {
+        return c.sqlite3_column_double(self.handle, index);
+    }
+
+    /// Read a 0-based column from the current row as UTF-8 text.
     ///
     /// The returned slice is borrowed from SQLite. It remains valid until the
     /// next `step`, `reset`, or `deinit` on this statement. Call this only
@@ -224,6 +279,53 @@ pub const Statement = struct {
 
         const many: [*]const u8 = @ptrCast(ptr);
         return many[0..@intCast(bytes)];
+    }
+
+    /// Read a 0-based column from the current row as blob bytes.
+    ///
+    /// The returned slice is borrowed from SQLite. It remains valid until the
+    /// next `step`, `reset`, or `deinit` on this statement. Call this only
+    /// after `step` returns `.row`.
+    pub fn columnBlob(self: *Statement, index: c_int) []const u8 {
+        const ptr = c.sqlite3_column_blob(self.handle, index);
+        const bytes = c.sqlite3_column_bytes(self.handle, index);
+        if (ptr == null or bytes <= 0) return "";
+
+        const many: [*]const u8 = @ptrCast(ptr);
+        return many[0..@intCast(bytes)];
+    }
+
+    /// Return the runtime SQLite type of a column in the current row.
+    ///
+    /// Column indexes are 0-based. For the most precise result, call this
+    /// before using accessors that may ask SQLite to convert the value.
+    pub fn columnType(self: *Statement, index: c_int) ColumnType {
+        return switch (c.sqlite3_column_type(self.handle, index)) {
+            c.SQLITE_INTEGER => .integer,
+            c.SQLITE_FLOAT => .float,
+            c.SQLITE_TEXT => .text,
+            c.SQLITE_BLOB => .blob,
+            c.SQLITE_NULL => .null,
+            else => unreachable,
+        };
+    }
+
+    /// Return the number of columns produced by this statement.
+    pub fn columnCount(self: *Statement) c_int {
+        return c.sqlite3_column_count(self.handle);
+    }
+
+    /// Return the number of SQL parameters in this statement.
+    pub fn parameterCount(self: *Statement) c_int {
+        return c.sqlite3_bind_parameter_count(self.handle);
+    }
+
+    /// Return the 1-based index for a named SQL parameter.
+    ///
+    /// `name` must include SQLite's parameter prefix, such as `":id"`.
+    /// SQLite returns `0` when the name is not present.
+    pub fn parameterIndex(self: *Statement, name: [:0]const u8) c_int {
+        return c.sqlite3_bind_parameter_index(self.handle, name.ptr);
     }
 };
 
@@ -297,6 +399,74 @@ test "column text reads converted values" {
     defer select.deinit();
     try std.testing.expectEqual(Step.row, try select.step());
     try std.testing.expectEqualStrings("42", select.columnText(0));
+}
+
+test "statement binds and reads scalar and blob values" {
+    var db = try Database.open(":memory:");
+    defer db.deinit();
+
+    try db.exec(
+        \\create table samples (
+        \\  i integer,
+        \\  r real,
+        \\  b blob,
+        \\  empty_blob blob,
+        \\  n text
+        \\)
+    );
+
+    var insert = try db.prepare("insert into samples (i, r, b, empty_blob, n) values (?, ?, ?, ?, ?)");
+    defer insert.deinit();
+    try insert.bindInt64(1, -42);
+    try insert.bindDouble(2, 3.25);
+    try insert.bindBlob(3, &.{ 0x01, 0x02, 0x03 });
+    try insert.bindBlob(4, &.{});
+    try insert.bindNull(5);
+    try std.testing.expectEqual(Step.done, try insert.step());
+
+    var select = try db.prepare("select i, r, b, empty_blob, n from samples");
+    defer select.deinit();
+    try std.testing.expectEqual(@as(c_int, 5), select.columnCount());
+    try std.testing.expectEqual(Step.row, try select.step());
+
+    try std.testing.expectEqual(ColumnType.integer, select.columnType(0));
+    try std.testing.expectEqual(ColumnType.float, select.columnType(1));
+    try std.testing.expectEqual(ColumnType.blob, select.columnType(2));
+    try std.testing.expectEqual(ColumnType.blob, select.columnType(3));
+    try std.testing.expectEqual(ColumnType.null, select.columnType(4));
+
+    try std.testing.expectEqual(@as(i64, -42), select.columnInt64(0));
+    try std.testing.expectEqual(@as(f64, 3.25), select.columnDouble(1));
+    try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x02, 0x03 }, select.columnBlob(2));
+    try std.testing.expectEqual(@as(usize, 0), select.columnBlob(3).len);
+}
+
+test "statement reports parameter count and named parameter index" {
+    var db = try Database.open(":memory:");
+    defer db.deinit();
+
+    var select = try db.prepare("select ?, :name, ?");
+    defer select.deinit();
+
+    try std.testing.expectEqual(@as(c_int, 3), select.parameterCount());
+    try std.testing.expectEqual(@as(c_int, 2), select.parameterIndex(":name"));
+}
+
+test "statement reset and clear bindings prevent stale values" {
+    var db = try Database.open(":memory:");
+    defer db.deinit();
+
+    var select = try db.prepare("select coalesce(?1, 'fallback')");
+    defer select.deinit();
+
+    try select.bindText(1, "first");
+    try std.testing.expectEqual(Step.row, try select.step());
+    try std.testing.expectEqualStrings("first", select.columnText(0));
+
+    try select.reset();
+    try select.clearBindings();
+    try std.testing.expectEqual(Step.row, try select.step());
+    try std.testing.expectEqualStrings("fallback", select.columnText(0));
 }
 
 test "transaction commit keeps writes" {
