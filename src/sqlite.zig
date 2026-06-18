@@ -1,9 +1,18 @@
 const std = @import("std");
 
+/// Raw SQLite C bindings.
+///
+/// Zova keeps this public on purpose: the wrapper below covers the common
+/// v0 lifecycle, statement, and transaction paths, but callers can still drop
+/// down to SQLite directly when they need an API Zova does not wrap yet.
 pub const c = @cImport({
     @cInclude("sqlite3.h");
 });
 
+/// Error set for the small public SQLite wrapper.
+///
+/// The wrapper maps common SQLite result codes to named Zig errors and folds
+/// everything else into `SqliteError` until Zova needs more detail.
 pub const Error = error{
     SqliteError,
     Busy,
@@ -12,13 +21,23 @@ pub const Error = error{
     Misuse,
 };
 
+/// Return the runtime SQLite library version used by this build.
 pub fn version() []const u8 {
     return std.mem.span(c.sqlite3_libversion());
 }
 
+/// Owns one SQLite database connection.
+///
+/// `Database` is a thin owner around `sqlite3*`. It does not hide SQL, build
+/// queries, or manage schemas. Callers prepare and execute normal SQLite SQL,
+/// while Zova centralizes handle ownership and result-code mapping.
 pub const Database = struct {
     handle: *c.sqlite3,
 
+    /// Open a SQLite database at `path`.
+    ///
+    /// `path` is zero-terminated to match SQLite's C API. Use `":memory:"` for
+    /// an in-memory database.
     pub fn open(path: [:0]const u8) Error!Database {
         var raw_db: ?*c.sqlite3 = null;
         const rc = c.sqlite3_open(path.ptr, &raw_db);
@@ -32,32 +51,49 @@ pub const Database = struct {
         return .{ .handle = raw_db.? };
     }
 
+    /// Close the database connection.
+    ///
+    /// In v0 this asserts that all statements have already been finalized.
+    /// Leaving statements alive at database close is treated as programmer
+    /// misuse rather than a recoverable runtime condition.
     pub fn deinit(self: *Database) void {
         const rc = c.sqlite3_close(self.handle);
         std.debug.assert(rc == c.SQLITE_OK);
     }
 
+    /// Execute SQL that does not need bound parameters or returned rows.
     pub fn exec(self: *Database, sql: [:0]const u8) Error!void {
         const rc = c.sqlite3_exec(self.handle, sql.ptr, null, null, null);
         if (rc != c.SQLITE_OK) return mapResultCode(rc);
     }
 
+    /// Start a deferred SQLite transaction.
     pub fn begin(self: *Database) Error!void {
         try self.exec("begin");
     }
 
+    /// Start an immediate SQLite transaction.
+    ///
+    /// This acquires the write lock up front, which is often the clearer
+    /// default for storage code that knows it is about to write.
     pub fn beginImmediate(self: *Database) Error!void {
         try self.exec("begin immediate");
     }
 
+    /// Commit the active transaction.
     pub fn commit(self: *Database) Error!void {
         try self.exec("commit");
     }
 
+    /// Roll back the active transaction.
     pub fn rollback(self: *Database) Error!void {
         try self.exec("rollback");
     }
 
+    /// Prepare SQL for repeated execution or bound parameters.
+    ///
+    /// The returned statement borrows this database connection. Finalize it
+    /// with `Statement.deinit` before closing the database.
     pub fn prepare(self: *Database, sql: [:0]const u8) Error!Statement {
         var raw_stmt: ?*c.sqlite3_stmt = null;
         const rc = c.sqlite3_prepare_v2(self.handle, sql.ptr, -1, &raw_stmt, null);
@@ -69,37 +105,61 @@ pub const Database = struct {
         };
     }
 
+    /// Number of rows modified by the most recent INSERT, UPDATE, or DELETE.
     pub fn changes(self: *Database) i64 {
         return @intCast(c.sqlite3_changes64(self.handle));
     }
 
+    /// Rowid from the most recent successful INSERT on this connection.
     pub fn lastInsertRowId(self: *Database) i64 {
         return c.sqlite3_last_insert_rowid(self.handle);
     }
 
+    /// Current SQLite error message for this connection.
+    ///
+    /// The slice is owned by SQLite and should be treated as borrowed.
     pub fn errorMessage(self: *Database) []const u8 {
         return std.mem.span(c.sqlite3_errmsg(self.handle));
     }
 };
 
+/// Result of advancing a prepared statement.
 pub const Step = enum {
+    /// The statement produced a row, and column accessors may be used.
     row,
+    /// The statement finished without producing another row.
     done,
 };
 
+/// Owns one prepared SQLite statement.
+///
+/// A statement borrows its parent database and must be finalized with
+/// `deinit`. Column slices returned from this type are borrowed from SQLite
+/// and are valid only until the statement is stepped, reset, or finalized.
 pub const Statement = struct {
     db: *Database,
     handle: *c.sqlite3_stmt,
 
+    /// Finalize the prepared statement.
+    ///
+    /// SQLite returns the previous `step` error from `sqlite3_finalize`, so
+    /// cleanup intentionally ignores the result. Callers should observe
+    /// execution errors from `step`, not from deferred cleanup.
     pub fn deinit(self: *Statement) void {
         _ = c.sqlite3_finalize(self.handle);
     }
 
+    /// Bind a signed 64-bit integer to a 1-based SQL parameter index.
     pub fn bindInt64(self: *Statement, index: c_int, value: i64) Error!void {
         const rc = c.sqlite3_bind_int64(self.handle, index, value);
         if (rc != c.SQLITE_OK) return mapResultCode(rc);
     }
 
+    /// Bind UTF-8 text to a 1-based SQL parameter index.
+    ///
+    /// The input slice does not need to outlive this call. Zig cannot safely
+    /// use SQLite's `SQLITE_TRANSIENT` function-pointer macro directly, so
+    /// Zova makes a SQLite-owned copy and asks SQLite to free it when done.
     pub fn bindText(self: *Statement, index: c_int, value: []const u8) Error!void {
         const raw_copy = c.sqlite3_malloc64(@intCast(value.len + 1)) orelse return error.SqliteError;
         const copy: [*]u8 = @ptrCast(raw_copy);
@@ -117,6 +177,10 @@ pub const Statement = struct {
         if (rc != c.SQLITE_OK) return mapResultCode(rc);
     }
 
+    /// Advance the statement once.
+    ///
+    /// Returns `.row` when a result row is available and `.done` when the
+    /// statement has completed.
     pub fn step(self: *Statement) Error!Step {
         const rc = c.sqlite3_step(self.handle);
         return switch (rc) {
@@ -126,21 +190,34 @@ pub const Statement = struct {
         };
     }
 
+    /// Reset the statement so it can be executed again.
+    ///
+    /// Existing bindings are preserved, matching SQLite's behavior. Use
+    /// `clearBindings` when the next execution should start unbound.
     pub fn reset(self: *Statement) Error!void {
         const rc = c.sqlite3_reset(self.handle);
         if (rc != c.SQLITE_OK) return mapResultCode(rc);
     }
 
+    /// Clear all currently bound SQL parameters on the statement.
     pub fn clearBindings(self: *Statement) Error!void {
         const rc = c.sqlite3_clear_bindings(self.handle);
         if (rc != c.SQLITE_OK) return mapResultCode(rc);
     }
 
+    /// Read a column from the current row as a signed 64-bit integer.
     pub fn columnInt64(self: *Statement, index: c_int) i64 {
         return c.sqlite3_column_int64(self.handle, index);
     }
 
+    /// Read a column from the current row as UTF-8 text.
+    ///
+    /// The returned slice is borrowed from SQLite. It remains valid until the
+    /// next `step`, `reset`, or `deinit` on this statement. Call this only
+    /// after `step` returns `.row`.
     pub fn columnText(self: *Statement, index: c_int) []const u8 {
+        // SQLite documents this order as the safe way to force text conversion
+        // before asking for the converted byte length.
         const ptr = c.sqlite3_column_text(self.handle, index);
         const bytes = c.sqlite3_column_bytes(self.handle, index);
         if (ptr == null or bytes <= 0) return "";
@@ -150,6 +227,7 @@ pub const Statement = struct {
     }
 };
 
+/// Convert a SQLite result code into Zova's small v0 error set.
 fn mapResultCode(rc: c_int) Error {
     return switch (rc) {
         c.SQLITE_BUSY => error.Busy,
