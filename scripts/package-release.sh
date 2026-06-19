@@ -13,6 +13,13 @@ run() {
     "$@"
 }
 
+require_command() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        echo "missing required command: $1" >&2
+        exit 1
+    fi
+}
+
 if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
     usage
     exit 2
@@ -56,6 +63,15 @@ trap cleanup EXIT INT TERM
 
 cd "$ROOT"
 
+require_command git
+require_command gh
+require_command tar
+
+if ! gh auth status >/dev/null 2>&1; then
+    echo "GitHub CLI is not authenticated. Run: gh auth login" >&2
+    exit 1
+fi
+
 if [ -n "$(git status --porcelain)" ]; then
     echo "working tree is not clean; commit or stash changes before tagging a release" >&2
     git status --short >&2
@@ -68,13 +84,28 @@ if [ -z "$CURRENT_BRANCH" ]; then
     exit 1
 fi
 
+HEAD_COMMIT="$(git rev-parse HEAD)"
+LOCAL_TAG_COMMIT=""
+REMOTE_TAG_COMMIT="$(git ls-remote --tags origin "refs/tags/$TAG^{}" | awk 'NR == 1 {print $1}')"
+if [ -z "$REMOTE_TAG_COMMIT" ]; then
+    REMOTE_TAG_COMMIT="$(git ls-remote --tags origin "refs/tags/$TAG" | awk 'NR == 1 {print $1}')"
+fi
+
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-    echo "tag already exists: $TAG" >&2
+    LOCAL_TAG_COMMIT="$(git rev-list -n 1 "$TAG")"
+    if [ "$LOCAL_TAG_COMMIT" != "$HEAD_COMMIT" ]; then
+        echo "local tag $TAG does not point at HEAD" >&2
+        exit 1
+    fi
+fi
+
+if [ -n "$REMOTE_TAG_COMMIT" ] && [ "$REMOTE_TAG_COMMIT" != "$HEAD_COMMIT" ]; then
+    echo "origin tag $TAG does not point at HEAD" >&2
     exit 1
 fi
 
-if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
-    echo "tag already exists on origin: $TAG" >&2
+if gh release view "$TAG" >/dev/null 2>&1; then
+    echo "GitHub Release already exists: $TAG" >&2
     exit 1
 fi
 
@@ -107,12 +138,22 @@ zig build
 zig build run
 
 cd "$ROOT"
-run git tag -a "$TAG" -m "Zova $VERSION"
-TAG_CREATED=1
+if [ -z "$LOCAL_TAG_COMMIT" ]; then
+    run git tag -a "$TAG" -m "Zova $VERSION"
+    TAG_CREATED=1
+else
+    echo "reusing local tag: $TAG"
+fi
 run git push origin "$CURRENT_BRANCH"
-run git push origin "$TAG"
+if [ -z "$REMOTE_TAG_COMMIT" ]; then
+    run git push origin "$TAG"
+else
+    echo "reusing origin tag: $TAG"
+fi
+run gh release create "$TAG" "$ARCHIVE" --title "Zova $TAG" --notes "Zova $TAG" --verify-tag
 
 TAG_CREATED=0
 echo "release source archive: $ARCHIVE"
 echo "release tag: $TAG"
 echo "pushed branch: $CURRENT_BRANCH"
+echo "GitHub Release: $TAG"
