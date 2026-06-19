@@ -47,7 +47,7 @@ TAG_CREATED=0
 cleanup() {
     status=$?
     if [ "$status" -ne 0 ] && [ "$TAG_CREATED" -eq 1 ]; then
-        git tag -d "$TAG" >/dev/null 2>&1 || true
+        git -C "$ROOT" tag -d "$TAG" >/dev/null 2>&1 || true
     fi
     rm -rf "$TMP"
     exit "$status"
@@ -79,8 +79,6 @@ if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; the
 fi
 
 "$ROOT/scripts/check-release.sh"
-run git tag -a "$TAG" -m "Zova $VERSION"
-TAG_CREATED=1
 
 rm -rf "$TMP"
 mkdir -p "$TMP/$PKG" "$OUT_DIR"
@@ -108,6 +106,9 @@ zig build test -Doptimize=ReleaseSafe
 zig build
 zig build run
 
+cd "$ROOT"
+run git tag -a "$TAG" -m "Zova $VERSION"
+TAG_CREATED=1
 run git push origin "$CURRENT_BRANCH"
 run git push origin "$TAG"
 
