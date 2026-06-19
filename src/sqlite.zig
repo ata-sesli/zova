@@ -9,6 +9,17 @@
 //! behavior, query building, async behavior, and connection pooling are
 //! intentionally absent from this module today. Plain SQLite usage should not
 //! require Zova-specific schema setup.
+//!
+//! The stable v0 package surface is `zova.sqlite`. Database paths stay
+//! zero-terminated, `deinit` keeps assert-style close behavior, transaction
+//! helpers stay manual, and raw result-code/debug needs should use
+//! `errorMessage()` or the public `sqlite.c` escape hatch.
+//!
+//! Zova v0 is not a stricter, distributed, or more concurrent SQL dialect. It
+//! does not alter SQLite PRAGMAs on open; callers remain responsible for
+//! connection settings such as journal mode, synchronous mode, and foreign
+//! keys. The vendored SQLite build keeps FTS5 enabled and relies on modern
+//! SQLite's built-in JSON support.
 
 const std = @import("std");
 
@@ -32,6 +43,10 @@ pub const Error = error{
     Constraint,
     CantOpen,
     Misuse,
+    NoMemory,
+    Interrupt,
+    ReadOnly,
+    Corrupt,
 };
 
 /// Return the runtime SQLite library version used by this build.
@@ -50,7 +65,8 @@ pub const Database = struct {
     /// Open a SQLite database at `path`.
     ///
     /// `path` is zero-terminated to match SQLite's C API. Use `":memory:"` for
-    /// an in-memory database.
+    /// an in-memory database. v0 intentionally keeps this as the only open API
+    /// and does not add an `openZ` alias or allocator-based path helper.
     pub fn open(path: [:0]const u8) Error!Database {
         var raw_db: ?*c.sqlite3 = null;
         const rc = c.sqlite3_open(path.ptr, &raw_db);
@@ -68,7 +84,8 @@ pub const Database = struct {
     ///
     /// In v0 this asserts that all statements have already been finalized.
     /// Leaving statements alive at database close is treated as programmer
-    /// misuse rather than a recoverable runtime condition.
+    /// misuse rather than a recoverable runtime condition. v0 does not expose
+    /// a fallible close API.
     pub fn deinit(self: *Database) void {
         const rc = c.sqlite3_close(self.handle);
         std.debug.assert(rc == c.SQLITE_OK);
@@ -202,7 +219,7 @@ pub const Statement = struct {
     /// use SQLite's `SQLITE_TRANSIENT` function-pointer macro directly, so
     /// Zova makes a SQLite-owned copy and asks SQLite to free it when done.
     pub fn bindText(self: *Statement, index: c_int, value: []const u8) Error!void {
-        const raw_copy = c.sqlite3_malloc64(@intCast(value.len + 1)) orelse return error.SqliteError;
+        const raw_copy = c.sqlite3_malloc64(@intCast(value.len + 1)) orelse return error.NoMemory;
         const copy: [*]u8 = @ptrCast(raw_copy);
         @memcpy(copy[0..value.len], value);
         copy[value.len] = 0;
@@ -230,7 +247,7 @@ pub const Statement = struct {
             return;
         }
 
-        const raw_copy = c.sqlite3_malloc64(@intCast(value.len)) orelse return error.SqliteError;
+        const raw_copy = c.sqlite3_malloc64(@intCast(value.len)) orelse return error.NoMemory;
         const copy: [*]u8 = @ptrCast(raw_copy);
         @memcpy(copy[0..value.len], value);
 
@@ -273,11 +290,17 @@ pub const Statement = struct {
     }
 
     /// Read a 0-based column from the current row as a signed 64-bit integer.
+    ///
+    /// Like SQLite's column APIs, this does not validate the index. Callers are
+    /// responsible for passing a valid column index for the current row.
     pub fn columnInt64(self: *Statement, index: c_int) i64 {
         return c.sqlite3_column_int64(self.handle, index);
     }
 
     /// Read a 0-based column from the current row as a 64-bit floating point value.
+    ///
+    /// Like SQLite's column APIs, this does not validate the index. Callers are
+    /// responsible for passing a valid column index for the current row.
     pub fn columnDouble(self: *Statement, index: c_int) f64 {
         return c.sqlite3_column_double(self.handle, index);
     }
@@ -286,7 +309,8 @@ pub const Statement = struct {
     ///
     /// The returned slice is borrowed from SQLite. It remains valid until the
     /// next `step`, `reset`, or `deinit` on this statement. Call this only
-    /// after `step` returns `.row`.
+    /// after `step` returns `.row`. Like SQLite's column APIs, this does not
+    /// validate the index.
     pub fn columnText(self: *Statement, index: c_int) []const u8 {
         // SQLite documents this order as the safe way to force text conversion
         // before asking for the converted byte length.
@@ -302,7 +326,8 @@ pub const Statement = struct {
     ///
     /// The returned slice is borrowed from SQLite. It remains valid until the
     /// next `step`, `reset`, or `deinit` on this statement. Call this only
-    /// after `step` returns `.row`.
+    /// after `step` returns `.row`. Like SQLite's column APIs, this does not
+    /// validate the index.
     pub fn columnBlob(self: *Statement, index: c_int) []const u8 {
         const ptr = c.sqlite3_column_blob(self.handle, index);
         const bytes = c.sqlite3_column_bytes(self.handle, index);
@@ -354,6 +379,10 @@ fn mapResultCode(rc: c_int) Error {
         c.SQLITE_CONSTRAINT => error.Constraint,
         c.SQLITE_CANTOPEN => error.CantOpen,
         c.SQLITE_MISUSE => error.Misuse,
+        c.SQLITE_NOMEM => error.NoMemory,
+        c.SQLITE_INTERRUPT => error.Interrupt,
+        c.SQLITE_READONLY => error.ReadOnly,
+        c.SQLITE_CORRUPT => error.Corrupt,
         else => error.SqliteError,
     };
 }
@@ -365,6 +394,10 @@ fn testingDbPath(buffer: []u8, sub_path: []const u8, filename: []const u8) ![:0]
 test "result code mapping covers locked misuse and generic errors" {
     try std.testing.expectEqual(error.Locked, mapResultCode(c.SQLITE_LOCKED));
     try std.testing.expectEqual(error.Misuse, mapResultCode(c.SQLITE_MISUSE));
+    try std.testing.expectEqual(error.NoMemory, mapResultCode(c.SQLITE_NOMEM));
+    try std.testing.expectEqual(error.Interrupt, mapResultCode(c.SQLITE_INTERRUPT));
+    try std.testing.expectEqual(error.ReadOnly, mapResultCode(c.SQLITE_READONLY));
+    try std.testing.expectEqual(error.Corrupt, mapResultCode(c.SQLITE_CORRUPT));
     try std.testing.expectEqual(error.SqliteError, mapResultCode(c.SQLITE_ERROR));
 }
 
@@ -384,6 +417,78 @@ test "database exec creates table and writes row" {
 
     try std.testing.expectEqual(@as(i64, 1), db.changes());
     try std.testing.expectEqual(@as(i64, 1), db.lastInsertRowId());
+}
+
+test "database exec runs multiline schema sql unchanged" {
+    var db = try Database.open(":memory:");
+    defer db.deinit();
+
+    try db.exec(
+        \\create table accounts (
+        \\  id integer primary key,
+        \\  email text not null unique
+        \\);
+        \\create index accounts_email_idx on accounts (email);
+        \\create view active_accounts as
+        \\  select id, email from accounts;
+    );
+
+    var objects = try db.prepare(
+        \\select count(*)
+        \\from sqlite_master
+        \\where name in ('accounts', 'accounts_email_idx', 'active_accounts')
+    );
+    defer objects.deinit();
+
+    try std.testing.expectEqual(Step.row, try objects.step());
+    try std.testing.expectEqual(@as(i64, 3), objects.columnInt64(0));
+}
+
+test "vendored sqlite supports built in json functions" {
+    var db = try Database.open(":memory:");
+    defer db.deinit();
+
+    var json = try db.prepare("select json_extract('{\"zova\":\"sqlite\"}', '$.zova')");
+    defer json.deinit();
+
+    try std.testing.expectEqual(Step.row, try json.step());
+    try std.testing.expectEqualStrings("sqlite", json.columnText(0));
+}
+
+test "vendored sqlite supports fts5 virtual tables" {
+    var db = try Database.open(":memory:");
+    defer db.deinit();
+
+    try db.exec("create virtual table docs using fts5(body)");
+    try db.exec("insert into docs (body) values ('zova wraps sqlite')");
+
+    var search = try db.prepare("select body from docs where docs match 'sqlite'");
+    defer search.deinit();
+
+    try std.testing.expectEqual(Step.row, try search.step());
+    try std.testing.expectEqualStrings("zova wraps sqlite", search.columnText(0));
+    try std.testing.expectEqual(Step.done, try search.step());
+}
+
+test "database open leaves user controlled pragmas alone" {
+    var db = try Database.open(":memory:");
+    defer db.deinit();
+
+    var foreign_keys = try db.prepare("pragma foreign_keys");
+    defer foreign_keys.deinit();
+
+    try std.testing.expectEqual(Step.row, try foreign_keys.step());
+    try std.testing.expectEqual(@as(i64, 0), foreign_keys.columnInt64(0));
+}
+
+test "raw sqlite escape hatch can use public database handle" {
+    var db = try Database.open(":memory:");
+    defer db.deinit();
+
+    try db.exec("create table messages (id integer primary key, body text not null)");
+    try db.exec("insert into messages (body) values ('hello')");
+
+    try std.testing.expectEqual(@as(i64, 1), c.sqlite3_total_changes64(db.handle));
 }
 
 test "database open maps missing parent directory to CantOpen" {
@@ -546,6 +651,26 @@ test "statement cleanup tolerates previous step error" {
     try std.testing.expectError(error.Constraint, duplicate.step());
 }
 
+test "constraint errors are recoverable" {
+    var db = try Database.open(":memory:");
+    defer db.deinit();
+
+    try db.exec("create table users (email text not null unique)");
+    try db.exec("insert into users (email) values ('a@example.com')");
+
+    var duplicate = try db.prepare("insert into users (email) values (?)");
+    defer duplicate.deinit();
+    try duplicate.bindText(1, "a@example.com");
+    try std.testing.expectError(error.Constraint, duplicate.step());
+
+    try db.exec("insert into users (email) values ('b@example.com')");
+
+    var count = try db.prepare("select count(*) from users");
+    defer count.deinit();
+    try std.testing.expectEqual(Step.row, try count.step());
+    try std.testing.expectEqual(@as(i64, 2), count.columnInt64(0));
+}
+
 test "column text reads converted values" {
     var db = try Database.open(":memory:");
     defer db.deinit();
@@ -594,6 +719,32 @@ test "statement binds and reads scalar and blob values" {
     try std.testing.expectEqual(@as(f64, 3.25), select.columnDouble(1));
     try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x02, 0x03 }, select.columnBlob(2));
     try std.testing.expectEqual(@as(usize, 0), select.columnBlob(3).len);
+}
+
+test "bound text and blob are copied from caller buffers" {
+    var db = try Database.open(":memory:");
+    defer db.deinit();
+
+    try db.exec("create table payloads (body text not null, bytes blob not null)");
+
+    var body = [_]u8{ 'a', 'l', 'p', 'h', 'a' };
+    var bytes = [_]u8{ 0x01, 0x02, 0x03 };
+
+    var insert = try db.prepare("insert into payloads (body, bytes) values (?, ?)");
+    defer insert.deinit();
+    try insert.bindText(1, body[0..]);
+    try insert.bindBlob(2, bytes[0..]);
+
+    @memcpy(body[0..], "omega");
+    @memset(bytes[0..], 0xff);
+
+    try std.testing.expectEqual(Step.done, try insert.step());
+
+    var select = try db.prepare("select body, bytes from payloads");
+    defer select.deinit();
+    try std.testing.expectEqual(Step.row, try select.step());
+    try std.testing.expectEqualStrings("alpha", select.columnText(0));
+    try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x02, 0x03 }, select.columnBlob(1));
 }
 
 test "statement reports parameter count and named parameter index" {

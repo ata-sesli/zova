@@ -76,6 +76,7 @@
         "README.md",
         "src",
         "v0-checklist.md",
+        "vendor",
         "zova.md",
     },
 }
