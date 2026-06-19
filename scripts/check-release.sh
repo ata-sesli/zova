@@ -27,8 +27,9 @@ trap cleanup EXIT INT TERM
 
 require_command tar
 
-zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/fastcdc.zig src/main.zig
+zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/fastcdc.zig src/main.zig tests/e2e.zig
 zig build test
+zig build e2e
 zig build test -Doptimize=ReleaseSafe
 zig build
 zig build run
@@ -38,6 +39,7 @@ mkdir -p "$TMP/$PKG"
 
 cp build.zig build.zig.zon README.md "$TMP/$PKG/"
 cp -R src "$TMP/$PKG/"
+cp -R tests "$TMP/$PKG/"
 cp -R vendor "$TMP/$PKG/"
 
 if find "$TMP/$PKG" -name '*.md' ! -name README.md | grep -q .; then
@@ -53,6 +55,11 @@ fi
 
 if [ ! -d "$TMP/$PKG/src" ]; then
     echo "release package is missing src" >&2
+    exit 1
+fi
+
+if [ ! -d "$TMP/$PKG/tests" ]; then
+    echo "release package is missing tests" >&2
     exit 1
 fi
 
@@ -73,8 +80,9 @@ mkdir -p "$VERIFY_DIR"
 tar -xzf "$TMP/$PKG.tar.gz" -C "$VERIFY_DIR"
 cd "$VERIFY_DIR/$PKG"
 
-zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/fastcdc.zig src/main.zig
+zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/fastcdc.zig src/main.zig tests/e2e.zig
 zig build test
+zig build e2e
 zig build test -Doptimize=ReleaseSafe
 zig build
 zig build run

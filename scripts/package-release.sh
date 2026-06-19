@@ -116,6 +116,7 @@ mkdir -p "$TMP/$PKG" "$OUT_DIR"
 
 cp build.zig build.zig.zon README.md "$TMP/$PKG/"
 cp -R src "$TMP/$PKG/"
+cp -R tests "$TMP/$PKG/"
 cp -R vendor "$TMP/$PKG/"
 
 if find "$TMP/$PKG" -name '*.md' ! -name README.md | grep -q .; then
@@ -131,8 +132,9 @@ mkdir -p "$VERIFY_DIR"
 tar -xzf "$ARCHIVE" -C "$VERIFY_DIR"
 cd "$VERIFY_DIR/$PKG"
 
-zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/fastcdc.zig src/main.zig
+zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/fastcdc.zig src/main.zig tests/e2e.zig
 zig build test
+zig build e2e
 zig build test -Doptimize=ReleaseSafe
 zig build
 zig build run

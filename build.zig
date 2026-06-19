@@ -34,6 +34,28 @@ pub fn build(b: *std.Build) void {
     const test_cmd = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&test_cmd.step);
+
+    const zova_module = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    addSqlite(zova_module, b);
+
+    const e2e_module = b.createModule(.{
+        .root_source_file = b.path("tests/e2e.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    e2e_module.addImport("zova", zova_module);
+
+    const e2e_tests = b.addTest(.{
+        .root_module = e2e_module,
+    });
+
+    const e2e_cmd = b.addRunArtifact(e2e_tests);
+    const e2e_step = b.step("e2e", "Run end-to-end tests");
+    e2e_step.dependOn(&e2e_cmd.step);
 }
 
 fn addSqlite(module: *std.Build.Module, b: *std.Build) void {
