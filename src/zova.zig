@@ -18,10 +18,11 @@
 //! API, initializes Zova metadata in the destination, and never mutates the
 //! source file.
 //!
-//! v0.3 adds in-memory object read/write APIs on top of deterministic
-//! SHA-256 object identity and private FastCDC chunking. Object bytes remain
-//! inside the SQLite file as private BLOB chunk rows. Vector storage,
-//! migrations, streaming object I/O, delete APIs, and repair tooling are
+//! Zova object APIs use deterministic SHA-256 object identity and private
+//! FastCDC chunking. Object bytes remain inside the SQLite file as private BLOB
+//! chunk rows. Deleting an object removes only Zova-owned object rows and
+//! unreferenced object chunks; user SQL references remain application-owned.
+//! Vector storage, migrations, streaming object I/O, and repair tooling are
 //! intentionally absent from this slice.
 
 const std = @import("std");
@@ -345,6 +346,33 @@ pub const Database = struct {
         const metadata = try loadObjectMetadata(&self.sqlite_db, id);
         return try sqliteI64ToU64(metadata.chunk_count);
     }
+
+    /// Delete one Zova object and garbage-collect its unreferenced chunks.
+    ///
+    /// Delete owns a `begin immediate` transaction and returns
+    /// `error.ObjectTransactionActive` if the connection is already inside a
+    /// user transaction. Missing or already-deleted ids return
+    /// `error.ObjectNotFound`. User SQL rows that store this object id are not
+    /// inspected or modified.
+    pub fn deleteObject(self: *Database, id: ObjectId) Error!void {
+        if (hasActiveTransaction(&self.sqlite_db)) return error.ObjectTransactionActive;
+
+        try self.sqlite_db.beginImmediate();
+        var committed = false;
+        errdefer if (!committed) self.sqlite_db.rollback() catch {};
+
+        if (!try objectRowExists(&self.sqlite_db, id)) return error.ObjectNotFound;
+
+        const candidate_chunks = try collectDeleteCandidateChunks(std.heap.page_allocator, &self.sqlite_db, id);
+        defer std.heap.page_allocator.free(candidate_chunks);
+
+        try deleteObjectManifestRows(&self.sqlite_db, id);
+        try deleteObjectRow(&self.sqlite_db, id);
+        try deleteUnreferencedCandidateChunks(&self.sqlite_db, candidate_chunks);
+
+        try self.sqlite_db.commit();
+        committed = true;
+    }
 };
 
 const ObjectMetadata = struct {
@@ -378,6 +406,66 @@ fn objectRowExists(db: *sqlite.Database, id: ObjectId) Error!bool {
         .row => true,
         .done => false,
     };
+}
+
+fn collectDeleteCandidateChunks(allocator: std.mem.Allocator, db: *sqlite.Database, id: ObjectId) Error![]ObjectId {
+    var chunks: std.ArrayList(ObjectId) = .empty;
+    errdefer chunks.deinit(allocator);
+
+    var stmt = try db.prepare(
+        \\select distinct chunk_hash
+        \\from _zova_object_chunks
+        \\where object_id = ?
+    );
+    defer stmt.deinit();
+
+    try stmt.bindBlob(1, &id);
+    while ((try stmt.step()) == .row) {
+        const candidate = stmt.columnBlob(0);
+        if (candidate.len != @sizeOf(ObjectId)) return error.SqliteError;
+
+        var chunk_hash: ObjectId = undefined;
+        @memcpy(&chunk_hash, candidate);
+        try chunks.append(allocator, chunk_hash);
+    }
+
+    return try chunks.toOwnedSlice(allocator);
+}
+
+fn deleteObjectManifestRows(db: *sqlite.Database, id: ObjectId) Error!void {
+    var stmt = try db.prepare("delete from _zova_object_chunks where object_id = ?");
+    defer stmt.deinit();
+
+    try stmt.bindBlob(1, &id);
+    std.debug.assert((try stmt.step()) == .done);
+}
+
+fn deleteObjectRow(db: *sqlite.Database, id: ObjectId) Error!void {
+    var stmt = try db.prepare("delete from _zova_objects where object_id = ?");
+    defer stmt.deinit();
+
+    try stmt.bindBlob(1, &id);
+    std.debug.assert((try stmt.step()) == .done);
+}
+
+fn deleteUnreferencedCandidateChunks(db: *sqlite.Database, candidate_chunks: []const ObjectId) Error!void {
+    var delete_chunk = try db.prepare(
+        \\delete from _zova_chunks
+        \\where chunk_hash = ?
+        \\  and not exists (
+        \\    select 1
+        \\    from _zova_object_chunks
+        \\    where _zova_object_chunks.chunk_hash = _zova_chunks.chunk_hash
+        \\  )
+    );
+    defer delete_chunk.deinit();
+
+    for (candidate_chunks) |chunk_hash| {
+        try delete_chunk.bindBlob(1, &chunk_hash);
+        std.debug.assert((try delete_chunk.step()) == .done);
+        try delete_chunk.reset();
+        try delete_chunk.clearBindings();
+    }
 }
 
 fn loadObjectMetadata(db: *sqlite.Database, id: ObjectId) Error!ObjectMetadata {
@@ -809,6 +897,22 @@ fn testingSharedChunkCount(db: *Database, left_id: ObjectId, right_id: ObjectId)
     return count.columnInt64(0);
 }
 
+fn testingExpectObjectMissing(db: *Database, id: ObjectId) !void {
+    try std.testing.expect(!try db.hasObject(id));
+    try std.testing.expectError(error.ObjectNotFound, db.objectSize(id));
+    try std.testing.expectError(error.ObjectNotFound, db.objectChunkCount(id));
+    try std.testing.expectError(error.ObjectNotFound, db.getObject(std.testing.allocator, id));
+}
+
+fn testingQuickCheckOk(db: *Database) !void {
+    var stmt = try db.prepare("pragma quick_check");
+    defer stmt.deinit();
+
+    try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+    try std.testing.expectEqualStrings("ok", stmt.columnText(0));
+    try std.testing.expectEqual(sqlite.Step.done, try stmt.step());
+}
+
 test "create initializes and open validates zova database" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1013,6 +1117,377 @@ test "object lookup helpers report present and missing objects" {
     try std.testing.expectError(error.ObjectNotFound, db.objectSize(missing));
     try std.testing.expectError(error.ObjectNotFound, db.objectChunkCount(missing));
     try std.testing.expectError(error.ObjectNotFound, db.getObject(std.testing.allocator, missing));
+}
+
+test "delete object reports missing for absent and already deleted ids" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "delete-missing.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try std.testing.expectError(error.ObjectNotFound, db.deleteObject(objectId("missing")));
+
+    const id = try db.putObject("delete once");
+    try db.deleteObject(id);
+    try std.testing.expectError(error.ObjectNotFound, db.deleteObject(id));
+}
+
+test "delete empty object removes only object row and lookup APIs report missing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "delete-empty.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const id = try db.putObject("");
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from _zova_objects"));
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_object_chunks"));
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_chunks"));
+
+    try db.deleteObject(id);
+
+    try testingExpectObjectMissing(&db, id);
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_objects"));
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_object_chunks"));
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_chunks"));
+}
+
+test "delete one chunk object removes object manifest and unreferenced chunk rows" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "delete-one-chunk.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const id = try db.putObject("one chunk");
+    try std.testing.expectEqual(@as(u64, 1), try db.objectChunkCount(id));
+    try std.testing.expectEqual(@as(i64, 1), try testingObjectManifestCount(&db, id));
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from _zova_chunks"));
+
+    try db.deleteObject(id);
+
+    try testingExpectObjectMissing(&db, id);
+    try std.testing.expectEqual(@as(i64, 0), try testingObjectManifestCount(&db, id));
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_chunks"));
+}
+
+test "delete multi chunk object removes manifests and unreferenced chunks" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "delete-multi-chunk.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    var bytes: [fastcdc.max_size + fastcdc.avg_size]u8 = undefined;
+    for (&bytes, 0..) |*byte, index| {
+        byte.* = @intCast((index * 19 + index / 5 + 3) % 253);
+    }
+
+    const id = try db.putObject(&bytes);
+    const chunk_count = try db.objectChunkCount(id);
+    try std.testing.expect(chunk_count > 1);
+
+    try db.deleteObject(id);
+
+    try testingExpectObjectMissing(&db, id);
+    try std.testing.expectEqual(@as(i64, 0), try testingObjectManifestCount(&db, id));
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_chunks"));
+}
+
+test "delete preserves chunks shared by another object and later removes them" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "delete-shared-chunks.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const base = [_]u8{0} ** (fastcdc.max_size * 4);
+    var edited: [base.len + 257]u8 = undefined;
+    for (edited[0..257], 0..) |*byte, index| {
+        byte.* = @intCast((index * 29 + 7) % 251);
+    }
+    @memcpy(edited[257..], &base);
+
+    const base_id = try db.putObject(&base);
+    const edited_id = try db.putObject(&edited);
+    const shared_count = try testingSharedChunkCount(&db, base_id, edited_id);
+    try std.testing.expect(shared_count > 0);
+
+    try db.deleteObject(base_id);
+    try testingExpectObjectMissing(&db, base_id);
+    try std.testing.expect(try db.hasObject(edited_id));
+
+    var edited_object = try db.getObject(std.testing.allocator, edited_id);
+    defer edited_object.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, &edited, edited_object.bytes);
+    const remaining_chunk_rows = try testingCount(&db, "select count(*) from _zova_chunks");
+    try std.testing.expect(remaining_chunk_rows > 0);
+    try std.testing.expect(remaining_chunk_rows <= @as(i64, @intCast(try db.objectChunkCount(edited_id))));
+
+    try db.deleteObject(edited_id);
+    try testingExpectObjectMissing(&db, edited_id);
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_chunks"));
+}
+
+test "delete repeated content object handles duplicate candidate chunk hashes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "delete-duplicate-candidates.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const bytes = [_]u8{0} ** (fastcdc.max_size * 4);
+    const id = try db.putObject(&bytes);
+    try std.testing.expect((try testingObjectManifestCount(&db, id)) > try testingCount(&db, "select count(*) from _zova_chunks"));
+
+    try db.deleteObject(id);
+
+    try testingExpectObjectMissing(&db, id);
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_chunks"));
+}
+
+test "delete corrupt object with missing chunk data still cleans object and manifest rows" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "delete-corrupt-missing-chunk.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const id = try db.putObject("missing chunk during delete");
+    try db.exec("delete from _zova_chunks");
+    try std.testing.expectError(error.ObjectCorrupt, db.getObject(std.testing.allocator, id));
+
+    try db.deleteObject(id);
+
+    try testingExpectObjectMissing(&db, id);
+    try std.testing.expectEqual(@as(i64, 0), try testingObjectManifestCount(&db, id));
+}
+
+test "putting same bytes after delete recreates same object id" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "delete-reput.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const first_id = try db.putObject("recreate me");
+    try db.deleteObject(first_id);
+
+    const second_id = try db.putObject("recreate me");
+    try std.testing.expectEqualSlices(u8, &first_id, &second_id);
+
+    var object = try db.getObject(std.testing.allocator, second_id);
+    defer object.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, "recreate me", object.bytes);
+}
+
+test "delete object preserves user sql references and blob tables" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "delete-user-sql.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.exec(
+        \\create table attachments (object_id blob not null, filename text not null);
+        \\create table user_blobs (data blob not null);
+    );
+
+    const id = try db.putObject("user referenced");
+    {
+        var insert = try db.prepare("insert into attachments (object_id, filename) values (?, ?)");
+        defer insert.deinit();
+
+        try insert.bindBlob(1, &id);
+        try insert.bindText(2, "kept.bin");
+        try std.testing.expectEqual(sqlite.Step.done, try insert.step());
+    }
+
+    const blob = [_]u8{ 9, 8, 7, 0, 6 };
+    {
+        var insert = try db.prepare("insert into user_blobs (data) values (?)");
+        defer insert.deinit();
+
+        try insert.bindBlob(1, &blob);
+        try std.testing.expectEqual(sqlite.Step.done, try insert.step());
+    }
+
+    try db.deleteObject(id);
+
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from attachments"));
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from user_blobs where length(data) = 5"));
+    try testingExpectObjectMissing(&db, id);
+    try testingQuickCheckOk(&db);
+}
+
+test "delete object does not touch caller temp tables" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "delete-temp-collision.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const id = try db.putObject("temp table collision");
+    try db.exec(
+        \\create temp table zova_delete_candidate_chunks (
+        \\  chunk_hash text primary key,
+        \\  note text not null
+        \\);
+        \\insert into temp.zova_delete_candidate_chunks (chunk_hash, note)
+        \\values ('caller-owned', 'preserved');
+    );
+
+    try db.deleteObject(id);
+
+    var select = try db.prepare("select note from temp.zova_delete_candidate_chunks where chunk_hash = 'caller-owned'");
+    defer select.deinit();
+
+    try std.testing.expectEqual(sqlite.Step.row, try select.step());
+    try std.testing.expectEqualStrings("preserved", select.columnText(0));
+    try std.testing.expectEqual(sqlite.Step.done, try select.step());
+}
+
+test "delete object works on converted zova database" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "delete-convert.db");
+
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "delete-convert.zova");
+
+    {
+        var source = try sqlite.Database.open(source_path);
+        defer source.deinit();
+        try source.exec("create table notes (id integer primary key, body text not null)");
+        try source.exec("insert into notes (body) values ('kept')");
+    }
+
+    try convertSqliteToZova(source_path, dest_path);
+
+    var db = try Database.open(dest_path);
+    defer db.deinit();
+
+    const id = try db.putObject("converted delete");
+    try db.deleteObject(id);
+
+    try testingExpectObjectMissing(&db, id);
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from notes"));
+}
+
+test "delete object rejects active user transactions" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "delete-active-transaction.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const deferred_id = try db.putObject("deferred delete");
+    try db.sqlite_db.begin();
+    try std.testing.expectError(error.ObjectTransactionActive, db.deleteObject(deferred_id));
+    try db.sqlite_db.rollback();
+    try std.testing.expect(try db.hasObject(deferred_id));
+
+    const immediate_id = try db.putObject("immediate delete");
+    try db.sqlite_db.beginImmediate();
+    try std.testing.expectError(error.ObjectTransactionActive, db.deleteObject(immediate_id));
+    try db.sqlite_db.rollback();
+    try std.testing.expect(try db.hasObject(immediate_id));
+}
+
+test "failed delete rolls back visible changes and keeps connection usable" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "delete-rollback.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const id = try db.putObject("rollback delete");
+    try db.exec(
+        \\create trigger force_chunk_delete_failure
+        \\before delete on _zova_chunks
+        \\begin
+        \\  select raise(abort, 'forced chunk delete failure');
+        \\end;
+    );
+
+    try std.testing.expectError(error.Constraint, db.deleteObject(id));
+
+    try std.testing.expect(try db.hasObject(id));
+    try std.testing.expectEqual(@as(i64, 1), try testingObjectManifestCount(&db, id));
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from _zova_chunks"));
+
+    try db.exec("drop trigger force_chunk_delete_failure");
+
+    var object = try db.getObject(std.testing.allocator, id);
+    defer object.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, "rollback delete", object.bytes);
+
+    const later_id = try db.putObject("later put after failed delete");
+    try std.testing.expect(try db.hasObject(later_id));
+
+    try db.deleteObject(id);
+    try testingExpectObjectMissing(&db, id);
+}
+
+test "delete object follows sqlite write lock behavior across connections" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "delete-two-connections.zova");
+
+    var first = try Database.create(db_path);
+    defer first.deinit();
+    const id = try first.putObject("locked delete");
+
+    var second = try Database.open(db_path);
+    defer second.deinit();
+
+    try first.sqlite_db.beginImmediate();
+    try std.testing.expectError(error.Busy, second.deleteObject(id));
+    try first.sqlite_db.rollback();
+
+    try second.deleteObject(id);
+    try testingExpectObjectMissing(&second, id);
 }
 
 test "object ids can be stored in user sql tables" {

@@ -59,6 +59,11 @@ test "e2e app database stores relational rows and native objects across reopen" 
     try expectStoredObject(&reopened, "hello-copy.txt", duplicate_id, "hello object");
     try expectStoredObject(&reopened, "binary.bin", binary_id, &binary);
     try expectStoredObject(&reopened, "large.bin", large_id, large);
+
+    try reopened.deleteObject(binary_id);
+    try expectAttachmentCount(&reopened, 5);
+    try expectDeletedAttachmentObject(&reopened, "binary.bin", binary_id);
+    try expectStoredObject(&reopened, "large.bin", large_id, large);
     try expectQuickCheckOk(&reopened);
 }
 
@@ -144,6 +149,11 @@ test "e2e converted sqlite database preserves sql data and accepts new objects" 
     try expectCount(&reopened, "select count(*) from files", 3);
     try expectCount(&reopened, "select count(*) from audit", 3);
     try expectObjectRef(&reopened, "converted", converted_object_id, "converted object bytes");
+
+    try reopened.deleteObject(converted_object_id);
+    try expectCount(&reopened, "select count(*) from files", 3);
+    try expectCount(&reopened, "select count(*) from audit", 3);
+    try expectDeletedObjectRef(&reopened, "converted", converted_object_id);
     try expectQuickCheckOk(&reopened);
 }
 
@@ -169,6 +179,14 @@ test "e2e two connections keep sqlite locking and later recover" {
 
     const id = try second.putObject("after lock");
     try std.testing.expect(try second.hasObject(id));
+
+    const delete_id = try second.putObject("delete after lock");
+    try first.exec("begin immediate");
+    try std.testing.expectError(error.Busy, second.deleteObject(delete_id));
+    try first.exec("rollback");
+
+    try second.deleteObject(delete_id);
+    try std.testing.expectError(error.ObjectNotFound, second.getObject(std.testing.allocator, delete_id));
     try expectQuickCheckOk(&second);
 }
 
@@ -238,6 +256,26 @@ fn expectObjectRef(db: *zova.Database, label: []const u8, expected_id: zova.Obje
     var object = try db.getObject(std.testing.allocator, id);
     defer object.deinit(std.testing.allocator);
     try std.testing.expectEqualSlices(u8, expected_bytes, object.bytes);
+}
+
+fn expectDeletedAttachmentObject(db: *zova.Database, filename: []const u8, expected_id: zova.ObjectId) !void {
+    const id = try loadObjectIdByFilename(db, filename);
+    try std.testing.expectEqualSlices(u8, &expected_id, &id);
+    try std.testing.expectError(error.ObjectNotFound, db.getObject(std.testing.allocator, id));
+    try std.testing.expectError(error.ObjectNotFound, db.objectSize(id));
+}
+
+fn expectDeletedObjectRef(db: *zova.Database, label: []const u8, expected_id: zova.ObjectId) !void {
+    var stmt = try db.prepare("select object_id from object_refs where label = ?");
+    defer stmt.deinit();
+
+    try stmt.bindText(1, label);
+    try std.testing.expectEqual(zova.sqlite.Step.row, try stmt.step());
+    const id = try objectIdFromColumn(&stmt, 0);
+    try std.testing.expectEqualSlices(u8, &expected_id, &id);
+    try std.testing.expectEqual(zova.sqlite.Step.done, try stmt.step());
+
+    try std.testing.expectError(error.ObjectNotFound, db.getObject(std.testing.allocator, id));
 }
 
 fn loadObjectIdByFilename(db: *zova.Database, filename: []const u8) !zova.ObjectId {

@@ -30,5 +30,6 @@ test "package exports zova database namespace" {
     try std.testing.expect(@hasDecl(Database, "hasObject"));
     try std.testing.expect(@hasDecl(Database, "objectSize"));
     try std.testing.expect(@hasDecl(Database, "objectChunkCount"));
+    try std.testing.expect(@hasDecl(Database, "deleteObject"));
     try std.testing.expect(!@hasDecl(@This(), "fastcdc"));
 }
