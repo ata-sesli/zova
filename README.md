@@ -2,11 +2,13 @@
 
 Zova is a Zig-powered embedded data substrate built on SQLite.
 
-The current v0 surface is intentionally small: a thin SQLite wrapper for
+Current package version: `0.2.0`.
+
+The current v0.2 surface is intentionally small: a thin SQLite wrapper for
 database lifecycle, prepared statements, transactions, common result-code
-mapping, and tests against the vendored SQLite build. SQL stays normal SQLite
-SQL, existing SQLite files can be opened directly, and plain SQLite usage does
-not create Zova system tables.
+mapping, plus a `.zova` file identity layer and SQLite-to-Zova conversion. SQL
+stays normal SQLite SQL, existing SQLite files can be opened directly, and
+plain SQLite usage does not create Zova system tables.
 
 Zova v0 is not a different SQL dialect and not "better SQL." It does not make
 SQLite stricter, distributed, or magically concurrent. It wraps SQLite's native
@@ -15,7 +17,7 @@ model with clearer Zig ownership and boring, direct ergonomics.
 Raw SQLite remains available through `sqlite.c` for APIs that Zova does not
 wrap yet.
 
-Zova also has a file-level database boundary:
+Zova v0.2 also has a file-level database boundary:
 
 ```text
 *.zova  -> Zova-owned database
@@ -23,11 +25,13 @@ other   -> plain SQLite database
 ```
 
 Use `zova.sqlite.Database` when you want the plain SQLite wrapper. Use
-`zova.Database` when you want Zova to validate and manage a `.zova` file.
+`zova.Database` when you want Zova to validate and manage a `.zova` file. Use
+`zova.convertSqliteToZova` when you want to convert an existing SQLite database
+into a new Zova database.
 
 ## Import
 
-Zova v0 commits to `zova.sqlite` as the SQLite wrapper namespace. Packages
+Zova v0.2 keeps `zova.sqlite` as the SQLite wrapper namespace. Packages
 that depend on Zova use the package surface from `src/root.zig`:
 
 ```zig
@@ -41,6 +45,7 @@ Inside this repository, the smoke executable imports `src/sqlite.zig` directly.
 
 `zova.Database` is the Zova-owned database API. It only accepts `.zova` paths
 and validates private metadata before opening a file as Zova-managed storage.
+It does not add object or vector behavior yet.
 
 Create a new `.zova` database:
 
@@ -79,6 +84,13 @@ Zova metadata in the destination, and does not mutate the source SQLite file.
 The destination must end in `.zova` and must not already exist. Source schemas
 that already use Zova-reserved `_zova_` names are rejected with
 `error.ZovaNameConflict`.
+
+After conversion, open the result through `zova.Database.open`:
+
+```zig
+var db = try zova.Database.open("app.zova");
+defer db.deinit();
+```
 
 ## Open A Database
 
