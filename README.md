@@ -353,6 +353,32 @@ version.
 FTS5 is enabled in the vendored build. That means normal SQLite FTS5 virtual
 tables are available through SQL, but Zova v0 does not add a search abstraction.
 
+## Testing And Release Smoke
+
+Run the normal library tests:
+
+```sh
+zig build test
+```
+
+Run realistic file-backed end-to-end tests:
+
+```sh
+zig build e2e
+```
+
+Run the full release smoke before publishing:
+
+```sh
+scripts/check-release.sh
+```
+
+The release smoke formats sources, runs unit/integration tests, runs E2E tests,
+builds the smoke executable, runs it, creates a source-package candidate, and
+verifies that candidate from extraction. The release package is source-only:
+`README.md`, build files, `src`, `tests`, and `vendor`. Compiled CLI binaries are
+not release artifacts in v0.3.
+
 ## Raw SQLite To Zova Mapping
 
 | Raw SQLite C | Zova wrapper |
