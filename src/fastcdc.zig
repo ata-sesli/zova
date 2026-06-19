@@ -213,6 +213,22 @@ test "fastcdc-v1 insertion near front preserves a later chunk hash" {
     try std.testing.expect(hasSharedChunkHash(&base, base_chunks, &edited, edited_chunks));
 }
 
+test "fastcdc-v1 does not allocate per byte" {
+    const input = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(input);
+
+    for (input, 0..) |*byte, index| {
+        byte.* = @intCast((index * 17 + index / 11 + 29) % 256);
+    }
+
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const chunks = try chunkBoundaries(failing_allocator.allocator(), input);
+    defer failing_allocator.allocator().free(chunks);
+
+    try std.testing.expect(chunks.len > 1);
+    try std.testing.expect(failing_allocator.allocations < 64);
+}
+
 test "fastcdc-v1 documents the unused published average mask" {
     try std.testing.expectEqual(@as(u64, 0x0000d90303530000), mask_a);
 }

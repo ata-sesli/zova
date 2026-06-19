@@ -2,13 +2,14 @@
 
 Zova is a Zig-powered embedded data substrate built on SQLite.
 
-Current package version: `0.2.0`.
+Current package version: `0.3.0`.
 
-The current v0.2 surface is intentionally small: a thin SQLite wrapper for
+The current v0.3 surface is intentionally small: a thin SQLite wrapper for
 database lifecycle, prepared statements, transactions, common result-code
-mapping, plus a `.zova` file identity layer and SQLite-to-Zova conversion. SQL
-stays normal SQLite SQL, existing SQLite files can be opened directly, and
-plain SQLite usage does not create Zova system tables.
+mapping, plus a `.zova` file identity layer, SQLite-to-Zova conversion, and
+native content-addressed object storage. SQL stays normal SQLite SQL, existing
+SQLite files can be opened directly, and plain SQLite usage does not create
+Zova system tables.
 
 Zova v0 is not a different SQL dialect and not "better SQL." It does not make
 SQLite stricter, distributed, or magically concurrent. It wraps SQLite's native
@@ -17,7 +18,7 @@ model with clearer Zig ownership and boring, direct ergonomics.
 Raw SQLite remains available through `sqlite.c` for APIs that Zova does not
 wrap yet.
 
-Zova v0.2 also has a file-level database boundary:
+Zova v0.3 also has a file-level database boundary:
 
 ```text
 *.zova  -> Zova-owned database
@@ -31,7 +32,7 @@ into a new Zova database.
 
 ## Import
 
-Zova v0.2 keeps `zova.sqlite` as the SQLite wrapper namespace. Packages
+Zova v0.3 keeps `zova.sqlite` as the SQLite wrapper namespace. Packages
 that depend on Zova use the package surface from `src/root.zig`:
 
 ```zig
@@ -45,7 +46,7 @@ Inside this repository, the smoke executable imports `src/sqlite.zig` directly.
 
 `zova.Database` is the Zova-owned database API. It only accepts `.zova` paths
 and validates private metadata before opening a file as Zova-managed storage.
-It does not add object or vector behavior yet.
+It includes native object storage, but it does not add vector behavior yet.
 
 Create a new `.zova` database:
 
@@ -90,6 +91,83 @@ After conversion, open the result through `zova.Database.open`:
 ```zig
 var db = try zova.Database.open("app.zova");
 defer db.deinit();
+```
+
+Conversion preserves SQLite data as SQLite data. It does not scan user BLOB
+columns, convert them into Zova objects, or rewrite application schema. If an
+application wants to move an existing BLOB column to Zova objects, that is an
+application migration using the object API below.
+
+## Objects
+
+Zova objects are raw content-addressed bytes:
+
+```text
+Object -> FastCDC chunk manifest -> SQLite BLOB chunk rows
+```
+
+The public identity is `zova.ObjectId`, a raw `[32]u8` SHA-256 digest of the
+full object bytes. The same bytes produce the same object id. Display it with
+normal Zig formatting helpers such as `std.fmt.fmtSliceHexLower(&id)` when a
+hex string is useful.
+
+Store and load an object:
+
+```zig
+const id = try db.putObject("hello object");
+
+var object = try db.getObject(allocator, id);
+defer object.deinit(allocator);
+
+std.debug.assert(std.mem.eql(u8, object.bytes, "hello object"));
+```
+
+`getObject` allocates the full object in memory in v0.3. Streaming reads are
+not part of this release.
+
+SQL BLOB columns and Zova objects are different tools. A user-created BLOB
+column remains an ordinary SQLite BLOB column. Zova objects are stored in
+private `_zova_` tables as FastCDC chunks, and those chunk boundaries are not
+part of the public API.
+
+Application metadata belongs in application tables. For example, store object
+ids beside filenames or other app data:
+
+```zig
+try db.exec(
+    \\create table attachments (
+    \\  id integer primary key,
+    \\  object_id blob not null,
+    \\  filename text not null
+    \\)
+);
+
+const id = try db.putObject(file_bytes);
+
+var insert = try db.prepare("insert into attachments (object_id, filename) values (?, ?)");
+defer insert.deinit();
+
+try insert.bindBlob(1, &id);
+try insert.bindText(2, "report.pdf");
+std.debug.assert((try insert.step()) == .done);
+```
+
+Later, read the object id from SQL and load the bytes through Zova:
+
+```zig
+var select = try db.prepare("select object_id from attachments where filename = ?");
+defer select.deinit();
+
+try select.bindText(1, "report.pdf");
+if ((try select.step()) == .row) {
+    var stored_id: zova.ObjectId = undefined;
+    const raw_id = select.columnBlob(0);
+    std.debug.assert(raw_id.len == @sizeOf(zova.ObjectId));
+    @memcpy(stored_id[0..], raw_id);
+
+    var object = try db.getObject(allocator, stored_id);
+    defer object.deinit(allocator);
+}
 ```
 
 ## Open A Database
@@ -232,7 +310,9 @@ Other SQLite result codes currently map to `error.SqliteError`.
 
 The Zova-owned database layer adds boundary errors such as `error.NotZovaPath`,
 `error.NotZovaDatabase`, `error.UnsupportedZovaVersion`,
-`error.DestinationExists`, and `error.ZovaNameConflict`.
+`error.DestinationExists`, and `error.ZovaNameConflict`. Object APIs add
+`error.ObjectNotFound`, `error.ObjectCorrupt`, `error.ObjectTooLarge`, and
+`error.ObjectTransactionActive`.
 
 Use `Database.errorMessage()` to read SQLite's current error message for the
 connection:
@@ -297,9 +377,13 @@ tables are available through SQL, but Zova v0 does not add a search abstraction.
 
 ## What Is Not In This Module Yet
 
-This SQLite wrapper does not add object storage, vector storage, migrations,
-system tables, an ORM, a query builder, connection pooling, async behavior, or
-a background service.
+The plain `zova.sqlite` wrapper does not add object storage, vector storage,
+migrations, system tables, an ORM, a query builder, connection pooling, async
+behavior, or a background service.
+
+The Zova-owned `zova.Database` layer adds `.zova` identity and native objects,
+but v0.3 still has no vector API, object delete API, streaming object API,
+repair CLI, automatic BLOB migration, compression, encryption, or remote sync.
 
 Those layers can grow later. The v0 foundation is boring on purpose: normal
 SQLite first, wrapped just enough to make ownership and common usage clear in

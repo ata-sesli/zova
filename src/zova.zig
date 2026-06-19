@@ -18,11 +18,11 @@
 //! API, initializes Zova metadata in the destination, and never mutates the
 //! source file.
 //!
-//! v0.3 object storage work starts with deterministic object identity and
-//! private FastCDC chunking. The required object-storage foundation tables are
-//! present in current-format `.zova` files, but object read/write APIs, vector
-//! storage, migrations, and repair tooling are intentionally absent from this
-//! slice.
+//! v0.3 adds in-memory object read/write APIs on top of deterministic
+//! SHA-256 object identity and private FastCDC chunking. Object bytes remain
+//! inside the SQLite file as private BLOB chunk rows. Vector storage,
+//! migrations, streaming object I/O, delete APIs, and repair tooling are
+//! intentionally absent from this slice.
 
 const std = @import("std");
 const fastcdc = @import("fastcdc.zig");
@@ -78,6 +78,11 @@ pub const Error = sqlite.Error || error{
     UnsupportedZovaVersion,
     DestinationExists,
     ZovaNameConflict,
+    ObjectNotFound,
+    ObjectCorrupt,
+    ObjectTooLarge,
+    ObjectTransactionActive,
+    OutOfMemory,
 };
 
 /// Compute the content identity for a future Zova object.
@@ -86,6 +91,20 @@ pub fn objectId(bytes: []const u8) ObjectId {
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
     return digest;
 }
+
+/// Owned object bytes returned by `Database.getObject`.
+///
+/// v0.3 reads whole objects into memory. Call `deinit` with the same allocator
+/// passed to `getObject` when the bytes are no longer needed.
+pub const Object = struct {
+    id: ObjectId,
+    bytes: []u8,
+
+    /// Free the owned byte buffer.
+    pub fn deinit(self: *Object, allocator: std.mem.Allocator) void {
+        allocator.free(self.bytes);
+    }
+};
 
 /// Convert an existing SQLite database file into a new `.zova` database.
 ///
@@ -191,7 +210,267 @@ pub const Database = struct {
     pub fn errorMessage(self: *Database) []const u8 {
         return self.sqlite_db.errorMessage();
     }
+
+    /// Store raw bytes as a content-addressed Zova object.
+    ///
+    /// The returned id is the SHA-256 digest of the full byte slice. v0.3 owns
+    /// its own transaction for object writes and returns
+    /// `error.ObjectTransactionActive` if the connection is already inside a
+    /// user transaction.
+    pub fn putObject(self: *Database, bytes: []const u8) Error!ObjectId {
+        if (hasActiveTransaction(&self.sqlite_db)) return error.ObjectTransactionActive;
+
+        const id = objectId(bytes);
+        const size_bytes = try usizeToSqliteI64(bytes.len);
+        const chunk_count = try usizeToSqliteI64(countObjectChunks(bytes));
+
+        try self.sqlite_db.beginImmediate();
+        var committed = false;
+        errdefer if (!committed) self.sqlite_db.rollback() catch {};
+
+        if (try objectRowExists(&self.sqlite_db, id)) {
+            try self.sqlite_db.commit();
+            committed = true;
+            return id;
+        }
+
+        try insertObjectRow(&self.sqlite_db, id, size_bytes, chunk_count);
+
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const chunk_len = fastcdc.cut(bytes[offset..]);
+            const chunk = bytes[offset .. offset + chunk_len];
+            const chunk_hash = objectId(chunk);
+            try insertChunkRow(&self.sqlite_db, chunk_hash, chunk);
+            offset += chunk_len;
+        }
+
+        offset = 0;
+        var chunk_index: i64 = 0;
+        while (offset < bytes.len) {
+            const chunk_len = fastcdc.cut(bytes[offset..]);
+            const chunk = bytes[offset .. offset + chunk_len];
+            const chunk_hash = objectId(chunk);
+            try insertManifestRow(
+                &self.sqlite_db,
+                id,
+                chunk_index,
+                chunk_hash,
+                try usizeToSqliteI64(offset),
+                try usizeToSqliteI64(chunk_len),
+            );
+            offset += chunk_len;
+            chunk_index += 1;
+        }
+
+        try self.sqlite_db.commit();
+        committed = true;
+        return id;
+    }
+
+    /// Load and verify an object by id.
+    ///
+    /// The returned object owns an allocated byte buffer. Missing ids return
+    /// `error.ObjectNotFound`. Broken private object rows return
+    /// `error.ObjectCorrupt` rather than being repaired.
+    pub fn getObject(self: *Database, allocator: std.mem.Allocator, id: ObjectId) Error!Object {
+        const metadata = try loadObjectMetadata(&self.sqlite_db, id);
+        const size = try sqliteI64ToUsize(metadata.size_bytes);
+        const chunk_count = try sqliteI64ToUsize(metadata.chunk_count);
+        var bytes = try allocator.alloc(u8, size);
+        errdefer allocator.free(bytes);
+
+        if (chunk_count == 0) {
+            if (size != 0) return error.ObjectCorrupt;
+            if (!std.mem.eql(u8, &objectId(bytes), &id)) return error.ObjectCorrupt;
+            return .{ .id = id, .bytes = bytes };
+        }
+
+        var manifest = try self.sqlite_db.prepare(
+            \\select oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.data
+            \\from _zova_object_chunks oc
+            \\left join _zova_chunks c on c.chunk_hash = oc.chunk_hash
+            \\where oc.object_id = ?
+            \\order by oc.chunk_index asc
+        );
+        defer manifest.deinit();
+
+        try manifest.bindBlob(1, &id);
+
+        var expected_index: i64 = 0;
+        var expected_offset: usize = 0;
+        while ((try manifest.step()) == .row) {
+            if (manifest.columnInt64(0) != expected_index) return error.ObjectCorrupt;
+
+            const chunk_hash = manifest.columnBlob(1);
+            if (chunk_hash.len != @sizeOf(ObjectId)) return error.ObjectCorrupt;
+
+            const offset = try sqliteI64ToUsize(manifest.columnInt64(2));
+            const chunk_size = try sqliteI64ToUsize(manifest.columnInt64(3));
+            if (offset != expected_offset) return error.ObjectCorrupt;
+            if (chunk_size == 0 or chunk_size > fastcdc.max_size) return error.ObjectCorrupt;
+            if (offset > bytes.len or chunk_size > bytes.len - offset) return error.ObjectCorrupt;
+            if (manifest.columnType(4) == .null) return error.ObjectCorrupt;
+
+            const chunk_data = manifest.columnBlob(4);
+            if (chunk_data.len != chunk_size) return error.ObjectCorrupt;
+            const actual_chunk_hash = objectId(chunk_data);
+            if (!std.mem.eql(u8, &actual_chunk_hash, chunk_hash)) return error.ObjectCorrupt;
+
+            @memcpy(bytes[offset .. offset + chunk_size], chunk_data);
+            expected_offset += chunk_size;
+            expected_index += 1;
+        }
+
+        if (expected_index != @as(i64, @intCast(chunk_count))) return error.ObjectCorrupt;
+        if (expected_offset != bytes.len) return error.ObjectCorrupt;
+        if (!std.mem.eql(u8, &objectId(bytes), &id)) return error.ObjectCorrupt;
+
+        return .{ .id = id, .bytes = bytes };
+    }
+
+    /// Return whether an object id exists without loading object bytes.
+    pub fn hasObject(self: *Database, id: ObjectId) Error!bool {
+        return try objectRowExists(&self.sqlite_db, id);
+    }
+
+    /// Return the original full object byte length.
+    pub fn objectSize(self: *Database, id: ObjectId) Error!u64 {
+        const metadata = try loadObjectMetadata(&self.sqlite_db, id);
+        return try sqliteI64ToU64(metadata.size_bytes);
+    }
+
+    /// Return the number of FastCDC chunks in the object manifest.
+    pub fn objectChunkCount(self: *Database, id: ObjectId) Error!u64 {
+        const metadata = try loadObjectMetadata(&self.sqlite_db, id);
+        return try sqliteI64ToU64(metadata.chunk_count);
+    }
 };
+
+const ObjectMetadata = struct {
+    size_bytes: i64,
+    chunk_count: i64,
+};
+
+fn hasActiveTransaction(db: *sqlite.Database) bool {
+    return sqlite.c.sqlite3_get_autocommit(db.handle) == 0 or
+        sqlite.c.sqlite3_txn_state(db.handle, null) != sqlite.c.SQLITE_TXN_NONE;
+}
+
+fn countObjectChunks(bytes: []const u8) usize {
+    var count: usize = 0;
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const chunk_len = fastcdc.cut(bytes[offset..]);
+        std.debug.assert(chunk_len > 0);
+        count += 1;
+        offset += chunk_len;
+    }
+    return count;
+}
+
+fn objectRowExists(db: *sqlite.Database, id: ObjectId) Error!bool {
+    var stmt = try db.prepare("select 1 from _zova_objects where object_id = ? limit 1");
+    defer stmt.deinit();
+
+    try stmt.bindBlob(1, &id);
+    return switch (try stmt.step()) {
+        .row => true,
+        .done => false,
+    };
+}
+
+fn loadObjectMetadata(db: *sqlite.Database, id: ObjectId) Error!ObjectMetadata {
+    var stmt = try db.prepare(
+        \\select size_bytes, chunk_count, chunker
+        \\from _zova_objects
+        \\where object_id = ?
+    );
+    defer stmt.deinit();
+
+    try stmt.bindBlob(1, &id);
+
+    switch (try stmt.step()) {
+        .done => return error.ObjectNotFound,
+        .row => {
+            const size_bytes = stmt.columnInt64(0);
+            const chunk_count = stmt.columnInt64(1);
+            if (size_bytes < 0 or chunk_count < 0) return error.ObjectCorrupt;
+            if (!std.mem.eql(u8, stmt.columnText(2), fastcdc.version)) return error.ObjectCorrupt;
+            return .{
+                .size_bytes = size_bytes,
+                .chunk_count = chunk_count,
+            };
+        },
+    }
+}
+
+fn insertObjectRow(db: *sqlite.Database, id: ObjectId, size_bytes: i64, chunk_count: i64) Error!void {
+    var stmt = try db.prepare(
+        \\insert into _zova_objects (object_id, size_bytes, chunk_count, chunker)
+        \\values (?, ?, ?, ?)
+        \\on conflict(object_id) do nothing
+    );
+    defer stmt.deinit();
+
+    try stmt.bindBlob(1, &id);
+    try stmt.bindInt64(2, size_bytes);
+    try stmt.bindInt64(3, chunk_count);
+    try stmt.bindText(4, fastcdc.version);
+    std.debug.assert((try stmt.step()) == .done);
+}
+
+fn insertChunkRow(db: *sqlite.Database, chunk_hash: ObjectId, chunk: []const u8) Error!void {
+    var stmt = try db.prepare(
+        \\insert into _zova_chunks (chunk_hash, size_bytes, data)
+        \\values (?, ?, ?)
+        \\on conflict(chunk_hash) do nothing
+    );
+    defer stmt.deinit();
+
+    try stmt.bindBlob(1, &chunk_hash);
+    try stmt.bindInt64(2, try usizeToSqliteI64(chunk.len));
+    try stmt.bindBlob(3, chunk);
+    std.debug.assert((try stmt.step()) == .done);
+}
+
+fn insertManifestRow(
+    db: *sqlite.Database,
+    id: ObjectId,
+    chunk_index: i64,
+    chunk_hash: ObjectId,
+    offset: i64,
+    size_bytes: i64,
+) Error!void {
+    var stmt = try db.prepare(
+        \\insert into _zova_object_chunks (object_id, chunk_index, chunk_hash, offset, size_bytes)
+        \\values (?, ?, ?, ?, ?)
+    );
+    defer stmt.deinit();
+
+    try stmt.bindBlob(1, &id);
+    try stmt.bindInt64(2, chunk_index);
+    try stmt.bindBlob(3, &chunk_hash);
+    try stmt.bindInt64(4, offset);
+    try stmt.bindInt64(5, size_bytes);
+    std.debug.assert((try stmt.step()) == .done);
+}
+
+fn usizeToSqliteI64(value: usize) Error!i64 {
+    if (value > std.math.maxInt(i64)) return error.ObjectTooLarge;
+    return @intCast(value);
+}
+
+fn sqliteI64ToU64(value: i64) Error!u64 {
+    if (value < 0) return error.ObjectCorrupt;
+    return @intCast(value);
+}
+
+fn sqliteI64ToUsize(value: i64) Error!usize {
+    const unsigned = try sqliteI64ToU64(value);
+    if (unsigned > std.math.maxInt(usize)) return error.ObjectTooLarge;
+    return @intCast(unsigned);
+}
 
 fn isZovaPath(path: []const u8) bool {
     return std.mem.endsWith(u8, path, ".zova");
@@ -496,6 +775,40 @@ fn testingExpectTableCount(db: *sqlite.Database, table_name: []const u8, expecte
     try std.testing.expectEqual(expected, count.columnInt64(0));
 }
 
+fn testingCount(db: anytype, sql: [:0]const u8) !i64 {
+    var count = try db.prepare(sql);
+    defer count.deinit();
+
+    try std.testing.expectEqual(sqlite.Step.row, try count.step());
+    return count.columnInt64(0);
+}
+
+fn testingObjectManifestCount(db: *Database, id: ObjectId) !i64 {
+    var count = try db.prepare("select count(*) from _zova_object_chunks where object_id = ?");
+    defer count.deinit();
+
+    try count.bindBlob(1, &id);
+    try std.testing.expectEqual(sqlite.Step.row, try count.step());
+    return count.columnInt64(0);
+}
+
+fn testingSharedChunkCount(db: *Database, left_id: ObjectId, right_id: ObjectId) !i64 {
+    var count = try db.prepare(
+        \\select count(*)
+        \\from _zova_object_chunks left_chunks
+        \\join _zova_object_chunks right_chunks
+        \\  on right_chunks.chunk_hash = left_chunks.chunk_hash
+        \\where left_chunks.object_id = ?
+        \\  and right_chunks.object_id = ?
+    );
+    defer count.deinit();
+
+    try count.bindBlob(1, &left_id);
+    try count.bindBlob(2, &right_id);
+    try std.testing.expectEqual(sqlite.Step.row, try count.step());
+    return count.columnInt64(0);
+}
+
 test "create initializes and open validates zova database" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -530,12 +843,537 @@ test "object ids are sha256 of full object bytes" {
         0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c,
         0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
     };
+    const hello_expected = ObjectId{
+        0x2c, 0xf2, 0x4d, 0xba, 0x5f, 0xb0, 0xa3, 0x0e,
+        0x26, 0xe8, 0x3b, 0x2a, 0xc5, 0xb9, 0xe2, 0x9e,
+        0x1b, 0x16, 0x1e, 0x5c, 0x1f, 0xa7, 0x42, 0x5e,
+        0x73, 0x04, 0x33, 0x62, 0x93, 0x8b, 0x98, 0x24,
+    };
 
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(ObjectId));
     try std.testing.expectEqualSlices(u8, &empty_expected, &objectId(""));
+    try std.testing.expectEqualSlices(u8, &hello_expected, &objectId("hello"));
     try std.testing.expectEqualSlices(u8, &objectId("same bytes"), &objectId("same bytes"));
     try std.testing.expect(!std.mem.eql(u8, &objectId("first"), &objectId("second")));
     try std.testing.expectEqualStrings("fastcdc-v1", fastcdc.version);
+}
+
+test "put and get empty object" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "put-get-empty.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const id = try db.putObject("");
+    try std.testing.expectEqualSlices(u8, &objectId(""), &id);
+    try std.testing.expect(try db.hasObject(id));
+    try std.testing.expectEqual(@as(u64, 0), try db.objectSize(id));
+    try std.testing.expectEqual(@as(u64, 0), try db.objectChunkCount(id));
+
+    var object = try db.getObject(std.testing.allocator, id);
+    defer object.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualSlices(u8, &id, &object.id);
+    try std.testing.expectEqualSlices(u8, "", object.bytes);
+}
+
+test "put and get small binary object" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "put-get-small.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const bytes = [_]u8{ 'z', 'o', 'v', 'a', 0, 1, 2, 255 };
+    const id = try db.putObject(&bytes);
+    try std.testing.expectEqualSlices(u8, &objectId(&bytes), &id);
+    try std.testing.expect(try db.hasObject(id));
+    try std.testing.expectEqual(@as(u64, bytes.len), try db.objectSize(id));
+    try std.testing.expectEqual(@as(u64, 1), try db.objectChunkCount(id));
+
+    var object = try db.getObject(std.testing.allocator, id);
+    defer object.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualSlices(u8, &id, &object.id);
+    try std.testing.expectEqualSlices(u8, &bytes, object.bytes);
+}
+
+test "put and get large multi chunk object" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "put-get-large.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    var bytes: [fastcdc.max_size + fastcdc.avg_size]u8 = undefined;
+    for (&bytes, 0..) |*byte, index| {
+        byte.* = @intCast((index * 17 + index / 3 + 11) % 251);
+    }
+
+    const id = try db.putObject(&bytes);
+    try std.testing.expect(try db.objectChunkCount(id) > 1);
+
+    var object = try db.getObject(std.testing.allocator, id);
+    defer object.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualSlices(u8, &id, &object.id);
+    try std.testing.expectEqualSlices(u8, &bytes, object.bytes);
+}
+
+test "put same object twice deduplicates object chunks and manifest" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "put-dedupe.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const bytes = "same object bytes";
+    const first_id = try db.putObject(bytes);
+    const second_id = try db.putObject(bytes);
+
+    try std.testing.expectEqualSlices(u8, &first_id, &second_id);
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from _zova_objects"));
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from _zova_chunks"));
+    try std.testing.expectEqual(@as(i64, 1), try testingObjectManifestCount(&db, first_id));
+}
+
+test "put repeated content deduplicates identical chunks" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "chunk-dedupe.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const bytes = [_]u8{0} ** (fastcdc.max_size * 4);
+    const id = try db.putObject(&bytes);
+
+    const chunk_rows = try testingCount(&db, "select count(*) from _zova_chunks");
+    const manifest_rows = try testingObjectManifestCount(&db, id);
+    try std.testing.expect(manifest_rows > 1);
+    try std.testing.expect(chunk_rows < manifest_rows);
+}
+
+test "put similar objects shares at least one chunk" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "shared-chunks.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const base = [_]u8{0} ** (fastcdc.max_size * 4);
+    var edited: [base.len + 257]u8 = undefined;
+    for (edited[0..257], 0..) |*byte, index| {
+        byte.* = @intCast((index * 23 + 5) % 241);
+    }
+    @memcpy(edited[257..], &base);
+
+    const base_id = try db.putObject(&base);
+    const edited_id = try db.putObject(&edited);
+
+    try std.testing.expect(!std.mem.eql(u8, &base_id, &edited_id));
+    try std.testing.expect(try testingSharedChunkCount(&db, base_id, edited_id) > 0);
+}
+
+test "object lookup helpers report present and missing objects" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "object-lookups.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const present = try db.putObject("present");
+    const missing = objectId("missing");
+
+    try std.testing.expect(try db.hasObject(present));
+    try std.testing.expect(!try db.hasObject(missing));
+    try std.testing.expectEqual(@as(u64, 7), try db.objectSize(present));
+    try std.testing.expectEqual(@as(u64, 1), try db.objectChunkCount(present));
+    try std.testing.expectError(error.ObjectNotFound, db.objectSize(missing));
+    try std.testing.expectError(error.ObjectNotFound, db.objectChunkCount(missing));
+    try std.testing.expectError(error.ObjectNotFound, db.getObject(std.testing.allocator, missing));
+}
+
+test "object ids can be stored in user sql tables" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "object-relational.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.exec("create table attachments (id integer primary key, object_id blob not null, filename text not null)");
+
+    const id = try db.putObject("attachment bytes");
+    {
+        var insert = try db.prepare("insert into attachments (object_id, filename) values (?, ?)");
+        defer insert.deinit();
+
+        try insert.bindBlob(1, &id);
+        try insert.bindText(2, "note.bin");
+        try std.testing.expectEqual(sqlite.Step.done, try insert.step());
+    }
+
+    var loaded_id: ObjectId = undefined;
+    {
+        var select = try db.prepare("select object_id from attachments where filename = ?");
+        defer select.deinit();
+
+        try select.bindText(1, "note.bin");
+        try std.testing.expectEqual(sqlite.Step.row, try select.step());
+        const stored_id = select.columnBlob(0);
+        try std.testing.expectEqual(@as(usize, 32), stored_id.len);
+        @memcpy(loaded_id[0..], stored_id);
+    }
+
+    var object = try db.getObject(std.testing.allocator, loaded_id);
+    defer object.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualSlices(u8, "attachment bytes", object.bytes);
+}
+
+test "plain sql blob tables still work in zova databases" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "plain-blob.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.exec("create table user_blobs (id integer primary key, data blob not null)");
+
+    const blob = [_]u8{ 0, 1, 2, 3, 4 };
+    {
+        var insert = try db.prepare("insert into user_blobs (data) values (?)");
+        defer insert.deinit();
+
+        try insert.bindBlob(1, &blob);
+        try std.testing.expectEqual(sqlite.Step.done, try insert.step());
+    }
+
+    var select = try db.prepare("select data from user_blobs");
+    defer select.deinit();
+
+    try std.testing.expectEqual(sqlite.Step.row, try select.step());
+    try std.testing.expectEqualSlices(u8, &blob, select.columnBlob(0));
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_objects"));
+}
+
+test "object api works on converted sqlite database" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "object-convert.db");
+
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "object-convert.zova");
+
+    {
+        var source = try sqlite.Database.open(source_path);
+        defer source.deinit();
+        try source.exec("create table notes (id integer primary key, body text not null)");
+        try source.exec("insert into notes (body) values ('kept')");
+    }
+
+    try convertSqliteToZova(source_path, dest_path);
+
+    var db = try Database.open(dest_path);
+    defer db.deinit();
+
+    const id = try db.putObject("converted object");
+    var object = try db.getObject(std.testing.allocator, id);
+    defer object.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualSlices(u8, "converted object", object.bytes);
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from notes"));
+}
+
+test "put object rejects active user transactions" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "active-transaction.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.sqlite_db.begin();
+    try std.testing.expectError(error.ObjectTransactionActive, db.putObject("deferred"));
+    try db.sqlite_db.rollback();
+
+    try db.sqlite_db.beginImmediate();
+    try std.testing.expectError(error.ObjectTransactionActive, db.putObject("immediate"));
+    try db.sqlite_db.rollback();
+}
+
+test "failed put object rolls back visible private rows" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "put-rollback.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.exec("drop table _zova_object_chunks");
+    try std.testing.expectError(error.SqliteError, db.putObject("rollback me"));
+
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_objects"));
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_chunks"));
+
+    try db.exec(object_chunks_schema_sql ++ ";");
+    const id = try db.putObject("later success");
+    var object = try db.getObject(std.testing.allocator, id);
+    defer object.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualSlices(u8, "later success", object.bytes);
+}
+
+test "stored chunk hash is sha256 of chunk bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "chunk-hash.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    _ = try db.putObject("chunk");
+
+    var select = try db.prepare("select chunk_hash from _zova_chunks");
+    defer select.deinit();
+
+    try std.testing.expectEqual(sqlite.Step.row, try select.step());
+    try std.testing.expectEqualSlices(u8, &objectId("chunk"), select.columnBlob(0));
+}
+
+test "get object reports corruption for missing chunks" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "corrupt-missing-chunk.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const id = try db.putObject("missing chunk");
+    try db.exec("delete from _zova_chunks");
+
+    try std.testing.expectError(error.ObjectCorrupt, db.getObject(std.testing.allocator, id));
+}
+
+test "get object reports corruption for chunk hash mismatch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "corrupt-chunk-data.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const id = try db.putObject("abc");
+    {
+        var update = try db.prepare("update _zova_chunks set data = ?");
+        defer update.deinit();
+
+        try update.bindBlob(1, "abd");
+        try std.testing.expectEqual(sqlite.Step.done, try update.step());
+    }
+
+    try std.testing.expectError(error.ObjectCorrupt, db.getObject(std.testing.allocator, id));
+}
+
+test "get object reports corruption for manifest size and offset mismatches" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var size_path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const size_path = try testingDbPath(&size_path_buffer, tmp.sub_path[0..], "corrupt-manifest-size.zova");
+
+    {
+        var db = try Database.create(size_path);
+        defer db.deinit();
+
+        const id = try db.putObject("abcdef");
+        try db.exec("update _zova_object_chunks set size_bytes = 2");
+        try std.testing.expectError(error.ObjectCorrupt, db.getObject(std.testing.allocator, id));
+    }
+
+    var offset_path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const offset_path = try testingDbPath(&offset_path_buffer, tmp.sub_path[0..], "corrupt-manifest-offset.zova");
+
+    {
+        var db = try Database.create(offset_path);
+        defer db.deinit();
+
+        const id = try db.putObject("abcdef");
+        try db.exec("update _zova_object_chunks set offset = 1");
+        try std.testing.expectError(error.ObjectCorrupt, db.getObject(std.testing.allocator, id));
+    }
+}
+
+test "get object reports corruption for object size mismatch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "corrupt-object-size.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const id = try db.putObject("object size");
+    try db.exec("update _zova_objects set size_bytes = size_bytes + 1");
+
+    try std.testing.expectError(error.ObjectCorrupt, db.getObject(std.testing.allocator, id));
+}
+
+test "get object reports corruption for full object hash mismatch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "corrupt-object-hash.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const real_id = try db.putObject("real bytes");
+    const wrong_id = objectId("wrong bytes");
+
+    {
+        var update_object = try db.prepare("update _zova_objects set object_id = ? where object_id = ?");
+        defer update_object.deinit();
+
+        try update_object.bindBlob(1, &wrong_id);
+        try update_object.bindBlob(2, &real_id);
+        try std.testing.expectEqual(sqlite.Step.done, try update_object.step());
+    }
+
+    {
+        var update_manifest = try db.prepare("update _zova_object_chunks set object_id = ? where object_id = ?");
+        defer update_manifest.deinit();
+
+        try update_manifest.bindBlob(1, &wrong_id);
+        try update_manifest.bindBlob(2, &real_id);
+        try std.testing.expectEqual(sqlite.Step.done, try update_manifest.step());
+    }
+
+    try std.testing.expectError(error.ObjectCorrupt, db.getObject(std.testing.allocator, wrong_id));
+}
+
+test "object manifest rejects duplicate indexes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "duplicate-manifest-index.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    _ = try db.putObject("duplicate index");
+
+    try std.testing.expectError(
+        error.Constraint,
+        db.exec(
+            \\insert into _zova_object_chunks (object_id, chunk_index, chunk_hash, offset, size_bytes)
+            \\select object_id, chunk_index, chunk_hash, offset, size_bytes
+            \\from _zova_object_chunks
+            \\limit 1
+        ),
+    );
+}
+
+test "get object reports corruption for invalid manifest index" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "invalid-manifest-index.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const id = try db.putObject("invalid index");
+    try db.exec("update _zova_object_chunks set chunk_index = 1 where chunk_index = 0");
+
+    try std.testing.expectError(error.ObjectCorrupt, db.getObject(std.testing.allocator, id));
+}
+
+test "get object reports corruption for chunk count mismatch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "corrupt-chunk-count.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const id = try db.putObject("chunk count");
+    try db.exec("update _zova_objects set chunk_count = chunk_count + 1");
+
+    try std.testing.expectError(error.ObjectCorrupt, db.getObject(std.testing.allocator, id));
+}
+
+test "open validates identity only and object corruption is read-time" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "open-read-time-corruption.zova");
+    const id = id: {
+        var db = try Database.create(db_path);
+        defer db.deinit();
+
+        const stored_id = try db.putObject("abc");
+        {
+            var update = try db.prepare("update _zova_chunks set data = ?");
+            defer update.deinit();
+
+            try update.bindBlob(1, "abd");
+            try std.testing.expectEqual(sqlite.Step.done, try update.step());
+        }
+
+        break :id stored_id;
+    };
+
+    var reopened = try Database.open(db_path);
+    defer reopened.deinit();
+
+    try std.testing.expectError(error.ObjectCorrupt, reopened.getObject(std.testing.allocator, id));
 }
 
 test "created zova database stores metadata" {
