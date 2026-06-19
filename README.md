@@ -15,6 +15,16 @@ model with clearer Zig ownership and boring, direct ergonomics.
 Raw SQLite remains available through `sqlite.c` for APIs that Zova does not
 wrap yet.
 
+Zova also has a file-level database boundary:
+
+```text
+*.zova  -> Zova-owned database
+other   -> plain SQLite database
+```
+
+Use `zova.sqlite.Database` when you want the plain SQLite wrapper. Use
+`zova.Database` when you want Zova to validate and manage a `.zova` file.
+
 ## Import
 
 Zova v0 commits to `zova.sqlite` as the SQLite wrapper namespace. Packages
@@ -26,6 +36,41 @@ const sqlite = zova.sqlite;
 ```
 
 Inside this repository, the smoke executable imports `src/sqlite.zig` directly.
+
+## Zova Databases
+
+`zova.Database` is the Zova-owned database API. It only accepts `.zova` paths
+and validates private metadata before opening a file as Zova-managed storage.
+
+Create a new `.zova` database:
+
+```zig
+var db = try zova.Database.create("app.zova");
+defer db.deinit();
+```
+
+Open an initialized `.zova` database:
+
+```zig
+var db = try zova.Database.open("app.zova");
+defer db.deinit();
+```
+
+The file is still SQLite underneath. You can inspect it with the plain wrapper
+when needed:
+
+```zig
+var raw = try zova.sqlite.Database.open("app.zova");
+defer raw.deinit();
+```
+
+Renaming a SQLite file to `.zova` is not enough. Zova validates the internal
+`_zova_meta` table and rejects files that are missing the expected magic value
+and format version.
+
+SQLite-to-Zova conversion is intentionally not implemented yet. The future
+conversion path will create a new `.zova` file and will not mutate the source
+SQLite file.
 
 ## Open A Database
 
