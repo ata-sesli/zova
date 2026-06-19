@@ -5,23 +5,62 @@
 //! The file is still a SQLite database underneath, but Zova validates private
 //! metadata before treating it as a Zova-owned database.
 //!
+//! Zova is currently pre-1.0, and internal `.zova` format compatibility is
+//! not preserved between experimental format versions. v0.3 defines the
+//! current format as `_zova_meta.format_version = '2'` plus the required
+//! private object schema: `_zova_objects`, `_zova_chunks`, and
+//! `_zova_object_chunks`. `Database.open` is intentionally non-mutating: it
+//! validates the file and rejects old, future, incomplete, or invalid private
+//! schemas instead of repairing or migrating them.
+//!
 //! Existing SQLite files can be converted into new `.zova` files with
 //! `convertSqliteToZova`. Conversion copies the source with SQLite's backup
 //! API, initializes Zova metadata in the destination, and never mutates the
 //! source file.
 //!
 //! v0.3 object storage work starts with deterministic object identity and
-//! private FastCDC chunking. Object storage tables, object read/write APIs,
-//! vector storage, migrations, and repair tooling are intentionally absent
-//! from this slice.
+//! private FastCDC chunking. The required object-storage foundation tables are
+//! present in current-format `.zova` files, but object read/write APIs, vector
+//! storage, migrations, and repair tooling are intentionally absent from this
+//! slice.
 
 const std = @import("std");
 const fastcdc = @import("fastcdc.zig");
 const sqlite = @import("sqlite.zig");
 
 const metadata_table = "_zova_meta";
+const objects_table = "_zova_objects";
+const chunks_table = "_zova_chunks";
+const object_chunks_table = "_zova_object_chunks";
 const magic_value = "zova";
-const format_version = "1";
+const format_version = "2";
+const objects_schema_sql =
+    \\create table _zova_objects (
+    \\  object_id blob not null primary key check (length(object_id) = 32),
+    \\  size_bytes integer not null check (size_bytes >= 0),
+    \\  chunk_count integer not null check (chunk_count >= 0),
+    \\  chunker text not null check (chunker = 'fastcdc-v1')
+    \\)
+;
+const chunks_schema_sql =
+    \\create table _zova_chunks (
+    \\  chunk_hash blob not null primary key check (length(chunk_hash) = 32),
+    \\  size_bytes integer not null check (size_bytes > 0 and size_bytes <= 65536),
+    \\  data blob not null check (length(data) = size_bytes)
+    \\)
+;
+const object_chunks_schema_sql =
+    \\create table _zova_object_chunks (
+    \\  object_id blob not null check (length(object_id) = 32),
+    \\  chunk_index integer not null check (chunk_index >= 0),
+    \\  chunk_hash blob not null check (length(chunk_hash) = 32),
+    \\  offset integer not null check (offset >= 0),
+    \\  size_bytes integer not null check (size_bytes > 0 and size_bytes <= 65536),
+    \\  primary key (object_id, chunk_index),
+    \\  foreign key (object_id) references _zova_objects(object_id),
+    \\  foreign key (chunk_hash) references _zova_chunks(chunk_hash)
+    \\)
+;
 
 /// SHA-256 digest of full object bytes.
 ///
@@ -77,7 +116,7 @@ pub fn convertSqliteToZova(source_path: [:0]const u8, dest_path: [:0]const u8) E
         defer dest.deinit();
 
         try backupMainDatabase(&source, &dest);
-        try initializeMetadata(&dest);
+        try initializeZovaSchema(&dest);
     }
 
     var validated = try Database.open(dest_path);
@@ -96,7 +135,8 @@ pub const Database = struct {
     /// Create a new initialized `.zova` database.
     ///
     /// This never overwrites an existing file. The file is initialized with the
-    /// private `_zova_meta` table and format version `1`.
+    /// private `_zova_meta` table, format version `2`, and the required v0.3
+    /// private object schema.
     pub fn create(path: [:0]const u8) Error!Database {
         if (!isZovaPath(path)) return error.NotZovaPath;
 
@@ -112,14 +152,15 @@ pub const Database = struct {
         var raw = try sqlite.Database.open(path);
         errdefer raw.deinit();
 
-        try initializeMetadata(&raw);
+        try initializeZovaSchema(&raw);
         return .{ .sqlite_db = raw };
     }
 
     /// Open an existing initialized `.zova` database.
     ///
     /// The `.zova` extension is the public opt-in boundary. Metadata is the
-    /// actual validity check, so a renamed SQLite file is rejected.
+    /// actual validity check, so a renamed SQLite file is rejected. Open never
+    /// repairs, migrates, or lazily initializes missing private schema.
     pub fn open(path: [:0]const u8) Error!Database {
         if (!isZovaPath(path)) return error.NotZovaPath;
         try ensurePathExists(path);
@@ -127,7 +168,7 @@ pub const Database = struct {
         var raw = try sqlite.Database.open(path);
         errdefer raw.deinit();
 
-        try validateMetadata(&raw);
+        try validateZovaSchema(&raw);
         return .{ .sqlite_db = raw };
     }
 
@@ -199,6 +240,11 @@ fn ensureSourcePathExists(path: []const u8) Error!void {
     std.Io.Dir.cwd().access(io, path, .{}) catch return error.CantOpen;
 }
 
+fn initializeZovaSchema(db: *sqlite.Database) sqlite.Error!void {
+    try initializeMetadata(db);
+    try initializeObjectSchema(db);
+}
+
 fn initializeMetadata(db: *sqlite.Database) sqlite.Error!void {
     try db.exec(
         \\create table _zova_meta (
@@ -206,8 +252,14 @@ fn initializeMetadata(db: *sqlite.Database) sqlite.Error!void {
         \\  value text not null
         \\);
         \\insert into _zova_meta (key, value) values ('magic', 'zova');
-        \\insert into _zova_meta (key, value) values ('format_version', '1');
+        \\insert into _zova_meta (key, value) values ('format_version', '2');
     );
+}
+
+fn initializeObjectSchema(db: *sqlite.Database) sqlite.Error!void {
+    try db.exec(objects_schema_sql ++ ";");
+    try db.exec(chunks_schema_sql ++ ";");
+    try db.exec(object_chunks_schema_sql ++ ";");
 }
 
 fn rejectReservedZovaNames(db: *sqlite.Database) Error!void {
@@ -254,9 +306,122 @@ fn mapSqliteResultCode(rc: c_int) Error {
     };
 }
 
-fn validateMetadata(db: *sqlite.Database) Error!void {
+fn validateZovaSchema(db: *sqlite.Database) Error!void {
     try expectMetadataValue(db, "magic", magic_value, .magic);
     try expectMetadataValue(db, "format_version", format_version, .format_version);
+    try validateObjectSchema(db);
+}
+
+fn validateObjectSchema(db: *sqlite.Database) Error!void {
+    const object_columns = [_][]const u8{
+        "object_id",
+        "size_bytes",
+        "chunk_count",
+        "chunker",
+    };
+    try validateRequiredTable(db, objects_table, &object_columns, objects_schema_sql);
+
+    const chunk_columns = [_][]const u8{
+        "chunk_hash",
+        "size_bytes",
+        "data",
+    };
+    try validateRequiredTable(db, chunks_table, &chunk_columns, chunks_schema_sql);
+
+    const object_chunk_columns = [_][]const u8{
+        "object_id",
+        "chunk_index",
+        "chunk_hash",
+        "offset",
+        "size_bytes",
+    };
+    try validateRequiredTable(db, object_chunks_table, &object_chunk_columns, object_chunks_schema_sql);
+}
+
+fn validateRequiredTable(
+    db: *sqlite.Database,
+    table_name: []const u8,
+    required_columns: []const []const u8,
+    expected_sql: []const u8,
+) Error!void {
+    if (!try tableExists(db, table_name)) return error.NotZovaDatabase;
+
+    for (required_columns) |column_name| {
+        if (!try tableColumnExists(db, table_name, column_name)) return error.NotZovaDatabase;
+    }
+
+    var table_sql = try db.prepare(
+        \\select sql
+        \\from sqlite_master
+        \\where type = 'table' and name = ?
+    );
+    defer table_sql.deinit();
+
+    try table_sql.bindText(1, table_name);
+
+    switch (try table_sql.step()) {
+        .done => return error.NotZovaDatabase,
+        .row => {
+            const sql_text = table_sql.columnText(0);
+            if (!schemaSqlEqual(sql_text, expected_sql)) return error.NotZovaDatabase;
+        },
+    }
+}
+
+fn tableExists(db: *sqlite.Database, table_name: []const u8) Error!bool {
+    var stmt = try db.prepare(
+        \\select count(*)
+        \\from sqlite_master
+        \\where type = 'table' and name = ?
+    );
+    defer stmt.deinit();
+
+    try stmt.bindText(1, table_name);
+    const step = try stmt.step();
+    std.debug.assert(step == .row);
+    return stmt.columnInt64(0) == 1;
+}
+
+fn tableColumnExists(db: *sqlite.Database, table_name: []const u8, column_name: []const u8) Error!bool {
+    var stmt = try db.prepare(
+        \\select count(*)
+        \\from pragma_table_info(?)
+        \\where name = ?
+    );
+    defer stmt.deinit();
+
+    try stmt.bindText(1, table_name);
+    try stmt.bindText(2, column_name);
+    const step = try stmt.step();
+    std.debug.assert(step == .row);
+    return stmt.columnInt64(0) == 1;
+}
+
+fn schemaSqlEqual(actual: []const u8, expected: []const u8) bool {
+    var actual_index: usize = 0;
+    var expected_index: usize = 0;
+
+    while (true) {
+        actual_index = skipAsciiWhitespace(actual, actual_index);
+        expected_index = skipAsciiWhitespace(expected, expected_index);
+
+        if (actual_index == actual.len or expected_index == expected.len) {
+            return actual_index == actual.len and expected_index == expected.len;
+        }
+
+        if (std.ascii.toLower(actual[actual_index]) != std.ascii.toLower(expected[expected_index])) {
+            return false;
+        }
+
+        actual_index += 1;
+        expected_index += 1;
+    }
+}
+
+fn skipAsciiWhitespace(bytes: []const u8, start_index: usize) usize {
+    var index = start_index;
+    while (index < bytes.len and std.ascii.isWhitespace(bytes[index])) : (index += 1) {}
+    return index;
 }
 
 const MetadataKey = enum {
@@ -285,22 +450,50 @@ fn expectMetadataValue(
             if (std.mem.eql(u8, actual, expected)) return;
             return switch (metadata_key) {
                 .magic => error.NotZovaDatabase,
-                .format_version => if (isFutureFormatVersion(actual))
-                    error.UnsupportedZovaVersion
-                else
-                    error.NotZovaDatabase,
+                .format_version => error.UnsupportedZovaVersion,
             };
         },
     };
 }
 
-fn isFutureFormatVersion(value: []const u8) bool {
-    const parsed = std.fmt.parseInt(u64, value, 10) catch return false;
-    return parsed > 1;
-}
-
 fn testingDbPath(buffer: []u8, sub_path: []const u8, filename: []const u8) ![:0]u8 {
     return std.fmt.bufPrintZ(buffer, ".zig-cache/tmp/{s}/{s}", .{ sub_path, filename });
+}
+
+fn testingWriteMetadata(db: *sqlite.Database, magic: []const u8, version_value: []const u8) !void {
+    try db.exec(
+        \\create table _zova_meta (
+        \\  key text primary key,
+        \\  value text not null
+        \\);
+    );
+
+    var insert = try db.prepare("insert into _zova_meta (key, value) values (?, ?)");
+    defer insert.deinit();
+
+    try insert.bindText(1, "magic");
+    try insert.bindText(2, magic);
+    try std.testing.expectEqual(sqlite.Step.done, try insert.step());
+
+    try insert.reset();
+    try insert.clearBindings();
+
+    try insert.bindText(1, "format_version");
+    try insert.bindText(2, version_value);
+    try std.testing.expectEqual(sqlite.Step.done, try insert.step());
+}
+
+fn testingExpectTableCount(db: *sqlite.Database, table_name: []const u8, expected: i64) !void {
+    var count = try db.prepare(
+        \\select count(*)
+        \\from sqlite_master
+        \\where type = 'table' and name = ?
+    );
+    defer count.deinit();
+
+    try count.bindText(1, table_name);
+    try std.testing.expectEqual(sqlite.Step.row, try count.step());
+    try std.testing.expectEqual(expected, count.columnInt64(0));
 }
 
 test "create initializes and open validates zova database" {
@@ -365,7 +558,7 @@ test "created zova database stores metadata" {
 
     try std.testing.expectEqual(sqlite.Step.row, try meta.step());
     try std.testing.expectEqualStrings("format_version", meta.columnText(0));
-    try std.testing.expectEqualStrings("1", meta.columnText(1));
+    try std.testing.expectEqualStrings("2", meta.columnText(1));
 
     try std.testing.expectEqual(sqlite.Step.row, try meta.step());
     try std.testing.expectEqualStrings("magic", meta.columnText(0));
@@ -451,11 +644,28 @@ test "open rejects wrong magic" {
         try raw.exec(
             \\create table _zova_meta (key text primary key, value text not null);
             \\insert into _zova_meta (key, value) values ('magic', 'not-zova');
-            \\insert into _zova_meta (key, value) values ('format_version', '1');
+            \\insert into _zova_meta (key, value) values ('format_version', '2');
         );
     }
 
     try std.testing.expectError(error.NotZovaDatabase, Database.open(db_path));
+}
+
+test "open rejects old format version" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "old-format.zova");
+
+    {
+        var raw = try sqlite.Database.open(db_path);
+        defer raw.deinit();
+
+        try testingWriteMetadata(&raw, "zova", "1");
+    }
+
+    try std.testing.expectError(error.UnsupportedZovaVersion, Database.open(db_path));
 }
 
 test "open rejects future format version" {
@@ -472,11 +682,492 @@ test "open rejects future format version" {
         try raw.exec(
             \\create table _zova_meta (key text primary key, value text not null);
             \\insert into _zova_meta (key, value) values ('magic', 'zova');
-            \\insert into _zova_meta (key, value) values ('format_version', '2');
+            \\insert into _zova_meta (key, value) values ('format_version', '3');
         );
     }
 
     try std.testing.expectError(error.UnsupportedZovaVersion, Database.open(db_path));
+}
+
+test "created zova database contains required object tables" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "object-tables.zova");
+
+    {
+        var db = try Database.create(db_path);
+        defer db.deinit();
+    }
+
+    var raw = try sqlite.Database.open(db_path);
+    defer raw.deinit();
+
+    try testingExpectTableCount(&raw, "_zova_objects", 1);
+    try testingExpectTableCount(&raw, "_zova_chunks", 1);
+    try testingExpectTableCount(&raw, "_zova_object_chunks", 1);
+}
+
+test "open rejects format two database missing required object table without mutating it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "missing-object-table.zova");
+
+    {
+        var raw = try sqlite.Database.open(db_path);
+        defer raw.deinit();
+
+        try testingWriteMetadata(&raw, "zova", "2");
+    }
+
+    try std.testing.expectError(error.NotZovaDatabase, Database.open(db_path));
+
+    var raw = try sqlite.Database.open(db_path);
+    defer raw.deinit();
+
+    try testingExpectTableCount(&raw, "_zova_objects", 0);
+    try testingExpectTableCount(&raw, "_zova_chunks", 0);
+    try testingExpectTableCount(&raw, "_zova_object_chunks", 0);
+}
+
+test "open rejects required object table missing required column" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "missing-object-column.zova");
+
+    {
+        var raw = try sqlite.Database.open(db_path);
+        defer raw.deinit();
+
+        try testingWriteMetadata(&raw, "zova", "2");
+        try raw.exec(
+            \\create table _zova_objects (
+            \\  object_id blob not null primary key check (length(object_id) = 32),
+            \\  chunk_count integer not null check (chunk_count >= 0),
+            \\  chunker text not null check (chunker = 'fastcdc-v1')
+            \\);
+            \\create table _zova_chunks (
+            \\  chunk_hash blob not null primary key check (length(chunk_hash) = 32),
+            \\  size_bytes integer not null check (size_bytes > 0 and size_bytes <= 65536),
+            \\  data blob not null check (length(data) = size_bytes)
+            \\);
+            \\create table _zova_object_chunks (
+            \\  object_id blob not null check (length(object_id) = 32),
+            \\  chunk_index integer not null check (chunk_index >= 0),
+            \\  chunk_hash blob not null check (length(chunk_hash) = 32),
+            \\  offset integer not null check (offset >= 0),
+            \\  size_bytes integer not null check (size_bytes > 0 and size_bytes <= 65536),
+            \\  primary key (object_id, chunk_index),
+            \\  foreign key (object_id) references _zova_objects(object_id),
+            \\  foreign key (chunk_hash) references _zova_chunks(chunk_hash)
+            \\);
+        );
+    }
+
+    try std.testing.expectError(error.NotZovaDatabase, Database.open(db_path));
+}
+
+test "open rejects required object table missing required constraint" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "missing-object-constraint.zova");
+
+    {
+        var raw = try sqlite.Database.open(db_path);
+        defer raw.deinit();
+
+        try testingWriteMetadata(&raw, "zova", "2");
+        try raw.exec(
+            \\create table _zova_objects (
+            \\  object_id blob not null primary key check (length(object_id) = 32),
+            \\  size_bytes integer not null,
+            \\  chunk_count integer not null check (chunk_count >= 0),
+            \\  chunker text not null check (chunker = 'fastcdc-v1')
+            \\);
+            \\create table _zova_chunks (
+            \\  chunk_hash blob not null primary key check (length(chunk_hash) = 32),
+            \\  size_bytes integer not null check (size_bytes > 0 and size_bytes <= 65536),
+            \\  data blob not null check (length(data) = size_bytes)
+            \\);
+            \\create table _zova_object_chunks (
+            \\  object_id blob not null check (length(object_id) = 32),
+            \\  chunk_index integer not null check (chunk_index >= 0),
+            \\  chunk_hash blob not null check (length(chunk_hash) = 32),
+            \\  offset integer not null check (offset >= 0),
+            \\  size_bytes integer not null check (size_bytes > 0 and size_bytes <= 65536),
+            \\  primary key (object_id, chunk_index),
+            \\  foreign key (object_id) references _zova_objects(object_id),
+            \\  foreign key (chunk_hash) references _zova_chunks(chunk_hash)
+            \\);
+        );
+    }
+
+    try std.testing.expectError(error.NotZovaDatabase, Database.open(db_path));
+}
+
+test "open rejects fake constraint text in required object table" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "fake-object-constraint.zova");
+
+    {
+        var raw = try sqlite.Database.open(db_path);
+        defer raw.deinit();
+
+        try testingWriteMetadata(&raw, "zova", "2");
+        try raw.exec(
+            \\create table _zova_objects (
+            \\  object_id blob not null primary key check (length(object_id) = 32),
+            \\  size_bytes integer not null check ('check (size_bytes >= 0)' is not null),
+            \\  chunk_count integer not null check (chunk_count >= 0),
+            \\  chunker text not null check (chunker = 'fastcdc-v1')
+            \\);
+            \\create table _zova_chunks (
+            \\  chunk_hash blob not null primary key check (length(chunk_hash) = 32),
+            \\  size_bytes integer not null check (size_bytes > 0 and size_bytes <= 65536),
+            \\  data blob not null check (length(data) = size_bytes)
+            \\);
+            \\create table _zova_object_chunks (
+            \\  object_id blob not null check (length(object_id) = 32),
+            \\  chunk_index integer not null check (chunk_index >= 0),
+            \\  chunk_hash blob not null check (length(chunk_hash) = 32),
+            \\  offset integer not null check (offset >= 0),
+            \\  size_bytes integer not null check (size_bytes > 0 and size_bytes <= 65536),
+            \\  primary key (object_id, chunk_index),
+            \\  foreign key (object_id) references _zova_objects(object_id),
+            \\  foreign key (chunk_hash) references _zova_chunks(chunk_hash)
+            \\);
+        );
+    }
+
+    try std.testing.expectError(error.NotZovaDatabase, Database.open(db_path));
+}
+
+test "sqlite wrapper can inspect zova object tables" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "sqlite-inspect.zova");
+
+    {
+        var db = try Database.create(db_path);
+        defer db.deinit();
+    }
+
+    var raw = try sqlite.Database.open(db_path);
+    defer raw.deinit();
+
+    var tables = try raw.prepare(
+        \\select count(*)
+        \\from sqlite_master
+        \\where type = 'table'
+        \\  and name in ('_zova_objects', '_zova_chunks', '_zova_object_chunks')
+    );
+    defer tables.deinit();
+
+    try std.testing.expectEqual(sqlite.Step.row, try tables.step());
+    try std.testing.expectEqual(@as(i64, 3), tables.columnInt64(0));
+}
+
+test "object table constraints reject invalid object ids and chunkers" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "object-constraints.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    {
+        var short_id = [_]u8{0xaa} ** 31;
+        var invalid_id = try db.prepare(
+            \\insert into _zova_objects (object_id, size_bytes, chunk_count, chunker)
+            \\values (?, 0, 0, 'fastcdc-v1')
+        );
+        defer invalid_id.deinit();
+
+        try invalid_id.bindBlob(1, &short_id);
+        try std.testing.expectError(error.Constraint, invalid_id.step());
+    }
+
+    {
+        var object_id = [_]u8{0xbb} ** 32;
+        var invalid_chunker = try db.prepare(
+            \\insert into _zova_objects (object_id, size_bytes, chunk_count, chunker)
+            \\values (?, 0, 0, ?)
+        );
+        defer invalid_chunker.deinit();
+
+        try invalid_chunker.bindBlob(1, &object_id);
+        try invalid_chunker.bindText(2, "other-chunker");
+        try std.testing.expectError(error.Constraint, invalid_chunker.step());
+    }
+}
+
+test "object table rejects null object ids" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "null-object-id.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    var null_id = try db.prepare(
+        \\insert into _zova_objects (object_id, size_bytes, chunk_count, chunker)
+        \\values (?, 0, 0, 'fastcdc-v1')
+    );
+    defer null_id.deinit();
+
+    try null_id.bindNull(1);
+    try std.testing.expectError(error.Constraint, null_id.step());
+}
+
+test "chunk table constraints reject invalid chunk rows" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "chunk-constraints.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    {
+        var short_hash = [_]u8{0xcc} ** 31;
+        var invalid_hash = try db.prepare(
+            \\insert into _zova_chunks (chunk_hash, size_bytes, data)
+            \\values (?, 0, ?)
+        );
+        defer invalid_hash.deinit();
+
+        try invalid_hash.bindBlob(1, &short_hash);
+        try invalid_hash.bindBlob(2, "");
+        try std.testing.expectError(error.Constraint, invalid_hash.step());
+    }
+
+    {
+        var chunk_hash = [_]u8{0xdd} ** 32;
+        var invalid_size = try db.prepare(
+            \\insert into _zova_chunks (chunk_hash, size_bytes, data)
+            \\values (?, 5, ?)
+        );
+        defer invalid_size.deinit();
+
+        try invalid_size.bindBlob(1, &chunk_hash);
+        try invalid_size.bindBlob(2, "abc");
+        try std.testing.expectError(error.Constraint, invalid_size.step());
+    }
+
+    {
+        var chunk_hash = [_]u8{0xee} ** 32;
+        var too_large_data = [_]u8{0x11} ** (fastcdc.max_size + 1);
+        var too_large = try db.prepare(
+            \\insert into _zova_chunks (chunk_hash, size_bytes, data)
+            \\values (?, 65537, ?)
+        );
+        defer too_large.deinit();
+
+        try too_large.bindBlob(1, &chunk_hash);
+        try too_large.bindBlob(2, &too_large_data);
+        try std.testing.expectError(error.Constraint, too_large.step());
+    }
+}
+
+test "chunk table rejects null chunk hashes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "null-chunk-hash.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    var null_hash = try db.prepare(
+        \\insert into _zova_chunks (chunk_hash, size_bytes, data)
+        \\values (?, 1, ?)
+    );
+    defer null_hash.deinit();
+
+    try null_hash.bindNull(1);
+    try null_hash.bindBlob(2, "a");
+    try std.testing.expectError(error.Constraint, null_hash.step());
+}
+
+test "chunk table rejects zero-length chunks" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "zero-chunk.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    var chunk_hash = [_]u8{0x12} ** 32;
+    var zero_chunk = try db.prepare(
+        \\insert into _zova_chunks (chunk_hash, size_bytes, data)
+        \\values (?, 0, ?)
+    );
+    defer zero_chunk.deinit();
+
+    try zero_chunk.bindBlob(1, &chunk_hash);
+    try zero_chunk.bindBlob(2, "");
+    try std.testing.expectError(error.Constraint, zero_chunk.step());
+}
+
+test "object manifest rejects zero-length entries and short ids" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "manifest-constraints.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    var object_id = [_]u8{0x21} ** 32;
+    var chunk_hash = [_]u8{0x22} ** 32;
+    var short_object_id = [_]u8{0x23} ** 31;
+    var short_chunk_hash = [_]u8{0x24} ** 31;
+
+    {
+        var zero_manifest = try db.prepare(
+            \\insert into _zova_object_chunks (object_id, chunk_index, chunk_hash, offset, size_bytes)
+            \\values (?, 0, ?, 0, 0)
+        );
+        defer zero_manifest.deinit();
+
+        try zero_manifest.bindBlob(1, &object_id);
+        try zero_manifest.bindBlob(2, &chunk_hash);
+        try std.testing.expectError(error.Constraint, zero_manifest.step());
+    }
+
+    {
+        var invalid_object_id = try db.prepare(
+            \\insert into _zova_object_chunks (object_id, chunk_index, chunk_hash, offset, size_bytes)
+            \\values (?, 1, ?, 0, 1)
+        );
+        defer invalid_object_id.deinit();
+
+        try invalid_object_id.bindBlob(1, &short_object_id);
+        try invalid_object_id.bindBlob(2, &chunk_hash);
+        try std.testing.expectError(error.Constraint, invalid_object_id.step());
+    }
+
+    {
+        var invalid_chunk_hash = try db.prepare(
+            \\insert into _zova_object_chunks (object_id, chunk_index, chunk_hash, offset, size_bytes)
+            \\values (?, 2, ?, 0, 1)
+        );
+        defer invalid_chunk_hash.deinit();
+
+        try invalid_chunk_hash.bindBlob(1, &object_id);
+        try invalid_chunk_hash.bindBlob(2, &short_chunk_hash);
+        try std.testing.expectError(error.Constraint, invalid_chunk_hash.step());
+    }
+}
+
+test "object schema accepts empty object row without chunks or manifest rows" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "empty-object-schema.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    var empty_object_id = objectId("");
+
+    {
+        var object = try db.prepare(
+            \\insert into _zova_objects (object_id, size_bytes, chunk_count, chunker)
+            \\values (?, 0, 0, 'fastcdc-v1')
+        );
+        defer object.deinit();
+
+        try object.bindBlob(1, &empty_object_id);
+        try std.testing.expectEqual(sqlite.Step.done, try object.step());
+    }
+
+    var chunks = try db.prepare("select count(*) from _zova_chunks");
+    defer chunks.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try chunks.step());
+    try std.testing.expectEqual(@as(i64, 0), chunks.columnInt64(0));
+
+    var manifest = try db.prepare("select count(*) from _zova_object_chunks");
+    defer manifest.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try manifest.step());
+    try std.testing.expectEqual(@as(i64, 0), manifest.columnInt64(0));
+}
+
+test "object schema accepts minimal valid object chunk and manifest rows" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "valid-object-schema.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    var object_id = [_]u8{0x01} ** 32;
+    var chunk_hash = [_]u8{0x02} ** 32;
+
+    {
+        var chunk = try db.prepare(
+            \\insert into _zova_chunks (chunk_hash, size_bytes, data)
+            \\values (?, 3, ?)
+        );
+        defer chunk.deinit();
+
+        try chunk.bindBlob(1, &chunk_hash);
+        try chunk.bindBlob(2, "abc");
+        try std.testing.expectEqual(sqlite.Step.done, try chunk.step());
+    }
+
+    {
+        var object = try db.prepare(
+            \\insert into _zova_objects (object_id, size_bytes, chunk_count, chunker)
+            \\values (?, 3, 1, 'fastcdc-v1')
+        );
+        defer object.deinit();
+
+        try object.bindBlob(1, &object_id);
+        try std.testing.expectEqual(sqlite.Step.done, try object.step());
+    }
+
+    {
+        var manifest = try db.prepare(
+            \\insert into _zova_object_chunks (object_id, chunk_index, chunk_hash, offset, size_bytes)
+            \\values (?, 0, ?, 0, 3)
+        );
+        defer manifest.deinit();
+
+        try manifest.bindBlob(1, &object_id);
+        try manifest.bindBlob(2, &chunk_hash);
+        try std.testing.expectEqual(sqlite.Step.done, try manifest.step());
+    }
+
+    var count = try db.prepare("select count(*) from _zova_object_chunks");
+    defer count.deinit();
+
+    try std.testing.expectEqual(sqlite.Step.row, try count.step());
+    try std.testing.expectEqual(@as(i64, 1), count.columnInt64(0));
 }
 
 test "plain sqlite open on zova path does not initialize metadata" {
@@ -590,6 +1281,16 @@ test "converted zova remains readable through sqlite wrapper" {
 
     try std.testing.expectEqual(sqlite.Step.row, try item.step());
     try std.testing.expectEqualStrings("kept", item.columnText(0));
+
+    var meta = try raw.prepare("select value from _zova_meta where key = 'format_version'");
+    defer meta.deinit();
+
+    try std.testing.expectEqual(sqlite.Step.row, try meta.step());
+    try std.testing.expectEqualStrings("2", meta.columnText(0));
+
+    try testingExpectTableCount(&raw, "_zova_objects", 1);
+    try testingExpectTableCount(&raw, "_zova_chunks", 1);
+    try testingExpectTableCount(&raw, "_zova_object_chunks", 1);
 }
 
 test "convert sqlite to zova preserves index view and trigger" {
