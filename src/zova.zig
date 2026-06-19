@@ -5,8 +5,13 @@
 //! The file is still a SQLite database underneath, but Zova validates private
 //! metadata before treating it as a Zova-owned database.
 //!
-//! Object storage, vector storage, conversion, migrations, and repair tooling
-//! are intentionally absent from this slice.
+//! Existing SQLite files can be converted into new `.zova` files with
+//! `convertSqliteToZova`. Conversion copies the source with SQLite's backup
+//! API, initializes Zova metadata in the destination, and never mutates the
+//! source file.
+//!
+//! Object storage, vector storage, migrations, and repair tooling are
+//! intentionally absent from this slice.
 
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
@@ -24,7 +29,43 @@ pub const Error = sqlite.Error || error{
     NotZovaDatabase,
     UnsupportedZovaVersion,
     DestinationExists,
+    ZovaNameConflict,
 };
+
+/// Convert an existing SQLite database file into a new `.zova` database.
+///
+/// The source is opened as plain SQLite and is never mutated. The destination
+/// must use the `.zova` extension and must not already exist. Source schema
+/// objects with `_zova_` names are rejected because that namespace is reserved
+/// for Zova-owned metadata inside `.zova` files.
+pub fn convertSqliteToZova(source_path: [:0]const u8, dest_path: [:0]const u8) Error!void {
+    if (!isZovaPath(dest_path)) return error.NotZovaPath;
+
+    var dest_file = std.fs.cwd().createFile(dest_path, .{ .exclusive = true }) catch |err| switch (err) {
+        error.PathAlreadyExists => return error.DestinationExists,
+        else => return error.CantOpen,
+    };
+    dest_file.close();
+    errdefer std.fs.cwd().deleteFile(dest_path) catch {};
+
+    try ensureSourcePathExists(source_path);
+
+    var source = try sqlite.Database.open(source_path);
+    defer source.deinit();
+
+    try rejectReservedZovaNames(&source);
+
+    {
+        var dest = try sqlite.Database.open(dest_path);
+        defer dest.deinit();
+
+        try backupMainDatabase(&source, &dest);
+        try initializeMetadata(&dest);
+    }
+
+    var validated = try Database.open(dest_path);
+    validated.deinit();
+}
 
 /// Owns one initialized `.zova` database.
 ///
@@ -112,6 +153,15 @@ fn ensurePathExists(path: []const u8) Error!void {
     };
 }
 
+fn ensureSourcePathExists(path: []const u8) Error!void {
+    if (std.fs.path.isAbsolute(path)) {
+        std.fs.accessAbsolute(path, .{}) catch return error.CantOpen;
+        return;
+    }
+
+    std.fs.cwd().access(path, .{}) catch return error.CantOpen;
+}
+
 fn initializeMetadata(db: *sqlite.Database) sqlite.Error!void {
     try db.exec(
         \\create table _zova_meta (
@@ -121,6 +171,50 @@ fn initializeMetadata(db: *sqlite.Database) sqlite.Error!void {
         \\insert into _zova_meta (key, value) values ('magic', 'zova');
         \\insert into _zova_meta (key, value) values ('format_version', '1');
     );
+}
+
+fn rejectReservedZovaNames(db: *sqlite.Database) Error!void {
+    var objects = try db.prepare("select name from sqlite_master where name is not null");
+    defer objects.deinit();
+
+    while ((try objects.step()) == .row) {
+        const name = objects.columnText(0);
+        if (isReservedZovaName(name)) return error.ZovaNameConflict;
+    }
+}
+
+fn isReservedZovaName(name: []const u8) bool {
+    const reserved_prefix = "_zova_";
+    return name.len >= reserved_prefix.len and
+        std.ascii.eqlIgnoreCase(name[0..reserved_prefix.len], reserved_prefix);
+}
+
+fn backupMainDatabase(source: *sqlite.Database, dest: *sqlite.Database) Error!void {
+    const backup = sqlite.c.sqlite3_backup_init(dest.handle, "main", source.handle, "main") orelse {
+        return mapSqliteResultCode(sqlite.c.sqlite3_errcode(dest.handle));
+    };
+
+    const step_rc = sqlite.c.sqlite3_backup_step(backup, -1);
+    const finish_rc = sqlite.c.sqlite3_backup_finish(backup);
+
+    if (step_rc != sqlite.c.SQLITE_DONE) return mapSqliteResultCode(step_rc);
+    if (finish_rc != sqlite.c.SQLITE_OK) return mapSqliteResultCode(finish_rc);
+}
+
+fn mapSqliteResultCode(rc: c_int) Error {
+    const primary = rc & 0xff;
+    return switch (primary) {
+        sqlite.c.SQLITE_BUSY => error.Busy,
+        sqlite.c.SQLITE_LOCKED => error.Locked,
+        sqlite.c.SQLITE_CONSTRAINT => error.Constraint,
+        sqlite.c.SQLITE_CANTOPEN => error.CantOpen,
+        sqlite.c.SQLITE_MISUSE => error.Misuse,
+        sqlite.c.SQLITE_NOMEM => error.NoMemory,
+        sqlite.c.SQLITE_INTERRUPT => error.Interrupt,
+        sqlite.c.SQLITE_READONLY => error.ReadOnly,
+        sqlite.c.SQLITE_CORRUPT => error.Corrupt,
+        else => error.SqliteError,
+    };
 }
 
 fn validateMetadata(db: *sqlite.Database) Error!void {
@@ -354,4 +448,245 @@ test "plain sqlite open on zova path does not initialize metadata" {
 
     try std.testing.expectEqual(sqlite.Step.row, try count.step());
     try std.testing.expectEqual(@as(i64, 0), count.columnInt64(0));
+}
+
+test "convert sqlite to zova preserves table rows and source file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "source.db");
+
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "converted.zova");
+
+    {
+        var source = try sqlite.Database.open(source_path);
+        defer source.deinit();
+
+        try source.exec(
+            \\create table messages (
+            \\  id integer primary key,
+            \\  body text not null
+            \\);
+            \\insert into messages (body) values ('alpha');
+            \\insert into messages (body) values ('beta');
+        );
+    }
+
+    try convertSqliteToZova(source_path, dest_path);
+
+    {
+        var dest = try Database.open(dest_path);
+        defer dest.deinit();
+
+        var rows = try dest.prepare("select body from messages order by id");
+        defer rows.deinit();
+
+        try std.testing.expectEqual(sqlite.Step.row, try rows.step());
+        try std.testing.expectEqualStrings("alpha", rows.columnText(0));
+        try std.testing.expectEqual(sqlite.Step.row, try rows.step());
+        try std.testing.expectEqualStrings("beta", rows.columnText(0));
+        try std.testing.expectEqual(sqlite.Step.done, try rows.step());
+    }
+
+    {
+        var source = try sqlite.Database.open(source_path);
+        defer source.deinit();
+
+        var count = try source.prepare("select count(*) from messages");
+        defer count.deinit();
+
+        try std.testing.expectEqual(sqlite.Step.row, try count.step());
+        try std.testing.expectEqual(@as(i64, 2), count.columnInt64(0));
+
+        var metadata = try source.prepare(
+            \\select count(*)
+            \\from sqlite_master
+            \\where type = 'table' and name = '_zova_meta'
+        );
+        defer metadata.deinit();
+
+        try std.testing.expectEqual(sqlite.Step.row, try metadata.step());
+        try std.testing.expectEqual(@as(i64, 0), metadata.columnInt64(0));
+    }
+}
+
+test "converted zova remains readable through sqlite wrapper" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "sqlite-readable.db");
+
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "sqlite-readable.zova");
+
+    {
+        var source = try sqlite.Database.open(source_path);
+        defer source.deinit();
+        try source.exec("create table items (name text not null); insert into items (name) values ('kept')");
+    }
+
+    try convertSqliteToZova(source_path, dest_path);
+
+    var raw = try sqlite.Database.open(dest_path);
+    defer raw.deinit();
+
+    var item = try raw.prepare("select name from items");
+    defer item.deinit();
+
+    try std.testing.expectEqual(sqlite.Step.row, try item.step());
+    try std.testing.expectEqualStrings("kept", item.columnText(0));
+}
+
+test "convert sqlite to zova preserves index view and trigger" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "schema.db");
+
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "schema.zova");
+
+    {
+        var source = try sqlite.Database.open(source_path);
+        defer source.deinit();
+
+        try source.exec(
+            \\create table notes (
+            \\  id integer primary key,
+            \\  body text not null
+            \\);
+            \\create table note_log (
+            \\  note_id integer not null,
+            \\  body text not null
+            \\);
+            \\create index notes_body_idx on notes (body);
+            \\create view note_bodies as select body from notes;
+            \\create trigger notes_after_insert
+            \\after insert on notes
+            \\begin
+            \\  insert into note_log (note_id, body) values (new.id, new.body);
+            \\end;
+            \\insert into notes (body) values ('first');
+        );
+    }
+
+    try convertSqliteToZova(source_path, dest_path);
+
+    var dest = try Database.open(dest_path);
+    defer dest.deinit();
+
+    var objects = try dest.prepare(
+        \\select count(*)
+        \\from sqlite_master
+        \\where name in ('notes_body_idx', 'note_bodies', 'notes_after_insert')
+    );
+    defer objects.deinit();
+
+    try std.testing.expectEqual(sqlite.Step.row, try objects.step());
+    try std.testing.expectEqual(@as(i64, 3), objects.columnInt64(0));
+
+    try dest.exec("insert into notes (body) values ('second')");
+
+    var log = try dest.prepare("select body from note_log order by note_id");
+    defer log.deinit();
+
+    try std.testing.expectEqual(sqlite.Step.row, try log.step());
+    try std.testing.expectEqualStrings("first", log.columnText(0));
+    try std.testing.expectEqual(sqlite.Step.row, try log.step());
+    try std.testing.expectEqualStrings("second", log.columnText(0));
+    try std.testing.expectEqual(sqlite.Step.done, try log.step());
+}
+
+test "convert sqlite to zova rejects invalid destination path and existing destination" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "rejects.db");
+
+    var invalid_dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const invalid_dest_path = try testingDbPath(&invalid_dest_buffer, tmp.sub_path[0..], "rejects.db");
+
+    var existing_dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const existing_dest_path = try testingDbPath(&existing_dest_buffer, tmp.sub_path[0..], "existing-dest.zova");
+
+    {
+        var source = try sqlite.Database.open(source_path);
+        defer source.deinit();
+        try source.exec("create table data (id integer primary key)");
+    }
+
+    try std.testing.expectError(error.NotZovaPath, convertSqliteToZova(source_path, invalid_dest_path));
+
+    {
+        var dest = try Database.create(existing_dest_path);
+        defer dest.deinit();
+    }
+
+    try std.testing.expectError(error.DestinationExists, convertSqliteToZova(source_path, existing_dest_path));
+}
+
+test "convert sqlite to zova rejects reserved zova source names" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "reserved.db");
+
+    var meta_dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const meta_dest_path = try testingDbPath(&meta_dest_buffer, tmp.sub_path[0..], "reserved-meta.zova");
+
+    var prefix_dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const prefix_dest_path = try testingDbPath(&prefix_dest_buffer, tmp.sub_path[0..], "reserved-prefix.zova");
+
+    var case_dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const case_dest_path = try testingDbPath(&case_dest_buffer, tmp.sub_path[0..], "reserved-case.zova");
+
+    {
+        var source = try sqlite.Database.open(source_path);
+        defer source.deinit();
+        try source.exec("create table _zova_meta (key text primary key, value text not null)");
+    }
+
+    try std.testing.expectError(error.ZovaNameConflict, convertSqliteToZova(source_path, meta_dest_path));
+
+    {
+        var source = try sqlite.Database.open(source_path);
+        defer source.deinit();
+        try source.exec("drop table _zova_meta; create table _zova_user_data (id integer primary key)");
+    }
+
+    try std.testing.expectError(error.ZovaNameConflict, convertSqliteToZova(source_path, prefix_dest_path));
+
+    {
+        var source = try sqlite.Database.open(source_path);
+        defer source.deinit();
+        try source.exec("drop table _zova_user_data; create table _ZOVA_case (id integer primary key)");
+    }
+
+    try std.testing.expectError(error.ZovaNameConflict, convertSqliteToZova(source_path, case_dest_path));
+}
+
+test "failed conversion cleans up destination file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "cleanup.db");
+
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "cleanup.zova");
+
+    {
+        var source = try sqlite.Database.open(source_path);
+        defer source.deinit();
+        try source.exec("create table _zova_user_data (id integer primary key)");
+    }
+
+    try std.testing.expectError(error.ZovaNameConflict, convertSqliteToZova(source_path, dest_path));
+    try std.testing.expectError(error.NotZovaDatabase, Database.open(dest_path));
 }

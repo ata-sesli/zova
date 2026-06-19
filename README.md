@@ -68,9 +68,17 @@ Renaming a SQLite file to `.zova` is not enough. Zova validates the internal
 `_zova_meta` table and rejects files that are missing the expected magic value
 and format version.
 
-SQLite-to-Zova conversion is intentionally not implemented yet. The future
-conversion path will create a new `.zova` file and will not mutate the source
-SQLite file.
+Convert an existing SQLite database into a new `.zova` database:
+
+```zig
+try zova.convertSqliteToZova("app.db", "app.zova");
+```
+
+Conversion copies the source database with SQLite's backup API, initializes
+Zova metadata in the destination, and does not mutate the source SQLite file.
+The destination must end in `.zova` and must not already exist. Source schemas
+that already use Zova-reserved `_zova_` names are rejected with
+`error.ZovaNameConflict`.
 
 ## Open A Database
 
@@ -209,6 +217,10 @@ Common SQLite result codes map to Zova errors such as `error.Busy`,
 `error.Locked`, `error.Constraint`, `error.CantOpen`, `error.Misuse`,
 `error.NoMemory`, `error.Interrupt`, `error.ReadOnly`, and `error.Corrupt`.
 Other SQLite result codes currently map to `error.SqliteError`.
+
+The Zova-owned database layer adds boundary errors such as `error.NotZovaPath`,
+`error.NotZovaDatabase`, `error.UnsupportedZovaVersion`,
+`error.DestinationExists`, and `error.ZovaNameConflict`.
 
 Use `Database.errorMessage()` to read SQLite's current error message for the
 connection:

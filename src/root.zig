@@ -5,6 +5,7 @@ const zova = @import("zova.zig");
 
 pub const Database = zova.Database;
 pub const Error = zova.Error;
+pub const convertSqliteToZova = zova.convertSqliteToZova;
 
 test "package exports sqlite namespace" {
     try std.testing.expect(@hasDecl(@This(), "sqlite"));
@@ -16,4 +17,5 @@ test "package exports sqlite namespace" {
 test "package exports zova database namespace" {
     try std.testing.expect(@hasDecl(@This(), "Database"));
     try std.testing.expect(@hasDecl(@This(), "Error"));
+    try std.testing.expect(@hasDecl(@This(), "convertSqliteToZova"));
 }
