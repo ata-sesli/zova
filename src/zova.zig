@@ -630,6 +630,26 @@ test "convert sqlite to zova rejects invalid destination path and existing desti
     try std.testing.expectError(error.DestinationExists, convertSqliteToZova(source_path, existing_dest_path));
 }
 
+test "convert sqlite to zova rejects non sqlite source file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "not-sqlite.db");
+
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "not-sqlite.zova");
+
+    {
+        var source = try std.fs.cwd().createFile(source_path, .{});
+        defer source.close();
+        try source.writeAll("this is not a sqlite database");
+    }
+
+    try std.testing.expectError(error.SqliteError, convertSqliteToZova(source_path, dest_path));
+    try std.testing.expectError(error.NotZovaDatabase, Database.open(dest_path));
+}
+
 test "convert sqlite to zova rejects reserved zova source names" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
