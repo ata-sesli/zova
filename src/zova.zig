@@ -10,15 +10,24 @@
 //! API, initializes Zova metadata in the destination, and never mutates the
 //! source file.
 //!
-//! Object storage, vector storage, migrations, and repair tooling are
-//! intentionally absent from this slice.
+//! v0.3 object storage work starts with deterministic object identity and
+//! private FastCDC chunking. Object storage tables, object read/write APIs,
+//! vector storage, migrations, and repair tooling are intentionally absent
+//! from this slice.
 
 const std = @import("std");
+const fastcdc = @import("fastcdc.zig");
 const sqlite = @import("sqlite.zig");
 
 const metadata_table = "_zova_meta";
 const magic_value = "zova";
 const format_version = "1";
+
+/// SHA-256 digest of full object bytes.
+///
+/// Zova object identity is content identity: the same bytes produce the same
+/// raw 32-byte `ObjectId`.
+pub const ObjectId = [32]u8;
 
 /// Error set for the Zova-owned database layer.
 ///
@@ -32,6 +41,13 @@ pub const Error = sqlite.Error || error{
     ZovaNameConflict,
 };
 
+/// Compute the content identity for a future Zova object.
+pub fn objectId(bytes: []const u8) ObjectId {
+    var digest: ObjectId = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    return digest;
+}
+
 /// Convert an existing SQLite database file into a new `.zova` database.
 ///
 /// The source is opened as plain SQLite and is never mutated. The destination
@@ -41,12 +57,13 @@ pub const Error = sqlite.Error || error{
 pub fn convertSqliteToZova(source_path: [:0]const u8, dest_path: [:0]const u8) Error!void {
     if (!isZovaPath(dest_path)) return error.NotZovaPath;
 
-    var dest_file = std.fs.cwd().createFile(dest_path, .{ .exclusive = true }) catch |err| switch (err) {
+    const io = defaultIo();
+    var dest_file = std.Io.Dir.cwd().createFile(io, dest_path, .{ .exclusive = true }) catch |err| switch (err) {
         error.PathAlreadyExists => return error.DestinationExists,
         else => return error.CantOpen,
     };
-    dest_file.close();
-    errdefer std.fs.cwd().deleteFile(dest_path) catch {};
+    dest_file.close(io);
+    errdefer std.Io.Dir.cwd().deleteFile(io, dest_path) catch {};
 
     try ensureSourcePathExists(source_path);
 
@@ -83,13 +100,14 @@ pub const Database = struct {
     pub fn create(path: [:0]const u8) Error!Database {
         if (!isZovaPath(path)) return error.NotZovaPath;
 
-        var file = std.fs.cwd().createFile(path, .{ .exclusive = true }) catch |err| switch (err) {
+        const io = defaultIo();
+        var file = std.Io.Dir.cwd().createFile(io, path, .{ .exclusive = true }) catch |err| switch (err) {
             error.PathAlreadyExists => return error.DestinationExists,
             else => return error.CantOpen,
         };
-        file.close();
+        file.close(io);
 
-        errdefer std.fs.cwd().deleteFile(path) catch {};
+        errdefer std.Io.Dir.cwd().deleteFile(io, path) catch {};
 
         var raw = try sqlite.Database.open(path);
         errdefer raw.deinit();
@@ -138,28 +156,47 @@ fn isZovaPath(path: []const u8) bool {
     return std.mem.endsWith(u8, path, ".zova");
 }
 
+fn defaultIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
 fn ensurePathExists(path: []const u8) Error!void {
+    const io = defaultIo();
     if (std.fs.path.isAbsolute(path)) {
-        std.fs.accessAbsolute(path, .{}) catch |err| switch (err) {
-            error.FileNotFound => return error.NotZovaDatabase,
+        std.Io.Dir.accessAbsolute(io, path, .{}) catch |err| switch (err) {
+            error.FileNotFound => return missingPathError(io, path),
             else => return error.CantOpen,
         };
         return;
     }
 
-    std.fs.cwd().access(path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return error.NotZovaDatabase,
+    std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return missingPathError(io, path),
         else => return error.CantOpen,
     };
 }
 
+fn missingPathError(io: std.Io, path: []const u8) Error {
+    const parent = std.fs.path.dirname(path) orelse return error.NotZovaDatabase;
+    if (parent.len == 0) return error.NotZovaDatabase;
+
+    if (std.fs.path.isAbsolute(parent)) {
+        std.Io.Dir.accessAbsolute(io, parent, .{}) catch return error.CantOpen;
+    } else {
+        std.Io.Dir.cwd().access(io, parent, .{}) catch return error.CantOpen;
+    }
+
+    return error.NotZovaDatabase;
+}
+
 fn ensureSourcePathExists(path: []const u8) Error!void {
+    const io = defaultIo();
     if (std.fs.path.isAbsolute(path)) {
-        std.fs.accessAbsolute(path, .{}) catch return error.CantOpen;
+        std.Io.Dir.accessAbsolute(io, path, .{}) catch return error.CantOpen;
         return;
     }
 
-    std.fs.cwd().access(path, .{}) catch return error.CantOpen;
+    std.Io.Dir.cwd().access(io, path, .{}) catch return error.CantOpen;
 }
 
 fn initializeMetadata(db: *sqlite.Database) sqlite.Error!void {
@@ -291,6 +328,21 @@ test "create initializes and open validates zova database" {
         try std.testing.expectEqual(sqlite.Step.row, try select.step());
         try std.testing.expectEqualStrings("hello", select.columnText(0));
     }
+}
+
+test "object ids are sha256 of full object bytes" {
+    const empty_expected = ObjectId{
+        0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14,
+        0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9, 0x24,
+        0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c,
+        0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
+    };
+
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(ObjectId));
+    try std.testing.expectEqualSlices(u8, &empty_expected, &objectId(""));
+    try std.testing.expectEqualSlices(u8, &objectId("same bytes"), &objectId("same bytes"));
+    try std.testing.expect(!std.mem.eql(u8, &objectId("first"), &objectId("second")));
+    try std.testing.expectEqualStrings("fastcdc-v1", fastcdc.version);
 }
 
 test "created zova database stores metadata" {
@@ -640,11 +692,10 @@ test "convert sqlite to zova rejects non sqlite source file" {
     var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "not-sqlite.zova");
 
-    {
-        var source = try std.fs.cwd().createFile(source_path, .{});
-        defer source.close();
-        try source.writeAll("this is not a sqlite database");
-    }
+    try std.Io.Dir.cwd().writeFile(defaultIo(), .{
+        .sub_path = source_path,
+        .data = "this is not a sqlite database",
+    });
 
     try std.testing.expectError(error.SqliteError, convertSqliteToZova(source_path, dest_path));
     try std.testing.expectError(error.NotZovaDatabase, Database.open(dest_path));
