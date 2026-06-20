@@ -54,6 +54,8 @@ test "e2e app database stores relational rows and native objects across reopen" 
         try insertAttachment(&db, large_id, "large.bin", "application/octet-stream", large.len);
         try insertChunkRef(&db, "chunk-1", 1, "first semantic chunk");
         try insertChunkRef(&db, "chunk-2", 1, "second semantic chunk");
+        try db.putVector("chunks", "chunk-1", &.{ 1.0, 0.0, 0.0 });
+        try db.putVector("chunks", "chunk-2", &.{ 0.0, 1.0, 0.0 });
         try std.testing.expect(try db.hasVectorCollection("chunks"));
         try expectQuickCheckOk(&db);
         try expectIntegrityCheckOk(&db);
@@ -68,11 +70,21 @@ test "e2e app database stores relational rows and native objects across reopen" 
     try expectChunkCount(&reopened, 2);
     try std.testing.expect(try reopened.hasVectorCollection("chunks"));
     try std.testing.expect(!try reopened.hasVectorCollection("missing"));
+    try expectStoredVector(&reopened, "chunk-1", &.{ 1.0, 0.0, 0.0 });
+    try expectStoredVector(&reopened, "chunk-2", &.{ 0.0, 1.0, 0.0 });
+    try expectChunkSearchResult(&reopened, &.{ 0.9, 0.1, 0.0 }, &.{ "chunk-1", "chunk-2" }, &.{ "first semantic chunk", "second semantic chunk" });
     try expectStoredObject(&reopened, "empty.bin", empty_id, "");
     try expectStoredObject(&reopened, "hello.txt", small_id, "hello object");
     try expectStoredObject(&reopened, "hello-copy.txt", duplicate_id, "hello object");
     try expectStoredObject(&reopened, "binary.bin", binary_id, &binary);
     try expectStoredObject(&reopened, "large.bin", large_id, large);
+
+    try reopened.putVector("chunks", "chunk-1", &.{ 0.25, 0.5, 0.75 });
+    try expectStoredVector(&reopened, "chunk-1", &.{ 0.25, 0.5, 0.75 });
+    try expectChunkSearchResult(&reopened, &.{ 0.25, 0.5, 0.75 }, &.{ "chunk-1", "chunk-2" }, &.{ "first semantic chunk", "second semantic chunk" });
+    try reopened.deleteVector("chunks", "chunk-2");
+    try expectMissingVectorRef(&reopened, "second semantic chunk", "chunk-2");
+    try expectChunkSearchResult(&reopened, &.{ 0.25, 0.5, 0.75 }, &.{"chunk-1"}, &.{"first semantic chunk"});
 
     try reopened.deleteObject(binary_id);
     try expectAttachmentCount(&reopened, 5);
@@ -173,6 +185,7 @@ test "e2e converted sqlite database preserves sql data and accepts new objects" 
         const object_id = try db.putObject("converted object bytes");
         try insertObjectRef(&db, object_id, "converted");
         try insertSearchRow(&db, "converted-row-1", "converted sql row");
+        try db.putVector("search_rows", "converted-row-1", &.{ 1.0, 2.0, 3.0 });
         try std.testing.expect(try db.hasVectorCollection("search_rows"));
         try expectQuickCheckOk(&db);
         try expectIntegrityCheckOk(&db);
@@ -186,8 +199,15 @@ test "e2e converted sqlite database preserves sql data and accepts new objects" 
     try expectCount(&reopened, "select count(*) from audit", 3);
     try expectCount(&reopened, "select count(*) from search_rows", 1);
     try std.testing.expect(try reopened.hasVectorCollection("search_rows"));
+    try expectStoredSearchVector(&reopened, "converted-row-1", &.{ 1.0, 2.0, 3.0 });
+    try expectConvertedSearchResult(&reopened, &.{ 1.0, 2.0, 3.0 }, &.{"converted-row-1"}, &.{"converted sql row"});
     try expectObjectRef(&reopened, "converted", converted_object_id, "converted object bytes");
 
+    try reopened.putVector("search_rows", "converted-row-1", &.{ 3.0, 2.0, 1.0 });
+    try expectStoredSearchVector(&reopened, "converted-row-1", &.{ 3.0, 2.0, 1.0 });
+    try expectConvertedSearchResult(&reopened, &.{ 3.0, 2.0, 1.0 }, &.{"converted-row-1"}, &.{"converted sql row"});
+    try reopened.deleteVector("search_rows", "converted-row-1");
+    try expectMissingSearchVectorRef(&reopened, "converted-row-1");
     try reopened.deleteObject(converted_object_id);
     try expectCount(&reopened, "select count(*) from files", 3);
     try expectCount(&reopened, "select count(*) from audit", 3);
@@ -209,26 +229,35 @@ test "e2e two connections keep sqlite locking and later recover" {
     var first = try zova.Database.create(db_path);
     defer first.deinit();
     try first.exec("create table notes (id integer primary key, body text not null)");
+    try first.createVectorCollection("notes", .{ .dimensions = 2, .metric = .dot });
 
     var second = try zova.Database.open(db_path);
     defer second.deinit();
 
     try first.exec("begin immediate");
     try first.exec("insert into notes (body) values ('held')");
+    try first.putVector("notes", "held", &.{ 1.0, 1.0 });
     try std.testing.expectError(error.ObjectTransactionActive, first.putObject("same connection"));
     try std.testing.expectError(error.Busy, second.putObject("second connection"));
+    try std.testing.expectError(error.Busy, second.putVector("notes", "blocked", &.{ 2.0, 2.0 }));
     try first.exec("rollback");
 
     const id = try second.putObject("after lock");
     try std.testing.expect(try second.hasObject(id));
+    try second.putVector("notes", "after-lock", &.{ 2.0, 2.0 });
+    try std.testing.expect(try second.hasVector("notes", "after-lock"));
 
     const delete_id = try second.putObject("delete after lock");
+    try second.putVector("notes", "delete-after-lock", &.{ 3.0, 3.0 });
     try first.exec("begin immediate");
     try std.testing.expectError(error.Busy, second.deleteObject(delete_id));
+    try std.testing.expectError(error.Busy, second.deleteVector("notes", "delete-after-lock"));
     try first.exec("rollback");
 
     try second.deleteObject(delete_id);
     try std.testing.expectError(error.ObjectNotFound, second.getObject(std.testing.allocator, delete_id));
+    try second.deleteVector("notes", "delete-after-lock");
+    try std.testing.expectError(error.VectorNotFound, second.getVector(std.testing.allocator, "notes", "delete-after-lock"));
     try expectQuickCheckOk(&second);
     try expectIntegrityCheckOk(&second);
 }
@@ -346,6 +375,103 @@ fn expectDeletedObjectRef(db: *zova.Database, label: []const u8, expected_id: zo
     try std.testing.expectEqual(zova.sqlite.Step.done, try stmt.step());
 
     try std.testing.expectError(error.ObjectNotFound, db.getObject(std.testing.allocator, id));
+}
+
+fn expectStoredVector(db: *zova.Database, vector_id: []const u8, expected: []const f32) !void {
+    var vector = try db.getVector(std.testing.allocator, "chunks", vector_id);
+    defer vector.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings(vector_id, vector.id);
+    try std.testing.expectEqualSlices(f32, expected, vector.values);
+}
+
+fn expectStoredSearchVector(db: *zova.Database, vector_id: []const u8, expected: []const f32) !void {
+    var vector = try db.getVector(std.testing.allocator, "search_rows", vector_id);
+    defer vector.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings(vector_id, vector.id);
+    try std.testing.expectEqualSlices(f32, expected, vector.values);
+}
+
+fn expectChunkSearchResult(
+    db: *zova.Database,
+    query: []const f32,
+    expected_ids: []const []const u8,
+    expected_bodies: []const []const u8,
+) !void {
+    var results = try db.searchVectors(std.testing.allocator, "chunks", query, expected_ids.len);
+    defer results.deinit(std.testing.allocator);
+    try expectSearchIds(&results, expected_ids);
+
+    for (results.items, expected_bodies) |result, expected_body| {
+        try expectChunkBodyForVectorId(db, result.id, expected_body);
+    }
+}
+
+fn expectConvertedSearchResult(
+    db: *zova.Database,
+    query: []const f32,
+    expected_ids: []const []const u8,
+    expected_bodies: []const []const u8,
+) !void {
+    var results = try db.searchVectors(std.testing.allocator, "search_rows", query, expected_ids.len);
+    defer results.deinit(std.testing.allocator);
+    try expectSearchIds(&results, expected_ids);
+
+    for (results.items, expected_bodies) |result, expected_body| {
+        try expectSearchRowBodyForVectorId(db, result.id, expected_body);
+    }
+}
+
+fn expectSearchIds(results: *const zova.VectorSearchResults, expected: []const []const u8) !void {
+    try std.testing.expectEqual(expected.len, results.items.len);
+    for (expected, 0..) |expected_id, index| {
+        try std.testing.expectEqualStrings(expected_id, results.items[index].id);
+    }
+}
+
+fn expectChunkBodyForVectorId(db: *zova.Database, vector_id: []const u8, expected_body: []const u8) !void {
+    var stmt = try db.prepare("select body from chunks where vector_id = ?");
+    defer stmt.deinit();
+
+    try stmt.bindText(1, vector_id);
+    try std.testing.expectEqual(zova.sqlite.Step.row, try stmt.step());
+    try std.testing.expectEqualStrings(expected_body, stmt.columnText(0));
+    try std.testing.expectEqual(zova.sqlite.Step.done, try stmt.step());
+}
+
+fn expectSearchRowBodyForVectorId(db: *zova.Database, vector_id: []const u8, expected_body: []const u8) !void {
+    var stmt = try db.prepare("select body from search_rows where vector_id = ?");
+    defer stmt.deinit();
+
+    try stmt.bindText(1, vector_id);
+    try std.testing.expectEqual(zova.sqlite.Step.row, try stmt.step());
+    try std.testing.expectEqualStrings(expected_body, stmt.columnText(0));
+    try std.testing.expectEqual(zova.sqlite.Step.done, try stmt.step());
+}
+
+fn expectMissingVectorRef(db: *zova.Database, body: []const u8, expected_vector_id: []const u8) !void {
+    var stmt = try db.prepare("select vector_id from chunks where body = ?");
+    defer stmt.deinit();
+
+    try stmt.bindText(1, body);
+    try std.testing.expectEqual(zova.sqlite.Step.row, try stmt.step());
+    const vector_id = stmt.columnText(0);
+    try std.testing.expectEqualStrings(expected_vector_id, vector_id);
+    try std.testing.expectError(error.VectorNotFound, db.getVector(std.testing.allocator, "chunks", vector_id));
+    try std.testing.expectEqual(zova.sqlite.Step.done, try stmt.step());
+}
+
+fn expectMissingSearchVectorRef(db: *zova.Database, expected_vector_id: []const u8) !void {
+    var stmt = try db.prepare("select vector_id from search_rows where vector_id = ?");
+    defer stmt.deinit();
+
+    try stmt.bindText(1, expected_vector_id);
+    try std.testing.expectEqual(zova.sqlite.Step.row, try stmt.step());
+    const vector_id = stmt.columnText(0);
+    try std.testing.expectEqualStrings(expected_vector_id, vector_id);
+    try std.testing.expectError(error.VectorNotFound, db.getVector(std.testing.allocator, "search_rows", vector_id));
+    try std.testing.expectEqual(zova.sqlite.Step.done, try stmt.step());
 }
 
 fn loadObjectIdByFilename(db: *zova.Database, filename: []const u8) !zova.ObjectId {
