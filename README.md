@@ -2,14 +2,14 @@
 
 Zova is a Zig-powered embedded data substrate built on SQLite.
 
-Current package version: `0.4.0`.
+Current package version: `0.5.0`.
 
-The current v0.4 surface is intentionally small: a thin SQLite wrapper for
+The current v0.5 surface is intentionally small: a thin SQLite wrapper for
 database lifecycle, prepared statements, transactions, common result-code
 mapping, plus a `.zova` file identity layer, SQLite-to-Zova conversion, and
-native content-addressed object storage with explicit object deletion. SQL
-stays normal SQLite SQL, existing SQLite files can be opened directly, and
-plain SQLite usage does not create Zova system tables.
+native content-addressed object storage and native vector storage. SQL stays
+normal SQLite SQL, existing SQLite files can be opened directly, and plain
+SQLite usage does not create Zova system tables.
 
 Zova v0 is not a different SQL dialect and not "better SQL." It does not make
 SQLite stricter, distributed, or magically concurrent. It wraps SQLite's native
@@ -18,7 +18,7 @@ model with clearer Zig ownership and boring, direct ergonomics.
 Raw SQLite remains available through `sqlite.c` for APIs that Zova does not
 wrap yet.
 
-Zova v0.4 also has a file-level database boundary:
+Zova v0.5 also has a file-level database boundary:
 
 ```text
 *.zova  -> Zova-owned database
@@ -32,7 +32,7 @@ into a new Zova database.
 
 ## Import
 
-Zova v0.4 keeps `zova.sqlite` as the SQLite wrapper namespace. Packages
+Zova v0.5 keeps `zova.sqlite` as the SQLite wrapper namespace. Packages
 that depend on Zova use the package surface from `src/root.zig`:
 
 ```zig
@@ -46,7 +46,7 @@ Inside this repository, the smoke executable imports `src/sqlite.zig` directly.
 
 `zova.Database` is the Zova-owned database API. It only accepts `.zova` paths
 and validates private metadata before opening a file as Zova-managed storage.
-It includes native object storage, but it does not add vector behavior yet.
+It includes native object storage and native vector storage.
 
 Create a new `.zova` database:
 
@@ -125,7 +125,7 @@ try db.deleteObject(id);
 std.debug.assert(!try db.hasObject(id));
 ```
 
-`getObject` allocates the full object in memory in v0.4. Streaming reads are
+`getObject` allocates the full object in memory in v0.5. Streaming reads are
 not part of this release.
 
 `deleteObject` removes the object row, removes its manifest rows, and
@@ -194,6 +194,119 @@ Deleting object rows does not mean the SQLite file shrinks immediately. Zova
 does not run `VACUUM`, enable `auto_vacuum`, or change PRAGMAs on open or
 delete. Physical file-size reclamation is normal SQLite behavior; applications
 that want compaction can run SQLite mechanisms such as `VACUUM` explicitly.
+
+## Vectors
+
+Zova vectors follow a pgvector-style model adapted to a single `.zova` file:
+application rows stay in normal SQL tables, and Zova stores the searchable
+numeric representation.
+
+```text
+SQL row -> vector_id -> Zova vector
+```
+
+Vector rows are grouped into named collections. A collection fixes the vector
+dimension count and distance metric:
+
+```zig
+try db.createVectorCollection("chunks", .{
+    .dimensions = 3,
+    .metric = .cosine,
+});
+```
+
+The supported metrics are `cosine`, `l2`, and `dot`. Vector values are finite
+`f32` values stored as deterministic little-endian bytes in private Zova
+tables. Vector ids are application-provided UTF-8 text ids scoped to a
+collection; they are not hashes of the vector bytes.
+
+Zova does not store labels, filenames, owners, timestamps, JSON payloads, or app
+references inside private vector rows. Store that metadata in your own SQL
+tables:
+
+```zig
+try db.exec(
+    \\create table chunks (
+    \\  id integer primary key,
+    \\  document_id text not null,
+    \\  object_id blob not null,
+    \\  vector_id text not null,
+    \\  body text not null
+    \\)
+);
+
+const body = "Zova stores relational rows, objects, and vectors together.";
+const object_id = try db.putObject(body);
+
+try db.putVector("chunks", "chunk:1", &[_]f32{ 0.2, 0.7, 0.1 });
+
+var insert = try db.prepare(
+    \\insert into chunks (document_id, object_id, vector_id, body)
+    \\values (?, ?, ?, ?)
+);
+defer insert.deinit();
+
+try insert.bindText(1, "doc:readme");
+try insert.bindBlob(2, &object_id);
+try insert.bindText(3, "chunk:1");
+try insert.bindText(4, body);
+std.debug.assert((try insert.step()) == .done);
+```
+
+Exact search scans the collection and returns owned vector ids with
+lower-is-better distances. Equal distances are ordered by vector id text order,
+so results are deterministic.
+
+```zig
+const query = [_]f32{ 0.1, 0.8, 0.1 };
+
+var results = try db.searchVectors(allocator, "chunks", &query, 5);
+defer results.deinit(allocator);
+
+for (results.items) |result| {
+    var row = try db.prepare(
+        \\select document_id, body
+        \\from chunks
+        \\where vector_id = ?
+    );
+    defer row.deinit();
+
+    try row.bindText(1, result.id);
+    if ((try row.step()) == .row) {
+        std.debug.print(
+            "{s}: {s} ({d})\n",
+            .{ row.columnText(0), row.columnText(1), result.distance },
+        );
+    }
+}
+```
+
+Vector lifecycle is explicit:
+
+```zig
+try db.putVector("chunks", "chunk:1", &[_]f32{ 0.2, 0.7, 0.1 });
+
+var vector = try db.getVector(allocator, "chunks", "chunk:1");
+defer vector.deinit(allocator);
+
+std.debug.assert(try db.hasVector("chunks", "chunk:1"));
+
+try db.deleteVector("chunks", "chunk:1");
+std.debug.assert(!try db.hasVector("chunks", "chunk:1"));
+```
+
+Deleting a vector removes only the private vector row. It does not scan or
+mutate user SQL tables, so application-owned rows can still contain deleted
+vector ids until the application updates them.
+
+v0.5 search is exact and collection-wide. There is no approximate nearest
+neighbor index, candidate-id filtering, SQL virtual table integration, payload
+filtering, embedding generation, sparse vector support, binary vector support,
+quantization, or vector repair CLI in this release.
+
+Objects and vectors can coexist naturally in the same user table: store
+`object_id` when you need the bytes, and store `vector_id` when you need the
+searchable representation.
 
 ## Open A Database
 
@@ -337,7 +450,10 @@ The Zova-owned database layer adds boundary errors such as `error.NotZovaPath`,
 `error.NotZovaDatabase`, `error.UnsupportedZovaVersion`,
 `error.DestinationExists`, and `error.ZovaNameConflict`. Object APIs add
 `error.ObjectNotFound`, `error.ObjectCorrupt`, `error.ObjectTooLarge`, and
-`error.ObjectTransactionActive`.
+`error.ObjectTransactionActive`. Vector APIs add errors such as
+`error.VectorCollectionExists`, `error.VectorCollectionNotFound`,
+`error.VectorNotFound`, `error.VectorDimensionMismatch`,
+`error.VectorCorrupt`, and `error.VectorInvalid`.
 
 Use `Database.errorMessage()` to read SQLite's current error message for the
 connection:
@@ -402,7 +518,7 @@ The release smoke formats sources, runs unit/integration tests, runs E2E tests,
 builds the smoke executable, runs it, creates a source-package candidate, and
 verifies that candidate from extraction. The release package is source-only:
 `README.md`, build files, `src`, `tests`, and `vendor`. Compiled CLI binaries are
-not release artifacts in v0.4.
+not release artifacts in v0.5.
 
 ## Raw SQLite To Zova Mapping
 
@@ -432,9 +548,11 @@ The plain `zova.sqlite` wrapper does not add object storage, vector storage,
 migrations, system tables, an ORM, a query builder, connection pooling, async
 behavior, or a background service.
 
-The Zova-owned `zova.Database` layer adds `.zova` identity and native objects,
-but v0.4 still has no vector API, streaming object API, repair CLI, automatic
-BLOB migration, compression, encryption, or remote sync.
+The Zova-owned `zova.Database` layer adds `.zova` identity, native objects, and
+native vectors, but v0.5 still has no streaming object API, vector ANN index,
+candidate-filtered vector search, SQL virtual table integration, repair CLI,
+automatic BLOB/object/vector migration, embedding generation, compression,
+encryption, or remote sync.
 
 Those layers can grow later. The v0 foundation is boring on purpose: normal
 SQLite first, wrapped just enough to make ownership and common usage clear in

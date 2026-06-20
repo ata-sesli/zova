@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 usage() {
     echo "usage: scripts/package-release.sh <version> [out-dir]" >&2
-    echo "example: scripts/package-release.sh 0.4.0" >&2
+    echo "example: scripts/package-release.sh 0.5.0" >&2
 }
 
 run() {
