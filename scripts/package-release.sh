@@ -138,11 +138,12 @@ mkdir -p "$VERIFY_DIR"
 tar -xzf "$ARCHIVE" -C "$VERIFY_DIR"
 cd "$VERIFY_DIR/$PKG"
 
-zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/fastcdc.zig src/c_api.zig src/main.zig tests/e2e.zig
+zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/fastcdc.zig src/c_api.zig src/cli.zig src/main.zig tests/e2e.zig tests/cli.zig
 zig build test
 zig build e2e
 zig build c-abi
 zig build c-abi-test
+zig build cli-test
 zig build test -Doptimize=ReleaseSafe
 zig build
 zig build run

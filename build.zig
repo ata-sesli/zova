@@ -3,6 +3,24 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const package_version = packageVersion(b);
+
+    const zova_module = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    addSqlite(zova_module, b);
+
+    const cli_module = b.createModule(.{
+        .root_source_file = b.path("src/cli.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cli_module.addImport("zova", zova_module);
+    const cli_options = b.addOptions();
+    cli_options.addOption([]const u8, "package_version", package_version);
+    cli_module.addOptions("cli_options", cli_options);
 
     const exe = b.addExecutable(.{
         .name = "zova",
@@ -12,12 +30,13 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    addSqlite(exe.root_module, b);
+    exe.root_module.addImport("cli", cli_module);
 
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
+    run_cmd.addArg("--version");
 
     const run_step = b.step("run", "Run Zova");
     run_step.dependOn(&run_cmd.step);
@@ -47,13 +66,6 @@ pub fn build(b: *std.Build) void {
     const c_api_test_cmd = b.addRunArtifact(c_api_tests);
     test_step.dependOn(&c_api_test_cmd.step);
 
-    const zova_module = b.createModule(.{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    addSqlite(zova_module, b);
-
     const e2e_module = b.createModule(.{
         .root_source_file = b.path("tests/e2e.zig"),
         .target = target,
@@ -68,6 +80,22 @@ pub fn build(b: *std.Build) void {
     const e2e_cmd = b.addRunArtifact(e2e_tests);
     const e2e_step = b.step("e2e", "Run end-to-end tests");
     e2e_step.dependOn(&e2e_cmd.step);
+
+    const cli_tests_module = b.createModule(.{
+        .root_source_file = b.path("tests/cli.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cli_tests_module.addImport("zova", zova_module);
+    cli_tests_module.addImport("cli", cli_module);
+
+    const cli_tests = b.addTest(.{
+        .root_module = cli_tests_module,
+    });
+    const cli_tests_cmd = b.addRunArtifact(cli_tests);
+    const cli_test_step = b.step("cli-test", "Run CLI tests");
+    cli_test_step.dependOn(&cli_tests_cmd.step);
+    test_step.dependOn(&cli_tests_cmd.step);
 
     const c_abi_lib = b.addLibrary(.{
         .name = "zova_c",
@@ -120,4 +148,18 @@ fn addSqlite(module: *std.Build.Module, b: *std.Build) void {
         },
     });
     module.link_libc = true;
+}
+
+fn packageVersion(b: *std.Build) []const u8 {
+    const manifest = b.build_root.handle.readFileAlloc(
+        b.graph.io,
+        "build.zig.zon",
+        b.allocator,
+        .limited(64 * 1024),
+    ) catch @panic("unable to read build.zig.zon");
+    const marker = ".version = \"";
+    const start = std.mem.indexOf(u8, manifest, marker) orelse @panic("build.zig.zon is missing .version");
+    const value_start = start + marker.len;
+    const value_end = std.mem.indexOfScalarPos(u8, manifest, value_start, '"') orelse @panic("build.zig.zon has malformed .version");
+    return manifest[value_start..value_end];
 }
