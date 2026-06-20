@@ -2,9 +2,9 @@
 
 Zova is a Zig-powered embedded data substrate built on SQLite.
 
-Current package version: `0.5.0`.
+Current package version: `0.6.0`.
 
-The current v0.5 surface is intentionally small: a thin SQLite wrapper for
+The current v0.6 surface is intentionally small: a thin SQLite wrapper for
 database lifecycle, prepared statements, transactions, common result-code
 mapping, plus a `.zova` file identity layer, SQLite-to-Zova conversion, and
 native content-addressed object storage and native vector storage. SQL stays
@@ -18,7 +18,7 @@ model with clearer Zig ownership and boring, direct ergonomics.
 Raw SQLite remains available through `sqlite.c` for APIs that Zova does not
 wrap yet.
 
-Zova v0.5 also has a file-level database boundary:
+Zova v0.6 also has a file-level database boundary:
 
 ```text
 *.zova  -> Zova-owned database
@@ -32,7 +32,7 @@ into a new Zova database.
 
 ## Import
 
-Zova v0.5 keeps `zova.sqlite` as the SQLite wrapper namespace. Packages
+Zova v0.6 keeps `zova.sqlite` as the SQLite wrapper namespace. Packages
 that depend on Zova use the package surface from `src/root.zig`:
 
 ```zig
@@ -111,7 +111,7 @@ full object bytes. The same bytes produce the same object id. Display it with
 normal Zig formatting helpers such as `std.fmt.fmtSliceHexLower(&id)` when a
 hex string is useful.
 
-Store, load, and delete an object:
+Store, load, range-read, and delete an object:
 
 ```zig
 const id = try db.putObject("hello object");
@@ -121,12 +121,55 @@ defer object.deinit(allocator);
 
 std.debug.assert(std.mem.eql(u8, object.bytes, "hello object"));
 
+var preview: [5]u8 = undefined;
+const copied = try db.readObjectRange(id, 0, &preview);
+std.debug.assert(copied == preview.len);
+std.debug.assert(std.mem.eql(u8, &preview, "hello"));
+
 try db.deleteObject(id);
 std.debug.assert(!try db.hasObject(id));
 ```
 
-`getObject` allocates the full object in memory in v0.5. Streaming reads are
-not part of this release.
+`getObject` allocates the full object in memory. `readObjectRange` reads from
+the logical object into a caller-provided buffer without allocating the full
+object, which is the preferred path for previews, media serving, and partial
+reads. Offsets are byte offsets in the full object. `offset == object_size`
+returns `0`; `offset > object_size` returns `error.ObjectRangeInvalid`.
+
+Object manifests and chunk reads expose the read-side chunk model without
+exposing private table rows:
+
+```zig
+var manifest = try db.objectManifest(allocator, id);
+defer manifest.deinit(allocator);
+
+for (manifest.chunks) |chunk| {
+    std.debug.print("chunk {}: {x} at {}\n", .{
+        chunk.index,
+        std.fmt.fmtSliceHexLower(&chunk.hash),
+        chunk.offset,
+    });
+
+    var data = try db.getObjectChunk(allocator, chunk.hash);
+    defer data.deinit(allocator);
+}
+```
+
+`objectManifest` validates manifest shape: chunk order, offsets, sizes, row
+presence, and the `fastcdc-v1` chunker. It does not hash every chunk byte.
+`getObjectChunk` and every chunk touched by `readObjectRange` verify
+`SHA-256(chunk_bytes) == chunk.hash`. A full-object `readObjectRange` also
+verifies the final full-object SHA-256; partial range reads verify only the
+chunks they touch.
+
+The v0.6 object streaming surface is read/serve only. It does not receive loose
+chunks, assemble objects from externally supplied chunks, or define a transfer
+protocol.
+
+Transfer state belongs in application SQL tables. A media-heavy application can
+store preview status, peer state, missing chunk hashes, retry counters, or
+RChat-style attachment metadata in normal tables while using Zova object ids and
+range reads to serve the actual bytes.
 
 `deleteObject` removes the object row, removes its manifest rows, and
 garbage-collects Zova chunks that are no longer referenced by any remaining
@@ -140,8 +183,9 @@ contention can still surface as SQLite wrapper errors such as `error.Busy`.
 
 SQL BLOB columns and Zova objects are different tools. A user-created BLOB
 column remains an ordinary SQLite BLOB column. Zova objects are stored in
-private `_zova_` tables as FastCDC chunks, and those chunk boundaries are not
-part of the public API.
+private `_zova_` tables as FastCDC chunks. Apps should use `objectManifest`,
+`getObjectChunk`, and `readObjectRange` instead of querying private tables
+directly.
 
 Application metadata belongs in application tables. For example, store object
 ids beside filenames or other app data:
@@ -165,7 +209,8 @@ try insert.bindText(2, "report.pdf");
 std.debug.assert((try insert.step()) == .done);
 ```
 
-Later, read the object id from SQL and load the bytes through Zova:
+Later, read the object id from SQL and load or range-read the bytes through
+Zova:
 
 ```zig
 var select = try db.prepare("select object_id from attachments where filename = ?");
@@ -180,6 +225,9 @@ if ((try select.step()) == .row) {
 
     var object = try db.getObject(allocator, stored_id);
     defer object.deinit(allocator);
+
+    var header: [64]u8 = undefined;
+    _ = try db.readObjectRange(stored_id, 0, &header);
 }
 ```
 

@@ -78,6 +78,8 @@ test "e2e app database stores relational rows and native objects across reopen" 
     try expectStoredObject(&reopened, "hello-copy.txt", duplicate_id, "hello object");
     try expectStoredObject(&reopened, "binary.bin", binary_id, &binary);
     try expectStoredObject(&reopened, "large.bin", large_id, large);
+    try expectStoredObjectRange(&reopened, "large.bin", large_id, large);
+    try expectObjectChunksReassemble(&reopened, large_id, large);
 
     try reopened.putVector("chunks", "chunk-1", &.{ 0.25, 0.5, 0.75 });
     try expectStoredVector(&reopened, "chunk-1", &.{ 0.25, 0.5, 0.75 });
@@ -202,6 +204,8 @@ test "e2e converted sqlite database preserves sql data and accepts new objects" 
     try expectStoredSearchVector(&reopened, "converted-row-1", &.{ 1.0, 2.0, 3.0 });
     try expectConvertedSearchResult(&reopened, &.{ 1.0, 2.0, 3.0 }, &.{"converted-row-1"}, &.{"converted sql row"});
     try expectObjectRef(&reopened, "converted", converted_object_id, "converted object bytes");
+    try expectObjectRefRange(&reopened, "converted", converted_object_id, "converted object bytes");
+    try expectObjectChunksReassemble(&reopened, converted_object_id, "converted object bytes");
 
     try reopened.putVector("search_rows", "converted-row-1", &.{ 3.0, 2.0, 1.0 });
     try expectStoredSearchVector(&reopened, "converted-row-1", &.{ 3.0, 2.0, 1.0 });
@@ -342,6 +346,13 @@ fn expectStoredObject(db: *zova.Database, filename: []const u8, expected_id: zov
     try std.testing.expectEqual(@as(u64, expected_bytes.len), try db.objectSize(id));
 }
 
+fn expectStoredObjectRange(db: *zova.Database, filename: []const u8, expected_id: zova.ObjectId, expected_bytes: []const u8) !void {
+    const id = try loadObjectIdByFilename(db, filename);
+    try std.testing.expectEqualSlices(u8, &expected_id, &id);
+    try std.testing.expectEqual(@as(u64, expected_bytes.len), try db.objectSize(id));
+    try expectObjectRangeBytes(db, id, expected_bytes);
+}
+
 fn expectObjectRef(db: *zova.Database, label: []const u8, expected_id: zova.ObjectId, expected_bytes: []const u8) !void {
     var stmt = try db.prepare("select object_id from object_refs where label = ?");
     defer stmt.deinit();
@@ -355,6 +366,67 @@ fn expectObjectRef(db: *zova.Database, label: []const u8, expected_id: zova.Obje
     var object = try db.getObject(std.testing.allocator, id);
     defer object.deinit(std.testing.allocator);
     try std.testing.expectEqualSlices(u8, expected_bytes, object.bytes);
+}
+
+fn expectObjectRefRange(db: *zova.Database, label: []const u8, expected_id: zova.ObjectId, expected_bytes: []const u8) !void {
+    var stmt = try db.prepare("select object_id from object_refs where label = ?");
+    defer stmt.deinit();
+
+    try stmt.bindText(1, label);
+    try std.testing.expectEqual(zova.sqlite.Step.row, try stmt.step());
+    const id = try objectIdFromColumn(&stmt, 0);
+    try std.testing.expectEqualSlices(u8, &expected_id, &id);
+    try std.testing.expectEqual(zova.sqlite.Step.done, try stmt.step());
+
+    try expectObjectRangeBytes(db, id, expected_bytes);
+}
+
+fn expectObjectRangeBytes(db: *zova.Database, id: zova.ObjectId, expected_bytes: []const u8) !void {
+    const full = try std.testing.allocator.alloc(u8, expected_bytes.len);
+    defer std.testing.allocator.free(full);
+
+    try std.testing.expectEqual(expected_bytes.len, try db.readObjectRange(id, 0, full));
+    try std.testing.expectEqualSlices(u8, expected_bytes, full);
+
+    if (expected_bytes.len == 0) return;
+
+    var preview: [32]u8 = undefined;
+    const preview_len = @min(preview.len, expected_bytes.len);
+    try std.testing.expectEqual(preview_len, try db.readObjectRange(id, 0, preview[0..preview_len]));
+    try std.testing.expectEqualSlices(u8, expected_bytes[0..preview_len], preview[0..preview_len]);
+
+    var tail: [16]u8 = undefined;
+    const tail_offset = if (expected_bytes.len > tail.len) expected_bytes.len - tail.len else 0;
+    const tail_len = expected_bytes.len - tail_offset;
+    try std.testing.expectEqual(tail_len, try db.readObjectRange(id, tail_offset, tail[0..tail_len]));
+    try std.testing.expectEqualSlices(u8, expected_bytes[tail_offset..], tail[0..tail_len]);
+}
+
+fn expectObjectChunksReassemble(db: *zova.Database, id: zova.ObjectId, expected_bytes: []const u8) !void {
+    var manifest = try db.objectManifest(std.testing.allocator, id);
+    defer manifest.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualSlices(u8, &id, &manifest.object_id);
+    try std.testing.expectEqual(@as(u64, expected_bytes.len), manifest.size_bytes);
+    try std.testing.expectEqual(try db.objectChunkCount(id), manifest.chunk_count);
+    try std.testing.expectEqual(@as(usize, @intCast(manifest.chunk_count)), manifest.chunks.len);
+
+    var rebuilt = try std.testing.allocator.alloc(u8, expected_bytes.len);
+    defer std.testing.allocator.free(rebuilt);
+
+    for (manifest.chunks) |chunk| {
+        try std.testing.expect(try db.hasObjectChunk(chunk.hash));
+
+        var chunk_data = try db.getObjectChunk(std.testing.allocator, chunk.hash);
+        defer chunk_data.deinit(std.testing.allocator);
+
+        try std.testing.expectEqualSlices(u8, &chunk.hash, &chunk_data.hash);
+        try std.testing.expectEqual(@as(usize, @intCast(chunk.size_bytes)), chunk_data.bytes.len);
+        const start: usize = @intCast(chunk.offset);
+        @memcpy(rebuilt[start .. start + chunk_data.bytes.len], chunk_data.bytes);
+    }
+
+    try std.testing.expectEqualSlices(u8, expected_bytes, rebuilt);
 }
 
 fn expectDeletedAttachmentObject(db: *zova.Database, filename: []const u8, expected_id: zova.ObjectId) !void {
