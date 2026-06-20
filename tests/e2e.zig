@@ -12,9 +12,19 @@ test "e2e app database stores relational rows and native objects across reopen" 
     defer std.testing.allocator.free(large);
     fillDeterministic(large);
 
+    const streamed = try std.testing.allocator.alloc(u8, 768 * 1024);
+    defer std.testing.allocator.free(streamed);
+    fillDeterministic(streamed);
+    streamed[0] ^= 0xaa;
+
+    const cancelled = try std.testing.allocator.alloc(u8, 128 * 1024);
+    defer std.testing.allocator.free(cancelled);
+    fillDeterministic(cancelled);
+    cancelled[0] ^= 0x55;
+
     const binary = [_]u8{ 0x00, 0x01, 0x02, 0xff, 0x00, 0x7f, 0x80 };
 
-    const empty_id, const small_id, const duplicate_id, const binary_id, const large_id = ids: {
+    const empty_id, const small_id, const duplicate_id, const binary_id, const large_id, const streamed_id = ids: {
         var db = try zova.Database.create(db_path);
         defer db.deinit();
 
@@ -40,8 +50,18 @@ test "e2e app database stores relational rows and native objects across reopen" 
         const duplicate_id = try db.putObject("hello object");
         const binary_id = try db.putObject(&binary);
         const large_id = try db.putObject(large);
+        const streamed_id = try streamObject(&db, streamed, &.{ 17, 65_537, 3, 4096 });
+
+        {
+            var cancelled_writer = try db.objectWriter(std.testing.allocator);
+            defer cancelled_writer.deinit();
+            try cancelled_writer.write(cancelled);
+            try cancelled_writer.cancel();
+        }
+        try std.testing.expectError(error.ObjectNotFound, db.getObject(std.testing.allocator, zova.objectId(cancelled)));
 
         try std.testing.expectEqualSlices(u8, &small_id, &duplicate_id);
+        try std.testing.expectEqualSlices(u8, &zova.objectId(streamed), &streamed_id);
         try std.testing.expect(try db.hasObject(large_id));
         try std.testing.expectEqual(@as(u64, large.len), try db.objectSize(large_id));
         try std.testing.expect((try db.objectChunkCount(large_id)) > 1);
@@ -52,6 +72,7 @@ test "e2e app database stores relational rows and native objects across reopen" 
         try insertAttachment(&db, duplicate_id, "hello-copy.txt", "text/plain", "hello object".len);
         try insertAttachment(&db, binary_id, "binary.bin", "application/octet-stream", binary.len);
         try insertAttachment(&db, large_id, "large.bin", "application/octet-stream", large.len);
+        try insertAttachment(&db, streamed_id, "streamed.bin", "application/octet-stream", streamed.len);
         try insertChunkRef(&db, "chunk-1", 1, "first semantic chunk");
         try insertChunkRef(&db, "chunk-2", 1, "second semantic chunk");
         try db.putVector("chunks", "chunk-1", &.{ 1.0, 0.0, 0.0 });
@@ -60,13 +81,13 @@ test "e2e app database stores relational rows and native objects across reopen" 
         try expectQuickCheckOk(&db);
         try expectIntegrityCheckOk(&db);
 
-        break :ids .{ empty_id, small_id, duplicate_id, binary_id, large_id };
+        break :ids .{ empty_id, small_id, duplicate_id, binary_id, large_id, streamed_id };
     };
 
     var reopened = try zova.Database.open(db_path);
     defer reopened.deinit();
 
-    try expectAttachmentCount(&reopened, 5);
+    try expectAttachmentCount(&reopened, 6);
     try expectChunkCount(&reopened, 2);
     try std.testing.expect(try reopened.hasVectorCollection("chunks"));
     try std.testing.expect(!try reopened.hasVectorCollection("missing"));
@@ -78,8 +99,11 @@ test "e2e app database stores relational rows and native objects across reopen" 
     try expectStoredObject(&reopened, "hello-copy.txt", duplicate_id, "hello object");
     try expectStoredObject(&reopened, "binary.bin", binary_id, &binary);
     try expectStoredObject(&reopened, "large.bin", large_id, large);
+    try expectStoredObject(&reopened, "streamed.bin", streamed_id, streamed);
     try expectStoredObjectRange(&reopened, "large.bin", large_id, large);
+    try expectStoredObjectRange(&reopened, "streamed.bin", streamed_id, streamed);
     try expectObjectChunksReassemble(&reopened, large_id, large);
+    try expectObjectChunksReassemble(&reopened, streamed_id, streamed);
 
     try reopened.putVector("chunks", "chunk-1", &.{ 0.25, 0.5, 0.75 });
     try expectStoredVector(&reopened, "chunk-1", &.{ 0.25, 0.5, 0.75 });
@@ -89,14 +113,14 @@ test "e2e app database stores relational rows and native objects across reopen" 
     try expectChunkSearchResult(&reopened, &.{ 0.25, 0.5, 0.75 }, &.{"chunk-1"}, &.{"first semantic chunk"});
 
     try reopened.deleteObject(binary_id);
-    try expectAttachmentCount(&reopened, 5);
+    try expectAttachmentCount(&reopened, 6);
     try expectDeletedAttachmentObject(&reopened, "binary.bin", binary_id);
     try deleteAttachment(&reopened, "binary.bin");
-    try expectAttachmentCount(&reopened, 4);
+    try expectAttachmentCount(&reopened, 5);
     try expectStoredObject(&reopened, "large.bin", large_id, large);
 
     try reopened.deleteObject(small_id);
-    try expectAttachmentCount(&reopened, 4);
+    try expectAttachmentCount(&reopened, 5);
     try expectDeletedAttachmentObject(&reopened, "hello.txt", small_id);
     try expectDeletedAttachmentObject(&reopened, "hello-copy.txt", duplicate_id);
 
@@ -104,6 +128,12 @@ test "e2e app database stores relational rows and native objects across reopen" 
     try std.testing.expectEqualSlices(u8, &small_id, &recreated_id);
     try expectStoredObject(&reopened, "hello.txt", recreated_id, "hello object");
     try expectStoredObject(&reopened, "hello-copy.txt", duplicate_id, "hello object");
+
+    try reopened.deleteObject(streamed_id);
+    try expectAttachmentCount(&reopened, 5);
+    try expectDeletedAttachmentObject(&reopened, "streamed.bin", streamed_id);
+    try expectStoredObject(&reopened, "large.bin", large_id, large);
+
     try expectQuickCheckOk(&reopened);
     try expectIntegrityCheckOk(&reopened);
 }
@@ -249,6 +279,7 @@ test "e2e converted sqlite database preserves sql data and accepts new objects" 
     const beta_payload = [_]u8{ 0xaa, 0xbb, 0x00, 0xcc, 0xdd };
     const assembled_bytes = "converted assembled object bytes";
     const assembled_id = zova.objectId(assembled_bytes);
+    const streamed_bytes = "converted streamed object bytes";
 
     {
         var source = try zova.sqlite.Database.open(source_path);
@@ -287,7 +318,7 @@ test "e2e converted sqlite database preserves sql data and accepts new objects" 
         try expectCount(&source, "select count(*) from audit", 2);
     }
 
-    const converted_object_id = id: {
+    const converted_object_id, const streamed_object_id = ids: {
         var db = try zova.Database.open(dest_path);
         defer db.deinit();
 
@@ -317,6 +348,8 @@ test "e2e converted sqlite database preserves sql data and accepts new objects" 
 
         const object_id = try db.putObject("converted object bytes");
         try insertObjectRef(&db, object_id, "converted");
+        const streamed_id = try streamObject(&db, streamed_bytes, &.{ 1, 2, 8 });
+        try insertObjectRef(&db, streamed_id, "streamed");
         const assembled_left = assembled_bytes[0..11];
         const assembled_right = assembled_bytes[11..];
         const assembled_left_hash = zova.objectChunkId(assembled_left);
@@ -344,7 +377,7 @@ test "e2e converted sqlite database preserves sql data and accepts new objects" 
         try std.testing.expect(try db.hasVectorCollection("search_rows"));
         try expectQuickCheckOk(&db);
         try expectIntegrityCheckOk(&db);
-        break :id object_id;
+        break :ids .{ object_id, streamed_id };
     };
 
     var reopened = try zova.Database.open(dest_path);
@@ -359,6 +392,8 @@ test "e2e converted sqlite database preserves sql data and accepts new objects" 
     try expectObjectRef(&reopened, "converted", converted_object_id, "converted object bytes");
     try expectObjectRefRange(&reopened, "converted", converted_object_id, "converted object bytes");
     try expectObjectChunksReassemble(&reopened, converted_object_id, "converted object bytes");
+    try expectObjectRef(&reopened, "streamed", streamed_object_id, streamed_bytes);
+    try expectObjectRefRange(&reopened, "streamed", streamed_object_id, streamed_bytes);
     try expectObjectRef(&reopened, "assembled", assembled_id, assembled_bytes);
     try expectObjectRefRange(&reopened, "assembled", assembled_id, assembled_bytes);
 
@@ -368,6 +403,7 @@ test "e2e converted sqlite database preserves sql data and accepts new objects" 
     try reopened.deleteVector("search_rows", "converted-row-1");
     try expectMissingSearchVectorRef(&reopened, "converted-row-1");
     try reopened.deleteObject(converted_object_id);
+    try reopened.deleteObject(streamed_object_id);
     try reopened.deleteObject(assembled_id);
     try expectCount(&reopened, "select count(*) from files", 3);
     try expectCount(&reopened, "select count(*) from audit", 3);
@@ -375,6 +411,7 @@ test "e2e converted sqlite database preserves sql data and accepts new objects" 
     try expectFilePayload(&reopened, "beta", &beta_payload);
     try expectViewPayloadLength(&reopened, "beta", beta_payload.len);
     try expectDeletedObjectRef(&reopened, "converted", converted_object_id);
+    try expectDeletedObjectRef(&reopened, "streamed", streamed_object_id);
     try expectDeletedObjectRef(&reopened, "assembled", assembled_id);
     try expectQuickCheckOk(&reopened);
     try expectIntegrityCheckOk(&reopened);
@@ -399,7 +436,14 @@ test "e2e two connections keep sqlite locking and later recover" {
     try first.exec("insert into notes (body) values ('held')");
     try first.putVector("notes", "held", &.{ 1.0, 1.0 });
     try std.testing.expectError(error.ObjectTransactionActive, first.putObject("same connection"));
+    try std.testing.expectError(error.ObjectTransactionActive, first.objectWriter(std.testing.allocator));
     try std.testing.expectError(error.Busy, second.putObject("second connection"));
+    {
+        var blocked_writer = try second.objectWriter(std.testing.allocator);
+        defer blocked_writer.deinit();
+        try blocked_writer.write("second connection writer");
+        try std.testing.expectError(error.Busy, blocked_writer.finish());
+    }
     try std.testing.expectError(error.Busy, second.putVector("notes", "blocked", &.{ 2.0, 2.0 }));
     try first.exec("rollback");
 
@@ -431,6 +475,24 @@ fn fillDeterministic(bytes: []u8) void {
     for (bytes, 0..) |*byte, index| {
         byte.* = @intCast((index * 31 + index / 7 + 11) % 256);
     }
+}
+
+fn streamObject(db: *zova.Database, bytes: []const u8, pieces: []const usize) !zova.ObjectId {
+    var writer = try db.objectWriter(std.testing.allocator);
+    defer writer.deinit();
+
+    var offset: usize = 0;
+    var piece_index: usize = 0;
+    while (offset < bytes.len) {
+        const requested = if (pieces.len == 0) bytes.len else pieces[piece_index % pieces.len];
+        std.debug.assert(requested > 0);
+        const len = @min(requested, bytes.len - offset);
+        try writer.write(bytes[offset .. offset + len]);
+        offset += len;
+        piece_index += 1;
+    }
+
+    return try writer.finish();
 }
 
 fn insertAttachment(db: *zova.Database, id: zova.ObjectId, filename: []const u8, mime_type: []const u8, size_bytes: usize) !void {

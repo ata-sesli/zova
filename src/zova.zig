@@ -6,7 +6,7 @@
 //! metadata before treating it as a Zova-owned database.
 //!
 //! Zova is currently pre-1.0, and internal `.zova` format compatibility is
-//! not preserved between experimental format versions. The current v0.6
+//! not preserved between experimental format versions. The current v0.8
 //! development format is version `3`: `_zova_meta.format_version = '3'` plus
 //! the required private object schema and vector collection schema.
 //! `Database.open` is intentionally non-mutating: it validates the file and
@@ -25,9 +25,10 @@
 //! chunks into complete objects, `getObject` reconstructs and verifies the full
 //! object in memory, `objectManifest` and `getObjectChunk` expose verified
 //! read-side chunk primitives, `readObjectRange` serves caller-requested byte
-//! ranges without full-object allocation, and delete helpers remove only
-//! Zova-owned object or unreferenced chunk rows. User SQL references and
-//! transfer state remain application-owned.
+//! ranges without full-object allocation, `ObjectWriter` streams caller bytes
+//! through the same FastCDC-v1 chunker without retaining the full object, and
+//! delete helpers remove only Zova-owned object or unreferenced chunk rows.
+//! User SQL references and transfer state remain application-owned.
 //!
 //! Zova vector APIs follow pgvector's philosophy: vectors are native searchable
 //! numeric values, while labels and application metadata stay in user SQL
@@ -128,6 +129,7 @@ pub const Error = sqlite.Error || error{
     ObjectRangeInvalid,
     ObjectTooLarge,
     ObjectTransactionActive,
+    ObjectWriterClosed,
     VectorCollectionExists,
     VectorCollectionNotFound,
     VectorNotFound,
@@ -269,6 +271,200 @@ pub const Object = struct {
     }
 };
 
+/// Incremental writer for one content-addressed Zova object.
+///
+/// `ObjectWriter` accepts arbitrary byte slices, emits FastCDC-v1 chunks as
+/// they become available, stores those chunks as verified loose chunks, and
+/// assembles the final object on `finish`. It does not keep the full object in
+/// memory and it does not hold a SQLite transaction open across `write` calls.
+/// The writer must be deinitialized; unfinished writers auto-cancel.
+pub const ObjectWriter = struct {
+    db: *Database,
+    allocator: std.mem.Allocator,
+    chunker: fastcdc.StreamChunker = .empty,
+    hasher: std.crypto.hash.sha2.Sha256 = std.crypto.hash.sha2.Sha256.init(.{}),
+    size_bytes: u64 = 0,
+    chunks: std.ArrayList(ObjectChunk) = .empty,
+    seen_chunks: std.ArrayList(ObjectChunkId) = .empty,
+    closed: bool = false,
+
+    fn init(db: *Database, allocator: std.mem.Allocator) ObjectWriter {
+        return .{
+            .db = db,
+            .allocator = allocator,
+            .hasher = std.crypto.hash.sha2.Sha256.init(.{}),
+        };
+    }
+
+    /// Append bytes to the streamed object.
+    ///
+    /// Empty writes are no-ops. Non-empty writes may be split into several
+    /// FastCDC chunks internally. Writer operations are rejected inside active
+    /// caller-owned SQLite transactions because final assembly owns its own
+    /// transaction and the writer's chunk cleanup policy assumes no ambient
+    /// transaction.
+    pub fn write(self: *ObjectWriter, bytes: []const u8) Error!void {
+        if (self.closed) return error.ObjectWriterClosed;
+        if (self.chunker.finished) return error.ObjectWriterClosed;
+        if (hasActiveTransaction(&self.db.sqlite_db)) return error.ObjectTransactionActive;
+        if (bytes.len == 0) return;
+
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            try self.drainReadyChunks();
+
+            const accepted = try self.chunker.write(self.allocator, bytes[offset..]);
+            if (accepted == 0) {
+                try self.drainReadyChunks();
+                continue;
+            }
+
+            try self.addSize(accepted);
+            self.hasher.update(bytes[offset .. offset + accepted]);
+            offset += accepted;
+        }
+
+        try self.drainReadyChunks();
+    }
+
+    /// Finish the stream and return the object's content id.
+    ///
+    /// The final object id is SHA-256 of all bytes written. If the same valid
+    /// object already exists, `finish` returns that id successfully, matching
+    /// `Database.putObject`. After `finish`, all writer operations return
+    /// `error.ObjectWriterClosed`; call `deinit` to free writer-owned buffers.
+    pub fn finish(self: *ObjectWriter) Error!ObjectId {
+        if (self.closed) return error.ObjectWriterClosed;
+        if (hasActiveTransaction(&self.db.sqlite_db)) return error.ObjectTransactionActive;
+
+        self.chunker.finish();
+        try self.drainReadyChunks();
+
+        var final_hasher = self.hasher;
+        var id: ObjectId = undefined;
+        final_hasher.final(&id);
+
+        self.db.assembleObjectFromChunks(id, self.size_bytes, self.chunks.items) catch |err| switch (err) {
+            error.ObjectAlreadyExists => {
+                try self.ensureExistingObjectIsValid(id);
+            },
+            else => return err,
+        };
+
+        try self.deleteUnreferencedSeenChunks();
+        self.closed = true;
+        return id;
+    }
+
+    /// Cancel an unfinished writer and remove unreferenced chunks it stored.
+    ///
+    /// Chunks already referenced by completed objects are preserved. After
+    /// cancellation, all writer operations return `error.ObjectWriterClosed`.
+    pub fn cancel(self: *ObjectWriter) Error!void {
+        if (self.closed) return error.ObjectWriterClosed;
+        if (hasActiveTransaction(&self.db.sqlite_db)) return error.ObjectTransactionActive;
+
+        try self.deleteUnreferencedSeenChunks();
+        self.closed = true;
+    }
+
+    /// Free writer-owned buffers.
+    ///
+    /// If the writer has not been finished or cancelled, `deinit` attempts to
+    /// cancel it first and deliberately ignores cleanup errors.
+    pub fn deinit(self: *ObjectWriter) void {
+        if (!self.closed) {
+            self.cancel() catch {};
+        }
+        self.chunker.deinit(self.allocator);
+        self.chunks.deinit(self.allocator);
+        self.seen_chunks.deinit(self.allocator);
+    }
+
+    fn drainReadyChunks(self: *ObjectWriter) Error!void {
+        while (self.chunker.next()) |chunk| {
+            try self.storeChunk(chunk);
+            self.chunker.consume(self.allocator, chunk.bytes.len);
+        }
+    }
+
+    fn storeChunk(self: *ObjectWriter, chunk: fastcdc.StreamChunk) Error!void {
+        std.debug.assert(chunk.bytes.len > 0);
+        std.debug.assert(chunk.bytes.len <= fastcdc.max_size);
+
+        const hash = objectChunkId(chunk.bytes);
+        const already_stored = already_stored: {
+            var existing = self.db.getObjectChunk(self.allocator, hash) catch |err| switch (err) {
+                error.ObjectChunkNotFound => break :already_stored false,
+                else => return err,
+            };
+            existing.deinit(self.allocator);
+            break :already_stored true;
+        };
+
+        try self.db.putObjectChunk(hash, chunk.bytes);
+        if (!already_stored) try self.rememberSeenChunk(hash);
+        try self.chunks.append(self.allocator, .{
+            .index = @intCast(self.chunks.items.len),
+            .hash = hash,
+            .offset = @intCast(chunk.offset),
+            .size_bytes = @intCast(chunk.bytes.len),
+        });
+    }
+
+    fn rememberSeenChunk(self: *ObjectWriter, hash: ObjectChunkId) Error!void {
+        for (self.seen_chunks.items) |seen_hash| {
+            if (std.mem.eql(u8, &seen_hash, &hash)) return;
+        }
+        try self.seen_chunks.append(self.allocator, hash);
+    }
+
+    fn deleteUnreferencedSeenChunks(self: *ObjectWriter) Error!void {
+        for (self.seen_chunks.items) |hash| {
+            _ = try self.db.deleteObjectChunk(hash);
+        }
+    }
+
+    fn ensureExistingObjectIsValid(self: *ObjectWriter, id: ObjectId) Error!void {
+        var manifest = self.db.objectManifest(self.allocator, id) catch |err| switch (err) {
+            error.ObjectNotFound, error.ObjectCorrupt => return error.ObjectCorrupt,
+            else => return err,
+        };
+        defer manifest.deinit(self.allocator);
+
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        var total_size: u64 = 0;
+        for (manifest.chunks) |chunk| {
+            var chunk_data = self.db.getObjectChunk(self.allocator, chunk.hash) catch |err| switch (err) {
+                error.ObjectChunkNotFound, error.ObjectCorrupt => return error.ObjectCorrupt,
+                else => return err,
+            };
+
+            if (@as(u64, @intCast(chunk_data.bytes.len)) != chunk.size_bytes) {
+                chunk_data.deinit(self.allocator);
+                return error.ObjectCorrupt;
+            }
+
+            hasher.update(chunk_data.bytes);
+            total_size += chunk.size_bytes;
+            chunk_data.deinit(self.allocator);
+        }
+
+        if (total_size != manifest.size_bytes) return error.ObjectCorrupt;
+
+        var digest: ObjectId = undefined;
+        hasher.final(&digest);
+        if (!std.mem.eql(u8, &digest, &id)) return error.ObjectCorrupt;
+    }
+
+    fn addSize(self: *ObjectWriter, len: usize) Error!void {
+        const amount: u64 = @intCast(len);
+        const max_size: u64 = @intCast(std.math.maxInt(i64));
+        if (amount > max_size - self.size_bytes) return error.ObjectTooLarge;
+        self.size_bytes += amount;
+    }
+};
+
 /// Convert an existing SQLite database file into a new `.zova` database.
 ///
 /// The source is opened as plain SQLite and is never mutated. The destination
@@ -372,6 +568,17 @@ pub const Database = struct {
     /// Current SQLite error message for the underlying connection.
     pub fn errorMessage(self: *Database) []const u8 {
         return self.sqlite_db.errorMessage();
+    }
+
+    /// Create an incremental object writer for this database connection.
+    ///
+    /// The writer streams bytes through FastCDC-v1, stores verified loose
+    /// chunks as they are emitted, and assembles the final content-addressed
+    /// object on `ObjectWriter.finish`. Writer operations are unsupported while
+    /// this connection is inside an active caller-owned transaction.
+    pub fn objectWriter(self: *Database, allocator: std.mem.Allocator) Error!ObjectWriter {
+        if (hasActiveTransaction(&self.sqlite_db)) return error.ObjectTransactionActive;
+        return ObjectWriter.init(self, allocator);
     }
 
     /// Create a native vector collection.
@@ -2035,6 +2242,103 @@ fn testingPutLooseManifest(allocator: std.mem.Allocator, db: *Database, bytes: [
     return try chunks.toOwnedSlice(allocator);
 }
 
+fn testingStreamObject(db: *Database, bytes: []const u8, pieces: []const usize) !ObjectId {
+    var writer = try db.objectWriter(std.testing.allocator);
+    defer writer.deinit();
+
+    var offset: usize = 0;
+    var piece_index: usize = 0;
+    while (offset < bytes.len) {
+        const requested = if (pieces.len == 0) bytes.len else pieces[piece_index % pieces.len];
+        std.debug.assert(requested > 0);
+        const len = @min(requested, bytes.len - offset);
+        try writer.write(bytes[offset .. offset + len]);
+        offset += len;
+        piece_index += 1;
+    }
+
+    return try writer.finish();
+}
+
+const TestingTrackingAllocator = struct {
+    backing: std.mem.Allocator,
+    largest_request: usize = 0,
+
+    fn allocator(self: *TestingTrackingAllocator) std.mem.Allocator {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            },
+        };
+    }
+
+    fn record(self: *TestingTrackingAllocator, len: usize) void {
+        self.largest_request = @max(self.largest_request, len);
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *TestingTrackingAllocator = @ptrCast(@alignCast(ctx));
+        self.record(len);
+        return self.backing.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn resize(
+        ctx: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) bool {
+        const self: *TestingTrackingAllocator = @ptrCast(@alignCast(ctx));
+        self.record(new_len);
+        return self.backing.rawResize(memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(
+        ctx: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const self: *TestingTrackingAllocator = @ptrCast(@alignCast(ctx));
+        self.record(new_len);
+        return self.backing.rawRemap(memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *TestingTrackingAllocator = @ptrCast(@alignCast(ctx));
+        self.backing.rawFree(memory, alignment, ret_addr);
+    }
+};
+
+fn testingExpectObjectBytes(db: *Database, id: ObjectId, expected: []const u8) !void {
+    var object = try db.getObject(std.testing.allocator, id);
+    defer object.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualSlices(u8, &id, &object.id);
+    try std.testing.expectEqualSlices(u8, expected, object.bytes);
+}
+
+fn testingExpectManifestsEqual(left: ObjectManifest, right: ObjectManifest) !void {
+    try std.testing.expectEqualSlices(u8, &left.object_id, &right.object_id);
+    try std.testing.expectEqual(left.size_bytes, right.size_bytes);
+    try std.testing.expectEqual(left.chunk_count, right.chunk_count);
+    try std.testing.expectEqualStrings(left.chunker, right.chunker);
+    try std.testing.expectEqual(left.chunks.len, right.chunks.len);
+
+    for (left.chunks, right.chunks) |left_chunk, right_chunk| {
+        try std.testing.expectEqual(left_chunk.index, right_chunk.index);
+        try std.testing.expectEqualSlices(u8, &left_chunk.hash, &right_chunk.hash);
+        try std.testing.expectEqual(left_chunk.offset, right_chunk.offset);
+        try std.testing.expectEqual(left_chunk.size_bytes, right_chunk.size_bytes);
+    }
+}
+
 fn expectSearchIds(results: *const VectorSearchResults, expected: []const []const u8) !void {
     try std.testing.expectEqual(expected.len, results.items.len);
     for (expected, 0..) |expected_id, index| {
@@ -2102,6 +2406,305 @@ test "object chunk ids are sha256 of chunk bytes" {
     try std.testing.expectEqualSlices(u8, &abc_expected, &objectChunkId("abc"));
     try std.testing.expectEqualSlices(u8, &objectChunkId("same chunk"), &objectChunkId("same chunk"));
     try std.testing.expect(!std.mem.eql(u8, &objectChunkId("left"), &objectChunkId("right")));
+}
+
+test "object writer streams empty small binary and large objects" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "writer-basic.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const empty_id = try testingStreamObject(&db, "", &.{1});
+    try std.testing.expectEqualSlices(u8, &objectId(""), &empty_id);
+    try testingExpectObjectBytes(&db, empty_id, "");
+    try std.testing.expectEqual(@as(u64, 0), try db.objectChunkCount(empty_id));
+
+    const small = "streamed hello object";
+    const small_id = try testingStreamObject(&db, small, &.{ 1, 3, 2 });
+    try std.testing.expectEqualSlices(u8, &objectId(small), &small_id);
+    try testingExpectObjectBytes(&db, small_id, small);
+
+    const binary = [_]u8{ 'z', 'o', 0, 1, 2, 0xff, 'a' };
+    const binary_id = try testingStreamObject(&db, &binary, &.{2});
+    try std.testing.expectEqualSlices(u8, &objectId(&binary), &binary_id);
+    try testingExpectObjectBytes(&db, binary_id, &binary);
+
+    var large: [fastcdc.max_size * 3 + fastcdc.avg_size]u8 = undefined;
+    for (&large, 0..) |*byte, index| {
+        byte.* = @intCast((index * 29 + index / 5 + 17) % 251);
+    }
+
+    const large_id = try testingStreamObject(&db, &large, &.{ 13, 8191, 3, 65537 });
+    try std.testing.expectEqualSlices(u8, &objectId(&large), &large_id);
+    try std.testing.expect(try db.objectChunkCount(large_id) > 1);
+    try testingExpectObjectBytes(&db, large_id, &large);
+
+    var range: [97]u8 = undefined;
+    try std.testing.expectEqual(range.len, try db.readObjectRange(large_id, 1234, &range));
+    try std.testing.expectEqualSlices(u8, large[1234 .. 1234 + range.len], &range);
+
+    var manifest = try db.objectManifest(std.testing.allocator, large_id);
+    defer manifest.deinit(std.testing.allocator);
+    try std.testing.expect(manifest.chunks.len > 1);
+
+    var first_chunk = try db.getObjectChunk(std.testing.allocator, manifest.chunks[0].hash);
+    defer first_chunk.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, &manifest.chunks[0].hash, &first_chunk.hash);
+}
+
+test "object writer manifest matches put object for same bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var writer_path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var put_path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const writer_path = try testingDbPath(&writer_path_buffer, tmp.sub_path[0..], "writer-manifest.zova");
+    const put_path = try testingDbPath(&put_path_buffer, tmp.sub_path[0..], "put-manifest.zova");
+
+    var bytes: [fastcdc.max_size * 2 + 777]u8 = undefined;
+    for (&bytes, 0..) |*byte, index| {
+        byte.* = @intCast((index * 11 + index / 17 + 91) % 253);
+    }
+
+    var writer_db = try Database.create(writer_path);
+    defer writer_db.deinit();
+    const writer_id = try testingStreamObject(&writer_db, &bytes, &.{ 1, 5, 257, 4099 });
+
+    var put_db = try Database.create(put_path);
+    defer put_db.deinit();
+    const put_id = try put_db.putObject(&bytes);
+
+    try std.testing.expectEqualSlices(u8, &put_id, &writer_id);
+
+    var writer_manifest = try writer_db.objectManifest(std.testing.allocator, writer_id);
+    defer writer_manifest.deinit(std.testing.allocator);
+    var put_manifest = try put_db.objectManifest(std.testing.allocator, put_id);
+    defer put_manifest.deinit(std.testing.allocator);
+    try testingExpectManifestsEqual(writer_manifest, put_manifest);
+}
+
+test "object writer does not allocate object sized memory for multi megabyte input" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "writer-memory.zova");
+
+    const bytes = try std.testing.allocator.alloc(u8, 2 * 1024 * 1024);
+    defer std.testing.allocator.free(bytes);
+    for (bytes, 0..) |*byte, index| {
+        byte.* = @intCast((index * 31 + index / 7 + 19) % 251);
+    }
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    var tracking = TestingTrackingAllocator{ .backing = std.testing.allocator };
+    var writer = try db.objectWriter(tracking.allocator());
+    defer writer.deinit();
+
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const len = @min(bytes.len - offset, 37_919);
+        try writer.write(bytes[offset .. offset + len]);
+        offset += len;
+    }
+
+    const id = try writer.finish();
+    try std.testing.expectEqualSlices(u8, &objectId(bytes), &id);
+    try std.testing.expect(try db.objectChunkCount(id) > 1);
+    try std.testing.expect(tracking.largest_request < bytes.len / 4);
+    try std.testing.expect(tracking.largest_request <= fastcdc.max_size * 4);
+
+    var preview: [128]u8 = undefined;
+    try std.testing.expectEqual(preview.len, try db.readObjectRange(id, 123_456, &preview));
+    try std.testing.expectEqualSlices(u8, bytes[123_456 .. 123_456 + preview.len], &preview);
+}
+
+test "object writer deduplicates repeated content and existing objects" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "writer-dedupe.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const repeated = [_]u8{0} ** (fastcdc.max_size * 4);
+    const first_id = try testingStreamObject(&db, &repeated, &.{ 1024, 7, 9000 });
+    const second_id = try testingStreamObject(&db, &repeated, &.{repeated.len});
+
+    try std.testing.expectEqualSlices(u8, &first_id, &second_id);
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from _zova_objects"));
+
+    const chunk_rows = try testingCount(&db, "select count(*) from _zova_chunks");
+    const manifest_rows = try testingObjectManifestCount(&db, first_id);
+    try std.testing.expect(manifest_rows > 1);
+    try std.testing.expect(chunk_rows < manifest_rows);
+}
+
+test "object writer cancel and deinit cleanup unfinished chunks" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "writer-cancel.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const bytes = [_]u8{0x42} ** (fastcdc.max_size + fastcdc.avg_size);
+    const id = objectId(&bytes);
+
+    var writer = try db.objectWriter(std.testing.allocator);
+    try writer.write(&bytes);
+    try writer.cancel();
+    defer writer.deinit();
+
+    try testingExpectObjectMissing(&db, id);
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_chunks"));
+    try std.testing.expectError(error.ObjectWriterClosed, writer.write("again"));
+    try std.testing.expectError(error.ObjectWriterClosed, writer.finish());
+    try std.testing.expectError(error.ObjectWriterClosed, writer.cancel());
+
+    var finished = try db.objectWriter(std.testing.allocator);
+    try finished.write("closed after finish");
+    _ = try finished.finish();
+    defer finished.deinit();
+    try std.testing.expectError(error.ObjectWriterClosed, finished.write("again"));
+    try std.testing.expectError(error.ObjectWriterClosed, finished.finish());
+    try std.testing.expectError(error.ObjectWriterClosed, finished.cancel());
+
+    const chunk_count_before_auto_cancel = try testingCount(&db, "select count(*) from _zova_chunks");
+    {
+        var auto_cancel = try db.objectWriter(std.testing.allocator);
+        try auto_cancel.write(&bytes);
+        auto_cancel.deinit();
+    }
+    try testingExpectObjectMissing(&db, id);
+    try std.testing.expectEqual(chunk_count_before_auto_cancel, try testingCount(&db, "select count(*) from _zova_chunks"));
+}
+
+test "object writer cancel preserves pre-existing loose chunks" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "writer-cancel-existing-chunk.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const chunk = [_]u8{0x73} ** fastcdc.max_size;
+    const hash = objectChunkId(&chunk);
+    try db.putObjectChunk(hash, &chunk);
+
+    var writer = try db.objectWriter(std.testing.allocator);
+    try writer.write(&chunk);
+    try writer.cancel();
+    defer writer.deinit();
+
+    try std.testing.expect(try db.hasObjectChunk(hash));
+    var stored = try db.getObjectChunk(std.testing.allocator, hash);
+    defer stored.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, &chunk, stored.bytes);
+    try testingExpectObjectMissing(&db, objectId(&chunk));
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from _zova_chunks"));
+}
+
+test "object writer rejects active transactions and can retry after finish failure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "writer-transaction.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.sqlite_db.begin();
+    try std.testing.expectError(error.ObjectTransactionActive, db.objectWriter(std.testing.allocator));
+    try db.sqlite_db.rollback();
+
+    var active_writer = try db.objectWriter(std.testing.allocator);
+    defer active_writer.deinit();
+    try db.sqlite_db.begin();
+    try std.testing.expectError(error.ObjectTransactionActive, active_writer.write("blocked"));
+    try std.testing.expectError(error.ObjectTransactionActive, active_writer.finish());
+    try std.testing.expectError(error.ObjectTransactionActive, active_writer.cancel());
+    try db.sqlite_db.rollback();
+    try active_writer.cancel();
+
+    const bytes = "writer rollback retry";
+    const id = objectId(bytes);
+    var writer = try db.objectWriter(std.testing.allocator);
+    defer writer.deinit();
+    try writer.write(bytes);
+
+    try db.exec(
+        \\create trigger force_writer_manifest_failure
+        \\before insert on _zova_object_chunks
+        \\begin
+        \\  select raise(abort, 'forced writer manifest failure');
+        \\end;
+    );
+    try std.testing.expectError(error.Constraint, writer.finish());
+    try std.testing.expect(!try db.hasObject(id));
+    try std.testing.expectEqual(@as(i64, 0), try testingObjectManifestCount(&db, id));
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from _zova_chunks"));
+
+    try db.exec("drop trigger force_writer_manifest_failure");
+    try std.testing.expectError(error.ObjectWriterClosed, writer.write("after failed finish"));
+    const retried_id = try writer.finish();
+    try std.testing.expectEqualSlices(u8, &id, &retried_id);
+    try testingExpectObjectBytes(&db, id, bytes);
+}
+
+test "object writer works after reopen and on converted databases" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "writer-reopen.zova");
+
+    const reopened_id = id: {
+        var db = try Database.create(db_path);
+        defer db.deinit();
+        break :id try testingStreamObject(&db, "persisted writer object", &.{ 2, 3 });
+    };
+
+    {
+        var db = try Database.open(db_path);
+        defer db.deinit();
+        try testingExpectObjectBytes(&db, reopened_id, "persisted writer object");
+        try testingQuickCheckOk(&db);
+        try testingIntegrityCheckOk(&db);
+    }
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "writer-source.db");
+    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "writer-converted.zova");
+
+    {
+        var source = try sqlite.Database.open(source_path);
+        defer source.deinit();
+        try source.exec("create table notes (id integer primary key, body text not null)");
+        try source.exec("insert into notes (body) values ('source row')");
+    }
+
+    try convertSqliteToZova(source_path, dest_path);
+    var db = try Database.open(dest_path);
+    defer db.deinit();
+
+    const converted_id = try testingStreamObject(&db, "converted writer object", &.{1});
+    try testingExpectObjectBytes(&db, converted_id, "converted writer object");
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from notes"));
 }
 
 test "put and get empty object" {
@@ -3617,6 +4220,33 @@ test "two connections can read object ranges concurrently" {
     try std.testing.expectEqual(second_read.len, try second.readObjectRange(id, 11, &second_read));
     try std.testing.expectEqualSlices(u8, bytes[0..first_read.len], &first_read);
     try std.testing.expectEqualSlices(u8, bytes[11 .. 11 + second_read.len], &second_read);
+}
+
+test "two connections can read writer-created object ranges concurrently" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "writer-concurrent-range-reads.zova");
+
+    var first = try Database.create(db_path);
+    defer first.deinit();
+
+    var bytes: [fastcdc.max_size * 2 + 4096]u8 = undefined;
+    for (&bytes, 0..) |*byte, index| {
+        byte.* = @intCast((index * 13 + index / 3 + 41) % 253);
+    }
+    const id = try testingStreamObject(&first, &bytes, &.{ 5, 1000, 65_537, 11 });
+
+    var second = try Database.open(db_path);
+    defer second.deinit();
+
+    var first_read: [257]u8 = undefined;
+    var second_read: [1024]u8 = undefined;
+    try std.testing.expectEqual(first_read.len, try first.readObjectRange(id, 4093, &first_read));
+    try std.testing.expectEqual(second_read.len, try second.readObjectRange(id, fastcdc.max_size - 17, &second_read));
+    try std.testing.expectEqualSlices(u8, bytes[4093 .. 4093 + first_read.len], &first_read);
+    try std.testing.expectEqualSlices(u8, bytes[fastcdc.max_size - 17 .. fastcdc.max_size - 17 + second_read.len], &second_read);
 }
 
 test "range reads report sqlite lock errors under exclusive lock" {

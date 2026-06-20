@@ -2,13 +2,14 @@
 
 Zova is a Zig embedded data substrate built on SQLite.
 
-Current package version: `0.7.0`.
+Current package version: `0.8.0`.
 
 Zova keeps SQLite as the foundation and adds native content types on top:
 
 - plain SQLite access through `zova.sqlite`
 - `.zova` database identity and validation through `zova.Database`
 - content-addressed objects stored as FastCDC chunks
+- an object streaming writer for large caller-owned byte streams
 - verified loose chunk ingest and object assembly for transfer workflows
 - native `f32` vector collections, CRUD, and exact search
 
@@ -166,6 +167,57 @@ try db.deleteObject(id);
 User tables may still contain old object ids after deletion. Those references
 are application-owned and will return `error.ObjectNotFound` if loaded later.
 
+## Object Streaming Writer
+
+Use `putObject` when the full byte slice is already in memory. Use
+`ObjectWriter` when the caller receives or produces bytes in pieces and should
+not keep the whole object in one buffer.
+
+```zig
+var writer = try db.objectWriter(allocator);
+defer writer.deinit();
+
+try writer.write(first_part);
+try writer.write(second_part);
+
+const id = try writer.finish();
+```
+
+`ObjectWriter` computes the final `ObjectId` incrementally, cuts bytes with the
+same `fastcdc-v1` rules as `putObject`, stores verified chunks as they are
+emitted, and finishes by assembling the object from those chunks. It keeps
+memory bounded around the streaming buffer, chunk data, and manifest metadata;
+it does not allocate an object-sized buffer.
+
+The writer does not hold a long transaction while bytes are being written.
+`objectWriter`, `write`, and `finish` return `error.ObjectTransactionActive`
+when the connection is already inside a user transaction. `finish` returns the
+existing id successfully if the same valid object is already stored, matching
+`putObject`.
+
+Cancel unfinished writes explicitly:
+
+```zig
+try writer.cancel();
+```
+
+`cancel` removes unreferenced chunks seen by that writer and preserves chunks
+that are already referenced or existed before the writer. `deinit` automatically
+cancels unfinished writers. After `finish` or `cancel`, further writer
+operations return `error.ObjectWriterClosed`.
+
+Use receive-side chunk assembly when chunks arrive as externally identified
+transfer units:
+
+```text
+have all bytes now        -> putObject(bytes)
+produce bytes over time   -> ObjectWriter
+receive verified chunks   -> putObjectChunk + app SQL transfer state + assembleObjectFromChunks
+```
+
+In every path, filenames, MIME types, owners, transfer sessions, retry state,
+and final object references belong in application SQL tables.
+
 ## Manifests And Chunks
 
 Object manifests expose the public chunk layout:
@@ -197,7 +249,7 @@ Use `std.fmt.fmtSliceHexLower(&id)` or
 
 ## Receive-Side Object Assembly
 
-Zova v0.7 supports verified loose chunks. This is useful for applications that
+Zova supports verified loose chunks. This is useful for applications that
 receive object chunks before the full object is ready.
 
 Store a verified chunk:
@@ -415,6 +467,7 @@ such as:
 - `error.ObjectRangeInvalid`
 - `error.ObjectTooLarge`
 - `error.ObjectTransactionActive`
+- `error.ObjectWriterClosed`
 - `error.VectorCollectionExists`
 - `error.VectorCollectionNotFound`
 - `error.VectorNotFound`
@@ -488,13 +541,13 @@ artifacts.
 
 ## Not In This Release
 
-Zova v0.7 does not include:
+Zova v0.8 does not include:
 
-- peer protocol or transfer sessions
+- peer protocol or transfer session tables
 - transfer retry engine
 - Rust crate or C ABI
 - RChat adapter
-- object streaming writer
+- inspection/check CLI
 - object repair or orphan scan CLI
 - compression or encryption
 - remote sync

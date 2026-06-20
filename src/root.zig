@@ -11,6 +11,7 @@ pub const ObjectChunkData = zova.ObjectChunkData;
 pub const ObjectChunkId = zova.ObjectChunkId;
 pub const ObjectId = zova.ObjectId;
 pub const ObjectManifest = zova.ObjectManifest;
+pub const ObjectWriter = zova.ObjectWriter;
 pub const Vector = zova.Vector;
 pub const VectorCollectionOptions = zova.VectorCollectionOptions;
 pub const VectorMetric = zova.VectorMetric;
@@ -38,6 +39,7 @@ test "package exports zova database namespace" {
     try std.testing.expect(@hasDecl(@This(), "ObjectChunkId"));
     try std.testing.expect(@hasDecl(@This(), "ObjectId"));
     try std.testing.expect(@hasDecl(@This(), "ObjectManifest"));
+    try std.testing.expect(@hasDecl(@This(), "ObjectWriter"));
     try std.testing.expect(@hasDecl(@This(), "objectChunkId"));
     try std.testing.expect(@hasDecl(@This(), "objectId"));
     try std.testing.expect(@hasDecl(@This(), "Vector"));
@@ -62,6 +64,7 @@ test "package exports zova database namespace" {
     try std.testing.expect(@hasDecl(Database, "assembleObjectFromChunks"));
     try std.testing.expect(@hasDecl(Database, "deleteObjectChunk"));
     try std.testing.expect(@hasDecl(Database, "readObjectRange"));
+    try std.testing.expect(@hasDecl(Database, "objectWriter"));
     try std.testing.expect(@hasDecl(Database, "createVectorCollection"));
     try std.testing.expect(@hasDecl(Database, "hasVectorCollection"));
     try std.testing.expect(@hasDecl(Database, "putVector"));
