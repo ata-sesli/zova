@@ -6,12 +6,12 @@
 //! metadata before treating it as a Zova-owned database.
 //!
 //! Zova is currently pre-1.0, and internal `.zova` format compatibility is
-//! not preserved between experimental format versions. v0.3 defines the
-//! current format as `_zova_meta.format_version = '2'` plus the required
-//! private object schema: `_zova_objects`, `_zova_chunks`, and
-//! `_zova_object_chunks`. `Database.open` is intentionally non-mutating: it
-//! validates the file and rejects old, future, incomplete, or invalid private
-//! schemas instead of repairing or migrating them.
+//! not preserved between experimental format versions. The current v0.5
+//! development format is version `3`: `_zova_meta.format_version = '3'` plus
+//! the required private object schema and vector collection schema.
+//! `Database.open` is intentionally non-mutating: it validates the file and
+//! rejects old, future, incomplete, or invalid private schemas instead of
+//! repairing or migrating them.
 //!
 //! Existing SQLite files can be converted into new `.zova` files with
 //! `convertSqliteToZova`. Conversion copies the source with SQLite's backup
@@ -19,11 +19,17 @@
 //! source file.
 //!
 //! Zova object APIs use deterministic SHA-256 object identity and private
-//! FastCDC chunking. Object bytes remain inside the SQLite file as private BLOB
-//! chunk rows. Deleting an object removes only Zova-owned object rows and
-//! unreferenced object chunks; user SQL references remain application-owned.
-//! Vector storage, migrations, streaming object I/O, and repair tooling are
-//! intentionally absent from this slice.
+//! FastCDC chunking. `putObject` stores whole caller bytes as content-addressed
+//! chunk BLOB rows, `getObject` reconstructs and verifies the full object in
+//! memory, and `deleteObject` removes only Zova-owned object rows plus
+//! unreferenced object chunks. User SQL references remain application-owned.
+//!
+//! Zova vector APIs follow pgvector's philosophy: vectors are native searchable
+//! numeric values, while labels and application metadata stay in user SQL
+//! tables. v0.5 starts with collection schema only; vector rows and search are
+//! intentionally deferred to later v0.5 iterations.
+//! Migrations, streaming object I/O, and repair tooling are intentionally
+//! absent from this release.
 
 const std = @import("std");
 const fastcdc = @import("fastcdc.zig");
@@ -33,8 +39,12 @@ const metadata_table = "_zova_meta";
 const objects_table = "_zova_objects";
 const chunks_table = "_zova_chunks";
 const object_chunks_table = "_zova_object_chunks";
+const vector_collections_table = "_zova_vector_collections";
+const vectors_table = "_zova_vectors";
 const magic_value = "zova";
-const format_version = "2";
+const format_version = "3";
+pub const max_vector_dimensions: u32 = 16_384;
+const max_vector_collection_name_bytes: usize = 255;
 const objects_schema_sql =
     \\create table _zova_objects (
     \\  object_id blob not null primary key check (length(object_id) = 32),
@@ -62,6 +72,24 @@ const object_chunks_schema_sql =
     \\  foreign key (chunk_hash) references _zova_chunks(chunk_hash)
     \\)
 ;
+const vector_collections_schema_sql =
+    \\create table _zova_vector_collections (
+    \\  name text not null primary key check (length(name) > 0 and length(name) <= 255),
+    \\  dimensions integer not null check (dimensions > 0 and dimensions <= 16384),
+    \\  metric text not null check (metric in ('cosine', 'l2', 'dot')),
+    \\  element_type text not null check (element_type = 'f32')
+    \\)
+;
+const vectors_schema_sql =
+    \\create table _zova_vectors (
+    \\  collection_name text not null,
+    \\  vector_id text not null check (length(vector_id) > 0),
+    \\  dimensions integer not null check (dimensions > 0 and dimensions <= 16384),
+    \\  "values" blob not null check (length("values") = dimensions * 4),
+    \\  primary key (collection_name, vector_id),
+    \\  foreign key (collection_name) references _zova_vector_collections(name)
+    \\)
+;
 
 /// SHA-256 digest of full object bytes.
 ///
@@ -83,10 +111,31 @@ pub const Error = sqlite.Error || error{
     ObjectCorrupt,
     ObjectTooLarge,
     ObjectTransactionActive,
+    VectorCollectionExists,
+    VectorInvalid,
     OutOfMemory,
 };
 
-/// Compute the content identity for a future Zova object.
+/// Distance metric used by a Zova vector collection.
+///
+/// v0.5 stores collection metadata only. Later vector search APIs will use the
+/// collection metric to interpret exact distance calculations.
+pub const VectorMetric = enum {
+    cosine,
+    l2,
+    dot,
+};
+
+/// Required options for creating a native vector collection.
+///
+/// The metric is explicit by design; Zova does not guess distance semantics.
+/// v0.5 supports only `f32` vectors and at most `max_vector_dimensions`.
+pub const VectorCollectionOptions = struct {
+    dimensions: u32,
+    metric: VectorMetric,
+};
+
+/// Compute the content identity for a Zova object.
 pub fn objectId(bytes: []const u8) ObjectId {
     var digest: ObjectId = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
@@ -95,7 +144,7 @@ pub fn objectId(bytes: []const u8) ObjectId {
 
 /// Owned object bytes returned by `Database.getObject`.
 ///
-/// v0.3 reads whole objects into memory. Call `deinit` with the same allocator
+/// v0.4 reads whole objects into memory. Call `deinit` with the same allocator
 /// passed to `getObject` when the bytes are no longer needed.
 pub const Object = struct {
     id: ObjectId,
@@ -155,8 +204,8 @@ pub const Database = struct {
     /// Create a new initialized `.zova` database.
     ///
     /// This never overwrites an existing file. The file is initialized with the
-    /// private `_zova_meta` table, format version `2`, and the required v0.3
-    /// private object schema.
+    /// private `_zova_meta` table, format version `3`, the required object
+    /// schema, and the required vector collection schema.
     pub fn create(path: [:0]const u8) Error!Database {
         if (!isZovaPath(path)) return error.NotZovaPath;
 
@@ -212,9 +261,59 @@ pub const Database = struct {
         return self.sqlite_db.errorMessage();
     }
 
+    /// Create a native vector collection.
+    ///
+    /// Collection names are application-facing stable text names. They must be
+    /// non-empty UTF-8, at most 255 bytes, and outside the reserved `_zova_`
+    /// namespace. `dimensions` must be in `1...max_vector_dimensions`.
+    /// Collection creation is a single SQLite insert and can participate in a
+    /// caller-owned SQL transaction.
+    pub fn createVectorCollection(
+        self: *Database,
+        name: []const u8,
+        options: VectorCollectionOptions,
+    ) Error!void {
+        try validateVectorCollectionName(name);
+        try validateVectorDimensions(options.dimensions);
+
+        var insert = try self.prepare(
+            \\insert into _zova_vector_collections (name, dimensions, metric, element_type)
+            \\values (?, ?, ?, 'f32')
+        );
+        defer insert.deinit();
+
+        try insert.bindText(1, name);
+        try insert.bindInt64(2, @intCast(options.dimensions));
+        try insert.bindText(3, vectorMetricText(options.metric));
+        _ = insert.step() catch |err| switch (err) {
+            error.Constraint => return error.VectorCollectionExists,
+            else => return err,
+        };
+    }
+
+    /// Return whether a valid vector collection exists.
+    ///
+    /// Invalid collection names return `error.VectorInvalid`; valid but missing
+    /// names return `false`.
+    pub fn hasVectorCollection(self: *Database, name: []const u8) Error!bool {
+        try validateVectorCollectionName(name);
+
+        var stmt = try self.prepare(
+            \\select count(*)
+            \\from _zova_vector_collections
+            \\where name = ?
+        );
+        defer stmt.deinit();
+
+        try stmt.bindText(1, name);
+        const step = try stmt.step();
+        std.debug.assert(step == .row);
+        return stmt.columnInt64(0) == 1;
+    }
+
     /// Store raw bytes as a content-addressed Zova object.
     ///
-    /// The returned id is the SHA-256 digest of the full byte slice. v0.3 owns
+    /// The returned id is the SHA-256 digest of the full byte slice. v0.4 owns
     /// its own transaction for object writes and returns
     /// `error.ObjectTransactionActive` if the connection is already inside a
     /// user transaction.
@@ -610,6 +709,7 @@ fn ensureSourcePathExists(path: []const u8) Error!void {
 fn initializeZovaSchema(db: *sqlite.Database) sqlite.Error!void {
     try initializeMetadata(db);
     try initializeObjectSchema(db);
+    try initializeVectorSchema(db);
 }
 
 fn initializeMetadata(db: *sqlite.Database) sqlite.Error!void {
@@ -619,7 +719,7 @@ fn initializeMetadata(db: *sqlite.Database) sqlite.Error!void {
         \\  value text not null
         \\);
         \\insert into _zova_meta (key, value) values ('magic', 'zova');
-        \\insert into _zova_meta (key, value) values ('format_version', '2');
+        \\insert into _zova_meta (key, value) values ('format_version', '3');
     );
 }
 
@@ -627,6 +727,11 @@ fn initializeObjectSchema(db: *sqlite.Database) sqlite.Error!void {
     try db.exec(objects_schema_sql ++ ";");
     try db.exec(chunks_schema_sql ++ ";");
     try db.exec(object_chunks_schema_sql ++ ";");
+}
+
+fn initializeVectorSchema(db: *sqlite.Database) sqlite.Error!void {
+    try db.exec(vector_collections_schema_sql ++ ";");
+    try db.exec(vectors_schema_sql ++ ";");
 }
 
 fn rejectReservedZovaNames(db: *sqlite.Database) Error!void {
@@ -643,6 +748,25 @@ fn isReservedZovaName(name: []const u8) bool {
     const reserved_prefix = "_zova_";
     return name.len >= reserved_prefix.len and
         std.ascii.eqlIgnoreCase(name[0..reserved_prefix.len], reserved_prefix);
+}
+
+fn validateVectorCollectionName(name: []const u8) Error!void {
+    if (name.len == 0) return error.VectorInvalid;
+    if (name.len > max_vector_collection_name_bytes) return error.VectorInvalid;
+    if (!std.unicode.utf8ValidateSlice(name)) return error.VectorInvalid;
+    if (isReservedZovaName(name)) return error.VectorInvalid;
+}
+
+fn validateVectorDimensions(dimensions: u32) Error!void {
+    if (dimensions == 0 or dimensions > max_vector_dimensions) return error.VectorInvalid;
+}
+
+fn vectorMetricText(metric: VectorMetric) []const u8 {
+    return switch (metric) {
+        .cosine => "cosine",
+        .l2 => "l2",
+        .dot => "dot",
+    };
 }
 
 fn backupMainDatabase(source: *sqlite.Database, dest: *sqlite.Database) Error!void {
@@ -677,6 +801,7 @@ fn validateZovaSchema(db: *sqlite.Database) Error!void {
     try expectMetadataValue(db, "magic", magic_value, .magic);
     try expectMetadataValue(db, "format_version", format_version, .format_version);
     try validateObjectSchema(db);
+    try validateVectorSchema(db);
 }
 
 fn validateObjectSchema(db: *sqlite.Database) Error!void {
@@ -703,6 +828,24 @@ fn validateObjectSchema(db: *sqlite.Database) Error!void {
         "size_bytes",
     };
     try validateRequiredTable(db, object_chunks_table, &object_chunk_columns, object_chunks_schema_sql);
+}
+
+fn validateVectorSchema(db: *sqlite.Database) Error!void {
+    const vector_collection_columns = [_][]const u8{
+        "name",
+        "dimensions",
+        "metric",
+        "element_type",
+    };
+    try validateRequiredTable(db, vector_collections_table, &vector_collection_columns, vector_collections_schema_sql);
+
+    const vector_columns = [_][]const u8{
+        "collection_name",
+        "vector_id",
+        "dimensions",
+        "values",
+    };
+    try validateRequiredTable(db, vectors_table, &vector_columns, vectors_schema_sql);
 }
 
 fn validateRequiredTable(
@@ -906,6 +1049,15 @@ fn testingExpectObjectMissing(db: *Database, id: ObjectId) !void {
 
 fn testingQuickCheckOk(db: *Database) !void {
     var stmt = try db.prepare("pragma quick_check");
+    defer stmt.deinit();
+
+    try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+    try std.testing.expectEqualStrings("ok", stmt.columnText(0));
+    try std.testing.expectEqual(sqlite.Step.done, try stmt.step());
+}
+
+fn testingIntegrityCheckOk(db: anytype) !void {
+    var stmt = try db.prepare("pragma integrity_check");
     defer stmt.deinit();
 
     try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
@@ -1346,6 +1498,7 @@ test "delete object preserves user sql references and blob tables" {
     try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from user_blobs where length(data) = 5"));
     try testingExpectObjectMissing(&db, id);
     try testingQuickCheckOk(&db);
+    try testingIntegrityCheckOk(&db);
 }
 
 test "delete object does not touch caller temp tables" {
@@ -1376,6 +1529,95 @@ test "delete object does not touch caller temp tables" {
     try std.testing.expectEqual(sqlite.Step.row, try select.step());
     try std.testing.expectEqualStrings("preserved", select.columnText(0));
     try std.testing.expectEqual(sqlite.Step.done, try select.step());
+}
+
+test "delete object preserves multiple user sql references to the same id" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "delete-multiple-user-refs.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.exec(
+        \\create table attachments (
+        \\  id integer primary key,
+        \\  object_id blob not null,
+        \\  filename text not null
+        \\)
+    );
+
+    const id = try db.putObject("referenced twice");
+    for ([_][]const u8{ "first.bin", "second.bin" }) |filename| {
+        var insert = try db.prepare("insert into attachments (object_id, filename) values (?, ?)");
+        defer insert.deinit();
+
+        try insert.bindBlob(1, &id);
+        try insert.bindText(2, filename);
+        try std.testing.expectEqual(sqlite.Step.done, try insert.step());
+    }
+
+    try db.deleteObject(id);
+
+    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from attachments"));
+    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from attachments where length(object_id) = 32"));
+    try testingExpectObjectMissing(&db, id);
+}
+
+test "delete object with missing manifest rows cleans remaining object state" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "delete-missing-manifest.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    var bytes: [fastcdc.max_size + fastcdc.avg_size]u8 = undefined;
+    for (&bytes, 0..) |*byte, index| {
+        byte.* = @intCast((index * 13 + index / 7 + 17) % 251);
+    }
+
+    const id = try db.putObject(&bytes);
+    try std.testing.expect((try testingObjectManifestCount(&db, id)) > 1);
+    try db.exec("delete from _zova_object_chunks where chunk_index = 0");
+    try std.testing.expectError(error.ObjectCorrupt, db.getObject(std.testing.allocator, id));
+
+    try db.deleteObject(id);
+
+    try testingExpectObjectMissing(&db, id);
+    try std.testing.expectEqual(@as(i64, 0), try testingObjectManifestCount(&db, id));
+}
+
+test "sqlite wrapper can inspect object tables after deletion" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "sqlite-inspect-after-delete.zova");
+    const id = id: {
+        var db = try Database.create(db_path);
+        defer db.deinit();
+
+        const stored_id = try db.putObject("raw sqlite inspect");
+        try db.deleteObject(stored_id);
+        break :id stored_id;
+    };
+
+    var raw = try sqlite.Database.open(db_path);
+    defer raw.deinit();
+
+    try testingExpectTableCount(&raw, "_zova_objects", 1);
+    try testingExpectTableCount(&raw, "_zova_chunks", 1);
+    try testingExpectTableCount(&raw, "_zova_object_chunks", 1);
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&raw, "select count(*) from _zova_objects"));
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&raw, "select count(*) from _zova_object_chunks"));
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&raw, "select count(*) from _zova_chunks"));
+    try std.testing.expect(!try objectRowExists(&raw, id));
+    try testingIntegrityCheckOk(&raw);
 }
 
 test "delete object works on converted zova database" {
@@ -1871,13 +2113,32 @@ test "created zova database stores metadata" {
 
     try std.testing.expectEqual(sqlite.Step.row, try meta.step());
     try std.testing.expectEqualStrings("format_version", meta.columnText(0));
-    try std.testing.expectEqualStrings("2", meta.columnText(1));
+    try std.testing.expectEqualStrings("3", meta.columnText(1));
 
     try std.testing.expectEqual(sqlite.Step.row, try meta.step());
     try std.testing.expectEqualStrings("magic", meta.columnText(0));
     try std.testing.expectEqualStrings("zova", meta.columnText(1));
 
     try std.testing.expectEqual(sqlite.Step.done, try meta.step());
+}
+
+test "created zova database contains required vector tables" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-tables.zova");
+
+    {
+        var db = try Database.create(db_path);
+        defer db.deinit();
+    }
+
+    var raw = try sqlite.Database.open(db_path);
+    defer raw.deinit();
+
+    try testingExpectTableCount(&raw, "_zova_vector_collections", 1);
+    try testingExpectTableCount(&raw, "_zova_vectors", 1);
 }
 
 test "zova database rejects non zova paths" {
@@ -1957,7 +2218,7 @@ test "open rejects wrong magic" {
         try raw.exec(
             \\create table _zova_meta (key text primary key, value text not null);
             \\insert into _zova_meta (key, value) values ('magic', 'not-zova');
-            \\insert into _zova_meta (key, value) values ('format_version', '2');
+            \\insert into _zova_meta (key, value) values ('format_version', '3');
         );
     }
 
@@ -1995,8 +2256,28 @@ test "open rejects future format version" {
         try raw.exec(
             \\create table _zova_meta (key text primary key, value text not null);
             \\insert into _zova_meta (key, value) values ('magic', 'zova');
-            \\insert into _zova_meta (key, value) values ('format_version', '3');
+            \\insert into _zova_meta (key, value) values ('format_version', '4');
         );
+    }
+
+    try std.testing.expectError(error.UnsupportedZovaVersion, Database.open(db_path));
+}
+
+test "open rejects v0.4 format version two database" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "v04-format.zova");
+
+    {
+        var raw = try sqlite.Database.open(db_path);
+        defer raw.deinit();
+
+        try testingWriteMetadata(&raw, "zova", "2");
+        try raw.exec(objects_schema_sql ++ ";");
+        try raw.exec(chunks_schema_sql ++ ";");
+        try raw.exec(object_chunks_schema_sql ++ ";");
     }
 
     try std.testing.expectError(error.UnsupportedZovaVersion, Database.open(db_path));
@@ -2033,7 +2314,7 @@ test "open rejects format two database missing required object table without mut
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "2");
+        try testingWriteMetadata(&raw, "zova", "3");
     }
 
     try std.testing.expectError(error.NotZovaDatabase, Database.open(db_path));
@@ -2044,6 +2325,32 @@ test "open rejects format two database missing required object table without mut
     try testingExpectTableCount(&raw, "_zova_objects", 0);
     try testingExpectTableCount(&raw, "_zova_chunks", 0);
     try testingExpectTableCount(&raw, "_zova_object_chunks", 0);
+}
+
+test "open rejects version three database missing required vector table without mutating it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "missing-vector-table.zova");
+
+    {
+        var raw = try sqlite.Database.open(db_path);
+        defer raw.deinit();
+
+        try testingWriteMetadata(&raw, "zova", "3");
+        try raw.exec(objects_schema_sql ++ ";");
+        try raw.exec(chunks_schema_sql ++ ";");
+        try raw.exec(object_chunks_schema_sql ++ ";");
+    }
+
+    try std.testing.expectError(error.NotZovaDatabase, Database.open(db_path));
+
+    var raw = try sqlite.Database.open(db_path);
+    defer raw.deinit();
+
+    try testingExpectTableCount(&raw, "_zova_vector_collections", 0);
+    try testingExpectTableCount(&raw, "_zova_vectors", 0);
 }
 
 test "open rejects required object table missing required column" {
@@ -2057,7 +2364,7 @@ test "open rejects required object table missing required column" {
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "2");
+        try testingWriteMetadata(&raw, "zova", "3");
         try raw.exec(
             \\create table _zova_objects (
             \\  object_id blob not null primary key check (length(object_id) = 32),
@@ -2096,7 +2403,7 @@ test "open rejects required object table missing required constraint" {
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "2");
+        try testingWriteMetadata(&raw, "zova", "3");
         try raw.exec(
             \\create table _zova_objects (
             \\  object_id blob not null primary key check (length(object_id) = 32),
@@ -2136,7 +2443,7 @@ test "open rejects fake constraint text in required object table" {
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "2");
+        try testingWriteMetadata(&raw, "zova", "3");
         try raw.exec(
             \\create table _zova_objects (
             \\  object_id blob not null primary key check (length(object_id) = 32),
@@ -2158,6 +2465,41 @@ test "open rejects fake constraint text in required object table" {
             \\  primary key (object_id, chunk_index),
             \\  foreign key (object_id) references _zova_objects(object_id),
             \\  foreign key (chunk_hash) references _zova_chunks(chunk_hash)
+            \\);
+        );
+    }
+
+    try std.testing.expectError(error.NotZovaDatabase, Database.open(db_path));
+}
+
+test "open rejects required vector table missing required column" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "missing-vector-column.zova");
+
+    {
+        var raw = try sqlite.Database.open(db_path);
+        defer raw.deinit();
+
+        try testingWriteMetadata(&raw, "zova", "3");
+        try raw.exec(objects_schema_sql ++ ";");
+        try raw.exec(chunks_schema_sql ++ ";");
+        try raw.exec(object_chunks_schema_sql ++ ";");
+        try raw.exec(
+            \\create table _zova_vector_collections (
+            \\  name text not null primary key check (length(name) > 0 and length(name) <= 255),
+            \\  dimensions integer not null check (dimensions > 0 and dimensions <= 16384),
+            \\  element_type text not null check (element_type = 'f32')
+            \\);
+            \\create table _zova_vectors (
+            \\  collection_name text not null,
+            \\  vector_id text not null check (length(vector_id) > 0),
+            \\  dimensions integer not null check (dimensions > 0 and dimensions <= 16384),
+            \\  "values" blob not null check (length("values") = dimensions * 4),
+            \\  primary key (collection_name, vector_id),
+            \\  foreign key (collection_name) references _zova_vector_collections(name)
             \\);
         );
     }
@@ -2190,6 +2532,86 @@ test "sqlite wrapper can inspect zova object tables" {
 
     try std.testing.expectEqual(sqlite.Step.row, try tables.step());
     try std.testing.expectEqual(@as(i64, 3), tables.columnInt64(0));
+}
+
+test "sqlite wrapper can inspect zova vector tables" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "sqlite-inspect-vectors.zova");
+
+    {
+        var db = try Database.create(db_path);
+        defer db.deinit();
+    }
+
+    var raw = try sqlite.Database.open(db_path);
+    defer raw.deinit();
+
+    var tables = try raw.prepare(
+        \\select count(*)
+        \\from sqlite_master
+        \\where type = 'table'
+        \\  and name in ('_zova_vector_collections', '_zova_vectors')
+    );
+    defer tables.deinit();
+
+    try std.testing.expectEqual(sqlite.Step.row, try tables.step());
+    try std.testing.expectEqual(@as(i64, 2), tables.columnInt64(0));
+}
+
+test "create and lookup vector collections" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-collections.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try std.testing.expect(!try db.hasVectorCollection("chunks"));
+    try db.createVectorCollection("chunks", .{ .dimensions = 3, .metric = .cosine });
+    try std.testing.expect(try db.hasVectorCollection("chunks"));
+
+    var row = try db.prepare(
+        \\select dimensions, metric, element_type
+        \\from _zova_vector_collections
+        \\where name = 'chunks'
+    );
+    defer row.deinit();
+
+    try std.testing.expectEqual(sqlite.Step.row, try row.step());
+    try std.testing.expectEqual(@as(i64, 3), row.columnInt64(0));
+    try std.testing.expectEqualStrings("cosine", row.columnText(1));
+    try std.testing.expectEqualStrings("f32", row.columnText(2));
+    try std.testing.expectEqual(sqlite.Step.done, try row.step());
+}
+
+test "vector collection duplicate and validation behavior" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-validation.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.createVectorCollection("chunks", .{ .dimensions = max_vector_dimensions, .metric = .l2 });
+    try std.testing.expectError(error.VectorCollectionExists, db.createVectorCollection("chunks", .{ .dimensions = max_vector_dimensions, .metric = .dot }));
+
+    try std.testing.expectError(error.VectorInvalid, db.createVectorCollection("", .{ .dimensions = 3, .metric = .cosine }));
+    try std.testing.expectError(error.VectorInvalid, db.createVectorCollection("_zova_vectors", .{ .dimensions = 3, .metric = .cosine }));
+    try std.testing.expectError(error.VectorInvalid, db.createVectorCollection("bad\xff", .{ .dimensions = 3, .metric = .cosine }));
+    try std.testing.expectError(error.VectorInvalid, db.createVectorCollection("zero", .{ .dimensions = 0, .metric = .cosine }));
+    try std.testing.expectError(error.VectorInvalid, db.createVectorCollection("too-many", .{ .dimensions = max_vector_dimensions + 1, .metric = .cosine }));
+
+    var long_name: [256]u8 = undefined;
+    @memset(&long_name, 'a');
+    try std.testing.expectError(error.VectorInvalid, db.createVectorCollection(&long_name, .{ .dimensions = 3, .metric = .cosine }));
+    try std.testing.expectError(error.VectorInvalid, db.hasVectorCollection(""));
 }
 
 test "object table constraints reject invalid object ids and chunkers" {
@@ -2599,11 +3021,13 @@ test "converted zova remains readable through sqlite wrapper" {
     defer meta.deinit();
 
     try std.testing.expectEqual(sqlite.Step.row, try meta.step());
-    try std.testing.expectEqualStrings("2", meta.columnText(0));
+    try std.testing.expectEqualStrings("3", meta.columnText(0));
 
     try testingExpectTableCount(&raw, "_zova_objects", 1);
     try testingExpectTableCount(&raw, "_zova_chunks", 1);
     try testingExpectTableCount(&raw, "_zova_object_chunks", 1);
+    try testingExpectTableCount(&raw, "_zova_vector_collections", 1);
+    try testingExpectTableCount(&raw, "_zova_vectors", 1);
 }
 
 test "convert sqlite to zova preserves index view and trigger" {

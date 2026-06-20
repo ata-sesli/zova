@@ -25,8 +25,15 @@ test "e2e app database stores relational rows and native objects across reopen" 
             \\  filename text not null,
             \\  mime_type text not null,
             \\  size_bytes integer not null
+            \\);
+            \\create table chunks (
+            \\  id integer primary key,
+            \\  vector_id text not null,
+            \\  document_id integer not null,
+            \\  body text not null
             \\)
         );
+        try db.createVectorCollection("chunks", .{ .dimensions = 3, .metric = .cosine });
 
         const empty_id = try db.putObject("");
         const small_id = try db.putObject("hello object");
@@ -45,7 +52,11 @@ test "e2e app database stores relational rows and native objects across reopen" 
         try insertAttachment(&db, duplicate_id, "hello-copy.txt", "text/plain", "hello object".len);
         try insertAttachment(&db, binary_id, "binary.bin", "application/octet-stream", binary.len);
         try insertAttachment(&db, large_id, "large.bin", "application/octet-stream", large.len);
+        try insertChunkRef(&db, "chunk-1", 1, "first semantic chunk");
+        try insertChunkRef(&db, "chunk-2", 1, "second semantic chunk");
+        try std.testing.expect(try db.hasVectorCollection("chunks"));
         try expectQuickCheckOk(&db);
+        try expectIntegrityCheckOk(&db);
 
         break :ids .{ empty_id, small_id, duplicate_id, binary_id, large_id };
     };
@@ -54,6 +65,9 @@ test "e2e app database stores relational rows and native objects across reopen" 
     defer reopened.deinit();
 
     try expectAttachmentCount(&reopened, 5);
+    try expectChunkCount(&reopened, 2);
+    try std.testing.expect(try reopened.hasVectorCollection("chunks"));
+    try std.testing.expect(!try reopened.hasVectorCollection("missing"));
     try expectStoredObject(&reopened, "empty.bin", empty_id, "");
     try expectStoredObject(&reopened, "hello.txt", small_id, "hello object");
     try expectStoredObject(&reopened, "hello-copy.txt", duplicate_id, "hello object");
@@ -63,8 +77,21 @@ test "e2e app database stores relational rows and native objects across reopen" 
     try reopened.deleteObject(binary_id);
     try expectAttachmentCount(&reopened, 5);
     try expectDeletedAttachmentObject(&reopened, "binary.bin", binary_id);
+    try deleteAttachment(&reopened, "binary.bin");
+    try expectAttachmentCount(&reopened, 4);
     try expectStoredObject(&reopened, "large.bin", large_id, large);
+
+    try reopened.deleteObject(small_id);
+    try expectAttachmentCount(&reopened, 4);
+    try expectDeletedAttachmentObject(&reopened, "hello.txt", small_id);
+    try expectDeletedAttachmentObject(&reopened, "hello-copy.txt", duplicate_id);
+
+    const recreated_id = try reopened.putObject("hello object");
+    try std.testing.expectEqualSlices(u8, &small_id, &recreated_id);
+    try expectStoredObject(&reopened, "hello.txt", recreated_id, "hello object");
+    try expectStoredObject(&reopened, "hello-copy.txt", duplicate_id, "hello object");
     try expectQuickCheckOk(&reopened);
+    try expectIntegrityCheckOk(&reopened);
 }
 
 test "e2e converted sqlite database preserves sql data and accepts new objects" {
@@ -134,12 +161,21 @@ test "e2e converted sqlite database preserves sql data and accepts new objects" 
             \\  id integer primary key,
             \\  object_id blob not null,
             \\  label text not null
+            \\);
+            \\create table search_rows (
+            \\  id integer primary key,
+            \\  vector_id text not null,
+            \\  body text not null
             \\)
         );
+        try db.createVectorCollection("search_rows", .{ .dimensions = 3, .metric = .l2 });
 
         const object_id = try db.putObject("converted object bytes");
         try insertObjectRef(&db, object_id, "converted");
+        try insertSearchRow(&db, "converted-row-1", "converted sql row");
+        try std.testing.expect(try db.hasVectorCollection("search_rows"));
         try expectQuickCheckOk(&db);
+        try expectIntegrityCheckOk(&db);
         break :id object_id;
     };
 
@@ -148,13 +184,19 @@ test "e2e converted sqlite database preserves sql data and accepts new objects" 
 
     try expectCount(&reopened, "select count(*) from files", 3);
     try expectCount(&reopened, "select count(*) from audit", 3);
+    try expectCount(&reopened, "select count(*) from search_rows", 1);
+    try std.testing.expect(try reopened.hasVectorCollection("search_rows"));
     try expectObjectRef(&reopened, "converted", converted_object_id, "converted object bytes");
 
     try reopened.deleteObject(converted_object_id);
     try expectCount(&reopened, "select count(*) from files", 3);
     try expectCount(&reopened, "select count(*) from audit", 3);
+    try expectFilePayload(&reopened, "alpha", &alpha_payload);
+    try expectFilePayload(&reopened, "beta", &beta_payload);
+    try expectViewPayloadLength(&reopened, "beta", beta_payload.len);
     try expectDeletedObjectRef(&reopened, "converted", converted_object_id);
     try expectQuickCheckOk(&reopened);
+    try expectIntegrityCheckOk(&reopened);
 }
 
 test "e2e two connections keep sqlite locking and later recover" {
@@ -188,6 +230,7 @@ test "e2e two connections keep sqlite locking and later recover" {
     try second.deleteObject(delete_id);
     try std.testing.expectError(error.ObjectNotFound, second.getObject(std.testing.allocator, delete_id));
     try expectQuickCheckOk(&second);
+    try expectIntegrityCheckOk(&second);
 }
 
 fn testingDbPath(buffer: []u8, sub_path: []const u8, filename: []const u8) ![:0]u8 {
@@ -211,6 +254,33 @@ fn insertAttachment(db: *zova.Database, id: zova.ObjectId, filename: []const u8,
     try stmt.bindText(2, filename);
     try stmt.bindText(3, mime_type);
     try stmt.bindInt64(4, @intCast(size_bytes));
+    try std.testing.expectEqual(zova.sqlite.Step.done, try stmt.step());
+}
+
+fn deleteAttachment(db: *zova.Database, filename: []const u8) !void {
+    var stmt = try db.prepare("delete from attachments where filename = ?");
+    defer stmt.deinit();
+
+    try stmt.bindText(1, filename);
+    try std.testing.expectEqual(zova.sqlite.Step.done, try stmt.step());
+}
+
+fn insertChunkRef(db: *zova.Database, vector_id: []const u8, document_id: i64, body: []const u8) !void {
+    var stmt = try db.prepare("insert into chunks (vector_id, document_id, body) values (?, ?, ?)");
+    defer stmt.deinit();
+
+    try stmt.bindText(1, vector_id);
+    try stmt.bindInt64(2, document_id);
+    try stmt.bindText(3, body);
+    try std.testing.expectEqual(zova.sqlite.Step.done, try stmt.step());
+}
+
+fn insertSearchRow(db: *zova.Database, vector_id: []const u8, body: []const u8) !void {
+    var stmt = try db.prepare("insert into search_rows (vector_id, body) values (?, ?)");
+    defer stmt.deinit();
+
+    try stmt.bindText(1, vector_id);
+    try stmt.bindText(2, body);
     try std.testing.expectEqual(zova.sqlite.Step.done, try stmt.step());
 }
 
@@ -301,6 +371,10 @@ fn expectAttachmentCount(db: *zova.Database, expected: i64) !void {
     try expectCount(db, "select count(*) from attachments", expected);
 }
 
+fn expectChunkCount(db: *zova.Database, expected: i64) !void {
+    try expectCount(db, "select count(*) from chunks", expected);
+}
+
 fn expectCount(db: anytype, sql: [:0]const u8, expected: i64) !void {
     var stmt = try db.prepare(sql);
     defer stmt.deinit();
@@ -342,6 +416,15 @@ fn expectViewPayloadLength(db: *zova.Database, name: []const u8, expected: usize
 
 fn expectQuickCheckOk(db: anytype) !void {
     var stmt = try db.prepare("pragma quick_check");
+    defer stmt.deinit();
+
+    try std.testing.expectEqual(zova.sqlite.Step.row, try stmt.step());
+    try std.testing.expectEqualStrings("ok", stmt.columnText(0));
+    try std.testing.expectEqual(zova.sqlite.Step.done, try stmt.step());
+}
+
+fn expectIntegrityCheckOk(db: anytype) !void {
+    var stmt = try db.prepare("pragma integrity_check");
     defer stmt.deinit();
 
     try std.testing.expectEqual(zova.sqlite.Step.row, try stmt.step());

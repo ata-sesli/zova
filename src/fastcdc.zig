@@ -1,9 +1,13 @@
-//! Private FastCDC-v1 chunking foundation for future Zova objects.
+//! Private FastCDC-v1 chunking for Zova native objects.
 //!
 //! This module defines deterministic content-defined chunk boundaries using
-//! the v0.3 parameters: 2 KiB minimum, 8 KiB average, and 64 KiB maximum.
-//! It is intentionally not exported from the package root; public Zova object
-//! APIs will use it internally when object storage is added.
+//! the current object parameters: 2 KiB minimum, 8 KiB average, and 64 KiB
+//! maximum. The exact masks, table seed, SplitMix64 gear generation, scan
+//! regions, and max-cut behavior are part of the `fastcdc-v1` storage contract.
+//!
+//! It is intentionally not exported from the package root. Public object APIs
+//! expose whole objects through `zova.Database`; callers do not see or choose
+//! chunk boundaries. Chunks are stored as SQLite BLOB rows by `src/zova.zig`.
 
 const std = @import("std");
 
@@ -19,11 +23,17 @@ const mask_l: u64 = 0x0000d90003530000;
 const gear_seed: u64 = 0x5a4f56415f464344;
 const gear = makeGearTable();
 
+/// One chunk boundary as an offset and byte length into the original input.
 pub const Chunk = struct {
     offset: usize,
     len: usize,
 };
 
+/// Return the byte length of the first FastCDC-v1 chunk in `input`.
+///
+/// Empty input returns `0`. Inputs at or below `min_size` are one chunk. Larger
+/// inputs scan the normalized short region first, then the long region, and cut
+/// at `max_size` when no content-defined breakpoint is found.
 pub fn cut(input: []const u8) usize {
     if (input.len <= min_size) return input.len;
 
@@ -50,6 +60,11 @@ pub fn cut(input: []const u8) usize {
     return limit;
 }
 
+/// Return all FastCDC-v1 chunk boundaries for `input`.
+///
+/// The returned slice is owned by `allocator`. Empty input returns an empty
+/// owned slice. This helper is package-internal test/foundation code; object
+/// storage currently calls `cut` directly while writing manifests.
 pub fn chunkBoundaries(allocator: std.mem.Allocator, input: []const u8) ![]Chunk {
     var chunks: std.ArrayList(Chunk) = .empty;
     errdefer chunks.deinit(allocator);

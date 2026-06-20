@@ -2,14 +2,14 @@
 
 Zova is a Zig-powered embedded data substrate built on SQLite.
 
-Current package version: `0.3.0`.
+Current package version: `0.4.0`.
 
-The current v0.3 surface is intentionally small: a thin SQLite wrapper for
+The current v0.4 surface is intentionally small: a thin SQLite wrapper for
 database lifecycle, prepared statements, transactions, common result-code
 mapping, plus a `.zova` file identity layer, SQLite-to-Zova conversion, and
-native content-addressed object storage. SQL stays normal SQLite SQL, existing
-SQLite files can be opened directly, and plain SQLite usage does not create
-Zova system tables.
+native content-addressed object storage with explicit object deletion. SQL
+stays normal SQLite SQL, existing SQLite files can be opened directly, and
+plain SQLite usage does not create Zova system tables.
 
 Zova v0 is not a different SQL dialect and not "better SQL." It does not make
 SQLite stricter, distributed, or magically concurrent. It wraps SQLite's native
@@ -18,7 +18,7 @@ model with clearer Zig ownership and boring, direct ergonomics.
 Raw SQLite remains available through `sqlite.c` for APIs that Zova does not
 wrap yet.
 
-Zova v0.3 also has a file-level database boundary:
+Zova v0.4 also has a file-level database boundary:
 
 ```text
 *.zova  -> Zova-owned database
@@ -32,7 +32,7 @@ into a new Zova database.
 
 ## Import
 
-Zova v0.3 keeps `zova.sqlite` as the SQLite wrapper namespace. Packages
+Zova v0.4 keeps `zova.sqlite` as the SQLite wrapper namespace. Packages
 that depend on Zova use the package surface from `src/root.zig`:
 
 ```zig
@@ -111,7 +111,7 @@ full object bytes. The same bytes produce the same object id. Display it with
 normal Zig formatting helpers such as `std.fmt.fmtSliceHexLower(&id)` when a
 hex string is useful.
 
-Store and load an object:
+Store, load, and delete an object:
 
 ```zig
 const id = try db.putObject("hello object");
@@ -120,10 +120,23 @@ var object = try db.getObject(allocator, id);
 defer object.deinit(allocator);
 
 std.debug.assert(std.mem.eql(u8, object.bytes, "hello object"));
+
+try db.deleteObject(id);
+std.debug.assert(!try db.hasObject(id));
 ```
 
-`getObject` allocates the full object in memory in v0.3. Streaming reads are
+`getObject` allocates the full object in memory in v0.4. Streaming reads are
 not part of this release.
+
+`deleteObject` removes the object row, removes its manifest rows, and
+garbage-collects Zova chunks that are no longer referenced by any remaining
+object manifest. It does not read, reassemble, or hash the object bytes during
+delete. Delete is lifecycle cleanup, not repair tooling.
+
+Missing or already-deleted object ids return `error.ObjectNotFound`.
+`deleteObject` owns its own write transaction, so calling it inside an active
+user transaction returns `error.ObjectTransactionActive`. Normal SQLite write
+contention can still surface as SQLite wrapper errors such as `error.Busy`.
 
 SQL BLOB columns and Zova objects are different tools. A user-created BLOB
 column remains an ordinary SQLite BLOB column. Zova objects are stored in
@@ -169,6 +182,18 @@ if ((try select.step()) == .row) {
     defer object.deinit(allocator);
 }
 ```
+
+Object references in user SQL tables are application-owned. Deleting an object
+does not scan application tables, does not remove rows from user tables, and
+does not rewrite object ids stored by the application. A user table can still
+contain an object id after `deleteObject`; loading that id through `getObject`
+returns `error.ObjectNotFound` until the application updates or removes its own
+reference.
+
+Deleting object rows does not mean the SQLite file shrinks immediately. Zova
+does not run `VACUUM`, enable `auto_vacuum`, or change PRAGMAs on open or
+delete. Physical file-size reclamation is normal SQLite behavior; applications
+that want compaction can run SQLite mechanisms such as `VACUUM` explicitly.
 
 ## Open A Database
 
@@ -377,7 +402,7 @@ The release smoke formats sources, runs unit/integration tests, runs E2E tests,
 builds the smoke executable, runs it, creates a source-package candidate, and
 verifies that candidate from extraction. The release package is source-only:
 `README.md`, build files, `src`, `tests`, and `vendor`. Compiled CLI binaries are
-not release artifacts in v0.3.
+not release artifacts in v0.4.
 
 ## Raw SQLite To Zova Mapping
 
@@ -408,8 +433,8 @@ migrations, system tables, an ORM, a query builder, connection pooling, async
 behavior, or a background service.
 
 The Zova-owned `zova.Database` layer adds `.zova` identity and native objects,
-but v0.3 still has no vector API, object delete API, streaming object API,
-repair CLI, automatic BLOB migration, compression, encryption, or remote sync.
+but v0.4 still has no vector API, streaming object API, repair CLI, automatic
+BLOB migration, compression, encryption, or remote sync.
 
 Those layers can grow later. The v0 foundation is boring on purpose: normal
 SQLite first, wrapped just enough to make ownership and common usage clear in
