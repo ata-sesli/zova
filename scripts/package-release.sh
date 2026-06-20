@@ -115,6 +115,7 @@ rm -rf "$TMP"
 mkdir -p "$TMP/$PKG" "$OUT_DIR"
 
 cp build.zig build.zig.zon README.md "$TMP/$PKG/"
+cp -R include "$TMP/$PKG/"
 cp -R src "$TMP/$PKG/"
 cp -R tests "$TMP/$PKG/"
 cp -R vendor "$TMP/$PKG/"
@@ -125,6 +126,11 @@ if find "$TMP/$PKG" -name '*.md' ! -name README.md | grep -q .; then
     exit 1
 fi
 
+if [ ! -f "$TMP/$PKG/include/zova.h" ]; then
+    echo "release package is missing include/zova.h" >&2
+    exit 1
+fi
+
 tar -czf "$ARCHIVE" -C "$TMP" "$PKG"
 
 VERIFY_DIR="$TMP/verify"
@@ -132,9 +138,11 @@ mkdir -p "$VERIFY_DIR"
 tar -xzf "$ARCHIVE" -C "$VERIFY_DIR"
 cd "$VERIFY_DIR/$PKG"
 
-zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/fastcdc.zig src/main.zig tests/e2e.zig
+zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/fastcdc.zig src/c_api.zig src/main.zig tests/e2e.zig
 zig build test
 zig build e2e
+zig build c-abi
+zig build c-abi-test
 zig build test -Doptimize=ReleaseSafe
 zig build
 zig build run

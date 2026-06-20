@@ -73,6 +73,7 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        "include",
         "README.md",
         "src",
         "tests",
