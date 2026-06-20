@@ -2,12 +2,13 @@
 
 Zova is a Zig-powered embedded data substrate built on SQLite.
 
-Current package version: `0.6.0`.
+Current package version: `0.7.0`.
 
-The current v0.6 surface is intentionally small: a thin SQLite wrapper for
+The current v0.7 surface is intentionally small: a thin SQLite wrapper for
 database lifecycle, prepared statements, transactions, common result-code
 mapping, plus a `.zova` file identity layer, SQLite-to-Zova conversion, and
-native content-addressed object storage and native vector storage. SQL stays
+native content-addressed object storage, verified chunk ingest/object assembly,
+and native vector storage. SQL stays
 normal SQLite SQL, existing SQLite files can be opened directly, and plain
 SQLite usage does not create Zova system tables.
 
@@ -18,7 +19,7 @@ model with clearer Zig ownership and boring, direct ergonomics.
 Raw SQLite remains available through `sqlite.c` for APIs that Zova does not
 wrap yet.
 
-Zova v0.6 also has a file-level database boundary:
+Zova v0.7 also has a file-level database boundary:
 
 ```text
 *.zova  -> Zova-owned database
@@ -32,7 +33,7 @@ into a new Zova database.
 
 ## Import
 
-Zova v0.6 keeps `zova.sqlite` as the SQLite wrapper namespace. Packages
+Zova v0.7 keeps `zova.sqlite` as the SQLite wrapper namespace. Packages
 that depend on Zova use the package surface from `src/root.zig`:
 
 ```zig
@@ -162,14 +163,52 @@ presence, and the `fastcdc-v1` chunker. It does not hash every chunk byte.
 verifies the final full-object SHA-256; partial range reads verify only the
 chunks they touch.
 
-The v0.6 object streaming surface is read/serve only. It does not receive loose
-chunks, assemble objects from externally supplied chunks, or define a transfer
-protocol.
+The v0.7 development surface can ingest loose verified chunks before complete
+object assembly exists. A loose chunk is not a complete object; it is only a
+verified `chunk_hash -> chunk bytes` row that can be read later by hash:
+
+```zig
+const chunk_hash = zova.objectChunkId(received_bytes);
+try db.putObjectChunk(chunk_hash, received_bytes);
+
+var chunk = try db.getObjectChunk(allocator, chunk_hash);
+defer chunk.deinit(allocator);
+```
+
+`putObjectChunk` verifies `SHA-256(received_bytes) == chunk_hash`, rejects
+empty or oversized chunks, and is idempotent when the same valid chunk is
+received more than once. It does not create an object row or manifest row.
+
+After the application has received every expected chunk, it can assemble the
+complete object from the public manifest:
+
+```zig
+try db.assembleObjectFromChunks(object_id, total_size, manifest.chunks);
+```
+
+Assembly consumes existing verified chunk rows only. It validates manifest
+indexes, offsets, sizes, stored chunk bytes, and the final full-object
+SHA-256 before creating the object row and manifest rows. Invalid caller
+manifests return `error.ObjectManifestInvalid`; missing chunk rows return
+`error.ObjectChunkNotFound`; malformed stored private rows return
+`error.ObjectCorrupt`; assembling an already existing valid object returns
+`error.ObjectAlreadyExists`.
 
 Transfer state belongs in application SQL tables. A media-heavy application can
 store preview status, peer state, missing chunk hashes, retry counters, or
-RChat-style attachment metadata in normal tables while using Zova object ids and
-range reads to serve the actual bytes.
+RChat-style attachment metadata in normal tables while using Zova chunk ids,
+object ids, and range reads to store and serve the actual bytes.
+
+Loose chunks can be cleaned up explicitly when they are not referenced by any
+assembled object:
+
+```zig
+const deleted = try db.deleteObjectChunk(chunk_hash);
+```
+
+`deleteObjectChunk` returns `true` only when it removed an unreferenced chunk.
+It returns `false` for missing chunks or chunks still referenced by an object
+manifest. It does not inspect application transfer tables.
 
 `deleteObject` removes the object row, removes its manifest rows, and
 garbage-collects Zova chunks that are no longer referenced by any remaining
@@ -497,7 +536,10 @@ Other SQLite result codes currently map to `error.SqliteError`.
 The Zova-owned database layer adds boundary errors such as `error.NotZovaPath`,
 `error.NotZovaDatabase`, `error.UnsupportedZovaVersion`,
 `error.DestinationExists`, and `error.ZovaNameConflict`. Object APIs add
-`error.ObjectNotFound`, `error.ObjectCorrupt`, `error.ObjectTooLarge`, and
+`error.ObjectNotFound`, `error.ObjectAlreadyExists`,
+`error.ObjectChunkNotFound`, `error.ObjectChunkHashMismatch`,
+`error.ObjectCorrupt`, `error.ObjectManifestInvalid`,
+`error.ObjectRangeInvalid`, `error.ObjectTooLarge`, and
 `error.ObjectTransactionActive`. Vector APIs add errors such as
 `error.VectorCollectionExists`, `error.VectorCollectionNotFound`,
 `error.VectorNotFound`, `error.VectorDimensionMismatch`,
@@ -566,7 +608,7 @@ The release smoke formats sources, runs unit/integration tests, runs E2E tests,
 builds the smoke executable, runs it, creates a source-package candidate, and
 verifies that candidate from extraction. The release package is source-only:
 `README.md`, build files, `src`, `tests`, and `vendor`. Compiled CLI binaries are
-not release artifacts in v0.5.
+not release artifacts in v0.7.
 
 ## Raw SQLite To Zova Mapping
 
@@ -597,10 +639,10 @@ migrations, system tables, an ORM, a query builder, connection pooling, async
 behavior, or a background service.
 
 The Zova-owned `zova.Database` layer adds `.zova` identity, native objects, and
-native vectors, but v0.5 still has no streaming object API, vector ANN index,
-candidate-filtered vector search, SQL virtual table integration, repair CLI,
-automatic BLOB/object/vector migration, embedding generation, compression,
-encryption, or remote sync.
+native vectors, but v0.7 still has no peer protocol, transfer sessions, retry
+engine, Rust/C ABI, repair CLI, vector ANN index, candidate-filtered vector
+search, SQL virtual table integration, automatic BLOB/object/vector migration,
+embedding generation, compression, encryption, or remote sync.
 
 Those layers can grow later. The v0 foundation is boring on purpose: normal
 SQLite first, wrapped just enough to make ownership and common usage clear in

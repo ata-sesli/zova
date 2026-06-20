@@ -108,6 +108,135 @@ test "e2e app database stores relational rows and native objects across reopen" 
     try expectIntegrityCheckOk(&reopened);
 }
 
+test "e2e receiver stores verified loose chunks with app-owned transfer state" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "receiver.zova");
+
+    const bytes = "received transfer chunk";
+    const hash = zova.objectChunkId(bytes);
+
+    {
+        var db = try zova.Database.create(db_path);
+        defer db.deinit();
+
+        try db.exec(
+            \\create table incoming_chunks (
+            \\  transfer_id text not null,
+            \\  chunk_hash blob not null,
+            \\  state text not null,
+            \\  primary key (transfer_id, chunk_hash)
+            \\)
+        );
+
+        try db.putObjectChunk(hash, bytes);
+        try db.putObjectChunk(hash, bytes);
+        try insertIncomingChunk(&db, "transfer-1", hash, "received");
+
+        try expectIncomingChunk(&db, "transfer-1", hash, "received");
+        try expectLooseChunk(&db, hash, bytes);
+        try expectCount(&db, "select count(*) from _zova_chunks", 1);
+        try expectCount(&db, "select count(*) from _zova_objects", 0);
+        try expectCount(&db, "select count(*) from _zova_object_chunks", 0);
+        try expectQuickCheckOk(&db);
+        try expectIntegrityCheckOk(&db);
+    }
+
+    var reopened = try zova.Database.open(db_path);
+    defer reopened.deinit();
+
+    try expectIncomingChunk(&reopened, "transfer-1", hash, "received");
+    try expectLooseChunk(&reopened, hash, bytes);
+    try expectCount(&reopened, "select count(*) from _zova_chunks", 1);
+    try expectCount(&reopened, "select count(*) from _zova_objects", 0);
+    try expectCount(&reopened, "select count(*) from _zova_object_chunks", 0);
+    try expectQuickCheckOk(&reopened);
+    try expectIntegrityCheckOk(&reopened);
+}
+
+test "e2e receiver assembles object from shuffled verified chunks" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var sender_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var receiver_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const sender_path = try testingDbPath(&sender_buffer, tmp.sub_path[0..], "sender.zova");
+    const receiver_path = try testingDbPath(&receiver_buffer, tmp.sub_path[0..], "receiver-assembly.zova");
+
+    const payload = try std.testing.allocator.alloc(u8, 192 * 1024);
+    defer std.testing.allocator.free(payload);
+    fillDeterministic(payload);
+
+    var sender = try zova.Database.create(sender_path);
+    defer sender.deinit();
+    const object_id = try sender.putObject(payload);
+    var sender_manifest = try sender.objectManifest(std.testing.allocator, object_id);
+    defer sender_manifest.deinit(std.testing.allocator);
+    try std.testing.expect(sender_manifest.chunks.len > 1);
+
+    var receiver = try zova.Database.create(receiver_path);
+    defer receiver.deinit();
+    try receiver.exec(
+        \\create table incoming_chunks (
+        \\  transfer_id text not null,
+        \\  chunk_hash blob not null,
+        \\  state text not null,
+        \\  primary key (transfer_id, chunk_hash)
+        \\);
+        \\create table transfers (
+        \\  transfer_id text primary key,
+        \\  object_id blob not null,
+        \\  state text not null
+        \\)
+    );
+
+    try std.testing.expectError(
+        error.ObjectChunkNotFound,
+        receiver.assembleObjectFromChunks(object_id, payload.len, sender_manifest.chunks),
+    );
+
+    const shuffled = try std.testing.allocator.dupe(zova.ObjectChunk, sender_manifest.chunks);
+    defer std.testing.allocator.free(shuffled);
+    std.mem.reverse(zova.ObjectChunk, shuffled);
+
+    for (shuffled[0 .. shuffled.len - 1]) |chunk| {
+        const start: usize = @intCast(chunk.offset);
+        const end = start + @as(usize, @intCast(chunk.size_bytes));
+        try receiver.putObjectChunk(chunk.hash, payload[start..end]);
+        try insertIncomingChunk(&receiver, "transfer-assembly", chunk.hash, "received");
+    }
+
+    const duplicate = shuffled[0];
+    const duplicate_start: usize = @intCast(duplicate.offset);
+    const duplicate_end = duplicate_start + @as(usize, @intCast(duplicate.size_bytes));
+    try receiver.putObjectChunk(duplicate.hash, payload[duplicate_start..duplicate_end]);
+    try expectPrivateChunkCountForHash(&receiver, duplicate.hash, 1);
+
+    try std.testing.expectError(
+        error.ObjectChunkNotFound,
+        receiver.assembleObjectFromChunks(object_id, payload.len, sender_manifest.chunks),
+    );
+
+    const missing = shuffled[shuffled.len - 1];
+    const missing_start: usize = @intCast(missing.offset);
+    const missing_end = missing_start + @as(usize, @intCast(missing.size_bytes));
+    try receiver.putObjectChunk(missing.hash, payload[missing_start..missing_end]);
+    try insertIncomingChunk(&receiver, "transfer-assembly", missing.hash, "received");
+
+    try receiver.assembleObjectFromChunks(object_id, payload.len, sender_manifest.chunks);
+    try insertTransferObject(&receiver, "transfer-assembly", object_id, "complete");
+    try expectTransferObject(&receiver, "transfer-assembly", object_id, "complete", payload);
+    try expectObjectRangeBytes(&receiver, object_id, payload);
+    try expectObjectChunksReassemble(&receiver, object_id, payload);
+
+    try receiver.deleteObject(object_id);
+    try expectDeletedTransferObject(&receiver, "transfer-assembly", object_id, "complete");
+    try expectQuickCheckOk(&receiver);
+    try expectIntegrityCheckOk(&receiver);
+}
+
 test "e2e converted sqlite database preserves sql data and accepts new objects" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -118,6 +247,8 @@ test "e2e converted sqlite database preserves sql data and accepts new objects" 
     const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "converted.zova");
     const alpha_payload = [_]u8{ 0x10, 0x00, 0x20, 0x30 };
     const beta_payload = [_]u8{ 0xaa, 0xbb, 0x00, 0xcc, 0xdd };
+    const assembled_bytes = "converted assembled object bytes";
+    const assembled_id = zova.objectId(assembled_bytes);
 
     {
         var source = try zova.sqlite.Database.open(source_path);
@@ -186,6 +317,28 @@ test "e2e converted sqlite database preserves sql data and accepts new objects" 
 
         const object_id = try db.putObject("converted object bytes");
         try insertObjectRef(&db, object_id, "converted");
+        const assembled_left = assembled_bytes[0..11];
+        const assembled_right = assembled_bytes[11..];
+        const assembled_left_hash = zova.objectChunkId(assembled_left);
+        const assembled_right_hash = zova.objectChunkId(assembled_right);
+        try db.putObjectChunk(assembled_right_hash, assembled_right);
+        try db.putObjectChunk(assembled_left_hash, assembled_left);
+        const assembled_manifest = [_]zova.ObjectChunk{
+            .{
+                .index = 0,
+                .hash = assembled_left_hash,
+                .offset = 0,
+                .size_bytes = assembled_left.len,
+            },
+            .{
+                .index = 1,
+                .hash = assembled_right_hash,
+                .offset = assembled_left.len,
+                .size_bytes = assembled_right.len,
+            },
+        };
+        try db.assembleObjectFromChunks(assembled_id, assembled_bytes.len, &assembled_manifest);
+        try insertObjectRef(&db, assembled_id, "assembled");
         try insertSearchRow(&db, "converted-row-1", "converted sql row");
         try db.putVector("search_rows", "converted-row-1", &.{ 1.0, 2.0, 3.0 });
         try std.testing.expect(try db.hasVectorCollection("search_rows"));
@@ -206,6 +359,8 @@ test "e2e converted sqlite database preserves sql data and accepts new objects" 
     try expectObjectRef(&reopened, "converted", converted_object_id, "converted object bytes");
     try expectObjectRefRange(&reopened, "converted", converted_object_id, "converted object bytes");
     try expectObjectChunksReassemble(&reopened, converted_object_id, "converted object bytes");
+    try expectObjectRef(&reopened, "assembled", assembled_id, assembled_bytes);
+    try expectObjectRefRange(&reopened, "assembled", assembled_id, assembled_bytes);
 
     try reopened.putVector("search_rows", "converted-row-1", &.{ 3.0, 2.0, 1.0 });
     try expectStoredSearchVector(&reopened, "converted-row-1", &.{ 3.0, 2.0, 1.0 });
@@ -213,12 +368,14 @@ test "e2e converted sqlite database preserves sql data and accepts new objects" 
     try reopened.deleteVector("search_rows", "converted-row-1");
     try expectMissingSearchVectorRef(&reopened, "converted-row-1");
     try reopened.deleteObject(converted_object_id);
+    try reopened.deleteObject(assembled_id);
     try expectCount(&reopened, "select count(*) from files", 3);
     try expectCount(&reopened, "select count(*) from audit", 3);
     try expectFilePayload(&reopened, "alpha", &alpha_payload);
     try expectFilePayload(&reopened, "beta", &beta_payload);
     try expectViewPayloadLength(&reopened, "beta", beta_payload.len);
     try expectDeletedObjectRef(&reopened, "converted", converted_object_id);
+    try expectDeletedObjectRef(&reopened, "assembled", assembled_id);
     try expectQuickCheckOk(&reopened);
     try expectIntegrityCheckOk(&reopened);
 }
@@ -335,6 +492,26 @@ fn insertObjectRef(db: *zova.Database, id: zova.ObjectId, label: []const u8) !vo
     try std.testing.expectEqual(zova.sqlite.Step.done, try stmt.step());
 }
 
+fn insertIncomingChunk(db: *zova.Database, transfer_id: []const u8, hash: zova.ObjectChunkId, state: []const u8) !void {
+    var stmt = try db.prepare("insert or ignore into incoming_chunks (transfer_id, chunk_hash, state) values (?, ?, ?)");
+    defer stmt.deinit();
+
+    try stmt.bindText(1, transfer_id);
+    try stmt.bindBlob(2, &hash);
+    try stmt.bindText(3, state);
+    try std.testing.expectEqual(zova.sqlite.Step.done, try stmt.step());
+}
+
+fn insertTransferObject(db: *zova.Database, transfer_id: []const u8, id: zova.ObjectId, state: []const u8) !void {
+    var stmt = try db.prepare("insert into transfers (transfer_id, object_id, state) values (?, ?, ?)");
+    defer stmt.deinit();
+
+    try stmt.bindText(1, transfer_id);
+    try stmt.bindBlob(2, &id);
+    try stmt.bindText(3, state);
+    try std.testing.expectEqual(zova.sqlite.Step.done, try stmt.step());
+}
+
 fn expectStoredObject(db: *zova.Database, filename: []const u8, expected_id: zova.ObjectId, expected_bytes: []const u8) !void {
     const id = try loadObjectIdByFilename(db, filename);
     try std.testing.expectEqualSlices(u8, &expected_id, &id);
@@ -379,6 +556,74 @@ fn expectObjectRefRange(db: *zova.Database, label: []const u8, expected_id: zova
     try std.testing.expectEqual(zova.sqlite.Step.done, try stmt.step());
 
     try expectObjectRangeBytes(db, id, expected_bytes);
+}
+
+fn expectIncomingChunk(db: *zova.Database, transfer_id: []const u8, expected_hash: zova.ObjectChunkId, expected_state: []const u8) !void {
+    var stmt = try db.prepare("select chunk_hash, state from incoming_chunks where transfer_id = ?");
+    defer stmt.deinit();
+
+    try stmt.bindText(1, transfer_id);
+    try std.testing.expectEqual(zova.sqlite.Step.row, try stmt.step());
+    try std.testing.expectEqualSlices(u8, &expected_hash, stmt.columnBlob(0));
+    try std.testing.expectEqualStrings(expected_state, stmt.columnText(1));
+    try std.testing.expectEqual(zova.sqlite.Step.done, try stmt.step());
+}
+
+fn expectLooseChunk(db: *zova.Database, hash: zova.ObjectChunkId, expected_bytes: []const u8) !void {
+    try std.testing.expect(try db.hasObjectChunk(hash));
+    var chunk = try db.getObjectChunk(std.testing.allocator, hash);
+    defer chunk.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualSlices(u8, &hash, &chunk.hash);
+    try std.testing.expectEqualSlices(u8, expected_bytes, chunk.bytes);
+}
+
+fn expectPrivateChunkCountForHash(db: *zova.Database, hash: zova.ObjectChunkId, expected: i64) !void {
+    var stmt = try db.prepare("select count(*) from _zova_chunks where chunk_hash = ?");
+    defer stmt.deinit();
+
+    try stmt.bindBlob(1, &hash);
+    try std.testing.expectEqual(zova.sqlite.Step.row, try stmt.step());
+    try std.testing.expectEqual(expected, stmt.columnInt64(0));
+    try std.testing.expectEqual(zova.sqlite.Step.done, try stmt.step());
+}
+
+fn expectTransferObject(
+    db: *zova.Database,
+    transfer_id: []const u8,
+    expected_id: zova.ObjectId,
+    expected_state: []const u8,
+    expected_bytes: []const u8,
+) !void {
+    var stmt = try db.prepare("select object_id, state from transfers where transfer_id = ?");
+    defer stmt.deinit();
+
+    try stmt.bindText(1, transfer_id);
+    try std.testing.expectEqual(zova.sqlite.Step.row, try stmt.step());
+    try std.testing.expectEqualSlices(u8, &expected_id, stmt.columnBlob(0));
+    try std.testing.expectEqualStrings(expected_state, stmt.columnText(1));
+    try std.testing.expectEqual(zova.sqlite.Step.done, try stmt.step());
+
+    var object = try db.getObject(std.testing.allocator, expected_id);
+    defer object.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, expected_bytes, object.bytes);
+}
+
+fn expectDeletedTransferObject(
+    db: *zova.Database,
+    transfer_id: []const u8,
+    expected_id: zova.ObjectId,
+    expected_state: []const u8,
+) !void {
+    var stmt = try db.prepare("select object_id, state from transfers where transfer_id = ?");
+    defer stmt.deinit();
+
+    try stmt.bindText(1, transfer_id);
+    try std.testing.expectEqual(zova.sqlite.Step.row, try stmt.step());
+    try std.testing.expectEqualSlices(u8, &expected_id, stmt.columnBlob(0));
+    try std.testing.expectEqualStrings(expected_state, stmt.columnText(1));
+    try std.testing.expectEqual(zova.sqlite.Step.done, try stmt.step());
+    try std.testing.expectError(error.ObjectNotFound, db.getObject(std.testing.allocator, expected_id));
 }
 
 fn expectObjectRangeBytes(db: *zova.Database, id: zova.ObjectId, expected_bytes: []const u8) !void {
