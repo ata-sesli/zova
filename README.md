@@ -2,7 +2,7 @@
 
 Zova is a Zig embedded data substrate built on SQLite.
 
-Current package version: `0.8.0`.
+Current package version: `0.9.0`.
 
 Zova keeps SQLite as the foundation and adds native content types on top:
 
@@ -12,6 +12,8 @@ Zova keeps SQLite as the foundation and adds native content types on top:
 - an object streaming writer for large caller-owned byte streams
 - verified loose chunk ingest and object assembly for transfer workflows
 - native `f32` vector collections, CRUD, and exact search
+- a C ABI foundation for object workflows
+- a non-mutating inspection/check CLI
 
 SQL is still normal SQLite SQL. User tables stay yours. Zova does not replace
 SQLite with a new query language, ORM, migration system, or background service.
@@ -433,6 +435,191 @@ _ = c.sqlite3_total_changes64(db.handle);
 
 This is an escape hatch for APIs Zova does not wrap yet.
 
+## C ABI
+
+v0.9 adds a pre-1.0 C ABI foundation for object workflows. It is designed for
+future Rust bindings and other host languages, but it is not a permanent stable
+ABI promise yet.
+
+The C ABI lives in:
+
+- `include/zova.h`
+- `src/c_api.zig`
+- `zig build c-abi`
+- `zig build c-abi-test`
+
+The v0.9 C ABI exposes:
+
+- database create/open/close
+- SQL `exec`
+- SQLite-to-Zova conversion
+- object put/get/delete/existence/size/chunk count
+- range reads
+- manifests and chunk reads
+- verified loose chunk ingest
+- object assembly from verified chunks
+- `ObjectWriter`
+
+Vector APIs are intentionally not part of the v0.9 C ABI. A future low-level
+`zova-sys` crate and safe Rust crate can wrap this boundary, but v0.9 ships no
+Rust crate and no RChat adapter.
+
+C inputs are borrowed for the duration of the call. Paths and SQL use
+null-terminated C strings. Arbitrary bytes use pointer plus length. Returned
+buffers, messages, and manifests are owned by Zova and must be released with
+their matching free function:
+
+```c
+zova_buffer_free(&buffer);
+zova_message_free(&message);
+zova_object_manifest_free(&manifest);
+```
+
+Database and writer handles are opaque. Close or destroy them explicitly:
+
+```c
+zova_database_close(db);
+zova_object_writer_destroy(writer);
+```
+
+Every C ABI function returns `zova_status`. `ZOVA_OK` means success. SQLite and
+Zova failures map to explicit status values such as `ZOVA_BUSY`,
+`ZOVA_CONSTRAINT`, `ZOVA_OBJECT_NOT_FOUND`, and `ZOVA_OBJECT_CORRUPT`.
+`zova_status_name(status)` returns a static status name.
+
+For database-scoped diagnostics, use:
+
+```c
+const char *message = zova_database_last_error_message(db);
+```
+
+That pointer is borrowed and valid until the next call on that database handle
+or until close. Create/open/convert failures can also return an owned
+`zova_message` through their request structs.
+
+Minimal C object example:
+
+```c
+zova_database *db = NULL;
+zova_message message = {0};
+
+zova_database_open_request open_req = {
+    .path = "app.zova",
+    .out_db = &db,
+    .out_error_message = &message,
+};
+zova_status status = zova_database_create(&open_req);
+zova_message_free(&message);
+if (status != ZOVA_OK) return 1;
+
+zova_database_exec_request sql = {
+    .db = db,
+    .sql = "create table files (id integer primary key, object_id blob not null)",
+};
+if (zova_database_exec(&sql) != ZOVA_OK) return 1;
+
+const uint8_t bytes[] = "hello";
+zova_object_id id = {0};
+zova_object_put_request put = {
+    .db = db,
+    .data = bytes,
+    .len = sizeof(bytes) - 1,
+    .out_id = &id,
+};
+if (zova_object_put(&put) != ZOVA_OK) return 1;
+
+uint8_t preview[5] = {0};
+size_t copied = 0;
+zova_object_read_range_request range = {
+    .db = db,
+    .id = id,
+    .offset = 0,
+    .buffer = preview,
+    .buffer_len = sizeof(preview),
+    .out_copied = &copied,
+};
+if (zova_object_read_range(&range) != ZOVA_OK) return 1;
+
+zova_buffer object = {0};
+zova_object_get_request get = {
+    .db = db,
+    .id = id,
+    .out_buffer = &object,
+};
+if (zova_object_get(&get) != ZOVA_OK) return 1;
+zova_buffer_free(&object);
+
+zova_database_close(db);
+```
+
+Manifest/chunk and assembly flow:
+
+```c
+zova_object_manifest manifest = {0};
+zova_object_manifest_get_request manifest_req = {
+    .db = db,
+    .id = id,
+    .out_manifest = &manifest,
+};
+if (zova_object_manifest_get(&manifest_req) != ZOVA_OK) return 1;
+
+zova_buffer chunk = {0};
+zova_object_chunk_get_request chunk_req = {
+    .db = db,
+    .hash = manifest.chunks[0].hash,
+    .out_buffer = &chunk,
+};
+if (zova_object_chunk_get(&chunk_req) != ZOVA_OK) return 1;
+
+zova_object_chunk_put_request loose = {
+    .db = db,
+    .expected_hash = manifest.chunks[0].hash,
+    .data = chunk.data,
+    .len = chunk.len,
+};
+if (zova_object_chunk_put(&loose) != ZOVA_OK) return 1;
+
+zova_object_assemble_from_chunks_request assemble = {
+    .db = db,
+    .id = id,
+    .size_bytes = manifest.size_bytes,
+    .chunks = manifest.chunks,
+    .chunk_count = manifest.chunks_len,
+};
+/* Existing valid objects return ZOVA_OBJECT_ALREADY_EXISTS. */
+status = zova_object_assemble_from_chunks(&assemble);
+
+zova_buffer_free(&chunk);
+zova_object_manifest_free(&manifest);
+```
+
+Streaming writer flow:
+
+```c
+zova_object_writer *writer = NULL;
+zova_object_writer_create_request create_writer = {
+    .db = db,
+    .out_writer = &writer,
+};
+if (zova_object_writer_create(&create_writer) != ZOVA_OK) return 1;
+
+zova_object_writer_write_request write = {
+    .writer = writer,
+    .data = bytes,
+    .len = sizeof(bytes) - 1,
+};
+if (zova_object_writer_write(&write) != ZOVA_OK) return 1;
+
+zova_object_id streamed = {0};
+zova_object_writer_finish_request finish = {
+    .writer = writer,
+    .out_id = &streamed,
+};
+if (zova_object_writer_finish(&finish) != ZOVA_OK) return 1;
+
+zova_object_writer_destroy(writer);
+```
+
 ## Error Shape
 
 Zova keeps errors small and direct.
@@ -478,6 +665,52 @@ such as:
 For SQLite failures, `db.errorMessage()` exposes SQLite's current diagnostic
 message.
 
+## CLI
+
+v0.9 turns the `zova` executable into a non-mutating inspection/check CLI.
+
+```sh
+zig build run
+```
+
+`zig build run` is the release smoke and prints the version. Built directly,
+the command shape is:
+
+```sh
+zig-out/bin/zova --version
+zig-out/bin/zova --help
+zig-out/bin/zova info app.zova
+zig-out/bin/zova check app.zova
+zig-out/bin/zova check --deep app.zova
+
+zova --version
+zova --help
+zova info app.zova
+zova check app.zova
+zova check --deep app.zova
+```
+
+`info` prints bounded text output: package version, SQLite version, Zova format
+version, object/chunk/vector counts, loose chunk count, stored chunk bytes, and
+user table count. It does not print object bytes, vector values, or private
+schema SQL.
+
+`check` validates Zova identity/schema and runs SQLite `PRAGMA quick_check`.
+`check --deep` also validates object manifests, referenced chunks, full object
+hashes, loose chunks as informational state, and vector row shape/finite
+values.
+
+Exit codes:
+
+- `0`: success or healthy file
+- `1`: unexpected internal error
+- `2`: usage error
+- `3`: open, path, Zova identity, or unsupported version error
+- `4`: integrity or corruption check failure
+
+The CLI does not repair, migrate, delete loose chunks, rebuild manifests, run
+`VACUUM`, change application data, or mutate `.zova` files in v0.9.
+
 ## Vendored SQLite
 
 Zova builds against the vendored SQLite amalgamation in `vendor/sqlite3.53.2`.
@@ -512,11 +745,35 @@ Run the smoke executable:
 zig build run
 ```
 
+Run CLI tests:
+
+```sh
+zig build cli-test
+```
+
+Build and test the C ABI:
+
+```sh
+zig build c-abi
+zig build c-abi-test
+```
+
 Run the release smoke:
 
 ```sh
 scripts/check-release.sh
 ```
+
+## Release Package Policy
+
+v0.9 releases a source-only package/archive. The package includes `README.md`,
+`build.zig`, `build.zig.zon`, `include`, `src`, `tests`, and `vendor`.
+
+`README.md` is the only markdown file included in the release package. Planning
+notes stay outside the package.
+
+Compiled CLI binaries and compiled C ABI libraries are not release artifacts in
+v0.9. Consumers build the CLI or static C ABI library from source with Zig.
 
 The release smoke formats sources, runs tests, runs E2E tests, builds and runs
 the smoke executable, creates a source-package candidate, and verifies that

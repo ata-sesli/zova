@@ -69,6 +69,44 @@ test "cli check succeeds for healthy databases" {
     try expectContains(deep.stdout, "loose_chunks:");
 }
 
+test "cli check reports healthy converted database" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var sqlite_path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const sqlite_path = try testingDbPath(&sqlite_path_buffer, tmp.sub_path[0..], "source.db");
+    {
+        var raw = try zova.sqlite.Database.open(sqlite_path);
+        defer raw.deinit();
+        try raw.exec(
+            \\create table notes (id integer primary key, body text not null);
+            \\insert into notes (body) values ('kept as sql');
+        );
+    }
+
+    var zova_path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const zova_path = try testingDbPath(&zova_path_buffer, tmp.sub_path[0..], "converted.zova");
+    try zova.convertSqliteToZova(sqlite_path, zova_path);
+
+    {
+        var db = try zova.Database.open(zova_path);
+        defer db.deinit();
+        _ = try db.putObject("converted object");
+        try db.createVectorCollection("converted", .{ .dimensions = 2, .metric = .l2 });
+        try db.putVector("converted", "note-1", &.{ 3.0, 4.0 });
+    }
+
+    var info = try runCli(&.{ "zova", "info", zova_path });
+    defer info.deinit();
+    try std.testing.expectEqual(@as(u8, 0), info.code);
+    try expectContains(info.stdout, "user_tables: 1");
+
+    var check = try runCli(&.{ "zova", "check", "--deep", zova_path });
+    defer check.deinit();
+    try std.testing.expectEqual(@as(u8, 0), check.code);
+    try expectContains(check.stdout, "deep_check: ok");
+}
+
 test "cli open failures return exit code 3" {
     var result = try runCli(&.{ "zova", "info", "missing.zova" });
     defer result.deinit();
@@ -151,7 +189,11 @@ test "cli deep check reports full object hash mismatch" {
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "wrong-object-id.zova");
-    try createHealthyDatabase(db_path);
+    {
+        var db = try zova.Database.create(db_path);
+        defer db.deinit();
+        _ = try db.putObject("hello object");
+    }
 
     {
         var raw = try zova.sqlite.Database.open(db_path);
@@ -192,6 +234,33 @@ test "cli deep check reports vector corruption" {
     defer result.deinit();
     try std.testing.expectEqual(@as(u8, 4), result.code);
     try expectContains(result.stderr, "vector corruption");
+}
+
+test "cli deep check covers writer-created object and sql-introduced corruption" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "writer-and-corruption.zova");
+    try createHealthyDatabase(db_path);
+
+    var healthy = try runCli(&.{ "zova", "check", "--deep", db_path });
+    defer healthy.deinit();
+    try std.testing.expectEqual(@as(u8, 0), healthy.code);
+    try expectContains(healthy.stdout, "objects_checked: 2");
+    try expectContains(healthy.stdout, "vectors_checked: 1");
+    try expectContains(healthy.stdout, "loose_chunks: 1");
+
+    {
+        var raw = try zova.sqlite.Database.open(db_path);
+        defer raw.deinit();
+        try raw.exec("update _zova_chunks set data = x'636f7272757074', size_bytes = 7 where rowid = (select rowid from _zova_chunks limit 1)");
+    }
+
+    var corrupt = try runCli(&.{ "zova", "check", "--deep", db_path });
+    defer corrupt.deinit();
+    try std.testing.expectEqual(@as(u8, 4), corrupt.code);
+    try expectContains(corrupt.stderr, "object corruption");
 }
 
 const CliResult = struct {
@@ -237,6 +306,12 @@ fn createHealthyDatabase(path: [:0]const u8) !void {
     try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .l2 });
     try db.putVector("docs", "doc-1", &.{ 1.0, 2.0 });
     try db.putObjectChunk(zova.objectChunkId("loose"), "loose");
+
+    var writer = try db.objectWriter(std.testing.allocator);
+    defer writer.deinit();
+    try writer.write("streamed ");
+    try writer.write("object");
+    _ = try writer.finish();
 }
 
 fn insertDocument(db: *zova.Database, object_id: zova.ObjectId, vector_id: []const u8, title: []const u8) !void {

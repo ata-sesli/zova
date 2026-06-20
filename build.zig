@@ -127,11 +127,51 @@ pub fn build(b: *std.Build) void {
         .name = "zova_c_abi_smoke",
         .root_module = c_smoke_module,
     });
+    const c_abi_smoke_db_path = b.pathJoin(&.{ b.cache_root.path orelse ".zig-cache", "c-abi-smoke.zova" });
     const c_smoke_cmd = b.addRunArtifact(c_smoke);
-    c_smoke_cmd.addArg(b.pathJoin(&.{ b.cache_root.path orelse ".zig-cache", "c-abi-smoke.zova" }));
+    c_smoke_cmd.addArg(c_abi_smoke_db_path);
+
+    const cli_info_c_abi_db_cmd = b.addRunArtifact(exe);
+    cli_info_c_abi_db_cmd.step.dependOn(&c_smoke_cmd.step);
+    cli_info_c_abi_db_cmd.addArg("info");
+    cli_info_c_abi_db_cmd.addArg(c_abi_smoke_db_path);
+
+    const cli_check_c_abi_db_cmd = b.addRunArtifact(exe);
+    cli_check_c_abi_db_cmd.step.dependOn(&c_smoke_cmd.step);
+    cli_check_c_abi_db_cmd.addArg("check");
+    cli_check_c_abi_db_cmd.addArg("--deep");
+    cli_check_c_abi_db_cmd.addArg(c_abi_smoke_db_path);
+
+    const cxx_header_module = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libcpp = true,
+    });
+    cxx_header_module.addIncludePath(b.path("include"));
+    cxx_header_module.addCSourceFile(.{
+        .file = b.path("tests/c_abi_header_smoke.cpp"),
+        .flags = &.{"-std=c++17"},
+    });
+    cxx_header_module.linkLibrary(c_abi_lib);
+
+    const cxx_header_smoke = b.addExecutable(.{
+        .name = "zova_c_abi_header_smoke",
+        .root_module = cxx_header_module,
+    });
+    const cxx_header_cmd = b.addRunArtifact(cxx_header_smoke);
+
+    const c_abi_symbols_cmd = b.addSystemCommand(&.{
+        "sh",
+        "tests/check_c_abi_symbols.sh",
+    });
+    c_abi_symbols_cmd.addArtifactArg(c_abi_lib);
 
     const c_abi_test_step = b.step("c-abi-test", "Run the C ABI smoke test");
     c_abi_test_step.dependOn(&c_smoke_cmd.step);
+    c_abi_test_step.dependOn(&cli_info_c_abi_db_cmd.step);
+    c_abi_test_step.dependOn(&cli_check_c_abi_db_cmd.step);
+    c_abi_test_step.dependOn(&cxx_header_cmd.step);
+    c_abi_test_step.dependOn(&c_abi_symbols_cmd.step);
 }
 
 fn addSqlite(module: *std.Build.Module, b: *std.Build) void {
