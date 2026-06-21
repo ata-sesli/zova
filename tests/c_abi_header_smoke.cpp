@@ -8,11 +8,17 @@ static_assert(sizeof(zova_object_chunk_id) == 32, "chunk ids are fixed 32-byte S
 static_assert(ZOVA_VECTOR_METRIC_COSINE == 0, "vector metric values are stable");
 static_assert(ZOVA_VECTOR_METRIC_L2 == 1, "vector metric values are stable");
 static_assert(ZOVA_VECTOR_METRIC_DOT == 2, "vector metric values are stable");
+static_assert(ZOVA_STEP_ROW == 1, "step result values are stable");
+static_assert(ZOVA_STEP_DONE == 2, "step result values are stable");
+static_assert(ZOVA_COLUMN_INTEGER == 1, "column type values are stable");
+static_assert(ZOVA_COLUMN_NULL == 5, "column type values are stable");
 static_assert(ZOVA_VECTOR_INVALID == 75, "vector status values are stable");
 
 int main() {
     zova_database *db = nullptr;
+    zova_statement *statement = nullptr;
     zova_buffer buffer = {};
+    zova_text text = {};
     zova_object_manifest manifest = {};
     zova_object_id id = {};
     zova_vector vector = {};
@@ -30,6 +36,24 @@ int main() {
     zova_vector_put_many_request put_many_request = {};
     put_many_request.vectors = vector_inputs;
     put_many_request.vectors_len = 1;
+    zova_database_prepare_request prepare_request = {};
+    prepare_request.out_statement = &statement;
+    zova_statement_step_request step_request = {};
+    step_request.statement = statement;
+    zova_step_result step_result = ZOVA_STEP_DONE;
+    step_request.out_result = &step_result;
+    zova_statement_bind_text_request bind_text_request = {};
+    bind_text_request.data = reinterpret_cast<const uint8_t *>("hello");
+    bind_text_request.len = 5;
+    zova_statement_column_type_request column_type_request = {};
+    zova_column_type column_type = ZOVA_COLUMN_NULL;
+    column_type_request.out_type = &column_type;
+    zova_statement_column_text_request column_text_request = {};
+    column_text_request.out_text = &text;
+    zova_statement_column_blob_request column_blob_request = {};
+    column_blob_request.out_buffer = &buffer;
+    zova_database_simple_request simple_request = {};
+    simple_request.db = db;
     zova_vector_collection_info_get_request info_request = {};
     info_request.out_info = &collection_info;
     zova_vector_collections_list_request list_request = {};
@@ -64,6 +88,7 @@ int main() {
     by_id_in_within_request.candidate_ids = nullptr;
 
     zova_buffer_free(&buffer);
+    zova_text_free(&text);
     zova_object_manifest_free(&manifest);
     zova_vector_free(&vector);
     zova_vector_search_results_free(&search_results);
@@ -85,6 +110,13 @@ int main() {
                    zova_status_name(ZOVA_VECTOR_INVALID) != nullptr &&
                    zova_status_name(ZOVA_OK) != nullptr &&
                    zova_abi_version_string() != nullptr &&
+                   prepare_request.out_statement == &statement &&
+                   step_request.out_result == &step_result &&
+                   bind_text_request.len == 5 &&
+                   column_type_request.out_type == &column_type &&
+                   column_text_request.out_text == &text &&
+                   column_blob_request.out_buffer == &buffer &&
+                   simple_request.db == db &&
                    id.bytes[0] == 0
                ? 0
                : 1;

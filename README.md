@@ -8,7 +8,7 @@ content-addressed objects, chunk manifests, streaming writes, and exact vector
 search. Applications keep their own metadata in normal SQL tables and store
 Zova object ids or vector ids alongside their rows.
 
-Current package version: `0.11.1`.
+Current package version: `0.11.2`.
 
 Zova is not tied to one application language. The project exposes:
 
@@ -51,7 +51,7 @@ flowchart TD
     VecCols --> Vecs
 ```
 
-## What Works In v0.11
+## What Works In v0.11.2
 
 - normal SQLite access through a thin wrapper
 - `.zova` database create/open/validation
@@ -65,7 +65,8 @@ flowchart TD
 - native vector collections
 - vector CRUD, batch upsert, collection info/list/delete
 - exact vector search, candidate-filtered search, search-by-id, and thresholds
-- C ABI for database, SQL, objects, chunks, writers, and vectors
+- C ABI for database, prepared SQL statements, explicit maintenance, objects,
+  chunks, writers, and vectors
 - CLI `info`, `stats`, object/chunk/vector/table inspection, and `check`
 - source-only release packaging
 
@@ -104,6 +105,9 @@ The ABI exposes:
 
 - database create/open/close
 - SQL `exec`
+- prepared statements with bind/step/column/finalize
+- explicit transaction helpers
+- explicit `VACUUM`
 - SQLite-to-Zova conversion
 - object put/get/delete/existence/size/chunk count
 - range reads
@@ -126,12 +130,51 @@ lists, and search results are owned by Zova and must be freed explicitly:
 ```c
 zova_buffer_free(&buffer);
 zova_message_free(&message);
+zova_text_free(&text);
 zova_object_manifest_free(&manifest);
 zova_vector_free(&vector);
 zova_vector_collection_info_free(&info);
 zova_vector_collection_list_free(&list);
 zova_vector_search_results_free(&results);
 ```
+
+Prepared SQL uses one Zova database handle. This is the intended path for
+Rust, Go, and other bindings that want records, objects, and vectors through a
+single database API instead of opening a second SQLite handle:
+
+```c
+zova_statement *stmt = NULL;
+zova_database_prepare(&(zova_database_prepare_request){
+    .db = db,
+    .sql = "insert into attachments (object_id, filename) values (?, ?)",
+    .out_statement = &stmt,
+});
+
+zova_statement_bind_blob(&(zova_statement_bind_blob_request){
+    .statement = stmt,
+    .index = 1,
+    .data = object_id.bytes,
+    .len = sizeof(object_id.bytes),
+});
+
+zova_statement_bind_text(&(zova_statement_bind_text_request){
+    .statement = stmt,
+    .index = 2,
+    .data = (const uint8_t *)"photo.jpg",
+    .len = strlen("photo.jpg"),
+});
+
+zova_step_result step = ZOVA_STEP_DONE;
+zova_statement_step(&(zova_statement_step_request){
+    .statement = stmt,
+    .out_result = &step,
+});
+zova_statement_finalize(stmt);
+```
+
+Parameter indexes are 1-based, matching SQLite. Column indexes are 0-based.
+Column text and blob outputs are owned copies; free them with `zova_text_free`
+and `zova_buffer_free`.
 
 Every C ABI function returns `zova_status`. `ZOVA_OK` means success.
 `zova_status_name(status)` returns a static status name.
@@ -251,6 +294,23 @@ try db.deleteObject(id);
 
 Deletion removes Zova-owned object rows, manifest rows, and unreferenced chunks.
 It never scans or mutates user SQL rows.
+
+Deletion frees logical storage inside SQLite. The `.zova` file may not shrink
+immediately, because SQLite can keep freed pages for reuse. Run an explicit
+vacuum when your application deliberately wants SQLite to rebuild the file:
+
+```zig
+try db.vacuum();
+```
+
+Through the C ABI:
+
+```c
+zova_database_vacuum(&(zova_database_simple_request){ .db = db });
+```
+
+Zova never runs `VACUUM` automatically and does not enable SQLite
+`auto_vacuum` for you.
 
 ## Manifests, Chunks, And Transfers
 
@@ -416,9 +476,18 @@ var close = try db.searchVectorsWithin(
 defer close.deinit(allocator);
 ```
 
-Search is exact and flat-scan in v0.11. Missing candidate ids are skipped.
-Invalid candidate ids return `error.VectorInvalid`. Corrupt selected vector rows
-return `error.VectorCorrupt`.
+Search is exact and flat-scan in v0.11.2. That is deliberate: Zova currently
+prioritizes deterministic local correctness over approximate indexing. It is a
+good fit for small and medium local datasets, offline ranking, tests that need
+repeatable nearest-neighbor results, and candidate-filtered search where SQL
+first narrows the metadata set and Zova ranks the eligible vector ids.
+
+It is not yet a low-latency ANN engine for millions of vectors. Zova does not
+include HNSW, IVFFlat, quantized indexes, vector SQL operators, or SQLite
+virtual-table integration in v0.11.2.
+
+Missing candidate ids are skipped. Invalid candidate ids return
+`error.VectorInvalid`. Corrupt selected vector rows return `error.VectorCorrupt`.
 
 ## CLI
 
@@ -482,6 +551,20 @@ Exit codes:
 The CLI does not repair, migrate, delete loose chunks, rebuild manifests, run
 `VACUUM`, change PRAGMAs, or mutate `.zova` files.
 
+## SQLite Policy
+
+Zova does not hide SQLite. SQL remains SQLite SQL, locking remains SQLite
+locking, and PRAGMAs remain application policy.
+
+Foreign-key enforcement is connection-local in SQLite. Zova private tables may
+declare foreign keys for schema clarity, but Zova does not silently run
+`PRAGMA foreign_keys = ON` because that would also affect user tables. Zova
+validates object/vector integrity through its APIs and `zova check --deep`.
+
+Similarly, Zova does not run `VACUUM`, enable `auto_vacuum`, or change journal
+or synchronous settings automatically. Use explicit SQL or `Database.vacuum()`
+when your application wants maintenance behavior.
+
 ## Vendored SQLite
 
 Zova builds against the vendored SQLite amalgamation in `vendor/sqlite3.53.2`.
@@ -532,7 +615,7 @@ scripts/check-release.sh
 
 ## Release Package Policy
 
-v0.11 releases a source-only package/archive. The package includes:
+v0.11.2 releases a source-only package/archive. The package includes:
 
 - `README.md`
 - `build.zig`
@@ -551,16 +634,16 @@ Consumers build the CLI or static C ABI library from source with Zig.
 The release script:
 
 ```sh
-scripts/package-release.sh 0.11.1
+scripts/package-release.sh 0.11.2
 ```
 
 tags the current commit, pushes the branch and tag, creates a source archive,
 and creates the GitHub release. Do not run it until the exact commit you want
 to release is ready.
 
-## Non-Goals In v0.11
+## Non-Goals In v0.11.2
 
-Zova v0.11 does not include:
+Zova v0.11.2 does not include:
 
 - ANN indexes
 - HNSW or IVFFlat

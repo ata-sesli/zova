@@ -91,6 +91,140 @@ int main(int argc, char **argv) {
         .sql = "create table refs (id integer primary key, object_id blob not null)",
     };
     expect_status(zova_database_exec(&exec_req), ZOVA_OK, "exec sql");
+    expect_status(zova_database_exec(&(zova_database_exec_request){
+                      .db = db,
+                      .sql = "create table notes (id integer primary key, body text not null, payload blob not null)",
+                  }),
+                  ZOVA_OK,
+                  "exec notes table");
+
+    expect_status(zova_database_begin(&(zova_database_simple_request){.db = db}), ZOVA_OK, "begin transaction");
+    expect_status(zova_database_exec(&(zova_database_exec_request){
+                      .db = db,
+                      .sql = "insert into notes (body, payload) values ('rolled back', x'00')",
+                  }),
+                  ZOVA_OK,
+                  "transaction insert");
+    expect_status(zova_database_rollback(&(zova_database_simple_request){.db = db}), ZOVA_OK, "rollback transaction");
+
+    zova_statement *insert_note = NULL;
+    expect_status(zova_database_prepare(&(zova_database_prepare_request){
+                      .db = db,
+                      .sql = "insert into notes (body, payload) values (:body, :payload)",
+                      .out_statement = &insert_note,
+                  }),
+                  ZOVA_OK,
+                  "prepare note insert");
+    int body_index = 0;
+    expect_status(zova_statement_parameter_index(&(zova_statement_parameter_index_request){
+                      .statement = insert_note,
+                      .name = ":body",
+                      .out_index = &body_index,
+                  }),
+                  ZOVA_OK,
+                  "note body parameter");
+    if (body_index != 1) {
+        fprintf(stderr, "note body parameter: unexpected index\n");
+        return 1;
+    }
+    const char *note_body = "committed note";
+    const uint8_t note_payload[] = {9, 8, 7};
+    expect_status(zova_database_begin_immediate(&(zova_database_simple_request){.db = db}), ZOVA_OK, "begin immediate transaction");
+    expect_status(zova_statement_bind_text(&(zova_statement_bind_text_request){
+                      .statement = insert_note,
+                      .index = 1,
+                      .data = (const uint8_t *)note_body,
+                      .len = strlen(note_body),
+                  }),
+                  ZOVA_OK,
+                  "bind note text");
+    expect_status(zova_statement_bind_blob(&(zova_statement_bind_blob_request){
+                      .statement = insert_note,
+                      .index = 2,
+                      .data = note_payload,
+                      .len = sizeof(note_payload),
+                  }),
+                  ZOVA_OK,
+                  "bind note blob");
+    zova_step_result step_result = ZOVA_STEP_DONE;
+    expect_status(zova_statement_step(&(zova_statement_step_request){
+                      .statement = insert_note,
+                      .out_result = &step_result,
+                  }),
+                  ZOVA_OK,
+                  "step note insert");
+    if (step_result != ZOVA_STEP_DONE) {
+        fprintf(stderr, "step note insert: expected done\n");
+        return 1;
+    }
+    expect_status(zova_database_commit(&(zova_database_simple_request){.db = db}), ZOVA_OK, "commit transaction");
+    expect_status(zova_statement_finalize(insert_note), ZOVA_OK, "finalize note insert");
+
+    zova_statement *select_note = NULL;
+    expect_status(zova_database_prepare(&(zova_database_prepare_request){
+                      .db = db,
+                      .sql = "select body, payload from notes",
+                      .out_statement = &select_note,
+                  }),
+                  ZOVA_OK,
+                  "prepare note select");
+    int column_count = 0;
+    expect_status(zova_statement_column_count(&(zova_statement_column_count_request){
+                      .statement = select_note,
+                      .out_count = &column_count,
+                  }),
+                  ZOVA_OK,
+                  "note column count");
+    if (column_count != 2) {
+        fprintf(stderr, "note column count: unexpected count\n");
+        return 1;
+    }
+    expect_status(zova_statement_step(&(zova_statement_step_request){
+                      .statement = select_note,
+                      .out_result = &step_result,
+                  }),
+                  ZOVA_OK,
+                  "step note select");
+    if (step_result != ZOVA_STEP_ROW) {
+        fprintf(stderr, "step note select: expected row\n");
+        return 1;
+    }
+    zova_column_type note_type = ZOVA_COLUMN_NULL;
+    expect_status(zova_statement_column_type(&(zova_statement_column_type_request){
+                      .statement = select_note,
+                      .index = 0,
+                      .out_type = &note_type,
+                  }),
+                  ZOVA_OK,
+                  "note text column type");
+    if (note_type != ZOVA_COLUMN_TEXT) {
+        fprintf(stderr, "note text column type: expected text\n");
+        return 1;
+    }
+    zova_text selected_body = {0};
+    zova_buffer selected_payload = {0};
+    expect_status(zova_statement_column_text(&(zova_statement_column_text_request){
+                      .statement = select_note,
+                      .index = 0,
+                      .out_text = &selected_body,
+                  }),
+                  ZOVA_OK,
+                  "note text column");
+    if (selected_body.len != strlen(note_body) || memcmp(selected_body.data, note_body, selected_body.len) != 0) {
+        fprintf(stderr, "note text column: unexpected value\n");
+        return 1;
+    }
+    expect_status(zova_statement_column_blob(&(zova_statement_column_blob_request){
+                      .statement = select_note,
+                      .index = 1,
+                      .out_buffer = &selected_payload,
+                  }),
+                  ZOVA_OK,
+                  "note blob column");
+    expect_bytes(selected_payload.data, note_payload, selected_payload.len, "note blob column");
+    zova_text_free(&selected_body);
+    zova_buffer_free(&selected_payload);
+    expect_status(zova_statement_finalize(select_note), ZOVA_OK, "finalize note select");
 
     zova_vector_collection_create_request vector_collection_req = {
         .db = db,
@@ -491,6 +625,64 @@ int main(int argc, char **argv) {
     expect_status(zova_object_put(&put_req), ZOVA_OK, "put object");
     expect_id_equal(object_id, expected_id, "put object id");
 
+    zova_statement *insert_ref = NULL;
+    expect_status(zova_database_prepare(&(zova_database_prepare_request){
+                      .db = db,
+                      .sql = "insert into refs (object_id) values (?)",
+                      .out_statement = &insert_ref,
+                  }),
+                  ZOVA_OK,
+                  "prepare ref insert");
+    expect_status(zova_statement_bind_blob(&(zova_statement_bind_blob_request){
+                      .statement = insert_ref,
+                      .index = 1,
+                      .data = object_id.bytes,
+                      .len = sizeof(object_id.bytes),
+                  }),
+                  ZOVA_OK,
+                  "bind object id ref");
+    expect_status(zova_statement_step(&(zova_statement_step_request){
+                      .statement = insert_ref,
+                      .out_result = &step_result,
+                  }),
+                  ZOVA_OK,
+                  "step ref insert");
+    if (step_result != ZOVA_STEP_DONE) {
+        fprintf(stderr, "step ref insert: expected done\n");
+        return 1;
+    }
+    expect_status(zova_statement_finalize(insert_ref), ZOVA_OK, "finalize ref insert");
+
+    zova_statement *select_ref = NULL;
+    expect_status(zova_database_prepare(&(zova_database_prepare_request){
+                      .db = db,
+                      .sql = "select object_id from refs",
+                      .out_statement = &select_ref,
+                  }),
+                  ZOVA_OK,
+                  "prepare ref select");
+    expect_status(zova_statement_step(&(zova_statement_step_request){
+                      .statement = select_ref,
+                      .out_result = &step_result,
+                  }),
+                  ZOVA_OK,
+                  "step ref select");
+    if (step_result != ZOVA_STEP_ROW) {
+        fprintf(stderr, "step ref select: expected row\n");
+        return 1;
+    }
+    zova_buffer selected_object_id = {0};
+    expect_status(zova_statement_column_blob(&(zova_statement_column_blob_request){
+                      .statement = select_ref,
+                      .index = 0,
+                      .out_buffer = &selected_object_id,
+                  }),
+                  ZOVA_OK,
+                  "read object id ref");
+    expect_bytes(selected_object_id.data, object_id.bytes, sizeof(object_id.bytes), "read object id ref");
+    zova_buffer_free(&selected_object_id);
+    expect_status(zova_statement_finalize(select_ref), ZOVA_OK, "finalize ref select");
+
     uint8_t range[5] = {0};
     size_t copied = 0;
     zova_object_read_range_request range_req = {
@@ -615,6 +807,7 @@ int main(int argc, char **argv) {
     expect_status(zova_object_delete(&missing_delete), ZOVA_OBJECT_NOT_FOUND, "missing object");
 
     zova_object_manifest_free(&manifest);
+    expect_status(zova_database_vacuum(&(zova_database_simple_request){.db = db}), ZOVA_OK, "explicit vacuum");
     expect_status(zova_database_close(db), ZOVA_OK, "close database");
 
     db = NULL;

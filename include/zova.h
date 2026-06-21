@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 /*
- * Zova C ABI, v0.11.1 pre-1.0.
+ * Zova C ABI, v0.11.2 pre-1.0.
  *
  * This header exposes a C-compatible object and vector API over Zova's Zig
  * implementation. The ABI is intentionally conservative: opaque handles,
@@ -32,10 +32,12 @@
  *   database handle; it is valid until the next call on that handle or close.
  *
  * Scope:
- * - This ABI exposes database lifecycle, SQL exec, conversion, objects,
- *   chunks, manifests, range reads, assembly, ObjectWriter, and native vectors.
+ * - This ABI exposes database lifecycle, SQL exec, prepared statements,
+ *   explicit transactions, explicit vacuum, conversion, objects, chunks,
+ *   manifests, range reads, assembly, ObjectWriter, and native vectors.
  * - Vector metadata remains application-owned in user SQL tables. Vector search
  *   returns vector ids and distances only.
+ * - Zova does not automatically run VACUUM or change SQLite PRAGMAs.
  */
 
 #ifdef __cplusplus
@@ -45,6 +47,7 @@ extern "C" {
 /* Opaque handles. Callers must only pass them back to Zova functions. */
 typedef struct zova_database zova_database;
 typedef struct zova_object_writer zova_object_writer;
+typedef struct zova_statement zova_statement;
 
 /* Stable status values for the pre-1.0 ABI surface. */
 typedef enum zova_status {
@@ -88,6 +91,19 @@ typedef enum zova_vector_metric {
     ZOVA_VECTOR_METRIC_DOT = 2,
 } zova_vector_metric;
 
+typedef enum zova_step_result {
+    ZOVA_STEP_ROW = 1,
+    ZOVA_STEP_DONE = 2,
+} zova_step_result;
+
+typedef enum zova_column_type {
+    ZOVA_COLUMN_INTEGER = 1,
+    ZOVA_COLUMN_FLOAT = 2,
+    ZOVA_COLUMN_TEXT = 3,
+    ZOVA_COLUMN_BLOB = 4,
+    ZOVA_COLUMN_NULL = 5,
+} zova_column_type;
+
 /* SHA-256 identity of full object bytes. */
 typedef struct zova_object_id {
     uint8_t bytes[32];
@@ -109,6 +125,12 @@ typedef struct zova_message {
     char *data;
     size_t len;
 } zova_message;
+
+/* Owned text returned by Zova. Free with zova_text_free. */
+typedef struct zova_text {
+    char *data;
+    size_t len;
+} zova_text;
 
 /* One flat manifest row. Chunks are ordered by index. */
 typedef struct zova_object_manifest_chunk {
@@ -199,6 +221,98 @@ typedef struct zova_database_exec_request {
     zova_database *db;
     const char *sql;
 } zova_database_exec_request;
+
+typedef struct zova_database_simple_request {
+    zova_database *db;
+} zova_database_simple_request;
+
+typedef struct zova_database_prepare_request {
+    zova_database *db;
+    const char *sql;
+    zova_statement **out_statement;
+} zova_database_prepare_request;
+
+typedef struct zova_statement_step_request {
+    zova_statement *statement;
+    zova_step_result *out_result;
+} zova_statement_step_request;
+
+typedef struct zova_statement_bind_null_request {
+    zova_statement *statement;
+    int index;
+} zova_statement_bind_null_request;
+
+typedef struct zova_statement_bind_int64_request {
+    zova_statement *statement;
+    int index;
+    int64_t value;
+} zova_statement_bind_int64_request;
+
+typedef struct zova_statement_bind_double_request {
+    zova_statement *statement;
+    int index;
+    double value;
+} zova_statement_bind_double_request;
+
+typedef struct zova_statement_bind_text_request {
+    zova_statement *statement;
+    int index;
+    const uint8_t *data;
+    size_t len;
+} zova_statement_bind_text_request;
+
+typedef struct zova_statement_bind_blob_request {
+    zova_statement *statement;
+    int index;
+    const uint8_t *data;
+    size_t len;
+} zova_statement_bind_blob_request;
+
+typedef struct zova_statement_parameter_count_request {
+    zova_statement *statement;
+    int *out_count;
+} zova_statement_parameter_count_request;
+
+typedef struct zova_statement_parameter_index_request {
+    zova_statement *statement;
+    const char *name;
+    int *out_index;
+} zova_statement_parameter_index_request;
+
+typedef struct zova_statement_column_count_request {
+    zova_statement *statement;
+    int *out_count;
+} zova_statement_column_count_request;
+
+typedef struct zova_statement_column_type_request {
+    zova_statement *statement;
+    int index;
+    zova_column_type *out_type;
+} zova_statement_column_type_request;
+
+typedef struct zova_statement_column_int64_request {
+    zova_statement *statement;
+    int index;
+    int64_t *out_value;
+} zova_statement_column_int64_request;
+
+typedef struct zova_statement_column_double_request {
+    zova_statement *statement;
+    int index;
+    double *out_value;
+} zova_statement_column_double_request;
+
+typedef struct zova_statement_column_text_request {
+    zova_statement *statement;
+    int index;
+    zova_text *out_text;
+} zova_statement_column_text_request;
+
+typedef struct zova_statement_column_blob_request {
+    zova_statement *statement;
+    int index;
+    zova_buffer *out_buffer;
+} zova_statement_column_blob_request;
 
 /* Stores caller bytes as a complete content-addressed object. */
 typedef struct zova_object_put_request {
@@ -455,19 +569,51 @@ const char *zova_status_name(zova_status status);
 /* Free functions are null-safe and reset the passed container to empty. */
 void zova_buffer_free(zova_buffer *buffer);
 void zova_message_free(zova_message *message);
+void zova_text_free(zova_text *text);
 void zova_object_manifest_free(zova_object_manifest *manifest);
 void zova_vector_free(zova_vector *vector);
 void zova_vector_search_results_free(zova_vector_search_results *results);
 void zova_vector_collection_info_free(zova_vector_collection_info *info);
 void zova_vector_collection_list_free(zova_vector_collection_list *list);
 
-/* Database lifecycle, SQL passthrough, and SQLite-to-Zova conversion. */
+/* Database lifecycle, SQL passthrough, prepared statements, and conversion. */
 zova_status zova_database_create(const zova_database_open_request *request);
 zova_status zova_database_open(const zova_database_open_request *request);
 zova_status zova_database_close(zova_database *db);
 zova_status zova_database_exec(const zova_database_exec_request *request);
+zova_status zova_database_begin(const zova_database_simple_request *request);
+zova_status zova_database_begin_immediate(const zova_database_simple_request *request);
+zova_status zova_database_commit(const zova_database_simple_request *request);
+zova_status zova_database_rollback(const zova_database_simple_request *request);
+zova_status zova_database_vacuum(const zova_database_simple_request *request);
+zova_status zova_database_prepare(const zova_database_prepare_request *request);
 const char *zova_database_last_error_message(zova_database *db);
 zova_status zova_convert_sqlite_to_zova(const zova_convert_sqlite_to_zova_request *request);
+
+/*
+ * Prepared statements.
+ *
+ * Parameter indexes are 1-based. Column indexes are 0-based. Text and blob
+ * bind inputs are borrowed for the call; column text/blob outputs are owned by
+ * Zova and must be freed with zova_text_free or zova_buffer_free.
+ */
+zova_status zova_statement_finalize(zova_statement *statement);
+zova_status zova_statement_step(const zova_statement_step_request *request);
+zova_status zova_statement_reset(zova_statement *statement);
+zova_status zova_statement_clear_bindings(zova_statement *statement);
+zova_status zova_statement_bind_null(const zova_statement_bind_null_request *request);
+zova_status zova_statement_bind_int64(const zova_statement_bind_int64_request *request);
+zova_status zova_statement_bind_double(const zova_statement_bind_double_request *request);
+zova_status zova_statement_bind_text(const zova_statement_bind_text_request *request);
+zova_status zova_statement_bind_blob(const zova_statement_bind_blob_request *request);
+zova_status zova_statement_parameter_count(const zova_statement_parameter_count_request *request);
+zova_status zova_statement_parameter_index(const zova_statement_parameter_index_request *request);
+zova_status zova_statement_column_count(const zova_statement_column_count_request *request);
+zova_status zova_statement_column_type(const zova_statement_column_type_request *request);
+zova_status zova_statement_column_int64(const zova_statement_column_int64_request *request);
+zova_status zova_statement_column_double(const zova_statement_column_double_request *request);
+zova_status zova_statement_column_text(const zova_statement_column_text_request *request);
+zova_status zova_statement_column_blob(const zova_statement_column_blob_request *request);
 
 /*
  * Object/chunk helpers and lifecycle operations.

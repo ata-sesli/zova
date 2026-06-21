@@ -605,6 +605,15 @@ pub const Database = struct {
         return try self.sqlite_db.prepare(sql);
     }
 
+    /// Reclaim SQLite free pages with an explicit in-place `VACUUM`.
+    ///
+    /// Zova never runs `VACUUM` automatically after object or vector deletes.
+    /// This method is a thin SQLite wrapper for applications that deliberately
+    /// want SQLite to rebuild the database file and potentially shrink it.
+    pub fn vacuum(self: *Database) Error!void {
+        try self.exec("vacuum");
+    }
+
     /// Current SQLite error message for the underlying connection.
     pub fn errorMessage(self: *Database) []const u8 {
         return self.sqlite_db.errorMessage();

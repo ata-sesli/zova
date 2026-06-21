@@ -21,9 +21,20 @@
 //! returned vectors/search results are library-owned containers with explicit
 //! free functions. Vector metadata remains application-owned in normal SQL
 //! tables; this bridge only exposes native vector storage and exact search.
+//!
+//! Prepared statements intentionally mirror the thin Zig SQLite wrapper so
+//! language bindings can use one Zova database handle for application records
+//! plus native object/vector operations. Statement column text/blob outputs are
+//! copied into owned C ABI containers to avoid exposing SQLite's borrowed
+//! statement-scoped column lifetimes across FFI boundaries.
+//!
+//! Maintenance is explicit. The ABI exposes in-place `VACUUM`, but Zova never
+//! runs it automatically and never changes connection PRAGMAs such as
+//! `foreign_keys`, journal mode, or synchronous mode on behalf of callers.
 
 const std = @import("std");
 const zova = @import("zova.zig");
+const sqlite = @import("sqlite.zig");
 
 const allocator = std.heap.c_allocator;
 
@@ -31,6 +42,7 @@ const allocator = std.heap.c_allocator;
 // DatabaseHandle and WriterHandle below so C callers cannot depend on layout.
 pub const zova_database = opaque {};
 pub const zova_object_writer = opaque {};
+pub const zova_statement = opaque {};
 
 const DatabaseHandle = struct {
     db: zova.Database,
@@ -45,6 +57,14 @@ const WriterHandle = struct {
     // support using either handle concurrently from multiple threads.
     db: *DatabaseHandle,
     writer: zova.ObjectWriter,
+};
+
+const StatementHandle = struct {
+    // Statements borrow their parent database handle and must be finalized
+    // before closing the database. The C ABI mirrors SQLite's one-handle,
+    // non-concurrent statement model.
+    db: *DatabaseHandle,
+    statement: sqlite.Statement,
 };
 
 // Keep these numeric values synchronized with `include/zova.h`. Existing values
@@ -84,6 +104,19 @@ pub const zova_status = enum(c_int) {
     VECTOR_INVALID = 75,
 };
 
+pub const zova_step_result = enum(c_int) {
+    ROW = 1,
+    DONE = 2,
+};
+
+pub const zova_column_type = enum(c_int) {
+    INTEGER = 1,
+    FLOAT = 2,
+    TEXT = 3,
+    BLOB = 4,
+    NULL = 5,
+};
+
 pub const zova_object_id = extern struct {
     bytes: [32]u8,
 };
@@ -98,6 +131,11 @@ pub const zova_buffer = extern struct {
 };
 
 pub const zova_message = extern struct {
+    data: ?[*]u8,
+    len: usize,
+};
+
+pub const zova_text = extern struct {
     data: ?[*]u8,
     len: usize,
 };
@@ -184,6 +222,98 @@ pub const zova_convert_sqlite_to_zova_request = extern struct {
 pub const zova_database_exec_request = extern struct {
     db: ?*zova_database,
     sql: ?[*:0]const u8,
+};
+
+pub const zova_database_simple_request = extern struct {
+    db: ?*zova_database,
+};
+
+pub const zova_database_prepare_request = extern struct {
+    db: ?*zova_database,
+    sql: ?[*:0]const u8,
+    out_statement: ?*?*zova_statement,
+};
+
+pub const zova_statement_step_request = extern struct {
+    statement: ?*zova_statement,
+    out_result: ?*zova_step_result,
+};
+
+pub const zova_statement_bind_null_request = extern struct {
+    statement: ?*zova_statement,
+    index: c_int,
+};
+
+pub const zova_statement_bind_int64_request = extern struct {
+    statement: ?*zova_statement,
+    index: c_int,
+    value: i64,
+};
+
+pub const zova_statement_bind_double_request = extern struct {
+    statement: ?*zova_statement,
+    index: c_int,
+    value: f64,
+};
+
+pub const zova_statement_bind_text_request = extern struct {
+    statement: ?*zova_statement,
+    index: c_int,
+    data: ?[*]const u8,
+    len: usize,
+};
+
+pub const zova_statement_bind_blob_request = extern struct {
+    statement: ?*zova_statement,
+    index: c_int,
+    data: ?[*]const u8,
+    len: usize,
+};
+
+pub const zova_statement_parameter_count_request = extern struct {
+    statement: ?*zova_statement,
+    out_count: ?*c_int,
+};
+
+pub const zova_statement_parameter_index_request = extern struct {
+    statement: ?*zova_statement,
+    name: ?[*:0]const u8,
+    out_index: ?*c_int,
+};
+
+pub const zova_statement_column_count_request = extern struct {
+    statement: ?*zova_statement,
+    out_count: ?*c_int,
+};
+
+pub const zova_statement_column_type_request = extern struct {
+    statement: ?*zova_statement,
+    index: c_int,
+    out_type: ?*zova_column_type,
+};
+
+pub const zova_statement_column_int64_request = extern struct {
+    statement: ?*zova_statement,
+    index: c_int,
+    out_value: ?*i64,
+};
+
+pub const zova_statement_column_double_request = extern struct {
+    statement: ?*zova_statement,
+    index: c_int,
+    out_value: ?*f64,
+};
+
+pub const zova_statement_column_text_request = extern struct {
+    statement: ?*zova_statement,
+    index: c_int,
+    out_text: ?*zova_text,
+};
+
+pub const zova_statement_column_blob_request = extern struct {
+    statement: ?*zova_statement,
+    index: c_int,
+    out_buffer: ?*zova_buffer,
 };
 
 pub const zova_object_put_request = extern struct {
@@ -437,11 +567,11 @@ export fn zova_abi_version_minor() callconv(.c) u32 {
 }
 
 export fn zova_abi_version_patch() callconv(.c) u32 {
-    return 1;
+    return 2;
 }
 
 export fn zova_abi_version_string() callconv(.c) [*:0]const u8 {
-    return "0.11.1";
+    return "0.11.2";
 }
 
 // Accept a raw integer instead of a Zig enum so accidental or future C enum
@@ -466,6 +596,14 @@ export fn zova_message_free(message: ?*zova_message) callconv(.c) void {
         allocator.free(data[0 .. out.len + 1]);
     }
     out.* = .{ .data = null, .len = 0 };
+}
+
+export fn zova_text_free(text: ?*zova_text) callconv(.c) void {
+    const out = text orelse return;
+    if (out.data) |data| {
+        allocator.free(data[0 .. out.len + 1]);
+    }
+    out.* = emptyText();
 }
 
 export fn zova_object_manifest_free(manifest: ?*zova_object_manifest) callconv(.c) void {
@@ -537,6 +675,207 @@ export fn zova_database_exec(request: ?*const zova_database_exec_request) callco
     const sql = req.sql orelse return failDb(handle, error.InvalidArgument);
     handle.db.exec(std.mem.span(sql)) catch |err| return failDb(handle, err);
     return okDb(handle);
+}
+
+export fn zova_database_begin(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.db.sqlite_db.begin() catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+export fn zova_database_begin_immediate(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.db.sqlite_db.beginImmediate() catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+export fn zova_database_commit(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.db.sqlite_db.commit() catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+export fn zova_database_rollback(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.db.sqlite_db.rollback() catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+export fn zova_database_vacuum(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.db.vacuum() catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+export fn zova_database_prepare(request: ?*const zova_database_prepare_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    const sql = req.sql orelse return failDb(handle, error.InvalidArgument);
+    const out = req.out_statement orelse return failDb(handle, error.InvalidArgument);
+    out.* = null;
+
+    const statement = handle.db.prepare(std.mem.span(sql)) catch |err| return failDb(handle, err);
+    const statement_handle = allocator.create(StatementHandle) catch |err| {
+        var cleanup = statement;
+        cleanup.deinit();
+        return failDb(handle, err);
+    };
+    statement_handle.* = .{ .db = handle, .statement = statement };
+    out.* = @ptrCast(statement_handle);
+    return okDb(handle);
+}
+
+export fn zova_statement_finalize(statement: ?*zova_statement) callconv(.c) zova_status {
+    const handle = statementHandle(statement) orelse return .INVALID_ARGUMENT;
+    handle.statement.deinit();
+    allocator.destroy(handle);
+    return .OK;
+}
+
+export fn zova_statement_step(request: ?*const zova_statement_step_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    const out = req.out_result orelse return failDb(handle.db, error.InvalidArgument);
+    const result = handle.statement.step() catch |err| return failDb(handle.db, err);
+    out.* = switch (result) {
+        .row => .ROW,
+        .done => .DONE,
+    };
+    return okDb(handle.db);
+}
+
+export fn zova_statement_reset(statement: ?*zova_statement) callconv(.c) zova_status {
+    const handle = statementHandle(statement) orelse return .INVALID_ARGUMENT;
+    handle.statement.reset() catch |err| return failDb(handle.db, err);
+    return okDb(handle.db);
+}
+
+export fn zova_statement_clear_bindings(statement: ?*zova_statement) callconv(.c) zova_status {
+    const handle = statementHandle(statement) orelse return .INVALID_ARGUMENT;
+    handle.statement.clearBindings() catch |err| return failDb(handle.db, err);
+    return okDb(handle.db);
+}
+
+export fn zova_statement_bind_null(request: ?*const zova_statement_bind_null_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    handle.statement.bindNull(req.index) catch |err| return failDb(handle.db, err);
+    return okDb(handle.db);
+}
+
+export fn zova_statement_bind_int64(request: ?*const zova_statement_bind_int64_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    handle.statement.bindInt64(req.index, req.value) catch |err| return failDb(handle.db, err);
+    return okDb(handle.db);
+}
+
+export fn zova_statement_bind_double(request: ?*const zova_statement_bind_double_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    handle.statement.bindDouble(req.index, req.value) catch |err| return failDb(handle.db, err);
+    return okDb(handle.db);
+}
+
+export fn zova_statement_bind_text(request: ?*const zova_statement_bind_text_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    const bytes = bytesConst(req.data, req.len) orelse return failDb(handle.db, error.InvalidArgument);
+    handle.statement.bindText(req.index, bytes) catch |err| return failDb(handle.db, err);
+    return okDb(handle.db);
+}
+
+export fn zova_statement_bind_blob(request: ?*const zova_statement_bind_blob_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    const bytes = bytesConst(req.data, req.len) orelse return failDb(handle.db, error.InvalidArgument);
+    handle.statement.bindBlob(req.index, bytes) catch |err| return failDb(handle.db, err);
+    return okDb(handle.db);
+}
+
+export fn zova_statement_parameter_count(request: ?*const zova_statement_parameter_count_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    const out = req.out_count orelse return failDb(handle.db, error.InvalidArgument);
+    out.* = handle.statement.parameterCount();
+    return okDb(handle.db);
+}
+
+export fn zova_statement_parameter_index(request: ?*const zova_statement_parameter_index_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    const name = req.name orelse return failDb(handle.db, error.InvalidArgument);
+    const out = req.out_index orelse return failDb(handle.db, error.InvalidArgument);
+    out.* = handle.statement.parameterIndex(std.mem.span(name));
+    return okDb(handle.db);
+}
+
+export fn zova_statement_column_count(request: ?*const zova_statement_column_count_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    const out = req.out_count orelse return failDb(handle.db, error.InvalidArgument);
+    out.* = handle.statement.columnCount();
+    return okDb(handle.db);
+}
+
+export fn zova_statement_column_type(request: ?*const zova_statement_column_type_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    const out = req.out_type orelse return failDb(handle.db, error.InvalidArgument);
+    out.* = columnTypeToAbi(handle.statement.columnType(req.index));
+    return okDb(handle.db);
+}
+
+export fn zova_statement_column_int64(request: ?*const zova_statement_column_int64_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    const out = req.out_value orelse return failDb(handle.db, error.InvalidArgument);
+    out.* = handle.statement.columnInt64(req.index);
+    return okDb(handle.db);
+}
+
+export fn zova_statement_column_double(request: ?*const zova_statement_column_double_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    const out = req.out_value orelse return failDb(handle.db, error.InvalidArgument);
+    out.* = handle.statement.columnDouble(req.index);
+    return okDb(handle.db);
+}
+
+export fn zova_statement_column_text(request: ?*const zova_statement_column_text_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    const out = req.out_text orelse return failDb(handle.db, error.InvalidArgument);
+    zova_text_free(out);
+
+    if (handle.statement.columnType(req.index) == .null) return okDb(handle.db);
+    const text = handle.statement.columnText(req.index);
+    const copy = allocator.alloc(u8, text.len + 1) catch |err| return failDb(handle.db, err);
+    @memcpy(copy[0..text.len], text);
+    copy[text.len] = 0;
+    out.* = .{ .data = copy.ptr, .len = text.len };
+    return okDb(handle.db);
+}
+
+export fn zova_statement_column_blob(request: ?*const zova_statement_column_blob_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    const out = req.out_buffer orelse return failDb(handle.db, error.InvalidArgument);
+    zova_buffer_free(out);
+
+    if (handle.statement.columnType(req.index) == .null) return okDb(handle.db);
+    const blob = handle.statement.columnBlob(req.index);
+    if (blob.len == 0) return okDb(handle.db);
+
+    const copy = allocator.alloc(u8, blob.len) catch |err| return failDb(handle.db, err);
+    @memcpy(copy, blob);
+    out.* = .{ .data = copy.ptr, .len = copy.len };
+    return okDb(handle.db);
 }
 
 export fn zova_database_last_error_message(db: ?*zova_database) callconv(.c) [*:0]const u8 {
@@ -1074,6 +1413,11 @@ fn writerHandle(writer: ?*zova_object_writer) ?*WriterHandle {
     return @ptrCast(@alignCast(ptr));
 }
 
+fn statementHandle(statement: ?*zova_statement) ?*StatementHandle {
+    const ptr = statement orelse return null;
+    return @ptrCast(@alignCast(ptr));
+}
+
 // A null pointer is valid only for empty byte slices. That keeps empty objects
 // and zero-length range buffers ergonomic while still catching bad lengths.
 fn bytesConst(data: ?[*]const u8, len: usize) ?[]const u8 {
@@ -1170,6 +1514,10 @@ fn emptyBuffer() zova_buffer {
     return .{ .data = null, .len = 0 };
 }
 
+fn emptyText() zova_text {
+    return .{ .data = null, .len = 0 };
+}
+
 fn emptyManifest() zova_object_manifest {
     return .{
         .object_id = .{ .bytes = [_]u8{0} ** 32 },
@@ -1201,6 +1549,16 @@ fn emptyVectorCollectionInfo() zova_vector_collection_info {
 
 fn emptyVectorCollectionList() zova_vector_collection_list {
     return .{ .items = null, .len = 0 };
+}
+
+fn columnTypeToAbi(column_type: sqlite.ColumnType) zova_column_type {
+    return switch (column_type) {
+        .integer => .INTEGER,
+        .float => .FLOAT,
+        .text => .TEXT,
+        .blob => .BLOB,
+        .null => .NULL,
+    };
 }
 
 fn freeVectorCollectionInfo(info: *zova_vector_collection_info) void {
@@ -1392,8 +1750,8 @@ fn statusName(status: c_int) [*:0]const u8 {
 test "c abi status names and versions are stable" {
     try std.testing.expectEqual(@as(u32, 0), zova_abi_version_major());
     try std.testing.expectEqual(@as(u32, 11), zova_abi_version_minor());
-    try std.testing.expectEqual(@as(u32, 1), zova_abi_version_patch());
-    try std.testing.expectEqualStrings("0.11.1", std.mem.span(zova_abi_version_string()));
+    try std.testing.expectEqual(@as(u32, 2), zova_abi_version_patch());
+    try std.testing.expectEqualStrings("0.11.2", std.mem.span(zova_abi_version_string()));
     try std.testing.expectEqualStrings("ZOVA_OK", std.mem.span(zova_status_name(@intFromEnum(zova_status.OK))));
     try std.testing.expectEqualStrings("ZOVA_OBJECT_NOT_FOUND", std.mem.span(zova_status_name(@intFromEnum(zova_status.OBJECT_NOT_FOUND))));
     try std.testing.expectEqualStrings("ZOVA_VECTOR_INVALID", std.mem.span(zova_status_name(@intFromEnum(zova_status.VECTOR_INVALID))));
@@ -1418,6 +1776,29 @@ test "c abi validates null pointers" {
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_search_by_id_in(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_search_by_id_within(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_search_by_id_in_within(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_begin(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_begin_immediate(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_commit(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_rollback(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_vacuum(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_prepare(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_finalize(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_step(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_reset(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_clear_bindings(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_bind_null(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_bind_int64(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_bind_double(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_bind_text(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_bind_blob(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_parameter_count(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_parameter_index(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_column_count(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_column_type(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_column_int64(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_column_double(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_column_text(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_column_blob(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_buffer_free_and_status_for_test());
 }
 
@@ -1762,4 +2143,185 @@ test "c abi no-handle create error can return owned message" {
     try std.testing.expect(message.data != null);
     try std.testing.expect(message.len > 0);
     zova_message_free(&message);
+}
+
+test "c abi exposes prepared statement sql lifecycle" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-statements.zova", .{tmp.sub_path[0..]});
+
+    var db: ?*zova_database = null;
+    var create_request = zova_database_open_request{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&create_request));
+    defer _ = zova_database_close(db);
+
+    var bad_stmt: ?*zova_statement = null;
+    const bad_prepare = zova_database_prepare_request{
+        .db = db,
+        .sql = "select from definitely invalid sql",
+        .out_statement = &bad_stmt,
+    };
+    try std.testing.expectEqual(zova_status.SQLITE_ERROR, zova_database_prepare(&bad_prepare));
+    try std.testing.expect(bad_stmt == null);
+    try std.testing.expect(std.mem.indexOf(u8, std.mem.span(zova_database_last_error_message(db)), "syntax") != null);
+
+    var create_stmt: ?*zova_statement = null;
+    const prepare_create = zova_database_prepare_request{
+        .db = db,
+        .sql = "create table records (id integer primary key, i integer, r real, t text, b blob, n text)",
+        .out_statement = &create_stmt,
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_database_prepare(&prepare_create));
+    var step_result: zova_step_result = undefined;
+    try std.testing.expectEqual(zova_status.OK, zova_statement_step(&.{
+        .statement = create_stmt,
+        .out_result = &step_result,
+    }));
+    try std.testing.expectEqual(zova_step_result.DONE, step_result);
+    try std.testing.expectEqual(zova_status.OK, zova_statement_finalize(create_stmt));
+
+    var insert_stmt: ?*zova_statement = null;
+    const prepare_insert = zova_database_prepare_request{
+        .db = db,
+        .sql = "insert into records (i, r, t, b, n) values (:i, :r, :t, :b, :n)",
+        .out_statement = &insert_stmt,
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_database_prepare(&prepare_insert));
+    defer _ = zova_statement_finalize(insert_stmt);
+
+    var param_count: i32 = 0;
+    try std.testing.expectEqual(zova_status.OK, zova_statement_parameter_count(&.{
+        .statement = insert_stmt,
+        .out_count = &param_count,
+    }));
+    try std.testing.expectEqual(@as(i32, 5), param_count);
+
+    var text_index: i32 = 0;
+    try std.testing.expectEqual(zova_status.OK, zova_statement_parameter_index(&.{
+        .statement = insert_stmt,
+        .name = ":t",
+        .out_index = &text_index,
+    }));
+    try std.testing.expectEqual(@as(i32, 3), text_index);
+
+    const text = "hello";
+    const blob = [_]u8{ 0, 1, 2, 3 };
+    try std.testing.expectEqual(zova_status.OK, zova_statement_bind_int64(&.{ .statement = insert_stmt, .index = 1, .value = 42 }));
+    try std.testing.expectEqual(zova_status.OK, zova_statement_bind_double(&.{ .statement = insert_stmt, .index = 2, .value = 3.5 }));
+    try std.testing.expectEqual(zova_status.OK, zova_statement_bind_text(&.{ .statement = insert_stmt, .index = 3, .data = text.ptr, .len = text.len }));
+    try std.testing.expectEqual(zova_status.OK, zova_statement_bind_blob(&.{ .statement = insert_stmt, .index = 4, .data = &blob, .len = blob.len }));
+    try std.testing.expectEqual(zova_status.OK, zova_statement_bind_null(&.{ .statement = insert_stmt, .index = 5 }));
+    try std.testing.expectEqual(zova_status.OK, zova_statement_step(&.{ .statement = insert_stmt, .out_result = &step_result }));
+    try std.testing.expectEqual(zova_step_result.DONE, step_result);
+
+    try std.testing.expectEqual(zova_status.OK, zova_statement_reset(insert_stmt));
+    try std.testing.expectEqual(zova_status.OK, zova_statement_clear_bindings(insert_stmt));
+    const empty = "";
+    try std.testing.expectEqual(zova_status.OK, zova_statement_bind_int64(&.{ .statement = insert_stmt, .index = 1, .value = 7 }));
+    try std.testing.expectEqual(zova_status.OK, zova_statement_bind_double(&.{ .statement = insert_stmt, .index = 2, .value = 0.25 }));
+    try std.testing.expectEqual(zova_status.OK, zova_statement_bind_text(&.{ .statement = insert_stmt, .index = 3, .data = empty.ptr, .len = 0 }));
+    try std.testing.expectEqual(zova_status.OK, zova_statement_bind_blob(&.{ .statement = insert_stmt, .index = 4, .data = empty.ptr, .len = 0 }));
+    try std.testing.expectEqual(zova_status.OK, zova_statement_bind_null(&.{ .statement = insert_stmt, .index = 5 }));
+    try std.testing.expectEqual(zova_status.OK, zova_statement_step(&.{ .statement = insert_stmt, .out_result = &step_result }));
+    try std.testing.expectEqual(zova_step_result.DONE, step_result);
+
+    var select_stmt: ?*zova_statement = null;
+    const prepare_select = zova_database_prepare_request{
+        .db = db,
+        .sql = "select i, r, t, b, n from records order by id",
+        .out_statement = &select_stmt,
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_database_prepare(&prepare_select));
+    defer _ = zova_statement_finalize(select_stmt);
+
+    var column_count: i32 = 0;
+    try std.testing.expectEqual(zova_status.OK, zova_statement_column_count(&.{ .statement = select_stmt, .out_count = &column_count }));
+    try std.testing.expectEqual(@as(i32, 5), column_count);
+
+    try std.testing.expectEqual(zova_status.OK, zova_statement_step(&.{ .statement = select_stmt, .out_result = &step_result }));
+    try std.testing.expectEqual(zova_step_result.ROW, step_result);
+
+    var column_type: zova_column_type = undefined;
+    try std.testing.expectEqual(zova_status.OK, zova_statement_column_type(&.{ .statement = select_stmt, .index = 0, .out_type = &column_type }));
+    try std.testing.expectEqual(zova_column_type.INTEGER, column_type);
+
+    var int_value: i64 = 0;
+    var double_value: f64 = 0;
+    var text_value = zova_text{ .data = null, .len = 0 };
+    var blob_value = zova_buffer{ .data = null, .len = 0 };
+    defer zova_text_free(&text_value);
+    defer zova_buffer_free(&blob_value);
+
+    try std.testing.expectEqual(zova_status.OK, zova_statement_column_int64(&.{ .statement = select_stmt, .index = 0, .out_value = &int_value }));
+    try std.testing.expectEqual(@as(i64, 42), int_value);
+    try std.testing.expectEqual(zova_status.OK, zova_statement_column_double(&.{ .statement = select_stmt, .index = 1, .out_value = &double_value }));
+    try std.testing.expectEqual(@as(f64, 3.5), double_value);
+    try std.testing.expectEqual(zova_status.OK, zova_statement_column_text(&.{ .statement = select_stmt, .index = 2, .out_text = &text_value }));
+    try std.testing.expectEqualStrings("hello", text_value.data.?[0..text_value.len]);
+    try std.testing.expectEqual(zova_status.OK, zova_statement_column_blob(&.{ .statement = select_stmt, .index = 3, .out_buffer = &blob_value }));
+    try std.testing.expectEqualSlices(u8, &blob, blob_value.data.?[0..blob_value.len]);
+    try std.testing.expectEqual(zova_status.OK, zova_statement_column_type(&.{ .statement = select_stmt, .index = 4, .out_type = &column_type }));
+    try std.testing.expectEqual(zova_column_type.NULL, column_type);
+
+    zova_text_free(&text_value);
+    zova_buffer_free(&blob_value);
+    try std.testing.expectEqual(zova_status.OK, zova_statement_step(&.{ .statement = select_stmt, .out_result = &step_result }));
+    try std.testing.expectEqual(zova_step_result.ROW, step_result);
+    try std.testing.expectEqual(zova_status.OK, zova_statement_column_text(&.{ .statement = select_stmt, .index = 2, .out_text = &text_value }));
+    try std.testing.expect(text_value.data != null);
+    try std.testing.expectEqual(@as(usize, 0), text_value.len);
+    try std.testing.expectEqual(zova_status.OK, zova_statement_column_blob(&.{ .statement = select_stmt, .index = 3, .out_buffer = &blob_value }));
+    try std.testing.expectEqual(@as(usize, 0), blob_value.len);
+}
+
+test "c abi exposes transaction helpers and vacuum" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-vacuum.zova", .{tmp.sub_path[0..]});
+
+    var db: ?*zova_database = null;
+    var create_request = zova_database_open_request{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&create_request));
+    defer _ = zova_database_close(db);
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = db, .sql = "create table notes (body text not null)" }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_begin(&.{ .db = db }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = db, .sql = "insert into notes (body) values ('rollback')" }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_rollback(&.{ .db = db }));
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_begin_immediate(&.{ .db = db }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = db, .sql = "insert into notes (body) values ('commit')" }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_commit(&.{ .db = db }));
+
+    const object_id = try databaseHandle(db).?.db.putObject("vacuum keeps objects");
+    const deleted_id = try databaseHandle(db).?.db.putObject("vacuum after delete");
+    try databaseHandle(db).?.db.deleteObject(deleted_id);
+    try databaseHandle(db).?.db.createVectorCollection("vectors", .{ .dimensions = 2, .metric = .l2 });
+    try databaseHandle(db).?.db.putVector("vectors", "v1", &.{ 1.0, 2.0 });
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_vacuum(&.{ .db = db }));
+
+    try std.testing.expect(try databaseHandle(db).?.db.hasObject(object_id));
+    try std.testing.expect(!try databaseHandle(db).?.db.hasObject(deleted_id));
+    try std.testing.expect(try databaseHandle(db).?.db.hasVector("vectors", "v1"));
+    var count_stmt: ?*zova_statement = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_prepare(&.{ .db = db, .sql = "select count(*) from notes where body = 'commit'", .out_statement = &count_stmt }));
+    defer _ = zova_statement_finalize(count_stmt);
+    var step_result: zova_step_result = undefined;
+    try std.testing.expectEqual(zova_status.OK, zova_statement_step(&.{ .statement = count_stmt, .out_result = &step_result }));
+    var count: i64 = 0;
+    try std.testing.expectEqual(zova_status.OK, zova_statement_column_int64(&.{ .statement = count_stmt, .index = 0, .out_value = &count }));
+    try std.testing.expectEqual(@as(i64, 1), count);
 }
