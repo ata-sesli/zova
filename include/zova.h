@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 /*
- * Zova C ABI, v0.9 pre-1.0.
+ * Zova C ABI, v0.10 pre-1.0.
  *
  * This header exposes a C-compatible object and vector API over Zova's Zig
  * implementation. The ABI is intentionally conservative: opaque handles,
@@ -157,6 +157,28 @@ typedef struct zova_vector_search_results {
     zova_vector_search_result *items;
     size_t len;
 } zova_vector_search_results;
+
+/* Owned vector collection info. Free with zova_vector_collection_info_free. */
+typedef struct zova_vector_collection_info {
+    char *name;
+    size_t name_len;
+    uint32_t dimensions;
+    int metric;
+    uint64_t vector_count;
+} zova_vector_collection_info;
+
+/* Owned vector collection list. Free with zova_vector_collection_list_free. */
+typedef struct zova_vector_collection_list {
+    zova_vector_collection_info *items;
+    size_t len;
+} zova_vector_collection_list;
+
+/* Borrowed input row for zova_vector_put_many. */
+typedef struct zova_vector_input {
+    const char *id;
+    const float *values;
+    size_t values_len;
+} zova_vector_input;
 
 /* Open/create requests use C strings and may return an owned error message. */
 typedef struct zova_database_open_request {
@@ -340,6 +362,89 @@ typedef struct zova_vector_search_in_request {
     zova_vector_search_results *out_results;
 } zova_vector_search_in_request;
 
+typedef struct zova_vector_collection_info_get_request {
+    zova_database *db;
+    const char *name;
+    zova_vector_collection_info *out_info;
+} zova_vector_collection_info_get_request;
+
+typedef struct zova_vector_collections_list_request {
+    zova_database *db;
+    zova_vector_collection_list *out_list;
+} zova_vector_collections_list_request;
+
+typedef struct zova_vector_put_many_request {
+    zova_database *db;
+    const char *collection_name;
+    const zova_vector_input *vectors;
+    size_t vectors_len;
+} zova_vector_put_many_request;
+
+typedef struct zova_vector_collection_delete_request {
+    zova_database *db;
+    const char *name;
+} zova_vector_collection_delete_request;
+
+typedef struct zova_vector_search_within_request {
+    zova_database *db;
+    const char *collection_name;
+    const float *query;
+    size_t query_len;
+    double max_distance;
+    size_t limit;
+    zova_vector_search_results *out_results;
+} zova_vector_search_within_request;
+
+typedef struct zova_vector_search_in_within_request {
+    zova_database *db;
+    const char *collection_name;
+    const float *query;
+    size_t query_len;
+    const char *const *candidate_ids;
+    size_t candidate_count;
+    double max_distance;
+    size_t limit;
+    zova_vector_search_results *out_results;
+} zova_vector_search_in_within_request;
+
+typedef struct zova_vector_search_by_id_request {
+    zova_database *db;
+    const char *collection_name;
+    const char *source_vector_id;
+    size_t limit;
+    zova_vector_search_results *out_results;
+} zova_vector_search_by_id_request;
+
+typedef struct zova_vector_search_by_id_in_request {
+    zova_database *db;
+    const char *collection_name;
+    const char *source_vector_id;
+    const char *const *candidate_ids;
+    size_t candidate_count;
+    size_t limit;
+    zova_vector_search_results *out_results;
+} zova_vector_search_by_id_in_request;
+
+typedef struct zova_vector_search_by_id_within_request {
+    zova_database *db;
+    const char *collection_name;
+    const char *source_vector_id;
+    double max_distance;
+    size_t limit;
+    zova_vector_search_results *out_results;
+} zova_vector_search_by_id_within_request;
+
+typedef struct zova_vector_search_by_id_in_within_request {
+    zova_database *db;
+    const char *collection_name;
+    const char *source_vector_id;
+    const char *const *candidate_ids;
+    size_t candidate_count;
+    double max_distance;
+    size_t limit;
+    zova_vector_search_results *out_results;
+} zova_vector_search_by_id_in_within_request;
+
 /* ABI version helpers describe this C boundary, not the .zova file format. */
 uint32_t zova_abi_version_major(void);
 uint32_t zova_abi_version_minor(void);
@@ -353,6 +458,8 @@ void zova_message_free(zova_message *message);
 void zova_object_manifest_free(zova_object_manifest *manifest);
 void zova_vector_free(zova_vector *vector);
 void zova_vector_search_results_free(zova_vector_search_results *results);
+void zova_vector_collection_info_free(zova_vector_collection_info *info);
+void zova_vector_collection_list_free(zova_vector_collection_list *list);
 
 /* Database lifecycle, SQL passthrough, and SQLite-to-Zova conversion. */
 zova_status zova_database_create(const zova_database_open_request *request);
@@ -401,12 +508,22 @@ zova_status zova_object_writer_destroy(zova_object_writer *writer);
  */
 zova_status zova_vector_collection_create(const zova_vector_collection_create_request *request);
 zova_status zova_vector_collection_exists(const zova_vector_collection_exists_request *request);
+zova_status zova_vector_collection_info_get(const zova_vector_collection_info_get_request *request);
+zova_status zova_vector_collections_list(const zova_vector_collections_list_request *request);
 zova_status zova_vector_put(const zova_vector_put_request *request);
+zova_status zova_vector_put_many(const zova_vector_put_many_request *request);
 zova_status zova_vector_get(const zova_vector_get_request *request);
 zova_status zova_vector_exists(const zova_vector_exists_request *request);
 zova_status zova_vector_delete(const zova_vector_delete_request *request);
+zova_status zova_vector_collection_delete(const zova_vector_collection_delete_request *request);
 zova_status zova_vector_search(const zova_vector_search_request *request);
 zova_status zova_vector_search_in(const zova_vector_search_in_request *request);
+zova_status zova_vector_search_within(const zova_vector_search_within_request *request);
+zova_status zova_vector_search_in_within(const zova_vector_search_in_within_request *request);
+zova_status zova_vector_search_by_id(const zova_vector_search_by_id_request *request);
+zova_status zova_vector_search_by_id_in(const zova_vector_search_by_id_in_request *request);
+zova_status zova_vector_search_by_id_within(const zova_vector_search_by_id_within_request *request);
+zova_status zova_vector_search_by_id_in_within(const zova_vector_search_by_id_in_within_request *request);
 
 #ifdef __cplusplus
 }

@@ -159,6 +159,46 @@ pub const VectorCollectionOptions = struct {
     metric: VectorMetric,
 };
 
+/// Owned metadata for one native vector collection.
+///
+/// `name` is heap-owned. `vector_count` counts private Zova vector rows in the
+/// collection; application metadata rows that reference vector ids remain in
+/// user SQL tables and are not counted here.
+pub const VectorCollectionInfo = struct {
+    name: []u8,
+    dimensions: u32,
+    metric: VectorMetric,
+    vector_count: u64,
+
+    /// Free the owned collection name.
+    pub fn deinit(self: *VectorCollectionInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+    }
+};
+
+/// Owned list of vector collection metadata rows.
+///
+/// The list returned by `Database.listVectorCollections` is sorted by
+/// ascending collection name.
+pub const VectorCollectionList = struct {
+    items: []VectorCollectionInfo,
+
+    /// Free every owned collection name and the item slice.
+    pub fn deinit(self: *VectorCollectionList, allocator: std.mem.Allocator) void {
+        for (self.items) |*item| item.deinit(allocator);
+        allocator.free(self.items);
+    }
+};
+
+/// Input row for `Database.putVectors`.
+///
+/// Vector ids are application-provided UTF-8 text ids scoped to a collection.
+/// Values are stored exactly as finite little-endian `f32` bytes.
+pub const VectorInput = struct {
+    id: []const u8,
+    values: []const f32,
+};
+
 /// Owned vector row returned by `Database.getVector`.
 ///
 /// Vector ids are application-provided UTF-8 text ids scoped to a collection.
@@ -631,6 +671,70 @@ pub const Database = struct {
         return stmt.columnInt64(0) == 1;
     }
 
+    /// Return owned metadata for one existing vector collection.
+    ///
+    /// Missing valid names return `error.VectorCollectionNotFound`; invalid
+    /// names return `error.VectorInvalid`. The returned name is owned memory
+    /// and must be freed with `VectorCollectionInfo.deinit`.
+    pub fn vectorCollectionInfo(
+        self: *Database,
+        allocator: std.mem.Allocator,
+        name: []const u8,
+    ) Error!VectorCollectionInfo {
+        try validateVectorCollectionName(name);
+
+        var stmt = try self.prepare(
+            \\select c.name, c.dimensions, c.metric, c.element_type, count(v.vector_id)
+            \\from _zova_vector_collections c
+            \\left join _zova_vectors v on v.collection_name = c.name
+            \\where c.name = ?
+            \\group by c.name, c.dimensions, c.metric, c.element_type
+        );
+        defer stmt.deinit();
+
+        try stmt.bindText(1, name);
+        return switch (try stmt.step()) {
+            .done => error.VectorCollectionNotFound,
+            .row => try vectorCollectionInfoFromRow(allocator, &stmt),
+        };
+    }
+
+    /// List all vector collections sorted by ascending name.
+    ///
+    /// Each returned collection name is owned. Call
+    /// `VectorCollectionList.deinit` with the same allocator to release the
+    /// list.
+    pub fn listVectorCollections(
+        self: *Database,
+        allocator: std.mem.Allocator,
+    ) Error!VectorCollectionList {
+        var stmt = try self.prepare(
+            \\select c.name, c.dimensions, c.metric, c.element_type, count(v.vector_id)
+            \\from _zova_vector_collections c
+            \\left join _zova_vectors v on v.collection_name = c.name
+            \\group by c.name, c.dimensions, c.metric, c.element_type
+            \\order by c.name asc
+        );
+        defer stmt.deinit();
+
+        var items: std.ArrayList(VectorCollectionInfo) = .empty;
+        errdefer {
+            for (items.items) |*item| item.deinit(allocator);
+            items.deinit(allocator);
+        }
+
+        while ((try stmt.step()) == .row) {
+            const info = try vectorCollectionInfoFromRow(allocator, &stmt);
+            items.append(allocator, info) catch |err| {
+                var cleanup = info;
+                cleanup.deinit(allocator);
+                return err;
+            };
+        }
+
+        return .{ .items = try items.toOwnedSlice(allocator) };
+    }
+
     /// Store or replace one vector row in a collection.
     ///
     /// `collection_name` must name an existing collection. `vector_id` is a
@@ -644,28 +748,27 @@ pub const Database = struct {
         values: []const f32,
     ) Error!void {
         try validateVectorCollectionName(collection_name);
-        try validateVectorId(vector_id);
-
         const collection = try loadVectorCollection(self, collection_name);
-        try validateVectorValues(collection.dimensions, collection.metric, values);
+        try validateVectorInput(collection, .{ .id = vector_id, .values = values });
+        try self.writeVectorRows(collection_name, collection, &[_]VectorInput{.{ .id = vector_id, .values = values }});
+    }
 
-        const encoded = try encodeF32Le(std.heap.page_allocator, values);
-        defer std.heap.page_allocator.free(encoded);
-
-        var stmt = try self.prepare(
-            \\insert into _zova_vectors (collection_name, vector_id, dimensions, "values")
-            \\values (?, ?, ?, ?)
-            \\on conflict(collection_name, vector_id) do update set
-            \\  dimensions = excluded.dimensions,
-            \\  "values" = excluded."values"
-        );
-        defer stmt.deinit();
-
-        try stmt.bindText(1, collection_name);
-        try stmt.bindText(2, vector_id);
-        try stmt.bindInt64(3, @intCast(collection.dimensions));
-        try stmt.bindBlob(4, encoded);
-        std.debug.assert((try stmt.step()) == .done);
+    /// Store or replace multiple vector rows in a collection.
+    ///
+    /// Batch writes use the same upsert semantics as `putVector`. Duplicate ids
+    /// inside the batch are applied in input order, so the last entry wins.
+    /// Zova validates the whole batch before writing any row. This method is a
+    /// sequence of normal SQLite statements and can participate in a
+    /// caller-owned transaction.
+    pub fn putVectors(
+        self: *Database,
+        collection_name: []const u8,
+        vectors: []const VectorInput,
+    ) Error!void {
+        try validateVectorCollectionName(collection_name);
+        const collection = try loadVectorCollection(self, collection_name);
+        for (vectors) |vector| try validateVectorInput(collection, vector);
+        try self.writeVectorRows(collection_name, collection, vectors);
     }
 
     /// Load one vector row into owned memory.
@@ -763,6 +866,28 @@ pub const Database = struct {
         std.debug.assert((try stmt.step()) == .done);
 
         if (self.sqlite_db.changes() == 0) return error.VectorNotFound;
+    }
+
+    /// Delete a vector collection and all private vector rows in it.
+    ///
+    /// User SQL rows that store collection names or vector ids are
+    /// application-owned and are not scanned or mutated. This method uses
+    /// ordinary SQLite deletes and can participate in a caller-owned
+    /// transaction.
+    pub fn deleteVectorCollection(self: *Database, name: []const u8) Error!void {
+        try validateVectorCollectionName(name);
+        _ = try loadVectorCollection(self, name);
+
+        var delete_vectors = try self.prepare("delete from _zova_vectors where collection_name = ?");
+        defer delete_vectors.deinit();
+        try delete_vectors.bindText(1, name);
+        std.debug.assert((try delete_vectors.step()) == .done);
+
+        var delete_collection = try self.prepare("delete from _zova_vector_collections where name = ?");
+        defer delete_collection.deinit();
+        try delete_collection.bindText(1, name);
+        std.debug.assert((try delete_collection.step()) == .done);
+        if (self.sqlite_db.changes() == 0) return error.VectorCollectionNotFound;
     }
 
     /// Search one vector collection with an exact flat scan.
@@ -1079,6 +1204,37 @@ pub const Database = struct {
                 return values;
             },
         };
+    }
+
+    fn writeVectorRows(
+        self: *Database,
+        collection_name: []const u8,
+        collection: VectorCollectionMetadata,
+        vectors: []const VectorInput,
+    ) Error!void {
+        if (vectors.len == 0) return;
+
+        var stmt = try self.prepare(
+            \\insert into _zova_vectors (collection_name, vector_id, dimensions, "values")
+            \\values (?, ?, ?, ?)
+            \\on conflict(collection_name, vector_id) do update set
+            \\  dimensions = excluded.dimensions,
+            \\  "values" = excluded."values"
+        );
+        defer stmt.deinit();
+
+        for (vectors) |vector| {
+            const encoded = try encodeF32Le(std.heap.page_allocator, vector.values);
+            defer std.heap.page_allocator.free(encoded);
+
+            try stmt.bindText(1, collection_name);
+            try stmt.bindText(2, vector.id);
+            try stmt.bindInt64(3, @intCast(collection.dimensions));
+            try stmt.bindBlob(4, encoded);
+            std.debug.assert((try stmt.step()) == .done);
+            try stmt.reset();
+            try stmt.clearBindings();
+        }
     }
 
     /// Store raw bytes as a content-addressed Zova object.
@@ -1992,6 +2148,11 @@ fn validateVectorValues(expected_dimensions: u32, metric: VectorMetric, values: 
     if (metric == .cosine and norm_squared == 0) return error.VectorInvalid;
 }
 
+fn validateVectorInput(collection: VectorCollectionMetadata, input: VectorInput) Error!void {
+    try validateVectorId(input.id);
+    try validateVectorValues(collection.dimensions, collection.metric, input.values);
+}
+
 fn validateVectorSearchThreshold(max_distance: f64) Error!void {
     if (std.math.isNan(max_distance) or std.math.isInf(max_distance)) return error.VectorInvalid;
 }
@@ -2053,6 +2214,22 @@ fn loadVectorCollection(db: *Database, name: []const u8) Error!VectorCollectionM
                 .metric = try vectorMetricFromText(stmt.columnText(1)),
             };
         },
+    };
+}
+
+fn vectorCollectionInfoFromRow(allocator: std.mem.Allocator, stmt: *sqlite.Statement) Error!VectorCollectionInfo {
+    const dimensions_i64 = stmt.columnInt64(1);
+    if (dimensions_i64 <= 0 or dimensions_i64 > max_vector_dimensions) return error.NotZovaDatabase;
+    if (!std.mem.eql(u8, stmt.columnText(3), "f32")) return error.NotZovaDatabase;
+
+    const name = try allocator.dupe(u8, stmt.columnText(0));
+    errdefer allocator.free(name);
+
+    return .{
+        .name = name,
+        .dimensions = @intCast(dimensions_i64),
+        .metric = try vectorMetricFromText(stmt.columnText(2)),
+        .vector_count = try sqliteI64ToU64(stmt.columnInt64(4)),
     };
 }
 
@@ -5415,6 +5592,55 @@ test "vector collection duplicate and validation behavior" {
     try std.testing.expectError(error.VectorInvalid, db.hasVectorCollection(""));
 }
 
+test "vector collection info and listing return owned sorted metadata" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-collection-info.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    {
+        var empty = try db.listVectorCollections(std.testing.allocator);
+        defer empty.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 0), empty.items.len);
+    }
+
+    try db.createVectorCollection("beta", .{ .dimensions = 2, .metric = .dot });
+    try db.createVectorCollection("alpha", .{ .dimensions = 3, .metric = .cosine });
+    try db.putVector("alpha", "a-1", &.{ 1.0, 0.0, 0.0 });
+    try db.putVector("alpha", "a-2", &.{ 0.0, 1.0, 0.0 });
+    try db.putVector("beta", "b-1", &.{ 2.0, 3.0 });
+
+    {
+        var info = try db.vectorCollectionInfo(std.testing.allocator, "alpha");
+        defer info.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("alpha", info.name);
+        try std.testing.expectEqual(@as(u32, 3), info.dimensions);
+        try std.testing.expectEqual(VectorMetric.cosine, info.metric);
+        try std.testing.expectEqual(@as(u64, 2), info.vector_count);
+    }
+
+    {
+        var list = try db.listVectorCollections(std.testing.allocator);
+        defer list.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 2), list.items.len);
+        try std.testing.expectEqualStrings("alpha", list.items[0].name);
+        try std.testing.expectEqual(@as(u32, 3), list.items[0].dimensions);
+        try std.testing.expectEqual(VectorMetric.cosine, list.items[0].metric);
+        try std.testing.expectEqual(@as(u64, 2), list.items[0].vector_count);
+        try std.testing.expectEqualStrings("beta", list.items[1].name);
+        try std.testing.expectEqual(@as(u32, 2), list.items[1].dimensions);
+        try std.testing.expectEqual(VectorMetric.dot, list.items[1].metric);
+        try std.testing.expectEqual(@as(u64, 1), list.items[1].vector_count);
+    }
+
+    try std.testing.expectError(error.VectorCollectionNotFound, db.vectorCollectionInfo(std.testing.allocator, "missing"));
+    try std.testing.expectError(error.VectorInvalid, db.vectorCollectionInfo(std.testing.allocator, ""));
+}
+
 test "put and get vector rows use little endian f32 blobs" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -5447,6 +5673,56 @@ test "put and get vector rows use little endian f32 blobs" {
         0x00, 0x00, 0x80, 0x3e,
     }, raw.columnBlob(1));
     try std.testing.expectEqual(sqlite.Step.done, try raw.step());
+}
+
+test "batch vector upsert validates before writing and last duplicate wins" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-batch.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.createVectorCollection("chunks", .{ .dimensions = 2, .metric = .l2 });
+
+    const invalid_batch = [_]VectorInput{
+        .{ .id = "good", .values = &.{ 1.0, 1.0 } },
+        .{ .id = "bad", .values = &.{1.0} },
+    };
+    try std.testing.expectError(error.VectorDimensionMismatch, db.putVectors("chunks", &invalid_batch));
+    try std.testing.expect(!try db.hasVector("chunks", "good"));
+
+    const batch = [_]VectorInput{
+        .{ .id = "a", .values = &.{ 1.0, 2.0 } },
+        .{ .id = "b", .values = &.{ 3.0, 4.0 } },
+        .{ .id = "a", .values = &.{ 5.0, 6.0 } },
+    };
+    try db.putVectors("chunks", &batch);
+
+    {
+        var vector = try db.getVector(std.testing.allocator, "chunks", "a");
+        defer vector.deinit(std.testing.allocator);
+        try std.testing.expectEqualSlices(f32, &.{ 5.0, 6.0 }, vector.values);
+    }
+    {
+        var vector = try db.getVector(std.testing.allocator, "chunks", "b");
+        defer vector.deinit(std.testing.allocator);
+        try std.testing.expectEqualSlices(f32, &.{ 3.0, 4.0 }, vector.values);
+    }
+
+    try db.putVectors("chunks", &.{});
+    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from _zova_vectors where collection_name = 'chunks'"));
+
+    try std.testing.expectError(error.VectorCollectionNotFound, db.putVectors("missing", &batch));
+    const invalid_id = [_]VectorInput{.{ .id = "_zova_bad", .values = &.{ 1.0, 2.0 } }};
+    try std.testing.expectError(error.VectorInvalid, db.putVectors("chunks", &invalid_id));
+
+    try db.exec("begin");
+    try db.putVectors("chunks", &[_]VectorInput{.{ .id = "tx", .values = &.{ 7.0, 8.0 } }});
+    try db.exec("commit");
+    try std.testing.expect(try db.hasVector("chunks", "tx"));
 }
 
 test "vector upsert delete and sql references remain application owned" {
@@ -5498,6 +5774,54 @@ test "vector upsert delete and sql references remain application owned" {
     try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from chunks where vector_id = 'delete-me'"));
 }
 
+test "delete vector collection removes private vectors and leaves sql references" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-delete-collection.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.exec(
+        \\create table chunks (
+        \\  id integer primary key,
+        \\  vector_id text not null,
+        \\  body text not null
+        \\)
+    );
+    try db.createVectorCollection("chunks", .{ .dimensions = 2, .metric = .l2 });
+    try db.putVectors("chunks", &[_]VectorInput{
+        .{ .id = "keep-ref-1", .values = &.{ 1.0, 1.0 } },
+        .{ .id = "keep-ref-2", .values = &.{ 2.0, 2.0 } },
+    });
+
+    var insert = try db.prepare("insert into chunks (vector_id, body) values (?, ?)");
+    defer insert.deinit();
+    try insert.bindText(1, "keep-ref-1");
+    try insert.bindText(2, "application row 1");
+    try std.testing.expectEqual(sqlite.Step.done, try insert.step());
+    try insert.reset();
+    try insert.clearBindings();
+    try insert.bindText(1, "keep-ref-2");
+    try insert.bindText(2, "application row 2");
+    try std.testing.expectEqual(sqlite.Step.done, try insert.step());
+
+    try db.exec("begin");
+    try db.deleteVectorCollection("chunks");
+    try db.exec("commit");
+
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_vectors where collection_name = 'chunks'"));
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_vector_collections where name = 'chunks'"));
+    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from chunks"));
+    try std.testing.expectError(error.VectorCollectionNotFound, db.hasVector("chunks", "keep-ref-1"));
+    try std.testing.expectError(error.VectorCollectionNotFound, db.getVector(std.testing.allocator, "chunks", "keep-ref-1"));
+    try std.testing.expectError(error.VectorCollectionNotFound, db.searchVectors(std.testing.allocator, "chunks", &.{ 1.0, 1.0 }, 10));
+    try std.testing.expectError(error.VectorCollectionNotFound, db.deleteVectorCollection("chunks"));
+    try std.testing.expectError(error.VectorInvalid, db.deleteVectorCollection(""));
+}
+
 test "vector CRUD validates collections ids dimensions and finite values" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -5527,6 +5851,48 @@ test "vector CRUD validates collections ids dimensions and finite values" {
     var long_id: [256]u8 = undefined;
     @memset(&long_id, 'a');
     try std.testing.expectError(error.VectorInvalid, db.putVector("chunks", &long_id, &.{ 1.0, 2.0, 3.0 }));
+}
+
+test "vector collection management persists and works after conversion" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "collection-management-source.db");
+    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "collection-management-converted.zova");
+
+    {
+        var source = try sqlite.Database.open(source_path);
+        defer source.deinit();
+        try source.exec("create table docs (id integer primary key, body text not null); insert into docs (body) values ('alpha'), ('beta')");
+    }
+
+    try convertSqliteToZova(source_path, dest_path);
+
+    {
+        var db = try Database.open(dest_path);
+        defer db.deinit();
+        try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .dot });
+        try db.putVectors("docs", &[_]VectorInput{
+            .{ .id = "doc-1", .values = &.{ 1.0, 0.0 } },
+            .{ .id = "doc-2", .values = &.{ 0.0, 1.0 } },
+        });
+    }
+
+    {
+        var reopened = try Database.open(dest_path);
+        defer reopened.deinit();
+
+        var info = try reopened.vectorCollectionInfo(std.testing.allocator, "docs");
+        defer info.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("docs", info.name);
+        try std.testing.expectEqual(VectorMetric.dot, info.metric);
+        try std.testing.expectEqual(@as(u64, 2), info.vector_count);
+
+        try reopened.deleteVectorCollection("docs");
+        try std.testing.expectEqual(@as(i64, 2), try testingCount(&reopened, "select count(*) from docs"));
+    }
 }
 
 test "get vector detects corrupt private rows" {
