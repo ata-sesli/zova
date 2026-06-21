@@ -1,4 +1,5 @@
 const std = @import("std");
+const cli = @import("cli");
 const zova = @import("zova");
 
 test "e2e app database stores relational rows and native objects across reopen" {
@@ -114,6 +115,8 @@ test "e2e app database stores relational rows and native objects across reopen" 
     try expectStoredObjectRange(&reopened, "streamed.bin", streamed_id, streamed);
     try expectObjectChunksReassemble(&reopened, large_id, large);
     try expectObjectChunksReassemble(&reopened, streamed_id, streamed);
+    try expectCliObjectChunkInspection(db_path, &reopened, large_id);
+    try expectCliVectorTableInspection(db_path, "chunks");
 
     try reopened.putVectors("chunks", &[_]zova.VectorInput{
         .{ .id = "chunk-1", .values = &.{ 0.9, 0.1, 0.0 } },
@@ -424,6 +427,7 @@ test "e2e converted sqlite database preserves sql data and accepts new objects" 
     try expectObjectRefRange(&reopened, "streamed", streamed_object_id, streamed_bytes);
     try expectObjectRef(&reopened, "assembled", assembled_id, assembled_bytes);
     try expectObjectRefRange(&reopened, "assembled", assembled_id, assembled_bytes);
+    try expectCliVectorTableInspection(dest_path, "search_rows");
 
     try reopened.putVector("search_rows", "converted-row-1", &.{ 3.0, 2.0, 1.0 });
     try expectStoredSearchVector(&reopened, "converted-row-1", &.{ 3.0, 2.0, 1.0 });
@@ -501,6 +505,187 @@ test "e2e two connections keep sqlite locking and later recover" {
 
 fn testingDbPath(buffer: []u8, sub_path: []const u8, filename: []const u8) ![:0]u8 {
     return std.fmt.bufPrintZ(buffer, ".zig-cache/tmp/{s}/{s}", .{ sub_path, filename });
+}
+
+fn expectCliObjectChunkInspection(path: [:0]const u8, db: *zova.Database, object_id: zova.ObjectId) !void {
+    const object_id_hex = try lowerHexAlloc(&object_id);
+    defer std.testing.allocator.free(object_id_hex);
+
+    var manifest = try db.objectManifest(std.testing.allocator, object_id);
+    defer manifest.deinit(std.testing.allocator);
+    try std.testing.expect(manifest.chunks.len > 0);
+
+    const chunk_id_hex = try lowerHexAlloc(&manifest.chunks[0].hash);
+    defer std.testing.allocator.free(chunk_id_hex);
+
+    var objects_text = try runCli(&.{ "zova", "objects", path });
+    defer objects_text.deinit();
+    try std.testing.expectEqual(@as(u8, 0), objects_text.code);
+    try expectContains(objects_text.stdout, "Zova objects");
+    try expectContains(objects_text.stdout, object_id_hex);
+
+    var objects_json = try runCli(&.{ "zova", "objects", "--json", path });
+    defer objects_json.deinit();
+    try std.testing.expectEqual(@as(u8, 0), objects_json.code);
+    var parsed_objects = try parseJson(objects_json.stdout);
+    defer parsed_objects.deinit();
+    try expectJsonString(parsed_objects.value.object, "command", "objects");
+
+    var object_json = try runCli(&.{ "zova", "object", "--json", path, object_id_hex });
+    defer object_json.deinit();
+    try std.testing.expectEqual(@as(u8, 0), object_json.code);
+    var parsed_object = try parseJson(object_json.stdout);
+    defer parsed_object.deinit();
+    try expectJsonString(parsed_object.value.object, "command", "object");
+    try expectJsonString(parsed_object.value.object, "object_id", object_id_hex);
+    try expectJsonArray(parsed_object.value.object, "manifest");
+
+    var chunks_text = try runCli(&.{ "zova", "chunks", path });
+    defer chunks_text.deinit();
+    try std.testing.expectEqual(@as(u8, 0), chunks_text.code);
+    try expectContains(chunks_text.stdout, "Zova chunks");
+    try expectContains(chunks_text.stdout, chunk_id_hex);
+
+    var chunks_json = try runCli(&.{ "zova", "chunks", "--json", path });
+    defer chunks_json.deinit();
+    try std.testing.expectEqual(@as(u8, 0), chunks_json.code);
+    var parsed_chunks = try parseJson(chunks_json.stdout);
+    defer parsed_chunks.deinit();
+    try expectJsonString(parsed_chunks.value.object, "command", "chunks");
+    try expectJsonArray(parsed_chunks.value.object, "chunks");
+
+    var chunk_json = try runCli(&.{ "zova", "chunk", "--json", path, chunk_id_hex });
+    defer chunk_json.deinit();
+    try std.testing.expectEqual(@as(u8, 0), chunk_json.code);
+    var parsed_chunk = try parseJson(chunk_json.stdout);
+    defer parsed_chunk.deinit();
+    try expectJsonString(parsed_chunk.value.object, "command", "chunk");
+    try expectJsonString(parsed_chunk.value.object, "chunk_hash", chunk_id_hex);
+    try expectJsonArray(parsed_chunk.value.object, "references");
+}
+
+fn expectCliVectorTableInspection(path: [:0]const u8, collection_name: []const u8) !void {
+    var info_json = try runCli(&.{ "zova", "info", "--json", path });
+    defer info_json.deinit();
+    try std.testing.expectEqual(@as(u8, 0), info_json.code);
+    var parsed_info = try parseJson(info_json.stdout);
+    defer parsed_info.deinit();
+    try expectJsonString(parsed_info.value.object, "command", "info");
+
+    var stats_text = try runCli(&.{ "zova", "stats", path });
+    defer stats_text.deinit();
+    try std.testing.expectEqual(@as(u8, 0), stats_text.code);
+    try expectContains(stats_text.stdout, "Zova stats");
+
+    var stats_json = try runCli(&.{ "zova", "stats", "--json", path });
+    defer stats_json.deinit();
+    try std.testing.expectEqual(@as(u8, 0), stats_json.code);
+    var parsed_stats = try parseJson(stats_json.stdout);
+    defer parsed_stats.deinit();
+    try expectJsonString(parsed_stats.value.object, "command", "stats");
+
+    var vectors_text = try runCli(&.{ "zova", "vectors", path });
+    defer vectors_text.deinit();
+    try std.testing.expectEqual(@as(u8, 0), vectors_text.code);
+    try expectContains(vectors_text.stdout, "Zova vector collections");
+    try expectContains(vectors_text.stdout, collection_name);
+
+    var vectors_json = try runCli(&.{ "zova", "vectors", "--json", path });
+    defer vectors_json.deinit();
+    try std.testing.expectEqual(@as(u8, 0), vectors_json.code);
+    var parsed_vectors = try parseJson(vectors_json.stdout);
+    defer parsed_vectors.deinit();
+    try expectJsonString(parsed_vectors.value.object, "command", "vectors");
+    try expectJsonArray(parsed_vectors.value.object, "collections");
+
+    var collection_json = try runCli(&.{ "zova", "vector-collection", "--json", "--limit", "1", path, collection_name });
+    defer collection_json.deinit();
+    try std.testing.expectEqual(@as(u8, 0), collection_json.code);
+    var parsed_collection = try parseJson(collection_json.stdout);
+    defer parsed_collection.deinit();
+    try expectJsonString(parsed_collection.value.object, "command", "vector-collection");
+    try expectJsonString(parsed_collection.value.object, "name", collection_name);
+    try expectJsonArray(parsed_collection.value.object, "vector_ids");
+
+    var tables_text = try runCli(&.{ "zova", "tables", path });
+    defer tables_text.deinit();
+    try std.testing.expectEqual(@as(u8, 0), tables_text.code);
+    try expectContains(tables_text.stdout, "Zova tables");
+    try expectContains(tables_text.stdout, "user_tables:");
+    try expectContains(tables_text.stdout, "private_tables:");
+
+    var tables_json = try runCli(&.{ "zova", "tables", "--json", path });
+    defer tables_json.deinit();
+    try std.testing.expectEqual(@as(u8, 0), tables_json.code);
+    var parsed_tables = try parseJson(tables_json.stdout);
+    defer parsed_tables.deinit();
+    try expectJsonString(parsed_tables.value.object, "command", "tables");
+    try expectJsonArray(parsed_tables.value.object, "user_tables");
+    try expectJsonArray(parsed_tables.value.object, "private_tables");
+
+    var check = try runCli(&.{ "zova", "check", path });
+    defer check.deinit();
+    try std.testing.expectEqual(@as(u8, 0), check.code);
+    try expectContains(check.stdout, "quick_check: ok");
+
+    var deep = try runCli(&.{ "zova", "check", "--deep", path });
+    defer deep.deinit();
+    try std.testing.expectEqual(@as(u8, 0), deep.code);
+    try expectContains(deep.stdout, "deep_check: ok");
+}
+
+const CliResult = struct {
+    code: u8,
+    stdout: []u8,
+    stderr: []u8,
+
+    fn deinit(self: *CliResult) void {
+        std.testing.allocator.free(self.stdout);
+        std.testing.allocator.free(self.stderr);
+    }
+};
+
+fn runCli(args: []const []const u8) !CliResult {
+    var stdout_buffer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stdout_buffer.deinit();
+    var stderr_buffer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer stderr_buffer.deinit();
+
+    const code = try cli.run(std.testing.allocator, args, &stdout_buffer.writer, &stderr_buffer.writer);
+    return .{
+        .code = code,
+        .stdout = try std.testing.allocator.dupe(u8, stdout_buffer.written()),
+        .stderr = try std.testing.allocator.dupe(u8, stderr_buffer.written()),
+    };
+}
+
+fn lowerHexAlloc(bytes: []const u8) ![]u8 {
+    const digits = "0123456789abcdef";
+    const out = try std.testing.allocator.alloc(u8, bytes.len * 2);
+    for (bytes, 0..) |byte, index| {
+        out[index * 2] = digits[@intCast(byte >> 4)];
+        out[index * 2 + 1] = digits[@intCast(byte & 0x0f)];
+    }
+    return out;
+}
+
+fn expectContains(haystack: []const u8, needle: []const u8) !void {
+    try std.testing.expect(std.mem.indexOf(u8, haystack, needle) != null);
+}
+
+fn parseJson(bytes: []const u8) !std.json.Parsed(std.json.Value) {
+    return std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+}
+
+fn expectJsonString(object: std.json.ObjectMap, key: []const u8, expected: []const u8) !void {
+    const value = object.get(key) orelse return error.MissingJsonField;
+    try std.testing.expectEqual(std.json.Value.string, std.meta.activeTag(value));
+    try std.testing.expectEqualStrings(expected, value.string);
+}
+
+fn expectJsonArray(object: std.json.ObjectMap, key: []const u8) !void {
+    const value = object.get(key) orelse return error.MissingJsonField;
+    try std.testing.expectEqual(std.json.Value.array, std.meta.activeTag(value));
 }
 
 fn fillDeterministic(bytes: []u8) void {

@@ -1,88 +1,187 @@
 # Zova
 
-Zova is a Zig embedded data substrate built on SQLite.
+SQLite-backed embedded database for records, objects, and vectors in one local
+file.
 
-Current package version: `0.10.0`.
+Zova keeps SQLite as the relational core, then adds native local storage for
+content-addressed objects, chunk manifests, streaming writes, and exact vector
+search. Applications keep their own metadata in normal SQL tables and store
+Zova object ids or vector ids alongside their rows.
 
-Zova keeps SQLite as the durable relational core and adds native local storage
-for objects and vectors in the same `.zova` file.
+Current package version: `0.11.0`.
 
-```text
-SQLite records + Zova objects + Zova vectors
+Zova is not tied to one application language. The project exposes:
+
+- a native Zig API
+- a C ABI in `include/zova.h`
+- a non-mutating CLI for inspection and checks
+- a source-only release package that consumers build locally
+
+Rust, Go, TypeScript, and Swift bindings are planned as layers over the C ABI.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    App["Application"]
+    SQL["User SQL tables<br/>records and metadata"]
+    ZovaAPI["Zova API<br/>native Zig or C ABI"]
+    CLI["zova CLI<br/>info, stats, inspect, check"]
+    DB["local .zova file<br/>SQLite database"]
+    Meta["_zova_meta<br/>identity and format"]
+    Objects["_zova_objects<br/>object identity"]
+    Chunks["_zova_chunks<br/>verified chunk BLOBs"]
+    Manifest["_zova_object_chunks<br/>object manifests"]
+    VecCols["_zova_vector_collections<br/>dimensions and metric"]
+    Vecs["_zova_vectors<br/>f32 vector BLOBs"]
+
+    App --> SQL
+    App --> ZovaAPI
+    ZovaAPI --> DB
+    CLI --> DB
+    DB --> SQL
+    DB --> Meta
+    DB --> Objects
+    DB --> Chunks
+    DB --> Manifest
+    DB --> VecCols
+    DB --> Vecs
+    Objects --> Manifest
+    Manifest --> Chunks
+    VecCols --> Vecs
 ```
 
-It is not a SQLite replacement, ORM, daemon, cloud service, or distributed
-database. It is a source-only Zig package for applications that want one local
-storage layer instead of a separate SQL database, object store, vector database,
-and cleanup script pile.
+## What Works In v0.11
 
-## What Works In v0.10
-
-Zova v0.10 includes:
-
-- thin SQLite access through `zova.sqlite`
-- `.zova` database create/open/validation through `zova.Database`
-- SQLite-to-Zova conversion with source preservation
-- content-addressed objects
+- normal SQLite access through a thin wrapper
+- `.zova` database create/open/validation
+- conversion from an existing SQLite database into a new `.zova` file
+- content-addressed objects with `ObjectId = SHA-256(full bytes)`
 - FastCDC-v1 chunking and chunk deduplication
 - object manifests and verified chunk reads
-- range reads for serving previews or partial content
+- range reads for previews and partial serving
 - streaming object writes with `ObjectWriter`
 - verified loose chunk ingest and object assembly from chunks
 - native vector collections
 - vector CRUD, batch upsert, collection info/list/delete
 - exact vector search, candidate-filtered search, search-by-id, and thresholds
 - C ABI for database, SQL, objects, chunks, writers, and vectors
-- non-mutating CLI `info` and `check`
+- CLI `info`, `stats`, object/chunk/vector/table inspection, and `check`
 - source-only release packaging
 
-The current `.zova` file format is still pre-1.0 and experimental. Current
-files use `_zova_meta.format_version = '3'`. `Database.open` validates the
-current private object/vector schema and does not repair, migrate, or lazily
-initialize older experimental files.
+The `.zova` format is still pre-1.0. Current files use
+`_zova_meta.format_version = '3'`. Opening a file validates the current private
+schema and does not repair, migrate, or lazily initialize older experimental
+files.
 
-## Install
+## File Boundary
 
-Add Zova as a Zig package dependency, then import it by package name:
+Zova is opt-in at the file level:
+
+```text
+*.zova  -> Zova database
+other   -> normal SQLite database
+```
+
+Renaming `app.db` to `app.zova` is not enough. A valid Zova database has Zova
+metadata and the required private object/vector schema.
+
+Normal SQLite files remain normal SQLite files. Existing BLOB columns are not
+automatically converted into Zova objects or vectors.
+
+## C ABI
+
+The C ABI is the language-neutral integration point.
+
+Files and build steps:
+
+- `include/zova.h`
+- `src/c_api.zig`
+- `zig build c-abi`
+- `zig build c-abi-test`
+
+The ABI exposes:
+
+- database create/open/close
+- SQL `exec`
+- SQLite-to-Zova conversion
+- object put/get/delete/existence/size/chunk count
+- range reads
+- object manifests and chunk reads
+- verified loose chunk ingest
+- object assembly from verified chunks
+- streaming object writes
+- vector collection create/exists/info/list/delete
+- vector put/get/exists/delete
+- batch vector put
+- exact vector search, candidate-filtered search, search-by-id, and thresholds
+
+Inputs are borrowed for the duration of each call. Paths and SQL use
+null-terminated C strings. Bytes use pointer plus length. Vector values use
+`const float *values` plus `size_t values_len`.
+
+Returned buffers, messages, manifests, vectors, collection info, collection
+lists, and search results are owned by Zova and must be freed explicitly:
+
+```c
+zova_buffer_free(&buffer);
+zova_message_free(&message);
+zova_object_manifest_free(&manifest);
+zova_vector_free(&vector);
+zova_vector_collection_info_free(&info);
+zova_vector_collection_list_free(&list);
+zova_vector_search_results_free(&results);
+```
+
+Every C ABI function returns `zova_status`. `ZOVA_OK` means success.
+`zova_status_name(status)` returns a static status name.
+
+Database-scoped diagnostics:
+
+```c
+const char *message = zova_database_last_error_message(db);
+```
+
+The returned pointer is borrowed and valid until the next call on that database
+handle or until close. Create/open/convert failures can also return an owned
+`zova_message` through their request structs.
+
+Handles are opaque. Do not use the same database or writer handle concurrently
+from multiple threads. Multiple database handles to the same file are allowed
+and follow SQLite locking.
+
+The ABI is additive and pre-1.0.
+
+## Native Zig API
+
+Zig users can import the package directly:
 
 ```zig
 const zova = @import("zova");
 ```
 
-Inside this repository the smoke executable imports source files directly, but
-package users should use the public package surface exported by `src/root.zig`.
-
-## Database Layers
-
-Zova exposes two layers.
-
-Use `zova.sqlite.Database` when you want a thin SQLite wrapper:
-
-```zig
-const sqlite = zova.sqlite;
-
-var db = try sqlite.Database.open("app.db");
-defer db.deinit();
-
-try db.exec("create table notes (id integer primary key, body text not null)");
-```
-
-Use `zova.Database` when you want Zova objects and vectors:
+Use `zova.Database` for `.zova` files:
 
 ```zig
 var db = try zova.Database.create("app.zova");
 defer db.deinit();
 ```
 
-The boundary is file-level:
+Use `zova.sqlite.Database` when you only want the thin SQLite wrapper:
 
-```text
-*.zova  -> Zova database
-other   -> plain SQLite database
+```zig
+var db = try zova.sqlite.Database.open("app.db");
+defer db.deinit();
+
+try db.exec("create table notes (id integer primary key, body text not null)");
 ```
 
-Renaming `app.db` to `app.zova` is not enough. A valid Zova file must have Zova
-metadata and the required private schema.
+Raw SQLite access remains available through `zova.sqlite.c` and public handles:
+
+```zig
+const c = zova.sqlite.c;
+_ = c.sqlite3_total_changes64(db.handle);
+```
 
 ## Convert SQLite To Zova
 
@@ -98,12 +197,9 @@ overwrites the destination. The destination must end in `.zova`.
 Schemas that already use `_zova_*` names are rejected with
 `error.ZovaNameConflict`, because those names are reserved for Zova internals.
 
-Existing SQLite data stays SQLite data. Existing BLOB columns are not
-automatically converted into Zova objects or vectors.
+## SQL Records
 
-## SQL Remains SQLite SQL
-
-`zova.Database` forwards basic SQL work to the underlying SQLite database:
+SQL remains SQLite SQL. User tables stay application-owned:
 
 ```zig
 try db.exec(
@@ -114,61 +210,15 @@ try db.exec(
     \\  mime_type text not null
     \\)
 );
-
-var stmt = try db.prepare(
-    "insert into attachments (object_id, filename, mime_type) values (?, ?, ?)",
-);
-defer stmt.deinit();
 ```
 
-User tables stay yours. Zova private tables store only Zova-owned object, chunk,
-and vector state.
-
-## SQLite Wrapper
-
-The SQLite wrapper intentionally stays close to SQLite's C API.
-
-```zig
-var db = try zova.sqlite.Database.open(":memory:");
-defer db.deinit();
-
-try db.exec("create table items (id integer primary key, name text not null)");
-try db.exec("insert into items (name) values ('one')");
-
-var stmt = try db.prepare("select id, name from items where name = ?");
-defer stmt.deinit();
-
-try stmt.bindText(1, "one"); // parameters are 1-based
-
-while (try stmt.step() == .row) {
-    const id = stmt.columnInt64(0); // columns are 0-based
-    const name = stmt.columnText(1);
-    std.debug.print("{} {s}\n", .{ id, name });
-}
-```
-
-Text and blob column slices are borrowed from SQLite and are valid until the
-statement is stepped, reset, cleared, or finalized. Bound text and blob values
-are copied into SQLite.
-
-Transactions are explicit:
-
-```zig
-try db.beginImmediate();
-try db.exec("insert into items (name) values ('two')");
-try db.commit();
-```
-
-Raw SQLite remains available through `zova.sqlite.c` and public handles:
-
-```zig
-const c = zova.sqlite.c;
-_ = c.sqlite3_total_changes64(db.handle);
-```
+Zova does not scan or mutate your user tables when objects or vectors are
+deleted. If a user table still references a deleted object id or vector id, that
+reference is application state.
 
 ## Objects
 
-Zova objects are raw content-addressed bytes.
+Zova objects are raw content-addressed bytes:
 
 ```text
 Object -> FastCDC-v1 chunks -> SQLite BLOB chunk rows
@@ -184,45 +234,28 @@ const id = try db.putObject("hello object");
 
 var object = try db.getObject(allocator, id);
 defer object.deinit(allocator);
-
-std.debug.assert(std.mem.eql(u8, object.bytes, "hello object"));
 ```
 
-Check object metadata without loading bytes:
-
-```zig
-if (try db.hasObject(id)) {
-    const size = try db.objectSize(id);
-    const chunks = try db.objectChunkCount(id);
-    std.debug.print("object: {} bytes in {} chunks\n", .{ size, chunks });
-}
-```
-
-Read a byte range into caller-owned memory:
+Read part of an object without allocating the full object:
 
 ```zig
 var preview: [16]u8 = undefined;
 const copied = try db.readObjectRange(id, 0, &preview);
-std.debug.print("copied {} preview bytes\n", .{copied});
 ```
 
-`getObject` allocates the full object. `readObjectRange` does not allocate an
-object-sized buffer and is the better API for previews, media serving, and
-partial reads.
-
-Delete removes Zova-owned object rows, manifest rows, and unreferenced chunks:
+Delete object storage:
 
 ```zig
 try db.deleteObject(id);
 ```
 
-Zova never scans or mutates user SQL rows during object deletion. If your SQL
-table still stores the deleted object id, that reference is application-owned
-and later reads return `error.ObjectNotFound`.
+Deletion removes Zova-owned object rows, manifest rows, and unreferenced chunks.
+It never scans or mutates user SQL rows.
 
-## Object Manifests And Chunks
+## Manifests, Chunks, And Transfers
 
-Objects have public manifests so applications can inspect or transfer chunks.
+Objects expose manifests so applications can inspect or transfer verified
+chunks:
 
 ```zig
 var manifest = try db.objectManifest(allocator, id);
@@ -231,7 +264,6 @@ defer manifest.deinit(allocator);
 for (manifest.chunks) |chunk| {
     var data = try db.getObjectChunk(allocator, chunk.hash);
     defer data.deinit(allocator);
-    // send or inspect data.bytes
 }
 ```
 
@@ -252,24 +284,13 @@ Assemble a complete object from already stored chunks:
 try db.assembleObjectFromChunks(object_id, size_bytes, manifest_chunks);
 ```
 
-Zova validates manifest shape, chunk existence, chunk hashes, offsets, sizes,
-and the final full-object SHA-256 before inserting the object row and manifest
-rows.
+Transfer state belongs in user SQL tables: pending chunks, peer state, retries,
+filenames, MIME types, UI progress, and final object references.
 
-Remove unreferenced loose chunks explicitly:
-
-```zig
-const deleted = try db.deleteObjectChunk(chunk_hash);
-```
-
-`deleteObjectChunk` returns `false` when the chunk is missing or still
-referenced by an object.
-
-## ObjectWriter
+## Streaming Object Writes
 
 Use `putObject` when the full byte slice is already in memory. Use
-`ObjectWriter` when bytes arrive over time and should not be held in one
-object-sized buffer.
+`ObjectWriter` when bytes arrive over time:
 
 ```zig
 var writer = try db.objectWriter(allocator);
@@ -283,43 +304,8 @@ const id = try writer.finish();
 
 The writer uses the same FastCDC-v1 boundaries as `putObject`, stores verified
 chunks as they are emitted, and finishes by assembling the object from those
-chunks. It keeps memory bounded around the streaming buffer, chunk data, and
-manifest metadata.
-
-Cancel unfinished writes:
-
-```zig
-try writer.cancel();
-```
-
-`cancel` removes unreferenced chunks seen by that writer and preserves chunks
-already referenced by objects. `deinit` automatically cancels unfinished writers.
-After `finish` or `cancel`, further writer operations return
-`error.ObjectWriterClosed`.
-
-## Application Metadata
-
-Zova object APIs store bytes, identities, chunks, and manifests. Application
-metadata belongs in user SQL tables.
-
-Examples of application-owned metadata:
-
-- filenames
-- MIME types
-- owners
-- labels
-- document ids
-- transfer sessions
-- retry state
-- permissions
-- UI progress
-
-The intended model is:
-
-```text
-user SQL row -> object_id blob -> Zova object bytes
-user SQL row -> vector_id text -> Zova vector values
-```
+chunks. `cancel` removes unreferenced chunks seen by that writer. `deinit`
+automatically cancels unfinished writers.
 
 ## Vectors
 
@@ -350,31 +336,18 @@ Vectors are stored as deterministic little-endian `f32` BLOBs in private Zova
 tables. Collection names and vector ids are UTF-8 text. Vector ids are scoped to
 their collection and are application-provided.
 
-Put and get vectors:
+Put vectors:
 
 ```zig
 try db.putVector("chunks", "chunk-001", &.{ 0.1, 0.2, 0.3 });
 
-var vector = try db.getVector(allocator, "chunks", "chunk-001");
-defer vector.deinit(allocator);
-```
-
-Batch upsert vectors:
-
-```zig
 try db.putVectors("chunks", &.{
     .{ .id = "chunk-001", .values = &.{ 0.1, 0.2, 0.3 } },
     .{ .id = "chunk-002", .values = &.{ 0.2, 0.3, 0.4 } },
 });
 ```
 
-`putVectors` validates the collection and every input row before writing. It
-uses the same upsert behavior as `putVector`; duplicate ids in one batch are
-applied in input order, so the last entry wins. It does not own a transaction,
-so callers can wrap it in `beginImmediate` / `commit` when they want atomic
-application-level work.
-
-Inspect collections:
+Inspect and delete collections:
 
 ```zig
 var info = try db.vectorCollectionInfo(allocator, "chunks");
@@ -382,16 +355,12 @@ defer info.deinit(allocator);
 
 var collections = try db.listVectorCollections(allocator);
 defer collections.deinit(allocator);
-```
 
-Delete a collection:
-
-```zig
 try db.deleteVectorCollection("chunks");
 ```
 
-This deletes private vector rows and the collection row. It does not scan or
-mutate user SQL tables that reference those vector ids.
+Collection deletion removes private vector rows and the collection row. It does
+not scan or mutate user SQL tables.
 
 ## Vector Search
 
@@ -407,10 +376,7 @@ var results = try db.searchVectors(
 defer results.deinit(allocator);
 ```
 
-Results are sorted by ascending distance, then ascending vector id. Returned ids
-are owned memory and must be freed with `VectorSearchResults.deinit`.
-
-Candidate-filtered search:
+Candidate-filtered exact search:
 
 ```zig
 const candidates = [_][]const u8{ "chunk-001", "chunk-004", "chunk-009" };
@@ -425,13 +391,6 @@ var filtered = try db.searchVectorsIn(
 defer filtered.deinit(allocator);
 ```
 
-This is the practical SQL-first path:
-
-1. Query your metadata tables with SQL.
-2. Collect candidate vector ids.
-3. Let Zova rank only those candidates.
-4. Join returned ids back to your SQL rows.
-
 Search by an existing vector id:
 
 ```zig
@@ -442,20 +401,6 @@ var neighbors = try db.searchVectorsById(
     10,
 );
 defer neighbors.deinit(allocator);
-```
-
-The source vector is excluded from results. Candidate-filtered search by id is
-also available:
-
-```zig
-var related = try db.searchVectorsByIdIn(
-    allocator,
-    "chunks",
-    "chunk-001",
-    &candidates,
-    10,
-);
-defer related.deinit(allocator);
 ```
 
 Threshold search is inclusive:
@@ -471,58 +416,60 @@ var close = try db.searchVectorsWithin(
 defer close.deinit(allocator);
 ```
 
-Threshold variants exist for candidate-filtered search and search-by-id:
-
-```zig
-var close_related = try db.searchVectorsByIdInWithin(
-    allocator,
-    "chunks",
-    "chunk-001",
-    &candidates,
-    0.25,
-    10,
-);
-defer close_related.deinit(allocator);
-```
-
-`limit = 0` returns an empty result set after validating the collection and
-query. Missing candidate ids are skipped. Invalid candidate ids return
-`error.VectorInvalid`. Corrupt selected vector rows return
-`error.VectorCorrupt`.
+Search is exact and flat-scan in v0.11. Missing candidate ids are skipped.
+Invalid candidate ids return `error.VectorInvalid`. Corrupt selected vector rows
+return `error.VectorCorrupt`.
 
 ## CLI
 
 The `zova` executable is a non-mutating inspection/check tool.
 
-```sh
-zig build run
-```
-
-Command shape:
+Build and run:
 
 ```sh
-zig-out/bin/zova --version
+zig build
 zig-out/bin/zova --help
-zig-out/bin/zova info app.zova
-zig-out/bin/zova check app.zova
-zig-out/bin/zova check --deep app.zova
 ```
 
-`info` prints bounded text output:
+Commands:
 
-- package version
-- SQLite version
-- Zova format version
-- object/chunk/vector counts
-- loose chunk count
-- stored chunk bytes
-- user table count
+```sh
+zova --version
+zova --help
+zova info [--json] <file.zova>
+zova stats [--json] [--limit <n>] <file.zova>
+zova objects [--json] [--limit <n>] <file.zova>
+zova object [--json] [--limit <n>] <file.zova> <object-id>
+zova chunks [--json] [--limit <n>] <file.zova>
+zova chunk [--json] [--limit <n>] <file.zova> <chunk-id>
+zova vectors [--json] [--limit <n>] <file.zova>
+zova vector-collection [--json] [--limit <n>] <file.zova> <name>
+zova tables [--json] [--limit <n>] <file.zova>
+zova check [--json] [--deep] <file.zova>
+```
 
-It does not print object bytes, vector values, or private schema SQL.
+`info` reports package/SQLite/format versions, file sizes, SQLite page stats,
+object counts, chunk counts, vector counts, and table counts.
+
+`stats` adds bounded storage statistics: object size stats, chunk size stats,
+deduped bytes saved, per-collection vector stats, top objects, and top chunks.
+
+`objects`, `object`, `chunks`, and `chunk` inspect ids/counts/sizes only. They
+do not read or print object bytes or chunk bytes.
+
+`vectors` lists vector collections. `vector-collection` reports one collection
+and bounded vector ids. They do not decode or print vector values.
+
+`tables` reports bounded user/private table names. It does not print schema SQL
+or row data.
 
 `check` validates Zova identity/schema and runs SQLite `PRAGMA quick_check`.
 `check --deep` also validates object manifests, referenced chunks, full object
-hashes, loose chunks as informational state, and vector row shape/finite values.
+hashes, loose chunks, and vector row shape/finite values. It reports bounded
+issue examples where practical.
+
+JSON output uses `cli_json_version = 1` and follows the same privacy rules as
+text output.
 
 Exit codes:
 
@@ -533,113 +480,7 @@ Exit codes:
 - `4`: integrity or corruption check failure
 
 The CLI does not repair, migrate, delete loose chunks, rebuild manifests, run
-`VACUUM`, change PRAGMAs, or mutate `.zova` files in v0.10.
-
-## C ABI
-
-Zova ships a pre-1.0 C ABI for future language bindings.
-
-Files and build steps:
-
-- `include/zova.h`
-- `src/c_api.zig`
-- `zig build c-abi`
-- `zig build c-abi-test`
-
-The C ABI exposes:
-
-- database create/open/close
-- SQL `exec`
-- SQLite-to-Zova conversion
-- object put/get/delete/existence/size/chunk count
-- range reads
-- manifests and chunk reads
-- verified loose chunk ingest
-- object assembly from verified chunks
-- `ObjectWriter`
-- vector collection create/exists/info/list/delete
-- vector put/get/exists/delete
-- batch vector put
-- collection-wide exact vector search
-- candidate-filtered exact vector search
-- search by existing vector id
-- inclusive threshold search
-
-Inputs are borrowed for the duration of each call. Paths and SQL use
-null-terminated C strings. Object bytes use pointer plus length. Vector values
-use `const float *values` plus `size_t values_len`.
-
-Returned buffers, messages, manifests, vectors, collection info, collection
-lists, and search results are owned by Zova and must be freed explicitly:
-
-```c
-zova_buffer_free(&buffer);
-zova_message_free(&message);
-zova_object_manifest_free(&manifest);
-zova_vector_free(&vector);
-zova_vector_collection_info_free(&info);
-zova_vector_collection_list_free(&list);
-zova_vector_search_results_free(&results);
-```
-
-Minimal C vector example:
-
-```c
-zova_vector_collection_create_request create = {
-    .db = db,
-    .name = "chunks",
-    .options = { .dimensions = 3, .metric = ZOVA_VECTOR_METRIC_COSINE },
-};
-zova_vector_collection_create(&create);
-
-const float a[3] = {0.1f, 0.2f, 0.3f};
-const float b[3] = {0.2f, 0.3f, 0.4f};
-
-zova_vector_input rows[] = {
-    { .id = "chunk-001", .values = a, .values_len = 3 },
-    { .id = "chunk-002", .values = b, .values_len = 3 },
-};
-
-zova_vector_put_many_request put_many = {
-    .db = db,
-    .collection_name = "chunks",
-    .vectors = rows,
-    .vectors_len = 2,
-};
-zova_vector_put_many(&put_many);
-
-zova_vector_search_results results = {0};
-zova_vector_search_by_id_within_request search = {
-    .db = db,
-    .collection_name = "chunks",
-    .source_vector_id = "chunk-001",
-    .max_distance = 0.25,
-    .limit = 10,
-    .out_results = &results,
-};
-zova_vector_search_by_id_within(&search);
-zova_vector_search_results_free(&results);
-```
-
-Every C ABI function returns `zova_status`. `ZOVA_OK` means success.
-`zova_status_name(status)` returns a static status name.
-
-Database-scoped diagnostics:
-
-```c
-const char *message = zova_database_last_error_message(db);
-```
-
-The pointer is borrowed and valid until the next call on that database handle or
-until close. Create/open/convert failures can also return an owned
-`zova_message` through their request structs.
-
-Handles are opaque. Do not use the same database or writer handle concurrently
-from multiple threads. Multiple database handles to the same file are allowed
-and follow SQLite locking.
-
-The ABI is additive and pre-1.0. Rust, Go, TypeScript, and Swift bindings remain
-future work.
+`VACUUM`, change PRAGMAs, or mutate `.zova` files.
 
 ## Vendored SQLite
 
@@ -655,48 +496,6 @@ Modern SQLite JSON support is built in for this SQLite version, so the old
 
 FTS5 and JSON are available as normal SQLite SQL. Zova does not add a separate
 FTS or JSON API.
-
-## Errors
-
-SQLite wrapper errors include:
-
-- `error.Busy`
-- `error.Locked`
-- `error.Constraint`
-- `error.CantOpen`
-- `error.ReadOnly`
-- `error.Corrupt`
-- `error.NoMemory`
-- `error.Interrupt`
-- `error.Misuse`
-- `error.SqliteError`
-
-Zova database errors include:
-
-- `error.NotZovaPath`
-- `error.NotZovaDatabase`
-- `error.UnsupportedZovaVersion`
-- `error.DestinationExists`
-- `error.ZovaNameConflict`
-- `error.ObjectNotFound`
-- `error.ObjectAlreadyExists`
-- `error.ObjectChunkNotFound`
-- `error.ObjectChunkHashMismatch`
-- `error.ObjectCorrupt`
-- `error.ObjectManifestInvalid`
-- `error.ObjectRangeInvalid`
-- `error.ObjectTooLarge`
-- `error.ObjectTransactionActive`
-- `error.ObjectWriterClosed`
-- `error.VectorCollectionExists`
-- `error.VectorCollectionNotFound`
-- `error.VectorNotFound`
-- `error.VectorDimensionMismatch`
-- `error.VectorCorrupt`
-- `error.VectorInvalid`
-
-For SQLite failures, `db.errorMessage()` exposes SQLite's current diagnostic
-message.
 
 ## Testing
 
@@ -725,12 +524,6 @@ zig build c-abi
 zig build c-abi-test
 ```
 
-Run the smoke executable:
-
-```sh
-zig build run
-```
-
 Run the full release smoke:
 
 ```sh
@@ -739,7 +532,7 @@ scripts/check-release.sh
 
 ## Release Package Policy
 
-v0.10 releases a source-only package/archive. The package includes:
+v0.11 releases a source-only package/archive. The package includes:
 
 - `README.md`
 - `build.zig`
@@ -758,16 +551,16 @@ Consumers build the CLI or static C ABI library from source with Zig.
 The release script:
 
 ```sh
-scripts/package-release.sh 0.10.0
+scripts/package-release.sh 0.11.0
 ```
 
 tags the current commit, pushes the branch and tag, creates a source archive,
 and creates the GitHub release. Do not run it until the exact commit you want
 to release is ready.
 
-## Non-Goals In v0.10
+## Non-Goals In v0.11
 
-Zova v0.10 does not include:
+Zova v0.11 does not include:
 
 - ANN indexes
 - HNSW or IVFFlat
@@ -777,6 +570,9 @@ Zova v0.10 does not include:
 - Rust, Go, TypeScript, or Swift bindings
 - repair commands
 - orphan scan CLI
+- CLI mutation commands
+- object or chunk extraction commands
+- vector search commands in the CLI
 - object compression or encryption
 - remote sync
 - daemon mode
@@ -799,5 +595,5 @@ inspection -> non-mutating CLI
 interop -> C ABI
 ```
 
-The goal is not to hide SQLite. The goal is to make records, objects, and
-vectors coexist in one embedded local storage layer without extra services.
+The goal is not to hide SQLite. The goal is to keep records, objects, and
+vectors together in one embedded local database without extra services.

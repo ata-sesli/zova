@@ -72,6 +72,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     e2e_module.addImport("zova", zova_module);
+    e2e_module.addImport("cli", cli_module);
 
     const e2e_tests = b.addTest(.{
         .root_module = e2e_module,
