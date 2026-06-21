@@ -72,5 +72,12 @@ test "package exports zova database namespace" {
     try std.testing.expect(@hasDecl(Database, "hasVector"));
     try std.testing.expect(@hasDecl(Database, "deleteVector"));
     try std.testing.expect(@hasDecl(Database, "searchVectors"));
+    try std.testing.expect(@hasDecl(Database, "searchVectorsIn"));
+    try std.testing.expect(@hasDecl(Database, "searchVectorsById"));
+    try std.testing.expect(@hasDecl(Database, "searchVectorsByIdIn"));
+    try std.testing.expect(@hasDecl(Database, "searchVectorsWithin"));
+    try std.testing.expect(@hasDecl(Database, "searchVectorsInWithin"));
+    try std.testing.expect(@hasDecl(Database, "searchVectorsByIdWithin"));
+    try std.testing.expect(@hasDecl(Database, "searchVectorsByIdInWithin"));
     try std.testing.expect(!@hasDecl(@This(), "fastcdc"));
 }

@@ -40,6 +40,8 @@ test "e2e app database stores relational rows and native objects across reopen" 
             \\  id integer primary key,
             \\  vector_id text not null,
             \\  document_id integer not null,
+            \\  language text not null,
+            \\  source text not null,
             \\  body text not null
             \\)
         );
@@ -73,8 +75,8 @@ test "e2e app database stores relational rows and native objects across reopen" 
         try insertAttachment(&db, binary_id, "binary.bin", "application/octet-stream", binary.len);
         try insertAttachment(&db, large_id, "large.bin", "application/octet-stream", large.len);
         try insertAttachment(&db, streamed_id, "streamed.bin", "application/octet-stream", streamed.len);
-        try insertChunkRef(&db, "chunk-1", 1, "first semantic chunk");
-        try insertChunkRef(&db, "chunk-2", 1, "second semantic chunk");
+        try insertChunkRef(&db, "chunk-1", 1, "en", "notes", "first semantic chunk");
+        try insertChunkRef(&db, "chunk-2", 1, "en", "archive", "second semantic chunk");
         try db.putVector("chunks", "chunk-1", &.{ 1.0, 0.0, 0.0 });
         try db.putVector("chunks", "chunk-2", &.{ 0.0, 1.0, 0.0 });
         try std.testing.expect(try db.hasVectorCollection("chunks"));
@@ -94,6 +96,10 @@ test "e2e app database stores relational rows and native objects across reopen" 
     try expectStoredVector(&reopened, "chunk-1", &.{ 1.0, 0.0, 0.0 });
     try expectStoredVector(&reopened, "chunk-2", &.{ 0.0, 1.0, 0.0 });
     try expectChunkSearchResult(&reopened, &.{ 0.9, 0.1, 0.0 }, &.{ "chunk-1", "chunk-2" }, &.{ "first semantic chunk", "second semantic chunk" });
+    try expectSqlFilteredChunkSearchResult(&reopened, &.{ 0.0, 1.0, 0.0 }, "en", "notes", &.{"chunk-1"}, &.{"first semantic chunk"});
+    try expectChunkSearchByIdResult(&reopened, "chunk-1", &.{"chunk-2"}, &.{"second semantic chunk"});
+    try expectSqlFilteredChunkSearchByIdResult(&reopened, "chunk-1", "en", "archive", &.{"chunk-2"}, &.{"second semantic chunk"});
+    try expectChunkThresholdSearchResult(&reopened, &.{ 1.0, 0.0, 0.0 }, 0.0, &.{"chunk-1"}, &.{"first semantic chunk"});
     try expectStoredObject(&reopened, "empty.bin", empty_id, "");
     try expectStoredObject(&reopened, "hello.txt", small_id, "hello object");
     try expectStoredObject(&reopened, "hello-copy.txt", duplicate_id, "hello object");
@@ -373,7 +379,9 @@ test "e2e converted sqlite database preserves sql data and accepts new objects" 
         try db.assembleObjectFromChunks(assembled_id, assembled_bytes.len, &assembled_manifest);
         try insertObjectRef(&db, assembled_id, "assembled");
         try insertSearchRow(&db, "converted-row-1", "converted sql row");
+        try insertSearchRow(&db, "converted-row-2", "converted sql row extra");
         try db.putVector("search_rows", "converted-row-1", &.{ 1.0, 2.0, 3.0 });
+        try db.putVector("search_rows", "converted-row-2", &.{ 2.0, 2.0, 3.0 });
         try std.testing.expect(try db.hasVectorCollection("search_rows"));
         try expectQuickCheckOk(&db);
         try expectIntegrityCheckOk(&db);
@@ -385,10 +393,14 @@ test "e2e converted sqlite database preserves sql data and accepts new objects" 
 
     try expectCount(&reopened, "select count(*) from files", 3);
     try expectCount(&reopened, "select count(*) from audit", 3);
-    try expectCount(&reopened, "select count(*) from search_rows", 1);
+    try expectCount(&reopened, "select count(*) from search_rows", 2);
     try std.testing.expect(try reopened.hasVectorCollection("search_rows"));
     try expectStoredSearchVector(&reopened, "converted-row-1", &.{ 1.0, 2.0, 3.0 });
+    try expectStoredSearchVector(&reopened, "converted-row-2", &.{ 2.0, 2.0, 3.0 });
     try expectConvertedSearchResult(&reopened, &.{ 1.0, 2.0, 3.0 }, &.{"converted-row-1"}, &.{"converted sql row"});
+    try expectSqlFilteredConvertedSearchResult(&reopened, &.{ 1.0, 2.0, 3.0 }, "converted%", &.{"converted-row-1"}, &.{"converted sql row"});
+    try expectConvertedThresholdSearchResult(&reopened, &.{ 1.0, 2.0, 3.0 }, 1.0, &.{ "converted-row-1", "converted-row-2" }, &.{ "converted sql row", "converted sql row extra" });
+    try expectSqlFilteredConvertedSearchByIdResult(&reopened, "converted-row-1", "converted%", &.{"converted-row-2"}, &.{"converted sql row extra"});
     try expectObjectRef(&reopened, "converted", converted_object_id, "converted object bytes");
     try expectObjectRefRange(&reopened, "converted", converted_object_id, "converted object bytes");
     try expectObjectChunksReassemble(&reopened, converted_object_id, "converted object bytes");
@@ -517,13 +529,15 @@ fn deleteAttachment(db: *zova.Database, filename: []const u8) !void {
     try std.testing.expectEqual(zova.sqlite.Step.done, try stmt.step());
 }
 
-fn insertChunkRef(db: *zova.Database, vector_id: []const u8, document_id: i64, body: []const u8) !void {
-    var stmt = try db.prepare("insert into chunks (vector_id, document_id, body) values (?, ?, ?)");
+fn insertChunkRef(db: *zova.Database, vector_id: []const u8, document_id: i64, language: []const u8, source: []const u8, body: []const u8) !void {
+    var stmt = try db.prepare("insert into chunks (vector_id, document_id, language, source, body) values (?, ?, ?, ?, ?)");
     defer stmt.deinit();
 
     try stmt.bindText(1, vector_id);
     try stmt.bindInt64(2, document_id);
-    try stmt.bindText(3, body);
+    try stmt.bindText(3, language);
+    try stmt.bindText(4, source);
+    try stmt.bindText(5, body);
     try std.testing.expectEqual(zova.sqlite.Step.done, try stmt.step());
 }
 
@@ -787,6 +801,77 @@ fn expectChunkSearchResult(
     }
 }
 
+fn expectSqlFilteredChunkSearchResult(
+    db: *zova.Database,
+    query: []const f32,
+    language: []const u8,
+    source: []const u8,
+    expected_ids: []const []const u8,
+    expected_bodies: []const []const u8,
+) !void {
+    var candidates = try selectChunkCandidateIds(std.testing.allocator, db, language, source);
+    defer candidates.deinit(std.testing.allocator);
+
+    var results = try db.searchVectorsIn(std.testing.allocator, "chunks", query, candidates.ids, expected_ids.len);
+    defer results.deinit(std.testing.allocator);
+    try expectSearchIds(&results, expected_ids);
+
+    for (results.items, expected_bodies) |result, expected_body| {
+        try expectChunkBodyForVectorId(db, result.id, expected_body);
+    }
+}
+
+fn expectChunkSearchByIdResult(
+    db: *zova.Database,
+    source_vector_id: []const u8,
+    expected_ids: []const []const u8,
+    expected_bodies: []const []const u8,
+) !void {
+    var results = try db.searchVectorsById(std.testing.allocator, "chunks", source_vector_id, expected_ids.len);
+    defer results.deinit(std.testing.allocator);
+    try expectSearchIds(&results, expected_ids);
+
+    for (results.items, expected_bodies) |result, expected_body| {
+        try expectChunkBodyForVectorId(db, result.id, expected_body);
+    }
+}
+
+fn expectSqlFilteredChunkSearchByIdResult(
+    db: *zova.Database,
+    source_vector_id: []const u8,
+    language: []const u8,
+    source: []const u8,
+    expected_ids: []const []const u8,
+    expected_bodies: []const []const u8,
+) !void {
+    var candidates = try selectChunkCandidateIds(std.testing.allocator, db, language, source);
+    defer candidates.deinit(std.testing.allocator);
+
+    var results = try db.searchVectorsByIdIn(std.testing.allocator, "chunks", source_vector_id, candidates.ids, expected_ids.len);
+    defer results.deinit(std.testing.allocator);
+    try expectSearchIds(&results, expected_ids);
+
+    for (results.items, expected_bodies) |result, expected_body| {
+        try expectChunkBodyForVectorId(db, result.id, expected_body);
+    }
+}
+
+fn expectChunkThresholdSearchResult(
+    db: *zova.Database,
+    query: []const f32,
+    max_distance: f64,
+    expected_ids: []const []const u8,
+    expected_bodies: []const []const u8,
+) !void {
+    var results = try db.searchVectorsWithin(std.testing.allocator, "chunks", query, max_distance, expected_ids.len + 10);
+    defer results.deinit(std.testing.allocator);
+    try expectSearchIds(&results, expected_ids);
+
+    for (results.items, expected_bodies) |result, expected_body| {
+        try expectChunkBodyForVectorId(db, result.id, expected_body);
+    }
+}
+
 fn expectConvertedSearchResult(
     db: *zova.Database,
     query: []const f32,
@@ -800,6 +885,131 @@ fn expectConvertedSearchResult(
     for (results.items, expected_bodies) |result, expected_body| {
         try expectSearchRowBodyForVectorId(db, result.id, expected_body);
     }
+}
+
+fn expectConvertedThresholdSearchResult(
+    db: *zova.Database,
+    query: []const f32,
+    max_distance: f64,
+    expected_ids: []const []const u8,
+    expected_bodies: []const []const u8,
+) !void {
+    var results = try db.searchVectorsWithin(std.testing.allocator, "search_rows", query, max_distance, expected_ids.len + 10);
+    defer results.deinit(std.testing.allocator);
+    try expectSearchIds(&results, expected_ids);
+
+    for (results.items, expected_bodies) |result, expected_body| {
+        try expectSearchRowBodyForVectorId(db, result.id, expected_body);
+    }
+}
+
+fn expectSqlFilteredConvertedSearchResult(
+    db: *zova.Database,
+    query: []const f32,
+    body_like: []const u8,
+    expected_ids: []const []const u8,
+    expected_bodies: []const []const u8,
+) !void {
+    var candidates = try selectSearchRowCandidateIds(std.testing.allocator, db, body_like);
+    defer candidates.deinit(std.testing.allocator);
+
+    var results = try db.searchVectorsIn(std.testing.allocator, "search_rows", query, candidates.ids, expected_ids.len);
+    defer results.deinit(std.testing.allocator);
+    try expectSearchIds(&results, expected_ids);
+
+    for (results.items, expected_bodies) |result, expected_body| {
+        try expectSearchRowBodyForVectorId(db, result.id, expected_body);
+    }
+}
+
+fn expectSqlFilteredConvertedSearchByIdResult(
+    db: *zova.Database,
+    source_vector_id: []const u8,
+    body_like: []const u8,
+    expected_ids: []const []const u8,
+    expected_bodies: []const []const u8,
+) !void {
+    var candidates = try selectSearchRowCandidateIds(std.testing.allocator, db, body_like);
+    defer candidates.deinit(std.testing.allocator);
+
+    var results = try db.searchVectorsByIdIn(std.testing.allocator, "search_rows", source_vector_id, candidates.ids, expected_ids.len);
+    defer results.deinit(std.testing.allocator);
+    try expectSearchIds(&results, expected_ids);
+
+    for (results.items, expected_bodies) |result, expected_body| {
+        try expectSearchRowBodyForVectorId(db, result.id, expected_body);
+    }
+}
+
+const SelectedCandidateIds = struct {
+    ids: []const []const u8,
+
+    fn deinit(self: *SelectedCandidateIds, allocator: std.mem.Allocator) void {
+        for (self.ids) |id| {
+            allocator.free(id);
+        }
+        allocator.free(self.ids);
+    }
+};
+
+fn selectChunkCandidateIds(
+    allocator: std.mem.Allocator,
+    db: *zova.Database,
+    language: []const u8,
+    source: []const u8,
+) !SelectedCandidateIds {
+    var ids: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (ids.items) |id| {
+            allocator.free(id);
+        }
+        ids.deinit(allocator);
+    }
+
+    var stmt = try db.prepare(
+        \\select vector_id
+        \\from chunks
+        \\where language = ? and source = ?
+        \\order by id
+    );
+    defer stmt.deinit();
+
+    try stmt.bindText(1, language);
+    try stmt.bindText(2, source);
+    while ((try stmt.step()) == .row) {
+        try ids.append(allocator, try allocator.dupe(u8, stmt.columnText(0)));
+    }
+
+    return .{ .ids = try ids.toOwnedSlice(allocator) };
+}
+
+fn selectSearchRowCandidateIds(
+    allocator: std.mem.Allocator,
+    db: *zova.Database,
+    body_like: []const u8,
+) !SelectedCandidateIds {
+    var ids: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (ids.items) |id| {
+            allocator.free(id);
+        }
+        ids.deinit(allocator);
+    }
+
+    var stmt = try db.prepare(
+        \\select vector_id
+        \\from search_rows
+        \\where body like ?
+        \\order by id
+    );
+    defer stmt.deinit();
+
+    try stmt.bindText(1, body_like);
+    while ((try stmt.step()) == .row) {
+        try ids.append(allocator, try allocator.dupe(u8, stmt.columnText(0)));
+    }
+
+    return .{ .ids = try ids.toOwnedSlice(allocator) };
 }
 
 fn expectSearchIds(results: *const zova.VectorSearchResults, expected: []const []const u8) !void {

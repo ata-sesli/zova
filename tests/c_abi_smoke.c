@@ -32,6 +32,24 @@ static void expect_chunk_id_equal(zova_object_chunk_id left, zova_object_chunk_i
     }
 }
 
+static void expect_float_values(const float *actual, const float *expected, size_t len, const char *label) {
+    for (size_t i = 0; i < len; i += 1) {
+        if (actual[i] != expected[i]) {
+            fprintf(stderr, "%s: float mismatch at %zu\n", label, i);
+            exit(1);
+        }
+    }
+}
+
+static void expect_result_id(const zova_vector_search_results *results, size_t index, const char *expected, const char *label) {
+    size_t expected_len = strlen(expected);
+    if (index >= results->len || results->items[index].id_len != expected_len ||
+        memcmp(results->items[index].id, expected, expected_len) != 0) {
+        fprintf(stderr, "%s: unexpected vector search id at %zu\n", label, index);
+        exit(1);
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         fprintf(stderr, "usage: %s <db-path>\n", argv[0]);
@@ -56,6 +74,269 @@ int main(int argc, char **argv) {
         .sql = "create table refs (id integer primary key, object_id blob not null)",
     };
     expect_status(zova_database_exec(&exec_req), ZOVA_OK, "exec sql");
+
+    zova_vector_collection_create_request vector_collection_req = {
+        .db = db,
+        .name = "chunks",
+        .options = {.dimensions = 2, .metric = ZOVA_VECTOR_METRIC_L2},
+    };
+    expect_status(zova_vector_collection_create(&vector_collection_req), ZOVA_OK, "create vector collection");
+    expect_status(zova_vector_collection_create(&vector_collection_req), ZOVA_VECTOR_COLLECTION_EXISTS, "duplicate vector collection");
+
+    uint8_t collection_exists = 0;
+    zova_vector_collection_exists_request collection_exists_req = {
+        .db = db,
+        .name = "chunks",
+        .out_exists = &collection_exists,
+    };
+    expect_status(zova_vector_collection_exists(&collection_exists_req), ZOVA_OK, "vector collection exists");
+    if (!collection_exists) {
+        fprintf(stderr, "vector collection exists: expected true\n");
+        return 1;
+    }
+
+    const float near_values[] = {1.0f, 0.0f};
+    const float tie_a_values[] = {2.0f, 0.0f};
+    const float tie_b_values[] = {0.0f, 2.0f};
+    const float far_values[] = {10.0f, 0.0f};
+    const float query_values[] = {0.0f, 0.0f};
+
+    zova_vector_put_request put_near = {
+        .db = db,
+        .collection_name = "chunks",
+        .vector_id = "near",
+        .values = near_values,
+        .values_len = 2,
+    };
+    zova_vector_put_request put_tie_a = {
+        .db = db,
+        .collection_name = "chunks",
+        .vector_id = "tie-a",
+        .values = tie_a_values,
+        .values_len = 2,
+    };
+    zova_vector_put_request put_tie_b = {
+        .db = db,
+        .collection_name = "chunks",
+        .vector_id = "tie-b",
+        .values = tie_b_values,
+        .values_len = 2,
+    };
+    zova_vector_put_request put_far = {
+        .db = db,
+        .collection_name = "chunks",
+        .vector_id = "far",
+        .values = far_values,
+        .values_len = 2,
+    };
+    expect_status(zova_vector_put(&put_near), ZOVA_OK, "put near vector");
+    expect_status(zova_vector_put(&put_tie_a), ZOVA_OK, "put tie-a vector");
+    expect_status(zova_vector_put(&put_tie_b), ZOVA_OK, "put tie-b vector");
+    expect_status(zova_vector_put(&put_far), ZOVA_OK, "put far vector");
+
+    const float updated_near_values[] = {1.0f, 1.0f};
+    put_near.values = updated_near_values;
+    expect_status(zova_vector_put(&put_near), ZOVA_OK, "upsert near vector");
+
+    uint8_t vector_exists = 0;
+    zova_vector_exists_request vector_exists_req = {
+        .db = db,
+        .collection_name = "chunks",
+        .vector_id = "near",
+        .out_exists = &vector_exists,
+    };
+    expect_status(zova_vector_exists(&vector_exists_req), ZOVA_OK, "vector exists");
+    if (!vector_exists) {
+        fprintf(stderr, "vector exists: expected true\n");
+        return 1;
+    }
+
+    zova_vector fetched = {0};
+    zova_vector_get_request vector_get_req = {
+        .db = db,
+        .collection_name = "chunks",
+        .vector_id = "near",
+        .out_vector = &fetched,
+    };
+    expect_status(zova_vector_get(&vector_get_req), ZOVA_OK, "get vector");
+    if (fetched.id_len != strlen("near") || memcmp(fetched.id, "near", fetched.id_len) != 0 || fetched.values_len != 2) {
+        fprintf(stderr, "get vector: unexpected vector shape\n");
+        return 1;
+    }
+    expect_float_values(fetched.values, updated_near_values, 2, "get vector values");
+    zova_vector_free(&fetched);
+
+    zova_vector_search_results l2_results = {0};
+    zova_vector_search_request search_req = {
+        .db = db,
+        .collection_name = "chunks",
+        .query = query_values,
+        .query_len = 2,
+        .limit = 3,
+        .out_results = &l2_results,
+    };
+    expect_status(zova_vector_search(&search_req), ZOVA_OK, "l2 vector search");
+    if (l2_results.len != 3) {
+        fprintf(stderr, "l2 vector search: unexpected result length\n");
+        return 1;
+    }
+    expect_result_id(&l2_results, 0, "near", "l2 vector search");
+    expect_result_id(&l2_results, 1, "tie-a", "l2 vector search");
+    expect_result_id(&l2_results, 2, "tie-b", "l2 vector search");
+    zova_vector_search_results_free(&l2_results);
+
+    const char *candidate_ids[] = {"far", "missing", "tie-b", "near", "tie-a", "near"};
+    zova_vector_search_results filtered_results = {0};
+    zova_vector_search_in_request search_in_req = {
+        .db = db,
+        .collection_name = "chunks",
+        .query = query_values,
+        .query_len = 2,
+        .candidate_ids = candidate_ids,
+        .candidate_count = sizeof(candidate_ids) / sizeof(candidate_ids[0]),
+        .limit = 2,
+        .out_results = &filtered_results,
+    };
+    expect_status(zova_vector_search_in(&search_in_req), ZOVA_OK, "candidate vector search");
+    if (filtered_results.len != 2) {
+        fprintf(stderr, "candidate vector search: unexpected result length\n");
+        return 1;
+    }
+    expect_result_id(&filtered_results, 0, "near", "candidate vector search");
+    expect_result_id(&filtered_results, 1, "tie-a", "candidate vector search");
+    zova_vector_search_results_free(&filtered_results);
+
+    zova_vector_delete_request delete_vector_req = {
+        .db = db,
+        .collection_name = "chunks",
+        .vector_id = "far",
+    };
+    expect_status(zova_vector_delete(&delete_vector_req), ZOVA_OK, "delete vector");
+    expect_status(zova_vector_delete(&delete_vector_req), ZOVA_VECTOR_NOT_FOUND, "delete missing vector");
+
+    zova_vector_get_request missing_vector_get_req = {
+        .db = db,
+        .collection_name = "chunks",
+        .vector_id = "far",
+        .out_vector = &fetched,
+    };
+    expect_status(zova_vector_get(&missing_vector_get_req), ZOVA_VECTOR_NOT_FOUND, "get missing vector");
+
+    zova_vector_put_request missing_collection_put = {
+        .db = db,
+        .collection_name = "missing",
+        .vector_id = "id",
+        .values = near_values,
+        .values_len = 2,
+    };
+    expect_status(zova_vector_put(&missing_collection_put), ZOVA_VECTOR_COLLECTION_NOT_FOUND, "put missing vector collection");
+
+    zova_vector_collection_create_request cosine_collection_req = {
+        .db = db,
+        .name = "cosine",
+        .options = {.dimensions = 2, .metric = ZOVA_VECTOR_METRIC_COSINE},
+    };
+    zova_vector_collection_create_request dot_collection_req = {
+        .db = db,
+        .name = "dot",
+        .options = {.dimensions = 2, .metric = ZOVA_VECTOR_METRIC_DOT},
+    };
+    expect_status(zova_vector_collection_create(&cosine_collection_req), ZOVA_OK, "create cosine collection");
+    expect_status(zova_vector_collection_create(&dot_collection_req), ZOVA_OK, "create dot collection");
+
+    const float east[] = {1.0f, 0.0f};
+    const float north[] = {0.0f, 1.0f};
+    const float northeast[] = {1.0f, 1.0f};
+    zova_vector_put_request put_cosine_east = {
+        .db = db,
+        .collection_name = "cosine",
+        .vector_id = "east",
+        .values = east,
+        .values_len = 2,
+    };
+    zova_vector_put_request put_cosine_north = {
+        .db = db,
+        .collection_name = "cosine",
+        .vector_id = "north",
+        .values = north,
+        .values_len = 2,
+    };
+    zova_vector_put_request put_cosine_northeast = {
+        .db = db,
+        .collection_name = "cosine",
+        .vector_id = "northeast",
+        .values = northeast,
+        .values_len = 2,
+    };
+    expect_status(zova_vector_put(&put_cosine_east), ZOVA_OK, "put cosine east");
+    expect_status(zova_vector_put(&put_cosine_north), ZOVA_OK, "put cosine north");
+    expect_status(zova_vector_put(&put_cosine_northeast), ZOVA_OK, "put cosine northeast");
+
+    zova_vector_search_results cosine_results = {0};
+    zova_vector_search_request cosine_search_req = {
+        .db = db,
+        .collection_name = "cosine",
+        .query = east,
+        .query_len = 2,
+        .limit = 3,
+        .out_results = &cosine_results,
+    };
+    expect_status(zova_vector_search(&cosine_search_req), ZOVA_OK, "cosine vector search");
+    if (cosine_results.len != 3) {
+        fprintf(stderr, "cosine vector search: unexpected result length\n");
+        return 1;
+    }
+    expect_result_id(&cosine_results, 0, "east", "cosine vector search");
+    expect_result_id(&cosine_results, 1, "northeast", "cosine vector search");
+    expect_result_id(&cosine_results, 2, "north", "cosine vector search");
+    zova_vector_search_results_free(&cosine_results);
+
+    const float dot_large[] = {3.0f, 0.0f};
+    const float dot_small[] = {1.0f, 0.0f};
+    const float dot_negative[] = {-1.0f, 0.0f};
+    zova_vector_put_request put_dot_large = {
+        .db = db,
+        .collection_name = "dot",
+        .vector_id = "large",
+        .values = dot_large,
+        .values_len = 2,
+    };
+    zova_vector_put_request put_dot_small = {
+        .db = db,
+        .collection_name = "dot",
+        .vector_id = "small",
+        .values = dot_small,
+        .values_len = 2,
+    };
+    zova_vector_put_request put_dot_negative = {
+        .db = db,
+        .collection_name = "dot",
+        .vector_id = "negative",
+        .values = dot_negative,
+        .values_len = 2,
+    };
+    expect_status(zova_vector_put(&put_dot_large), ZOVA_OK, "put dot large");
+    expect_status(zova_vector_put(&put_dot_small), ZOVA_OK, "put dot small");
+    expect_status(zova_vector_put(&put_dot_negative), ZOVA_OK, "put dot negative");
+
+    zova_vector_search_results dot_results = {0};
+    zova_vector_search_request dot_search_req = {
+        .db = db,
+        .collection_name = "dot",
+        .query = east,
+        .query_len = 2,
+        .limit = 3,
+        .out_results = &dot_results,
+    };
+    expect_status(zova_vector_search(&dot_search_req), ZOVA_OK, "dot vector search");
+    if (dot_results.len != 3) {
+        fprintf(stderr, "dot vector search: unexpected result length\n");
+        return 1;
+    }
+    expect_result_id(&dot_results, 0, "large", "dot vector search");
+    expect_result_id(&dot_results, 1, "small", "dot vector search");
+    expect_result_id(&dot_results, 2, "negative", "dot vector search");
+    zova_vector_search_results_free(&dot_results);
 
     const uint8_t object_bytes[] = "hello from c abi";
     zova_object_id expected_id = {0};

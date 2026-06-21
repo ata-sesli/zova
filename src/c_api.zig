@@ -15,6 +15,12 @@
 //! Exported functions should never let Zig implementation details escape. Convert
 //! every Zig error into `zova_status`, return owned data through C containers,
 //! and keep borrowed pointers scoped to the documented lifetime.
+//!
+//! Vectors follow the same ABI pattern as objects: collection names and vector
+//! ids are borrowed C strings, vector values are borrowed `float` arrays, and
+//! returned vectors/search results are library-owned containers with explicit
+//! free functions. Vector metadata remains application-owned in normal SQL
+//! tables; this bridge only exposes native vector storage and exact search.
 
 const std = @import("std");
 const zova = @import("zova.zig");
@@ -70,6 +76,12 @@ pub const zova_status = enum(c_int) {
     OBJECT_TOO_LARGE = 57,
     OBJECT_TRANSACTION_ACTIVE = 58,
     OBJECT_WRITER_CLOSED = 59,
+    VECTOR_COLLECTION_EXISTS = 70,
+    VECTOR_COLLECTION_NOT_FOUND = 71,
+    VECTOR_NOT_FOUND = 72,
+    VECTOR_DIMENSION_MISMATCH = 73,
+    VECTOR_CORRUPT = 74,
+    VECTOR_INVALID = 75,
 };
 
 pub const zova_object_id = extern struct {
@@ -104,6 +116,38 @@ pub const zova_object_manifest = extern struct {
     chunker: ?[*:0]const u8,
     chunks: ?[*]zova_object_manifest_chunk,
     chunks_len: usize,
+};
+
+pub const zova_vector_metric = enum(c_int) {
+    COSINE = 0,
+    L2 = 1,
+    DOT = 2,
+};
+
+pub const zova_vector_collection_options = extern struct {
+    dimensions: u32,
+    // Keep this as a raw C integer instead of a Zig enum field so invalid C
+    // enum values can be reported as ZOVA_INVALID_ARGUMENT rather than tripping
+    // Zig enum safety checks.
+    metric: c_int,
+};
+
+pub const zova_vector = extern struct {
+    id: ?[*]u8,
+    id_len: usize,
+    values: ?[*]f32,
+    values_len: usize,
+};
+
+pub const zova_vector_search_result = extern struct {
+    id: ?[*]u8,
+    id_len: usize,
+    distance: f64,
+};
+
+pub const zova_vector_search_results = extern struct {
+    items: ?[*]zova_vector_search_result,
+    len: usize,
 };
 
 pub const zova_database_open_request = extern struct {
@@ -221,6 +265,66 @@ pub const zova_object_writer_cancel_request = extern struct {
     writer: ?*zova_object_writer,
 };
 
+pub const zova_vector_collection_create_request = extern struct {
+    db: ?*zova_database,
+    name: ?[*:0]const u8,
+    options: zova_vector_collection_options,
+};
+
+pub const zova_vector_collection_exists_request = extern struct {
+    db: ?*zova_database,
+    name: ?[*:0]const u8,
+    out_exists: ?*u8,
+};
+
+pub const zova_vector_put_request = extern struct {
+    db: ?*zova_database,
+    collection_name: ?[*:0]const u8,
+    vector_id: ?[*:0]const u8,
+    values: ?[*]const f32,
+    values_len: usize,
+};
+
+pub const zova_vector_get_request = extern struct {
+    db: ?*zova_database,
+    collection_name: ?[*:0]const u8,
+    vector_id: ?[*:0]const u8,
+    out_vector: ?*zova_vector,
+};
+
+pub const zova_vector_exists_request = extern struct {
+    db: ?*zova_database,
+    collection_name: ?[*:0]const u8,
+    vector_id: ?[*:0]const u8,
+    out_exists: ?*u8,
+};
+
+pub const zova_vector_delete_request = extern struct {
+    db: ?*zova_database,
+    collection_name: ?[*:0]const u8,
+    vector_id: ?[*:0]const u8,
+};
+
+pub const zova_vector_search_request = extern struct {
+    db: ?*zova_database,
+    collection_name: ?[*:0]const u8,
+    query: ?[*]const f32,
+    query_len: usize,
+    limit: usize,
+    out_results: ?*zova_vector_search_results,
+};
+
+pub const zova_vector_search_in_request = extern struct {
+    db: ?*zova_database,
+    collection_name: ?[*:0]const u8,
+    query: ?[*]const f32,
+    query_len: usize,
+    candidate_ids: ?[*]const ?[*:0]const u8,
+    candidate_count: usize,
+    limit: usize,
+    out_results: ?*zova_vector_search_results,
+};
+
 // Version helpers describe the C ABI boundary, not the .zova file format.
 export fn zova_abi_version_major() callconv(.c) u32 {
     return 0;
@@ -268,6 +372,30 @@ export fn zova_object_manifest_free(manifest: ?*zova_object_manifest) callconv(.
         allocator.free(chunks[0..out.chunks_len]);
     }
     out.* = emptyManifest();
+}
+
+export fn zova_vector_free(vector: ?*zova_vector) callconv(.c) void {
+    const out = vector orelse return;
+    if (out.id) |id| {
+        allocator.free(id[0 .. out.id_len + 1]);
+    }
+    if (out.values) |values| {
+        allocator.free(values[0..out.values_len]);
+    }
+    out.* = emptyVector();
+}
+
+export fn zova_vector_search_results_free(results: ?*zova_vector_search_results) callconv(.c) void {
+    const out = results orelse return;
+    if (out.items) |items| {
+        for (items[0..out.len]) |item| {
+            if (item.id) |id| {
+                allocator.free(id[0 .. item.id_len + 1]);
+            }
+        }
+        allocator.free(items[0..out.len]);
+    }
+    out.* = emptyVectorSearchResults();
 }
 
 export fn zova_database_create(request: ?*const zova_database_open_request) callconv(.c) zova_status {
@@ -526,6 +654,120 @@ export fn zova_object_writer_destroy(writer: ?*zova_object_writer) callconv(.c) 
     return .OK;
 }
 
+export fn zova_vector_collection_create(request: ?*const zova_vector_collection_create_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    const name = req.name orelse return failDb(handle, error.InvalidArgument);
+    const metric = vectorMetricFromAbi(req.options.metric) orelse return failDb(handle, error.InvalidArgument);
+
+    handle.db.createVectorCollection(std.mem.span(name), .{
+        .dimensions = req.options.dimensions,
+        .metric = metric,
+    }) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+export fn zova_vector_collection_exists(request: ?*const zova_vector_collection_exists_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    const name = req.name orelse return failDb(handle, error.InvalidArgument);
+    const out = req.out_exists orelse return failDb(handle, error.InvalidArgument);
+    const exists = handle.db.hasVectorCollection(std.mem.span(name)) catch |err| return failDb(handle, err);
+    out.* = if (exists) 1 else 0;
+    return okDb(handle);
+}
+
+export fn zova_vector_put(request: ?*const zova_vector_put_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
+    const vector_id = req.vector_id orelse return failDb(handle, error.InvalidArgument);
+    const values = floatsConst(req.values, req.values_len) orelse return failDb(handle, error.InvalidArgument);
+
+    handle.db.putVector(std.mem.span(collection_name), std.mem.span(vector_id), values) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+export fn zova_vector_get(request: ?*const zova_vector_get_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
+    const vector_id = req.vector_id orelse return failDb(handle, error.InvalidArgument);
+    const out = req.out_vector orelse return failDb(handle, error.InvalidArgument);
+    out.* = emptyVector();
+
+    var vector = handle.db.getVector(allocator, std.mem.span(collection_name), std.mem.span(vector_id)) catch |err| return failDb(handle, err);
+    errdefer vector.deinit(allocator);
+
+    const id = allocator.dupeZ(u8, vector.id) catch |err| return failDb(handle, err);
+    errdefer allocator.free(id);
+
+    allocator.free(vector.id);
+    vector.id = &.{};
+    out.* = .{
+        .id = id.ptr,
+        .id_len = id.len,
+        .values = if (vector.values.len == 0) null else vector.values.ptr,
+        .values_len = vector.values.len,
+    };
+    vector.values = &.{};
+    return okDb(handle);
+}
+
+export fn zova_vector_exists(request: ?*const zova_vector_exists_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
+    const vector_id = req.vector_id orelse return failDb(handle, error.InvalidArgument);
+    const out = req.out_exists orelse return failDb(handle, error.InvalidArgument);
+    const exists = handle.db.hasVector(std.mem.span(collection_name), std.mem.span(vector_id)) catch |err| return failDb(handle, err);
+    out.* = if (exists) 1 else 0;
+    return okDb(handle);
+}
+
+export fn zova_vector_delete(request: ?*const zova_vector_delete_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
+    const vector_id = req.vector_id orelse return failDb(handle, error.InvalidArgument);
+
+    handle.db.deleteVector(std.mem.span(collection_name), std.mem.span(vector_id)) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+export fn zova_vector_search(request: ?*const zova_vector_search_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
+    const query = floatsConst(req.query, req.query_len) orelse return failDb(handle, error.InvalidArgument);
+    const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
+    out.* = emptyVectorSearchResults();
+
+    var results = handle.db.searchVectors(allocator, std.mem.span(collection_name), query, req.limit) catch |err| return failDb(handle, err);
+    defer results.deinit(allocator);
+
+    fillSearchResults(out, results.items) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+export fn zova_vector_search_in(request: ?*const zova_vector_search_in_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
+    const query = floatsConst(req.query, req.query_len) orelse return failDb(handle, error.InvalidArgument);
+    const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
+    out.* = emptyVectorSearchResults();
+
+    const candidates = candidateIdSlices(req.candidate_ids, req.candidate_count) catch |err| return failDb(handle, err);
+    defer if (candidates.len != 0) allocator.free(candidates);
+
+    var results = handle.db.searchVectorsIn(allocator, std.mem.span(collection_name), query, candidates, req.limit) catch |err| return failDb(handle, err);
+    defer results.deinit(allocator);
+
+    fillSearchResults(out, results.items) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
 const OpenMode = enum { create, open };
 
 fn openDatabase(request: ?*const zova_database_open_request, mode: OpenMode) zova_status {
@@ -581,6 +823,36 @@ fn manifestChunks(chunks: ?[*]const zova_object_manifest_chunk, len: usize) ?[]c
     return ptr[0..len];
 }
 
+fn floatsConst(data: ?[*]const f32, len: usize) ?[]const f32 {
+    if (len == 0) return &.{};
+    const ptr = data orelse return null;
+    return ptr[0..len];
+}
+
+fn candidateIdSlices(
+    candidate_ids: ?[*]const ?[*:0]const u8,
+    len: usize,
+) (error{ OutOfMemory, InvalidArgument }![]const []const u8) {
+    if (len == 0) return &.{};
+    const ptr = candidate_ids orelse return error.InvalidArgument;
+    const candidates = try allocator.alloc([]const u8, len);
+    errdefer allocator.free(candidates);
+    for (ptr[0..len], candidates) |candidate, *out| {
+        const id = candidate orelse return error.InvalidArgument;
+        out.* = std.mem.span(id);
+    }
+    return candidates;
+}
+
+fn vectorMetricFromAbi(metric: c_int) ?zova.VectorMetric {
+    return switch (metric) {
+        @intFromEnum(zova_vector_metric.COSINE) => .cosine,
+        @intFromEnum(zova_vector_metric.L2) => .l2,
+        @intFromEnum(zova_vector_metric.DOT) => .dot,
+        else => null,
+    };
+}
+
 fn toObjectId(id: zova_object_id) zova.ObjectId {
     return id.bytes;
 }
@@ -610,6 +882,39 @@ fn emptyManifest() zova_object_manifest {
         .chunks = null,
         .chunks_len = 0,
     };
+}
+
+fn emptyVector() zova_vector {
+    return .{ .id = null, .id_len = 0, .values = null, .values_len = 0 };
+}
+
+fn emptyVectorSearchResults() zova_vector_search_results {
+    return .{ .items = null, .len = 0 };
+}
+
+fn fillSearchResults(out: *zova_vector_search_results, items: []const zova.VectorSearchResult) error{OutOfMemory}!void {
+    out.* = emptyVectorSearchResults();
+    if (items.len == 0) return;
+
+    const abi_items = try allocator.alloc(zova_vector_search_result, items.len);
+    errdefer {
+        for (abi_items[0..items.len]) |item| {
+            if (item.id) |id| allocator.free(id[0 .. item.id_len + 1]);
+        }
+        allocator.free(abi_items);
+    }
+
+    for (abi_items) |*item| item.* = .{ .id = null, .id_len = 0, .distance = 0 };
+    for (items, abi_items) |item, *abi_item| {
+        const id = try allocator.dupeZ(u8, item.id);
+        abi_item.* = .{
+            .id = id.ptr,
+            .id_len = id.len,
+            .distance = item.distance,
+        };
+    }
+
+    out.* = .{ .items = abi_items.ptr, .len = abi_items.len };
 }
 
 fn failDb(handle: *DatabaseHandle, err: anyerror) zova_status {
@@ -690,6 +995,12 @@ fn statusFromError(err: anyerror) zova_status {
         error.ObjectTooLarge => .OBJECT_TOO_LARGE,
         error.ObjectTransactionActive => .OBJECT_TRANSACTION_ACTIVE,
         error.ObjectWriterClosed => .OBJECT_WRITER_CLOSED,
+        error.VectorCollectionExists => .VECTOR_COLLECTION_EXISTS,
+        error.VectorCollectionNotFound => .VECTOR_COLLECTION_NOT_FOUND,
+        error.VectorNotFound => .VECTOR_NOT_FOUND,
+        error.VectorDimensionMismatch => .VECTOR_DIMENSION_MISMATCH,
+        error.VectorCorrupt => .VECTOR_CORRUPT,
+        error.VectorInvalid => .VECTOR_INVALID,
         error.InvalidArgument => .INVALID_ARGUMENT,
         else => .SQLITE_ERROR,
     };
@@ -723,6 +1034,12 @@ fn statusName(status: c_int) [*:0]const u8 {
         @intFromEnum(zova_status.OBJECT_TOO_LARGE) => "ZOVA_OBJECT_TOO_LARGE",
         @intFromEnum(zova_status.OBJECT_TRANSACTION_ACTIVE) => "ZOVA_OBJECT_TRANSACTION_ACTIVE",
         @intFromEnum(zova_status.OBJECT_WRITER_CLOSED) => "ZOVA_OBJECT_WRITER_CLOSED",
+        @intFromEnum(zova_status.VECTOR_COLLECTION_EXISTS) => "ZOVA_VECTOR_COLLECTION_EXISTS",
+        @intFromEnum(zova_status.VECTOR_COLLECTION_NOT_FOUND) => "ZOVA_VECTOR_COLLECTION_NOT_FOUND",
+        @intFromEnum(zova_status.VECTOR_NOT_FOUND) => "ZOVA_VECTOR_NOT_FOUND",
+        @intFromEnum(zova_status.VECTOR_DIMENSION_MISMATCH) => "ZOVA_VECTOR_DIMENSION_MISMATCH",
+        @intFromEnum(zova_status.VECTOR_CORRUPT) => "ZOVA_VECTOR_CORRUPT",
+        @intFromEnum(zova_status.VECTOR_INVALID) => "ZOVA_VECTOR_INVALID",
         else => "ZOVA_UNKNOWN_STATUS",
     };
 }
@@ -734,6 +1051,7 @@ test "c abi status names and versions are stable" {
     try std.testing.expectEqualStrings("0.9.0", std.mem.span(zova_abi_version_string()));
     try std.testing.expectEqualStrings("ZOVA_OK", std.mem.span(zova_status_name(@intFromEnum(zova_status.OK))));
     try std.testing.expectEqualStrings("ZOVA_OBJECT_NOT_FOUND", std.mem.span(zova_status_name(@intFromEnum(zova_status.OBJECT_NOT_FOUND))));
+    try std.testing.expectEqualStrings("ZOVA_VECTOR_INVALID", std.mem.span(zova_status_name(@intFromEnum(zova_status.VECTOR_INVALID))));
     try std.testing.expectEqualStrings("ZOVA_UNKNOWN_STATUS", std.mem.span(zova_status_name(-1)));
 }
 
@@ -742,7 +1060,88 @@ test "c abi validates null pointers" {
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_object_id_from_bytes(null, 1, null));
     var id = zova_object_id{ .bytes = [_]u8{0} ** 32 };
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_object_id_from_bytes(null, 1, &id));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_collection_create(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_put(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_search(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_buffer_free_and_status_for_test());
+}
+
+test "c abi validates vector request shapes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-vector-validation.zova", .{tmp.sub_path[0..]});
+
+    var db: ?*zova_database = null;
+    var create_request = zova_database_open_request{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&create_request));
+    defer _ = zova_database_close(db);
+
+    const invalid_metric_request = zova_vector_collection_create_request{
+        .db = db,
+        .name = "bad",
+        .options = .{ .dimensions = 2, .metric = 99 },
+    };
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_collection_create(&invalid_metric_request));
+
+    const create_collection_request = zova_vector_collection_create_request{
+        .db = db,
+        .name = "chunks",
+        .options = .{ .dimensions = 2, .metric = @intFromEnum(zova_vector_metric.L2) },
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_vector_collection_create(&create_collection_request));
+
+    const bad_values_request = zova_vector_put_request{
+        .db = db,
+        .collection_name = "chunks",
+        .vector_id = "id",
+        .values = null,
+        .values_len = 2,
+    };
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_put(&bad_values_request));
+
+    var search_results = zova_vector_search_results{ .items = null, .len = 0 };
+    const bad_search_request = zova_vector_search_request{
+        .db = db,
+        .collection_name = "chunks",
+        .query = null,
+        .query_len = 2,
+        .limit = 10,
+        .out_results = &search_results,
+    };
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_search(&bad_search_request));
+
+    const bad_candidates_request = zova_vector_search_in_request{
+        .db = db,
+        .collection_name = "chunks",
+        .query = null,
+        .query_len = 0,
+        .candidate_ids = null,
+        .candidate_count = 1,
+        .limit = 10,
+        .out_results = &search_results,
+    };
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_search_in(&bad_candidates_request));
+
+    const null_candidate_entries = [_]?[*:0]const u8{null};
+    const bad_candidate_entry_request = zova_vector_search_in_request{
+        .db = db,
+        .collection_name = "chunks",
+        .query = null,
+        .query_len = 0,
+        .candidate_ids = &null_candidate_entries,
+        .candidate_count = null_candidate_entries.len,
+        .limit = 10,
+        .out_results = &search_results,
+    };
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_search_in(&bad_candidate_entry_request));
+
+    zova_vector_search_results_free(&search_results);
 }
 
 fn zova_buffer_free_and_status_for_test() zova_status {

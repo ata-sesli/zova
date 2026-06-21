@@ -7,7 +7,7 @@
 /*
  * Zova C ABI, v0.9 pre-1.0.
  *
- * This header exposes a C-compatible object API over Zova's Zig
+ * This header exposes a C-compatible object and vector API over Zova's Zig
  * implementation. The ABI is intentionally conservative: opaque handles,
  * request structs, fixed-size ids, explicit status codes, and caller-visible
  * ownership rules.
@@ -20,20 +20,22 @@
  *
  * Strings and bytes:
  * - Paths and SQL are null-terminated C strings.
- * - Arbitrary object/chunk bytes use pointer + length.
+ * - Arbitrary object/chunk bytes and vector values use pointer + length.
+ * - Vector input/output floats are expected to be IEEE-754 single precision.
  * - A null pointer with a non-zero length is invalid.
  *
  * Ownership:
- * - Buffers/messages/manifests returned by Zova are library-owned and must be
- *   released with the matching zova_*_free function.
+ * - Buffers/messages/manifests/vectors/search results returned by Zova are
+ *   library-owned and must be released with the matching zova_*_free function.
  * - Input pointers are borrowed only for the duration of the call.
  * - zova_database_last_error_message returns a borrowed pointer scoped to the
  *   database handle; it is valid until the next call on that handle or close.
  *
  * Scope:
- * - This v0.9 ABI exposes database lifecycle, SQL exec, conversion, objects,
- *   chunks, manifests, range reads, assembly, and ObjectWriter.
- * - Vector APIs are intentionally not part of this C ABI slice.
+ * - This ABI exposes database lifecycle, SQL exec, conversion, objects,
+ *   chunks, manifests, range reads, assembly, ObjectWriter, and native vectors.
+ * - Vector metadata remains application-owned in user SQL tables. Vector search
+ *   returns vector ids and distances only.
  */
 
 #ifdef __cplusplus
@@ -44,7 +46,7 @@ extern "C" {
 typedef struct zova_database zova_database;
 typedef struct zova_object_writer zova_object_writer;
 
-/* Stable status values for the v0.9 ABI surface. */
+/* Stable status values for the pre-1.0 ABI surface. */
 typedef enum zova_status {
     ZOVA_OK = 0,
     ZOVA_INVALID_ARGUMENT = 1,
@@ -72,7 +74,19 @@ typedef enum zova_status {
     ZOVA_OBJECT_TOO_LARGE = 57,
     ZOVA_OBJECT_TRANSACTION_ACTIVE = 58,
     ZOVA_OBJECT_WRITER_CLOSED = 59,
+    ZOVA_VECTOR_COLLECTION_EXISTS = 70,
+    ZOVA_VECTOR_COLLECTION_NOT_FOUND = 71,
+    ZOVA_VECTOR_NOT_FOUND = 72,
+    ZOVA_VECTOR_DIMENSION_MISMATCH = 73,
+    ZOVA_VECTOR_CORRUPT = 74,
+    ZOVA_VECTOR_INVALID = 75,
 } zova_status;
+
+typedef enum zova_vector_metric {
+    ZOVA_VECTOR_METRIC_COSINE = 0,
+    ZOVA_VECTOR_METRIC_L2 = 1,
+    ZOVA_VECTOR_METRIC_DOT = 2,
+} zova_vector_metric;
 
 /* SHA-256 identity of full object bytes. */
 typedef struct zova_object_id {
@@ -113,6 +127,36 @@ typedef struct zova_object_manifest {
     zova_object_manifest_chunk *chunks;
     size_t chunks_len;
 } zova_object_manifest;
+
+typedef struct zova_vector_collection_options {
+    uint32_t dimensions;
+    /*
+     * Raw C int for ABI layout stability. Use ZOVA_VECTOR_METRIC_* constants.
+     * This avoids enum-size differences from compiler options such as
+     * -fshort-enums while still keeping named metric values.
+     */
+    int metric;
+} zova_vector_collection_options;
+
+/* Owned vector returned by Zova. Free with zova_vector_free. */
+typedef struct zova_vector {
+    char *id;
+    size_t id_len;
+    float *values;
+    size_t values_len;
+} zova_vector;
+
+typedef struct zova_vector_search_result {
+    char *id;
+    size_t id_len;
+    double distance;
+} zova_vector_search_result;
+
+/* Owned vector search results. Free with zova_vector_search_results_free. */
+typedef struct zova_vector_search_results {
+    zova_vector_search_result *items;
+    size_t len;
+} zova_vector_search_results;
 
 /* Open/create requests use C strings and may return an owned error message. */
 typedef struct zova_database_open_request {
@@ -236,6 +280,66 @@ typedef struct zova_object_writer_cancel_request {
     zova_object_writer *writer;
 } zova_object_writer_cancel_request;
 
+typedef struct zova_vector_collection_create_request {
+    zova_database *db;
+    const char *name;
+    zova_vector_collection_options options;
+} zova_vector_collection_create_request;
+
+typedef struct zova_vector_collection_exists_request {
+    zova_database *db;
+    const char *name;
+    uint8_t *out_exists;
+} zova_vector_collection_exists_request;
+
+typedef struct zova_vector_put_request {
+    zova_database *db;
+    const char *collection_name;
+    const char *vector_id;
+    const float *values;
+    size_t values_len;
+} zova_vector_put_request;
+
+typedef struct zova_vector_get_request {
+    zova_database *db;
+    const char *collection_name;
+    const char *vector_id;
+    zova_vector *out_vector;
+} zova_vector_get_request;
+
+typedef struct zova_vector_exists_request {
+    zova_database *db;
+    const char *collection_name;
+    const char *vector_id;
+    uint8_t *out_exists;
+} zova_vector_exists_request;
+
+typedef struct zova_vector_delete_request {
+    zova_database *db;
+    const char *collection_name;
+    const char *vector_id;
+} zova_vector_delete_request;
+
+typedef struct zova_vector_search_request {
+    zova_database *db;
+    const char *collection_name;
+    const float *query;
+    size_t query_len;
+    size_t limit;
+    zova_vector_search_results *out_results;
+} zova_vector_search_request;
+
+typedef struct zova_vector_search_in_request {
+    zova_database *db;
+    const char *collection_name;
+    const float *query;
+    size_t query_len;
+    const char *const *candidate_ids;
+    size_t candidate_count;
+    size_t limit;
+    zova_vector_search_results *out_results;
+} zova_vector_search_in_request;
+
 /* ABI version helpers describe this C boundary, not the .zova file format. */
 uint32_t zova_abi_version_major(void);
 uint32_t zova_abi_version_minor(void);
@@ -247,6 +351,8 @@ const char *zova_status_name(zova_status status);
 void zova_buffer_free(zova_buffer *buffer);
 void zova_message_free(zova_message *message);
 void zova_object_manifest_free(zova_object_manifest *manifest);
+void zova_vector_free(zova_vector *vector);
+void zova_vector_search_results_free(zova_vector_search_results *results);
 
 /* Database lifecycle, SQL passthrough, and SQLite-to-Zova conversion. */
 zova_status zova_database_create(const zova_database_open_request *request);
@@ -284,6 +390,23 @@ zova_status zova_object_writer_write(const zova_object_writer_write_request *req
 zova_status zova_object_writer_finish(const zova_object_writer_finish_request *request);
 zova_status zova_object_writer_cancel(const zova_object_writer_cancel_request *request);
 zova_status zova_object_writer_destroy(zova_object_writer *writer);
+
+/*
+ * Native vector operations.
+ *
+ * Collection names and vector ids are null-terminated UTF-8 C strings.
+ * Vector values are borrowed float arrays for the duration of the call.
+ * Search returns vector ids and lower-is-better distances only; applications
+ * should query their own SQL tables for metadata.
+ */
+zova_status zova_vector_collection_create(const zova_vector_collection_create_request *request);
+zova_status zova_vector_collection_exists(const zova_vector_collection_exists_request *request);
+zova_status zova_vector_put(const zova_vector_put_request *request);
+zova_status zova_vector_get(const zova_vector_get_request *request);
+zova_status zova_vector_exists(const zova_vector_exists_request *request);
+zova_status zova_vector_delete(const zova_vector_delete_request *request);
+zova_status zova_vector_search(const zova_vector_search_request *request);
+zova_status zova_vector_search_in(const zova_vector_search_in_request *request);
 
 #ifdef __cplusplus
 }

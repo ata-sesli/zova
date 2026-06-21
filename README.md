@@ -12,7 +12,7 @@ Zova keeps SQLite as the foundation and adds native content types on top:
 - an object streaming writer for large caller-owned byte streams
 - verified loose chunk ingest and object assembly for transfer workflows
 - native `f32` vector collections, CRUD, and exact search
-- a C ABI foundation for object workflows
+- a C ABI foundation for object workflows, with vector ABI work in progress
 - a non-mutating inspection/check CLI
 
 SQL is still normal SQLite SQL. User tables stay yours. Zova does not replace
@@ -351,6 +351,90 @@ Search is collection-wide and exact. Distances are lower-is-better:
 Equal distances are ordered by vector id text. Result ids are owned memory and
 must be freed with `VectorSearchResults.deinit`.
 
+Search candidates selected by SQL:
+
+```zig
+// Your SQL metadata query decides what is eligible.
+const candidate_ids = [_][]const u8{ "chunk-001", "chunk-004", "chunk-009" };
+
+var filtered = try db.searchVectorsIn(
+    allocator,
+    "chunks",
+    query_embedding,
+    &candidate_ids,
+    5,
+);
+defer filtered.deinit(allocator);
+
+// Use filtered.items[n].id to fetch the matching SQL row.
+```
+
+Candidate-filtered search ranks only the supplied vector ids. Missing candidate
+ids are skipped, duplicate candidate ids appear at most once in the result set,
+and invalid candidate id text is rejected with `error.VectorInvalid`. This is
+the preferred pattern when user SQL tables contain metadata such as tenant,
+document, language, source, timestamp, or permissions.
+
+Search by an existing vector id:
+
+```zig
+var neighbors = try db.searchVectorsById(
+    allocator,
+    "chunks",
+    "chunk-001",
+    10,
+);
+defer neighbors.deinit(allocator);
+```
+
+`searchVectorsById` loads the source vector from the collection, uses it as the
+query, and excludes the source id from the result set. Missing source ids return
+`error.VectorNotFound`; corrupt private vector rows return `error.VectorCorrupt`.
+The candidate-filtered form combines SQL metadata filtering with row-to-row
+nearest-neighbor search:
+
+```zig
+const candidates = [_][]const u8{ "chunk-001", "chunk-004", "chunk-009" };
+
+var neighbors = try db.searchVectorsByIdIn(
+    allocator,
+    "chunks",
+    "chunk-001",
+    &candidates,
+    5,
+);
+defer neighbors.deinit(allocator);
+```
+
+Threshold variants use the same lower-is-better distance values and include
+results whose distance is exactly equal to the threshold:
+
+```zig
+var close = try db.searchVectorsWithin(
+    allocator,
+    "chunks",
+    query_embedding,
+    0.25,
+    10,
+);
+defer close.deinit(allocator);
+
+var close_neighbors = try db.searchVectorsByIdInWithin(
+    allocator,
+    "chunks",
+    "chunk-001",
+    &candidates,
+    0.25,
+    5,
+);
+defer close_neighbors.deinit(allocator);
+```
+
+Thresholds are available for collection-wide search, candidate-filtered search,
+search-by-id, and candidate-filtered search-by-id. Negative thresholds are valid
+for dot-product collections because dot distance is stored as negative dot
+product.
+
 Vectors are stored as deterministic little-endian `f32` BLOBs. Zova rejects
 dimension mismatches, non-finite values, and all-zero vectors in cosine
 collections. The current maximum dimension count is
@@ -371,7 +455,8 @@ try db.exec(
 
 try db.putVector("chunks", "chunk-001", embedding);
 
-var search = try db.searchVectors(allocator, "chunks", query_embedding, 5);
+const candidates = [_][]const u8{ "chunk-001" }; // normally selected from SQL
+var search = try db.searchVectorsIn(allocator, "chunks", query_embedding, &candidates, 5);
 defer search.deinit(allocator);
 
 // Use search.items[n].id to query your SQL metadata table.
@@ -437,9 +522,10 @@ This is an escape hatch for APIs Zova does not wrap yet.
 
 ## C ABI
 
-v0.9 adds a pre-1.0 C ABI foundation for object workflows. It is designed for
-future Rust bindings and other host languages, but it is not a permanent stable
-ABI promise yet.
+v0.9 adds a pre-1.0 C ABI foundation for object workflows. v0.10 development
+extends that ABI to the current vector collection, CRUD, and exact search
+surface. It is designed for future Rust bindings and other host languages, but
+it is not a permanent stable ABI promise yet.
 
 The C ABI lives in:
 
@@ -448,7 +534,7 @@ The C ABI lives in:
 - `zig build c-abi`
 - `zig build c-abi-test`
 
-The v0.9 C ABI exposes:
+The C ABI exposes:
 
 - database create/open/close
 - SQL `exec`
@@ -459,20 +545,50 @@ The v0.9 C ABI exposes:
 - verified loose chunk ingest
 - object assembly from verified chunks
 - `ObjectWriter`
+- vector collection create/exists
+- vector put/get/exists/delete
+- collection-wide exact vector search
+- candidate-filtered exact vector search
 
-Vector APIs are intentionally not part of the v0.9 C ABI. A future low-level
-`zova-sys` crate and safe Rust crate can wrap this boundary, but v0.9 ships no
+Vector metadata still belongs in user SQL tables. C vector search returns
+vector ids and distances only; callers query their own SQL rows for labels,
+document ids, permissions, and other metadata. A future low-level `zova-sys`
+crate and safe Rust crate can wrap this boundary, but this package ships no
 Rust crate and no RChat adapter.
 
 C inputs are borrowed for the duration of the call. Paths and SQL use
 null-terminated C strings. Arbitrary bytes use pointer plus length. Returned
-buffers, messages, and manifests are owned by Zova and must be released with
-their matching free function:
+buffers, messages, manifests, vectors, and vector search results are owned by
+Zova and must be released with their matching free function:
 
 ```c
 zova_buffer_free(&buffer);
 zova_message_free(&message);
 zova_object_manifest_free(&manifest);
+zova_vector_free(&vector);
+zova_vector_search_results_free(&results);
+```
+
+Vector inputs use C strings for collection names and vector ids, plus
+`const float *values` and `size_t values_len` for numeric data:
+
+```c
+zova_vector_collection_create_request create_vectors = {
+    .db = db,
+    .name = "chunks",
+    .options = { .dimensions = 3, .metric = ZOVA_VECTOR_METRIC_COSINE },
+};
+zova_vector_collection_create(&create_vectors);
+
+const float embedding[3] = {0.1f, 0.2f, 0.3f};
+zova_vector_put_request put_vector = {
+    .db = db,
+    .collection_name = "chunks",
+    .vector_id = "chunk-001",
+    .values = embedding,
+    .values_len = 3,
+};
+zova_vector_put(&put_vector);
 ```
 
 Database and writer handles are opaque. Close or destroy them explicitly:
@@ -798,18 +914,16 @@ artifacts.
 
 ## Not In This Release
 
-Zova v0.8 does not include:
+This package does not include:
 
 - peer protocol or transfer session tables
 - transfer retry engine
-- Rust crate or C ABI
+- Rust, Go, TypeScript, or Swift bindings
 - RChat adapter
-- inspection/check CLI
 - object repair or orphan scan CLI
 - compression or encryption
 - remote sync
 - vector ANN index
-- vector candidate filtering
 - vector SQL virtual table integration
 - embedding generation
 - schema migrations for older experimental `.zova` files
