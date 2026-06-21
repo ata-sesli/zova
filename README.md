@@ -8,7 +8,7 @@ content-addressed objects, chunk manifests, streaming writes, and exact vector
 search. Applications keep their own metadata in normal SQL tables and store
 Zova object ids or vector ids alongside their rows.
 
-Current package version: `0.11.0`.
+Current package version: `0.11.1`.
 
 Zova is not tied to one application language. The project exposes:
 
@@ -551,7 +551,7 @@ Consumers build the CLI or static C ABI library from source with Zig.
 The release script:
 
 ```sh
-scripts/package-release.sh 0.11.0
+scripts/package-release.sh 0.11.1
 ```
 
 tags the current commit, pushes the branch and tag, creates a source archive,
