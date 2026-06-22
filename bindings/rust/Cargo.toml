@@ -1,0 +1,10 @@
+[workspace]
+members = ["zova-sys", "zova"]
+default-members = ["zova-sys", "zova"]
+resolver = "2"
+
+[workspace.package]
+version = "0.13.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/atasesli/zova"

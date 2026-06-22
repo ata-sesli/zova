@@ -109,8 +109,10 @@ pub fn build(b: *std.Build) void {
     });
     addSqlite(c_abi_lib.root_module, b);
 
+    const install_c_abi_lib = b.addInstallArtifact(c_abi_lib, .{});
+
     const c_abi_step = b.step("c-abi", "Build the Zova C ABI static library");
-    c_abi_step.dependOn(&c_abi_lib.step);
+    c_abi_step.dependOn(&install_c_abi_lib.step);
 
     const c_smoke_module = b.createModule(.{
         .target = target,

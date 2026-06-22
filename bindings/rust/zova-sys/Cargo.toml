@@ -1,0 +1,12 @@
+[package]
+name = "zova-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+links = "zova"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+

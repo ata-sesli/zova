@@ -1,0 +1,17 @@
+[package]
+name = "zova"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+zova-sys = { path = "../zova-sys" }
+
+[lib]
+path = "src/lib.rs"
+
+[[example]]
+name = "basic"
+path = "examples/basic.rs"
+
