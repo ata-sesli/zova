@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 usage() {
     echo "usage: scripts/package-release.sh <version> [out-dir]" >&2
-    echo "example: scripts/package-release.sh 0.13.0" >&2
+    echo "example: scripts/package-release.sh 0.13.1" >&2
 }
 
 run() {
@@ -67,6 +67,7 @@ require_command git
 require_command gh
 require_command tar
 require_command cargo
+require_command go
 
 if ! gh auth status >/dev/null 2>&1; then
     echo "GitHub CLI is not authenticated. Run: gh auth login" >&2
@@ -123,9 +124,9 @@ cp -R tests "$TMP/$PKG/"
 cp -R vendor "$TMP/$PKG/"
 rm -rf "$TMP/$PKG/bindings/rust/target"
 
-if find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/bindings/rust/README.md" | grep -q .; then
+if find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" | grep -q .; then
     echo "release package contains unexpected markdown files" >&2
-    find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/bindings/rust/README.md" >&2
+    find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" >&2
     exit 1
 fi
 
@@ -151,6 +152,36 @@ fi
 
 if [ ! -d "$TMP/$PKG/bindings/rust/zova" ]; then
     echo "release package is missing bindings/rust/zova" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/bindings/go/go.mod" ]; then
+    echo "release package is missing bindings/go/go.mod" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/bindings/go/README.md" ]; then
+    echo "release package is missing bindings/go/README.md" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/bindings/go/zova.go" ]; then
+    echo "release package is missing bindings/go/zova.go" >&2
+    exit 1
+fi
+
+if [ ! -d "$TMP/$PKG/bindings/go/examples/basic" ]; then
+    echo "release package is missing bindings/go/examples/basic" >&2
+    exit 1
+fi
+
+if [ ! -d "$TMP/$PKG/bindings/go/examples/objects" ]; then
+    echo "release package is missing bindings/go/examples/objects" >&2
+    exit 1
+fi
+
+if [ ! -d "$TMP/$PKG/bindings/go/examples/vectors" ]; then
+    echo "release package is missing bindings/go/examples/vectors" >&2
     exit 1
 fi
 
@@ -183,6 +214,8 @@ zig build run
 CARGO_TARGET_DIR="$TMP/cargo-target/verify" cargo fmt --all --manifest-path bindings/rust/Cargo.toml --check
 CARGO_TARGET_DIR="$TMP/cargo-target/verify" cargo test --workspace --manifest-path bindings/rust/Cargo.toml
 CARGO_TARGET_DIR="$TMP/cargo-target/verify" cargo check --examples --manifest-path bindings/rust/Cargo.toml
+(cd bindings/go && GOCACHE="$TMP/go-cache/verify" go test ./...)
+(cd bindings/go && GOCACHE="$TMP/go-cache/verify" go vet ./...)
 
 cd "$ROOT"
 if [ -z "$LOCAL_TAG_COMMIT" ]; then

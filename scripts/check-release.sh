@@ -21,6 +21,8 @@ PKG="zova-$MANIFEST_VERSION"
 TMP="${TMPDIR:-/tmp}/zova-check-release.$$"
 CARGO_TARGET_REPO="$TMP/cargo-target/repo"
 CARGO_TARGET_VERIFY="$TMP/cargo-target/verify"
+GO_CACHE_REPO="$TMP/go-cache/repo"
+GO_CACHE_VERIFY="$TMP/go-cache/verify"
 
 cleanup() {
     rm -rf "$TMP"
@@ -29,6 +31,7 @@ trap cleanup EXIT INT TERM
 
 require_command tar
 require_command cargo
+require_command go
 
 zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/zova_test_support.zig src/object.zig src/object_fastcdc.zig src/object_tests.zig src/vector.zig src/vector_tests.zig src/vector_sql.zig src/vector_sql_tests.zig src/c_api.zig src/c_api_internal.zig src/c_api_tests.zig src/cli.zig src/main.zig tests/e2e.zig tests/cli.zig
 zig build test
@@ -42,6 +45,8 @@ zig build run
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo fmt --all --manifest-path bindings/rust/Cargo.toml --check
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo test --workspace --manifest-path bindings/rust/Cargo.toml
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo check --examples --manifest-path bindings/rust/Cargo.toml
+(cd bindings/go && GOCACHE="$GO_CACHE_REPO" go test ./...)
+(cd bindings/go && GOCACHE="$GO_CACHE_REPO" go vet ./...)
 
 rm -rf "$TMP"
 mkdir -p "$TMP/$PKG"
@@ -54,9 +59,9 @@ cp -R tests "$TMP/$PKG/"
 cp -R vendor "$TMP/$PKG/"
 rm -rf "$TMP/$PKG/bindings/rust/target"
 
-if find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/bindings/rust/README.md" | grep -q .; then
+if find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" | grep -q .; then
     echo "release package contains unexpected markdown files" >&2
-    find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/bindings/rust/README.md" >&2
+    find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" >&2
     exit 1
 fi
 
@@ -105,6 +110,36 @@ if [ ! -d "$TMP/$PKG/bindings/rust/zova" ]; then
     exit 1
 fi
 
+if [ ! -f "$TMP/$PKG/bindings/go/go.mod" ]; then
+    echo "release package is missing bindings/go/go.mod" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/bindings/go/README.md" ]; then
+    echo "release package is missing bindings/go/README.md" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/bindings/go/zova.go" ]; then
+    echo "release package is missing bindings/go/zova.go" >&2
+    exit 1
+fi
+
+if [ ! -d "$TMP/$PKG/bindings/go/examples/basic" ]; then
+    echo "release package is missing bindings/go/examples/basic" >&2
+    exit 1
+fi
+
+if [ ! -d "$TMP/$PKG/bindings/go/examples/objects" ]; then
+    echo "release package is missing bindings/go/examples/objects" >&2
+    exit 1
+fi
+
+if [ ! -d "$TMP/$PKG/bindings/go/examples/vectors" ]; then
+    echo "release package is missing bindings/go/examples/vectors" >&2
+    exit 1
+fi
+
 if [ -e "$TMP/$PKG/zig-out" ]; then
     echo "release package must not contain compiled CLI artifacts" >&2
     exit 1
@@ -134,3 +169,5 @@ zig build run
 CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo fmt --all --manifest-path bindings/rust/Cargo.toml --check
 CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo test --workspace --manifest-path bindings/rust/Cargo.toml
 CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo check --examples --manifest-path bindings/rust/Cargo.toml
+(cd bindings/go && GOCACHE="$GO_CACHE_VERIFY" go test ./...)
+(cd bindings/go && GOCACHE="$GO_CACHE_VERIFY" go vet ./...)

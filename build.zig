@@ -183,6 +183,9 @@ fn addSqlite(module: *std.Build.Module, b: *std.Build) void {
         .file = b.path("vendor/sqlite3.53.2/sqlite3.c"),
         .flags = &.{
             "-std=c99",
+            // Keep the static C ABI library consumable by external linkers
+            // such as cgo without requiring Zig/Clang sanitizer runtimes.
+            "-fno-sanitize=undefined",
             // Keep SQLite's mutex support enabled for normal embedded use.
             "-DSQLITE_THREADSAFE=1",
             // Promise FTS5 as part of Zova's vendored SQLite build, without

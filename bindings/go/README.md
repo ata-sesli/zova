@@ -1,0 +1,205 @@
+# Zova Go Bindings
+
+This module is the first Go binding slice for Zova.
+
+It currently covers:
+
+- database create/open/close
+- SQLite-to-Zova conversion
+- SQL `exec`
+- prepared statements with bind/step/column access
+- explicit transactions
+- explicit `VACUUM`
+- objects, chunks, manifests, range reads, assembly, and `ObjectWriter`
+- vector collections, vector CRUD, batch writes, collection management, exact
+  search, candidate search, search-by-id, thresholds, and SQL-native vector
+  search
+
+## Build Requirements
+
+The Go binding uses cgo over `include/zova.h` and links the local static C ABI
+library.
+
+From the repository root, build the C ABI first:
+
+```sh
+zig build c-abi
+```
+
+Then run Go tests:
+
+```sh
+cd bindings/go
+go test ./...
+```
+
+The default cgo flags expect:
+
+- headers in `../../include`
+- `libzova_c.a` in `../../zig-out/lib`
+
+For custom local builds, pass normal cgo flags:
+
+```sh
+CGO_CFLAGS="-I/path/to/include" \
+CGO_LDFLAGS="-L/path/to/lib -lzova_c" \
+go test ./...
+```
+
+For local test runs, `test.sh` accepts `ZOVA_INCLUDE_DIR` and `ZOVA_LIB_DIR`
+and translates them into cgo flags:
+
+```sh
+ZOVA_INCLUDE_DIR=/path/to/include ZOVA_LIB_DIR=/path/to/lib sh test.sh
+```
+
+You need Zig `0.16.0` or newer, cgo enabled, and a working C compiler.
+
+## Handle Policy
+
+`DB` serializes operations with an internal mutex because one Zova database
+handle must not be used concurrently. Open multiple `DB` handles to the same
+file for parallel work; SQLite locking rules still apply.
+
+Object writers also use their parent `DB` lock. Zova writer operations reject
+active user transactions, so finish or cancel writers outside explicit
+application transactions.
+
+## Objects
+
+Objects are content-addressed byte values stored by Zova while application
+metadata stays in your SQL tables.
+
+```go
+db.Exec("create table attachments(id integer primary key, object_id blob not null)")
+
+writer, err := db.ObjectWriter()
+if err != nil {
+    log.Fatal(err)
+}
+writer.Write([]byte("hello "))
+writer.Write([]byte("from Go"))
+objectID, err := writer.Finish()
+if err != nil {
+    log.Fatal(err)
+}
+
+insert, _ := db.Prepare("insert into attachments(object_id) values (?1)")
+defer insert.Close()
+insert.BindBlob(1, objectID[:])
+insert.Step()
+```
+
+Use `PutObject` for in-memory bytes, `ObjectWriter` for streamed writes,
+`ReadObjectRange` for previews, and `ObjectManifest` / `GetObjectChunk` /
+`PutObjectChunk` / `AssembleObjectFromChunks` for receive-side chunk flows.
+
+## Vectors
+
+Vectors are native Zova rows grouped into named collections. Application
+metadata stays in SQL tables, usually with a `vector_id text` column that points
+at a vector row.
+
+```go
+db.Exec("create table chunks(id integer primary key, vector_id text not null, text text not null)")
+
+err := db.CreateVectorCollection("chunks", zova.VectorCollectionOptions{
+    Dimensions: 2,
+    Metric:     zova.VectorMetricL2,
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+err = db.PutVectors("chunks", []zova.VectorInput{
+    {ID: "intro", Values: []float32{0, 0}},
+    {ID: "api", Values: []float32{1, 0}},
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+results, err := db.SearchVectors("chunks", []float32{0.2, 0}, 5)
+if err != nil {
+    log.Fatal(err)
+}
+for _, result := range results {
+    fmt.Println(result.ID, result.Distance)
+}
+```
+
+Use `SearchVectorsIn` when SQL has already selected candidate vector ids from
+metadata. Use `SearchVectorsByID*` when an existing stored vector is the query.
+Threshold variants use inclusive `distance <= maxDistance`; distances are always
+lower-is-better.
+
+Zova also registers SQL-native exact vector search on `.zova` connections. Use
+`EncodeVectorBlob` to bind little-endian `f32` query blobs through prepared
+statements:
+
+```go
+stmt, err := db.Prepare(`
+select c.vector_id, c.text, s.distance
+from zova_vector_search as s
+join chunks as c on c.vector_id = s.vector_id
+where s.collection = ?1
+  and s.query_vector = ?2
+  and s.top_k = ?3
+order by s.rank`)
+if err != nil {
+    log.Fatal(err)
+}
+stmt.BindText(1, "chunks")
+stmt.BindBlob(2, zova.EncodeVectorBlob([]float32{0.2, 0}))
+stmt.BindInt64(3, 5)
+```
+
+Scalar distance functions are available too:
+
+```sql
+select zova_vector_distance('chunks', vector_id, ?1) as distance
+from chunks
+where source = 'docs'
+order by distance
+limit 10
+```
+
+## Example
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+
+    zova "github.com/atasesli/zova/bindings/go"
+)
+
+func main() {
+    db, err := zova.Create("example.zova")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer db.Close()
+
+    if err := db.Exec("create table notes(id integer primary key, body text not null)"); err != nil {
+        log.Fatal(err)
+    }
+
+    insert, err := db.Prepare("insert into notes(body) values (?1)")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer insert.Close()
+
+    if err := insert.BindText(1, "hello from Go"); err != nil {
+        log.Fatal(err)
+    }
+    step, err := insert.Step()
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println(step == zova.StepDone)
+}
+```

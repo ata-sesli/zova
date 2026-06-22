@@ -8,18 +8,19 @@ content-addressed objects, chunk manifests, streaming writes, and exact vector
 search. Applications keep their own metadata in normal SQL tables and store
 Zova object ids or vector ids alongside their rows.
 
-Current package version: `0.13.0`.
+Current package version: `0.13.1`.
 
 Zova is not tied to one application language. The project exposes:
 
 - a native Zig API
 - a C ABI in `include/zova.h`
 - source-first Rust bindings in `bindings/rust`
+- source-first Go bindings in `bindings/go`
 - a non-mutating CLI for inspection and checks
 - a source-only release package that consumers build locally
 
-Go, Python, TypeScript, and Swift bindings are planned as later layers over the
-C ABI and Rust binding foundation.
+Python, TypeScript, and Swift bindings are planned as later layers over the C
+ABI and Rust/Go binding foundation.
 
 ## Architecture
 
@@ -53,7 +54,7 @@ flowchart TD
     VecCols --> Vecs
 ```
 
-## What Works In v0.13.0
+## What Works In v0.13.1
 
 - normal SQLite access through a thin wrapper
 - `.zova` database create/open/validation
@@ -72,6 +73,8 @@ flowchart TD
 - C ABI for database, prepared SQL statements, explicit maintenance, objects,
   chunks, writers, and vectors
 - Rust bindings for records, prepared statements, transactions, vacuum, objects,
+  chunks, manifests, `ObjectWriter`, vectors, and SQL-native vector search
+- Go bindings for records, prepared statements, transactions, vacuum, objects,
   chunks, manifests, `ObjectWriter`, vectors, and SQL-native vector search
 - CLI `info`, `stats`, object/chunk/vector/table inspection, and `check`
 - source-only release packaging
@@ -203,7 +206,7 @@ The ABI is additive and pre-1.0.
 
 ## Rust Bindings
 
-v0.13.0 adds source-first Rust bindings under `bindings/rust`.
+v0.13.0 introduced source-first Rust bindings under `bindings/rust`.
 
 The workspace contains:
 
@@ -235,9 +238,45 @@ Run the Rust tests:
 cargo test --workspace --manifest-path bindings/rust/Cargo.toml
 ```
 
-The Rust crates are included in the source archive, but v0.13.0 does not publish
+The Rust crates are included in the source archive, but v0.13.1 does not publish
 them to crates.io automatically and does not ship compiled libraries. Consumers
 build from source.
+
+## Go Bindings
+
+v0.13.1 adds source-first Go bindings under `bindings/go`.
+
+The Go package is a cgo-backed wrapper over `include/zova.h`. It links the local
+static C ABI library produced by:
+
+```sh
+zig build c-abi
+```
+
+The Go package exposes:
+
+- `DB` lifecycle, conversion, `Exec`, prepared statements, transactions, and
+  explicit `Vacuum`
+- SQL records through one Zova handle, without opening a separate SQLite handle
+- object APIs, chunk/manifest APIs, receive-side assembly, range reads, and
+  `ObjectWriter`
+- vector collections, CRUD, batch writes, exact search, candidate-filtered
+  search, search-by-id, thresholds, and collection management
+- SQL-native vector search through prepared statements, including
+  `zova_vector_distance`, `zova_vector_distance_by_id`, and
+  `zova_vector_search`
+
+Run the Go checks after building the C ABI:
+
+```sh
+cd bindings/go
+go test ./...
+go vet ./...
+```
+
+The Go module is included in the source archive, but v0.13.1 does not publish a
+Go module automatically and does not ship compiled libraries. Consumers build
+from source.
 
 ## Native Zig API
 
@@ -520,21 +559,21 @@ var close = try db.searchVectorsWithin(
 defer close.deinit(allocator);
 ```
 
-Search is exact and flat-scan in v0.13.0. That is deliberate: Zova currently
+Search is exact and flat-scan in v0.13.1. That is deliberate: Zova currently
 prioritizes deterministic local correctness over approximate indexing. It is a
 good fit for small and medium local datasets, offline ranking, tests that need
 repeatable nearest-neighbor results, and candidate-filtered search where SQL
 first narrows the metadata set and Zova ranks the eligible vector ids.
 
 It is not yet a low-latency ANN engine for millions of vectors. Zova does not
-include HNSW, IVFFlat, quantized indexes, or vector SQL operators in v0.13.0.
+include HNSW, IVFFlat, quantized indexes, or vector SQL operators in v0.13.1.
 
 Missing candidate ids are skipped. Invalid candidate ids return
 `error.VectorInvalid`. Corrupt selected vector rows return `error.VectorCorrupt`.
 
 ## SQL-Native Vector Search
 
-v0.13.0 makes Zova vectors queryable from SQL on `zova.Database` connections.
+v0.13.1 makes Zova vectors queryable from SQL on `zova.Database` connections.
 The raw `zova.sqlite.Database` wrapper remains plain SQLite and does not
 register Zova vector SQL helpers.
 
@@ -754,6 +793,14 @@ cargo test --workspace --manifest-path bindings/rust/Cargo.toml
 cargo check --examples --manifest-path bindings/rust/Cargo.toml
 ```
 
+Run Go binding checks:
+
+```sh
+cd bindings/go
+go test ./...
+go vet ./...
+```
+
 Run the full release smoke:
 
 ```sh
@@ -762,45 +809,48 @@ scripts/check-release.sh
 
 ## Release Package Policy
 
-v0.13.0 releases a source-only package/archive. The package includes:
+v0.13.1 releases a source-only package/archive. The package includes:
 
 - `README.md`
 - `build.zig`
 - `build.zig.zon`
 - `bindings/rust`
+- `bindings/go`
 - `include`
 - `src`
 - `tests`
 - `vendor`
 
-The root `README.md` and `bindings/rust/README.md` are the only markdown files
-included in the release package. Planning notes stay outside the package.
+The root `README.md`, `bindings/rust/README.md`, and `bindings/go/README.md`
+are the only markdown files included in the release package. Planning notes stay
+outside the package.
 
-Compiled CLI binaries, compiled C ABI libraries, and compiled Rust artifacts are
-not release artifacts. Consumers build the CLI, static C ABI library, and Rust
-crates from source.
+Compiled CLI binaries, compiled C ABI libraries, compiled Rust artifacts, and
+compiled Go artifacts are not release artifacts. Consumers build the CLI, static
+C ABI library, Rust crates, and Go package from source.
 
 The release script:
 
 ```sh
-scripts/package-release.sh 0.13.0
+scripts/package-release.sh 0.13.1
 ```
 
 tags the current commit, pushes the branch and tag, creates a source archive,
 and creates the GitHub release. Do not run it until the exact commit you want
 to release is ready.
 
-## Non-Goals In v0.13.0
+## Non-Goals In v0.13.1
 
-Zova v0.13.0 does not include:
+Zova v0.13.1 does not include:
 
 - ANN indexes
 - HNSW or IVFFlat
 - vector SQL operators
 - object or chunk virtual tables
 - embedding generation
-- Go, Python, TypeScript, or Swift bindings
+- Python, TypeScript, or Swift bindings
 - crates.io publishing
+- automatic Go module publishing
 - repair commands
 - orphan scan CLI
 - CLI mutation commands
