@@ -91,3 +91,9 @@ test "package exports zova database namespace" {
     try std.testing.expect(@hasDecl(Database, "searchVectorsByIdInWithin"));
     try std.testing.expect(!@hasDecl(@This(), "fastcdc"));
 }
+
+test {
+    _ = @import("object_tests.zig");
+    _ = @import("vector_tests.zig");
+    _ = @import("vector_sql_tests.zig");
+}
