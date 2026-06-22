@@ -4,6 +4,11 @@ use crate::object::{
     PyObjectWriter,
 };
 use crate::statement::PyStatement;
+use crate::vector::{
+    candidate_refs, options_from_py, py_collection_info, py_search_results, py_vector,
+    vector_input_refs, vector_inputs_from_py, PyVector, PyVectorCollectionInfo,
+    PyVectorSearchResult,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes};
 
@@ -168,6 +173,217 @@ impl PyDatabase {
         Ok(PyObjectWriter {
             inner: Some(self.db_mut()?.object_writer_owned().map_err(zova_error)?),
         })
+    }
+
+    pub(crate) fn create_vector_collection(
+        &mut self,
+        name: &str,
+        options: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let options = options_from_py(options)?;
+        self.db_mut()?
+            .create_vector_collection(name, options)
+            .map_err(zova_error)
+    }
+
+    pub(crate) fn has_vector_collection(&mut self, name: &str) -> PyResult<bool> {
+        self.db_mut()?
+            .has_vector_collection(name)
+            .map_err(zova_error)
+    }
+
+    pub(crate) fn vector_collection_info(
+        &mut self,
+        name: &str,
+    ) -> PyResult<PyVectorCollectionInfo> {
+        let info = self
+            .db_mut()?
+            .vector_collection_info(name)
+            .map_err(zova_error)?;
+        Ok(py_collection_info(info))
+    }
+
+    pub(crate) fn list_vector_collections(&mut self) -> PyResult<Vec<PyVectorCollectionInfo>> {
+        let collections = self
+            .db_mut()?
+            .list_vector_collections()
+            .map_err(zova_error)?;
+        Ok(collections.into_iter().map(py_collection_info).collect())
+    }
+
+    pub(crate) fn delete_vector_collection(&mut self, name: &str) -> PyResult<()> {
+        self.db_mut()?
+            .delete_vector_collection(name)
+            .map_err(zova_error)
+    }
+
+    pub(crate) fn put_vector(
+        &mut self,
+        collection_name: &str,
+        vector_id: &str,
+        values: Vec<f32>,
+    ) -> PyResult<()> {
+        self.db_mut()?
+            .put_vector(collection_name, vector_id, &values)
+            .map_err(zova_error)
+    }
+
+    pub(crate) fn put_vectors(
+        &mut self,
+        collection_name: &str,
+        vectors: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let owned = vector_inputs_from_py(vectors)?;
+        let refs = vector_input_refs(&owned);
+        self.db_mut()?
+            .put_vectors(collection_name, &refs)
+            .map_err(zova_error)
+    }
+
+    pub(crate) fn get_vector(
+        &mut self,
+        collection_name: &str,
+        vector_id: &str,
+    ) -> PyResult<PyVector> {
+        let vector = self
+            .db_mut()?
+            .get_vector(collection_name, vector_id)
+            .map_err(zova_error)?;
+        Ok(py_vector(vector))
+    }
+
+    pub(crate) fn has_vector(&mut self, collection_name: &str, vector_id: &str) -> PyResult<bool> {
+        self.db_mut()?
+            .has_vector(collection_name, vector_id)
+            .map_err(zova_error)
+    }
+
+    pub(crate) fn delete_vector(&mut self, collection_name: &str, vector_id: &str) -> PyResult<()> {
+        self.db_mut()?
+            .delete_vector(collection_name, vector_id)
+            .map_err(zova_error)
+    }
+
+    pub(crate) fn search_vectors(
+        &mut self,
+        collection_name: &str,
+        query: Vec<f32>,
+        limit: usize,
+    ) -> PyResult<Vec<PyVectorSearchResult>> {
+        let results = self
+            .db_mut()?
+            .search_vectors(collection_name, &query, limit)
+            .map_err(zova_error)?;
+        Ok(py_search_results(results))
+    }
+
+    pub(crate) fn search_vectors_in(
+        &mut self,
+        collection_name: &str,
+        query: Vec<f32>,
+        candidate_ids: Vec<String>,
+        limit: usize,
+    ) -> PyResult<Vec<PyVectorSearchResult>> {
+        let candidates = candidate_refs(&candidate_ids);
+        let results = self
+            .db_mut()?
+            .search_vectors_in(collection_name, &query, &candidates, limit)
+            .map_err(zova_error)?;
+        Ok(py_search_results(results))
+    }
+
+    pub(crate) fn search_vectors_within(
+        &mut self,
+        collection_name: &str,
+        query: Vec<f32>,
+        max_distance: f64,
+        limit: usize,
+    ) -> PyResult<Vec<PyVectorSearchResult>> {
+        let results = self
+            .db_mut()?
+            .search_vectors_within(collection_name, &query, max_distance, limit)
+            .map_err(zova_error)?;
+        Ok(py_search_results(results))
+    }
+
+    pub(crate) fn search_vectors_in_within(
+        &mut self,
+        collection_name: &str,
+        query: Vec<f32>,
+        candidate_ids: Vec<String>,
+        max_distance: f64,
+        limit: usize,
+    ) -> PyResult<Vec<PyVectorSearchResult>> {
+        let candidates = candidate_refs(&candidate_ids);
+        let results = self
+            .db_mut()?
+            .search_vectors_in_within(collection_name, &query, &candidates, max_distance, limit)
+            .map_err(zova_error)?;
+        Ok(py_search_results(results))
+    }
+
+    pub(crate) fn search_vectors_by_id(
+        &mut self,
+        collection_name: &str,
+        source_vector_id: &str,
+        limit: usize,
+    ) -> PyResult<Vec<PyVectorSearchResult>> {
+        let results = self
+            .db_mut()?
+            .search_vectors_by_id(collection_name, source_vector_id, limit)
+            .map_err(zova_error)?;
+        Ok(py_search_results(results))
+    }
+
+    pub(crate) fn search_vectors_by_id_in(
+        &mut self,
+        collection_name: &str,
+        source_vector_id: &str,
+        candidate_ids: Vec<String>,
+        limit: usize,
+    ) -> PyResult<Vec<PyVectorSearchResult>> {
+        let candidates = candidate_refs(&candidate_ids);
+        let results = self
+            .db_mut()?
+            .search_vectors_by_id_in(collection_name, source_vector_id, &candidates, limit)
+            .map_err(zova_error)?;
+        Ok(py_search_results(results))
+    }
+
+    pub(crate) fn search_vectors_by_id_within(
+        &mut self,
+        collection_name: &str,
+        source_vector_id: &str,
+        max_distance: f64,
+        limit: usize,
+    ) -> PyResult<Vec<PyVectorSearchResult>> {
+        let results = self
+            .db_mut()?
+            .search_vectors_by_id_within(collection_name, source_vector_id, max_distance, limit)
+            .map_err(zova_error)?;
+        Ok(py_search_results(results))
+    }
+
+    pub(crate) fn search_vectors_by_id_in_within(
+        &mut self,
+        collection_name: &str,
+        source_vector_id: &str,
+        candidate_ids: Vec<String>,
+        max_distance: f64,
+        limit: usize,
+    ) -> PyResult<Vec<PyVectorSearchResult>> {
+        let candidates = candidate_refs(&candidate_ids);
+        let results = self
+            .db_mut()?
+            .search_vectors_by_id_in_within(
+                collection_name,
+                source_vector_id,
+                &candidates,
+                max_distance,
+                limit,
+            )
+            .map_err(zova_error)?;
+        Ok(py_search_results(results))
     }
 
     pub(crate) fn __enter__(slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {

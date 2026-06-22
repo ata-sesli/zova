@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 usage() {
     echo "usage: scripts/package-release.sh <version> [out-dir]" >&2
-    echo "example: scripts/package-release.sh 0.13.1" >&2
+    echo "example: scripts/package-release.sh 0.13.2" >&2
 }
 
 run() {
@@ -68,6 +68,7 @@ require_command gh
 require_command tar
 require_command cargo
 require_command go
+require_command uv
 
 if ! gh auth status >/dev/null 2>&1; then
     echo "GitHub CLI is not authenticated. Run: gh auth login" >&2
@@ -123,10 +124,16 @@ cp -R src "$TMP/$PKG/"
 cp -R tests "$TMP/$PKG/"
 cp -R vendor "$TMP/$PKG/"
 rm -rf "$TMP/$PKG/bindings/rust/target"
+rm -rf "$TMP/$PKG/bindings/python/target"
+rm -rf "$TMP/$PKG/bindings/python/.venv"
+rm -rf "$TMP/$PKG/bindings/python/.pytest_cache"
+rm -rf "$TMP/$PKG/bindings/python/dist"
+find "$TMP/$PKG/bindings/python" -type d -name '__pycache__' -prune -exec rm -rf {} +
+find "$TMP/$PKG/bindings/python" \( -name '*.so' -o -name '*.pyd' -o -name '*.dylib' -o -name '*.dll' -o -name '*.whl' \) -delete
 
-if find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" | grep -q .; then
+if find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" | grep -q .; then
     echo "release package contains unexpected markdown files" >&2
-    find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" >&2
+    find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" >&2
     exit 1
 fi
 
@@ -185,6 +192,41 @@ if [ ! -d "$TMP/$PKG/bindings/go/examples/vectors" ]; then
     exit 1
 fi
 
+if [ ! -f "$TMP/$PKG/bindings/python/pyproject.toml" ]; then
+    echo "release package is missing bindings/python/pyproject.toml" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/bindings/python/Cargo.toml" ]; then
+    echo "release package is missing bindings/python/Cargo.toml" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/bindings/python/README.md" ]; then
+    echo "release package is missing bindings/python/README.md" >&2
+    exit 1
+fi
+
+if [ ! -d "$TMP/$PKG/bindings/python/python/zova" ]; then
+    echo "release package is missing bindings/python/python/zova" >&2
+    exit 1
+fi
+
+if [ ! -d "$TMP/$PKG/bindings/python/src" ]; then
+    echo "release package is missing bindings/python/src" >&2
+    exit 1
+fi
+
+if [ ! -d "$TMP/$PKG/bindings/python/tests" ]; then
+    echo "release package is missing bindings/python/tests" >&2
+    exit 1
+fi
+
+if [ ! -d "$TMP/$PKG/bindings/python/examples" ]; then
+    echo "release package is missing bindings/python/examples" >&2
+    exit 1
+fi
+
 if [ -e "$TMP/$PKG/zig-out" ]; then
     echo "release package must not contain compiled CLI artifacts" >&2
     exit 1
@@ -192,6 +234,17 @@ fi
 
 if [ -e "$TMP/$PKG/bindings/rust/target" ]; then
     echo "release package must not contain compiled Rust artifacts" >&2
+    exit 1
+fi
+
+if [ -e "$TMP/$PKG/bindings/python/target" ] || [ -e "$TMP/$PKG/bindings/python/dist" ] || [ -e "$TMP/$PKG/bindings/python/.venv" ]; then
+    echo "release package must not contain compiled Python artifacts" >&2
+    exit 1
+fi
+
+if find "$TMP/$PKG/bindings/python" \( -name '__pycache__' -o -name '.pytest_cache' -o -name '*.so' -o -name '*.pyd' -o -name '*.dylib' -o -name '*.dll' -o -name '*.whl' \) | grep -q .; then
+    echo "release package must not contain Python cache/native/wheel artifacts" >&2
+    find "$TMP/$PKG/bindings/python" \( -name '__pycache__' -o -name '.pytest_cache' -o -name '*.so' -o -name '*.pyd' -o -name '*.dylib' -o -name '*.dll' -o -name '*.whl' \) >&2
     exit 1
 fi
 
@@ -216,6 +269,12 @@ CARGO_TARGET_DIR="$TMP/cargo-target/verify" cargo test --workspace --manifest-pa
 CARGO_TARGET_DIR="$TMP/cargo-target/verify" cargo check --examples --manifest-path bindings/rust/Cargo.toml
 (cd bindings/go && GOCACHE="$TMP/go-cache/verify" go test ./...)
 (cd bindings/go && GOCACHE="$TMP/go-cache/verify" go vet ./...)
+CARGO_TARGET_DIR="$TMP/cargo-target/python-verify" cargo fmt --manifest-path bindings/python/Cargo.toml --check
+CARGO_TARGET_DIR="$TMP/cargo-target/python-verify" cargo test --manifest-path bindings/python/Cargo.toml
+CARGO_TARGET_DIR="$TMP/cargo-target/python-verify" uv run --isolated --with maturin --with pytest --directory bindings/python maturin develop
+uv run --isolated --with pytest --directory bindings/python python -m pytest
+mkdir -p "$TMP/python-wheels/verify"
+CARGO_TARGET_DIR="$TMP/cargo-target/python-verify" uv run --isolated --with maturin --directory bindings/python maturin build --out "$TMP/python-wheels/verify"
 
 cd "$ROOT"
 if [ -z "$LOCAL_TAG_COMMIT" ]; then

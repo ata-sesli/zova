@@ -20,12 +20,12 @@ fn abi_version_and_status_names_are_available() {
     unsafe {
         assert_eq!(zova_sys::zova_abi_version_major(), 0);
         assert_eq!(zova_sys::zova_abi_version_minor(), 13);
-        assert_eq!(zova_sys::zova_abi_version_patch(), 1);
+        assert_eq!(zova_sys::zova_abi_version_patch(), 2);
         assert_eq!(
             CStr::from_ptr(zova_sys::zova_abi_version_string())
                 .to_str()
                 .unwrap(),
-            "0.13.1"
+            "0.13.2"
         );
         assert_eq!(
             CStr::from_ptr(zova_sys::zova_status_name(zova_sys::ZOVA_OK))

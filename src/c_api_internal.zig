@@ -567,11 +567,11 @@ pub fn zova_abi_version_minor() callconv(.c) u32 {
 }
 
 pub fn zova_abi_version_patch() callconv(.c) u32 {
-    return 1;
+    return 2;
 }
 
 pub fn zova_abi_version_string() callconv(.c) [*:0]const u8 {
-    return "0.13.1";
+    return "0.13.2";
 }
 
 // Accept a raw integer instead of a Zig enum so accidental or future C enum
@@ -1750,8 +1750,8 @@ fn statusName(status: c_int) [*:0]const u8 {
 test "c abi status names and versions are stable" {
     try std.testing.expectEqual(@as(u32, 0), zova_abi_version_major());
     try std.testing.expectEqual(@as(u32, 13), zova_abi_version_minor());
-    try std.testing.expectEqual(@as(u32, 1), zova_abi_version_patch());
-    try std.testing.expectEqualStrings("0.13.1", std.mem.span(zova_abi_version_string()));
+    try std.testing.expectEqual(@as(u32, 2), zova_abi_version_patch());
+    try std.testing.expectEqualStrings("0.13.2", std.mem.span(zova_abi_version_string()));
     try std.testing.expectEqualStrings("ZOVA_OK", std.mem.span(zova_status_name(@intFromEnum(zova_status.OK))));
     try std.testing.expectEqualStrings("ZOVA_OBJECT_NOT_FOUND", std.mem.span(zova_status_name(@intFromEnum(zova_status.OBJECT_NOT_FOUND))));
     try std.testing.expectEqualStrings("ZOVA_VECTOR_INVALID", std.mem.span(zova_status_name(@intFromEnum(zova_status.VECTOR_INVALID))));

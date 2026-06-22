@@ -8,7 +8,7 @@ content-addressed objects, chunk manifests, streaming writes, and exact vector
 search. Applications keep their own metadata in normal SQL tables and store
 Zova object ids or vector ids alongside their rows.
 
-Current package version: `0.13.1`.
+Current package version: `0.13.2`.
 
 Zova is not tied to one application language. The project exposes:
 
@@ -16,11 +16,12 @@ Zova is not tied to one application language. The project exposes:
 - a C ABI in `include/zova.h`
 - source-first Rust bindings in `bindings/rust`
 - source-first Go bindings in `bindings/go`
+- source-first Python bindings in `bindings/python`
 - a non-mutating CLI for inspection and checks
 - a source-only release package that consumers build locally
 
-Python, TypeScript, and Swift bindings are planned as later layers over the C
-ABI and Rust/Go binding foundation.
+TypeScript and Swift bindings are planned as later layers over the C ABI and
+Rust/Go/Python binding foundation.
 
 ## Architecture
 
@@ -54,7 +55,7 @@ flowchart TD
     VecCols --> Vecs
 ```
 
-## What Works In v0.13.1
+## What Works In v0.13.2
 
 - normal SQLite access through a thin wrapper
 - `.zova` database create/open/validation
@@ -76,6 +77,9 @@ flowchart TD
   chunks, manifests, `ObjectWriter`, vectors, and SQL-native vector search
 - Go bindings for records, prepared statements, transactions, vacuum, objects,
   chunks, manifests, `ObjectWriter`, vectors, and SQL-native vector search
+- Python bindings for records, prepared statements, transactions, vacuum,
+  objects, chunks, manifests, `ObjectWriter`, vectors, and SQL-native vector
+  search
 - CLI `info`, `stats`, object/chunk/vector/table inspection, and `check`
 - source-only release packaging
 
@@ -238,13 +242,13 @@ Run the Rust tests:
 cargo test --workspace --manifest-path bindings/rust/Cargo.toml
 ```
 
-The Rust crates are included in the source archive, but v0.13.1 does not publish
+The Rust crates are included in the source archive, but v0.13.2 does not publish
 them to crates.io automatically and does not ship compiled libraries. Consumers
 build from source.
 
 ## Go Bindings
 
-v0.13.1 adds source-first Go bindings under `bindings/go`.
+v0.13.1 added source-first Go bindings under `bindings/go`.
 
 The Go package is a cgo-backed wrapper over `include/zova.h`. It links the local
 static C ABI library produced by:
@@ -274,9 +278,42 @@ go test ./...
 go vet ./...
 ```
 
-The Go module is included in the source archive, but v0.13.1 does not publish a
+The Go module is included in the source archive, but v0.13.2 does not publish a
 Go module automatically and does not ship compiled libraries. Consumers build
 from source.
+
+## Python Bindings
+
+v0.13.2 adds source-first Python bindings under `bindings/python`.
+
+The Python package is a PyO3/maturin extension backed by the safe Rust `zova`
+crate. It does not use `ctypes` or cffi as the official binding path, and users
+do not need to manually locate a shared `libzova` library.
+
+The Python package exposes:
+
+- `Database` lifecycle, conversion, `exec`, prepared statements, transactions,
+  and explicit `vacuum`
+- SQL records through one Zova handle, without opening a separate Python
+  `sqlite3` handle for normal Zova SQL work
+- object APIs, chunk/manifest APIs, receive-side assembly, range reads, and
+  `ObjectWriter`
+- vector collections, CRUD, batch writes, exact search, candidate-filtered
+  search, search-by-id, thresholds, and collection management
+- SQL-native vector search through prepared statements, including
+  `zova_vector_distance`, `zova_vector_distance_by_id`, and
+  `zova_vector_search`
+
+Run the Python checks with `uv`:
+
+```sh
+uv run --isolated --with maturin --with pytest --directory bindings/python maturin develop
+uv run --isolated --with pytest --directory bindings/python python -m pytest
+```
+
+The Python package is included in the source archive, but v0.13.2 does not
+publish to PyPI automatically and does not ship a platform wheel matrix.
+Consumers build from source with maturin.
 
 ## Native Zig API
 
@@ -559,21 +596,21 @@ var close = try db.searchVectorsWithin(
 defer close.deinit(allocator);
 ```
 
-Search is exact and flat-scan in v0.13.1. That is deliberate: Zova currently
+Search is exact and flat-scan in v0.13.2. That is deliberate: Zova currently
 prioritizes deterministic local correctness over approximate indexing. It is a
 good fit for small and medium local datasets, offline ranking, tests that need
 repeatable nearest-neighbor results, and candidate-filtered search where SQL
 first narrows the metadata set and Zova ranks the eligible vector ids.
 
 It is not yet a low-latency ANN engine for millions of vectors. Zova does not
-include HNSW, IVFFlat, quantized indexes, or vector SQL operators in v0.13.1.
+include HNSW, IVFFlat, quantized indexes, or vector SQL operators in v0.13.2.
 
 Missing candidate ids are skipped. Invalid candidate ids return
 `error.VectorInvalid`. Corrupt selected vector rows return `error.VectorCorrupt`.
 
 ## SQL-Native Vector Search
 
-v0.13.1 makes Zova vectors queryable from SQL on `zova.Database` connections.
+v0.13.2 makes Zova vectors queryable from SQL on `zova.Database` connections.
 The raw `zova.sqlite.Database` wrapper remains plain SQLite and does not
 register Zova vector SQL helpers.
 
@@ -801,6 +838,16 @@ go test ./...
 go vet ./...
 ```
 
+Run Python binding checks:
+
+```sh
+cargo fmt --manifest-path bindings/python/Cargo.toml --check
+cargo test --manifest-path bindings/python/Cargo.toml
+uv run --isolated --with maturin --with pytest --directory bindings/python maturin develop
+uv run --isolated --with pytest --directory bindings/python python -m pytest
+uv run --isolated --with maturin --directory bindings/python maturin build
+```
+
 Run the full release smoke:
 
 ```sh
@@ -809,48 +856,52 @@ scripts/check-release.sh
 
 ## Release Package Policy
 
-v0.13.1 releases a source-only package/archive. The package includes:
+v0.13.2 releases a source-only package/archive. The package includes:
 
 - `README.md`
 - `build.zig`
 - `build.zig.zon`
 - `bindings/rust`
 - `bindings/go`
+- `bindings/python`
 - `include`
 - `src`
 - `tests`
 - `vendor`
 
-The root `README.md`, `bindings/rust/README.md`, and `bindings/go/README.md`
-are the only markdown files included in the release package. Planning notes stay
-outside the package.
+The root `README.md`, `bindings/rust/README.md`, `bindings/go/README.md`, and
+`bindings/python/README.md` are the only markdown files included in the release
+package. Planning notes stay outside the package.
 
-Compiled CLI binaries, compiled C ABI libraries, compiled Rust artifacts, and
-compiled Go artifacts are not release artifacts. Consumers build the CLI, static
-C ABI library, Rust crates, and Go package from source.
+Compiled CLI binaries, compiled C ABI libraries, compiled Rust artifacts,
+compiled Go artifacts, and compiled Python extension/wheel artifacts are not
+release artifacts. Consumers build the CLI, static C ABI library, Rust crates,
+Go package, and Python extension from source.
 
 The release script:
 
 ```sh
-scripts/package-release.sh 0.13.1
+scripts/package-release.sh 0.13.2
 ```
 
 tags the current commit, pushes the branch and tag, creates a source archive,
 and creates the GitHub release. Do not run it until the exact commit you want
 to release is ready.
 
-## Non-Goals In v0.13.1
+## Non-Goals In v0.13.2
 
-Zova v0.13.1 does not include:
+Zova v0.13.2 does not include:
 
 - ANN indexes
 - HNSW or IVFFlat
 - vector SQL operators
 - object or chunk virtual tables
 - embedding generation
-- Python, TypeScript, or Swift bindings
+- TypeScript or Swift bindings
 - crates.io publishing
 - automatic Go module publishing
+- PyPI publishing
+- platform wheel matrix publishing
 - repair commands
 - orphan scan CLI
 - CLI mutation commands

@@ -26,9 +26,9 @@ the object and vector layers are added.
 
 ## Current Surface
 
-This foundation slice exposes database lifecycle, conversion, prepared SQL
-statements, transactions, explicit vacuum, context managers, and Zova status
-exceptions.
+This slice exposes database lifecycle, conversion, prepared SQL statements,
+transactions, explicit vacuum, objects, streaming object writes, vectors,
+SQL-native vector search, context managers, and Zova status exceptions.
 
 One Python `Database` object owns one native handle. Use one handle at a time,
 and open additional database handles when an application needs independent
@@ -79,4 +79,101 @@ applications track transfer state in their own SQL tables, call
 `put_object_chunk()` for verified chunks, then call
 `assemble_object_from_chunks()` when the manifest is complete.
 
-Vector APIs are planned for a later v0.13.2 slice.
+## Vectors
+
+The Python binding exposes Zova vectors with the same model as the Rust binding:
+Zova stores numeric vectors in named collections, while application metadata
+stays in normal SQL tables.
+
+```python
+import zova
+
+with zova.Database.create("vectors.zova") as db:
+    db.exec(
+        "create table chunks("
+        "id text primary key, "
+        "document_id text not null, "
+        "text text not null, "
+        "vector_id text not null)"
+    )
+
+    db.create_vector_collection(
+        "chunks",
+        zova.VectorCollectionOptions(2, zova.VectorMetric.L2),
+    )
+    db.put_vectors(
+        "chunks",
+        [
+            zova.VectorInput("chunk:1", [0.0, 0.0]),
+            zova.VectorInput("chunk:2", [1.0, 0.0]),
+        ],
+    )
+
+    db.exec(
+        "insert into chunks(id, document_id, text, vector_id) values "
+        "('c1', 'doc-a', 'first chunk', 'chunk:1'), "
+        "('c2', 'doc-a', 'near chunk', 'chunk:2')"
+    )
+
+    results = db.search_vectors_in(
+        "chunks",
+        [0.0, 0.0],
+        ["chunk:1", "chunk:2"],
+        2,
+    )
+    for result in results:
+        with db.prepare("select text from chunks where vector_id = ?1") as stmt:
+            stmt.bind_text(1, result.id)
+            stmt.step()
+            print(result.id, result.distance, stmt.column_text(0))
+```
+
+Search is exact and lower distance is better. Candidate-filtered searches skip
+missing ids and deduplicate duplicate candidates. Search-by-id excludes the
+source vector. Threshold variants are inclusive, and dot-product thresholds may
+be negative because dot distance is `-dot_product`.
+
+Deleting a vector collection removes Zova's private vector rows only. User SQL
+metadata rows that reference vector ids are application-owned and remain in
+place.
+
+## SQL-Native Vector Search
+
+Zova registers SQL vector functions and the `zova_vector_search` virtual table
+on Zova database connections. Bind query vectors as little-endian `f32` blobs
+with `encode_f32_le()`:
+
+```python
+query = zova.encode_f32_le([0.0, 0.0])
+
+with db.prepare(
+    "select c.id, zova_vector_distance('chunks', c.vector_id, ?1) as distance "
+    "from chunks as c "
+    "where c.document_id = 'doc-a' "
+    "order by distance "
+    "limit 10"
+) as stmt:
+    stmt.bind_blob(1, query)
+```
+
+Row-to-row distances use `zova_vector_distance_by_id(collection, vector_id,
+source_vector_id)`. Collection-wide SQL search uses `zova_vector_search`:
+
+```python
+with db.prepare(
+    "select c.text, s.distance "
+    "from zova_vector_search as s "
+    "join chunks as c on c.vector_id = s.vector_id "
+    "where s.collection = 'chunks' "
+    "and s.query_vector = ?1 "
+    "and s.top_k = 10 "
+    "order by s.rank"
+) as stmt:
+    stmt.bind_blob(1, query)
+```
+
+Python's built-in `sqlite3` module opens an ordinary SQLite connection and does
+not automatically register Zova's SQL functions or virtual table. Use
+`zova.Database` for SQL-native vector search in this binding. A future SQLite
+loadable extension may make the SQL surface available to external SQLite
+connections.
