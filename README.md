@@ -8,7 +8,7 @@ content-addressed objects, chunk manifests, streaming writes, and exact vector
 search. Applications keep their own metadata in normal SQL tables and store
 Zova object ids or vector ids alongside their rows.
 
-Current package version: `0.12.0`.
+Current package version: `0.12.1`.
 
 Zova is not tied to one application language. The project exposes:
 
@@ -51,7 +51,7 @@ flowchart TD
     VecCols --> Vecs
 ```
 
-## What Works In v0.12.0
+## What Works In v0.12.1
 
 - normal SQLite access through a thin wrapper
 - `.zova` database create/open/validation
@@ -478,21 +478,21 @@ var close = try db.searchVectorsWithin(
 defer close.deinit(allocator);
 ```
 
-Search is exact and flat-scan in v0.12.0. That is deliberate: Zova currently
+Search is exact and flat-scan in v0.12.1. That is deliberate: Zova currently
 prioritizes deterministic local correctness over approximate indexing. It is a
 good fit for small and medium local datasets, offline ranking, tests that need
 repeatable nearest-neighbor results, and candidate-filtered search where SQL
 first narrows the metadata set and Zova ranks the eligible vector ids.
 
 It is not yet a low-latency ANN engine for millions of vectors. Zova does not
-include HNSW, IVFFlat, quantized indexes, or vector SQL operators in v0.12.0.
+include HNSW, IVFFlat, quantized indexes, or vector SQL operators in v0.12.1.
 
 Missing candidate ids are skipped. Invalid candidate ids return
 `error.VectorInvalid`. Corrupt selected vector rows return `error.VectorCorrupt`.
 
 ## SQL-Native Vector Search
 
-v0.12.0 makes Zova vectors queryable from SQL on `zova.Database` connections.
+v0.12.1 makes Zova vectors queryable from SQL on `zova.Database` connections.
 The raw `zova.sqlite.Database` wrapper remains plain SQLite and does not
 register Zova vector SQL helpers.
 
@@ -712,7 +712,7 @@ scripts/check-release.sh
 
 ## Release Package Policy
 
-v0.12.0 releases a source-only package/archive. The package includes:
+v0.12.1 releases a source-only package/archive. The package includes:
 
 - `README.md`
 - `build.zig`
@@ -731,16 +731,16 @@ Consumers build the CLI or static C ABI library from source with Zig.
 The release script:
 
 ```sh
-scripts/package-release.sh 0.12.0
+scripts/package-release.sh 0.12.1
 ```
 
 tags the current commit, pushes the branch and tag, creates a source archive,
 and creates the GitHub release. Do not run it until the exact commit you want
 to release is ready.
 
-## Non-Goals In v0.12.0
+## Non-Goals In v0.12.1
 
-Zova v0.12.0 does not include:
+Zova v0.12.1 does not include:
 
 - ANN indexes
 - HNSW or IVFFlat

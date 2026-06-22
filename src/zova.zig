@@ -39,472 +39,48 @@
 //! intentionally absent from this release.
 
 const std = @import("std");
-const fastcdc = @import("fastcdc.zig");
+const fastcdc = @import("object_fastcdc.zig");
+const object_impl = @import("object.zig");
 const sqlite = @import("sqlite.zig");
+const vector_impl = @import("vector.zig");
 const vector_sql = @import("vector_sql.zig");
+const zova_error = @import("zova_error.zig");
 
 const metadata_table = "_zova_meta";
 const objects_table = "_zova_objects";
 const chunks_table = "_zova_chunks";
 const object_chunks_table = "_zova_object_chunks";
-const vector_collections_table = "_zova_vector_collections";
-const vectors_table = "_zova_vectors";
 const magic_value = "zova";
 const format_version = "3";
-pub const max_vector_dimensions: u32 = 16_384;
-const max_vector_collection_name_bytes: usize = 255;
-const objects_schema_sql =
-    \\create table _zova_objects (
-    \\  object_id blob not null primary key check (length(object_id) = 32),
-    \\  size_bytes integer not null check (size_bytes >= 0),
-    \\  chunk_count integer not null check (chunk_count >= 0),
-    \\  chunker text not null check (chunker = 'fastcdc-v1')
-    \\)
-;
-const chunks_schema_sql =
-    \\create table _zova_chunks (
-    \\  chunk_hash blob not null primary key check (length(chunk_hash) = 32),
-    \\  size_bytes integer not null check (size_bytes > 0 and size_bytes <= 65536),
-    \\  data blob not null check (length(data) = size_bytes)
-    \\)
-;
-const object_chunks_schema_sql =
-    \\create table _zova_object_chunks (
-    \\  object_id blob not null check (length(object_id) = 32),
-    \\  chunk_index integer not null check (chunk_index >= 0),
-    \\  chunk_hash blob not null check (length(chunk_hash) = 32),
-    \\  offset integer not null check (offset >= 0),
-    \\  size_bytes integer not null check (size_bytes > 0 and size_bytes <= 65536),
-    \\  primary key (object_id, chunk_index),
-    \\  foreign key (object_id) references _zova_objects(object_id),
-    \\  foreign key (chunk_hash) references _zova_chunks(chunk_hash)
-    \\)
-;
-const vector_collections_schema_sql =
-    \\create table _zova_vector_collections (
-    \\  name text not null primary key check (length(name) > 0 and length(name) <= 255),
-    \\  dimensions integer not null check (dimensions > 0 and dimensions <= 16384),
-    \\  metric text not null check (metric in ('cosine', 'l2', 'dot')),
-    \\  element_type text not null check (element_type = 'f32')
-    \\)
-;
-const vectors_schema_sql =
-    \\create table _zova_vectors (
-    \\  collection_name text not null,
-    \\  vector_id text not null check (length(vector_id) > 0),
-    \\  dimensions integer not null check (dimensions > 0 and dimensions <= 16384),
-    \\  "values" blob not null check (length("values") = dimensions * 4),
-    \\  primary key (collection_name, vector_id),
-    \\  foreign key (collection_name) references _zova_vector_collections(name)
-    \\)
-;
-
-/// SHA-256 digest of full object bytes.
-///
-/// Zova object identity is content identity: the same bytes produce the same
-/// raw 32-byte `ObjectId`.
-pub const ObjectId = [32]u8;
-
-/// SHA-256 digest of one stored object chunk.
-///
-/// Chunk identity is content identity for the chunk bytes. Chunk ids are stable
-/// object-transfer identifiers, not application metadata.
-pub const ObjectChunkId = [32]u8;
-
-/// Error set for the Zova-owned database layer.
-///
-/// Boundary errors describe Zova file identity problems. SQLite operation
-/// failures keep using the wrapped SQLite errors.
-pub const Error = sqlite.Error || error{
-    NotZovaPath,
-    NotZovaDatabase,
-    UnsupportedZovaVersion,
-    DestinationExists,
-    ZovaNameConflict,
-    ObjectNotFound,
-    ObjectAlreadyExists,
-    ObjectChunkNotFound,
-    ObjectChunkHashMismatch,
-    ObjectCorrupt,
-    ObjectManifestInvalid,
-    ObjectRangeInvalid,
-    ObjectTooLarge,
-    ObjectTransactionActive,
-    ObjectWriterClosed,
-    VectorCollectionExists,
-    VectorCollectionNotFound,
-    VectorNotFound,
-    VectorDimensionMismatch,
-    VectorCorrupt,
-    VectorInvalid,
-    OutOfMemory,
-};
-
-/// Distance metric used by a Zova vector collection.
-///
-/// v0.5 exact search uses one lower-is-better `distance` field for all metrics:
-/// cosine uses `1 - cosine_similarity`, l2 uses Euclidean distance, and dot
-/// uses negative dot product.
-pub const VectorMetric = enum {
-    cosine,
-    l2,
-    dot,
-};
-
-/// Required options for creating a native vector collection.
-///
-/// The metric is explicit by design; Zova does not guess distance semantics.
-/// v0.5 supports only `f32` vectors and at most `max_vector_dimensions`.
-pub const VectorCollectionOptions = struct {
-    dimensions: u32,
-    metric: VectorMetric,
-};
-
-/// Owned metadata for one native vector collection.
-///
-/// `name` is heap-owned. `vector_count` counts private Zova vector rows in the
-/// collection; application metadata rows that reference vector ids remain in
-/// user SQL tables and are not counted here.
-pub const VectorCollectionInfo = struct {
-    name: []u8,
-    dimensions: u32,
-    metric: VectorMetric,
-    vector_count: u64,
-
-    /// Free the owned collection name.
-    pub fn deinit(self: *VectorCollectionInfo, allocator: std.mem.Allocator) void {
-        allocator.free(self.name);
-    }
-};
-
-/// Owned list of vector collection metadata rows.
-///
-/// The list returned by `Database.listVectorCollections` is sorted by
-/// ascending collection name.
-pub const VectorCollectionList = struct {
-    items: []VectorCollectionInfo,
-
-    /// Free every owned collection name and the item slice.
-    pub fn deinit(self: *VectorCollectionList, allocator: std.mem.Allocator) void {
-        for (self.items) |*item| item.deinit(allocator);
-        allocator.free(self.items);
-    }
-};
-
-/// Input row for `Database.putVectors`.
-///
-/// Vector ids are application-provided UTF-8 text ids scoped to a collection.
-/// Values are stored exactly as finite little-endian `f32` bytes.
-pub const VectorInput = struct {
-    id: []const u8,
-    values: []const f32,
-};
-
-/// Owned vector row returned by `Database.getVector`.
-///
-/// Vector ids are application-provided UTF-8 text ids scoped to a collection.
-/// Values are decoded from Zova's deterministic little-endian `f32` BLOB
-/// format. Call `deinit` with the same allocator passed to `getVector`.
-pub const Vector = struct {
-    id: []u8,
-    values: []f32,
-
-    /// Free the owned id and value buffers.
-    pub fn deinit(self: *Vector, allocator: std.mem.Allocator) void {
-        allocator.free(self.id);
-        allocator.free(self.values);
-    }
-};
-
-/// One exact vector search result.
-///
-/// Results contain the application-provided vector id plus a lower-is-better
-/// distance. Zova search does not return application metadata or SQL rows.
-pub const VectorSearchResult = struct {
-    id: []u8,
-    distance: f64,
-};
-
-/// Owned exact vector search result set.
-///
-/// Each result id is heap-owned. Call `deinit` with the same allocator passed
-/// to `Database.searchVectors`.
-pub const VectorSearchResults = struct {
-    items: []VectorSearchResult,
-
-    /// Free all owned result ids and the result slice.
-    pub fn deinit(self: *VectorSearchResults, allocator: std.mem.Allocator) void {
-        freeSearchItems(allocator, self.items);
-        allocator.free(self.items);
-    }
-};
+pub const ObjectId = object_impl.ObjectId;
+pub const ObjectChunkId = object_impl.ObjectChunkId;
+pub const ObjectChunk = object_impl.ObjectChunk;
+pub const ObjectManifest = object_impl.ObjectManifest;
+pub const ObjectChunkData = object_impl.ObjectChunkData;
+pub const Object = object_impl.Object;
+pub const ObjectWriter = object_impl.ObjectWriter;
 
 /// Compute the content identity for a Zova object.
 pub fn objectId(bytes: []const u8) ObjectId {
-    var digest: ObjectId = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
-    return digest;
+    return object_impl.objectId(bytes);
 }
 
 /// Compute the content identity for a single Zova object chunk.
-///
-/// The returned id is the SHA-256 digest of the chunk byte slice. This helper
-/// is useful for receive-side workflows that verify chunks before complete
-/// object assembly exists.
 pub fn objectChunkId(bytes: []const u8) ObjectChunkId {
-    var digest: ObjectChunkId = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
-    return digest;
+    return object_impl.objectChunkId(bytes);
 }
 
-/// One chunk entry in an object manifest.
-///
-/// Indexes are 0-based. Offsets and sizes are byte counts within the full
-/// logical object.
-pub const ObjectChunk = struct {
-    index: u64,
-    hash: ObjectChunkId,
-    offset: u64,
-    size_bytes: u64,
-};
+pub const Error = zova_error.Error;
 
-/// Owned object manifest returned by `Database.objectManifest`.
-///
-/// The manifest describes the logical object layout without exposing private
-/// table details. `chunker` is the static chunker version string for v0.6.
-pub const ObjectManifest = struct {
-    object_id: ObjectId,
-    size_bytes: u64,
-    chunk_count: u64,
-    chunker: []const u8,
-    chunks: []ObjectChunk,
-
-    /// Free the owned chunk slice.
-    pub fn deinit(self: *ObjectManifest, allocator: std.mem.Allocator) void {
-        allocator.free(self.chunks);
-    }
-};
-
-/// Owned chunk bytes returned by `Database.getObjectChunk`.
-///
-/// Call `deinit` with the same allocator passed to `getObjectChunk`.
-pub const ObjectChunkData = struct {
-    hash: ObjectChunkId,
-    bytes: []u8,
-
-    /// Free the owned chunk byte buffer.
-    pub fn deinit(self: *ObjectChunkData, allocator: std.mem.Allocator) void {
-        allocator.free(self.bytes);
-    }
-};
-
-/// Owned object bytes returned by `Database.getObject`.
-///
-/// v0.4 reads whole objects into memory. Call `deinit` with the same allocator
-/// passed to `getObject` when the bytes are no longer needed.
-pub const Object = struct {
-    id: ObjectId,
-    bytes: []u8,
-
-    /// Free the owned byte buffer.
-    pub fn deinit(self: *Object, allocator: std.mem.Allocator) void {
-        allocator.free(self.bytes);
-    }
-};
-
-/// Incremental writer for one content-addressed Zova object.
-///
-/// `ObjectWriter` accepts arbitrary byte slices, emits FastCDC-v1 chunks as
-/// they become available, stores those chunks as verified loose chunks, and
-/// assembles the final object on `finish`. It does not keep the full object in
-/// memory and it does not hold a SQLite transaction open across `write` calls.
-/// The writer must be deinitialized; unfinished writers auto-cancel.
-pub const ObjectWriter = struct {
-    db: *Database,
-    allocator: std.mem.Allocator,
-    chunker: fastcdc.StreamChunker = .empty,
-    hasher: std.crypto.hash.sha2.Sha256 = std.crypto.hash.sha2.Sha256.init(.{}),
-    size_bytes: u64 = 0,
-    chunks: std.ArrayList(ObjectChunk) = .empty,
-    seen_chunks: std.ArrayList(ObjectChunkId) = .empty,
-    closed: bool = false,
-
-    fn init(db: *Database, allocator: std.mem.Allocator) ObjectWriter {
-        return .{
-            .db = db,
-            .allocator = allocator,
-            .hasher = std.crypto.hash.sha2.Sha256.init(.{}),
-        };
-    }
-
-    /// Append bytes to the streamed object.
-    ///
-    /// Empty writes are no-ops. Non-empty writes may be split into several
-    /// FastCDC chunks internally. Writer operations are rejected inside active
-    /// caller-owned SQLite transactions because final assembly owns its own
-    /// transaction and the writer's chunk cleanup policy assumes no ambient
-    /// transaction.
-    pub fn write(self: *ObjectWriter, bytes: []const u8) Error!void {
-        if (self.closed) return error.ObjectWriterClosed;
-        if (self.chunker.finished) return error.ObjectWriterClosed;
-        if (hasActiveTransaction(&self.db.sqlite_db)) return error.ObjectTransactionActive;
-        if (bytes.len == 0) return;
-
-        var offset: usize = 0;
-        while (offset < bytes.len) {
-            try self.drainReadyChunks();
-
-            const accepted = try self.chunker.write(self.allocator, bytes[offset..]);
-            if (accepted == 0) {
-                try self.drainReadyChunks();
-                continue;
-            }
-
-            try self.addSize(accepted);
-            self.hasher.update(bytes[offset .. offset + accepted]);
-            offset += accepted;
-        }
-
-        try self.drainReadyChunks();
-    }
-
-    /// Finish the stream and return the object's content id.
-    ///
-    /// The final object id is SHA-256 of all bytes written. If the same valid
-    /// object already exists, `finish` returns that id successfully, matching
-    /// `Database.putObject`. After `finish`, all writer operations return
-    /// `error.ObjectWriterClosed`; call `deinit` to free writer-owned buffers.
-    pub fn finish(self: *ObjectWriter) Error!ObjectId {
-        if (self.closed) return error.ObjectWriterClosed;
-        if (hasActiveTransaction(&self.db.sqlite_db)) return error.ObjectTransactionActive;
-
-        self.chunker.finish();
-        try self.drainReadyChunks();
-
-        var final_hasher = self.hasher;
-        var id: ObjectId = undefined;
-        final_hasher.final(&id);
-
-        self.db.assembleObjectFromChunks(id, self.size_bytes, self.chunks.items) catch |err| switch (err) {
-            error.ObjectAlreadyExists => {
-                try self.ensureExistingObjectIsValid(id);
-            },
-            else => return err,
-        };
-
-        try self.deleteUnreferencedSeenChunks();
-        self.closed = true;
-        return id;
-    }
-
-    /// Cancel an unfinished writer and remove unreferenced chunks it stored.
-    ///
-    /// Chunks already referenced by completed objects are preserved. After
-    /// cancellation, all writer operations return `error.ObjectWriterClosed`.
-    pub fn cancel(self: *ObjectWriter) Error!void {
-        if (self.closed) return error.ObjectWriterClosed;
-        if (hasActiveTransaction(&self.db.sqlite_db)) return error.ObjectTransactionActive;
-
-        try self.deleteUnreferencedSeenChunks();
-        self.closed = true;
-    }
-
-    /// Free writer-owned buffers.
-    ///
-    /// If the writer has not been finished or cancelled, `deinit` attempts to
-    /// cancel it first and deliberately ignores cleanup errors.
-    pub fn deinit(self: *ObjectWriter) void {
-        if (!self.closed) {
-            self.cancel() catch {};
-        }
-        self.chunker.deinit(self.allocator);
-        self.chunks.deinit(self.allocator);
-        self.seen_chunks.deinit(self.allocator);
-    }
-
-    fn drainReadyChunks(self: *ObjectWriter) Error!void {
-        while (self.chunker.next()) |chunk| {
-            try self.storeChunk(chunk);
-            self.chunker.consume(self.allocator, chunk.bytes.len);
-        }
-    }
-
-    fn storeChunk(self: *ObjectWriter, chunk: fastcdc.StreamChunk) Error!void {
-        std.debug.assert(chunk.bytes.len > 0);
-        std.debug.assert(chunk.bytes.len <= fastcdc.max_size);
-
-        const hash = objectChunkId(chunk.bytes);
-        const already_stored = already_stored: {
-            var existing = self.db.getObjectChunk(self.allocator, hash) catch |err| switch (err) {
-                error.ObjectChunkNotFound => break :already_stored false,
-                else => return err,
-            };
-            existing.deinit(self.allocator);
-            break :already_stored true;
-        };
-
-        try self.db.putObjectChunk(hash, chunk.bytes);
-        if (!already_stored) try self.rememberSeenChunk(hash);
-        try self.chunks.append(self.allocator, .{
-            .index = @intCast(self.chunks.items.len),
-            .hash = hash,
-            .offset = @intCast(chunk.offset),
-            .size_bytes = @intCast(chunk.bytes.len),
-        });
-    }
-
-    fn rememberSeenChunk(self: *ObjectWriter, hash: ObjectChunkId) Error!void {
-        for (self.seen_chunks.items) |seen_hash| {
-            if (std.mem.eql(u8, &seen_hash, &hash)) return;
-        }
-        try self.seen_chunks.append(self.allocator, hash);
-    }
-
-    fn deleteUnreferencedSeenChunks(self: *ObjectWriter) Error!void {
-        for (self.seen_chunks.items) |hash| {
-            _ = try self.db.deleteObjectChunk(hash);
-        }
-    }
-
-    fn ensureExistingObjectIsValid(self: *ObjectWriter, id: ObjectId) Error!void {
-        var manifest = self.db.objectManifest(self.allocator, id) catch |err| switch (err) {
-            error.ObjectNotFound, error.ObjectCorrupt => return error.ObjectCorrupt,
-            else => return err,
-        };
-        defer manifest.deinit(self.allocator);
-
-        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-        var total_size: u64 = 0;
-        for (manifest.chunks) |chunk| {
-            var chunk_data = self.db.getObjectChunk(self.allocator, chunk.hash) catch |err| switch (err) {
-                error.ObjectChunkNotFound, error.ObjectCorrupt => return error.ObjectCorrupt,
-                else => return err,
-            };
-
-            if (@as(u64, @intCast(chunk_data.bytes.len)) != chunk.size_bytes) {
-                chunk_data.deinit(self.allocator);
-                return error.ObjectCorrupt;
-            }
-
-            hasher.update(chunk_data.bytes);
-            total_size += chunk.size_bytes;
-            chunk_data.deinit(self.allocator);
-        }
-
-        if (total_size != manifest.size_bytes) return error.ObjectCorrupt;
-
-        var digest: ObjectId = undefined;
-        hasher.final(&digest);
-        if (!std.mem.eql(u8, &digest, &id)) return error.ObjectCorrupt;
-    }
-
-    fn addSize(self: *ObjectWriter, len: usize) Error!void {
-        const amount: u64 = @intCast(len);
-        const max_size: u64 = @intCast(std.math.maxInt(i64));
-        if (amount > max_size - self.size_bytes) return error.ObjectTooLarge;
-        self.size_bytes += amount;
-    }
-};
+pub const max_vector_dimensions = vector_impl.max_vector_dimensions;
+pub const VectorMetric = vector_impl.VectorMetric;
+pub const VectorCollectionOptions = vector_impl.VectorCollectionOptions;
+pub const VectorCollectionInfo = vector_impl.VectorCollectionInfo;
+pub const VectorCollectionList = vector_impl.VectorCollectionList;
+pub const VectorInput = vector_impl.VectorInput;
+pub const Vector = vector_impl.Vector;
+pub const VectorSearchResult = vector_impl.VectorSearchResult;
+pub const VectorSearchResults = vector_impl.VectorSearchResults;
 
 /// Convert an existing SQLite database file into a new `.zova` database.
 ///
@@ -623,292 +199,105 @@ pub const Database = struct {
     }
 
     /// Create an incremental object writer for this database connection.
-    ///
-    /// The writer streams bytes through FastCDC-v1, stores verified loose
-    /// chunks as they are emitted, and assembles the final content-addressed
-    /// object on `ObjectWriter.finish`. Writer operations are unsupported while
-    /// this connection is inside an active caller-owned transaction.
     pub fn objectWriter(self: *Database, allocator: std.mem.Allocator) Error!ObjectWriter {
-        if (hasActiveTransaction(&self.sqlite_db)) return error.ObjectTransactionActive;
-        return ObjectWriter.init(self, allocator);
+        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return objects.objectWriter(allocator);
     }
 
     /// Create a native vector collection.
-    ///
-    /// Collection names are application-facing stable text names. They must be
-    /// non-empty UTF-8, at most 255 bytes, and outside the reserved `_zova_`
-    /// namespace. `dimensions` must be in `1...max_vector_dimensions`.
-    /// Collection creation is a single SQLite insert and can participate in a
-    /// caller-owned SQL transaction.
     pub fn createVectorCollection(
         self: *Database,
         name: []const u8,
         options: VectorCollectionOptions,
     ) Error!void {
-        try validateVectorCollectionName(name);
-        try validateVectorDimensions(options.dimensions);
-
-        var insert = try self.prepare(
-            \\insert into _zova_vector_collections (name, dimensions, metric, element_type)
-            \\values (?, ?, ?, 'f32')
-        );
-        defer insert.deinit();
-
-        try insert.bindText(1, name);
-        try insert.bindInt64(2, @intCast(options.dimensions));
-        try insert.bindText(3, vectorMetricText(options.metric));
-        _ = insert.step() catch |err| switch (err) {
-            error.Constraint => return error.VectorCollectionExists,
-            else => return err,
-        };
+        var vectors = vector_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return vectors.createVectorCollection(name, options);
     }
 
     /// Return whether a valid vector collection exists.
-    ///
-    /// Invalid collection names return `error.VectorInvalid`; valid but missing
-    /// names return `false`.
     pub fn hasVectorCollection(self: *Database, name: []const u8) Error!bool {
-        try validateVectorCollectionName(name);
-
-        var stmt = try self.prepare(
-            \\select count(*)
-            \\from _zova_vector_collections
-            \\where name = ?
-        );
-        defer stmt.deinit();
-
-        try stmt.bindText(1, name);
-        const step = try stmt.step();
-        std.debug.assert(step == .row);
-        return stmt.columnInt64(0) == 1;
+        var vectors = vector_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return vectors.hasVectorCollection(name);
     }
 
     /// Return owned metadata for one existing vector collection.
-    ///
-    /// Missing valid names return `error.VectorCollectionNotFound`; invalid
-    /// names return `error.VectorInvalid`. The returned name is owned memory
-    /// and must be freed with `VectorCollectionInfo.deinit`.
     pub fn vectorCollectionInfo(
         self: *Database,
         allocator: std.mem.Allocator,
         name: []const u8,
     ) Error!VectorCollectionInfo {
-        try validateVectorCollectionName(name);
-
-        var stmt = try self.prepare(
-            \\select c.name, c.dimensions, c.metric, c.element_type, count(v.vector_id)
-            \\from _zova_vector_collections c
-            \\left join _zova_vectors v on v.collection_name = c.name
-            \\where c.name = ?
-            \\group by c.name, c.dimensions, c.metric, c.element_type
-        );
-        defer stmt.deinit();
-
-        try stmt.bindText(1, name);
-        return switch (try stmt.step()) {
-            .done => error.VectorCollectionNotFound,
-            .row => try vectorCollectionInfoFromRow(allocator, &stmt),
-        };
+        var vectors = vector_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return vectors.vectorCollectionInfo(allocator, name);
     }
 
     /// List all vector collections sorted by ascending name.
-    ///
-    /// Each returned collection name is owned. Call
-    /// `VectorCollectionList.deinit` with the same allocator to release the
-    /// list.
     pub fn listVectorCollections(
         self: *Database,
         allocator: std.mem.Allocator,
     ) Error!VectorCollectionList {
-        var stmt = try self.prepare(
-            \\select c.name, c.dimensions, c.metric, c.element_type, count(v.vector_id)
-            \\from _zova_vector_collections c
-            \\left join _zova_vectors v on v.collection_name = c.name
-            \\group by c.name, c.dimensions, c.metric, c.element_type
-            \\order by c.name asc
-        );
-        defer stmt.deinit();
-
-        var items: std.ArrayList(VectorCollectionInfo) = .empty;
-        errdefer {
-            for (items.items) |*item| item.deinit(allocator);
-            items.deinit(allocator);
-        }
-
-        while ((try stmt.step()) == .row) {
-            const info = try vectorCollectionInfoFromRow(allocator, &stmt);
-            items.append(allocator, info) catch |err| {
-                var cleanup = info;
-                cleanup.deinit(allocator);
-                return err;
-            };
-        }
-
-        return .{ .items = try items.toOwnedSlice(allocator) };
+        var vectors = vector_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return vectors.listVectorCollections(allocator);
     }
 
     /// Store or replace one vector row in a collection.
-    ///
-    /// `collection_name` must name an existing collection. `vector_id` is a
-    /// non-empty UTF-8 text id scoped to that collection. Values must match the
-    /// collection dimensions and must be finite `f32` numbers. Storage uses one
-    /// SQLite BLOB containing explicit little-endian `f32` bytes.
     pub fn putVector(
         self: *Database,
         collection_name: []const u8,
         vector_id: []const u8,
         values: []const f32,
     ) Error!void {
-        try validateVectorCollectionName(collection_name);
-        const collection = try loadVectorCollection(self, collection_name);
-        try validateVectorInput(collection, .{ .id = vector_id, .values = values });
-        try self.writeVectorRows(collection_name, collection, &[_]VectorInput{.{ .id = vector_id, .values = values }});
+        var vectors = vector_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return vectors.putVector(collection_name, vector_id, values);
     }
 
     /// Store or replace multiple vector rows in a collection.
-    ///
-    /// Batch writes use the same upsert semantics as `putVector`. Duplicate ids
-    /// inside the batch are applied in input order, so the last entry wins.
-    /// Zova validates the whole batch before writing any row. This method is a
-    /// sequence of normal SQLite statements and can participate in a
-    /// caller-owned transaction.
     pub fn putVectors(
         self: *Database,
         collection_name: []const u8,
-        vectors: []const VectorInput,
+        inputs: []const VectorInput,
     ) Error!void {
-        try validateVectorCollectionName(collection_name);
-        const collection = try loadVectorCollection(self, collection_name);
-        for (vectors) |vector| try validateVectorInput(collection, vector);
-        try self.writeVectorRows(collection_name, collection, vectors);
+        var vectors = vector_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return vectors.putVectors(collection_name, inputs);
     }
 
     /// Load one vector row into owned memory.
-    ///
-    /// Missing collections return `error.VectorCollectionNotFound`; missing
-    /// vector ids return `error.VectorNotFound`. Invalid private vector bytes
-    /// return `error.VectorCorrupt`.
     pub fn getVector(
         self: *Database,
         allocator: std.mem.Allocator,
         collection_name: []const u8,
         vector_id: []const u8,
     ) Error!Vector {
-        try validateVectorCollectionName(collection_name);
-        try validateVectorId(vector_id);
-
-        const collection = try loadVectorCollection(self, collection_name);
-
-        var stmt = try self.prepare(
-            \\select vector_id, dimensions, "values"
-            \\from _zova_vectors
-            \\where collection_name = ? and vector_id = ?
-        );
-        defer stmt.deinit();
-
-        try stmt.bindText(1, collection_name);
-        try stmt.bindText(2, vector_id);
-
-        switch (try stmt.step()) {
-            .done => return error.VectorNotFound,
-            .row => {
-                const stored_id = stmt.columnText(0);
-                const stored_dimensions = stmt.columnInt64(1);
-                if (stored_dimensions < 0) return error.VectorCorrupt;
-                if (@as(u64, @intCast(stored_dimensions)) != collection.dimensions) return error.VectorCorrupt;
-
-                const id = try allocator.dupe(u8, stored_id);
-                errdefer allocator.free(id);
-
-                const values = try decodeF32Le(allocator, stmt.columnBlob(2), collection.dimensions);
-                errdefer allocator.free(values);
-
-                return .{ .id = id, .values = values };
-            },
-        }
+        var vectors = vector_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return vectors.getVector(allocator, collection_name, vector_id);
     }
 
     /// Return whether a vector id exists in an existing collection.
-    ///
-    /// Missing collections return `error.VectorCollectionNotFound`; valid but
-    /// missing vector ids return `false`.
     pub fn hasVector(
         self: *Database,
         collection_name: []const u8,
         vector_id: []const u8,
     ) Error!bool {
-        try validateVectorCollectionName(collection_name);
-        try validateVectorId(vector_id);
-        _ = try loadVectorCollection(self, collection_name);
-
-        var stmt = try self.prepare(
-            \\select 1
-            \\from _zova_vectors
-            \\where collection_name = ? and vector_id = ?
-            \\limit 1
-        );
-        defer stmt.deinit();
-
-        try stmt.bindText(1, collection_name);
-        try stmt.bindText(2, vector_id);
-        return switch (try stmt.step()) {
-            .row => true,
-            .done => false,
-        };
+        var vectors = vector_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return vectors.hasVector(collection_name, vector_id);
     }
 
     /// Delete one vector row from an existing collection.
-    ///
-    /// This removes only Zova's private vector row. User SQL rows that store
-    /// the same vector id are application-owned and are not scanned or mutated.
     pub fn deleteVector(
         self: *Database,
         collection_name: []const u8,
         vector_id: []const u8,
     ) Error!void {
-        try validateVectorCollectionName(collection_name);
-        try validateVectorId(vector_id);
-        _ = try loadVectorCollection(self, collection_name);
-
-        var stmt = try self.prepare("delete from _zova_vectors where collection_name = ? and vector_id = ?");
-        defer stmt.deinit();
-
-        try stmt.bindText(1, collection_name);
-        try stmt.bindText(2, vector_id);
-        std.debug.assert((try stmt.step()) == .done);
-
-        if (self.sqlite_db.changes() == 0) return error.VectorNotFound;
+        var vectors = vector_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return vectors.deleteVector(collection_name, vector_id);
     }
 
     /// Delete a vector collection and all private vector rows in it.
-    ///
-    /// User SQL rows that store collection names or vector ids are
-    /// application-owned and are not scanned or mutated. This method uses
-    /// ordinary SQLite deletes and can participate in a caller-owned
-    /// transaction.
     pub fn deleteVectorCollection(self: *Database, name: []const u8) Error!void {
-        try validateVectorCollectionName(name);
-        _ = try loadVectorCollection(self, name);
-
-        var delete_vectors = try self.prepare("delete from _zova_vectors where collection_name = ?");
-        defer delete_vectors.deinit();
-        try delete_vectors.bindText(1, name);
-        std.debug.assert((try delete_vectors.step()) == .done);
-
-        var delete_collection = try self.prepare("delete from _zova_vector_collections where name = ?");
-        defer delete_collection.deinit();
-        try delete_collection.bindText(1, name);
-        std.debug.assert((try delete_collection.step()) == .done);
-        if (self.sqlite_db.changes() == 0) return error.VectorCollectionNotFound;
+        var vectors = vector_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return vectors.deleteVectorCollection(name);
     }
 
     /// Search one vector collection with an exact flat scan.
-    ///
-    /// Search is collection-wide. It does not inspect labels, join user
-    /// tables, or use approximate indexes. Returned results are sorted by
-    /// ascending distance and then by ascending vector id for deterministic
-    /// ties. `limit = 0` returns an empty owned result set after validating the
-    /// collection and query.
     pub fn searchVectors(
         self: *Database,
         allocator: std.mem.Allocator,
@@ -916,19 +305,11 @@ pub const Database = struct {
         query: []const f32,
         limit: usize,
     ) Error!VectorSearchResults {
-        try validateVectorCollectionName(collection_name);
-        const collection = try loadVectorCollection(self, collection_name);
-        try validateVectorValues(collection.dimensions, collection.metric, query);
-
-        return self.searchAllVectors(allocator, collection_name, collection, query, limit, null, null);
+        var vectors = vector_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return vectors.searchVectors(allocator, collection_name, query, limit);
     }
 
     /// Search one vector collection with an exact flat scan and distance cap.
-    ///
-    /// `max_distance` uses Zova's unified lower-is-better distance model and is
-    /// inclusive: results whose distance equals the threshold are returned.
-    /// Negative thresholds are valid for dot-product collections because dot
-    /// search stores distance as negative dot product.
     pub fn searchVectorsWithin(
         self: *Database,
         allocator: std.mem.Allocator,
@@ -937,21 +318,11 @@ pub const Database = struct {
         max_distance: f64,
         limit: usize,
     ) Error!VectorSearchResults {
-        try validateVectorCollectionName(collection_name);
-        const collection = try loadVectorCollection(self, collection_name);
-        try validateVectorValues(collection.dimensions, collection.metric, query);
-        try validateVectorSearchThreshold(max_distance);
-
-        return self.searchAllVectors(allocator, collection_name, collection, query, limit, max_distance, null);
+        var vectors = vector_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return vectors.searchVectorsWithin(allocator, collection_name, query, max_distance, limit);
     }
 
     /// Search one vector collection over a caller-supplied candidate id set.
-    ///
-    /// This is the SQL-filter-first vector search path: callers select eligible
-    /// vector ids from their own SQL metadata tables, then Zova ranks only
-    /// those candidates by the collection metric. Missing candidate ids are
-    /// skipped. Duplicate candidate ids are considered once. Results are sorted
-    /// by ascending distance and then by ascending vector id.
     pub fn searchVectorsIn(
         self: *Database,
         allocator: std.mem.Allocator,
@@ -960,11 +331,8 @@ pub const Database = struct {
         candidate_ids: []const []const u8,
         limit: usize,
     ) Error!VectorSearchResults {
-        try validateVectorCollectionName(collection_name);
-        const collection = try loadVectorCollection(self, collection_name);
-        try validateVectorValues(collection.dimensions, collection.metric, query);
-
-        return self.searchCandidateVectors(allocator, collection_name, collection, query, candidate_ids, limit, null, null);
+        var vectors = vector_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return vectors.searchVectorsIn(allocator, collection_name, query, candidate_ids, limit);
     }
 
     /// Search one vector collection over candidates with an inclusive distance cap.
@@ -977,19 +345,11 @@ pub const Database = struct {
         max_distance: f64,
         limit: usize,
     ) Error!VectorSearchResults {
-        try validateVectorCollectionName(collection_name);
-        const collection = try loadVectorCollection(self, collection_name);
-        try validateVectorValues(collection.dimensions, collection.metric, query);
-        try validateVectorSearchThreshold(max_distance);
-
-        return self.searchCandidateVectors(allocator, collection_name, collection, query, candidate_ids, limit, max_distance, null);
+        var vectors = vector_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return vectors.searchVectorsInWithin(allocator, collection_name, query, candidate_ids, max_distance, limit);
     }
 
     /// Search one vector collection using an existing vector as the query.
-    ///
-    /// The source vector is loaded from the same collection, validated as
-    /// stored Zova data, and excluded from the result set. Missing source ids
-    /// return `error.VectorNotFound`.
     pub fn searchVectorsById(
         self: *Database,
         allocator: std.mem.Allocator,
@@ -997,19 +357,11 @@ pub const Database = struct {
         source_vector_id: []const u8,
         limit: usize,
     ) Error!VectorSearchResults {
-        try validateVectorCollectionName(collection_name);
-        try validateVectorId(source_vector_id);
-        const collection = try loadVectorCollection(self, collection_name);
-        const query = try self.loadVectorValuesForSearch(allocator, collection_name, collection, source_vector_id);
-        defer allocator.free(query);
-
-        return self.searchAllVectors(allocator, collection_name, collection, query, limit, null, source_vector_id);
+        var vectors = vector_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return vectors.searchVectorsById(allocator, collection_name, source_vector_id, limit);
     }
 
     /// Search candidates using an existing vector as the query.
-    ///
-    /// Candidate ids are validated, deduplicated, and missing candidates are
-    /// skipped. The source id is excluded even if supplied as a candidate.
     pub fn searchVectorsByIdIn(
         self: *Database,
         allocator: std.mem.Allocator,
@@ -1018,13 +370,8 @@ pub const Database = struct {
         candidate_ids: []const []const u8,
         limit: usize,
     ) Error!VectorSearchResults {
-        try validateVectorCollectionName(collection_name);
-        try validateVectorId(source_vector_id);
-        const collection = try loadVectorCollection(self, collection_name);
-        const query = try self.loadVectorValuesForSearch(allocator, collection_name, collection, source_vector_id);
-        defer allocator.free(query);
-
-        return self.searchCandidateVectors(allocator, collection_name, collection, query, candidate_ids, limit, null, source_vector_id);
+        var vectors = vector_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return vectors.searchVectorsByIdIn(allocator, collection_name, source_vector_id, candidate_ids, limit);
     }
 
     /// Search by existing vector id with an inclusive distance cap.
@@ -1036,14 +383,8 @@ pub const Database = struct {
         max_distance: f64,
         limit: usize,
     ) Error!VectorSearchResults {
-        try validateVectorCollectionName(collection_name);
-        try validateVectorId(source_vector_id);
-        const collection = try loadVectorCollection(self, collection_name);
-        try validateVectorSearchThreshold(max_distance);
-        const query = try self.loadVectorValuesForSearch(allocator, collection_name, collection, source_vector_id);
-        defer allocator.free(query);
-
-        return self.searchAllVectors(allocator, collection_name, collection, query, limit, max_distance, source_vector_id);
+        var vectors = vector_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return vectors.searchVectorsByIdWithin(allocator, collection_name, source_vector_id, max_distance, limit);
     }
 
     /// Search candidates by existing vector id with an inclusive distance cap.
@@ -1056,989 +397,97 @@ pub const Database = struct {
         max_distance: f64,
         limit: usize,
     ) Error!VectorSearchResults {
-        try validateVectorCollectionName(collection_name);
-        try validateVectorId(source_vector_id);
-        const collection = try loadVectorCollection(self, collection_name);
-        try validateVectorSearchThreshold(max_distance);
-        const query = try self.loadVectorValuesForSearch(allocator, collection_name, collection, source_vector_id);
-        defer allocator.free(query);
-
-        return self.searchCandidateVectors(allocator, collection_name, collection, query, candidate_ids, limit, max_distance, source_vector_id);
-    }
-
-    fn searchAllVectors(
-        self: *Database,
-        allocator: std.mem.Allocator,
-        collection_name: []const u8,
-        collection: VectorCollectionMetadata,
-        query: []const f32,
-        limit: usize,
-        max_distance: ?f64,
-        exclude_id: ?[]const u8,
-    ) Error!VectorSearchResults {
-        var results: std.ArrayList(VectorSearchResult) = .empty;
-        errdefer {
-            freeSearchItems(allocator, results.items);
-            results.deinit(allocator);
-        }
-
-        if (limit == 0) {
-            return .{ .items = try results.toOwnedSlice(allocator) };
-        }
-
-        var stmt = try self.prepare(
-            \\select vector_id, dimensions, "values"
-            \\from _zova_vectors
-            \\where collection_name = ?
-        );
-        defer stmt.deinit();
-
-        try stmt.bindText(1, collection_name);
-        while ((try stmt.step()) == .row) {
-            const vector_id = stmt.columnText(0);
-            if (exclude_id) |excluded| {
-                if (std.mem.eql(u8, vector_id, excluded)) continue;
-            }
-
-            try validateStoredVectorDimensions(collection.dimensions, stmt.columnInt64(1));
-
-            const distance = try vectorDistanceFromEncoded(
-                collection.metric,
-                query,
-                stmt.columnBlob(2),
-                collection.dimensions,
-            );
-            if (!distanceWithinThreshold(distance, max_distance)) continue;
-            try maybeInsertSearchResult(allocator, &results, limit, vector_id, distance);
-        }
-
-        const items = try results.toOwnedSlice(allocator);
-        std.mem.sort(VectorSearchResult, items, {}, searchResultLessThan);
-        return .{ .items = items };
-    }
-
-    fn searchCandidateVectors(
-        self: *Database,
-        allocator: std.mem.Allocator,
-        collection_name: []const u8,
-        collection: VectorCollectionMetadata,
-        query: []const f32,
-        candidate_ids: []const []const u8,
-        limit: usize,
-        max_distance: ?f64,
-        exclude_id: ?[]const u8,
-    ) Error!VectorSearchResults {
-        var seen = std.StringHashMap(void).init(allocator);
-        defer seen.deinit();
-
-        for (candidate_ids) |candidate_id| {
-            try validateVectorId(candidate_id);
-            if (exclude_id) |excluded| {
-                if (std.mem.eql(u8, candidate_id, excluded)) continue;
-            }
-            if (!seen.contains(candidate_id)) {
-                try seen.put(candidate_id, {});
-            }
-        }
-
-        var results: std.ArrayList(VectorSearchResult) = .empty;
-        errdefer {
-            freeSearchItems(allocator, results.items);
-            results.deinit(allocator);
-        }
-
-        if (limit == 0 or seen.count() == 0) {
-            return .{ .items = try results.toOwnedSlice(allocator) };
-        }
-
-        var stmt = try self.prepare(
-            \\select dimensions, "values"
-            \\from _zova_vectors
-            \\where collection_name = ? and vector_id = ?
-        );
-        defer stmt.deinit();
-
-        try stmt.bindText(1, collection_name);
-
-        var iterator = seen.keyIterator();
-        while (iterator.next()) |candidate_id| {
-            try stmt.bindText(2, candidate_id.*);
-
-            switch (try stmt.step()) {
-                .done => {},
-                .row => {
-                    try validateStoredVectorDimensions(collection.dimensions, stmt.columnInt64(0));
-
-                    const distance = try vectorDistanceFromEncoded(
-                        collection.metric,
-                        query,
-                        stmt.columnBlob(1),
-                        collection.dimensions,
-                    );
-                    if (distanceWithinThreshold(distance, max_distance)) {
-                        try maybeInsertSearchResult(allocator, &results, limit, candidate_id.*, distance);
-                    }
-                },
-            }
-
-            try stmt.reset();
-        }
-
-        const items = try results.toOwnedSlice(allocator);
-        std.mem.sort(VectorSearchResult, items, {}, searchResultLessThan);
-        return .{ .items = items };
-    }
-
-    fn loadVectorValuesForSearch(
-        self: *Database,
-        allocator: std.mem.Allocator,
-        collection_name: []const u8,
-        collection: VectorCollectionMetadata,
-        vector_id: []const u8,
-    ) Error![]f32 {
-        var stmt = try self.prepare(
-            \\select dimensions, "values"
-            \\from _zova_vectors
-            \\where collection_name = ? and vector_id = ?
-        );
-        defer stmt.deinit();
-
-        try stmt.bindText(1, collection_name);
-        try stmt.bindText(2, vector_id);
-
-        return switch (try stmt.step()) {
-            .done => error.VectorNotFound,
-            .row => {
-                try validateStoredVectorDimensions(collection.dimensions, stmt.columnInt64(0));
-                const values = try decodeF32Le(allocator, stmt.columnBlob(1), collection.dimensions);
-                errdefer allocator.free(values);
-                try validateStoredVectorValues(collection.metric, values);
-                return values;
-            },
-        };
-    }
-
-    fn writeVectorRows(
-        self: *Database,
-        collection_name: []const u8,
-        collection: VectorCollectionMetadata,
-        vectors: []const VectorInput,
-    ) Error!void {
-        if (vectors.len == 0) return;
-
-        var stmt = try self.prepare(
-            \\insert into _zova_vectors (collection_name, vector_id, dimensions, "values")
-            \\values (?, ?, ?, ?)
-            \\on conflict(collection_name, vector_id) do update set
-            \\  dimensions = excluded.dimensions,
-            \\  "values" = excluded."values"
-        );
-        defer stmt.deinit();
-
-        for (vectors) |vector| {
-            const encoded = try encodeF32Le(std.heap.page_allocator, vector.values);
-            defer std.heap.page_allocator.free(encoded);
-
-            try stmt.bindText(1, collection_name);
-            try stmt.bindText(2, vector.id);
-            try stmt.bindInt64(3, @intCast(collection.dimensions));
-            try stmt.bindBlob(4, encoded);
-            std.debug.assert((try stmt.step()) == .done);
-            try stmt.reset();
-            try stmt.clearBindings();
-        }
+        var vectors = vector_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return vectors.searchVectorsByIdInWithin(allocator, collection_name, source_vector_id, candidate_ids, max_distance, limit);
     }
 
     /// Store raw bytes as a content-addressed Zova object.
-    ///
-    /// The returned id is the SHA-256 digest of the full byte slice. v0.4 owns
-    /// its own transaction for object writes and returns
-    /// `error.ObjectTransactionActive` if the connection is already inside a
-    /// user transaction.
     pub fn putObject(self: *Database, bytes: []const u8) Error!ObjectId {
-        if (hasActiveTransaction(&self.sqlite_db)) return error.ObjectTransactionActive;
-
-        const id = objectId(bytes);
-        const size_bytes = try usizeToSqliteI64(bytes.len);
-        const chunk_count = try usizeToSqliteI64(countObjectChunks(bytes));
-
-        try self.sqlite_db.beginImmediate();
-        var committed = false;
-        errdefer if (!committed) self.sqlite_db.rollback() catch {};
-
-        if (try objectRowExists(&self.sqlite_db, id)) {
-            try self.sqlite_db.commit();
-            committed = true;
-            return id;
-        }
-
-        try insertObjectRow(&self.sqlite_db, id, size_bytes, chunk_count);
-
-        var offset: usize = 0;
-        while (offset < bytes.len) {
-            const chunk_len = fastcdc.cut(bytes[offset..]);
-            const chunk = bytes[offset .. offset + chunk_len];
-            const chunk_hash = objectId(chunk);
-            try insertChunkRow(&self.sqlite_db, chunk_hash, chunk);
-            offset += chunk_len;
-        }
-
-        offset = 0;
-        var chunk_index: i64 = 0;
-        while (offset < bytes.len) {
-            const chunk_len = fastcdc.cut(bytes[offset..]);
-            const chunk = bytes[offset .. offset + chunk_len];
-            const chunk_hash = objectId(chunk);
-            try insertManifestRow(
-                &self.sqlite_db,
-                id,
-                chunk_index,
-                chunk_hash,
-                try usizeToSqliteI64(offset),
-                try usizeToSqliteI64(chunk_len),
-            );
-            offset += chunk_len;
-            chunk_index += 1;
-        }
-
-        try self.sqlite_db.commit();
-        committed = true;
-        return id;
+        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return objects.putObject(bytes);
     }
 
     /// Load and verify an object by id.
-    ///
-    /// The returned object owns an allocated byte buffer. Missing ids return
-    /// `error.ObjectNotFound`. Broken private object rows return
-    /// `error.ObjectCorrupt` rather than being repaired.
     pub fn getObject(self: *Database, allocator: std.mem.Allocator, id: ObjectId) Error!Object {
-        const metadata = try loadObjectMetadata(&self.sqlite_db, id);
-        const size = try sqliteI64ToUsize(metadata.size_bytes);
-        const chunk_count = try sqliteI64ToUsize(metadata.chunk_count);
-        var bytes = try allocator.alloc(u8, size);
-        errdefer allocator.free(bytes);
-
-        if (chunk_count == 0) {
-            if (size != 0) return error.ObjectCorrupt;
-            if (!std.mem.eql(u8, &objectId(bytes), &id)) return error.ObjectCorrupt;
-            return .{ .id = id, .bytes = bytes };
-        }
-
-        var manifest = try self.sqlite_db.prepare(
-            \\select oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.data
-            \\from _zova_object_chunks oc
-            \\left join _zova_chunks c on c.chunk_hash = oc.chunk_hash
-            \\where oc.object_id = ?
-            \\order by oc.chunk_index asc
-        );
-        defer manifest.deinit();
-
-        try manifest.bindBlob(1, &id);
-
-        var expected_index: i64 = 0;
-        var expected_offset: usize = 0;
-        while ((try manifest.step()) == .row) {
-            if (manifest.columnInt64(0) != expected_index) return error.ObjectCorrupt;
-
-            const chunk_hash = manifest.columnBlob(1);
-            if (chunk_hash.len != @sizeOf(ObjectId)) return error.ObjectCorrupt;
-
-            const offset = try sqliteI64ToUsize(manifest.columnInt64(2));
-            const chunk_size = try sqliteI64ToUsize(manifest.columnInt64(3));
-            if (offset != expected_offset) return error.ObjectCorrupt;
-            if (chunk_size == 0 or chunk_size > fastcdc.max_size) return error.ObjectCorrupt;
-            if (offset > bytes.len or chunk_size > bytes.len - offset) return error.ObjectCorrupt;
-            if (manifest.columnType(4) == .null) return error.ObjectCorrupt;
-
-            const chunk_data = manifest.columnBlob(4);
-            if (chunk_data.len != chunk_size) return error.ObjectCorrupt;
-            const actual_chunk_hash = objectId(chunk_data);
-            if (!std.mem.eql(u8, &actual_chunk_hash, chunk_hash)) return error.ObjectCorrupt;
-
-            @memcpy(bytes[offset .. offset + chunk_size], chunk_data);
-            expected_offset += chunk_size;
-            expected_index += 1;
-        }
-
-        if (expected_index != @as(i64, @intCast(chunk_count))) return error.ObjectCorrupt;
-        if (expected_offset != bytes.len) return error.ObjectCorrupt;
-        if (!std.mem.eql(u8, &objectId(bytes), &id)) return error.ObjectCorrupt;
-
-        return .{ .id = id, .bytes = bytes };
+        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return objects.getObject(allocator, id);
     }
 
     /// Read a byte range from a logical object into a caller-provided buffer.
-    ///
-    /// This is the v0.6 object serving path: it avoids object-sized
-    /// allocation, reads only the chunks that overlap the requested range, and
-    /// verifies every touched chunk by SHA-256 before copying bytes. `offset`
-    /// is a 0-based byte offset in the full object. Offsets past the end
-    /// return `error.ObjectRangeInvalid`; offsets at the end return `0`.
-    /// Full-object reads additionally verify the final full-object SHA-256.
     pub fn readObjectRange(self: *Database, id: ObjectId, offset: u64, buffer: []u8) Error!usize {
-        const metadata = try loadObjectMetadata(&self.sqlite_db, id);
-        const size = try sqliteI64ToU64(metadata.size_bytes);
-        const chunk_count = try sqliteI64ToU64(metadata.chunk_count);
-
-        if (offset > size) return error.ObjectRangeInvalid;
-
-        const available = size - offset;
-        const read_len_u64 = @min(available, @as(u64, @intCast(buffer.len)));
-        if (read_len_u64 == 0) return 0;
-
-        if (chunk_count == 0) {
-            if (size != 0) return error.ObjectCorrupt;
-            if (!std.mem.eql(u8, &objectId(""), &id)) return error.ObjectCorrupt;
-            return 0;
-        }
-
-        try validateObjectManifestShape(&self.sqlite_db, id, size, chunk_count);
-
-        const read_end = offset + read_len_u64;
-        var chunks = try self.sqlite_db.prepare(
-            \\select oc.chunk_hash, oc.offset, oc.size_bytes, c.data
-            \\from _zova_object_chunks oc
-            \\join _zova_chunks c on c.chunk_hash = oc.chunk_hash
-            \\where oc.object_id = ?
-            \\  and oc.offset + oc.size_bytes > ?
-            \\  and oc.offset < ?
-            \\order by oc.chunk_index asc
-        );
-        defer chunks.deinit();
-
-        try chunks.bindBlob(1, &id);
-        try chunks.bindInt64(2, @intCast(offset));
-        try chunks.bindInt64(3, @intCast(read_end));
-
-        var copied: usize = 0;
-        while ((try chunks.step()) == .row) {
-            const raw_hash = chunks.columnBlob(0);
-            if (raw_hash.len != @sizeOf(ObjectChunkId)) return error.ObjectCorrupt;
-
-            const chunk_offset = try sqliteI64ToU64(chunks.columnInt64(1));
-            const chunk_size = try sqliteI64ToU64(chunks.columnInt64(2));
-            if (chunk_size == 0 or chunk_size > fastcdc.max_size) return error.ObjectCorrupt;
-            if (chunk_offset > size or chunk_size > size - chunk_offset) return error.ObjectCorrupt;
-
-            const chunk_data = chunks.columnBlob(3);
-            if (chunk_data.len != chunk_size) return error.ObjectCorrupt;
-            const actual_chunk_hash = objectId(chunk_data);
-            if (!std.mem.eql(u8, &actual_chunk_hash, raw_hash)) return error.ObjectCorrupt;
-
-            const chunk_end = chunk_offset + chunk_size;
-            const copy_start = @max(offset, chunk_offset);
-            const copy_end = @min(read_end, chunk_end);
-            if (copy_start >= copy_end) continue;
-
-            const src_start: usize = @intCast(copy_start - chunk_offset);
-            const dest_start: usize = @intCast(copy_start - offset);
-            const copy_len: usize = @intCast(copy_end - copy_start);
-            @memcpy(
-                buffer[dest_start .. dest_start + copy_len],
-                chunk_data[src_start .. src_start + copy_len],
-            );
-            copied += copy_len;
-        }
-
-        if (copied != @as(usize, @intCast(read_len_u64))) return error.ObjectCorrupt;
-        if (offset == 0 and read_len_u64 == size and !std.mem.eql(u8, &objectId(buffer[0..copied]), &id)) {
-            return error.ObjectCorrupt;
-        }
-
-        return copied;
+        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return objects.readObjectRange(id, offset, buffer);
     }
 
     /// Return the public manifest for one object.
-    ///
-    /// The manifest validates object/chunk ordering, offsets, sizes, and chunk
-    /// row presence. It does not hash every chunk byte; use `getObjectChunk`
-    /// or `getObject` when byte-level verification is required.
-    pub fn objectManifest(
-        self: *Database,
-        allocator: std.mem.Allocator,
-        id: ObjectId,
-    ) Error!ObjectManifest {
-        const metadata = try loadObjectMetadata(&self.sqlite_db, id);
-        const size = try sqliteI64ToU64(metadata.size_bytes);
-        const chunk_count = try sqliteI64ToU64(metadata.chunk_count);
-
-        if (chunk_count == 0) {
-            if (size != 0) return error.ObjectCorrupt;
-            if (!std.mem.eql(u8, &objectId(""), &id)) return error.ObjectCorrupt;
-            return .{
-                .object_id = id,
-                .size_bytes = 0,
-                .chunk_count = 0,
-                .chunker = fastcdc.version,
-                .chunks = try allocator.alloc(ObjectChunk, 0),
-            };
-        }
-
-        if (chunk_count > size) return error.ObjectCorrupt;
-        if (try countObjectManifestRows(&self.sqlite_db, id) != chunk_count) return error.ObjectCorrupt;
-
-        const chunk_len = try sqliteI64ToUsize(metadata.chunk_count);
-        var chunks = try allocator.alloc(ObjectChunk, chunk_len);
-        errdefer allocator.free(chunks);
-
-        var manifest = try self.sqlite_db.prepare(
-            \\select oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.size_bytes
-            \\from _zova_object_chunks oc
-            \\left join _zova_chunks c on c.chunk_hash = oc.chunk_hash
-            \\where oc.object_id = ?
-            \\order by oc.chunk_index asc
-        );
-        defer manifest.deinit();
-
-        try manifest.bindBlob(1, &id);
-
-        var expected_index: u64 = 0;
-        var expected_offset: u64 = 0;
-        while ((try manifest.step()) == .row) {
-            if (expected_index >= chunks.len) return error.ObjectCorrupt;
-
-            const chunk_index = try sqliteI64ToU64(manifest.columnInt64(0));
-            if (chunk_index != expected_index) return error.ObjectCorrupt;
-
-            const raw_hash = manifest.columnBlob(1);
-            if (raw_hash.len != @sizeOf(ObjectChunkId)) return error.ObjectCorrupt;
-            var chunk_hash: ObjectChunkId = undefined;
-            @memcpy(&chunk_hash, raw_hash);
-
-            const offset = try sqliteI64ToU64(manifest.columnInt64(2));
-            const chunk_size = try sqliteI64ToU64(manifest.columnInt64(3));
-            if (offset != expected_offset) return error.ObjectCorrupt;
-            if (chunk_size == 0 or chunk_size > fastcdc.max_size) return error.ObjectCorrupt;
-            if (offset > size or chunk_size > size - offset) return error.ObjectCorrupt;
-            if (manifest.columnType(4) == .null) return error.ObjectCorrupt;
-
-            const stored_chunk_size = try sqliteI64ToU64(manifest.columnInt64(4));
-            if (stored_chunk_size != chunk_size) return error.ObjectCorrupt;
-
-            chunks[@intCast(expected_index)] = .{
-                .index = chunk_index,
-                .hash = chunk_hash,
-                .offset = offset,
-                .size_bytes = chunk_size,
-            };
-
-            expected_offset += chunk_size;
-            expected_index += 1;
-        }
-
-        if (expected_index != chunk_count) return error.ObjectCorrupt;
-        if (expected_offset != size) return error.ObjectCorrupt;
-
-        return .{
-            .object_id = id,
-            .size_bytes = size,
-            .chunk_count = chunk_count,
-            .chunker = fastcdc.version,
-            .chunks = chunks,
-        };
+    pub fn objectManifest(self: *Database, allocator: std.mem.Allocator, id: ObjectId) Error!ObjectManifest {
+        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return objects.objectManifest(allocator, id);
     }
 
-    /// Return whether a stored object chunk exists by chunk hash.
+    /// Return whether a stored chunk hash exists.
     pub fn hasObjectChunk(self: *Database, hash: ObjectChunkId) Error!bool {
-        var stmt = try self.prepare("select 1 from _zova_chunks where chunk_hash = ? limit 1");
-        defer stmt.deinit();
-
-        try stmt.bindBlob(1, &hash);
-        return switch (try stmt.step()) {
-            .row => true,
-            .done => false,
-        };
+        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return objects.hasObjectChunk(hash);
     }
 
     /// Store one verified loose object chunk.
-    ///
-    /// `expected_hash` must be `objectChunkId(bytes)`. Empty chunks and chunks
-    /// larger than FastCDC's maximum chunk size are rejected as
-    /// `error.ObjectCorrupt`; hash mismatches return
-    /// `error.ObjectChunkHashMismatch`. Existing valid chunks are accepted
-    /// idempotently, and existing malformed chunk rows return
-    /// `error.ObjectCorrupt` instead of being overwritten.
-    ///
-    /// This method stores only `_zova_chunks` rows. It does not create objects,
-    /// manifests, transfer sessions, or user metadata, and it may run inside a
-    /// caller-owned SQLite transaction.
     pub fn putObjectChunk(self: *Database, expected_hash: ObjectChunkId, bytes: []const u8) Error!void {
-        if (bytes.len == 0 or bytes.len > fastcdc.max_size) return error.ObjectCorrupt;
-        const actual_hash = objectChunkId(bytes);
-        if (!std.mem.eql(u8, &actual_hash, &expected_hash)) return error.ObjectChunkHashMismatch;
-
-        var existing = self.getObjectChunk(std.heap.page_allocator, expected_hash) catch |err| switch (err) {
-            error.ObjectChunkNotFound => {
-                try insertChunkRow(&self.sqlite_db, expected_hash, bytes);
-                return;
-            },
-            else => return err,
-        };
-        existing.deinit(std.heap.page_allocator);
+        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return objects.putObjectChunk(expected_hash, bytes);
     }
 
-    /// Assemble a complete object from existing verified chunks.
-    ///
-    /// The supplied `chunks` are a public manifest, not bytes. Every referenced
-    /// chunk must already exist in `_zova_chunks`, usually through
-    /// `putObjectChunk` or another object. Zova validates manifest shape,
-    /// verifies every stored chunk hash, streams the chunk bytes through
-    /// SHA-256, and requires the final digest to equal `id` before writing the
-    /// object row and manifest rows.
-    ///
-    /// Assembly owns a `begin immediate` transaction and returns
-    /// `error.ObjectTransactionActive` inside caller-owned transactions.
-    /// Existing valid objects return `error.ObjectAlreadyExists`; invalid
-    /// caller manifests return `error.ObjectManifestInvalid`.
+    /// Assemble a complete object from already-verified chunks.
     pub fn assembleObjectFromChunks(
         self: *Database,
         id: ObjectId,
         size_bytes: u64,
         chunks: []const ObjectChunk,
     ) Error!void {
-        if (hasActiveTransaction(&self.sqlite_db)) return error.ObjectTransactionActive;
-
-        try self.sqlite_db.beginImmediate();
-        var committed = false;
-        errdefer if (!committed) self.sqlite_db.rollback() catch {};
-
-        if (try objectRowExists(&self.sqlite_db, id)) {
-            var existing = self.getObject(std.heap.page_allocator, id) catch |err| switch (err) {
-                error.ObjectNotFound, error.ObjectCorrupt => return error.ObjectCorrupt,
-                else => return err,
-            };
-            existing.deinit(std.heap.page_allocator);
-            return error.ObjectAlreadyExists;
-        }
-
-        const sorted_chunks = try self.validateAssemblyChunks(std.heap.page_allocator, id, size_bytes, chunks);
-        defer std.heap.page_allocator.free(sorted_chunks);
-
-        try insertObjectRow(
-            &self.sqlite_db,
-            id,
-            try u64ToSqliteI64(size_bytes),
-            try usizeToSqliteI64(sorted_chunks.len),
-        );
-
-        for (sorted_chunks) |chunk| {
-            try insertManifestRow(
-                &self.sqlite_db,
-                id,
-                try u64ToSqliteI64(chunk.index),
-                chunk.hash,
-                try u64ToSqliteI64(chunk.offset),
-                try u64ToSqliteI64(chunk.size_bytes),
-            );
-        }
-
-        try self.sqlite_db.commit();
-        committed = true;
+        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return objects.assembleObjectFromChunks(id, size_bytes, chunks);
     }
 
-    /// Delete one unreferenced stored chunk by hash.
-    ///
-    /// This is cleanup for loose chunks, not object deletion. It removes a
-    /// chunk only when no `_zova_object_chunks` row references it. Missing
-    /// chunks and referenced chunks both return `false`.
+    /// Delete one unreferenced loose chunk if possible.
     pub fn deleteObjectChunk(self: *Database, hash: ObjectChunkId) Error!bool {
-        var stmt = try self.prepare(
-            \\delete from _zova_chunks
-            \\where chunk_hash = ?
-            \\  and not exists (
-            \\    select 1
-            \\    from _zova_object_chunks
-            \\    where _zova_object_chunks.chunk_hash = _zova_chunks.chunk_hash
-            \\  )
-        );
-        defer stmt.deinit();
-
-        try stmt.bindBlob(1, &hash);
-        std.debug.assert((try stmt.step()) == .done);
-        return self.sqlite_db.changes() > 0;
+        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return objects.deleteObjectChunk(hash);
     }
 
-    fn validateAssemblyChunks(
-        self: *Database,
-        allocator: std.mem.Allocator,
-        id: ObjectId,
-        size_bytes: u64,
-        chunks: []const ObjectChunk,
-    ) Error![]ObjectChunk {
-        if (size_bytes > std.math.maxInt(i64)) return error.ObjectTooLarge;
-
-        if (size_bytes == 0) {
-            if (chunks.len != 0) return error.ObjectManifestInvalid;
-            if (!std.mem.eql(u8, &objectId(""), &id)) return error.ObjectManifestInvalid;
-            return try allocator.alloc(ObjectChunk, 0);
-        }
-
-        if (chunks.len == 0) return error.ObjectManifestInvalid;
-
-        const sorted_chunks = try allocator.dupe(ObjectChunk, chunks);
-        errdefer allocator.free(sorted_chunks);
-        std.mem.sort(ObjectChunk, sorted_chunks, {}, objectChunkIndexLessThan);
-
-        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-        var expected_index: u64 = 0;
-        var expected_offset: u64 = 0;
-
-        for (sorted_chunks) |chunk| {
-            if (chunk.index != expected_index) return error.ObjectManifestInvalid;
-            if (chunk.offset != expected_offset) return error.ObjectManifestInvalid;
-            if (chunk.size_bytes == 0 or chunk.size_bytes > fastcdc.max_size) return error.ObjectManifestInvalid;
-            if (chunk.offset > size_bytes or chunk.size_bytes > size_bytes - chunk.offset) {
-                return error.ObjectManifestInvalid;
-            }
-
-            var stored_chunk = try self.getObjectChunk(allocator, chunk.hash);
-            defer stored_chunk.deinit(allocator);
-            if (stored_chunk.bytes.len != chunk.size_bytes) return error.ObjectManifestInvalid;
-
-            hasher.update(stored_chunk.bytes);
-            expected_offset += chunk.size_bytes;
-            expected_index += 1;
-        }
-
-        if (expected_offset != size_bytes) return error.ObjectManifestInvalid;
-
-        var digest: ObjectId = undefined;
-        hasher.final(&digest);
-        if (!std.mem.eql(u8, &digest, &id)) return error.ObjectManifestInvalid;
-
-        return sorted_chunks;
-    }
-
-    /// Load and verify a stored object chunk by chunk hash.
-    ///
-    /// Missing chunks return `error.ObjectChunkNotFound`. Malformed or
-    /// hash-mismatched private chunk rows return `error.ObjectCorrupt`.
+    /// Load and verify one chunk by hash.
     pub fn getObjectChunk(
         self: *Database,
         allocator: std.mem.Allocator,
         hash: ObjectChunkId,
     ) Error!ObjectChunkData {
-        var stmt = try self.prepare(
-            \\select size_bytes, data
-            \\from _zova_chunks
-            \\where chunk_hash = ?
-        );
-        defer stmt.deinit();
-
-        try stmt.bindBlob(1, &hash);
-        switch (try stmt.step()) {
-            .done => return error.ObjectChunkNotFound,
-            .row => {
-                const size = try sqliteI64ToUsize(stmt.columnInt64(0));
-                if (size == 0 or size > fastcdc.max_size) return error.ObjectCorrupt;
-
-                const data = stmt.columnBlob(1);
-                if (data.len != size) return error.ObjectCorrupt;
-                if (!std.mem.eql(u8, &objectId(data), &hash)) return error.ObjectCorrupt;
-
-                const bytes = try allocator.dupe(u8, data);
-                errdefer allocator.free(bytes);
-                return .{ .hash = hash, .bytes = bytes };
-            },
-        }
+        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return objects.getObjectChunk(allocator, hash);
     }
 
     /// Return whether an object id exists without loading object bytes.
     pub fn hasObject(self: *Database, id: ObjectId) Error!bool {
-        return try objectRowExists(&self.sqlite_db, id);
+        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return objects.hasObject(id);
     }
 
     /// Return the original full object byte length.
     pub fn objectSize(self: *Database, id: ObjectId) Error!u64 {
-        const metadata = try loadObjectMetadata(&self.sqlite_db, id);
-        return try sqliteI64ToU64(metadata.size_bytes);
+        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return objects.objectSize(id);
     }
 
     /// Return the number of FastCDC chunks in the object manifest.
     pub fn objectChunkCount(self: *Database, id: ObjectId) Error!u64 {
-        const metadata = try loadObjectMetadata(&self.sqlite_db, id);
-        return try sqliteI64ToU64(metadata.chunk_count);
+        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return objects.objectChunkCount(id);
     }
 
     /// Delete one Zova object and garbage-collect its unreferenced chunks.
-    ///
-    /// Delete owns a `begin immediate` transaction and returns
-    /// `error.ObjectTransactionActive` if the connection is already inside a
-    /// user transaction. Missing or already-deleted ids return
-    /// `error.ObjectNotFound`. User SQL rows that store this object id are not
-    /// inspected or modified.
     pub fn deleteObject(self: *Database, id: ObjectId) Error!void {
-        if (hasActiveTransaction(&self.sqlite_db)) return error.ObjectTransactionActive;
-
-        try self.sqlite_db.beginImmediate();
-        var committed = false;
-        errdefer if (!committed) self.sqlite_db.rollback() catch {};
-
-        if (!try objectRowExists(&self.sqlite_db, id)) return error.ObjectNotFound;
-
-        const candidate_chunks = try collectDeleteCandidateChunks(std.heap.page_allocator, &self.sqlite_db, id);
-        defer std.heap.page_allocator.free(candidate_chunks);
-
-        try deleteObjectManifestRows(&self.sqlite_db, id);
-        try deleteObjectRow(&self.sqlite_db, id);
-        try deleteUnreferencedCandidateChunks(&self.sqlite_db, candidate_chunks);
-
-        try self.sqlite_db.commit();
-        committed = true;
+        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        return objects.deleteObject(id);
     }
 };
-
-const ObjectMetadata = struct {
-    size_bytes: i64,
-    chunk_count: i64,
-};
-
-const VectorCollectionMetadata = struct {
-    dimensions: u32,
-    metric: VectorMetric,
-};
-
-fn hasActiveTransaction(db: *sqlite.Database) bool {
-    return sqlite.c.sqlite3_get_autocommit(db.handle) == 0 or
-        sqlite.c.sqlite3_txn_state(db.handle, null) != sqlite.c.SQLITE_TXN_NONE;
-}
-
-fn countObjectChunks(bytes: []const u8) usize {
-    var count: usize = 0;
-    var offset: usize = 0;
-    while (offset < bytes.len) {
-        const chunk_len = fastcdc.cut(bytes[offset..]);
-        std.debug.assert(chunk_len > 0);
-        count += 1;
-        offset += chunk_len;
-    }
-    return count;
-}
-
-fn objectChunkIndexLessThan(_: void, left: ObjectChunk, right: ObjectChunk) bool {
-    return left.index < right.index;
-}
-
-fn objectRowExists(db: *sqlite.Database, id: ObjectId) Error!bool {
-    var stmt = try db.prepare("select 1 from _zova_objects where object_id = ? limit 1");
-    defer stmt.deinit();
-
-    try stmt.bindBlob(1, &id);
-    return switch (try stmt.step()) {
-        .row => true,
-        .done => false,
-    };
-}
-
-fn countObjectManifestRows(db: *sqlite.Database, id: ObjectId) Error!u64 {
-    var stmt = try db.prepare("select count(*) from _zova_object_chunks where object_id = ?");
-    defer stmt.deinit();
-
-    try stmt.bindBlob(1, &id);
-    std.debug.assert((try stmt.step()) == .row);
-    return try sqliteI64ToU64(stmt.columnInt64(0));
-}
-
-fn validateObjectManifestShape(db: *sqlite.Database, id: ObjectId, size: u64, chunk_count: u64) Error!void {
-    if (chunk_count == 0) {
-        if (size != 0) return error.ObjectCorrupt;
-        return;
-    }
-    if (chunk_count > size) return error.ObjectCorrupt;
-    if (try countObjectManifestRows(db, id) != chunk_count) return error.ObjectCorrupt;
-
-    var manifest = try db.prepare(
-        \\select oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.size_bytes
-        \\from _zova_object_chunks oc
-        \\left join _zova_chunks c on c.chunk_hash = oc.chunk_hash
-        \\where oc.object_id = ?
-        \\order by oc.chunk_index asc
-    );
-    defer manifest.deinit();
-
-    try manifest.bindBlob(1, &id);
-
-    var expected_index: u64 = 0;
-    var expected_offset: u64 = 0;
-    while ((try manifest.step()) == .row) {
-        const chunk_index = try sqliteI64ToU64(manifest.columnInt64(0));
-        if (chunk_index != expected_index) return error.ObjectCorrupt;
-        if (manifest.columnBlob(1).len != @sizeOf(ObjectChunkId)) return error.ObjectCorrupt;
-
-        const offset = try sqliteI64ToU64(manifest.columnInt64(2));
-        const chunk_size = try sqliteI64ToU64(manifest.columnInt64(3));
-        if (offset != expected_offset) return error.ObjectCorrupt;
-        if (chunk_size == 0 or chunk_size > fastcdc.max_size) return error.ObjectCorrupt;
-        if (offset > size or chunk_size > size - offset) return error.ObjectCorrupt;
-        if (manifest.columnType(4) == .null) return error.ObjectCorrupt;
-
-        const stored_chunk_size = try sqliteI64ToU64(manifest.columnInt64(4));
-        if (stored_chunk_size != chunk_size) return error.ObjectCorrupt;
-
-        expected_offset += chunk_size;
-        expected_index += 1;
-    }
-
-    if (expected_index != chunk_count) return error.ObjectCorrupt;
-    if (expected_offset != size) return error.ObjectCorrupt;
-}
-
-fn collectDeleteCandidateChunks(allocator: std.mem.Allocator, db: *sqlite.Database, id: ObjectId) Error![]ObjectId {
-    var chunks: std.ArrayList(ObjectId) = .empty;
-    errdefer chunks.deinit(allocator);
-
-    var stmt = try db.prepare(
-        \\select distinct chunk_hash
-        \\from _zova_object_chunks
-        \\where object_id = ?
-    );
-    defer stmt.deinit();
-
-    try stmt.bindBlob(1, &id);
-    while ((try stmt.step()) == .row) {
-        const candidate = stmt.columnBlob(0);
-        if (candidate.len != @sizeOf(ObjectId)) return error.SqliteError;
-
-        var chunk_hash: ObjectId = undefined;
-        @memcpy(&chunk_hash, candidate);
-        try chunks.append(allocator, chunk_hash);
-    }
-
-    return try chunks.toOwnedSlice(allocator);
-}
-
-fn deleteObjectManifestRows(db: *sqlite.Database, id: ObjectId) Error!void {
-    var stmt = try db.prepare("delete from _zova_object_chunks where object_id = ?");
-    defer stmt.deinit();
-
-    try stmt.bindBlob(1, &id);
-    std.debug.assert((try stmt.step()) == .done);
-}
-
-fn deleteObjectRow(db: *sqlite.Database, id: ObjectId) Error!void {
-    var stmt = try db.prepare("delete from _zova_objects where object_id = ?");
-    defer stmt.deinit();
-
-    try stmt.bindBlob(1, &id);
-    std.debug.assert((try stmt.step()) == .done);
-}
-
-fn deleteUnreferencedCandidateChunks(db: *sqlite.Database, candidate_chunks: []const ObjectId) Error!void {
-    var delete_chunk = try db.prepare(
-        \\delete from _zova_chunks
-        \\where chunk_hash = ?
-        \\  and not exists (
-        \\    select 1
-        \\    from _zova_object_chunks
-        \\    where _zova_object_chunks.chunk_hash = _zova_chunks.chunk_hash
-        \\  )
-    );
-    defer delete_chunk.deinit();
-
-    for (candidate_chunks) |chunk_hash| {
-        try delete_chunk.bindBlob(1, &chunk_hash);
-        std.debug.assert((try delete_chunk.step()) == .done);
-        try delete_chunk.reset();
-        try delete_chunk.clearBindings();
-    }
-}
-
-fn loadObjectMetadata(db: *sqlite.Database, id: ObjectId) Error!ObjectMetadata {
-    var stmt = try db.prepare(
-        \\select size_bytes, chunk_count, chunker
-        \\from _zova_objects
-        \\where object_id = ?
-    );
-    defer stmt.deinit();
-
-    try stmt.bindBlob(1, &id);
-
-    switch (try stmt.step()) {
-        .done => return error.ObjectNotFound,
-        .row => {
-            const size_bytes = stmt.columnInt64(0);
-            const chunk_count = stmt.columnInt64(1);
-            if (size_bytes < 0 or chunk_count < 0) return error.ObjectCorrupt;
-            if (!std.mem.eql(u8, stmt.columnText(2), fastcdc.version)) return error.ObjectCorrupt;
-            return .{
-                .size_bytes = size_bytes,
-                .chunk_count = chunk_count,
-            };
-        },
-    }
-}
-
-fn insertObjectRow(db: *sqlite.Database, id: ObjectId, size_bytes: i64, chunk_count: i64) Error!void {
-    var stmt = try db.prepare(
-        \\insert into _zova_objects (object_id, size_bytes, chunk_count, chunker)
-        \\values (?, ?, ?, ?)
-        \\on conflict(object_id) do nothing
-    );
-    defer stmt.deinit();
-
-    try stmt.bindBlob(1, &id);
-    try stmt.bindInt64(2, size_bytes);
-    try stmt.bindInt64(3, chunk_count);
-    try stmt.bindText(4, fastcdc.version);
-    std.debug.assert((try stmt.step()) == .done);
-}
-
-fn insertChunkRow(db: *sqlite.Database, chunk_hash: ObjectId, chunk: []const u8) Error!void {
-    var stmt = try db.prepare(
-        \\insert into _zova_chunks (chunk_hash, size_bytes, data)
-        \\values (?, ?, ?)
-        \\on conflict(chunk_hash) do nothing
-    );
-    defer stmt.deinit();
-
-    try stmt.bindBlob(1, &chunk_hash);
-    try stmt.bindInt64(2, try usizeToSqliteI64(chunk.len));
-    try stmt.bindBlob(3, chunk);
-    std.debug.assert((try stmt.step()) == .done);
-}
-
-fn insertManifestRow(
-    db: *sqlite.Database,
-    id: ObjectId,
-    chunk_index: i64,
-    chunk_hash: ObjectId,
-    offset: i64,
-    size_bytes: i64,
-) Error!void {
-    var stmt = try db.prepare(
-        \\insert into _zova_object_chunks (object_id, chunk_index, chunk_hash, offset, size_bytes)
-        \\values (?, ?, ?, ?, ?)
-    );
-    defer stmt.deinit();
-
-    try stmt.bindBlob(1, &id);
-    try stmt.bindInt64(2, chunk_index);
-    try stmt.bindBlob(3, &chunk_hash);
-    try stmt.bindInt64(4, offset);
-    try stmt.bindInt64(5, size_bytes);
-    std.debug.assert((try stmt.step()) == .done);
-}
-
-fn usizeToSqliteI64(value: usize) Error!i64 {
-    if (value > std.math.maxInt(i64)) return error.ObjectTooLarge;
-    return @intCast(value);
-}
-
-fn u64ToSqliteI64(value: u64) Error!i64 {
-    if (value > std.math.maxInt(i64)) return error.ObjectTooLarge;
-    return @intCast(value);
-}
-
-fn sqliteI64ToU64(value: i64) Error!u64 {
-    if (value < 0) return error.ObjectCorrupt;
-    return @intCast(value);
-}
-
-fn sqliteI64ToUsize(value: i64) Error!usize {
-    const unsigned = try sqliteI64ToU64(value);
-    if (unsigned > std.math.maxInt(usize)) return error.ObjectTooLarge;
-    return @intCast(unsigned);
-}
 
 fn isZovaPath(path: []const u8) bool {
     return std.mem.endsWith(u8, path, ".zova");
@@ -2105,14 +554,14 @@ fn initializeMetadata(db: *sqlite.Database) sqlite.Error!void {
 }
 
 fn initializeObjectSchema(db: *sqlite.Database) sqlite.Error!void {
-    try db.exec(objects_schema_sql ++ ";");
-    try db.exec(chunks_schema_sql ++ ";");
-    try db.exec(object_chunks_schema_sql ++ ";");
+    try db.exec(object_impl.objects_schema_sql ++ ";");
+    try db.exec(object_impl.chunks_schema_sql ++ ";");
+    try db.exec(object_impl.object_chunks_schema_sql ++ ";");
 }
 
 fn initializeVectorSchema(db: *sqlite.Database) sqlite.Error!void {
-    try db.exec(vector_collections_schema_sql ++ ";");
-    try db.exec(vectors_schema_sql ++ ";");
+    try db.exec(vector_impl.collections_schema_sql ++ ";");
+    try db.exec(vector_impl.vectors_schema_sql ++ ";");
 }
 
 fn rejectReservedZovaNames(db: *sqlite.Database) Error!void {
@@ -2129,273 +578,6 @@ fn isReservedZovaName(name: []const u8) bool {
     const reserved_prefix = "_zova_";
     return name.len >= reserved_prefix.len and
         std.ascii.eqlIgnoreCase(name[0..reserved_prefix.len], reserved_prefix);
-}
-
-fn validateVectorCollectionName(name: []const u8) Error!void {
-    if (name.len == 0) return error.VectorInvalid;
-    if (name.len > max_vector_collection_name_bytes) return error.VectorInvalid;
-    if (!std.unicode.utf8ValidateSlice(name)) return error.VectorInvalid;
-    if (isReservedZovaName(name)) return error.VectorInvalid;
-}
-
-fn validateVectorId(id: []const u8) Error!void {
-    if (id.len == 0) return error.VectorInvalid;
-    if (id.len > max_vector_collection_name_bytes) return error.VectorInvalid;
-    if (!std.unicode.utf8ValidateSlice(id)) return error.VectorInvalid;
-    if (isReservedZovaName(id)) return error.VectorInvalid;
-}
-
-fn validateVectorDimensions(dimensions: u32) Error!void {
-    if (dimensions == 0 or dimensions > max_vector_dimensions) return error.VectorInvalid;
-}
-
-fn validateVectorValues(expected_dimensions: u32, metric: VectorMetric, values: []const f32) Error!void {
-    if (values.len != expected_dimensions) return error.VectorDimensionMismatch;
-    var norm_squared: f64 = 0;
-    for (values) |value| {
-        if (std.math.isNan(value) or std.math.isInf(value)) return error.VectorInvalid;
-        const value_f64: f64 = @floatCast(value);
-        norm_squared += value_f64 * value_f64;
-    }
-    if (metric == .cosine and norm_squared == 0) return error.VectorInvalid;
-}
-
-fn validateVectorInput(collection: VectorCollectionMetadata, input: VectorInput) Error!void {
-    try validateVectorId(input.id);
-    try validateVectorValues(collection.dimensions, collection.metric, input.values);
-}
-
-fn validateVectorSearchThreshold(max_distance: f64) Error!void {
-    if (std.math.isNan(max_distance) or std.math.isInf(max_distance)) return error.VectorInvalid;
-}
-
-fn validateStoredVectorDimensions(expected_dimensions: u32, stored_dimensions: i64) Error!void {
-    if (stored_dimensions < 0) return error.VectorCorrupt;
-    if (@as(u64, @intCast(stored_dimensions)) != expected_dimensions) return error.VectorCorrupt;
-}
-
-fn validateStoredVectorValues(metric: VectorMetric, values: []const f32) Error!void {
-    var norm_squared: f64 = 0;
-    for (values) |value| {
-        if (std.math.isNan(value) or std.math.isInf(value)) return error.VectorCorrupt;
-        const value_f64: f64 = @floatCast(value);
-        norm_squared += value_f64 * value_f64;
-    }
-    if (metric == .cosine and norm_squared == 0) return error.VectorCorrupt;
-}
-
-fn distanceWithinThreshold(distance: f64, max_distance: ?f64) bool {
-    if (max_distance) |threshold| {
-        return distance <= threshold;
-    }
-    return true;
-}
-
-fn vectorMetricText(metric: VectorMetric) []const u8 {
-    return switch (metric) {
-        .cosine => "cosine",
-        .l2 => "l2",
-        .dot => "dot",
-    };
-}
-
-fn vectorMetricFromText(text: []const u8) Error!VectorMetric {
-    if (std.mem.eql(u8, text, "cosine")) return .cosine;
-    if (std.mem.eql(u8, text, "l2")) return .l2;
-    if (std.mem.eql(u8, text, "dot")) return .dot;
-    return error.NotZovaDatabase;
-}
-
-fn loadVectorCollection(db: *Database, name: []const u8) Error!VectorCollectionMetadata {
-    var stmt = try db.prepare(
-        \\select dimensions, metric, element_type
-        \\from _zova_vector_collections
-        \\where name = ?
-    );
-    defer stmt.deinit();
-
-    try stmt.bindText(1, name);
-    return switch (try stmt.step()) {
-        .done => error.VectorCollectionNotFound,
-        .row => {
-            const dimensions_i64 = stmt.columnInt64(0);
-            if (dimensions_i64 <= 0 or dimensions_i64 > max_vector_dimensions) return error.NotZovaDatabase;
-            if (!std.mem.eql(u8, stmt.columnText(2), "f32")) return error.NotZovaDatabase;
-            return .{
-                .dimensions = @intCast(dimensions_i64),
-                .metric = try vectorMetricFromText(stmt.columnText(1)),
-            };
-        },
-    };
-}
-
-fn vectorCollectionInfoFromRow(allocator: std.mem.Allocator, stmt: *sqlite.Statement) Error!VectorCollectionInfo {
-    const dimensions_i64 = stmt.columnInt64(1);
-    if (dimensions_i64 <= 0 or dimensions_i64 > max_vector_dimensions) return error.NotZovaDatabase;
-    if (!std.mem.eql(u8, stmt.columnText(3), "f32")) return error.NotZovaDatabase;
-
-    const name = try allocator.dupe(u8, stmt.columnText(0));
-    errdefer allocator.free(name);
-
-    return .{
-        .name = name,
-        .dimensions = @intCast(dimensions_i64),
-        .metric = try vectorMetricFromText(stmt.columnText(2)),
-        .vector_count = try sqliteI64ToU64(stmt.columnInt64(4)),
-    };
-}
-
-fn vectorByteLen(dimensions: u32) usize {
-    return @as(usize, @intCast(dimensions)) * @sizeOf(f32);
-}
-
-fn encodeF32Le(allocator: std.mem.Allocator, values: []const f32) Error![]u8 {
-    const bytes = try allocator.alloc(u8, values.len * @sizeOf(f32));
-    errdefer allocator.free(bytes);
-
-    for (values, 0..) |value, index| {
-        const bits: u32 = @bitCast(value);
-        std.mem.writeInt(u32, bytes[index * 4 ..][0..4], bits, .little);
-    }
-
-    return bytes;
-}
-
-fn decodeF32Le(allocator: std.mem.Allocator, bytes: []const u8, dimensions: u32) Error![]f32 {
-    if (bytes.len != vectorByteLen(dimensions)) return error.VectorCorrupt;
-
-    const values = try allocator.alloc(f32, dimensions);
-    errdefer allocator.free(values);
-
-    for (values, 0..) |*value, index| {
-        const bits = std.mem.readInt(u32, bytes[index * 4 ..][0..4], .little);
-        value.* = @bitCast(bits);
-        if (std.math.isNan(value.*) or std.math.isInf(value.*)) return error.VectorCorrupt;
-    }
-
-    return values;
-}
-
-fn decodeF32LeAt(bytes: []const u8, index: usize) f32 {
-    const bits = std.mem.readInt(u32, bytes[index * 4 ..][0..4], .little);
-    return @bitCast(bits);
-}
-
-fn vectorDistanceFromEncoded(
-    metric: VectorMetric,
-    query: []const f32,
-    encoded_values: []const u8,
-    dimensions: u32,
-) Error!f64 {
-    if (encoded_values.len != vectorByteLen(dimensions)) return error.VectorCorrupt;
-
-    return switch (metric) {
-        .cosine => cosineDistanceFromEncoded(query, encoded_values),
-        .l2 => l2DistanceFromEncoded(query, encoded_values),
-        .dot => dotDistanceFromEncoded(query, encoded_values),
-    };
-}
-
-fn cosineDistanceFromEncoded(query: []const f32, encoded_values: []const u8) Error!f64 {
-    var dot: f64 = 0;
-    var query_norm: f64 = 0;
-    var stored_norm: f64 = 0;
-
-    for (query, 0..) |query_value, index| {
-        const stored_value = decodeF32LeAt(encoded_values, index);
-        if (std.math.isNan(stored_value) or std.math.isInf(stored_value)) return error.VectorCorrupt;
-
-        const query_f64: f64 = @floatCast(query_value);
-        const stored_f64: f64 = @floatCast(stored_value);
-        dot += query_f64 * stored_f64;
-        query_norm += query_f64 * query_f64;
-        stored_norm += stored_f64 * stored_f64;
-    }
-
-    if (query_norm == 0 or stored_norm == 0) return error.VectorCorrupt;
-    return 1.0 - (dot / (@sqrt(query_norm) * @sqrt(stored_norm)));
-}
-
-fn l2DistanceFromEncoded(query: []const f32, encoded_values: []const u8) Error!f64 {
-    var sum: f64 = 0;
-    for (query, 0..) |query_value, index| {
-        const stored_value = decodeF32LeAt(encoded_values, index);
-        if (std.math.isNan(stored_value) or std.math.isInf(stored_value)) return error.VectorCorrupt;
-
-        const diff = @as(f64, @floatCast(query_value)) - @as(f64, @floatCast(stored_value));
-        sum += diff * diff;
-    }
-    return @sqrt(sum);
-}
-
-fn dotDistanceFromEncoded(query: []const f32, encoded_values: []const u8) Error!f64 {
-    var dot: f64 = 0;
-    for (query, 0..) |query_value, index| {
-        const stored_value = decodeF32LeAt(encoded_values, index);
-        if (std.math.isNan(stored_value) or std.math.isInf(stored_value)) return error.VectorCorrupt;
-
-        dot += @as(f64, @floatCast(query_value)) * @as(f64, @floatCast(stored_value));
-    }
-    return -dot;
-}
-
-fn maybeInsertSearchResult(
-    allocator: std.mem.Allocator,
-    results: *std.ArrayList(VectorSearchResult),
-    limit: usize,
-    id: []const u8,
-    distance: f64,
-) Error!void {
-    if (results.items.len < limit) {
-        const id_copy = try allocator.dupe(u8, id);
-        errdefer allocator.free(id_copy);
-
-        try results.append(allocator, .{
-            .id = id_copy,
-            .distance = distance,
-        });
-        return;
-    }
-
-    const worst_index = worstSearchResultIndex(results.items);
-    if (!searchCandidateLessThan(id, distance, results.items[worst_index])) return;
-
-    const id_copy = try allocator.dupe(u8, id);
-    allocator.free(results.items[worst_index].id);
-    results.items[worst_index] = .{
-        .id = id_copy,
-        .distance = distance,
-    };
-}
-
-fn worstSearchResultIndex(items: []const VectorSearchResult) usize {
-    std.debug.assert(items.len > 0);
-
-    var worst_index: usize = 0;
-    for (items[1..], 1..) |item, index| {
-        if (searchResultLessThan({}, items[worst_index], item)) {
-            worst_index = index;
-        }
-    }
-    return worst_index;
-}
-
-fn searchCandidateLessThan(candidate_id: []const u8, candidate_distance: f64, existing: VectorSearchResult) bool {
-    if (candidate_distance < existing.distance) return true;
-    if (candidate_distance > existing.distance) return false;
-    return std.mem.order(u8, candidate_id, existing.id) == .lt;
-}
-
-fn searchResultLessThan(_: void, lhs: VectorSearchResult, rhs: VectorSearchResult) bool {
-    if (lhs.distance < rhs.distance) return true;
-    if (lhs.distance > rhs.distance) return false;
-    return std.mem.order(u8, lhs.id, rhs.id) == .lt;
-}
-
-fn freeSearchItems(allocator: std.mem.Allocator, items: []VectorSearchResult) void {
-    for (items) |item| {
-        allocator.free(item.id);
-    }
 }
 
 fn backupMainDatabase(source: *sqlite.Database, dest: *sqlite.Database) Error!void {
@@ -2440,14 +622,14 @@ fn validateObjectSchema(db: *sqlite.Database) Error!void {
         "chunk_count",
         "chunker",
     };
-    try validateRequiredTable(db, objects_table, &object_columns, objects_schema_sql);
+    try validateRequiredTable(db, object_impl.objects_table, &object_columns, object_impl.objects_schema_sql);
 
     const chunk_columns = [_][]const u8{
         "chunk_hash",
         "size_bytes",
         "data",
     };
-    try validateRequiredTable(db, chunks_table, &chunk_columns, chunks_schema_sql);
+    try validateRequiredTable(db, object_impl.chunks_table, &chunk_columns, object_impl.chunks_schema_sql);
 
     const object_chunk_columns = [_][]const u8{
         "object_id",
@@ -2456,7 +638,7 @@ fn validateObjectSchema(db: *sqlite.Database) Error!void {
         "offset",
         "size_bytes",
     };
-    try validateRequiredTable(db, object_chunks_table, &object_chunk_columns, object_chunks_schema_sql);
+    try validateRequiredTable(db, object_impl.object_chunks_table, &object_chunk_columns, object_impl.object_chunks_schema_sql);
 }
 
 fn validateVectorSchema(db: *sqlite.Database) Error!void {
@@ -2466,7 +648,7 @@ fn validateVectorSchema(db: *sqlite.Database) Error!void {
         "metric",
         "element_type",
     };
-    try validateRequiredTable(db, vector_collections_table, &vector_collection_columns, vector_collections_schema_sql);
+    try validateRequiredTable(db, "_zova_vector_collections", &vector_collection_columns, vector_impl.collections_schema_sql);
 
     const vector_columns = [_][]const u8{
         "collection_name",
@@ -2474,7 +656,7 @@ fn validateVectorSchema(db: *sqlite.Database) Error!void {
         "dimensions",
         "values",
     };
-    try validateRequiredTable(db, vectors_table, &vector_columns, vectors_schema_sql);
+    try validateRequiredTable(db, "_zova_vectors", &vector_columns, vector_impl.vectors_schema_sql);
 }
 
 fn validateRequiredTable(
@@ -3696,7 +1878,7 @@ test "sqlite wrapper can inspect object tables after deletion" {
     try std.testing.expectEqual(@as(i64, 0), try testingCount(&raw, "select count(*) from _zova_objects"));
     try std.testing.expectEqual(@as(i64, 0), try testingCount(&raw, "select count(*) from _zova_object_chunks"));
     try std.testing.expectEqual(@as(i64, 0), try testingCount(&raw, "select count(*) from _zova_chunks"));
-    try std.testing.expect(!try objectRowExists(&raw, id));
+    _ = id;
     try testingIntegrityCheckOk(&raw);
 }
 
@@ -3946,7 +2128,7 @@ test "failed put object rolls back visible private rows" {
     try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_objects"));
     try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_chunks"));
 
-    try db.exec(object_chunks_schema_sql ++ ";");
+    try db.exec(object_impl.object_chunks_schema_sql ++ ";");
     const id = try db.putObject("later success");
     var object = try db.getObject(std.testing.allocator, id);
     defer object.deinit(std.testing.allocator);
@@ -4503,7 +2685,7 @@ test "delete object chunk removes only unreferenced loose chunks" {
 
     try db.exec("drop table _zova_chunks");
     try std.testing.expectError(error.SqliteError, db.deleteObjectChunk(loose_hash));
-    try db.exec(chunks_schema_sql ++ ";");
+    try db.exec(object_impl.chunks_schema_sql ++ ";");
     try db.putObjectChunk(loose_hash, "loose cleanup");
     try std.testing.expect(try db.deleteObjectChunk(loose_hash));
 }
@@ -5273,9 +3455,9 @@ test "open rejects v0.4 format version two database" {
         defer raw.deinit();
 
         try testingWriteMetadata(&raw, "zova", "2");
-        try raw.exec(objects_schema_sql ++ ";");
-        try raw.exec(chunks_schema_sql ++ ";");
-        try raw.exec(object_chunks_schema_sql ++ ";");
+        try raw.exec(object_impl.objects_schema_sql ++ ";");
+        try raw.exec(object_impl.chunks_schema_sql ++ ";");
+        try raw.exec(object_impl.object_chunks_schema_sql ++ ";");
     }
 
     try std.testing.expectError(error.UnsupportedZovaVersion, Database.open(db_path));
@@ -5337,9 +3519,9 @@ test "open rejects version three database missing required vector table without 
         defer raw.deinit();
 
         try testingWriteMetadata(&raw, "zova", "3");
-        try raw.exec(objects_schema_sql ++ ";");
-        try raw.exec(chunks_schema_sql ++ ";");
-        try raw.exec(object_chunks_schema_sql ++ ";");
+        try raw.exec(object_impl.objects_schema_sql ++ ";");
+        try raw.exec(object_impl.chunks_schema_sql ++ ";");
+        try raw.exec(object_impl.object_chunks_schema_sql ++ ";");
     }
 
     try std.testing.expectError(error.NotZovaDatabase, Database.open(db_path));
@@ -5482,9 +3664,9 @@ test "open rejects required vector table missing required column" {
         defer raw.deinit();
 
         try testingWriteMetadata(&raw, "zova", "3");
-        try raw.exec(objects_schema_sql ++ ";");
-        try raw.exec(chunks_schema_sql ++ ";");
-        try raw.exec(object_chunks_schema_sql ++ ";");
+        try raw.exec(object_impl.objects_schema_sql ++ ";");
+        try raw.exec(object_impl.chunks_schema_sql ++ ";");
+        try raw.exec(object_impl.object_chunks_schema_sql ++ ";");
         try raw.exec(
             \\create table _zova_vector_collections (
             \\  name text not null primary key check (length(name) > 0 and length(name) <= 255),
@@ -6476,7 +4658,7 @@ test "sql vector scalar functions and virtual table rank metadata rows" {
         \\  ('c', 'doc-2', 'charlie', 'chunk-c');
     );
 
-    const query_blob = try encodeF32Le(std.testing.allocator, &.{ 0.0, 0.0 });
+    const query_blob = try vector_impl.encodeF32Le(std.testing.allocator, &.{ 0.0, 0.0 });
     defer std.testing.allocator.free(query_blob);
 
     {
@@ -6570,7 +4752,7 @@ test "sql vector integration validates errors and registers only on zova connect
         try db.putVector("docs", "near", &.{ 1.0, 0.0 });
         try db.putVector("docs", "far", &.{ 5.0, 0.0 });
 
-        const query_blob = try encodeF32Le(std.testing.allocator, &.{ 0.0, 0.0 });
+        const query_blob = try vector_impl.encodeF32Le(std.testing.allocator, &.{ 0.0, 0.0 });
         defer std.testing.allocator.free(query_blob);
 
         {
@@ -6679,7 +4861,7 @@ test "sql vector integration works after sqlite conversion" {
     try db.putVector("chunks", "two-vector", &.{ 1.0, 0.0 });
     try db.exec("update chunks set vector_id = id || '-vector'");
 
-    const query_blob = try encodeF32Le(std.testing.allocator, &.{ 1.0, 0.0 });
+    const query_blob = try vector_impl.encodeF32Le(std.testing.allocator, &.{ 1.0, 0.0 });
     defer std.testing.allocator.free(query_blob);
 
     var stmt = try db.prepare(
@@ -6724,7 +4906,7 @@ test "sql vector integration supports all metrics and threshold-only searches" {
 
     try db.createVectorCollection("empty", .{ .dimensions = 2, .metric = .l2 });
 
-    const east_blob = try encodeF32Le(std.testing.allocator, &.{ 1.0, 0.0 });
+    const east_blob = try vector_impl.encodeF32Le(std.testing.allocator, &.{ 1.0, 0.0 });
     defer std.testing.allocator.free(east_blob);
 
     {
