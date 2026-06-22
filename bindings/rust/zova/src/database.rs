@@ -125,6 +125,10 @@ impl Database {
     pub(crate) fn status(&mut self, status: i32) -> Result<()> {
         db_status(self.raw.as_ptr(), status)
     }
+
+    pub(crate) fn raw_ptr(&mut self) -> *mut zova_sys::zova_database {
+        self.raw.as_ptr()
+    }
 }
 
 impl Drop for Database {

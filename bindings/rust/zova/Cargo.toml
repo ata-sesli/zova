@@ -15,3 +15,10 @@ path = "src/lib.rs"
 name = "basic"
 path = "examples/basic.rs"
 
+[[example]]
+name = "objects"
+path = "examples/objects.rs"
+
+[[example]]
+name = "vectors"
+path = "examples/vectors.rs"
