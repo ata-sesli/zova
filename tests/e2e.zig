@@ -103,6 +103,9 @@ test "e2e app database stores relational rows and native objects across reopen" 
     try expectChunkSearchResult(&reopened, &.{ 0.9, 0.1, 0.0 }, &.{ "chunk-1", "chunk-2" }, &.{ "first semantic chunk", "second semantic chunk" });
     try expectSqlFilteredChunkSearchResult(&reopened, &.{ 0.0, 1.0, 0.0 }, "en", "notes", &.{"chunk-1"}, &.{"first semantic chunk"});
     try expectChunkSearchByIdResult(&reopened, "chunk-1", &.{"chunk-2"}, &.{"second semantic chunk"});
+    try expectSqlNativeChunkSearchResult(&reopened, &.{ 0.9, 0.1, 0.0 }, &.{ "chunk-1", "chunk-2" }, &.{ "first semantic chunk", "second semantic chunk" });
+    try expectSqlNativeFilteredChunkDistanceResult(&reopened, &.{ 0.0, 1.0, 0.0 }, "en", "notes", &.{"chunk-1"}, &.{"first semantic chunk"});
+    try expectSqlNativeChunkDistanceByIdResult(&reopened, "chunk-1", &.{"chunk-2"}, &.{"second semantic chunk"});
     try expectSqlFilteredChunkSearchByIdResult(&reopened, "chunk-1", "en", "archive", &.{"chunk-2"}, &.{"second semantic chunk"});
     try expectChunkThresholdSearchResult(&reopened, &.{ 1.0, 0.0, 0.0 }, 0.0, &.{"chunk-1"}, &.{"first semantic chunk"});
     try expectStoredObject(&reopened, "empty.bin", empty_id, "");
@@ -418,8 +421,11 @@ test "e2e converted sqlite database preserves sql data and accepts new objects" 
     try expectStoredSearchVector(&reopened, "converted-row-2", &.{ 2.0, 2.0, 3.0 });
     try expectConvertedSearchResult(&reopened, &.{ 1.0, 2.0, 3.0 }, &.{"converted-row-1"}, &.{"converted sql row"});
     try expectSqlFilteredConvertedSearchResult(&reopened, &.{ 1.0, 2.0, 3.0 }, "converted%", &.{"converted-row-1"}, &.{"converted sql row"});
+    try expectSqlNativeConvertedSearchResult(&reopened, &.{ 1.0, 2.0, 3.0 }, &.{"converted-row-1"}, &.{"converted sql row"});
+    try expectSqlNativeFilteredConvertedDistanceResult(&reopened, &.{ 1.0, 2.0, 3.0 }, "converted%", &.{"converted-row-1"}, &.{"converted sql row"});
     try expectConvertedThresholdSearchResult(&reopened, &.{ 1.0, 2.0, 3.0 }, 1.0, &.{ "converted-row-1", "converted-row-2" }, &.{ "converted sql row", "converted sql row extra" });
     try expectSqlFilteredConvertedSearchByIdResult(&reopened, "converted-row-1", "converted%", &.{"converted-row-2"}, &.{"converted sql row extra"});
+    try expectSqlNativeFilteredConvertedDistanceByIdResult(&reopened, "converted-row-1", "converted%", &.{"converted-row-2"}, &.{"converted sql row extra"});
     try expectObjectRef(&reopened, "converted", converted_object_id, "converted object bytes");
     try expectObjectRefRange(&reopened, "converted", converted_object_id, "converted object bytes");
     try expectObjectChunksReassemble(&reopened, converted_object_id, "converted object bytes");
@@ -1032,6 +1038,31 @@ fn expectChunkSearchResult(
     }
 }
 
+fn expectSqlNativeChunkSearchResult(
+    db: *zova.Database,
+    query: []const f32,
+    expected_ids: []const []const u8,
+    expected_bodies: []const []const u8,
+) !void {
+    const query_blob = try encodeF32Le(std.testing.allocator, query);
+    defer std.testing.allocator.free(query_blob);
+
+    var stmt = try db.prepare(
+        \\select c.vector_id, c.body
+        \\from zova_vector_search as s
+        \\join chunks as c on c.vector_id = s.vector_id
+        \\where s.collection = 'chunks'
+        \\  and s.query_vector = ?
+        \\  and s.top_k = ?
+        \\order by s.rank
+    );
+    defer stmt.deinit();
+
+    try stmt.bindBlob(1, query_blob);
+    try stmt.bindInt64(2, @intCast(expected_ids.len));
+    try expectVectorBodyRows(&stmt, expected_ids, expected_bodies);
+}
+
 fn expectSqlFilteredChunkSearchResult(
     db: *zova.Database,
     query: []const f32,
@@ -1052,6 +1083,33 @@ fn expectSqlFilteredChunkSearchResult(
     }
 }
 
+fn expectSqlNativeFilteredChunkDistanceResult(
+    db: *zova.Database,
+    query: []const f32,
+    language: []const u8,
+    source: []const u8,
+    expected_ids: []const []const u8,
+    expected_bodies: []const []const u8,
+) !void {
+    const query_blob = try encodeF32Le(std.testing.allocator, query);
+    defer std.testing.allocator.free(query_blob);
+
+    var stmt = try db.prepare(
+        \\select vector_id, body
+        \\from chunks
+        \\where language = ? and source = ?
+        \\order by zova_vector_distance('chunks', vector_id, ?)
+        \\limit ?
+    );
+    defer stmt.deinit();
+
+    try stmt.bindText(1, language);
+    try stmt.bindText(2, source);
+    try stmt.bindBlob(3, query_blob);
+    try stmt.bindInt64(4, @intCast(expected_ids.len));
+    try expectVectorBodyRows(&stmt, expected_ids, expected_bodies);
+}
+
 fn expectChunkSearchByIdResult(
     db: *zova.Database,
     source_vector_id: []const u8,
@@ -1065,6 +1123,27 @@ fn expectChunkSearchByIdResult(
     for (results.items, expected_bodies) |result, expected_body| {
         try expectChunkBodyForVectorId(db, result.id, expected_body);
     }
+}
+
+fn expectSqlNativeChunkDistanceByIdResult(
+    db: *zova.Database,
+    source_vector_id: []const u8,
+    expected_ids: []const []const u8,
+    expected_bodies: []const []const u8,
+) !void {
+    var stmt = try db.prepare(
+        \\select vector_id, body
+        \\from chunks
+        \\where vector_id != ?
+        \\order by zova_vector_distance_by_id('chunks', vector_id, ?)
+        \\limit ?
+    );
+    defer stmt.deinit();
+
+    try stmt.bindText(1, source_vector_id);
+    try stmt.bindText(2, source_vector_id);
+    try stmt.bindInt64(3, @intCast(expected_ids.len));
+    try expectVectorBodyRows(&stmt, expected_ids, expected_bodies);
 }
 
 fn expectSqlFilteredChunkSearchByIdResult(
@@ -1118,6 +1197,31 @@ fn expectConvertedSearchResult(
     }
 }
 
+fn expectSqlNativeConvertedSearchResult(
+    db: *zova.Database,
+    query: []const f32,
+    expected_ids: []const []const u8,
+    expected_bodies: []const []const u8,
+) !void {
+    const query_blob = try encodeF32Le(std.testing.allocator, query);
+    defer std.testing.allocator.free(query_blob);
+
+    var stmt = try db.prepare(
+        \\select r.vector_id, r.body
+        \\from zova_vector_search as s
+        \\join search_rows as r on r.vector_id = s.vector_id
+        \\where s.collection = 'search_rows'
+        \\  and s.query_vector = ?
+        \\  and s.top_k = ?
+        \\order by s.rank
+    );
+    defer stmt.deinit();
+
+    try stmt.bindBlob(1, query_blob);
+    try stmt.bindInt64(2, @intCast(expected_ids.len));
+    try expectVectorBodyRows(&stmt, expected_ids, expected_bodies);
+}
+
 fn expectConvertedThresholdSearchResult(
     db: *zova.Database,
     query: []const f32,
@@ -1132,6 +1236,31 @@ fn expectConvertedThresholdSearchResult(
     for (results.items, expected_bodies) |result, expected_body| {
         try expectSearchRowBodyForVectorId(db, result.id, expected_body);
     }
+}
+
+fn expectSqlNativeFilteredConvertedDistanceResult(
+    db: *zova.Database,
+    query: []const f32,
+    body_like: []const u8,
+    expected_ids: []const []const u8,
+    expected_bodies: []const []const u8,
+) !void {
+    const query_blob = try encodeF32Le(std.testing.allocator, query);
+    defer std.testing.allocator.free(query_blob);
+
+    var stmt = try db.prepare(
+        \\select vector_id, body
+        \\from search_rows
+        \\where body like ?
+        \\order by zova_vector_distance('search_rows', vector_id, ?)
+        \\limit ?
+    );
+    defer stmt.deinit();
+
+    try stmt.bindText(1, body_like);
+    try stmt.bindBlob(2, query_blob);
+    try stmt.bindInt64(3, @intCast(expected_ids.len));
+    try expectVectorBodyRows(&stmt, expected_ids, expected_bodies);
 }
 
 fn expectSqlFilteredConvertedSearchResult(
@@ -1170,6 +1299,50 @@ fn expectSqlFilteredConvertedSearchByIdResult(
     for (results.items, expected_bodies) |result, expected_body| {
         try expectSearchRowBodyForVectorId(db, result.id, expected_body);
     }
+}
+
+fn expectSqlNativeFilteredConvertedDistanceByIdResult(
+    db: *zova.Database,
+    source_vector_id: []const u8,
+    body_like: []const u8,
+    expected_ids: []const []const u8,
+    expected_bodies: []const []const u8,
+) !void {
+    var stmt = try db.prepare(
+        \\select vector_id, body
+        \\from search_rows
+        \\where body like ? and vector_id != ?
+        \\order by zova_vector_distance_by_id('search_rows', vector_id, ?)
+        \\limit ?
+    );
+    defer stmt.deinit();
+
+    try stmt.bindText(1, body_like);
+    try stmt.bindText(2, source_vector_id);
+    try stmt.bindText(3, source_vector_id);
+    try stmt.bindInt64(4, @intCast(expected_ids.len));
+    try expectVectorBodyRows(&stmt, expected_ids, expected_bodies);
+}
+
+fn expectVectorBodyRows(stmt: *zova.sqlite.Statement, expected_ids: []const []const u8, expected_bodies: []const []const u8) !void {
+    try std.testing.expectEqual(expected_ids.len, expected_bodies.len);
+    for (expected_ids, expected_bodies) |expected_id, expected_body| {
+        try std.testing.expectEqual(zova.sqlite.Step.row, try stmt.step());
+        try std.testing.expectEqualStrings(expected_id, stmt.columnText(0));
+        try std.testing.expectEqualStrings(expected_body, stmt.columnText(1));
+    }
+    try std.testing.expectEqual(zova.sqlite.Step.done, try stmt.step());
+}
+
+fn encodeF32Le(allocator: std.mem.Allocator, values: []const f32) ![]u8 {
+    const bytes = try allocator.alloc(u8, values.len * @sizeOf(f32));
+    errdefer allocator.free(bytes);
+
+    for (values, 0..) |value, index| {
+        std.mem.writeInt(u32, bytes[index * 4 ..][0..4], @bitCast(value), .little);
+    }
+
+    return bytes;
 }
 
 const SelectedCandidateIds = struct {

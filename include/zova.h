@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 /*
- * Zova C ABI, v0.11.2 pre-1.0.
+ * Zova C ABI, v0.12.0 pre-1.0.
  *
  * This header exposes a C-compatible object and vector API over Zova's Zig
  * implementation. The ABI is intentionally conservative: opaque handles,
@@ -37,6 +37,10 @@
  *   manifests, range reads, assembly, ObjectWriter, and native vectors.
  * - Vector metadata remains application-owned in user SQL tables. Vector search
  *   returns vector ids and distances only.
+ * - zova_database connections register read-only SQL vector helpers:
+ *   zova_vector_distance, zova_vector_distance_by_id, and zova_vector_search.
+ *   Query vector blobs for those SQL helpers are little-endian IEEE-754 f32
+ *   arrays with exactly the collection dimension count.
  * - Zova does not automatically run VACUUM or change SQLite PRAGMAs.
  */
 

@@ -8,7 +8,7 @@ content-addressed objects, chunk manifests, streaming writes, and exact vector
 search. Applications keep their own metadata in normal SQL tables and store
 Zova object ids or vector ids alongside their rows.
 
-Current package version: `0.11.2`.
+Current package version: `0.12.0`.
 
 Zova is not tied to one application language. The project exposes:
 
@@ -51,7 +51,7 @@ flowchart TD
     VecCols --> Vecs
 ```
 
-## What Works In v0.11.2
+## What Works In v0.12.0
 
 - normal SQLite access through a thin wrapper
 - `.zova` database create/open/validation
@@ -65,6 +65,8 @@ flowchart TD
 - native vector collections
 - vector CRUD, batch upsert, collection info/list/delete
 - exact vector search, candidate-filtered search, search-by-id, and thresholds
+- SQL-native vector distance functions and the read-only `zova_vector_search`
+  virtual table
 - C ABI for database, prepared SQL statements, explicit maintenance, objects,
   chunks, writers, and vectors
 - CLI `info`, `stats`, object/chunk/vector/table inspection, and `check`
@@ -476,18 +478,113 @@ var close = try db.searchVectorsWithin(
 defer close.deinit(allocator);
 ```
 
-Search is exact and flat-scan in v0.11.2. That is deliberate: Zova currently
+Search is exact and flat-scan in v0.12.0. That is deliberate: Zova currently
 prioritizes deterministic local correctness over approximate indexing. It is a
 good fit for small and medium local datasets, offline ranking, tests that need
 repeatable nearest-neighbor results, and candidate-filtered search where SQL
 first narrows the metadata set and Zova ranks the eligible vector ids.
 
 It is not yet a low-latency ANN engine for millions of vectors. Zova does not
-include HNSW, IVFFlat, quantized indexes, vector SQL operators, or SQLite
-virtual-table integration in v0.11.2.
+include HNSW, IVFFlat, quantized indexes, or vector SQL operators in v0.12.0.
 
 Missing candidate ids are skipped. Invalid candidate ids return
 `error.VectorInvalid`. Corrupt selected vector rows return `error.VectorCorrupt`.
+
+## SQL-Native Vector Search
+
+v0.12.0 makes Zova vectors queryable from SQL on `zova.Database` connections.
+The raw `zova.sqlite.Database` wrapper remains plain SQLite and does not
+register Zova vector SQL helpers.
+
+Registered scalar functions:
+
+```sql
+zova_vector_distance(collection, vector_id, query_vector_blob)
+zova_vector_distance_by_id(collection, vector_id, source_vector_id)
+```
+
+`query_vector_blob` is a little-endian IEEE-754 `f32` blob with exactly the
+collection dimension count. This is the same encoding Zova uses internally for
+stored vectors.
+
+In Zig, encode a query vector explicitly:
+
+```zig
+fn encodeVectorBlob(allocator: std.mem.Allocator, values: []const f32) ![]u8 {
+    const bytes = try allocator.alloc(u8, values.len * @sizeOf(f32));
+    errdefer allocator.free(bytes);
+
+    for (values, 0..) |value, index| {
+        std.mem.writeInt(u32, bytes[index * 4 ..][0..4], @bitCast(value), .little);
+    }
+
+    return bytes;
+}
+```
+
+SQL-filter-first ranking:
+
+```sql
+select
+  c.id,
+  c.body,
+  zova_vector_distance('chunks', c.vector_id, ?1) as distance
+from chunks as c
+where c.document_id = 'doc-123'
+order by distance
+limit 10;
+```
+
+Row-to-row nearest-neighbor style ranking:
+
+```sql
+select
+  c.id,
+  c.body,
+  zova_vector_distance_by_id('chunks', c.vector_id, 'chunk-001') as distance
+from chunks as c
+where c.vector_id != 'chunk-001'
+order by distance
+limit 10;
+```
+
+The read-only eponymous-only virtual table is:
+
+```sql
+create table zova_vector_search(
+  rank integer,
+  vector_id text,
+  distance real,
+  collection text hidden,
+  query_vector blob hidden,
+  source_vector_id text hidden,
+  top_k integer hidden,
+  max_distance real hidden
+);
+```
+
+Example:
+
+```sql
+select
+  c.id,
+  c.body,
+  s.distance
+from zova_vector_search as s
+join chunks as c on c.vector_id = s.vector_id
+where s.collection = 'chunks'
+  and s.query_vector = ?1
+  and s.top_k = 10
+order by s.rank;
+```
+
+`zova_vector_search` requires `collection`, exactly one query source
+(`query_vector` or `source_vector_id`), and at least one bound (`top_k` or
+`max_distance`). `max_distance` is inclusive and may be negative for dot
+distance collections. `top_k = 0` returns no rows after validating inputs.
+
+The SQL integration is read-only. It does not expose object internals, mutate
+user tables, create indexes, or run approximate search.
 
 ## CLI
 
@@ -615,7 +712,7 @@ scripts/check-release.sh
 
 ## Release Package Policy
 
-v0.11.2 releases a source-only package/archive. The package includes:
+v0.12.0 releases a source-only package/archive. The package includes:
 
 - `README.md`
 - `build.zig`
@@ -634,21 +731,21 @@ Consumers build the CLI or static C ABI library from source with Zig.
 The release script:
 
 ```sh
-scripts/package-release.sh 0.11.2
+scripts/package-release.sh 0.12.0
 ```
 
 tags the current commit, pushes the branch and tag, creates a source archive,
 and creates the GitHub release. Do not run it until the exact commit you want
 to release is ready.
 
-## Non-Goals In v0.11.2
+## Non-Goals In v0.12.0
 
-Zova v0.11.2 does not include:
+Zova v0.12.0 does not include:
 
 - ANN indexes
 - HNSW or IVFFlat
 - vector SQL operators
-- SQLite virtual table integration
+- object or chunk virtual tables
 - embedding generation
 - Rust, Go, TypeScript, or Swift bindings
 - repair commands

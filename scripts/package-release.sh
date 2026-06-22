@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 usage() {
     echo "usage: scripts/package-release.sh <version> [out-dir]" >&2
-    echo "example: scripts/package-release.sh 0.11.2" >&2
+    echo "example: scripts/package-release.sh 0.12.0" >&2
 }
 
 run() {
@@ -138,7 +138,7 @@ mkdir -p "$VERIFY_DIR"
 tar -xzf "$ARCHIVE" -C "$VERIFY_DIR"
 cd "$VERIFY_DIR/$PKG"
 
-zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/fastcdc.zig src/c_api.zig src/cli.zig src/main.zig tests/e2e.zig tests/cli.zig
+zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/fastcdc.zig src/vector_sql.zig src/c_api.zig src/cli.zig src/main.zig tests/e2e.zig tests/cli.zig
 zig build test
 zig build e2e
 zig build c-abi

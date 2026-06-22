@@ -604,6 +604,131 @@ int main(int argc, char **argv) {
     }
     zova_vector_search_results_free(&dot_results);
 
+    const uint8_t zero_query_blob[] = {0, 0, 0, 0, 0, 0, 0, 0};
+    zova_statement *sql_distance = NULL;
+    expect_status(zova_database_prepare(&(zova_database_prepare_request){
+                      .db = db,
+                      .sql = "select zova_vector_distance('chunks', 'near', ?)",
+                      .out_statement = &sql_distance,
+                  }),
+                  ZOVA_OK,
+                  "prepare sql vector distance");
+    expect_status(zova_statement_bind_blob(&(zova_statement_bind_blob_request){
+                      .statement = sql_distance,
+                      .index = 1,
+                      .data = zero_query_blob,
+                      .len = sizeof(zero_query_blob),
+                  }),
+                  ZOVA_OK,
+                  "bind sql vector query blob");
+    expect_status(zova_statement_step(&(zova_statement_step_request){
+                      .statement = sql_distance,
+                      .out_result = &step_result,
+                  }),
+                  ZOVA_OK,
+                  "step sql vector distance");
+    if (step_result != ZOVA_STEP_ROW) {
+        fprintf(stderr, "step sql vector distance: expected row\n");
+        return 1;
+    }
+    double sql_distance_value = 0.0;
+    expect_status(zova_statement_column_double(&(zova_statement_column_double_request){
+                      .statement = sql_distance,
+                      .index = 0,
+                      .out_value = &sql_distance_value,
+                  }),
+                  ZOVA_OK,
+                  "read sql vector distance");
+    if (sql_distance_value < 1.4 || sql_distance_value > 1.5) {
+        fprintf(stderr, "read sql vector distance: unexpected distance\n");
+        return 1;
+    }
+    expect_status(zova_statement_finalize(sql_distance), ZOVA_OK, "finalize sql vector distance");
+
+    zova_statement *sql_search = NULL;
+    expect_status(zova_database_prepare(&(zova_database_prepare_request){
+                      .db = db,
+                      .sql = "select rank, vector_id, distance from zova_vector_search where collection = 'chunks' and query_vector = ? and top_k = 2 order by rank",
+                      .out_statement = &sql_search,
+                  }),
+                  ZOVA_OK,
+                  "prepare sql vector search");
+    expect_status(zova_statement_bind_blob(&(zova_statement_bind_blob_request){
+                      .statement = sql_search,
+                      .index = 1,
+                      .data = zero_query_blob,
+                      .len = sizeof(zero_query_blob),
+                  }),
+                  ZOVA_OK,
+                  "bind sql vector search query blob");
+    expect_status(zova_statement_step(&(zova_statement_step_request){
+                      .statement = sql_search,
+                      .out_result = &step_result,
+                  }),
+                  ZOVA_OK,
+                  "step sql vector search first row");
+    if (step_result != ZOVA_STEP_ROW) {
+        fprintf(stderr, "step sql vector search first row: expected row\n");
+        return 1;
+    }
+    int64_t sql_rank = 0;
+    expect_status(zova_statement_column_int64(&(zova_statement_column_int64_request){
+                      .statement = sql_search,
+                      .index = 0,
+                      .out_value = &sql_rank,
+                  }),
+                  ZOVA_OK,
+                  "read sql vector search rank");
+    if (sql_rank != 1) {
+        fprintf(stderr, "read sql vector search rank: unexpected rank\n");
+        return 1;
+    }
+    zova_text sql_vector_id = {0};
+    expect_status(zova_statement_column_text(&(zova_statement_column_text_request){
+                      .statement = sql_search,
+                      .index = 1,
+                      .out_text = &sql_vector_id,
+                  }),
+                  ZOVA_OK,
+                  "read sql vector search id");
+    if (sql_vector_id.len != strlen("near") || memcmp(sql_vector_id.data, "near", sql_vector_id.len) != 0) {
+        fprintf(stderr, "read sql vector search id: unexpected id\n");
+        return 1;
+    }
+    zova_text_free(&sql_vector_id);
+    expect_status(zova_statement_finalize(sql_search), ZOVA_OK, "finalize sql vector search");
+
+    zova_statement *sql_distance_by_id = NULL;
+    expect_status(zova_database_prepare(&(zova_database_prepare_request){
+                      .db = db,
+                      .sql = "select zova_vector_distance_by_id('chunks', 'tie-a', 'near')",
+                      .out_statement = &sql_distance_by_id,
+                  }),
+                  ZOVA_OK,
+                  "prepare sql vector distance by id");
+    expect_status(zova_statement_step(&(zova_statement_step_request){
+                      .statement = sql_distance_by_id,
+                      .out_result = &step_result,
+                  }),
+                  ZOVA_OK,
+                  "step sql vector distance by id");
+    if (step_result != ZOVA_STEP_ROW) {
+        fprintf(stderr, "step sql vector distance by id: expected row\n");
+        return 1;
+    }
+    expect_status(zova_statement_column_double(&(zova_statement_column_double_request){
+                      .statement = sql_distance_by_id,
+                      .index = 0,
+                      .out_value = &sql_distance_value,
+                  }),
+                  ZOVA_OK,
+                  "read sql vector distance by id");
+    if (sql_distance_value < 1.4 || sql_distance_value > 1.5) {
+        fprintf(stderr, "read sql vector distance by id: unexpected distance\n");
+        return 1;
+    }
+    expect_status(zova_statement_finalize(sql_distance_by_id), ZOVA_OK, "finalize sql vector distance by id");
+
     zova_vector_collection_delete_request delete_collection_req = {
         .db = db,
         .name = "chunks",
