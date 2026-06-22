@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::statement::Statement;
+use crate::statement::{OwnedStatement, Statement};
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::marker::PhantomData;
@@ -8,6 +8,10 @@ use std::ptr::{self, NonNull};
 use std::rc::Rc;
 
 pub struct Database {
+    pub(crate) inner: Rc<DatabaseInner>,
+}
+
+pub(crate) struct DatabaseInner {
     raw: NonNull<zova_sys::zova_database>,
     _not_send_sync: PhantomData<Rc<()>>,
 }
@@ -43,7 +47,7 @@ impl Database {
     pub fn exec(&mut self, sql: &str) -> Result<()> {
         let sql = cstring(sql, "sql")?;
         let request = zova_sys::zova_database_exec_request {
-            db: self.raw.as_ptr(),
+            db: self.raw_ptr(),
             sql: sql.as_ptr(),
         };
         self.status(unsafe { zova_sys::zova_database_exec(&request) })
@@ -53,14 +57,28 @@ impl Database {
         let sql = cstring(sql, "sql")?;
         let mut statement = ptr::null_mut();
         let request = zova_sys::zova_database_prepare_request {
-            db: self.raw.as_ptr(),
+            db: self.raw_ptr(),
             sql: sql.as_ptr(),
             out_statement: &mut statement,
         };
         self.status(unsafe { zova_sys::zova_database_prepare(&request) })?;
         let raw = NonNull::new(statement)
             .ok_or_else(|| Error::from_status(zova_sys::ZOVA_INVALID_ARGUMENT, None))?;
-        Ok(Statement::new(raw, self.raw.as_ptr()))
+        Ok(Statement::new(raw, self.raw_ptr()))
+    }
+
+    pub fn prepare_owned(&mut self, sql: &str) -> Result<OwnedStatement> {
+        let sql = cstring(sql, "sql")?;
+        let mut statement = ptr::null_mut();
+        let request = zova_sys::zova_database_prepare_request {
+            db: self.raw_ptr(),
+            sql: sql.as_ptr(),
+            out_statement: &mut statement,
+        };
+        self.status(unsafe { zova_sys::zova_database_prepare(&request) })?;
+        let raw = NonNull::new(statement)
+            .ok_or_else(|| Error::from_status(zova_sys::ZOVA_INVALID_ARGUMENT, None))?;
+        Ok(OwnedStatement::new(raw, self.inner.clone()))
     }
 
     pub fn begin(&mut self) -> Result<()> {
@@ -105,8 +123,10 @@ impl Database {
         let raw = NonNull::new(db)
             .ok_or_else(|| Error::from_status(zova_sys::ZOVA_INVALID_ARGUMENT, None))?;
         Ok(Self {
-            raw,
-            _not_send_sync: PhantomData,
+            inner: Rc::new(DatabaseInner {
+                raw,
+                _not_send_sync: PhantomData,
+            }),
         })
     }
 
@@ -116,22 +136,26 @@ impl Database {
             *const zova_sys::zova_database_simple_request,
         ) -> zova_sys::zova_status,
     ) -> Result<()> {
-        let request = zova_sys::zova_database_simple_request {
-            db: self.raw.as_ptr(),
-        };
+        let request = zova_sys::zova_database_simple_request { db: self.raw_ptr() };
         self.status(unsafe { function(&request) })
     }
 
     pub(crate) fn status(&mut self, status: i32) -> Result<()> {
-        db_status(self.raw.as_ptr(), status)
+        db_status(self.raw_ptr(), status)
     }
 
     pub(crate) fn raw_ptr(&mut self) -> *mut zova_sys::zova_database {
+        self.inner.raw_ptr()
+    }
+}
+
+impl DatabaseInner {
+    pub(crate) fn raw_ptr(&self) -> *mut zova_sys::zova_database {
         self.raw.as_ptr()
     }
 }
 
-impl Drop for Database {
+impl Drop for DatabaseInner {
     fn drop(&mut self) {
         unsafe {
             let _ = zova_sys::zova_database_close(self.raw.as_ptr());

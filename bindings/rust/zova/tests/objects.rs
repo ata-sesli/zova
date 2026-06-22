@@ -231,6 +231,40 @@ fn object_writer_streams_finishes_cancels_and_drops() {
 }
 
 #[test]
+fn owned_object_writer_keeps_database_handle_alive_and_cleans_up() {
+    let path = temp_path("owned-writer");
+    let bytes = fixture_bytes(72_000);
+    let id = object_id(&bytes).unwrap();
+
+    let mut db = Database::create(&path).unwrap();
+    let mut writer = db.object_writer_owned().unwrap();
+    drop(db);
+    for chunk in bytes.chunks(127) {
+        writer.write(chunk).unwrap();
+    }
+    assert_eq!(writer.finish().unwrap(), id);
+
+    let mut reopened = Database::open(&path).unwrap();
+    assert_eq!(reopened.get_object(id).unwrap(), bytes);
+    drop(reopened);
+
+    let cancel_id = object_id(b"cancel owned").unwrap();
+    let mut db = Database::open(&path).unwrap();
+    let mut cancel_writer = db.object_writer_owned().unwrap();
+    cancel_writer.write(b"cancel owned").unwrap();
+    cancel_writer.cancel().unwrap();
+    assert!(!db.has_object(cancel_id).unwrap());
+
+    let drop_id = object_id(b"drop owned").unwrap();
+    {
+        let mut drop_writer = db.object_writer_owned().unwrap();
+        drop_writer.write(b"drop owned").unwrap();
+    }
+    assert!(!db.has_object(drop_id).unwrap());
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn object_ids_can_live_in_user_sql_rows() {
     let path = temp_path("records");
     let mut db = Database::create(&path).unwrap();

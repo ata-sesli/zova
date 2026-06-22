@@ -1,4 +1,4 @@
-use crate::database::db_status;
+use crate::database::{db_status, DatabaseInner};
 use crate::error::{Error, Result, Status};
 use crate::Database;
 use std::convert::TryFrom;
@@ -39,6 +39,15 @@ pub struct ObjectWriter<'db> {
     raw: Option<NonNull<zova_sys::zova_object_writer>>,
     db: *mut zova_sys::zova_database,
     _database: PhantomData<&'db mut Database>,
+    _not_send_sync: PhantomData<Rc<()>>,
+}
+
+/// Owned streaming writer for language bindings that need writer objects
+/// independent of Rust's borrowed `Database::object_writer` lifetime.
+pub struct OwnedObjectWriter {
+    raw: Option<NonNull<zova_sys::zova_object_writer>>,
+    db: *mut zova_sys::zova_database,
+    _database: Rc<DatabaseInner>,
     _not_send_sync: PhantomData<Rc<()>>,
 }
 
@@ -308,6 +317,24 @@ impl Database {
             _not_send_sync: PhantomData,
         })
     }
+
+    /// Create an owned streaming object writer that keeps the database handle alive.
+    pub fn object_writer_owned(&mut self) -> Result<OwnedObjectWriter> {
+        let mut writer = ptr::null_mut();
+        let request = zova_sys::zova_object_writer_create_request {
+            db: self.raw_ptr(),
+            out_writer: &mut writer,
+        };
+        self.status(unsafe { zova_sys::zova_object_writer_create(&request) })?;
+        let raw = NonNull::new(writer)
+            .ok_or_else(|| Error::from_status(zova_sys::ZOVA_INVALID_ARGUMENT, None))?;
+        Ok(OwnedObjectWriter {
+            raw: Some(raw),
+            db: self.raw_ptr(),
+            _database: self.inner.clone(),
+            _not_send_sync: PhantomData,
+        })
+    }
 }
 
 impl ObjectWriter<'_> {
@@ -367,6 +394,68 @@ impl ObjectWriter<'_> {
 }
 
 impl Drop for ObjectWriter<'_> {
+    fn drop(&mut self) {
+        self.destroy();
+    }
+}
+
+impl OwnedObjectWriter {
+    /// Append bytes to the stream.
+    pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        let raw = self.raw()?;
+        let request = zova_sys::zova_object_writer_write_request {
+            writer: raw.as_ptr(),
+            data: bytes.as_ptr(),
+            len: bytes.len(),
+        };
+        db_status(self.db, unsafe {
+            zova_sys::zova_object_writer_write(&request)
+        })
+    }
+
+    /// Finish the stream and return the complete object's id.
+    pub fn finish(mut self) -> Result<ObjectId> {
+        let raw = self.raw()?;
+        let mut out = zova_sys::zova_object_id { bytes: [0; 32] };
+        let request = zova_sys::zova_object_writer_finish_request {
+            writer: raw.as_ptr(),
+            out_id: &mut out,
+        };
+        db_status(self.db, unsafe {
+            zova_sys::zova_object_writer_finish(&request)
+        })?;
+        self.destroy();
+        Ok(from_c_object_id(out))
+    }
+
+    /// Cancel the stream and clean up unreferenced chunks written by this writer.
+    pub fn cancel(mut self) -> Result<()> {
+        let raw = self.raw()?;
+        let request = zova_sys::zova_object_writer_cancel_request {
+            writer: raw.as_ptr(),
+        };
+        db_status(self.db, unsafe {
+            zova_sys::zova_object_writer_cancel(&request)
+        })?;
+        self.destroy();
+        Ok(())
+    }
+
+    fn raw(&self) -> Result<NonNull<zova_sys::zova_object_writer>> {
+        self.raw
+            .ok_or_else(|| Error::from_status(zova_sys::ZOVA_OBJECT_WRITER_CLOSED, None))
+    }
+
+    fn destroy(&mut self) {
+        if let Some(raw) = self.raw.take() {
+            unsafe {
+                let _ = zova_sys::zova_object_writer_destroy(raw.as_ptr());
+            }
+        }
+    }
+}
+
+impl Drop for OwnedObjectWriter {
     fn drop(&mut self) {
         self.destroy();
     }

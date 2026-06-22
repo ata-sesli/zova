@@ -50,6 +50,42 @@ fn create_open_exec_and_prepare_records() {
 }
 
 #[test]
+fn owned_statement_can_outlive_database_wrapper_and_preserve_statement_api() {
+    let path = temp_path("owned-statement");
+    let mut db = Database::create(&path).unwrap();
+    db.exec("create table records(id integer primary key, body text, payload blob)")
+        .unwrap();
+
+    let mut insert = db
+        .prepare_owned("insert into records(body, payload) values (:body, :payload)")
+        .unwrap();
+    assert_eq!(insert.parameter_count().unwrap(), 2);
+    assert_eq!(insert.parameter_index(":body").unwrap(), Some(1));
+    insert.bind_text(1, "owned").unwrap();
+    insert.bind_blob(2, b"bytes").unwrap();
+    assert_eq!(insert.step().unwrap(), Step::Done);
+    drop(db);
+    drop(insert);
+
+    let mut reopened = Database::open(&path).unwrap();
+    let mut query = reopened
+        .prepare_owned("select body, payload from records where id = ?1")
+        .unwrap();
+    query.bind_i64(1, 1).unwrap();
+    assert_eq!(query.step().unwrap(), Step::Row);
+    assert_eq!(query.column_text(0).unwrap(), Some("owned".to_string()));
+    assert_eq!(query.column_blob(1).unwrap(), Some(b"bytes".to_vec()));
+
+    query.reset().unwrap();
+    query.clear_bindings().unwrap();
+    query.bind_i64(1, 1).unwrap();
+    assert_eq!(query.step().unwrap(), Step::Row);
+    assert_eq!(query.column_text(0).unwrap(), Some("owned".to_string()));
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn statements_round_trip_all_basic_types_and_nulls() {
     let path = temp_path("types");
     let mut db = Database::create(&path).unwrap();

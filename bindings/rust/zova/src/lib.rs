@@ -16,9 +16,9 @@ pub use database::Database;
 pub use error::{Error, Result, Status};
 pub use object::{
     object_chunk_id, object_id, ObjectChunkId, ObjectId, ObjectManifest, ObjectManifestChunk,
-    ObjectWriter,
+    ObjectWriter, OwnedObjectWriter,
 };
-pub use statement::{ColumnType, Statement, Step};
+pub use statement::{ColumnType, OwnedStatement, Statement, Step};
 pub use vector::{
     Vector, VectorCollectionInfo, VectorCollectionOptions, VectorInput, VectorMetric,
     VectorSearchResult,

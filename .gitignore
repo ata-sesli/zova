@@ -2,3 +2,8 @@ zig-out
 .zig-cache
 .DS_STORE
 notes
+__pycache__
+.pytest_cache
+bindings/python/python/zova/*.so
+bindings/python/python/zova/*.pyd
+bindings/python/python/zova/*.dylib
