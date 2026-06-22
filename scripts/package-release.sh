@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 usage() {
     echo "usage: scripts/package-release.sh <version> [out-dir]" >&2
-    echo "example: scripts/package-release.sh 0.12.1" >&2
+    echo "example: scripts/package-release.sh 0.13.0" >&2
 }
 
 run() {
@@ -66,6 +66,7 @@ cd "$ROOT"
 require_command git
 require_command gh
 require_command tar
+require_command cargo
 
 if ! gh auth status >/dev/null 2>&1; then
     echo "GitHub CLI is not authenticated. Run: gh auth login" >&2
@@ -115,19 +116,51 @@ rm -rf "$TMP"
 mkdir -p "$TMP/$PKG" "$OUT_DIR"
 
 cp build.zig build.zig.zon README.md "$TMP/$PKG/"
+cp -R bindings "$TMP/$PKG/"
 cp -R include "$TMP/$PKG/"
 cp -R src "$TMP/$PKG/"
 cp -R tests "$TMP/$PKG/"
 cp -R vendor "$TMP/$PKG/"
+rm -rf "$TMP/$PKG/bindings/rust/target"
 
-if find "$TMP/$PKG" -name '*.md' ! -name README.md | grep -q .; then
-    echo "release package contains markdown files other than README.md" >&2
-    find "$TMP/$PKG" -name '*.md' ! -name README.md >&2
+if find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/bindings/rust/README.md" | grep -q .; then
+    echo "release package contains unexpected markdown files" >&2
+    find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/bindings/rust/README.md" >&2
     exit 1
 fi
 
 if [ ! -f "$TMP/$PKG/include/zova.h" ]; then
     echo "release package is missing include/zova.h" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/bindings/rust/Cargo.toml" ]; then
+    echo "release package is missing bindings/rust/Cargo.toml" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/bindings/rust/README.md" ]; then
+    echo "release package is missing bindings/rust/README.md" >&2
+    exit 1
+fi
+
+if [ ! -d "$TMP/$PKG/bindings/rust/zova-sys" ]; then
+    echo "release package is missing bindings/rust/zova-sys" >&2
+    exit 1
+fi
+
+if [ ! -d "$TMP/$PKG/bindings/rust/zova" ]; then
+    echo "release package is missing bindings/rust/zova" >&2
+    exit 1
+fi
+
+if [ -e "$TMP/$PKG/zig-out" ]; then
+    echo "release package must not contain compiled CLI artifacts" >&2
+    exit 1
+fi
+
+if [ -e "$TMP/$PKG/bindings/rust/target" ]; then
+    echo "release package must not contain compiled Rust artifacts" >&2
     exit 1
 fi
 
@@ -147,6 +180,9 @@ zig build cli-test
 zig build test -Doptimize=ReleaseSafe
 zig build
 zig build run
+CARGO_TARGET_DIR="$TMP/cargo-target/verify" cargo fmt --all --manifest-path bindings/rust/Cargo.toml --check
+CARGO_TARGET_DIR="$TMP/cargo-target/verify" cargo test --workspace --manifest-path bindings/rust/Cargo.toml
+CARGO_TARGET_DIR="$TMP/cargo-target/verify" cargo check --examples --manifest-path bindings/rust/Cargo.toml
 
 cd "$ROOT"
 if [ -z "$LOCAL_TAG_COMMIT" ]; then
