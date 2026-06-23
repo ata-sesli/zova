@@ -20,7 +20,7 @@ from ._native import (
     object_id,
 )
 
-__version__ = "0.13.2"
+__version__ = "0.14.0"
 
 
 class Step(IntEnum):

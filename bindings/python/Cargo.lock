@@ -126,14 +126,14 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "zova"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "zova-sys",
 ]
 
 [[package]]
 name = "zova-python"
-version = "0.13.2"
+version = "0.14.0"
 dependencies = [
  "pyo3",
  "zova",
@@ -141,4 +141,4 @@ dependencies = [
 
 [[package]]
 name = "zova-sys"
-version = "0.13.1"
+version = "0.14.0"

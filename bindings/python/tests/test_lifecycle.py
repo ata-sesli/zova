@@ -6,7 +6,7 @@ import zova
 
 
 def test_import_and_error_mapping(tmp_path):
-    assert zova.__version__ == "0.13.2"
+    assert zova.__version__ == "0.14.0"
 
     with pytest.raises(zova.ZovaError) as exc:
         zova.Database.create(str(tmp_path / "plain.db"))
@@ -160,3 +160,17 @@ def test_read_only_open_and_busy_timeout(tmp_path):
         with pytest.raises(zova.ZovaError) as exc:
             db.exec("insert into notes(body) values ('blocked')")
         assert exc.value.status_name == "ZOVA_READ_ONLY"
+
+
+def test_python_errors_copy_diagnostics_immediately(tmp_path):
+    path = tmp_path / "diagnostics.zova"
+    with zova.Database.create(str(path)) as db:
+        with pytest.raises(zova.ZovaError) as exc:
+            db.exec("select * from no_such_table")
+        copied_message = str(exc.value)
+        assert exc.value.status_name == "ZOVA_SQLITE_ERROR"
+        assert "no_such_table" in copied_message
+
+        db.exec("create table after_error(id integer)")
+        assert exc.value.status_name == "ZOVA_SQLITE_ERROR"
+        assert "no_such_table" in str(exc.value)

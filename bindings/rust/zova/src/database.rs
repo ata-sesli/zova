@@ -262,19 +262,19 @@ pub(crate) fn cstring(value: &str, context: &'static str) -> Result<CString> {
     CString::new(value).map_err(|_| Error::InteriorNul { context })
 }
 
-fn path_to_cstring(path: &Path) -> Result<CString> {
+pub(crate) fn path_to_cstring(path: &Path) -> Result<CString> {
     let value = path.to_str().ok_or(Error::NonUtf8Path)?;
     cstring(value, "path")
 }
 
-fn empty_message() -> zova_sys::zova_message {
+pub(crate) fn empty_message() -> zova_sys::zova_message {
     zova_sys::zova_message {
         data: ptr::null_mut(),
         len: 0,
     }
 }
 
-fn take_message(message: &mut zova_sys::zova_message) -> Option<String> {
+pub(crate) fn take_message(message: &mut zova_sys::zova_message) -> Option<String> {
     if message.data.is_null() {
         return None;
     }

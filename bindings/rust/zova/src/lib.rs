@@ -4,11 +4,13 @@
 //! prepared SQL statements, transactions, explicit vacuum, objects, chunks,
 //! manifests, range reads, assembly, `ObjectWriter`, vector collections, vector
 //! CRUD, exact vector search, and SQL-native vector queries through prepared
-//! statements.
+//! statements. Use `SharedDatabase` when one serialized handle should be shared
+//! across Rust threads.
 
 mod database;
 mod error;
 mod object;
+mod shared;
 mod statement;
 mod vector;
 
@@ -18,6 +20,7 @@ pub use object::{
     object_chunk_id, object_id, ObjectChunkId, ObjectId, ObjectManifest, ObjectManifestChunk,
     ObjectWriter, OwnedObjectWriter,
 };
+pub use shared::{SharedDatabase, SharedDatabaseGuard, SharedObjectWriter, SharedStatement};
 pub use statement::{ColumnType, OwnedStatement, Statement, Step};
 pub use vector::{
     Vector, VectorCollectionInfo, VectorCollectionOptions, VectorInput, VectorMetric,

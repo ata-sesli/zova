@@ -45,8 +45,13 @@ fn build_local_zova() -> PathBuf {
         "cargo:rerun-if-changed={}",
         repo_root.join("include/zova.h").display()
     );
-    println!("cargo:rerun-if-changed={}", repo_root.join("src").display());
     println!("cargo:rerun-if-changed={}", build_zig.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        repo_root.join("build.zig.zon").display()
+    );
+    emit_rerun_if_changed_recursive(&repo_root.join("src"));
+    emit_rerun_if_changed_recursive(&repo_root.join("vendor"));
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let prefix = out_dir.join("zova-c-abi");
@@ -67,6 +72,31 @@ fn build_local_zova() -> PathBuf {
     let lib_dir = prefix.join("lib");
     assert_static_library_exists(&lib_dir);
     lib_dir
+}
+
+fn emit_rerun_if_changed_recursive(path: &Path) {
+    let entries = std::fs::read_dir(path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|err| {
+            panic!(
+                "failed to read directory entry under {}: {err}",
+                path.display()
+            )
+        });
+        let entry_path = entry.path();
+        let file_type = entry.file_type().unwrap_or_else(|err| {
+            panic!(
+                "failed to read file type for {}: {err}",
+                entry_path.display()
+            )
+        });
+        if file_type.is_dir() {
+            emit_rerun_if_changed_recursive(&entry_path);
+        } else {
+            println!("cargo:rerun-if-changed={}", entry_path.display());
+        }
+    }
 }
 
 fn assert_static_library_exists(lib_dir: &Path) {

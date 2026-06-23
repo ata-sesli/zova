@@ -1,6 +1,6 @@
 # Zova Go Bindings
 
-This module is the first Go binding slice for Zova.
+This module contains the source-first Go bindings for Zova.
 
 It currently covers:
 

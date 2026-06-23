@@ -241,5 +241,8 @@ fn errors_preserve_status_and_reject_bad_strings() {
     let err = db.exec("select * from no_such_table").unwrap_err();
     assert_eq!(err.status(), Some(Status::SqliteError));
     assert!(err.to_string().contains("no_such_table"));
+    db.exec("create table after_error(id integer)").unwrap();
+    assert_eq!(err.status(), Some(Status::SqliteError));
+    assert!(err.to_string().contains("no_such_table"));
     let _ = std::fs::remove_file(path);
 }

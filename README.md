@@ -8,7 +8,7 @@ content-addressed objects, chunk manifests, streaming writes, and exact vector
 search. Applications keep their own metadata in normal SQL tables and store
 Zova object ids or vector ids alongside their rows.
 
-Current package version: `0.13.2`.
+Current package version: `0.14.0`.
 
 Zova is not tied to one application language. The project exposes:
 
@@ -55,7 +55,7 @@ flowchart TD
     VecCols --> Vecs
 ```
 
-## What Works In v0.13.2
+## What Works In v0.14.0
 
 - normal SQLite access through a thin wrapper
 - `.zova` database create/open/validation
@@ -73,8 +73,11 @@ flowchart TD
   virtual table
 - C ABI for database, prepared SQL statements, explicit maintenance, objects,
   chunks, writers, and vectors
+- internally serialized C ABI database handles, child-handle close protection,
+  read-only open, busy timeout controls, and SQL record helpers
 - Rust bindings for records, prepared statements, transactions, vacuum, objects,
-  chunks, manifests, `ObjectWriter`, vectors, and SQL-native vector search
+  chunks, manifests, `ObjectWriter`, vectors, SQL-native vector search, and the
+  opt-in shared `SharedDatabase`
 - Go bindings for records, prepared statements, transactions, vacuum, objects,
   chunks, manifests, `ObjectWriter`, vectors, and SQL-native vector search
 - Python bindings for records, prepared statements, transactions, vacuum,
@@ -212,7 +215,9 @@ the database; `zova_database_close` returns `ZOVA_MISUSE` and leaves the handle
 usable while live children still exist. After a successful close, statement
 finalize, or writer destroy, that C pointer is invalid and must not be reused;
 coordinate those terminal calls so no other thread can still call through the
-same pointer.
+same pointer. Serialization is not recursive callback reentrancy; do not call
+back into the same handle from code already executing inside a Zova/SQLite
+callback.
 
 Use one handle when simplicity matters. Open multiple database handles to the
 same file when you want true concurrent database work; cross-handle contention
@@ -236,7 +241,7 @@ The ABI is additive and pre-1.0.
 
 ## Rust Bindings
 
-v0.13.0 introduced source-first Rust bindings under `bindings/rust`.
+Source-first Rust bindings live under `bindings/rust`.
 
 The workspace contains:
 
@@ -253,6 +258,8 @@ The safe `zova` crate exposes:
 
 - `Database` lifecycle, conversion, `exec`, prepared statements, transactions,
   and explicit `vacuum`
+- `SharedDatabase` for cloneable, thread-safe, internally serialized access to
+  one Zova handle
 - SQL records through one Zova handle, without opening a separate SQLite handle
 - object APIs, chunk/manifests APIs, receive-side assembly, range reads, and
   `ObjectWriter`
@@ -268,13 +275,13 @@ Run the Rust tests:
 cargo test --workspace --manifest-path bindings/rust/Cargo.toml
 ```
 
-The Rust crates are included in the source archive, but v0.13.2 does not publish
+The Rust crates are included in the source archive, but v0.14.0 does not publish
 them to crates.io automatically and does not ship compiled libraries. Consumers
 build from source.
 
 ## Go Bindings
 
-v0.13.1 added source-first Go bindings under `bindings/go`.
+Source-first Go bindings live under `bindings/go`.
 
 The Go package is a cgo-backed wrapper over `include/zova.h`. It links the local
 static C ABI library produced by:
@@ -304,13 +311,13 @@ go test ./...
 go vet ./...
 ```
 
-The Go module is included in the source archive, but v0.13.2 does not publish a
+The Go module is included in the source archive, but v0.14.0 does not publish a
 Go module automatically and does not ship compiled libraries. Consumers build
 from source.
 
 ## Python Bindings
 
-v0.13.2 adds source-first Python bindings under `bindings/python`.
+Source-first Python bindings live under `bindings/python`.
 
 The Python package is a PyO3/maturin extension backed by the safe Rust `zova`
 crate. It does not use `ctypes` or cffi as the official binding path, and users
@@ -337,7 +344,7 @@ uv run --isolated --with maturin --with pytest --directory bindings/python matur
 uv run --isolated --with pytest --directory bindings/python python -m pytest
 ```
 
-The Python package is included in the source archive, but v0.13.2 does not
+The Python package is included in the source archive, but v0.14.0 does not
 publish to PyPI automatically and does not ship a platform wheel matrix.
 Consumers build from source with maturin.
 
@@ -622,21 +629,21 @@ var close = try db.searchVectorsWithin(
 defer close.deinit(allocator);
 ```
 
-Search is exact and flat-scan in v0.13.2. That is deliberate: Zova currently
+Search is exact and flat-scan in v0.14.0. That is deliberate: Zova currently
 prioritizes deterministic local correctness over approximate indexing. It is a
 good fit for small and medium local datasets, offline ranking, tests that need
 repeatable nearest-neighbor results, and candidate-filtered search where SQL
 first narrows the metadata set and Zova ranks the eligible vector ids.
 
 It is not yet a low-latency ANN engine for millions of vectors. Zova does not
-include HNSW, IVFFlat, quantized indexes, or vector SQL operators in v0.13.2.
+include HNSW, IVFFlat, quantized indexes, or vector SQL operators in v0.14.0.
 
 Missing candidate ids are skipped. Invalid candidate ids return
 `error.VectorInvalid`. Corrupt selected vector rows return `error.VectorCorrupt`.
 
 ## SQL-Native Vector Search
 
-v0.13.2 makes Zova vectors queryable from SQL on `zova.Database` connections.
+v0.14.0 makes Zova vectors queryable from SQL on `zova.Database` connections.
 The raw `zova.sqlite.Database` wrapper remains plain SQLite and does not
 register Zova vector SQL helpers.
 
@@ -882,7 +889,7 @@ scripts/check-release.sh
 
 ## Release Package Policy
 
-v0.13.2 releases a source-only package/archive. The package includes:
+v0.14.0 releases a source-only package/archive. The package includes:
 
 - `README.md`
 - `build.zig`
@@ -907,16 +914,16 @@ Go package, and Python extension from source.
 The release script:
 
 ```sh
-scripts/package-release.sh 0.13.2
+scripts/package-release.sh 0.14.0
 ```
 
 tags the current commit, pushes the branch and tag, creates a source archive,
 and creates the GitHub release. Do not run it until the exact commit you want
 to release is ready.
 
-## Non-Goals In v0.13.2
+## Non-Goals In v0.14.0
 
-Zova v0.13.2 does not include:
+Zova v0.14.0 does not include:
 
 - ANN indexes
 - HNSW or IVFFlat
@@ -928,6 +935,7 @@ Zova v0.13.2 does not include:
 - automatic Go module publishing
 - PyPI publishing
 - platform wheel matrix publishing
+- background worker threads hidden inside Zova
 - repair commands
 - orphan scan CLI
 - CLI mutation commands

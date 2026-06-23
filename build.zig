@@ -124,6 +124,7 @@ pub fn build(b: *std.Build) void {
         .file = b.path("tests/c_abi_smoke.c"),
         .flags = &.{"-std=c99"},
     });
+    c_smoke_module.linkSystemLibrary("pthread", .{});
     c_smoke_module.linkLibrary(c_abi_lib);
 
     const c_smoke = b.addExecutable(.{

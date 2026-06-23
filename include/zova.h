@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 /*
- * Zova C ABI, v0.13.2 pre-1.0.
+ * Zova C ABI, v0.14.0 pre-1.0.
  *
  * This header exposes a C-compatible object and vector API over Zova's Zig
  * implementation. The ABI is intentionally conservative: opaque handles,
@@ -24,6 +24,8 @@
  *   calls so no other thread can still call through the same pointer.
  * - Multiple database handles may point at the same file for true concurrency;
  *   cross-handle locking follows normal SQLite behavior.
+ * - Serialization is not callback reentrancy. Do not call back into the same
+ *   handle from code that is already executing inside a Zova/SQLite callback.
  *
  * Strings and bytes:
  * - Paths and SQL are null-terminated C strings.

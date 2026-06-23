@@ -462,19 +462,19 @@ impl Drop for OwnedObjectWriter {
 }
 
 impl ObjectId {
-    fn to_c(self) -> zova_sys::zova_object_id {
+    pub(crate) fn to_c(self) -> zova_sys::zova_object_id {
         zova_sys::zova_object_id { bytes: self.0 }
     }
 }
 
 impl ObjectChunkId {
-    fn to_c(self) -> zova_sys::zova_object_chunk_id {
+    pub(crate) fn to_c(self) -> zova_sys::zova_object_chunk_id {
         zova_sys::zova_object_chunk_id { bytes: self.0 }
     }
 }
 
 impl ObjectManifestChunk {
-    fn to_c(&self) -> zova_sys::zova_object_manifest_chunk {
+    pub(crate) fn to_c(&self) -> zova_sys::zova_object_manifest_chunk {
         zova_sys::zova_object_manifest_chunk {
             index: self.index,
             hash: self.hash.to_c(),
@@ -484,22 +484,22 @@ impl ObjectManifestChunk {
     }
 }
 
-fn from_c_object_id(id: zova_sys::zova_object_id) -> ObjectId {
+pub(crate) fn from_c_object_id(id: zova_sys::zova_object_id) -> ObjectId {
     ObjectId(id.bytes)
 }
 
-fn from_c_chunk_id(id: zova_sys::zova_object_chunk_id) -> ObjectChunkId {
+pub(crate) fn from_c_chunk_id(id: zova_sys::zova_object_chunk_id) -> ObjectChunkId {
     ObjectChunkId(id.bytes)
 }
 
-fn empty_buffer() -> zova_sys::zova_buffer {
+pub(crate) fn empty_buffer() -> zova_sys::zova_buffer {
     zova_sys::zova_buffer {
         data: ptr::null_mut(),
         len: 0,
     }
 }
 
-fn take_buffer(buffer: &mut zova_sys::zova_buffer) -> Vec<u8> {
+pub(crate) fn take_buffer(buffer: &mut zova_sys::zova_buffer) -> Vec<u8> {
     if buffer.data.is_null() || buffer.len == 0 {
         unsafe {
             zova_sys::zova_buffer_free(buffer);
@@ -514,7 +514,7 @@ fn take_buffer(buffer: &mut zova_sys::zova_buffer) -> Vec<u8> {
     out
 }
 
-fn empty_manifest() -> zova_sys::zova_object_manifest {
+pub(crate) fn empty_manifest() -> zova_sys::zova_object_manifest {
     zova_sys::zova_object_manifest {
         object_id: zova_sys::zova_object_id { bytes: [0; 32] },
         size_bytes: 0,
@@ -525,7 +525,7 @@ fn empty_manifest() -> zova_sys::zova_object_manifest {
     }
 }
 
-fn take_manifest(manifest: &mut zova_sys::zova_object_manifest) -> ObjectManifest {
+pub(crate) fn take_manifest(manifest: &mut zova_sys::zova_object_manifest) -> ObjectManifest {
     let chunker = if manifest.chunker.is_null() {
         String::new()
     } else {

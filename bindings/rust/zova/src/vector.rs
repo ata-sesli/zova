@@ -396,7 +396,7 @@ impl Database {
 }
 
 impl VectorMetric {
-    fn to_c(self) -> i32 {
+    pub(crate) fn to_c(self) -> i32 {
         match self {
             Self::Cosine => zova_sys::ZOVA_VECTOR_METRIC_COSINE,
             Self::L2 => zova_sys::ZOVA_VECTOR_METRIC_L2,
@@ -404,7 +404,7 @@ impl VectorMetric {
         }
     }
 
-    fn from_c(metric: i32) -> Result<Self> {
+    pub(crate) fn from_c(metric: i32) -> Result<Self> {
         match metric {
             zova_sys::ZOVA_VECTOR_METRIC_COSINE => Ok(Self::Cosine),
             zova_sys::ZOVA_VECTOR_METRIC_L2 => Ok(Self::L2),
@@ -414,7 +414,7 @@ impl VectorMetric {
     }
 }
 
-fn values_ptr(values: &[f32]) -> *const f32 {
+pub(crate) fn values_ptr(values: &[f32]) -> *const f32 {
     if values.is_empty() {
         ptr::null()
     } else {
@@ -422,7 +422,9 @@ fn values_ptr(values: &[f32]) -> *const f32 {
     }
 }
 
-fn candidate_ptrs(candidate_ids: &[&str]) -> Result<(Vec<std::ffi::CString>, Vec<*const c_char>)> {
+pub(crate) fn candidate_ptrs(
+    candidate_ids: &[&str],
+) -> Result<(Vec<std::ffi::CString>, Vec<*const c_char>)> {
     let candidates = candidate_ids
         .iter()
         .map(|id| cstring(id, "vector id"))
@@ -431,7 +433,7 @@ fn candidate_ptrs(candidate_ids: &[&str]) -> Result<(Vec<std::ffi::CString>, Vec
     Ok((candidates, pointers))
 }
 
-fn vector_inputs(
+pub(crate) fn vector_inputs(
     vectors: &[VectorInput<'_>],
 ) -> Result<(Vec<std::ffi::CString>, Vec<zova_sys::zova_vector_input>)> {
     let ids = vectors
@@ -450,7 +452,7 @@ fn vector_inputs(
     Ok((ids, inputs))
 }
 
-fn empty_vector() -> zova_sys::zova_vector {
+pub(crate) fn empty_vector() -> zova_sys::zova_vector {
     zova_sys::zova_vector {
         id: ptr::null_mut(),
         id_len: 0,
@@ -459,14 +461,14 @@ fn empty_vector() -> zova_sys::zova_vector {
     }
 }
 
-fn empty_search_results() -> zova_sys::zova_vector_search_results {
+pub(crate) fn empty_search_results() -> zova_sys::zova_vector_search_results {
     zova_sys::zova_vector_search_results {
         items: ptr::null_mut(),
         len: 0,
     }
 }
 
-fn empty_collection_info() -> zova_sys::zova_vector_collection_info {
+pub(crate) fn empty_collection_info() -> zova_sys::zova_vector_collection_info {
     zova_sys::zova_vector_collection_info {
         name: ptr::null_mut(),
         name_len: 0,
@@ -484,7 +486,7 @@ fn string_from_parts(data: *const c_char, len: usize) -> Result<String> {
     String::from_utf8(bytes.to_vec()).map_err(|_| Error::InvalidUtf8Text)
 }
 
-fn take_vector(vector: &mut zova_sys::zova_vector) -> Result<Vector> {
+pub(crate) fn take_vector(vector: &mut zova_sys::zova_vector) -> Result<Vector> {
     let id = string_from_parts(vector.id, vector.id_len);
     let values = if vector.values.is_null() || vector.values_len == 0 {
         Vec::new()
@@ -497,7 +499,7 @@ fn take_vector(vector: &mut zova_sys::zova_vector) -> Result<Vector> {
     Ok(Vector { id: id?, values })
 }
 
-fn take_search_results(
+pub(crate) fn take_search_results(
     results: &mut zova_sys::zova_vector_search_results,
 ) -> Result<Vec<VectorSearchResult>> {
     let items = if results.items.is_null() || results.len == 0 {
@@ -519,7 +521,7 @@ fn take_search_results(
     Ok(items)
 }
 
-fn take_collection_info(
+pub(crate) fn take_collection_info(
     info: &mut zova_sys::zova_vector_collection_info,
 ) -> Result<VectorCollectionInfo> {
     let name = string_from_parts(info.name, info.name_len);
@@ -536,7 +538,7 @@ fn take_collection_info(
     out
 }
 
-fn take_collection_list(
+pub(crate) fn take_collection_list(
     list: &mut zova_sys::zova_vector_collection_list,
 ) -> Result<Vec<VectorCollectionInfo>> {
     let items = if list.items.is_null() || list.len == 0 {

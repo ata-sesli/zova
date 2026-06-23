@@ -1,6 +1,6 @@
 # Zova Python Bindings
 
-This is the first Python binding slice for Zova.
+This package contains the source-first Python bindings for Zova.
 
 It is a PyO3/maturin extension backed by the safe Rust `zova` binding. It does
 not wrap the C ABI directly with `ctypes` or cffi. The native build still uses
@@ -21,8 +21,7 @@ The native build uses maturin, Cargo, Zig, and the Rust `zova` crate. The
 project is source-first in this slice: it does not publish wheels to PyPI and
 does not require users to locate a shared C library manually.
 
-The Python API is pre-1.0 and may still change alongside the Rust binding while
-the object and vector layers are added.
+The Python API is pre-1.0 and may still change alongside the Rust binding.
 
 ## Current Surface
 
@@ -33,7 +32,8 @@ SQL-native vector search, context managers, and Zova status exceptions.
 One Python `Database` object owns one native handle. The native C ABI serializes
 calls on that handle, so one handle is safe but not parallel. Open additional
 database handles when an application needs independent concurrent connections;
-SQLite locking rules still apply across handles.
+SQLite locking rules still apply across handles. PyO3 classes remain unsendable
+in this release even though the native C ABI serializes its own calls.
 
 Use `Database.open(path, read_only=True)` for read-only handles, and
 `Database.set_busy_timeout(milliseconds)` when an application wants SQLite to

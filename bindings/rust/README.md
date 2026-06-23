@@ -1,6 +1,6 @@
 # Zova Rust Bindings
 
-This workspace is the first Rust binding slice for Zova.
+This workspace contains the source-first Rust bindings for Zova.
 
 It contains:
 
@@ -33,16 +33,29 @@ Zova currently requires Zig `0.16.0` or newer for the local C ABI build.
 ## Handle Policy
 
 The C ABI serializes calls on one `zova_database` handle, so the native handle
-can be called from multiple threads safely, one call at a time. The safe Rust
-wrapper remains deliberately conservative in this release: `Database` and
-`Statement` are not `Send` or `Sync`, and methods use mutable borrows. Open
-multiple `Database` handles to the same file for parallel work and let SQLite
-locking decide cross-handle concurrency.
+can be called from multiple threads safely, one call at a time. Rust exposes two
+safe surfaces on top of that:
+
+- `Database` is the single-owner API. It is deliberately not `Send` or `Sync`,
+  and its methods use mutable borrows.
+- `SharedDatabase` is the opt-in shared API. It is `Clone + Send + Sync`,
+  serializes calls with a Rust mutex, and copies C ABI diagnostics before
+  another Rust thread can replace them.
+
+Use one `SharedDatabase` when you want a simple shared storage handle, such as
+from Tauri commands or worker threads. It is safe, but not parallel: one call on
+that handle runs at a time. Open multiple `Database` or `SharedDatabase` handles
+to the same file for true concurrent SQLite work and let SQLite locking decide
+cross-handle concurrency.
+
+For multi-call units that must not interleave with other calls on the same
+shared handle, use `SharedDatabase::with_exclusive`,
+`SharedDatabase::transaction`, or `SharedDatabase::transaction_immediate`.
 
 Use `Database::open_with_options` with `OpenOptions { read_only: true, .. }`
-for read-only handles, and `Database::set_busy_timeout` when an application
-wants SQLite to wait briefly on cross-handle contention. No nonzero timeout is
-installed by default.
+or `SharedDatabase::open_with_options` for read-only handles, and
+`set_busy_timeout` when an application wants SQLite to wait briefly on
+cross-handle contention. No nonzero timeout is installed by default.
 
 ## Example
 

@@ -1,5 +1,6 @@
 #include "zova.h"
 
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -65,6 +66,161 @@ static void expect_collection_info(
         fprintf(stderr, "%s: unexpected collection info\n", label);
         exit(1);
     }
+}
+
+typedef struct threaded_sql_context {
+    zova_database *db;
+    int worker_index;
+    zova_status status;
+} threaded_sql_context;
+
+static void *threaded_sql_worker(void *arg) {
+    threaded_sql_context *ctx = (threaded_sql_context *)arg;
+    char sql[160];
+    for (int i = 0; i < 12; i += 1) {
+        snprintf(sql, sizeof(sql), "insert into threaded_records(worker, item) values (%d, %d)", ctx->worker_index, i);
+        ctx->status = zova_database_exec(&(zova_database_exec_request){
+            .db = ctx->db,
+            .sql = sql,
+        });
+        if (ctx->status != ZOVA_OK) {
+            return NULL;
+        }
+    }
+    return NULL;
+}
+
+typedef struct threaded_mixed_context {
+    zova_database *db;
+    int worker_index;
+    zova_object_id object_id;
+    zova_status status;
+} threaded_mixed_context;
+
+static void *threaded_mixed_worker(void *arg) {
+    threaded_mixed_context *ctx = (threaded_mixed_context *)arg;
+    if ((ctx->worker_index % 2) == 0) {
+        const uint8_t bytes[] = "threaded object bytes";
+        ctx->status = zova_object_put(&(zova_object_put_request){
+            .db = ctx->db,
+            .data = bytes,
+            .len = sizeof(bytes) - 1,
+            .out_id = &ctx->object_id,
+        });
+        return NULL;
+    }
+
+    char vector_id[32];
+    snprintf(vector_id, sizeof(vector_id), "thread-v-%d", ctx->worker_index);
+    float values[] = {(float)ctx->worker_index, 1.0f};
+    ctx->status = zova_vector_put(&(zova_vector_put_request){
+        .db = ctx->db,
+        .collection_name = "threaded_vectors",
+        .vector_id = vector_id,
+        .values = values,
+        .values_len = 2,
+    });
+    return NULL;
+}
+
+static void run_threaded_same_handle_smoke(zova_database *db) {
+    expect_status(zova_database_exec(&(zova_database_exec_request){
+                      .db = db,
+                      .sql = "create table threaded_records(worker integer not null, item integer not null)",
+                  }),
+                  ZOVA_OK,
+                  "threaded create records");
+
+    pthread_t sql_threads[4];
+    threaded_sql_context sql_contexts[4];
+    for (size_t i = 0; i < sizeof(sql_threads) / sizeof(sql_threads[0]); i += 1) {
+        sql_contexts[i] = (threaded_sql_context){.db = db, .worker_index = (int)i, .status = ZOVA_OK};
+        if (pthread_create(&sql_threads[i], NULL, threaded_sql_worker, &sql_contexts[i]) != 0) {
+            fprintf(stderr, "threaded sql: pthread_create failed\n");
+            exit(1);
+        }
+    }
+    for (size_t i = 0; i < sizeof(sql_threads) / sizeof(sql_threads[0]); i += 1) {
+        pthread_join(sql_threads[i], NULL);
+        expect_status(sql_contexts[i].status, ZOVA_OK, "threaded sql worker");
+    }
+
+    zova_statement *count_stmt = NULL;
+    expect_status(zova_database_prepare(&(zova_database_prepare_request){
+                      .db = db,
+                      .sql = "select count(*) from threaded_records",
+                      .out_statement = &count_stmt,
+                  }),
+                  ZOVA_OK,
+                  "threaded count prepare");
+    zova_step_result step_result = ZOVA_STEP_DONE;
+    expect_status(zova_statement_step(&(zova_statement_step_request){
+                      .statement = count_stmt,
+                      .out_result = &step_result,
+                  }),
+                  ZOVA_OK,
+                  "threaded count step");
+    int64_t count = 0;
+    expect_status(zova_statement_column_int64(&(zova_statement_column_int64_request){
+                      .statement = count_stmt,
+                      .index = 0,
+                      .out_value = &count,
+                  }),
+                  ZOVA_OK,
+                  "threaded count read");
+    if (count != 48) {
+        fprintf(stderr, "threaded count: unexpected count\n");
+        exit(1);
+    }
+    expect_status(zova_statement_finalize(count_stmt), ZOVA_OK, "threaded count finalize");
+
+    expect_status(zova_vector_collection_create(&(zova_vector_collection_create_request){
+                      .db = db,
+                      .name = "threaded_vectors",
+                      .options = {.dimensions = 2, .metric = ZOVA_VECTOR_METRIC_L2},
+                  }),
+                  ZOVA_OK,
+                  "threaded create vectors");
+    pthread_t mixed_threads[6];
+    threaded_mixed_context mixed_contexts[6];
+    for (size_t i = 0; i < sizeof(mixed_threads) / sizeof(mixed_threads[0]); i += 1) {
+        mixed_contexts[i] = (threaded_mixed_context){.db = db, .worker_index = (int)i, .status = ZOVA_OK};
+        if (pthread_create(&mixed_threads[i], NULL, threaded_mixed_worker, &mixed_contexts[i]) != 0) {
+            fprintf(stderr, "threaded mixed: pthread_create failed\n");
+            exit(1);
+        }
+    }
+    for (size_t i = 0; i < sizeof(mixed_threads) / sizeof(mixed_threads[0]); i += 1) {
+        pthread_join(mixed_threads[i], NULL);
+        expect_status(mixed_contexts[i].status, ZOVA_OK, "threaded mixed worker");
+    }
+    for (size_t i = 0; i < sizeof(mixed_contexts) / sizeof(mixed_contexts[0]); i += 2) {
+        uint8_t exists = 0;
+        expect_status(zova_object_exists(&(zova_object_exists_request){
+                          .db = db,
+                          .id = mixed_contexts[i].object_id,
+                          .out_exists = &exists,
+                      }),
+                      ZOVA_OK,
+                      "threaded object exists");
+        if (!exists) {
+            fprintf(stderr, "threaded object exists: expected true\n");
+            exit(1);
+        }
+    }
+    zova_vector_collection_info info = {0};
+    expect_status(zova_vector_collection_info_get(&(zova_vector_collection_info_get_request){
+                      .db = db,
+                      .name = "threaded_vectors",
+                      .out_info = &info,
+                  }),
+                  ZOVA_OK,
+                  "threaded vector info");
+    if (info.vector_count != 3) {
+        fprintf(stderr, "threaded vector info: unexpected count\n");
+        exit(1);
+    }
+    zova_vector_collection_info_free(&info);
 }
 
 int main(int argc, char **argv) {
@@ -774,6 +930,81 @@ int main(int argc, char **argv) {
         return 1;
     }
     expect_status(zova_statement_finalize(sql_distance_by_id), ZOVA_OK, "finalize sql vector distance by id");
+
+    run_threaded_same_handle_smoke(db);
+
+    zova_statement *live_stmt = NULL;
+    expect_status(zova_database_prepare(&(zova_database_prepare_request){
+                      .db = db,
+                      .sql = "select 1",
+                      .out_statement = &live_stmt,
+                  }),
+                  ZOVA_OK,
+                  "live statement prepare");
+    expect_status(zova_database_close(db), ZOVA_MISUSE, "close with live statement");
+    expect_status(zova_statement_finalize(live_stmt), ZOVA_OK, "finalize live statement");
+
+    zova_object_writer *live_writer = NULL;
+    expect_status(zova_object_writer_create(&(zova_object_writer_create_request){
+                      .db = db,
+                      .out_writer = &live_writer,
+                  }),
+                  ZOVA_OK,
+                  "live writer create");
+    expect_status(zova_database_close(db), ZOVA_MISUSE, "close with live writer");
+    expect_status(zova_object_writer_destroy(live_writer), ZOVA_OK, "destroy live writer");
+
+    zova_database *readonly_db = NULL;
+    expect_status(zova_database_open_with_options(&(zova_database_open_options_request){
+                      .path = db_path,
+                      .flags = ZOVA_OPEN_READ_ONLY,
+                      .busy_timeout_ms = 1,
+                      .out_db = &readonly_db,
+                      .out_error_message = NULL,
+                  }),
+                  ZOVA_OK,
+                  "read-only open");
+    zova_statement *readonly_stmt = NULL;
+    expect_status(zova_database_prepare(&(zova_database_prepare_request){
+                      .db = readonly_db,
+                      .sql = "select count(*) from notes",
+                      .out_statement = &readonly_stmt,
+                  }),
+                  ZOVA_OK,
+                  "read-only prepare");
+    expect_status(zova_statement_step(&(zova_statement_step_request){
+                      .statement = readonly_stmt,
+                      .out_result = &step_result,
+                  }),
+                  ZOVA_OK,
+                  "read-only step");
+    expect_status(zova_statement_finalize(readonly_stmt), ZOVA_OK, "read-only finalize");
+    expect_status(zova_database_exec(&(zova_database_exec_request){
+                      .db = readonly_db,
+                      .sql = "insert into notes(body, payload) values ('blocked', x'00')",
+                  }),
+                  ZOVA_READ_ONLY,
+                  "read-only write");
+    expect_status(zova_database_close(readonly_db), ZOVA_OK, "read-only close");
+
+    zova_database *contender = NULL;
+    expect_status(zova_database_open_with_options(&(zova_database_open_options_request){
+                      .path = db_path,
+                      .flags = 0,
+                      .busy_timeout_ms = 1,
+                      .out_db = &contender,
+                      .out_error_message = NULL,
+                  }),
+                  ZOVA_OK,
+                  "contender open");
+    expect_status(zova_database_begin_immediate(&(zova_database_simple_request){.db = db}), ZOVA_OK, "busy holder begin immediate");
+    zova_status contender_status = zova_database_begin_immediate(&(zova_database_simple_request){.db = contender});
+    if (contender_status != ZOVA_BUSY && contender_status != ZOVA_LOCKED) {
+        fprintf(stderr, "contender begin immediate: expected busy or locked, got %s\n", zova_status_name(contender_status));
+        return 1;
+    }
+    expect_status(zova_database_rollback(&(zova_database_simple_request){.db = db}), ZOVA_OK, "busy holder rollback");
+    expect_status(zova_database_close(contender), ZOVA_OK, "contender close");
 
     zova_vector_collection_delete_request delete_collection_req = {
         .db = db,

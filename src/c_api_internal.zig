@@ -37,6 +37,9 @@
 //! execute one at a time. Statements and object writers are child handles and
 //! use the parent database mutex. Multiple database handles remain the explicit
 //! path for true concurrency and follow normal SQLite locking behavior.
+//! This is not callback reentrancy support: the mutex is intentionally
+//! non-recursive, and C ABI entrypoints must not call back into the same handle
+//! while already executing inside a Zova/SQLite callback.
 //! Successful close/finalize/destroy calls are still terminal C pointer lifetime
 //! events and must be coordinated by callers as final uses of those pointers.
 
@@ -626,15 +629,15 @@ pub fn zova_abi_version_major() callconv(.c) u32 {
 }
 
 pub fn zova_abi_version_minor() callconv(.c) u32 {
-    return 13;
+    return 14;
 }
 
 pub fn zova_abi_version_patch() callconv(.c) u32 {
-    return 2;
+    return 0;
 }
 
 pub fn zova_abi_version_string() callconv(.c) [*:0]const u8 {
-    return "0.13.2";
+    return "0.14.0";
 }
 
 // Accept a raw integer instead of a Zig enum so accidental or future C enum
@@ -2040,9 +2043,9 @@ fn statusName(status: c_int) [*:0]const u8 {
 
 test "c abi status names and versions are stable" {
     try std.testing.expectEqual(@as(u32, 0), zova_abi_version_major());
-    try std.testing.expectEqual(@as(u32, 13), zova_abi_version_minor());
-    try std.testing.expectEqual(@as(u32, 2), zova_abi_version_patch());
-    try std.testing.expectEqualStrings("0.13.2", std.mem.span(zova_abi_version_string()));
+    try std.testing.expectEqual(@as(u32, 14), zova_abi_version_minor());
+    try std.testing.expectEqual(@as(u32, 0), zova_abi_version_patch());
+    try std.testing.expectEqualStrings("0.14.0", std.mem.span(zova_abi_version_string()));
     try std.testing.expectEqualStrings("ZOVA_OK", std.mem.span(zova_status_name(@intFromEnum(zova_status.OK))));
     try std.testing.expectEqualStrings("ZOVA_OBJECT_NOT_FOUND", std.mem.span(zova_status_name(@intFromEnum(zova_status.OBJECT_NOT_FOUND))));
     try std.testing.expectEqualStrings("ZOVA_VECTOR_INVALID", std.mem.span(zova_status_name(@intFromEnum(zova_status.VECTOR_INVALID))));
@@ -2927,6 +2930,145 @@ test "c abi serializes concurrent sql calls on one database handle" {
     try std.testing.expectEqual(@as(i64, contexts.len * Worker.inserts_per_worker), count);
 }
 
+test "c abi serializes concurrent statement metadata calls on one statement" {
+    const Worker = struct {
+        const calls_per_worker = 32;
+
+        statement: ?*zova_statement,
+        status: zova_status = .OK,
+
+        fn run(ctx: *@This()) void {
+            for (0..calls_per_worker) |_| {
+                var column_count: i32 = 0;
+                var column_name = zova_text{ .data = null, .len = 0 };
+                defer zova_text_free(&column_name);
+
+                ctx.status = zova_statement_column_count(&.{
+                    .statement = ctx.statement,
+                    .out_count = &column_count,
+                });
+                if (ctx.status != .OK) return;
+                if (column_count != 2) {
+                    ctx.status = .MISUSE;
+                    return;
+                }
+
+                ctx.status = zova_statement_column_name(&.{
+                    .statement = ctx.statement,
+                    .index = 0,
+                    .out_name = &column_name,
+                });
+                if (ctx.status != .OK) return;
+                if (!std.mem.eql(u8, column_name.data.?[0..column_name.len], "one")) {
+                    ctx.status = .MISUSE;
+                    return;
+                }
+                zova_text_free(&column_name);
+            }
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-threaded-statement.zova", .{tmp.sub_path[0..]});
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(db);
+
+    var stmt: ?*zova_statement = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_prepare(&.{
+        .db = db,
+        .sql = "select 1 as one, 2 as two",
+        .out_statement = &stmt,
+    }));
+    defer _ = zova_statement_finalize(stmt);
+
+    var contexts: [8]Worker = undefined;
+    var threads: [contexts.len]std.Thread = undefined;
+    for (&contexts) |*context| {
+        context.* = .{ .statement = stmt };
+    }
+    for (&threads, &contexts) |*thread, *context| {
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{context});
+    }
+    for (threads) |thread| thread.join();
+    for (contexts) |context| try std.testing.expectEqual(zova_status.OK, context.status);
+}
+
+test "c abi serializes concurrent object writer writes on one writer" {
+    const Worker = struct {
+        const payload = "x";
+        const writes_per_worker = 64;
+
+        writer: ?*zova_object_writer,
+        status: zova_status = .OK,
+
+        fn run(ctx: *@This()) void {
+            for (0..writes_per_worker) |_| {
+                ctx.status = zova_object_writer_write(&.{
+                    .writer = ctx.writer,
+                    .data = payload.ptr,
+                    .len = payload.len,
+                });
+                if (ctx.status != .OK) return;
+            }
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-threaded-writer.zova", .{tmp.sub_path[0..]});
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(db);
+
+    var writer: ?*zova_object_writer = null;
+    try std.testing.expectEqual(zova_status.OK, zova_object_writer_create(&.{
+        .db = db,
+        .out_writer = &writer,
+    }));
+    defer _ = zova_object_writer_destroy(writer);
+
+    var contexts: [8]Worker = undefined;
+    var threads: [contexts.len]std.Thread = undefined;
+    for (&contexts) |*context| {
+        context.* = .{ .writer = writer };
+    }
+    for (&threads, &contexts) |*thread, *context| {
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{context});
+    }
+    for (threads) |thread| thread.join();
+    for (contexts) |context| try std.testing.expectEqual(zova_status.OK, context.status);
+
+    var object_id = zova_object_id{ .bytes = [_]u8{0} ** 32 };
+    try std.testing.expectEqual(zova_status.OK, zova_object_writer_finish(&.{
+        .writer = writer,
+        .out_id = &object_id,
+    }));
+
+    var size: u64 = 0;
+    try std.testing.expectEqual(zova_status.OK, zova_object_size(&.{
+        .db = db,
+        .id = object_id,
+        .out_size = &size,
+    }));
+    try std.testing.expectEqual(@as(u64, contexts.len * Worker.writes_per_worker * Worker.payload.len), size);
+}
+
 test "c abi serializes mixed object vector and database calls on one handle" {
     const Worker = struct {
         db: ?*zova_database,
@@ -3019,4 +3161,143 @@ test "c abi serializes mixed object vector and database calls on one handle" {
     }));
     defer zova_vector_collection_info_free(&info);
     try std.testing.expectEqual(@as(u64, 6), info.vector_count);
+}
+
+test "c abi multi-handle reads and vector search follow sqlite locking" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-multi-handle-read.zova", .{tmp.sub_path[0..]});
+
+    var writer: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
+        .path = db_path,
+        .out_db = &writer,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(writer);
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = writer, .sql = "create table records (body text not null)" }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = writer, .sql = "insert into records (body) values ('visible')" }));
+    try std.testing.expectEqual(zova_status.OK, zova_vector_collection_create(&.{
+        .db = writer,
+        .name = "vectors",
+        .options = .{ .dimensions = 2, .metric = @intFromEnum(zova_vector_metric.L2) },
+    }));
+    const values = [_]f32{ 1.0, 2.0 };
+    try std.testing.expectEqual(zova_status.OK, zova_vector_put(&.{
+        .db = writer,
+        .collection_name = "vectors",
+        .vector_id = "v1",
+        .values = &values,
+        .values_len = values.len,
+    }));
+
+    var reader: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_open(&.{
+        .path = db_path,
+        .out_db = &reader,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(reader);
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_begin_immediate(&.{ .db = writer }));
+    defer _ = zova_database_rollback(&.{ .db = writer });
+
+    var stmt: ?*zova_statement = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_prepare(&.{
+        .db = reader,
+        .sql = "select count(*) from records",
+        .out_statement = &stmt,
+    }));
+    defer _ = zova_statement_finalize(stmt);
+    var step_result: zova_step_result = undefined;
+    try std.testing.expectEqual(zova_status.OK, zova_statement_step(&.{ .statement = stmt, .out_result = &step_result }));
+    try std.testing.expectEqual(zova_step_result.ROW, step_result);
+    var count: i64 = 0;
+    try std.testing.expectEqual(zova_status.OK, zova_statement_column_int64(&.{ .statement = stmt, .index = 0, .out_value = &count }));
+    try std.testing.expectEqual(@as(i64, 1), count);
+
+    var results = emptyVectorSearchResults();
+    try std.testing.expectEqual(zova_status.OK, zova_vector_search(&.{
+        .db = reader,
+        .collection_name = "vectors",
+        .query = &values,
+        .query_len = values.len,
+        .limit = 1,
+        .out_results = &results,
+    }));
+    defer zova_vector_search_results_free(&results);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+}
+
+test "c abi multi-handle write contention returns busy or locked with short timeout" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-multi-handle-busy.zova", .{tmp.sub_path[0..]});
+
+    var first: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
+        .path = db_path,
+        .out_db = &first,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(first);
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = first, .sql = "create table records (body text not null)" }));
+
+    var second: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_open_with_options(&.{
+        .path = db_path,
+        .flags = 0,
+        .busy_timeout_ms = 1,
+        .out_db = &second,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(second);
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_begin_immediate(&.{ .db = first }));
+    defer _ = zova_database_rollback(&.{ .db = first });
+
+    const status = zova_database_begin_immediate(&.{ .db = second });
+    try std.testing.expect(status == .BUSY or status == .LOCKED);
+}
+
+test "c abi last error remains useful after concurrent serialized failures" {
+    const Worker = struct {
+        db: ?*zova_database,
+        status: zova_status = .OK,
+
+        fn run(ctx: *@This()) void {
+            ctx.status = zova_database_exec(&.{ .db = ctx.db, .sql = "select * from no_such_table" });
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-threaded-errors.zova", .{tmp.sub_path[0..]});
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(db);
+
+    var contexts: [6]Worker = undefined;
+    var threads: [contexts.len]std.Thread = undefined;
+    for (&contexts) |*context| {
+        context.* = .{ .db = db };
+    }
+    for (&threads, &contexts) |*thread, *context| {
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{context});
+    }
+    for (threads) |thread| thread.join();
+    for (contexts) |context| try std.testing.expectEqual(zova_status.SQLITE_ERROR, context.status);
+    try std.testing.expect(std.mem.indexOf(u8, std.mem.span(zova_database_last_error_message(db)), "no_such_table") != null);
 }
