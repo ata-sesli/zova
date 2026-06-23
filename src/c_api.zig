@@ -25,9 +25,15 @@ pub const zova_vector_collection_info = internal.zova_vector_collection_info;
 pub const zova_vector_collection_list = internal.zova_vector_collection_list;
 pub const zova_vector_input = internal.zova_vector_input;
 pub const ZOVA_OPEN_READ_ONLY = internal.ZOVA_OPEN_READ_ONLY;
+pub const ZOVA_BACKUP_NO_VERIFY = internal.ZOVA_BACKUP_NO_VERIFY;
+pub const ZOVA_COMPACT_NO_VERIFY = internal.ZOVA_COMPACT_NO_VERIFY;
+pub const ZOVA_RESTORE_NO_VERIFY = internal.ZOVA_RESTORE_NO_VERIFY;
 pub const zova_database_open_request = internal.zova_database_open_request;
 pub const zova_database_open_options_request = internal.zova_database_open_options_request;
 pub const zova_convert_sqlite_to_zova_request = internal.zova_convert_sqlite_to_zova_request;
+pub const zova_database_backup_request = internal.zova_database_backup_request;
+pub const zova_database_compact_request = internal.zova_database_compact_request;
+pub const zova_database_restore_request = internal.zova_database_restore_request;
 pub const zova_database_exec_request = internal.zova_database_exec_request;
 pub const zova_database_simple_request = internal.zova_database_simple_request;
 pub const zova_database_busy_timeout_request = internal.zova_database_busy_timeout_request;
@@ -177,6 +183,14 @@ export fn zova_database_vacuum(request: ?*const zova_database_simple_request) ca
     return internal.zova_database_vacuum(request);
 }
 
+export fn zova_database_backup(request: ?*const zova_database_backup_request) callconv(.c) zova_status {
+    return internal.zova_database_backup(request);
+}
+
+export fn zova_database_compact(request: ?*const zova_database_compact_request) callconv(.c) zova_status {
+    return internal.zova_database_compact(request);
+}
+
 export fn zova_database_set_busy_timeout(request: ?*const zova_database_busy_timeout_request) callconv(.c) zova_status {
     return internal.zova_database_set_busy_timeout(request);
 }
@@ -275,6 +289,10 @@ export fn zova_database_last_error_message(db: ?*zova_database) callconv(.c) [*:
 
 export fn zova_convert_sqlite_to_zova(request: ?*const zova_convert_sqlite_to_zova_request) callconv(.c) zova_status {
     return internal.zova_convert_sqlite_to_zova(request);
+}
+
+export fn zova_database_restore(request: ?*const zova_database_restore_request) callconv(.c) zova_status {
+    return internal.zova_database_restore(request);
 }
 
 export fn zova_object_id_from_bytes(data: ?[*]const u8, len: usize, out_id: ?*zova_object_id) callconv(.c) zova_status {

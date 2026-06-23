@@ -68,6 +68,77 @@ static void expect_collection_info(
     }
 }
 
+static void verify_operational_copy(const char *path, zova_object_id object_id, const char *label) {
+    zova_database *copy = NULL;
+    zova_message message = {0};
+    expect_status(zova_database_open(&(zova_database_open_request){
+                      .path = path,
+                      .out_db = &copy,
+                      .out_error_message = &message,
+                  }),
+                  ZOVA_OK,
+                  label);
+    zova_message_free(&message);
+
+    zova_statement *stmt = NULL;
+    expect_status(zova_database_prepare(&(zova_database_prepare_request){
+                      .db = copy,
+                      .sql = "select count(*) from notes where body = 'committed note'",
+                      .out_statement = &stmt,
+                  }),
+                  ZOVA_OK,
+                  "copy prepare notes");
+    zova_step_result step = ZOVA_STEP_DONE;
+    expect_status(zova_statement_step(&(zova_statement_step_request){
+                      .statement = stmt,
+                      .out_result = &step,
+                  }),
+                  ZOVA_OK,
+                  "copy step notes");
+    int64_t count = 0;
+    expect_status(zova_statement_column_int64(&(zova_statement_column_int64_request){
+                      .statement = stmt,
+                      .index = 0,
+                      .out_value = &count,
+                  }),
+                  ZOVA_OK,
+                  "copy read notes");
+    if (count != 1) {
+        fprintf(stderr, "%s: unexpected notes count\n", label);
+        exit(1);
+    }
+    expect_status(zova_statement_finalize(stmt), ZOVA_OK, "copy finalize notes");
+
+    uint8_t exists = 0;
+    expect_status(zova_object_exists(&(zova_object_exists_request){
+                      .db = copy,
+                      .id = object_id,
+                      .out_exists = &exists,
+                  }),
+                  ZOVA_OK,
+                  "copy object exists");
+    if (!exists) {
+        fprintf(stderr, "%s: object missing\n", label);
+        exit(1);
+    }
+
+    exists = 0;
+    expect_status(zova_vector_exists(&(zova_vector_exists_request){
+                      .db = copy,
+                      .collection_name = "cosine",
+                      .vector_id = "east",
+                      .out_exists = &exists,
+                  }),
+                  ZOVA_OK,
+                  "copy vector exists");
+    if (!exists) {
+        fprintf(stderr, "%s: vector missing\n", label);
+        exit(1);
+    }
+
+    expect_status(zova_database_close(copy), ZOVA_OK, "copy close");
+}
+
 typedef struct threaded_sql_context {
     zova_database *db;
     int worker_index;
@@ -231,6 +302,16 @@ int main(int argc, char **argv) {
 
     const char *db_path = argv[1];
     remove(db_path);
+
+    char backup_path[1024];
+    char compact_path[1024];
+    char restored_path[1024];
+    snprintf(backup_path, sizeof(backup_path), "%s.backup.zova", db_path);
+    snprintf(compact_path, sizeof(compact_path), "%s.compact.zova", db_path);
+    snprintf(restored_path, sizeof(restored_path), "%s.restored.zova", db_path);
+    remove(backup_path);
+    remove(compact_path);
+    remove(restored_path);
 
     zova_database *db = NULL;
     zova_message open_message = {0};
@@ -1209,6 +1290,33 @@ int main(int argc, char **argv) {
     expect_status(zova_object_delete(&missing_delete), ZOVA_OBJECT_NOT_FOUND, "missing object");
 
     zova_object_manifest_free(&manifest);
+    expect_status(zova_database_backup(&(zova_database_backup_request){
+                      .db = db,
+                      .destination_path = backup_path,
+                      .flags = 0,
+                  }),
+                  ZOVA_OK,
+                  "backup database");
+    expect_status(zova_database_compact(&(zova_database_compact_request){
+                      .db = db,
+                      .destination_path = compact_path,
+                      .flags = ZOVA_COMPACT_NO_VERIFY,
+                  }),
+                  ZOVA_OK,
+                  "compact database");
+    expect_status(zova_database_restore(&(zova_database_restore_request){
+                      .source_path = backup_path,
+                      .destination_path = restored_path,
+                      .flags = 0,
+                      .out_error_message = &open_message,
+                  }),
+                  ZOVA_OK,
+                  "restore database");
+    zova_message_free(&open_message);
+    verify_operational_copy(backup_path, object_id, "backup copy");
+    verify_operational_copy(compact_path, object_id, "compact copy");
+    verify_operational_copy(restored_path, object_id, "restored copy");
+
     expect_status(zova_database_vacuum(&(zova_database_simple_request){.db = db}), ZOVA_OK, "explicit vacuum");
     expect_status(zova_database_close(db), ZOVA_OK, "close database");
 

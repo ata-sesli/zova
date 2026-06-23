@@ -238,6 +238,9 @@ pub const zova_vector_input = extern struct {
 };
 
 pub const ZOVA_OPEN_READ_ONLY: u32 = 1 << 0;
+pub const ZOVA_BACKUP_NO_VERIFY: u32 = 1 << 0;
+pub const ZOVA_COMPACT_NO_VERIFY: u32 = 1 << 0;
+pub const ZOVA_RESTORE_NO_VERIFY: u32 = 1 << 0;
 
 pub const zova_database_open_request = extern struct {
     path: ?[*:0]const u8,
@@ -256,6 +259,25 @@ pub const zova_database_open_options_request = extern struct {
 pub const zova_convert_sqlite_to_zova_request = extern struct {
     source_path: ?[*:0]const u8,
     dest_path: ?[*:0]const u8,
+    out_error_message: ?*zova_message,
+};
+
+pub const zova_database_backup_request = extern struct {
+    db: ?*zova_database,
+    destination_path: ?[*:0]const u8,
+    flags: u32,
+};
+
+pub const zova_database_compact_request = extern struct {
+    db: ?*zova_database,
+    destination_path: ?[*:0]const u8,
+    flags: u32,
+};
+
+pub const zova_database_restore_request = extern struct {
+    source_path: ?[*:0]const u8,
+    destination_path: ?[*:0]const u8,
+    flags: u32,
     out_error_message: ?*zova_message,
 };
 
@@ -806,6 +828,34 @@ pub fn zova_database_vacuum(request: ?*const zova_database_simple_request) callc
     return okDb(handle);
 }
 
+pub fn zova_database_backup(request: ?*const zova_database_backup_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const destination_path = req.destination_path orelse return failDb(handle, error.InvalidArgument);
+    if ((req.flags & ~ZOVA_BACKUP_NO_VERIFY) != 0) return failDb(handle, error.InvalidArgument);
+
+    handle.db.backupTo(std.mem.span(destination_path), .{
+        .verify = (req.flags & ZOVA_BACKUP_NO_VERIFY) == 0,
+    }) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_database_compact(request: ?*const zova_database_compact_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const destination_path = req.destination_path orelse return failDb(handle, error.InvalidArgument);
+    if ((req.flags & ~ZOVA_COMPACT_NO_VERIFY) != 0) return failDb(handle, error.InvalidArgument);
+
+    handle.db.compactTo(std.mem.span(destination_path), .{
+        .verify = (req.flags & ZOVA_COMPACT_NO_VERIFY) == 0,
+    }) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
 pub fn zova_database_set_busy_timeout(request: ?*const zova_database_busy_timeout_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
@@ -1085,6 +1135,21 @@ pub fn zova_convert_sqlite_to_zova(request: ?*const zova_convert_sqlite_to_zova_
     const dest_path = req.dest_path orelse return failMessage(req.out_error_message, error.InvalidArgument);
 
     zova.convertSqliteToZova(std.mem.span(source_path), std.mem.span(dest_path)) catch |err| {
+        return failMessage(req.out_error_message, err);
+    };
+    return .OK;
+}
+
+pub fn zova_database_restore(request: ?*const zova_database_restore_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    clearMessage(req.out_error_message);
+    const source_path = req.source_path orelse return failMessage(req.out_error_message, error.InvalidArgument);
+    const destination_path = req.destination_path orelse return failMessage(req.out_error_message, error.InvalidArgument);
+    if ((req.flags & ~ZOVA_RESTORE_NO_VERIFY) != 0) return failMessage(req.out_error_message, error.InvalidArgument);
+
+    zova.restoreBackup(std.mem.span(source_path), std.mem.span(destination_path), .{
+        .verify = (req.flags & ZOVA_RESTORE_NO_VERIFY) == 0,
+    }) catch |err| {
         return failMessage(req.out_error_message, err);
     };
     return .OK;
@@ -2077,6 +2142,9 @@ test "c abi validates null pointers" {
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_commit(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_rollback(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_vacuum(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_backup(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_compact(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_restore(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_last_insert_rowid(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_changes(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_total_changes(null));
@@ -2810,6 +2878,156 @@ test "c abi exposes transaction helpers and vacuum" {
     var count: i64 = 0;
     try std.testing.expectEqual(zova_status.OK, zova_statement_column_int64(&.{ .statement = count_stmt, .index = 0, .out_value = &count }));
     try std.testing.expectEqual(@as(i64, 1), count);
+}
+
+fn expectCAbiOperationalCopy(path: [:0]const u8, object_id: zova_object_id) !void {
+    var db: ?*zova_database = null;
+    var open_request = zova_database_open_request{
+        .path = path,
+        .out_db = &db,
+        .out_error_message = null,
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_database_open(&open_request));
+    defer _ = zova_database_close(db);
+
+    var stmt: ?*zova_statement = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_prepare(&.{
+        .db = db,
+        .sql = "select count(*) from records where body = 'kept'",
+        .out_statement = &stmt,
+    }));
+    defer _ = zova_statement_finalize(stmt);
+
+    var step_result: zova_step_result = undefined;
+    try std.testing.expectEqual(zova_status.OK, zova_statement_step(&.{ .statement = stmt, .out_result = &step_result }));
+    try std.testing.expectEqual(zova_step_result.ROW, step_result);
+
+    var count: i64 = 0;
+    try std.testing.expectEqual(zova_status.OK, zova_statement_column_int64(&.{ .statement = stmt, .index = 0, .out_value = &count }));
+    try std.testing.expectEqual(@as(i64, 1), count);
+
+    var exists: u8 = 0;
+    try std.testing.expectEqual(zova_status.OK, zova_object_exists(&.{
+        .db = db,
+        .id = object_id,
+        .out_exists = &exists,
+    }));
+    try std.testing.expectEqual(@as(u8, 1), exists);
+
+    exists = 0;
+    try std.testing.expectEqual(zova_status.OK, zova_vector_exists(&.{
+        .db = db,
+        .collection_name = "records",
+        .vector_id = "r1",
+        .out_exists = &exists,
+    }));
+    try std.testing.expectEqual(@as(u8, 1), exists);
+}
+
+test "c abi backs up compacts and restores zova databases" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try std.fmt.bufPrintZ(&source_buffer, ".zig-cache/tmp/{s}/c-api-ops-source.zova", .{tmp.sub_path[0..]});
+
+    var backup_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const backup_path = try std.fmt.bufPrintZ(&backup_buffer, ".zig-cache/tmp/{s}/c-api-ops-backup.zova", .{tmp.sub_path[0..]});
+
+    var compact_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const compact_path = try std.fmt.bufPrintZ(&compact_buffer, ".zig-cache/tmp/{s}/c-api-ops-compact.zova", .{tmp.sub_path[0..]});
+
+    var restored_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const restored_path = try std.fmt.bufPrintZ(&restored_buffer, ".zig-cache/tmp/{s}/c-api-ops-restored.zova", .{tmp.sub_path[0..]});
+
+    var existing_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const existing_path = try std.fmt.bufPrintZ(&existing_buffer, ".zig-cache/tmp/{s}/c-api-ops-existing.zova", .{tmp.sub_path[0..]});
+
+    var db: ?*zova_database = null;
+    var create_request = zova_database_open_request{
+        .path = source_path,
+        .out_db = &db,
+        .out_error_message = null,
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&create_request));
+    defer _ = zova_database_close(db);
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{
+        .db = db,
+        .sql = "create table records (body text not null); insert into records (body) values ('kept')",
+    }));
+
+    var object_id = zova_object_id{ .bytes = [_]u8{0} ** 32 };
+    try std.testing.expectEqual(zova_status.OK, zova_object_put(&.{
+        .db = db,
+        .data = "c abi backup object",
+        .len = "c abi backup object".len,
+        .out_id = &object_id,
+    }));
+
+    try std.testing.expectEqual(zova_status.OK, zova_vector_collection_create(&.{
+        .db = db,
+        .name = "records",
+        .options = .{ .dimensions = 2, .metric = @intFromEnum(zova_vector_metric.L2) },
+    }));
+    const values = [_]f32{ 1.0, 2.0 };
+    try std.testing.expectEqual(zova_status.OK, zova_vector_put(&.{
+        .db = db,
+        .collection_name = "records",
+        .vector_id = "r1",
+        .values = &values,
+        .values_len = values.len,
+    }));
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_backup(&.{
+        .db = db,
+        .destination_path = backup_path,
+        .flags = 0,
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_compact(&.{
+        .db = db,
+        .destination_path = compact_path,
+        .flags = ZOVA_COMPACT_NO_VERIFY,
+    }));
+
+    var restore_message = zova_message{ .data = null, .len = 0 };
+    defer zova_message_free(&restore_message);
+    try std.testing.expectEqual(zova_status.OK, zova_database_restore(&.{
+        .source_path = backup_path,
+        .destination_path = restored_path,
+        .flags = 0,
+        .out_error_message = &restore_message,
+    }));
+
+    try expectCAbiOperationalCopy(backup_path, object_id);
+    try expectCAbiOperationalCopy(compact_path, object_id);
+    try expectCAbiOperationalCopy(restored_path, object_id);
+
+    var existing: ?*zova_database = null;
+    var existing_request = zova_database_open_request{
+        .path = existing_path,
+        .out_db = &existing,
+        .out_error_message = null,
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&existing_request));
+    try std.testing.expectEqual(zova_status.OK, zova_database_close(existing));
+
+    try std.testing.expectEqual(zova_status.DESTINATION_EXISTS, zova_database_backup(&.{
+        .db = db,
+        .destination_path = existing_path,
+        .flags = 0,
+    }));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_backup(&.{
+        .db = db,
+        .destination_path = backup_path,
+        .flags = 0xffff_ffff,
+    }));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_restore(&.{
+        .source_path = backup_path,
+        .destination_path = restored_path,
+        .flags = 0xffff_ffff,
+        .out_error_message = &restore_message,
+    }));
 }
 
 test "c abi rejects database close while statement or writer children are live" {

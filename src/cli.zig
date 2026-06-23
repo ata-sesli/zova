@@ -1,8 +1,8 @@
-//! Inspection and check CLI for Zova.
+//! Inspection, check, and operational-copy CLI for Zova.
 //!
-//! The CLI is intentionally non-mutating. It opens current-format `.zova`
-//! databases, reports bounded summaries, and validates existing object/vector
-//! storage. It does not repair, migrate, delete, vacuum, or dump binary content.
+//! Inspection and check commands are non-mutating. Operational commands create
+//! new backup/compact/restore files but do not overwrite destinations, repair,
+//! migrate, delete, or dump binary content.
 
 const std = @import("std");
 const zova = @import("zova");
@@ -33,6 +33,13 @@ const BoundedCommandArgs = struct {
     limit: usize,
     path: []const u8,
     id: ?[]const u8,
+};
+
+const OperationalCommandArgs = struct {
+    format: OutputFormat,
+    verify: bool,
+    source_path: []const u8,
+    destination_path: []const u8,
 };
 
 const BoundedCommandParseError = error{
@@ -362,6 +369,15 @@ pub fn run(
     if (std.mem.eql(u8, command, "check")) {
         return checkCommand(allocator, args[2..], stdout, stderr);
     }
+    if (std.mem.eql(u8, command, "backup")) {
+        return backupCommand(allocator, args[2..], stdout, stderr);
+    }
+    if (std.mem.eql(u8, command, "compact")) {
+        return compactCommand(allocator, args[2..], stdout, stderr);
+    }
+    if (std.mem.eql(u8, command, "restore")) {
+        return restoreCommand(allocator, args[2..], stdout, stderr);
+    }
 
     try stderr.print("unknown command: {s}\n\n", .{command});
     try writeUsage(stderr);
@@ -385,6 +401,9 @@ fn writeUsage(writer: *std.Io.Writer) !void {
         \\  zova tables [--json] [--limit <n>] <file.zova>
         \\  zova check [--deep] <file.zova>
         \\  zova check --json [--deep] <file.zova>
+        \\  zova backup [--json] [--no-verify] <source.zova> <destination.zova>
+        \\  zova compact [--json] [--no-verify] <source.zova> <destination.zova>
+        \\  zova restore [--json] [--no-verify] <backup.zova> <destination.zova>
         \\
         \\commands:
         \\  info   print a bounded summary of a current-format Zova database
@@ -397,6 +416,9 @@ fn writeUsage(writer: *std.Io.Writer) !void {
         \\  vector-collection inspect one collection and bounded vector ids
         \\  tables  list bounded user/private table names without schema or rows
         \\  check  validate Zova identity/schema and SQLite quick_check
+        \\  backup create a verified snapshot copy without overwriting destination
+        \\  compact create a verified space-reclaiming copy with VACUUM INTO
+        \\  restore restore a backup into a new destination file
         \\
         \\exit codes:
         \\  0 healthy/success
@@ -420,6 +442,196 @@ fn usageErrorFormat(stderr: *std.Io.Writer, command: []const u8, format: OutputF
         .json => try writeJsonError(stderr, command, message),
     }
     return ExitCode.usage;
+}
+
+fn parseOperationalCommandArgs(
+    args: []const []const u8,
+    command: []const u8,
+    stderr: *std.Io.Writer,
+) !OperationalCommandArgs {
+    var format: OutputFormat = .text;
+    var verify = true;
+    var saw_no_verify = false;
+    var source_path: ?[]const u8 = null;
+    var destination_path: ?[]const u8 = null;
+
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            if (format == .json) return error.DuplicateJson;
+            format = .json;
+        } else if (std.mem.eql(u8, arg, "--no-verify")) {
+            if (saw_no_verify) return error.DuplicateNoVerify;
+            saw_no_verify = true;
+            verify = false;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            return error.UnknownFlag;
+        } else if (source_path == null) {
+            source_path = arg;
+        } else if (destination_path == null) {
+            destination_path = arg;
+        } else {
+            return error.ExtraArgs;
+        }
+    }
+
+    const source = source_path orelse {
+        _ = stderr;
+        _ = command;
+        return error.MissingSource;
+    };
+    const destination = destination_path orelse return error.MissingDestination;
+
+    return .{
+        .format = format,
+        .verify = verify,
+        .source_path = source,
+        .destination_path = destination,
+    };
+}
+
+fn operationalUsageMessage(command: []const u8, err: anyerror) []const u8 {
+    return switch (err) {
+        error.DuplicateJson => "duplicate --json",
+        error.DuplicateNoVerify => "duplicate --no-verify",
+        error.UnknownFlag => "unknown flag",
+        error.MissingSource => "missing source path",
+        error.MissingDestination => "missing destination path",
+        error.ExtraArgs => if (std.mem.eql(u8, command, "restore"))
+            "restore accepts only [--json] [--no-verify] <backup.zova> <destination.zova>"
+        else
+            "command accepts only [--json] [--no-verify] <source.zova> <destination.zova>",
+        else => "invalid command arguments",
+    };
+}
+
+fn operationalErrorExitCode(err: anyerror) u8 {
+    return switch (err) {
+        error.Corrupt,
+        error.ObjectCorrupt,
+        error.ObjectNotFound,
+        error.ObjectChunkNotFound,
+        error.VectorCorrupt,
+        error.VectorCollectionNotFound,
+        error.VectorNotFound,
+        => ExitCode.check_failed,
+        else => ExitCode.open,
+    };
+}
+
+fn argsContain(args: []const []const u8, needle: []const u8) bool {
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, needle)) return true;
+    }
+    return false;
+}
+
+fn operationalErrorFormat(stderr: *std.Io.Writer, command: []const u8, format: OutputFormat, err: anyerror) !u8 {
+    const exit_code = operationalErrorExitCode(err);
+    const label = if (exit_code == ExitCode.check_failed) "verification failed" else "operation failed";
+    switch (format) {
+        .text => try stderr.print("{s}: {s}: {s}\n", .{ command, label, @errorName(err) }),
+        .json => try writeJsonErrorWithKind(stderr, command, label, @errorName(err)),
+    }
+    return exit_code;
+}
+
+fn backupCommand(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !u8 {
+    const parsed = parseOperationalCommandArgs(args, "backup", stderr) catch |err| {
+        const format: OutputFormat = if (argsContain(args, "--json")) .json else .text;
+        return usageErrorFormat(stderr, "backup", format, operationalUsageMessage("backup", err));
+    };
+
+    const source = try allocator.dupeZ(u8, parsed.source_path);
+    defer allocator.free(source);
+    const destination = try allocator.dupeZ(u8, parsed.destination_path);
+    defer allocator.free(destination);
+
+    var db = zova.Database.open(source) catch |err| return openErrorFormat(stderr, "backup", parsed.format, err);
+    defer db.deinit();
+
+    db.backupTo(destination, .{ .verify = parsed.verify }) catch |err| return operationalErrorFormat(stderr, "backup", parsed.format, err);
+    try writeOperationalSuccess(stdout, "backup", parsed, parsed.source_path, parsed.destination_path);
+    return ExitCode.ok;
+}
+
+fn compactCommand(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !u8 {
+    const parsed = parseOperationalCommandArgs(args, "compact", stderr) catch |err| {
+        const format: OutputFormat = if (argsContain(args, "--json")) .json else .text;
+        return usageErrorFormat(stderr, "compact", format, operationalUsageMessage("compact", err));
+    };
+
+    const source = try allocator.dupeZ(u8, parsed.source_path);
+    defer allocator.free(source);
+    const destination = try allocator.dupeZ(u8, parsed.destination_path);
+    defer allocator.free(destination);
+
+    var db = zova.Database.open(source) catch |err| return openErrorFormat(stderr, "compact", parsed.format, err);
+    defer db.deinit();
+
+    db.compactTo(destination, .{ .verify = parsed.verify }) catch |err| return operationalErrorFormat(stderr, "compact", parsed.format, err);
+    try writeOperationalSuccess(stdout, "compact", parsed, parsed.source_path, parsed.destination_path);
+    return ExitCode.ok;
+}
+
+fn restoreCommand(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !u8 {
+    const parsed = parseOperationalCommandArgs(args, "restore", stderr) catch |err| {
+        const format: OutputFormat = if (argsContain(args, "--json")) .json else .text;
+        return usageErrorFormat(stderr, "restore", format, operationalUsageMessage("restore", err));
+    };
+
+    const source = try allocator.dupeZ(u8, parsed.source_path);
+    defer allocator.free(source);
+    const destination = try allocator.dupeZ(u8, parsed.destination_path);
+    defer allocator.free(destination);
+
+    zova.restoreBackup(source, destination, .{ .verify = parsed.verify }) catch |err| return operationalErrorFormat(stderr, "restore", parsed.format, err);
+    try writeOperationalSuccess(stdout, "restore", parsed, parsed.source_path, parsed.destination_path);
+    return ExitCode.ok;
+}
+
+fn writeOperationalSuccess(
+    stdout: *std.Io.Writer,
+    command: []const u8,
+    parsed: OperationalCommandArgs,
+    source_path: []const u8,
+    destination_path: []const u8,
+) !void {
+    switch (parsed.format) {
+        .text => {
+            try stdout.print("{s}: ok\n", .{command});
+            try stdout.print("source: {s}\n", .{source_path});
+            try stdout.print("destination: {s}\n", .{destination_path});
+            try stdout.print("verified: {}\n", .{parsed.verify});
+        },
+        .json => {
+            try stdout.writeAll("{\n");
+            try stdout.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
+            try stdout.writeAll("  \"status\": \"ok\",\n");
+            try stdout.writeAll("  \"command\": ");
+            try writeJsonString(stdout, command);
+            try stdout.writeAll(",\n  \"source_path\": ");
+            try writeJsonString(stdout, source_path);
+            try stdout.writeAll(",\n  \"destination_path\": ");
+            try writeJsonString(stdout, destination_path);
+            try stdout.print(",\n  \"verified\": {}\n", .{parsed.verify});
+            try stdout.writeAll("}\n");
+        },
+    }
 }
 
 fn infoCommand(

@@ -44,8 +44,9 @@
  *
  * Scope:
  * - This ABI exposes database lifecycle, SQL exec, prepared statements,
- *   explicit transactions, explicit vacuum, conversion, objects, chunks,
- *   manifests, range reads, assembly, ObjectWriter, and native vectors.
+ *   explicit transactions, explicit vacuum, conversion, backup, compact copy,
+ *   restore-to-new-file, objects, chunks, manifests, range reads, assembly,
+ *   ObjectWriter, and native vectors.
  * - Vector metadata remains application-owned in user SQL tables. Vector search
  *   returns vector ids and distances only.
  * - zova_database connections register read-only SQL vector helpers:
@@ -221,6 +222,12 @@ enum {
     ZOVA_OPEN_READ_ONLY = 1u << 0
 };
 
+enum {
+    ZOVA_BACKUP_NO_VERIFY = 1u << 0,
+    ZOVA_COMPACT_NO_VERIFY = 1u << 0,
+    ZOVA_RESTORE_NO_VERIFY = 1u << 0
+};
+
 /* Open/create requests use C strings and may return an owned error message. */
 typedef struct zova_database_open_request {
     const char *path;
@@ -247,6 +254,30 @@ typedef struct zova_convert_sqlite_to_zova_request {
     const char *dest_path;
     zova_message *out_error_message;
 } zova_convert_sqlite_to_zova_request;
+
+/*
+ * Operational copy requests never overwrite destination files. By default Zova
+ * opens and verifies the destination after the copy. Use *_NO_VERIFY flags only
+ * when the caller will verify separately.
+ */
+typedef struct zova_database_backup_request {
+    zova_database *db;
+    const char *destination_path;
+    uint32_t flags;
+} zova_database_backup_request;
+
+typedef struct zova_database_compact_request {
+    zova_database *db;
+    const char *destination_path;
+    uint32_t flags;
+} zova_database_compact_request;
+
+typedef struct zova_database_restore_request {
+    const char *source_path;
+    const char *destination_path;
+    uint32_t flags;
+    zova_message *out_error_message;
+} zova_database_restore_request;
 
 /* SQL is passed through to SQLite unchanged. */
 typedef struct zova_database_exec_request {
@@ -645,6 +676,8 @@ zova_status zova_database_begin_immediate(const zova_database_simple_request *re
 zova_status zova_database_commit(const zova_database_simple_request *request);
 zova_status zova_database_rollback(const zova_database_simple_request *request);
 zova_status zova_database_vacuum(const zova_database_simple_request *request);
+zova_status zova_database_backup(const zova_database_backup_request *request);
+zova_status zova_database_compact(const zova_database_compact_request *request);
 zova_status zova_database_set_busy_timeout(const zova_database_busy_timeout_request *request);
 zova_status zova_database_last_insert_rowid(const zova_database_last_insert_rowid_request *request);
 zova_status zova_database_changes(const zova_database_changes_request *request);
@@ -652,6 +685,7 @@ zova_status zova_database_total_changes(const zova_database_total_changes_reques
 zova_status zova_database_prepare(const zova_database_prepare_request *request);
 const char *zova_database_last_error_message(zova_database *db);
 zova_status zova_convert_sqlite_to_zova(const zova_convert_sqlite_to_zova_request *request);
+zova_status zova_database_restore(const zova_database_restore_request *request);
 
 /*
  * Prepared statements.

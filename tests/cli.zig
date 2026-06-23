@@ -20,6 +20,9 @@ test "cli version and help are successful" {
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "vector-collection [--json] [--limit <n>] <file.zova> <name>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "tables [--json] [--limit <n>] <file.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "check [--deep] <file.zova>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "backup [--json] [--no-verify] <source.zova> <destination.zova>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "compact [--json] [--no-verify] <source.zova> <destination.zova>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "restore [--json] [--no-verify] <backup.zova> <destination.zova>") != null);
 }
 
 test "cli usage errors return exit code 2" {
@@ -54,6 +57,117 @@ test "cli info reports bounded database summary" {
     try expectContains(result.stdout, "user_tables:");
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, "hello object") == null);
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, "7.25") == null);
+}
+
+test "cli backup compact and restore create usable copies" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "ops-source.zova");
+
+    var backup_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const backup_path = try testingDbPath(&backup_buffer, tmp.sub_path[0..], "ops-backup.zova");
+
+    var compact_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const compact_path = try testingDbPath(&compact_buffer, tmp.sub_path[0..], "ops-compact.zova");
+
+    var restored_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const restored_path = try testingDbPath(&restored_buffer, tmp.sub_path[0..], "ops-restored.zova");
+
+    try createHealthyDatabase(source_path);
+
+    var backup = try runCli(&.{ "zova", "backup", source_path, backup_path });
+    defer backup.deinit();
+    try std.testing.expectEqual(@as(u8, 0), backup.code);
+    try expectContains(backup.stdout, "backup: ok");
+    try expectContains(backup.stdout, "verified: true");
+
+    var compact = try runCli(&.{ "zova", "compact", "--json", "--no-verify", source_path, compact_path });
+    defer compact.deinit();
+    try std.testing.expectEqual(@as(u8, 0), compact.code);
+    var compact_json = try parseJson(compact.stdout);
+    defer compact_json.deinit();
+    try expectJsonString(compact_json.value.object, "command", "compact");
+    try expectJsonBool(compact_json.value.object, "verified", false);
+
+    var restore = try runCli(&.{ "zova", "restore", "--json", backup_path, restored_path });
+    defer restore.deinit();
+    try std.testing.expectEqual(@as(u8, 0), restore.code);
+    var restore_json = try parseJson(restore.stdout);
+    defer restore_json.deinit();
+    try expectJsonString(restore_json.value.object, "command", "restore");
+    try expectJsonBool(restore_json.value.object, "verified", true);
+
+    try expectHealthyCopy(backup_path);
+    try expectHealthyCopy(compact_path);
+    try expectHealthyCopy(restored_path);
+
+    var backup_check = try runCli(&.{ "zova", "check", backup_path });
+    defer backup_check.deinit();
+    try std.testing.expectEqual(@as(u8, 0), backup_check.code);
+
+    var backup_deep = try runCli(&.{ "zova", "check", "--deep", backup_path });
+    defer backup_deep.deinit();
+    try std.testing.expectEqual(@as(u8, 0), backup_deep.code);
+
+    var compact_deep = try runCli(&.{ "zova", "check", "--deep", compact_path });
+    defer compact_deep.deinit();
+    try std.testing.expectEqual(@as(u8, 0), compact_deep.code);
+
+    var restored_deep = try runCli(&.{ "zova", "check", "--deep", restored_path });
+    defer restored_deep.deinit();
+    try std.testing.expectEqual(@as(u8, 0), restored_deep.code);
+}
+
+test "cli operational commands report usage path and verification failures" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "ops-errors-source.zova");
+
+    var backup_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const backup_path = try testingDbPath(&backup_buffer, tmp.sub_path[0..], "ops-errors-backup.zova");
+
+    var existing_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const existing_path = try testingDbPath(&existing_buffer, tmp.sub_path[0..], "ops-errors-existing.zova");
+
+    var invalid_source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const invalid_source_path = try testingDbPath(&invalid_source_buffer, tmp.sub_path[0..], "ops-errors-source.db");
+
+    var corrupt_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const corrupt_path = try testingDbPath(&corrupt_buffer, tmp.sub_path[0..], "ops-errors-corrupt.zova");
+
+    var corrupt_backup_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const corrupt_backup_path = try testingDbPath(&corrupt_backup_buffer, tmp.sub_path[0..], "ops-errors-corrupt-backup.zova");
+
+    try createHealthyDatabase(source_path);
+    try createHealthyDatabase(existing_path);
+    try createCorruptObjectDatabase(corrupt_path);
+
+    var duplicate_json = try runCli(&.{ "zova", "backup", "--json", "--json", source_path, backup_path });
+    defer duplicate_json.deinit();
+    try std.testing.expectEqual(@as(u8, 2), duplicate_json.code);
+    try expectContains(duplicate_json.stderr, "\"status\": \"error\"");
+
+    var missing_arg = try runCli(&.{ "zova", "compact", source_path });
+    defer missing_arg.deinit();
+    try std.testing.expectEqual(@as(u8, 2), missing_arg.code);
+
+    var invalid_source = try runCli(&.{ "zova", "backup", invalid_source_path, backup_path });
+    defer invalid_source.deinit();
+    try std.testing.expectEqual(@as(u8, 3), invalid_source.code);
+
+    var existing_dest = try runCli(&.{ "zova", "backup", source_path, existing_path });
+    defer existing_dest.deinit();
+    try std.testing.expectEqual(@as(u8, 3), existing_dest.code);
+    try expectContains(existing_dest.stderr, "DestinationExists");
+
+    var verification = try runCli(&.{ "zova", "backup", "--json", corrupt_path, corrupt_backup_path });
+    defer verification.deinit();
+    try std.testing.expectEqual(@as(u8, 4), verification.code);
+    try expectContains(verification.stderr, "verification failed");
 }
 
 test "cli info json reports bounded database summary" {
@@ -962,6 +1076,46 @@ fn createHealthyDatabase(path: [:0]const u8) !void {
     _ = try writer.finish();
 }
 
+fn createCorruptObjectDatabase(path: [:0]const u8) !void {
+    {
+        var db = try zova.Database.create(path);
+        defer db.deinit();
+        _ = try db.putObject("corrupt me");
+    }
+
+    var raw = try zova.sqlite.Database.open(path);
+    defer raw.deinit();
+    try raw.exec("update _zova_chunks set data = zeroblob(size_bytes) where chunk_hash = (select chunk_hash from _zova_chunks limit 1)");
+}
+
+fn expectHealthyCopy(path: [:0]const u8) !void {
+    var db = try zova.Database.open(path);
+    defer db.deinit();
+
+    try std.testing.expectEqual(@as(i64, 1), try countRows(&db, "select count(*) from documents"));
+
+    var object_row = try db.prepare("select object_id from documents order by id limit 1");
+    defer object_row.deinit();
+    try std.testing.expectEqual(zova.sqlite.Step.row, try object_row.step());
+    const object_blob = object_row.columnBlob(0);
+    try std.testing.expectEqual(@as(usize, 32), object_blob.len);
+    var object_id: zova.ObjectId = undefined;
+    @memcpy(object_id[0..], object_blob);
+
+    var object = try db.getObject(std.testing.allocator, object_id);
+    defer object.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("hello object", object.bytes);
+
+    var results = try db.searchVectors(std.testing.allocator, "docs", &.{ 7.25, 8.5 }, 1);
+    defer results.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), results.items.len);
+    try std.testing.expectEqualStrings("doc-1", results.items[0].id);
+
+    var loose = try db.getObjectChunk(std.testing.allocator, zova.objectChunkId("hidden chunk bytes"));
+    defer loose.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("hidden chunk bytes", loose.bytes);
+}
+
 fn insertDocument(db: *zova.Database, object_id: zova.ObjectId, vector_id: []const u8, title: []const u8) !void {
     var insert = try db.prepare("insert into documents (object_id, vector_id, title) values (?, ?, ?)");
     defer insert.deinit();
@@ -969,6 +1123,14 @@ fn insertDocument(db: *zova.Database, object_id: zova.ObjectId, vector_id: []con
     try insert.bindText(2, vector_id);
     try insert.bindText(3, title);
     try std.testing.expectEqual(zova.sqlite.Step.done, try insert.step());
+}
+
+fn countRows(db: *zova.Database, sql: [:0]const u8) !i64 {
+    var stmt = try db.prepare(sql);
+    defer stmt.deinit();
+
+    try std.testing.expectEqual(zova.sqlite.Step.row, try stmt.step());
+    return stmt.columnInt64(0);
 }
 
 fn testingDbPath(buffer: []u8, sub_path: []const u8, name: []const u8) ![:0]u8 {

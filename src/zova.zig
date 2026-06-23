@@ -92,6 +92,24 @@ pub const OpenOptions = struct {
     busy_timeout_ms: u32 = 0,
 };
 
+/// Options for `Database.backupTo`.
+pub const BackupOptions = struct {
+    /// Open and validate the destination after copying.
+    verify: bool = true,
+};
+
+/// Options for `Database.compactTo`.
+pub const CompactOptions = struct {
+    /// Open and validate the destination after compacting.
+    verify: bool = true,
+};
+
+/// Options for `restoreBackup`.
+pub const RestoreOptions = struct {
+    /// Open and validate the restored destination after copying.
+    verify: bool = true,
+};
+
 /// Convert an existing SQLite database file into a new `.zova` database.
 ///
 /// The source is opened as plain SQLite and is never mutated. The destination
@@ -99,15 +117,8 @@ pub const OpenOptions = struct {
 /// objects with `_zova_` names are rejected because that namespace is reserved
 /// for Zova-owned metadata inside `.zova` files.
 pub fn convertSqliteToZova(source_path: [:0]const u8, dest_path: [:0]const u8) Error!void {
-    if (!isZovaPath(dest_path)) return error.NotZovaPath;
-
-    const io = defaultIo();
-    var dest_file = std.Io.Dir.cwd().createFile(io, dest_path, .{ .exclusive = true }) catch |err| switch (err) {
-        error.PathAlreadyExists => return error.DestinationExists,
-        else => return error.CantOpen,
-    };
-    dest_file.close(io);
-    errdefer std.Io.Dir.cwd().deleteFile(io, dest_path) catch {};
+    try reserveDestinationZovaFile(dest_path);
+    errdefer deleteDestinationFile(dest_path);
 
     try ensureSourcePathExists(source_path);
 
@@ -126,6 +137,19 @@ pub fn convertSqliteToZova(source_path: [:0]const u8, dest_path: [:0]const u8) E
 
     var validated = try Database.open(dest_path);
     validated.deinit();
+}
+
+/// Restore a backup `.zova` file into a new destination `.zova` file.
+///
+/// This uses SQLite's online backup API and never overwrites an existing
+/// destination. The source must already be a valid current-format Zova file.
+pub fn restoreBackup(source_path: [:0]const u8, dest_path: [:0]const u8, options: RestoreOptions) Error!void {
+    if (!isZovaPath(source_path)) return error.NotZovaPath;
+
+    var source = try Database.openWithOptions(source_path, .{ .read_only = true });
+    defer source.deinit();
+
+    try source.backupTo(dest_path, .{ .verify = options.verify });
 }
 
 /// Owns one initialized `.zova` database.
@@ -213,6 +237,43 @@ pub const Database = struct {
     /// want SQLite to rebuild the database file and potentially shrink it.
     pub fn vacuum(self: *Database) Error!void {
         try self.exec("vacuum");
+    }
+
+    /// Copy this database to a new `.zova` destination with SQLite's online
+    /// backup API.
+    ///
+    /// The destination must not already exist. When verification is enabled,
+    /// Zova opens the copy, runs SQLite `quick_check`, and validates object,
+    /// chunk, and vector rows through the public read paths.
+    pub fn backupTo(self: *Database, destination_path: [:0]const u8, options: BackupOptions) Error!void {
+        try reserveDestinationZovaFile(destination_path);
+        errdefer deleteDestinationFile(destination_path);
+
+        {
+            var dest = try sqlite.Database.open(destination_path);
+            defer dest.deinit();
+            try backupMainDatabase(&self.sqlite_db, &dest);
+        }
+
+        if (options.verify) try verifyOperationalCopy(destination_path);
+    }
+
+    /// Write a compact copy to a new `.zova` destination using SQLite
+    /// `VACUUM INTO`.
+    ///
+    /// This is the explicit space-reclaiming copy path. The source database is
+    /// not replaced, and the destination must not already exist.
+    pub fn compactTo(self: *Database, destination_path: [:0]const u8, options: CompactOptions) Error!void {
+        try ensureDestinationZovaPathAvailable(destination_path);
+        errdefer deleteDestinationFile(destination_path);
+
+        var vacuum_stmt = try self.prepare("vacuum into ?");
+        defer vacuum_stmt.deinit();
+
+        try vacuum_stmt.bindText(1, destination_path);
+        try expectDone(&vacuum_stmt);
+
+        if (options.verify) try verifyOperationalCopy(destination_path);
     }
 
     /// Set SQLite's busy timeout in milliseconds for this connection.
@@ -541,6 +602,58 @@ fn defaultIo() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
 
+fn ensureDestinationZovaPathAvailable(path: [:0]const u8) Error!void {
+    if (!isZovaPath(path)) return error.NotZovaPath;
+
+    const io = defaultIo();
+    if (std.fs.path.isAbsolute(path)) {
+        std.Io.Dir.accessAbsolute(io, path, .{}) catch |err| switch (err) {
+            error.FileNotFound => {
+                try ensureParentPathExists(io, path);
+                return;
+            },
+            else => return error.CantOpen,
+        };
+        return error.DestinationExists;
+    }
+
+    std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            try ensureParentPathExists(io, path);
+            return;
+        },
+        else => return error.CantOpen,
+    };
+
+    return error.DestinationExists;
+}
+
+fn ensureParentPathExists(io: std.Io, path: []const u8) Error!void {
+    const parent = std.fs.path.dirname(path) orelse return;
+    if (parent.len == 0) return;
+
+    if (std.fs.path.isAbsolute(parent)) {
+        std.Io.Dir.accessAbsolute(io, parent, .{}) catch return error.CantOpen;
+    } else {
+        std.Io.Dir.cwd().access(io, parent, .{}) catch return error.CantOpen;
+    }
+}
+
+fn reserveDestinationZovaFile(path: [:0]const u8) Error!void {
+    try ensureDestinationZovaPathAvailable(path);
+
+    const io = defaultIo();
+    var file = std.Io.Dir.cwd().createFile(io, path, .{ .exclusive = true }) catch |err| switch (err) {
+        error.PathAlreadyExists => return error.DestinationExists,
+        else => return error.CantOpen,
+    };
+    file.close(io);
+}
+
+fn deleteDestinationFile(path: [:0]const u8) void {
+    std.Io.Dir.cwd().deleteFile(defaultIo(), path) catch {};
+}
+
 fn ensurePathExists(path: []const u8) Error!void {
     const io = defaultIo();
     if (std.fs.path.isAbsolute(path)) {
@@ -634,6 +747,98 @@ fn backupMainDatabase(source: *sqlite.Database, dest: *sqlite.Database) Error!vo
 
     if (step_rc != sqlite.c.SQLITE_DONE) return mapSqliteResultCode(step_rc);
     if (finish_rc != sqlite.c.SQLITE_OK) return mapSqliteResultCode(finish_rc);
+}
+
+fn expectDone(stmt: *sqlite.Statement) Error!void {
+    switch (try stmt.step()) {
+        .done => {},
+        .row => return error.SqliteError,
+    }
+}
+
+fn verifyOperationalCopy(path: [:0]const u8) Error!void {
+    var db = try Database.openWithOptions(path, .{ .read_only = true });
+    defer db.deinit();
+
+    try verifyQuickCheck(&db);
+    try verifyStoredObjects(&db);
+    try verifyStoredChunks(&db);
+    try verifyStoredVectors(&db);
+}
+
+fn verifyQuickCheck(db: *Database) Error!void {
+    var stmt = try db.prepare("pragma quick_check");
+    defer stmt.deinit();
+
+    switch (try stmt.step()) {
+        .done => return error.Corrupt,
+        .row => {
+            if (!std.mem.eql(u8, stmt.columnText(0), "ok")) return error.Corrupt;
+        },
+    }
+
+    switch (try stmt.step()) {
+        .done => {},
+        .row => return error.Corrupt,
+    }
+}
+
+fn verifyStoredObjects(db: *Database) Error!void {
+    const allocator = std.heap.page_allocator;
+
+    var objects = try db.prepare("select object_id from _zova_objects order by object_id");
+    defer objects.deinit();
+
+    while ((try objects.step()) == .row) {
+        const blob = objects.columnBlob(0);
+        if (blob.len != @sizeOf(ObjectId)) return error.ObjectCorrupt;
+
+        var id: ObjectId = undefined;
+        @memcpy(id[0..], blob);
+
+        var object = try db.getObject(allocator, id);
+        defer object.deinit(allocator);
+    }
+}
+
+fn verifyStoredChunks(db: *Database) Error!void {
+    const allocator = std.heap.page_allocator;
+
+    var chunks = try db.prepare("select chunk_hash from _zova_chunks order by chunk_hash");
+    defer chunks.deinit();
+
+    while ((try chunks.step()) == .row) {
+        const blob = chunks.columnBlob(0);
+        if (blob.len != @sizeOf(ObjectChunkId)) return error.ObjectCorrupt;
+
+        var hash: ObjectChunkId = undefined;
+        @memcpy(hash[0..], blob);
+
+        var chunk = try db.getObjectChunk(allocator, hash);
+        defer chunk.deinit(allocator);
+    }
+}
+
+fn verifyStoredVectors(db: *Database) Error!void {
+    const allocator = std.heap.page_allocator;
+
+    var vectors = try db.prepare(
+        \\select collection_name, vector_id
+        \\from _zova_vectors
+        \\order by collection_name, vector_id
+    );
+    defer vectors.deinit();
+
+    while ((try vectors.step()) == .row) {
+        const collection_name = try allocator.dupe(u8, vectors.columnText(0));
+        defer allocator.free(collection_name);
+
+        const vector_id = try allocator.dupe(u8, vectors.columnText(1));
+        defer allocator.free(vector_id);
+
+        var vector = try db.getVector(allocator, collection_name, vector_id);
+        defer vector.deinit(allocator);
+    }
 }
 
 fn mapSqliteResultCode(rc: c_int) Error {
@@ -826,7 +1031,154 @@ const testingDbPath = test_support.testingDbPath;
 const testingWriteMetadata = test_support.testingWriteMetadata;
 const testingExpectTableCount = test_support.testingExpectTableCount;
 const testingCount = test_support.testingCount;
+const testingQuickCheckOk = test_support.testingQuickCheckOk;
 const testingIntegrityCheckOk = test_support.testingIntegrityCheckOk;
+
+const OperationalFixtureIds = struct {
+    primary_object: ObjectId,
+    streamed_object: ObjectId,
+    loose_chunk: ObjectChunkId,
+};
+
+fn fillOperationalLargeFixture(bytes: []u8) void {
+    for (bytes, 0..) |*byte, index| {
+        byte.* = @intCast((index * 31 + index / 7) % 251);
+    }
+}
+
+fn populateOperationalFixture(
+    db: *Database,
+    primary_bytes: []const u8,
+    streamed_bytes: []const u8,
+    loose_bytes: []const u8,
+) !OperationalFixtureIds {
+    try db.exec(
+        \\create table docs (
+        \\  id integer primary key,
+        \\  title text not null,
+        \\  object_id blob,
+        \\  vector_id text
+        \\);
+        \\create table doc_log (
+        \\  doc_id integer not null,
+        \\  title text not null
+        \\);
+        \\create index docs_title_idx on docs (title);
+        \\create view doc_titles as select title from docs;
+        \\create trigger docs_after_insert
+        \\after insert on docs
+        \\begin
+        \\  insert into doc_log (doc_id, title) values (new.id, new.title);
+        \\end;
+    );
+
+    const primary_object = try db.putObject(primary_bytes);
+    const streamed_object = try test_support.testingStreamObject(db, streamed_bytes, &.{ 1, 17, 4096, 70_000 });
+
+    var insert_doc = try db.prepare(
+        \\insert into docs (title, object_id, vector_id)
+        \\values (?, ?, ?)
+    );
+    defer insert_doc.deinit();
+
+    try insert_doc.bindText(1, "primary");
+    try insert_doc.bindBlob(2, &primary_object);
+    try insert_doc.bindText(3, "doc-a");
+    try std.testing.expectEqual(sqlite.Step.done, try insert_doc.step());
+
+    try insert_doc.reset();
+    try insert_doc.clearBindings();
+    try insert_doc.bindText(1, "streamed");
+    try insert_doc.bindBlob(2, &streamed_object);
+    try insert_doc.bindText(3, "doc-b");
+    try std.testing.expectEqual(sqlite.Step.done, try insert_doc.step());
+
+    try db.createVectorCollection("docs", .{ .dimensions = 3, .metric = .l2 });
+    try db.putVectors("docs", &.{
+        .{ .id = "doc-a", .values = &.{ 1.0, 0.0, 0.0 } },
+        .{ .id = "doc-b", .values = &.{ 0.0, 2.0, 0.0 } },
+    });
+
+    const loose_chunk = objectChunkId(loose_bytes);
+    try db.putObjectChunk(loose_chunk, loose_bytes);
+
+    return .{
+        .primary_object = primary_object,
+        .streamed_object = streamed_object,
+        .loose_chunk = loose_chunk,
+    };
+}
+
+fn expectOperationalFixture(
+    path: [:0]const u8,
+    ids: OperationalFixtureIds,
+    primary_bytes: []const u8,
+    streamed_bytes: []const u8,
+    loose_bytes: []const u8,
+) !void {
+    var db = try Database.open(path);
+    defer db.deinit();
+
+    try testingQuickCheckOk(&db);
+    try testingIntegrityCheckOk(&db);
+
+    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from docs"));
+    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from doc_log"));
+    try std.testing.expectEqual(@as(i64, 3), try testingCount(&db,
+        \\select count(*)
+        \\from sqlite_master
+        \\where name in ('docs_title_idx', 'doc_titles', 'docs_after_insert')
+    ));
+
+    var view_rows = try db.prepare("select title from doc_titles order by title");
+    defer view_rows.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try view_rows.step());
+    try std.testing.expectEqualStrings("primary", view_rows.columnText(0));
+    try std.testing.expectEqual(sqlite.Step.row, try view_rows.step());
+    try std.testing.expectEqualStrings("streamed", view_rows.columnText(0));
+    try std.testing.expectEqual(sqlite.Step.done, try view_rows.step());
+
+    var primary = try db.getObject(std.testing.allocator, ids.primary_object);
+    defer primary.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, primary_bytes, primary.bytes);
+
+    var streamed = try db.getObject(std.testing.allocator, ids.streamed_object);
+    defer streamed.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, streamed_bytes, streamed.bytes);
+
+    var range: [37]u8 = undefined;
+    const range_len = try db.readObjectRange(ids.streamed_object, 11, &range);
+    try std.testing.expectEqual(@as(usize, range.len), range_len);
+    try std.testing.expectEqualSlices(u8, streamed_bytes[11 .. 11 + range.len], &range);
+
+    var manifest = try db.objectManifest(std.testing.allocator, ids.streamed_object);
+    defer manifest.deinit(std.testing.allocator);
+    try std.testing.expect(manifest.chunks.len > 1);
+
+    var loose = try db.getObjectChunk(std.testing.allocator, ids.loose_chunk);
+    defer loose.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, loose_bytes, loose.bytes);
+
+    var vector = try db.getVector(std.testing.allocator, "docs", "doc-a");
+    defer vector.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("doc-a", vector.id);
+    try std.testing.expectEqualSlices(f32, &.{ 1.0, 0.0, 0.0 }, vector.values);
+
+    var results = try db.searchVectors(std.testing.allocator, "docs", &.{ 1.0, 0.0, 0.0 }, 2);
+    defer results.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), results.items.len);
+    try std.testing.expectEqualStrings("doc-a", results.items[0].id);
+
+    const query_blob = try vector_impl.encodeF32Le(std.testing.allocator, &.{ 1.0, 0.0, 0.0 });
+    defer std.testing.allocator.free(query_blob);
+
+    var distance = try db.prepare("select zova_vector_distance('docs', 'doc-a', ?)");
+    defer distance.deinit();
+    try distance.bindBlob(1, query_blob);
+    try std.testing.expectEqual(sqlite.Step.row, try distance.step());
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), distance.columnDouble(0), 0.000001);
+    try std.testing.expectEqual(sqlite.Step.done, try distance.step());
+}
 
 test "create initializes and open validates zova database" {
     var tmp = std.testing.tmpDir(.{});
@@ -1461,6 +1813,105 @@ test "convert sqlite to zova preserves index view and trigger" {
     try std.testing.expectEqual(sqlite.Step.row, try log.step());
     try std.testing.expectEqualStrings("second", log.columnText(0));
     try std.testing.expectEqual(sqlite.Step.done, try log.step());
+}
+
+test "backup compact and restore preserve zova records objects chunks and vectors" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "operations-source.zova");
+
+    var backup_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const backup_path = try testingDbPath(&backup_buffer, tmp.sub_path[0..], "operations-backup.zova");
+
+    var compact_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const compact_path = try testingDbPath(&compact_buffer, tmp.sub_path[0..], "operations-compact.zova");
+
+    var restored_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const restored_path = try testingDbPath(&restored_buffer, tmp.sub_path[0..], "operations-restored.zova");
+
+    var quoted_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const quoted_path = try testingDbPath(&quoted_buffer, tmp.sub_path[0..], "operations copy 'quoted'.zova");
+
+    const primary_bytes = "primary object bytes\x00with nul";
+    const loose_bytes = "verified loose operational chunk";
+
+    const streamed_bytes = try std.testing.allocator.alloc(u8, 140_000);
+    defer std.testing.allocator.free(streamed_bytes);
+    fillOperationalLargeFixture(streamed_bytes);
+
+    var ids: OperationalFixtureIds = undefined;
+    {
+        var db = try Database.create(source_path);
+        defer db.deinit();
+
+        ids = try populateOperationalFixture(&db, primary_bytes, streamed_bytes, loose_bytes);
+        try db.backupTo(backup_path, .{});
+        try db.compactTo(compact_path, .{});
+        try db.backupTo(quoted_path, .{});
+    }
+
+    try restoreBackup(backup_path, restored_path, .{});
+
+    try expectOperationalFixture(backup_path, ids, primary_bytes, streamed_bytes, loose_bytes);
+    try expectOperationalFixture(compact_path, ids, primary_bytes, streamed_bytes, loose_bytes);
+    try expectOperationalFixture(restored_path, ids, primary_bytes, streamed_bytes, loose_bytes);
+    try expectOperationalFixture(quoted_path, ids, primary_bytes, streamed_bytes, loose_bytes);
+}
+
+test "operational copy APIs reject invalid and existing destinations" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "operations-reject-source.zova");
+
+    var invalid_dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const invalid_dest_path = try testingDbPath(&invalid_dest_buffer, tmp.sub_path[0..], "operations-reject.db");
+
+    var existing_backup_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const existing_backup_path = try testingDbPath(&existing_backup_buffer, tmp.sub_path[0..], "operations-existing-backup.zova");
+
+    var existing_compact_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const existing_compact_path = try testingDbPath(&existing_compact_buffer, tmp.sub_path[0..], "operations-existing-compact.zova");
+
+    var existing_restore_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const existing_restore_path = try testingDbPath(&existing_restore_buffer, tmp.sub_path[0..], "operations-existing-restore.zova");
+
+    var missing_parent_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const missing_parent_path = try std.fmt.bufPrintZ(&missing_parent_buffer, ".zig-cache/tmp/{s}/missing-parent/operations.zova", .{tmp.sub_path[0..]});
+
+    {
+        var db = try Database.create(source_path);
+        defer db.deinit();
+        _ = try db.putObject("copy me");
+
+        try std.testing.expectError(error.NotZovaPath, db.backupTo(invalid_dest_path, .{}));
+        try std.testing.expectError(error.NotZovaPath, db.compactTo(invalid_dest_path, .{}));
+    }
+
+    {
+        var dest = try Database.create(existing_backup_path);
+        defer dest.deinit();
+    }
+    {
+        var dest = try Database.create(existing_compact_path);
+        defer dest.deinit();
+    }
+    {
+        var dest = try Database.create(existing_restore_path);
+        defer dest.deinit();
+    }
+
+    var db = try Database.open(source_path);
+    defer db.deinit();
+
+    try std.testing.expectError(error.DestinationExists, db.backupTo(existing_backup_path, .{}));
+    try std.testing.expectError(error.DestinationExists, db.compactTo(existing_compact_path, .{}));
+    try std.testing.expectError(error.DestinationExists, restoreBackup(source_path, existing_restore_path, .{}));
+    try std.testing.expectError(error.CantOpen, db.backupTo(missing_parent_path, .{}));
+    try std.testing.expectError(error.NotZovaPath, restoreBackup(invalid_dest_path, existing_restore_path, .{}));
 }
 
 test "convert sqlite to zova rejects invalid destination path and existing destination" {

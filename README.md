@@ -17,7 +17,7 @@ Zova is not tied to one application language. The project exposes:
 - source-first Rust bindings in `bindings/rust`
 - source-first Go bindings in `bindings/go`
 - source-first Python bindings in `bindings/python`
-- a non-mutating CLI for inspection and checks
+- a CLI for inspection, checks, backup, compact copy, and restore-to-new-file
 - a source-only release package that consumers build locally
 
 TypeScript and Swift bindings are planned as later layers over the C ABI and
@@ -36,20 +36,21 @@ Read this file in this order if you are new to Zova:
 7. [Python Bindings](#python-bindings)
 8. [Native Zig API](#native-zig-api)
 9. [Convert SQLite To Zova](#convert-sqlite-to-zova)
-10. [SQL Records](#sql-records)
-11. [Objects](#objects)
-12. [Manifests, Chunks, And Transfers](#manifests-chunks-and-transfers)
-13. [Streaming Object Writes](#streaming-object-writes)
-14. [Vectors](#vectors)
-15. [Vector Search](#vector-search)
-16. [SQL-Native Vector Search](#sql-native-vector-search)
-17. [CLI](#cli)
-18. [SQLite Policy](#sqlite-policy)
-19. [Vendored SQLite](#vendored-sqlite)
-20. [Testing](#testing)
-21. [Release Package Policy](#release-package-policy)
-22. [Non-Goals In v0.14.0](#non-goals-in-v0140)
-23. [Design Philosophy](#design-philosophy)
+10. [Operational Safety](#operational-safety)
+11. [SQL Records](#sql-records)
+12. [Objects](#objects)
+13. [Manifests, Chunks, And Transfers](#manifests-chunks-and-transfers)
+14. [Streaming Object Writes](#streaming-object-writes)
+15. [Vectors](#vectors)
+16. [Vector Search](#vector-search)
+17. [SQL-Native Vector Search](#sql-native-vector-search)
+18. [CLI](#cli)
+19. [SQLite Policy](#sqlite-policy)
+20. [Vendored SQLite](#vendored-sqlite)
+21. [Testing](#testing)
+22. [Release Package Policy](#release-package-policy)
+23. [Non-Goals In v0.14.0](#non-goals-in-v0140)
+24. [Design Philosophy](#design-philosophy)
 
 ## Architecture
 
@@ -58,7 +59,7 @@ flowchart TD
     App["Application"]
     SQL["User SQL tables<br/>records and metadata"]
     ZovaAPI["Zova API<br/>native Zig or C ABI"]
-    CLI["zova CLI<br/>info, stats, inspect, check"]
+    CLI["zova CLI<br/>info, stats, inspect, check, backup"]
     DB["local .zova file<br/>SQLite database"]
     Meta["_zova_meta<br/>identity and format"]
     Objects["_zova_objects<br/>object identity"]
@@ -88,6 +89,9 @@ flowchart TD
 - normal SQLite access through a thin wrapper
 - `.zova` database create/open/validation
 - conversion from an existing SQLite database into a new `.zova` file
+- backup to a new `.zova` snapshot with SQLite's online backup API
+- compact copy to a new `.zova` file with SQLite `VACUUM INTO`
+- restore from a backup `.zova` into a new destination file
 - content-addressed objects with `ObjectId = SHA-256(full bytes)`
 - FastCDC-v1 chunking and chunk deduplication
 - object manifests and verified chunk reads
@@ -100,7 +104,7 @@ flowchart TD
 - SQL-native vector distance functions and the read-only `zova_vector_search`
   virtual table
 - C ABI for database, prepared SQL statements, explicit maintenance, objects,
-  chunks, writers, and vectors
+  chunks, writers, vectors, backup, compact copy, and restore
 - internally serialized C ABI database handles, child-handle close protection,
   read-only open, busy timeout controls, and SQL record helpers
 - Rust bindings for records, prepared statements, transactions, vacuum, objects,
@@ -111,7 +115,8 @@ flowchart TD
 - Python bindings for records, prepared statements, transactions, vacuum,
   objects, chunks, manifests, `ObjectWriter`, vectors, and SQL-native vector
   search
-- CLI `info`, `stats`, object/chunk/vector/table inspection, and `check`
+- CLI `info`, `stats`, object/chunk/vector/table inspection, `check`,
+  `backup`, `compact`, and `restore`
 - source-only release packaging
 
 The `.zova` format is still pre-1.0. Current files use
@@ -152,6 +157,7 @@ The ABI exposes:
 - prepared statements with bind/step/column/finalize
 - explicit transaction helpers
 - explicit `VACUUM`
+- backup, compact copy, and restore-to-new-file
 - SQLite-to-Zova conversion
 - object put/get/delete/existence/size/chunk count
 - range reads
@@ -420,6 +426,55 @@ overwrites the destination. The destination must end in `.zova`.
 
 Schemas that already use `_zova_*` names are rejected with
 `error.ZovaNameConflict`, because those names are reserved for Zova internals.
+
+## Operational Safety
+
+v0.15 starts Zova's operational-safety layer. The first slice adds three
+copy-to-new-file operations:
+
+- `backup`: faithful snapshot copy using SQLite's online backup API
+- `compact`: space-reclaiming copy using SQLite `VACUUM INTO`
+- `restore`: copy a backup `.zova` into a new destination `.zova`
+
+The default policy is deliberately conservative: destinations must end in
+`.zova` and must not already exist. Zova does not replace a live application
+database for you. If an app wants to swap a restored file into active use, the
+app should close its handles and own that replace policy explicitly.
+
+Zig:
+
+```zig
+try db.backupTo("app.backup.zova", .{});
+try db.compactTo("app.compact.zova", .{});
+try zova.restoreBackup("app.backup.zova", "app.restored.zova", .{});
+```
+
+C ABI:
+
+```c
+zova_database_backup(&(zova_database_backup_request){
+    .db = db,
+    .destination_path = "app.backup.zova",
+    .flags = 0,
+});
+```
+
+CLI:
+
+```sh
+zova backup app.zova app.backup.zova
+zova compact app.zova app.compact.zova
+zova restore app.backup.zova app.restored.zova
+```
+
+By default, each operation verifies the produced destination by opening it,
+running SQLite `quick_check`, and validating Zova object/chunk/vector storage.
+Use `--no-verify` or the C ABI `*_NO_VERIFY` flags only when you will verify
+separately, for example with:
+
+```sh
+zova check --deep app.backup.zova
+```
 
 ## SQL Records
 
@@ -767,7 +822,9 @@ user tables, create indexes, or run approximate search.
 
 ## CLI
 
-The `zova` executable is a non-mutating inspection/check tool.
+The `zova` executable handles inspection, checks, and operational copy
+workflows. Inspection and check commands do not mutate the database they read.
+Backup, compact, and restore create new destination files and never overwrite.
 
 Build and run:
 
@@ -791,6 +848,9 @@ zova vectors [--json] [--limit <n>] <file.zova>
 zova vector-collection [--json] [--limit <n>] <file.zova> <name>
 zova tables [--json] [--limit <n>] <file.zova>
 zova check [--json] [--deep] <file.zova>
+zova backup [--json] [--no-verify] <source.zova> <destination.zova>
+zova compact [--json] [--no-verify] <source.zova> <destination.zova>
+zova restore [--json] [--no-verify] <backup.zova> <destination.zova>
 ```
 
 `info` reports package/SQLite/format versions, file sizes, SQLite page stats,
@@ -813,6 +873,10 @@ or row data.
 hashes, loose chunks, and vector row shape/finite values. It reports bounded
 issue examples where practical.
 
+`backup`, `compact`, and `restore` create new `.zova` destination files.
+Default verification is on. JSON output includes `cli_json_version`, `status`,
+`command`, `source_path`, `destination_path`, and `verified`.
+
 JSON output uses `cli_json_version = 1` and follows the same privacy rules as
 text output.
 
@@ -824,8 +888,10 @@ Exit codes:
 - `3`: open, path, Zova identity, or unsupported version error
 - `4`: integrity or corruption check failure
 
-The CLI does not repair, migrate, delete loose chunks, rebuild manifests, run
-`VACUUM`, change PRAGMAs, or mutate `.zova` files.
+The CLI does not repair, migrate, delete loose chunks, rebuild manifests,
+replace live application files, change PRAGMAs, or dump stored bytes. `compact`
+uses `VACUUM INTO` to create a new file; it does not vacuum the source file in
+place.
 
 ## SQLite Policy
 

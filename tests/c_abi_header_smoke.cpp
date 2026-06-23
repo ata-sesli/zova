@@ -13,6 +13,9 @@ static_assert(ZOVA_STEP_DONE == 2, "step result values are stable");
 static_assert(ZOVA_COLUMN_INTEGER == 1, "column type values are stable");
 static_assert(ZOVA_COLUMN_NULL == 5, "column type values are stable");
 static_assert(ZOVA_VECTOR_INVALID == 75, "vector status values are stable");
+static_assert(ZOVA_BACKUP_NO_VERIFY == 1u, "backup flags are stable");
+static_assert(ZOVA_COMPACT_NO_VERIFY == 1u, "compact flags are stable");
+static_assert(ZOVA_RESTORE_NO_VERIFY == 1u, "restore flags are stable");
 
 int main() {
     zova_database *db = nullptr;
@@ -65,6 +68,15 @@ int main() {
     column_blob_request.out_buffer = &buffer;
     zova_database_simple_request simple_request = {};
     simple_request.db = db;
+    zova_database_backup_request backup_request = {};
+    backup_request.db = db;
+    backup_request.destination_path = "backup.zova";
+    zova_database_compact_request compact_request = {};
+    compact_request.db = db;
+    compact_request.destination_path = "compact.zova";
+    zova_database_restore_request restore_request = {};
+    restore_request.source_path = "backup.zova";
+    restore_request.destination_path = "restored.zova";
     zova_vector_collection_info_get_request info_request = {};
     info_request.out_info = &collection_info;
     zova_vector_collections_list_request list_request = {};
@@ -132,6 +144,9 @@ int main() {
                    column_text_request.out_text == &text &&
                    column_blob_request.out_buffer == &buffer &&
                    simple_request.db == db &&
+                   backup_request.destination_path != nullptr &&
+                   compact_request.destination_path != nullptr &&
+                   restore_request.source_path != nullptr &&
                    id.bytes[0] == 0
                ? 0
                : 1;
