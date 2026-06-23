@@ -10,6 +10,32 @@ It contains:
   assembly, `ObjectWriter`, vector collections, vector CRUD, and exact vector
   search.
 
+## Contents
+
+1. [How It Fits](#how-it-fits)
+2. [Local Build](#local-build)
+3. [Handle Policy](#handle-policy)
+4. [Example](#example)
+
+## How It Fits
+
+Rust users normally use the safe `zova` crate. The lower-level `zova-sys` crate
+is there for ABI coverage and for users who explicitly want raw C calls.
+
+```mermaid
+flowchart LR
+    App["Rust app"]
+    Safe["zova crate<br/>safe API"]
+    Sys["zova-sys<br/>raw C ABI"]
+    CABI["libzova_c.a"]
+    File["local .zova file"]
+
+    App --> Safe
+    Safe --> Sys
+    Sys --> CABI
+    CABI --> File
+```
+
 ## Local Build
 
 By default, `zova-sys` builds the local C ABI with:

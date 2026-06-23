@@ -2,7 +2,7 @@
 
 This module contains the source-first Go bindings for Zova.
 
-It currently covers:
+It covers:
 
 - database create/open/close
 - SQLite-to-Zova conversion
@@ -14,6 +14,32 @@ It currently covers:
 - vector collections, vector CRUD, batch writes, collection management, exact
   search, candidate search, search-by-id, thresholds, and SQL-native vector
   search
+
+## Contents
+
+1. [How It Fits](#how-it-fits)
+2. [Build Requirements](#build-requirements)
+3. [Handle Policy](#handle-policy)
+4. [Objects](#objects)
+5. [Vectors](#vectors)
+6. [Example](#example)
+
+## How It Fits
+
+The Go package uses cgo over Zova's C ABI. Your Go code talks to `DB` and
+`Stmt`; the package handles C ownership and copies outputs into Go values.
+
+```mermaid
+flowchart LR
+    App["Go app"]
+    GoPkg["bindings/go<br/>DB and Stmt"]
+    CABI["libzova_c.a<br/>C ABI"]
+    File["local .zova file"]
+
+    App --> GoPkg
+    GoPkg --> CABI
+    CABI --> File
+```
 
 ## Build Requirements
 

@@ -8,6 +8,36 @@ Zova's C ABI underneath through the Rust `zova-sys` crate, so Python gets the
 same records/objects/vectors foundation without reimplementing the ABI ownership
 rules.
 
+## Contents
+
+1. [How It Fits](#how-it-fits)
+2. [Local Development](#local-development)
+3. [What It Covers](#what-it-covers)
+4. [Objects](#objects)
+5. [Vectors](#vectors)
+6. [SQL-Native Vector Search](#sql-native-vector-search)
+
+## How It Fits
+
+Python users import `zova`. The extension is built with PyO3 and reuses the
+safe Rust binding, which in turn links Zova's C ABI.
+
+```mermaid
+flowchart LR
+    App["Python app"]
+    PyPkg["zova Python package"]
+    PyO3["PyO3 extension"]
+    Rust["Rust zova crate"]
+    CABI["libzova_c.a"]
+    File["local .zova file"]
+
+    App --> PyPkg
+    PyPkg --> PyO3
+    PyO3 --> Rust
+    Rust --> CABI
+    CABI --> File
+```
+
 ## Local Development
 
 From `bindings/python`:
@@ -18,16 +48,17 @@ uv run --isolated --with pytest python -m pytest
 ```
 
 The native build uses maturin, Cargo, Zig, and the Rust `zova` crate. The
-project is source-first in this slice: it does not publish wheels to PyPI and
-does not require users to locate a shared C library manually.
+project is source-first: it does not publish wheels to PyPI, and users do not
+need to locate a shared C library manually.
 
 The Python API is pre-1.0 and may still change alongside the Rust binding.
 
-## Current Surface
+## What It Covers
 
-This slice exposes database lifecycle, conversion, prepared SQL statements,
-transactions, explicit vacuum, objects, streaming object writes, vectors,
-SQL-native vector search, context managers, and Zova status exceptions.
+The Python package exposes database lifecycle, conversion, prepared SQL
+statements, transactions, explicit vacuum, objects, streaming object writes,
+vectors, SQL-native vector search, context managers, and Zova status
+exceptions.
 
 One Python `Database` object owns one native handle. The native C ABI serializes
 calls on that handle, so one handle is safe but not parallel. Open additional

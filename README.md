@@ -23,6 +23,34 @@ Zova is not tied to one application language. The project exposes:
 TypeScript and Swift bindings are planned as later layers over the C ABI and
 Rust/Go/Python binding foundation.
 
+## Contents
+
+Read this file in this order if you are new to Zova:
+
+1. [Architecture](#architecture)
+2. [What Works In v0.14.0](#what-works-in-v0140)
+3. [File Boundary](#file-boundary)
+4. [C ABI](#c-abi)
+5. [Rust Bindings](#rust-bindings)
+6. [Go Bindings](#go-bindings)
+7. [Python Bindings](#python-bindings)
+8. [Native Zig API](#native-zig-api)
+9. [Convert SQLite To Zova](#convert-sqlite-to-zova)
+10. [SQL Records](#sql-records)
+11. [Objects](#objects)
+12. [Manifests, Chunks, And Transfers](#manifests-chunks-and-transfers)
+13. [Streaming Object Writes](#streaming-object-writes)
+14. [Vectors](#vectors)
+15. [Vector Search](#vector-search)
+16. [SQL-Native Vector Search](#sql-native-vector-search)
+17. [CLI](#cli)
+18. [SQLite Policy](#sqlite-policy)
+19. [Vendored SQLite](#vendored-sqlite)
+20. [Testing](#testing)
+21. [Release Package Policy](#release-package-policy)
+22. [Non-Goals In v0.14.0](#non-goals-in-v0140)
+23. [Design Philosophy](#design-philosophy)
+
 ## Architecture
 
 ```mermaid
