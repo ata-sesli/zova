@@ -23,6 +23,12 @@ type DB struct {
 	writers    map[*ObjectWriter]struct{}
 }
 
+// OpenOptions controls optional behavior for opening an existing .zova file.
+type OpenOptions struct {
+	ReadOnly      bool
+	BusyTimeoutMS uint32
+}
+
 // Create creates a new .zova database.
 func Create(path string) (*DB, error) {
 	return openOrCreate(path, true)
@@ -31,6 +37,11 @@ func Create(path string) (*DB, error) {
 // Open opens an existing .zova database.
 func Open(path string) (*DB, error) {
 	return openOrCreate(path, false)
+}
+
+// OpenWithOptions opens an existing .zova database with explicit options.
+func OpenWithOptions(path string, options OpenOptions) (*DB, error) {
+	return openWithOptions(path, options)
 }
 
 // ConvertSqliteToZova converts an existing SQLite database into a new .zova file.
@@ -81,6 +92,44 @@ func openOrCreate(path string, create bool) (*DB, error) {
 	} else {
 		status = C.zova_database_open(&request)
 	}
+	if status != C.ZOVA_OK {
+		return nil, statusWithMessage(status, takeMessage(message))
+	}
+	raw := *outRaw
+	if raw == nil {
+		return nil, newError(StatusInvalidArgument, "Zova returned a nil database handle")
+	}
+	return &DB{
+		ptr:        raw,
+		statements: make(map[*Stmt]struct{}),
+		writers:    make(map[*ObjectWriter]struct{}),
+	}, nil
+}
+
+func openWithOptions(path string, options OpenOptions) (*DB, error) {
+	cPath, err := cString("path", path)
+	if err != nil {
+		return nil, err
+	}
+	defer freeCString(cPath)
+
+	outRaw := (**C.zova_database)(C.calloc(1, C.size_t(unsafe.Sizeof(uintptr(0)))))
+	defer C.free(unsafe.Pointer(outRaw))
+	message := newCMessage()
+	defer freeCMessage(message)
+	var flags C.uint32_t
+	if options.ReadOnly {
+		flags = C.ZOVA_OPEN_READ_ONLY
+	}
+	request := C.zova_database_open_options_request{
+		path:              cPath,
+		flags:             flags,
+		busy_timeout_ms:   C.uint32_t(options.BusyTimeoutMS),
+		out_db:            outRaw,
+		out_error_message: message,
+	}
+
+	status := C.zova_database_open_with_options(&request)
 	if status != C.ZOVA_OK {
 		return nil, statusWithMessage(status, takeMessage(message))
 	}
@@ -211,6 +260,59 @@ func (db *DB) Vacuum() error {
 	return db.simple(func(request *C.zova_database_simple_request) C.zova_status {
 		return C.zova_database_vacuum(request)
 	})
+}
+
+// SetBusyTimeout sets SQLite's busy timeout for this database handle.
+func (db *DB) SetBusyTimeout(milliseconds uint32) error {
+	return db.withLock(func() error {
+		request := C.zova_database_busy_timeout_request{
+			db:           db.ptr,
+			milliseconds: C.uint32_t(milliseconds),
+		}
+		return statusFromDB(db, C.zova_database_set_busy_timeout(&request))
+	})
+}
+
+// LastInsertRowID returns SQLite's last insert rowid for this database handle.
+func (db *DB) LastInsertRowID() (int64, error) {
+	value := (*C.int64_t)(C.calloc(1, C.size_t(unsafe.Sizeof(C.int64_t(0)))))
+	defer C.free(unsafe.Pointer(value))
+	err := db.withLock(func() error {
+		request := C.zova_database_last_insert_rowid_request{
+			db:        db.ptr,
+			out_rowid: value,
+		}
+		return statusFromDB(db, C.zova_database_last_insert_rowid(&request))
+	})
+	return int64(*value), err
+}
+
+// Changes returns rows changed by the most recent INSERT, UPDATE, or DELETE.
+func (db *DB) Changes() (int64, error) {
+	value := (*C.int64_t)(C.calloc(1, C.size_t(unsafe.Sizeof(C.int64_t(0)))))
+	defer C.free(unsafe.Pointer(value))
+	err := db.withLock(func() error {
+		request := C.zova_database_changes_request{
+			db:          db.ptr,
+			out_changes: value,
+		}
+		return statusFromDB(db, C.zova_database_changes(&request))
+	})
+	return int64(*value), err
+}
+
+// TotalChanges returns all rows changed by INSERT, UPDATE, or DELETE on this handle.
+func (db *DB) TotalChanges() (int64, error) {
+	value := (*C.int64_t)(C.calloc(1, C.size_t(unsafe.Sizeof(C.int64_t(0)))))
+	defer C.free(unsafe.Pointer(value))
+	err := db.withLock(func() error {
+		request := C.zova_database_total_changes_request{
+			db:                db.ptr,
+			out_total_changes: value,
+		}
+		return statusFromDB(db, C.zova_database_total_changes(&request))
+	})
+	return int64(*value), err
 }
 
 func (db *DB) simple(function func(*C.zova_database_simple_request) C.zova_status) error {

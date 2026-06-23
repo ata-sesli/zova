@@ -32,10 +32,17 @@ Zova currently requires Zig `0.16.0` or newer for the local C ABI build.
 
 ## Handle Policy
 
-The safe Rust wrapper models Zova's one-handle-at-a-time policy with mutable
-database and statement methods. `Database` and `Statement` are not `Send` or
-`Sync` in this first slice. Open multiple `Database` handles to the same file
-for parallel work and let SQLite locking decide concurrency.
+The C ABI serializes calls on one `zova_database` handle, so the native handle
+can be called from multiple threads safely, one call at a time. The safe Rust
+wrapper remains deliberately conservative in this release: `Database` and
+`Statement` are not `Send` or `Sync`, and methods use mutable borrows. Open
+multiple `Database` handles to the same file for parallel work and let SQLite
+locking decide cross-handle concurrency.
+
+Use `Database::open_with_options` with `OpenOptions { read_only: true, .. }`
+for read-only handles, and `Database::set_busy_timeout` when an application
+wants SQLite to wait briefly on cross-handle contention. No nonzero timeout is
+installed by default.
 
 ## Example
 
@@ -50,7 +57,14 @@ db.exec("create table notes(id integer primary key, body text not null)")?;
 let mut insert = db.prepare("insert into notes(body) values (?1)")?;
 insert.bind_text(1, "hello from Rust")?;
 assert_eq!(insert.step()?, Step::Done);
+assert_eq!(db.changes()?, 1);
+let rowid = db.last_insert_rowid()?;
 ```
+
+Use `Database::changes`, `Database::total_changes`,
+`Database::last_insert_rowid`, and `Statement::column_name` for normal
+application SQL record helpers. They are not a public interface to Zova's
+private `_zova_*` tables.
 
 Objects can live beside ordinary SQL metadata:
 
@@ -79,9 +93,9 @@ assert_eq!(db.get_object(stored_id)?, b"file bytes");
 For large writes, use `Database::object_writer()` to stream data into Zova
 without keeping the complete object in memory. Transfer state, filenames, MIME
 types, and application references still belong in user SQL tables.
-Writer operations use the same one-handle-at-a-time policy as the Zig API:
-they are not thread-safe and return a Zova transaction error when used inside
-an active user transaction.
+Writer operations serialize through their parent database handle at the C ABI
+boundary and return a Zova transaction error when used inside an active user
+transaction.
 
 Vectors follow Zova's SQL-metadata model: store labels, document ids, and other
 metadata in ordinary tables, and store numeric vectors in a named collection.

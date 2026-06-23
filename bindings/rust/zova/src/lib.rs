@@ -12,7 +12,7 @@ mod object;
 mod statement;
 mod vector;
 
-pub use database::Database;
+pub use database::{Database, OpenOptions};
 pub use error::{Error, Result, Status};
 pub use object::{
     object_chunk_id, object_id, ObjectChunkId, ObjectId, ObjectManifest, ObjectManifestChunk,

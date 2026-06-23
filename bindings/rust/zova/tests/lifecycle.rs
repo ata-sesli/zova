@@ -1,4 +1,4 @@
-use zova::{ColumnType, Database, Error, Status, Step};
+use zova::{ColumnType, Database, Error, OpenOptions, Status, Step};
 
 fn temp_path(name: &str) -> String {
     let mut path = std::env::temp_dir();
@@ -31,6 +31,10 @@ fn create_open_exec_and_prepare_records() {
         insert.bind_text(1, "alpha").unwrap();
         insert.bind_blob(2, b"\0bytes").unwrap();
         assert_eq!(insert.step().unwrap(), Step::Done);
+        drop(insert);
+        assert_eq!(db.last_insert_rowid().unwrap(), 1);
+        assert_eq!(db.changes().unwrap(), 1);
+        assert!(db.total_changes().unwrap() >= 1);
     }
     {
         let mut db = Database::open(&path).unwrap();
@@ -40,6 +44,9 @@ fn create_open_exec_and_prepare_records() {
         query.bind_text(1, "alpha").unwrap();
         assert_eq!(query.step().unwrap(), Step::Row);
         assert_eq!(query.column_count().unwrap(), 3);
+        assert_eq!(query.column_name(0).unwrap(), "id");
+        assert_eq!(query.column_name(1).unwrap(), "name");
+        assert_eq!(query.column_name(2).unwrap(), "payload");
         assert_eq!(query.column_type(0).unwrap(), ColumnType::Integer);
         assert_eq!(query.column_i64(0).unwrap(), 1);
         assert_eq!(query.column_text(1).unwrap(), Some("alpha".to_string()));
@@ -69,10 +76,11 @@ fn owned_statement_can_outlive_database_wrapper_and_preserve_statement_api() {
 
     let mut reopened = Database::open(&path).unwrap();
     let mut query = reopened
-        .prepare_owned("select body, payload from records where id = ?1")
+        .prepare_owned("select body as body_text, payload from records where id = ?1")
         .unwrap();
     query.bind_i64(1, 1).unwrap();
     assert_eq!(query.step().unwrap(), Step::Row);
+    assert_eq!(query.column_name(0).unwrap(), "body_text");
     assert_eq!(query.column_text(0).unwrap(), Some("owned".to_string()));
     assert_eq!(query.column_blob(1).unwrap(), Some(b"bytes".to_vec()));
 
@@ -174,6 +182,39 @@ fn transactions_commit_rollback_and_vacuum_work() {
     drop(count);
 
     db.vacuum().unwrap();
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn read_only_open_and_busy_timeout_work() {
+    let path = temp_path("readonly");
+    {
+        let mut db = Database::create(&path).unwrap();
+        db.exec("create table notes(id integer primary key, body text not null)")
+            .unwrap();
+        db.exec("insert into notes(body) values ('kept')").unwrap();
+    }
+
+    let mut db = Database::open_with_options(
+        &path,
+        OpenOptions {
+            read_only: true,
+            busy_timeout_ms: 1,
+        },
+    )
+    .unwrap();
+    db.set_busy_timeout(0).unwrap();
+    db.set_busy_timeout(2).unwrap();
+
+    let mut query = db.prepare("select body from notes").unwrap();
+    assert_eq!(query.step().unwrap(), Step::Row);
+    assert_eq!(query.column_text(0).unwrap(), Some("kept".to_string()));
+    drop(query);
+
+    let err = db
+        .exec("insert into notes(body) values ('blocked')")
+        .unwrap_err();
+    assert_eq!(err.status(), Some(Status::ReadOnly));
     let _ = std::fs::remove_file(path);
 }
 

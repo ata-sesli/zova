@@ -29,12 +29,18 @@ def test_create_open_exec_prepare_and_context_managers(tmp_path):
             stmt.bind_text(1, "alpha")
             stmt.bind_blob(2, b"\x00bytes")
             assert stmt.step() == zova.Step.DONE
+        assert db.last_insert_rowid() == 1
+        assert db.changes() == 1
+        assert db.total_changes() >= 1
 
     with zova.Database.open(str(path)) as db:
         with db.prepare("select id, name, payload from records where name = ?1") as stmt:
             stmt.bind_text(1, "alpha")
             assert stmt.step() == zova.Step.ROW
             assert stmt.column_count() == 3
+            assert stmt.column_name(0) == "id"
+            assert stmt.column_name(1) == "name"
+            assert stmt.column_name(2) == "payload"
             assert stmt.column_type(0) == zova.ColumnType.INTEGER
             assert stmt.column_int(0) == 1
             assert stmt.column_text(1) == "alpha"
@@ -136,3 +142,21 @@ def test_transactions_vacuum_and_conversion(tmp_path):
             stmt.bind_int(1, 1)
             assert stmt.step() == zova.Step.ROW
             assert stmt.column_text(0) == "from sqlite"
+
+
+def test_read_only_open_and_busy_timeout(tmp_path):
+    path = tmp_path / "readonly.zova"
+    with zova.Database.create(str(path)) as db:
+        db.exec("create table notes(id integer primary key, body text not null)")
+        db.exec("insert into notes(body) values ('kept')")
+
+    with zova.Database.open(str(path), read_only=True, busy_timeout_ms=1) as db:
+        db.set_busy_timeout(0)
+        db.set_busy_timeout(2)
+        with db.prepare("select body from notes") as stmt:
+            assert stmt.step() == zova.Step.ROW
+            assert stmt.column_text(0) == "kept"
+
+        with pytest.raises(zova.ZovaError) as exc:
+            db.exec("insert into notes(body) values ('blocked')")
+        assert exc.value.status_name == "ZOVA_READ_ONLY"

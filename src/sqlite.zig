@@ -54,6 +54,15 @@ pub fn version() []const u8 {
     return std.mem.span(c.sqlite3_libversion());
 }
 
+/// Explicit SQLite open mode used when callers need to avoid SQLite's default
+/// create-on-open behavior.
+pub const OpenFlags = enum {
+    /// Open an existing database for reads and writes.
+    read_write,
+    /// Open an existing database for reads only.
+    read_only,
+};
+
 /// Owns one SQLite database connection.
 ///
 /// `Database` is a thin owner around `sqlite3*`. It does not hide SQL, build
@@ -70,6 +79,28 @@ pub const Database = struct {
     pub fn open(path: [:0]const u8) Error!Database {
         var raw_db: ?*c.sqlite3 = null;
         const rc = c.sqlite3_open(path.ptr, &raw_db);
+        if (rc != c.SQLITE_OK) {
+            if (raw_db) |db| {
+                _ = c.sqlite3_close(db);
+            }
+            return mapResultCode(rc);
+        }
+
+        return .{ .handle = raw_db.? };
+    }
+
+    /// Open an existing SQLite database with explicit SQLite flags.
+    ///
+    /// Plain `open` intentionally preserves SQLite's convenient default of
+    /// creating a missing file. Use this when the caller needs read-only open
+    /// behavior or wants missing files to fail.
+    pub fn openWithFlags(path: [:0]const u8, flags: OpenFlags) Error!Database {
+        var raw_db: ?*c.sqlite3 = null;
+        const sqlite_flags: c_int = switch (flags) {
+            .read_write => c.SQLITE_OPEN_READWRITE,
+            .read_only => c.SQLITE_OPEN_READONLY,
+        };
+        const rc = c.sqlite3_open_v2(path.ptr, &raw_db, sqlite_flags, null);
         if (rc != c.SQLITE_OK) {
             if (raw_db) |db| {
                 _ = c.sqlite3_close(db);
@@ -124,6 +155,15 @@ pub const Database = struct {
         try self.exec("rollback");
     }
 
+    /// Set SQLite's busy timeout in milliseconds.
+    ///
+    /// Passing 0 clears the busy handler, matching SQLite's C API.
+    pub fn setBusyTimeout(self: *Database, milliseconds: u32) Error!void {
+        if (milliseconds > std.math.maxInt(c_int)) return error.Misuse;
+        const rc = c.sqlite3_busy_timeout(self.handle, @intCast(milliseconds));
+        if (rc != c.SQLITE_OK) return mapResultCode(rc);
+    }
+
     /// Prepare SQL for repeated execution or bound parameters.
     ///
     /// The returned statement borrows this database connection. Finalize it
@@ -142,6 +182,11 @@ pub const Database = struct {
     /// Number of rows modified by the most recent INSERT, UPDATE, or DELETE.
     pub fn changes(self: *Database) i64 {
         return @intCast(c.sqlite3_changes64(self.handle));
+    }
+
+    /// Total number of rows modified by INSERT, UPDATE, or DELETE on this connection.
+    pub fn totalChanges(self: *Database) i64 {
+        return @intCast(c.sqlite3_total_changes64(self.handle));
     }
 
     /// Rowid from the most recent successful INSERT on this connection.
@@ -357,6 +402,17 @@ pub const Statement = struct {
         return c.sqlite3_column_count(self.handle);
     }
 
+    /// Return the 0-based column name for a prepared statement result column.
+    ///
+    /// The returned slice is borrowed from SQLite and is valid until the
+    /// statement is finalized or automatically reprepared. This validates the
+    /// index before calling SQLite so bindings can surface clean misuse errors.
+    pub fn columnName(self: *Statement, index: c_int) Error![]const u8 {
+        if (index < 0 or index >= self.columnCount()) return error.Misuse;
+        const ptr = c.sqlite3_column_name(self.handle, index) orelse return error.NoMemory;
+        return std.mem.span(ptr);
+    }
+
     /// Return the number of SQL parameters in this statement.
     pub fn parameterCount(self: *Statement) c_int {
         return c.sqlite3_bind_parameter_count(self.handle);
@@ -408,6 +464,38 @@ test "database opens memory database and exposes sqlite version" {
     try std.testing.expect(version().len > 0);
 }
 
+test "database can open an existing file read-only" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "readonly.db");
+
+    {
+        var setup = try Database.open(db_path);
+        defer setup.deinit();
+        try setup.exec("create table items (id integer primary key, name text not null)");
+        try setup.exec("insert into items (name) values ('stored')");
+    }
+
+    var db = try Database.openWithFlags(db_path, .read_only);
+    defer db.deinit();
+
+    var stmt = try db.prepare("select name from items where id = 1");
+    defer stmt.deinit();
+    try std.testing.expectEqual(Step.row, try stmt.step());
+    try std.testing.expectEqualStrings("stored", stmt.columnText(0));
+    try std.testing.expectError(error.ReadOnly, db.exec("insert into items (name) values ('blocked')"));
+}
+
+test "database busy timeout can be set and cleared" {
+    var db = try Database.open(":memory:");
+    defer db.deinit();
+
+    try db.setBusyTimeout(1);
+    try db.setBusyTimeout(0);
+}
+
 test "database exec creates table and writes row" {
     var db = try Database.open(":memory:");
     defer db.deinit();
@@ -416,6 +504,7 @@ test "database exec creates table and writes row" {
     try db.exec("insert into messages (body) values ('hello')");
 
     try std.testing.expectEqual(@as(i64, 1), db.changes());
+    try std.testing.expectEqual(@as(i64, 1), db.totalChanges());
     try std.testing.expectEqual(@as(i64, 1), db.lastInsertRowId());
 }
 
@@ -448,11 +537,13 @@ test "vendored sqlite supports built in json functions" {
     var db = try Database.open(":memory:");
     defer db.deinit();
 
-    var json = try db.prepare("select json_extract('{\"zova\":\"sqlite\"}', '$.zova')");
+    var json = try db.prepare("select json_extract('{\"zova\":\"sqlite\"}', '$.zova') as value");
     defer json.deinit();
 
     try std.testing.expectEqual(Step.row, try json.step());
+    try std.testing.expectEqualStrings("value", try json.columnName(0));
     try std.testing.expectEqualStrings("sqlite", json.columnText(0));
+    try std.testing.expectError(error.Misuse, json.columnName(1));
 }
 
 test "vendored sqlite supports fts5 virtual tables" {

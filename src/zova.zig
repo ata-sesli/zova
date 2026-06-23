@@ -82,6 +82,16 @@ pub const Vector = vector_impl.Vector;
 pub const VectorSearchResult = vector_impl.VectorSearchResult;
 pub const VectorSearchResults = vector_impl.VectorSearchResults;
 
+/// Options for opening an existing `.zova` database.
+pub const OpenOptions = struct {
+    /// Open the SQLite handle read-only. Read APIs and SQL queries work, while
+    /// SQLite-backed writes return `error.ReadOnly`.
+    read_only: bool = false,
+    /// Initial SQLite busy timeout in milliseconds. A value of 0 leaves
+    /// SQLite's default busy handling unchanged.
+    busy_timeout_ms: u32 = 0,
+};
+
 /// Convert an existing SQLite database file into a new `.zova` database.
 ///
 /// The source is opened as plain SQLite and is never mutated. The destination
@@ -158,12 +168,24 @@ pub const Database = struct {
     /// actual validity check, so a renamed SQLite file is rejected. Open never
     /// repairs, migrates, or lazily initializes missing private schema.
     pub fn open(path: [:0]const u8) Error!Database {
+        return openWithOptions(path, .{});
+    }
+
+    /// Open an existing initialized `.zova` database with explicit options.
+    ///
+    /// Read-only opens still validate Zova metadata and register connection-
+    /// local SQL vector helpers, but they never write private schema or run
+    /// migrations. Mutating SQL/object/vector APIs fail through SQLite's normal
+    /// read-only error path.
+    pub fn openWithOptions(path: [:0]const u8, options: OpenOptions) Error!Database {
         if (!isZovaPath(path)) return error.NotZovaPath;
         try ensurePathExists(path);
 
-        var raw = try sqlite.Database.open(path);
+        const flags: sqlite.OpenFlags = if (options.read_only) .read_only else .read_write;
+        var raw = try sqlite.Database.openWithFlags(path, flags);
         errdefer raw.deinit();
 
+        if (options.busy_timeout_ms != 0) try raw.setBusyTimeout(options.busy_timeout_ms);
         try validateZovaSchema(&raw);
         try vector_sql.register(&raw);
         return .{ .sqlite_db = raw };
@@ -191,6 +213,28 @@ pub const Database = struct {
     /// want SQLite to rebuild the database file and potentially shrink it.
     pub fn vacuum(self: *Database) Error!void {
         try self.exec("vacuum");
+    }
+
+    /// Set SQLite's busy timeout in milliseconds for this connection.
+    ///
+    /// Passing 0 clears the busy handler.
+    pub fn setBusyTimeout(self: *Database, milliseconds: u32) Error!void {
+        try self.sqlite_db.setBusyTimeout(milliseconds);
+    }
+
+    /// Rowid from the most recent successful INSERT on this connection.
+    pub fn lastInsertRowid(self: *Database) i64 {
+        return self.sqlite_db.lastInsertRowId();
+    }
+
+    /// Number of rows modified by the most recent INSERT, UPDATE, or DELETE.
+    pub fn changes(self: *Database) i64 {
+        return self.sqlite_db.changes();
+    }
+
+    /// Total number of rows modified by INSERT, UPDATE, or DELETE on this connection.
+    pub fn totalChanges(self: *Database) i64 {
+        return self.sqlite_db.totalChanges();
     }
 
     /// Current SQLite error message for the underlying connection.

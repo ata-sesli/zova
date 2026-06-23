@@ -11,6 +11,12 @@ pub struct Database {
     pub(crate) inner: Rc<DatabaseInner>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OpenOptions {
+    pub read_only: bool,
+    pub busy_timeout_ms: u32,
+}
+
 pub(crate) struct DatabaseInner {
     raw: NonNull<zova_sys::zova_database>,
     _not_send_sync: PhantomData<Rc<()>>,
@@ -23,6 +29,36 @@ impl Database {
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_or_create(path, false)
+    }
+
+    pub fn open_with_options(path: impl AsRef<Path>, options: OpenOptions) -> Result<Self> {
+        let path = path_to_cstring(path.as_ref())?;
+        let mut db = ptr::null_mut();
+        let mut message = empty_message();
+        let flags = if options.read_only {
+            zova_sys::ZOVA_OPEN_READ_ONLY
+        } else {
+            0
+        };
+        let request = zova_sys::zova_database_open_options_request {
+            path: path.as_ptr(),
+            flags,
+            busy_timeout_ms: options.busy_timeout_ms,
+            out_db: &mut db,
+            out_error_message: &mut message,
+        };
+        let status = unsafe { zova_sys::zova_database_open_with_options(&request) };
+        if status != zova_sys::ZOVA_OK {
+            return Err(Error::from_status(status, take_message(&mut message)));
+        }
+        let raw = NonNull::new(db)
+            .ok_or_else(|| Error::from_status(zova_sys::ZOVA_INVALID_ARGUMENT, None))?;
+        Ok(Self {
+            inner: Rc::new(DatabaseInner {
+                raw,
+                _not_send_sync: PhantomData,
+            }),
+        })
     }
 
     pub fn convert_sqlite_to_zova(
@@ -99,6 +135,44 @@ impl Database {
 
     pub fn vacuum(&mut self) -> Result<()> {
         self.simple(zova_sys::zova_database_vacuum)
+    }
+
+    pub fn set_busy_timeout(&mut self, milliseconds: u32) -> Result<()> {
+        let request = zova_sys::zova_database_busy_timeout_request {
+            db: self.raw_ptr(),
+            milliseconds,
+        };
+        self.status(unsafe { zova_sys::zova_database_set_busy_timeout(&request) })
+    }
+
+    pub fn last_insert_rowid(&mut self) -> Result<i64> {
+        let mut rowid = 0;
+        let request = zova_sys::zova_database_last_insert_rowid_request {
+            db: self.raw_ptr(),
+            out_rowid: &mut rowid,
+        };
+        self.status(unsafe { zova_sys::zova_database_last_insert_rowid(&request) })?;
+        Ok(rowid)
+    }
+
+    pub fn changes(&mut self) -> Result<i64> {
+        let mut changes = 0;
+        let request = zova_sys::zova_database_changes_request {
+            db: self.raw_ptr(),
+            out_changes: &mut changes,
+        };
+        self.status(unsafe { zova_sys::zova_database_changes(&request) })?;
+        Ok(changes)
+    }
+
+    pub fn total_changes(&mut self) -> Result<i64> {
+        let mut total_changes = 0;
+        let request = zova_sys::zova_database_total_changes_request {
+            db: self.raw_ptr(),
+            out_total_changes: &mut total_changes,
+        };
+        self.status(unsafe { zova_sys::zova_database_total_changes(&request) })?;
+        Ok(total_changes)
     }
 
     fn open_or_create(path: impl AsRef<Path>, create: bool) -> Result<Self> {

@@ -13,10 +13,17 @@
  * ownership rules.
  *
  * Threading:
- * - Do not use the same zova_database or zova_object_writer handle
- *   concurrently from multiple threads.
- * - Multiple database handles may point at the same file; locking follows
- *   normal SQLite behavior.
+ * - A single zova_database handle may be called from multiple threads. Calls
+ *   on the same handle are internally serialized and execute one at a time.
+ * - Statements and object writers are child handles of their parent database;
+ *   their calls use the same parent serialization boundary.
+ * - zova_database_close fails with ZOVA_MISUSE while live statements or object
+ *   writers still exist. Finalize/destroy child handles before closing.
+ * - After a successful close, statement finalize, or writer destroy, that C
+ *   pointer is invalid and must not be used again. Coordinate these terminal
+ *   calls so no other thread can still call through the same pointer.
+ * - Multiple database handles may point at the same file for true concurrency;
+ *   cross-handle locking follows normal SQLite behavior.
  *
  * Strings and bytes:
  * - Paths and SQL are null-terminated C strings.
@@ -30,6 +37,8 @@
  * - Input pointers are borrowed only for the duration of the call.
  * - zova_database_last_error_message returns a borrowed pointer scoped to the
  *   database handle; it is valid until the next call on that handle or close.
+ *   Another thread's next serialized call on the same handle may replace it, so
+ *   bindings should copy diagnostics immediately.
  *
  * Scope:
  * - This ABI exposes database lifecycle, SQL exec, prepared statements,
@@ -206,12 +215,29 @@ typedef struct zova_vector_input {
     size_t values_len;
 } zova_vector_input;
 
+enum {
+    ZOVA_OPEN_READ_ONLY = 1u << 0
+};
+
 /* Open/create requests use C strings and may return an owned error message. */
 typedef struct zova_database_open_request {
     const char *path;
     zova_database **out_db;
     zova_message *out_error_message;
 } zova_database_open_request;
+
+/*
+ * Additive open options for existing .zova files. flags = 0 opens read/write.
+ * ZOVA_OPEN_READ_ONLY opens the SQLite handle read-only. busy_timeout_ms = 0
+ * leaves SQLite's default busy handling unchanged.
+ */
+typedef struct zova_database_open_options_request {
+    const char *path;
+    uint32_t flags;
+    uint32_t busy_timeout_ms;
+    zova_database **out_db;
+    zova_message *out_error_message;
+} zova_database_open_options_request;
 
 /* Conversion never mutates the source and never overwrites the destination. */
 typedef struct zova_convert_sqlite_to_zova_request {
@@ -229,6 +255,26 @@ typedef struct zova_database_exec_request {
 typedef struct zova_database_simple_request {
     zova_database *db;
 } zova_database_simple_request;
+
+typedef struct zova_database_busy_timeout_request {
+    zova_database *db;
+    uint32_t milliseconds;
+} zova_database_busy_timeout_request;
+
+typedef struct zova_database_last_insert_rowid_request {
+    zova_database *db;
+    int64_t *out_rowid;
+} zova_database_last_insert_rowid_request;
+
+typedef struct zova_database_changes_request {
+    zova_database *db;
+    int64_t *out_changes;
+} zova_database_changes_request;
+
+typedef struct zova_database_total_changes_request {
+    zova_database *db;
+    int64_t *out_total_changes;
+} zova_database_total_changes_request;
 
 typedef struct zova_database_prepare_request {
     zova_database *db;
@@ -287,6 +333,12 @@ typedef struct zova_statement_column_count_request {
     zova_statement *statement;
     int *out_count;
 } zova_statement_column_count_request;
+
+typedef struct zova_statement_column_name_request {
+    zova_statement *statement;
+    int index;
+    zova_text *out_name;
+} zova_statement_column_name_request;
 
 typedef struct zova_statement_column_type_request {
     zova_statement *statement;
@@ -583,6 +635,7 @@ void zova_vector_collection_list_free(zova_vector_collection_list *list);
 /* Database lifecycle, SQL passthrough, prepared statements, and conversion. */
 zova_status zova_database_create(const zova_database_open_request *request);
 zova_status zova_database_open(const zova_database_open_request *request);
+zova_status zova_database_open_with_options(const zova_database_open_options_request *request);
 zova_status zova_database_close(zova_database *db);
 zova_status zova_database_exec(const zova_database_exec_request *request);
 zova_status zova_database_begin(const zova_database_simple_request *request);
@@ -590,6 +643,10 @@ zova_status zova_database_begin_immediate(const zova_database_simple_request *re
 zova_status zova_database_commit(const zova_database_simple_request *request);
 zova_status zova_database_rollback(const zova_database_simple_request *request);
 zova_status zova_database_vacuum(const zova_database_simple_request *request);
+zova_status zova_database_set_busy_timeout(const zova_database_busy_timeout_request *request);
+zova_status zova_database_last_insert_rowid(const zova_database_last_insert_rowid_request *request);
+zova_status zova_database_changes(const zova_database_changes_request *request);
+zova_status zova_database_total_changes(const zova_database_total_changes_request *request);
 zova_status zova_database_prepare(const zova_database_prepare_request *request);
 const char *zova_database_last_error_message(zova_database *db);
 zova_status zova_convert_sqlite_to_zova(const zova_convert_sqlite_to_zova_request *request);
@@ -613,6 +670,7 @@ zova_status zova_statement_bind_blob(const zova_statement_bind_blob_request *req
 zova_status zova_statement_parameter_count(const zova_statement_parameter_count_request *request);
 zova_status zova_statement_parameter_index(const zova_statement_parameter_index_request *request);
 zova_status zova_statement_column_count(const zova_statement_column_count_request *request);
+zova_status zova_statement_column_name(const zova_statement_column_name_request *request);
 zova_status zova_statement_column_type(const zova_statement_column_type_request *request);
 zova_status zova_statement_column_int64(const zova_statement_column_int64_request *request);
 zova_status zova_statement_column_double(const zova_statement_column_double_request *request);

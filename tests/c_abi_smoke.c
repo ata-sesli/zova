@@ -157,6 +157,39 @@ int main(int argc, char **argv) {
         fprintf(stderr, "step note insert: expected done\n");
         return 1;
     }
+    int64_t rowid = 0;
+    expect_status(zova_database_last_insert_rowid(&(zova_database_last_insert_rowid_request){
+                      .db = db,
+                      .out_rowid = &rowid,
+                  }),
+                  ZOVA_OK,
+                  "last insert rowid");
+    if (rowid != 1) {
+        fprintf(stderr, "last insert rowid: unexpected value\n");
+        return 1;
+    }
+    int64_t changes = 0;
+    expect_status(zova_database_changes(&(zova_database_changes_request){
+                      .db = db,
+                      .out_changes = &changes,
+                  }),
+                  ZOVA_OK,
+                  "changes");
+    if (changes != 1) {
+        fprintf(stderr, "changes: unexpected value\n");
+        return 1;
+    }
+    int64_t total_changes = 0;
+    expect_status(zova_database_total_changes(&(zova_database_total_changes_request){
+                      .db = db,
+                      .out_total_changes = &total_changes,
+                  }),
+                  ZOVA_OK,
+                  "total changes");
+    if (total_changes < 1) {
+        fprintf(stderr, "total changes: unexpected value\n");
+        return 1;
+    }
     expect_status(zova_database_commit(&(zova_database_simple_request){.db = db}), ZOVA_OK, "commit transaction");
     expect_status(zova_statement_finalize(insert_note), ZOVA_OK, "finalize note insert");
 
@@ -179,6 +212,19 @@ int main(int argc, char **argv) {
         fprintf(stderr, "note column count: unexpected count\n");
         return 1;
     }
+    zova_text column_name = {0};
+    expect_status(zova_statement_column_name(&(zova_statement_column_name_request){
+                      .statement = select_note,
+                      .index = 0,
+                      .out_name = &column_name,
+                  }),
+                  ZOVA_OK,
+                  "note column name");
+    if (column_name.len != 4 || memcmp(column_name.data, "body", column_name.len) != 0) {
+        fprintf(stderr, "note column name: unexpected value\n");
+        return 1;
+    }
+    zova_text_free(&column_name);
     expect_status(zova_statement_step(&(zova_statement_step_request){
                       .statement = select_note,
                       .out_result = &step_result,

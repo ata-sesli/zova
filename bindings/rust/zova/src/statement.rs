@@ -106,6 +106,10 @@ macro_rules! impl_statement_api {
             self.inner.column_count()
         }
 
+        pub fn column_name(&mut self, index: usize) -> Result<String> {
+            self.inner.column_name(index)
+        }
+
         pub fn column_type(&mut self, index: usize) -> Result<ColumnType> {
             self.inner.column_type(index)
         }
@@ -239,6 +243,25 @@ impl RawStatement {
         };
         self.status(unsafe { zova_sys::zova_statement_column_count(&request) })?;
         Ok(count as usize)
+    }
+
+    fn column_name(&mut self, index: usize) -> Result<String> {
+        let mut text = zova_sys::zova_text {
+            data: ptr::null_mut(),
+            len: 0,
+        };
+        let request = zova_sys::zova_statement_column_name_request {
+            statement: self.raw.as_ptr(),
+            index: checked_index(index)?,
+            out_name: &mut text,
+        };
+        self.status(unsafe { zova_sys::zova_statement_column_name(&request) })?;
+        let bytes = unsafe { std::slice::from_raw_parts(text.data.cast::<u8>(), text.len) };
+        let value = String::from_utf8(bytes.to_vec()).map_err(|_| Error::InvalidUtf8Text);
+        unsafe {
+            zova_sys::zova_text_free(&mut text);
+        }
+        value
     }
 
     fn column_type(&mut self, index: usize) -> Result<ColumnType> {

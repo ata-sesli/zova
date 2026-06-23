@@ -24,10 +24,16 @@ pub const zova_vector_search_results = internal.zova_vector_search_results;
 pub const zova_vector_collection_info = internal.zova_vector_collection_info;
 pub const zova_vector_collection_list = internal.zova_vector_collection_list;
 pub const zova_vector_input = internal.zova_vector_input;
+pub const ZOVA_OPEN_READ_ONLY = internal.ZOVA_OPEN_READ_ONLY;
 pub const zova_database_open_request = internal.zova_database_open_request;
+pub const zova_database_open_options_request = internal.zova_database_open_options_request;
 pub const zova_convert_sqlite_to_zova_request = internal.zova_convert_sqlite_to_zova_request;
 pub const zova_database_exec_request = internal.zova_database_exec_request;
 pub const zova_database_simple_request = internal.zova_database_simple_request;
+pub const zova_database_busy_timeout_request = internal.zova_database_busy_timeout_request;
+pub const zova_database_last_insert_rowid_request = internal.zova_database_last_insert_rowid_request;
+pub const zova_database_changes_request = internal.zova_database_changes_request;
+pub const zova_database_total_changes_request = internal.zova_database_total_changes_request;
 pub const zova_database_prepare_request = internal.zova_database_prepare_request;
 pub const zova_statement_step_request = internal.zova_statement_step_request;
 pub const zova_statement_bind_null_request = internal.zova_statement_bind_null_request;
@@ -38,6 +44,7 @@ pub const zova_statement_bind_blob_request = internal.zova_statement_bind_blob_r
 pub const zova_statement_parameter_count_request = internal.zova_statement_parameter_count_request;
 pub const zova_statement_parameter_index_request = internal.zova_statement_parameter_index_request;
 pub const zova_statement_column_count_request = internal.zova_statement_column_count_request;
+pub const zova_statement_column_name_request = internal.zova_statement_column_name_request;
 pub const zova_statement_column_type_request = internal.zova_statement_column_type_request;
 pub const zova_statement_column_int64_request = internal.zova_statement_column_int64_request;
 pub const zova_statement_column_double_request = internal.zova_statement_column_double_request;
@@ -138,6 +145,10 @@ export fn zova_database_open(request: ?*const zova_database_open_request) callco
     return internal.zova_database_open(request);
 }
 
+export fn zova_database_open_with_options(request: ?*const zova_database_open_options_request) callconv(.c) zova_status {
+    return internal.zova_database_open_with_options(request);
+}
+
 export fn zova_database_close(db: ?*zova_database) callconv(.c) zova_status {
     return internal.zova_database_close(db);
 }
@@ -164,6 +175,22 @@ export fn zova_database_rollback(request: ?*const zova_database_simple_request) 
 
 export fn zova_database_vacuum(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
     return internal.zova_database_vacuum(request);
+}
+
+export fn zova_database_set_busy_timeout(request: ?*const zova_database_busy_timeout_request) callconv(.c) zova_status {
+    return internal.zova_database_set_busy_timeout(request);
+}
+
+export fn zova_database_last_insert_rowid(request: ?*const zova_database_last_insert_rowid_request) callconv(.c) zova_status {
+    return internal.zova_database_last_insert_rowid(request);
+}
+
+export fn zova_database_changes(request: ?*const zova_database_changes_request) callconv(.c) zova_status {
+    return internal.zova_database_changes(request);
+}
+
+export fn zova_database_total_changes(request: ?*const zova_database_total_changes_request) callconv(.c) zova_status {
+    return internal.zova_database_total_changes(request);
 }
 
 export fn zova_database_prepare(request: ?*const zova_database_prepare_request) callconv(.c) zova_status {
@@ -216,6 +243,10 @@ export fn zova_statement_parameter_index(request: ?*const zova_statement_paramet
 
 export fn zova_statement_column_count(request: ?*const zova_statement_column_count_request) callconv(.c) zova_status {
     return internal.zova_statement_column_count(request);
+}
+
+export fn zova_statement_column_name(request: ?*const zova_statement_column_name_request) callconv(.c) zova_status {
+    return internal.zova_statement_column_name(request);
 }
 
 export fn zova_statement_column_type(request: ?*const zova_statement_column_type_request) callconv(.c) zova_status {

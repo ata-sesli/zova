@@ -77,6 +77,15 @@ func TestCreateOpenExecAndPreparedStatements(t *testing.T) {
 	if step, err := insert.Step(); err != nil || step != StepDone {
 		t.Fatalf("insert step = %v, %v", step, err)
 	}
+	if rowid, err := db.LastInsertRowID(); err != nil || rowid != 7 {
+		t.Fatalf("last insert rowid = %d, %v", rowid, err)
+	}
+	if changes, err := db.Changes(); err != nil || changes != 1 {
+		t.Fatalf("changes = %d, %v", changes, err)
+	}
+	if total, err := db.TotalChanges(); err != nil || total < 1 {
+		t.Fatalf("total changes = %d, %v", total, err)
+	}
 	must(t, insert.Close())
 
 	query, err := db.Prepare(`select id, name, score, note, data, empty_text, empty_blob from records where id = ?1`)
@@ -90,6 +99,12 @@ func TestCreateOpenExecAndPreparedStatements(t *testing.T) {
 	}
 	if count, err := query.ColumnCount(); err != nil || count != 7 {
 		t.Fatalf("column count = %d, %v", count, err)
+	}
+	if column, err := query.ColumnName(0); err != nil || column != "id" {
+		t.Fatalf("column 0 name = %q, %v", column, err)
+	}
+	if column, err := query.ColumnName(1); err != nil || column != "name" {
+		t.Fatalf("column 1 name = %q, %v", column, err)
 	}
 	if typ, err := query.ColumnType(3); err != nil || typ != ColumnNull {
 		t.Fatalf("note type = %v, %v", typ, err)
@@ -166,6 +181,21 @@ func TestResetClearBindingsTransactionsVacuumAndMultipleHandles(t *testing.T) {
 	defer second.Close()
 	if got := scalarInt(t, second, "select count(*) from items"); got != 1 {
 		t.Fatalf("second handle count = %d", got)
+	}
+
+	readonly, err := OpenWithOptions(path, OpenOptions{ReadOnly: true, BusyTimeoutMS: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readonly.Close()
+	must(t, readonly.SetBusyTimeout(0))
+	must(t, readonly.SetBusyTimeout(2))
+	if got := scalarInt(t, readonly, "select count(*) from items"); got != 1 {
+		t.Fatalf("readonly count = %d", got)
+	}
+	err = readonly.Exec("insert into items(body) values ('blocked')")
+	if !errorStatusIs(err, StatusReadOnly) {
+		t.Fatalf("readonly write error = %v, want StatusReadOnly", err)
 	}
 }
 

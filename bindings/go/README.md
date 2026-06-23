@@ -57,13 +57,22 @@ You need Zig `0.16.0` or newer, cgo enabled, and a working C compiler.
 
 ## Handle Policy
 
-`DB` serializes operations with an internal mutex because one Zova database
-handle must not be used concurrently. Open multiple `DB` handles to the same
-file for parallel work; SQLite locking rules still apply.
+The Zova C ABI serializes calls on one database handle, so one native handle is
+safe but not parallel. The Go wrapper keeps its own `DB` mutex as a simple
+Go-level guard around the same contract. Open multiple `DB` handles to the same
+file for parallel work; SQLite locking rules still apply across handles.
 
 Object writers also use their parent `DB` lock. Zova writer operations reject
 active user transactions, so finish or cancel writers outside explicit
 application transactions.
+
+Use `OpenWithOptions` with `OpenOptions{ReadOnly: true}` for read-only handles,
+and `SetBusyTimeout` when an application wants SQLite to wait briefly on
+cross-handle contention. No nonzero timeout is installed by default.
+
+Use `LastInsertRowID`, `Changes`, `TotalChanges`, and `Stmt.ColumnName` for
+normal application SQL record helpers. They do not expose or stabilize Zova's
+private `_zova_*` tables.
 
 ## Objects
 

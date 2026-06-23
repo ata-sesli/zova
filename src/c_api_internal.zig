@@ -31,12 +31,32 @@
 //! Maintenance is explicit. The ABI exposes in-place `VACUUM`, but Zova never
 //! runs it automatically and never changes connection PRAGMAs such as
 //! `foreign_keys`, journal mode, or synchronous mode on behalf of callers.
+//!
+//! Runtime model: one `zova_database` handle is internally serialized by a
+//! per-handle mutex. Calls on that handle are safe from multiple threads but
+//! execute one at a time. Statements and object writers are child handles and
+//! use the parent database mutex. Multiple database handles remain the explicit
+//! path for true concurrency and follow normal SQLite locking behavior.
+//! Successful close/finalize/destroy calls are still terminal C pointer lifetime
+//! events and must be coordinated by callers as final uses of those pointers.
 
 const std = @import("std");
 const zova = @import("zova.zig");
 const sqlite = @import("sqlite.zig");
 
 const allocator = std.heap.c_allocator;
+
+const AbiMutex = struct {
+    state: std.Io.Mutex = .init,
+
+    fn lock(self: *AbiMutex) void {
+        std.Io.Threaded.mutexLock(&self.state);
+    }
+
+    fn unlock(self: *AbiMutex) void {
+        std.Io.Threaded.mutexUnlock(&self.state);
+    }
+};
 
 // These opaque declarations match `include/zova.h`. The real state lives in
 // DatabaseHandle and WriterHandle below so C callers cannot depend on layout.
@@ -46,6 +66,13 @@ pub const zova_statement = opaque {};
 
 const DatabaseHandle = struct {
     db: zova.Database,
+    // One C ABI database handle is internally serialized. This mutex protects
+    // the SQLite/Zova handle, child-handle counts, and connection-scoped error
+    // message. It is intentionally per-handle, not global; separate handles can
+    // still run independently and follow normal SQLite locking behavior.
+    mutex: AbiMutex = .{},
+    live_statements: usize = 0,
+    live_writers: usize = 0,
     // Connection-scoped diagnostic text. This mirrors SQLite's model closely:
     // callers can ask the database handle for the most recent useful message,
     // and the pointer is borrowed until another call on the handle replaces it.
@@ -53,16 +80,16 @@ const DatabaseHandle = struct {
 };
 
 const WriterHandle = struct {
-    // Writers are tied to one database handle. The C ABI intentionally does not
-    // support using either handle concurrently from multiple threads.
+    // Writers are child handles tied to one database handle. Writer methods
+    // serialize through the parent database mutex.
     db: *DatabaseHandle,
     writer: zova.ObjectWriter,
 };
 
 const StatementHandle = struct {
     // Statements borrow their parent database handle and must be finalized
-    // before closing the database. The C ABI mirrors SQLite's one-handle,
-    // non-concurrent statement model.
+    // before closing the database. Statement methods serialize through the
+    // parent database mutex.
     db: *DatabaseHandle,
     statement: sqlite.Statement,
 };
@@ -207,8 +234,18 @@ pub const zova_vector_input = extern struct {
     values_len: usize,
 };
 
+pub const ZOVA_OPEN_READ_ONLY: u32 = 1 << 0;
+
 pub const zova_database_open_request = extern struct {
     path: ?[*:0]const u8,
+    out_db: ?*?*zova_database,
+    out_error_message: ?*zova_message,
+};
+
+pub const zova_database_open_options_request = extern struct {
+    path: ?[*:0]const u8,
+    flags: u32,
+    busy_timeout_ms: u32,
     out_db: ?*?*zova_database,
     out_error_message: ?*zova_message,
 };
@@ -226,6 +263,26 @@ pub const zova_database_exec_request = extern struct {
 
 pub const zova_database_simple_request = extern struct {
     db: ?*zova_database,
+};
+
+pub const zova_database_busy_timeout_request = extern struct {
+    db: ?*zova_database,
+    milliseconds: u32,
+};
+
+pub const zova_database_last_insert_rowid_request = extern struct {
+    db: ?*zova_database,
+    out_rowid: ?*i64,
+};
+
+pub const zova_database_changes_request = extern struct {
+    db: ?*zova_database,
+    out_changes: ?*i64,
+};
+
+pub const zova_database_total_changes_request = extern struct {
+    db: ?*zova_database,
+    out_total_changes: ?*i64,
 };
 
 pub const zova_database_prepare_request = extern struct {
@@ -284,6 +341,12 @@ pub const zova_statement_parameter_index_request = extern struct {
 pub const zova_statement_column_count_request = extern struct {
     statement: ?*zova_statement,
     out_count: ?*c_int,
+};
+
+pub const zova_statement_column_name_request = extern struct {
+    statement: ?*zova_statement,
+    index: c_int,
+    out_name: ?*zova_text,
 };
 
 pub const zova_statement_column_type_request = extern struct {
@@ -661,10 +724,26 @@ pub fn zova_database_open(request: ?*const zova_database_open_request) callconv(
     return openDatabase(request, .open);
 }
 
+pub fn zova_database_open_with_options(request: ?*const zova_database_open_options_request) callconv(.c) zova_status {
+    return openDatabaseWithOptions(request);
+}
+
 pub fn zova_database_close(db: ?*zova_database) callconv(.c) zova_status {
     const handle = databaseHandle(db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    if (handle.live_statements != 0 or handle.live_writers != 0) {
+        defer handle.mutex.unlock();
+        var message_buffer: [160]u8 = undefined;
+        const message = std.fmt.bufPrint(
+            &message_buffer,
+            "cannot close database with live child handles: {d} statements, {d} object writers",
+            .{ handle.live_statements, handle.live_writers },
+        ) catch "cannot close database with live child handles";
+        return failDbStatusString(handle, .MISUSE, message);
+    }
     clearLastError(handle);
     handle.db.deinit();
+    handle.mutex.unlock();
     allocator.destroy(handle);
     return .OK;
 }
@@ -672,6 +751,8 @@ pub fn zova_database_close(db: ?*zova_database) callconv(.c) zova_status {
 pub fn zova_database_exec(request: ?*const zova_database_exec_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const sql = req.sql orelse return failDb(handle, error.InvalidArgument);
     handle.db.exec(std.mem.span(sql)) catch |err| return failDb(handle, err);
     return okDb(handle);
@@ -680,6 +761,8 @@ pub fn zova_database_exec(request: ?*const zova_database_exec_request) callconv(
 pub fn zova_database_begin(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     handle.db.sqlite_db.begin() catch |err| return failDb(handle, err);
     return okDb(handle);
 }
@@ -687,6 +770,8 @@ pub fn zova_database_begin(request: ?*const zova_database_simple_request) callco
 pub fn zova_database_begin_immediate(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     handle.db.sqlite_db.beginImmediate() catch |err| return failDb(handle, err);
     return okDb(handle);
 }
@@ -694,6 +779,8 @@ pub fn zova_database_begin_immediate(request: ?*const zova_database_simple_reque
 pub fn zova_database_commit(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     handle.db.sqlite_db.commit() catch |err| return failDb(handle, err);
     return okDb(handle);
 }
@@ -701,6 +788,8 @@ pub fn zova_database_commit(request: ?*const zova_database_simple_request) callc
 pub fn zova_database_rollback(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     handle.db.sqlite_db.rollback() catch |err| return failDb(handle, err);
     return okDb(handle);
 }
@@ -708,13 +797,57 @@ pub fn zova_database_rollback(request: ?*const zova_database_simple_request) cal
 pub fn zova_database_vacuum(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     handle.db.vacuum() catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_database_set_busy_timeout(request: ?*const zova_database_busy_timeout_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    if (req.milliseconds > std.math.maxInt(c_int)) return failDb(handle, error.InvalidArgument);
+    handle.db.setBusyTimeout(req.milliseconds) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_database_last_insert_rowid(request: ?*const zova_database_last_insert_rowid_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const out = req.out_rowid orelse return failDb(handle, error.InvalidArgument);
+    out.* = handle.db.lastInsertRowid();
+    return okDb(handle);
+}
+
+pub fn zova_database_changes(request: ?*const zova_database_changes_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const out = req.out_changes orelse return failDb(handle, error.InvalidArgument);
+    out.* = handle.db.changes();
+    return okDb(handle);
+}
+
+pub fn zova_database_total_changes(request: ?*const zova_database_total_changes_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const out = req.out_total_changes orelse return failDb(handle, error.InvalidArgument);
+    out.* = handle.db.totalChanges();
     return okDb(handle);
 }
 
 pub fn zova_database_prepare(request: ?*const zova_database_prepare_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const sql = req.sql orelse return failDb(handle, error.InvalidArgument);
     const out = req.out_statement orelse return failDb(handle, error.InvalidArgument);
     out.* = null;
@@ -726,20 +859,28 @@ pub fn zova_database_prepare(request: ?*const zova_database_prepare_request) cal
         return failDb(handle, err);
     };
     statement_handle.* = .{ .db = handle, .statement = statement };
+    handle.live_statements += 1;
     out.* = @ptrCast(statement_handle);
     return okDb(handle);
 }
 
 pub fn zova_statement_finalize(statement: ?*zova_statement) callconv(.c) zova_status {
     const handle = statementHandle(statement) orelse return .INVALID_ARGUMENT;
+    const db_handle = handle.db;
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
     handle.statement.deinit();
+    std.debug.assert(db_handle.live_statements > 0);
+    db_handle.live_statements -= 1;
     allocator.destroy(handle);
-    return .OK;
+    return okDb(db_handle);
 }
 
 pub fn zova_statement_step(request: ?*const zova_statement_step_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    handle.db.mutex.lock();
+    defer handle.db.mutex.unlock();
     const out = req.out_result orelse return failDb(handle.db, error.InvalidArgument);
     const result = handle.statement.step() catch |err| return failDb(handle.db, err);
     out.* = switch (result) {
@@ -751,12 +892,16 @@ pub fn zova_statement_step(request: ?*const zova_statement_step_request) callcon
 
 pub fn zova_statement_reset(statement: ?*zova_statement) callconv(.c) zova_status {
     const handle = statementHandle(statement) orelse return .INVALID_ARGUMENT;
+    handle.db.mutex.lock();
+    defer handle.db.mutex.unlock();
     handle.statement.reset() catch |err| return failDb(handle.db, err);
     return okDb(handle.db);
 }
 
 pub fn zova_statement_clear_bindings(statement: ?*zova_statement) callconv(.c) zova_status {
     const handle = statementHandle(statement) orelse return .INVALID_ARGUMENT;
+    handle.db.mutex.lock();
+    defer handle.db.mutex.unlock();
     handle.statement.clearBindings() catch |err| return failDb(handle.db, err);
     return okDb(handle.db);
 }
@@ -764,6 +909,8 @@ pub fn zova_statement_clear_bindings(statement: ?*zova_statement) callconv(.c) z
 pub fn zova_statement_bind_null(request: ?*const zova_statement_bind_null_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    handle.db.mutex.lock();
+    defer handle.db.mutex.unlock();
     handle.statement.bindNull(req.index) catch |err| return failDb(handle.db, err);
     return okDb(handle.db);
 }
@@ -771,6 +918,8 @@ pub fn zova_statement_bind_null(request: ?*const zova_statement_bind_null_reques
 pub fn zova_statement_bind_int64(request: ?*const zova_statement_bind_int64_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    handle.db.mutex.lock();
+    defer handle.db.mutex.unlock();
     handle.statement.bindInt64(req.index, req.value) catch |err| return failDb(handle.db, err);
     return okDb(handle.db);
 }
@@ -778,6 +927,8 @@ pub fn zova_statement_bind_int64(request: ?*const zova_statement_bind_int64_requ
 pub fn zova_statement_bind_double(request: ?*const zova_statement_bind_double_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    handle.db.mutex.lock();
+    defer handle.db.mutex.unlock();
     handle.statement.bindDouble(req.index, req.value) catch |err| return failDb(handle.db, err);
     return okDb(handle.db);
 }
@@ -785,6 +936,8 @@ pub fn zova_statement_bind_double(request: ?*const zova_statement_bind_double_re
 pub fn zova_statement_bind_text(request: ?*const zova_statement_bind_text_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    handle.db.mutex.lock();
+    defer handle.db.mutex.unlock();
     const bytes = bytesConst(req.data, req.len) orelse return failDb(handle.db, error.InvalidArgument);
     handle.statement.bindText(req.index, bytes) catch |err| return failDb(handle.db, err);
     return okDb(handle.db);
@@ -793,6 +946,8 @@ pub fn zova_statement_bind_text(request: ?*const zova_statement_bind_text_reques
 pub fn zova_statement_bind_blob(request: ?*const zova_statement_bind_blob_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    handle.db.mutex.lock();
+    defer handle.db.mutex.unlock();
     const bytes = bytesConst(req.data, req.len) orelse return failDb(handle.db, error.InvalidArgument);
     handle.statement.bindBlob(req.index, bytes) catch |err| return failDb(handle.db, err);
     return okDb(handle.db);
@@ -801,6 +956,8 @@ pub fn zova_statement_bind_blob(request: ?*const zova_statement_bind_blob_reques
 pub fn zova_statement_parameter_count(request: ?*const zova_statement_parameter_count_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    handle.db.mutex.lock();
+    defer handle.db.mutex.unlock();
     const out = req.out_count orelse return failDb(handle.db, error.InvalidArgument);
     out.* = handle.statement.parameterCount();
     return okDb(handle.db);
@@ -809,6 +966,8 @@ pub fn zova_statement_parameter_count(request: ?*const zova_statement_parameter_
 pub fn zova_statement_parameter_index(request: ?*const zova_statement_parameter_index_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    handle.db.mutex.lock();
+    defer handle.db.mutex.unlock();
     const name = req.name orelse return failDb(handle.db, error.InvalidArgument);
     const out = req.out_index orelse return failDb(handle.db, error.InvalidArgument);
     out.* = handle.statement.parameterIndex(std.mem.span(name));
@@ -818,14 +977,34 @@ pub fn zova_statement_parameter_index(request: ?*const zova_statement_parameter_
 pub fn zova_statement_column_count(request: ?*const zova_statement_column_count_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    handle.db.mutex.lock();
+    defer handle.db.mutex.unlock();
     const out = req.out_count orelse return failDb(handle.db, error.InvalidArgument);
     out.* = handle.statement.columnCount();
+    return okDb(handle.db);
+}
+
+pub fn zova_statement_column_name(request: ?*const zova_statement_column_name_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    handle.db.mutex.lock();
+    defer handle.db.mutex.unlock();
+    const out = req.out_name orelse return failDb(handle.db, error.InvalidArgument);
+    zova_text_free(out);
+
+    const name = handle.statement.columnName(req.index) catch |err| return failDb(handle.db, err);
+    const copy = allocator.alloc(u8, name.len + 1) catch |err| return failDb(handle.db, err);
+    @memcpy(copy[0..name.len], name);
+    copy[name.len] = 0;
+    out.* = .{ .data = copy.ptr, .len = name.len };
     return okDb(handle.db);
 }
 
 pub fn zova_statement_column_type(request: ?*const zova_statement_column_type_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    handle.db.mutex.lock();
+    defer handle.db.mutex.unlock();
     const out = req.out_type orelse return failDb(handle.db, error.InvalidArgument);
     out.* = columnTypeToAbi(handle.statement.columnType(req.index));
     return okDb(handle.db);
@@ -834,6 +1013,8 @@ pub fn zova_statement_column_type(request: ?*const zova_statement_column_type_re
 pub fn zova_statement_column_int64(request: ?*const zova_statement_column_int64_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    handle.db.mutex.lock();
+    defer handle.db.mutex.unlock();
     const out = req.out_value orelse return failDb(handle.db, error.InvalidArgument);
     out.* = handle.statement.columnInt64(req.index);
     return okDb(handle.db);
@@ -842,6 +1023,8 @@ pub fn zova_statement_column_int64(request: ?*const zova_statement_column_int64_
 pub fn zova_statement_column_double(request: ?*const zova_statement_column_double_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    handle.db.mutex.lock();
+    defer handle.db.mutex.unlock();
     const out = req.out_value orelse return failDb(handle.db, error.InvalidArgument);
     out.* = handle.statement.columnDouble(req.index);
     return okDb(handle.db);
@@ -850,6 +1033,8 @@ pub fn zova_statement_column_double(request: ?*const zova_statement_column_doubl
 pub fn zova_statement_column_text(request: ?*const zova_statement_column_text_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    handle.db.mutex.lock();
+    defer handle.db.mutex.unlock();
     const out = req.out_text orelse return failDb(handle.db, error.InvalidArgument);
     zova_text_free(out);
 
@@ -865,6 +1050,8 @@ pub fn zova_statement_column_text(request: ?*const zova_statement_column_text_re
 pub fn zova_statement_column_blob(request: ?*const zova_statement_column_blob_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
+    handle.db.mutex.lock();
+    defer handle.db.mutex.unlock();
     const out = req.out_buffer orelse return failDb(handle.db, error.InvalidArgument);
     zova_buffer_free(out);
 
@@ -880,6 +1067,8 @@ pub fn zova_statement_column_blob(request: ?*const zova_statement_column_blob_re
 
 pub fn zova_database_last_error_message(db: ?*zova_database) callconv(.c) [*:0]const u8 {
     const handle = databaseHandle(db) orelse return "invalid database handle";
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     if (handle.last_error) |message| return message.ptr;
     return "";
 }
@@ -921,6 +1110,8 @@ pub fn zova_object_chunk_id_from_bytes(
 pub fn zova_object_put(request: ?*const zova_object_put_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const out = req.out_id orelse return failDb(handle, error.InvalidArgument);
     const bytes = bytesConst(req.data, req.len) orelse return failDb(handle, error.InvalidArgument);
     const id = handle.db.putObject(bytes) catch |err| return failDb(handle, err);
@@ -931,6 +1122,8 @@ pub fn zova_object_put(request: ?*const zova_object_put_request) callconv(.c) zo
 pub fn zova_object_get(request: ?*const zova_object_get_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const out = req.out_buffer orelse return failDb(handle, error.InvalidArgument);
     out.* = emptyBuffer();
     var object = handle.db.getObject(allocator, toObjectId(req.id)) catch |err| return failDb(handle, err);
@@ -943,6 +1136,8 @@ pub fn zova_object_get(request: ?*const zova_object_get_request) callconv(.c) zo
 pub fn zova_object_read_range(request: ?*const zova_object_read_range_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const out = req.out_copied orelse return failDb(handle, error.InvalidArgument);
     out.* = 0;
     const buffer = bytesMut(req.buffer, req.buffer_len) orelse return failDb(handle, error.InvalidArgument);
@@ -954,6 +1149,8 @@ pub fn zova_object_read_range(request: ?*const zova_object_read_range_request) c
 pub fn zova_object_delete(request: ?*const zova_object_delete_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     handle.db.deleteObject(toObjectId(req.id)) catch |err| return failDb(handle, err);
     return okDb(handle);
 }
@@ -961,6 +1158,8 @@ pub fn zova_object_delete(request: ?*const zova_object_delete_request) callconv(
 pub fn zova_object_exists(request: ?*const zova_object_exists_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const out = req.out_exists orelse return failDb(handle, error.InvalidArgument);
     const exists = handle.db.hasObject(toObjectId(req.id)) catch |err| return failDb(handle, err);
     out.* = if (exists) 1 else 0;
@@ -970,6 +1169,8 @@ pub fn zova_object_exists(request: ?*const zova_object_exists_request) callconv(
 pub fn zova_object_size(request: ?*const zova_object_size_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const out = req.out_size orelse return failDb(handle, error.InvalidArgument);
     out.* = handle.db.objectSize(toObjectId(req.id)) catch |err| return failDb(handle, err);
     return okDb(handle);
@@ -978,6 +1179,8 @@ pub fn zova_object_size(request: ?*const zova_object_size_request) callconv(.c) 
 pub fn zova_object_chunk_count(request: ?*const zova_object_chunk_count_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const out = req.out_count orelse return failDb(handle, error.InvalidArgument);
     out.* = handle.db.objectChunkCount(toObjectId(req.id)) catch |err| return failDb(handle, err);
     return okDb(handle);
@@ -986,6 +1189,8 @@ pub fn zova_object_chunk_count(request: ?*const zova_object_chunk_count_request)
 pub fn zova_object_manifest_get(request: ?*const zova_object_manifest_get_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const out = req.out_manifest orelse return failDb(handle, error.InvalidArgument);
     out.* = emptyManifest();
 
@@ -1017,6 +1222,8 @@ pub fn zova_object_manifest_get(request: ?*const zova_object_manifest_get_reques
 pub fn zova_object_chunk_get(request: ?*const zova_object_chunk_get_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const out = req.out_buffer orelse return failDb(handle, error.InvalidArgument);
     out.* = emptyBuffer();
     var chunk = handle.db.getObjectChunk(allocator, toChunkId(req.hash)) catch |err| return failDb(handle, err);
@@ -1029,6 +1236,8 @@ pub fn zova_object_chunk_get(request: ?*const zova_object_chunk_get_request) cal
 pub fn zova_object_chunk_put(request: ?*const zova_object_chunk_put_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const bytes = bytesConst(req.data, req.len) orelse return failDb(handle, error.InvalidArgument);
     handle.db.putObjectChunk(toChunkId(req.expected_hash), bytes) catch |err| return failDb(handle, err);
     return okDb(handle);
@@ -1037,6 +1246,8 @@ pub fn zova_object_chunk_put(request: ?*const zova_object_chunk_put_request) cal
 pub fn zova_object_chunk_delete(request: ?*const zova_object_chunk_delete_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const out = req.out_deleted orelse return failDb(handle, error.InvalidArgument);
     const deleted = handle.db.deleteObjectChunk(toChunkId(req.hash)) catch |err| return failDb(handle, err);
     out.* = if (deleted) 1 else 0;
@@ -1048,6 +1259,8 @@ pub fn zova_object_assemble_from_chunks(
 ) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const input_chunks = manifestChunks(req.chunks, req.chunk_count) orelse return failDb(handle, error.InvalidArgument);
     const chunks = allocator.alloc(zova.ObjectChunk, input_chunks.len) catch |err| return failDb(handle, err);
     defer allocator.free(chunks);
@@ -1066,6 +1279,8 @@ pub fn zova_object_assemble_from_chunks(
 pub fn zova_object_writer_create(request: ?*const zova_object_writer_create_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const out = req.out_writer orelse return failDb(handle, error.InvalidArgument);
     out.* = null;
 
@@ -1075,6 +1290,7 @@ pub fn zova_object_writer_create(request: ?*const zova_object_writer_create_requ
         return failDb(handle, err);
     };
     writer_handle.* = .{ .db = handle, .writer = writer };
+    handle.live_writers += 1;
     out.* = @ptrCast(writer_handle);
     return okDb(handle);
 }
@@ -1082,6 +1298,8 @@ pub fn zova_object_writer_create(request: ?*const zova_object_writer_create_requ
 pub fn zova_object_writer_write(request: ?*const zova_object_writer_write_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = writerHandle(req.writer) orelse return .INVALID_ARGUMENT;
+    handle.db.mutex.lock();
+    defer handle.db.mutex.unlock();
     const bytes = bytesConst(req.data, req.len) orelse return failDb(handle.db, error.InvalidArgument);
     handle.writer.write(bytes) catch |err| return failDb(handle.db, err);
     return okDb(handle.db);
@@ -1090,6 +1308,8 @@ pub fn zova_object_writer_write(request: ?*const zova_object_writer_write_reques
 pub fn zova_object_writer_finish(request: ?*const zova_object_writer_finish_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = writerHandle(req.writer) orelse return .INVALID_ARGUMENT;
+    handle.db.mutex.lock();
+    defer handle.db.mutex.unlock();
     const out = req.out_id orelse return failDb(handle.db, error.InvalidArgument);
     const id = handle.writer.finish() catch |err| return failDb(handle.db, err);
     out.* = fromObjectId(id);
@@ -1099,20 +1319,29 @@ pub fn zova_object_writer_finish(request: ?*const zova_object_writer_finish_requ
 pub fn zova_object_writer_cancel(request: ?*const zova_object_writer_cancel_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = writerHandle(req.writer) orelse return .INVALID_ARGUMENT;
+    handle.db.mutex.lock();
+    defer handle.db.mutex.unlock();
     handle.writer.cancel() catch |err| return failDb(handle.db, err);
     return okDb(handle.db);
 }
 
 pub fn zova_object_writer_destroy(writer: ?*zova_object_writer) callconv(.c) zova_status {
     const handle = writerHandle(writer) orelse return .INVALID_ARGUMENT;
+    const db_handle = handle.db;
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
     handle.writer.deinit();
+    std.debug.assert(db_handle.live_writers > 0);
+    db_handle.live_writers -= 1;
     allocator.destroy(handle);
-    return .OK;
+    return okDb(db_handle);
 }
 
 pub fn zova_vector_collection_create(request: ?*const zova_vector_collection_create_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const name = req.name orelse return failDb(handle, error.InvalidArgument);
     const metric = vectorMetricFromAbi(req.options.metric) orelse return failDb(handle, error.InvalidArgument);
 
@@ -1126,6 +1355,8 @@ pub fn zova_vector_collection_create(request: ?*const zova_vector_collection_cre
 pub fn zova_vector_collection_exists(request: ?*const zova_vector_collection_exists_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const name = req.name orelse return failDb(handle, error.InvalidArgument);
     const out = req.out_exists orelse return failDb(handle, error.InvalidArgument);
     const exists = handle.db.hasVectorCollection(std.mem.span(name)) catch |err| return failDb(handle, err);
@@ -1136,6 +1367,8 @@ pub fn zova_vector_collection_exists(request: ?*const zova_vector_collection_exi
 pub fn zova_vector_put(request: ?*const zova_vector_put_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const vector_id = req.vector_id orelse return failDb(handle, error.InvalidArgument);
     const values = floatsConst(req.values, req.values_len) orelse return failDb(handle, error.InvalidArgument);
@@ -1147,6 +1380,8 @@ pub fn zova_vector_put(request: ?*const zova_vector_put_request) callconv(.c) zo
 pub fn zova_vector_get(request: ?*const zova_vector_get_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const vector_id = req.vector_id orelse return failDb(handle, error.InvalidArgument);
     const out = req.out_vector orelse return failDb(handle, error.InvalidArgument);
@@ -1173,6 +1408,8 @@ pub fn zova_vector_get(request: ?*const zova_vector_get_request) callconv(.c) zo
 pub fn zova_vector_exists(request: ?*const zova_vector_exists_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const vector_id = req.vector_id orelse return failDb(handle, error.InvalidArgument);
     const out = req.out_exists orelse return failDb(handle, error.InvalidArgument);
@@ -1184,6 +1421,8 @@ pub fn zova_vector_exists(request: ?*const zova_vector_exists_request) callconv(
 pub fn zova_vector_delete(request: ?*const zova_vector_delete_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const vector_id = req.vector_id orelse return failDb(handle, error.InvalidArgument);
 
@@ -1194,6 +1433,8 @@ pub fn zova_vector_delete(request: ?*const zova_vector_delete_request) callconv(
 pub fn zova_vector_search(request: ?*const zova_vector_search_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const query = floatsConst(req.query, req.query_len) orelse return failDb(handle, error.InvalidArgument);
     const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
@@ -1209,6 +1450,8 @@ pub fn zova_vector_search(request: ?*const zova_vector_search_request) callconv(
 pub fn zova_vector_search_in(request: ?*const zova_vector_search_in_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const query = floatsConst(req.query, req.query_len) orelse return failDb(handle, error.InvalidArgument);
     const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
@@ -1227,6 +1470,8 @@ pub fn zova_vector_search_in(request: ?*const zova_vector_search_in_request) cal
 pub fn zova_vector_collection_info_get(request: ?*const zova_vector_collection_info_get_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const name = req.name orelse return failDb(handle, error.InvalidArgument);
     const out = req.out_info orelse return failDb(handle, error.InvalidArgument);
     out.* = emptyVectorCollectionInfo();
@@ -1241,6 +1486,8 @@ pub fn zova_vector_collection_info_get(request: ?*const zova_vector_collection_i
 pub fn zova_vector_collections_list(request: ?*const zova_vector_collections_list_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const out = req.out_list orelse return failDb(handle, error.InvalidArgument);
     out.* = emptyVectorCollectionList();
 
@@ -1254,6 +1501,8 @@ pub fn zova_vector_collections_list(request: ?*const zova_vector_collections_lis
 pub fn zova_vector_put_many(request: ?*const zova_vector_put_many_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
 
     const vectors = vectorInputSlices(req.vectors, req.vectors_len) catch |err| return failDb(handle, err);
@@ -1266,6 +1515,8 @@ pub fn zova_vector_put_many(request: ?*const zova_vector_put_many_request) callc
 pub fn zova_vector_collection_delete(request: ?*const zova_vector_collection_delete_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const name = req.name orelse return failDb(handle, error.InvalidArgument);
 
     handle.db.deleteVectorCollection(std.mem.span(name)) catch |err| return failDb(handle, err);
@@ -1275,6 +1526,8 @@ pub fn zova_vector_collection_delete(request: ?*const zova_vector_collection_del
 pub fn zova_vector_search_within(request: ?*const zova_vector_search_within_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const query = floatsConst(req.query, req.query_len) orelse return failDb(handle, error.InvalidArgument);
     const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
@@ -1290,6 +1543,8 @@ pub fn zova_vector_search_within(request: ?*const zova_vector_search_within_requ
 pub fn zova_vector_search_in_within(request: ?*const zova_vector_search_in_within_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const query = floatsConst(req.query, req.query_len) orelse return failDb(handle, error.InvalidArgument);
     const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
@@ -1308,6 +1563,8 @@ pub fn zova_vector_search_in_within(request: ?*const zova_vector_search_in_withi
 pub fn zova_vector_search_by_id(request: ?*const zova_vector_search_by_id_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const source_vector_id = req.source_vector_id orelse return failDb(handle, error.InvalidArgument);
     const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
@@ -1323,6 +1580,8 @@ pub fn zova_vector_search_by_id(request: ?*const zova_vector_search_by_id_reques
 pub fn zova_vector_search_by_id_in(request: ?*const zova_vector_search_by_id_in_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const source_vector_id = req.source_vector_id orelse return failDb(handle, error.InvalidArgument);
     const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
@@ -1341,6 +1600,8 @@ pub fn zova_vector_search_by_id_in(request: ?*const zova_vector_search_by_id_in_
 pub fn zova_vector_search_by_id_within(request: ?*const zova_vector_search_by_id_within_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const source_vector_id = req.source_vector_id orelse return failDb(handle, error.InvalidArgument);
     const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
@@ -1356,6 +1617,8 @@ pub fn zova_vector_search_by_id_within(request: ?*const zova_vector_search_by_id
 pub fn zova_vector_search_by_id_in_within(request: ?*const zova_vector_search_by_id_in_within_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const source_vector_id = req.source_vector_id orelse return failDb(handle, error.InvalidArgument);
     const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
@@ -1391,6 +1654,29 @@ fn openDatabase(request: ?*const zova_database_open_request, mode: OpenMode) zov
         .create => zova.Database.create(std.mem.span(path)),
         .open => zova.Database.open(std.mem.span(path)),
     } catch |err| return failMessage(req.out_error_message, err);
+
+    const handle = allocator.create(DatabaseHandle) catch |err| {
+        db.deinit();
+        return failMessage(req.out_error_message, err);
+    };
+    handle.* = .{ .db = db };
+    out.* = @ptrCast(handle);
+    return .OK;
+}
+
+fn openDatabaseWithOptions(request: ?*const zova_database_open_options_request) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    clearMessage(req.out_error_message);
+    const out = req.out_db orelse return failMessage(req.out_error_message, error.InvalidArgument);
+    out.* = null;
+    const path = req.path orelse return failMessage(req.out_error_message, error.InvalidArgument);
+    if ((req.flags & ~ZOVA_OPEN_READ_ONLY) != 0) return failMessage(req.out_error_message, error.InvalidArgument);
+    if (req.busy_timeout_ms > std.math.maxInt(c_int)) return failMessage(req.out_error_message, error.InvalidArgument);
+
+    var db = zova.Database.openWithOptions(std.mem.span(path), .{
+        .read_only = (req.flags & ZOVA_OPEN_READ_ONLY) != 0,
+        .busy_timeout_ms = req.busy_timeout_ms,
+    }) catch |err| return failMessage(req.out_error_message, err);
 
     const handle = allocator.create(DatabaseHandle) catch |err| {
         db.deinit();
@@ -1626,6 +1912,11 @@ fn failDb(handle: *DatabaseHandle, err: anyerror) zova_status {
     return status;
 }
 
+fn failDbStatusString(handle: *DatabaseHandle, status: zova_status, message: []const u8) zova_status {
+    setLastErrorString(handle, message);
+    return status;
+}
+
 fn okDb(handle: *DatabaseHandle) zova_status {
     clearLastError(handle);
     return .OK;
@@ -1675,7 +1966,7 @@ fn clearMessage(message: ?*zova_message) void {
 // should be considered here deliberately instead of leaking as SQLITE_ERROR.
 fn statusFromError(err: anyerror) zova_status {
     return switch (err) {
-        error.OutOfMemory => .OUT_OF_MEMORY,
+        error.OutOfMemory, error.NoMemory => .OUT_OF_MEMORY,
         error.Busy => .BUSY,
         error.Locked => .LOCKED,
         error.Constraint => .CONSTRAINT,
@@ -1760,6 +2051,8 @@ test "c abi status names and versions are stable" {
 
 test "c abi validates null pointers" {
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_create(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_open_with_options(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_set_busy_timeout(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_object_id_from_bytes(null, 1, null));
     var id = zova_object_id{ .bytes = [_]u8{0} ** 32 };
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_object_id_from_bytes(null, 1, &id));
@@ -1781,6 +2074,9 @@ test "c abi validates null pointers" {
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_commit(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_rollback(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_vacuum(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_last_insert_rowid(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_changes(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_total_changes(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_prepare(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_finalize(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_step(null));
@@ -1794,12 +2090,199 @@ test "c abi validates null pointers" {
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_parameter_count(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_parameter_index(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_column_count(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_column_name(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_column_type(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_column_int64(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_column_double(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_column_text(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_column_blob(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_buffer_free_and_status_for_test());
+}
+
+test "c abi open options validate flags and support read-only handles" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-readonly.zova", .{tmp.sub_path[0..]});
+
+    var writable: ?*zova_database = null;
+    var create_request = zova_database_open_request{
+        .path = db_path,
+        .out_db = &writable,
+        .out_error_message = null,
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&create_request));
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = writable, .sql = "create table notes (body text not null)" }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = writable, .sql = "insert into notes (body) values ('kept')" }));
+    var object_id = zova_object_id{ .bytes = [_]u8{0} ** 32 };
+    try std.testing.expectEqual(zova_status.OK, zova_object_put(&.{
+        .db = writable,
+        .data = "readonly object",
+        .len = "readonly object".len,
+        .out_id = &object_id,
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_vector_collection_create(&.{
+        .db = writable,
+        .name = "chunks",
+        .options = .{ .dimensions = 2, .metric = @intFromEnum(zova_vector_metric.L2) },
+    }));
+    const values = [_]f32{ 1.0, 2.0 };
+    try std.testing.expectEqual(zova_status.OK, zova_vector_put(&.{
+        .db = writable,
+        .collection_name = "chunks",
+        .vector_id = "v1",
+        .values = &values,
+        .values_len = values.len,
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_close(writable));
+
+    var invalid_message = zova_message{ .data = null, .len = 0 };
+    var invalid_db: ?*zova_database = null;
+    const invalid_request = zova_database_open_options_request{
+        .path = db_path,
+        .flags = 0xffff_ffff,
+        .busy_timeout_ms = 0,
+        .out_db = &invalid_db,
+        .out_error_message = &invalid_message,
+    };
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_open_with_options(&invalid_request));
+    try std.testing.expect(invalid_db == null);
+    zova_message_free(&invalid_message);
+
+    var readonly: ?*zova_database = null;
+    const readonly_request = zova_database_open_options_request{
+        .path = db_path,
+        .flags = ZOVA_OPEN_READ_ONLY,
+        .busy_timeout_ms = 1,
+        .out_db = &readonly,
+        .out_error_message = null,
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_database_open_with_options(&readonly_request));
+    defer _ = zova_database_close(readonly);
+
+    var stmt: ?*zova_statement = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_prepare(&.{
+        .db = readonly,
+        .sql = "select body from notes",
+        .out_statement = &stmt,
+    }));
+    var step_result: zova_step_result = undefined;
+    try std.testing.expectEqual(zova_status.OK, zova_statement_step(&.{ .statement = stmt, .out_result = &step_result }));
+    try std.testing.expectEqual(zova_step_result.ROW, step_result);
+    try std.testing.expectEqual(zova_status.OK, zova_statement_finalize(stmt));
+
+    var object_exists: u8 = 0;
+    try std.testing.expectEqual(zova_status.OK, zova_object_exists(&.{
+        .db = readonly,
+        .id = object_id,
+        .out_exists = &object_exists,
+    }));
+    try std.testing.expectEqual(@as(u8, 1), object_exists);
+
+    var exists: u8 = 0;
+    try std.testing.expectEqual(zova_status.OK, zova_vector_exists(&.{
+        .db = readonly,
+        .collection_name = "chunks",
+        .vector_id = "v1",
+        .out_exists = &exists,
+    }));
+    try std.testing.expectEqual(@as(u8, 1), exists);
+
+    var distance_stmt: ?*zova_statement = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_prepare(&.{
+        .db = readonly,
+        .sql = "select zova_vector_distance('chunks', 'v1', ?1)",
+        .out_statement = &distance_stmt,
+    }));
+    const query_bytes = std.mem.asBytes(&values);
+    try std.testing.expectEqual(zova_status.OK, zova_statement_bind_blob(&.{
+        .statement = distance_stmt,
+        .index = 1,
+        .data = query_bytes.ptr,
+        .len = query_bytes.len,
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_statement_step(&.{ .statement = distance_stmt, .out_result = &step_result }));
+    try std.testing.expectEqual(zova_step_result.ROW, step_result);
+    try std.testing.expectEqual(zova_status.OK, zova_statement_finalize(distance_stmt));
+
+    try std.testing.expectEqual(zova_status.READ_ONLY, zova_database_exec(&.{ .db = readonly, .sql = "insert into notes (body) values ('blocked')" }));
+    var blocked_object_id = zova_object_id{ .bytes = [_]u8{0} ** 32 };
+    const blocked_object_status = zova_object_put(&.{
+        .db = readonly,
+        .data = "blocked object",
+        .len = "blocked object".len,
+        .out_id = &blocked_object_id,
+    });
+    try std.testing.expect(blocked_object_status != .OK);
+    try std.testing.expectEqual(zova_status.READ_ONLY, zova_vector_put(&.{
+        .db = readonly,
+        .collection_name = "chunks",
+        .vector_id = "v2",
+        .values = &values,
+        .values_len = values.len,
+    }));
+    const vacuum_status = zova_database_vacuum(&.{ .db = readonly });
+    try std.testing.expect(vacuum_status == .READ_ONLY or vacuum_status == .SQLITE_ERROR);
+    try std.testing.expectEqual(zova_status.OK, zova_database_set_busy_timeout(&.{ .db = readonly, .milliseconds = 0 }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_set_busy_timeout(&.{ .db = readonly, .milliseconds = 2 }));
+}
+
+test "c abi exposes sql record helper functions" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-record-helpers.zova", .{tmp.sub_path[0..]});
+
+    var db: ?*zova_database = null;
+    var create_request = zova_database_open_request{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&create_request));
+    defer _ = zova_database_close(db);
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = db, .sql = "create table records (id integer primary key, name text not null)" }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = db, .sql = "insert into records (name) values ('one')" }));
+
+    var rowid: i64 = 0;
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_last_insert_rowid(&.{ .db = db, .out_rowid = null }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_last_insert_rowid(&.{ .db = db, .out_rowid = &rowid }));
+    try std.testing.expectEqual(@as(i64, 1), rowid);
+
+    var changes: i64 = 0;
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_changes(&.{ .db = db, .out_changes = null }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_changes(&.{ .db = db, .out_changes = &changes }));
+    try std.testing.expectEqual(@as(i64, 1), changes);
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = db, .sql = "update records set name = 'two' where id = 1" }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_changes(&.{ .db = db, .out_changes = &changes }));
+    try std.testing.expectEqual(@as(i64, 1), changes);
+
+    var total_changes: i64 = 0;
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_total_changes(&.{ .db = db, .out_total_changes = null }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_total_changes(&.{ .db = db, .out_total_changes = &total_changes }));
+    try std.testing.expect(total_changes >= 2);
+
+    var stmt: ?*zova_statement = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_prepare(&.{
+        .db = db,
+        .sql = "select id as record_id, name from records",
+        .out_statement = &stmt,
+    }));
+    defer _ = zova_statement_finalize(stmt);
+
+    var name = zova_text{ .data = null, .len = 0 };
+    defer zova_text_free(&name);
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_column_name(&.{ .statement = stmt, .index = 0, .out_name = null }));
+    try std.testing.expectEqual(zova_status.OK, zova_statement_column_name(&.{ .statement = stmt, .index = 0, .out_name = &name }));
+    try std.testing.expectEqualStrings("record_id", name.data.?[0..name.len]);
+    zova_text_free(&name);
+    try std.testing.expectEqual(zova_status.OK, zova_statement_column_name(&.{ .statement = stmt, .index = 1, .out_name = &name }));
+    try std.testing.expectEqualStrings("name", name.data.?[0..name.len]);
+    try std.testing.expectEqual(zova_status.MISUSE, zova_statement_column_name(&.{ .statement = stmt, .index = 2, .out_name = &name }));
 }
 
 test "c abi validates vector request shapes" {
@@ -2324,4 +2807,216 @@ test "c abi exposes transaction helpers and vacuum" {
     var count: i64 = 0;
     try std.testing.expectEqual(zova_status.OK, zova_statement_column_int64(&.{ .statement = count_stmt, .index = 0, .out_value = &count }));
     try std.testing.expectEqual(@as(i64, 1), count);
+}
+
+test "c abi rejects database close while statement or writer children are live" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-live-children.zova", .{tmp.sub_path[0..]});
+
+    var db: ?*zova_database = null;
+    var create_request = zova_database_open_request{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&create_request));
+
+    var stmt: ?*zova_statement = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_prepare(&.{
+        .db = db,
+        .sql = "select 1",
+        .out_statement = &stmt,
+    }));
+
+    try std.testing.expectEqual(zova_status.MISUSE, zova_database_close(db));
+    try std.testing.expect(std.mem.indexOf(u8, std.mem.span(zova_database_last_error_message(db)), "live child") != null);
+
+    var step_result: zova_step_result = undefined;
+    try std.testing.expectEqual(zova_status.OK, zova_statement_step(&.{
+        .statement = stmt,
+        .out_result = &step_result,
+    }));
+    try std.testing.expectEqual(zova_step_result.ROW, step_result);
+    try std.testing.expectEqual(zova_status.OK, zova_statement_finalize(stmt));
+
+    var writer: ?*zova_object_writer = null;
+    try std.testing.expectEqual(zova_status.OK, zova_object_writer_create(&.{
+        .db = db,
+        .out_writer = &writer,
+    }));
+
+    try std.testing.expectEqual(zova_status.MISUSE, zova_database_close(db));
+    try std.testing.expect(std.mem.indexOf(u8, std.mem.span(zova_database_last_error_message(db)), "live child") != null);
+
+    try std.testing.expectEqual(zova_status.OK, zova_object_writer_destroy(writer));
+    try std.testing.expectEqual(zova_status.OK, zova_database_close(db));
+}
+
+test "c abi serializes concurrent sql calls on one database handle" {
+    const Worker = struct {
+        const inserts_per_worker = 24;
+
+        db: ?*zova_database,
+        worker_index: usize,
+        status: zova_status = .OK,
+
+        fn run(ctx: *@This()) void {
+            var sql_buffer: [160]u8 = undefined;
+            for (0..inserts_per_worker) |insert_index| {
+                const sql = std.fmt.bufPrintZ(
+                    &sql_buffer,
+                    "insert into records (worker, item) values ({d}, {d})",
+                    .{ ctx.worker_index, insert_index },
+                ) catch {
+                    ctx.status = .OUT_OF_MEMORY;
+                    return;
+                };
+                const status = zova_database_exec(&.{ .db = ctx.db, .sql = sql.ptr });
+                if (status != .OK) {
+                    ctx.status = status;
+                    return;
+                }
+            }
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-threaded-sql.zova", .{tmp.sub_path[0..]});
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(db);
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = db, .sql = "create table records (worker integer not null, item integer not null)" }));
+
+    var contexts: [8]Worker = undefined;
+    var threads: [contexts.len]std.Thread = undefined;
+    for (&contexts, 0..) |*context, index| {
+        context.* = .{ .db = db, .worker_index = index };
+    }
+    for (&threads, &contexts) |*thread, *context| {
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{context});
+    }
+    for (threads) |thread| thread.join();
+    for (contexts) |context| try std.testing.expectEqual(zova_status.OK, context.status);
+
+    var stmt: ?*zova_statement = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_prepare(&.{
+        .db = db,
+        .sql = "select count(*) from records",
+        .out_statement = &stmt,
+    }));
+    defer _ = zova_statement_finalize(stmt);
+
+    var step_result: zova_step_result = undefined;
+    try std.testing.expectEqual(zova_status.OK, zova_statement_step(&.{ .statement = stmt, .out_result = &step_result }));
+    try std.testing.expectEqual(zova_step_result.ROW, step_result);
+
+    var count: i64 = 0;
+    try std.testing.expectEqual(zova_status.OK, zova_statement_column_int64(&.{ .statement = stmt, .index = 0, .out_value = &count }));
+    try std.testing.expectEqual(@as(i64, contexts.len * Worker.inserts_per_worker), count);
+}
+
+test "c abi serializes mixed object vector and database calls on one handle" {
+    const Worker = struct {
+        db: ?*zova_database,
+        worker_index: usize,
+        object_id: zova_object_id = .{ .bytes = [_]u8{0} ** 32 },
+        status: zova_status = .OK,
+
+        fn run(ctx: *@This()) void {
+            if (ctx.worker_index % 2 == 0) {
+                var data_buffer: [64]u8 = undefined;
+                const data = std.fmt.bufPrint(&data_buffer, "threaded object {d}", .{ctx.worker_index}) catch {
+                    ctx.status = .OUT_OF_MEMORY;
+                    return;
+                };
+                ctx.status = zova_object_put(&.{
+                    .db = ctx.db,
+                    .data = data.ptr,
+                    .len = data.len,
+                    .out_id = &ctx.object_id,
+                });
+            } else {
+                var id_buffer: [32]u8 = undefined;
+                const vector_id = std.fmt.bufPrintZ(&id_buffer, "v-{d}", .{ctx.worker_index}) catch {
+                    ctx.status = .OUT_OF_MEMORY;
+                    return;
+                };
+                const values = [_]f32{ @floatFromInt(ctx.worker_index), 1.0 };
+                ctx.status = zova_vector_put(&.{
+                    .db = ctx.db,
+                    .collection_name = "mixed",
+                    .vector_id = vector_id.ptr,
+                    .values = &values,
+                    .values_len = values.len,
+                });
+            }
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-threaded-mixed.zova", .{tmp.sub_path[0..]});
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(db);
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = db, .sql = "create table events (body text)" }));
+    try std.testing.expectEqual(zova_status.OK, zova_vector_collection_create(&.{
+        .db = db,
+        .name = "mixed",
+        .options = .{ .dimensions = 2, .metric = @intFromEnum(zova_vector_metric.L2) },
+    }));
+
+    var contexts: [12]Worker = undefined;
+    var threads: [contexts.len]std.Thread = undefined;
+    for (&contexts, 0..) |*context, index| {
+        context.* = .{ .db = db, .worker_index = index };
+    }
+    for (&threads, &contexts) |*thread, *context| {
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{context});
+    }
+    for (threads) |thread| thread.join();
+    for (contexts) |context| try std.testing.expectEqual(zova_status.OK, context.status);
+
+    var object_count: usize = 0;
+    for (contexts) |context| {
+        if (context.worker_index % 2 != 0) continue;
+        var exists: u8 = 0;
+        try std.testing.expectEqual(zova_status.OK, zova_object_exists(&.{
+            .db = db,
+            .id = context.object_id,
+            .out_exists = &exists,
+        }));
+        try std.testing.expectEqual(@as(u8, 1), exists);
+        object_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 6), object_count);
+
+    var info = emptyVectorCollectionInfo();
+    try std.testing.expectEqual(zova_status.OK, zova_vector_collection_info_get(&.{
+        .db = db,
+        .name = "mixed",
+        .out_info = &info,
+    }));
+    defer zova_vector_collection_info_free(&info);
+    try std.testing.expectEqual(@as(u64, 6), info.vector_count);
 }

@@ -38,6 +38,15 @@ int main() {
     put_many_request.vectors_len = 1;
     zova_database_prepare_request prepare_request = {};
     prepare_request.out_statement = &statement;
+    zova_database_last_insert_rowid_request last_rowid_request = {};
+    int64_t last_rowid = 0;
+    last_rowid_request.out_rowid = &last_rowid;
+    zova_database_changes_request changes_request = {};
+    int64_t changes = 0;
+    changes_request.out_changes = &changes;
+    zova_database_total_changes_request total_changes_request = {};
+    int64_t total_changes = 0;
+    total_changes_request.out_total_changes = &total_changes;
     zova_statement_step_request step_request = {};
     step_request.statement = statement;
     zova_step_result step_result = ZOVA_STEP_DONE;
@@ -48,6 +57,8 @@ int main() {
     zova_statement_column_type_request column_type_request = {};
     zova_column_type column_type = ZOVA_COLUMN_NULL;
     column_type_request.out_type = &column_type;
+    zova_statement_column_name_request column_name_request = {};
+    column_name_request.out_name = &text;
     zova_statement_column_text_request column_text_request = {};
     column_text_request.out_text = &text;
     zova_statement_column_blob_request column_blob_request = {};
@@ -111,9 +122,13 @@ int main() {
                    zova_status_name(ZOVA_OK) != nullptr &&
                    zova_abi_version_string() != nullptr &&
                    prepare_request.out_statement == &statement &&
+                   last_rowid_request.out_rowid == &last_rowid &&
+                   changes_request.out_changes == &changes &&
+                   total_changes_request.out_total_changes == &total_changes &&
                    step_request.out_result == &step_result &&
                    bind_text_request.len == 5 &&
                    column_type_request.out_type == &column_type &&
+                   column_name_request.out_name == &text &&
                    column_text_request.out_text == &text &&
                    column_blob_request.out_buffer == &buffer &&
                    simple_request.db == db &&

@@ -20,6 +20,7 @@ pub const VectorInput = zova.VectorInput;
 pub const VectorMetric = zova.VectorMetric;
 pub const VectorSearchResult = zova.VectorSearchResult;
 pub const VectorSearchResults = zova.VectorSearchResults;
+pub const OpenOptions = zova.OpenOptions;
 pub const max_vector_dimensions = zova.max_vector_dimensions;
 pub const objectChunkId = zova.objectChunkId;
 pub const objectId = zova.objectId;
@@ -35,6 +36,7 @@ test "package exports sqlite namespace" {
 test "package exports zova database namespace" {
     try std.testing.expect(@hasDecl(@This(), "Database"));
     try std.testing.expect(@hasDecl(@This(), "Error"));
+    try std.testing.expect(@hasDecl(@This(), "OpenOptions"));
     try std.testing.expect(@hasDecl(@This(), "convertSqliteToZova"));
     try std.testing.expect(@hasDecl(@This(), "Object"));
     try std.testing.expect(@hasDecl(@This(), "ObjectChunk"));
@@ -89,6 +91,11 @@ test "package exports zova database namespace" {
     try std.testing.expect(@hasDecl(Database, "searchVectorsInWithin"));
     try std.testing.expect(@hasDecl(Database, "searchVectorsByIdWithin"));
     try std.testing.expect(@hasDecl(Database, "searchVectorsByIdInWithin"));
+    try std.testing.expect(@hasDecl(Database, "openWithOptions"));
+    try std.testing.expect(@hasDecl(Database, "setBusyTimeout"));
+    try std.testing.expect(@hasDecl(Database, "lastInsertRowid"));
+    try std.testing.expect(@hasDecl(Database, "changes"));
+    try std.testing.expect(@hasDecl(Database, "totalChanges"));
     try std.testing.expect(!@hasDecl(@This(), "fastcdc"));
 }
 

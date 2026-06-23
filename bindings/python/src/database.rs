@@ -27,9 +27,19 @@ impl PyDatabase {
     }
 
     #[staticmethod]
-    pub(crate) fn open(path: &str) -> PyResult<Self> {
+    #[pyo3(signature = (path, *, read_only = false, busy_timeout_ms = 0))]
+    pub(crate) fn open(path: &str, read_only: bool, busy_timeout_ms: u32) -> PyResult<Self> {
         Ok(Self {
-            inner: Some(zova_rust::Database::open(path).map_err(zova_error)?),
+            inner: Some(
+                zova_rust::Database::open_with_options(
+                    path,
+                    zova_rust::OpenOptions {
+                        read_only,
+                        busy_timeout_ms,
+                    },
+                )
+                .map_err(zova_error)?,
+            ),
         })
     }
 
@@ -64,6 +74,24 @@ impl PyDatabase {
 
     pub(crate) fn vacuum(&mut self) -> PyResult<()> {
         self.db_mut()?.vacuum().map_err(zova_error)
+    }
+
+    pub(crate) fn set_busy_timeout(&mut self, milliseconds: u32) -> PyResult<()> {
+        self.db_mut()?
+            .set_busy_timeout(milliseconds)
+            .map_err(zova_error)
+    }
+
+    pub(crate) fn last_insert_rowid(&mut self) -> PyResult<i64> {
+        self.db_mut()?.last_insert_rowid().map_err(zova_error)
+    }
+
+    pub(crate) fn changes(&mut self) -> PyResult<i64> {
+        self.db_mut()?.changes().map_err(zova_error)
+    }
+
+    pub(crate) fn total_changes(&mut self) -> PyResult<i64> {
+        self.db_mut()?.total_changes().map_err(zova_error)
     }
 
     pub(crate) fn put_object(&mut self, data: Vec<u8>) -> PyResult<PyObjectId> {

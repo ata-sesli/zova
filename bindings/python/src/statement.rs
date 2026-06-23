@@ -83,6 +83,10 @@ impl PyStatement {
         self.statement_mut()?.column_count().map_err(zova_error)
     }
 
+    pub(crate) fn column_name(&mut self, index: usize) -> PyResult<String> {
+        self.statement_mut()?.column_name(index).map_err(zova_error)
+    }
+
     pub(crate) fn column_type(&mut self, index: usize) -> PyResult<i32> {
         let column_type = self
             .statement_mut()?

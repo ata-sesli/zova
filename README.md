@@ -187,7 +187,9 @@ zova_statement_finalize(stmt);
 
 Parameter indexes are 1-based, matching SQLite. Column indexes are 0-based.
 Column text and blob outputs are owned copies; free them with `zova_text_free`
-and `zova_buffer_free`.
+and `zova_buffer_free`. Record helpers expose SQLite rowid/change counters and
+statement column names for application SQL tables; they do not expose or
+stabilize Zova's private `_zova_*` schema.
 
 Every C ABI function returns `zova_status`. `ZOVA_OK` means success.
 `zova_status_name(status)` returns a static status name.
@@ -202,9 +204,33 @@ The returned pointer is borrowed and valid until the next call on that database
 handle or until close. Create/open/convert failures can also return an owned
 `zova_message` through their request structs.
 
-Handles are opaque. Do not use the same database or writer handle concurrently
-from multiple threads. Multiple database handles to the same file are allowed
-and follow SQLite locking.
+Handles are opaque. A single `zova_database` handle is internally serialized:
+calls from multiple threads are safe, but they execute one at a time. Statements
+and object writers are child handles of their parent database and use the same
+serialization boundary. Finalize statements and destroy writers before closing
+the database; `zova_database_close` returns `ZOVA_MISUSE` and leaves the handle
+usable while live children still exist. After a successful close, statement
+finalize, or writer destroy, that C pointer is invalid and must not be reused;
+coordinate those terminal calls so no other thread can still call through the
+same pointer.
+
+Use one handle when simplicity matters. Open multiple database handles to the
+same file when you want true concurrent database work; cross-handle contention
+uses normal SQLite locking and can surface statuses such as `ZOVA_BUSY` or
+`ZOVA_LOCKED`. Retry, backoff, and transaction-shaping policy belongs to the
+application.
+
+Open options are additive. Existing `zova_database_open` remains the
+compatibility path. Use `zova_database_open_with_options` with
+`ZOVA_OPEN_READ_ONLY` to validate and query an existing `.zova` file without
+opening it for writes. Read-only handles still support SQL reads, object reads,
+vector reads, and SQL-native vector search; writes fail with SQLite's read-only
+status path.
+
+Busy handling is explicit. `zova_database_set_busy_timeout` sets SQLite's busy
+timeout for one handle, and `busy_timeout_ms` on the open-options request can
+set the initial timeout. Zova does not install a nonzero timeout by default, and
+a timeout does not guarantee success under sustained cross-handle contention.
 
 The ABI is additive and pre-1.0.
 

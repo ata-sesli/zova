@@ -54,6 +54,7 @@ pub const ZOVA_COLUMN_NULL: zova_column_type = 5;
 pub const ZOVA_VECTOR_METRIC_COSINE: zova_vector_metric = 0;
 pub const ZOVA_VECTOR_METRIC_L2: zova_vector_metric = 1;
 pub const ZOVA_VECTOR_METRIC_DOT: zova_vector_metric = 2;
+pub const ZOVA_OPEN_READ_ONLY: u32 = 1 << 0;
 
 #[repr(C)]
 pub struct zova_database {
@@ -187,6 +188,15 @@ pub struct zova_database_open_request {
 }
 
 #[repr(C)]
+pub struct zova_database_open_options_request {
+    pub path: *const c_char,
+    pub flags: u32,
+    pub busy_timeout_ms: u32,
+    pub out_db: *mut *mut zova_database,
+    pub out_error_message: *mut zova_message,
+}
+
+#[repr(C)]
 pub struct zova_convert_sqlite_to_zova_request {
     pub source_path: *const c_char,
     pub dest_path: *const c_char,
@@ -202,6 +212,30 @@ pub struct zova_database_exec_request {
 #[repr(C)]
 pub struct zova_database_simple_request {
     pub db: *mut zova_database,
+}
+
+#[repr(C)]
+pub struct zova_database_busy_timeout_request {
+    pub db: *mut zova_database,
+    pub milliseconds: u32,
+}
+
+#[repr(C)]
+pub struct zova_database_last_insert_rowid_request {
+    pub db: *mut zova_database,
+    pub out_rowid: *mut i64,
+}
+
+#[repr(C)]
+pub struct zova_database_changes_request {
+    pub db: *mut zova_database,
+    pub out_changes: *mut i64,
+}
+
+#[repr(C)]
+pub struct zova_database_total_changes_request {
+    pub db: *mut zova_database,
+    pub out_total_changes: *mut i64,
 }
 
 #[repr(C)]
@@ -270,6 +304,13 @@ pub struct zova_statement_parameter_index_request {
 pub struct zova_statement_column_count_request {
     pub statement: *mut zova_statement,
     pub out_count: *mut c_int,
+}
+
+#[repr(C)]
+pub struct zova_statement_column_name_request {
+    pub statement: *mut zova_statement,
+    pub index: c_int,
+    pub out_name: *mut zova_text,
 }
 
 #[repr(C)]
@@ -600,6 +641,9 @@ extern "C" {
 
     pub fn zova_database_create(request: *const zova_database_open_request) -> zova_status;
     pub fn zova_database_open(request: *const zova_database_open_request) -> zova_status;
+    pub fn zova_database_open_with_options(
+        request: *const zova_database_open_options_request,
+    ) -> zova_status;
     pub fn zova_database_close(db: *mut zova_database) -> zova_status;
     pub fn zova_database_exec(request: *const zova_database_exec_request) -> zova_status;
     pub fn zova_database_begin(request: *const zova_database_simple_request) -> zova_status;
@@ -609,6 +653,16 @@ extern "C" {
     pub fn zova_database_commit(request: *const zova_database_simple_request) -> zova_status;
     pub fn zova_database_rollback(request: *const zova_database_simple_request) -> zova_status;
     pub fn zova_database_vacuum(request: *const zova_database_simple_request) -> zova_status;
+    pub fn zova_database_set_busy_timeout(
+        request: *const zova_database_busy_timeout_request,
+    ) -> zova_status;
+    pub fn zova_database_last_insert_rowid(
+        request: *const zova_database_last_insert_rowid_request,
+    ) -> zova_status;
+    pub fn zova_database_changes(request: *const zova_database_changes_request) -> zova_status;
+    pub fn zova_database_total_changes(
+        request: *const zova_database_total_changes_request,
+    ) -> zova_status;
     pub fn zova_database_prepare(request: *const zova_database_prepare_request) -> zova_status;
     pub fn zova_database_last_error_message(db: *mut zova_database) -> *const c_char;
     pub fn zova_convert_sqlite_to_zova(
@@ -642,6 +696,9 @@ extern "C" {
     ) -> zova_status;
     pub fn zova_statement_column_count(
         request: *const zova_statement_column_count_request,
+    ) -> zova_status;
+    pub fn zova_statement_column_name(
+        request: *const zova_statement_column_name_request,
     ) -> zova_status;
     pub fn zova_statement_column_type(
         request: *const zova_statement_column_type_request,

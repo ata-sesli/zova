@@ -30,9 +30,20 @@ This slice exposes database lifecycle, conversion, prepared SQL statements,
 transactions, explicit vacuum, objects, streaming object writes, vectors,
 SQL-native vector search, context managers, and Zova status exceptions.
 
-One Python `Database` object owns one native handle. Use one handle at a time,
-and open additional database handles when an application needs independent
-connections.
+One Python `Database` object owns one native handle. The native C ABI serializes
+calls on that handle, so one handle is safe but not parallel. Open additional
+database handles when an application needs independent concurrent connections;
+SQLite locking rules still apply across handles.
+
+Use `Database.open(path, read_only=True)` for read-only handles, and
+`Database.set_busy_timeout(milliseconds)` when an application wants SQLite to
+wait briefly on cross-handle contention. No nonzero timeout is installed by
+default.
+
+Use `Database.last_insert_rowid()`, `Database.changes()`,
+`Database.total_changes()`, and `Statement.column_name(index)` for normal
+application SQL record helpers. They do not expose or stabilize Zova's private
+`_zova_*` tables.
 
 ## Objects
 

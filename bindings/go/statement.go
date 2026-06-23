@@ -201,6 +201,34 @@ func (s *Stmt) ColumnCount() (int, error) {
 	return int(*count), err
 }
 
+// ColumnName returns the result-column name for a 0-based column index.
+func (s *Stmt) ColumnName(index int) (string, error) {
+	cIndex, err := checkedColumnIndex(index)
+	if err != nil {
+		return "", err
+	}
+	var value string
+	err = s.withLock(func(db *DB) error {
+		text := (*C.zova_text)(C.calloc(1, C.size_t(unsafe.Sizeof(C.zova_text{}))))
+		defer func() {
+			C.zova_text_free(text)
+			C.free(unsafe.Pointer(text))
+		}()
+		request := C.zova_statement_column_name_request{
+			statement: s.ptr,
+			index:     cIndex,
+			out_name:  text,
+		}
+		if err := statusFromDB(db, C.zova_statement_column_name(&request)); err != nil {
+			return err
+		}
+		bytes := unsafe.Slice((*byte)(unsafe.Pointer(text.data)), int(text.len))
+		value = string(bytes)
+		return nil
+	})
+	return value, err
+}
+
 // ColumnType returns the runtime type of a result column.
 func (s *Stmt) ColumnType(index int) (ColumnType, error) {
 	cIndex, err := checkedColumnIndex(index)
