@@ -19,13 +19,13 @@ fn temp_path(name: &str) -> String {
 fn abi_version_and_status_names_are_available() {
     unsafe {
         assert_eq!(zova_sys::zova_abi_version_major(), 0);
-        assert_eq!(zova_sys::zova_abi_version_minor(), 14);
+        assert_eq!(zova_sys::zova_abi_version_minor(), 15);
         assert_eq!(zova_sys::zova_abi_version_patch(), 0);
         assert_eq!(
             CStr::from_ptr(zova_sys::zova_abi_version_string())
                 .to_str()
                 .unwrap(),
-            "0.14.0"
+            "0.15.0"
         );
         assert_eq!(
             CStr::from_ptr(zova_sys::zova_status_name(zova_sys::ZOVA_OK))
@@ -93,6 +93,73 @@ fn raw_create_exec_prepare_step_close_smoke() {
     }
 
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn raw_backup_compact_and_restore_smoke() {
+    let path = temp_path("ops-source");
+    let backup_path = temp_path("ops-backup");
+    let compact_path = temp_path("ops-compact");
+    let restored_path = temp_path("ops-restored");
+    let c_path = CString::new(path.as_str()).unwrap();
+    let c_backup = CString::new(backup_path.as_str()).unwrap();
+    let c_compact = CString::new(compact_path.as_str()).unwrap();
+    let c_restored = CString::new(restored_path.as_str()).unwrap();
+    let mut db = ptr::null_mut();
+    let mut message = zova_sys::zova_message {
+        data: ptr::null_mut(),
+        len: 0,
+    };
+    let create = zova_sys::zova_database_open_request {
+        path: c_path.as_ptr(),
+        out_db: &mut db,
+        out_error_message: &mut message,
+    };
+
+    unsafe {
+        assert_eq!(zova_sys::zova_database_create(&create), zova_sys::ZOVA_OK);
+        let sql = CString::new(
+            "create table records(id integer primary key, body text not null);
+             insert into records(body) values ('kept');",
+        )
+        .unwrap();
+        let exec = zova_sys::zova_database_exec_request {
+            db,
+            sql: sql.as_ptr(),
+        };
+        assert_eq!(zova_sys::zova_database_exec(&exec), zova_sys::ZOVA_OK);
+
+        let backup = zova_sys::zova_database_backup_request {
+            db,
+            destination_path: c_backup.as_ptr(),
+            flags: zova_sys::ZOVA_BACKUP_NO_VERIFY,
+        };
+        assert_eq!(zova_sys::zova_database_backup(&backup), zova_sys::ZOVA_OK);
+
+        let compact = zova_sys::zova_database_compact_request {
+            db,
+            destination_path: c_compact.as_ptr(),
+            flags: zova_sys::ZOVA_COMPACT_NO_VERIFY,
+        };
+        assert_eq!(zova_sys::zova_database_compact(&compact), zova_sys::ZOVA_OK);
+
+        let restore = zova_sys::zova_database_restore_request {
+            source_path: c_backup.as_ptr(),
+            destination_path: c_restored.as_ptr(),
+            flags: zova_sys::ZOVA_RESTORE_NO_VERIFY,
+            out_error_message: &mut message,
+        };
+        assert_eq!(zova_sys::zova_database_restore(&restore), zova_sys::ZOVA_OK);
+        assert_eq!(zova_sys::zova_database_close(db), zova_sys::ZOVA_OK);
+    }
+
+    assert!(std::path::Path::new(&backup_path).exists());
+    assert!(std::path::Path::new(&compact_path).exists());
+    assert!(std::path::Path::new(&restored_path).exists());
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(backup_path);
+    let _ = std::fs::remove_file(compact_path);
+    let _ = std::fs::remove_file(restored_path);
 }
 
 #[test]

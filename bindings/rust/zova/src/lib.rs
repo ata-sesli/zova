@@ -1,11 +1,11 @@
 //! Safe Rust bindings for Zova's C ABI.
 //!
 //! This Rust binding currently covers database lifecycle, records through
-//! prepared SQL statements, transactions, explicit vacuum, objects, chunks,
-//! manifests, range reads, assembly, `ObjectWriter`, vector collections, vector
-//! CRUD, exact vector search, and SQL-native vector queries through prepared
-//! statements. Use `SharedDatabase` when one serialized handle should be shared
-//! across Rust threads.
+//! prepared SQL statements, transactions, explicit vacuum, backup/compact/
+//! restore, objects, chunks, manifests, range reads, assembly, `ObjectWriter`,
+//! vector collections, vector CRUD, exact vector search, and SQL-native vector
+//! queries through prepared statements. Use `SharedDatabase` when one serialized
+//! handle should be shared across Rust threads.
 
 mod database;
 mod error;
@@ -14,7 +14,9 @@ mod shared;
 mod statement;
 mod vector;
 
-pub use database::{Database, OpenOptions};
+pub use database::{
+    restore_backup, BackupOptions, CompactOptions, Database, OpenOptions, RestoreOptions,
+};
 pub use error::{Error, Result, Status};
 pub use object::{
     object_chunk_id, object_id, ObjectChunkId, ObjectId, ObjectManifest, ObjectManifestChunk,

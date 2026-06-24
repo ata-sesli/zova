@@ -20,10 +20,10 @@ func tempZovaPath(t *testing.T, name string) string {
 
 func TestABIVersionAndStatusNames(t *testing.T) {
 	major, minor, patch := ABIVersionNumbers()
-	if major != 0 || minor != 14 || patch != 0 {
+	if major != 0 || minor != 15 || patch != 0 {
 		t.Fatalf("unexpected ABI version: %d.%d.%d", major, minor, patch)
 	}
-	if got := ABIVersion(); got != "0.14.0" {
+	if got := ABIVersion(); got != "0.15.0" {
 		t.Fatalf("unexpected ABI version string: %q", got)
 	}
 	if got := StatusName(StatusOK); got != "ZOVA_OK" {
@@ -201,6 +201,54 @@ func TestResetClearBindingsTransactionsVacuumAndMultipleHandles(t *testing.T) {
 	}
 }
 
+func TestBackupCompactAndRestore(t *testing.T) {
+	source := tempZovaPath(t, "ops-source")
+	backup := tempZovaPath(t, "ops-backup")
+	compact := tempZovaPath(t, "ops-compact")
+	restored := tempZovaPath(t, "ops-restored")
+	noVerify := tempZovaPath(t, "ops-no-verify")
+	db, err := Create(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	must(t, db.Exec("create table records(id integer primary key, body text not null)"))
+	must(t, db.Exec("insert into records(body) values ('kept')"))
+	objectID, err := db.PutObject([]byte("go operational object bytes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	must(t, db.CreateVectorCollection("chunks", VectorCollectionOptions{
+		Dimensions: 2,
+		Metric:     VectorMetricL2,
+	}))
+	must(t, db.PutVector("chunks", "near", []float32{0, 0}))
+	must(t, db.PutVector("chunks", "far", []float32{10, 0}))
+
+	must(t, db.BackupTo(backup))
+	must(t, db.CompactTo(compact))
+	must(t, db.BackupTo(noVerify, BackupOptions{NoVerify: true}))
+	if err := db.BackupTo(backup); !errorStatusIs(err, StatusDestinationExists) {
+		t.Fatalf("backup destination conflict = %v, want StatusDestinationExists", err)
+	}
+	if err := db.CompactTo("bad-destination.db"); !errorStatusIs(err, StatusNotZovaPath) {
+		t.Fatalf("compact bad destination = %v, want StatusNotZovaPath", err)
+	}
+	if err := db.BackupTo(tempZovaPath(t, "too-many-options"), BackupOptions{}, BackupOptions{}); !errorStatusIs(err, StatusInvalidArgument) {
+		t.Fatalf("too many backup options = %v, want StatusInvalidArgument", err)
+	}
+
+	must(t, RestoreBackup(backup, restored))
+	if err := RestoreBackup("bad-source.db", tempZovaPath(t, "bad-restore")); !errorStatusIs(err, StatusNotZovaPath) {
+		t.Fatalf("restore bad source = %v, want StatusNotZovaPath", err)
+	}
+
+	for _, path := range []string{backup, compact, restored, noVerify} {
+		verifyOperationalCopy(t, path, objectID)
+	}
+}
+
 func TestConversionInteriorNULAndUseAfterClose(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source.db")
@@ -242,6 +290,46 @@ func TestConversionInteriorNULAndUseAfterClose(t *testing.T) {
 	defer db2.Close()
 	if err := db2.Exec("select '\x00'"); err == nil {
 		t.Fatal("Exec accepted SQL with NUL")
+	}
+}
+
+func verifyOperationalCopy(t *testing.T, path string, objectID ObjectID) {
+	t.Helper()
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if got := scalarInt(t, db, "select count(*) from records where body = 'kept'"); got != 1 {
+		t.Fatalf("%s record count = %d", path, got)
+	}
+	object, err := db.GetObject(objectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(object, []byte("go operational object bytes")) {
+		t.Fatalf("%s object mismatch", path)
+	}
+	results, err := db.SearchVectors("chunks", []float32{0, 0}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 || results[0].ID != "near" {
+		t.Fatalf("%s vector results = %#v", path, results)
+	}
+
+	stmt, err := db.Prepare("select zova_vector_distance('chunks', 'near', ?1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stmt.Close()
+	must(t, stmt.BindBlob(1, EncodeVectorBlob([]float32{0, 0})))
+	if step, err := stmt.Step(); err != nil || step != StepRow {
+		t.Fatalf("distance step = %v, %v", step, err)
+	}
+	if distance, err := stmt.ColumnFloat64(0); err != nil || distance != 0 {
+		t.Fatalf("distance = %f, %v", distance, err)
 	}
 }
 

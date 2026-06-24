@@ -1,8 +1,8 @@
 // Package zova provides Go bindings for Zova's C ABI.
 //
 // This Go binding covers database lifecycle, prepared SQL statements,
-// transactions, SQLite-to-Zova conversion, explicit vacuum, objects, and
-// vectors over Zova's C ABI.
+// transactions, SQLite-to-Zova conversion, explicit vacuum,
+// backup/compact/restore, objects, and vectors over Zova's C ABI.
 package zova
 
 /*

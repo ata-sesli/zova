@@ -8,14 +8,15 @@ It contains:
 - `zova`: safe Rust wrappers for database lifecycle, SQL prepared statements,
   transactions, explicit vacuum, objects, chunks, manifests, range reads,
   assembly, `ObjectWriter`, vector collections, vector CRUD, and exact vector
-  search.
+  search, plus backup, compact copy, and restore-to-new-file.
 
 ## Contents
 
 1. [How It Fits](#how-it-fits)
 2. [Local Build](#local-build)
 3. [Handle Policy](#handle-policy)
-4. [Example](#example)
+4. [Operational Safety](#operational-safety)
+5. [Example](#example)
 
 ## How It Fits
 
@@ -104,6 +105,30 @@ Use `Database::changes`, `Database::total_changes`,
 `Database::last_insert_rowid`, and `Statement::column_name` for normal
 application SQL record helpers. They are not a public interface to Zova's
 private `_zova_*` tables.
+
+## Operational Safety
+
+Use `backup_to` for a faithful snapshot, `compact_to` for a space-reclaiming
+copy, and `restore_backup` to copy a backup into a new destination file.
+Destinations must be `.zova` paths and are never overwritten.
+
+```rust
+use zova::{restore_backup, BackupOptions, CompactOptions, Database, RestoreOptions};
+
+let mut db = Database::open("app.zova")?;
+db.backup_to("app.backup.zova", BackupOptions::default())?;
+db.compact_to("app.compact.zova", CompactOptions::default())?;
+restore_backup(
+    "app.backup.zova",
+    "app.restored.zova",
+    RestoreOptions::default(),
+)?;
+```
+
+`SharedDatabase` exposes the same `backup_to` and `compact_to` methods. By
+default, each operation verifies the destination after copying. Pass
+`BackupOptions { verify: false }`, `CompactOptions { verify: false }`, or
+`RestoreOptions { verify: false }` only when you will verify separately.
 
 Objects can live beside ordinary SQL metadata:
 

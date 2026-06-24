@@ -1,4 +1,7 @@
-use crate::database::{cstring, empty_message, path_to_cstring, take_message};
+use crate::database::{
+    backup_flags, compact_flags, cstring, empty_message, path_to_cstring, take_message,
+    BackupOptions, CompactOptions,
+};
 use crate::error::{Error, Result, Status};
 use crate::object::{
     empty_buffer, empty_manifest, from_c_object_id, take_buffer, take_manifest, ObjectChunkId,
@@ -180,6 +183,30 @@ impl SharedDatabase {
 
     pub fn vacuum(&self) -> Result<()> {
         self.simple(zova_sys::zova_database_vacuum)
+    }
+
+    pub fn backup_to(&self, destination: impl AsRef<Path>, options: BackupOptions) -> Result<()> {
+        let destination = path_to_cstring(destination.as_ref())?;
+        let _guard = self.inner.lock();
+        let request = zova_sys::zova_database_backup_request {
+            db: self.inner.raw_ptr(),
+            destination_path: destination.as_ptr(),
+            flags: backup_flags(options.verify),
+        };
+        self.inner
+            .status_locked(unsafe { zova_sys::zova_database_backup(&request) })
+    }
+
+    pub fn compact_to(&self, destination: impl AsRef<Path>, options: CompactOptions) -> Result<()> {
+        let destination = path_to_cstring(destination.as_ref())?;
+        let _guard = self.inner.lock();
+        let request = zova_sys::zova_database_compact_request {
+            db: self.inner.raw_ptr(),
+            destination_path: destination.as_ptr(),
+            flags: compact_flags(options.verify),
+        };
+        self.inner
+            .status_locked(unsafe { zova_sys::zova_database_compact(&request) })
     }
 
     pub fn set_busy_timeout(&self, milliseconds: u32) -> Result<()> {

@@ -76,6 +76,20 @@ impl PyDatabase {
         self.db_mut()?.vacuum().map_err(zova_error)
     }
 
+    #[pyo3(signature = (destination, *, verify = true))]
+    pub(crate) fn backup_to(&mut self, destination: &str, verify: bool) -> PyResult<()> {
+        self.db_mut()?
+            .backup_to(destination, zova_rust::BackupOptions { verify })
+            .map_err(zova_error)
+    }
+
+    #[pyo3(signature = (destination, *, verify = true))]
+    pub(crate) fn compact_to(&mut self, destination: &str, verify: bool) -> PyResult<()> {
+        self.db_mut()?
+            .compact_to(destination, zova_rust::CompactOptions { verify })
+            .map_err(zova_error)
+    }
+
     pub(crate) fn set_busy_timeout(&mut self, milliseconds: u32) -> PyResult<()> {
         self.db_mut()?
             .set_busy_timeout(milliseconds)
@@ -438,4 +452,11 @@ impl PyDatabase {
 #[pyfunction]
 pub(crate) fn convert_sqlite_to_zova(source: &str, destination: &str) -> PyResult<()> {
     zova_rust::Database::convert_sqlite_to_zova(source, destination).map_err(zova_error)
+}
+
+#[pyfunction]
+#[pyo3(signature = (source, destination, *, verify = true))]
+pub(crate) fn restore_backup(source: &str, destination: &str, verify: bool) -> PyResult<()> {
+    zova_rust::restore_backup(source, destination, zova_rust::RestoreOptions { verify })
+        .map_err(zova_error)
 }

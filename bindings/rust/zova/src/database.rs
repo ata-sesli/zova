@@ -17,6 +17,39 @@ pub struct OpenOptions {
     pub busy_timeout_ms: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackupOptions {
+    pub verify: bool,
+}
+
+impl Default for BackupOptions {
+    fn default() -> Self {
+        Self { verify: true }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactOptions {
+    pub verify: bool,
+}
+
+impl Default for CompactOptions {
+    fn default() -> Self {
+        Self { verify: true }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RestoreOptions {
+    pub verify: bool,
+}
+
+impl Default for RestoreOptions {
+    fn default() -> Self {
+        Self { verify: true }
+    }
+}
+
 pub(crate) struct DatabaseInner {
     raw: NonNull<zova_sys::zova_database>,
     _not_send_sync: PhantomData<Rc<()>>,
@@ -78,6 +111,34 @@ impl Database {
             return Ok(());
         }
         Err(Error::from_status(status, take_message(&mut message)))
+    }
+
+    pub fn backup_to(
+        &mut self,
+        destination: impl AsRef<Path>,
+        options: BackupOptions,
+    ) -> Result<()> {
+        let destination = path_to_cstring(destination.as_ref())?;
+        let request = zova_sys::zova_database_backup_request {
+            db: self.raw_ptr(),
+            destination_path: destination.as_ptr(),
+            flags: backup_flags(options.verify),
+        };
+        self.status(unsafe { zova_sys::zova_database_backup(&request) })
+    }
+
+    pub fn compact_to(
+        &mut self,
+        destination: impl AsRef<Path>,
+        options: CompactOptions,
+    ) -> Result<()> {
+        let destination = path_to_cstring(destination.as_ref())?;
+        let request = zova_sys::zova_database_compact_request {
+            db: self.raw_ptr(),
+            destination_path: destination.as_ptr(),
+            flags: compact_flags(options.verify),
+        };
+        self.status(unsafe { zova_sys::zova_database_compact(&request) })
     }
 
     pub fn exec(&mut self, sql: &str) -> Result<()> {
@@ -265,6 +326,51 @@ pub(crate) fn cstring(value: &str, context: &'static str) -> Result<CString> {
 pub(crate) fn path_to_cstring(path: &Path) -> Result<CString> {
     let value = path.to_str().ok_or(Error::NonUtf8Path)?;
     cstring(value, "path")
+}
+
+pub fn restore_backup(
+    source: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+    options: RestoreOptions,
+) -> Result<()> {
+    let source = path_to_cstring(source.as_ref())?;
+    let destination = path_to_cstring(destination.as_ref())?;
+    let mut message = empty_message();
+    let request = zova_sys::zova_database_restore_request {
+        source_path: source.as_ptr(),
+        destination_path: destination.as_ptr(),
+        flags: restore_flags(options.verify),
+        out_error_message: &mut message,
+    };
+    let status = unsafe { zova_sys::zova_database_restore(&request) };
+    if status == zova_sys::ZOVA_OK {
+        return Ok(());
+    }
+    Err(Error::from_status(status, take_message(&mut message)))
+}
+
+pub(crate) fn backup_flags(verify: bool) -> u32 {
+    if verify {
+        0
+    } else {
+        zova_sys::ZOVA_BACKUP_NO_VERIFY
+    }
+}
+
+pub(crate) fn compact_flags(verify: bool) -> u32 {
+    if verify {
+        0
+    } else {
+        zova_sys::ZOVA_COMPACT_NO_VERIFY
+    }
+}
+
+pub(crate) fn restore_flags(verify: bool) -> u32 {
+    if verify {
+        0
+    } else {
+        zova_sys::ZOVA_RESTORE_NO_VERIFY
+    }
 }
 
 pub(crate) fn empty_message() -> zova_sys::zova_message {

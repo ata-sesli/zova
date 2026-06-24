@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 /*
- * Zova C ABI, v0.14.0 pre-1.0.
+ * Zova C ABI, v0.15.0 pre-1.0.
  *
  * This header exposes a C-compatible object and vector API over Zova's Zig
  * implementation. The ABI is intentionally conservative: opaque handles,

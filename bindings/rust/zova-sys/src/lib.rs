@@ -55,6 +55,9 @@ pub const ZOVA_VECTOR_METRIC_COSINE: zova_vector_metric = 0;
 pub const ZOVA_VECTOR_METRIC_L2: zova_vector_metric = 1;
 pub const ZOVA_VECTOR_METRIC_DOT: zova_vector_metric = 2;
 pub const ZOVA_OPEN_READ_ONLY: u32 = 1 << 0;
+pub const ZOVA_BACKUP_NO_VERIFY: u32 = 1 << 0;
+pub const ZOVA_COMPACT_NO_VERIFY: u32 = 1 << 0;
+pub const ZOVA_RESTORE_NO_VERIFY: u32 = 1 << 0;
 
 #[repr(C)]
 pub struct zova_database {
@@ -200,6 +203,28 @@ pub struct zova_database_open_options_request {
 pub struct zova_convert_sqlite_to_zova_request {
     pub source_path: *const c_char,
     pub dest_path: *const c_char,
+    pub out_error_message: *mut zova_message,
+}
+
+#[repr(C)]
+pub struct zova_database_backup_request {
+    pub db: *mut zova_database,
+    pub destination_path: *const c_char,
+    pub flags: u32,
+}
+
+#[repr(C)]
+pub struct zova_database_compact_request {
+    pub db: *mut zova_database,
+    pub destination_path: *const c_char,
+    pub flags: u32,
+}
+
+#[repr(C)]
+pub struct zova_database_restore_request {
+    pub source_path: *const c_char,
+    pub destination_path: *const c_char,
+    pub flags: u32,
     pub out_error_message: *mut zova_message,
 }
 
@@ -653,6 +678,8 @@ extern "C" {
     pub fn zova_database_commit(request: *const zova_database_simple_request) -> zova_status;
     pub fn zova_database_rollback(request: *const zova_database_simple_request) -> zova_status;
     pub fn zova_database_vacuum(request: *const zova_database_simple_request) -> zova_status;
+    pub fn zova_database_backup(request: *const zova_database_backup_request) -> zova_status;
+    pub fn zova_database_compact(request: *const zova_database_compact_request) -> zova_status;
     pub fn zova_database_set_busy_timeout(
         request: *const zova_database_busy_timeout_request,
     ) -> zova_status;
@@ -668,6 +695,7 @@ extern "C" {
     pub fn zova_convert_sqlite_to_zova(
         request: *const zova_convert_sqlite_to_zova_request,
     ) -> zova_status;
+    pub fn zova_database_restore(request: *const zova_database_restore_request) -> zova_status;
 
     pub fn zova_statement_finalize(statement: *mut zova_statement) -> zova_status;
     pub fn zova_statement_step(request: *const zova_statement_step_request) -> zova_status;

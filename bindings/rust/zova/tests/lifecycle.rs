@@ -1,4 +1,7 @@
-use zova::{ColumnType, Database, Error, OpenOptions, Status, Step};
+use zova::{
+    restore_backup, BackupOptions, ColumnType, CompactOptions, Database, Error, OpenOptions,
+    RestoreOptions, SharedDatabase, Status, Step, VectorCollectionOptions, VectorMetric,
+};
 
 fn temp_path(name: &str) -> String {
     let mut path = std::env::temp_dir();
@@ -183,6 +186,121 @@ fn transactions_commit_rollback_and_vacuum_work() {
 
     db.vacuum().unwrap();
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn backup_compact_and_restore_preserve_records_objects_and_vectors() {
+    let path = temp_path("ops-source");
+    let backup_path = temp_path("ops-backup");
+    let compact_path = temp_path("ops-compact");
+    let restored_path = temp_path("ops-restored");
+    let no_verify_path = temp_path("ops-no-verify");
+    let payload = b"rust operational object bytes";
+    let object_id;
+    {
+        let mut db = Database::create(&path).unwrap();
+        db.exec("create table records(id integer primary key, body text not null)")
+            .unwrap();
+        db.exec("insert into records(body) values ('kept')")
+            .unwrap();
+        object_id = db.put_object(payload).unwrap();
+        db.create_vector_collection(
+            "chunks",
+            VectorCollectionOptions {
+                dimensions: 2,
+                metric: VectorMetric::L2,
+            },
+        )
+        .unwrap();
+        db.put_vector("chunks", "near", &[0.0, 0.0]).unwrap();
+        db.put_vector("chunks", "far", &[10.0, 0.0]).unwrap();
+
+        db.backup_to(&backup_path, BackupOptions::default())
+            .unwrap();
+        db.compact_to(&compact_path, CompactOptions::default())
+            .unwrap();
+        db.backup_to(&no_verify_path, BackupOptions { verify: false })
+            .unwrap();
+
+        let err = db
+            .backup_to(&backup_path, BackupOptions::default())
+            .unwrap_err();
+        assert_eq!(err.status(), Some(Status::DestinationExists));
+    }
+
+    restore_backup(&backup_path, &restored_path, RestoreOptions::default()).unwrap();
+
+    for copy in [&backup_path, &compact_path, &restored_path, &no_verify_path] {
+        let mut db = Database::open(copy).unwrap();
+        let mut query = db.prepare("select body from records where id = 1").unwrap();
+        assert_eq!(query.step().unwrap(), Step::Row);
+        assert_eq!(query.column_text(0).unwrap(), Some("kept".to_string()));
+        drop(query);
+
+        assert_eq!(db.get_object(object_id).unwrap(), payload);
+
+        let results = db.search_vectors("chunks", &[0.0, 0.0], 2).unwrap();
+        assert_eq!(results[0].id, "near");
+
+        let query_blob: Vec<u8> = [0.0_f32, 0.0]
+            .into_iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        let mut distance = db
+            .prepare("select zova_vector_distance('chunks', 'near', ?1)")
+            .unwrap();
+        distance.bind_blob(1, &query_blob).unwrap();
+        assert_eq!(distance.step().unwrap(), Step::Row);
+        assert_eq!(distance.column_f64(0).unwrap(), 0.0);
+    }
+
+    let mut db = Database::open(&path).unwrap();
+    let err = db
+        .compact_to("bad-destination.db", CompactOptions::default())
+        .unwrap_err();
+    assert_eq!(err.status(), Some(Status::NotZovaPath));
+    let err = restore_backup(
+        "bad-source.db",
+        &temp_path("bad-restore"),
+        RestoreOptions::default(),
+    )
+    .unwrap_err();
+    assert_eq!(err.status(), Some(Status::NotZovaPath));
+}
+
+#[test]
+fn shared_database_backup_and_compact_work() {
+    let path = temp_path("shared-ops-source");
+    let backup_path = temp_path("shared-ops-backup");
+    let compact_path = temp_path("shared-ops-compact");
+    let db = SharedDatabase::create(&path).unwrap();
+    db.exec("create table records(id integer primary key, body text not null)")
+        .unwrap();
+    db.exec("insert into records(body) values ('shared')")
+        .unwrap();
+
+    let reader = db.clone();
+    let handle = std::thread::spawn(move || {
+        for _ in 0..8 {
+            let mut stmt = reader
+                .prepare("select count(*) from records where body = 'shared'")
+                .unwrap();
+            assert_eq!(stmt.step().unwrap(), Step::Row);
+            assert_eq!(stmt.column_i64(0).unwrap(), 1);
+        }
+    });
+    db.backup_to(&backup_path, BackupOptions::default())
+        .unwrap();
+    db.compact_to(&compact_path, CompactOptions { verify: false })
+        .unwrap();
+    handle.join().unwrap();
+
+    for copy in [&backup_path, &compact_path] {
+        let mut opened = Database::open(copy).unwrap();
+        let mut stmt = opened.prepare("select body from records").unwrap();
+        assert_eq!(stmt.step().unwrap(), Step::Row);
+        assert_eq!(stmt.column_text(0).unwrap(), Some("shared".to_string()));
+    }
 }
 
 #[test]

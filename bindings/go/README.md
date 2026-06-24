@@ -10,6 +10,7 @@ It covers:
 - prepared statements with bind/step/column access
 - explicit transactions
 - explicit `VACUUM`
+- backup, compact copy, and restore-to-new-file
 - objects, chunks, manifests, range reads, assembly, and `ObjectWriter`
 - vector collections, vector CRUD, batch writes, collection management, exact
   search, candidate search, search-by-id, thresholds, and SQL-native vector
@@ -20,9 +21,10 @@ It covers:
 1. [How It Fits](#how-it-fits)
 2. [Build Requirements](#build-requirements)
 3. [Handle Policy](#handle-policy)
-4. [Objects](#objects)
-5. [Vectors](#vectors)
-6. [Example](#example)
+4. [Operational Safety](#operational-safety)
+5. [Objects](#objects)
+6. [Vectors](#vectors)
+7. [Example](#example)
 
 ## How It Fits
 
@@ -99,6 +101,28 @@ cross-handle contention. No nonzero timeout is installed by default.
 Use `LastInsertRowID`, `Changes`, `TotalChanges`, and `Stmt.ColumnName` for
 normal application SQL record helpers. They do not expose or stabilize Zova's
 private `_zova_*` tables.
+
+## Operational Safety
+
+Use `BackupTo` for a faithful snapshot, `CompactTo` for a space-reclaiming
+copy, and `RestoreBackup` to copy a backup into a new destination file.
+Destinations must be `.zova` paths and are never overwritten.
+
+```go
+if err := db.BackupTo("app.backup.zova"); err != nil {
+    log.Fatal(err)
+}
+if err := db.CompactTo("app.compact.zova"); err != nil {
+    log.Fatal(err)
+}
+if err := zova.RestoreBackup("app.backup.zova", "app.restored.zova"); err != nil {
+    log.Fatal(err)
+}
+```
+
+The zero-value options verify destinations after copying. Use
+`BackupOptions{NoVerify: true}`, `CompactOptions{NoVerify: true}`, or
+`RestoreOptions{NoVerify: true}` only when you will verify separately.
 
 ## Objects
 

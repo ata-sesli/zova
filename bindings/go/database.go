@@ -29,6 +29,30 @@ type OpenOptions struct {
 	BusyTimeoutMS uint32
 }
 
+// BackupOptions controls backup behavior.
+//
+// The zero value verifies the copied destination after backup. Set NoVerify to
+// skip that validation.
+type BackupOptions struct {
+	NoVerify bool
+}
+
+// CompactOptions controls compact-copy behavior.
+//
+// The zero value verifies the compact destination after copying. Set NoVerify
+// to skip that validation.
+type CompactOptions struct {
+	NoVerify bool
+}
+
+// RestoreOptions controls restore behavior.
+//
+// The zero value verifies the restored destination after copying. Set NoVerify
+// to skip that validation.
+type RestoreOptions struct {
+	NoVerify bool
+}
+
 // Create creates a new .zova database.
 func Create(path string) (*DB, error) {
 	return openOrCreate(path, true)
@@ -66,6 +90,36 @@ func ConvertSqliteToZova(source, destination string) error {
 		out_error_message: message,
 	}
 	status := C.zova_convert_sqlite_to_zova(&request)
+	return statusWithMessage(status, takeMessage(message))
+}
+
+// RestoreBackup copies a backup .zova file into a new destination .zova file.
+func RestoreBackup(source, destination string, options ...RestoreOptions) error {
+	option, err := singleRestoreOptions(options)
+	if err != nil {
+		return err
+	}
+	cSource, err := cString("source path", source)
+	if err != nil {
+		return err
+	}
+	defer freeCString(cSource)
+
+	cDestination, err := cString("destination path", destination)
+	if err != nil {
+		return err
+	}
+	defer freeCString(cDestination)
+
+	message := newCMessage()
+	defer freeCMessage(message)
+	request := C.zova_database_restore_request{
+		source_path:       cSource,
+		destination_path:  cDestination,
+		flags:             restoreFlags(option),
+		out_error_message: message,
+	}
+	status := C.zova_database_restore(&request)
 	return statusWithMessage(status, takeMessage(message))
 }
 
@@ -262,6 +316,50 @@ func (db *DB) Vacuum() error {
 	})
 }
 
+// BackupTo creates a faithful snapshot copy at destination.
+func (db *DB) BackupTo(destination string, options ...BackupOptions) error {
+	option, err := singleBackupOptions(options)
+	if err != nil {
+		return err
+	}
+	cDestination, err := cString("destination path", destination)
+	if err != nil {
+		return err
+	}
+	defer freeCString(cDestination)
+
+	return db.withLock(func() error {
+		request := C.zova_database_backup_request{
+			db:               db.ptr,
+			destination_path: cDestination,
+			flags:            backupFlags(option),
+		}
+		return statusFromDB(db, C.zova_database_backup(&request))
+	})
+}
+
+// CompactTo creates a compact, space-reclaiming copy at destination.
+func (db *DB) CompactTo(destination string, options ...CompactOptions) error {
+	option, err := singleCompactOptions(options)
+	if err != nil {
+		return err
+	}
+	cDestination, err := cString("destination path", destination)
+	if err != nil {
+		return err
+	}
+	defer freeCString(cDestination)
+
+	return db.withLock(func() error {
+		request := C.zova_database_compact_request{
+			db:               db.ptr,
+			destination_path: cDestination,
+			flags:            compactFlags(option),
+		}
+		return statusFromDB(db, C.zova_database_compact(&request))
+	})
+}
+
 // SetBusyTimeout sets SQLite's busy timeout for this database handle.
 func (db *DB) SetBusyTimeout(milliseconds uint32) error {
 	return db.withLock(func() error {
@@ -332,4 +430,55 @@ func (db *DB) withLock(fn func() error) error {
 		return closedError("database")
 	}
 	return fn()
+}
+
+func singleBackupOptions(options []BackupOptions) (BackupOptions, error) {
+	if len(options) > 1 {
+		return BackupOptions{}, newError(StatusInvalidArgument, "BackupTo accepts at most one options value")
+	}
+	if len(options) == 0 {
+		return BackupOptions{}, nil
+	}
+	return options[0], nil
+}
+
+func singleCompactOptions(options []CompactOptions) (CompactOptions, error) {
+	if len(options) > 1 {
+		return CompactOptions{}, newError(StatusInvalidArgument, "CompactTo accepts at most one options value")
+	}
+	if len(options) == 0 {
+		return CompactOptions{}, nil
+	}
+	return options[0], nil
+}
+
+func singleRestoreOptions(options []RestoreOptions) (RestoreOptions, error) {
+	if len(options) > 1 {
+		return RestoreOptions{}, newError(StatusInvalidArgument, "RestoreBackup accepts at most one options value")
+	}
+	if len(options) == 0 {
+		return RestoreOptions{}, nil
+	}
+	return options[0], nil
+}
+
+func backupFlags(options BackupOptions) C.uint32_t {
+	if options.NoVerify {
+		return C.ZOVA_BACKUP_NO_VERIFY
+	}
+	return 0
+}
+
+func compactFlags(options CompactOptions) C.uint32_t {
+	if options.NoVerify {
+		return C.ZOVA_COMPACT_NO_VERIFY
+	}
+	return 0
+}
+
+func restoreFlags(options RestoreOptions) C.uint32_t {
+	if options.NoVerify {
+		return C.ZOVA_RESTORE_NO_VERIFY
+	}
+	return 0
 }

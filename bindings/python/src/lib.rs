@@ -4,7 +4,7 @@ mod object;
 mod statement;
 mod vector;
 
-use database::{convert_sqlite_to_zova, PyDatabase};
+use database::{convert_sqlite_to_zova, restore_backup, PyDatabase};
 use error::{ClosedHandleError, ZovaError};
 use object::{
     object_chunk_id, object_id, PyObjectChunkId, PyObjectId, PyObjectManifest,
@@ -34,6 +34,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVectorInput>()?;
     m.add_class::<PyVectorSearchResult>()?;
     m.add_function(wrap_pyfunction!(convert_sqlite_to_zova, m)?)?;
+    m.add_function(wrap_pyfunction!(restore_backup, m)?)?;
     m.add_function(wrap_pyfunction!(object_id, m)?)?;
     m.add_function(wrap_pyfunction!(object_chunk_id, m)?)?;
     m.add_function(wrap_pyfunction!(encode_f32_le, m)?)?;

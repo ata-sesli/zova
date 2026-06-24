@@ -13,9 +13,10 @@ rules.
 1. [How It Fits](#how-it-fits)
 2. [Local Development](#local-development)
 3. [What It Covers](#what-it-covers)
-4. [Objects](#objects)
-5. [Vectors](#vectors)
-6. [SQL-Native Vector Search](#sql-native-vector-search)
+4. [Operational Safety](#operational-safety)
+5. [Objects](#objects)
+6. [Vectors](#vectors)
+7. [SQL-Native Vector Search](#sql-native-vector-search)
 
 ## How It Fits
 
@@ -56,9 +57,9 @@ The Python API is pre-1.0 and may still change alongside the Rust binding.
 ## What It Covers
 
 The Python package exposes database lifecycle, conversion, prepared SQL
-statements, transactions, explicit vacuum, objects, streaming object writes,
-vectors, SQL-native vector search, context managers, and Zova status
-exceptions.
+statements, transactions, explicit vacuum, backup/compact/restore, objects,
+streaming object writes, vectors, SQL-native vector search, context managers,
+and Zova status exceptions.
 
 One Python `Database` object owns one native handle. The native C ABI serializes
 calls on that handle, so one handle is safe but not parallel. Open additional
@@ -75,6 +76,24 @@ Use `Database.last_insert_rowid()`, `Database.changes()`,
 `Database.total_changes()`, and `Statement.column_name(index)` for normal
 application SQL record helpers. They do not expose or stabilize Zova's private
 `_zova_*` tables.
+
+## Operational Safety
+
+Use `backup_to()` for a faithful snapshot, `compact_to()` for a
+space-reclaiming copy, and `restore_backup()` to copy a backup into a new
+destination file. Destinations must be `.zova` paths and are never overwritten.
+
+```python
+with zova.Database.open("app.zova") as db:
+    db.backup_to("app.backup.zova")
+    db.compact_to("app.compact.zova")
+
+zova.restore_backup("app.backup.zova", "app.restored.zova")
+```
+
+By default, each operation verifies the destination after copying. Pass
+`verify=False` only when you will verify separately, for example with
+`zova check --deep`.
 
 ## Objects
 

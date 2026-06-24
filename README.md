@@ -8,7 +8,7 @@ content-addressed objects, chunk manifests, streaming writes, and exact vector
 search. Applications keep their own metadata in normal SQL tables and store
 Zova object ids or vector ids alongside their rows.
 
-Current package version: `0.14.0`.
+Current package version: `0.15.0`.
 
 Zova is not tied to one application language. The project exposes:
 
@@ -28,7 +28,7 @@ Rust/Go/Python binding foundation.
 Read this file in this order if you are new to Zova:
 
 1. [Architecture](#architecture)
-2. [What Works In v0.14.0](#what-works-in-v0140)
+2. [What Works In v0.15.0](#what-works-in-v0150)
 3. [File Boundary](#file-boundary)
 4. [C ABI](#c-abi)
 5. [Rust Bindings](#rust-bindings)
@@ -49,7 +49,7 @@ Read this file in this order if you are new to Zova:
 20. [Vendored SQLite](#vendored-sqlite)
 21. [Testing](#testing)
 22. [Release Package Policy](#release-package-policy)
-23. [Non-Goals In v0.14.0](#non-goals-in-v0140)
+23. [Non-Goals In v0.15.0](#non-goals-in-v0150)
 24. [Design Philosophy](#design-philosophy)
 
 ## Architecture
@@ -84,7 +84,7 @@ flowchart TD
     VecCols --> Vecs
 ```
 
-## What Works In v0.14.0
+## What Works In v0.15.0
 
 - normal SQLite access through a thin wrapper
 - `.zova` database create/open/validation
@@ -107,14 +107,15 @@ flowchart TD
   chunks, writers, vectors, backup, compact copy, and restore
 - internally serialized C ABI database handles, child-handle close protection,
   read-only open, busy timeout controls, and SQL record helpers
-- Rust bindings for records, prepared statements, transactions, vacuum, objects,
-  chunks, manifests, `ObjectWriter`, vectors, SQL-native vector search, and the
-  opt-in shared `SharedDatabase`
-- Go bindings for records, prepared statements, transactions, vacuum, objects,
-  chunks, manifests, `ObjectWriter`, vectors, and SQL-native vector search
+- Rust bindings for records, prepared statements, transactions, vacuum,
+  backup/compact/restore, objects, chunks, manifests, `ObjectWriter`, vectors,
+  SQL-native vector search, and the opt-in shared `SharedDatabase`
+- Go bindings for records, prepared statements, transactions, vacuum,
+  backup/compact/restore, objects, chunks, manifests, `ObjectWriter`, vectors,
+  and SQL-native vector search
 - Python bindings for records, prepared statements, transactions, vacuum,
-  objects, chunks, manifests, `ObjectWriter`, vectors, and SQL-native vector
-  search
+  backup/compact/restore, objects, chunks, manifests, `ObjectWriter`, vectors,
+  and SQL-native vector search
 - CLI `info`, `stats`, object/chunk/vector/table inspection, `check`,
   `backup`, `compact`, and `restore`
 - source-only release packaging
@@ -309,7 +310,7 @@ Run the Rust tests:
 cargo test --workspace --manifest-path bindings/rust/Cargo.toml
 ```
 
-The Rust crates are included in the source archive, but v0.14.0 does not publish
+The Rust crates are included in the source archive, but v0.15.0 does not publish
 them to crates.io automatically and does not ship compiled libraries. Consumers
 build from source.
 
@@ -345,7 +346,7 @@ go test ./...
 go vet ./...
 ```
 
-The Go module is included in the source archive, but v0.14.0 does not publish a
+The Go module is included in the source archive, but v0.15.0 does not publish a
 Go module automatically and does not ship compiled libraries. Consumers build
 from source.
 
@@ -378,7 +379,7 @@ uv run --isolated --with maturin --with pytest --directory bindings/python matur
 uv run --isolated --with pytest --directory bindings/python python -m pytest
 ```
 
-The Python package is included in the source archive, but v0.14.0 does not
+The Python package is included in the source archive, but v0.15.0 does not
 publish to PyPI automatically and does not ship a platform wheel matrix.
 Consumers build from source with maturin.
 
@@ -429,8 +430,8 @@ Schemas that already use `_zova_*` names are rejected with
 
 ## Operational Safety
 
-v0.15 starts Zova's operational-safety layer. The first slice adds three
-copy-to-new-file operations:
+v0.15 is Zova's operational-safety release. It adds three copy-to-new-file
+operations:
 
 - `backup`: faithful snapshot copy using SQLite's online backup API
 - `compact`: space-reclaiming copy using SQLite `VACUUM INTO`
@@ -447,6 +448,34 @@ Zig:
 try db.backupTo("app.backup.zova", .{});
 try db.compactTo("app.compact.zova", .{});
 try zova.restoreBackup("app.backup.zova", "app.restored.zova", .{});
+```
+
+Rust:
+
+```rust
+db.backup_to("app.backup.zova", zova::BackupOptions::default())?;
+db.compact_to("app.compact.zova", zova::CompactOptions::default())?;
+zova::restore_backup(
+    "app.backup.zova",
+    "app.restored.zova",
+    zova::RestoreOptions::default(),
+)?;
+```
+
+Go:
+
+```go
+db.BackupTo("app.backup.zova")
+db.CompactTo("app.compact.zova")
+zova.RestoreBackup("app.backup.zova", "app.restored.zova")
+```
+
+Python:
+
+```python
+db.backup_to("app.backup.zova")
+db.compact_to("app.compact.zova")
+zova.restore_backup("app.backup.zova", "app.restored.zova")
 ```
 
 C ABI:
@@ -712,21 +741,21 @@ var close = try db.searchVectorsWithin(
 defer close.deinit(allocator);
 ```
 
-Search is exact and flat-scan in v0.14.0. That is deliberate: Zova currently
+Search is exact and flat-scan in v0.15.0. That is deliberate: Zova currently
 prioritizes deterministic local correctness over approximate indexing. It is a
 good fit for small and medium local datasets, offline ranking, tests that need
 repeatable nearest-neighbor results, and candidate-filtered search where SQL
 first narrows the metadata set and Zova ranks the eligible vector ids.
 
 It is not yet a low-latency ANN engine for millions of vectors. Zova does not
-include HNSW, IVFFlat, quantized indexes, or vector SQL operators in v0.14.0.
+include HNSW, IVFFlat, quantized indexes, or vector SQL operators in v0.15.0.
 
 Missing candidate ids are skipped. Invalid candidate ids return
 `error.VectorInvalid`. Corrupt selected vector rows return `error.VectorCorrupt`.
 
 ## SQL-Native Vector Search
 
-v0.14.0 makes Zova vectors queryable from SQL on `zova.Database` connections.
+v0.15.0 keeps Zova vectors queryable from SQL on `zova.Database` connections.
 The raw `zova.sqlite.Database` wrapper remains plain SQLite and does not
 register Zova vector SQL helpers.
 
@@ -983,7 +1012,7 @@ scripts/check-release.sh
 
 ## Release Package Policy
 
-v0.14.0 releases a source-only package/archive. The package includes:
+v0.15.0 releases a source-only package/archive. The package includes:
 
 - `README.md`
 - `build.zig`
@@ -1008,16 +1037,16 @@ Go package, and Python extension from source.
 The release script:
 
 ```sh
-scripts/package-release.sh 0.14.0
+scripts/package-release.sh 0.15.0
 ```
 
 tags the current commit, pushes the branch and tag, creates a source archive,
 and creates the GitHub release. Do not run it until the exact commit you want
 to release is ready.
 
-## Non-Goals In v0.14.0
+## Non-Goals In v0.15.0
 
-Zova v0.14.0 does not include:
+Zova v0.15.0 does not include:
 
 - ANN indexes
 - HNSW or IVFFlat

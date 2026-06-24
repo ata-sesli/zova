@@ -6,7 +6,7 @@ import zova
 
 
 def test_import_and_error_mapping(tmp_path):
-    assert zova.__version__ == "0.14.0"
+    assert zova.__version__ == "0.15.0"
 
     with pytest.raises(zova.ZovaError) as exc:
         zova.Database.create(str(tmp_path / "plain.db"))
@@ -142,6 +142,56 @@ def test_transactions_vacuum_and_conversion(tmp_path):
             stmt.bind_int(1, 1)
             assert stmt.step() == zova.Step.ROW
             assert stmt.column_text(0) == "from sqlite"
+
+
+def test_backup_compact_and_restore(tmp_path):
+    source = tmp_path / "ops-source.zova"
+    backup = tmp_path / "ops-backup.zova"
+    compact = tmp_path / "ops-compact.zova"
+    restored = tmp_path / "ops-restored.zova"
+    no_verify = tmp_path / "ops-no-verify.zova"
+    payload = b"python operational object bytes"
+
+    with zova.Database.create(str(source)) as db:
+        db.exec("create table records(id integer primary key, body text not null)")
+        db.exec("insert into records(body) values ('kept')")
+        object_id = db.put_object(payload)
+        db.create_vector_collection(
+            "chunks",
+            zova.VectorCollectionOptions(2, zova.VectorMetric.L2),
+        )
+        db.put_vector("chunks", "near", [0.0, 0.0])
+        db.put_vector("chunks", "far", [10.0, 0.0])
+
+        db.backup_to(str(backup))
+        db.compact_to(str(compact))
+        db.backup_to(str(no_verify), verify=False)
+
+        with pytest.raises(zova.ZovaError) as exc:
+            db.backup_to(str(backup))
+        assert exc.value.status_name == "ZOVA_DESTINATION_EXISTS"
+
+        with pytest.raises(zova.ZovaError) as exc:
+            db.compact_to(str(tmp_path / "bad-destination.db"))
+        assert exc.value.status_name == "ZOVA_NOT_ZOVA_PATH"
+
+    zova.restore_backup(str(backup), str(restored))
+    with pytest.raises(zova.ZovaError) as exc:
+        zova.restore_backup(str(tmp_path / "bad-source.db"), str(tmp_path / "bad-restore.zova"))
+    assert exc.value.status_name == "ZOVA_NOT_ZOVA_PATH"
+
+    for copy in (backup, compact, restored, no_verify):
+        with zova.Database.open(str(copy)) as db:
+            with db.prepare("select body from records where id = 1") as stmt:
+                assert stmt.step() == zova.Step.ROW
+                assert stmt.column_text(0) == "kept"
+            assert db.get_object(object_id) == payload
+            results = db.search_vectors("chunks", [0.0, 0.0], 2)
+            assert results[0].id == "near"
+            with db.prepare("select zova_vector_distance('chunks', 'near', ?1)") as stmt:
+                stmt.bind_blob(1, zova.encode_f32_le([0.0, 0.0]))
+                assert stmt.step() == zova.Step.ROW
+                assert stmt.column_float(0) == 0.0
 
 
 def test_read_only_open_and_busy_timeout(tmp_path):

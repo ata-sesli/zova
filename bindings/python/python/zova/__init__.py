@@ -18,9 +18,10 @@ from ._native import (
     encode_f32_le,
     object_chunk_id,
     object_id,
+    restore_backup,
 )
 
-__version__ = "0.14.0"
+__version__ = "0.15.0"
 
 
 class Step(IntEnum):
@@ -64,4 +65,5 @@ __all__ = [
     "encode_f32_le",
     "object_chunk_id",
     "object_id",
+    "restore_backup",
 ]
