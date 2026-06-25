@@ -20,12 +20,12 @@ fn abi_version_and_status_names_are_available() {
     unsafe {
         assert_eq!(zova_sys::zova_abi_version_major(), 0);
         assert_eq!(zova_sys::zova_abi_version_minor(), 15);
-        assert_eq!(zova_sys::zova_abi_version_patch(), 0);
+        assert_eq!(zova_sys::zova_abi_version_patch(), 1);
         assert_eq!(
             CStr::from_ptr(zova_sys::zova_abi_version_string())
                 .to_str()
                 .unwrap(),
-            "0.15.0"
+            "0.15.1"
         );
         assert_eq!(
             CStr::from_ptr(zova_sys::zova_status_name(zova_sys::ZOVA_OK))
@@ -89,6 +89,93 @@ fn raw_create_exec_prepare_step_close_smoke() {
             zova_sys::zova_statement_finalize(statement),
             zova_sys::ZOVA_OK
         );
+        assert_eq!(zova_sys::zova_database_close(db), zova_sys::ZOVA_OK);
+    }
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn raw_savepoint_smoke() {
+    let path = temp_path("savepoints");
+    let c_path = CString::new(path.as_str()).unwrap();
+    let mut db = ptr::null_mut();
+    let mut message = zova_sys::zova_message {
+        data: ptr::null_mut(),
+        len: 0,
+    };
+    let create = zova_sys::zova_database_open_request {
+        path: c_path.as_ptr(),
+        out_db: &mut db,
+        out_error_message: &mut message,
+    };
+
+    unsafe {
+        assert_eq!(zova_sys::zova_database_create(&create), zova_sys::ZOVA_OK);
+        let create_table =
+            CString::new("create table records(id integer primary key, body text)").unwrap();
+        let exec = zova_sys::zova_database_exec_request {
+            db,
+            sql: create_table.as_ptr(),
+        };
+        assert_eq!(zova_sys::zova_database_exec(&exec), zova_sys::ZOVA_OK);
+
+        let simple = zova_sys::zova_database_simple_request { db };
+        assert_eq!(
+            zova_sys::zova_database_begin_immediate(&simple),
+            zova_sys::ZOVA_OK
+        );
+
+        let sp_name = CString::new("sp_one").unwrap();
+        let savepoint = zova_sys::zova_database_savepoint_request {
+            db,
+            name: sp_name.as_ptr(),
+        };
+        assert_eq!(
+            zova_sys::zova_database_savepoint(&savepoint),
+            zova_sys::ZOVA_OK
+        );
+
+        let insert = CString::new("insert into records(body) values ('rolled back')").unwrap();
+        let exec = zova_sys::zova_database_exec_request {
+            db,
+            sql: insert.as_ptr(),
+        };
+        assert_eq!(zova_sys::zova_database_exec(&exec), zova_sys::ZOVA_OK);
+        assert_eq!(
+            zova_sys::zova_database_rollback_to_savepoint(&savepoint),
+            zova_sys::ZOVA_OK
+        );
+        assert_eq!(
+            zova_sys::zova_database_release_savepoint(&savepoint),
+            zova_sys::ZOVA_OK
+        );
+
+        let bad_name = CString::new("bad name").unwrap();
+        let bad = zova_sys::zova_database_savepoint_request {
+            db,
+            name: bad_name.as_ptr(),
+        };
+        assert_eq!(
+            zova_sys::zova_database_savepoint(&bad),
+            zova_sys::ZOVA_INVALID_ARGUMENT
+        );
+
+        let missing_name = CString::new("missing_sp").unwrap();
+        let missing = zova_sys::zova_database_savepoint_request {
+            db,
+            name: missing_name.as_ptr(),
+        };
+        assert_eq!(
+            zova_sys::zova_database_release_savepoint(&missing),
+            zova_sys::ZOVA_SQLITE_ERROR
+        );
+        let last_error = CStr::from_ptr(zova_sys::zova_database_last_error_message(db))
+            .to_string_lossy()
+            .into_owned();
+        assert!(last_error.contains("no such savepoint"));
+
+        assert_eq!(zova_sys::zova_database_commit(&simple), zova_sys::ZOVA_OK);
         assert_eq!(zova_sys::zova_database_close(db), zova_sys::ZOVA_OK);
     }
 

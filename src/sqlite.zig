@@ -38,6 +38,7 @@ pub const c = @cImport({
 /// everything else into `SqliteError` until Zova needs more detail.
 pub const Error = error{
     SqliteError,
+    InvalidArgument,
     Busy,
     Locked,
     Constraint,
@@ -155,6 +156,35 @@ pub const Database = struct {
         try self.exec("rollback");
     }
 
+    /// Create a named SQLite savepoint.
+    ///
+    /// Savepoint names are validated as plain ASCII identifiers before SQL is
+    /// built: 1-64 bytes, first byte `[A-Za-z_]`, remaining bytes
+    /// `[A-Za-z0-9_]`, and not the reserved `_zova_` prefix.
+    pub fn savepoint(self: *Database, name: []const u8) Error!void {
+        try self.execSavepoint("savepoint", name);
+    }
+
+    /// Roll back changes made after a named SQLite savepoint.
+    ///
+    /// SQLite keeps the savepoint active after `ROLLBACK TO`; call
+    /// `releaseSavepoint` when the checkpoint should be removed.
+    pub fn rollbackToSavepoint(self: *Database, name: []const u8) Error!void {
+        try self.execSavepoint("rollback to", name);
+    }
+
+    /// Release a named SQLite savepoint.
+    pub fn releaseSavepoint(self: *Database, name: []const u8) Error!void {
+        try self.execSavepoint("release", name);
+    }
+
+    fn execSavepoint(self: *Database, comptime prefix: []const u8, name: []const u8) Error!void {
+        try validateSavepointName(name);
+        var sql_buffer: [96]u8 = undefined;
+        const sql = std.fmt.bufPrintZ(&sql_buffer, prefix ++ " {s}", .{name}) catch unreachable;
+        try self.exec(sql);
+    }
+
     /// Set SQLite's busy timeout in milliseconds.
     ///
     /// Passing 0 clears the busy handler, matching SQLite's C API.
@@ -201,6 +231,36 @@ pub const Database = struct {
         return std.mem.span(c.sqlite3_errmsg(self.handle));
     }
 };
+
+fn validateSavepointName(name: []const u8) Error!void {
+    if (name.len == 0 or name.len > 64) return error.InvalidArgument;
+    if (hasReservedZovaPrefix(name)) return error.InvalidArgument;
+    if (!isAsciiIdentStart(name[0])) return error.InvalidArgument;
+    for (name[1..]) |byte| {
+        if (!isAsciiIdentContinue(byte)) return error.InvalidArgument;
+    }
+}
+
+fn hasReservedZovaPrefix(name: []const u8) bool {
+    const reserved = "_zova_";
+    if (name.len < reserved.len) return false;
+    for (reserved, 0..) |expected, index| {
+        if (asciiLower(name[index]) != expected) return false;
+    }
+    return true;
+}
+
+fn isAsciiIdentStart(byte: u8) bool {
+    return byte == '_' or (byte >= 'A' and byte <= 'Z') or (byte >= 'a' and byte <= 'z');
+}
+
+fn isAsciiIdentContinue(byte: u8) bool {
+    return isAsciiIdentStart(byte) or (byte >= '0' and byte <= '9');
+}
+
+fn asciiLower(byte: u8) u8 {
+    return if (byte >= 'A' and byte <= 'Z') byte + ('a' - 'A') else byte;
+}
 
 /// Result of advancing a prepared statement.
 pub const Step = enum {
@@ -935,6 +995,68 @@ test "transaction rollback discards writes" {
     defer count.deinit();
     try std.testing.expectEqual(Step.row, try count.step());
     try std.testing.expectEqual(@as(i64, 0), count.columnInt64(0));
+}
+
+test "savepoint rollback and release follow sqlite semantics" {
+    var db = try Database.open(":memory:");
+    defer db.deinit();
+
+    try db.exec("create table items (id integer primary key, name text not null)");
+    try db.beginImmediate();
+    try db.exec("insert into items (name) values ('outer')");
+
+    try db.savepoint("sp_one");
+    try db.exec("insert into items (name) values ('rolled back')");
+    try db.rollbackToSavepoint("sp_one");
+    try db.releaseSavepoint("sp_one");
+
+    try db.savepoint("sp_two");
+    try db.exec("insert into items (name) values ('released')");
+    try db.releaseSavepoint("sp_two");
+
+    {
+        var scan = try db.prepare("select name from items order by id");
+        defer scan.deinit();
+        try std.testing.expectEqual(Step.row, try scan.step());
+        try std.testing.expectEqualStrings("outer", scan.columnText(0));
+        try db.savepoint("sp_scan");
+        try db.releaseSavepoint("sp_scan");
+        try std.testing.expectEqual(Step.row, try scan.step());
+        try std.testing.expectEqualStrings("released", scan.columnText(0));
+    }
+
+    try db.commit();
+
+    var count = try db.prepare("select count(*) from items");
+    defer count.deinit();
+    try std.testing.expectEqual(Step.row, try count.step());
+    try std.testing.expectEqual(@as(i64, 2), count.columnInt64(0));
+
+    var missing = try db.prepare("select count(*) from items where name = 'rolled back'");
+    defer missing.deinit();
+    try std.testing.expectEqual(Step.row, try missing.step());
+    try std.testing.expectEqual(@as(i64, 0), missing.columnInt64(0));
+}
+
+test "savepoint names are strict identifiers" {
+    var db = try Database.open(":memory:");
+    defer db.deinit();
+
+    const invalid_names = [_][]const u8{
+        "",
+        "1starts_with_digit",
+        "has space",
+        "has'quote",
+        "has;semicolon",
+        "_zova_internal",
+        "_ZoVa_internal",
+        "emoji_\xF0\x9F\x98\x80",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    };
+
+    for (invalid_names) |name| {
+        try std.testing.expectError(error.InvalidArgument, db.savepoint(name));
+    }
 }
 
 test "commit without active transaction maps to generic sqlite error" {

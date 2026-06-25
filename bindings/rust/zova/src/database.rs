@@ -194,6 +194,18 @@ impl Database {
         self.simple(zova_sys::zova_database_rollback)
     }
 
+    pub fn savepoint(&mut self, name: &str) -> Result<()> {
+        self.savepoint_call(name, zova_sys::zova_database_savepoint)
+    }
+
+    pub fn rollback_to_savepoint(&mut self, name: &str) -> Result<()> {
+        self.savepoint_call(name, zova_sys::zova_database_rollback_to_savepoint)
+    }
+
+    pub fn release_savepoint(&mut self, name: &str) -> Result<()> {
+        self.savepoint_call(name, zova_sys::zova_database_release_savepoint)
+    }
+
     pub fn vacuum(&mut self) -> Result<()> {
         self.simple(zova_sys::zova_database_vacuum)
     }
@@ -272,6 +284,21 @@ impl Database {
         ) -> zova_sys::zova_status,
     ) -> Result<()> {
         let request = zova_sys::zova_database_simple_request { db: self.raw_ptr() };
+        self.status(unsafe { function(&request) })
+    }
+
+    fn savepoint_call(
+        &mut self,
+        name: &str,
+        function: unsafe extern "C" fn(
+            *const zova_sys::zova_database_savepoint_request,
+        ) -> zova_sys::zova_status,
+    ) -> Result<()> {
+        let name = cstring(name, "savepoint name")?;
+        let request = zova_sys::zova_database_savepoint_request {
+            db: self.raw_ptr(),
+            name: name.as_ptr(),
+        };
         self.status(unsafe { function(&request) })
     }
 

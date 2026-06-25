@@ -344,6 +344,50 @@ int main(int argc, char **argv) {
                   "transaction insert");
     expect_status(zova_database_rollback(&(zova_database_simple_request){.db = db}), ZOVA_OK, "rollback transaction");
 
+    expect_status(zova_database_begin_immediate(&(zova_database_simple_request){.db = db}), ZOVA_OK, "begin savepoint transaction");
+    expect_status(zova_database_savepoint(&(zova_database_savepoint_request){
+                      .db = db,
+                      .name = "sp_one",
+                  }),
+                  ZOVA_OK,
+                  "create savepoint");
+    expect_status(zova_database_exec(&(zova_database_exec_request){
+                      .db = db,
+                      .sql = "insert into notes (body, payload) values ('savepoint rolled back', x'01')",
+                  }),
+                  ZOVA_OK,
+                  "savepoint insert");
+    expect_status(zova_database_rollback_to_savepoint(&(zova_database_savepoint_request){
+                      .db = db,
+                      .name = "sp_one",
+                  }),
+                  ZOVA_OK,
+                  "rollback to savepoint");
+    expect_status(zova_database_release_savepoint(&(zova_database_savepoint_request){
+                      .db = db,
+                      .name = "sp_one",
+                  }),
+                  ZOVA_OK,
+                  "release savepoint");
+    expect_status(zova_database_savepoint(&(zova_database_savepoint_request){
+                      .db = db,
+                      .name = "bad name",
+                  }),
+                  ZOVA_INVALID_ARGUMENT,
+                  "invalid savepoint name");
+    expect_status(zova_database_release_savepoint(&(zova_database_savepoint_request){
+                      .db = db,
+                      .name = "missing_sp",
+                  }),
+                  ZOVA_SQLITE_ERROR,
+                  "missing savepoint release");
+    const char *savepoint_error = zova_database_last_error_message(db);
+    if (savepoint_error == NULL || strstr(savepoint_error, "no such savepoint") == NULL) {
+        fprintf(stderr, "missing savepoint release: missing diagnostic\n");
+        return 1;
+    }
+    expect_status(zova_database_commit(&(zova_database_simple_request){.db = db}), ZOVA_OK, "commit savepoint transaction");
+
     zova_statement *insert_note = NULL;
     expect_status(zova_database_prepare(&(zova_database_prepare_request){
                       .db = db,

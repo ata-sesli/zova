@@ -13,10 +13,11 @@ rules.
 1. [How It Fits](#how-it-fits)
 2. [Local Development](#local-development)
 3. [What It Covers](#what-it-covers)
-4. [Operational Safety](#operational-safety)
-5. [Objects](#objects)
-6. [Vectors](#vectors)
-7. [SQL-Native Vector Search](#sql-native-vector-search)
+4. [Savepoints](#savepoints)
+5. [Operational Safety](#operational-safety)
+6. [Objects](#objects)
+7. [Vectors](#vectors)
+8. [SQL-Native Vector Search](#sql-native-vector-search)
 
 ## How It Fits
 
@@ -76,6 +77,28 @@ Use `Database.last_insert_rowid()`, `Database.changes()`,
 `Database.total_changes()`, and `Statement.column_name(index)` for normal
 application SQL record helpers. They do not expose or stabilize Zova's private
 `_zova_*` tables.
+
+## Savepoints
+
+Use explicit savepoints for partial rollback inside one database connection:
+
+```python
+with zova.Database.open("app.zova") as db:
+    db.begin_immediate()
+    db.savepoint("attach_file")
+    db.exec("insert into attachments(filename) values ('draft.txt')")
+    db.rollback_to_savepoint("attach_file")
+    db.release_savepoint("attach_file")
+    db.commit()
+```
+
+Savepoint names are strict ASCII identifiers: 1-64 bytes, first byte
+`[A-Za-z_]`, remaining bytes `[A-Za-z0-9_]`, and no case-insensitive `_zova_`
+prefix. `rollback_to_savepoint()` keeps the savepoint active;
+`release_savepoint()` removes it.
+An inner released savepoint can still be undone by rolling back an outer
+transaction or savepoint. v0.15.1 exposes explicit methods only; a savepoint
+context manager is deferred.
 
 ## Operational Safety
 

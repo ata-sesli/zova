@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 /*
- * Zova C ABI, v0.15.0 pre-1.0.
+ * Zova C ABI, v0.15.1 pre-1.0.
  *
  * This header exposes a C-compatible object and vector API over Zova's Zig
  * implementation. The ABI is intentionally conservative: opaque handles,
@@ -288,6 +288,18 @@ typedef struct zova_database_exec_request {
 typedef struct zova_database_simple_request {
     zova_database *db;
 } zova_database_simple_request;
+
+/*
+ * Savepoint names are strict ASCII identifiers: 1-64 bytes, first byte
+ * [A-Za-z_], remaining bytes [A-Za-z0-9_], and no case-insensitive _zova_
+ * prefix. ROLLBACK TO keeps the savepoint active; RELEASE removes it.
+ * Savepoint calls are serialized with the database handle, but they are not
+ * callback-reentrant and do not change child statement/writer lifetime rules.
+ */
+typedef struct zova_database_savepoint_request {
+    zova_database *db;
+    const char *name;
+} zova_database_savepoint_request;
 
 typedef struct zova_database_busy_timeout_request {
     zova_database *db;
@@ -675,6 +687,9 @@ zova_status zova_database_begin(const zova_database_simple_request *request);
 zova_status zova_database_begin_immediate(const zova_database_simple_request *request);
 zova_status zova_database_commit(const zova_database_simple_request *request);
 zova_status zova_database_rollback(const zova_database_simple_request *request);
+zova_status zova_database_savepoint(const zova_database_savepoint_request *request);
+zova_status zova_database_rollback_to_savepoint(const zova_database_savepoint_request *request);
+zova_status zova_database_release_savepoint(const zova_database_savepoint_request *request);
 zova_status zova_database_vacuum(const zova_database_simple_request *request);
 zova_status zova_database_backup(const zova_database_backup_request *request);
 zova_status zova_database_compact(const zova_database_compact_request *request);

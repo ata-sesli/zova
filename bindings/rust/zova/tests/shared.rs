@@ -191,6 +191,52 @@ fn shared_transactions_hold_the_rust_mutex_for_the_whole_closure() {
 }
 
 #[test]
+fn shared_database_savepoints_work_directly_and_inside_guards() {
+    let path = temp_path("savepoints");
+    let db = SharedDatabase::create(&path).unwrap();
+    db.exec("create table tx(id integer primary key, value text)")
+        .unwrap();
+
+    db.begin_immediate().unwrap();
+    db.exec("insert into tx(value) values ('outer')").unwrap();
+    db.savepoint("sp_direct").unwrap();
+    db.exec("insert into tx(value) values ('rolled back')")
+        .unwrap();
+    db.rollback_to_savepoint("sp_direct").unwrap();
+    db.release_savepoint("sp_direct").unwrap();
+    db.commit().unwrap();
+
+    let mut count = db.prepare("select count(*) from tx").unwrap();
+    assert_eq!(count.step().unwrap(), Step::Row);
+    assert_eq!(count.column_i64(0).unwrap(), 1);
+    drop(count);
+
+    db.transaction_immediate(|guard| {
+        guard.savepoint("sp_guard")?;
+        guard.exec("insert into tx(value) values ('discarded')")?;
+        guard.rollback_to_savepoint("sp_guard")?;
+        guard.release_savepoint("sp_guard")?;
+        guard.savepoint("sp_kept")?;
+        guard.exec("insert into tx(value) values ('kept')")?;
+        guard.release_savepoint("sp_kept")?;
+        Ok(())
+    })
+    .unwrap();
+
+    let invalid = db.savepoint("_zova_private").unwrap_err();
+    assert_eq!(invalid.status(), Some(zova::Status::InvalidArgument));
+    let missing = db.rollback_to_savepoint("missing_sp").unwrap_err();
+    assert!(missing.to_string().contains("no such savepoint"));
+
+    let mut count = db
+        .prepare("select count(*) from tx where value != 'discarded'")
+        .unwrap();
+    assert_eq!(count.step().unwrap(), Step::Row);
+    assert_eq!(count.column_i64(0).unwrap(), 2);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn shared_transaction_rolls_back_when_commit_fails() {
     let path = temp_path("commit-failure");
     let db = SharedDatabase::create(&path).unwrap();

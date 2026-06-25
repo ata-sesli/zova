@@ -230,6 +230,28 @@ pub const Database = struct {
         return try self.sqlite_db.prepare(sql);
     }
 
+    /// Create a named SQLite savepoint on this Zova connection.
+    ///
+    /// Names use Zova's strict savepoint identifier rule: ASCII, 1-64 bytes,
+    /// first byte `[A-Za-z_]`, remaining bytes `[A-Za-z0-9_]`, and no
+    /// case-insensitive `_zova_` prefix.
+    pub fn savepoint(self: *Database, name: []const u8) Error!void {
+        try self.sqlite_db.savepoint(name);
+    }
+
+    /// Roll back changes made after a named SQLite savepoint.
+    ///
+    /// SQLite keeps the savepoint active after `ROLLBACK TO`; call
+    /// `releaseSavepoint` when the checkpoint should be removed.
+    pub fn rollbackToSavepoint(self: *Database, name: []const u8) Error!void {
+        try self.sqlite_db.rollbackToSavepoint(name);
+    }
+
+    /// Release a named SQLite savepoint.
+    pub fn releaseSavepoint(self: *Database, name: []const u8) Error!void {
+        try self.sqlite_db.releaseSavepoint(name);
+    }
+
     /// Reclaim SQLite free pages with an explicit in-place `VACUUM`.
     ///
     /// Zova never runs `VACUUM` automatically after object or vector deletes.
@@ -1858,6 +1880,58 @@ test "backup compact and restore preserve zova records objects chunks and vector
     try expectOperationalFixture(compact_path, ids, primary_bytes, streamed_bytes, loose_bytes);
     try expectOperationalFixture(restored_path, ids, primary_bytes, streamed_bytes, loose_bytes);
     try expectOperationalFixture(quoted_path, ids, primary_bytes, streamed_bytes, loose_bytes);
+}
+
+test "savepoints roll back zova records objects and vectors" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "savepoints.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.exec("create table notes (body text not null)");
+    const readable_object = try db.putObject("readable inside savepoint");
+    var pending_writer = try db.objectWriter(std.testing.allocator);
+    defer pending_writer.deinit();
+    try pending_writer.write("writer finish blocked inside savepoint");
+
+    try db.exec("begin immediate");
+    try db.exec("insert into notes (body) values ('outer')");
+
+    try db.savepoint("sp_vectors");
+    try db.exec("insert into notes (body) values ('rolled back')");
+    var readable = try db.getObject(std.testing.allocator, readable_object);
+    defer readable.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, "readable inside savepoint", readable.bytes);
+    var range_buffer: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 8), try db.readObjectRange(readable_object, 0, &range_buffer));
+    try std.testing.expectEqualSlices(u8, "readable", &range_buffer);
+    try std.testing.expectError(error.ObjectTransactionActive, db.putObject("savepoint object"));
+    try std.testing.expectError(error.ObjectTransactionActive, db.deleteObject(readable_object));
+    try std.testing.expectError(error.ObjectTransactionActive, pending_writer.finish());
+    try db.createVectorCollection("save_vectors", .{ .dimensions = 2, .metric = .l2 });
+    try db.putVector("save_vectors", "v1", &.{ 1.0, 2.0 });
+    try db.rollbackToSavepoint("sp_vectors");
+    try db.releaseSavepoint("sp_vectors");
+
+    try std.testing.expect(!try db.hasVectorCollection("save_vectors"));
+
+    try db.savepoint("sp_release");
+    try db.exec("insert into notes (body) values ('kept')");
+    try db.createVectorCollection("kept_vectors", .{ .dimensions = 2, .metric = .l2 });
+    try db.releaseSavepoint("sp_release");
+    try db.exec("commit");
+
+    try pending_writer.cancel();
+    const kept_object = try db.putObject("kept savepoint object");
+    try std.testing.expect(try db.hasObject(kept_object));
+    try std.testing.expect(try db.hasVectorCollection("kept_vectors"));
+    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from notes"));
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from notes where body = 'rolled back'"));
+    try testingQuickCheckOk(&db);
 }
 
 test "operational copy APIs reject invalid and existing destinations" {

@@ -181,6 +181,18 @@ impl SharedDatabase {
         self.simple(zova_sys::zova_database_rollback)
     }
 
+    pub fn savepoint(&self, name: &str) -> Result<()> {
+        self.savepoint_call(name, zova_sys::zova_database_savepoint)
+    }
+
+    pub fn rollback_to_savepoint(&self, name: &str) -> Result<()> {
+        self.savepoint_call(name, zova_sys::zova_database_rollback_to_savepoint)
+    }
+
+    pub fn release_savepoint(&self, name: &str) -> Result<()> {
+        self.savepoint_call(name, zova_sys::zova_database_release_savepoint)
+    }
+
     pub fn vacuum(&self) -> Result<()> {
         self.simple(zova_sys::zova_database_vacuum)
     }
@@ -876,6 +888,22 @@ impl SharedDatabase {
         self.inner.status_locked(unsafe { function(&request) })
     }
 
+    fn savepoint_call(
+        &self,
+        name: &str,
+        function: unsafe extern "C" fn(
+            *const zova_sys::zova_database_savepoint_request,
+        ) -> zova_sys::zova_status,
+    ) -> Result<()> {
+        let name = cstring(name, "savepoint name")?;
+        let _guard = self.inner.lock();
+        let request = zova_sys::zova_database_savepoint_request {
+            db: self.inner.raw_ptr(),
+            name: name.as_ptr(),
+        };
+        self.inner.status_locked(unsafe { function(&request) })
+    }
+
     fn transaction_with<T>(
         &self,
         begin: unsafe extern "C" fn(
@@ -945,6 +973,18 @@ impl SharedDatabaseGuard<'_> {
         self.inner.total_changes_locked()
     }
 
+    pub fn savepoint(&mut self, name: &str) -> Result<()> {
+        self.savepoint_locked(name, zova_sys::zova_database_savepoint)
+    }
+
+    pub fn rollback_to_savepoint(&mut self, name: &str) -> Result<()> {
+        self.savepoint_locked(name, zova_sys::zova_database_rollback_to_savepoint)
+    }
+
+    pub fn release_savepoint(&mut self, name: &str) -> Result<()> {
+        self.savepoint_locked(name, zova_sys::zova_database_release_savepoint)
+    }
+
     fn simple_locked(
         &self,
         function: unsafe extern "C" fn(
@@ -953,6 +993,21 @@ impl SharedDatabaseGuard<'_> {
     ) -> Result<()> {
         let request = zova_sys::zova_database_simple_request {
             db: self.inner.raw_ptr(),
+        };
+        self.inner.status_locked(unsafe { function(&request) })
+    }
+
+    fn savepoint_locked(
+        &self,
+        name: &str,
+        function: unsafe extern "C" fn(
+            *const zova_sys::zova_database_savepoint_request,
+        ) -> zova_sys::zova_status,
+    ) -> Result<()> {
+        let name = cstring(name, "savepoint name")?;
+        let request = zova_sys::zova_database_savepoint_request {
+            db: self.inner.raw_ptr(),
+            name: name.as_ptr(),
         };
         self.inner.status_locked(unsafe { function(&request) })
     }

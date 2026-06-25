@@ -8,7 +8,7 @@ content-addressed objects, chunk manifests, streaming writes, and exact vector
 search. Applications keep their own metadata in normal SQL tables and store
 Zova object ids or vector ids alongside their rows.
 
-Current package version: `0.15.0`.
+Current package version: `0.15.1`.
 
 Zova is not tied to one application language. The project exposes:
 
@@ -28,7 +28,7 @@ Rust/Go/Python binding foundation.
 Read this file in this order if you are new to Zova:
 
 1. [Architecture](#architecture)
-2. [What Works In v0.15.0](#what-works-in-v0150)
+2. [What Works In v0.15.1](#what-works-in-v0151)
 3. [File Boundary](#file-boundary)
 4. [C ABI](#c-abi)
 5. [Rust Bindings](#rust-bindings)
@@ -38,19 +38,20 @@ Read this file in this order if you are new to Zova:
 9. [Convert SQLite To Zova](#convert-sqlite-to-zova)
 10. [Operational Safety](#operational-safety)
 11. [SQL Records](#sql-records)
-12. [Objects](#objects)
-13. [Manifests, Chunks, And Transfers](#manifests-chunks-and-transfers)
-14. [Streaming Object Writes](#streaming-object-writes)
-15. [Vectors](#vectors)
-16. [Vector Search](#vector-search)
-17. [SQL-Native Vector Search](#sql-native-vector-search)
-18. [CLI](#cli)
-19. [SQLite Policy](#sqlite-policy)
-20. [Vendored SQLite](#vendored-sqlite)
-21. [Testing](#testing)
-22. [Release Package Policy](#release-package-policy)
-23. [Non-Goals In v0.15.0](#non-goals-in-v0150)
-24. [Design Philosophy](#design-philosophy)
+12. [Savepoints](#savepoints)
+13. [Objects](#objects)
+14. [Manifests, Chunks, And Transfers](#manifests-chunks-and-transfers)
+15. [Streaming Object Writes](#streaming-object-writes)
+16. [Vectors](#vectors)
+17. [Vector Search](#vector-search)
+18. [SQL-Native Vector Search](#sql-native-vector-search)
+19. [CLI](#cli)
+20. [SQLite Policy](#sqlite-policy)
+21. [Vendored SQLite](#vendored-sqlite)
+22. [Testing](#testing)
+23. [Release Package Policy](#release-package-policy)
+24. [Non-Goals In v0.15.1](#non-goals-in-v0151)
+25. [Design Philosophy](#design-philosophy)
 
 ## Architecture
 
@@ -84,7 +85,7 @@ flowchart TD
     VecCols --> Vecs
 ```
 
-## What Works In v0.15.0
+## What Works In v0.15.1
 
 - normal SQLite access through a thin wrapper
 - `.zova` database create/open/validation
@@ -92,6 +93,7 @@ flowchart TD
 - backup to a new `.zova` snapshot with SQLite's online backup API
 - compact copy to a new `.zova` file with SQLite `VACUUM INTO`
 - restore from a backup `.zova` into a new destination file
+- explicit named savepoints with `SAVEPOINT`, `ROLLBACK TO`, and `RELEASE`
 - content-addressed objects with `ObjectId = SHA-256(full bytes)`
 - FastCDC-v1 chunking and chunk deduplication
 - object manifests and verified chunk reads
@@ -157,6 +159,7 @@ The ABI exposes:
 - SQL `exec`
 - prepared statements with bind/step/column/finalize
 - explicit transaction helpers
+- explicit named savepoint helpers
 - explicit `VACUUM`
 - backup, compact copy, and restore-to-new-file
 - SQLite-to-Zova conversion
@@ -228,6 +231,13 @@ Column text and blob outputs are owned copies; free them with `zova_text_free`
 and `zova_buffer_free`. Record helpers expose SQLite rowid/change counters and
 statement column names for application SQL tables; they do not expose or
 stabilize Zova's private `_zova_*` schema.
+
+Savepoint helpers are explicit and connection-local. Names must be ASCII
+identifiers: 1-64 bytes, first byte `[A-Za-z_]`, remaining bytes
+`[A-Za-z0-9_]`, and no case-insensitive `_zova_` prefix. `ROLLBACK TO` rewinds
+to the savepoint but keeps it active; `RELEASE` removes it.
+Releasing an inner savepoint does not make its work durable against an outer
+rollback; the outer transaction or savepoint can still undo it.
 
 Every C ABI function returns `zova_status`. `ZOVA_OK` means success.
 `zova_status_name(status)` returns a static status name.
@@ -310,7 +320,7 @@ Run the Rust tests:
 cargo test --workspace --manifest-path bindings/rust/Cargo.toml
 ```
 
-The Rust crates are included in the source archive, but v0.15.0 does not publish
+The Rust crates are included in the source archive, but v0.15.1 does not publish
 them to crates.io automatically and does not ship compiled libraries. Consumers
 build from source.
 
@@ -346,7 +356,7 @@ go test ./...
 go vet ./...
 ```
 
-The Go module is included in the source archive, but v0.15.0 does not publish a
+The Go module is included in the source archive, but v0.15.1 does not publish a
 Go module automatically and does not ship compiled libraries. Consumers build
 from source.
 
@@ -379,7 +389,7 @@ uv run --isolated --with maturin --with pytest --directory bindings/python matur
 uv run --isolated --with pytest --directory bindings/python python -m pytest
 ```
 
-The Python package is included in the source archive, but v0.15.0 does not
+The Python package is included in the source archive, but v0.15.1 does not
 publish to PyPI automatically and does not ship a platform wheel matrix.
 Consumers build from source with maturin.
 
@@ -523,6 +533,40 @@ try db.exec(
 Zova does not scan or mutate your user tables when objects or vectors are
 deleted. If a user table still references a deleted object id or vector id, that
 reference is application state.
+
+## Savepoints
+
+Savepoints are SQLite checkpoints inside one connection. They are useful when a
+larger workflow wants a smaller rollback point without closing the outer
+transaction:
+
+```zig
+try db.exec("begin immediate");
+try db.savepoint("attach_file");
+try db.exec("insert into attachments(filename) values ('draft.txt')");
+try db.rollbackToSavepoint("attach_file");
+try db.releaseSavepoint("attach_file");
+try db.exec("commit");
+```
+
+Rust, Go, Python, and the C ABI expose the same three operations:
+`savepoint`, `rollback_to_savepoint` / `RollbackToSavepoint`, and
+`release_savepoint` / `ReleaseSavepoint`.
+
+v0.15.1 deliberately exposes explicit methods only; scoped savepoint helpers
+and context-manager wrappers are deferred. Object reads are allowed inside
+savepoint stacks, but object mutation APIs and `ObjectWriter.finish` keep the
+existing object transaction policy and return the active-transaction error.
+Vector writes follow SQLite transaction behavior and can be rolled back.
+
+There are no CLI savepoint commands. Savepoints are tied to one live database
+connection, while each CLI invocation opens and closes its own connection.
+Use backup/compact/restore for file-level operational safety; use savepoints
+for connection-local partial rollback.
+
+Backup and compact copy do not add special savepoint semantics. Applications
+should finish active transaction/savepoint stacks before operational copy
+workflows unless they intentionally rely on SQLite snapshot and locking rules.
 
 ## Objects
 
@@ -741,21 +785,21 @@ var close = try db.searchVectorsWithin(
 defer close.deinit(allocator);
 ```
 
-Search is exact and flat-scan in v0.15.0. That is deliberate: Zova currently
+Search is exact and flat-scan in v0.15.1. That is deliberate: Zova currently
 prioritizes deterministic local correctness over approximate indexing. It is a
 good fit for small and medium local datasets, offline ranking, tests that need
 repeatable nearest-neighbor results, and candidate-filtered search where SQL
 first narrows the metadata set and Zova ranks the eligible vector ids.
 
 It is not yet a low-latency ANN engine for millions of vectors. Zova does not
-include HNSW, IVFFlat, quantized indexes, or vector SQL operators in v0.15.0.
+include HNSW, IVFFlat, quantized indexes, or vector SQL operators in v0.15.1.
 
 Missing candidate ids are skipped. Invalid candidate ids return
 `error.VectorInvalid`. Corrupt selected vector rows return `error.VectorCorrupt`.
 
 ## SQL-Native Vector Search
 
-v0.15.0 keeps Zova vectors queryable from SQL on `zova.Database` connections.
+v0.15.1 keeps Zova vectors queryable from SQL on `zova.Database` connections.
 The raw `zova.sqlite.Database` wrapper remains plain SQLite and does not
 register Zova vector SQL helpers.
 
@@ -1012,7 +1056,7 @@ scripts/check-release.sh
 
 ## Release Package Policy
 
-v0.15.0 releases a source-only package/archive. The package includes:
+v0.15.1 releases a source-only package/archive. The package includes:
 
 - `README.md`
 - `build.zig`
@@ -1037,16 +1081,16 @@ Go package, and Python extension from source.
 The release script:
 
 ```sh
-scripts/package-release.sh 0.15.0
+scripts/package-release.sh 0.15.1
 ```
 
 tags the current commit, pushes the branch and tag, creates a source archive,
 and creates the GitHub release. Do not run it until the exact commit you want
 to release is ready.
 
-## Non-Goals In v0.15.0
+## Non-Goals In v0.15.1
 
-Zova v0.15.0 does not include:
+Zova v0.15.1 does not include:
 
 - ANN indexes
 - HNSW or IVFFlat

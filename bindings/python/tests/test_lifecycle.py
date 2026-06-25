@@ -6,7 +6,7 @@ import zova
 
 
 def test_import_and_error_mapping(tmp_path):
-    assert zova.__version__ == "0.15.0"
+    assert zova.__version__ == "0.15.1"
 
     with pytest.raises(zova.ZovaError) as exc:
         zova.Database.create(str(tmp_path / "plain.db"))
@@ -142,6 +142,45 @@ def test_transactions_vacuum_and_conversion(tmp_path):
             stmt.bind_int(1, 1)
             assert stmt.step() == zova.Step.ROW
             assert stmt.column_text(0) == "from sqlite"
+
+
+def test_savepoints_rollback_release_and_validate_names(tmp_path):
+    path = tmp_path / "savepoints.zova"
+    with zova.Database.create(str(path)) as db:
+        db.exec("create table tx(id integer primary key, value text)")
+        db.begin_immediate()
+        db.exec("insert into tx(value) values ('outer')")
+
+        db.savepoint("sp_vectors")
+        db.exec("insert into tx(value) values ('rolled back')")
+        with pytest.raises(zova.ZovaError) as exc:
+            db.put_object(b"blocked inside savepoint")
+        assert exc.value.status_name == "ZOVA_OBJECT_TRANSACTION_ACTIVE"
+        db.create_vector_collection(
+            "temporary_vectors",
+            zova.VectorCollectionOptions(2, zova.VectorMetric.L2),
+        )
+        db.put_vector("temporary_vectors", "v1", [1.0, 2.0])
+        db.rollback_to_savepoint("sp_vectors")
+        db.release_savepoint("sp_vectors")
+        assert not db.has_vector_collection("temporary_vectors")
+
+        db.savepoint("sp_release")
+        db.exec("insert into tx(value) values ('kept')")
+        db.release_savepoint("sp_release")
+        db.commit()
+
+        with db.prepare("select count(*) from tx where value != 'rolled back'") as stmt:
+            assert stmt.step() == zova.Step.ROW
+            assert stmt.column_int(0) == 2
+
+        with pytest.raises(zova.ZovaError) as exc:
+            db.savepoint("bad name")
+        assert exc.value.status_name == "ZOVA_INVALID_ARGUMENT"
+
+        with pytest.raises(zova.ZovaError) as exc:
+            db.release_savepoint("missing_sp")
+        assert "no such savepoint" in str(exc.value)
 
 
 def test_backup_compact_and_restore(tmp_path):

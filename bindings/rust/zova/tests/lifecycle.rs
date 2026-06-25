@@ -189,6 +189,55 @@ fn transactions_commit_rollback_and_vacuum_work() {
 }
 
 #[test]
+fn savepoints_rollback_release_and_validate_names() {
+    let path = temp_path("savepoints");
+    let mut db = Database::create(&path).unwrap();
+    db.exec("create table tx(id integer primary key, value text)")
+        .unwrap();
+    db.begin_immediate().unwrap();
+    db.exec("insert into tx(value) values ('outer')").unwrap();
+
+    db.savepoint("sp_one").unwrap();
+    db.exec("insert into tx(value) values ('rolled back')")
+        .unwrap();
+    let object_error = db.put_object(b"blocked inside savepoint").unwrap_err();
+    assert_eq!(object_error.status(), Some(Status::ObjectTransactionActive));
+    db.create_vector_collection(
+        "temporary_vectors",
+        VectorCollectionOptions {
+            dimensions: 2,
+            metric: VectorMetric::L2,
+        },
+    )
+    .unwrap();
+    db.put_vector("temporary_vectors", "v1", &[1.0, 2.0])
+        .unwrap();
+    db.rollback_to_savepoint("sp_one").unwrap();
+    db.release_savepoint("sp_one").unwrap();
+
+    assert!(!db.has_vector_collection("temporary_vectors").unwrap());
+
+    db.savepoint("sp_two").unwrap();
+    db.exec("insert into tx(value) values ('kept')").unwrap();
+    db.release_savepoint("sp_two").unwrap();
+    db.commit().unwrap();
+
+    let mut count = db
+        .prepare("select count(*) from tx where value != 'rolled back'")
+        .unwrap();
+    assert_eq!(count.step().unwrap(), Step::Row);
+    assert_eq!(count.column_i64(0).unwrap(), 2);
+    drop(count);
+
+    let invalid = db.savepoint("bad name").unwrap_err();
+    assert_eq!(invalid.status(), Some(Status::InvalidArgument));
+
+    let missing = db.release_savepoint("missing_sp").unwrap_err();
+    assert!(missing.to_string().contains("no such savepoint"));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn backup_compact_and_restore_preserve_records_objects_and_vectors() {
     let path = temp_path("ops-source");
     let backup_path = temp_path("ops-backup");

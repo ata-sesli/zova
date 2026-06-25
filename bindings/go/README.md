@@ -9,6 +9,7 @@ It covers:
 - SQL `exec`
 - prepared statements with bind/step/column access
 - explicit transactions
+- explicit named savepoints
 - explicit `VACUUM`
 - backup, compact copy, and restore-to-new-file
 - objects, chunks, manifests, range reads, assembly, and `ObjectWriter`
@@ -21,10 +22,11 @@ It covers:
 1. [How It Fits](#how-it-fits)
 2. [Build Requirements](#build-requirements)
 3. [Handle Policy](#handle-policy)
-4. [Operational Safety](#operational-safety)
-5. [Objects](#objects)
-6. [Vectors](#vectors)
-7. [Example](#example)
+4. [Savepoints](#savepoints)
+5. [Operational Safety](#operational-safety)
+6. [Objects](#objects)
+7. [Vectors](#vectors)
+8. [Example](#example)
 
 ## How It Fits
 
@@ -101,6 +103,39 @@ cross-handle contention. No nonzero timeout is installed by default.
 Use `LastInsertRowID`, `Changes`, `TotalChanges`, and `Stmt.ColumnName` for
 normal application SQL record helpers. They do not expose or stabilize Zova's
 private `_zova_*` tables.
+
+## Savepoints
+
+Use explicit savepoints for partial rollback inside one database connection:
+
+```go
+if err := db.BeginImmediate(); err != nil {
+    log.Fatal(err)
+}
+if err := db.Savepoint("attach_file"); err != nil {
+    log.Fatal(err)
+}
+if err := db.Exec("insert into attachments(filename) values ('draft.txt')"); err != nil {
+    log.Fatal(err)
+}
+if err := db.RollbackToSavepoint("attach_file"); err != nil {
+    log.Fatal(err)
+}
+if err := db.ReleaseSavepoint("attach_file"); err != nil {
+    log.Fatal(err)
+}
+if err := db.Commit(); err != nil {
+    log.Fatal(err)
+}
+```
+
+Savepoint names are strict ASCII identifiers: 1-64 bytes, first byte
+`[A-Za-z_]`, remaining bytes `[A-Za-z0-9_]`, and no case-insensitive `_zova_`
+prefix. `RollbackToSavepoint` keeps the savepoint active; `ReleaseSavepoint`
+removes it.
+An inner released savepoint can still be undone by rolling back an outer
+transaction or savepoint. v0.15.1 exposes explicit methods only; a `WithSavepoint`
+helper is deferred.
 
 ## Operational Safety
 

@@ -15,8 +15,9 @@ It contains:
 1. [How It Fits](#how-it-fits)
 2. [Local Build](#local-build)
 3. [Handle Policy](#handle-policy)
-4. [Operational Safety](#operational-safety)
-5. [Example](#example)
+4. [Example](#example)
+5. [Savepoints](#savepoints)
+6. [Operational Safety](#operational-safety)
 
 ## How It Fits
 
@@ -105,6 +106,32 @@ Use `Database::changes`, `Database::total_changes`,
 `Database::last_insert_rowid`, and `Statement::column_name` for normal
 application SQL record helpers. They are not a public interface to Zova's
 private `_zova_*` tables.
+
+## Savepoints
+
+Use explicit savepoints for partial rollback inside one connection:
+
+```rust
+let mut db = Database::open("app.zova")?;
+db.begin_immediate()?;
+db.savepoint("attach_file")?;
+db.exec("insert into attachments(filename) values ('draft.txt')")?;
+db.rollback_to_savepoint("attach_file")?;
+db.release_savepoint("attach_file")?;
+db.commit()?;
+```
+
+`SharedDatabase` exposes the same methods. Inside
+`SharedDatabase::transaction` or `transaction_immediate`, the guard also has
+`savepoint`, `rollback_to_savepoint`, and `release_savepoint`, so nested
+checkpoints do not interleave with other threads on the shared handle.
+
+Savepoint names are strict ASCII identifiers: 1-64 bytes, first byte
+`[A-Za-z_]`, remaining bytes `[A-Za-z0-9_]`, and no case-insensitive `_zova_`
+prefix. `ROLLBACK TO` keeps the savepoint active; `RELEASE` removes it.
+An inner released savepoint can still be undone by rolling back an outer
+transaction or savepoint. v0.15.1 exposes explicit methods only; scoped
+`with_savepoint` helpers are deferred.
 
 ## Operational Safety
 

@@ -290,6 +290,11 @@ pub const zova_database_simple_request = extern struct {
     db: ?*zova_database,
 };
 
+pub const zova_database_savepoint_request = extern struct {
+    db: ?*zova_database,
+    name: ?[*:0]const u8,
+};
+
 pub const zova_database_busy_timeout_request = extern struct {
     db: ?*zova_database,
     milliseconds: u32,
@@ -655,11 +660,11 @@ pub fn zova_abi_version_minor() callconv(.c) u32 {
 }
 
 pub fn zova_abi_version_patch() callconv(.c) u32 {
-    return 0;
+    return 1;
 }
 
 pub fn zova_abi_version_string() callconv(.c) [*:0]const u8 {
-    return "0.15.0";
+    return "0.15.1";
 }
 
 // Accept a raw integer instead of a Zig enum so accidental or future C enum
@@ -819,6 +824,18 @@ pub fn zova_database_rollback(request: ?*const zova_database_simple_request) cal
     return okDb(handle);
 }
 
+pub fn zova_database_savepoint(request: ?*const zova_database_savepoint_request) callconv(.c) zova_status {
+    return databaseSavepoint(request, .savepoint);
+}
+
+pub fn zova_database_rollback_to_savepoint(request: ?*const zova_database_savepoint_request) callconv(.c) zova_status {
+    return databaseSavepoint(request, .rollback_to);
+}
+
+pub fn zova_database_release_savepoint(request: ?*const zova_database_savepoint_request) callconv(.c) zova_status {
+    return databaseSavepoint(request, .release);
+}
+
 pub fn zova_database_vacuum(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
@@ -893,6 +910,27 @@ pub fn zova_database_total_changes(request: ?*const zova_database_total_changes_
     defer handle.mutex.unlock();
     const out = req.out_total_changes orelse return failDb(handle, error.InvalidArgument);
     out.* = handle.db.totalChanges();
+    return okDb(handle);
+}
+
+const SavepointOperation = enum {
+    savepoint,
+    rollback_to,
+    release,
+};
+
+fn databaseSavepoint(request: ?*const zova_database_savepoint_request, operation: SavepointOperation) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const name = req.name orelse return failDb(handle, error.InvalidArgument);
+    const result = switch (operation) {
+        .savepoint => handle.db.savepoint(std.mem.span(name)),
+        .rollback_to => handle.db.rollbackToSavepoint(std.mem.span(name)),
+        .release => handle.db.releaseSavepoint(std.mem.span(name)),
+    };
+    result catch |err| return failDb(handle, err);
     return okDb(handle);
 }
 
@@ -2109,8 +2147,8 @@ fn statusName(status: c_int) [*:0]const u8 {
 test "c abi status names and versions are stable" {
     try std.testing.expectEqual(@as(u32, 0), zova_abi_version_major());
     try std.testing.expectEqual(@as(u32, 15), zova_abi_version_minor());
-    try std.testing.expectEqual(@as(u32, 0), zova_abi_version_patch());
-    try std.testing.expectEqualStrings("0.15.0", std.mem.span(zova_abi_version_string()));
+    try std.testing.expectEqual(@as(u32, 1), zova_abi_version_patch());
+    try std.testing.expectEqualStrings("0.15.1", std.mem.span(zova_abi_version_string()));
     try std.testing.expectEqualStrings("ZOVA_OK", std.mem.span(zova_status_name(@intFromEnum(zova_status.OK))));
     try std.testing.expectEqualStrings("ZOVA_OBJECT_NOT_FOUND", std.mem.span(zova_status_name(@intFromEnum(zova_status.OBJECT_NOT_FOUND))));
     try std.testing.expectEqualStrings("ZOVA_VECTOR_INVALID", std.mem.span(zova_status_name(@intFromEnum(zova_status.VECTOR_INVALID))));
@@ -2142,6 +2180,9 @@ test "c abi validates null pointers" {
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_commit(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_rollback(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_vacuum(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_savepoint(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_rollback_to_savepoint(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_release_savepoint(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_backup(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_compact(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_restore(null));
@@ -2878,6 +2919,54 @@ test "c abi exposes transaction helpers and vacuum" {
     var count: i64 = 0;
     try std.testing.expectEqual(zova_status.OK, zova_statement_column_int64(&.{ .statement = count_stmt, .index = 0, .out_value = &count }));
     try std.testing.expectEqual(@as(i64, 1), count);
+}
+
+test "c abi exposes savepoint helpers" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-savepoint.zova", .{tmp.sub_path[0..]});
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(db);
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = db, .sql = "create table notes (body text not null)" }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_begin_immediate(&.{ .db = db }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = db, .sql = "insert into notes (body) values ('outer')" }));
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_savepoint(&.{ .db = db, .name = "sp_one" }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = db, .sql = "insert into notes (body) values ('rolled back')" }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_rollback_to_savepoint(&.{ .db = db, .name = "sp_one" }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_release_savepoint(&.{ .db = db, .name = "sp_one" }));
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_savepoint(&.{ .db = db, .name = "sp_two" }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = db, .sql = "insert into notes (body) values ('released')" }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_release_savepoint(&.{ .db = db, .name = "sp_two" }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_commit(&.{ .db = db }));
+
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_savepoint(&.{ .db = db, .name = "bad name" }));
+    try std.testing.expectEqual(zova_status.SQLITE_ERROR, zova_database_release_savepoint(&.{ .db = db, .name = "missing_sp" }));
+    const message = std.mem.span(zova_database_last_error_message(db));
+    try std.testing.expect(std.mem.indexOf(u8, message, "no such savepoint") != null);
+
+    var stmt: ?*zova_statement = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_prepare(&.{
+        .db = db,
+        .sql = "select count(*) from notes where body = 'rolled back'",
+        .out_statement = &stmt,
+    }));
+    defer _ = zova_statement_finalize(stmt);
+    var step_result: zova_step_result = undefined;
+    try std.testing.expectEqual(zova_status.OK, zova_statement_step(&.{ .statement = stmt, .out_result = &step_result }));
+    var count: i64 = 0;
+    try std.testing.expectEqual(zova_status.OK, zova_statement_column_int64(&.{ .statement = stmt, .index = 0, .out_value = &count }));
+    try std.testing.expectEqual(@as(i64, 0), count);
 }
 
 fn expectCAbiOperationalCopy(path: [:0]const u8, object_id: zova_object_id) !void {

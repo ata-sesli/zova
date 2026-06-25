@@ -72,6 +72,20 @@ impl PyDatabase {
         self.db_mut()?.rollback().map_err(zova_error)
     }
 
+    pub(crate) fn savepoint(&mut self, name: &str) -> PyResult<()> {
+        self.db_mut()?.savepoint(name).map_err(zova_error)
+    }
+
+    pub(crate) fn rollback_to_savepoint(&mut self, name: &str) -> PyResult<()> {
+        self.db_mut()?
+            .rollback_to_savepoint(name)
+            .map_err(zova_error)
+    }
+
+    pub(crate) fn release_savepoint(&mut self, name: &str) -> PyResult<()> {
+        self.db_mut()?.release_savepoint(name).map_err(zova_error)
+    }
+
     pub(crate) fn vacuum(&mut self) -> PyResult<()> {
         self.db_mut()?.vacuum().map_err(zova_error)
     }

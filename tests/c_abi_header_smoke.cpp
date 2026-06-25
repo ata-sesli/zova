@@ -68,6 +68,9 @@ int main() {
     column_blob_request.out_buffer = &buffer;
     zova_database_simple_request simple_request = {};
     simple_request.db = db;
+    zova_database_savepoint_request savepoint_request = {};
+    savepoint_request.db = db;
+    savepoint_request.name = "sp_one";
     zova_database_backup_request backup_request = {};
     backup_request.db = db;
     backup_request.destination_path = "backup.zova";
@@ -144,6 +147,7 @@ int main() {
                    column_text_request.out_text == &text &&
                    column_blob_request.out_buffer == &buffer &&
                    simple_request.db == db &&
+                   savepoint_request.name != nullptr &&
                    backup_request.destination_path != nullptr &&
                    compact_request.destination_path != nullptr &&
                    restore_request.source_path != nullptr &&

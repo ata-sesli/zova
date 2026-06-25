@@ -309,6 +309,33 @@ func (db *DB) Rollback() error {
 	})
 }
 
+// Savepoint creates a named SQLite savepoint.
+//
+// Names must be ASCII identifiers: 1-64 bytes, first byte [A-Za-z_],
+// remaining bytes [A-Za-z0-9_], and no case-insensitive _zova_ prefix.
+func (db *DB) Savepoint(name string) error {
+	return db.savepoint(name, func(request *C.zova_database_savepoint_request) C.zova_status {
+		return C.zova_database_savepoint(request)
+	})
+}
+
+// RollbackToSavepoint rolls back changes made after a named savepoint.
+//
+// SQLite keeps the savepoint active after ROLLBACK TO; call ReleaseSavepoint
+// when the checkpoint should be removed.
+func (db *DB) RollbackToSavepoint(name string) error {
+	return db.savepoint(name, func(request *C.zova_database_savepoint_request) C.zova_status {
+		return C.zova_database_rollback_to_savepoint(request)
+	})
+}
+
+// ReleaseSavepoint releases a named SQLite savepoint.
+func (db *DB) ReleaseSavepoint(name string) error {
+	return db.savepoint(name, func(request *C.zova_database_savepoint_request) C.zova_status {
+		return C.zova_database_release_savepoint(request)
+	})
+}
+
 // Vacuum runs an explicit in-place SQLite VACUUM.
 func (db *DB) Vacuum() error {
 	return db.simple(func(request *C.zova_database_simple_request) C.zova_status {
@@ -416,6 +443,22 @@ func (db *DB) TotalChanges() (int64, error) {
 func (db *DB) simple(function func(*C.zova_database_simple_request) C.zova_status) error {
 	return db.withLock(func() error {
 		request := C.zova_database_simple_request{db: db.ptr}
+		return statusFromDB(db, function(&request))
+	})
+}
+
+func (db *DB) savepoint(name string, function func(*C.zova_database_savepoint_request) C.zova_status) error {
+	cName, err := cString("savepoint name", name)
+	if err != nil {
+		return err
+	}
+	defer freeCString(cName)
+
+	return db.withLock(func() error {
+		request := C.zova_database_savepoint_request{
+			db:   db.ptr,
+			name: cName,
+		}
 		return statusFromDB(db, function(&request))
 	})
 }

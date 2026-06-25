@@ -20,10 +20,10 @@ func tempZovaPath(t *testing.T, name string) string {
 
 func TestABIVersionAndStatusNames(t *testing.T) {
 	major, minor, patch := ABIVersionNumbers()
-	if major != 0 || minor != 15 || patch != 0 {
+	if major != 0 || minor != 15 || patch != 1 {
 		t.Fatalf("unexpected ABI version: %d.%d.%d", major, minor, patch)
 	}
-	if got := ABIVersion(); got != "0.15.0" {
+	if got := ABIVersion(); got != "0.15.1" {
 		t.Fatalf("unexpected ABI version string: %q", got)
 	}
 	if got := StatusName(StatusOK); got != "ZOVA_OK" {
@@ -174,6 +174,38 @@ func TestResetClearBindingsTransactionsVacuumAndMultipleHandles(t *testing.T) {
 		t.Fatalf("commit count = %d", got)
 	}
 
+	must(t, db.BeginImmediate())
+	must(t, db.Exec("insert into items(body) values ('outer')"))
+	must(t, db.Savepoint("sp_vectors"))
+	must(t, db.Exec("insert into items(body) values ('rolled back')"))
+	if _, err := db.PutObject([]byte("blocked inside savepoint")); !errorStatusIs(err, StatusObjectTransactionActive) {
+		t.Fatalf("object write inside savepoint = %v, want StatusObjectTransactionActive", err)
+	}
+	must(t, db.CreateVectorCollection("temporary_vectors", VectorCollectionOptions{
+		Dimensions: 2,
+		Metric:     VectorMetricL2,
+	}))
+	must(t, db.PutVector("temporary_vectors", "v1", []float32{1, 2}))
+	must(t, db.RollbackToSavepoint("sp_vectors"))
+	must(t, db.ReleaseSavepoint("sp_vectors"))
+	if exists, err := db.HasVectorCollection("temporary_vectors"); err != nil || exists {
+		t.Fatalf("temporary vector collection exists = %v, %v", exists, err)
+	}
+
+	must(t, db.Savepoint("sp_release"))
+	must(t, db.Exec("insert into items(body) values ('kept by savepoint')"))
+	must(t, db.ReleaseSavepoint("sp_release"))
+	must(t, db.Commit())
+	if got := scalarInt(t, db, "select count(*) from items where body != 'rolled back'"); got != 3 {
+		t.Fatalf("savepoint count = %d", got)
+	}
+	if err := db.Savepoint("bad name"); !errorStatusIs(err, StatusInvalidArgument) {
+		t.Fatalf("invalid savepoint error = %v, want StatusInvalidArgument", err)
+	}
+	if err := db.ReleaseSavepoint("missing_sp"); err == nil || !strings.Contains(err.Error(), "no such savepoint") {
+		t.Fatalf("missing savepoint error = %v, want useful diagnostic", err)
+	}
+
 	must(t, db.Vacuum())
 
 	second, err := Open(path)
@@ -181,7 +213,7 @@ func TestResetClearBindingsTransactionsVacuumAndMultipleHandles(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer second.Close()
-	if got := scalarInt(t, second, "select count(*) from items"); got != 1 {
+	if got := scalarInt(t, second, "select count(*) from items"); got != 3 {
 		t.Fatalf("second handle count = %d", got)
 	}
 
@@ -192,7 +224,7 @@ func TestResetClearBindingsTransactionsVacuumAndMultipleHandles(t *testing.T) {
 	defer readonly.Close()
 	must(t, readonly.SetBusyTimeout(0))
 	must(t, readonly.SetBusyTimeout(2))
-	if got := scalarInt(t, readonly, "select count(*) from items"); got != 1 {
+	if got := scalarInt(t, readonly, "select count(*) from items"); got != 3 {
 		t.Fatalf("readonly count = %d", got)
 	}
 	err = readonly.Exec("insert into items(body) values ('blocked')")

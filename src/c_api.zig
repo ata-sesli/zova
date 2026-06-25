@@ -36,6 +36,7 @@ pub const zova_database_compact_request = internal.zova_database_compact_request
 pub const zova_database_restore_request = internal.zova_database_restore_request;
 pub const zova_database_exec_request = internal.zova_database_exec_request;
 pub const zova_database_simple_request = internal.zova_database_simple_request;
+pub const zova_database_savepoint_request = internal.zova_database_savepoint_request;
 pub const zova_database_busy_timeout_request = internal.zova_database_busy_timeout_request;
 pub const zova_database_last_insert_rowid_request = internal.zova_database_last_insert_rowid_request;
 pub const zova_database_changes_request = internal.zova_database_changes_request;
@@ -177,6 +178,18 @@ export fn zova_database_commit(request: ?*const zova_database_simple_request) ca
 
 export fn zova_database_rollback(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
     return internal.zova_database_rollback(request);
+}
+
+export fn zova_database_savepoint(request: ?*const zova_database_savepoint_request) callconv(.c) zova_status {
+    return internal.zova_database_savepoint(request);
+}
+
+export fn zova_database_rollback_to_savepoint(request: ?*const zova_database_savepoint_request) callconv(.c) zova_status {
+    return internal.zova_database_rollback_to_savepoint(request);
+}
+
+export fn zova_database_release_savepoint(request: ?*const zova_database_savepoint_request) callconv(.c) zova_status {
+    return internal.zova_database_release_savepoint(request);
 }
 
 export fn zova_database_vacuum(request: ?*const zova_database_simple_request) callconv(.c) zova_status {

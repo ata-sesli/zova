@@ -240,6 +240,12 @@ pub struct zova_database_simple_request {
 }
 
 #[repr(C)]
+pub struct zova_database_savepoint_request {
+    pub db: *mut zova_database,
+    pub name: *const c_char,
+}
+
+#[repr(C)]
 pub struct zova_database_busy_timeout_request {
     pub db: *mut zova_database,
     pub milliseconds: u32,
@@ -677,6 +683,13 @@ extern "C" {
     ) -> zova_status;
     pub fn zova_database_commit(request: *const zova_database_simple_request) -> zova_status;
     pub fn zova_database_rollback(request: *const zova_database_simple_request) -> zova_status;
+    pub fn zova_database_savepoint(request: *const zova_database_savepoint_request) -> zova_status;
+    pub fn zova_database_rollback_to_savepoint(
+        request: *const zova_database_savepoint_request,
+    ) -> zova_status;
+    pub fn zova_database_release_savepoint(
+        request: *const zova_database_savepoint_request,
+    ) -> zova_status;
     pub fn zova_database_vacuum(request: *const zova_database_simple_request) -> zova_status;
     pub fn zova_database_backup(request: *const zova_database_backup_request) -> zova_status;
     pub fn zova_database_compact(request: *const zova_database_compact_request) -> zova_status;
