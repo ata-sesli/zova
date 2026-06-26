@@ -17,6 +17,13 @@ pub(crate) struct PyDatabase {
     inner: Option<zova_rust::Database>,
 }
 
+#[pyclass(name = "SavepointContext", unsendable)]
+pub(crate) struct PySavepointContext {
+    database: Py<PyDatabase>,
+    name: String,
+    active: bool,
+}
+
 #[pymethods]
 impl PyDatabase {
     #[staticmethod]
@@ -84,6 +91,14 @@ impl PyDatabase {
 
     pub(crate) fn release_savepoint(&mut self, name: &str) -> PyResult<()> {
         self.db_mut()?.release_savepoint(name).map_err(zova_error)
+    }
+
+    pub(crate) fn savepoint_context(slf: Py<Self>, name: &str) -> PySavepointContext {
+        PySavepointContext {
+            database: slf,
+            name: name.to_owned(),
+            active: false,
+        }
     }
 
     pub(crate) fn vacuum(&mut self) -> PyResult<()> {
@@ -460,6 +475,40 @@ impl PyDatabase {
 impl PyDatabase {
     pub(crate) fn db_mut(&mut self) -> PyResult<&mut zova_rust::Database> {
         self.inner.as_mut().ok_or_else(|| closed_error("database"))
+    }
+}
+
+#[pymethods]
+impl PySavepointContext {
+    pub(crate) fn __enter__(&mut self, py: Python<'_>) -> PyResult<Py<PyDatabase>> {
+        self.database
+            .borrow_mut(py)
+            .savepoint(&self.name)
+            .map_err(|err| err)?;
+        self.active = true;
+        Ok(self.database.clone_ref(py))
+    }
+
+    pub(crate) fn __exit__(
+        &mut self,
+        py: Python<'_>,
+        exc_type: Option<&Bound<'_, PyAny>>,
+        _exc_value: Option<&Bound<'_, PyAny>>,
+        _traceback: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<bool> {
+        if !self.active {
+            return Ok(false);
+        }
+        self.active = false;
+
+        let mut database = self.database.borrow_mut(py);
+        if exc_type.is_some() {
+            database.rollback_to_savepoint(&self.name)?;
+            database.release_savepoint(&self.name)?;
+            return Ok(false);
+        }
+        database.release_savepoint(&self.name)?;
+        Ok(false)
     }
 }
 

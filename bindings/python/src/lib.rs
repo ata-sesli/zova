@@ -4,7 +4,7 @@ mod object;
 mod statement;
 mod vector;
 
-use database::{convert_sqlite_to_zova, restore_backup, PyDatabase};
+use database::{convert_sqlite_to_zova, restore_backup, PyDatabase, PySavepointContext};
 use error::{ClosedHandleError, ZovaError};
 use object::{
     object_chunk_id, object_id, PyObjectChunkId, PyObjectId, PyObjectManifest,
@@ -22,6 +22,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("ZovaError", py.get_type::<ZovaError>())?;
     m.add("ClosedHandleError", py.get_type::<ClosedHandleError>())?;
     m.add_class::<PyDatabase>()?;
+    m.add_class::<PySavepointContext>()?;
     m.add_class::<PyStatement>()?;
     m.add_class::<PyObjectId>()?;
     m.add_class::<PyObjectChunkId>()?;

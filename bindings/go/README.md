@@ -134,8 +134,20 @@ Savepoint names are strict ASCII identifiers: 1-64 bytes, first byte
 prefix. `RollbackToSavepoint` keeps the savepoint active; `ReleaseSavepoint`
 removes it.
 An inner released savepoint can still be undone by rolling back an outer
-transaction or savepoint. v0.15.1 exposes explicit methods only; a `WithSavepoint`
-helper is deferred.
+transaction or savepoint.
+
+Use `WithSavepoint` when you want rollback cleanup tied to a callback:
+
+```go
+if err := db.WithSavepoint("attach_file", func(db *zova.DB) error {
+    return db.Exec("insert into attachments(filename) values ('draft.txt')")
+}); err != nil {
+    log.Fatal(err)
+}
+```
+
+`WithSavepoint` is cleanup ergonomics, not a multi-call concurrency lock. The
+Go wrapper still serializes individual calls with its internal mutex.
 
 ## Operational Safety
 

@@ -336,6 +336,31 @@ func (db *DB) ReleaseSavepoint(name string) error {
 	})
 }
 
+// WithSavepoint runs fn inside a named SQLite savepoint.
+//
+// The helper releases the savepoint when fn succeeds. If fn returns an error,
+// the helper rolls back to the savepoint, releases it, and then returns the
+// original error unless cleanup itself fails. The callback is not invoked when
+// the savepoint name is invalid.
+func (db *DB) WithSavepoint(name string, fn func(*DB) error) error {
+	if fn == nil {
+		return newError(StatusInvalidArgument, "WithSavepoint callback is nil")
+	}
+	if err := db.Savepoint(name); err != nil {
+		return err
+	}
+	if err := fn(db); err != nil {
+		if rollbackErr := db.RollbackToSavepoint(name); rollbackErr != nil {
+			return rollbackErr
+		}
+		if releaseErr := db.ReleaseSavepoint(name); releaseErr != nil {
+			return releaseErr
+		}
+		return err
+	}
+	return db.ReleaseSavepoint(name)
+}
+
 // Vacuum runs an explicit in-place SQLite VACUUM.
 func (db *DB) Vacuum() error {
 	return db.simple(func(request *C.zova_database_simple_request) C.zova_status {

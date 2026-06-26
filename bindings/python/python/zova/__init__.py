@@ -8,6 +8,7 @@ from ._native import (
     ObjectManifest,
     ObjectManifestChunk,
     ObjectWriter,
+    SavepointContext,
     Vector,
     VectorCollectionInfo,
     VectorCollectionOptions,
@@ -21,7 +22,7 @@ from ._native import (
     restore_backup,
 )
 
-__version__ = "0.15.1"
+__version__ = "0.15.2"
 
 
 class Step(IntEnum):
@@ -52,6 +53,7 @@ __all__ = [
     "ObjectManifest",
     "ObjectManifestChunk",
     "ObjectWriter",
+    "SavepointContext",
     "Step",
     "Vector",
     "VectorCollectionInfo",

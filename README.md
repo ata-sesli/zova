@@ -8,7 +8,7 @@ content-addressed objects, chunk manifests, streaming writes, and exact vector
 search. Applications keep their own metadata in normal SQL tables and store
 Zova object ids or vector ids alongside their rows.
 
-Current package version: `0.15.1`.
+Current package version: `0.15.2`.
 
 Zova is not tied to one application language. The project exposes:
 
@@ -28,7 +28,7 @@ Rust/Go/Python binding foundation.
 Read this file in this order if you are new to Zova:
 
 1. [Architecture](#architecture)
-2. [What Works In v0.15.1](#what-works-in-v0151)
+2. [What Works In v0.15.2](#what-works-in-v0152)
 3. [File Boundary](#file-boundary)
 4. [C ABI](#c-abi)
 5. [Rust Bindings](#rust-bindings)
@@ -50,7 +50,7 @@ Read this file in this order if you are new to Zova:
 21. [Vendored SQLite](#vendored-sqlite)
 22. [Testing](#testing)
 23. [Release Package Policy](#release-package-policy)
-24. [Non-Goals In v0.15.1](#non-goals-in-v0151)
+24. [Non-Goals In v0.15.2](#non-goals-in-v0152)
 25. [Design Philosophy](#design-philosophy)
 
 ## Architecture
@@ -85,7 +85,7 @@ flowchart TD
     VecCols --> Vecs
 ```
 
-## What Works In v0.15.1
+## What Works In v0.15.2
 
 - normal SQLite access through a thin wrapper
 - `.zova` database create/open/validation
@@ -320,7 +320,7 @@ Run the Rust tests:
 cargo test --workspace --manifest-path bindings/rust/Cargo.toml
 ```
 
-The Rust crates are included in the source archive, but v0.15.1 does not publish
+The Rust crates are included in the source archive, but v0.15.2 does not publish
 them to crates.io automatically and does not ship compiled libraries. Consumers
 build from source.
 
@@ -356,7 +356,7 @@ go test ./...
 go vet ./...
 ```
 
-The Go module is included in the source archive, but v0.15.1 does not publish a
+The Go module is included in the source archive, but v0.15.2 does not publish a
 Go module automatically and does not ship compiled libraries. Consumers build
 from source.
 
@@ -389,7 +389,7 @@ uv run --isolated --with maturin --with pytest --directory bindings/python matur
 uv run --isolated --with pytest --directory bindings/python python -m pytest
 ```
 
-The Python package is included in the source archive, but v0.15.1 does not
+The Python package is included in the source archive, but v0.15.2 does not
 publish to PyPI automatically and does not ship a platform wheel matrix.
 Consumers build from source with maturin.
 
@@ -553,11 +553,17 @@ Rust, Go, Python, and the C ABI expose the same three operations:
 `savepoint`, `rollback_to_savepoint` / `RollbackToSavepoint`, and
 `release_savepoint` / `ReleaseSavepoint`.
 
-v0.15.1 deliberately exposes explicit methods only; scoped savepoint helpers
-and context-manager wrappers are deferred. Object reads are allowed inside
-savepoint stacks, but object mutation APIs and `ObjectWriter.finish` keep the
-existing object transaction policy and return the active-transaction error.
-Vector writes follow SQLite transaction behavior and can be rolled back.
+v0.15.2 also adds scoped helpers for rollback cleanup:
+`Database.withSavepoint` in Zig, `with_savepoint` in Rust,
+`WithSavepoint` in Go, and `savepoint_context()` in Python. On success the
+helper releases the savepoint. On callback or body failure it rolls back to the
+savepoint, releases it, and returns or raises the original error when cleanup
+succeeds.
+
+Object reads are allowed inside savepoint stacks, but object mutation APIs and
+`ObjectWriter.finish` keep the existing object transaction policy and return the
+active-transaction error. Vector writes follow SQLite transaction behavior and
+can be rolled back.
 
 There are no CLI savepoint commands. Savepoints are tied to one live database
 connection, while each CLI invocation opens and closes its own connection.
@@ -785,21 +791,21 @@ var close = try db.searchVectorsWithin(
 defer close.deinit(allocator);
 ```
 
-Search is exact and flat-scan in v0.15.1. That is deliberate: Zova currently
+Search is exact and flat-scan in v0.15.2. That is deliberate: Zova currently
 prioritizes deterministic local correctness over approximate indexing. It is a
 good fit for small and medium local datasets, offline ranking, tests that need
 repeatable nearest-neighbor results, and candidate-filtered search where SQL
 first narrows the metadata set and Zova ranks the eligible vector ids.
 
 It is not yet a low-latency ANN engine for millions of vectors. Zova does not
-include HNSW, IVFFlat, quantized indexes, or vector SQL operators in v0.15.1.
+include HNSW, IVFFlat, quantized indexes, or vector SQL operators in v0.15.2.
 
 Missing candidate ids are skipped. Invalid candidate ids return
 `error.VectorInvalid`. Corrupt selected vector rows return `error.VectorCorrupt`.
 
 ## SQL-Native Vector Search
 
-v0.15.1 keeps Zova vectors queryable from SQL on `zova.Database` connections.
+v0.15.2 keeps Zova vectors queryable from SQL on `zova.Database` connections.
 The raw `zova.sqlite.Database` wrapper remains plain SQLite and does not
 register Zova vector SQL helpers.
 
@@ -1056,7 +1062,7 @@ scripts/check-release.sh
 
 ## Release Package Policy
 
-v0.15.1 releases a source-only package/archive. The package includes:
+v0.15.2 releases a source-only package/archive. The package includes:
 
 - `README.md`
 - `build.zig`
@@ -1081,16 +1087,16 @@ Go package, and Python extension from source.
 The release script:
 
 ```sh
-scripts/package-release.sh 0.15.1
+scripts/package-release.sh 0.15.2
 ```
 
 tags the current commit, pushes the branch and tag, creates a source archive,
 and creates the GitHub release. Do not run it until the exact commit you want
 to release is ready.
 
-## Non-Goals In v0.15.1
+## Non-Goals In v0.15.2
 
-Zova v0.15.1 does not include:
+Zova v0.15.2 does not include:
 
 - ANN indexes
 - HNSW or IVFFlat

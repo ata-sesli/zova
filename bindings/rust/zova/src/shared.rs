@@ -193,6 +193,14 @@ impl SharedDatabase {
         self.savepoint_call(name, zova_sys::zova_database_release_savepoint)
     }
 
+    pub fn with_savepoint<T>(
+        &self,
+        name: &str,
+        f: impl FnOnce(&mut SharedDatabaseGuard<'_>) -> Result<T>,
+    ) -> Result<T> {
+        self.with_exclusive(|guard| guard.with_savepoint(name, f))
+    }
+
     pub fn vacuum(&self) -> Result<()> {
         self.simple(zova_sys::zova_database_vacuum)
     }
@@ -983,6 +991,25 @@ impl SharedDatabaseGuard<'_> {
 
     pub fn release_savepoint(&mut self, name: &str) -> Result<()> {
         self.savepoint_locked(name, zova_sys::zova_database_release_savepoint)
+    }
+
+    pub fn with_savepoint<T>(
+        &mut self,
+        name: &str,
+        f: impl FnOnce(&mut SharedDatabaseGuard<'_>) -> Result<T>,
+    ) -> Result<T> {
+        self.savepoint(name)?;
+        match f(self) {
+            Ok(value) => {
+                self.release_savepoint(name)?;
+                Ok(value)
+            }
+            Err(error) => {
+                self.rollback_to_savepoint(name)?;
+                self.release_savepoint(name)?;
+                Err(error)
+            }
+        }
     }
 
     fn simple_locked(

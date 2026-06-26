@@ -97,8 +97,17 @@ Savepoint names are strict ASCII identifiers: 1-64 bytes, first byte
 prefix. `rollback_to_savepoint()` keeps the savepoint active;
 `release_savepoint()` removes it.
 An inner released savepoint can still be undone by rolling back an outer
-transaction or savepoint. v0.15.1 exposes explicit methods only; a savepoint
-context manager is deferred.
+transaction or savepoint.
+
+Use `savepoint_context()` when you want rollback cleanup tied to a `with` block:
+
+```python
+with db.savepoint_context("attach_file") as scoped_db:
+    scoped_db.exec("insert into attachments(filename) values ('draft.txt')")
+```
+
+On normal exit the context releases the savepoint. On exception it rolls back,
+releases, and then re-raises the original exception when cleanup succeeds.
 
 ## Operational Safety
 

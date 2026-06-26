@@ -237,6 +237,68 @@ fn shared_database_savepoints_work_directly_and_inside_guards() {
 }
 
 #[test]
+fn shared_scoped_savepoint_helpers_hold_guard_and_cleanup() {
+    let path = temp_path("scoped-savepoints");
+    let db = SharedDatabase::create(&path).unwrap();
+    db.exec("create table tx(id integer primary key, value text)")
+        .unwrap();
+
+    let value = db
+        .with_savepoint("sp_keep", |guard| {
+            guard.exec("insert into tx(value) values ('kept shared')")?;
+            Ok(7)
+        })
+        .unwrap();
+    assert_eq!(value, 7);
+
+    let err = db
+        .with_savepoint("sp_fail", |guard| {
+            guard.exec("insert into tx(value) values ('rolled back shared')")?;
+            guard.exec("select * from missing_table")
+        })
+        .unwrap_err();
+    assert_eq!(err.status(), Some(zova::Status::SqliteError));
+
+    db.transaction_immediate(|guard| {
+        guard.with_savepoint("sp_guard_keep", |guard| {
+            guard.exec("insert into tx(value) values ('kept guard')")
+        })?;
+        let err = guard
+            .with_savepoint("sp_guard_fail", |guard| {
+                guard.exec("insert into tx(value) values ('rolled back guard')")?;
+                guard.exec("select * from missing_table")
+            })
+            .unwrap_err();
+        assert_eq!(err.status(), Some(zova::Status::SqliteError));
+        Ok(())
+    })
+    .unwrap();
+
+    let err = db
+        .with_savepoint("bad name", |guard| {
+            guard.exec("insert into tx(value) values ('not invoked')")
+        })
+        .unwrap_err();
+    assert_eq!(err.status(), Some(zova::Status::InvalidArgument));
+
+    let mut count = db
+        .prepare("select count(*) from tx where value in ('kept shared', 'kept guard')")
+        .unwrap();
+    assert_eq!(count.step().unwrap(), Step::Row);
+    assert_eq!(count.column_i64(0).unwrap(), 2);
+    drop(count);
+
+    let mut rolled_back = db
+        .prepare(
+            "select count(*) from tx where value like '%rolled back%' or value = 'not invoked'",
+        )
+        .unwrap();
+    assert_eq!(rolled_back.step().unwrap(), Step::Row);
+    assert_eq!(rolled_back.column_i64(0).unwrap(), 0);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn shared_transaction_rolls_back_when_commit_fails() {
     let path = temp_path("commit-failure");
     let db = SharedDatabase::create(&path).unwrap();

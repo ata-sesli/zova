@@ -20,10 +20,10 @@ func tempZovaPath(t *testing.T, name string) string {
 
 func TestABIVersionAndStatusNames(t *testing.T) {
 	major, minor, patch := ABIVersionNumbers()
-	if major != 0 || minor != 15 || patch != 1 {
+	if major != 0 || minor != 15 || patch != 2 {
 		t.Fatalf("unexpected ABI version: %d.%d.%d", major, minor, patch)
 	}
-	if got := ABIVersion(); got != "0.15.1" {
+	if got := ABIVersion(); got != "0.15.2" {
 		t.Fatalf("unexpected ABI version string: %q", got)
 	}
 	if got := StatusName(StatusOK); got != "ZOVA_OK" {
@@ -206,6 +206,39 @@ func TestResetClearBindingsTransactionsVacuumAndMultipleHandles(t *testing.T) {
 		t.Fatalf("missing savepoint error = %v, want useful diagnostic", err)
 	}
 
+	must(t, db.WithSavepoint("sp_scoped_keep", func(db *DB) error {
+		return db.Exec("insert into items(body) values ('kept scoped')")
+	}))
+	err = db.WithSavepoint("sp_scoped_fail", func(db *DB) error {
+		must(t, db.Exec("insert into items(body) values ('rolled back scoped')"))
+		return db.Exec("select * from missing_table")
+	})
+	if err == nil {
+		t.Fatalf("WithSavepoint failure = nil, want error")
+	}
+	invoked := false
+	if err := db.WithSavepoint("bad name", func(db *DB) error {
+		invoked = true
+		return db.Exec("insert into items(body) values ('not invoked')")
+	}); !errorStatusIs(err, StatusInvalidArgument) {
+		t.Fatalf("invalid WithSavepoint error = %v, want StatusInvalidArgument", err)
+	}
+	if invoked {
+		t.Fatalf("WithSavepoint invoked callback for invalid name")
+	}
+	must(t, db.WithSavepoint("sp_outer", func(db *DB) error {
+		must(t, db.Exec("insert into items(body) values ('outer scoped')"))
+		return db.WithSavepoint("sp_inner", func(db *DB) error {
+			return db.Exec("insert into items(body) values ('inner scoped')")
+		})
+	}))
+	if got := scalarInt(t, db, "select count(*) from items where body in ('kept scoped', 'outer scoped', 'inner scoped')"); got != 3 {
+		t.Fatalf("WithSavepoint kept count = %d", got)
+	}
+	if got := scalarInt(t, db, "select count(*) from items where body like '%rolled back%' or body = 'not invoked'"); got != 0 {
+		t.Fatalf("WithSavepoint rolled back count = %d", got)
+	}
+
 	must(t, db.Vacuum())
 
 	second, err := Open(path)
@@ -213,7 +246,7 @@ func TestResetClearBindingsTransactionsVacuumAndMultipleHandles(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer second.Close()
-	if got := scalarInt(t, second, "select count(*) from items"); got != 3 {
+	if got := scalarInt(t, second, "select count(*) from items"); got != 6 {
 		t.Fatalf("second handle count = %d", got)
 	}
 
@@ -224,7 +257,7 @@ func TestResetClearBindingsTransactionsVacuumAndMultipleHandles(t *testing.T) {
 	defer readonly.Close()
 	must(t, readonly.SetBusyTimeout(0))
 	must(t, readonly.SetBusyTimeout(2))
-	if got := scalarInt(t, readonly, "select count(*) from items"); got != 3 {
+	if got := scalarInt(t, readonly, "select count(*) from items"); got != 6 {
 		t.Fatalf("readonly count = %d", got)
 	}
 	err = readonly.Exec("insert into items(body) values ('blocked')")

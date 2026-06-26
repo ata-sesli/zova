@@ -130,8 +130,20 @@ Savepoint names are strict ASCII identifiers: 1-64 bytes, first byte
 `[A-Za-z_]`, remaining bytes `[A-Za-z0-9_]`, and no case-insensitive `_zova_`
 prefix. `ROLLBACK TO` keeps the savepoint active; `RELEASE` removes it.
 An inner released savepoint can still be undone by rolling back an outer
-transaction or savepoint. v0.15.1 exposes explicit methods only; scoped
-`with_savepoint` helpers are deferred.
+transaction or savepoint.
+
+Use `with_savepoint` when you want rollback cleanup tied to a closure:
+
+```rust
+db.with_savepoint("attach_file", |db| {
+    db.exec("insert into attachments(filename) values ('draft.txt')")?;
+    Ok(())
+})?;
+```
+
+`SharedDatabase::with_savepoint` and `SharedDatabaseGuard::with_savepoint`
+hold the shared Rust mutex for the whole closure, so the scoped unit does not
+interleave with other threads using the same shared handle.
 
 ## Operational Safety
 

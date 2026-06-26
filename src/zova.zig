@@ -252,6 +252,26 @@ pub const Database = struct {
         try self.sqlite_db.releaseSavepoint(name);
     }
 
+    /// Run a callback inside a named SQLite savepoint.
+    ///
+    /// The savepoint is released when the callback succeeds. If the callback
+    /// returns an error, Zova rolls back to the savepoint, releases it, and then
+    /// returns the callback error unless cleanup itself fails.
+    pub fn withSavepoint(
+        self: *Database,
+        name: []const u8,
+        context: anytype,
+        comptime callback: fn (@TypeOf(context)) Error!void,
+    ) Error!void {
+        try self.savepoint(name);
+        callback(context) catch |callback_err| {
+            self.rollbackToSavepoint(name) catch |cleanup_err| return cleanup_err;
+            self.releaseSavepoint(name) catch |cleanup_err| return cleanup_err;
+            return callback_err;
+        };
+        try self.releaseSavepoint(name);
+    }
+
     /// Reclaim SQLite free pages with an explicit in-place `VACUUM`.
     ///
     /// Zova never runs `VACUUM` automatically after object or vector deletes.
@@ -1932,6 +1952,81 @@ test "savepoints roll back zova records objects and vectors" {
     try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from notes"));
     try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from notes where body = 'rolled back'"));
     try testingQuickCheckOk(&db);
+}
+
+test "scoped savepoint helper releases rolls back nests and reports cleanup failure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "scoped-savepoints.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.exec("create table notes (body text not null)");
+    try db.exec("begin immediate");
+
+    const Ctx = struct {
+        db: *Database,
+        invoked: *bool,
+
+        fn insertKept(self: *@This()) Error!void {
+            self.invoked.* = true;
+            try self.db.exec("insert into notes (body) values ('kept scoped')");
+        }
+
+        fn insertThenFail(self: *@This()) Error!void {
+            self.invoked.* = true;
+            try self.db.exec("insert into notes (body) values ('rolled back scoped')");
+            return error.InvalidArgument;
+        }
+
+        fn insertInner(self: *@This()) Error!void {
+            try self.db.exec("insert into notes (body) values ('inner rolled back')");
+        }
+
+        fn nestedThenFail(self: *@This()) Error!void {
+            self.invoked.* = true;
+            try self.db.exec("insert into notes (body) values ('outer rolled back')");
+            try self.db.withSavepoint("sp_inner", self, @This().insertInner);
+            return error.InvalidArgument;
+        }
+
+        fn releaseManually(self: *@This()) Error!void {
+            self.invoked.* = true;
+            try self.db.exec("insert into notes (body) values ('manual release kept')");
+            try self.db.releaseSavepoint("sp_manual");
+        }
+    };
+
+    var invoked = false;
+    var ctx = Ctx{ .db = &db, .invoked = &invoked };
+
+    try db.withSavepoint("sp_keep", &ctx, Ctx.insertKept);
+    try std.testing.expect(invoked);
+
+    invoked = false;
+    try std.testing.expectError(error.InvalidArgument, db.withSavepoint("sp_fail", &ctx, Ctx.insertThenFail));
+    try std.testing.expect(invoked);
+
+    invoked = false;
+    try std.testing.expectError(error.InvalidArgument, db.withSavepoint("sp_outer", &ctx, Ctx.nestedThenFail));
+    try std.testing.expect(invoked);
+
+    invoked = false;
+    try std.testing.expectError(error.InvalidArgument, db.withSavepoint("bad name", &ctx, Ctx.insertKept));
+    try std.testing.expect(!invoked);
+
+    invoked = false;
+    try std.testing.expectError(error.SqliteError, db.withSavepoint("sp_manual", &ctx, Ctx.releaseManually));
+    try std.testing.expect(invoked);
+
+    try db.exec("commit");
+    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from notes"));
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from notes where body = 'kept scoped'"));
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from notes where body = 'manual release kept'"));
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from notes where body like '%rolled back%'"));
 }
 
 test "operational copy APIs reject invalid and existing destinations" {

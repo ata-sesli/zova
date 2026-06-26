@@ -238,6 +238,63 @@ fn savepoints_rollback_release_and_validate_names() {
 }
 
 #[test]
+fn scoped_savepoint_helper_releases_rolls_back_and_returns_values() {
+    let path = temp_path("scoped-savepoints");
+    let mut db = Database::create(&path).unwrap();
+    db.exec("create table tx(id integer primary key, value text)")
+        .unwrap();
+    db.begin_immediate().unwrap();
+
+    let value = db
+        .with_savepoint("sp_keep", |db| {
+            db.exec("insert into tx(value) values ('kept scoped')")?;
+            Ok(42)
+        })
+        .unwrap();
+    assert_eq!(value, 42);
+
+    let err = db
+        .with_savepoint("sp_fail", |db| {
+            db.exec("insert into tx(value) values ('rolled back scoped')")?;
+            db.exec("select * from missing_table")
+        })
+        .unwrap_err();
+    assert_eq!(err.status(), Some(Status::SqliteError));
+
+    let err = db
+        .with_savepoint("bad name", |db| {
+            db.exec("insert into tx(value) values ('not invoked')")
+        })
+        .unwrap_err();
+    assert_eq!(err.status(), Some(Status::InvalidArgument));
+
+    let err = db
+        .with_savepoint("sp_manual", |db| {
+            db.exec("insert into tx(value) values ('manual release kept')")?;
+            db.release_savepoint("sp_manual")
+        })
+        .unwrap_err();
+    assert!(err.to_string().contains("no such savepoint"));
+
+    db.commit().unwrap();
+    let mut count = db
+        .prepare("select count(*) from tx where value in ('kept scoped', 'manual release kept')")
+        .unwrap();
+    assert_eq!(count.step().unwrap(), Step::Row);
+    assert_eq!(count.column_i64(0).unwrap(), 2);
+    drop(count);
+
+    let mut rolled_back = db
+        .prepare(
+            "select count(*) from tx where value like '%rolled back%' or value = 'not invoked'",
+        )
+        .unwrap();
+    assert_eq!(rolled_back.step().unwrap(), Step::Row);
+    assert_eq!(rolled_back.column_i64(0).unwrap(), 0);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn backup_compact_and_restore_preserve_records_objects_and_vectors() {
     let path = temp_path("ops-source");
     let backup_path = temp_path("ops-backup");

@@ -6,7 +6,7 @@ import zova
 
 
 def test_import_and_error_mapping(tmp_path):
-    assert zova.__version__ == "0.15.1"
+    assert zova.__version__ == "0.15.2"
 
     with pytest.raises(zova.ZovaError) as exc:
         zova.Database.create(str(tmp_path / "plain.db"))
@@ -181,6 +181,42 @@ def test_savepoints_rollback_release_and_validate_names(tmp_path):
         with pytest.raises(zova.ZovaError) as exc:
             db.release_savepoint("missing_sp")
         assert "no such savepoint" in str(exc.value)
+
+        with db.savepoint_context("sp_scoped_keep") as scoped_db:
+            assert scoped_db is db
+            db.exec("insert into tx(value) values ('kept scoped')")
+
+        with pytest.raises(zova.ZovaError):
+            with db.savepoint_context("sp_scoped_fail"):
+                db.exec("insert into tx(value) values ('rolled back scoped')")
+                db.exec("select * from missing_table")
+
+        with pytest.raises(zova.ZovaError) as exc:
+            with db.savepoint_context("bad name"):
+                db.exec("insert into tx(value) values ('not invoked')")
+        assert exc.value.status_name == "ZOVA_INVALID_ARGUMENT"
+
+        with db.savepoint_context("sp_outer"):
+            db.exec("insert into tx(value) values ('outer scoped')")
+            with db.savepoint_context("sp_inner"):
+                db.exec("insert into tx(value) values ('inner scoped')")
+
+        with pytest.raises(RuntimeError):
+            with db.savepoint_context("sp_python_error"):
+                db.exec("insert into tx(value) values ('rolled back python')")
+                raise RuntimeError("boom")
+
+        with db.prepare(
+            "select count(*) from tx where value in ('kept scoped', 'outer scoped', 'inner scoped')"
+        ) as stmt:
+            assert stmt.step() == zova.Step.ROW
+            assert stmt.column_int(0) == 3
+
+        with db.prepare(
+            "select count(*) from tx where value like '%rolled back%' or value = 'not invoked'"
+        ) as stmt:
+            assert stmt.step() == zova.Step.ROW
+            assert stmt.column_int(0) == 0
 
 
 def test_backup_compact_and_restore(tmp_path):

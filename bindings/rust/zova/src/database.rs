@@ -206,6 +206,25 @@ impl Database {
         self.savepoint_call(name, zova_sys::zova_database_release_savepoint)
     }
 
+    pub fn with_savepoint<T>(
+        &mut self,
+        name: &str,
+        f: impl FnOnce(&mut Database) -> Result<T>,
+    ) -> Result<T> {
+        self.savepoint(name)?;
+        match f(self) {
+            Ok(value) => {
+                self.release_savepoint(name)?;
+                Ok(value)
+            }
+            Err(error) => {
+                self.rollback_to_savepoint(name)?;
+                self.release_savepoint(name)?;
+                Err(error)
+            }
+        }
+    }
+
     pub fn vacuum(&mut self) -> Result<()> {
         self.simple(zova_sys::zova_database_vacuum)
     }
