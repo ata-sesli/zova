@@ -57,9 +57,12 @@ CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo test --workspace --manifest-path bin
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo check --examples --manifest-path bindings/rust/Cargo.toml
 sh bindings/rust/zova-sys/tools/sync-native-source.sh
 sh bindings/rust/zova-sys/tools/check-native-source.sh
-CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo package --list -p zova-sys --manifest-path bindings/rust/Cargo.toml >/dev/null
+# zova-sys intentionally packages a generated native source snapshot that stays
+# git-ignored in the repository. Sync and check it first, then allow Cargo's
+# dirty-tree check only for this crate.
+CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo package --allow-dirty --list -p zova-sys --manifest-path bindings/rust/Cargo.toml >/dev/null
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo package --list -p zova --manifest-path bindings/rust/Cargo.toml >/dev/null
-CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo publish --dry-run -p zova-sys --manifest-path bindings/rust/Cargo.toml
+CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo publish --allow-dirty --dry-run -p zova-sys --manifest-path bindings/rust/Cargo.toml
 if [ "${ZOVA_CHECK_PUBLISHED_RUST_SAFE_CRATE:-0}" = "1" ]; then
     CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo publish --dry-run -p zova --manifest-path bindings/rust/Cargo.toml
 else
@@ -267,9 +270,9 @@ CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo test --workspace --manifest-path b
 CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo check --examples --manifest-path bindings/rust/Cargo.toml
 sh bindings/rust/zova-sys/tools/sync-native-source.sh
 sh bindings/rust/zova-sys/tools/check-native-source.sh
-CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo package --list -p zova-sys --manifest-path bindings/rust/Cargo.toml >/dev/null
+CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo package --allow-dirty --list -p zova-sys --manifest-path bindings/rust/Cargo.toml >/dev/null
 CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo package --list -p zova --manifest-path bindings/rust/Cargo.toml >/dev/null
-CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo publish --dry-run -p zova-sys --manifest-path bindings/rust/Cargo.toml
+CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo publish --allow-dirty --dry-run -p zova-sys --manifest-path bindings/rust/Cargo.toml
 if [ "${ZOVA_CHECK_PUBLISHED_RUST_SAFE_CRATE:-0}" = "1" ]; then
     CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo publish --dry-run -p zova --manifest-path bindings/rust/Cargo.toml
 else
