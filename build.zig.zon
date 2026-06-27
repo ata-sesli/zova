@@ -75,6 +75,7 @@
         "build.zig.zon",
         "bindings",
         "include",
+        "LICENSE",
         "README.md",
         "src",
         "tests",

@@ -49,10 +49,11 @@ Read this file in this order if you are new to Zova:
 19. [CLI](#cli)
 20. [SQLite Policy](#sqlite-policy)
 21. [Vendored SQLite](#vendored-sqlite)
-22. [Testing](#testing)
-23. [Release Package Policy](#release-package-policy)
-24. [Non-Goals In v0.17.0](#non-goals-in-v0170)
-25. [Design Philosophy](#design-philosophy)
+22. [License](#license)
+23. [Testing](#testing)
+24. [Release Package Policy](#release-package-policy)
+25. [Non-Goals In v0.17.0](#non-goals-in-v0170)
+26. [Design Philosophy](#design-philosophy)
 
 ## Architecture
 
@@ -1014,6 +1015,7 @@ when your application wants maintenance behavior.
 ## Vendored SQLite
 
 Zova builds against the vendored SQLite amalgamation in `vendor/sqlite3.53.2`.
+SQLite is public domain.
 
 The build enables:
 
@@ -1025,6 +1027,12 @@ Modern SQLite JSON support is built in for this SQLite version, so the old
 
 FTS5 and JSON are available as normal SQLite SQL. Zova does not add a separate
 FTS or JSON API.
+
+## License
+
+Zova is MIT licensed. See `LICENSE`.
+
+Zova vendors SQLite. SQLite is public domain.
 
 ## Testing
 

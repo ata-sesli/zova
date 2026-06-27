@@ -15,12 +15,14 @@ links = "zova"
 build = "build.rs"
 include = [
     "Cargo.toml",
+    "LICENSE",
     "README.md",
     "build.rs",
     "src/**",
     "tests/**",
     "native/build.zig",
     "native/build.zig.zon",
+    "native/LICENSE",
     "native/include/**",
     "native/src/**",
     "native/tests/**",

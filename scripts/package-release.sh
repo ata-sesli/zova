@@ -117,7 +117,7 @@ fi
 rm -rf "$TMP"
 mkdir -p "$TMP/$PKG" "$OUT_DIR"
 
-cp build.zig build.zig.zon README.md "$TMP/$PKG/"
+cp build.zig build.zig.zon LICENSE README.md "$TMP/$PKG/"
 cp -R bindings "$TMP/$PKG/"
 cp -R include "$TMP/$PKG/"
 cp -R src "$TMP/$PKG/"
@@ -131,9 +131,14 @@ rm -rf "$TMP/$PKG/bindings/python/dist"
 find "$TMP/$PKG/bindings/python" -type d -name '__pycache__' -prune -exec rm -rf {} +
 find "$TMP/$PKG/bindings/python" \( -name '*.so' -o -name '*.pyd' -o -name '*.dylib' -o -name '*.dll' -o -name '*.whl' \) -delete
 
-if find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" | grep -q .; then
+if find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" | grep -q .; then
     echo "release package contains unexpected markdown files" >&2
-    find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" >&2
+    find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/LICENSE" ]; then
+    echo "release package is missing LICENSE" >&2
     exit 1
 fi
 
@@ -157,8 +162,18 @@ if [ ! -d "$TMP/$PKG/bindings/rust/zova-sys" ]; then
     exit 1
 fi
 
+if [ ! -f "$TMP/$PKG/bindings/rust/zova-sys/README.md" ]; then
+    echo "release package is missing bindings/rust/zova-sys/README.md" >&2
+    exit 1
+fi
+
 if [ ! -d "$TMP/$PKG/bindings/rust/zova" ]; then
     echo "release package is missing bindings/rust/zova" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/bindings/rust/zova/README.md" ]; then
+    echo "release package is missing bindings/rust/zova/README.md" >&2
     exit 1
 fi
 

@@ -55,6 +55,7 @@ zig build run
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo fmt --all --manifest-path bindings/rust/Cargo.toml --check
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo test --workspace --manifest-path bindings/rust/Cargo.toml
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo check --examples --manifest-path bindings/rust/Cargo.toml
+sh bindings/rust/zova-sys/tools/sync-native-source.sh
 sh bindings/rust/zova-sys/tools/check-native-source.sh
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo package --list -p zova-sys --manifest-path bindings/rust/Cargo.toml >/dev/null
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo package --list -p zova --manifest-path bindings/rust/Cargo.toml >/dev/null
@@ -79,7 +80,7 @@ find bindings/python \( -name '*.so' -o -name '*.pyd' -o -name '*.dylib' -o -nam
 rm -rf "$TMP"
 mkdir -p "$TMP/$PKG"
 
-cp build.zig build.zig.zon README.md "$TMP/$PKG/"
+cp build.zig build.zig.zon LICENSE README.md "$TMP/$PKG/"
 cp -R bindings "$TMP/$PKG/"
 cp -R include "$TMP/$PKG/"
 cp -R src "$TMP/$PKG/"
@@ -101,6 +102,11 @@ fi
 
 if [ ! -f "$TMP/$PKG/README.md" ]; then
     echo "release package is missing README.md" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/LICENSE" ]; then
+    echo "release package is missing LICENSE" >&2
     exit 1
 fi
 
@@ -259,6 +265,7 @@ zig build run
 CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo fmt --all --manifest-path bindings/rust/Cargo.toml --check
 CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo test --workspace --manifest-path bindings/rust/Cargo.toml
 CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo check --examples --manifest-path bindings/rust/Cargo.toml
+sh bindings/rust/zova-sys/tools/sync-native-source.sh
 sh bindings/rust/zova-sys/tools/check-native-source.sh
 CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo package --list -p zova-sys --manifest-path bindings/rust/Cargo.toml >/dev/null
 CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo package --list -p zova --manifest-path bindings/rust/Cargo.toml >/dev/null

@@ -3,6 +3,7 @@ zig-out
 target
 bindings/rust/target
 bindings/rust/target*/
+bindings/rust/zova-sys/native/
 bindings/python/target
 *.crate
 .DS_STORE
