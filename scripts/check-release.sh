@@ -16,6 +16,11 @@ if [ -z "$MANIFEST_VERSION" ]; then
     echo "could not read version from build.zig.zon" >&2
     exit 1
 fi
+RUST_WORKSPACE_VERSION="$(sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/bindings/rust/Cargo.toml" | head -n 1)"
+if [ -z "$RUST_WORKSPACE_VERSION" ]; then
+    echo "could not read version from bindings/rust/Cargo.toml" >&2
+    exit 1
+fi
 
 PKG="zova-$MANIFEST_VERSION"
 TMP="${TMPDIR:-/tmp}/zova-check-release.$$"
@@ -50,6 +55,15 @@ zig build run
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo fmt --all --manifest-path bindings/rust/Cargo.toml --check
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo test --workspace --manifest-path bindings/rust/Cargo.toml
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo check --examples --manifest-path bindings/rust/Cargo.toml
+sh bindings/rust/zova-sys/tools/check-native-source.sh
+CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo package --list -p zova-sys --manifest-path bindings/rust/Cargo.toml >/dev/null
+CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo package --list -p zova --manifest-path bindings/rust/Cargo.toml >/dev/null
+CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo publish --dry-run -p zova-sys --manifest-path bindings/rust/Cargo.toml
+if [ "${ZOVA_CHECK_PUBLISHED_RUST_SAFE_CRATE:-0}" = "1" ]; then
+    CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo publish --dry-run -p zova --manifest-path bindings/rust/Cargo.toml
+else
+    echo "skipping zova publish dry-run until zova-sys $RUST_WORKSPACE_VERSION is published"
+fi
 (cd bindings/go && GOCACHE="$GO_CACHE_REPO" go test ./...)
 (cd bindings/go && GOCACHE="$GO_CACHE_REPO" go vet ./...)
 CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" cargo fmt --manifest-path bindings/python/Cargo.toml --check
@@ -79,9 +93,9 @@ rm -rf "$TMP/$PKG/bindings/python/dist"
 find "$TMP/$PKG/bindings/python" -type d -name '__pycache__' -prune -exec rm -rf {} +
 find "$TMP/$PKG/bindings/python" \( -name '*.so' -o -name '*.pyd' -o -name '*.dylib' -o -name '*.dll' -o -name '*.whl' \) -delete
 
-if find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" | grep -q .; then
+if find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" | grep -q .; then
     echo "release package contains unexpected markdown files" >&2
-    find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" >&2
+    find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" >&2
     exit 1
 fi
 
@@ -125,8 +139,18 @@ if [ ! -d "$TMP/$PKG/bindings/rust/zova-sys" ]; then
     exit 1
 fi
 
+if [ ! -f "$TMP/$PKG/bindings/rust/zova-sys/README.md" ]; then
+    echo "release package is missing bindings/rust/zova-sys/README.md" >&2
+    exit 1
+fi
+
 if [ ! -d "$TMP/$PKG/bindings/rust/zova" ]; then
     echo "release package is missing bindings/rust/zova" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/bindings/rust/zova/README.md" ]; then
+    echo "release package is missing bindings/rust/zova/README.md" >&2
     exit 1
 fi
 
@@ -235,6 +259,15 @@ zig build run
 CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo fmt --all --manifest-path bindings/rust/Cargo.toml --check
 CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo test --workspace --manifest-path bindings/rust/Cargo.toml
 CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo check --examples --manifest-path bindings/rust/Cargo.toml
+sh bindings/rust/zova-sys/tools/check-native-source.sh
+CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo package --list -p zova-sys --manifest-path bindings/rust/Cargo.toml >/dev/null
+CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo package --list -p zova --manifest-path bindings/rust/Cargo.toml >/dev/null
+CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo publish --dry-run -p zova-sys --manifest-path bindings/rust/Cargo.toml
+if [ "${ZOVA_CHECK_PUBLISHED_RUST_SAFE_CRATE:-0}" = "1" ]; then
+    CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo publish --dry-run -p zova --manifest-path bindings/rust/Cargo.toml
+else
+    echo "skipping zova publish dry-run until zova-sys $RUST_WORKSPACE_VERSION is published"
+fi
 (cd bindings/go && GOCACHE="$GO_CACHE_VERIFY" go test ./...)
 (cd bindings/go && GOCACHE="$GO_CACHE_VERIFY" go vet ./...)
 CARGO_TARGET_DIR="$PY_CARGO_TARGET_VERIFY" cargo fmt --manifest-path bindings/python/Cargo.toml --check

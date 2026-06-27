@@ -1,5 +1,10 @@
 zig-out
 .zig-cache
+target
+bindings/rust/target
+bindings/rust/target*/
+bindings/python/target
+*.crate
 .DS_STORE
 notes
 __pycache__

@@ -2,11 +2,31 @@
 name = "zova-sys"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/zova-sys"
+description = "Raw Rust FFI bindings for Zova's C ABI."
+readme = "README.md"
+keywords = ["zova", "sqlite", "ffi", "database"]
+categories = ["database", "external-ffi-bindings"]
 links = "zova"
 build = "build.rs"
+include = [
+    "Cargo.toml",
+    "README.md",
+    "build.rs",
+    "src/**",
+    "tests/**",
+    "native/build.zig",
+    "native/build.zig.zon",
+    "native/include/**",
+    "native/src/**",
+    "native/tests/**",
+    "native/vendor/**",
+    "tools/**",
+]
 
 [lib]
 path = "src/lib.rs"
-

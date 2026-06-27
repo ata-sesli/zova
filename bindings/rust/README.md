@@ -13,11 +13,12 @@ It contains:
 ## Contents
 
 1. [How It Fits](#how-it-fits)
-2. [Local Build](#local-build)
-3. [Handle Policy](#handle-policy)
-4. [Example](#example)
-5. [Savepoints](#savepoints)
-6. [Operational Safety](#operational-safety)
+2. [Install From crates.io](#install-from-cratesio)
+3. [Local Build](#local-build)
+4. [Handle Policy](#handle-policy)
+5. [Example](#example)
+6. [Savepoints](#savepoints)
+7. [Operational Safety](#operational-safety)
 
 ## How It Fits
 
@@ -38,9 +39,36 @@ flowchart LR
     CABI --> File
 ```
 
+## Install From crates.io
+
+Use the safe crate for normal Rust applications:
+
+```toml
+[dependencies]
+zova = "0.17.0"
+```
+
+Use the raw FFI crate only when you want to call the C ABI directly:
+
+```toml
+[dependencies]
+zova-sys = "0.17.0"
+```
+
+Both crates contain native code. The default build path compiles Zova's static C
+ABI library through `zova-sys`, so registry users still need:
+
+- Rust,
+- Zig `0.16.0` or newer,
+- a C compiler/linker for their platform.
+
+Zova is still pre-1.0. The Rust API, C ABI, and `.zova` format are usable, but
+they may evolve before the 1.0 line. The current `.zova` `format_version` is
+`3`.
+
 ## Local Build
 
-By default, `zova-sys` builds the local C ABI with:
+Inside this repository, `zova-sys` builds the local C ABI with:
 
 ```sh
 zig build c-abi
@@ -55,6 +83,15 @@ ZOVA_LIB_DIR=/path/to/lib ZOVA_INCLUDE_DIR=/path/to/include cargo test
 
 `ZOVA_INCLUDE_DIR` is accepted for callers that vendor the header alongside the
 library. The current hand-written FFI does not run bindgen.
+
+You can also point the native build at a separate Zova source checkout:
+
+```sh
+ZOVA_SOURCE_DIR=/path/to/zova/source cargo test
+```
+
+When building from crates.io without overrides, `zova-sys` uses its bundled
+native source snapshot.
 
 Zova currently requires Zig `0.16.0` or newer for the local C ABI build.
 
