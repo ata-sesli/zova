@@ -116,6 +116,7 @@ flowchart TD
 - Rust bindings for records, prepared statements, transactions, vacuum,
   backup/compact/restore, objects, chunks, manifests, `ObjectWriter`, vectors,
   SQL-native vector search, and the opt-in shared `SharedDatabase`
+- Go module prepared for Git-tag-based distribution from `bindings/go`
 - Go bindings for records, prepared statements, transactions, vacuum,
   backup/compact/restore, objects, chunks, manifests, `ObjectWriter`, vectors,
   and SQL-native vector search
@@ -360,9 +361,9 @@ go test ./...
 go vet ./...
 ```
 
-The Go module is included in the source archive, but v0.17.0 does not publish a
-Go module automatically and does not ship compiled libraries. Consumers build
-from source.
+The Go module is prepared for Git-tag-based distribution as
+`github.com/atasesli/zova/bindings/go`. It still links the local or installed
+Zova C ABI through cgo and does not ship compiled native libraries.
 
 ## Python Bindings
 
@@ -393,9 +394,9 @@ uv run --isolated --with maturin --with pytest --directory bindings/python matur
 uv run --isolated --with pytest --directory bindings/python python -m pytest
 ```
 
-The Python package is included in the source archive, but v0.17.0 does not
-publish to PyPI automatically and does not ship a platform wheel matrix.
-Consumers build from source with maturin.
+The Python package is prepared for PyPI source publishing. It does not ship a
+platform wheel matrix in v0.17.0, so consumers build the native extension from
+source with maturin.
 
 ## Native Zig API
 
@@ -1137,8 +1138,6 @@ Zova v0.17.0 does not include:
 - object or chunk virtual tables
 - embedding generation
 - TypeScript or Swift bindings
-- automatic Go module publishing
-- PyPI publishing
 - platform wheel matrix publishing
 - background worker threads hidden inside Zova
 - in-place repair commands

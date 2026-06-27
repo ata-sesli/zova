@@ -11,13 +11,14 @@ rules.
 ## Contents
 
 1. [How It Fits](#how-it-fits)
-2. [Local Development](#local-development)
-3. [What It Covers](#what-it-covers)
-4. [Savepoints](#savepoints)
-5. [Operational Safety](#operational-safety)
-6. [Objects](#objects)
-7. [Vectors](#vectors)
-8. [SQL-Native Vector Search](#sql-native-vector-search)
+2. [Install](#install)
+3. [Local Development](#local-development)
+4. [What It Covers](#what-it-covers)
+5. [Savepoints](#savepoints)
+6. [Operational Safety](#operational-safety)
+7. [Objects](#objects)
+8. [Vectors](#vectors)
+9. [SQL-Native Vector Search](#sql-native-vector-search)
 
 ## How It Fits
 
@@ -40,6 +41,21 @@ flowchart LR
     CABI --> File
 ```
 
+## Install
+
+After the Python package is published to PyPI:
+
+```sh
+python -m pip install zova
+```
+
+The v0.17 Python package is source-first. It builds the PyO3 extension locally
+through maturin and Cargo, and the Rust crates `zova` and `zova-sys` must be
+available on crates.io first. Users need Python 3.10 or newer, Rust/Cargo, Zig
+0.16.0 or newer, and a working C compiler/linker.
+
+No official platform wheel matrix is promised in v0.17.
+
 ## Local Development
 
 From `bindings/python`:
@@ -49,9 +65,8 @@ uv run --isolated --with maturin --with pytest maturin develop
 uv run --isolated --with pytest python -m pytest
 ```
 
-The native build uses maturin, Cargo, Zig, and the Rust `zova` crate. The
-project is source-first: it does not publish wheels to PyPI, and users do not
-need to locate a shared C library manually.
+The native build uses maturin, Cargo, Zig, and the Rust `zova` crate. Users do
+not need to locate a shared C library manually.
 
 The Python API is pre-1.0 and may still change alongside the Rust binding.
 

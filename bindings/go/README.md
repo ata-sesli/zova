@@ -20,13 +20,15 @@ It covers:
 ## Contents
 
 1. [How It Fits](#how-it-fits)
-2. [Build Requirements](#build-requirements)
-3. [Handle Policy](#handle-policy)
-4. [Savepoints](#savepoints)
-5. [Operational Safety](#operational-safety)
-6. [Objects](#objects)
-7. [Vectors](#vectors)
-8. [Example](#example)
+2. [Install](#install)
+3. [Build Requirements](#build-requirements)
+4. [Publishing](#publishing)
+5. [Handle Policy](#handle-policy)
+6. [Savepoints](#savepoints)
+7. [Operational Safety](#operational-safety)
+8. [Objects](#objects)
+9. [Vectors](#vectors)
+10. [Example](#example)
 
 ## How It Fits
 
@@ -44,6 +46,24 @@ flowchart LR
     GoPkg --> CABI
     CABI --> File
 ```
+
+## Install
+
+After the Go module tag is pushed, applications can add the binding with:
+
+```sh
+go get github.com/atasesli/zova/bindings/go@v0.17.0
+```
+
+Import it as:
+
+```go
+import zova "github.com/atasesli/zova/bindings/go"
+```
+
+The Go package is source-only and uses cgo. It does not download or build the
+native Zova C ABI automatically during `go get`; your build environment must
+provide `zova.h` and `libzova_c.a`.
 
 ## Build Requirements
 
@@ -68,6 +88,27 @@ The default cgo flags expect:
 - headers in `../../include`
 - `libzova_c.a` in `../../zig-out/lib`
 
+That default works inside this repository. When using the Go module from another
+project, point cgo at an installed or locally built Zova C ABI:
+
+```sh
+CGO_CFLAGS="-I/path/to/zova/include" \
+CGO_LDFLAGS="-L/path/to/zova/zig-out/lib -lzova_c" \
+go test ./...
+```
+
+If you build the C ABI into a separate prefix, copy the header next to it:
+
+```sh
+zig build c-abi -p /path/to/zova-prefix
+mkdir -p /path/to/zova-prefix/include
+cp include/zova.h /path/to/zova-prefix/include/
+
+CGO_CFLAGS="-I/path/to/zova-prefix/include" \
+CGO_LDFLAGS="-L/path/to/zova-prefix/lib -lzova_c" \
+go test ./...
+```
+
 For custom local builds, pass normal cgo flags:
 
 ```sh
@@ -84,6 +125,29 @@ ZOVA_INCLUDE_DIR=/path/to/include ZOVA_LIB_DIR=/path/to/lib sh test.sh
 ```
 
 You need Zig `0.16.0` or newer, cgo enabled, and a working C compiler.
+
+## Publishing
+
+Go modules are published by Git tags, not by uploading to a central registry.
+Because this module lives in the `bindings/go` subdirectory, the release tag
+must include that subdirectory prefix:
+
+```sh
+git tag -a bindings/go/v0.17.0 -m "Zova Go bindings v0.17.0"
+git push origin bindings/go/v0.17.0
+```
+
+After pushing the tag, ask the public Go module proxy to resolve it:
+
+```sh
+GOPROXY=proxy.golang.org go list -m github.com/atasesli/zova/bindings/go@v0.17.0
+```
+
+The module path is:
+
+```text
+github.com/atasesli/zova/bindings/go
+```
 
 ## Handle Policy
 

@@ -5,10 +5,33 @@ build-backend = "maturin"
 [project]
 name = "zova"
 version = "0.17.0"
-description = "Python bindings for Zova"
+description = "SQLite-backed embedded database for records, objects, and vectors in one local file."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Ata Sesli" },
+]
+keywords = ["zova", "sqlite", "database", "objects", "vectors"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Topic :: Database",
+]
+
+[project.urls]
+Homepage = "https://github.com/atasesli/zova"
+Repository = "https://github.com/atasesli/zova"
+Issues = "https://github.com/atasesli/zova/issues"
 
 [tool.maturin]
 module-name = "zova._native"
