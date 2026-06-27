@@ -171,6 +171,11 @@ The zero-value options verify destinations after copying. Use
 `BackupOptions{NoVerify: true}`, `CompactOptions{NoVerify: true}`, or
 `RestoreOptions{NoVerify: true}` only when you will verify separately.
 
+Diagnostic recovery commands such as `zova doctor`, `zova salvage --dry-run`,
+and `zova salvage <source> <destination>` are CLI-first in the v0.16 line. The
+Go package does not expose typed doctor/salvage report APIs yet, and library
+code should not parse the human text output as a stable binding contract.
+
 ## Objects
 
 Objects are content-addressed byte values stored by Zova while application

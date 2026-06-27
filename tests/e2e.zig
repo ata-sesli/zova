@@ -638,6 +638,129 @@ fn expectCliVectorTableInspection(path: [:0]const u8, collection_name: []const u
     defer deep.deinit();
     try std.testing.expectEqual(@as(u8, 0), deep.code);
     try expectContains(deep.stdout, "deep_check: ok");
+
+    var doctor = try runCli(&.{ "zova", "doctor", path });
+    defer doctor.deinit();
+    try std.testing.expectEqual(@as(u8, 0), doctor.code);
+    try expectContains(doctor.stdout, "Zova doctor:");
+    try expectContains(doctor.stdout, "status: ok");
+
+    var doctor_json = try runCli(&.{ "zova", "doctor", "--json", path });
+    defer doctor_json.deinit();
+    try std.testing.expectEqual(@as(u8, 0), doctor_json.code);
+    var parsed_doctor = try parseJson(doctor_json.stdout);
+    defer parsed_doctor.deinit();
+    try expectJsonString(parsed_doctor.value.object, "command", "doctor");
+    try expectJsonString(parsed_doctor.value.object, "status", "ok");
+    try expectJsonArray(parsed_doctor.value.object, "suggested_actions");
+
+    var salvage = try runCli(&.{ "zova", "salvage", "--dry-run", path });
+    defer salvage.deinit();
+    try std.testing.expectEqual(@as(u8, 0), salvage.code);
+    try expectContains(salvage.stdout, "Zova salvage dry-run:");
+    try expectContains(salvage.stdout, "recoverability: recoverable");
+
+    var salvage_json = try runCli(&.{ "zova", "salvage", "--dry-run", "--json", path });
+    defer salvage_json.deinit();
+    try std.testing.expectEqual(@as(u8, 0), salvage_json.code);
+    var parsed_salvage = try parseJson(salvage_json.stdout);
+    defer parsed_salvage.deinit();
+    try expectJsonString(parsed_salvage.value.object, "command", "salvage");
+    try expectJsonString(parsed_salvage.value.object, "recoverability", "recoverable");
+    try expectJsonArray(parsed_salvage.value.object, "suggested_actions");
+
+    const salvage_dest = try std.fmt.allocPrintSentinel(std.testing.allocator, "{s}.salvaged.zova", .{path}, 0);
+    defer std.testing.allocator.free(salvage_dest);
+
+    var salvage_exec = try runCli(&.{ "zova", "salvage", "--json", path, salvage_dest });
+    defer salvage_exec.deinit();
+    try std.testing.expectEqual(@as(u8, 0), salvage_exec.code);
+    var parsed_salvage_exec = try parseJson(salvage_exec.stdout);
+    defer parsed_salvage_exec.deinit();
+    try expectJsonString(parsed_salvage_exec.value.object, "command", "salvage");
+    try expectJsonString(parsed_salvage_exec.value.object, "status", "ok");
+    try expectJsonBool(parsed_salvage_exec.value.object, "dry_run", false);
+    try expectJsonBool(parsed_salvage_exec.value.object, "will_write_destination", true);
+    try expectJsonBool(parsed_salvage_exec.value.object, "destination_verified", true);
+    try expectJsonString(parsed_salvage_exec.value.object, "destination_path", salvage_dest);
+
+    var salvage_check = try runCli(&.{ "zova", "check", "--deep", salvage_dest });
+    defer salvage_check.deinit();
+    try std.testing.expectEqual(@as(u8, 0), salvage_check.code);
+
+    var salvage_collection = try runCli(&.{ "zova", "vector-collection", "--json", "--limit", "1", salvage_dest, collection_name });
+    defer salvage_collection.deinit();
+    try std.testing.expectEqual(@as(u8, 0), salvage_collection.code);
+    var parsed_salvage_collection = try parseJson(salvage_collection.stdout);
+    defer parsed_salvage_collection.deinit();
+    try expectJsonString(parsed_salvage_collection.value.object, "command", "vector-collection");
+    try expectJsonString(parsed_salvage_collection.value.object, "name", collection_name);
+
+    var salvaged = try zova.Database.open(salvage_dest);
+    defer salvaged.deinit();
+    if (std.mem.eql(u8, collection_name, "chunks")) {
+        try expectSqlNativeChunkSearchResult(&salvaged, &.{ 0.9, 0.1, 0.0 }, &.{ "chunk-1", "chunk-2" }, &.{ "first semantic chunk", "second semantic chunk" });
+    } else if (std.mem.eql(u8, collection_name, "search_rows")) {
+        try expectSqlNativeConvertedSearchResult(&salvaged, &.{ 1.0, 2.0, 3.0 }, &.{"converted-row-1"}, &.{"converted sql row"});
+    }
+}
+
+test "cli doctor reports sql introduced corruption in realistic file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "doctor-corrupt.zova");
+
+    {
+        var db = try zova.Database.create(path);
+        defer db.deinit();
+        try db.exec(
+            \\create table search_rows (
+            \\  id integer primary key,
+            \\  vector_id text not null,
+            \\  body text not null
+            \\)
+        );
+        _ = try streamObject(&db, "doctor object body", &.{ 3, 5 });
+        try db.createVectorCollection("chunks", .{ .dimensions = 2, .metric = .l2 });
+        try db.putVector("chunks", "chunk-1", &.{ 1.0, 2.0 });
+        try insertSearchRow(&db, "chunk-1", "private body should not be printed");
+    }
+
+    {
+        var raw = try zova.sqlite.Database.open(path);
+        defer raw.deinit();
+        try raw.exec(
+            \\update _zova_chunks
+            \\set data = x'636f7272757074', size_bytes = 7
+            \\where rowid = (select rowid from _zova_chunks limit 1);
+            \\update _zova_vectors
+            \\set dimensions = 1, "values" = x'0000c07f'
+            \\where vector_id = 'chunk-1';
+        );
+    }
+
+    var doctor = try runCli(&.{ "zova", "doctor", "--json", "--limit", "2", path });
+    defer doctor.deinit();
+    try std.testing.expectEqual(@as(u8, 4), doctor.code);
+    var parsed = try parseJson(doctor.stderr);
+    defer parsed.deinit();
+    try expectJsonString(parsed.value.object, "command", "doctor");
+    try expectJsonString(parsed.value.object, "status", "needs_attention");
+    try expectJsonArray(parsed.value.object, "suggested_actions");
+    try expectContains(doctor.stderr, "chunk-1");
+    try std.testing.expect(std.mem.indexOf(u8, doctor.stderr, "private body should not be printed") == null);
+
+    var salvage = try runCli(&.{ "zova", "salvage", "--dry-run", "--json", "--limit", "2", path });
+    defer salvage.deinit();
+    try std.testing.expectEqual(@as(u8, 4), salvage.code);
+    var parsed_salvage = try parseJson(salvage.stderr);
+    defer parsed_salvage.deinit();
+    try expectJsonString(parsed_salvage.value.object, "command", "salvage");
+    try expectJsonString(parsed_salvage.value.object, "recoverability", "partially_recoverable");
+    try expectJsonArray(parsed_salvage.value.object, "issues");
+    try std.testing.expect(std.mem.indexOf(u8, salvage.stderr, "private body should not be printed") == null);
 }
 
 const CliResult = struct {
@@ -687,6 +810,12 @@ fn expectJsonString(object: std.json.ObjectMap, key: []const u8, expected: []con
     const value = object.get(key) orelse return error.MissingJsonField;
     try std.testing.expectEqual(std.json.Value.string, std.meta.activeTag(value));
     try std.testing.expectEqualStrings(expected, value.string);
+}
+
+fn expectJsonBool(object: std.json.ObjectMap, key: []const u8, expected: bool) !void {
+    const value = object.get(key) orelse return error.MissingJsonField;
+    try std.testing.expectEqual(std.json.Value.bool, std.meta.activeTag(value));
+    try std.testing.expectEqual(expected, value.bool);
 }
 
 fn expectJsonArray(object: std.json.ObjectMap, key: []const u8) !void {

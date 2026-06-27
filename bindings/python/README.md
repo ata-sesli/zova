@@ -127,6 +127,11 @@ By default, each operation verifies the destination after copying. Pass
 `verify=False` only when you will verify separately, for example with
 `zova check --deep`.
 
+Diagnostic recovery commands such as `zova doctor`, `zova salvage --dry-run`,
+and `zova salvage <source> <destination>` are CLI-first in the v0.16 line. The
+Python package does not expose typed doctor/salvage report APIs yet, and library
+code should not parse the human text output as a stable binding contract.
+
 ## Objects
 
 The Python binding exposes Zova objects as content-addressed byte values while

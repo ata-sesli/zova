@@ -23,6 +23,9 @@ test "cli version and help are successful" {
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "backup [--json] [--no-verify] <source.zova> <destination.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "compact [--json] [--no-verify] <source.zova> <destination.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "restore [--json] [--no-verify] <backup.zova> <destination.zova>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "doctor [--json] [--limit <n>] <file.zova>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "salvage --dry-run [--json] [--limit <n>] <source.zova>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "salvage [--json] [--limit <n>] <source.zova> <destination.zova>") != null);
 }
 
 test "cli usage errors return exit code 2" {
@@ -725,6 +728,552 @@ test "cli check json succeeds for healthy databases" {
     try expectJsonString(reversed_json.value.object, "deep_check", "ok");
 }
 
+test "cli doctor reports healthy databases in text and json" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "doctor-healthy.zova");
+    try createHealthyDatabase(db_path);
+
+    var text = try runCli(&.{ "zova", "doctor", db_path });
+    defer text.deinit();
+    try std.testing.expectEqual(@as(u8, 0), text.code);
+    try expectContains(text.stdout, "Zova doctor:");
+    try expectContains(text.stdout, "status: ok");
+    try expectContains(text.stdout, "quick_check: ok");
+    try expectContains(text.stdout, "schema: ok");
+    try expectContains(text.stdout, "objects_checked:");
+    try expectContains(text.stdout, "chunks_checked:");
+    try expectContains(text.stdout, "vectors_checked:");
+    try expectContains(text.stdout, "user_tables:");
+    try expectContains(text.stdout, "private_tables:");
+    try expectContains(text.stdout, "suggested_actions:");
+    try std.testing.expect(std.mem.indexOf(u8, text.stdout, "hello object") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text.stdout, "hidden chunk bytes") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text.stdout, "7.25") == null);
+
+    var json = try runCli(&.{ "zova", "doctor", "--json", db_path });
+    defer json.deinit();
+    try std.testing.expectEqual(@as(u8, 0), json.code);
+    var parsed = try parseJson(json.stdout);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try expectJsonInt(root, "cli_json_version", 1);
+    try expectJsonString(root, "status", "ok");
+    try expectJsonString(root, "command", "doctor");
+    try expectJsonString(root, "source_path", db_path);
+    try expectJsonObjectHasInt(root, "checked", "objects");
+    try expectJsonObjectHasInt(root, "checked", "chunks");
+    try expectJsonObjectHasInt(root, "checked", "vectors");
+    try expectJsonInt(root, "issue_count", 0);
+    try expectJsonObjectHasInt(root, "issue_counts", "object");
+    try expectJsonObjectHasInt(root, "severity_counts", "error");
+    try expectJsonArrayLen(root, "issues", 0);
+    try expectJsonArray(root, "suggested_actions");
+    try std.testing.expect(std.mem.indexOf(u8, json.stdout, "hello object") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json.stdout, "hidden chunk bytes") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json.stdout, "7.25") == null);
+
+    var source_check = try runCli(&.{ "zova", "check", "--deep", db_path });
+    defer source_check.deinit();
+    try std.testing.expectEqual(@as(u8, 0), source_check.code);
+}
+
+test "cli doctor reports corruption with bounded json issues" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "doctor-corrupt.zova");
+    try createHealthyDatabase(db_path);
+
+    {
+        var raw = try zova.sqlite.Database.open(db_path);
+        defer raw.deinit();
+        try raw.exec(
+            \\update _zova_chunks
+            \\set data = x'636f7272757074', size_bytes = 7
+            \\where rowid = (select rowid from _zova_chunks limit 1);
+            \\update _zova_vectors
+            \\set dimensions = 1, "values" = x'0000c07f'
+            \\where vector_id = 'doc-1';
+        );
+    }
+
+    var limited = try runCli(&.{ "zova", "doctor", "--json", "--limit", "1", db_path });
+    defer limited.deinit();
+    try std.testing.expectEqual(@as(u8, 4), limited.code);
+    var parsed = try parseJson(limited.stderr);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try expectJsonString(root, "status", "needs_attention");
+    try expectJsonString(root, "command", "doctor");
+    try expectJsonObjectHasInt(root, "issue_counts", "chunk");
+    try expectJsonObjectHasInt(root, "issue_counts", "vector");
+    try expectJsonObjectHasInt(root, "severity_counts", "error");
+    try expectJsonBool(root, "issues_truncated", true);
+    try expectJsonArrayLen(root, "issues", 1);
+    try expectJsonArray(root, "suggested_actions");
+    try std.testing.expect(std.mem.indexOf(u8, limited.stderr, "zova salvage --dry-run") != null);
+    try std.testing.expect(std.mem.indexOf(u8, limited.stderr, "corrupt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, limited.stderr, "hidden chunk bytes") == null);
+    try std.testing.expect(std.mem.indexOf(u8, limited.stderr, "7.25") == null);
+
+    var zero = try runCli(&.{ "zova", "doctor", "--json", "--limit", "0", db_path });
+    defer zero.deinit();
+    try std.testing.expectEqual(@as(u8, 4), zero.code);
+    var zero_json = try parseJson(zero.stderr);
+    defer zero_json.deinit();
+    const zero_root = zero_json.value.object;
+    try expectJsonBool(zero_root, "issues_truncated", true);
+    try expectJsonArrayLen(zero_root, "issues", 0);
+    const issue_count = zero_root.get("issue_count") orelse return error.MissingJsonField;
+    try std.testing.expectEqual(std.json.Value.integer, std.meta.activeTag(issue_count));
+    try std.testing.expect(issue_count.integer > 0);
+
+    var zero_text = try runCli(&.{ "zova", "doctor", "--limit", "0", db_path });
+    defer zero_text.deinit();
+    try std.testing.expectEqual(@as(u8, 4), zero_text.code);
+    try expectContains(zero_text.stderr, "issue_count:");
+    try expectContains(zero_text.stderr, "no issue examples shown");
+    try std.testing.expect(std.mem.indexOf(u8, zero_text.stderr, "issues:\n  none") == null);
+}
+
+test "cli salvage dry-run reports healthy recoverability in text and json" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "salvage-healthy.zova");
+    try createHealthyDatabase(db_path);
+
+    var text = try runCli(&.{ "zova", "salvage", "--dry-run", db_path });
+    defer text.deinit();
+    try std.testing.expectEqual(@as(u8, 0), text.code);
+    try expectContains(text.stdout, "Zova salvage dry-run:");
+    try expectContains(text.stdout, "status: ok");
+    try expectContains(text.stdout, "dry_run: true");
+    try expectContains(text.stdout, "will_write_destination: false");
+    try expectContains(text.stdout, "recoverability: recoverable");
+    try expectContains(text.stdout, "recoverable_user_tables:");
+    try expectContains(text.stdout, "skipped_objects: 0");
+    try expectContains(text.stdout, "issues:\n  none");
+    try std.testing.expect(std.mem.indexOf(u8, text.stdout, "hello object") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text.stdout, "hidden chunk bytes") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text.stdout, "7.25") == null);
+
+    var json = try runCli(&.{ "zova", "salvage", "--dry-run", "--json", db_path });
+    defer json.deinit();
+    try std.testing.expectEqual(@as(u8, 0), json.code);
+    var parsed = try parseJson(json.stdout);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try expectJsonInt(root, "cli_json_version", 1);
+    try expectJsonString(root, "status", "ok");
+    try expectJsonString(root, "command", "salvage");
+    try expectJsonBool(root, "dry_run", true);
+    try expectJsonBool(root, "will_write_destination", false);
+    try expectJsonString(root, "source_path", db_path);
+    try expectJsonString(root, "recoverability", "recoverable");
+    try expectJsonObjectHasInt(root, "recoverable", "user_tables");
+    try expectJsonObjectHasInt(root, "recoverable", "objects");
+    try expectJsonObjectHasInt(root, "recoverable", "chunks");
+    try expectJsonObjectHasInt(root, "recoverable", "vector_collections");
+    try expectJsonObjectHasInt(root, "recoverable", "vectors");
+    try expectJsonObjectHasInt(root, "skipped", "objects");
+    try expectJsonInt(root, "issue_count", 0);
+    try expectJsonArrayLen(root, "issues", 0);
+    try expectJsonArray(root, "suggested_actions");
+    try std.testing.expect(std.mem.indexOf(u8, json.stdout, "hello object") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json.stdout, "hidden chunk bytes") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json.stdout, "7.25") == null);
+
+    var source_check = try runCli(&.{ "zova", "check", "--deep", db_path });
+    defer source_check.deinit();
+    try std.testing.expectEqual(@as(u8, 0), source_check.code);
+}
+
+test "cli salvage dry-run reports corrupt recoverability with bounded issues" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "salvage-corrupt.zova");
+    try createHealthyDatabase(db_path);
+
+    {
+        var raw = try zova.sqlite.Database.open(db_path);
+        defer raw.deinit();
+        try raw.exec(
+            \\update _zova_chunks
+            \\set data = x'636f7272757074', size_bytes = 7
+            \\where rowid = (select rowid from _zova_chunks limit 1);
+            \\update _zova_vectors
+            \\set dimensions = 1, "values" = x'0000c07f'
+            \\where vector_id = 'doc-1';
+        );
+    }
+
+    var limited = try runCli(&.{ "zova", "salvage", "--dry-run", "--json", "--limit", "1", db_path });
+    defer limited.deinit();
+    try std.testing.expectEqual(@as(u8, 4), limited.code);
+    var parsed = try parseJson(limited.stderr);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try expectJsonString(root, "status", "needs_attention");
+    try expectJsonString(root, "command", "salvage");
+    try expectJsonBool(root, "dry_run", true);
+    try expectJsonBool(root, "will_write_destination", false);
+    try expectJsonString(root, "recoverability", "partially_recoverable");
+    try expectJsonObjectHasInt(root, "issue_counts", "chunk");
+    try expectJsonObjectHasInt(root, "issue_counts", "vector");
+    try expectJsonObjectHasInt(root, "skipped", "chunks");
+    try expectJsonObjectHasInt(root, "skipped", "vectors");
+    try expectJsonBool(root, "issues_truncated", true);
+    try expectJsonArrayLen(root, "issues", 1);
+    try expectJsonArray(root, "suggested_actions");
+    try std.testing.expect(std.mem.indexOf(u8, limited.stderr, "corrupt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, limited.stderr, "hidden chunk bytes") == null);
+    try std.testing.expect(std.mem.indexOf(u8, limited.stderr, "7.25") == null);
+
+    var zero = try runCli(&.{ "zova", "salvage", "--dry-run", "--json", "--limit", "0", db_path });
+    defer zero.deinit();
+    try std.testing.expectEqual(@as(u8, 4), zero.code);
+    var zero_json = try parseJson(zero.stderr);
+    defer zero_json.deinit();
+    const zero_root = zero_json.value.object;
+    try expectJsonBool(zero_root, "issues_truncated", true);
+    try expectJsonArrayLen(zero_root, "issues", 0);
+    const issue_count = zero_root.get("issue_count") orelse return error.MissingJsonField;
+    try std.testing.expectEqual(std.json.Value.integer, std.meta.activeTag(issue_count));
+    try std.testing.expect(issue_count.integer > 0);
+}
+
+test "cli salvage dry-run counts missing chunks as skipped" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "salvage-missing-chunks.zova");
+    try createHealthyDatabase(db_path);
+
+    {
+        var raw = try zova.sqlite.Database.open(db_path);
+        defer raw.deinit();
+        try raw.exec("delete from _zova_chunks");
+    }
+
+    var result = try runCli(&.{ "zova", "salvage", "--dry-run", "--json", "--limit", "0", db_path });
+    defer result.deinit();
+    try std.testing.expectEqual(@as(u8, 4), result.code);
+    var parsed = try parseJson(result.stderr);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try expectJsonString(root, "command", "salvage");
+    try expectJsonString(root, "status", "needs_attention");
+    try std.testing.expect(try jsonObjectInt(root, "issue_counts", "chunk") > 0);
+    try std.testing.expect(try jsonObjectInt(root, "skipped", "chunks") > 0);
+    try expectJsonArrayLen(root, "issues", 0);
+    try expectJsonBool(root, "issues_truncated", true);
+}
+
+test "cli salvage copies healthy database into verified destination" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "salvage-source.zova");
+    try createHealthyDatabase(source_path);
+    try addRichUserSqlFixture(source_path);
+
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "salvage-destination.zova");
+
+    var result = try runCli(&.{ "zova", "salvage", "--json", source_path, dest_path });
+    defer result.deinit();
+    try std.testing.expectEqual(@as(u8, 0), result.code);
+    var parsed = try parseJson(result.stdout);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try expectJsonString(root, "status", "ok");
+    try expectJsonString(root, "command", "salvage");
+    try expectJsonBool(root, "dry_run", false);
+    try expectJsonBool(root, "will_write_destination", true);
+    try expectJsonString(root, "source_path", source_path);
+    try expectJsonString(root, "destination_path", dest_path);
+    try expectJsonBool(root, "destination_verified", true);
+    try expectJsonObjectHasInt(root, "copied", "user_tables");
+    try std.testing.expect((try jsonObjectInt(root, "copied", "user_schema_objects")) > 0);
+    try std.testing.expect((try jsonObjectInt(root, "copied", "user_rows")) > 0);
+    try expectJsonObjectHasInt(root, "copied", "objects");
+    try expectJsonObjectHasInt(root, "copied", "vectors");
+    try expectJsonObjectHasInt(root, "skipped", "objects");
+    try expectJsonObjectHasInt(root, "skipped", "user_schema_objects");
+    try std.testing.expectEqual(@as(i64, 0), try jsonObjectInt(root, "skipped", "user_rows"));
+    try expectJsonArrayLen(root, "issues", 0);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "hello object") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "hidden chunk bytes") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "secret blob value") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "7.25") == null);
+
+    var deep = try runCli(&.{ "zova", "check", "--deep", dest_path });
+    defer deep.deinit();
+    try std.testing.expectEqual(@as(u8, 0), deep.code);
+    try expectHealthyCopy(dest_path);
+    try expectRichUserSqlFixture(dest_path);
+}
+
+test "cli salvage reports skipped user rows without printing values" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "salvage-row-skip-source.zova");
+    try createHealthyDatabase(source_path);
+
+    {
+        var db = try zova.Database.open(source_path);
+        defer db.deinit();
+        try db.exec(
+            \\create table generated_rows (
+            \\  id integer primary key,
+            \\  value text not null,
+            \\  value_len integer generated always as (length(value)) stored
+            \\);
+            \\insert into generated_rows (value) values ('generated-secret-row-value');
+        );
+    }
+
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "salvage-row-skip-destination.zova");
+
+    var result = try runCli(&.{ "zova", "salvage", "--json", source_path, dest_path });
+    defer result.deinit();
+    try std.testing.expectEqual(@as(u8, 0), result.code);
+    var parsed = try parseJson(result.stdout);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try expectJsonString(root, "status", "ok");
+    try expectJsonBool(root, "destination_verified", true);
+    try std.testing.expect((try jsonObjectInt(root, "skipped", "user_tables")) > 0);
+    try std.testing.expect((try jsonObjectInt(root, "skipped", "user_rows")) > 0);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "generated-secret-row-value") == null);
+
+    var deep = try runCli(&.{ "zova", "check", "--deep", dest_path });
+    defer deep.deinit();
+    try std.testing.expectEqual(@as(u8, 0), deep.code);
+}
+
+test "cli salvage rejects invalid destinations without overwrite" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "salvage-policy-source.zova");
+    try createHealthyDatabase(source_path);
+
+    var existing_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const existing_path = try testingDbPath(&existing_buffer, tmp.sub_path[0..], "salvage-existing.zova");
+    try createHealthyDatabase(existing_path);
+
+    var existing = try runCli(&.{ "zova", "salvage", source_path, existing_path });
+    defer existing.deinit();
+    try std.testing.expectEqual(@as(u8, 4), existing.code);
+    try expectContains(existing.stderr, "salvage failed");
+
+    var invalid_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const invalid_path = try testingDbPath(&invalid_buffer, tmp.sub_path[0..], "salvage-destination.db");
+    var invalid = try runCli(&.{ "zova", "salvage", source_path, invalid_path });
+    defer invalid.deinit();
+    try std.testing.expectEqual(@as(u8, 2), invalid.code);
+    try expectContains(invalid.stderr, "destination");
+}
+
+test "cli salvage skips corrupt objects and preserves readable sql and vectors" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "salvage-corrupt-source.zova");
+    try createHealthyDatabase(source_path);
+    try addRichUserSqlFixture(source_path);
+
+    {
+        var raw = try zova.sqlite.Database.open(source_path);
+        defer raw.deinit();
+        try raw.exec("delete from _zova_chunks");
+    }
+
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "salvage-corrupt-destination.zova");
+
+    var result = try runCli(&.{ "zova", "salvage", "--json", "--limit", "1", source_path, dest_path });
+    defer result.deinit();
+    try std.testing.expectEqual(@as(u8, 0), result.code);
+    var parsed = try parseJson(result.stdout);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try expectJsonString(root, "status", "ok");
+    try expectJsonString(root, "recoverability", "partially_recoverable");
+    try expectJsonBool(root, "destination_verified", true);
+    try std.testing.expect(try jsonObjectInt(root, "skipped", "objects") > 0);
+    try std.testing.expect(try jsonObjectInt(root, "skipped", "chunks") > 0);
+    try expectJsonBool(root, "issues_truncated", true);
+    try expectJsonArrayLen(root, "issues", 1);
+
+    var deep = try runCli(&.{ "zova", "check", "--deep", dest_path });
+    defer deep.deinit();
+    try std.testing.expectEqual(@as(u8, 0), deep.code);
+    try expectRichUserSqlFixture(dest_path);
+
+    var dest = try zova.Database.open(dest_path);
+    defer dest.deinit();
+    var results = try dest.searchVectors(std.testing.allocator, "docs", &.{ 7.25, 8.5 }, 1);
+    defer results.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), results.items.len);
+    try std.testing.expectEqualStrings("doc-1", results.items[0].id);
+}
+
+test "cli salvage skips object hash mismatches and verifies destination" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "salvage-object-hash-source.zova");
+    try createHealthyDatabase(source_path);
+
+    {
+        var raw = try zova.sqlite.Database.open(source_path);
+        defer raw.deinit();
+        const original_id = zova.objectId("hello object");
+        const wrong_id = zova.objectId("not hello object");
+
+        var update_object = try raw.prepare("update _zova_objects set object_id = ? where object_id = ?");
+        defer update_object.deinit();
+        try update_object.bindBlob(1, &wrong_id);
+        try update_object.bindBlob(2, &original_id);
+        try std.testing.expectEqual(zova.sqlite.Step.done, try update_object.step());
+
+        var update_manifest = try raw.prepare("update _zova_object_chunks set object_id = ? where object_id = ?");
+        defer update_manifest.deinit();
+        try update_manifest.bindBlob(1, &wrong_id);
+        try update_manifest.bindBlob(2, &original_id);
+        try std.testing.expectEqual(zova.sqlite.Step.done, try update_manifest.step());
+    }
+
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "salvage-object-hash-destination.zova");
+
+    var result = try runCli(&.{ "zova", "salvage", "--json", source_path, dest_path });
+    defer result.deinit();
+    try std.testing.expectEqual(@as(u8, 0), result.code);
+    var parsed = try parseJson(result.stdout);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try expectJsonString(root, "status", "ok");
+    try expectJsonString(root, "recoverability", "partially_recoverable");
+    try expectJsonBool(root, "destination_verified", true);
+    try std.testing.expect((try jsonObjectInt(root, "issue_counts", "object")) > 0);
+    try std.testing.expect((try jsonObjectInt(root, "skipped", "objects")) > 0);
+
+    var deep = try runCli(&.{ "zova", "check", "--deep", dest_path });
+    defer deep.deinit();
+    try std.testing.expectEqual(@as(u8, 0), deep.code);
+}
+
+test "cli salvage skips corrupt loose chunks and keeps valid data" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "salvage-loose-source.zova");
+    try createHealthyDatabase(source_path);
+
+    {
+        var raw = try zova.sqlite.Database.open(source_path);
+        defer raw.deinit();
+        const loose_hash = zova.objectChunkId("hidden chunk bytes");
+        var corrupt_loose = try raw.prepare("update _zova_chunks set data = x'626164', size_bytes = 3 where chunk_hash = ?");
+        defer corrupt_loose.deinit();
+        try corrupt_loose.bindBlob(1, &loose_hash);
+        try std.testing.expectEqual(zova.sqlite.Step.done, try corrupt_loose.step());
+    }
+
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "salvage-loose-destination.zova");
+
+    var result = try runCli(&.{ "zova", "salvage", "--json", source_path, dest_path });
+    defer result.deinit();
+    try std.testing.expectEqual(@as(u8, 0), result.code);
+    var parsed = try parseJson(result.stdout);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try expectJsonString(root, "status", "ok");
+    try expectJsonBool(root, "destination_verified", true);
+    try std.testing.expect((try jsonObjectInt(root, "issue_counts", "chunk")) > 0);
+    try std.testing.expect((try jsonObjectInt(root, "skipped", "chunks")) > 0);
+
+    var deep = try runCli(&.{ "zova", "check", "--deep", dest_path });
+    defer deep.deinit();
+    try std.testing.expectEqual(@as(u8, 0), deep.code);
+
+    var source_deep = try runCli(&.{ "zova", "check", "--deep", source_path });
+    defer source_deep.deinit();
+    try std.testing.expectEqual(@as(u8, 4), source_deep.code);
+
+    var dest = try zova.Database.open(dest_path);
+    defer dest.deinit();
+    try std.testing.expectError(error.ObjectChunkNotFound, dest.getObjectChunk(std.testing.allocator, zova.objectChunkId("hidden chunk bytes")));
+    var object = try dest.getObject(std.testing.allocator, zova.objectId("hello object"));
+    defer object.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("hello object", object.bytes);
+}
+
+test "cli salvage skips cosine zero stored vectors" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "salvage-cosine-source.zova");
+    try createHealthyDatabase(source_path);
+
+    {
+        var db = try zova.Database.open(source_path);
+        defer db.deinit();
+        try db.createVectorCollection("cosines", .{ .dimensions = 2, .metric = .cosine });
+        try db.putVector("cosines", "valid", &.{ 1.0, 0.0 });
+    }
+    {
+        var raw = try zova.sqlite.Database.open(source_path);
+        defer raw.deinit();
+        try raw.exec("insert into _zova_vectors (collection_name, vector_id, dimensions, \"values\") values ('cosines', 'zero', 2, x'0000000000000000')");
+    }
+
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "salvage-cosine-destination.zova");
+
+    var result = try runCli(&.{ "zova", "salvage", "--json", source_path, dest_path });
+    defer result.deinit();
+    try std.testing.expectEqual(@as(u8, 0), result.code);
+    var parsed = try parseJson(result.stdout);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try expectJsonString(root, "status", "ok");
+    try expectJsonBool(root, "destination_verified", true);
+    try std.testing.expect((try jsonObjectInt(root, "issue_counts", "vector")) > 0);
+    try std.testing.expect((try jsonObjectInt(root, "skipped", "vectors")) > 0);
+
+    var dest = try zova.Database.open(dest_path);
+    defer dest.deinit();
+    try std.testing.expect(try dest.hasVector("cosines", "valid"));
+    try std.testing.expect(!try dest.hasVector("cosines", "zero"));
+    var results = try dest.searchVectors(std.testing.allocator, "cosines", &.{ 1.0, 0.0 }, 5);
+    defer results.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), results.items.len);
+    try std.testing.expectEqualStrings("valid", results.items[0].id);
+}
+
 test "cli check reports healthy converted database" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -794,6 +1343,51 @@ test "cli open failures return exit code 3" {
     defer non_zova.deinit();
     try std.testing.expectEqual(@as(u8, 3), non_zova.code);
     try expectContains(non_zova.stderr, "open failed");
+
+    var missing_doctor = try runCli(&.{ "zova", "doctor", "missing.zova" });
+    defer missing_doctor.deinit();
+    try std.testing.expectEqual(@as(u8, 3), missing_doctor.code);
+    try expectContains(missing_doctor.stderr, "open failed");
+
+    var non_zova_doctor = try runCli(&.{ "zova", "doctor", "--json", sqlite_path });
+    defer non_zova_doctor.deinit();
+    try std.testing.expectEqual(@as(u8, 3), non_zova_doctor.code);
+    var doctor_json = try parseJson(non_zova_doctor.stderr);
+    defer doctor_json.deinit();
+    try expectJsonString(doctor_json.value.object, "command", "doctor");
+    try std.testing.expect(doctor_json.value.object.get("issue_count") == null);
+
+    var missing_salvage = try runCli(&.{ "zova", "salvage", "--dry-run", "missing.zova" });
+    defer missing_salvage.deinit();
+    try std.testing.expectEqual(@as(u8, 3), missing_salvage.code);
+    try expectContains(missing_salvage.stderr, "open failed");
+
+    var non_zova_salvage = try runCli(&.{ "zova", "salvage", "--dry-run", "--json", sqlite_path });
+    defer non_zova_salvage.deinit();
+    try std.testing.expectEqual(@as(u8, 3), non_zova_salvage.code);
+    var salvage_json = try parseJson(non_zova_salvage.stderr);
+    defer salvage_json.deinit();
+    try expectJsonString(salvage_json.value.object, "command", "salvage");
+
+    var text_path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const text_path = try testingDbPath(&text_path_buffer, tmp.sub_path[0..], "not-sqlite.zova");
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try tmp.dir.writeFile(io, .{ .sub_path = "not-sqlite.zova", .data = "not sqlite" });
+    var non_sqlite_doctor = try runCli(&.{ "zova", "doctor", "--json", text_path });
+    defer non_sqlite_doctor.deinit();
+    try std.testing.expectEqual(@as(u8, 3), non_sqlite_doctor.code);
+    var non_sqlite_doctor_json = try parseJson(non_sqlite_doctor.stderr);
+    defer non_sqlite_doctor_json.deinit();
+    try expectJsonString(non_sqlite_doctor_json.value.object, "command", "doctor");
+    try std.testing.expect(non_sqlite_doctor_json.value.object.get("issue_count") == null);
+
+    var non_sqlite_salvage = try runCli(&.{ "zova", "salvage", "--dry-run", "--json", text_path });
+    defer non_sqlite_salvage.deinit();
+    try std.testing.expectEqual(@as(u8, 3), non_sqlite_salvage.code);
+    var non_sqlite_salvage_json = try parseJson(non_sqlite_salvage.stderr);
+    defer non_sqlite_salvage_json.deinit();
+    try expectJsonString(non_sqlite_salvage_json.value.object, "command", "salvage");
+    try std.testing.expect(non_sqlite_salvage_json.value.object.get("issue_count") == null);
 }
 
 test "cli json mode preserves open and corruption exit codes" {
@@ -850,6 +1444,36 @@ test "cli json flag usage errors return exit code 2" {
     var extra = try runCli(&.{ "zova", "check", "--json", "x.zova", "extra" });
     defer extra.deinit();
     try std.testing.expectEqual(@as(u8, 2), extra.code);
+
+    const doctor_usage_cases = [_][]const []const u8{
+        &.{ "zova", "doctor", "--json", "--json", "x.zova" },
+        &.{ "zova", "doctor", "--limit", "--json", "x.zova" },
+        &.{ "zova", "doctor", "--limit", "101", "x.zova" },
+        &.{ "zova", "doctor", "--wat", "x.zova" },
+        &.{ "zova", "doctor", "x.zova", "extra" },
+        &.{ "zova", "doctor" },
+    };
+    for (doctor_usage_cases) |args| {
+        var doctor_usage = try runCli(args);
+        defer doctor_usage.deinit();
+        try std.testing.expectEqual(@as(u8, 2), doctor_usage.code);
+    }
+
+    const salvage_usage_cases = [_][]const []const u8{
+        &.{ "zova", "salvage", "x.zova" },
+        &.{ "zova", "salvage", "--dry-run", "--dry-run", "x.zova" },
+        &.{ "zova", "salvage", "--dry-run", "--json", "--json", "x.zova" },
+        &.{ "zova", "salvage", "--dry-run", "--limit", "--json", "x.zova" },
+        &.{ "zova", "salvage", "--dry-run", "--limit", "101", "x.zova" },
+        &.{ "zova", "salvage", "--dry-run", "--wat", "x.zova" },
+        &.{ "zova", "salvage", "--dry-run", "x.zova", "dest.zova" },
+        &.{ "zova", "salvage", "--dry-run" },
+    };
+    for (salvage_usage_cases) |args| {
+        var salvage_usage = try runCli(args);
+        defer salvage_usage.deinit();
+        try std.testing.expectEqual(@as(u8, 2), salvage_usage.code);
+    }
 }
 
 test "cli deep check reports object corruption with exit code 4" {
@@ -930,6 +1554,47 @@ test "cli check fails invalid metadata and missing private schema" {
     try std.testing.expectEqual(@as(u8, 3), invalid_meta.code);
     try expectContains(invalid_meta.stderr, "open failed");
 
+    var invalid_meta_doctor = try runCli(&.{ "zova", "doctor", "--json", invalid_meta_path });
+    defer invalid_meta_doctor.deinit();
+    try std.testing.expectEqual(@as(u8, 3), invalid_meta_doctor.code);
+    var invalid_meta_doctor_json = try parseJson(invalid_meta_doctor.stderr);
+    defer invalid_meta_doctor_json.deinit();
+    try expectJsonString(invalid_meta_doctor_json.value.object, "command", "doctor");
+    try std.testing.expect(invalid_meta_doctor_json.value.object.get("issue_count") == null);
+
+    var invalid_meta_salvage = try runCli(&.{ "zova", "salvage", "--dry-run", "--json", invalid_meta_path });
+    defer invalid_meta_salvage.deinit();
+    try std.testing.expectEqual(@as(u8, 3), invalid_meta_salvage.code);
+    var invalid_meta_salvage_json = try parseJson(invalid_meta_salvage.stderr);
+    defer invalid_meta_salvage_json.deinit();
+    try expectJsonString(invalid_meta_salvage_json.value.object, "command", "salvage");
+    try std.testing.expect(invalid_meta_salvage_json.value.object.get("issue_count") == null);
+
+    var unsupported_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const unsupported_path = try testingDbPath(&unsupported_buffer, tmp.sub_path[0..], "unsupported-format.zova");
+    try createHealthyDatabase(unsupported_path);
+    {
+        var raw = try zova.sqlite.Database.open(unsupported_path);
+        defer raw.deinit();
+        try raw.exec("update _zova_meta set value = '999' where key = 'format_version'");
+    }
+
+    var unsupported_doctor = try runCli(&.{ "zova", "doctor", "--json", unsupported_path });
+    defer unsupported_doctor.deinit();
+    try std.testing.expectEqual(@as(u8, 3), unsupported_doctor.code);
+    var unsupported_doctor_json = try parseJson(unsupported_doctor.stderr);
+    defer unsupported_doctor_json.deinit();
+    try expectJsonString(unsupported_doctor_json.value.object, "command", "doctor");
+    try std.testing.expect(unsupported_doctor_json.value.object.get("issue_count") == null);
+
+    var unsupported_salvage = try runCli(&.{ "zova", "salvage", "--dry-run", "--json", unsupported_path });
+    defer unsupported_salvage.deinit();
+    try std.testing.expectEqual(@as(u8, 3), unsupported_salvage.code);
+    var unsupported_salvage_json = try parseJson(unsupported_salvage.stderr);
+    defer unsupported_salvage_json.deinit();
+    try expectJsonString(unsupported_salvage_json.value.object, "command", "salvage");
+    try std.testing.expect(unsupported_salvage_json.value.object.get("issue_count") == null);
+
     var missing_schema_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const missing_schema_path = try testingDbPath(&missing_schema_buffer, tmp.sub_path[0..], "missing-schema.zova");
     try createHealthyDatabase(missing_schema_path);
@@ -943,6 +1608,22 @@ test "cli check fails invalid metadata and missing private schema" {
     defer missing_schema.deinit();
     try std.testing.expectEqual(@as(u8, 3), missing_schema.code);
     try expectContains(missing_schema.stderr, "open failed");
+
+    var missing_schema_doctor = try runCli(&.{ "zova", "doctor", "--json", missing_schema_path });
+    defer missing_schema_doctor.deinit();
+    try std.testing.expectEqual(@as(u8, 3), missing_schema_doctor.code);
+    var missing_schema_doctor_json = try parseJson(missing_schema_doctor.stderr);
+    defer missing_schema_doctor_json.deinit();
+    try expectJsonString(missing_schema_doctor_json.value.object, "command", "doctor");
+    try std.testing.expect(missing_schema_doctor_json.value.object.get("issue_count") == null);
+
+    var missing_schema_salvage = try runCli(&.{ "zova", "salvage", "--dry-run", "--json", missing_schema_path });
+    defer missing_schema_salvage.deinit();
+    try std.testing.expectEqual(@as(u8, 3), missing_schema_salvage.code);
+    var missing_schema_salvage_json = try parseJson(missing_schema_salvage.stderr);
+    defer missing_schema_salvage_json.deinit();
+    try expectJsonString(missing_schema_salvage_json.value.object, "command", "salvage");
+    try std.testing.expect(missing_schema_salvage_json.value.object.get("issue_count") == null);
 }
 
 test "cli deep check reports full object hash mismatch" {
@@ -1088,6 +1769,53 @@ fn createCorruptObjectDatabase(path: [:0]const u8) !void {
     try raw.exec("update _zova_chunks set data = zeroblob(size_bytes) where chunk_hash = (select chunk_hash from _zova_chunks limit 1)");
 }
 
+fn addRichUserSqlFixture(path: [:0]const u8) !void {
+    var db = try zova.Database.open(path);
+    defer db.deinit();
+
+    try db.exec(
+        \\create table attachments (
+        \\  id integer primary key,
+        \\  label text not null,
+        \\  payload blob not null
+        \\);
+        \\create table attachment_audit (
+        \\  attachment_id integer not null,
+        \\  label text not null
+        \\);
+        \\create index attachments_label_idx on attachments(label);
+        \\create view attachment_labels as
+        \\  select id, label from attachments;
+        \\create trigger attachments_ai after insert on attachments
+        \\begin
+        \\  insert into attachment_audit (attachment_id, label) values (new.id, new.label);
+        \\end;
+    );
+
+    var insert = try db.prepare("insert into attachments (label, payload) values (?, ?)");
+    defer insert.deinit();
+    try insert.bindText(1, "invoice");
+    try insert.bindBlob(2, "secret blob value");
+    try std.testing.expectEqual(zova.sqlite.Step.done, try insert.step());
+}
+
+fn expectRichUserSqlFixture(path: [:0]const u8) !void {
+    var db = try zova.Database.open(path);
+    defer db.deinit();
+
+    try std.testing.expectEqual(@as(i64, 1), try countRows(&db, "select count(*) from attachments"));
+    try std.testing.expectEqual(@as(i64, 1), try countRows(&db, "select count(*) from attachment_audit"));
+    try std.testing.expectEqual(@as(i64, 1), try countRows(&db, "select count(*) from attachment_labels where label = 'invoice'"));
+
+    var payload = try db.prepare("select payload from attachments where label = 'invoice'");
+    defer payload.deinit();
+    try std.testing.expectEqual(zova.sqlite.Step.row, try payload.step());
+    try std.testing.expectEqualStrings("secret blob value", payload.columnBlob(0));
+
+    try db.exec("insert into attachments (label, payload) values ('receipt', x'010203')");
+    try std.testing.expectEqual(@as(i64, 2), try countRows(&db, "select count(*) from attachment_audit"));
+}
+
 fn expectHealthyCopy(path: [:0]const u8) !void {
     var db = try zova.Database.open(path);
     defer db.deinit();
@@ -1197,10 +1925,15 @@ fn expectJsonString(object: std.json.ObjectMap, key: []const u8, expected: []con
 }
 
 fn expectJsonObjectHasInt(object: std.json.ObjectMap, object_key: []const u8, key: []const u8) !void {
+    _ = try jsonObjectInt(object, object_key, key);
+}
+
+fn jsonObjectInt(object: std.json.ObjectMap, object_key: []const u8, key: []const u8) !i64 {
     const value = object.get(object_key) orelse return error.MissingJsonField;
     try std.testing.expectEqual(std.json.Value.object, std.meta.activeTag(value));
     const child = value.object.get(key) orelse return error.MissingJsonField;
     try std.testing.expectEqual(std.json.Value.integer, std.meta.activeTag(child));
+    return child.integer;
 }
 
 fn expectJsonArray(object: std.json.ObjectMap, key: []const u8) !void {

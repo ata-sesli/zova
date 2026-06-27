@@ -35,6 +35,14 @@ const BoundedCommandArgs = struct {
     id: ?[]const u8,
 };
 
+const SalvageCommandArgs = struct {
+    format: OutputFormat,
+    limit: usize,
+    dry_run: bool,
+    source_path: []const u8,
+    destination_path: ?[]const u8,
+};
+
 const OperationalCommandArgs = struct {
     format: OutputFormat,
     verify: bool,
@@ -50,6 +58,19 @@ const BoundedCommandParseError = error{
     UnknownFlag,
     MissingPath,
     MissingId,
+    ExtraArgs,
+};
+
+const SalvageCommandParseError = error{
+    DuplicateJson,
+    DuplicateDryRun,
+    DuplicateLimit,
+    MissingLimitValue,
+    InvalidLimit,
+    UnknownFlag,
+    MissingSource,
+    MissingDestination,
+    DestinationNotAllowed,
     ExtraArgs,
 };
 
@@ -77,7 +98,7 @@ const DatabaseSummary = struct {
     }
 };
 
-const DeepStats = struct {
+const DiagnosticStats = struct {
     objects: u64 = 0,
     chunks: u64 = 0,
     vectors: u64 = 0,
@@ -272,22 +293,29 @@ const TableList = struct {
     }
 };
 
-const DeepIssueCounts = struct {
+const DiagnosticIssueCounts = struct {
     sqlite: u64 = 0,
     object: u64 = 0,
     chunk: u64 = 0,
     vector: u64 = 0,
 };
 
-const DeepIssueArea = enum {
+const DiagnosticSeverityCounts = struct {
+    info: u64 = 0,
+    warning: u64 = 0,
+    errors: u64 = 0,
+    fatal: u64 = 0,
+};
+
+const DiagnosticIssueArea = enum {
     sqlite,
     object,
     chunk,
     vector,
 };
 
-const DeepIssue = struct {
-    area: DeepIssueArea,
+const DiagnosticIssue = struct {
+    area: DiagnosticIssueArea,
     kind: []const u8,
     severity: []const u8 = "error",
     detail: []const u8,
@@ -296,7 +324,7 @@ const DeepIssue = struct {
     collection_name: ?[]u8 = null,
     vector_id: ?[]u8 = null,
 
-    fn deinit(self: *DeepIssue, allocator: std.mem.Allocator) void {
+    fn deinit(self: *DiagnosticIssue, allocator: std.mem.Allocator) void {
         if (self.object_id_hex) |value| allocator.free(value);
         if (self.chunk_hash_hex) |value| allocator.free(value);
         if (self.collection_name) |value| allocator.free(value);
@@ -304,17 +332,72 @@ const DeepIssue = struct {
     }
 };
 
-const DeepReport = struct {
-    stats: DeepStats = .{},
+const DiagnosticReport = struct {
+    stats: DiagnosticStats = .{},
     issue_count: u64 = 0,
-    issue_counts: DeepIssueCounts = .{},
-    issues: []DeepIssue = &.{},
+    issue_counts: DiagnosticIssueCounts = .{},
+    severity_counts: DiagnosticSeverityCounts = .{},
+    issues: []DiagnosticIssue = &.{},
     issues_truncated: bool = false,
+    issue_limit: usize = 10,
 
-    fn deinit(self: *DeepReport, allocator: std.mem.Allocator) void {
+    fn deinit(self: *DiagnosticReport, allocator: std.mem.Allocator) void {
         for (self.issues) |*issue| issue.deinit(allocator);
         allocator.free(self.issues);
     }
+};
+
+const SalvageRecoverability = enum {
+    recoverable,
+    partially_recoverable,
+    not_recoverable,
+    unknown,
+};
+
+const SalvageCounts = struct {
+    user_tables: u64 = 0,
+    user_schema_objects: u64 = 0,
+    user_rows: u64 = 0,
+    objects: u64 = 0,
+    chunks: u64 = 0,
+    loose_chunks: u64 = 0,
+    vector_collections: u64 = 0,
+    vectors: u64 = 0,
+};
+
+const SalvagePlan = struct {
+    report: DiagnosticReport,
+    recoverability: SalvageRecoverability,
+    recoverable: SalvageCounts,
+    skipped: SalvageCounts,
+
+    fn deinit(self: *SalvagePlan, allocator: std.mem.Allocator) void {
+        self.report.deinit(allocator);
+    }
+};
+
+const SalvageExecutionResult = struct {
+    plan: SalvagePlan,
+    copied: SalvageCounts,
+    destination_verified: bool,
+
+    fn deinit(self: *SalvageExecutionResult, allocator: std.mem.Allocator) void {
+        self.plan.deinit(allocator);
+    }
+};
+
+const UserSqlCopyResult = struct {
+    copied_tables: u64 = 0,
+    skipped_tables: u64 = 0,
+    copied_schema_objects: u64 = 0,
+    skipped_schema_objects: u64 = 0,
+    copied_rows: u64 = 0,
+    skipped_rows: u64 = 0,
+};
+
+const UserSqlRowCopyResult = struct {
+    copied_rows: u64 = 0,
+    skipped_rows: u64 = 0,
 };
 
 pub fn run(
@@ -369,6 +452,12 @@ pub fn run(
     if (std.mem.eql(u8, command, "check")) {
         return checkCommand(allocator, args[2..], stdout, stderr);
     }
+    if (std.mem.eql(u8, command, "doctor")) {
+        return doctorCommand(allocator, args[2..], stdout, stderr);
+    }
+    if (std.mem.eql(u8, command, "salvage")) {
+        return salvageCommand(allocator, args[2..], stdout, stderr);
+    }
     if (std.mem.eql(u8, command, "backup")) {
         return backupCommand(allocator, args[2..], stdout, stderr);
     }
@@ -401,6 +490,9 @@ fn writeUsage(writer: *std.Io.Writer) !void {
         \\  zova tables [--json] [--limit <n>] <file.zova>
         \\  zova check [--deep] <file.zova>
         \\  zova check --json [--deep] <file.zova>
+        \\  zova doctor [--json] [--limit <n>] <file.zova>
+        \\  zova salvage --dry-run [--json] [--limit <n>] <source.zova>
+        \\  zova salvage [--json] [--limit <n>] <source.zova> <destination.zova>
         \\  zova backup [--json] [--no-verify] <source.zova> <destination.zova>
         \\  zova compact [--json] [--no-verify] <source.zova> <destination.zova>
         \\  zova restore [--json] [--no-verify] <backup.zova> <destination.zova>
@@ -416,6 +508,8 @@ fn writeUsage(writer: *std.Io.Writer) !void {
         \\  vector-collection inspect one collection and bounded vector ids
         \\  tables  list bounded user/private table names without schema or rows
         \\  check  validate Zova identity/schema and SQLite quick_check
+        \\  doctor explain database health and suggested recovery actions
+        \\  salvage plan or copy best-effort recovery without mutating the source
         \\  backup create a verified snapshot copy without overwriting destination
         \\  compact create a verified space-reclaiming copy with VACUUM INTO
         \\  restore restore a backup into a new destination file
@@ -940,6 +1034,52 @@ fn parseBoundedCommandArgs(args: []const []const u8, expect_id: bool) BoundedCom
     };
 }
 
+fn parseSalvageCommandArgs(args: []const []const u8) SalvageCommandParseError!SalvageCommandArgs {
+    var format: OutputFormat = .text;
+    var limit: usize = default_list_limit;
+    var saw_dry_run = false;
+    var saw_limit = false;
+    var positionals: [2][]const u8 = undefined;
+    var positional_count: usize = 0;
+
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--json")) {
+            if (format == .json) return error.DuplicateJson;
+            format = .json;
+        } else if (std.mem.eql(u8, arg, "--dry-run")) {
+            if (saw_dry_run) return error.DuplicateDryRun;
+            saw_dry_run = true;
+        } else if (std.mem.eql(u8, arg, "--limit")) {
+            if (saw_limit) return error.DuplicateLimit;
+            saw_limit = true;
+            index += 1;
+            if (index >= args.len) return error.MissingLimitValue;
+            limit = parseLimit(args[index], max_list_limit) catch return error.InvalidLimit;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            return error.UnknownFlag;
+        } else {
+            if (positional_count >= positionals.len) return error.ExtraArgs;
+            positionals[positional_count] = arg;
+            positional_count += 1;
+        }
+    }
+
+    if (positional_count == 0) return error.MissingSource;
+    if (saw_dry_run and positional_count > 1) return error.DestinationNotAllowed;
+    if (!saw_dry_run and positional_count == 1) return error.MissingDestination;
+    if (!saw_dry_run and positional_count > 2) return error.ExtraArgs;
+
+    return .{
+        .format = format,
+        .limit = limit,
+        .dry_run = saw_dry_run,
+        .source_path = positionals[0],
+        .destination_path = if (saw_dry_run) null else positionals[1],
+    };
+}
+
 fn boundedCommandUsageMessage(command: []const u8, err: BoundedCommandParseError) []const u8 {
     return switch (err) {
         error.DuplicateJson => "duplicate --json",
@@ -957,6 +1097,21 @@ fn boundedCommandUsageMessage(command: []const u8, err: BoundedCommandParseError
             "chunk requires <file.zova> <chunk-id>"
         else
             "vector-collection requires <file.zova> <name>",
+        error.ExtraArgs => "too many arguments",
+    };
+}
+
+fn salvageCommandUsageMessage(err: SalvageCommandParseError) []const u8 {
+    return switch (err) {
+        error.DuplicateJson => "duplicate --json",
+        error.DuplicateDryRun => "duplicate --dry-run",
+        error.DuplicateLimit => "duplicate --limit",
+        error.MissingLimitValue => "--limit requires a value",
+        error.InvalidLimit => "invalid --limit",
+        error.UnknownFlag => "unknown flag",
+        error.MissingSource => "salvage requires <source.zova>",
+        error.MissingDestination => "salvage execution requires <destination.zova>",
+        error.DestinationNotAllowed => "salvage --dry-run does not accept a destination",
         error.ExtraArgs => "too many arguments",
     };
 }
@@ -1024,7 +1179,7 @@ fn checkCommand(
     quickCheck(&db) catch |err| return checkErrorFormat(stderr, "check", format, "sqlite quick_check failed", err);
 
     if (deep) {
-        var report = deepCheck(allocator, &db) catch |err| return deepCheckErrorFormat(stderr, format, err);
+        var report = runDiagnostics(allocator, &db, 10) catch |err| return deepCheckErrorFormat(stderr, format, err);
         defer report.deinit(allocator);
         if (report.issue_count != 0) {
             switch (format) {
@@ -1048,6 +1203,204 @@ fn checkCommand(
     return ExitCode.ok;
 }
 
+fn doctorCommand(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !u8 {
+    const parsed = parseBoundedCommandArgs(args, false) catch |err| return usageErrorFormat(stderr, "doctor", boundedCommandErrorFormat(args), boundedCommandUsageMessage("doctor", err));
+    const path = try allocator.dupeZ(u8, parsed.path);
+    defer allocator.free(path);
+
+    var db = zova.Database.open(path) catch |err| return openErrorFormat(stderr, "doctor", parsed.format, err);
+    defer db.deinit();
+
+    quickCheck(&db) catch |err| return doctorCheckErrorFormat(stderr, parsed.format, parsed.path, "sqlite quick_check failed", err);
+
+    var summary = loadDatabaseSummary(allocator, &db, path) catch |err| return doctorCheckErrorFormat(stderr, parsed.format, parsed.path, "summary failed", err);
+    defer summary.deinit(allocator);
+
+    var report = runDiagnostics(allocator, &db, parsed.limit) catch |err| return doctorCheckErrorFormat(stderr, parsed.format, parsed.path, "diagnostic check failed", err);
+    defer report.deinit(allocator);
+
+    if (report.issue_count != 0) {
+        switch (parsed.format) {
+            .text => try writeDoctorText(stderr, parsed.path, summary, report),
+            .json => try writeDoctorJson(stderr, parsed.path, summary, report),
+        }
+        return ExitCode.check_failed;
+    }
+
+    switch (parsed.format) {
+        .text => try writeDoctorText(stdout, parsed.path, summary, report),
+        .json => try writeDoctorJson(stdout, parsed.path, summary, report),
+    }
+    return ExitCode.ok;
+}
+
+fn salvageCommand(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !u8 {
+    const parsed = parseSalvageCommandArgs(args) catch |err| {
+        const format = boundedCommandErrorFormat(args);
+        return usageErrorFormat(stderr, "salvage", format, salvageCommandUsageMessage(err));
+    };
+    if (!parsed.dry_run and !isZovaPath(parsed.destination_path.?)) {
+        return usageErrorFormat(stderr, "salvage", parsed.format, "destination path must end in .zova");
+    }
+
+    const source = try allocator.dupeZ(u8, parsed.source_path);
+    defer allocator.free(source);
+
+    var db = zova.Database.openWithOptions(source, .{ .read_only = true }) catch |err| return openErrorFormat(stderr, "salvage", parsed.format, err);
+    defer db.deinit();
+
+    if (quickCheck(&db)) |_| {} else |err| {
+        const report = try diagnosticErrorReport(allocator, parsed.limit, .sqlite, "sqlite_quick_check", @errorName(err));
+        var summary = try emptyDatabaseSummary(allocator);
+        defer summary.deinit(allocator);
+        var plan = buildSalvagePlan(summary, report);
+        defer plan.deinit(allocator);
+        return if (parsed.dry_run)
+            writeSalvageFailure(stderr, parsed.format, parsed.source_path, plan)
+        else
+            writeSalvageExecutionFailure(stderr, parsed.format, parsed.source_path, parsed.destination_path.?, plan);
+    }
+
+    var summary = loadDatabaseSummary(allocator, &db, source) catch |err| {
+        const report = try diagnosticErrorReport(allocator, parsed.limit, .sqlite, "summary", @errorName(err));
+        var empty_summary = try emptyDatabaseSummary(allocator);
+        defer empty_summary.deinit(allocator);
+        var plan = buildSalvagePlan(empty_summary, report);
+        defer plan.deinit(allocator);
+        return if (parsed.dry_run)
+            writeSalvageFailure(stderr, parsed.format, parsed.source_path, plan)
+        else
+            writeSalvageExecutionFailure(stderr, parsed.format, parsed.source_path, parsed.destination_path.?, plan);
+    };
+    defer summary.deinit(allocator);
+
+    const report = runDiagnostics(allocator, &db, parsed.limit) catch |err| {
+        const diagnostic_report = try diagnosticErrorReport(allocator, parsed.limit, .sqlite, "diagnostic_check", @errorName(err));
+        var plan = buildSalvagePlan(summary, diagnostic_report);
+        defer plan.deinit(allocator);
+        return if (parsed.dry_run)
+            writeSalvageFailure(stderr, parsed.format, parsed.source_path, plan)
+        else
+            writeSalvageExecutionFailure(stderr, parsed.format, parsed.source_path, parsed.destination_path.?, plan);
+    };
+
+    var plan = buildSalvagePlan(summary, report);
+    plan.recoverable.user_schema_objects = countUserSchemaObjects(&db) catch 0;
+    plan.recoverable.user_rows = countUserRows(allocator, &db) catch 0;
+
+    if (!parsed.dry_run) {
+        const destination = try allocator.dupeZ(u8, parsed.destination_path.?);
+        defer allocator.free(destination);
+        var result = executeSalvage(allocator, &db, destination, plan) catch |err| {
+            plan.deinit(allocator);
+            return salvageExecutionErrorFormat(stderr, parsed.format, parsed.source_path, parsed.destination_path.?, err);
+        };
+        defer result.deinit(allocator);
+
+        if (!result.destination_verified) {
+            return writeSalvageExecutionFailure(stderr, parsed.format, parsed.source_path, parsed.destination_path.?, result.plan);
+        }
+
+        switch (parsed.format) {
+            .text => try writeSalvageExecutionText(stdout, parsed.source_path, parsed.destination_path.?, result),
+            .json => try writeSalvageExecutionJson(stdout, parsed.source_path, parsed.destination_path.?, result),
+        }
+        return ExitCode.ok;
+    }
+
+    defer plan.deinit(allocator);
+
+    const has_issues = plan.report.issue_count != 0;
+    if (has_issues) {
+        switch (parsed.format) {
+            .text => try writeSalvageDryRunText(stderr, parsed.source_path, plan),
+            .json => try writeSalvageDryRunJson(stderr, parsed.source_path, plan),
+        }
+        return ExitCode.check_failed;
+    }
+
+    switch (parsed.format) {
+        .text => try writeSalvageDryRunText(stdout, parsed.source_path, plan),
+        .json => try writeSalvageDryRunJson(stdout, parsed.source_path, plan),
+    }
+    return ExitCode.ok;
+}
+
+fn isZovaPath(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, ".zova");
+}
+
+fn expectDone(stmt: *sqlite.Statement) !void {
+    switch (try stmt.step()) {
+        .done => {},
+        .row => return error.SqliteError,
+    }
+}
+
+fn writeSalvageFailure(stderr: *std.Io.Writer, format: OutputFormat, source_path: []const u8, plan: SalvagePlan) !u8 {
+    switch (format) {
+        .text => try writeSalvageDryRunText(stderr, source_path, plan),
+        .json => try writeSalvageDryRunJson(stderr, source_path, plan),
+    }
+    return ExitCode.check_failed;
+}
+
+fn writeSalvageExecutionFailure(
+    stderr: *std.Io.Writer,
+    format: OutputFormat,
+    source_path: []const u8,
+    destination_path: []const u8,
+    plan: SalvagePlan,
+) !u8 {
+    const result = SalvageExecutionResult{
+        .plan = plan,
+        .copied = .{},
+        .destination_verified = false,
+    };
+    switch (format) {
+        .text => try writeSalvageExecutionText(stderr, source_path, destination_path, result),
+        .json => try writeSalvageExecutionJson(stderr, source_path, destination_path, result),
+    }
+    return ExitCode.check_failed;
+}
+
+fn salvageExecutionErrorFormat(
+    stderr: *std.Io.Writer,
+    format: OutputFormat,
+    source_path: []const u8,
+    destination_path: []const u8,
+    err: anyerror,
+) !u8 {
+    switch (format) {
+        .text => try stderr.print("salvage failed: {s}\nsource: {s}\ndestination: {s}\n", .{ @errorName(err), source_path, destination_path }),
+        .json => {
+            try stderr.writeAll("{\n");
+            try stderr.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
+            try stderr.writeAll("  \"status\": \"error\",\n");
+            try stderr.writeAll("  \"command\": \"salvage\",\n");
+            try stderr.writeAll("  \"source_path\": ");
+            try writeJsonString(stderr, source_path);
+            try stderr.writeAll(",\n  \"destination_path\": ");
+            try writeJsonString(stderr, destination_path);
+            try stderr.writeAll(",\n  \"error\": ");
+            try writeJsonString(stderr, @errorName(err));
+            try stderr.writeAll(",\n  \"destination_verified\": false\n");
+            try stderr.writeAll("}\n");
+        },
+    }
+    return ExitCode.check_failed;
+}
+
 fn openErrorFormat(stderr: *std.Io.Writer, command: []const u8, format: OutputFormat, err: anyerror) !u8 {
     switch (format) {
         .text => try stderr.print("{s} open failed: {s}\n", .{ command, @errorName(err) }),
@@ -1060,6 +1413,33 @@ fn checkErrorFormat(stderr: *std.Io.Writer, command: []const u8, format: OutputF
     switch (format) {
         .text => try stderr.print("{s}: {s}\n", .{ message, @errorName(err) }),
         .json => try writeJsonErrorWithKind(stderr, command, message, @errorName(err)),
+    }
+    return ExitCode.check_failed;
+}
+
+fn doctorCheckErrorFormat(stderr: *std.Io.Writer, format: OutputFormat, source_path: []const u8, message: []const u8, err: anyerror) !u8 {
+    switch (format) {
+        .text => {
+            try stderr.print("Zova doctor: {s}\n", .{source_path});
+            try stderr.print("status: needs_attention\nerror: {s}: {s}\n", .{ message, @errorName(err) });
+            try stderr.writeAll("suggested_actions:\n");
+            try writeSuggestedActionsText(stderr, source_path, true);
+        },
+        .json => {
+            try stderr.writeAll("{\n");
+            try stderr.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
+            try stderr.writeAll("  \"status\": \"needs_attention\",\n");
+            try stderr.writeAll("  \"command\": \"doctor\",\n");
+            try stderr.writeAll("  \"source_path\": ");
+            try writeJsonString(stderr, source_path);
+            try stderr.writeAll(",\n  \"error\": ");
+            try writeJsonString(stderr, message);
+            try stderr.writeAll(",\n  \"kind\": ");
+            try writeJsonString(stderr, @errorName(err));
+            try stderr.writeAll(",\n  \"suggested_actions\": ");
+            try writeSuggestedActionsJson(stderr, source_path, true);
+            try stderr.writeAll("\n}\n");
+        },
     }
     return ExitCode.check_failed;
 }
@@ -1162,6 +1542,28 @@ fn loadDatabaseSummary(allocator: std.mem.Allocator, db: *zova.Database, path: [
             \\where type = 'table'
             \\  and substr(name, 1, 6) = '_zova_'
         ),
+    };
+}
+
+fn emptyDatabaseSummary(allocator: std.mem.Allocator) !DatabaseSummary {
+    return .{
+        .format_version = try allocator.dupe(u8, ""),
+        .database_bytes = 0,
+        .wal_bytes = 0,
+        .journal_bytes = 0,
+        .page_count = 0,
+        .page_size = 0,
+        .freelist_count = 0,
+        .object_count = 0,
+        .object_logical_bytes = 0,
+        .chunk_count = 0,
+        .manifest_count = 0,
+        .loose_chunk_count = 0,
+        .chunk_bytes = 0,
+        .vector_collection_count = 0,
+        .vector_count = 0,
+        .user_table_count = 0,
+        .private_table_count = 0,
     };
 }
 
@@ -2454,7 +2856,7 @@ fn writeTopChunkStatsJson(stdout: *std.Io.Writer, items: []const TopChunkStats) 
     try stdout.writeAll("]");
 }
 
-fn writeCheckText(stdout: *std.Io.Writer, report: ?DeepReport) !void {
+fn writeCheckText(stdout: *std.Io.Writer, report: ?DiagnosticReport) !void {
     try stdout.print("quick_check: ok\n", .{});
     if (report) |deep_report| {
         try stdout.print(
@@ -2468,6 +2870,7 @@ fn writeCheckText(stdout: *std.Io.Writer, report: ?DeepReport) !void {
             \\object_issues: {d}
             \\chunk_issues: {d}
             \\vector_issues: {d}
+            \\error_issues: {d}
             \\
         , .{
             deep_report.stats.objects,
@@ -2479,12 +2882,13 @@ fn writeCheckText(stdout: *std.Io.Writer, report: ?DeepReport) !void {
             deep_report.issue_counts.object,
             deep_report.issue_counts.chunk,
             deep_report.issue_counts.vector,
+            deep_report.severity_counts.errors,
         });
     }
     try stdout.print("status: ok\n", .{});
 }
 
-fn writeCheckJson(stdout: *std.Io.Writer, report: ?DeepReport) !void {
+fn writeCheckJson(stdout: *std.Io.Writer, report: ?DiagnosticReport) !void {
     try stdout.writeAll("{\n");
     try stdout.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
     try stdout.writeAll("  \"status\": \"ok\",\n");
@@ -2510,13 +2914,16 @@ fn writeCheckJson(stdout: *std.Io.Writer, report: ?DeepReport) !void {
             deep_report.issue_count,
         });
         try stdout.writeByte(' ');
-        try writeDeepIssueCountsJson(stdout, deep_report.issue_counts);
-        try stdout.writeAll(",\n  \"issues_truncated\": false,\n  \"issues\": []");
+        try writeDiagnosticIssueCountsJson(stdout, deep_report.issue_counts);
+        try stdout.writeAll(",\n  \"severity_counts\": ");
+        try writeDiagnosticSeverityCountsJson(stdout, deep_report.severity_counts);
+        try stdout.writeAll(",\n  \"issues_truncated\": false,\n  \"issues\": [],\n  \"suggested_actions\": ");
+        try writeSuggestedActionsJson(stdout, "", false);
     }
     try stdout.writeAll("\n}\n");
 }
 
-fn writeDeepCheckFailureText(stderr: *std.Io.Writer, report: DeepReport) !void {
+fn writeDeepCheckFailureText(stderr: *std.Io.Writer, report: DiagnosticReport) !void {
     try stderr.print(
         \\deep_check: failed
         \\issue_count: {d}
@@ -2524,6 +2931,7 @@ fn writeDeepCheckFailureText(stderr: *std.Io.Writer, report: DeepReport) !void {
         \\object_issues: {d}
         \\chunk_issues: {d}
         \\vector_issues: {d}
+        \\error_issues: {d}
         \\issues_truncated: {}
         \\issues:
         \\
@@ -2533,6 +2941,7 @@ fn writeDeepCheckFailureText(stderr: *std.Io.Writer, report: DeepReport) !void {
         report.issue_counts.object,
         report.issue_counts.chunk,
         report.issue_counts.vector,
+        report.severity_counts.errors,
         report.issues_truncated,
     });
     if (report.issue_counts.object != 0 or report.issue_counts.chunk != 0) {
@@ -2543,7 +2952,7 @@ fn writeDeepCheckFailureText(stderr: *std.Io.Writer, report: DeepReport) !void {
     }
     for (report.issues) |issue| {
         try stderr.print("  area={s} kind={s} severity={s} detail={s}", .{
-            deepIssueAreaText(issue.area),
+            diagnosticIssueAreaText(issue.area),
             issue.kind,
             issue.severity,
             issue.detail,
@@ -2556,7 +2965,7 @@ fn writeDeepCheckFailureText(stderr: *std.Io.Writer, report: DeepReport) !void {
     }
 }
 
-fn writeDeepCheckFailureJson(stderr: *std.Io.Writer, report: DeepReport) !void {
+fn writeDeepCheckFailureJson(stderr: *std.Io.Writer, report: DiagnosticReport) !void {
     try stderr.writeAll("{\n");
     try stderr.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
     try stderr.writeAll("  \"status\": \"error\",\n");
@@ -2565,14 +2974,478 @@ fn writeDeepCheckFailureJson(stderr: *std.Io.Writer, report: DeepReport) !void {
     try stderr.writeAll("  \"error\": \"corruption detected\",\n");
     try stderr.print("  \"issue_count\": {d},\n", .{report.issue_count});
     try stderr.writeAll("  \"issue_counts\": ");
-    try writeDeepIssueCountsJson(stderr, report.issue_counts);
+    try writeDiagnosticIssueCountsJson(stderr, report.issue_counts);
+    try stderr.writeAll(",\n  \"severity_counts\": ");
+    try writeDiagnosticSeverityCountsJson(stderr, report.severity_counts);
     try stderr.print(",\n  \"issues_truncated\": {},\n", .{report.issues_truncated});
     try stderr.writeAll("  \"issues\": ");
-    try writeDeepIssuesJson(stderr, report.issues);
+    try writeDiagnosticIssuesJson(stderr, report.issues);
+    try stderr.writeAll(",\n  \"suggested_actions\": ");
+    try writeSuggestedActionsJson(stderr, "", true);
     try stderr.writeAll("\n}\n");
 }
 
-fn writeDeepIssueCountsJson(writer: *std.Io.Writer, counts: DeepIssueCounts) !void {
+fn writeDoctorText(writer: *std.Io.Writer, source_path: []const u8, summary: DatabaseSummary, report: DiagnosticReport) !void {
+    const has_issues = report.issue_count != 0;
+    try writer.print(
+        \\Zova doctor: {s}
+        \\status: {s}
+        \\quick_check: ok
+        \\schema: ok
+        \\objects_checked: {d}
+        \\chunks_checked: {d}
+        \\vectors_checked: {d}
+        \\loose_chunks: {d}
+        \\user_tables: {d}
+        \\private_tables: {d}
+        \\issue_count: {d}
+        \\sqlite_issues: {d}
+        \\object_issues: {d}
+        \\chunk_issues: {d}
+        \\vector_issues: {d}
+        \\error_issues: {d}
+        \\issues_truncated: {}
+        \\
+    , .{
+        source_path,
+        if (has_issues) "needs_attention" else "ok",
+        report.stats.objects,
+        report.stats.chunks,
+        report.stats.vectors,
+        report.stats.loose_chunks,
+        summary.user_table_count,
+        summary.private_table_count,
+        report.issue_count,
+        report.issue_counts.sqlite,
+        report.issue_counts.object,
+        report.issue_counts.chunk,
+        report.issue_counts.vector,
+        report.severity_counts.errors,
+        report.issues_truncated,
+    });
+
+    try writer.writeAll("issues:\n");
+    if (report.issues.len == 0) {
+        if (report.issue_count == 0) {
+            try writer.writeAll("  none\n");
+        } else {
+            try writer.writeAll("  no issue examples shown\n");
+        }
+    } else {
+        for (report.issues) |issue| {
+            try writer.print("  area={s} kind={s} severity={s} detail={s}", .{
+                diagnosticIssueAreaText(issue.area),
+                issue.kind,
+                issue.severity,
+                issue.detail,
+            });
+            if (issue.object_id_hex) |value| try writer.print(" object_id={s}", .{value});
+            if (issue.chunk_hash_hex) |value| try writer.print(" chunk_hash={s}", .{value});
+            if (issue.collection_name) |value| try writer.print(" collection={s}", .{value});
+            if (issue.vector_id) |value| try writer.print(" vector_id={s}", .{value});
+            try writer.writeByte('\n');
+        }
+    }
+
+    try writer.writeAll("suggested_actions:\n");
+    try writeSuggestedActionsText(writer, source_path, has_issues);
+}
+
+fn writeDoctorJson(writer: *std.Io.Writer, source_path: []const u8, summary: DatabaseSummary, report: DiagnosticReport) !void {
+    const has_issues = report.issue_count != 0;
+    try writer.writeAll("{\n");
+    try writer.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
+    try writer.print("  \"status\": \"{s}\",\n", .{if (has_issues) "needs_attention" else "ok"});
+    try writer.writeAll("  \"command\": \"doctor\",\n");
+    try writer.writeAll("  \"source_path\": ");
+    try writeJsonString(writer, source_path);
+    try writer.print(
+        \\,
+        \\  "quick_check": "ok",
+        \\  "schema": "ok",
+        \\  "checked": {{
+        \\    "objects": {d},
+        \\    "chunks": {d},
+        \\    "vectors": {d},
+        \\    "loose_chunks": {d}
+        \\  }},
+        \\  "tables": {{
+        \\    "user": {d},
+        \\    "private": {d}
+        \\  }},
+        \\  "issue_count": {d},
+        \\  "issue_counts":
+    , .{
+        report.stats.objects,
+        report.stats.chunks,
+        report.stats.vectors,
+        report.stats.loose_chunks,
+        summary.user_table_count,
+        summary.private_table_count,
+        report.issue_count,
+    });
+    try writer.writeByte(' ');
+    try writeDiagnosticIssueCountsJson(writer, report.issue_counts);
+    try writer.writeAll(",\n  \"severity_counts\": ");
+    try writeDiagnosticSeverityCountsJson(writer, report.severity_counts);
+    try writer.print(",\n  \"issues_truncated\": {},\n", .{report.issues_truncated});
+    try writer.writeAll("  \"issues\": ");
+    try writeDiagnosticIssuesJson(writer, report.issues);
+    try writer.writeAll(",\n  \"suggested_actions\": ");
+    try writeSuggestedActionsJson(writer, source_path, has_issues);
+    try writer.writeAll("\n}\n");
+}
+
+fn writeSuggestedActionsText(writer: *std.Io.Writer, source_path: []const u8, has_issues: bool) !void {
+    if (!has_issues) {
+        try writer.writeAll("  no action needed\n");
+        return;
+    }
+    try writer.writeAll("  restore from a recent backup if available\n");
+    try writer.print("  run zova check --deep {s}\n", .{source_path});
+    try writer.print("  run zova salvage --dry-run {s}\n", .{source_path});
+    try writer.print("  run zova salvage {s} <destination.zova>\n", .{source_path});
+}
+
+fn writeSuggestedActionsJson(writer: *std.Io.Writer, source_path: []const u8, has_issues: bool) !void {
+    _ = source_path;
+    if (!has_issues) {
+        try writer.writeAll("[\"no action needed\"]");
+        return;
+    }
+    try writer.writeAll("[");
+    try writeJsonString(writer, "restore from a recent backup if available");
+    try writer.writeAll(", ");
+    try writeJsonString(writer, "run zova check --deep <file.zova>");
+    try writer.writeAll(", ");
+    try writeJsonString(writer, "run zova salvage --dry-run <file.zova>");
+    try writer.writeAll(", ");
+    try writeJsonString(writer, "run zova salvage <file.zova> <destination.zova>");
+    try writer.writeAll("]");
+}
+
+fn writeSalvageDryRunText(writer: *std.Io.Writer, source_path: []const u8, plan: SalvagePlan) !void {
+    const has_issues = plan.report.issue_count != 0;
+    try writer.print(
+        \\Zova salvage dry-run: {s}
+        \\status: {s}
+        \\dry_run: true
+        \\will_write_destination: false
+        \\recoverability: {s}
+        \\recoverable_user_tables: {d}
+        \\recoverable_user_schema_objects: {d}
+        \\recoverable_user_rows: {d}
+        \\recoverable_objects: {d}
+        \\recoverable_chunks: {d}
+        \\recoverable_loose_chunks: {d}
+        \\recoverable_vector_collections: {d}
+        \\recoverable_vectors: {d}
+        \\skipped_user_tables: {d}
+        \\skipped_user_schema_objects: {d}
+        \\skipped_user_rows: {d}
+        \\skipped_objects: {d}
+        \\skipped_chunks: {d}
+        \\skipped_loose_chunks: {d}
+        \\skipped_vector_collections: {d}
+        \\skipped_vectors: {d}
+        \\issue_count: {d}
+        \\sqlite_issues: {d}
+        \\object_issues: {d}
+        \\chunk_issues: {d}
+        \\vector_issues: {d}
+        \\error_issues: {d}
+        \\issues_truncated: {}
+        \\
+    , .{
+        source_path,
+        if (has_issues) "needs_attention" else "ok",
+        salvageRecoverabilityText(plan.recoverability),
+        plan.recoverable.user_tables,
+        plan.recoverable.user_schema_objects,
+        plan.recoverable.user_rows,
+        plan.recoverable.objects,
+        plan.recoverable.chunks,
+        plan.recoverable.loose_chunks,
+        plan.recoverable.vector_collections,
+        plan.recoverable.vectors,
+        plan.skipped.user_tables,
+        plan.skipped.user_schema_objects,
+        plan.skipped.user_rows,
+        plan.skipped.objects,
+        plan.skipped.chunks,
+        plan.skipped.loose_chunks,
+        plan.skipped.vector_collections,
+        plan.skipped.vectors,
+        plan.report.issue_count,
+        plan.report.issue_counts.sqlite,
+        plan.report.issue_counts.object,
+        plan.report.issue_counts.chunk,
+        plan.report.issue_counts.vector,
+        plan.report.severity_counts.errors,
+        plan.report.issues_truncated,
+    });
+
+    try writer.writeAll("issues:\n");
+    if (plan.report.issues.len == 0) {
+        if (plan.report.issue_count == 0) {
+            try writer.writeAll("  none\n");
+        } else {
+            try writer.writeAll("  no issue examples shown\n");
+        }
+    } else {
+        for (plan.report.issues) |issue| {
+            try writer.print("  area={s} kind={s} severity={s} detail={s}", .{
+                diagnosticIssueAreaText(issue.area),
+                issue.kind,
+                issue.severity,
+                issue.detail,
+            });
+            if (issue.object_id_hex) |value| try writer.print(" object_id={s}", .{value});
+            if (issue.chunk_hash_hex) |value| try writer.print(" chunk_hash={s}", .{value});
+            if (issue.collection_name) |value| try writer.print(" collection={s}", .{value});
+            if (issue.vector_id) |value| try writer.print(" vector_id={s}", .{value});
+            try writer.writeByte('\n');
+        }
+    }
+
+    try writer.writeAll("suggested_actions:\n");
+    try writeSalvageSuggestedActionsText(writer, source_path, has_issues);
+}
+
+fn writeSalvageDryRunJson(writer: *std.Io.Writer, source_path: []const u8, plan: SalvagePlan) !void {
+    const has_issues = plan.report.issue_count != 0;
+    try writer.writeAll("{\n");
+    try writer.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
+    try writer.print("  \"status\": \"{s}\",\n", .{if (has_issues) "needs_attention" else "ok"});
+    try writer.writeAll("  \"command\": \"salvage\",\n");
+    try writer.writeAll("  \"dry_run\": true,\n");
+    try writer.writeAll("  \"will_write_destination\": false,\n");
+    try writer.writeAll("  \"source_path\": ");
+    try writeJsonString(writer, source_path);
+    try writer.writeAll(",\n  \"recoverability\": ");
+    try writeJsonString(writer, salvageRecoverabilityText(plan.recoverability));
+    try writer.writeAll(",\n  \"recoverable\": ");
+    try writeSalvageCountsJson(writer, plan.recoverable);
+    try writer.writeAll(",\n  \"skipped\": ");
+    try writeSalvageCountsJson(writer, plan.skipped);
+    try writer.print(",\n  \"issue_count\": {d},\n", .{plan.report.issue_count});
+    try writer.writeAll("  \"issue_counts\": ");
+    try writeDiagnosticIssueCountsJson(writer, plan.report.issue_counts);
+    try writer.writeAll(",\n  \"severity_counts\": ");
+    try writeDiagnosticSeverityCountsJson(writer, plan.report.severity_counts);
+    try writer.print(",\n  \"issues_truncated\": {},\n", .{plan.report.issues_truncated});
+    try writer.writeAll("  \"issues\": ");
+    try writeDiagnosticIssuesJson(writer, plan.report.issues);
+    try writer.writeAll(",\n  \"suggested_actions\": ");
+    try writeSalvageSuggestedActionsJson(writer, has_issues);
+    try writer.writeAll("\n}\n");
+}
+
+fn writeSalvageExecutionText(
+    writer: *std.Io.Writer,
+    source_path: []const u8,
+    destination_path: []const u8,
+    result: SalvageExecutionResult,
+) !void {
+    try writer.print(
+        \\Zova salvage: {s}
+        \\status: {s}
+        \\dry_run: false
+        \\will_write_destination: true
+        \\destination: {s}
+        \\destination_verified: {}
+        \\recoverability: {s}
+        \\copied_user_tables: {d}
+        \\copied_user_schema_objects: {d}
+        \\copied_user_rows: {d}
+        \\copied_objects: {d}
+        \\copied_chunks: {d}
+        \\copied_loose_chunks: {d}
+        \\copied_vector_collections: {d}
+        \\copied_vectors: {d}
+        \\skipped_user_tables: {d}
+        \\skipped_user_schema_objects: {d}
+        \\skipped_user_rows: {d}
+        \\skipped_objects: {d}
+        \\skipped_chunks: {d}
+        \\skipped_loose_chunks: {d}
+        \\skipped_vector_collections: {d}
+        \\skipped_vectors: {d}
+        \\issue_count: {d}
+        \\issues_truncated: {}
+        \\
+    , .{
+        source_path,
+        if (result.destination_verified) "ok" else "error",
+        destination_path,
+        result.destination_verified,
+        salvageRecoverabilityText(result.plan.recoverability),
+        result.copied.user_tables,
+        result.copied.user_schema_objects,
+        result.copied.user_rows,
+        result.copied.objects,
+        result.copied.chunks,
+        result.copied.loose_chunks,
+        result.copied.vector_collections,
+        result.copied.vectors,
+        result.plan.skipped.user_tables,
+        result.plan.skipped.user_schema_objects,
+        result.plan.skipped.user_rows,
+        result.plan.skipped.objects,
+        result.plan.skipped.chunks,
+        result.plan.skipped.loose_chunks,
+        result.plan.skipped.vector_collections,
+        result.plan.skipped.vectors,
+        result.plan.report.issue_count,
+        result.plan.report.issues_truncated,
+    });
+
+    try writer.writeAll("issues:\n");
+    if (result.plan.report.issues.len == 0) {
+        if (result.plan.report.issue_count == 0) {
+            try writer.writeAll("  none\n");
+        } else {
+            try writer.writeAll("  no issue examples shown\n");
+        }
+    } else {
+        for (result.plan.report.issues) |issue| {
+            try writer.print("  area={s} kind={s} severity={s} detail={s}", .{
+                diagnosticIssueAreaText(issue.area),
+                issue.kind,
+                issue.severity,
+                issue.detail,
+            });
+            if (issue.object_id_hex) |value| try writer.print(" object_id={s}", .{value});
+            if (issue.chunk_hash_hex) |value| try writer.print(" chunk_hash={s}", .{value});
+            if (issue.collection_name) |value| try writer.print(" collection={s}", .{value});
+            if (issue.vector_id) |value| try writer.print(" vector_id={s}", .{value});
+            try writer.writeByte('\n');
+        }
+    }
+
+    try writer.writeAll("suggested_actions:\n");
+    if (result.destination_verified) {
+        try writer.writeAll("  run zova check --deep on the destination before replacing any live file\n");
+    } else {
+        try writer.writeAll("  restore from a recent backup if available\n");
+        try writer.writeAll("  inspect the source with zova doctor before trying salvage again\n");
+    }
+}
+
+fn writeSalvageExecutionJson(
+    writer: *std.Io.Writer,
+    source_path: []const u8,
+    destination_path: []const u8,
+    result: SalvageExecutionResult,
+) !void {
+    try writer.writeAll("{\n");
+    try writer.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
+    try writer.print("  \"status\": \"{s}\",\n", .{if (result.destination_verified) "ok" else "error"});
+    try writer.writeAll("  \"command\": \"salvage\",\n");
+    try writer.writeAll("  \"dry_run\": false,\n");
+    try writer.writeAll("  \"will_write_destination\": true,\n");
+    try writer.writeAll("  \"source_path\": ");
+    try writeJsonString(writer, source_path);
+    try writer.writeAll(",\n  \"destination_path\": ");
+    try writeJsonString(writer, destination_path);
+    try writer.print(",\n  \"destination_verified\": {},\n", .{result.destination_verified});
+    try writer.writeAll("  \"recoverability\": ");
+    try writeJsonString(writer, salvageRecoverabilityText(result.plan.recoverability));
+    try writer.writeAll(",\n  \"copied\": ");
+    try writeSalvageCountsJson(writer, result.copied);
+    try writer.writeAll(",\n  \"recoverable\": ");
+    try writeSalvageCountsJson(writer, result.plan.recoverable);
+    try writer.writeAll(",\n  \"skipped\": ");
+    try writeSalvageCountsJson(writer, result.plan.skipped);
+    try writer.print(",\n  \"issue_count\": {d},\n", .{result.plan.report.issue_count});
+    try writer.writeAll("  \"issue_counts\": ");
+    try writeDiagnosticIssueCountsJson(writer, result.plan.report.issue_counts);
+    try writer.writeAll(",\n  \"severity_counts\": ");
+    try writeDiagnosticSeverityCountsJson(writer, result.plan.report.severity_counts);
+    try writer.print(",\n  \"issues_truncated\": {},\n", .{result.plan.report.issues_truncated});
+    try writer.writeAll("  \"issues\": ");
+    try writeDiagnosticIssuesJson(writer, result.plan.report.issues);
+    try writer.writeAll(",\n  \"suggested_actions\": ");
+    if (result.destination_verified) {
+        try writer.writeAll("[");
+        try writeJsonString(writer, "run zova check --deep on the destination before replacing any live file");
+        try writer.writeAll("]");
+    } else {
+        try writer.writeAll("[");
+        try writeJsonString(writer, "restore from a recent backup if available");
+        try writer.writeAll(", ");
+        try writeJsonString(writer, "inspect the source with zova doctor before trying salvage again");
+        try writer.writeAll("]");
+    }
+    try writer.writeAll("\n}\n");
+}
+
+fn writeSalvageCountsJson(writer: *std.Io.Writer, counts: SalvageCounts) !void {
+    try writer.print(
+        \\{{
+        \\    "user_tables": {d},
+        \\    "user_schema_objects": {d},
+        \\    "user_rows": {d},
+        \\    "objects": {d},
+        \\    "chunks": {d},
+        \\    "loose_chunks": {d},
+        \\    "vector_collections": {d},
+        \\    "vectors": {d}
+        \\  }}
+    , .{
+        counts.user_tables,
+        counts.user_schema_objects,
+        counts.user_rows,
+        counts.objects,
+        counts.chunks,
+        counts.loose_chunks,
+        counts.vector_collections,
+        counts.vectors,
+    });
+}
+
+fn writeSalvageSuggestedActionsText(writer: *std.Io.Writer, source_path: []const u8, has_issues: bool) !void {
+    if (!has_issues) {
+        try writer.writeAll("  source appears recoverable\n");
+        try writer.writeAll("  no destination was written\n");
+        try writer.print("  run: zova salvage {s} <destination.zova>\n", .{source_path});
+        return;
+    }
+    try writer.writeAll("  restore from a recent backup if available\n");
+    try writer.print("  review this dry-run report before salvaging {s}\n", .{source_path});
+    try writer.print("  run: zova salvage {s} <destination.zova>\n", .{source_path});
+}
+
+fn writeSalvageSuggestedActionsJson(writer: *std.Io.Writer, has_issues: bool) !void {
+    if (!has_issues) {
+        try writer.writeAll("[");
+        try writeJsonString(writer, "source appears recoverable");
+        try writer.writeAll(", ");
+        try writeJsonString(writer, "no destination was written");
+        try writer.writeAll(", ");
+        try writeJsonString(writer, "run zova salvage <source.zova> <destination.zova> to create a recovery copy");
+        try writer.writeAll("]");
+        return;
+    }
+    try writer.writeAll("[");
+    try writeJsonString(writer, "restore from a recent backup if available");
+    try writer.writeAll(", ");
+    try writeJsonString(writer, "review this dry-run report before salvaging");
+    try writer.writeAll(", ");
+    try writeJsonString(writer, "run zova salvage <source.zova> <destination.zova> to copy recoverable data into a new file");
+    try writer.writeAll("]");
+}
+
+fn salvageRecoverabilityText(value: SalvageRecoverability) []const u8 {
+    return switch (value) {
+        .recoverable => "recoverable",
+        .partially_recoverable => "partially_recoverable",
+        .not_recoverable => "not_recoverable",
+        .unknown => "unknown",
+    };
+}
+
+fn writeDiagnosticIssueCountsJson(writer: *std.Io.Writer, counts: DiagnosticIssueCounts) !void {
     try writer.print(
         \\{{
         \\    "sqlite": {d},
@@ -2583,12 +3456,23 @@ fn writeDeepIssueCountsJson(writer: *std.Io.Writer, counts: DeepIssueCounts) !vo
     , .{ counts.sqlite, counts.object, counts.chunk, counts.vector });
 }
 
-fn writeDeepIssuesJson(writer: *std.Io.Writer, issues: []const DeepIssue) !void {
+fn writeDiagnosticSeverityCountsJson(writer: *std.Io.Writer, counts: DiagnosticSeverityCounts) !void {
+    try writer.print(
+        \\{{
+        \\    "info": {d},
+        \\    "warning": {d},
+        \\    "error": {d},
+        \\    "fatal": {d}
+        \\  }}
+    , .{ counts.info, counts.warning, counts.errors, counts.fatal });
+}
+
+fn writeDiagnosticIssuesJson(writer: *std.Io.Writer, issues: []const DiagnosticIssue) !void {
     try writer.writeAll("[");
     for (issues, 0..) |issue, index| {
         if (index != 0) try writer.writeAll(", ");
         try writer.writeAll("{\"area\": ");
-        try writeJsonString(writer, deepIssueAreaText(issue.area));
+        try writeJsonString(writer, diagnosticIssueAreaText(issue.area));
         try writer.writeAll(", \"kind\": ");
         try writeJsonString(writer, issue.kind);
         try writer.writeAll(", \"severity\": ");
@@ -2616,7 +3500,7 @@ fn writeDeepIssuesJson(writer: *std.Io.Writer, issues: []const DeepIssue) !void 
     try writer.writeAll("]");
 }
 
-fn deepIssueAreaText(area: DeepIssueArea) []const u8 {
+fn diagnosticIssueAreaText(area: DiagnosticIssueArea) []const u8 {
     return switch (area) {
         .sqlite => "sqlite",
         .object => "object",
@@ -2681,14 +3565,14 @@ fn quickCheck(db: *zova.Database) !void {
     }
 }
 
-fn deepCheck(allocator: std.mem.Allocator, db: *zova.Database) !DeepReport {
-    var issues: std.ArrayList(DeepIssue) = .empty;
+fn runDiagnostics(allocator: std.mem.Allocator, db: *zova.Database, issue_limit: usize) !DiagnosticReport {
+    var issues: std.ArrayList(DiagnosticIssue) = .empty;
     errdefer {
         for (issues.items) |*issue| issue.deinit(allocator);
         issues.deinit(allocator);
     }
 
-    var report = DeepReport{};
+    var report = DiagnosticReport{ .issue_limit = issue_limit };
     try validateObjects(allocator, db, &report, &issues);
     try validateLooseChunks(allocator, db, &report, &issues);
     try validateVectors(allocator, db, &report, &issues);
@@ -2696,14 +3580,442 @@ fn deepCheck(allocator: std.mem.Allocator, db: *zova.Database) !DeepReport {
     return report;
 }
 
-fn validateObjects(allocator: std.mem.Allocator, db: *zova.Database, report: *DeepReport, issues: *std.ArrayList(DeepIssue)) !void {
+fn diagnosticErrorReport(
+    allocator: std.mem.Allocator,
+    issue_limit: usize,
+    area: DiagnosticIssueArea,
+    kind: []const u8,
+    detail: []const u8,
+) !DiagnosticReport {
+    var issues: std.ArrayList(DiagnosticIssue) = .empty;
+    errdefer {
+        for (issues.items) |*issue| issue.deinit(allocator);
+        issues.deinit(allocator);
+    }
+
+    var report = DiagnosticReport{ .issue_limit = issue_limit };
+    try addDiagnosticIssue(allocator, &report, &issues, area, kind, detail, null, null, null, null);
+    report.issues = try issues.toOwnedSlice(allocator);
+    return report;
+}
+
+fn buildSalvagePlan(summary: DatabaseSummary, report: DiagnosticReport) SalvagePlan {
+    var recoverable = SalvageCounts{
+        .user_tables = summary.user_table_count,
+        .objects = summary.object_count,
+        .chunks = summary.chunk_count,
+        .loose_chunks = summary.loose_chunk_count,
+        .vector_collections = summary.vector_collection_count,
+        .vectors = summary.vector_count,
+    };
+    const skipped = SalvageCounts{
+        .objects = @min(summary.object_count, report.issue_counts.object),
+        .chunks = report.issue_counts.chunk,
+        .vectors = @min(summary.vector_count, report.issue_counts.vector),
+    };
+
+    recoverable.objects = subtractClamped(recoverable.objects, skipped.objects);
+    recoverable.chunks = subtractClamped(recoverable.chunks, skipped.chunks);
+    recoverable.vectors = subtractClamped(recoverable.vectors, skipped.vectors);
+
+    const recoverability: SalvageRecoverability = if (report.issue_counts.sqlite != 0)
+        .unknown
+    else if (report.issue_count == 0)
+        .recoverable
+    else if (hasRecoverableData(recoverable))
+        .partially_recoverable
+    else
+        .not_recoverable;
+
+    return .{
+        .report = report,
+        .recoverability = recoverability,
+        .recoverable = recoverable,
+        .skipped = skipped,
+    };
+}
+
+fn executeSalvage(
+    allocator: std.mem.Allocator,
+    source: *zova.Database,
+    destination_path: [:0]const u8,
+    plan: SalvagePlan,
+) !SalvageExecutionResult {
+    if (plan.report.issue_counts.sqlite != 0) return error.Corrupt;
+
+    var destination = try zova.Database.create(destination_path);
+    defer destination.deinit();
+
+    var result_plan = plan;
+    var copied = SalvageCounts{};
+    const user_sql = try copyUserSql(allocator, source, &destination);
+    copied.user_tables = user_sql.copied_tables;
+    copied.user_schema_objects = user_sql.copied_schema_objects;
+    copied.user_rows = user_sql.copied_rows;
+    result_plan.skipped.user_tables += user_sql.skipped_tables;
+    result_plan.skipped.user_schema_objects += user_sql.skipped_schema_objects;
+    result_plan.skipped.user_rows += user_sql.skipped_rows;
+    result_plan.recoverable.user_tables = copied.user_tables;
+    result_plan.recoverable.user_schema_objects = copied.user_schema_objects;
+    result_plan.recoverable.user_rows = copied.user_rows;
+    copied.objects = try copyValidObjects(allocator, source, &destination);
+    copied.loose_chunks = try copyValidLooseChunks(allocator, source, &destination);
+    try copyValidVectors(allocator, source, &destination, &copied);
+    copied.chunks = try scalarU64(&destination, "select count(*) from _zova_chunks");
+
+    const destination_verified = try verifySalvageDestination(allocator, &destination);
+    return .{
+        .plan = result_plan,
+        .copied = copied,
+        .destination_verified = destination_verified,
+    };
+}
+
+fn copyUserSql(allocator: std.mem.Allocator, source: *zova.Database, destination: *zova.Database) !UserSqlCopyResult {
+    var tables = try source.prepare(
+        \\select name, sql
+        \\from sqlite_master
+        \\where type = 'table'
+        \\  and sql is not null
+        \\  and lower(substr(name, 1, 6)) != '_zova_'
+        \\  and lower(substr(name, 1, 7)) != 'sqlite_'
+        \\order by name asc
+    );
+    defer tables.deinit();
+
+    var result = UserSqlCopyResult{};
+    while ((try tables.step()) == .row) {
+        const table_name = try allocator.dupe(u8, tables.columnText(0));
+        defer allocator.free(table_name);
+        const schema_sql = try allocator.dupeZ(u8, tables.columnText(1));
+        defer allocator.free(schema_sql);
+        const source_row_count = countRowsInUserTable(allocator, source, table_name) catch 0;
+
+        destination.exec(schema_sql) catch {
+            result.skipped_tables += 1;
+            result.skipped_rows += source_row_count;
+            continue;
+        };
+        const rows = copyUserTableRows(allocator, source, destination, table_name, source_row_count) catch {
+            result.skipped_tables += 1;
+            result.skipped_rows += source_row_count;
+            continue;
+        };
+        result.copied_rows += rows.copied_rows;
+        result.skipped_rows += rows.skipped_rows;
+        if (rows.skipped_rows != 0) result.skipped_tables += 1;
+        result.copied_tables += 1;
+    }
+
+    const schema_objects = try copyUserSchemaObjects(allocator, source, destination);
+    result.copied_schema_objects = schema_objects.copied_schema_objects;
+    result.skipped_schema_objects = schema_objects.skipped_schema_objects;
+    return result;
+}
+
+fn copyUserSchemaObjects(allocator: std.mem.Allocator, source: *zova.Database, destination: *zova.Database) !UserSqlCopyResult {
+    var objects = try source.prepare(
+        \\select sql
+        \\from sqlite_master
+        \\where type in ('index', 'view', 'trigger')
+        \\  and sql is not null
+        \\  and lower(substr(name, 1, 6)) != '_zova_'
+        \\  and lower(substr(name, 1, 7)) != 'sqlite_'
+        \\  and lower(substr(tbl_name, 1, 6)) != '_zova_'
+        \\  and lower(substr(tbl_name, 1, 7)) != 'sqlite_'
+        \\order by
+        \\  case type when 'index' then 0 when 'view' then 1 else 2 end,
+        \\  name asc
+    );
+    defer objects.deinit();
+
+    var result = UserSqlCopyResult{};
+    while ((try objects.step()) == .row) {
+        const schema_sql = try allocator.dupeZ(u8, objects.columnText(0));
+        defer allocator.free(schema_sql);
+        destination.exec(schema_sql) catch {
+            result.skipped_schema_objects += 1;
+            continue;
+        };
+        result.copied_schema_objects += 1;
+    }
+    return result;
+}
+
+fn countUserSchemaObjects(db: *zova.Database) !u64 {
+    return try scalarU64(db,
+        \\select count(*)
+        \\from sqlite_master
+        \\where type in ('index', 'view', 'trigger')
+        \\  and sql is not null
+        \\  and lower(substr(name, 1, 6)) != '_zova_'
+        \\  and lower(substr(name, 1, 7)) != 'sqlite_'
+        \\  and lower(substr(tbl_name, 1, 6)) != '_zova_'
+        \\  and lower(substr(tbl_name, 1, 7)) != 'sqlite_'
+    );
+}
+
+fn countUserRows(allocator: std.mem.Allocator, db: *zova.Database) !u64 {
+    var tables = try db.prepare(
+        \\select name
+        \\from sqlite_master
+        \\where type = 'table'
+        \\  and sql is not null
+        \\  and lower(substr(name, 1, 6)) != '_zova_'
+        \\  and lower(substr(name, 1, 7)) != 'sqlite_'
+        \\order by name asc
+    );
+    defer tables.deinit();
+
+    var count: u64 = 0;
+    while ((try tables.step()) == .row) {
+        const table_name = try allocator.dupe(u8, tables.columnText(0));
+        defer allocator.free(table_name);
+        count += countRowsInUserTable(allocator, db, table_name) catch 0;
+    }
+    return count;
+}
+
+fn countRowsInUserTable(allocator: std.mem.Allocator, db: *zova.Database, table_name: []const u8) !u64 {
+    const quoted_name = try quoteSqlIdentifierAlloc(allocator, table_name);
+    defer allocator.free(quoted_name);
+
+    const sql = try std.fmt.allocPrintSentinel(allocator, "select count(*) from {s}", .{quoted_name}, 0);
+    defer allocator.free(sql);
+
+    return try scalarU64(db, sql);
+}
+
+fn copyUserTableRows(
+    allocator: std.mem.Allocator,
+    source: *zova.Database,
+    destination: *zova.Database,
+    table_name: []const u8,
+    source_row_count: u64,
+) !UserSqlRowCopyResult {
+    const quoted_name = try quoteSqlIdentifierAlloc(allocator, table_name);
+    defer allocator.free(quoted_name);
+
+    const select_sql = try std.fmt.allocPrintSentinel(allocator, "select * from {s}", .{quoted_name}, 0);
+    defer allocator.free(select_sql);
+
+    var read_rows = try source.prepare(select_sql);
+    defer read_rows.deinit();
+
+    const column_count = read_rows.columnCount();
+    const insert_sql = try buildInsertAllSql(allocator, quoted_name, @intCast(column_count));
+    defer allocator.free(insert_sql);
+
+    var insert_row = destination.prepare(insert_sql) catch return .{ .skipped_rows = source_row_count };
+    defer insert_row.deinit();
+
+    var result = UserSqlRowCopyResult{};
+    while ((try read_rows.step()) == .row) {
+        var column_index: c_int = 0;
+        var row_failed = false;
+        while (column_index < column_count) : (column_index += 1) {
+            const bind_index: c_int = column_index + 1;
+            const bind_result = switch (read_rows.columnType(column_index)) {
+                .integer => insert_row.bindInt64(bind_index, read_rows.columnInt64(column_index)),
+                .float => insert_row.bindDouble(bind_index, read_rows.columnDouble(column_index)),
+                .text => insert_row.bindText(bind_index, read_rows.columnText(column_index)),
+                .blob => insert_row.bindBlob(bind_index, read_rows.columnBlob(column_index)),
+                .null => insert_row.bindNull(bind_index),
+            };
+            bind_result catch {
+                row_failed = true;
+                break;
+            };
+        }
+        if (!row_failed) {
+            expectDone(&insert_row) catch {
+                row_failed = true;
+            };
+        }
+        if (row_failed) {
+            result.skipped_rows += 1;
+        } else {
+            result.copied_rows += 1;
+        }
+        insert_row.reset() catch {};
+        insert_row.clearBindings() catch {};
+    }
+    return result;
+}
+
+fn copyValidObjects(allocator: std.mem.Allocator, source: *zova.Database, destination: *zova.Database) !u64 {
+    var objects = try source.prepare("select object_id from _zova_objects order by hex(object_id)");
+    defer objects.deinit();
+
+    var copied: u64 = 0;
+    while ((try objects.step()) == .row) {
+        const raw_id = objects.columnBlob(0);
+        if (raw_id.len != @sizeOf(zova.ObjectId)) continue;
+
+        var id: zova.ObjectId = undefined;
+        @memcpy(&id, raw_id);
+        var object = source.getObject(allocator, id) catch continue;
+
+        const copied_id = destination.putObject(object.bytes) catch {
+            object.deinit(allocator);
+            continue;
+        };
+        object.deinit(allocator);
+        if (std.mem.eql(u8, copied_id[0..], id[0..])) copied += 1;
+    }
+    return copied;
+}
+
+fn copyValidLooseChunks(allocator: std.mem.Allocator, source: *zova.Database, destination: *zova.Database) !u64 {
+    var chunks = try source.prepare(
+        \\select c.chunk_hash
+        \\from _zova_chunks c
+        \\where not exists (
+        \\  select 1 from _zova_object_chunks oc where oc.chunk_hash = c.chunk_hash
+        \\)
+        \\order by hex(c.chunk_hash)
+    );
+    defer chunks.deinit();
+
+    var copied: u64 = 0;
+    while ((try chunks.step()) == .row) {
+        const raw_hash = chunks.columnBlob(0);
+        if (raw_hash.len != @sizeOf(zova.ObjectChunkId)) continue;
+
+        var hash: zova.ObjectChunkId = undefined;
+        @memcpy(&hash, raw_hash);
+        var chunk = source.getObjectChunk(allocator, hash) catch continue;
+
+        destination.putObjectChunk(hash, chunk.bytes) catch {
+            chunk.deinit(allocator);
+            continue;
+        };
+        chunk.deinit(allocator);
+        copied += 1;
+    }
+    return copied;
+}
+
+fn copyValidVectors(
+    allocator: std.mem.Allocator,
+    source: *zova.Database,
+    destination: *zova.Database,
+    copied: *SalvageCounts,
+) !void {
+    var collections = try source.listVectorCollections(allocator);
+    defer collections.deinit(allocator);
+
+    for (collections.items) |collection| {
+        destination.createVectorCollection(collection.name, .{
+            .dimensions = collection.dimensions,
+            .metric = collection.metric,
+        }) catch continue;
+        copied.vector_collections += 1;
+
+        var vectors = try source.prepare(
+            \\select vector_id
+            \\from _zova_vectors
+            \\where collection_name = ?
+            \\order by vector_id asc
+        );
+        defer vectors.deinit();
+        try vectors.bindText(1, collection.name);
+
+        while ((try vectors.step()) == .row) {
+            const vector_id = try allocator.dupe(u8, vectors.columnText(0));
+
+            var vector = source.getVector(allocator, collection.name, vector_id) catch {
+                allocator.free(vector_id);
+                continue;
+            };
+
+            destination.putVector(collection.name, vector.id, vector.values) catch {
+                vector.deinit(allocator);
+                allocator.free(vector_id);
+                continue;
+            };
+            vector.deinit(allocator);
+            allocator.free(vector_id);
+            copied.vectors += 1;
+        }
+    }
+}
+
+fn verifySalvageDestination(allocator: std.mem.Allocator, destination: *zova.Database) !bool {
+    quickCheck(destination) catch return false;
+    var report = runDiagnostics(allocator, destination, 0) catch return false;
+    defer report.deinit(allocator);
+    return report.issue_count == 0;
+}
+
+fn quoteSqlIdentifierAlloc(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    var quote_count: usize = 0;
+    for (name) |byte| {
+        if (byte == '"') quote_count += 1;
+    }
+
+    const out = try allocator.alloc(u8, name.len + quote_count + 2);
+    var index: usize = 0;
+    out[index] = '"';
+    index += 1;
+    for (name) |byte| {
+        out[index] = byte;
+        index += 1;
+        if (byte == '"') {
+            out[index] = '"';
+            index += 1;
+        }
+    }
+    out[index] = '"';
+    return out;
+}
+
+fn buildInsertAllSql(allocator: std.mem.Allocator, quoted_name: []const u8, column_count: usize) ![:0]u8 {
+    if (column_count == 0) {
+        return std.fmt.allocPrintSentinel(allocator, "insert into {s} default values", .{quoted_name}, 0);
+    }
+
+    const placeholders_len = column_count + (column_count - 1) * 2;
+    const placeholders = try allocator.alloc(u8, placeholders_len);
+    defer allocator.free(placeholders);
+
+    var index: usize = 0;
+    for (0..column_count) |column_index| {
+        if (column_index != 0) {
+            placeholders[index] = ',';
+            placeholders[index + 1] = ' ';
+            index += 2;
+        }
+        placeholders[index] = '?';
+        index += 1;
+    }
+
+    return std.fmt.allocPrintSentinel(allocator, "insert into {s} values ({s})", .{ quoted_name, placeholders }, 0);
+}
+
+fn subtractClamped(value: u64, amount: u64) u64 {
+    return if (amount >= value) 0 else value - amount;
+}
+
+fn hasRecoverableData(counts: SalvageCounts) bool {
+    return counts.user_tables != 0 or
+        counts.user_schema_objects != 0 or
+        counts.user_rows != 0 or
+        counts.objects != 0 or
+        counts.chunks != 0 or
+        counts.loose_chunks != 0 or
+        counts.vector_collections != 0 or
+        counts.vectors != 0;
+}
+
+fn validateObjects(allocator: std.mem.Allocator, db: *zova.Database, report: *DiagnosticReport, issues: *std.ArrayList(DiagnosticIssue)) !void {
     var stmt = try db.prepare("select object_id from _zova_objects order by hex(object_id)");
     defer stmt.deinit();
 
     while ((try stmt.step()) == .row) {
         const raw_id = stmt.columnBlob(0);
         if (raw_id.len != @sizeOf(zova.ObjectId)) {
-            try addDeepIssue(allocator, report, issues, .object, "object_id_shape", "ObjectCorrupt", raw_id, null, null, null);
+            try addDiagnosticIssue(allocator, report, issues, .object, "object_id_shape", "ObjectCorrupt", raw_id, null, null, null);
             continue;
         }
         var id: zova.ObjectId = undefined;
@@ -2711,28 +4023,55 @@ fn validateObjects(allocator: std.mem.Allocator, db: *zova.Database, report: *De
         report.stats.objects += 1;
 
         var manifest = db.objectManifest(allocator, id) catch |err| {
-            try addDeepIssue(allocator, report, issues, .object, "object_manifest", @errorName(err), id[0..], null, null, null);
+            try addMissingManifestChunkIssues(allocator, db, report, issues, id);
+            try addDiagnosticIssue(allocator, report, issues, .object, "object_manifest", @errorName(err), id[0..], null, null, null);
             continue;
         };
         defer manifest.deinit(allocator);
         for (manifest.chunks) |chunk| {
             report.stats.chunks += 1;
             var chunk_data = db.getObjectChunk(allocator, chunk.hash) catch |err| {
-                try addDeepIssue(allocator, report, issues, .chunk, "chunk_integrity", @errorName(err), id[0..], chunk.hash[0..], null, null);
+                try addDiagnosticIssue(allocator, report, issues, .chunk, "chunk_integrity", @errorName(err), id[0..], chunk.hash[0..], null, null);
                 continue;
             };
             chunk_data.deinit(allocator);
         }
 
         var object = db.getObject(allocator, id) catch |err| {
-            try addDeepIssue(allocator, report, issues, .object, "object_integrity", @errorName(err), id[0..], null, null, null);
+            try addDiagnosticIssue(allocator, report, issues, .object, "object_integrity", @errorName(err), id[0..], null, null, null);
             continue;
         };
         object.deinit(allocator);
     }
 }
 
-fn validateLooseChunks(allocator: std.mem.Allocator, db: *zova.Database, report: *DeepReport, issues: *std.ArrayList(DeepIssue)) !void {
+fn addMissingManifestChunkIssues(
+    allocator: std.mem.Allocator,
+    db: *zova.Database,
+    report: *DiagnosticReport,
+    issues: *std.ArrayList(DiagnosticIssue),
+    object_id: zova.ObjectId,
+) !void {
+    var stmt = try db.prepare(
+        \\select oc.chunk_hash
+        \\from _zova_object_chunks oc
+        \\left join _zova_chunks c on c.chunk_hash = oc.chunk_hash
+        \\where oc.object_id = ?
+        \\  and c.chunk_hash is null
+        \\order by oc.chunk_index asc
+    );
+    defer stmt.deinit();
+    try stmt.bindBlob(1, &object_id);
+
+    while ((try stmt.step()) == .row) {
+        const raw_hash = stmt.columnBlob(0);
+        const kind: []const u8 = if (raw_hash.len == @sizeOf(zova.ObjectChunkId)) "missing_chunk" else "missing_chunk_id_shape";
+        const detail: []const u8 = if (raw_hash.len == @sizeOf(zova.ObjectChunkId)) "ObjectChunkNotFound" else "ObjectCorrupt";
+        try addDiagnosticIssue(allocator, report, issues, .chunk, kind, detail, object_id[0..], raw_hash, null, null);
+    }
+}
+
+fn validateLooseChunks(allocator: std.mem.Allocator, db: *zova.Database, report: *DiagnosticReport, issues: *std.ArrayList(DiagnosticIssue)) !void {
     var stmt = try db.prepare(
         \\select c.chunk_hash
         \\from _zova_chunks c
@@ -2746,7 +4085,7 @@ fn validateLooseChunks(allocator: std.mem.Allocator, db: *zova.Database, report:
     while ((try stmt.step()) == .row) {
         const raw_hash = stmt.columnBlob(0);
         if (raw_hash.len != @sizeOf(zova.ObjectChunkId)) {
-            try addDeepIssue(allocator, report, issues, .chunk, "loose_chunk_id_shape", "ObjectCorrupt", null, raw_hash, null, null);
+            try addDiagnosticIssue(allocator, report, issues, .chunk, "loose_chunk_id_shape", "ObjectCorrupt", null, raw_hash, null, null);
             continue;
         }
         var hash: zova.ObjectChunkId = undefined;
@@ -2754,14 +4093,14 @@ fn validateLooseChunks(allocator: std.mem.Allocator, db: *zova.Database, report:
         report.stats.loose_chunks += 1;
 
         var chunk = db.getObjectChunk(allocator, hash) catch |err| {
-            try addDeepIssue(allocator, report, issues, .chunk, "loose_chunk_integrity", @errorName(err), null, hash[0..], null, null);
+            try addDiagnosticIssue(allocator, report, issues, .chunk, "loose_chunk_integrity", @errorName(err), null, hash[0..], null, null);
             continue;
         };
         chunk.deinit(allocator);
     }
 }
 
-fn validateVectors(allocator: std.mem.Allocator, db: *zova.Database, report: *DeepReport, issues: *std.ArrayList(DeepIssue)) !void {
+fn validateVectors(allocator: std.mem.Allocator, db: *zova.Database, report: *DiagnosticReport, issues: *std.ArrayList(DiagnosticIssue)) !void {
     var stmt = try db.prepare(
         \\select collection_name, vector_id
         \\from _zova_vectors
@@ -2774,18 +4113,34 @@ fn validateVectors(allocator: std.mem.Allocator, db: *zova.Database, report: *De
         const vector_id = stmt.columnText(1);
         report.stats.vectors += 1;
         var vector = db.getVector(allocator, collection_name, vector_id) catch |err| {
-            try addDeepIssue(allocator, report, issues, .vector, "vector_integrity", @errorName(err), null, null, collection_name, vector_id);
+            try addDiagnosticIssue(allocator, report, issues, .vector, "vector_integrity", @errorName(err), null, null, collection_name, vector_id);
             continue;
         };
+        const collection = db.vectorCollectionInfo(allocator, collection_name) catch |err| {
+            vector.deinit(allocator);
+            try addDiagnosticIssue(allocator, report, issues, .vector, "vector_integrity", @errorName(err), null, null, collection_name, vector_id);
+            continue;
+        };
+        var mutable_collection = collection;
+        defer mutable_collection.deinit(allocator);
+        if (mutable_collection.metric == .cosine) {
+            var norm_squared: f32 = 0;
+            for (vector.values) |value| norm_squared += value * value;
+            if (norm_squared == 0) {
+                vector.deinit(allocator);
+                try addDiagnosticIssue(allocator, report, issues, .vector, "vector_integrity", @errorName(error.VectorCorrupt), null, null, collection_name, vector_id);
+                continue;
+            }
+        }
         vector.deinit(allocator);
     }
 }
 
-fn addDeepIssue(
+fn addDiagnosticIssue(
     allocator: std.mem.Allocator,
-    report: *DeepReport,
-    issues: *std.ArrayList(DeepIssue),
-    area: DeepIssueArea,
+    report: *DiagnosticReport,
+    issues: *std.ArrayList(DiagnosticIssue),
+    area: DiagnosticIssueArea,
     kind: []const u8,
     detail: []const u8,
     object_id: ?[]const u8,
@@ -2794,6 +4149,7 @@ fn addDeepIssue(
     vector_id: ?[]const u8,
 ) !void {
     report.issue_count += 1;
+    report.severity_counts.errors += 1;
     switch (area) {
         .sqlite => report.issue_counts.sqlite += 1,
         .object => report.issue_counts.object += 1,
@@ -2801,12 +4157,12 @@ fn addDeepIssue(
         .vector => report.issue_counts.vector += 1,
     }
 
-    if (issues.items.len >= 10) {
+    if (issues.items.len >= report.issue_limit) {
         report.issues_truncated = true;
         return;
     }
 
-    var issue = DeepIssue{
+    var issue = DiagnosticIssue{
         .area = area,
         .kind = kind,
         .detail = detail,

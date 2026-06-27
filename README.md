@@ -8,7 +8,7 @@ content-addressed objects, chunk manifests, streaming writes, and exact vector
 search. Applications keep their own metadata in normal SQL tables and store
 Zova object ids or vector ids alongside their rows.
 
-Current package version: `0.15.2`.
+Current package version: `0.16.0`.
 
 Zova is not tied to one application language. The project exposes:
 
@@ -17,7 +17,8 @@ Zova is not tied to one application language. The project exposes:
 - source-first Rust bindings in `bindings/rust`
 - source-first Go bindings in `bindings/go`
 - source-first Python bindings in `bindings/python`
-- a CLI for inspection, checks, backup, compact copy, and restore-to-new-file
+- a CLI for inspection, checks, diagnostics, salvage, backup, compact copy, and
+  restore-to-new-file
 - a source-only release package that consumers build locally
 
 TypeScript and Swift bindings are planned as later layers over the C ABI and
@@ -28,7 +29,7 @@ Rust/Go/Python binding foundation.
 Read this file in this order if you are new to Zova:
 
 1. [Architecture](#architecture)
-2. [What Works In v0.15.2](#what-works-in-v0152)
+2. [What Works In v0.16.0](#what-works-in-v0160)
 3. [File Boundary](#file-boundary)
 4. [C ABI](#c-abi)
 5. [Rust Bindings](#rust-bindings)
@@ -50,7 +51,7 @@ Read this file in this order if you are new to Zova:
 21. [Vendored SQLite](#vendored-sqlite)
 22. [Testing](#testing)
 23. [Release Package Policy](#release-package-policy)
-24. [Non-Goals In v0.15.2](#non-goals-in-v0152)
+24. [Non-Goals In v0.16.0](#non-goals-in-v0160)
 25. [Design Philosophy](#design-philosophy)
 
 ## Architecture
@@ -60,7 +61,7 @@ flowchart TD
     App["Application"]
     SQL["User SQL tables<br/>records and metadata"]
     ZovaAPI["Zova API<br/>native Zig or C ABI"]
-    CLI["zova CLI<br/>info, stats, inspect, check, backup"]
+    CLI["zova CLI<br/>inspect, check, doctor, salvage, backup"]
     DB["local .zova file<br/>SQLite database"]
     Meta["_zova_meta<br/>identity and format"]
     Objects["_zova_objects<br/>object identity"]
@@ -85,7 +86,7 @@ flowchart TD
     VecCols --> Vecs
 ```
 
-## What Works In v0.15.2
+## What Works In v0.16.0
 
 - normal SQLite access through a thin wrapper
 - `.zova` database create/open/validation
@@ -119,7 +120,7 @@ flowchart TD
   backup/compact/restore, objects, chunks, manifests, `ObjectWriter`, vectors,
   and SQL-native vector search
 - CLI `info`, `stats`, object/chunk/vector/table inspection, `check`,
-  `backup`, `compact`, and `restore`
+  `doctor`, `salvage --dry-run`, `salvage`, `backup`, `compact`, and `restore`
 - source-only release packaging
 
 The `.zova` format is still pre-1.0. Current files use
@@ -320,7 +321,7 @@ Run the Rust tests:
 cargo test --workspace --manifest-path bindings/rust/Cargo.toml
 ```
 
-The Rust crates are included in the source archive, but v0.15.2 does not publish
+The Rust crates are included in the source archive, but v0.16.0 does not publish
 them to crates.io automatically and does not ship compiled libraries. Consumers
 build from source.
 
@@ -356,7 +357,7 @@ go test ./...
 go vet ./...
 ```
 
-The Go module is included in the source archive, but v0.15.2 does not publish a
+The Go module is included in the source archive, but v0.16.0 does not publish a
 Go module automatically and does not ship compiled libraries. Consumers build
 from source.
 
@@ -389,7 +390,7 @@ uv run --isolated --with maturin --with pytest --directory bindings/python matur
 uv run --isolated --with pytest --directory bindings/python python -m pytest
 ```
 
-The Python package is included in the source archive, but v0.15.2 does not
+The Python package is included in the source archive, but v0.16.0 does not
 publish to PyPI automatically and does not ship a platform wheel matrix.
 Consumers build from source with maturin.
 
@@ -553,7 +554,7 @@ Rust, Go, Python, and the C ABI expose the same three operations:
 `savepoint`, `rollback_to_savepoint` / `RollbackToSavepoint`, and
 `release_savepoint` / `ReleaseSavepoint`.
 
-v0.15.2 also adds scoped helpers for rollback cleanup:
+v0.16.0 also includes scoped helpers for rollback cleanup:
 `Database.withSavepoint` in Zig, `with_savepoint` in Rust,
 `WithSavepoint` in Go, and `savepoint_context()` in Python. On success the
 helper releases the savepoint. On callback or body failure it rolls back to the
@@ -791,21 +792,21 @@ var close = try db.searchVectorsWithin(
 defer close.deinit(allocator);
 ```
 
-Search is exact and flat-scan in v0.15.2. That is deliberate: Zova currently
+Search is exact and flat-scan in v0.16.0. That is deliberate: Zova currently
 prioritizes deterministic local correctness over approximate indexing. It is a
 good fit for small and medium local datasets, offline ranking, tests that need
 repeatable nearest-neighbor results, and candidate-filtered search where SQL
 first narrows the metadata set and Zova ranks the eligible vector ids.
 
 It is not yet a low-latency ANN engine for millions of vectors. Zova does not
-include HNSW, IVFFlat, quantized indexes, or vector SQL operators in v0.15.2.
+include HNSW, IVFFlat, quantized indexes, or vector SQL operators in v0.16.0.
 
 Missing candidate ids are skipped. Invalid candidate ids return
 `error.VectorInvalid`. Corrupt selected vector rows return `error.VectorCorrupt`.
 
 ## SQL-Native Vector Search
 
-v0.15.2 keeps Zova vectors queryable from SQL on `zova.Database` connections.
+v0.16.0 keeps Zova vectors queryable from SQL on `zova.Database` connections.
 The raw `zova.sqlite.Database` wrapper remains plain SQLite and does not
 register Zova vector SQL helpers.
 
@@ -927,6 +928,9 @@ zova vectors [--json] [--limit <n>] <file.zova>
 zova vector-collection [--json] [--limit <n>] <file.zova> <name>
 zova tables [--json] [--limit <n>] <file.zova>
 zova check [--json] [--deep] <file.zova>
+zova doctor [--json] [--limit <n>] <file.zova>
+zova salvage --dry-run [--json] [--limit <n>] <source.zova>
+zova salvage [--json] [--limit <n>] <source.zova> <destination.zova>
 zova backup [--json] [--no-verify] <source.zova> <destination.zova>
 zova compact [--json] [--no-verify] <source.zova> <destination.zova>
 zova restore [--json] [--no-verify] <backup.zova> <destination.zova>
@@ -952,6 +956,25 @@ or row data.
 hashes, loose chunks, and vector row shape/finite values. It reports bounded
 issue examples where practical.
 
+`doctor` runs the same health checks in a friendlier report and suggests next
+actions. It does not repair the file.
+
+`salvage --dry-run` estimates what records, objects, chunks, and vectors appear
+recoverable. It never writes a destination file and never mutates the source.
+Use it when no good backup is available and you need a best-effort recovery plan
+before copying anything.
+
+`salvage` copies readable user SQL, complete objects, valid loose chunks, valid
+vector collections, and valid vector rows into a new `.zova` destination. It
+opens the source read-only, never overwrites the destination, verifies the
+destination, and may skip corrupt private Zova data. Prefer restoring a good
+backup when you have one; use salvage when backup restore is not enough.
+
+In the v0.16 line, `doctor` and `salvage` are CLI-first workflows. The C ABI
+and Rust/Go/Python bindings do not expose typed doctor/salvage report APIs yet;
+applications may invoke the CLI as an operational tool, but bindings should not
+parse the human text output as a stable library contract.
+
 `backup`, `compact`, and `restore` create new `.zova` destination files.
 Default verification is on. JSON output includes `cli_json_version`, `status`,
 `command`, `source_path`, `destination_path`, and `verified`.
@@ -967,10 +990,10 @@ Exit codes:
 - `3`: open, path, Zova identity, or unsupported version error
 - `4`: integrity or corruption check failure
 
-The CLI does not repair, migrate, delete loose chunks, rebuild manifests,
-replace live application files, change PRAGMAs, or dump stored bytes. `compact`
-uses `VACUUM INTO` to create a new file; it does not vacuum the source file in
-place.
+The CLI does not repair in place, migrate, delete loose chunks, rebuild
+manifests, replace live application files, change PRAGMAs, or dump stored
+bytes. `compact` uses `VACUUM INTO` to create a new file; it does not vacuum the
+source file in place.
 
 ## SQLite Policy
 
@@ -1062,7 +1085,7 @@ scripts/check-release.sh
 
 ## Release Package Policy
 
-v0.15.2 releases a source-only package/archive. The package includes:
+v0.16.0 releases a source-only package/archive. The package includes:
 
 - `README.md`
 - `build.zig`
@@ -1087,16 +1110,16 @@ Go package, and Python extension from source.
 The release script:
 
 ```sh
-scripts/package-release.sh 0.15.2
+scripts/package-release.sh 0.16.0
 ```
 
 tags the current commit, pushes the branch and tag, creates a source archive,
 and creates the GitHub release. Do not run it until the exact commit you want
 to release is ready.
 
-## Non-Goals In v0.15.2
+## Non-Goals In v0.16.0
 
-Zova v0.15.2 does not include:
+Zova v0.16.0 does not include:
 
 - ANN indexes
 - HNSW or IVFFlat
@@ -1109,7 +1132,7 @@ Zova v0.15.2 does not include:
 - PyPI publishing
 - platform wheel matrix publishing
 - background worker threads hidden inside Zova
-- repair commands
+- in-place repair commands
 - orphan scan CLI
 - CLI mutation commands
 - object or chunk extraction commands

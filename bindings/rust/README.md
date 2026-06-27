@@ -169,6 +169,11 @@ default, each operation verifies the destination after copying. Pass
 `BackupOptions { verify: false }`, `CompactOptions { verify: false }`, or
 `RestoreOptions { verify: false }` only when you will verify separately.
 
+Diagnostic recovery commands such as `zova doctor`, `zova salvage --dry-run`,
+and `zova salvage <source> <destination>` are CLI-first in the v0.16 line. The
+Rust crates do not expose typed doctor/salvage report APIs yet, and library code
+should not parse the human text output as a stable binding contract.
+
 Objects can live beside ordinary SQL metadata:
 
 ```rust
