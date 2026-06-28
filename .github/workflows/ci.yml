@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  zig:
+    name: Zig (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/zova_test_support.zig src/object.zig src/object_fastcdc.zig src/object_tests.zig src/vector.zig src/vector_tests.zig src/vector_sql.zig src/vector_sql_tests.zig src/c_api.zig src/c_api_internal.zig src/c_api_tests.zig src/cli.zig src/main.zig tests/e2e.zig tests/cli.zig
+      - run: zig build test
+      - run: zig build e2e
+      - run: zig build c-abi
+      - run: zig build c-abi-test
+      - run: zig build cli-test
+      - run: zig build test -Doptimize=ReleaseSafe
+
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - run: cargo fmt --all --manifest-path bindings/rust/Cargo.toml --check
+      - run: cargo test --workspace --manifest-path bindings/rust/Cargo.toml
+      - run: cargo check --examples --manifest-path bindings/rust/Cargo.toml
+      - run: sh bindings/rust/zova-sys/tools/sync-native-source.sh
+      - run: sh bindings/rust/zova-sys/tools/check-native-source.sh
+      - run: cargo package --allow-dirty --list -p zova-sys --manifest-path bindings/rust/Cargo.toml >/tmp/zova-sys-package-list.txt
+      - run: cargo package --list -p zova --manifest-path bindings/rust/Cargo.toml >/tmp/zova-package-list.txt
+
+  go:
+    name: Go (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - run: zig build c-abi
+      - run: go test ./...
+        working-directory: bindings/go
+      - run: go vet ./...
+        working-directory: bindings/go
+
+  python:
+    name: Python ${{ matrix.python-version }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v5
+      - run: cargo fmt --manifest-path bindings/python/Cargo.toml --check
+      - run: cargo test --manifest-path bindings/python/Cargo.toml
+      - run: uv run --isolated --with maturin --with pytest --directory bindings/python maturin develop
+      - run: uv run --isolated --with pytest --directory bindings/python python -m pytest
+      - run: uv run --isolated --with maturin --directory bindings/python maturin build --out /tmp/zova-python-wheels

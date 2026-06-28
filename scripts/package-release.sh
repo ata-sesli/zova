@@ -27,6 +27,7 @@ fi
 
 VERSION="${1#v}"
 TAG="v$VERSION"
+GO_TAG="bindings/go/v$VERSION"
 OUT_DIR="${2:-$ROOT/zig-out/release}"
 MANIFEST_VERSION="$(sed -n 's/^[[:space:]]*\.version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/build.zig.zon" | head -n 1)"
 
@@ -50,9 +51,13 @@ PKG="zova-$VERSION"
 ARCHIVE="$OUT_DIR/$PKG.tar.gz"
 TMP="${TMPDIR:-/tmp}/zova-release.$$"
 TAG_CREATED=0
+GO_TAG_CREATED=0
 
 cleanup() {
     status=$?
+    if [ "$status" -ne 0 ] && [ "$GO_TAG_CREATED" -eq 1 ]; then
+        git -C "$ROOT" tag -d "$GO_TAG" >/dev/null 2>&1 || true
+    fi
     if [ "$status" -ne 0 ] && [ "$TAG_CREATED" -eq 1 ]; then
         git -C "$ROOT" tag -d "$TAG" >/dev/null 2>&1 || true
     fi
@@ -93,6 +98,11 @@ REMOTE_TAG_COMMIT="$(git ls-remote --tags origin "refs/tags/$TAG^{}" | awk 'NR =
 if [ -z "$REMOTE_TAG_COMMIT" ]; then
     REMOTE_TAG_COMMIT="$(git ls-remote --tags origin "refs/tags/$TAG" | awk 'NR == 1 {print $1}')"
 fi
+LOCAL_GO_TAG_COMMIT=""
+REMOTE_GO_TAG_COMMIT="$(git ls-remote --tags origin "refs/tags/$GO_TAG^{}" | awk 'NR == 1 {print $1}')"
+if [ -z "$REMOTE_GO_TAG_COMMIT" ]; then
+    REMOTE_GO_TAG_COMMIT="$(git ls-remote --tags origin "refs/tags/$GO_TAG" | awk 'NR == 1 {print $1}')"
+fi
 
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
     LOCAL_TAG_COMMIT="$(git rev-list -n 1 "$TAG")"
@@ -102,8 +112,21 @@ if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
     fi
 fi
 
+if git rev-parse -q --verify "refs/tags/$GO_TAG" >/dev/null; then
+    LOCAL_GO_TAG_COMMIT="$(git rev-list -n 1 "$GO_TAG")"
+    if [ "$LOCAL_GO_TAG_COMMIT" != "$HEAD_COMMIT" ]; then
+        echo "local tag $GO_TAG does not point at HEAD" >&2
+        exit 1
+    fi
+fi
+
 if [ -n "$REMOTE_TAG_COMMIT" ] && [ "$REMOTE_TAG_COMMIT" != "$HEAD_COMMIT" ]; then
     echo "origin tag $TAG does not point at HEAD" >&2
+    exit 1
+fi
+
+if [ -n "$REMOTE_GO_TAG_COMMIT" ] && [ "$REMOTE_GO_TAG_COMMIT" != "$HEAD_COMMIT" ]; then
+    echo "origin tag $GO_TAG does not point at HEAD" >&2
     exit 1
 fi
 
@@ -119,6 +142,7 @@ mkdir -p "$TMP/$PKG" "$OUT_DIR"
 
 cp build.zig build.zig.zon LICENSE README.md "$TMP/$PKG/"
 cp -R bindings "$TMP/$PKG/"
+cp -R docs "$TMP/$PKG/"
 cp -R include "$TMP/$PKG/"
 cp -R src "$TMP/$PKG/"
 cp -R tests "$TMP/$PKG/"
@@ -131,14 +155,19 @@ rm -rf "$TMP/$PKG/bindings/python/dist"
 find "$TMP/$PKG/bindings/python" -type d -name '__pycache__' -prune -exec rm -rf {} +
 find "$TMP/$PKG/bindings/python" \( -name '*.so' -o -name '*.pyd' -o -name '*.dylib' -o -name '*.dll' -o -name '*.whl' \) -delete
 
-if find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" | grep -q .; then
+if find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" | grep -q .; then
     echo "release package contains unexpected markdown files" >&2
-    find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" >&2
+    find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" >&2
     exit 1
 fi
 
 if [ ! -f "$TMP/$PKG/LICENSE" ]; then
     echo "release package is missing LICENSE" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/docs/sqlite-to-zova.md" ]; then
+    echo "release package is missing docs/sqlite-to-zova.md" >&2
     exit 1
 fi
 
@@ -304,10 +333,23 @@ if [ -z "$REMOTE_TAG_COMMIT" ]; then
 else
     echo "reusing origin tag: $TAG"
 fi
+if [ -z "$LOCAL_GO_TAG_COMMIT" ]; then
+    run git tag -a "$GO_TAG" -m "Zova Go bindings $VERSION"
+    GO_TAG_CREATED=1
+else
+    echo "reusing local tag: $GO_TAG"
+fi
+if [ -z "$REMOTE_GO_TAG_COMMIT" ]; then
+    run git push origin "$GO_TAG"
+else
+    echo "reusing origin tag: $GO_TAG"
+fi
 run gh release create "$TAG" "$ARCHIVE" --title "Zova $TAG" --notes "Zova $TAG" --verify-tag
 
+GO_TAG_CREATED=0
 TAG_CREATED=0
 echo "release source archive: $ARCHIVE"
 echo "release tag: $TAG"
+echo "Go module tag: $GO_TAG"
 echo "pushed branch: $CURRENT_BRANCH"
 echo "GitHub Release: $TAG"

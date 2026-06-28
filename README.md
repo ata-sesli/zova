@@ -292,6 +292,9 @@ The destination must be a new `.zova` path. If the SQLite source uses table
 names reserved by Zova, conversion fails instead of silently rewriting the
 application schema.
 
+For a full application migration path, see
+[SQLite App To Zova App Migration Guide](docs/sqlite-to-zova.md).
+
 ## Objects
 
 Objects are raw bytes stored by content identity:
@@ -642,6 +645,7 @@ Zova releases source packages. The source archive includes:
 - `LICENSE`
 - `build.zig`
 - `build.zig.zon`
+- `docs`
 - `bindings/rust`
 - `bindings/go`
 - `bindings/python`
