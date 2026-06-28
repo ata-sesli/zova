@@ -646,6 +646,7 @@ Zova releases source packages. The source archive includes:
 - `build.zig`
 - `build.zig.zon`
 - `docs`
+- `scripts`
 - `bindings/rust`
 - `bindings/go`
 - `bindings/python`

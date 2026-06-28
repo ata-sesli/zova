@@ -68,6 +68,7 @@ if [ "${ZOVA_CHECK_PUBLISHED_RUST_SAFE_CRATE:-0}" = "1" ]; then
 else
     echo "skipping zova publish dry-run until zova-sys $RUST_WORKSPACE_VERSION is published"
 fi
+sh scripts/repack-darwin-c-abi.sh
 (cd bindings/go && GOCACHE="$GO_CACHE_REPO" go test ./...)
 (cd bindings/go && GOCACHE="$GO_CACHE_REPO" go vet ./...)
 CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" cargo fmt --manifest-path bindings/python/Cargo.toml --check
@@ -87,6 +88,7 @@ cp build.zig build.zig.zon LICENSE README.md "$TMP/$PKG/"
 cp -R bindings "$TMP/$PKG/"
 cp -R docs "$TMP/$PKG/"
 cp -R include "$TMP/$PKG/"
+cp -R scripts "$TMP/$PKG/"
 cp -R src "$TMP/$PKG/"
 cp -R tests "$TMP/$PKG/"
 cp -R vendor "$TMP/$PKG/"
@@ -116,6 +118,11 @@ fi
 
 if [ ! -f "$TMP/$PKG/docs/sqlite-to-zova.md" ]; then
     echo "release package is missing docs/sqlite-to-zova.md" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/scripts/repack-darwin-c-abi.sh" ]; then
+    echo "release package is missing scripts/repack-darwin-c-abi.sh" >&2
     exit 1
 fi
 
@@ -284,6 +291,7 @@ if [ "${ZOVA_CHECK_PUBLISHED_RUST_SAFE_CRATE:-0}" = "1" ]; then
 else
     echo "skipping zova publish dry-run until zova-sys $RUST_WORKSPACE_VERSION is published"
 fi
+sh scripts/repack-darwin-c-abi.sh
 (cd bindings/go && GOCACHE="$GO_CACHE_VERIFY" go test ./...)
 (cd bindings/go && GOCACHE="$GO_CACHE_VERIFY" go vet ./...)
 CARGO_TARGET_DIR="$PY_CARGO_TARGET_VERIFY" cargo fmt --manifest-path bindings/python/Cargo.toml --check

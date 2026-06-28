@@ -144,6 +144,7 @@ cp build.zig build.zig.zon LICENSE README.md "$TMP/$PKG/"
 cp -R bindings "$TMP/$PKG/"
 cp -R docs "$TMP/$PKG/"
 cp -R include "$TMP/$PKG/"
+cp -R scripts "$TMP/$PKG/"
 cp -R src "$TMP/$PKG/"
 cp -R tests "$TMP/$PKG/"
 cp -R vendor "$TMP/$PKG/"
@@ -168,6 +169,11 @@ fi
 
 if [ ! -f "$TMP/$PKG/docs/sqlite-to-zova.md" ]; then
     echo "release package is missing docs/sqlite-to-zova.md" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/scripts/repack-darwin-c-abi.sh" ]; then
+    echo "release package is missing scripts/repack-darwin-c-abi.sh" >&2
     exit 1
 fi
 
@@ -311,6 +317,7 @@ zig build run
 CARGO_TARGET_DIR="$TMP/cargo-target/verify" cargo fmt --all --manifest-path bindings/rust/Cargo.toml --check
 CARGO_TARGET_DIR="$TMP/cargo-target/verify" cargo test --workspace --manifest-path bindings/rust/Cargo.toml
 CARGO_TARGET_DIR="$TMP/cargo-target/verify" cargo check --examples --manifest-path bindings/rust/Cargo.toml
+sh scripts/repack-darwin-c-abi.sh
 (cd bindings/go && GOCACHE="$TMP/go-cache/verify" go test ./...)
 (cd bindings/go && GOCACHE="$TMP/go-cache/verify" go vet ./...)
 CARGO_TARGET_DIR="$TMP/cargo-target/python-verify" cargo fmt --manifest-path bindings/python/Cargo.toml --check
