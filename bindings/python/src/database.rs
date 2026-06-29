@@ -1,4 +1,5 @@
 use crate::error::{closed_error, zova_error};
+use crate::notification::PySubscription;
 use crate::object::{
     chunk_id_from_py, manifest_chunks_from_py, object_id_from_py, PyObjectId, PyObjectManifest,
     PyObjectWriter,
@@ -99,6 +100,16 @@ impl PyDatabase {
             name: name.to_owned(),
             active: false,
         }
+    }
+
+    pub(crate) fn notify(&mut self, channel: &str, payload: &str) -> PyResult<()> {
+        self.db_mut()?.notify(channel, payload).map_err(zova_error)
+    }
+
+    pub(crate) fn listen(&mut self, channel: &str) -> PyResult<PySubscription> {
+        Ok(PySubscription {
+            inner: Some(self.db_mut()?.listen(channel).map_err(zova_error)?),
+        })
     }
 
     pub(crate) fn vacuum(&mut self) -> PyResult<()> {

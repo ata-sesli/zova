@@ -21,7 +21,7 @@ include = [
 ]
 
 [dependencies]
-zova-sys = { version = "0.17.0", path = "../zova-sys" }
+zova-sys = { version = "0.18.0", path = "../zova-sys" }
 
 [lib]
 path = "src/lib.rs"
@@ -37,3 +37,7 @@ path = "examples/objects.rs"
 [[example]]
 name = "vectors"
 path = "examples/vectors.rs"
+
+[[example]]
+name = "notifications"
+path = "examples/notifications.rs"

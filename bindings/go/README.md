@@ -16,6 +16,7 @@ It covers:
 - vector collections, vector CRUD, batch writes, collection management, exact
   search, candidate search, search-by-id, thresholds, and SQL-native vector
   search
+- same-process transaction-aware app events with `Listen` / `Notify`
 
 ## Contents
 
@@ -26,9 +27,10 @@ It covers:
 5. [Handle Policy](#handle-policy)
 6. [Savepoints](#savepoints)
 7. [Operational Safety](#operational-safety)
-8. [Objects](#objects)
-9. [Vectors](#vectors)
-10. [Example](#example)
+8. [App Events](#app-events)
+9. [Objects](#objects)
+10. [Vectors](#vectors)
+11. [Example](#example)
 
 ## How It Fits
 
@@ -52,7 +54,7 @@ flowchart LR
 After the Go module tag is pushed, applications can add the binding with:
 
 ```sh
-go get github.com/atasesli/zova/bindings/go@v0.17.0
+go get github.com/atasesli/zova/bindings/go@v0.18.0
 ```
 
 Import it as:
@@ -133,14 +135,14 @@ Because this module lives in the `bindings/go` subdirectory, the release tag
 must include that subdirectory prefix:
 
 ```sh
-git tag -a bindings/go/v0.17.0 -m "Zova Go bindings v0.17.0"
-git push origin bindings/go/v0.17.0
+git tag -a bindings/go/v0.18.0 -m "Zova Go bindings v0.18.0"
+git push origin bindings/go/v0.18.0
 ```
 
 After pushing the tag, ask the public Go module proxy to resolve it:
 
 ```sh
-GOPROXY=proxy.golang.org go list -m github.com/atasesli/zova/bindings/go@v0.17.0
+GOPROXY=proxy.golang.org go list -m github.com/atasesli/zova/bindings/go@v0.18.0
 ```
 
 The module path is:
@@ -239,6 +241,52 @@ Diagnostic recovery commands such as `zova doctor`, `zova salvage --dry-run`,
 and `zova salvage <source> <destination>` are CLI-first in the v0.16 line. The
 Go package does not expose typed doctor/salvage report APIs yet, and library
 code should not parse the human text output as a stable binding contract.
+
+## App Events
+
+Use `Listen` / `Notify` for same-process storage workflow notifications. They
+are explicit, in-memory, local to one open `DB` handle, and delivered only after
+the surrounding Zova transaction commits. Rollback discards pending
+notifications.
+
+```go
+sub, err := db.Listen("message:123:attachments")
+if err != nil {
+    log.Fatal(err)
+}
+defer sub.Close()
+
+if err := db.BeginImmediate(); err != nil {
+    log.Fatal(err)
+}
+if err := db.Exec("insert into attachments(message_id, name) values (123, 'photo.jpg')"); err != nil {
+    log.Fatal(err)
+}
+if err := db.Notify("message:123:attachments", "changed"); err != nil {
+    log.Fatal(err)
+}
+if err := db.Commit(); err != nil {
+    log.Fatal(err)
+}
+
+note, err := sub.TryReceive()
+if err != nil {
+    log.Fatal(err)
+}
+if note != nil {
+    log.Println(note.Channel, note.Payload)
+}
+```
+
+SQL `zova_notify(...)` follows the same transaction rules when the surrounding
+transaction/savepoint was opened through Zova helpers; raw SQL transaction
+scopes are rejected because Zova cannot track their notification lifetime.
+
+Event delivery is queue-only in v0.18: no callbacks, no blocking receive, no
+cross-process delivery, no replay after restart, and no automatic logging of SQL,
+object, or vector mutations. Each subscription queue holds 1024 notifications
+and drops the oldest entries on overflow; the next received notification reports
+how many were dropped before it.
 
 ## Objects
 

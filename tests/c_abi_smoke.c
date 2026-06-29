@@ -294,6 +294,91 @@ static void run_threaded_same_handle_smoke(zova_database *db) {
     zova_vector_collection_info_free(&info);
 }
 
+static void run_notification_smoke(zova_database *db) {
+    zova_subscription *subscription = NULL;
+    expect_status(zova_database_listen(&(zova_database_listen_request){
+                      .db = db,
+                      .channel = "message:1:attachments",
+                      .out_subscription = &subscription,
+                  }),
+                  ZOVA_OK,
+                  "listen notification");
+    expect_status(zova_database_close(db), ZOVA_MISUSE, "close with live subscription");
+
+    const uint8_t payload[] = "changed";
+    expect_status(zova_database_begin_immediate(&(zova_database_simple_request){.db = db}), ZOVA_OK, "notify begin immediate");
+    expect_status(zova_database_notify(&(zova_database_notify_request){
+                      .db = db,
+                      .channel = "message:1:attachments",
+                      .payload = payload,
+                      .payload_len = sizeof(payload) - 1,
+                  }),
+                  ZOVA_OK,
+                  "notify in transaction");
+
+    zova_notification notification = {0};
+    uint8_t has_notification = 1;
+    expect_status(zova_subscription_try_receive(&(zova_subscription_try_receive_request){
+                      .subscription = subscription,
+                      .out_notification = &notification,
+                      .out_has_notification = &has_notification,
+                  }),
+                  ZOVA_OK,
+                  "receive before commit");
+    if (has_notification != 0) {
+        fprintf(stderr, "receive before commit: expected empty queue\n");
+        exit(1);
+    }
+
+    expect_status(zova_database_commit(&(zova_database_simple_request){.db = db}), ZOVA_OK, "notify commit");
+    expect_status(zova_subscription_try_receive(&(zova_subscription_try_receive_request){
+                      .subscription = subscription,
+                      .out_notification = &notification,
+                      .out_has_notification = &has_notification,
+                  }),
+                  ZOVA_OK,
+                  "receive after commit");
+    if (has_notification != 1 || notification.payload_len != sizeof(payload) - 1 ||
+        memcmp(notification.payload, payload, sizeof(payload) - 1) != 0) {
+        fprintf(stderr, "receive after commit: unexpected notification\n");
+        exit(1);
+    }
+    zova_notification_free(&notification);
+
+    zova_statement *notify_stmt = NULL;
+    expect_status(zova_database_prepare(&(zova_database_prepare_request){
+                      .db = db,
+                      .sql = "select zova_notify('message:1:attachments', 'from-sql')",
+                      .out_statement = &notify_stmt,
+                  }),
+                  ZOVA_OK,
+                  "prepare sql notify");
+    zova_step_result step = ZOVA_STEP_DONE;
+    expect_status(zova_statement_step(&(zova_statement_step_request){
+                      .statement = notify_stmt,
+                      .out_result = &step,
+                  }),
+                  ZOVA_OK,
+                  "step sql notify");
+    expect_status(zova_statement_finalize(notify_stmt), ZOVA_OK, "finalize sql notify");
+
+    expect_status(zova_subscription_try_receive(&(zova_subscription_try_receive_request){
+                      .subscription = subscription,
+                      .out_notification = &notification,
+                      .out_has_notification = &has_notification,
+                  }),
+                  ZOVA_OK,
+                  "receive sql notify");
+    if (has_notification != 1 || notification.payload_len != strlen("from-sql") ||
+        memcmp(notification.payload, "from-sql", strlen("from-sql")) != 0) {
+        fprintf(stderr, "receive sql notify: unexpected notification\n");
+        exit(1);
+    }
+    zova_notification_free(&notification);
+
+    expect_status(zova_subscription_close(subscription), ZOVA_OK, "close subscription");
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         fprintf(stderr, "usage: %s <db-path>\n", argv[0]);
@@ -1057,6 +1142,7 @@ int main(int argc, char **argv) {
     expect_status(zova_statement_finalize(sql_distance_by_id), ZOVA_OK, "finalize sql vector distance by id");
 
     run_threaded_same_handle_smoke(db);
+    run_notification_smoke(db);
 
     zova_statement *live_stmt = NULL;
     expect_status(zova_database_prepare(&(zova_database_prepare_request){

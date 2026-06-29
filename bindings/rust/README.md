@@ -8,7 +8,8 @@ It contains:
 - `zova`: safe Rust wrappers for database lifecycle, SQL prepared statements,
   transactions, explicit vacuum, objects, chunks, manifests, range reads,
   assembly, `ObjectWriter`, vector collections, vector CRUD, and exact vector
-  search, plus backup, compact copy, and restore-to-new-file.
+  search, plus backup, compact copy, restore-to-new-file, and same-process
+  app events.
 
 ## Contents
 
@@ -18,7 +19,8 @@ It contains:
 4. [Handle Policy](#handle-policy)
 5. [Example](#example)
 6. [Savepoints](#savepoints)
-7. [Operational Safety](#operational-safety)
+7. [App Events](#app-events)
+8. [Operational Safety](#operational-safety)
 
 ## How It Fits
 
@@ -45,14 +47,14 @@ Use the safe crate for normal Rust applications:
 
 ```toml
 [dependencies]
-zova = "0.17.0"
+zova = "0.18.0"
 ```
 
 Use the raw FFI crate only when you want to call the C ABI directly:
 
 ```toml
 [dependencies]
-zova-sys = "0.17.0"
+zova-sys = "0.18.0"
 ```
 
 Both crates contain native code. The default build path compiles Zova's static C
@@ -181,6 +183,40 @@ db.with_savepoint("attach_file", |db| {
 `SharedDatabase::with_savepoint` and `SharedDatabaseGuard::with_savepoint`
 hold the shared Rust mutex for the whole closure, so the scoped unit does not
 interleave with other threads using the same shared handle.
+
+## App Events
+
+Use `listen` / `notify` for same-process storage workflow notifications. They
+are explicit, in-memory, local to one open database handle, and delivered only
+after the surrounding Zova transaction commits. Rollback discards pending
+notifications.
+
+```rust
+let mut db = Database::open("app.zova")?;
+let mut sub = db.listen("message:123:attachments")?;
+
+db.begin_immediate()?;
+db.exec("insert into attachments(message_id, name) values (123, 'photo.jpg')")?;
+db.notify("message:123:attachments", "changed")?;
+db.commit()?;
+
+if let Some(note) = sub.try_receive()? {
+    assert_eq!(note.channel, "message:123:attachments");
+}
+```
+
+`SharedDatabase` exposes the same methods. Inside
+`SharedDatabase::transaction` or `transaction_immediate`, call `guard.notify`
+so the notification belongs to the same serialized transaction scope.
+SQL `zova_notify(...)` follows the same transaction rules when the surrounding
+transaction/savepoint was opened through Zova helpers; raw SQL transaction
+scopes are rejected because Zova cannot track their notification lifetime.
+
+Event delivery is queue-only in v0.18: no callbacks, no blocking receive, no
+cross-process delivery, no replay after restart, and no automatic logging of SQL,
+object, or vector mutations. Each subscription queue holds 1024 notifications
+and drops the oldest entries on overflow; the next received notification reports
+how many were dropped before it.
 
 ## Operational Safety
 

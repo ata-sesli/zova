@@ -40,6 +40,7 @@
 
 const std = @import("std");
 const fastcdc = @import("object_fastcdc.zig");
+const notify_impl = @import("notify.zig");
 const object_impl = @import("object.zig");
 const sqlite = @import("sqlite.zig");
 const vector_impl = @import("vector.zig");
@@ -81,6 +82,8 @@ pub const VectorInput = vector_impl.VectorInput;
 pub const Vector = vector_impl.Vector;
 pub const VectorSearchResult = vector_impl.VectorSearchResult;
 pub const VectorSearchResults = vector_impl.VectorSearchResults;
+pub const Notification = notify_impl.Notification;
+pub const NotificationSubscription = notify_impl.NotificationSubscription;
 
 /// Options for opening an existing `.zova` database.
 pub const OpenOptions = struct {
@@ -152,6 +155,21 @@ pub fn restoreBackup(source_path: [:0]const u8, dest_path: [:0]const u8, options
     try source.backupTo(dest_path, .{ .verify = options.verify });
 }
 
+fn initNotifications(db: *sqlite.Database) Error!*notify_impl.Hub {
+    const allocator = std.heap.c_allocator;
+    const hub = allocator.create(notify_impl.Hub) catch return error.OutOfMemory;
+    hub.* = notify_impl.Hub.init(allocator);
+    errdefer allocator.destroy(hub);
+    try notify_impl.registerSql(db, hub);
+    return hub;
+}
+
+fn deinitNotifications(hub: *notify_impl.Hub) void {
+    const allocator = std.heap.c_allocator;
+    hub.deinit();
+    allocator.destroy(hub);
+}
+
 /// Owns one initialized `.zova` database.
 ///
 /// A Zova database is physically SQLite, but it must use the `.zova` extension
@@ -160,6 +178,7 @@ pub fn restoreBackup(source_path: [:0]const u8, dest_path: [:0]const u8, options
 /// consistent with the v0 SQLite wrapper.
 pub const Database = struct {
     sqlite_db: sqlite.Database,
+    notifications: *notify_impl.Hub,
 
     /// Create a new initialized `.zova` database.
     ///
@@ -183,7 +202,9 @@ pub const Database = struct {
 
         try initializeZovaSchema(&raw);
         try vector_sql.register(&raw);
-        return .{ .sqlite_db = raw };
+        const notifications = try initNotifications(&raw);
+        errdefer deinitNotifications(notifications);
+        return .{ .sqlite_db = raw, .notifications = notifications };
     }
 
     /// Open an existing initialized `.zova` database.
@@ -212,12 +233,15 @@ pub const Database = struct {
         if (options.busy_timeout_ms != 0) try raw.setBusyTimeout(options.busy_timeout_ms);
         try validateZovaSchema(&raw);
         try vector_sql.register(&raw);
-        return .{ .sqlite_db = raw };
+        const notifications = try initNotifications(&raw);
+        errdefer deinitNotifications(notifications);
+        return .{ .sqlite_db = raw, .notifications = notifications };
     }
 
     /// Close the underlying SQLite connection.
     pub fn deinit(self: *Database) void {
         self.sqlite_db.deinit();
+        deinitNotifications(self.notifications);
     }
 
     /// Execute SQL against the underlying SQLite database.
@@ -230,6 +254,36 @@ pub const Database = struct {
         return try self.sqlite_db.prepare(sql);
     }
 
+    /// Start a deferred SQLite transaction and notification delivery scope.
+    pub fn begin(self: *Database) Error!void {
+        try self.sqlite_db.begin();
+        self.notifications.begin() catch |err| {
+            self.sqlite_db.rollback() catch {};
+            return err;
+        };
+    }
+
+    /// Start an immediate SQLite transaction and notification delivery scope.
+    pub fn beginImmediate(self: *Database) Error!void {
+        try self.sqlite_db.beginImmediate();
+        self.notifications.begin() catch |err| {
+            self.sqlite_db.rollback() catch {};
+            return err;
+        };
+    }
+
+    /// Commit the active transaction, then deliver pending notifications.
+    pub fn commit(self: *Database) Error!void {
+        try self.sqlite_db.commit();
+        self.notifications.commit();
+    }
+
+    /// Roll back the active transaction and discard pending notifications.
+    pub fn rollback(self: *Database) Error!void {
+        try self.sqlite_db.rollback();
+        self.notifications.rollback();
+    }
+
     /// Create a named SQLite savepoint on this Zova connection.
     ///
     /// Names use Zova's strict savepoint identifier rule: ASCII, 1-64 bytes,
@@ -237,6 +291,10 @@ pub const Database = struct {
     /// case-insensitive `_zova_` prefix.
     pub fn savepoint(self: *Database, name: []const u8) Error!void {
         try self.sqlite_db.savepoint(name);
+        self.notifications.savepoint(name) catch |err| {
+            self.sqlite_db.releaseSavepoint(name) catch {};
+            return err;
+        };
     }
 
     /// Roll back changes made after a named SQLite savepoint.
@@ -245,11 +303,14 @@ pub const Database = struct {
     /// `releaseSavepoint` when the checkpoint should be removed.
     pub fn rollbackToSavepoint(self: *Database, name: []const u8) Error!void {
         try self.sqlite_db.rollbackToSavepoint(name);
+        self.notifications.rollbackToSavepoint(name);
     }
 
     /// Release a named SQLite savepoint.
     pub fn releaseSavepoint(self: *Database, name: []const u8) Error!void {
+        try self.notifications.prepareReleaseSavepoint(name);
         try self.sqlite_db.releaseSavepoint(name);
+        self.notifications.releaseSavepoint(name);
     }
 
     /// Run a callback inside a named SQLite savepoint.
@@ -279,6 +340,20 @@ pub const Database = struct {
     /// want SQLite to rebuild the database file and potentially shrink it.
     pub fn vacuum(self: *Database) Error!void {
         try self.exec("vacuum");
+    }
+
+    /// Subscribe to explicit same-handle app notifications on `channel`.
+    pub fn listen(self: *Database, channel: []const u8) Error!NotificationSubscription {
+        return try self.notifications.listen(channel);
+    }
+
+    /// Queue an explicit same-handle app notification.
+    ///
+    /// Outside a Zova transaction helper this is immediately receiveable.
+    /// Inside `begin`/`beginImmediate` and savepoints, delivery follows commit,
+    /// rollback, and savepoint release semantics.
+    pub fn notify(self: *Database, channel: []const u8, payload: []const u8) Error!void {
+        try self.notifications.notify(channel, payload);
     }
 
     /// Copy this database to a new `.zova` destination with SQLite's online
@@ -1952,6 +2027,236 @@ test "savepoints roll back zova records objects and vectors" {
     try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from notes"));
     try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from notes where body = 'rolled back'"));
     try testingQuickCheckOk(&db);
+}
+
+test "notifications deliver after commit and rollback suppresses pending events" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "notifications.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    var sub = try db.listen("messages");
+    defer sub.deinit();
+
+    try db.notify("messages", "outside");
+    {
+        var note = (try sub.tryReceive(std.testing.allocator)).?;
+        defer note.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("messages", note.channel);
+        try std.testing.expectEqualStrings("outside", note.payload);
+        try std.testing.expectEqual(@as(u64, 1), note.sequence);
+        try std.testing.expectEqual(@as(u64, 0), note.dropped_before);
+    }
+    try std.testing.expectEqual(@as(?Notification, null), try sub.tryReceive(std.testing.allocator));
+
+    try db.beginImmediate();
+    try db.notify("messages", "committed");
+    try std.testing.expectEqual(@as(?Notification, null), try sub.tryReceive(std.testing.allocator));
+    try db.commit();
+    {
+        var note = (try sub.tryReceive(std.testing.allocator)).?;
+        defer note.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("committed", note.payload);
+    }
+
+    try db.beginImmediate();
+    try db.exec("select zova_notify('messages', 'sql-committed')");
+    try std.testing.expectEqual(@as(?Notification, null), try sub.tryReceive(std.testing.allocator));
+    try db.commit();
+    {
+        var note = (try sub.tryReceive(std.testing.allocator)).?;
+        defer note.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("sql-committed", note.payload);
+    }
+
+    try db.exec("begin immediate");
+    try std.testing.expectError(error.SqliteError, db.exec("select zova_notify('messages', 'raw-sql-transaction')"));
+    try db.exec("rollback");
+    try std.testing.expectEqual(@as(?Notification, null), try sub.tryReceive(std.testing.allocator));
+
+    try db.beginImmediate();
+    try db.notify("messages", "rolled-back");
+    try db.rollback();
+    try std.testing.expectEqual(@as(?Notification, null), try sub.tryReceive(std.testing.allocator));
+}
+
+test "notification savepoint release and rollback follow sqlite savepoint semantics" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "notification-savepoints.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    var sub = try db.listen("objects:changed");
+    defer sub.deinit();
+
+    try db.beginImmediate();
+    try db.notify("objects:changed", "outer");
+    try db.savepoint("inner");
+    try db.notify("objects:changed", "discarded");
+    try db.rollbackToSavepoint("inner");
+    try db.notify("objects:changed", "after-rollback-to");
+    try db.releaseSavepoint("inner");
+    try db.commit();
+
+    {
+        var note = (try sub.tryReceive(std.testing.allocator)).?;
+        defer note.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("outer", note.payload);
+    }
+    {
+        var note = (try sub.tryReceive(std.testing.allocator)).?;
+        defer note.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("after-rollback-to", note.payload);
+    }
+    try std.testing.expectEqual(@as(?Notification, null), try sub.tryReceive(std.testing.allocator));
+
+    try db.beginImmediate();
+    try db.savepoint("inner");
+    try db.notify("objects:changed", "released");
+    try db.releaseSavepoint("inner");
+    try std.testing.expectEqual(@as(?Notification, null), try sub.tryReceive(std.testing.allocator));
+    try db.commit();
+
+    {
+        var note = (try sub.tryReceive(std.testing.allocator)).?;
+        defer note.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("released", note.payload);
+    }
+}
+
+test "notification queues drop oldest entries and report dropped count" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "notification-overflow.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    var sub = try db.listen("overflow");
+    defer sub.deinit();
+
+    var index: usize = 0;
+    while (index < notify_impl.queue_capacity + 1) : (index += 1) {
+        var payload_buffer: [32]u8 = undefined;
+        const payload = try std.fmt.bufPrint(&payload_buffer, "event-{d}", .{index});
+        try db.notify("overflow", payload);
+    }
+
+    var first = (try sub.tryReceive(std.testing.allocator)).?;
+    defer first.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("event-1", first.payload);
+    try std.testing.expectEqual(@as(u64, 1), first.dropped_before);
+}
+
+test "notifications support multiple listeners read-only handles and per-handle hubs" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "notification-listeners.zova");
+
+    {
+        var db = try Database.create(db_path);
+        defer db.deinit();
+
+        var first = try db.listen("events");
+        defer first.deinit();
+        var second = try db.listen("events");
+        defer second.deinit();
+        var other = try db.listen("other");
+        defer other.deinit();
+        var closed = try db.listen("events");
+        closed.deinit();
+
+        try db.notify("events", "one");
+
+        var first_note = (try first.tryReceive(std.testing.allocator)).?;
+        defer first_note.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("one", first_note.payload);
+
+        var second_note = (try second.tryReceive(std.testing.allocator)).?;
+        defer second_note.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("one", second_note.payload);
+
+        try std.testing.expectEqual(@as(?Notification, null), try other.tryReceive(std.testing.allocator));
+    }
+
+    {
+        var writer = try Database.open(db_path);
+        defer writer.deinit();
+        var reader = try Database.open(db_path);
+        defer reader.deinit();
+
+        var writer_sub = try writer.listen("local");
+        defer writer_sub.deinit();
+        var reader_sub = try reader.listen("local");
+        defer reader_sub.deinit();
+
+        try writer.notify("local", "writer-only");
+        var note = (try writer_sub.tryReceive(std.testing.allocator)).?;
+        defer note.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("writer-only", note.payload);
+        try std.testing.expectEqual(@as(?Notification, null), try reader_sub.tryReceive(std.testing.allocator));
+    }
+
+    {
+        var readonly = try Database.openWithOptions(db_path, .{ .read_only = true });
+        defer readonly.deinit();
+        var sub = try readonly.listen("readonly");
+        defer sub.deinit();
+        try readonly.notify("readonly", "local");
+        var note = (try sub.tryReceive(std.testing.allocator)).?;
+        defer note.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("local", note.payload);
+    }
+}
+
+test "notification validation rejects invalid channels payloads and SQL notify inputs" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "notification-validation.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    var sub = try db.listen("messages");
+    defer sub.deinit();
+
+    const invalid_channel_bytes = [_]u8{ 0xc3, 0xa9 };
+    const invalid_channels = [_][]const u8{
+        "",
+        "bad channel",
+        "_zova_private",
+        invalid_channel_bytes[0..],
+    };
+    for (invalid_channels) |channel| {
+        try std.testing.expectError(error.InvalidArgument, db.listen(channel));
+        try std.testing.expectError(error.InvalidArgument, db.notify(channel, "payload"));
+    }
+
+    var long_channel: [notify_impl.max_channel_len + 1]u8 = undefined;
+    @memset(long_channel[0..], 'a');
+    try std.testing.expectError(error.InvalidArgument, db.listen(long_channel[0..]));
+    try std.testing.expectError(error.InvalidArgument, db.notify(long_channel[0..], "payload"));
+
+    const invalid_payload = [_]u8{0xff};
+    try std.testing.expectError(error.InvalidArgument, db.notify("messages", invalid_payload[0..]));
+
+    try std.testing.expectError(error.SqliteError, db.exec("select zova_notify('_zova_private', 'payload')"));
+    try std.testing.expectError(error.SqliteError, db.exec("select zova_notify('messages', cast(x'ff' as text))"));
+    try std.testing.expectEqual(@as(?Notification, null), try sub.tryReceive(std.testing.allocator));
 }
 
 test "scoped savepoint helper releases rolls back nests and reports cleanup failure" {

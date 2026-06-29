@@ -20,8 +20,10 @@ static_assert(ZOVA_RESTORE_NO_VERIFY == 1u, "restore flags are stable");
 int main() {
     zova_database *db = nullptr;
     zova_statement *statement = nullptr;
+    zova_subscription *subscription = nullptr;
     zova_buffer buffer = {};
     zova_text text = {};
+    zova_notification notification = {};
     zova_object_manifest manifest = {};
     zova_object_id id = {};
     zova_vector vector = {};
@@ -50,6 +52,18 @@ int main() {
     zova_database_total_changes_request total_changes_request = {};
     int64_t total_changes = 0;
     total_changes_request.out_total_changes = &total_changes;
+    zova_database_notify_request notify_request = {};
+    notify_request.channel = "events";
+    notify_request.payload = reinterpret_cast<const uint8_t *>("changed");
+    notify_request.payload_len = 7;
+    zova_database_listen_request listen_request = {};
+    listen_request.channel = "events";
+    listen_request.out_subscription = &subscription;
+    zova_subscription_try_receive_request receive_request = {};
+    uint8_t has_notification = 0;
+    receive_request.subscription = subscription;
+    receive_request.out_notification = &notification;
+    receive_request.out_has_notification = &has_notification;
     zova_statement_step_request step_request = {};
     step_request.statement = statement;
     zova_step_result step_result = ZOVA_STEP_DONE;
@@ -115,6 +129,7 @@ int main() {
 
     zova_buffer_free(&buffer);
     zova_text_free(&text);
+    zova_notification_free(&notification);
     zova_object_manifest_free(&manifest);
     zova_vector_free(&vector);
     zova_vector_search_results_free(&search_results);
@@ -140,6 +155,11 @@ int main() {
                    last_rowid_request.out_rowid == &last_rowid &&
                    changes_request.out_changes == &changes &&
                    total_changes_request.out_total_changes == &total_changes &&
+                   notify_request.payload_len == 7 &&
+                   listen_request.out_subscription == &subscription &&
+                   receive_request.out_notification == &notification &&
+                   receive_request.out_has_notification == &has_notification &&
+                   zova_subscription_close(subscription) == ZOVA_INVALID_ARGUMENT &&
                    step_request.out_result == &step_result &&
                    bind_text_request.len == 5 &&
                    column_type_request.out_type == &column_type &&

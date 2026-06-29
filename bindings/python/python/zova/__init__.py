@@ -3,12 +3,14 @@ from enum import IntEnum
 from ._native import (
     ClosedHandleError,
     Database,
+    Notification,
     ObjectChunkId,
     ObjectId,
     ObjectManifest,
     ObjectManifestChunk,
     ObjectWriter,
     SavepointContext,
+    Subscription,
     Vector,
     VectorCollectionInfo,
     VectorCollectionOptions,
@@ -22,7 +24,7 @@ from ._native import (
     restore_backup,
 )
 
-__version__ = "0.17.0"
+__version__ = "0.18.0"
 
 
 class Step(IntEnum):
@@ -48,12 +50,14 @@ __all__ = [
     "ClosedHandleError",
     "ColumnType",
     "Database",
+    "Notification",
     "ObjectChunkId",
     "ObjectId",
     "ObjectManifest",
     "ObjectManifestChunk",
     "ObjectWriter",
     "SavepointContext",
+    "Subscription",
     "Step",
     "Vector",
     "VectorCollectionInfo",

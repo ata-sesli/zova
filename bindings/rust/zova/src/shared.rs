@@ -3,6 +3,9 @@ use crate::database::{
     BackupOptions, CompactOptions,
 };
 use crate::error::{Error, Result, Status};
+use crate::notification::{
+    empty_notification, listen_raw, notify_raw, take_notification, Notification,
+};
 use crate::object::{
     empty_buffer, empty_manifest, from_c_object_id, take_buffer, take_manifest, ObjectChunkId,
     ObjectId, ObjectManifest, ObjectManifestChunk,
@@ -47,6 +50,13 @@ pub struct SharedObjectWriter {
     _not_sync: PhantomData<Cell<()>>,
 }
 
+/// Owned notification subscription tied to a [`SharedDatabase`].
+pub struct SharedSubscription {
+    raw: Option<NonNull<zova_sys::zova_subscription>>,
+    database: Arc<SharedDatabaseInner>,
+    _not_sync: PhantomData<Cell<()>>,
+}
+
 /// Scoped exclusive access to one shared database handle.
 ///
 /// The guard keeps the Rust mutex for the lifetime of the closure passed to
@@ -63,7 +73,7 @@ pub struct SharedGuardStatement<'db> {
     _guard: PhantomData<&'db mut SharedDatabaseGuard<'db>>,
 }
 
-struct SharedDatabaseInner {
+pub(crate) struct SharedDatabaseInner {
     raw: NonNull<zova_sys::zova_database>,
     mutex: Mutex<()>,
 }
@@ -82,6 +92,10 @@ unsafe impl Send for SharedStatement {}
 // Safety: methods require `&mut self`, the raw writer is used only while the
 // parent database lock is held, and the parent Arc keeps the native handle alive.
 unsafe impl Send for SharedObjectWriter {}
+
+// Safety: methods require `&mut self`, and the parent Arc keeps the native
+// database handle alive while receive/close serialize through the Rust mutex.
+unsafe impl Send for SharedSubscription {}
 
 impl SharedDatabase {
     pub fn create(path: impl AsRef<Path>) -> Result<Self> {
@@ -199,6 +213,21 @@ impl SharedDatabase {
         f: impl FnOnce(&mut SharedDatabaseGuard<'_>) -> Result<T>,
     ) -> Result<T> {
         self.with_exclusive(|guard| guard.with_savepoint(name, f))
+    }
+
+    pub fn notify(&self, channel: &str, payload: &str) -> Result<()> {
+        let _guard = self.inner.lock();
+        notify_raw(self.inner.raw_ptr(), channel, payload)
+    }
+
+    pub fn listen(&self, channel: &str) -> Result<SharedSubscription> {
+        let _guard = self.inner.lock();
+        let raw = listen_raw(self.inner.raw_ptr(), channel)?;
+        Ok(SharedSubscription {
+            raw: Some(raw),
+            database: self.inner.clone(),
+            _not_sync: PhantomData,
+        })
     }
 
     pub fn vacuum(&self) -> Result<()> {
@@ -950,6 +979,10 @@ impl SharedDatabaseGuard<'_> {
             .status_locked(unsafe { zova_sys::zova_database_exec(&request) })
     }
 
+    pub fn notify(&mut self, channel: &str, payload: &str) -> Result<()> {
+        notify_raw(self.inner.raw_ptr(), channel, payload)
+    }
+
     pub fn prepare(&mut self, sql: &str) -> Result<SharedGuardStatement<'_>> {
         let sql = cstring(sql, "sql")?;
         let mut statement = ptr::null_mut();
@@ -1289,6 +1322,49 @@ impl Drop for SharedDatabaseInner {
         let _guard = self.lock();
         unsafe {
             let _ = zova_sys::zova_database_close(self.raw.as_ptr());
+        }
+    }
+}
+
+impl SharedSubscription {
+    pub fn try_receive(&mut self) -> Result<Option<Notification>> {
+        let raw = self
+            .raw
+            .ok_or_else(|| Error::from_status(zova_sys::ZOVA_MISUSE, None))?;
+        let _guard = self.database.lock();
+        let mut notification = empty_notification();
+        let mut has_notification = 0;
+        let request = zova_sys::zova_subscription_try_receive_request {
+            subscription: raw.as_ptr(),
+            out_notification: &mut notification,
+            out_has_notification: &mut has_notification,
+        };
+        self.database
+            .status_locked(unsafe { zova_sys::zova_subscription_try_receive(&request) })?;
+        if has_notification == 0 {
+            return Ok(None);
+        }
+        Ok(Some(take_notification(&mut notification)?))
+    }
+
+    pub fn close(&mut self) -> Result<()> {
+        if let Some(raw) = self.raw {
+            let _guard = self.database.lock();
+            self.database
+                .status_locked(unsafe { zova_sys::zova_subscription_close(raw.as_ptr()) })?;
+            self.raw = None;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for SharedSubscription {
+    fn drop(&mut self) {
+        if let Some(raw) = self.raw.take() {
+            let _guard = self.database.lock();
+            unsafe {
+                let _ = zova_sys::zova_subscription_close(raw.as_ptr());
+            }
         }
     }
 }

@@ -9,6 +9,7 @@
 
 mod database;
 mod error;
+mod notification;
 mod object;
 mod shared;
 mod statement;
@@ -18,11 +19,14 @@ pub use database::{
     restore_backup, BackupOptions, CompactOptions, Database, OpenOptions, RestoreOptions,
 };
 pub use error::{Error, Result, Status};
+pub use notification::{Notification, Subscription};
 pub use object::{
     object_chunk_id, object_id, ObjectChunkId, ObjectId, ObjectManifest, ObjectManifestChunk,
     ObjectWriter, OwnedObjectWriter,
 };
-pub use shared::{SharedDatabase, SharedDatabaseGuard, SharedObjectWriter, SharedStatement};
+pub use shared::{
+    SharedDatabase, SharedDatabaseGuard, SharedObjectWriter, SharedStatement, SharedSubscription,
+};
 pub use statement::{ColumnType, OwnedStatement, Statement, Step};
 pub use vector::{
     Vector, VectorCollectionInfo, VectorCollectionOptions, VectorInput, VectorMetric,

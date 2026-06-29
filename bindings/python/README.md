@@ -16,9 +16,10 @@ rules.
 4. [What It Covers](#what-it-covers)
 5. [Savepoints](#savepoints)
 6. [Operational Safety](#operational-safety)
-7. [Objects](#objects)
-8. [Vectors](#vectors)
-9. [SQL-Native Vector Search](#sql-native-vector-search)
+7. [App Events](#app-events)
+8. [Objects](#objects)
+9. [Vectors](#vectors)
+10. [SQL-Native Vector Search](#sql-native-vector-search)
 
 ## How It Fits
 
@@ -49,12 +50,12 @@ After the Python package is published to PyPI:
 python -m pip install zova
 ```
 
-The v0.17 Python package is source-first. It builds the PyO3 extension locally
+The v0.18 Python package is source-first. It builds the PyO3 extension locally
 through maturin and Cargo, and the Rust crates `zova` and `zova-sys` must be
 available on crates.io first. Users need Python 3.10 or newer, Rust/Cargo, Zig
 0.16.0 or newer, and a working C compiler/linker.
 
-No official platform wheel matrix is promised in v0.17.
+No official platform wheel matrix is promised in v0.18.
 
 ## Local Development
 
@@ -74,8 +75,8 @@ The Python API is pre-1.0 and may still change alongside the Rust binding.
 
 The Python package exposes database lifecycle, conversion, prepared SQL
 statements, transactions, explicit vacuum, backup/compact/restore, objects,
-streaming object writes, vectors, SQL-native vector search, context managers,
-and Zova status exceptions.
+streaming object writes, vectors, SQL-native vector search, same-process app
+events, context managers, and Zova status exceptions.
 
 One Python `Database` object owns one native handle. The native C ABI serializes
 calls on that handle, so one handle is safe but not parallel. Open additional
@@ -146,6 +147,36 @@ Diagnostic recovery commands such as `zova doctor`, `zova salvage --dry-run`,
 and `zova salvage <source> <destination>` are CLI-first in the v0.16 line. The
 Python package does not expose typed doctor/salvage report APIs yet, and library
 code should not parse the human text output as a stable binding contract.
+
+## App Events
+
+Use `listen` / `notify` for same-process storage workflow notifications. They
+are explicit, in-memory, local to one open `Database` handle, and delivered only
+after the surrounding Zova transaction commits. Rollback discards pending
+notifications.
+
+```python
+with zova.Database.open("app.zova") as db:
+    with db.listen("message:123:attachments") as sub:
+        db.begin_immediate()
+        db.exec("insert into attachments(message_id, name) values (123, 'photo.jpg')")
+        db.notify("message:123:attachments", "changed")
+        db.commit()
+
+        note = sub.try_receive()
+        if note is not None:
+            print(note.channel, note.payload)
+```
+
+SQL `zova_notify(...)` follows the same transaction rules when the surrounding
+transaction/savepoint was opened through Zova helpers; raw SQL transaction
+scopes are rejected because Zova cannot track their notification lifetime.
+
+Event delivery is queue-only in v0.18: no callbacks, no blocking receive, no
+cross-process delivery, no replay after restart, and no automatic logging of SQL,
+object, or vector mutations. Each subscription queue holds 1024 notifications
+and drops the oldest entries on overflow; the next received notification reports
+how many were dropped before it.
 
 ## Objects
 

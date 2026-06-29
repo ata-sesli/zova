@@ -10,7 +10,7 @@ Rust ownership, error handling, and safe containers.
 
 ```toml
 [dependencies]
-zova = "0.17.0"
+zova = "0.18.0"
 ```
 
 The crate builds Zova's native C ABI through `zova-sys`, so users need Rust,
@@ -25,6 +25,7 @@ Zig 0.16.0 or newer, and a working C compiler/linker.
 - objects, chunks, manifests, range reads, and `ObjectWriter`
 - vector collections, CRUD, exact search, candidate search, thresholds, and
   SQL-native vector search
+- same-process transaction-aware app events with `listen` / `notify`
 - `SharedDatabase` for a cloneable, serialized Rust handle
 
 ## Example
@@ -42,3 +43,10 @@ assert_eq!(insert.step()?, Step::Done);
 ```
 
 See the workspace README and examples for object and vector workflows.
+
+## App Events
+
+`Database::listen` and `Database::notify` provide queue-only, same-process app
+events on one open Zova handle. Notifications are explicit and in-memory; they
+are delivered after commit and discarded on rollback. They are not durable,
+cross-process, replayable, or automatic mutation logs.

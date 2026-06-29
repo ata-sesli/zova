@@ -126,16 +126,14 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "zova"
-version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a8fb0a3a7ca0fef420a4c4e1bd31bb519e7bc697553f541e249163cf866ef56"
+version = "0.18.0"
 dependencies = [
  "zova-sys",
 ]
 
 [[package]]
 name = "zova-python"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "pyo3",
  "zova",
@@ -143,6 +141,4 @@ dependencies = [
 
 [[package]]
 name = "zova-sys"
-version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c11b4d0622a9a16ef3f75518face4a6425c70bd5c4e872612c8c231a0f915bf"
+version = "0.18.0"

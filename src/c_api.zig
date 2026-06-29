@@ -6,6 +6,7 @@ const internal = @import("c_api_internal.zig");
 pub const zova_database = internal.zova_database;
 pub const zova_object_writer = internal.zova_object_writer;
 pub const zova_statement = internal.zova_statement;
+pub const zova_subscription = internal.zova_subscription;
 pub const zova_status = internal.zova_status;
 pub const zova_step_result = internal.zova_step_result;
 pub const zova_column_type = internal.zova_column_type;
@@ -14,6 +15,7 @@ pub const zova_object_chunk_id = internal.zova_object_chunk_id;
 pub const zova_buffer = internal.zova_buffer;
 pub const zova_message = internal.zova_message;
 pub const zova_text = internal.zova_text;
+pub const zova_notification = internal.zova_notification;
 pub const zova_object_manifest_chunk = internal.zova_object_manifest_chunk;
 pub const zova_object_manifest = internal.zova_object_manifest;
 pub const zova_vector_metric = internal.zova_vector_metric;
@@ -41,6 +43,9 @@ pub const zova_database_busy_timeout_request = internal.zova_database_busy_timeo
 pub const zova_database_last_insert_rowid_request = internal.zova_database_last_insert_rowid_request;
 pub const zova_database_changes_request = internal.zova_database_changes_request;
 pub const zova_database_total_changes_request = internal.zova_database_total_changes_request;
+pub const zova_database_notify_request = internal.zova_database_notify_request;
+pub const zova_database_listen_request = internal.zova_database_listen_request;
+pub const zova_subscription_try_receive_request = internal.zova_subscription_try_receive_request;
 pub const zova_database_prepare_request = internal.zova_database_prepare_request;
 pub const zova_statement_step_request = internal.zova_statement_step_request;
 pub const zova_statement_bind_null_request = internal.zova_statement_bind_null_request;
@@ -122,6 +127,10 @@ export fn zova_message_free(message: ?*zova_message) callconv(.c) void {
 
 export fn zova_text_free(text: ?*zova_text) callconv(.c) void {
     return internal.zova_text_free(text);
+}
+
+export fn zova_notification_free(notification: ?*zova_notification) callconv(.c) void {
+    return internal.zova_notification_free(notification);
 }
 
 export fn zova_object_manifest_free(manifest: ?*zova_object_manifest) callconv(.c) void {
@@ -218,6 +227,22 @@ export fn zova_database_changes(request: ?*const zova_database_changes_request) 
 
 export fn zova_database_total_changes(request: ?*const zova_database_total_changes_request) callconv(.c) zova_status {
     return internal.zova_database_total_changes(request);
+}
+
+export fn zova_database_notify(request: ?*const zova_database_notify_request) callconv(.c) zova_status {
+    return internal.zova_database_notify(request);
+}
+
+export fn zova_database_listen(request: ?*const zova_database_listen_request) callconv(.c) zova_status {
+    return internal.zova_database_listen(request);
+}
+
+export fn zova_subscription_try_receive(request: ?*const zova_subscription_try_receive_request) callconv(.c) zova_status {
+    return internal.zova_subscription_try_receive(request);
+}
+
+export fn zova_subscription_close(subscription: ?*zova_subscription) callconv(.c) zova_status {
+    return internal.zova_subscription_close(subscription);
 }
 
 export fn zova_database_prepare(request: ?*const zova_database_prepare_request) callconv(.c) zova_status {

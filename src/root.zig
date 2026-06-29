@@ -20,6 +20,8 @@ pub const VectorInput = zova.VectorInput;
 pub const VectorMetric = zova.VectorMetric;
 pub const VectorSearchResult = zova.VectorSearchResult;
 pub const VectorSearchResults = zova.VectorSearchResults;
+pub const Notification = zova.Notification;
+pub const NotificationSubscription = zova.NotificationSubscription;
 pub const OpenOptions = zova.OpenOptions;
 pub const BackupOptions = zova.BackupOptions;
 pub const CompactOptions = zova.CompactOptions;
@@ -63,6 +65,8 @@ test "package exports zova database namespace" {
     try std.testing.expect(@hasDecl(@This(), "VectorMetric"));
     try std.testing.expect(@hasDecl(@This(), "VectorSearchResult"));
     try std.testing.expect(@hasDecl(@This(), "VectorSearchResults"));
+    try std.testing.expect(@hasDecl(@This(), "Notification"));
+    try std.testing.expect(@hasDecl(@This(), "NotificationSubscription"));
     try std.testing.expect(@hasDecl(@This(), "max_vector_dimensions"));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(ObjectId));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(ObjectChunkId));
@@ -106,6 +110,8 @@ test "package exports zova database namespace" {
     try std.testing.expect(@hasDecl(Database, "totalChanges"));
     try std.testing.expect(@hasDecl(Database, "backupTo"));
     try std.testing.expect(@hasDecl(Database, "compactTo"));
+    try std.testing.expect(@hasDecl(Database, "listen"));
+    try std.testing.expect(@hasDecl(Database, "notify"));
     try std.testing.expect(!@hasDecl(@This(), "fastcdc"));
 }
 

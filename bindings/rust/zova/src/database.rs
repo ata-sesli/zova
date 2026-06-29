@@ -1,4 +1,5 @@
 use crate::error::{Error, Result};
+use crate::notification::{listen_raw, notify_raw, Subscription};
 use crate::statement::{OwnedStatement, Statement};
 use std::ffi::{CStr, CString};
 use std::fmt;
@@ -223,6 +224,15 @@ impl Database {
                 Err(error)
             }
         }
+    }
+
+    pub fn notify(&mut self, channel: &str, payload: &str) -> Result<()> {
+        notify_raw(self.raw_ptr(), channel, payload)
+    }
+
+    pub fn listen(&mut self, channel: &str) -> Result<Subscription> {
+        let raw = listen_raw(self.raw_ptr(), channel)?;
+        Ok(Subscription::new(raw, self.inner.clone()))
     }
 
     pub fn vacuum(&mut self) -> Result<()> {

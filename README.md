@@ -5,10 +5,10 @@ file.
 
 Zova keeps SQLite as the relational core and adds native storage for
 content-addressed objects, chunk manifests, streaming writes, exact vector
-search, SQL-native vector queries, diagnostics, salvage, backup, compact copy,
-and restore.
+search, SQL-native vector queries, transaction-aware app events, diagnostics,
+salvage, backup, compact copy, and restore.
 
-Current package version: `0.17.0`.
+Current package version: `0.18.0`.
 
 Zova is pre-1.0. The current `.zova` file `format_version` is `3`.
 
@@ -25,15 +25,16 @@ Zova is pre-1.0. The current `.zova` file `format_version` is `3`.
 9. [Vectors](#vectors)
 10. [SQL-Native Vector Search](#sql-native-vector-search)
 11. [Operational Safety](#operational-safety)
-12. [Diagnostics And Salvage](#diagnostics-and-salvage)
-13. [CLI](#cli)
-14. [Bindings](#bindings)
-15. [Build From Source](#build-from-source)
-16. [SQLite Policy](#sqlite-policy)
-17. [Current Boundaries](#current-boundaries)
-18. [Testing](#testing)
-19. [Release Package Policy](#release-package-policy)
-20. [License](#license)
+12. [App Events](#app-events)
+13. [Diagnostics And Salvage](#diagnostics-and-salvage)
+14. [CLI](#cli)
+15. [Bindings](#bindings)
+16. [Build From Source](#build-from-source)
+17. [SQLite Policy](#sqlite-policy)
+18. [Current Boundaries](#current-boundaries)
+19. [Testing](#testing)
+20. [Release Package Policy](#release-package-policy)
+21. [License](#license)
 
 ## Install
 
@@ -47,7 +48,7 @@ or:
 
 ```toml
 [dependencies]
-zova = "0.17.0"
+zova = "0.18.0"
 ```
 
 Python:
@@ -65,7 +66,7 @@ python -m pip install zova
 Go:
 
 ```sh
-go get github.com/atasesli/zova/bindings/go@v0.17.0
+go get github.com/atasesli/zova/bindings/go@v0.18.0
 ```
 
 The Go binding uses cgo over Zova's C ABI. Build or provide the C ABI library
@@ -92,7 +93,7 @@ Zova vendors SQLite. You do not need a system SQLite installation.
 |---|---|---:|---:|---:|---|
 | Rust | `cargo add zova` | yes | yes | yes | `zova-sys` builds Zova's native C ABI from bundled source |
 | Python | `uv add zova` / `pip install zova` | yes | yes | yes | source-first PyO3 build; no wheel matrix yet |
-| Go | `go get github.com/atasesli/zova/bindings/go@v0.17.0` | yes, for C ABI build | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
+| Go | `go get github.com/atasesli/zova/bindings/go@v0.18.0` | yes, for C ABI build | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
 | C ABI | `zig build c-abi` | yes | no | yes | produces static `libzova_c.a` |
 | Zig | package source | yes | no | yes | native API |
 | CLI | `zig build` | yes | no | yes | source-built command line tool |
@@ -343,7 +344,7 @@ Zova supports collection create/info/list/delete, vector CRUD, batch upsert,
 exact search, candidate-filtered search, search-by-id, and inclusive distance
 thresholds.
 
-Search is exact and flat-scan in `0.17.0`. It is good for local datasets,
+Search is exact and flat-scan in `0.18.0`. It is good for local datasets,
 offline ranking, deterministic tests, and SQL-filter-first workflows. It is not
 yet an ANN engine for million-scale low-latency search.
 
@@ -402,6 +403,47 @@ RELEASE name
 
 Bindings also expose scoped savepoint helpers for cleanup ergonomics.
 
+## App Events
+
+Zova has same-process `listen` / `notify` app events for storage workflows:
+
+```rust
+let mut listener = db.listen("message:1:attachments")?;
+let object_id = db.put_object(b"attachment bytes")?;
+
+db.begin_immediate()?;
+// Store object_id in your SQL metadata row here.
+db.notify("message:1:attachments", "changed")?;
+assert!(listener.try_receive()?.is_none());
+db.commit()?;
+
+let event = listener.try_receive()?.unwrap();
+assert_eq!(event.payload, "changed");
+```
+
+Notifications are explicit, local to one open database handle, in-memory, and
+non-persistent. They are delivered to subscription queues after commit. Rollback
+discards pending notifications. Savepoint rollback discards inner pending
+notifications; savepoint release preserves them for the outer scope.
+SQL `zova_notify(...)` participates in this model when transactions/savepoints
+are opened through Zova helpers; raw SQL transaction scopes that Zova cannot
+track are rejected instead of guessed.
+
+This is useful when one process wants a clean storage-runtime boundary: a write
+workflow stores records, objects, or vectors, then notifies another part of the
+same process to reload by id. It is not cross-process delivery, replay,
+replication, audit logging, or automatic mutation tracking.
+
+Queue details:
+
+- channel names are ASCII, 1-128 bytes, using letters, digits, `_`, `.`, `:`,
+  and `-`
+- payloads are UTF-8 text, up to 64 KiB
+- each subscription queue holds 1024 notifications
+- when a queue overflows, Zova drops the oldest notification and reports the
+  drop count on the next received notification
+- v0.18 has polling only: use `try_receive` / drain loops, not callbacks
+
 ## Diagnostics And Salvage
 
 Zova keeps diagnostics non-mutating by default:
@@ -454,14 +496,14 @@ Rust users normally use the safe crate:
 
 ```toml
 [dependencies]
-zova = "0.17.0"
+zova = "0.18.0"
 ```
 
 The lower-level raw FFI crate is available as:
 
 ```toml
 [dependencies]
-zova-sys = "0.17.0"
+zova-sys = "0.18.0"
 ```
 
 `zova` exposes `Database` for single-owner code and `SharedDatabase` for an
@@ -477,11 +519,11 @@ uv add zova
 ```
 
 The Python package is a PyO3/maturin extension backed by the Rust `zova` crate.
-It exposes records, prepared statements, transactions, savepoints, backup,
-compact, restore, objects, `ObjectWriter`, vectors, and SQL-native vector
-search.
+It exposes records, prepared statements, transactions, savepoints, app events,
+backup, compact, restore, objects, `ObjectWriter`, vectors, and SQL-native
+vector search.
 
-The package is source-first in `0.17.0`. Installs may build the native extension
+The package is source-first in `0.18.0`. Installs may build the native extension
 locally and require Rust, Zig, and a C compiler. No official wheel matrix is
 promised yet.
 
@@ -490,7 +532,7 @@ promised yet.
 Install:
 
 ```sh
-go get github.com/atasesli/zova/bindings/go@v0.17.0
+go get github.com/atasesli/zova/bindings/go@v0.18.0
 ```
 
 Import:
@@ -602,7 +644,7 @@ synchronous settings automatically.
 
 ## Current Boundaries
 
-Zova `0.17.0` does not include:
+Zova `0.18.0` does not include:
 
 - ANN indexes such as HNSW or IVFFlat
 - vector SQL operators
@@ -612,6 +654,8 @@ Zova `0.17.0` does not include:
 - automatic Go module publishing
 - a Python wheel matrix
 - background worker threads hidden inside Zova
+- cross-process notifications, durable notification replay, or automatic
+  mutation logging
 - in-place repair
 - overwrite mode for backup/compact/restore/salvage
 - remote sync, S3 compatibility, NATS integration, or Redis-like behavior
@@ -662,7 +706,7 @@ are not release artifacts.
 Release command:
 
 ```sh
-scripts/package-release.sh 0.17.0
+scripts/package-release.sh 0.18.0
 ```
 
 Do not run it until the exact commit is ready to tag and publish.

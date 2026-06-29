@@ -21,6 +21,7 @@ type DB struct {
 	closed     bool
 	statements map[*Stmt]struct{}
 	writers    map[*ObjectWriter]struct{}
+	subs       map[*Subscription]struct{}
 }
 
 // OpenOptions controls optional behavior for opening an existing .zova file.
@@ -157,6 +158,7 @@ func openOrCreate(path string, create bool) (*DB, error) {
 		ptr:        raw,
 		statements: make(map[*Stmt]struct{}),
 		writers:    make(map[*ObjectWriter]struct{}),
+		subs:       make(map[*Subscription]struct{}),
 	}, nil
 }
 
@@ -195,6 +197,7 @@ func openWithOptions(path string, options OpenOptions) (*DB, error) {
 		ptr:        raw,
 		statements: make(map[*Stmt]struct{}),
 		writers:    make(map[*ObjectWriter]struct{}),
+		subs:       make(map[*Subscription]struct{}),
 	}, nil
 }
 
@@ -225,6 +228,14 @@ func (db *DB) Close() error {
 			writer.closed = true
 		}
 		delete(db.writers, writer)
+	}
+	for sub := range db.subs {
+		if !sub.closed && sub.ptr != nil {
+			_ = C.zova_subscription_close(sub.ptr)
+			sub.ptr = nil
+			sub.closed = true
+		}
+		delete(db.subs, sub)
 	}
 
 	status := C.zova_database_close(db.ptr)

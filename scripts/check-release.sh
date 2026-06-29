@@ -43,7 +43,7 @@ require_command cargo
 require_command go
 require_command uv
 
-zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/zova_test_support.zig src/object.zig src/object_fastcdc.zig src/object_tests.zig src/vector.zig src/vector_tests.zig src/vector_sql.zig src/vector_sql_tests.zig src/c_api.zig src/c_api_internal.zig src/c_api_tests.zig src/cli.zig src/main.zig tests/e2e.zig tests/cli.zig
+zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/zova_test_support.zig src/notify.zig src/object.zig src/object_fastcdc.zig src/object_tests.zig src/vector.zig src/vector_tests.zig src/vector_sql.zig src/vector_sql_tests.zig src/c_api.zig src/c_api_internal.zig src/c_api_tests.zig src/cli.zig src/main.zig tests/e2e.zig tests/cli.zig
 zig build test
 zig build e2e
 zig build c-abi
@@ -58,13 +58,13 @@ CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo check --examples --manifest-path bin
 sh bindings/rust/zova-sys/tools/sync-native-source.sh
 sh bindings/rust/zova-sys/tools/check-native-source.sh
 # zova-sys intentionally packages a generated native source snapshot that stays
-# git-ignored in the repository. Sync and check it first, then allow Cargo's
-# dirty-tree check only for this crate.
+# git-ignored in the repository. Sync and check it first. Release smoke may run
+# before committing local changes, so package dry-runs use the current tree.
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo package --allow-dirty --list -p zova-sys --manifest-path bindings/rust/Cargo.toml >/dev/null
-CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo package --list -p zova --manifest-path bindings/rust/Cargo.toml >/dev/null
+CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo package --allow-dirty --list -p zova --manifest-path bindings/rust/Cargo.toml >/dev/null
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo publish --allow-dirty --dry-run -p zova-sys --manifest-path bindings/rust/Cargo.toml
 if [ "${ZOVA_CHECK_PUBLISHED_RUST_SAFE_CRATE:-0}" = "1" ]; then
-    CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo publish --dry-run -p zova --manifest-path bindings/rust/Cargo.toml
+    CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo publish --allow-dirty --dry-run -p zova --manifest-path bindings/rust/Cargo.toml
 else
     echo "skipping zova publish dry-run until zova-sys $RUST_WORKSPACE_VERSION is published"
 fi
@@ -128,6 +128,11 @@ fi
 
 if [ ! -d "$TMP/$PKG/src" ]; then
     echo "release package is missing src" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/src/notify.zig" ]; then
+    echo "release package is missing src/notify.zig" >&2
     exit 1
 fi
 
@@ -206,6 +211,11 @@ if [ ! -d "$TMP/$PKG/bindings/go/examples/vectors" ]; then
     exit 1
 fi
 
+if [ ! -d "$TMP/$PKG/bindings/go/examples/notifications" ]; then
+    echo "release package is missing bindings/go/examples/notifications" >&2
+    exit 1
+fi
+
 if [ ! -f "$TMP/$PKG/bindings/python/pyproject.toml" ]; then
     echo "release package is missing bindings/python/pyproject.toml" >&2
     exit 1
@@ -269,7 +279,7 @@ mkdir -p "$VERIFY_DIR"
 tar -xzf "$TMP/$PKG.tar.gz" -C "$VERIFY_DIR"
 cd "$VERIFY_DIR/$PKG"
 
-zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/zova_test_support.zig src/object.zig src/object_fastcdc.zig src/object_tests.zig src/vector.zig src/vector_tests.zig src/vector_sql.zig src/vector_sql_tests.zig src/c_api.zig src/c_api_internal.zig src/c_api_tests.zig src/cli.zig src/main.zig tests/e2e.zig tests/cli.zig
+zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/zova_test_support.zig src/notify.zig src/object.zig src/object_fastcdc.zig src/object_tests.zig src/vector.zig src/vector_tests.zig src/vector_sql.zig src/vector_sql_tests.zig src/c_api.zig src/c_api_internal.zig src/c_api_tests.zig src/cli.zig src/main.zig tests/e2e.zig tests/cli.zig
 zig build test
 zig build e2e
 zig build c-abi
@@ -284,10 +294,10 @@ CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo check --examples --manifest-path b
 sh bindings/rust/zova-sys/tools/sync-native-source.sh
 sh bindings/rust/zova-sys/tools/check-native-source.sh
 CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo package --allow-dirty --list -p zova-sys --manifest-path bindings/rust/Cargo.toml >/dev/null
-CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo package --list -p zova --manifest-path bindings/rust/Cargo.toml >/dev/null
+CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo package --allow-dirty --list -p zova --manifest-path bindings/rust/Cargo.toml >/dev/null
 CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo publish --allow-dirty --dry-run -p zova-sys --manifest-path bindings/rust/Cargo.toml
 if [ "${ZOVA_CHECK_PUBLISHED_RUST_SAFE_CRATE:-0}" = "1" ]; then
-    CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo publish --dry-run -p zova --manifest-path bindings/rust/Cargo.toml
+    CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo publish --allow-dirty --dry-run -p zova --manifest-path bindings/rust/Cargo.toml
 else
     echo "skipping zova publish dry-run until zova-sys $RUST_WORKSPACE_VERSION is published"
 fi

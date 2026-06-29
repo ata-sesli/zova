@@ -75,6 +75,11 @@ pub struct zova_object_writer {
 }
 
 #[repr(C)]
+pub struct zova_subscription {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct zova_object_id {
     pub bytes: [u8; 32],
@@ -105,6 +110,17 @@ pub struct zova_message {
 pub struct zova_text {
     pub data: *mut c_char,
     pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_notification {
+    pub channel: *mut c_char,
+    pub channel_len: usize,
+    pub payload: *mut c_char,
+    pub payload_len: usize,
+    pub sequence: u64,
+    pub dropped_before: u64,
 }
 
 #[repr(C)]
@@ -267,6 +283,28 @@ pub struct zova_database_changes_request {
 pub struct zova_database_total_changes_request {
     pub db: *mut zova_database,
     pub out_total_changes: *mut i64,
+}
+
+#[repr(C)]
+pub struct zova_database_notify_request {
+    pub db: *mut zova_database,
+    pub channel: *const c_char,
+    pub payload: *const u8,
+    pub payload_len: usize,
+}
+
+#[repr(C)]
+pub struct zova_database_listen_request {
+    pub db: *mut zova_database,
+    pub channel: *const c_char,
+    pub out_subscription: *mut *mut zova_subscription,
+}
+
+#[repr(C)]
+pub struct zova_subscription_try_receive_request {
+    pub subscription: *mut zova_subscription,
+    pub out_notification: *mut zova_notification,
+    pub out_has_notification: *mut u8,
 }
 
 #[repr(C)]
@@ -664,6 +702,7 @@ extern "C" {
     pub fn zova_buffer_free(buffer: *mut zova_buffer);
     pub fn zova_message_free(message: *mut zova_message);
     pub fn zova_text_free(text: *mut zova_text);
+    pub fn zova_notification_free(notification: *mut zova_notification);
     pub fn zova_object_manifest_free(manifest: *mut zova_object_manifest);
     pub fn zova_vector_free(vector: *mut zova_vector);
     pub fn zova_vector_search_results_free(results: *mut zova_vector_search_results);
@@ -703,6 +742,12 @@ extern "C" {
     pub fn zova_database_total_changes(
         request: *const zova_database_total_changes_request,
     ) -> zova_status;
+    pub fn zova_database_notify(request: *const zova_database_notify_request) -> zova_status;
+    pub fn zova_database_listen(request: *const zova_database_listen_request) -> zova_status;
+    pub fn zova_subscription_try_receive(
+        request: *const zova_subscription_try_receive_request,
+    ) -> zova_status;
+    pub fn zova_subscription_close(subscription: *mut zova_subscription) -> zova_status;
     pub fn zova_database_prepare(request: *const zova_database_prepare_request) -> zova_status;
     pub fn zova_database_last_error_message(db: *mut zova_database) -> *const c_char;
     pub fn zova_convert_sqlite_to_zova(

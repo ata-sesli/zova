@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 /*
- * Zova C ABI, v0.17.0 pre-1.0.
+ * Zova C ABI, v0.18.0 pre-1.0.
  *
  * This header exposes a C-compatible object and vector API over Zova's Zig
  * implementation. The ABI is intentionally conservative: opaque handles,
@@ -15,10 +15,12 @@
  * Threading:
  * - A single zova_database handle may be called from multiple threads. Calls
  *   on the same handle are internally serialized and execute one at a time.
- * - Statements and object writers are child handles of their parent database;
- *   their calls use the same parent serialization boundary.
- * - zova_database_close fails with ZOVA_MISUSE while live statements or object
- *   writers still exist. Finalize/destroy child handles before closing.
+ * - Statements, object writers, and notification subscriptions are child
+ *   handles of their parent database; their calls use the same parent
+ *   serialization boundary.
+ * - zova_database_close fails with ZOVA_MISUSE while live statements, object
+ *   writers, or subscriptions still exist. Finalize/destroy/close child
+ *   handles before closing.
  * - After a successful close, statement finalize, or writer destroy, that C
  *   pointer is invalid and must not be used again. Coordinate these terminal
  *   calls so no other thread can still call through the same pointer.
@@ -54,6 +56,11 @@
  *   Query vector blobs for those SQL helpers are little-endian IEEE-754 f32
  *   arrays with exactly the collection dimension count.
  * - Zova does not automatically run VACUUM or change SQLite PRAGMAs.
+ * - App notifications are same-process, in-memory, local to one database
+ *   handle, non-persistent, and delivered only to subscription queues. They
+ *   are transaction-aware when callers use Zova transaction/savepoint helpers;
+ *   raw SQL transaction scopes that Zova cannot track are rejected for
+ *   zova_notify().
  */
 
 #ifdef __cplusplus
@@ -64,6 +71,7 @@ extern "C" {
 typedef struct zova_database zova_database;
 typedef struct zova_object_writer zova_object_writer;
 typedef struct zova_statement zova_statement;
+typedef struct zova_subscription zova_subscription;
 
 /* Stable status values for the pre-1.0 ABI surface. */
 typedef enum zova_status {
@@ -147,6 +155,16 @@ typedef struct zova_text {
     char *data;
     size_t len;
 } zova_text;
+
+/* Owned app notification returned by Zova. Free with zova_notification_free. */
+typedef struct zova_notification {
+    char *channel;
+    size_t channel_len;
+    char *payload;
+    size_t payload_len;
+    uint64_t sequence;
+    uint64_t dropped_before;
+} zova_notification;
 
 /* One flat manifest row. Chunks are ordered by index. */
 typedef struct zova_object_manifest_chunk {
@@ -320,6 +338,25 @@ typedef struct zova_database_total_changes_request {
     zova_database *db;
     int64_t *out_total_changes;
 } zova_database_total_changes_request;
+
+typedef struct zova_database_notify_request {
+    zova_database *db;
+    const char *channel;
+    const uint8_t *payload;
+    size_t payload_len;
+} zova_database_notify_request;
+
+typedef struct zova_database_listen_request {
+    zova_database *db;
+    const char *channel;
+    zova_subscription **out_subscription;
+} zova_database_listen_request;
+
+typedef struct zova_subscription_try_receive_request {
+    zova_subscription *subscription;
+    zova_notification *out_notification;
+    uint8_t *out_has_notification;
+} zova_subscription_try_receive_request;
 
 typedef struct zova_database_prepare_request {
     zova_database *db;
@@ -671,6 +708,7 @@ const char *zova_status_name(zova_status status);
 void zova_buffer_free(zova_buffer *buffer);
 void zova_message_free(zova_message *message);
 void zova_text_free(zova_text *text);
+void zova_notification_free(zova_notification *notification);
 void zova_object_manifest_free(zova_object_manifest *manifest);
 void zova_vector_free(zova_vector *vector);
 void zova_vector_search_results_free(zova_vector_search_results *results);
@@ -697,6 +735,10 @@ zova_status zova_database_set_busy_timeout(const zova_database_busy_timeout_requ
 zova_status zova_database_last_insert_rowid(const zova_database_last_insert_rowid_request *request);
 zova_status zova_database_changes(const zova_database_changes_request *request);
 zova_status zova_database_total_changes(const zova_database_total_changes_request *request);
+zova_status zova_database_notify(const zova_database_notify_request *request);
+zova_status zova_database_listen(const zova_database_listen_request *request);
+zova_status zova_subscription_try_receive(const zova_subscription_try_receive_request *request);
+zova_status zova_subscription_close(zova_subscription *subscription);
 zova_status zova_database_prepare(const zova_database_prepare_request *request);
 const char *zova_database_last_error_message(zova_database *db);
 zova_status zova_convert_sqlite_to_zova(const zova_convert_sqlite_to_zova_request *request);

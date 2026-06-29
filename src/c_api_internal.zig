@@ -66,6 +66,7 @@ const AbiMutex = struct {
 pub const zova_database = opaque {};
 pub const zova_object_writer = opaque {};
 pub const zova_statement = opaque {};
+pub const zova_subscription = opaque {};
 
 const DatabaseHandle = struct {
     db: zova.Database,
@@ -76,6 +77,7 @@ const DatabaseHandle = struct {
     mutex: AbiMutex = .{},
     live_statements: usize = 0,
     live_writers: usize = 0,
+    live_subscriptions: usize = 0,
     // Connection-scoped diagnostic text. This mirrors SQLite's model closely:
     // callers can ask the database handle for the most recent useful message,
     // and the pointer is borrowed until another call on the handle replaces it.
@@ -95,6 +97,13 @@ const StatementHandle = struct {
     // parent database mutex.
     db: *DatabaseHandle,
     statement: sqlite.Statement,
+};
+
+const SubscriptionHandle = struct {
+    // Subscriptions are child handles tied to one database handle. Receive and
+    // close operations serialize through the parent database mutex.
+    db: *DatabaseHandle,
+    subscription: zova.NotificationSubscription,
 };
 
 // Keep these numeric values synchronized with `include/zova.h`. Existing values
@@ -168,6 +177,15 @@ pub const zova_message = extern struct {
 pub const zova_text = extern struct {
     data: ?[*]u8,
     len: usize,
+};
+
+pub const zova_notification = extern struct {
+    channel: ?[*]u8,
+    channel_len: usize,
+    payload: ?[*]u8,
+    payload_len: usize,
+    sequence: u64,
+    dropped_before: u64,
 };
 
 pub const zova_object_manifest_chunk = extern struct {
@@ -313,6 +331,25 @@ pub const zova_database_changes_request = extern struct {
 pub const zova_database_total_changes_request = extern struct {
     db: ?*zova_database,
     out_total_changes: ?*i64,
+};
+
+pub const zova_database_notify_request = extern struct {
+    db: ?*zova_database,
+    channel: ?[*:0]const u8,
+    payload: ?[*]const u8,
+    payload_len: usize,
+};
+
+pub const zova_database_listen_request = extern struct {
+    db: ?*zova_database,
+    channel: ?[*:0]const u8,
+    out_subscription: ?*?*zova_subscription,
+};
+
+pub const zova_subscription_try_receive_request = extern struct {
+    subscription: ?*zova_subscription,
+    out_notification: ?*zova_notification,
+    out_has_notification: ?*u8,
 };
 
 pub const zova_database_prepare_request = extern struct {
@@ -656,7 +693,7 @@ pub fn zova_abi_version_major() callconv(.c) u32 {
 }
 
 pub fn zova_abi_version_minor() callconv(.c) u32 {
-    return 17;
+    return 18;
 }
 
 pub fn zova_abi_version_patch() callconv(.c) u32 {
@@ -664,7 +701,7 @@ pub fn zova_abi_version_patch() callconv(.c) u32 {
 }
 
 pub fn zova_abi_version_string() callconv(.c) [*:0]const u8 {
-    return "0.17.0";
+    return "0.18.0";
 }
 
 // Accept a raw integer instead of a Zig enum so accidental or future C enum
@@ -697,6 +734,17 @@ pub fn zova_text_free(text: ?*zova_text) callconv(.c) void {
         allocator.free(data[0 .. out.len + 1]);
     }
     out.* = emptyText();
+}
+
+pub fn zova_notification_free(notification: ?*zova_notification) callconv(.c) void {
+    const out = notification orelse return;
+    if (out.channel) |channel| {
+        allocator.free(channel[0 .. out.channel_len + 1]);
+    }
+    if (out.payload) |payload| {
+        allocator.free(payload[0 .. out.payload_len + 1]);
+    }
+    out.* = emptyNotification();
 }
 
 pub fn zova_object_manifest_free(manifest: ?*zova_object_manifest) callconv(.c) void {
@@ -761,13 +809,13 @@ pub fn zova_database_open_with_options(request: ?*const zova_database_open_optio
 pub fn zova_database_close(db: ?*zova_database) callconv(.c) zova_status {
     const handle = databaseHandle(db) orelse return .INVALID_ARGUMENT;
     handle.mutex.lock();
-    if (handle.live_statements != 0 or handle.live_writers != 0) {
+    if (handle.live_statements != 0 or handle.live_writers != 0 or handle.live_subscriptions != 0) {
         defer handle.mutex.unlock();
-        var message_buffer: [160]u8 = undefined;
+        var message_buffer: [192]u8 = undefined;
         const message = std.fmt.bufPrint(
             &message_buffer,
-            "cannot close database with live child handles: {d} statements, {d} object writers",
-            .{ handle.live_statements, handle.live_writers },
+            "cannot close database with live child handles: {d} statements, {d} object writers, {d} subscriptions",
+            .{ handle.live_statements, handle.live_writers, handle.live_subscriptions },
         ) catch "cannot close database with live child handles";
         return failDbStatusString(handle, .MISUSE, message);
     }
@@ -793,7 +841,7 @@ pub fn zova_database_begin(request: ?*const zova_database_simple_request) callco
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     handle.mutex.lock();
     defer handle.mutex.unlock();
-    handle.db.sqlite_db.begin() catch |err| return failDb(handle, err);
+    handle.db.begin() catch |err| return failDb(handle, err);
     return okDb(handle);
 }
 
@@ -802,7 +850,7 @@ pub fn zova_database_begin_immediate(request: ?*const zova_database_simple_reque
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     handle.mutex.lock();
     defer handle.mutex.unlock();
-    handle.db.sqlite_db.beginImmediate() catch |err| return failDb(handle, err);
+    handle.db.beginImmediate() catch |err| return failDb(handle, err);
     return okDb(handle);
 }
 
@@ -811,7 +859,7 @@ pub fn zova_database_commit(request: ?*const zova_database_simple_request) callc
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     handle.mutex.lock();
     defer handle.mutex.unlock();
-    handle.db.sqlite_db.commit() catch |err| return failDb(handle, err);
+    handle.db.commit() catch |err| return failDb(handle, err);
     return okDb(handle);
 }
 
@@ -820,7 +868,7 @@ pub fn zova_database_rollback(request: ?*const zova_database_simple_request) cal
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     handle.mutex.lock();
     defer handle.mutex.unlock();
-    handle.db.sqlite_db.rollback() catch |err| return failDb(handle, err);
+    handle.db.rollback() catch |err| return failDb(handle, err);
     return okDb(handle);
 }
 
@@ -911,6 +959,69 @@ pub fn zova_database_total_changes(request: ?*const zova_database_total_changes_
     const out = req.out_total_changes orelse return failDb(handle, error.InvalidArgument);
     out.* = handle.db.totalChanges();
     return okDb(handle);
+}
+
+pub fn zova_database_notify(request: ?*const zova_database_notify_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const channel = req.channel orelse return failDb(handle, error.InvalidArgument);
+    const payload = bytesConst(req.payload, req.payload_len) orelse return failDb(handle, error.InvalidArgument);
+    handle.db.notify(std.mem.span(channel), payload) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_database_listen(request: ?*const zova_database_listen_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const channel = req.channel orelse return failDb(handle, error.InvalidArgument);
+    const out = req.out_subscription orelse return failDb(handle, error.InvalidArgument);
+    out.* = null;
+
+    const subscription = handle.db.listen(std.mem.span(channel)) catch |err| return failDb(handle, err);
+    const subscription_handle = allocator.create(SubscriptionHandle) catch |err| {
+        var cleanup = subscription;
+        cleanup.deinit();
+        return failDb(handle, err);
+    };
+    subscription_handle.* = .{ .db = handle, .subscription = subscription };
+    handle.live_subscriptions += 1;
+    out.* = @ptrCast(subscription_handle);
+    return okDb(handle);
+}
+
+pub fn zova_subscription_try_receive(request: ?*const zova_subscription_try_receive_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = subscriptionHandle(req.subscription) orelse return .INVALID_ARGUMENT;
+    handle.db.mutex.lock();
+    defer handle.db.mutex.unlock();
+    const out_notification = req.out_notification orelse return failDb(handle.db, error.InvalidArgument);
+    const out_has_notification = req.out_has_notification orelse return failDb(handle.db, error.InvalidArgument);
+
+    zova_notification_free(out_notification);
+    out_has_notification.* = 0;
+    var notification = handle.subscription.tryReceive(allocator) catch |err| return failDb(handle.db, err);
+    if (notification) |*value| {
+        defer value.deinit(allocator);
+        fillNotification(out_notification, value.*) catch |err| return failDb(handle.db, err);
+        out_has_notification.* = 1;
+    }
+    return okDb(handle.db);
+}
+
+pub fn zova_subscription_close(subscription: ?*zova_subscription) callconv(.c) zova_status {
+    const handle = subscriptionHandle(subscription) orelse return .INVALID_ARGUMENT;
+    const db_handle = handle.db;
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    handle.subscription.deinit();
+    std.debug.assert(db_handle.live_subscriptions > 0);
+    db_handle.live_subscriptions -= 1;
+    allocator.destroy(handle);
+    return okDb(db_handle);
 }
 
 const SavepointOperation = enum {
@@ -1810,6 +1921,11 @@ fn statementHandle(statement: ?*zova_statement) ?*StatementHandle {
     return @ptrCast(@alignCast(ptr));
 }
 
+fn subscriptionHandle(subscription: ?*zova_subscription) ?*SubscriptionHandle {
+    const ptr = subscription orelse return null;
+    return @ptrCast(@alignCast(ptr));
+}
+
 // A null pointer is valid only for empty byte slices. That keeps empty objects
 // and zero-length range buffers ergonomic while still catching bad lengths.
 fn bytesConst(data: ?[*]const u8, len: usize) ?[]const u8 {
@@ -1908,6 +2024,17 @@ fn emptyBuffer() zova_buffer {
 
 fn emptyText() zova_text {
     return .{ .data = null, .len = 0 };
+}
+
+fn emptyNotification() zova_notification {
+    return .{
+        .channel = null,
+        .channel_len = 0,
+        .payload = null,
+        .payload_len = 0,
+        .sequence = 0,
+        .dropped_before = 0,
+    };
 }
 
 fn emptyManifest() zova_object_manifest {
@@ -2010,6 +2137,27 @@ fn fillVectorCollectionList(out: *zova_vector_collection_list, items: []const zo
     }
 
     out.* = .{ .items = abi_items.ptr, .len = abi_items.len };
+}
+
+fn fillNotification(out: *zova_notification, notification: zova.Notification) error{OutOfMemory}!void {
+    const channel = try allocator.alloc(u8, notification.channel.len + 1);
+    errdefer allocator.free(channel);
+    @memcpy(channel[0..notification.channel.len], notification.channel);
+    channel[notification.channel.len] = 0;
+
+    const payload = try allocator.alloc(u8, notification.payload.len + 1);
+    errdefer allocator.free(payload);
+    @memcpy(payload[0..notification.payload.len], notification.payload);
+    payload[notification.payload.len] = 0;
+
+    out.* = .{
+        .channel = channel.ptr,
+        .channel_len = notification.channel.len,
+        .payload = payload.ptr,
+        .payload_len = notification.payload.len,
+        .sequence = notification.sequence,
+        .dropped_before = notification.dropped_before,
+    };
 }
 
 fn failDb(handle: *DatabaseHandle, err: anyerror) zova_status {
@@ -2146,9 +2294,9 @@ fn statusName(status: c_int) [*:0]const u8 {
 
 test "c abi status names and versions are stable" {
     try std.testing.expectEqual(@as(u32, 0), zova_abi_version_major());
-    try std.testing.expectEqual(@as(u32, 17), zova_abi_version_minor());
+    try std.testing.expectEqual(@as(u32, 18), zova_abi_version_minor());
     try std.testing.expectEqual(@as(u32, 0), zova_abi_version_patch());
-    try std.testing.expectEqualStrings("0.17.0", std.mem.span(zova_abi_version_string()));
+    try std.testing.expectEqualStrings("0.18.0", std.mem.span(zova_abi_version_string()));
     try std.testing.expectEqualStrings("ZOVA_OK", std.mem.span(zova_status_name(@intFromEnum(zova_status.OK))));
     try std.testing.expectEqualStrings("ZOVA_OBJECT_NOT_FOUND", std.mem.span(zova_status_name(@intFromEnum(zova_status.OBJECT_NOT_FOUND))));
     try std.testing.expectEqualStrings("ZOVA_VECTOR_INVALID", std.mem.span(zova_status_name(@intFromEnum(zova_status.VECTOR_INVALID))));
@@ -2189,6 +2337,10 @@ test "c abi validates null pointers" {
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_last_insert_rowid(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_changes(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_total_changes(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_notify(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_listen(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_subscription_try_receive(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_subscription_close(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_prepare(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_finalize(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_step(null));
@@ -3607,4 +3759,149 @@ test "c abi last error remains useful after concurrent serialized failures" {
     for (threads) |thread| thread.join();
     for (contexts) |context| try std.testing.expectEqual(zova_status.SQLITE_ERROR, context.status);
     try std.testing.expect(std.mem.indexOf(u8, std.mem.span(zova_database_last_error_message(db)), "no_such_table") != null);
+}
+
+test "c abi notifications are transaction aware and SQL callable" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-notify.zova", .{tmp.sub_path[0..]});
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    }));
+
+    var subscription: ?*zova_subscription = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_listen(&.{
+        .db = db,
+        .channel = "messages",
+        .out_subscription = &subscription,
+    }));
+
+    try std.testing.expectEqual(zova_status.MISUSE, zova_database_close(db));
+
+    var out = emptyNotification();
+    defer zova_notification_free(&out);
+    var has_notification: u8 = 0;
+
+    const invalid_utf8_channel = [_:0]u8{ 0xc3, 0xa9 };
+    const invalid_payload = [_]u8{0xff};
+    const invalid_channels = [_][*:0]const u8{
+        "",
+        "bad channel",
+        "_zova_private",
+        &invalid_utf8_channel,
+    };
+    for (invalid_channels) |channel| {
+        var invalid_subscription: ?*zova_subscription = null;
+        try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_listen(&.{
+            .db = db,
+            .channel = channel,
+            .out_subscription = &invalid_subscription,
+        }));
+        try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_notify(&.{
+            .db = db,
+            .channel = channel,
+            .payload = "payload",
+            .payload_len = "payload".len,
+        }));
+    }
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_notify(&.{
+        .db = db,
+        .channel = "messages",
+        .payload = invalid_payload[0..].ptr,
+        .payload_len = invalid_payload.len,
+    }));
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_notify(&.{
+        .db = db,
+        .channel = "messages",
+        .payload = "outside",
+        .payload_len = "outside".len,
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_subscription_try_receive(&.{
+        .subscription = subscription,
+        .out_notification = &out,
+        .out_has_notification = &has_notification,
+    }));
+    try std.testing.expectEqual(@as(u8, 1), has_notification);
+    try std.testing.expectEqualStrings("messages", out.channel.?[0..out.channel_len]);
+    try std.testing.expectEqualStrings("outside", out.payload.?[0..out.payload_len]);
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_begin_immediate(&.{ .db = db }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_notify(&.{
+        .db = db,
+        .channel = "messages",
+        .payload = "committed",
+        .payload_len = "committed".len,
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_subscription_try_receive(&.{
+        .subscription = subscription,
+        .out_notification = &out,
+        .out_has_notification = &has_notification,
+    }));
+    try std.testing.expectEqual(@as(u8, 0), has_notification);
+    try std.testing.expectEqual(zova_status.OK, zova_database_commit(&.{ .db = db }));
+    try std.testing.expectEqual(zova_status.OK, zova_subscription_try_receive(&.{
+        .subscription = subscription,
+        .out_notification = &out,
+        .out_has_notification = &has_notification,
+    }));
+    try std.testing.expectEqual(@as(u8, 1), has_notification);
+    try std.testing.expectEqualStrings("committed", out.payload.?[0..out.payload_len]);
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_begin_immediate(&.{ .db = db }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_notify(&.{
+        .db = db,
+        .channel = "messages",
+        .payload = "rolled-back",
+        .payload_len = "rolled-back".len,
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_rollback(&.{ .db = db }));
+    try std.testing.expectEqual(zova_status.OK, zova_subscription_try_receive(&.{
+        .subscription = subscription,
+        .out_notification = &out,
+        .out_has_notification = &has_notification,
+    }));
+    try std.testing.expectEqual(@as(u8, 0), has_notification);
+
+    var statement: ?*zova_statement = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_prepare(&.{
+        .db = db,
+        .sql = "select zova_notify('messages', 'from-sql')",
+        .out_statement = &statement,
+    }));
+    var step_result: zova_step_result = undefined;
+    try std.testing.expectEqual(zova_status.OK, zova_statement_step(&.{ .statement = statement, .out_result = &step_result }));
+    try std.testing.expectEqual(zova_step_result.ROW, step_result);
+    try std.testing.expectEqual(zova_status.OK, zova_statement_finalize(statement));
+    try std.testing.expectEqual(zova_status.OK, zova_subscription_try_receive(&.{
+        .subscription = subscription,
+        .out_notification = &out,
+        .out_has_notification = &has_notification,
+    }));
+    try std.testing.expectEqual(@as(u8, 1), has_notification);
+    try std.testing.expectEqualStrings("from-sql", out.payload.?[0..out.payload_len]);
+
+    try std.testing.expectEqual(zova_status.SQLITE_ERROR, zova_database_exec(&.{
+        .db = db,
+        .sql = "select zova_notify('_zova_private', 'payload')",
+    }));
+    try std.testing.expectEqual(zova_status.SQLITE_ERROR, zova_database_exec(&.{
+        .db = db,
+        .sql = "select zova_notify('messages', cast(x'ff' as text))",
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_subscription_try_receive(&.{
+        .subscription = subscription,
+        .out_notification = &out,
+        .out_has_notification = &has_notification,
+    }));
+    try std.testing.expectEqual(@as(u8, 0), has_notification);
+
+    try std.testing.expectEqual(zova_status.OK, zova_subscription_close(subscription));
+    try std.testing.expectEqual(zova_status.OK, zova_database_close(db));
 }
