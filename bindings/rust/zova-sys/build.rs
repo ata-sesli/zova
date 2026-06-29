@@ -86,6 +86,7 @@ fn build_local_zova() -> PathBuf {
 
     let lib_dir = prefix.join("lib");
     assert_static_library_exists(&lib_dir);
+    repack_macos_static_library(&lib_dir);
     lib_dir
 }
 
@@ -169,3 +170,127 @@ fn assert_static_library_exists(lib_dir: &Path) {
         names
     );
 }
+
+fn repack_macos_static_library(lib_dir: &Path) {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+        return;
+    }
+
+    let archive = lib_dir.join("libzova_c.a");
+    if !archive.exists() {
+        return;
+    }
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+    let repack_dir = out_dir.join("darwin-repack");
+    if repack_dir.exists() {
+        std::fs::remove_dir_all(&repack_dir).unwrap_or_else(|err| {
+            panic!(
+                "failed to remove stale Darwin archive repack directory {}: {err}",
+                repack_dir.display()
+            )
+        });
+    }
+    std::fs::create_dir_all(&repack_dir).unwrap_or_else(|err| {
+        panic!(
+            "failed to create Darwin archive repack directory {}: {err}",
+            repack_dir.display()
+        )
+    });
+
+    let original = repack_dir.join("original.a");
+    std::fs::copy(&archive, &original).unwrap_or_else(|err| {
+        panic!(
+            "failed to copy {} to {} for Darwin archive repack: {err}",
+            archive.display(),
+            original.display()
+        )
+    });
+
+    let members_output = Command::new("ar")
+        .arg("-t")
+        .arg("original.a")
+        .current_dir(&repack_dir)
+        .output()
+        .expect("failed to run `ar -t` while repacking Darwin archive");
+    if !members_output.status.success() {
+        panic!(
+            "`ar -t` failed while repacking Darwin archive with status {}",
+            members_output.status
+        );
+    }
+
+    let members_text = String::from_utf8(members_output.stdout)
+        .expect("Darwin archive member list was not valid UTF-8");
+    let members: Vec<&str> = members_text
+        .lines()
+        .filter(|line| line.ends_with(".o"))
+        .collect();
+    if members.is_empty() {
+        panic!(
+            "Darwin archive {} contains no object members to repack",
+            archive.display()
+        );
+    }
+
+    let extract_status = Command::new("ar")
+        .arg("-x")
+        .arg("original.a")
+        .current_dir(&repack_dir)
+        .status()
+        .expect("failed to run `ar -x` while repacking Darwin archive");
+    if !extract_status.success() {
+        panic!("`ar -x` failed while repacking Darwin archive with status {extract_status}");
+    }
+
+    for member in &members {
+        make_repacked_member_readable(&repack_dir.join(member));
+    }
+
+    let mut libtool = Command::new("libtool");
+    libtool
+        .arg("-static")
+        .arg("-o")
+        .arg("libzova_c.a")
+        .args(&members)
+        .current_dir(&repack_dir);
+    let libtool_status = libtool
+        .status()
+        .expect("failed to run `libtool -static` while repacking Darwin archive");
+    if !libtool_status.success() {
+        panic!(
+            "`libtool -static` failed while repacking Darwin archive with status {libtool_status}"
+        );
+    }
+
+    let ranlib_status = Command::new("ranlib")
+        .arg("libzova_c.a")
+        .current_dir(&repack_dir)
+        .status()
+        .expect("failed to run `ranlib` while repacking Darwin archive");
+    if !ranlib_status.success() {
+        panic!("`ranlib` failed while repacking Darwin archive with status {ranlib_status}");
+    }
+
+    std::fs::copy(repack_dir.join("libzova_c.a"), &archive).unwrap_or_else(|err| {
+        panic!(
+            "failed to replace {} with Darwin-repacked archive: {err}",
+            archive.display()
+        )
+    });
+}
+
+#[cfg(unix)]
+fn make_repacked_member_readable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = std::fs::metadata(path)
+        .unwrap_or_else(|err| panic!("failed to stat {}: {err}", path.display()))
+        .permissions();
+    permissions.set_mode(0o644);
+    std::fs::set_permissions(path, permissions)
+        .unwrap_or_else(|err| panic!("failed to chmod {}: {err}", path.display()));
+}
+
+#[cfg(not(unix))]
+fn make_repacked_member_readable(_path: &Path) {}
