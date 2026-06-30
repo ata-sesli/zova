@@ -135,6 +135,9 @@ pub const zova_status = enum(c_int) {
     OBJECT_TOO_LARGE = 57,
     OBJECT_TRANSACTION_ACTIVE = 58,
     OBJECT_WRITER_CLOSED = 59,
+    BOUND_STORE_EXISTS = 60,
+    BOUND_STORE_NOT_FOUND = 61,
+    BOUND_STORE_INVALID = 62,
     VECTOR_COLLECTION_EXISTS = 70,
     VECTOR_COLLECTION_NOT_FOUND = 71,
     VECTOR_NOT_FOUND = 72,
@@ -2243,6 +2246,9 @@ fn statusFromError(err: anyerror) zova_status {
         error.ObjectTooLarge => .OBJECT_TOO_LARGE,
         error.ObjectTransactionActive => .OBJECT_TRANSACTION_ACTIVE,
         error.ObjectWriterClosed => .OBJECT_WRITER_CLOSED,
+        error.BoundStoreExists => .BOUND_STORE_EXISTS,
+        error.BoundStoreNotFound => .BOUND_STORE_NOT_FOUND,
+        error.BoundStoreInvalid => .BOUND_STORE_INVALID,
         error.VectorCollectionExists => .VECTOR_COLLECTION_EXISTS,
         error.VectorCollectionNotFound => .VECTOR_COLLECTION_NOT_FOUND,
         error.VectorNotFound => .VECTOR_NOT_FOUND,
@@ -2282,6 +2288,9 @@ fn statusName(status: c_int) [*:0]const u8 {
         @intFromEnum(zova_status.OBJECT_TOO_LARGE) => "ZOVA_OBJECT_TOO_LARGE",
         @intFromEnum(zova_status.OBJECT_TRANSACTION_ACTIVE) => "ZOVA_OBJECT_TRANSACTION_ACTIVE",
         @intFromEnum(zova_status.OBJECT_WRITER_CLOSED) => "ZOVA_OBJECT_WRITER_CLOSED",
+        @intFromEnum(zova_status.BOUND_STORE_EXISTS) => "ZOVA_BOUND_STORE_EXISTS",
+        @intFromEnum(zova_status.BOUND_STORE_NOT_FOUND) => "ZOVA_BOUND_STORE_NOT_FOUND",
+        @intFromEnum(zova_status.BOUND_STORE_INVALID) => "ZOVA_BOUND_STORE_INVALID",
         @intFromEnum(zova_status.VECTOR_COLLECTION_EXISTS) => "ZOVA_VECTOR_COLLECTION_EXISTS",
         @intFromEnum(zova_status.VECTOR_COLLECTION_NOT_FOUND) => "ZOVA_VECTOR_COLLECTION_NOT_FOUND",
         @intFromEnum(zova_status.VECTOR_NOT_FOUND) => "ZOVA_VECTOR_NOT_FOUND",
@@ -2299,6 +2308,7 @@ test "c abi status names and versions are stable" {
     try std.testing.expectEqualStrings("0.18.0", std.mem.span(zova_abi_version_string()));
     try std.testing.expectEqualStrings("ZOVA_OK", std.mem.span(zova_status_name(@intFromEnum(zova_status.OK))));
     try std.testing.expectEqualStrings("ZOVA_OBJECT_NOT_FOUND", std.mem.span(zova_status_name(@intFromEnum(zova_status.OBJECT_NOT_FOUND))));
+    try std.testing.expectEqualStrings("ZOVA_BOUND_STORE_INVALID", std.mem.span(zova_status_name(@intFromEnum(zova_status.BOUND_STORE_INVALID))));
     try std.testing.expectEqualStrings("ZOVA_VECTOR_INVALID", std.mem.span(zova_status_name(@intFromEnum(zova_status.VECTOR_INVALID))));
     try std.testing.expectEqualStrings("ZOVA_UNKNOWN_STATUS", std.mem.span(zova_status_name(-1)));
 }

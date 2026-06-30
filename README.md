@@ -309,6 +309,31 @@ same `.zova` file. You can put/get whole objects, range-read object bytes,
 inspect manifests, fetch verified chunks, store loose chunks, and assemble a
 complete object from chunks.
 
+### Optional Bound Object Stores
+
+Single-file `.zova` remains the default. On the current development branch,
+applications can opt into one bound object store when object bytes should live
+beside the main records database:
+
+```sh
+zova object-store create objects.zova
+zova object-store bind main.zova objects.zova
+zova object-store info main.zova
+```
+
+After binding, object APIs route `_zova_objects`, `_zova_chunks`, and manifests
+to the object-store file. User SQL records and vector rows stay in the main
+database. If the object-store file is moved, rebind it manually:
+
+```sh
+zova object-store rebind main.zova new/path/objects.zova
+```
+
+This is local, manual storage placement. It is not distributed storage, cloud
+sync, automatic path repair, or a multi-file transaction guarantee. v0.19 starts
+with one optional object store; vector stores and multiple named stores are
+deferred.
+
 Use `ObjectWriter` when bytes arrive over time:
 
 ```rust
@@ -482,6 +507,7 @@ zova vector-collection app.zova chunks
 zova tables app.zova
 zova check --deep app.zova
 zova doctor --json app.zova
+zova object-store info app.zova
 ```
 
 JSON output includes `cli_json_version = 1`. CLI output is bounded and avoids

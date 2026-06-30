@@ -24,12 +24,14 @@ pub const Notification = zova.Notification;
 pub const NotificationSubscription = zova.NotificationSubscription;
 pub const OpenOptions = zova.OpenOptions;
 pub const BackupOptions = zova.BackupOptions;
+pub const BoundObjectStoreInfo = zova.BoundObjectStoreInfo;
 pub const CompactOptions = zova.CompactOptions;
 pub const RestoreOptions = zova.RestoreOptions;
 pub const max_vector_dimensions = zova.max_vector_dimensions;
 pub const objectChunkId = zova.objectChunkId;
 pub const objectId = zova.objectId;
 pub const convertSqliteToZova = zova.convertSqliteToZova;
+pub const createObjectStore = zova.createObjectStore;
 pub const restoreBackup = zova.restoreBackup;
 
 test "package exports sqlite namespace" {
@@ -44,9 +46,11 @@ test "package exports zova database namespace" {
     try std.testing.expect(@hasDecl(@This(), "Error"));
     try std.testing.expect(@hasDecl(@This(), "OpenOptions"));
     try std.testing.expect(@hasDecl(@This(), "BackupOptions"));
+    try std.testing.expect(@hasDecl(@This(), "BoundObjectStoreInfo"));
     try std.testing.expect(@hasDecl(@This(), "CompactOptions"));
     try std.testing.expect(@hasDecl(@This(), "RestoreOptions"));
     try std.testing.expect(@hasDecl(@This(), "convertSqliteToZova"));
+    try std.testing.expect(@hasDecl(@This(), "createObjectStore"));
     try std.testing.expect(@hasDecl(@This(), "restoreBackup"));
     try std.testing.expect(@hasDecl(@This(), "Object"));
     try std.testing.expect(@hasDecl(@This(), "ObjectChunk"));
@@ -109,7 +113,11 @@ test "package exports zova database namespace" {
     try std.testing.expect(@hasDecl(Database, "changes"));
     try std.testing.expect(@hasDecl(Database, "totalChanges"));
     try std.testing.expect(@hasDecl(Database, "backupTo"));
+    try std.testing.expect(@hasDecl(Database, "bindObjectStore"));
+    try std.testing.expect(@hasDecl(Database, "boundObjectStore"));
     try std.testing.expect(@hasDecl(Database, "compactTo"));
+    try std.testing.expect(@hasDecl(Database, "rebindObjectStore"));
+    try std.testing.expect(@hasDecl(Database, "unbindObjectStore"));
     try std.testing.expect(@hasDecl(Database, "listen"));
     try std.testing.expect(@hasDecl(Database, "notify"));
     try std.testing.expect(!@hasDecl(@This(), "fastcdc"));

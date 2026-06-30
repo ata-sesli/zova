@@ -26,6 +26,11 @@ test "cli version and help are successful" {
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "doctor [--json] [--limit <n>] <file.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "salvage --dry-run [--json] [--limit <n>] <source.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "salvage [--json] [--limit <n>] <source.zova> <destination.zova>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "object-store create [--json] <objects.zova>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "object-store bind [--json] <main.zova> <objects.zova>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "object-store info [--json] <main.zova>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "object-store unbind [--json] <main.zova>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "object-store rebind [--json] <main.zova> <objects.zova>") != null);
 }
 
 test "cli usage errors return exit code 2" {
@@ -38,6 +43,101 @@ test "cli usage errors return exit code 2" {
     defer missing.deinit();
     try std.testing.expectEqual(@as(u8, 2), missing.code);
     try std.testing.expect(std.mem.indexOf(u8, missing.stderr, "usage") != null);
+}
+
+test "cli object-store commands create bind inspect rebind and unbind" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "object-store-main.zova");
+
+    var store_one_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_one_path = try testingDbPath(&store_one_buffer, tmp.sub_path[0..], "object-store-one.zova");
+
+    var store_two_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_two_path = try testingDbPath(&store_two_buffer, tmp.sub_path[0..], "object-store-two.zova");
+
+    {
+        var db = try zova.Database.create(main_path);
+        defer db.deinit();
+    }
+
+    var create_one = try runCli(&.{ "zova", "object-store", "create", "--json", store_one_path });
+    defer create_one.deinit();
+    try std.testing.expectEqual(@as(u8, 0), create_one.code);
+    var create_one_json = try parseJson(create_one.stdout);
+    defer create_one_json.deinit();
+    try expectJsonString(create_one_json.value.object, "command", "object-store-create");
+    try expectJsonBool(create_one_json.value.object, "created", true);
+
+    var create_two = try runCli(&.{ "zova", "object-store", "create", store_two_path });
+    defer create_two.deinit();
+    try std.testing.expectEqual(@as(u8, 0), create_two.code);
+    try expectContains(create_two.stdout, "object-store-create: ok");
+
+    var bind = try runCli(&.{ "zova", "object-store", "bind", "--json", main_path, store_one_path });
+    defer bind.deinit();
+    try std.testing.expectEqual(@as(u8, 0), bind.code);
+    var bind_json = try parseJson(bind.stdout);
+    defer bind_json.deinit();
+    try expectJsonString(bind_json.value.object, "command", "object-store-bind");
+    try expectJsonBool(bind_json.value.object, "bound", true);
+
+    {
+        var db = try zova.Database.open(main_path);
+        defer db.deinit();
+        _ = try db.putObject("stored in first bound store");
+        try std.testing.expectEqual(@as(i64, 0), try countRawRows(&db.sqlite_db, "select count(*) from _zova_objects"));
+    }
+
+    {
+        var store = try zova.sqlite.Database.open(store_one_path);
+        defer store.deinit();
+        try std.testing.expectEqual(@as(i64, 1), try countRawRows(&store, "select count(*) from _zova_objects"));
+    }
+
+    var info = try runCli(&.{ "zova", "object-store", "info", "--json", main_path });
+    defer info.deinit();
+    try std.testing.expectEqual(@as(u8, 0), info.code);
+    var info_json = try parseJson(info.stdout);
+    defer info_json.deinit();
+    try expectJsonString(info_json.value.object, "command", "object-store-info");
+    try expectJsonBool(info_json.value.object, "bound", true);
+    try expectJsonString(info_json.value.object, "path", store_one_path);
+
+    var rebind = try runCli(&.{ "zova", "object-store", "rebind", "--json", main_path, store_two_path });
+    defer rebind.deinit();
+    try std.testing.expectEqual(@as(u8, 0), rebind.code);
+    var rebind_json = try parseJson(rebind.stdout);
+    defer rebind_json.deinit();
+    try expectJsonString(rebind_json.value.object, "command", "object-store-rebind");
+    try expectJsonString(rebind_json.value.object, "path", store_two_path);
+
+    {
+        var db = try zova.Database.open(main_path);
+        defer db.deinit();
+        _ = try db.putObject("stored in second bound store");
+    }
+
+    {
+        var store = try zova.sqlite.Database.open(store_two_path);
+        defer store.deinit();
+        try std.testing.expectEqual(@as(i64, 1), try countRawRows(&store, "select count(*) from _zova_objects"));
+    }
+
+    var unbind = try runCli(&.{ "zova", "object-store", "unbind", "--json", main_path });
+    defer unbind.deinit();
+    try std.testing.expectEqual(@as(u8, 0), unbind.code);
+    var unbind_json = try parseJson(unbind.stdout);
+    defer unbind_json.deinit();
+    try expectJsonString(unbind_json.value.object, "command", "object-store-unbind");
+    try expectJsonBool(unbind_json.value.object, "bound", false);
+
+    var unbound_info = try runCli(&.{ "zova", "object-store", "info", main_path });
+    defer unbound_info.deinit();
+    try std.testing.expectEqual(@as(u8, 0), unbound_info.code);
+    try expectContains(unbound_info.stdout, "bound: false");
 }
 
 test "cli info reports bounded database summary" {
@@ -1854,6 +1954,14 @@ fn insertDocument(db: *zova.Database, object_id: zova.ObjectId, vector_id: []con
 }
 
 fn countRows(db: *zova.Database, sql: [:0]const u8) !i64 {
+    var stmt = try db.prepare(sql);
+    defer stmt.deinit();
+
+    try std.testing.expectEqual(zova.sqlite.Step.row, try stmt.step());
+    return stmt.columnInt64(0);
+}
+
+fn countRawRows(db: *zova.sqlite.Database, sql: [:0]const u8) !i64 {
     var stmt = try db.prepare(sql);
     defer stmt.deinit();
 

@@ -50,6 +50,21 @@ const OperationalCommandArgs = struct {
     destination_path: []const u8,
 };
 
+const ObjectStoreAction = enum {
+    create,
+    bind,
+    info,
+    unbind,
+    rebind,
+};
+
+const ObjectStoreCommandArgs = struct {
+    format: OutputFormat,
+    action: ObjectStoreAction,
+    main_path: ?[]const u8,
+    store_path: ?[]const u8,
+};
+
 const BoundedCommandParseError = error{
     DuplicateJson,
     DuplicateLimit,
@@ -71,6 +86,16 @@ const SalvageCommandParseError = error{
     MissingSource,
     MissingDestination,
     DestinationNotAllowed,
+    ExtraArgs,
+};
+
+const ObjectStoreCommandParseError = error{
+    MissingAction,
+    UnknownAction,
+    DuplicateJson,
+    UnknownFlag,
+    MissingMainPath,
+    MissingStorePath,
     ExtraArgs,
 };
 
@@ -467,6 +492,9 @@ pub fn run(
     if (std.mem.eql(u8, command, "restore")) {
         return restoreCommand(allocator, args[2..], stdout, stderr);
     }
+    if (std.mem.eql(u8, command, "object-store")) {
+        return objectStoreCommand(allocator, args[2..], stdout, stderr);
+    }
 
     try stderr.print("unknown command: {s}\n\n", .{command});
     try writeUsage(stderr);
@@ -496,6 +524,11 @@ fn writeUsage(writer: *std.Io.Writer) !void {
         \\  zova backup [--json] [--no-verify] <source.zova> <destination.zova>
         \\  zova compact [--json] [--no-verify] <source.zova> <destination.zova>
         \\  zova restore [--json] [--no-verify] <backup.zova> <destination.zova>
+        \\  zova object-store create [--json] <objects.zova>
+        \\  zova object-store bind [--json] <main.zova> <objects.zova>
+        \\  zova object-store info [--json] <main.zova>
+        \\  zova object-store unbind [--json] <main.zova>
+        \\  zova object-store rebind [--json] <main.zova> <objects.zova>
         \\
         \\commands:
         \\  info   print a bounded summary of a current-format Zova database
@@ -513,6 +546,7 @@ fn writeUsage(writer: *std.Io.Writer) !void {
         \\  backup create a verified snapshot copy without overwriting destination
         \\  compact create a verified space-reclaiming copy with VACUUM INTO
         \\  restore restore a backup into a new destination file
+        \\  object-store manage one optional bound object store
         \\
         \\exit codes:
         \\  0 healthy/success
@@ -696,6 +730,218 @@ fn restoreCommand(
     zova.restoreBackup(source, destination, .{ .verify = parsed.verify }) catch |err| return operationalErrorFormat(stderr, "restore", parsed.format, err);
     try writeOperationalSuccess(stdout, "restore", parsed, parsed.source_path, parsed.destination_path);
     return ExitCode.ok;
+}
+
+fn objectStoreCommand(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !u8 {
+    const parsed = parseObjectStoreCommandArgs(args) catch |err| {
+        const format: OutputFormat = if (argsContain(args, "--json")) .json else .text;
+        return usageErrorFormat(stderr, "object-store", format, objectStoreUsageMessage(err));
+    };
+
+    const command_name = objectStoreCommandName(parsed.action);
+    switch (parsed.action) {
+        .create => {
+            const store_path = parsed.store_path.?;
+            const store_z = try allocator.dupeZ(u8, store_path);
+            defer allocator.free(store_z);
+
+            zova.createObjectStore(store_z) catch |err| return objectStoreErrorFormat(stderr, command_name, parsed.format, err);
+            try writeObjectStoreSuccess(stdout, parsed.format, command_name, null, store_path, null, true, true);
+            return ExitCode.ok;
+        },
+        .bind => {
+            const main_path = parsed.main_path.?;
+            const store_path = parsed.store_path.?;
+            const main_z = try allocator.dupeZ(u8, main_path);
+            defer allocator.free(main_z);
+            const store_z = try allocator.dupeZ(u8, store_path);
+            defer allocator.free(store_z);
+
+            var db = zova.Database.open(main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
+            defer db.deinit();
+
+            db.bindObjectStore(store_z) catch |err| return objectStoreErrorFormat(stderr, command_name, parsed.format, err);
+            var info = (try db.boundObjectStore(allocator)).?;
+            defer info.deinit(allocator);
+            try writeObjectStoreSuccess(stdout, parsed.format, command_name, main_path, info.path, info.store_id, false, true);
+            return ExitCode.ok;
+        },
+        .info => {
+            const main_path = parsed.main_path.?;
+            const main_z = try allocator.dupeZ(u8, main_path);
+            defer allocator.free(main_z);
+
+            var db = zova.Database.open(main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
+            defer db.deinit();
+
+            var maybe_info = try db.boundObjectStore(allocator);
+            if (maybe_info) |*info| {
+                defer info.deinit(allocator);
+                try writeObjectStoreSuccess(stdout, parsed.format, command_name, main_path, info.path, info.store_id, false, true);
+            } else {
+                try writeObjectStoreSuccess(stdout, parsed.format, command_name, main_path, null, null, false, false);
+            }
+            return ExitCode.ok;
+        },
+        .unbind => {
+            const main_path = parsed.main_path.?;
+            const main_z = try allocator.dupeZ(u8, main_path);
+            defer allocator.free(main_z);
+
+            var db = zova.Database.open(main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
+            defer db.deinit();
+
+            db.unbindObjectStore() catch |err| return objectStoreErrorFormat(stderr, command_name, parsed.format, err);
+            try writeObjectStoreSuccess(stdout, parsed.format, command_name, main_path, null, null, false, false);
+            return ExitCode.ok;
+        },
+        .rebind => {
+            const main_path = parsed.main_path.?;
+            const store_path = parsed.store_path.?;
+            const main_z = try allocator.dupeZ(u8, main_path);
+            defer allocator.free(main_z);
+            const store_z = try allocator.dupeZ(u8, store_path);
+            defer allocator.free(store_z);
+
+            var db = zova.Database.open(main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
+            defer db.deinit();
+
+            db.rebindObjectStore(store_z) catch |err| return objectStoreErrorFormat(stderr, command_name, parsed.format, err);
+            var info = (try db.boundObjectStore(allocator)).?;
+            defer info.deinit(allocator);
+            try writeObjectStoreSuccess(stdout, parsed.format, command_name, main_path, info.path, info.store_id, false, true);
+            return ExitCode.ok;
+        },
+    }
+}
+
+fn parseObjectStoreCommandArgs(args: []const []const u8) ObjectStoreCommandParseError!ObjectStoreCommandArgs {
+    if (args.len == 0) return error.MissingAction;
+
+    const action = parseObjectStoreAction(args[0]) orelse return error.UnknownAction;
+    var format: OutputFormat = .text;
+    var first_path: ?[]const u8 = null;
+    var second_path: ?[]const u8 = null;
+
+    for (args[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            if (format == .json) return error.DuplicateJson;
+            format = .json;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            return error.UnknownFlag;
+        } else if (first_path == null) {
+            first_path = arg;
+        } else if (second_path == null) {
+            second_path = arg;
+        } else {
+            return error.ExtraArgs;
+        }
+    }
+
+    switch (action) {
+        .create => {
+            const store_path = first_path orelse return error.MissingStorePath;
+            if (second_path != null) return error.ExtraArgs;
+            return .{ .format = format, .action = action, .main_path = null, .store_path = store_path };
+        },
+        .bind, .rebind => {
+            const main_path = first_path orelse return error.MissingMainPath;
+            const store_path = second_path orelse return error.MissingStorePath;
+            return .{ .format = format, .action = action, .main_path = main_path, .store_path = store_path };
+        },
+        .info, .unbind => {
+            const main_path = first_path orelse return error.MissingMainPath;
+            if (second_path != null) return error.ExtraArgs;
+            return .{ .format = format, .action = action, .main_path = main_path, .store_path = null };
+        },
+    }
+}
+
+fn parseObjectStoreAction(value: []const u8) ?ObjectStoreAction {
+    if (std.mem.eql(u8, value, "create")) return .create;
+    if (std.mem.eql(u8, value, "bind")) return .bind;
+    if (std.mem.eql(u8, value, "info")) return .info;
+    if (std.mem.eql(u8, value, "unbind")) return .unbind;
+    if (std.mem.eql(u8, value, "rebind")) return .rebind;
+    return null;
+}
+
+fn objectStoreCommandName(action: ObjectStoreAction) []const u8 {
+    return switch (action) {
+        .create => "object-store-create",
+        .bind => "object-store-bind",
+        .info => "object-store-info",
+        .unbind => "object-store-unbind",
+        .rebind => "object-store-rebind",
+    };
+}
+
+fn objectStoreUsageMessage(err: ObjectStoreCommandParseError) []const u8 {
+    return switch (err) {
+        error.MissingAction => "object-store requires create, bind, info, unbind, or rebind",
+        error.UnknownAction => "unknown object-store action",
+        error.DuplicateJson => "duplicate --json",
+        error.UnknownFlag => "unknown flag",
+        error.MissingMainPath => "object-store action requires <main.zova>",
+        error.MissingStorePath => "object-store action requires <objects.zova>",
+        error.ExtraArgs => "object-store action received extra arguments",
+    };
+}
+
+fn objectStoreErrorFormat(stderr: *std.Io.Writer, command: []const u8, format: OutputFormat, err: anyerror) !u8 {
+    switch (format) {
+        .text => try stderr.print("{s}: failed: {s}\n", .{ command, @errorName(err) }),
+        .json => try writeJsonErrorWithKind(stderr, command, "operation failed", @errorName(err)),
+    }
+    return ExitCode.open;
+}
+
+fn writeObjectStoreSuccess(
+    stdout: *std.Io.Writer,
+    format: OutputFormat,
+    command: []const u8,
+    main_path: ?[]const u8,
+    store_path: ?[]const u8,
+    store_id: ?[]const u8,
+    created: bool,
+    bound: bool,
+) !void {
+    switch (format) {
+        .text => {
+            try stdout.print("{s}: ok\n", .{command});
+            if (main_path) |value| try stdout.print("main_path: {s}\n", .{value});
+            if (store_path) |value| try stdout.print("path: {s}\n", .{value});
+            if (store_id) |value| try stdout.print("store_id: {s}\n", .{value});
+            if (created) try stdout.writeAll("created: true\n");
+            try stdout.print("bound: {}\n", .{bound});
+        },
+        .json => {
+            try stdout.writeAll("{\n");
+            try stdout.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
+            try stdout.writeAll("  \"status\": \"ok\",\n");
+            try stdout.writeAll("  \"command\": ");
+            try writeJsonString(stdout, command);
+            if (main_path) |value| {
+                try stdout.writeAll(",\n  \"main_path\": ");
+                try writeJsonString(stdout, value);
+            }
+            if (store_path) |value| {
+                try stdout.writeAll(",\n  \"path\": ");
+                try writeJsonString(stdout, value);
+            }
+            if (store_id) |value| {
+                try stdout.writeAll(",\n  \"store_id\": ");
+                try writeJsonString(stdout, value);
+            }
+            try stdout.print(",\n  \"created\": {},\n  \"bound\": {}\n", .{ created, bound });
+            try stdout.writeAll("}\n");
+        },
+    }
 }
 
 fn writeOperationalSuccess(

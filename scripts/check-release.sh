@@ -76,7 +76,15 @@ CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" cargo test --manifest-path bindings/pyt
 CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" uv run --isolated --with maturin --with pytest --directory bindings/python maturin develop
 uv run --isolated --with pytest --directory bindings/python python -m pytest
 mkdir -p "$PY_WHEEL_REPO"
-CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" uv run --isolated --with maturin --directory bindings/python maturin build --out "$PY_WHEEL_REPO"
+CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" uv run --isolated --with maturin --directory bindings/python maturin build --sdist --out "$PY_WHEEL_REPO"
+if ! find "$PY_WHEEL_REPO" -name "zova-$MANIFEST_VERSION-*.whl" | grep -q .; then
+    echo "Python release artifacts are missing a wheel" >&2
+    exit 1
+fi
+if [ ! -f "$PY_WHEEL_REPO/zova-$MANIFEST_VERSION.tar.gz" ]; then
+    echo "Python release artifacts are missing an sdist" >&2
+    exit 1
+fi
 rm -rf bindings/python/target bindings/python/.venv bindings/python/.pytest_cache bindings/python/dist
 find bindings/python -type d -name '__pycache__' -prune -exec rm -rf {} +
 find bindings/python \( -name '*.so' -o -name '*.pyd' -o -name '*.dylib' -o -name '*.dll' -o -name '*.whl' \) -delete
@@ -309,4 +317,12 @@ CARGO_TARGET_DIR="$PY_CARGO_TARGET_VERIFY" cargo test --manifest-path bindings/p
 CARGO_TARGET_DIR="$PY_CARGO_TARGET_VERIFY" uv run --isolated --with maturin --with pytest --directory bindings/python maturin develop
 uv run --isolated --with pytest --directory bindings/python python -m pytest
 mkdir -p "$PY_WHEEL_VERIFY"
-CARGO_TARGET_DIR="$PY_CARGO_TARGET_VERIFY" uv run --isolated --with maturin --directory bindings/python maturin build --out "$PY_WHEEL_VERIFY"
+CARGO_TARGET_DIR="$PY_CARGO_TARGET_VERIFY" uv run --isolated --with maturin --directory bindings/python maturin build --sdist --out "$PY_WHEEL_VERIFY"
+if ! find "$PY_WHEEL_VERIFY" -name "zova-$MANIFEST_VERSION-*.whl" | grep -q .; then
+    echo "Python release artifacts are missing a wheel" >&2
+    exit 1
+fi
+if [ ! -f "$PY_WHEEL_VERIFY/zova-$MANIFEST_VERSION.tar.gz" ]; then
+    echo "Python release artifacts are missing an sdist" >&2
+    exit 1
+fi

@@ -44,6 +44,9 @@ const (
 	StatusObjectTooLarge           Status = C.ZOVA_OBJECT_TOO_LARGE
 	StatusObjectTransactionActive  Status = C.ZOVA_OBJECT_TRANSACTION_ACTIVE
 	StatusObjectWriterClosed       Status = C.ZOVA_OBJECT_WRITER_CLOSED
+	StatusBoundStoreExists         Status = C.ZOVA_BOUND_STORE_EXISTS
+	StatusBoundStoreNotFound       Status = C.ZOVA_BOUND_STORE_NOT_FOUND
+	StatusBoundStoreInvalid        Status = C.ZOVA_BOUND_STORE_INVALID
 	StatusVectorCollectionExists   Status = C.ZOVA_VECTOR_COLLECTION_EXISTS
 	StatusVectorCollectionNotFound Status = C.ZOVA_VECTOR_COLLECTION_NOT_FOUND
 	StatusVectorNotFound           Status = C.ZOVA_VECTOR_NOT_FOUND

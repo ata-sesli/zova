@@ -335,7 +335,15 @@ CARGO_TARGET_DIR="$TMP/cargo-target/python-verify" cargo test --manifest-path bi
 CARGO_TARGET_DIR="$TMP/cargo-target/python-verify" uv run --isolated --with maturin --with pytest --directory bindings/python maturin develop
 uv run --isolated --with pytest --directory bindings/python python -m pytest
 mkdir -p "$TMP/python-wheels/verify"
-CARGO_TARGET_DIR="$TMP/cargo-target/python-verify" uv run --isolated --with maturin --directory bindings/python maturin build --out "$TMP/python-wheels/verify"
+CARGO_TARGET_DIR="$TMP/cargo-target/python-verify" uv run --isolated --with maturin --directory bindings/python maturin build --sdist --out "$TMP/python-wheels/verify"
+if ! find "$TMP/python-wheels/verify" -name "zova-$VERSION-*.whl" | grep -q .; then
+    echo "Python release artifacts are missing a wheel" >&2
+    exit 1
+fi
+if [ ! -f "$TMP/python-wheels/verify/zova-$VERSION.tar.gz" ]; then
+    echo "Python release artifacts are missing an sdist" >&2
+    exit 1
+fi
 
 cd "$ROOT"
 if [ -z "$LOCAL_TAG_COMMIT" ]; then

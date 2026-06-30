@@ -51,8 +51,21 @@ const metadata_table = "_zova_meta";
 const objects_table = "_zova_objects";
 const chunks_table = "_zova_chunks";
 const object_chunks_table = "_zova_object_chunks";
+const bound_stores_table = "_zova_bound_stores";
 const magic_value = "zova";
 const format_version = "3";
+const bound_object_store_role = "object_store";
+const bound_object_store_name = "default";
+const bound_stores_schema_sql =
+    \\create table _zova_bound_stores (
+    \\  role text not null check (role = 'object_store'),
+    \\  name text not null check (name = 'default'),
+    \\  path text not null,
+    \\  store_id text not null check (length(store_id) = 64),
+    \\  created_at_unix integer not null,
+    \\  primary key (role, name)
+    \\)
+;
 pub const ObjectId = object_impl.ObjectId;
 pub const ObjectChunkId = object_impl.ObjectChunkId;
 pub const ObjectChunk = object_impl.ObjectChunk;
@@ -85,6 +98,29 @@ pub const VectorSearchResults = vector_impl.VectorSearchResults;
 pub const Notification = notify_impl.Notification;
 pub const NotificationSubscription = notify_impl.NotificationSubscription;
 
+/// Information about the optional object store bound to a main `.zova` file.
+///
+/// Single-file Zova remains the default. This struct is returned only when a
+/// main database has explicitly been bound to one external object store.
+pub const BoundObjectStoreInfo = struct {
+    path: []u8,
+    store_id: []u8,
+
+    /// Free owned strings returned by `Database.boundObjectStore`.
+    pub fn deinit(self: *BoundObjectStoreInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        allocator.free(self.store_id);
+    }
+};
+
+const BoundObjectStore = struct {
+    sqlite_db: sqlite.Database,
+
+    fn deinit(self: *BoundObjectStore) void {
+        self.sqlite_db.deinit();
+    }
+};
+
 /// Options for opening an existing `.zova` database.
 pub const OpenOptions = struct {
     /// Open the SQLite handle read-only. Read APIs and SQL queries work, while
@@ -112,6 +148,31 @@ pub const RestoreOptions = struct {
     /// Open and validate the restored destination after copying.
     verify: bool = true,
 };
+
+/// Create a standalone object-store `.zova` file.
+///
+/// This is opt-in storage for a main database that later calls
+/// `Database.bindObjectStore`. Normal `.zova` files remain single-file by
+/// default, and object-store files are rejected by `Database.open` as main
+/// databases.
+pub fn createObjectStore(path: [:0]const u8) Error!void {
+    if (!isZovaPath(path)) return error.NotZovaPath;
+
+    const io = defaultIo();
+    var file = std.Io.Dir.cwd().createFile(io, path, .{ .exclusive = true }) catch |err| switch (err) {
+        error.PathAlreadyExists => return error.DestinationExists,
+        else => return error.CantOpen,
+    };
+    file.close(io);
+
+    errdefer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    var raw = try sqlite.Database.open(path);
+    defer raw.deinit();
+
+    try initializeZovaSchema(&raw);
+    try markAsObjectStore(&raw);
+}
 
 /// Convert an existing SQLite database file into a new `.zova` database.
 ///
@@ -179,6 +240,7 @@ fn deinitNotifications(hub: *notify_impl.Hub) void {
 pub const Database = struct {
     sqlite_db: sqlite.Database,
     notifications: *notify_impl.Hub,
+    bound_object_store: ?BoundObjectStore = null,
 
     /// Create a new initialized `.zova` database.
     ///
@@ -232,14 +294,20 @@ pub const Database = struct {
 
         if (options.busy_timeout_ms != 0) try raw.setBusyTimeout(options.busy_timeout_ms);
         try validateZovaSchema(&raw);
+        var bound_object_store = try openConfiguredBoundObjectStore(&raw, options);
+        errdefer if (bound_object_store) |*store| store.deinit();
         try vector_sql.register(&raw);
         const notifications = try initNotifications(&raw);
         errdefer deinitNotifications(notifications);
-        return .{ .sqlite_db = raw, .notifications = notifications };
+        return .{ .sqlite_db = raw, .notifications = notifications, .bound_object_store = bound_object_store };
     }
 
     /// Close the underlying SQLite connection.
     pub fn deinit(self: *Database) void {
+        if (self.bound_object_store) |*store| {
+            store.deinit();
+            self.bound_object_store = null;
+        }
         self.sqlite_db.deinit();
         deinitNotifications(self.notifications);
     }
@@ -420,9 +488,81 @@ pub const Database = struct {
         return self.sqlite_db.errorMessage();
     }
 
+    /// Bind this main database to one optional external object store.
+    ///
+    /// Single-file object storage remains the default until this method is
+    /// called. v0.19's first slice supports at most one bound object store per
+    /// main database.
+    pub fn bindObjectStore(self: *Database, path: [:0]const u8) Error!void {
+        try ensureMainDatabaseRole(&self.sqlite_db);
+        try ensureBoundStoreTable(&self.sqlite_db);
+        if (try hasBoundObjectStoreRow(&self.sqlite_db)) return error.BoundStoreExists;
+
+        const stored_path = try std.heap.c_allocator.dupeZ(u8, path);
+        defer std.heap.c_allocator.free(stored_path);
+
+        var store = try openObjectStore(stored_path, .read_write, 0);
+        errdefer store.deinit();
+        const store_id = try objectStoreIdAlloc(std.heap.c_allocator, &store.sqlite_db);
+        defer std.heap.c_allocator.free(store_id);
+
+        try insertBoundObjectStoreRow(&self.sqlite_db, stored_path, store_id);
+        self.replaceBoundObjectStore(store);
+    }
+
+    /// Return information about the optional bound object store, if present.
+    pub fn boundObjectStore(self: *Database, allocator: std.mem.Allocator) Error!?BoundObjectStoreInfo {
+        return try loadBoundObjectStoreInfo(allocator, &self.sqlite_db);
+    }
+
+    /// Remove the optional object-store binding from this main database.
+    ///
+    /// This never deletes or mutates the object store file itself.
+    pub fn unbindObjectStore(self: *Database) Error!void {
+        if (!try hasBoundObjectStoreRow(&self.sqlite_db)) return error.BoundStoreNotFound;
+
+        var stmt = try self.sqlite_db.prepare(
+            \\delete from _zova_bound_stores
+            \\where role = 'object_store' and name = 'default'
+        );
+        defer stmt.deinit();
+        std.debug.assert((try stmt.step()) == .done);
+
+        if (self.bound_object_store) |*store| {
+            store.deinit();
+            self.bound_object_store = null;
+        }
+    }
+
+    /// Replace the optional object-store binding with a different store file.
+    pub fn rebindObjectStore(self: *Database, path: [:0]const u8) Error!void {
+        if (!try hasBoundObjectStoreRow(&self.sqlite_db)) return error.BoundStoreNotFound;
+
+        const stored_path = try std.heap.c_allocator.dupeZ(u8, path);
+        defer std.heap.c_allocator.free(stored_path);
+
+        var store = try openObjectStore(stored_path, .read_write, 0);
+        errdefer store.deinit();
+        const store_id = try objectStoreIdAlloc(std.heap.c_allocator, &store.sqlite_db);
+        defer std.heap.c_allocator.free(store_id);
+
+        var stmt = try self.sqlite_db.prepare(
+            \\update _zova_bound_stores
+            \\set path = ?, store_id = ?
+            \\where role = 'object_store' and name = 'default'
+        );
+        defer stmt.deinit();
+
+        try stmt.bindText(1, stored_path);
+        try stmt.bindText(2, store_id);
+        std.debug.assert((try stmt.step()) == .done);
+        self.replaceBoundObjectStore(store);
+    }
+
     /// Create an incremental object writer for this database connection.
     pub fn objectWriter(self: *Database, allocator: std.mem.Allocator) Error!ObjectWriter {
-        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        try self.rejectBoundObjectMutationInsideMainTransaction();
+        var objects = object_impl.Database{ .sqlite_db = self.objectSqliteDb() };
         return objects.objectWriter(allocator);
     }
 
@@ -625,37 +765,39 @@ pub const Database = struct {
 
     /// Store raw bytes as a content-addressed Zova object.
     pub fn putObject(self: *Database, bytes: []const u8) Error!ObjectId {
-        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        try self.rejectBoundObjectMutationInsideMainTransaction();
+        var objects = object_impl.Database{ .sqlite_db = self.objectSqliteDb() };
         return objects.putObject(bytes);
     }
 
     /// Load and verify an object by id.
     pub fn getObject(self: *Database, allocator: std.mem.Allocator, id: ObjectId) Error!Object {
-        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        var objects = object_impl.Database{ .sqlite_db = self.objectSqliteDb() };
         return objects.getObject(allocator, id);
     }
 
     /// Read a byte range from a logical object into a caller-provided buffer.
     pub fn readObjectRange(self: *Database, id: ObjectId, offset: u64, buffer: []u8) Error!usize {
-        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        var objects = object_impl.Database{ .sqlite_db = self.objectSqliteDb() };
         return objects.readObjectRange(id, offset, buffer);
     }
 
     /// Return the public manifest for one object.
     pub fn objectManifest(self: *Database, allocator: std.mem.Allocator, id: ObjectId) Error!ObjectManifest {
-        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        var objects = object_impl.Database{ .sqlite_db = self.objectSqliteDb() };
         return objects.objectManifest(allocator, id);
     }
 
     /// Return whether a stored chunk hash exists.
     pub fn hasObjectChunk(self: *Database, hash: ObjectChunkId) Error!bool {
-        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        var objects = object_impl.Database{ .sqlite_db = self.objectSqliteDb() };
         return objects.hasObjectChunk(hash);
     }
 
     /// Store one verified loose object chunk.
     pub fn putObjectChunk(self: *Database, expected_hash: ObjectChunkId, bytes: []const u8) Error!void {
-        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        try self.rejectBoundObjectMutationInsideMainTransaction();
+        var objects = object_impl.Database{ .sqlite_db = self.objectSqliteDb() };
         return objects.putObjectChunk(expected_hash, bytes);
     }
 
@@ -666,13 +808,15 @@ pub const Database = struct {
         size_bytes: u64,
         chunks: []const ObjectChunk,
     ) Error!void {
-        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        try self.rejectBoundObjectMutationInsideMainTransaction();
+        var objects = object_impl.Database{ .sqlite_db = self.objectSqliteDb() };
         return objects.assembleObjectFromChunks(id, size_bytes, chunks);
     }
 
     /// Delete one unreferenced loose chunk if possible.
     pub fn deleteObjectChunk(self: *Database, hash: ObjectChunkId) Error!bool {
-        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        try self.rejectBoundObjectMutationInsideMainTransaction();
+        var objects = object_impl.Database{ .sqlite_db = self.objectSqliteDb() };
         return objects.deleteObjectChunk(hash);
     }
 
@@ -682,32 +826,49 @@ pub const Database = struct {
         allocator: std.mem.Allocator,
         hash: ObjectChunkId,
     ) Error!ObjectChunkData {
-        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        var objects = object_impl.Database{ .sqlite_db = self.objectSqliteDb() };
         return objects.getObjectChunk(allocator, hash);
     }
 
     /// Return whether an object id exists without loading object bytes.
     pub fn hasObject(self: *Database, id: ObjectId) Error!bool {
-        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        var objects = object_impl.Database{ .sqlite_db = self.objectSqliteDb() };
         return objects.hasObject(id);
     }
 
     /// Return the original full object byte length.
     pub fn objectSize(self: *Database, id: ObjectId) Error!u64 {
-        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        var objects = object_impl.Database{ .sqlite_db = self.objectSqliteDb() };
         return objects.objectSize(id);
     }
 
     /// Return the number of FastCDC chunks in the object manifest.
     pub fn objectChunkCount(self: *Database, id: ObjectId) Error!u64 {
-        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        var objects = object_impl.Database{ .sqlite_db = self.objectSqliteDb() };
         return objects.objectChunkCount(id);
     }
 
     /// Delete one Zova object and garbage-collect its unreferenced chunks.
     pub fn deleteObject(self: *Database, id: ObjectId) Error!void {
-        var objects = object_impl.Database{ .sqlite_db = &self.sqlite_db };
+        try self.rejectBoundObjectMutationInsideMainTransaction();
+        var objects = object_impl.Database{ .sqlite_db = self.objectSqliteDb() };
         return objects.deleteObject(id);
+    }
+
+    fn objectSqliteDb(self: *Database) *sqlite.Database {
+        if (self.bound_object_store) |*store| return &store.sqlite_db;
+        return &self.sqlite_db;
+    }
+
+    fn rejectBoundObjectMutationInsideMainTransaction(self: *Database) Error!void {
+        if (self.bound_object_store != null and hasActiveTransaction(&self.sqlite_db)) {
+            return error.ObjectTransactionActive;
+        }
+    }
+
+    fn replaceBoundObjectStore(self: *Database, store: BoundObjectStore) void {
+        if (self.bound_object_store) |*existing| existing.deinit();
+        self.bound_object_store = store;
     }
 };
 
@@ -836,6 +997,187 @@ fn initializeObjectSchema(db: *sqlite.Database) sqlite.Error!void {
 fn initializeVectorSchema(db: *sqlite.Database) sqlite.Error!void {
     try db.exec(vector_impl.collections_schema_sql ++ ";");
     try db.exec(vector_impl.vectors_schema_sql ++ ";");
+}
+
+fn markAsObjectStore(db: *sqlite.Database) Error!void {
+    var random_bytes: [32]u8 = undefined;
+    sqlite.c.sqlite3_randomness(random_bytes.len, &random_bytes);
+
+    var store_id: [64]u8 = undefined;
+    lowerHexInto(&store_id, &random_bytes);
+
+    var insert_role = try db.prepare("insert into _zova_meta (key, value) values ('store_role', ?)");
+    defer insert_role.deinit();
+    try insert_role.bindText(1, bound_object_store_role);
+    std.debug.assert((try insert_role.step()) == .done);
+
+    var insert_id = try db.prepare("insert into _zova_meta (key, value) values ('store_id', ?)");
+    defer insert_id.deinit();
+    try insert_id.bindText(1, &store_id);
+    std.debug.assert((try insert_id.step()) == .done);
+}
+
+fn ensureBoundStoreTable(db: *sqlite.Database) Error!void {
+    if (try tableExists(db, bound_stores_table)) {
+        try validateBoundStoreTable(db);
+        return;
+    }
+    try db.exec(bound_stores_schema_sql ++ ";");
+}
+
+fn validateOptionalBoundStoreSchema(db: *sqlite.Database) Error!void {
+    if (try tableExists(db, bound_stores_table)) try validateBoundStoreTable(db);
+}
+
+fn validateBoundStoreTable(db: *sqlite.Database) Error!void {
+    const columns = [_][]const u8{
+        "role",
+        "name",
+        "path",
+        "store_id",
+        "created_at_unix",
+    };
+    try validateRequiredTable(db, bound_stores_table, &columns, bound_stores_schema_sql);
+}
+
+fn ensureMainDatabaseRole(db: *sqlite.Database) Error!void {
+    if (try metadataValueAlloc(std.heap.c_allocator, db, "store_role")) |role| {
+        defer std.heap.c_allocator.free(role);
+        if (std.mem.eql(u8, role, bound_object_store_role)) return error.BoundStoreInvalid;
+        return error.NotZovaDatabase;
+    }
+}
+
+fn openConfiguredBoundObjectStore(db: *sqlite.Database, options: OpenOptions) Error!?BoundObjectStore {
+    if (!try tableExists(db, bound_stores_table)) return null;
+
+    var info = (try loadBoundObjectStoreInfo(std.heap.c_allocator, db)) orelse return null;
+    defer info.deinit(std.heap.c_allocator);
+
+    const path_z = try std.heap.c_allocator.dupeZ(u8, info.path);
+    defer std.heap.c_allocator.free(path_z);
+
+    const flags: sqlite.OpenFlags = if (options.read_only) .read_only else .read_write;
+    return try openObjectStore(path_z, flags, options.busy_timeout_ms);
+}
+
+fn openObjectStore(path: [:0]const u8, flags: sqlite.OpenFlags, busy_timeout_ms: u32) Error!BoundObjectStore {
+    if (!isZovaPath(path)) return error.NotZovaPath;
+    try ensurePathExists(path);
+
+    var raw = try sqlite.Database.openWithFlags(path, flags);
+    errdefer raw.deinit();
+
+    if (busy_timeout_ms != 0) try raw.setBusyTimeout(busy_timeout_ms);
+    try validateObjectStoreDatabase(&raw);
+    return .{ .sqlite_db = raw };
+}
+
+fn validateObjectStoreDatabase(db: *sqlite.Database) Error!void {
+    try expectMetadataValue(db, "magic", magic_value, .magic);
+    try expectMetadataValue(db, "format_version", format_version, .format_version);
+    try expectMetadataValue(db, "store_role", bound_object_store_role, .magic);
+    const store_id = try objectStoreIdAlloc(std.heap.c_allocator, db);
+    defer std.heap.c_allocator.free(store_id);
+    try validateObjectSchema(db);
+}
+
+fn hasBoundObjectStoreRow(db: *sqlite.Database) Error!bool {
+    if (!try tableExists(db, bound_stores_table)) return false;
+
+    var stmt = try db.prepare(
+        \\select 1
+        \\from _zova_bound_stores
+        \\where role = 'object_store' and name = 'default'
+        \\limit 1
+    );
+    defer stmt.deinit();
+
+    return switch (try stmt.step()) {
+        .row => true,
+        .done => false,
+    };
+}
+
+fn loadBoundObjectStoreInfo(allocator: std.mem.Allocator, db: *sqlite.Database) Error!?BoundObjectStoreInfo {
+    if (!try tableExists(db, bound_stores_table)) return null;
+
+    var stmt = try db.prepare(
+        \\select path, store_id
+        \\from _zova_bound_stores
+        \\where role = 'object_store' and name = 'default'
+    );
+    defer stmt.deinit();
+
+    switch (try stmt.step()) {
+        .done => return null,
+        .row => {
+            const path = try allocator.dupe(u8, stmt.columnText(0));
+            errdefer allocator.free(path);
+
+            const store_id = try allocator.dupe(u8, stmt.columnText(1));
+            errdefer allocator.free(store_id);
+            if (!isValidStoreId(store_id)) return error.BoundStoreInvalid;
+
+            switch (try stmt.step()) {
+                .done => {},
+                .row => return error.BoundStoreInvalid,
+            }
+
+            return .{ .path = path, .store_id = store_id };
+        },
+    }
+}
+
+fn insertBoundObjectStoreRow(db: *sqlite.Database, path: []const u8, store_id: []const u8) Error!void {
+    var stmt = try db.prepare(
+        \\insert into _zova_bound_stores (role, name, path, store_id, created_at_unix)
+        \\values ('object_store', 'default', ?, ?, unixepoch())
+    );
+    defer stmt.deinit();
+
+    try stmt.bindText(1, path);
+    try stmt.bindText(2, store_id);
+    std.debug.assert((try stmt.step()) == .done);
+}
+
+fn objectStoreIdAlloc(allocator: std.mem.Allocator, db: *sqlite.Database) Error![]u8 {
+    const store_id = (try metadataValueAlloc(allocator, db, "store_id")) orelse return error.BoundStoreInvalid;
+    errdefer allocator.free(store_id);
+    if (!isValidStoreId(store_id)) return error.BoundStoreInvalid;
+    return store_id;
+}
+
+fn metadataValueAlloc(allocator: std.mem.Allocator, db: *sqlite.Database, key: []const u8) Error!?[]u8 {
+    var stmt = try db.prepare("select value from _zova_meta where key = ?");
+    defer stmt.deinit();
+
+    try stmt.bindText(1, key);
+    return switch (try stmt.step()) {
+        .done => null,
+        .row => try allocator.dupe(u8, stmt.columnText(0)),
+    };
+}
+
+fn isValidStoreId(value: []const u8) bool {
+    if (value.len != 64) return false;
+    for (value) |byte| {
+        _ = std.fmt.charToDigit(byte, 16) catch return false;
+    }
+    return true;
+}
+
+fn lowerHexInto(dest: *[64]u8, bytes: *const [32]u8) void {
+    const alphabet = "0123456789abcdef";
+    for (bytes.*, 0..) |byte, index| {
+        dest[index * 2] = alphabet[byte >> 4];
+        dest[index * 2 + 1] = alphabet[byte & 0x0f];
+    }
+}
+
+fn hasActiveTransaction(db: *sqlite.Database) bool {
+    return sqlite.c.sqlite3_get_autocommit(db.handle) == 0 or
+        sqlite.c.sqlite3_txn_state(db.handle, null) != sqlite.c.SQLITE_TXN_NONE;
 }
 
 fn rejectReservedZovaNames(db: *sqlite.Database) Error!void {
@@ -977,8 +1319,10 @@ fn mapSqliteResultCode(rc: c_int) Error {
 fn validateZovaSchema(db: *sqlite.Database) Error!void {
     try expectMetadataValue(db, "magic", magic_value, .magic);
     try expectMetadataValue(db, "format_version", format_version, .format_version);
+    try ensureMainDatabaseRole(db);
     try validateObjectSchema(db);
     try validateVectorSchema(db);
+    try validateOptionalBoundStoreSchema(db);
 }
 
 fn validateObjectSchema(db: *sqlite.Database) Error!void {
@@ -1513,6 +1857,90 @@ test "created zova database contains required object tables" {
     try testingExpectTableCount(&raw, "_zova_objects", 1);
     try testingExpectTableCount(&raw, "_zova_chunks", 1);
     try testingExpectTableCount(&raw, "_zova_object_chunks", 1);
+}
+
+test "single file remains the default object store" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "single-file-default.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try std.testing.expectEqual(@as(?BoundObjectStoreInfo, null), try db.boundObjectStore(std.testing.allocator));
+
+    const id = try db.putObject("stored in the main database");
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from _zova_objects"));
+
+    var object = try db.getObject(std.testing.allocator, id);
+    defer object.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, "stored in the main database", object.bytes);
+}
+
+test "optional bound object store routes object APIs after reopen" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "bound-main.zova");
+
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "objects-store.zova");
+
+    try createObjectStore(store_path);
+
+    const id = stored: {
+        var db = try Database.create(main_path);
+        defer db.deinit();
+
+        try std.testing.expectEqual(@as(?BoundObjectStoreInfo, null), try db.boundObjectStore(std.testing.allocator));
+        try db.bindObjectStore(store_path);
+
+        var info = (try db.boundObjectStore(std.testing.allocator)).?;
+        defer info.deinit(std.testing.allocator);
+        try std.testing.expect(std.mem.endsWith(u8, info.path, "objects-store.zova"));
+
+        const object_id = try db.putObject("stored outside the main database");
+        try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_objects"));
+        break :stored object_id;
+    };
+
+    {
+        var store_raw = try sqlite.Database.open(store_path);
+        defer store_raw.deinit();
+        try std.testing.expectEqual(@as(i64, 1), try testingCount(&store_raw, "select count(*) from _zova_objects"));
+    }
+
+    {
+        var reopened = try Database.open(main_path);
+        defer reopened.deinit();
+
+        var object = try reopened.getObject(std.testing.allocator, id);
+        defer object.deinit(std.testing.allocator);
+        try std.testing.expectEqualSlices(u8, "stored outside the main database", object.bytes);
+
+        try reopened.unbindObjectStore();
+        try std.testing.expectEqual(@as(?BoundObjectStoreInfo, null), try reopened.boundObjectStore(std.testing.allocator));
+        try std.testing.expectError(error.ObjectNotFound, reopened.getObject(std.testing.allocator, id));
+
+        try reopened.bindObjectStore(store_path);
+        var rebound = try reopened.getObject(std.testing.allocator, id);
+        defer rebound.deinit(std.testing.allocator);
+        try std.testing.expectEqualSlices(u8, "stored outside the main database", rebound.bytes);
+    }
+}
+
+test "object store files are not accepted as main databases" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "role-object-store.zova");
+
+    try createObjectStore(store_path);
+    try std.testing.expectError(error.BoundStoreInvalid, Database.open(store_path));
 }
 
 test "open rejects format two database missing required object table without mutating it" {
