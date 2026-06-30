@@ -140,6 +140,47 @@ test "cli object-store commands create bind inspect rebind and unbind" {
     try expectContains(unbound_info.stdout, "bound: false");
 }
 
+test "cli object-store rebind works when the previous store is missing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "object-store-rebind-missing-main.zova");
+
+    var old_store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const old_store_path = try testingDbPath(&old_store_buffer, tmp.sub_path[0..], "object-store-rebind-old.zova");
+
+    var new_store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const new_store_path = try testingDbPath(&new_store_buffer, tmp.sub_path[0..], "object-store-rebind-new.zova");
+
+    {
+        var db = try zova.Database.create(main_path);
+        defer db.deinit();
+        try zova.createObjectStore(old_store_path);
+        try db.bindObjectStore(old_store_path);
+    }
+
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try tmp.dir.deleteFile(io, "object-store-rebind-old.zova");
+    try zova.createObjectStore(new_store_path);
+
+    var rebind = try runCli(&.{ "zova", "object-store", "rebind", "--json", main_path, new_store_path });
+    defer rebind.deinit();
+    try std.testing.expectEqual(@as(u8, 0), rebind.code);
+
+    var rebind_json = try parseJson(rebind.stdout);
+    defer rebind_json.deinit();
+    try expectJsonString(rebind_json.value.object, "command", "object-store-rebind");
+    try expectJsonString(rebind_json.value.object, "path", new_store_path);
+
+    var db = try zova.Database.open(main_path);
+    defer db.deinit();
+    const id = try db.putObject("stored after missing-store rebind");
+    var object = try db.getObject(std.testing.allocator, id);
+    defer object.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, "stored after missing-store rebind", object.bytes);
+}
+
 test "cli info reports bounded database summary" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

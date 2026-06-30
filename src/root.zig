@@ -108,6 +108,7 @@ test "package exports zova database namespace" {
     try std.testing.expect(@hasDecl(Database, "searchVectorsByIdWithin"));
     try std.testing.expect(@hasDecl(Database, "searchVectorsByIdInWithin"));
     try std.testing.expect(@hasDecl(Database, "openWithOptions"));
+    try std.testing.expect(@hasDecl(Database, "openForObjectStoreManagement"));
     try std.testing.expect(@hasDecl(Database, "setBusyTimeout"));
     try std.testing.expect(@hasDecl(Database, "lastInsertRowid"));
     try std.testing.expect(@hasDecl(Database, "changes"));

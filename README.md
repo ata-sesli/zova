@@ -329,6 +329,15 @@ database. If the object-store file is moved, rebind it manually:
 zova object-store rebind main.zova new/path/objects.zova
 ```
 
+The main database records the object store identity and rejects a different
+object-store file at the stored path. `backup`, `compact`, and `restore` are
+bound-store-aware: they copy readable bound object data back into the new
+destination so the produced file is self-contained.
+
+Binding management is explicit. `bind`, `unbind`, and `rebind` are rejected
+while the main database has an active transaction or savepoint, because v0.19
+does not promise multi-file transaction semantics.
+
 This is local, manual storage placement. It is not distributed storage, cloud
 sync, automatic path repair, or a multi-file transaction guarantee. v0.19 starts
 with one optional object store; vector stores and multiple named stores are

@@ -762,7 +762,7 @@ fn objectStoreCommand(
             const store_z = try allocator.dupeZ(u8, store_path);
             defer allocator.free(store_z);
 
-            var db = zova.Database.open(main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
+            var db = zova.Database.openForObjectStoreManagement(main_z, .{}) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
             defer db.deinit();
 
             db.bindObjectStore(store_z) catch |err| return objectStoreErrorFormat(stderr, command_name, parsed.format, err);
@@ -776,7 +776,7 @@ fn objectStoreCommand(
             const main_z = try allocator.dupeZ(u8, main_path);
             defer allocator.free(main_z);
 
-            var db = zova.Database.open(main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
+            var db = zova.Database.openForObjectStoreManagement(main_z, .{}) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
             defer db.deinit();
 
             var maybe_info = try db.boundObjectStore(allocator);
@@ -793,7 +793,7 @@ fn objectStoreCommand(
             const main_z = try allocator.dupeZ(u8, main_path);
             defer allocator.free(main_z);
 
-            var db = zova.Database.open(main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
+            var db = zova.Database.openForObjectStoreManagement(main_z, .{}) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
             defer db.deinit();
 
             db.unbindObjectStore() catch |err| return objectStoreErrorFormat(stderr, command_name, parsed.format, err);
@@ -808,7 +808,7 @@ fn objectStoreCommand(
             const store_z = try allocator.dupeZ(u8, store_path);
             defer allocator.free(store_z);
 
-            var db = zova.Database.open(main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
+            var db = zova.Database.openForObjectStoreManagement(main_z, .{}) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
             defer db.deinit();
 
             db.rebindObjectStore(store_z) catch |err| return objectStoreErrorFormat(stderr, command_name, parsed.format, err);

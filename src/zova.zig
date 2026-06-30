@@ -285,6 +285,20 @@ pub const Database = struct {
     /// migrations. Mutating SQL/object/vector APIs fail through SQLite's normal
     /// read-only error path.
     pub fn openWithOptions(path: [:0]const u8, options: OpenOptions) Error!Database {
+        return openInternal(path, options, true);
+    }
+
+    /// Open only the main `.zova` file for object-store binding management.
+    ///
+    /// This is for repairing or replacing binding metadata when the configured
+    /// object-store path is no longer available. Object read/write APIs on the
+    /// returned handle use the main file only; normal application code should
+    /// use `open` or `openWithOptions`.
+    pub fn openForObjectStoreManagement(path: [:0]const u8, options: OpenOptions) Error!Database {
+        return openInternal(path, options, false);
+    }
+
+    fn openInternal(path: [:0]const u8, options: OpenOptions, load_bound_object_store: bool) Error!Database {
         if (!isZovaPath(path)) return error.NotZovaPath;
         try ensurePathExists(path);
 
@@ -294,7 +308,10 @@ pub const Database = struct {
 
         if (options.busy_timeout_ms != 0) try raw.setBusyTimeout(options.busy_timeout_ms);
         try validateZovaSchema(&raw);
-        var bound_object_store = try openConfiguredBoundObjectStore(&raw, options);
+        var bound_object_store = if (load_bound_object_store)
+            try openConfiguredBoundObjectStore(&raw, options)
+        else
+            null;
         errdefer if (bound_object_store) |*store| store.deinit();
         try vector_sql.register(&raw);
         const notifications = try initNotifications(&raw);
@@ -440,6 +457,7 @@ pub const Database = struct {
             try backupMainDatabase(&self.sqlite_db, &dest);
         }
 
+        try self.inlineBoundObjectStoreIntoDestination(destination_path);
         if (options.verify) try verifyOperationalCopy(destination_path);
     }
 
@@ -458,6 +476,7 @@ pub const Database = struct {
         try vacuum_stmt.bindText(1, destination_path);
         try expectDone(&vacuum_stmt);
 
+        try self.inlineBoundObjectStoreIntoDestination(destination_path);
         if (options.verify) try verifyOperationalCopy(destination_path);
     }
 
@@ -494,6 +513,7 @@ pub const Database = struct {
     /// called. v0.19's first slice supports at most one bound object store per
     /// main database.
     pub fn bindObjectStore(self: *Database, path: [:0]const u8) Error!void {
+        try self.rejectBoundStoreManagementInsideMainTransaction();
         try ensureMainDatabaseRole(&self.sqlite_db);
         try ensureBoundStoreTable(&self.sqlite_db);
         if (try hasBoundObjectStoreRow(&self.sqlite_db)) return error.BoundStoreExists;
@@ -519,6 +539,7 @@ pub const Database = struct {
     ///
     /// This never deletes or mutates the object store file itself.
     pub fn unbindObjectStore(self: *Database) Error!void {
+        try self.rejectBoundStoreManagementInsideMainTransaction();
         if (!try hasBoundObjectStoreRow(&self.sqlite_db)) return error.BoundStoreNotFound;
 
         var stmt = try self.sqlite_db.prepare(
@@ -536,6 +557,7 @@ pub const Database = struct {
 
     /// Replace the optional object-store binding with a different store file.
     pub fn rebindObjectStore(self: *Database, path: [:0]const u8) Error!void {
+        try self.rejectBoundStoreManagementInsideMainTransaction();
         if (!try hasBoundObjectStoreRow(&self.sqlite_db)) return error.BoundStoreNotFound;
 
         const stored_path = try std.heap.c_allocator.dupeZ(u8, path);
@@ -866,9 +888,25 @@ pub const Database = struct {
         }
     }
 
+    fn rejectBoundStoreManagementInsideMainTransaction(self: *Database) Error!void {
+        if (hasActiveTransaction(&self.sqlite_db)) {
+            return error.ObjectTransactionActive;
+        }
+    }
+
     fn replaceBoundObjectStore(self: *Database, store: BoundObjectStore) void {
         if (self.bound_object_store) |*existing| existing.deinit();
         self.bound_object_store = store;
+    }
+
+    fn inlineBoundObjectStoreIntoDestination(self: *Database, destination_path: [:0]const u8) Error!void {
+        const store = if (self.bound_object_store) |*bound_store| bound_store else return;
+
+        var destination = try sqlite.Database.open(destination_path);
+        defer destination.deinit();
+
+        try copyObjectStorage(&store.sqlite_db, &destination);
+        try deleteBoundObjectStoreRows(&destination);
     }
 };
 
@@ -1058,7 +1096,14 @@ fn openConfiguredBoundObjectStore(db: *sqlite.Database, options: OpenOptions) Er
     defer std.heap.c_allocator.free(path_z);
 
     const flags: sqlite.OpenFlags = if (options.read_only) .read_only else .read_write;
-    return try openObjectStore(path_z, flags, options.busy_timeout_ms);
+    var store = try openObjectStore(path_z, flags, options.busy_timeout_ms);
+    errdefer store.deinit();
+
+    const actual_store_id = try objectStoreIdAlloc(std.heap.c_allocator, &store.sqlite_db);
+    defer std.heap.c_allocator.free(actual_store_id);
+    if (!std.mem.eql(u8, actual_store_id, info.store_id)) return error.BoundStoreInvalid;
+
+    return store;
 }
 
 fn openObjectStore(path: [:0]const u8, flags: sqlite.OpenFlags, busy_timeout_ms: u32) Error!BoundObjectStore {
@@ -1071,6 +1116,66 @@ fn openObjectStore(path: [:0]const u8, flags: sqlite.OpenFlags, busy_timeout_ms:
     if (busy_timeout_ms != 0) try raw.setBusyTimeout(busy_timeout_ms);
     try validateObjectStoreDatabase(&raw);
     return .{ .sqlite_db = raw };
+}
+
+fn copyObjectStorage(source: *sqlite.Database, destination: *sqlite.Database) Error!void {
+    var source_objects = object_impl.Database{ .sqlite_db = source };
+    var destination_objects = object_impl.Database{ .sqlite_db = destination };
+
+    var objects = try source.prepare("select object_id from _zova_objects order by hex(object_id)");
+    defer objects.deinit();
+
+    while ((try objects.step()) == .row) {
+        const raw_id = objects.columnBlob(0);
+        if (raw_id.len != @sizeOf(ObjectId)) return error.ObjectCorrupt;
+
+        var id: ObjectId = undefined;
+        @memcpy(id[0..], raw_id);
+
+        var object = try source_objects.getObject(std.heap.c_allocator, id);
+        const copied_id = destination_objects.putObject(object.bytes) catch |err| {
+            object.deinit(std.heap.c_allocator);
+            return err;
+        };
+        object.deinit(std.heap.c_allocator);
+        if (!std.mem.eql(u8, copied_id[0..], id[0..])) return error.ObjectCorrupt;
+    }
+
+    var chunks = try source.prepare(
+        \\select c.chunk_hash
+        \\from _zova_chunks c
+        \\where not exists (
+        \\  select 1 from _zova_object_chunks oc where oc.chunk_hash = c.chunk_hash
+        \\)
+        \\order by hex(c.chunk_hash)
+    );
+    defer chunks.deinit();
+
+    while ((try chunks.step()) == .row) {
+        const raw_hash = chunks.columnBlob(0);
+        if (raw_hash.len != @sizeOf(ObjectChunkId)) return error.ObjectCorrupt;
+
+        var hash: ObjectChunkId = undefined;
+        @memcpy(hash[0..], raw_hash);
+
+        var chunk = try source_objects.getObjectChunk(std.heap.c_allocator, hash);
+        destination_objects.putObjectChunk(hash, chunk.bytes) catch |err| {
+            chunk.deinit(std.heap.c_allocator);
+            return err;
+        };
+        chunk.deinit(std.heap.c_allocator);
+    }
+}
+
+fn deleteBoundObjectStoreRows(db: *sqlite.Database) Error!void {
+    if (!try tableExists(db, bound_stores_table)) return;
+
+    var stmt = try db.prepare(
+        \\delete from _zova_bound_stores
+        \\where role = 'object_store' and name = 'default'
+    );
+    defer stmt.deinit();
+    std.debug.assert((try stmt.step()) == .done);
 }
 
 fn validateObjectStoreDatabase(db: *sqlite.Database) Error!void {
@@ -1930,6 +2035,123 @@ test "optional bound object store routes object APIs after reopen" {
         defer rebound.deinit(std.testing.allocator);
         try std.testing.expectEqualSlices(u8, "stored outside the main database", rebound.bytes);
     }
+}
+
+test "operational copies inline bound object store data into single-file destinations" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "bound-copy-main.zova");
+
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "bound-copy-objects.zova");
+
+    var backup_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const backup_path = try testingDbPath(&backup_buffer, tmp.sub_path[0..], "bound-copy-backup.zova");
+
+    var compact_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const compact_path = try testingDbPath(&compact_buffer, tmp.sub_path[0..], "bound-copy-compact.zova");
+
+    var restore_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const restore_path = try testingDbPath(&restore_buffer, tmp.sub_path[0..], "bound-copy-restore.zova");
+
+    try createObjectStore(store_path);
+
+    var db = try Database.create(main_path);
+    defer db.deinit();
+    try db.bindObjectStore(store_path);
+
+    const object_id = try db.putObject("bound object copied into one destination file");
+    const loose_chunk = objectChunkId("loose chunk copied too");
+    try db.putObjectChunk(loose_chunk, "loose chunk copied too");
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_objects"));
+
+    try db.backupTo(backup_path, .{});
+    try db.compactTo(compact_path, .{});
+    try restoreBackup(main_path, restore_path, .{});
+
+    const copy_paths = [_][:0]const u8{ backup_path, compact_path, restore_path };
+    for (copy_paths) |copy_path| {
+        var copy = try Database.open(copy_path);
+        defer copy.deinit();
+
+        try std.testing.expectEqual(@as(?BoundObjectStoreInfo, null), try copy.boundObjectStore(std.testing.allocator));
+        try std.testing.expectEqual(@as(i64, 1), try testingCount(&copy, "select count(*) from _zova_objects"));
+
+        var object = try copy.getObject(std.testing.allocator, object_id);
+        defer object.deinit(std.testing.allocator);
+        try std.testing.expectEqualSlices(u8, "bound object copied into one destination file", object.bytes);
+
+        var chunk = try copy.getObjectChunk(std.testing.allocator, loose_chunk);
+        defer chunk.deinit(std.testing.allocator);
+        try std.testing.expectEqualSlices(u8, "loose chunk copied too", chunk.bytes);
+    }
+}
+
+test "open rejects bound object store id mismatch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "bound-id-main.zova");
+
+    var store_one_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_one_path = try testingDbPath(&store_one_buffer, tmp.sub_path[0..], "bound-id-one.zova");
+
+    var store_two_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_two_path = try testingDbPath(&store_two_buffer, tmp.sub_path[0..], "bound-id-two.zova");
+
+    try createObjectStore(store_one_path);
+    try createObjectStore(store_two_path);
+
+    {
+        var db = try Database.create(main_path);
+        defer db.deinit();
+        try db.bindObjectStore(store_one_path);
+
+        var stmt = try db.sqlite_db.prepare(
+            \\update _zova_bound_stores
+            \\set path = ?
+            \\where role = 'object_store' and name = 'default'
+        );
+        defer stmt.deinit();
+        try stmt.bindText(1, store_two_path);
+        try std.testing.expectEqual(sqlite.Step.done, try stmt.step());
+    }
+
+    try std.testing.expectError(error.BoundStoreInvalid, Database.open(main_path));
+}
+
+test "object store binding changes are rejected inside active transactions" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "bound-transaction-main.zova");
+
+    var store_one_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_one_path = try testingDbPath(&store_one_buffer, tmp.sub_path[0..], "bound-transaction-one.zova");
+
+    var store_two_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_two_path = try testingDbPath(&store_two_buffer, tmp.sub_path[0..], "bound-transaction-two.zova");
+
+    try createObjectStore(store_one_path);
+    try createObjectStore(store_two_path);
+
+    var db = try Database.create(main_path);
+    defer db.deinit();
+
+    try db.begin();
+    try std.testing.expectError(error.ObjectTransactionActive, db.bindObjectStore(store_one_path));
+    try db.rollback();
+
+    try db.bindObjectStore(store_one_path);
+
+    try db.savepoint("sp");
+    try std.testing.expectError(error.ObjectTransactionActive, db.unbindObjectStore());
+    try std.testing.expectError(error.ObjectTransactionActive, db.rebindObjectStore(store_two_path));
+    try db.releaseSavepoint("sp");
 }
 
 test "object store files are not accepted as main databases" {
