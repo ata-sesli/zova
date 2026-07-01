@@ -309,39 +309,80 @@ same `.zova` file. You can put/get whole objects, range-read object bytes,
 inspect manifests, fetch verified chunks, store loose chunks, and assemble a
 complete object from chunks.
 
-### Optional Bound Object Stores
+### Optional Bound Object And Vector Stores
 
 Single-file `.zova` remains the default. On the current development branch,
-applications can opt into one bound object store when object bytes should live
-beside the main records database:
+applications can opt into one bound object store and one bound vector store when
+large object bytes or vector rows should live beside the main records database:
 
 ```sh
 zova object-store create objects.zova
 zova object-store bind main.zova objects.zova
 zova object-store info main.zova
+
+zova vector-store create vectors.zova
+zova vector-store bind main.zova vectors.zova
+zova vector-store info main.zova
 ```
 
-After binding, object APIs route `_zova_objects`, `_zova_chunks`, and manifests
-to the object-store file. User SQL records and vector rows stay in the main
-database. If the object-store file is moved, rebind it manually:
+Use `bind` for new or empty Zova-owned storage. If the main file already has
+object rows or vector rows that you want to move out, use `split` instead:
 
 ```sh
-zova object-store rebind main.zova new/path/objects.zova
+zova split --objects main.zova objects.zova
+zova split --vectors main.zova vectors.zova
 ```
 
-The main database records the object store identity and rejects a different
-object-store file at the stored path. `backup`, `compact`, and `restore` are
-bound-store-aware: they copy readable bound object data back into the new
-destination so the produced file is self-contained.
+`split` is an in-place local migration. It creates a new store file, copies the
+selected Zova-owned private rows into that store, clears those private rows from
+the main file, binds the new store, and verifies the result. User SQL tables and
+rows stay in `main.zova`. The destination store must be a new `.zova` path; Zova
+does not overwrite existing files.
 
-Binding management is explicit. `bind`, `unbind`, and `rebind` are rejected
-while the main database has an active transaction or savepoint, because v0.19
-does not promise multi-file transaction semantics.
+After binding, Zova attaches the object store to the main SQLite connection and
+routes `_zova_objects`, `_zova_chunks`, and manifests through the internal
+`object_store` schema. A bound vector store similarly routes vector collections
+and vector rows through the internal `vector_store` schema. User SQL records
+stay in the main database. If a store file is moved, run `bind` again with the
+new path:
+
+```sh
+zova object-store bind main.zova new/path/objects.zova
+zova vector-store bind main.zova new/path/vectors.zova
+```
+
+`bind` is a safe set-or-replace operation for already-empty or already-bound
+storage: Zova validates the new store file before updating the main database's
+binding metadata. It rejects a first-time bind when the main file already
+contains object/vector rows, because that would hide existing data. Use `split`
+for that case. The main database records store identity, a bound-set id, and
+object/vector epochs. Normal open rejects missing stores, wrong stores, marker
+mismatches, and split bound sets instead of silently continuing. `doctor` and
+`check --deep` report those as `bound_store` diagnostics so the problem is
+visible without mutating any file. For a moved store path, run `bind` again with
+the new location; marker mismatches are treated as consistency problems, not
+path-repair prompts.
+
+`backup`, `compact`, and `restore` are bound-store-aware: they copy readable
+bound object/vector data back into the new destination so the produced file is
+self-contained.
+
+Object writes, deletes, chunk writes, assembly, and `ObjectWriter.finish` can
+participate in the same Zova transaction/savepoint as main-file SQL when an
+object store is bound. Vector collection and vector row mutations follow the
+same transaction/savepoint stack when a vector store is bound. Binding
+management is still explicit: `bind`, `unbind`, and replacement binds are
+rejected while the main database has an active transaction or savepoint.
+
+SQLite's `ATTACH` rules still matter. Multi-file transactions are crash-atomic
+only under SQLite's documented journal-mode conditions. Zova does not claim a
+stronger guarantee; the bound-set id and epoch exist so Zova can detect and
+explain split-file states during open, `doctor`, and `check --deep`.
 
 This is local, manual storage placement. It is not distributed storage, cloud
 sync, automatic path repair, or a multi-file transaction guarantee. v0.19 starts
-with one optional object store; vector stores and multiple named stores are
-deferred.
+with one optional object store and one optional vector store; multiple named
+stores are deferred.
 
 Use `ObjectWriter` when bytes arrive over time:
 
@@ -517,6 +558,7 @@ zova tables app.zova
 zova check --deep app.zova
 zova doctor --json app.zova
 zova object-store info app.zova
+zova vector-store info app.zova
 ```
 
 JSON output includes `cli_json_version = 1`. CLI output is bounded and avoids

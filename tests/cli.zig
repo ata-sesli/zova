@@ -23,6 +23,7 @@ test "cli version and help are successful" {
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "backup [--json] [--no-verify] <source.zova> <destination.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "compact [--json] [--no-verify] <source.zova> <destination.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "restore [--json] [--no-verify] <backup.zova> <destination.zova>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "split (--objects | --vectors) [--json] <main.zova> <store.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "doctor [--json] [--limit <n>] <file.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "salvage --dry-run [--json] [--limit <n>] <source.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "salvage [--json] [--limit <n>] <source.zova> <destination.zova>") != null);
@@ -30,7 +31,11 @@ test "cli version and help are successful" {
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "object-store bind [--json] <main.zova> <objects.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "object-store info [--json] <main.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "object-store unbind [--json] <main.zova>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "object-store rebind [--json] <main.zova> <objects.zova>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "object-store rebind") == null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "vector-store create [--json] <vectors.zova>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "vector-store bind [--json] <main.zova> <vectors.zova>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "vector-store info [--json] <main.zova>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "vector-store unbind [--json] <main.zova>") != null);
 }
 
 test "cli usage errors return exit code 2" {
@@ -45,7 +50,7 @@ test "cli usage errors return exit code 2" {
     try std.testing.expect(std.mem.indexOf(u8, missing.stderr, "usage") != null);
 }
 
-test "cli object-store commands create bind inspect rebind and unbind" {
+test "cli object-store commands create bind inspect replace and unbind" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -106,13 +111,13 @@ test "cli object-store commands create bind inspect rebind and unbind" {
     try expectJsonBool(info_json.value.object, "bound", true);
     try expectJsonString(info_json.value.object, "path", store_one_path);
 
-    var rebind = try runCli(&.{ "zova", "object-store", "rebind", "--json", main_path, store_two_path });
-    defer rebind.deinit();
-    try std.testing.expectEqual(@as(u8, 0), rebind.code);
-    var rebind_json = try parseJson(rebind.stdout);
-    defer rebind_json.deinit();
-    try expectJsonString(rebind_json.value.object, "command", "object-store-rebind");
-    try expectJsonString(rebind_json.value.object, "path", store_two_path);
+    var replace_bind = try runCli(&.{ "zova", "object-store", "bind", "--json", main_path, store_two_path });
+    defer replace_bind.deinit();
+    try std.testing.expectEqual(@as(u8, 0), replace_bind.code);
+    var replace_bind_json = try parseJson(replace_bind.stdout);
+    defer replace_bind_json.deinit();
+    try expectJsonString(replace_bind_json.value.object, "command", "object-store-bind");
+    try expectJsonString(replace_bind_json.value.object, "path", store_two_path);
 
     {
         var db = try zova.Database.open(main_path);
@@ -140,18 +145,18 @@ test "cli object-store commands create bind inspect rebind and unbind" {
     try expectContains(unbound_info.stdout, "bound: false");
 }
 
-test "cli object-store rebind works when the previous store is missing" {
+test "cli object-store bind replaces when the previous store is missing" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
     var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "object-store-rebind-missing-main.zova");
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "object-store-bind-missing-main.zova");
 
     var old_store_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const old_store_path = try testingDbPath(&old_store_buffer, tmp.sub_path[0..], "object-store-rebind-old.zova");
+    const old_store_path = try testingDbPath(&old_store_buffer, tmp.sub_path[0..], "object-store-bind-old.zova");
 
     var new_store_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const new_store_path = try testingDbPath(&new_store_buffer, tmp.sub_path[0..], "object-store-rebind-new.zova");
+    const new_store_path = try testingDbPath(&new_store_buffer, tmp.sub_path[0..], "object-store-bind-new.zova");
 
     {
         var db = try zova.Database.create(main_path);
@@ -161,24 +166,480 @@ test "cli object-store rebind works when the previous store is missing" {
     }
 
     const io = std.Io.Threaded.global_single_threaded.io();
-    try tmp.dir.deleteFile(io, "object-store-rebind-old.zova");
+    try tmp.dir.deleteFile(io, "object-store-bind-old.zova");
     try zova.createObjectStore(new_store_path);
 
-    var rebind = try runCli(&.{ "zova", "object-store", "rebind", "--json", main_path, new_store_path });
-    defer rebind.deinit();
-    try std.testing.expectEqual(@as(u8, 0), rebind.code);
+    var bind = try runCli(&.{ "zova", "object-store", "bind", "--json", main_path, new_store_path });
+    defer bind.deinit();
+    try std.testing.expectEqual(@as(u8, 0), bind.code);
 
-    var rebind_json = try parseJson(rebind.stdout);
-    defer rebind_json.deinit();
-    try expectJsonString(rebind_json.value.object, "command", "object-store-rebind");
-    try expectJsonString(rebind_json.value.object, "path", new_store_path);
+    var bind_json = try parseJson(bind.stdout);
+    defer bind_json.deinit();
+    try expectJsonString(bind_json.value.object, "command", "object-store-bind");
+    try expectJsonString(bind_json.value.object, "path", new_store_path);
 
     var db = try zova.Database.open(main_path);
     defer db.deinit();
-    const id = try db.putObject("stored after missing-store rebind");
+    const id = try db.putObject("stored after missing-store bind");
     var object = try db.getObject(std.testing.allocator, id);
     defer object.deinit(std.testing.allocator);
-    try std.testing.expectEqualSlices(u8, "stored after missing-store rebind", object.bytes);
+    try std.testing.expectEqualSlices(u8, "stored after missing-store bind", object.bytes);
+}
+
+test "cli vector-store commands create bind inspect replace and unbind" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "vector-store-main.zova");
+
+    var store_one_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_one_path = try testingDbPath(&store_one_buffer, tmp.sub_path[0..], "vector-store-one.zova");
+
+    var store_two_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_two_path = try testingDbPath(&store_two_buffer, tmp.sub_path[0..], "vector-store-two.zova");
+
+    {
+        var db = try zova.Database.create(main_path);
+        defer db.deinit();
+    }
+
+    var create_one = try runCli(&.{ "zova", "vector-store", "create", "--json", store_one_path });
+    defer create_one.deinit();
+    try std.testing.expectEqual(@as(u8, 0), create_one.code);
+    var create_one_json = try parseJson(create_one.stdout);
+    defer create_one_json.deinit();
+    try expectJsonString(create_one_json.value.object, "command", "vector-store-create");
+    try expectJsonBool(create_one_json.value.object, "created", true);
+
+    var create_two = try runCli(&.{ "zova", "vector-store", "create", store_two_path });
+    defer create_two.deinit();
+    try std.testing.expectEqual(@as(u8, 0), create_two.code);
+    try expectContains(create_two.stdout, "vector-store-create: ok");
+
+    var bind = try runCli(&.{ "zova", "vector-store", "bind", "--json", main_path, store_one_path });
+    defer bind.deinit();
+    try std.testing.expectEqual(@as(u8, 0), bind.code);
+    var bind_json = try parseJson(bind.stdout);
+    defer bind_json.deinit();
+    try expectJsonString(bind_json.value.object, "command", "vector-store-bind");
+    try expectJsonBool(bind_json.value.object, "bound", true);
+
+    {
+        var db = try zova.Database.open(main_path);
+        defer db.deinit();
+        try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .l2 });
+        try db.putVector("docs", "v1", &.{ 1.0, 2.0 });
+        try std.testing.expectEqual(@as(i64, 0), try countRawRows(&db.sqlite_db, "select count(*) from _zova_vectors"));
+
+        var results = try db.searchVectors(std.testing.allocator, "docs", &.{ 1.0, 2.0 }, 1);
+        defer results.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 1), results.items.len);
+        try std.testing.expectEqualStrings("v1", results.items[0].id);
+    }
+
+    {
+        var store = try zova.sqlite.Database.open(store_one_path);
+        defer store.deinit();
+        try std.testing.expectEqual(@as(i64, 1), try countRawRows(&store, "select count(*) from _zova_vectors"));
+    }
+
+    var info = try runCli(&.{ "zova", "vector-store", "info", "--json", main_path });
+    defer info.deinit();
+    try std.testing.expectEqual(@as(u8, 0), info.code);
+    var info_json = try parseJson(info.stdout);
+    defer info_json.deinit();
+    try expectJsonString(info_json.value.object, "command", "vector-store-info");
+    try expectJsonBool(info_json.value.object, "bound", true);
+    try expectJsonString(info_json.value.object, "path", store_one_path);
+
+    var replace_bind = try runCli(&.{ "zova", "vector-store", "bind", "--json", main_path, store_two_path });
+    defer replace_bind.deinit();
+    try std.testing.expectEqual(@as(u8, 0), replace_bind.code);
+    var replace_bind_json = try parseJson(replace_bind.stdout);
+    defer replace_bind_json.deinit();
+    try expectJsonString(replace_bind_json.value.object, "command", "vector-store-bind");
+    try expectJsonString(replace_bind_json.value.object, "path", store_two_path);
+
+    {
+        var db = try zova.Database.open(main_path);
+        defer db.deinit();
+        try db.createVectorCollection("images", .{ .dimensions = 2, .metric = .l2 });
+        try db.putVector("images", "img-1", &.{ 3.0, 4.0 });
+    }
+
+    {
+        var store = try zova.sqlite.Database.open(store_two_path);
+        defer store.deinit();
+        try std.testing.expectEqual(@as(i64, 1), try countRawRows(&store, "select count(*) from _zova_vectors"));
+    }
+
+    var unbind = try runCli(&.{ "zova", "vector-store", "unbind", "--json", main_path });
+    defer unbind.deinit();
+    try std.testing.expectEqual(@as(u8, 0), unbind.code);
+    var unbind_json = try parseJson(unbind.stdout);
+    defer unbind_json.deinit();
+    try expectJsonString(unbind_json.value.object, "command", "vector-store-unbind");
+    try expectJsonBool(unbind_json.value.object, "bound", false);
+
+    var unbound_info = try runCli(&.{ "zova", "vector-store", "info", main_path });
+    defer unbound_info.deinit();
+    try std.testing.expectEqual(@as(u8, 0), unbound_info.code);
+    try expectContains(unbound_info.stdout, "bound: false");
+}
+
+test "cli split moves existing object and vector storage into bound stores" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var object_main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const object_main_path = try testingDbPath(&object_main_buffer, tmp.sub_path[0..], "split-object-main.zova");
+
+    var object_store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const object_store_path = try testingDbPath(&object_store_buffer, tmp.sub_path[0..], "split-object-store.zova");
+
+    {
+        var db = try zova.Database.create(object_main_path);
+        defer db.deinit();
+        try db.exec("create table documents (object_id blob not null, vector_id text not null, title text not null)");
+        const object_id = try db.putObject("cli split object");
+        try insertDocument(&db, object_id, "unused", "object metadata stays in main");
+        try db.putObjectChunk(zova.objectChunkId("cli split loose chunk"), "cli split loose chunk");
+    }
+
+    var object_split = try runCli(&.{ "zova", "split", "--objects", "--json", object_main_path, object_store_path });
+    defer object_split.deinit();
+    try std.testing.expectEqual(@as(u8, 0), object_split.code);
+    var object_json = try parseJson(object_split.stdout);
+    defer object_json.deinit();
+    const object_root = object_json.value.object;
+    try expectJsonString(object_root, "command", "split");
+    try expectJsonString(object_root, "role", "objects");
+    try expectJsonString(object_root, "main_path", object_main_path);
+    try expectJsonString(object_root, "store_path", object_store_path);
+    try expectJsonBool(object_root, "created", true);
+    try expectJsonBool(object_root, "bound", true);
+    try expectJsonBool(object_root, "verified", true);
+    try expectJsonObjectHasInt(object_root, "copied", "objects");
+    try expectJsonObjectHasInt(object_root, "copied", "chunks");
+    try expectJsonObjectHasInt(object_root, "copied", "manifest_rows");
+    try expectJsonObjectHasInt(object_root, "cleared", "objects");
+
+    {
+        var db = try zova.Database.open(object_main_path);
+        defer db.deinit();
+        try std.testing.expectEqual(@as(i64, 0), try countRawRows(&db.sqlite_db, "select count(*) from _zova_objects"));
+        try std.testing.expectEqual(@as(i64, 1), try countRawRows(&db.sqlite_db, "select count(*) from documents"));
+    }
+    {
+        var store = try zova.sqlite.Database.open(object_store_path);
+        defer store.deinit();
+        try std.testing.expectEqual(@as(i64, 1), try countRawRows(&store, "select count(*) from _zova_objects"));
+    }
+
+    var vector_main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const vector_main_path = try testingDbPath(&vector_main_buffer, tmp.sub_path[0..], "split-vector-main.zova");
+
+    var vector_store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const vector_store_path = try testingDbPath(&vector_store_buffer, tmp.sub_path[0..], "split-vector-store.zova");
+
+    {
+        var db = try zova.Database.create(vector_main_path);
+        defer db.deinit();
+        try db.exec("create table documents (vector_id text not null, title text not null)");
+        try db.exec("insert into documents (vector_id, title) values ('doc-a', 'vector metadata stays in main')");
+        try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .l2 });
+        try db.putVectors("docs", &.{
+            .{ .id = "doc-a", .values = &.{ 1.0, 0.0 } },
+            .{ .id = "doc-b", .values = &.{ 0.0, 2.0 } },
+        });
+    }
+
+    var vector_split = try runCli(&.{ "zova", "split", "--vectors", "--json", vector_main_path, vector_store_path });
+    defer vector_split.deinit();
+    try std.testing.expectEqual(@as(u8, 0), vector_split.code);
+    var vector_json = try parseJson(vector_split.stdout);
+    defer vector_json.deinit();
+    const vector_root = vector_json.value.object;
+    try expectJsonString(vector_root, "command", "split");
+    try expectJsonString(vector_root, "role", "vectors");
+    try expectJsonString(vector_root, "main_path", vector_main_path);
+    try expectJsonString(vector_root, "store_path", vector_store_path);
+    try expectJsonBool(vector_root, "created", true);
+    try expectJsonBool(vector_root, "bound", true);
+    try expectJsonBool(vector_root, "verified", true);
+    try expectJsonObjectHasInt(vector_root, "copied", "vector_collections");
+    try expectJsonObjectHasInt(vector_root, "copied", "vectors");
+    try expectJsonObjectHasInt(vector_root, "cleared", "vectors");
+
+    {
+        var db = try zova.Database.open(vector_main_path);
+        defer db.deinit();
+        try std.testing.expectEqual(@as(i64, 0), try countRawRows(&db.sqlite_db, "select count(*) from _zova_vectors"));
+        try std.testing.expectEqual(@as(i64, 1), try countRawRows(&db.sqlite_db, "select count(*) from documents"));
+        var results = try db.searchVectors(std.testing.allocator, "docs", &.{ 1.0, 0.0 }, 1);
+        defer results.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("doc-a", results.items[0].id);
+    }
+}
+
+test "cli bind rejects non-empty main storage and split usage errors are bounded" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var object_main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const object_main_path = try testingDbPath(&object_main_buffer, tmp.sub_path[0..], "bind-reject-object-main.zova");
+
+    var object_store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const object_store_path = try testingDbPath(&object_store_buffer, tmp.sub_path[0..], "bind-reject-object-store.zova");
+
+    {
+        var db = try zova.Database.create(object_main_path);
+        defer db.deinit();
+        _ = try db.putObject("existing object requires split");
+    }
+    try zova.createObjectStore(object_store_path);
+
+    var object_bind = try runCli(&.{ "zova", "object-store", "bind", object_main_path, object_store_path });
+    defer object_bind.deinit();
+    try std.testing.expectEqual(@as(u8, 3), object_bind.code);
+    try expectContains(object_bind.stderr, "split --objects");
+
+    var vector_main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const vector_main_path = try testingDbPath(&vector_main_buffer, tmp.sub_path[0..], "bind-reject-vector-main.zova");
+
+    var vector_store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const vector_store_path = try testingDbPath(&vector_store_buffer, tmp.sub_path[0..], "bind-reject-vector-store.zova");
+
+    {
+        var db = try zova.Database.create(vector_main_path);
+        defer db.deinit();
+        try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .l2 });
+    }
+    try zova.createVectorStore(vector_store_path);
+
+    var vector_bind = try runCli(&.{ "zova", "vector-store", "bind", vector_main_path, vector_store_path });
+    defer vector_bind.deinit();
+    try std.testing.expectEqual(@as(u8, 3), vector_bind.code);
+    try expectContains(vector_bind.stderr, "split --vectors");
+
+    const usage_cases = [_][]const []const u8{
+        &.{ "zova", "split", object_main_path, object_store_path },
+        &.{ "zova", "split", "--objects", "--vectors", object_main_path, object_store_path },
+        &.{ "zova", "split", "--objects", object_main_path },
+        &.{ "zova", "split", "--objects", object_main_path, object_store_path, "extra" },
+        &.{ "zova", "split", "--objects", object_main_path, object_main_path },
+        &.{ "zova", "split", "--wat", object_main_path, object_store_path },
+    };
+    for (usage_cases) |case| {
+        var result = try runCli(case);
+        defer result.deinit();
+        try std.testing.expectEqual(@as(u8, 2), result.code);
+    }
+}
+
+test "cli doctor and check report healthy bound object stores" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "bound-health-main.zova");
+
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "bound-health-objects.zova");
+
+    {
+        var db = try zova.Database.create(main_path);
+        defer db.deinit();
+        try zova.createObjectStore(store_path);
+        try db.bindObjectStore(store_path);
+        _ = try db.putObject("bound store diagnostic object");
+    }
+
+    var doctor = try runCli(&.{ "zova", "doctor", "--json", main_path });
+    defer doctor.deinit();
+    try std.testing.expectEqual(@as(u8, 0), doctor.code);
+    var doctor_json = try parseJson(doctor.stdout);
+    defer doctor_json.deinit();
+    const doctor_root = doctor_json.value.object;
+    try expectJsonString(doctor_root, "status", "ok");
+    try expectJsonInt(doctor_root, "issue_count", 0);
+    try std.testing.expectEqual(@as(i64, 0), try jsonObjectInt(doctor_root, "issue_counts", "bound_store"));
+    try std.testing.expect(std.mem.indexOf(u8, doctor.stdout, "bound store diagnostic object") == null);
+
+    var check = try runCli(&.{ "zova", "check", "--deep", "--json", main_path });
+    defer check.deinit();
+    try std.testing.expectEqual(@as(u8, 0), check.code);
+    var check_json = try parseJson(check.stdout);
+    defer check_json.deinit();
+    const check_root = check_json.value.object;
+    try expectJsonString(check_root, "status", "ok");
+    try expectJsonInt(check_root, "issue_count", 0);
+    try std.testing.expectEqual(@as(i64, 0), try jsonObjectInt(check_root, "issue_counts", "bound_store"));
+    try std.testing.expect((try jsonObjectInt(check_root, "checked", "objects")) > 0);
+}
+
+test "cli doctor and check categorize bound object store marker failures" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "bound-marker-main.zova");
+
+    var missing_store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const missing_store_path = try testingDbPath(&missing_store_buffer, tmp.sub_path[0..], "bound-marker-missing.zova");
+
+    {
+        var db = try zova.Database.create(main_path);
+        defer db.deinit();
+        try zova.createObjectStore(missing_store_path);
+        try db.bindObjectStore(missing_store_path);
+    }
+
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try tmp.dir.deleteFile(io, "bound-marker-missing.zova");
+
+    var missing_doctor = try runCli(&.{ "zova", "doctor", main_path });
+    defer missing_doctor.deinit();
+    try std.testing.expectEqual(@as(u8, 4), missing_doctor.code);
+    try expectContains(missing_doctor.stderr, "bound_store_issues:");
+    try expectContains(missing_doctor.stderr, "missing_or_unreadable_store");
+    try expectContains(missing_doctor.stderr, "zova object-store bind");
+
+    var missing_check = try runCli(&.{ "zova", "check", "--deep", "--json", main_path });
+    defer missing_check.deinit();
+    try std.testing.expectEqual(@as(u8, 4), missing_check.code);
+    var missing_check_json = try parseJson(missing_check.stderr);
+    defer missing_check_json.deinit();
+    const missing_root = missing_check_json.value.object;
+    try expectJsonString(missing_root, "command", "check");
+    try std.testing.expect((try jsonObjectInt(missing_root, "issue_counts", "bound_store")) > 0);
+    try expectContains(missing_check.stderr, "missing_or_unreadable_store");
+
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "bound-marker-objects.zova");
+
+    {
+        var db = try zova.Database.openForObjectStoreManagement(main_path, .{});
+        defer db.deinit();
+        try zova.createObjectStore(store_path);
+        try db.bindObjectStore(store_path);
+        _ = try db.putObject("bound epoch object");
+    }
+
+    {
+        var store = try zova.sqlite.Database.open(store_path);
+        defer store.deinit();
+        try store.exec("update _zova_meta set value = '999' where key = 'object_epoch'");
+    }
+
+    var epoch_doctor = try runCli(&.{ "zova", "doctor", "--json", main_path });
+    defer epoch_doctor.deinit();
+    try std.testing.expectEqual(@as(u8, 4), epoch_doctor.code);
+    var epoch_doctor_json = try parseJson(epoch_doctor.stderr);
+    defer epoch_doctor_json.deinit();
+    const epoch_root = epoch_doctor_json.value.object;
+    try expectJsonString(epoch_root, "command", "doctor");
+    try std.testing.expect((try jsonObjectInt(epoch_root, "issue_counts", "bound_store")) > 0);
+    try expectContains(epoch_doctor.stderr, "object_epoch_mismatch");
+    try std.testing.expect(std.mem.indexOf(u8, epoch_doctor.stderr, "zova object-store bind") == null);
+    try std.testing.expect(std.mem.indexOf(u8, epoch_doctor.stderr, "bound epoch object") == null);
+}
+
+test "cli doctor categorizes bound vector store marker failures" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var missing_main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const missing_main_path = try testingDbPath(&missing_main_buffer, tmp.sub_path[0..], "bound-vector-missing-main.zova");
+
+    var missing_store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const missing_store_path = try testingDbPath(&missing_store_buffer, tmp.sub_path[0..], "bound-vector-missing-vectors.zova");
+
+    {
+        var db = try zova.Database.create(missing_main_path);
+        defer db.deinit();
+        try zova.createVectorStore(missing_store_path);
+        try db.bindVectorStore(missing_store_path);
+    }
+
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try tmp.dir.deleteFile(io, "bound-vector-missing-vectors.zova");
+
+    var missing_doctor = try runCli(&.{ "zova", "doctor", missing_main_path });
+    defer missing_doctor.deinit();
+    try std.testing.expectEqual(@as(u8, 4), missing_doctor.code);
+    try expectContains(missing_doctor.stderr, "bound_store_issues:");
+    try expectContains(missing_doctor.stderr, "missing_or_unreadable_store");
+    try expectContains(missing_doctor.stderr, "zova vector-store bind");
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "bound-vector-marker-main.zova");
+
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "bound-vector-marker-vectors.zova");
+
+    {
+        var db = try zova.Database.create(main_path);
+        defer db.deinit();
+        try zova.createVectorStore(store_path);
+        try db.bindVectorStore(store_path);
+        try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .l2 });
+        try db.putVector("docs", "private-vector-id", &.{ 1.0, 2.0 });
+    }
+
+    {
+        var store = try zova.sqlite.Database.open(store_path);
+        defer store.deinit();
+        try store.exec("update _zova_meta set value = '999' where key = 'vector_epoch'");
+    }
+
+    var doctor = try runCli(&.{ "zova", "doctor", "--json", main_path });
+    defer doctor.deinit();
+    try std.testing.expectEqual(@as(u8, 4), doctor.code);
+    var doctor_json = try parseJson(doctor.stderr);
+    defer doctor_json.deinit();
+    const root = doctor_json.value.object;
+    try expectJsonString(root, "command", "doctor");
+    try std.testing.expect((try jsonObjectInt(root, "issue_counts", "bound_store")) > 0);
+    try expectContains(doctor.stderr, "vector_epoch_mismatch");
+    try std.testing.expect(std.mem.indexOf(u8, doctor.stderr, "private-vector-id") == null);
+}
+
+test "cli doctor reports existing bound store with unreadable metadata" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "bound-unreadable-main.zova");
+
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "bound-unreadable-objects.zova");
+
+    {
+        var db = try zova.Database.create(main_path);
+        defer db.deinit();
+        try zova.createObjectStore(store_path);
+        try db.bindObjectStore(store_path);
+    }
+
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try tmp.dir.deleteFile(io, "bound-unreadable-objects.zova");
+    {
+        var plain = try zova.sqlite.Database.open(store_path);
+        defer plain.deinit();
+        try plain.exec("create table plain (id integer primary key)");
+    }
+
+    var doctor = try runCli(&.{ "zova", "doctor", "--json", main_path });
+    defer doctor.deinit();
+    try std.testing.expectEqual(@as(u8, 4), doctor.code);
+    var parsed = try parseJson(doctor.stderr);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try expectJsonString(root, "command", "doctor");
+    try std.testing.expect((try jsonObjectInt(root, "issue_counts", "bound_store")) > 0);
+    try expectContains(doctor.stderr, "store_magic_unreadable");
 }
 
 test "cli info reports bounded database summary" {

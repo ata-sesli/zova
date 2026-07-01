@@ -123,6 +123,18 @@ pub const Object = struct {
     }
 };
 
+pub const StorageSchema = enum {
+    main,
+    object_store,
+
+    pub fn prefix(self: StorageSchema) []const u8 {
+        return switch (self) {
+            .main => "main.",
+            .object_store => "object_store.",
+        };
+    }
+};
+
 /// Incremental writer for one content-addressed Zova object.
 ///
 /// `ObjectWriter` accepts arbitrary byte slices, emits FastCDC-v1 chunks as
@@ -132,6 +144,8 @@ pub const Object = struct {
 /// The writer must be deinitialized; unfinished writers auto-cancel.
 pub const ObjectWriter = struct {
     sqlite_db: *sqlite.Database,
+    storage_schema: StorageSchema = .main,
+    allow_active_transactions: bool = false,
     allocator: std.mem.Allocator,
     chunker: fastcdc.StreamChunker = .empty,
     hasher: std.crypto.hash.sha2.Sha256 = std.crypto.hash.sha2.Sha256.init(.{}),
@@ -140,29 +154,39 @@ pub const ObjectWriter = struct {
     seen_chunks: std.ArrayList(ObjectChunkId) = .empty,
     closed: bool = false,
 
-    fn init(sqlite_db: *sqlite.Database, allocator: std.mem.Allocator) ObjectWriter {
+    fn init(
+        sqlite_db: *sqlite.Database,
+        storage_schema: StorageSchema,
+        allow_active_transactions: bool,
+        allocator: std.mem.Allocator,
+    ) ObjectWriter {
         return .{
             .sqlite_db = sqlite_db,
+            .storage_schema = storage_schema,
+            .allow_active_transactions = allow_active_transactions,
             .allocator = allocator,
             .hasher = std.crypto.hash.sha2.Sha256.init(.{}),
         };
     }
 
     fn database(self: *ObjectWriter) Database {
-        return .{ .sqlite_db = self.sqlite_db };
+        return .{
+            .sqlite_db = self.sqlite_db,
+            .storage_schema = self.storage_schema,
+            .allow_active_transactions = self.allow_active_transactions,
+        };
     }
 
     /// Append bytes to the streamed object.
     ///
     /// Empty writes are no-ops. Non-empty writes may be split into several
-    /// FastCDC chunks internally. Writer operations are rejected inside active
-    /// caller-owned SQLite transactions because final assembly owns its own
-    /// transaction and the writer's chunk cleanup policy assumes no ambient
-    /// transaction.
+    /// FastCDC chunks internally. Single-file writers reject active caller
+    /// transactions; bound object-store writers may join them through the
+    /// attached object-store schema.
     pub fn write(self: *ObjectWriter, bytes: []const u8) Error!void {
         if (self.closed) return error.ObjectWriterClosed;
         if (self.chunker.finished) return error.ObjectWriterClosed;
-        if (hasActiveTransaction(self.sqlite_db)) return error.ObjectTransactionActive;
+        try rejectActiveTransaction(self.sqlite_db, self.allow_active_transactions);
         if (bytes.len == 0) return;
 
         var offset: usize = 0;
@@ -191,7 +215,7 @@ pub const ObjectWriter = struct {
     /// `error.ObjectWriterClosed`; call `deinit` to free writer-owned buffers.
     pub fn finish(self: *ObjectWriter) Error!ObjectId {
         if (self.closed) return error.ObjectWriterClosed;
-        if (hasActiveTransaction(self.sqlite_db)) return error.ObjectTransactionActive;
+        try rejectActiveTransaction(self.sqlite_db, self.allow_active_transactions);
 
         self.chunker.finish();
         try self.drainReadyChunks();
@@ -219,7 +243,7 @@ pub const ObjectWriter = struct {
     /// cancellation, all writer operations return `error.ObjectWriterClosed`.
     pub fn cancel(self: *ObjectWriter) Error!void {
         if (self.closed) return error.ObjectWriterClosed;
-        if (hasActiveTransaction(self.sqlite_db)) return error.ObjectTransactionActive;
+        try rejectActiveTransaction(self.sqlite_db, self.allow_active_transactions);
 
         try self.deleteUnreferencedSeenChunks();
         self.closed = true;
@@ -327,8 +351,12 @@ pub const ObjectWriter = struct {
 
 pub const Database = struct {
     sqlite_db: *sqlite.Database,
+    storage_schema: StorageSchema = .main,
+    allow_active_transactions: bool = false,
 
-    fn prepare(self: *Database, sql: [:0]const u8) Error!sqlite.Statement {
+    fn prepareSchema(self: *Database, comptime sql_format: []const u8, args: anytype) Error!sqlite.Statement {
+        var sql_buffer: [4096]u8 = undefined;
+        const sql = std.fmt.bufPrintZ(&sql_buffer, sql_format, args) catch return error.SqliteError;
         return try self.sqlite_db.prepare(sql);
     }
 
@@ -336,44 +364,44 @@ pub const Database = struct {
     ///
     /// The writer streams bytes through FastCDC-v1, stores verified loose
     /// chunks as they are emitted, and assembles the final content-addressed
-    /// object on `ObjectWriter.finish`. Writer operations are unsupported while
-    /// this connection is inside an active caller-owned transaction.
+    /// object on `ObjectWriter.finish`. By default writer operations reject
+    /// active caller-owned transactions; the Zova facade enables ambient
+    /// transaction participation only for attached bound object stores.
     pub fn objectWriter(self: *Database, allocator: std.mem.Allocator) Error!ObjectWriter {
-        if (hasActiveTransaction(self.sqlite_db)) return error.ObjectTransactionActive;
-        return ObjectWriter.init(self.sqlite_db, allocator);
+        try rejectActiveTransaction(self.sqlite_db, self.allow_active_transactions);
+        return ObjectWriter.init(self.sqlite_db, self.storage_schema, self.allow_active_transactions, allocator);
     }
 
     /// Store raw bytes as a content-addressed Zova object.
     ///
-    /// The returned id is the SHA-256 digest of the full byte slice. v0.4 owns
-    /// its own transaction for object writes and returns
-    /// `error.ObjectTransactionActive` if the connection is already inside a
-    /// user transaction.
+    /// The returned id is the SHA-256 digest of the full byte slice. By
+    /// default this owns its own transaction and returns
+    /// `error.ObjectTransactionActive` inside a user transaction. The Zova
+    /// facade enables ambient transaction participation for attached bound
+    /// object stores.
     pub fn putObject(self: *Database, bytes: []const u8) Error!ObjectId {
-        if (hasActiveTransaction(self.sqlite_db)) return error.ObjectTransactionActive;
-
         const id = objectId(bytes);
         const size_bytes = try usizeToSqliteI64(bytes.len);
         const chunk_count = try usizeToSqliteI64(countObjectChunks(bytes));
 
-        try self.sqlite_db.beginImmediate();
+        const owns_transaction = try beginOwnedWrite(self.sqlite_db, self.allow_active_transactions);
         var committed = false;
-        errdefer if (!committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed and owns_transaction) self.sqlite_db.rollback() catch {};
 
-        if (try objectRowExists(self.sqlite_db, id)) {
-            try self.sqlite_db.commit();
+        if (try objectRowExists(self.sqlite_db, self.storage_schema, id)) {
+            if (owns_transaction) try self.sqlite_db.commit();
             committed = true;
             return id;
         }
 
-        try insertObjectRow(self.sqlite_db, id, size_bytes, chunk_count);
+        try insertObjectRow(self.sqlite_db, self.storage_schema, id, size_bytes, chunk_count);
 
         var offset: usize = 0;
         while (offset < bytes.len) {
             const chunk_len = fastcdc.cut(bytes[offset..]);
             const chunk = bytes[offset .. offset + chunk_len];
             const chunk_hash = objectId(chunk);
-            try insertChunkRow(self.sqlite_db, chunk_hash, chunk);
+            try insertChunkRow(self.sqlite_db, self.storage_schema, chunk_hash, chunk);
             offset += chunk_len;
         }
 
@@ -385,6 +413,7 @@ pub const Database = struct {
             const chunk_hash = objectId(chunk);
             try insertManifestRow(
                 self.sqlite_db,
+                self.storage_schema,
                 id,
                 chunk_index,
                 chunk_hash,
@@ -395,7 +424,7 @@ pub const Database = struct {
             chunk_index += 1;
         }
 
-        try self.sqlite_db.commit();
+        if (owns_transaction) try self.sqlite_db.commit();
         committed = true;
         return id;
     }
@@ -406,7 +435,7 @@ pub const Database = struct {
     /// `error.ObjectNotFound`. Broken private object rows return
     /// `error.ObjectCorrupt` rather than being repaired.
     pub fn getObject(self: *Database, allocator: std.mem.Allocator, id: ObjectId) Error!Object {
-        const metadata = try loadObjectMetadata(self.sqlite_db, id);
+        const metadata = try loadObjectMetadata(self.sqlite_db, self.storage_schema, id);
         const size = try sqliteI64ToUsize(metadata.size_bytes);
         const chunk_count = try sqliteI64ToUsize(metadata.chunk_count);
         var bytes = try allocator.alloc(u8, size);
@@ -418,13 +447,13 @@ pub const Database = struct {
             return .{ .id = id, .bytes = bytes };
         }
 
-        var manifest = try self.sqlite_db.prepare(
+        var manifest = try self.prepareSchema(
             \\select oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.data
-            \\from _zova_object_chunks oc
-            \\left join _zova_chunks c on c.chunk_hash = oc.chunk_hash
+            \\from {s}_zova_object_chunks oc
+            \\left join {s}_zova_chunks c on c.chunk_hash = oc.chunk_hash
             \\where oc.object_id = ?
             \\order by oc.chunk_index asc
-        );
+        , .{ self.storage_schema.prefix(), self.storage_schema.prefix() });
         defer manifest.deinit();
 
         try manifest.bindBlob(1, &id);
@@ -470,7 +499,7 @@ pub const Database = struct {
     /// return `error.ObjectRangeInvalid`; offsets at the end return `0`.
     /// Full-object reads additionally verify the final full-object SHA-256.
     pub fn readObjectRange(self: *Database, id: ObjectId, offset: u64, buffer: []u8) Error!usize {
-        const metadata = try loadObjectMetadata(self.sqlite_db, id);
+        const metadata = try loadObjectMetadata(self.sqlite_db, self.storage_schema, id);
         const size = try sqliteI64ToU64(metadata.size_bytes);
         const chunk_count = try sqliteI64ToU64(metadata.chunk_count);
 
@@ -486,18 +515,18 @@ pub const Database = struct {
             return 0;
         }
 
-        try validateObjectManifestShape(self.sqlite_db, id, size, chunk_count);
+        try validateObjectManifestShape(self.sqlite_db, self.storage_schema, id, size, chunk_count);
 
         const read_end = offset + read_len_u64;
-        var chunks = try self.sqlite_db.prepare(
+        var chunks = try self.prepareSchema(
             \\select oc.chunk_hash, oc.offset, oc.size_bytes, c.data
-            \\from _zova_object_chunks oc
-            \\join _zova_chunks c on c.chunk_hash = oc.chunk_hash
+            \\from {s}_zova_object_chunks oc
+            \\join {s}_zova_chunks c on c.chunk_hash = oc.chunk_hash
             \\where oc.object_id = ?
             \\  and oc.offset + oc.size_bytes > ?
             \\  and oc.offset < ?
             \\order by oc.chunk_index asc
-        );
+        , .{ self.storage_schema.prefix(), self.storage_schema.prefix() });
         defer chunks.deinit();
 
         try chunks.bindBlob(1, &id);
@@ -552,7 +581,7 @@ pub const Database = struct {
         allocator: std.mem.Allocator,
         id: ObjectId,
     ) Error!ObjectManifest {
-        const metadata = try loadObjectMetadata(self.sqlite_db, id);
+        const metadata = try loadObjectMetadata(self.sqlite_db, self.storage_schema, id);
         const size = try sqliteI64ToU64(metadata.size_bytes);
         const chunk_count = try sqliteI64ToU64(metadata.chunk_count);
 
@@ -569,19 +598,19 @@ pub const Database = struct {
         }
 
         if (chunk_count > size) return error.ObjectCorrupt;
-        if (try countObjectManifestRows(self.sqlite_db, id) != chunk_count) return error.ObjectCorrupt;
+        if (try countObjectManifestRows(self.sqlite_db, self.storage_schema, id) != chunk_count) return error.ObjectCorrupt;
 
         const chunk_len = try sqliteI64ToUsize(metadata.chunk_count);
         var chunks = try allocator.alloc(ObjectChunk, chunk_len);
         errdefer allocator.free(chunks);
 
-        var manifest = try self.sqlite_db.prepare(
+        var manifest = try self.prepareSchema(
             \\select oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.size_bytes
-            \\from _zova_object_chunks oc
-            \\left join _zova_chunks c on c.chunk_hash = oc.chunk_hash
+            \\from {s}_zova_object_chunks oc
+            \\left join {s}_zova_chunks c on c.chunk_hash = oc.chunk_hash
             \\where oc.object_id = ?
             \\order by oc.chunk_index asc
-        );
+        , .{ self.storage_schema.prefix(), self.storage_schema.prefix() });
         defer manifest.deinit();
 
         try manifest.bindBlob(1, &id);
@@ -634,7 +663,10 @@ pub const Database = struct {
 
     /// Return whether a stored object chunk exists by chunk hash.
     pub fn hasObjectChunk(self: *Database, hash: ObjectChunkId) Error!bool {
-        var stmt = try self.prepare("select 1 from _zova_chunks where chunk_hash = ? limit 1");
+        var stmt = try self.prepareSchema(
+            "select 1 from {s}_zova_chunks where chunk_hash = ? limit 1",
+            .{self.storage_schema.prefix()},
+        );
         defer stmt.deinit();
 
         try stmt.bindBlob(1, &hash);
@@ -663,7 +695,7 @@ pub const Database = struct {
 
         var existing = self.getObjectChunk(std.heap.page_allocator, expected_hash) catch |err| switch (err) {
             error.ObjectChunkNotFound => {
-                try insertChunkRow(self.sqlite_db, expected_hash, bytes);
+                try insertChunkRow(self.sqlite_db, self.storage_schema, expected_hash, bytes);
                 return;
             },
             else => return err,
@@ -680,23 +712,22 @@ pub const Database = struct {
     /// SHA-256, and requires the final digest to equal `id` before writing the
     /// object row and manifest rows.
     ///
-    /// Assembly owns a `begin immediate` transaction and returns
-    /// `error.ObjectTransactionActive` inside caller-owned transactions.
-    /// Existing valid objects return `error.ObjectAlreadyExists`; invalid
-    /// caller manifests return `error.ObjectManifestInvalid`.
+    /// Assembly owns a `begin immediate` transaction by default and returns
+    /// `error.ObjectTransactionActive` inside caller-owned transactions unless
+    /// the database wrapper explicitly allows ambient transactions. Existing
+    /// valid objects return `error.ObjectAlreadyExists`; invalid caller
+    /// manifests return `error.ObjectManifestInvalid`.
     pub fn assembleObjectFromChunks(
         self: *Database,
         id: ObjectId,
         size_bytes: u64,
         chunks: []const ObjectChunk,
     ) Error!void {
-        if (hasActiveTransaction(self.sqlite_db)) return error.ObjectTransactionActive;
-
-        try self.sqlite_db.beginImmediate();
+        const owns_transaction = try beginOwnedWrite(self.sqlite_db, self.allow_active_transactions);
         var committed = false;
-        errdefer if (!committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed and owns_transaction) self.sqlite_db.rollback() catch {};
 
-        if (try objectRowExists(self.sqlite_db, id)) {
+        if (try objectRowExists(self.sqlite_db, self.storage_schema, id)) {
             var existing = self.getObject(std.heap.page_allocator, id) catch |err| switch (err) {
                 error.ObjectNotFound, error.ObjectCorrupt => return error.ObjectCorrupt,
                 else => return err,
@@ -710,6 +741,7 @@ pub const Database = struct {
 
         try insertObjectRow(
             self.sqlite_db,
+            self.storage_schema,
             id,
             try u64ToSqliteI64(size_bytes),
             try usizeToSqliteI64(sorted_chunks.len),
@@ -718,6 +750,7 @@ pub const Database = struct {
         for (sorted_chunks) |chunk| {
             try insertManifestRow(
                 self.sqlite_db,
+                self.storage_schema,
                 id,
                 try u64ToSqliteI64(chunk.index),
                 chunk.hash,
@@ -726,7 +759,7 @@ pub const Database = struct {
             );
         }
 
-        try self.sqlite_db.commit();
+        if (owns_transaction) try self.sqlite_db.commit();
         committed = true;
     }
 
@@ -736,15 +769,15 @@ pub const Database = struct {
     /// chunk only when no `_zova_object_chunks` row references it. Missing
     /// chunks and referenced chunks both return `false`.
     pub fn deleteObjectChunk(self: *Database, hash: ObjectChunkId) Error!bool {
-        var stmt = try self.prepare(
-            \\delete from _zova_chunks
+        var stmt = try self.prepareSchema(
+            \\delete from {s}_zova_chunks
             \\where chunk_hash = ?
             \\  and not exists (
             \\    select 1
-            \\    from _zova_object_chunks
-            \\    where _zova_object_chunks.chunk_hash = _zova_chunks.chunk_hash
+            \\    from {s}_zova_object_chunks
+            \\    where {s}_zova_object_chunks.chunk_hash = {s}_zova_chunks.chunk_hash
             \\  )
-        );
+        , .{ self.storage_schema.prefix(), self.storage_schema.prefix(), self.storage_schema.prefix(), self.storage_schema.prefix() });
         defer stmt.deinit();
 
         try stmt.bindBlob(1, &hash);
@@ -812,11 +845,11 @@ pub const Database = struct {
         allocator: std.mem.Allocator,
         hash: ObjectChunkId,
     ) Error!ObjectChunkData {
-        var stmt = try self.prepare(
+        var stmt = try self.prepareSchema(
             \\select size_bytes, data
-            \\from _zova_chunks
+            \\from {s}_zova_chunks
             \\where chunk_hash = ?
-        );
+        , .{self.storage_schema.prefix()});
         defer stmt.deinit();
 
         try stmt.bindBlob(1, &hash);
@@ -839,45 +872,43 @@ pub const Database = struct {
 
     /// Return whether an object id exists without loading object bytes.
     pub fn hasObject(self: *Database, id: ObjectId) Error!bool {
-        return try objectRowExists(self.sqlite_db, id);
+        return try objectRowExists(self.sqlite_db, self.storage_schema, id);
     }
 
     /// Return the original full object byte length.
     pub fn objectSize(self: *Database, id: ObjectId) Error!u64 {
-        const metadata = try loadObjectMetadata(self.sqlite_db, id);
+        const metadata = try loadObjectMetadata(self.sqlite_db, self.storage_schema, id);
         return try sqliteI64ToU64(metadata.size_bytes);
     }
 
     /// Return the number of FastCDC chunks in the object manifest.
     pub fn objectChunkCount(self: *Database, id: ObjectId) Error!u64 {
-        const metadata = try loadObjectMetadata(self.sqlite_db, id);
+        const metadata = try loadObjectMetadata(self.sqlite_db, self.storage_schema, id);
         return try sqliteI64ToU64(metadata.chunk_count);
     }
 
     /// Delete one Zova object and garbage-collect its unreferenced chunks.
     ///
-    /// Delete owns a `begin immediate` transaction and returns
-    /// `error.ObjectTransactionActive` if the connection is already inside a
-    /// user transaction. Missing or already-deleted ids return
-    /// `error.ObjectNotFound`. User SQL rows that store this object id are not
-    /// inspected or modified.
+    /// Delete owns a `begin immediate` transaction by default and returns
+    /// `error.ObjectTransactionActive` inside caller-owned transactions unless
+    /// the database wrapper explicitly allows ambient transactions. Missing or
+    /// already-deleted ids return `error.ObjectNotFound`. User SQL rows that
+    /// store this object id are not inspected or modified.
     pub fn deleteObject(self: *Database, id: ObjectId) Error!void {
-        if (hasActiveTransaction(self.sqlite_db)) return error.ObjectTransactionActive;
-
-        try self.sqlite_db.beginImmediate();
+        const owns_transaction = try beginOwnedWrite(self.sqlite_db, self.allow_active_transactions);
         var committed = false;
-        errdefer if (!committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed and owns_transaction) self.sqlite_db.rollback() catch {};
 
-        if (!try objectRowExists(self.sqlite_db, id)) return error.ObjectNotFound;
+        if (!try objectRowExists(self.sqlite_db, self.storage_schema, id)) return error.ObjectNotFound;
 
-        const candidate_chunks = try collectDeleteCandidateChunks(std.heap.page_allocator, self.sqlite_db, id);
+        const candidate_chunks = try collectDeleteCandidateChunks(std.heap.page_allocator, self.sqlite_db, self.storage_schema, id);
         defer std.heap.page_allocator.free(candidate_chunks);
 
-        try deleteObjectManifestRows(self.sqlite_db, id);
-        try deleteObjectRow(self.sqlite_db, id);
-        try deleteUnreferencedCandidateChunks(self.sqlite_db, candidate_chunks);
+        try deleteObjectManifestRows(self.sqlite_db, self.storage_schema, id);
+        try deleteObjectRow(self.sqlite_db, self.storage_schema, id);
+        try deleteUnreferencedCandidateChunks(self.sqlite_db, self.storage_schema, candidate_chunks);
 
-        try self.sqlite_db.commit();
+        if (owns_transaction) try self.sqlite_db.commit();
         committed = true;
     }
 };
@@ -890,6 +921,32 @@ const ObjectMetadata = struct {
 fn hasActiveTransaction(db: *sqlite.Database) bool {
     return sqlite.c.sqlite3_get_autocommit(db.handle) == 0 or
         sqlite.c.sqlite3_txn_state(db.handle, null) != sqlite.c.SQLITE_TXN_NONE;
+}
+
+fn rejectActiveTransaction(db: *sqlite.Database, allow_active_transactions: bool) Error!void {
+    if (!allow_active_transactions and hasActiveTransaction(db)) return error.ObjectTransactionActive;
+}
+
+fn beginOwnedWrite(db: *sqlite.Database, allow_active_transactions: bool) Error!bool {
+    if (hasActiveTransaction(db)) {
+        if (allow_active_transactions) return false;
+        return error.ObjectTransactionActive;
+    }
+
+    try db.beginImmediate();
+    return true;
+}
+
+fn prepareSchema(
+    db: *sqlite.Database,
+    storage_schema: StorageSchema,
+    comptime sql_format: []const u8,
+    args: anytype,
+) Error!sqlite.Statement {
+    var sql_buffer: [4096]u8 = undefined;
+    const sql = std.fmt.bufPrintZ(&sql_buffer, sql_format, args) catch return error.SqliteError;
+    _ = storage_schema;
+    return try db.prepare(sql);
 }
 
 fn countObjectChunks(bytes: []const u8) usize {
@@ -908,8 +965,13 @@ fn objectChunkIndexLessThan(_: void, left: ObjectChunk, right: ObjectChunk) bool
     return left.index < right.index;
 }
 
-fn objectRowExists(db: *sqlite.Database, id: ObjectId) Error!bool {
-    var stmt = try db.prepare("select 1 from _zova_objects where object_id = ? limit 1");
+fn objectRowExists(db: *sqlite.Database, storage_schema: StorageSchema, id: ObjectId) Error!bool {
+    var stmt = try prepareSchema(
+        db,
+        storage_schema,
+        "select 1 from {s}_zova_objects where object_id = ? limit 1",
+        .{storage_schema.prefix()},
+    );
     defer stmt.deinit();
 
     try stmt.bindBlob(1, &id);
@@ -919,8 +981,13 @@ fn objectRowExists(db: *sqlite.Database, id: ObjectId) Error!bool {
     };
 }
 
-fn countObjectManifestRows(db: *sqlite.Database, id: ObjectId) Error!u64 {
-    var stmt = try db.prepare("select count(*) from _zova_object_chunks where object_id = ?");
+fn countObjectManifestRows(db: *sqlite.Database, storage_schema: StorageSchema, id: ObjectId) Error!u64 {
+    var stmt = try prepareSchema(
+        db,
+        storage_schema,
+        "select count(*) from {s}_zova_object_chunks where object_id = ?",
+        .{storage_schema.prefix()},
+    );
     defer stmt.deinit();
 
     try stmt.bindBlob(1, &id);
@@ -928,21 +995,27 @@ fn countObjectManifestRows(db: *sqlite.Database, id: ObjectId) Error!u64 {
     return try sqliteI64ToU64(stmt.columnInt64(0));
 }
 
-fn validateObjectManifestShape(db: *sqlite.Database, id: ObjectId, size: u64, chunk_count: u64) Error!void {
+fn validateObjectManifestShape(
+    db: *sqlite.Database,
+    storage_schema: StorageSchema,
+    id: ObjectId,
+    size: u64,
+    chunk_count: u64,
+) Error!void {
     if (chunk_count == 0) {
         if (size != 0) return error.ObjectCorrupt;
         return;
     }
     if (chunk_count > size) return error.ObjectCorrupt;
-    if (try countObjectManifestRows(db, id) != chunk_count) return error.ObjectCorrupt;
+    if (try countObjectManifestRows(db, storage_schema, id) != chunk_count) return error.ObjectCorrupt;
 
-    var manifest = try db.prepare(
+    var manifest = try prepareSchema(db, storage_schema,
         \\select oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.size_bytes
-        \\from _zova_object_chunks oc
-        \\left join _zova_chunks c on c.chunk_hash = oc.chunk_hash
+        \\from {s}_zova_object_chunks oc
+        \\left join {s}_zova_chunks c on c.chunk_hash = oc.chunk_hash
         \\where oc.object_id = ?
         \\order by oc.chunk_index asc
-    );
+    , .{ storage_schema.prefix(), storage_schema.prefix() });
     defer manifest.deinit();
 
     try manifest.bindBlob(1, &id);
@@ -972,15 +1045,20 @@ fn validateObjectManifestShape(db: *sqlite.Database, id: ObjectId, size: u64, ch
     if (expected_offset != size) return error.ObjectCorrupt;
 }
 
-fn collectDeleteCandidateChunks(allocator: std.mem.Allocator, db: *sqlite.Database, id: ObjectId) Error![]ObjectId {
+fn collectDeleteCandidateChunks(
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    storage_schema: StorageSchema,
+    id: ObjectId,
+) Error![]ObjectId {
     var chunks: std.ArrayList(ObjectId) = .empty;
     errdefer chunks.deinit(allocator);
 
-    var stmt = try db.prepare(
+    var stmt = try prepareSchema(db, storage_schema,
         \\select distinct chunk_hash
-        \\from _zova_object_chunks
+        \\from {s}_zova_object_chunks
         \\where object_id = ?
-    );
+    , .{storage_schema.prefix()});
     defer stmt.deinit();
 
     try stmt.bindBlob(1, &id);
@@ -996,32 +1074,46 @@ fn collectDeleteCandidateChunks(allocator: std.mem.Allocator, db: *sqlite.Databa
     return try chunks.toOwnedSlice(allocator);
 }
 
-fn deleteObjectManifestRows(db: *sqlite.Database, id: ObjectId) Error!void {
-    var stmt = try db.prepare("delete from _zova_object_chunks where object_id = ?");
+fn deleteObjectManifestRows(db: *sqlite.Database, storage_schema: StorageSchema, id: ObjectId) Error!void {
+    var stmt = try prepareSchema(
+        db,
+        storage_schema,
+        "delete from {s}_zova_object_chunks where object_id = ?",
+        .{storage_schema.prefix()},
+    );
     defer stmt.deinit();
 
     try stmt.bindBlob(1, &id);
     std.debug.assert((try stmt.step()) == .done);
 }
 
-fn deleteObjectRow(db: *sqlite.Database, id: ObjectId) Error!void {
-    var stmt = try db.prepare("delete from _zova_objects where object_id = ?");
+fn deleteObjectRow(db: *sqlite.Database, storage_schema: StorageSchema, id: ObjectId) Error!void {
+    var stmt = try prepareSchema(
+        db,
+        storage_schema,
+        "delete from {s}_zova_objects where object_id = ?",
+        .{storage_schema.prefix()},
+    );
     defer stmt.deinit();
 
     try stmt.bindBlob(1, &id);
     std.debug.assert((try stmt.step()) == .done);
 }
 
-fn deleteUnreferencedCandidateChunks(db: *sqlite.Database, candidate_chunks: []const ObjectId) Error!void {
-    var delete_chunk = try db.prepare(
-        \\delete from _zova_chunks
+fn deleteUnreferencedCandidateChunks(
+    db: *sqlite.Database,
+    storage_schema: StorageSchema,
+    candidate_chunks: []const ObjectId,
+) Error!void {
+    var delete_chunk = try prepareSchema(db, storage_schema,
+        \\delete from {s}_zova_chunks
         \\where chunk_hash = ?
         \\  and not exists (
         \\    select 1
-        \\    from _zova_object_chunks
-        \\    where _zova_object_chunks.chunk_hash = _zova_chunks.chunk_hash
+        \\    from {s}_zova_object_chunks
+        \\    where {s}_zova_object_chunks.chunk_hash = {s}_zova_chunks.chunk_hash
         \\  )
-    );
+    , .{ storage_schema.prefix(), storage_schema.prefix(), storage_schema.prefix(), storage_schema.prefix() });
     defer delete_chunk.deinit();
 
     for (candidate_chunks) |chunk_hash| {
@@ -1032,12 +1124,12 @@ fn deleteUnreferencedCandidateChunks(db: *sqlite.Database, candidate_chunks: []c
     }
 }
 
-fn loadObjectMetadata(db: *sqlite.Database, id: ObjectId) Error!ObjectMetadata {
-    var stmt = try db.prepare(
+fn loadObjectMetadata(db: *sqlite.Database, storage_schema: StorageSchema, id: ObjectId) Error!ObjectMetadata {
+    var stmt = try prepareSchema(db, storage_schema,
         \\select size_bytes, chunk_count, chunker
-        \\from _zova_objects
+        \\from {s}_zova_objects
         \\where object_id = ?
-    );
+    , .{storage_schema.prefix()});
     defer stmt.deinit();
 
     try stmt.bindBlob(1, &id);
@@ -1057,12 +1149,18 @@ fn loadObjectMetadata(db: *sqlite.Database, id: ObjectId) Error!ObjectMetadata {
     }
 }
 
-fn insertObjectRow(db: *sqlite.Database, id: ObjectId, size_bytes: i64, chunk_count: i64) Error!void {
-    var stmt = try db.prepare(
-        \\insert into _zova_objects (object_id, size_bytes, chunk_count, chunker)
+fn insertObjectRow(
+    db: *sqlite.Database,
+    storage_schema: StorageSchema,
+    id: ObjectId,
+    size_bytes: i64,
+    chunk_count: i64,
+) Error!void {
+    var stmt = try prepareSchema(db, storage_schema,
+        \\insert into {s}_zova_objects (object_id, size_bytes, chunk_count, chunker)
         \\values (?, ?, ?, ?)
         \\on conflict(object_id) do nothing
-    );
+    , .{storage_schema.prefix()});
     defer stmt.deinit();
 
     try stmt.bindBlob(1, &id);
@@ -1072,12 +1170,17 @@ fn insertObjectRow(db: *sqlite.Database, id: ObjectId, size_bytes: i64, chunk_co
     std.debug.assert((try stmt.step()) == .done);
 }
 
-fn insertChunkRow(db: *sqlite.Database, chunk_hash: ObjectId, chunk: []const u8) Error!void {
-    var stmt = try db.prepare(
-        \\insert into _zova_chunks (chunk_hash, size_bytes, data)
+fn insertChunkRow(
+    db: *sqlite.Database,
+    storage_schema: StorageSchema,
+    chunk_hash: ObjectId,
+    chunk: []const u8,
+) Error!void {
+    var stmt = try prepareSchema(db, storage_schema,
+        \\insert into {s}_zova_chunks (chunk_hash, size_bytes, data)
         \\values (?, ?, ?)
         \\on conflict(chunk_hash) do nothing
-    );
+    , .{storage_schema.prefix()});
     defer stmt.deinit();
 
     try stmt.bindBlob(1, &chunk_hash);
@@ -1088,16 +1191,17 @@ fn insertChunkRow(db: *sqlite.Database, chunk_hash: ObjectId, chunk: []const u8)
 
 fn insertManifestRow(
     db: *sqlite.Database,
+    storage_schema: StorageSchema,
     id: ObjectId,
     chunk_index: i64,
     chunk_hash: ObjectId,
     offset: i64,
     size_bytes: i64,
 ) Error!void {
-    var stmt = try db.prepare(
-        \\insert into _zova_object_chunks (object_id, chunk_index, chunk_hash, offset, size_bytes)
+    var stmt = try prepareSchema(db, storage_schema,
+        \\insert into {s}_zova_object_chunks (object_id, chunk_index, chunk_hash, offset, size_bytes)
         \\values (?, ?, ?, ?, ?)
-    );
+    , .{storage_schema.prefix()});
     defer stmt.deinit();
 
     try stmt.bindBlob(1, &id);

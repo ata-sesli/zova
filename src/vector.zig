@@ -6,8 +6,8 @@ const zova_error = @import("zova_error.zig");
 
 pub const Error = zova_error.Error;
 
-const vector_collections_table = "_zova_vector_collections";
-const vectors_table = "_zova_vectors";
+pub const vector_collections_table = "_zova_vector_collections";
+pub const vectors_table = "_zova_vectors";
 const max_vector_collection_name_bytes: usize = 255;
 pub const max_vector_dimensions: u32 = 16_384;
 
@@ -110,6 +110,18 @@ pub const VectorSearchResults = struct {
     }
 };
 
+pub const StorageSchema = enum {
+    main,
+    vector_store,
+
+    pub fn prefix(self: StorageSchema) []const u8 {
+        return switch (self) {
+            .main => "main.",
+            .vector_store => "vector_store.",
+        };
+    }
+};
+
 const CollectionMetadata = struct {
     dimensions: u32,
     metric: VectorMetric,
@@ -136,8 +148,11 @@ pub const vectors_schema_sql =
 
 pub const Database = struct {
     sqlite_db: *sqlite.Database,
+    storage_schema: StorageSchema = .main,
 
-    fn prepare(self: *Database, sql: [:0]const u8) Error!sqlite.Statement {
+    fn prepareSchema(self: *Database, comptime sql_format: []const u8, args: anytype) Error!sqlite.Statement {
+        var sql_buffer: [4096]u8 = undefined;
+        const sql = std.fmt.bufPrintZ(&sql_buffer, sql_format, args) catch return error.SqliteError;
         return try self.sqlite_db.prepare(sql);
     }
 
@@ -156,10 +171,10 @@ pub const Database = struct {
         try validateVectorCollectionName(name);
         try validateVectorDimensions(options.dimensions);
 
-        var insert = try self.prepare(
-            \\insert into _zova_vector_collections (name, dimensions, metric, element_type)
+        var insert = try self.prepareSchema(
+            \\insert into {s}_zova_vector_collections (name, dimensions, metric, element_type)
             \\values (?, ?, ?, 'f32')
-        );
+        , .{self.storage_schema.prefix()});
         defer insert.deinit();
 
         try insert.bindText(1, name);
@@ -178,11 +193,11 @@ pub const Database = struct {
     pub fn hasVectorCollection(self: *Database, name: []const u8) Error!bool {
         try validateVectorCollectionName(name);
 
-        var stmt = try self.prepare(
+        var stmt = try self.prepareSchema(
             \\select count(*)
-            \\from _zova_vector_collections
+            \\from {s}_zova_vector_collections
             \\where name = ?
-        );
+        , .{self.storage_schema.prefix()});
         defer stmt.deinit();
 
         try stmt.bindText(1, name);
@@ -203,13 +218,13 @@ pub const Database = struct {
     ) Error!VectorCollectionInfo {
         try validateVectorCollectionName(name);
 
-        var stmt = try self.prepare(
+        var stmt = try self.prepareSchema(
             \\select c.name, c.dimensions, c.metric, c.element_type, count(v.vector_id)
-            \\from _zova_vector_collections c
-            \\left join _zova_vectors v on v.collection_name = c.name
+            \\from {s}_zova_vector_collections c
+            \\left join {s}_zova_vectors v on v.collection_name = c.name
             \\where c.name = ?
             \\group by c.name, c.dimensions, c.metric, c.element_type
-        );
+        , .{ self.storage_schema.prefix(), self.storage_schema.prefix() });
         defer stmt.deinit();
 
         try stmt.bindText(1, name);
@@ -228,13 +243,13 @@ pub const Database = struct {
         self: *Database,
         allocator: std.mem.Allocator,
     ) Error!VectorCollectionList {
-        var stmt = try self.prepare(
+        var stmt = try self.prepareSchema(
             \\select c.name, c.dimensions, c.metric, c.element_type, count(v.vector_id)
-            \\from _zova_vector_collections c
-            \\left join _zova_vectors v on v.collection_name = c.name
+            \\from {s}_zova_vector_collections c
+            \\left join {s}_zova_vectors v on v.collection_name = c.name
             \\group by c.name, c.dimensions, c.metric, c.element_type
             \\order by c.name asc
-        );
+        , .{ self.storage_schema.prefix(), self.storage_schema.prefix() });
         defer stmt.deinit();
 
         var items: std.ArrayList(VectorCollectionInfo) = .empty;
@@ -307,11 +322,11 @@ pub const Database = struct {
 
         const collection = try loadVectorCollection(self, collection_name);
 
-        var stmt = try self.prepare(
+        var stmt = try self.prepareSchema(
             \\select vector_id, dimensions, "values"
-            \\from _zova_vectors
+            \\from {s}_zova_vectors
             \\where collection_name = ? and vector_id = ?
-        );
+        , .{self.storage_schema.prefix()});
         defer stmt.deinit();
 
         try stmt.bindText(1, collection_name);
@@ -349,12 +364,12 @@ pub const Database = struct {
         try validateVectorId(vector_id);
         _ = try loadVectorCollection(self, collection_name);
 
-        var stmt = try self.prepare(
+        var stmt = try self.prepareSchema(
             \\select 1
-            \\from _zova_vectors
+            \\from {s}_zova_vectors
             \\where collection_name = ? and vector_id = ?
             \\limit 1
-        );
+        , .{self.storage_schema.prefix()});
         defer stmt.deinit();
 
         try stmt.bindText(1, collection_name);
@@ -378,7 +393,7 @@ pub const Database = struct {
         try validateVectorId(vector_id);
         _ = try loadVectorCollection(self, collection_name);
 
-        var stmt = try self.prepare("delete from _zova_vectors where collection_name = ? and vector_id = ?");
+        var stmt = try self.prepareSchema("delete from {s}_zova_vectors where collection_name = ? and vector_id = ?", .{self.storage_schema.prefix()});
         defer stmt.deinit();
 
         try stmt.bindText(1, collection_name);
@@ -398,12 +413,12 @@ pub const Database = struct {
         try validateVectorCollectionName(name);
         _ = try loadVectorCollection(self, name);
 
-        var delete_vectors = try self.prepare("delete from _zova_vectors where collection_name = ?");
+        var delete_vectors = try self.prepareSchema("delete from {s}_zova_vectors where collection_name = ?", .{self.storage_schema.prefix()});
         defer delete_vectors.deinit();
         try delete_vectors.bindText(1, name);
         std.debug.assert((try delete_vectors.step()) == .done);
 
-        var delete_collection = try self.prepare("delete from _zova_vector_collections where name = ?");
+        var delete_collection = try self.prepareSchema("delete from {s}_zova_vector_collections where name = ?", .{self.storage_schema.prefix()});
         defer delete_collection.deinit();
         try delete_collection.bindText(1, name);
         std.debug.assert((try delete_collection.step()) == .done);
@@ -594,11 +609,11 @@ pub const Database = struct {
             return .{ .items = try results.toOwnedSlice(allocator) };
         }
 
-        var stmt = try self.prepare(
+        var stmt = try self.prepareSchema(
             \\select vector_id, dimensions, "values"
-            \\from _zova_vectors
+            \\from {s}_zova_vectors
             \\where collection_name = ?
-        );
+        , .{self.storage_schema.prefix()});
         defer stmt.deinit();
 
         try stmt.bindText(1, collection_name);
@@ -659,11 +674,11 @@ pub const Database = struct {
             return .{ .items = try results.toOwnedSlice(allocator) };
         }
 
-        var stmt = try self.prepare(
+        var stmt = try self.prepareSchema(
             \\select dimensions, "values"
-            \\from _zova_vectors
+            \\from {s}_zova_vectors
             \\where collection_name = ? and vector_id = ?
-        );
+        , .{self.storage_schema.prefix()});
         defer stmt.deinit();
 
         try stmt.bindText(1, collection_name);
@@ -704,11 +719,11 @@ pub const Database = struct {
         collection: CollectionMetadata,
         vector_id: []const u8,
     ) Error![]f32 {
-        var stmt = try self.prepare(
+        var stmt = try self.prepareSchema(
             \\select dimensions, "values"
-            \\from _zova_vectors
+            \\from {s}_zova_vectors
             \\where collection_name = ? and vector_id = ?
-        );
+        , .{self.storage_schema.prefix()});
         defer stmt.deinit();
 
         try stmt.bindText(1, collection_name);
@@ -734,13 +749,13 @@ pub const Database = struct {
     ) Error!void {
         if (vectors.len == 0) return;
 
-        var stmt = try self.prepare(
-            \\insert into _zova_vectors (collection_name, vector_id, dimensions, "values")
+        var stmt = try self.prepareSchema(
+            \\insert into {s}_zova_vectors (collection_name, vector_id, dimensions, "values")
             \\values (?, ?, ?, ?)
             \\on conflict(collection_name, vector_id) do update set
             \\  dimensions = excluded.dimensions,
             \\  "values" = excluded."values"
-        );
+        , .{self.storage_schema.prefix()});
         defer stmt.deinit();
 
         for (vectors) |vector| {
@@ -834,11 +849,11 @@ fn vectorMetricFromText(text: []const u8) Error!VectorMetric {
 }
 
 fn loadVectorCollection(db: *Database, name: []const u8) Error!CollectionMetadata {
-    var stmt = try db.prepare(
+    var stmt = try db.prepareSchema(
         \\select dimensions, metric, element_type
-        \\from _zova_vector_collections
+        \\from {s}_zova_vector_collections
         \\where name = ?
-    );
+    , .{db.storage_schema.prefix()});
     defer stmt.deinit();
 
     try stmt.bindText(1, name);

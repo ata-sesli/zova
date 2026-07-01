@@ -129,6 +129,45 @@ pub const Database = struct {
         if (rc != c.SQLITE_OK) return mapResultCode(rc);
     }
 
+    /// Attach another SQLite database under a compile-time schema name.
+    ///
+    /// This helper is intentionally narrow: the schema name is not a caller
+    /// string, while the path is bound as data. Zova uses this for internal
+    /// bound object stores without exposing a SQL-identifier escaping API.
+    pub fn attachDatabase(self: *Database, path: []const u8, comptime schema_name: []const u8) Error!void {
+        comptime validateInternalSchemaName(schema_name);
+
+        var sql_buffer: [128]u8 = undefined;
+        const sql = std.fmt.bufPrintZ(&sql_buffer, "attach database ? as {s}", .{schema_name}) catch unreachable;
+
+        var stmt = try self.prepare(sql);
+        defer stmt.deinit();
+
+        try stmt.bindText(1, path);
+        std.debug.assert((try stmt.step()) == .done);
+    }
+
+    /// Detach a database previously attached with `attachDatabase`.
+    pub fn detachDatabase(self: *Database, comptime schema_name: []const u8) Error!void {
+        comptime validateInternalSchemaName(schema_name);
+
+        var sql_buffer: [64]u8 = undefined;
+        const sql = std.fmt.bufPrintZ(&sql_buffer, "detach database {s}", .{schema_name}) catch unreachable;
+        try self.exec(sql);
+    }
+
+    /// Set SQLite's connection-local query-only mode.
+    ///
+    /// This does not mutate the database file; it asks SQLite to reject write
+    /// statements on this connection.
+    pub fn setQueryOnly(self: *Database, enabled: bool) Error!void {
+        if (enabled) {
+            try self.exec("pragma query_only = on");
+        } else {
+            try self.exec("pragma query_only = off");
+        }
+    }
+
     /// Start a deferred SQLite transaction.
     ///
     /// This is a thin wrapper over `begin`; nested transaction behavior,
@@ -238,6 +277,14 @@ fn validateSavepointName(name: []const u8) Error!void {
     if (!isAsciiIdentStart(name[0])) return error.InvalidArgument;
     for (name[1..]) |byte| {
         if (!isAsciiIdentContinue(byte)) return error.InvalidArgument;
+    }
+}
+
+fn validateInternalSchemaName(comptime name: []const u8) void {
+    if (name.len == 0) @compileError("schema name must not be empty");
+    if (!isAsciiIdentStart(name[0])) @compileError("schema name must start with an identifier byte");
+    for (name[1..]) |byte| {
+        if (!isAsciiIdentContinue(byte)) @compileError("schema name must be an identifier");
     }
 }
 

@@ -50,12 +50,23 @@ const OperationalCommandArgs = struct {
     destination_path: []const u8,
 };
 
+const SplitRole = enum {
+    objects,
+    vectors,
+};
+
+const SplitCommandArgs = struct {
+    format: OutputFormat,
+    role: SplitRole,
+    main_path: []const u8,
+    store_path: []const u8,
+};
+
 const ObjectStoreAction = enum {
     create,
     bind,
     info,
     unbind,
-    rebind,
 };
 
 const ObjectStoreCommandArgs = struct {
@@ -96,6 +107,17 @@ const ObjectStoreCommandParseError = error{
     UnknownFlag,
     MissingMainPath,
     MissingStorePath,
+    ExtraArgs,
+};
+
+const SplitCommandParseError = error{
+    MissingRole,
+    DuplicateRole,
+    DuplicateJson,
+    UnknownFlag,
+    MissingMainPath,
+    MissingStorePath,
+    SamePath,
     ExtraArgs,
 };
 
@@ -320,6 +342,7 @@ const TableList = struct {
 
 const DiagnosticIssueCounts = struct {
     sqlite: u64 = 0,
+    bound_store: u64 = 0,
     object: u64 = 0,
     chunk: u64 = 0,
     vector: u64 = 0,
@@ -334,6 +357,7 @@ const DiagnosticSeverityCounts = struct {
 
 const DiagnosticIssueArea = enum {
     sqlite,
+    bound_store,
     object,
     chunk,
     vector,
@@ -492,8 +516,14 @@ pub fn run(
     if (std.mem.eql(u8, command, "restore")) {
         return restoreCommand(allocator, args[2..], stdout, stderr);
     }
+    if (std.mem.eql(u8, command, "split")) {
+        return splitCommand(allocator, args[2..], stdout, stderr);
+    }
     if (std.mem.eql(u8, command, "object-store")) {
         return objectStoreCommand(allocator, args[2..], stdout, stderr);
+    }
+    if (std.mem.eql(u8, command, "vector-store")) {
+        return vectorStoreCommand(allocator, args[2..], stdout, stderr);
     }
 
     try stderr.print("unknown command: {s}\n\n", .{command});
@@ -524,11 +554,15 @@ fn writeUsage(writer: *std.Io.Writer) !void {
         \\  zova backup [--json] [--no-verify] <source.zova> <destination.zova>
         \\  zova compact [--json] [--no-verify] <source.zova> <destination.zova>
         \\  zova restore [--json] [--no-verify] <backup.zova> <destination.zova>
+        \\  zova split (--objects | --vectors) [--json] <main.zova> <store.zova>
         \\  zova object-store create [--json] <objects.zova>
         \\  zova object-store bind [--json] <main.zova> <objects.zova>
         \\  zova object-store info [--json] <main.zova>
         \\  zova object-store unbind [--json] <main.zova>
-        \\  zova object-store rebind [--json] <main.zova> <objects.zova>
+        \\  zova vector-store create [--json] <vectors.zova>
+        \\  zova vector-store bind [--json] <main.zova> <vectors.zova>
+        \\  zova vector-store info [--json] <main.zova>
+        \\  zova vector-store unbind [--json] <main.zova>
         \\
         \\commands:
         \\  info   print a bounded summary of a current-format Zova database
@@ -546,7 +580,9 @@ fn writeUsage(writer: *std.Io.Writer) !void {
         \\  backup create a verified snapshot copy without overwriting destination
         \\  compact create a verified space-reclaiming copy with VACUUM INTO
         \\  restore restore a backup into a new destination file
+        \\  split  move existing single-file object or vector storage into a new bound store
         \\  object-store manage one optional bound object store
+        \\  vector-store manage one optional bound vector store
         \\
         \\exit codes:
         \\  0 healthy/success
@@ -732,6 +768,99 @@ fn restoreCommand(
     return ExitCode.ok;
 }
 
+fn splitCommand(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !u8 {
+    const parsed = parseSplitCommandArgs(args) catch |err| {
+        const format: OutputFormat = if (argsContain(args, "--json")) .json else .text;
+        return usageErrorFormat(stderr, "split", format, splitUsageMessage(err));
+    };
+
+    const main_z = try allocator.dupeZ(u8, parsed.main_path);
+    defer allocator.free(main_z);
+    const store_z = try allocator.dupeZ(u8, parsed.store_path);
+    defer allocator.free(store_z);
+
+    var db = zova.Database.openForObjectStoreManagement(main_z, .{}) catch |err| return openErrorFormat(stderr, "split", parsed.format, err);
+    defer db.deinit();
+
+    switch (parsed.role) {
+        .objects => {
+            const result = db.splitObjectStore(store_z) catch |err| return splitErrorFormat(stderr, parsed.format, err);
+            try writeSplitObjectSuccess(stdout, parsed, result);
+        },
+        .vectors => {
+            const result = db.splitVectorStore(store_z) catch |err| return splitErrorFormat(stderr, parsed.format, err);
+            try writeSplitVectorSuccess(stdout, parsed, result);
+        },
+    }
+    return ExitCode.ok;
+}
+
+fn parseSplitCommandArgs(args: []const []const u8) SplitCommandParseError!SplitCommandArgs {
+    var format: OutputFormat = .text;
+    var role: ?SplitRole = null;
+    var main_path: ?[]const u8 = null;
+    var store_path: ?[]const u8 = null;
+
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            if (format == .json) return error.DuplicateJson;
+            format = .json;
+        } else if (std.mem.eql(u8, arg, "--objects")) {
+            if (role != null) return error.DuplicateRole;
+            role = .objects;
+        } else if (std.mem.eql(u8, arg, "--vectors")) {
+            if (role != null) return error.DuplicateRole;
+            role = .vectors;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            return error.UnknownFlag;
+        } else if (main_path == null) {
+            main_path = arg;
+        } else if (store_path == null) {
+            store_path = arg;
+        } else {
+            return error.ExtraArgs;
+        }
+    }
+
+    const selected_role = role orelse return error.MissingRole;
+    const main = main_path orelse return error.MissingMainPath;
+    const store = store_path orelse return error.MissingStorePath;
+    if (std.mem.eql(u8, main, store)) return error.SamePath;
+
+    return .{
+        .format = format,
+        .role = selected_role,
+        .main_path = main,
+        .store_path = store,
+    };
+}
+
+fn splitUsageMessage(err: SplitCommandParseError) []const u8 {
+    return switch (err) {
+        error.MissingRole => "split requires exactly one of --objects or --vectors",
+        error.DuplicateRole => "split accepts only one role flag",
+        error.DuplicateJson => "duplicate --json",
+        error.UnknownFlag => "unknown flag",
+        error.MissingMainPath => "split requires <main.zova>",
+        error.MissingStorePath => "split requires <store.zova>",
+        error.SamePath => "split store path must differ from main path",
+        error.ExtraArgs => "split accepts only (--objects | --vectors) [--json] <main.zova> <store.zova>",
+    };
+}
+
+fn splitErrorFormat(stderr: *std.Io.Writer, format: OutputFormat, err: anyerror) !u8 {
+    switch (format) {
+        .text => try stderr.print("split: failed: {s}\n", .{@errorName(err)}),
+        .json => try writeJsonErrorWithKind(stderr, "split", "operation failed", @errorName(err)),
+    }
+    return ExitCode.open;
+}
+
 fn objectStoreCommand(
     allocator: std.mem.Allocator,
     args: []const []const u8,
@@ -765,7 +894,10 @@ fn objectStoreCommand(
             var db = zova.Database.openForObjectStoreManagement(main_z, .{}) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
             defer db.deinit();
 
-            db.bindObjectStore(store_z) catch |err| return objectStoreErrorFormat(stderr, command_name, parsed.format, err);
+            db.bindObjectStore(store_z) catch |err| {
+                if (err == error.BoundStoreExists) return boundStoreMigrationRequiredFormat(stderr, command_name, parsed.format, .objects, main_path, store_path);
+                return objectStoreErrorFormat(stderr, command_name, parsed.format, err);
+            };
             var info = (try db.boundObjectStore(allocator)).?;
             defer info.deinit(allocator);
             try writeObjectStoreSuccess(stdout, parsed.format, command_name, main_path, info.path, info.store_id, false, true);
@@ -800,7 +932,32 @@ fn objectStoreCommand(
             try writeObjectStoreSuccess(stdout, parsed.format, command_name, main_path, null, null, false, false);
             return ExitCode.ok;
         },
-        .rebind => {
+    }
+}
+
+fn vectorStoreCommand(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !u8 {
+    const parsed = parseObjectStoreCommandArgs(args) catch |err| {
+        const format: OutputFormat = if (argsContain(args, "--json")) .json else .text;
+        return usageErrorFormat(stderr, "vector-store", format, vectorStoreUsageMessage(err));
+    };
+
+    const command_name = vectorStoreCommandName(parsed.action);
+    switch (parsed.action) {
+        .create => {
+            const store_path = parsed.store_path.?;
+            const store_z = try allocator.dupeZ(u8, store_path);
+            defer allocator.free(store_z);
+
+            zova.createVectorStore(store_z) catch |err| return objectStoreErrorFormat(stderr, command_name, parsed.format, err);
+            try writeObjectStoreSuccess(stdout, parsed.format, command_name, null, store_path, null, true, true);
+            return ExitCode.ok;
+        },
+        .bind => {
             const main_path = parsed.main_path.?;
             const store_path = parsed.store_path.?;
             const main_z = try allocator.dupeZ(u8, main_path);
@@ -811,10 +968,42 @@ fn objectStoreCommand(
             var db = zova.Database.openForObjectStoreManagement(main_z, .{}) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
             defer db.deinit();
 
-            db.rebindObjectStore(store_z) catch |err| return objectStoreErrorFormat(stderr, command_name, parsed.format, err);
-            var info = (try db.boundObjectStore(allocator)).?;
+            db.bindVectorStore(store_z) catch |err| {
+                if (err == error.BoundStoreExists) return boundStoreMigrationRequiredFormat(stderr, command_name, parsed.format, .vectors, main_path, store_path);
+                return objectStoreErrorFormat(stderr, command_name, parsed.format, err);
+            };
+            var info = (try db.boundVectorStore(allocator)).?;
             defer info.deinit(allocator);
             try writeObjectStoreSuccess(stdout, parsed.format, command_name, main_path, info.path, info.store_id, false, true);
+            return ExitCode.ok;
+        },
+        .info => {
+            const main_path = parsed.main_path.?;
+            const main_z = try allocator.dupeZ(u8, main_path);
+            defer allocator.free(main_z);
+
+            var db = zova.Database.openForObjectStoreManagement(main_z, .{}) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
+            defer db.deinit();
+
+            var maybe_info = try db.boundVectorStore(allocator);
+            if (maybe_info) |*info| {
+                defer info.deinit(allocator);
+                try writeObjectStoreSuccess(stdout, parsed.format, command_name, main_path, info.path, info.store_id, false, true);
+            } else {
+                try writeObjectStoreSuccess(stdout, parsed.format, command_name, main_path, null, null, false, false);
+            }
+            return ExitCode.ok;
+        },
+        .unbind => {
+            const main_path = parsed.main_path.?;
+            const main_z = try allocator.dupeZ(u8, main_path);
+            defer allocator.free(main_z);
+
+            var db = zova.Database.openForObjectStoreManagement(main_z, .{}) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
+            defer db.deinit();
+
+            db.unbindVectorStore() catch |err| return objectStoreErrorFormat(stderr, command_name, parsed.format, err);
+            try writeObjectStoreSuccess(stdout, parsed.format, command_name, main_path, null, null, false, false);
             return ExitCode.ok;
         },
     }
@@ -849,7 +1038,7 @@ fn parseObjectStoreCommandArgs(args: []const []const u8) ObjectStoreCommandParse
             if (second_path != null) return error.ExtraArgs;
             return .{ .format = format, .action = action, .main_path = null, .store_path = store_path };
         },
-        .bind, .rebind => {
+        .bind => {
             const main_path = first_path orelse return error.MissingMainPath;
             const store_path = second_path orelse return error.MissingStorePath;
             return .{ .format = format, .action = action, .main_path = main_path, .store_path = store_path };
@@ -867,7 +1056,6 @@ fn parseObjectStoreAction(value: []const u8) ?ObjectStoreAction {
     if (std.mem.eql(u8, value, "bind")) return .bind;
     if (std.mem.eql(u8, value, "info")) return .info;
     if (std.mem.eql(u8, value, "unbind")) return .unbind;
-    if (std.mem.eql(u8, value, "rebind")) return .rebind;
     return null;
 }
 
@@ -877,13 +1065,21 @@ fn objectStoreCommandName(action: ObjectStoreAction) []const u8 {
         .bind => "object-store-bind",
         .info => "object-store-info",
         .unbind => "object-store-unbind",
-        .rebind => "object-store-rebind",
+    };
+}
+
+fn vectorStoreCommandName(action: ObjectStoreAction) []const u8 {
+    return switch (action) {
+        .create => "vector-store-create",
+        .bind => "vector-store-bind",
+        .info => "vector-store-info",
+        .unbind => "vector-store-unbind",
     };
 }
 
 fn objectStoreUsageMessage(err: ObjectStoreCommandParseError) []const u8 {
     return switch (err) {
-        error.MissingAction => "object-store requires create, bind, info, unbind, or rebind",
+        error.MissingAction => "object-store requires create, bind, info, or unbind",
         error.UnknownAction => "unknown object-store action",
         error.DuplicateJson => "duplicate --json",
         error.UnknownFlag => "unknown flag",
@@ -893,12 +1089,162 @@ fn objectStoreUsageMessage(err: ObjectStoreCommandParseError) []const u8 {
     };
 }
 
+fn vectorStoreUsageMessage(err: ObjectStoreCommandParseError) []const u8 {
+    return switch (err) {
+        error.MissingAction => "vector-store requires create, bind, info, or unbind",
+        error.UnknownAction => "unknown vector-store action",
+        error.DuplicateJson => "duplicate --json",
+        error.UnknownFlag => "unknown flag",
+        error.MissingMainPath => "vector-store action requires <main.zova>",
+        error.MissingStorePath => "vector-store action requires <vectors.zova>",
+        error.ExtraArgs => "vector-store action received extra arguments",
+    };
+}
+
 fn objectStoreErrorFormat(stderr: *std.Io.Writer, command: []const u8, format: OutputFormat, err: anyerror) !u8 {
     switch (format) {
         .text => try stderr.print("{s}: failed: {s}\n", .{ command, @errorName(err) }),
         .json => try writeJsonErrorWithKind(stderr, command, "operation failed", @errorName(err)),
     }
     return ExitCode.open;
+}
+
+fn boundStoreMigrationRequiredFormat(
+    stderr: *std.Io.Writer,
+    command: []const u8,
+    format: OutputFormat,
+    role: SplitRole,
+    main_path: []const u8,
+    store_path: []const u8,
+) !u8 {
+    const role_flag = splitRoleFlag(role);
+    switch (format) {
+        .text => {
+            try stderr.print("{s}: failed: BoundStoreExists\n", .{command});
+            try stderr.print("main database already contains {s} storage; run zova split {s} {s} {s}\n", .{
+                splitRoleStorageName(role),
+                role_flag,
+                main_path,
+                store_path,
+            });
+        },
+        .json => {
+            try stderr.writeAll("{\n");
+            try stderr.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
+            try stderr.writeAll("  \"status\": \"error\",\n");
+            try stderr.writeAll("  \"command\": ");
+            try writeJsonString(stderr, command);
+            try stderr.writeAll(",\n  \"kind\": \"split required\",\n");
+            try stderr.writeAll("  \"error\": \"BoundStoreExists\",\n");
+            try stderr.writeAll("  \"suggested_command\": ");
+            try writeJsonStringFormat(stderr, "zova split {s} {s} {s}", .{ role_flag, main_path, store_path });
+            try stderr.writeAll("\n}\n");
+        },
+    }
+    return ExitCode.open;
+}
+
+fn writeSplitObjectSuccess(stdout: *std.Io.Writer, parsed: SplitCommandArgs, result: zova.SplitObjectStoreResult) !void {
+    switch (parsed.format) {
+        .text => {
+            try stdout.writeAll("split: ok\n");
+            try stdout.writeAll("role: objects\n");
+            try stdout.print("main_path: {s}\n", .{parsed.main_path});
+            try stdout.print("store_path: {s}\n", .{parsed.store_path});
+            try stdout.print("copied_objects: {d}\n", .{result.copied.objects});
+            try stdout.print("copied_chunks: {d}\n", .{result.copied.chunks});
+            try stdout.print("copied_manifest_rows: {d}\n", .{result.copied.manifest_rows});
+            try stdout.print("cleared_objects: {d}\n", .{result.cleared.objects});
+            try stdout.print("cleared_chunks: {d}\n", .{result.cleared.chunks});
+            try stdout.print("cleared_manifest_rows: {d}\n", .{result.cleared.manifest_rows});
+            try stdout.print("verified: {}\n", .{result.verified});
+        },
+        .json => {
+            try writeSplitJsonHeader(stdout, parsed, result.store_id, result.bound_set_id, result.verified);
+            try stdout.writeAll(",\n  \"copied\": {\n");
+            try stdout.print("    \"objects\": {d},\n", .{result.copied.objects});
+            try stdout.print("    \"chunks\": {d},\n", .{result.copied.chunks});
+            try stdout.print("    \"manifest_rows\": {d}\n", .{result.copied.manifest_rows});
+            try stdout.writeAll("  },\n  \"cleared\": {\n");
+            try stdout.print("    \"objects\": {d},\n", .{result.cleared.objects});
+            try stdout.print("    \"chunks\": {d},\n", .{result.cleared.chunks});
+            try stdout.print("    \"manifest_rows\": {d}\n", .{result.cleared.manifest_rows});
+            try stdout.writeAll("  }\n}\n");
+        },
+    }
+}
+
+fn writeSplitVectorSuccess(stdout: *std.Io.Writer, parsed: SplitCommandArgs, result: zova.SplitVectorStoreResult) !void {
+    switch (parsed.format) {
+        .text => {
+            try stdout.writeAll("split: ok\n");
+            try stdout.writeAll("role: vectors\n");
+            try stdout.print("main_path: {s}\n", .{parsed.main_path});
+            try stdout.print("store_path: {s}\n", .{parsed.store_path});
+            try stdout.print("copied_vector_collections: {d}\n", .{result.copied.vector_collections});
+            try stdout.print("copied_vectors: {d}\n", .{result.copied.vectors});
+            try stdout.print("cleared_vector_collections: {d}\n", .{result.cleared.vector_collections});
+            try stdout.print("cleared_vectors: {d}\n", .{result.cleared.vectors});
+            try stdout.print("verified: {}\n", .{result.verified});
+        },
+        .json => {
+            try writeSplitJsonHeader(stdout, parsed, result.store_id, result.bound_set_id, result.verified);
+            try stdout.writeAll(",\n  \"copied\": {\n");
+            try stdout.print("    \"vector_collections\": {d},\n", .{result.copied.vector_collections});
+            try stdout.print("    \"vectors\": {d}\n", .{result.copied.vectors});
+            try stdout.writeAll("  },\n  \"cleared\": {\n");
+            try stdout.print("    \"vector_collections\": {d},\n", .{result.cleared.vector_collections});
+            try stdout.print("    \"vectors\": {d}\n", .{result.cleared.vectors});
+            try stdout.writeAll("  }\n}\n");
+        },
+    }
+}
+
+fn writeSplitJsonHeader(
+    stdout: *std.Io.Writer,
+    parsed: SplitCommandArgs,
+    store_id: [64]u8,
+    bound_set_id: [64]u8,
+    verified: bool,
+) !void {
+    try stdout.writeAll("{\n");
+    try stdout.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
+    try stdout.writeAll("  \"status\": \"ok\",\n");
+    try stdout.writeAll("  \"command\": \"split\",\n");
+    try stdout.writeAll("  \"role\": ");
+    try writeJsonString(stdout, splitRoleJsonName(parsed.role));
+    try stdout.writeAll(",\n  \"main_path\": ");
+    try writeJsonString(stdout, parsed.main_path);
+    try stdout.writeAll(",\n  \"store_path\": ");
+    try writeJsonString(stdout, parsed.store_path);
+    try stdout.writeAll(",\n  \"created\": true,\n");
+    try stdout.writeAll("  \"bound\": true,\n");
+    try stdout.print("  \"verified\": {},\n", .{verified});
+    try stdout.writeAll("  \"store_id\": ");
+    try writeJsonString(stdout, store_id[0..]);
+    try stdout.writeAll(",\n  \"bound_set_id\": ");
+    try writeJsonString(stdout, bound_set_id[0..]);
+}
+
+fn splitRoleJsonName(role: SplitRole) []const u8 {
+    return switch (role) {
+        .objects => "objects",
+        .vectors => "vectors",
+    };
+}
+
+fn splitRoleFlag(role: SplitRole) []const u8 {
+    return switch (role) {
+        .objects => "--objects",
+        .vectors => "--vectors",
+    };
+}
+
+fn splitRoleStorageName(role: SplitRole) []const u8 {
+    return switch (role) {
+        .objects => "object",
+        .vectors => "vector",
+    };
 }
 
 fn writeObjectStoreSuccess(
@@ -1419,7 +1765,12 @@ fn checkCommand(
     const path = try allocator.dupeZ(u8, raw_path);
     defer allocator.free(path);
 
-    var db = zova.Database.open(path) catch |err| return openErrorFormat(stderr, "check", format, err);
+    var db = zova.Database.open(path) catch |err| {
+        if (deep) {
+            if (try writeBoundStoreOpenFailureCheck(allocator, stderr, format, path, err)) |exit_code| return exit_code;
+        }
+        return openErrorFormat(stderr, "check", format, err);
+    };
     defer db.deinit();
 
     quickCheck(&db) catch |err| return checkErrorFormat(stderr, "check", format, "sqlite quick_check failed", err);
@@ -1459,7 +1810,10 @@ fn doctorCommand(
     const path = try allocator.dupeZ(u8, parsed.path);
     defer allocator.free(path);
 
-    var db = zova.Database.open(path) catch |err| return openErrorFormat(stderr, "doctor", parsed.format, err);
+    var db = zova.Database.open(path) catch |err| {
+        if (try writeBoundStoreOpenFailureDoctor(allocator, stderr, parsed.format, parsed.path, path, err)) |exit_code| return exit_code;
+        return openErrorFormat(stderr, "doctor", parsed.format, err);
+    };
     defer db.deinit();
 
     quickCheck(&db) catch |err| return doctorCheckErrorFormat(stderr, parsed.format, parsed.path, "sqlite quick_check failed", err);
@@ -1483,6 +1837,95 @@ fn doctorCommand(
         .json => try writeDoctorJson(stdout, parsed.path, summary, report),
     }
     return ExitCode.ok;
+}
+
+fn writeBoundStoreOpenFailureCheck(
+    allocator: std.mem.Allocator,
+    stderr: *std.Io.Writer,
+    format: OutputFormat,
+    path: [:0]const u8,
+    open_err: anyerror,
+) !?u8 {
+    var db = zova.Database.openForObjectStoreManagement(path, .{}) catch return null;
+    defer db.deinit();
+
+    var has_bound_store = false;
+    if (try db.boundObjectStore(allocator)) |info_value| {
+        var info = info_value;
+        info.deinit(allocator);
+        has_bound_store = true;
+    }
+    if (try db.boundVectorStore(allocator)) |info_value| {
+        var info = info_value;
+        info.deinit(allocator);
+        has_bound_store = true;
+    }
+    if (!has_bound_store) return null;
+
+    var report = try runDiagnostics(allocator, &db, 10);
+    if (report.issue_count == 0) {
+        report.deinit(allocator);
+        report = try diagnosticErrorReport(allocator, 10, .bound_store, "bound_store_open_failed", @errorName(open_err));
+    }
+    defer report.deinit(allocator);
+
+    switch (format) {
+        .text => {
+            try writeDeepCheckFailureText(stderr, report);
+            if (reportHasIssue(report, .bound_store, "missing_or_unreadable_store")) {
+                try stderr.print(
+                    \\suggested_actions:
+                    \\  run zova object-store bind {s} <objects.zova> or zova vector-store bind {s} <vectors.zova>
+                    \\
+                , .{ path, path });
+            }
+        },
+        .json => try writeDeepCheckFailureJson(stderr, report),
+    }
+    return ExitCode.check_failed;
+}
+
+fn writeBoundStoreOpenFailureDoctor(
+    allocator: std.mem.Allocator,
+    stderr: *std.Io.Writer,
+    format: OutputFormat,
+    source_path: []const u8,
+    path: [:0]const u8,
+    open_err: anyerror,
+) !?u8 {
+    var db = zova.Database.openForObjectStoreManagement(path, .{}) catch return null;
+    defer db.deinit();
+
+    var has_bound_store = false;
+    if (try db.boundObjectStore(allocator)) |info_value| {
+        var info = info_value;
+        info.deinit(allocator);
+        has_bound_store = true;
+    }
+    if (try db.boundVectorStore(allocator)) |info_value| {
+        var info = info_value;
+        info.deinit(allocator);
+        has_bound_store = true;
+    }
+    if (!has_bound_store) return null;
+
+    quickCheck(&db) catch |err| return try doctorCheckErrorFormat(stderr, format, source_path, "sqlite quick_check failed", err);
+
+    var summary = loadDatabaseSummary(allocator, &db, path) catch |err| return try doctorCheckErrorFormat(stderr, format, source_path, "summary failed", err);
+    defer summary.deinit(allocator);
+
+    var report = try runDiagnostics(allocator, &db, 10);
+    if (report.issue_count == 0) {
+        report.deinit(allocator);
+        report = try diagnosticErrorReport(allocator, 10, .bound_store, "bound_store_open_failed", @errorName(open_err));
+    }
+    defer report.deinit(allocator);
+
+    switch (format) {
+        .text => try writeDoctorText(stderr, source_path, summary, report),
+        .json => try writeDoctorJson(stderr, source_path, summary, report),
+    }
+    return ExitCode.check_failed;
 }
 
 fn salvageCommand(
@@ -3113,6 +3556,7 @@ fn writeCheckText(stdout: *std.Io.Writer, report: ?DiagnosticReport) !void {
             \\loose_chunks: {d}
             \\issue_count: {d}
             \\sqlite_issues: {d}
+            \\bound_store_issues: {d}
             \\object_issues: {d}
             \\chunk_issues: {d}
             \\vector_issues: {d}
@@ -3125,6 +3569,7 @@ fn writeCheckText(stdout: *std.Io.Writer, report: ?DiagnosticReport) !void {
             deep_report.stats.loose_chunks,
             deep_report.issue_count,
             deep_report.issue_counts.sqlite,
+            deep_report.issue_counts.bound_store,
             deep_report.issue_counts.object,
             deep_report.issue_counts.chunk,
             deep_report.issue_counts.vector,
@@ -3174,6 +3619,7 @@ fn writeDeepCheckFailureText(stderr: *std.Io.Writer, report: DiagnosticReport) !
         \\deep_check: failed
         \\issue_count: {d}
         \\sqlite_issues: {d}
+        \\bound_store_issues: {d}
         \\object_issues: {d}
         \\chunk_issues: {d}
         \\vector_issues: {d}
@@ -3184,6 +3630,7 @@ fn writeDeepCheckFailureText(stderr: *std.Io.Writer, report: DiagnosticReport) !
     , .{
         report.issue_count,
         report.issue_counts.sqlite,
+        report.issue_counts.bound_store,
         report.issue_counts.object,
         report.issue_counts.chunk,
         report.issue_counts.vector,
@@ -3246,6 +3693,7 @@ fn writeDoctorText(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
         \\private_tables: {d}
         \\issue_count: {d}
         \\sqlite_issues: {d}
+        \\bound_store_issues: {d}
         \\object_issues: {d}
         \\chunk_issues: {d}
         \\vector_issues: {d}
@@ -3263,6 +3711,7 @@ fn writeDoctorText(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
         summary.private_table_count,
         report.issue_count,
         report.issue_counts.sqlite,
+        report.issue_counts.bound_store,
         report.issue_counts.object,
         report.issue_counts.chunk,
         report.issue_counts.vector,
@@ -3295,6 +3744,10 @@ fn writeDoctorText(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
 
     try writer.writeAll("suggested_actions:\n");
     try writeSuggestedActionsText(writer, source_path, has_issues);
+    if (reportHasIssue(report, .bound_store, "missing_or_unreadable_store")) {
+        try writer.print("  run zova object-store bind {s} <objects.zova>\n", .{source_path});
+        try writer.print("  run zova vector-store bind {s} <vectors.zova>\n", .{source_path});
+    }
 }
 
 fn writeDoctorJson(writer: *std.Io.Writer, source_path: []const u8, summary: DatabaseSummary, report: DiagnosticReport) !void {
@@ -3396,6 +3849,7 @@ fn writeSalvageDryRunText(writer: *std.Io.Writer, source_path: []const u8, plan:
         \\skipped_vectors: {d}
         \\issue_count: {d}
         \\sqlite_issues: {d}
+        \\bound_store_issues: {d}
         \\object_issues: {d}
         \\chunk_issues: {d}
         \\vector_issues: {d}
@@ -3424,6 +3878,7 @@ fn writeSalvageDryRunText(writer: *std.Io.Writer, source_path: []const u8, plan:
         plan.skipped.vectors,
         plan.report.issue_count,
         plan.report.issue_counts.sqlite,
+        plan.report.issue_counts.bound_store,
         plan.report.issue_counts.object,
         plan.report.issue_counts.chunk,
         plan.report.issue_counts.vector,
@@ -3695,11 +4150,12 @@ fn writeDiagnosticIssueCountsJson(writer: *std.Io.Writer, counts: DiagnosticIssu
     try writer.print(
         \\{{
         \\    "sqlite": {d},
+        \\    "bound_store": {d},
         \\    "object": {d},
         \\    "chunk": {d},
         \\    "vector": {d}
         \\  }}
-    , .{ counts.sqlite, counts.object, counts.chunk, counts.vector });
+    , .{ counts.sqlite, counts.bound_store, counts.object, counts.chunk, counts.vector });
 }
 
 fn writeDiagnosticSeverityCountsJson(writer: *std.Io.Writer, counts: DiagnosticSeverityCounts) !void {
@@ -3749,10 +4205,18 @@ fn writeDiagnosticIssuesJson(writer: *std.Io.Writer, issues: []const DiagnosticI
 fn diagnosticIssueAreaText(area: DiagnosticIssueArea) []const u8 {
     return switch (area) {
         .sqlite => "sqlite",
+        .bound_store => "bound_store",
         .object => "object",
         .chunk => "chunk",
         .vector => "vector",
     };
+}
+
+fn reportHasIssue(report: DiagnosticReport, area: DiagnosticIssueArea, kind: []const u8) bool {
+    for (report.issues) |issue| {
+        if (issue.area == area and std.mem.eql(u8, issue.kind, kind)) return true;
+    }
+    return false;
 }
 
 fn writeJsonError(stderr: *std.Io.Writer, command: []const u8, err: []const u8) !void {
@@ -3770,6 +4234,12 @@ fn writeJsonErrorWithKind(stderr: *std.Io.Writer, command: []const u8, kind: []c
     try stderr.writeAll(",\n  \"error\": ");
     try writeJsonString(stderr, err);
     try stderr.writeAll("\n}\n");
+}
+
+fn writeJsonStringFormat(writer: *std.Io.Writer, comptime format: []const u8, args: anytype) !void {
+    var buffer: [std.fs.max_path_bytes * 3]u8 = undefined;
+    const value = std.fmt.bufPrint(&buffer, format, args) catch return error.NoSpaceLeft;
+    try writeJsonString(writer, value);
 }
 
 fn writeJsonString(writer: *std.Io.Writer, value: []const u8) !void {
@@ -3819,11 +4289,144 @@ fn runDiagnostics(allocator: std.mem.Allocator, db: *zova.Database, issue_limit:
     }
 
     var report = DiagnosticReport{ .issue_limit = issue_limit };
+    try validateBoundStores(allocator, db, &report, &issues);
     try validateObjects(allocator, db, &report, &issues);
     try validateLooseChunks(allocator, db, &report, &issues);
     try validateVectors(allocator, db, &report, &issues);
     report.issues = try issues.toOwnedSlice(allocator);
     return report;
+}
+
+fn validateBoundStores(allocator: std.mem.Allocator, db: *zova.Database, report: *DiagnosticReport, issues: *std.ArrayList(DiagnosticIssue)) !void {
+    if (try db.boundObjectStore(allocator)) |info_value| {
+        var info = info_value;
+        defer info.deinit(allocator);
+        try validateOneBoundStore(
+            allocator,
+            report,
+            issues,
+            info.path,
+            "object_store",
+            info.store_id,
+            info.bound_set_id,
+            "object_epoch",
+            "missing_object_epoch",
+            "object_epoch_unreadable",
+            "object_epoch_invalid",
+            "object_epoch_mismatch",
+            info.object_epoch,
+        );
+    }
+
+    if (try db.boundVectorStore(allocator)) |info_value| {
+        var info = info_value;
+        defer info.deinit(allocator);
+        try validateOneBoundStore(
+            allocator,
+            report,
+            issues,
+            info.path,
+            "vector_store",
+            info.store_id,
+            info.bound_set_id,
+            "vector_epoch",
+            "missing_vector_epoch",
+            "vector_epoch_unreadable",
+            "vector_epoch_invalid",
+            "vector_epoch_mismatch",
+            info.vector_epoch,
+        );
+    }
+}
+
+fn validateOneBoundStore(
+    allocator: std.mem.Allocator,
+    report: *DiagnosticReport,
+    issues: *std.ArrayList(DiagnosticIssue),
+    path: []const u8,
+    expected_role: []const u8,
+    expected_store_id: []const u8,
+    expected_bound_set_id: []const u8,
+    epoch_key: []const u8,
+    missing_epoch_kind: []const u8,
+    unreadable_epoch_kind: []const u8,
+    invalid_epoch_kind: []const u8,
+    mismatch_epoch_kind: []const u8,
+    expected_epoch: u64,
+) !void {
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+
+    var store = sqlite.Database.openWithFlags(path_z, .read_only) catch |err| {
+        try addDiagnosticIssue(allocator, report, issues, .bound_store, "missing_or_unreadable_store", @errorName(err), null, null, null, null);
+        return;
+    };
+    defer store.deinit();
+
+    const magic = (try requiredBoundStoreMetaValueAlloc(allocator, &store, report, issues, "magic", "missing_store_magic", "NotZovaDatabase", "store_magic_unreadable")) orelse return;
+    defer allocator.free(magic);
+    if (!std.mem.eql(u8, magic, "zova")) {
+        try addDiagnosticIssue(allocator, report, issues, .bound_store, "store_magic_mismatch", "NotZovaDatabase", null, null, null, null);
+        return;
+    }
+
+    const format_version = (try requiredBoundStoreMetaValueAlloc(allocator, &store, report, issues, "format_version", "missing_store_format_version", "UnsupportedZovaVersion", "store_format_version_unreadable")) orelse return;
+    defer allocator.free(format_version);
+    if (!std.mem.eql(u8, format_version, "3")) {
+        try addDiagnosticIssue(allocator, report, issues, .bound_store, "store_format_version_mismatch", "UnsupportedZovaVersion", null, null, null, null);
+        return;
+    }
+
+    const role = (try requiredBoundStoreMetaValueAlloc(allocator, &store, report, issues, "store_role", "missing_store_role", "BoundStoreInvalid", "store_role_unreadable")) orelse return;
+    defer allocator.free(role);
+    if (!std.mem.eql(u8, role, expected_role)) {
+        try addDiagnosticIssue(allocator, report, issues, .bound_store, "store_role_mismatch", "BoundStoreInvalid", null, null, null, null);
+        return;
+    }
+
+    const store_id = (try requiredBoundStoreMetaValueAlloc(allocator, &store, report, issues, "store_id", "missing_store_id", "BoundStoreInvalid", "store_id_unreadable")) orelse return;
+    defer allocator.free(store_id);
+    if (!std.mem.eql(u8, store_id, expected_store_id)) {
+        try addDiagnosticIssue(allocator, report, issues, .bound_store, "store_id_mismatch", "BoundStoreInvalid", null, null, null, null);
+        return;
+    }
+
+    const bound_set_id = (try requiredBoundStoreMetaValueAlloc(allocator, &store, report, issues, "bound_set_id", "missing_bound_set_id", "BoundStoreInvalid", "bound_set_id_unreadable")) orelse return;
+    defer allocator.free(bound_set_id);
+    if (!std.mem.eql(u8, bound_set_id, expected_bound_set_id)) {
+        try addDiagnosticIssue(allocator, report, issues, .bound_store, "bound_set_id_mismatch", "BoundStoreInvalid", null, null, null, null);
+        return;
+    }
+
+    const epoch_text = (try requiredBoundStoreMetaValueAlloc(allocator, &store, report, issues, epoch_key, missing_epoch_kind, "BoundStoreInvalid", unreadable_epoch_kind)) orelse return;
+    defer allocator.free(epoch_text);
+    const epoch = std.fmt.parseInt(u64, epoch_text, 10) catch {
+        try addDiagnosticIssue(allocator, report, issues, .bound_store, invalid_epoch_kind, "BoundStoreInvalid", null, null, null, null);
+        return;
+    };
+    if (epoch != expected_epoch) {
+        try addDiagnosticIssue(allocator, report, issues, .bound_store, mismatch_epoch_kind, "BoundStoreInvalid", null, null, null, null);
+    }
+}
+
+fn requiredBoundStoreMetaValueAlloc(
+    allocator: std.mem.Allocator,
+    store: *sqlite.Database,
+    report: *DiagnosticReport,
+    issues: *std.ArrayList(DiagnosticIssue),
+    key: []const u8,
+    missing_kind: []const u8,
+    missing_detail: []const u8,
+    unreadable_kind: []const u8,
+) !?[]u8 {
+    const value = sqliteMetaValueAlloc(allocator, store, key) catch |err| {
+        try addDiagnosticIssue(allocator, report, issues, .bound_store, unreadable_kind, @errorName(err), null, null, null, null);
+        return null;
+    };
+    if (value) |actual| return actual;
+
+    try addDiagnosticIssue(allocator, report, issues, .bound_store, missing_kind, missing_detail, null, null, null, null);
+    return null;
 }
 
 fn diagnosticErrorReport(
@@ -4255,7 +4858,11 @@ fn hasRecoverableData(counts: SalvageCounts) bool {
 }
 
 fn validateObjects(allocator: std.mem.Allocator, db: *zova.Database, report: *DiagnosticReport, issues: *std.ArrayList(DiagnosticIssue)) !void {
-    var stmt = try db.prepare("select object_id from _zova_objects order by hex(object_id)");
+    const prefix = diagnosticObjectSchemaPrefix(db);
+    const sql = try std.fmt.allocPrintSentinel(allocator, "select object_id from {s}_zova_objects order by hex(object_id)", .{prefix}, 0);
+    defer allocator.free(sql);
+
+    var stmt = try db.prepare(sql);
     defer stmt.deinit();
 
     while ((try stmt.step()) == .row) {
@@ -4298,14 +4905,18 @@ fn addMissingManifestChunkIssues(
     issues: *std.ArrayList(DiagnosticIssue),
     object_id: zova.ObjectId,
 ) !void {
-    var stmt = try db.prepare(
+    const prefix = diagnosticObjectSchemaPrefix(db);
+    const sql = try std.fmt.allocPrintSentinel(allocator,
         \\select oc.chunk_hash
-        \\from _zova_object_chunks oc
-        \\left join _zova_chunks c on c.chunk_hash = oc.chunk_hash
+        \\from {s}_zova_object_chunks oc
+        \\left join {s}_zova_chunks c on c.chunk_hash = oc.chunk_hash
         \\where oc.object_id = ?
         \\  and c.chunk_hash is null
         \\order by oc.chunk_index asc
-    );
+    , .{ prefix, prefix }, 0);
+    defer allocator.free(sql);
+
+    var stmt = try db.prepare(sql);
     defer stmt.deinit();
     try stmt.bindBlob(1, &object_id);
 
@@ -4318,14 +4929,18 @@ fn addMissingManifestChunkIssues(
 }
 
 fn validateLooseChunks(allocator: std.mem.Allocator, db: *zova.Database, report: *DiagnosticReport, issues: *std.ArrayList(DiagnosticIssue)) !void {
-    var stmt = try db.prepare(
+    const prefix = diagnosticObjectSchemaPrefix(db);
+    const sql = try std.fmt.allocPrintSentinel(allocator,
         \\select c.chunk_hash
-        \\from _zova_chunks c
+        \\from {s}_zova_chunks c
         \\where not exists (
-        \\  select 1 from _zova_object_chunks oc where oc.chunk_hash = c.chunk_hash
+        \\  select 1 from {s}_zova_object_chunks oc where oc.chunk_hash = c.chunk_hash
         \\)
         \\order by hex(c.chunk_hash)
-    );
+    , .{ prefix, prefix }, 0);
+    defer allocator.free(sql);
+
+    var stmt = try db.prepare(sql);
     defer stmt.deinit();
 
     while ((try stmt.step()) == .row) {
@@ -4346,12 +4961,28 @@ fn validateLooseChunks(allocator: std.mem.Allocator, db: *zova.Database, report:
     }
 }
 
+fn diagnosticObjectSchemaPrefix(db: *zova.Database) []const u8 {
+    var stmt = db.prepare("select 1 from object_store.sqlite_master limit 1") catch return "";
+    defer stmt.deinit();
+    return "object_store.";
+}
+
+fn diagnosticVectorSchemaPrefix(db: *zova.Database) []const u8 {
+    var stmt = db.prepare("select 1 from vector_store.sqlite_master limit 1") catch return "";
+    defer stmt.deinit();
+    return "vector_store.";
+}
+
 fn validateVectors(allocator: std.mem.Allocator, db: *zova.Database, report: *DiagnosticReport, issues: *std.ArrayList(DiagnosticIssue)) !void {
-    var stmt = try db.prepare(
+    const prefix = diagnosticVectorSchemaPrefix(db);
+    const sql = try std.fmt.allocPrintSentinel(allocator,
         \\select collection_name, vector_id
-        \\from _zova_vectors
+        \\from {s}_zova_vectors
         \\order by collection_name, vector_id
-    );
+    , .{prefix}, 0);
+    defer allocator.free(sql);
+
+    var stmt = try db.prepare(sql);
     defer stmt.deinit();
 
     while ((try stmt.step()) == .row) {
@@ -4398,6 +5029,7 @@ fn addDiagnosticIssue(
     report.severity_counts.errors += 1;
     switch (area) {
         .sqlite => report.issue_counts.sqlite += 1,
+        .bound_store => report.issue_counts.bound_store += 1,
         .object => report.issue_counts.object += 1,
         .chunk => report.issue_counts.chunk += 1,
         .vector => report.issue_counts.vector += 1,
@@ -4429,6 +5061,17 @@ fn scalarU64(db: *zova.Database, sql: [:0]const u8) !u64 {
     return switch (try stmt.step()) {
         .row => @intCast(stmt.columnInt64(0)),
         .done => 0,
+    };
+}
+
+fn sqliteMetaValueAlloc(allocator: std.mem.Allocator, db: *sqlite.Database, key: []const u8) !?[]u8 {
+    var stmt = try db.prepare("select value from _zova_meta where key = ?");
+    defer stmt.deinit();
+
+    try stmt.bindText(1, key);
+    return switch (try stmt.step()) {
+        .done => null,
+        .row => try allocator.dupe(u8, stmt.columnText(0)),
     };
 }
 

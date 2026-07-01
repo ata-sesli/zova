@@ -425,14 +425,27 @@ fn searchRowid(cursor: ?*c.sqlite3_vtab_cursor, rowid: [*c]c.sqlite3_int64) call
     return c.SQLITE_OK;
 }
 
+fn vectorSchemaPrefix(db: *sqlite.Database) []const u8 {
+    var stmt = db.prepare("select 1 from vector_store.sqlite_master limit 1") catch return "";
+    defer stmt.deinit();
+    return "vector_store.";
+}
+
+fn prepareSchema(db: *sqlite.Database, comptime sql_format: []const u8, args: anytype) Error!sqlite.Statement {
+    var sql_buffer: [4096]u8 = undefined;
+    const sql = std.fmt.bufPrintZ(&sql_buffer, sql_format, args) catch return error.SqliteError;
+    return try db.prepare(sql);
+}
+
 fn loadCollection(db: *sqlite.Database, name: []const u8) Error!Collection {
     try validateName(name);
 
-    var stmt = try db.prepare(
+    const prefix = vectorSchemaPrefix(db);
+    var stmt = try prepareSchema(db,
         \\select dimensions, metric, element_type
-        \\from _zova_vector_collections
+        \\from {s}_zova_vector_collections
         \\where name = ?
-    );
+    , .{prefix});
     defer stmt.deinit();
 
     try stmt.bindText(1, name);
@@ -453,11 +466,12 @@ fn loadCollection(db: *sqlite.Database, name: []const u8) Error!Collection {
 fn loadVectorEncoded(db: *sqlite.Database, collection_name: []const u8, vector_id: []const u8, collection: Collection) Error![]u8 {
     try validateName(vector_id);
 
-    var stmt = try db.prepare(
+    const prefix = vectorSchemaPrefix(db);
+    var stmt = try prepareSchema(db,
         \\select dimensions, "values"
-        \\from _zova_vectors
+        \\from {s}_zova_vectors
         \\where collection_name = ? and vector_id = ?
-    );
+    , .{prefix});
     defer stmt.deinit();
 
     try stmt.bindText(1, collection_name);
@@ -500,11 +514,12 @@ fn searchAll(
         if (limit == 0) return try rows.toOwnedSlice(allocator);
     }
 
-    var stmt = try db.prepare(
+    const prefix = vectorSchemaPrefix(db);
+    var stmt = try prepareSchema(db,
         \\select vector_id, dimensions, "values"
-        \\from _zova_vectors
+        \\from {s}_zova_vectors
         \\where collection_name = ?
-    );
+    , .{prefix});
     defer stmt.deinit();
 
     try stmt.bindText(1, collection_name);
