@@ -68,6 +68,267 @@ static void expect_collection_info(
     }
 }
 
+static void expect_graph_text(const char *actual, size_t actual_len, const char *expected, const char *label) {
+    size_t expected_len = strlen(expected);
+    if (actual_len != expected_len || memcmp(actual, expected, expected_len) != 0) {
+        fprintf(stderr, "%s: unexpected graph text\n", label);
+        exit(1);
+    }
+}
+
+static void run_graph_smoke(zova_database *db) {
+    expect_status(zova_graph_create(&(zova_graph_create_request){
+                      .db = db,
+                      .name = "app",
+                  }),
+                  ZOVA_OK,
+                  "graph create");
+    expect_status(zova_graph_create(&(zova_graph_create_request){
+                      .db = db,
+                      .name = "app",
+                  }),
+                  ZOVA_GRAPH_EXISTS,
+                  "graph create duplicate");
+
+    uint8_t exists = 0;
+    expect_status(zova_graph_exists(&(zova_graph_exists_request){
+                      .db = db,
+                      .name = "app",
+                      .out_exists = &exists,
+                  }),
+                  ZOVA_OK,
+                  "graph exists");
+    if (!exists) {
+        fprintf(stderr, "graph exists: expected true\n");
+        exit(1);
+    }
+
+    expect_status(zova_graph_node_put(&(zova_graph_node_put_request){
+                      .db = db,
+                      .graph_name = "app",
+                      .node_id = "message:1",
+                      .kind = "message",
+                      .target_type = ZOVA_GRAPH_TARGET_RECORD,
+                      .target_namespace = NULL,
+                      .target_ref = "messages:1",
+                  }),
+                  ZOVA_OK,
+                  "graph node put message 1");
+    expect_status(zova_graph_node_put(&(zova_graph_node_put_request){
+                      .db = db,
+                      .graph_name = "app",
+                      .node_id = "message:2",
+                      .kind = "message",
+                      .target_type = ZOVA_GRAPH_TARGET_RECORD,
+                      .target_namespace = NULL,
+                      .target_ref = "messages:2",
+                  }),
+                  ZOVA_OK,
+                  "graph node put message 2");
+    expect_status(zova_graph_node_put(&(zova_graph_node_put_request){
+                      .db = db,
+                      .graph_name = "app",
+                      .node_id = "attachment:1",
+                      .kind = "attachment",
+                      .target_type = ZOVA_GRAPH_TARGET_EXTERNAL,
+                      .target_namespace = "attachments",
+                      .target_ref = "",
+                  }),
+                  ZOVA_OK,
+                  "graph node put attachment");
+
+    zova_graph_node node = {0};
+    expect_status(zova_graph_node_get(&(zova_graph_node_get_request){
+                      .db = db,
+                      .graph_name = "app",
+                      .node_id = "attachment:1",
+                      .out_node = &node,
+                  }),
+                  ZOVA_OK,
+                  "graph node get");
+    expect_graph_text(node.node_id, node.node_id_len, "attachment:1", "graph node id");
+    if (!node.has_target_namespace || !node.has_target_ref || node.target_ref_len != 0) {
+        fprintf(stderr, "graph node get: unexpected optional target fields\n");
+        exit(1);
+    }
+    zova_graph_node_free(&node);
+
+    expect_status(zova_graph_edge_put(&(zova_graph_edge_put_request){
+                      .db = db,
+                      .graph_name = "app",
+                      .from_node_id = "message:1",
+                      .edge_type = "replies_to",
+                      .to_node_id = "message:2",
+                  }),
+                  ZOVA_OK,
+                  "graph edge put reply");
+    expect_status(zova_graph_edge_put(&(zova_graph_edge_put_request){
+                      .db = db,
+                      .graph_name = "app",
+                      .from_node_id = "message:1",
+                      .edge_type = "has_attachment",
+                      .to_node_id = "attachment:1",
+                  }),
+                  ZOVA_OK,
+                  "graph edge put attachment");
+
+    zova_graph_edge edge = {0};
+    expect_status(zova_graph_edge_get(&(zova_graph_edge_get_request){
+                      .db = db,
+                      .graph_name = "app",
+                      .from_node_id = "message:1",
+                      .edge_type = "has_attachment",
+                      .to_node_id = "attachment:1",
+                      .out_edge = &edge,
+                  }),
+                  ZOVA_OK,
+                  "graph edge get");
+    expect_graph_text(edge.edge_type, edge.edge_type_len, "has_attachment", "graph edge type");
+    zova_graph_edge_free(&edge);
+
+    zova_graph_info info = {0};
+    expect_status(zova_graph_info_get(&(zova_graph_info_get_request){
+                      .db = db,
+                      .name = "app",
+                      .out_info = &info,
+                  }),
+                  ZOVA_OK,
+                  "graph info");
+    if (info.node_count != 3 || info.edge_count != 2) {
+        fprintf(stderr, "graph info: unexpected counts\n");
+        exit(1);
+    }
+    zova_graph_info_free(&info);
+
+    zova_graph_list list = {0};
+    expect_status(zova_graphs_list(&(zova_graph_list_request){
+                      .db = db,
+                      .out_list = &list,
+                  }),
+                  ZOVA_OK,
+                  "graph list");
+    if (list.len != 1) {
+        fprintf(stderr, "graph list: unexpected count\n");
+        exit(1);
+    }
+    zova_graph_list_free(&list);
+
+    zova_graph_neighbor_results neighbors = {0};
+    expect_status(zova_graph_neighbors(&(zova_graph_neighbors_request){
+                      .db = db,
+                      .graph_name = "app",
+                      .node_id = "message:1",
+                      .direction = ZOVA_GRAPH_NEIGHBOR_OUTGOING,
+                      .edge_type = NULL,
+                      .limit = 10,
+                      .out_results = &neighbors,
+                  }),
+                  ZOVA_OK,
+                  "graph neighbors");
+    if (neighbors.len != 2) {
+        fprintf(stderr, "graph neighbors: unexpected count\n");
+        exit(1);
+    }
+    zova_graph_neighbor_results_free(&neighbors);
+
+    zova_graph_walk_results walk = {0};
+    expect_status(zova_graph_walk(&(zova_graph_walk_request){
+                      .db = db,
+                      .graph_name = "app",
+                      .start_node_id = "message:1",
+                      .edge_type = NULL,
+                      .max_depth = 1,
+                      .limit = 10,
+                      .out_results = &walk,
+                  }),
+                  ZOVA_OK,
+                  "graph walk");
+    if (walk.len != 3 || walk.items[0].depth != 0 || walk.items[1].depth != 1 ||
+        !walk.items[1].has_predecessor_node_id) {
+        fprintf(stderr, "graph walk: unexpected result shape\n");
+        exit(1);
+    }
+    zova_graph_walk_results_free(&walk);
+
+    zova_statement *sql_graph_neighbors = NULL;
+    expect_status(zova_database_prepare(&(zova_database_prepare_request){
+                      .db = db,
+                      .sql = "select node_id, edge_type from zova_graph_neighbors where graph_name = 'app' and source_node_id = 'message:1' and \"limit\" = 1 order by rank",
+                      .out_statement = &sql_graph_neighbors,
+                  }),
+                  ZOVA_OK,
+                  "prepare sql graph neighbors");
+    zova_step_result step_result = 0;
+    expect_status(zova_statement_step(&(zova_statement_step_request){
+                      .statement = sql_graph_neighbors,
+                      .out_result = &step_result,
+                  }),
+                  ZOVA_OK,
+                  "step sql graph neighbors");
+    if (step_result != ZOVA_STEP_ROW) {
+        fprintf(stderr, "step sql graph neighbors: expected row\n");
+        exit(1);
+    }
+    zova_text sql_graph_node = {0};
+    expect_status(zova_statement_column_text(&(zova_statement_column_text_request){
+                      .statement = sql_graph_neighbors,
+                      .index = 0,
+                      .out_text = &sql_graph_node,
+                  }),
+                  ZOVA_OK,
+                  "read sql graph neighbor node");
+    expect_graph_text(sql_graph_node.data, sql_graph_node.len, "message:2", "sql graph neighbor node");
+    zova_text_free(&sql_graph_node);
+    expect_status(zova_statement_finalize(sql_graph_neighbors), ZOVA_OK, "finalize sql graph neighbors");
+
+    zova_statement *sql_graph_walk = NULL;
+    expect_status(zova_database_prepare(&(zova_database_prepare_request){
+                      .db = db,
+                      .sql = "select node_id, depth from zova_graph_walk where graph_name = 'app' and start_node_id = 'message:1' and max_depth = 1 and \"limit\" = 2 order by rank",
+                      .out_statement = &sql_graph_walk,
+                  }),
+                  ZOVA_OK,
+                  "prepare sql graph walk");
+    expect_status(zova_statement_step(&(zova_statement_step_request){
+                      .statement = sql_graph_walk,
+                      .out_result = &step_result,
+                  }),
+                  ZOVA_OK,
+                  "step sql graph walk");
+    if (step_result != ZOVA_STEP_ROW) {
+        fprintf(stderr, "step sql graph walk: expected row\n");
+        exit(1);
+    }
+    expect_status(zova_statement_column_text(&(zova_statement_column_text_request){
+                      .statement = sql_graph_walk,
+                      .index = 0,
+                      .out_text = &sql_graph_node,
+                  }),
+                  ZOVA_OK,
+                  "read sql graph walk node");
+    expect_graph_text(sql_graph_node.data, sql_graph_node.len, "message:1", "sql graph walk node");
+    zova_text_free(&sql_graph_node);
+    expect_status(zova_statement_finalize(sql_graph_walk), ZOVA_OK, "finalize sql graph walk");
+
+    expect_status(zova_graph_node_delete(&(zova_graph_node_delete_request){
+                      .db = db,
+                      .graph_name = "app",
+                      .node_id = "message:2",
+                  }),
+                  ZOVA_OK,
+                  "graph node delete");
+    expect_status(zova_graph_edge_get(&(zova_graph_edge_get_request){
+                      .db = db,
+                      .graph_name = "app",
+                      .from_node_id = "message:1",
+                      .edge_type = "replies_to",
+                      .to_node_id = "message:2",
+                      .out_edge = &edge,
+                  }),
+                  ZOVA_GRAPH_EDGE_NOT_FOUND,
+                  "graph edge removed with node");
+}
+
 static void verify_operational_copy(const char *path, zova_object_id object_id, const char *label) {
     zova_database *copy = NULL;
     zova_message message = {0};
@@ -1141,6 +1402,7 @@ int main(int argc, char **argv) {
     }
     expect_status(zova_statement_finalize(sql_distance_by_id), ZOVA_OK, "finalize sql vector distance by id");
 
+    run_graph_smoke(db);
     run_threaded_same_handle_smoke(db);
     run_notification_smoke(db);
 

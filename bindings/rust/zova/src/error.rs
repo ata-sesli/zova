@@ -40,6 +40,11 @@ pub enum Status {
     VectorDimensionMismatch,
     VectorCorrupt,
     VectorInvalid,
+    GraphExists,
+    GraphNotFound,
+    GraphNodeNotFound,
+    GraphEdgeNotFound,
+    GraphInvalid,
     Unknown(i32),
 }
 
@@ -80,6 +85,11 @@ impl Status {
             zova_sys::ZOVA_VECTOR_DIMENSION_MISMATCH => Self::VectorDimensionMismatch,
             zova_sys::ZOVA_VECTOR_CORRUPT => Self::VectorCorrupt,
             zova_sys::ZOVA_VECTOR_INVALID => Self::VectorInvalid,
+            zova_sys::ZOVA_GRAPH_EXISTS => Self::GraphExists,
+            zova_sys::ZOVA_GRAPH_NOT_FOUND => Self::GraphNotFound,
+            zova_sys::ZOVA_GRAPH_NODE_NOT_FOUND => Self::GraphNodeNotFound,
+            zova_sys::ZOVA_GRAPH_EDGE_NOT_FOUND => Self::GraphEdgeNotFound,
+            zova_sys::ZOVA_GRAPH_INVALID => Self::GraphInvalid,
             other => Self::Unknown(other),
         }
     }
@@ -120,6 +130,11 @@ impl Status {
             Self::VectorDimensionMismatch => zova_sys::ZOVA_VECTOR_DIMENSION_MISMATCH,
             Self::VectorCorrupt => zova_sys::ZOVA_VECTOR_CORRUPT,
             Self::VectorInvalid => zova_sys::ZOVA_VECTOR_INVALID,
+            Self::GraphExists => zova_sys::ZOVA_GRAPH_EXISTS,
+            Self::GraphNotFound => zova_sys::ZOVA_GRAPH_NOT_FOUND,
+            Self::GraphNodeNotFound => zova_sys::ZOVA_GRAPH_NODE_NOT_FOUND,
+            Self::GraphEdgeNotFound => zova_sys::ZOVA_GRAPH_EDGE_NOT_FOUND,
+            Self::GraphInvalid => zova_sys::ZOVA_GRAPH_INVALID,
             Self::Unknown(code) => code,
         }
     }

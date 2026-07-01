@@ -22,6 +22,20 @@ pub const VectorSearchResult = zova.VectorSearchResult;
 pub const VectorSearchResults = zova.VectorSearchResults;
 pub const Notification = zova.Notification;
 pub const NotificationSubscription = zova.NotificationSubscription;
+pub const GraphTargetType = zova.GraphTargetType;
+pub const GraphInfo = zova.GraphInfo;
+pub const GraphList = zova.GraphList;
+pub const GraphNodeInput = zova.GraphNodeInput;
+pub const GraphNode = zova.GraphNode;
+pub const GraphEdgeInput = zova.GraphEdgeInput;
+pub const GraphEdge = zova.GraphEdge;
+pub const GraphNeighborDirection = zova.GraphNeighborDirection;
+pub const GraphNeighborsOptions = zova.GraphNeighborsOptions;
+pub const GraphNeighbor = zova.GraphNeighbor;
+pub const GraphNeighborList = zova.GraphNeighborList;
+pub const GraphWalkOptions = zova.GraphWalkOptions;
+pub const GraphWalkItem = zova.GraphWalkItem;
+pub const GraphWalk = zova.GraphWalk;
 pub const OpenOptions = zova.OpenOptions;
 pub const BackupOptions = zova.BackupOptions;
 pub const BoundObjectStoreInfo = zova.BoundObjectStoreInfo;
@@ -83,6 +97,12 @@ test "package exports zova database namespace" {
     try std.testing.expect(@hasDecl(@This(), "VectorSearchResults"));
     try std.testing.expect(@hasDecl(@This(), "Notification"));
     try std.testing.expect(@hasDecl(@This(), "NotificationSubscription"));
+    try std.testing.expect(@hasDecl(@This(), "GraphTargetType"));
+    try std.testing.expect(@hasDecl(@This(), "GraphNode"));
+    try std.testing.expect(@hasDecl(@This(), "GraphEdgeInput"));
+    try std.testing.expect(@hasDecl(@This(), "GraphEdge"));
+    try std.testing.expect(@hasDecl(@This(), "GraphNeighborList"));
+    try std.testing.expect(@hasDecl(@This(), "GraphWalk"));
     try std.testing.expect(@hasDecl(@This(), "max_vector_dimensions"));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(ObjectId));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(ObjectChunkId));
@@ -138,10 +158,21 @@ test "package exports zova database namespace" {
     try std.testing.expect(@hasDecl(Database, "unbindVectorStore"));
     try std.testing.expect(@hasDecl(Database, "listen"));
     try std.testing.expect(@hasDecl(Database, "notify"));
+    try std.testing.expect(@hasDecl(Database, "createGraph"));
+    try std.testing.expect(@hasDecl(Database, "listGraphs"));
+    try std.testing.expect(@hasDecl(Database, "graphInfo"));
+    try std.testing.expect(@hasDecl(Database, "putGraphNode"));
+    try std.testing.expect(@hasDecl(Database, "getGraphNode"));
+    try std.testing.expect(@hasDecl(Database, "putGraphEdge"));
+    try std.testing.expect(@hasDecl(Database, "getGraphEdge"));
+    try std.testing.expect(@hasDecl(Database, "graphNeighbors"));
+    try std.testing.expect(@hasDecl(Database, "graphWalk"));
     try std.testing.expect(!@hasDecl(@This(), "fastcdc"));
 }
 
 test {
+    _ = @import("graph_sql_tests.zig");
+    _ = @import("graph_tests.zig");
     _ = @import("object_tests.zig");
     _ = @import("vector_tests.zig");
     _ = @import("vector_sql_tests.zig");

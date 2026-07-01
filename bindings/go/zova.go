@@ -53,6 +53,11 @@ const (
 	StatusVectorDimensionMismatch  Status = C.ZOVA_VECTOR_DIMENSION_MISMATCH
 	StatusVectorCorrupt            Status = C.ZOVA_VECTOR_CORRUPT
 	StatusVectorInvalid            Status = C.ZOVA_VECTOR_INVALID
+	StatusGraphExists              Status = C.ZOVA_GRAPH_EXISTS
+	StatusGraphNotFound            Status = C.ZOVA_GRAPH_NOT_FOUND
+	StatusGraphNodeNotFound        Status = C.ZOVA_GRAPH_NODE_NOT_FOUND
+	StatusGraphEdgeNotFound        Status = C.ZOVA_GRAPH_EDGE_NOT_FOUND
+	StatusGraphInvalid             Status = C.ZOVA_GRAPH_INVALID
 )
 
 // Step is the result of advancing a prepared statement.

@@ -1,7 +1,8 @@
 use std::thread;
 use zova::{
-    object_id, SharedDatabase, SharedObjectWriter, SharedStatement, Step, VectorCollectionOptions,
-    VectorInput, VectorMetric,
+    object_id, GraphEdgeInput, GraphNeighborDirection, GraphNeighborsOptions, GraphNodeInput,
+    GraphTargetType, GraphWalkOptions, SharedDatabase, SharedObjectWriter, SharedStatement, Status,
+    Step, VectorCollectionOptions, VectorInput, VectorMetric, DEFAULT_GRAPH_NAME,
 };
 
 fn temp_path(name: &str) -> String {
@@ -27,6 +28,30 @@ fn fixture_bytes(len: usize) -> Vec<u8> {
 fn assert_send<T: Send>() {}
 
 fn assert_send_sync<T: Send + Sync>() {}
+
+fn graph_node<'a>(node_id: &'a str) -> GraphNodeInput<'a> {
+    GraphNodeInput {
+        graph_name: DEFAULT_GRAPH_NAME,
+        node_id,
+        kind: "message",
+        target_type: GraphTargetType::None,
+        target_namespace: None,
+        target_ref: None,
+    }
+}
+
+fn graph_edge<'a>(
+    from_node_id: &'a str,
+    edge_type: &'a str,
+    to_node_id: &'a str,
+) -> GraphEdgeInput<'a> {
+    GraphEdgeInput {
+        graph_name: DEFAULT_GRAPH_NAME,
+        from_node_id,
+        edge_type,
+        to_node_id,
+    }
+}
 
 #[test]
 fn shared_database_traits_are_thread_safe_opt_in_surface() {
@@ -151,6 +176,103 @@ fn cloned_shared_database_handles_objects_and_vectors_from_threads() {
 
     let nearest = db.search_vectors("items", &[0.0, 0.0], 3).unwrap();
     assert_eq!(nearest[0].id, "v0");
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn cloned_shared_database_handles_graphs_from_threads() {
+    let path = temp_path("graphs");
+    let db = SharedDatabase::create(&path).unwrap();
+    db.create_graph(DEFAULT_GRAPH_NAME).unwrap();
+
+    let mut threads = Vec::new();
+    for index in 0..8 {
+        let db = db.clone();
+        threads.push(thread::spawn(move || {
+            let node_id = format!("message:{index}");
+            db.put_graph_node(GraphNodeInput {
+                graph_name: DEFAULT_GRAPH_NAME,
+                node_id: &node_id,
+                kind: "message",
+                target_type: GraphTargetType::Record,
+                target_namespace: Some("messages"),
+                target_ref: Some(&node_id),
+            })
+            .unwrap();
+            assert!(db.has_graph_node(DEFAULT_GRAPH_NAME, &node_id).unwrap());
+        }));
+    }
+    for thread in threads {
+        thread.join().unwrap();
+    }
+
+    db.put_graph_edge(graph_edge("message:0", "mentions", "message:1"))
+        .unwrap();
+    let neighbors = db
+        .graph_neighbors(GraphNeighborsOptions {
+            graph_name: DEFAULT_GRAPH_NAME,
+            node_id: "message:0",
+            direction: GraphNeighborDirection::Outgoing,
+            edge_type: Some("mentions"),
+            limit: 10,
+        })
+        .unwrap();
+    assert_eq!(neighbors[0].node_id, "message:1");
+
+    let err = db
+        .get_graph_node(DEFAULT_GRAPH_NAME, "missing")
+        .unwrap_err();
+    assert_eq!(err.status(), Some(Status::GraphNodeNotFound));
+    let message = err.to_string();
+    db.exec("select 1").unwrap();
+    assert!(message.contains("ZOVA_GRAPH_NODE_NOT_FOUND"));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn shared_graph_operations_work_inside_transactions_and_savepoints() {
+    let path = temp_path("graph-transactions");
+    let db = SharedDatabase::create(&path).unwrap();
+    db.create_graph(DEFAULT_GRAPH_NAME).unwrap();
+
+    let err = db
+        .transaction_immediate(|guard| {
+            guard.put_graph_node(graph_node("rolled-back"))?;
+            guard.get_graph_node(DEFAULT_GRAPH_NAME, "missing")?;
+            Ok(())
+        })
+        .unwrap_err();
+    assert_eq!(err.status(), Some(zova::Status::GraphNodeNotFound));
+    assert!(!db
+        .has_graph_node(DEFAULT_GRAPH_NAME, "rolled-back")
+        .unwrap());
+
+    db.transaction_immediate(|guard| {
+        guard.put_graph_node(graph_node("root"))?;
+        guard.with_savepoint("sp_graph", |guard| {
+            guard.put_graph_node(graph_node("child"))?;
+            guard.put_graph_edge(graph_edge("root", "links", "child"))?;
+            Ok(())
+        })?;
+        Ok(())
+    })
+    .unwrap();
+
+    let walk = db
+        .graph_walk(GraphWalkOptions {
+            graph_name: DEFAULT_GRAPH_NAME,
+            start_node_id: "root",
+            edge_type: None,
+            max_depth: 2,
+            limit: 10,
+        })
+        .unwrap();
+    assert_eq!(
+        walk.iter()
+            .map(|item| item.node_id.as_str())
+            .collect::<Vec<_>>(),
+        ["root", "child"]
+    );
     let _ = std::fs::remove_file(path);
 }
 

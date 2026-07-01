@@ -13,6 +13,10 @@ static_assert(ZOVA_STEP_DONE == 2, "step result values are stable");
 static_assert(ZOVA_COLUMN_INTEGER == 1, "column type values are stable");
 static_assert(ZOVA_COLUMN_NULL == 5, "column type values are stable");
 static_assert(ZOVA_VECTOR_INVALID == 75, "vector status values are stable");
+static_assert(ZOVA_GRAPH_TARGET_NONE == 0, "graph target values are stable");
+static_assert(ZOVA_GRAPH_TARGET_EXTERNAL == 8, "graph target values are stable");
+static_assert(ZOVA_GRAPH_NEIGHBOR_OUTGOING == 0, "graph direction values are stable");
+static_assert(ZOVA_GRAPH_INVALID == 84, "graph status values are stable");
 static_assert(ZOVA_BACKUP_NO_VERIFY == 1u, "backup flags are stable");
 static_assert(ZOVA_COMPACT_NO_VERIFY == 1u, "compact flags are stable");
 static_assert(ZOVA_RESTORE_NO_VERIFY == 1u, "restore flags are stable");
@@ -30,6 +34,12 @@ int main() {
     zova_vector_search_results search_results = {};
     zova_vector_collection_info collection_info = {};
     zova_vector_collection_list collection_list = {};
+    zova_graph_info graph_info = {};
+    zova_graph_list graph_list = {};
+    zova_graph_node graph_node = {};
+    zova_graph_edge graph_edge = {};
+    zova_graph_neighbor_results graph_neighbors = {};
+    zova_graph_walk_results graph_walk = {};
     zova_vector_collection_options options = {
         3,
         ZOVA_VECTOR_METRIC_COSINE,
@@ -126,6 +136,42 @@ int main() {
     by_id_in_within_request.collection_name = "chunks";
     by_id_in_within_request.source_vector_id = "chunk-001";
     by_id_in_within_request.candidate_ids = nullptr;
+    zova_graph_create_request graph_create_request = {};
+    graph_create_request.name = "app";
+    zova_graph_exists_request graph_exists_request = {};
+    uint8_t graph_exists = 0;
+    graph_exists_request.out_exists = &graph_exists;
+    zova_graph_info_get_request graph_info_request = {};
+    graph_info_request.out_info = &graph_info;
+    zova_graph_list_request graph_list_request = {};
+    graph_list_request.out_list = &graph_list;
+    zova_graph_delete_request graph_delete_request = {};
+    graph_delete_request.name = "app";
+    zova_graph_node_put_request graph_node_put_request = {};
+    graph_node_put_request.graph_name = "app";
+    graph_node_put_request.node_id = "message:1";
+    graph_node_put_request.kind = "message";
+    graph_node_put_request.target_type = ZOVA_GRAPH_TARGET_RECORD;
+    zova_graph_node_get_request graph_node_get_request = {};
+    graph_node_get_request.out_node = &graph_node;
+    zova_graph_node_exists_request graph_node_exists_request = {};
+    graph_node_exists_request.out_exists = &graph_exists;
+    zova_graph_node_delete_request graph_node_delete_request = {};
+    graph_node_delete_request.node_id = "message:1";
+    zova_graph_edge_put_request graph_edge_put_request = {};
+    graph_edge_put_request.edge_type = "contains";
+    zova_graph_edge_get_request graph_edge_get_request = {};
+    graph_edge_get_request.out_edge = &graph_edge;
+    zova_graph_edge_exists_request graph_edge_exists_request = {};
+    graph_edge_exists_request.out_exists = &graph_exists;
+    zova_graph_edge_delete_request graph_edge_delete_request = {};
+    graph_edge_delete_request.edge_type = "contains";
+    zova_graph_neighbors_request graph_neighbors_request = {};
+    graph_neighbors_request.direction = ZOVA_GRAPH_NEIGHBOR_OUTGOING;
+    graph_neighbors_request.out_results = &graph_neighbors;
+    zova_graph_walk_request graph_walk_request = {};
+    graph_walk_request.max_depth = 2;
+    graph_walk_request.out_results = &graph_walk;
 
     zova_buffer_free(&buffer);
     zova_text_free(&text);
@@ -135,6 +181,12 @@ int main() {
     zova_vector_search_results_free(&search_results);
     zova_vector_collection_info_free(&collection_info);
     zova_vector_collection_list_free(&collection_list);
+    zova_graph_info_free(&graph_info);
+    zova_graph_list_free(&graph_list);
+    zova_graph_node_free(&graph_node);
+    zova_graph_edge_free(&graph_edge);
+    zova_graph_neighbor_results_free(&graph_neighbors);
+    zova_graph_walk_results_free(&graph_walk);
 
     return zova_database_close(db) == ZOVA_INVALID_ARGUMENT &&
                    options.metric == ZOVA_VECTOR_METRIC_COSINE &&
@@ -148,6 +200,24 @@ int main() {
                    by_id_in_request.candidate_ids == nullptr &&
                    by_id_within_request.source_vector_id != nullptr &&
                    by_id_in_within_request.candidate_ids == nullptr &&
+                   graph_create_request.name != nullptr &&
+                   graph_exists_request.out_exists == &graph_exists &&
+                   graph_info_request.out_info == &graph_info &&
+                   graph_list_request.out_list == &graph_list &&
+                   graph_delete_request.name != nullptr &&
+                   graph_node_put_request.target_type == ZOVA_GRAPH_TARGET_RECORD &&
+                   graph_node_get_request.out_node == &graph_node &&
+                   graph_node_exists_request.out_exists == &graph_exists &&
+                   graph_node_delete_request.node_id != nullptr &&
+                   graph_edge_put_request.edge_type != nullptr &&
+                   graph_edge_get_request.out_edge == &graph_edge &&
+                   graph_edge_exists_request.out_exists == &graph_exists &&
+                   graph_edge_delete_request.edge_type != nullptr &&
+                   graph_neighbors_request.direction == ZOVA_GRAPH_NEIGHBOR_OUTGOING &&
+                   graph_neighbors_request.out_results == &graph_neighbors &&
+                   graph_walk_request.max_depth == 2 &&
+                   graph_walk_request.out_results == &graph_walk &&
+                   zova_status_name(ZOVA_GRAPH_INVALID) != nullptr &&
                    zova_status_name(ZOVA_VECTOR_INVALID) != nullptr &&
                    zova_status_name(ZOVA_OK) != nullptr &&
                    zova_abi_version_string() != nullptr &&

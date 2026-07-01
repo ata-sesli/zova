@@ -4,8 +4,8 @@ build-backend = "maturin"
 
 [project]
 name = "zova"
-version = "0.19.0"
-description = "SQLite-backed embedded database for records, objects, and vectors in one local file."
+version = "0.20.0"
+description = "SQLite-backed embedded database for records, objects, vectors, and graph relationships in one local file."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -13,7 +13,7 @@ license-files = ["LICENSE"]
 authors = [
     { name = "Ata Sesli" },
 ]
-keywords = ["zova", "sqlite", "database", "objects", "vectors"]
+keywords = ["zova", "sqlite", "database", "objects", "vectors", "graphs"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",

@@ -3,6 +3,13 @@ use crate::database::{
     BackupOptions, CompactOptions,
 };
 use crate::error::{Error, Result, Status};
+use crate::graph::{
+    create_graph_raw, delete_graph_edge_raw, delete_graph_node_raw, delete_graph_raw,
+    get_graph_edge_raw, get_graph_node_raw, graph_info_raw, graph_neighbors_raw, graph_walk_raw,
+    has_graph_edge_raw, has_graph_node_raw, has_graph_raw, list_graphs_raw, put_graph_edge_raw,
+    put_graph_node_raw, GraphEdge, GraphEdgeInput, GraphInfo, GraphNeighbor, GraphNeighborsOptions,
+    GraphNode, GraphNodeInput, GraphWalkItem, GraphWalkOptions,
+};
 use crate::notification::{
     empty_notification, listen_raw, notify_raw, take_notification, Notification,
 };
@@ -879,6 +886,163 @@ impl SharedDatabase {
         take_search_results(&mut results)
     }
 
+    pub fn create_graph(&self, name: &str) -> Result<()> {
+        let _guard = self.inner.lock();
+        create_graph_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            name,
+        )
+    }
+
+    pub fn has_graph(&self, name: &str) -> Result<bool> {
+        let _guard = self.inner.lock();
+        has_graph_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            name,
+        )
+    }
+
+    pub fn graph_info(&self, name: &str) -> Result<GraphInfo> {
+        let _guard = self.inner.lock();
+        graph_info_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            name,
+        )
+    }
+
+    pub fn list_graphs(&self) -> Result<Vec<GraphInfo>> {
+        let _guard = self.inner.lock();
+        list_graphs_raw(self.inner.raw_ptr(), |status| {
+            self.inner.status_locked(status)
+        })
+    }
+
+    pub fn delete_graph(&self, name: &str) -> Result<()> {
+        let _guard = self.inner.lock();
+        delete_graph_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            name,
+        )
+    }
+
+    pub fn put_graph_node(&self, input: GraphNodeInput<'_>) -> Result<()> {
+        let _guard = self.inner.lock();
+        put_graph_node_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            input,
+        )
+    }
+
+    pub fn get_graph_node(&self, graph_name: &str, node_id: &str) -> Result<GraphNode> {
+        let _guard = self.inner.lock();
+        get_graph_node_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            node_id,
+        )
+    }
+
+    pub fn has_graph_node(&self, graph_name: &str, node_id: &str) -> Result<bool> {
+        let _guard = self.inner.lock();
+        has_graph_node_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            node_id,
+        )
+    }
+
+    pub fn delete_graph_node(&self, graph_name: &str, node_id: &str) -> Result<()> {
+        let _guard = self.inner.lock();
+        delete_graph_node_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            node_id,
+        )
+    }
+
+    pub fn put_graph_edge(&self, input: GraphEdgeInput<'_>) -> Result<()> {
+        let _guard = self.inner.lock();
+        put_graph_edge_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            input,
+        )
+    }
+
+    pub fn get_graph_edge(
+        &self,
+        graph_name: &str,
+        from_node_id: &str,
+        edge_type: &str,
+        to_node_id: &str,
+    ) -> Result<GraphEdge> {
+        let _guard = self.inner.lock();
+        get_graph_edge_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            from_node_id,
+            edge_type,
+            to_node_id,
+        )
+    }
+
+    pub fn has_graph_edge(
+        &self,
+        graph_name: &str,
+        from_node_id: &str,
+        edge_type: &str,
+        to_node_id: &str,
+    ) -> Result<bool> {
+        let _guard = self.inner.lock();
+        has_graph_edge_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            from_node_id,
+            edge_type,
+            to_node_id,
+        )
+    }
+
+    pub fn delete_graph_edge(&self, input: GraphEdgeInput<'_>) -> Result<()> {
+        let _guard = self.inner.lock();
+        delete_graph_edge_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            input,
+        )
+    }
+
+    pub fn graph_neighbors(
+        &self,
+        options: GraphNeighborsOptions<'_>,
+    ) -> Result<Vec<GraphNeighbor>> {
+        let _guard = self.inner.lock();
+        graph_neighbors_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            options,
+        )
+    }
+
+    pub fn graph_walk(&self, options: GraphWalkOptions<'_>) -> Result<Vec<GraphWalkItem>> {
+        let _guard = self.inner.lock();
+        graph_walk_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            options,
+        )
+    }
+
     fn open_or_create(path: impl AsRef<Path>, create: bool) -> Result<Self> {
         let path = path_to_cstring(path.as_ref())?;
         let mut db = ptr::null_mut();
@@ -1043,6 +1207,148 @@ impl SharedDatabaseGuard<'_> {
                 Err(error)
             }
         }
+    }
+
+    pub fn create_graph(&mut self, name: &str) -> Result<()> {
+        create_graph_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            name,
+        )
+    }
+
+    pub fn has_graph(&mut self, name: &str) -> Result<bool> {
+        has_graph_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            name,
+        )
+    }
+
+    pub fn graph_info(&mut self, name: &str) -> Result<GraphInfo> {
+        graph_info_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            name,
+        )
+    }
+
+    pub fn list_graphs(&mut self) -> Result<Vec<GraphInfo>> {
+        list_graphs_raw(self.inner.raw_ptr(), |status| {
+            self.inner.status_locked(status)
+        })
+    }
+
+    pub fn delete_graph(&mut self, name: &str) -> Result<()> {
+        delete_graph_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            name,
+        )
+    }
+
+    pub fn put_graph_node(&mut self, input: GraphNodeInput<'_>) -> Result<()> {
+        put_graph_node_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            input,
+        )
+    }
+
+    pub fn get_graph_node(&mut self, graph_name: &str, node_id: &str) -> Result<GraphNode> {
+        get_graph_node_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            node_id,
+        )
+    }
+
+    pub fn has_graph_node(&mut self, graph_name: &str, node_id: &str) -> Result<bool> {
+        has_graph_node_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            node_id,
+        )
+    }
+
+    pub fn delete_graph_node(&mut self, graph_name: &str, node_id: &str) -> Result<()> {
+        delete_graph_node_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            node_id,
+        )
+    }
+
+    pub fn put_graph_edge(&mut self, input: GraphEdgeInput<'_>) -> Result<()> {
+        put_graph_edge_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            input,
+        )
+    }
+
+    pub fn get_graph_edge(
+        &mut self,
+        graph_name: &str,
+        from_node_id: &str,
+        edge_type: &str,
+        to_node_id: &str,
+    ) -> Result<GraphEdge> {
+        get_graph_edge_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            from_node_id,
+            edge_type,
+            to_node_id,
+        )
+    }
+
+    pub fn has_graph_edge(
+        &mut self,
+        graph_name: &str,
+        from_node_id: &str,
+        edge_type: &str,
+        to_node_id: &str,
+    ) -> Result<bool> {
+        has_graph_edge_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            from_node_id,
+            edge_type,
+            to_node_id,
+        )
+    }
+
+    pub fn delete_graph_edge(&mut self, input: GraphEdgeInput<'_>) -> Result<()> {
+        delete_graph_edge_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            input,
+        )
+    }
+
+    pub fn graph_neighbors(
+        &mut self,
+        options: GraphNeighborsOptions<'_>,
+    ) -> Result<Vec<GraphNeighbor>> {
+        graph_neighbors_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            options,
+        )
+    }
+
+    pub fn graph_walk(&mut self, options: GraphWalkOptions<'_>) -> Result<Vec<GraphWalkItem>> {
+        graph_walk_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            options,
+        )
     }
 
     fn simple_locked(

@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 /*
- * Zova C ABI, v0.19.0 pre-1.0.
+ * Zova C ABI, v0.20.0 pre-1.0.
  *
  * This header exposes a C-compatible object and vector API over Zova's Zig
  * implementation. The ABI is intentionally conservative: opaque handles,
@@ -48,13 +48,16 @@
  * - This ABI exposes database lifecycle, SQL exec, prepared statements,
  *   explicit transactions, explicit vacuum, conversion, backup, compact copy,
  *   restore-to-new-file, objects, chunks, manifests, range reads, assembly,
- *   ObjectWriter, and native vectors.
+ *   ObjectWriter, native vectors, and native graph relationships.
  * - Vector metadata remains application-owned in user SQL tables. Vector search
  *   returns vector ids and distances only.
  * - zova_database connections register read-only SQL vector helpers:
  *   zova_vector_distance, zova_vector_distance_by_id, and zova_vector_search.
  *   Query vector blobs for those SQL helpers are little-endian IEEE-754 f32
  *   arrays with exactly the collection dimension count.
+ * - zova_database connections register read-only SQL graph virtual tables:
+ *   zova_graph_neighbors and zova_graph_walk. These are connection-local
+ *   helpers for joining returned graph node ids back to application SQL rows.
  * - Zova does not automatically run VACUUM or change SQLite PRAGMAs.
  * - App notifications are same-process, in-memory, local to one database
  *   handle, non-persistent, and delivered only to subscription queues. They
@@ -110,6 +113,11 @@ typedef enum zova_status {
     ZOVA_VECTOR_DIMENSION_MISMATCH = 73,
     ZOVA_VECTOR_CORRUPT = 74,
     ZOVA_VECTOR_INVALID = 75,
+    ZOVA_GRAPH_EXISTS = 80,
+    ZOVA_GRAPH_NOT_FOUND = 81,
+    ZOVA_GRAPH_NODE_NOT_FOUND = 82,
+    ZOVA_GRAPH_EDGE_NOT_FOUND = 83,
+    ZOVA_GRAPH_INVALID = 84,
 } zova_status;
 
 typedef enum zova_vector_metric {
@@ -117,6 +125,23 @@ typedef enum zova_vector_metric {
     ZOVA_VECTOR_METRIC_L2 = 1,
     ZOVA_VECTOR_METRIC_DOT = 2,
 } zova_vector_metric;
+
+typedef enum zova_graph_target_type {
+    ZOVA_GRAPH_TARGET_NONE = 0,
+    ZOVA_GRAPH_TARGET_RECORD = 1,
+    ZOVA_GRAPH_TARGET_OBJECT = 2,
+    ZOVA_GRAPH_TARGET_OBJECT_CHUNK = 3,
+    ZOVA_GRAPH_TARGET_VECTOR = 4,
+    ZOVA_GRAPH_TARGET_ENTITY = 5,
+    ZOVA_GRAPH_TARGET_FACT = 6,
+    ZOVA_GRAPH_TARGET_CONCEPT = 7,
+    ZOVA_GRAPH_TARGET_EXTERNAL = 8,
+} zova_graph_target_type;
+
+typedef enum zova_graph_neighbor_direction {
+    ZOVA_GRAPH_NEIGHBOR_OUTGOING = 0,
+    ZOVA_GRAPH_NEIGHBOR_INCOMING = 1,
+} zova_graph_neighbor_direction;
 
 typedef enum zova_step_result {
     ZOVA_STEP_ROW = 1,
@@ -238,6 +263,84 @@ typedef struct zova_vector_input {
     const float *values;
     size_t values_len;
 } zova_vector_input;
+
+/* Owned graph info. Free with zova_graph_info_free. */
+typedef struct zova_graph_info {
+    char *name;
+    size_t name_len;
+    uint64_t node_count;
+    uint64_t edge_count;
+} zova_graph_info;
+
+/* Owned graph list. Free with zova_graph_list_free. */
+typedef struct zova_graph_list {
+    zova_graph_info *items;
+    size_t len;
+} zova_graph_list;
+
+/* Owned graph node. Free with zova_graph_node_free. */
+typedef struct zova_graph_node {
+    char *graph_name;
+    size_t graph_name_len;
+    char *node_id;
+    size_t node_id_len;
+    char *kind;
+    size_t kind_len;
+    int target_type;
+    char *target_namespace;
+    size_t target_namespace_len;
+    uint8_t has_target_namespace;
+    char *target_ref;
+    size_t target_ref_len;
+    uint8_t has_target_ref;
+} zova_graph_node;
+
+/* Owned exact graph edge. Free with zova_graph_edge_free. */
+typedef struct zova_graph_edge {
+    char *graph_name;
+    size_t graph_name_len;
+    char *from_node_id;
+    size_t from_node_id_len;
+    char *edge_type;
+    size_t edge_type_len;
+    char *to_node_id;
+    size_t to_node_id_len;
+} zova_graph_edge;
+
+typedef struct zova_graph_neighbor_result {
+    char *node_id;
+    size_t node_id_len;
+    char *kind;
+    size_t kind_len;
+    char *edge_type;
+    size_t edge_type_len;
+} zova_graph_neighbor_result;
+
+/* Owned graph neighbor results. Free with zova_graph_neighbor_results_free. */
+typedef struct zova_graph_neighbor_results {
+    zova_graph_neighbor_result *items;
+    size_t len;
+} zova_graph_neighbor_results;
+
+typedef struct zova_graph_walk_result {
+    char *node_id;
+    size_t node_id_len;
+    char *kind;
+    size_t kind_len;
+    uint32_t depth;
+    char *predecessor_node_id;
+    size_t predecessor_node_id_len;
+    uint8_t has_predecessor_node_id;
+    char *edge_type;
+    size_t edge_type_len;
+    uint8_t has_edge_type;
+} zova_graph_walk_result;
+
+/* Owned graph walk results. Free with zova_graph_walk_results_free. */
+typedef struct zova_graph_walk_results {
+    zova_graph_walk_result *items;
+    size_t len;
+} zova_graph_walk_results;
 
 enum {
     ZOVA_OPEN_READ_ONLY = 1u << 0
@@ -700,6 +803,117 @@ typedef struct zova_vector_search_by_id_in_within_request {
     zova_vector_search_results *out_results;
 } zova_vector_search_by_id_in_within_request;
 
+typedef struct zova_graph_create_request {
+    zova_database *db;
+    const char *name;
+} zova_graph_create_request;
+
+typedef struct zova_graph_exists_request {
+    zova_database *db;
+    const char *name;
+    uint8_t *out_exists;
+} zova_graph_exists_request;
+
+typedef struct zova_graph_info_get_request {
+    zova_database *db;
+    const char *name;
+    zova_graph_info *out_info;
+} zova_graph_info_get_request;
+
+typedef struct zova_graph_list_request {
+    zova_database *db;
+    zova_graph_list *out_list;
+} zova_graph_list_request;
+
+typedef struct zova_graph_delete_request {
+    zova_database *db;
+    const char *name;
+} zova_graph_delete_request;
+
+typedef struct zova_graph_node_put_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *node_id;
+    const char *kind;
+    int target_type;
+    const char *target_namespace;
+    const char *target_ref;
+} zova_graph_node_put_request;
+
+typedef struct zova_graph_node_get_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *node_id;
+    zova_graph_node *out_node;
+} zova_graph_node_get_request;
+
+typedef struct zova_graph_node_exists_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *node_id;
+    uint8_t *out_exists;
+} zova_graph_node_exists_request;
+
+typedef struct zova_graph_node_delete_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *node_id;
+} zova_graph_node_delete_request;
+
+typedef struct zova_graph_edge_put_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *from_node_id;
+    const char *edge_type;
+    const char *to_node_id;
+} zova_graph_edge_put_request;
+
+typedef struct zova_graph_edge_get_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *from_node_id;
+    const char *edge_type;
+    const char *to_node_id;
+    zova_graph_edge *out_edge;
+} zova_graph_edge_get_request;
+
+typedef struct zova_graph_edge_exists_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *from_node_id;
+    const char *edge_type;
+    const char *to_node_id;
+    uint8_t *out_exists;
+} zova_graph_edge_exists_request;
+
+typedef struct zova_graph_edge_delete_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *from_node_id;
+    const char *edge_type;
+    const char *to_node_id;
+} zova_graph_edge_delete_request;
+
+typedef struct zova_graph_neighbors_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *node_id;
+    int direction;
+    const char *edge_type;
+    size_t limit;
+    zova_graph_neighbor_results *out_results;
+} zova_graph_neighbors_request;
+
+typedef struct zova_graph_walk_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *start_node_id;
+    const char *edge_type;
+    uint32_t max_depth;
+    size_t limit;
+    zova_graph_walk_results *out_results;
+} zova_graph_walk_request;
+
 /* ABI version helpers describe this C boundary, not the .zova file format. */
 uint32_t zova_abi_version_major(void);
 uint32_t zova_abi_version_minor(void);
@@ -717,6 +931,12 @@ void zova_vector_free(zova_vector *vector);
 void zova_vector_search_results_free(zova_vector_search_results *results);
 void zova_vector_collection_info_free(zova_vector_collection_info *info);
 void zova_vector_collection_list_free(zova_vector_collection_list *list);
+void zova_graph_info_free(zova_graph_info *info);
+void zova_graph_list_free(zova_graph_list *list);
+void zova_graph_node_free(zova_graph_node *node);
+void zova_graph_edge_free(zova_graph_edge *edge);
+void zova_graph_neighbor_results_free(zova_graph_neighbor_results *results);
+void zova_graph_walk_results_free(zova_graph_walk_results *results);
 
 /* Database lifecycle, SQL passthrough, prepared statements, and conversion. */
 zova_status zova_database_create(const zova_database_open_request *request);
@@ -828,6 +1048,31 @@ zova_status zova_vector_search_by_id(const zova_vector_search_by_id_request *req
 zova_status zova_vector_search_by_id_in(const zova_vector_search_by_id_in_request *request);
 zova_status zova_vector_search_by_id_within(const zova_vector_search_by_id_within_request *request);
 zova_status zova_vector_search_by_id_in_within(const zova_vector_search_by_id_in_within_request *request);
+
+/*
+ * Native graph operations.
+ *
+ * Graph names, node ids, node kinds, and edge types are application-owned
+ * UTF-8 strings validated by Zova. Graph results contain topology and target
+ * references only; applications should query their own SQL tables for metadata.
+ * zova_graphs_list uses a plural name because zova_graph_list is the owned
+ * result container typedef.
+ */
+zova_status zova_graph_create(const zova_graph_create_request *request);
+zova_status zova_graph_exists(const zova_graph_exists_request *request);
+zova_status zova_graph_info_get(const zova_graph_info_get_request *request);
+zova_status zova_graphs_list(const zova_graph_list_request *request);
+zova_status zova_graph_delete(const zova_graph_delete_request *request);
+zova_status zova_graph_node_put(const zova_graph_node_put_request *request);
+zova_status zova_graph_node_get(const zova_graph_node_get_request *request);
+zova_status zova_graph_node_exists(const zova_graph_node_exists_request *request);
+zova_status zova_graph_node_delete(const zova_graph_node_delete_request *request);
+zova_status zova_graph_edge_put(const zova_graph_edge_put_request *request);
+zova_status zova_graph_edge_get(const zova_graph_edge_get_request *request);
+zova_status zova_graph_edge_exists(const zova_graph_edge_exists_request *request);
+zova_status zova_graph_edge_delete(const zova_graph_edge_delete_request *request);
+zova_status zova_graph_neighbors(const zova_graph_neighbors_request *request);
+zova_status zova_graph_walk(const zova_graph_walk_request *request);
 
 #ifdef __cplusplus
 }

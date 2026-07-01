@@ -1,16 +1,18 @@
 # Zova
 
-SQLite-backed embedded database for records, objects, and vectors in local
-`.zova` files.
+SQLite-backed embedded database for records, objects, vectors, and graph-aware
+relationships in local `.zova` files.
 
 Zova keeps SQLite as the relational core and adds native storage for
 content-addressed objects, chunk manifests, streaming writes, exact vector
-search, SQL-native vector queries, transaction-aware app events, bound
-object/vector stores, diagnostics, salvage, backup, compact copy, and restore.
+search, SQL-native vector queries, graph relationships, SQL-native graph
+traversal, transaction-aware app events, bound object/vector stores,
+diagnostics, salvage, backup, compact copy, and restore.
 
-Current package version: `0.19.0`.
+Current package version: `0.20.0`.
 
-Zova is pre-1.0. The current `.zova` file `format_version` is `3`.
+Zova is pre-1.0. The current `.zova` file `format_version` is `4`.
+Zova `0.20.0` is the graph-aware relationships release.
 
 ## Contents
 
@@ -24,17 +26,19 @@ Zova is pre-1.0. The current `.zova` file `format_version` is `3`.
 8. [Objects](#objects)
 9. [Vectors](#vectors)
 10. [SQL-Native Vector Search](#sql-native-vector-search)
-11. [Operational Safety](#operational-safety)
-12. [App Events](#app-events)
-13. [Diagnostics And Salvage](#diagnostics-and-salvage)
-14. [CLI](#cli)
-15. [Bindings](#bindings)
-16. [Build From Source](#build-from-source)
-17. [SQLite Policy](#sqlite-policy)
-18. [Current Boundaries](#current-boundaries)
-19. [Testing](#testing)
-20. [Release Package Policy](#release-package-policy)
-21. [License](#license)
+11. [Graphs](#graphs)
+12. [SQL-Native Graph Traversal](#sql-native-graph-traversal)
+13. [Operational Safety](#operational-safety)
+14. [App Events](#app-events)
+15. [Diagnostics And Salvage](#diagnostics-and-salvage)
+16. [CLI](#cli)
+17. [Bindings](#bindings)
+18. [Build From Source](#build-from-source)
+19. [SQLite Policy](#sqlite-policy)
+20. [Current Boundaries](#current-boundaries)
+21. [Testing](#testing)
+22. [Release Package Policy](#release-package-policy)
+23. [License](#license)
 
 ## Install
 
@@ -48,7 +52,7 @@ or:
 
 ```toml
 [dependencies]
-zova = "0.19.0"
+zova = "0.20.0"
 ```
 
 Python:
@@ -66,7 +70,7 @@ python -m pip install zova
 Go:
 
 ```sh
-go get github.com/atasesli/zova/bindings/go@v0.19.0
+go get github.com/atasesli/zova/bindings/go@v0.20.0
 ```
 
 The Go binding uses cgo over Zova's C ABI. Build or provide the C ABI library
@@ -93,7 +97,7 @@ Zova vendors SQLite. You do not need a system SQLite installation.
 |---|---|---:|---:|---:|---|
 | Rust | `cargo add zova` | yes | yes | yes | `zova-sys` builds Zova's native C ABI from bundled source |
 | Python | `uv add zova` / `pip install zova` | yes | yes | yes | source-first PyO3 build; no wheel matrix yet |
-| Go | `go get github.com/atasesli/zova/bindings/go@v0.19.0` | yes, for C ABI build | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
+| Go | `go get github.com/atasesli/zova/bindings/go@v0.20.0` | yes, for C ABI build | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
 | C ABI | `zig build c-abi` | yes | no | yes | produces static `libzova_c.a` |
 | Zig | package source | yes | no | yes | native API |
 | CLI | `zig build` | yes | no | yes | source-built command line tool |
@@ -189,6 +193,8 @@ Zova has three first-class storage shapes:
   `SHA-256(full bytes)`.
 - **Vectors:** named vector collections with exact flat search and SQL-native
   query helpers.
+- **Graphs:** named relationship graphs with application-provided stable node
+  IDs and explicit directed edges.
 
 Applications own their metadata in normal SQL tables. Zova-owned private tables
 store object bytes, manifests, chunk rows, vector collections, and vector rows.
@@ -216,6 +222,9 @@ flowchart TD
     Manifest["_zova_object_chunks<br/>object manifests"]
     VecCols["_zova_vector_collections<br/>dimensions and metric"]
     Vecs["_zova_vectors<br/>f32 vector BLOBs"]
+    Graphs["_zova_graphs<br/>named relationship graphs"]
+    Nodes["_zova_graph_nodes<br/>stable app node ids"]
+    Edges["_zova_graph_edges<br/>directed relationships"]
 
     App --> API
     App --> UserSQL
@@ -228,6 +237,9 @@ flowchart TD
     File --> Manifest
     File --> VecCols
     File --> Vecs
+    File --> Graphs
+    Graphs --> Nodes
+    Nodes --> Edges
     Objects --> Manifest
     Manifest --> Chunks
     VecCols --> Vecs
@@ -382,7 +394,7 @@ stronger guarantee; the bound-set id and epoch exist so Zova can detect and
 explain split-file states during open, `doctor`, and `check --deep`.
 
 This is local, manual storage placement. It is not distributed storage, cloud
-sync, automatic path repair, or a multi-file transaction guarantee. v0.19 starts
+sync, automatic path repair, or a multi-file transaction guarantee. v0.20 starts
 with one optional object store and one optional vector store; multiple named
 stores are deferred.
 
@@ -421,7 +433,7 @@ Zova supports collection create/info/list/delete, vector CRUD, batch upsert,
 exact search, candidate-filtered search, search-by-id, and inclusive distance
 thresholds.
 
-Search is exact and flat-scan in `0.19.0`. It is good for local datasets,
+Search is exact and flat-scan in `0.20.0`. It is good for local datasets,
 offline ranking, deterministic tests, and SQL-filter-first workflows. It is not
 yet an ANN engine for million-scale low-latency search.
 
@@ -452,6 +464,73 @@ order by s.rank;
 `query_vector_blob` is little-endian `f32` data. This lets applications combine
 SQL metadata filters with vector ranking without pulling the whole metadata set
 into application code.
+
+## Graphs
+
+Graphs let applications store relationships between records, objects, chunks,
+vectors, entities, facts, concepts, and external references.
+
+Zova does not invent row IDs for your app. Nodes use stable IDs that the
+application provides:
+
+```text
+message:123 --has_attachment--> object:8f...
+message:123 --embedded_as--> vector:chunks:message-123
+entity:person:alice --mentioned_in--> message:123
+fact:991 --supported_by--> chunk:doc7:12
+```
+
+Graph rows store topology and small routing fields only. Application metadata
+stays in normal SQL tables. Zova validates graph names, node IDs, edge types,
+edge endpoint existence, and Zova-owned targets such as object IDs, chunk IDs,
+and vector IDs. It does not validate arbitrary user SQL row existence; apps own
+that contract.
+
+CLI inspection is bounded and privacy-aware:
+
+```sh
+zova graphs app.zova
+zova graph app.zova app
+zova graph-node app.zova app message:123
+zova graph-neighbors --limit 20 app.zova app message:123
+zova graph-walk --max-depth 2 --limit 50 app.zova app message:123
+```
+
+This is a local graph-aware relationship layer, not Neo4j, Cypher, GQL,
+Gremlin, SPARQL, or automatic LLM extraction.
+
+## SQL-Native Graph Traversal
+
+Zova registers read-only graph virtual tables on Zova SQLite connections:
+
+```sql
+select m.body, g.edge_type
+from zova_graph_neighbors as g
+join messages as m on m.graph_node_id = g.node_id
+where g.graph_name = 'default'
+  and g.source_node_id = 'message:123'
+  and g.direction = 'outgoing'
+  and g."limit" = 20
+order by g.rank;
+```
+
+For bounded directed walks:
+
+```sql
+select node_id, depth, predecessor_node_id, edge_type
+from zova_graph_walk
+where graph_name = 'default'
+  and start_node_id = 'message:123'
+  and edge_type_filter = 'mentions'
+  and max_depth = 2
+  and "limit" = 50
+order by rank;
+```
+
+`zova_graph_neighbors` returns one-hop neighboring nodes. `zova_graph_walk`
+returns the start node plus bounded reachable nodes. In both helpers, visible
+`node_id` is the returned node ID; input nodes use `source_node_id` or
+`start_node_id`. Apps join those node IDs back to their own SQL tables.
 
 ## Operational Safety
 
@@ -507,9 +586,12 @@ are opened through Zova helpers; raw SQL transaction scopes that Zova cannot
 track are rejected instead of guessed.
 
 This is useful when one process wants a clean storage-runtime boundary: a write
-workflow stores records, objects, or vectors, then notifies another part of the
-same process to reload by id. It is not cross-process delivery, replay,
-replication, audit logging, or automatic mutation tracking.
+workflow stores records, objects, vectors, or graph relationships, then notifies
+another part of the same process to reload by id. Graph mutations do not emit
+automatic events; call `notify("graph:changed", "...")` explicitly inside the
+same transaction when your app wants listeners to refresh graph-derived views.
+It is not cross-process delivery, replay, replication, audit logging, or
+automatic mutation tracking.
 
 Queue details:
 
@@ -541,7 +623,10 @@ zova salvage damaged.zova recovered.zova
 ```
 
 Salvage never mutates the source file and never overwrites the destination. A
-good backup is still preferred when one exists.
+good backup is still preferred when one exists. In v0.20, salvage is
+graph-aware: it copies valid graph topology and skips invalid graph nodes or
+edges, such as edges whose endpoint nodes or Zova-owned targets cannot be
+validated.
 
 ## CLI
 
@@ -556,6 +641,11 @@ zova chunks app.zova
 zova chunk app.zova <chunk-id-hex>
 zova vectors app.zova
 zova vector-collection app.zova chunks
+zova graphs app.zova
+zova graph app.zova app
+zova graph-node app.zova app message:123
+zova graph-neighbors --limit 20 app.zova app message:123
+zova graph-walk --max-depth 2 --limit 50 app.zova app message:123
 zova tables app.zova
 zova check --deep app.zova
 zova doctor --json app.zova
@@ -575,14 +665,14 @@ Rust users normally use the safe crate:
 
 ```toml
 [dependencies]
-zova = "0.19.0"
+zova = "0.20.0"
 ```
 
 The lower-level raw FFI crate is available as:
 
 ```toml
 [dependencies]
-zova-sys = "0.19.0"
+zova-sys = "0.20.0"
 ```
 
 `zova` exposes `Database` for single-owner code and `SharedDatabase` for an
@@ -591,7 +681,7 @@ serialized; open multiple handles for true SQLite concurrency.
 
 Existing Rust object and vector APIs transparently use a bound store after the
 database is opened. Store create/bind/unbind/split management remains
-native-Zig/CLI-only in v0.19.
+native-Zig/CLI-only in v0.20.
 
 ### Python
 
@@ -606,20 +696,20 @@ It exposes records, prepared statements, transactions, savepoints, app events,
 backup, compact, restore, objects, `ObjectWriter`, vectors, and SQL-native
 vector search.
 
-The package is source-first in `0.19.0`. Installs may build the native extension
+The package is source-first in `0.20.0`. Installs may build the native extension
 locally and require Rust, Zig, and a C compiler. No official wheel matrix is
 promised yet.
 
 Existing Python object and vector APIs transparently use a bound store after the
 database is opened. Store create/bind/unbind/split management remains
-native-Zig/CLI-only in v0.19.
+native-Zig/CLI-only in v0.20.
 
 ### Go
 
 Install:
 
 ```sh
-go get github.com/atasesli/zova/bindings/go@v0.19.0
+go get github.com/atasesli/zova/bindings/go@v0.20.0
 ```
 
 Import:
@@ -637,7 +727,7 @@ zig build c-abi
 
 Existing Go object and vector APIs transparently use a bound store after the
 database is opened. Store create/bind/unbind/split management remains
-native-Zig/CLI-only in v0.19.
+native-Zig/CLI-only in v0.20.
 
 External Go projects should point cgo at an installed Zova C ABI:
 
@@ -735,11 +825,13 @@ synchronous settings automatically.
 
 ## Current Boundaries
 
-Zova `0.19.0` does not include:
+Zova `0.20.0` does not include:
 
 - ANN indexes such as HNSW or IVFFlat
 - vector SQL operators
 - object or chunk virtual tables
+- Cypher, GQL, Gremlin, SPARQL, or Neo4j compatibility
+- automatic graph extraction from SQL, documents, or LLM output
 - embedding generation
 - TypeScript or Swift bindings
 - a Python wheel matrix
@@ -800,13 +892,13 @@ are not release artifacts.
 Release command:
 
 ```sh
-scripts/package-release.sh 0.19.0
+scripts/package-release.sh 0.20.0
 ```
 
 Distribution command for crates.io and PyPI, in that order:
 
 ```sh
-scripts/distribute-release.sh 0.19.0
+scripts/distribute-release.sh 0.20.0
 ```
 
 The Go module tag is created and pushed by `scripts/package-release.sh`.

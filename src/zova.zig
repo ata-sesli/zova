@@ -6,8 +6,8 @@
 //! metadata before treating it as a Zova-owned database.
 //!
 //! Zova is currently pre-1.0, and internal `.zova` format compatibility is
-//! not preserved between experimental format versions. The current v0.12
-//! development format is version `3`: `_zova_meta.format_version = '3'` plus
+//! not preserved between experimental format versions. The current v0.20
+//! development format is version `4`: `_zova_meta.format_version = '4'` plus
 //! the required private object schema and vector collection schema.
 //! `Database.open` is intentionally non-mutating: it validates the file and
 //! rejects old, future, incomplete, or invalid private schemas instead of
@@ -40,6 +40,8 @@
 
 const std = @import("std");
 const fastcdc = @import("object_fastcdc.zig");
+const graph_impl = @import("graph.zig");
+const graph_sql = @import("graph_sql.zig");
 const notify_impl = @import("notify.zig");
 const object_impl = @import("object.zig");
 const sqlite = @import("sqlite.zig");
@@ -53,7 +55,7 @@ const chunks_table = "_zova_chunks";
 const object_chunks_table = "_zova_object_chunks";
 const bound_stores_table = "_zova_bound_stores";
 const magic_value = "zova";
-const format_version = "3";
+const format_version = "4";
 const bound_object_store_role = "object_store";
 const bound_vector_store_role = "vector_store";
 const bound_object_store_name = "default";
@@ -137,6 +139,20 @@ pub const VectorSearchResult = vector_impl.VectorSearchResult;
 pub const VectorSearchResults = vector_impl.VectorSearchResults;
 pub const Notification = notify_impl.Notification;
 pub const NotificationSubscription = notify_impl.NotificationSubscription;
+pub const GraphTargetType = graph_impl.GraphTargetType;
+pub const GraphInfo = graph_impl.GraphInfo;
+pub const GraphList = graph_impl.GraphList;
+pub const GraphNodeInput = graph_impl.GraphNodeInput;
+pub const GraphNode = graph_impl.GraphNode;
+pub const GraphEdgeInput = graph_impl.GraphEdgeInput;
+pub const GraphEdge = graph_impl.GraphEdge;
+pub const GraphNeighborDirection = graph_impl.GraphNeighborDirection;
+pub const GraphNeighborsOptions = graph_impl.GraphNeighborsOptions;
+pub const GraphNeighbor = graph_impl.GraphNeighbor;
+pub const GraphNeighborList = graph_impl.GraphNeighborList;
+pub const GraphWalkOptions = graph_impl.GraphWalkOptions;
+pub const GraphWalkItem = graph_impl.GraphWalkItem;
+pub const GraphWalk = graph_impl.GraphWalk;
 
 /// Information about the optional object store bound to a main `.zova` file.
 ///
@@ -359,8 +375,8 @@ pub const Database = struct {
     /// Create a new initialized `.zova` database.
     ///
     /// This never overwrites an existing file. The file is initialized with the
-    /// private `_zova_meta` table, format version `3`, the required object
-    /// schema, and the required vector collection schema.
+    /// private `_zova_meta` table, format version `4`, and the required
+    /// object, vector, and graph schemas.
     pub fn create(path: [:0]const u8) Error!Database {
         if (!isZovaPath(path)) return error.NotZovaPath;
 
@@ -378,6 +394,7 @@ pub const Database = struct {
 
         try initializeZovaSchema(&raw);
         try vector_sql.register(&raw);
+        try graph_sql.register(&raw);
         const notifications = try initNotifications(&raw);
         errdefer deinitNotifications(notifications);
         return .{ .sqlite_db = raw, .notifications = notifications };
@@ -395,9 +412,9 @@ pub const Database = struct {
     /// Open an existing initialized `.zova` database with explicit options.
     ///
     /// Read-only opens still validate Zova metadata and register connection-
-    /// local SQL vector helpers, but they never write private schema or run
-    /// migrations. Mutating SQL/object/vector APIs fail through SQLite's normal
-    /// read-only error path.
+    /// local SQL vector and graph helpers, but they never write private schema
+    /// or run migrations. Mutating SQL/object/vector/graph APIs fail through
+    /// SQLite's normal read-only error path.
     pub fn openWithOptions(path: [:0]const u8, options: OpenOptions) Error!Database {
         return openInternal(path, options, true);
     }
@@ -433,6 +450,7 @@ pub const Database = struct {
             null;
         errdefer if (bound_vector_store != null) raw.detachDatabase(bound_vector_store_schema_name) catch {};
         try vector_sql.register(&raw);
+        try graph_sql.register(&raw);
         const notifications = try initNotifications(&raw);
         errdefer deinitNotifications(notifications);
         return .{
@@ -559,6 +577,96 @@ pub const Database = struct {
     /// rollback, and savepoint release semantics.
     pub fn notify(self: *Database, channel: []const u8, payload: []const u8) Error!void {
         try self.notifications.notify(channel, payload);
+    }
+
+    /// Create a named graph for application-provided relationship nodes.
+    pub fn createGraph(self: *Database, name: []const u8) Error!void {
+        var graphs = self.graphDatabase();
+        try graphs.createGraph(name);
+    }
+
+    /// Delete a graph and all of its Zova-owned graph nodes and edges.
+    pub fn deleteGraph(self: *Database, name: []const u8) Error!void {
+        var graphs = self.graphDatabase();
+        try graphs.deleteGraph(name);
+    }
+
+    /// Return whether a graph exists.
+    pub fn hasGraph(self: *Database, name: []const u8) Error!bool {
+        var graphs = self.graphDatabase();
+        return try graphs.hasGraph(name);
+    }
+
+    /// Return owned metadata for one graph.
+    pub fn graphInfo(self: *Database, allocator: std.mem.Allocator, name: []const u8) Error!GraphInfo {
+        var graphs = self.graphDatabase();
+        return try graphs.graphInfo(allocator, name);
+    }
+
+    /// List graphs sorted by ascending name.
+    pub fn listGraphs(self: *Database, allocator: std.mem.Allocator) Error!GraphList {
+        var graphs = self.graphDatabase();
+        return try graphs.listGraphs(allocator);
+    }
+
+    /// Create or update a graph node.
+    pub fn putGraphNode(self: *Database, input: GraphNodeInput) Error!void {
+        var graphs = self.graphDatabase();
+        try graphs.putGraphNode(input);
+    }
+
+    /// Return an owned graph node.
+    pub fn getGraphNode(self: *Database, allocator: std.mem.Allocator, graph_name: []const u8, node_id: []const u8) Error!GraphNode {
+        var graphs = self.graphDatabase();
+        return try graphs.getGraphNode(allocator, graph_name, node_id);
+    }
+
+    /// Return whether a graph node exists.
+    pub fn hasGraphNode(self: *Database, graph_name: []const u8, node_id: []const u8) Error!bool {
+        var graphs = self.graphDatabase();
+        return try graphs.hasGraphNode(graph_name, node_id);
+    }
+
+    /// Delete a graph node and its incident graph edges only.
+    pub fn deleteGraphNode(self: *Database, graph_name: []const u8, node_id: []const u8) Error!void {
+        var graphs = self.graphDatabase();
+        try graphs.deleteGraphNode(graph_name, node_id);
+    }
+
+    /// Create an explicit directed graph edge.
+    pub fn putGraphEdge(self: *Database, input: GraphEdgeInput) Error!void {
+        var graphs = self.graphDatabase();
+        try graphs.putGraphEdge(input);
+    }
+
+    /// Return whether an explicit graph edge exists.
+    pub fn hasGraphEdge(self: *Database, graph_name: []const u8, from_node_id: []const u8, edge_type: []const u8, to_node_id: []const u8) Error!bool {
+        var graphs = self.graphDatabase();
+        return try graphs.hasGraphEdge(graph_name, from_node_id, edge_type, to_node_id);
+    }
+
+    /// Return an owned explicit graph edge.
+    pub fn getGraphEdge(self: *Database, allocator: std.mem.Allocator, graph_name: []const u8, from_node_id: []const u8, edge_type: []const u8, to_node_id: []const u8) Error!GraphEdge {
+        var graphs = self.graphDatabase();
+        return try graphs.getGraphEdge(allocator, graph_name, from_node_id, edge_type, to_node_id);
+    }
+
+    /// Delete an explicit graph edge.
+    pub fn deleteGraphEdge(self: *Database, input: GraphEdgeInput) Error!void {
+        var graphs = self.graphDatabase();
+        try graphs.deleteGraphEdge(input);
+    }
+
+    /// Return bounded incoming or outgoing graph neighbors.
+    pub fn graphNeighbors(self: *Database, allocator: std.mem.Allocator, options: GraphNeighborsOptions) Error!GraphNeighborList {
+        var graphs = self.graphDatabase();
+        return try graphs.graphNeighbors(allocator, options);
+    }
+
+    /// Return a bounded directed walk from one graph node.
+    pub fn graphWalk(self: *Database, allocator: std.mem.Allocator, options: GraphWalkOptions) Error!GraphWalk {
+        var graphs = self.graphDatabase();
+        return try graphs.graphWalk(allocator, options);
     }
 
     /// Copy this database to a new `.zova` destination with SQLite's online
@@ -1299,6 +1407,10 @@ pub const Database = struct {
         };
     }
 
+    fn graphDatabase(self: *Database) graph_impl.Database {
+        return .{ .sqlite_db = &self.sqlite_db };
+    }
+
     fn rejectBoundStoreManagementInsideMainTransaction(self: *Database) Error!void {
         if (hasActiveTransaction(&self.sqlite_db)) {
             return error.ObjectTransactionActive;
@@ -1450,6 +1562,7 @@ fn initializeZovaSchema(db: *sqlite.Database) sqlite.Error!void {
     try initializeMetadata(db);
     try initializeObjectSchema(db);
     try initializeVectorSchema(db);
+    try initializeGraphSchema(db);
 }
 
 fn initializeMetadata(db: *sqlite.Database) sqlite.Error!void {
@@ -1465,7 +1578,7 @@ fn initializeMetadata(db: *sqlite.Database) sqlite.Error!void {
         \\  value text not null
         \\);
         \\insert into _zova_meta (key, value) values ('magic', 'zova');
-        \\insert into _zova_meta (key, value) values ('format_version', '3');
+        \\insert into _zova_meta (key, value) values ('format_version', '4');
     );
 
     var insert_id = try db.prepare("insert into _zova_meta (key, value) values ('database_id', ?)");
@@ -1483,6 +1596,12 @@ fn initializeObjectSchema(db: *sqlite.Database) sqlite.Error!void {
 fn initializeVectorSchema(db: *sqlite.Database) sqlite.Error!void {
     try db.exec(vector_impl.collections_schema_sql ++ ";");
     try db.exec(vector_impl.vectors_schema_sql ++ ";");
+}
+
+fn initializeGraphSchema(db: *sqlite.Database) sqlite.Error!void {
+    try db.exec(graph_impl.graphs_schema_sql ++ ";");
+    try db.exec(graph_impl.graph_nodes_schema_sql ++ ";");
+    try db.exec(graph_impl.graph_edges_schema_sql ++ ";");
 }
 
 fn markAsObjectStore(db: *sqlite.Database) Error!void {
@@ -2549,6 +2668,7 @@ fn validateZovaSchema(db: *sqlite.Database) Error!void {
     try ensureMainDatabaseRole(db);
     try validateObjectSchema(db);
     try validateVectorSchema(db);
+    try validateGraphSchema(db);
     try validateOptionalBoundStoreSchema(db);
 }
 
@@ -2594,6 +2714,34 @@ fn validateVectorSchema(db: *sqlite.Database) Error!void {
         "values",
     };
     try validateRequiredTable(db, "_zova_vectors", &vector_columns, vector_impl.vectors_schema_sql);
+}
+
+fn validateGraphSchema(db: *sqlite.Database) Error!void {
+    const graph_columns = [_][]const u8{
+        "name",
+        "created_order",
+    };
+    try validateRequiredTable(db, graph_impl.graphs_table, &graph_columns, graph_impl.graphs_schema_sql);
+
+    const node_columns = [_][]const u8{
+        "graph_name",
+        "node_id",
+        "kind",
+        "target_type",
+        "target_namespace",
+        "target_ref",
+        "created_order",
+    };
+    try validateRequiredTable(db, graph_impl.graph_nodes_table, &node_columns, graph_impl.graph_nodes_schema_sql);
+
+    const edge_columns = [_][]const u8{
+        "graph_name",
+        "from_node_id",
+        "edge_type",
+        "to_node_id",
+        "created_order",
+    };
+    try validateRequiredTable(db, graph_impl.graph_edges_table, &edge_columns, graph_impl.graph_edges_schema_sql);
 }
 
 fn validateRequiredTable(
@@ -2769,6 +2917,16 @@ fn insertObjectReference(db: *Database, object_id: ObjectId) !void {
     try std.testing.expectEqual(sqlite.Step.done, try stmt.step());
 }
 
+fn testingLowerHexAlloc(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    const digits = "0123456789abcdef";
+    const out = try allocator.alloc(u8, bytes.len * 2);
+    for (bytes, 0..) |byte, index| {
+        out[index * 2] = digits[@intCast(byte >> 4)];
+        out[index * 2 + 1] = digits[@intCast(byte & 0x0f)];
+    }
+    return out;
+}
+
 const OperationalFixtureIds = struct {
     primary_object: ObjectId,
     streamed_object: ObjectId,
@@ -2833,6 +2991,13 @@ fn populateOperationalFixture(
         .{ .id = "doc-a", .values = &.{ 1.0, 0.0, 0.0 } },
         .{ .id = "doc-b", .values = &.{ 0.0, 2.0, 0.0 } },
     });
+
+    try db.createGraph("ops");
+    try db.putGraphNode(.{ .graph_name = "ops", .node_id = "doc:primary", .kind = "document", .target_type = .record, .target_namespace = "docs", .target_ref = "1" });
+    try db.putGraphNode(.{ .graph_name = "ops", .node_id = "doc:streamed", .kind = "document", .target_type = .record, .target_namespace = "docs", .target_ref = "2" });
+    try db.putGraphNode(.{ .graph_name = "ops", .node_id = "vector:doc-a", .kind = "embedding", .target_type = .vector, .target_namespace = "docs", .target_ref = "doc-a" });
+    try db.putGraphEdge(.{ .graph_name = "ops", .from_node_id = "doc:primary", .edge_type = "related_to", .to_node_id = "doc:streamed" });
+    try db.putGraphEdge(.{ .graph_name = "ops", .from_node_id = "doc:primary", .edge_type = "embedded_as", .to_node_id = "vector:doc-a" });
 
     const loose_chunk = objectChunkId(loose_bytes);
     try db.putObjectChunk(loose_chunk, loose_bytes);
@@ -2904,6 +3069,19 @@ fn expectOperationalFixture(
     try std.testing.expectEqual(@as(usize, 2), results.items.len);
     try std.testing.expectEqualStrings("doc-a", results.items[0].id);
 
+    try std.testing.expect(try db.hasGraph("ops"));
+    try std.testing.expect(try db.hasGraphNode("ops", "doc:primary"));
+    try std.testing.expect(try db.hasGraphEdge("ops", "doc:primary", "embedded_as", "vector:doc-a"));
+    var neighbors = try db.graphNeighbors(std.testing.allocator, .{
+        .graph_name = "ops",
+        .node_id = "doc:primary",
+        .limit = 10,
+    });
+    defer neighbors.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), neighbors.items.len);
+    try std.testing.expectEqualStrings("doc:streamed", neighbors.items[0].node_id);
+    try std.testing.expectEqualStrings("vector:doc-a", neighbors.items[1].node_id);
+
     const query_blob = try vector_impl.encodeF32Le(std.testing.allocator, &.{ 1.0, 0.0, 0.0 });
     defer std.testing.allocator.free(query_blob);
 
@@ -2966,7 +3144,7 @@ test "created zova database stores metadata" {
 
     try std.testing.expectEqual(sqlite.Step.row, try meta.step());
     try std.testing.expectEqualStrings("format_version", meta.columnText(0));
-    try std.testing.expectEqualStrings("3", meta.columnText(1));
+    try std.testing.expectEqualStrings("4", meta.columnText(1));
 
     try std.testing.expectEqual(sqlite.Step.row, try meta.step());
     try std.testing.expectEqualStrings("magic", meta.columnText(0));
@@ -3052,7 +3230,7 @@ test "open rejects wrong magic" {
         try raw.exec(
             \\create table _zova_meta (key text primary key, value text not null);
             \\insert into _zova_meta (key, value) values ('magic', 'not-zova');
-            \\insert into _zova_meta (key, value) values ('format_version', '3');
+            \\insert into _zova_meta (key, value) values ('format_version', '4');
         );
     }
 
@@ -3090,7 +3268,7 @@ test "open rejects future format version" {
         try raw.exec(
             \\create table _zova_meta (key text primary key, value text not null);
             \\insert into _zova_meta (key, value) values ('magic', 'zova');
-            \\insert into _zova_meta (key, value) values ('format_version', '4');
+            \\insert into _zova_meta (key, value) values ('format_version', '5');
         );
     }
 
@@ -3366,6 +3544,9 @@ test "split object store moves existing object storage into a bound store" {
     try db.exec("create table documents (object_id blob not null, title text not null)");
 
     const object_id = try db.putObject("object moved into split store");
+    const object_id_hex = try testingLowerHexAlloc(std.testing.allocator, &object_id);
+    defer std.testing.allocator.free(object_id_hex);
+
     var insert = try db.prepare("insert into documents (object_id, title) values (?, 'kept in main')");
     defer insert.deinit();
     try insert.bindBlob(1, &object_id);
@@ -3386,6 +3567,11 @@ test "split object store moves existing object storage into a bound store" {
         .{ .index = 0, .hash = left_hash, .offset = 0, .size_bytes = left_chunk.len },
         .{ .index = 1, .hash = right_hash, .offset = left_chunk.len, .size_bytes = right_chunk.len },
     });
+
+    try db.createGraph("split_objects");
+    try db.putGraphNode(.{ .graph_name = "split_objects", .node_id = "doc:object", .kind = "document", .target_type = .record, .target_namespace = "documents", .target_ref = "kept in main" });
+    try db.putGraphNode(.{ .graph_name = "split_objects", .node_id = "object:primary", .kind = "object", .target_type = .object, .target_ref = object_id_hex });
+    try db.putGraphEdge(.{ .graph_name = "split_objects", .from_node_id = "doc:object", .edge_type = "has_object", .to_node_id = "object:primary" });
 
     try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from _zova_objects"));
     try std.testing.expectEqual(@as(i64, 4), try testingCount(&db, "select count(*) from _zova_chunks"));
@@ -3424,6 +3610,17 @@ test "split object store moves existing object storage into a bound store" {
     defer chunk.deinit(std.testing.allocator);
     try std.testing.expectEqualSlices(u8, "loose split chunk", chunk.bytes);
 
+    try std.testing.expect(try db.hasGraphNode("split_objects", "object:primary"));
+    try std.testing.expect(try db.hasGraphEdge("split_objects", "doc:object", "has_object", "object:primary"));
+    var graph_neighbors = try db.graphNeighbors(std.testing.allocator, .{
+        .graph_name = "split_objects",
+        .node_id = "doc:object",
+        .limit = 10,
+    });
+    defer graph_neighbors.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), graph_neighbors.items.len);
+    try std.testing.expectEqualStrings("object:primary", graph_neighbors.items[0].node_id);
+
     try db.backupTo(backup_path, .{});
     var backup = try Database.open(backup_path);
     defer backup.deinit();
@@ -3431,6 +3628,7 @@ test "split object store moves existing object storage into a bound store" {
     try std.testing.expectEqual(@as(i64, 2), try testingCount(&backup, "select count(*) from _zova_objects"));
     try std.testing.expectEqual(@as(i64, 4), try testingCount(&backup, "select count(*) from _zova_chunks"));
     try std.testing.expectEqual(@as(i64, 3), try testingCount(&backup, "select count(*) from _zova_object_chunks"));
+    try std.testing.expect(try backup.hasGraphEdge("split_objects", "doc:object", "has_object", "object:primary"));
 }
 
 test "optional bound vector store routes vector APIs and sql native search after reopen" {
@@ -3640,6 +3838,10 @@ test "split vector store moves existing vector storage into a bound store" {
         .{ .id = "doc-a", .values = &.{ 1.0, 0.0 } },
         .{ .id = "doc-b", .values = &.{ 0.0, 2.0 } },
     });
+    try db.createGraph("split_vectors");
+    try db.putGraphNode(.{ .graph_name = "split_vectors", .node_id = "doc:a", .kind = "document", .target_type = .record, .target_namespace = "documents", .target_ref = "doc-a" });
+    try db.putGraphNode(.{ .graph_name = "split_vectors", .node_id = "vector:doc-a", .kind = "embedding", .target_type = .vector, .target_namespace = "docs", .target_ref = "doc-a" });
+    try db.putGraphEdge(.{ .graph_name = "split_vectors", .from_node_id = "doc:a", .edge_type = "embedded_as", .to_node_id = "vector:doc-a" });
     try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from _zova_vector_collections"));
     try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from _zova_vectors"));
 
@@ -3662,6 +3864,8 @@ test "split vector store moves existing vector storage into a bound store" {
     defer results.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 2), results.items.len);
     try std.testing.expectEqualStrings("doc-a", results.items[0].id);
+    try std.testing.expect(try db.hasGraphNode("split_vectors", "vector:doc-a"));
+    try std.testing.expect(try db.hasGraphEdge("split_vectors", "doc:a", "embedded_as", "vector:doc-a"));
 
     const query_blob = try vector_impl.encodeF32Le(std.testing.allocator, &.{ 1.0, 0.0 });
     defer std.testing.allocator.free(query_blob);
@@ -3677,6 +3881,7 @@ test "split vector store moves existing vector storage into a bound store" {
     try std.testing.expectEqual(@as(?BoundVectorStoreInfo, null), try backup.boundVectorStore(std.testing.allocator));
     try std.testing.expectEqual(@as(i64, 1), try testingCount(&backup, "select count(*) from _zova_vector_collections"));
     try std.testing.expectEqual(@as(i64, 2), try testingCount(&backup, "select count(*) from _zova_vectors"));
+    try std.testing.expect(try backup.hasGraphEdge("split_vectors", "doc:a", "embedded_as", "vector:doc-a"));
 }
 
 test "open rejects bound object store id mismatch" {
@@ -3857,7 +4062,7 @@ test "object store files are not accepted as main databases" {
     try std.testing.expectError(error.BoundStoreInvalid, Database.open(store_path));
 }
 
-test "open rejects format two database missing required object table without mutating it" {
+test "open rejects current format database missing required object table without mutating it" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -3868,7 +4073,7 @@ test "open rejects format two database missing required object table without mut
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "3");
+        try testingWriteMetadata(&raw, "zova", "4");
     }
 
     try std.testing.expectError(error.NotZovaDatabase, Database.open(db_path));
@@ -3881,7 +4086,7 @@ test "open rejects format two database missing required object table without mut
     try testingExpectTableCount(&raw, "_zova_object_chunks", 0);
 }
 
-test "open rejects version three database missing required vector table without mutating it" {
+test "open rejects current format database missing required vector table without mutating it" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -3892,7 +4097,7 @@ test "open rejects version three database missing required vector table without 
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "3");
+        try testingWriteMetadata(&raw, "zova", "4");
         try raw.exec(object_impl.objects_schema_sql ++ ";");
         try raw.exec(object_impl.chunks_schema_sql ++ ";");
         try raw.exec(object_impl.object_chunks_schema_sql ++ ";");
@@ -3918,7 +4123,7 @@ test "open rejects required object table missing required column" {
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "3");
+        try testingWriteMetadata(&raw, "zova", "4");
         try raw.exec(
             \\create table _zova_objects (
             \\  object_id blob not null primary key check (length(object_id) = 32),
@@ -3957,7 +4162,7 @@ test "open rejects required object table missing required constraint" {
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "3");
+        try testingWriteMetadata(&raw, "zova", "4");
         try raw.exec(
             \\create table _zova_objects (
             \\  object_id blob not null primary key check (length(object_id) = 32),
@@ -3997,7 +4202,7 @@ test "open rejects fake constraint text in required object table" {
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "3");
+        try testingWriteMetadata(&raw, "zova", "4");
         try raw.exec(
             \\create table _zova_objects (
             \\  object_id blob not null primary key check (length(object_id) = 32),
@@ -4037,7 +4242,7 @@ test "open rejects required vector table missing required column" {
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "3");
+        try testingWriteMetadata(&raw, "zova", "4");
         try raw.exec(object_impl.objects_schema_sql ++ ";");
         try raw.exec(object_impl.chunks_schema_sql ++ ";");
         try raw.exec(object_impl.object_chunks_schema_sql ++ ";");
@@ -4204,13 +4409,16 @@ test "converted zova remains readable through sqlite wrapper" {
     defer meta.deinit();
 
     try std.testing.expectEqual(sqlite.Step.row, try meta.step());
-    try std.testing.expectEqualStrings("3", meta.columnText(0));
+    try std.testing.expectEqualStrings("4", meta.columnText(0));
 
     try testingExpectTableCount(&raw, "_zova_objects", 1);
     try testingExpectTableCount(&raw, "_zova_chunks", 1);
     try testingExpectTableCount(&raw, "_zova_object_chunks", 1);
     try testingExpectTableCount(&raw, "_zova_vector_collections", 1);
     try testingExpectTableCount(&raw, "_zova_vectors", 1);
+    try testingExpectTableCount(&raw, "_zova_graphs", 1);
+    try testingExpectTableCount(&raw, "_zova_graph_nodes", 1);
+    try testingExpectTableCount(&raw, "_zova_graph_edges", 1);
 }
 
 test "convert sqlite to zova preserves index view and trigger" {

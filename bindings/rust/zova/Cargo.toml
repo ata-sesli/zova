@@ -7,9 +7,9 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/zova"
-description = "Safe Rust bindings for Zova, a SQLite-backed embedded database for records, objects, and vectors."
+description = "Safe Rust bindings for Zova, a SQLite-backed embedded database for records, objects, vectors, and graph relationships."
 readme = "README.md"
-keywords = ["zova", "sqlite", "embedded", "vectors", "objects"]
+keywords = ["zova", "sqlite", "embedded", "vectors", "graphs"]
 categories = ["database", "api-bindings"]
 include = [
     "Cargo.toml",
@@ -21,7 +21,7 @@ include = [
 ]
 
 [dependencies]
-zova-sys = { version = "0.19.0", path = "../zova-sys" }
+zova-sys = { version = "0.20.0", path = "../zova-sys" }
 
 [lib]
 path = "src/lib.rs"

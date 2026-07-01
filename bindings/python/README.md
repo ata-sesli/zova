@@ -19,7 +19,9 @@ rules.
 7. [App Events](#app-events)
 8. [Objects](#objects)
 9. [Vectors](#vectors)
-10. [SQL-Native Vector Search](#sql-native-vector-search)
+10. [Graphs](#graphs)
+11. [Bound Stores](#bound-stores)
+12. [SQL-Native Vector Search](#sql-native-vector-search)
 
 ## How It Fits
 
@@ -50,12 +52,12 @@ After the Python package is published to PyPI:
 python -m pip install zova
 ```
 
-The v0.19 Python package is source-first. It builds the PyO3 extension locally
+The v0.20 Python package is source-first. It builds the PyO3 extension locally
 through maturin and Cargo, and the Rust crates `zova` and `zova-sys` must be
 available on crates.io first. Users need Python 3.10 or newer, Rust/Cargo, Zig
 0.16.0 or newer, and a working C compiler/linker.
 
-No official platform wheel matrix is promised in v0.19.
+No official platform wheel matrix is promised in v0.20.
 
 ## Local Development
 
@@ -75,8 +77,8 @@ The Python API is pre-1.0 and may still change alongside the Rust binding.
 
 The Python package exposes database lifecycle, conversion, prepared SQL
 statements, transactions, explicit vacuum, backup/compact/restore, objects,
-streaming object writes, vectors, SQL-native vector search, same-process app
-events, context managers, and Zova status exceptions.
+streaming object writes, vectors, SQL-native vector search, graphs,
+same-process app events, context managers, and Zova status exceptions.
 
 One Python `Database` object owns one native handle. The native C ABI serializes
 calls on that handle, so one handle is safe but not parallel. Open additional
@@ -144,9 +146,10 @@ By default, each operation verifies the destination after copying. Pass
 `zova check --deep`.
 
 Diagnostic recovery commands such as `zova doctor`, `zova salvage --dry-run`,
-and `zova salvage <source> <destination>` are CLI-first in the v0.16 line. The
-Python package does not expose typed doctor/salvage report APIs yet, and library
-code should not parse the human text output as a stable binding contract.
+and `zova salvage <source> <destination>` are CLI-first. In v0.20, CLI salvage
+copies valid graph topology and skips invalid graph nodes or edges. The Python
+package does not expose typed doctor/salvage report APIs yet, and library code
+should not parse the human text output as a stable binding contract.
 
 ## App Events
 
@@ -174,9 +177,9 @@ scopes are rejected because Zova cannot track their notification lifetime.
 
 Event delivery is queue-only in v0.18: no callbacks, no blocking receive, no
 cross-process delivery, no replay after restart, and no automatic logging of SQL,
-object, or vector mutations. Each subscription queue holds 1024 notifications
-and drops the oldest entries on overflow; the next received notification reports
-how many were dropped before it.
+object, vector, or graph mutations. Each subscription queue holds 1024
+notifications and drops the oldest entries on overflow; the next received
+notification reports how many were dropped before it.
 
 ## Objects
 
@@ -283,9 +286,72 @@ Deleting a vector collection removes Zova's private vector rows only. User SQL
 metadata rows that reference vector ids are application-owned and remain in
 place.
 
+## Graphs
+
+Graphs store relationship topology while application metadata stays in SQL
+tables, objects, and vectors. Apps provide stable node IDs and can point nodes
+at records, objects, object chunks, vectors, entities, facts, concepts, or
+external references.
+
+```python
+db.create_graph(zova.DEFAULT_GRAPH_NAME)
+db.put_graph_node(
+    zova.GraphNodeInput(
+        zova.DEFAULT_GRAPH_NAME,
+        "message:1",
+        "message",
+        zova.GraphTargetType.RECORD,
+        "messages",
+        "1",
+    )
+)
+db.put_graph_node(
+    zova.GraphNodeInput(
+        zova.DEFAULT_GRAPH_NAME,
+        "entity:zova",
+        "entity",
+        zova.GraphTargetType.ENTITY,
+        None,
+        "zova",
+    )
+)
+db.put_graph_edge(
+    zova.GraphEdgeInput(
+        zova.DEFAULT_GRAPH_NAME,
+        "message:1",
+        "mentions",
+        "entity:zova",
+    )
+)
+```
+
+Use `graph_neighbors()` for one-hop expansion and `graph_walk()` for bounded
+directed walks. Zova validates object, chunk, and vector targets it owns, but
+arbitrary SQL row existence remains the application's job. Node IDs may contain
+sensitive app identifiers, so choose export-safe IDs when files may leave the
+app.
+
+SQL-native graph helpers are available through ordinary prepared statements:
+
+```python
+with db.prepare(
+    "select m.body "
+    "from zova_graph_neighbors as g "
+    "join messages as m on m.graph_node_id = g.node_id "
+    "where g.graph_name = 'default' "
+    "and g.source_node_id = 'message:1' "
+    'and g."limit" = 20 '
+    "order by g.rank"
+) as stmt:
+    ...
+```
+
+Use `zova_graph_neighbors` for one-hop joins and `zova_graph_walk` for bounded
+directed walks with `depth`, `predecessor_node_id`, and `edge_type` columns.
+
 ## Bound Stores
 
-In v0.19, a `.zova` file may be bound to one object store and one vector store
+In v0.20, a `.zova` file may be bound to one object store and one vector store
 through the native Zig API or CLI. The Python object and vector methods above
 transparently use those stores after `Database.open`. Store
 create/bind/unbind/split management is not exposed as a Python API yet.

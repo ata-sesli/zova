@@ -1,4 +1,9 @@
 use crate::error::{closed_error, zova_error};
+use crate::graph::{
+    edge_input_from_py, neighbors_options_from_py, node_input_from_py, py_graph_edge,
+    py_graph_info, py_graph_neighbors, py_graph_node, py_graph_walk, walk_options_from_py,
+    PyGraphEdge, PyGraphInfo, PyGraphNeighbor, PyGraphNode, PyGraphWalkItem,
+};
 use crate::notification::PySubscription;
 use crate::object::{
     chunk_id_from_py, manifest_chunks_from_py, object_id_from_py, PyObjectId, PyObjectManifest,
@@ -466,6 +471,123 @@ impl PyDatabase {
             )
             .map_err(zova_error)?;
         Ok(py_search_results(results))
+    }
+
+    pub(crate) fn create_graph(&mut self, name: &str) -> PyResult<()> {
+        self.db_mut()?.create_graph(name).map_err(zova_error)
+    }
+
+    pub(crate) fn has_graph(&mut self, name: &str) -> PyResult<bool> {
+        self.db_mut()?.has_graph(name).map_err(zova_error)
+    }
+
+    pub(crate) fn graph_info(&mut self, name: &str) -> PyResult<PyGraphInfo> {
+        let info = self.db_mut()?.graph_info(name).map_err(zova_error)?;
+        Ok(py_graph_info(info))
+    }
+
+    pub(crate) fn list_graphs(&mut self) -> PyResult<Vec<PyGraphInfo>> {
+        let graphs = self.db_mut()?.list_graphs().map_err(zova_error)?;
+        Ok(graphs.into_iter().map(py_graph_info).collect())
+    }
+
+    pub(crate) fn delete_graph(&mut self, name: &str) -> PyResult<()> {
+        self.db_mut()?.delete_graph(name).map_err(zova_error)
+    }
+
+    pub(crate) fn put_graph_node(&mut self, input: &Bound<'_, PyAny>) -> PyResult<()> {
+        let input = node_input_from_py(input)?;
+        self.db_mut()?
+            .put_graph_node(input.as_rust())
+            .map_err(zova_error)
+    }
+
+    pub(crate) fn get_graph_node(
+        &mut self,
+        graph_name: &str,
+        node_id: &str,
+    ) -> PyResult<PyGraphNode> {
+        let node = self
+            .db_mut()?
+            .get_graph_node(graph_name, node_id)
+            .map_err(zova_error)?;
+        Ok(py_graph_node(node))
+    }
+
+    pub(crate) fn has_graph_node(&mut self, graph_name: &str, node_id: &str) -> PyResult<bool> {
+        self.db_mut()?
+            .has_graph_node(graph_name, node_id)
+            .map_err(zova_error)
+    }
+
+    pub(crate) fn delete_graph_node(&mut self, graph_name: &str, node_id: &str) -> PyResult<()> {
+        self.db_mut()?
+            .delete_graph_node(graph_name, node_id)
+            .map_err(zova_error)
+    }
+
+    pub(crate) fn put_graph_edge(&mut self, input: &Bound<'_, PyAny>) -> PyResult<()> {
+        let input = edge_input_from_py(input)?;
+        self.db_mut()?
+            .put_graph_edge(input.as_rust())
+            .map_err(zova_error)
+    }
+
+    pub(crate) fn get_graph_edge(
+        &mut self,
+        graph_name: &str,
+        from_node_id: &str,
+        edge_type: &str,
+        to_node_id: &str,
+    ) -> PyResult<PyGraphEdge> {
+        let edge = self
+            .db_mut()?
+            .get_graph_edge(graph_name, from_node_id, edge_type, to_node_id)
+            .map_err(zova_error)?;
+        Ok(py_graph_edge(edge))
+    }
+
+    pub(crate) fn has_graph_edge(
+        &mut self,
+        graph_name: &str,
+        from_node_id: &str,
+        edge_type: &str,
+        to_node_id: &str,
+    ) -> PyResult<bool> {
+        self.db_mut()?
+            .has_graph_edge(graph_name, from_node_id, edge_type, to_node_id)
+            .map_err(zova_error)
+    }
+
+    pub(crate) fn delete_graph_edge(&mut self, input: &Bound<'_, PyAny>) -> PyResult<()> {
+        let input = edge_input_from_py(input)?;
+        self.db_mut()?
+            .delete_graph_edge(input.as_rust())
+            .map_err(zova_error)
+    }
+
+    pub(crate) fn graph_neighbors(
+        &mut self,
+        options: &Bound<'_, PyAny>,
+    ) -> PyResult<Vec<PyGraphNeighbor>> {
+        let options = neighbors_options_from_py(options)?;
+        let neighbors = self
+            .db_mut()?
+            .graph_neighbors(options.as_rust())
+            .map_err(zova_error)?;
+        Ok(py_graph_neighbors(neighbors))
+    }
+
+    pub(crate) fn graph_walk(
+        &mut self,
+        options: &Bound<'_, PyAny>,
+    ) -> PyResult<Vec<PyGraphWalkItem>> {
+        let options = walk_options_from_py(options)?;
+        let items = self
+            .db_mut()?
+            .graph_walk(options.as_rust())
+            .map_err(zova_error)?;
+        Ok(py_graph_walk(items))
     }
 
     pub(crate) fn __enter__(slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {

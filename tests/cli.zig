@@ -50,6 +50,113 @@ test "cli usage errors return exit code 2" {
     try std.testing.expect(std.mem.indexOf(u8, missing.stderr, "usage") != null);
 }
 
+test "cli graph commands inspect graphs nodes neighbors and walks" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "graphs.zova");
+
+    {
+        var db = try zova.Database.create(db_path);
+        defer db.deinit();
+
+        try db.createGraph("app");
+        try db.putGraphNode(.{ .graph_name = "app", .node_id = "message:1", .kind = "message", .target_type = .record, .target_ref = "messages:1" });
+        try db.putGraphNode(.{ .graph_name = "app", .node_id = "object:1", .kind = "attachment", .target_type = .external, .target_ref = "object:1" });
+        try db.putGraphNode(.{ .graph_name = "app", .node_id = "message:2", .kind = "message", .target_type = .record, .target_ref = "messages:2" });
+        try db.putGraphEdge(.{ .graph_name = "app", .from_node_id = "message:1", .edge_type = "has_attachment", .to_node_id = "object:1" });
+        try db.putGraphEdge(.{ .graph_name = "app", .from_node_id = "message:1", .edge_type = "replies_to", .to_node_id = "message:2" });
+    }
+
+    var graphs = try runCli(&.{ "zova", "graphs", "--json", db_path });
+    defer graphs.deinit();
+    try std.testing.expectEqual(@as(u8, 0), graphs.code);
+    var graphs_json = try parseJson(graphs.stdout);
+    defer graphs_json.deinit();
+    try expectJsonString(graphs_json.value.object, "command", "graphs");
+    try expectJsonArrayLen(graphs_json.value.object, "graphs", 1);
+
+    var graph = try runCli(&.{ "zova", "graph", db_path, "app" });
+    defer graph.deinit();
+    try std.testing.expectEqual(@as(u8, 0), graph.code);
+    try expectContains(graph.stdout, "graph: app");
+    try expectContains(graph.stdout, "nodes: 3");
+    try expectContains(graph.stdout, "edges: 2");
+
+    var node = try runCli(&.{ "zova", "graph-node", "--json", db_path, "app", "message:1" });
+    defer node.deinit();
+    try std.testing.expectEqual(@as(u8, 0), node.code);
+    var node_json = try parseJson(node.stdout);
+    defer node_json.deinit();
+    try expectJsonString(node_json.value.object, "command", "graph-node");
+    try expectJsonString(node_json.value.object, "node_id", "message:1");
+    try expectJsonString(node_json.value.object, "kind", "message");
+
+    var neighbors = try runCli(&.{ "zova", "graph-neighbors", "--json", "--limit", "1", db_path, "app", "message:1" });
+    defer neighbors.deinit();
+    try std.testing.expectEqual(@as(u8, 0), neighbors.code);
+    var neighbors_json = try parseJson(neighbors.stdout);
+    defer neighbors_json.deinit();
+    try expectJsonString(neighbors_json.value.object, "command", "graph-neighbors");
+    try expectJsonArrayLen(neighbors_json.value.object, "neighbors", 1);
+    try expectJsonBool(neighbors_json.value.object, "truncated", true);
+
+    var walk = try runCli(&.{ "zova", "graph-walk", "--json", "--max-depth", "2", db_path, "app", "message:1" });
+    defer walk.deinit();
+    try std.testing.expectEqual(@as(u8, 0), walk.code);
+    var walk_json = try parseJson(walk.stdout);
+    defer walk_json.deinit();
+    try expectJsonString(walk_json.value.object, "command", "graph-walk");
+    try expectJsonArrayLen(walk_json.value.object, "nodes", 3);
+}
+
+test "cli graph usage errors and diagnostics are bounded" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "graph-diagnostic.zova");
+
+    {
+        var db = try zova.Database.create(db_path);
+        defer db.deinit();
+        try db.createGraph("app");
+        try db.putGraphNode(.{ .graph_name = "app", .node_id = "message:1", .kind = "message" });
+    }
+
+    var invalid = try runCli(&.{ "zova", "graph-neighbors", "--limit", "101", db_path, "app", "message:1" });
+    defer invalid.deinit();
+    try std.testing.expectEqual(@as(u8, 2), invalid.code);
+
+    {
+        var raw = try zova.sqlite.Database.open(db_path);
+        defer raw.deinit();
+        try raw.exec(
+            \\insert into _zova_graph_edges (graph_name, from_node_id, edge_type, to_node_id, created_order)
+            \\values ('app', 'message:1', 'mentions', 'missing:entity', 1)
+        );
+    }
+
+    var doctor = try runCli(&.{ "zova", "doctor", "--json", "--limit", "1", db_path });
+    defer doctor.deinit();
+    try std.testing.expectEqual(@as(u8, 4), doctor.code);
+    var doctor_json = try parseJson(doctor.stderr);
+    defer doctor_json.deinit();
+    try expectJsonString(doctor_json.value.object, "command", "doctor");
+    try expectJsonObjectHasInt(doctor_json.value.object, "issue_counts", "graph");
+    try expectJsonArrayLen(doctor_json.value.object, "issues", 1);
+    try std.testing.expect(std.mem.indexOf(u8, doctor.stderr, "_zova_graph_edges") == null);
+    try std.testing.expect(std.mem.indexOf(u8, doctor.stderr, "hidden chunk bytes") == null);
+
+    var check = try runCli(&.{ "zova", "check", "--json", "--deep", db_path });
+    defer check.deinit();
+    try std.testing.expectEqual(@as(u8, 4), check.code);
+    var check_json = try parseJson(check.stderr);
+    defer check_json.deinit();
+    try expectJsonObjectHasInt(check_json.value.object, "issue_counts", "graph");
+}
+
 test "cli object-store commands create bind inspect replace and unbind" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -303,8 +410,14 @@ test "cli split moves existing object and vector storage into bound stores" {
         defer db.deinit();
         try db.exec("create table documents (object_id blob not null, vector_id text not null, title text not null)");
         const object_id = try db.putObject("cli split object");
+        const object_id_hex = try lowerHexAlloc(&object_id);
+        defer std.testing.allocator.free(object_id_hex);
         try insertDocument(&db, object_id, "unused", "object metadata stays in main");
         try db.putObjectChunk(zova.objectChunkId("cli split loose chunk"), "cli split loose chunk");
+        try db.createGraph("split_objects");
+        try db.putGraphNode(.{ .graph_name = "split_objects", .node_id = "doc:object", .kind = "document", .target_type = .record, .target_namespace = "documents", .target_ref = "object metadata stays in main" });
+        try db.putGraphNode(.{ .graph_name = "split_objects", .node_id = "object:primary", .kind = "object", .target_type = .object, .target_ref = object_id_hex });
+        try db.putGraphEdge(.{ .graph_name = "split_objects", .from_node_id = "doc:object", .edge_type = "has_object", .to_node_id = "object:primary" });
     }
 
     var object_split = try runCli(&.{ "zova", "split", "--objects", "--json", object_main_path, object_store_path });
@@ -330,11 +443,21 @@ test "cli split moves existing object and vector storage into bound stores" {
         defer db.deinit();
         try std.testing.expectEqual(@as(i64, 0), try countRawRows(&db.sqlite_db, "select count(*) from _zova_objects"));
         try std.testing.expectEqual(@as(i64, 1), try countRawRows(&db.sqlite_db, "select count(*) from documents"));
+        try std.testing.expect(try db.hasGraphEdge("split_objects", "doc:object", "has_object", "object:primary"));
     }
     {
         var store = try zova.sqlite.Database.open(object_store_path);
         defer store.deinit();
         try std.testing.expectEqual(@as(i64, 1), try countRawRows(&store, "select count(*) from _zova_objects"));
+    }
+    {
+        var check = try runCli(&.{ "zova", "check", "--deep", "--json", object_main_path });
+        defer check.deinit();
+        try std.testing.expectEqual(@as(u8, 0), check.code);
+
+        var doctor = try runCli(&.{ "zova", "doctor", "--json", object_main_path });
+        defer doctor.deinit();
+        try std.testing.expectEqual(@as(u8, 0), doctor.code);
     }
 
     var vector_main_buffer: [std.fs.max_path_bytes]u8 = undefined;
@@ -353,6 +476,10 @@ test "cli split moves existing object and vector storage into bound stores" {
             .{ .id = "doc-a", .values = &.{ 1.0, 0.0 } },
             .{ .id = "doc-b", .values = &.{ 0.0, 2.0 } },
         });
+        try db.createGraph("split_vectors");
+        try db.putGraphNode(.{ .graph_name = "split_vectors", .node_id = "doc:a", .kind = "document", .target_type = .record, .target_namespace = "documents", .target_ref = "doc-a" });
+        try db.putGraphNode(.{ .graph_name = "split_vectors", .node_id = "vector:doc-a", .kind = "embedding", .target_type = .vector, .target_namespace = "docs", .target_ref = "doc-a" });
+        try db.putGraphEdge(.{ .graph_name = "split_vectors", .from_node_id = "doc:a", .edge_type = "embedded_as", .to_node_id = "vector:doc-a" });
     }
 
     var vector_split = try runCli(&.{ "zova", "split", "--vectors", "--json", vector_main_path, vector_store_path });
@@ -380,6 +507,16 @@ test "cli split moves existing object and vector storage into bound stores" {
         var results = try db.searchVectors(std.testing.allocator, "docs", &.{ 1.0, 0.0 }, 1);
         defer results.deinit(std.testing.allocator);
         try std.testing.expectEqualStrings("doc-a", results.items[0].id);
+        try std.testing.expect(try db.hasGraphEdge("split_vectors", "doc:a", "embedded_as", "vector:doc-a"));
+    }
+    {
+        var check = try runCli(&.{ "zova", "check", "--deep", "--json", vector_main_path });
+        defer check.deinit();
+        try std.testing.expectEqual(@as(u8, 0), check.code);
+
+        var doctor = try runCli(&.{ "zova", "doctor", "--json", vector_main_path });
+        defer doctor.deinit();
+        try std.testing.expectEqual(@as(u8, 0), doctor.code);
     }
 }
 
@@ -654,7 +791,7 @@ test "cli info reports bounded database summary" {
     defer result.deinit();
     try std.testing.expectEqual(@as(u8, 0), result.code);
     try expectContains(result.stdout, "Zova database");
-    try expectContains(result.stdout, "format_version: 3");
+    try expectContains(result.stdout, "format_version: 4");
     try expectContains(result.stdout, "objects:");
     try expectContains(result.stdout, "chunks:");
     try expectContains(result.stdout, "loose_chunks:");
@@ -794,7 +931,7 @@ test "cli info json reports bounded database summary" {
     try expectJsonInt(root, "cli_json_version", 1);
     try expectJsonString(root, "package_version", cli.package_version);
     try expectJsonString(root, "sqlite_version", zova.sqlite.version());
-    try expectJsonString(root, "format_version", "3");
+    try expectJsonString(root, "format_version", "4");
     try expectJsonObjectHasInt(root, "files", "database_bytes");
     try expectJsonObjectHasInt(root, "sqlite", "page_count");
     try expectJsonObjectHasInt(root, "objects", "count");
@@ -1588,6 +1725,14 @@ test "cli salvage copies healthy database into verified destination" {
     const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "salvage-source.zova");
     try createHealthyDatabase(source_path);
     try addRichUserSqlFixture(source_path);
+    {
+        var source = try zova.Database.open(source_path);
+        defer source.deinit();
+        try source.createGraph("app");
+        try source.putGraphNode(.{ .graph_name = "app", .node_id = "message:1", .kind = "message", .target_type = .record, .target_ref = "notes:1" });
+        try source.putGraphNode(.{ .graph_name = "app", .node_id = "attachment:1", .kind = "attachment", .target_type = .external, .target_ref = "attachment:1" });
+        try source.putGraphEdge(.{ .graph_name = "app", .from_node_id = "message:1", .edge_type = "has_attachment", .to_node_id = "attachment:1" });
+    }
 
     var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "salvage-destination.zova");
@@ -1610,6 +1755,9 @@ test "cli salvage copies healthy database into verified destination" {
     try std.testing.expect((try jsonObjectInt(root, "copied", "user_rows")) > 0);
     try expectJsonObjectHasInt(root, "copied", "objects");
     try expectJsonObjectHasInt(root, "copied", "vectors");
+    try std.testing.expect((try jsonObjectInt(root, "copied", "graphs")) > 0);
+    try std.testing.expect((try jsonObjectInt(root, "copied", "graph_nodes")) > 0);
+    try std.testing.expect((try jsonObjectInt(root, "copied", "graph_edges")) > 0);
     try expectJsonObjectHasInt(root, "skipped", "objects");
     try expectJsonObjectHasInt(root, "skipped", "user_schema_objects");
     try std.testing.expectEqual(@as(i64, 0), try jsonObjectInt(root, "skipped", "user_rows"));
@@ -1624,6 +1772,56 @@ test "cli salvage copies healthy database into verified destination" {
     try std.testing.expectEqual(@as(u8, 0), deep.code);
     try expectHealthyCopy(dest_path);
     try expectRichUserSqlFixture(dest_path);
+    {
+        var destination = try zova.Database.open(dest_path);
+        defer destination.deinit();
+        try std.testing.expect(try destination.hasGraph("app"));
+        try std.testing.expect(try destination.hasGraphEdge("app", "message:1", "has_attachment", "attachment:1"));
+    }
+}
+
+test "cli salvage copies valid graph data and skips invalid graph targets" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "salvage-graph-source.zova");
+    try createHealthyDatabase(source_path);
+
+    {
+        var source = try zova.Database.open(source_path);
+        defer source.deinit();
+        try source.createGraph("app");
+        try source.putGraphNode(.{ .graph_name = "app", .node_id = "message:1", .kind = "message", .target_type = .record, .target_ref = "notes:1" });
+        try source.putGraphNode(.{ .graph_name = "app", .node_id = "object:missing", .kind = "attachment", .target_type = .object, .target_ref = "0000000000000000000000000000000000000000000000000000000000000000" });
+        try source.putGraphEdge(.{ .graph_name = "app", .from_node_id = "message:1", .edge_type = "has_attachment", .to_node_id = "object:missing" });
+    }
+
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "salvage-graph-destination.zova");
+
+    var result = try runCli(&.{ "zova", "salvage", "--json", source_path, dest_path });
+    defer result.deinit();
+    try std.testing.expectEqual(@as(u8, 0), result.code);
+    var parsed = try parseJson(result.stdout);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try expectJsonString(root, "status", "ok");
+    try expectJsonBool(root, "destination_verified", true);
+    try std.testing.expect((try jsonObjectInt(root, "issue_counts", "graph")) > 0);
+    try std.testing.expect((try jsonObjectInt(root, "copied", "graphs")) > 0);
+    try std.testing.expect((try jsonObjectInt(root, "copied", "graph_nodes")) > 0);
+
+    var deep = try runCli(&.{ "zova", "check", "--deep", dest_path });
+    defer deep.deinit();
+    try std.testing.expectEqual(@as(u8, 0), deep.code);
+
+    var destination = try zova.Database.open(dest_path);
+    defer destination.deinit();
+    try std.testing.expect(try destination.hasGraph("app"));
+    try std.testing.expect(try destination.hasGraphNode("app", "message:1"));
+    try std.testing.expect(!try destination.hasGraphNode("app", "object:missing"));
+    try std.testing.expect(!try destination.hasGraphEdge("app", "message:1", "has_attachment", "object:missing"));
 }
 
 test "cli salvage reports skipped user rows without printing values" {

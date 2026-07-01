@@ -7,7 +7,7 @@ cd "$ROOT"
 usage() {
     cat >&2 <<'EOF'
 usage: scripts/distribute-release.sh <version> [--dry-run] [--yes]
-example: scripts/distribute-release.sh 0.19.0
+example: scripts/distribute-release.sh 0.20.0
 
 Publishes distribution channels in this order:
   1. Rust crates: zova-sys, then zova

@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 usage() {
     echo "usage: scripts/package-release.sh <version> [out-dir]" >&2
-    echo "example: scripts/package-release.sh 0.19.0" >&2
+    echo "example: scripts/package-release.sh 0.20.0" >&2
 }
 
 run() {
@@ -192,6 +192,26 @@ if [ ! -f "$TMP/$PKG/src/notify.zig" ]; then
     exit 1
 fi
 
+if [ ! -f "$TMP/$PKG/src/graph.zig" ]; then
+    echo "release package is missing src/graph.zig" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/src/graph_tests.zig" ]; then
+    echo "release package is missing src/graph_tests.zig" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/src/graph_sql.zig" ]; then
+    echo "release package is missing src/graph_sql.zig" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/src/graph_sql_tests.zig" ]; then
+    echo "release package is missing src/graph_sql_tests.zig" >&2
+    exit 1
+fi
+
 if [ ! -f "$TMP/$PKG/bindings/rust/Cargo.toml" ]; then
     echo "release package is missing bindings/rust/Cargo.toml" >&2
     exit 1
@@ -222,6 +242,16 @@ if [ ! -f "$TMP/$PKG/bindings/rust/zova/README.md" ]; then
     exit 1
 fi
 
+if [ ! -f "$TMP/$PKG/bindings/rust/zova/examples/graphs.rs" ]; then
+    echo "release package is missing bindings/rust/zova/examples/graphs.rs" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/bindings/rust/zova/examples/graph_rag.rs" ]; then
+    echo "release package is missing bindings/rust/zova/examples/graph_rag.rs" >&2
+    exit 1
+fi
+
 if [ ! -f "$TMP/$PKG/bindings/go/go.mod" ]; then
     echo "release package is missing bindings/go/go.mod" >&2
     exit 1
@@ -234,6 +264,11 @@ fi
 
 if [ ! -f "$TMP/$PKG/bindings/go/zova.go" ]; then
     echo "release package is missing bindings/go/zova.go" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/bindings/go/graph.go" ]; then
+    echo "release package is missing bindings/go/graph.go" >&2
     exit 1
 fi
 
@@ -254,6 +289,16 @@ fi
 
 if [ ! -d "$TMP/$PKG/bindings/go/examples/notifications" ]; then
     echo "release package is missing bindings/go/examples/notifications" >&2
+    exit 1
+fi
+
+if [ ! -d "$TMP/$PKG/bindings/go/examples/graphs" ]; then
+    echo "release package is missing bindings/go/examples/graphs" >&2
+    exit 1
+fi
+
+if [ ! -d "$TMP/$PKG/bindings/go/examples/graph_rag" ]; then
+    echo "release package is missing bindings/go/examples/graph_rag" >&2
     exit 1
 fi
 
@@ -292,6 +337,16 @@ if [ ! -d "$TMP/$PKG/bindings/python/examples" ]; then
     exit 1
 fi
 
+if [ ! -f "$TMP/$PKG/bindings/python/examples/graphs.py" ]; then
+    echo "release package is missing bindings/python/examples/graphs.py" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/bindings/python/examples/graph_rag.py" ]; then
+    echo "release package is missing bindings/python/examples/graph_rag.py" >&2
+    exit 1
+fi
+
 if [ -e "$TMP/$PKG/zig-out" ]; then
     echo "release package must not contain compiled CLI artifacts" >&2
     exit 1
@@ -320,7 +375,7 @@ mkdir -p "$VERIFY_DIR"
 tar -xzf "$ARCHIVE" -C "$VERIFY_DIR"
 cd "$VERIFY_DIR/$PKG"
 
-zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/zova_test_support.zig src/notify.zig src/object.zig src/object_fastcdc.zig src/object_tests.zig src/vector.zig src/vector_tests.zig src/vector_sql.zig src/vector_sql_tests.zig src/c_api.zig src/c_api_internal.zig src/c_api_tests.zig src/cli.zig src/main.zig tests/e2e.zig tests/cli.zig
+zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/zova_test_support.zig src/notify.zig src/object.zig src/object_fastcdc.zig src/object_tests.zig src/vector.zig src/vector_tests.zig src/vector_sql.zig src/vector_sql_tests.zig src/graph.zig src/graph_tests.zig src/graph_sql.zig src/graph_sql_tests.zig src/c_api.zig src/c_api_internal.zig src/c_api_tests.zig src/cli.zig src/main.zig tests/e2e.zig tests/cli.zig
 zig build test
 zig build e2e
 zig build c-abi

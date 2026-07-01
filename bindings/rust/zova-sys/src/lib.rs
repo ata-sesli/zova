@@ -8,6 +8,8 @@ pub type zova_status = c_int;
 pub type zova_step_result = c_int;
 pub type zova_column_type = c_int;
 pub type zova_vector_metric = c_int;
+pub type zova_graph_target_type = c_int;
+pub type zova_graph_neighbor_direction = c_int;
 
 pub const ZOVA_OK: zova_status = 0;
 pub const ZOVA_INVALID_ARGUMENT: zova_status = 1;
@@ -44,6 +46,11 @@ pub const ZOVA_VECTOR_NOT_FOUND: zova_status = 72;
 pub const ZOVA_VECTOR_DIMENSION_MISMATCH: zova_status = 73;
 pub const ZOVA_VECTOR_CORRUPT: zova_status = 74;
 pub const ZOVA_VECTOR_INVALID: zova_status = 75;
+pub const ZOVA_GRAPH_EXISTS: zova_status = 80;
+pub const ZOVA_GRAPH_NOT_FOUND: zova_status = 81;
+pub const ZOVA_GRAPH_NODE_NOT_FOUND: zova_status = 82;
+pub const ZOVA_GRAPH_EDGE_NOT_FOUND: zova_status = 83;
+pub const ZOVA_GRAPH_INVALID: zova_status = 84;
 
 pub const ZOVA_STEP_ROW: zova_step_result = 1;
 pub const ZOVA_STEP_DONE: zova_step_result = 2;
@@ -57,6 +64,17 @@ pub const ZOVA_COLUMN_NULL: zova_column_type = 5;
 pub const ZOVA_VECTOR_METRIC_COSINE: zova_vector_metric = 0;
 pub const ZOVA_VECTOR_METRIC_L2: zova_vector_metric = 1;
 pub const ZOVA_VECTOR_METRIC_DOT: zova_vector_metric = 2;
+pub const ZOVA_GRAPH_TARGET_NONE: zova_graph_target_type = 0;
+pub const ZOVA_GRAPH_TARGET_RECORD: zova_graph_target_type = 1;
+pub const ZOVA_GRAPH_TARGET_OBJECT: zova_graph_target_type = 2;
+pub const ZOVA_GRAPH_TARGET_OBJECT_CHUNK: zova_graph_target_type = 3;
+pub const ZOVA_GRAPH_TARGET_VECTOR: zova_graph_target_type = 4;
+pub const ZOVA_GRAPH_TARGET_ENTITY: zova_graph_target_type = 5;
+pub const ZOVA_GRAPH_TARGET_FACT: zova_graph_target_type = 6;
+pub const ZOVA_GRAPH_TARGET_CONCEPT: zova_graph_target_type = 7;
+pub const ZOVA_GRAPH_TARGET_EXTERNAL: zova_graph_target_type = 8;
+pub const ZOVA_GRAPH_NEIGHBOR_OUTGOING: zova_graph_neighbor_direction = 0;
+pub const ZOVA_GRAPH_NEIGHBOR_INCOMING: zova_graph_neighbor_direction = 1;
 pub const ZOVA_OPEN_READ_ONLY: u32 = 1 << 0;
 pub const ZOVA_BACKUP_NO_VERIFY: u32 = 1 << 0;
 pub const ZOVA_COMPACT_NO_VERIFY: u32 = 1 << 0;
@@ -200,6 +218,94 @@ pub struct zova_vector_input {
     pub id: *const c_char,
     pub values: *const f32,
     pub values_len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_graph_info {
+    pub name: *mut c_char,
+    pub name_len: usize,
+    pub node_count: u64,
+    pub edge_count: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_graph_list {
+    pub items: *mut zova_graph_info,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_graph_node {
+    pub graph_name: *mut c_char,
+    pub graph_name_len: usize,
+    pub node_id: *mut c_char,
+    pub node_id_len: usize,
+    pub kind: *mut c_char,
+    pub kind_len: usize,
+    pub target_type: c_int,
+    pub target_namespace: *mut c_char,
+    pub target_namespace_len: usize,
+    pub has_target_namespace: u8,
+    pub target_ref: *mut c_char,
+    pub target_ref_len: usize,
+    pub has_target_ref: u8,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_graph_edge {
+    pub graph_name: *mut c_char,
+    pub graph_name_len: usize,
+    pub from_node_id: *mut c_char,
+    pub from_node_id_len: usize,
+    pub edge_type: *mut c_char,
+    pub edge_type_len: usize,
+    pub to_node_id: *mut c_char,
+    pub to_node_id_len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_graph_neighbor_result {
+    pub node_id: *mut c_char,
+    pub node_id_len: usize,
+    pub kind: *mut c_char,
+    pub kind_len: usize,
+    pub edge_type: *mut c_char,
+    pub edge_type_len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_graph_neighbor_results {
+    pub items: *mut zova_graph_neighbor_result,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_graph_walk_result {
+    pub node_id: *mut c_char,
+    pub node_id_len: usize,
+    pub kind: *mut c_char,
+    pub kind_len: usize,
+    pub depth: u32,
+    pub predecessor_node_id: *mut c_char,
+    pub predecessor_node_id_len: usize,
+    pub has_predecessor_node_id: u8,
+    pub edge_type: *mut c_char,
+    pub edge_type_len: usize,
+    pub has_edge_type: u8,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_graph_walk_results {
+    pub items: *mut zova_graph_walk_result,
+    pub len: usize,
 }
 
 #[repr(C)]
@@ -695,6 +801,132 @@ pub struct zova_vector_search_by_id_in_within_request {
     pub out_results: *mut zova_vector_search_results,
 }
 
+#[repr(C)]
+pub struct zova_graph_create_request {
+    pub db: *mut zova_database,
+    pub name: *const c_char,
+}
+
+#[repr(C)]
+pub struct zova_graph_exists_request {
+    pub db: *mut zova_database,
+    pub name: *const c_char,
+    pub out_exists: *mut u8,
+}
+
+#[repr(C)]
+pub struct zova_graph_info_get_request {
+    pub db: *mut zova_database,
+    pub name: *const c_char,
+    pub out_info: *mut zova_graph_info,
+}
+
+#[repr(C)]
+pub struct zova_graph_list_request {
+    pub db: *mut zova_database,
+    pub out_list: *mut zova_graph_list,
+}
+
+#[repr(C)]
+pub struct zova_graph_delete_request {
+    pub db: *mut zova_database,
+    pub name: *const c_char,
+}
+
+#[repr(C)]
+pub struct zova_graph_node_put_request {
+    pub db: *mut zova_database,
+    pub graph_name: *const c_char,
+    pub node_id: *const c_char,
+    pub kind: *const c_char,
+    pub target_type: c_int,
+    pub target_namespace: *const c_char,
+    pub target_ref: *const c_char,
+}
+
+#[repr(C)]
+pub struct zova_graph_node_get_request {
+    pub db: *mut zova_database,
+    pub graph_name: *const c_char,
+    pub node_id: *const c_char,
+    pub out_node: *mut zova_graph_node,
+}
+
+#[repr(C)]
+pub struct zova_graph_node_exists_request {
+    pub db: *mut zova_database,
+    pub graph_name: *const c_char,
+    pub node_id: *const c_char,
+    pub out_exists: *mut u8,
+}
+
+#[repr(C)]
+pub struct zova_graph_node_delete_request {
+    pub db: *mut zova_database,
+    pub graph_name: *const c_char,
+    pub node_id: *const c_char,
+}
+
+#[repr(C)]
+pub struct zova_graph_edge_put_request {
+    pub db: *mut zova_database,
+    pub graph_name: *const c_char,
+    pub from_node_id: *const c_char,
+    pub edge_type: *const c_char,
+    pub to_node_id: *const c_char,
+}
+
+#[repr(C)]
+pub struct zova_graph_edge_get_request {
+    pub db: *mut zova_database,
+    pub graph_name: *const c_char,
+    pub from_node_id: *const c_char,
+    pub edge_type: *const c_char,
+    pub to_node_id: *const c_char,
+    pub out_edge: *mut zova_graph_edge,
+}
+
+#[repr(C)]
+pub struct zova_graph_edge_exists_request {
+    pub db: *mut zova_database,
+    pub graph_name: *const c_char,
+    pub from_node_id: *const c_char,
+    pub edge_type: *const c_char,
+    pub to_node_id: *const c_char,
+    pub out_exists: *mut u8,
+}
+
+#[repr(C)]
+pub struct zova_graph_edge_delete_request {
+    pub db: *mut zova_database,
+    pub graph_name: *const c_char,
+    pub from_node_id: *const c_char,
+    pub edge_type: *const c_char,
+    pub to_node_id: *const c_char,
+}
+
+#[repr(C)]
+pub struct zova_graph_neighbors_request {
+    pub db: *mut zova_database,
+    pub graph_name: *const c_char,
+    pub node_id: *const c_char,
+    pub direction: c_int,
+    pub edge_type: *const c_char,
+    pub limit: usize,
+    pub out_results: *mut zova_graph_neighbor_results,
+}
+
+#[repr(C)]
+pub struct zova_graph_walk_request {
+    pub db: *mut zova_database,
+    pub graph_name: *const c_char,
+    pub start_node_id: *const c_char,
+    pub edge_type: *const c_char,
+    pub max_depth: u32,
+    pub limit: usize,
+    pub out_results: *mut zova_graph_walk_results,
+}
+
 extern "C" {
     pub fn zova_abi_version_major() -> u32;
     pub fn zova_abi_version_minor() -> u32;
@@ -887,4 +1119,26 @@ extern "C" {
     pub fn zova_vector_search_by_id_in_within(
         request: *const zova_vector_search_by_id_in_within_request,
     ) -> zova_status;
+
+    pub fn zova_graph_info_free(info: *mut zova_graph_info);
+    pub fn zova_graph_list_free(list: *mut zova_graph_list);
+    pub fn zova_graph_node_free(node: *mut zova_graph_node);
+    pub fn zova_graph_edge_free(edge: *mut zova_graph_edge);
+    pub fn zova_graph_neighbor_results_free(results: *mut zova_graph_neighbor_results);
+    pub fn zova_graph_walk_results_free(results: *mut zova_graph_walk_results);
+    pub fn zova_graph_create(request: *const zova_graph_create_request) -> zova_status;
+    pub fn zova_graph_exists(request: *const zova_graph_exists_request) -> zova_status;
+    pub fn zova_graph_info_get(request: *const zova_graph_info_get_request) -> zova_status;
+    pub fn zova_graphs_list(request: *const zova_graph_list_request) -> zova_status;
+    pub fn zova_graph_delete(request: *const zova_graph_delete_request) -> zova_status;
+    pub fn zova_graph_node_put(request: *const zova_graph_node_put_request) -> zova_status;
+    pub fn zova_graph_node_get(request: *const zova_graph_node_get_request) -> zova_status;
+    pub fn zova_graph_node_exists(request: *const zova_graph_node_exists_request) -> zova_status;
+    pub fn zova_graph_node_delete(request: *const zova_graph_node_delete_request) -> zova_status;
+    pub fn zova_graph_edge_put(request: *const zova_graph_edge_put_request) -> zova_status;
+    pub fn zova_graph_edge_get(request: *const zova_graph_edge_get_request) -> zova_status;
+    pub fn zova_graph_edge_exists(request: *const zova_graph_edge_exists_request) -> zova_status;
+    pub fn zova_graph_edge_delete(request: *const zova_graph_edge_delete_request) -> zova_status;
+    pub fn zova_graph_neighbors(request: *const zova_graph_neighbors_request) -> zova_status;
+    pub fn zova_graph_walk(request: *const zova_graph_walk_request) -> zova_status;
 }

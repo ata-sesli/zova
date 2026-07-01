@@ -35,6 +35,33 @@ const BoundedCommandArgs = struct {
     id: ?[]const u8,
 };
 
+const GraphNodeCommandArgs = struct {
+    format: OutputFormat,
+    path: []const u8,
+    graph_name: []const u8,
+    node_id: []const u8,
+};
+
+const GraphNeighborsCommandArgs = struct {
+    format: OutputFormat,
+    limit: usize,
+    path: []const u8,
+    graph_name: []const u8,
+    node_id: []const u8,
+    incoming: bool,
+    edge_type: ?[]const u8,
+};
+
+const GraphWalkCommandArgs = struct {
+    format: OutputFormat,
+    limit: usize,
+    max_depth: u32,
+    path: []const u8,
+    graph_name: []const u8,
+    node_id: []const u8,
+    edge_type: ?[]const u8,
+};
+
 const SalvageCommandArgs = struct {
     format: OutputFormat,
     limit: usize,
@@ -84,6 +111,24 @@ const BoundedCommandParseError = error{
     UnknownFlag,
     MissingPath,
     MissingId,
+    ExtraArgs,
+};
+
+const GraphCommandParseError = error{
+    DuplicateJson,
+    DuplicateLimit,
+    DuplicateIncoming,
+    DuplicateEdgeType,
+    DuplicateMaxDepth,
+    MissingLimitValue,
+    MissingEdgeTypeValue,
+    MissingMaxDepthValue,
+    InvalidLimit,
+    InvalidMaxDepth,
+    UnknownFlag,
+    MissingPath,
+    MissingGraph,
+    MissingNode,
     ExtraArgs,
 };
 
@@ -150,6 +195,9 @@ const DiagnosticStats = struct {
     chunks: u64 = 0,
     vectors: u64 = 0,
     loose_chunks: u64 = 0,
+    graphs: u64 = 0,
+    graph_nodes: u64 = 0,
+    graph_edges: u64 = 0,
 };
 
 const StatsSummary = struct {
@@ -346,6 +394,7 @@ const DiagnosticIssueCounts = struct {
     object: u64 = 0,
     chunk: u64 = 0,
     vector: u64 = 0,
+    graph: u64 = 0,
 };
 
 const DiagnosticSeverityCounts = struct {
@@ -361,6 +410,7 @@ const DiagnosticIssueArea = enum {
     object,
     chunk,
     vector,
+    graph,
 };
 
 const DiagnosticIssue = struct {
@@ -372,12 +422,18 @@ const DiagnosticIssue = struct {
     chunk_hash_hex: ?[]u8 = null,
     collection_name: ?[]u8 = null,
     vector_id: ?[]u8 = null,
+    graph_name: ?[]u8 = null,
+    node_id: ?[]u8 = null,
+    edge_type: ?[]u8 = null,
 
     fn deinit(self: *DiagnosticIssue, allocator: std.mem.Allocator) void {
         if (self.object_id_hex) |value| allocator.free(value);
         if (self.chunk_hash_hex) |value| allocator.free(value);
         if (self.collection_name) |value| allocator.free(value);
         if (self.vector_id) |value| allocator.free(value);
+        if (self.graph_name) |value| allocator.free(value);
+        if (self.node_id) |value| allocator.free(value);
+        if (self.edge_type) |value| allocator.free(value);
     }
 };
 
@@ -407,6 +463,9 @@ const SalvageCounts = struct {
     user_tables: u64 = 0,
     user_schema_objects: u64 = 0,
     user_rows: u64 = 0,
+    graphs: u64 = 0,
+    graph_nodes: u64 = 0,
+    graph_edges: u64 = 0,
     objects: u64 = 0,
     chunks: u64 = 0,
     loose_chunks: u64 = 0,
@@ -495,6 +554,21 @@ pub fn run(
     if (std.mem.eql(u8, command, "vector-collection")) {
         return vectorCollectionCommand(allocator, args[2..], stdout, stderr);
     }
+    if (std.mem.eql(u8, command, "graphs")) {
+        return graphsCommand(allocator, args[2..], stdout, stderr);
+    }
+    if (std.mem.eql(u8, command, "graph")) {
+        return graphCommand(allocator, args[2..], stdout, stderr);
+    }
+    if (std.mem.eql(u8, command, "graph-node")) {
+        return graphNodeCommand(allocator, args[2..], stdout, stderr);
+    }
+    if (std.mem.eql(u8, command, "graph-neighbors")) {
+        return graphNeighborsCommand(allocator, args[2..], stdout, stderr);
+    }
+    if (std.mem.eql(u8, command, "graph-walk")) {
+        return graphWalkCommand(allocator, args[2..], stdout, stderr);
+    }
     if (std.mem.eql(u8, command, "tables")) {
         return tablesCommand(allocator, args[2..], stdout, stderr);
     }
@@ -545,6 +619,11 @@ fn writeUsage(writer: *std.Io.Writer) !void {
         \\  zova chunk [--json] [--limit <n>] <file.zova> <chunk-id>
         \\  zova vectors [--json] [--limit <n>] <file.zova>
         \\  zova vector-collection [--json] [--limit <n>] <file.zova> <name>
+        \\  zova graphs [--json] [--limit <n>] <file.zova>
+        \\  zova graph [--json] <file.zova> <graph>
+        \\  zova graph-node [--json] <file.zova> <graph> <node-id>
+        \\  zova graph-neighbors [--json] [--incoming] [--edge-type <type>] [--limit <n>] <file.zova> <graph> <node-id>
+        \\  zova graph-walk [--json] [--edge-type <type>] [--max-depth <n>] [--limit <n>] <file.zova> <graph> <node-id>
         \\  zova tables [--json] [--limit <n>] <file.zova>
         \\  zova check [--deep] <file.zova>
         \\  zova check --json [--deep] <file.zova>
@@ -573,6 +652,11 @@ fn writeUsage(writer: *std.Io.Writer) !void {
         \\  chunk   inspect one chunk reference summary without reading chunk bytes
         \\  vectors list bounded vector collection metadata without vector values
         \\  vector-collection inspect one collection and bounded vector ids
+        \\  graphs list bounded graph metadata
+        \\  graph inspect one graph summary
+        \\  graph-node inspect one graph node without user row/object/vector data
+        \\  graph-neighbors list bounded incoming or outgoing neighbors
+        \\  graph-walk walk directed graph edges with depth and result bounds
         \\  tables  list bounded user/private table names without schema or rows
         \\  check  validate Zova identity/schema and SQLite quick_check
         \\  doctor explain database health and suggested recovery actions
@@ -1555,6 +1639,147 @@ fn vectorCollectionCommand(
     return ExitCode.ok;
 }
 
+fn graphsCommand(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !u8 {
+    const parsed = parseBoundedCommandArgs(args, false) catch |err| return usageErrorFormat(stderr, "graphs", boundedCommandErrorFormat(args), boundedCommandUsageMessage("graphs", err));
+    const path = try allocator.dupeZ(u8, parsed.path);
+    defer allocator.free(path);
+
+    var db = zova.Database.open(path) catch |err| return openErrorFormat(stderr, "graphs", parsed.format, err);
+    defer db.deinit();
+
+    var list = try db.listGraphs(allocator);
+    defer list.deinit(allocator);
+    const visible_len = @min(parsed.limit, list.items.len);
+    const visible = list.items[0..visible_len];
+    const truncated = list.items.len > parsed.limit;
+
+    switch (parsed.format) {
+        .text => try writeGraphsText(stdout, parsed.path, parsed.limit, visible, truncated),
+        .json => try writeGraphsJson(stdout, parsed.limit, visible, truncated),
+    }
+    return ExitCode.ok;
+}
+
+fn graphCommand(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !u8 {
+    const parsed = parseBoundedCommandArgs(args, true) catch |err| return usageErrorFormat(stderr, "graph", boundedCommandErrorFormat(args), boundedCommandUsageMessage("graph", err));
+    const graph_name = parsed.id orelse return usageErrorFormat(stderr, "graph", parsed.format, "graph requires <file.zova> <graph>");
+    const path = try allocator.dupeZ(u8, parsed.path);
+    defer allocator.free(path);
+
+    var db = zova.Database.open(path) catch |err| return openErrorFormat(stderr, "graph", parsed.format, err);
+    defer db.deinit();
+
+    var info = db.graphInfo(allocator, graph_name) catch |err| return graphInspectErrorFormat(stderr, "graph", parsed.format, err);
+    defer info.deinit(allocator);
+
+    switch (parsed.format) {
+        .text => try writeGraphText(stdout, parsed.path, info),
+        .json => try writeGraphJson(stdout, info),
+    }
+    return ExitCode.ok;
+}
+
+fn graphNodeCommand(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !u8 {
+    const parsed = parseGraphNodeCommandArgs(args) catch |err| return usageErrorFormat(stderr, "graph-node", graphCommandErrorFormat(args), graphCommandUsageMessage("graph-node", err));
+    const path = try allocator.dupeZ(u8, parsed.path);
+    defer allocator.free(path);
+
+    var db = zova.Database.open(path) catch |err| return openErrorFormat(stderr, "graph-node", parsed.format, err);
+    defer db.deinit();
+
+    var node = db.getGraphNode(allocator, parsed.graph_name, parsed.node_id) catch |err| return graphInspectErrorFormat(stderr, "graph-node", parsed.format, err);
+    defer node.deinit(allocator);
+
+    switch (parsed.format) {
+        .text => try writeGraphNodeText(stdout, parsed.path, node),
+        .json => try writeGraphNodeJson(stdout, node),
+    }
+    return ExitCode.ok;
+}
+
+fn graphNeighborsCommand(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !u8 {
+    const parsed = parseGraphNeighborsCommandArgs(args) catch |err| return usageErrorFormat(stderr, "graph-neighbors", graphCommandErrorFormat(args), graphCommandUsageMessage("graph-neighbors", err));
+    const path = try allocator.dupeZ(u8, parsed.path);
+    defer allocator.free(path);
+
+    var db = zova.Database.open(path) catch |err| return openErrorFormat(stderr, "graph-neighbors", parsed.format, err);
+    defer db.deinit();
+
+    const requested_limit = if (parsed.limit == std.math.maxInt(usize)) parsed.limit else parsed.limit + 1;
+    var neighbors = db.graphNeighbors(allocator, .{
+        .graph_name = parsed.graph_name,
+        .node_id = parsed.node_id,
+        .direction = if (parsed.incoming) .incoming else .outgoing,
+        .edge_type = parsed.edge_type,
+        .limit = requested_limit,
+    }) catch |err| return graphInspectErrorFormat(stderr, "graph-neighbors", parsed.format, err);
+    defer neighbors.deinit(allocator);
+
+    const visible_len = @min(parsed.limit, neighbors.items.len);
+    const visible = neighbors.items[0..visible_len];
+    const truncated = neighbors.items.len > parsed.limit;
+
+    switch (parsed.format) {
+        .text => try writeGraphNeighborsText(stdout, parsed.path, parsed.graph_name, parsed.node_id, parsed.limit, if (parsed.incoming) .incoming else .outgoing, visible, truncated),
+        .json => try writeGraphNeighborsJson(stdout, parsed.graph_name, parsed.node_id, parsed.limit, if (parsed.incoming) .incoming else .outgoing, visible, truncated),
+    }
+    return ExitCode.ok;
+}
+
+fn graphWalkCommand(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !u8 {
+    const parsed = parseGraphWalkCommandArgs(args) catch |err| return usageErrorFormat(stderr, "graph-walk", graphCommandErrorFormat(args), graphCommandUsageMessage("graph-walk", err));
+    const path = try allocator.dupeZ(u8, parsed.path);
+    defer allocator.free(path);
+
+    var db = zova.Database.open(path) catch |err| return openErrorFormat(stderr, "graph-walk", parsed.format, err);
+    defer db.deinit();
+
+    const requested_limit = if (parsed.limit == std.math.maxInt(usize)) parsed.limit else parsed.limit + 1;
+    var walk = db.graphWalk(allocator, .{
+        .graph_name = parsed.graph_name,
+        .start_node_id = parsed.node_id,
+        .edge_type = parsed.edge_type,
+        .max_depth = parsed.max_depth,
+        .limit = requested_limit,
+    }) catch |err| return graphInspectErrorFormat(stderr, "graph-walk", parsed.format, err);
+    defer walk.deinit(allocator);
+
+    const visible_len = @min(parsed.limit, walk.items.len);
+    const visible = walk.items[0..visible_len];
+    const truncated = walk.items.len > parsed.limit;
+
+    switch (parsed.format) {
+        .text => try writeGraphWalkText(stdout, parsed.path, parsed.graph_name, parsed.node_id, parsed.limit, parsed.max_depth, visible, truncated),
+        .json => try writeGraphWalkJson(stdout, parsed.graph_name, parsed.node_id, parsed.limit, parsed.max_depth, visible, truncated),
+    }
+    return ExitCode.ok;
+}
+
 fn tablesCommand(
     allocator: std.mem.Allocator,
     args: []const []const u8,
@@ -1626,6 +1851,154 @@ fn parseBoundedCommandArgs(args: []const []const u8, expect_id: bool) BoundedCom
     };
 }
 
+fn parseGraphNodeCommandArgs(args: []const []const u8) GraphCommandParseError!GraphNodeCommandArgs {
+    var format: OutputFormat = .text;
+    var positionals: [3][]const u8 = undefined;
+    var positional_count: usize = 0;
+
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            if (format == .json) return error.DuplicateJson;
+            format = .json;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            return error.UnknownFlag;
+        } else {
+            if (positional_count >= positionals.len) return error.ExtraArgs;
+            positionals[positional_count] = arg;
+            positional_count += 1;
+        }
+    }
+
+    if (positional_count == 0) return error.MissingPath;
+    if (positional_count == 1) return error.MissingGraph;
+    if (positional_count == 2) return error.MissingNode;
+
+    return .{
+        .format = format,
+        .path = positionals[0],
+        .graph_name = positionals[1],
+        .node_id = positionals[2],
+    };
+}
+
+fn parseGraphNeighborsCommandArgs(args: []const []const u8) GraphCommandParseError!GraphNeighborsCommandArgs {
+    var format: OutputFormat = .text;
+    var limit: usize = default_list_limit;
+    var incoming = false;
+    var edge_type: ?[]const u8 = null;
+    var saw_limit = false;
+    var saw_incoming = false;
+    var saw_edge_type = false;
+    var positionals: [3][]const u8 = undefined;
+    var positional_count: usize = 0;
+
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--json")) {
+            if (format == .json) return error.DuplicateJson;
+            format = .json;
+        } else if (std.mem.eql(u8, arg, "--limit")) {
+            if (saw_limit) return error.DuplicateLimit;
+            saw_limit = true;
+            index += 1;
+            if (index >= args.len) return error.MissingLimitValue;
+            limit = parseLimit(args[index], max_list_limit) catch return error.InvalidLimit;
+        } else if (std.mem.eql(u8, arg, "--incoming")) {
+            if (saw_incoming) return error.DuplicateIncoming;
+            saw_incoming = true;
+            incoming = true;
+        } else if (std.mem.eql(u8, arg, "--edge-type")) {
+            if (saw_edge_type) return error.DuplicateEdgeType;
+            saw_edge_type = true;
+            index += 1;
+            if (index >= args.len) return error.MissingEdgeTypeValue;
+            edge_type = args[index];
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            return error.UnknownFlag;
+        } else {
+            if (positional_count >= positionals.len) return error.ExtraArgs;
+            positionals[positional_count] = arg;
+            positional_count += 1;
+        }
+    }
+
+    if (positional_count == 0) return error.MissingPath;
+    if (positional_count == 1) return error.MissingGraph;
+    if (positional_count == 2) return error.MissingNode;
+
+    return .{
+        .format = format,
+        .limit = limit,
+        .path = positionals[0],
+        .graph_name = positionals[1],
+        .node_id = positionals[2],
+        .incoming = incoming,
+        .edge_type = edge_type,
+    };
+}
+
+fn parseGraphWalkCommandArgs(args: []const []const u8) GraphCommandParseError!GraphWalkCommandArgs {
+    var format: OutputFormat = .text;
+    var limit: usize = default_list_limit;
+    var max_depth: u32 = 1;
+    var edge_type: ?[]const u8 = null;
+    var saw_limit = false;
+    var saw_max_depth = false;
+    var saw_edge_type = false;
+    var positionals: [3][]const u8 = undefined;
+    var positional_count: usize = 0;
+
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--json")) {
+            if (format == .json) return error.DuplicateJson;
+            format = .json;
+        } else if (std.mem.eql(u8, arg, "--limit")) {
+            if (saw_limit) return error.DuplicateLimit;
+            saw_limit = true;
+            index += 1;
+            if (index >= args.len) return error.MissingLimitValue;
+            limit = parseLimit(args[index], max_list_limit) catch return error.InvalidLimit;
+        } else if (std.mem.eql(u8, arg, "--max-depth")) {
+            if (saw_max_depth) return error.DuplicateMaxDepth;
+            saw_max_depth = true;
+            index += 1;
+            if (index >= args.len) return error.MissingMaxDepthValue;
+            const parsed = std.fmt.parseUnsigned(u32, args[index], 10) catch return error.InvalidMaxDepth;
+            if (parsed > 64) return error.InvalidMaxDepth;
+            max_depth = parsed;
+        } else if (std.mem.eql(u8, arg, "--edge-type")) {
+            if (saw_edge_type) return error.DuplicateEdgeType;
+            saw_edge_type = true;
+            index += 1;
+            if (index >= args.len) return error.MissingEdgeTypeValue;
+            edge_type = args[index];
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            return error.UnknownFlag;
+        } else {
+            if (positional_count >= positionals.len) return error.ExtraArgs;
+            positionals[positional_count] = arg;
+            positional_count += 1;
+        }
+    }
+
+    if (positional_count == 0) return error.MissingPath;
+    if (positional_count == 1) return error.MissingGraph;
+    if (positional_count == 2) return error.MissingNode;
+
+    return .{
+        .format = format,
+        .limit = limit,
+        .max_depth = max_depth,
+        .path = positionals[0],
+        .graph_name = positionals[1],
+        .node_id = positionals[2],
+        .edge_type = edge_type,
+    };
+}
+
 fn parseSalvageCommandArgs(args: []const []const u8) SalvageCommandParseError!SalvageCommandArgs {
     var format: OutputFormat = .text;
     var limit: usize = default_list_limit;
@@ -1679,7 +2052,7 @@ fn boundedCommandUsageMessage(command: []const u8, err: BoundedCommandParseError
         error.MissingLimitValue => "--limit requires a value",
         error.InvalidLimit => "invalid --limit",
         error.UnknownFlag => "unknown flag",
-        error.MissingPath => if (std.mem.eql(u8, command, "object") or std.mem.eql(u8, command, "chunk") or std.mem.eql(u8, command, "vector-collection"))
+        error.MissingPath => if (std.mem.eql(u8, command, "object") or std.mem.eql(u8, command, "chunk") or std.mem.eql(u8, command, "vector-collection") or std.mem.eql(u8, command, "graph"))
             "command requires <file.zova> <id>"
         else
             "command requires <file.zova>",
@@ -1687,8 +2060,35 @@ fn boundedCommandUsageMessage(command: []const u8, err: BoundedCommandParseError
             "object requires <file.zova> <object-id>"
         else if (std.mem.eql(u8, command, "chunk"))
             "chunk requires <file.zova> <chunk-id>"
+        else if (std.mem.eql(u8, command, "graph"))
+            "graph requires <file.zova> <graph>"
         else
             "vector-collection requires <file.zova> <name>",
+        error.ExtraArgs => "too many arguments",
+    };
+}
+
+fn graphCommandUsageMessage(command: []const u8, err: GraphCommandParseError) []const u8 {
+    return switch (err) {
+        error.DuplicateJson => "duplicate --json",
+        error.DuplicateLimit => "duplicate --limit",
+        error.DuplicateIncoming => "duplicate --incoming",
+        error.DuplicateEdgeType => "duplicate --edge-type",
+        error.DuplicateMaxDepth => "duplicate --max-depth",
+        error.MissingLimitValue => "--limit requires a value",
+        error.MissingEdgeTypeValue => "--edge-type requires a value",
+        error.MissingMaxDepthValue => "--max-depth requires a value",
+        error.InvalidLimit => "invalid --limit",
+        error.InvalidMaxDepth => "invalid --max-depth",
+        error.UnknownFlag => "unknown flag",
+        error.MissingPath => "command requires <file.zova> <graph> <node-id>",
+        error.MissingGraph => "command requires <graph>",
+        error.MissingNode => if (std.mem.eql(u8, command, "graph-node"))
+            "graph-node requires <file.zova> <graph> <node-id>"
+        else if (std.mem.eql(u8, command, "graph-neighbors"))
+            "graph-neighbors requires <file.zova> <graph> <node-id>"
+        else
+            "graph-walk requires <file.zova> <graph> <node-id>",
         error.ExtraArgs => "too many arguments",
     };
 }
@@ -1713,6 +2113,10 @@ fn boundedCommandErrorFormat(args: []const []const u8) OutputFormat {
         if (std.mem.eql(u8, arg, "--json")) return .json;
     }
     return .text;
+}
+
+fn graphCommandErrorFormat(args: []const []const u8) OutputFormat {
+    return boundedCommandErrorFormat(args);
 }
 
 fn parseHex32(value: []const u8) ![32]u8 {
@@ -2171,6 +2575,22 @@ fn vectorInspectErrorFormat(stderr: *std.Io.Writer, command: []const u8, format:
     const label = switch (err) {
         error.VectorCollectionNotFound => "not found",
         error.VectorCorrupt => "vector corruption",
+        else => "inspection failed",
+    };
+    switch (format) {
+        .text => try stderr.print("{s}: {s}: {s}\n", .{ command, label, @errorName(err) }),
+        .json => try writeJsonErrorWithKind(stderr, command, label, @errorName(err)),
+    }
+    return ExitCode.check_failed;
+}
+
+fn graphInspectErrorFormat(stderr: *std.Io.Writer, command: []const u8, format: OutputFormat, err: anyerror) !u8 {
+    const label = switch (err) {
+        error.GraphNotFound,
+        error.GraphNodeNotFound,
+        error.GraphEdgeNotFound,
+        => "not found",
+        error.GraphInvalid => "invalid graph input",
         else => "inspection failed",
     };
     switch (format) {
@@ -3382,6 +3802,203 @@ fn writeVectorCollectionJson(stdout: *std.Io.Writer, limit: usize, detail: Vecto
     try stdout.writeAll("\n}\n");
 }
 
+fn writeGraphsText(stdout: *std.Io.Writer, path: []const u8, limit: usize, items: []const zova.GraphInfo, truncated: bool) !void {
+    try stdout.print(
+        \\Zova graphs: {s}
+        \\limit: {d}
+        \\truncated: {}
+        \\
+    , .{ path, limit, truncated });
+    if (items.len == 0) {
+        try stdout.writeAll("graphs: none\n");
+        return;
+    }
+    try stdout.writeAll("graphs:\n");
+    for (items) |item| {
+        try stdout.print("  {s} nodes={d} edges={d}\n", .{ item.name, item.node_count, item.edge_count });
+    }
+}
+
+fn writeGraphsJson(stdout: *std.Io.Writer, limit: usize, items: []const zova.GraphInfo, truncated: bool) !void {
+    try stdout.writeAll("{\n");
+    try stdout.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
+    try stdout.writeAll("  \"status\": \"ok\",\n");
+    try stdout.writeAll("  \"command\": \"graphs\",\n");
+    try stdout.print("  \"limit\": {d},\n", .{limit});
+    try stdout.print("  \"truncated\": {},\n", .{truncated});
+    try stdout.writeAll("  \"graphs\": ");
+    try writeGraphInfoArrayJson(stdout, items);
+    try stdout.writeAll("\n}\n");
+}
+
+fn writeGraphText(stdout: *std.Io.Writer, path: []const u8, info: zova.GraphInfo) !void {
+    try stdout.print(
+        \\Zova graph: {s}
+        \\graph: {s}
+        \\nodes: {d}
+        \\edges: {d}
+        \\
+    , .{ path, info.name, info.node_count, info.edge_count });
+}
+
+fn writeGraphJson(stdout: *std.Io.Writer, info: zova.GraphInfo) !void {
+    try stdout.writeAll("{\n");
+    try stdout.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
+    try stdout.writeAll("  \"status\": \"ok\",\n");
+    try stdout.writeAll("  \"command\": \"graph\",\n");
+    try stdout.writeAll("  \"graph\": ");
+    try writeJsonString(stdout, info.name);
+    try stdout.print(
+        \\,
+        \\  "node_count": {d},
+        \\  "edge_count": {d}
+        \\
+    , .{ info.node_count, info.edge_count });
+    try stdout.writeAll("}\n");
+}
+
+fn writeGraphNodeText(stdout: *std.Io.Writer, path: []const u8, node: zova.GraphNode) !void {
+    try stdout.print(
+        \\Zova graph node: {s}
+        \\graph: {s}
+        \\node_id: {s}
+        \\kind: {s}
+        \\target_type: {s}
+        \\
+    , .{ path, node.graph_name, node.node_id, node.kind, graphTargetTypeText(node.target_type) });
+    if (node.target_namespace) |value| try stdout.print("target_namespace: {s}\n", .{value});
+    if (node.target_ref) |value| try stdout.print("target_ref: {s}\n", .{value});
+}
+
+fn writeGraphNodeJson(stdout: *std.Io.Writer, node: zova.GraphNode) !void {
+    try stdout.writeAll("{\n");
+    try stdout.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
+    try stdout.writeAll("  \"status\": \"ok\",\n");
+    try stdout.writeAll("  \"command\": \"graph-node\",\n");
+    try stdout.writeAll("  \"graph\": ");
+    try writeJsonString(stdout, node.graph_name);
+    try stdout.writeAll(",\n  \"node_id\": ");
+    try writeJsonString(stdout, node.node_id);
+    try stdout.writeAll(",\n  \"kind\": ");
+    try writeJsonString(stdout, node.kind);
+    try stdout.writeAll(",\n  \"target_type\": ");
+    try writeJsonString(stdout, graphTargetTypeText(node.target_type));
+    try stdout.writeAll(",\n  \"target_namespace\": ");
+    try writeNullableJsonString(stdout, node.target_namespace);
+    try stdout.writeAll(",\n  \"target_ref\": ");
+    try writeNullableJsonString(stdout, node.target_ref);
+    try stdout.writeAll("\n}\n");
+}
+
+fn writeGraphNeighborsText(
+    stdout: *std.Io.Writer,
+    path: []const u8,
+    graph_name: []const u8,
+    node_id: []const u8,
+    limit: usize,
+    direction: zova.GraphNeighborDirection,
+    items: []const zova.GraphNeighbor,
+    truncated: bool,
+) !void {
+    try stdout.print(
+        \\Zova graph neighbors: {s}
+        \\graph: {s}
+        \\node_id: {s}
+        \\direction: {s}
+        \\limit: {d}
+        \\truncated: {}
+        \\
+    , .{ path, graph_name, node_id, graphDirectionText(direction), limit, truncated });
+    if (items.len == 0) {
+        try stdout.writeAll("neighbors: none\n");
+        return;
+    }
+    try stdout.writeAll("neighbors:\n");
+    for (items) |item| {
+        try stdout.print("  {s} kind={s} edge_type={s}\n", .{ item.node_id, item.kind, item.edge_type });
+    }
+}
+
+fn writeGraphNeighborsJson(
+    stdout: *std.Io.Writer,
+    graph_name: []const u8,
+    node_id: []const u8,
+    limit: usize,
+    direction: zova.GraphNeighborDirection,
+    items: []const zova.GraphNeighbor,
+    truncated: bool,
+) !void {
+    try stdout.writeAll("{\n");
+    try stdout.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
+    try stdout.writeAll("  \"status\": \"ok\",\n");
+    try stdout.writeAll("  \"command\": \"graph-neighbors\",\n");
+    try stdout.writeAll("  \"graph\": ");
+    try writeJsonString(stdout, graph_name);
+    try stdout.writeAll(",\n  \"node_id\": ");
+    try writeJsonString(stdout, node_id);
+    try stdout.writeAll(",\n  \"direction\": ");
+    try writeJsonString(stdout, graphDirectionText(direction));
+    try stdout.print(",\n  \"limit\": {d},\n  \"truncated\": {},\n", .{ limit, truncated });
+    try stdout.writeAll("  \"neighbors\": ");
+    try writeGraphNeighborsArrayJson(stdout, items);
+    try stdout.writeAll("\n}\n");
+}
+
+fn writeGraphWalkText(
+    stdout: *std.Io.Writer,
+    path: []const u8,
+    graph_name: []const u8,
+    node_id: []const u8,
+    limit: usize,
+    max_depth: u32,
+    items: []const zova.GraphWalkItem,
+    truncated: bool,
+) !void {
+    try stdout.print(
+        \\Zova graph walk: {s}
+        \\graph: {s}
+        \\start_node_id: {s}
+        \\max_depth: {d}
+        \\limit: {d}
+        \\truncated: {}
+        \\
+    , .{ path, graph_name, node_id, max_depth, limit, truncated });
+    if (items.len == 0) {
+        try stdout.writeAll("nodes: none\n");
+        return;
+    }
+    try stdout.writeAll("nodes:\n");
+    for (items) |item| {
+        try stdout.print("  {s} kind={s} depth={d}", .{ item.node_id, item.kind, item.depth });
+        if (item.predecessor_node_id) |value| try stdout.print(" predecessor={s}", .{value});
+        if (item.edge_type) |value| try stdout.print(" edge_type={s}", .{value});
+        try stdout.writeByte('\n');
+    }
+}
+
+fn writeGraphWalkJson(
+    stdout: *std.Io.Writer,
+    graph_name: []const u8,
+    node_id: []const u8,
+    limit: usize,
+    max_depth: u32,
+    items: []const zova.GraphWalkItem,
+    truncated: bool,
+) !void {
+    try stdout.writeAll("{\n");
+    try stdout.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
+    try stdout.writeAll("  \"status\": \"ok\",\n");
+    try stdout.writeAll("  \"command\": \"graph-walk\",\n");
+    try stdout.writeAll("  \"graph\": ");
+    try writeJsonString(stdout, graph_name);
+    try stdout.writeAll(",\n  \"start_node_id\": ");
+    try writeJsonString(stdout, node_id);
+    try stdout.print(",\n  \"max_depth\": {d},\n  \"limit\": {d},\n  \"truncated\": {},\n", .{ max_depth, limit, truncated });
+    try stdout.writeAll("  \"nodes\": ");
+    try writeGraphWalkArrayJson(stdout, items);
+    try stdout.writeAll("\n}\n");
+}
+
 fn writeTablesText(stdout: *std.Io.Writer, path: []const u8, limit: usize, list: TableList) !void {
     try stdout.print(
         \\Zova tables: {s}
@@ -3508,6 +4125,49 @@ fn writeVectorCollectionStatsJson(stdout: *std.Io.Writer, items: []const VectorC
     try stdout.writeAll("]");
 }
 
+fn writeGraphInfoArrayJson(stdout: *std.Io.Writer, items: []const zova.GraphInfo) !void {
+    try stdout.writeAll("[");
+    for (items, 0..) |item, index| {
+        if (index != 0) try stdout.writeAll(", ");
+        try stdout.writeAll("{\"name\": ");
+        try writeJsonString(stdout, item.name);
+        try stdout.print(", \"node_count\": {d}, \"edge_count\": {d}}}", .{ item.node_count, item.edge_count });
+    }
+    try stdout.writeAll("]");
+}
+
+fn writeGraphNeighborsArrayJson(stdout: *std.Io.Writer, items: []const zova.GraphNeighbor) !void {
+    try stdout.writeAll("[");
+    for (items, 0..) |item, index| {
+        if (index != 0) try stdout.writeAll(", ");
+        try stdout.writeAll("{\"node_id\": ");
+        try writeJsonString(stdout, item.node_id);
+        try stdout.writeAll(", \"kind\": ");
+        try writeJsonString(stdout, item.kind);
+        try stdout.writeAll(", \"edge_type\": ");
+        try writeJsonString(stdout, item.edge_type);
+        try stdout.writeAll("}");
+    }
+    try stdout.writeAll("]");
+}
+
+fn writeGraphWalkArrayJson(stdout: *std.Io.Writer, items: []const zova.GraphWalkItem) !void {
+    try stdout.writeAll("[");
+    for (items, 0..) |item, index| {
+        if (index != 0) try stdout.writeAll(", ");
+        try stdout.writeAll("{\"node_id\": ");
+        try writeJsonString(stdout, item.node_id);
+        try stdout.writeAll(", \"kind\": ");
+        try writeJsonString(stdout, item.kind);
+        try stdout.print(", \"depth\": {d}, \"predecessor_node_id\": ", .{item.depth});
+        try writeNullableJsonString(stdout, item.predecessor_node_id);
+        try stdout.writeAll(", \"edge_type\": ");
+        try writeNullableJsonString(stdout, item.edge_type);
+        try stdout.writeAll("}");
+    }
+    try stdout.writeAll("]");
+}
+
 fn writeStringArrayJson(stdout: *std.Io.Writer, items: []const []const u8) !void {
     try stdout.writeAll("[");
     for (items, 0..) |item, index| {
@@ -3515,6 +4175,48 @@ fn writeStringArrayJson(stdout: *std.Io.Writer, items: []const []const u8) !void
         try writeJsonString(stdout, item);
     }
     try stdout.writeAll("]");
+}
+
+fn writeNullableJsonString(writer: *std.Io.Writer, value: ?[]const u8) !void {
+    if (value) |actual| {
+        try writeJsonString(writer, actual);
+    } else {
+        try writer.writeAll("null");
+    }
+}
+
+fn graphTargetTypeText(target_type: zova.GraphTargetType) []const u8 {
+    return switch (target_type) {
+        .none => "none",
+        .record => "record",
+        .object => "object",
+        .object_chunk => "object_chunk",
+        .vector => "vector",
+        .entity => "entity",
+        .fact => "fact",
+        .concept => "concept",
+        .external => "external",
+    };
+}
+
+fn graphTargetTypeFromText(text: []const u8) ?zova.GraphTargetType {
+    if (std.mem.eql(u8, text, "none")) return .none;
+    if (std.mem.eql(u8, text, "record")) return .record;
+    if (std.mem.eql(u8, text, "object")) return .object;
+    if (std.mem.eql(u8, text, "object_chunk")) return .object_chunk;
+    if (std.mem.eql(u8, text, "vector")) return .vector;
+    if (std.mem.eql(u8, text, "entity")) return .entity;
+    if (std.mem.eql(u8, text, "fact")) return .fact;
+    if (std.mem.eql(u8, text, "concept")) return .concept;
+    if (std.mem.eql(u8, text, "external")) return .external;
+    return null;
+}
+
+fn graphDirectionText(direction: zova.GraphNeighborDirection) []const u8 {
+    return switch (direction) {
+        .outgoing => "outgoing",
+        .incoming => "incoming",
+    };
 }
 
 fn writeTopObjectStatsJson(stdout: *std.Io.Writer, items: []const TopObjectStats) !void {
@@ -3554,12 +4256,16 @@ fn writeCheckText(stdout: *std.Io.Writer, report: ?DiagnosticReport) !void {
             \\chunks_checked: {d}
             \\vectors_checked: {d}
             \\loose_chunks: {d}
+            \\graphs_checked: {d}
+            \\graph_nodes_checked: {d}
+            \\graph_edges_checked: {d}
             \\issue_count: {d}
             \\sqlite_issues: {d}
             \\bound_store_issues: {d}
             \\object_issues: {d}
             \\chunk_issues: {d}
             \\vector_issues: {d}
+            \\graph_issues: {d}
             \\error_issues: {d}
             \\
         , .{
@@ -3567,12 +4273,16 @@ fn writeCheckText(stdout: *std.Io.Writer, report: ?DiagnosticReport) !void {
             deep_report.stats.chunks,
             deep_report.stats.vectors,
             deep_report.stats.loose_chunks,
+            deep_report.stats.graphs,
+            deep_report.stats.graph_nodes,
+            deep_report.stats.graph_edges,
             deep_report.issue_count,
             deep_report.issue_counts.sqlite,
             deep_report.issue_counts.bound_store,
             deep_report.issue_counts.object,
             deep_report.issue_counts.chunk,
             deep_report.issue_counts.vector,
+            deep_report.issue_counts.graph,
             deep_report.severity_counts.errors,
         });
     }
@@ -3593,7 +4303,10 @@ fn writeCheckJson(stdout: *std.Io.Writer, report: ?DiagnosticReport) !void {
             \\    "objects": {d},
             \\    "chunks": {d},
             \\    "vectors": {d},
-            \\    "loose_chunks": {d}
+            \\    "loose_chunks": {d},
+            \\    "graphs": {d},
+            \\    "graph_nodes": {d},
+            \\    "graph_edges": {d}
             \\  }},
             \\  "issue_count": {d},
             \\  "issue_counts":
@@ -3602,6 +4315,9 @@ fn writeCheckJson(stdout: *std.Io.Writer, report: ?DiagnosticReport) !void {
             deep_report.stats.chunks,
             deep_report.stats.vectors,
             deep_report.stats.loose_chunks,
+            deep_report.stats.graphs,
+            deep_report.stats.graph_nodes,
+            deep_report.stats.graph_edges,
             deep_report.issue_count,
         });
         try stdout.writeByte(' ');
@@ -3623,6 +4339,7 @@ fn writeDeepCheckFailureText(stderr: *std.Io.Writer, report: DiagnosticReport) !
         \\object_issues: {d}
         \\chunk_issues: {d}
         \\vector_issues: {d}
+        \\graph_issues: {d}
         \\error_issues: {d}
         \\issues_truncated: {}
         \\issues:
@@ -3634,6 +4351,7 @@ fn writeDeepCheckFailureText(stderr: *std.Io.Writer, report: DiagnosticReport) !
         report.issue_counts.object,
         report.issue_counts.chunk,
         report.issue_counts.vector,
+        report.issue_counts.graph,
         report.severity_counts.errors,
         report.issues_truncated,
     });
@@ -3642,6 +4360,9 @@ fn writeDeepCheckFailureText(stderr: *std.Io.Writer, report: DiagnosticReport) !
     }
     if (report.issue_counts.vector != 0) {
         try stderr.writeAll("vector corruption: detected\n");
+    }
+    if (report.issue_counts.graph != 0) {
+        try stderr.writeAll("graph corruption: detected\n");
     }
     for (report.issues) |issue| {
         try stderr.print("  area={s} kind={s} severity={s} detail={s}", .{
@@ -3654,6 +4375,9 @@ fn writeDeepCheckFailureText(stderr: *std.Io.Writer, report: DiagnosticReport) !
         if (issue.chunk_hash_hex) |value| try stderr.print(" chunk_hash={s}", .{value});
         if (issue.collection_name) |value| try stderr.print(" collection={s}", .{value});
         if (issue.vector_id) |value| try stderr.print(" vector_id={s}", .{value});
+        if (issue.graph_name) |value| try stderr.print(" graph={s}", .{value});
+        if (issue.node_id) |value| try stderr.print(" node_id={s}", .{value});
+        if (issue.edge_type) |value| try stderr.print(" edge_type={s}", .{value});
         try stderr.writeByte('\n');
     }
 }
@@ -3689,6 +4413,9 @@ fn writeDoctorText(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
         \\chunks_checked: {d}
         \\vectors_checked: {d}
         \\loose_chunks: {d}
+        \\graphs_checked: {d}
+        \\graph_nodes_checked: {d}
+        \\graph_edges_checked: {d}
         \\user_tables: {d}
         \\private_tables: {d}
         \\issue_count: {d}
@@ -3697,6 +4424,7 @@ fn writeDoctorText(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
         \\object_issues: {d}
         \\chunk_issues: {d}
         \\vector_issues: {d}
+        \\graph_issues: {d}
         \\error_issues: {d}
         \\issues_truncated: {}
         \\
@@ -3707,6 +4435,9 @@ fn writeDoctorText(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
         report.stats.chunks,
         report.stats.vectors,
         report.stats.loose_chunks,
+        report.stats.graphs,
+        report.stats.graph_nodes,
+        report.stats.graph_edges,
         summary.user_table_count,
         summary.private_table_count,
         report.issue_count,
@@ -3715,6 +4446,7 @@ fn writeDoctorText(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
         report.issue_counts.object,
         report.issue_counts.chunk,
         report.issue_counts.vector,
+        report.issue_counts.graph,
         report.severity_counts.errors,
         report.issues_truncated,
     });
@@ -3738,6 +4470,9 @@ fn writeDoctorText(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
             if (issue.chunk_hash_hex) |value| try writer.print(" chunk_hash={s}", .{value});
             if (issue.collection_name) |value| try writer.print(" collection={s}", .{value});
             if (issue.vector_id) |value| try writer.print(" vector_id={s}", .{value});
+            if (issue.graph_name) |value| try writer.print(" graph={s}", .{value});
+            if (issue.node_id) |value| try writer.print(" node_id={s}", .{value});
+            if (issue.edge_type) |value| try writer.print(" edge_type={s}", .{value});
             try writer.writeByte('\n');
         }
     }
@@ -3766,7 +4501,10 @@ fn writeDoctorJson(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
         \\    "objects": {d},
         \\    "chunks": {d},
         \\    "vectors": {d},
-        \\    "loose_chunks": {d}
+        \\    "loose_chunks": {d},
+        \\    "graphs": {d},
+        \\    "graph_nodes": {d},
+        \\    "graph_edges": {d}
         \\  }},
         \\  "tables": {{
         \\    "user": {d},
@@ -3779,6 +4517,9 @@ fn writeDoctorJson(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
         report.stats.chunks,
         report.stats.vectors,
         report.stats.loose_chunks,
+        report.stats.graphs,
+        report.stats.graph_nodes,
+        report.stats.graph_edges,
         summary.user_table_count,
         summary.private_table_count,
         report.issue_count,
@@ -4087,6 +4828,9 @@ fn writeSalvageCountsJson(writer: *std.Io.Writer, counts: SalvageCounts) !void {
         \\    "user_tables": {d},
         \\    "user_schema_objects": {d},
         \\    "user_rows": {d},
+        \\    "graphs": {d},
+        \\    "graph_nodes": {d},
+        \\    "graph_edges": {d},
         \\    "objects": {d},
         \\    "chunks": {d},
         \\    "loose_chunks": {d},
@@ -4097,6 +4841,9 @@ fn writeSalvageCountsJson(writer: *std.Io.Writer, counts: SalvageCounts) !void {
         counts.user_tables,
         counts.user_schema_objects,
         counts.user_rows,
+        counts.graphs,
+        counts.graph_nodes,
+        counts.graph_edges,
         counts.objects,
         counts.chunks,
         counts.loose_chunks,
@@ -4153,9 +4900,10 @@ fn writeDiagnosticIssueCountsJson(writer: *std.Io.Writer, counts: DiagnosticIssu
         \\    "bound_store": {d},
         \\    "object": {d},
         \\    "chunk": {d},
-        \\    "vector": {d}
+        \\    "vector": {d},
+        \\    "graph": {d}
         \\  }}
-    , .{ counts.sqlite, counts.bound_store, counts.object, counts.chunk, counts.vector });
+    , .{ counts.sqlite, counts.bound_store, counts.object, counts.chunk, counts.vector, counts.graph });
 }
 
 fn writeDiagnosticSeverityCountsJson(writer: *std.Io.Writer, counts: DiagnosticSeverityCounts) !void {
@@ -4197,6 +4945,18 @@ fn writeDiagnosticIssuesJson(writer: *std.Io.Writer, issues: []const DiagnosticI
             try writer.writeAll(", \"vector_id\": ");
             try writeJsonString(writer, value);
         }
+        if (issue.graph_name) |value| {
+            try writer.writeAll(", \"graph\": ");
+            try writeJsonString(writer, value);
+        }
+        if (issue.node_id) |value| {
+            try writer.writeAll(", \"node_id\": ");
+            try writeJsonString(writer, value);
+        }
+        if (issue.edge_type) |value| {
+            try writer.writeAll(", \"edge_type\": ");
+            try writeJsonString(writer, value);
+        }
         try writer.writeAll("}");
     }
     try writer.writeAll("]");
@@ -4209,6 +4969,7 @@ fn diagnosticIssueAreaText(area: DiagnosticIssueArea) []const u8 {
         .object => "object",
         .chunk => "chunk",
         .vector => "vector",
+        .graph => "graph",
     };
 }
 
@@ -4293,6 +5054,7 @@ fn runDiagnostics(allocator: std.mem.Allocator, db: *zova.Database, issue_limit:
     try validateObjects(allocator, db, &report, &issues);
     try validateLooseChunks(allocator, db, &report, &issues);
     try validateVectors(allocator, db, &report, &issues);
+    try validateGraphs(allocator, db, &report, &issues);
     report.issues = try issues.toOwnedSlice(allocator);
     return report;
 }
@@ -4372,7 +5134,7 @@ fn validateOneBoundStore(
 
     const format_version = (try requiredBoundStoreMetaValueAlloc(allocator, &store, report, issues, "format_version", "missing_store_format_version", "UnsupportedZovaVersion", "store_format_version_unreadable")) orelse return;
     defer allocator.free(format_version);
-    if (!std.mem.eql(u8, format_version, "3")) {
+    if (!std.mem.eql(u8, format_version, "4")) {
         try addDiagnosticIssue(allocator, report, issues, .bound_store, "store_format_version_mismatch", "UnsupportedZovaVersion", null, null, null, null);
         return;
     }
@@ -4456,16 +5218,21 @@ fn buildSalvagePlan(summary: DatabaseSummary, report: DiagnosticReport) SalvageP
         .loose_chunks = summary.loose_chunk_count,
         .vector_collections = summary.vector_collection_count,
         .vectors = summary.vector_count,
+        .graphs = report.stats.graphs,
+        .graph_nodes = report.stats.graph_nodes,
+        .graph_edges = report.stats.graph_edges,
     };
     const skipped = SalvageCounts{
         .objects = @min(summary.object_count, report.issue_counts.object),
         .chunks = report.issue_counts.chunk,
         .vectors = @min(summary.vector_count, report.issue_counts.vector),
+        .graph_edges = @min(report.stats.graph_edges, report.issue_counts.graph),
     };
 
     recoverable.objects = subtractClamped(recoverable.objects, skipped.objects);
     recoverable.chunks = subtractClamped(recoverable.chunks, skipped.chunks);
     recoverable.vectors = subtractClamped(recoverable.vectors, skipped.vectors);
+    recoverable.graph_edges = subtractClamped(recoverable.graph_edges, skipped.graph_edges);
 
     const recoverability: SalvageRecoverability = if (report.issue_counts.sqlite != 0)
         .unknown
@@ -4510,6 +5277,7 @@ fn executeSalvage(
     copied.objects = try copyValidObjects(allocator, source, &destination);
     copied.loose_chunks = try copyValidLooseChunks(allocator, source, &destination);
     try copyValidVectors(allocator, source, &destination, &copied);
+    try copyValidGraphs(allocator, source, &destination, &copied);
     copied.chunks = try scalarU64(&destination, "select count(*) from _zova_chunks");
 
     const destination_verified = try verifySalvageDestination(allocator, &destination);
@@ -4790,6 +5558,109 @@ fn copyValidVectors(
     }
 }
 
+fn copyValidGraphs(
+    allocator: std.mem.Allocator,
+    source: *zova.Database,
+    destination: *zova.Database,
+    copied: *SalvageCounts,
+) !void {
+    _ = allocator;
+
+    var graphs = try source.prepare("select name from _zova_graphs order by created_order, name");
+    defer graphs.deinit();
+    while ((try graphs.step()) == .row) {
+        const graph_name = graphs.columnText(0);
+        if (!isValidGraphAsciiName(graph_name, 128)) continue;
+        destination.createGraph(graph_name) catch continue;
+        copied.graphs += 1;
+    }
+
+    var nodes = try source.prepare(
+        \\select graph_name, node_id, kind, target_type, target_namespace, target_ref
+        \\from _zova_graph_nodes
+        \\order by created_order, graph_name, node_id
+    );
+    defer nodes.deinit();
+    while ((try nodes.step()) == .row) {
+        const graph_name = nodes.columnText(0);
+        const node_id = nodes.columnText(1);
+        const kind = nodes.columnText(2);
+        const target_type_text = nodes.columnText(3);
+        if (!isValidGraphAsciiName(graph_name, 128)) continue;
+        if (!isValidGraphNodeId(node_id)) continue;
+        if (!isValidGraphAsciiName(kind, 128)) continue;
+        const target_type = graphTargetTypeFromText(target_type_text) orelse continue;
+        const target_namespace = if (nodes.columnType(4) == .null) null else nodes.columnText(4);
+        const target_ref = if (nodes.columnType(5) == .null) null else nodes.columnText(5);
+        if (target_namespace) |value| {
+            if (!isValidGraphOptionalText(value)) continue;
+        }
+        if (target_ref) |value| {
+            if (!isValidGraphOptionalText(value)) continue;
+        }
+        if (!graphTargetReferenceAvailable(destination, target_type, target_namespace, target_ref)) continue;
+        destination.putGraphNode(.{
+            .graph_name = graph_name,
+            .node_id = node_id,
+            .kind = kind,
+            .target_type = target_type,
+            .target_namespace = target_namespace,
+            .target_ref = target_ref,
+        }) catch continue;
+        copied.graph_nodes += 1;
+    }
+
+    var edges = try source.prepare(
+        \\select graph_name, from_node_id, edge_type, to_node_id
+        \\from _zova_graph_edges
+        \\order by created_order, graph_name, from_node_id, edge_type, to_node_id
+    );
+    defer edges.deinit();
+    while ((try edges.step()) == .row) {
+        const graph_name = edges.columnText(0);
+        const from_node_id = edges.columnText(1);
+        const edge_type = edges.columnText(2);
+        const to_node_id = edges.columnText(3);
+        if (!isValidGraphAsciiName(graph_name, 128)) continue;
+        if (!isValidGraphNodeId(from_node_id)) continue;
+        if (!isValidGraphAsciiName(edge_type, 128)) continue;
+        if (!isValidGraphNodeId(to_node_id)) continue;
+        destination.putGraphEdge(.{
+            .graph_name = graph_name,
+            .from_node_id = from_node_id,
+            .edge_type = edge_type,
+            .to_node_id = to_node_id,
+        }) catch continue;
+        copied.graph_edges += 1;
+    }
+}
+
+fn graphTargetReferenceAvailable(
+    db: *zova.Database,
+    target_type: zova.GraphTargetType,
+    target_namespace: ?[]const u8,
+    target_ref: ?[]const u8,
+) bool {
+    return switch (target_type) {
+        .object => {
+            const ref = target_ref orelse return false;
+            const id = parseHex32(ref) catch return false;
+            return db.hasObject(id) catch false;
+        },
+        .object_chunk => {
+            const ref = target_ref orelse return false;
+            const id = parseHex32(ref) catch return false;
+            return db.hasObjectChunk(id) catch false;
+        },
+        .vector => {
+            const collection = target_namespace orelse return false;
+            const vector_id = target_ref orelse return false;
+            return db.hasVector(collection, vector_id) catch false;
+        },
+        else => true,
+    };
+}
+
 fn verifySalvageDestination(allocator: std.mem.Allocator, destination: *zova.Database) !bool {
     quickCheck(destination) catch return false;
     var report = runDiagnostics(allocator, destination, 0) catch return false;
@@ -4850,6 +5721,9 @@ fn hasRecoverableData(counts: SalvageCounts) bool {
     return counts.user_tables != 0 or
         counts.user_schema_objects != 0 or
         counts.user_rows != 0 or
+        counts.graphs != 0 or
+        counts.graph_nodes != 0 or
+        counts.graph_edges != 0 or
         counts.objects != 0 or
         counts.chunks != 0 or
         counts.loose_chunks != 0 or
@@ -5013,6 +5887,205 @@ fn validateVectors(allocator: std.mem.Allocator, db: *zova.Database, report: *Di
     }
 }
 
+fn validateGraphs(allocator: std.mem.Allocator, db: *zova.Database, report: *DiagnosticReport, issues: *std.ArrayList(DiagnosticIssue)) !void {
+    var graphs = try db.prepare("select name from _zova_graphs order by name");
+    defer graphs.deinit();
+    while ((try graphs.step()) == .row) {
+        const graph_name = graphs.columnText(0);
+        report.stats.graphs += 1;
+        if (!isValidGraphAsciiName(graph_name, 128)) {
+            try addGraphDiagnosticIssue(allocator, report, issues, "graph_name_invalid", @errorName(error.GraphInvalid), graph_name, null, null);
+        }
+    }
+
+    var nodes = try db.prepare(
+        \\select graph_name, node_id, kind, target_type, target_namespace, target_ref
+        \\from _zova_graph_nodes
+        \\order by graph_name, node_id
+    );
+    defer nodes.deinit();
+    while ((try nodes.step()) == .row) {
+        const graph_name = nodes.columnText(0);
+        const node_id = nodes.columnText(1);
+        const kind = nodes.columnText(2);
+        const target_type = nodes.columnText(3);
+        report.stats.graph_nodes += 1;
+
+        if (!isValidGraphAsciiName(graph_name, 128)) {
+            try addGraphDiagnosticIssue(allocator, report, issues, "node_graph_name_invalid", @errorName(error.GraphInvalid), graph_name, node_id, null);
+        }
+        if (!isValidGraphNodeId(node_id)) {
+            try addGraphDiagnosticIssue(allocator, report, issues, "node_id_invalid", @errorName(error.GraphInvalid), graph_name, node_id, null);
+        }
+        if (!isValidGraphAsciiName(kind, 128)) {
+            try addGraphDiagnosticIssue(allocator, report, issues, "node_kind_invalid", @errorName(error.GraphInvalid), graph_name, node_id, null);
+        }
+        if (!isValidGraphTargetTypeText(target_type)) {
+            try addGraphDiagnosticIssue(allocator, report, issues, "node_target_type_invalid", @errorName(error.GraphInvalid), graph_name, node_id, null);
+        }
+        if (nodes.columnType(4) != .null and !isValidGraphOptionalText(nodes.columnText(4))) {
+            try addGraphDiagnosticIssue(allocator, report, issues, "node_target_namespace_invalid", @errorName(error.GraphInvalid), graph_name, node_id, null);
+        }
+        if (nodes.columnType(5) != .null and !isValidGraphOptionalText(nodes.columnText(5))) {
+            try addGraphDiagnosticIssue(allocator, report, issues, "node_target_ref_invalid", @errorName(error.GraphInvalid), graph_name, node_id, null);
+        }
+        if (graphTargetTypeFromText(target_type)) |target_type_value| {
+            try validateGraphTargetReference(
+                allocator,
+                db,
+                report,
+                issues,
+                graph_name,
+                node_id,
+                target_type_value,
+                if (nodes.columnType(4) == .null) null else nodes.columnText(4),
+                if (nodes.columnType(5) == .null) null else nodes.columnText(5),
+            );
+        }
+    }
+
+    var edges = try db.prepare(
+        \\select e.graph_name, e.from_node_id, e.edge_type, e.to_node_id,
+        \\  from_node.node_id is null,
+        \\  to_node.node_id is null
+        \\from _zova_graph_edges e
+        \\left join _zova_graph_nodes from_node
+        \\  on from_node.graph_name = e.graph_name and from_node.node_id = e.from_node_id
+        \\left join _zova_graph_nodes to_node
+        \\  on to_node.graph_name = e.graph_name and to_node.node_id = e.to_node_id
+        \\order by e.graph_name, e.from_node_id, e.edge_type, e.to_node_id
+    );
+    defer edges.deinit();
+    while ((try edges.step()) == .row) {
+        const graph_name = edges.columnText(0);
+        const from_node_id = edges.columnText(1);
+        const edge_type = edges.columnText(2);
+        const to_node_id = edges.columnText(3);
+        const missing_from = edges.columnInt64(4) != 0;
+        const missing_to = edges.columnInt64(5) != 0;
+        report.stats.graph_edges += 1;
+
+        if (!isValidGraphAsciiName(graph_name, 128)) {
+            try addGraphDiagnosticIssue(allocator, report, issues, "edge_graph_name_invalid", @errorName(error.GraphInvalid), graph_name, from_node_id, edge_type);
+        }
+        if (!isValidGraphNodeId(from_node_id)) {
+            try addGraphDiagnosticIssue(allocator, report, issues, "edge_from_node_invalid", @errorName(error.GraphInvalid), graph_name, from_node_id, edge_type);
+        }
+        if (!isValidGraphNodeId(to_node_id)) {
+            try addGraphDiagnosticIssue(allocator, report, issues, "edge_to_node_invalid", @errorName(error.GraphInvalid), graph_name, to_node_id, edge_type);
+        }
+        if (!isValidGraphAsciiName(edge_type, 128)) {
+            try addGraphDiagnosticIssue(allocator, report, issues, "edge_type_invalid", @errorName(error.GraphInvalid), graph_name, from_node_id, edge_type);
+        }
+        if (missing_from) {
+            try addGraphDiagnosticIssue(allocator, report, issues, "missing_edge_from_node", @errorName(error.GraphNodeNotFound), graph_name, from_node_id, edge_type);
+        }
+        if (missing_to) {
+            try addGraphDiagnosticIssue(allocator, report, issues, "missing_edge_to_node", @errorName(error.GraphNodeNotFound), graph_name, to_node_id, edge_type);
+        }
+    }
+}
+
+fn isValidGraphAsciiName(name: []const u8, max_len: usize) bool {
+    if (name.len == 0 or name.len > max_len) return false;
+    if (startsWithZovaPrefix(name)) return false;
+    for (name) |byte| {
+        if (!((byte >= 'A' and byte <= 'Z') or
+            (byte >= 'a' and byte <= 'z') or
+            (byte >= '0' and byte <= '9') or
+            byte == '_' or
+            byte == '.' or
+            byte == ':' or
+            byte == '-')) return false;
+    }
+    return true;
+}
+
+fn isValidGraphNodeId(id: []const u8) bool {
+    if (id.len == 0 or id.len > 512) return false;
+    if (!std.unicode.utf8ValidateSlice(id)) return false;
+    if (startsWithZovaPrefix(id)) return false;
+    for (id) |byte| {
+        if (byte == 0) return false;
+    }
+    return true;
+}
+
+fn isValidGraphOptionalText(value: []const u8) bool {
+    if (!std.unicode.utf8ValidateSlice(value)) return false;
+    for (value) |byte| {
+        if (byte == 0) return false;
+    }
+    return true;
+}
+
+fn isValidGraphTargetTypeText(text: []const u8) bool {
+    return std.mem.eql(u8, text, "none") or
+        std.mem.eql(u8, text, "record") or
+        std.mem.eql(u8, text, "object") or
+        std.mem.eql(u8, text, "object_chunk") or
+        std.mem.eql(u8, text, "vector") or
+        std.mem.eql(u8, text, "entity") or
+        std.mem.eql(u8, text, "fact") or
+        std.mem.eql(u8, text, "concept") or
+        std.mem.eql(u8, text, "external");
+}
+
+fn validateGraphTargetReference(
+    allocator: std.mem.Allocator,
+    db: *zova.Database,
+    report: *DiagnosticReport,
+    issues: *std.ArrayList(DiagnosticIssue),
+    graph_name: []const u8,
+    node_id: []const u8,
+    target_type: zova.GraphTargetType,
+    target_namespace: ?[]const u8,
+    target_ref: ?[]const u8,
+) !void {
+    switch (target_type) {
+        .object => {
+            const ref = target_ref orelse {
+                try addGraphDiagnosticIssue(allocator, report, issues, "node_object_target_missing", @errorName(error.ObjectNotFound), graph_name, node_id, null);
+                return;
+            };
+            const id = parseHex32(ref) catch {
+                try addGraphDiagnosticIssue(allocator, report, issues, "node_object_target_invalid", @errorName(error.GraphInvalid), graph_name, node_id, null);
+                return;
+            };
+            if (!(db.hasObject(id) catch false)) {
+                try addGraphDiagnosticIssue(allocator, report, issues, "node_object_target_missing", @errorName(error.ObjectNotFound), graph_name, node_id, null);
+            }
+        },
+        .object_chunk => {
+            const ref = target_ref orelse {
+                try addGraphDiagnosticIssue(allocator, report, issues, "node_chunk_target_missing", @errorName(error.ObjectChunkNotFound), graph_name, node_id, null);
+                return;
+            };
+            const id = parseHex32(ref) catch {
+                try addGraphDiagnosticIssue(allocator, report, issues, "node_chunk_target_invalid", @errorName(error.GraphInvalid), graph_name, node_id, null);
+                return;
+            };
+            if (!(db.hasObjectChunk(id) catch false)) {
+                try addGraphDiagnosticIssue(allocator, report, issues, "node_chunk_target_missing", @errorName(error.ObjectChunkNotFound), graph_name, node_id, null);
+            }
+        },
+        .vector => {
+            const collection = target_namespace orelse {
+                try addGraphDiagnosticIssue(allocator, report, issues, "node_vector_target_missing", @errorName(error.VectorNotFound), graph_name, node_id, null);
+                return;
+            };
+            const vector_id = target_ref orelse {
+                try addGraphDiagnosticIssue(allocator, report, issues, "node_vector_target_missing", @errorName(error.VectorNotFound), graph_name, node_id, null);
+                return;
+            };
+            if (!(db.hasVector(collection, vector_id) catch false)) {
+                try addGraphDiagnosticIssue(allocator, report, issues, "node_vector_target_missing", @errorName(error.VectorNotFound), graph_name, node_id, null);
+            }
+        },
+        else => {},
+    }
+}
+
 fn addDiagnosticIssue(
     allocator: std.mem.Allocator,
     report: *DiagnosticReport,
@@ -5033,6 +6106,7 @@ fn addDiagnosticIssue(
         .object => report.issue_counts.object += 1,
         .chunk => report.issue_counts.chunk += 1,
         .vector => report.issue_counts.vector += 1,
+        .graph => report.issue_counts.graph += 1,
     }
 
     if (issues.items.len >= report.issue_limit) {
@@ -5051,6 +6125,39 @@ fn addDiagnosticIssue(
     if (chunk_hash) |bytes| issue.chunk_hash_hex = try lowerHexAlloc(allocator, bytes);
     if (collection_name) |value| issue.collection_name = try allocator.dupe(u8, value);
     if (vector_id) |value| issue.vector_id = try allocator.dupe(u8, value);
+
+    try issues.append(allocator, issue);
+}
+
+fn addGraphDiagnosticIssue(
+    allocator: std.mem.Allocator,
+    report: *DiagnosticReport,
+    issues: *std.ArrayList(DiagnosticIssue),
+    kind: []const u8,
+    detail: []const u8,
+    graph_name: ?[]const u8,
+    node_id: ?[]const u8,
+    edge_type: ?[]const u8,
+) !void {
+    report.issue_count += 1;
+    report.severity_counts.errors += 1;
+    report.issue_counts.graph += 1;
+
+    if (issues.items.len >= report.issue_limit) {
+        report.issues_truncated = true;
+        return;
+    }
+
+    var issue = DiagnosticIssue{
+        .area = .graph,
+        .kind = kind,
+        .detail = detail,
+    };
+    errdefer issue.deinit(allocator);
+
+    if (graph_name) |value| issue.graph_name = try allocator.dupe(u8, value);
+    if (node_id) |value| issue.node_id = try allocator.dupe(u8, value);
+    if (edge_type) |value| issue.edge_type = try allocator.dupe(u8, value);
 
     try issues.append(allocator, issue);
 }

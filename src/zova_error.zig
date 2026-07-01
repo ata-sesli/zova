@@ -30,5 +30,10 @@ pub const Error = sqlite.Error || error{
     VectorDimensionMismatch,
     VectorCorrupt,
     VectorInvalid,
+    GraphExists,
+    GraphNotFound,
+    GraphNodeNotFound,
+    GraphEdgeNotFound,
+    GraphInvalid,
     OutOfMemory,
 };

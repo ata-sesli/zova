@@ -3,6 +3,15 @@ from enum import IntEnum
 from ._native import (
     ClosedHandleError,
     Database,
+    GraphEdge,
+    GraphEdgeInput,
+    GraphInfo,
+    GraphNeighbor,
+    GraphNeighborsOptions,
+    GraphNode,
+    GraphNodeInput,
+    GraphWalkItem,
+    GraphWalkOptions,
     Notification,
     ObjectChunkId,
     ObjectId,
@@ -24,7 +33,7 @@ from ._native import (
     restore_backup,
 )
 
-__version__ = "0.19.0"
+__version__ = "0.20.0"
 
 
 class Step(IntEnum):
@@ -46,10 +55,42 @@ class VectorMetric(IntEnum):
     DOT = 2
 
 
+class GraphTargetType(IntEnum):
+    NONE = 0
+    RECORD = 1
+    OBJECT = 2
+    OBJECT_CHUNK = 3
+    VECTOR = 4
+    ENTITY = 5
+    FACT = 6
+    CONCEPT = 7
+    EXTERNAL = 8
+
+
+class GraphNeighborDirection(IntEnum):
+    OUTGOING = 0
+    INCOMING = 1
+
+
+DEFAULT_GRAPH_NAME = "default"
+
+
 __all__ = [
     "ClosedHandleError",
     "ColumnType",
     "Database",
+    "DEFAULT_GRAPH_NAME",
+    "GraphEdge",
+    "GraphEdgeInput",
+    "GraphInfo",
+    "GraphNeighbor",
+    "GraphNeighborDirection",
+    "GraphNeighborsOptions",
+    "GraphNode",
+    "GraphNodeInput",
+    "GraphTargetType",
+    "GraphWalkItem",
+    "GraphWalkOptions",
     "Notification",
     "ObjectChunkId",
     "ObjectId",

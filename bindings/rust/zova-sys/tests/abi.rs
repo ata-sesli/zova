@@ -19,19 +19,27 @@ fn temp_path(name: &str) -> String {
 fn abi_version_and_status_names_are_available() {
     unsafe {
         assert_eq!(zova_sys::zova_abi_version_major(), 0);
-        assert_eq!(zova_sys::zova_abi_version_minor(), 19);
+        assert_eq!(zova_sys::zova_abi_version_minor(), 20);
         assert_eq!(zova_sys::zova_abi_version_patch(), 0);
         assert_eq!(
             CStr::from_ptr(zova_sys::zova_abi_version_string())
                 .to_str()
                 .unwrap(),
-            "0.19.0"
+            "0.20.0"
         );
         assert_eq!(
             CStr::from_ptr(zova_sys::zova_status_name(zova_sys::ZOVA_OK))
                 .to_str()
                 .unwrap(),
             "ZOVA_OK"
+        );
+        assert_eq!(zova_sys::ZOVA_GRAPH_EXISTS, 80);
+        assert_eq!(zova_sys::ZOVA_GRAPH_INVALID, 84);
+        assert_eq!(
+            CStr::from_ptr(zova_sys::zova_status_name(zova_sys::ZOVA_GRAPH_INVALID))
+                .to_str()
+                .unwrap(),
+            "ZOVA_GRAPH_INVALID"
         );
     }
 }
@@ -530,6 +538,219 @@ fn raw_vector_collection_crud_batch_and_search_smoke() {
         assert_eq!(
             zova_sys::zova_vector_get(&get),
             zova_sys::ZOVA_VECTOR_COLLECTION_NOT_FOUND
+        );
+
+        assert_eq!(zova_sys::zova_database_close(db), zova_sys::ZOVA_OK);
+    }
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn raw_graph_crud_and_traversal_smoke() {
+    let path = temp_path("graphs");
+    let c_path = CString::new(path.as_str()).unwrap();
+    let mut db = ptr::null_mut();
+    let mut message = zova_sys::zova_message {
+        data: ptr::null_mut(),
+        len: 0,
+    };
+    let create = zova_sys::zova_database_open_request {
+        path: c_path.as_ptr(),
+        out_db: &mut db,
+        out_error_message: &mut message,
+    };
+
+    unsafe {
+        assert_eq!(zova_sys::zova_database_create(&create), zova_sys::ZOVA_OK);
+        assert_eq!(zova_sys::ZOVA_GRAPH_TARGET_VECTOR, 4);
+
+        let graph = CString::new("app").unwrap();
+        let create_graph = zova_sys::zova_graph_create_request {
+            db,
+            name: graph.as_ptr(),
+        };
+        assert_eq!(
+            zova_sys::zova_graph_create(&create_graph),
+            zova_sys::ZOVA_OK
+        );
+        assert_eq!(
+            zova_sys::zova_graph_create(&create_graph),
+            zova_sys::ZOVA_GRAPH_EXISTS
+        );
+
+        let mut exists = 0;
+        let exists_request = zova_sys::zova_graph_exists_request {
+            db,
+            name: graph.as_ptr(),
+            out_exists: &mut exists,
+        };
+        assert_eq!(
+            zova_sys::zova_graph_exists(&exists_request),
+            zova_sys::ZOVA_OK
+        );
+        assert_eq!(exists, 1);
+
+        let message_1 = CString::new("message:1").unwrap();
+        let message_2 = CString::new("message:2").unwrap();
+        let attachment = CString::new("attachment:1").unwrap();
+        let kind_message = CString::new("message").unwrap();
+        let kind_attachment = CString::new("attachment").unwrap();
+        let table = CString::new("messages").unwrap();
+        let row_ref = CString::new("1").unwrap();
+        let external_ref = CString::new("https://example.test/a").unwrap();
+
+        let put_message_1 = zova_sys::zova_graph_node_put_request {
+            db,
+            graph_name: graph.as_ptr(),
+            node_id: message_1.as_ptr(),
+            kind: kind_message.as_ptr(),
+            target_type: zova_sys::ZOVA_GRAPH_TARGET_RECORD,
+            target_namespace: table.as_ptr(),
+            target_ref: row_ref.as_ptr(),
+        };
+        assert_eq!(
+            zova_sys::zova_graph_node_put(&put_message_1),
+            zova_sys::ZOVA_OK
+        );
+        let put_message_2 = zova_sys::zova_graph_node_put_request {
+            db,
+            graph_name: graph.as_ptr(),
+            node_id: message_2.as_ptr(),
+            kind: kind_message.as_ptr(),
+            target_type: zova_sys::ZOVA_GRAPH_TARGET_NONE,
+            target_namespace: ptr::null(),
+            target_ref: ptr::null(),
+        };
+        assert_eq!(
+            zova_sys::zova_graph_node_put(&put_message_2),
+            zova_sys::ZOVA_OK
+        );
+        let put_attachment = zova_sys::zova_graph_node_put_request {
+            db,
+            graph_name: graph.as_ptr(),
+            node_id: attachment.as_ptr(),
+            kind: kind_attachment.as_ptr(),
+            target_type: zova_sys::ZOVA_GRAPH_TARGET_EXTERNAL,
+            target_namespace: ptr::null(),
+            target_ref: external_ref.as_ptr(),
+        };
+        assert_eq!(
+            zova_sys::zova_graph_node_put(&put_attachment),
+            zova_sys::ZOVA_OK
+        );
+
+        let mut node = zova_sys::zova_graph_node {
+            graph_name: ptr::null_mut(),
+            graph_name_len: 0,
+            node_id: ptr::null_mut(),
+            node_id_len: 0,
+            kind: ptr::null_mut(),
+            kind_len: 0,
+            target_type: zova_sys::ZOVA_GRAPH_TARGET_NONE,
+            target_namespace: ptr::null_mut(),
+            target_namespace_len: 0,
+            has_target_namespace: 0,
+            target_ref: ptr::null_mut(),
+            target_ref_len: 0,
+            has_target_ref: 0,
+        };
+        let get_node = zova_sys::zova_graph_node_get_request {
+            db,
+            graph_name: graph.as_ptr(),
+            node_id: message_1.as_ptr(),
+            out_node: &mut node,
+        };
+        assert_eq!(zova_sys::zova_graph_node_get(&get_node), zova_sys::ZOVA_OK);
+        assert_eq!(node.target_type, zova_sys::ZOVA_GRAPH_TARGET_RECORD);
+        assert_eq!(node.has_target_namespace, 1);
+        zova_sys::zova_graph_node_free(&mut node);
+
+        let replies_to = CString::new("replies_to").unwrap();
+        let has_attachment = CString::new("has_attachment").unwrap();
+        let edge_1 = zova_sys::zova_graph_edge_put_request {
+            db,
+            graph_name: graph.as_ptr(),
+            from_node_id: message_1.as_ptr(),
+            edge_type: replies_to.as_ptr(),
+            to_node_id: message_2.as_ptr(),
+        };
+        assert_eq!(zova_sys::zova_graph_edge_put(&edge_1), zova_sys::ZOVA_OK);
+        let edge_2 = zova_sys::zova_graph_edge_put_request {
+            db,
+            graph_name: graph.as_ptr(),
+            from_node_id: message_1.as_ptr(),
+            edge_type: has_attachment.as_ptr(),
+            to_node_id: attachment.as_ptr(),
+        };
+        assert_eq!(zova_sys::zova_graph_edge_put(&edge_2), zova_sys::ZOVA_OK);
+
+        let mut edge = zova_sys::zova_graph_edge {
+            graph_name: ptr::null_mut(),
+            graph_name_len: 0,
+            from_node_id: ptr::null_mut(),
+            from_node_id_len: 0,
+            edge_type: ptr::null_mut(),
+            edge_type_len: 0,
+            to_node_id: ptr::null_mut(),
+            to_node_id_len: 0,
+        };
+        let get_edge = zova_sys::zova_graph_edge_get_request {
+            db,
+            graph_name: graph.as_ptr(),
+            from_node_id: message_1.as_ptr(),
+            edge_type: has_attachment.as_ptr(),
+            to_node_id: attachment.as_ptr(),
+            out_edge: &mut edge,
+        };
+        assert_eq!(zova_sys::zova_graph_edge_get(&get_edge), zova_sys::ZOVA_OK);
+        zova_sys::zova_graph_edge_free(&mut edge);
+
+        let mut neighbors = zova_sys::zova_graph_neighbor_results {
+            items: ptr::null_mut(),
+            len: 0,
+        };
+        let neighbor_request = zova_sys::zova_graph_neighbors_request {
+            db,
+            graph_name: graph.as_ptr(),
+            node_id: message_1.as_ptr(),
+            direction: zova_sys::ZOVA_GRAPH_NEIGHBOR_OUTGOING,
+            edge_type: ptr::null(),
+            limit: 10,
+            out_results: &mut neighbors,
+        };
+        assert_eq!(
+            zova_sys::zova_graph_neighbors(&neighbor_request),
+            zova_sys::ZOVA_OK
+        );
+        assert_eq!(neighbors.len, 2);
+        zova_sys::zova_graph_neighbor_results_free(&mut neighbors);
+
+        let mut walk = zova_sys::zova_graph_walk_results {
+            items: ptr::null_mut(),
+            len: 0,
+        };
+        let walk_request = zova_sys::zova_graph_walk_request {
+            db,
+            graph_name: graph.as_ptr(),
+            start_node_id: message_1.as_ptr(),
+            edge_type: ptr::null(),
+            max_depth: 2,
+            limit: 10,
+            out_results: &mut walk,
+        };
+        assert_eq!(zova_sys::zova_graph_walk(&walk_request), zova_sys::ZOVA_OK);
+        assert_eq!(walk.len, 3);
+        zova_sys::zova_graph_walk_results_free(&mut walk);
+
+        let invalid_graph = CString::new("_zova_private").unwrap();
+        let invalid = zova_sys::zova_graph_create_request {
+            db,
+            name: invalid_graph.as_ptr(),
+        };
+        assert_eq!(
+            zova_sys::zova_graph_create(&invalid),
+            zova_sys::ZOVA_GRAPH_INVALID
         );
 
         assert_eq!(zova_sys::zova_database_close(db), zova_sys::ZOVA_OK);

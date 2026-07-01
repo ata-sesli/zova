@@ -16,6 +16,7 @@ It covers:
 - vector collections, vector CRUD, batch writes, collection management, exact
   search, candidate search, search-by-id, thresholds, and SQL-native vector
   search
+- graph lifecycle, node/edge CRUD, neighbors, and bounded walk traversal
 - same-process transaction-aware app events with `Listen` / `Notify`
 
 ## Contents
@@ -30,7 +31,9 @@ It covers:
 8. [App Events](#app-events)
 9. [Objects](#objects)
 10. [Vectors](#vectors)
-11. [Example](#example)
+11. [Bound Stores](#bound-stores)
+12. [Graphs](#graphs)
+13. [Example](#example)
 
 ## How It Fits
 
@@ -54,7 +57,7 @@ flowchart LR
 After the Go module tag is pushed, applications can add the binding with:
 
 ```sh
-go get github.com/atasesli/zova/bindings/go@v0.19.0
+go get github.com/atasesli/zova/bindings/go@v0.20.0
 ```
 
 Import it as:
@@ -135,14 +138,14 @@ Because this module lives in the `bindings/go` subdirectory, the release tag
 must include that subdirectory prefix:
 
 ```sh
-git tag -a bindings/go/v0.19.0 -m "Zova Go bindings v0.19.0"
-git push origin bindings/go/v0.19.0
+git tag -a bindings/go/v0.20.0 -m "Zova Go bindings v0.20.0"
+git push origin bindings/go/v0.20.0
 ```
 
 After pushing the tag, ask the public Go module proxy to resolve it:
 
 ```sh
-GOPROXY=proxy.golang.org go list -m github.com/atasesli/zova/bindings/go@v0.19.0
+GOPROXY=proxy.golang.org go list -m github.com/atasesli/zova/bindings/go@v0.20.0
 ```
 
 The module path is:
@@ -238,9 +241,10 @@ The zero-value options verify destinations after copying. Use
 `RestoreOptions{NoVerify: true}` only when you will verify separately.
 
 Diagnostic recovery commands such as `zova doctor`, `zova salvage --dry-run`,
-and `zova salvage <source> <destination>` are CLI-first in the v0.16 line. The
-Go package does not expose typed doctor/salvage report APIs yet, and library
-code should not parse the human text output as a stable binding contract.
+and `zova salvage <source> <destination>` are CLI-first. In v0.20, CLI salvage
+copies valid graph topology and skips invalid graph nodes or edges. The Go
+package does not expose typed doctor/salvage report APIs yet, and library code
+should not parse the human text output as a stable binding contract.
 
 ## App Events
 
@@ -284,9 +288,9 @@ scopes are rejected because Zova cannot track their notification lifetime.
 
 Event delivery is queue-only in v0.18: no callbacks, no blocking receive, no
 cross-process delivery, no replay after restart, and no automatic logging of SQL,
-object, or vector mutations. Each subscription queue holds 1024 notifications
-and drops the oldest entries on overflow; the next received notification reports
-how many were dropped before it.
+object, vector, or graph mutations. Each subscription queue holds 1024
+notifications and drops the oldest entries on overflow; the next received
+notification reports how many were dropped before it.
 
 ## Objects
 
@@ -358,7 +362,7 @@ lower-is-better.
 
 ## Bound Stores
 
-In v0.19, a `.zova` file may be bound to one object store and one vector store
+In v0.20, a `.zova` file may be bound to one object store and one vector store
 through the native Zig API or CLI. The Go object and vector methods above
 transparently use those stores after `Open`. Store create/bind/unbind/split
 management is not exposed as a Go API yet.
@@ -393,6 +397,64 @@ where source = 'docs'
 order by distance
 limit 10
 ```
+
+## Graphs
+
+Graphs store relationship topology while application metadata stays in SQL
+tables, objects, and vectors. Apps provide stable node IDs and can point nodes
+at records, objects, object chunks, vectors, entities, facts, concepts, or
+external references.
+
+```go
+name := zova.DefaultGraphName
+targetTable := "messages"
+targetID := "1"
+entityRef := "zova"
+db.CreateGraph(name)
+
+db.PutGraphNode(zova.GraphNodeInput{
+    GraphName:       name,
+    NodeID:          "message:1",
+    Kind:            "message",
+    TargetType:      zova.GraphTargetRecord,
+    TargetNamespace: &targetTable,
+    TargetRef:       &targetID,
+})
+db.PutGraphNode(zova.GraphNodeInput{
+    GraphName:  name,
+    NodeID:     "entity:zova",
+    Kind:       "entity",
+    TargetType: zova.GraphTargetEntity,
+    TargetRef:  &entityRef,
+})
+db.PutGraphEdge(zova.GraphEdgeInput{
+    GraphName:  name,
+    FromNodeID: "message:1",
+    EdgeType:   "mentions",
+    ToNodeID:   "entity:zova",
+})
+```
+
+Use `GraphNeighbors` for one-hop expansion and `GraphWalk` for bounded directed
+walks. Zova validates object, chunk, and vector targets it owns, but arbitrary
+SQL row existence remains the application's job. Node IDs may contain sensitive
+app identifiers, so choose export-safe IDs when files may leave the app.
+
+SQL-native graph helpers are available through ordinary prepared statements:
+
+```go
+stmt, err := db.Prepare(`
+select m.body
+from zova_graph_neighbors as g
+join messages as m on m.graph_node_id = g.node_id
+where g.graph_name = 'default'
+  and g.source_node_id = 'message:1'
+  and g."limit" = 20
+order by g.rank`)
+```
+
+Use `zova_graph_neighbors` for one-hop joins and `zova_graph_walk` for bounded
+directed walks with `depth`, `predecessor_node_id`, and `edge_type` columns.
 
 ## Example
 

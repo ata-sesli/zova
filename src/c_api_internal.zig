@@ -144,6 +144,11 @@ pub const zova_status = enum(c_int) {
     VECTOR_DIMENSION_MISMATCH = 73,
     VECTOR_CORRUPT = 74,
     VECTOR_INVALID = 75,
+    GRAPH_EXISTS = 80,
+    GRAPH_NOT_FOUND = 81,
+    GRAPH_NODE_NOT_FOUND = 82,
+    GRAPH_EDGE_NOT_FOUND = 83,
+    GRAPH_INVALID = 84,
 };
 
 pub const zova_step_result = enum(c_int) {
@@ -213,6 +218,23 @@ pub const zova_vector_metric = enum(c_int) {
     DOT = 2,
 };
 
+pub const zova_graph_target_type = enum(c_int) {
+    NONE = 0,
+    RECORD = 1,
+    OBJECT = 2,
+    OBJECT_CHUNK = 3,
+    VECTOR = 4,
+    ENTITY = 5,
+    FACT = 6,
+    CONCEPT = 7,
+    EXTERNAL = 8,
+};
+
+pub const zova_graph_neighbor_direction = enum(c_int) {
+    OUTGOING = 0,
+    INCOMING = 1,
+};
+
 pub const zova_vector_collection_options = extern struct {
     dimensions: u32,
     // Keep this as a raw C integer instead of a Zig enum field so invalid C
@@ -256,6 +278,78 @@ pub const zova_vector_input = extern struct {
     id: ?[*:0]const u8,
     values: ?[*]const f32,
     values_len: usize,
+};
+
+pub const zova_graph_info = extern struct {
+    name: ?[*]u8,
+    name_len: usize,
+    node_count: u64,
+    edge_count: u64,
+};
+
+pub const zova_graph_list = extern struct {
+    items: ?[*]zova_graph_info,
+    len: usize,
+};
+
+pub const zova_graph_node = extern struct {
+    graph_name: ?[*]u8,
+    graph_name_len: usize,
+    node_id: ?[*]u8,
+    node_id_len: usize,
+    kind: ?[*]u8,
+    kind_len: usize,
+    target_type: c_int,
+    target_namespace: ?[*]u8,
+    target_namespace_len: usize,
+    has_target_namespace: u8,
+    target_ref: ?[*]u8,
+    target_ref_len: usize,
+    has_target_ref: u8,
+};
+
+pub const zova_graph_edge = extern struct {
+    graph_name: ?[*]u8,
+    graph_name_len: usize,
+    from_node_id: ?[*]u8,
+    from_node_id_len: usize,
+    edge_type: ?[*]u8,
+    edge_type_len: usize,
+    to_node_id: ?[*]u8,
+    to_node_id_len: usize,
+};
+
+pub const zova_graph_neighbor_result = extern struct {
+    node_id: ?[*]u8,
+    node_id_len: usize,
+    kind: ?[*]u8,
+    kind_len: usize,
+    edge_type: ?[*]u8,
+    edge_type_len: usize,
+};
+
+pub const zova_graph_neighbor_results = extern struct {
+    items: ?[*]zova_graph_neighbor_result,
+    len: usize,
+};
+
+pub const zova_graph_walk_result = extern struct {
+    node_id: ?[*]u8,
+    node_id_len: usize,
+    kind: ?[*]u8,
+    kind_len: usize,
+    depth: u32,
+    predecessor_node_id: ?[*]u8,
+    predecessor_node_id_len: usize,
+    has_predecessor_node_id: u8,
+    edge_type: ?[*]u8,
+    edge_type_len: usize,
+    has_edge_type: u8,
+};
+
+pub const zova_graph_walk_results = extern struct {
+    items: ?[*]zova_graph_walk_result,
+    len: usize,
 };
 
 pub const ZOVA_OPEN_READ_ONLY: u32 = 1 << 0;
@@ -690,13 +784,124 @@ pub const zova_vector_search_by_id_in_within_request = extern struct {
     out_results: ?*zova_vector_search_results,
 };
 
+pub const zova_graph_create_request = extern struct {
+    db: ?*zova_database,
+    name: ?[*:0]const u8,
+};
+
+pub const zova_graph_exists_request = extern struct {
+    db: ?*zova_database,
+    name: ?[*:0]const u8,
+    out_exists: ?*u8,
+};
+
+pub const zova_graph_info_get_request = extern struct {
+    db: ?*zova_database,
+    name: ?[*:0]const u8,
+    out_info: ?*zova_graph_info,
+};
+
+pub const zova_graph_list_request = extern struct {
+    db: ?*zova_database,
+    out_list: ?*zova_graph_list,
+};
+
+pub const zova_graph_delete_request = extern struct {
+    db: ?*zova_database,
+    name: ?[*:0]const u8,
+};
+
+pub const zova_graph_node_put_request = extern struct {
+    db: ?*zova_database,
+    graph_name: ?[*:0]const u8,
+    node_id: ?[*:0]const u8,
+    kind: ?[*:0]const u8,
+    target_type: c_int,
+    target_namespace: ?[*:0]const u8,
+    target_ref: ?[*:0]const u8,
+};
+
+pub const zova_graph_node_get_request = extern struct {
+    db: ?*zova_database,
+    graph_name: ?[*:0]const u8,
+    node_id: ?[*:0]const u8,
+    out_node: ?*zova_graph_node,
+};
+
+pub const zova_graph_node_exists_request = extern struct {
+    db: ?*zova_database,
+    graph_name: ?[*:0]const u8,
+    node_id: ?[*:0]const u8,
+    out_exists: ?*u8,
+};
+
+pub const zova_graph_node_delete_request = extern struct {
+    db: ?*zova_database,
+    graph_name: ?[*:0]const u8,
+    node_id: ?[*:0]const u8,
+};
+
+pub const zova_graph_edge_put_request = extern struct {
+    db: ?*zova_database,
+    graph_name: ?[*:0]const u8,
+    from_node_id: ?[*:0]const u8,
+    edge_type: ?[*:0]const u8,
+    to_node_id: ?[*:0]const u8,
+};
+
+pub const zova_graph_edge_get_request = extern struct {
+    db: ?*zova_database,
+    graph_name: ?[*:0]const u8,
+    from_node_id: ?[*:0]const u8,
+    edge_type: ?[*:0]const u8,
+    to_node_id: ?[*:0]const u8,
+    out_edge: ?*zova_graph_edge,
+};
+
+pub const zova_graph_edge_exists_request = extern struct {
+    db: ?*zova_database,
+    graph_name: ?[*:0]const u8,
+    from_node_id: ?[*:0]const u8,
+    edge_type: ?[*:0]const u8,
+    to_node_id: ?[*:0]const u8,
+    out_exists: ?*u8,
+};
+
+pub const zova_graph_edge_delete_request = extern struct {
+    db: ?*zova_database,
+    graph_name: ?[*:0]const u8,
+    from_node_id: ?[*:0]const u8,
+    edge_type: ?[*:0]const u8,
+    to_node_id: ?[*:0]const u8,
+};
+
+pub const zova_graph_neighbors_request = extern struct {
+    db: ?*zova_database,
+    graph_name: ?[*:0]const u8,
+    node_id: ?[*:0]const u8,
+    direction: c_int,
+    edge_type: ?[*:0]const u8,
+    limit: usize,
+    out_results: ?*zova_graph_neighbor_results,
+};
+
+pub const zova_graph_walk_request = extern struct {
+    db: ?*zova_database,
+    graph_name: ?[*:0]const u8,
+    start_node_id: ?[*:0]const u8,
+    edge_type: ?[*:0]const u8,
+    max_depth: u32,
+    limit: usize,
+    out_results: ?*zova_graph_walk_results,
+};
+
 // Version helpers describe the C ABI boundary, not the .zova file format.
 pub fn zova_abi_version_major() callconv(.c) u32 {
     return 0;
 }
 
 pub fn zova_abi_version_minor() callconv(.c) u32 {
-    return 19;
+    return 20;
 }
 
 pub fn zova_abi_version_patch() callconv(.c) u32 {
@@ -704,7 +909,7 @@ pub fn zova_abi_version_patch() callconv(.c) u32 {
 }
 
 pub fn zova_abi_version_string() callconv(.c) [*:0]const u8 {
-    return "0.19.0";
+    return "0.20.0";
 }
 
 // Accept a raw integer instead of a Zig enum so accidental or future C enum
@@ -795,6 +1000,51 @@ pub fn zova_vector_collection_list_free(list: ?*zova_vector_collection_list) cal
         allocator.free(items[0..out.len]);
     }
     out.* = emptyVectorCollectionList();
+}
+
+pub fn zova_graph_info_free(info: ?*zova_graph_info) callconv(.c) void {
+    const out = info orelse return;
+    freeGraphInfo(out);
+    out.* = emptyGraphInfo();
+}
+
+pub fn zova_graph_list_free(list: ?*zova_graph_list) callconv(.c) void {
+    const out = list orelse return;
+    if (out.items) |items| {
+        for (items[0..out.len]) |*item| freeGraphInfo(item);
+        allocator.free(items[0..out.len]);
+    }
+    out.* = emptyGraphList();
+}
+
+pub fn zova_graph_node_free(node: ?*zova_graph_node) callconv(.c) void {
+    const out = node orelse return;
+    freeGraphNode(out);
+    out.* = emptyGraphNode();
+}
+
+pub fn zova_graph_edge_free(edge: ?*zova_graph_edge) callconv(.c) void {
+    const out = edge orelse return;
+    freeGraphEdge(out);
+    out.* = emptyGraphEdge();
+}
+
+pub fn zova_graph_neighbor_results_free(results: ?*zova_graph_neighbor_results) callconv(.c) void {
+    const out = results orelse return;
+    if (out.items) |items| {
+        for (items[0..out.len]) |*item| freeGraphNeighborResult(item);
+        allocator.free(items[0..out.len]);
+    }
+    out.* = emptyGraphNeighborResults();
+}
+
+pub fn zova_graph_walk_results_free(results: ?*zova_graph_walk_results) callconv(.c) void {
+    const out = results orelse return;
+    if (out.items) |items| {
+        for (items[0..out.len]) |*item| freeGraphWalkResult(item);
+        allocator.free(items[0..out.len]);
+    }
+    out.* = emptyGraphWalkResults();
 }
 
 pub fn zova_database_create(request: ?*const zova_database_open_request) callconv(.c) zova_status {
@@ -1861,6 +2111,235 @@ pub fn zova_vector_search_by_id_in_within(request: ?*const zova_vector_search_by
     return okDb(handle);
 }
 
+pub fn zova_graph_create(request: ?*const zova_graph_create_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const name = req.name orelse return failDb(handle, error.InvalidArgument);
+    handle.db.createGraph(std.mem.span(name)) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_graph_exists(request: ?*const zova_graph_exists_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const name = req.name orelse return failDb(handle, error.InvalidArgument);
+    const out = req.out_exists orelse return failDb(handle, error.InvalidArgument);
+    const exists = handle.db.hasGraph(std.mem.span(name)) catch |err| return failDb(handle, err);
+    out.* = if (exists) 1 else 0;
+    return okDb(handle);
+}
+
+pub fn zova_graph_info_get(request: ?*const zova_graph_info_get_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const name = req.name orelse return failDb(handle, error.InvalidArgument);
+    const out = req.out_info orelse return failDb(handle, error.InvalidArgument);
+    out.* = emptyGraphInfo();
+    var info = handle.db.graphInfo(allocator, std.mem.span(name)) catch |err| return failDb(handle, err);
+    defer info.deinit(allocator);
+    fillGraphInfo(out, info) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_graphs_list(request: ?*const zova_graph_list_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const out = req.out_list orelse return failDb(handle, error.InvalidArgument);
+    out.* = emptyGraphList();
+    var list = handle.db.listGraphs(allocator) catch |err| return failDb(handle, err);
+    defer list.deinit(allocator);
+    fillGraphList(out, list.items) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_graph_delete(request: ?*const zova_graph_delete_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const name = req.name orelse return failDb(handle, error.InvalidArgument);
+    handle.db.deleteGraph(std.mem.span(name)) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_graph_node_put(request: ?*const zova_graph_node_put_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
+    const node_id = req.node_id orelse return failDb(handle, error.InvalidArgument);
+    const kind = req.kind orelse return failDb(handle, error.InvalidArgument);
+    const target_type = graphTargetTypeFromAbi(req.target_type) orelse return failDb(handle, error.InvalidArgument);
+    handle.db.putGraphNode(.{
+        .graph_name = std.mem.span(graph_name),
+        .node_id = std.mem.span(node_id),
+        .kind = std.mem.span(kind),
+        .target_type = target_type,
+        .target_namespace = optionalCStringSpan(req.target_namespace),
+        .target_ref = optionalCStringSpan(req.target_ref),
+    }) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_graph_node_get(request: ?*const zova_graph_node_get_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
+    const node_id = req.node_id orelse return failDb(handle, error.InvalidArgument);
+    const out = req.out_node orelse return failDb(handle, error.InvalidArgument);
+    out.* = emptyGraphNode();
+    var node = handle.db.getGraphNode(allocator, std.mem.span(graph_name), std.mem.span(node_id)) catch |err| return failDb(handle, err);
+    defer node.deinit(allocator);
+    fillGraphNode(out, node) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_graph_node_exists(request: ?*const zova_graph_node_exists_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
+    const node_id = req.node_id orelse return failDb(handle, error.InvalidArgument);
+    const out = req.out_exists orelse return failDb(handle, error.InvalidArgument);
+    const exists = handle.db.hasGraphNode(std.mem.span(graph_name), std.mem.span(node_id)) catch |err| return failDb(handle, err);
+    out.* = if (exists) 1 else 0;
+    return okDb(handle);
+}
+
+pub fn zova_graph_node_delete(request: ?*const zova_graph_node_delete_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
+    const node_id = req.node_id orelse return failDb(handle, error.InvalidArgument);
+    handle.db.deleteGraphNode(std.mem.span(graph_name), std.mem.span(node_id)) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_graph_edge_put(request: ?*const zova_graph_edge_put_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
+    const from_node_id = req.from_node_id orelse return failDb(handle, error.InvalidArgument);
+    const edge_type = req.edge_type orelse return failDb(handle, error.InvalidArgument);
+    const to_node_id = req.to_node_id orelse return failDb(handle, error.InvalidArgument);
+    handle.db.putGraphEdge(.{
+        .graph_name = std.mem.span(graph_name),
+        .from_node_id = std.mem.span(from_node_id),
+        .edge_type = std.mem.span(edge_type),
+        .to_node_id = std.mem.span(to_node_id),
+    }) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_graph_edge_get(request: ?*const zova_graph_edge_get_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
+    const from_node_id = req.from_node_id orelse return failDb(handle, error.InvalidArgument);
+    const edge_type = req.edge_type orelse return failDb(handle, error.InvalidArgument);
+    const to_node_id = req.to_node_id orelse return failDb(handle, error.InvalidArgument);
+    const out = req.out_edge orelse return failDb(handle, error.InvalidArgument);
+    out.* = emptyGraphEdge();
+    var edge = handle.db.getGraphEdge(allocator, std.mem.span(graph_name), std.mem.span(from_node_id), std.mem.span(edge_type), std.mem.span(to_node_id)) catch |err| return failDb(handle, err);
+    defer edge.deinit(allocator);
+    fillGraphEdge(out, edge) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_graph_edge_exists(request: ?*const zova_graph_edge_exists_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
+    const from_node_id = req.from_node_id orelse return failDb(handle, error.InvalidArgument);
+    const edge_type = req.edge_type orelse return failDb(handle, error.InvalidArgument);
+    const to_node_id = req.to_node_id orelse return failDb(handle, error.InvalidArgument);
+    const out = req.out_exists orelse return failDb(handle, error.InvalidArgument);
+    const exists = handle.db.hasGraphEdge(std.mem.span(graph_name), std.mem.span(from_node_id), std.mem.span(edge_type), std.mem.span(to_node_id)) catch |err| return failDb(handle, err);
+    out.* = if (exists) 1 else 0;
+    return okDb(handle);
+}
+
+pub fn zova_graph_edge_delete(request: ?*const zova_graph_edge_delete_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
+    const from_node_id = req.from_node_id orelse return failDb(handle, error.InvalidArgument);
+    const edge_type = req.edge_type orelse return failDb(handle, error.InvalidArgument);
+    const to_node_id = req.to_node_id orelse return failDb(handle, error.InvalidArgument);
+    handle.db.deleteGraphEdge(.{
+        .graph_name = std.mem.span(graph_name),
+        .from_node_id = std.mem.span(from_node_id),
+        .edge_type = std.mem.span(edge_type),
+        .to_node_id = std.mem.span(to_node_id),
+    }) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_graph_neighbors(request: ?*const zova_graph_neighbors_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
+    const node_id = req.node_id orelse return failDb(handle, error.InvalidArgument);
+    const direction = graphDirectionFromAbi(req.direction) orelse return failDb(handle, error.InvalidArgument);
+    const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
+    out.* = emptyGraphNeighborResults();
+    var results = handle.db.graphNeighbors(allocator, .{
+        .graph_name = std.mem.span(graph_name),
+        .node_id = std.mem.span(node_id),
+        .direction = direction,
+        .edge_type = optionalCStringSpan(req.edge_type),
+        .limit = req.limit,
+    }) catch |err| return failDb(handle, err);
+    defer results.deinit(allocator);
+    fillGraphNeighborResults(out, results.items) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_graph_walk(request: ?*const zova_graph_walk_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
+    const start_node_id = req.start_node_id orelse return failDb(handle, error.InvalidArgument);
+    const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
+    out.* = emptyGraphWalkResults();
+    var results = handle.db.graphWalk(allocator, .{
+        .graph_name = std.mem.span(graph_name),
+        .start_node_id = std.mem.span(start_node_id),
+        .edge_type = optionalCStringSpan(req.edge_type),
+        .max_depth = req.max_depth,
+        .limit = req.limit,
+    }) catch |err| return failDb(handle, err);
+    defer results.deinit(allocator);
+    fillGraphWalkResults(out, results.items) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
 const OpenMode = enum { create, open };
 
 fn openDatabase(request: ?*const zova_database_open_request, mode: OpenMode) zova_status {
@@ -2005,6 +2484,48 @@ fn vectorMetricToAbi(metric: zova.VectorMetric) c_int {
     };
 }
 
+fn graphTargetTypeFromAbi(target_type: c_int) ?zova.GraphTargetType {
+    return switch (target_type) {
+        @intFromEnum(zova_graph_target_type.NONE) => .none,
+        @intFromEnum(zova_graph_target_type.RECORD) => .record,
+        @intFromEnum(zova_graph_target_type.OBJECT) => .object,
+        @intFromEnum(zova_graph_target_type.OBJECT_CHUNK) => .object_chunk,
+        @intFromEnum(zova_graph_target_type.VECTOR) => .vector,
+        @intFromEnum(zova_graph_target_type.ENTITY) => .entity,
+        @intFromEnum(zova_graph_target_type.FACT) => .fact,
+        @intFromEnum(zova_graph_target_type.CONCEPT) => .concept,
+        @intFromEnum(zova_graph_target_type.EXTERNAL) => .external,
+        else => null,
+    };
+}
+
+fn graphTargetTypeToAbi(target_type: zova.GraphTargetType) c_int {
+    return switch (target_type) {
+        .none => @intFromEnum(zova_graph_target_type.NONE),
+        .record => @intFromEnum(zova_graph_target_type.RECORD),
+        .object => @intFromEnum(zova_graph_target_type.OBJECT),
+        .object_chunk => @intFromEnum(zova_graph_target_type.OBJECT_CHUNK),
+        .vector => @intFromEnum(zova_graph_target_type.VECTOR),
+        .entity => @intFromEnum(zova_graph_target_type.ENTITY),
+        .fact => @intFromEnum(zova_graph_target_type.FACT),
+        .concept => @intFromEnum(zova_graph_target_type.CONCEPT),
+        .external => @intFromEnum(zova_graph_target_type.EXTERNAL),
+    };
+}
+
+fn graphDirectionFromAbi(direction: c_int) ?zova.GraphNeighborDirection {
+    return switch (direction) {
+        @intFromEnum(zova_graph_neighbor_direction.OUTGOING) => .outgoing,
+        @intFromEnum(zova_graph_neighbor_direction.INCOMING) => .incoming,
+        else => null,
+    };
+}
+
+fn optionalCStringSpan(value: ?[*:0]const u8) ?[]const u8 {
+    const ptr = value orelse return null;
+    return std.mem.span(ptr);
+}
+
 fn toObjectId(id: zova_object_id) zova.ObjectId {
     return id.bytes;
 }
@@ -2073,6 +2594,53 @@ fn emptyVectorCollectionList() zova_vector_collection_list {
     return .{ .items = null, .len = 0 };
 }
 
+fn emptyGraphInfo() zova_graph_info {
+    return .{ .name = null, .name_len = 0, .node_count = 0, .edge_count = 0 };
+}
+
+fn emptyGraphList() zova_graph_list {
+    return .{ .items = null, .len = 0 };
+}
+
+fn emptyGraphNode() zova_graph_node {
+    return .{
+        .graph_name = null,
+        .graph_name_len = 0,
+        .node_id = null,
+        .node_id_len = 0,
+        .kind = null,
+        .kind_len = 0,
+        .target_type = @intFromEnum(zova_graph_target_type.NONE),
+        .target_namespace = null,
+        .target_namespace_len = 0,
+        .has_target_namespace = 0,
+        .target_ref = null,
+        .target_ref_len = 0,
+        .has_target_ref = 0,
+    };
+}
+
+fn emptyGraphEdge() zova_graph_edge {
+    return .{
+        .graph_name = null,
+        .graph_name_len = 0,
+        .from_node_id = null,
+        .from_node_id_len = 0,
+        .edge_type = null,
+        .edge_type_len = 0,
+        .to_node_id = null,
+        .to_node_id_len = 0,
+    };
+}
+
+fn emptyGraphNeighborResults() zova_graph_neighbor_results {
+    return .{ .items = null, .len = 0 };
+}
+
+fn emptyGraphWalkResults() zova_graph_walk_results {
+    return .{ .items = null, .len = 0 };
+}
+
 fn columnTypeToAbi(column_type: sqlite.ColumnType) zova_column_type {
     return switch (column_type) {
         .integer => .INTEGER,
@@ -2085,6 +2653,38 @@ fn columnTypeToAbi(column_type: sqlite.ColumnType) zova_column_type {
 
 fn freeVectorCollectionInfo(info: *zova_vector_collection_info) void {
     if (info.name) |name| allocator.free(name[0 .. info.name_len + 1]);
+}
+
+fn freeGraphInfo(info: *zova_graph_info) void {
+    if (info.name) |name| allocator.free(name[0 .. info.name_len + 1]);
+}
+
+fn freeGraphNode(node: *zova_graph_node) void {
+    if (node.graph_name) |value| allocator.free(value[0 .. node.graph_name_len + 1]);
+    if (node.node_id) |value| allocator.free(value[0 .. node.node_id_len + 1]);
+    if (node.kind) |value| allocator.free(value[0 .. node.kind_len + 1]);
+    if (node.target_namespace) |value| allocator.free(value[0 .. node.target_namespace_len + 1]);
+    if (node.target_ref) |value| allocator.free(value[0 .. node.target_ref_len + 1]);
+}
+
+fn freeGraphEdge(edge: *zova_graph_edge) void {
+    if (edge.graph_name) |value| allocator.free(value[0 .. edge.graph_name_len + 1]);
+    if (edge.from_node_id) |value| allocator.free(value[0 .. edge.from_node_id_len + 1]);
+    if (edge.edge_type) |value| allocator.free(value[0 .. edge.edge_type_len + 1]);
+    if (edge.to_node_id) |value| allocator.free(value[0 .. edge.to_node_id_len + 1]);
+}
+
+fn freeGraphNeighborResult(result: *zova_graph_neighbor_result) void {
+    if (result.node_id) |value| allocator.free(value[0 .. result.node_id_len + 1]);
+    if (result.kind) |value| allocator.free(value[0 .. result.kind_len + 1]);
+    if (result.edge_type) |value| allocator.free(value[0 .. result.edge_type_len + 1]);
+}
+
+fn freeGraphWalkResult(result: *zova_graph_walk_result) void {
+    if (result.node_id) |value| allocator.free(value[0 .. result.node_id_len + 1]);
+    if (result.kind) |value| allocator.free(value[0 .. result.kind_len + 1]);
+    if (result.predecessor_node_id) |value| allocator.free(value[0 .. result.predecessor_node_id_len + 1]);
+    if (result.edge_type) |value| allocator.free(value[0 .. result.edge_type_len + 1]);
 }
 
 fn fillSearchResults(out: *zova_vector_search_results, items: []const zova.VectorSearchResult) error{OutOfMemory}!void {
@@ -2106,6 +2706,168 @@ fn fillSearchResults(out: *zova_vector_search_results, items: []const zova.Vecto
             .id = id.ptr,
             .id_len = id.len,
             .distance = item.distance,
+        };
+    }
+
+    out.* = .{ .items = abi_items.ptr, .len = abi_items.len };
+}
+
+fn fillGraphInfo(out: *zova_graph_info, info: zova.GraphInfo) error{OutOfMemory}!void {
+    out.* = emptyGraphInfo();
+    const name = try allocator.dupeZ(u8, info.name);
+    out.* = .{
+        .name = name.ptr,
+        .name_len = name.len,
+        .node_count = info.node_count,
+        .edge_count = info.edge_count,
+    };
+}
+
+fn fillGraphList(out: *zova_graph_list, items: []const zova.GraphInfo) error{OutOfMemory}!void {
+    out.* = emptyGraphList();
+    if (items.len == 0) return;
+
+    const abi_items = try allocator.alloc(zova_graph_info, items.len);
+    errdefer {
+        for (abi_items[0..items.len]) |*item| freeGraphInfo(item);
+        allocator.free(abi_items);
+    }
+
+    for (abi_items) |*item| item.* = emptyGraphInfo();
+    for (items, abi_items) |item, *abi_item| try fillGraphInfo(abi_item, item);
+    out.* = .{ .items = abi_items.ptr, .len = abi_items.len };
+}
+
+fn fillGraphNode(out: *zova_graph_node, node: zova.GraphNode) error{OutOfMemory}!void {
+    out.* = emptyGraphNode();
+    const graph_name = try allocator.dupeZ(u8, node.graph_name);
+    errdefer allocator.free(graph_name);
+    const node_id = try allocator.dupeZ(u8, node.node_id);
+    errdefer allocator.free(node_id);
+    const kind = try allocator.dupeZ(u8, node.kind);
+    errdefer allocator.free(kind);
+    const target_namespace = if (node.target_namespace) |value| try allocator.dupeZ(u8, value) else null;
+    errdefer if (target_namespace) |value| allocator.free(value);
+    const target_ref = if (node.target_ref) |value| try allocator.dupeZ(u8, value) else null;
+    errdefer if (target_ref) |value| allocator.free(value);
+
+    out.* = .{
+        .graph_name = graph_name.ptr,
+        .graph_name_len = graph_name.len,
+        .node_id = node_id.ptr,
+        .node_id_len = node_id.len,
+        .kind = kind.ptr,
+        .kind_len = kind.len,
+        .target_type = graphTargetTypeToAbi(node.target_type),
+        .target_namespace = if (target_namespace) |value| value.ptr else null,
+        .target_namespace_len = if (target_namespace) |value| value.len else 0,
+        .has_target_namespace = if (target_namespace != null) 1 else 0,
+        .target_ref = if (target_ref) |value| value.ptr else null,
+        .target_ref_len = if (target_ref) |value| value.len else 0,
+        .has_target_ref = if (target_ref != null) 1 else 0,
+    };
+}
+
+fn fillGraphEdge(out: *zova_graph_edge, edge: zova.GraphEdge) error{OutOfMemory}!void {
+    out.* = emptyGraphEdge();
+    const graph_name = try allocator.dupeZ(u8, edge.graph_name);
+    errdefer allocator.free(graph_name);
+    const from_node_id = try allocator.dupeZ(u8, edge.from_node_id);
+    errdefer allocator.free(from_node_id);
+    const edge_type = try allocator.dupeZ(u8, edge.edge_type);
+    errdefer allocator.free(edge_type);
+    const to_node_id = try allocator.dupeZ(u8, edge.to_node_id);
+    errdefer allocator.free(to_node_id);
+
+    out.* = .{
+        .graph_name = graph_name.ptr,
+        .graph_name_len = graph_name.len,
+        .from_node_id = from_node_id.ptr,
+        .from_node_id_len = from_node_id.len,
+        .edge_type = edge_type.ptr,
+        .edge_type_len = edge_type.len,
+        .to_node_id = to_node_id.ptr,
+        .to_node_id_len = to_node_id.len,
+    };
+}
+
+fn fillGraphNeighborResults(out: *zova_graph_neighbor_results, items: []const zova.GraphNeighbor) error{OutOfMemory}!void {
+    out.* = emptyGraphNeighborResults();
+    if (items.len == 0) return;
+
+    const abi_items = try allocator.alloc(zova_graph_neighbor_result, items.len);
+    errdefer {
+        for (abi_items[0..items.len]) |*item| freeGraphNeighborResult(item);
+        allocator.free(abi_items);
+    }
+
+    for (abi_items) |*item| item.* = .{ .node_id = null, .node_id_len = 0, .kind = null, .kind_len = 0, .edge_type = null, .edge_type_len = 0 };
+    for (items, abi_items) |item, *abi_item| {
+        const node_id = try allocator.dupeZ(u8, item.node_id);
+        errdefer allocator.free(node_id);
+        const kind = try allocator.dupeZ(u8, item.kind);
+        errdefer allocator.free(kind);
+        const edge_type = try allocator.dupeZ(u8, item.edge_type);
+        abi_item.* = .{
+            .node_id = node_id.ptr,
+            .node_id_len = node_id.len,
+            .kind = kind.ptr,
+            .kind_len = kind.len,
+            .edge_type = edge_type.ptr,
+            .edge_type_len = edge_type.len,
+        };
+    }
+
+    out.* = .{ .items = abi_items.ptr, .len = abi_items.len };
+}
+
+fn fillGraphWalkResults(out: *zova_graph_walk_results, items: []const zova.GraphWalkItem) error{OutOfMemory}!void {
+    out.* = emptyGraphWalkResults();
+    if (items.len == 0) return;
+
+    const abi_items = try allocator.alloc(zova_graph_walk_result, items.len);
+    errdefer {
+        for (abi_items[0..items.len]) |*item| freeGraphWalkResult(item);
+        allocator.free(abi_items);
+    }
+
+    for (abi_items) |*item| {
+        item.* = .{
+            .node_id = null,
+            .node_id_len = 0,
+            .kind = null,
+            .kind_len = 0,
+            .depth = 0,
+            .predecessor_node_id = null,
+            .predecessor_node_id_len = 0,
+            .has_predecessor_node_id = 0,
+            .edge_type = null,
+            .edge_type_len = 0,
+            .has_edge_type = 0,
+        };
+    }
+
+    for (items, abi_items) |item, *abi_item| {
+        const node_id = try allocator.dupeZ(u8, item.node_id);
+        errdefer allocator.free(node_id);
+        const kind = try allocator.dupeZ(u8, item.kind);
+        errdefer allocator.free(kind);
+        const predecessor = if (item.predecessor_node_id) |value| try allocator.dupeZ(u8, value) else null;
+        errdefer if (predecessor) |value| allocator.free(value);
+        const edge_type = if (item.edge_type) |value| try allocator.dupeZ(u8, value) else null;
+
+        abi_item.* = .{
+            .node_id = node_id.ptr,
+            .node_id_len = node_id.len,
+            .kind = kind.ptr,
+            .kind_len = kind.len,
+            .depth = item.depth,
+            .predecessor_node_id = if (predecessor) |value| value.ptr else null,
+            .predecessor_node_id_len = if (predecessor) |value| value.len else 0,
+            .has_predecessor_node_id = if (predecessor != null) 1 else 0,
+            .edge_type = if (edge_type) |value| value.ptr else null,
+            .edge_type_len = if (edge_type) |value| value.len else 0,
+            .has_edge_type = if (edge_type != null) 1 else 0,
         };
     }
 
@@ -2255,6 +3017,11 @@ fn statusFromError(err: anyerror) zova_status {
         error.VectorDimensionMismatch => .VECTOR_DIMENSION_MISMATCH,
         error.VectorCorrupt => .VECTOR_CORRUPT,
         error.VectorInvalid => .VECTOR_INVALID,
+        error.GraphExists => .GRAPH_EXISTS,
+        error.GraphNotFound => .GRAPH_NOT_FOUND,
+        error.GraphNodeNotFound => .GRAPH_NODE_NOT_FOUND,
+        error.GraphEdgeNotFound => .GRAPH_EDGE_NOT_FOUND,
+        error.GraphInvalid => .GRAPH_INVALID,
         error.InvalidArgument => .INVALID_ARGUMENT,
         else => .SQLITE_ERROR,
     };
@@ -2297,19 +3064,25 @@ fn statusName(status: c_int) [*:0]const u8 {
         @intFromEnum(zova_status.VECTOR_DIMENSION_MISMATCH) => "ZOVA_VECTOR_DIMENSION_MISMATCH",
         @intFromEnum(zova_status.VECTOR_CORRUPT) => "ZOVA_VECTOR_CORRUPT",
         @intFromEnum(zova_status.VECTOR_INVALID) => "ZOVA_VECTOR_INVALID",
+        @intFromEnum(zova_status.GRAPH_EXISTS) => "ZOVA_GRAPH_EXISTS",
+        @intFromEnum(zova_status.GRAPH_NOT_FOUND) => "ZOVA_GRAPH_NOT_FOUND",
+        @intFromEnum(zova_status.GRAPH_NODE_NOT_FOUND) => "ZOVA_GRAPH_NODE_NOT_FOUND",
+        @intFromEnum(zova_status.GRAPH_EDGE_NOT_FOUND) => "ZOVA_GRAPH_EDGE_NOT_FOUND",
+        @intFromEnum(zova_status.GRAPH_INVALID) => "ZOVA_GRAPH_INVALID",
         else => "ZOVA_UNKNOWN_STATUS",
     };
 }
 
 test "c abi status names and versions are stable" {
     try std.testing.expectEqual(@as(u32, 0), zova_abi_version_major());
-    try std.testing.expectEqual(@as(u32, 19), zova_abi_version_minor());
+    try std.testing.expectEqual(@as(u32, 20), zova_abi_version_minor());
     try std.testing.expectEqual(@as(u32, 0), zova_abi_version_patch());
-    try std.testing.expectEqualStrings("0.19.0", std.mem.span(zova_abi_version_string()));
+    try std.testing.expectEqualStrings("0.20.0", std.mem.span(zova_abi_version_string()));
     try std.testing.expectEqualStrings("ZOVA_OK", std.mem.span(zova_status_name(@intFromEnum(zova_status.OK))));
     try std.testing.expectEqualStrings("ZOVA_OBJECT_NOT_FOUND", std.mem.span(zova_status_name(@intFromEnum(zova_status.OBJECT_NOT_FOUND))));
     try std.testing.expectEqualStrings("ZOVA_BOUND_STORE_INVALID", std.mem.span(zova_status_name(@intFromEnum(zova_status.BOUND_STORE_INVALID))));
     try std.testing.expectEqualStrings("ZOVA_VECTOR_INVALID", std.mem.span(zova_status_name(@intFromEnum(zova_status.VECTOR_INVALID))));
+    try std.testing.expectEqualStrings("ZOVA_GRAPH_INVALID", std.mem.span(zova_status_name(@intFromEnum(zova_status.GRAPH_INVALID))));
     try std.testing.expectEqualStrings("ZOVA_UNKNOWN_STATUS", std.mem.span(zova_status_name(-1)));
 }
 
@@ -2351,6 +3124,21 @@ test "c abi validates null pointers" {
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_listen(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_subscription_try_receive(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_subscription_close(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_create(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_exists(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_info_get(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graphs_list(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_delete(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_node_put(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_node_get(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_node_exists(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_node_delete(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_edge_put(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_edge_get(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_edge_exists(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_edge_delete(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_neighbors(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_walk(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_prepare(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_finalize(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_step(null));
@@ -2557,6 +3345,222 @@ test "c abi exposes sql record helper functions" {
     try std.testing.expectEqual(zova_status.OK, zova_statement_column_name(&.{ .statement = stmt, .index = 1, .out_name = &name }));
     try std.testing.expectEqualStrings("name", name.data.?[0..name.len]);
     try std.testing.expectEqual(zova_status.MISUSE, zova_statement_column_name(&.{ .statement = stmt, .index = 2, .out_name = &name }));
+}
+
+test "c abi exposes graph lifecycle nodes edges and traversal" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-graph.zova", .{tmp.sub_path[0..]});
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(db);
+
+    try std.testing.expectEqualStrings("ZOVA_GRAPH_NOT_FOUND", std.mem.span(zova_status_name(@intFromEnum(zova_status.GRAPH_NOT_FOUND))));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_create(&.{ .db = db, .name = null }));
+    try std.testing.expectEqual(zova_status.GRAPH_INVALID, zova_graph_create(&.{ .db = db, .name = "_zova_private" }));
+
+    try std.testing.expectEqual(zova_status.OK, zova_graph_create(&.{ .db = db, .name = "app" }));
+    try std.testing.expectEqual(zova_status.GRAPH_EXISTS, zova_graph_create(&.{ .db = db, .name = "app" }));
+
+    var exists: u8 = 0;
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_exists(&.{ .db = db, .name = "app", .out_exists = null }));
+    try std.testing.expectEqual(zova_status.OK, zova_graph_exists(&.{ .db = db, .name = "app", .out_exists = &exists }));
+    try std.testing.expectEqual(@as(u8, 1), exists);
+
+    try std.testing.expectEqual(zova_status.OK, zova_graph_node_put(&.{
+        .db = db,
+        .graph_name = "app",
+        .node_id = "message:1",
+        .kind = "message",
+        .target_type = @intFromEnum(zova_graph_target_type.RECORD),
+        .target_namespace = null,
+        .target_ref = "messages:1",
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_graph_node_put(&.{
+        .db = db,
+        .graph_name = "app",
+        .node_id = "message:2",
+        .kind = "message",
+        .target_type = @intFromEnum(zova_graph_target_type.RECORD),
+        .target_namespace = null,
+        .target_ref = "messages:2",
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_graph_node_put(&.{
+        .db = db,
+        .graph_name = "app",
+        .node_id = "attachment:1",
+        .kind = "attachment",
+        .target_type = @intFromEnum(zova_graph_target_type.EXTERNAL),
+        .target_namespace = "attachments",
+        .target_ref = "",
+    }));
+    try std.testing.expectEqual(zova_status.GRAPH_INVALID, zova_graph_node_put(&.{
+        .db = db,
+        .graph_name = "app",
+        .node_id = "_zova_bad",
+        .kind = "message",
+        .target_type = @intFromEnum(zova_graph_target_type.NONE),
+        .target_namespace = null,
+        .target_ref = null,
+    }));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_node_put(&.{
+        .db = db,
+        .graph_name = "app",
+        .node_id = "bad-target",
+        .kind = "message",
+        .target_type = 99,
+        .target_namespace = null,
+        .target_ref = null,
+    }));
+
+    var info = zova_graph_info{ .name = null, .name_len = 0, .node_count = 0, .edge_count = 0 };
+    defer zova_graph_info_free(&info);
+    try std.testing.expectEqual(zova_status.OK, zova_graph_info_get(&.{ .db = db, .name = "app", .out_info = &info }));
+    try std.testing.expectEqualStrings("app", info.name.?[0..info.name_len]);
+    try std.testing.expectEqual(@as(u64, 3), info.node_count);
+    zova_graph_info_free(&info);
+
+    var graphs = zova_graph_list{ .items = null, .len = 0 };
+    defer zova_graph_list_free(&graphs);
+    try std.testing.expectEqual(zova_status.OK, zova_graphs_list(&.{ .db = db, .out_list = &graphs }));
+    try std.testing.expectEqual(@as(usize, 1), graphs.len);
+
+    var node = zova_graph_node{
+        .graph_name = null,
+        .graph_name_len = 0,
+        .node_id = null,
+        .node_id_len = 0,
+        .kind = null,
+        .kind_len = 0,
+        .target_type = @intFromEnum(zova_graph_target_type.NONE),
+        .target_namespace = null,
+        .target_namespace_len = 0,
+        .target_ref = null,
+        .target_ref_len = 0,
+        .has_target_namespace = 0,
+        .has_target_ref = 0,
+    };
+    defer zova_graph_node_free(&node);
+    try std.testing.expectEqual(zova_status.OK, zova_graph_node_get(&.{ .db = db, .graph_name = "app", .node_id = "attachment:1", .out_node = &node }));
+    try std.testing.expectEqualStrings("attachment:1", node.node_id.?[0..node.node_id_len]);
+    try std.testing.expectEqual(@as(u8, 1), node.has_target_namespace);
+    try std.testing.expectEqualStrings("attachments", node.target_namespace.?[0..node.target_namespace_len]);
+    try std.testing.expectEqual(@as(u8, 1), node.has_target_ref);
+    try std.testing.expectEqual(@as(usize, 0), node.target_ref_len);
+
+    try std.testing.expectEqual(zova_status.GRAPH_NODE_NOT_FOUND, zova_graph_edge_put(&.{
+        .db = db,
+        .graph_name = "app",
+        .from_node_id = "message:1",
+        .edge_type = "missing",
+        .to_node_id = "missing",
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_graph_edge_put(&.{ .db = db, .graph_name = "app", .from_node_id = "message:1", .edge_type = "replies_to", .to_node_id = "message:2" }));
+    try std.testing.expectEqual(zova_status.OK, zova_graph_edge_put(&.{ .db = db, .graph_name = "app", .from_node_id = "message:1", .edge_type = "has_attachment", .to_node_id = "attachment:1" }));
+
+    var edge = zova_graph_edge{ .graph_name = null, .graph_name_len = 0, .from_node_id = null, .from_node_id_len = 0, .edge_type = null, .edge_type_len = 0, .to_node_id = null, .to_node_id_len = 0 };
+    defer zova_graph_edge_free(&edge);
+    try std.testing.expectEqual(zova_status.OK, zova_graph_edge_get(&.{ .db = db, .graph_name = "app", .from_node_id = "message:1", .edge_type = "has_attachment", .to_node_id = "attachment:1", .out_edge = &edge }));
+    try std.testing.expectEqualStrings("has_attachment", edge.edge_type.?[0..edge.edge_type_len]);
+
+    var edge_exists: u8 = 0;
+    try std.testing.expectEqual(zova_status.OK, zova_graph_edge_exists(&.{ .db = db, .graph_name = "app", .from_node_id = "message:1", .edge_type = "has_attachment", .to_node_id = "attachment:1", .out_exists = &edge_exists }));
+    try std.testing.expectEqual(@as(u8, 1), edge_exists);
+
+    var neighbors = zova_graph_neighbor_results{ .items = null, .len = 0 };
+    defer zova_graph_neighbor_results_free(&neighbors);
+    try std.testing.expectEqual(zova_status.OK, zova_graph_neighbors(&.{
+        .db = db,
+        .graph_name = "app",
+        .node_id = "message:1",
+        .direction = @intFromEnum(zova_graph_neighbor_direction.OUTGOING),
+        .edge_type = null,
+        .limit = 10,
+        .out_results = &neighbors,
+    }));
+    try std.testing.expectEqual(@as(usize, 2), neighbors.len);
+    zova_graph_neighbor_results_free(&neighbors);
+    try std.testing.expectEqual(zova_status.OK, zova_graph_neighbors(&.{
+        .db = db,
+        .graph_name = "app",
+        .node_id = "message:2",
+        .direction = @intFromEnum(zova_graph_neighbor_direction.INCOMING),
+        .edge_type = "replies_to",
+        .limit = 0,
+        .out_results = &neighbors,
+    }));
+    try std.testing.expectEqual(@as(usize, 0), neighbors.len);
+
+    const too_large_limit: usize = @as(usize, @intCast(std.math.maxInt(i64))) + 1;
+    try std.testing.expectEqual(zova_status.GRAPH_INVALID, zova_graph_neighbors(&.{
+        .db = db,
+        .graph_name = "app",
+        .node_id = "message:1",
+        .direction = @intFromEnum(zova_graph_neighbor_direction.OUTGOING),
+        .edge_type = null,
+        .limit = too_large_limit,
+        .out_results = &neighbors,
+    }));
+
+    var walk = zova_graph_walk_results{ .items = null, .len = 0 };
+    defer zova_graph_walk_results_free(&walk);
+    try std.testing.expectEqual(zova_status.OK, zova_graph_walk(&.{
+        .db = db,
+        .graph_name = "app",
+        .start_node_id = "message:1",
+        .edge_type = null,
+        .max_depth = 1,
+        .limit = 10,
+        .out_results = &walk,
+    }));
+    try std.testing.expectEqual(@as(usize, 3), walk.len);
+    try std.testing.expectEqual(@as(u32, 0), walk.items.?[0].depth);
+    try std.testing.expectEqual(@as(u32, 1), walk.items.?[1].depth);
+    try std.testing.expectEqual(@as(u8, 1), walk.items.?[1].has_predecessor_node_id);
+    try std.testing.expectEqual(zova_status.GRAPH_INVALID, zova_graph_walk(&.{
+        .db = db,
+        .graph_name = "app",
+        .start_node_id = "message:1",
+        .edge_type = null,
+        .max_depth = 1,
+        .limit = too_large_limit,
+        .out_results = &walk,
+    }));
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_begin_immediate(&.{ .db = db }));
+    try std.testing.expectEqual(zova_status.OK, zova_graph_node_put(&.{
+        .db = db,
+        .graph_name = "app",
+        .node_id = "message:rollback",
+        .kind = "message",
+        .target_type = @intFromEnum(zova_graph_target_type.NONE),
+        .target_namespace = null,
+        .target_ref = null,
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_rollback(&.{ .db = db }));
+    try std.testing.expectEqual(zova_status.GRAPH_NODE_NOT_FOUND, zova_graph_node_get(&.{ .db = db, .graph_name = "app", .node_id = "message:rollback", .out_node = &node }));
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_close(db));
+    db = null;
+
+    var readonly: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_open_with_options(&.{
+        .path = db_path,
+        .flags = ZOVA_OPEN_READ_ONLY,
+        .busy_timeout_ms = 0,
+        .out_db = &readonly,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(readonly);
+    try std.testing.expectEqual(zova_status.OK, zova_graph_exists(&.{ .db = readonly, .name = "app", .out_exists = &exists }));
+    try std.testing.expectEqual(zova_status.READ_ONLY, zova_graph_create(&.{ .db = readonly, .name = "readonly_new" }));
 }
 
 test "c abi validates vector request shapes" {
