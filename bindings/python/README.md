@@ -50,12 +50,12 @@ After the Python package is published to PyPI:
 python -m pip install zova
 ```
 
-The v0.18 Python package is source-first. It builds the PyO3 extension locally
+The v0.19 Python package is source-first. It builds the PyO3 extension locally
 through maturin and Cargo, and the Rust crates `zova` and `zova-sys` must be
 available on crates.io first. Users need Python 3.10 or newer, Rust/Cargo, Zig
 0.16.0 or newer, and a working C compiler/linker.
 
-No official platform wheel matrix is promised in v0.18.
+No official platform wheel matrix is promised in v0.19.
 
 ## Local Development
 
@@ -216,7 +216,9 @@ with db.object_writer() as writer:
 
 If a writer leaves the context without `finish()`, it is cancelled and any
 unreferenced chunks written by that writer are cleaned up. Writer operations
-follow Zova's object transaction policy and reject active user transactions.
+follow Zova's object transaction policy in single-file mode. When an object
+store is bound, object writes participate in the same Zova transaction/savepoint
+scope through SQLite `ATTACH`.
 
 Loose chunks and assembly are also exposed for receive-side workflows:
 applications track transfer state in their own SQL tables, call
@@ -280,6 +282,13 @@ be negative because dot distance is `-dot_product`.
 Deleting a vector collection removes Zova's private vector rows only. User SQL
 metadata rows that reference vector ids are application-owned and remain in
 place.
+
+## Bound Stores
+
+In v0.19, a `.zova` file may be bound to one object store and one vector store
+through the native Zig API or CLI. The Python object and vector methods above
+transparently use those stores after `Database.open`. Store
+create/bind/unbind/split management is not exposed as a Python API yet.
 
 ## SQL-Native Vector Search
 

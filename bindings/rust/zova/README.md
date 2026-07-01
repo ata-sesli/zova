@@ -10,7 +10,7 @@ Rust ownership, error handling, and safe containers.
 
 ```toml
 [dependencies]
-zova = "0.18.0"
+zova = "0.19.0"
 ```
 
 The crate builds Zova's native C ABI through `zova-sys`, so users need Rust,
@@ -26,7 +26,11 @@ Zig 0.16.0 or newer, and a working C compiler/linker.
 - vector collections, CRUD, exact search, candidate search, thresholds, and
   SQL-native vector search
 - same-process transaction-aware app events with `listen` / `notify`
+- transparent use of v0.19 bound object/vector stores after open
 - `SharedDatabase` for a cloneable, serialized Rust handle
+
+Store create/bind/unbind/split management is CLI/native-Zig-only in v0.19; this
+crate keeps the existing object and vector APIs source-compatible.
 
 ## Example
 

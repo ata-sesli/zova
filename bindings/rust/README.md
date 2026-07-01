@@ -47,14 +47,14 @@ Use the safe crate for normal Rust applications:
 
 ```toml
 [dependencies]
-zova = "0.18.0"
+zova = "0.19.0"
 ```
 
 Use the raw FFI crate only when you want to call the C ABI directly:
 
 ```toml
 [dependencies]
-zova-sys = "0.18.0"
+zova-sys = "0.19.0"
 ```
 
 Both crates contain native code. The default build path compiles Zova's static C
@@ -275,8 +275,9 @@ For large writes, use `Database::object_writer()` to stream data into Zova
 without keeping the complete object in memory. Transfer state, filenames, MIME
 types, and application references still belong in user SQL tables.
 Writer operations serialize through their parent database handle at the C ABI
-boundary and return a Zova transaction error when used inside an active user
-transaction.
+boundary. Single-file object writes keep the existing object transaction policy;
+when an object store is bound, object writes participate in the same Zova
+transaction/savepoint scope through SQLite `ATTACH`.
 
 Vectors follow Zova's SQL-metadata model: store labels, document ids, and other
 metadata in ordinary tables, and store numeric vectors in a named collection.
@@ -310,3 +311,10 @@ SQL-native vector search is available through prepared statements too. Bind
 query vectors as little-endian `f32` blobs when calling `zova_vector_distance`
 or querying `zova_vector_search`; see `zova/examples/vectors.rs` for a complete
 metadata join example.
+
+## Bound Stores
+
+In v0.19, a `.zova` file may be bound to one object store and one vector store
+through the native Zig API or CLI. The Rust object and vector methods above
+transparently use those stores after `Database::open` or `SharedDatabase::open`.
+Store create/bind/unbind/split management is not exposed as a Rust API yet.

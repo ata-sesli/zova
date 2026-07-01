@@ -54,7 +54,7 @@ flowchart LR
 After the Go module tag is pushed, applications can add the binding with:
 
 ```sh
-go get github.com/atasesli/zova/bindings/go@v0.18.0
+go get github.com/atasesli/zova/bindings/go@v0.19.0
 ```
 
 Import it as:
@@ -135,14 +135,14 @@ Because this module lives in the `bindings/go` subdirectory, the release tag
 must include that subdirectory prefix:
 
 ```sh
-git tag -a bindings/go/v0.18.0 -m "Zova Go bindings v0.18.0"
-git push origin bindings/go/v0.18.0
+git tag -a bindings/go/v0.19.0 -m "Zova Go bindings v0.19.0"
+git push origin bindings/go/v0.19.0
 ```
 
 After pushing the tag, ask the public Go module proxy to resolve it:
 
 ```sh
-GOPROXY=proxy.golang.org go list -m github.com/atasesli/zova/bindings/go@v0.18.0
+GOPROXY=proxy.golang.org go list -m github.com/atasesli/zova/bindings/go@v0.19.0
 ```
 
 The module path is:
@@ -355,6 +355,13 @@ Use `SearchVectorsIn` when SQL has already selected candidate vector ids from
 metadata. Use `SearchVectorsByID*` when an existing stored vector is the query.
 Threshold variants use inclusive `distance <= maxDistance`; distances are always
 lower-is-better.
+
+## Bound Stores
+
+In v0.19, a `.zova` file may be bound to one object store and one vector store
+through the native Zig API or CLI. The Go object and vector methods above
+transparently use those stores after `Open`. Store create/bind/unbind/split
+management is not exposed as a Go API yet.
 
 Zova also registers SQL-native exact vector search on `.zova` connections. Use
 `EncodeVectorBlob` to bind little-endian `f32` query blobs through prepared

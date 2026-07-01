@@ -1,14 +1,14 @@
 # Zova
 
-SQLite-backed embedded database for records, objects, and vectors in one local
-file.
+SQLite-backed embedded database for records, objects, and vectors in local
+`.zova` files.
 
 Zova keeps SQLite as the relational core and adds native storage for
 content-addressed objects, chunk manifests, streaming writes, exact vector
-search, SQL-native vector queries, transaction-aware app events, diagnostics,
-salvage, backup, compact copy, and restore.
+search, SQL-native vector queries, transaction-aware app events, bound
+object/vector stores, diagnostics, salvage, backup, compact copy, and restore.
 
-Current package version: `0.18.0`.
+Current package version: `0.19.0`.
 
 Zova is pre-1.0. The current `.zova` file `format_version` is `3`.
 
@@ -48,7 +48,7 @@ or:
 
 ```toml
 [dependencies]
-zova = "0.18.0"
+zova = "0.19.0"
 ```
 
 Python:
@@ -66,7 +66,7 @@ python -m pip install zova
 Go:
 
 ```sh
-go get github.com/atasesli/zova/bindings/go@v0.18.0
+go get github.com/atasesli/zova/bindings/go@v0.19.0
 ```
 
 The Go binding uses cgo over Zova's C ABI. Build or provide the C ABI library
@@ -93,7 +93,7 @@ Zova vendors SQLite. You do not need a system SQLite installation.
 |---|---|---:|---:|---:|---|
 | Rust | `cargo add zova` | yes | yes | yes | `zova-sys` builds Zova's native C ABI from bundled source |
 | Python | `uv add zova` / `pip install zova` | yes | yes | yes | source-first PyO3 build; no wheel matrix yet |
-| Go | `go get github.com/atasesli/zova/bindings/go@v0.18.0` | yes, for C ABI build | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
+| Go | `go get github.com/atasesli/zova/bindings/go@v0.19.0` | yes, for C ABI build | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
 | C ABI | `zig build c-abi` | yes | no | yes | produces static `libzova_c.a` |
 | Zig | package source | yes | no | yes | native API |
 | CLI | `zig build` | yes | no | yes | source-built command line tool |
@@ -337,7 +337,9 @@ zova split --vectors main.zova vectors.zova
 selected Zova-owned private rows into that store, clears those private rows from
 the main file, binds the new store, and verifies the result. User SQL tables and
 rows stay in `main.zova`. The destination store must be a new `.zova` path; Zova
-does not overwrite existing files.
+does not overwrite existing files. Take a backup before splitting; after a
+successful split, rollback means restoring that backup or running another
+explicit local migration.
 
 After binding, Zova attaches the object store to the main SQLite connection and
 routes `_zova_objects`, `_zova_chunks`, and manifests through the internal
@@ -419,7 +421,7 @@ Zova supports collection create/info/list/delete, vector CRUD, batch upsert,
 exact search, candidate-filtered search, search-by-id, and inclusive distance
 thresholds.
 
-Search is exact and flat-scan in `0.18.0`. It is good for local datasets,
+Search is exact and flat-scan in `0.19.0`. It is good for local datasets,
 offline ranking, deterministic tests, and SQL-filter-first workflows. It is not
 yet an ANN engine for million-scale low-latency search.
 
@@ -573,19 +575,23 @@ Rust users normally use the safe crate:
 
 ```toml
 [dependencies]
-zova = "0.18.0"
+zova = "0.19.0"
 ```
 
 The lower-level raw FFI crate is available as:
 
 ```toml
 [dependencies]
-zova-sys = "0.18.0"
+zova-sys = "0.19.0"
 ```
 
 `zova` exposes `Database` for single-owner code and `SharedDatabase` for an
 opt-in cloneable `Send + Sync` handle. One shared handle is safe and internally
 serialized; open multiple handles for true SQLite concurrency.
+
+Existing Rust object and vector APIs transparently use a bound store after the
+database is opened. Store create/bind/unbind/split management remains
+native-Zig/CLI-only in v0.19.
 
 ### Python
 
@@ -600,16 +606,20 @@ It exposes records, prepared statements, transactions, savepoints, app events,
 backup, compact, restore, objects, `ObjectWriter`, vectors, and SQL-native
 vector search.
 
-The package is source-first in `0.18.0`. Installs may build the native extension
+The package is source-first in `0.19.0`. Installs may build the native extension
 locally and require Rust, Zig, and a C compiler. No official wheel matrix is
 promised yet.
+
+Existing Python object and vector APIs transparently use a bound store after the
+database is opened. Store create/bind/unbind/split management remains
+native-Zig/CLI-only in v0.19.
 
 ### Go
 
 Install:
 
 ```sh
-go get github.com/atasesli/zova/bindings/go@v0.18.0
+go get github.com/atasesli/zova/bindings/go@v0.19.0
 ```
 
 Import:
@@ -624,6 +634,10 @@ C ABI first in this repository:
 ```sh
 zig build c-abi
 ```
+
+Existing Go object and vector APIs transparently use a bound store after the
+database is opened. Store create/bind/unbind/split management remains
+native-Zig/CLI-only in v0.19.
 
 External Go projects should point cgo at an installed Zova C ABI:
 
@@ -721,7 +735,7 @@ synchronous settings automatically.
 
 ## Current Boundaries
 
-Zova `0.18.0` does not include:
+Zova `0.19.0` does not include:
 
 - ANN indexes such as HNSW or IVFFlat
 - vector SQL operators
@@ -735,6 +749,10 @@ Zova `0.18.0` does not include:
   mutation logging
 - in-place repair
 - overwrite mode for backup/compact/restore/salvage
+- bundle backup or multi-file restore packages
+- multiple named object/vector stores or routing rules
+- automatic bound-store path repair
+- C ABI, Rust, Go, or Python store-management APIs
 - remote sync, S3 compatibility, NATS integration, or Redis-like behavior
 - compiled release artifacts
 
@@ -783,7 +801,7 @@ are not release artifacts.
 Release command:
 
 ```sh
-scripts/package-release.sh 0.18.0
+scripts/package-release.sh 0.19.0
 ```
 
 Do not run it until the exact commit is ready to tag and publish.
