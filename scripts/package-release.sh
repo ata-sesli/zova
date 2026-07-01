@@ -177,6 +177,11 @@ if [ ! -f "$TMP/$PKG/scripts/repack-darwin-c-abi.sh" ]; then
     exit 1
 fi
 
+if [ ! -f "$TMP/$PKG/scripts/distribute-release.sh" ]; then
+    echo "release package is missing scripts/distribute-release.sh" >&2
+    exit 1
+fi
+
 if [ ! -f "$TMP/$PKG/include/zova.h" ]; then
     echo "release package is missing include/zova.h" >&2
     exit 1

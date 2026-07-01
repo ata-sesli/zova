@@ -742,7 +742,6 @@ Zova `0.19.0` does not include:
 - object or chunk virtual tables
 - embedding generation
 - TypeScript or Swift bindings
-- automatic Go module publishing
 - a Python wheel matrix
 - background worker threads hidden inside Zova
 - cross-process notifications, durable notification replay, or automatic
@@ -804,7 +803,16 @@ Release command:
 scripts/package-release.sh 0.19.0
 ```
 
-Do not run it until the exact commit is ready to tag and publish.
+Distribution command for crates.io and PyPI, in that order:
+
+```sh
+scripts/distribute-release.sh 0.19.0
+```
+
+The Go module tag is created and pushed by `scripts/package-release.sh`.
+
+Do not run release or distribution commands until the exact commit is ready to
+tag and publish.
 
 ## License
 

@@ -134,6 +134,11 @@ if [ ! -f "$TMP/$PKG/scripts/repack-darwin-c-abi.sh" ]; then
     exit 1
 fi
 
+if [ ! -f "$TMP/$PKG/scripts/distribute-release.sh" ]; then
+    echo "release package is missing scripts/distribute-release.sh" >&2
+    exit 1
+fi
+
 if [ ! -d "$TMP/$PKG/src" ]; then
     echo "release package is missing src" >&2
     exit 1
