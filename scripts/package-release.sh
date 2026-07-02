@@ -222,6 +222,16 @@ if [ ! -f "$TMP/$PKG/src/graph_sql_tests.zig" ]; then
     exit 1
 fi
 
+if [ ! -f "$TMP/$PKG/src/trgm.zig" ]; then
+    echo "release package is missing src/trgm.zig" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/src/trgm_tests.zig" ]; then
+    echo "release package is missing src/trgm_tests.zig" >&2
+    exit 1
+fi
+
 if [ ! -f "$TMP/$PKG/bindings/rust/Cargo.toml" ]; then
     echo "release package is missing bindings/rust/Cargo.toml" >&2
     exit 1
@@ -385,7 +395,7 @@ mkdir -p "$VERIFY_DIR"
 tar -xzf "$ARCHIVE" -C "$VERIFY_DIR"
 cd "$VERIFY_DIR/$PKG"
 
-zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/zova_error.zig src/zova_test_support.zig src/extension.zig src/notify.zig src/object.zig src/object_fastcdc.zig src/object_tests.zig src/vector.zig src/vector_tests.zig src/vector_sql.zig src/vector_sql_tests.zig src/graph.zig src/graph_tests.zig src/graph_sql.zig src/graph_sql_tests.zig src/c_api.zig src/c_api_internal.zig src/c_api_tests.zig src/cli.zig src/main.zig tests/e2e.zig tests/cli.zig
+zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/zova_error.zig src/zova_test_support.zig src/extension.zig src/notify.zig src/object.zig src/object_fastcdc.zig src/object_tests.zig src/vector.zig src/vector_tests.zig src/vector_sql.zig src/vector_sql_tests.zig src/graph.zig src/graph_tests.zig src/graph_sql.zig src/graph_sql_tests.zig src/trgm.zig src/trgm_tests.zig src/c_api.zig src/c_api_internal.zig src/c_api_tests.zig src/cli.zig src/main.zig tests/e2e.zig tests/cli.zig
 zig build test
 zig build e2e
 zig build c-abi

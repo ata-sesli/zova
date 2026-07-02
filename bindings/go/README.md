@@ -246,12 +246,37 @@ copies valid graph topology and skips invalid graph nodes or edges. The Go
 package does not expose typed doctor/salvage report APIs yet, and library code
 should not parse the human text output as a stable binding contract.
 
-The current development branch adds a native Zig extension host foundation.
-Go extension lifecycle and registry APIs are not exposed yet; ordinary Go opens
-continue to require installed extension code to be available through the process
-that owns the native Zova connection.
+The current development branch adds a native Zig extension host foundation and
+the bundled `trgm` extension. Go extension lifecycle and registry APIs are not
+exposed yet; ordinary Go opens can use bundled extension SQL surfaces through
+prepared statements after the extension has been installed.
 See [../../docs/extensions.md](../../docs/extensions.md) for the current host
 contract and trust model.
+
+```go
+put, err := db.Prepare("select zova_trgm_put('messages', ?1, 'record', 'messages', ?2, ?3)")
+if err != nil {
+    return err
+}
+defer put.Close()
+_ = put.BindText(1, "message:123")
+_ = put.BindText(2, "123")
+_ = put.BindText(3, "attachment upload failed")
+_, _ = put.Step()
+
+search, err := db.Prepare(`
+    select document_id, score
+    from zova_trgm_search
+    where index_name = 'messages'
+      and query = ?1
+      and "limit" = 10
+    order by rank`)
+if err != nil {
+    return err
+}
+defer search.Close()
+_ = search.BindText(1, "attachement failed")
+```
 
 ## App Events
 

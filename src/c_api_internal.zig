@@ -4935,3 +4935,69 @@ test "c abi notifications are transaction aware and SQL callable" {
     try std.testing.expectEqual(zova_status.OK, zova_subscription_close(subscription));
     try std.testing.expectEqual(zova_status.OK, zova_database_close(db));
 }
+
+test "c abi can query bundled trgm SQL surface through prepared statements" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-trgm.zova", .{tmp.sub_path[0..]});
+
+    {
+        var native = try zova.Database.create(db_path);
+        defer native.deinit();
+        try native.installExtension("trgm");
+    }
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_open(&.{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(db);
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{
+        .db = db,
+        .sql = "select zova_trgm_create_index('docs')",
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{
+        .db = db,
+        .sql = "select zova_trgm_put('docs', 'doc:1', 'record', 'messages', '1', 'attachment upload failed')",
+    }));
+
+    var similarity_stmt: ?*zova_statement = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_prepare(&.{
+        .db = db,
+        .sql = "select zova_trgm_similarity('attachment', 'attachement')",
+        .out_statement = &similarity_stmt,
+    }));
+    defer _ = zova_statement_finalize(similarity_stmt);
+    var step_result: zova_step_result = undefined;
+    try std.testing.expectEqual(zova_status.OK, zova_statement_step(&.{ .statement = similarity_stmt, .out_result = &step_result }));
+    try std.testing.expectEqual(zova_step_result.ROW, step_result);
+    var score: f64 = 0;
+    try std.testing.expectEqual(zova_status.OK, zova_statement_column_double(&.{ .statement = similarity_stmt, .index = 0, .out_value = &score }));
+    try std.testing.expect(score > 0.5);
+
+    var search_stmt: ?*zova_statement = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_prepare(&.{
+        .db = db,
+        .sql =
+        \\select document_id, score
+        \\from zova_trgm_search
+        \\where index_name = 'docs'
+        \\  and query = 'attachement failed'
+        \\  and "limit" = 1
+        \\order by rank
+        ,
+        .out_statement = &search_stmt,
+    }));
+    defer _ = zova_statement_finalize(search_stmt);
+    try std.testing.expectEqual(zova_status.OK, zova_statement_step(&.{ .statement = search_stmt, .out_result = &step_result }));
+    try std.testing.expectEqual(zova_step_result.ROW, step_result);
+    var document_id = zova_text{ .data = null, .len = 0 };
+    defer zova_text_free(&document_id);
+    try std.testing.expectEqual(zova_status.OK, zova_statement_column_text(&.{ .statement = search_stmt, .index = 0, .out_text = &document_id }));
+    try std.testing.expectEqualStrings("doc:1", document_id.data.?[0..document_id.len]);
+}

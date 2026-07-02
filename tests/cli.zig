@@ -88,6 +88,57 @@ test "cli extension host lists checks and rejects unavailable install" {
     try expectContains(invalid_name.stderr, "extension name is invalid");
 }
 
+test "cli bundled trgm extension installs checks lists and drops" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "trgm-cli.zova");
+
+    {
+        var db = try zova.Database.create(db_path);
+        defer db.deinit();
+    }
+
+    var install = try runCli(&.{ "zova", "extension", "install", "--json", db_path, "trgm" });
+    defer install.deinit();
+    try std.testing.expectEqual(@as(u8, 0), install.code);
+    var install_json = try parseJson(install.stdout);
+    defer install_json.deinit();
+    try expectJsonString(install_json.value.object, "command", "extension-install");
+    const install_extension = install_json.value.object.get("extension") orelse return error.MissingJsonField;
+    try expectJsonString(install_extension.object, "name", "trgm");
+
+    var info = try runCli(&.{ "zova", "extension", "info", "--json", db_path, "trgm" });
+    defer info.deinit();
+    try std.testing.expectEqual(@as(u8, 0), info.code);
+    var info_json = try parseJson(info.stdout);
+    defer info_json.deinit();
+    const info_extension = info_json.value.object.get("extension") orelse return error.MissingJsonField;
+    try expectJsonString(info_extension.object, "name", "trgm");
+    try expectJsonString(info_extension.object, "storage_prefix", "_zova_ext_trgm_");
+
+    var check = try runCli(&.{ "zova", "extension", "check", "--json", db_path, "trgm" });
+    defer check.deinit();
+    try std.testing.expectEqual(@as(u8, 0), check.code);
+
+    var doctor = try runCli(&.{ "zova", "doctor", "--json", db_path });
+    defer doctor.deinit();
+    try std.testing.expectEqual(@as(u8, 0), doctor.code);
+    try expectContains(doctor.stdout, "\"extension\"");
+
+    var drop = try runCli(&.{ "zova", "extension", "drop", "--json", db_path, "trgm" });
+    defer drop.deinit();
+    try std.testing.expectEqual(@as(u8, 0), drop.code);
+
+    var list = try runCli(&.{ "zova", "extension", "list", "--json", db_path });
+    defer list.deinit();
+    try std.testing.expectEqual(@as(u8, 0), list.code);
+    var list_json = try parseJson(list.stdout);
+    defer list_json.deinit();
+    try expectJsonArrayLen(list_json.value.object, "extensions", 0);
+}
+
 test "cli extension list info and diagnostics inspect unavailable extension metadata" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

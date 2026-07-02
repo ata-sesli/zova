@@ -46,6 +46,7 @@ const graph_sql = @import("graph_sql.zig");
 const notify_impl = @import("notify.zig");
 const object_impl = @import("object.zig");
 const sqlite = @import("sqlite.zig");
+const trgm_impl = @import("trgm.zig");
 const vector_impl = @import("vector.zig");
 const vector_sql = @import("vector_sql.zig");
 const zova_error = @import("zova_error.zig");
@@ -63,6 +64,9 @@ const bound_object_store_name = "default";
 const bound_vector_store_name = "default";
 const bound_object_store_schema_name = "object_store";
 const bound_vector_store_schema_name = "vector_store";
+const bundled_extensions = [_]extension_impl.Extension{
+    trgm_impl.extension(),
+};
 const bound_stores_schema_sql =
     \\create table _zova_bound_stores (
     \\  role text not null check (role in ('object_store', 'vector_store')),
@@ -348,7 +352,7 @@ pub fn convertSqliteToZova(source_path: [:0]const u8, dest_path: [:0]const u8) E
 /// This uses SQLite's online backup API and never overwrites an existing
 /// destination. The source must already be a valid current-format Zova file.
 pub fn restoreBackup(source_path: [:0]const u8, dest_path: [:0]const u8, options: RestoreOptions) Error!void {
-    try restoreBackupWithExtensions(source_path, dest_path, options, ExtensionRegistry.empty());
+    try restoreBackupWithExtensions(source_path, dest_path, options, defaultExtensionRegistry());
 }
 
 /// Restore a backup `.zova` file with process-registered extension code.
@@ -376,6 +380,10 @@ fn deinitNotifications(hub: *notify_impl.Hub) void {
     allocator.destroy(hub);
 }
 
+fn defaultExtensionRegistry() ExtensionRegistry {
+    return ExtensionRegistry.init(&bundled_extensions);
+}
+
 /// Owns one initialized `.zova` database.
 ///
 /// A Zova database is physically SQLite, but it must use the `.zova` extension
@@ -395,7 +403,7 @@ pub const Database = struct {
     /// private `_zova_meta` table, format version `5`, and the required
     /// object, vector, graph, and extension registry schemas.
     pub fn create(path: [:0]const u8) Error!Database {
-        return createWithExtensions(path, ExtensionRegistry.empty());
+        return createWithExtensions(path, defaultExtensionRegistry());
     }
 
     /// Create a new initialized `.zova` database with process-registered
@@ -447,7 +455,7 @@ pub const Database = struct {
     /// or run migrations. Mutating SQL/object/vector/graph APIs fail through
     /// SQLite's normal read-only error path.
     pub fn openWithOptions(path: [:0]const u8, options: OpenOptions) Error!Database {
-        return openWithOptionsAndExtensions(path, options, ExtensionRegistry.empty());
+        return openWithOptionsAndExtensions(path, options, defaultExtensionRegistry());
     }
 
     /// Open an existing initialized `.zova` database with explicit options and
@@ -476,7 +484,7 @@ pub const Database = struct {
     /// handle use the main file only; normal application code should use `open`
     /// or `openWithOptions`.
     pub fn openForObjectStoreManagement(path: [:0]const u8, options: OpenOptions) Error!Database {
-        return openInternal(path, options, false, ExtensionRegistry.empty(), .enforce);
+        return openInternal(path, options, false, defaultExtensionRegistry(), .enforce);
     }
 
     fn openInternal(path: [:0]const u8, options: OpenOptions, load_bound_stores: bool, registry: ExtensionRegistry, extension_mode: ExtensionOpenMode) Error!Database {

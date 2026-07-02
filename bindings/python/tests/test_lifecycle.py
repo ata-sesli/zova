@@ -48,6 +48,104 @@ def test_create_open_exec_prepare_and_context_managers(tmp_path):
             assert stmt.step() == zova.Step.DONE
 
 
+def test_bundled_trgm_extension_sql_surface_works_after_reopen(tmp_path):
+    path = tmp_path / "trgm.zova"
+
+    with zova.Database.create(str(path)) as db:
+        _install_trgm_fixture(db)
+
+    with zova.Database.open(str(path)) as db:
+        with db.prepare("select zova_trgm_create_index('messages')") as stmt:
+            assert stmt.step() == zova.Step.ROW
+
+        with db.prepare(
+            "select zova_trgm_put('messages', ?1, 'record', 'messages', ?2, ?3)"
+        ) as stmt:
+            stmt.bind_text(1, "message:123")
+            stmt.bind_text(2, "123")
+            stmt.bind_text(3, "attachment upload failed")
+            assert stmt.step() == zova.Step.ROW
+
+        with db.prepare(
+            """
+            select document_id, score
+            from zova_trgm_search
+            where index_name = 'messages'
+              and query = ?1
+              and "limit" = 1
+            order by rank
+            """
+        ) as stmt:
+            stmt.bind_text(1, "attachement failed")
+            assert stmt.step() == zova.Step.ROW
+            assert stmt.column_text(0) == "message:123"
+            assert stmt.column_float(1) > 0.20
+
+
+def _install_trgm_fixture(db):
+    db.exec(
+        """
+        insert into _zova_extensions
+            (name, version, storage_prefix, zova_abi_min, capabilities, required,
+             installed_at_unix, manifest_json)
+        values ('trgm', '0.1.0', '_zova_ext_trgm_', '0.21.0', 'sql,trgm', 1,
+                0, '{"extension":"trgm","version":"0.1.0"}')
+        """
+    )
+    db.exec("create table _zova_ext_trgm_meta (key text primary key, value text not null)")
+    db.exec(
+        """
+        insert into _zova_ext_trgm_meta (key, value)
+        values ('schema_version', '1'), ('extension_version', '0.1.0')
+        """
+    )
+    db.exec(
+        """
+        create table _zova_ext_trgm_indexes (
+            name text primary key,
+            created_order integer not null unique
+        )
+        """
+    )
+    db.exec(
+        """
+        create table _zova_ext_trgm_documents (
+            index_name text not null,
+            document_id text not null,
+            target_type text not null,
+            target_namespace text,
+            target_ref text,
+            normalized_len integer not null,
+            text_hash blob not null check (length(text_hash) = 32),
+            term_count integer not null,
+            updated_at_unix integer not null,
+            primary key (index_name, document_id)
+        )
+        """
+    )
+    db.exec(
+        """
+        create table _zova_ext_trgm_terms (
+            index_name text not null,
+            term blob not null check (length(term) = 3),
+            document_count integer not null,
+            primary key (index_name, term)
+        )
+        """
+    )
+    db.exec(
+        """
+        create table _zova_ext_trgm_postings (
+            index_name text not null,
+            term blob not null check (length(term) = 3),
+            document_id text not null,
+            count integer not null,
+            primary key (index_name, term, document_id)
+        )
+        """
+    )
+
+
 def test_statement_round_trips_types_reset_clear_and_nulls(tmp_path):
     path = tmp_path / "types.zova"
     db = zova.Database.create(str(path))

@@ -151,12 +151,35 @@ copies valid graph topology and skips invalid graph nodes or edges. The Python
 package does not expose typed doctor/salvage report APIs yet, and library code
 should not parse the human text output as a stable binding contract.
 
-The current development branch adds a native Zig extension host foundation.
-Python extension lifecycle and registry APIs are not exposed yet; ordinary
-Python opens continue to require installed extension code to be available
-through the process that owns the native Zova connection.
+The current development branch adds a native Zig extension host foundation and
+the bundled `trgm` extension. Python extension lifecycle and registry APIs are
+not exposed yet; ordinary Python opens can use bundled extension SQL surfaces
+through prepared statements after the extension has been installed.
 See [../../docs/extensions.md](../../docs/extensions.md) for the current host
 contract and trust model.
+
+```python
+with zova.Database.open("app.zova") as db:
+    with db.prepare(
+        "select zova_trgm_put('messages', ?1, 'record', 'messages', ?2, ?3)"
+    ) as stmt:
+        stmt.bind_text(1, "message:123")
+        stmt.bind_text(2, "123")
+        stmt.bind_text(3, "attachment upload failed")
+        assert stmt.step() == zova.Step.ROW
+
+    with db.prepare(
+        """
+        select document_id, score
+        from zova_trgm_search
+        where index_name = 'messages'
+          and query = ?1
+          and "limit" = 10
+        order by rank
+        """
+    ) as stmt:
+        stmt.bind_text(1, "attachement failed")
+```
 
 ## App Events
 

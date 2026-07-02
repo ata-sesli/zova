@@ -140,6 +140,109 @@ func TestCreateOpenExecAndPreparedStatements(t *testing.T) {
 	}
 }
 
+func TestBundledTrgmExtensionSQLSurfaceWorksAfterReopen(t *testing.T) {
+	path := tempZovaPath(t, "trgm")
+	{
+		db, err := Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		installTrgmFixture(t, db)
+		must(t, db.Close())
+	}
+
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	create, err := db.Prepare("select zova_trgm_create_index('messages')")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if step, err := create.Step(); err != nil || step != StepRow {
+		t.Fatalf("create index step = %v, %v", step, err)
+	}
+	must(t, create.Close())
+
+	put, err := db.Prepare("select zova_trgm_put('messages', ?1, 'record', 'messages', ?2, ?3)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	must(t, put.BindText(1, "message:123"))
+	must(t, put.BindText(2, "123"))
+	must(t, put.BindText(3, "attachment upload failed"))
+	if step, err := put.Step(); err != nil || step != StepRow {
+		t.Fatalf("put step = %v, %v", step, err)
+	}
+	must(t, put.Close())
+
+	search, err := db.Prepare(`
+		select document_id, score
+		from zova_trgm_search
+		where index_name = 'messages'
+		  and query = ?1
+		  and "limit" = 1
+		order by rank`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer search.Close()
+	must(t, search.BindText(1, "attachement failed"))
+	if step, err := search.Step(); err != nil || step != StepRow {
+		t.Fatalf("search step = %v, %v", step, err)
+	}
+	documentID, ok, err := search.ColumnText(0)
+	if err != nil || !ok || documentID != "message:123" {
+		t.Fatalf("document_id = %q, %v, %v", documentID, ok, err)
+	}
+	score, err := search.ColumnFloat64(1)
+	if err != nil || score <= 0.20 {
+		t.Fatalf("score = %f, %v", score, err)
+	}
+}
+
+func installTrgmFixture(t *testing.T, db *DB) {
+	t.Helper()
+	must(t, db.Exec(`insert into _zova_extensions
+		(name, version, storage_prefix, zova_abi_min, capabilities, required, installed_at_unix, manifest_json)
+		values ('trgm', '0.1.0', '_zova_ext_trgm_', '0.21.0', 'sql,trgm', 1, 0,
+		        '{"extension":"trgm","version":"0.1.0"}')`))
+	must(t, db.Exec(`create table _zova_ext_trgm_meta (key text primary key, value text not null)`))
+	must(t, db.Exec(`insert into _zova_ext_trgm_meta (key, value)
+		values ('schema_version', '1'), ('extension_version', '0.1.0')`))
+	must(t, db.Exec(`create table _zova_ext_trgm_indexes (
+		name text primary key,
+		created_order integer not null unique
+	)`))
+	must(t, db.Exec(`create table _zova_ext_trgm_documents (
+		index_name text not null,
+		document_id text not null,
+		target_type text not null,
+		target_namespace text,
+		target_ref text,
+		normalized_len integer not null,
+		text_hash blob not null check (length(text_hash) = 32),
+		term_count integer not null,
+		updated_at_unix integer not null,
+		primary key (index_name, document_id)
+	)`))
+	must(t, db.Exec(`create table _zova_ext_trgm_terms (
+		index_name text not null,
+		term blob not null check (length(term) = 3),
+		document_count integer not null,
+		primary key (index_name, term)
+	)`))
+	must(t, db.Exec(`create table _zova_ext_trgm_postings (
+		index_name text not null,
+		term blob not null check (length(term) = 3),
+		document_id text not null,
+		count integer not null,
+		primary key (index_name, term, document_id)
+	)`))
+}
+
 func TestResetClearBindingsTransactionsVacuumAndMultipleHandles(t *testing.T) {
 	path := tempZovaPath(t, "lifecycle")
 	db, err := Create(path)

@@ -14,7 +14,8 @@ Current package version: `0.20.0`.
 
 Zova is pre-1.0. The current development `.zova` file `format_version` is `5`.
 Zova `0.20.0` is the graph-aware relationships release; the current source
-tree is building the v0.21 extension host foundation.
+tree is building the v0.21 extension host foundation and bundled `trgm`
+extension.
 
 ## Contents
 
@@ -613,7 +614,7 @@ Queue details:
 ## Extensions
 
 The current development branch includes the first v0.21 extension host
-foundation.
+foundation plus the first bundled extension, `trgm`.
 
 An extension is trusted process code plus private Zova metadata:
 
@@ -640,9 +641,46 @@ zova extension drop app.zova <name>
 zova extension install app.zova <name>
 ```
 
-In this host-only slice, `install` succeeds only for extensions registered in
-the current process. The first official extension, `zova_trgm`, and dynamic
-trusted local loading are deferred.
+`install` succeeds only for extensions registered in the current process or
+bundled with Zova. The default Zova process registry includes `trgm`, so this
+works in the normal CLI build:
+
+```sh
+zova extension install app.zova trgm
+```
+
+After installation, Zova registers the `zova_trgm_*` SQL surface on each open
+connection. `trgm` is for fuzzy target lookup: typo-tolerant matching over app
+document IDs that point back to records, objects, chunks, vectors, graph nodes,
+entities, facts, concepts, or external refs.
+
+```sql
+select zova_trgm_create_index('messages');
+select zova_trgm_put(
+  'messages',
+  'message:123',
+  'record',
+  'messages',
+  '123',
+  'attachment upload failed'
+);
+
+select document_id, score
+from zova_trgm_search
+where index_name = 'messages'
+  and query = 'attachement failed'
+  and threshold = 0.20
+  and "limit" = 10
+order by rank;
+```
+
+`trgm` is not SQLite FTS and not vector search. FTS is best for tokenized
+full-text search such as matching words and phrases. Vectors are best for
+semantic similarity. Trigram lookup is useful when the query or target has
+small spelling differences, filename variations, IDs, short labels, or
+operator-entered text where typo tolerance matters.
+
+Dynamic trusted local loading is still deferred.
 
 For the host contract, authoring shape, storage rules, diagnostics behavior,
 and current non-goals, see [docs/extensions.md](docs/extensions.md).
@@ -873,7 +911,6 @@ synchronous settings automatically.
 
 Zova `0.20.0` does not include:
 
-- `zova_trgm` or another official functional extension yet
 - dynamic trusted local extension loading
 - C ABI, Rust, Go, or Python extension lifecycle APIs
 - ANN indexes such as HNSW or IVFFlat

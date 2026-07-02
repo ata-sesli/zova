@@ -60,6 +60,78 @@ fn create_open_exec_and_prepare_records() {
 }
 
 #[test]
+fn bundled_trgm_extension_sql_surface_works_after_reopen() {
+    let path = temp_path("trgm");
+    {
+        let mut db = Database::create(&path).unwrap();
+        install_trgm_fixture(&mut db);
+    }
+
+    {
+        let mut db = Database::open(&path).unwrap();
+        let mut create = db
+            .prepare("select zova_trgm_create_index('messages')")
+            .unwrap();
+        assert_eq!(create.step().unwrap(), Step::Row);
+        drop(create);
+
+        let mut put = db
+            .prepare("select zova_trgm_put('messages', ?1, 'record', 'messages', ?2, ?3)")
+            .unwrap();
+        put.bind_text(1, "message:123").unwrap();
+        put.bind_text(2, "123").unwrap();
+        put.bind_text(3, "attachment upload failed").unwrap();
+        assert_eq!(put.step().unwrap(), Step::Row);
+        drop(put);
+
+        let mut search = db
+            .prepare(
+                "select document_id, score from zova_trgm_search \
+                 where index_name = 'messages' and query = ?1 and \"limit\" = 1 \
+                 order by rank",
+            )
+            .unwrap();
+        search.bind_text(1, "attachement failed").unwrap();
+        assert_eq!(search.step().unwrap(), Step::Row);
+        assert_eq!(
+            search.column_text(0).unwrap(),
+            Some("message:123".to_string())
+        );
+        assert!(search.column_f64(1).unwrap() > 0.20);
+        assert_eq!(search.step().unwrap(), Step::Done);
+    }
+    let _ = std::fs::remove_file(path);
+}
+
+fn install_trgm_fixture(db: &mut Database) {
+    db.exec(
+        "insert into _zova_extensions \
+         (name, version, storage_prefix, zova_abi_min, capabilities, required, installed_at_unix, manifest_json) \
+         values ('trgm', '0.1.0', '_zova_ext_trgm_', '0.21.0', 'sql,trgm', 1, 0, \
+         '{\"extension\":\"trgm\",\"version\":\"0.1.0\"}')",
+    )
+    .unwrap();
+    db.exec("create table _zova_ext_trgm_meta (key text primary key, value text not null)")
+        .unwrap();
+    db.exec("insert into _zova_ext_trgm_meta (key, value) values ('schema_version', '1'), ('extension_version', '0.1.0')")
+        .unwrap();
+    db.exec("create table _zova_ext_trgm_indexes (name text primary key, created_order integer not null unique)")
+        .unwrap();
+    db.exec(
+        "create table _zova_ext_trgm_documents (\
+         index_name text not null, document_id text not null, target_type text not null, \
+         target_namespace text, target_ref text, normalized_len integer not null, \
+         text_hash blob not null check (length(text_hash) = 32), term_count integer not null, \
+         updated_at_unix integer not null, primary key (index_name, document_id))",
+    )
+    .unwrap();
+    db.exec("create table _zova_ext_trgm_terms (index_name text not null, term blob not null check (length(term) = 3), document_count integer not null, primary key (index_name, term))")
+        .unwrap();
+    db.exec("create table _zova_ext_trgm_postings (index_name text not null, term blob not null check (length(term) = 3), document_id text not null, count integer not null, primary key (index_name, term, document_id))")
+        .unwrap();
+}
+
+#[test]
 fn owned_statement_can_outlive_database_wrapper_and_preserve_statement_api() {
     let path = temp_path("owned-statement");
     let mut db = Database::create(&path).unwrap();

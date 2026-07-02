@@ -41,6 +41,70 @@ Deferred for later v0.21 work:
 - optional installed extensions
 - C ABI, Rust, Go, or Python lifecycle APIs
 
+## Bundled `trgm`
+
+The first bundled extension is `trgm`.
+
+Install it with the normal CLI build:
+
+```sh
+zova extension install app.zova trgm
+```
+
+After install, default Zova opens know about the bundled code and register the
+SQL surface:
+
+```sql
+zova_trgm_similarity(a text, b text)
+zova_trgm_create_index(index_name text)
+zova_trgm_drop_index(index_name text)
+zova_trgm_put(index_name, document_id, target_type, target_namespace, target_ref, text)
+zova_trgm_delete(index_name, document_id)
+zova_trgm_search
+```
+
+`trgm` stores no raw indexed text. It stores a normalized length, a SHA-256 text
+hash, unique trigram counts, and postings. Search ranks with Jaccard similarity
+over byte trigrams and orders ties by `document_id`.
+
+`target_namespace` and `target_ref` may be null for app-owned targets such as
+`record`, `entity`, `fact`, `concept`, and `external`. Zova-owned targets
+(`object`, `object_chunk`, `vector`, and `graph`) require enough reference data
+for Zova to validate the target.
+
+Use `trgm` for fuzzy target lookup:
+
+```sql
+select zova_trgm_create_index('messages');
+select zova_trgm_put(
+  'messages',
+  'message:123',
+  'record',
+  'messages',
+  '123',
+  'attachment upload failed'
+);
+
+select document_id, target_type, target_namespace, target_ref, score
+from zova_trgm_search
+where index_name = 'messages'
+  and query = 'attachement failed'
+  and threshold = 0.20
+  and "limit" = 10
+order by rank;
+```
+
+This is different from SQLite FTS. FTS is for tokenized full-text search:
+documents, terms, phrase matching, and ranking by textual relevance. `trgm` is
+for typo-tolerant matching of short labels, filenames, identifiers, titles, or
+target records. It also differs from vectors: vectors are for semantic
+similarity, while trigram similarity is lexical and deterministic.
+
+Accepted target types are `record`, `object`, `object_chunk`, `vector`, `graph`,
+`entity`, `fact`, `concept`, and `external`. Zova validates object IDs, object
+chunk IDs, vectors, and graph nodes when possible. It does not validate
+arbitrary application SQL row existence.
+
 ## Manifest
 
 The foundation manifest contains:

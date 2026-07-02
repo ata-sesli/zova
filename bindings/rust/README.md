@@ -322,12 +322,31 @@ copies valid graph topology and skips invalid graph nodes or edges. The Rust
 crates do not expose typed doctor/salvage report APIs yet, and library code
 should not parse the human text output as a stable binding contract.
 
-The current development branch adds a native Zig extension host foundation.
-Rust extension lifecycle and registry APIs are not exposed yet; ordinary Rust
-opens continue to require installed extension code to be available through the
-process that owns the native Zova connection.
+The current development branch adds a native Zig extension host foundation and
+the bundled `trgm` extension. Rust extension lifecycle and registry APIs are
+not exposed yet; ordinary Rust opens can use bundled extension SQL surfaces
+through prepared statements after the extension has been installed.
 See [../../docs/extensions.md](../../docs/extensions.md) for the current host
 contract and trust model.
+
+```rust
+let mut db = Database::open("app.zova")?;
+
+let mut put = db.prepare(
+    "select zova_trgm_put('messages', ?1, 'record', 'messages', ?2, ?3)"
+)?;
+put.bind_text(1, "message:123")?;
+put.bind_text(2, "123")?;
+put.bind_text(3, "attachment upload failed")?;
+assert_eq!(put.step()?, Step::Row);
+
+let mut search = db.prepare(
+    "select document_id, score from zova_trgm_search \
+     where index_name = 'messages' and query = ?1 and \"limit\" = 10 \
+     order by rank"
+)?;
+search.bind_text(1, "attachement failed")?;
+```
 
 Objects can live beside ordinary SQL metadata:
 
