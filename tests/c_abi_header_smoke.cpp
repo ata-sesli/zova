@@ -17,6 +17,8 @@ static_assert(ZOVA_GRAPH_TARGET_NONE == 0, "graph target values are stable");
 static_assert(ZOVA_GRAPH_TARGET_EXTERNAL == 8, "graph target values are stable");
 static_assert(ZOVA_GRAPH_NEIGHBOR_OUTGOING == 0, "graph direction values are stable");
 static_assert(ZOVA_GRAPH_INVALID == 84, "graph status values are stable");
+static_assert(ZOVA_EXTENSION_NOT_FOUND == 90, "extension status values are stable");
+static_assert(ZOVA_EXTENSION_UNAVAILABLE == 94, "extension status values are stable");
 static_assert(ZOVA_BACKUP_NO_VERIFY == 1u, "backup flags are stable");
 static_assert(ZOVA_COMPACT_NO_VERIFY == 1u, "compact flags are stable");
 static_assert(ZOVA_RESTORE_NO_VERIFY == 1u, "restore flags are stable");
@@ -40,6 +42,8 @@ int main() {
     zova_graph_edge graph_edge = {};
     zova_graph_neighbor_results graph_neighbors = {};
     zova_graph_walk_results graph_walk = {};
+    zova_extension_info extension_info = {};
+    zova_extension_list extension_list = {};
     zova_vector_collection_options options = {
         3,
         ZOVA_VECTOR_METRIC_COSINE,
@@ -172,6 +176,16 @@ int main() {
     zova_graph_walk_request graph_walk_request = {};
     graph_walk_request.max_depth = 2;
     graph_walk_request.out_results = &graph_walk;
+    zova_database_extension_request extension_request = {};
+    extension_request.db = db;
+    extension_request.name = "trgm";
+    zova_database_extension_info_request extension_info_request = {};
+    extension_info_request.db = db;
+    extension_info_request.name = "trgm";
+    extension_info_request.out_info = &extension_info;
+    zova_database_extension_list_request extension_list_request = {};
+    extension_list_request.db = db;
+    extension_list_request.out_list = &extension_list;
 
     zova_buffer_free(&buffer);
     zova_text_free(&text);
@@ -187,6 +201,8 @@ int main() {
     zova_graph_edge_free(&graph_edge);
     zova_graph_neighbor_results_free(&graph_neighbors);
     zova_graph_walk_results_free(&graph_walk);
+    zova_extension_info_free(&extension_info);
+    zova_extension_list_free(&extension_list);
 
     return zova_database_close(db) == ZOVA_INVALID_ARGUMENT &&
                    options.metric == ZOVA_VECTOR_METRIC_COSINE &&
@@ -217,6 +233,10 @@ int main() {
                    graph_neighbors_request.out_results == &graph_neighbors &&
                    graph_walk_request.max_depth == 2 &&
                    graph_walk_request.out_results == &graph_walk &&
+                   extension_request.name != nullptr &&
+                   extension_info_request.out_info == &extension_info &&
+                   extension_list_request.out_list == &extension_list &&
+                   zova_status_name(ZOVA_EXTENSION_UNAVAILABLE) != nullptr &&
                    zova_status_name(ZOVA_GRAPH_INVALID) != nullptr &&
                    zova_status_name(ZOVA_VECTOR_INVALID) != nullptr &&
                    zova_status_name(ZOVA_OK) != nullptr &&

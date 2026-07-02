@@ -243,6 +243,32 @@ pub struct zova_graph_list {
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
+pub struct zova_extension_info {
+    pub name: *mut c_char,
+    pub name_len: usize,
+    pub version: *mut c_char,
+    pub version_len: usize,
+    pub storage_prefix: *mut c_char,
+    pub storage_prefix_len: usize,
+    pub zova_abi_min: *mut c_char,
+    pub zova_abi_min_len: usize,
+    pub capabilities: *mut c_char,
+    pub capabilities_len: usize,
+    pub required: u8,
+    pub installed_at_unix: i64,
+    pub manifest_json: *mut c_char,
+    pub manifest_json_len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_extension_list {
+    pub items: *mut zova_extension_info,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
 pub struct zova_graph_node {
     pub graph_name: *mut c_char,
     pub graph_name_len: usize,
@@ -833,6 +859,25 @@ pub struct zova_graph_list_request {
 }
 
 #[repr(C)]
+pub struct zova_database_extension_request {
+    pub db: *mut zova_database,
+    pub name: *const c_char,
+}
+
+#[repr(C)]
+pub struct zova_database_extension_info_request {
+    pub db: *mut zova_database,
+    pub name: *const c_char,
+    pub out_info: *mut zova_extension_info,
+}
+
+#[repr(C)]
+pub struct zova_database_extension_list_request {
+    pub db: *mut zova_database,
+    pub out_list: *mut zova_extension_list,
+}
+
+#[repr(C)]
 pub struct zova_graph_delete_request {
     pub db: *mut zova_database,
     pub name: *const c_char,
@@ -1127,6 +1172,8 @@ extern "C" {
 
     pub fn zova_graph_info_free(info: *mut zova_graph_info);
     pub fn zova_graph_list_free(list: *mut zova_graph_list);
+    pub fn zova_extension_info_free(info: *mut zova_extension_info);
+    pub fn zova_extension_list_free(list: *mut zova_extension_list);
     pub fn zova_graph_node_free(node: *mut zova_graph_node);
     pub fn zova_graph_edge_free(edge: *mut zova_graph_edge);
     pub fn zova_graph_neighbor_results_free(results: *mut zova_graph_neighbor_results);
@@ -1135,6 +1182,24 @@ extern "C" {
     pub fn zova_graph_exists(request: *const zova_graph_exists_request) -> zova_status;
     pub fn zova_graph_info_get(request: *const zova_graph_info_get_request) -> zova_status;
     pub fn zova_graphs_list(request: *const zova_graph_list_request) -> zova_status;
+    pub fn zova_database_extension_install(
+        request: *const zova_database_extension_request,
+    ) -> zova_status;
+    pub fn zova_database_extension_list(
+        request: *const zova_database_extension_list_request,
+    ) -> zova_status;
+    pub fn zova_database_extension_info(
+        request: *const zova_database_extension_info_request,
+    ) -> zova_status;
+    pub fn zova_database_extension_check(
+        request: *const zova_database_extension_request,
+    ) -> zova_status;
+    pub fn zova_database_extension_check_all(
+        request: *const zova_database_simple_request,
+    ) -> zova_status;
+    pub fn zova_database_extension_drop(
+        request: *const zova_database_extension_request,
+    ) -> zova_status;
     pub fn zova_graph_delete(request: *const zova_graph_delete_request) -> zova_status;
     pub fn zova_graph_node_put(request: *const zova_graph_node_put_request) -> zova_status;
     pub fn zova_graph_node_get(request: *const zova_graph_node_get_request) -> zova_status;

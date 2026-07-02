@@ -1,4 +1,5 @@
 use crate::error::{closed_error, zova_error};
+use crate::extension::{py_extension_info, py_extension_infos, PyExtensionInfo};
 use crate::graph::{
     edge_input_from_py, neighbors_options_from_py, node_input_from_py, py_graph_edge,
     py_graph_info, py_graph_neighbors, py_graph_node, py_graph_walk, walk_options_from_py,
@@ -115,6 +116,34 @@ impl PyDatabase {
         Ok(PySubscription {
             inner: Some(self.db_mut()?.listen(channel).map_err(zova_error)?),
         })
+    }
+
+    pub(crate) fn install_extension(&mut self, name: &str) -> PyResult<()> {
+        self.db_mut()?.install_extension(name).map_err(zova_error)
+    }
+
+    pub(crate) fn list_extensions(&mut self) -> PyResult<Vec<PyExtensionInfo>> {
+        Ok(py_extension_infos(
+            self.db_mut()?.list_extensions().map_err(zova_error)?,
+        ))
+    }
+
+    pub(crate) fn extension_info(&mut self, name: &str) -> PyResult<PyExtensionInfo> {
+        Ok(py_extension_info(
+            self.db_mut()?.extension_info(name).map_err(zova_error)?,
+        ))
+    }
+
+    pub(crate) fn check_extension(&mut self, name: &str) -> PyResult<()> {
+        self.db_mut()?.check_extension(name).map_err(zova_error)
+    }
+
+    pub(crate) fn check_extensions(&mut self) -> PyResult<()> {
+        self.db_mut()?.check_extensions().map_err(zova_error)
+    }
+
+    pub(crate) fn drop_extension(&mut self, name: &str) -> PyResult<()> {
+        self.db_mut()?.drop_extension(name).map_err(zova_error)
     }
 
     pub(crate) fn vacuum(&mut self) -> PyResult<()> {

@@ -82,6 +82,49 @@ def test_bundled_trgm_extension_sql_surface_works_after_reopen(tmp_path):
             assert stmt.column_float(1) > 0.20
 
 
+def test_extension_lifecycle_methods_manage_bundled_trgm(tmp_path):
+    path = tmp_path / "extensions.zova"
+
+    with zova.Database.create(str(path)) as db:
+        assert db.list_extensions() == []
+
+        with pytest.raises(zova.ZovaError) as exc:
+            db.install_extension("missing_ext")
+        assert exc.value.status_name == "ZOVA_EXTENSION_NOT_FOUND"
+
+        db.install_extension("trgm")
+        with pytest.raises(zova.ZovaError) as exc:
+            db.install_extension("trgm")
+        assert exc.value.status_name == "ZOVA_EXTENSION_EXISTS"
+
+        info = db.extension_info("trgm")
+        assert isinstance(info, zova.ExtensionInfo)
+        assert info.name == "trgm"
+        assert info.storage_prefix == "_zova_ext_trgm_"
+        assert info.capabilities == "sql,trgm"
+        assert info.required is True
+        assert info.installed_at_unix > 0
+        assert "trgm" in info.manifest_json
+        with pytest.raises(AttributeError):
+            info.name = "changed"
+
+        extensions = db.list_extensions()
+        assert [extension.name for extension in extensions] == ["trgm"]
+        db.check_extension("trgm")
+        db.check_extensions()
+
+        with db.prepare("select zova_trgm_create_index('messages')") as stmt:
+            assert stmt.step() == zova.Step.ROW
+
+        db.drop_extension("trgm")
+        with pytest.raises(zova.ZovaError) as exc:
+            db.extension_info("trgm")
+        assert exc.value.status_name == "ZOVA_EXTENSION_NOT_FOUND"
+
+        with pytest.raises(TypeError):
+            db.install_extension(123)
+
+
 def _install_trgm_fixture(db):
     db.exec(
         """

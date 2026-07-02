@@ -3,6 +3,10 @@ use crate::database::{
     BackupOptions, CompactOptions,
 };
 use crate::error::{Error, Result, Status};
+use crate::extension::{
+    check_extension_raw, check_extensions_raw, drop_extension_raw, extension_info_raw,
+    install_extension_raw, list_extensions_raw, ExtensionInfo,
+};
 use crate::graph::{
     create_graph_raw, delete_graph_edge_raw, delete_graph_node_raw, delete_graph_raw,
     get_graph_edge_raw, get_graph_node_raw, graph_info_raw, graph_neighbors_raw, graph_walk_raw,
@@ -1043,6 +1047,56 @@ impl SharedDatabase {
         )
     }
 
+    pub fn install_extension(&self, name: &str) -> Result<()> {
+        let _guard = self.inner.lock();
+        install_extension_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            name,
+        )
+    }
+
+    pub fn list_extensions(&self) -> Result<Vec<ExtensionInfo>> {
+        let _guard = self.inner.lock();
+        list_extensions_raw(self.inner.raw_ptr(), |status| {
+            self.inner.status_locked(status)
+        })
+    }
+
+    pub fn extension_info(&self, name: &str) -> Result<ExtensionInfo> {
+        let _guard = self.inner.lock();
+        extension_info_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            name,
+        )
+    }
+
+    pub fn check_extension(&self, name: &str) -> Result<()> {
+        let _guard = self.inner.lock();
+        check_extension_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            name,
+        )
+    }
+
+    pub fn check_extensions(&self) -> Result<()> {
+        let _guard = self.inner.lock();
+        check_extensions_raw(self.inner.raw_ptr(), |status| {
+            self.inner.status_locked(status)
+        })
+    }
+
+    pub fn drop_extension(&self, name: &str) -> Result<()> {
+        let _guard = self.inner.lock();
+        drop_extension_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            name,
+        )
+    }
+
     fn open_or_create(path: impl AsRef<Path>, create: bool) -> Result<Self> {
         let path = path_to_cstring(path.as_ref())?;
         let mut db = ptr::null_mut();
@@ -1348,6 +1402,50 @@ impl SharedDatabaseGuard<'_> {
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
             options,
+        )
+    }
+
+    pub fn install_extension(&mut self, name: &str) -> Result<()> {
+        install_extension_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            name,
+        )
+    }
+
+    pub fn list_extensions(&mut self) -> Result<Vec<ExtensionInfo>> {
+        list_extensions_raw(self.inner.raw_ptr(), |status| {
+            self.inner.status_locked(status)
+        })
+    }
+
+    pub fn extension_info(&mut self, name: &str) -> Result<ExtensionInfo> {
+        extension_info_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            name,
+        )
+    }
+
+    pub fn check_extension(&mut self, name: &str) -> Result<()> {
+        check_extension_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            name,
+        )
+    }
+
+    pub fn check_extensions(&mut self) -> Result<()> {
+        check_extensions_raw(self.inner.raw_ptr(), |status| {
+            self.inner.status_locked(status)
+        })
+    }
+
+    pub fn drop_extension(&mut self, name: &str) -> Result<()> {
+        drop_extension_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            name,
         )
     }
 

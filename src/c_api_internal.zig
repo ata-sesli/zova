@@ -297,6 +297,28 @@ pub const zova_graph_list = extern struct {
     len: usize,
 };
 
+pub const zova_extension_info = extern struct {
+    name: ?[*]u8,
+    name_len: usize,
+    version: ?[*]u8,
+    version_len: usize,
+    storage_prefix: ?[*]u8,
+    storage_prefix_len: usize,
+    zova_abi_min: ?[*]u8,
+    zova_abi_min_len: usize,
+    capabilities: ?[*]u8,
+    capabilities_len: usize,
+    required: u8,
+    installed_at_unix: i64,
+    manifest_json: ?[*]u8,
+    manifest_json_len: usize,
+};
+
+pub const zova_extension_list = extern struct {
+    items: ?[*]zova_extension_info,
+    len: usize,
+};
+
 pub const zova_graph_node = extern struct {
     graph_name: ?[*]u8,
     graph_name_len: usize,
@@ -811,6 +833,22 @@ pub const zova_graph_list_request = extern struct {
     out_list: ?*zova_graph_list,
 };
 
+pub const zova_database_extension_request = extern struct {
+    db: ?*zova_database,
+    name: ?[*:0]const u8,
+};
+
+pub const zova_database_extension_info_request = extern struct {
+    db: ?*zova_database,
+    name: ?[*:0]const u8,
+    out_info: ?*zova_extension_info,
+};
+
+pub const zova_database_extension_list_request = extern struct {
+    db: ?*zova_database,
+    out_list: ?*zova_extension_list,
+};
+
 pub const zova_graph_delete_request = extern struct {
     db: ?*zova_database,
     name: ?[*:0]const u8,
@@ -1020,6 +1058,21 @@ pub fn zova_graph_list_free(list: ?*zova_graph_list) callconv(.c) void {
         allocator.free(items[0..out.len]);
     }
     out.* = emptyGraphList();
+}
+
+pub fn zova_extension_info_free(info: ?*zova_extension_info) callconv(.c) void {
+    const out = info orelse return;
+    freeExtensionInfo(out);
+    out.* = emptyExtensionInfo();
+}
+
+pub fn zova_extension_list_free(list: ?*zova_extension_list) callconv(.c) void {
+    const out = list orelse return;
+    if (out.items) |items| {
+        for (items[0..out.len]) |*item| freeExtensionInfo(item);
+        allocator.free(items[0..out.len]);
+    }
+    out.* = emptyExtensionList();
 }
 
 pub fn zova_graph_node_free(node: ?*zova_graph_node) callconv(.c) void {
@@ -2165,6 +2218,76 @@ pub fn zova_graphs_list(request: ?*const zova_graph_list_request) callconv(.c) z
     return okDb(handle);
 }
 
+pub fn zova_database_extension_install(request: ?*const zova_database_extension_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const name = req.name orelse return failDb(handle, error.InvalidArgument);
+    handle.db.installExtension(std.mem.span(name)) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_database_extension_list(request: ?*const zova_database_extension_list_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const out = req.out_list orelse return failDb(handle, error.InvalidArgument);
+    out.* = emptyExtensionList();
+    var list = handle.db.listExtensions(allocator) catch |err| return failDb(handle, err);
+    defer list.deinit(allocator);
+    fillExtensionList(out, list.items) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_database_extension_info(request: ?*const zova_database_extension_info_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const name = req.name orelse return failDb(handle, error.InvalidArgument);
+    const out = req.out_info orelse return failDb(handle, error.InvalidArgument);
+    out.* = emptyExtensionInfo();
+    var info = handle.db.extensionInfo(allocator, std.mem.span(name)) catch |err| return failDb(handle, err);
+    defer info.deinit(allocator);
+    fillExtensionInfo(out, info) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_database_extension_check(request: ?*const zova_database_extension_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const name = req.name orelse return failDb(handle, error.InvalidArgument);
+    handle.db.checkExtension(std.mem.span(name)) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_database_extension_check_all(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    var list = handle.db.listExtensions(allocator) catch |err| return failDb(handle, err);
+    defer list.deinit(allocator);
+    for (list.items) |item| {
+        handle.db.checkExtension(item.name) catch |err| return failDb(handle, err);
+    }
+    return okDb(handle);
+}
+
+pub fn zova_database_extension_drop(request: ?*const zova_database_extension_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const name = req.name orelse return failDb(handle, error.InvalidArgument);
+    handle.db.dropExtension(std.mem.span(name)) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
 pub fn zova_graph_delete(request: ?*const zova_graph_delete_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
@@ -2607,6 +2730,29 @@ fn emptyGraphList() zova_graph_list {
     return .{ .items = null, .len = 0 };
 }
 
+fn emptyExtensionInfo() zova_extension_info {
+    return .{
+        .name = null,
+        .name_len = 0,
+        .version = null,
+        .version_len = 0,
+        .storage_prefix = null,
+        .storage_prefix_len = 0,
+        .zova_abi_min = null,
+        .zova_abi_min_len = 0,
+        .capabilities = null,
+        .capabilities_len = 0,
+        .required = 0,
+        .installed_at_unix = 0,
+        .manifest_json = null,
+        .manifest_json_len = 0,
+    };
+}
+
+fn emptyExtensionList() zova_extension_list {
+    return .{ .items = null, .len = 0 };
+}
+
 fn emptyGraphNode() zova_graph_node {
     return .{
         .graph_name = null,
@@ -2662,6 +2808,15 @@ fn freeVectorCollectionInfo(info: *zova_vector_collection_info) void {
 
 fn freeGraphInfo(info: *zova_graph_info) void {
     if (info.name) |name| allocator.free(name[0 .. info.name_len + 1]);
+}
+
+fn freeExtensionInfo(info: *zova_extension_info) void {
+    if (info.name) |value| allocator.free(value[0 .. info.name_len + 1]);
+    if (info.version) |value| allocator.free(value[0 .. info.version_len + 1]);
+    if (info.storage_prefix) |value| allocator.free(value[0 .. info.storage_prefix_len + 1]);
+    if (info.zova_abi_min) |value| allocator.free(value[0 .. info.zova_abi_min_len + 1]);
+    if (info.capabilities) |value| allocator.free(value[0 .. info.capabilities_len + 1]);
+    if (info.manifest_json) |value| allocator.free(value[0 .. info.manifest_json_len + 1]);
 }
 
 fn freeGraphNode(node: *zova_graph_node) void {
@@ -2740,6 +2895,54 @@ fn fillGraphList(out: *zova_graph_list, items: []const zova.GraphInfo) error{Out
 
     for (abi_items) |*item| item.* = emptyGraphInfo();
     for (items, abi_items) |item, *abi_item| try fillGraphInfo(abi_item, item);
+    out.* = .{ .items = abi_items.ptr, .len = abi_items.len };
+}
+
+fn fillExtensionInfo(out: *zova_extension_info, info: zova.ExtensionInfo) error{OutOfMemory}!void {
+    out.* = emptyExtensionInfo();
+    const name = try allocator.dupeZ(u8, info.name);
+    errdefer allocator.free(name);
+    const version = try allocator.dupeZ(u8, info.version);
+    errdefer allocator.free(version);
+    const storage_prefix = try allocator.dupeZ(u8, info.storage_prefix);
+    errdefer allocator.free(storage_prefix);
+    const zova_abi_min = try allocator.dupeZ(u8, info.zova_abi_min);
+    errdefer allocator.free(zova_abi_min);
+    const capabilities = try allocator.dupeZ(u8, info.capabilities);
+    errdefer allocator.free(capabilities);
+    const manifest_json = try allocator.dupeZ(u8, info.manifest_json);
+    errdefer allocator.free(manifest_json);
+
+    out.* = .{
+        .name = name.ptr,
+        .name_len = name.len,
+        .version = version.ptr,
+        .version_len = version.len,
+        .storage_prefix = storage_prefix.ptr,
+        .storage_prefix_len = storage_prefix.len,
+        .zova_abi_min = zova_abi_min.ptr,
+        .zova_abi_min_len = zova_abi_min.len,
+        .capabilities = capabilities.ptr,
+        .capabilities_len = capabilities.len,
+        .required = if (info.required) 1 else 0,
+        .installed_at_unix = info.installed_at_unix,
+        .manifest_json = manifest_json.ptr,
+        .manifest_json_len = manifest_json.len,
+    };
+}
+
+fn fillExtensionList(out: *zova_extension_list, items: []const zova.ExtensionInfo) error{OutOfMemory}!void {
+    out.* = emptyExtensionList();
+    if (items.len == 0) return;
+
+    const abi_items = try allocator.alloc(zova_extension_info, items.len);
+    errdefer {
+        for (abi_items[0..items.len]) |*item| freeExtensionInfo(item);
+        allocator.free(abi_items);
+    }
+
+    for (abi_items) |*item| item.* = emptyExtensionInfo();
+    for (items, abi_items) |item, *abi_item| try fillExtensionInfo(abi_item, item);
     out.* = .{ .items = abi_items.ptr, .len = abi_items.len };
 }
 
@@ -5000,4 +5203,90 @@ test "c abi can query bundled trgm SQL surface through prepared statements" {
     defer zova_text_free(&document_id);
     try std.testing.expectEqual(zova_status.OK, zova_statement_column_text(&.{ .statement = search_stmt, .index = 0, .out_text = &document_id }));
     try std.testing.expectEqualStrings("doc:1", document_id.data.?[0..document_id.len]);
+}
+
+test "c abi manages bundled extension lifecycle" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-extension-lifecycle.zova", .{tmp.sub_path[0..]});
+
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_extension_install(null));
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(db);
+
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_extension_list(&.{
+        .db = db,
+        .out_list = null,
+    }));
+    try std.testing.expectEqual(zova_status.EXTENSION_NOT_FOUND, zova_database_extension_install(&.{
+        .db = db,
+        .name = "missing_ext",
+    }));
+    try std.testing.expectEqual(zova_status.EXTENSION_INVALID, zova_database_extension_install(&.{
+        .db = db,
+        .name = "bad name",
+    }));
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_extension_install(&.{
+        .db = db,
+        .name = "trgm",
+    }));
+    try std.testing.expectEqual(zova_status.EXTENSION_EXISTS, zova_database_extension_install(&.{
+        .db = db,
+        .name = "trgm",
+    }));
+
+    var info = emptyExtensionInfo();
+    defer zova_extension_info_free(&info);
+    try std.testing.expectEqual(zova_status.OK, zova_database_extension_info(&.{
+        .db = db,
+        .name = "trgm",
+        .out_info = &info,
+    }));
+    try std.testing.expectEqualStrings("trgm", info.name.?[0..info.name_len]);
+    try std.testing.expectEqualStrings("0.1.0", info.version.?[0..info.version_len]);
+    try std.testing.expectEqualStrings("_zova_ext_trgm_", info.storage_prefix.?[0..info.storage_prefix_len]);
+    try std.testing.expectEqualStrings("0.21.0", info.zova_abi_min.?[0..info.zova_abi_min_len]);
+    try std.testing.expectEqualStrings("sql,trgm", info.capabilities.?[0..info.capabilities_len]);
+    try std.testing.expectEqual(@as(u8, 1), info.required);
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_extension_check(&.{
+        .db = db,
+        .name = "trgm",
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_extension_check_all(&.{ .db = db }));
+
+    var list = emptyExtensionList();
+    defer zova_extension_list_free(&list);
+    try std.testing.expectEqual(zova_status.OK, zova_database_extension_list(&.{
+        .db = db,
+        .out_list = &list,
+    }));
+    try std.testing.expectEqual(@as(usize, 1), list.len);
+    try std.testing.expectEqualStrings("trgm", list.items.?[0].name.?[0..list.items.?[0].name_len]);
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_extension_drop(&.{
+        .db = db,
+        .name = "trgm",
+    }));
+    try std.testing.expectEqual(zova_status.EXTENSION_NOT_FOUND, zova_database_extension_info(&.{
+        .db = db,
+        .name = "trgm",
+        .out_info = &info,
+    }));
+    try std.testing.expectEqual(zova_status.EXTENSION_NOT_FOUND, zova_database_extension_check(&.{
+        .db = db,
+        .name = "trgm",
+    }));
+
+    zova_extension_info_free(null);
+    zova_extension_list_free(null);
 }

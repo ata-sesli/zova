@@ -30,6 +30,8 @@ pub const zova_graph_target_type = internal.zova_graph_target_type;
 pub const zova_graph_neighbor_direction = internal.zova_graph_neighbor_direction;
 pub const zova_graph_info = internal.zova_graph_info;
 pub const zova_graph_list = internal.zova_graph_list;
+pub const zova_extension_info = internal.zova_extension_info;
+pub const zova_extension_list = internal.zova_extension_list;
 pub const zova_graph_node = internal.zova_graph_node;
 pub const zova_graph_edge = internal.zova_graph_edge;
 pub const zova_graph_neighbor_result = internal.zova_graph_neighbor_result;
@@ -110,6 +112,9 @@ pub const zova_graph_create_request = internal.zova_graph_create_request;
 pub const zova_graph_exists_request = internal.zova_graph_exists_request;
 pub const zova_graph_info_get_request = internal.zova_graph_info_get_request;
 pub const zova_graph_list_request = internal.zova_graph_list_request;
+pub const zova_database_extension_request = internal.zova_database_extension_request;
+pub const zova_database_extension_info_request = internal.zova_database_extension_info_request;
+pub const zova_database_extension_list_request = internal.zova_database_extension_list_request;
 pub const zova_graph_delete_request = internal.zova_graph_delete_request;
 pub const zova_graph_node_put_request = internal.zova_graph_node_put_request;
 pub const zova_graph_node_get_request = internal.zova_graph_node_get_request;
@@ -184,6 +189,14 @@ export fn zova_graph_info_free(info: ?*zova_graph_info) callconv(.c) void {
 
 export fn zova_graph_list_free(list: ?*zova_graph_list) callconv(.c) void {
     return internal.zova_graph_list_free(list);
+}
+
+export fn zova_extension_info_free(info: ?*zova_extension_info) callconv(.c) void {
+    return internal.zova_extension_info_free(info);
+}
+
+export fn zova_extension_list_free(list: ?*zova_extension_list) callconv(.c) void {
+    return internal.zova_extension_list_free(list);
 }
 
 export fn zova_graph_node_free(node: ?*zova_graph_node) callconv(.c) void {
@@ -550,6 +563,30 @@ export fn zova_graph_info_get(request: ?*const zova_graph_info_get_request) call
 
 export fn zova_graphs_list(request: ?*const zova_graph_list_request) callconv(.c) zova_status {
     return internal.zova_graphs_list(request);
+}
+
+export fn zova_database_extension_install(request: ?*const zova_database_extension_request) callconv(.c) zova_status {
+    return internal.zova_database_extension_install(request);
+}
+
+export fn zova_database_extension_list(request: ?*const zova_database_extension_list_request) callconv(.c) zova_status {
+    return internal.zova_database_extension_list(request);
+}
+
+export fn zova_database_extension_info(request: ?*const zova_database_extension_info_request) callconv(.c) zova_status {
+    return internal.zova_database_extension_info(request);
+}
+
+export fn zova_database_extension_check(request: ?*const zova_database_extension_request) callconv(.c) zova_status {
+    return internal.zova_database_extension_check(request);
+}
+
+export fn zova_database_extension_check_all(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
+    return internal.zova_database_extension_check_all(request);
+}
+
+export fn zova_database_extension_drop(request: ?*const zova_database_extension_request) callconv(.c) zova_status {
+    return internal.zova_database_extension_drop(request);
 }
 
 export fn zova_graph_delete(request: ?*const zova_graph_delete_request) callconv(.c) zova_status {

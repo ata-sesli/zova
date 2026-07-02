@@ -282,6 +282,11 @@ if [ ! -f "$TMP/$PKG/bindings/rust/zova/examples/graph_rag.rs" ]; then
     exit 1
 fi
 
+if [ ! -f "$TMP/$PKG/bindings/rust/zova/examples/extensions.rs" ]; then
+    echo "release package is missing bindings/rust/zova/examples/extensions.rs" >&2
+    exit 1
+fi
+
 if [ ! -f "$TMP/$PKG/bindings/go/go.mod" ]; then
     echo "release package is missing bindings/go/go.mod" >&2
     exit 1
@@ -332,6 +337,11 @@ if [ ! -d "$TMP/$PKG/bindings/go/examples/graph_rag" ]; then
     exit 1
 fi
 
+if [ ! -d "$TMP/$PKG/bindings/go/examples/extensions" ]; then
+    echo "release package is missing bindings/go/examples/extensions" >&2
+    exit 1
+fi
+
 if [ ! -f "$TMP/$PKG/bindings/python/pyproject.toml" ]; then
     echo "release package is missing bindings/python/pyproject.toml" >&2
     exit 1
@@ -377,6 +387,11 @@ if [ ! -f "$TMP/$PKG/bindings/python/examples/graph_rag.py" ]; then
     exit 1
 fi
 
+if [ ! -f "$TMP/$PKG/bindings/python/examples/extensions.py" ]; then
+    echo "release package is missing bindings/python/examples/extensions.py" >&2
+    exit 1
+fi
+
 if [ -e "$TMP/$PKG/zig-out" ]; then
     echo "release package must not contain compiled CLI artifacts" >&2
     exit 1
@@ -384,6 +399,12 @@ fi
 
 if [ -e "$TMP/$PKG/bindings/rust/target" ]; then
     echo "release package must not contain compiled Rust artifacts" >&2
+    exit 1
+fi
+
+if find "$TMP/$PKG/bindings/go" \( -name '*.test' -o -name '*.out' -o -name '*.exe' -o -name 'coverage.txt' -o -name 'coverage.out' \) | grep -q .; then
+    echo "release package must not contain Go build/test artifacts" >&2
+    find "$TMP/$PKG/bindings/go" \( -name '*.test' -o -name '*.out' -o -name '*.exe' -o -name 'coverage.txt' -o -name 'coverage.out' \) >&2
     exit 1
 fi
 

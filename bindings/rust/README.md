@@ -8,8 +8,8 @@ It contains:
 - `zova`: safe Rust wrappers for database lifecycle, SQL prepared statements,
   transactions, explicit vacuum, objects, chunks, manifests, range reads,
   assembly, `ObjectWriter`, vector collections, vector CRUD, and exact vector
-  search, graphs, plus backup, compact copy, restore-to-new-file, and
-  same-process app events.
+  search, graphs, bundled extension lifecycle, plus backup, compact copy,
+  restore-to-new-file, and same-process app events.
 
 ## Contents
 
@@ -22,6 +22,7 @@ It contains:
 7. [App Events](#app-events)
 8. [Graphs](#graphs)
 9. [Operational Safety](#operational-safety)
+10. [Extensions](#extensions)
 
 ## How It Fits
 
@@ -322,18 +323,25 @@ copies valid graph topology and skips invalid graph nodes or edges. The Rust
 crates do not expose typed doctor/salvage report APIs yet, and library code
 should not parse the human text output as a stable binding contract.
 
-The current development branch adds a native Zig extension host foundation and
-the bundled `trgm` extension. Rust extension lifecycle and registry APIs are
-not exposed yet; ordinary Rust opens can use bundled extension SQL surfaces
-through prepared statements after the extension has been installed.
-Databases that require a dynamic local extension need a process that supplies
-that trusted extension code; Rust does not expose dynamic extension loading APIs
-yet. Use the CLI or native Zig host APIs for extension trust/install workflows.
+## Extensions
+
+Rust exposes lifecycle methods for extensions already present in the current
+process registry. The default registry includes bundled extensions such as
+`trgm`, so Rust applications can install, list, check, and drop `trgm` directly.
+App-registered extension authoring and dynamic `.zovaext` loading remain
+native Zig/CLI-only in v0.21.
+
 See [../../docs/extensions.md](../../docs/extensions.md) for the current host
-contract and trust model.
+contract and trust model. A fuller records/objects/vectors/graphs example lives
+in `zova/examples/extensions.rs`.
 
 ```rust
 let mut db = Database::open("app.zova")?;
+db.install_extension("trgm")?;
+
+let info = db.extension_info("trgm")?;
+assert_eq!(info.storage_prefix, "_zova_ext_trgm_");
+db.check_extensions()?;
 
 let mut put = db.prepare(
     "select zova_trgm_put('messages', ?1, 'record', 'messages', ?2, ?3)"

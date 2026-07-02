@@ -103,6 +103,76 @@ fn bundled_trgm_extension_sql_surface_works_after_reopen() {
     let _ = std::fs::remove_file(path);
 }
 
+#[test]
+fn extension_lifecycle_methods_manage_bundled_trgm() {
+    let path = temp_path("extensions");
+    {
+        let mut db = Database::create(&path).unwrap();
+        assert!(db.list_extensions().unwrap().is_empty());
+
+        let missing = db.install_extension("missing_ext").unwrap_err();
+        assert_eq!(missing.status(), Some(Status::ExtensionNotFound));
+
+        db.install_extension("trgm").unwrap();
+        let duplicate = db.install_extension("trgm").unwrap_err();
+        assert_eq!(duplicate.status(), Some(Status::ExtensionExists));
+
+        let info = db.extension_info("trgm").unwrap();
+        assert_eq!(info.name, "trgm");
+        assert_eq!(info.storage_prefix, "_zova_ext_trgm_");
+        assert_eq!(info.capabilities, "sql,trgm");
+        assert!(info.required);
+        assert!(info.installed_at_unix > 0);
+        assert!(info.manifest_json.contains("trgm"));
+
+        let list = db.list_extensions().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "trgm");
+        db.check_extension("trgm").unwrap();
+        db.check_extensions().unwrap();
+
+        let mut create = db
+            .prepare("select zova_trgm_create_index('messages')")
+            .unwrap();
+        assert_eq!(create.step().unwrap(), Step::Row);
+        drop(create);
+
+        db.drop_extension("trgm").unwrap();
+        let missing_info = db.extension_info("trgm").unwrap_err();
+        assert_eq!(missing_info.status(), Some(Status::ExtensionNotFound));
+    }
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn shared_extension_lifecycle_methods_lock_and_copy_diagnostics() {
+    let path = temp_path("shared-extensions");
+    let db = SharedDatabase::create(&path).unwrap();
+    db.install_extension("trgm").unwrap();
+    assert_eq!(db.list_extensions().unwrap()[0].name, "trgm");
+    db.check_extension("trgm").unwrap();
+    db.check_extensions().unwrap();
+
+    let err = db.install_extension("trgm").unwrap_err();
+    assert_eq!(err.status(), Some(Status::ExtensionExists));
+    db.exec("create table after_extension_error(id integer)")
+        .unwrap();
+    assert!(err.to_string().contains("ExtensionExists"));
+
+    db.transaction(|guard| {
+        let info = guard.extension_info("trgm")?;
+        assert_eq!(info.storage_prefix, "_zova_ext_trgm_");
+        guard.check_extension("trgm")?;
+        guard.check_extensions()?;
+        Ok(())
+    })
+    .unwrap();
+
+    db.drop_extension("trgm").unwrap();
+    assert!(db.list_extensions().unwrap().is_empty());
+    let _ = std::fs::remove_file(path);
+}
+
 fn install_trgm_fixture(db: &mut Database) {
     db.exec(
         "insert into _zova_extensions \

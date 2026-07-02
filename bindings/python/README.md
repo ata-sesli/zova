@@ -16,12 +16,13 @@ rules.
 4. [What It Covers](#what-it-covers)
 5. [Savepoints](#savepoints)
 6. [Operational Safety](#operational-safety)
-7. [App Events](#app-events)
-8. [Objects](#objects)
-9. [Vectors](#vectors)
-10. [Graphs](#graphs)
-11. [Bound Stores](#bound-stores)
-12. [SQL-Native Vector Search](#sql-native-vector-search)
+7. [Extensions](#extensions)
+8. [App Events](#app-events)
+9. [Objects](#objects)
+10. [Vectors](#vectors)
+11. [Graphs](#graphs)
+12. [Bound Stores](#bound-stores)
+13. [SQL-Native Vector Search](#sql-native-vector-search)
 
 ## How It Fits
 
@@ -78,7 +79,8 @@ The Python API is pre-1.0 and may still change alongside the Rust binding.
 The Python package exposes database lifecycle, conversion, prepared SQL
 statements, transactions, explicit vacuum, backup/compact/restore, objects,
 streaming object writes, vectors, SQL-native vector search, graphs,
-same-process app events, context managers, and Zova status exceptions.
+bundled extension lifecycle, same-process app events, context managers, and
+Zova status exceptions.
 
 One Python `Database` object owns one native handle. The native C ABI serializes
 calls on that handle, so one handle is safe but not parallel. Open additional
@@ -151,19 +153,25 @@ copies valid graph topology and skips invalid graph nodes or edges. The Python
 package does not expose typed doctor/salvage report APIs yet, and library code
 should not parse the human text output as a stable binding contract.
 
-The current development branch adds a native Zig extension host foundation and
-the bundled `trgm` extension. Python extension lifecycle and registry APIs are
-not exposed yet; ordinary Python opens can use bundled extension SQL surfaces
-through prepared statements after the extension has been installed.
-Databases that require a dynamic local extension need a process that supplies
-that trusted extension code; Python does not expose dynamic extension loading
-APIs yet. Use the CLI or native Zig host APIs for extension trust/install
-workflows.
+## Extensions
+
+Python exposes lifecycle methods for extensions already present in the current
+process registry. The default registry includes bundled extensions such as
+`trgm`, so Python applications can install, list, check, and drop `trgm`
+directly. App-registered extension authoring and dynamic `.zovaext` loading
+remain native Zig/CLI-only in v0.21.
+
 See [../../docs/extensions.md](../../docs/extensions.md) for the current host
-contract and trust model.
+contract and trust model. A fuller records/objects/vectors/graphs example lives
+in `examples/extensions.py`.
 
 ```python
 with zova.Database.open("app.zova") as db:
+    db.install_extension("trgm")
+    info = db.extension_info("trgm")
+    assert info.storage_prefix == "_zova_ext_trgm_"
+    db.check_extensions()
+
     with db.prepare(
         "select zova_trgm_put('messages', ?1, 'record', 'messages', ?2, ?3)"
     ) as stmt:

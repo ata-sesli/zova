@@ -17,6 +17,7 @@ It covers:
   search, candidate search, search-by-id, thresholds, and SQL-native vector
   search
 - graph lifecycle, node/edge CRUD, neighbors, and bounded walk traversal
+- bundled extension lifecycle for process-registered extensions such as `trgm`
 - same-process transaction-aware app events with `Listen` / `Notify`
 
 ## Contents
@@ -28,12 +29,13 @@ It covers:
 5. [Handle Policy](#handle-policy)
 6. [Savepoints](#savepoints)
 7. [Operational Safety](#operational-safety)
-8. [App Events](#app-events)
-9. [Objects](#objects)
-10. [Vectors](#vectors)
-11. [Bound Stores](#bound-stores)
-12. [Graphs](#graphs)
-13. [Example](#example)
+8. [Extensions](#extensions)
+9. [App Events](#app-events)
+10. [Objects](#objects)
+11. [Vectors](#vectors)
+12. [Bound Stores](#bound-stores)
+13. [Graphs](#graphs)
+14. [Example](#example)
 
 ## How It Fits
 
@@ -246,17 +248,31 @@ copies valid graph topology and skips invalid graph nodes or edges. The Go
 package does not expose typed doctor/salvage report APIs yet, and library code
 should not parse the human text output as a stable binding contract.
 
-The current development branch adds a native Zig extension host foundation and
-the bundled `trgm` extension. Go extension lifecycle and registry APIs are not
-exposed yet; ordinary Go opens can use bundled extension SQL surfaces through
-prepared statements after the extension has been installed.
-Databases that require a dynamic local extension need a process that supplies
-that trusted extension code; Go does not expose dynamic extension loading APIs
-yet. Use the CLI or native Zig host APIs for extension trust/install workflows.
+## Extensions
+
+Go exposes lifecycle methods for extensions already present in the current
+process registry. The default registry includes bundled extensions such as
+`trgm`, so Go applications can install, list, check, and drop `trgm` directly.
+App-registered extension authoring and dynamic `.zovaext` loading remain
+native Zig/CLI-only in v0.21.
+
 See [../../docs/extensions.md](../../docs/extensions.md) for the current host
-contract and trust model.
+contract and trust model. A fuller records/objects/vectors/graphs example lives
+in `examples/extensions`.
 
 ```go
+if err := db.InstallExtension("trgm"); err != nil {
+    return err
+}
+info, err := db.ExtensionInfo("trgm")
+if err != nil {
+    return err
+}
+fmt.Println(info.StoragePrefix)
+if err := db.CheckExtensions(); err != nil {
+    return err
+}
+
 put, err := db.Prepare("select zova_trgm_put('messages', ?1, 'record', 'messages', ?2, ?3)")
 if err != nil {
     return err

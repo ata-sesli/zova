@@ -1,5 +1,6 @@
 mod database;
 mod error;
+mod extension;
 mod graph;
 mod notification;
 mod object;
@@ -8,6 +9,7 @@ mod vector;
 
 use database::{convert_sqlite_to_zova, restore_backup, PyDatabase, PySavepointContext};
 use error::{ClosedHandleError, ZovaError};
+use extension::PyExtensionInfo;
 use graph::{
     PyGraphEdge, PyGraphEdgeInput, PyGraphInfo, PyGraphNeighbor, PyGraphNeighborsOptions,
     PyGraphNode, PyGraphNodeInput, PyGraphWalkItem, PyGraphWalkOptions,
@@ -43,6 +45,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVector>()?;
     m.add_class::<PyVectorInput>()?;
     m.add_class::<PyVectorSearchResult>()?;
+    m.add_class::<PyExtensionInfo>()?;
     m.add_class::<PyGraphInfo>()?;
     m.add_class::<PyGraphNodeInput>()?;
     m.add_class::<PyGraphNode>()?;

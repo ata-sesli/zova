@@ -194,6 +194,99 @@ test "trgm validates zova owned object vector and graph targets" {
     try putExpectError(&db, "targets", "missing-graph", "graph", "app", "missing", "missing");
 }
 
+test "trgm validates object and vector targets routed through bound stores" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "trgm-bound-main.zova");
+    var object_store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const object_store_path = try testingDbPath(&object_store_buffer, tmp.sub_path[0..], "trgm-bound-objects.zova");
+    var vector_store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const vector_store_path = try testingDbPath(&vector_store_buffer, tmp.sub_path[0..], "trgm-bound-vectors.zova");
+
+    try zova.createObjectStore(object_store_path);
+    try zova.createVectorStore(vector_store_path);
+
+    var db = try zova.Database.create(main_path);
+    defer db.deinit();
+    try db.bindObjectStore(object_store_path);
+    try db.bindVectorStore(vector_store_path);
+    try db.installExtension("trgm");
+    try execSql(&db, "select zova_trgm_create_index('targets')");
+
+    const object_id = try db.putObject("bound attachment bytes");
+    var object_hex_buffer: [64]u8 = undefined;
+    const object_hex = try hexObjectId(&object_hex_buffer, object_id);
+    try db.createVectorCollection("chunks", .{ .dimensions = 2, .metric = .cosine });
+    try db.putVector("chunks", "vec:bound", &.{ 1.0, 0.0 });
+
+    try putWithBoundArgs(&db, "targets", "bound-object", "object", null, object_hex, "bound object target");
+    try putWithBoundArgs(&db, "targets", "bound-vector", "vector", "chunks", "vec:bound", "bound vector target");
+    try db.checkExtension("trgm");
+
+    try db.deleteObject(object_id);
+    try std.testing.expectError(error.ExtensionInvalid, db.checkExtension("trgm"));
+}
+
+test "split object and vector stores preserve trgm metadata and target references" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var object_main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const object_main_path = try testingDbPath(&object_main_buffer, tmp.sub_path[0..], "trgm-split-object-main.zova");
+    var object_store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const object_store_path = try testingDbPath(&object_store_buffer, tmp.sub_path[0..], "trgm-split-object-store.zova");
+
+    {
+        var db = try zova.Database.create(object_main_path);
+        defer db.deinit();
+        try db.installExtension("trgm");
+        try execSql(&db, "select zova_trgm_create_index('attachments')");
+        const object_id = try db.putObject("single-file attachment before split");
+        var object_hex_buffer: [64]u8 = undefined;
+        const object_hex = try hexObjectId(&object_hex_buffer, object_id);
+        try putWithBoundArgs(&db, "attachments", "attachment:1", "object", null, object_hex, "invoice attachment filename");
+
+        _ = try db.splitObjectStore(object_store_path);
+        try db.checkExtension("trgm");
+        try expectSearchIds(&db, "attachments", "invoice filename", 1, 0.0, &.{"attachment:1"});
+    }
+
+    {
+        var reopened = try zova.Database.open(object_main_path);
+        defer reopened.deinit();
+        try reopened.checkExtension("trgm");
+        try expectSearchIds(&reopened, "attachments", "invoice filename", 1, 0.0, &.{"attachment:1"});
+    }
+
+    var vector_main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const vector_main_path = try testingDbPath(&vector_main_buffer, tmp.sub_path[0..], "trgm-split-vector-main.zova");
+    var vector_store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const vector_store_path = try testingDbPath(&vector_store_buffer, tmp.sub_path[0..], "trgm-split-vector-store.zova");
+
+    {
+        var db = try zova.Database.create(vector_main_path);
+        defer db.deinit();
+        try db.installExtension("trgm");
+        try execSql(&db, "select zova_trgm_create_index('chunks')");
+        try db.createVectorCollection("chunks", .{ .dimensions = 2, .metric = .cosine });
+        try db.putVector("chunks", "chunk:1", &.{ 1.0, 0.0 });
+        try putWithBoundArgs(&db, "chunks", "chunk:1", "vector", "chunks", "chunk:1", "semantic chunk receipt text");
+
+        _ = try db.splitVectorStore(vector_store_path);
+        try db.checkExtension("trgm");
+        try expectSearchIds(&db, "chunks", "reciept text", 1, 0.0, &.{"chunk:1"});
+    }
+
+    {
+        var reopened = try zova.Database.open(vector_main_path);
+        defer reopened.deinit();
+        try reopened.checkExtension("trgm");
+        try expectSearchIds(&reopened, "chunks", "reciept text", 1, 0.0, &.{"chunk:1"});
+    }
+}
+
 test "trgm validates sql inputs and accepts app-owned target types" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

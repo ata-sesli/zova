@@ -3,6 +3,7 @@ from enum import IntEnum
 from ._native import (
     ClosedHandleError,
     Database,
+    ExtensionInfo,
     GraphEdge,
     GraphEdgeInput,
     GraphInfo,
@@ -80,6 +81,7 @@ __all__ = [
     "ColumnType",
     "Database",
     "DEFAULT_GRAPH_NAME",
+    "ExtensionInfo",
     "GraphEdge",
     "GraphEdgeInput",
     "GraphInfo",

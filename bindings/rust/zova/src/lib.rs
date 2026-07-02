@@ -10,6 +10,7 @@
 
 mod database;
 mod error;
+mod extension;
 mod graph;
 mod notification;
 mod object;
@@ -21,6 +22,7 @@ pub use database::{
     restore_backup, BackupOptions, CompactOptions, Database, OpenOptions, RestoreOptions,
 };
 pub use error::{Error, Result, Status};
+pub use extension::ExtensionInfo;
 pub use graph::{
     GraphEdge, GraphEdgeInput, GraphInfo, GraphNeighbor, GraphNeighborDirection,
     GraphNeighborsOptions, GraphNode, GraphNodeInput, GraphTargetType, GraphWalkItem,

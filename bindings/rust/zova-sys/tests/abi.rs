@@ -54,6 +54,122 @@ fn abi_version_and_status_names_are_available() {
 }
 
 #[test]
+fn raw_extension_lifecycle_smoke() {
+    let path = temp_path("extensions");
+    let c_path = CString::new(path.as_str()).unwrap();
+    let mut db = ptr::null_mut();
+    let mut message = zova_sys::zova_message {
+        data: ptr::null_mut(),
+        len: 0,
+    };
+    let create = zova_sys::zova_database_open_request {
+        path: c_path.as_ptr(),
+        out_db: &mut db,
+        out_error_message: &mut message,
+    };
+
+    unsafe {
+        assert_eq!(zova_sys::zova_database_create(&create), zova_sys::ZOVA_OK);
+
+        let missing = CString::new("missing_ext").unwrap();
+        let missing_request = zova_sys::zova_database_extension_request {
+            db,
+            name: missing.as_ptr(),
+        };
+        assert_eq!(
+            zova_sys::zova_database_extension_install(&missing_request),
+            zova_sys::ZOVA_EXTENSION_NOT_FOUND
+        );
+
+        let trgm = CString::new("trgm").unwrap();
+        let request = zova_sys::zova_database_extension_request {
+            db,
+            name: trgm.as_ptr(),
+        };
+        assert_eq!(
+            zova_sys::zova_database_extension_install(&request),
+            zova_sys::ZOVA_OK
+        );
+        assert_eq!(
+            zova_sys::zova_database_extension_install(&request),
+            zova_sys::ZOVA_EXTENSION_EXISTS
+        );
+
+        let mut info = zova_sys::zova_extension_info {
+            name: ptr::null_mut(),
+            name_len: 0,
+            version: ptr::null_mut(),
+            version_len: 0,
+            storage_prefix: ptr::null_mut(),
+            storage_prefix_len: 0,
+            zova_abi_min: ptr::null_mut(),
+            zova_abi_min_len: 0,
+            capabilities: ptr::null_mut(),
+            capabilities_len: 0,
+            required: 0,
+            installed_at_unix: 0,
+            manifest_json: ptr::null_mut(),
+            manifest_json_len: 0,
+        };
+        let info_request = zova_sys::zova_database_extension_info_request {
+            db,
+            name: trgm.as_ptr(),
+            out_info: &mut info,
+        };
+        assert_eq!(
+            zova_sys::zova_database_extension_info(&info_request),
+            zova_sys::ZOVA_OK
+        );
+        assert_eq!(CStr::from_ptr(info.name).to_str().unwrap(), "trgm");
+        assert_eq!(
+            CStr::from_ptr(info.storage_prefix).to_str().unwrap(),
+            "_zova_ext_trgm_"
+        );
+        assert_eq!(info.required, 1);
+        assert!(info.installed_at_unix > 0);
+        zova_sys::zova_extension_info_free(&mut info);
+
+        let mut list = zova_sys::zova_extension_list {
+            items: ptr::null_mut(),
+            len: 0,
+        };
+        let list_request = zova_sys::zova_database_extension_list_request {
+            db,
+            out_list: &mut list,
+        };
+        assert_eq!(
+            zova_sys::zova_database_extension_list(&list_request),
+            zova_sys::ZOVA_OK
+        );
+        assert_eq!(list.len, 1);
+        zova_sys::zova_extension_list_free(&mut list);
+
+        assert_eq!(
+            zova_sys::zova_database_extension_check(&request),
+            zova_sys::ZOVA_OK
+        );
+        let check_all = zova_sys::zova_database_simple_request { db };
+        assert_eq!(
+            zova_sys::zova_database_extension_check_all(&check_all),
+            zova_sys::ZOVA_OK
+        );
+        assert_eq!(
+            zova_sys::zova_database_extension_drop(&request),
+            zova_sys::ZOVA_OK
+        );
+        assert_eq!(
+            zova_sys::zova_database_extension_info(&info_request),
+            zova_sys::ZOVA_EXTENSION_NOT_FOUND
+        );
+        zova_sys::zova_extension_info_free(ptr::null_mut());
+        zova_sys::zova_extension_list_free(ptr::null_mut());
+        assert_eq!(zova_sys::zova_database_close(db), zova_sys::ZOVA_OK);
+    }
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn raw_create_exec_prepare_step_close_smoke() {
     let path = temp_path("raw");
     let c_path = CString::new(path.as_str()).unwrap();

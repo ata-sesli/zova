@@ -145,6 +145,10 @@ over byte trigrams and orders ties by `document_id`.
 (`object`, `object_chunk`, `vector`, and `graph`) require enough reference data
 for Zova to validate the target.
 
+Object and vector targets may live in bound object/vector stores. `trgm` follows
+normal Zova target validation through the opened database, while the extension
+registry and `_zova_ext_trgm_*` index tables remain in the main database.
+
 Use `trgm` for fuzzy target lookup:
 
 ```sql
@@ -252,6 +256,9 @@ Unknown `_zova_ext_*` objects without an installed owner are reported by
 diagnostics as extension issues.
 
 Extension private storage lives in the main database in this host slice.
+Extensions can still refer to objects and vectors in bound stores through
+normal target refs; the extension-owned tables themselves are not stored in the
+bound store in v0.21.
 
 ## Diagnostics
 
@@ -265,10 +272,28 @@ extension code is unavailable.
 metadata without registered code. `zova extension check`, `drop`, and `install`
 still require matching process-registered extension code.
 
+## Binding Lifecycle APIs
+
+The C ABI, Rust, Go, and Python bindings can manage extensions that are already
+registered in the current process. In the default Zova build that means bundled
+extensions such as `trgm`: install, list, info, check, check all, and drop.
+
+Those binding APIs do not make `.zova` files executable and do not load dynamic
+bundles. App-registered extension authoring and dynamic `.zovaext` loading are
+still native Zig/CLI-only in v0.21.
+
 When a dynamic bundle is missing or untrusted, diagnostics point back to the
 process boundary: supply the bundle with `--extension <bundle.zovaext>` for that
 command, or run `zova extension trust <bundle.zovaext>` after verifying the
 local code is expected.
+
+The binding example files include an `extensions` example that installs `trgm`,
+indexes records, object filenames, vector chunks, and graph entities, then uses
+normal prepared statements to query `zova_trgm_search`.
+
+Extension operations do not auto-notify listeners. Applications or trusted
+extension workflows should call Zova's same-process `notify` API explicitly when
+they want listeners to react to an indexing workflow.
 
 ## Operational Copies
 

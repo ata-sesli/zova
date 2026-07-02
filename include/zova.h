@@ -283,6 +283,30 @@ typedef struct zova_graph_list {
     size_t len;
 } zova_graph_list;
 
+/* Owned extension info. Free with zova_extension_info_free. */
+typedef struct zova_extension_info {
+    char *name;
+    size_t name_len;
+    char *version;
+    size_t version_len;
+    char *storage_prefix;
+    size_t storage_prefix_len;
+    char *zova_abi_min;
+    size_t zova_abi_min_len;
+    char *capabilities;
+    size_t capabilities_len;
+    uint8_t required;
+    int64_t installed_at_unix;
+    char *manifest_json;
+    size_t manifest_json_len;
+} zova_extension_info;
+
+/* Owned extension info list. Free with zova_extension_list_free. */
+typedef struct zova_extension_list {
+    zova_extension_info *items;
+    size_t len;
+} zova_extension_list;
+
 /* Owned graph node. Free with zova_graph_node_free. */
 typedef struct zova_graph_node {
     char *graph_name;
@@ -830,6 +854,22 @@ typedef struct zova_graph_list_request {
     zova_graph_list *out_list;
 } zova_graph_list_request;
 
+typedef struct zova_database_extension_request {
+    zova_database *db;
+    const char *name;
+} zova_database_extension_request;
+
+typedef struct zova_database_extension_info_request {
+    zova_database *db;
+    const char *name;
+    zova_extension_info *out_info;
+} zova_database_extension_info_request;
+
+typedef struct zova_database_extension_list_request {
+    zova_database *db;
+    zova_extension_list *out_list;
+} zova_database_extension_list_request;
+
 typedef struct zova_graph_delete_request {
     zova_database *db;
     const char *name;
@@ -938,6 +978,8 @@ void zova_vector_collection_info_free(zova_vector_collection_info *info);
 void zova_vector_collection_list_free(zova_vector_collection_list *list);
 void zova_graph_info_free(zova_graph_info *info);
 void zova_graph_list_free(zova_graph_list *list);
+void zova_extension_info_free(zova_extension_info *info);
+void zova_extension_list_free(zova_extension_list *list);
 void zova_graph_node_free(zova_graph_node *node);
 void zova_graph_edge_free(zova_graph_edge *edge);
 void zova_graph_neighbor_results_free(zova_graph_neighbor_results *results);
@@ -1067,6 +1109,20 @@ zova_status zova_graph_create(const zova_graph_create_request *request);
 zova_status zova_graph_exists(const zova_graph_exists_request *request);
 zova_status zova_graph_info_get(const zova_graph_info_get_request *request);
 zova_status zova_graphs_list(const zova_graph_list_request *request);
+
+/*
+ * Extension lifecycle helpers manage extensions already present in the process
+ * registry. Normal C-created handles use Zova's bundled registry, including
+ * bundled extensions such as trgm. Dynamic local extension loading and
+ * app-registered extension authoring remain outside the C ABI in v0.21.
+ */
+zova_status zova_database_extension_install(const zova_database_extension_request *request);
+zova_status zova_database_extension_list(const zova_database_extension_list_request *request);
+zova_status zova_database_extension_info(const zova_database_extension_info_request *request);
+zova_status zova_database_extension_check(const zova_database_extension_request *request);
+zova_status zova_database_extension_check_all(const zova_database_simple_request *request);
+zova_status zova_database_extension_drop(const zova_database_extension_request *request);
+
 zova_status zova_graph_delete(const zova_graph_delete_request *request);
 zova_status zova_graph_node_put(const zova_graph_node_put_request *request);
 zova_status zova_graph_node_get(const zova_graph_node_get_request *request);

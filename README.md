@@ -623,6 +623,7 @@ An extension is trusted process code plus private Zova metadata:
 - extension code is provided by the process, not loaded from the `.zova` file
 - SQL functions or virtual tables are registered on each opened Zova connection
 - install, check, and drop hooks run inside Zova-managed transactions
+- extension registry and private storage live in the main database in v0.21
 
 This keeps `.zova` files non-executable. A file may say it requires an
 extension, but the application or CLI process decides which extension code is
@@ -671,6 +672,9 @@ connection. `trgm` is for fuzzy target lookup: typo-tolerant matching over app
 document IDs that point back to records, objects, chunks, vectors, graph nodes,
 entities, facts, concepts, or external refs.
 
+Those target refs may point at objects or vectors stored in optional bound
+stores. The extension index itself still stays in the main database.
+
 ```sql
 select zova_trgm_create_index('messages');
 select zova_trgm_put(
@@ -696,6 +700,10 @@ full-text search such as matching words and phrases. Vectors are best for
 semantic similarity. Trigram lookup is useful when the query or target has
 small spelling differences, filename variations, IDs, short labels, or
 operator-entered text where typo tolerance matters.
+
+Extension operations do not emit automatic app events. If an application wants
+same-process listeners to react to indexing, it should call `notify` explicitly
+inside the same transaction, for example `notify("search:indexed", "messages")`.
 
 For the host contract, authoring shape, storage rules, diagnostics behavior,
 and current non-goals, see [docs/extensions.md](docs/extensions.md).
@@ -945,8 +953,8 @@ synchronous settings automatically.
 
 Zova `0.20.0` does not include:
 
-- dynamic trusted local extension loading
-- C ABI, Rust, Go, or Python extension lifecycle APIs
+- binding-level app-registered extension authoring APIs
+- binding-level dynamic `.zovaext` loading APIs
 - ANN indexes such as HNSW or IVFFlat
 - vector SQL operators
 - object or chunk virtual tables

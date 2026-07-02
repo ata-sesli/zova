@@ -329,6 +329,81 @@ static void run_graph_smoke(zova_database *db) {
                   "graph edge removed with node");
 }
 
+static void run_extension_smoke(zova_database *db) {
+    expect_status(zova_database_extension_install(&(zova_database_extension_request){
+                      .db = db,
+                      .name = "missing_ext",
+                  }),
+                  ZOVA_EXTENSION_NOT_FOUND,
+                  "extension install missing");
+    expect_status(zova_database_extension_install(&(zova_database_extension_request){
+                      .db = db,
+                      .name = "trgm",
+                  }),
+                  ZOVA_OK,
+                  "extension install trgm");
+    expect_status(zova_database_extension_install(&(zova_database_extension_request){
+                      .db = db,
+                      .name = "trgm",
+                  }),
+                  ZOVA_EXTENSION_EXISTS,
+                  "extension duplicate install");
+
+    zova_extension_info info = {0};
+    expect_status(zova_database_extension_info(&(zova_database_extension_info_request){
+                      .db = db,
+                      .name = "trgm",
+                      .out_info = &info,
+                  }),
+                  ZOVA_OK,
+                  "extension info trgm");
+    expect_graph_text(info.name, info.name_len, "trgm", "extension info name");
+    expect_graph_text(info.storage_prefix, info.storage_prefix_len, "_zova_ext_trgm_", "extension info prefix");
+    if (!info.required) {
+        fprintf(stderr, "extension info: expected required\n");
+        exit(1);
+    }
+    zova_extension_info_free(&info);
+
+    zova_extension_list list = {0};
+    expect_status(zova_database_extension_list(&(zova_database_extension_list_request){
+                      .db = db,
+                      .out_list = &list,
+                  }),
+                  ZOVA_OK,
+                  "extension list");
+    if (list.len != 1) {
+        fprintf(stderr, "extension list: unexpected count\n");
+        exit(1);
+    }
+    zova_extension_list_free(&list);
+
+    expect_status(zova_database_extension_check(&(zova_database_extension_request){
+                      .db = db,
+                      .name = "trgm",
+                  }),
+                  ZOVA_OK,
+                  "extension check trgm");
+    expect_status(zova_database_extension_check_all(&(zova_database_simple_request){.db = db}),
+                  ZOVA_OK,
+                  "extension check all");
+    expect_status(zova_database_extension_drop(&(zova_database_extension_request){
+                      .db = db,
+                      .name = "trgm",
+                  }),
+                  ZOVA_OK,
+                  "extension drop trgm");
+    expect_status(zova_database_extension_info(&(zova_database_extension_info_request){
+                      .db = db,
+                      .name = "trgm",
+                      .out_info = &info,
+                  }),
+                  ZOVA_EXTENSION_NOT_FOUND,
+                  "extension info dropped");
+    zova_extension_info_free(NULL);
+    zova_extension_list_free(NULL);
+}
+
 static void verify_operational_copy(const char *path, zova_object_id object_id, const char *label) {
     zova_database *copy = NULL;
     zova_message message = {0};
@@ -1403,6 +1478,7 @@ int main(int argc, char **argv) {
     expect_status(zova_statement_finalize(sql_distance_by_id), ZOVA_OK, "finalize sql vector distance by id");
 
     run_graph_smoke(db);
+    run_extension_smoke(db);
     run_threaded_same_handle_smoke(db);
     run_notification_smoke(db);
 
