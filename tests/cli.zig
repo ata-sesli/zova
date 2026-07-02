@@ -88,6 +88,83 @@ test "cli extension host lists checks and rejects unavailable install" {
     try expectContains(invalid_name.stderr, "extension name is invalid");
 }
 
+test "cli extension list info and diagnostics inspect unavailable extension metadata" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "extension-unavailable.zova");
+    try createUnavailableExtensionFixture(db_path);
+
+    var list = try runCli(&.{ "zova", "extension", "list", "--json", db_path });
+    defer list.deinit();
+    try std.testing.expectEqual(@as(u8, 0), list.code);
+    var list_json = try parseJson(list.stdout);
+    defer list_json.deinit();
+    try expectJsonArrayLen(list_json.value.object, "extensions", 1);
+
+    var info = try runCli(&.{ "zova", "extension", "info", "--json", db_path, "test" });
+    defer info.deinit();
+    try std.testing.expectEqual(@as(u8, 0), info.code);
+    var info_json = try parseJson(info.stdout);
+    defer info_json.deinit();
+    try expectJsonString(info_json.value.object, "command", "extension-info");
+    const extension_value = info_json.value.object.get("extension") orelse return error.MissingJsonField;
+    try std.testing.expectEqual(std.json.Value.object, std.meta.activeTag(extension_value));
+    try expectJsonString(extension_value.object, "name", "test");
+
+    var check_extension = try runCli(&.{ "zova", "extension", "check", "--json", db_path, "test" });
+    defer check_extension.deinit();
+    try std.testing.expectEqual(@as(u8, 4), check_extension.code);
+    try expectContains(check_extension.stderr, "ExtensionUnavailable");
+
+    var doctor = try runCli(&.{ "zova", "doctor", "--json", db_path });
+    defer doctor.deinit();
+    try std.testing.expectEqual(@as(u8, 4), doctor.code);
+    var doctor_json = try parseJson(doctor.stderr);
+    defer doctor_json.deinit();
+    try expectJsonObjectHasInt(doctor_json.value.object, "issue_counts", "extension");
+    try expectContains(doctor.stderr, "ExtensionUnavailable");
+
+    var check = try runCli(&.{ "zova", "check", "--json", "--deep", db_path });
+    defer check.deinit();
+    try std.testing.expectEqual(@as(u8, 4), check.code);
+    var check_json = try parseJson(check.stderr);
+    defer check_json.deinit();
+    try expectJsonObjectHasInt(check_json.value.object, "issue_counts", "extension");
+    try expectContains(check.stderr, "ExtensionUnavailable");
+}
+
+test "cli diagnostics report unknown extension private storage" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "extension-orphan-storage.zova");
+
+    {
+        var db = try zova.Database.create(db_path);
+        defer db.deinit();
+    }
+    {
+        var raw = try zova.sqlite.Database.open(db_path);
+        defer raw.deinit();
+        try raw.exec("create table _zova_ext_orphan_meta (key text primary key, value text not null)");
+    }
+
+    var doctor = try runCli(&.{ "zova", "doctor", "--json", db_path });
+    defer doctor.deinit();
+    try std.testing.expectEqual(@as(u8, 4), doctor.code);
+    try expectContains(doctor.stderr, "unknown_extension_storage");
+    try expectContains(doctor.stderr, "_zova_ext_orphan_meta");
+    try std.testing.expect(std.mem.indexOf(u8, doctor.stderr, "create table") == null);
+
+    var check = try runCli(&.{ "zova", "check", "--json", "--deep", db_path });
+    defer check.deinit();
+    try std.testing.expectEqual(@as(u8, 4), check.code);
+    try expectContains(check.stderr, "unknown_extension_storage");
+}
+
 test "cli graph commands inspect graphs nodes neighbors and walks" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2705,6 +2782,21 @@ fn countRawRows(db: *zova.sqlite.Database, sql: [:0]const u8) !i64 {
 
     try std.testing.expectEqual(zova.sqlite.Step.row, try stmt.step());
     return stmt.columnInt64(0);
+}
+
+fn createUnavailableExtensionFixture(db_path: [:0]const u8) !void {
+    {
+        var db = try zova.Database.create(db_path);
+        defer db.deinit();
+    }
+    var raw = try zova.sqlite.Database.open(db_path);
+    defer raw.deinit();
+    try raw.exec(
+        \\insert into _zova_extensions
+        \\  (name, version, storage_prefix, zova_abi_min, capabilities, required, installed_at_unix, manifest_json)
+        \\values ('test', '0.1.0', '_zova_ext_test_', '0.21.0', 'sql', 1, 0, '')
+    );
+    try raw.exec("create table _zova_ext_test_meta (key text primary key, value text not null)");
 }
 
 fn testingDbPath(buffer: []u8, sub_path: []const u8, name: []const u8) ![:0]u8 {

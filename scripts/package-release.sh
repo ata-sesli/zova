@@ -156,9 +156,9 @@ rm -rf "$TMP/$PKG/bindings/python/dist"
 find "$TMP/$PKG/bindings/python" -type d -name '__pycache__' -prune -exec rm -rf {} +
 find "$TMP/$PKG/bindings/python" \( -name '*.so' -o -name '*.pyd' -o -name '*.dylib' -o -name '*.dll' -o -name '*.whl' \) -delete
 
-if find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" | grep -q .; then
+if find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/docs/extensions.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" | grep -q .; then
     echo "release package contains unexpected markdown files" >&2
-    find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" >&2
+    find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/docs/extensions.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" >&2
     exit 1
 fi
 
@@ -169,6 +169,11 @@ fi
 
 if [ ! -f "$TMP/$PKG/docs/sqlite-to-zova.md" ]; then
     echo "release package is missing docs/sqlite-to-zova.md" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/docs/extensions.md" ]; then
+    echo "release package is missing docs/extensions.md" >&2
     exit 1
 fi
 

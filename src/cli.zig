@@ -444,9 +444,9 @@ const DiagnosticIssueArea = enum {
 
 const DiagnosticIssue = struct {
     area: DiagnosticIssueArea,
-    kind: []const u8,
+    kind: []u8,
     severity: []const u8 = "error",
-    detail: []const u8,
+    detail: []u8,
     object_id_hex: ?[]u8 = null,
     chunk_hash_hex: ?[]u8 = null,
     collection_name: ?[]u8 = null,
@@ -456,6 +456,8 @@ const DiagnosticIssue = struct {
     edge_type: ?[]u8 = null,
 
     fn deinit(self: *DiagnosticIssue, allocator: std.mem.Allocator) void {
+        allocator.free(self.kind);
+        allocator.free(self.detail);
         if (self.object_id_hex) |value| allocator.free(value);
         if (self.chunk_hash_hex) |value| allocator.free(value);
         if (self.collection_name) |value| allocator.free(value);
@@ -1145,7 +1147,17 @@ fn extensionCommand(
     const path_z = try allocator.dupeZ(u8, parsed.path);
     defer allocator.free(path_z);
 
-    var db = zova.Database.open(path_z) catch |err| return extensionOpenErrorFormat(stderr, parsed.format, err);
+    var db = open_db: {
+        const opened = zova.Database.open(path_z) catch |err| {
+            if ((parsed.action == .list or parsed.action == .info) and isExtensionHealthError(err)) {
+                break :open_db zova.Database.openForExtensionInspection(path_z, .{}) catch |inspect_err| {
+                    return extensionOpenErrorFormat(stderr, parsed.format, inspect_err);
+                };
+            }
+            return extensionOpenErrorFormat(stderr, parsed.format, err);
+        };
+        break :open_db opened;
+    };
     defer db.deinit();
 
     switch (parsed.action) {
@@ -2474,11 +2486,19 @@ fn checkCommand(
     const path = try allocator.dupeZ(u8, raw_path);
     defer allocator.free(path);
 
-    var db = zova.Database.open(path) catch |err| {
-        if (deep) {
-            if (try writeBoundStoreOpenFailureCheck(allocator, stderr, format, path, err)) |exit_code| return exit_code;
-        }
-        return openErrorFormat(stderr, "check", format, err);
+    var db = open_db: {
+        const opened = zova.Database.open(path) catch |err| {
+            if (deep and isExtensionHealthError(err)) {
+                break :open_db zova.Database.openForExtensionInspection(path, .{}) catch |inspect_err| {
+                    return openErrorFormat(stderr, "check", format, inspect_err);
+                };
+            }
+            if (deep) {
+                if (try writeBoundStoreOpenFailureCheck(allocator, stderr, format, path, err)) |exit_code| return exit_code;
+            }
+            return openErrorFormat(stderr, "check", format, err);
+        };
+        break :open_db opened;
     };
     defer db.deinit();
 
@@ -2519,9 +2539,17 @@ fn doctorCommand(
     const path = try allocator.dupeZ(u8, parsed.path);
     defer allocator.free(path);
 
-    var db = zova.Database.open(path) catch |err| {
-        if (try writeBoundStoreOpenFailureDoctor(allocator, stderr, parsed.format, parsed.path, path, err)) |exit_code| return exit_code;
-        return openErrorFormat(stderr, "doctor", parsed.format, err);
+    var db = open_db: {
+        const opened = zova.Database.open(path) catch |err| {
+            if (isExtensionHealthError(err)) {
+                break :open_db zova.Database.openForExtensionInspection(path, .{}) catch |inspect_err| {
+                    return openErrorFormat(stderr, "doctor", parsed.format, inspect_err);
+                };
+            }
+            if (try writeBoundStoreOpenFailureDoctor(allocator, stderr, parsed.format, parsed.path, path, err)) |exit_code| return exit_code;
+            return openErrorFormat(stderr, "doctor", parsed.format, err);
+        };
+        break :open_db opened;
     };
     defer db.deinit();
 
@@ -5415,6 +5443,14 @@ fn validateExtensions(allocator: std.mem.Allocator, db: *zova.Database, report: 
     defer extensions.deinit(allocator);
 
     report.stats.extensions = extensions.items.len;
+    const unknown_storage = db.unknownExtensionStorage(allocator) catch |err| {
+        try addDiagnosticIssue(allocator, report, issues, .extension, "extension_storage_unreadable", @errorName(err), null, null, null, null);
+        return;
+    };
+    if (unknown_storage) |name| {
+        defer allocator.free(name);
+        try addDiagnosticIssue(allocator, report, issues, .extension, "unknown_extension_storage", name, null, null, null, null);
+    }
     for (extensions.items) |item| {
         db.checkExtension(item.name) catch |err| {
             try addDiagnosticIssue(allocator, report, issues, .extension, "extension_check_failed", @errorName(err), null, null, null, null);
@@ -6478,10 +6514,16 @@ fn addDiagnosticIssue(
         return;
     }
 
+    const owned_kind = try allocator.dupe(u8, kind);
+    const owned_detail = allocator.dupe(u8, detail) catch |err| {
+        allocator.free(owned_kind);
+        return err;
+    };
+
     var issue = DiagnosticIssue{
         .area = area,
-        .kind = kind,
-        .detail = detail,
+        .kind = owned_kind,
+        .detail = owned_detail,
     };
     errdefer issue.deinit(allocator);
 
@@ -6512,10 +6554,16 @@ fn addGraphDiagnosticIssue(
         return;
     }
 
+    const owned_kind = try allocator.dupe(u8, kind);
+    const owned_detail = allocator.dupe(u8, detail) catch |err| {
+        allocator.free(owned_kind);
+        return err;
+    };
+
     var issue = DiagnosticIssue{
         .area = .graph,
-        .kind = kind,
-        .detail = detail,
+        .kind = owned_kind,
+        .detail = owned_detail,
     };
     errdefer issue.deinit(allocator);
 

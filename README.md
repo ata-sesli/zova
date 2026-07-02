@@ -644,6 +644,9 @@ In this host-only slice, `install` succeeds only for extensions registered in
 the current process. The first official extension, `zova_trgm`, and dynamic
 trusted local loading are deferred.
 
+For the host contract, authoring shape, storage rules, diagnostics behavior,
+and current non-goals, see [docs/extensions.md](docs/extensions.md).
+
 ## Diagnostics And Salvage
 
 Zova keeps diagnostics non-mutating by default:

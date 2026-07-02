@@ -155,6 +155,8 @@ The current development branch adds a native Zig extension host foundation.
 Python extension lifecycle and registry APIs are not exposed yet; ordinary
 Python opens continue to require installed extension code to be available
 through the process that owns the native Zova connection.
+See [../../docs/extensions.md](../../docs/extensions.md) for the current host
+contract and trust model.
 
 ## App Events
 

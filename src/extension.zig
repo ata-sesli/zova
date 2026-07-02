@@ -42,6 +42,7 @@ pub const Manifest = struct {
 };
 
 pub const Hook = *const fn (*sqlite.Database, Manifest) Error!void;
+pub const ValidationHook = *const fn (*sqlite.Database) anyerror!void;
 
 pub const Extension = struct {
     manifest: Manifest,
@@ -110,6 +111,15 @@ pub const InstalledList = struct {
     }
 };
 
+const SchemaObjectList = struct {
+    names: [][]u8,
+
+    fn deinit(self: *SchemaObjectList, allocator: std.mem.Allocator) void {
+        for (self.names) |name| allocator.free(name);
+        allocator.free(self.names);
+    }
+};
+
 pub fn validateName(name: []const u8) Error!void {
     if (name.len == 0 or name.len > 64) return error.ExtensionInvalid;
     if (hasReservedZovaPrefix(name)) return error.ExtensionInvalid;
@@ -131,15 +141,19 @@ pub fn validateManifest(manifest: Manifest) Error!void {
     if (manifest.zova_abi_min.len == 0 or manifest.zova_abi_min.len > 64) return error.ExtensionInvalid;
     if (manifest.capabilities.len > 512) return error.ExtensionInvalid;
     if (manifest.manifest_json.len > 4096) return error.ExtensionInvalid;
+    if (!manifest.required) return error.ExtensionInvalid;
     try validateStoragePrefix(manifest.name, manifest.storage_prefix);
 }
 
-pub fn install(db: *sqlite.Database, registry: Registry, name: []const u8) Error!void {
+pub fn install(db: *sqlite.Database, registry: Registry, name: []const u8, validate_core: ?ValidationHook) Error!void {
     try registry.validate();
     try validateName(name);
     const extension = registry.find(name) orelse return error.ExtensionNotFound;
     try validateManifest(extension.manifest);
     if (try isInstalled(db, name)) return error.ExtensionExists;
+
+    var before_objects = try listSchemaObjects(std.heap.c_allocator, db);
+    defer before_objects.deinit(std.heap.c_allocator);
 
     try db.savepoint("extension_lifecycle");
     var released = false;
@@ -151,12 +165,15 @@ pub fn install(db: *sqlite.Database, registry: Registry, name: []const u8) Error
     try extension.install(db, extension.manifest);
     try insertInstalled(db, extension.manifest);
     if (extension.register_sql) |register_sql| try register_sql(db, extension.manifest);
+    try validateNewSchemaObjectsOwnedBy(std.heap.c_allocator, db, before_objects.names, extension.manifest.storage_prefix);
+    try validateInstalledState(std.heap.c_allocator, db);
+    if (validate_core) |hook| hook(db) catch return error.ExtensionInvalid;
 
     try db.releaseSavepoint("extension_lifecycle");
     released = true;
 }
 
-pub fn drop(db: *sqlite.Database, registry: Registry, name: []const u8) Error!void {
+pub fn drop(db: *sqlite.Database, registry: Registry, name: []const u8, validate_core: ?ValidationHook) Error!void {
     try registry.validate();
     try validateName(name);
     const installed = try loadInfo(std.heap.c_allocator, db, name);
@@ -180,6 +197,9 @@ pub fn drop(db: *sqlite.Database, registry: Registry, name: []const u8) Error!vo
     try delete_row.bindText(1, name);
     std.debug.assert((try delete_row.step()) == .done);
 
+    try validateInstalledState(std.heap.c_allocator, db);
+    if (validate_core) |hook| hook(db) catch return error.ExtensionInvalid;
+
     try db.releaseSavepoint("extension_lifecycle");
     released = true;
 }
@@ -199,6 +219,7 @@ pub fn check(db: *sqlite.Database, registry: Registry, name: []const u8) Error!v
 
 pub fn checkAll(db: *sqlite.Database, registry: Registry) Error!void {
     try registry.validate();
+    try validateInstalledState(std.heap.c_allocator, db);
     var list = try listInstalled(std.heap.c_allocator, db);
     defer list.deinit(std.heap.c_allocator);
     for (list.items) |item| {
@@ -210,6 +231,7 @@ pub fn checkAll(db: *sqlite.Database, registry: Registry) Error!void {
 
 pub fn registerSqlForInstalled(db: *sqlite.Database, registry: Registry) Error!void {
     try registry.validate();
+    try validateInstalledState(std.heap.c_allocator, db);
     var list = try listInstalled(std.heap.c_allocator, db);
     defer list.deinit(std.heap.c_allocator);
     for (list.items) |item| {
@@ -247,10 +269,45 @@ pub fn listInstalled(allocator: std.mem.Allocator, db: *sqlite.Database) Error!I
         };
         errdefer item.deinit(allocator);
         try validateInstalledShape(item);
+        for (items.items) |previous| {
+            if (std.mem.eql(u8, previous.storage_prefix, item.storage_prefix)) return error.ExtensionInvalid;
+        }
         try items.append(allocator, item);
     }
 
     return .{ .items = try items.toOwnedSlice(allocator) };
+}
+
+pub fn validateInstalledState(allocator: std.mem.Allocator, db: *sqlite.Database) Error!void {
+    var list = try listInstalled(allocator, db);
+    defer list.deinit(allocator);
+    try validatePrivateStorageOwners(db, list.items);
+}
+
+pub fn validateInstalledRegistry(allocator: std.mem.Allocator, db: *sqlite.Database) Error!void {
+    var list = try listInstalled(allocator, db);
+    defer list.deinit(allocator);
+}
+
+pub fn findUnknownPrivateStorage(allocator: std.mem.Allocator, db: *sqlite.Database) Error!?[]u8 {
+    var list = try listInstalled(allocator, db);
+    defer list.deinit(allocator);
+
+    var stmt = try db.prepare(
+        \\select name
+        \\from sqlite_master
+        \\where type in ('table', 'index', 'view', 'trigger')
+        \\order by name
+    );
+    defer stmt.deinit();
+
+    while (try stmt.step() == .row) {
+        const name = stmt.columnText(0);
+        if (!std.mem.startsWith(u8, name, storage_prefix_prefix)) continue;
+        if (isOwnedPrivateStorage(name, list.items)) continue;
+        return try allocator.dupe(u8, name);
+    }
+    return null;
 }
 
 pub fn loadInfo(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) Error!InstalledInfo {
@@ -315,7 +372,76 @@ fn validateInstalledShape(item: InstalledInfo) Error!void {
     if (item.zova_abi_min.len == 0 or item.zova_abi_min.len > 64) return error.ExtensionInvalid;
     if (item.capabilities.len > 512) return error.ExtensionInvalid;
     if (item.manifest_json.len > 4096) return error.ExtensionInvalid;
+    if (!item.required) return error.ExtensionInvalid;
     try validateStoragePrefix(item.name, item.storage_prefix);
+}
+
+fn validatePrivateStorageOwners(db: *sqlite.Database, installed: []const InstalledInfo) Error!void {
+    var stmt = try db.prepare(
+        \\select name
+        \\from sqlite_master
+        \\where type in ('table', 'index', 'view', 'trigger')
+        \\order by name
+    );
+    defer stmt.deinit();
+
+    while (try stmt.step() == .row) {
+        const name = stmt.columnText(0);
+        if (!std.mem.startsWith(u8, name, storage_prefix_prefix)) continue;
+        if (!isOwnedPrivateStorage(name, installed)) return error.ExtensionInvalid;
+    }
+}
+
+fn listSchemaObjects(allocator: std.mem.Allocator, db: *sqlite.Database) Error!SchemaObjectList {
+    var stmt = try db.prepare(
+        \\select name
+        \\from sqlite_master
+        \\where type in ('table', 'index', 'view', 'trigger')
+        \\order by name
+    );
+    defer stmt.deinit();
+
+    var names: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (names.items) |name| allocator.free(name);
+        names.deinit(allocator);
+    }
+
+    while (try stmt.step() == .row) {
+        const name = stmt.columnText(0);
+        if (isSqliteInternalObject(name)) continue;
+        try names.append(allocator, try allocator.dupe(u8, name));
+    }
+
+    return .{ .names = try names.toOwnedSlice(allocator) };
+}
+
+fn validateNewSchemaObjectsOwnedBy(allocator: std.mem.Allocator, db: *sqlite.Database, before: []const []const u8, storage_prefix: []const u8) Error!void {
+    var after = try listSchemaObjects(allocator, db);
+    defer after.deinit(allocator);
+
+    for (after.names) |name| {
+        if (schemaObjectExists(before, name)) continue;
+        if (!std.mem.startsWith(u8, name, storage_prefix)) return error.ExtensionInvalid;
+    }
+}
+
+fn schemaObjectExists(names: []const []const u8, needle: []const u8) bool {
+    for (names) |name| {
+        if (std.mem.eql(u8, name, needle)) return true;
+    }
+    return false;
+}
+
+fn isOwnedPrivateStorage(name: []const u8, installed: []const InstalledInfo) bool {
+    for (installed) |item| {
+        if (std.mem.startsWith(u8, name, item.storage_prefix)) return true;
+    }
+    return false;
+}
+
+fn isSqliteInternalObject(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "sqlite_");
 }
 
 fn ensureManifestMatchesInstalled(manifest: Manifest, installed: InstalledInfo) Error!void {
