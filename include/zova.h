@@ -118,6 +118,11 @@ typedef enum zova_status {
     ZOVA_GRAPH_NODE_NOT_FOUND = 82,
     ZOVA_GRAPH_EDGE_NOT_FOUND = 83,
     ZOVA_GRAPH_INVALID = 84,
+    ZOVA_EXTENSION_NOT_FOUND = 90,
+    ZOVA_EXTENSION_EXISTS = 91,
+    ZOVA_EXTENSION_INVALID = 92,
+    ZOVA_EXTENSION_INCOMPATIBLE = 93,
+    ZOVA_EXTENSION_UNAVAILABLE = 94,
 } zova_status;
 
 typedef enum zova_vector_metric {

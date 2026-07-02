@@ -149,6 +149,11 @@ pub const zova_status = enum(c_int) {
     GRAPH_NODE_NOT_FOUND = 82,
     GRAPH_EDGE_NOT_FOUND = 83,
     GRAPH_INVALID = 84,
+    EXTENSION_NOT_FOUND = 90,
+    EXTENSION_EXISTS = 91,
+    EXTENSION_INVALID = 92,
+    EXTENSION_INCOMPATIBLE = 93,
+    EXTENSION_UNAVAILABLE = 94,
 };
 
 pub const zova_step_result = enum(c_int) {
@@ -3022,6 +3027,11 @@ fn statusFromError(err: anyerror) zova_status {
         error.GraphNodeNotFound => .GRAPH_NODE_NOT_FOUND,
         error.GraphEdgeNotFound => .GRAPH_EDGE_NOT_FOUND,
         error.GraphInvalid => .GRAPH_INVALID,
+        error.ExtensionNotFound => .EXTENSION_NOT_FOUND,
+        error.ExtensionExists => .EXTENSION_EXISTS,
+        error.ExtensionInvalid => .EXTENSION_INVALID,
+        error.ExtensionIncompatible => .EXTENSION_INCOMPATIBLE,
+        error.ExtensionUnavailable => .EXTENSION_UNAVAILABLE,
         error.InvalidArgument => .INVALID_ARGUMENT,
         else => .SQLITE_ERROR,
     };
@@ -3069,6 +3079,11 @@ fn statusName(status: c_int) [*:0]const u8 {
         @intFromEnum(zova_status.GRAPH_NODE_NOT_FOUND) => "ZOVA_GRAPH_NODE_NOT_FOUND",
         @intFromEnum(zova_status.GRAPH_EDGE_NOT_FOUND) => "ZOVA_GRAPH_EDGE_NOT_FOUND",
         @intFromEnum(zova_status.GRAPH_INVALID) => "ZOVA_GRAPH_INVALID",
+        @intFromEnum(zova_status.EXTENSION_NOT_FOUND) => "ZOVA_EXTENSION_NOT_FOUND",
+        @intFromEnum(zova_status.EXTENSION_EXISTS) => "ZOVA_EXTENSION_EXISTS",
+        @intFromEnum(zova_status.EXTENSION_INVALID) => "ZOVA_EXTENSION_INVALID",
+        @intFromEnum(zova_status.EXTENSION_INCOMPATIBLE) => "ZOVA_EXTENSION_INCOMPATIBLE",
+        @intFromEnum(zova_status.EXTENSION_UNAVAILABLE) => "ZOVA_EXTENSION_UNAVAILABLE",
         else => "ZOVA_UNKNOWN_STATUS",
     };
 }
@@ -3083,6 +3098,7 @@ test "c abi status names and versions are stable" {
     try std.testing.expectEqualStrings("ZOVA_BOUND_STORE_INVALID", std.mem.span(zova_status_name(@intFromEnum(zova_status.BOUND_STORE_INVALID))));
     try std.testing.expectEqualStrings("ZOVA_VECTOR_INVALID", std.mem.span(zova_status_name(@intFromEnum(zova_status.VECTOR_INVALID))));
     try std.testing.expectEqualStrings("ZOVA_GRAPH_INVALID", std.mem.span(zova_status_name(@intFromEnum(zova_status.GRAPH_INVALID))));
+    try std.testing.expectEqualStrings("ZOVA_EXTENSION_UNAVAILABLE", std.mem.span(zova_status_name(@intFromEnum(zova_status.EXTENSION_UNAVAILABLE))));
     try std.testing.expectEqualStrings("ZOVA_UNKNOWN_STATUS", std.mem.span(zova_status_name(-1)));
 }
 

@@ -51,6 +51,11 @@ pub const ZOVA_GRAPH_NOT_FOUND: zova_status = 81;
 pub const ZOVA_GRAPH_NODE_NOT_FOUND: zova_status = 82;
 pub const ZOVA_GRAPH_EDGE_NOT_FOUND: zova_status = 83;
 pub const ZOVA_GRAPH_INVALID: zova_status = 84;
+pub const ZOVA_EXTENSION_NOT_FOUND: zova_status = 90;
+pub const ZOVA_EXTENSION_EXISTS: zova_status = 91;
+pub const ZOVA_EXTENSION_INVALID: zova_status = 92;
+pub const ZOVA_EXTENSION_INCOMPATIBLE: zova_status = 93;
+pub const ZOVA_EXTENSION_UNAVAILABLE: zova_status = 94;
 
 pub const ZOVA_STEP_ROW: zova_step_result = 1;
 pub const ZOVA_STEP_DONE: zova_step_result = 2;

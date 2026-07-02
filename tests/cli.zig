@@ -36,6 +36,8 @@ test "cli version and help are successful" {
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "vector-store bind [--json] <main.zova> <vectors.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "vector-store info [--json] <main.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "vector-store unbind [--json] <main.zova>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "extension list [--json] <file.zova>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "extension install [--json] <file.zova> <name>") != null);
 }
 
 test "cli usage errors return exit code 2" {
@@ -48,6 +50,42 @@ test "cli usage errors return exit code 2" {
     defer missing.deinit();
     try std.testing.expectEqual(@as(u8, 2), missing.code);
     try std.testing.expect(std.mem.indexOf(u8, missing.stderr, "usage") != null);
+}
+
+test "cli extension host lists checks and rejects unavailable install" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "extensions-cli.zova");
+
+    {
+        var db = try zova.Database.create(db_path);
+        defer db.deinit();
+    }
+
+    var list = try runCli(&.{ "zova", "extension", "list", "--json", db_path });
+    defer list.deinit();
+    try std.testing.expectEqual(@as(u8, 0), list.code);
+    var list_json = try parseJson(list.stdout);
+    defer list_json.deinit();
+    try expectJsonString(list_json.value.object, "command", "extension-list");
+    try expectJsonArrayLen(list_json.value.object, "extensions", 0);
+
+    var check = try runCli(&.{ "zova", "extension", "check", db_path });
+    defer check.deinit();
+    try std.testing.expectEqual(@as(u8, 0), check.code);
+    try expectContains(check.stdout, "extensions: 0");
+
+    var missing = try runCli(&.{ "zova", "extension", "install", "--json", db_path, "missing_ext" });
+    defer missing.deinit();
+    try std.testing.expectEqual(@as(u8, 4), missing.code);
+    try expectContains(missing.stderr, "ExtensionNotFound");
+
+    var invalid_name = try runCli(&.{ "zova", "extension", "info", db_path, "_zova_hidden" });
+    defer invalid_name.deinit();
+    try std.testing.expectEqual(@as(u8, 2), invalid_name.code);
+    try expectContains(invalid_name.stderr, "extension name is invalid");
 }
 
 test "cli graph commands inspect graphs nodes neighbors and walks" {
@@ -791,7 +829,7 @@ test "cli info reports bounded database summary" {
     defer result.deinit();
     try std.testing.expectEqual(@as(u8, 0), result.code);
     try expectContains(result.stdout, "Zova database");
-    try expectContains(result.stdout, "format_version: 4");
+    try expectContains(result.stdout, "format_version: 5");
     try expectContains(result.stdout, "objects:");
     try expectContains(result.stdout, "chunks:");
     try expectContains(result.stdout, "loose_chunks:");
@@ -931,7 +969,7 @@ test "cli info json reports bounded database summary" {
     try expectJsonInt(root, "cli_json_version", 1);
     try expectJsonString(root, "package_version", cli.package_version);
     try expectJsonString(root, "sqlite_version", zova.sqlite.version());
-    try expectJsonString(root, "format_version", "4");
+    try expectJsonString(root, "format_version", "5");
     try expectJsonObjectHasInt(root, "files", "database_bytes");
     try expectJsonObjectHasInt(root, "sqlite", "page_count");
     try expectJsonObjectHasInt(root, "objects", "count");

@@ -36,6 +36,11 @@ pub const GraphNeighborList = zova.GraphNeighborList;
 pub const GraphWalkOptions = zova.GraphWalkOptions;
 pub const GraphWalkItem = zova.GraphWalkItem;
 pub const GraphWalk = zova.GraphWalk;
+pub const Extension = zova.Extension;
+pub const ExtensionRegistry = zova.ExtensionRegistry;
+pub const ExtensionManifest = zova.ExtensionManifest;
+pub const ExtensionInfo = zova.ExtensionInfo;
+pub const ExtensionList = zova.ExtensionList;
 pub const OpenOptions = zova.OpenOptions;
 pub const BackupOptions = zova.BackupOptions;
 pub const BoundObjectStoreInfo = zova.BoundObjectStoreInfo;
@@ -53,6 +58,7 @@ pub const convertSqliteToZova = zova.convertSqliteToZova;
 pub const createObjectStore = zova.createObjectStore;
 pub const createVectorStore = zova.createVectorStore;
 pub const restoreBackup = zova.restoreBackup;
+pub const restoreBackupWithExtensions = zova.restoreBackupWithExtensions;
 
 test "package exports sqlite namespace" {
     try std.testing.expect(@hasDecl(@This(), "sqlite"));
@@ -78,6 +84,7 @@ test "package exports zova database namespace" {
     try std.testing.expect(@hasDecl(@This(), "createObjectStore"));
     try std.testing.expect(@hasDecl(@This(), "createVectorStore"));
     try std.testing.expect(@hasDecl(@This(), "restoreBackup"));
+    try std.testing.expect(@hasDecl(@This(), "restoreBackupWithExtensions"));
     try std.testing.expect(@hasDecl(@This(), "Object"));
     try std.testing.expect(@hasDecl(@This(), "ObjectChunk"));
     try std.testing.expect(@hasDecl(@This(), "ObjectChunkData"));
@@ -103,6 +110,11 @@ test "package exports zova database namespace" {
     try std.testing.expect(@hasDecl(@This(), "GraphEdge"));
     try std.testing.expect(@hasDecl(@This(), "GraphNeighborList"));
     try std.testing.expect(@hasDecl(@This(), "GraphWalk"));
+    try std.testing.expect(@hasDecl(@This(), "Extension"));
+    try std.testing.expect(@hasDecl(@This(), "ExtensionRegistry"));
+    try std.testing.expect(@hasDecl(@This(), "ExtensionManifest"));
+    try std.testing.expect(@hasDecl(@This(), "ExtensionInfo"));
+    try std.testing.expect(@hasDecl(@This(), "ExtensionList"));
     try std.testing.expect(@hasDecl(@This(), "max_vector_dimensions"));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(ObjectId));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(ObjectChunkId));
@@ -167,10 +179,19 @@ test "package exports zova database namespace" {
     try std.testing.expect(@hasDecl(Database, "getGraphEdge"));
     try std.testing.expect(@hasDecl(Database, "graphNeighbors"));
     try std.testing.expect(@hasDecl(Database, "graphWalk"));
+    try std.testing.expect(@hasDecl(Database, "createWithExtensions"));
+    try std.testing.expect(@hasDecl(Database, "openWithExtensions"));
+    try std.testing.expect(@hasDecl(Database, "openWithOptionsAndExtensions"));
+    try std.testing.expect(@hasDecl(Database, "installExtension"));
+    try std.testing.expect(@hasDecl(Database, "listExtensions"));
+    try std.testing.expect(@hasDecl(Database, "extensionInfo"));
+    try std.testing.expect(@hasDecl(Database, "checkExtension"));
+    try std.testing.expect(@hasDecl(Database, "dropExtension"));
     try std.testing.expect(!@hasDecl(@This(), "fastcdc"));
 }
 
 test {
+    _ = @import("extension.zig");
     _ = @import("graph_sql_tests.zig");
     _ = @import("graph_tests.zig");
     _ = @import("object_tests.zig");

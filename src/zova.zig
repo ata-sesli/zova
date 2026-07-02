@@ -6,9 +6,9 @@
 //! metadata before treating it as a Zova-owned database.
 //!
 //! Zova is currently pre-1.0, and internal `.zova` format compatibility is
-//! not preserved between experimental format versions. The current v0.20
-//! development format is version `4`: `_zova_meta.format_version = '4'` plus
-//! the required private object schema and vector collection schema.
+//! not preserved between experimental format versions. The current v0.21
+//! development format is version `5`: `_zova_meta.format_version = '5'` plus
+//! the required private object, vector, graph, and extension registry schemas.
 //! `Database.open` is intentionally non-mutating: it validates the file and
 //! rejects old, future, incomplete, or invalid private schemas instead of
 //! repairing or migrating them.
@@ -39,6 +39,7 @@
 //! intentionally absent from this release.
 
 const std = @import("std");
+const extension_impl = @import("extension.zig");
 const fastcdc = @import("object_fastcdc.zig");
 const graph_impl = @import("graph.zig");
 const graph_sql = @import("graph_sql.zig");
@@ -55,7 +56,7 @@ const chunks_table = "_zova_chunks";
 const object_chunks_table = "_zova_object_chunks";
 const bound_stores_table = "_zova_bound_stores";
 const magic_value = "zova";
-const format_version = "4";
+const format_version = "5";
 const bound_object_store_role = "object_store";
 const bound_vector_store_role = "vector_store";
 const bound_object_store_name = "default";
@@ -153,6 +154,11 @@ pub const GraphNeighborList = graph_impl.GraphNeighborList;
 pub const GraphWalkOptions = graph_impl.GraphWalkOptions;
 pub const GraphWalkItem = graph_impl.GraphWalkItem;
 pub const GraphWalk = graph_impl.GraphWalk;
+pub const Extension = extension_impl.Extension;
+pub const ExtensionRegistry = extension_impl.Registry;
+pub const ExtensionManifest = extension_impl.Manifest;
+pub const ExtensionInfo = extension_impl.InstalledInfo;
+pub const ExtensionList = extension_impl.InstalledList;
 
 /// Information about the optional object store bound to a main `.zova` file.
 ///
@@ -337,9 +343,14 @@ pub fn convertSqliteToZova(source_path: [:0]const u8, dest_path: [:0]const u8) E
 /// This uses SQLite's online backup API and never overwrites an existing
 /// destination. The source must already be a valid current-format Zova file.
 pub fn restoreBackup(source_path: [:0]const u8, dest_path: [:0]const u8, options: RestoreOptions) Error!void {
+    try restoreBackupWithExtensions(source_path, dest_path, options, ExtensionRegistry.empty());
+}
+
+/// Restore a backup `.zova` file with process-registered extension code.
+pub fn restoreBackupWithExtensions(source_path: [:0]const u8, dest_path: [:0]const u8, options: RestoreOptions, registry: ExtensionRegistry) Error!void {
     if (!isZovaPath(source_path)) return error.NotZovaPath;
 
-    var source = try Database.openWithOptions(source_path, .{ .read_only = true });
+    var source = try Database.openWithOptionsAndExtensions(source_path, .{ .read_only = true }, registry);
     defer source.deinit();
 
     try source.backupTo(dest_path, .{ .verify = options.verify });
@@ -371,13 +382,21 @@ pub const Database = struct {
     notifications: *notify_impl.Hub,
     bound_object_store: ?BoundObjectStore = null,
     bound_vector_store: ?BoundVectorStore = null,
+    extension_registry: ExtensionRegistry = ExtensionRegistry.empty(),
 
     /// Create a new initialized `.zova` database.
     ///
     /// This never overwrites an existing file. The file is initialized with the
-    /// private `_zova_meta` table, format version `4`, and the required
-    /// object, vector, and graph schemas.
+    /// private `_zova_meta` table, format version `5`, and the required
+    /// object, vector, graph, and extension registry schemas.
     pub fn create(path: [:0]const u8) Error!Database {
+        return createWithExtensions(path, ExtensionRegistry.empty());
+    }
+
+    /// Create a new initialized `.zova` database with process-registered
+    /// extension code available for later extension lifecycle calls.
+    pub fn createWithExtensions(path: [:0]const u8, registry: ExtensionRegistry) Error!Database {
+        try registry.validate();
         if (!isZovaPath(path)) return error.NotZovaPath;
 
         const io = defaultIo();
@@ -395,9 +414,10 @@ pub const Database = struct {
         try initializeZovaSchema(&raw);
         try vector_sql.register(&raw);
         try graph_sql.register(&raw);
+        try extension_impl.registerSqlForInstalled(&raw, registry);
         const notifications = try initNotifications(&raw);
         errdefer deinitNotifications(notifications);
-        return .{ .sqlite_db = raw, .notifications = notifications };
+        return .{ .sqlite_db = raw, .notifications = notifications, .extension_registry = registry };
     }
 
     /// Open an existing initialized `.zova` database.
@@ -409,6 +429,12 @@ pub const Database = struct {
         return openWithOptions(path, .{});
     }
 
+    /// Open an existing initialized `.zova` database with process-registered
+    /// extension code.
+    pub fn openWithExtensions(path: [:0]const u8, registry: ExtensionRegistry) Error!Database {
+        return openWithOptionsAndExtensions(path, .{}, registry);
+    }
+
     /// Open an existing initialized `.zova` database with explicit options.
     ///
     /// Read-only opens still validate Zova metadata and register connection-
@@ -416,7 +442,13 @@ pub const Database = struct {
     /// or run migrations. Mutating SQL/object/vector/graph APIs fail through
     /// SQLite's normal read-only error path.
     pub fn openWithOptions(path: [:0]const u8, options: OpenOptions) Error!Database {
-        return openInternal(path, options, true);
+        return openWithOptionsAndExtensions(path, options, ExtensionRegistry.empty());
+    }
+
+    /// Open an existing initialized `.zova` database with explicit options and
+    /// process-registered extension code.
+    pub fn openWithOptionsAndExtensions(path: [:0]const u8, options: OpenOptions, registry: ExtensionRegistry) Error!Database {
+        return openInternal(path, options, true, registry);
     }
 
     /// Open only the main `.zova` file for bound-store binding management.
@@ -426,10 +458,11 @@ pub const Database = struct {
     /// handle use the main file only; normal application code should use `open`
     /// or `openWithOptions`.
     pub fn openForObjectStoreManagement(path: [:0]const u8, options: OpenOptions) Error!Database {
-        return openInternal(path, options, false);
+        return openInternal(path, options, false, ExtensionRegistry.empty());
     }
 
-    fn openInternal(path: [:0]const u8, options: OpenOptions, load_bound_stores: bool) Error!Database {
+    fn openInternal(path: [:0]const u8, options: OpenOptions, load_bound_stores: bool, registry: ExtensionRegistry) Error!Database {
+        try registry.validate();
         if (!isZovaPath(path)) return error.NotZovaPath;
         try ensurePathExists(path);
 
@@ -451,6 +484,8 @@ pub const Database = struct {
         errdefer if (bound_vector_store != null) raw.detachDatabase(bound_vector_store_schema_name) catch {};
         try vector_sql.register(&raw);
         try graph_sql.register(&raw);
+        try extension_impl.registerSqlForInstalled(&raw, registry);
+        try extension_impl.checkAll(&raw, registry);
         const notifications = try initNotifications(&raw);
         errdefer deinitNotifications(notifications);
         return .{
@@ -458,6 +493,7 @@ pub const Database = struct {
             .notifications = notifications,
             .bound_object_store = bound_object_store,
             .bound_vector_store = bound_vector_store,
+            .extension_registry = registry,
         };
     }
 
@@ -465,6 +501,34 @@ pub const Database = struct {
     pub fn deinit(self: *Database) void {
         self.sqlite_db.deinit();
         deinitNotifications(self.notifications);
+    }
+
+    /// Install one process-registered extension into this database.
+    ///
+    /// The database records extension metadata and extension-owned storage, but
+    /// never records executable paths or auto-loads code from the file.
+    pub fn installExtension(self: *Database, name: []const u8) Error!void {
+        try extension_impl.install(&self.sqlite_db, self.extension_registry, name);
+    }
+
+    /// Return installed extension metadata sorted by extension name.
+    pub fn listExtensions(self: *Database, allocator: std.mem.Allocator) Error!ExtensionList {
+        return extension_impl.listInstalled(allocator, &self.sqlite_db);
+    }
+
+    /// Return metadata for one installed extension.
+    pub fn extensionInfo(self: *Database, allocator: std.mem.Allocator, name: []const u8) Error!ExtensionInfo {
+        return extension_impl.loadInfo(allocator, &self.sqlite_db, name);
+    }
+
+    /// Run the registered extension's health check hook.
+    pub fn checkExtension(self: *Database, name: []const u8) Error!void {
+        try extension_impl.check(&self.sqlite_db, self.extension_registry, name);
+    }
+
+    /// Drop one process-registered extension and its namespaced storage.
+    pub fn dropExtension(self: *Database, name: []const u8) Error!void {
+        try extension_impl.drop(&self.sqlite_db, self.extension_registry, name);
     }
 
     /// Execute SQL against the underlying SQLite database.
@@ -686,7 +750,7 @@ pub const Database = struct {
         }
 
         try self.inlineBoundStoresIntoDestination(destination_path);
-        if (options.verify) try verifyOperationalCopy(destination_path);
+        if (options.verify) try verifyOperationalCopy(destination_path, self.extension_registry);
     }
 
     /// Write a compact copy to a new `.zova` destination using SQLite
@@ -705,7 +769,7 @@ pub const Database = struct {
         try expectDone(&vacuum_stmt);
 
         try self.inlineBoundStoresIntoDestination(destination_path);
-        if (options.verify) try verifyOperationalCopy(destination_path);
+        if (options.verify) try verifyOperationalCopy(destination_path, self.extension_registry);
     }
 
     /// Set SQLite's busy timeout in milliseconds for this connection.
@@ -1560,6 +1624,7 @@ fn ensureSourcePathExists(path: []const u8) Error!void {
 
 fn initializeZovaSchema(db: *sqlite.Database) sqlite.Error!void {
     try initializeMetadata(db);
+    try initializeExtensionSchema(db);
     try initializeObjectSchema(db);
     try initializeVectorSchema(db);
     try initializeGraphSchema(db);
@@ -1578,13 +1643,17 @@ fn initializeMetadata(db: *sqlite.Database) sqlite.Error!void {
         \\  value text not null
         \\);
         \\insert into _zova_meta (key, value) values ('magic', 'zova');
-        \\insert into _zova_meta (key, value) values ('format_version', '4');
+        \\insert into _zova_meta (key, value) values ('format_version', '5');
     );
 
     var insert_id = try db.prepare("insert into _zova_meta (key, value) values ('database_id', ?)");
     defer insert_id.deinit();
     try insert_id.bindText(1, &database_id);
     std.debug.assert((try insert_id.step()) == .done);
+}
+
+fn initializeExtensionSchema(db: *sqlite.Database) sqlite.Error!void {
+    try db.exec(extension_impl.extensions_schema_sql ++ ";");
 }
 
 fn initializeObjectSchema(db: *sqlite.Database) sqlite.Error!void {
@@ -1994,6 +2063,7 @@ fn validateObjectStoreDatabase(db: *sqlite.Database) Error!void {
     try expectMetadataValue(db, "store_role", bound_object_store_role, .magic);
     const store_id = try objectStoreIdAlloc(std.heap.c_allocator, db);
     defer std.heap.c_allocator.free(store_id);
+    try validateExtensionSchema(db);
     try validateObjectSchema(db);
 }
 
@@ -2007,6 +2077,7 @@ fn validateAttachedObjectStoreAlloc(
     try expectAttachedMetadataValue(db, schema_name, "store_role", bound_object_store_role, .magic);
     const store_id = try attachedObjectStoreIdAlloc(allocator, db, schema_name);
     errdefer allocator.free(store_id);
+    try validateAttachedExtensionSchema(db, schema_name);
     try validateAttachedObjectSchema(db, schema_name);
     return store_id;
 }
@@ -2017,6 +2088,7 @@ fn validateVectorStoreDatabase(db: *sqlite.Database) Error!void {
     try expectMetadataValue(db, "store_role", bound_vector_store_role, .magic);
     const store_id = try objectStoreIdAlloc(std.heap.c_allocator, db);
     defer std.heap.c_allocator.free(store_id);
+    try validateExtensionSchema(db);
     try validateVectorSchema(db);
 }
 
@@ -2030,6 +2102,7 @@ fn validateAttachedVectorStoreAlloc(
     try expectAttachedMetadataValue(db, schema_name, "store_role", bound_vector_store_role, .magic);
     const store_id = try attachedObjectStoreIdAlloc(allocator, db, schema_name);
     errdefer allocator.free(store_id);
+    try validateAttachedExtensionSchema(db, schema_name);
     try validateAttachedVectorSchema(db, schema_name);
     return store_id;
 }
@@ -2076,6 +2149,20 @@ fn validateAttachedVectorSchema(db: *sqlite.Database, comptime schema_name: []co
         "values",
     };
     try validateAttachedRequiredTable(db, schema_name, vector_impl.vectors_table, &vector_columns, vector_impl.vectors_schema_sql);
+}
+
+fn validateAttachedExtensionSchema(db: *sqlite.Database, comptime schema_name: []const u8) Error!void {
+    const extension_columns = [_][]const u8{
+        "name",
+        "version",
+        "storage_prefix",
+        "zova_abi_min",
+        "capabilities",
+        "required",
+        "installed_at_unix",
+        "manifest_json",
+    };
+    try validateAttachedRequiredTable(db, schema_name, extension_impl.extensions_table, &extension_columns, extension_impl.extensions_schema_sql);
 }
 
 fn validateAttachedRequiredTable(
@@ -2539,8 +2626,8 @@ fn expectDone(stmt: *sqlite.Statement) Error!void {
     }
 }
 
-fn verifyOperationalCopy(path: [:0]const u8) Error!void {
-    var db = try Database.openWithOptions(path, .{ .read_only = true });
+fn verifyOperationalCopy(path: [:0]const u8, registry: ExtensionRegistry) Error!void {
+    var db = try Database.openWithOptionsAndExtensions(path, .{ .read_only = true }, registry);
     defer db.deinit();
 
     try verifyCurrentDatabase(&db);
@@ -2666,10 +2753,25 @@ fn validateZovaSchema(db: *sqlite.Database) Error!void {
     try expectMetadataValue(db, "magic", magic_value, .magic);
     try expectMetadataValue(db, "format_version", format_version, .format_version);
     try ensureMainDatabaseRole(db);
+    try validateExtensionSchema(db);
     try validateObjectSchema(db);
     try validateVectorSchema(db);
     try validateGraphSchema(db);
     try validateOptionalBoundStoreSchema(db);
+}
+
+fn validateExtensionSchema(db: *sqlite.Database) Error!void {
+    const extension_columns = [_][]const u8{
+        "name",
+        "version",
+        "storage_prefix",
+        "zova_abi_min",
+        "capabilities",
+        "required",
+        "installed_at_unix",
+        "manifest_json",
+    };
+    try validateRequiredTable(db, extension_impl.extensions_table, &extension_columns, extension_impl.extensions_schema_sql);
 }
 
 fn validateObjectSchema(db: *sqlite.Database) Error!void {
@@ -3144,13 +3246,325 @@ test "created zova database stores metadata" {
 
     try std.testing.expectEqual(sqlite.Step.row, try meta.step());
     try std.testing.expectEqualStrings("format_version", meta.columnText(0));
-    try std.testing.expectEqualStrings("4", meta.columnText(1));
+    try std.testing.expectEqualStrings("5", meta.columnText(1));
 
     try std.testing.expectEqual(sqlite.Step.row, try meta.step());
     try std.testing.expectEqualStrings("magic", meta.columnText(0));
     try std.testing.expectEqualStrings("zova", meta.columnText(1));
 
     try std.testing.expectEqual(sqlite.Step.done, try meta.step());
+}
+
+test "created zova database stores required extension registry" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "extensions-registry.zova");
+
+    {
+        var db = try Database.create(db_path);
+        defer db.deinit();
+
+        var extensions = try db.listExtensions(std.testing.allocator);
+        defer extensions.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 0), extensions.items.len);
+    }
+
+    var raw = try sqlite.Database.open(db_path);
+    defer raw.deinit();
+
+    try std.testing.expect(try tableExists(&raw, "_zova_extensions"));
+}
+
+test "app registered extension installs checks registers sql and drops" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "registered-extension.zova");
+
+    const registry = ExtensionRegistry.init(&.{testExtension()});
+
+    {
+        var db = try Database.createWithExtensions(db_path, registry);
+        defer db.deinit();
+
+        try db.installExtension("test");
+
+        var info = try db.extensionInfo(std.testing.allocator, "test");
+        defer info.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("test", info.name);
+        try std.testing.expectEqualStrings("0.1.0", info.version);
+        try std.testing.expectEqualStrings("_zova_ext_test_", info.storage_prefix);
+
+        try db.checkExtension("test");
+
+        var scalar = try db.prepare("select zova_test_extension_value()");
+        defer scalar.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try scalar.step());
+        try std.testing.expectEqual(@as(i64, 7), scalar.columnInt64(0));
+
+        try std.testing.expect(try tableExists(&db.sqlite_db, "_zova_ext_test_meta"));
+    }
+
+    {
+        var db = try Database.openWithExtensions(db_path, registry);
+        defer db.deinit();
+        try db.checkExtension("test");
+        try db.dropExtension("test");
+        try std.testing.expect(!try tableExists(&db.sqlite_db, "_zova_ext_test_meta"));
+        try std.testing.expectError(error.ExtensionNotFound, db.extensionInfo(std.testing.allocator, "test"));
+    }
+}
+
+test "open with missing registered extension code fails clearly" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "missing-extension.zova");
+
+    const registry = ExtensionRegistry.init(&.{testExtension()});
+    {
+        var db = try Database.createWithExtensions(db_path, registry);
+        defer db.deinit();
+        try db.installExtension("test");
+    }
+
+    try std.testing.expectError(error.ExtensionUnavailable, Database.open(db_path));
+}
+
+test "extension registry is used for backup compact and restore verification" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var backup_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var compact_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var restore_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "extension-copy-source.zova");
+    const backup_path = try testingDbPath(&backup_buffer, tmp.sub_path[0..], "extension-copy-backup.zova");
+    const compact_path = try testingDbPath(&compact_buffer, tmp.sub_path[0..], "extension-copy-compact.zova");
+    const restore_path = try testingDbPath(&restore_buffer, tmp.sub_path[0..], "extension-copy-restore.zova");
+
+    const registry = ExtensionRegistry.init(&.{testExtension()});
+
+    {
+        var db = try Database.createWithExtensions(db_path, registry);
+        defer db.deinit();
+        try db.installExtension("test");
+
+        try db.backupTo(backup_path, .{});
+        try db.compactTo(compact_path, .{});
+    }
+
+    try restoreBackupWithExtensions(backup_path, restore_path, .{}, registry);
+
+    for ([_][:0]const u8{ backup_path, compact_path, restore_path }) |copy_path| {
+        var copy = try Database.openWithExtensions(copy_path, registry);
+        defer copy.deinit();
+        try copy.checkExtension("test");
+
+        var scalar = try copy.prepare("select zova_test_extension_value()");
+        defer scalar.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try scalar.step());
+        try std.testing.expectEqual(@as(i64, 7), scalar.columnInt64(0));
+    }
+}
+
+test "extension manifests validate names prefixes and duplicate registry prefixes" {
+    try std.testing.expectError(error.ExtensionInvalid, extension_impl.validateManifest(.{
+        .name = "",
+        .version = "0.1.0",
+        .storage_prefix = "_zova_ext__",
+        .zova_abi_min = "0.21.0",
+    }));
+    try std.testing.expectError(error.ExtensionInvalid, extension_impl.validateManifest(.{
+        .name = "_zova_hidden",
+        .version = "0.1.0",
+        .storage_prefix = "_zova_ext__zova_hidden_",
+        .zova_abi_min = "0.21.0",
+    }));
+    try std.testing.expectError(error.ExtensionInvalid, extension_impl.validateManifest(.{
+        .name = "bad name",
+        .version = "0.1.0",
+        .storage_prefix = "_zova_ext_bad name_",
+        .zova_abi_min = "0.21.0",
+    }));
+    try std.testing.expectError(error.ExtensionInvalid, extension_impl.validateManifest(.{
+        .name = "test",
+        .version = "0.1.0",
+        .storage_prefix = "_zova_objects",
+        .zova_abi_min = "0.21.0",
+    }));
+
+    const duplicate_one = testExtension();
+    const duplicate_two = Extension{
+        .manifest = .{
+            .name = "other",
+            .version = "0.1.0",
+            .storage_prefix = "_zova_ext_test_",
+            .zova_abi_min = "0.21.0",
+        },
+        .install = testExtensionInstall,
+        .check = testExtensionCheck,
+        .drop = testExtensionDrop,
+    };
+    try std.testing.expectError(error.ExtensionInvalid, ExtensionRegistry.init(&.{ duplicate_one, duplicate_two }).validate());
+}
+
+test "extension duplicate install and failed hooks roll back cleanly" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "extension-rollback.zova");
+
+    const registry = ExtensionRegistry.init(&.{ testExtension(), failingExtension(), registerFailingExtension() });
+    var db = try Database.createWithExtensions(db_path, registry);
+    defer db.deinit();
+
+    try db.installExtension("test");
+    try std.testing.expectError(error.ExtensionExists, db.installExtension("test"));
+
+    try std.testing.expectError(error.ExtensionInvalid, db.installExtension("failing"));
+    try std.testing.expectError(error.ExtensionNotFound, db.extensionInfo(std.testing.allocator, "failing"));
+    try std.testing.expect(!try tableExists(&db.sqlite_db, "_zova_ext_failing_meta"));
+
+    try std.testing.expectError(error.ExtensionInvalid, db.installExtension("register_fail"));
+    try std.testing.expectError(error.ExtensionNotFound, db.extensionInfo(std.testing.allocator, "register_fail"));
+    try std.testing.expect(!try tableExists(&db.sqlite_db, "_zova_ext_register_fail_meta"));
+}
+
+fn testExtension() Extension {
+    return .{
+        .manifest = .{
+            .name = "test",
+            .version = "0.1.0",
+            .storage_prefix = "_zova_ext_test_",
+            .zova_abi_min = "0.21.0",
+            .capabilities = "sql",
+        },
+        .install = testExtensionInstall,
+        .check = testExtensionCheck,
+        .drop = testExtensionDrop,
+        .register_sql = testExtensionRegisterSql,
+    };
+}
+
+fn failingExtension() Extension {
+    return .{
+        .manifest = .{
+            .name = "failing",
+            .version = "0.1.0",
+            .storage_prefix = "_zova_ext_failing_",
+            .zova_abi_min = "0.21.0",
+        },
+        .install = failingExtensionInstall,
+        .check = testExtensionCheck,
+        .drop = testExtensionDrop,
+    };
+}
+
+fn registerFailingExtension() Extension {
+    return .{
+        .manifest = .{
+            .name = "register_fail",
+            .version = "0.1.0",
+            .storage_prefix = "_zova_ext_register_fail_",
+            .zova_abi_min = "0.21.0",
+        },
+        .install = registerFailingExtensionInstall,
+        .check = registerFailingExtensionCheck,
+        .drop = registerFailingExtensionDrop,
+        .register_sql = registerFailingExtensionRegisterSql,
+    };
+}
+
+fn testExtensionInstall(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
+    try extension_impl.validateManifest(manifest);
+    try db.exec(
+        \\create table _zova_ext_test_meta (
+        \\  key text primary key,
+        \\  value text not null
+        \\)
+    );
+    var stmt = try db.prepare("insert into _zova_ext_test_meta (key, value) values ('installed', ?)");
+    defer stmt.deinit();
+    try stmt.bindText(1, manifest.version);
+    std.debug.assert((try stmt.step()) == .done);
+}
+
+fn testExtensionCheck(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
+    try extension_impl.validateManifest(manifest);
+    var stmt = try db.prepare("select value from _zova_ext_test_meta where key = 'installed'");
+    defer stmt.deinit();
+    switch (try stmt.step()) {
+        .row => {
+            if (!std.mem.eql(u8, stmt.columnText(0), manifest.version)) return error.ExtensionInvalid;
+        },
+        .done => return error.ExtensionInvalid,
+    }
+
+    var scalar = try db.prepare("select zova_test_extension_value()");
+    defer scalar.deinit();
+    if ((try scalar.step()) != .row) return error.ExtensionInvalid;
+    if (scalar.columnInt64(0) != 7) return error.ExtensionInvalid;
+}
+
+fn testExtensionDrop(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
+    try extension_impl.validateManifest(manifest);
+    try db.exec("drop table _zova_ext_test_meta");
+}
+
+fn testExtensionRegisterSql(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
+    try extension_impl.validateManifest(manifest);
+    const rc = sqlite.c.sqlite3_create_function_v2(
+        db.handle,
+        "zova_test_extension_value",
+        0,
+        sqlite.c.SQLITE_UTF8,
+        null,
+        testExtensionValueFunc,
+        null,
+        null,
+        null,
+    );
+    if (rc != sqlite.c.SQLITE_OK) return error.SqliteError;
+}
+
+fn failingExtensionInstall(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
+    try extension_impl.validateManifest(manifest);
+    try db.exec("create table _zova_ext_failing_meta (key text primary key, value text not null)");
+    return error.ExtensionInvalid;
+}
+
+fn registerFailingExtensionInstall(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
+    try extension_impl.validateManifest(manifest);
+    try db.exec("create table _zova_ext_register_fail_meta (key text primary key, value text not null)");
+}
+
+fn registerFailingExtensionCheck(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
+    try extension_impl.validateManifest(manifest);
+    _ = db;
+}
+
+fn registerFailingExtensionDrop(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
+    try extension_impl.validateManifest(manifest);
+    try db.exec("drop table _zova_ext_register_fail_meta");
+}
+
+fn registerFailingExtensionRegisterSql(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
+    try extension_impl.validateManifest(manifest);
+    _ = db;
+    return error.ExtensionInvalid;
+}
+
+fn testExtensionValueFunc(ctx: ?*sqlite.c.sqlite3_context, argc: c_int, argv: [*c]?*sqlite.c.sqlite3_value) callconv(.c) void {
+    _ = argv;
+    if (argc != 0) return;
+    sqlite.c.sqlite3_result_int64(ctx, 7);
 }
 
 test "zova database rejects non zova paths" {
@@ -3268,7 +3682,7 @@ test "open rejects future format version" {
         try raw.exec(
             \\create table _zova_meta (key text primary key, value text not null);
             \\insert into _zova_meta (key, value) values ('magic', 'zova');
-            \\insert into _zova_meta (key, value) values ('format_version', '5');
+            \\insert into _zova_meta (key, value) values ('format_version', '6');
         );
     }
 
@@ -4073,7 +4487,8 @@ test "open rejects current format database missing required object table without
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "4");
+        try testingWriteMetadata(&raw, "zova", "5");
+        try raw.exec(extension_impl.extensions_schema_sql ++ ";");
     }
 
     try std.testing.expectError(error.NotZovaDatabase, Database.open(db_path));
@@ -4097,7 +4512,8 @@ test "open rejects current format database missing required vector table without
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "4");
+        try testingWriteMetadata(&raw, "zova", "5");
+        try raw.exec(extension_impl.extensions_schema_sql ++ ";");
         try raw.exec(object_impl.objects_schema_sql ++ ";");
         try raw.exec(object_impl.chunks_schema_sql ++ ";");
         try raw.exec(object_impl.object_chunks_schema_sql ++ ";");
@@ -4123,7 +4539,8 @@ test "open rejects required object table missing required column" {
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "4");
+        try testingWriteMetadata(&raw, "zova", "5");
+        try raw.exec(extension_impl.extensions_schema_sql ++ ";");
         try raw.exec(
             \\create table _zova_objects (
             \\  object_id blob not null primary key check (length(object_id) = 32),
@@ -4162,7 +4579,8 @@ test "open rejects required object table missing required constraint" {
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "4");
+        try testingWriteMetadata(&raw, "zova", "5");
+        try raw.exec(extension_impl.extensions_schema_sql ++ ";");
         try raw.exec(
             \\create table _zova_objects (
             \\  object_id blob not null primary key check (length(object_id) = 32),
@@ -4202,7 +4620,8 @@ test "open rejects fake constraint text in required object table" {
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "4");
+        try testingWriteMetadata(&raw, "zova", "5");
+        try raw.exec(extension_impl.extensions_schema_sql ++ ";");
         try raw.exec(
             \\create table _zova_objects (
             \\  object_id blob not null primary key check (length(object_id) = 32),
@@ -4242,7 +4661,8 @@ test "open rejects required vector table missing required column" {
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "4");
+        try testingWriteMetadata(&raw, "zova", "5");
+        try raw.exec(extension_impl.extensions_schema_sql ++ ";");
         try raw.exec(object_impl.objects_schema_sql ++ ";");
         try raw.exec(object_impl.chunks_schema_sql ++ ";");
         try raw.exec(object_impl.object_chunks_schema_sql ++ ";");
@@ -4409,7 +4829,7 @@ test "converted zova remains readable through sqlite wrapper" {
     defer meta.deinit();
 
     try std.testing.expectEqual(sqlite.Step.row, try meta.step());
-    try std.testing.expectEqualStrings("4", meta.columnText(0));
+    try std.testing.expectEqualStrings("5", meta.columnText(0));
 
     try testingExpectTableCount(&raw, "_zova_objects", 1);
     try testingExpectTableCount(&raw, "_zova_chunks", 1);

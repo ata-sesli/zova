@@ -255,12 +255,12 @@ test "graph workflow uses explicit notifications after commit" {
     try std.testing.expectEqual(@as(?zova.Notification, null), try sub.tryReceive(std.testing.allocator));
 }
 
-test "format version four requires graph schema" {
+test "format version five requires graph schema" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "format-four.zova");
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "format-five.zova");
 
     {
         var db = try zova.Database.create(db_path);
@@ -274,7 +274,7 @@ test "format version four requires graph schema" {
         var meta = try raw.prepare("select value from _zova_meta where key = 'format_version'");
         defer meta.deinit();
         try std.testing.expectEqual(sqlite.Step.row, try meta.step());
-        try std.testing.expectEqualStrings("4", meta.columnText(0));
+        try std.testing.expectEqualStrings("5", meta.columnText(0));
     }
 
     try std.testing.expect(try tableExists(&raw, "_zova_graphs"));

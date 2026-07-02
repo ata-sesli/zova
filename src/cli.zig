@@ -96,11 +96,26 @@ const ObjectStoreAction = enum {
     unbind,
 };
 
+const ExtensionAction = enum {
+    list,
+    info,
+    check,
+    drop,
+    install,
+};
+
 const ObjectStoreCommandArgs = struct {
     format: OutputFormat,
     action: ObjectStoreAction,
     main_path: ?[]const u8,
     store_path: ?[]const u8,
+};
+
+const ExtensionCommandArgs = struct {
+    format: OutputFormat,
+    action: ExtensionAction,
+    path: []const u8,
+    name: ?[]const u8,
 };
 
 const BoundedCommandParseError = error{
@@ -155,6 +170,17 @@ const ObjectStoreCommandParseError = error{
     ExtraArgs,
 };
 
+const ExtensionCommandParseError = error{
+    MissingAction,
+    UnknownAction,
+    DuplicateJson,
+    UnknownFlag,
+    MissingPath,
+    MissingName,
+    InvalidName,
+    ExtraArgs,
+};
+
 const SplitCommandParseError = error{
     MissingRole,
     DuplicateRole,
@@ -191,6 +217,7 @@ const DatabaseSummary = struct {
 };
 
 const DiagnosticStats = struct {
+    extensions: u64 = 0,
     objects: u64 = 0,
     chunks: u64 = 0,
     vectors: u64 = 0,
@@ -391,6 +418,7 @@ const TableList = struct {
 const DiagnosticIssueCounts = struct {
     sqlite: u64 = 0,
     bound_store: u64 = 0,
+    extension: u64 = 0,
     object: u64 = 0,
     chunk: u64 = 0,
     vector: u64 = 0,
@@ -407,6 +435,7 @@ const DiagnosticSeverityCounts = struct {
 const DiagnosticIssueArea = enum {
     sqlite,
     bound_store,
+    extension,
     object,
     chunk,
     vector,
@@ -599,6 +628,9 @@ pub fn run(
     if (std.mem.eql(u8, command, "vector-store")) {
         return vectorStoreCommand(allocator, args[2..], stdout, stderr);
     }
+    if (std.mem.eql(u8, command, "extension")) {
+        return extensionCommand(allocator, args[2..], stdout, stderr);
+    }
 
     try stderr.print("unknown command: {s}\n\n", .{command});
     try writeUsage(stderr);
@@ -642,6 +674,11 @@ fn writeUsage(writer: *std.Io.Writer) !void {
         \\  zova vector-store bind [--json] <main.zova> <vectors.zova>
         \\  zova vector-store info [--json] <main.zova>
         \\  zova vector-store unbind [--json] <main.zova>
+        \\  zova extension list [--json] <file.zova>
+        \\  zova extension info [--json] <file.zova> <name>
+        \\  zova extension check [--json] <file.zova> [name]
+        \\  zova extension drop [--json] <file.zova> <name>
+        \\  zova extension install [--json] <file.zova> <name>
         \\
         \\commands:
         \\  info   print a bounded summary of a current-format Zova database
@@ -667,6 +704,7 @@ fn writeUsage(writer: *std.Io.Writer) !void {
         \\  split  move existing single-file object or vector storage into a new bound store
         \\  object-store manage one optional bound object store
         \\  vector-store manage one optional bound vector store
+        \\  extension inspect and manage trusted app-registered extensions
         \\
         \\exit codes:
         \\  0 healthy/success
@@ -1093,6 +1131,70 @@ fn vectorStoreCommand(
     }
 }
 
+fn extensionCommand(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !u8 {
+    const parsed = parseExtensionCommandArgs(args) catch |err| {
+        const format: OutputFormat = if (argsContain(args, "--json")) .json else .text;
+        return usageErrorFormat(stderr, "extension", format, extensionUsageMessage(err));
+    };
+
+    const path_z = try allocator.dupeZ(u8, parsed.path);
+    defer allocator.free(path_z);
+
+    var db = zova.Database.open(path_z) catch |err| return extensionOpenErrorFormat(stderr, parsed.format, err);
+    defer db.deinit();
+
+    switch (parsed.action) {
+        .list => {
+            var extensions = db.listExtensions(allocator) catch |err| return extensionErrorFormat(stderr, "extension-list", parsed.format, err);
+            defer extensions.deinit(allocator);
+            try writeExtensionList(stdout, parsed.format, parsed.path, extensions);
+            return ExitCode.ok;
+        },
+        .info => {
+            const name = parsed.name.?;
+            var info = db.extensionInfo(allocator, name) catch |err| return extensionErrorFormat(stderr, "extension-info", parsed.format, err);
+            defer info.deinit(allocator);
+            try writeExtensionInfo(stdout, parsed.format, "extension-info", parsed.path, info);
+            return ExitCode.ok;
+        },
+        .check => {
+            if (parsed.name) |name| {
+                db.checkExtension(name) catch |err| return extensionErrorFormat(stderr, "extension-check", parsed.format, err);
+                var info = db.extensionInfo(allocator, name) catch |err| return extensionErrorFormat(stderr, "extension-check", parsed.format, err);
+                defer info.deinit(allocator);
+                try writeExtensionInfo(stdout, parsed.format, "extension-check", parsed.path, info);
+            } else {
+                var extensions = db.listExtensions(allocator) catch |err| return extensionErrorFormat(stderr, "extension-check", parsed.format, err);
+                defer extensions.deinit(allocator);
+                for (extensions.items) |item| {
+                    db.checkExtension(item.name) catch |err| return extensionErrorFormat(stderr, "extension-check", parsed.format, err);
+                }
+                try writeExtensionList(stdout, parsed.format, parsed.path, extensions);
+            }
+            return ExitCode.ok;
+        },
+        .drop => {
+            const name = parsed.name.?;
+            db.dropExtension(name) catch |err| return extensionErrorFormat(stderr, "extension-drop", parsed.format, err);
+            try writeExtensionMutationSuccess(stdout, parsed.format, "extension-drop", parsed.path, name);
+            return ExitCode.ok;
+        },
+        .install => {
+            const name = parsed.name.?;
+            db.installExtension(name) catch |err| return extensionErrorFormat(stderr, "extension-install", parsed.format, err);
+            var info = db.extensionInfo(allocator, name) catch |err| return extensionErrorFormat(stderr, "extension-install", parsed.format, err);
+            defer info.deinit(allocator);
+            try writeExtensionInfo(stdout, parsed.format, "extension-install", parsed.path, info);
+            return ExitCode.ok;
+        },
+    }
+}
+
 fn parseObjectStoreCommandArgs(args: []const []const u8) ObjectStoreCommandParseError!ObjectStoreCommandArgs {
     if (args.len == 0) return error.MissingAction;
 
@@ -1133,6 +1235,93 @@ fn parseObjectStoreCommandArgs(args: []const []const u8) ObjectStoreCommandParse
             return .{ .format = format, .action = action, .main_path = main_path, .store_path = null };
         },
     }
+}
+
+fn parseExtensionCommandArgs(args: []const []const u8) ExtensionCommandParseError!ExtensionCommandArgs {
+    if (args.len == 0) return error.MissingAction;
+
+    const action = parseExtensionAction(args[0]) orelse return error.UnknownAction;
+    var format: OutputFormat = .text;
+    var first_path: ?[]const u8 = null;
+    var name: ?[]const u8 = null;
+
+    for (args[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            if (format == .json) return error.DuplicateJson;
+            format = .json;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            return error.UnknownFlag;
+        } else if (first_path == null) {
+            first_path = arg;
+        } else if (name == null) {
+            if (!isValidCliExtensionName(arg)) return error.InvalidName;
+            name = arg;
+        } else {
+            return error.ExtraArgs;
+        }
+    }
+
+    const path = first_path orelse return error.MissingPath;
+    switch (action) {
+        .list => {
+            if (name != null) return error.ExtraArgs;
+        },
+        .info, .drop, .install => {
+            _ = name orelse return error.MissingName;
+        },
+        .check => {},
+    }
+
+    return .{ .format = format, .action = action, .path = path, .name = name };
+}
+
+fn parseExtensionAction(value: []const u8) ?ExtensionAction {
+    if (std.mem.eql(u8, value, "list")) return .list;
+    if (std.mem.eql(u8, value, "info")) return .info;
+    if (std.mem.eql(u8, value, "check")) return .check;
+    if (std.mem.eql(u8, value, "drop")) return .drop;
+    if (std.mem.eql(u8, value, "install")) return .install;
+    return null;
+}
+
+fn extensionUsageMessage(err: ExtensionCommandParseError) []const u8 {
+    return switch (err) {
+        error.MissingAction => "extension requires list, info, check, drop, or install",
+        error.UnknownAction => "unknown extension action",
+        error.DuplicateJson => "duplicate --json",
+        error.UnknownFlag => "unknown flag",
+        error.MissingPath => "extension action requires <file.zova>",
+        error.MissingName => "extension action requires <name>",
+        error.InvalidName => "extension name is invalid",
+        error.ExtraArgs => "extension action received extra arguments",
+    };
+}
+
+fn extensionOpenErrorFormat(stderr: *std.Io.Writer, format: OutputFormat, err: anyerror) !u8 {
+    const is_extension_health = isExtensionHealthError(err);
+    switch (format) {
+        .text => try stderr.print("extension: {s}: {s}\n", .{ if (is_extension_health) "failed" else "open failed", @errorName(err) }),
+        .json => try writeJsonErrorWithKind(stderr, "extension", if (is_extension_health) "extension failed" else "open failed", @errorName(err)),
+    }
+    return if (is_extension_health) ExitCode.check_failed else ExitCode.open;
+}
+
+fn isExtensionHealthError(err: anyerror) bool {
+    return switch (err) {
+        error.ExtensionInvalid,
+        error.ExtensionIncompatible,
+        error.ExtensionUnavailable,
+        => true,
+        else => false,
+    };
+}
+
+fn extensionErrorFormat(stderr: *std.Io.Writer, command: []const u8, format: OutputFormat, err: anyerror) !u8 {
+    switch (format) {
+        .text => try stderr.print("{s}: failed: {s}\n", .{ command, @errorName(err) }),
+        .json => try writeJsonErrorWithKind(stderr, command, "extension failed", @errorName(err)),
+    }
+    return ExitCode.check_failed;
 }
 
 fn parseObjectStoreAction(value: []const u8) ?ObjectStoreAction {
@@ -1372,6 +1561,122 @@ fn writeObjectStoreSuccess(
             try stdout.writeAll("}\n");
         },
     }
+}
+
+fn writeExtensionList(
+    stdout: *std.Io.Writer,
+    format: OutputFormat,
+    path: []const u8,
+    extensions: zova.ExtensionList,
+) !void {
+    switch (format) {
+        .text => {
+            try stdout.print("extension-list: {s}\n", .{path});
+            try stdout.print("extensions: {d}\n", .{extensions.items.len});
+            if (extensions.items.len == 0) {
+                try stdout.writeAll("  none\n");
+            } else {
+                for (extensions.items) |item| {
+                    try stdout.print("  {s} version={s} storage_prefix={s} required={}\n", .{
+                        item.name,
+                        item.version,
+                        item.storage_prefix,
+                        item.required,
+                    });
+                }
+            }
+        },
+        .json => {
+            try stdout.writeAll("{\n");
+            try stdout.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
+            try stdout.writeAll("  \"status\": \"ok\",\n");
+            try stdout.writeAll("  \"command\": \"extension-list\",\n");
+            try stdout.writeAll("  \"path\": ");
+            try writeJsonString(stdout, path);
+            try stdout.print(",\n  \"count\": {d},\n", .{extensions.items.len});
+            try stdout.writeAll("  \"extensions\": [");
+            for (extensions.items, 0..) |item, index| {
+                if (index != 0) try stdout.writeAll(", ");
+                try writeExtensionInfoObject(stdout, item);
+            }
+            try stdout.writeAll("]\n}\n");
+        },
+    }
+}
+
+fn writeExtensionInfo(
+    stdout: *std.Io.Writer,
+    format: OutputFormat,
+    command: []const u8,
+    path: []const u8,
+    info: zova.ExtensionInfo,
+) !void {
+    switch (format) {
+        .text => {
+            try stdout.print("{s}: ok\n", .{command});
+            try stdout.print("path: {s}\n", .{path});
+            try stdout.print("name: {s}\n", .{info.name});
+            try stdout.print("version: {s}\n", .{info.version});
+            try stdout.print("storage_prefix: {s}\n", .{info.storage_prefix});
+            try stdout.print("zova_abi_min: {s}\n", .{info.zova_abi_min});
+            try stdout.print("capabilities: {s}\n", .{info.capabilities});
+            try stdout.print("required: {}\n", .{info.required});
+        },
+        .json => {
+            try stdout.writeAll("{\n");
+            try stdout.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
+            try stdout.writeAll("  \"status\": \"ok\",\n");
+            try stdout.writeAll("  \"command\": ");
+            try writeJsonString(stdout, command);
+            try stdout.writeAll(",\n  \"path\": ");
+            try writeJsonString(stdout, path);
+            try stdout.writeAll(",\n  \"extension\": ");
+            try writeExtensionInfoObject(stdout, info);
+            try stdout.writeAll("\n}\n");
+        },
+    }
+}
+
+fn writeExtensionMutationSuccess(
+    stdout: *std.Io.Writer,
+    format: OutputFormat,
+    command: []const u8,
+    path: []const u8,
+    name: []const u8,
+) !void {
+    switch (format) {
+        .text => {
+            try stdout.print("{s}: ok\n", .{command});
+            try stdout.print("path: {s}\n", .{path});
+            try stdout.print("name: {s}\n", .{name});
+        },
+        .json => {
+            try stdout.writeAll("{\n");
+            try stdout.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
+            try stdout.writeAll("  \"status\": \"ok\",\n");
+            try stdout.writeAll("  \"command\": ");
+            try writeJsonString(stdout, command);
+            try stdout.writeAll(",\n  \"path\": ");
+            try writeJsonString(stdout, path);
+            try stdout.writeAll(",\n  \"name\": ");
+            try writeJsonString(stdout, name);
+            try stdout.writeAll("\n}\n");
+        },
+    }
+}
+
+fn writeExtensionInfoObject(writer: *std.Io.Writer, info: zova.ExtensionInfo) !void {
+    try writer.writeAll("{\"name\": ");
+    try writeJsonString(writer, info.name);
+    try writer.writeAll(", \"version\": ");
+    try writeJsonString(writer, info.version);
+    try writer.writeAll(", \"storage_prefix\": ");
+    try writeJsonString(writer, info.storage_prefix);
+    try writer.writeAll(", \"zova_abi_min\": ");
+    try writeJsonString(writer, info.zova_abi_min);
+    try writer.writeAll(", \"capabilities\": ");
+    try writeJsonString(writer, info.capabilities);
+    try writer.print(", \"required\": {}}}", .{info.required});
 }
 
 fn writeOperationalSuccess(
@@ -2495,6 +2800,14 @@ fn salvageExecutionErrorFormat(
 }
 
 fn openErrorFormat(stderr: *std.Io.Writer, command: []const u8, format: OutputFormat, err: anyerror) !u8 {
+    if (isExtensionHealthError(err)) {
+        switch (format) {
+            .text => try stderr.print("{s}: extension failed: {s}\n", .{ command, @errorName(err) }),
+            .json => try writeJsonErrorWithKind(stderr, command, "extension failed", @errorName(err)),
+        }
+        return ExitCode.check_failed;
+    }
+
     switch (format) {
         .text => try stderr.print("{s} open failed: {s}\n", .{ command, @errorName(err) }),
         .json => try writeJsonError(stderr, command, @errorName(err)),
@@ -2604,6 +2917,19 @@ fn isValidCliVectorName(name: []const u8) bool {
     if (name.len == 0 or name.len > 255) return false;
     if (!std.unicode.utf8ValidateSlice(name)) return false;
     return !startsWithZovaPrefix(name);
+}
+
+fn isValidCliExtensionName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 64) return false;
+    if (startsWithZovaPrefix(name)) return false;
+    for (name) |byte| {
+        const ok = (byte >= 'A' and byte <= 'Z') or
+            (byte >= 'a' and byte <= 'z') or
+            (byte >= '0' and byte <= '9') or
+            byte == '_' or byte == '.' or byte == ':' or byte == '-';
+        if (!ok) return false;
+    }
+    return true;
 }
 
 fn startsWithZovaPrefix(name: []const u8) bool {
@@ -4252,6 +4578,7 @@ fn writeCheckText(stdout: *std.Io.Writer, report: ?DiagnosticReport) !void {
     if (report) |deep_report| {
         try stdout.print(
             \\deep_check: ok
+            \\extensions_checked: {d}
             \\objects_checked: {d}
             \\chunks_checked: {d}
             \\vectors_checked: {d}
@@ -4262,6 +4589,7 @@ fn writeCheckText(stdout: *std.Io.Writer, report: ?DiagnosticReport) !void {
             \\issue_count: {d}
             \\sqlite_issues: {d}
             \\bound_store_issues: {d}
+            \\extension_issues: {d}
             \\object_issues: {d}
             \\chunk_issues: {d}
             \\vector_issues: {d}
@@ -4269,6 +4597,7 @@ fn writeCheckText(stdout: *std.Io.Writer, report: ?DiagnosticReport) !void {
             \\error_issues: {d}
             \\
         , .{
+            deep_report.stats.extensions,
             deep_report.stats.objects,
             deep_report.stats.chunks,
             deep_report.stats.vectors,
@@ -4279,6 +4608,7 @@ fn writeCheckText(stdout: *std.Io.Writer, report: ?DiagnosticReport) !void {
             deep_report.issue_count,
             deep_report.issue_counts.sqlite,
             deep_report.issue_counts.bound_store,
+            deep_report.issue_counts.extension,
             deep_report.issue_counts.object,
             deep_report.issue_counts.chunk,
             deep_report.issue_counts.vector,
@@ -4300,6 +4630,7 @@ fn writeCheckJson(stdout: *std.Io.Writer, report: ?DiagnosticReport) !void {
             \\,
             \\  "deep_check": "ok",
             \\  "checked": {{
+            \\    "extensions": {d},
             \\    "objects": {d},
             \\    "chunks": {d},
             \\    "vectors": {d},
@@ -4311,6 +4642,7 @@ fn writeCheckJson(stdout: *std.Io.Writer, report: ?DiagnosticReport) !void {
             \\  "issue_count": {d},
             \\  "issue_counts":
         , .{
+            deep_report.stats.extensions,
             deep_report.stats.objects,
             deep_report.stats.chunks,
             deep_report.stats.vectors,
@@ -4336,6 +4668,7 @@ fn writeDeepCheckFailureText(stderr: *std.Io.Writer, report: DiagnosticReport) !
         \\issue_count: {d}
         \\sqlite_issues: {d}
         \\bound_store_issues: {d}
+        \\extension_issues: {d}
         \\object_issues: {d}
         \\chunk_issues: {d}
         \\vector_issues: {d}
@@ -4348,6 +4681,7 @@ fn writeDeepCheckFailureText(stderr: *std.Io.Writer, report: DiagnosticReport) !
         report.issue_count,
         report.issue_counts.sqlite,
         report.issue_counts.bound_store,
+        report.issue_counts.extension,
         report.issue_counts.object,
         report.issue_counts.chunk,
         report.issue_counts.vector,
@@ -4363,6 +4697,9 @@ fn writeDeepCheckFailureText(stderr: *std.Io.Writer, report: DiagnosticReport) !
     }
     if (report.issue_counts.graph != 0) {
         try stderr.writeAll("graph corruption: detected\n");
+    }
+    if (report.issue_counts.extension != 0) {
+        try stderr.writeAll("extension issues: detected\n");
     }
     for (report.issues) |issue| {
         try stderr.print("  area={s} kind={s} severity={s} detail={s}", .{
@@ -4409,6 +4746,7 @@ fn writeDoctorText(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
         \\status: {s}
         \\quick_check: ok
         \\schema: ok
+        \\extensions_checked: {d}
         \\objects_checked: {d}
         \\chunks_checked: {d}
         \\vectors_checked: {d}
@@ -4421,6 +4759,7 @@ fn writeDoctorText(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
         \\issue_count: {d}
         \\sqlite_issues: {d}
         \\bound_store_issues: {d}
+        \\extension_issues: {d}
         \\object_issues: {d}
         \\chunk_issues: {d}
         \\vector_issues: {d}
@@ -4431,6 +4770,7 @@ fn writeDoctorText(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
     , .{
         source_path,
         if (has_issues) "needs_attention" else "ok",
+        report.stats.extensions,
         report.stats.objects,
         report.stats.chunks,
         report.stats.vectors,
@@ -4443,6 +4783,7 @@ fn writeDoctorText(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
         report.issue_count,
         report.issue_counts.sqlite,
         report.issue_counts.bound_store,
+        report.issue_counts.extension,
         report.issue_counts.object,
         report.issue_counts.chunk,
         report.issue_counts.vector,
@@ -4498,6 +4839,7 @@ fn writeDoctorJson(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
         \\  "quick_check": "ok",
         \\  "schema": "ok",
         \\  "checked": {{
+        \\    "extensions": {d},
         \\    "objects": {d},
         \\    "chunks": {d},
         \\    "vectors": {d},
@@ -4513,6 +4855,7 @@ fn writeDoctorJson(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
         \\  "issue_count": {d},
         \\  "issue_counts":
     , .{
+        report.stats.extensions,
         report.stats.objects,
         report.stats.chunks,
         report.stats.vectors,
@@ -4591,6 +4934,7 @@ fn writeSalvageDryRunText(writer: *std.Io.Writer, source_path: []const u8, plan:
         \\issue_count: {d}
         \\sqlite_issues: {d}
         \\bound_store_issues: {d}
+        \\extension_issues: {d}
         \\object_issues: {d}
         \\chunk_issues: {d}
         \\vector_issues: {d}
@@ -4620,6 +4964,7 @@ fn writeSalvageDryRunText(writer: *std.Io.Writer, source_path: []const u8, plan:
         plan.report.issue_count,
         plan.report.issue_counts.sqlite,
         plan.report.issue_counts.bound_store,
+        plan.report.issue_counts.extension,
         plan.report.issue_counts.object,
         plan.report.issue_counts.chunk,
         plan.report.issue_counts.vector,
@@ -4898,12 +5243,13 @@ fn writeDiagnosticIssueCountsJson(writer: *std.Io.Writer, counts: DiagnosticIssu
         \\{{
         \\    "sqlite": {d},
         \\    "bound_store": {d},
+        \\    "extension": {d},
         \\    "object": {d},
         \\    "chunk": {d},
         \\    "vector": {d},
         \\    "graph": {d}
         \\  }}
-    , .{ counts.sqlite, counts.bound_store, counts.object, counts.chunk, counts.vector, counts.graph });
+    , .{ counts.sqlite, counts.bound_store, counts.extension, counts.object, counts.chunk, counts.vector, counts.graph });
 }
 
 fn writeDiagnosticSeverityCountsJson(writer: *std.Io.Writer, counts: DiagnosticSeverityCounts) !void {
@@ -4966,6 +5312,7 @@ fn diagnosticIssueAreaText(area: DiagnosticIssueArea) []const u8 {
     return switch (area) {
         .sqlite => "sqlite",
         .bound_store => "bound_store",
+        .extension => "extension",
         .object => "object",
         .chunk => "chunk",
         .vector => "vector",
@@ -5051,12 +5398,28 @@ fn runDiagnostics(allocator: std.mem.Allocator, db: *zova.Database, issue_limit:
 
     var report = DiagnosticReport{ .issue_limit = issue_limit };
     try validateBoundStores(allocator, db, &report, &issues);
+    try validateExtensions(allocator, db, &report, &issues);
     try validateObjects(allocator, db, &report, &issues);
     try validateLooseChunks(allocator, db, &report, &issues);
     try validateVectors(allocator, db, &report, &issues);
     try validateGraphs(allocator, db, &report, &issues);
     report.issues = try issues.toOwnedSlice(allocator);
     return report;
+}
+
+fn validateExtensions(allocator: std.mem.Allocator, db: *zova.Database, report: *DiagnosticReport, issues: *std.ArrayList(DiagnosticIssue)) !void {
+    var extensions = db.listExtensions(allocator) catch |err| {
+        try addDiagnosticIssue(allocator, report, issues, .extension, "extension_registry_unreadable", @errorName(err), null, null, null, null);
+        return;
+    };
+    defer extensions.deinit(allocator);
+
+    report.stats.extensions = extensions.items.len;
+    for (extensions.items) |item| {
+        db.checkExtension(item.name) catch |err| {
+            try addDiagnosticIssue(allocator, report, issues, .extension, "extension_check_failed", @errorName(err), null, null, null, null);
+        };
+    }
 }
 
 fn validateBoundStores(allocator: std.mem.Allocator, db: *zova.Database, report: *DiagnosticReport, issues: *std.ArrayList(DiagnosticIssue)) !void {
@@ -5134,7 +5497,7 @@ fn validateOneBoundStore(
 
     const format_version = (try requiredBoundStoreMetaValueAlloc(allocator, &store, report, issues, "format_version", "missing_store_format_version", "UnsupportedZovaVersion", "store_format_version_unreadable")) orelse return;
     defer allocator.free(format_version);
-    if (!std.mem.eql(u8, format_version, "4")) {
+    if (!std.mem.eql(u8, format_version, "5")) {
         try addDiagnosticIssue(allocator, report, issues, .bound_store, "store_format_version_mismatch", "UnsupportedZovaVersion", null, null, null, null);
         return;
     }
@@ -6103,6 +6466,7 @@ fn addDiagnosticIssue(
     switch (area) {
         .sqlite => report.issue_counts.sqlite += 1,
         .bound_store => report.issue_counts.bound_store += 1,
+        .extension => report.issue_counts.extension += 1,
         .object => report.issue_counts.object += 1,
         .chunk => report.issue_counts.chunk += 1,
         .vector => report.issue_counts.vector += 1,

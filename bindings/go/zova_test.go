@@ -29,6 +29,9 @@ func TestABIVersionAndStatusNames(t *testing.T) {
 	if got := StatusName(StatusOK); got != "ZOVA_OK" {
 		t.Fatalf("unexpected OK status name: %q", got)
 	}
+	if got := StatusName(StatusExtensionUnavailable); got != "ZOVA_EXTENSION_UNAVAILABLE" {
+		t.Fatalf("unexpected extension status name: %q", got)
+	}
 }
 
 func TestCreateOpenExecAndPreparedStatements(t *testing.T) {

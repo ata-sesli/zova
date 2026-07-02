@@ -45,6 +45,11 @@ pub enum Status {
     GraphNodeNotFound,
     GraphEdgeNotFound,
     GraphInvalid,
+    ExtensionNotFound,
+    ExtensionExists,
+    ExtensionInvalid,
+    ExtensionIncompatible,
+    ExtensionUnavailable,
     Unknown(i32),
 }
 
@@ -90,6 +95,11 @@ impl Status {
             zova_sys::ZOVA_GRAPH_NODE_NOT_FOUND => Self::GraphNodeNotFound,
             zova_sys::ZOVA_GRAPH_EDGE_NOT_FOUND => Self::GraphEdgeNotFound,
             zova_sys::ZOVA_GRAPH_INVALID => Self::GraphInvalid,
+            zova_sys::ZOVA_EXTENSION_NOT_FOUND => Self::ExtensionNotFound,
+            zova_sys::ZOVA_EXTENSION_EXISTS => Self::ExtensionExists,
+            zova_sys::ZOVA_EXTENSION_INVALID => Self::ExtensionInvalid,
+            zova_sys::ZOVA_EXTENSION_INCOMPATIBLE => Self::ExtensionIncompatible,
+            zova_sys::ZOVA_EXTENSION_UNAVAILABLE => Self::ExtensionUnavailable,
             other => Self::Unknown(other),
         }
     }
@@ -135,6 +145,11 @@ impl Status {
             Self::GraphNodeNotFound => zova_sys::ZOVA_GRAPH_NODE_NOT_FOUND,
             Self::GraphEdgeNotFound => zova_sys::ZOVA_GRAPH_EDGE_NOT_FOUND,
             Self::GraphInvalid => zova_sys::ZOVA_GRAPH_INVALID,
+            Self::ExtensionNotFound => zova_sys::ZOVA_EXTENSION_NOT_FOUND,
+            Self::ExtensionExists => zova_sys::ZOVA_EXTENSION_EXISTS,
+            Self::ExtensionInvalid => zova_sys::ZOVA_EXTENSION_INVALID,
+            Self::ExtensionIncompatible => zova_sys::ZOVA_EXTENSION_INCOMPATIBLE,
+            Self::ExtensionUnavailable => zova_sys::ZOVA_EXTENSION_UNAVAILABLE,
             Self::Unknown(code) => code,
         }
     }

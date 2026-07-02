@@ -35,5 +35,10 @@ pub const Error = sqlite.Error || error{
     GraphNodeNotFound,
     GraphEdgeNotFound,
     GraphInvalid,
+    ExtensionNotFound,
+    ExtensionExists,
+    ExtensionInvalid,
+    ExtensionIncompatible,
+    ExtensionUnavailable,
     OutOfMemory,
 };

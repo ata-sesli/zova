@@ -151,6 +151,11 @@ copies valid graph topology and skips invalid graph nodes or edges. The Python
 package does not expose typed doctor/salvage report APIs yet, and library code
 should not parse the human text output as a stable binding contract.
 
+The current development branch adds a native Zig extension host foundation.
+Python extension lifecycle and registry APIs are not exposed yet; ordinary
+Python opens continue to require installed extension code to be available
+through the process that owns the native Zova connection.
+
 ## App Events
 
 Use `listen` / `notify` for same-process storage workflow notifications. They

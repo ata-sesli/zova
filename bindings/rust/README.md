@@ -322,6 +322,11 @@ copies valid graph topology and skips invalid graph nodes or edges. The Rust
 crates do not expose typed doctor/salvage report APIs yet, and library code
 should not parse the human text output as a stable binding contract.
 
+The current development branch adds a native Zig extension host foundation.
+Rust extension lifecycle and registry APIs are not exposed yet; ordinary Rust
+opens continue to require installed extension code to be available through the
+process that owns the native Zova connection.
+
 Objects can live beside ordinary SQL metadata:
 
 ```rust

@@ -35,11 +35,20 @@ fn abi_version_and_status_names_are_available() {
         );
         assert_eq!(zova_sys::ZOVA_GRAPH_EXISTS, 80);
         assert_eq!(zova_sys::ZOVA_GRAPH_INVALID, 84);
+        assert_eq!(zova_sys::ZOVA_EXTENSION_UNAVAILABLE, 94);
         assert_eq!(
             CStr::from_ptr(zova_sys::zova_status_name(zova_sys::ZOVA_GRAPH_INVALID))
                 .to_str()
                 .unwrap(),
             "ZOVA_GRAPH_INVALID"
+        );
+        assert_eq!(
+            CStr::from_ptr(zova_sys::zova_status_name(
+                zova_sys::ZOVA_EXTENSION_UNAVAILABLE
+            ))
+            .to_str()
+            .unwrap(),
+            "ZOVA_EXTENSION_UNAVAILABLE"
         );
     }
 }

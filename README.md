@@ -7,12 +7,14 @@ Zova keeps SQLite as the relational core and adds native storage for
 content-addressed objects, chunk manifests, streaming writes, exact vector
 search, SQL-native vector queries, graph relationships, SQL-native graph
 traversal, transaction-aware app events, bound object/vector stores,
-diagnostics, salvage, backup, compact copy, and restore.
+diagnostics, salvage, backup, compact copy, restore, and a trusted extension
+host foundation.
 
 Current package version: `0.20.0`.
 
-Zova is pre-1.0. The current `.zova` file `format_version` is `4`.
-Zova `0.20.0` is the graph-aware relationships release.
+Zova is pre-1.0. The current development `.zova` file `format_version` is `5`.
+Zova `0.20.0` is the graph-aware relationships release; the current source
+tree is building the v0.21 extension host foundation.
 
 ## Contents
 
@@ -30,15 +32,16 @@ Zova `0.20.0` is the graph-aware relationships release.
 12. [SQL-Native Graph Traversal](#sql-native-graph-traversal)
 13. [Operational Safety](#operational-safety)
 14. [App Events](#app-events)
-15. [Diagnostics And Salvage](#diagnostics-and-salvage)
-16. [CLI](#cli)
-17. [Bindings](#bindings)
-18. [Build From Source](#build-from-source)
-19. [SQLite Policy](#sqlite-policy)
-20. [Current Boundaries](#current-boundaries)
-21. [Testing](#testing)
-22. [Release Package Policy](#release-package-policy)
-23. [License](#license)
+15. [Extensions](#extensions)
+16. [Diagnostics And Salvage](#diagnostics-and-salvage)
+17. [CLI](#cli)
+18. [Bindings](#bindings)
+19. [Build From Source](#build-from-source)
+20. [SQLite Policy](#sqlite-policy)
+21. [Current Boundaries](#current-boundaries)
+22. [Testing](#testing)
+23. [Release Package Policy](#release-package-policy)
+24. [License](#license)
 
 ## Install
 
@@ -186,7 +189,7 @@ func main() {
 
 ## What Zova Stores
 
-Zova has three first-class storage shapes:
+Zova has four first-class storage shapes:
 
 - **Records:** normal SQLite tables, indexes, views, triggers, and SQL.
 - **Objects:** content-addressed bytes, chunked with FastCDC-v1 and addressed by
@@ -225,6 +228,8 @@ flowchart TD
     Graphs["_zova_graphs<br/>named relationship graphs"]
     Nodes["_zova_graph_nodes<br/>stable app node ids"]
     Edges["_zova_graph_edges<br/>directed relationships"]
+    Ext["_zova_extensions<br/>installed extension registry"]
+    ExtStore["_zova_ext_name_*<br/>extension-owned storage"]
 
     App --> API
     App --> UserSQL
@@ -238,6 +243,8 @@ flowchart TD
     File --> VecCols
     File --> Vecs
     File --> Graphs
+    File --> Ext
+    Ext --> ExtStore
     Graphs --> Nodes
     Nodes --> Edges
     Objects --> Manifest
@@ -603,6 +610,40 @@ Queue details:
   drop count on the next received notification
 - v0.18 has polling only: use `try_receive` / drain loops, not callbacks
 
+## Extensions
+
+The current development branch includes the first v0.21 extension host
+foundation.
+
+An extension is trusted process code plus private Zova metadata:
+
+- the database records installed extension metadata in `_zova_extensions`
+- an extension owns only tables with its `_zova_ext_<name>_` prefix
+- extension code is provided by the process, not loaded from the `.zova` file
+- SQL functions or virtual tables are registered on each opened Zova connection
+- install, check, and drop hooks run inside Zova-managed transactions
+
+This keeps `.zova` files non-executable. A file may say it requires an
+extension, but the application or CLI process decides which extension code is
+available and trusted. Opening a database with an installed required extension
+whose code is unavailable fails clearly instead of silently ignoring the
+extension.
+
+The host foundation supports app-registered extensions in native Zig and CLI
+inspection/management:
+
+```sh
+zova extension list app.zova
+zova extension info app.zova <name>
+zova extension check app.zova [name]
+zova extension drop app.zova <name>
+zova extension install app.zova <name>
+```
+
+In this host-only slice, `install` succeeds only for extensions registered in
+the current process. The first official extension, `zova_trgm`, and dynamic
+trusted local loading are deferred.
+
 ## Diagnostics And Salvage
 
 Zova keeps diagnostics non-mutating by default:
@@ -651,6 +692,8 @@ zova check --deep app.zova
 zova doctor --json app.zova
 zova object-store info app.zova
 zova vector-store info app.zova
+zova extension list app.zova
+zova extension check app.zova
 ```
 
 JSON output includes `cli_json_version = 1`. CLI output is bounded and avoids
@@ -827,6 +870,9 @@ synchronous settings automatically.
 
 Zova `0.20.0` does not include:
 
+- `zova_trgm` or another official functional extension yet
+- dynamic trusted local extension loading
+- C ABI, Rust, Go, or Python extension lifecycle APIs
 - ANN indexes such as HNSW or IVFFlat
 - vector SQL operators
 - object or chunk virtual tables

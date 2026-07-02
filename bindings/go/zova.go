@@ -58,6 +58,11 @@ const (
 	StatusGraphNodeNotFound        Status = C.ZOVA_GRAPH_NODE_NOT_FOUND
 	StatusGraphEdgeNotFound        Status = C.ZOVA_GRAPH_EDGE_NOT_FOUND
 	StatusGraphInvalid             Status = C.ZOVA_GRAPH_INVALID
+	StatusExtensionNotFound        Status = C.ZOVA_EXTENSION_NOT_FOUND
+	StatusExtensionExists          Status = C.ZOVA_EXTENSION_EXISTS
+	StatusExtensionInvalid         Status = C.ZOVA_EXTENSION_INVALID
+	StatusExtensionIncompatible    Status = C.ZOVA_EXTENSION_INCOMPATIBLE
+	StatusExtensionUnavailable     Status = C.ZOVA_EXTENSION_UNAVAILABLE
 )
 
 // Step is the result of advancing a prepared statement.
