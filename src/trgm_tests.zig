@@ -75,6 +75,40 @@ test "trgm similarity documents typo punctuation case and utf8 behavior" {
     try expectSimilarity(&db, "İstanbul", "İstanbul", 1.0, 1.0);
 }
 
+test "trgm handles short strings and moderate document counts deterministically" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "trgm-short-moderate.zova");
+
+    var db = try zova.Database.create(db_path);
+    defer db.deinit();
+    try db.installExtension("trgm");
+    try execSql(&db, "select zova_trgm_create_index('docs')");
+
+    try putWithBoundArgs(&db, "docs", "short:a", "record", "messages", "short:a", "a");
+    try putWithBoundArgs(&db, "docs", "short:ab", "record", "messages", "short:ab", "ab");
+    try putWithBoundArgs(&db, "docs", "short:abc", "record", "messages", "short:abc", "abc");
+    try expectSearchIds(&db, "docs", "ab", 3, 0.0, &.{ "short:ab", "short:abc", "short:a" });
+
+    var index: usize = 0;
+    while (index < 128) : (index += 1) {
+        var id_buffer: [32]u8 = undefined;
+        const id = try std.fmt.bufPrint(&id_buffer, "doc:{d:0>3}", .{index});
+        var ref_buffer: [32]u8 = undefined;
+        const target_ref = try std.fmt.bufPrint(&ref_buffer, "messages:{d}", .{index});
+        var text_buffer: [160]u8 = undefined;
+        const text = if (index == 42)
+            try std.fmt.bufPrint(&text_buffer, "moderate corpus document target neon orbital attachment receipt database", .{})
+        else
+            try std.fmt.bufPrint(&text_buffer, "moderate corpus document {d:0>3} filler archive note", .{index});
+        try putWithBoundArgs(&db, "docs", id, "record", "messages", target_ref, text);
+    }
+
+    try expectSearchIds(&db, "docs", "neon orbital attachment receipt databse", 1, 0.0, &.{"doc:042"});
+}
+
 test "trgm search respects upsert delete limit threshold transactions and read only" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

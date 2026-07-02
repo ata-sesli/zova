@@ -10,6 +10,7 @@ const cli_options = @import("cli_options");
 const sqlite = zova.sqlite;
 
 pub const package_version = cli_options.package_version;
+pub const dynamic_extension_library_path = cli_options.dynamic_extension_library_path;
 
 const ExitCode = struct {
     const ok: u8 = 0;
@@ -26,6 +27,20 @@ const max_list_limit = 100;
 const OutputFormat = enum {
     text,
     json,
+};
+
+const CommandContext = struct {
+    registry: zova.ExtensionRegistry,
+};
+
+const ParsedGlobalArgs = struct {
+    args: []const []const u8,
+    extension_paths: []const []const u8,
+
+    fn deinit(self: *ParsedGlobalArgs, allocator: std.mem.Allocator) void {
+        allocator.free(self.args);
+        allocator.free(self.extension_paths);
+    }
 };
 
 const BoundedCommandArgs = struct {
@@ -102,6 +117,9 @@ const ExtensionAction = enum {
     check,
     drop,
     install,
+    trust,
+    untrust,
+    trusted,
 };
 
 const ObjectStoreCommandArgs = struct {
@@ -114,7 +132,7 @@ const ObjectStoreCommandArgs = struct {
 const ExtensionCommandArgs = struct {
     format: OutputFormat,
     action: ExtensionAction,
-    path: []const u8,
+    path: ?[]const u8,
     name: ?[]const u8,
 };
 
@@ -494,6 +512,8 @@ const SalvageCounts = struct {
     user_tables: u64 = 0,
     user_schema_objects: u64 = 0,
     user_rows: u64 = 0,
+    extensions: u64 = 0,
+    extension_private_objects: u64 = 0,
     graphs: u64 = 0,
     graph_nodes: u64 = 0,
     graph_edges: u64 = 0,
@@ -545,93 +565,115 @@ pub fn run(
     stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
 ) !u8 {
-    if (args.len <= 1) {
+    var parsed_global = parseGlobalArgs(allocator, args) catch |err| switch (err) {
+        error.MissingExtensionPath => return usageError(stderr, "--extension requires <bundle.zovaext>"),
+        else => return err,
+    };
+    defer parsed_global.deinit(allocator);
+
+    var dynamic_extensions = zova.DynamicExtensionSet.loadTrustedBundles(
+        allocator,
+        parsed_global.extension_paths,
+        .{},
+    ) catch |err| return dynamicExtensionLoadErrorFormat(stderr, if (argsContain(args, "--json")) .json else .text, err);
+    defer dynamic_extensions.deinit();
+
+    var owned_registry = zova.DynamicExtensionOwnedRegistry.init(allocator, &.{
+        zova.bundledExtensionRegistry(),
+        dynamic_extensions.registry(),
+    }) catch |err| return dynamicExtensionLoadErrorFormat(stderr, if (argsContain(args, "--json")) .json else .text, err);
+    defer owned_registry.deinit();
+
+    const ctx: CommandContext = .{ .registry = owned_registry.registry() };
+    const parsed_args = parsed_global.args;
+
+    if (parsed_args.len <= 1) {
         try writeUsage(stderr);
         return ExitCode.usage;
     }
 
-    const command = args[1];
+    const command = parsed_args[1];
     if (std.mem.eql(u8, command, "--version")) {
-        if (args.len != 2) return usageError(stderr, "unexpected argument after --version");
+        if (parsed_args.len != 2) return usageError(stderr, "unexpected argument after --version");
         try stdout.print("zova {s}\n", .{package_version});
         return ExitCode.ok;
     }
     if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "help")) {
-        if (args.len != 2) return usageError(stderr, "unexpected argument after help");
+        if (parsed_args.len != 2) return usageError(stderr, "unexpected argument after help");
         try writeUsage(stdout);
         return ExitCode.ok;
     }
     if (std.mem.eql(u8, command, "info")) {
-        return infoCommand(allocator, args[2..], stdout, stderr);
+        return infoCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
     if (std.mem.eql(u8, command, "stats")) {
-        return statsCommand(allocator, args[2..], stdout, stderr);
+        return statsCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
     if (std.mem.eql(u8, command, "objects")) {
-        return objectsCommand(allocator, args[2..], stdout, stderr);
+        return objectsCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
     if (std.mem.eql(u8, command, "object")) {
-        return objectCommand(allocator, args[2..], stdout, stderr);
+        return objectCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
     if (std.mem.eql(u8, command, "chunks")) {
-        return chunksCommand(allocator, args[2..], stdout, stderr);
+        return chunksCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
     if (std.mem.eql(u8, command, "chunk")) {
-        return chunkCommand(allocator, args[2..], stdout, stderr);
+        return chunkCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
     if (std.mem.eql(u8, command, "vectors")) {
-        return vectorsCommand(allocator, args[2..], stdout, stderr);
+        return vectorsCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
     if (std.mem.eql(u8, command, "vector-collection")) {
-        return vectorCollectionCommand(allocator, args[2..], stdout, stderr);
+        return vectorCollectionCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
     if (std.mem.eql(u8, command, "graphs")) {
-        return graphsCommand(allocator, args[2..], stdout, stderr);
+        return graphsCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
     if (std.mem.eql(u8, command, "graph")) {
-        return graphCommand(allocator, args[2..], stdout, stderr);
+        return graphCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
     if (std.mem.eql(u8, command, "graph-node")) {
-        return graphNodeCommand(allocator, args[2..], stdout, stderr);
+        return graphNodeCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
     if (std.mem.eql(u8, command, "graph-neighbors")) {
-        return graphNeighborsCommand(allocator, args[2..], stdout, stderr);
+        return graphNeighborsCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
     if (std.mem.eql(u8, command, "graph-walk")) {
-        return graphWalkCommand(allocator, args[2..], stdout, stderr);
+        return graphWalkCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
     if (std.mem.eql(u8, command, "tables")) {
-        return tablesCommand(allocator, args[2..], stdout, stderr);
+        return tablesCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
     if (std.mem.eql(u8, command, "check")) {
-        return checkCommand(allocator, args[2..], stdout, stderr);
+        return checkCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
     if (std.mem.eql(u8, command, "doctor")) {
-        return doctorCommand(allocator, args[2..], stdout, stderr);
+        return doctorCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
     if (std.mem.eql(u8, command, "salvage")) {
-        return salvageCommand(allocator, args[2..], stdout, stderr);
+        return salvageCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
     if (std.mem.eql(u8, command, "backup")) {
-        return backupCommand(allocator, args[2..], stdout, stderr);
+        return backupCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
     if (std.mem.eql(u8, command, "compact")) {
-        return compactCommand(allocator, args[2..], stdout, stderr);
+        return compactCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
     if (std.mem.eql(u8, command, "restore")) {
-        return restoreCommand(allocator, args[2..], stdout, stderr);
+        return restoreCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
     if (std.mem.eql(u8, command, "split")) {
-        return splitCommand(allocator, args[2..], stdout, stderr);
+        return splitCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
     if (std.mem.eql(u8, command, "object-store")) {
-        return objectStoreCommand(allocator, args[2..], stdout, stderr);
+        return objectStoreCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
     if (std.mem.eql(u8, command, "vector-store")) {
-        return vectorStoreCommand(allocator, args[2..], stdout, stderr);
+        return vectorStoreCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
     if (std.mem.eql(u8, command, "extension")) {
-        return extensionCommand(allocator, args[2..], stdout, stderr);
+        return extensionCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
 
     try stderr.print("unknown command: {s}\n\n", .{command});
@@ -639,9 +681,61 @@ pub fn run(
     return ExitCode.usage;
 }
 
+const GlobalParseError = error{
+    MissingExtensionPath,
+};
+
+fn parseGlobalArgs(allocator: std.mem.Allocator, args: []const []const u8) !ParsedGlobalArgs {
+    var remaining: std.ArrayList([]const u8) = .empty;
+    errdefer remaining.deinit(allocator);
+    var extension_paths: std.ArrayList([]const u8) = .empty;
+    errdefer extension_paths.deinit(allocator);
+
+    if (args.len == 0) {
+        return .{
+            .args = try allocator.alloc([]const u8, 0),
+            .extension_paths = try allocator.alloc([]const u8, 0),
+        };
+    }
+
+    try remaining.append(allocator, args[0]);
+    var index: usize = 1;
+    while (index < args.len and std.mem.eql(u8, args[index], "--extension")) {
+        index += 1;
+        if (index >= args.len) return error.MissingExtensionPath;
+        try extension_paths.append(allocator, args[index]);
+        index += 1;
+    }
+    while (index < args.len) : (index += 1) try remaining.append(allocator, args[index]);
+
+    return .{
+        .args = try remaining.toOwnedSlice(allocator),
+        .extension_paths = try extension_paths.toOwnedSlice(allocator),
+    };
+}
+
+fn globalUsageMessage(err: GlobalParseError) []const u8 {
+    return switch (err) {
+        error.MissingExtensionPath => "--extension requires <bundle.zovaext>",
+    };
+}
+
+fn openDatabase(ctx: CommandContext, path: [:0]const u8) zova.Error!zova.Database {
+    return zova.Database.openWithExtensions(path, ctx.registry);
+}
+
+fn openDatabaseWithOptions(ctx: CommandContext, path: [:0]const u8, options: zova.OpenOptions) zova.Error!zova.Database {
+    return zova.Database.openWithOptionsAndExtensions(path, options, ctx.registry);
+}
+
+fn openManagementDatabase(ctx: CommandContext, path: [:0]const u8) zova.Error!zova.Database {
+    return zova.Database.openForObjectStoreManagementWithExtensions(path, .{}, ctx.registry);
+}
+
 fn writeUsage(writer: *std.Io.Writer) !void {
     try writer.writeAll(
         \\usage:
+        \\  zova [--extension <bundle.zovaext> ...] <command>
         \\  zova --version
         \\  zova --help
         \\  zova info <file.zova>
@@ -681,6 +775,9 @@ fn writeUsage(writer: *std.Io.Writer) !void {
         \\  zova extension check [--json] <file.zova> [name]
         \\  zova extension drop [--json] <file.zova> <name>
         \\  zova extension install [--json] <file.zova> <name>
+        \\  zova extension trust [--json] <bundle.zovaext>
+        \\  zova extension untrust [--json] <bundle.zovaext|name>
+        \\  zova extension trusted [--json]
         \\
         \\commands:
         \\  info   print a bounded summary of a current-format Zova database
@@ -706,7 +803,7 @@ fn writeUsage(writer: *std.Io.Writer) !void {
         \\  split  move existing single-file object or vector storage into a new bound store
         \\  object-store manage one optional bound object store
         \\  vector-store manage one optional bound vector store
-        \\  extension inspect and manage trusted app-registered extensions
+        \\  extension inspect, trust, load, and manage process-provided extensions
         \\
         \\exit codes:
         \\  0 healthy/success
@@ -824,6 +921,7 @@ fn operationalErrorFormat(stderr: *std.Io.Writer, command: []const u8, format: O
 }
 
 fn backupCommand(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     args: []const []const u8,
     stdout: *std.Io.Writer,
@@ -839,7 +937,7 @@ fn backupCommand(
     const destination = try allocator.dupeZ(u8, parsed.destination_path);
     defer allocator.free(destination);
 
-    var db = zova.Database.open(source) catch |err| return openErrorFormat(stderr, "backup", parsed.format, err);
+    var db = openDatabase(ctx, source) catch |err| return openErrorFormat(stderr, "backup", parsed.format, err);
     defer db.deinit();
 
     db.backupTo(destination, .{ .verify = parsed.verify }) catch |err| return operationalErrorFormat(stderr, "backup", parsed.format, err);
@@ -848,6 +946,7 @@ fn backupCommand(
 }
 
 fn compactCommand(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     args: []const []const u8,
     stdout: *std.Io.Writer,
@@ -863,7 +962,7 @@ fn compactCommand(
     const destination = try allocator.dupeZ(u8, parsed.destination_path);
     defer allocator.free(destination);
 
-    var db = zova.Database.open(source) catch |err| return openErrorFormat(stderr, "compact", parsed.format, err);
+    var db = openDatabase(ctx, source) catch |err| return openErrorFormat(stderr, "compact", parsed.format, err);
     defer db.deinit();
 
     db.compactTo(destination, .{ .verify = parsed.verify }) catch |err| return operationalErrorFormat(stderr, "compact", parsed.format, err);
@@ -872,6 +971,7 @@ fn compactCommand(
 }
 
 fn restoreCommand(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     args: []const []const u8,
     stdout: *std.Io.Writer,
@@ -887,12 +987,13 @@ fn restoreCommand(
     const destination = try allocator.dupeZ(u8, parsed.destination_path);
     defer allocator.free(destination);
 
-    zova.restoreBackup(source, destination, .{ .verify = parsed.verify }) catch |err| return operationalErrorFormat(stderr, "restore", parsed.format, err);
+    zova.restoreBackupWithExtensions(source, destination, .{ .verify = parsed.verify }, ctx.registry) catch |err| return operationalErrorFormat(stderr, "restore", parsed.format, err);
     try writeOperationalSuccess(stdout, "restore", parsed, parsed.source_path, parsed.destination_path);
     return ExitCode.ok;
 }
 
 fn splitCommand(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     args: []const []const u8,
     stdout: *std.Io.Writer,
@@ -908,7 +1009,7 @@ fn splitCommand(
     const store_z = try allocator.dupeZ(u8, parsed.store_path);
     defer allocator.free(store_z);
 
-    var db = zova.Database.openForObjectStoreManagement(main_z, .{}) catch |err| return openErrorFormat(stderr, "split", parsed.format, err);
+    var db = openManagementDatabase(ctx, main_z) catch |err| return openErrorFormat(stderr, "split", parsed.format, err);
     defer db.deinit();
 
     switch (parsed.role) {
@@ -986,6 +1087,7 @@ fn splitErrorFormat(stderr: *std.Io.Writer, format: OutputFormat, err: anyerror)
 }
 
 fn objectStoreCommand(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     args: []const []const u8,
     stdout: *std.Io.Writer,
@@ -1015,7 +1117,7 @@ fn objectStoreCommand(
             const store_z = try allocator.dupeZ(u8, store_path);
             defer allocator.free(store_z);
 
-            var db = zova.Database.openForObjectStoreManagement(main_z, .{}) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
+            var db = openManagementDatabase(ctx, main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
             defer db.deinit();
 
             db.bindObjectStore(store_z) catch |err| {
@@ -1032,7 +1134,7 @@ fn objectStoreCommand(
             const main_z = try allocator.dupeZ(u8, main_path);
             defer allocator.free(main_z);
 
-            var db = zova.Database.openForObjectStoreManagement(main_z, .{}) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
+            var db = openManagementDatabase(ctx, main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
             defer db.deinit();
 
             var maybe_info = try db.boundObjectStore(allocator);
@@ -1049,7 +1151,7 @@ fn objectStoreCommand(
             const main_z = try allocator.dupeZ(u8, main_path);
             defer allocator.free(main_z);
 
-            var db = zova.Database.openForObjectStoreManagement(main_z, .{}) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
+            var db = openManagementDatabase(ctx, main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
             defer db.deinit();
 
             db.unbindObjectStore() catch |err| return objectStoreErrorFormat(stderr, command_name, parsed.format, err);
@@ -1060,6 +1162,7 @@ fn objectStoreCommand(
 }
 
 fn vectorStoreCommand(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     args: []const []const u8,
     stdout: *std.Io.Writer,
@@ -1089,7 +1192,7 @@ fn vectorStoreCommand(
             const store_z = try allocator.dupeZ(u8, store_path);
             defer allocator.free(store_z);
 
-            var db = zova.Database.openForObjectStoreManagement(main_z, .{}) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
+            var db = openManagementDatabase(ctx, main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
             defer db.deinit();
 
             db.bindVectorStore(store_z) catch |err| {
@@ -1106,7 +1209,7 @@ fn vectorStoreCommand(
             const main_z = try allocator.dupeZ(u8, main_path);
             defer allocator.free(main_z);
 
-            var db = zova.Database.openForObjectStoreManagement(main_z, .{}) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
+            var db = openManagementDatabase(ctx, main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
             defer db.deinit();
 
             var maybe_info = try db.boundVectorStore(allocator);
@@ -1123,7 +1226,7 @@ fn vectorStoreCommand(
             const main_z = try allocator.dupeZ(u8, main_path);
             defer allocator.free(main_z);
 
-            var db = zova.Database.openForObjectStoreManagement(main_z, .{}) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
+            var db = openManagementDatabase(ctx, main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
             defer db.deinit();
 
             db.unbindVectorStore() catch |err| return objectStoreErrorFormat(stderr, command_name, parsed.format, err);
@@ -1134,6 +1237,7 @@ fn vectorStoreCommand(
 }
 
 fn extensionCommand(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     args: []const []const u8,
     stdout: *std.Io.Writer,
@@ -1144,13 +1248,34 @@ fn extensionCommand(
         return usageErrorFormat(stderr, "extension", format, extensionUsageMessage(err));
     };
 
-    const path_z = try allocator.dupeZ(u8, parsed.path);
+    switch (parsed.action) {
+        .trust => {
+            var trusted = zova.extension_dynamic.trustBundle(allocator, parsed.path.?, .{}) catch |err| return extensionErrorFormat(stderr, "extension-trust", parsed.format, err);
+            defer trusted.deinit(allocator);
+            try writeExtensionTrustSuccess(stdout, parsed.format, "extension-trust", trusted);
+            return ExitCode.ok;
+        },
+        .untrust => {
+            const removed = zova.extension_dynamic.untrust(allocator, parsed.path.?, .{}) catch |err| return extensionErrorFormat(stderr, "extension-untrust", parsed.format, err);
+            try writeExtensionUntrustSuccess(stdout, parsed.format, parsed.path.?, removed);
+            return ExitCode.ok;
+        },
+        .trusted => {
+            var trusted = zova.extension_dynamic.loadTrusted(allocator, .{}) catch |err| return extensionErrorFormat(stderr, "extension-trusted", parsed.format, err);
+            defer trusted.deinit(allocator);
+            try writeTrustedExtensionList(stdout, parsed.format, trusted);
+            return ExitCode.ok;
+        },
+        else => {},
+    }
+
+    const path_z = try allocator.dupeZ(u8, parsed.path.?);
     defer allocator.free(path_z);
 
     var db = open_db: {
-        const opened = zova.Database.open(path_z) catch |err| {
+        const opened = openDatabase(ctx, path_z) catch |err| {
             if ((parsed.action == .list or parsed.action == .info) and isExtensionHealthError(err)) {
-                break :open_db zova.Database.openForExtensionInspection(path_z, .{}) catch |inspect_err| {
+                break :open_db zova.Database.openForExtensionInspectionWithExtensions(path_z, .{}, ctx.registry) catch |inspect_err| {
                     return extensionOpenErrorFormat(stderr, parsed.format, inspect_err);
                 };
             }
@@ -1164,14 +1289,14 @@ fn extensionCommand(
         .list => {
             var extensions = db.listExtensions(allocator) catch |err| return extensionErrorFormat(stderr, "extension-list", parsed.format, err);
             defer extensions.deinit(allocator);
-            try writeExtensionList(stdout, parsed.format, parsed.path, extensions);
+            try writeExtensionList(stdout, parsed.format, parsed.path.?, extensions);
             return ExitCode.ok;
         },
         .info => {
             const name = parsed.name.?;
             var info = db.extensionInfo(allocator, name) catch |err| return extensionErrorFormat(stderr, "extension-info", parsed.format, err);
             defer info.deinit(allocator);
-            try writeExtensionInfo(stdout, parsed.format, "extension-info", parsed.path, info);
+            try writeExtensionInfo(stdout, parsed.format, "extension-info", parsed.path.?, info);
             return ExitCode.ok;
         },
         .check => {
@@ -1179,21 +1304,21 @@ fn extensionCommand(
                 db.checkExtension(name) catch |err| return extensionErrorFormat(stderr, "extension-check", parsed.format, err);
                 var info = db.extensionInfo(allocator, name) catch |err| return extensionErrorFormat(stderr, "extension-check", parsed.format, err);
                 defer info.deinit(allocator);
-                try writeExtensionInfo(stdout, parsed.format, "extension-check", parsed.path, info);
+                try writeExtensionInfo(stdout, parsed.format, "extension-check", parsed.path.?, info);
             } else {
                 var extensions = db.listExtensions(allocator) catch |err| return extensionErrorFormat(stderr, "extension-check", parsed.format, err);
                 defer extensions.deinit(allocator);
                 for (extensions.items) |item| {
                     db.checkExtension(item.name) catch |err| return extensionErrorFormat(stderr, "extension-check", parsed.format, err);
                 }
-                try writeExtensionList(stdout, parsed.format, parsed.path, extensions);
+                try writeExtensionList(stdout, parsed.format, parsed.path.?, extensions);
             }
             return ExitCode.ok;
         },
         .drop => {
             const name = parsed.name.?;
             db.dropExtension(name) catch |err| return extensionErrorFormat(stderr, "extension-drop", parsed.format, err);
-            try writeExtensionMutationSuccess(stdout, parsed.format, "extension-drop", parsed.path, name);
+            try writeExtensionMutationSuccess(stdout, parsed.format, "extension-drop", parsed.path.?, name);
             return ExitCode.ok;
         },
         .install => {
@@ -1201,9 +1326,10 @@ fn extensionCommand(
             db.installExtension(name) catch |err| return extensionErrorFormat(stderr, "extension-install", parsed.format, err);
             var info = db.extensionInfo(allocator, name) catch |err| return extensionErrorFormat(stderr, "extension-install", parsed.format, err);
             defer info.deinit(allocator);
-            try writeExtensionInfo(stdout, parsed.format, "extension-install", parsed.path, info);
+            try writeExtensionInfo(stdout, parsed.format, "extension-install", parsed.path.?, info);
             return ExitCode.ok;
         },
+        .trust, .untrust, .trusted => unreachable,
     }
 }
 
@@ -1273,18 +1399,28 @@ fn parseExtensionCommandArgs(args: []const []const u8) ExtensionCommandParseErro
         }
     }
 
-    const path = first_path orelse return error.MissingPath;
     switch (action) {
         .list => {
+            _ = first_path orelse return error.MissingPath;
             if (name != null) return error.ExtraArgs;
         },
         .info, .drop, .install => {
+            _ = first_path orelse return error.MissingPath;
             _ = name orelse return error.MissingName;
         },
-        .check => {},
+        .check => {
+            _ = first_path orelse return error.MissingPath;
+        },
+        .trust, .untrust => {
+            _ = first_path orelse return error.MissingPath;
+            if (name != null) return error.ExtraArgs;
+        },
+        .trusted => {
+            if (first_path != null or name != null) return error.ExtraArgs;
+        },
     }
 
-    return .{ .format = format, .action = action, .path = path, .name = name };
+    return .{ .format = format, .action = action, .path = first_path, .name = name };
 }
 
 fn parseExtensionAction(value: []const u8) ?ExtensionAction {
@@ -1293,16 +1429,19 @@ fn parseExtensionAction(value: []const u8) ?ExtensionAction {
     if (std.mem.eql(u8, value, "check")) return .check;
     if (std.mem.eql(u8, value, "drop")) return .drop;
     if (std.mem.eql(u8, value, "install")) return .install;
+    if (std.mem.eql(u8, value, "trust")) return .trust;
+    if (std.mem.eql(u8, value, "untrust")) return .untrust;
+    if (std.mem.eql(u8, value, "trusted")) return .trusted;
     return null;
 }
 
 fn extensionUsageMessage(err: ExtensionCommandParseError) []const u8 {
     return switch (err) {
-        error.MissingAction => "extension requires list, info, check, drop, or install",
+        error.MissingAction => "extension requires list, info, check, drop, install, trust, untrust, or trusted",
         error.UnknownAction => "unknown extension action",
         error.DuplicateJson => "duplicate --json",
         error.UnknownFlag => "unknown flag",
-        error.MissingPath => "extension action requires <file.zova>",
+        error.MissingPath => "extension action requires <file.zova> or <bundle.zovaext>",
         error.MissingName => "extension action requires <name>",
         error.InvalidName => "extension name is invalid",
         error.ExtraArgs => "extension action received extra arguments",
@@ -1323,6 +1462,8 @@ fn isExtensionHealthError(err: anyerror) bool {
         error.ExtensionInvalid,
         error.ExtensionIncompatible,
         error.ExtensionUnavailable,
+        error.ExtensionUntrusted,
+        error.ExtensionLoadFailed,
         => true,
         else => false,
     };
@@ -1332,6 +1473,20 @@ fn extensionErrorFormat(stderr: *std.Io.Writer, command: []const u8, format: Out
     switch (format) {
         .text => try stderr.print("{s}: failed: {s}\n", .{ command, @errorName(err) }),
         .json => try writeJsonErrorWithKind(stderr, command, "extension failed", @errorName(err)),
+    }
+    return ExitCode.check_failed;
+}
+
+fn dynamicExtensionLoadErrorFormat(stderr: *std.Io.Writer, format: OutputFormat, err: anyerror) !u8 {
+    switch (format) {
+        .text => {
+            try stderr.print("extension-load: failed: {s}\n", .{@errorName(err)});
+            try stderr.writeAll("suggested_actions:\n");
+            try writeExtensionSuggestedActionsText(stderr, "");
+        },
+        .json => {
+            try writeJsonErrorWithKindAndActions(stderr, "extension-load", "extension load failed", @errorName(err), .{ .extension = 1 });
+        },
     }
     return ExitCode.check_failed;
 }
@@ -1677,6 +1832,108 @@ fn writeExtensionMutationSuccess(
     }
 }
 
+fn writeExtensionTrustSuccess(
+    stdout: *std.Io.Writer,
+    format: OutputFormat,
+    command: []const u8,
+    record: zova.DynamicExtensionTrustRecord,
+) !void {
+    switch (format) {
+        .text => {
+            try stdout.print("{s}: ok\n", .{command});
+            try stdout.print("name: {s}\n", .{record.name});
+            try stdout.print("version: {s}\n", .{record.version});
+            try stdout.print("storage_prefix: {s}\n", .{record.storage_prefix});
+            try stdout.print("bundle_path: {s}\n", .{record.bundle_path});
+            try stdout.writeAll("trusted: true\n");
+        },
+        .json => {
+            try stdout.writeAll("{\n");
+            try stdout.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
+            try stdout.writeAll("  \"status\": \"ok\",\n");
+            try stdout.writeAll("  \"command\": ");
+            try writeJsonString(stdout, command);
+            try stdout.writeAll(",\n  \"trusted_extension\": ");
+            try writeTrustedExtensionObject(stdout, record);
+            try stdout.writeAll("\n}\n");
+        },
+    }
+}
+
+fn writeExtensionUntrustSuccess(
+    stdout: *std.Io.Writer,
+    format: OutputFormat,
+    identifier: []const u8,
+    removed: bool,
+) !void {
+    switch (format) {
+        .text => {
+            try stdout.writeAll("extension-untrust: ok\n");
+            try stdout.print("identifier: {s}\n", .{identifier});
+            try stdout.print("removed: {}\n", .{removed});
+        },
+        .json => {
+            try stdout.writeAll("{\n");
+            try stdout.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
+            try stdout.writeAll("  \"status\": \"ok\",\n");
+            try stdout.writeAll("  \"command\": \"extension-untrust\",\n");
+            try stdout.writeAll("  \"identifier\": ");
+            try writeJsonString(stdout, identifier);
+            try stdout.print(",\n  \"removed\": {}\n", .{removed});
+            try stdout.writeAll("}\n");
+        },
+    }
+}
+
+fn writeTrustedExtensionList(
+    stdout: *std.Io.Writer,
+    format: OutputFormat,
+    trusted: zova.DynamicExtensionTrustedList,
+) !void {
+    switch (format) {
+        .text => {
+            try stdout.writeAll("extension-trusted: ok\n");
+            try stdout.print("trusted_extensions: {d}\n", .{trusted.records.len});
+            if (trusted.records.len == 0) {
+                try stdout.writeAll("  none\n");
+            } else {
+                for (trusted.records) |record| {
+                    try stdout.print("  {s} version={s} bundle_path={s}\n", .{ record.name, record.version, record.bundle_path });
+                }
+            }
+        },
+        .json => {
+            try stdout.writeAll("{\n");
+            try stdout.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
+            try stdout.writeAll("  \"status\": \"ok\",\n");
+            try stdout.writeAll("  \"command\": \"extension-trusted\",\n");
+            try stdout.print("  \"count\": {d},\n", .{trusted.records.len});
+            try stdout.writeAll("  \"trusted_extensions\": [");
+            for (trusted.records, 0..) |record, index| {
+                if (index != 0) try stdout.writeAll(", ");
+                try writeTrustedExtensionObject(stdout, record);
+            }
+            try stdout.writeAll("]\n}\n");
+        },
+    }
+}
+
+fn writeTrustedExtensionObject(writer: *std.Io.Writer, record: zova.DynamicExtensionTrustRecord) !void {
+    try writer.writeAll("{\"name\": ");
+    try writeJsonString(writer, record.name);
+    try writer.writeAll(", \"version\": ");
+    try writeJsonString(writer, record.version);
+    try writer.writeAll(", \"storage_prefix\": ");
+    try writeJsonString(writer, record.storage_prefix);
+    try writer.writeAll(", \"bundle_path\": ");
+    try writeJsonString(writer, record.bundle_path);
+    try writer.writeAll(", \"manifest_sha256\": ");
+    try writeJsonString(writer, record.manifest_sha256[0..]);
+    try writer.writeAll(", \"library_sha256\": ");
+    try writeJsonString(writer, record.library_sha256[0..]);
+    try writer.print(", \"trusted_at_unix\": {d}}}", .{record.trusted_at_unix});
+}
+
 fn writeExtensionInfoObject(writer: *std.Io.Writer, info: zova.ExtensionInfo) !void {
     try writer.writeAll("{\"name\": ");
     try writeJsonString(writer, info.name);
@@ -1722,6 +1979,7 @@ fn writeOperationalSuccess(
 }
 
 fn infoCommand(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     args: []const []const u8,
     stdout: *std.Io.Writer,
@@ -1747,7 +2005,7 @@ fn infoCommand(
     const path = try allocator.dupeZ(u8, raw_path);
     defer allocator.free(path);
 
-    var db = zova.Database.open(path) catch |err| return openErrorFormat(stderr, "info", format, err);
+    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "info", format, err);
     defer db.deinit();
 
     var summary = try loadDatabaseSummary(allocator, &db, path);
@@ -1761,6 +2019,7 @@ fn infoCommand(
 }
 
 fn statsCommand(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     args: []const []const u8,
     stdout: *std.Io.Writer,
@@ -1796,7 +2055,7 @@ fn statsCommand(
     const path = try allocator.dupeZ(u8, raw_path);
     defer allocator.free(path);
 
-    var db = zova.Database.open(path) catch |err| return openErrorFormat(stderr, "stats", format, err);
+    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "stats", format, err);
     defer db.deinit();
 
     var summary = try loadStatsSummary(allocator, &db, path, limit);
@@ -1810,6 +2069,7 @@ fn statsCommand(
 }
 
 fn objectsCommand(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     args: []const []const u8,
     stdout: *std.Io.Writer,
@@ -1819,7 +2079,7 @@ fn objectsCommand(
     const path = try allocator.dupeZ(u8, parsed.path);
     defer allocator.free(path);
 
-    var db = zova.Database.open(path) catch |err| return openErrorFormat(stderr, "objects", parsed.format, err);
+    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "objects", parsed.format, err);
     defer db.deinit();
 
     var list = try loadObjectList(allocator, &db, parsed.limit);
@@ -1833,6 +2093,7 @@ fn objectsCommand(
 }
 
 fn objectCommand(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     args: []const []const u8,
     stdout: *std.Io.Writer,
@@ -1844,7 +2105,7 @@ fn objectCommand(
     const path = try allocator.dupeZ(u8, parsed.path);
     defer allocator.free(path);
 
-    var db = zova.Database.open(path) catch |err| return openErrorFormat(stderr, "object", parsed.format, err);
+    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "object", parsed.format, err);
     defer db.deinit();
 
     var detail = loadObjectDetail(allocator, &db, id, parsed.limit) catch |err| return inspectErrorFormat(stderr, "object", parsed.format, err);
@@ -1858,6 +2119,7 @@ fn objectCommand(
 }
 
 fn chunksCommand(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     args: []const []const u8,
     stdout: *std.Io.Writer,
@@ -1867,7 +2129,7 @@ fn chunksCommand(
     const path = try allocator.dupeZ(u8, parsed.path);
     defer allocator.free(path);
 
-    var db = zova.Database.open(path) catch |err| return openErrorFormat(stderr, "chunks", parsed.format, err);
+    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "chunks", parsed.format, err);
     defer db.deinit();
 
     var list = try loadChunkList(allocator, &db, parsed.limit);
@@ -1881,6 +2143,7 @@ fn chunksCommand(
 }
 
 fn chunkCommand(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     args: []const []const u8,
     stdout: *std.Io.Writer,
@@ -1892,7 +2155,7 @@ fn chunkCommand(
     const path = try allocator.dupeZ(u8, parsed.path);
     defer allocator.free(path);
 
-    var db = zova.Database.open(path) catch |err| return openErrorFormat(stderr, "chunk", parsed.format, err);
+    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "chunk", parsed.format, err);
     defer db.deinit();
 
     var detail = loadChunkDetail(allocator, &db, id, parsed.limit) catch |err| return inspectErrorFormat(stderr, "chunk", parsed.format, err);
@@ -1906,6 +2169,7 @@ fn chunkCommand(
 }
 
 fn vectorsCommand(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     args: []const []const u8,
     stdout: *std.Io.Writer,
@@ -1915,7 +2179,7 @@ fn vectorsCommand(
     const path = try allocator.dupeZ(u8, parsed.path);
     defer allocator.free(path);
 
-    var db = zova.Database.open(path) catch |err| return openErrorFormat(stderr, "vectors", parsed.format, err);
+    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "vectors", parsed.format, err);
     defer db.deinit();
 
     var list = try loadVectorCollectionList(allocator, &db, parsed.limit);
@@ -1929,6 +2193,7 @@ fn vectorsCommand(
 }
 
 fn vectorCollectionCommand(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     args: []const []const u8,
     stdout: *std.Io.Writer,
@@ -1943,7 +2208,7 @@ fn vectorCollectionCommand(
     const path = try allocator.dupeZ(u8, parsed.path);
     defer allocator.free(path);
 
-    var db = zova.Database.open(path) catch |err| return openErrorFormat(stderr, "vector-collection", parsed.format, err);
+    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "vector-collection", parsed.format, err);
     defer db.deinit();
 
     var detail = loadVectorCollectionDetail(allocator, &db, name, parsed.limit) catch |err| return vectorInspectErrorFormat(stderr, "vector-collection", parsed.format, err);
@@ -1957,6 +2222,7 @@ fn vectorCollectionCommand(
 }
 
 fn graphsCommand(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     args: []const []const u8,
     stdout: *std.Io.Writer,
@@ -1966,7 +2232,7 @@ fn graphsCommand(
     const path = try allocator.dupeZ(u8, parsed.path);
     defer allocator.free(path);
 
-    var db = zova.Database.open(path) catch |err| return openErrorFormat(stderr, "graphs", parsed.format, err);
+    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "graphs", parsed.format, err);
     defer db.deinit();
 
     var list = try db.listGraphs(allocator);
@@ -1983,6 +2249,7 @@ fn graphsCommand(
 }
 
 fn graphCommand(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     args: []const []const u8,
     stdout: *std.Io.Writer,
@@ -1993,7 +2260,7 @@ fn graphCommand(
     const path = try allocator.dupeZ(u8, parsed.path);
     defer allocator.free(path);
 
-    var db = zova.Database.open(path) catch |err| return openErrorFormat(stderr, "graph", parsed.format, err);
+    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "graph", parsed.format, err);
     defer db.deinit();
 
     var info = db.graphInfo(allocator, graph_name) catch |err| return graphInspectErrorFormat(stderr, "graph", parsed.format, err);
@@ -2007,6 +2274,7 @@ fn graphCommand(
 }
 
 fn graphNodeCommand(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     args: []const []const u8,
     stdout: *std.Io.Writer,
@@ -2016,7 +2284,7 @@ fn graphNodeCommand(
     const path = try allocator.dupeZ(u8, parsed.path);
     defer allocator.free(path);
 
-    var db = zova.Database.open(path) catch |err| return openErrorFormat(stderr, "graph-node", parsed.format, err);
+    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "graph-node", parsed.format, err);
     defer db.deinit();
 
     var node = db.getGraphNode(allocator, parsed.graph_name, parsed.node_id) catch |err| return graphInspectErrorFormat(stderr, "graph-node", parsed.format, err);
@@ -2030,6 +2298,7 @@ fn graphNodeCommand(
 }
 
 fn graphNeighborsCommand(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     args: []const []const u8,
     stdout: *std.Io.Writer,
@@ -2039,7 +2308,7 @@ fn graphNeighborsCommand(
     const path = try allocator.dupeZ(u8, parsed.path);
     defer allocator.free(path);
 
-    var db = zova.Database.open(path) catch |err| return openErrorFormat(stderr, "graph-neighbors", parsed.format, err);
+    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "graph-neighbors", parsed.format, err);
     defer db.deinit();
 
     const requested_limit = if (parsed.limit == std.math.maxInt(usize)) parsed.limit else parsed.limit + 1;
@@ -2064,6 +2333,7 @@ fn graphNeighborsCommand(
 }
 
 fn graphWalkCommand(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     args: []const []const u8,
     stdout: *std.Io.Writer,
@@ -2073,7 +2343,7 @@ fn graphWalkCommand(
     const path = try allocator.dupeZ(u8, parsed.path);
     defer allocator.free(path);
 
-    var db = zova.Database.open(path) catch |err| return openErrorFormat(stderr, "graph-walk", parsed.format, err);
+    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "graph-walk", parsed.format, err);
     defer db.deinit();
 
     const requested_limit = if (parsed.limit == std.math.maxInt(usize)) parsed.limit else parsed.limit + 1;
@@ -2098,6 +2368,7 @@ fn graphWalkCommand(
 }
 
 fn tablesCommand(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     args: []const []const u8,
     stdout: *std.Io.Writer,
@@ -2107,7 +2378,7 @@ fn tablesCommand(
     const path = try allocator.dupeZ(u8, parsed.path);
     defer allocator.free(path);
 
-    var db = zova.Database.open(path) catch |err| return openErrorFormat(stderr, "tables", parsed.format, err);
+    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "tables", parsed.format, err);
     defer db.deinit();
 
     var list = try loadTableList(allocator, &db, parsed.limit);
@@ -2457,6 +2728,7 @@ fn hexNibble(byte: u8) ?u8 {
 }
 
 fn checkCommand(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     args: []const []const u8,
     stdout: *std.Io.Writer,
@@ -2487,14 +2759,14 @@ fn checkCommand(
     defer allocator.free(path);
 
     var db = open_db: {
-        const opened = zova.Database.open(path) catch |err| {
+        const opened = openDatabase(ctx, path) catch |err| {
             if (deep and isExtensionHealthError(err)) {
-                break :open_db zova.Database.openForExtensionInspection(path, .{}) catch |inspect_err| {
+                break :open_db zova.Database.openForExtensionInspectionWithExtensions(path, .{}, ctx.registry) catch |inspect_err| {
                     return openErrorFormat(stderr, "check", format, inspect_err);
                 };
             }
             if (deep) {
-                if (try writeBoundStoreOpenFailureCheck(allocator, stderr, format, path, err)) |exit_code| return exit_code;
+                if (try writeBoundStoreOpenFailureCheck(ctx, allocator, stderr, format, path, err)) |exit_code| return exit_code;
             }
             return openErrorFormat(stderr, "check", format, err);
         };
@@ -2530,6 +2802,7 @@ fn checkCommand(
 }
 
 fn doctorCommand(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     args: []const []const u8,
     stdout: *std.Io.Writer,
@@ -2540,13 +2813,13 @@ fn doctorCommand(
     defer allocator.free(path);
 
     var db = open_db: {
-        const opened = zova.Database.open(path) catch |err| {
+        const opened = openDatabase(ctx, path) catch |err| {
             if (isExtensionHealthError(err)) {
-                break :open_db zova.Database.openForExtensionInspection(path, .{}) catch |inspect_err| {
+                break :open_db zova.Database.openForExtensionInspectionWithExtensions(path, .{}, ctx.registry) catch |inspect_err| {
                     return openErrorFormat(stderr, "doctor", parsed.format, inspect_err);
                 };
             }
-            if (try writeBoundStoreOpenFailureDoctor(allocator, stderr, parsed.format, parsed.path, path, err)) |exit_code| return exit_code;
+            if (try writeBoundStoreOpenFailureDoctor(ctx, allocator, stderr, parsed.format, parsed.path, path, err)) |exit_code| return exit_code;
             return openErrorFormat(stderr, "doctor", parsed.format, err);
         };
         break :open_db opened;
@@ -2577,13 +2850,14 @@ fn doctorCommand(
 }
 
 fn writeBoundStoreOpenFailureCheck(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     stderr: *std.Io.Writer,
     format: OutputFormat,
     path: [:0]const u8,
     open_err: anyerror,
 ) !?u8 {
-    var db = zova.Database.openForObjectStoreManagement(path, .{}) catch return null;
+    var db = openManagementDatabase(ctx, path) catch return null;
     defer db.deinit();
 
     var has_bound_store = false;
@@ -2623,6 +2897,7 @@ fn writeBoundStoreOpenFailureCheck(
 }
 
 fn writeBoundStoreOpenFailureDoctor(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     stderr: *std.Io.Writer,
     format: OutputFormat,
@@ -2630,7 +2905,7 @@ fn writeBoundStoreOpenFailureDoctor(
     path: [:0]const u8,
     open_err: anyerror,
 ) !?u8 {
-    var db = zova.Database.openForObjectStoreManagement(path, .{}) catch return null;
+    var db = openManagementDatabase(ctx, path) catch return null;
     defer db.deinit();
 
     var has_bound_store = false;
@@ -2666,6 +2941,7 @@ fn writeBoundStoreOpenFailureDoctor(
 }
 
 fn salvageCommand(
+    ctx: CommandContext,
     allocator: std.mem.Allocator,
     args: []const []const u8,
     stdout: *std.Io.Writer,
@@ -2682,7 +2958,17 @@ fn salvageCommand(
     const source = try allocator.dupeZ(u8, parsed.source_path);
     defer allocator.free(source);
 
-    var db = zova.Database.openWithOptions(source, .{ .read_only = true }) catch |err| return openErrorFormat(stderr, "salvage", parsed.format, err);
+    var db = open_salvage_db: {
+        const opened = openDatabaseWithOptions(ctx, source, .{ .read_only = true }) catch |err| {
+            if (isExtensionHealthError(err)) {
+                break :open_salvage_db zova.Database.openForExtensionInspectionWithExtensions(source, .{}, ctx.registry) catch |inspect_err| {
+                    return openErrorFormat(stderr, "salvage", parsed.format, inspect_err);
+                };
+            }
+            return openErrorFormat(stderr, "salvage", parsed.format, err);
+        };
+        break :open_salvage_db opened;
+    };
     defer db.deinit();
 
     if (quickCheck(&db)) |_| {} else |err| {
@@ -2723,11 +3009,15 @@ fn salvageCommand(
     var plan = buildSalvagePlan(summary, report);
     plan.recoverable.user_schema_objects = countUserSchemaObjects(&db) catch 0;
     plan.recoverable.user_rows = countUserRows(allocator, &db) catch 0;
+    applyExtensionSalvagePlan(allocator, &db, ctx.registry, &plan) catch |err| {
+        plan.deinit(allocator);
+        return salvageExecutionErrorFormat(stderr, parsed.format, parsed.source_path, parsed.destination_path orelse "", err);
+    };
 
     if (!parsed.dry_run) {
         const destination = try allocator.dupeZ(u8, parsed.destination_path.?);
         defer allocator.free(destination);
-        var result = executeSalvage(allocator, &db, destination, plan) catch |err| {
+        var result = executeSalvage(allocator, &db, destination, plan, ctx.registry) catch |err| {
             plan.deinit(allocator);
             return salvageExecutionErrorFormat(stderr, parsed.format, parsed.source_path, parsed.destination_path.?, err);
         };
@@ -4745,6 +5035,10 @@ fn writeDeepCheckFailureText(stderr: *std.Io.Writer, report: DiagnosticReport) !
         if (issue.edge_type) |value| try stderr.print(" edge_type={s}", .{value});
         try stderr.writeByte('\n');
     }
+    if (report.issue_counts.extension != 0) {
+        try stderr.writeAll("suggested_actions:\n");
+        try writeExtensionSuggestedActionsText(stderr, "");
+    }
 }
 
 fn writeDeepCheckFailureJson(stderr: *std.Io.Writer, report: DiagnosticReport) !void {
@@ -4763,7 +5057,7 @@ fn writeDeepCheckFailureJson(stderr: *std.Io.Writer, report: DiagnosticReport) !
     try stderr.writeAll("  \"issues\": ");
     try writeDiagnosticIssuesJson(stderr, report.issues);
     try stderr.writeAll(",\n  \"suggested_actions\": ");
-    try writeSuggestedActionsJson(stderr, "", true);
+    try writeSuggestedActionsJsonForIssues(stderr, "", true, report.issue_counts);
     try stderr.writeAll("\n}\n");
 }
 
@@ -4852,6 +5146,9 @@ fn writeDoctorText(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
         try writer.print("  run zova object-store bind {s} <objects.zova>\n", .{source_path});
         try writer.print("  run zova vector-store bind {s} <vectors.zova>\n", .{source_path});
     }
+    if (report.issue_counts.extension != 0) {
+        try writeExtensionSuggestedActionsText(writer, source_path);
+    }
 }
 
 fn writeDoctorJson(writer: *std.Io.Writer, source_path: []const u8, summary: DatabaseSummary, report: DiagnosticReport) !void {
@@ -4903,7 +5200,7 @@ fn writeDoctorJson(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
     try writer.writeAll("  \"issues\": ");
     try writeDiagnosticIssuesJson(writer, report.issues);
     try writer.writeAll(",\n  \"suggested_actions\": ");
-    try writeSuggestedActionsJson(writer, source_path, has_issues);
+    try writeSuggestedActionsJsonForIssues(writer, source_path, has_issues, report.issue_counts);
     try writer.writeAll("\n}\n");
 }
 
@@ -4919,6 +5216,10 @@ fn writeSuggestedActionsText(writer: *std.Io.Writer, source_path: []const u8, ha
 }
 
 fn writeSuggestedActionsJson(writer: *std.Io.Writer, source_path: []const u8, has_issues: bool) !void {
+    try writeSuggestedActionsJsonForIssues(writer, source_path, has_issues, null);
+}
+
+fn writeSuggestedActionsJsonForIssues(writer: *std.Io.Writer, source_path: []const u8, has_issues: bool, issue_counts: ?DiagnosticIssueCounts) !void {
     _ = source_path;
     if (!has_issues) {
         try writer.writeAll("[\"no action needed\"]");
@@ -4932,7 +5233,31 @@ fn writeSuggestedActionsJson(writer: *std.Io.Writer, source_path: []const u8, ha
     try writeJsonString(writer, "run zova salvage --dry-run <file.zova>");
     try writer.writeAll(", ");
     try writeJsonString(writer, "run zova salvage <file.zova> <destination.zova>");
+    if (issue_counts) |counts| {
+        if (counts.extension != 0) {
+            try writer.writeAll(", ");
+            try writeJsonString(writer, "run zova extension list <file.zova>");
+            try writer.writeAll(", ");
+            try writeJsonString(writer, "run zova extension check <file.zova>");
+            try writer.writeAll(", ");
+            try writeJsonString(writer, "pass trusted dynamic bundles with zova --extension <bundle.zovaext> ... when required");
+            try writer.writeAll(", ");
+            try writeJsonString(writer, "run zova extension trust <bundle.zovaext> before using an untrusted bundle");
+        }
+    }
     try writer.writeAll("]");
+}
+
+fn writeExtensionSuggestedActionsText(writer: *std.Io.Writer, source_path: []const u8) !void {
+    if (source_path.len != 0) {
+        try writer.print("  run zova extension list {s}\n", .{source_path});
+        try writer.print("  run zova extension check {s}\n", .{source_path});
+    } else {
+        try writer.writeAll("  run zova extension list <file.zova>\n");
+        try writer.writeAll("  run zova extension check <file.zova>\n");
+    }
+    try writer.writeAll("  pass trusted dynamic bundles with zova --extension <bundle.zovaext> ... when required\n");
+    try writer.writeAll("  run zova extension trust <bundle.zovaext> before using an untrusted bundle\n");
 }
 
 fn writeSalvageDryRunText(writer: *std.Io.Writer, source_path: []const u8, plan: SalvagePlan) !void {
@@ -4946,6 +5271,8 @@ fn writeSalvageDryRunText(writer: *std.Io.Writer, source_path: []const u8, plan:
         \\recoverable_user_tables: {d}
         \\recoverable_user_schema_objects: {d}
         \\recoverable_user_rows: {d}
+        \\recoverable_extensions: {d}
+        \\recoverable_extension_private_objects: {d}
         \\recoverable_objects: {d}
         \\recoverable_chunks: {d}
         \\recoverable_loose_chunks: {d}
@@ -4954,6 +5281,8 @@ fn writeSalvageDryRunText(writer: *std.Io.Writer, source_path: []const u8, plan:
         \\skipped_user_tables: {d}
         \\skipped_user_schema_objects: {d}
         \\skipped_user_rows: {d}
+        \\skipped_extensions: {d}
+        \\skipped_extension_private_objects: {d}
         \\skipped_objects: {d}
         \\skipped_chunks: {d}
         \\skipped_loose_chunks: {d}
@@ -4976,6 +5305,8 @@ fn writeSalvageDryRunText(writer: *std.Io.Writer, source_path: []const u8, plan:
         plan.recoverable.user_tables,
         plan.recoverable.user_schema_objects,
         plan.recoverable.user_rows,
+        plan.recoverable.extensions,
+        plan.recoverable.extension_private_objects,
         plan.recoverable.objects,
         plan.recoverable.chunks,
         plan.recoverable.loose_chunks,
@@ -4984,6 +5315,8 @@ fn writeSalvageDryRunText(writer: *std.Io.Writer, source_path: []const u8, plan:
         plan.skipped.user_tables,
         plan.skipped.user_schema_objects,
         plan.skipped.user_rows,
+        plan.skipped.extensions,
+        plan.skipped.extension_private_objects,
         plan.skipped.objects,
         plan.skipped.chunks,
         plan.skipped.loose_chunks,
@@ -5073,6 +5406,8 @@ fn writeSalvageExecutionText(
         \\copied_user_tables: {d}
         \\copied_user_schema_objects: {d}
         \\copied_user_rows: {d}
+        \\copied_extensions: {d}
+        \\copied_extension_private_objects: {d}
         \\copied_objects: {d}
         \\copied_chunks: {d}
         \\copied_loose_chunks: {d}
@@ -5081,6 +5416,8 @@ fn writeSalvageExecutionText(
         \\skipped_user_tables: {d}
         \\skipped_user_schema_objects: {d}
         \\skipped_user_rows: {d}
+        \\skipped_extensions: {d}
+        \\skipped_extension_private_objects: {d}
         \\skipped_objects: {d}
         \\skipped_chunks: {d}
         \\skipped_loose_chunks: {d}
@@ -5098,6 +5435,8 @@ fn writeSalvageExecutionText(
         result.copied.user_tables,
         result.copied.user_schema_objects,
         result.copied.user_rows,
+        result.copied.extensions,
+        result.copied.extension_private_objects,
         result.copied.objects,
         result.copied.chunks,
         result.copied.loose_chunks,
@@ -5106,6 +5445,8 @@ fn writeSalvageExecutionText(
         result.plan.skipped.user_tables,
         result.plan.skipped.user_schema_objects,
         result.plan.skipped.user_rows,
+        result.plan.skipped.extensions,
+        result.plan.skipped.extension_private_objects,
         result.plan.skipped.objects,
         result.plan.skipped.chunks,
         result.plan.skipped.loose_chunks,
@@ -5201,6 +5542,8 @@ fn writeSalvageCountsJson(writer: *std.Io.Writer, counts: SalvageCounts) !void {
         \\    "user_tables": {d},
         \\    "user_schema_objects": {d},
         \\    "user_rows": {d},
+        \\    "extensions": {d},
+        \\    "extension_private_objects": {d},
         \\    "graphs": {d},
         \\    "graph_nodes": {d},
         \\    "graph_edges": {d},
@@ -5214,6 +5557,8 @@ fn writeSalvageCountsJson(writer: *std.Io.Writer, counts: SalvageCounts) !void {
         counts.user_tables,
         counts.user_schema_objects,
         counts.user_rows,
+        counts.extensions,
+        counts.extension_private_objects,
         counts.graphs,
         counts.graph_nodes,
         counts.graph_edges,
@@ -5372,6 +5717,21 @@ fn writeJsonErrorWithKind(stderr: *std.Io.Writer, command: []const u8, kind: []c
     try stderr.writeAll("\n}\n");
 }
 
+fn writeJsonErrorWithKindAndActions(stderr: *std.Io.Writer, command: []const u8, kind: []const u8, err: []const u8, issue_counts: DiagnosticIssueCounts) !void {
+    try stderr.writeAll("{\n");
+    try stderr.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
+    try stderr.writeAll("  \"status\": \"error\",\n");
+    try stderr.writeAll("  \"command\": ");
+    try writeJsonString(stderr, command);
+    try stderr.writeAll(",\n  \"kind\": ");
+    try writeJsonString(stderr, kind);
+    try stderr.writeAll(",\n  \"error\": ");
+    try writeJsonString(stderr, err);
+    try stderr.writeAll(",\n  \"suggested_actions\": ");
+    try writeSuggestedActionsJsonForIssues(stderr, "", true, issue_counts);
+    try stderr.writeAll("\n}\n");
+}
+
 fn writeJsonStringFormat(writer: *std.Io.Writer, comptime format: []const u8, args: anytype) !void {
     var buffer: [std.fs.max_path_bytes * 3]u8 = undefined;
     const value = std.fmt.bufPrint(&buffer, format, args) catch return error.NoSpaceLeft;
@@ -5452,10 +5812,27 @@ fn validateExtensions(allocator: std.mem.Allocator, db: *zova.Database, report: 
         try addDiagnosticIssue(allocator, report, issues, .extension, "unknown_extension_storage", name, null, null, null, null);
     }
     for (extensions.items) |item| {
+        db.registerExtensionSqlForDiagnostics(item.name) catch |err| {
+            var detail_buffer: [256]u8 = undefined;
+            const detail = std.fmt.bufPrint(&detail_buffer, "{s}: {s}", .{ item.name, @errorName(err) }) catch @errorName(err);
+            try addDiagnosticIssue(allocator, report, issues, .extension, extensionDiagnosticIssueKind(item.name, err), detail, null, null, null, null);
+            continue;
+        };
         db.checkExtension(item.name) catch |err| {
-            try addDiagnosticIssue(allocator, report, issues, .extension, "extension_check_failed", @errorName(err), null, null, null, null);
+            var detail_buffer: [256]u8 = undefined;
+            const detail = std.fmt.bufPrint(&detail_buffer, "{s}: {s}", .{ item.name, @errorName(err) }) catch @errorName(err);
+            try addDiagnosticIssue(allocator, report, issues, .extension, extensionDiagnosticIssueKind(item.name, err), detail, null, null, null, null);
         };
     }
+}
+
+fn extensionDiagnosticIssueKind(name: []const u8, err: anyerror) []const u8 {
+    if (err == error.ExtensionUnavailable) return "extension_unavailable";
+    if (err == error.ExtensionIncompatible) return "extension_incompatible";
+    if (err == error.ExtensionUntrusted) return "extension_untrusted";
+    if (err == error.ExtensionLoadFailed) return "extension_load_failed";
+    if (std.mem.eql(u8, name, "trgm")) return "trgm_check_failed";
+    return "extension_check_failed";
 }
 
 fn validateBoundStores(allocator: std.mem.Allocator, db: *zova.Database, report: *DiagnosticReport, issues: *std.ArrayList(DiagnosticIssue)) !void {
@@ -5655,10 +6032,11 @@ fn executeSalvage(
     source: *zova.Database,
     destination_path: [:0]const u8,
     plan: SalvagePlan,
+    registry: zova.ExtensionRegistry,
 ) !SalvageExecutionResult {
     if (plan.report.issue_counts.sqlite != 0) return error.Corrupt;
 
-    var destination = try zova.Database.create(destination_path);
+    var destination = try zova.Database.createWithExtensions(destination_path, registry);
     defer destination.deinit();
 
     var result_plan = plan;
@@ -5677,6 +6055,14 @@ fn executeSalvage(
     copied.loose_chunks = try copyValidLooseChunks(allocator, source, &destination);
     try copyValidVectors(allocator, source, &destination, &copied);
     try copyValidGraphs(allocator, source, &destination, &copied);
+    const extension_result = try zova.salvageInstalledExtensions(allocator, &source.sqlite_db, &destination.sqlite_db, registry, .copy);
+    copied.extensions += extension_result.copied_extensions;
+    copied.extension_private_objects += extension_result.copied_private_objects;
+    result_plan.skipped.extensions = extension_result.skipped_extensions;
+    result_plan.skipped.extension_private_objects = extension_result.skipped_private_objects;
+    result_plan.recoverable.extensions = copied.extensions;
+    result_plan.recoverable.extension_private_objects = copied.extension_private_objects;
+    refreshSalvageRecoverability(&result_plan);
     copied.chunks = try scalarU64(&destination, "select count(*) from _zova_chunks");
 
     const destination_verified = try verifySalvageDestination(allocator, &destination);
@@ -5685,6 +6071,20 @@ fn executeSalvage(
         .copied = copied,
         .destination_verified = destination_verified,
     };
+}
+
+fn applyExtensionSalvagePlan(
+    allocator: std.mem.Allocator,
+    source: *zova.Database,
+    registry: zova.ExtensionRegistry,
+    plan: *SalvagePlan,
+) !void {
+    const result = try zova.salvageInstalledExtensions(allocator, &source.sqlite_db, null, registry, .plan);
+    plan.recoverable.extensions += result.copied_extensions;
+    plan.recoverable.extension_private_objects += result.copied_private_objects;
+    plan.skipped.extensions += result.skipped_extensions;
+    plan.skipped.extension_private_objects += result.skipped_private_objects;
+    refreshSalvageRecoverability(plan);
 }
 
 fn copyUserSql(allocator: std.mem.Allocator, source: *zova.Database, destination: *zova.Database) !UserSqlCopyResult {
@@ -6116,10 +6516,39 @@ fn subtractClamped(value: u64, amount: u64) u64 {
     return if (amount >= value) 0 else value - amount;
 }
 
+fn refreshSalvageRecoverability(plan: *SalvagePlan) void {
+    plan.recoverability = if (plan.report.issue_counts.sqlite != 0)
+        .unknown
+    else if (plan.report.issue_count == 0 and !hasSkippedData(plan.skipped))
+        .recoverable
+    else if (hasRecoverableData(plan.recoverable))
+        .partially_recoverable
+    else
+        .not_recoverable;
+}
+
 fn hasRecoverableData(counts: SalvageCounts) bool {
     return counts.user_tables != 0 or
         counts.user_schema_objects != 0 or
         counts.user_rows != 0 or
+        counts.extensions != 0 or
+        counts.extension_private_objects != 0 or
+        counts.graphs != 0 or
+        counts.graph_nodes != 0 or
+        counts.graph_edges != 0 or
+        counts.objects != 0 or
+        counts.chunks != 0 or
+        counts.loose_chunks != 0 or
+        counts.vector_collections != 0 or
+        counts.vectors != 0;
+}
+
+fn hasSkippedData(counts: SalvageCounts) bool {
+    return counts.user_tables != 0 or
+        counts.user_schema_objects != 0 or
+        counts.user_rows != 0 or
+        counts.extensions != 0 or
+        counts.extension_private_objects != 0 or
         counts.graphs != 0 or
         counts.graph_nodes != 0 or
         counts.graph_edges != 0 or

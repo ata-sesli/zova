@@ -326,6 +326,9 @@ The current development branch adds a native Zig extension host foundation and
 the bundled `trgm` extension. Rust extension lifecycle and registry APIs are
 not exposed yet; ordinary Rust opens can use bundled extension SQL surfaces
 through prepared statements after the extension has been installed.
+Databases that require a dynamic local extension need a process that supplies
+that trusted extension code; Rust does not expose dynamic extension loading APIs
+yet. Use the CLI or native Zig host APIs for extension trust/install workflows.
 See [../../docs/extensions.md](../../docs/extensions.md) for the current host
 contract and trust model.
 

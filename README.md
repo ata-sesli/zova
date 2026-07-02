@@ -641,6 +641,23 @@ zova extension drop app.zova <name>
 zova extension install app.zova <name>
 ```
 
+It also supports explicitly trusted local `.zovaext` bundles for one process at
+a time:
+
+```sh
+zova extension trust ./my_ext.zovaext
+zova --extension ./my_ext.zovaext extension install app.zova my_ext
+zova --extension ./my_ext.zovaext check --deep app.zova
+zova extension trusted
+zova extension untrust my_ext
+```
+
+Trusted bundles are native code. Zova records hashes of the bundle manifest and
+library; if either changes, the bundle must be trusted again. Zova never loads
+extension code just because a `.zova` file contains extension metadata.
+If a command needs a dynamic extension that is missing or untrusted, diagnostics
+tell you to provide `--extension <bundle.zovaext>` or trust the bundle first.
+
 `install` succeeds only for extensions registered in the current process or
 bundled with Zova. The default Zova process registry includes `trgm`, so this
 works in the normal CLI build:
@@ -680,10 +697,14 @@ semantic similarity. Trigram lookup is useful when the query or target has
 small spelling differences, filename variations, IDs, short labels, or
 operator-entered text where typo tolerance matters.
 
-Dynamic trusted local loading is still deferred.
-
 For the host contract, authoring shape, storage rules, diagnostics behavior,
 and current non-goals, see [docs/extensions.md](docs/extensions.md).
+
+When moving a database that requires extensions, move or document the required
+extension code too. Bundled extensions such as `trgm` are available in the
+normal Zova process. Dynamic local extensions must be trusted and supplied again
+by the receiving CLI command or application process; `.zova` files never
+auto-load them.
 
 ## Diagnostics And Salvage
 
@@ -709,6 +730,19 @@ good backup is still preferred when one exists. In v0.20, salvage is
 graph-aware: it copies valid graph topology and skips invalid graph nodes or
 edges, such as edges whose endpoint nodes or Zova-owned targets cannot be
 validated.
+
+In the current v0.21 development branch, diagnostics also include extension
+health. Unknown `_zova_ext_*` storage and corrupt `trgm` private tables are
+reported as extension issues without printing indexed text or private schema
+SQL.
+
+Extension-aware salvage is hook-based. Core Zova never copies `_zova_ext_*`
+tables by guessing their meaning. If trusted extension code provides a salvage
+hook, Zova lets that extension copy, rebuild, or skip its own storage. If the
+extension code is unavailable or the extension has no salvage hook, extension
+storage is skipped and reported. The bundled `trgm` extension declares a no-op
+salvage hook in v0.21; real `trgm` index salvage/rebuild is deferred to
+v0.21.1.
 
 ## CLI
 

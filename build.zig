@@ -12,6 +12,13 @@ pub fn build(b: *std.Build) void {
     });
     addSqlite(zova_module, b);
 
+    const zova_dynamic_module = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    zova_dynamic_module.addIncludePath(b.path("vendor/sqlite3.53.2"));
+
     const cli_module = b.createModule(.{
         .root_source_file = b.path("src/cli.zig"),
         .target = target,
@@ -22,6 +29,20 @@ pub fn build(b: *std.Build) void {
     cli_options.addOption([]const u8, "package_version", package_version);
     cli_module.addOptions("cli_options", cli_options);
 
+    const dynamic_extension_fixture = b.addLibrary(.{
+        .name = "zova_dyn_test",
+        .linkage = .dynamic,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/dynamic_extension_fixture.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    dynamic_extension_fixture.root_module.addImport("zova", zova_dynamic_module);
+    dynamic_extension_fixture.linker_allow_shlib_undefined = true;
+    dynamic_extension_fixture.root_module.link_libc = true;
+    cli_options.addOptionPath("dynamic_extension_library_path", dynamic_extension_fixture.getEmittedBin());
+
     const exe = b.addExecutable(.{
         .name = "zova",
         .root_module = b.createModule(.{
@@ -31,6 +52,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.root_module.addImport("cli", cli_module);
+    exe.rdynamic = true;
 
     b.installArtifact(exe);
 
@@ -93,6 +115,7 @@ pub fn build(b: *std.Build) void {
     const cli_tests = b.addTest(.{
         .root_module = cli_tests_module,
     });
+    cli_tests.rdynamic = true;
     const cli_tests_cmd = b.addRunArtifact(cli_tests);
     const cli_test_step = b.step("cli-test", "Run CLI tests");
     cli_test_step.dependOn(&cli_tests_cmd.step);

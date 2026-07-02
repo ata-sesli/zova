@@ -41,6 +41,18 @@ pub const ExtensionRegistry = zova.ExtensionRegistry;
 pub const ExtensionManifest = zova.ExtensionManifest;
 pub const ExtensionInfo = zova.ExtensionInfo;
 pub const ExtensionList = zova.ExtensionList;
+pub const ExtensionSalvageMode = zova.ExtensionSalvageMode;
+pub const ExtensionSalvageContext = zova.ExtensionSalvageContext;
+pub const ExtensionSalvageResult = zova.ExtensionSalvageResult;
+pub const DynamicExtensionSet = zova.DynamicExtensionSet;
+pub const DynamicExtensionTrustRecord = zova.DynamicExtensionTrustRecord;
+pub const DynamicExtensionTrustedList = zova.DynamicExtensionTrustedList;
+pub const DynamicExtensionTrustStoreOptions = zova.DynamicExtensionTrustStoreOptions;
+pub const DynamicExtensionBundleInfo = zova.DynamicExtensionBundleInfo;
+pub const DynamicExtensionOwnedRegistry = zova.DynamicExtensionOwnedRegistry;
+pub const bundledExtensionRegistry = zova.bundledExtensionRegistry;
+pub const salvageInstalledExtensions = zova.salvageInstalledExtensions;
+pub const extension_dynamic = zova.extension_dynamic;
 pub const OpenOptions = zova.OpenOptions;
 pub const BackupOptions = zova.BackupOptions;
 pub const BoundObjectStoreInfo = zova.BoundObjectStoreInfo;
@@ -115,6 +127,14 @@ test "package exports zova database namespace" {
     try std.testing.expect(@hasDecl(@This(), "ExtensionManifest"));
     try std.testing.expect(@hasDecl(@This(), "ExtensionInfo"));
     try std.testing.expect(@hasDecl(@This(), "ExtensionList"));
+    try std.testing.expect(@hasDecl(@This(), "DynamicExtensionSet"));
+    try std.testing.expect(@hasDecl(@This(), "DynamicExtensionTrustRecord"));
+    try std.testing.expect(@hasDecl(@This(), "DynamicExtensionTrustedList"));
+    try std.testing.expect(@hasDecl(@This(), "DynamicExtensionTrustStoreOptions"));
+    try std.testing.expect(@hasDecl(@This(), "DynamicExtensionBundleInfo"));
+    try std.testing.expect(@hasDecl(@This(), "DynamicExtensionOwnedRegistry"));
+    try std.testing.expect(@hasDecl(@This(), "bundledExtensionRegistry"));
+    try std.testing.expect(@hasDecl(@This(), "extension_dynamic"));
     try std.testing.expect(@hasDecl(@This(), "max_vector_dimensions"));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(ObjectId));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(ObjectChunkId));
@@ -182,6 +202,7 @@ test "package exports zova database namespace" {
     try std.testing.expect(@hasDecl(Database, "createWithExtensions"));
     try std.testing.expect(@hasDecl(Database, "openWithExtensions"));
     try std.testing.expect(@hasDecl(Database, "openWithOptionsAndExtensions"));
+    try std.testing.expect(@hasDecl(Database, "openForObjectStoreManagementWithExtensions"));
     try std.testing.expect(@hasDecl(Database, "installExtension"));
     try std.testing.expect(@hasDecl(Database, "listExtensions"));
     try std.testing.expect(@hasDecl(Database, "extensionInfo"));
@@ -192,6 +213,7 @@ test "package exports zova database namespace" {
 
 test {
     _ = @import("extension.zig");
+    _ = @import("extension_dynamic.zig");
     _ = @import("graph_sql_tests.zig");
     _ = @import("graph_tests.zig");
     _ = @import("object_tests.zig");

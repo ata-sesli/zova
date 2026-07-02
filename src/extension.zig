@@ -44,12 +44,43 @@ pub const Manifest = struct {
 pub const Hook = *const fn (*sqlite.Database, Manifest) Error!void;
 pub const ValidationHook = *const fn (*sqlite.Database) anyerror!void;
 
+pub const SalvageMode = enum {
+    plan,
+    copy,
+};
+
+pub const SalvageContext = struct {
+    allocator: std.mem.Allocator,
+    source: *sqlite.Database,
+    destination: ?*sqlite.Database,
+    mode: SalvageMode,
+};
+
+pub const SalvageResult = struct {
+    copied_extensions: u64 = 0,
+    copied_private_objects: u64 = 0,
+    skipped_extensions: u64 = 0,
+    skipped_private_objects: u64 = 0,
+    installed_in_destination: bool = false,
+
+    fn add(self: *SalvageResult, other: SalvageResult) void {
+        self.copied_extensions += other.copied_extensions;
+        self.copied_private_objects += other.copied_private_objects;
+        self.skipped_extensions += other.skipped_extensions;
+        self.skipped_private_objects += other.skipped_private_objects;
+        self.installed_in_destination = self.installed_in_destination or other.installed_in_destination;
+    }
+};
+
+pub const SalvageHook = *const fn (SalvageContext, Manifest) Error!SalvageResult;
+
 pub const Extension = struct {
     manifest: Manifest,
     install: Hook,
     check: Hook,
     drop: Hook,
     register_sql: ?Hook = null,
+    salvage: ?SalvageHook = null,
 };
 
 pub const Registry = struct {
@@ -74,6 +105,9 @@ pub const Registry = struct {
         for (self.extensions, 0..) |extension, index| {
             try validateManifest(extension.manifest);
             for (self.extensions[0..index]) |previous| {
+                if (std.mem.eql(u8, previous.manifest.name, extension.manifest.name)) {
+                    return error.ExtensionInvalid;
+                }
                 if (std.mem.eql(u8, previous.manifest.storage_prefix, extension.manifest.storage_prefix)) {
                     return error.ExtensionInvalid;
                 }
@@ -217,6 +251,19 @@ pub fn check(db: *sqlite.Database, registry: Registry, name: []const u8) Error!v
     try extension.check(db, extension.manifest);
 }
 
+pub fn registerSqlForInstalledExtension(db: *sqlite.Database, registry: Registry, name: []const u8) Error!void {
+    try registry.validate();
+    try validateName(name);
+    const installed = try loadInfo(std.heap.c_allocator, db, name);
+    defer {
+        var mutable = installed;
+        mutable.deinit(std.heap.c_allocator);
+    }
+    const extension = registry.find(name) orelse return error.ExtensionUnavailable;
+    try ensureManifestMatchesInstalled(extension.manifest, installed);
+    if (extension.register_sql) |register_sql| try register_sql(db, extension.manifest);
+}
+
 pub fn checkAll(db: *sqlite.Database, registry: Registry) Error!void {
     try registry.validate();
     try validateInstalledState(std.heap.c_allocator, db);
@@ -308,6 +355,107 @@ pub fn findUnknownPrivateStorage(allocator: std.mem.Allocator, db: *sqlite.Datab
         return try allocator.dupe(u8, name);
     }
     return null;
+}
+
+pub fn countPrivateStorageObjects(db: *sqlite.Database, storage_prefix: []const u8) Error!u64 {
+    var stmt = try db.prepare(
+        \\select name
+        \\from sqlite_master
+        \\where type in ('table', 'index', 'view', 'trigger')
+        \\order by name
+    );
+    defer stmt.deinit();
+
+    var count: u64 = 0;
+    while (try stmt.step() == .row) {
+        const name = stmt.columnText(0);
+        if (isSqliteInternalObject(name)) continue;
+        if (std.mem.startsWith(u8, name, storage_prefix)) count += 1;
+    }
+    return count;
+}
+
+pub fn salvageInstalled(
+    allocator: std.mem.Allocator,
+    source: *sqlite.Database,
+    destination: ?*sqlite.Database,
+    registry: Registry,
+    mode: SalvageMode,
+) Error!SalvageResult {
+    try registry.validate();
+    var list = try listInstalled(allocator, source);
+    defer list.deinit(allocator);
+
+    var total = SalvageResult{};
+    for (list.items) |item| {
+        const private_objects = try countPrivateStorageObjects(source, item.storage_prefix);
+        const extension = registry.find(item.name) orelse {
+            total.skipped_extensions += 1;
+            total.skipped_private_objects += private_objects;
+            continue;
+        };
+        ensureManifestMatchesInstalled(extension.manifest, item) catch {
+            total.skipped_extensions += 1;
+            total.skipped_private_objects += private_objects;
+            continue;
+        };
+        const hook = extension.salvage orelse {
+            total.skipped_extensions += 1;
+            total.skipped_private_objects += private_objects;
+            continue;
+        };
+
+        const result = switch (mode) {
+            .plan => try hook(.{
+                .allocator = allocator,
+                .source = source,
+                .destination = null,
+                .mode = .plan,
+            }, extension.manifest),
+            .copy => try runCopySalvageHook(allocator, source, destination orelse return error.ExtensionInvalid, extension, hook),
+        };
+        total.add(result);
+    }
+    return total;
+}
+
+fn runCopySalvageHook(
+    allocator: std.mem.Allocator,
+    source: *sqlite.Database,
+    destination: *sqlite.Database,
+    extension: Extension,
+    hook: SalvageHook,
+) Error!SalvageResult {
+    var before_objects = try listSchemaObjects(allocator, destination);
+    defer before_objects.deinit(allocator);
+
+    try destination.savepoint("extension_salvage");
+    var released = false;
+    errdefer if (!released) {
+        destination.rollbackToSavepoint("extension_salvage") catch {};
+        destination.releaseSavepoint("extension_salvage") catch {};
+    };
+
+    const result = try hook(.{
+        .allocator = allocator,
+        .source = source,
+        .destination = destination,
+        .mode = .copy,
+    }, extension.manifest);
+
+    try validateNewSchemaObjectsOwnedBy(allocator, destination, before_objects.names, extension.manifest.storage_prefix);
+    if (result.installed_in_destination) {
+        if (!try isInstalled(destination, extension.manifest.name)) {
+            try insertInstalled(destination, extension.manifest);
+        }
+        try validateInstalledState(allocator, destination);
+    } else if (result.copied_private_objects != 0) {
+        return error.ExtensionInvalid;
+    }
+
+    try destination.releaseSavepoint("extension_salvage");
+    released = true;
+    return result;
 }
 
 pub fn loadInfo(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) Error!InstalledInfo {

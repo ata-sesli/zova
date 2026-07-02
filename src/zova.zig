@@ -39,6 +39,7 @@
 //! intentionally absent from this release.
 
 const std = @import("std");
+const extension_dynamic_impl = @import("extension_dynamic.zig");
 const extension_impl = @import("extension.zig");
 const fastcdc = @import("object_fastcdc.zig");
 const graph_impl = @import("graph.zig");
@@ -163,6 +164,16 @@ pub const ExtensionRegistry = extension_impl.Registry;
 pub const ExtensionManifest = extension_impl.Manifest;
 pub const ExtensionInfo = extension_impl.InstalledInfo;
 pub const ExtensionList = extension_impl.InstalledList;
+pub const ExtensionSalvageMode = extension_impl.SalvageMode;
+pub const ExtensionSalvageContext = extension_impl.SalvageContext;
+pub const ExtensionSalvageResult = extension_impl.SalvageResult;
+pub const DynamicExtensionSet = extension_dynamic_impl.DynamicExtensionSet;
+pub const DynamicExtensionTrustRecord = extension_dynamic_impl.TrustRecord;
+pub const DynamicExtensionTrustedList = extension_dynamic_impl.TrustedList;
+pub const DynamicExtensionTrustStoreOptions = extension_dynamic_impl.TrustStoreOptions;
+pub const DynamicExtensionBundleInfo = extension_dynamic_impl.BundleInfo;
+pub const DynamicExtensionOwnedRegistry = extension_dynamic_impl.OwnedRegistry;
+pub const extension_dynamic = extension_dynamic_impl;
 
 /// Information about the optional object store bound to a main `.zova` file.
 ///
@@ -352,7 +363,7 @@ pub fn convertSqliteToZova(source_path: [:0]const u8, dest_path: [:0]const u8) E
 /// This uses SQLite's online backup API and never overwrites an existing
 /// destination. The source must already be a valid current-format Zova file.
 pub fn restoreBackup(source_path: [:0]const u8, dest_path: [:0]const u8, options: RestoreOptions) Error!void {
-    try restoreBackupWithExtensions(source_path, dest_path, options, defaultExtensionRegistry());
+    try restoreBackupWithExtensions(source_path, dest_path, options, bundledExtensionRegistry());
 }
 
 /// Restore a backup `.zova` file with process-registered extension code.
@@ -380,8 +391,18 @@ fn deinitNotifications(hub: *notify_impl.Hub) void {
     allocator.destroy(hub);
 }
 
-fn defaultExtensionRegistry() ExtensionRegistry {
+pub fn bundledExtensionRegistry() ExtensionRegistry {
     return ExtensionRegistry.init(&bundled_extensions);
+}
+
+pub fn salvageInstalledExtensions(
+    allocator: std.mem.Allocator,
+    source: *sqlite.Database,
+    destination: ?*sqlite.Database,
+    registry: ExtensionRegistry,
+    mode: ExtensionSalvageMode,
+) Error!ExtensionSalvageResult {
+    return extension_impl.salvageInstalled(allocator, source, destination, registry, mode);
 }
 
 /// Owns one initialized `.zova` database.
@@ -403,7 +424,7 @@ pub const Database = struct {
     /// private `_zova_meta` table, format version `5`, and the required
     /// object, vector, graph, and extension registry schemas.
     pub fn create(path: [:0]const u8) Error!Database {
-        return createWithExtensions(path, defaultExtensionRegistry());
+        return createWithExtensions(path, bundledExtensionRegistry());
     }
 
     /// Create a new initialized `.zova` database with process-registered
@@ -455,7 +476,7 @@ pub const Database = struct {
     /// or run migrations. Mutating SQL/object/vector/graph APIs fail through
     /// SQLite's normal read-only error path.
     pub fn openWithOptions(path: [:0]const u8, options: OpenOptions) Error!Database {
-        return openWithOptionsAndExtensions(path, options, defaultExtensionRegistry());
+        return openWithOptionsAndExtensions(path, options, bundledExtensionRegistry());
     }
 
     /// Open an existing initialized `.zova` database with explicit options and
@@ -471,10 +492,16 @@ pub const Database = struct {
     /// extension SQL hooks. It is intended for `doctor`, `check --deep`, and
     /// `zova extension list/info` fallback paths.
     pub fn openForExtensionInspection(path: [:0]const u8, options: OpenOptions) Error!Database {
+        return openForExtensionInspectionWithExtensions(path, options, ExtensionRegistry.empty());
+    }
+
+    /// Open a database for diagnostic extension metadata inspection with
+    /// process-registered extension code available to explicit checks.
+    pub fn openForExtensionInspectionWithExtensions(path: [:0]const u8, options: OpenOptions, registry: ExtensionRegistry) Error!Database {
         return openInternal(path, .{
             .read_only = true,
             .busy_timeout_ms = options.busy_timeout_ms,
-        }, true, ExtensionRegistry.empty(), .inspect);
+        }, true, registry, .inspect);
     }
 
     /// Open only the main `.zova` file for bound-store binding management.
@@ -484,7 +511,13 @@ pub const Database = struct {
     /// handle use the main file only; normal application code should use `open`
     /// or `openWithOptions`.
     pub fn openForObjectStoreManagement(path: [:0]const u8, options: OpenOptions) Error!Database {
-        return openInternal(path, options, false, defaultExtensionRegistry(), .enforce);
+        return openForObjectStoreManagementWithExtensions(path, options, bundledExtensionRegistry());
+    }
+
+    /// Open only the main `.zova` file for bound-store binding management with
+    /// process-registered extension code.
+    pub fn openForObjectStoreManagementWithExtensions(path: [:0]const u8, options: OpenOptions, registry: ExtensionRegistry) Error!Database {
+        return openInternal(path, options, false, registry, .enforce);
     }
 
     fn openInternal(path: [:0]const u8, options: OpenOptions, load_bound_stores: bool, registry: ExtensionRegistry, extension_mode: ExtensionOpenMode) Error!Database {
@@ -561,6 +594,11 @@ pub const Database = struct {
     /// Run the registered extension's health check hook.
     pub fn checkExtension(self: *Database, name: []const u8) Error!void {
         try extension_impl.check(&self.sqlite_db, self.extension_registry, name);
+    }
+
+    /// Register SQL needed by one installed extension before diagnostic checks.
+    pub fn registerExtensionSqlForDiagnostics(self: *Database, name: []const u8) Error!void {
+        try extension_impl.registerSqlForInstalledExtension(&self.sqlite_db, self.extension_registry, name);
     }
 
     /// Drop one process-registered extension and its namespaced storage.
@@ -3402,6 +3440,26 @@ test "extension inspection opens missing-code databases for metadata only" {
     try std.testing.expectError(error.ReadOnly, inspected.exec("create table inspection_write_blocked (id integer)"));
 }
 
+test "extension inspection diagnostics can run SQL-backed check hooks" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "extension-inspection-sql.zova");
+
+    const registry = ExtensionRegistry.init(&.{testExtension()});
+    {
+        var db = try Database.createWithExtensions(db_path, registry);
+        defer db.deinit();
+        try db.installExtension("test");
+    }
+
+    var inspected = try Database.openForExtensionInspectionWithExtensions(db_path, .{}, registry);
+    defer inspected.deinit();
+    try inspected.registerExtensionSqlForDiagnostics("test");
+    try inspected.checkExtension("test");
+}
+
 test "extension registry is used for backup compact and restore verification" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3474,6 +3532,19 @@ test "extension manifests validate names prefixes and duplicate registry prefixe
     }));
 
     const duplicate_one = testExtension();
+    const duplicate_name = Extension{
+        .manifest = .{
+            .name = "test",
+            .version = "0.1.0",
+            .storage_prefix = "_zova_ext_test_two_",
+            .zova_abi_min = "0.21.0",
+        },
+        .install = testExtensionInstall,
+        .check = testExtensionCheck,
+        .drop = testExtensionDrop,
+    };
+    try std.testing.expectError(error.ExtensionInvalid, ExtensionRegistry.init(&.{ duplicate_one, duplicate_name }).validate());
+
     const duplicate_two = Extension{
         .manifest = .{
             .name = "other",
@@ -3562,6 +3633,59 @@ test "extension lifecycle audits namespace and drop cleanup" {
     }
 }
 
+test "extension salvage hook copies namespaced storage and installs destination metadata" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var destination_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "extension-salvage-source.zova");
+    const destination_path = try testingDbPath(&destination_buffer, tmp.sub_path[0..], "extension-salvage-destination.zova");
+
+    const registry = ExtensionRegistry.init(&.{salvageExtension()});
+    var source = try Database.createWithExtensions(source_path, registry);
+    defer source.deinit();
+    try source.installExtension("salvage");
+
+    var destination = try Database.createWithExtensions(destination_path, registry);
+    defer destination.deinit();
+
+    const result = try extension_impl.salvageInstalled(std.testing.allocator, &source.sqlite_db, &destination.sqlite_db, registry, .copy);
+    try std.testing.expectEqual(@as(u64, 1), result.copied_extensions);
+    try std.testing.expectEqual(@as(u64, 1), result.copied_private_objects);
+    try std.testing.expectEqual(@as(u64, 0), result.skipped_extensions);
+    try std.testing.expectEqual(@as(u64, 0), result.skipped_private_objects);
+    try std.testing.expect(result.installed_in_destination);
+
+    try std.testing.expect(try tableExists(&destination.sqlite_db, "_zova_ext_salvage_meta"));
+    var info = try destination.extensionInfo(std.testing.allocator, "salvage");
+    defer info.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("salvage", info.name);
+    try destination.checkExtension("salvage");
+}
+
+test "extension salvage hook rolls back storage outside its namespace" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var destination_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "extension-salvage-bad-source.zova");
+    const destination_path = try testingDbPath(&destination_buffer, tmp.sub_path[0..], "extension-salvage-bad-destination.zova");
+
+    const registry = ExtensionRegistry.init(&.{badSalvageExtension()});
+    var source = try Database.createWithExtensions(source_path, registry);
+    defer source.deinit();
+    try source.installExtension("bad_salvage");
+
+    var destination = try Database.createWithExtensions(destination_path, registry);
+    defer destination.deinit();
+
+    try std.testing.expectError(error.ExtensionInvalid, extension_impl.salvageInstalled(std.testing.allocator, &source.sqlite_db, &destination.sqlite_db, registry, .copy));
+    try std.testing.expect(!try tableExists(&destination.sqlite_db, "_zova_ext_other_salvage_meta"));
+    try std.testing.expectError(error.ExtensionNotFound, destination.extensionInfo(std.testing.allocator, "bad_salvage"));
+}
+
 fn testExtension() Extension {
     return .{
         .manifest = .{
@@ -3575,6 +3699,36 @@ fn testExtension() Extension {
         .check = testExtensionCheck,
         .drop = testExtensionDrop,
         .register_sql = testExtensionRegisterSql,
+    };
+}
+
+fn salvageExtension() Extension {
+    return .{
+        .manifest = .{
+            .name = "salvage",
+            .version = "0.1.0",
+            .storage_prefix = "_zova_ext_salvage_",
+            .zova_abi_min = "0.21.0",
+        },
+        .install = salvageExtensionInstall,
+        .check = salvageExtensionCheck,
+        .drop = salvageExtensionDrop,
+        .salvage = salvageExtensionSalvage,
+    };
+}
+
+fn badSalvageExtension() Extension {
+    return .{
+        .manifest = .{
+            .name = "bad_salvage",
+            .version = "0.1.0",
+            .storage_prefix = "_zova_ext_bad_salvage_",
+            .zova_abi_min = "0.21.0",
+        },
+        .install = badSalvageExtensionInstall,
+        .check = badSalvageExtensionCheck,
+        .drop = badSalvageExtensionDrop,
+        .salvage = badSalvageExtensionSalvage,
     };
 }
 
@@ -3699,6 +3853,67 @@ fn testExtensionRegisterSql(db: *sqlite.Database, manifest: ExtensionManifest) e
         null,
     );
     if (rc != sqlite.c.SQLITE_OK) return error.SqliteError;
+}
+
+fn salvageExtensionInstall(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
+    try extension_impl.validateManifest(manifest);
+    try db.exec("create table _zova_ext_salvage_meta (key text primary key, value text not null)");
+    var stmt = try db.prepare("insert into _zova_ext_salvage_meta (key, value) values ('installed', ?)");
+    defer stmt.deinit();
+    try stmt.bindText(1, manifest.version);
+    std.debug.assert((try stmt.step()) == .done);
+}
+
+fn salvageExtensionCheck(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
+    try extension_impl.validateManifest(manifest);
+    var stmt = try db.prepare("select value from _zova_ext_salvage_meta where key = 'installed'");
+    defer stmt.deinit();
+    switch (try stmt.step()) {
+        .row => if (!std.mem.eql(u8, stmt.columnText(0), manifest.version)) return error.ExtensionInvalid,
+        .done => return error.ExtensionInvalid,
+    }
+}
+
+fn salvageExtensionDrop(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
+    try extension_impl.validateManifest(manifest);
+    try db.exec("drop table if exists _zova_ext_salvage_meta");
+}
+
+fn salvageExtensionSalvage(context: extension_impl.SalvageContext, manifest: ExtensionManifest) extension_impl.Error!extension_impl.SalvageResult {
+    try extension_impl.validateManifest(manifest);
+    _ = context.source;
+    if (context.mode == .plan) {
+        return .{ .copied_extensions = 1, .copied_private_objects = 1 };
+    }
+    const destination = context.destination orelse return error.ExtensionInvalid;
+    try destination.exec("create table _zova_ext_salvage_meta (key text primary key, value text not null)");
+    var stmt = try destination.prepare("insert into _zova_ext_salvage_meta (key, value) values ('installed', ?)");
+    defer stmt.deinit();
+    try stmt.bindText(1, manifest.version);
+    std.debug.assert((try stmt.step()) == .done);
+    return .{ .copied_extensions = 1, .copied_private_objects = 1, .installed_in_destination = true };
+}
+
+fn badSalvageExtensionInstall(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
+    try extension_impl.validateManifest(manifest);
+    try db.exec("create table _zova_ext_bad_salvage_meta (key text primary key, value text not null)");
+}
+
+fn badSalvageExtensionCheck(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
+    try extension_impl.validateManifest(manifest);
+    _ = db;
+}
+
+fn badSalvageExtensionDrop(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
+    try extension_impl.validateManifest(manifest);
+    try db.exec("drop table if exists _zova_ext_bad_salvage_meta");
+}
+
+fn badSalvageExtensionSalvage(context: extension_impl.SalvageContext, manifest: ExtensionManifest) extension_impl.Error!extension_impl.SalvageResult {
+    try extension_impl.validateManifest(manifest);
+    const destination = context.destination orelse return error.ExtensionInvalid;
+    try destination.exec("create table _zova_ext_other_salvage_meta (key text primary key, value text not null)");
+    return .{ .copied_extensions = 1, .copied_private_objects = 1, .installed_in_destination = true };
 }
 
 fn failingExtensionInstall(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {

@@ -11,6 +11,7 @@ test "cli version and help are successful" {
     var help = try runCli(&.{ "zova", "--help" });
     defer help.deinit();
     try std.testing.expectEqual(@as(u8, 0), help.code);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "zova [--extension <bundle.zovaext> ...] <command>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "info <file.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "objects [--json] [--limit <n>] <file.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "object [--json] [--limit <n>] <file.zova> <object-id>") != null);
@@ -38,6 +39,8 @@ test "cli version and help are successful" {
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "vector-store unbind [--json] <main.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "extension list [--json] <file.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "extension install [--json] <file.zova> <name>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "extension trust [--json] <bundle.zovaext>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "extension trusted [--json]") != null);
 }
 
 test "cli usage errors return exit code 2" {
@@ -122,10 +125,22 @@ test "cli bundled trgm extension installs checks lists and drops" {
     defer check.deinit();
     try std.testing.expectEqual(@as(u8, 0), check.code);
 
+    var deep_check = try runCli(&.{ "zova", "check", "--json", "--deep", db_path });
+    defer deep_check.deinit();
+    try std.testing.expectEqual(@as(u8, 0), deep_check.code);
+    var deep_check_json = try parseJson(deep_check.stdout);
+    defer deep_check_json.deinit();
+    try expectJsonObjectHasInt(deep_check_json.value.object, "checked", "extensions");
+
     var doctor = try runCli(&.{ "zova", "doctor", "--json", db_path });
     defer doctor.deinit();
     try std.testing.expectEqual(@as(u8, 0), doctor.code);
     try expectContains(doctor.stdout, "\"extension\"");
+
+    var doctor_text = try runCli(&.{ "zova", "doctor", db_path });
+    defer doctor_text.deinit();
+    try std.testing.expectEqual(@as(u8, 0), doctor_text.code);
+    try expectContains(doctor_text.stdout, "extensions_checked: 1");
 
     var drop = try runCli(&.{ "zova", "extension", "drop", "--json", db_path, "trgm" });
     defer drop.deinit();
@@ -137,6 +152,89 @@ test "cli bundled trgm extension installs checks lists and drops" {
     var list_json = try parseJson(list.stdout);
     defer list_json.deinit();
     try expectJsonArrayLen(list_json.value.object, "extensions", 0);
+}
+
+test "cli trusted dynamic extension loads only when explicitly requested" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = defaultIo();
+
+    try tmp.dir.createDir(io, "dyn_test.zovaext", .default_dir);
+    const library_bytes = try std.Io.Dir.cwd().readFileAlloc(io, cli.dynamic_extension_library_path, std.testing.allocator, .limited(64 * 1024 * 1024));
+    defer std.testing.allocator.free(library_bytes);
+    try tmp.dir.writeFile(io, .{ .sub_path = "dyn_test.zovaext/libdyn_test", .data = library_bytes });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "dyn_test.zovaext/extension.json",
+        .data =
+        \\{
+        \\  "name": "dyn_test",
+        \\  "version": "0.1.0",
+        \\  "storage_prefix": "_zova_ext_dyn_test_",
+        \\  "zova_abi_min": "0.21.0",
+        \\  "capabilities": "sql,dynamic-test",
+        \\  "library": "libdyn_test"
+        \\}
+        ,
+    });
+
+    var bundle_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const bundle_path = try std.fmt.bufPrint(&bundle_buffer, ".zig-cache/tmp/{s}/dyn_test.zovaext", .{tmp.sub_path});
+    var trust_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const trust_path = try std.fmt.bufPrint(&trust_buffer, ".zig-cache/tmp/{s}/trusted_extensions.json", .{tmp.sub_path});
+    try setTestEnv("ZOVA_TRUST_STORE", trust_path);
+
+    var db_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&db_buffer, tmp.sub_path[0..], "dynamic-extension.zova");
+    {
+        var db = try zova.Database.create(db_path);
+        defer db.deinit();
+    }
+
+    var untrusted = try runCli(&.{ "zova", "--extension", bundle_path, "extension", "install", "--json", db_path, "dyn_test" });
+    defer untrusted.deinit();
+    try std.testing.expectEqual(@as(u8, 4), untrusted.code);
+    try expectContains(untrusted.stderr, "ExtensionUntrusted");
+    try expectContains(untrusted.stderr, "zova extension trust");
+
+    var trust = try runCli(&.{ "zova", "extension", "trust", "--json", bundle_path });
+    defer trust.deinit();
+    try std.testing.expectEqual(@as(u8, 0), trust.code);
+    var trust_json = try parseJson(trust.stdout);
+    defer trust_json.deinit();
+    try expectJsonString(trust_json.value.object, "command", "extension-trust");
+
+    var trusted = try runCli(&.{ "zova", "extension", "trusted", "--json" });
+    defer trusted.deinit();
+    try std.testing.expectEqual(@as(u8, 0), trusted.code);
+    try expectContains(trusted.stdout, "\"name\": \"dyn_test\"");
+
+    var missing = try runCli(&.{ "zova", "extension", "install", "--json", db_path, "dyn_test" });
+    defer missing.deinit();
+    try std.testing.expectEqual(@as(u8, 4), missing.code);
+    try expectContains(missing.stderr, "ExtensionNotFound");
+
+    var install = try runCli(&.{ "zova", "--extension", bundle_path, "extension", "install", "--json", db_path, "dyn_test" });
+    defer install.deinit();
+    try std.testing.expectEqual(@as(u8, 0), install.code);
+
+    var normal_check = try runCli(&.{ "zova", "extension", "check", "--json", db_path, "dyn_test" });
+    defer normal_check.deinit();
+    try std.testing.expectEqual(@as(u8, 4), normal_check.code);
+    try expectContains(normal_check.stderr, "ExtensionUnavailable");
+
+    var dynamic_check = try runCli(&.{ "zova", "--extension", bundle_path, "extension", "check", "--json", db_path, "dyn_test" });
+    defer dynamic_check.deinit();
+    try std.testing.expectEqual(@as(u8, 0), dynamic_check.code);
+
+    var untrust = try runCli(&.{ "zova", "extension", "untrust", "--json", "dyn_test" });
+    defer untrust.deinit();
+    try std.testing.expectEqual(@as(u8, 0), untrust.code);
+    try expectContains(untrust.stdout, "\"removed\": true");
+
+    var after_untrust = try runCli(&.{ "zova", "--extension", bundle_path, "extension", "check", "--json", db_path, "dyn_test" });
+    defer after_untrust.deinit();
+    try std.testing.expectEqual(@as(u8, 4), after_untrust.code);
+    try expectContains(after_untrust.stderr, "ExtensionUntrusted");
 }
 
 test "cli extension list info and diagnostics inspect unavailable extension metadata" {
@@ -214,6 +312,67 @@ test "cli diagnostics report unknown extension private storage" {
     defer check.deinit();
     try std.testing.expectEqual(@as(u8, 4), check.code);
     try expectContains(check.stderr, "unknown_extension_storage");
+}
+
+test "cli extension diagnostics keep trgm indexed text private" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "trgm-private-diagnostics.zova");
+    const sensitive_text = "secret recovery phrase midnight sunflower invoice";
+
+    {
+        var db = try zova.Database.create(db_path);
+        defer db.deinit();
+        try db.installExtension("trgm");
+        try db.exec("select zova_trgm_create_index('docs')");
+        var put = try db.prepare("select zova_trgm_put('docs', 'doc:secret', 'record', 'messages', '1', ?)");
+        defer put.deinit();
+        try put.bindText(1, sensitive_text);
+        try std.testing.expectEqual(zova.sqlite.Step.row, try put.step());
+    }
+    {
+        var raw = try zova.sqlite.Database.open(db_path);
+        defer raw.deinit();
+        try raw.exec("delete from _zova_ext_trgm_terms");
+    }
+
+    var extension_check = try runCli(&.{ "zova", "extension", "check", "--json", db_path, "trgm" });
+    defer extension_check.deinit();
+    try std.testing.expectEqual(@as(u8, 4), extension_check.code);
+    try expectContains(extension_check.stderr, "ExtensionInvalid");
+    try std.testing.expect(std.mem.indexOf(u8, extension_check.stderr, sensitive_text) == null);
+    try std.testing.expect(std.mem.indexOf(u8, extension_check.stderr, "create table") == null);
+
+    var doctor = try runCli(&.{ "zova", "doctor", "--json", "--limit", "1", db_path });
+    defer doctor.deinit();
+    try std.testing.expectEqual(@as(u8, 4), doctor.code);
+    var doctor_json = try parseJson(doctor.stderr);
+    defer doctor_json.deinit();
+    try expectJsonObjectHasInt(doctor_json.value.object, "issue_counts", "extension");
+    try expectContains(doctor.stderr, "trgm_check_failed");
+    try expectContains(doctor.stderr, "zova extension check");
+    try std.testing.expect(std.mem.indexOf(u8, doctor.stderr, sensitive_text) == null);
+    try std.testing.expect(std.mem.indexOf(u8, doctor.stderr, "create table") == null);
+
+    var bounded = try runCli(&.{ "zova", "doctor", "--json", "--limit", "0", db_path });
+    defer bounded.deinit();
+    try std.testing.expectEqual(@as(u8, 4), bounded.code);
+    var bounded_json = try parseJson(bounded.stderr);
+    defer bounded_json.deinit();
+    try expectJsonArrayLen(bounded_json.value.object, "issues", 0);
+    try expectJsonObjectHasInt(bounded_json.value.object, "issue_counts", "extension");
+
+    var check = try runCli(&.{ "zova", "check", "--json", "--deep", db_path });
+    defer check.deinit();
+    try std.testing.expectEqual(@as(u8, 4), check.code);
+    var check_json = try parseJson(check.stderr);
+    defer check_json.deinit();
+    try expectJsonObjectHasInt(check_json.value.object, "issue_counts", "extension");
+    try expectContains(check.stderr, "trgm_check_failed");
+    try std.testing.expect(std.mem.indexOf(u8, check.stderr, sensitive_text) == null);
+    try std.testing.expect(std.mem.indexOf(u8, check.stderr, "create table") == null);
 }
 
 test "cli graph commands inspect graphs nodes neighbors and walks" {
@@ -1883,6 +2042,101 @@ test "cli salvage dry-run counts missing chunks as skipped" {
     try expectJsonBool(root, "issues_truncated", true);
 }
 
+test "cli salvage skips trgm extension storage without copying indexed text" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "salvage-trgm-source.zova");
+    const sensitive_text = "private indexed phrase pineapple midnight";
+    {
+        var db = try zova.Database.create(source_path);
+        defer db.deinit();
+        try db.installExtension("trgm");
+        try db.exec("select zova_trgm_create_index('docs')");
+        var put = try db.prepare("select zova_trgm_put('docs', 'doc:secret', 'record', 'notes', '1', ?)");
+        defer put.deinit();
+        try put.bindText(1, sensitive_text);
+        try std.testing.expectEqual(zova.sqlite.Step.row, try put.step());
+    }
+
+    var dry_run = try runCli(&.{ "zova", "salvage", "--dry-run", "--json", source_path });
+    defer dry_run.deinit();
+    try std.testing.expectEqual(@as(u8, 0), dry_run.code);
+    var dry_json = try parseJson(dry_run.stdout);
+    defer dry_json.deinit();
+    const dry_root = dry_json.value.object;
+    try std.testing.expectEqual(@as(i64, 1), try jsonObjectInt(dry_root, "skipped", "extensions"));
+    try std.testing.expect((try jsonObjectInt(dry_root, "skipped", "extension_private_objects")) > 0);
+    try std.testing.expect(std.mem.indexOf(u8, dry_run.stdout, sensitive_text) == null);
+    try std.testing.expect(std.mem.indexOf(u8, dry_run.stdout, "create table") == null);
+
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "salvage-trgm-destination.zova");
+    var salvage = try runCli(&.{ "zova", "salvage", "--json", source_path, dest_path });
+    defer salvage.deinit();
+    try std.testing.expectEqual(@as(u8, 0), salvage.code);
+    var salvage_json = try parseJson(salvage.stdout);
+    defer salvage_json.deinit();
+    const root = salvage_json.value.object;
+    try expectJsonBool(root, "destination_verified", true);
+    try std.testing.expectEqual(@as(i64, 0), try jsonObjectInt(root, "copied", "extensions"));
+    try std.testing.expectEqual(@as(i64, 1), try jsonObjectInt(root, "skipped", "extensions"));
+    try std.testing.expect((try jsonObjectInt(root, "skipped", "extension_private_objects")) > 0);
+    try std.testing.expect(std.mem.indexOf(u8, salvage.stdout, sensitive_text) == null);
+    try std.testing.expect(std.mem.indexOf(u8, salvage.stdout, "create table") == null);
+
+    var extension_list = try runCli(&.{ "zova", "extension", "list", "--json", dest_path });
+    defer extension_list.deinit();
+    try std.testing.expectEqual(@as(u8, 0), extension_list.code);
+    var list_json = try parseJson(extension_list.stdout);
+    defer list_json.deinit();
+    try expectJsonArrayLen(list_json.value.object, "extensions", 0);
+
+    var deep = try runCli(&.{ "zova", "check", "--deep", dest_path });
+    defer deep.deinit();
+    try std.testing.expectEqual(@as(u8, 0), deep.code);
+}
+
+test "cli salvage skips unavailable extension storage through inspection fallback" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "salvage-unavailable-extension-source.zova");
+    try createUnavailableExtensionFixture(source_path);
+    {
+        var raw = try zova.sqlite.Database.open(source_path);
+        defer raw.deinit();
+        try raw.exec("create table notes (id integer primary key, body text); insert into notes (body) values ('keep me')");
+    }
+
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "salvage-unavailable-extension-destination.zova");
+    var salvage = try runCli(&.{ "zova", "salvage", "--json", source_path, dest_path });
+    defer salvage.deinit();
+    try std.testing.expectEqual(@as(u8, 0), salvage.code);
+    var parsed = try parseJson(salvage.stdout);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try expectJsonBool(root, "destination_verified", true);
+    try std.testing.expectEqual(@as(i64, 0), try jsonObjectInt(root, "copied", "extensions"));
+    try std.testing.expectEqual(@as(i64, 1), try jsonObjectInt(root, "skipped", "extensions"));
+    try std.testing.expect((try jsonObjectInt(root, "skipped", "extension_private_objects")) > 0);
+
+    var extension_list = try runCli(&.{ "zova", "extension", "list", "--json", dest_path });
+    defer extension_list.deinit();
+    try std.testing.expectEqual(@as(u8, 0), extension_list.code);
+    var list_json = try parseJson(extension_list.stdout);
+    defer list_json.deinit();
+    try expectJsonArrayLen(list_json.value.object, "extensions", 0);
+
+    var raw_dest = try zova.sqlite.Database.open(dest_path);
+    defer raw_dest.deinit();
+    try std.testing.expectEqual(@as(i64, 1), try countRawRows(&raw_dest, "select count(*) from notes"));
+    try std.testing.expectEqual(@as(i64, 0), try countRawRows(&raw_dest, "select count(*) from sqlite_master where name like '_zova_ext_test_%'"));
+}
+
 test "cli salvage copies healthy database into verified destination" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2852,6 +3106,21 @@ fn createUnavailableExtensionFixture(db_path: [:0]const u8) !void {
 
 fn testingDbPath(buffer: []u8, sub_path: []const u8, name: []const u8) ![:0]u8 {
     return try std.fmt.bufPrintZ(buffer, ".zig-cache/tmp/{s}/{s}", .{ sub_path, name });
+}
+
+extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+
+fn setTestEnv(name: []const u8, value: []const u8) !void {
+    const allocator = std.testing.allocator;
+    const name_z = try allocator.dupeZ(u8, name);
+    defer allocator.free(name_z);
+    const value_z = try allocator.dupeZ(u8, value);
+    defer allocator.free(value_z);
+    if (setenv(name_z.ptr, value_z.ptr, 1) != 0) return error.SetEnvFailed;
+}
+
+fn defaultIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
 }
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {

@@ -32,14 +32,87 @@ A `.zova` file may say which extensions it needs, but the application or CLI
 process decides which extension code is available. Zova never loads code just
 because a database asks for it.
 
-Deferred for later v0.21 work:
+Zova supports two process-owned extension sources in the v0.21 development
+branch:
 
-- dynamic trusted local extension artifacts
-- extension trust stores
+- bundled extensions shipped with Zova, such as `trgm`
+- explicitly trusted local `.zovaext` bundle folders supplied by the user or app
+
+Deferred for later work:
+
 - extension signing
 - marketplace or network fetching
 - optional installed extensions
 - C ABI, Rust, Go, or Python lifecycle APIs
+
+## Trusted Local `.zovaext` Bundles
+
+A dynamic extension bundle is a local folder ending in `.zovaext`.
+
+Required bundle shape:
+
+```text
+my_ext.zovaext/
+  extension.json
+  libmy_ext
+```
+
+`extension.json` contains:
+
+```json
+{
+  "name": "my_ext",
+  "version": "0.1.0",
+  "storage_prefix": "_zova_ext_my_ext_",
+  "zova_abi_min": "0.21.0",
+  "capabilities": "sql",
+  "library": "libmy_ext",
+  "entrypoint": "zova_extension_entry"
+}
+```
+
+`entrypoint` is optional and defaults to `zova_extension_entry`. The library path
+must be relative to the bundle, must not contain `..`, and must stay inside the
+bundle.
+
+Dynamic extensions are native trusted code. They must be built for the same
+Zova/Zig extension ABI. Loading a bundle means running code in the current
+process with the same trust level as the application.
+
+Trust a bundle before loading it:
+
+```sh
+zova extension trust ./my_ext.zovaext
+zova extension trusted
+```
+
+Trust records live at `$ZOVA_TRUST_STORE` when set, otherwise
+`$XDG_CONFIG_HOME/zova/trusted_extensions.json`, otherwise
+`$HOME/.config/zova/trusted_extensions.json`. A trust record stores the
+canonical bundle path, extension identity, manifest hash, library hash, and
+trust timestamp.
+
+If `extension.json` or the native library changes, loading fails until the
+bundle is trusted again.
+
+Load trusted bundles explicitly for one CLI process:
+
+```sh
+zova --extension ./my_ext.zovaext extension install app.zova my_ext
+zova --extension ./my_ext.zovaext check --deep app.zova
+```
+
+Zova never scans trusted bundles automatically. A `.zova` database can require
+an extension by name, but it cannot make Zova load a library path. The process
+opening the database must provide the bundle with `--extension` or with a
+registry-aware native API.
+
+Remove trust by name or bundle path:
+
+```sh
+zova extension untrust my_ext
+zova extension untrust ./my_ext.zovaext
+```
 
 ## Bundled `trgm`
 
@@ -192,14 +265,52 @@ extension code is unavailable.
 metadata without registered code. `zova extension check`, `drop`, and `install`
 still require matching process-registered extension code.
 
+When a dynamic bundle is missing or untrusted, diagnostics point back to the
+process boundary: supply the bundle with `--extension <bundle.zovaext>` for that
+command, or run `zova extension trust <bundle.zovaext>` after verifying the
+local code is expected.
+
 ## Operational Copies
 
 Backup, compact, and restore preserve `_zova_extensions` and extension-owned
 tables through normal SQLite copying. When extension code is available, Zova
 can verify the extension through its check hook.
 
-Salvage support for extension-owned storage is deferred. Unknown extension
-storage should be treated conservatively.
+If required extension code is unavailable during verification, the operation
+fails clearly instead of silently treating extension-owned storage as healthy.
+Use diagnostics with the same process registry or CLI `--extension` bundle list
+that the application will use.
+
+Salvage support is hook-based. Zova core never copies `_zova_ext_*` tables by
+guessing their meaning. During salvage, core asks installed extension code for
+an optional salvage hook. The hook may copy, rebuild, or skip its own storage.
+
+If extension code is unavailable, or if the extension has no salvage hook, Zova
+skips that extension's private storage and reports bounded skipped counts. The
+destination is not marked as having that extension installed unless the hook
+explicitly rebuilt enough storage and asks Zova to write installed metadata.
+
+The bundled `trgm` extension has a no-op salvage hook in v0.21. It skips derived
+trigram index storage without printing indexed text. Real `trgm` salvage or
+rebuild support is deferred to v0.21.1.
+
+## Moving Databases That Require Extensions
+
+When you copy or share a `.zova` file with installed extensions, move the
+required extension code along with the application or document which bundled
+extensions are required.
+
+Bundled extensions such as `trgm` are available in the normal Zova CLI and
+default native opens. Dynamic local extensions are not stored in the database;
+the receiving process must trust and provide the `.zovaext` bundle again:
+
+```sh
+zova extension trust ./my_ext.zovaext
+zova --extension ./my_ext.zovaext doctor app.zova
+```
+
+A database cannot force another machine to load extension code. Missing code is
+reported as an extension health issue.
 
 ## Authoring Shape
 

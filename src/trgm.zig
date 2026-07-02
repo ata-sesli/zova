@@ -115,6 +115,7 @@ pub fn extension() extension_impl.Extension {
         .check = check,
         .drop = drop,
         .register_sql = registerSql,
+        .salvage = salvage,
     };
 }
 
@@ -182,6 +183,17 @@ fn drop(db: *sqlite.Database, manifest: extension_impl.Manifest) extension_impl.
     try db.exec("drop table if exists _zova_ext_trgm_documents");
     try db.exec("drop table if exists _zova_ext_trgm_indexes");
     try db.exec("drop table if exists _zova_ext_trgm_meta");
+}
+
+fn salvage(context: extension_impl.SalvageContext, manifest: extension_impl.Manifest) extension_impl.Error!extension_impl.SalvageResult {
+    try extension_impl.validateManifest(manifest);
+    // TODO(v0.21.1): rebuild or copy valid trigram index rows through a real
+    // trgm-owned salvage strategy. v0.21 intentionally skips derived indexes.
+    const private_objects = try extension_impl.countPrivateStorageObjects(context.source, manifest.storage_prefix);
+    return .{
+        .skipped_extensions = 1,
+        .skipped_private_objects = private_objects,
+    };
 }
 
 fn registerSql(db: *sqlite.Database, manifest: extension_impl.Manifest) extension_impl.Error!void {

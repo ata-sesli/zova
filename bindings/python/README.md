@@ -155,6 +155,10 @@ The current development branch adds a native Zig extension host foundation and
 the bundled `trgm` extension. Python extension lifecycle and registry APIs are
 not exposed yet; ordinary Python opens can use bundled extension SQL surfaces
 through prepared statements after the extension has been installed.
+Databases that require a dynamic local extension need a process that supplies
+that trusted extension code; Python does not expose dynamic extension loading
+APIs yet. Use the CLI or native Zig host APIs for extension trust/install
+workflows.
 See [../../docs/extensions.md](../../docs/extensions.md) for the current host
 contract and trust model.
 
