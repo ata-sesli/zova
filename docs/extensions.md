@@ -18,10 +18,10 @@ must use `_zova_ext_<name>_...` names. For example, an extension named `trgm`
 owns `_zova_ext_trgm_docs`, `_zova_ext_trgm_postings`, and indexes with the
 same prefix.
 
-In v0.21 development builds, all installed extensions are required. Opening a
-database with installed extension metadata but without matching process code
-fails during normal open. Diagnostic commands can still inspect the metadata so
-they can explain what is missing.
+In v0.21, all installed extensions are required. Opening a database with
+installed extension metadata but without matching process code fails during
+normal open. Diagnostic commands can still inspect the metadata so they can
+explain what is missing.
 
 ## Trust Boundary
 
@@ -32,10 +32,10 @@ A `.zova` file may say which extensions it needs, but the application or CLI
 process decides which extension code is available. Zova never loads code just
 because a database asks for it.
 
-Zova supports two process-owned extension sources in the v0.21 development
-branch:
+Zova supports three process-owned extension sources in v0.21:
 
 - bundled extensions shipped with Zova, such as `trgm`
+- app-registered native Zig extensions supplied by the application process
 - explicitly trusted local `.zovaext` bundle folders supplied by the user or app
 
 Deferred for later work:
@@ -43,7 +43,7 @@ Deferred for later work:
 - extension signing
 - marketplace or network fetching
 - optional installed extensions
-- C ABI, Rust, Go, or Python lifecycle APIs
+- binding-level extension authoring and dynamic loading APIs
 
 ## Trusted Local `.zovaext` Bundles
 
@@ -360,6 +360,7 @@ const registry = zova.ExtensionRegistry.init(&.{ext});
 var db = try zova.Database.openWithExtensions("app.zova", registry);
 ```
 
-The exact public authoring API may still change while v0.21 is in development.
-The contract that should not change is the trust boundary: extension code comes
-from the process, not from the database file.
+The v0.21 binding APIs can manage extensions already present in the process
+registry, such as bundled `trgm`. Extension authoring and dynamic loading APIs
+remain native Zig/CLI-only. The stable contract is the trust boundary:
+extension code comes from the process, not from the database file.

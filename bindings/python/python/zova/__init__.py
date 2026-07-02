@@ -34,7 +34,7 @@ from ._native import (
     restore_backup,
 )
 
-__version__ = "0.20.0"
+__version__ = "0.21.0"
 
 
 class Step(IntEnum):

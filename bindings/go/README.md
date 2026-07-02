@@ -59,7 +59,7 @@ flowchart LR
 After the Go module tag is pushed, applications can add the binding with:
 
 ```sh
-go get github.com/atasesli/zova/bindings/go@v0.20.0
+go get github.com/atasesli/zova/bindings/go@v0.21.0
 ```
 
 Import it as:
@@ -140,14 +140,14 @@ Because this module lives in the `bindings/go` subdirectory, the release tag
 must include that subdirectory prefix:
 
 ```sh
-git tag -a bindings/go/v0.20.0 -m "Zova Go bindings v0.20.0"
-git push origin bindings/go/v0.20.0
+git tag -a bindings/go/v0.21.0 -m "Zova Go bindings v0.21.0"
+git push origin bindings/go/v0.21.0
 ```
 
 After pushing the tag, ask the public Go module proxy to resolve it:
 
 ```sh
-GOPROXY=proxy.golang.org go list -m github.com/atasesli/zova/bindings/go@v0.20.0
+GOPROXY=proxy.golang.org go list -m github.com/atasesli/zova/bindings/go@v0.21.0
 ```
 
 The module path is:
@@ -243,10 +243,11 @@ The zero-value options verify destinations after copying. Use
 `RestoreOptions{NoVerify: true}` only when you will verify separately.
 
 Diagnostic recovery commands such as `zova doctor`, `zova salvage --dry-run`,
-and `zova salvage <source> <destination>` are CLI-first. In v0.20, CLI salvage
-copies valid graph topology and skips invalid graph nodes or edges. The Go
-package does not expose typed doctor/salvage report APIs yet, and library code
-should not parse the human text output as a stable binding contract.
+and `zova salvage <source> <destination>` are CLI-first. In v0.21, CLI salvage
+copies valid core data and uses extension salvage hooks for extension-owned
+storage. The Go package does not expose typed doctor/salvage report APIs yet,
+and library code should not parse the human text output as a stable binding
+contract.
 
 ## Extensions
 
@@ -413,7 +414,7 @@ lower-is-better.
 
 ## Bound Stores
 
-In v0.20, a `.zova` file may be bound to one object store and one vector store
+In v0.21, a `.zova` file may be bound to one object store and one vector store
 through the native Zig API or CLI. The Go object and vector methods above
 transparently use those stores after `Open`. Store create/bind/unbind/split
 management is not exposed as a Go API yet.

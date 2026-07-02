@@ -49,14 +49,14 @@ Use the safe crate for normal Rust applications:
 
 ```toml
 [dependencies]
-zova = "0.20.0"
+zova = "0.21.0"
 ```
 
 Use the raw FFI crate only when you want to call the C ABI directly:
 
 ```toml
 [dependencies]
-zova-sys = "0.20.0"
+zova-sys = "0.21.0"
 ```
 
 Both crates contain native code. The default build path compiles Zova's static C
@@ -68,7 +68,7 @@ ABI library through `zova-sys`, so registry users still need:
 
 Zova is still pre-1.0. The Rust API, C ABI, and `.zova` format are usable, but
 they may evolve before the 1.0 line. The current `.zova` `format_version` is
-`4`.
+`5`.
 
 ## Local Build
 
@@ -318,10 +318,11 @@ default, each operation verifies the destination after copying. Pass
 `RestoreOptions { verify: false }` only when you will verify separately.
 
 Diagnostic recovery commands such as `zova doctor`, `zova salvage --dry-run`,
-and `zova salvage <source> <destination>` are CLI-first. In v0.20, CLI salvage
-copies valid graph topology and skips invalid graph nodes or edges. The Rust
-crates do not expose typed doctor/salvage report APIs yet, and library code
-should not parse the human text output as a stable binding contract.
+and `zova salvage <source> <destination>` are CLI-first. In v0.21, CLI salvage
+copies valid core data and uses extension salvage hooks for extension-owned
+storage. The Rust crates do not expose typed doctor/salvage report APIs yet,
+and library code should not parse the human text output as a stable binding
+contract.
 
 ## Extensions
 
@@ -426,7 +427,7 @@ metadata join example.
 
 ## Bound Stores
 
-In v0.20, a `.zova` file may be bound to one object store and one vector store
+In v0.21, a `.zova` file may be bound to one object store and one vector store
 through the native Zig API or CLI. The Rust object and vector methods above
 transparently use those stores after `Database::open` or `SharedDatabase::open`.
 Store create/bind/unbind/split management is not exposed as a Rust API yet.

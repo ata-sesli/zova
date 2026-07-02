@@ -19,13 +19,13 @@ fn temp_path(name: &str) -> String {
 fn abi_version_and_status_names_are_available() {
     unsafe {
         assert_eq!(zova_sys::zova_abi_version_major(), 0);
-        assert_eq!(zova_sys::zova_abi_version_minor(), 20);
+        assert_eq!(zova_sys::zova_abi_version_minor(), 21);
         assert_eq!(zova_sys::zova_abi_version_patch(), 0);
         assert_eq!(
             CStr::from_ptr(zova_sys::zova_abi_version_string())
                 .to_str()
                 .unwrap(),
-            "0.20.0"
+            "0.21.0"
         );
         assert_eq!(
             CStr::from_ptr(zova_sys::zova_status_name(zova_sys::ZOVA_OK))
