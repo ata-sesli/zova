@@ -1,0 +1,56 @@
+name: Feature Request
+description: Suggest a focused Zova improvement.
+title: "feature: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please keep feature requests concrete. Big design changes may need a
+        discussion before implementation.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what is hard today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like Zova to provide?
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Area
+      options:
+        - CLI
+        - Zig API
+        - C ABI
+        - Rust binding
+        - Go binding
+        - Python binding
+        - Records
+        - Objects
+        - Vectors
+        - Graphs
+        - Extensions
+        - Diagnostics/salvage
+        - Packaging/release
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds or different designs have you considered?
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility notes
+      description: Would this affect existing files, APIs, bindings, or package behavior?

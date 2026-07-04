@@ -1,0 +1,81 @@
+name: Bug Report
+description: Report a reproducible Zova bug.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please do not include security issues here;
+        use `SECURITY.md` instead.
+  - type: input
+    id: version
+    attributes:
+      label: Zova version
+      description: Version, commit, or branch.
+      placeholder: "0.21.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected surface
+      options:
+        - CLI
+        - Zig API
+        - C ABI
+        - Rust binding
+        - Go binding
+        - Python binding
+        - Records
+        - Objects
+        - Vectors
+        - Graphs
+        - Extensions
+        - Backup/restore/compact
+        - Doctor/check/salvage
+        - Packaging/release
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the bug clearly.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Include a small command, code snippet, or test case when possible.
+      placeholder: |
+        1. Create database with ...
+        2. Run ...
+        3. See ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, architecture, Zig/Rust/Go/Python versions when relevant.
+      placeholder: |
+        macOS 15 arm64
+        Zig 0.16.0
+        Rust stable
+        Go 1.22
+        Python 3.12
+  - type: textarea
+    id: extra
+    attributes:
+      label: Extra context
+      description: Logs, stack traces, or related notes. Avoid private data.
