@@ -570,7 +570,16 @@ fn similarityText(a: []const u8, b: []const u8) Error!f64 {
     }
     const union_count = a_terms.len + b_terms.len - intersection;
     if (union_count == 0) return 1.0;
-    return @as(f64, @floatFromInt(intersection)) / @as(f64, @floatFromInt(union_count));
+    return scoreRatio(intersection, union_count);
+}
+
+fn scoreRatio(intersection: usize, union_count: usize) Error!f64 {
+    if (intersection > std.math.maxInt(u32) or union_count > std.math.maxInt(u32)) {
+        return error.TrgmInvalid;
+    }
+    const numerator: u32 = @intCast(intersection);
+    const denominator: u32 = @intCast(union_count);
+    return @as(f64, @floatFromInt(numerator)) / @as(f64, @floatFromInt(denominator));
 }
 
 fn normalize(alloc: std.mem.Allocator, text: []const u8) Error!std.ArrayList(u8) {
@@ -885,7 +894,7 @@ fn search(db: *sqlite.Database, index_name: []const u8, query: []const u8, limit
         if (intersection == 0) continue;
         const doc_term_count: usize = @intCast(doc_term_count_i64);
         const union_count = query_terms.len + doc_term_count - intersection;
-        const score = @as(f64, @floatFromInt(intersection)) / @as(f64, @floatFromInt(union_count));
+        const score = try scoreRatio(intersection, union_count);
         if (score < threshold) continue;
         var row = try makeSearchRow(&docs, score);
         errdefer row.deinit();
