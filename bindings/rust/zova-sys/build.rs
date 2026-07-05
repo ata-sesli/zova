@@ -118,6 +118,9 @@ fn compile_c_object(
         .arg(format!("-std={standard}"))
         .arg("-I")
         .arg(include_dir);
+    if env::var("CARGO_CFG_TARGET_FAMILY").as_deref() == Ok("unix") {
+        command.arg("-fPIC");
+    }
     for flag in default_flags {
         command.arg(flag);
     }
