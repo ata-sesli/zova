@@ -115,6 +115,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - uses: astral-sh/setup-uv@v5
+      - run: sh bindings/python/tools/sync-rust-source.sh
+      - run: sh bindings/python/tools/check-rust-source.sh
       - run: cargo fmt --manifest-path bindings/python/Cargo.toml --check
       - run: cargo test --manifest-path bindings/python/Cargo.toml
       - run: uv run --isolated --with maturin --with pytest --directory bindings/python maturin develop
