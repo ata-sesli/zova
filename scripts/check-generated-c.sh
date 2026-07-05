@@ -29,9 +29,9 @@ COMPILER_RUNTIME_ARGS=""
 if [ "$(uname -s)" = "Linux" ]; then
     RUNTIME_LIB="$(clang --print-libgcc-file-name 2>/dev/null || true)"
     if [ -n "$RUNTIME_LIB" ] && [ -f "$RUNTIME_LIB" ]; then
-        COMPILER_RUNTIME_ARGS="$RUNTIME_LIB"
+        COMPILER_RUNTIME_ARGS="$RUNTIME_LIB -lgcc -lgcc_s"
     else
-        COMPILER_RUNTIME_ARGS="-lgcc"
+        COMPILER_RUNTIME_ARGS="-lgcc -lgcc_s"
     fi
 fi
 
@@ -84,6 +84,9 @@ clang -std=c99 \
     -o "$TMP/sqlite3.o"
 
 echo "linking generated-C C ABI smoke binary"
+if [ -n "$COMPILER_RUNTIME_ARGS" ]; then
+    echo "compiler runtime link args: $COMPILER_RUNTIME_ARGS"
+fi
 clang -std=c99 \
     -I "$BUNDLE" \
     tests/c_abi_smoke.c \
