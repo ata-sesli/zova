@@ -574,12 +574,21 @@ fn similarityText(a: []const u8, b: []const u8) Error!f64 {
 }
 
 fn scoreRatio(intersection: usize, union_count: usize) Error!f64 {
-    if (intersection > std.math.maxInt(i32) or union_count > std.math.maxInt(i32)) {
+    if (intersection > std.math.maxInt(u32) or union_count > std.math.maxInt(u32)) {
         return error.TrgmInvalid;
     }
-    const numerator: i32 = @intCast(intersection);
-    const denominator: i32 = @intCast(union_count);
-    return @as(f64, @floatFromInt(numerator)) / @as(f64, @floatFromInt(denominator));
+    const numerator: u32 = @intCast(intersection);
+    const denominator: u32 = @intCast(union_count);
+    return u32ToF64(numerator) / u32ToF64(denominator);
+}
+
+fn u32ToF64(value: u32) f64 {
+    if (value == 0) return 0.0;
+    const top_bit: u6 = @intCast(31 - @clz(value));
+    const exponent: u64 = @as(u64, top_bit) + 1023;
+    const mantissa_source: u64 = @as(u64, value) - (@as(u64, 1) << top_bit);
+    const mantissa = mantissa_source << @intCast(52 - top_bit);
+    return @bitCast((exponent << 52) | mantissa);
 }
 
 fn normalize(alloc: std.mem.Allocator, text: []const u8) Error!std.ArrayList(u8) {
