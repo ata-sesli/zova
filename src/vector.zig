@@ -796,7 +796,7 @@ fn validateVectorValues(expected_dimensions: u32, metric: VectorMetric, values: 
     var norm_squared: f64 = 0;
     for (values) |value| {
         if (std.math.isNan(value) or std.math.isInf(value)) return error.VectorInvalid;
-        const value_f64: f64 = @floatCast(value);
+        const value_f64 = f32ToF64(value);
         norm_squared += value_f64 * value_f64;
     }
     if (metric == .cosine and norm_squared == 0) return error.VectorInvalid;
@@ -820,7 +820,7 @@ fn validateStoredVectorValues(metric: VectorMetric, values: []const f32) Error!v
     var norm_squared: f64 = 0;
     for (values) |value| {
         if (std.math.isNan(value) or std.math.isInf(value)) return error.VectorCorrupt;
-        const value_f64: f64 = @floatCast(value);
+        const value_f64 = f32ToF64(value);
         norm_squared += value_f64 * value_f64;
     }
     if (metric == .cosine and norm_squared == 0) return error.VectorCorrupt;
@@ -947,8 +947,8 @@ fn cosineDistanceFromEncoded(query: []const f32, encoded_values: []const u8) Err
         const stored_value = decodeF32LeAt(encoded_values, index);
         if (std.math.isNan(stored_value) or std.math.isInf(stored_value)) return error.VectorCorrupt;
 
-        const query_f64: f64 = @floatCast(query_value);
-        const stored_f64: f64 = @floatCast(stored_value);
+        const query_f64 = f32ToF64(query_value);
+        const stored_f64 = f32ToF64(stored_value);
         dot += query_f64 * stored_f64;
         query_norm += query_f64 * query_f64;
         stored_norm += stored_f64 * stored_f64;
@@ -964,7 +964,7 @@ fn l2DistanceFromEncoded(query: []const f32, encoded_values: []const u8) Error!f
         const stored_value = decodeF32LeAt(encoded_values, index);
         if (std.math.isNan(stored_value) or std.math.isInf(stored_value)) return error.VectorCorrupt;
 
-        const diff = @as(f64, @floatCast(query_value)) - @as(f64, @floatCast(stored_value));
+        const diff = f32ToF64(query_value) - f32ToF64(stored_value);
         sum += diff * diff;
     }
     return @sqrt(sum);
@@ -976,9 +976,53 @@ fn dotDistanceFromEncoded(query: []const f32, encoded_values: []const u8) Error!
         const stored_value = decodeF32LeAt(encoded_values, index);
         if (std.math.isNan(stored_value) or std.math.isInf(stored_value)) return error.VectorCorrupt;
 
-        dot += @as(f64, @floatCast(query_value)) * @as(f64, @floatCast(stored_value));
+        dot += f32ToF64(query_value) * f32ToF64(stored_value);
     }
     return -dot;
+}
+
+pub fn f32ToF64(value: f32) f64 {
+    const bits: u32 = @bitCast(value);
+    const sign = @as(u64, bits >> 31) << 63;
+    const exponent = (bits >> 23) & 0xff;
+    const fraction = bits & 0x7fffff;
+
+    if (exponent == 0xff) {
+        const quiet_nan = if (fraction == 0) 0 else @as(u64, 1) << 51;
+        return @bitCast(sign | (@as(u64, 0x7ff) << 52) | (@as(u64, fraction) << 29) | quiet_nan);
+    }
+
+    if (exponent == 0) {
+        if (fraction == 0) return @bitCast(sign);
+        const top_bit: u6 = @intCast(31 - @clz(fraction));
+        const exponent64 = @as(u64, top_bit) + 874;
+        const mantissa_source = @as(u64, fraction) - (@as(u64, 1) << top_bit);
+        const mantissa = mantissa_source << @intCast(52 - top_bit);
+        return @bitCast(sign | (exponent64 << 52) | mantissa);
+    }
+
+    const exponent64 = @as(u64, exponent) + 896;
+    const mantissa = @as(u64, fraction) << 29;
+    return @bitCast(sign | (exponent64 << 52) | mantissa);
+}
+
+test "f32ToF64 matches Zig float widening" {
+    const values = [_]f32{
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        1.5,
+        -12345.75,
+        std.math.floatMin(f32),
+        std.math.floatMax(f32),
+        @as(f32, @bitCast(@as(u32, 1))),
+        @as(f32, @bitCast(@as(u32, 0x007fffff))),
+    };
+    for (values) |value| {
+        const expected: f64 = @floatCast(value);
+        try std.testing.expectEqual(@as(u64, @bitCast(expected)), @as(u64, @bitCast(f32ToF64(value))));
+    }
 }
 
 fn maybeInsertSearchResult(

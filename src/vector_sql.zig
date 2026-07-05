@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
+const vector_storage = @import("vector.zig");
 
 const c = sqlite.c;
 const allocator = std.heap.c_allocator;
@@ -657,8 +658,8 @@ fn cosineDistanceFromEncoded(query: []const f32, encoded_values: []const u8) Err
     for (query, 0..) |query_value, index| {
         const stored_value = decodeF32LeAt(encoded_values, index);
         if (std.math.isNan(stored_value) or std.math.isInf(stored_value)) return error.VectorCorrupt;
-        const query_f64: f64 = @floatCast(query_value);
-        const stored_f64: f64 = @floatCast(stored_value);
+        const query_f64 = vector_storage.f32ToF64(query_value);
+        const stored_f64 = vector_storage.f32ToF64(stored_value);
         dot += query_f64 * stored_f64;
         query_norm += query_f64 * query_f64;
         stored_norm += stored_f64 * stored_f64;
@@ -673,7 +674,7 @@ fn l2DistanceFromEncoded(query: []const f32, encoded_values: []const u8) Error!f
     for (query, 0..) |query_value, index| {
         const stored_value = decodeF32LeAt(encoded_values, index);
         if (std.math.isNan(stored_value) or std.math.isInf(stored_value)) return error.VectorCorrupt;
-        const diff = @as(f64, @floatCast(query_value)) - @as(f64, @floatCast(stored_value));
+        const diff = vector_storage.f32ToF64(query_value) - vector_storage.f32ToF64(stored_value);
         sum += diff * diff;
     }
     return @sqrt(sum);
@@ -684,7 +685,7 @@ fn dotDistanceFromEncoded(query: []const f32, encoded_values: []const u8) Error!
     for (query, 0..) |query_value, index| {
         const stored_value = decodeF32LeAt(encoded_values, index);
         if (std.math.isNan(stored_value) or std.math.isInf(stored_value)) return error.VectorCorrupt;
-        dot += @as(f64, @floatCast(query_value)) * @as(f64, @floatCast(stored_value));
+        dot += vector_storage.f32ToF64(query_value) * vector_storage.f32ToF64(stored_value);
     }
     return -dot;
 }
@@ -698,7 +699,7 @@ fn validateQueryValues(metric: VectorMetric, values: []const f32) Error!void {
     var norm_squared: f64 = 0;
     for (values) |value| {
         if (std.math.isNan(value) or std.math.isInf(value)) return error.VectorInvalid;
-        const value_f64: f64 = @floatCast(value);
+        const value_f64 = vector_storage.f32ToF64(value);
         norm_squared += value_f64 * value_f64;
     }
     if (metric == .cosine and norm_squared == 0) return error.VectorInvalid;
@@ -708,7 +709,7 @@ fn validateStoredValues(metric: VectorMetric, values: []const f32) Error!void {
     var norm_squared: f64 = 0;
     for (values) |value| {
         if (std.math.isNan(value) or std.math.isInf(value)) return error.VectorCorrupt;
-        const value_f64: f64 = @floatCast(value);
+        const value_f64 = vector_storage.f32ToF64(value);
         norm_squared += value_f64 * value_f64;
     }
     if (metric == .cosine and norm_squared == 0) return error.VectorCorrupt;
