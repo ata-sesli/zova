@@ -574,11 +574,11 @@ fn similarityText(a: []const u8, b: []const u8) Error!f64 {
 }
 
 fn scoreRatio(intersection: usize, union_count: usize) Error!f64 {
-    if (intersection > std.math.maxInt(u32) or union_count > std.math.maxInt(u32)) {
+    if (intersection > std.math.maxInt(i32) or union_count > std.math.maxInt(i32)) {
         return error.TrgmInvalid;
     }
-    const numerator: u32 = @intCast(intersection);
-    const denominator: u32 = @intCast(union_count);
+    const numerator: i32 = @intCast(intersection);
+    const denominator: i32 = @intCast(union_count);
     return @as(f64, @floatFromInt(numerator)) / @as(f64, @floatFromInt(denominator));
 }
 
