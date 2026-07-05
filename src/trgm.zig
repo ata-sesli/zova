@@ -187,7 +187,7 @@ fn drop(db: *sqlite.Database, manifest: extension_impl.Manifest) extension_impl.
 
 fn salvage(context: extension_impl.SalvageContext, manifest: extension_impl.Manifest) extension_impl.Error!extension_impl.SalvageResult {
     try extension_impl.validateManifest(manifest);
-    // TODO(v0.21.1): rebuild or copy valid trigram index rows through a real
+    // TODO(future patch): rebuild or copy valid trigram index rows through a real
     // trgm-owned salvage strategy. v0.21 intentionally skips derived indexes.
     const private_objects = try extension_impl.countPrivateStorageObjects(context.source, manifest.storage_prefix);
     return .{
