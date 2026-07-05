@@ -5,7 +5,11 @@
 //! never contains executable paths and never triggers loading by itself.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const extension = @import("extension.zig");
+
+pub const supports_dynamic_loading = builtin.os.tag != .windows;
+const DynamicLibrary = if (supports_dynamic_loading) std.DynLib else struct {};
 
 pub const default_entrypoint = "zova_extension_entry";
 pub const bundle_manifest_file = "extension.json";
@@ -130,7 +134,7 @@ pub const OwnedRegistry = struct {
 
 pub const DynamicExtensionSet = struct {
     allocator: std.mem.Allocator,
-    libraries: []std.DynLib,
+    libraries: []DynamicLibrary,
     extensions: []extension.Extension,
 
     pub fn loadTrustedBundles(
@@ -138,7 +142,16 @@ pub const DynamicExtensionSet = struct {
         bundle_paths: []const []const u8,
         options: TrustStoreOptions,
     ) Error!DynamicExtensionSet {
-        var libraries: std.ArrayList(std.DynLib) = .empty;
+        if (comptime !supports_dynamic_loading) {
+            if (bundle_paths.len != 0) return error.ExtensionLoadFailed;
+            return .{
+                .allocator = allocator,
+                .libraries = try allocator.alloc(DynamicLibrary, 0),
+                .extensions = try allocator.alloc(extension.Extension, 0),
+            };
+        }
+
+        var libraries: std.ArrayList(DynamicLibrary) = .empty;
         errdefer {
             for (libraries.items) |*library| library.close();
             libraries.deinit(allocator);
@@ -188,7 +201,9 @@ pub const DynamicExtensionSet = struct {
     }
 
     pub fn deinit(self: *DynamicExtensionSet) void {
-        for (self.libraries) |*library| library.close();
+        if (comptime supports_dynamic_loading) {
+            for (self.libraries) |*library| library.close();
+        }
         self.allocator.free(self.libraries);
         self.allocator.free(self.extensions);
     }
@@ -523,6 +538,7 @@ fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8, limit: usize) E
 }
 
 fn unixTimestamp() i64 {
+    if (comptime builtin.os.tag == .windows) return 0;
     var ts: std.posix.timespec = undefined;
     return switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
         .SUCCESS => @intCast(ts.sec),

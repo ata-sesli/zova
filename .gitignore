@@ -7,6 +7,7 @@ bindings/rust/target*/
 # into crate/source packages, but Git should not track compiler output.
 bindings/rust/zova-sys/native/
 bindings/python/target
+bindings/python/rust/
 *.crate
 .DS_STORE
 notes

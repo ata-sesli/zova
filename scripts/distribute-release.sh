@@ -108,6 +108,8 @@ release_python_package() {
     wheel_dir="$TMP/python-dist"
     mkdir -p "$wheel_dir"
 
+    run sh bindings/python/tools/sync-rust-source.sh
+    run sh bindings/python/tools/check-rust-source.sh
     run uv run --isolated --with maturin --directory bindings/python maturin build --sdist --out "$wheel_dir"
 
     if ! find "$wheel_dir" -name "zova-$VERSION-*.whl" | grep -q .; then

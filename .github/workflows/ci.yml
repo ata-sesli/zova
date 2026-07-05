@@ -65,6 +65,8 @@ jobs:
       - run: cargo fmt --all --manifest-path bindings/rust/Cargo.toml --check
       - run: sh bindings/rust/zova-sys/tools/sync-native-source.sh
       - run: sh bindings/rust/zova-sys/tools/check-native-source.sh
+      - run: sh bindings/python/tools/sync-rust-source.sh
+      - run: sh bindings/python/tools/check-rust-source.sh
       - run: cargo test --workspace --manifest-path bindings/rust/Cargo.toml
       - run: cargo check --examples --manifest-path bindings/rust/Cargo.toml
       - run: cargo package --allow-dirty -p zova-sys --manifest-path bindings/rust/Cargo.toml

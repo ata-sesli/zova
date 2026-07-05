@@ -37,3 +37,7 @@ Issues = "https://github.com/atasesli/zova/issues"
 module-name = "zova._native"
 python-source = "python"
 features = ["pyo3/extension-module"]
+include = [
+    { path = "rust/zova/**", format = "sdist" },
+    { path = "rust/zova-sys/**", format = "sdist" },
+]

@@ -4,6 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const package_version = packageVersion(b);
+    const supports_dynamic_extension_fixture = target.result.os.tag != .windows;
 
     const zova_module = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
@@ -29,19 +30,23 @@ pub fn build(b: *std.Build) void {
     cli_options.addOption([]const u8, "package_version", package_version);
     cli_module.addOptions("cli_options", cli_options);
 
-    const dynamic_extension_fixture = b.addLibrary(.{
-        .name = "zova_dyn_test",
-        .linkage = .dynamic,
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/dynamic_extension_fixture.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    dynamic_extension_fixture.root_module.addImport("zova", zova_dynamic_module);
-    dynamic_extension_fixture.linker_allow_shlib_undefined = true;
-    dynamic_extension_fixture.root_module.link_libc = true;
-    cli_options.addOptionPath("dynamic_extension_library_path", dynamic_extension_fixture.getEmittedBin());
+    if (supports_dynamic_extension_fixture) {
+        const dynamic_extension_fixture = b.addLibrary(.{
+            .name = "zova_dyn_test",
+            .linkage = .dynamic,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/dynamic_extension_fixture.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        dynamic_extension_fixture.root_module.addImport("zova", zova_dynamic_module);
+        dynamic_extension_fixture.linker_allow_shlib_undefined = true;
+        dynamic_extension_fixture.root_module.link_libc = true;
+        cli_options.addOptionPath("dynamic_extension_library_path", dynamic_extension_fixture.getEmittedBin());
+    } else {
+        cli_options.addOption([]const u8, "dynamic_extension_library_path", "");
+    }
 
     const exe = b.addExecutable(.{
         .name = "zova",

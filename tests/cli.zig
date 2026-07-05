@@ -155,6 +155,8 @@ test "cli bundled trgm extension installs checks lists and drops" {
 }
 
 test "cli trusted dynamic extension loads only when explicitly requested" {
+    if (comptime !zova.extension_dynamic.supports_dynamic_loading) return error.SkipZigTest;
+
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const io = defaultIo();

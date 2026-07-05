@@ -45,13 +45,30 @@ jobs:
           if-no-files-found: error
 
   python:
-    name: Python Wheels (${{ matrix.os }} / py${{ matrix.python-version }})
+    name: Python Wheels (${{ matrix.platform }} / py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-13, macos-latest]
-        python-version: ["3.10", "3.12"]
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            python-version: "3.10"
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            python-version: "3.12"
+          - os: macos-13
+            platform: macos-x86_64
+            python-version: "3.10"
+          - os: macos-13
+            platform: macos-x86_64
+            python-version: "3.12"
+          - os: macos-latest
+            platform: macos-arm64
+            python-version: "3.10"
+          - os: macos-latest
+            platform: macos-arm64
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
@@ -64,7 +81,9 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - uses: astral-sh/setup-uv@v5
-      - run: uv run --isolated --with maturin --directory bindings/python maturin build --out zig-out/python-artifacts
+      - run: sh bindings/python/tools/sync-rust-source.sh
+      - run: sh bindings/python/tools/check-rust-source.sh
+      - run: uv run --isolated --with maturin --directory bindings/python maturin build --out "${{ github.workspace }}/zig-out/python-artifacts"
       - run: |
           uv run --isolated --with pytest --with "$(find zig-out/python-artifacts -name 'zova-${{ inputs.version }}-*.whl' | head -n 1)" python - <<'PY'
           import tempfile
@@ -83,7 +102,7 @@ jobs:
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: zova-${{ inputs.version }}-${{ matrix.os }}-py${{ matrix.python-version }}-python
+          name: zova-${{ inputs.version }}-${{ matrix.platform }}-py${{ matrix.python-version }}-python
           path: zig-out/python-artifacts/*
           if-no-files-found: error
 
@@ -102,7 +121,9 @@ jobs:
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@v5
-      - run: uv run --isolated --with maturin --directory bindings/python maturin build --sdist --out zig-out/python-sdist
+      - run: sh bindings/python/tools/sync-rust-source.sh
+      - run: sh bindings/python/tools/check-rust-source.sh
+      - run: uv run --isolated --with maturin --directory bindings/python maturin build --sdist --out "${{ github.workspace }}/zig-out/python-sdist"
       - uses: actions/upload-artifact@v4
         with:
           name: zova-${{ inputs.version }}-python-sdist

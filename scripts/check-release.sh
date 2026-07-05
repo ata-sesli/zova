@@ -58,6 +58,8 @@ CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo test --workspace --manifest-path bin
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo check --examples --manifest-path bindings/rust/Cargo.toml
 sh bindings/rust/zova-sys/tools/sync-native-source.sh
 sh bindings/rust/zova-sys/tools/check-native-source.sh
+sh bindings/python/tools/sync-rust-source.sh
+sh bindings/python/tools/check-rust-source.sh
 # zova-sys intentionally packages a generated native source snapshot that stays
 # git-ignored in the repository. Sync and check it first. Release smoke may run
 # before committing local changes, so package dry-runs use the current tree.
@@ -455,6 +457,8 @@ CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo test --workspace --manifest-path b
 CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo check --examples --manifest-path bindings/rust/Cargo.toml
 sh bindings/rust/zova-sys/tools/sync-native-source.sh
 sh bindings/rust/zova-sys/tools/check-native-source.sh
+sh bindings/python/tools/sync-rust-source.sh
+sh bindings/python/tools/check-rust-source.sh
 CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo package --allow-dirty --list -p zova-sys --manifest-path bindings/rust/Cargo.toml >/dev/null
 CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo package --allow-dirty --list -p zova --manifest-path bindings/rust/Cargo.toml >/dev/null
 CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo publish --allow-dirty --dry-run -p zova-sys --manifest-path bindings/rust/Cargo.toml

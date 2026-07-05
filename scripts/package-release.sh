@@ -483,6 +483,8 @@ zig build run
 CARGO_TARGET_DIR="$TMP/cargo-target/verify" cargo fmt --all --manifest-path bindings/rust/Cargo.toml --check
 CARGO_TARGET_DIR="$TMP/cargo-target/verify" cargo test --workspace --manifest-path bindings/rust/Cargo.toml
 CARGO_TARGET_DIR="$TMP/cargo-target/verify" cargo check --examples --manifest-path bindings/rust/Cargo.toml
+sh bindings/python/tools/sync-rust-source.sh
+sh bindings/python/tools/check-rust-source.sh
 sh scripts/repack-darwin-c-abi.sh
 (cd bindings/go && GOCACHE="$TMP/go-cache/verify" go test ./...)
 (cd bindings/go && GOCACHE="$TMP/go-cache/verify" go vet ./...)
