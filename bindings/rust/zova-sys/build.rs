@@ -6,6 +6,9 @@ fn main() {
     println!("cargo:rerun-if-env-changed=ZOVA_LIB_DIR");
     println!("cargo:rerun-if-env-changed=ZOVA_INCLUDE_DIR");
     println!("cargo:rerun-if-env-changed=ZOVA_SOURCE_DIR");
+    println!("cargo:rerun-if-env-changed=CC");
+    println!("cargo:rerun-if-env-changed=CFLAGS");
+    println!("cargo:rerun-if-env-changed=AR");
     println!("cargo:rerun-if-env-changed=DOCS_RS");
 
     if env::var_os("DOCS_RS").is_some() {
@@ -34,8 +37,139 @@ fn main() {
 
 fn build_local_zova() -> PathBuf {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let source_root = source_root_for_build(&manifest_dir);
 
+    if let Ok(path) = env::var("ZOVA_SOURCE_DIR") {
+        return build_zig_source(&PathBuf::from(path));
+    }
+
+    let generated = manifest_dir.join("native/generated");
+    if generated.join("zova_c.c").exists() {
+        return build_generated_c(&generated);
+    }
+
+    let source_root = source_root_for_build(&manifest_dir);
+    build_zig_source(&source_root)
+}
+
+fn build_generated_c(generated_dir: &Path) -> PathBuf {
+    for name in [
+        "zova_c.c",
+        "zig.h",
+        "zova.h",
+        "sqlite3.c",
+        "sqlite3.h",
+        "sqlite3ext.h",
+    ] {
+        let path = generated_dir.join(name);
+        if !path.exists() {
+            panic!(
+                "generated Zova C bundle is missing {}; run bindings/rust/zova-sys/tools/sync-native-source.sh",
+                path.display()
+            );
+        }
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+
+    if env::var_os("ZOVA_INCLUDE_DIR").is_none() {
+        println!("cargo:include={}", generated_dir.display());
+    }
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+    let lib_dir = absolute_dir(&out_dir.join("zova-c-abi/lib"));
+    let obj_dir = absolute_dir(&out_dir.join("zova-c-abi/obj"));
+    let zova_obj = obj_dir.join("zova_c.o");
+    let sqlite_obj = obj_dir.join("sqlite3.o");
+
+    compile_c_object(
+        generated_dir,
+        &generated_dir.join("zova_c.c"),
+        &zova_obj,
+        "c11",
+        &["-O2", "-Wno-incompatible-pointer-types"],
+    );
+    compile_c_object(
+        generated_dir,
+        &generated_dir.join("sqlite3.c"),
+        &sqlite_obj,
+        "c99",
+        &[
+            "-O2",
+            "-fno-sanitize=undefined",
+            "-DSQLITE_THREADSAFE=1",
+            "-DSQLITE_ENABLE_FTS5",
+        ],
+    );
+
+    archive_static_library(&lib_dir, &[zova_obj, sqlite_obj]);
+    assert_static_library_exists(&lib_dir);
+    lib_dir
+}
+
+fn compile_c_object(
+    include_dir: &Path,
+    source: &Path,
+    output: &Path,
+    standard: &str,
+    default_flags: &[&str],
+) {
+    let compiler = env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let mut command = Command::new(&compiler);
+    command
+        .arg(format!("-std={standard}"))
+        .arg("-I")
+        .arg(include_dir);
+    for flag in default_flags {
+        command.arg(flag);
+    }
+    if let Ok(flags) = env::var("CFLAGS") {
+        for flag in flags.split_whitespace() {
+            command.arg(flag);
+        }
+    }
+    command.arg("-c").arg(source).arg("-o").arg(output);
+
+    let status = command.status().unwrap_or_else(|err| {
+        panic!(
+            "failed to run C compiler `{compiler}` for {}: {err}",
+            source.display()
+        )
+    });
+    if !status.success() {
+        panic!(
+            "C compiler `{compiler}` failed while compiling {} with status {status}",
+            source.display()
+        );
+    }
+}
+
+fn archive_static_library(lib_dir: &Path, objects: &[PathBuf]) {
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        let archive = lib_dir.join("zova_c.lib");
+        let mut command = Command::new("lib");
+        command.arg(format!("/OUT:{}", archive.display()));
+        command.args(objects);
+        let status = command
+            .status()
+            .expect("failed to run `lib` while archiving generated Zova C objects");
+        if !status.success() {
+            panic!("`lib` failed while archiving generated Zova C objects with status {status}");
+        }
+        return;
+    }
+
+    let archive = lib_dir.join("libzova_c.a");
+    let archiver = env::var("AR").unwrap_or_else(|_| "ar".to_string());
+    let mut command = Command::new(&archiver);
+    command.arg("crs").arg(&archive).args(objects);
+    let status = command
+        .status()
+        .unwrap_or_else(|err| panic!("failed to run archiver `{archiver}`: {err}"));
+    if !status.success() {
+        panic!("archiver `{archiver}` failed with status {status}");
+    }
+}
+
+fn build_zig_source(source_root: &Path) -> PathBuf {
     let build_zig = source_root.join("build.zig");
     if !build_zig.exists() {
         panic!(
@@ -98,10 +232,6 @@ fn absolute_dir(path: &Path) -> PathBuf {
 }
 
 fn source_root_for_build(manifest_dir: &Path) -> PathBuf {
-    if let Ok(path) = env::var("ZOVA_SOURCE_DIR") {
-        return PathBuf::from(path);
-    }
-
     if let Some(repo_root) = find_repository_root(manifest_dir) {
         return repo_root;
     }

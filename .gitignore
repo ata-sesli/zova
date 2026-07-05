@@ -3,6 +3,8 @@ zig-out
 target
 bindings/rust/target
 bindings/rust/target*/
+# Generated native/package snapshot for zova-sys. The release flow syncs this
+# into crate/source packages, but Git should not track compiler output.
 bindings/rust/zova-sys/native/
 bindings/python/target
 *.crate

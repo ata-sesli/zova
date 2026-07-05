@@ -98,8 +98,8 @@ Zova vendors SQLite. You do not need a system SQLite installation.
 
 | Path | Main Command | Needs Zig | Needs Rust | Needs C Compiler | Notes |
 |---|---|---:|---:|---:|---|
-| Rust | `cargo add zova` | yes | yes | yes | `zova-sys` builds Zova's native C ABI from bundled source |
-| Python | `uv add zova` / `pip install zova` | yes | yes | yes | source-first PyO3 build; no wheel matrix yet |
+| Rust | `cargo add zova` | no | yes | yes | `zova-sys` builds Zova's native C ABI from bundled generated C |
+| Python | `uv add zova` / `pip install zova` | no | yes | yes | source-first PyO3 build through Rust; no wheel matrix yet |
 | Go | `go get github.com/atasesli/zova/bindings/go@v0.21.0` | yes, for C ABI build | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
 | C ABI | `zig build c-abi` | yes | no | yes | produces static `libzova_c.a` |
 | Zig | package source | yes | no | yes | native API |
@@ -808,6 +808,10 @@ Existing Rust object and vector APIs transparently use a bound store after the
 database is opened. Store create/bind/unbind/split management remains
 native-Zig/CLI-only in v0.21.
 
+From crates.io, the Rust crates build through a bundled generated C snapshot, so
+normal Rust users need Rust and a C compiler, not Zig. Zig is only needed when
+developing Zova itself or regenerating the native snapshot.
+
 ### Python
 
 Install from PyPI:
@@ -822,7 +826,8 @@ backup, compact, restore, objects, `ObjectWriter`, vectors, and SQL-native
 vector search.
 
 The package is source-first in `0.21.0`. Installs may build the native extension
-locally and require Rust, Zig, and a C compiler. No official wheel matrix is
+locally and require Rust and a C compiler. Zig is only needed for Zova
+development or native snapshot regeneration. No official wheel matrix is
 promised yet.
 
 Existing Python object and vector APIs transparently use a bound store after the
@@ -844,7 +849,16 @@ import zova "github.com/atasesli/zova/bindings/go"
 ```
 
 The Go package uses cgo over `include/zova.h` and links `libzova_c.a`. Build the
-C ABI first in this repository:
+Zova release artifacts include prebuilt C ABI archives for Go/manual embedding.
+Point cgo at an unpacked archive:
+
+```sh
+CGO_CFLAGS="-I/path/to/zova-c-abi/include" \
+CGO_LDFLAGS="-L/path/to/zova-c-abi/lib -lzova_c" \
+go test ./...
+```
+
+Or build the C ABI first in this repository:
 
 ```sh
 zig build c-abi
@@ -1028,10 +1042,20 @@ Distribution command for crates.io and PyPI, in that order:
 scripts/distribute-release.sh 0.21.0
 ```
 
-The Go module tag is created and pushed by `scripts/package-release.sh`.
+GitHub Actions provides the preferred release flow:
 
-Do not run release or distribution commands until the exact commit is ready to
-tag and publish.
+1. Run **Release Artifacts** on the exact commit to build source, CLI, C ABI,
+   generated-C, and Python artifacts.
+2. Inspect the uploaded artifacts.
+3. Run **Publish Release** with the same version and the Release Artifacts run
+   ID. The publish workflow uses the protected `release` environment, creates
+   the GitHub and Go module tags, creates the GitHub Release, then publishes
+   crates.io and PyPI packages.
+
+The local scripts remain useful for maintainer smoke tests. Do not run release
+or distribution commands until the exact commit is ready to tag and publish.
+
+The Go module tag is created by the protected publish workflow.
 
 ## License
 

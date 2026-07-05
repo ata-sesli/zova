@@ -30,6 +30,7 @@ TAG="v$VERSION"
 GO_TAG="bindings/go/v$VERSION"
 OUT_DIR="${2:-$ROOT/zig-out/release}"
 MANIFEST_VERSION="$(sed -n 's/^[[:space:]]*\.version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/build.zig.zon" | head -n 1)"
+DRY_RUN="${ZOVA_PACKAGE_RELEASE_DRY_RUN:-0}"
 
 if ! printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
     echo "invalid version: $1" >&2
@@ -69,13 +70,15 @@ trap cleanup EXIT INT TERM
 cd "$ROOT"
 
 require_command git
-require_command gh
 require_command tar
 require_command cargo
 require_command go
 require_command uv
+if [ "$DRY_RUN" -eq 0 ]; then
+    require_command gh
+fi
 
-if ! gh auth status >/dev/null 2>&1; then
+if [ "$DRY_RUN" -eq 0 ] && ! gh auth status >/dev/null 2>&1; then
     echo "GitHub CLI is not authenticated. Run: gh auth login" >&2
     exit 1
 fi
@@ -130,7 +133,7 @@ if [ -n "$REMOTE_GO_TAG_COMMIT" ] && [ "$REMOTE_GO_TAG_COMMIT" != "$HEAD_COMMIT"
     exit 1
 fi
 
-if gh release view "$TAG" >/dev/null 2>&1; then
+if [ "$DRY_RUN" -eq 0 ] && gh release view "$TAG" >/dev/null 2>&1; then
     echo "GitHub Release already exists: $TAG" >&2
     exit 1
 fi
@@ -179,6 +182,21 @@ fi
 
 if [ ! -f "$TMP/$PKG/scripts/repack-darwin-c-abi.sh" ]; then
     echo "release package is missing scripts/repack-darwin-c-abi.sh" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/scripts/check-generated-c.sh" ]; then
+    echo "release package is missing scripts/check-generated-c.sh" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/scripts/update-generated-c.sh" ]; then
+    echo "release package is missing scripts/update-generated-c.sh" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/scripts/build-release-artifacts.sh" ]; then
+    echo "release package is missing scripts/build-release-artifacts.sh" >&2
     exit 1
 fi
 
@@ -259,6 +277,32 @@ fi
 
 if [ ! -f "$TMP/$PKG/bindings/rust/zova-sys/README.md" ]; then
     echo "release package is missing bindings/rust/zova-sys/README.md" >&2
+    exit 1
+fi
+
+if ! CARGO_TARGET_DIR="$TMP/cargo-target-zova-sys-package-list" cargo package --allow-dirty --list -p zova-sys --manifest-path "$TMP/$PKG/bindings/rust/Cargo.toml" >"$TMP/zova-sys-package-list.txt"; then
+    echo "zova-sys package list failed inside release package" >&2
+    exit 1
+fi
+
+for package_file in \
+    native/LICENSE \
+    native/generated/zova_c.c \
+    native/generated/zig.h \
+    native/generated/zova.h \
+    native/generated/sqlite3.c \
+    native/generated/sqlite3.h \
+    native/generated/sqlite3ext.h
+do
+    if ! grep -qx "$package_file" "$TMP/zova-sys-package-list.txt"; then
+        echo "zova-sys crate package is missing $package_file" >&2
+        exit 1
+    fi
+done
+
+if grep -Eq '^(native/build\.zig|native/build\.zig\.zon|native/src/|native/vendor/|native/tests/|native/include/)' "$TMP/zova-sys-package-list.txt"; then
+    echo "zova-sys crate package includes full Zig/native source snapshot" >&2
+    grep -E '^(native/build\.zig|native/build\.zig\.zon|native/src/|native/vendor/|native/tests/|native/include/)' "$TMP/zova-sys-package-list.txt" >&2
     exit 1
 fi
 
@@ -431,6 +475,7 @@ zig build test
 zig build e2e
 zig build c-abi
 zig build c-abi-test
+sh scripts/check-generated-c.sh
 zig build cli-test
 zig build test -Doptimize=ReleaseSafe
 zig build
@@ -457,6 +502,13 @@ if [ ! -f "$TMP/python-wheels/verify/zova-$VERSION.tar.gz" ]; then
 fi
 
 cd "$ROOT"
+
+if [ "$DRY_RUN" -ne 0 ]; then
+    echo "release source archive: $ARCHIVE"
+    echo "dry run: skipping git tags, git push, and GitHub Release creation"
+    exit 0
+fi
+
 if [ -z "$LOCAL_TAG_COMMIT" ]; then
     run git tag -a "$TAG" -m "Zova $VERSION"
     TAG_CREATED=1

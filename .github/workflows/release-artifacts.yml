@@ -1,0 +1,138 @@
+name: Release Artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, without leading v"
+        required: true
+        type: string
+
+concurrency:
+  group: release-artifacts-${{ github.ref }}-${{ inputs.version }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  native:
+    name: Native Artifacts (${{ matrix.artifact-id }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact-id: linux-x86_64
+          - os: macos-13
+            artifact-id: macos-x86_64
+          - os: macos-latest
+            artifact-id: macos-arm64
+          - os: windows-latest
+            artifact-id: windows-x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: scripts/build-release-artifacts.sh "${{ inputs.version }}" "${{ matrix.artifact-id }}" "zig-out/release-artifacts"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zova-${{ inputs.version }}-${{ matrix.artifact-id }}-native
+          path: zig-out/release-artifacts/*
+          if-no-files-found: error
+
+  python:
+    name: Python Wheels (${{ matrix.os }} / py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-13, macos-latest]
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v5
+      - run: uv run --isolated --with maturin --directory bindings/python maturin build --out zig-out/python-artifacts
+      - run: |
+          uv run --isolated --with pytest --with "$(find zig-out/python-artifacts -name 'zova-${{ inputs.version }}-*.whl' | head -n 1)" python - <<'PY'
+          import tempfile
+          from pathlib import Path
+          import zova
+
+          with tempfile.TemporaryDirectory() as tmp:
+              path = str(Path(tmp) / "smoke.zova")
+              with zova.Database.create(path) as db:
+                  db.exec("create table notes(id integer primary key, body text)")
+                  db.exec("insert into notes(body) values ('hello')")
+                  stmt = db.prepare("select body from notes")
+                  assert stmt.step() == zova.Step.ROW
+                  assert stmt.column_text(0) == "hello"
+          print("ok", zova.__version__)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zova-${{ inputs.version }}-${{ matrix.os }}-py${{ matrix.python-version }}-python
+          path: zig-out/python-artifacts/*
+          if-no-files-found: error
+
+  python-sdist:
+    name: Python sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - run: uv run --isolated --with maturin --directory bindings/python maturin build --sdist --out zig-out/python-sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zova-${{ inputs.version }}-python-sdist
+          path: zig-out/python-sdist/*
+          if-no-files-found: error
+
+  source:
+    name: Source Package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - run: scripts/package-release.sh "${{ inputs.version }}" "zig-out/source-release"
+        env:
+          ZOVA_PACKAGE_RELEASE_DRY_RUN: "1"
+      - run: mv "zig-out/source-release/zova-${{ inputs.version }}.tar.gz" "zig-out/source-release/zova-source-v${{ inputs.version }}.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zova-${{ inputs.version }}-source
+          path: zig-out/source-release/*
+          if-no-files-found: error

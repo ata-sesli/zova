@@ -27,3 +27,11 @@ check_path "$ROOT/include" "$NATIVE/include"
 check_path "$ROOT/src" "$NATIVE/src"
 check_path "$ROOT/tests" "$NATIVE/tests"
 check_path "$ROOT/vendor" "$NATIVE/vendor"
+
+for generated_file in zova_c.c zig.h zova.h sqlite3.c sqlite3.h sqlite3ext.h; do
+    if [ ! -f "$NATIVE/generated/$generated_file" ]; then
+        echo "missing generated C bundle file: $generated_file" >&2
+        echo "run bindings/rust/zova-sys/tools/sync-native-source.sh" >&2
+        exit 1
+    fi
+done

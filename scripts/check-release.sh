@@ -48,6 +48,7 @@ zig build test
 zig build e2e
 zig build c-abi
 zig build c-abi-test
+sh scripts/check-generated-c.sh
 zig build cli-test
 zig build test -Doptimize=ReleaseSafe
 zig build
@@ -136,6 +137,21 @@ fi
 
 if [ ! -f "$TMP/$PKG/scripts/repack-darwin-c-abi.sh" ]; then
     echo "release package is missing scripts/repack-darwin-c-abi.sh" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/scripts/check-generated-c.sh" ]; then
+    echo "release package is missing scripts/check-generated-c.sh" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/scripts/update-generated-c.sh" ]; then
+    echo "release package is missing scripts/update-generated-c.sh" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/scripts/build-release-artifacts.sh" ]; then
+    echo "release package is missing scripts/build-release-artifacts.sh" >&2
     exit 1
 fi
 
@@ -231,6 +247,32 @@ fi
 
 if [ ! -f "$TMP/$PKG/bindings/rust/zova-sys/README.md" ]; then
     echo "release package is missing bindings/rust/zova-sys/README.md" >&2
+    exit 1
+fi
+
+if ! CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo package --allow-dirty --list -p zova-sys --manifest-path "$TMP/$PKG/bindings/rust/Cargo.toml" >"$TMP/zova-sys-package-list.txt"; then
+    echo "zova-sys package list failed inside release package" >&2
+    exit 1
+fi
+
+for package_file in \
+    native/LICENSE \
+    native/generated/zova_c.c \
+    native/generated/zig.h \
+    native/generated/zova.h \
+    native/generated/sqlite3.c \
+    native/generated/sqlite3.h \
+    native/generated/sqlite3ext.h
+do
+    if ! grep -qx "$package_file" "$TMP/zova-sys-package-list.txt"; then
+        echo "zova-sys crate package is missing $package_file" >&2
+        exit 1
+    fi
+done
+
+if grep -Eq '^(native/build\.zig|native/build\.zig\.zon|native/src/|native/vendor/|native/tests/|native/include/)' "$TMP/zova-sys-package-list.txt"; then
+    echo "zova-sys crate package includes full Zig/native source snapshot" >&2
+    grep -E '^(native/build\.zig|native/build\.zig\.zon|native/src/|native/vendor/|native/tests/|native/include/)' "$TMP/zova-sys-package-list.txt" >&2
     exit 1
 fi
 
@@ -403,6 +445,7 @@ zig build test
 zig build e2e
 zig build c-abi
 zig build c-abi-test
+sh scripts/check-generated-c.sh
 zig build cli-test
 zig build test -Doptimize=ReleaseSafe
 zig build

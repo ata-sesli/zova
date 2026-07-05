@@ -55,8 +55,9 @@ python -m pip install zova
 
 The v0.21 Python package is source-first. It builds the PyO3 extension locally
 through maturin and Cargo, and the Rust crates `zova` and `zova-sys` must be
-available on crates.io first. Users need Python 3.10 or newer, Rust/Cargo, Zig
-0.16.0 or newer, and a working C compiler/linker.
+available on crates.io first. Users need Python 3.10 or newer, Rust/Cargo, and
+a working C compiler/linker. Zig is only needed when developing Zova itself or
+regenerating the bundled native snapshot.
 
 No official platform wheel matrix is promised in v0.21.
 
@@ -69,8 +70,8 @@ uv run --isolated --with maturin --with pytest maturin develop
 uv run --isolated --with pytest python -m pytest
 ```
 
-The native build uses maturin, Cargo, Zig, and the Rust `zova` crate. Users do
-not need to locate a shared C library manually.
+The native build uses maturin, Cargo, and the Rust `zova` crate. Users do not
+need to locate a shared C library manually.
 
 The Python API is pre-1.0 and may still change alongside the Rust binding.
 

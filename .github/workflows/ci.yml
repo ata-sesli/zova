@@ -23,13 +23,29 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      - run: zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/zova_error.zig src/zova_test_support.zig src/extension.zig src/notify.zig src/object.zig src/object_fastcdc.zig src/object_tests.zig src/vector.zig src/vector_tests.zig src/vector_sql.zig src/vector_sql_tests.zig src/graph.zig src/graph_tests.zig src/graph_sql.zig src/graph_sql_tests.zig src/c_api.zig src/c_api_internal.zig src/c_api_tests.zig src/cli.zig src/main.zig tests/e2e.zig tests/cli.zig
+      - run: zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/zova_error.zig src/zova_test_support.zig src/extension.zig src/extension_dynamic.zig src/notify.zig src/object.zig src/object_fastcdc.zig src/object_tests.zig src/vector.zig src/vector_tests.zig src/vector_sql.zig src/vector_sql_tests.zig src/graph.zig src/graph_tests.zig src/graph_sql.zig src/graph_sql_tests.zig src/trgm.zig src/trgm_tests.zig src/c_api.zig src/c_api_internal.zig src/c_api_tests.zig src/cli.zig src/main.zig tests/dynamic_extension_fixture.zig tests/e2e.zig tests/cli.zig
       - run: zig build test
       - run: zig build e2e
       - run: zig build c-abi
       - run: zig build c-abi-test
       - run: zig build cli-test
       - run: zig build test -Doptimize=ReleaseSafe
+
+  generated-c:
+    name: Generated C (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: scripts/check-generated-c.sh
+        env:
+          ZOVA_GENERATED_C_REQUIRE_GCC: ${{ runner.os == 'Linux' && '1' || '0' }}
 
   rust:
     name: Rust (${{ matrix.os }})
@@ -47,10 +63,11 @@ jobs:
         with:
           toolchain: stable
       - run: cargo fmt --all --manifest-path bindings/rust/Cargo.toml --check
-      - run: cargo test --workspace --manifest-path bindings/rust/Cargo.toml
-      - run: cargo check --examples --manifest-path bindings/rust/Cargo.toml
       - run: sh bindings/rust/zova-sys/tools/sync-native-source.sh
       - run: sh bindings/rust/zova-sys/tools/check-native-source.sh
+      - run: cargo test --workspace --manifest-path bindings/rust/Cargo.toml
+      - run: cargo check --examples --manifest-path bindings/rust/Cargo.toml
+      - run: cargo package --allow-dirty -p zova-sys --manifest-path bindings/rust/Cargo.toml
       - run: cargo package --allow-dirty --list -p zova-sys --manifest-path bindings/rust/Cargo.toml >/tmp/zova-sys-package-list.txt
       - run: cargo package --list -p zova --manifest-path bindings/rust/Cargo.toml >/tmp/zova-package-list.txt
 

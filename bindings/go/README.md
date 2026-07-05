@@ -77,6 +77,19 @@ provide `zova.h` and `libzova_c.a`.
 The Go binding uses cgo over `include/zova.h` and links the local static C ABI
 library.
 
+For application builds, the easiest path is to download the matching prebuilt
+C ABI archive from the Zova GitHub Release, then point cgo at its `include` and
+`lib` directories:
+
+```sh
+CGO_CFLAGS="-I/path/to/zova-c-abi/include" \
+CGO_LDFLAGS="-L/path/to/zova-c-abi/lib -lzova_c" \
+go test ./...
+```
+
+The prebuilt C ABI archives are built by Zova's release workflow from the Zig
+source. The Go module stays small and does not bundle generated C.
+
 From the repository root, build the C ABI first:
 
 ```sh

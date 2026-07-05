@@ -60,26 +60,29 @@ zova-sys = "0.21.0"
 ```
 
 Both crates contain native code. The default build path compiles Zova's static C
-ABI library through `zova-sys`, so registry users still need:
+ABI library through `zova-sys` from a bundled generated C snapshot, so registry
+users still need:
 
 - Rust,
-- Zig `0.16.0` or newer,
 - a C compiler/linker for their platform.
 
 Zova is still pre-1.0. The Rust API, C ABI, and `.zova` format are usable, but
 they may evolve before the 1.0 line. The current `.zova` `format_version` is
 `5`.
 
-## Local Build
+## Native Build
 
-Inside this repository, `zova-sys` builds the local C ABI with:
+From crates.io, `zova-sys` builds Zova from a bundled generated C snapshot, so
+normal Rust users need Rust and a C compiler, not Zig.
+
+Inside this repository, the generated C snapshot is refreshed from Zig source
+before package/release checks:
 
 ```sh
-zig build c-abi
+sh bindings/rust/zova-sys/tools/sync-native-source.sh
 ```
 
-Cargo then links the resulting static library. You can point Cargo at an
-existing build instead:
+You can point Cargo at an existing native build instead:
 
 ```sh
 ZOVA_LIB_DIR=/path/to/lib ZOVA_INCLUDE_DIR=/path/to/include cargo test
@@ -88,16 +91,13 @@ ZOVA_LIB_DIR=/path/to/lib ZOVA_INCLUDE_DIR=/path/to/include cargo test
 `ZOVA_INCLUDE_DIR` is accepted for callers that vendor the header alongside the
 library. The current hand-written FFI does not run bindgen.
 
-You can also point the native build at a separate Zova source checkout:
+Native build order is:
 
-```sh
-ZOVA_SOURCE_DIR=/path/to/zova/source cargo test
-```
+1. `ZOVA_LIB_DIR` / `ZOVA_INCLUDE_DIR` if provided.
+2. Bundled generated C compiled with the platform C compiler at `-O2`.
 
-When building from crates.io without overrides, `zova-sys` uses its bundled
-native source snapshot.
-
-Zova currently requires Zig `0.16.0` or newer for the local C ABI build.
+Zig is not part of the normal Rust install path. It is only needed for Zova
+development and for regenerating the bundled generated C snapshot.
 
 ## Handle Policy
 

@@ -13,6 +13,7 @@ rsync -a --delete "$ROOT/include/" "$NATIVE/include/"
 rsync -a --delete "$ROOT/src/" "$NATIVE/src/"
 rsync -a --delete "$ROOT/tests/" "$NATIVE/tests/"
 rsync -a --delete "$ROOT/vendor/" "$NATIVE/vendor/"
+"$ROOT/scripts/update-generated-c.sh" "$NATIVE/generated"
 
 rm -rf "$NATIVE/.zig-cache" "$NATIVE/zig-out"
 find "$NATIVE" \( -name '.DS_Store' -o -name '*.zova' -o -name '*.zova-wal' -o -name '*.zova-shm' \) -delete

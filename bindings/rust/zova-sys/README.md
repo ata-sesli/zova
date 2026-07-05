@@ -8,11 +8,10 @@ functions from `include/zova.h`.
 
 ## Native Build
 
-By default, the crate builds Zova's static C ABI library with Zig and links it
-into the Rust crate. You need:
+By default, crates.io builds compile the bundled generated C snapshot with the
+platform C compiler and link it into the Rust crate. You need:
 
 - Rust
-- Zig 0.16.0 or newer
 - a C compiler/linker for your platform
 
 Advanced users can point the build script at an existing native build:
@@ -21,9 +20,13 @@ Advanced users can point the build script at an existing native build:
 ZOVA_LIB_DIR=/path/to/lib ZOVA_INCLUDE_DIR=/path/to/include cargo build
 ```
 
-`ZOVA_SOURCE_DIR=/path/to/zova/source` can be used to build from a separate Zova
-source checkout. Without overrides, crates.io builds use the bundled native
-source snapshot included in this crate.
+Build order is:
+
+1. `ZOVA_LIB_DIR` / `ZOVA_INCLUDE_DIR` if provided.
+2. Bundled generated C compiled with the platform C compiler at `-O2`.
+
+Inside the Zova repository, Zig is also used to regenerate the bundled C
+snapshot. The generated C is compiler output, not a human-authored API.
 
 ## Safety
 

@@ -1,0 +1,175 @@
+name: Publish Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, without leading v"
+        required: true
+        type: string
+      artifacts_run_id:
+        description: "Run ID from the Release Artifacts workflow"
+        required: true
+        type: string
+
+concurrency:
+  group: publish-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish ${{ inputs.version }}
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Validate version
+        run: |
+          set -eu
+          version="${{ inputs.version }}"
+          manifest_version="$(sed -n 's/^[[:space:]]*\.version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' build.zig.zon | head -n 1)"
+          rust_version="$(sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' bindings/rust/Cargo.toml | head -n 1)"
+          python_version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' bindings/python/pyproject.toml | head -n 1)"
+          test "$version" = "$manifest_version"
+          test "$version" = "$rust_version"
+          test "$version" = "$python_version"
+
+      - name: Download release artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          mkdir -p zig-out/release-download
+          gh run download "${{ inputs.artifacts_run_id }}" \
+            --repo "${{ github.repository }}" \
+            --dir zig-out/release-download
+          find zig-out/release-download -maxdepth 3 -type f -print | sort
+
+      - name: Verify artifact commit
+        run: |
+          set -eu
+          head_commit="$(git rev-parse HEAD)"
+          manifest_files="$(find zig-out/release-download -name MANIFEST.txt -print)"
+          if [ -z "$manifest_files" ]; then
+            echo "no MANIFEST.txt files found in downloaded artifacts" >&2
+            exit 1
+          fi
+          for manifest in $manifest_files; do
+            artifact_commit="$(sed -n 's/^commit: //p' "$manifest" | head -n 1)"
+            if [ "$artifact_commit" != "$head_commit" ]; then
+              echo "artifact manifest $manifest was built from $artifact_commit, expected $head_commit" >&2
+              exit 1
+            fi
+          done
+
+      - name: Prepare release assets
+        run: |
+          set -eu
+          mkdir -p zig-out/release-assets zig-out/python-assets
+          find zig-out/release-download -type f \( \
+            -name '*.tar.gz' -o \
+            -name '*.zip' -o \
+            -name '*.txt' \
+          \) -exec cp {} zig-out/release-assets/ \;
+          find zig-out/release-download -path '*python*' -type f \( \
+            -name 'zova-${{ inputs.version }}-*.whl' -o \
+            -name 'zova-${{ inputs.version }}.tar.gz' \
+          \) -exec cp {} zig-out/python-assets/ \;
+          ls -lh zig-out/release-assets zig-out/python-assets
+
+      - name: Create tags and GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          version="${{ inputs.version }}"
+          tag="v$version"
+          go_tag="bindings/go/v$version"
+          head_commit="$(git rev-parse HEAD)"
+
+          create_or_verify_tag() {
+            tag_name="$1"
+            message="$2"
+            if git rev-parse -q --verify "refs/tags/$tag_name" >/dev/null; then
+              tag_commit="$(git rev-list -n 1 "$tag_name")"
+              test "$tag_commit" = "$head_commit"
+            else
+              git tag -a "$tag_name" -m "$message"
+            fi
+            git push origin "$tag_name"
+          }
+
+          create_or_verify_tag "$tag" "Zova $version"
+          create_or_verify_tag "$go_tag" "Zova Go bindings $version"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "GitHub Release already exists: $tag" >&2
+            exit 1
+          fi
+          gh release create "$tag" zig-out/release-assets/* \
+            --title "Zova $tag" \
+            --notes "Zova $tag" \
+            --verify-tag
+
+      - name: Publish Rust crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -eu
+          version="${{ inputs.version }}"
+          sh bindings/rust/zova-sys/tools/sync-native-source.sh
+          sh bindings/rust/zova-sys/tools/check-native-source.sh
+
+          crate_published() {
+            cargo info "$1@$version" >/dev/null 2>&1
+          }
+
+          if ! crate_published zova-sys; then
+            cargo publish --allow-dirty -p zova-sys --manifest-path bindings/rust/Cargo.toml
+          fi
+
+          attempt=1
+          while ! crate_published zova-sys; do
+            if [ "$attempt" -gt 20 ]; then
+              echo "timed out waiting for zova-sys $version on crates.io" >&2
+              exit 1
+            fi
+            sleep 15
+            attempt=$((attempt + 1))
+          done
+
+          if ! crate_published zova; then
+            cargo publish --allow-dirty -p zova --manifest-path bindings/rust/Cargo.toml
+          fi
+
+      - name: Publish Python package
+        env:
+          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          set -eu
+          if ! find zig-out/python-assets -name 'zova-${{ inputs.version }}*' | grep -q .; then
+            echo "no Python artifacts found to publish" >&2
+            exit 1
+          fi
+          if [ -n "${PYPI_API_TOKEN:-}" ]; then
+            UV_PUBLISH_TOKEN="$PYPI_API_TOKEN" uv publish --check-url https://pypi.org/simple/ zig-out/python-assets/zova-${{ inputs.version }}*
+          else
+            uv publish --check-url https://pypi.org/simple/ zig-out/python-assets/zova-${{ inputs.version }}*
+          fi
