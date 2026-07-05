@@ -25,6 +25,16 @@ require_command nm
 require_command diff
 require_command wc
 
+COMPILER_RUNTIME_ARGS=""
+if [ "$(uname -s)" = "Linux" ]; then
+    RUNTIME_LIB="$(clang --print-libgcc-file-name 2>/dev/null || true)"
+    if [ -n "$RUNTIME_LIB" ] && [ -f "$RUNTIME_LIB" ]; then
+        COMPILER_RUNTIME_ARGS="$RUNTIME_LIB"
+    else
+        COMPILER_RUNTIME_ARGS="-lgcc"
+    fi
+fi
+
 ZIG_LIB_DIR="$(zig env | sed -n 's/^[[:space:]]*\.lib_dir[[:space:]]*=[[:space:]]*"\([^"]*\)",[[:space:]]*$/\1/p')"
 if [ -z "$ZIG_LIB_DIR" ]; then
     echo "could not determine Zig lib_dir from zig env" >&2
@@ -81,6 +91,7 @@ clang -std=c99 \
     "$TMP/sqlite3.o" \
     -pthread \
     -lm \
+    $COMPILER_RUNTIME_ARGS \
     -o "$TMP/zova_c_abi_smoke"
 
 echo "running generated-C C ABI smoke"

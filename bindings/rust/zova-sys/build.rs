@@ -32,6 +32,9 @@ fn main() {
         println!("cargo:rustc-link-lib=dylib=pthread");
         println!("cargo:rustc-link-lib=dylib=dl");
         println!("cargo:rustc-link-lib=dylib=m");
+        if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("gnu") {
+            println!("cargo:rustc-link-lib=dylib=gcc_s");
+        }
     }
 }
 
