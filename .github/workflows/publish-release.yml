@@ -63,13 +63,24 @@ jobs:
           find zig-out/release-download -maxdepth 3 -type f -print | sort
 
       - name: Verify artifact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
           head_commit="$(git rev-parse HEAD)"
+          artifacts_head_commit="$(gh run view "${{ inputs.artifacts_run_id }}" \
+            --repo "${{ github.repository }}" \
+            --json headSha \
+            --jq .headSha)"
+          if [ "$artifacts_head_commit" != "$head_commit" ]; then
+            echo "artifact run was built from $artifacts_head_commit, expected $head_commit" >&2
+            exit 1
+          fi
+
           manifest_files="$(find zig-out/release-download -name MANIFEST.txt -print)"
           if [ -z "$manifest_files" ]; then
-            echo "no MANIFEST.txt files found in downloaded artifacts" >&2
-            exit 1
+            echo "no MANIFEST.txt files found in downloaded artifacts; run head commit matched, continuing"
+            exit 0
           fi
           for manifest in $manifest_files; do
             artifact_commit="$(sed -n 's/^commit: //p' "$manifest" | head -n 1)"
