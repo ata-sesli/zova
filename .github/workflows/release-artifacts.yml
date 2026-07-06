@@ -159,6 +159,7 @@ jobs:
       - run: scripts/package-release.sh "${{ inputs.version }}" "zig-out/source-release"
         env:
           ZOVA_PACKAGE_RELEASE_DRY_RUN: "1"
+      - run: scripts/verify-source-package.sh "zig-out/source-release/zova-${{ inputs.version }}.tar.gz"
       - run: mv "zig-out/source-release/zova-${{ inputs.version }}.tar.gz" "zig-out/source-release/zova-source-v${{ inputs.version }}.tar.gz"
       - uses: actions/upload-artifact@v4
         with:

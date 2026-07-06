@@ -72,8 +72,6 @@ cd "$ROOT"
 require_command git
 require_command tar
 require_command cargo
-require_command go
-require_command uv
 if [ "$DRY_RUN" -eq 0 ]; then
     require_command gh
 fi
@@ -138,8 +136,6 @@ if [ "$DRY_RUN" -eq 0 ] && gh release view "$TAG" >/dev/null 2>&1; then
     exit 1
 fi
 
-"$ROOT/scripts/check-release.sh"
-
 rm -rf "$TMP"
 mkdir -p "$TMP/$PKG" "$OUT_DIR"
 
@@ -203,6 +199,11 @@ fi
 
 if [ ! -f "$TMP/$PKG/scripts/distribute-release.sh" ]; then
     echo "release package is missing scripts/distribute-release.sh" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/scripts/verify-source-package.sh" ]; then
+    echo "release package is missing scripts/verify-source-package.sh" >&2
     exit 1
 fi
 
@@ -465,44 +466,6 @@ if find "$TMP/$PKG/bindings/python" \( -name '__pycache__' -o -name '.pytest_cac
 fi
 
 tar -czf "$ARCHIVE" -C "$TMP" "$PKG"
-
-VERIFY_DIR="$TMP/verify"
-mkdir -p "$VERIFY_DIR"
-tar -xzf "$ARCHIVE" -C "$VERIFY_DIR"
-cd "$VERIFY_DIR/$PKG"
-
-zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/zova_error.zig src/zova_test_support.zig src/extension.zig src/extension_dynamic.zig src/notify.zig src/object.zig src/object_fastcdc.zig src/object_tests.zig src/vector.zig src/vector_tests.zig src/vector_sql.zig src/vector_sql_tests.zig src/graph.zig src/graph_tests.zig src/graph_sql.zig src/graph_sql_tests.zig src/trgm.zig src/trgm_tests.zig src/c_api.zig src/c_api_internal.zig src/c_api_tests.zig src/cli.zig src/main.zig tests/dynamic_extension_fixture.zig tests/e2e.zig tests/cli.zig
-zig build test
-zig build e2e
-zig build c-abi
-zig build c-abi-test
-sh scripts/check-generated-c.sh
-zig build cli-test
-zig build test -Doptimize=ReleaseSafe
-zig build
-zig build run
-CARGO_TARGET_DIR="$TMP/cargo-target/verify" cargo fmt --all --manifest-path bindings/rust/Cargo.toml --check
-CARGO_TARGET_DIR="$TMP/cargo-target/verify" cargo test --workspace --manifest-path bindings/rust/Cargo.toml
-CARGO_TARGET_DIR="$TMP/cargo-target/verify" cargo check --examples --manifest-path bindings/rust/Cargo.toml
-sh bindings/python/tools/sync-rust-source.sh
-sh bindings/python/tools/check-rust-source.sh
-sh scripts/repack-darwin-c-abi.sh
-(cd bindings/go && GOCACHE="$TMP/go-cache/verify" go test ./...)
-(cd bindings/go && GOCACHE="$TMP/go-cache/verify" go vet ./...)
-CARGO_TARGET_DIR="$TMP/cargo-target/python-verify" cargo fmt --manifest-path bindings/python/Cargo.toml --check
-CARGO_TARGET_DIR="$TMP/cargo-target/python-verify" cargo test --manifest-path bindings/python/Cargo.toml
-CARGO_TARGET_DIR="$TMP/cargo-target/python-verify" uv run --isolated --with maturin --with pytest --directory bindings/python maturin develop
-uv run --isolated --with pytest --directory bindings/python python -m pytest
-mkdir -p "$TMP/python-wheels/verify"
-CARGO_TARGET_DIR="$TMP/cargo-target/python-verify" uv run --isolated --with maturin --directory bindings/python maturin build --sdist --out "$TMP/python-wheels/verify"
-if ! find "$TMP/python-wheels/verify" -name "zova-$VERSION-*.whl" | grep -q .; then
-    echo "Python release artifacts are missing a wheel" >&2
-    exit 1
-fi
-if [ ! -f "$TMP/python-wheels/verify/zova-$VERSION.tar.gz" ]; then
-    echo "Python release artifacts are missing an sdist" >&2
-    exit 1
-fi
 
 cd "$ROOT"
 

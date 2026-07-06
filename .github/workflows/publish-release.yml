@@ -110,6 +110,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           version="${{ inputs.version }}"
           tag="v$version"
           go_tag="bindings/go/v$version"
