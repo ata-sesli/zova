@@ -90,7 +90,20 @@ CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo check --workspace --manifest-path 
 CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo check --examples --manifest-path bindings/rust/Cargo.toml
 sh bindings/rust/zova-sys/tools/sync-native-source.sh
 sh bindings/rust/zova-sys/tools/check-native-source.sh
-CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo package --allow-dirty --list -p zova-sys --manifest-path bindings/rust/Cargo.toml >/dev/null
+ZOVA_SYS_PACKAGE_LIST="$TMP/zova-sys-package-list.txt"
+CARGO_TARGET_DIR="$CARGO_TARGET_VERIFY" cargo package --allow-dirty --list -p zova-sys --manifest-path bindings/rust/Cargo.toml >"$ZOVA_SYS_PACKAGE_LIST"
+if ! grep -qx 'native/LICENSE' "$ZOVA_SYS_PACKAGE_LIST"; then
+    echo "zova-sys crate package is missing native/LICENSE" >&2
+    exit 1
+fi
+if ! grep -qx 'native/generated/zova_c.c' "$ZOVA_SYS_PACKAGE_LIST"; then
+    echo "zova-sys crate package is missing generated C source" >&2
+    exit 1
+fi
+if grep -q '^native/src/' "$ZOVA_SYS_PACKAGE_LIST"; then
+    echo "zova-sys crate package must not include the full Zig source snapshot" >&2
+    exit 1
+fi
 
 sh scripts/repack-darwin-c-abi.sh
 (cd bindings/go && GOCACHE="$GO_CACHE_VERIFY" go test ./...)

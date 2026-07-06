@@ -134,13 +134,14 @@ jobs:
           create_or_verify_tag "$go_tag" "Zova Go bindings $version"
 
           if gh release view "$tag" >/dev/null 2>&1; then
-            echo "GitHub Release already exists: $tag" >&2
-            exit 1
+            echo "GitHub Release already exists: $tag; uploading assets with --clobber"
+            gh release upload "$tag" zig-out/release-assets/* --clobber
+          else
+            gh release create "$tag" zig-out/release-assets/* \
+              --title "Zova $tag" \
+              --notes "Zova $tag" \
+              --verify-tag
           fi
-          gh release create "$tag" zig-out/release-assets/* \
-            --title "Zova $tag" \
-            --notes "Zova $tag" \
-            --verify-tag
 
       - name: Publish Rust crates
         env:
