@@ -136,6 +136,11 @@ if [ "$DRY_RUN" -eq 0 ] && gh release view "$TAG" >/dev/null 2>&1; then
     exit 1
 fi
 
+sh bindings/rust/zova-sys/tools/sync-native-source.sh
+sh bindings/rust/zova-sys/tools/check-native-source.sh
+sh bindings/python/tools/sync-rust-source.sh
+sh bindings/python/tools/check-rust-source.sh
+
 rm -rf "$TMP"
 mkdir -p "$TMP/$PKG" "$OUT_DIR"
 
