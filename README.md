@@ -82,12 +82,16 @@ before using it from another project.
 C ABI:
 
 ```sh
+# Download a matching zova-v0.21.1-<platform>-c-abi archive
+# from the GitHub Release, or build it locally:
 zig build c-abi
 ```
 
 CLI:
 
 ```sh
+# Download a matching zova-v0.21.1-<platform>-cli archive
+# from the GitHub Release, or build it locally:
 zig build
 zig-out/bin/zova --help
 ```
@@ -99,11 +103,11 @@ Zova vendors SQLite. You do not need a system SQLite installation.
 | Path | Main Command | Needs Zig | Needs Rust | Needs C Compiler | Notes |
 |---|---|---:|---:|---:|---|
 | Rust | `cargo add zova` | no | yes | yes | `zova-sys` builds Zova's native C ABI from bundled generated C |
-| Python | `uv add zova` / `pip install zova` | no | yes | yes | source-first PyO3 build through Rust; no wheel matrix yet |
-| Go | `go get github.com/atasesli/zova/bindings/go@v0.21.1` | yes, for C ABI build | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
-| C ABI | `zig build c-abi` | yes | no | yes | produces static `libzova_c.a` |
+| Python | `uv add zova` / `pip install zova` | no | only for sdist builds | only for sdist builds | wheels are published for Linux/macOS x86_64/arm64 on CPython 3.10/3.12; sdist fallback builds through Rust |
+| Go | `go get github.com/atasesli/zova/bindings/go@v0.21.1` | no, if using a release C ABI archive | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
+| C ABI | release archive or `zig build c-abi` | no, if using a release archive | no | no, if using a release archive | static C ABI library and `zova.h` |
 | Zig | package source | yes | no | yes | native API |
-| CLI | `zig build` | yes | no | yes | source-built command line tool |
+| CLI | release archive or `zig build` | no, if using a release archive | no | no, if using a release archive | source-built or prebuilt command line tool |
 
 Minimum tool versions used by the project:
 
@@ -608,7 +612,8 @@ Queue details:
 - each subscription queue holds 1024 notifications
 - when a queue overflows, Zova drops the oldest notification and reports the
   drop count on the next received notification
-- v0.18 has polling only: use `try_receive` / drain loops, not callbacks
+- the current event API has polling only: use `try_receive` / drain loops, not
+  callbacks
 
 ## Extensions
 
@@ -820,15 +825,22 @@ Install from PyPI:
 uv add zova
 ```
 
+or:
+
+```sh
+python -m pip install zova
+```
+
 The Python package is a PyO3/maturin extension backed by the Rust `zova` crate.
 It exposes records, prepared statements, transactions, savepoints, app events,
-backup, compact, restore, objects, `ObjectWriter`, vectors, and SQL-native
-vector search.
+backup, compact, restore, objects, `ObjectWriter`, vectors, graphs,
+SQL-native vector and graph helpers, and bundled extension lifecycle APIs.
 
-The package is source-first in `0.21.1`. Installs may build the native extension
-locally and require Rust and a C compiler. Zig is only needed for Zova
-development or native snapshot regeneration. No official wheel matrix is
-promised yet.
+PyPI releases include wheels for Linux/macOS x86_64/arm64 on CPython 3.10/3.12
+plus an sdist fallback. Wheel installs do not require Zig, Rust, or a local C
+compiler. If pip falls back to the sdist for an unsupported platform/Python
+combination, the build uses Rust/Cargo and a C compiler. Zig is only needed when
+developing Zova itself or regenerating the bundled native snapshot.
 
 Existing Python object and vector APIs transparently use a bound store after the
 database is opened. Store create/bind/unbind/split management remains
@@ -848,9 +860,9 @@ Import:
 import zova "github.com/atasesli/zova/bindings/go"
 ```
 
-The Go package uses cgo over `include/zova.h` and links `libzova_c.a`. Build the
-Zova release artifacts include prebuilt C ABI archives for Go/manual embedding.
-Point cgo at an unpacked archive:
+The Go package uses cgo over `include/zova.h` and links `libzova_c.a`. The
+GitHub Release includes prebuilt C ABI archives for Go/manual embedding. Point
+cgo at an unpacked archive:
 
 ```sh
 CGO_CFLAGS="-I/path/to/zova-c-abi/include" \
@@ -975,7 +987,6 @@ Zova `0.21.1` does not include:
 - automatic graph extraction from SQL, documents, or LLM output
 - embedding generation
 - TypeScript or Swift bindings
-- a Python wheel matrix
 - background worker threads hidden inside Zova
 - cross-process notifications, durable notification replay, or automatic
   mutation logging
@@ -986,7 +997,7 @@ Zova `0.21.1` does not include:
 - automatic bound-store path repair
 - C ABI, Rust, Go, or Python store-management APIs
 - remote sync, S3 compatibility, NATS integration, or Redis-like behavior
-- compiled release artifacts
+- Python wheels outside the current Linux/macOS CPython 3.10/3.12 matrix
 
 Diagnostics and salvage are CLI-first in this release. Bindings should not parse
 human text output as a stable library contract.
@@ -1010,7 +1021,19 @@ scripts/check-release.sh
 
 ## Release Package Policy
 
-Zova releases source packages. The source archive includes:
+Zova publishes several release artifact types:
+
+- GitHub Release CLI archives for Linux x86_64, Linux arm64, macOS x86_64,
+  macOS arm64, and Windows x86_64.
+- GitHub Release C ABI archives for the same platform set.
+- GitHub Release generated-C source archives, used to prove the no-Zig native
+  build path.
+- A GitHub Release source archive.
+- Rust crates on crates.io: `zova-sys` and `zova`.
+- Python wheels and sdist on PyPI.
+- A Go module tag: `bindings/go/v0.21.1`.
+
+The source archive includes:
 
 - `README.md`
 - `LICENSE`
@@ -1026,17 +1049,21 @@ Zova releases source packages. The source archive includes:
 - `tests`
 - `vendor`
 
-Compiled CLI binaries, compiled C ABI libraries, Rust `target` directories, Go
-build outputs, Python wheels, Python native extensions, and cache directories
-are not release artifacts.
+The source archive does not include compiled CLI binaries, compiled C ABI
+libraries, Rust `target` directories, Go build outputs, Python wheels, Python
+native extensions, or cache directories.
 
-Release command:
+The `zova-sys` crate does not include the full Zig source snapshot. It packages
+the generated C bundle, `zig.h`, `zova.h`, vendored SQLite C sources, and the
+license needed to build the C ABI with a normal C compiler.
+
+Maintainer source-package command:
 
 ```sh
 scripts/package-release.sh 0.21.1
 ```
 
-Distribution command for crates.io and PyPI, in that order:
+Maintainer local distribution command for crates.io and PyPI, in that order:
 
 ```sh
 scripts/distribute-release.sh 0.21.1
@@ -1044,13 +1071,18 @@ scripts/distribute-release.sh 0.21.1
 
 GitHub Actions provides the preferred release flow:
 
-1. Run **Release Artifacts** on the exact commit to build source, CLI, C ABI,
-   generated-C, and Python artifacts.
-2. Inspect the uploaded artifacts.
-3. Run **Publish Release** with the same version and the Release Artifacts run
-   ID. The publish workflow uses the protected `release` environment, creates
-   the GitHub and Go module tags, creates the GitHub Release, then publishes
+1. Let CI pass on the exact commit.
+2. Run **Release Artifacts** with the release version to build source, CLI,
+   C ABI, generated-C, Python wheel, and Python sdist artifacts.
+3. Inspect the uploaded artifacts.
+4. Run **Publish Release** with the same version and the Release Artifacts run
+   ID. The publish workflow verifies that the artifacts came from the checked
+   out commit, uses the protected `release` environment, creates the GitHub and
+   Go module tags, creates or updates the GitHub Release, then publishes
    crates.io and PyPI packages.
+
+The publish workflow is intentionally tied to a specific Release Artifacts run:
+it refuses to publish artifacts built from a different commit.
 
 The local scripts remain useful for maintainer smoke tests. Do not run release
 or distribution commands until the exact commit is ready to tag and publish.
