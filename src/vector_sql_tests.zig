@@ -173,6 +173,17 @@ test "sql vector integration supports raw f16 and i8 collections" {
     try db.putVectorTyped("halves", "near", .{ .f16 = &.{ 0x3c00, 0x0000 } });
     try db.putVectorTyped("halves", "far", .{ .f16 = &.{ 0x4400, 0x0000 } });
 
+    try db.exec(
+        \\create table typed_docs (
+        \\  id text primary key,
+        \\  bucket text not null,
+        \\  vector_id text not null
+        \\);
+        \\insert into typed_docs (id, bucket, vector_id) values
+        \\  ('keep-near', 'keep', 'near'),
+        \\  ('skip-far', 'skip', 'far');
+    );
+
     const i8_query = try vector_impl.encodeI8(std.testing.allocator, &.{ @as(i8, 0), @as(i8, 0) });
     defer std.testing.allocator.free(i8_query);
     const f16_query = try vector_impl.encodeF16Le(std.testing.allocator, &.{ 0x0000, 0x0000 });
@@ -236,6 +247,26 @@ test "sql vector integration supports raw f16 and i8 collections" {
         try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
         try std.testing.expectEqualStrings("far", stmt.columnText(0));
         try std.testing.expectApproxEqAbs(@as(f64, 4.0), stmt.columnDouble(1), 0.000001);
+        try std.testing.expectEqual(sqlite.Step.done, try stmt.step());
+    }
+
+    {
+        var stmt = try db.prepare(
+            \\select d.id, s.distance
+            \\from zova_vector_search as s
+            \\join typed_docs as d on d.vector_id = s.vector_id
+            \\where s.collection = 'i8s'
+            \\  and s.query_vector = zova_vector_encode_i8(?)
+            \\  and s.top_k = 2
+            \\  and d.bucket = 'keep'
+            \\order by s.rank
+        );
+        defer stmt.deinit();
+
+        try stmt.bindBlob(1, i8_query);
+        try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+        try std.testing.expectEqualStrings("keep-near", stmt.columnText(0));
+        try std.testing.expectApproxEqAbs(@as(f64, 1.0), stmt.columnDouble(1), 0.000001);
         try std.testing.expectEqual(sqlite.Step.done, try stmt.step());
     }
 

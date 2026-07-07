@@ -1264,7 +1264,7 @@ fn inputValueAsF64(values: VectorValuesConst, index: usize) Error!f64 {
             if (!f16BitsFinite(value)) return error.VectorInvalid;
             return f16BitsToF64(value);
         },
-        .i8 => |typed| @floatFromInt(typed[index]),
+        .i8 => |typed| i8ToF64(typed[index]),
     };
 }
 
@@ -1281,7 +1281,7 @@ fn encodedValueAsF64(element_type: VectorElementType, encoded_values: []const u8
             if (!f16BitsFinite(bits)) return error.VectorCorrupt;
             return f16BitsToF64(bits);
         },
-        .i8 => @floatFromInt(@as(i8, @bitCast(encoded_values[index]))),
+        .i8 => i8ToF64(@as(i8, @bitCast(encoded_values[index]))),
     };
 }
 
@@ -1339,6 +1339,21 @@ pub fn f32ToF64(value: f32) f64 {
     return @bitCast(sign | (exponent64 << 52) | mantissa);
 }
 
+pub fn i8ToF64(value: i8) f64 {
+    const sign = if (value < 0) @as(u64, 1) << 63 else 0;
+    const wide: i16 = value;
+    const magnitude_wide = if (wide < 0) -wide else wide;
+    const magnitude: u8 = @intCast(magnitude_wide);
+    if (magnitude == 0) return @bitCast(sign);
+
+    const top_bit: u4 = @intCast(7 - @clz(magnitude));
+    const exponent64 = @as(u64, top_bit) + 1023;
+    const mantissa_source = @as(u64, magnitude) - (@as(u64, 1) << top_bit);
+    const shift: u6 = @intCast(52 - @as(u6, top_bit));
+    const mantissa = mantissa_source << shift;
+    return @bitCast(sign | (exponent64 << 52) | mantissa);
+}
+
 test "f32ToF64 matches Zig float widening" {
     const values = [_]f32{
         0.0,
@@ -1355,6 +1370,31 @@ test "f32ToF64 matches Zig float widening" {
     for (values) |value| {
         const expected: f64 = @floatCast(value);
         try std.testing.expectEqual(@as(u64, @bitCast(expected)), @as(u64, @bitCast(f32ToF64(value))));
+    }
+}
+
+test "i8ToF64 matches Zig float widening" {
+    const values = [_]i8{
+        -128,
+        -127,
+        -2,
+        -1,
+        0,
+        1,
+        2,
+        3,
+        7,
+        8,
+        15,
+        16,
+        42,
+        64,
+        100,
+        127,
+    };
+    for (values) |value| {
+        const expected: f64 = @floatFromInt(value);
+        try std.testing.expectEqual(@as(u64, @bitCast(expected)), @as(u64, @bitCast(i8ToF64(value))));
     }
 }
 

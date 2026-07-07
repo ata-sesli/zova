@@ -913,7 +913,7 @@ fn inputValueAsF64(values: VectorValuesConst, index: usize) Error!f64 {
             if (!f16BitsFinite(value)) return error.VectorInvalid;
             return f16BitsToF64(value);
         },
-        .i8 => |typed| @floatFromInt(typed[index]),
+        .i8 => |typed| vector_storage.i8ToF64(typed[index]),
     };
 }
 
@@ -930,7 +930,7 @@ fn encodedValueAsF64(element_type: VectorElementType, encoded_values: []const u8
             if (!f16BitsFinite(bits)) return error.VectorCorrupt;
             return f16BitsToF64(bits);
         },
-        .i8 => @floatFromInt(@as(i8, @bitCast(encoded_values[index]))),
+        .i8 => vector_storage.i8ToF64(@as(i8, @bitCast(encoded_values[index]))),
     };
 }
 

@@ -232,6 +232,95 @@ test "typed vector collections store search validate and detect corrupt raw f16 
     try std.testing.expectError(error.VectorCorrupt, db.searchVectorsTyped(std.testing.allocator, "halves", .{ .f16 = &.{ 0x0000, 0x0000 } }, 10));
 }
 
+test "typed vector search covers raw i8 and f16 metrics and candidate filtering" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-typed-metrics.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.createVectorCollection("i8-cosine", .{ .dimensions = 2, .metric = .cosine, .element_type = .i8 });
+    try db.putVectorTyped("i8-cosine", "east", .{ .i8 = &.{ @as(i8, 127), @as(i8, 0) } });
+    try db.putVectorTyped("i8-cosine", "northeast", .{ .i8 = &.{ @as(i8, 64), @as(i8, 64) } });
+    try db.putVectorTyped("i8-cosine", "north", .{ .i8 = &.{ @as(i8, 0), @as(i8, 127) } });
+    try db.putVectorTyped("i8-cosine", "south", .{ .i8 = &.{ @as(i8, 0), @as(i8, -127) } });
+    try db.putVectorTyped("i8-cosine", "west", .{ .i8 = &.{ @as(i8, -127), @as(i8, 0) } });
+
+    {
+        var results = try db.searchVectorsTyped(std.testing.allocator, "i8-cosine", .{ .i8 = &.{ @as(i8, 127), @as(i8, 0) } }, 5);
+        defer results.deinit(std.testing.allocator);
+        try expectSearchIds(&results, &.{ "east", "northeast", "north", "south", "west" });
+        try std.testing.expectApproxEqAbs(@as(f64, 0.0), results.items[0].distance, 0.000001);
+        try std.testing.expectApproxEqAbs(@as(f64, 1.0 - 0.7071067811865475), results.items[1].distance, 0.000001);
+        try std.testing.expectApproxEqAbs(@as(f64, 1.0), results.items[2].distance, 0.000001);
+        try std.testing.expectApproxEqAbs(@as(f64, 1.0), results.items[3].distance, 0.000001);
+        try std.testing.expectApproxEqAbs(@as(f64, 2.0), results.items[4].distance, 0.000001);
+    }
+
+    {
+        const candidates = [_][]const u8{ "west", "missing", "northeast", "east", "northeast" };
+        var results = try db.searchVectorsInTyped(std.testing.allocator, "i8-cosine", .{ .i8 = &.{ @as(i8, 127), @as(i8, 0) } }, &candidates, 3);
+        defer results.deinit(std.testing.allocator);
+        try expectSearchIds(&results, &.{ "east", "northeast", "west" });
+    }
+
+    try std.testing.expectError(error.VectorInvalid, db.putVectorTyped("i8-cosine", "zero", .{ .i8 = &.{ @as(i8, 0), @as(i8, 0) } }));
+    try std.testing.expectError(error.VectorInvalid, db.searchVectorsTyped(std.testing.allocator, "i8-cosine", .{ .i8 = &.{ @as(i8, 0), @as(i8, 0) } }, 5));
+
+    try db.createVectorCollection("i8-dot", .{ .dimensions = 2, .metric = .dot, .element_type = .i8 });
+    try db.putVectorTyped("i8-dot", "strong", .{ .i8 = &.{ @as(i8, 4), @as(i8, 0) } });
+    try db.putVectorTyped("i8-dot", "weak", .{ .i8 = &.{ @as(i8, 1), @as(i8, 0) } });
+    try db.putVectorTyped("i8-dot", "negative", .{ .i8 = &.{ @as(i8, -1), @as(i8, 0) } });
+    {
+        var results = try db.searchVectorsTyped(std.testing.allocator, "i8-dot", .{ .i8 = &.{ @as(i8, 1), @as(i8, 0) } }, 3);
+        defer results.deinit(std.testing.allocator);
+        try expectSearchIds(&results, &.{ "strong", "weak", "negative" });
+        try std.testing.expectApproxEqAbs(@as(f64, -4.0), results.items[0].distance, 0.000001);
+        try std.testing.expectApproxEqAbs(@as(f64, -1.0), results.items[1].distance, 0.000001);
+        try std.testing.expectApproxEqAbs(@as(f64, 1.0), results.items[2].distance, 0.000001);
+    }
+
+    try db.createVectorCollection("f16-cosine", .{ .dimensions = 2, .metric = .cosine, .element_type = .f16 });
+    try db.putVectorTyped("f16-cosine", "east", .{ .f16 = &.{ 0x3c00, 0x0000 } });
+    try db.putVectorTyped("f16-cosine", "northeast", .{ .f16 = &.{ 0x3c00, 0x3c00 } });
+    try db.putVectorTyped("f16-cosine", "north", .{ .f16 = &.{ 0x0000, 0x3c00 } });
+    {
+        var results = try db.searchVectorsTyped(std.testing.allocator, "f16-cosine", .{ .f16 = &.{ 0x3c00, 0x0000 } }, 3);
+        defer results.deinit(std.testing.allocator);
+        try expectSearchIds(&results, &.{ "east", "northeast", "north" });
+        try std.testing.expectApproxEqAbs(@as(f64, 0.0), results.items[0].distance, 0.000001);
+        try std.testing.expectApproxEqAbs(@as(f64, 1.0 - 0.7071067811865475), results.items[1].distance, 0.000001);
+        try std.testing.expectApproxEqAbs(@as(f64, 1.0), results.items[2].distance, 0.000001);
+    }
+
+    try db.createVectorCollection("f16-dot", .{ .dimensions = 2, .metric = .dot, .element_type = .f16 });
+    try db.putVectorTyped("f16-dot", "strong", .{ .f16 = &.{ 0x4400, 0x0000 } });
+    try db.putVectorTyped("f16-dot", "weak", .{ .f16 = &.{ 0x3c00, 0x0000 } });
+    try db.putVectorTyped("f16-dot", "subnormal", .{ .f16 = &.{ 0x0001, 0x0000 } });
+    try db.putVectorTyped("f16-dot", "signed-zero", .{ .f16 = &.{ 0x8000, 0x0000 } });
+    try db.putVectorTyped("f16-dot", "negative", .{ .f16 = &.{ 0xbc00, 0x0000 } });
+    {
+        var results = try db.searchVectorsTyped(std.testing.allocator, "f16-dot", .{ .f16 = &.{ 0x3c00, 0x0000 } }, 5);
+        defer results.deinit(std.testing.allocator);
+        try expectSearchIds(&results, &.{ "strong", "weak", "subnormal", "signed-zero", "negative" });
+        try std.testing.expectApproxEqAbs(@as(f64, -4.0), results.items[0].distance, 0.000001);
+        try std.testing.expectApproxEqAbs(@as(f64, -1.0), results.items[1].distance, 0.000001);
+        try std.testing.expect(results.items[2].distance < 0);
+        try std.testing.expectApproxEqAbs(@as(f64, 0.0), results.items[3].distance, 0.000001);
+        try std.testing.expectApproxEqAbs(@as(f64, 1.0), results.items[4].distance, 0.000001);
+    }
+
+    {
+        const candidates = [_][]const u8{ "negative", "missing", "strong", "negative" };
+        var results = try db.searchVectorsInTyped(std.testing.allocator, "f16-dot", .{ .f16 = &.{ 0x3c00, 0x0000 } }, &candidates, 2);
+        defer results.deinit(std.testing.allocator);
+        try expectSearchIds(&results, &.{ "strong", "negative" });
+    }
+}
+
 test "vector collection duplicate and validation behavior" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
