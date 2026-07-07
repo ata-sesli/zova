@@ -83,6 +83,7 @@ func main() {
 	fmt.Printf("api distance: %.3f\n", distance)
 
 	sqlSearch(db, []float32{0, 0})
+	typedVectors(db)
 }
 
 func lookupText(db *zova.DB, vectorID string) string {
@@ -173,4 +174,59 @@ order by s.rank`)
 		}
 		fmt.Printf("sql %s %s %.3f\n", id, source, distance)
 	}
+}
+
+func typedVectors(db *zova.DB) {
+	if err := db.CreateVectorCollectionTyped("scores_i8", zova.TypedVectorCollectionOptions{
+		Dimensions:  2,
+		Metric:      zova.VectorMetricL2,
+		ElementType: zova.VectorElementTypeI8,
+	}); err != nil {
+		log.Fatal(err)
+	}
+	if err := db.PutVectorsTyped("scores_i8", []zova.TypedVectorInput{
+		{
+			ID: "near",
+			Values: zova.VectorValues{
+				ElementType: zova.VectorElementTypeI8,
+				I8:          []int8{1, -1},
+			},
+		},
+		{
+			ID: "far",
+			Values: zova.VectorValues{
+				ElementType: zova.VectorElementTypeI8,
+				I8:          []int8{8, -1},
+			},
+		},
+	}); err != nil {
+		log.Fatal(err)
+	}
+	i8Hits, err := db.SearchVectorsTyped("scores_i8", zova.VectorValues{
+		ElementType: zova.VectorElementTypeI8,
+		I8:          []int8{0, 0},
+	}, 1)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("i8 %s %.3f\n", i8Hits[0].ID, i8Hits[0].Distance)
+
+	if err := db.CreateVectorCollectionTyped("halves", zova.TypedVectorCollectionOptions{
+		Dimensions:  2,
+		Metric:      zova.VectorMetricL2,
+		ElementType: zova.VectorElementTypeF16,
+	}); err != nil {
+		log.Fatal(err)
+	}
+	if err := db.PutVectorTyped("halves", "one", zova.VectorValues{
+		ElementType: zova.VectorElementTypeF16,
+		F16:         []uint16{0x3c00, 0x0000},
+	}); err != nil {
+		log.Fatal(err)
+	}
+	half, err := db.GetVectorTyped("halves", "one")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("f16 %#v\n", half.Values.F16)
 }

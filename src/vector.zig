@@ -22,13 +22,25 @@ pub const VectorMetric = enum {
     dot,
 };
 
+/// Raw element type stored by a Zova vector collection.
+///
+/// `f16` values are IEEE 754 binary16 bit patterns transported as `u16`.
+/// `i8` values are raw signed bytes. Zova does not quantize or dequantize
+/// either type.
+pub const VectorElementType = enum {
+    f32,
+    f16,
+    i8,
+};
+
 /// Required options for creating a native vector collection.
 ///
 /// The metric is explicit by design; Zova does not guess distance semantics.
-/// v0.5 supports only `f32` vectors and at most `max_vector_dimensions`.
+/// `element_type` defaults to `f32` for compatibility with earlier APIs.
 pub const VectorCollectionOptions = struct {
     dimensions: u32,
     metric: VectorMetric,
+    element_type: VectorElementType = .f32,
 };
 
 /// Owned metadata for one native vector collection.
@@ -40,6 +52,7 @@ pub const VectorCollectionInfo = struct {
     name: []u8,
     dimensions: u32,
     metric: VectorMetric,
+    element_type: VectorElementType,
     vector_count: u64,
 
     /// Free the owned collection name.
@@ -71,6 +84,42 @@ pub const VectorInput = struct {
     values: []const f32,
 };
 
+/// Typed input row for `Database.putVectorsTyped`.
+pub const TypedVectorInput = struct {
+    id: []const u8,
+    values: VectorValuesConst,
+};
+
+/// Borrowed typed vector values.
+pub const VectorValuesConst = union(VectorElementType) {
+    f32: []const f32,
+    f16: []const u16,
+    i8: []const i8,
+};
+
+/// Owned typed vector values.
+pub const VectorValuesOwned = union(VectorElementType) {
+    f32: []f32,
+    f16: []u16,
+    i8: []i8,
+
+    pub fn asConst(self: VectorValuesOwned) VectorValuesConst {
+        return switch (self) {
+            .f32 => |values| .{ .f32 = values },
+            .f16 => |values| .{ .f16 = values },
+            .i8 => |values| .{ .i8 = values },
+        };
+    }
+
+    pub fn deinit(self: VectorValuesOwned, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .f32 => |values| allocator.free(values),
+            .f16 => |values| allocator.free(values),
+            .i8 => |values| allocator.free(values),
+        }
+    }
+};
+
 /// Owned vector row returned by `Database.getVector`.
 ///
 /// Vector ids are application-provided UTF-8 text ids scoped to a collection.
@@ -84,6 +133,18 @@ pub const Vector = struct {
     pub fn deinit(self: *Vector, allocator: std.mem.Allocator) void {
         allocator.free(self.id);
         allocator.free(self.values);
+    }
+};
+
+/// Owned typed vector row returned by `Database.getVectorTyped`.
+pub const TypedVector = struct {
+    id: []u8,
+    values: VectorValuesOwned,
+
+    /// Free the owned id and value buffers.
+    pub fn deinit(self: *TypedVector, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        self.values.deinit(allocator);
     }
 };
 
@@ -125,6 +186,7 @@ pub const StorageSchema = enum {
 const CollectionMetadata = struct {
     dimensions: u32,
     metric: VectorMetric,
+    element_type: VectorElementType,
 };
 
 pub const collections_schema_sql =
@@ -132,7 +194,7 @@ pub const collections_schema_sql =
     \\  name text not null primary key check (length(name) > 0 and length(name) <= 255),
     \\  dimensions integer not null check (dimensions > 0 and dimensions <= 16384),
     \\  metric text not null check (metric in ('cosine', 'l2', 'dot')),
-    \\  element_type text not null check (element_type = 'f32')
+    \\  element_type text not null check (element_type in ('f32', 'f16', 'i8'))
     \\)
 ;
 pub const vectors_schema_sql =
@@ -140,7 +202,7 @@ pub const vectors_schema_sql =
     \\  collection_name text not null,
     \\  vector_id text not null check (length(vector_id) > 0),
     \\  dimensions integer not null check (dimensions > 0 and dimensions <= 16384),
-    \\  "values" blob not null check (length("values") = dimensions * 4),
+    \\  "values" blob not null check (length("values") > 0),
     \\  primary key (collection_name, vector_id),
     \\  foreign key (collection_name) references _zova_vector_collections(name)
     \\)
@@ -173,13 +235,14 @@ pub const Database = struct {
 
         var insert = try self.prepareSchema(
             \\insert into {s}_zova_vector_collections (name, dimensions, metric, element_type)
-            \\values (?, ?, ?, 'f32')
+            \\values (?, ?, ?, ?)
         , .{self.storage_schema.prefix()});
         defer insert.deinit();
 
         try insert.bindText(1, name);
         try insert.bindInt64(2, @intCast(options.dimensions));
         try insert.bindText(3, vectorMetricText(options.metric));
+        try insert.bindText(4, vectorElementTypeText(options.element_type));
         _ = insert.step() catch |err| switch (err) {
             error.Constraint => return error.VectorCollectionExists,
             else => return err,
@@ -282,10 +345,20 @@ pub const Database = struct {
         vector_id: []const u8,
         values: []const f32,
     ) Error!void {
+        return self.putVectorTyped(collection_name, vector_id, .{ .f32 = values });
+    }
+
+    /// Store or replace one typed vector row in a collection.
+    pub fn putVectorTyped(
+        self: *Database,
+        collection_name: []const u8,
+        vector_id: []const u8,
+        values: VectorValuesConst,
+    ) Error!void {
         try validateVectorCollectionName(collection_name);
         const collection = try loadVectorCollection(self, collection_name);
-        try validateVectorInput(collection, .{ .id = vector_id, .values = values });
-        try self.writeVectorRows(collection_name, collection, &[_]VectorInput{.{ .id = vector_id, .values = values }});
+        try validateTypedVectorInput(collection, .{ .id = vector_id, .values = values });
+        try self.writeTypedVectorRows(collection_name, collection, &[_]TypedVectorInput{.{ .id = vector_id, .values = values }});
     }
 
     /// Store or replace multiple vector rows in a collection.
@@ -300,10 +373,30 @@ pub const Database = struct {
         collection_name: []const u8,
         vectors: []const VectorInput,
     ) Error!void {
+        if (vectors.len == 0) {
+            try validateVectorCollectionName(collection_name);
+            _ = try loadVectorCollection(self, collection_name);
+            return;
+        }
+
+        const typed_vectors = try std.heap.page_allocator.alloc(TypedVectorInput, vectors.len);
+        defer std.heap.page_allocator.free(typed_vectors);
+        for (vectors, typed_vectors) |vector, *typed| {
+            typed.* = .{ .id = vector.id, .values = .{ .f32 = vector.values } };
+        }
+        return self.putVectorsTyped(collection_name, typed_vectors);
+    }
+
+    /// Store or replace multiple typed vector rows in a collection.
+    pub fn putVectorsTyped(
+        self: *Database,
+        collection_name: []const u8,
+        vectors: []const TypedVectorInput,
+    ) Error!void {
         try validateVectorCollectionName(collection_name);
         const collection = try loadVectorCollection(self, collection_name);
-        for (vectors) |vector| try validateVectorInput(collection, vector);
-        try self.writeVectorRows(collection_name, collection, vectors);
+        for (vectors) |vector| try validateTypedVectorInput(collection, vector);
+        try self.writeTypedVectorRows(collection_name, collection, vectors);
     }
 
     /// Load one vector row into owned memory.
@@ -317,6 +410,24 @@ pub const Database = struct {
         collection_name: []const u8,
         vector_id: []const u8,
     ) Error!Vector {
+        var typed = try self.getVectorTyped(allocator, collection_name, vector_id);
+        errdefer typed.deinit(allocator);
+        return switch (typed.values) {
+            .f32 => |values| .{
+                .id = typed.id,
+                .values = values,
+            },
+            else => error.VectorInvalid,
+        };
+    }
+
+    /// Load one typed vector row into owned memory.
+    pub fn getVectorTyped(
+        self: *Database,
+        allocator: std.mem.Allocator,
+        collection_name: []const u8,
+        vector_id: []const u8,
+    ) Error!TypedVector {
         try validateVectorCollectionName(collection_name);
         try validateVectorId(vector_id);
 
@@ -343,8 +454,8 @@ pub const Database = struct {
                 const id = try allocator.dupe(u8, stored_id);
                 errdefer allocator.free(id);
 
-                const values = try decodeF32Le(allocator, stmt.columnBlob(2), collection.dimensions);
-                errdefer allocator.free(values);
+                const values = try decodeValuesLe(allocator, collection.element_type, stmt.columnBlob(2), collection.dimensions);
+                errdefer values.deinit(allocator);
 
                 return .{ .id = id, .values = values };
             },
@@ -439,9 +550,20 @@ pub const Database = struct {
         query: []const f32,
         limit: usize,
     ) Error!VectorSearchResults {
+        return self.searchVectorsTyped(allocator, collection_name, .{ .f32 = query }, limit);
+    }
+
+    /// Search one vector collection with an exact typed flat scan.
+    pub fn searchVectorsTyped(
+        self: *Database,
+        allocator: std.mem.Allocator,
+        collection_name: []const u8,
+        query: VectorValuesConst,
+        limit: usize,
+    ) Error!VectorSearchResults {
         try validateVectorCollectionName(collection_name);
         const collection = try loadVectorCollection(self, collection_name);
-        try validateVectorValues(collection.dimensions, collection.metric, query);
+        try validateVectorValues(collection, query);
 
         return self.searchAllVectors(allocator, collection_name, collection, query, limit, null, null);
     }
@@ -460,9 +582,21 @@ pub const Database = struct {
         max_distance: f64,
         limit: usize,
     ) Error!VectorSearchResults {
+        return self.searchVectorsWithinTyped(allocator, collection_name, .{ .f32 = query }, max_distance, limit);
+    }
+
+    /// Search one typed vector collection with an exact flat scan and distance cap.
+    pub fn searchVectorsWithinTyped(
+        self: *Database,
+        allocator: std.mem.Allocator,
+        collection_name: []const u8,
+        query: VectorValuesConst,
+        max_distance: f64,
+        limit: usize,
+    ) Error!VectorSearchResults {
         try validateVectorCollectionName(collection_name);
         const collection = try loadVectorCollection(self, collection_name);
-        try validateVectorValues(collection.dimensions, collection.metric, query);
+        try validateVectorValues(collection, query);
         try validateVectorSearchThreshold(max_distance);
 
         return self.searchAllVectors(allocator, collection_name, collection, query, limit, max_distance, null);
@@ -483,9 +617,21 @@ pub const Database = struct {
         candidate_ids: []const []const u8,
         limit: usize,
     ) Error!VectorSearchResults {
+        return self.searchVectorsInTyped(allocator, collection_name, .{ .f32 = query }, candidate_ids, limit);
+    }
+
+    /// Search one typed vector collection over a caller-supplied candidate id set.
+    pub fn searchVectorsInTyped(
+        self: *Database,
+        allocator: std.mem.Allocator,
+        collection_name: []const u8,
+        query: VectorValuesConst,
+        candidate_ids: []const []const u8,
+        limit: usize,
+    ) Error!VectorSearchResults {
         try validateVectorCollectionName(collection_name);
         const collection = try loadVectorCollection(self, collection_name);
-        try validateVectorValues(collection.dimensions, collection.metric, query);
+        try validateVectorValues(collection, query);
 
         return self.searchCandidateVectors(allocator, collection_name, collection, query, candidate_ids, limit, null, null);
     }
@@ -500,9 +646,22 @@ pub const Database = struct {
         max_distance: f64,
         limit: usize,
     ) Error!VectorSearchResults {
+        return self.searchVectorsInWithinTyped(allocator, collection_name, .{ .f32 = query }, candidate_ids, max_distance, limit);
+    }
+
+    /// Search one typed vector collection over candidates with an inclusive distance cap.
+    pub fn searchVectorsInWithinTyped(
+        self: *Database,
+        allocator: std.mem.Allocator,
+        collection_name: []const u8,
+        query: VectorValuesConst,
+        candidate_ids: []const []const u8,
+        max_distance: f64,
+        limit: usize,
+    ) Error!VectorSearchResults {
         try validateVectorCollectionName(collection_name);
         const collection = try loadVectorCollection(self, collection_name);
-        try validateVectorValues(collection.dimensions, collection.metric, query);
+        try validateVectorValues(collection, query);
         try validateVectorSearchThreshold(max_distance);
 
         return self.searchCandidateVectors(allocator, collection_name, collection, query, candidate_ids, limit, max_distance, null);
@@ -524,9 +683,9 @@ pub const Database = struct {
         try validateVectorId(source_vector_id);
         const collection = try loadVectorCollection(self, collection_name);
         const query = try self.loadVectorValuesForSearch(allocator, collection_name, collection, source_vector_id);
-        defer allocator.free(query);
+        defer query.deinit(allocator);
 
-        return self.searchAllVectors(allocator, collection_name, collection, query, limit, null, source_vector_id);
+        return self.searchAllVectors(allocator, collection_name, collection, vectorValuesConst(query), limit, null, source_vector_id);
     }
 
     /// Search candidates using an existing vector as the query.
@@ -545,9 +704,9 @@ pub const Database = struct {
         try validateVectorId(source_vector_id);
         const collection = try loadVectorCollection(self, collection_name);
         const query = try self.loadVectorValuesForSearch(allocator, collection_name, collection, source_vector_id);
-        defer allocator.free(query);
+        defer query.deinit(allocator);
 
-        return self.searchCandidateVectors(allocator, collection_name, collection, query, candidate_ids, limit, null, source_vector_id);
+        return self.searchCandidateVectors(allocator, collection_name, collection, vectorValuesConst(query), candidate_ids, limit, null, source_vector_id);
     }
 
     /// Search by existing vector id with an inclusive distance cap.
@@ -564,9 +723,9 @@ pub const Database = struct {
         const collection = try loadVectorCollection(self, collection_name);
         try validateVectorSearchThreshold(max_distance);
         const query = try self.loadVectorValuesForSearch(allocator, collection_name, collection, source_vector_id);
-        defer allocator.free(query);
+        defer query.deinit(allocator);
 
-        return self.searchAllVectors(allocator, collection_name, collection, query, limit, max_distance, source_vector_id);
+        return self.searchAllVectors(allocator, collection_name, collection, vectorValuesConst(query), limit, max_distance, source_vector_id);
     }
 
     /// Search candidates by existing vector id with an inclusive distance cap.
@@ -584,9 +743,9 @@ pub const Database = struct {
         const collection = try loadVectorCollection(self, collection_name);
         try validateVectorSearchThreshold(max_distance);
         const query = try self.loadVectorValuesForSearch(allocator, collection_name, collection, source_vector_id);
-        defer allocator.free(query);
+        defer query.deinit(allocator);
 
-        return self.searchCandidateVectors(allocator, collection_name, collection, query, candidate_ids, limit, max_distance, source_vector_id);
+        return self.searchCandidateVectors(allocator, collection_name, collection, vectorValuesConst(query), candidate_ids, limit, max_distance, source_vector_id);
     }
 
     fn searchAllVectors(
@@ -594,7 +753,7 @@ pub const Database = struct {
         allocator: std.mem.Allocator,
         collection_name: []const u8,
         collection: CollectionMetadata,
-        query: []const f32,
+        query: VectorValuesConst,
         limit: usize,
         max_distance: ?f64,
         exclude_id: ?[]const u8,
@@ -626,6 +785,7 @@ pub const Database = struct {
             try validateStoredVectorDimensions(collection.dimensions, stmt.columnInt64(1));
 
             const distance = try vectorDistanceFromEncoded(
+                collection.element_type,
                 collection.metric,
                 query,
                 stmt.columnBlob(2),
@@ -645,7 +805,7 @@ pub const Database = struct {
         allocator: std.mem.Allocator,
         collection_name: []const u8,
         collection: CollectionMetadata,
-        query: []const f32,
+        query: VectorValuesConst,
         candidate_ids: []const []const u8,
         limit: usize,
         max_distance: ?f64,
@@ -693,6 +853,7 @@ pub const Database = struct {
                     try validateStoredVectorDimensions(collection.dimensions, stmt.columnInt64(0));
 
                     const distance = try vectorDistanceFromEncoded(
+                        collection.element_type,
                         collection.metric,
                         query,
                         stmt.columnBlob(1),
@@ -718,7 +879,7 @@ pub const Database = struct {
         collection_name: []const u8,
         collection: CollectionMetadata,
         vector_id: []const u8,
-    ) Error![]f32 {
+    ) Error!VectorValuesOwned {
         var stmt = try self.prepareSchema(
             \\select dimensions, "values"
             \\from {s}_zova_vectors
@@ -733,19 +894,19 @@ pub const Database = struct {
             .done => error.VectorNotFound,
             .row => {
                 try validateStoredVectorDimensions(collection.dimensions, stmt.columnInt64(0));
-                const values = try decodeF32Le(allocator, stmt.columnBlob(1), collection.dimensions);
-                errdefer allocator.free(values);
-                try validateStoredVectorValues(collection.metric, values);
+                const values = try decodeValuesLe(allocator, collection.element_type, stmt.columnBlob(1), collection.dimensions);
+                errdefer values.deinit(allocator);
+                try validateStoredVectorValues(collection, vectorValuesConst(values));
                 return values;
             },
         };
     }
 
-    fn writeVectorRows(
+    fn writeTypedVectorRows(
         self: *Database,
         collection_name: []const u8,
         collection: CollectionMetadata,
-        vectors: []const VectorInput,
+        vectors: []const TypedVectorInput,
     ) Error!void {
         if (vectors.len == 0) return;
 
@@ -759,7 +920,7 @@ pub const Database = struct {
         defer stmt.deinit();
 
         for (vectors) |vector| {
-            const encoded = try encodeF32Le(std.heap.page_allocator, vector.values);
+            const encoded = try encodeValuesLe(std.heap.page_allocator, vector.values);
             defer std.heap.page_allocator.free(encoded);
 
             try stmt.bindText(1, collection_name);
@@ -791,20 +952,20 @@ fn validateVectorDimensions(dimensions: u32) Error!void {
     if (dimensions == 0 or dimensions > max_vector_dimensions) return error.VectorInvalid;
 }
 
-fn validateVectorValues(expected_dimensions: u32, metric: VectorMetric, values: []const f32) Error!void {
-    if (values.len != expected_dimensions) return error.VectorDimensionMismatch;
+fn validateVectorValues(collection: CollectionMetadata, values: VectorValuesConst) Error!void {
+    if (vectorValuesElementType(values) != collection.element_type) return error.VectorInvalid;
+    if (vectorValuesLen(values) != collection.dimensions) return error.VectorDimensionMismatch;
     var norm_squared: f64 = 0;
-    for (values) |value| {
-        if (std.math.isNan(value) or std.math.isInf(value)) return error.VectorInvalid;
-        const value_f64 = f32ToF64(value);
+    for (0..vectorValuesLen(values)) |index| {
+        const value_f64 = try inputValueAsF64(values, index);
         norm_squared += value_f64 * value_f64;
     }
-    if (metric == .cosine and norm_squared == 0) return error.VectorInvalid;
+    if (collection.metric == .cosine and norm_squared == 0) return error.VectorInvalid;
 }
 
-fn validateVectorInput(collection: CollectionMetadata, input: VectorInput) Error!void {
+fn validateTypedVectorInput(collection: CollectionMetadata, input: TypedVectorInput) Error!void {
     try validateVectorId(input.id);
-    try validateVectorValues(collection.dimensions, collection.metric, input.values);
+    try validateVectorValues(collection, input.values);
 }
 
 fn validateVectorSearchThreshold(max_distance: f64) Error!void {
@@ -816,14 +977,15 @@ fn validateStoredVectorDimensions(expected_dimensions: u32, stored_dimensions: i
     if (@as(u64, @intCast(stored_dimensions)) != expected_dimensions) return error.VectorCorrupt;
 }
 
-fn validateStoredVectorValues(metric: VectorMetric, values: []const f32) Error!void {
+fn validateStoredVectorValues(collection: CollectionMetadata, values: VectorValuesConst) Error!void {
+    if (vectorValuesElementType(values) != collection.element_type) return error.VectorCorrupt;
+    if (vectorValuesLen(values) != collection.dimensions) return error.VectorCorrupt;
     var norm_squared: f64 = 0;
-    for (values) |value| {
-        if (std.math.isNan(value) or std.math.isInf(value)) return error.VectorCorrupt;
-        const value_f64 = f32ToF64(value);
+    for (0..vectorValuesLen(values)) |index| {
+        const value_f64 = inputValueAsF64(values, index) catch return error.VectorCorrupt;
         norm_squared += value_f64 * value_f64;
     }
-    if (metric == .cosine and norm_squared == 0) return error.VectorCorrupt;
+    if (collection.metric == .cosine and norm_squared == 0) return error.VectorCorrupt;
 }
 
 fn distanceWithinThreshold(distance: f64, max_distance: ?f64) bool {
@@ -848,6 +1010,21 @@ fn vectorMetricFromText(text: []const u8) Error!VectorMetric {
     return error.NotZovaDatabase;
 }
 
+fn vectorElementTypeText(element_type: VectorElementType) []const u8 {
+    return switch (element_type) {
+        .f32 => "f32",
+        .f16 => "f16",
+        .i8 => "i8",
+    };
+}
+
+fn vectorElementTypeFromText(text: []const u8) Error!VectorElementType {
+    if (std.mem.eql(u8, text, "f32")) return .f32;
+    if (std.mem.eql(u8, text, "f16")) return .f16;
+    if (std.mem.eql(u8, text, "i8")) return .i8;
+    return error.NotZovaDatabase;
+}
+
 fn loadVectorCollection(db: *Database, name: []const u8) Error!CollectionMetadata {
     var stmt = try db.prepareSchema(
         \\select dimensions, metric, element_type
@@ -862,10 +1039,10 @@ fn loadVectorCollection(db: *Database, name: []const u8) Error!CollectionMetadat
         .row => {
             const dimensions_i64 = stmt.columnInt64(0);
             if (dimensions_i64 <= 0 or dimensions_i64 > max_vector_dimensions) return error.NotZovaDatabase;
-            if (!std.mem.eql(u8, stmt.columnText(2), "f32")) return error.NotZovaDatabase;
             return .{
                 .dimensions = @intCast(dimensions_i64),
                 .metric = try vectorMetricFromText(stmt.columnText(1)),
+                .element_type = try vectorElementTypeFromText(stmt.columnText(2)),
             };
         },
     };
@@ -874,7 +1051,6 @@ fn loadVectorCollection(db: *Database, name: []const u8) Error!CollectionMetadat
 fn vectorCollectionInfoFromRow(allocator: std.mem.Allocator, stmt: *sqlite.Statement) Error!VectorCollectionInfo {
     const dimensions_i64 = stmt.columnInt64(1);
     if (dimensions_i64 <= 0 or dimensions_i64 > max_vector_dimensions) return error.NotZovaDatabase;
-    if (!std.mem.eql(u8, stmt.columnText(3), "f32")) return error.NotZovaDatabase;
 
     const name = try allocator.dupe(u8, stmt.columnText(0));
     errdefer allocator.free(name);
@@ -883,12 +1059,18 @@ fn vectorCollectionInfoFromRow(allocator: std.mem.Allocator, stmt: *sqlite.State
         .name = name,
         .dimensions = @intCast(dimensions_i64),
         .metric = try vectorMetricFromText(stmt.columnText(2)),
+        .element_type = try vectorElementTypeFromText(stmt.columnText(3)),
         .vector_count = try sqliteI64ToU64(stmt.columnInt64(4)),
     };
 }
 
-fn vectorByteLen(dimensions: u32) usize {
-    return @as(usize, @intCast(dimensions)) * @sizeOf(f32);
+fn vectorByteLen(element_type: VectorElementType, dimensions: u32) usize {
+    const element_size: usize = switch (element_type) {
+        .f32 => @sizeOf(f32),
+        .f16 => @sizeOf(u16),
+        .i8 => @sizeOf(i8),
+    };
+    return @as(usize, @intCast(dimensions)) * element_size;
 }
 
 pub fn encodeF32Le(allocator: std.mem.Allocator, values: []const f32) Error![]u8 {
@@ -903,8 +1085,51 @@ pub fn encodeF32Le(allocator: std.mem.Allocator, values: []const f32) Error![]u8
     return bytes;
 }
 
+fn encodeValuesLe(allocator: std.mem.Allocator, values: VectorValuesConst) Error![]u8 {
+    return switch (values) {
+        .f32 => |f32_values| encodeF32Le(allocator, f32_values),
+        .f16 => |f16_values| encodeF16Le(allocator, f16_values),
+        .i8 => |i8_values| encodeI8(allocator, i8_values),
+    };
+}
+
+pub fn encodeF16Le(allocator: std.mem.Allocator, values: []const u16) Error![]u8 {
+    const bytes = try allocator.alloc(u8, values.len * @sizeOf(u16));
+    errdefer allocator.free(bytes);
+
+    for (values, 0..) |value, index| {
+        std.mem.writeInt(u16, bytes[index * 2 ..][0..2], value, .little);
+    }
+
+    return bytes;
+}
+
+pub fn encodeI8(allocator: std.mem.Allocator, values: []const i8) Error![]u8 {
+    const bytes = try allocator.alloc(u8, values.len);
+    errdefer allocator.free(bytes);
+
+    for (values, 0..) |value, index| {
+        bytes[index] = @bitCast(value);
+    }
+
+    return bytes;
+}
+
+fn decodeValuesLe(
+    allocator: std.mem.Allocator,
+    element_type: VectorElementType,
+    bytes: []const u8,
+    dimensions: u32,
+) Error!VectorValuesOwned {
+    return switch (element_type) {
+        .f32 => .{ .f32 = try decodeF32Le(allocator, bytes, dimensions) },
+        .f16 => .{ .f16 = try decodeF16Le(allocator, bytes, dimensions) },
+        .i8 => .{ .i8 = try decodeI8(allocator, bytes, dimensions) },
+    };
+}
+
 fn decodeF32Le(allocator: std.mem.Allocator, bytes: []const u8, dimensions: u32) Error![]f32 {
-    if (bytes.len != vectorByteLen(dimensions)) return error.VectorCorrupt;
+    if (bytes.len != vectorByteLen(.f32, dimensions)) return error.VectorCorrupt;
 
     const values = try allocator.alloc(f32, dimensions);
     errdefer allocator.free(values);
@@ -918,67 +1143,175 @@ fn decodeF32Le(allocator: std.mem.Allocator, bytes: []const u8, dimensions: u32)
     return values;
 }
 
+fn decodeF16Le(allocator: std.mem.Allocator, bytes: []const u8, dimensions: u32) Error![]u16 {
+    if (bytes.len != vectorByteLen(.f16, dimensions)) return error.VectorCorrupt;
+
+    const values = try allocator.alloc(u16, dimensions);
+    errdefer allocator.free(values);
+
+    for (values, 0..) |*value, index| {
+        value.* = std.mem.readInt(u16, bytes[index * 2 ..][0..2], .little);
+        if (!f16BitsFinite(value.*)) return error.VectorCorrupt;
+    }
+
+    return values;
+}
+
+fn decodeI8(allocator: std.mem.Allocator, bytes: []const u8, dimensions: u32) Error![]i8 {
+    if (bytes.len != vectorByteLen(.i8, dimensions)) return error.VectorCorrupt;
+
+    const values = try allocator.alloc(i8, dimensions);
+    errdefer allocator.free(values);
+
+    for (values, 0..) |*value, index| {
+        value.* = @bitCast(bytes[index]);
+    }
+
+    return values;
+}
+
 fn decodeF32LeAt(bytes: []const u8, index: usize) f32 {
     const bits = std.mem.readInt(u32, bytes[index * 4 ..][0..4], .little);
     return @bitCast(bits);
 }
 
 fn vectorDistanceFromEncoded(
+    element_type: VectorElementType,
     metric: VectorMetric,
-    query: []const f32,
+    query: VectorValuesConst,
     encoded_values: []const u8,
     dimensions: u32,
 ) Error!f64 {
-    if (encoded_values.len != vectorByteLen(dimensions)) return error.VectorCorrupt;
+    if (vectorValuesElementType(query) != element_type) return error.VectorInvalid;
+    if (vectorValuesLen(query) != dimensions) return error.VectorDimensionMismatch;
+    if (encoded_values.len != vectorByteLen(element_type, dimensions)) return error.VectorCorrupt;
 
     return switch (metric) {
-        .cosine => cosineDistanceFromEncoded(query, encoded_values),
-        .l2 => l2DistanceFromEncoded(query, encoded_values),
-        .dot => dotDistanceFromEncoded(query, encoded_values),
+        .cosine => cosineDistanceFromEncoded(element_type, query, encoded_values),
+        .l2 => l2DistanceFromEncoded(element_type, query, encoded_values),
+        .dot => dotDistanceFromEncoded(element_type, query, encoded_values),
     };
 }
 
-fn cosineDistanceFromEncoded(query: []const f32, encoded_values: []const u8) Error!f64 {
+fn cosineDistanceFromEncoded(element_type: VectorElementType, query: VectorValuesConst, encoded_values: []const u8) Error!f64 {
     var dot: f64 = 0;
     var query_norm: f64 = 0;
     var stored_norm: f64 = 0;
 
-    for (query, 0..) |query_value, index| {
-        const stored_value = decodeF32LeAt(encoded_values, index);
-        if (std.math.isNan(stored_value) or std.math.isInf(stored_value)) return error.VectorCorrupt;
-
-        const query_f64 = f32ToF64(query_value);
-        const stored_f64 = f32ToF64(stored_value);
+    for (0..vectorValuesLen(query)) |index| {
+        const query_f64 = try inputValueAsF64(query, index);
+        const stored_f64 = try encodedValueAsF64(element_type, encoded_values, index);
         dot += query_f64 * stored_f64;
         query_norm += query_f64 * query_f64;
         stored_norm += stored_f64 * stored_f64;
     }
 
-    if (query_norm == 0 or stored_norm == 0) return error.VectorCorrupt;
+    if (query_norm == 0) return error.VectorInvalid;
+    if (stored_norm == 0) return error.VectorCorrupt;
     return 1.0 - (dot / (@sqrt(query_norm) * @sqrt(stored_norm)));
 }
 
-fn l2DistanceFromEncoded(query: []const f32, encoded_values: []const u8) Error!f64 {
+fn l2DistanceFromEncoded(element_type: VectorElementType, query: VectorValuesConst, encoded_values: []const u8) Error!f64 {
     var sum: f64 = 0;
-    for (query, 0..) |query_value, index| {
-        const stored_value = decodeF32LeAt(encoded_values, index);
-        if (std.math.isNan(stored_value) or std.math.isInf(stored_value)) return error.VectorCorrupt;
-
-        const diff = f32ToF64(query_value) - f32ToF64(stored_value);
+    for (0..vectorValuesLen(query)) |index| {
+        const diff = try inputValueAsF64(query, index) - try encodedValueAsF64(element_type, encoded_values, index);
         sum += diff * diff;
     }
     return @sqrt(sum);
 }
 
-fn dotDistanceFromEncoded(query: []const f32, encoded_values: []const u8) Error!f64 {
+fn dotDistanceFromEncoded(element_type: VectorElementType, query: VectorValuesConst, encoded_values: []const u8) Error!f64 {
     var dot: f64 = 0;
-    for (query, 0..) |query_value, index| {
-        const stored_value = decodeF32LeAt(encoded_values, index);
-        if (std.math.isNan(stored_value) or std.math.isInf(stored_value)) return error.VectorCorrupt;
-
-        dot += f32ToF64(query_value) * f32ToF64(stored_value);
+    for (0..vectorValuesLen(query)) |index| {
+        dot += try inputValueAsF64(query, index) * try encodedValueAsF64(element_type, encoded_values, index);
     }
     return -dot;
+}
+
+fn vectorValuesElementType(values: VectorValuesConst) VectorElementType {
+    return switch (values) {
+        .f32 => .f32,
+        .f16 => .f16,
+        .i8 => .i8,
+    };
+}
+
+fn vectorValuesLen(values: VectorValuesConst) usize {
+    return switch (values) {
+        .f32 => |typed| typed.len,
+        .f16 => |typed| typed.len,
+        .i8 => |typed| typed.len,
+    };
+}
+
+fn vectorValuesConst(values: VectorValuesOwned) VectorValuesConst {
+    return switch (values) {
+        .f32 => |typed| .{ .f32 = typed },
+        .f16 => |typed| .{ .f16 = typed },
+        .i8 => |typed| .{ .i8 = typed },
+    };
+}
+
+fn inputValueAsF64(values: VectorValuesConst, index: usize) Error!f64 {
+    return switch (values) {
+        .f32 => |typed| {
+            const value = typed[index];
+            if (std.math.isNan(value) or std.math.isInf(value)) return error.VectorInvalid;
+            return f32ToF64(value);
+        },
+        .f16 => |typed| {
+            const value = typed[index];
+            if (!f16BitsFinite(value)) return error.VectorInvalid;
+            return f16BitsToF64(value);
+        },
+        .i8 => |typed| @floatFromInt(typed[index]),
+    };
+}
+
+fn encodedValueAsF64(element_type: VectorElementType, encoded_values: []const u8, index: usize) Error!f64 {
+    return switch (element_type) {
+        .f32 => {
+            const value = decodeF32LeAt(encoded_values, index);
+            if (std.math.isNan(value) or std.math.isInf(value)) return error.VectorCorrupt;
+            return f32ToF64(value);
+        },
+        .f16 => {
+            const offset = index * @sizeOf(u16);
+            const bits = std.mem.readInt(u16, encoded_values[offset..][0..2], .little);
+            if (!f16BitsFinite(bits)) return error.VectorCorrupt;
+            return f16BitsToF64(bits);
+        },
+        .i8 => @floatFromInt(@as(i8, @bitCast(encoded_values[index]))),
+    };
+}
+
+fn f16BitsFinite(bits: u16) bool {
+    return ((bits >> 10) & 0x1f) != 0x1f;
+}
+
+fn f16BitsToF64(bits: u16) f64 {
+    const sign = @as(u64, bits >> 15) << 63;
+    const exponent = (bits >> 10) & 0x1f;
+    const fraction = bits & 0x03ff;
+
+    if (exponent == 0x1f) {
+        const quiet_nan = if (fraction == 0) 0 else @as(u64, 1) << 51;
+        return @bitCast(sign | (@as(u64, 0x7ff) << 52) | (@as(u64, fraction) << 42) | quiet_nan);
+    }
+
+    if (exponent == 0) {
+        if (fraction == 0) return @bitCast(sign);
+        const top_bit: u4 = @intCast(15 - @clz(fraction));
+        const exponent64 = @as(u64, top_bit) + 999;
+        const mantissa_source = @as(u64, fraction) - (@as(u64, 1) << top_bit);
+        const shift: u6 = @intCast(52 - @as(u6, top_bit));
+        const mantissa = mantissa_source << shift;
+        return @bitCast(sign | (exponent64 << 52) | mantissa);
+    }
+
+    const exponent64 = @as(u64, exponent) + 1008;
+    const mantissa = @as(u64, fraction) << 42;
+    return @bitCast(sign | (exponent64 << 52) | mantissa);
 }
 
 pub fn f32ToF64(value: f32) f64 {

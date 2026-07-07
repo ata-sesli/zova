@@ -142,6 +142,56 @@ def test_vector_search_variants(tmp_path):
             db.put_vector("l2", "bad\0id", [1.0, 2.0])
 
 
+def test_raw_typed_vectors_roundtrip_and_search(tmp_path):
+    path = tmp_path / "typed-vectors.zova"
+
+    with zova.Database.create(str(path)) as db:
+        db.create_vector_collection(
+            "ints",
+            zova.VectorCollectionOptions(2, zova.VectorMetric.L2, zova.VectorElementType.I8),
+        )
+        info = db.vector_collection_info("ints")
+        assert info.element_type == zova.VectorElementType.I8
+
+        db.put_vector_typed("ints", "near", zova.VectorElementType.I8, [1, -2])
+        db.put_vectors_typed(
+            "ints",
+            [
+                zova.TypedVectorInput("far", zova.VectorElementType.I8, [8, -2]),
+                zova.TypedVectorInput("origin", zova.VectorElementType.I8, [0, 0]),
+            ],
+        )
+        got = db.get_vector_typed("ints", "near")
+        assert isinstance(got, zova.TypedVector)
+        assert got.element_type == zova.VectorElementType.I8
+        assert got.values == [1, -2]
+        assert [item.id for item in db.search_vectors_typed("ints", zova.VectorElementType.I8, [0, 0], 2)] == [
+            "origin",
+            "near",
+        ]
+        with pytest.raises(zova.ZovaError) as exc:
+            db.put_vector("ints", "wrong", [1.0, 2.0])
+        assert exc.value.status_name == "ZOVA_VECTOR_INVALID"
+
+        db.create_vector_collection_typed(
+            "halves",
+            zova.VectorCollectionOptions(2, zova.VectorMetric.L2, zova.VectorElementType.F16),
+        )
+        db.put_vector_typed("halves", "zero", zova.VectorElementType.F16, [0x0000, 0x0000])
+        db.put_vector_typed("halves", "one", zova.VectorElementType.F16, [0x3C00, 0x0000])
+        assert db.get_vector_typed("halves", "one").values == [0x3C00, 0x0000]
+        assert [item.id for item in db.search_vectors_typed("halves", zova.VectorElementType.F16, [0, 0], 2)] == [
+            "zero",
+            "one",
+        ]
+
+    with zova.Database.open(str(path)) as db:
+        assert db.vector_collection_info("ints").element_type == zova.VectorElementType.I8
+        assert db.vector_collection_info("halves").element_type == zova.VectorElementType.F16
+        assert db.get_vector_typed("ints", "near").values == [1, -2]
+        assert db.get_vector_typed("halves", "one").values == [0x3C00, 0x0000]
+
+
 def test_vectors_survive_reopen_conversion_and_mix_with_records_objects(tmp_path):
     path = tmp_path / "mixed.zova"
     with zova.Database.create(str(path)) as db:

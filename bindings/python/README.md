@@ -321,6 +321,27 @@ with zova.Database.create("vectors.zova") as db:
             print(result.id, result.distance, stmt.column_text(0))
 ```
 
+The f32 methods above stay available as compatibility wrappers. Raw typed
+collections use `VectorElementType`, typed put/get/search methods, and Python
+lists. `F16` values are raw IEEE 754 binary16 bits carried as integer `uint16`
+bit patterns; `I8` values are raw signed byte values with no quantization
+metadata.
+
+```python
+db.create_vector_collection(
+    "scores_i8",
+    zova.VectorCollectionOptions(2, zova.VectorMetric.L2, zova.VectorElementType.I8),
+)
+db.put_vector_typed("scores_i8", "near", zova.VectorElementType.I8, [1, -1])
+
+db.create_vector_collection(
+    "halves",
+    zova.VectorCollectionOptions(2, zova.VectorMetric.L2, zova.VectorElementType.F16),
+)
+db.put_vector_typed("halves", "one", zova.VectorElementType.F16, [0x3C00, 0x0000])
+assert db.get_vector_typed("halves", "one").values == [0x3C00, 0x0000]
+```
+
 Search is exact and lower distance is better. Candidate-filtered searches skip
 missing ids and deduplicate duplicate candidates. Search-by-id excludes the
 source vector. Threshold variants are inclusive, and dot-product thresholds may

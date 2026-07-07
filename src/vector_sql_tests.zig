@@ -155,6 +155,94 @@ test "sql vector scalar functions and virtual table rank metadata rows" {
     }
 }
 
+test "sql vector integration supports raw f16 and i8 collections" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-sql-typed.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.createVectorCollection("i8s", .{ .dimensions = 2, .metric = .l2, .element_type = .i8 });
+    try db.putVectorTyped("i8s", "near", .{ .i8 = &.{ @as(i8, 1), @as(i8, 0) } });
+    try db.putVectorTyped("i8s", "far", .{ .i8 = &.{ @as(i8, 5), @as(i8, 0) } });
+
+    try db.createVectorCollection("halves", .{ .dimensions = 2, .metric = .l2, .element_type = .f16 });
+    try db.putVectorTyped("halves", "near", .{ .f16 = &.{ 0x3c00, 0x0000 } });
+    try db.putVectorTyped("halves", "far", .{ .f16 = &.{ 0x4400, 0x0000 } });
+
+    const i8_query = try vector_impl.encodeI8(std.testing.allocator, &.{ @as(i8, 0), @as(i8, 0) });
+    defer std.testing.allocator.free(i8_query);
+    const f16_query = try vector_impl.encodeF16Le(std.testing.allocator, &.{ 0x0000, 0x0000 });
+    defer std.testing.allocator.free(f16_query);
+
+    {
+        var stmt = try db.prepare(
+            \\select
+            \\  zova_vector_distance('i8s', 'near', zova_vector_encode_i8(?)),
+            \\  zova_vector_distance_by_id('i8s', 'far', 'near'),
+            \\  zova_vector_distance('halves', 'near', zova_vector_encode_f16(?)),
+            \\  zova_vector_distance_by_id('halves', 'far', 'near')
+        );
+        defer stmt.deinit();
+
+        try stmt.bindBlob(1, i8_query);
+        try stmt.bindBlob(2, f16_query);
+        try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+        try std.testing.expectApproxEqAbs(@as(f64, 1.0), stmt.columnDouble(0), 0.000001);
+        try std.testing.expectApproxEqAbs(@as(f64, 4.0), stmt.columnDouble(1), 0.000001);
+        try std.testing.expectApproxEqAbs(@as(f64, 1.0), stmt.columnDouble(2), 0.000001);
+        try std.testing.expectApproxEqAbs(@as(f64, 3.0), stmt.columnDouble(3), 0.000001);
+    }
+
+    {
+        var stmt = try db.prepare(
+            \\select vector_id, distance
+            \\from zova_vector_search
+            \\where collection = 'i8s'
+            \\  and query_vector = zova_vector_encode_i8(?)
+            \\  and top_k = 2
+            \\order by rank
+        );
+        defer stmt.deinit();
+
+        try stmt.bindBlob(1, i8_query);
+        try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+        try std.testing.expectEqualStrings("near", stmt.columnText(0));
+        try std.testing.expectApproxEqAbs(@as(f64, 1.0), stmt.columnDouble(1), 0.000001);
+        try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+        try std.testing.expectEqualStrings("far", stmt.columnText(0));
+        try std.testing.expectApproxEqAbs(@as(f64, 5.0), stmt.columnDouble(1), 0.000001);
+        try std.testing.expectEqual(sqlite.Step.done, try stmt.step());
+    }
+
+    {
+        var stmt = try db.prepare(
+            \\select vector_id, distance
+            \\from zova_vector_search
+            \\where collection = 'halves'
+            \\  and query_vector = zova_vector_encode_f16(?)
+            \\  and top_k = 2
+            \\order by rank
+        );
+        defer stmt.deinit();
+
+        try stmt.bindBlob(1, f16_query);
+        try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+        try std.testing.expectEqualStrings("near", stmt.columnText(0));
+        try std.testing.expectApproxEqAbs(@as(f64, 1.0), stmt.columnDouble(1), 0.000001);
+        try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+        try std.testing.expectEqualStrings("far", stmt.columnText(0));
+        try std.testing.expectApproxEqAbs(@as(f64, 4.0), stmt.columnDouble(1), 0.000001);
+        try std.testing.expectEqual(sqlite.Step.done, try stmt.step());
+    }
+
+    try expectSqlPrepareOrStepError(&db, "select zova_vector_encode_f16(x'007c')");
+    try expectSqlPrepareOrStepError(&db, "select zova_vector_distance('i8s', 'near', x'00')");
+}
+
 test "sql vector integration validates errors and registers only on zova connections" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

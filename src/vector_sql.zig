@@ -31,9 +31,40 @@ const VectorMetric = enum {
     dot,
 };
 
+const VectorElementType = vector_storage.VectorElementType;
+
+const VectorValuesConst = union(VectorElementType) {
+    f32: []const f32,
+    f16: []const u16,
+    i8: []const i8,
+};
+
+const VectorValuesOwned = union(VectorElementType) {
+    f32: []f32,
+    f16: []u16,
+    i8: []i8,
+
+    fn asConst(self: VectorValuesOwned) VectorValuesConst {
+        return switch (self) {
+            .f32 => |values| .{ .f32 = values },
+            .f16 => |values| .{ .f16 = values },
+            .i8 => |values| .{ .i8 = values },
+        };
+    }
+
+    fn deinit(self: VectorValuesOwned) void {
+        switch (self) {
+            .f32 => |values| allocator.free(values),
+            .f16 => |values| allocator.free(values),
+            .i8 => |values| allocator.free(values),
+        }
+    }
+};
+
 const Collection = struct {
     dimensions: u32,
     metric: VectorMetric,
+    element_type: VectorElementType,
 };
 
 const SearchRow = extern struct {
@@ -105,6 +136,32 @@ pub fn register(db: *sqlite.Database) sqlite.Error!void {
     );
     if (rc != c.SQLITE_OK) return mapResultCode(rc);
 
+    rc = c.sqlite3_create_function_v2(
+        db.handle,
+        "zova_vector_encode_f16",
+        1,
+        flags,
+        null,
+        vectorEncodeF16Func,
+        null,
+        null,
+        null,
+    );
+    if (rc != c.SQLITE_OK) return mapResultCode(rc);
+
+    rc = c.sqlite3_create_function_v2(
+        db.handle,
+        "zova_vector_encode_i8",
+        1,
+        flags,
+        null,
+        vectorEncodeI8Func,
+        null,
+        null,
+        null,
+    );
+    if (rc != c.SQLITE_OK) return mapResultCode(rc);
+
     rc = c.sqlite3_create_module_v2(
         db.handle,
         "zova_vector_search",
@@ -143,6 +200,50 @@ fn vectorDistanceByIdFunc(ctx: ?*c.sqlite3_context, argc: c_int, argv: [*c]?*c.s
     c.sqlite3_result_double(ctx.?, result);
 }
 
+fn vectorEncodeF16Func(ctx: ?*c.sqlite3_context, argc: c_int, argv: [*c]?*c.sqlite3_value) callconv(.c) void {
+    if (ctx == null) return;
+    if (argc != 1) {
+        resultError(ctx.?, "zova_vector_encode_f16 expects 1 argument");
+        return;
+    }
+    const blob = valueBlob(argv[0] orelse {
+        resultError(ctx.?, errorMessage(error.InvalidArgument));
+        return;
+    }) catch |err| {
+        resultError(ctx.?, errorMessage(err));
+        return;
+    };
+    if (blob.len % @sizeOf(u16) != 0) {
+        resultError(ctx.?, errorMessage(error.VectorDimensionMismatch));
+        return;
+    }
+    var index: usize = 0;
+    while (index < blob.len) : (index += @sizeOf(u16)) {
+        const bits = std.mem.readInt(u16, blob[index..][0..2], .little);
+        if (!f16BitsFinite(bits)) {
+            resultError(ctx.?, errorMessage(error.VectorInvalid));
+            return;
+        }
+    }
+    resultBlob(ctx.?, blob);
+}
+
+fn vectorEncodeI8Func(ctx: ?*c.sqlite3_context, argc: c_int, argv: [*c]?*c.sqlite3_value) callconv(.c) void {
+    if (ctx == null) return;
+    if (argc != 1) {
+        resultError(ctx.?, "zova_vector_encode_i8 expects 1 argument");
+        return;
+    }
+    const blob = valueBlob(argv[0] orelse {
+        resultError(ctx.?, errorMessage(error.InvalidArgument));
+        return;
+    }) catch |err| {
+        resultError(ctx.?, errorMessage(err));
+        return;
+    };
+    resultBlob(ctx.?, blob);
+}
+
 fn computeScalarDistance(ctx: *c.sqlite3_context, argv: [*c]?*c.sqlite3_value, by_id: bool) Error!f64 {
     const db = c.sqlite3_context_db_handle(ctx) orelse return error.SqliteError;
     const collection_name = try valueText(argv[0] orelse return error.InvalidArgument);
@@ -151,7 +252,7 @@ fn computeScalarDistance(ctx: *c.sqlite3_context, argv: [*c]?*c.sqlite3_value, b
     var wrapper = sqlite.Database{ .handle = db };
     const collection = try loadCollection(&wrapper, collection_name);
 
-    var query: []f32 = undefined;
+    var query: VectorValuesOwned = undefined;
     if (by_id) {
         const source_vector_id = try valueText(argv[2] orelse return error.InvalidArgument);
         query = try loadVectorValues(&wrapper, collection_name, source_vector_id, collection);
@@ -159,12 +260,12 @@ fn computeScalarDistance(ctx: *c.sqlite3_context, argv: [*c]?*c.sqlite3_value, b
         const query_blob = try valueBlob(argv[2] orelse return error.InvalidArgument);
         query = try decodeQueryBlob(query_blob, collection);
     }
-    defer allocator.free(query);
+    defer query.deinit();
 
     const encoded = try loadVectorEncoded(&wrapper, collection_name, vector_id, collection);
     defer allocator.free(encoded);
 
-    return try vectorDistanceFromEncoded(collection.metric, query, encoded, collection.dimensions);
+    return try vectorDistanceFromEncoded(collection.element_type, collection.metric, query.asConst(), encoded, collection.dimensions);
 }
 
 const vector_search_module = c.sqlite3_module{
@@ -343,7 +444,7 @@ fn searchFilter(
     var wrapper = sqlite.Database{ .handle = db };
     const collection = loadCollection(&wrapper, collection_name) catch |err| return setCursorError(search_cursor, errorMessage(err));
 
-    var query: []f32 = undefined;
+    var query: VectorValuesOwned = undefined;
     if (bits.query_vector) {
         const query_blob = valueBlob(argv[arg_index] orelse return setCursorError(search_cursor, "missing query_vector")) catch |err| return setCursorError(search_cursor, errorMessage(err));
         query = decodeQueryBlob(query_blob, collection) catch |err| return setCursorError(search_cursor, errorMessage(err));
@@ -353,7 +454,7 @@ fn searchFilter(
         query = loadVectorValues(&wrapper, collection_name, source_vector_id, collection) catch |err| return setCursorError(search_cursor, errorMessage(err));
         arg_index += 1;
     }
-    defer allocator.free(query);
+    defer query.deinit();
 
     var top_k: ?usize = null;
     if (bits.top_k) {
@@ -367,7 +468,7 @@ fn searchFilter(
         arg_index += 1;
     }
 
-    const rows = searchAll(&wrapper, collection_name, collection, query, top_k, max_distance, if (bits.source_vector_id) querySourceId(argv, bits) else null) catch |err| {
+    const rows = searchAll(&wrapper, collection_name, collection, query.asConst(), top_k, max_distance, if (bits.source_vector_id) querySourceId(argv, bits) else null) catch |err| {
         return setCursorError(search_cursor, errorMessage(err));
     };
     search_cursor.rows = rows.ptr;
@@ -455,10 +556,10 @@ fn loadCollection(db: *sqlite.Database, name: []const u8) Error!Collection {
         .row => {
             const dimensions_i64 = stmt.columnInt64(0);
             if (dimensions_i64 <= 0 or dimensions_i64 > max_vector_dimensions) return error.VectorCorrupt;
-            if (!std.mem.eql(u8, stmt.columnText(2), "f32")) return error.VectorCorrupt;
             return .{
                 .dimensions = @intCast(dimensions_i64),
                 .metric = try metricFromText(stmt.columnText(1)),
+                .element_type = try elementTypeFromText(stmt.columnText(2)),
             };
         },
     };
@@ -482,17 +583,18 @@ fn loadVectorEncoded(db: *sqlite.Database, collection_name: []const u8, vector_i
         .row => {
             try validateStoredDimensions(collection.dimensions, stmt.columnInt64(0));
             const blob = stmt.columnBlob(1);
-            if (blob.len != vectorByteLen(collection.dimensions)) return error.VectorCorrupt;
+            if (blob.len != vectorByteLen(collection.element_type, collection.dimensions)) return error.VectorCorrupt;
             return allocator.dupe(u8, blob) catch return error.OutOfMemory;
         },
     };
 }
 
-fn loadVectorValues(db: *sqlite.Database, collection_name: []const u8, vector_id: []const u8, collection: Collection) Error![]f32 {
+fn loadVectorValues(db: *sqlite.Database, collection_name: []const u8, vector_id: []const u8, collection: Collection) Error!VectorValuesOwned {
     const encoded = try loadVectorEncoded(db, collection_name, vector_id, collection);
     defer allocator.free(encoded);
-    const values = try decodeF32Le(encoded, collection.dimensions, .corrupt);
-    try validateStoredValues(collection.metric, values);
+    const values = try decodeValuesLe(encoded, collection.element_type, collection.dimensions, .corrupt);
+    errdefer values.deinit();
+    try validateStoredValues(collection, values.asConst());
     return values;
 }
 
@@ -500,7 +602,7 @@ fn searchAll(
     db: *sqlite.Database,
     collection_name: []const u8,
     collection: Collection,
-    query: []const f32,
+    query: VectorValuesConst,
     top_k: ?usize,
     max_distance: ?f64,
     exclude_id: ?[]const u8,
@@ -531,7 +633,7 @@ fn searchAll(
         }
 
         try validateStoredDimensions(collection.dimensions, stmt.columnInt64(1));
-        const distance = try vectorDistanceFromEncoded(collection.metric, query, stmt.columnBlob(2), collection.dimensions);
+        const distance = try vectorDistanceFromEncoded(collection.element_type, collection.metric, query, stmt.columnBlob(2), collection.dimensions);
         if (!within(distance, max_distance)) continue;
         try maybeInsertRow(&rows, top_k, vector_id, distance);
     }
@@ -609,11 +711,11 @@ fn freeRowIds(rows: []const SearchRow) void {
     }
 }
 
-fn decodeQueryBlob(blob: []const u8, collection: Collection) Error![]f32 {
-    if (blob.len != vectorByteLen(collection.dimensions)) return error.VectorDimensionMismatch;
-    const values = try decodeF32Le(blob, collection.dimensions, .invalid);
-    errdefer allocator.free(values);
-    try validateQueryValues(collection.metric, values);
+fn decodeQueryBlob(blob: []const u8, collection: Collection) Error!VectorValuesOwned {
+    if (blob.len != vectorByteLen(collection.element_type, collection.dimensions)) return error.VectorDimensionMismatch;
+    const values = try decodeValuesLe(blob, collection.element_type, collection.dimensions, .invalid);
+    errdefer values.deinit();
+    try validateQueryValues(collection, values.asConst());
     return values;
 }
 
@@ -623,13 +725,42 @@ const DecodeErrorKind = enum {
 };
 
 fn decodeF32Le(bytes: []const u8, dimensions: u32, error_kind: DecodeErrorKind) Error![]f32 {
-    if (bytes.len != vectorByteLen(dimensions)) return decodeError(error_kind);
+    if (bytes.len != vectorByteLen(.f32, dimensions)) return decodeError(error_kind);
     const values = allocator.alloc(f32, dimensions) catch return error.OutOfMemory;
     errdefer allocator.free(values);
     for (values, 0..) |*value, index| {
         const bits = std.mem.readInt(u32, bytes[index * 4 ..][0..4], .little);
         value.* = @bitCast(bits);
         if (std.math.isNan(value.*) or std.math.isInf(value.*)) return decodeError(error_kind);
+    }
+    return values;
+}
+
+fn decodeValuesLe(bytes: []const u8, element_type: VectorElementType, dimensions: u32, error_kind: DecodeErrorKind) Error!VectorValuesOwned {
+    return switch (element_type) {
+        .f32 => .{ .f32 = try decodeF32Le(bytes, dimensions, error_kind) },
+        .f16 => .{ .f16 = try decodeF16Le(bytes, dimensions, error_kind) },
+        .i8 => .{ .i8 = try decodeI8(bytes, dimensions, error_kind) },
+    };
+}
+
+fn decodeF16Le(bytes: []const u8, dimensions: u32, error_kind: DecodeErrorKind) Error![]u16 {
+    if (bytes.len != vectorByteLen(.f16, dimensions)) return decodeError(error_kind);
+    const values = allocator.alloc(u16, dimensions) catch return error.OutOfMemory;
+    errdefer allocator.free(values);
+    for (values, 0..) |*value, index| {
+        value.* = std.mem.readInt(u16, bytes[index * 2 ..][0..2], .little);
+        if (!f16BitsFinite(value.*)) return decodeError(error_kind);
+    }
+    return values;
+}
+
+fn decodeI8(bytes: []const u8, dimensions: u32, error_kind: DecodeErrorKind) Error![]i8 {
+    if (bytes.len != vectorByteLen(.i8, dimensions)) return decodeError(error_kind);
+    const values = allocator.alloc(i8, dimensions) catch return error.OutOfMemory;
+    errdefer allocator.free(values);
+    for (values, 0..) |*value, index| {
+        value.* = @bitCast(bytes[index]);
     }
     return values;
 }
@@ -641,51 +772,50 @@ fn decodeError(error_kind: DecodeErrorKind) Error {
     };
 }
 
-fn vectorDistanceFromEncoded(metric: VectorMetric, query: []const f32, encoded_values: []const u8, dimensions: u32) Error!f64 {
-    if (encoded_values.len != vectorByteLen(dimensions)) return error.VectorCorrupt;
+fn vectorDistanceFromEncoded(element_type: VectorElementType, metric: VectorMetric, query: VectorValuesConst, encoded_values: []const u8, dimensions: u32) Error!f64 {
+    if (vectorValuesElementType(query) != element_type) return error.VectorInvalid;
+    if (vectorValuesLen(query) != dimensions) return error.VectorDimensionMismatch;
+    if (encoded_values.len != vectorByteLen(element_type, dimensions)) return error.VectorCorrupt;
     return switch (metric) {
-        .cosine => cosineDistanceFromEncoded(query, encoded_values),
-        .l2 => l2DistanceFromEncoded(query, encoded_values),
-        .dot => dotDistanceFromEncoded(query, encoded_values),
+        .cosine => cosineDistanceFromEncoded(element_type, query, encoded_values),
+        .l2 => l2DistanceFromEncoded(element_type, query, encoded_values),
+        .dot => dotDistanceFromEncoded(element_type, query, encoded_values),
     };
 }
 
-fn cosineDistanceFromEncoded(query: []const f32, encoded_values: []const u8) Error!f64 {
+fn cosineDistanceFromEncoded(element_type: VectorElementType, query: VectorValuesConst, encoded_values: []const u8) Error!f64 {
     var dot: f64 = 0;
     var query_norm: f64 = 0;
     var stored_norm: f64 = 0;
 
-    for (query, 0..) |query_value, index| {
-        const stored_value = decodeF32LeAt(encoded_values, index);
-        if (std.math.isNan(stored_value) or std.math.isInf(stored_value)) return error.VectorCorrupt;
-        const query_f64 = vector_storage.f32ToF64(query_value);
-        const stored_f64 = vector_storage.f32ToF64(stored_value);
+    for (0..vectorValuesLen(query)) |index| {
+        const query_f64 = try inputValueAsF64(query, index);
+        const stored_f64 = try encodedValueAsF64(element_type, encoded_values, index);
         dot += query_f64 * stored_f64;
         query_norm += query_f64 * query_f64;
         stored_norm += stored_f64 * stored_f64;
     }
 
-    if (query_norm == 0 or stored_norm == 0) return error.VectorCorrupt;
+    if (query_norm == 0) return error.VectorInvalid;
+    if (stored_norm == 0) return error.VectorCorrupt;
     return 1.0 - (dot / (@sqrt(query_norm) * @sqrt(stored_norm)));
 }
 
-fn l2DistanceFromEncoded(query: []const f32, encoded_values: []const u8) Error!f64 {
+fn l2DistanceFromEncoded(element_type: VectorElementType, query: VectorValuesConst, encoded_values: []const u8) Error!f64 {
     var sum: f64 = 0;
-    for (query, 0..) |query_value, index| {
-        const stored_value = decodeF32LeAt(encoded_values, index);
-        if (std.math.isNan(stored_value) or std.math.isInf(stored_value)) return error.VectorCorrupt;
-        const diff = vector_storage.f32ToF64(query_value) - vector_storage.f32ToF64(stored_value);
+    for (0..vectorValuesLen(query)) |index| {
+        const query_f64 = try inputValueAsF64(query, index);
+        const stored_f64 = try encodedValueAsF64(element_type, encoded_values, index);
+        const diff = query_f64 - stored_f64;
         sum += diff * diff;
     }
     return @sqrt(sum);
 }
 
-fn dotDistanceFromEncoded(query: []const f32, encoded_values: []const u8) Error!f64 {
+fn dotDistanceFromEncoded(element_type: VectorElementType, query: VectorValuesConst, encoded_values: []const u8) Error!f64 {
     var dot: f64 = 0;
-    for (query, 0..) |query_value, index| {
-        const stored_value = decodeF32LeAt(encoded_values, index);
-        if (std.math.isNan(stored_value) or std.math.isInf(stored_value)) return error.VectorCorrupt;
-        dot += vector_storage.f32ToF64(query_value) * vector_storage.f32ToF64(stored_value);
+    for (0..vectorValuesLen(query)) |index| {
+        dot += try inputValueAsF64(query, index) * try encodedValueAsF64(element_type, encoded_values, index);
     }
     return -dot;
 }
@@ -695,24 +825,26 @@ fn decodeF32LeAt(bytes: []const u8, index: usize) f32 {
     return @bitCast(bits);
 }
 
-fn validateQueryValues(metric: VectorMetric, values: []const f32) Error!void {
+fn validateQueryValues(collection: Collection, values: VectorValuesConst) Error!void {
+    if (vectorValuesElementType(values) != collection.element_type) return error.VectorInvalid;
+    if (vectorValuesLen(values) != collection.dimensions) return error.VectorDimensionMismatch;
     var norm_squared: f64 = 0;
-    for (values) |value| {
-        if (std.math.isNan(value) or std.math.isInf(value)) return error.VectorInvalid;
-        const value_f64 = vector_storage.f32ToF64(value);
+    for (0..vectorValuesLen(values)) |index| {
+        const value_f64 = try inputValueAsF64(values, index);
         norm_squared += value_f64 * value_f64;
     }
-    if (metric == .cosine and norm_squared == 0) return error.VectorInvalid;
+    if (collection.metric == .cosine and norm_squared == 0) return error.VectorInvalid;
 }
 
-fn validateStoredValues(metric: VectorMetric, values: []const f32) Error!void {
+fn validateStoredValues(collection: Collection, values: VectorValuesConst) Error!void {
+    if (vectorValuesElementType(values) != collection.element_type) return error.VectorCorrupt;
+    if (vectorValuesLen(values) != collection.dimensions) return error.VectorCorrupt;
     var norm_squared: f64 = 0;
-    for (values) |value| {
-        if (std.math.isNan(value) or std.math.isInf(value)) return error.VectorCorrupt;
-        const value_f64 = vector_storage.f32ToF64(value);
+    for (0..vectorValuesLen(values)) |index| {
+        const value_f64 = inputValueAsF64(values, index) catch return error.VectorCorrupt;
         norm_squared += value_f64 * value_f64;
     }
-    if (metric == .cosine and norm_squared == 0) return error.VectorCorrupt;
+    if (collection.metric == .cosine and norm_squared == 0) return error.VectorCorrupt;
 }
 
 fn validateStoredDimensions(expected: u32, stored: i64) Error!void {
@@ -737,8 +869,98 @@ fn metricFromText(text: []const u8) Error!VectorMetric {
     return error.VectorCorrupt;
 }
 
-fn vectorByteLen(dimensions: u32) usize {
-    return @as(usize, @intCast(dimensions)) * @sizeOf(f32);
+fn elementTypeFromText(text: []const u8) Error!VectorElementType {
+    if (std.mem.eql(u8, text, "f32")) return .f32;
+    if (std.mem.eql(u8, text, "f16")) return .f16;
+    if (std.mem.eql(u8, text, "i8")) return .i8;
+    return error.VectorCorrupt;
+}
+
+fn vectorByteLen(element_type: VectorElementType, dimensions: u32) usize {
+    const element_size: usize = switch (element_type) {
+        .f32 => @sizeOf(f32),
+        .f16 => @sizeOf(u16),
+        .i8 => @sizeOf(i8),
+    };
+    return @as(usize, @intCast(dimensions)) * element_size;
+}
+
+fn vectorValuesElementType(values: VectorValuesConst) VectorElementType {
+    return switch (values) {
+        .f32 => .f32,
+        .f16 => .f16,
+        .i8 => .i8,
+    };
+}
+
+fn vectorValuesLen(values: VectorValuesConst) usize {
+    return switch (values) {
+        .f32 => |typed| typed.len,
+        .f16 => |typed| typed.len,
+        .i8 => |typed| typed.len,
+    };
+}
+
+fn inputValueAsF64(values: VectorValuesConst, index: usize) Error!f64 {
+    return switch (values) {
+        .f32 => |typed| {
+            const value = typed[index];
+            if (std.math.isNan(value) or std.math.isInf(value)) return error.VectorInvalid;
+            return vector_storage.f32ToF64(value);
+        },
+        .f16 => |typed| {
+            const value = typed[index];
+            if (!f16BitsFinite(value)) return error.VectorInvalid;
+            return f16BitsToF64(value);
+        },
+        .i8 => |typed| @floatFromInt(typed[index]),
+    };
+}
+
+fn encodedValueAsF64(element_type: VectorElementType, encoded_values: []const u8, index: usize) Error!f64 {
+    return switch (element_type) {
+        .f32 => {
+            const value = decodeF32LeAt(encoded_values, index);
+            if (std.math.isNan(value) or std.math.isInf(value)) return error.VectorCorrupt;
+            return vector_storage.f32ToF64(value);
+        },
+        .f16 => {
+            const offset = index * @sizeOf(u16);
+            const bits = std.mem.readInt(u16, encoded_values[offset..][0..2], .little);
+            if (!f16BitsFinite(bits)) return error.VectorCorrupt;
+            return f16BitsToF64(bits);
+        },
+        .i8 => @floatFromInt(@as(i8, @bitCast(encoded_values[index]))),
+    };
+}
+
+fn f16BitsFinite(bits: u16) bool {
+    return ((bits >> 10) & 0x1f) != 0x1f;
+}
+
+fn f16BitsToF64(bits: u16) f64 {
+    const sign = @as(u64, bits >> 15) << 63;
+    const exponent = (bits >> 10) & 0x1f;
+    const fraction = bits & 0x03ff;
+
+    if (exponent == 0x1f) {
+        const quiet_nan = if (fraction == 0) 0 else @as(u64, 1) << 51;
+        return @bitCast(sign | (@as(u64, 0x7ff) << 52) | (@as(u64, fraction) << 42) | quiet_nan);
+    }
+
+    if (exponent == 0) {
+        if (fraction == 0) return @bitCast(sign);
+        const top_bit: u4 = @intCast(15 - @clz(fraction));
+        const exponent64 = @as(u64, top_bit) + 999;
+        const mantissa_source = @as(u64, fraction) - (@as(u64, 1) << top_bit);
+        const shift: u6 = @intCast(52 - @as(u6, top_bit));
+        const mantissa = mantissa_source << shift;
+        return @bitCast(sign | (exponent64 << 52) | mantissa);
+    }
+
+    const exponent64 = @as(u64, exponent) + 1008;
+    const mantissa = @as(u64, fraction) << 42;
+    return @bitCast(sign | (exponent64 << 52) | mantissa);
 }
 
 fn within(distance: f64, max_distance: ?f64) bool {
@@ -781,6 +1003,21 @@ fn parseMaxDistance(value: *c.sqlite3_value) Error!f64 {
     const distance = c.sqlite3_value_double(value);
     if (std.math.isNan(distance) or std.math.isInf(distance)) return error.VectorInvalid;
     return distance;
+}
+
+fn resultBlob(ctx: *c.sqlite3_context, blob: []const u8) void {
+    if (blob.len == 0) {
+        _ = c.sqlite3_result_zeroblob64(ctx, 0);
+        return;
+    }
+
+    const raw_copy = c.sqlite3_malloc64(@intCast(blob.len)) orelse {
+        c.sqlite3_result_error_nomem(ctx);
+        return;
+    };
+    const copy: [*]u8 = @ptrCast(raw_copy);
+    @memcpy(copy[0..blob.len], blob);
+    c.sqlite3_result_blob64(ctx, copy, @intCast(blob.len), c.sqlite3_free);
 }
 
 fn resultError(ctx: *c.sqlite3_context, message: []const u8) void {

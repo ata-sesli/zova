@@ -10,11 +10,12 @@ traversal, transaction-aware app events, bound object/vector stores,
 diagnostics, salvage, backup, compact copy, restore, and a trusted extension
 host foundation.
 
-Current package version: `0.21.1`.
+Current package version: `0.21.2`.
 
-Zova is pre-1.0. The current `.zova` file `format_version` is `5`.
-Zova `0.21.1` is the extension host release: trusted extension lifecycle,
-explicit local dynamic loading, and bundled target-aware `trgm` fuzzy lookup.
+Zova is pre-1.0. The current `.zova` file `format_version` is `6`.
+Zova `0.21.2` adds raw `f16` and `i8` vector element types while keeping the
+extension host, trusted extension lifecycle, local dynamic loading, and bundled
+target-aware `trgm` fuzzy lookup from the v0.21 line.
 
 ## Contents
 
@@ -55,7 +56,7 @@ or:
 
 ```toml
 [dependencies]
-zova = "0.21.1"
+zova = "0.21.2"
 ```
 
 Python:
@@ -73,7 +74,7 @@ python -m pip install zova
 Go:
 
 ```sh
-go get github.com/atasesli/zova/bindings/go@v0.21.1
+go get github.com/atasesli/zova/bindings/go@v0.21.2
 ```
 
 The Go binding uses cgo over Zova's C ABI. Build or provide the C ABI library
@@ -82,7 +83,7 @@ before using it from another project.
 C ABI:
 
 ```sh
-# Download a matching zova-v0.21.1-<platform>-c-abi archive
+# Download a matching zova-v0.21.2-<platform>-c-abi archive
 # from the GitHub Release, or build it locally:
 zig build c-abi
 ```
@@ -90,7 +91,7 @@ zig build c-abi
 CLI:
 
 ```sh
-# Download a matching zova-v0.21.1-<platform>-cli archive
+# Download a matching zova-v0.21.2-<platform>-cli archive
 # from the GitHub Release, or build it locally:
 zig build
 zig-out/bin/zova --help
@@ -104,7 +105,7 @@ Zova vendors SQLite. You do not need a system SQLite installation.
 |---|---|---:|---:|---:|---|
 | Rust | `cargo add zova` | no | yes | yes | `zova-sys` builds Zova's native C ABI from bundled generated C |
 | Python | `uv add zova` / `pip install zova` | no | only for sdist builds | only for sdist builds | wheels are published for Linux/macOS x86_64/arm64 on CPython 3.10/3.12; sdist fallback builds through Rust |
-| Go | `go get github.com/atasesli/zova/bindings/go@v0.21.1` | no, if using a release C ABI archive | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
+| Go | `go get github.com/atasesli/zova/bindings/go@v0.21.2` | no, if using a release C ABI archive | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
 | C ABI | release archive or `zig build c-abi` | no, if using a release archive | no | no, if using a release archive | static C ABI library and `zova.h` |
 | Zig | package source | yes | no | yes | native API |
 | CLI | release archive or `zig build` | no, if using a release archive | no | no, if using a release archive | source-built or prebuilt command line tool |
@@ -227,8 +228,8 @@ flowchart TD
     Objects["_zova_objects<br/>object ids and sizes"]
     Chunks["_zova_chunks<br/>verified chunk BLOBs"]
     Manifest["_zova_object_chunks<br/>object manifests"]
-    VecCols["_zova_vector_collections<br/>dimensions and metric"]
-    Vecs["_zova_vectors<br/>f32 vector BLOBs"]
+    VecCols["_zova_vector_collections<br/>dimensions, metric, and element type"]
+    Vecs["_zova_vectors<br/>typed vector BLOBs"]
     Graphs["_zova_graphs<br/>named relationship graphs"]
     Nodes["_zova_graph_nodes<br/>stable app node ids"]
     Edges["_zova_graph_edges<br/>directed relationships"]
@@ -334,7 +335,7 @@ complete object from chunks.
 
 ### Optional Bound Object And Vector Stores
 
-Single-file `.zova` remains the default. In v0.21.1, applications can opt into
+Single-file `.zova` remains the default. In v0.21.2, applications can opt into
 one bound object store and one bound vector store when
 large object bytes or vector rows should live beside the main records database:
 
@@ -431,8 +432,15 @@ Vectors live in named collections:
 collection: "chunks"
 dimensions: 384
 metric: cosine | l2 | dot
+element type: f32 | f16 | i8
 vector id: application-provided text
 ```
+
+`f32` is the default and keeps the existing APIs/file behavior. Raw `f16`
+collections store IEEE 754 binary16 bits as little-endian `uint16` values, and
+raw `i8` collections store signed bytes. These are storage element types, not
+automatic quantization; Zova does not add scales, zero-points, reranking, or ANN
+indexes for them.
 
 Supported metrics:
 
@@ -444,7 +452,7 @@ Zova supports collection create/info/list/delete, vector CRUD, batch upsert,
 exact search, candidate-filtered search, search-by-id, and inclusive distance
 thresholds.
 
-Search is exact and flat-scan in `0.21.1`. It is good for local datasets,
+Search is exact and flat-scan in `0.21.2`. It is good for local datasets,
 offline ranking, deterministic tests, and SQL-filter-first workflows. It is not
 yet an ANN engine for million-scale low-latency search.
 
@@ -472,9 +480,11 @@ where s.collection = 'chunks'
 order by s.rank;
 ```
 
-`query_vector_blob` is little-endian `f32` data. This lets applications combine
-SQL metadata filters with vector ranking without pulling the whole metadata set
-into application code.
+For `f32` collections, `query_vector_blob` is little-endian `f32` data. Typed
+collections use query blobs matching their collection element type; `f16` blobs
+are little-endian `uint16` bit patterns and `i8` blobs are raw signed bytes.
+This lets applications combine SQL metadata filters with vector ranking without
+pulling the whole metadata set into application code.
 
 ## Graphs
 
@@ -617,7 +627,7 @@ Queue details:
 
 ## Extensions
 
-Zova `0.21.1` includes the extension host plus the first bundled extension,
+The v0.21 line includes the extension host plus the first bundled extension,
 `trgm`.
 
 An extension is trusted process code plus private Zova metadata:
@@ -738,10 +748,10 @@ zova salvage damaged.zova recovered.zova
 ```
 
 Salvage never mutates the source file and never overwrites the destination. A
-good backup is still preferred when one exists. In v0.21, salvage is
-graph-aware: it copies valid graph topology and skips invalid graph nodes or
-edges, such as edges whose endpoint nodes or Zova-owned targets cannot be
-validated.
+good backup is still preferred when one exists. In v0.21.2, salvage is
+graph-aware and extension-aware: it copies valid graph topology, skips invalid
+graph nodes or edges, and lets trusted extension hooks recover their own private
+storage.
 
 Diagnostics also include extension health. Unknown `_zova_ext_*` storage and
 corrupt `trgm` private tables are
@@ -752,9 +762,9 @@ Extension-aware salvage is hook-based. Core Zova never copies `_zova_ext_*`
 tables by guessing their meaning. If trusted extension code provides a salvage
 hook, Zova lets that extension copy, rebuild, or skip its own storage. If the
 extension code is unavailable or the extension has no salvage hook, extension
-storage is skipped and reported. The bundled `trgm` extension declares a no-op
-salvage hook in v0.21; real `trgm` index salvage/rebuild is deferred to
-a future patch release.
+storage is skipped and reported. In v0.21.2, bundled `trgm` salvage recovers a
+valid subset of trgm private storage, rebuilds derived term rows from copied
+postings, and still never prints indexed text or private schema SQL.
 
 ## CLI
 
@@ -795,14 +805,14 @@ Rust users normally use the safe crate:
 
 ```toml
 [dependencies]
-zova = "0.21.1"
+zova = "0.21.2"
 ```
 
 The lower-level raw FFI crate is available as:
 
 ```toml
 [dependencies]
-zova-sys = "0.21.1"
+zova-sys = "0.21.2"
 ```
 
 `zova` exposes `Database` for single-owner code and `SharedDatabase` for an
@@ -851,7 +861,7 @@ native-Zig/CLI-only in v0.21.
 Install:
 
 ```sh
-go get github.com/atasesli/zova/bindings/go@v0.21.1
+go get github.com/atasesli/zova/bindings/go@v0.21.2
 ```
 
 Import:
@@ -976,7 +986,7 @@ synchronous settings automatically.
 
 ## Current Boundaries
 
-Zova `0.21.1` does not include:
+Zova `0.21.2` does not include:
 
 - binding-level app-registered extension authoring APIs
 - binding-level dynamic `.zovaext` loading APIs
@@ -1031,7 +1041,7 @@ Zova publishes several release artifact types:
 - A GitHub Release source archive.
 - Rust crates on crates.io: `zova-sys` and `zova`.
 - Python wheels and sdist on PyPI.
-- A Go module tag: `bindings/go/v0.21.1`.
+- A Go module tag: `bindings/go/v0.21.2`.
 
 The source archive includes:
 
@@ -1060,13 +1070,13 @@ license needed to build the C ABI with a normal C compiler.
 Maintainer source-package command:
 
 ```sh
-scripts/package-release.sh 0.21.1
+scripts/package-release.sh 0.21.2
 ```
 
 Maintainer local distribution command for crates.io and PyPI, in that order:
 
 ```sh
-scripts/distribute-release.sh 0.21.1
+scripts/distribute-release.sh 0.21.2
 ```
 
 GitHub Actions provides the preferred release flow:

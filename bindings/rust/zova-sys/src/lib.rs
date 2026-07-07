@@ -8,6 +8,7 @@ pub type zova_status = c_int;
 pub type zova_step_result = c_int;
 pub type zova_column_type = c_int;
 pub type zova_vector_metric = c_int;
+pub type zova_vector_element_type = c_int;
 pub type zova_graph_target_type = c_int;
 pub type zova_graph_neighbor_direction = c_int;
 
@@ -69,6 +70,9 @@ pub const ZOVA_COLUMN_NULL: zova_column_type = 5;
 pub const ZOVA_VECTOR_METRIC_COSINE: zova_vector_metric = 0;
 pub const ZOVA_VECTOR_METRIC_L2: zova_vector_metric = 1;
 pub const ZOVA_VECTOR_METRIC_DOT: zova_vector_metric = 2;
+pub const ZOVA_VECTOR_ELEMENT_TYPE_F32: zova_vector_element_type = 0;
+pub const ZOVA_VECTOR_ELEMENT_TYPE_F16: zova_vector_element_type = 1;
+pub const ZOVA_VECTOR_ELEMENT_TYPE_I8: zova_vector_element_type = 2;
 pub const ZOVA_GRAPH_TARGET_NONE: zova_graph_target_type = 0;
 pub const ZOVA_GRAPH_TARGET_RECORD: zova_graph_target_type = 1;
 pub const ZOVA_GRAPH_TARGET_OBJECT: zova_graph_target_type = 2;
@@ -178,10 +182,40 @@ pub struct zova_vector_collection_options {
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
+pub struct zova_vector_collection_typed_options {
+    pub dimensions: u32,
+    pub metric: c_int,
+    pub element_type: c_int,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_vector_values {
+    pub element_type: c_int,
+    pub f32_values: *const f32,
+    pub f16_values: *const u16,
+    pub i8_values: *const i8,
+    pub values_len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
 pub struct zova_vector {
     pub id: *mut c_char,
     pub id_len: usize,
     pub values: *mut f32,
+    pub values_len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_vector_typed {
+    pub id: *mut c_char,
+    pub id_len: usize,
+    pub element_type: c_int,
+    pub f32_values: *mut f32,
+    pub f16_values: *mut u16,
+    pub i8_values: *mut i8,
     pub values_len: usize,
 }
 
@@ -219,10 +253,35 @@ pub struct zova_vector_collection_list {
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
+pub struct zova_vector_collection_typed_info {
+    pub name: *mut c_char,
+    pub name_len: usize,
+    pub dimensions: u32,
+    pub metric: c_int,
+    pub element_type: c_int,
+    pub vector_count: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_vector_collection_typed_list {
+    pub items: *mut zova_vector_collection_typed_info,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
 pub struct zova_vector_input {
     pub id: *const c_char,
     pub values: *const f32,
     pub values_len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_vector_typed_input {
+    pub id: *const c_char,
+    pub values: zova_vector_values,
 }
 
 #[repr(C)]
@@ -679,6 +738,13 @@ pub struct zova_vector_collection_create_request {
 }
 
 #[repr(C)]
+pub struct zova_vector_collection_create_typed_request {
+    pub db: *mut zova_database,
+    pub name: *const c_char,
+    pub options: zova_vector_collection_typed_options,
+}
+
+#[repr(C)]
 pub struct zova_vector_collection_exists_request {
     pub db: *mut zova_database,
     pub name: *const c_char,
@@ -695,11 +761,27 @@ pub struct zova_vector_put_request {
 }
 
 #[repr(C)]
+pub struct zova_vector_put_typed_request {
+    pub db: *mut zova_database,
+    pub collection_name: *const c_char,
+    pub vector_id: *const c_char,
+    pub values: zova_vector_values,
+}
+
+#[repr(C)]
 pub struct zova_vector_get_request {
     pub db: *mut zova_database,
     pub collection_name: *const c_char,
     pub vector_id: *const c_char,
     pub out_vector: *mut zova_vector,
+}
+
+#[repr(C)]
+pub struct zova_vector_get_typed_request {
+    pub db: *mut zova_database,
+    pub collection_name: *const c_char,
+    pub vector_id: *const c_char,
+    pub out_vector: *mut zova_vector_typed,
 }
 
 #[repr(C)]
@@ -723,6 +805,15 @@ pub struct zova_vector_search_request {
     pub collection_name: *const c_char,
     pub query: *const f32,
     pub query_len: usize,
+    pub limit: usize,
+    pub out_results: *mut zova_vector_search_results,
+}
+
+#[repr(C)]
+pub struct zova_vector_search_typed_request {
+    pub db: *mut zova_database,
+    pub collection_name: *const c_char,
+    pub query: zova_vector_values,
     pub limit: usize,
     pub out_results: *mut zova_vector_search_results,
 }
@@ -753,10 +844,31 @@ pub struct zova_vector_collections_list_request {
 }
 
 #[repr(C)]
+pub struct zova_vector_collection_typed_info_get_request {
+    pub db: *mut zova_database,
+    pub name: *const c_char,
+    pub out_info: *mut zova_vector_collection_typed_info,
+}
+
+#[repr(C)]
+pub struct zova_vector_collections_typed_list_request {
+    pub db: *mut zova_database,
+    pub out_list: *mut zova_vector_collection_typed_list,
+}
+
+#[repr(C)]
 pub struct zova_vector_put_many_request {
     pub db: *mut zova_database,
     pub collection_name: *const c_char,
     pub vectors: *const zova_vector_input,
+    pub vectors_len: usize,
+}
+
+#[repr(C)]
+pub struct zova_vector_put_many_typed_request {
+    pub db: *mut zova_database,
+    pub collection_name: *const c_char,
+    pub vectors: *const zova_vector_typed_input,
     pub vectors_len: usize,
 }
 
@@ -990,9 +1102,12 @@ extern "C" {
     pub fn zova_notification_free(notification: *mut zova_notification);
     pub fn zova_object_manifest_free(manifest: *mut zova_object_manifest);
     pub fn zova_vector_free(vector: *mut zova_vector);
+    pub fn zova_vector_typed_free(vector: *mut zova_vector_typed);
     pub fn zova_vector_search_results_free(results: *mut zova_vector_search_results);
     pub fn zova_vector_collection_info_free(info: *mut zova_vector_collection_info);
     pub fn zova_vector_collection_list_free(list: *mut zova_vector_collection_list);
+    pub fn zova_vector_collection_typed_info_free(info: *mut zova_vector_collection_typed_info);
+    pub fn zova_vector_collection_typed_list_free(list: *mut zova_vector_collection_typed_list);
 
     pub fn zova_database_create(request: *const zova_database_open_request) -> zova_status;
     pub fn zova_database_open(request: *const zova_database_open_request) -> zova_status;
@@ -1132,6 +1247,9 @@ extern "C" {
     pub fn zova_vector_collection_create(
         request: *const zova_vector_collection_create_request,
     ) -> zova_status;
+    pub fn zova_vector_collection_create_typed(
+        request: *const zova_vector_collection_create_typed_request,
+    ) -> zova_status;
     pub fn zova_vector_collection_exists(
         request: *const zova_vector_collection_exists_request,
     ) -> zova_status;
@@ -1141,15 +1259,29 @@ extern "C" {
     pub fn zova_vector_collections_list(
         request: *const zova_vector_collections_list_request,
     ) -> zova_status;
+    pub fn zova_vector_collection_typed_info_get(
+        request: *const zova_vector_collection_typed_info_get_request,
+    ) -> zova_status;
+    pub fn zova_vector_collections_typed_list(
+        request: *const zova_vector_collections_typed_list_request,
+    ) -> zova_status;
     pub fn zova_vector_put(request: *const zova_vector_put_request) -> zova_status;
+    pub fn zova_vector_put_typed(request: *const zova_vector_put_typed_request) -> zova_status;
     pub fn zova_vector_put_many(request: *const zova_vector_put_many_request) -> zova_status;
+    pub fn zova_vector_put_many_typed(
+        request: *const zova_vector_put_many_typed_request,
+    ) -> zova_status;
     pub fn zova_vector_get(request: *const zova_vector_get_request) -> zova_status;
+    pub fn zova_vector_get_typed(request: *const zova_vector_get_typed_request) -> zova_status;
     pub fn zova_vector_exists(request: *const zova_vector_exists_request) -> zova_status;
     pub fn zova_vector_delete(request: *const zova_vector_delete_request) -> zova_status;
     pub fn zova_vector_collection_delete(
         request: *const zova_vector_collection_delete_request,
     ) -> zova_status;
     pub fn zova_vector_search(request: *const zova_vector_search_request) -> zova_status;
+    pub fn zova_vector_search_typed(
+        request: *const zova_vector_search_typed_request,
+    ) -> zova_status;
     pub fn zova_vector_search_in(request: *const zova_vector_search_in_request) -> zova_status;
     pub fn zova_vector_search_within(
         request: *const zova_vector_search_within_request,

@@ -1118,7 +1118,7 @@ test "cli info reports bounded database summary" {
     defer result.deinit();
     try std.testing.expectEqual(@as(u8, 0), result.code);
     try expectContains(result.stdout, "Zova database");
-    try expectContains(result.stdout, "format_version: 5");
+    try expectContains(result.stdout, "format_version: 6");
     try expectContains(result.stdout, "objects:");
     try expectContains(result.stdout, "chunks:");
     try expectContains(result.stdout, "loose_chunks:");
@@ -1258,7 +1258,7 @@ test "cli info json reports bounded database summary" {
     try expectJsonInt(root, "cli_json_version", 1);
     try expectJsonString(root, "package_version", cli.package_version);
     try expectJsonString(root, "sqlite_version", zova.sqlite.version());
-    try expectJsonString(root, "format_version", "5");
+    try expectJsonString(root, "format_version", "6");
     try expectJsonObjectHasInt(root, "files", "database_bytes");
     try expectJsonObjectHasInt(root, "sqlite", "page_count");
     try expectJsonObjectHasInt(root, "objects", "count");
@@ -2044,7 +2044,7 @@ test "cli salvage dry-run counts missing chunks as skipped" {
     try expectJsonBool(root, "issues_truncated", true);
 }
 
-test "cli salvage skips trgm extension storage without copying indexed text" {
+test "cli salvage recovers trgm extension storage without leaking indexed text" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -2068,8 +2068,10 @@ test "cli salvage skips trgm extension storage without copying indexed text" {
     var dry_json = try parseJson(dry_run.stdout);
     defer dry_json.deinit();
     const dry_root = dry_json.value.object;
-    try std.testing.expectEqual(@as(i64, 1), try jsonObjectInt(dry_root, "skipped", "extensions"));
-    try std.testing.expect((try jsonObjectInt(dry_root, "skipped", "extension_private_objects")) > 0);
+    try std.testing.expectEqual(@as(i64, 1), try jsonObjectInt(dry_root, "recoverable", "extensions"));
+    try std.testing.expect((try jsonObjectInt(dry_root, "recoverable", "extension_private_objects")) > 0);
+    try std.testing.expectEqual(@as(i64, 0), try jsonObjectInt(dry_root, "skipped", "extensions"));
+    try std.testing.expectEqual(@as(i64, 0), try jsonObjectInt(dry_root, "skipped", "extension_private_objects"));
     try std.testing.expect(std.mem.indexOf(u8, dry_run.stdout, sensitive_text) == null);
     try std.testing.expect(std.mem.indexOf(u8, dry_run.stdout, "create table") == null);
 
@@ -2082,9 +2084,10 @@ test "cli salvage skips trgm extension storage without copying indexed text" {
     defer salvage_json.deinit();
     const root = salvage_json.value.object;
     try expectJsonBool(root, "destination_verified", true);
-    try std.testing.expectEqual(@as(i64, 0), try jsonObjectInt(root, "copied", "extensions"));
-    try std.testing.expectEqual(@as(i64, 1), try jsonObjectInt(root, "skipped", "extensions"));
-    try std.testing.expect((try jsonObjectInt(root, "skipped", "extension_private_objects")) > 0);
+    try std.testing.expectEqual(@as(i64, 1), try jsonObjectInt(root, "copied", "extensions"));
+    try std.testing.expect((try jsonObjectInt(root, "copied", "extension_private_objects")) > 0);
+    try std.testing.expectEqual(@as(i64, 0), try jsonObjectInt(root, "skipped", "extensions"));
+    try std.testing.expectEqual(@as(i64, 0), try jsonObjectInt(root, "skipped", "extension_private_objects"));
     try std.testing.expect(std.mem.indexOf(u8, salvage.stdout, sensitive_text) == null);
     try std.testing.expect(std.mem.indexOf(u8, salvage.stdout, "create table") == null);
 
@@ -2093,7 +2096,10 @@ test "cli salvage skips trgm extension storage without copying indexed text" {
     try std.testing.expectEqual(@as(u8, 0), extension_list.code);
     var list_json = try parseJson(extension_list.stdout);
     defer list_json.deinit();
-    try expectJsonArrayLen(list_json.value.object, "extensions", 0);
+    const extensions = list_json.value.object.get("extensions") orelse return error.MissingJsonField;
+    try std.testing.expectEqual(std.json.Value.array, std.meta.activeTag(extensions));
+    try std.testing.expectEqual(@as(usize, 1), extensions.array.items.len);
+    try expectJsonString(extensions.array.items[0].object, "name", "trgm");
 
     var deep = try runCli(&.{ "zova", "check", "--deep", dest_path });
     defer deep.deinit();

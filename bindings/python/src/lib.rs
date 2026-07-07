@@ -22,8 +22,8 @@ use object::{
 use pyo3::prelude::*;
 use statement::PyStatement;
 use vector::{
-    encode_f32_le, PyVector, PyVectorCollectionInfo, PyVectorCollectionOptions, PyVectorInput,
-    PyVectorSearchResult,
+    encode_f32_le, PyTypedVector, PyTypedVectorInput, PyVector, PyVectorCollectionInfo,
+    PyVectorCollectionOptions, PyVectorInput, PyVectorSearchResult,
 };
 
 #[pymodule]
@@ -43,7 +43,9 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVectorCollectionOptions>()?;
     m.add_class::<PyVectorCollectionInfo>()?;
     m.add_class::<PyVector>()?;
+    m.add_class::<PyTypedVector>()?;
     m.add_class::<PyVectorInput>()?;
+    m.add_class::<PyTypedVectorInput>()?;
     m.add_class::<PyVectorSearchResult>()?;
     m.add_class::<PyExtensionInfo>()?;
     m.add_class::<PyGraphInfo>()?;

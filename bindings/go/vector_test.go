@@ -81,6 +81,74 @@ func TestVectorCollectionCRUDAndBatch(t *testing.T) {
 	}
 }
 
+func TestRawTypedVectorsRoundtripAndSearch(t *testing.T) {
+	db, err := Create(tempZovaPath(t, "typed-vectors"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	must(t, db.CreateVectorCollectionTyped("bytes", TypedVectorCollectionOptions{
+		Dimensions:  2,
+		Metric:      VectorMetricL2,
+		ElementType: VectorElementTypeI8,
+	}))
+	must(t, db.CreateVectorCollectionTyped("halves", TypedVectorCollectionOptions{
+		Dimensions:  2,
+		Metric:      VectorMetricL2,
+		ElementType: VectorElementTypeF16,
+	}))
+
+	info, err := db.VectorCollectionInfo("bytes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.ElementType != VectorElementTypeI8 {
+		t.Fatalf("bytes element type = %v", info.ElementType)
+	}
+
+	must(t, db.PutVectorsTyped("bytes", []TypedVectorInput{
+		{ID: "near", Values: VectorValues{ElementType: VectorElementTypeI8, I8: []int8{1, 0}}},
+		{ID: "far", Values: VectorValues{ElementType: VectorElementTypeI8, I8: []int8{5, 0}}},
+	}))
+	must(t, db.PutVectorTyped("halves", "near", VectorValues{ElementType: VectorElementTypeF16, F16: []uint16{0x3c00, 0x0000}}))
+	must(t, db.PutVectorTyped("halves", "far", VectorValues{ElementType: VectorElementTypeF16, F16: []uint16{0x4400, 0x0000}}))
+
+	vector, err := db.GetVectorTyped("bytes", "near")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vector.ID != "near" || vector.Values.ElementType != VectorElementTypeI8 || len(vector.Values.I8) != 2 || vector.Values.I8[0] != 1 {
+		t.Fatalf("typed i8 vector = %#v", vector)
+	}
+
+	vector, err = db.GetVectorTyped("halves", "near")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vector.Values.ElementType != VectorElementTypeF16 || len(vector.Values.F16) != 2 || vector.Values.F16[0] != 0x3c00 {
+		t.Fatalf("typed f16 vector = %#v", vector)
+	}
+
+	results, err := db.SearchVectorsTyped("bytes", VectorValues{ElementType: VectorElementTypeI8, I8: []int8{0, 0}}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertIDs(t, results, []string{"near", "far"})
+	assertDistance(t, results[0].Distance, 1)
+
+	results, err = db.SearchVectorsTyped("halves", VectorValues{ElementType: VectorElementTypeF16, F16: []uint16{0x0000, 0x0000}}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertIDs(t, results, []string{"near", "far"})
+	assertDistance(t, results[0].Distance, 1)
+
+	if err := db.PutVector("bytes", "wrong", []float32{1, 2}); !hasStatus(err, StatusVectorInvalid) {
+		t.Fatalf("f32 wrapper on i8 collection err=%v", err)
+	}
+}
+
 func TestVectorSearchVariants(t *testing.T) {
 	db, err := Create(tempZovaPath(t, "vector-search"))
 	if err != nil {

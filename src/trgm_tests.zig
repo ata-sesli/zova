@@ -365,6 +365,102 @@ test "trgm is preserved by backup compact and restore" {
     try expectTrgmCopy(restored_path);
 }
 
+test "trgm salvage rebuilds terms from copied postings" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "trgm-salvage-rebuild-source.zova");
+    var destination_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const destination_path = try testingDbPath(&destination_buffer, tmp.sub_path[0..], "trgm-salvage-rebuild-destination.zova");
+
+    {
+        var db = try zova.Database.create(source_path);
+        defer db.deinit();
+        try db.installExtension("trgm");
+        try execSql(&db, "select zova_trgm_create_index('docs')");
+        try execSql(&db, "select zova_trgm_put('docs', 'doc:1', 'record', 'messages', '1', 'attachment upload failed')");
+        try execSql(&db, "select zova_trgm_put('docs', 'doc:2', 'record', 'messages', '2', 'database opened successfully')");
+    }
+    {
+        var raw = try sqlite.Database.open(source_path);
+        defer raw.deinit();
+        try raw.exec("delete from _zova_ext_trgm_terms");
+    }
+
+    try copyTrgmSalvage(source_path, destination_path, 1, 0);
+    try expectTrgmCopy(destination_path);
+}
+
+test "trgm salvage copies valid subset when one document is unrecoverable" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "trgm-salvage-subset-source.zova");
+    var destination_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const destination_path = try testingDbPath(&destination_buffer, tmp.sub_path[0..], "trgm-salvage-subset-destination.zova");
+
+    {
+        var db = try zova.Database.create(source_path);
+        defer db.deinit();
+        try db.installExtension("trgm");
+        try execSql(&db, "select zova_trgm_create_index('docs')");
+        try execSql(&db, "select zova_trgm_put('docs', 'doc:good', 'record', 'messages', 'good', 'alpha attachment receipt')");
+        try execSql(&db, "select zova_trgm_put('docs', 'doc:bad', 'record', 'messages', 'bad', 'zzzzzyyyyyxxxxx')");
+    }
+    {
+        var raw = try sqlite.Database.open(source_path);
+        defer raw.deinit();
+        try raw.exec(
+            \\update _zova_ext_trgm_documents
+            \\set target_type = 'vector',
+            \\    target_namespace = 'missing',
+            \\    target_ref = 'missing'
+            \\where document_id = 'doc:bad'
+        );
+    }
+
+    try copyTrgmSalvage(source_path, destination_path, 1, 0);
+
+    var destination = try zova.Database.open(destination_path);
+    defer destination.deinit();
+    try destination.checkExtension("trgm");
+    try std.testing.expectEqual(@as(i64, 1), try countSqlRows(&destination.sqlite_db, "select count(*) from _zova_ext_trgm_documents"));
+    try expectSearchIds(&destination, "docs", "alpha attachment", 1, 0.0, &.{"doc:good"});
+    try expectSearchIds(&destination, "docs", "zzzzzyyyyyxxxxx", 1, 0.80, &.{});
+}
+
+test "trgm salvage skips unrecoverable private storage without leaving tables" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "trgm-salvage-unrecoverable-source.zova");
+    var destination_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const destination_path = try testingDbPath(&destination_buffer, tmp.sub_path[0..], "trgm-salvage-unrecoverable-destination.zova");
+
+    {
+        var db = try zova.Database.create(source_path);
+        defer db.deinit();
+        try db.installExtension("trgm");
+        try execSql(&db, "select zova_trgm_create_index('docs')");
+        try execSql(&db, "select zova_trgm_put('docs', 'doc:1', 'record', 'messages', '1', 'attachment upload failed')");
+    }
+    {
+        var raw = try sqlite.Database.open(source_path);
+        defer raw.deinit();
+        try raw.exec("drop table _zova_ext_trgm_postings");
+    }
+
+    try copyTrgmSalvage(source_path, destination_path, 0, 1);
+
+    var raw_destination = try sqlite.Database.open(destination_path);
+    defer raw_destination.deinit();
+    try std.testing.expectEqual(@as(i64, 0), try countSqlRows(&raw_destination, "select count(*) from _zova_extensions where name = 'trgm'"));
+    try std.testing.expectEqual(@as(i64, 0), try countSqlRows(&raw_destination, "select count(*) from sqlite_master where name like '_zova_ext_trgm_%'"));
+}
+
 fn execSql(db: *zova.Database, sql: [:0]const u8) !void {
     var stmt = try db.prepare(sql);
     defer stmt.deinit();
@@ -378,6 +474,41 @@ fn expectTrgmCopy(path: [:0]const u8) !void {
     defer db.deinit();
     try db.checkExtension("trgm");
     try expectSearchIds(&db, "docs", "attachement failed", 1, 0.0, &.{"doc:1"});
+}
+
+fn copyTrgmSalvage(source_path: [:0]const u8, destination_path: [:0]const u8, expected_copied_extensions: u64, expected_skipped_extensions: u64) !void {
+    const registry = zova.bundledExtensionRegistry();
+    var source = try sqlite.Database.open(source_path);
+    defer source.deinit();
+    var destination = try zova.Database.createWithExtensions(destination_path, registry);
+    defer destination.deinit();
+
+    const result = try zova.salvageInstalledExtensions(
+        std.testing.allocator,
+        &source,
+        &destination.sqlite_db,
+        registry,
+        .copy,
+    );
+    try std.testing.expectEqual(expected_copied_extensions, result.copied_extensions);
+    try std.testing.expectEqual(expected_skipped_extensions, result.skipped_extensions);
+    try std.testing.expectEqual(expected_copied_extensions != 0, result.installed_in_destination);
+    if (expected_copied_extensions != 0) {
+        try std.testing.expect(result.copied_private_objects > 0);
+        try std.testing.expectEqual(@as(u64, 0), result.skipped_private_objects);
+    } else {
+        try std.testing.expectEqual(@as(u64, 0), result.copied_private_objects);
+        try std.testing.expect(result.skipped_private_objects > 0);
+    }
+}
+
+fn countSqlRows(db: *sqlite.Database, sql: [:0]const u8) !i64 {
+    var stmt = try db.prepare(sql);
+    defer stmt.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+    const count = stmt.columnInt64(0);
+    try std.testing.expectEqual(sqlite.Step.done, try stmt.step());
+    return count;
 }
 
 fn expectSimilarity(db: *zova.Database, a: []const u8, b: []const u8, min: f64, max: f64) !void {

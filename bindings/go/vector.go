@@ -21,10 +21,26 @@ const (
 	VectorMetricDot    VectorMetric = C.ZOVA_VECTOR_METRIC_DOT
 )
 
+// VectorElementType is the raw element type stored by a vector collection.
+type VectorElementType int
+
+const (
+	VectorElementTypeF32 VectorElementType = C.ZOVA_VECTOR_ELEMENT_TYPE_F32
+	VectorElementTypeF16 VectorElementType = C.ZOVA_VECTOR_ELEMENT_TYPE_F16
+	VectorElementTypeI8  VectorElementType = C.ZOVA_VECTOR_ELEMENT_TYPE_I8
+)
+
 // VectorCollectionOptions configures a vector collection.
 type VectorCollectionOptions struct {
 	Dimensions uint32
 	Metric     VectorMetric
+}
+
+// TypedVectorCollectionOptions configures a typed vector collection.
+type TypedVectorCollectionOptions struct {
+	Dimensions  uint32
+	Metric      VectorMetric
+	ElementType VectorElementType
 }
 
 // VectorCollectionInfo describes one vector collection.
@@ -32,6 +48,7 @@ type VectorCollectionInfo struct {
 	Name        string
 	Dimensions  uint32
 	Metric      VectorMetric
+	ElementType VectorElementType
 	VectorCount uint64
 }
 
@@ -41,10 +58,31 @@ type VectorInput struct {
 	Values []float32
 }
 
+// VectorValues is a borrowed typed vector value set. The active slice is
+// selected by ElementType.
+type VectorValues struct {
+	ElementType VectorElementType
+	F32         []float32
+	F16         []uint16
+	I8          []int8
+}
+
+// TypedVectorInput is one typed vector row for batch writes.
+type TypedVectorInput struct {
+	ID     string
+	Values VectorValues
+}
+
 // Vector is one owned vector row returned by Zova.
 type Vector struct {
 	ID     string
 	Values []float32
+}
+
+// TypedVector is one owned typed vector row returned by Zova.
+type TypedVector struct {
+	ID     string
+	Values VectorValues
 }
 
 // VectorSearchResult is one exact-search hit. Lower distance is better.
@@ -84,6 +122,28 @@ func (db *DB) CreateVectorCollection(name string, options VectorCollectionOption
 	})
 }
 
+// CreateVectorCollectionTyped creates a native typed vector collection.
+func (db *DB) CreateVectorCollectionTyped(name string, options TypedVectorCollectionOptions) error {
+	cName, err := cString("vector collection name", name)
+	if err != nil {
+		return err
+	}
+	defer freeCString(cName)
+
+	return db.withLock(func() error {
+		request := C.zova_vector_collection_create_typed_request{
+			db:   db.ptr,
+			name: cName,
+			options: C.zova_vector_collection_typed_options{
+				dimensions:   C.uint32_t(options.Dimensions),
+				metric:       C.int(options.Metric),
+				element_type: C.int(options.ElementType),
+			},
+		}
+		return statusFromDB(db, C.zova_vector_collection_create_typed(&request))
+	})
+}
+
 // HasVectorCollection reports whether a collection exists.
 func (db *DB) HasVectorCollection(name string) (bool, error) {
 	cName, err := cString("vector collection name", name)
@@ -116,12 +176,12 @@ func (db *DB) VectorCollectionInfo(name string) (VectorCollectionInfo, error) {
 	info := newCVectorCollectionInfo()
 	defer freeCVectorCollectionInfo(info)
 	err = db.withLock(func() error {
-		request := C.zova_vector_collection_info_get_request{
+		request := C.zova_vector_collection_typed_info_get_request{
 			db:       db.ptr,
 			name:     cName,
 			out_info: info,
 		}
-		return statusFromDB(db, C.zova_vector_collection_info_get(&request))
+		return statusFromDB(db, C.zova_vector_collection_typed_info_get(&request))
 	})
 	if err != nil {
 		return VectorCollectionInfo{}, err
@@ -131,17 +191,17 @@ func (db *DB) VectorCollectionInfo(name string) (VectorCollectionInfo, error) {
 
 // ListVectorCollections returns all vector collections sorted by name.
 func (db *DB) ListVectorCollections() ([]VectorCollectionInfo, error) {
-	list := (*C.zova_vector_collection_list)(C.calloc(1, C.size_t(unsafe.Sizeof(C.zova_vector_collection_list{}))))
+	list := (*C.zova_vector_collection_typed_list)(C.calloc(1, C.size_t(unsafe.Sizeof(C.zova_vector_collection_typed_list{}))))
 	defer func() {
-		C.zova_vector_collection_list_free(list)
+		C.zova_vector_collection_typed_list_free(list)
 		C.free(unsafe.Pointer(list))
 	}()
 	err := db.withLock(func() error {
-		request := C.zova_vector_collections_list_request{
+		request := C.zova_vector_collections_typed_list_request{
 			db:       db.ptr,
 			out_list: list,
 		}
-		return statusFromDB(db, C.zova_vector_collections_list(&request))
+		return statusFromDB(db, C.zova_vector_collections_typed_list(&request))
 	})
 	if err != nil {
 		return nil, err
@@ -193,6 +253,32 @@ func (db *DB) PutVector(collectionName, vectorID string, values []float32) error
 	})
 }
 
+// PutVectorTyped inserts or replaces one typed vector row.
+func (db *DB) PutVectorTyped(collectionName, vectorID string, values VectorValues) error {
+	cCollection, err := cString("vector collection name", collectionName)
+	if err != nil {
+		return err
+	}
+	defer freeCString(cCollection)
+	cID, err := cString("vector id", vectorID)
+	if err != nil {
+		return err
+	}
+	defer freeCString(cID)
+	cValues, cleanup := cVectorValues(values)
+	defer cleanup()
+
+	return db.withLock(func() error {
+		request := C.zova_vector_put_typed_request{
+			db:              db.ptr,
+			collection_name: cCollection,
+			vector_id:       cID,
+			values:          cValues,
+		}
+		return statusFromDB(db, C.zova_vector_put_typed(&request))
+	})
+}
+
 // PutVectors inserts or replaces many vector rows. Duplicate ids are applied
 // in input order, so the last entry wins.
 func (db *DB) PutVectors(collectionName string, vectors []VectorInput) error {
@@ -218,6 +304,30 @@ func (db *DB) PutVectors(collectionName string, vectors []VectorInput) error {
 	})
 }
 
+// PutVectorsTyped inserts or replaces many typed vector rows.
+func (db *DB) PutVectorsTyped(collectionName string, vectors []TypedVectorInput) error {
+	cCollection, err := cString("vector collection name", collectionName)
+	if err != nil {
+		return err
+	}
+	defer freeCString(cCollection)
+	cVectors, cleanup, err := cTypedVectorInputs(vectors)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	return db.withLock(func() error {
+		request := C.zova_vector_put_many_typed_request{
+			db:              db.ptr,
+			collection_name: cCollection,
+			vectors:         cVectors,
+			vectors_len:     C.size_t(len(vectors)),
+		}
+		return statusFromDB(db, C.zova_vector_put_many_typed(&request))
+	})
+}
+
 // GetVector returns one vector row.
 func (db *DB) GetVector(collectionName, vectorID string) (Vector, error) {
 	cCollection, cID, cleanup, err := cCollectionAndVectorID(collectionName, vectorID)
@@ -240,6 +350,30 @@ func (db *DB) GetVector(collectionName, vectorID string) (Vector, error) {
 		return Vector{}, err
 	}
 	return copyVector(vector), nil
+}
+
+// GetVectorTyped returns one typed vector row.
+func (db *DB) GetVectorTyped(collectionName, vectorID string) (TypedVector, error) {
+	cCollection, cID, cleanup, err := cCollectionAndVectorID(collectionName, vectorID)
+	if err != nil {
+		return TypedVector{}, err
+	}
+	defer cleanup()
+	vector := newCTypedVector()
+	defer freeCTypedVector(vector)
+	err = db.withLock(func() error {
+		request := C.zova_vector_get_typed_request{
+			db:              db.ptr,
+			collection_name: cCollection,
+			vector_id:       cID,
+			out_vector:      vector,
+		}
+		return statusFromDB(db, C.zova_vector_get_typed(&request))
+	})
+	if err != nil {
+		return TypedVector{}, err
+	}
+	return copyTypedVector(vector), nil
 }
 
 // HasVector reports whether a vector id exists in a collection.
@@ -303,6 +437,31 @@ func (db *DB) SearchVectors(collectionName string, query []float32, limit int) (
 			out_results:     out,
 		}
 		return statusFromDB(db, C.zova_vector_search(&request))
+	})
+}
+
+// SearchVectorsTyped ranks a whole typed collection by exact distance to query.
+func (db *DB) SearchVectorsTyped(collectionName string, query VectorValues, limit int) ([]VectorSearchResult, error) {
+	cLimit, err := checkedLimit(limit)
+	if err != nil {
+		return nil, err
+	}
+	cCollection, err := cString("vector collection name", collectionName)
+	if err != nil {
+		return nil, err
+	}
+	defer freeCString(cCollection)
+	cQuery, cleanup := cVectorValues(query)
+	defer cleanup()
+	return db.withSearchResults(func(out *C.zova_vector_search_results) error {
+		request := C.zova_vector_search_typed_request{
+			db:              db.ptr,
+			collection_name: cCollection,
+			query:           cQuery,
+			limit:           cLimit,
+			out_results:     out,
+		}
+		return statusFromDB(db, C.zova_vector_search_typed(&request))
 	})
 }
 
@@ -561,6 +720,56 @@ func cFloatArray(values []float32) (*C.float, func()) {
 	return (*C.float)(ptr), func() { C.free(ptr) }
 }
 
+func cUint16Array(values []uint16) (*C.uint16_t, func()) {
+	if len(values) == 0 {
+		return nil, func() {}
+	}
+	ptr := C.malloc(C.size_t(len(values)) * C.size_t(unsafe.Sizeof(C.uint16_t(0))))
+	out := unsafe.Slice((*C.uint16_t)(ptr), len(values))
+	for i, value := range values {
+		out[i] = C.uint16_t(value)
+	}
+	return (*C.uint16_t)(ptr), func() { C.free(ptr) }
+}
+
+func cInt8Array(values []int8) (*C.int8_t, func()) {
+	if len(values) == 0 {
+		return nil, func() {}
+	}
+	ptr := C.malloc(C.size_t(len(values)) * C.size_t(unsafe.Sizeof(C.int8_t(0))))
+	out := unsafe.Slice((*C.int8_t)(ptr), len(values))
+	for i, value := range values {
+		out[i] = C.int8_t(value)
+	}
+	return (*C.int8_t)(ptr), func() { C.free(ptr) }
+}
+
+func cVectorValues(values VectorValues) (C.zova_vector_values, func()) {
+	switch values.ElementType {
+	case VectorElementTypeF16:
+		cValues, cleanup := cUint16Array(values.F16)
+		return C.zova_vector_values{
+			element_type: C.int(values.ElementType),
+			f16_values:   cValues,
+			values_len:   C.size_t(len(values.F16)),
+		}, cleanup
+	case VectorElementTypeI8:
+		cValues, cleanup := cInt8Array(values.I8)
+		return C.zova_vector_values{
+			element_type: C.int(values.ElementType),
+			i8_values:    cValues,
+			values_len:   C.size_t(len(values.I8)),
+		}, cleanup
+	default:
+		cValues, cleanup := cFloatArray(values.F32)
+		return C.zova_vector_values{
+			element_type: C.int(VectorElementTypeF32),
+			f32_values:   cValues,
+			values_len:   C.size_t(len(values.F32)),
+		}, cleanup
+	}
+}
+
 func copyFloatArray(values *C.float, length C.size_t) []float32 {
 	if values == nil || length == 0 {
 		return []float32{}
@@ -569,6 +778,30 @@ func copyFloatArray(values *C.float, length C.size_t) []float32 {
 	out := make([]float32, len(cValues))
 	for i, value := range cValues {
 		out[i] = float32(value)
+	}
+	return out
+}
+
+func copyUint16Array(values *C.uint16_t, length C.size_t) []uint16 {
+	if values == nil || length == 0 {
+		return []uint16{}
+	}
+	cValues := unsafe.Slice(values, int(length))
+	out := make([]uint16, len(cValues))
+	for i, value := range cValues {
+		out[i] = uint16(value)
+	}
+	return out
+}
+
+func copyInt8Array(values *C.int8_t, length C.size_t) []int8 {
+	if values == nil || length == 0 {
+		return []int8{}
+	}
+	cValues := unsafe.Slice(values, int(length))
+	out := make([]int8, len(cValues))
+	for i, value := range cValues {
+		out[i] = int8(value)
 	}
 	return out
 }
@@ -629,8 +862,42 @@ func cVectorInputs(vectors []VectorInput) (*C.zova_vector_input, func(), error) 
 	return (*C.zova_vector_input)(ptr), cleanup, nil
 }
 
+func cTypedVectorInputs(vectors []TypedVectorInput) (*C.zova_vector_typed_input, func(), error) {
+	if len(vectors) == 0 {
+		return nil, func() {}, nil
+	}
+	ptr := C.malloc(C.size_t(len(vectors)) * C.size_t(unsafe.Sizeof(C.zova_vector_typed_input{})))
+	rows := unsafe.Slice((*C.zova_vector_typed_input)(ptr), len(vectors))
+	cleanups := make([]func(), 0, len(vectors)*2)
+	cleanup := func() {
+		for i := len(cleanups) - 1; i >= 0; i-- {
+			cleanups[i]()
+		}
+		C.free(ptr)
+	}
+	for i, input := range vectors {
+		cID, err := cString("vector id", input.ID)
+		if err != nil {
+			cleanup()
+			return nil, func() {}, err
+		}
+		cleanups = append(cleanups, func() { freeCString(cID) })
+		cValues, valuesCleanup := cVectorValues(input.Values)
+		cleanups = append(cleanups, valuesCleanup)
+		rows[i] = C.zova_vector_typed_input{
+			id:     cID,
+			values: cValues,
+		}
+	}
+	return (*C.zova_vector_typed_input)(ptr), cleanup, nil
+}
+
 func newCVector() *C.zova_vector {
 	return (*C.zova_vector)(C.calloc(1, C.size_t(unsafe.Sizeof(C.zova_vector{}))))
+}
+
+func newCTypedVector() *C.zova_vector_typed {
+	return (*C.zova_vector_typed)(C.calloc(1, C.size_t(unsafe.Sizeof(C.zova_vector_typed{}))))
 }
 
 func freeCVector(vector *C.zova_vector) {
@@ -641,10 +908,35 @@ func freeCVector(vector *C.zova_vector) {
 	C.free(unsafe.Pointer(vector))
 }
 
+func freeCTypedVector(vector *C.zova_vector_typed) {
+	if vector == nil {
+		return
+	}
+	C.zova_vector_typed_free(vector)
+	C.free(unsafe.Pointer(vector))
+}
+
 func copyVector(vector *C.zova_vector) Vector {
 	return Vector{
 		ID:     cStringN(vector.id, vector.id_len),
 		Values: copyFloatArray(vector.values, vector.values_len),
+	}
+}
+
+func copyTypedVector(vector *C.zova_vector_typed) TypedVector {
+	values := VectorValues{ElementType: VectorElementType(vector.element_type)}
+	switch values.ElementType {
+	case VectorElementTypeF16:
+		values.F16 = copyUint16Array(vector.f16_values, vector.values_len)
+	case VectorElementTypeI8:
+		values.I8 = copyInt8Array(vector.i8_values, vector.values_len)
+	default:
+		values.ElementType = VectorElementTypeF32
+		values.F32 = copyFloatArray(vector.f32_values, vector.values_len)
+	}
+	return TypedVector{
+		ID:     cStringN(vector.id, vector.id_len),
+		Values: values,
 	}
 }
 
@@ -663,28 +955,29 @@ func copyVectorSearchResults(results *C.zova_vector_search_results) []VectorSear
 	return out
 }
 
-func newCVectorCollectionInfo() *C.zova_vector_collection_info {
-	return (*C.zova_vector_collection_info)(C.calloc(1, C.size_t(unsafe.Sizeof(C.zova_vector_collection_info{}))))
+func newCVectorCollectionInfo() *C.zova_vector_collection_typed_info {
+	return (*C.zova_vector_collection_typed_info)(C.calloc(1, C.size_t(unsafe.Sizeof(C.zova_vector_collection_typed_info{}))))
 }
 
-func freeCVectorCollectionInfo(info *C.zova_vector_collection_info) {
+func freeCVectorCollectionInfo(info *C.zova_vector_collection_typed_info) {
 	if info == nil {
 		return
 	}
-	C.zova_vector_collection_info_free(info)
+	C.zova_vector_collection_typed_info_free(info)
 	C.free(unsafe.Pointer(info))
 }
 
-func copyVectorCollectionInfo(info *C.zova_vector_collection_info) VectorCollectionInfo {
+func copyVectorCollectionInfo(info *C.zova_vector_collection_typed_info) VectorCollectionInfo {
 	return VectorCollectionInfo{
 		Name:        cStringN(info.name, info.name_len),
 		Dimensions:  uint32(info.dimensions),
 		Metric:      VectorMetric(info.metric),
+		ElementType: VectorElementType(info.element_type),
 		VectorCount: uint64(info.vector_count),
 	}
 }
 
-func copyVectorCollectionList(list *C.zova_vector_collection_list) []VectorCollectionInfo {
+func copyVectorCollectionList(list *C.zova_vector_collection_typed_list) []VectorCollectionInfo {
 	if list == nil || list.len == 0 {
 		return []VectorCollectionInfo{}
 	}

@@ -20,12 +20,12 @@ fn abi_version_and_status_names_are_available() {
     unsafe {
         assert_eq!(zova_sys::zova_abi_version_major(), 0);
         assert_eq!(zova_sys::zova_abi_version_minor(), 21);
-        assert_eq!(zova_sys::zova_abi_version_patch(), 1);
+        assert_eq!(zova_sys::zova_abi_version_patch(), 2);
         assert_eq!(
             CStr::from_ptr(zova_sys::zova_abi_version_string())
                 .to_str()
                 .unwrap(),
-            "0.21.1"
+            "0.21.2"
         );
         assert_eq!(
             CStr::from_ptr(zova_sys::zova_status_name(zova_sys::ZOVA_OK))
@@ -637,6 +637,30 @@ fn raw_vector_collection_crud_batch_and_search_smoke() {
         assert_eq!(info.vector_count, 3);
         zova_sys::zova_vector_collection_info_free(&mut info);
 
+        let mut typed_info = zova_sys::zova_vector_collection_typed_info {
+            name: ptr::null_mut(),
+            name_len: 0,
+            dimensions: 0,
+            metric: 0,
+            element_type: zova_sys::ZOVA_VECTOR_ELEMENT_TYPE_F32,
+            vector_count: 0,
+        };
+        let typed_info_request = zova_sys::zova_vector_collection_typed_info_get_request {
+            db,
+            name: collection.as_ptr(),
+            out_info: &mut typed_info,
+        };
+        assert_eq!(
+            zova_sys::zova_vector_collection_typed_info_get(&typed_info_request),
+            zova_sys::ZOVA_OK
+        );
+        assert_eq!(typed_info.vector_count, 3);
+        assert_eq!(
+            typed_info.element_type,
+            zova_sys::ZOVA_VECTOR_ELEMENT_TYPE_F32
+        );
+        zova_sys::zova_vector_collection_typed_info_free(&mut typed_info);
+
         let mut list = zova_sys::zova_vector_collection_list {
             items: ptr::null_mut(),
             len: 0,
@@ -651,6 +675,21 @@ fn raw_vector_collection_crud_batch_and_search_smoke() {
         );
         assert_eq!(list.len, 1);
         zova_sys::zova_vector_collection_list_free(&mut list);
+
+        let mut typed_list = zova_sys::zova_vector_collection_typed_list {
+            items: ptr::null_mut(),
+            len: 0,
+        };
+        let typed_list_request = zova_sys::zova_vector_collections_typed_list_request {
+            db,
+            out_list: &mut typed_list,
+        };
+        assert_eq!(
+            zova_sys::zova_vector_collections_typed_list(&typed_list_request),
+            zova_sys::ZOVA_OK
+        );
+        assert_eq!(typed_list.len, 1);
+        zova_sys::zova_vector_collection_typed_list_free(&mut typed_list);
 
         let delete_collection = zova_sys::zova_vector_collection_delete_request {
             db,

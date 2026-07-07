@@ -5,6 +5,8 @@ on:
   push:
     branches:
       - main
+      - release/**
+      - work/**
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}

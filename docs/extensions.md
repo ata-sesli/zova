@@ -315,9 +315,13 @@ skips that extension's private storage and reports bounded skipped counts. The
 destination is not marked as having that extension installed unless the hook
 explicitly rebuilt enough storage and asks Zova to write installed metadata.
 
-The bundled `trgm` extension has a no-op salvage hook in v0.21. It skips derived
-trigram index storage without printing indexed text. Real `trgm` salvage or
-rebuild support is deferred to v0.21.1.
+In v0.21.2, the bundled `trgm` extension has a valid-subset salvage hook. When
+the source has required trgm private schema and metadata, the hook copies valid
+indexes, documents, and postings, rebuilds derived term rows, and asks Zova to
+mark `trgm` installed in the destination only after the rebuilt storage passes
+the extension check. It skips unrecoverable trgm storage without leaving private
+tables behind and without printing indexed text, term bytes, or private schema
+SQL.
 
 ## Moving Databases That Require Extensions
 

@@ -13,7 +13,7 @@ body:
     attributes:
       label: Zova version
       description: Version, commit, or branch.
-      placeholder: "0.21.0"
+      placeholder: "0.21.2"
     validations:
       required: true
   - type: dropdown

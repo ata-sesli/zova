@@ -73,6 +73,27 @@ def main() -> None:
             while vector_search.step() == zova.Step.ROW:
                 print("search", vector_search.column_text(0), vector_search.column_float(1))
 
+        db.create_vector_collection(
+            "scores_i8",
+            zova.VectorCollectionOptions(2, zova.VectorMetric.L2, zova.VectorElementType.I8),
+        )
+        db.put_vectors_typed(
+            "scores_i8",
+            [
+                zova.TypedVectorInput("near", zova.VectorElementType.I8, [1, -1]),
+                zova.TypedVectorInput("far", zova.VectorElementType.I8, [8, -1]),
+            ],
+        )
+        i8_hit = db.search_vectors_typed("scores_i8", zova.VectorElementType.I8, [0, 0], 1)[0]
+        print("i8", i8_hit.id, i8_hit.distance)
+
+        db.create_vector_collection(
+            "halves",
+            zova.VectorCollectionOptions(2, zova.VectorMetric.L2, zova.VectorElementType.F16),
+        )
+        db.put_vector_typed("halves", "one", zova.VectorElementType.F16, [0x3C00, 0x0000])
+        print("f16", db.get_vector_typed("halves", "one").values)
+
 
 if __name__ == "__main__":
     main()

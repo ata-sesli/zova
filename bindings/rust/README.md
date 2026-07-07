@@ -49,14 +49,14 @@ Use the safe crate for normal Rust applications:
 
 ```toml
 [dependencies]
-zova = "0.21.1"
+zova = "0.21.2"
 ```
 
 Use the raw FFI crate only when you want to call the C ABI directly:
 
 ```toml
 [dependencies]
-zova-sys = "0.21.1"
+zova-sys = "0.21.2"
 ```
 
 Both crates contain native code. The default build path compiles Zova's static C
@@ -68,7 +68,7 @@ users still need:
 
 Zova is still pre-1.0. The Rust API, C ABI, and `.zova` format are usable, but
 they may evolve before the 1.0 line. The current `.zova` `format_version` is
-`5`.
+`6`.
 
 ## Native Build
 
@@ -418,6 +418,36 @@ db.put_vectors(
 
 let nearest = db.search_vectors("chunks", &[0.0, 0.0], 2)?;
 assert_eq!(nearest[0].id, "v1");
+```
+
+The f32 methods above are compatibility wrappers. For raw typed collections,
+use `VectorElementType`, `TypedVectorCollectionOptions`, and `VectorValues`.
+`F16` values are raw IEEE 754 binary16 bits carried as `u16`; `I8` values are
+raw signed bytes with no quantization metadata.
+
+```rust
+use zova::{TypedVectorCollectionOptions, VectorElementType, VectorMetric, VectorValues};
+
+db.create_vector_collection_typed(
+    "scores_i8",
+    TypedVectorCollectionOptions {
+        dimensions: 2,
+        metric: VectorMetric::L2,
+        element_type: VectorElementType::I8,
+    },
+)?;
+db.put_vector_typed("scores_i8", "near", VectorValues::I8(&[1, -1]))?;
+
+db.create_vector_collection_typed(
+    "halves",
+    TypedVectorCollectionOptions {
+        dimensions: 2,
+        metric: VectorMetric::L2,
+        element_type: VectorElementType::F16,
+    },
+)?;
+db.put_vector_typed("halves", "one", VectorValues::F16(&[0x3c00, 0x0000]))?;
+assert_eq!(db.get_vector_typed("halves", "one")?.values, zova::VectorValuesOwned::F16(vec![0x3c00, 0]));
 ```
 
 SQL-native vector search is available through prepared statements too. Bind

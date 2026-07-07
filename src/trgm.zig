@@ -26,6 +26,13 @@ const documents_table = storage_prefix ++ "documents";
 const terms_table = storage_prefix ++ "terms";
 const postings_table = storage_prefix ++ "postings";
 const meta_table = storage_prefix ++ "meta";
+const required_private_tables = [_][]const u8{
+    meta_table,
+    indexes_table,
+    documents_table,
+    terms_table,
+    postings_table,
+};
 
 const Error = sqlite.Error || error{
     ExtensionInvalid,
@@ -187,13 +194,282 @@ fn drop(db: *sqlite.Database, manifest: extension_impl.Manifest) extension_impl.
 
 fn salvage(context: extension_impl.SalvageContext, manifest: extension_impl.Manifest) extension_impl.Error!extension_impl.SalvageResult {
     try extension_impl.validateManifest(manifest);
-    // TODO(future patch): rebuild or copy valid trigram index rows through a real
-    // trgm-owned salvage strategy. v0.21 intentionally skips derived indexes.
     const private_objects = try extension_impl.countPrivateStorageObjects(context.source, manifest.storage_prefix);
-    return .{
-        .skipped_extensions = 1,
-        .skipped_private_objects = private_objects,
+    if (!try hasRecoverableStorage(context.source, manifest)) {
+        return .{
+            .skipped_extensions = 1,
+            .skipped_private_objects = private_objects,
+        };
+    }
+
+    switch (context.mode) {
+        .plan => return .{
+            .copied_extensions = 1,
+            .copied_private_objects = private_objects,
+        },
+        .copy => {
+            const destination = context.destination orelse return error.ExtensionInvalid;
+            try install(destination, manifest);
+            try copySalvageIndexes(context.source, destination);
+            try copySalvageDocuments(context.source, destination);
+            try copySalvagePostings(context.source, destination);
+            try refreshCopiedDocumentTermCounts(destination);
+            try rebuildCopiedTerms(destination);
+            checkInternal(destination, manifest) catch return error.ExtensionInvalid;
+            return .{
+                .copied_extensions = 1,
+                .copied_private_objects = private_objects,
+                .installed_in_destination = true,
+            };
+        },
+    }
+}
+
+fn hasRecoverableStorage(db: *sqlite.Database, manifest: extension_impl.Manifest) extension_impl.Error!bool {
+    for (required_private_tables) |table_name| {
+        if (!try salvageTableExists(db, table_name)) return false;
+    }
+    return hasRecoverableMeta(db, manifest) catch false;
+}
+
+fn hasRecoverableMeta(db: *sqlite.Database, manifest: extension_impl.Manifest) Error!bool {
+    var schema_version_ok = false;
+    var extension_version_ok = false;
+    var stmt = try db.prepare("select key, value from _zova_ext_trgm_meta where key in ('schema_version', 'extension_version')");
+    defer stmt.deinit();
+    while (try stmt.step() == .row) {
+        const key = stmt.columnText(0);
+        const value = stmt.columnText(1);
+        if (std.mem.eql(u8, key, "schema_version")) {
+            schema_version_ok = std.mem.eql(u8, value, "1");
+        } else if (std.mem.eql(u8, key, "extension_version")) {
+            extension_version_ok = std.mem.eql(u8, value, manifest.version);
+        }
+    }
+    return schema_version_ok and extension_version_ok;
+}
+
+fn copySalvageIndexes(source: *sqlite.Database, destination: *sqlite.Database) extension_impl.Error!void {
+    var source_rows = try source.prepare(
+        \\select name, created_order
+        \\from _zova_ext_trgm_indexes
+        \\order by created_order, name
+    );
+    defer source_rows.deinit();
+
+    var insert = try destination.prepare(
+        \\insert into _zova_ext_trgm_indexes (name, created_order)
+        \\values (?, ?)
+    );
+    defer insert.deinit();
+
+    while (try source_rows.step() == .row) {
+        const index_name = source_rows.columnText(0);
+        if (validateIndexName(index_name)) |_| {} else |_| continue;
+        if (source_rows.columnType(1) != .integer) continue;
+        const created_order = source_rows.columnInt64(1);
+        if (created_order < 0) continue;
+
+        try insert.bindText(1, index_name);
+        try insert.bindInt64(2, created_order);
+        if (!try stepInsertOrSkip(&insert)) continue;
+    }
+}
+
+fn copySalvageDocuments(source: *sqlite.Database, destination: *sqlite.Database) extension_impl.Error!void {
+    var source_rows = try source.prepare(
+        \\select index_name, document_id, target_type, target_namespace, target_ref,
+        \\       normalized_len, text_hash, term_count, updated_at_unix
+        \\from _zova_ext_trgm_documents
+        \\order by index_name, document_id
+    );
+    defer source_rows.deinit();
+
+    var insert = try destination.prepare(
+        \\insert into _zova_ext_trgm_documents
+        \\  (index_name, document_id, target_type, target_namespace, target_ref,
+        \\   normalized_len, text_hash, term_count, updated_at_unix)
+        \\values (?, ?, ?, ?, ?, ?, ?, 0, ?)
+    );
+    defer insert.deinit();
+
+    while (try source_rows.step() == .row) {
+        const index_name = source_rows.columnText(0);
+        const document_id = source_rows.columnText(1);
+        const target_type_text = source_rows.columnText(2);
+        const target_namespace = if (source_rows.columnType(3) == .null) null else source_rows.columnText(3);
+        const target_ref = if (source_rows.columnType(4) == .null) null else source_rows.columnText(4);
+        if (!try isSalvageDocumentValid(destination, index_name, document_id, target_type_text, target_namespace, target_ref, &source_rows)) continue;
+
+        const normalized_len = source_rows.columnInt64(5);
+        const text_hash = source_rows.columnBlob(6);
+        const updated_at_unix = source_rows.columnInt64(8);
+
+        try insert.bindText(1, index_name);
+        try insert.bindText(2, document_id);
+        try insert.bindText(3, target_type_text);
+        if (target_namespace) |value| {
+            try insert.bindText(4, value);
+        } else {
+            try insert.bindNull(4);
+        }
+        if (target_ref) |value| {
+            try insert.bindText(5, value);
+        } else {
+            try insert.bindNull(5);
+        }
+        try insert.bindInt64(6, normalized_len);
+        try insert.bindBlob(7, text_hash);
+        try insert.bindInt64(8, updated_at_unix);
+        if (!try stepInsertOrSkip(&insert)) continue;
+    }
+}
+
+fn isSalvageDocumentValid(
+    destination: *sqlite.Database,
+    index_name: []const u8,
+    document_id: []const u8,
+    target_type_text: []const u8,
+    target_namespace: ?[]const u8,
+    target_ref: ?[]const u8,
+    row: *sqlite.Statement,
+) extension_impl.Error!bool {
+    validateIndexName(index_name) catch return false;
+    validateDocumentId(document_id) catch return false;
+    if (!try salvageIndexExists(destination, index_name)) return false;
+
+    const target_type = parseTargetType(target_type_text) catch return false;
+    validateTarget(destination, target_type, target_namespace, target_ref) catch |err| switch (err) {
+        error.TrgmInvalid, error.TrgmIndexNotFound, error.TrgmDocumentNotFound, error.ExtensionInvalid => return false,
+        else => return salvageOperationalError(err),
     };
+
+    if (row.columnType(5) != .integer or row.columnInt64(5) < 0) return false;
+    if (row.columnType(6) != .blob or row.columnBlob(6).len != 32) return false;
+    if (row.columnType(7) != .integer or row.columnInt64(7) < 0) return false;
+    if (row.columnType(8) != .integer or row.columnInt64(8) < 0) return false;
+    return true;
+}
+
+fn copySalvagePostings(source: *sqlite.Database, destination: *sqlite.Database) extension_impl.Error!void {
+    var source_rows = try source.prepare(
+        \\select index_name, term, document_id, count
+        \\from _zova_ext_trgm_postings
+        \\order by index_name, document_id, term
+    );
+    defer source_rows.deinit();
+
+    var insert = try destination.prepare(
+        \\insert into _zova_ext_trgm_postings (index_name, term, document_id, count)
+        \\values (?, ?, ?, ?)
+    );
+    defer insert.deinit();
+
+    while (try source_rows.step() == .row) {
+        const index_name = source_rows.columnText(0);
+        const term = source_rows.columnBlob(1);
+        const document_id = source_rows.columnText(2);
+        if (validateIndexName(index_name)) |_| {} else |_| continue;
+        if (validateDocumentId(document_id)) |_| {} else |_| continue;
+        if (!try documentExists(destination, index_name, document_id)) continue;
+        if (source_rows.columnType(1) != .blob or term.len != 3) continue;
+        if (source_rows.columnType(3) != .integer) continue;
+        const count = source_rows.columnInt64(3);
+        if (count <= 0) continue;
+
+        try insert.bindText(1, index_name);
+        try insert.bindBlob(2, term);
+        try insert.bindText(3, document_id);
+        try insert.bindInt64(4, count);
+        if (!try stepInsertOrSkip(&insert)) continue;
+    }
+}
+
+fn documentExists(db: *sqlite.Database, index_name: []const u8, document_id: []const u8) extension_impl.Error!bool {
+    var stmt = try db.prepare(
+        \\select count(*)
+        \\from _zova_ext_trgm_documents
+        \\where index_name = ? and document_id = ?
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, index_name);
+    try stmt.bindText(2, document_id);
+    std.debug.assert((try stmt.step()) == .row);
+    return stmt.columnInt64(0) == 1;
+}
+
+fn refreshCopiedDocumentTermCounts(db: *sqlite.Database) extension_impl.Error!void {
+    try db.exec(
+        \\update _zova_ext_trgm_documents
+        \\set term_count = (
+        \\  select count(*)
+        \\  from _zova_ext_trgm_postings p
+        \\  where p.index_name = _zova_ext_trgm_documents.index_name
+        \\    and p.document_id = _zova_ext_trgm_documents.document_id
+        \\)
+    );
+}
+
+fn rebuildCopiedTerms(db: *sqlite.Database) extension_impl.Error!void {
+    var indexes = try db.prepare(
+        \\select name
+        \\from _zova_ext_trgm_indexes
+        \\order by created_order, name
+    );
+    defer indexes.deinit();
+    while (try indexes.step() == .row) {
+        rebuildTerms(db, indexes.columnText(0)) catch |err| switch (err) {
+            error.TrgmInvalid, error.TrgmIndexNotFound, error.TrgmDocumentNotFound, error.ExtensionInvalid => return error.ExtensionInvalid,
+            else => return salvageOperationalError(err),
+        };
+    }
+}
+
+fn salvageTableExists(db: *sqlite.Database, table_name: []const u8) extension_impl.Error!bool {
+    return tableExists(db, table_name) catch |err| switch (err) {
+        error.TrgmInvalid, error.TrgmIndexNotFound, error.TrgmDocumentNotFound, error.ExtensionInvalid => false,
+        else => return salvageOperationalError(err),
+    };
+}
+
+fn salvageIndexExists(db: *sqlite.Database, index_name: []const u8) extension_impl.Error!bool {
+    return indexExists(db, index_name) catch |err| switch (err) {
+        error.TrgmInvalid, error.TrgmIndexNotFound, error.TrgmDocumentNotFound, error.ExtensionInvalid => false,
+        else => return salvageOperationalError(err),
+    };
+}
+
+fn salvageOperationalError(err: Error) extension_impl.Error {
+    return switch (err) {
+        error.SqliteError => error.SqliteError,
+        error.InvalidArgument => error.InvalidArgument,
+        error.Busy => error.Busy,
+        error.Locked => error.Locked,
+        error.Constraint => error.Constraint,
+        error.CantOpen => error.CantOpen,
+        error.Misuse => error.Misuse,
+        error.NoMemory => error.NoMemory,
+        error.Interrupt => error.Interrupt,
+        error.ReadOnly => error.ReadOnly,
+        error.Corrupt => error.Corrupt,
+        error.OutOfMemory => error.OutOfMemory,
+        error.ExtensionInvalid, error.TrgmInvalid, error.TrgmIndexNotFound, error.TrgmDocumentNotFound => error.ExtensionInvalid,
+    };
+}
+
+fn stepInsertOrSkip(stmt: *sqlite.Statement) extension_impl.Error!bool {
+    const step = stmt.step() catch |err| switch (err) {
+        error.Constraint => {
+            try stmt.reset();
+            try stmt.clearBindings();
+            return false;
+        },
+        else => return err,
+    };
+    if (step != .done) return error.ExtensionInvalid;
+    try stmt.reset();
+    try stmt.clearBindings();
+    return true;
 }
 
 fn registerSql(db: *sqlite.Database, manifest: extension_impl.Manifest) extension_impl.Error!void {

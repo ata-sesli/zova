@@ -223,6 +223,12 @@ pub const zova_vector_metric = enum(c_int) {
     DOT = 2,
 };
 
+pub const zova_vector_element_type = enum(c_int) {
+    F32 = 0,
+    F16 = 1,
+    I8 = 2,
+};
+
 pub const zova_graph_target_type = enum(c_int) {
     NONE = 0,
     RECORD = 1,
@@ -248,10 +254,34 @@ pub const zova_vector_collection_options = extern struct {
     metric: c_int,
 };
 
+pub const zova_vector_collection_typed_options = extern struct {
+    dimensions: u32,
+    metric: c_int,
+    element_type: c_int,
+};
+
+pub const zova_vector_values = extern struct {
+    element_type: c_int,
+    f32_values: ?[*]const f32,
+    f16_values: ?[*]const u16,
+    i8_values: ?[*]const i8,
+    values_len: usize,
+};
+
 pub const zova_vector = extern struct {
     id: ?[*]u8,
     id_len: usize,
     values: ?[*]f32,
+    values_len: usize,
+};
+
+pub const zova_vector_typed = extern struct {
+    id: ?[*]u8,
+    id_len: usize,
+    element_type: c_int,
+    f32_values: ?[*]f32,
+    f16_values: ?[*]u16,
+    i8_values: ?[*]i8,
     values_len: usize,
 };
 
@@ -279,10 +309,29 @@ pub const zova_vector_collection_list = extern struct {
     len: usize,
 };
 
+pub const zova_vector_collection_typed_info = extern struct {
+    name: ?[*]u8,
+    name_len: usize,
+    dimensions: u32,
+    metric: c_int,
+    element_type: c_int,
+    vector_count: u64,
+};
+
+pub const zova_vector_collection_typed_list = extern struct {
+    items: ?[*]zova_vector_collection_typed_info,
+    len: usize,
+};
+
 pub const zova_vector_input = extern struct {
     id: ?[*:0]const u8,
     values: ?[*]const f32,
     values_len: usize,
+};
+
+pub const zova_vector_typed_input = extern struct {
+    id: ?[*:0]const u8,
+    values: zova_vector_values,
 };
 
 pub const zova_graph_info = extern struct {
@@ -674,6 +723,12 @@ pub const zova_vector_collection_create_request = extern struct {
     options: zova_vector_collection_options,
 };
 
+pub const zova_vector_collection_create_typed_request = extern struct {
+    db: ?*zova_database,
+    name: ?[*:0]const u8,
+    options: zova_vector_collection_typed_options,
+};
+
 pub const zova_vector_collection_exists_request = extern struct {
     db: ?*zova_database,
     name: ?[*:0]const u8,
@@ -688,11 +743,25 @@ pub const zova_vector_put_request = extern struct {
     values_len: usize,
 };
 
+pub const zova_vector_put_typed_request = extern struct {
+    db: ?*zova_database,
+    collection_name: ?[*:0]const u8,
+    vector_id: ?[*:0]const u8,
+    values: zova_vector_values,
+};
+
 pub const zova_vector_get_request = extern struct {
     db: ?*zova_database,
     collection_name: ?[*:0]const u8,
     vector_id: ?[*:0]const u8,
     out_vector: ?*zova_vector,
+};
+
+pub const zova_vector_get_typed_request = extern struct {
+    db: ?*zova_database,
+    collection_name: ?[*:0]const u8,
+    vector_id: ?[*:0]const u8,
+    out_vector: ?*zova_vector_typed,
 };
 
 pub const zova_vector_exists_request = extern struct {
@@ -713,6 +782,14 @@ pub const zova_vector_search_request = extern struct {
     collection_name: ?[*:0]const u8,
     query: ?[*]const f32,
     query_len: usize,
+    limit: usize,
+    out_results: ?*zova_vector_search_results,
+};
+
+pub const zova_vector_search_typed_request = extern struct {
+    db: ?*zova_database,
+    collection_name: ?[*:0]const u8,
+    query: zova_vector_values,
     limit: usize,
     out_results: ?*zova_vector_search_results,
 };
@@ -739,10 +816,28 @@ pub const zova_vector_collections_list_request = extern struct {
     out_list: ?*zova_vector_collection_list,
 };
 
+pub const zova_vector_collection_typed_info_get_request = extern struct {
+    db: ?*zova_database,
+    name: ?[*:0]const u8,
+    out_info: ?*zova_vector_collection_typed_info,
+};
+
+pub const zova_vector_collections_typed_list_request = extern struct {
+    db: ?*zova_database,
+    out_list: ?*zova_vector_collection_typed_list,
+};
+
 pub const zova_vector_put_many_request = extern struct {
     db: ?*zova_database,
     collection_name: ?[*:0]const u8,
     vectors: ?[*]const zova_vector_input,
+    vectors_len: usize,
+};
+
+pub const zova_vector_put_many_typed_request = extern struct {
+    db: ?*zova_database,
+    collection_name: ?[*:0]const u8,
+    vectors: ?[*]const zova_vector_typed_input,
     vectors_len: usize,
 };
 
@@ -948,11 +1043,11 @@ pub fn zova_abi_version_minor() callconv(.c) u32 {
 }
 
 pub fn zova_abi_version_patch() callconv(.c) u32 {
-    return 1;
+    return 2;
 }
 
 pub fn zova_abi_version_string() callconv(.c) [*:0]const u8 {
-    return "0.21.1";
+    return "0.21.2";
 }
 
 // Accept a raw integer instead of a Zig enum so accidental or future C enum
@@ -1017,6 +1112,23 @@ pub fn zova_vector_free(vector: ?*zova_vector) callconv(.c) void {
     out.* = emptyVector();
 }
 
+pub fn zova_vector_typed_free(vector: ?*zova_vector_typed) callconv(.c) void {
+    const out = vector orelse return;
+    if (out.id) |id| {
+        allocator.free(id[0 .. out.id_len + 1]);
+    }
+    if (out.f32_values) |values| {
+        allocator.free(values[0..out.values_len]);
+    }
+    if (out.f16_values) |values| {
+        allocator.free(values[0..out.values_len]);
+    }
+    if (out.i8_values) |values| {
+        allocator.free(values[0..out.values_len]);
+    }
+    out.* = emptyTypedVector();
+}
+
 pub fn zova_vector_search_results_free(results: ?*zova_vector_search_results) callconv(.c) void {
     const out = results orelse return;
     if (out.items) |items| {
@@ -1043,6 +1155,21 @@ pub fn zova_vector_collection_list_free(list: ?*zova_vector_collection_list) cal
         allocator.free(items[0..out.len]);
     }
     out.* = emptyVectorCollectionList();
+}
+
+pub fn zova_vector_collection_typed_info_free(info: ?*zova_vector_collection_typed_info) callconv(.c) void {
+    const out = info orelse return;
+    freeVectorCollectionTypedInfo(out);
+    out.* = emptyVectorCollectionTypedInfo();
+}
+
+pub fn zova_vector_collection_typed_list_free(list: ?*zova_vector_collection_typed_list) callconv(.c) void {
+    const out = list orelse return;
+    if (out.items) |items| {
+        for (items[0..out.len]) |*item| freeVectorCollectionTypedInfo(item);
+        allocator.free(items[0..out.len]);
+    }
+    out.* = emptyVectorCollectionTypedList();
 }
 
 pub fn zova_graph_info_free(info: ?*zova_graph_info) callconv(.c) void {
@@ -1880,6 +2007,23 @@ pub fn zova_vector_collection_create(request: ?*const zova_vector_collection_cre
     return okDb(handle);
 }
 
+pub fn zova_vector_collection_create_typed(request: ?*const zova_vector_collection_create_typed_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const name = req.name orelse return failDb(handle, error.InvalidArgument);
+    const metric = vectorMetricFromAbi(req.options.metric) orelse return failDb(handle, error.InvalidArgument);
+    const element_type = vectorElementTypeFromAbi(req.options.element_type) orelse return failDb(handle, error.InvalidArgument);
+
+    handle.db.createVectorCollection(std.mem.span(name), .{
+        .dimensions = req.options.dimensions,
+        .metric = metric,
+        .element_type = element_type,
+    }) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
 pub fn zova_vector_collection_exists(request: ?*const zova_vector_collection_exists_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
@@ -1902,6 +2046,19 @@ pub fn zova_vector_put(request: ?*const zova_vector_put_request) callconv(.c) zo
     const values = floatsConst(req.values, req.values_len) orelse return failDb(handle, error.InvalidArgument);
 
     handle.db.putVector(std.mem.span(collection_name), std.mem.span(vector_id), values) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_vector_put_typed(request: ?*const zova_vector_put_typed_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
+    const vector_id = req.vector_id orelse return failDb(handle, error.InvalidArgument);
+    const values = vectorValuesConst(req.values) orelse return failDb(handle, error.InvalidArgument);
+
+    handle.db.putVectorTyped(std.mem.span(collection_name), std.mem.span(vector_id), values) catch |err| return failDb(handle, err);
     return okDb(handle);
 }
 
@@ -1930,6 +2087,22 @@ pub fn zova_vector_get(request: ?*const zova_vector_get_request) callconv(.c) zo
         .values_len = vector.values.len,
     };
     vector.values = &.{};
+    return okDb(handle);
+}
+
+pub fn zova_vector_get_typed(request: ?*const zova_vector_get_typed_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
+    const vector_id = req.vector_id orelse return failDb(handle, error.InvalidArgument);
+    const out = req.out_vector orelse return failDb(handle, error.InvalidArgument);
+    out.* = emptyTypedVector();
+
+    var vector = handle.db.getVectorTyped(allocator, std.mem.span(collection_name), std.mem.span(vector_id)) catch |err| return failDb(handle, err);
+    errdefer vector.deinit(allocator);
+    fillTypedVector(out, &vector) catch |err| return failDb(handle, err);
     return okDb(handle);
 }
 
@@ -1969,6 +2142,23 @@ pub fn zova_vector_search(request: ?*const zova_vector_search_request) callconv(
     out.* = emptyVectorSearchResults();
 
     var results = handle.db.searchVectors(allocator, std.mem.span(collection_name), query, req.limit) catch |err| return failDb(handle, err);
+    defer results.deinit(allocator);
+
+    fillSearchResults(out, results.items) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_vector_search_typed(request: ?*const zova_vector_search_typed_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
+    const query = vectorValuesConst(req.query) orelse return failDb(handle, error.InvalidArgument);
+    const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
+    out.* = emptyVectorSearchResults();
+
+    var results = handle.db.searchVectorsTyped(allocator, std.mem.span(collection_name), query, req.limit) catch |err| return failDb(handle, err);
     defer results.deinit(allocator);
 
     fillSearchResults(out, results.items) catch |err| return failDb(handle, err);
@@ -2026,6 +2216,37 @@ pub fn zova_vector_collections_list(request: ?*const zova_vector_collections_lis
     return okDb(handle);
 }
 
+pub fn zova_vector_collection_typed_info_get(request: ?*const zova_vector_collection_typed_info_get_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const name = req.name orelse return failDb(handle, error.InvalidArgument);
+    const out = req.out_info orelse return failDb(handle, error.InvalidArgument);
+    out.* = emptyVectorCollectionTypedInfo();
+
+    var info = handle.db.vectorCollectionInfo(allocator, std.mem.span(name)) catch |err| return failDb(handle, err);
+    defer info.deinit(allocator);
+
+    fillVectorCollectionTypedInfo(out, info) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_vector_collections_typed_list(request: ?*const zova_vector_collections_typed_list_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const out = req.out_list orelse return failDb(handle, error.InvalidArgument);
+    out.* = emptyVectorCollectionTypedList();
+
+    var list = handle.db.listVectorCollections(allocator) catch |err| return failDb(handle, err);
+    defer list.deinit(allocator);
+
+    fillVectorCollectionTypedList(out, list.items) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
 pub fn zova_vector_put_many(request: ?*const zova_vector_put_many_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
@@ -2037,6 +2258,20 @@ pub fn zova_vector_put_many(request: ?*const zova_vector_put_many_request) callc
     defer if (vectors.len != 0) allocator.free(vectors);
 
     handle.db.putVectors(std.mem.span(collection_name), vectors) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_vector_put_many_typed(request: ?*const zova_vector_put_many_typed_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
+
+    const vectors = typedVectorInputSlices(req.vectors, req.vectors_len) catch |err| return failDb(handle, err);
+    defer if (vectors.len != 0) allocator.free(vectors);
+
+    handle.db.putVectorsTyped(std.mem.span(collection_name), vectors) catch |err| return failDb(handle, err);
     return okDb(handle);
 }
 
@@ -2562,6 +2797,18 @@ fn floatsConst(data: ?[*]const f32, len: usize) ?[]const f32 {
     return ptr[0..len];
 }
 
+fn u16Const(data: ?[*]const u16, len: usize) ?[]const u16 {
+    if (len == 0) return &.{};
+    const ptr = data orelse return null;
+    return ptr[0..len];
+}
+
+fn i8Const(data: ?[*]const i8, len: usize) ?[]const i8 {
+    if (len == 0) return &.{};
+    const ptr = data orelse return null;
+    return ptr[0..len];
+}
+
 fn candidateIdSlices(
     candidate_ids: ?[*]const ?[*:0]const u8,
     len: usize,
@@ -2595,6 +2842,24 @@ fn vectorInputSlices(
     return inputs;
 }
 
+fn typedVectorInputSlices(
+    vector_inputs: ?[*]const zova_vector_typed_input,
+    len: usize,
+) (error{ OutOfMemory, InvalidArgument }![]const zova.TypedVectorInput) {
+    if (len == 0) return &.{};
+    const ptr = vector_inputs orelse return error.InvalidArgument;
+    const inputs = try allocator.alloc(zova.TypedVectorInput, len);
+    errdefer allocator.free(inputs);
+
+    for (ptr[0..len], inputs) |input, *out| {
+        const id = input.id orelse return error.InvalidArgument;
+        const values = vectorValuesConst(input.values) orelse return error.InvalidArgument;
+        out.* = .{ .id = std.mem.span(id), .values = values };
+    }
+
+    return inputs;
+}
+
 fn vectorMetricFromAbi(metric: c_int) ?zova.VectorMetric {
     return switch (metric) {
         @intFromEnum(zova_vector_metric.COSINE) => .cosine,
@@ -2609,6 +2874,32 @@ fn vectorMetricToAbi(metric: zova.VectorMetric) c_int {
         .cosine => @intFromEnum(zova_vector_metric.COSINE),
         .l2 => @intFromEnum(zova_vector_metric.L2),
         .dot => @intFromEnum(zova_vector_metric.DOT),
+    };
+}
+
+fn vectorElementTypeFromAbi(element_type: c_int) ?zova.VectorElementType {
+    return switch (element_type) {
+        @intFromEnum(zova_vector_element_type.F32) => .f32,
+        @intFromEnum(zova_vector_element_type.F16) => .f16,
+        @intFromEnum(zova_vector_element_type.I8) => .i8,
+        else => null,
+    };
+}
+
+fn vectorElementTypeToAbi(element_type: zova.VectorElementType) c_int {
+    return switch (element_type) {
+        .f32 => @intFromEnum(zova_vector_element_type.F32),
+        .f16 => @intFromEnum(zova_vector_element_type.F16),
+        .i8 => @intFromEnum(zova_vector_element_type.I8),
+    };
+}
+
+fn vectorValuesConst(values: zova_vector_values) ?zova.VectorValuesConst {
+    const element_type = vectorElementTypeFromAbi(values.element_type) orelse return null;
+    return switch (element_type) {
+        .f32 => .{ .f32 = floatsConst(values.f32_values, values.values_len) orelse return null },
+        .f16 => .{ .f16 = u16Const(values.f16_values, values.values_len) orelse return null },
+        .i8 => .{ .i8 = i8Const(values.i8_values, values.values_len) orelse return null },
     };
 }
 
@@ -2704,6 +2995,18 @@ fn emptyVector() zova_vector {
     return .{ .id = null, .id_len = 0, .values = null, .values_len = 0 };
 }
 
+fn emptyTypedVector() zova_vector_typed {
+    return .{
+        .id = null,
+        .id_len = 0,
+        .element_type = @intFromEnum(zova_vector_element_type.F32),
+        .f32_values = null,
+        .f16_values = null,
+        .i8_values = null,
+        .values_len = 0,
+    };
+}
+
 fn emptyVectorSearchResults() zova_vector_search_results {
     return .{ .items = null, .len = 0 };
 }
@@ -2719,6 +3022,21 @@ fn emptyVectorCollectionInfo() zova_vector_collection_info {
 }
 
 fn emptyVectorCollectionList() zova_vector_collection_list {
+    return .{ .items = null, .len = 0 };
+}
+
+fn emptyVectorCollectionTypedInfo() zova_vector_collection_typed_info {
+    return .{
+        .name = null,
+        .name_len = 0,
+        .dimensions = 0,
+        .metric = 0,
+        .element_type = @intFromEnum(zova_vector_element_type.F32),
+        .vector_count = 0,
+    };
+}
+
+fn emptyVectorCollectionTypedList() zova_vector_collection_typed_list {
     return .{ .items = null, .len = 0 };
 }
 
@@ -2806,6 +3124,10 @@ fn freeVectorCollectionInfo(info: *zova_vector_collection_info) void {
     if (info.name) |name| allocator.free(name[0 .. info.name_len + 1]);
 }
 
+fn freeVectorCollectionTypedInfo(info: *zova_vector_collection_typed_info) void {
+    if (info.name) |name| allocator.free(name[0 .. info.name_len + 1]);
+}
+
 fn freeGraphInfo(info: *zova_graph_info) void {
     if (info.name) |name| allocator.free(name[0 .. info.name_len + 1]);
 }
@@ -2870,6 +3192,35 @@ fn fillSearchResults(out: *zova_vector_search_results, items: []const zova.Vecto
     }
 
     out.* = .{ .items = abi_items.ptr, .len = abi_items.len };
+}
+
+fn fillTypedVector(out: *zova_vector_typed, vector: *zova.TypedVector) error{OutOfMemory}!void {
+    out.* = emptyTypedVector();
+    const id = try allocator.dupeZ(u8, vector.id);
+    errdefer allocator.free(id);
+
+    out.id = id.ptr;
+    out.id_len = id.len;
+    allocator.free(vector.id);
+    vector.id = &.{};
+
+    switch (vector.values) {
+        .f32 => |values| {
+            out.element_type = vectorElementTypeToAbi(.f32);
+            out.f32_values = if (values.len == 0) null else values.ptr;
+            out.values_len = values.len;
+        },
+        .f16 => |values| {
+            out.element_type = vectorElementTypeToAbi(.f16);
+            out.f16_values = if (values.len == 0) null else values.ptr;
+            out.values_len = values.len;
+        },
+        .i8 => |values| {
+            out.element_type = vectorElementTypeToAbi(.i8);
+            out.i8_values = if (values.len == 0) null else values.ptr;
+            out.values_len = values.len;
+        },
+    }
 }
 
 fn fillGraphInfo(out: *zova_graph_info, info: zova.GraphInfo) error{OutOfMemory}!void {
@@ -3112,6 +3463,37 @@ fn fillVectorCollectionList(out: *zova_vector_collection_list, items: []const zo
     out.* = .{ .items = abi_items.ptr, .len = abi_items.len };
 }
 
+fn fillVectorCollectionTypedInfo(out: *zova_vector_collection_typed_info, info: zova.VectorCollectionInfo) error{OutOfMemory}!void {
+    out.* = emptyVectorCollectionTypedInfo();
+    const name = try allocator.dupeZ(u8, info.name);
+    out.* = .{
+        .name = name.ptr,
+        .name_len = name.len,
+        .dimensions = info.dimensions,
+        .metric = vectorMetricToAbi(info.metric),
+        .element_type = vectorElementTypeToAbi(info.element_type),
+        .vector_count = info.vector_count,
+    };
+}
+
+fn fillVectorCollectionTypedList(out: *zova_vector_collection_typed_list, items: []const zova.VectorCollectionInfo) error{OutOfMemory}!void {
+    out.* = emptyVectorCollectionTypedList();
+    if (items.len == 0) return;
+
+    const abi_items = try allocator.alloc(zova_vector_collection_typed_info, items.len);
+    errdefer {
+        for (abi_items[0..items.len]) |*item| freeVectorCollectionTypedInfo(item);
+        allocator.free(abi_items);
+    }
+
+    for (abi_items) |*item| item.* = emptyVectorCollectionTypedInfo();
+    for (items, abi_items) |item, *abi_item| {
+        try fillVectorCollectionTypedInfo(abi_item, item);
+    }
+
+    out.* = .{ .items = abi_items.ptr, .len = abi_items.len };
+}
+
 fn fillNotification(out: *zova_notification, notification: zova.Notification) error{OutOfMemory}!void {
     const channel = try allocator.alloc(u8, notification.channel.len + 1);
     errdefer allocator.free(channel);
@@ -3294,8 +3676,8 @@ fn statusName(status: c_int) [*:0]const u8 {
 test "c abi status names and versions are stable" {
     try std.testing.expectEqual(@as(u32, 0), zova_abi_version_major());
     try std.testing.expectEqual(@as(u32, 21), zova_abi_version_minor());
-    try std.testing.expectEqual(@as(u32, 1), zova_abi_version_patch());
-    try std.testing.expectEqualStrings("0.21.1", std.mem.span(zova_abi_version_string()));
+    try std.testing.expectEqual(@as(u32, 2), zova_abi_version_patch());
+    try std.testing.expectEqualStrings("0.21.2", std.mem.span(zova_abi_version_string()));
     try std.testing.expectEqualStrings("ZOVA_OK", std.mem.span(zova_status_name(@intFromEnum(zova_status.OK))));
     try std.testing.expectEqualStrings("ZOVA_OBJECT_NOT_FOUND", std.mem.span(zova_status_name(@intFromEnum(zova_status.OBJECT_NOT_FOUND))));
     try std.testing.expectEqualStrings("ZOVA_BOUND_STORE_INVALID", std.mem.span(zova_status_name(@intFromEnum(zova_status.BOUND_STORE_INVALID))));
@@ -3317,6 +3699,8 @@ test "c abi validates null pointers" {
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_search(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_collection_info_get(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_collections_list(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_collection_typed_info_get(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_collections_typed_list(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_put_many(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_collection_delete(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_search_within(null));
@@ -3972,6 +4356,17 @@ test "c abi exposes vector collection management batch writes and expanded searc
     try std.testing.expectEqual(@as(u64, 4), info.vector_count);
     zova_vector_collection_info_free(&info);
 
+    var typed_info = emptyVectorCollectionTypedInfo();
+    const typed_info_request = zova_vector_collection_typed_info_get_request{
+        .db = db,
+        .name = "chunks",
+        .out_info = &typed_info,
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_vector_collection_typed_info_get(&typed_info_request));
+    try std.testing.expectEqualStrings("chunks", typed_info.name.?[0..typed_info.name_len]);
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(zova_vector_element_type.F32)), typed_info.element_type);
+    zova_vector_collection_typed_info_free(&typed_info);
+
     var list = zova_vector_collection_list{ .items = null, .len = 0 };
     const list_request = zova_vector_collections_list_request{
         .db = db,
@@ -3982,6 +4377,17 @@ test "c abi exposes vector collection management batch writes and expanded searc
     try std.testing.expectEqual(@as(usize, 2), list.len);
     try std.testing.expectEqualStrings("chunks", list.items.?[0].name.?[0..list.items.?[0].name_len]);
     try std.testing.expectEqualStrings("docs", list.items.?[1].name.?[0..list.items.?[1].name_len]);
+
+    var typed_list = zova_vector_collection_typed_list{ .items = null, .len = 0 };
+    const typed_list_request = zova_vector_collections_typed_list_request{
+        .db = db,
+        .out_list = &typed_list,
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_vector_collections_typed_list(&typed_list_request));
+    defer zova_vector_collection_typed_list_free(&typed_list);
+    try std.testing.expectEqual(@as(usize, 2), typed_list.len);
+    try std.testing.expectEqualStrings("chunks", typed_list.items.?[0].name.?[0..typed_list.items.?[0].name_len]);
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(zova_vector_element_type.F32)), typed_list.items.?[0].element_type);
 
     var results = zova_vector_search_results{ .items = null, .len = 0 };
     const query = [_]f32{ 0.0, 0.0 };
@@ -4103,6 +4509,107 @@ test "c abi exposes vector collection management batch writes and expanded searc
     try std.testing.expectEqual(zova_status.OK, zova_vector_collection_delete(&delete_collection));
     try std.testing.expectEqual(zova_status.VECTOR_COLLECTION_NOT_FOUND, zova_vector_get(&get_near));
     try std.testing.expectEqual(zova_status.VECTOR_COLLECTION_NOT_FOUND, zova_vector_collection_delete(&delete_collection));
+}
+
+test "c abi exposes raw typed i8 and f16 vectors" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-typed-vectors.zova", .{tmp.sub_path[0..]});
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(db);
+
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_collection_create_typed(&.{
+        .db = db,
+        .name = "bad",
+        .options = .{ .dimensions = 2, .metric = @intFromEnum(zova_vector_metric.L2), .element_type = 99 },
+    }));
+
+    try std.testing.expectEqual(zova_status.OK, zova_vector_collection_create_typed(&.{
+        .db = db,
+        .name = "bytes",
+        .options = .{ .dimensions = 2, .metric = @intFromEnum(zova_vector_metric.L2), .element_type = @intFromEnum(zova_vector_element_type.I8) },
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_vector_collection_create_typed(&.{
+        .db = db,
+        .name = "halves",
+        .options = .{ .dimensions = 2, .metric = @intFromEnum(zova_vector_metric.L2), .element_type = @intFromEnum(zova_vector_element_type.F16) },
+    }));
+
+    const near_i8 = [_]i8{ 1, 0 };
+    const far_i8 = [_]i8{ 5, 0 };
+    const query_i8 = [_]i8{ 0, 0 };
+    try std.testing.expectEqual(zova_status.OK, zova_vector_put_typed(&.{
+        .db = db,
+        .collection_name = "bytes",
+        .vector_id = "near",
+        .values = .{ .element_type = @intFromEnum(zova_vector_element_type.I8), .f32_values = null, .f16_values = null, .i8_values = &near_i8, .values_len = near_i8.len },
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_vector_put_typed(&.{
+        .db = db,
+        .collection_name = "bytes",
+        .vector_id = "far",
+        .values = .{ .element_type = @intFromEnum(zova_vector_element_type.I8), .f32_values = null, .f16_values = null, .i8_values = &far_i8, .values_len = far_i8.len },
+    }));
+
+    const near_f16 = [_]u16{ 0x3c00, 0x0000 };
+    const far_f16 = [_]u16{ 0x4400, 0x0000 };
+    const f16_inputs = [_]zova_vector_typed_input{
+        .{ .id = "near", .values = .{ .element_type = @intFromEnum(zova_vector_element_type.F16), .f32_values = null, .f16_values = &near_f16, .i8_values = null, .values_len = near_f16.len } },
+        .{ .id = "far", .values = .{ .element_type = @intFromEnum(zova_vector_element_type.F16), .f32_values = null, .f16_values = &far_f16, .i8_values = null, .values_len = far_f16.len } },
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_vector_put_many_typed(&.{
+        .db = db,
+        .collection_name = "halves",
+        .vectors = &f16_inputs,
+        .vectors_len = f16_inputs.len,
+    }));
+
+    var fetched = emptyTypedVector();
+    try std.testing.expectEqual(zova_status.OK, zova_vector_get_typed(&.{
+        .db = db,
+        .collection_name = "bytes",
+        .vector_id = "near",
+        .out_vector = &fetched,
+    }));
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(zova_vector_element_type.I8)), fetched.element_type);
+    try std.testing.expectEqualStrings("near", fetched.id.?[0..fetched.id_len]);
+    try std.testing.expectEqualSlices(i8, &near_i8, fetched.i8_values.?[0..fetched.values_len]);
+    zova_vector_typed_free(&fetched);
+
+    var results = emptyVectorSearchResults();
+    try std.testing.expectEqual(zova_status.OK, zova_vector_search_typed(&.{
+        .db = db,
+        .collection_name = "bytes",
+        .query = .{ .element_type = @intFromEnum(zova_vector_element_type.I8), .f32_values = null, .f16_values = null, .i8_values = &query_i8, .values_len = query_i8.len },
+        .limit = 2,
+        .out_results = &results,
+    }));
+    try std.testing.expectEqual(@as(usize, 2), results.len);
+    try std.testing.expectEqualStrings("near", results.items.?[0].id.?[0..results.items.?[0].id_len]);
+    zova_vector_search_results_free(&results);
+
+    try std.testing.expectEqual(zova_status.OK, zova_vector_get_typed(&.{
+        .db = db,
+        .collection_name = "halves",
+        .vector_id = "near",
+        .out_vector = &fetched,
+    }));
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(zova_vector_element_type.F16)), fetched.element_type);
+    try std.testing.expectEqualSlices(u16, &near_f16, fetched.f16_values.?[0..fetched.values_len]);
+    zova_vector_typed_free(&fetched);
+
+    var info = emptyVectorCollectionTypedInfo();
+    try std.testing.expectEqual(zova_status.OK, zova_vector_collection_typed_info_get(&.{ .db = db, .name = "halves", .out_info = &info }));
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(zova_vector_element_type.F16)), info.element_type);
+    zova_vector_collection_typed_info_free(&info);
 }
 
 fn zova_buffer_free_and_status_for_test() zova_status {

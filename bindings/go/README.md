@@ -59,7 +59,7 @@ flowchart LR
 After the Go module tag is pushed, applications can add the binding with:
 
 ```sh
-go get github.com/atasesli/zova/bindings/go@v0.21.1
+go get github.com/atasesli/zova/bindings/go@v0.21.2
 ```
 
 Import it as:
@@ -153,14 +153,14 @@ Because this module lives in the `bindings/go` subdirectory, the release tag
 must include that subdirectory prefix:
 
 ```sh
-git tag -a bindings/go/v0.21.1 -m "Zova Go bindings v0.21.1"
-git push origin bindings/go/v0.21.1
+git tag -a bindings/go/v0.21.2 -m "Zova Go bindings v0.21.2"
+git push origin bindings/go/v0.21.2
 ```
 
 After pushing the tag, ask the public Go module proxy to resolve it:
 
 ```sh
-GOPROXY=proxy.golang.org go list -m github.com/atasesli/zova/bindings/go@v0.21.1
+GOPROXY=proxy.golang.org go list -m github.com/atasesli/zova/bindings/go@v0.21.2
 ```
 
 The module path is:
@@ -418,6 +418,39 @@ if err != nil {
 for _, result := range results {
     fmt.Println(result.ID, result.Distance)
 }
+```
+
+The f32 methods above stay available as compatibility wrappers. Raw typed
+collections use `TypedVectorCollectionOptions` and `VectorValues`. `F16` values
+are raw IEEE 754 binary16 bits carried as `uint16`; `I8` values are raw signed
+bytes with no quantization metadata.
+
+```go
+err = db.CreateVectorCollectionTyped("scores_i8", zova.TypedVectorCollectionOptions{
+    Dimensions:  2,
+    Metric:      zova.VectorMetricL2,
+    ElementType: zova.VectorElementTypeI8,
+})
+if err != nil {
+    log.Fatal(err)
+}
+err = db.PutVectorTyped("scores_i8", "near", zova.VectorValues{
+    ElementType: zova.VectorElementTypeI8,
+    I8:          []int8{1, -1},
+})
+
+err = db.CreateVectorCollectionTyped("halves", zova.TypedVectorCollectionOptions{
+    Dimensions:  2,
+    Metric:      zova.VectorMetricL2,
+    ElementType: zova.VectorElementTypeF16,
+})
+if err != nil {
+    log.Fatal(err)
+}
+err = db.PutVectorTyped("halves", "one", zova.VectorValues{
+    ElementType: zova.VectorElementTypeF16,
+    F16:         []uint16{0x3c00, 0x0000},
+})
 ```
 
 Use `SearchVectorsIn` when SQL has already selected candidate vector ids from

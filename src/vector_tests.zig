@@ -18,10 +18,12 @@ const Vector = zova.Vector;
 const VectorCollectionInfo = zova.VectorCollectionInfo;
 const VectorCollectionList = zova.VectorCollectionList;
 const VectorCollectionOptions = zova.VectorCollectionOptions;
+const VectorElementType = zova.VectorElementType;
 const VectorInput = zova.VectorInput;
 const VectorMetric = zova.VectorMetric;
 const VectorSearchResult = zova.VectorSearchResult;
 const VectorSearchResults = zova.VectorSearchResults;
+const TypedVectorInput = zova.TypedVectorInput;
 const max_vector_dimensions = zova.max_vector_dimensions;
 const convertSqliteToZova = zova.convertSqliteToZova;
 const objectChunkId = zova.objectChunkId;
@@ -120,6 +122,114 @@ test "create and lookup vector collections" {
     try std.testing.expectEqualStrings("cosine", row.columnText(1));
     try std.testing.expectEqualStrings("f32", row.columnText(2));
     try std.testing.expectEqual(sqlite.Step.done, try row.step());
+}
+
+test "typed vector collections store list reopen search and delete raw i8 values" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-i8.zova");
+
+    {
+        var db = try Database.create(db_path);
+        defer db.deinit();
+
+        try db.createVectorCollection("bytes", .{ .dimensions = 2, .metric = .l2, .element_type = .i8 });
+
+        var info = try db.vectorCollectionInfo(std.testing.allocator, "bytes");
+        defer info.deinit(std.testing.allocator);
+        try std.testing.expectEqual(VectorElementType.i8, info.element_type);
+
+        const batch = [_]TypedVectorInput{
+            .{ .id = "near", .values = .{ .i8 = &.{ @as(i8, 1), @as(i8, 1) } } },
+            .{ .id = "far", .values = .{ .i8 = &.{ @as(i8, 5), @as(i8, 5) } } },
+        };
+        try db.putVectorsTyped("bytes", &batch);
+        try db.putVectorTyped("bytes", "negative", .{ .i8 = &.{ @as(i8, -1), @as(i8, -2) } });
+
+        {
+            var list = try db.listVectorCollections(std.testing.allocator);
+            defer list.deinit(std.testing.allocator);
+            try std.testing.expectEqual(@as(usize, 1), list.items.len);
+            try std.testing.expectEqual(VectorElementType.i8, list.items[0].element_type);
+            try std.testing.expectEqual(@as(u64, 3), list.items[0].vector_count);
+        }
+
+        {
+            var vector = try db.getVectorTyped(std.testing.allocator, "bytes", "negative");
+            defer vector.deinit(std.testing.allocator);
+            try std.testing.expectEqualStrings("negative", vector.id);
+            try std.testing.expectEqualSlices(i8, &.{ @as(i8, -1), @as(i8, -2) }, vector.values.i8);
+        }
+
+        {
+            var results = try db.searchVectorsTyped(std.testing.allocator, "bytes", .{ .i8 = &.{ @as(i8, 0), @as(i8, 0) } }, 3);
+            defer results.deinit(std.testing.allocator);
+            try expectSearchIds(&results, &.{ "near", "negative", "far" });
+        }
+
+        try std.testing.expectError(error.VectorDimensionMismatch, db.putVectorTyped("bytes", "short", .{ .i8 = &.{@as(i8, 1)} }));
+        try std.testing.expectError(error.VectorInvalid, db.putVector("bytes", "f32-wrapper", &.{ 1.0, 2.0 }));
+        try db.deleteVector("bytes", "far");
+        try std.testing.expect(!try db.hasVector("bytes", "far"));
+    }
+
+    {
+        var reopened = try Database.open(db_path);
+        defer reopened.deinit();
+
+        var vector = try reopened.getVectorTyped(std.testing.allocator, "bytes", "near");
+        defer vector.deinit(std.testing.allocator);
+        try std.testing.expectEqualSlices(i8, &.{ @as(i8, 1), @as(i8, 1) }, vector.values.i8);
+
+        var results = try reopened.searchVectorsTyped(std.testing.allocator, "bytes", .{ .i8 = &.{ @as(i8, 0), @as(i8, 0) } }, 10);
+        defer results.deinit(std.testing.allocator);
+        try expectSearchIds(&results, &.{ "near", "negative" });
+    }
+}
+
+test "typed vector collections store search validate and detect corrupt raw f16 bits" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-f16.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.createVectorCollection("halves", .{ .dimensions = 2, .metric = .l2, .element_type = .f16 });
+    try db.createVectorCollection("half-cosine", .{ .dimensions = 2, .metric = .cosine, .element_type = .f16 });
+
+    try db.putVectorTyped("halves", "near", .{ .f16 = &.{ 0x3c00, 0x3c00 } });
+    try db.putVectorTyped("halves", "far", .{ .f16 = &.{ 0x4400, 0x4400 } });
+
+    {
+        var vector = try db.getVectorTyped(std.testing.allocator, "halves", "near");
+        defer vector.deinit(std.testing.allocator);
+        try std.testing.expectEqualSlices(u16, &.{ 0x3c00, 0x3c00 }, vector.values.f16);
+    }
+
+    {
+        var results = try db.searchVectorsTyped(std.testing.allocator, "halves", .{ .f16 = &.{ 0x0000, 0x0000 } }, 2);
+        defer results.deinit(std.testing.allocator);
+        try expectSearchIds(&results, &.{ "near", "far" });
+        try std.testing.expectApproxEqAbs(@as(f64, @sqrt(2.0)), results.items[0].distance, 0.000001);
+    }
+
+    try std.testing.expectError(error.VectorDimensionMismatch, db.putVectorTyped("halves", "short", .{ .f16 = &.{0x3c00} }));
+    try std.testing.expectError(error.VectorInvalid, db.putVectorTyped("halves", "inf", .{ .f16 = &.{ 0x7c00, 0x3c00 } }));
+    try std.testing.expectError(error.VectorInvalid, db.putVectorTyped("halves", "nan", .{ .f16 = &.{ 0x7e00, 0x3c00 } }));
+    try std.testing.expectError(error.VectorInvalid, db.putVectorTyped("halves", "wrong-type", .{ .i8 = &.{ @as(i8, 1), @as(i8, 2) } }));
+    try std.testing.expectError(error.VectorInvalid, db.putVectorTyped("half-cosine", "zero", .{ .f16 = &.{ 0x0000, 0x0000 } }));
+
+    try db.exec("pragma ignore_check_constraints = on");
+    try db.exec("update _zova_vectors set \"values\" = x'003c' where collection_name = 'halves' and vector_id = 'near'");
+    try db.exec("pragma ignore_check_constraints = off");
+
+    try std.testing.expectError(error.VectorCorrupt, db.getVectorTyped(std.testing.allocator, "halves", "near"));
+    try std.testing.expectError(error.VectorCorrupt, db.searchVectorsTyped(std.testing.allocator, "halves", .{ .f16 = &.{ 0x0000, 0x0000 } }, 10));
 }
 
 test "vector collection duplicate and validation behavior" {

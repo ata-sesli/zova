@@ -545,28 +545,28 @@ impl SharedDatabase {
         let name = cstring(name, "vector collection name")?;
         let _guard = self.inner.lock();
         let mut info = empty_collection_info();
-        let request = zova_sys::zova_vector_collection_info_get_request {
+        let request = zova_sys::zova_vector_collection_typed_info_get_request {
             db: self.inner.raw_ptr(),
             name: name.as_ptr(),
             out_info: &mut info,
         };
         self.inner
-            .status_locked(unsafe { zova_sys::zova_vector_collection_info_get(&request) })?;
+            .status_locked(unsafe { zova_sys::zova_vector_collection_typed_info_get(&request) })?;
         take_collection_info(&mut info)
     }
 
     pub fn list_vector_collections(&self) -> Result<Vec<VectorCollectionInfo>> {
         let _guard = self.inner.lock();
-        let mut list = zova_sys::zova_vector_collection_list {
+        let mut list = zova_sys::zova_vector_collection_typed_list {
             items: ptr::null_mut(),
             len: 0,
         };
-        let request = zova_sys::zova_vector_collections_list_request {
+        let request = zova_sys::zova_vector_collections_typed_list_request {
             db: self.inner.raw_ptr(),
             out_list: &mut list,
         };
         self.inner
-            .status_locked(unsafe { zova_sys::zova_vector_collections_list(&request) })?;
+            .status_locked(unsafe { zova_sys::zova_vector_collections_typed_list(&request) })?;
         take_collection_list(&mut list)
     }
 

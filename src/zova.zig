@@ -7,7 +7,7 @@
 //!
 //! Zova is currently pre-1.0, and internal `.zova` format compatibility is
 //! not preserved between experimental format versions. The current v0.21
-//! development format is version `5`: `_zova_meta.format_version = '5'` plus
+//! development format is version `6`: `_zova_meta.format_version = '6'` plus
 //! the required private object, vector, graph, and extension registry schemas.
 //! `Database.open` is intentionally non-mutating: it validates the file and
 //! rejects old, future, incomplete, or invalid private schemas instead of
@@ -58,7 +58,7 @@ const chunks_table = "_zova_chunks";
 const object_chunks_table = "_zova_object_chunks";
 const bound_stores_table = "_zova_bound_stores";
 const magic_value = "zova";
-const format_version = "5";
+const format_version = "6";
 const bound_object_store_role = "object_store";
 const bound_vector_store_role = "vector_store";
 const bound_object_store_name = "default";
@@ -136,11 +136,16 @@ pub const Error = zova_error.Error;
 
 pub const max_vector_dimensions = vector_impl.max_vector_dimensions;
 pub const VectorMetric = vector_impl.VectorMetric;
+pub const VectorElementType = vector_impl.VectorElementType;
 pub const VectorCollectionOptions = vector_impl.VectorCollectionOptions;
 pub const VectorCollectionInfo = vector_impl.VectorCollectionInfo;
 pub const VectorCollectionList = vector_impl.VectorCollectionList;
 pub const VectorInput = vector_impl.VectorInput;
+pub const TypedVectorInput = vector_impl.TypedVectorInput;
+pub const VectorValuesConst = vector_impl.VectorValuesConst;
+pub const VectorValuesOwned = vector_impl.VectorValuesOwned;
 pub const Vector = vector_impl.Vector;
+pub const TypedVector = vector_impl.TypedVector;
 pub const VectorSearchResult = vector_impl.VectorSearchResult;
 pub const VectorSearchResults = vector_impl.VectorSearchResults;
 pub const Notification = notify_impl.Notification;
@@ -421,7 +426,7 @@ pub const Database = struct {
     /// Create a new initialized `.zova` database.
     ///
     /// This never overwrites an existing file. The file is initialized with the
-    /// private `_zova_meta` table, format version `5`, and the required
+    /// private `_zova_meta` table, format version `6`, and the required
     /// object, vector, graph, and extension registry schemas.
     pub fn create(path: [:0]const u8) Error!Database {
         return createWithExtensions(path, bundledExtensionRegistry());
@@ -1206,6 +1211,24 @@ pub const Database = struct {
         committed = true;
     }
 
+    /// Store or replace one typed vector row in a collection.
+    pub fn putVectorTyped(
+        self: *Database,
+        collection_name: []const u8,
+        vector_id: []const u8,
+        values: VectorValuesConst,
+    ) Error!void {
+        const owns_transaction = try self.beginBoundVectorMutation();
+        var committed = false;
+        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+
+        var vectors = self.vectorDatabase();
+        try vectors.putVectorTyped(collection_name, vector_id, values);
+        if (self.bound_vector_store != null) try incrementBoundVectorEpoch(&self.sqlite_db);
+        try self.finishBoundVectorMutation(owns_transaction);
+        committed = true;
+    }
+
     /// Store or replace multiple vector rows in a collection.
     pub fn putVectors(
         self: *Database,
@@ -1223,6 +1246,23 @@ pub const Database = struct {
         committed = true;
     }
 
+    /// Store or replace multiple typed vector rows in a collection.
+    pub fn putVectorsTyped(
+        self: *Database,
+        collection_name: []const u8,
+        inputs: []const TypedVectorInput,
+    ) Error!void {
+        const owns_transaction = try self.beginBoundVectorMutation();
+        var committed = false;
+        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+
+        var vectors = self.vectorDatabase();
+        try vectors.putVectorsTyped(collection_name, inputs);
+        if (self.bound_vector_store != null and inputs.len != 0) try incrementBoundVectorEpoch(&self.sqlite_db);
+        try self.finishBoundVectorMutation(owns_transaction);
+        committed = true;
+    }
+
     /// Load one vector row into owned memory.
     pub fn getVector(
         self: *Database,
@@ -1232,6 +1272,17 @@ pub const Database = struct {
     ) Error!Vector {
         var vectors = self.vectorDatabase();
         return vectors.getVector(allocator, collection_name, vector_id);
+    }
+
+    /// Load one typed vector row into owned memory.
+    pub fn getVectorTyped(
+        self: *Database,
+        allocator: std.mem.Allocator,
+        collection_name: []const u8,
+        vector_id: []const u8,
+    ) Error!TypedVector {
+        var vectors = self.vectorDatabase();
+        return vectors.getVectorTyped(allocator, collection_name, vector_id);
     }
 
     /// Return whether a vector id exists in an existing collection.
@@ -1286,6 +1337,18 @@ pub const Database = struct {
         return vectors.searchVectors(allocator, collection_name, query, limit);
     }
 
+    /// Search one typed vector collection with an exact flat scan.
+    pub fn searchVectorsTyped(
+        self: *Database,
+        allocator: std.mem.Allocator,
+        collection_name: []const u8,
+        query: VectorValuesConst,
+        limit: usize,
+    ) Error!VectorSearchResults {
+        var vectors = self.vectorDatabase();
+        return vectors.searchVectorsTyped(allocator, collection_name, query, limit);
+    }
+
     /// Search one vector collection with an exact flat scan and distance cap.
     pub fn searchVectorsWithin(
         self: *Database,
@@ -1297,6 +1360,19 @@ pub const Database = struct {
     ) Error!VectorSearchResults {
         var vectors = self.vectorDatabase();
         return vectors.searchVectorsWithin(allocator, collection_name, query, max_distance, limit);
+    }
+
+    /// Search one typed vector collection with an exact flat scan and distance cap.
+    pub fn searchVectorsWithinTyped(
+        self: *Database,
+        allocator: std.mem.Allocator,
+        collection_name: []const u8,
+        query: VectorValuesConst,
+        max_distance: f64,
+        limit: usize,
+    ) Error!VectorSearchResults {
+        var vectors = self.vectorDatabase();
+        return vectors.searchVectorsWithinTyped(allocator, collection_name, query, max_distance, limit);
     }
 
     /// Search one vector collection over a caller-supplied candidate id set.
@@ -1312,6 +1388,19 @@ pub const Database = struct {
         return vectors.searchVectorsIn(allocator, collection_name, query, candidate_ids, limit);
     }
 
+    /// Search one typed vector collection over a caller-supplied candidate id set.
+    pub fn searchVectorsInTyped(
+        self: *Database,
+        allocator: std.mem.Allocator,
+        collection_name: []const u8,
+        query: VectorValuesConst,
+        candidate_ids: []const []const u8,
+        limit: usize,
+    ) Error!VectorSearchResults {
+        var vectors = self.vectorDatabase();
+        return vectors.searchVectorsInTyped(allocator, collection_name, query, candidate_ids, limit);
+    }
+
     /// Search one vector collection over candidates with an inclusive distance cap.
     pub fn searchVectorsInWithin(
         self: *Database,
@@ -1324,6 +1413,20 @@ pub const Database = struct {
     ) Error!VectorSearchResults {
         var vectors = self.vectorDatabase();
         return vectors.searchVectorsInWithin(allocator, collection_name, query, candidate_ids, max_distance, limit);
+    }
+
+    /// Search one typed vector collection over candidates with an inclusive distance cap.
+    pub fn searchVectorsInWithinTyped(
+        self: *Database,
+        allocator: std.mem.Allocator,
+        collection_name: []const u8,
+        query: VectorValuesConst,
+        candidate_ids: []const []const u8,
+        max_distance: f64,
+        limit: usize,
+    ) Error!VectorSearchResults {
+        var vectors = self.vectorDatabase();
+        return vectors.searchVectorsInWithinTyped(allocator, collection_name, query, candidate_ids, max_distance, limit);
     }
 
     /// Search one vector collection using an existing vector as the query.
@@ -1718,7 +1821,7 @@ fn initializeMetadata(db: *sqlite.Database) sqlite.Error!void {
         \\  value text not null
         \\);
         \\insert into _zova_meta (key, value) values ('magic', 'zova');
-        \\insert into _zova_meta (key, value) values ('format_version', '5');
+        \\insert into _zova_meta (key, value) values ('format_version', '6');
     );
 
     var insert_id = try db.prepare("insert into _zova_meta (key, value) values ('database_id', ?)");
@@ -2022,13 +2125,17 @@ fn copyVectorStorage(
         if (destination_has_collection) {
             var destination_info = try destination_vectors.vectorCollectionInfo(std.heap.c_allocator, collection.name);
             defer destination_info.deinit(std.heap.c_allocator);
-            if (destination_info.dimensions != collection.dimensions or destination_info.metric != collection.metric) {
+            if (destination_info.dimensions != collection.dimensions or
+                destination_info.metric != collection.metric or
+                destination_info.element_type != collection.element_type)
+            {
                 return error.VectorCollectionExists;
             }
         } else {
             try destination_vectors.createVectorCollection(collection.name, .{
                 .dimensions = collection.dimensions,
                 .metric = collection.metric,
+                .element_type = collection.element_type,
             });
         }
 
@@ -2045,10 +2152,10 @@ fn copyVectorStorage(
             const vector_id = try std.heap.c_allocator.dupe(u8, rows.columnText(0));
             defer std.heap.c_allocator.free(vector_id);
 
-            var vector = try source_vectors.getVector(std.heap.c_allocator, collection.name, vector_id);
+            var vector = try source_vectors.getVectorTyped(std.heap.c_allocator, collection.name, vector_id);
             defer vector.deinit(std.heap.c_allocator);
 
-            try destination_vectors.putVector(collection.name, vector.id, vector.values);
+            try destination_vectors.putVectorTyped(collection.name, vector.id, vector.values.asConst());
         }
     }
 }
@@ -2803,7 +2910,7 @@ fn verifyStoredVectors(db: *Database) Error!void {
         const vector_id = try allocator.dupe(u8, vectors.columnText(1));
         defer allocator.free(vector_id);
 
-        var vector = try db.getVector(allocator, collection_name, vector_id);
+        var vector = try db.getVectorTyped(allocator, collection_name, vector_id);
         defer vector.deinit(allocator);
     }
 }
@@ -3325,7 +3432,7 @@ test "created zova database stores metadata" {
 
     try std.testing.expectEqual(sqlite.Step.row, try meta.step());
     try std.testing.expectEqualStrings("format_version", meta.columnText(0));
-    try std.testing.expectEqualStrings("5", meta.columnText(1));
+    try std.testing.expectEqualStrings("6", meta.columnText(1));
 
     try std.testing.expectEqual(sqlite.Step.row, try meta.step());
     try std.testing.expectEqualStrings("magic", meta.columnText(0));
@@ -4111,7 +4218,7 @@ test "open rejects future format version" {
         try raw.exec(
             \\create table _zova_meta (key text primary key, value text not null);
             \\insert into _zova_meta (key, value) values ('magic', 'zova');
-            \\insert into _zova_meta (key, value) values ('format_version', '6');
+            \\insert into _zova_meta (key, value) values ('format_version', '7');
         );
     }
 
@@ -4636,8 +4743,15 @@ test "operational copies inline bound vector store data into single-file destina
         .{ .id = "doc-a", .values = &.{ 1.0, 0.0 } },
         .{ .id = "doc-b", .values = &.{ 0.0, 2.0 } },
     });
+    try db.createVectorCollection("bytes", .{ .dimensions = 2, .metric = .l2, .element_type = .i8 });
+    try db.putVectorsTyped("bytes", &.{
+        .{ .id = "byte-a", .values = .{ .i8 = &.{ @as(i8, 1), @as(i8, -1) } } },
+        .{ .id = "byte-b", .values = .{ .i8 = &.{ @as(i8, 5), @as(i8, -1) } } },
+    });
+    try db.createVectorCollection("halves", .{ .dimensions = 2, .metric = .l2, .element_type = .f16 });
+    try db.putVectorTyped("halves", "half-one", .{ .f16 = &.{ 0x3c00, 0x0000 } });
     try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_vectors"));
-    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from vector_store._zova_vectors"));
+    try std.testing.expectEqual(@as(i64, 5), try testingCount(&db, "select count(*) from vector_store._zova_vectors"));
     try std.testing.expectError(error.VectorCollectionNotFound, db.getVector(std.testing.allocator, "stale", "main-only"));
 
     try db.backupTo(backup_path, .{});
@@ -4650,12 +4764,29 @@ test "operational copies inline bound vector store data into single-file destina
         defer copy.deinit();
 
         try std.testing.expectEqual(@as(?BoundVectorStoreInfo, null), try copy.boundVectorStore(std.testing.allocator));
-        try std.testing.expectEqual(@as(i64, 2), try testingCount(&copy, "select count(*) from _zova_vectors"));
+        try std.testing.expectEqual(@as(i64, 5), try testingCount(&copy, "select count(*) from _zova_vectors"));
 
         var results = try copy.searchVectors(std.testing.allocator, "docs", &.{ 1.0, 0.0 }, 2);
         defer results.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 2), results.items.len);
         try std.testing.expectEqualStrings("doc-a", results.items[0].id);
+
+        var bytes_info = try copy.vectorCollectionInfo(std.testing.allocator, "bytes");
+        defer bytes_info.deinit(std.testing.allocator);
+        try std.testing.expectEqual(vector_impl.VectorElementType.i8, bytes_info.element_type);
+
+        var byte_vector = try copy.getVectorTyped(std.testing.allocator, "bytes", "byte-a");
+        defer byte_vector.deinit(std.testing.allocator);
+        try std.testing.expectEqualSlices(i8, &.{ @as(i8, 1), @as(i8, -1) }, byte_vector.values.i8);
+
+        var half_vector = try copy.getVectorTyped(std.testing.allocator, "halves", "half-one");
+        defer half_vector.deinit(std.testing.allocator);
+        try std.testing.expectEqualSlices(u16, &.{ 0x3c00, 0x0000 }, half_vector.values.f16);
+
+        var byte_results = try copy.searchVectorsTyped(std.testing.allocator, "bytes", .{ .i8 = &.{ @as(i8, 0), @as(i8, 0) } }, 2);
+        defer byte_results.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 2), byte_results.items.len);
+        try std.testing.expectEqualStrings("byte-a", byte_results.items[0].id);
     }
 }
 
@@ -4681,26 +4812,31 @@ test "split vector store moves existing vector storage into a bound store" {
         .{ .id = "doc-a", .values = &.{ 1.0, 0.0 } },
         .{ .id = "doc-b", .values = &.{ 0.0, 2.0 } },
     });
+    try db.createVectorCollection("bytes", .{ .dimensions = 2, .metric = .l2, .element_type = .i8 });
+    try db.putVectorsTyped("bytes", &.{
+        .{ .id = "byte-a", .values = .{ .i8 = &.{ @as(i8, 1), @as(i8, 0) } } },
+        .{ .id = "byte-b", .values = .{ .i8 = &.{ @as(i8, 5), @as(i8, 0) } } },
+    });
     try db.createGraph("split_vectors");
     try db.putGraphNode(.{ .graph_name = "split_vectors", .node_id = "doc:a", .kind = "document", .target_type = .record, .target_namespace = "documents", .target_ref = "doc-a" });
     try db.putGraphNode(.{ .graph_name = "split_vectors", .node_id = "vector:doc-a", .kind = "embedding", .target_type = .vector, .target_namespace = "docs", .target_ref = "doc-a" });
     try db.putGraphEdge(.{ .graph_name = "split_vectors", .from_node_id = "doc:a", .edge_type = "embedded_as", .to_node_id = "vector:doc-a" });
-    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from _zova_vector_collections"));
-    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from _zova_vectors"));
+    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from _zova_vector_collections"));
+    try std.testing.expectEqual(@as(i64, 4), try testingCount(&db, "select count(*) from _zova_vectors"));
 
     const result = try db.splitVectorStore(store_path);
     try std.testing.expectEqualStrings(bound_vector_store_role, result.role);
     try std.testing.expect(result.verified);
-    try std.testing.expectEqual(@as(u64, 1), result.copied.vector_collections);
-    try std.testing.expectEqual(@as(u64, 2), result.copied.vectors);
+    try std.testing.expectEqual(@as(u64, 2), result.copied.vector_collections);
+    try std.testing.expectEqual(@as(u64, 4), result.copied.vectors);
     try std.testing.expectEqual(result.copied, result.cleared);
     try std.testing.expect(isValidStoreId(&result.store_id));
     try std.testing.expect(isValidStoreId(&result.bound_set_id));
 
     try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_vector_collections"));
     try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_vectors"));
-    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from vector_store._zova_vector_collections"));
-    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from vector_store._zova_vectors"));
+    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from vector_store._zova_vector_collections"));
+    try std.testing.expectEqual(@as(i64, 4), try testingCount(&db, "select count(*) from vector_store._zova_vectors"));
     try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from documents"));
 
     var results = try db.searchVectors(std.testing.allocator, "docs", &.{ 1.0, 0.0 }, 2);
@@ -4709,6 +4845,10 @@ test "split vector store moves existing vector storage into a bound store" {
     try std.testing.expectEqualStrings("doc-a", results.items[0].id);
     try std.testing.expect(try db.hasGraphNode("split_vectors", "vector:doc-a"));
     try std.testing.expect(try db.hasGraphEdge("split_vectors", "doc:a", "embedded_as", "vector:doc-a"));
+
+    var byte_vector = try db.getVectorTyped(std.testing.allocator, "bytes", "byte-a");
+    defer byte_vector.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(i8, &.{ @as(i8, 1), @as(i8, 0) }, byte_vector.values.i8);
 
     const query_blob = try vector_impl.encodeF32Le(std.testing.allocator, &.{ 1.0, 0.0 });
     defer std.testing.allocator.free(query_blob);
@@ -4722,9 +4862,13 @@ test "split vector store moves existing vector storage into a bound store" {
     var backup = try Database.open(backup_path);
     defer backup.deinit();
     try std.testing.expectEqual(@as(?BoundVectorStoreInfo, null), try backup.boundVectorStore(std.testing.allocator));
-    try std.testing.expectEqual(@as(i64, 1), try testingCount(&backup, "select count(*) from _zova_vector_collections"));
-    try std.testing.expectEqual(@as(i64, 2), try testingCount(&backup, "select count(*) from _zova_vectors"));
+    try std.testing.expectEqual(@as(i64, 2), try testingCount(&backup, "select count(*) from _zova_vector_collections"));
+    try std.testing.expectEqual(@as(i64, 4), try testingCount(&backup, "select count(*) from _zova_vectors"));
     try std.testing.expect(try backup.hasGraphEdge("split_vectors", "doc:a", "embedded_as", "vector:doc-a"));
+
+    var backup_bytes = try backup.vectorCollectionInfo(std.testing.allocator, "bytes");
+    defer backup_bytes.deinit(std.testing.allocator);
+    try std.testing.expectEqual(vector_impl.VectorElementType.i8, backup_bytes.element_type);
 }
 
 test "open rejects bound object store id mismatch" {
@@ -4916,7 +5060,7 @@ test "open rejects current format database missing required object table without
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "5");
+        try testingWriteMetadata(&raw, "zova", "6");
         try raw.exec(extension_impl.extensions_schema_sql ++ ";");
     }
 
@@ -4941,7 +5085,7 @@ test "open rejects current format database missing required vector table without
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "5");
+        try testingWriteMetadata(&raw, "zova", "6");
         try raw.exec(extension_impl.extensions_schema_sql ++ ";");
         try raw.exec(object_impl.objects_schema_sql ++ ";");
         try raw.exec(object_impl.chunks_schema_sql ++ ";");
@@ -4968,7 +5112,7 @@ test "open rejects required object table missing required column" {
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "5");
+        try testingWriteMetadata(&raw, "zova", "6");
         try raw.exec(extension_impl.extensions_schema_sql ++ ";");
         try raw.exec(
             \\create table _zova_objects (
@@ -5008,7 +5152,7 @@ test "open rejects required object table missing required constraint" {
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "5");
+        try testingWriteMetadata(&raw, "zova", "6");
         try raw.exec(extension_impl.extensions_schema_sql ++ ";");
         try raw.exec(
             \\create table _zova_objects (
@@ -5049,7 +5193,7 @@ test "open rejects fake constraint text in required object table" {
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "5");
+        try testingWriteMetadata(&raw, "zova", "6");
         try raw.exec(extension_impl.extensions_schema_sql ++ ";");
         try raw.exec(
             \\create table _zova_objects (
@@ -5090,7 +5234,7 @@ test "open rejects required vector table missing required column" {
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "5");
+        try testingWriteMetadata(&raw, "zova", "6");
         try raw.exec(extension_impl.extensions_schema_sql ++ ";");
         try raw.exec(object_impl.objects_schema_sql ++ ";");
         try raw.exec(object_impl.chunks_schema_sql ++ ";");
@@ -5258,7 +5402,7 @@ test "converted zova remains readable through sqlite wrapper" {
     defer meta.deinit();
 
     try std.testing.expectEqual(sqlite.Step.row, try meta.step());
-    try std.testing.expectEqualStrings("5", meta.columnText(0));
+    try std.testing.expectEqualStrings("6", meta.columnText(0));
 
     try testingExpectTableCount(&raw, "_zova_objects", 1);
     try testingExpectTableCount(&raw, "_zova_chunks", 1);

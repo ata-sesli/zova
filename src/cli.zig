@@ -5910,7 +5910,7 @@ fn validateOneBoundStore(
 
     const format_version = (try requiredBoundStoreMetaValueAlloc(allocator, &store, report, issues, "format_version", "missing_store_format_version", "UnsupportedZovaVersion", "store_format_version_unreadable")) orelse return;
     defer allocator.free(format_version);
-    if (!std.mem.eql(u8, format_version, "5")) {
+    if (!std.mem.eql(u8, format_version, "6")) {
         try addDiagnosticIssue(allocator, report, issues, .bound_store, "store_format_version_mismatch", "UnsupportedZovaVersion", null, null, null, null);
         return;
     }

@@ -1,12 +1,13 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyAny;
+use pyo3::types::{PyAny, PyList};
 
 #[pyclass(name = "VectorCollectionOptions", frozen, skip_from_py_object)]
 #[derive(Clone, Copy)]
 pub(crate) struct PyVectorCollectionOptions {
     dimensions: u32,
     metric: i32,
+    element_type: i32,
 }
 
 #[pyclass(name = "Vector", frozen, skip_from_py_object)]
@@ -16,12 +17,27 @@ pub(crate) struct PyVector {
     values: Vec<f32>,
 }
 
+#[derive(Clone)]
+pub(crate) enum PyVectorValues {
+    F32(Vec<f32>),
+    F16(Vec<u16>),
+    I8(Vec<i8>),
+}
+
+#[pyclass(name = "TypedVector", frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub(crate) struct PyTypedVector {
+    id: String,
+    values: PyVectorValues,
+}
+
 #[pyclass(name = "VectorCollectionInfo", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PyVectorCollectionInfo {
     name: String,
     dimensions: u32,
     metric: i32,
+    element_type: i32,
     vector_count: u64,
 }
 
@@ -30,6 +46,13 @@ pub(crate) struct PyVectorCollectionInfo {
 pub(crate) struct PyVectorInput {
     id: String,
     values: Vec<f32>,
+}
+
+#[pyclass(name = "TypedVectorInput", frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub(crate) struct PyTypedVectorInput {
+    id: String,
+    values: PyVectorValues,
 }
 
 #[pyclass(name = "VectorSearchResult", frozen, skip_from_py_object)]
@@ -42,9 +65,15 @@ pub(crate) struct PyVectorSearchResult {
 #[pymethods]
 impl PyVectorCollectionOptions {
     #[new]
-    pub(crate) fn new(dimensions: u32, metric: i32) -> PyResult<Self> {
+    #[pyo3(signature = (dimensions, metric, element_type = 0))]
+    pub(crate) fn new(dimensions: u32, metric: i32, element_type: i32) -> PyResult<Self> {
         let _ = metric_from_i32(metric)?;
-        Ok(Self { dimensions, metric })
+        let _ = element_type_from_i32(element_type)?;
+        Ok(Self {
+            dimensions,
+            metric,
+            element_type,
+        })
     }
 
     #[getter]
@@ -57,10 +86,15 @@ impl PyVectorCollectionOptions {
         self.metric
     }
 
+    #[getter]
+    pub(crate) fn element_type(&self) -> i32 {
+        self.element_type
+    }
+
     pub(crate) fn __repr__(&self) -> String {
         format!(
-            "VectorCollectionOptions(dimensions={}, metric={})",
-            self.dimensions, self.metric
+            "VectorCollectionOptions(dimensions={}, metric={}, element_type={})",
+            self.dimensions, self.metric, self.element_type
         )
     }
 }
@@ -83,6 +117,33 @@ impl PyVector {
 }
 
 #[pymethods]
+impl PyTypedVector {
+    #[getter]
+    pub(crate) fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    #[getter]
+    pub(crate) fn element_type(&self) -> i32 {
+        self.values.element_type_i32()
+    }
+
+    #[getter]
+    pub(crate) fn values(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.values.to_py(py)
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        format!(
+            "TypedVector(id='{}', element_type={}, values_len={})",
+            self.id,
+            self.values.element_type_i32(),
+            self.values.len()
+        )
+    }
+}
+
+#[pymethods]
 impl PyVectorCollectionInfo {
     #[getter]
     pub(crate) fn name(&self) -> String {
@@ -100,14 +161,19 @@ impl PyVectorCollectionInfo {
     }
 
     #[getter]
+    pub(crate) fn element_type(&self) -> i32 {
+        self.element_type
+    }
+
+    #[getter]
     pub(crate) fn vector_count(&self) -> u64 {
         self.vector_count
     }
 
     pub(crate) fn __repr__(&self) -> String {
         format!(
-            "VectorCollectionInfo(name='{}', dimensions={}, metric={}, vector_count={})",
-            self.name, self.dimensions, self.metric, self.vector_count
+            "VectorCollectionInfo(name='{}', dimensions={}, metric={}, element_type={}, vector_count={})",
+            self.name, self.dimensions, self.metric, self.element_type, self.vector_count
         )
     }
 }
@@ -139,6 +205,41 @@ impl PyVectorInput {
 }
 
 #[pymethods]
+impl PyTypedVectorInput {
+    #[new]
+    pub(crate) fn new(id: String, element_type: i32, values: &Bound<'_, PyAny>) -> PyResult<Self> {
+        Ok(Self {
+            id,
+            values: vector_values_from_py(element_type, values)?,
+        })
+    }
+
+    #[getter]
+    pub(crate) fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    #[getter]
+    pub(crate) fn element_type(&self) -> i32 {
+        self.values.element_type_i32()
+    }
+
+    #[getter]
+    pub(crate) fn values(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.values.to_py(py)
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        format!(
+            "TypedVectorInput(id='{}', element_type={}, values_len={})",
+            self.id,
+            self.values.element_type_i32(),
+            self.values.len()
+        )
+    }
+}
+
+#[pymethods]
 impl PyVectorSearchResult {
     #[getter]
     pub(crate) fn id(&self) -> String {
@@ -158,13 +259,14 @@ impl PyVectorSearchResult {
     }
 }
 
-pub(crate) fn options_from_py(
+pub(crate) fn typed_options_from_py(
     value: &Bound<'_, PyAny>,
-) -> PyResult<zova_rust::VectorCollectionOptions> {
+) -> PyResult<zova_rust::TypedVectorCollectionOptions> {
     let options = value.extract::<PyRef<'_, PyVectorCollectionOptions>>()?;
-    Ok(zova_rust::VectorCollectionOptions {
+    Ok(zova_rust::TypedVectorCollectionOptions {
         dimensions: options.dimensions,
         metric: metric_from_i32(options.metric)?,
+        element_type: element_type_from_i32(options.element_type)?,
     })
 }
 
@@ -174,6 +276,18 @@ pub(crate) fn vector_inputs_from_py(value: &Bound<'_, PyAny>) -> PyResult<Vec<(S
         let item = item?;
         let vector = item.extract::<PyRef<'_, PyVectorInput>>()?;
         vectors.push((vector.id.clone(), vector.values.clone()));
+    }
+    Ok(vectors)
+}
+
+pub(crate) fn typed_vector_inputs_from_py(
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Vec<PyTypedVectorInput>> {
+    let mut vectors = Vec::new();
+    for item in value.try_iter()? {
+        let item = item?;
+        let vector = item.extract::<PyRef<'_, PyTypedVectorInput>>()?;
+        vectors.push(vector.clone());
     }
     Ok(vectors)
 }
@@ -190,6 +304,18 @@ pub(crate) fn vector_input_refs<'a>(
         .collect()
 }
 
+pub(crate) fn typed_vector_input_refs<'a>(
+    vectors: &'a [PyTypedVectorInput],
+) -> Vec<zova_rust::TypedVectorInput<'a>> {
+    vectors
+        .iter()
+        .map(|vector| zova_rust::TypedVectorInput {
+            id: vector.id.as_str(),
+            values: vector.values.as_rust(),
+        })
+        .collect()
+}
+
 pub(crate) fn candidate_refs(candidate_ids: &[String]) -> Vec<&str> {
     candidate_ids.iter().map(String::as_str).collect()
 }
@@ -201,11 +327,23 @@ pub(crate) fn py_vector(vector: zova_rust::Vector) -> PyVector {
     }
 }
 
+pub(crate) fn py_typed_vector(vector: zova_rust::TypedVector) -> PyTypedVector {
+    PyTypedVector {
+        id: vector.id,
+        values: match vector.values {
+            zova_rust::VectorValuesOwned::F32(values) => PyVectorValues::F32(values),
+            zova_rust::VectorValuesOwned::F16(values) => PyVectorValues::F16(values),
+            zova_rust::VectorValuesOwned::I8(values) => PyVectorValues::I8(values),
+        },
+    }
+}
+
 pub(crate) fn py_collection_info(info: zova_rust::VectorCollectionInfo) -> PyVectorCollectionInfo {
     PyVectorCollectionInfo {
         name: info.name,
         dimensions: info.dimensions,
         metric: metric_to_i32(info.metric),
+        element_type: element_type_to_i32(info.element_type),
         vector_count: info.vector_count,
     }
 }
@@ -220,6 +358,52 @@ pub(crate) fn py_search_results(
             distance: result.distance,
         })
         .collect()
+}
+
+impl PyVectorValues {
+    pub(crate) fn as_rust(&self) -> zova_rust::VectorValues<'_> {
+        match self {
+            Self::F32(values) => zova_rust::VectorValues::F32(values.as_slice()),
+            Self::F16(values) => zova_rust::VectorValues::F16(values.as_slice()),
+            Self::I8(values) => zova_rust::VectorValues::I8(values.as_slice()),
+        }
+    }
+
+    fn element_type_i32(&self) -> i32 {
+        match self {
+            Self::F32(_) => 0,
+            Self::F16(_) => 1,
+            Self::I8(_) => 2,
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::F32(values) => values.len(),
+            Self::F16(values) => values.len(),
+            Self::I8(values) => values.len(),
+        }
+    }
+
+    fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let list = match self {
+            Self::F32(values) => PyList::new(py, values)?,
+            Self::F16(values) => PyList::new(py, values)?,
+            Self::I8(values) => PyList::new(py, values)?,
+        };
+        Ok(list.into_any().unbind())
+    }
+}
+
+pub(crate) fn vector_values_from_py(
+    element_type: i32,
+    values: &Bound<'_, PyAny>,
+) -> PyResult<PyVectorValues> {
+    match element_type_from_i32(element_type)? {
+        zova_rust::VectorElementType::F32 => Ok(PyVectorValues::F32(values.extract()?)),
+        zova_rust::VectorElementType::F16 => Ok(PyVectorValues::F16(values.extract()?)),
+        zova_rust::VectorElementType::I8 => Ok(PyVectorValues::I8(values.extract()?)),
+    }
 }
 
 pub(crate) fn metric_from_i32(metric: i32) -> PyResult<zova_rust::VectorMetric> {
@@ -238,6 +422,25 @@ pub(crate) fn metric_to_i32(metric: zova_rust::VectorMetric) -> i32 {
         zova_rust::VectorMetric::Cosine => 0,
         zova_rust::VectorMetric::L2 => 1,
         zova_rust::VectorMetric::Dot => 2,
+    }
+}
+
+pub(crate) fn element_type_from_i32(element_type: i32) -> PyResult<zova_rust::VectorElementType> {
+    match element_type {
+        0 => Ok(zova_rust::VectorElementType::F32),
+        1 => Ok(zova_rust::VectorElementType::F16),
+        2 => Ok(zova_rust::VectorElementType::I8),
+        _ => Err(PyValueError::new_err(format!(
+            "invalid vector element type {element_type}; expected 0, 1, or 2"
+        ))),
+    }
+}
+
+pub(crate) fn element_type_to_i32(element_type: zova_rust::VectorElementType) -> i32 {
+    match element_type {
+        zova_rust::VectorElementType::F32 => 0,
+        zova_rust::VectorElementType::F16 => 1,
+        zova_rust::VectorElementType::I8 => 2,
     }
 }
 

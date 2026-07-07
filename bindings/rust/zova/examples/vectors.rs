@@ -1,4 +1,7 @@
-use zova::{Database, Step, VectorCollectionOptions, VectorInput, VectorMetric};
+use zova::{
+    Database, Step, TypedVectorCollectionOptions, TypedVectorInput, VectorCollectionOptions,
+    VectorElementType, VectorInput, VectorMetric, VectorValues,
+};
 
 fn f32_blob(values: &[f32]) -> Vec<u8> {
     values
@@ -80,6 +83,42 @@ fn main() -> zova::Result<()> {
             sql_search.column_f64(1)?
         );
     }
+
+    db.create_vector_collection_typed(
+        "scores_i8",
+        TypedVectorCollectionOptions {
+            dimensions: 2,
+            metric: VectorMetric::L2,
+            element_type: VectorElementType::I8,
+        },
+    )?;
+    db.put_vectors_typed(
+        "scores_i8",
+        &[
+            TypedVectorInput {
+                id: "near",
+                values: VectorValues::I8(&[1, -1]),
+            },
+            TypedVectorInput {
+                id: "far",
+                values: VectorValues::I8(&[8, -1]),
+            },
+        ],
+    )?;
+    let i8_hit = db.search_vectors_typed("scores_i8", VectorValues::I8(&[0, 0]), 1)?;
+    println!("i8: {} {}", i8_hit[0].id, i8_hit[0].distance);
+
+    db.create_vector_collection_typed(
+        "halves",
+        TypedVectorCollectionOptions {
+            dimensions: 2,
+            metric: VectorMetric::L2,
+            element_type: VectorElementType::F16,
+        },
+    )?;
+    db.put_vector_typed("halves", "one", VectorValues::F16(&[0x3c00, 0x0000]))?;
+    let half = db.get_vector_typed("halves", "one")?;
+    println!("f16: {:?}", half.values);
 
     Ok(())
 }

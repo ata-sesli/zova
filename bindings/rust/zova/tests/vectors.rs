@@ -1,4 +1,8 @@
-use zova::{Database, Status, Step, VectorCollectionOptions, VectorInput, VectorMetric};
+use zova::{
+    Database, Status, Step, TypedVectorCollectionOptions, TypedVectorInput,
+    VectorCollectionOptions, VectorElementType, VectorInput, VectorMetric, VectorValues,
+    VectorValuesOwned,
+};
 
 fn temp_path(name: &str) -> String {
     let mut path = std::env::temp_dir();
@@ -116,6 +120,93 @@ fn vector_collection_lifecycle_crud_batch_and_delete() {
     assert_eq!(
         db.delete_vector_collection("chunks").unwrap_err().status(),
         Some(Status::VectorCollectionNotFound)
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn raw_typed_vectors_roundtrip_and_search() {
+    let path = temp_path("typed");
+    let mut db = Database::create(&path).unwrap();
+
+    db.create_vector_collection_typed(
+        "bytes",
+        TypedVectorCollectionOptions {
+            dimensions: 2,
+            metric: VectorMetric::L2,
+            element_type: VectorElementType::I8,
+        },
+    )
+    .unwrap();
+    db.create_vector_collection_typed(
+        "halves",
+        TypedVectorCollectionOptions {
+            dimensions: 2,
+            metric: VectorMetric::L2,
+            element_type: VectorElementType::F16,
+        },
+    )
+    .unwrap();
+
+    let info = db.vector_collection_info("bytes").unwrap();
+    assert_eq!(info.element_type, VectorElementType::I8);
+
+    db.put_vectors_typed(
+        "bytes",
+        &[
+            TypedVectorInput {
+                id: "near",
+                values: VectorValues::I8(&[1, 0]),
+            },
+            TypedVectorInput {
+                id: "far",
+                values: VectorValues::I8(&[5, 0]),
+            },
+        ],
+    )
+    .unwrap();
+    db.put_vector_typed("halves", "near", VectorValues::F16(&[0x3c00, 0x0000]))
+        .unwrap();
+    db.put_vector_typed("halves", "far", VectorValues::F16(&[0x4400, 0x0000]))
+        .unwrap();
+
+    let vector = db.get_vector_typed("bytes", "near").unwrap();
+    assert_eq!(vector.id, "near");
+    assert_eq!(vector.values, VectorValuesOwned::I8(vec![1, 0]));
+
+    let vector = db.get_vector_typed("halves", "near").unwrap();
+    assert_eq!(vector.values, VectorValuesOwned::F16(vec![0x3c00, 0x0000]));
+
+    let results = db
+        .search_vectors_typed("bytes", VectorValues::I8(&[0, 0]), 2)
+        .unwrap();
+    assert_eq!(
+        results
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        ["near", "far"]
+    );
+    assert_close(results[0].distance, 1.0);
+
+    let results = db
+        .search_vectors_typed("halves", VectorValues::F16(&[0x0000, 0x0000]), 2)
+        .unwrap();
+    assert_eq!(
+        results
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        ["near", "far"]
+    );
+    assert_close(results[0].distance, 1.0);
+
+    assert_eq!(
+        db.put_vector("bytes", "wrong", &[1.0, 2.0])
+            .unwrap_err()
+            .status(),
+        Some(Status::VectorInvalid)
     );
 
     let _ = std::fs::remove_file(path);

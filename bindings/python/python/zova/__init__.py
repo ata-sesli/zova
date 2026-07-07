@@ -21,6 +21,8 @@ from ._native import (
     ObjectWriter,
     SavepointContext,
     Subscription,
+    TypedVector,
+    TypedVectorInput,
     Vector,
     VectorCollectionInfo,
     VectorCollectionOptions,
@@ -34,7 +36,7 @@ from ._native import (
     restore_backup,
 )
 
-__version__ = "0.21.1"
+__version__ = "0.21.2"
 
 
 class Step(IntEnum):
@@ -54,6 +56,12 @@ class VectorMetric(IntEnum):
     COSINE = 0
     L2 = 1
     DOT = 2
+
+
+class VectorElementType(IntEnum):
+    F32 = 0
+    F16 = 1
+    I8 = 2
 
 
 class GraphTargetType(IntEnum):
@@ -101,10 +109,13 @@ __all__ = [
     "ObjectWriter",
     "SavepointContext",
     "Subscription",
+    "TypedVector",
+    "TypedVectorInput",
     "Step",
     "Vector",
     "VectorCollectionInfo",
     "VectorCollectionOptions",
+    "VectorElementType",
     "VectorInput",
     "VectorMetric",
     "VectorSearchResult",
