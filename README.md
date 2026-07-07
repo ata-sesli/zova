@@ -673,6 +673,21 @@ extension code just because a `.zova` file contains extension metadata.
 If a command needs a dynamic extension that is missing or untrusted, diagnostics
 tell you to provide `--extension <bundle.zovaext>` or trust the bundle first.
 
+The v0.22 development line also includes an experimental bundle producer CLI:
+
+```sh
+zova extension scaffold ./sample_ext --name sample_ext --version 0.1.0
+zova extension build ./sample_ext
+zova extension pack ./sample_ext --out ./sample_ext.zovaext
+zova extension verify --smoke ./sample_ext.zovaext
+```
+
+At the low-level C ABI, apps can register scalar SQL functions on Zova-owned
+connections with `zova_database_register_function`. Callback arguments are
+borrowed for the call only, result bytes are copied by Zova, and callbacks must
+not re-enter the same `zova_database` handle. Safe high-level Rust, Go, and
+Python callback APIs are not part of this first v0.22 slice.
+
 `install` succeeds only for extensions registered in the current process or
 bundled with Zova. The default Zova process registry includes `trgm`, so this
 works in the normal CLI build:
@@ -990,6 +1005,7 @@ Zova `0.21.2` does not include:
 
 - binding-level app-registered extension authoring APIs
 - binding-level dynamic `.zovaext` loading APIs
+- safe high-level Rust, Go, or Python SQL callback APIs
 - ANN indexes such as HNSW or IVFFlat
 - vector SQL operators
 - object or chunk virtual tables

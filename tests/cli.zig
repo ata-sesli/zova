@@ -41,6 +41,10 @@ test "cli version and help are successful" {
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "extension install [--json] <file.zova> <name>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "extension trust [--json] <bundle.zovaext>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "extension trusted [--json]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "extension scaffold [--json] <dir> --name <name> --version <version>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "extension build [--json] <dir>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "extension pack [--json] <dir> --out <bundle.zovaext>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "extension verify [--json] [--smoke] <bundle.zovaext>") != null);
 }
 
 test "cli usage errors return exit code 2" {
@@ -237,6 +241,82 @@ test "cli trusted dynamic extension loads only when explicitly requested" {
     defer after_untrust.deinit();
     try std.testing.expectEqual(@as(u8, 4), after_untrust.code);
     try expectContains(after_untrust.stderr, "ExtensionUntrusted");
+}
+
+test "cli experimental extension builder scaffolds builds packs verifies and installs" {
+    if (comptime !zova.extension_dynamic.supports_dynamic_loading) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var extension_dir_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const extension_dir = try std.fmt.bufPrint(&extension_dir_buffer, ".zig-cache/tmp/{s}/sample_ext", .{tmp.sub_path});
+    var bundle_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const bundle_path = try std.fmt.bufPrint(&bundle_buffer, ".zig-cache/tmp/{s}/sample_ext.zovaext", .{tmp.sub_path});
+    var trust_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const trust_path = try std.fmt.bufPrint(&trust_buffer, ".zig-cache/tmp/{s}/trusted_builder_extensions.json", .{tmp.sub_path});
+    try setTestEnv("ZOVA_TRUST_STORE", trust_path);
+
+    var scaffold = try runCli(&.{ "zova", "extension", "scaffold", "--json", extension_dir, "--name", "sample_ext", "--version", "0.1.0" });
+    defer scaffold.deinit();
+    try std.testing.expectEqual(@as(u8, 0), scaffold.code);
+    var scaffold_json = try parseJson(scaffold.stdout);
+    defer scaffold_json.deinit();
+    try expectJsonString(scaffold_json.value.object, "command", "extension-scaffold");
+    try expectContains(scaffold.stdout, "\"experimental\": true");
+
+    try expectFileExists(tmp.dir, "sample_ext/extension.zig");
+    try expectFileExists(tmp.dir, "sample_ext/extension.json");
+
+    var build = try runCli(&.{ "zova", "extension", "build", "--json", extension_dir });
+    defer build.deinit();
+    try std.testing.expectEqual(@as(u8, 0), build.code);
+    var build_json = try parseJson(build.stdout);
+    defer build_json.deinit();
+    try expectJsonString(build_json.value.object, "command", "extension-build");
+
+    var pack = try runCli(&.{ "zova", "extension", "pack", "--json", extension_dir, "--out", bundle_path });
+    defer pack.deinit();
+    try std.testing.expectEqual(@as(u8, 0), pack.code);
+    var pack_json = try parseJson(pack.stdout);
+    defer pack_json.deinit();
+    try expectJsonString(pack_json.value.object, "command", "extension-pack");
+    try expectContains(pack.stdout, "zova extension trust");
+
+    var verify = try runCli(&.{ "zova", "extension", "verify", "--json", bundle_path });
+    defer verify.deinit();
+    try std.testing.expectEqual(@as(u8, 0), verify.code);
+    var verify_json = try parseJson(verify.stdout);
+    defer verify_json.deinit();
+    try expectJsonString(verify_json.value.object, "command", "extension-verify");
+
+    var smoke = try runCli(&.{ "zova", "extension", "verify", "--json", "--smoke", bundle_path });
+    defer smoke.deinit();
+    try std.testing.expectEqual(@as(u8, 0), smoke.code);
+
+    var trusted_before = try runCli(&.{ "zova", "extension", "trusted", "--json" });
+    defer trusted_before.deinit();
+    try std.testing.expectEqual(@as(u8, 0), trusted_before.code);
+    try std.testing.expect(std.mem.indexOf(u8, trusted_before.stdout, "sample_ext") == null);
+
+    var trust = try runCli(&.{ "zova", "extension", "trust", "--json", bundle_path });
+    defer trust.deinit();
+    try std.testing.expectEqual(@as(u8, 0), trust.code);
+
+    var db_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&db_buffer, tmp.sub_path[0..], "builder-extension.zova");
+    {
+        var db = try zova.Database.create(db_path);
+        defer db.deinit();
+    }
+
+    var install = try runCli(&.{ "zova", "--extension", bundle_path, "extension", "install", "--json", db_path, "sample_ext" });
+    defer install.deinit();
+    try std.testing.expectEqual(@as(u8, 0), install.code);
+
+    var check = try runCli(&.{ "zova", "--extension", bundle_path, "extension", "check", "--json", db_path, "sample_ext" });
+    defer check.deinit();
+    try std.testing.expectEqual(@as(u8, 0), check.code);
 }
 
 test "cli extension list info and diagnostics inspect unavailable extension metadata" {
@@ -3133,6 +3213,12 @@ fn defaultIo() std.Io {
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {
     try std.testing.expect(std.mem.indexOf(u8, haystack, needle) != null);
+}
+
+fn expectFileExists(dir: std.Io.Dir, sub_path: []const u8) !void {
+    const io = defaultIo();
+    var file = try dir.openFile(io, sub_path, .{});
+    file.close(io);
 }
 
 fn missingHexId() []const u8 {

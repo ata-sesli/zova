@@ -78,10 +78,26 @@ const DatabaseHandle = struct {
     live_statements: usize = 0,
     live_writers: usize = 0,
     live_subscriptions: usize = 0,
+    sql_functions: std.ArrayList(SqlFunctionRegistration) = .empty,
     // Connection-scoped diagnostic text. This mirrors SQLite's model closely:
     // callers can ask the database handle for the most recent useful message,
     // and the pointer is borrowed until another call on the handle replaces it.
     last_error: ?[:0]u8 = null,
+};
+
+const SqlFunctionRegistration = struct {
+    name: [:0]u8,
+    arity: c_int,
+
+    fn deinit(self: *SqlFunctionRegistration) void {
+        allocator.free(self.name);
+    }
+};
+
+const SqlScalarFunctionContext = struct {
+    user_data: ?*anyopaque,
+    callback: *const fn (?*anyopaque, ?*const zova_sql_function_call, ?*zova_sql_result) callconv(.c) void,
+    destroy: zova_sql_destroy_callback,
 };
 
 const WriterHandle = struct {
@@ -168,6 +184,56 @@ pub const zova_column_type = enum(c_int) {
     BLOB = 4,
     NULL = 5,
 };
+
+pub const zova_sql_value_type = enum(c_int) {
+    NULL = 0,
+    INTEGER = 1,
+    FLOAT = 2,
+    TEXT = 3,
+    BLOB = 4,
+};
+
+pub const zova_sql_result_type = enum(c_int) {
+    NULL = 0,
+    INTEGER = 1,
+    FLOAT = 2,
+    TEXT = 3,
+    BLOB = 4,
+    ERROR = 5,
+};
+
+pub const ZOVA_SQL_FUNCTION_DETERMINISTIC: u32 = 1 << 0;
+pub const ZOVA_SQL_FUNCTION_DIRECT_ONLY: u32 = 1 << 1;
+pub const ZOVA_SQL_FUNCTION_INNOCUOUS: u32 = 1 << 2;
+
+pub const zova_sql_value = extern struct {
+    value_type: zova_sql_value_type = .NULL,
+    int64_value: i64 = 0,
+    double_value: f64 = 0,
+    data: ?*const anyopaque = null,
+    data_len: usize = 0,
+};
+
+pub const zova_sql_result = extern struct {
+    // Raw C integer so invalid callback result types can be reported as SQLite
+    // callback errors instead of becoming Zig enum-safety traps.
+    result_type: c_int = @intFromEnum(zova_sql_result_type.NULL),
+    int64_value: i64 = 0,
+    double_value: f64 = 0,
+    data: ?*const anyopaque = null,
+    data_len: usize = 0,
+    error_message: ?[*]const u8 = null,
+    error_message_len: usize = 0,
+};
+
+pub const zova_sql_function_call = extern struct {
+    user_data: ?*anyopaque,
+    argc: usize,
+    argv: ?[*]const zova_sql_value,
+};
+
+pub const zova_sql_scalar_callback = ?*const fn (?*anyopaque, ?*const zova_sql_function_call, ?*zova_sql_result) callconv(.c) void;
+pub const zova_sql_destroy_callback = ?*const fn (?*anyopaque) callconv(.c) void;
 
 pub const zova_object_id = extern struct {
     bytes: [32]u8,
@@ -444,6 +510,16 @@ pub const zova_database_restore_request = extern struct {
 pub const zova_database_exec_request = extern struct {
     db: ?*zova_database,
     sql: ?[*:0]const u8,
+};
+
+pub const zova_sql_function_register_request = extern struct {
+    db: ?*zova_database,
+    name: ?[*:0]const u8,
+    arity: c_int,
+    flags: u32,
+    user_data: ?*anyopaque,
+    callback: zova_sql_scalar_callback,
+    destroy: zova_sql_destroy_callback,
 };
 
 pub const zova_database_simple_request = extern struct {
@@ -1151,6 +1227,7 @@ pub fn zova_database_close(db: ?*zova_database) callconv(.c) zova_status {
     }
     clearLastError(handle);
     handle.db.deinit();
+    deinitSqlFunctionRegistrations(handle);
     handle.mutex.unlock();
     allocator.destroy(handle);
     return .OK;
@@ -1163,6 +1240,55 @@ pub fn zova_database_exec(request: ?*const zova_database_exec_request) callconv(
     defer handle.mutex.unlock();
     const sql = req.sql orelse return failDb(handle, error.InvalidArgument);
     handle.db.exec(std.mem.span(sql)) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_database_register_function(request: ?*const zova_sql_function_register_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+
+    const name_z = req.name orelse return failDb(handle, error.InvalidArgument);
+    const name = std.mem.span(name_z);
+    validateSqlFunctionName(name) catch |err| return failDb(handle, err);
+    if (!isValidSqlFunctionArity(req.arity)) return failDb(handle, error.InvalidArgument);
+    if ((req.flags & ~allowed_sql_function_flags) != 0) return failDb(handle, error.InvalidArgument);
+    const callback = req.callback orelse return failDb(handle, error.InvalidArgument);
+    if (hasRegisteredSqlFunction(handle, name, req.arity)) return failDb(handle, error.InvalidArgument);
+
+    handle.sql_functions.ensureUnusedCapacity(allocator, 1) catch |err| return failDb(handle, err);
+
+    const context = allocator.create(SqlScalarFunctionContext) catch |err| return failDb(handle, err);
+    context.* = .{
+        .user_data = req.user_data,
+        .callback = callback,
+        .destroy = req.destroy,
+    };
+
+    const name_copy = allocator.dupeZ(u8, name) catch |err| {
+        destroySqlScalarContext(@ptrCast(context));
+        return failDb(handle, err);
+    };
+
+    const rc = sqlite.c.sqlite3_create_function_v2(
+        handle.db.sqlite_db.handle,
+        name_z,
+        req.arity,
+        sqlFunctionFlagsToSqlite(req.flags),
+        context,
+        sqlScalarTrampoline,
+        null,
+        null,
+        destroySqlScalarContext,
+    );
+    if (rc != sqlite.c.SQLITE_OK) {
+        allocator.free(name_copy);
+        return failDbSqliteResult(handle, rc);
+    }
+
+    handle.sql_functions.appendAssumeCapacity(.{ .name = name_copy, .arity = req.arity });
+
     return okDb(handle);
 }
 
@@ -2559,6 +2685,214 @@ fn bytesMut(data: ?[*]u8, len: usize) ?[]u8 {
     return ptr[0..len];
 }
 
+const allowed_sql_function_flags =
+    ZOVA_SQL_FUNCTION_DETERMINISTIC |
+    ZOVA_SQL_FUNCTION_DIRECT_ONLY |
+    ZOVA_SQL_FUNCTION_INNOCUOUS;
+
+fn validateSqlFunctionName(name: []const u8) error{InvalidArgument}!void {
+    if (name.len == 0 or name.len > 64) return error.InvalidArgument;
+    if (hasAsciiInsensitivePrefix(name, "zova_") or hasAsciiInsensitivePrefix(name, "_zova_")) return error.InvalidArgument;
+    if (!isAsciiIdentStart(name[0])) return error.InvalidArgument;
+    for (name[1..]) |byte| {
+        if (!isAsciiIdentContinue(byte)) return error.InvalidArgument;
+    }
+}
+
+fn isValidSqlFunctionArity(arity: c_int) bool {
+    return arity == -1 or (arity >= 0 and arity <= 127);
+}
+
+fn hasRegisteredSqlFunction(handle: *DatabaseHandle, name: []const u8, arity: c_int) bool {
+    for (handle.sql_functions.items) |item| {
+        if (item.arity == arity and asciiInsensitiveEql(item.name, name)) return true;
+    }
+    return false;
+}
+
+fn sqlFunctionFlagsToSqlite(flags: u32) c_int {
+    var sqlite_flags: c_int = sqlite.c.SQLITE_UTF8;
+    if ((flags & ZOVA_SQL_FUNCTION_DETERMINISTIC) != 0) sqlite_flags |= sqlite.c.SQLITE_DETERMINISTIC;
+    if ((flags & ZOVA_SQL_FUNCTION_DIRECT_ONLY) != 0) sqlite_flags |= sqlite.c.SQLITE_DIRECTONLY;
+    if ((flags & ZOVA_SQL_FUNCTION_INNOCUOUS) != 0) sqlite_flags |= sqlite.c.SQLITE_INNOCUOUS;
+    return sqlite_flags;
+}
+
+fn deinitSqlFunctionRegistrations(handle: *DatabaseHandle) void {
+    for (handle.sql_functions.items) |*item| item.deinit();
+    handle.sql_functions.deinit(allocator);
+}
+
+fn destroySqlScalarContext(user_data: ?*anyopaque) callconv(.c) void {
+    const context_ptr = user_data orelse return;
+    const context: *SqlScalarFunctionContext = @ptrCast(@alignCast(context_ptr));
+    if (context.destroy) |destroy| destroy(context.user_data);
+    allocator.destroy(context);
+}
+
+fn sqlScalarTrampoline(
+    sqlite_context: ?*sqlite.c.sqlite3_context,
+    argc: c_int,
+    argv: [*c]?*sqlite.c.sqlite3_value,
+) callconv(.c) void {
+    const raw_context = sqlite_context orelse return;
+    const user_data = sqlite.c.sqlite3_user_data(raw_context) orelse {
+        sqlite.c.sqlite3_result_error(raw_context, "missing zova sql callback context", -1);
+        return;
+    };
+    const context: *SqlScalarFunctionContext = @ptrCast(@alignCast(user_data));
+    if (argc < 0) {
+        sqlite.c.sqlite3_result_error(raw_context, "invalid zova sql callback argc", -1);
+        return;
+    }
+
+    const count: usize = @intCast(argc);
+    const values = allocator.alloc(zova_sql_value, count) catch {
+        sqlite.c.sqlite3_result_error_nomem(raw_context);
+        return;
+    };
+    defer allocator.free(values);
+
+    for (values, 0..) |*value, index| {
+        const sqlite_value = argv[index] orelse {
+            sqlite.c.sqlite3_result_error(raw_context, "invalid zova sql callback argv", -1);
+            return;
+        };
+        value.* = sqlValueFromSqlite(sqlite_value);
+    }
+
+    var call = zova_sql_function_call{
+        .user_data = context.user_data,
+        .argc = count,
+        .argv = if (values.len == 0) null else values.ptr,
+    };
+    var result = zova_sql_result{};
+    context.callback(context.user_data, &call, &result);
+    applySqlResult(raw_context, result);
+}
+
+fn sqlValueFromSqlite(value: *sqlite.c.sqlite3_value) zova_sql_value {
+    return switch (sqlite.c.sqlite3_value_type(value)) {
+        sqlite.c.SQLITE_INTEGER => .{
+            .value_type = .INTEGER,
+            .int64_value = sqlite.c.sqlite3_value_int64(value),
+        },
+        sqlite.c.SQLITE_FLOAT => .{
+            .value_type = .FLOAT,
+            .double_value = sqlite.c.sqlite3_value_double(value),
+        },
+        sqlite.c.SQLITE_TEXT => textSqlValue(value),
+        sqlite.c.SQLITE_BLOB => blobSqlValue(value),
+        sqlite.c.SQLITE_NULL => .{ .value_type = .NULL },
+        else => .{ .value_type = .NULL },
+    };
+}
+
+fn textSqlValue(value: *sqlite.c.sqlite3_value) zova_sql_value {
+    const len_raw = sqlite.c.sqlite3_value_bytes(value);
+    const len: usize = if (len_raw <= 0) 0 else @intCast(len_raw);
+    const ptr = sqlite.c.sqlite3_value_text(value);
+    return .{
+        .value_type = .TEXT,
+        .data = if (ptr == null) null else @ptrCast(ptr),
+        .data_len = len,
+    };
+}
+
+fn blobSqlValue(value: *sqlite.c.sqlite3_value) zova_sql_value {
+    const len_raw = sqlite.c.sqlite3_value_bytes(value);
+    const len: usize = if (len_raw <= 0) 0 else @intCast(len_raw);
+    const ptr = sqlite.c.sqlite3_value_blob(value);
+    return .{
+        .value_type = .BLOB,
+        .data = if (ptr == null) null else @ptrCast(ptr),
+        .data_len = len,
+    };
+}
+
+fn applySqlResult(sqlite_context: *sqlite.c.sqlite3_context, result: zova_sql_result) void {
+    switch (result.result_type) {
+        @intFromEnum(zova_sql_result_type.NULL) => sqlite.c.sqlite3_result_null(sqlite_context),
+        @intFromEnum(zova_sql_result_type.INTEGER) => sqlite.c.sqlite3_result_int64(sqlite_context, result.int64_value),
+        @intFromEnum(zova_sql_result_type.FLOAT) => sqlite.c.sqlite3_result_double(sqlite_context, result.double_value),
+        @intFromEnum(zova_sql_result_type.TEXT) => applySqlTextResult(sqlite_context, result.data, result.data_len),
+        @intFromEnum(zova_sql_result_type.BLOB) => applySqlBlobResult(sqlite_context, result.data, result.data_len),
+        @intFromEnum(zova_sql_result_type.ERROR) => applySqlErrorResult(sqlite_context, result.error_message, result.error_message_len),
+        else => sqlite.c.sqlite3_result_error(sqlite_context, "invalid zova sql callback result type", -1),
+    }
+}
+
+fn applySqlTextResult(sqlite_context: *sqlite.c.sqlite3_context, data: ?*const anyopaque, len: usize) void {
+    const copy = copySqlResultBytes(sqlite_context, data, len, true) orelse return;
+    sqlite.c.sqlite3_result_text64(sqlite_context, @ptrCast(copy), @intCast(len), sqlite.c.sqlite3_free, sqlite.c.SQLITE_UTF8);
+}
+
+fn applySqlBlobResult(sqlite_context: *sqlite.c.sqlite3_context, data: ?*const anyopaque, len: usize) void {
+    const copy = copySqlResultBytes(sqlite_context, data, len, false) orelse return;
+    sqlite.c.sqlite3_result_blob64(sqlite_context, copy, @intCast(len), sqlite.c.sqlite3_free);
+}
+
+fn applySqlErrorResult(sqlite_context: *sqlite.c.sqlite3_context, message: ?[*]const u8, len: usize) void {
+    if (message == null or len == 0) {
+        sqlite.c.sqlite3_result_error(sqlite_context, "zova sql callback error", -1);
+        return;
+    }
+    if (len > std.math.maxInt(c_int)) {
+        sqlite.c.sqlite3_result_error(sqlite_context, "zova sql callback error too large", -1);
+        return;
+    }
+    sqlite.c.sqlite3_result_error(sqlite_context, @ptrCast(message), @intCast(len));
+}
+
+fn copySqlResultBytes(sqlite_context: *sqlite.c.sqlite3_context, data: ?*const anyopaque, len: usize, nul_terminate: bool) ?*anyopaque {
+    if (data == null and len != 0) {
+        sqlite.c.sqlite3_result_error(sqlite_context, "zova sql callback result has null data", -1);
+        return null;
+    }
+    const extra: usize = if (nul_terminate) 1 else 0;
+    const alloc_len = std.math.add(usize, len, extra) catch {
+        sqlite.c.sqlite3_result_error_nomem(sqlite_context);
+        return null;
+    };
+    const effective_alloc_len = @max(alloc_len, 1);
+    const copy = sqlite.c.sqlite3_malloc64(@intCast(effective_alloc_len)) orelse {
+        sqlite.c.sqlite3_result_error_nomem(sqlite_context);
+        return null;
+    };
+    const dest: [*]u8 = @ptrCast(copy);
+    if (len != 0) {
+        const src: [*]const u8 = @ptrCast(data.?);
+        @memcpy(dest[0..len], src[0..len]);
+    }
+    if (nul_terminate) dest[len] = 0;
+    return copy;
+}
+
+fn isAsciiIdentStart(byte: u8) bool {
+    return byte == '_' or (byte >= 'A' and byte <= 'Z') or (byte >= 'a' and byte <= 'z');
+}
+
+fn isAsciiIdentContinue(byte: u8) bool {
+    return isAsciiIdentStart(byte) or (byte >= '0' and byte <= '9');
+}
+
+fn hasAsciiInsensitivePrefix(value: []const u8, prefix: []const u8) bool {
+    if (value.len < prefix.len) return false;
+    return asciiInsensitiveEql(value[0..prefix.len], prefix);
+}
+
+fn asciiInsensitiveEql(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |left, right| {
+        if (asciiLower(left) != asciiLower(right)) return false;
+    }
+    return true;
+}
+
+fn asciiLower(byte: u8) u8 {
+    return if (byte >= 'A' and byte <= 'Z') byte + ('a' - 'A') else byte;
+}
+
 fn manifestChunks(chunks: ?[*]const zova_object_manifest_chunk, len: usize) ?[]const zova_object_manifest_chunk {
     if (len == 0) return &.{};
     const ptr = chunks orelse return null;
@@ -3235,6 +3569,16 @@ fn failDb(handle: *DatabaseHandle, err: anyerror) zova_status {
     return status;
 }
 
+fn failDbSqliteResult(handle: *DatabaseHandle, rc: c_int) zova_status {
+    const sqlite_message = handle.db.errorMessage();
+    if (!std.mem.eql(u8, sqlite_message, "not an error") and sqlite_message.len > 0) {
+        setLastErrorString(handle, sqlite_message);
+    } else {
+        setLastErrorString(handle, "SQLite error");
+    }
+    return statusFromSqliteResultCode(rc);
+}
+
 fn failDbStatusString(handle: *DatabaseHandle, status: zova_status, message: []const u8) zova_status {
     setLastErrorString(handle, message);
     return status;
@@ -3336,6 +3680,21 @@ fn statusFromError(err: anyerror) zova_status {
     };
 }
 
+fn statusFromSqliteResultCode(rc: c_int) zova_status {
+    return switch (rc) {
+        sqlite.c.SQLITE_OK => .OK,
+        sqlite.c.SQLITE_BUSY => .BUSY,
+        sqlite.c.SQLITE_LOCKED => .LOCKED,
+        sqlite.c.SQLITE_CONSTRAINT => .CONSTRAINT,
+        sqlite.c.SQLITE_CANTOPEN => .CANT_OPEN,
+        sqlite.c.SQLITE_READONLY => .READ_ONLY,
+        sqlite.c.SQLITE_CORRUPT => .CORRUPT,
+        sqlite.c.SQLITE_MISUSE => .MISUSE,
+        sqlite.c.SQLITE_NOMEM => .OUT_OF_MEMORY,
+        else => .SQLITE_ERROR,
+    };
+}
+
 fn statusName(status: c_int) [*:0]const u8 {
     return switch (status) {
         @intFromEnum(zova_status.OK) => "ZOVA_OK",
@@ -3404,6 +3763,7 @@ test "c abi status names and versions are stable" {
 test "c abi validates null pointers" {
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_create(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_open_with_options(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_register_function(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_set_busy_timeout(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_object_id_from_bytes(null, 1, null));
     var id = zova_object_id{ .bytes = [_]u8{0} ** 32 };
@@ -3474,6 +3834,256 @@ test "c abi validates null pointers" {
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_column_text(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_column_blob(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_buffer_free_and_status_for_test());
+}
+
+const SqlFunctionTestState = struct {
+    calls: usize = 0,
+    destroyed: bool = false,
+    saw_user_data: bool = false,
+    saw_null: bool = false,
+    saw_int: bool = false,
+    saw_float: bool = false,
+    saw_text: bool = false,
+    saw_blob: bool = false,
+};
+
+fn sqlFunctionDestroy(user_data: ?*anyopaque) callconv(.c) void {
+    const state: *SqlFunctionTestState = @ptrCast(@alignCast(user_data.?));
+    state.destroyed = true;
+}
+
+fn sqlFunctionMixed(user_data: ?*anyopaque, call: ?*const zova_sql_function_call, out: ?*zova_sql_result) callconv(.c) void {
+    const state: *SqlFunctionTestState = @ptrCast(@alignCast(user_data.?));
+    const args = call.?.argv.?[0..call.?.argc];
+    state.calls += 1;
+    state.saw_user_data = call.?.user_data == user_data;
+    state.saw_null = args[0].value_type == .NULL;
+    state.saw_int = args[1].value_type == .INTEGER and args[1].int64_value == 7;
+    state.saw_float = args[2].value_type == .FLOAT and args[2].double_value == 2.5;
+    state.saw_text = args[3].value_type == .TEXT and args[3].data_len == 3 and std.mem.eql(u8, bytesFromAny(args[3].data, args[3].data_len), "abc");
+    state.saw_blob = args[4].value_type == .BLOB and args[4].data_len == 3 and std.mem.eql(u8, bytesFromAny(args[4].data, args[4].data_len), &.{ 0x0a, 0x0b, 0x0c });
+    out.?.* = .{ .result_type = @intFromEnum(zova_sql_result_type.INTEGER), .int64_value = 42 };
+}
+
+fn sqlFunctionText(_: ?*anyopaque, _: ?*const zova_sql_function_call, out: ?*zova_sql_result) callconv(.c) void {
+    out.?.* = .{ .result_type = @intFromEnum(zova_sql_result_type.TEXT), .data = "hello".ptr, .data_len = 5 };
+}
+
+const sql_function_blob_bytes = [_]u8{ 1, 2, 3, 4 };
+
+fn sqlFunctionBlob(_: ?*anyopaque, _: ?*const zova_sql_function_call, out: ?*zova_sql_result) callconv(.c) void {
+    out.?.* = .{ .result_type = @intFromEnum(zova_sql_result_type.BLOB), .data = &sql_function_blob_bytes, .data_len = sql_function_blob_bytes.len };
+}
+
+fn sqlFunctionError(_: ?*anyopaque, _: ?*const zova_sql_function_call, out: ?*zova_sql_result) callconv(.c) void {
+    out.?.* = .{ .result_type = @intFromEnum(zova_sql_result_type.ERROR), .error_message = "callback failed".ptr, .error_message_len = "callback failed".len };
+}
+
+fn bytesFromAny(ptr: ?*const anyopaque, len: usize) []const u8 {
+    const many: [*]const u8 = @ptrCast(ptr.?);
+    return many[0..len];
+}
+
+test "c abi validates scalar sql function registration requests" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-sql-function-validation.zova", .{tmp.sub_path[0..]});
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(db);
+
+    var state = SqlFunctionTestState{};
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_register_function(&.{
+        .db = null,
+        .name = "app_fn",
+        .arity = 0,
+        .flags = 0,
+        .user_data = &state,
+        .callback = sqlFunctionMixed,
+        .destroy = null,
+    }));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_register_function(&.{
+        .db = db,
+        .name = null,
+        .arity = 0,
+        .flags = 0,
+        .user_data = &state,
+        .callback = sqlFunctionMixed,
+        .destroy = null,
+    }));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_register_function(&.{
+        .db = db,
+        .name = "1bad",
+        .arity = 0,
+        .flags = 0,
+        .user_data = &state,
+        .callback = sqlFunctionMixed,
+        .destroy = null,
+    }));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_register_function(&.{
+        .db = db,
+        .name = "zova_private",
+        .arity = 0,
+        .flags = 0,
+        .user_data = &state,
+        .callback = sqlFunctionMixed,
+        .destroy = null,
+    }));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_register_function(&.{
+        .db = db,
+        .name = "app_fn",
+        .arity = -2,
+        .flags = 0,
+        .user_data = &state,
+        .callback = sqlFunctionMixed,
+        .destroy = null,
+    }));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_register_function(&.{
+        .db = db,
+        .name = "app_fn",
+        .arity = 128,
+        .flags = 0,
+        .user_data = &state,
+        .callback = sqlFunctionMixed,
+        .destroy = null,
+    }));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_register_function(&.{
+        .db = db,
+        .name = "app_fn",
+        .arity = 0,
+        .flags = 0xffff_ffff,
+        .user_data = &state,
+        .callback = sqlFunctionMixed,
+        .destroy = null,
+    }));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_register_function(&.{
+        .db = db,
+        .name = "app_fn",
+        .arity = 0,
+        .flags = 0,
+        .user_data = &state,
+        .callback = null,
+        .destroy = null,
+    }));
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_register_function(&.{
+        .db = db,
+        .name = "app_fn",
+        .arity = 0,
+        .flags = ZOVA_SQL_FUNCTION_DETERMINISTIC,
+        .user_data = &state,
+        .callback = sqlFunctionText,
+        .destroy = null,
+    }));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_register_function(&.{
+        .db = db,
+        .name = "app_fn",
+        .arity = 0,
+        .flags = 0,
+        .user_data = &state,
+        .callback = sqlFunctionText,
+        .destroy = null,
+    }));
+}
+
+test "c abi registers scalar sql functions on zova owned connections" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-sql-functions.zova", .{tmp.sub_path[0..]});
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    }));
+
+    var state = SqlFunctionTestState{};
+    try std.testing.expectEqual(zova_status.OK, zova_database_register_function(&.{
+        .db = db,
+        .name = "app_mix",
+        .arity = 5,
+        .flags = ZOVA_SQL_FUNCTION_DETERMINISTIC | ZOVA_SQL_FUNCTION_INNOCUOUS,
+        .user_data = &state,
+        .callback = sqlFunctionMixed,
+        .destroy = sqlFunctionDestroy,
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_register_function(&.{
+        .db = db,
+        .name = "app_text",
+        .arity = 0,
+        .flags = ZOVA_SQL_FUNCTION_DIRECT_ONLY,
+        .user_data = null,
+        .callback = sqlFunctionText,
+        .destroy = null,
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_register_function(&.{
+        .db = db,
+        .name = "app_blob",
+        .arity = -1,
+        .flags = 0,
+        .user_data = null,
+        .callback = sqlFunctionBlob,
+        .destroy = null,
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_register_function(&.{
+        .db = db,
+        .name = "app_fail",
+        .arity = 0,
+        .flags = 0,
+        .user_data = null,
+        .callback = sqlFunctionError,
+        .destroy = null,
+    }));
+
+    var stmt: ?*zova_statement = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_prepare(&.{
+        .db = db,
+        .sql = "select app_mix(null, 7, 2.5, 'abc', x'0a0b0c'), app_text(), app_blob(1, 2)",
+        .out_statement = &stmt,
+    }));
+    var step_result: zova_step_result = undefined;
+    try std.testing.expectEqual(zova_status.OK, zova_statement_step(&.{ .statement = stmt, .out_result = &step_result }));
+    try std.testing.expectEqual(zova_step_result.ROW, step_result);
+
+    var int_value: i64 = 0;
+    try std.testing.expectEqual(zova_status.OK, zova_statement_column_int64(&.{ .statement = stmt, .index = 0, .out_value = &int_value }));
+    try std.testing.expectEqual(@as(i64, 42), int_value);
+
+    var text = zova_text{ .data = null, .len = 0 };
+    defer zova_text_free(&text);
+    try std.testing.expectEqual(zova_status.OK, zova_statement_column_text(&.{ .statement = stmt, .index = 1, .out_text = &text }));
+    try std.testing.expectEqualStrings("hello", text.data.?[0..text.len]);
+
+    var blob = zova_buffer{ .data = null, .len = 0 };
+    defer zova_buffer_free(&blob);
+    try std.testing.expectEqual(zova_status.OK, zova_statement_column_blob(&.{ .statement = stmt, .index = 2, .out_buffer = &blob }));
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4 }, blob.data.?[0..blob.len]);
+    try std.testing.expectEqual(zova_status.OK, zova_statement_finalize(stmt));
+
+    try std.testing.expectEqual(@as(usize, 1), state.calls);
+    try std.testing.expect(state.saw_user_data);
+    try std.testing.expect(state.saw_null);
+    try std.testing.expect(state.saw_int);
+    try std.testing.expect(state.saw_float);
+    try std.testing.expect(state.saw_text);
+    try std.testing.expect(state.saw_blob);
+
+    try std.testing.expectEqual(zova_status.SQLITE_ERROR, zova_database_exec(&.{ .db = db, .sql = "select app_fail()" }));
+    try std.testing.expect(std.mem.indexOf(u8, std.mem.span(zova_database_last_error_message(db)), "callback failed") != null);
+
+    try std.testing.expect(!state.destroyed);
+    try std.testing.expectEqual(zova_status.OK, zova_database_close(db));
+    try std.testing.expect(state.destroyed);
 }
 
 test "c abi open options validate flags and support read-only handles" {

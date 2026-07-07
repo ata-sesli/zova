@@ -10,6 +10,13 @@ pub const zova_subscription = internal.zova_subscription;
 pub const zova_status = internal.zova_status;
 pub const zova_step_result = internal.zova_step_result;
 pub const zova_column_type = internal.zova_column_type;
+pub const zova_sql_value_type = internal.zova_sql_value_type;
+pub const zova_sql_result_type = internal.zova_sql_result_type;
+pub const zova_sql_value = internal.zova_sql_value;
+pub const zova_sql_result = internal.zova_sql_result;
+pub const zova_sql_function_call = internal.zova_sql_function_call;
+pub const zova_sql_scalar_callback = internal.zova_sql_scalar_callback;
+pub const zova_sql_destroy_callback = internal.zova_sql_destroy_callback;
 pub const zova_object_id = internal.zova_object_id;
 pub const zova_object_chunk_id = internal.zova_object_chunk_id;
 pub const zova_buffer = internal.zova_buffer;
@@ -44,6 +51,9 @@ pub const ZOVA_OPEN_READ_ONLY = internal.ZOVA_OPEN_READ_ONLY;
 pub const ZOVA_BACKUP_NO_VERIFY = internal.ZOVA_BACKUP_NO_VERIFY;
 pub const ZOVA_COMPACT_NO_VERIFY = internal.ZOVA_COMPACT_NO_VERIFY;
 pub const ZOVA_RESTORE_NO_VERIFY = internal.ZOVA_RESTORE_NO_VERIFY;
+pub const ZOVA_SQL_FUNCTION_DETERMINISTIC = internal.ZOVA_SQL_FUNCTION_DETERMINISTIC;
+pub const ZOVA_SQL_FUNCTION_DIRECT_ONLY = internal.ZOVA_SQL_FUNCTION_DIRECT_ONLY;
+pub const ZOVA_SQL_FUNCTION_INNOCUOUS = internal.ZOVA_SQL_FUNCTION_INNOCUOUS;
 pub const zova_database_open_request = internal.zova_database_open_request;
 pub const zova_database_open_options_request = internal.zova_database_open_options_request;
 pub const zova_convert_sqlite_to_zova_request = internal.zova_convert_sqlite_to_zova_request;
@@ -51,6 +61,7 @@ pub const zova_database_backup_request = internal.zova_database_backup_request;
 pub const zova_database_compact_request = internal.zova_database_compact_request;
 pub const zova_database_restore_request = internal.zova_database_restore_request;
 pub const zova_database_exec_request = internal.zova_database_exec_request;
+pub const zova_sql_function_register_request = internal.zova_sql_function_register_request;
 pub const zova_database_simple_request = internal.zova_database_simple_request;
 pub const zova_database_savepoint_request = internal.zova_database_savepoint_request;
 pub const zova_database_busy_timeout_request = internal.zova_database_busy_timeout_request;
@@ -235,6 +246,10 @@ export fn zova_database_close(db: ?*zova_database) callconv(.c) zova_status {
 
 export fn zova_database_exec(request: ?*const zova_database_exec_request) callconv(.c) zova_status {
     return internal.zova_database_exec(request);
+}
+
+export fn zova_database_register_function(request: ?*const zova_sql_function_register_request) callconv(.c) zova_status {
+    return internal.zova_database_register_function(request);
 }
 
 export fn zova_database_begin(request: ?*const zova_database_simple_request) callconv(.c) zova_status {

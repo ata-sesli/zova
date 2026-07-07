@@ -114,6 +114,50 @@ zova extension untrust my_ext
 zova extension untrust ./my_ext.zovaext
 ```
 
+## Experimental Bundle Builder
+
+The v0.22 development line includes an experimental producer-side CLI for
+local Zig extensions. It is meant to remove the manual bundle-shape work while
+the stable extension-authoring contract is still being designed.
+
+Create a minimal Zig extension project:
+
+```sh
+zova extension scaffold ./sample_ext --name sample_ext --version 0.1.0
+```
+
+Build the native dynamic library with the same Zig package layout Zova uses:
+
+```sh
+zova extension build ./sample_ext
+```
+
+The experimental builder passes Zova's vendored SQLite include directory to Zig
+because extension code that imports `zova.sqlite` needs `sqlite3.h` visible at
+compile time. Manual bridge builds need the same include path.
+
+Pack it into the existing `.zovaext` directory format:
+
+```sh
+zova extension pack ./sample_ext --out ./sample_ext.zovaext
+```
+
+Verify bundle metadata, library containment, hashes, and the entrypoint symbol:
+
+```sh
+zova extension verify ./sample_ext.zovaext
+zova extension verify --smoke ./sample_ext.zovaext
+```
+
+`--smoke` opens the native library and verifies the configured entrypoint
+against the bundle manifest. It does not trust the bundle for later commands.
+Trust and install remain explicit:
+
+```sh
+zova extension trust ./sample_ext.zovaext
+zova --extension ./sample_ext.zovaext extension install app.zova sample_ext
+```
+
 ## Bundled `trgm`
 
 The first bundled extension is `trgm`.
@@ -294,6 +338,43 @@ normal prepared statements to query `zova_trgm_search`.
 Extension operations do not auto-notify listeners. Applications or trusted
 extension workflows should call Zova's same-process `notify` API explicitly when
 they want listeners to react to an indexing workflow.
+
+## C ABI Scalar SQL Functions
+
+The v0.22 development line adds a controlled C ABI path for registering scalar
+SQL functions on a Zova-owned connection:
+
+```c
+zova_sql_function_register_request request = {
+    .db = db,
+    .name = "app_score",
+    .arity = 1,
+    .flags = ZOVA_SQL_FUNCTION_DETERMINISTIC,
+    .user_data = state,
+    .callback = app_score_callback,
+    .destroy = app_score_destroy,
+};
+zova_database_register_function(&request);
+```
+
+Function names are ASCII identifiers, 1-64 bytes, and may not use `zova_` or
+`_zova_` prefixes. Arity is `-1` for varargs or `0..127` for fixed arity.
+Registration is per open SQLite connection; registering a function on one
+`zova_database` handle does not install it on other handles.
+
+The callback receives borrowed `zova_sql_value` arguments and fills one
+`zova_sql_result`. Zova copies text, blob, and error bytes before SQLite
+observes the result, so result buffers only need to stay valid until the
+callback returns. Argument pointers are valid only during the callback.
+
+Callbacks run while the database handle is inside Zova's serialization boundary.
+They must not re-enter the same `zova_database` handle. The destructor, when
+provided, runs when SQLite releases the registered function, normally during
+database close.
+
+This iteration exposes the low-level C ABI and `zova-sys` declarations only.
+Safe high-level Rust, Go, and Python callback APIs are still separate v0.22
+checklist work.
 
 ## Operational Copies
 

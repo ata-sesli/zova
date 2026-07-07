@@ -5,12 +5,15 @@
 //! migrate, delete, or dump binary content.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const zova = @import("zova");
 const cli_options = @import("cli_options");
 const sqlite = zova.sqlite;
 
 pub const package_version = cli_options.package_version;
 pub const dynamic_extension_library_path = cli_options.dynamic_extension_library_path;
+pub const source_root = cli_options.source_root;
+pub const zig_exe = cli_options.zig_exe;
 
 const ExitCode = struct {
     const ok: u8 = 0;
@@ -23,6 +26,10 @@ const ExitCode = struct {
 const cli_json_version = 1;
 const default_list_limit = 10;
 const max_list_limit = 100;
+
+fn defaultIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
 
 const OutputFormat = enum {
     text,
@@ -120,6 +127,10 @@ const ExtensionAction = enum {
     trust,
     untrust,
     trusted,
+    scaffold,
+    build,
+    pack,
+    verify,
 };
 
 const ObjectStoreCommandArgs = struct {
@@ -134,6 +145,9 @@ const ExtensionCommandArgs = struct {
     action: ExtensionAction,
     path: ?[]const u8,
     name: ?[]const u8,
+    version: ?[]const u8 = null,
+    out_path: ?[]const u8 = null,
+    smoke: bool = false,
 };
 
 const BoundedCommandParseError = error{
@@ -192,9 +206,16 @@ const ExtensionCommandParseError = error{
     MissingAction,
     UnknownAction,
     DuplicateJson,
+    DuplicateName,
+    DuplicateVersion,
+    DuplicateOut,
+    DuplicateSmoke,
     UnknownFlag,
+    MissingFlagValue,
     MissingPath,
     MissingName,
+    MissingVersion,
+    MissingOut,
     InvalidName,
     ExtraArgs,
 };
@@ -778,6 +799,10 @@ fn writeUsage(writer: *std.Io.Writer) !void {
         \\  zova extension trust [--json] <bundle.zovaext>
         \\  zova extension untrust [--json] <bundle.zovaext|name>
         \\  zova extension trusted [--json]
+        \\  zova extension scaffold [--json] <dir> --name <name> --version <version>
+        \\  zova extension build [--json] <dir>
+        \\  zova extension pack [--json] <dir> --out <bundle.zovaext>
+        \\  zova extension verify [--json] [--smoke] <bundle.zovaext>
         \\
         \\commands:
         \\  info   print a bounded summary of a current-format Zova database
@@ -1249,6 +1274,22 @@ fn extensionCommand(
     };
 
     switch (parsed.action) {
+        .scaffold => {
+            extensionScaffoldCommand(allocator, parsed, stdout) catch |err| return extensionErrorFormat(stderr, "extension-scaffold", parsed.format, err);
+            return ExitCode.ok;
+        },
+        .build => {
+            extensionBuildCommand(allocator, parsed, stdout, stderr) catch |err| return extensionErrorFormat(stderr, "extension-build", parsed.format, err);
+            return ExitCode.ok;
+        },
+        .pack => {
+            extensionPackCommand(allocator, parsed, stdout) catch |err| return extensionErrorFormat(stderr, "extension-pack", parsed.format, err);
+            return ExitCode.ok;
+        },
+        .verify => {
+            extensionVerifyCommand(allocator, parsed, stdout) catch |err| return extensionErrorFormat(stderr, "extension-verify", parsed.format, err);
+            return ExitCode.ok;
+        },
         .trust => {
             var trusted = zova.extension_dynamic.trustBundle(allocator, parsed.path.?, .{}) catch |err| return extensionErrorFormat(stderr, "extension-trust", parsed.format, err);
             defer trusted.deinit(allocator);
@@ -1329,8 +1370,305 @@ fn extensionCommand(
             try writeExtensionInfo(stdout, parsed.format, "extension-install", parsed.path.?, info);
             return ExitCode.ok;
         },
-        .trust, .untrust, .trusted => unreachable,
+        .trust, .untrust, .trusted, .scaffold, .build, .pack, .verify => unreachable,
     }
+}
+
+fn extensionScaffoldCommand(allocator: std.mem.Allocator, parsed: ExtensionCommandArgs, stdout: *std.Io.Writer) !void {
+    const dir_path = parsed.path.?;
+    const name = parsed.name.?;
+    const version = parsed.version.?;
+    if (!isValidExtensionScaffoldName(name)) return error.ExtensionInvalid;
+
+    const io = defaultIo();
+    try std.Io.Dir.cwd().createDirPath(io, dir_path);
+
+    const library = try dynamicLibraryFileName(allocator, name);
+    defer allocator.free(library);
+    const storage_prefix = try std.fmt.allocPrint(allocator, "_zova_ext_{s}_", .{name});
+    defer allocator.free(storage_prefix);
+
+    const extension_source = try scaffoldExtensionSource(allocator, name, version, storage_prefix);
+    defer allocator.free(extension_source);
+    const manifest_json = try scaffoldExtensionManifest(allocator, name, version, storage_prefix, library);
+    defer allocator.free(manifest_json);
+
+    const source_path = try std.fs.path.join(allocator, &.{ dir_path, "extension.zig" });
+    defer allocator.free(source_path);
+    const manifest_path = try std.fs.path.join(allocator, &.{ dir_path, zova.extension_dynamic.bundle_manifest_file });
+    defer allocator.free(manifest_path);
+
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = source_path, .data = extension_source });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = manifest_path, .data = manifest_json });
+    try writeExtensionBuilderSuccess(stdout, parsed.format, "extension-scaffold", dir_path, null, null);
+}
+
+fn extensionBuildCommand(allocator: std.mem.Allocator, parsed: ExtensionCommandArgs, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    const dir_path = parsed.path.?;
+    var manifest = try loadBuilderManifest(allocator, dir_path);
+    defer manifest.deinit(allocator);
+
+    const extension_source_path = try std.fs.path.join(allocator, &.{ dir_path, "extension.zig" });
+    defer allocator.free(extension_source_path);
+    const output_path = try std.fs.path.join(allocator, &.{ dir_path, manifest.library });
+    defer allocator.free(output_path);
+    const cache_path = try std.fs.path.join(allocator, &.{ dir_path, ".zig-cache" });
+    defer allocator.free(cache_path);
+    const global_cache_path = try std.fs.path.join(allocator, &.{ dir_path, ".zig-global-cache" });
+    defer allocator.free(global_cache_path);
+    const zova_root_path = try std.fs.path.join(allocator, &.{ source_root, "src/root.zig" });
+    defer allocator.free(zova_root_path);
+    const sqlite_include_path = try std.fs.path.join(allocator, &.{ source_root, "vendor/sqlite3.53.2" });
+    defer allocator.free(sqlite_include_path);
+
+    const argv = [_][]const u8{
+        zig_exe,
+        "build-lib",
+        "-dynamic",
+        "-fPIC",
+        "-fallow-shlib-undefined",
+        "-lc",
+        try std.fmt.allocPrint(allocator, "-femit-bin={s}", .{output_path}),
+        "--cache-dir",
+        cache_path,
+        "--global-cache-dir",
+        global_cache_path,
+        "--name",
+        manifest.name,
+        "--dep",
+        "zova",
+        try std.fmt.allocPrint(allocator, "-Mroot={s}", .{extension_source_path}),
+        "-I",
+        sqlite_include_path,
+        try std.fmt.allocPrint(allocator, "-Mzova={s}", .{zova_root_path}),
+    };
+    defer allocator.free(argv[6]);
+    defer allocator.free(argv[15]);
+    defer allocator.free(argv[18]);
+
+    const process_allocator = std.heap.page_allocator;
+    var threaded = std.Io.Threaded.init(process_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = std.process.Environ.Map.init(process_allocator);
+    defer env.deinit();
+    try env.put("ZIG_GLOBAL_CACHE_DIR", global_cache_path);
+    try env.put("HOME", global_cache_path);
+    try env.put("TMPDIR", cache_path);
+    try env.put("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
+    const result = try std.process.run(process_allocator, io, .{
+        .argv = &argv,
+        .environ_map = &env,
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(1024 * 1024),
+    });
+    defer process_allocator.free(result.stdout);
+    defer process_allocator.free(result.stderr);
+    switch (result.term) {
+        .exited => |code| if (code != 0) {
+            if (result.stderr.len != 0) try stderr.writeAll(result.stderr);
+            if (result.stdout.len != 0) try stderr.writeAll(result.stdout);
+            return error.ExtensionInvalid;
+        },
+        else => {
+            if (result.stderr.len != 0) try stderr.writeAll(result.stderr);
+            if (result.stdout.len != 0) try stderr.writeAll(result.stdout);
+            return error.ExtensionInvalid;
+        },
+    }
+
+    try writeExtensionBuilderSuccess(stdout, parsed.format, "extension-build", dir_path, output_path, null);
+}
+
+fn extensionPackCommand(allocator: std.mem.Allocator, parsed: ExtensionCommandArgs, stdout: *std.Io.Writer) !void {
+    const dir_path = parsed.path.?;
+    const out_path = parsed.out_path.?;
+    if (!std.mem.endsWith(u8, out_path, ".zovaext")) return error.ExtensionInvalid;
+    var manifest = try loadBuilderManifest(allocator, dir_path);
+    defer manifest.deinit(allocator);
+
+    const io = defaultIo();
+    try std.Io.Dir.cwd().createDir(io, out_path, .default_dir);
+    errdefer std.Io.Dir.cwd().deleteTree(io, out_path) catch {};
+
+    const source_manifest_path = try std.fs.path.join(allocator, &.{ dir_path, zova.extension_dynamic.bundle_manifest_file });
+    defer allocator.free(source_manifest_path);
+    const dest_manifest_path = try std.fs.path.join(allocator, &.{ out_path, zova.extension_dynamic.bundle_manifest_file });
+    defer allocator.free(dest_manifest_path);
+    const source_library_path = try std.fs.path.join(allocator, &.{ dir_path, manifest.library });
+    defer allocator.free(source_library_path);
+    const dest_library_path = try std.fs.path.join(allocator, &.{ out_path, manifest.library });
+    defer allocator.free(dest_library_path);
+
+    try copyFileAlloc(allocator, source_manifest_path, dest_manifest_path, 64 * 1024);
+    try copyFileAlloc(allocator, source_library_path, dest_library_path, 256 * 1024 * 1024);
+
+    var info = try zova.extension_dynamic.loadBundleInfo(allocator, out_path);
+    defer info.deinit(allocator);
+    try zova.extension_dynamic.verifyBundleEntrypoint(allocator, out_path);
+    const follow_up = try std.fmt.allocPrint(allocator, "zova extension trust {s}", .{out_path});
+    defer allocator.free(follow_up);
+    try writeExtensionBuilderSuccess(stdout, parsed.format, "extension-pack", dir_path, out_path, follow_up);
+}
+
+fn extensionVerifyCommand(allocator: std.mem.Allocator, parsed: ExtensionCommandArgs, stdout: *std.Io.Writer) !void {
+    const bundle_path = parsed.path.?;
+    var info = try zova.extension_dynamic.loadBundleInfo(allocator, bundle_path);
+    defer info.deinit(allocator);
+    if (parsed.smoke) {
+        try zova.extension_dynamic.verifyBundleEntrypoint(allocator, bundle_path);
+    }
+    try writeExtensionBuilderSuccess(stdout, parsed.format, "extension-verify", bundle_path, bundle_path, null);
+}
+
+fn writeExtensionBuilderSuccess(
+    stdout: *std.Io.Writer,
+    format: OutputFormat,
+    command: []const u8,
+    path: []const u8,
+    output_path: ?[]const u8,
+    follow_up: ?[]const u8,
+) !void {
+    switch (format) {
+        .text => {
+            try stdout.print("{s}: ok\n", .{command});
+            try stdout.writeAll("experimental: true\n");
+            try stdout.print("path: {s}\n", .{path});
+            if (output_path) |value| try stdout.print("output: {s}\n", .{value});
+            if (follow_up) |value| try stdout.print("next: {s}\n", .{value});
+        },
+        .json => {
+            try stdout.writeAll("{\n");
+            try stdout.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
+            try stdout.writeAll("  \"status\": \"ok\",\n");
+            try stdout.writeAll("  \"experimental\": true,\n");
+            try stdout.writeAll("  \"command\": ");
+            try writeJsonString(stdout, command);
+            try stdout.writeAll(",\n  \"path\": ");
+            try writeJsonString(stdout, path);
+            if (output_path) |value| {
+                try stdout.writeAll(",\n  \"output\": ");
+                try writeJsonString(stdout, value);
+            }
+            if (follow_up) |value| {
+                try stdout.writeAll(",\n  \"next\": ");
+                try writeJsonString(stdout, value);
+            }
+            try stdout.writeAll("\n}\n");
+        },
+    }
+}
+
+const BuilderManifest = struct {
+    name: []u8,
+    library: []u8,
+
+    fn deinit(self: *BuilderManifest, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.library);
+    }
+};
+
+fn loadBuilderManifest(allocator: std.mem.Allocator, dir_path: []const u8) !BuilderManifest {
+    const manifest_path = try std.fs.path.join(allocator, &.{ dir_path, zova.extension_dynamic.bundle_manifest_file });
+    defer allocator.free(manifest_path);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(defaultIo(), manifest_path, allocator, .limited(64 * 1024));
+    defer allocator.free(bytes);
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch return error.ExtensionInvalid;
+    defer parsed.deinit();
+    if (std.meta.activeTag(parsed.value) != .object) return error.ExtensionInvalid;
+    const object = parsed.value.object;
+    return .{
+        .name = try allocator.dupe(u8, try builderJsonString(object, "name")),
+        .library = try allocator.dupe(u8, try builderJsonString(object, "library")),
+    };
+}
+
+fn builderJsonString(object: std.json.ObjectMap, key: []const u8) ![]const u8 {
+    const value = object.get(key) orelse return error.ExtensionInvalid;
+    if (std.meta.activeTag(value) != .string) return error.ExtensionInvalid;
+    return value.string;
+}
+
+fn copyFileAlloc(allocator: std.mem.Allocator, source_path: []const u8, dest_path: []const u8, limit: usize) !void {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(defaultIo(), source_path, allocator, .limited(limit));
+    defer allocator.free(bytes);
+    try std.Io.Dir.cwd().writeFile(defaultIo(), .{ .sub_path = dest_path, .data = bytes });
+}
+
+fn dynamicLibraryFileName(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    return switch (builtin.os.tag) {
+        .windows => try std.fmt.allocPrint(allocator, "{s}.dll", .{name}),
+        .macos, .ios, .tvos, .watchos, .visionos => try std.fmt.allocPrint(allocator, "lib{s}.dylib", .{name}),
+        else => try std.fmt.allocPrint(allocator, "lib{s}.so", .{name}),
+    };
+}
+
+fn scaffoldExtensionManifest(allocator: std.mem.Allocator, name: []const u8, version: []const u8, storage_prefix: []const u8, library: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator,
+        \\{{
+        \\  "name": "{s}",
+        \\  "version": "{s}",
+        \\  "storage_prefix": "{s}",
+        \\  "zova_abi_min": "{s}",
+        \\  "capabilities": "experimental-builder",
+        \\  "library": "{s}"
+        \\}}
+        \\
+    , .{ name, version, storage_prefix, package_version, library });
+}
+
+fn scaffoldExtensionSource(allocator: std.mem.Allocator, name: []const u8, version: []const u8, storage_prefix: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator,
+        \\const zova = @import("zova");
+        \\
+        \\const HookError = error{{ ExtensionInvalid }};
+        \\
+        \\const manifest = zova.ExtensionManifest{{
+        \\    .name = "{s}",
+        \\    .version = "{s}",
+        \\    .storage_prefix = "{s}",
+        \\    .zova_abi_min = "{s}",
+        \\    .capabilities = "experimental-builder",
+        \\    .required = true,
+        \\    .manifest_json = "{{\"extension\":\"{s}\",\"experimental\":true}}",
+        \\}};
+        \\
+        \\const extension = zova.Extension{{
+        \\    .manifest = manifest,
+        \\    .install = install,
+        \\    .check = check,
+        \\    .drop = drop,
+        \\}};
+        \\
+        \\pub export fn zova_extension_entry() callconv(.c) *const zova.Extension {{
+        \\    return &extension;
+        \\}}
+        \\
+        \\fn install(_: *zova.sqlite.Database, _: zova.ExtensionManifest) HookError!void {{
+        \\}}
+        \\
+        \\fn check(_: *zova.sqlite.Database, _: zova.ExtensionManifest) HookError!void {{
+        \\}}
+        \\
+        \\fn drop(_: *zova.sqlite.Database, _: zova.ExtensionManifest) HookError!void {{
+        \\}}
+        \\
+    , .{ name, version, storage_prefix, package_version, name });
+}
+
+fn isValidExtensionScaffoldName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 64) return false;
+    if (startsWithZovaPrefix(name)) return false;
+    if (!((name[0] >= 'A' and name[0] <= 'Z') or (name[0] >= 'a' and name[0] <= 'z') or name[0] == '_')) return false;
+    for (name[1..]) |byte| {
+        const ok = (byte >= 'A' and byte <= 'Z') or
+            (byte >= 'a' and byte <= 'z') or
+            (byte >= '0' and byte <= '9') or
+            byte == '_';
+        if (!ok) return false;
+    }
+    return true;
 }
 
 fn parseObjectStoreCommandArgs(args: []const []const u8) ObjectStoreCommandParseError!ObjectStoreCommandArgs {
@@ -1382,11 +1720,35 @@ fn parseExtensionCommandArgs(args: []const []const u8) ExtensionCommandParseErro
     var format: OutputFormat = .text;
     var first_path: ?[]const u8 = null;
     var name: ?[]const u8 = null;
+    var version: ?[]const u8 = null;
+    var out_path: ?[]const u8 = null;
+    var smoke = false;
 
-    for (args[1..]) |arg| {
+    var index: usize = 1;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
         if (std.mem.eql(u8, arg, "--json")) {
             if (format == .json) return error.DuplicateJson;
             format = .json;
+        } else if (std.mem.eql(u8, arg, "--name")) {
+            if (name != null) return error.DuplicateName;
+            index += 1;
+            if (index >= args.len) return error.MissingFlagValue;
+            if (!isValidCliExtensionName(args[index])) return error.InvalidName;
+            name = args[index];
+        } else if (std.mem.eql(u8, arg, "--version")) {
+            if (version != null) return error.DuplicateVersion;
+            index += 1;
+            if (index >= args.len) return error.MissingFlagValue;
+            version = args[index];
+        } else if (std.mem.eql(u8, arg, "--out")) {
+            if (out_path != null) return error.DuplicateOut;
+            index += 1;
+            if (index >= args.len) return error.MissingFlagValue;
+            out_path = args[index];
+        } else if (std.mem.eql(u8, arg, "--smoke")) {
+            if (smoke) return error.DuplicateSmoke;
+            smoke = true;
         } else if (std.mem.startsWith(u8, arg, "-")) {
             return error.UnknownFlag;
         } else if (first_path == null) {
@@ -1402,25 +1764,46 @@ fn parseExtensionCommandArgs(args: []const []const u8) ExtensionCommandParseErro
     switch (action) {
         .list => {
             _ = first_path orelse return error.MissingPath;
-            if (name != null) return error.ExtraArgs;
+            if (name != null or version != null or out_path != null or smoke) return error.ExtraArgs;
         },
         .info, .drop, .install => {
             _ = first_path orelse return error.MissingPath;
             _ = name orelse return error.MissingName;
+            if (version != null or out_path != null or smoke) return error.ExtraArgs;
         },
         .check => {
             _ = first_path orelse return error.MissingPath;
+            if (version != null or out_path != null or smoke) return error.ExtraArgs;
         },
         .trust, .untrust => {
             _ = first_path orelse return error.MissingPath;
-            if (name != null) return error.ExtraArgs;
+            if (name != null or version != null or out_path != null or smoke) return error.ExtraArgs;
         },
         .trusted => {
-            if (first_path != null or name != null) return error.ExtraArgs;
+            if (first_path != null or name != null or version != null or out_path != null or smoke) return error.ExtraArgs;
+        },
+        .scaffold => {
+            _ = first_path orelse return error.MissingPath;
+            _ = name orelse return error.MissingName;
+            _ = version orelse return error.MissingVersion;
+            if (out_path != null or smoke) return error.ExtraArgs;
+        },
+        .build => {
+            _ = first_path orelse return error.MissingPath;
+            if (name != null or version != null or out_path != null or smoke) return error.ExtraArgs;
+        },
+        .pack => {
+            _ = first_path orelse return error.MissingPath;
+            _ = out_path orelse return error.MissingOut;
+            if (name != null or version != null or smoke) return error.ExtraArgs;
+        },
+        .verify => {
+            _ = first_path orelse return error.MissingPath;
+            if (name != null or version != null or out_path != null) return error.ExtraArgs;
         },
     }
 
-    return .{ .format = format, .action = action, .path = first_path, .name = name };
+    return .{ .format = format, .action = action, .path = first_path, .name = name, .version = version, .out_path = out_path, .smoke = smoke };
 }
 
 fn parseExtensionAction(value: []const u8) ?ExtensionAction {
@@ -1432,17 +1815,28 @@ fn parseExtensionAction(value: []const u8) ?ExtensionAction {
     if (std.mem.eql(u8, value, "trust")) return .trust;
     if (std.mem.eql(u8, value, "untrust")) return .untrust;
     if (std.mem.eql(u8, value, "trusted")) return .trusted;
+    if (std.mem.eql(u8, value, "scaffold")) return .scaffold;
+    if (std.mem.eql(u8, value, "build")) return .build;
+    if (std.mem.eql(u8, value, "pack")) return .pack;
+    if (std.mem.eql(u8, value, "verify")) return .verify;
     return null;
 }
 
 fn extensionUsageMessage(err: ExtensionCommandParseError) []const u8 {
     return switch (err) {
-        error.MissingAction => "extension requires list, info, check, drop, install, trust, untrust, or trusted",
+        error.MissingAction => "extension requires list, info, check, drop, install, trust, untrust, trusted, scaffold, build, pack, or verify",
         error.UnknownAction => "unknown extension action",
         error.DuplicateJson => "duplicate --json",
+        error.DuplicateName => "duplicate --name",
+        error.DuplicateVersion => "duplicate --version",
+        error.DuplicateOut => "duplicate --out",
+        error.DuplicateSmoke => "duplicate --smoke",
         error.UnknownFlag => "unknown flag",
+        error.MissingFlagValue => "extension flag requires a value",
         error.MissingPath => "extension action requires <file.zova> or <bundle.zovaext>",
         error.MissingName => "extension action requires <name>",
+        error.MissingVersion => "extension scaffold requires --version <version>",
+        error.MissingOut => "extension pack requires --out <bundle.zovaext>",
         error.InvalidName => "extension name is invalid",
         error.ExtraArgs => "extension action received extra arguments",
     };

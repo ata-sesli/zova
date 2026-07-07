@@ -28,6 +28,8 @@ pub fn build(b: *std.Build) void {
     cli_module.addImport("zova", zova_module);
     const cli_options = b.addOptions();
     cli_options.addOption([]const u8, "package_version", package_version);
+    cli_options.addOptionPath("source_root", b.path("."));
+    cli_options.addOption([]const u8, "zig_exe", b.graph.zig_exe);
     cli_module.addOptions("cli_options", cli_options);
 
     if (supports_dynamic_extension_fixture) {

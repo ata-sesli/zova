@@ -26,6 +26,7 @@ require_symbol() {
 require_symbol zova_database_create
 require_symbol zova_database_open
 require_symbol zova_database_close
+require_symbol zova_database_register_function
 require_symbol zova_object_put
 require_symbol zova_object_get
 require_symbol zova_object_read_range

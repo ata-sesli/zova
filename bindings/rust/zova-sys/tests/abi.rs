@@ -1,4 +1,5 @@
 use std::ffi::{CStr, CString};
+use std::os::raw::c_void;
 use std::ptr;
 
 fn temp_path(name: &str) -> String {
@@ -237,6 +238,118 @@ fn raw_create_exec_prepare_step_close_smoke() {
             zova_sys::ZOVA_OK
         );
         assert_eq!(zova_sys::zova_database_close(db), zova_sys::ZOVA_OK);
+    }
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[repr(C)]
+struct SqlCallbackState {
+    offset: i64,
+    destroyed: usize,
+}
+
+unsafe extern "C" fn sql_add_offset(
+    user_data: *mut c_void,
+    call: *const zova_sys::zova_sql_function_call,
+    out_result: *mut zova_sys::zova_sql_result,
+) {
+    let state = &*(user_data as *const SqlCallbackState);
+    let call = &*call;
+    assert_eq!(call.argc, 1);
+    let arg = &*call.argv;
+    assert_eq!(arg.value_type, zova_sys::ZOVA_SQL_VALUE_INTEGER);
+    (*out_result).result_type = zova_sys::ZOVA_SQL_RESULT_INTEGER;
+    (*out_result).int64_value = arg.int64_value + state.offset;
+    (*out_result).double_value = 0.0;
+    (*out_result).data = ptr::null();
+    (*out_result).data_len = 0;
+    (*out_result).error_message = ptr::null();
+    (*out_result).error_message_len = 0;
+}
+
+unsafe extern "C" fn sql_destroy(user_data: *mut c_void) {
+    let state = &mut *(user_data as *mut SqlCallbackState);
+    state.destroyed += 1;
+}
+
+#[test]
+fn raw_scalar_sql_function_registration_smoke() {
+    let path = temp_path("sql-fn");
+    let c_path = CString::new(path.as_str()).unwrap();
+    let mut db = ptr::null_mut();
+    let mut message = zova_sys::zova_message {
+        data: ptr::null_mut(),
+        len: 0,
+    };
+    let create = zova_sys::zova_database_open_request {
+        path: c_path.as_ptr(),
+        out_db: &mut db,
+        out_error_message: &mut message,
+    };
+    let mut state = SqlCallbackState {
+        offset: 9,
+        destroyed: 0,
+    };
+
+    unsafe {
+        assert_eq!(zova_sys::zova_database_create(&create), zova_sys::ZOVA_OK);
+        assert!(!db.is_null());
+
+        let name = CString::new("rust_add_offset").unwrap();
+        let register = zova_sys::zova_sql_function_register_request {
+            db,
+            name: name.as_ptr(),
+            arity: 1,
+            flags: zova_sys::ZOVA_SQL_FUNCTION_DETERMINISTIC
+                | zova_sys::ZOVA_SQL_FUNCTION_DIRECT_ONLY
+                | zova_sys::ZOVA_SQL_FUNCTION_INNOCUOUS,
+            user_data: &mut state as *mut SqlCallbackState as *mut c_void,
+            callback: Some(sql_add_offset),
+            destroy: Some(sql_destroy),
+        };
+        assert_eq!(
+            zova_sys::zova_database_register_function(&register),
+            zova_sys::ZOVA_OK
+        );
+
+        let sql = CString::new("select rust_add_offset(33)").unwrap();
+        let mut statement = ptr::null_mut();
+        let prepare = zova_sys::zova_database_prepare_request {
+            db,
+            sql: sql.as_ptr(),
+            out_statement: &mut statement,
+        };
+        assert_eq!(zova_sys::zova_database_prepare(&prepare), zova_sys::ZOVA_OK);
+        assert!(!statement.is_null());
+
+        let mut step_result = 0;
+        let step = zova_sys::zova_statement_step_request {
+            statement,
+            out_result: &mut step_result,
+        };
+        assert_eq!(zova_sys::zova_statement_step(&step), zova_sys::ZOVA_OK);
+        assert_eq!(step_result, zova_sys::ZOVA_STEP_ROW);
+
+        let mut value = 0_i64;
+        let column = zova_sys::zova_statement_column_int64_request {
+            statement,
+            index: 0,
+            out_value: &mut value,
+        };
+        assert_eq!(
+            zova_sys::zova_statement_column_int64(&column),
+            zova_sys::ZOVA_OK
+        );
+        assert_eq!(value, 42);
+
+        assert_eq!(
+            zova_sys::zova_statement_finalize(statement),
+            zova_sys::ZOVA_OK
+        );
+        assert_eq!(state.destroyed, 0);
+        assert_eq!(zova_sys::zova_database_close(db), zova_sys::ZOVA_OK);
+        assert_eq!(state.destroyed, 1);
     }
 
     let _ = std::fs::remove_file(path);

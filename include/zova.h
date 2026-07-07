@@ -169,6 +169,62 @@ typedef enum zova_column_type {
     ZOVA_COLUMN_NULL = 5,
 } zova_column_type;
 
+typedef enum zova_sql_value_type {
+    ZOVA_SQL_VALUE_NULL = 0,
+    ZOVA_SQL_VALUE_INTEGER = 1,
+    ZOVA_SQL_VALUE_FLOAT = 2,
+    ZOVA_SQL_VALUE_TEXT = 3,
+    ZOVA_SQL_VALUE_BLOB = 4,
+} zova_sql_value_type;
+
+typedef enum zova_sql_result_type {
+    ZOVA_SQL_RESULT_NULL = 0,
+    ZOVA_SQL_RESULT_INTEGER = 1,
+    ZOVA_SQL_RESULT_FLOAT = 2,
+    ZOVA_SQL_RESULT_TEXT = 3,
+    ZOVA_SQL_RESULT_BLOB = 4,
+    ZOVA_SQL_RESULT_ERROR = 5,
+} zova_sql_result_type;
+
+enum {
+    ZOVA_SQL_FUNCTION_DETERMINISTIC = 1u << 0,
+    ZOVA_SQL_FUNCTION_DIRECT_ONLY = 1u << 1,
+    ZOVA_SQL_FUNCTION_INNOCUOUS = 1u << 2
+};
+
+/* Borrowed SQLite argument value, valid only during the callback. */
+typedef struct zova_sql_value {
+    zova_sql_value_type value_type;
+    int64_t int64_value;
+    double double_value;
+    const void *data;
+    size_t data_len;
+} zova_sql_value;
+
+/*
+ * Callback result. Zova copies text/blob/error bytes before the callback result
+ * is applied. `result_type` is an int so invalid foreign values can be reported
+ * as SQLite callback errors.
+ */
+typedef struct zova_sql_result {
+    int result_type;
+    int64_t int64_value;
+    double double_value;
+    const void *data;
+    size_t data_len;
+    const char *error_message;
+    size_t error_message_len;
+} zova_sql_result;
+
+typedef struct zova_sql_function_call {
+    void *user_data;
+    size_t argc;
+    const zova_sql_value *argv;
+} zova_sql_function_call;
+
+typedef void (*zova_sql_scalar_callback)(void *user_data, const zova_sql_function_call *call, zova_sql_result *out_result);
+typedef void (*zova_sql_destroy_callback)(void *user_data);
+
 /* SHA-256 identity of full object bytes. */
 typedef struct zova_object_id {
     uint8_t bytes[32];
@@ -457,6 +513,26 @@ typedef struct zova_database_exec_request {
     zova_database *db;
     const char *sql;
 } zova_database_exec_request;
+
+/*
+ * Register an app-defined scalar SQL function on this Zova-owned connection.
+ * Function names are ASCII identifiers, 1-64 bytes, and may not use a zova_
+ * or _zova_ prefix. Arity is -1 for varargs or 0..127 for fixed arity.
+ *
+ * Callbacks run inside the database handle serialization boundary. They must
+ * not re-enter the same zova_database handle. Argument pointers are borrowed
+ * for the callback only. Text/blob/error result pointers are copied by Zova
+ * before SQLite observes the result.
+ */
+typedef struct zova_sql_function_register_request {
+    zova_database *db;
+    const char *name;
+    int arity;
+    uint32_t flags;
+    void *user_data;
+    zova_sql_scalar_callback callback;
+    zova_sql_destroy_callback destroy;
+} zova_sql_function_register_request;
 
 typedef struct zova_database_simple_request {
     zova_database *db;
@@ -1006,6 +1082,7 @@ zova_status zova_database_open(const zova_database_open_request *request);
 zova_status zova_database_open_with_options(const zova_database_open_options_request *request);
 zova_status zova_database_close(zova_database *db);
 zova_status zova_database_exec(const zova_database_exec_request *request);
+zova_status zova_database_register_function(const zova_sql_function_register_request *request);
 zova_status zova_database_begin(const zova_database_simple_request *request);
 zova_status zova_database_begin_immediate(const zova_database_simple_request *request);
 zova_status zova_database_commit(const zova_database_simple_request *request);

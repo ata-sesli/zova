@@ -2,11 +2,13 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use std::os::raw::{c_char, c_int};
+use std::os::raw::{c_char, c_int, c_void};
 
 pub type zova_status = c_int;
 pub type zova_step_result = c_int;
 pub type zova_column_type = c_int;
+pub type zova_sql_value_type = c_int;
+pub type zova_sql_result_type = c_int;
 pub type zova_vector_metric = c_int;
 pub type zova_vector_element_type = c_int;
 pub type zova_graph_target_type = c_int;
@@ -66,6 +68,20 @@ pub const ZOVA_COLUMN_FLOAT: zova_column_type = 2;
 pub const ZOVA_COLUMN_TEXT: zova_column_type = 3;
 pub const ZOVA_COLUMN_BLOB: zova_column_type = 4;
 pub const ZOVA_COLUMN_NULL: zova_column_type = 5;
+pub const ZOVA_SQL_VALUE_NULL: zova_sql_value_type = 0;
+pub const ZOVA_SQL_VALUE_INTEGER: zova_sql_value_type = 1;
+pub const ZOVA_SQL_VALUE_FLOAT: zova_sql_value_type = 2;
+pub const ZOVA_SQL_VALUE_TEXT: zova_sql_value_type = 3;
+pub const ZOVA_SQL_VALUE_BLOB: zova_sql_value_type = 4;
+pub const ZOVA_SQL_RESULT_NULL: zova_sql_result_type = 0;
+pub const ZOVA_SQL_RESULT_INTEGER: zova_sql_result_type = 1;
+pub const ZOVA_SQL_RESULT_FLOAT: zova_sql_result_type = 2;
+pub const ZOVA_SQL_RESULT_TEXT: zova_sql_result_type = 3;
+pub const ZOVA_SQL_RESULT_BLOB: zova_sql_result_type = 4;
+pub const ZOVA_SQL_RESULT_ERROR: zova_sql_result_type = 5;
+pub const ZOVA_SQL_FUNCTION_DETERMINISTIC: u32 = 1 << 0;
+pub const ZOVA_SQL_FUNCTION_DIRECT_ONLY: u32 = 1 << 1;
+pub const ZOVA_SQL_FUNCTION_INNOCUOUS: u32 = 1 << 2;
 
 pub const ZOVA_VECTOR_METRIC_COSINE: zova_vector_metric = 0;
 pub const ZOVA_VECTOR_METRIC_L2: zova_vector_metric = 1;
@@ -141,6 +157,46 @@ pub struct zova_text {
     pub data: *mut c_char,
     pub len: usize,
 }
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_sql_value {
+    pub value_type: zova_sql_value_type,
+    pub int64_value: i64,
+    pub double_value: f64,
+    pub data: *const c_void,
+    pub data_len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_sql_result {
+    pub result_type: c_int,
+    pub int64_value: i64,
+    pub double_value: f64,
+    pub data: *const c_void,
+    pub data_len: usize,
+    pub error_message: *const c_char,
+    pub error_message_len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_sql_function_call {
+    pub user_data: *mut c_void,
+    pub argc: usize,
+    pub argv: *const zova_sql_value,
+}
+
+pub type zova_sql_scalar_callback = Option<
+    unsafe extern "C" fn(
+        user_data: *mut c_void,
+        call: *const zova_sql_function_call,
+        out_result: *mut zova_sql_result,
+    ),
+>;
+
+pub type zova_sql_destroy_callback = Option<unsafe extern "C" fn(user_data: *mut c_void)>;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -406,6 +462,17 @@ pub struct zova_database_restore_request {
 pub struct zova_database_exec_request {
     pub db: *mut zova_database,
     pub sql: *const c_char,
+}
+
+#[repr(C)]
+pub struct zova_sql_function_register_request {
+    pub db: *mut zova_database,
+    pub name: *const c_char,
+    pub arity: c_int,
+    pub flags: u32,
+    pub user_data: *mut c_void,
+    pub callback: zova_sql_scalar_callback,
+    pub destroy: zova_sql_destroy_callback,
 }
 
 #[repr(C)]
@@ -1014,6 +1081,9 @@ extern "C" {
     ) -> zova_status;
     pub fn zova_database_close(db: *mut zova_database) -> zova_status;
     pub fn zova_database_exec(request: *const zova_database_exec_request) -> zova_status;
+    pub fn zova_database_register_function(
+        request: *const zova_sql_function_register_request,
+    ) -> zova_status;
     pub fn zova_database_begin(request: *const zova_database_simple_request) -> zova_status;
     pub fn zova_database_begin_immediate(
         request: *const zova_database_simple_request,

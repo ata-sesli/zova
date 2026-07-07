@@ -87,6 +87,159 @@ static void expect_graph_text(const char *actual, size_t actual_len, const char 
     }
 }
 
+typedef struct sql_callback_state {
+    int calls;
+    int saw_user_data;
+    int destroyed;
+} sql_callback_state;
+
+static void smoke_sql_destroy(void *user_data) {
+    sql_callback_state *state = (sql_callback_state *)user_data;
+    state->destroyed = 1;
+}
+
+static void smoke_sql_mix(void *user_data, const zova_sql_function_call *call, zova_sql_result *out_result) {
+    sql_callback_state *state = (sql_callback_state *)user_data;
+    state->calls += 1;
+    state->saw_user_data = call->user_data == user_data;
+    if (call->argc != 3 ||
+        call->argv[0].value_type != ZOVA_SQL_VALUE_INTEGER ||
+        call->argv[0].int64_value != 4 ||
+        call->argv[1].value_type != ZOVA_SQL_VALUE_TEXT ||
+        call->argv[1].data_len != 3 ||
+        memcmp(call->argv[1].data, "cat", 3) != 0 ||
+        call->argv[2].value_type != ZOVA_SQL_VALUE_BLOB ||
+        call->argv[2].data_len != 2) {
+        out_result->result_type = ZOVA_SQL_RESULT_ERROR;
+        out_result->error_message = "bad callback arguments";
+        out_result->error_message_len = strlen(out_result->error_message);
+        return;
+    }
+    out_result->result_type = ZOVA_SQL_RESULT_INTEGER;
+    out_result->int64_value = 99;
+}
+
+static void smoke_sql_text(void *user_data, const zova_sql_function_call *call, zova_sql_result *out_result) {
+    (void)user_data;
+    (void)call;
+    out_result->result_type = ZOVA_SQL_RESULT_TEXT;
+    out_result->data = "from-c";
+    out_result->data_len = strlen("from-c");
+}
+
+static void smoke_sql_error(void *user_data, const zova_sql_function_call *call, zova_sql_result *out_result) {
+    (void)user_data;
+    (void)call;
+    out_result->result_type = ZOVA_SQL_RESULT_ERROR;
+    out_result->error_message = "c callback failed";
+    out_result->error_message_len = strlen(out_result->error_message);
+}
+
+static void run_sql_function_smoke(zova_database *db, sql_callback_state *state) {
+    expect_status(zova_database_register_function(&(zova_sql_function_register_request){
+                      .db = db,
+                      .name = "app_c_mix",
+                      .arity = 3,
+                      .flags = ZOVA_SQL_FUNCTION_DETERMINISTIC | ZOVA_SQL_FUNCTION_INNOCUOUS,
+                      .user_data = state,
+                      .callback = smoke_sql_mix,
+                      .destroy = smoke_sql_destroy,
+                  }),
+                  ZOVA_OK,
+                  "register c sql mix");
+    expect_status(zova_database_register_function(&(zova_sql_function_register_request){
+                      .db = db,
+                      .name = "app_c_text",
+                      .arity = 0,
+                      .flags = ZOVA_SQL_FUNCTION_DIRECT_ONLY,
+                      .user_data = NULL,
+                      .callback = smoke_sql_text,
+                      .destroy = NULL,
+                  }),
+                  ZOVA_OK,
+                  "register c sql text");
+    expect_status(zova_database_register_function(&(zova_sql_function_register_request){
+                      .db = db,
+                      .name = "app_c_fail",
+                      .arity = 0,
+                      .flags = 0,
+                      .user_data = NULL,
+                      .callback = smoke_sql_error,
+                      .destroy = NULL,
+                  }),
+                  ZOVA_OK,
+                  "register c sql error");
+    expect_status(zova_database_register_function(&(zova_sql_function_register_request){
+                      .db = db,
+                      .name = "app_c_mix",
+                      .arity = 3,
+                      .flags = 0,
+                      .user_data = state,
+                      .callback = smoke_sql_mix,
+                      .destroy = NULL,
+                  }),
+                  ZOVA_INVALID_ARGUMENT,
+                  "register duplicate c sql function");
+
+    zova_statement *stmt = NULL;
+    expect_status(zova_database_prepare(&(zova_database_prepare_request){
+                      .db = db,
+                      .sql = "select app_c_mix(4, 'cat', x'0102'), app_c_text()",
+                      .out_statement = &stmt,
+                  }),
+                  ZOVA_OK,
+                  "prepare c sql function");
+    zova_step_result step = ZOVA_STEP_DONE;
+    expect_status(zova_statement_step(&(zova_statement_step_request){
+                      .statement = stmt,
+                      .out_result = &step,
+                  }),
+                  ZOVA_OK,
+                  "step c sql function");
+    if (step != ZOVA_STEP_ROW) {
+        fprintf(stderr, "step c sql function: expected row\n");
+        exit(1);
+    }
+    int64_t value = 0;
+    expect_status(zova_statement_column_int64(&(zova_statement_column_int64_request){
+                      .statement = stmt,
+                      .index = 0,
+                      .out_value = &value,
+                  }),
+                  ZOVA_OK,
+                  "c sql function int result");
+    if (value != 99 || state->calls != 1 || !state->saw_user_data) {
+        fprintf(stderr, "c sql function int result: unexpected callback state\n");
+        exit(1);
+    }
+    zova_text text = {0};
+    expect_status(zova_statement_column_text(&(zova_statement_column_text_request){
+                      .statement = stmt,
+                      .index = 1,
+                      .out_text = &text,
+                  }),
+                  ZOVA_OK,
+                  "c sql function text result");
+    if (text.len != strlen("from-c") || memcmp(text.data, "from-c", text.len) != 0) {
+        fprintf(stderr, "c sql function text result: unexpected text\n");
+        exit(1);
+    }
+    zova_text_free(&text);
+    expect_status(zova_statement_finalize(stmt), ZOVA_OK, "finalize c sql function statement");
+
+    expect_status(zova_database_exec(&(zova_database_exec_request){
+                      .db = db,
+                      .sql = "select app_c_fail()",
+                  }),
+                  ZOVA_SQLITE_ERROR,
+                  "c sql function callback error");
+    const char *message = zova_database_last_error_message(db);
+    if (message == NULL || strstr(message, "c callback failed") == NULL) {
+        fprintf(stderr, "c sql function callback error: missing diagnostic\n");
+        exit(1);
+    }
+}
+
 static void run_graph_smoke(zova_database *db) {
     expect_status(zova_graph_create(&(zova_graph_create_request){
                       .db = db,
@@ -765,6 +918,9 @@ int main(int argc, char **argv) {
                   }),
                   ZOVA_OK,
                   "exec notes table");
+
+    sql_callback_state sql_state = {0};
+    run_sql_function_smoke(db, &sql_state);
 
     expect_status(zova_database_begin(&(zova_database_simple_request){.db = db}), ZOVA_OK, "begin transaction");
     expect_status(zova_database_exec(&(zova_database_exec_request){
@@ -1832,6 +1988,10 @@ int main(int argc, char **argv) {
 
     expect_status(zova_database_vacuum(&(zova_database_simple_request){.db = db}), ZOVA_OK, "explicit vacuum");
     expect_status(zova_database_close(db), ZOVA_OK, "close database");
+    if (!sql_state.destroyed) {
+        fprintf(stderr, "close database: expected SQL callback destructor\n");
+        return 1;
+    }
 
     db = NULL;
     zova_database_open_request open_req = {

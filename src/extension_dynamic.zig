@@ -209,6 +209,23 @@ pub const DynamicExtensionSet = struct {
     }
 };
 
+pub fn verifyBundleEntrypoint(allocator: std.mem.Allocator, bundle_path: []const u8) Error!void {
+    if (comptime !supports_dynamic_loading) return error.ExtensionLoadFailed;
+
+    var info = try loadBundleInfo(allocator, bundle_path);
+    defer info.deinit(allocator);
+
+    var library = std.DynLib.open(info.library_path) catch return error.ExtensionLoadFailed;
+    defer library.close();
+
+    const entry_name = try allocator.dupeZ(u8, info.manifest.entrypoint);
+    defer allocator.free(entry_name);
+    const Entry = *const fn () callconv(.c) *const extension.Extension;
+    const entry = library.lookup(Entry, entry_name) orelse return error.ExtensionLoadFailed;
+    const loaded = entry().*;
+    try ensureLoadedExtensionMatches(info, loaded);
+}
+
 pub fn loadBundleInfo(allocator: std.mem.Allocator, bundle_path: []const u8) Error!BundleInfo {
     if (!std.mem.endsWith(u8, bundle_path, ".zovaext")) return error.ExtensionInvalid;
 
