@@ -36,7 +36,6 @@ int main() {
     zova_object_manifest manifest = {};
     zova_object_id id = {};
     zova_vector vector = {};
-    zova_vector_typed typed_vector = {};
     zova_vector_search_results search_results = {};
     zova_vector_collection_info collection_info = {};
     zova_vector_collection_list collection_list = {};
@@ -51,11 +50,7 @@ int main() {
     zova_vector_collection_options options = {
         3,
         ZOVA_VECTOR_METRIC_COSINE,
-    };
-    zova_vector_collection_typed_options typed_options = {
-        2,
-        ZOVA_VECTOR_METRIC_L2,
-        ZOVA_VECTOR_ELEMENT_TYPE_I8,
+        ZOVA_VECTOR_ELEMENT_TYPE_F32,
     };
     int8_t i8_values[2] = {1, 2};
     zova_vector_values typed_values = {};
@@ -64,17 +59,10 @@ int main() {
     typed_values.values_len = 2;
     zova_vector_input vector_inputs[1] = {};
     vector_inputs[0].id = "chunk-001";
-    vector_inputs[0].values = nullptr;
-    vector_inputs[0].values_len = 0;
+    vector_inputs[0].values = typed_values;
     zova_vector_put_many_request put_many_request = {};
     put_many_request.vectors = vector_inputs;
     put_many_request.vectors_len = 1;
-    zova_vector_typed_input typed_vector_inputs[1] = {};
-    typed_vector_inputs[0].id = "chunk-i8";
-    typed_vector_inputs[0].values = typed_values;
-    zova_vector_put_many_typed_request put_many_typed_request = {};
-    put_many_typed_request.vectors = typed_vector_inputs;
-    put_many_typed_request.vectors_len = 1;
     zova_database_prepare_request prepare_request = {};
     prepare_request.out_statement = &statement;
     zova_database_last_insert_rowid_request last_rowid_request = {};
@@ -130,25 +118,21 @@ int main() {
     restore_request.destination_path = "restored.zova";
     zova_vector_collection_info_get_request info_request = {};
     info_request.out_info = &collection_info;
-    zova_vector_collection_create_typed_request create_typed_collection_request = {};
-    create_typed_collection_request.options = typed_options;
+    zova_vector_collection_create_request create_collection_request = {};
+    create_collection_request.options = options;
     zova_vector_collections_list_request list_request = {};
     list_request.out_list = &collection_list;
     zova_vector_collection_delete_request delete_collection_request = {};
     delete_collection_request.name = "chunks";
     zova_vector_search_request search_request = {};
     search_request.collection_name = "chunks";
-    search_request.query = nullptr;
-    search_request.query_len = 0;
+    search_request.query = typed_values;
     search_request.limit = 0;
     search_request.out_results = &search_results;
-    zova_vector_put_typed_request put_typed_request = {};
-    put_typed_request.values = typed_values;
-    zova_vector_get_typed_request get_typed_request = {};
-    get_typed_request.out_vector = &typed_vector;
-    zova_vector_search_typed_request search_typed_request = {};
-    search_typed_request.query = typed_values;
-    search_typed_request.out_results = &search_results;
+    zova_vector_put_request put_request = {};
+    put_request.values = typed_values;
+    zova_vector_get_request get_request = {};
+    get_request.out_vector = &vector;
     zova_vector_search_within_request within_request = {};
     within_request.collection_name = "chunks";
     within_request.max_distance = 0.0;
@@ -221,7 +205,6 @@ int main() {
     zova_notification_free(&notification);
     zova_object_manifest_free(&manifest);
     zova_vector_free(&vector);
-    zova_vector_typed_free(&typed_vector);
     zova_vector_search_results_free(&search_results);
     zova_vector_collection_info_free(&collection_info);
     zova_vector_collection_list_free(&collection_list);
@@ -236,13 +219,12 @@ int main() {
 
     return zova_database_close(db) == ZOVA_INVALID_ARGUMENT &&
                    options.metric == ZOVA_VECTOR_METRIC_COSINE &&
-                   typed_options.element_type == ZOVA_VECTOR_ELEMENT_TYPE_I8 &&
+                   options.element_type == ZOVA_VECTOR_ELEMENT_TYPE_F32 &&
                    put_many_request.vectors_len == 1 &&
-                   put_many_typed_request.vectors_len == 1 &&
-                   create_typed_collection_request.options.element_type == ZOVA_VECTOR_ELEMENT_TYPE_I8 &&
-                   put_typed_request.values.values_len == 2 &&
-                   get_typed_request.out_vector == &typed_vector &&
-                   search_typed_request.out_results == &search_results &&
+                   create_collection_request.options.element_type == ZOVA_VECTOR_ELEMENT_TYPE_F32 &&
+                   put_request.values.values_len == 2 &&
+                   get_request.out_vector == &vector &&
+                   search_request.out_results == &search_results &&
                    info_request.out_info == &collection_info &&
                    list_request.out_list == &collection_list &&
                    delete_collection_request.name != nullptr &&

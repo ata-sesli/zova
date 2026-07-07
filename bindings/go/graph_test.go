@@ -70,8 +70,8 @@ func TestGraphLifecycleNodeEdgeTraversalAndTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	must(t, db.CreateVectorCollection("chunks", VectorCollectionOptions{Dimensions: 2, Metric: VectorMetricL2}))
-	must(t, db.PutVector("chunks", "chunk-vector", []float32{1, 0}))
+	must(t, db.CreateVectorCollection("chunks", VectorCollectionOptions{Dimensions: 2, Metric: VectorMetricL2, ElementType: VectorElementTypeF32}))
+	must(t, db.PutVector("chunks", "chunk-vector", VectorValues{ElementType: VectorElementTypeF32, F32: []float32{1, 0}}))
 
 	targets := []GraphNodeInput{
 		graphNodeInput("record:m1", GraphTargetRecord, stringPtr("messages"), stringPtr("m1")),
@@ -304,8 +304,8 @@ func TestGraphTransactionsReadOnlyValidationAndVectorMetadata(t *testing.T) {
 		t.Fatalf("savepoint node = %v, %v", has, err)
 	}
 
-	must(t, db.CreateVectorCollection("chunks", VectorCollectionOptions{Dimensions: 2, Metric: VectorMetricL2}))
-	must(t, db.PutVector("chunks", "v1", []float32{1, 0}))
+	must(t, db.CreateVectorCollection("chunks", VectorCollectionOptions{Dimensions: 2, Metric: VectorMetricL2, ElementType: VectorElementTypeF32}))
+	must(t, db.PutVector("chunks", "v1", VectorValues{ElementType: VectorElementTypeF32, F32: []float32{1, 0}}))
 	must(t, db.PutGraphNode(graphNodeInput("vector:v1", GraphTargetVector, stringPtr("chunks"), stringPtr("v1"))))
 	must(t, db.DeleteVector("chunks", "v1"))
 	node, err := db.GetGraphNode(DefaultGraphName, "vector:v1")

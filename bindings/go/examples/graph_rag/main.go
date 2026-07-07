@@ -35,10 +35,11 @@ func main() {
 	must(db.Exec("insert into chunks(id, body) values ('chunk:1', 'Zova stores records, objects, vectors, and graphs together')"))
 	must(db.CreateGraph(zova.DefaultGraphName))
 	must(db.CreateVectorCollection("chunks", zova.VectorCollectionOptions{
-		Dimensions: 2,
-		Metric:     zova.VectorMetricL2,
+		Dimensions:  2,
+		Metric:      zova.VectorMetricL2,
+		ElementType: zova.VectorElementTypeF32,
 	}))
-	must(db.PutVector("chunks", "chunk:1", []float32{0, 1}))
+	must(db.PutVector("chunks", "chunk:1", zova.VectorValues{ElementType: zova.VectorElementTypeF32, F32: []float32{0, 1}}))
 
 	objectID, err := db.PutObject([]byte("attachment bytes"))
 	must(err)
@@ -80,7 +81,7 @@ func main() {
 		ToNodeID:   "attachment:1",
 	}))
 
-	hits, err := db.SearchVectors("chunks", []float32{0, 1}, 1)
+	hits, err := db.SearchVectors("chunks", zova.VectorValues{ElementType: zova.VectorElementTypeF32, F32: []float32{0, 1}}, 1)
 	must(err)
 	for _, hit := range hits {
 		neighbors, err := db.GraphNeighbors(zova.GraphNeighborsOptions{

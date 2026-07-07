@@ -74,12 +74,13 @@ func main() {
 		log.Fatal(err)
 	}
 	if err := db.CreateVectorCollection("chunks", zova.VectorCollectionOptions{
-		Dimensions: 2,
-		Metric:     zova.VectorMetricL2,
+		Dimensions:  2,
+		Metric:      zova.VectorMetricL2,
+		ElementType: zova.VectorElementTypeF32,
 	}); err != nil {
 		log.Fatal(err)
 	}
-	if err := db.PutVector("chunks", "chunk:1", []float32{0, 0}); err != nil {
+	if err := db.PutVector("chunks", "chunk:1", zova.VectorValues{ElementType: zova.VectorElementTypeF32, F32: []float32{0, 0}}); err != nil {
 		log.Fatal(err)
 	}
 	vectorListener, err := db.Listen("vectors:chunks")
@@ -103,7 +104,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	results, err := db.SearchVectors("chunks", []float32{0, 0}, 1)
+	results, err := db.SearchVectors("chunks", zova.VectorValues{ElementType: zova.VectorElementTypeF32, F32: []float32{0, 0}}, 1)
 	if err != nil {
 		log.Fatal(err)
 	}

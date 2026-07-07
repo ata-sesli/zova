@@ -15,8 +15,8 @@ func TestVectorCollectionCRUDAndBatch(t *testing.T) {
 	defer db.Close()
 
 	must(t, db.Exec("create table chunks(id integer primary key, vector_id text not null)"))
-	must(t, db.CreateVectorCollection("chunks", VectorCollectionOptions{Dimensions: 2, Metric: VectorMetricL2}))
-	must(t, db.CreateVectorCollection("docs", VectorCollectionOptions{Dimensions: 3, Metric: VectorMetricDot}))
+	must(t, db.CreateVectorCollection("chunks", VectorCollectionOptions{Dimensions: 2, Metric: VectorMetricL2, ElementType: VectorElementTypeF32}))
+	must(t, db.CreateVectorCollection("docs", VectorCollectionOptions{Dimensions: 3, Metric: VectorMetricDot, ElementType: VectorElementTypeF32}))
 
 	exists, err := db.HasVectorCollection("chunks")
 	if err != nil || !exists {
@@ -38,25 +38,25 @@ func TestVectorCollectionCRUDAndBatch(t *testing.T) {
 	}
 
 	must(t, db.PutVectors("chunks", []VectorInput{
-		{ID: "a", Values: []float32{99, 99}},
-		{ID: "b", Values: []float32{1, 0}},
-		{ID: "a", Values: []float32{0, 0}},
-		{ID: "c", Values: []float32{2, 0}},
+		{ID: "a", Values: VectorValues{ElementType: VectorElementTypeF32, F32: []float32{99, 99}}},
+		{ID: "b", Values: VectorValues{ElementType: VectorElementTypeF32, F32: []float32{1, 0}}},
+		{ID: "a", Values: VectorValues{ElementType: VectorElementTypeF32, F32: []float32{0, 0}}},
+		{ID: "c", Values: VectorValues{ElementType: VectorElementTypeF32, F32: []float32{2, 0}}},
 	}))
 	must(t, db.PutVectors("chunks", nil))
 	vector, err := db.GetVector("chunks", "a")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if vector.ID != "a" || !sameFloat32s(vector.Values, []float32{0, 0}) {
+	if vector.ID != "a" || vector.Values.ElementType != VectorElementTypeF32 || !sameFloat32s(vector.Values.F32, []float32{0, 0}) {
 		t.Fatalf("last batch entry did not win: %#v", vector)
 	}
-	must(t, db.PutVector("chunks", "b", []float32{1, 1}))
+	must(t, db.PutVector("chunks", "b", VectorValues{ElementType: VectorElementTypeF32, F32: []float32{1, 1}}))
 	vector, err = db.GetVector("chunks", "b")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !sameFloat32s(vector.Values, []float32{1, 1}) {
+	if vector.Values.ElementType != VectorElementTypeF32 || !sameFloat32s(vector.Values.F32, []float32{1, 1}) {
 		t.Fatalf("PutVector upsert = %#v", vector)
 	}
 	has, err := db.HasVector("chunks", "b")
@@ -81,23 +81,15 @@ func TestVectorCollectionCRUDAndBatch(t *testing.T) {
 	}
 }
 
-func TestRawTypedVectorsRoundtripAndSearch(t *testing.T) {
+func TestRawI8AndF16VectorsRoundtripAndSearch(t *testing.T) {
 	db, err := Create(tempZovaPath(t, "typed-vectors"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 
-	must(t, db.CreateVectorCollectionTyped("bytes", TypedVectorCollectionOptions{
-		Dimensions:  2,
-		Metric:      VectorMetricL2,
-		ElementType: VectorElementTypeI8,
-	}))
-	must(t, db.CreateVectorCollectionTyped("halves", TypedVectorCollectionOptions{
-		Dimensions:  2,
-		Metric:      VectorMetricL2,
-		ElementType: VectorElementTypeF16,
-	}))
+	must(t, db.CreateVectorCollection("bytes", VectorCollectionOptions{Dimensions: 2, Metric: VectorMetricL2, ElementType: VectorElementTypeI8}))
+	must(t, db.CreateVectorCollection("halves", VectorCollectionOptions{Dimensions: 2, Metric: VectorMetricL2, ElementType: VectorElementTypeF16}))
 
 	info, err := db.VectorCollectionInfo("bytes")
 	if err != nil {
@@ -107,14 +99,14 @@ func TestRawTypedVectorsRoundtripAndSearch(t *testing.T) {
 		t.Fatalf("bytes element type = %v", info.ElementType)
 	}
 
-	must(t, db.PutVectorsTyped("bytes", []TypedVectorInput{
+	must(t, db.PutVectors("bytes", []VectorInput{
 		{ID: "near", Values: VectorValues{ElementType: VectorElementTypeI8, I8: []int8{1, 0}}},
 		{ID: "far", Values: VectorValues{ElementType: VectorElementTypeI8, I8: []int8{5, 0}}},
 	}))
-	must(t, db.PutVectorTyped("halves", "near", VectorValues{ElementType: VectorElementTypeF16, F16: []uint16{0x3c00, 0x0000}}))
-	must(t, db.PutVectorTyped("halves", "far", VectorValues{ElementType: VectorElementTypeF16, F16: []uint16{0x4400, 0x0000}}))
+	must(t, db.PutVector("halves", "near", VectorValues{ElementType: VectorElementTypeF16, F16: []uint16{0x3c00, 0x0000}}))
+	must(t, db.PutVector("halves", "far", VectorValues{ElementType: VectorElementTypeF16, F16: []uint16{0x4400, 0x0000}}))
 
-	vector, err := db.GetVectorTyped("bytes", "near")
+	vector, err := db.GetVector("bytes", "near")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +114,7 @@ func TestRawTypedVectorsRoundtripAndSearch(t *testing.T) {
 		t.Fatalf("typed i8 vector = %#v", vector)
 	}
 
-	vector, err = db.GetVectorTyped("halves", "near")
+	vector, err = db.GetVector("halves", "near")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,22 +122,22 @@ func TestRawTypedVectorsRoundtripAndSearch(t *testing.T) {
 		t.Fatalf("typed f16 vector = %#v", vector)
 	}
 
-	results, err := db.SearchVectorsTyped("bytes", VectorValues{ElementType: VectorElementTypeI8, I8: []int8{0, 0}}, 2)
+	results, err := db.SearchVectors("bytes", VectorValues{ElementType: VectorElementTypeI8, I8: []int8{0, 0}}, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertIDs(t, results, []string{"near", "far"})
 	assertDistance(t, results[0].Distance, 1)
 
-	results, err = db.SearchVectorsTyped("halves", VectorValues{ElementType: VectorElementTypeF16, F16: []uint16{0x0000, 0x0000}}, 2)
+	results, err = db.SearchVectors("halves", VectorValues{ElementType: VectorElementTypeF16, F16: []uint16{0x0000, 0x0000}}, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertIDs(t, results, []string{"near", "far"})
 	assertDistance(t, results[0].Distance, 1)
 
-	if err := db.PutVector("bytes", "wrong", []float32{1, 2}); !hasStatus(err, StatusVectorInvalid) {
-		t.Fatalf("f32 wrapper on i8 collection err=%v", err)
+	if err := db.PutVector("bytes", "wrong", VectorValues{ElementType: VectorElementTypeF32, F32: []float32{1, 2}}); !hasStatus(err, StatusVectorInvalid) {
+		t.Fatalf("f32 values on i8 collection err=%v", err)
 	}
 }
 
@@ -156,21 +148,21 @@ func TestVectorSearchVariants(t *testing.T) {
 	}
 	defer db.Close()
 
-	must(t, db.CreateVectorCollection("l2", VectorCollectionOptions{Dimensions: 2, Metric: VectorMetricL2}))
+	must(t, db.CreateVectorCollection("l2", VectorCollectionOptions{Dimensions: 2, Metric: VectorMetricL2, ElementType: VectorElementTypeF32}))
 	must(t, db.PutVectors("l2", []VectorInput{
-		{ID: "a", Values: []float32{0, 0}},
-		{ID: "b", Values: []float32{1, 0}},
-		{ID: "c", Values: []float32{2, 0}},
-		{ID: "d", Values: []float32{0, 2}},
+		{ID: "a", Values: VectorValues{ElementType: VectorElementTypeF32, F32: []float32{0, 0}}},
+		{ID: "b", Values: VectorValues{ElementType: VectorElementTypeF32, F32: []float32{1, 0}}},
+		{ID: "c", Values: VectorValues{ElementType: VectorElementTypeF32, F32: []float32{2, 0}}},
+		{ID: "d", Values: VectorValues{ElementType: VectorElementTypeF32, F32: []float32{0, 2}}},
 	}))
-	results, err := db.SearchVectors("l2", []float32{0, 0}, 3)
+	results, err := db.SearchVectors("l2", VectorValues{ElementType: VectorElementTypeF32, F32: []float32{0, 0}}, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertIDs(t, results, []string{"a", "b", "c"})
 	assertDistance(t, results[1].Distance, 1)
 
-	results, err = db.SearchVectorsIn("l2", []float32{0, 0}, []string{"missing", "c", "b", "b"}, 10)
+	results, err = db.SearchVectorsIn("l2", VectorValues{ElementType: VectorElementTypeF32, F32: []float32{0, 0}}, []string{"missing", "c", "b", "b"}, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,13 +180,13 @@ func TestVectorSearchVariants(t *testing.T) {
 	}
 	assertIDs(t, results, []string{"b", "c"})
 
-	results, err = db.SearchVectorsWithin("l2", []float32{0, 0}, 1, 10)
+	results, err = db.SearchVectorsWithin("l2", VectorValues{ElementType: VectorElementTypeF32, F32: []float32{0, 0}}, 1, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertIDs(t, results, []string{"a", "b"})
 
-	results, err = db.SearchVectorsInWithin("l2", []float32{0, 0}, []string{"c", "b"}, 1, 10)
+	results, err = db.SearchVectorsInWithin("l2", VectorValues{ElementType: VectorElementTypeF32, F32: []float32{0, 0}}, []string{"c", "b"}, 1, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,19 +204,19 @@ func TestVectorSearchVariants(t *testing.T) {
 	}
 	assertIDs(t, results, []string{"b", "c", "d"})
 
-	if _, err := db.SearchVectors("l2", []float32{0}, 1); !hasStatus(err, StatusVectorDimensionMismatch) {
+	if _, err := db.SearchVectors("l2", VectorValues{ElementType: VectorElementTypeF32, F32: []float32{0}}, 1); !hasStatus(err, StatusVectorDimensionMismatch) {
 		t.Fatalf("wrong dimension err=%v", err)
 	}
-	if _, err := db.SearchVectorsIn("l2", []float32{0, 0}, []string{"bad\x00id"}, 1); err == nil {
+	if _, err := db.SearchVectorsIn("l2", VectorValues{ElementType: VectorElementTypeF32, F32: []float32{0, 0}}, []string{"bad\x00id"}, 1); err == nil {
 		t.Fatal("SearchVectorsIn accepted candidate id with NUL")
 	}
 
-	must(t, db.CreateVectorCollection("cosine", VectorCollectionOptions{Dimensions: 2, Metric: VectorMetricCosine}))
+	must(t, db.CreateVectorCollection("cosine", VectorCollectionOptions{Dimensions: 2, Metric: VectorMetricCosine, ElementType: VectorElementTypeF32}))
 	must(t, db.PutVectors("cosine", []VectorInput{
-		{ID: "x", Values: []float32{1, 0}},
-		{ID: "y", Values: []float32{0, 1}},
+		{ID: "x", Values: VectorValues{ElementType: VectorElementTypeF32, F32: []float32{1, 0}}},
+		{ID: "y", Values: VectorValues{ElementType: VectorElementTypeF32, F32: []float32{0, 1}}},
 	}))
-	results, err = db.SearchVectors("cosine", []float32{1, 0}, 2)
+	results, err = db.SearchVectors("cosine", VectorValues{ElementType: VectorElementTypeF32, F32: []float32{1, 0}}, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,12 +224,12 @@ func TestVectorSearchVariants(t *testing.T) {
 	assertDistance(t, results[0].Distance, 0)
 	assertDistance(t, results[1].Distance, 1)
 
-	must(t, db.CreateVectorCollection("dot", VectorCollectionOptions{Dimensions: 2, Metric: VectorMetricDot}))
+	must(t, db.CreateVectorCollection("dot", VectorCollectionOptions{Dimensions: 2, Metric: VectorMetricDot, ElementType: VectorElementTypeF32}))
 	must(t, db.PutVectors("dot", []VectorInput{
-		{ID: "low", Values: []float32{1, 0}},
-		{ID: "high", Values: []float32{3, 0}},
+		{ID: "low", Values: VectorValues{ElementType: VectorElementTypeF32, F32: []float32{1, 0}}},
+		{ID: "high", Values: VectorValues{ElementType: VectorElementTypeF32, F32: []float32{3, 0}}},
 	}))
-	results, err = db.SearchVectorsWithin("dot", []float32{1, 0}, -2, 10)
+	results, err = db.SearchVectorsWithin("dot", VectorValues{ElementType: VectorElementTypeF32, F32: []float32{1, 0}}, -2, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,11 +248,11 @@ func TestVectorsReopenConversionSQLNativeAndMixedWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	must(t, db.CreateVectorCollection("chunks", VectorCollectionOptions{Dimensions: 2, Metric: VectorMetricL2}))
+	must(t, db.CreateVectorCollection("chunks", VectorCollectionOptions{Dimensions: 2, Metric: VectorMetricL2, ElementType: VectorElementTypeF32}))
 	must(t, db.PutVectors("chunks", []VectorInput{
-		{ID: "v1", Values: []float32{0, 0}},
-		{ID: "v2", Values: []float32{1, 0}},
-		{ID: "v3", Values: []float32{3, 0}},
+		{ID: "v1", Values: VectorValues{ElementType: VectorElementTypeF32, F32: []float32{0, 0}}},
+		{ID: "v2", Values: VectorValues{ElementType: VectorElementTypeF32, F32: []float32{1, 0}}},
+		{ID: "v3", Values: VectorValues{ElementType: VectorElementTypeF32, F32: []float32{3, 0}}},
 	}))
 	insert, err := db.Prepare("insert into chunks(object_id, vector_id, body) values (?1, ?2, ?3)")
 	if err != nil {
@@ -326,13 +318,13 @@ func TestVectorsReopenConversionSQLNativeAndMixedWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer converted.Close()
-	must(t, converted.CreateVectorCollection("converted", VectorCollectionOptions{Dimensions: 2, Metric: VectorMetricL2}))
-	must(t, converted.PutVector("converted", "row-1", []float32{4, 5}))
+	must(t, converted.CreateVectorCollection("converted", VectorCollectionOptions{Dimensions: 2, Metric: VectorMetricL2, ElementType: VectorElementTypeF32}))
+	must(t, converted.PutVector("converted", "row-1", VectorValues{ElementType: VectorElementTypeF32, F32: []float32{4, 5}}))
 	vector, err := converted.GetVector("converted", "row-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if vector.ID != "row-1" || !sameFloat32s(vector.Values, []float32{4, 5}) {
+	if vector.ID != "row-1" || vector.Values.ElementType != VectorElementTypeF32 || !sameFloat32s(vector.Values.F32, []float32{4, 5}) {
 		t.Fatalf("converted vector = %#v", vector)
 	}
 	if got := scalarInt(t, converted, "select count(*) from source_rows"); got != 1 {

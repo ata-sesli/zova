@@ -18,12 +18,12 @@ def test_vector_collection_lifecycle_crud_batch_and_delete(tmp_path):
 
     with zova.Database.create(str(path)) as db:
         db.exec("create table chunks(id text primary key, vector_id text not null)")
-        options = zova.VectorCollectionOptions(2, zova.VectorMetric.L2)
+        options = zova.VectorCollectionOptions(2, zova.VectorMetric.L2, zova.VectorElementType.F32)
         assert options.dimensions == 2
         assert options.metric == zova.VectorMetric.L2
 
         db.create_vector_collection("chunks", options)
-        db.create_vector_collection("docs", zova.VectorCollectionOptions(3, zova.VectorMetric.DOT))
+        db.create_vector_collection("docs", zova.VectorCollectionOptions(3, zova.VectorMetric.DOT, zova.VectorElementType.F32))
         assert db.has_vector_collection("chunks")
 
         info = db.vector_collection_info("chunks")
@@ -38,9 +38,9 @@ def test_vector_collection_lifecycle_crud_batch_and_delete(tmp_path):
         db.put_vectors(
             "chunks",
             [
-                zova.VectorInput("a", [2.0, 0.0]),
-                zova.VectorInput("b", (5.0, 0.0)),
-                zova.VectorInput("a", [1.0, 0.0]),
+                zova.VectorInput("a", zova.VectorElementType.F32, [2.0, 0.0]),
+                zova.VectorInput("b", zova.VectorElementType.F32, (5.0, 0.0)),
+                zova.VectorInput("a", zova.VectorElementType.F32, [1.0, 0.0]),
             ],
         )
         db.put_vectors("chunks", [])
@@ -49,9 +49,10 @@ def test_vector_collection_lifecycle_crud_batch_and_delete(tmp_path):
         vector = db.get_vector("chunks", "a")
         assert isinstance(vector, zova.Vector)
         assert vector.id == "a"
+        assert vector.element_type == zova.VectorElementType.F32
         assert vector.values == [1.0, 0.0]
 
-        db.put_vector("chunks", "a", [4.0, 0.0])
+        db.put_vector("chunks", "a", zova.VectorElementType.F32, [4.0, 0.0])
         assert db.get_vector("chunks", "a").values == [4.0, 0.0]
 
         db.exec("insert into chunks(id, vector_id) values ('row-a', 'a')")
@@ -79,22 +80,22 @@ def test_vector_search_variants(tmp_path):
     path = tmp_path / "search.zova"
 
     with zova.Database.create(str(path)) as db:
-        db.create_vector_collection("l2", zova.VectorCollectionOptions(2, zova.VectorMetric.L2))
+        db.create_vector_collection("l2", zova.VectorCollectionOptions(2, zova.VectorMetric.L2, zova.VectorElementType.F32))
         db.put_vectors(
             "l2",
             [
-                zova.VectorInput("source", [0.0, 0.0]),
-                zova.VectorInput("near", [1.0, 0.0]),
-                zova.VectorInput("tie-a", [0.0, 1.0]),
-                zova.VectorInput("far", [3.0, 4.0]),
+                zova.VectorInput("source", zova.VectorElementType.F32, [0.0, 0.0]),
+                zova.VectorInput("near", zova.VectorElementType.F32, [1.0, 0.0]),
+                zova.VectorInput("tie-a", zova.VectorElementType.F32, [0.0, 1.0]),
+                zova.VectorInput("far", zova.VectorElementType.F32, [3.0, 4.0]),
             ],
         )
 
         assert_distances_close(
-            db.search_vectors("l2", [0.0, 0.0], 3),
+            db.search_vectors("l2", zova.VectorElementType.F32, [0.0, 0.0], 3),
             [("source", 0.0), ("near", 1.0), ("tie-a", 1.0)],
         )
-        assert [item.id for item in db.search_vectors_in("l2", [0.0, 0.0], ["far", "near", "near", "missing"], 10)] == [
+        assert [item.id for item in db.search_vectors_in("l2", zova.VectorElementType.F32, [0.0, 0.0], ["far", "near", "near", "missing"], 10)] == [
             "near",
             "far",
         ]
@@ -107,12 +108,12 @@ def test_vector_search_variants(tmp_path):
             "near",
             "far",
         ]
-        assert [item.id for item in db.search_vectors_within("l2", [0.0, 0.0], 1.0, 10)] == [
+        assert [item.id for item in db.search_vectors_within("l2", zova.VectorElementType.F32, [0.0, 0.0], 1.0, 10)] == [
             "source",
             "near",
             "tie-a",
         ]
-        assert [item.id for item in db.search_vectors_in_within("l2", [0.0, 0.0], ["near", "far"], 1.0, 10)] == [
+        assert [item.id for item in db.search_vectors_in_within("l2", zova.VectorElementType.F32, [0.0, 0.0], ["near", "far"], 1.0, 10)] == [
             "near"
         ]
         assert [item.id for item in db.search_vectors_by_id_within("l2", "source", 1.0, 10)] == [
@@ -123,26 +124,26 @@ def test_vector_search_variants(tmp_path):
             "near"
         ]
 
-        db.create_vector_collection("cosine", zova.VectorCollectionOptions(2, zova.VectorMetric.COSINE))
-        db.put_vector("cosine", "x", [1.0, 0.0])
-        db.put_vector("cosine", "diag", [1.0, 1.0])
-        assert [item.id for item in db.search_vectors("cosine", [1.0, 0.0], 2)] == ["x", "diag"]
+        db.create_vector_collection("cosine", zova.VectorCollectionOptions(2, zova.VectorMetric.COSINE, zova.VectorElementType.F32))
+        db.put_vector("cosine", "x", zova.VectorElementType.F32, [1.0, 0.0])
+        db.put_vector("cosine", "diag", zova.VectorElementType.F32, [1.0, 1.0])
+        assert [item.id for item in db.search_vectors("cosine", zova.VectorElementType.F32, [1.0, 0.0], 2)] == ["x", "diag"]
 
-        db.create_vector_collection("dot", zova.VectorCollectionOptions(2, zova.VectorMetric.DOT))
-        db.put_vector("dot", "low", [1.0, 0.0])
-        db.put_vector("dot", "high", [3.0, 0.0])
-        dot = db.search_vectors_within("dot", [1.0, 0.0], -2.0, 10)
+        db.create_vector_collection("dot", zova.VectorCollectionOptions(2, zova.VectorMetric.DOT, zova.VectorElementType.F32))
+        db.put_vector("dot", "low", zova.VectorElementType.F32, [1.0, 0.0])
+        db.put_vector("dot", "high", zova.VectorElementType.F32, [3.0, 0.0])
+        dot = db.search_vectors_within("dot", zova.VectorElementType.F32, [1.0, 0.0], -2.0, 10)
         assert_distances_close(dot, [("high", -3.0)])
 
         with pytest.raises(zova.ZovaError) as exc:
-            db.search_vectors("l2", [0.0], 1)
+            db.search_vectors("l2", zova.VectorElementType.F32, [0.0], 1)
         assert exc.value.status_name == "ZOVA_VECTOR_DIMENSION_MISMATCH"
 
         with pytest.raises(ValueError):
-            db.put_vector("l2", "bad\0id", [1.0, 2.0])
+            db.put_vector("l2", "bad\0id", zova.VectorElementType.F32, [1.0, 2.0])
 
 
-def test_raw_typed_vectors_roundtrip_and_search(tmp_path):
+def test_raw_i8_and_f16_vectors_roundtrip_and_search(tmp_path):
     path = tmp_path / "typed-vectors.zova"
 
     with zova.Database.create(str(path)) as db:
@@ -153,34 +154,34 @@ def test_raw_typed_vectors_roundtrip_and_search(tmp_path):
         info = db.vector_collection_info("ints")
         assert info.element_type == zova.VectorElementType.I8
 
-        db.put_vector_typed("ints", "near", zova.VectorElementType.I8, [1, -2])
-        db.put_vectors_typed(
+        db.put_vector("ints", "near", zova.VectorElementType.I8, [1, -2])
+        db.put_vectors(
             "ints",
             [
-                zova.TypedVectorInput("far", zova.VectorElementType.I8, [8, -2]),
-                zova.TypedVectorInput("origin", zova.VectorElementType.I8, [0, 0]),
+                zova.VectorInput("far", zova.VectorElementType.I8, [8, -2]),
+                zova.VectorInput("origin", zova.VectorElementType.I8, [0, 0]),
             ],
         )
-        got = db.get_vector_typed("ints", "near")
-        assert isinstance(got, zova.TypedVector)
+        got = db.get_vector("ints", "near")
+        assert isinstance(got, zova.Vector)
         assert got.element_type == zova.VectorElementType.I8
         assert got.values == [1, -2]
-        assert [item.id for item in db.search_vectors_typed("ints", zova.VectorElementType.I8, [0, 0], 2)] == [
+        assert [item.id for item in db.search_vectors("ints", zova.VectorElementType.I8, [0, 0], 2)] == [
             "origin",
             "near",
         ]
         with pytest.raises(zova.ZovaError) as exc:
-            db.put_vector("ints", "wrong", [1.0, 2.0])
+            db.put_vector("ints", "wrong", zova.VectorElementType.F32, [1.0, 2.0])
         assert exc.value.status_name == "ZOVA_VECTOR_INVALID"
 
-        db.create_vector_collection_typed(
+        db.create_vector_collection(
             "halves",
             zova.VectorCollectionOptions(2, zova.VectorMetric.L2, zova.VectorElementType.F16),
         )
-        db.put_vector_typed("halves", "zero", zova.VectorElementType.F16, [0x0000, 0x0000])
-        db.put_vector_typed("halves", "one", zova.VectorElementType.F16, [0x3C00, 0x0000])
-        assert db.get_vector_typed("halves", "one").values == [0x3C00, 0x0000]
-        assert [item.id for item in db.search_vectors_typed("halves", zova.VectorElementType.F16, [0, 0], 2)] == [
+        db.put_vector("halves", "zero", zova.VectorElementType.F16, [0x0000, 0x0000])
+        db.put_vector("halves", "one", zova.VectorElementType.F16, [0x3C00, 0x0000])
+        assert db.get_vector("halves", "one").values == [0x3C00, 0x0000]
+        assert [item.id for item in db.search_vectors("halves", zova.VectorElementType.F16, [0, 0], 2)] == [
             "zero",
             "one",
         ]
@@ -188,8 +189,8 @@ def test_raw_typed_vectors_roundtrip_and_search(tmp_path):
     with zova.Database.open(str(path)) as db:
         assert db.vector_collection_info("ints").element_type == zova.VectorElementType.I8
         assert db.vector_collection_info("halves").element_type == zova.VectorElementType.F16
-        assert db.get_vector_typed("ints", "near").values == [1, -2]
-        assert db.get_vector_typed("halves", "one").values == [0x3C00, 0x0000]
+        assert db.get_vector("ints", "near").values == [1, -2]
+        assert db.get_vector("halves", "one").values == [0x3C00, 0x0000]
 
 
 def test_vectors_survive_reopen_conversion_and_mix_with_records_objects(tmp_path):
@@ -203,9 +204,9 @@ def test_vectors_survive_reopen_conversion_and_mix_with_records_objects(tmp_path
             "document_id text not null)"
         )
         object_id = db.put_object(b"metadata and bytes")
-        db.create_vector_collection("chunks", zova.VectorCollectionOptions(2, zova.VectorMetric.L2))
-        db.put_vector("chunks", "v1", [0.0, 0.0])
-        db.put_vector("chunks", "v2", [1.0, 0.0])
+        db.create_vector_collection("chunks", zova.VectorCollectionOptions(2, zova.VectorMetric.L2, zova.VectorElementType.F32))
+        db.put_vector("chunks", "v1", zova.VectorElementType.F32, [0.0, 0.0])
+        db.put_vector("chunks", "v2", zova.VectorElementType.F32, [1.0, 0.0])
         with db.prepare("insert into chunks(id, object_id, vector_id, document_id) values (?1, ?2, ?3, ?4)") as stmt:
             stmt.bind_text(1, "chunk-1")
             stmt.bind_blob(2, bytes(object_id))
@@ -215,7 +216,7 @@ def test_vectors_survive_reopen_conversion_and_mix_with_records_objects(tmp_path
 
     with zova.Database.open(str(path)) as db:
         assert db.vector_collection_info("chunks").vector_count == 2
-        assert db.search_vectors("chunks", [0.0, 0.0], 1)[0].id == "v1"
+        assert db.search_vectors("chunks", zova.VectorElementType.F32, [0.0, 0.0], 1)[0].id == "v1"
         with db.prepare("select object_id from chunks where vector_id = ?1") as stmt:
             stmt.bind_text(1, "v1")
             assert stmt.step() == zova.Step.ROW
@@ -231,8 +232,11 @@ def test_vectors_survive_reopen_conversion_and_mix_with_records_objects(tmp_path
 
     zova.convert_sqlite_to_zova(str(source), str(destination))
     with zova.Database.open(str(destination)) as db:
-        db.create_vector_collection("converted_vectors", zova.VectorCollectionOptions(2, zova.VectorMetric.L2))
-        db.put_vector("converted_vectors", "v", [1.0, 2.0])
+        db.create_vector_collection(
+            "converted_vectors",
+            zova.VectorCollectionOptions(2, zova.VectorMetric.L2, zova.VectorElementType.F32),
+        )
+        db.put_vector("converted_vectors", "v", zova.VectorElementType.F32, [1.0, 2.0])
         assert db.get_vector("converted_vectors", "v").values == [1.0, 2.0]
         with db.prepare("select count(*) from rows") as stmt:
             assert stmt.step() == zova.Step.ROW
@@ -247,12 +251,15 @@ def test_sql_native_vector_helpers_and_queries(tmp_path):
 
     with zova.Database.create(str(path)) as db:
         db.exec("create table chunks(id text primary key, vector_id text not null, document_id text not null)")
-        db.create_vector_collection("chunks", zova.VectorCollectionOptions(2, zova.VectorMetric.L2))
+        db.create_vector_collection(
+            "chunks",
+            zova.VectorCollectionOptions(2, zova.VectorMetric.L2, zova.VectorElementType.F32),
+        )
         db.put_vectors(
             "chunks",
             [
-                zova.VectorInput("v1", [0.0, 0.0]),
-                zova.VectorInput("v2", [1.0, 0.0]),
+                zova.VectorInput("v1", zova.VectorElementType.F32, [0.0, 0.0]),
+                zova.VectorInput("v2", zova.VectorElementType.F32, [1.0, 0.0]),
             ],
         )
         db.exec(

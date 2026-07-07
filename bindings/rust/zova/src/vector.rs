@@ -22,19 +22,13 @@ pub enum VectorElementType {
 pub struct VectorCollectionOptions {
     pub dimensions: u32,
     pub metric: VectorMetric,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TypedVectorCollectionOptions {
-    pub dimensions: u32,
-    pub metric: VectorMetric,
     pub element_type: VectorElementType,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Vector {
     pub id: String,
-    pub values: Vec<f32>,
+    pub values: VectorValuesOwned,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -42,12 +36,6 @@ pub enum VectorValuesOwned {
     F32(Vec<f32>),
     F16(Vec<u16>),
     I8(Vec<i8>),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct TypedVector {
-    pub id: String,
-    pub values: VectorValuesOwned,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,7 +50,7 @@ pub struct VectorCollectionInfo {
 #[derive(Debug, Clone, Copy)]
 pub struct VectorInput<'a> {
     pub id: &'a str,
-    pub values: &'a [f32],
+    pub values: VectorValues<'a>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -70,12 +58,6 @@ pub enum VectorValues<'a> {
     F32(&'a [f32]),
     F16(&'a [u16]),
     I8(&'a [i8]),
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct TypedVectorInput<'a> {
-    pub id: &'a str,
-    pub values: VectorValues<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -97,27 +79,10 @@ impl Database {
             options: zova_sys::zova_vector_collection_options {
                 dimensions: options.dimensions,
                 metric: options.metric.to_c(),
-            },
-        };
-        self.status(unsafe { zova_sys::zova_vector_collection_create(&request) })
-    }
-
-    pub fn create_vector_collection_typed(
-        &mut self,
-        name: &str,
-        options: TypedVectorCollectionOptions,
-    ) -> Result<()> {
-        let name = cstring(name, "vector collection name")?;
-        let request = zova_sys::zova_vector_collection_create_typed_request {
-            db: self.raw_ptr(),
-            name: name.as_ptr(),
-            options: zova_sys::zova_vector_collection_typed_options {
-                dimensions: options.dimensions,
-                metric: options.metric.to_c(),
                 element_type: options.element_type.to_c(),
             },
         };
-        self.status(unsafe { zova_sys::zova_vector_collection_create_typed(&request) })
+        self.status(unsafe { zova_sys::zova_vector_collection_create(&request) })
     }
 
     pub fn has_vector_collection(&mut self, name: &str) -> Result<bool> {
@@ -135,25 +100,25 @@ impl Database {
     pub fn vector_collection_info(&mut self, name: &str) -> Result<VectorCollectionInfo> {
         let name = cstring(name, "vector collection name")?;
         let mut info = empty_collection_info();
-        let request = zova_sys::zova_vector_collection_typed_info_get_request {
+        let request = zova_sys::zova_vector_collection_info_get_request {
             db: self.raw_ptr(),
             name: name.as_ptr(),
             out_info: &mut info,
         };
-        self.status(unsafe { zova_sys::zova_vector_collection_typed_info_get(&request) })?;
+        self.status(unsafe { zova_sys::zova_vector_collection_info_get(&request) })?;
         take_collection_info(&mut info)
     }
 
     pub fn list_vector_collections(&mut self) -> Result<Vec<VectorCollectionInfo>> {
-        let mut list = zova_sys::zova_vector_collection_typed_list {
+        let mut list = zova_sys::zova_vector_collection_list {
             items: ptr::null_mut(),
             len: 0,
         };
-        let request = zova_sys::zova_vector_collections_typed_list_request {
+        let request = zova_sys::zova_vector_collections_list_request {
             db: self.raw_ptr(),
             out_list: &mut list,
         };
-        self.status(unsafe { zova_sys::zova_vector_collections_typed_list(&request) })?;
+        self.status(unsafe { zova_sys::zova_vector_collections_list(&request) })?;
         take_collection_list(&mut list)
     }
 
@@ -170,7 +135,7 @@ impl Database {
         &mut self,
         collection_name: &str,
         vector_id: &str,
-        values: &[f32],
+        values: VectorValues<'_>,
     ) -> Result<()> {
         let collection_name = cstring(collection_name, "vector collection name")?;
         let vector_id = cstring(vector_id, "vector id")?;
@@ -178,27 +143,9 @@ impl Database {
             db: self.raw_ptr(),
             collection_name: collection_name.as_ptr(),
             vector_id: vector_id.as_ptr(),
-            values: values_ptr(values),
-            values_len: values.len(),
-        };
-        self.status(unsafe { zova_sys::zova_vector_put(&request) })
-    }
-
-    pub fn put_vector_typed(
-        &mut self,
-        collection_name: &str,
-        vector_id: &str,
-        values: VectorValues<'_>,
-    ) -> Result<()> {
-        let collection_name = cstring(collection_name, "vector collection name")?;
-        let vector_id = cstring(vector_id, "vector id")?;
-        let request = zova_sys::zova_vector_put_typed_request {
-            db: self.raw_ptr(),
-            collection_name: collection_name.as_ptr(),
-            vector_id: vector_id.as_ptr(),
             values: values.to_c(),
         };
-        self.status(unsafe { zova_sys::zova_vector_put_typed(&request) })
+        self.status(unsafe { zova_sys::zova_vector_put(&request) })
     }
 
     pub fn put_vectors(
@@ -223,28 +170,6 @@ impl Database {
         result
     }
 
-    pub fn put_vectors_typed(
-        &mut self,
-        collection_name: &str,
-        vectors: &[TypedVectorInput<'_>],
-    ) -> Result<()> {
-        let collection_name = cstring(collection_name, "vector collection name")?;
-        let (ids, inputs) = typed_vector_inputs(vectors)?;
-        let request = zova_sys::zova_vector_put_many_typed_request {
-            db: self.raw_ptr(),
-            collection_name: collection_name.as_ptr(),
-            vectors: if inputs.is_empty() {
-                ptr::null()
-            } else {
-                inputs.as_ptr()
-            },
-            vectors_len: inputs.len(),
-        };
-        let result = self.status(unsafe { zova_sys::zova_vector_put_many_typed(&request) });
-        drop(ids);
-        result
-    }
-
     pub fn get_vector(&mut self, collection_name: &str, vector_id: &str) -> Result<Vector> {
         let collection_name = cstring(collection_name, "vector collection name")?;
         let vector_id = cstring(vector_id, "vector id")?;
@@ -257,24 +182,6 @@ impl Database {
         };
         self.status(unsafe { zova_sys::zova_vector_get(&request) })?;
         take_vector(&mut vector)
-    }
-
-    pub fn get_vector_typed(
-        &mut self,
-        collection_name: &str,
-        vector_id: &str,
-    ) -> Result<TypedVector> {
-        let collection_name = cstring(collection_name, "vector collection name")?;
-        let vector_id = cstring(vector_id, "vector id")?;
-        let mut vector = empty_typed_vector();
-        let request = zova_sys::zova_vector_get_typed_request {
-            db: self.raw_ptr(),
-            collection_name: collection_name.as_ptr(),
-            vector_id: vector_id.as_ptr(),
-            out_vector: &mut vector,
-        };
-        self.status(unsafe { zova_sys::zova_vector_get_typed(&request) })?;
-        take_typed_vector(&mut vector)
     }
 
     pub fn has_vector(&mut self, collection_name: &str, vector_id: &str) -> Result<bool> {
@@ -305,7 +212,7 @@ impl Database {
     pub fn search_vectors(
         &mut self,
         collection_name: &str,
-        query: &[f32],
+        query: VectorValues<'_>,
         limit: usize,
     ) -> Result<Vec<VectorSearchResult>> {
         let collection_name = cstring(collection_name, "vector collection name")?;
@@ -313,8 +220,7 @@ impl Database {
         let request = zova_sys::zova_vector_search_request {
             db: self.raw_ptr(),
             collection_name: collection_name.as_ptr(),
-            query: values_ptr(query),
-            query_len: query.len(),
+            query: query.to_c(),
             limit,
             out_results: &mut results,
         };
@@ -322,29 +228,10 @@ impl Database {
         take_search_results(&mut results)
     }
 
-    pub fn search_vectors_typed(
-        &mut self,
-        collection_name: &str,
-        query: VectorValues<'_>,
-        limit: usize,
-    ) -> Result<Vec<VectorSearchResult>> {
-        let collection_name = cstring(collection_name, "vector collection name")?;
-        let mut results = empty_search_results();
-        let request = zova_sys::zova_vector_search_typed_request {
-            db: self.raw_ptr(),
-            collection_name: collection_name.as_ptr(),
-            query: query.to_c(),
-            limit,
-            out_results: &mut results,
-        };
-        self.status(unsafe { zova_sys::zova_vector_search_typed(&request) })?;
-        take_search_results(&mut results)
-    }
-
     pub fn search_vectors_in(
         &mut self,
         collection_name: &str,
-        query: &[f32],
+        query: VectorValues<'_>,
         candidate_ids: &[&str],
         limit: usize,
     ) -> Result<Vec<VectorSearchResult>> {
@@ -354,8 +241,7 @@ impl Database {
         let request = zova_sys::zova_vector_search_in_request {
             db: self.raw_ptr(),
             collection_name: collection_name.as_ptr(),
-            query: values_ptr(query),
-            query_len: query.len(),
+            query: query.to_c(),
             candidate_ids: if candidate_ptrs.is_empty() {
                 ptr::null()
             } else {
@@ -374,7 +260,7 @@ impl Database {
     pub fn search_vectors_within(
         &mut self,
         collection_name: &str,
-        query: &[f32],
+        query: VectorValues<'_>,
         max_distance: f64,
         limit: usize,
     ) -> Result<Vec<VectorSearchResult>> {
@@ -383,8 +269,7 @@ impl Database {
         let request = zova_sys::zova_vector_search_within_request {
             db: self.raw_ptr(),
             collection_name: collection_name.as_ptr(),
-            query: values_ptr(query),
-            query_len: query.len(),
+            query: query.to_c(),
             max_distance,
             limit,
             out_results: &mut results,
@@ -396,7 +281,7 @@ impl Database {
     pub fn search_vectors_in_within(
         &mut self,
         collection_name: &str,
-        query: &[f32],
+        query: VectorValues<'_>,
         candidate_ids: &[&str],
         max_distance: f64,
         limit: usize,
@@ -407,8 +292,7 @@ impl Database {
         let request = zova_sys::zova_vector_search_in_within_request {
             db: self.raw_ptr(),
             collection_name: collection_name.as_ptr(),
-            query: values_ptr(query),
-            query_len: query.len(),
+            query: query.to_c(),
             candidate_ids: if candidate_ptrs.is_empty() {
                 ptr::null()
             } else {
@@ -569,7 +453,7 @@ impl VectorElementType {
 }
 
 impl VectorValues<'_> {
-    fn to_c(self) -> zova_sys::zova_vector_values {
+    pub(crate) fn to_c(self) -> zova_sys::zova_vector_values {
         match self {
             VectorValues::F32(values) => zova_sys::zova_vector_values {
                 element_type: VectorElementType::F32.to_c(),
@@ -643,28 +527,6 @@ pub(crate) fn vector_inputs(
         .zip(ids.iter())
         .map(|(vector, id)| zova_sys::zova_vector_input {
             id: id.as_ptr(),
-            values: values_ptr(vector.values),
-            values_len: vector.values.len(),
-        })
-        .collect();
-    Ok((ids, inputs))
-}
-
-pub(crate) fn typed_vector_inputs(
-    vectors: &[TypedVectorInput<'_>],
-) -> Result<(
-    Vec<std::ffi::CString>,
-    Vec<zova_sys::zova_vector_typed_input>,
-)> {
-    let ids = vectors
-        .iter()
-        .map(|vector| cstring(vector.id, "vector id"))
-        .collect::<Result<Vec<_>>>()?;
-    let inputs = vectors
-        .iter()
-        .zip(ids.iter())
-        .map(|(vector, id)| zova_sys::zova_vector_typed_input {
-            id: id.as_ptr(),
             values: vector.values.to_c(),
         })
         .collect();
@@ -673,15 +535,6 @@ pub(crate) fn typed_vector_inputs(
 
 pub(crate) fn empty_vector() -> zova_sys::zova_vector {
     zova_sys::zova_vector {
-        id: ptr::null_mut(),
-        id_len: 0,
-        values: ptr::null_mut(),
-        values_len: 0,
-    }
-}
-
-pub(crate) fn empty_typed_vector() -> zova_sys::zova_vector_typed {
-    zova_sys::zova_vector_typed {
         id: ptr::null_mut(),
         id_len: 0,
         element_type: zova_sys::ZOVA_VECTOR_ELEMENT_TYPE_F32,
@@ -699,8 +552,8 @@ pub(crate) fn empty_search_results() -> zova_sys::zova_vector_search_results {
     }
 }
 
-pub(crate) fn empty_collection_info() -> zova_sys::zova_vector_collection_typed_info {
-    zova_sys::zova_vector_collection_typed_info {
+pub(crate) fn empty_collection_info() -> zova_sys::zova_vector_collection_info {
+    zova_sys::zova_vector_collection_info {
         name: ptr::null_mut(),
         name_len: 0,
         dimensions: 0,
@@ -719,19 +572,6 @@ fn string_from_parts(data: *const c_char, len: usize) -> Result<String> {
 }
 
 pub(crate) fn take_vector(vector: &mut zova_sys::zova_vector) -> Result<Vector> {
-    let id = string_from_parts(vector.id, vector.id_len);
-    let values = if vector.values.is_null() || vector.values_len == 0 {
-        Vec::new()
-    } else {
-        unsafe { std::slice::from_raw_parts(vector.values, vector.values_len) }.to_vec()
-    };
-    unsafe {
-        zova_sys::zova_vector_free(vector);
-    }
-    Ok(Vector { id: id?, values })
-}
-
-pub(crate) fn take_typed_vector(vector: &mut zova_sys::zova_vector_typed) -> Result<TypedVector> {
     let id = string_from_parts(vector.id, vector.id_len);
     let values = match VectorElementType::from_c(vector.element_type)? {
         VectorElementType::F32 => {
@@ -760,9 +600,9 @@ pub(crate) fn take_typed_vector(vector: &mut zova_sys::zova_vector_typed) -> Res
         }
     };
     unsafe {
-        zova_sys::zova_vector_typed_free(vector);
+        zova_sys::zova_vector_free(vector);
     }
-    Ok(TypedVector { id: id?, values })
+    Ok(Vector { id: id?, values })
 }
 
 pub(crate) fn take_search_results(
@@ -788,7 +628,7 @@ pub(crate) fn take_search_results(
 }
 
 pub(crate) fn take_collection_info(
-    info: &mut zova_sys::zova_vector_collection_typed_info,
+    info: &mut zova_sys::zova_vector_collection_info,
 ) -> Result<VectorCollectionInfo> {
     let name = string_from_parts(info.name, info.name_len);
     let metric = VectorMetric::from_c(info.metric);
@@ -801,13 +641,13 @@ pub(crate) fn take_collection_info(
         vector_count: info.vector_count,
     });
     unsafe {
-        zova_sys::zova_vector_collection_typed_info_free(info);
+        zova_sys::zova_vector_collection_info_free(info);
     }
     out
 }
 
 pub(crate) fn take_collection_list(
-    list: &mut zova_sys::zova_vector_collection_typed_list,
+    list: &mut zova_sys::zova_vector_collection_list,
 ) -> Result<Vec<VectorCollectionInfo>> {
     let items = if list.items.is_null() || list.len == 0 {
         Vec::new()
@@ -826,7 +666,7 @@ pub(crate) fn take_collection_list(
             .collect::<Result<Vec<_>>>()?
     };
     unsafe {
-        zova_sys::zova_vector_collection_typed_list_free(list);
+        zova_sys::zova_vector_collection_list_free(list);
     }
     Ok(items)
 }

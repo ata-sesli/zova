@@ -1,6 +1,6 @@
 use zova::{
     Database, GraphEdgeInput, GraphNeighborsOptions, GraphNodeInput, GraphTargetType, Step,
-    VectorCollectionOptions, VectorMetric, DEFAULT_GRAPH_NAME,
+    VectorCollectionOptions, VectorElementType, VectorMetric, VectorValues, DEFAULT_GRAPH_NAME,
 };
 
 fn hex(bytes: [u8; 32]) -> String {
@@ -24,9 +24,10 @@ fn main() -> zova::Result<()> {
         VectorCollectionOptions {
             dimensions: 2,
             metric: VectorMetric::L2,
+            element_type: VectorElementType::F32,
         },
     )?;
-    db.put_vector("chunks", "chunk:1", &[0.0, 1.0])?;
+    db.put_vector("chunks", "chunk:1", VectorValues::F32(&[0.0, 1.0]))?;
 
     let object_id = db.put_object(b"attachment bytes")?;
     let object_hex = hex(object_id.into_bytes());
@@ -68,7 +69,7 @@ fn main() -> zova::Result<()> {
         to_node_id: "attachment:1",
     })?;
 
-    let nearest = db.search_vectors("chunks", &[0.0, 1.0], 1)?;
+    let nearest = db.search_vectors("chunks", VectorValues::F32(&[0.0, 1.0]), 1)?;
     for hit in nearest {
         let neighbors = db.graph_neighbors(GraphNeighborsOptions {
             graph_name: DEFAULT_GRAPH_NAME,

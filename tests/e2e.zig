@@ -79,8 +79,8 @@ test "e2e app database stores relational rows and native objects across reopen" 
         try insertChunkRef(&db, "chunk-1", 1, "en", "notes", "first semantic chunk");
         try insertChunkRef(&db, "chunk-2", 1, "en", "archive", "second semantic chunk");
         try db.putVectors("chunks", &[_]zova.VectorInput{
-            .{ .id = "chunk-1", .values = &.{ 1.0, 0.0, 0.0 } },
-            .{ .id = "chunk-2", .values = &.{ 0.0, 1.0, 0.0 } },
+            .{ .id = "chunk-1", .values = .{ .f32 = &.{ 1.0, 0.0, 0.0 } } },
+            .{ .id = "chunk-2", .values = .{ .f32 = &.{ 0.0, 1.0, 0.0 } } },
         });
         try std.testing.expect(try db.hasVectorCollection("chunks"));
         try expectQuickCheckOk(&db);
@@ -122,8 +122,8 @@ test "e2e app database stores relational rows and native objects across reopen" 
     try expectCliVectorTableInspection(db_path, "chunks");
 
     try reopened.putVectors("chunks", &[_]zova.VectorInput{
-        .{ .id = "chunk-1", .values = &.{ 0.9, 0.1, 0.0 } },
-        .{ .id = "chunk-1", .values = &.{ 0.25, 0.5, 0.75 } },
+        .{ .id = "chunk-1", .values = .{ .f32 = &.{ 0.9, 0.1, 0.0 } } },
+        .{ .id = "chunk-1", .values = .{ .f32 = &.{ 0.25, 0.5, 0.75 } } },
     });
     try expectStoredVector(&reopened, "chunk-1", &.{ 0.25, 0.5, 0.75 });
     try expectChunkSearchResult(&reopened, &.{ 0.25, 0.5, 0.75 }, &.{ "chunk-1", "chunk-2" }, &.{ "first semantic chunk", "second semantic chunk" });
@@ -399,8 +399,8 @@ test "e2e converted sqlite database preserves sql data and accepts new objects" 
         try insertSearchRow(&db, "converted-row-1", "converted sql row");
         try insertSearchRow(&db, "converted-row-2", "converted sql row extra");
         try db.putVectors("search_rows", &[_]zova.VectorInput{
-            .{ .id = "converted-row-1", .values = &.{ 1.0, 2.0, 3.0 } },
-            .{ .id = "converted-row-2", .values = &.{ 2.0, 2.0, 3.0 } },
+            .{ .id = "converted-row-1", .values = .{ .f32 = &.{ 1.0, 2.0, 3.0 } } },
+            .{ .id = "converted-row-2", .values = .{ .f32 = &.{ 2.0, 2.0, 3.0 } } },
         });
         try std.testing.expect(try db.hasVectorCollection("search_rows"));
         try expectQuickCheckOk(&db);
@@ -435,7 +435,7 @@ test "e2e converted sqlite database preserves sql data and accepts new objects" 
     try expectObjectRefRange(&reopened, "assembled", assembled_id, assembled_bytes);
     try expectCliVectorTableInspection(dest_path, "search_rows");
 
-    try reopened.putVector("search_rows", "converted-row-1", &.{ 3.0, 2.0, 1.0 });
+    try reopened.putVector("search_rows", "converted-row-1", .{ .f32 = &.{ 3.0, 2.0, 1.0 } });
     try expectStoredSearchVector(&reopened, "converted-row-1", &.{ 3.0, 2.0, 1.0 });
     try expectConvertedSearchResult(&reopened, &.{ 3.0, 2.0, 1.0 }, &.{"converted-row-1"}, &.{"converted sql row"});
     try reopened.deleteVector("search_rows", "converted-row-1");
@@ -476,7 +476,7 @@ test "e2e two connections keep sqlite locking and later recover" {
 
     try first.exec("begin immediate");
     try first.exec("insert into notes (body) values ('held')");
-    try first.putVector("notes", "held", &.{ 1.0, 1.0 });
+    try first.putVector("notes", "held", .{ .f32 = &.{ 1.0, 1.0 } });
     try std.testing.expectError(error.ObjectTransactionActive, first.putObject("same connection"));
     try std.testing.expectError(error.ObjectTransactionActive, first.objectWriter(std.testing.allocator));
     try std.testing.expectError(error.Busy, second.putObject("second connection"));
@@ -486,16 +486,16 @@ test "e2e two connections keep sqlite locking and later recover" {
         try blocked_writer.write("second connection writer");
         try std.testing.expectError(error.Busy, blocked_writer.finish());
     }
-    try std.testing.expectError(error.Busy, second.putVector("notes", "blocked", &.{ 2.0, 2.0 }));
+    try std.testing.expectError(error.Busy, second.putVector("notes", "blocked", .{ .f32 = &.{ 2.0, 2.0 } }));
     try first.exec("rollback");
 
     const id = try second.putObject("after lock");
     try std.testing.expect(try second.hasObject(id));
-    try second.putVector("notes", "after-lock", &.{ 2.0, 2.0 });
+    try second.putVector("notes", "after-lock", .{ .f32 = &.{ 2.0, 2.0 } });
     try std.testing.expect(try second.hasVector("notes", "after-lock"));
 
     const delete_id = try second.putObject("delete after lock");
-    try second.putVector("notes", "delete-after-lock", &.{ 3.0, 3.0 });
+    try second.putVector("notes", "delete-after-lock", .{ .f32 = &.{ 3.0, 3.0 } });
     try first.exec("begin immediate");
     try std.testing.expectError(error.Busy, second.deleteObject(delete_id));
     try std.testing.expectError(error.Busy, second.deleteVector("notes", "delete-after-lock"));
@@ -724,7 +724,7 @@ test "cli doctor reports sql introduced corruption in realistic file" {
         );
         _ = try streamObject(&db, "doctor object body", &.{ 3, 5 });
         try db.createVectorCollection("chunks", .{ .dimensions = 2, .metric = .l2 });
-        try db.putVector("chunks", "chunk-1", &.{ 1.0, 2.0 });
+        try db.putVector("chunks", "chunk-1", .{ .f32 = &.{ 1.0, 2.0 } });
         try insertSearchRow(&db, "chunk-1", "private body should not be printed");
     }
 
@@ -1115,7 +1115,7 @@ fn expectStoredVector(db: *zova.Database, vector_id: []const u8, expected: []con
     defer vector.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings(vector_id, vector.id);
-    try std.testing.expectEqualSlices(f32, expected, vector.values);
+    try std.testing.expectEqualSlices(f32, expected, vector.values.f32);
 }
 
 fn expectVectorCollectionInfo(
@@ -1149,7 +1149,7 @@ fn expectStoredSearchVector(db: *zova.Database, vector_id: []const u8, expected:
     defer vector.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings(vector_id, vector.id);
-    try std.testing.expectEqualSlices(f32, expected, vector.values);
+    try std.testing.expectEqualSlices(f32, expected, vector.values.f32);
 }
 
 fn expectChunkSearchResult(
@@ -1158,7 +1158,7 @@ fn expectChunkSearchResult(
     expected_ids: []const []const u8,
     expected_bodies: []const []const u8,
 ) !void {
-    var results = try db.searchVectors(std.testing.allocator, "chunks", query, expected_ids.len);
+    var results = try db.searchVectors(std.testing.allocator, "chunks", .{ .f32 = query }, expected_ids.len);
     defer results.deinit(std.testing.allocator);
     try expectSearchIds(&results, expected_ids);
 
@@ -1203,7 +1203,7 @@ fn expectSqlFilteredChunkSearchResult(
     var candidates = try selectChunkCandidateIds(std.testing.allocator, db, language, source);
     defer candidates.deinit(std.testing.allocator);
 
-    var results = try db.searchVectorsIn(std.testing.allocator, "chunks", query, candidates.ids, expected_ids.len);
+    var results = try db.searchVectorsIn(std.testing.allocator, "chunks", .{ .f32 = query }, candidates.ids, expected_ids.len);
     defer results.deinit(std.testing.allocator);
     try expectSearchIds(&results, expected_ids);
 
@@ -1302,7 +1302,7 @@ fn expectChunkThresholdSearchResult(
     expected_ids: []const []const u8,
     expected_bodies: []const []const u8,
 ) !void {
-    var results = try db.searchVectorsWithin(std.testing.allocator, "chunks", query, max_distance, expected_ids.len + 10);
+    var results = try db.searchVectorsWithin(std.testing.allocator, "chunks", .{ .f32 = query }, max_distance, expected_ids.len + 10);
     defer results.deinit(std.testing.allocator);
     try expectSearchIds(&results, expected_ids);
 
@@ -1317,7 +1317,7 @@ fn expectConvertedSearchResult(
     expected_ids: []const []const u8,
     expected_bodies: []const []const u8,
 ) !void {
-    var results = try db.searchVectors(std.testing.allocator, "search_rows", query, expected_ids.len);
+    var results = try db.searchVectors(std.testing.allocator, "search_rows", .{ .f32 = query }, expected_ids.len);
     defer results.deinit(std.testing.allocator);
     try expectSearchIds(&results, expected_ids);
 
@@ -1358,7 +1358,7 @@ fn expectConvertedThresholdSearchResult(
     expected_ids: []const []const u8,
     expected_bodies: []const []const u8,
 ) !void {
-    var results = try db.searchVectorsWithin(std.testing.allocator, "search_rows", query, max_distance, expected_ids.len + 10);
+    var results = try db.searchVectorsWithin(std.testing.allocator, "search_rows", .{ .f32 = query }, max_distance, expected_ids.len + 10);
     defer results.deinit(std.testing.allocator);
     try expectSearchIds(&results, expected_ids);
 
@@ -1402,7 +1402,7 @@ fn expectSqlFilteredConvertedSearchResult(
     var candidates = try selectSearchRowCandidateIds(std.testing.allocator, db, body_like);
     defer candidates.deinit(std.testing.allocator);
 
-    var results = try db.searchVectorsIn(std.testing.allocator, "search_rows", query, candidates.ids, expected_ids.len);
+    var results = try db.searchVectorsIn(std.testing.allocator, "search_rows", .{ .f32 = query }, candidates.ids, expected_ids.len);
     defer results.deinit(std.testing.allocator);
     try expectSearchIds(&results, expected_ids);
 

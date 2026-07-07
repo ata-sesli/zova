@@ -23,7 +23,6 @@ const VectorInput = zova.VectorInput;
 const VectorMetric = zova.VectorMetric;
 const VectorSearchResult = zova.VectorSearchResult;
 const VectorSearchResults = zova.VectorSearchResults;
-const TypedVectorInput = zova.TypedVectorInput;
 const max_vector_dimensions = zova.max_vector_dimensions;
 const convertSqliteToZova = zova.convertSqliteToZova;
 const objectChunkId = zova.objectChunkId;
@@ -141,12 +140,12 @@ test "typed vector collections store list reopen search and delete raw i8 values
         defer info.deinit(std.testing.allocator);
         try std.testing.expectEqual(VectorElementType.i8, info.element_type);
 
-        const batch = [_]TypedVectorInput{
+        const batch = [_]VectorInput{
             .{ .id = "near", .values = .{ .i8 = &.{ @as(i8, 1), @as(i8, 1) } } },
             .{ .id = "far", .values = .{ .i8 = &.{ @as(i8, 5), @as(i8, 5) } } },
         };
-        try db.putVectorsTyped("bytes", &batch);
-        try db.putVectorTyped("bytes", "negative", .{ .i8 = &.{ @as(i8, -1), @as(i8, -2) } });
+        try db.putVectors("bytes", &batch);
+        try db.putVector("bytes", "negative", .{ .i8 = &.{ @as(i8, -1), @as(i8, -2) } });
 
         {
             var list = try db.listVectorCollections(std.testing.allocator);
@@ -157,20 +156,20 @@ test "typed vector collections store list reopen search and delete raw i8 values
         }
 
         {
-            var vector = try db.getVectorTyped(std.testing.allocator, "bytes", "negative");
+            var vector = try db.getVector(std.testing.allocator, "bytes", "negative");
             defer vector.deinit(std.testing.allocator);
             try std.testing.expectEqualStrings("negative", vector.id);
             try std.testing.expectEqualSlices(i8, &.{ @as(i8, -1), @as(i8, -2) }, vector.values.i8);
         }
 
         {
-            var results = try db.searchVectorsTyped(std.testing.allocator, "bytes", .{ .i8 = &.{ @as(i8, 0), @as(i8, 0) } }, 3);
+            var results = try db.searchVectors(std.testing.allocator, "bytes", .{ .i8 = &.{ @as(i8, 0), @as(i8, 0) } }, 3);
             defer results.deinit(std.testing.allocator);
             try expectSearchIds(&results, &.{ "near", "negative", "far" });
         }
 
-        try std.testing.expectError(error.VectorDimensionMismatch, db.putVectorTyped("bytes", "short", .{ .i8 = &.{@as(i8, 1)} }));
-        try std.testing.expectError(error.VectorInvalid, db.putVector("bytes", "f32-wrapper", &.{ 1.0, 2.0 }));
+        try std.testing.expectError(error.VectorDimensionMismatch, db.putVector("bytes", "short", .{ .i8 = &.{@as(i8, 1)} }));
+        try std.testing.expectError(error.VectorInvalid, db.putVector("bytes", "f32-wrapper", .{ .f32 = &.{ 1.0, 2.0 } }));
         try db.deleteVector("bytes", "far");
         try std.testing.expect(!try db.hasVector("bytes", "far"));
     }
@@ -179,11 +178,11 @@ test "typed vector collections store list reopen search and delete raw i8 values
         var reopened = try Database.open(db_path);
         defer reopened.deinit();
 
-        var vector = try reopened.getVectorTyped(std.testing.allocator, "bytes", "near");
+        var vector = try reopened.getVector(std.testing.allocator, "bytes", "near");
         defer vector.deinit(std.testing.allocator);
         try std.testing.expectEqualSlices(i8, &.{ @as(i8, 1), @as(i8, 1) }, vector.values.i8);
 
-        var results = try reopened.searchVectorsTyped(std.testing.allocator, "bytes", .{ .i8 = &.{ @as(i8, 0), @as(i8, 0) } }, 10);
+        var results = try reopened.searchVectors(std.testing.allocator, "bytes", .{ .i8 = &.{ @as(i8, 0), @as(i8, 0) } }, 10);
         defer results.deinit(std.testing.allocator);
         try expectSearchIds(&results, &.{ "near", "negative" });
     }
@@ -202,34 +201,34 @@ test "typed vector collections store search validate and detect corrupt raw f16 
     try db.createVectorCollection("halves", .{ .dimensions = 2, .metric = .l2, .element_type = .f16 });
     try db.createVectorCollection("half-cosine", .{ .dimensions = 2, .metric = .cosine, .element_type = .f16 });
 
-    try db.putVectorTyped("halves", "near", .{ .f16 = &.{ 0x3c00, 0x3c00 } });
-    try db.putVectorTyped("halves", "far", .{ .f16 = &.{ 0x4400, 0x4400 } });
+    try db.putVector("halves", "near", .{ .f16 = &.{ 0x3c00, 0x3c00 } });
+    try db.putVector("halves", "far", .{ .f16 = &.{ 0x4400, 0x4400 } });
 
     {
-        var vector = try db.getVectorTyped(std.testing.allocator, "halves", "near");
+        var vector = try db.getVector(std.testing.allocator, "halves", "near");
         defer vector.deinit(std.testing.allocator);
         try std.testing.expectEqualSlices(u16, &.{ 0x3c00, 0x3c00 }, vector.values.f16);
     }
 
     {
-        var results = try db.searchVectorsTyped(std.testing.allocator, "halves", .{ .f16 = &.{ 0x0000, 0x0000 } }, 2);
+        var results = try db.searchVectors(std.testing.allocator, "halves", .{ .f16 = &.{ 0x0000, 0x0000 } }, 2);
         defer results.deinit(std.testing.allocator);
         try expectSearchIds(&results, &.{ "near", "far" });
         try std.testing.expectApproxEqAbs(@as(f64, @sqrt(2.0)), results.items[0].distance, 0.000001);
     }
 
-    try std.testing.expectError(error.VectorDimensionMismatch, db.putVectorTyped("halves", "short", .{ .f16 = &.{0x3c00} }));
-    try std.testing.expectError(error.VectorInvalid, db.putVectorTyped("halves", "inf", .{ .f16 = &.{ 0x7c00, 0x3c00 } }));
-    try std.testing.expectError(error.VectorInvalid, db.putVectorTyped("halves", "nan", .{ .f16 = &.{ 0x7e00, 0x3c00 } }));
-    try std.testing.expectError(error.VectorInvalid, db.putVectorTyped("halves", "wrong-type", .{ .i8 = &.{ @as(i8, 1), @as(i8, 2) } }));
-    try std.testing.expectError(error.VectorInvalid, db.putVectorTyped("half-cosine", "zero", .{ .f16 = &.{ 0x0000, 0x0000 } }));
+    try std.testing.expectError(error.VectorDimensionMismatch, db.putVector("halves", "short", .{ .f16 = &.{0x3c00} }));
+    try std.testing.expectError(error.VectorInvalid, db.putVector("halves", "inf", .{ .f16 = &.{ 0x7c00, 0x3c00 } }));
+    try std.testing.expectError(error.VectorInvalid, db.putVector("halves", "nan", .{ .f16 = &.{ 0x7e00, 0x3c00 } }));
+    try std.testing.expectError(error.VectorInvalid, db.putVector("halves", "wrong-type", .{ .i8 = &.{ @as(i8, 1), @as(i8, 2) } }));
+    try std.testing.expectError(error.VectorInvalid, db.putVector("half-cosine", "zero", .{ .f16 = &.{ 0x0000, 0x0000 } }));
 
     try db.exec("pragma ignore_check_constraints = on");
     try db.exec("update _zova_vectors set \"values\" = x'003c' where collection_name = 'halves' and vector_id = 'near'");
     try db.exec("pragma ignore_check_constraints = off");
 
-    try std.testing.expectError(error.VectorCorrupt, db.getVectorTyped(std.testing.allocator, "halves", "near"));
-    try std.testing.expectError(error.VectorCorrupt, db.searchVectorsTyped(std.testing.allocator, "halves", .{ .f16 = &.{ 0x0000, 0x0000 } }, 10));
+    try std.testing.expectError(error.VectorCorrupt, db.getVector(std.testing.allocator, "halves", "near"));
+    try std.testing.expectError(error.VectorCorrupt, db.searchVectors(std.testing.allocator, "halves", .{ .f16 = &.{ 0x0000, 0x0000 } }, 10));
 }
 
 test "typed vector search covers raw i8 and f16 metrics and candidate filtering" {
@@ -243,14 +242,14 @@ test "typed vector search covers raw i8 and f16 metrics and candidate filtering"
     defer db.deinit();
 
     try db.createVectorCollection("i8-cosine", .{ .dimensions = 2, .metric = .cosine, .element_type = .i8 });
-    try db.putVectorTyped("i8-cosine", "east", .{ .i8 = &.{ @as(i8, 127), @as(i8, 0) } });
-    try db.putVectorTyped("i8-cosine", "northeast", .{ .i8 = &.{ @as(i8, 64), @as(i8, 64) } });
-    try db.putVectorTyped("i8-cosine", "north", .{ .i8 = &.{ @as(i8, 0), @as(i8, 127) } });
-    try db.putVectorTyped("i8-cosine", "south", .{ .i8 = &.{ @as(i8, 0), @as(i8, -127) } });
-    try db.putVectorTyped("i8-cosine", "west", .{ .i8 = &.{ @as(i8, -127), @as(i8, 0) } });
+    try db.putVector("i8-cosine", "east", .{ .i8 = &.{ @as(i8, 127), @as(i8, 0) } });
+    try db.putVector("i8-cosine", "northeast", .{ .i8 = &.{ @as(i8, 64), @as(i8, 64) } });
+    try db.putVector("i8-cosine", "north", .{ .i8 = &.{ @as(i8, 0), @as(i8, 127) } });
+    try db.putVector("i8-cosine", "south", .{ .i8 = &.{ @as(i8, 0), @as(i8, -127) } });
+    try db.putVector("i8-cosine", "west", .{ .i8 = &.{ @as(i8, -127), @as(i8, 0) } });
 
     {
-        var results = try db.searchVectorsTyped(std.testing.allocator, "i8-cosine", .{ .i8 = &.{ @as(i8, 127), @as(i8, 0) } }, 5);
+        var results = try db.searchVectors(std.testing.allocator, "i8-cosine", .{ .i8 = &.{ @as(i8, 127), @as(i8, 0) } }, 5);
         defer results.deinit(std.testing.allocator);
         try expectSearchIds(&results, &.{ "east", "northeast", "north", "south", "west" });
         try std.testing.expectApproxEqAbs(@as(f64, 0.0), results.items[0].distance, 0.000001);
@@ -262,20 +261,20 @@ test "typed vector search covers raw i8 and f16 metrics and candidate filtering"
 
     {
         const candidates = [_][]const u8{ "west", "missing", "northeast", "east", "northeast" };
-        var results = try db.searchVectorsInTyped(std.testing.allocator, "i8-cosine", .{ .i8 = &.{ @as(i8, 127), @as(i8, 0) } }, &candidates, 3);
+        var results = try db.searchVectorsIn(std.testing.allocator, "i8-cosine", .{ .i8 = &.{ @as(i8, 127), @as(i8, 0) } }, &candidates, 3);
         defer results.deinit(std.testing.allocator);
         try expectSearchIds(&results, &.{ "east", "northeast", "west" });
     }
 
-    try std.testing.expectError(error.VectorInvalid, db.putVectorTyped("i8-cosine", "zero", .{ .i8 = &.{ @as(i8, 0), @as(i8, 0) } }));
-    try std.testing.expectError(error.VectorInvalid, db.searchVectorsTyped(std.testing.allocator, "i8-cosine", .{ .i8 = &.{ @as(i8, 0), @as(i8, 0) } }, 5));
+    try std.testing.expectError(error.VectorInvalid, db.putVector("i8-cosine", "zero", .{ .i8 = &.{ @as(i8, 0), @as(i8, 0) } }));
+    try std.testing.expectError(error.VectorInvalid, db.searchVectors(std.testing.allocator, "i8-cosine", .{ .i8 = &.{ @as(i8, 0), @as(i8, 0) } }, 5));
 
     try db.createVectorCollection("i8-dot", .{ .dimensions = 2, .metric = .dot, .element_type = .i8 });
-    try db.putVectorTyped("i8-dot", "strong", .{ .i8 = &.{ @as(i8, 4), @as(i8, 0) } });
-    try db.putVectorTyped("i8-dot", "weak", .{ .i8 = &.{ @as(i8, 1), @as(i8, 0) } });
-    try db.putVectorTyped("i8-dot", "negative", .{ .i8 = &.{ @as(i8, -1), @as(i8, 0) } });
+    try db.putVector("i8-dot", "strong", .{ .i8 = &.{ @as(i8, 4), @as(i8, 0) } });
+    try db.putVector("i8-dot", "weak", .{ .i8 = &.{ @as(i8, 1), @as(i8, 0) } });
+    try db.putVector("i8-dot", "negative", .{ .i8 = &.{ @as(i8, -1), @as(i8, 0) } });
     {
-        var results = try db.searchVectorsTyped(std.testing.allocator, "i8-dot", .{ .i8 = &.{ @as(i8, 1), @as(i8, 0) } }, 3);
+        var results = try db.searchVectors(std.testing.allocator, "i8-dot", .{ .i8 = &.{ @as(i8, 1), @as(i8, 0) } }, 3);
         defer results.deinit(std.testing.allocator);
         try expectSearchIds(&results, &.{ "strong", "weak", "negative" });
         try std.testing.expectApproxEqAbs(@as(f64, -4.0), results.items[0].distance, 0.000001);
@@ -284,11 +283,11 @@ test "typed vector search covers raw i8 and f16 metrics and candidate filtering"
     }
 
     try db.createVectorCollection("f16-cosine", .{ .dimensions = 2, .metric = .cosine, .element_type = .f16 });
-    try db.putVectorTyped("f16-cosine", "east", .{ .f16 = &.{ 0x3c00, 0x0000 } });
-    try db.putVectorTyped("f16-cosine", "northeast", .{ .f16 = &.{ 0x3c00, 0x3c00 } });
-    try db.putVectorTyped("f16-cosine", "north", .{ .f16 = &.{ 0x0000, 0x3c00 } });
+    try db.putVector("f16-cosine", "east", .{ .f16 = &.{ 0x3c00, 0x0000 } });
+    try db.putVector("f16-cosine", "northeast", .{ .f16 = &.{ 0x3c00, 0x3c00 } });
+    try db.putVector("f16-cosine", "north", .{ .f16 = &.{ 0x0000, 0x3c00 } });
     {
-        var results = try db.searchVectorsTyped(std.testing.allocator, "f16-cosine", .{ .f16 = &.{ 0x3c00, 0x0000 } }, 3);
+        var results = try db.searchVectors(std.testing.allocator, "f16-cosine", .{ .f16 = &.{ 0x3c00, 0x0000 } }, 3);
         defer results.deinit(std.testing.allocator);
         try expectSearchIds(&results, &.{ "east", "northeast", "north" });
         try std.testing.expectApproxEqAbs(@as(f64, 0.0), results.items[0].distance, 0.000001);
@@ -297,13 +296,13 @@ test "typed vector search covers raw i8 and f16 metrics and candidate filtering"
     }
 
     try db.createVectorCollection("f16-dot", .{ .dimensions = 2, .metric = .dot, .element_type = .f16 });
-    try db.putVectorTyped("f16-dot", "strong", .{ .f16 = &.{ 0x4400, 0x0000 } });
-    try db.putVectorTyped("f16-dot", "weak", .{ .f16 = &.{ 0x3c00, 0x0000 } });
-    try db.putVectorTyped("f16-dot", "subnormal", .{ .f16 = &.{ 0x0001, 0x0000 } });
-    try db.putVectorTyped("f16-dot", "signed-zero", .{ .f16 = &.{ 0x8000, 0x0000 } });
-    try db.putVectorTyped("f16-dot", "negative", .{ .f16 = &.{ 0xbc00, 0x0000 } });
+    try db.putVector("f16-dot", "strong", .{ .f16 = &.{ 0x4400, 0x0000 } });
+    try db.putVector("f16-dot", "weak", .{ .f16 = &.{ 0x3c00, 0x0000 } });
+    try db.putVector("f16-dot", "subnormal", .{ .f16 = &.{ 0x0001, 0x0000 } });
+    try db.putVector("f16-dot", "signed-zero", .{ .f16 = &.{ 0x8000, 0x0000 } });
+    try db.putVector("f16-dot", "negative", .{ .f16 = &.{ 0xbc00, 0x0000 } });
     {
-        var results = try db.searchVectorsTyped(std.testing.allocator, "f16-dot", .{ .f16 = &.{ 0x3c00, 0x0000 } }, 5);
+        var results = try db.searchVectors(std.testing.allocator, "f16-dot", .{ .f16 = &.{ 0x3c00, 0x0000 } }, 5);
         defer results.deinit(std.testing.allocator);
         try expectSearchIds(&results, &.{ "strong", "weak", "subnormal", "signed-zero", "negative" });
         try std.testing.expectApproxEqAbs(@as(f64, -4.0), results.items[0].distance, 0.000001);
@@ -315,7 +314,7 @@ test "typed vector search covers raw i8 and f16 metrics and candidate filtering"
 
     {
         const candidates = [_][]const u8{ "negative", "missing", "strong", "negative" };
-        var results = try db.searchVectorsInTyped(std.testing.allocator, "f16-dot", .{ .f16 = &.{ 0x3c00, 0x0000 } }, &candidates, 2);
+        var results = try db.searchVectorsIn(std.testing.allocator, "f16-dot", .{ .f16 = &.{ 0x3c00, 0x0000 } }, &candidates, 2);
         defer results.deinit(std.testing.allocator);
         try expectSearchIds(&results, &.{ "strong", "negative" });
     }
@@ -364,9 +363,9 @@ test "vector collection info and listing return owned sorted metadata" {
 
     try db.createVectorCollection("beta", .{ .dimensions = 2, .metric = .dot });
     try db.createVectorCollection("alpha", .{ .dimensions = 3, .metric = .cosine });
-    try db.putVector("alpha", "a-1", &.{ 1.0, 0.0, 0.0 });
-    try db.putVector("alpha", "a-2", &.{ 0.0, 1.0, 0.0 });
-    try db.putVector("beta", "b-1", &.{ 2.0, 3.0 });
+    try db.putVector("alpha", "a-1", .{ .f32 = &.{ 1.0, 0.0, 0.0 } });
+    try db.putVector("alpha", "a-2", .{ .f32 = &.{ 0.0, 1.0, 0.0 } });
+    try db.putVector("beta", "b-1", .{ .f32 = &.{ 2.0, 3.0 } });
 
     {
         var info = try db.vectorCollectionInfo(std.testing.allocator, "alpha");
@@ -408,39 +407,39 @@ test "batch vector upsert validates before writing and last duplicate wins" {
     try db.createVectorCollection("chunks", .{ .dimensions = 2, .metric = .l2 });
 
     const invalid_batch = [_]VectorInput{
-        .{ .id = "good", .values = &.{ 1.0, 1.0 } },
-        .{ .id = "bad", .values = &.{1.0} },
+        .{ .id = "good", .values = .{ .f32 = &.{ 1.0, 1.0 } } },
+        .{ .id = "bad", .values = .{ .f32 = &.{1.0} } },
     };
     try std.testing.expectError(error.VectorDimensionMismatch, db.putVectors("chunks", &invalid_batch));
     try std.testing.expect(!try db.hasVector("chunks", "good"));
 
     const batch = [_]VectorInput{
-        .{ .id = "a", .values = &.{ 1.0, 2.0 } },
-        .{ .id = "b", .values = &.{ 3.0, 4.0 } },
-        .{ .id = "a", .values = &.{ 5.0, 6.0 } },
+        .{ .id = "a", .values = .{ .f32 = &.{ 1.0, 2.0 } } },
+        .{ .id = "b", .values = .{ .f32 = &.{ 3.0, 4.0 } } },
+        .{ .id = "a", .values = .{ .f32 = &.{ 5.0, 6.0 } } },
     };
     try db.putVectors("chunks", &batch);
 
     {
         var vector = try db.getVector(std.testing.allocator, "chunks", "a");
         defer vector.deinit(std.testing.allocator);
-        try std.testing.expectEqualSlices(f32, &.{ 5.0, 6.0 }, vector.values);
+        try std.testing.expectEqualSlices(f32, &.{ 5.0, 6.0 }, vector.values.f32);
     }
     {
         var vector = try db.getVector(std.testing.allocator, "chunks", "b");
         defer vector.deinit(std.testing.allocator);
-        try std.testing.expectEqualSlices(f32, &.{ 3.0, 4.0 }, vector.values);
+        try std.testing.expectEqualSlices(f32, &.{ 3.0, 4.0 }, vector.values.f32);
     }
 
     try db.putVectors("chunks", &.{});
     try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from _zova_vectors where collection_name = 'chunks'"));
 
     try std.testing.expectError(error.VectorCollectionNotFound, db.putVectors("missing", &batch));
-    const invalid_id = [_]VectorInput{.{ .id = "_zova_bad", .values = &.{ 1.0, 2.0 } }};
+    const invalid_id = [_]VectorInput{.{ .id = "_zova_bad", .values = .{ .f32 = &.{ 1.0, 2.0 } } }};
     try std.testing.expectError(error.VectorInvalid, db.putVectors("chunks", &invalid_id));
 
     try db.exec("begin");
-    try db.putVectors("chunks", &[_]VectorInput{.{ .id = "tx", .values = &.{ 7.0, 8.0 } }});
+    try db.putVectors("chunks", &[_]VectorInput{.{ .id = "tx", .values = .{ .f32 = &.{ 7.0, 8.0 } } }});
     try db.exec("commit");
     try std.testing.expect(try db.hasVector("chunks", "tx"));
 }
@@ -465,10 +464,10 @@ test "vector upsert delete and sql references remain application owned" {
     try db.createVectorCollection("chunks", .{ .dimensions = 2, .metric = .l2 });
     try db.createVectorCollection("images", .{ .dimensions = 2, .metric = .dot });
 
-    try db.putVector("chunks", "same-id", &.{ 1.0, 2.0 });
-    try db.putVector("images", "same-id", &.{ 9.0, 8.0 });
-    try db.putVector("chunks", "same-id", &.{ 3.0, 4.0 });
-    try db.putVector("chunks", "delete-me", &.{ 5.0, 6.0 });
+    try db.putVector("chunks", "same-id", .{ .f32 = &.{ 1.0, 2.0 } });
+    try db.putVector("images", "same-id", .{ .f32 = &.{ 9.0, 8.0 } });
+    try db.putVector("chunks", "same-id", .{ .f32 = &.{ 3.0, 4.0 } });
+    try db.putVector("chunks", "delete-me", .{ .f32 = &.{ 5.0, 6.0 } });
 
     var insert = try db.prepare("insert into chunks (vector_id, body) values (?, ?)");
     defer insert.deinit();
@@ -479,12 +478,12 @@ test "vector upsert delete and sql references remain application owned" {
     {
         var chunks_vector = try db.getVector(std.testing.allocator, "chunks", "same-id");
         defer chunks_vector.deinit(std.testing.allocator);
-        try std.testing.expectEqualSlices(f32, &.{ 3.0, 4.0 }, chunks_vector.values);
+        try std.testing.expectEqualSlices(f32, &.{ 3.0, 4.0 }, chunks_vector.values.f32);
     }
     {
         var images_vector = try db.getVector(std.testing.allocator, "images", "same-id");
         defer images_vector.deinit(std.testing.allocator);
-        try std.testing.expectEqualSlices(f32, &.{ 9.0, 8.0 }, images_vector.values);
+        try std.testing.expectEqualSlices(f32, &.{ 9.0, 8.0 }, images_vector.values.f32);
     }
 
     try db.deleteVector("chunks", "delete-me");
@@ -513,8 +512,8 @@ test "delete vector collection removes private vectors and leaves sql references
     );
     try db.createVectorCollection("chunks", .{ .dimensions = 2, .metric = .l2 });
     try db.putVectors("chunks", &[_]VectorInput{
-        .{ .id = "keep-ref-1", .values = &.{ 1.0, 1.0 } },
-        .{ .id = "keep-ref-2", .values = &.{ 2.0, 2.0 } },
+        .{ .id = "keep-ref-1", .values = .{ .f32 = &.{ 1.0, 1.0 } } },
+        .{ .id = "keep-ref-2", .values = .{ .f32 = &.{ 2.0, 2.0 } } },
     });
 
     var insert = try db.prepare("insert into chunks (vector_id, body) values (?, ?)");
@@ -537,7 +536,7 @@ test "delete vector collection removes private vectors and leaves sql references
     try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from chunks"));
     try std.testing.expectError(error.VectorCollectionNotFound, db.hasVector("chunks", "keep-ref-1"));
     try std.testing.expectError(error.VectorCollectionNotFound, db.getVector(std.testing.allocator, "chunks", "keep-ref-1"));
-    try std.testing.expectError(error.VectorCollectionNotFound, db.searchVectors(std.testing.allocator, "chunks", &.{ 1.0, 1.0 }, 10));
+    try std.testing.expectError(error.VectorCollectionNotFound, db.searchVectors(std.testing.allocator, "chunks", .{ .f32 = &.{ 1.0, 1.0 } }, 10));
     try std.testing.expectError(error.VectorCollectionNotFound, db.deleteVectorCollection("chunks"));
     try std.testing.expectError(error.VectorInvalid, db.deleteVectorCollection(""));
 }
@@ -554,23 +553,23 @@ test "vector CRUD validates collections ids dimensions and finite values" {
 
     try db.createVectorCollection("chunks", .{ .dimensions = 3, .metric = .cosine });
 
-    try std.testing.expectError(error.VectorCollectionNotFound, db.putVector("missing", "id", &.{ 1.0, 2.0, 3.0 }));
+    try std.testing.expectError(error.VectorCollectionNotFound, db.putVector("missing", "id", .{ .f32 = &.{ 1.0, 2.0, 3.0 } }));
     try std.testing.expectError(error.VectorCollectionNotFound, db.getVector(std.testing.allocator, "missing", "id"));
     try std.testing.expectError(error.VectorCollectionNotFound, db.hasVector("missing", "id"));
     try std.testing.expectError(error.VectorCollectionNotFound, db.deleteVector("missing", "id"));
 
-    try std.testing.expectError(error.VectorInvalid, db.putVector("_zova_bad", "id", &.{ 1.0, 2.0, 3.0 }));
-    try std.testing.expectError(error.VectorInvalid, db.putVector("chunks", "", &.{ 1.0, 2.0, 3.0 }));
-    try std.testing.expectError(error.VectorInvalid, db.putVector("chunks", "_zova_id", &.{ 1.0, 2.0, 3.0 }));
-    try std.testing.expectError(error.VectorInvalid, db.putVector("chunks", "bad\xff", &.{ 1.0, 2.0, 3.0 }));
-    try std.testing.expectError(error.VectorDimensionMismatch, db.putVector("chunks", "short", &.{ 1.0, 2.0 }));
-    try std.testing.expectError(error.VectorDimensionMismatch, db.putVector("chunks", "empty", &.{}));
-    try std.testing.expectError(error.VectorInvalid, db.putVector("chunks", "nan", &.{ 1.0, std.math.nan(f32), 3.0 }));
-    try std.testing.expectError(error.VectorInvalid, db.putVector("chunks", "inf", &.{ 1.0, std.math.inf(f32), 3.0 }));
+    try std.testing.expectError(error.VectorInvalid, db.putVector("_zova_bad", "id", .{ .f32 = &.{ 1.0, 2.0, 3.0 } }));
+    try std.testing.expectError(error.VectorInvalid, db.putVector("chunks", "", .{ .f32 = &.{ 1.0, 2.0, 3.0 } }));
+    try std.testing.expectError(error.VectorInvalid, db.putVector("chunks", "_zova_id", .{ .f32 = &.{ 1.0, 2.0, 3.0 } }));
+    try std.testing.expectError(error.VectorInvalid, db.putVector("chunks", "bad\xff", .{ .f32 = &.{ 1.0, 2.0, 3.0 } }));
+    try std.testing.expectError(error.VectorDimensionMismatch, db.putVector("chunks", "short", .{ .f32 = &.{ 1.0, 2.0 } }));
+    try std.testing.expectError(error.VectorDimensionMismatch, db.putVector("chunks", "empty", .{ .f32 = &.{} }));
+    try std.testing.expectError(error.VectorInvalid, db.putVector("chunks", "nan", .{ .f32 = &.{ 1.0, std.math.nan(f32), 3.0 } }));
+    try std.testing.expectError(error.VectorInvalid, db.putVector("chunks", "inf", .{ .f32 = &.{ 1.0, std.math.inf(f32), 3.0 } }));
 
     var long_id: [256]u8 = undefined;
     @memset(&long_id, 'a');
-    try std.testing.expectError(error.VectorInvalid, db.putVector("chunks", &long_id, &.{ 1.0, 2.0, 3.0 }));
+    try std.testing.expectError(error.VectorInvalid, db.putVector("chunks", &long_id, .{ .f32 = &.{ 1.0, 2.0, 3.0 } }));
 }
 
 test "vector collection management persists and works after conversion" {
@@ -595,8 +594,8 @@ test "vector collection management persists and works after conversion" {
         defer db.deinit();
         try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .dot });
         try db.putVectors("docs", &[_]VectorInput{
-            .{ .id = "doc-1", .values = &.{ 1.0, 0.0 } },
-            .{ .id = "doc-2", .values = &.{ 0.0, 1.0 } },
+            .{ .id = "doc-1", .values = .{ .f32 = &.{ 1.0, 0.0 } } },
+            .{ .id = "doc-2", .values = .{ .f32 = &.{ 0.0, 1.0 } } },
         });
     }
 
@@ -626,9 +625,9 @@ test "get vector detects corrupt private rows" {
     defer db.deinit();
 
     try db.createVectorCollection("chunks", .{ .dimensions = 2, .metric = .l2 });
-    try db.putVector("chunks", "bad-len", &.{ 1.0, 2.0 });
-    try db.putVector("chunks", "bad-dim", &.{ 3.0, 4.0 });
-    try db.putVector("chunks", "bad-finite", &.{ 5.0, 6.0 });
+    try db.putVector("chunks", "bad-len", .{ .f32 = &.{ 1.0, 2.0 } });
+    try db.putVector("chunks", "bad-dim", .{ .f32 = &.{ 3.0, 4.0 } });
+    try db.putVector("chunks", "bad-finite", .{ .f32 = &.{ 5.0, 6.0 } });
 
     try db.exec("pragma ignore_check_constraints = on");
     try db.exec("update _zova_vectors set \"values\" = x'0000803f' where vector_id = 'bad-len'");
@@ -672,12 +671,12 @@ test "vector CRUD persists works after conversion and participates in transactio
 
         try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .cosine });
         try db.exec("begin");
-        try db.putVector("docs", "doc-1", &.{ 0.5, 0.25 });
+        try db.putVector("docs", "doc-1", .{ .f32 = &.{ 0.5, 0.25 } });
         try db.exec("commit");
 
         var vector = try db.getVector(std.testing.allocator, "docs", "doc-1");
         defer vector.deinit(std.testing.allocator);
-        try std.testing.expectEqualSlices(f32, &.{ 0.5, 0.25 }, vector.values);
+        try std.testing.expectEqualSlices(f32, &.{ 0.5, 0.25 }, vector.values.f32);
     }
 
     {
@@ -688,7 +687,7 @@ test "vector CRUD persists works after conversion and participates in transactio
         var vector = try reopened.getVector(std.testing.allocator, "docs", "doc-1");
         defer vector.deinit(std.testing.allocator);
         try std.testing.expectEqualStrings("doc-1", vector.id);
-        try std.testing.expectEqualSlices(f32, &.{ 0.5, 0.25 }, vector.values);
+        try std.testing.expectEqualSlices(f32, &.{ 0.5, 0.25 }, vector.values.f32);
     }
 }
 
@@ -707,12 +706,12 @@ test "second connection vector write follows sqlite busy behavior" {
     defer second.deinit();
 
     try first.exec("begin immediate");
-    try first.putVector("chunks", "first", &.{ 1.0, 2.0 });
-    try std.testing.expectError(error.Busy, second.putVector("chunks", "second", &.{ 3.0, 4.0 }));
+    try first.putVector("chunks", "first", .{ .f32 = &.{ 1.0, 2.0 } });
+    try std.testing.expectError(error.Busy, second.putVector("chunks", "second", .{ .f32 = &.{ 3.0, 4.0 } }));
     try std.testing.expectError(error.Busy, second.deleteVector("chunks", "first"));
     try first.exec("rollback");
 
-    try second.putVector("chunks", "second", &.{ 3.0, 4.0 });
+    try second.putVector("chunks", "second", .{ .f32 = &.{ 3.0, 4.0 } });
     try std.testing.expect(try second.hasVector("chunks", "second"));
 }
 
@@ -729,18 +728,18 @@ test "search vectors validates inputs and handles empty limits" {
     try db.createVectorCollection("chunks", .{ .dimensions = 2, .metric = .l2 });
     try db.createVectorCollection("cosine", .{ .dimensions = 2, .metric = .cosine });
 
-    try std.testing.expectError(error.VectorCollectionNotFound, db.searchVectors(std.testing.allocator, "missing", &.{ 1.0, 2.0 }, 10));
-    try std.testing.expectError(error.VectorDimensionMismatch, db.searchVectors(std.testing.allocator, "chunks", &.{1.0}, 10));
-    try std.testing.expectError(error.VectorInvalid, db.searchVectors(std.testing.allocator, "chunks", &.{ std.math.nan(f32), 1.0 }, 10));
-    try std.testing.expectError(error.VectorInvalid, db.searchVectors(std.testing.allocator, "chunks", &.{ std.math.inf(f32), 1.0 }, 10));
-    try std.testing.expectError(error.VectorInvalid, db.putVector("cosine", "zero", &.{ 0.0, 0.0 }));
-    try std.testing.expectError(error.VectorInvalid, db.searchVectors(std.testing.allocator, "cosine", &.{ 0.0, 0.0 }, 10));
+    try std.testing.expectError(error.VectorCollectionNotFound, db.searchVectors(std.testing.allocator, "missing", .{ .f32 = &.{ 1.0, 2.0 } }, 10));
+    try std.testing.expectError(error.VectorDimensionMismatch, db.searchVectors(std.testing.allocator, "chunks", .{ .f32 = &.{1.0} }, 10));
+    try std.testing.expectError(error.VectorInvalid, db.searchVectors(std.testing.allocator, "chunks", .{ .f32 = &.{ std.math.nan(f32), 1.0 } }, 10));
+    try std.testing.expectError(error.VectorInvalid, db.searchVectors(std.testing.allocator, "chunks", .{ .f32 = &.{ std.math.inf(f32), 1.0 } }, 10));
+    try std.testing.expectError(error.VectorInvalid, db.putVector("cosine", "zero", .{ .f32 = &.{ 0.0, 0.0 } }));
+    try std.testing.expectError(error.VectorInvalid, db.searchVectors(std.testing.allocator, "cosine", .{ .f32 = &.{ 0.0, 0.0 } }, 10));
 
-    var empty_limit = try db.searchVectors(std.testing.allocator, "chunks", &.{ 1.0, 2.0 }, 0);
+    var empty_limit = try db.searchVectors(std.testing.allocator, "chunks", .{ .f32 = &.{ 1.0, 2.0 } }, 0);
     defer empty_limit.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), empty_limit.items.len);
 
-    var empty_collection = try db.searchVectors(std.testing.allocator, "chunks", &.{ 1.0, 2.0 }, 10);
+    var empty_collection = try db.searchVectors(std.testing.allocator, "chunks", .{ .f32 = &.{ 1.0, 2.0 } }, 10);
     defer empty_collection.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), empty_collection.items.len);
 }
@@ -759,22 +758,22 @@ test "search vectors returns deterministic cosine l2 and dot results" {
     try db.createVectorCollection("l2", .{ .dimensions = 2, .metric = .l2 });
     try db.createVectorCollection("dot", .{ .dimensions = 2, .metric = .dot });
 
-    try db.putVector("cosine", "east", &.{ 1.0, 0.0 });
-    try db.putVector("cosine", "north", &.{ 0.0, 1.0 });
-    try db.putVector("cosine", "northeast", &.{ 1.0, 1.0 });
+    try db.putVector("cosine", "east", .{ .f32 = &.{ 1.0, 0.0 } });
+    try db.putVector("cosine", "north", .{ .f32 = &.{ 0.0, 1.0 } });
+    try db.putVector("cosine", "northeast", .{ .f32 = &.{ 1.0, 1.0 } });
 
-    try db.putVector("l2", "near", &.{ 1.0, 1.0 });
-    try db.putVector("l2", "far", &.{ 4.0, 5.0 });
-    try db.putVector("l2", "tie-a", &.{ 1.0, 3.0 });
-    try db.putVector("l2", "tie-b", &.{ 3.0, 1.0 });
-    try db.putVector("l2", "other", &.{ 0.0, 0.0 });
+    try db.putVector("l2", "near", .{ .f32 = &.{ 1.0, 1.0 } });
+    try db.putVector("l2", "far", .{ .f32 = &.{ 4.0, 5.0 } });
+    try db.putVector("l2", "tie-a", .{ .f32 = &.{ 1.0, 3.0 } });
+    try db.putVector("l2", "tie-b", .{ .f32 = &.{ 3.0, 1.0 } });
+    try db.putVector("l2", "other", .{ .f32 = &.{ 0.0, 0.0 } });
 
-    try db.putVector("dot", "large", &.{ 3.0, 0.0 });
-    try db.putVector("dot", "small", &.{ 1.0, 0.0 });
-    try db.putVector("dot", "negative", &.{ -1.0, 0.0 });
+    try db.putVector("dot", "large", .{ .f32 = &.{ 3.0, 0.0 } });
+    try db.putVector("dot", "small", .{ .f32 = &.{ 1.0, 0.0 } });
+    try db.putVector("dot", "negative", .{ .f32 = &.{ -1.0, 0.0 } });
 
     {
-        var results = try db.searchVectors(std.testing.allocator, "cosine", &.{ 1.0, 0.0 }, 3);
+        var results = try db.searchVectors(std.testing.allocator, "cosine", .{ .f32 = &.{ 1.0, 0.0 } }, 3);
         defer results.deinit(std.testing.allocator);
         try expectSearchIds(&results, &.{ "east", "northeast", "north" });
         try std.testing.expectApproxEqAbs(@as(f64, 0.0), results.items[0].distance, 0.000001);
@@ -783,7 +782,7 @@ test "search vectors returns deterministic cosine l2 and dot results" {
     }
 
     {
-        var results = try db.searchVectors(std.testing.allocator, "l2", &.{ 2.0, 2.0 }, 3);
+        var results = try db.searchVectors(std.testing.allocator, "l2", .{ .f32 = &.{ 2.0, 2.0 } }, 3);
         defer results.deinit(std.testing.allocator);
         try expectSearchIds(&results, &.{ "near", "tie-a", "tie-b" });
         try std.testing.expectApproxEqAbs(@as(f64, @sqrt(2.0)), results.items[0].distance, 0.000001);
@@ -792,7 +791,7 @@ test "search vectors returns deterministic cosine l2 and dot results" {
     }
 
     {
-        var results = try db.searchVectors(std.testing.allocator, "dot", &.{ 1.0, 0.0 }, 5);
+        var results = try db.searchVectors(std.testing.allocator, "dot", .{ .f32 = &.{ 1.0, 0.0 } }, 5);
         defer results.deinit(std.testing.allocator);
         try expectSearchIds(&results, &.{ "large", "small", "negative" });
         try std.testing.expectApproxEqAbs(@as(f64, -3.0), results.items[0].distance, 0.000001);
@@ -822,12 +821,12 @@ test "search vectors reflects updates deletes reopen and conversion" {
         var db = try Database.open(dest_path);
         defer db.deinit();
         try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .l2 });
-        try db.putVector("docs", "a", &.{ 10.0, 10.0 });
-        try db.putVector("docs", "b", &.{ 2.0, 2.0 });
-        try db.putVector("docs", "a", &.{ 1.0, 1.0 });
+        try db.putVector("docs", "a", .{ .f32 = &.{ 10.0, 10.0 } });
+        try db.putVector("docs", "b", .{ .f32 = &.{ 2.0, 2.0 } });
+        try db.putVector("docs", "a", .{ .f32 = &.{ 1.0, 1.0 } });
         try db.deleteVector("docs", "b");
 
-        var results = try db.searchVectors(std.testing.allocator, "docs", &.{ 0.0, 0.0 }, 10);
+        var results = try db.searchVectors(std.testing.allocator, "docs", .{ .f32 = &.{ 0.0, 0.0 } }, 10);
         defer results.deinit(std.testing.allocator);
         try expectSearchIds(&results, &.{"a"});
     }
@@ -835,7 +834,7 @@ test "search vectors reflects updates deletes reopen and conversion" {
     {
         var reopened = try Database.open(dest_path);
         defer reopened.deinit();
-        var results = try reopened.searchVectors(std.testing.allocator, "docs", &.{ 0.0, 0.0 }, 10);
+        var results = try reopened.searchVectors(std.testing.allocator, "docs", .{ .f32 = &.{ 0.0, 0.0 } }, 10);
         defer results.deinit(std.testing.allocator);
         try expectSearchIds(&results, &.{"a"});
         try std.testing.expectEqual(@as(i64, 2), try testingCount(&reopened, "select count(*) from docs"));
@@ -853,11 +852,11 @@ test "search vectors reports corrupt private vector rows" {
     defer db.deinit();
 
     try db.createVectorCollection("chunks", .{ .dimensions = 2, .metric = .l2 });
-    try db.putVector("chunks", "bad", &.{ 1.0, 2.0 });
+    try db.putVector("chunks", "bad", .{ .f32 = &.{ 1.0, 2.0 } });
     try db.exec("pragma ignore_check_constraints = on");
     try db.exec("update _zova_vectors set \"values\" = x'0000803f' where vector_id = 'bad'");
     try db.exec("pragma ignore_check_constraints = off");
-    try std.testing.expectError(error.VectorCorrupt, db.searchVectors(std.testing.allocator, "chunks", &.{ 1.0, 2.0 }, 10));
+    try std.testing.expectError(error.VectorCorrupt, db.searchVectors(std.testing.allocator, "chunks", .{ .f32 = &.{ 1.0, 2.0 } }, 10));
 }
 
 test "candidate-filtered vector search ranks only supplied ids" {
@@ -871,14 +870,14 @@ test "candidate-filtered vector search ranks only supplied ids" {
     defer db.deinit();
 
     try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .l2 });
-    try db.putVector("docs", "global-nearest", &.{ 0.0, 0.0 });
-    try db.putVector("docs", "near", &.{ 1.0, 0.0 });
-    try db.putVector("docs", "tie-b", &.{ 0.0, 2.0 });
-    try db.putVector("docs", "tie-a", &.{ 2.0, 0.0 });
-    try db.putVector("docs", "far", &.{ 10.0, 0.0 });
+    try db.putVector("docs", "global-nearest", .{ .f32 = &.{ 0.0, 0.0 } });
+    try db.putVector("docs", "near", .{ .f32 = &.{ 1.0, 0.0 } });
+    try db.putVector("docs", "tie-b", .{ .f32 = &.{ 0.0, 2.0 } });
+    try db.putVector("docs", "tie-a", .{ .f32 = &.{ 2.0, 0.0 } });
+    try db.putVector("docs", "far", .{ .f32 = &.{ 10.0, 0.0 } });
 
     const candidates = [_][]const u8{ "far", "missing", "tie-b", "near", "tie-a", "near" };
-    var results = try db.searchVectorsIn(std.testing.allocator, "docs", &.{ 0.0, 0.0 }, &candidates, 3);
+    var results = try db.searchVectorsIn(std.testing.allocator, "docs", .{ .f32 = &.{ 0.0, 0.0 } }, &candidates, 3);
     defer results.deinit(std.testing.allocator);
 
     try expectSearchIds(&results, &.{ "near", "tie-a", "tie-b" });
@@ -899,23 +898,23 @@ test "candidate-filtered vector search validates inputs and handles empty limits
 
     try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .l2 });
     try db.createVectorCollection("cosine", .{ .dimensions = 2, .metric = .cosine });
-    try db.putVector("docs", "valid", &.{ 1.0, 2.0 });
+    try db.putVector("docs", "valid", .{ .f32 = &.{ 1.0, 2.0 } });
 
     const valid_candidates = [_][]const u8{"valid"};
     const invalid_candidates = [_][]const u8{ "_zova_bad", "valid" };
 
-    try std.testing.expectError(error.VectorCollectionNotFound, db.searchVectorsIn(std.testing.allocator, "missing", &.{ 1.0, 2.0 }, &valid_candidates, 10));
-    try std.testing.expectError(error.VectorDimensionMismatch, db.searchVectorsIn(std.testing.allocator, "docs", &.{1.0}, &valid_candidates, 10));
-    try std.testing.expectError(error.VectorInvalid, db.searchVectorsIn(std.testing.allocator, "docs", &.{ std.math.nan(f32), 1.0 }, &valid_candidates, 10));
-    try std.testing.expectError(error.VectorInvalid, db.searchVectorsIn(std.testing.allocator, "docs", &.{ std.math.inf(f32), 1.0 }, &valid_candidates, 10));
-    try std.testing.expectError(error.VectorInvalid, db.searchVectorsIn(std.testing.allocator, "cosine", &.{ 0.0, 0.0 }, &valid_candidates, 10));
-    try std.testing.expectError(error.VectorInvalid, db.searchVectorsIn(std.testing.allocator, "docs", &.{ 1.0, 2.0 }, &invalid_candidates, 0));
+    try std.testing.expectError(error.VectorCollectionNotFound, db.searchVectorsIn(std.testing.allocator, "missing", .{ .f32 = &.{ 1.0, 2.0 } }, &valid_candidates, 10));
+    try std.testing.expectError(error.VectorDimensionMismatch, db.searchVectorsIn(std.testing.allocator, "docs", .{ .f32 = &.{1.0} }, &valid_candidates, 10));
+    try std.testing.expectError(error.VectorInvalid, db.searchVectorsIn(std.testing.allocator, "docs", .{ .f32 = &.{ std.math.nan(f32), 1.0 } }, &valid_candidates, 10));
+    try std.testing.expectError(error.VectorInvalid, db.searchVectorsIn(std.testing.allocator, "docs", .{ .f32 = &.{ std.math.inf(f32), 1.0 } }, &valid_candidates, 10));
+    try std.testing.expectError(error.VectorInvalid, db.searchVectorsIn(std.testing.allocator, "cosine", .{ .f32 = &.{ 0.0, 0.0 } }, &valid_candidates, 10));
+    try std.testing.expectError(error.VectorInvalid, db.searchVectorsIn(std.testing.allocator, "docs", .{ .f32 = &.{ 1.0, 2.0 } }, &invalid_candidates, 0));
 
-    var empty_limit = try db.searchVectorsIn(std.testing.allocator, "docs", &.{ 1.0, 2.0 }, &valid_candidates, 0);
+    var empty_limit = try db.searchVectorsIn(std.testing.allocator, "docs", .{ .f32 = &.{ 1.0, 2.0 } }, &valid_candidates, 0);
     defer empty_limit.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), empty_limit.items.len);
 
-    var empty_candidates = try db.searchVectorsIn(std.testing.allocator, "docs", &.{ 1.0, 2.0 }, &.{}, 10);
+    var empty_candidates = try db.searchVectorsIn(std.testing.allocator, "docs", .{ .f32 = &.{ 1.0, 2.0 } }, &.{}, 10);
     defer empty_candidates.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), empty_candidates.items.len);
 }
@@ -942,14 +941,14 @@ test "candidate-filtered vector search supports cosine dot reopen and conversion
         defer db.deinit();
 
         try db.createVectorCollection("cosine", .{ .dimensions = 2, .metric = .cosine });
-        try db.putVector("cosine", "east", &.{ 1.0, 0.0 });
-        try db.putVector("cosine", "north", &.{ 0.0, 1.0 });
-        try db.putVector("cosine", "northeast", &.{ 1.0, 1.0 });
+        try db.putVector("cosine", "east", .{ .f32 = &.{ 1.0, 0.0 } });
+        try db.putVector("cosine", "north", .{ .f32 = &.{ 0.0, 1.0 } });
+        try db.putVector("cosine", "northeast", .{ .f32 = &.{ 1.0, 1.0 } });
 
         try db.createVectorCollection("dot", .{ .dimensions = 2, .metric = .dot });
-        try db.putVector("dot", "large", &.{ 3.0, 0.0 });
-        try db.putVector("dot", "small", &.{ 1.0, 0.0 });
-        try db.putVector("dot", "negative", &.{ -1.0, 0.0 });
+        try db.putVector("dot", "large", .{ .f32 = &.{ 3.0, 0.0 } });
+        try db.putVector("dot", "small", .{ .f32 = &.{ 1.0, 0.0 } });
+        try db.putVector("dot", "negative", .{ .f32 = &.{ -1.0, 0.0 } });
     }
 
     {
@@ -957,14 +956,14 @@ test "candidate-filtered vector search supports cosine dot reopen and conversion
         defer reopened.deinit();
 
         const cosine_candidates = [_][]const u8{ "north", "northeast" };
-        var cosine_results = try reopened.searchVectorsIn(std.testing.allocator, "cosine", &.{ 1.0, 0.0 }, &cosine_candidates, 10);
+        var cosine_results = try reopened.searchVectorsIn(std.testing.allocator, "cosine", .{ .f32 = &.{ 1.0, 0.0 } }, &cosine_candidates, 10);
         defer cosine_results.deinit(std.testing.allocator);
         try expectSearchIds(&cosine_results, &.{ "northeast", "north" });
         try std.testing.expectApproxEqAbs(@as(f64, 1.0 - 0.7071067811865475), cosine_results.items[0].distance, 0.000001);
         try std.testing.expectApproxEqAbs(@as(f64, 1.0), cosine_results.items[1].distance, 0.000001);
 
         const dot_candidates = [_][]const u8{ "small", "negative" };
-        var dot_results = try reopened.searchVectorsIn(std.testing.allocator, "dot", &.{ 1.0, 0.0 }, &dot_candidates, 10);
+        var dot_results = try reopened.searchVectorsIn(std.testing.allocator, "dot", .{ .f32 = &.{ 1.0, 0.0 } }, &dot_candidates, 10);
         defer dot_results.deinit(std.testing.allocator);
         try expectSearchIds(&dot_results, &.{ "small", "negative" });
         try std.testing.expectApproxEqAbs(@as(f64, -1.0), dot_results.items[0].distance, 0.000001);
@@ -984,19 +983,19 @@ test "candidate-filtered vector search reports only selected corrupt private vec
     defer db.deinit();
 
     try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .l2 });
-    try db.putVector("docs", "good", &.{ 1.0, 2.0 });
-    try db.putVector("docs", "bad", &.{ 3.0, 4.0 });
+    try db.putVector("docs", "good", .{ .f32 = &.{ 1.0, 2.0 } });
+    try db.putVector("docs", "bad", .{ .f32 = &.{ 3.0, 4.0 } });
     try db.exec("pragma ignore_check_constraints = on");
     try db.exec("update _zova_vectors set \"values\" = x'0000803f' where vector_id = 'bad'");
     try db.exec("pragma ignore_check_constraints = off");
 
     const good_only = [_][]const u8{"good"};
-    var results = try db.searchVectorsIn(std.testing.allocator, "docs", &.{ 1.0, 2.0 }, &good_only, 10);
+    var results = try db.searchVectorsIn(std.testing.allocator, "docs", .{ .f32 = &.{ 1.0, 2.0 } }, &good_only, 10);
     defer results.deinit(std.testing.allocator);
     try expectSearchIds(&results, &.{"good"});
 
     const selected_bad = [_][]const u8{"bad"};
-    try std.testing.expectError(error.VectorCorrupt, db.searchVectorsIn(std.testing.allocator, "docs", &.{ 1.0, 2.0 }, &selected_bad, 10));
+    try std.testing.expectError(error.VectorCorrupt, db.searchVectorsIn(std.testing.allocator, "docs", .{ .f32 = &.{ 1.0, 2.0 } }, &selected_bad, 10));
 }
 
 test "search vectors by id excludes source and supports candidates" {
@@ -1010,11 +1009,11 @@ test "search vectors by id excludes source and supports candidates" {
     defer db.deinit();
 
     try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .l2 });
-    try db.putVector("docs", "source", &.{ 0.0, 0.0 });
-    try db.putVector("docs", "near", &.{ 1.0, 0.0 });
-    try db.putVector("docs", "tie-b", &.{ 0.0, 2.0 });
-    try db.putVector("docs", "tie-a", &.{ 2.0, 0.0 });
-    try db.putVector("docs", "global-far", &.{ 10.0, 0.0 });
+    try db.putVector("docs", "source", .{ .f32 = &.{ 0.0, 0.0 } });
+    try db.putVector("docs", "near", .{ .f32 = &.{ 1.0, 0.0 } });
+    try db.putVector("docs", "tie-b", .{ .f32 = &.{ 0.0, 2.0 } });
+    try db.putVector("docs", "tie-a", .{ .f32 = &.{ 2.0, 0.0 } });
+    try db.putVector("docs", "global-far", .{ .f32 = &.{ 10.0, 0.0 } });
 
     {
         var results = try db.searchVectorsById(std.testing.allocator, "docs", "source", 3);
@@ -1044,20 +1043,20 @@ test "vector search thresholds filter inclusively across search modes" {
     defer db.deinit();
 
     try db.createVectorCollection("l2", .{ .dimensions = 2, .metric = .l2 });
-    try db.putVector("l2", "source", &.{ 0.0, 0.0 });
-    try db.putVector("l2", "one", &.{ 1.0, 0.0 });
-    try db.putVector("l2", "two", &.{ 2.0, 0.0 });
-    try db.putVector("l2", "three", &.{ 3.0, 0.0 });
+    try db.putVector("l2", "source", .{ .f32 = &.{ 0.0, 0.0 } });
+    try db.putVector("l2", "one", .{ .f32 = &.{ 1.0, 0.0 } });
+    try db.putVector("l2", "two", .{ .f32 = &.{ 2.0, 0.0 } });
+    try db.putVector("l2", "three", .{ .f32 = &.{ 3.0, 0.0 } });
 
     {
-        var results = try db.searchVectorsWithin(std.testing.allocator, "l2", &.{ 0.0, 0.0 }, 2.0, 10);
+        var results = try db.searchVectorsWithin(std.testing.allocator, "l2", .{ .f32 = &.{ 0.0, 0.0 } }, 2.0, 10);
         defer results.deinit(std.testing.allocator);
         try expectSearchIds(&results, &.{ "source", "one", "two" });
     }
 
     {
         const candidates = [_][]const u8{ "one", "two", "three" };
-        var results = try db.searchVectorsInWithin(std.testing.allocator, "l2", &.{ 0.0, 0.0 }, &candidates, 1.0, 10);
+        var results = try db.searchVectorsInWithin(std.testing.allocator, "l2", .{ .f32 = &.{ 0.0, 0.0 } }, &candidates, 1.0, 10);
         defer results.deinit(std.testing.allocator);
         try expectSearchIds(&results, &.{"one"});
     }
@@ -1076,27 +1075,27 @@ test "vector search thresholds filter inclusively across search modes" {
     }
 
     try db.createVectorCollection("cosine", .{ .dimensions = 2, .metric = .cosine });
-    try db.putVector("cosine", "east", &.{ 1.0, 0.0 });
-    try db.putVector("cosine", "northeast", &.{ 1.0, 1.0 });
-    try db.putVector("cosine", "north", &.{ 0.0, 1.0 });
+    try db.putVector("cosine", "east", .{ .f32 = &.{ 1.0, 0.0 } });
+    try db.putVector("cosine", "northeast", .{ .f32 = &.{ 1.0, 1.0 } });
+    try db.putVector("cosine", "north", .{ .f32 = &.{ 0.0, 1.0 } });
     {
-        var results = try db.searchVectorsWithin(std.testing.allocator, "cosine", &.{ 1.0, 0.0 }, 0.3, 10);
+        var results = try db.searchVectorsWithin(std.testing.allocator, "cosine", .{ .f32 = &.{ 1.0, 0.0 } }, 0.3, 10);
         defer results.deinit(std.testing.allocator);
         try expectSearchIds(&results, &.{ "east", "northeast" });
     }
 
     try db.createVectorCollection("dot", .{ .dimensions = 2, .metric = .dot });
-    try db.putVector("dot", "strong", &.{ 3.0, 0.0 });
-    try db.putVector("dot", "weak", &.{ 1.0, 0.0 });
-    try db.putVector("dot", "negative", &.{ -1.0, 0.0 });
+    try db.putVector("dot", "strong", .{ .f32 = &.{ 3.0, 0.0 } });
+    try db.putVector("dot", "weak", .{ .f32 = &.{ 1.0, 0.0 } });
+    try db.putVector("dot", "negative", .{ .f32 = &.{ -1.0, 0.0 } });
     {
-        var results = try db.searchVectorsWithin(std.testing.allocator, "dot", &.{ 1.0, 0.0 }, -1.0, 10);
+        var results = try db.searchVectorsWithin(std.testing.allocator, "dot", .{ .f32 = &.{ 1.0, 0.0 } }, -1.0, 10);
         defer results.deinit(std.testing.allocator);
         try expectSearchIds(&results, &.{ "strong", "weak" });
     }
 
     {
-        var results = try db.searchVectorsWithin(std.testing.allocator, "l2", &.{ 0.0, 0.0 }, 0.5, 10);
+        var results = try db.searchVectorsWithin(std.testing.allocator, "l2", .{ .f32 = &.{ 0.0, 0.0 } }, 0.5, 10);
         defer results.deinit(std.testing.allocator);
         try expectSearchIds(&results, &.{"source"});
     }
@@ -1113,9 +1112,9 @@ test "search vectors by id and thresholds validate inputs and corruption" {
     defer db.deinit();
 
     try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .l2 });
-    try db.putVector("docs", "source", &.{ 1.0, 2.0 });
-    try db.putVector("docs", "good", &.{ 2.0, 3.0 });
-    try db.putVector("docs", "bad", &.{ 3.0, 4.0 });
+    try db.putVector("docs", "source", .{ .f32 = &.{ 1.0, 2.0 } });
+    try db.putVector("docs", "good", .{ .f32 = &.{ 2.0, 3.0 } });
+    try db.putVector("docs", "bad", .{ .f32 = &.{ 3.0, 4.0 } });
 
     const valid_candidates = [_][]const u8{"good"};
     const invalid_candidates = [_][]const u8{"_zova_bad"};
@@ -1123,9 +1122,9 @@ test "search vectors by id and thresholds validate inputs and corruption" {
     try std.testing.expectError(error.VectorCollectionNotFound, db.searchVectorsById(std.testing.allocator, "missing", "source", 10));
     try std.testing.expectError(error.VectorInvalid, db.searchVectorsById(std.testing.allocator, "docs", "_zova_bad", 10));
     try std.testing.expectError(error.VectorNotFound, db.searchVectorsById(std.testing.allocator, "docs", "missing", 10));
-    try std.testing.expectError(error.VectorInvalid, db.searchVectorsInWithin(std.testing.allocator, "docs", &.{ 1.0, 2.0 }, &invalid_candidates, 1.0, 10));
-    try std.testing.expectError(error.VectorInvalid, db.searchVectorsWithin(std.testing.allocator, "docs", &.{ 1.0, 2.0 }, std.math.nan(f64), 10));
-    try std.testing.expectError(error.VectorInvalid, db.searchVectorsWithin(std.testing.allocator, "docs", &.{ 1.0, 2.0 }, std.math.inf(f64), 10));
+    try std.testing.expectError(error.VectorInvalid, db.searchVectorsInWithin(std.testing.allocator, "docs", .{ .f32 = &.{ 1.0, 2.0 } }, &invalid_candidates, 1.0, 10));
+    try std.testing.expectError(error.VectorInvalid, db.searchVectorsWithin(std.testing.allocator, "docs", .{ .f32 = &.{ 1.0, 2.0 } }, std.math.nan(f64), 10));
+    try std.testing.expectError(error.VectorInvalid, db.searchVectorsWithin(std.testing.allocator, "docs", .{ .f32 = &.{ 1.0, 2.0 } }, std.math.inf(f64), 10));
 
     var empty_limit = try db.searchVectorsByIdInWithin(std.testing.allocator, "docs", "source", &valid_candidates, 1.0, 0);
     defer empty_limit.deinit(std.testing.allocator);

@@ -174,7 +174,7 @@ test "trgm validates zova owned object vector and graph targets" {
     const chunk_id = zova.objectChunkId("loose chunk");
     try db.putObjectChunk(chunk_id, "loose chunk");
     try db.createVectorCollection("chunks", .{ .dimensions = 2, .metric = .cosine });
-    try db.putVector("chunks", "vec:1", &.{ 1.0, 0.0 });
+    try db.putVector("chunks", "vec:1", .{ .f32 = &.{ 1.0, 0.0 } });
     try db.createGraph("app");
     try db.putGraphNode(.{ .graph_name = "app", .node_id = "message:1", .kind = "message" });
 
@@ -219,7 +219,7 @@ test "trgm validates object and vector targets routed through bound stores" {
     var object_hex_buffer: [64]u8 = undefined;
     const object_hex = try hexObjectId(&object_hex_buffer, object_id);
     try db.createVectorCollection("chunks", .{ .dimensions = 2, .metric = .cosine });
-    try db.putVector("chunks", "vec:bound", &.{ 1.0, 0.0 });
+    try db.putVector("chunks", "vec:bound", .{ .f32 = &.{ 1.0, 0.0 } });
 
     try putWithBoundArgs(&db, "targets", "bound-object", "object", null, object_hex, "bound object target");
     try putWithBoundArgs(&db, "targets", "bound-vector", "vector", "chunks", "vec:bound", "bound vector target");
@@ -271,7 +271,7 @@ test "split object and vector stores preserve trgm metadata and target reference
         try db.installExtension("trgm");
         try execSql(&db, "select zova_trgm_create_index('chunks')");
         try db.createVectorCollection("chunks", .{ .dimensions = 2, .metric = .cosine });
-        try db.putVector("chunks", "chunk:1", &.{ 1.0, 0.0 });
+        try db.putVector("chunks", "chunk:1", .{ .f32 = &.{ 1.0, 0.0 } });
         try putWithBoundArgs(&db, "chunks", "chunk:1", "vector", "chunks", "chunk:1", "semantic chunk receipt text");
 
         _ = try db.splitVectorStore(vector_store_path);

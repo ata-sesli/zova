@@ -15,8 +15,11 @@ def main() -> None:
                 "('chunk:1', 'Zova stores records, objects, vectors, and graphs together')"
             )
             db.create_graph(zova.DEFAULT_GRAPH_NAME)
-            db.create_vector_collection("chunks", zova.VectorCollectionOptions(2, zova.VectorMetric.L2))
-            db.put_vector("chunks", "chunk:1", [0.0, 1.0])
+            db.create_vector_collection(
+                "chunks",
+                zova.VectorCollectionOptions(2, zova.VectorMetric.L2, zova.VectorElementType.F32),
+            )
+            db.put_vector("chunks", "chunk:1", zova.VectorElementType.F32, [0.0, 1.0])
 
             object_id = db.put_object(b"attachment bytes")
             object_hex = object_id.hex()
@@ -56,7 +59,7 @@ def main() -> None:
                 zova.GraphEdgeInput(zova.DEFAULT_GRAPH_NAME, "chunk:1", "has_attachment", "attachment:1")
             )
 
-            for hit in db.search_vectors("chunks", [0.0, 1.0], 1):
+            for hit in db.search_vectors("chunks", zova.VectorElementType.F32, [0.0, 1.0], 1):
                 neighbors = db.graph_neighbors(
                     zova.GraphNeighborsOptions(
                         zova.DEFAULT_GRAPH_NAME,

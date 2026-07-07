@@ -21,18 +21,13 @@ pub const zova_object_manifest = internal.zova_object_manifest;
 pub const zova_vector_metric = internal.zova_vector_metric;
 pub const zova_vector_element_type = internal.zova_vector_element_type;
 pub const zova_vector_collection_options = internal.zova_vector_collection_options;
-pub const zova_vector_collection_typed_options = internal.zova_vector_collection_typed_options;
 pub const zova_vector_values = internal.zova_vector_values;
 pub const zova_vector = internal.zova_vector;
-pub const zova_vector_typed = internal.zova_vector_typed;
 pub const zova_vector_search_result = internal.zova_vector_search_result;
 pub const zova_vector_search_results = internal.zova_vector_search_results;
 pub const zova_vector_collection_info = internal.zova_vector_collection_info;
 pub const zova_vector_collection_list = internal.zova_vector_collection_list;
-pub const zova_vector_collection_typed_info = internal.zova_vector_collection_typed_info;
-pub const zova_vector_collection_typed_list = internal.zova_vector_collection_typed_list;
 pub const zova_vector_input = internal.zova_vector_input;
-pub const zova_vector_typed_input = internal.zova_vector_typed_input;
 pub const zova_graph_target_type = internal.zova_graph_target_type;
 pub const zova_graph_neighbor_direction = internal.zova_graph_neighbor_direction;
 pub const zova_graph_info = internal.zova_graph_info;
@@ -98,24 +93,16 @@ pub const zova_object_writer_write_request = internal.zova_object_writer_write_r
 pub const zova_object_writer_finish_request = internal.zova_object_writer_finish_request;
 pub const zova_object_writer_cancel_request = internal.zova_object_writer_cancel_request;
 pub const zova_vector_collection_create_request = internal.zova_vector_collection_create_request;
-pub const zova_vector_collection_create_typed_request = internal.zova_vector_collection_create_typed_request;
 pub const zova_vector_collection_exists_request = internal.zova_vector_collection_exists_request;
 pub const zova_vector_put_request = internal.zova_vector_put_request;
-pub const zova_vector_put_typed_request = internal.zova_vector_put_typed_request;
 pub const zova_vector_get_request = internal.zova_vector_get_request;
-pub const zova_vector_get_typed_request = internal.zova_vector_get_typed_request;
 pub const zova_vector_exists_request = internal.zova_vector_exists_request;
 pub const zova_vector_delete_request = internal.zova_vector_delete_request;
 pub const zova_vector_search_request = internal.zova_vector_search_request;
-pub const zova_vector_search_typed_request = internal.zova_vector_search_typed_request;
 pub const zova_vector_search_in_request = internal.zova_vector_search_in_request;
-pub const zova_vector_search_in_typed_request = internal.zova_vector_search_in_typed_request;
 pub const zova_vector_collection_info_get_request = internal.zova_vector_collection_info_get_request;
 pub const zova_vector_collections_list_request = internal.zova_vector_collections_list_request;
-pub const zova_vector_collection_typed_info_get_request = internal.zova_vector_collection_typed_info_get_request;
-pub const zova_vector_collections_typed_list_request = internal.zova_vector_collections_typed_list_request;
 pub const zova_vector_put_many_request = internal.zova_vector_put_many_request;
-pub const zova_vector_put_many_typed_request = internal.zova_vector_put_many_typed_request;
 pub const zova_vector_collection_delete_request = internal.zova_vector_collection_delete_request;
 pub const zova_vector_search_within_request = internal.zova_vector_search_within_request;
 pub const zova_vector_search_in_within_request = internal.zova_vector_search_in_within_request;
@@ -186,10 +173,6 @@ export fn zova_vector_free(vector: ?*zova_vector) callconv(.c) void {
     return internal.zova_vector_free(vector);
 }
 
-export fn zova_vector_typed_free(vector: ?*zova_vector_typed) callconv(.c) void {
-    return internal.zova_vector_typed_free(vector);
-}
-
 export fn zova_vector_search_results_free(results: ?*zova_vector_search_results) callconv(.c) void {
     return internal.zova_vector_search_results_free(results);
 }
@@ -200,14 +183,6 @@ export fn zova_vector_collection_info_free(info: ?*zova_vector_collection_info) 
 
 export fn zova_vector_collection_list_free(list: ?*zova_vector_collection_list) callconv(.c) void {
     return internal.zova_vector_collection_list_free(list);
-}
-
-export fn zova_vector_collection_typed_info_free(info: ?*zova_vector_collection_typed_info) callconv(.c) void {
-    return internal.zova_vector_collection_typed_info_free(info);
-}
-
-export fn zova_vector_collection_typed_list_free(list: ?*zova_vector_collection_typed_list) callconv(.c) void {
-    return internal.zova_vector_collection_typed_list_free(list);
 }
 
 export fn zova_graph_info_free(info: ?*zova_graph_info) callconv(.c) void {
@@ -508,10 +483,6 @@ export fn zova_vector_collection_create(request: ?*const zova_vector_collection_
     return internal.zova_vector_collection_create(request);
 }
 
-export fn zova_vector_collection_create_typed(request: ?*const zova_vector_collection_create_typed_request) callconv(.c) zova_status {
-    return internal.zova_vector_collection_create_typed(request);
-}
-
 export fn zova_vector_collection_exists(request: ?*const zova_vector_collection_exists_request) callconv(.c) zova_status {
     return internal.zova_vector_collection_exists(request);
 }
@@ -520,16 +491,8 @@ export fn zova_vector_put(request: ?*const zova_vector_put_request) callconv(.c)
     return internal.zova_vector_put(request);
 }
 
-export fn zova_vector_put_typed(request: ?*const zova_vector_put_typed_request) callconv(.c) zova_status {
-    return internal.zova_vector_put_typed(request);
-}
-
 export fn zova_vector_get(request: ?*const zova_vector_get_request) callconv(.c) zova_status {
     return internal.zova_vector_get(request);
-}
-
-export fn zova_vector_get_typed(request: ?*const zova_vector_get_typed_request) callconv(.c) zova_status {
-    return internal.zova_vector_get_typed(request);
 }
 
 export fn zova_vector_exists(request: ?*const zova_vector_exists_request) callconv(.c) zova_status {
@@ -544,16 +507,8 @@ export fn zova_vector_search(request: ?*const zova_vector_search_request) callco
     return internal.zova_vector_search(request);
 }
 
-export fn zova_vector_search_typed(request: ?*const zova_vector_search_typed_request) callconv(.c) zova_status {
-    return internal.zova_vector_search_typed(request);
-}
-
 export fn zova_vector_search_in(request: ?*const zova_vector_search_in_request) callconv(.c) zova_status {
     return internal.zova_vector_search_in(request);
-}
-
-export fn zova_vector_search_in_typed(request: ?*const zova_vector_search_in_typed_request) callconv(.c) zova_status {
-    return internal.zova_vector_search_in_typed(request);
 }
 
 export fn zova_vector_collection_info_get(request: ?*const zova_vector_collection_info_get_request) callconv(.c) zova_status {
@@ -564,20 +519,8 @@ export fn zova_vector_collections_list(request: ?*const zova_vector_collections_
     return internal.zova_vector_collections_list(request);
 }
 
-export fn zova_vector_collection_typed_info_get(request: ?*const zova_vector_collection_typed_info_get_request) callconv(.c) zova_status {
-    return internal.zova_vector_collection_typed_info_get(request);
-}
-
-export fn zova_vector_collections_typed_list(request: ?*const zova_vector_collections_typed_list_request) callconv(.c) zova_status {
-    return internal.zova_vector_collections_typed_list(request);
-}
-
 export fn zova_vector_put_many(request: ?*const zova_vector_put_many_request) callconv(.c) zova_status {
     return internal.zova_vector_put_many(request);
-}
-
-export fn zova_vector_put_many_typed(request: ?*const zova_vector_put_many_typed_request) callconv(.c) zova_status {
-    return internal.zova_vector_put_many_typed(request);
 }
 
 export fn zova_vector_collection_delete(request: ?*const zova_vector_collection_delete_request) callconv(.c) zova_status {

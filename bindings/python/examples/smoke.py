@@ -63,17 +63,17 @@ def main() -> None:
             print("vectors: create collection, insert, search")
             db.create_vector_collection(
                 "chunks",
-                zova.VectorCollectionOptions(2, zova.VectorMetric.L2),
+                zova.VectorCollectionOptions(2, zova.VectorMetric.L2, zova.VectorElementType.F32),
             )
             db.put_vectors(
                 "chunks",
                 [
-                    zova.VectorInput("near", [0.0, 0.0]),
-                    zova.VectorInput("far", [10.0, 0.0]),
+                    zova.VectorInput("near", zova.VectorElementType.F32, [0.0, 0.0]),
+                    zova.VectorInput("far", zova.VectorElementType.F32, [10.0, 0.0]),
                 ],
             )
             assert db.vector_collection_info("chunks").vector_count == 2
-            results = db.search_vectors("chunks", [0.0, 0.0], 2)
+            results = db.search_vectors("chunks", zova.VectorElementType.F32, [0.0, 0.0], 2)
             assert [result.id for result in results] == ["near", "far"]
 
         print("reopen: records, objects, vectors survived")
@@ -85,7 +85,7 @@ def main() -> None:
                 reloaded_object_id = zova.ObjectId(stmt.column_blob(0))
             assert db.get_object(reloaded_object_id) == b"hello from a smoke object"
 
-            assert db.search_vectors("chunks", [0.0, 0.0], 1)[0].id == "near"
+            assert db.search_vectors("chunks", zova.VectorElementType.F32, [0.0, 0.0], 1)[0].id == "near"
 
     print("ok")
 

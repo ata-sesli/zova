@@ -12,10 +12,9 @@ use crate::object::{
 };
 use crate::statement::PyStatement;
 use crate::vector::{
-    candidate_refs, py_collection_info, py_search_results, py_typed_vector, py_vector,
-    typed_options_from_py, typed_vector_input_refs, typed_vector_inputs_from_py, vector_input_refs,
-    vector_inputs_from_py, vector_values_from_py, PyTypedVector, PyVector, PyVectorCollectionInfo,
-    PyVectorSearchResult,
+    candidate_refs, collection_options_from_py, py_collection_info, py_search_results, py_vector,
+    vector_input_refs, vector_inputs_from_py, vector_values_from_py, PyVector,
+    PyVectorCollectionInfo, PyVectorSearchResult,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes};
@@ -297,20 +296,9 @@ impl PyDatabase {
         name: &str,
         options: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
-        let options = typed_options_from_py(options)?;
+        let options = collection_options_from_py(options)?;
         self.db_mut()?
-            .create_vector_collection_typed(name, options)
-            .map_err(zova_error)
-    }
-
-    pub(crate) fn create_vector_collection_typed(
-        &mut self,
-        name: &str,
-        options: &Bound<'_, PyAny>,
-    ) -> PyResult<()> {
-        let options = typed_options_from_py(options)?;
-        self.db_mut()?
-            .create_vector_collection_typed(name, options)
+            .create_vector_collection(name, options)
             .map_err(zova_error)
     }
 
@@ -349,10 +337,12 @@ impl PyDatabase {
         &mut self,
         collection_name: &str,
         vector_id: &str,
-        values: Vec<f32>,
+        element_type: i32,
+        values: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
+        let values = vector_values_from_py(element_type, values)?;
         self.db_mut()?
-            .put_vector(collection_name, vector_id, &values)
+            .put_vector(collection_name, vector_id, values.as_rust())
             .map_err(zova_error)
     }
 
@@ -368,31 +358,6 @@ impl PyDatabase {
             .map_err(zova_error)
     }
 
-    pub(crate) fn put_vector_typed(
-        &mut self,
-        collection_name: &str,
-        vector_id: &str,
-        element_type: i32,
-        values: &Bound<'_, PyAny>,
-    ) -> PyResult<()> {
-        let values = vector_values_from_py(element_type, values)?;
-        self.db_mut()?
-            .put_vector_typed(collection_name, vector_id, values.as_rust())
-            .map_err(zova_error)
-    }
-
-    pub(crate) fn put_vectors_typed(
-        &mut self,
-        collection_name: &str,
-        vectors: &Bound<'_, PyAny>,
-    ) -> PyResult<()> {
-        let owned = typed_vector_inputs_from_py(vectors)?;
-        let refs = typed_vector_input_refs(&owned);
-        self.db_mut()?
-            .put_vectors_typed(collection_name, &refs)
-            .map_err(zova_error)
-    }
-
     pub(crate) fn get_vector(
         &mut self,
         collection_name: &str,
@@ -403,18 +368,6 @@ impl PyDatabase {
             .get_vector(collection_name, vector_id)
             .map_err(zova_error)?;
         Ok(py_vector(vector))
-    }
-
-    pub(crate) fn get_vector_typed(
-        &mut self,
-        collection_name: &str,
-        vector_id: &str,
-    ) -> PyResult<PyTypedVector> {
-        let vector = self
-            .db_mut()?
-            .get_vector_typed(collection_name, vector_id)
-            .map_err(zova_error)?;
-        Ok(py_typed_vector(vector))
     }
 
     pub(crate) fn has_vector(&mut self, collection_name: &str, vector_id: &str) -> PyResult<bool> {
@@ -432,19 +385,6 @@ impl PyDatabase {
     pub(crate) fn search_vectors(
         &mut self,
         collection_name: &str,
-        query: Vec<f32>,
-        limit: usize,
-    ) -> PyResult<Vec<PyVectorSearchResult>> {
-        let results = self
-            .db_mut()?
-            .search_vectors(collection_name, &query, limit)
-            .map_err(zova_error)?;
-        Ok(py_search_results(results))
-    }
-
-    pub(crate) fn search_vectors_typed(
-        &mut self,
-        collection_name: &str,
         element_type: i32,
         query: &Bound<'_, PyAny>,
         limit: usize,
@@ -452,7 +392,7 @@ impl PyDatabase {
         let query = vector_values_from_py(element_type, query)?;
         let results = self
             .db_mut()?
-            .search_vectors_typed(collection_name, query.as_rust(), limit)
+            .search_vectors(collection_name, query.as_rust(), limit)
             .map_err(zova_error)?;
         Ok(py_search_results(results))
     }
@@ -460,14 +400,16 @@ impl PyDatabase {
     pub(crate) fn search_vectors_in(
         &mut self,
         collection_name: &str,
-        query: Vec<f32>,
+        element_type: i32,
+        query: &Bound<'_, PyAny>,
         candidate_ids: Vec<String>,
         limit: usize,
     ) -> PyResult<Vec<PyVectorSearchResult>> {
+        let query = vector_values_from_py(element_type, query)?;
         let candidates = candidate_refs(&candidate_ids);
         let results = self
             .db_mut()?
-            .search_vectors_in(collection_name, &query, &candidates, limit)
+            .search_vectors_in(collection_name, query.as_rust(), &candidates, limit)
             .map_err(zova_error)?;
         Ok(py_search_results(results))
     }
@@ -475,13 +417,15 @@ impl PyDatabase {
     pub(crate) fn search_vectors_within(
         &mut self,
         collection_name: &str,
-        query: Vec<f32>,
+        element_type: i32,
+        query: &Bound<'_, PyAny>,
         max_distance: f64,
         limit: usize,
     ) -> PyResult<Vec<PyVectorSearchResult>> {
+        let query = vector_values_from_py(element_type, query)?;
         let results = self
             .db_mut()?
-            .search_vectors_within(collection_name, &query, max_distance, limit)
+            .search_vectors_within(collection_name, query.as_rust(), max_distance, limit)
             .map_err(zova_error)?;
         Ok(py_search_results(results))
     }
@@ -489,15 +433,23 @@ impl PyDatabase {
     pub(crate) fn search_vectors_in_within(
         &mut self,
         collection_name: &str,
-        query: Vec<f32>,
+        element_type: i32,
+        query: &Bound<'_, PyAny>,
         candidate_ids: Vec<String>,
         max_distance: f64,
         limit: usize,
     ) -> PyResult<Vec<PyVectorSearchResult>> {
+        let query = vector_values_from_py(element_type, query)?;
         let candidates = candidate_refs(&candidate_ids);
         let results = self
             .db_mut()?
-            .search_vectors_in_within(collection_name, &query, &candidates, max_distance, limit)
+            .search_vectors_in_within(
+                collection_name,
+                query.as_rust(),
+                &candidates,
+                max_distance,
+                limit,
+            )
             .map_err(zova_error)?;
         Ok(py_search_results(results))
     }

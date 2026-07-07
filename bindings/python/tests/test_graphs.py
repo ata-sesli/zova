@@ -238,8 +238,11 @@ def test_graph_vector_target_diagnostic_after_vector_delete(tmp_path):
     path = tmp_path / "graph_diag.zova"
 
     with zova.Database.create(str(path)) as db:
-        db.create_vector_collection("messages", zova.VectorCollectionOptions(2, zova.VectorMetric.L2))
-        db.put_vector("messages", "vec-1", [1.0, 0.0])
+        db.create_vector_collection(
+            "messages",
+            zova.VectorCollectionOptions(2, zova.VectorMetric.L2, zova.VectorElementType.F32),
+        )
+        db.put_vector("messages", "vec-1", zova.VectorElementType.F32, [1.0, 0.0])
         db.create_graph(zova.DEFAULT_GRAPH_NAME)
         db.put_graph_node(node("msg:1", "message", zova.GraphTargetType.VECTOR, "messages", "vec-1"))
         db.delete_vector("messages", "vec-1")

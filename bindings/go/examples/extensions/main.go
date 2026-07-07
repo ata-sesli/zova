@@ -75,10 +75,11 @@ func main() {
 	must(err)
 	objectHex := fmt.Sprintf("%x", objectID[:])
 	must(db.CreateVectorCollection("chunks", zova.VectorCollectionOptions{
-		Dimensions: 2,
-		Metric:     zova.VectorMetricL2,
+		Dimensions:  2,
+		Metric:      zova.VectorMetricL2,
+		ElementType: zova.VectorElementTypeF32,
 	}))
-	must(db.PutVector("chunks", "chunk:m1", []float32{0, 1}))
+	must(db.PutVector("chunks", "chunk:m1", zova.VectorValues{ElementType: zova.VectorElementTypeF32, F32: []float32{0, 1}}))
 	must(db.CreateGraph(zova.DefaultGraphName))
 	must(db.PutGraphNode(zova.GraphNodeInput{
 		GraphName:       zova.DefaultGraphName,

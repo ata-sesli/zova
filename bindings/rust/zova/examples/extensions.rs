@@ -1,6 +1,6 @@
 use zova::{
     Database, GraphEdgeInput, GraphNodeInput, GraphTargetType, Step, VectorCollectionOptions,
-    VectorMetric, DEFAULT_GRAPH_NAME,
+    VectorElementType, VectorMetric, VectorValues, DEFAULT_GRAPH_NAME,
 };
 
 fn hex(bytes: [u8; 32]) -> String {
@@ -70,9 +70,10 @@ fn main() -> zova::Result<()> {
         VectorCollectionOptions {
             dimensions: 2,
             metric: VectorMetric::L2,
+            element_type: VectorElementType::F32,
         },
     )?;
-    db.put_vector("chunks", "chunk:m1", &[0.0, 1.0])?;
+    db.put_vector("chunks", "chunk:m1", VectorValues::F32(&[0.0, 1.0]))?;
     db.create_graph(DEFAULT_GRAPH_NAME)?;
     db.put_graph_node(GraphNodeInput {
         graph_name: DEFAULT_GRAPH_NAME,

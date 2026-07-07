@@ -288,10 +288,11 @@ func TestResetClearBindingsTransactionsVacuumAndMultipleHandles(t *testing.T) {
 		t.Fatalf("object write inside savepoint = %v, want StatusObjectTransactionActive", err)
 	}
 	must(t, db.CreateVectorCollection("temporary_vectors", VectorCollectionOptions{
-		Dimensions: 2,
-		Metric:     VectorMetricL2,
+		Dimensions:  2,
+		Metric:      VectorMetricL2,
+		ElementType: VectorElementTypeF32,
 	}))
-	must(t, db.PutVector("temporary_vectors", "v1", []float32{1, 2}))
+	must(t, db.PutVector("temporary_vectors", "v1", VectorValues{ElementType: VectorElementTypeF32, F32: []float32{1, 2}}))
 	must(t, db.RollbackToSavepoint("sp_vectors"))
 	must(t, db.ReleaseSavepoint("sp_vectors"))
 	if exists, err := db.HasVectorCollection("temporary_vectors"); err != nil || exists {
@@ -391,11 +392,12 @@ func TestBackupCompactAndRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	must(t, db.CreateVectorCollection("chunks", VectorCollectionOptions{
-		Dimensions: 2,
-		Metric:     VectorMetricL2,
+		Dimensions:  2,
+		Metric:      VectorMetricL2,
+		ElementType: VectorElementTypeF32,
 	}))
-	must(t, db.PutVector("chunks", "near", []float32{0, 0}))
-	must(t, db.PutVector("chunks", "far", []float32{10, 0}))
+	must(t, db.PutVector("chunks", "near", VectorValues{ElementType: VectorElementTypeF32, F32: []float32{0, 0}}))
+	must(t, db.PutVector("chunks", "far", VectorValues{ElementType: VectorElementTypeF32, F32: []float32{10, 0}}))
 
 	must(t, db.BackupTo(backup))
 	must(t, db.CompactTo(compact))
@@ -482,7 +484,7 @@ func verifyOperationalCopy(t *testing.T, path string, objectID ObjectID) {
 	if !bytes.Equal(object, []byte("go operational object bytes")) {
 		t.Fatalf("%s object mismatch", path)
 	}
-	results, err := db.SearchVectors("chunks", []float32{0, 0}, 2)
+	results, err := db.SearchVectors("chunks", VectorValues{ElementType: VectorElementTypeF32, F32: []float32{0, 0}}, 2)
 	if err != nil {
 		t.Fatal(err)
 	}

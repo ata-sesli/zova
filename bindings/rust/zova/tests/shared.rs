@@ -2,7 +2,8 @@ use std::thread;
 use zova::{
     object_id, GraphEdgeInput, GraphNeighborDirection, GraphNeighborsOptions, GraphNodeInput,
     GraphTargetType, GraphWalkOptions, SharedDatabase, SharedObjectWriter, SharedStatement, Status,
-    Step, VectorCollectionOptions, VectorInput, VectorMetric, DEFAULT_GRAPH_NAME,
+    Step, VectorCollectionOptions, VectorElementType, VectorInput, VectorMetric, VectorValues,
+    DEFAULT_GRAPH_NAME,
 };
 
 fn temp_path(name: &str) -> String {
@@ -151,6 +152,7 @@ fn cloned_shared_database_handles_objects_and_vectors_from_threads() {
         VectorCollectionOptions {
             dimensions: 2,
             metric: VectorMetric::L2,
+            element_type: VectorElementType::F32,
         },
     )
     .unwrap();
@@ -166,7 +168,7 @@ fn cloned_shared_database_handles_objects_and_vectors_from_threads() {
             assert_eq!(&prefix, b"object");
 
             let vector_id = format!("v{index}");
-            db.put_vector("items", &vector_id, &[index as f32, 0.0])
+            db.put_vector("items", &vector_id, VectorValues::F32(&[index as f32, 0.0]))
                 .unwrap();
         }));
     }
@@ -174,7 +176,9 @@ fn cloned_shared_database_handles_objects_and_vectors_from_threads() {
         thread.join().unwrap();
     }
 
-    let nearest = db.search_vectors("items", &[0.0, 0.0], 3).unwrap();
+    let nearest = db
+        .search_vectors("items", VectorValues::F32(&[0.0, 0.0]), 3)
+        .unwrap();
     assert_eq!(nearest[0].id, "v0");
     let _ = std::fs::remove_file(path);
 }
@@ -499,6 +503,7 @@ fn shared_batch_vectors_and_candidate_search_match_database_api() {
         VectorCollectionOptions {
             dimensions: 2,
             metric: VectorMetric::Dot,
+            element_type: VectorElementType::F32,
         },
     )
     .unwrap();
@@ -507,15 +512,15 @@ fn shared_batch_vectors_and_candidate_search_match_database_api() {
         &[
             VectorInput {
                 id: "a",
-                values: &[1.0, 0.0],
+                values: VectorValues::F32(&[1.0, 0.0]),
             },
             VectorInput {
                 id: "b",
-                values: &[0.0, 1.0],
+                values: VectorValues::F32(&[0.0, 1.0]),
             },
             VectorInput {
                 id: "c",
-                values: &[2.0, 0.0],
+                values: VectorValues::F32(&[2.0, 0.0]),
             },
         ],
     )

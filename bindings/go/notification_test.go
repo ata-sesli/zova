@@ -216,10 +216,11 @@ func TestNotificationVectorMetadataWorkflow(t *testing.T) {
 
 	must(t, db.Exec("create table chunks(id text primary key, vector_id text not null)"))
 	must(t, db.CreateVectorCollection("chunks", VectorCollectionOptions{
-		Dimensions: 2,
-		Metric:     VectorMetricL2,
+		Dimensions:  2,
+		Metric:      VectorMetricL2,
+		ElementType: VectorElementTypeF32,
 	}))
-	must(t, db.PutVector("chunks", "chunk:1", []float32{0, 0}))
+	must(t, db.PutVector("chunks", "chunk:1", VectorValues{ElementType: VectorElementTypeF32, F32: []float32{0, 0}}))
 	sub, err := db.Listen("vectors:chunks")
 	if err != nil {
 		t.Fatal(err)
@@ -241,7 +242,7 @@ func TestNotificationVectorMetadataWorkflow(t *testing.T) {
 	if note == nil || note.Payload != "changed" {
 		t.Fatalf("expected vector workflow notification, got %#v", note)
 	}
-	results, err := db.SearchVectors("chunks", []float32{0, 0}, 1)
+	results, err := db.SearchVectors("chunks", VectorValues{ElementType: VectorElementTypeF32, F32: []float32{0, 0}}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

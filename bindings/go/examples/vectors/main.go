@@ -24,15 +24,16 @@ func main() {
 		log.Fatal(err)
 	}
 	if err := db.CreateVectorCollection("chunks", zova.VectorCollectionOptions{
-		Dimensions: 2,
-		Metric:     zova.VectorMetricL2,
+		Dimensions:  2,
+		Metric:      zova.VectorMetricL2,
+		ElementType: zova.VectorElementTypeF32,
 	}); err != nil {
 		log.Fatal(err)
 	}
 	if err := db.PutVectors("chunks", []zova.VectorInput{
-		{ID: "intro", Values: []float32{0, 0}},
-		{ID: "api", Values: []float32{1, 0}},
-		{ID: "release", Values: []float32{3, 0}},
+		{ID: "intro", Values: zova.VectorValues{ElementType: zova.VectorElementTypeF32, F32: []float32{0, 0}}},
+		{ID: "api", Values: zova.VectorValues{ElementType: zova.VectorElementTypeF32, F32: []float32{1, 0}}},
+		{ID: "release", Values: zova.VectorValues{ElementType: zova.VectorElementTypeF32, F32: []float32{3, 0}}},
 	}); err != nil {
 		log.Fatal(err)
 	}
@@ -70,7 +71,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	results, err := db.SearchVectors("chunks", []float32{0.2, 0}, 2)
+	results, err := db.SearchVectors("chunks", zova.VectorValues{ElementType: zova.VectorElementTypeF32, F32: []float32{0.2, 0}}, 2)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -177,14 +178,14 @@ order by s.rank`)
 }
 
 func typedVectors(db *zova.DB) {
-	if err := db.CreateVectorCollectionTyped("scores_i8", zova.TypedVectorCollectionOptions{
+	if err := db.CreateVectorCollection("scores_i8", zova.VectorCollectionOptions{
 		Dimensions:  2,
 		Metric:      zova.VectorMetricL2,
 		ElementType: zova.VectorElementTypeI8,
 	}); err != nil {
 		log.Fatal(err)
 	}
-	if err := db.PutVectorsTyped("scores_i8", []zova.TypedVectorInput{
+	if err := db.PutVectors("scores_i8", []zova.VectorInput{
 		{
 			ID: "near",
 			Values: zova.VectorValues{
@@ -202,7 +203,7 @@ func typedVectors(db *zova.DB) {
 	}); err != nil {
 		log.Fatal(err)
 	}
-	i8Hits, err := db.SearchVectorsTyped("scores_i8", zova.VectorValues{
+	i8Hits, err := db.SearchVectors("scores_i8", zova.VectorValues{
 		ElementType: zova.VectorElementTypeI8,
 		I8:          []int8{0, 0},
 	}, 1)
@@ -211,20 +212,20 @@ func typedVectors(db *zova.DB) {
 	}
 	fmt.Printf("i8 %s %.3f\n", i8Hits[0].ID, i8Hits[0].Distance)
 
-	if err := db.CreateVectorCollectionTyped("halves", zova.TypedVectorCollectionOptions{
+	if err := db.CreateVectorCollection("halves", zova.VectorCollectionOptions{
 		Dimensions:  2,
 		Metric:      zova.VectorMetricL2,
 		ElementType: zova.VectorElementTypeF16,
 	}); err != nil {
 		log.Fatal(err)
 	}
-	if err := db.PutVectorTyped("halves", "one", zova.VectorValues{
+	if err := db.PutVector("halves", "one", zova.VectorValues{
 		ElementType: zova.VectorElementTypeF16,
 		F16:         []uint16{0x3c00, 0x0000},
 	}); err != nil {
 		log.Fatal(err)
 	}
-	half, err := db.GetVectorTyped("halves", "one")
+	half, err := db.GetVector("halves", "one")
 	if err != nil {
 		log.Fatal(err)
 	}

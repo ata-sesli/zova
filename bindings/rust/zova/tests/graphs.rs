@@ -1,7 +1,7 @@
 use zova::{
     Database, GraphEdgeInput, GraphNeighborDirection, GraphNeighborsOptions, GraphNodeInput,
     GraphTargetType, GraphWalkOptions, OpenOptions, Status, Step, VectorCollectionOptions,
-    VectorMetric, DEFAULT_GRAPH_NAME,
+    VectorElementType, VectorMetric, VectorValues, DEFAULT_GRAPH_NAME,
 };
 
 fn temp_path(name: &str) -> String {
@@ -228,10 +228,11 @@ fn graph_targets_cover_records_objects_chunks_vectors_and_concepts() {
         VectorCollectionOptions {
             dimensions: 2,
             metric: VectorMetric::L2,
+            element_type: VectorElementType::F32,
         },
     )
     .unwrap();
-    db.put_vector("chunks", "chunk-vector", &[1.0, 0.0])
+    db.put_vector("chunks", "chunk-vector", VectorValues::F32(&[1.0, 0.0]))
         .unwrap();
 
     let targets = [

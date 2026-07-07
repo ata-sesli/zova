@@ -663,10 +663,10 @@ test "cli vector-store commands create bind inspect replace and unbind" {
         var db = try zova.Database.open(main_path);
         defer db.deinit();
         try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .l2 });
-        try db.putVector("docs", "v1", &.{ 1.0, 2.0 });
+        try db.putVector("docs", "v1", .{ .f32 = &.{ 1.0, 2.0 } });
         try std.testing.expectEqual(@as(i64, 0), try countRawRows(&db.sqlite_db, "select count(*) from _zova_vectors"));
 
-        var results = try db.searchVectors(std.testing.allocator, "docs", &.{ 1.0, 2.0 }, 1);
+        var results = try db.searchVectors(std.testing.allocator, "docs", .{ .f32 = &.{ 1.0, 2.0 } }, 1);
         defer results.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 1), results.items.len);
         try std.testing.expectEqualStrings("v1", results.items[0].id);
@@ -699,7 +699,7 @@ test "cli vector-store commands create bind inspect replace and unbind" {
         var db = try zova.Database.open(main_path);
         defer db.deinit();
         try db.createVectorCollection("images", .{ .dimensions = 2, .metric = .l2 });
-        try db.putVector("images", "img-1", &.{ 3.0, 4.0 });
+        try db.putVector("images", "img-1", .{ .f32 = &.{ 3.0, 4.0 } });
     }
 
     {
@@ -800,8 +800,8 @@ test "cli split moves existing object and vector storage into bound stores" {
         try db.exec("insert into documents (vector_id, title) values ('doc-a', 'vector metadata stays in main')");
         try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .l2 });
         try db.putVectors("docs", &.{
-            .{ .id = "doc-a", .values = &.{ 1.0, 0.0 } },
-            .{ .id = "doc-b", .values = &.{ 0.0, 2.0 } },
+            .{ .id = "doc-a", .values = .{ .f32 = &.{ 1.0, 0.0 } } },
+            .{ .id = "doc-b", .values = .{ .f32 = &.{ 0.0, 2.0 } } },
         });
         try db.createGraph("split_vectors");
         try db.putGraphNode(.{ .graph_name = "split_vectors", .node_id = "doc:a", .kind = "document", .target_type = .record, .target_namespace = "documents", .target_ref = "doc-a" });
@@ -831,7 +831,7 @@ test "cli split moves existing object and vector storage into bound stores" {
         defer db.deinit();
         try std.testing.expectEqual(@as(i64, 0), try countRawRows(&db.sqlite_db, "select count(*) from _zova_vectors"));
         try std.testing.expectEqual(@as(i64, 1), try countRawRows(&db.sqlite_db, "select count(*) from documents"));
-        var results = try db.searchVectors(std.testing.allocator, "docs", &.{ 1.0, 0.0 }, 1);
+        var results = try db.searchVectors(std.testing.allocator, "docs", .{ .f32 = &.{ 1.0, 0.0 } }, 1);
         defer results.deinit(std.testing.allocator);
         try std.testing.expectEqualStrings("doc-a", results.items[0].id);
         try std.testing.expect(try db.hasGraphEdge("split_vectors", "doc:a", "embedded_as", "vector:doc-a"));
@@ -1049,7 +1049,7 @@ test "cli doctor categorizes bound vector store marker failures" {
         try zova.createVectorStore(store_path);
         try db.bindVectorStore(store_path);
         try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .l2 });
-        try db.putVector("docs", "private-vector-id", &.{ 1.0, 2.0 });
+        try db.putVector("docs", "private-vector-id", .{ .f32 = &.{ 1.0, 2.0 } });
     }
 
     {
@@ -1634,8 +1634,8 @@ test "cli vector and table inspection commands report bounded summaries" {
         defer db.deinit();
         try db.createVectorCollection("images", .{ .dimensions = 2, .metric = .dot });
         try db.putVectors("images", &.{
-            .{ .id = "image-1", .values = &.{ 1.0, 2.0 } },
-            .{ .id = "image-2", .values = &.{ 2.0, 3.0 } },
+            .{ .id = "image-1", .values = .{ .f32 = &.{ 1.0, 2.0 } } },
+            .{ .id = "image-2", .values = .{ .f32 = &.{ 2.0, 3.0 } } },
         });
     }
 
@@ -2357,7 +2357,7 @@ test "cli salvage skips corrupt objects and preserves readable sql and vectors" 
 
     var dest = try zova.Database.open(dest_path);
     defer dest.deinit();
-    var results = try dest.searchVectors(std.testing.allocator, "docs", &.{ 7.25, 8.5 }, 1);
+    var results = try dest.searchVectors(std.testing.allocator, "docs", .{ .f32 = &.{ 7.25, 8.5 } }, 1);
     defer results.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), results.items.len);
     try std.testing.expectEqualStrings("doc-1", results.items[0].id);
@@ -2470,7 +2470,7 @@ test "cli salvage skips cosine zero stored vectors" {
         var db = try zova.Database.open(source_path);
         defer db.deinit();
         try db.createVectorCollection("cosines", .{ .dimensions = 2, .metric = .cosine });
-        try db.putVector("cosines", "valid", &.{ 1.0, 0.0 });
+        try db.putVector("cosines", "valid", .{ .f32 = &.{ 1.0, 0.0 } });
     }
     {
         var raw = try zova.sqlite.Database.open(source_path);
@@ -2496,7 +2496,7 @@ test "cli salvage skips cosine zero stored vectors" {
     defer dest.deinit();
     try std.testing.expect(try dest.hasVector("cosines", "valid"));
     try std.testing.expect(!try dest.hasVector("cosines", "zero"));
-    var results = try dest.searchVectors(std.testing.allocator, "cosines", &.{ 1.0, 0.0 }, 5);
+    var results = try dest.searchVectors(std.testing.allocator, "cosines", .{ .f32 = &.{ 1.0, 0.0 } }, 5);
     defer results.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), results.items.len);
     try std.testing.expectEqualStrings("valid", results.items[0].id);
@@ -2526,7 +2526,7 @@ test "cli check reports healthy converted database" {
         defer db.deinit();
         _ = try db.putObject("converted object");
         try db.createVectorCollection("converted", .{ .dimensions = 2, .metric = .l2 });
-        try db.putVector("converted", "note-1", &.{ 3.0, 4.0 });
+        try db.putVector("converted", "note-1", .{ .f32 = &.{ 3.0, 4.0 } });
     }
 
     var info = try runCli(&.{ "zova", "info", zova_path });
@@ -2975,7 +2975,7 @@ fn createHealthyDatabase(path: [:0]const u8) !void {
     const id = try db.putObject("hello object");
     try insertDocument(&db, id, "doc-1", "hello.txt");
     try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .l2 });
-    try db.putVector("docs", "doc-1", &.{ 7.25, 8.5 });
+    try db.putVector("docs", "doc-1", .{ .f32 = &.{ 7.25, 8.5 } });
     try db.putObjectChunk(zova.objectChunkId("hidden chunk bytes"), "hidden chunk bytes");
 
     var writer = try db.objectWriter(std.testing.allocator);
@@ -3062,7 +3062,7 @@ fn expectHealthyCopy(path: [:0]const u8) !void {
     defer object.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("hello object", object.bytes);
 
-    var results = try db.searchVectors(std.testing.allocator, "docs", &.{ 7.25, 8.5 }, 1);
+    var results = try db.searchVectors(std.testing.allocator, "docs", .{ .f32 = &.{ 7.25, 8.5 } }, 1);
     defer results.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), results.items.len);
     try std.testing.expectEqualStrings("doc-1", results.items[0].id);

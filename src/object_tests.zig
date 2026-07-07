@@ -2104,14 +2104,14 @@ test "put and get vector rows use little endian f32 blobs" {
 
     try db.createVectorCollection("chunks", .{ .dimensions = 3, .metric = .cosine });
     try std.testing.expect(!try db.hasVector("chunks", "chunk-1"));
-    try db.putVector("chunks", "chunk-1", &.{ 1.0, -2.5, 0.25 });
+    try db.putVector("chunks", "chunk-1", .{ .f32 = &.{ 1.0, -2.5, 0.25 } });
     try std.testing.expect(try db.hasVector("chunks", "chunk-1"));
 
     var vector = try db.getVector(std.testing.allocator, "chunks", "chunk-1");
     defer vector.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings("chunk-1", vector.id);
-    try std.testing.expectEqualSlices(f32, &.{ 1.0, -2.5, 0.25 }, vector.values);
+    try std.testing.expectEqualSlices(f32, &.{ 1.0, -2.5, 0.25 }, vector.values.f32);
 
     var raw = try db.prepare("select dimensions, \"values\" from _zova_vectors where collection_name = 'chunks' and vector_id = 'chunk-1'");
     defer raw.deinit();

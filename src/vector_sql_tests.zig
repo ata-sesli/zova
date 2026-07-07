@@ -67,9 +67,9 @@ test "sql vector scalar functions and virtual table rank metadata rows" {
         \\);
     );
     try db.createVectorCollection("chunks", .{ .dimensions = 2, .metric = .l2 });
-    try db.putVector("chunks", "chunk-a", &.{ 1.0, 0.0 });
-    try db.putVector("chunks", "chunk-b", &.{ 3.0, 0.0 });
-    try db.putVector("chunks", "chunk-c", &.{ 10.0, 0.0 });
+    try db.putVector("chunks", "chunk-a", .{ .f32 = &.{ 1.0, 0.0 } });
+    try db.putVector("chunks", "chunk-b", .{ .f32 = &.{ 3.0, 0.0 } });
+    try db.putVector("chunks", "chunk-c", .{ .f32 = &.{ 10.0, 0.0 } });
     try db.exec(
         \\insert into chunks (id, document_id, body, vector_id) values
         \\  ('a', 'doc-1', 'alpha', 'chunk-a'),
@@ -166,12 +166,12 @@ test "sql vector integration supports raw f16 and i8 collections" {
     defer db.deinit();
 
     try db.createVectorCollection("i8s", .{ .dimensions = 2, .metric = .l2, .element_type = .i8 });
-    try db.putVectorTyped("i8s", "near", .{ .i8 = &.{ @as(i8, 1), @as(i8, 0) } });
-    try db.putVectorTyped("i8s", "far", .{ .i8 = &.{ @as(i8, 5), @as(i8, 0) } });
+    try db.putVector("i8s", "near", .{ .i8 = &.{ @as(i8, 1), @as(i8, 0) } });
+    try db.putVector("i8s", "far", .{ .i8 = &.{ @as(i8, 5), @as(i8, 0) } });
 
     try db.createVectorCollection("halves", .{ .dimensions = 2, .metric = .l2, .element_type = .f16 });
-    try db.putVectorTyped("halves", "near", .{ .f16 = &.{ 0x3c00, 0x0000 } });
-    try db.putVectorTyped("halves", "far", .{ .f16 = &.{ 0x4400, 0x0000 } });
+    try db.putVector("halves", "near", .{ .f16 = &.{ 0x3c00, 0x0000 } });
+    try db.putVector("halves", "far", .{ .f16 = &.{ 0x4400, 0x0000 } });
 
     try db.exec(
         \\create table typed_docs (
@@ -286,9 +286,9 @@ test "sql vector integration validates errors and registers only on zova connect
         defer db.deinit();
 
         try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .l2 });
-        try db.putVector("docs", "source", &.{ 0.0, 0.0 });
-        try db.putVector("docs", "near", &.{ 1.0, 0.0 });
-        try db.putVector("docs", "far", &.{ 5.0, 0.0 });
+        try db.putVector("docs", "source", .{ .f32 = &.{ 0.0, 0.0 } });
+        try db.putVector("docs", "near", .{ .f32 = &.{ 1.0, 0.0 } });
+        try db.putVector("docs", "far", .{ .f32 = &.{ 5.0, 0.0 } });
 
         const query_blob = try vector_impl.encodeF32Le(std.testing.allocator, &.{ 0.0, 0.0 });
         defer std.testing.allocator.free(query_blob);
@@ -395,8 +395,8 @@ test "sql vector integration works after sqlite conversion" {
     defer db.deinit();
 
     try db.createVectorCollection("chunks", .{ .dimensions = 2, .metric = .dot });
-    try db.putVector("chunks", "one-vector", &.{ 2.0, 0.0 });
-    try db.putVector("chunks", "two-vector", &.{ 1.0, 0.0 });
+    try db.putVector("chunks", "one-vector", .{ .f32 = &.{ 2.0, 0.0 } });
+    try db.putVector("chunks", "two-vector", .{ .f32 = &.{ 1.0, 0.0 } });
     try db.exec("update chunks set vector_id = id || '-vector'");
 
     const query_blob = try vector_impl.encodeF32Le(std.testing.allocator, &.{ 1.0, 0.0 });
@@ -433,14 +433,14 @@ test "sql vector integration supports all metrics and threshold-only searches" {
     defer db.deinit();
 
     try db.createVectorCollection("cosine", .{ .dimensions = 2, .metric = .cosine });
-    try db.putVector("cosine", "east", &.{ 1.0, 0.0 });
-    try db.putVector("cosine", "northeast", &.{ 1.0, 1.0 });
-    try db.putVector("cosine", "north", &.{ 0.0, 1.0 });
+    try db.putVector("cosine", "east", .{ .f32 = &.{ 1.0, 0.0 } });
+    try db.putVector("cosine", "northeast", .{ .f32 = &.{ 1.0, 1.0 } });
+    try db.putVector("cosine", "north", .{ .f32 = &.{ 0.0, 1.0 } });
 
     try db.createVectorCollection("dot", .{ .dimensions = 2, .metric = .dot });
-    try db.putVector("dot", "strong", &.{ 3.0, 0.0 });
-    try db.putVector("dot", "weak", &.{ 1.0, 0.0 });
-    try db.putVector("dot", "negative", &.{ -1.0, 0.0 });
+    try db.putVector("dot", "strong", .{ .f32 = &.{ 3.0, 0.0 } });
+    try db.putVector("dot", "weak", .{ .f32 = &.{ 1.0, 0.0 } });
+    try db.putVector("dot", "negative", .{ .f32 = &.{ -1.0, 0.0 } });
 
     try db.createVectorCollection("empty", .{ .dimensions = 2, .metric = .l2 });
 

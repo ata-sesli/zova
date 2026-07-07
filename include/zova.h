@@ -233,13 +233,8 @@ typedef struct zova_vector_collection_options {
      * -fshort-enums while still keeping named metric values.
      */
     int metric;
-} zova_vector_collection_options;
-
-typedef struct zova_vector_collection_typed_options {
-    uint32_t dimensions;
-    int metric;
     int element_type;
-} zova_vector_collection_typed_options;
+} zova_vector_collection_options;
 
 typedef struct zova_vector_values {
     int element_type;
@@ -253,20 +248,12 @@ typedef struct zova_vector_values {
 typedef struct zova_vector {
     char *id;
     size_t id_len;
-    float *values;
-    size_t values_len;
-} zova_vector;
-
-/* Owned typed vector returned by Zova. Free with zova_vector_typed_free. */
-typedef struct zova_vector_typed {
-    char *id;
-    size_t id_len;
     int element_type;
     float *f32_values;
     uint16_t *f16_values;
     int8_t *i8_values;
     size_t values_len;
-} zova_vector_typed;
+} zova_vector;
 
 typedef struct zova_vector_search_result {
     char *id;
@@ -286,6 +273,7 @@ typedef struct zova_vector_collection_info {
     size_t name_len;
     uint32_t dimensions;
     int metric;
+    int element_type;
     uint64_t vector_count;
 } zova_vector_collection_info;
 
@@ -295,34 +283,11 @@ typedef struct zova_vector_collection_list {
     size_t len;
 } zova_vector_collection_list;
 
-/* Owned typed vector collection info. Free with zova_vector_collection_typed_info_free. */
-typedef struct zova_vector_collection_typed_info {
-    char *name;
-    size_t name_len;
-    uint32_t dimensions;
-    int metric;
-    int element_type;
-    uint64_t vector_count;
-} zova_vector_collection_typed_info;
-
-/* Owned typed vector collection list. Free with zova_vector_collection_typed_list_free. */
-typedef struct zova_vector_collection_typed_list {
-    zova_vector_collection_typed_info *items;
-    size_t len;
-} zova_vector_collection_typed_list;
-
 /* Borrowed input row for zova_vector_put_many. */
 typedef struct zova_vector_input {
     const char *id;
-    const float *values;
-    size_t values_len;
-} zova_vector_input;
-
-/* Borrowed typed input row for zova_vector_put_many_typed. */
-typedef struct zova_vector_typed_input {
-    const char *id;
     zova_vector_values values;
-} zova_vector_typed_input;
+} zova_vector_input;
 
 /* Owned graph info. Free with zova_graph_info_free. */
 typedef struct zova_graph_info {
@@ -750,12 +715,6 @@ typedef struct zova_vector_collection_create_request {
     zova_vector_collection_options options;
 } zova_vector_collection_create_request;
 
-typedef struct zova_vector_collection_create_typed_request {
-    zova_database *db;
-    const char *name;
-    zova_vector_collection_typed_options options;
-} zova_vector_collection_create_typed_request;
-
 typedef struct zova_vector_collection_exists_request {
     zova_database *db;
     const char *name;
@@ -766,16 +725,8 @@ typedef struct zova_vector_put_request {
     zova_database *db;
     const char *collection_name;
     const char *vector_id;
-    const float *values;
-    size_t values_len;
-} zova_vector_put_request;
-
-typedef struct zova_vector_put_typed_request {
-    zova_database *db;
-    const char *collection_name;
-    const char *vector_id;
     zova_vector_values values;
-} zova_vector_put_typed_request;
+} zova_vector_put_request;
 
 typedef struct zova_vector_get_request {
     zova_database *db;
@@ -783,13 +734,6 @@ typedef struct zova_vector_get_request {
     const char *vector_id;
     zova_vector *out_vector;
 } zova_vector_get_request;
-
-typedef struct zova_vector_get_typed_request {
-    zova_database *db;
-    const char *collection_name;
-    const char *vector_id;
-    zova_vector_typed *out_vector;
-} zova_vector_get_typed_request;
 
 typedef struct zova_vector_exists_request {
     zova_database *db;
@@ -807,40 +751,20 @@ typedef struct zova_vector_delete_request {
 typedef struct zova_vector_search_request {
     zova_database *db;
     const char *collection_name;
-    const float *query;
-    size_t query_len;
+    zova_vector_values query;
     size_t limit;
     zova_vector_search_results *out_results;
 } zova_vector_search_request;
 
-typedef struct zova_vector_search_typed_request {
-    zova_database *db;
-    const char *collection_name;
-    zova_vector_values query;
-    size_t limit;
-    zova_vector_search_results *out_results;
-} zova_vector_search_typed_request;
-
 typedef struct zova_vector_search_in_request {
     zova_database *db;
     const char *collection_name;
-    const float *query;
-    size_t query_len;
+    zova_vector_values query;
     const char *const *candidate_ids;
     size_t candidate_count;
     size_t limit;
     zova_vector_search_results *out_results;
 } zova_vector_search_in_request;
-
-typedef struct zova_vector_search_in_typed_request {
-    zova_database *db;
-    const char *collection_name;
-    zova_vector_values query;
-    const char *const *candidate_ids;
-    size_t candidate_count;
-    size_t limit;
-    zova_vector_search_results *out_results;
-} zova_vector_search_in_typed_request;
 
 typedef struct zova_vector_collection_info_get_request {
     zova_database *db;
@@ -853,30 +777,12 @@ typedef struct zova_vector_collections_list_request {
     zova_vector_collection_list *out_list;
 } zova_vector_collections_list_request;
 
-typedef struct zova_vector_collection_typed_info_get_request {
-    zova_database *db;
-    const char *name;
-    zova_vector_collection_typed_info *out_info;
-} zova_vector_collection_typed_info_get_request;
-
-typedef struct zova_vector_collections_typed_list_request {
-    zova_database *db;
-    zova_vector_collection_typed_list *out_list;
-} zova_vector_collections_typed_list_request;
-
 typedef struct zova_vector_put_many_request {
     zova_database *db;
     const char *collection_name;
     const zova_vector_input *vectors;
     size_t vectors_len;
 } zova_vector_put_many_request;
-
-typedef struct zova_vector_put_many_typed_request {
-    zova_database *db;
-    const char *collection_name;
-    const zova_vector_typed_input *vectors;
-    size_t vectors_len;
-} zova_vector_put_many_typed_request;
 
 typedef struct zova_vector_collection_delete_request {
     zova_database *db;
@@ -886,8 +792,7 @@ typedef struct zova_vector_collection_delete_request {
 typedef struct zova_vector_search_within_request {
     zova_database *db;
     const char *collection_name;
-    const float *query;
-    size_t query_len;
+    zova_vector_values query;
     double max_distance;
     size_t limit;
     zova_vector_search_results *out_results;
@@ -896,8 +801,7 @@ typedef struct zova_vector_search_within_request {
 typedef struct zova_vector_search_in_within_request {
     zova_database *db;
     const char *collection_name;
-    const float *query;
-    size_t query_len;
+    zova_vector_values query;
     const char *const *candidate_ids;
     size_t candidate_count;
     double max_distance;
@@ -1084,12 +988,9 @@ void zova_text_free(zova_text *text);
 void zova_notification_free(zova_notification *notification);
 void zova_object_manifest_free(zova_object_manifest *manifest);
 void zova_vector_free(zova_vector *vector);
-void zova_vector_typed_free(zova_vector_typed *vector);
 void zova_vector_search_results_free(zova_vector_search_results *results);
 void zova_vector_collection_info_free(zova_vector_collection_info *info);
 void zova_vector_collection_list_free(zova_vector_collection_list *list);
-void zova_vector_collection_typed_info_free(zova_vector_collection_typed_info *info);
-void zova_vector_collection_typed_list_free(zova_vector_collection_typed_list *list);
 void zova_graph_info_free(zova_graph_info *info);
 void zova_graph_list_free(zova_graph_list *list);
 void zova_extension_info_free(zova_extension_info *info);
@@ -1187,32 +1088,23 @@ zova_status zova_object_writer_destroy(zova_object_writer *writer);
  * Native vector operations.
  *
  * Collection names and vector ids are null-terminated UTF-8 C strings.
- * Existing zova_vector_* value APIs use borrowed f32 arrays for the duration
- * of the call. Typed APIs use zova_vector_values and support raw f32, f16
- * IEEE-754 binary16 bits, and signed i8 values without quantization.
+ * Value APIs use zova_vector_values and support raw f32, f16 IEEE-754
+ * binary16 bits, and signed i8 values without quantization.
  * Search returns vector ids and lower-is-better distances only; applications
  * should query their own SQL tables for metadata.
  */
 zova_status zova_vector_collection_create(const zova_vector_collection_create_request *request);
-zova_status zova_vector_collection_create_typed(const zova_vector_collection_create_typed_request *request);
 zova_status zova_vector_collection_exists(const zova_vector_collection_exists_request *request);
 zova_status zova_vector_collection_info_get(const zova_vector_collection_info_get_request *request);
 zova_status zova_vector_collections_list(const zova_vector_collections_list_request *request);
-zova_status zova_vector_collection_typed_info_get(const zova_vector_collection_typed_info_get_request *request);
-zova_status zova_vector_collections_typed_list(const zova_vector_collections_typed_list_request *request);
 zova_status zova_vector_put(const zova_vector_put_request *request);
-zova_status zova_vector_put_typed(const zova_vector_put_typed_request *request);
 zova_status zova_vector_put_many(const zova_vector_put_many_request *request);
-zova_status zova_vector_put_many_typed(const zova_vector_put_many_typed_request *request);
 zova_status zova_vector_get(const zova_vector_get_request *request);
-zova_status zova_vector_get_typed(const zova_vector_get_typed_request *request);
 zova_status zova_vector_exists(const zova_vector_exists_request *request);
 zova_status zova_vector_delete(const zova_vector_delete_request *request);
 zova_status zova_vector_collection_delete(const zova_vector_collection_delete_request *request);
 zova_status zova_vector_search(const zova_vector_search_request *request);
-zova_status zova_vector_search_typed(const zova_vector_search_typed_request *request);
 zova_status zova_vector_search_in(const zova_vector_search_in_request *request);
-zova_status zova_vector_search_in_typed(const zova_vector_search_in_typed_request *request);
 zova_status zova_vector_search_within(const zova_vector_search_within_request *request);
 zova_status zova_vector_search_in_within(const zova_vector_search_in_within_request *request);
 zova_status zova_vector_search_by_id(const zova_vector_search_by_id_request *request);

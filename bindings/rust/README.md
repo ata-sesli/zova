@@ -406,48 +406,49 @@ db.create_vector_collection(
     VectorCollectionOptions {
         dimensions: 2,
         metric: VectorMetric::L2,
+        element_type: zova::VectorElementType::F32,
     },
 )?;
 db.put_vectors(
     "chunks",
     &[
-        VectorInput { id: "v1", values: &[0.0, 0.0] },
-        VectorInput { id: "v2", values: &[1.0, 0.0] },
+        VectorInput { id: "v1", values: zova::VectorValues::F32(&[0.0, 0.0]) },
+        VectorInput { id: "v2", values: zova::VectorValues::F32(&[1.0, 0.0]) },
     ],
 )?;
 
-let nearest = db.search_vectors("chunks", &[0.0, 0.0], 2)?;
+let nearest = db.search_vectors("chunks", zova::VectorValues::F32(&[0.0, 0.0]), 2)?;
 assert_eq!(nearest[0].id, "v1");
 ```
 
-The f32 methods above are compatibility wrappers. For raw typed collections,
-use `VectorElementType`, `TypedVectorCollectionOptions`, and `VectorValues`.
+Vectors are typed by default. Use `VectorElementType`, `VectorCollectionOptions`,
+and `VectorValues`.
 `F16` values are raw IEEE 754 binary16 bits carried as `u16`; `I8` values are
 raw signed bytes with no quantization metadata.
 
 ```rust
-use zova::{TypedVectorCollectionOptions, VectorElementType, VectorMetric, VectorValues};
+use zova::{VectorCollectionOptions, VectorElementType, VectorMetric, VectorValues, VectorValuesOwned};
 
-db.create_vector_collection_typed(
+db.create_vector_collection(
     "scores_i8",
-    TypedVectorCollectionOptions {
+    VectorCollectionOptions {
         dimensions: 2,
         metric: VectorMetric::L2,
         element_type: VectorElementType::I8,
     },
 )?;
-db.put_vector_typed("scores_i8", "near", VectorValues::I8(&[1, -1]))?;
+db.put_vector("scores_i8", "near", VectorValues::I8(&[1, -1]))?;
 
-db.create_vector_collection_typed(
+db.create_vector_collection(
     "halves",
-    TypedVectorCollectionOptions {
+    VectorCollectionOptions {
         dimensions: 2,
         metric: VectorMetric::L2,
         element_type: VectorElementType::F16,
     },
 )?;
-db.put_vector_typed("halves", "one", VectorValues::F16(&[0x3c00, 0x0000]))?;
-assert_eq!(db.get_vector_typed("halves", "one")?.values, zova::VectorValuesOwned::F16(vec![0x3c00, 0]));
+db.put_vector("halves", "one", VectorValues::F16(&[0x3c00, 0x0000]))?;
+assert_eq!(db.get_vector("halves", "one")?.values, VectorValuesOwned::F16(vec![0x3c00, 0]));
 ```
 
 SQL-native vector search is available through prepared statements too. Bind

@@ -1,4 +1,6 @@
-use zova::{Database, Step, VectorCollectionOptions, VectorMetric};
+use zova::{
+    Database, Step, VectorCollectionOptions, VectorElementType, VectorMetric, VectorValues,
+};
 
 fn main() -> zova::Result<()> {
     let path = std::env::args()
@@ -45,16 +47,17 @@ fn main() -> zova::Result<()> {
         VectorCollectionOptions {
             dimensions: 2,
             metric: VectorMetric::L2,
+            element_type: VectorElementType::F32,
         },
     )?;
-    db.put_vector("chunks", "chunk:1", &[0.0, 0.0])?;
+    db.put_vector("chunks", "chunk:1", VectorValues::F32(&[0.0, 0.0]))?;
     let mut vector_listener = db.listen("vectors:chunks")?;
     db.begin_immediate()?;
     db.exec("insert into chunks(id, vector_id) values ('c1', 'chunk:1')")?;
     db.notify("vectors:chunks", "changed")?;
     db.commit()?;
     let vector_event = vector_listener.try_receive()?.expect("vector notification");
-    let results = db.search_vectors("chunks", &[0.0, 0.0], 1)?;
+    let results = db.search_vectors("chunks", VectorValues::F32(&[0.0, 0.0]), 1)?;
     println!("{} {}", vector_event.channel, results[0].id);
     Ok(())
 }

@@ -14,7 +14,7 @@ pub(crate) struct PyVectorCollectionOptions {
 #[derive(Clone)]
 pub(crate) struct PyVector {
     id: String,
-    values: Vec<f32>,
+    values: PyVectorValues,
 }
 
 #[derive(Clone)]
@@ -22,13 +22,6 @@ pub(crate) enum PyVectorValues {
     F32(Vec<f32>),
     F16(Vec<u16>),
     I8(Vec<i8>),
-}
-
-#[pyclass(name = "TypedVector", frozen, skip_from_py_object)]
-#[derive(Clone)]
-pub(crate) struct PyTypedVector {
-    id: String,
-    values: PyVectorValues,
 }
 
 #[pyclass(name = "VectorCollectionInfo", frozen, skip_from_py_object)]
@@ -44,13 +37,6 @@ pub(crate) struct PyVectorCollectionInfo {
 #[pyclass(name = "VectorInput", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PyVectorInput {
-    id: String,
-    values: Vec<f32>,
-}
-
-#[pyclass(name = "TypedVectorInput", frozen, skip_from_py_object)]
-#[derive(Clone)]
-pub(crate) struct PyTypedVectorInput {
     id: String,
     values: PyVectorValues,
 }
@@ -107,23 +93,6 @@ impl PyVector {
     }
 
     #[getter]
-    pub(crate) fn values(&self) -> Vec<f32> {
-        self.values.clone()
-    }
-
-    pub(crate) fn __repr__(&self) -> String {
-        format!("Vector(id='{}', values_len={})", self.id, self.values.len())
-    }
-}
-
-#[pymethods]
-impl PyTypedVector {
-    #[getter]
-    pub(crate) fn id(&self) -> String {
-        self.id.clone()
-    }
-
-    #[getter]
     pub(crate) fn element_type(&self) -> i32 {
         self.values.element_type_i32()
     }
@@ -135,7 +104,7 @@ impl PyTypedVector {
 
     pub(crate) fn __repr__(&self) -> String {
         format!(
-            "TypedVector(id='{}', element_type={}, values_len={})",
+            "Vector(id='{}', element_type={}, values_len={})",
             self.id,
             self.values.element_type_i32(),
             self.values.len()
@@ -181,32 +150,6 @@ impl PyVectorCollectionInfo {
 #[pymethods]
 impl PyVectorInput {
     #[new]
-    pub(crate) fn new(id: String, values: Vec<f32>) -> Self {
-        Self { id, values }
-    }
-
-    #[getter]
-    pub(crate) fn id(&self) -> String {
-        self.id.clone()
-    }
-
-    #[getter]
-    pub(crate) fn values(&self) -> Vec<f32> {
-        self.values.clone()
-    }
-
-    pub(crate) fn __repr__(&self) -> String {
-        format!(
-            "VectorInput(id='{}', values_len={})",
-            self.id,
-            self.values.len()
-        )
-    }
-}
-
-#[pymethods]
-impl PyTypedVectorInput {
-    #[new]
     pub(crate) fn new(id: String, element_type: i32, values: &Bound<'_, PyAny>) -> PyResult<Self> {
         Ok(Self {
             id,
@@ -231,7 +174,7 @@ impl PyTypedVectorInput {
 
     pub(crate) fn __repr__(&self) -> String {
         format!(
-            "TypedVectorInput(id='{}', element_type={}, values_len={})",
+            "VectorInput(id='{}', element_type={}, values_len={})",
             self.id,
             self.values.element_type_i32(),
             self.values.len()
@@ -259,57 +202,33 @@ impl PyVectorSearchResult {
     }
 }
 
-pub(crate) fn typed_options_from_py(
+pub(crate) fn collection_options_from_py(
     value: &Bound<'_, PyAny>,
-) -> PyResult<zova_rust::TypedVectorCollectionOptions> {
+) -> PyResult<zova_rust::VectorCollectionOptions> {
     let options = value.extract::<PyRef<'_, PyVectorCollectionOptions>>()?;
-    Ok(zova_rust::TypedVectorCollectionOptions {
+    Ok(zova_rust::VectorCollectionOptions {
         dimensions: options.dimensions,
         metric: metric_from_i32(options.metric)?,
         element_type: element_type_from_i32(options.element_type)?,
     })
 }
 
-pub(crate) fn vector_inputs_from_py(value: &Bound<'_, PyAny>) -> PyResult<Vec<(String, Vec<f32>)>> {
+pub(crate) fn vector_inputs_from_py(value: &Bound<'_, PyAny>) -> PyResult<Vec<PyVectorInput>> {
     let mut vectors = Vec::new();
     for item in value.try_iter()? {
         let item = item?;
         let vector = item.extract::<PyRef<'_, PyVectorInput>>()?;
-        vectors.push((vector.id.clone(), vector.values.clone()));
-    }
-    Ok(vectors)
-}
-
-pub(crate) fn typed_vector_inputs_from_py(
-    value: &Bound<'_, PyAny>,
-) -> PyResult<Vec<PyTypedVectorInput>> {
-    let mut vectors = Vec::new();
-    for item in value.try_iter()? {
-        let item = item?;
-        let vector = item.extract::<PyRef<'_, PyTypedVectorInput>>()?;
         vectors.push(vector.clone());
     }
     Ok(vectors)
 }
 
 pub(crate) fn vector_input_refs<'a>(
-    vectors: &'a [(String, Vec<f32>)],
+    vectors: &'a [PyVectorInput],
 ) -> Vec<zova_rust::VectorInput<'a>> {
     vectors
         .iter()
-        .map(|(id, values)| zova_rust::VectorInput {
-            id: id.as_str(),
-            values: values.as_slice(),
-        })
-        .collect()
-}
-
-pub(crate) fn typed_vector_input_refs<'a>(
-    vectors: &'a [PyTypedVectorInput],
-) -> Vec<zova_rust::TypedVectorInput<'a>> {
-    vectors
-        .iter()
-        .map(|vector| zova_rust::TypedVectorInput {
+        .map(|vector| zova_rust::VectorInput {
             id: vector.id.as_str(),
             values: vector.values.as_rust(),
         })
@@ -322,13 +241,6 @@ pub(crate) fn candidate_refs(candidate_ids: &[String]) -> Vec<&str> {
 
 pub(crate) fn py_vector(vector: zova_rust::Vector) -> PyVector {
     PyVector {
-        id: vector.id,
-        values: vector.values,
-    }
-}
-
-pub(crate) fn py_typed_vector(vector: zova_rust::TypedVector) -> PyTypedVector {
-    PyTypedVector {
         id: vector.id,
         values: match vector.values {
             zova_rust::VectorValuesOwned::F32(values) => PyVectorValues::F32(values),

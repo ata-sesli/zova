@@ -6345,7 +6345,7 @@ fn copyValidVectors(
                 continue;
             };
 
-            destination.putVector(collection.name, vector.id, vector.values) catch {
+            destination.putVector(collection.name, vector.id, vector.values.asConst()) catch {
                 vector.deinit(allocator);
                 allocator.free(vector_id);
                 continue;
@@ -6695,22 +6695,6 @@ fn validateVectors(allocator: std.mem.Allocator, db: *zova.Database, report: *Di
             try addDiagnosticIssue(allocator, report, issues, .vector, "vector_integrity", @errorName(err), null, null, collection_name, vector_id);
             continue;
         };
-        const collection = db.vectorCollectionInfo(allocator, collection_name) catch |err| {
-            vector.deinit(allocator);
-            try addDiagnosticIssue(allocator, report, issues, .vector, "vector_integrity", @errorName(err), null, null, collection_name, vector_id);
-            continue;
-        };
-        var mutable_collection = collection;
-        defer mutable_collection.deinit(allocator);
-        if (mutable_collection.metric == .cosine) {
-            var norm_squared: f32 = 0;
-            for (vector.values) |value| norm_squared += value * value;
-            if (norm_squared == 0) {
-                vector.deinit(allocator);
-                try addDiagnosticIssue(allocator, report, issues, .vector, "vector_integrity", @errorName(error.VectorCorrupt), null, null, collection_name, vector_id);
-                continue;
-            }
-        }
         vector.deinit(allocator);
     }
 }

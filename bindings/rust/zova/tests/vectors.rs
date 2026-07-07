@@ -1,7 +1,6 @@
 use zova::{
-    Database, Status, Step, TypedVectorCollectionOptions, TypedVectorInput,
-    VectorCollectionOptions, VectorElementType, VectorInput, VectorMetric, VectorValues,
-    VectorValuesOwned,
+    Database, Status, Step, VectorCollectionOptions, VectorElementType, VectorInput, VectorMetric,
+    VectorValues, VectorValuesOwned,
 };
 
 fn temp_path(name: &str) -> String {
@@ -44,6 +43,7 @@ fn vector_collection_lifecycle_crud_batch_and_delete() {
         VectorCollectionOptions {
             dimensions: 2,
             metric: VectorMetric::L2,
+            element_type: VectorElementType::F32,
         },
     )
     .unwrap();
@@ -52,6 +52,7 @@ fn vector_collection_lifecycle_crud_batch_and_delete() {
         VectorCollectionOptions {
             dimensions: 3,
             metric: VectorMetric::Dot,
+            element_type: VectorElementType::F32,
         },
     )
     .unwrap();
@@ -76,15 +77,15 @@ fn vector_collection_lifecycle_crud_batch_and_delete() {
         &[
             VectorInput {
                 id: "a",
-                values: &[2.0, 0.0],
+                values: VectorValues::F32(&[2.0, 0.0]),
             },
             VectorInput {
                 id: "b",
-                values: &[5.0, 0.0],
+                values: VectorValues::F32(&[5.0, 0.0]),
             },
             VectorInput {
                 id: "a",
-                values: &[1.0, 0.0],
+                values: VectorValues::F32(&[1.0, 0.0]),
             },
         ],
     )
@@ -94,7 +95,7 @@ fn vector_collection_lifecycle_crud_batch_and_delete() {
     assert!(db.has_vector("chunks", "a").unwrap());
     let vector = db.get_vector("chunks", "a").unwrap();
     assert_eq!(vector.id, "a");
-    assert_eq!(vector.values, vec![1.0, 0.0]);
+    assert_eq!(vector.values, VectorValuesOwned::F32(vec![1.0, 0.0]));
 
     db.exec("insert into chunks(id, vector_id) values ('row-a', 'a')")
         .unwrap();
@@ -126,22 +127,22 @@ fn vector_collection_lifecycle_crud_batch_and_delete() {
 }
 
 #[test]
-fn raw_typed_vectors_roundtrip_and_search() {
+fn raw_i8_and_f16_vectors_roundtrip_and_search() {
     let path = temp_path("typed");
     let mut db = Database::create(&path).unwrap();
 
-    db.create_vector_collection_typed(
+    db.create_vector_collection(
         "bytes",
-        TypedVectorCollectionOptions {
+        VectorCollectionOptions {
             dimensions: 2,
             metric: VectorMetric::L2,
             element_type: VectorElementType::I8,
         },
     )
     .unwrap();
-    db.create_vector_collection_typed(
+    db.create_vector_collection(
         "halves",
-        TypedVectorCollectionOptions {
+        VectorCollectionOptions {
             dimensions: 2,
             metric: VectorMetric::L2,
             element_type: VectorElementType::F16,
@@ -152,34 +153,34 @@ fn raw_typed_vectors_roundtrip_and_search() {
     let info = db.vector_collection_info("bytes").unwrap();
     assert_eq!(info.element_type, VectorElementType::I8);
 
-    db.put_vectors_typed(
+    db.put_vectors(
         "bytes",
         &[
-            TypedVectorInput {
+            VectorInput {
                 id: "near",
                 values: VectorValues::I8(&[1, 0]),
             },
-            TypedVectorInput {
+            VectorInput {
                 id: "far",
                 values: VectorValues::I8(&[5, 0]),
             },
         ],
     )
     .unwrap();
-    db.put_vector_typed("halves", "near", VectorValues::F16(&[0x3c00, 0x0000]))
+    db.put_vector("halves", "near", VectorValues::F16(&[0x3c00, 0x0000]))
         .unwrap();
-    db.put_vector_typed("halves", "far", VectorValues::F16(&[0x4400, 0x0000]))
+    db.put_vector("halves", "far", VectorValues::F16(&[0x4400, 0x0000]))
         .unwrap();
 
-    let vector = db.get_vector_typed("bytes", "near").unwrap();
+    let vector = db.get_vector("bytes", "near").unwrap();
     assert_eq!(vector.id, "near");
     assert_eq!(vector.values, VectorValuesOwned::I8(vec![1, 0]));
 
-    let vector = db.get_vector_typed("halves", "near").unwrap();
+    let vector = db.get_vector("halves", "near").unwrap();
     assert_eq!(vector.values, VectorValuesOwned::F16(vec![0x3c00, 0x0000]));
 
     let results = db
-        .search_vectors_typed("bytes", VectorValues::I8(&[0, 0]), 2)
+        .search_vectors("bytes", VectorValues::I8(&[0, 0]), 2)
         .unwrap();
     assert_eq!(
         results
@@ -191,7 +192,7 @@ fn raw_typed_vectors_roundtrip_and_search() {
     assert_close(results[0].distance, 1.0);
 
     let results = db
-        .search_vectors_typed("halves", VectorValues::F16(&[0x0000, 0x0000]), 2)
+        .search_vectors("halves", VectorValues::F16(&[0x0000, 0x0000]), 2)
         .unwrap();
     assert_eq!(
         results
@@ -203,7 +204,7 @@ fn raw_typed_vectors_roundtrip_and_search() {
     assert_close(results[0].distance, 1.0);
 
     assert_eq!(
-        db.put_vector("bytes", "wrong", &[1.0, 2.0])
+        db.put_vector("bytes", "wrong", VectorValues::F32(&[1.0, 2.0]))
             .unwrap_err()
             .status(),
         Some(Status::VectorInvalid)
@@ -221,6 +222,7 @@ fn vector_search_variants_preserve_c_abi_semantics() {
         VectorCollectionOptions {
             dimensions: 2,
             metric: VectorMetric::L2,
+            element_type: VectorElementType::F32,
         },
     )
     .unwrap();
@@ -229,25 +231,27 @@ fn vector_search_variants_preserve_c_abi_semantics() {
         &[
             VectorInput {
                 id: "source",
-                values: &[0.0, 0.0],
+                values: VectorValues::F32(&[0.0, 0.0]),
             },
             VectorInput {
                 id: "near",
-                values: &[1.0, 0.0],
+                values: VectorValues::F32(&[1.0, 0.0]),
             },
             VectorInput {
                 id: "tie-a",
-                values: &[0.0, 1.0],
+                values: VectorValues::F32(&[0.0, 1.0]),
             },
             VectorInput {
                 id: "far",
-                values: &[3.0, 4.0],
+                values: VectorValues::F32(&[3.0, 4.0]),
             },
         ],
     )
     .unwrap();
 
-    let results = db.search_vectors("l2", &[0.0, 0.0], 3).unwrap();
+    let results = db
+        .search_vectors("l2", VectorValues::F32(&[0.0, 0.0]), 3)
+        .unwrap();
     assert_eq!(
         results
             .iter()
@@ -258,7 +262,12 @@ fn vector_search_variants_preserve_c_abi_semantics() {
     assert_close(results[1].distance, 1.0);
 
     let candidate_results = db
-        .search_vectors_in("l2", &[0.0, 0.0], &["far", "near", "near", "missing"], 10)
+        .search_vectors_in(
+            "l2",
+            VectorValues::F32(&[0.0, 0.0]),
+            &["far", "near", "near", "missing"],
+            10,
+        )
         .unwrap();
     assert_eq!(
         candidate_results
@@ -284,7 +293,7 @@ fn vector_search_variants_preserve_c_abi_semantics() {
     );
 
     let within = db
-        .search_vectors_within("l2", &[0.0, 0.0], 1.0, 10)
+        .search_vectors_within("l2", VectorValues::F32(&[0.0, 0.0]), 1.0, 10)
         .unwrap();
     assert_eq!(
         within
@@ -295,7 +304,13 @@ fn vector_search_variants_preserve_c_abi_semantics() {
     );
 
     let in_within = db
-        .search_vectors_in_within("l2", &[0.0, 0.0], &["near", "far"], 1.0, 10)
+        .search_vectors_in_within(
+            "l2",
+            VectorValues::F32(&[0.0, 0.0]),
+            &["near", "far"],
+            1.0,
+            10,
+        )
         .unwrap();
     assert_eq!(
         in_within
@@ -332,12 +347,17 @@ fn vector_search_variants_preserve_c_abi_semantics() {
         VectorCollectionOptions {
             dimensions: 2,
             metric: VectorMetric::Cosine,
+            element_type: VectorElementType::F32,
         },
     )
     .unwrap();
-    db.put_vector("cosine", "x", &[1.0, 0.0]).unwrap();
-    db.put_vector("cosine", "diag", &[1.0, 1.0]).unwrap();
-    let cosine = db.search_vectors("cosine", &[1.0, 0.0], 2).unwrap();
+    db.put_vector("cosine", "x", VectorValues::F32(&[1.0, 0.0]))
+        .unwrap();
+    db.put_vector("cosine", "diag", VectorValues::F32(&[1.0, 1.0]))
+        .unwrap();
+    let cosine = db
+        .search_vectors("cosine", VectorValues::F32(&[1.0, 0.0]), 2)
+        .unwrap();
     assert_eq!(
         cosine
             .iter()
@@ -352,13 +372,16 @@ fn vector_search_variants_preserve_c_abi_semantics() {
         VectorCollectionOptions {
             dimensions: 2,
             metric: VectorMetric::Dot,
+            element_type: VectorElementType::F32,
         },
     )
     .unwrap();
-    db.put_vector("dot", "low", &[1.0, 0.0]).unwrap();
-    db.put_vector("dot", "high", &[3.0, 0.0]).unwrap();
+    db.put_vector("dot", "low", VectorValues::F32(&[1.0, 0.0]))
+        .unwrap();
+    db.put_vector("dot", "high", VectorValues::F32(&[3.0, 0.0]))
+        .unwrap();
     let dot = db
-        .search_vectors_within("dot", &[1.0, 0.0], -2.0, 10)
+        .search_vectors_within("dot", VectorValues::F32(&[1.0, 0.0]), -2.0, 10)
         .unwrap();
     assert_eq!(
         dot.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
@@ -367,11 +390,14 @@ fn vector_search_variants_preserve_c_abi_semantics() {
     assert_close(dot[0].distance, -3.0);
 
     assert_eq!(
-        db.search_vectors("l2", &[0.0], 1).unwrap_err().status(),
+        db.search_vectors("l2", VectorValues::F32(&[0.0]), 1)
+            .unwrap_err()
+            .status(),
         Some(Status::VectorDimensionMismatch)
     );
     assert!(matches!(
-        db.put_vector("l2", "bad\0id", &[1.0, 2.0]).unwrap_err(),
+        db.put_vector("l2", "bad\0id", VectorValues::F32(&[1.0, 2.0]))
+            .unwrap_err(),
         zova::Error::InteriorNul { .. }
     ));
 
@@ -396,6 +422,7 @@ fn vectors_survive_reopen_conversion_and_sql_native_queries() {
             VectorCollectionOptions {
                 dimensions: 2,
                 metric: VectorMetric::L2,
+                element_type: VectorElementType::F32,
             },
         )
         .unwrap();
@@ -404,11 +431,11 @@ fn vectors_survive_reopen_conversion_and_sql_native_queries() {
             &[
                 VectorInput {
                     id: "v1",
-                    values: &[0.0, 0.0],
+                    values: VectorValues::F32(&[0.0, 0.0]),
                 },
                 VectorInput {
                     id: "v2",
-                    values: &[1.0, 0.0],
+                    values: VectorValues::F32(&[1.0, 0.0]),
                 },
             ],
         )
@@ -482,11 +509,12 @@ fn vectors_survive_reopen_conversion_and_sql_native_queries() {
             VectorCollectionOptions {
                 dimensions: 2,
                 metric: VectorMetric::L2,
+                element_type: VectorElementType::F32,
             },
         )
         .unwrap();
     converted
-        .put_vector("converted_vectors", "v", &[1.0, 2.0])
+        .put_vector("converted_vectors", "v", VectorValues::F32(&[1.0, 2.0]))
         .unwrap();
     assert!(converted.has_vector("converted_vectors", "v").unwrap());
 

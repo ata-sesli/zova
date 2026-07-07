@@ -299,9 +299,9 @@ def test_savepoints_rollback_release_and_validate_names(tmp_path):
         assert exc.value.status_name == "ZOVA_OBJECT_TRANSACTION_ACTIVE"
         db.create_vector_collection(
             "temporary_vectors",
-            zova.VectorCollectionOptions(2, zova.VectorMetric.L2),
+            zova.VectorCollectionOptions(2, zova.VectorMetric.L2, zova.VectorElementType.F32),
         )
-        db.put_vector("temporary_vectors", "v1", [1.0, 2.0])
+        db.put_vector("temporary_vectors", "v1", zova.VectorElementType.F32, [1.0, 2.0])
         db.rollback_to_savepoint("sp_vectors")
         db.release_savepoint("sp_vectors")
         assert not db.has_vector_collection("temporary_vectors")
@@ -374,10 +374,10 @@ def test_backup_compact_and_restore(tmp_path):
         object_id = db.put_object(payload)
         db.create_vector_collection(
             "chunks",
-            zova.VectorCollectionOptions(2, zova.VectorMetric.L2),
+            zova.VectorCollectionOptions(2, zova.VectorMetric.L2, zova.VectorElementType.F32),
         )
-        db.put_vector("chunks", "near", [0.0, 0.0])
-        db.put_vector("chunks", "far", [10.0, 0.0])
+        db.put_vector("chunks", "near", zova.VectorElementType.F32, [0.0, 0.0])
+        db.put_vector("chunks", "far", zova.VectorElementType.F32, [10.0, 0.0])
 
         db.backup_to(str(backup))
         db.compact_to(str(compact))
@@ -402,7 +402,7 @@ def test_backup_compact_and_restore(tmp_path):
                 assert stmt.step() == zova.Step.ROW
                 assert stmt.column_text(0) == "kept"
             assert db.get_object(object_id) == payload
-            results = db.search_vectors("chunks", [0.0, 0.0], 2)
+            results = db.search_vectors("chunks", zova.VectorElementType.F32, [0.0, 0.0], 2)
             assert results[0].id == "near"
             with db.prepare("select zova_vector_distance('chunks', 'near', ?1)") as stmt:
                 stmt.bind_blob(1, zova.encode_f32_le([0.0, 0.0]))

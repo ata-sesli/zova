@@ -15,6 +15,20 @@ fn temp_path(name: &str) -> String {
     path.to_str().unwrap().to_owned()
 }
 
+fn f32_values(values: &[f32]) -> zova_sys::zova_vector_values {
+    zova_sys::zova_vector_values {
+        element_type: zova_sys::ZOVA_VECTOR_ELEMENT_TYPE_F32,
+        f32_values: if values.is_empty() {
+            ptr::null()
+        } else {
+            values.as_ptr()
+        },
+        f16_values: ptr::null(),
+        i8_values: ptr::null(),
+        values_len: values.len(),
+    }
+}
+
 #[test]
 fn abi_version_and_status_names_are_available() {
     unsafe {
@@ -515,6 +529,7 @@ fn raw_vector_collection_crud_batch_and_search_smoke() {
             options: zova_sys::zova_vector_collection_options {
                 dimensions: 2,
                 metric: zova_sys::ZOVA_VECTOR_METRIC_L2,
+                element_type: zova_sys::ZOVA_VECTOR_ELEMENT_TYPE_F32,
             },
         };
         assert_eq!(
@@ -543,18 +558,15 @@ fn raw_vector_collection_crud_batch_and_search_smoke() {
         let batch = [
             zova_sys::zova_vector_input {
                 id: source_id.as_ptr(),
-                values: source_values.as_ptr(),
-                values_len: source_values.len(),
+                values: f32_values(&source_values),
             },
             zova_sys::zova_vector_input {
                 id: near_id.as_ptr(),
-                values: near_values.as_ptr(),
-                values_len: near_values.len(),
+                values: f32_values(&near_values),
             },
             zova_sys::zova_vector_input {
                 id: far_id.as_ptr(),
-                values: far_values.as_ptr(),
-                values_len: far_values.len(),
+                values: f32_values(&far_values),
             },
         ];
         let put_many = zova_sys::zova_vector_put_many_request {
@@ -568,7 +580,10 @@ fn raw_vector_collection_crud_batch_and_search_smoke() {
         let mut vector = zova_sys::zova_vector {
             id: ptr::null_mut(),
             id_len: 0,
-            values: ptr::null_mut(),
+            element_type: zova_sys::ZOVA_VECTOR_ELEMENT_TYPE_F32,
+            f32_values: ptr::null_mut(),
+            f16_values: ptr::null_mut(),
+            i8_values: ptr::null_mut(),
             values_len: 0,
         };
         let get = zova_sys::zova_vector_get_request {
@@ -579,7 +594,7 @@ fn raw_vector_collection_crud_batch_and_search_smoke() {
         };
         assert_eq!(zova_sys::zova_vector_get(&get), zova_sys::ZOVA_OK);
         assert_eq!(
-            std::slice::from_raw_parts(vector.values, vector.values_len),
+            std::slice::from_raw_parts(vector.f32_values, vector.values_len),
             near_values
         );
         zova_sys::zova_vector_free(&mut vector);
@@ -592,8 +607,7 @@ fn raw_vector_collection_crud_batch_and_search_smoke() {
         let search = zova_sys::zova_vector_search_request {
             db,
             collection_name: collection.as_ptr(),
-            query: query.as_ptr(),
-            query_len: query.len(),
+            query: f32_values(&query),
             limit: 2,
             out_results: &mut results,
         };
@@ -623,6 +637,7 @@ fn raw_vector_collection_crud_batch_and_search_smoke() {
             name_len: 0,
             dimensions: 0,
             metric: 0,
+            element_type: zova_sys::ZOVA_VECTOR_ELEMENT_TYPE_F32,
             vector_count: 0,
         };
         let info_request = zova_sys::zova_vector_collection_info_get_request {
@@ -637,7 +652,7 @@ fn raw_vector_collection_crud_batch_and_search_smoke() {
         assert_eq!(info.vector_count, 3);
         zova_sys::zova_vector_collection_info_free(&mut info);
 
-        let mut typed_info = zova_sys::zova_vector_collection_typed_info {
+        let mut typed_info = zova_sys::zova_vector_collection_info {
             name: ptr::null_mut(),
             name_len: 0,
             dimensions: 0,
@@ -645,13 +660,13 @@ fn raw_vector_collection_crud_batch_and_search_smoke() {
             element_type: zova_sys::ZOVA_VECTOR_ELEMENT_TYPE_F32,
             vector_count: 0,
         };
-        let typed_info_request = zova_sys::zova_vector_collection_typed_info_get_request {
+        let typed_info_request = zova_sys::zova_vector_collection_info_get_request {
             db,
             name: collection.as_ptr(),
             out_info: &mut typed_info,
         };
         assert_eq!(
-            zova_sys::zova_vector_collection_typed_info_get(&typed_info_request),
+            zova_sys::zova_vector_collection_info_get(&typed_info_request),
             zova_sys::ZOVA_OK
         );
         assert_eq!(typed_info.vector_count, 3);
@@ -659,7 +674,7 @@ fn raw_vector_collection_crud_batch_and_search_smoke() {
             typed_info.element_type,
             zova_sys::ZOVA_VECTOR_ELEMENT_TYPE_F32
         );
-        zova_sys::zova_vector_collection_typed_info_free(&mut typed_info);
+        zova_sys::zova_vector_collection_info_free(&mut typed_info);
 
         let mut list = zova_sys::zova_vector_collection_list {
             items: ptr::null_mut(),
@@ -676,40 +691,40 @@ fn raw_vector_collection_crud_batch_and_search_smoke() {
         assert_eq!(list.len, 1);
         zova_sys::zova_vector_collection_list_free(&mut list);
 
-        let mut typed_list = zova_sys::zova_vector_collection_typed_list {
+        let mut typed_list = zova_sys::zova_vector_collection_list {
             items: ptr::null_mut(),
             len: 0,
         };
-        let typed_list_request = zova_sys::zova_vector_collections_typed_list_request {
+        let typed_list_request = zova_sys::zova_vector_collections_list_request {
             db,
             out_list: &mut typed_list,
         };
         assert_eq!(
-            zova_sys::zova_vector_collections_typed_list(&typed_list_request),
+            zova_sys::zova_vector_collections_list(&typed_list_request),
             zova_sys::ZOVA_OK
         );
         assert_eq!(typed_list.len, 1);
-        zova_sys::zova_vector_collection_typed_list_free(&mut typed_list);
+        zova_sys::zova_vector_collection_list_free(&mut typed_list);
 
         let byte_collection = CString::new("byte_chunks").unwrap();
-        let create_byte_collection = zova_sys::zova_vector_collection_create_typed_request {
+        let create_byte_collection = zova_sys::zova_vector_collection_create_request {
             db,
             name: byte_collection.as_ptr(),
-            options: zova_sys::zova_vector_collection_typed_options {
+            options: zova_sys::zova_vector_collection_options {
                 dimensions: 2,
                 metric: zova_sys::ZOVA_VECTOR_METRIC_L2,
                 element_type: zova_sys::ZOVA_VECTOR_ELEMENT_TYPE_I8,
             },
         };
         assert_eq!(
-            zova_sys::zova_vector_collection_create_typed(&create_byte_collection),
+            zova_sys::zova_vector_collection_create(&create_byte_collection),
             zova_sys::ZOVA_OK
         );
         let byte_near_values = [1_i8, 0];
         let byte_far_values = [5_i8, 0];
         let byte_query_values = [0_i8, 0];
         assert_eq!(
-            zova_sys::zova_vector_put_typed(&zova_sys::zova_vector_put_typed_request {
+            zova_sys::zova_vector_put(&zova_sys::zova_vector_put_request {
                 db,
                 collection_name: byte_collection.as_ptr(),
                 vector_id: near_id.as_ptr(),
@@ -724,7 +739,7 @@ fn raw_vector_collection_crud_batch_and_search_smoke() {
             zova_sys::ZOVA_OK
         );
         assert_eq!(
-            zova_sys::zova_vector_put_typed(&zova_sys::zova_vector_put_typed_request {
+            zova_sys::zova_vector_put(&zova_sys::zova_vector_put_request {
                 db,
                 collection_name: byte_collection.as_ptr(),
                 vector_id: far_id.as_ptr(),
@@ -739,7 +754,7 @@ fn raw_vector_collection_crud_batch_and_search_smoke() {
             zova_sys::ZOVA_OK
         );
         let typed_candidates = [far_id.as_ptr()];
-        let typed_search_in = zova_sys::zova_vector_search_in_typed_request {
+        let typed_search_in = zova_sys::zova_vector_search_in_request {
             db,
             collection_name: byte_collection.as_ptr(),
             query: zova_sys::zova_vector_values {
@@ -755,7 +770,7 @@ fn raw_vector_collection_crud_batch_and_search_smoke() {
             out_results: &mut results,
         };
         assert_eq!(
-            zova_sys::zova_vector_search_in_typed(&typed_search_in),
+            zova_sys::zova_vector_search_in(&typed_search_in),
             zova_sys::ZOVA_OK
         );
         assert_eq!(results.len, 1);

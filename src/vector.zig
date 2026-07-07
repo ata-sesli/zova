@@ -78,14 +78,8 @@ pub const VectorCollectionList = struct {
 /// Input row for `Database.putVectors`.
 ///
 /// Vector ids are application-provided UTF-8 text ids scoped to a collection.
-/// Values are stored exactly as finite little-endian `f32` bytes.
+/// Values must use the collection's raw element type.
 pub const VectorInput = struct {
-    id: []const u8,
-    values: []const f32,
-};
-
-/// Typed input row for `Database.putVectorsTyped`.
-pub const TypedVectorInput = struct {
     id: []const u8,
     values: VectorValuesConst,
 };
@@ -121,28 +115,12 @@ pub const VectorValuesOwned = union(VectorElementType) {
 };
 
 /// Owned vector row returned by `Database.getVector`.
-///
-/// Vector ids are application-provided UTF-8 text ids scoped to a collection.
-/// Values are decoded from Zova's deterministic little-endian `f32` BLOB
-/// format. Call `deinit` with the same allocator passed to `getVector`.
 pub const Vector = struct {
-    id: []u8,
-    values: []f32,
-
-    /// Free the owned id and value buffers.
-    pub fn deinit(self: *Vector, allocator: std.mem.Allocator) void {
-        allocator.free(self.id);
-        allocator.free(self.values);
-    }
-};
-
-/// Owned typed vector row returned by `Database.getVectorTyped`.
-pub const TypedVector = struct {
     id: []u8,
     values: VectorValuesOwned,
 
     /// Free the owned id and value buffers.
-    pub fn deinit(self: *TypedVector, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *Vector, allocator: std.mem.Allocator) void {
         allocator.free(self.id);
         self.values.deinit(allocator);
     }
@@ -337,19 +315,8 @@ pub const Database = struct {
     ///
     /// `collection_name` must name an existing collection. `vector_id` is a
     /// non-empty UTF-8 text id scoped to that collection. Values must match the
-    /// collection dimensions and must be finite `f32` numbers. Storage uses one
-    /// SQLite BLOB containing explicit little-endian `f32` bytes.
+    /// collection dimensions, element type, and finite-value rules.
     pub fn putVector(
-        self: *Database,
-        collection_name: []const u8,
-        vector_id: []const u8,
-        values: []const f32,
-    ) Error!void {
-        return self.putVectorTyped(collection_name, vector_id, .{ .f32 = values });
-    }
-
-    /// Store or replace one typed vector row in a collection.
-    pub fn putVectorTyped(
         self: *Database,
         collection_name: []const u8,
         vector_id: []const u8,
@@ -357,8 +324,8 @@ pub const Database = struct {
     ) Error!void {
         try validateVectorCollectionName(collection_name);
         const collection = try loadVectorCollection(self, collection_name);
-        try validateTypedVectorInput(collection, .{ .id = vector_id, .values = values });
-        try self.writeTypedVectorRows(collection_name, collection, &[_]TypedVectorInput{.{ .id = vector_id, .values = values }});
+        try validateVectorInput(collection, .{ .id = vector_id, .values = values });
+        try self.writeVectorRows(collection_name, collection, &[_]VectorInput{.{ .id = vector_id, .values = values }});
     }
 
     /// Store or replace multiple vector rows in a collection.
@@ -373,30 +340,10 @@ pub const Database = struct {
         collection_name: []const u8,
         vectors: []const VectorInput,
     ) Error!void {
-        if (vectors.len == 0) {
-            try validateVectorCollectionName(collection_name);
-            _ = try loadVectorCollection(self, collection_name);
-            return;
-        }
-
-        const typed_vectors = try std.heap.page_allocator.alloc(TypedVectorInput, vectors.len);
-        defer std.heap.page_allocator.free(typed_vectors);
-        for (vectors, typed_vectors) |vector, *typed| {
-            typed.* = .{ .id = vector.id, .values = .{ .f32 = vector.values } };
-        }
-        return self.putVectorsTyped(collection_name, typed_vectors);
-    }
-
-    /// Store or replace multiple typed vector rows in a collection.
-    pub fn putVectorsTyped(
-        self: *Database,
-        collection_name: []const u8,
-        vectors: []const TypedVectorInput,
-    ) Error!void {
         try validateVectorCollectionName(collection_name);
         const collection = try loadVectorCollection(self, collection_name);
-        for (vectors) |vector| try validateTypedVectorInput(collection, vector);
-        try self.writeTypedVectorRows(collection_name, collection, vectors);
+        for (vectors) |vector| try validateVectorInput(collection, vector);
+        try self.writeVectorRows(collection_name, collection, vectors);
     }
 
     /// Load one vector row into owned memory.
@@ -410,24 +357,6 @@ pub const Database = struct {
         collection_name: []const u8,
         vector_id: []const u8,
     ) Error!Vector {
-        var typed = try self.getVectorTyped(allocator, collection_name, vector_id);
-        errdefer typed.deinit(allocator);
-        return switch (typed.values) {
-            .f32 => |values| .{
-                .id = typed.id,
-                .values = values,
-            },
-            else => error.VectorInvalid,
-        };
-    }
-
-    /// Load one typed vector row into owned memory.
-    pub fn getVectorTyped(
-        self: *Database,
-        allocator: std.mem.Allocator,
-        collection_name: []const u8,
-        vector_id: []const u8,
-    ) Error!TypedVector {
         try validateVectorCollectionName(collection_name);
         try validateVectorId(vector_id);
 
@@ -456,6 +385,7 @@ pub const Database = struct {
 
                 const values = try decodeValuesLe(allocator, collection.element_type, stmt.columnBlob(2), collection.dimensions);
                 errdefer values.deinit(allocator);
+                try validateStoredVectorValues(collection, values.asConst());
 
                 return .{ .id = id, .values = values };
             },
@@ -547,17 +477,6 @@ pub const Database = struct {
         self: *Database,
         allocator: std.mem.Allocator,
         collection_name: []const u8,
-        query: []const f32,
-        limit: usize,
-    ) Error!VectorSearchResults {
-        return self.searchVectorsTyped(allocator, collection_name, .{ .f32 = query }, limit);
-    }
-
-    /// Search one vector collection with an exact typed flat scan.
-    pub fn searchVectorsTyped(
-        self: *Database,
-        allocator: std.mem.Allocator,
-        collection_name: []const u8,
         query: VectorValuesConst,
         limit: usize,
     ) Error!VectorSearchResults {
@@ -575,18 +494,6 @@ pub const Database = struct {
     /// Negative thresholds are valid for dot-product collections because dot
     /// search stores distance as negative dot product.
     pub fn searchVectorsWithin(
-        self: *Database,
-        allocator: std.mem.Allocator,
-        collection_name: []const u8,
-        query: []const f32,
-        max_distance: f64,
-        limit: usize,
-    ) Error!VectorSearchResults {
-        return self.searchVectorsWithinTyped(allocator, collection_name, .{ .f32 = query }, max_distance, limit);
-    }
-
-    /// Search one typed vector collection with an exact flat scan and distance cap.
-    pub fn searchVectorsWithinTyped(
         self: *Database,
         allocator: std.mem.Allocator,
         collection_name: []const u8,
@@ -613,18 +520,6 @@ pub const Database = struct {
         self: *Database,
         allocator: std.mem.Allocator,
         collection_name: []const u8,
-        query: []const f32,
-        candidate_ids: []const []const u8,
-        limit: usize,
-    ) Error!VectorSearchResults {
-        return self.searchVectorsInTyped(allocator, collection_name, .{ .f32 = query }, candidate_ids, limit);
-    }
-
-    /// Search one typed vector collection over a caller-supplied candidate id set.
-    pub fn searchVectorsInTyped(
-        self: *Database,
-        allocator: std.mem.Allocator,
-        collection_name: []const u8,
         query: VectorValuesConst,
         candidate_ids: []const []const u8,
         limit: usize,
@@ -638,19 +533,6 @@ pub const Database = struct {
 
     /// Search one vector collection over candidates with an inclusive distance cap.
     pub fn searchVectorsInWithin(
-        self: *Database,
-        allocator: std.mem.Allocator,
-        collection_name: []const u8,
-        query: []const f32,
-        candidate_ids: []const []const u8,
-        max_distance: f64,
-        limit: usize,
-    ) Error!VectorSearchResults {
-        return self.searchVectorsInWithinTyped(allocator, collection_name, .{ .f32 = query }, candidate_ids, max_distance, limit);
-    }
-
-    /// Search one typed vector collection over candidates with an inclusive distance cap.
-    pub fn searchVectorsInWithinTyped(
         self: *Database,
         allocator: std.mem.Allocator,
         collection_name: []const u8,
@@ -902,11 +784,11 @@ pub const Database = struct {
         };
     }
 
-    fn writeTypedVectorRows(
+    fn writeVectorRows(
         self: *Database,
         collection_name: []const u8,
         collection: CollectionMetadata,
-        vectors: []const TypedVectorInput,
+        vectors: []const VectorInput,
     ) Error!void {
         if (vectors.len == 0) return;
 
@@ -963,7 +845,7 @@ fn validateVectorValues(collection: CollectionMetadata, values: VectorValuesCons
     if (collection.metric == .cosine and norm_squared == 0) return error.VectorInvalid;
 }
 
-fn validateTypedVectorInput(collection: CollectionMetadata, input: TypedVectorInput) Error!void {
+fn validateVectorInput(collection: CollectionMetadata, input: VectorInput) Error!void {
     try validateVectorId(input.id);
     try validateVectorValues(collection, input.values);
 }

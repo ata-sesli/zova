@@ -1,4 +1,7 @@
-use zova::{Database, SharedDatabase, Status, Step, VectorCollectionOptions, VectorMetric};
+use zova::{
+    Database, SharedDatabase, Status, Step, VectorCollectionOptions, VectorElementType,
+    VectorMetric, VectorValues,
+};
 
 fn temp_path(name: &str) -> String {
     let mut path = std::env::temp_dir();
@@ -180,10 +183,12 @@ fn vector_metadata_workflow_notifies_after_commit() {
         VectorCollectionOptions {
             dimensions: 2,
             metric: VectorMetric::L2,
+            element_type: VectorElementType::F32,
         },
     )
     .unwrap();
-    db.put_vector("chunks", "chunk:1", &[0.0, 0.0]).unwrap();
+    db.put_vector("chunks", "chunk:1", VectorValues::F32(&[0.0, 0.0]))
+        .unwrap();
     let mut sub = db.listen("vectors:chunks").unwrap();
 
     db.begin_immediate().unwrap();
@@ -194,7 +199,9 @@ fn vector_metadata_workflow_notifies_after_commit() {
     db.commit().unwrap();
 
     assert_eq!(sub.try_receive().unwrap().unwrap().payload, "changed");
-    let results = db.search_vectors("chunks", &[0.0, 0.0], 1).unwrap();
+    let results = db
+        .search_vectors("chunks", VectorValues::F32(&[0.0, 0.0]), 1)
+        .unwrap();
     assert_eq!(results[0].id, "chunk:1");
 
     drop(sub);

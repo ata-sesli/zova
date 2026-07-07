@@ -38,7 +38,6 @@ pub use shared::{
 };
 pub use statement::{ColumnType, OwnedStatement, Statement, Step};
 pub use vector::{
-    TypedVector, TypedVectorCollectionOptions, TypedVectorInput, Vector, VectorCollectionInfo,
-    VectorCollectionOptions, VectorElementType, VectorInput, VectorMetric, VectorSearchResult,
-    VectorValues, VectorValuesOwned,
+    Vector, VectorCollectionInfo, VectorCollectionOptions, VectorElementType, VectorInput,
+    VectorMetric, VectorSearchResult, VectorValues, VectorValuesOwned,
 };

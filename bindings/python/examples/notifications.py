@@ -31,8 +31,11 @@ with TemporaryDirectory() as tmp:
             print(note.channel, note.payload)
 
         db.exec("create table chunks(id text primary key, vector_id text not null)")
-        db.create_vector_collection("chunks", zova.VectorCollectionOptions(2, zova.VectorMetric.L2))
-        db.put_vector("chunks", "chunk:1", [0.0, 0.0])
+        db.create_vector_collection(
+            "chunks",
+            zova.VectorCollectionOptions(2, zova.VectorMetric.L2, zova.VectorElementType.F32),
+        )
+        db.put_vector("chunks", "chunk:1", zova.VectorElementType.F32, [0.0, 0.0])
 
         with db.listen("vectors:chunks") as vector_listener:
             db.begin_immediate()
@@ -41,5 +44,5 @@ with TemporaryDirectory() as tmp:
             db.commit()
 
             vector_note = vector_listener.try_receive()
-            results = db.search_vectors("chunks", [0.0, 0.0], 1)
+            results = db.search_vectors("chunks", zova.VectorElementType.F32, [0.0, 0.0], 1)
             print(vector_note.channel, results[0].id)

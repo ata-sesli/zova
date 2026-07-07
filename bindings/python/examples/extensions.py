@@ -51,8 +51,11 @@ def main() -> None:
 
             object_id = db.put_object(b"receipt attachment bytes")
             object_hex = object_id.hex()
-            db.create_vector_collection("chunks", zova.VectorCollectionOptions(2, zova.VectorMetric.L2))
-            db.put_vector("chunks", "chunk:m1", [0.0, 1.0])
+            db.create_vector_collection(
+                "chunks",
+                zova.VectorCollectionOptions(2, zova.VectorMetric.L2, zova.VectorElementType.F32),
+            )
+            db.put_vector("chunks", "chunk:m1", zova.VectorElementType.F32, [0.0, 1.0])
             db.create_graph(zova.DEFAULT_GRAPH_NAME)
             db.put_graph_node(
                 zova.GraphNodeInput(

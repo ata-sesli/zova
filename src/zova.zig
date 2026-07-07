@@ -141,11 +141,9 @@ pub const VectorCollectionOptions = vector_impl.VectorCollectionOptions;
 pub const VectorCollectionInfo = vector_impl.VectorCollectionInfo;
 pub const VectorCollectionList = vector_impl.VectorCollectionList;
 pub const VectorInput = vector_impl.VectorInput;
-pub const TypedVectorInput = vector_impl.TypedVectorInput;
 pub const VectorValuesConst = vector_impl.VectorValuesConst;
 pub const VectorValuesOwned = vector_impl.VectorValuesOwned;
 pub const Vector = vector_impl.Vector;
-pub const TypedVector = vector_impl.TypedVector;
 pub const VectorSearchResult = vector_impl.VectorSearchResult;
 pub const VectorSearchResults = vector_impl.VectorSearchResults;
 pub const Notification = notify_impl.Notification;
@@ -1198,24 +1196,6 @@ pub const Database = struct {
         self: *Database,
         collection_name: []const u8,
         vector_id: []const u8,
-        values: []const f32,
-    ) Error!void {
-        const owns_transaction = try self.beginBoundVectorMutation();
-        var committed = false;
-        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
-
-        var vectors = self.vectorDatabase();
-        try vectors.putVector(collection_name, vector_id, values);
-        if (self.bound_vector_store != null) try incrementBoundVectorEpoch(&self.sqlite_db);
-        try self.finishBoundVectorMutation(owns_transaction);
-        committed = true;
-    }
-
-    /// Store or replace one typed vector row in a collection.
-    pub fn putVectorTyped(
-        self: *Database,
-        collection_name: []const u8,
-        vector_id: []const u8,
         values: VectorValuesConst,
     ) Error!void {
         const owns_transaction = try self.beginBoundVectorMutation();
@@ -1223,7 +1203,7 @@ pub const Database = struct {
         errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
 
         var vectors = self.vectorDatabase();
-        try vectors.putVectorTyped(collection_name, vector_id, values);
+        try vectors.putVector(collection_name, vector_id, values);
         if (self.bound_vector_store != null) try incrementBoundVectorEpoch(&self.sqlite_db);
         try self.finishBoundVectorMutation(owns_transaction);
         committed = true;
@@ -1246,23 +1226,6 @@ pub const Database = struct {
         committed = true;
     }
 
-    /// Store or replace multiple typed vector rows in a collection.
-    pub fn putVectorsTyped(
-        self: *Database,
-        collection_name: []const u8,
-        inputs: []const TypedVectorInput,
-    ) Error!void {
-        const owns_transaction = try self.beginBoundVectorMutation();
-        var committed = false;
-        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
-
-        var vectors = self.vectorDatabase();
-        try vectors.putVectorsTyped(collection_name, inputs);
-        if (self.bound_vector_store != null and inputs.len != 0) try incrementBoundVectorEpoch(&self.sqlite_db);
-        try self.finishBoundVectorMutation(owns_transaction);
-        committed = true;
-    }
-
     /// Load one vector row into owned memory.
     pub fn getVector(
         self: *Database,
@@ -1272,17 +1235,6 @@ pub const Database = struct {
     ) Error!Vector {
         var vectors = self.vectorDatabase();
         return vectors.getVector(allocator, collection_name, vector_id);
-    }
-
-    /// Load one typed vector row into owned memory.
-    pub fn getVectorTyped(
-        self: *Database,
-        allocator: std.mem.Allocator,
-        collection_name: []const u8,
-        vector_id: []const u8,
-    ) Error!TypedVector {
-        var vectors = self.vectorDatabase();
-        return vectors.getVectorTyped(allocator, collection_name, vector_id);
     }
 
     /// Return whether a vector id exists in an existing collection.
@@ -1330,23 +1282,11 @@ pub const Database = struct {
         self: *Database,
         allocator: std.mem.Allocator,
         collection_name: []const u8,
-        query: []const f32,
-        limit: usize,
-    ) Error!VectorSearchResults {
-        var vectors = self.vectorDatabase();
-        return vectors.searchVectors(allocator, collection_name, query, limit);
-    }
-
-    /// Search one typed vector collection with an exact flat scan.
-    pub fn searchVectorsTyped(
-        self: *Database,
-        allocator: std.mem.Allocator,
-        collection_name: []const u8,
         query: VectorValuesConst,
         limit: usize,
     ) Error!VectorSearchResults {
         var vectors = self.vectorDatabase();
-        return vectors.searchVectorsTyped(allocator, collection_name, query, limit);
+        return vectors.searchVectors(allocator, collection_name, query, limit);
     }
 
     /// Search one vector collection with an exact flat scan and distance cap.
@@ -1354,7 +1294,7 @@ pub const Database = struct {
         self: *Database,
         allocator: std.mem.Allocator,
         collection_name: []const u8,
-        query: []const f32,
+        query: VectorValuesConst,
         max_distance: f64,
         limit: usize,
     ) Error!VectorSearchResults {
@@ -1362,25 +1302,12 @@ pub const Database = struct {
         return vectors.searchVectorsWithin(allocator, collection_name, query, max_distance, limit);
     }
 
-    /// Search one typed vector collection with an exact flat scan and distance cap.
-    pub fn searchVectorsWithinTyped(
-        self: *Database,
-        allocator: std.mem.Allocator,
-        collection_name: []const u8,
-        query: VectorValuesConst,
-        max_distance: f64,
-        limit: usize,
-    ) Error!VectorSearchResults {
-        var vectors = self.vectorDatabase();
-        return vectors.searchVectorsWithinTyped(allocator, collection_name, query, max_distance, limit);
-    }
-
     /// Search one vector collection over a caller-supplied candidate id set.
     pub fn searchVectorsIn(
         self: *Database,
         allocator: std.mem.Allocator,
         collection_name: []const u8,
-        query: []const f32,
+        query: VectorValuesConst,
         candidate_ids: []const []const u8,
         limit: usize,
     ) Error!VectorSearchResults {
@@ -1388,45 +1315,18 @@ pub const Database = struct {
         return vectors.searchVectorsIn(allocator, collection_name, query, candidate_ids, limit);
     }
 
-    /// Search one typed vector collection over a caller-supplied candidate id set.
-    pub fn searchVectorsInTyped(
-        self: *Database,
-        allocator: std.mem.Allocator,
-        collection_name: []const u8,
-        query: VectorValuesConst,
-        candidate_ids: []const []const u8,
-        limit: usize,
-    ) Error!VectorSearchResults {
-        var vectors = self.vectorDatabase();
-        return vectors.searchVectorsInTyped(allocator, collection_name, query, candidate_ids, limit);
-    }
-
     /// Search one vector collection over candidates with an inclusive distance cap.
     pub fn searchVectorsInWithin(
         self: *Database,
         allocator: std.mem.Allocator,
         collection_name: []const u8,
-        query: []const f32,
+        query: VectorValuesConst,
         candidate_ids: []const []const u8,
         max_distance: f64,
         limit: usize,
     ) Error!VectorSearchResults {
         var vectors = self.vectorDatabase();
         return vectors.searchVectorsInWithin(allocator, collection_name, query, candidate_ids, max_distance, limit);
-    }
-
-    /// Search one typed vector collection over candidates with an inclusive distance cap.
-    pub fn searchVectorsInWithinTyped(
-        self: *Database,
-        allocator: std.mem.Allocator,
-        collection_name: []const u8,
-        query: VectorValuesConst,
-        candidate_ids: []const []const u8,
-        max_distance: f64,
-        limit: usize,
-    ) Error!VectorSearchResults {
-        var vectors = self.vectorDatabase();
-        return vectors.searchVectorsInWithinTyped(allocator, collection_name, query, candidate_ids, max_distance, limit);
     }
 
     /// Search one vector collection using an existing vector as the query.
@@ -2152,10 +2052,10 @@ fn copyVectorStorage(
             const vector_id = try std.heap.c_allocator.dupe(u8, rows.columnText(0));
             defer std.heap.c_allocator.free(vector_id);
 
-            var vector = try source_vectors.getVectorTyped(std.heap.c_allocator, collection.name, vector_id);
+            var vector = try source_vectors.getVector(std.heap.c_allocator, collection.name, vector_id);
             defer vector.deinit(std.heap.c_allocator);
 
-            try destination_vectors.putVectorTyped(collection.name, vector.id, vector.values.asConst());
+            try destination_vectors.putVector(collection.name, vector.id, vector.values.asConst());
         }
     }
 }
@@ -2910,7 +2810,7 @@ fn verifyStoredVectors(db: *Database) Error!void {
         const vector_id = try allocator.dupe(u8, vectors.columnText(1));
         defer allocator.free(vector_id);
 
-        var vector = try db.getVectorTyped(allocator, collection_name, vector_id);
+        var vector = try db.getVector(allocator, collection_name, vector_id);
         defer vector.deinit(allocator);
     }
 }
@@ -3276,8 +3176,8 @@ fn populateOperationalFixture(
 
     try db.createVectorCollection("docs", .{ .dimensions = 3, .metric = .l2 });
     try db.putVectors("docs", &.{
-        .{ .id = "doc-a", .values = &.{ 1.0, 0.0, 0.0 } },
-        .{ .id = "doc-b", .values = &.{ 0.0, 2.0, 0.0 } },
+        .{ .id = "doc-a", .values = .{ .f32 = &.{ 1.0, 0.0, 0.0 } } },
+        .{ .id = "doc-b", .values = .{ .f32 = &.{ 0.0, 2.0, 0.0 } } },
     });
 
     try db.createGraph("ops");
@@ -3350,9 +3250,9 @@ fn expectOperationalFixture(
     var vector = try db.getVector(std.testing.allocator, "docs", "doc-a");
     defer vector.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("doc-a", vector.id);
-    try std.testing.expectEqualSlices(f32, &.{ 1.0, 0.0, 0.0 }, vector.values);
+    try std.testing.expectEqualSlices(f32, &.{ 1.0, 0.0, 0.0 }, vector.values.f32);
 
-    var results = try db.searchVectors(std.testing.allocator, "docs", &.{ 1.0, 0.0, 0.0 }, 2);
+    var results = try db.searchVectors(std.testing.allocator, "docs", .{ .f32 = &.{ 1.0, 0.0, 0.0 } }, 2);
     defer results.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 2), results.items.len);
     try std.testing.expectEqualStrings("doc-a", results.items[0].id);
@@ -4606,8 +4506,8 @@ test "optional bound vector store routes vector APIs and sql native search after
 
         try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .l2 });
         try db.putVectors("docs", &.{
-            .{ .id = "doc-a", .values = &.{ 1.0, 0.0 } },
-            .{ .id = "doc-b", .values = &.{ 0.0, 2.0 } },
+            .{ .id = "doc-a", .values = .{ .f32 = &.{ 1.0, 0.0 } } },
+            .{ .id = "doc-b", .values = .{ .f32 = &.{ 0.0, 2.0 } } },
         });
 
         try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_vectors"));
@@ -4633,7 +4533,7 @@ test "optional bound vector store routes vector APIs and sql native search after
         var reopened = try Database.open(main_path);
         defer reopened.deinit();
 
-        var results = try reopened.searchVectors(std.testing.allocator, "docs", &.{ 1.0, 0.0 }, 2);
+        var results = try reopened.searchVectors(std.testing.allocator, "docs", .{ .f32 = &.{ 1.0, 0.0 } }, 2);
         defer results.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 2), results.items.len);
         try std.testing.expectEqualStrings("doc-a", results.items[0].id);
@@ -4645,7 +4545,7 @@ test "optional bound vector store routes vector APIs and sql native search after
         try reopened.bindVectorStore(store_path);
         var rebound = try reopened.getVector(std.testing.allocator, "docs", "doc-a");
         defer rebound.deinit(std.testing.allocator);
-        try std.testing.expectEqualSlices(f32, &.{ 1.0, 0.0 }, rebound.values);
+        try std.testing.expectEqualSlices(f32, &.{ 1.0, 0.0 }, rebound.values.f32);
     }
 
     {
@@ -4654,8 +4554,8 @@ test "optional bound vector store routes vector APIs and sql native search after
 
         var vector = try read_only.getVector(std.testing.allocator, "docs", "doc-b");
         defer vector.deinit(std.testing.allocator);
-        try std.testing.expectEqualSlices(f32, &.{ 0.0, 2.0 }, vector.values);
-        try std.testing.expectError(error.ReadOnly, read_only.putVector("docs", "read-only", &.{ 1.0, 1.0 }));
+        try std.testing.expectEqualSlices(f32, &.{ 0.0, 2.0 }, vector.values.f32);
+        try std.testing.expectError(error.ReadOnly, read_only.putVector("docs", "read-only", .{ .f32 = &.{ 1.0, 1.0 } }));
     }
 }
 
@@ -4684,7 +4584,7 @@ test "bound vector store markers roll back with transactions and savepoints" {
 
     try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .l2 });
     try expectBoundVectorEpoch(&db, 1);
-    try db.putVector("docs", "v1", &.{ 1.0, 2.0 });
+    try db.putVector("docs", "v1", .{ .f32 = &.{ 1.0, 2.0 } });
     try expectBoundVectorEpoch(&db, 2);
 
     var read_vector = try db.getVector(std.testing.allocator, "docs", "v1");
@@ -4696,7 +4596,7 @@ test "bound vector store markers roll back with transactions and savepoints" {
     try expectBoundVectorEpoch(&db, 2);
 
     try db.beginImmediate();
-    try db.putVector("docs", "rolled-back", &.{ 3.0, 4.0 });
+    try db.putVector("docs", "rolled-back", .{ .f32 = &.{ 3.0, 4.0 } });
     try expectBoundVectorEpoch(&db, 3);
     try db.rollback();
     try expectBoundVectorEpoch(&db, 2);
@@ -4704,7 +4604,7 @@ test "bound vector store markers roll back with transactions and savepoints" {
 
     try db.beginImmediate();
     try db.savepoint("sp");
-    try db.putVector("docs", "savepoint-rolled-back", &.{ 5.0, 6.0 });
+    try db.putVector("docs", "savepoint-rolled-back", .{ .f32 = &.{ 5.0, 6.0 } });
     try expectBoundVectorEpoch(&db, 3);
     try db.rollbackToSavepoint("sp");
     try db.releaseSavepoint("sp");
@@ -4740,16 +4640,16 @@ test "operational copies inline bound vector store data into single-file destina
 
     try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .l2 });
     try db.putVectors("docs", &.{
-        .{ .id = "doc-a", .values = &.{ 1.0, 0.0 } },
-        .{ .id = "doc-b", .values = &.{ 0.0, 2.0 } },
+        .{ .id = "doc-a", .values = .{ .f32 = &.{ 1.0, 0.0 } } },
+        .{ .id = "doc-b", .values = .{ .f32 = &.{ 0.0, 2.0 } } },
     });
     try db.createVectorCollection("bytes", .{ .dimensions = 2, .metric = .l2, .element_type = .i8 });
-    try db.putVectorsTyped("bytes", &.{
+    try db.putVectors("bytes", &.{
         .{ .id = "byte-a", .values = .{ .i8 = &.{ @as(i8, 1), @as(i8, -1) } } },
         .{ .id = "byte-b", .values = .{ .i8 = &.{ @as(i8, 5), @as(i8, -1) } } },
     });
     try db.createVectorCollection("halves", .{ .dimensions = 2, .metric = .l2, .element_type = .f16 });
-    try db.putVectorTyped("halves", "half-one", .{ .f16 = &.{ 0x3c00, 0x0000 } });
+    try db.putVector("halves", "half-one", .{ .f16 = &.{ 0x3c00, 0x0000 } });
     try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_vectors"));
     try std.testing.expectEqual(@as(i64, 5), try testingCount(&db, "select count(*) from vector_store._zova_vectors"));
     try std.testing.expectError(error.VectorCollectionNotFound, db.getVector(std.testing.allocator, "stale", "main-only"));
@@ -4766,7 +4666,7 @@ test "operational copies inline bound vector store data into single-file destina
         try std.testing.expectEqual(@as(?BoundVectorStoreInfo, null), try copy.boundVectorStore(std.testing.allocator));
         try std.testing.expectEqual(@as(i64, 5), try testingCount(&copy, "select count(*) from _zova_vectors"));
 
-        var results = try copy.searchVectors(std.testing.allocator, "docs", &.{ 1.0, 0.0 }, 2);
+        var results = try copy.searchVectors(std.testing.allocator, "docs", .{ .f32 = &.{ 1.0, 0.0 } }, 2);
         defer results.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 2), results.items.len);
         try std.testing.expectEqualStrings("doc-a", results.items[0].id);
@@ -4775,15 +4675,15 @@ test "operational copies inline bound vector store data into single-file destina
         defer bytes_info.deinit(std.testing.allocator);
         try std.testing.expectEqual(vector_impl.VectorElementType.i8, bytes_info.element_type);
 
-        var byte_vector = try copy.getVectorTyped(std.testing.allocator, "bytes", "byte-a");
+        var byte_vector = try copy.getVector(std.testing.allocator, "bytes", "byte-a");
         defer byte_vector.deinit(std.testing.allocator);
         try std.testing.expectEqualSlices(i8, &.{ @as(i8, 1), @as(i8, -1) }, byte_vector.values.i8);
 
-        var half_vector = try copy.getVectorTyped(std.testing.allocator, "halves", "half-one");
+        var half_vector = try copy.getVector(std.testing.allocator, "halves", "half-one");
         defer half_vector.deinit(std.testing.allocator);
         try std.testing.expectEqualSlices(u16, &.{ 0x3c00, 0x0000 }, half_vector.values.f16);
 
-        var byte_results = try copy.searchVectorsTyped(std.testing.allocator, "bytes", .{ .i8 = &.{ @as(i8, 0), @as(i8, 0) } }, 2);
+        var byte_results = try copy.searchVectors(std.testing.allocator, "bytes", .{ .i8 = &.{ @as(i8, 0), @as(i8, 0) } }, 2);
         defer byte_results.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 2), byte_results.items.len);
         try std.testing.expectEqualStrings("byte-a", byte_results.items[0].id);
@@ -4809,11 +4709,11 @@ test "split vector store moves existing vector storage into a bound store" {
     try db.exec("insert into documents (vector_id, title) values ('doc-a', 'kept in main')");
     try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .l2 });
     try db.putVectors("docs", &.{
-        .{ .id = "doc-a", .values = &.{ 1.0, 0.0 } },
-        .{ .id = "doc-b", .values = &.{ 0.0, 2.0 } },
+        .{ .id = "doc-a", .values = .{ .f32 = &.{ 1.0, 0.0 } } },
+        .{ .id = "doc-b", .values = .{ .f32 = &.{ 0.0, 2.0 } } },
     });
     try db.createVectorCollection("bytes", .{ .dimensions = 2, .metric = .l2, .element_type = .i8 });
-    try db.putVectorsTyped("bytes", &.{
+    try db.putVectors("bytes", &.{
         .{ .id = "byte-a", .values = .{ .i8 = &.{ @as(i8, 1), @as(i8, 0) } } },
         .{ .id = "byte-b", .values = .{ .i8 = &.{ @as(i8, 5), @as(i8, 0) } } },
     });
@@ -4839,14 +4739,14 @@ test "split vector store moves existing vector storage into a bound store" {
     try std.testing.expectEqual(@as(i64, 4), try testingCount(&db, "select count(*) from vector_store._zova_vectors"));
     try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from documents"));
 
-    var results = try db.searchVectors(std.testing.allocator, "docs", &.{ 1.0, 0.0 }, 2);
+    var results = try db.searchVectors(std.testing.allocator, "docs", .{ .f32 = &.{ 1.0, 0.0 } }, 2);
     defer results.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 2), results.items.len);
     try std.testing.expectEqualStrings("doc-a", results.items[0].id);
     try std.testing.expect(try db.hasGraphNode("split_vectors", "vector:doc-a"));
     try std.testing.expect(try db.hasGraphEdge("split_vectors", "doc:a", "embedded_as", "vector:doc-a"));
 
-    var byte_vector = try db.getVectorTyped(std.testing.allocator, "bytes", "byte-a");
+    var byte_vector = try db.getVector(std.testing.allocator, "bytes", "byte-a");
     defer byte_vector.deinit(std.testing.allocator);
     try std.testing.expectEqualSlices(i8, &.{ @as(i8, 1), @as(i8, 0) }, byte_vector.values.i8);
 
@@ -5551,7 +5451,7 @@ test "savepoints roll back zova records objects and vectors" {
     try std.testing.expectError(error.ObjectTransactionActive, db.deleteObject(readable_object));
     try std.testing.expectError(error.ObjectTransactionActive, pending_writer.finish());
     try db.createVectorCollection("save_vectors", .{ .dimensions = 2, .metric = .l2 });
-    try db.putVector("save_vectors", "v1", &.{ 1.0, 2.0 });
+    try db.putVector("save_vectors", "v1", .{ .f32 = &.{ 1.0, 2.0 } });
     try db.rollbackToSavepoint("sp_vectors");
     try db.releaseSavepoint("sp_vectors");
 

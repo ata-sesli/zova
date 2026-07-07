@@ -101,8 +101,11 @@ def test_notification_vector_metadata_workflow(tmp_path):
     path = tmp_path / "notification-vector-workflow.zova"
     with zova.Database.create(str(path)) as db:
         db.exec("create table chunks(id text primary key, vector_id text not null)")
-        db.create_vector_collection("chunks", zova.VectorCollectionOptions(2, zova.VectorMetric.L2))
-        db.put_vector("chunks", "chunk:1", [0.0, 0.0])
+        db.create_vector_collection(
+            "chunks",
+            zova.VectorCollectionOptions(2, zova.VectorMetric.L2, zova.VectorElementType.F32),
+        )
+        db.put_vector("chunks", "chunk:1", zova.VectorElementType.F32, [0.0, 0.0])
 
         with db.listen("vectors:chunks") as sub:
             db.begin_immediate()
@@ -114,4 +117,4 @@ def test_notification_vector_metadata_workflow(tmp_path):
             note = sub.try_receive()
             assert note is not None
             assert note.payload == "changed"
-            assert db.search_vectors("chunks", [0.0, 0.0], 1)[0].id == "chunk:1"
+            assert db.search_vectors("chunks", zova.VectorElementType.F32, [0.0, 0.0], 1)[0].id == "chunk:1"

@@ -1,6 +1,7 @@
 use zova::{
     restore_backup, BackupOptions, ColumnType, CompactOptions, Database, Error, OpenOptions,
-    RestoreOptions, SharedDatabase, Status, Step, VectorCollectionOptions, VectorMetric,
+    RestoreOptions, SharedDatabase, Status, Step, VectorCollectionOptions, VectorElementType,
+    VectorMetric, VectorValues,
 };
 
 fn temp_path(name: &str) -> String {
@@ -349,10 +350,11 @@ fn savepoints_rollback_release_and_validate_names() {
         VectorCollectionOptions {
             dimensions: 2,
             metric: VectorMetric::L2,
+            element_type: VectorElementType::F32,
         },
     )
     .unwrap();
-    db.put_vector("temporary_vectors", "v1", &[1.0, 2.0])
+    db.put_vector("temporary_vectors", "v1", VectorValues::F32(&[1.0, 2.0]))
         .unwrap();
     db.rollback_to_savepoint("sp_one").unwrap();
     db.release_savepoint("sp_one").unwrap();
@@ -457,11 +459,14 @@ fn backup_compact_and_restore_preserve_records_objects_and_vectors() {
             VectorCollectionOptions {
                 dimensions: 2,
                 metric: VectorMetric::L2,
+                element_type: VectorElementType::F32,
             },
         )
         .unwrap();
-        db.put_vector("chunks", "near", &[0.0, 0.0]).unwrap();
-        db.put_vector("chunks", "far", &[10.0, 0.0]).unwrap();
+        db.put_vector("chunks", "near", VectorValues::F32(&[0.0, 0.0]))
+            .unwrap();
+        db.put_vector("chunks", "far", VectorValues::F32(&[10.0, 0.0]))
+            .unwrap();
 
         db.backup_to(&backup_path, BackupOptions::default())
             .unwrap();
@@ -487,7 +492,9 @@ fn backup_compact_and_restore_preserve_records_objects_and_vectors() {
 
         assert_eq!(db.get_object(object_id).unwrap(), payload);
 
-        let results = db.search_vectors("chunks", &[0.0, 0.0], 2).unwrap();
+        let results = db
+            .search_vectors("chunks", VectorValues::F32(&[0.0, 0.0]), 2)
+            .unwrap();
         assert_eq!(results[0].id, "near");
 
         let query_blob: Vec<u8> = [0.0_f32, 0.0]

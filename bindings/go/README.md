@@ -396,22 +396,23 @@ at a vector row.
 db.Exec("create table chunks(id integer primary key, vector_id text not null, text text not null)")
 
 err := db.CreateVectorCollection("chunks", zova.VectorCollectionOptions{
-    Dimensions: 2,
-    Metric:     zova.VectorMetricL2,
+    Dimensions:  2,
+    Metric:      zova.VectorMetricL2,
+    ElementType: zova.VectorElementTypeF32,
 })
 if err != nil {
     log.Fatal(err)
 }
 
 err = db.PutVectors("chunks", []zova.VectorInput{
-    {ID: "intro", Values: []float32{0, 0}},
-    {ID: "api", Values: []float32{1, 0}},
+    {ID: "intro", Values: zova.VectorValues{ElementType: zova.VectorElementTypeF32, F32: []float32{0, 0}}},
+    {ID: "api", Values: zova.VectorValues{ElementType: zova.VectorElementTypeF32, F32: []float32{1, 0}}},
 })
 if err != nil {
     log.Fatal(err)
 }
 
-results, err := db.SearchVectors("chunks", []float32{0.2, 0}, 5)
+results, err := db.SearchVectors("chunks", zova.VectorValues{ElementType: zova.VectorElementTypeF32, F32: []float32{0.2, 0}}, 5)
 if err != nil {
     log.Fatal(err)
 }
@@ -420,13 +421,13 @@ for _, result := range results {
 }
 ```
 
-The f32 methods above stay available as compatibility wrappers. Raw typed
-collections use `TypedVectorCollectionOptions` and `VectorValues`. `F16` values
+Vectors are typed by default. Collections use `VectorCollectionOptions` and
+`VectorValues`. `F16` values
 are raw IEEE 754 binary16 bits carried as `uint16`; `I8` values are raw signed
 bytes with no quantization metadata.
 
 ```go
-err = db.CreateVectorCollectionTyped("scores_i8", zova.TypedVectorCollectionOptions{
+err = db.CreateVectorCollection("scores_i8", zova.VectorCollectionOptions{
     Dimensions:  2,
     Metric:      zova.VectorMetricL2,
     ElementType: zova.VectorElementTypeI8,
@@ -434,12 +435,12 @@ err = db.CreateVectorCollectionTyped("scores_i8", zova.TypedVectorCollectionOpti
 if err != nil {
     log.Fatal(err)
 }
-err = db.PutVectorTyped("scores_i8", "near", zova.VectorValues{
+err = db.PutVector("scores_i8", "near", zova.VectorValues{
     ElementType: zova.VectorElementTypeI8,
     I8:          []int8{1, -1},
 })
 
-err = db.CreateVectorCollectionTyped("halves", zova.TypedVectorCollectionOptions{
+err = db.CreateVectorCollection("halves", zova.VectorCollectionOptions{
     Dimensions:  2,
     Metric:      zova.VectorMetricL2,
     ElementType: zova.VectorElementTypeF16,
@@ -447,7 +448,7 @@ err = db.CreateVectorCollectionTyped("halves", zova.TypedVectorCollectionOptions
 if err != nil {
     log.Fatal(err)
 }
-err = db.PutVectorTyped("halves", "one", zova.VectorValues{
+err = db.PutVector("halves", "one", zova.VectorValues{
     ElementType: zova.VectorElementTypeF16,
     F16:         []uint16{0x3c00, 0x0000},
 })

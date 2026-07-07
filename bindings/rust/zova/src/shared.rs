@@ -24,9 +24,9 @@ use crate::object::{
 use crate::statement::{ColumnType, Step};
 use crate::vector::{
     candidate_ptrs, empty_collection_info, empty_search_results, empty_vector,
-    take_collection_info, take_collection_list, take_search_results, take_vector, values_ptr,
-    vector_inputs, Vector, VectorCollectionInfo, VectorCollectionOptions, VectorInput,
-    VectorSearchResult,
+    take_collection_info, take_collection_list, take_search_results, take_vector, vector_inputs,
+    Vector, VectorCollectionInfo, VectorCollectionOptions, VectorInput, VectorSearchResult,
+    VectorValues,
 };
 use crate::OpenOptions;
 use std::cell::Cell;
@@ -521,6 +521,7 @@ impl SharedDatabase {
             options: zova_sys::zova_vector_collection_options {
                 dimensions: options.dimensions,
                 metric: options.metric.to_c(),
+                element_type: options.element_type.to_c(),
             },
         };
         self.inner
@@ -545,28 +546,28 @@ impl SharedDatabase {
         let name = cstring(name, "vector collection name")?;
         let _guard = self.inner.lock();
         let mut info = empty_collection_info();
-        let request = zova_sys::zova_vector_collection_typed_info_get_request {
+        let request = zova_sys::zova_vector_collection_info_get_request {
             db: self.inner.raw_ptr(),
             name: name.as_ptr(),
             out_info: &mut info,
         };
         self.inner
-            .status_locked(unsafe { zova_sys::zova_vector_collection_typed_info_get(&request) })?;
+            .status_locked(unsafe { zova_sys::zova_vector_collection_info_get(&request) })?;
         take_collection_info(&mut info)
     }
 
     pub fn list_vector_collections(&self) -> Result<Vec<VectorCollectionInfo>> {
         let _guard = self.inner.lock();
-        let mut list = zova_sys::zova_vector_collection_typed_list {
+        let mut list = zova_sys::zova_vector_collection_list {
             items: ptr::null_mut(),
             len: 0,
         };
-        let request = zova_sys::zova_vector_collections_typed_list_request {
+        let request = zova_sys::zova_vector_collections_list_request {
             db: self.inner.raw_ptr(),
             out_list: &mut list,
         };
         self.inner
-            .status_locked(unsafe { zova_sys::zova_vector_collections_typed_list(&request) })?;
+            .status_locked(unsafe { zova_sys::zova_vector_collections_list(&request) })?;
         take_collection_list(&mut list)
     }
 
@@ -581,7 +582,12 @@ impl SharedDatabase {
             .status_locked(unsafe { zova_sys::zova_vector_collection_delete(&request) })
     }
 
-    pub fn put_vector(&self, collection_name: &str, vector_id: &str, values: &[f32]) -> Result<()> {
+    pub fn put_vector(
+        &self,
+        collection_name: &str,
+        vector_id: &str,
+        values: VectorValues<'_>,
+    ) -> Result<()> {
         let collection_name = cstring(collection_name, "vector collection name")?;
         let vector_id = cstring(vector_id, "vector id")?;
         let _guard = self.inner.lock();
@@ -589,8 +595,7 @@ impl SharedDatabase {
             db: self.inner.raw_ptr(),
             collection_name: collection_name.as_ptr(),
             vector_id: vector_id.as_ptr(),
-            values: values_ptr(values),
-            values_len: values.len(),
+            values: values.to_c(),
         };
         self.inner
             .status_locked(unsafe { zova_sys::zova_vector_put(&request) })
@@ -665,7 +670,7 @@ impl SharedDatabase {
     pub fn search_vectors(
         &self,
         collection_name: &str,
-        query: &[f32],
+        query: VectorValues<'_>,
         limit: usize,
     ) -> Result<Vec<VectorSearchResult>> {
         let collection_name = cstring(collection_name, "vector collection name")?;
@@ -674,8 +679,7 @@ impl SharedDatabase {
         let request = zova_sys::zova_vector_search_request {
             db: self.inner.raw_ptr(),
             collection_name: collection_name.as_ptr(),
-            query: values_ptr(query),
-            query_len: query.len(),
+            query: query.to_c(),
             limit,
             out_results: &mut results,
         };
@@ -687,7 +691,7 @@ impl SharedDatabase {
     pub fn search_vectors_in(
         &self,
         collection_name: &str,
-        query: &[f32],
+        query: VectorValues<'_>,
         candidate_ids: &[&str],
         limit: usize,
     ) -> Result<Vec<VectorSearchResult>> {
@@ -698,8 +702,7 @@ impl SharedDatabase {
         let request = zova_sys::zova_vector_search_in_request {
             db: self.inner.raw_ptr(),
             collection_name: collection_name.as_ptr(),
-            query: values_ptr(query),
-            query_len: query.len(),
+            query: query.to_c(),
             candidate_ids: if candidate_ptrs.is_empty() {
                 ptr::null()
             } else {
@@ -720,7 +723,7 @@ impl SharedDatabase {
     pub fn search_vectors_within(
         &self,
         collection_name: &str,
-        query: &[f32],
+        query: VectorValues<'_>,
         max_distance: f64,
         limit: usize,
     ) -> Result<Vec<VectorSearchResult>> {
@@ -730,8 +733,7 @@ impl SharedDatabase {
         let request = zova_sys::zova_vector_search_within_request {
             db: self.inner.raw_ptr(),
             collection_name: collection_name.as_ptr(),
-            query: values_ptr(query),
-            query_len: query.len(),
+            query: query.to_c(),
             max_distance,
             limit,
             out_results: &mut results,
@@ -744,7 +746,7 @@ impl SharedDatabase {
     pub fn search_vectors_in_within(
         &self,
         collection_name: &str,
-        query: &[f32],
+        query: VectorValues<'_>,
         candidate_ids: &[&str],
         max_distance: f64,
         limit: usize,
@@ -756,8 +758,7 @@ impl SharedDatabase {
         let request = zova_sys::zova_vector_search_in_within_request {
             db: self.inner.raw_ptr(),
             collection_name: collection_name.as_ptr(),
-            query: values_ptr(query),
-            query_len: query.len(),
+            query: query.to_c(),
             candidate_ids: if candidate_ptrs.is_empty() {
                 ptr::null()
             } else {
