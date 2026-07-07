@@ -691,6 +691,77 @@ fn raw_vector_collection_crud_batch_and_search_smoke() {
         assert_eq!(typed_list.len, 1);
         zova_sys::zova_vector_collection_typed_list_free(&mut typed_list);
 
+        let byte_collection = CString::new("byte_chunks").unwrap();
+        let create_byte_collection = zova_sys::zova_vector_collection_create_typed_request {
+            db,
+            name: byte_collection.as_ptr(),
+            options: zova_sys::zova_vector_collection_typed_options {
+                dimensions: 2,
+                metric: zova_sys::ZOVA_VECTOR_METRIC_L2,
+                element_type: zova_sys::ZOVA_VECTOR_ELEMENT_TYPE_I8,
+            },
+        };
+        assert_eq!(
+            zova_sys::zova_vector_collection_create_typed(&create_byte_collection),
+            zova_sys::ZOVA_OK
+        );
+        let byte_near_values = [1_i8, 0];
+        let byte_far_values = [5_i8, 0];
+        let byte_query_values = [0_i8, 0];
+        assert_eq!(
+            zova_sys::zova_vector_put_typed(&zova_sys::zova_vector_put_typed_request {
+                db,
+                collection_name: byte_collection.as_ptr(),
+                vector_id: near_id.as_ptr(),
+                values: zova_sys::zova_vector_values {
+                    element_type: zova_sys::ZOVA_VECTOR_ELEMENT_TYPE_I8,
+                    f32_values: ptr::null(),
+                    f16_values: ptr::null(),
+                    i8_values: byte_near_values.as_ptr(),
+                    values_len: byte_near_values.len(),
+                },
+            }),
+            zova_sys::ZOVA_OK
+        );
+        assert_eq!(
+            zova_sys::zova_vector_put_typed(&zova_sys::zova_vector_put_typed_request {
+                db,
+                collection_name: byte_collection.as_ptr(),
+                vector_id: far_id.as_ptr(),
+                values: zova_sys::zova_vector_values {
+                    element_type: zova_sys::ZOVA_VECTOR_ELEMENT_TYPE_I8,
+                    f32_values: ptr::null(),
+                    f16_values: ptr::null(),
+                    i8_values: byte_far_values.as_ptr(),
+                    values_len: byte_far_values.len(),
+                },
+            }),
+            zova_sys::ZOVA_OK
+        );
+        let typed_candidates = [far_id.as_ptr()];
+        let typed_search_in = zova_sys::zova_vector_search_in_typed_request {
+            db,
+            collection_name: byte_collection.as_ptr(),
+            query: zova_sys::zova_vector_values {
+                element_type: zova_sys::ZOVA_VECTOR_ELEMENT_TYPE_I8,
+                f32_values: ptr::null(),
+                f16_values: ptr::null(),
+                i8_values: byte_query_values.as_ptr(),
+                values_len: byte_query_values.len(),
+            },
+            candidate_ids: typed_candidates.as_ptr(),
+            candidate_count: typed_candidates.len(),
+            limit: 2,
+            out_results: &mut results,
+        };
+        assert_eq!(
+            zova_sys::zova_vector_search_in_typed(&typed_search_in),
+            zova_sys::ZOVA_OK
+        );
+        assert_eq!(results.len, 1);
+        assert_eq!(CStr::from_ptr((*results.items).id).to_str().unwrap(), "far");
+        zova_sys::zova_vector_search_results_free(&mut results);
+
         let delete_collection = zova_sys::zova_vector_collection_delete_request {
             db,
             name: collection.as_ptr(),

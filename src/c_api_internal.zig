@@ -805,6 +805,16 @@ pub const zova_vector_search_in_request = extern struct {
     out_results: ?*zova_vector_search_results,
 };
 
+pub const zova_vector_search_in_typed_request = extern struct {
+    db: ?*zova_database,
+    collection_name: ?[*:0]const u8,
+    query: zova_vector_values,
+    candidate_ids: ?[*]const ?[*:0]const u8,
+    candidate_count: usize,
+    limit: usize,
+    out_results: ?*zova_vector_search_results,
+};
+
 pub const zova_vector_collection_info_get_request = extern struct {
     db: ?*zova_database,
     name: ?[*:0]const u8,
@@ -2179,6 +2189,26 @@ pub fn zova_vector_search_in(request: ?*const zova_vector_search_in_request) cal
     defer if (candidates.len != 0) allocator.free(candidates);
 
     var results = handle.db.searchVectorsIn(allocator, std.mem.span(collection_name), query, candidates, req.limit) catch |err| return failDb(handle, err);
+    defer results.deinit(allocator);
+
+    fillSearchResults(out, results.items) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_vector_search_in_typed(request: ?*const zova_vector_search_in_typed_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
+    const query = vectorValuesConst(req.query) orelse return failDb(handle, error.InvalidArgument);
+    const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
+    out.* = emptyVectorSearchResults();
+
+    const candidates = candidateIdSlices(req.candidate_ids, req.candidate_count) catch |err| return failDb(handle, err);
+    defer if (candidates.len != 0) allocator.free(candidates);
+
+    var results = handle.db.searchVectorsInTyped(allocator, std.mem.span(collection_name), query, candidates, req.limit) catch |err| return failDb(handle, err);
     defer results.deinit(allocator);
 
     fillSearchResults(out, results.items) catch |err| return failDb(handle, err);
@@ -4594,6 +4624,20 @@ test "c abi exposes raw typed i8 and f16 vectors" {
     }));
     try std.testing.expectEqual(@as(usize, 2), results.len);
     try std.testing.expectEqualStrings("near", results.items.?[0].id.?[0..results.items.?[0].id_len]);
+    zova_vector_search_results_free(&results);
+
+    const typed_candidates = [_]?[*:0]const u8{"far"};
+    try std.testing.expectEqual(zova_status.OK, zova_vector_search_in_typed(&.{
+        .db = db,
+        .collection_name = "bytes",
+        .query = .{ .element_type = @intFromEnum(zova_vector_element_type.I8), .f32_values = null, .f16_values = null, .i8_values = &query_i8, .values_len = query_i8.len },
+        .candidate_ids = &typed_candidates,
+        .candidate_count = typed_candidates.len,
+        .limit = 2,
+        .out_results = &results,
+    }));
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("far", results.items.?[0].id.?[0..results.items.?[0].id_len]);
     zova_vector_search_results_free(&results);
 
     try std.testing.expectEqual(zova_status.OK, zova_vector_get_typed(&.{

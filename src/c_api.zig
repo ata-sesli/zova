@@ -109,6 +109,7 @@ pub const zova_vector_delete_request = internal.zova_vector_delete_request;
 pub const zova_vector_search_request = internal.zova_vector_search_request;
 pub const zova_vector_search_typed_request = internal.zova_vector_search_typed_request;
 pub const zova_vector_search_in_request = internal.zova_vector_search_in_request;
+pub const zova_vector_search_in_typed_request = internal.zova_vector_search_in_typed_request;
 pub const zova_vector_collection_info_get_request = internal.zova_vector_collection_info_get_request;
 pub const zova_vector_collections_list_request = internal.zova_vector_collections_list_request;
 pub const zova_vector_collection_typed_info_get_request = internal.zova_vector_collection_typed_info_get_request;
@@ -549,6 +550,10 @@ export fn zova_vector_search_typed(request: ?*const zova_vector_search_typed_req
 
 export fn zova_vector_search_in(request: ?*const zova_vector_search_in_request) callconv(.c) zova_status {
     return internal.zova_vector_search_in(request);
+}
+
+export fn zova_vector_search_in_typed(request: ?*const zova_vector_search_in_typed_request) callconv(.c) zova_status {
+    return internal.zova_vector_search_in_typed(request);
 }
 
 export fn zova_vector_collection_info_get(request: ?*const zova_vector_collection_info_get_request) callconv(.c) zova_status {

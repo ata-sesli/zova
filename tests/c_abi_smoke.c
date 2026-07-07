@@ -1107,6 +1107,51 @@ int main(int argc, char **argv) {
     expect_result_id(&filtered_results, 1, "tie-a", "candidate vector search");
     zova_vector_search_results_free(&filtered_results);
 
+    zova_vector_collection_create_typed_request byte_collection_req = {
+        .db = db,
+        .name = "byte_chunks",
+        .options = {.dimensions = 2, .metric = ZOVA_VECTOR_METRIC_L2, .element_type = ZOVA_VECTOR_ELEMENT_TYPE_I8},
+    };
+    expect_status(zova_vector_collection_create_typed(&byte_collection_req), ZOVA_OK, "create typed i8 vector collection");
+    const int8_t byte_near_values[] = {1, 0};
+    const int8_t byte_far_values[] = {5, 0};
+    const int8_t byte_query_values[] = {0, 0};
+    expect_status(zova_vector_put_typed(&(zova_vector_put_typed_request){
+                      .db = db,
+                      .collection_name = "byte_chunks",
+                      .vector_id = "near",
+                      .values = {.element_type = ZOVA_VECTOR_ELEMENT_TYPE_I8, .f32_values = NULL, .f16_values = NULL, .i8_values = byte_near_values, .values_len = 2},
+                  }),
+                  ZOVA_OK,
+                  "put typed i8 near vector");
+    expect_status(zova_vector_put_typed(&(zova_vector_put_typed_request){
+                      .db = db,
+                      .collection_name = "byte_chunks",
+                      .vector_id = "far",
+                      .values = {.element_type = ZOVA_VECTOR_ELEMENT_TYPE_I8, .f32_values = NULL, .f16_values = NULL, .i8_values = byte_far_values, .values_len = 2},
+                  }),
+                  ZOVA_OK,
+                  "put typed i8 far vector");
+    const char *typed_candidate_ids[] = {"far"};
+    zova_vector_search_results typed_filtered_results = {0};
+    expect_status(zova_vector_search_in_typed(&(zova_vector_search_in_typed_request){
+                      .db = db,
+                      .collection_name = "byte_chunks",
+                      .query = {.element_type = ZOVA_VECTOR_ELEMENT_TYPE_I8, .f32_values = NULL, .f16_values = NULL, .i8_values = byte_query_values, .values_len = 2},
+                      .candidate_ids = typed_candidate_ids,
+                      .candidate_count = sizeof(typed_candidate_ids) / sizeof(typed_candidate_ids[0]),
+                      .limit = 2,
+                      .out_results = &typed_filtered_results,
+                  }),
+                  ZOVA_OK,
+                  "typed candidate vector search");
+    if (typed_filtered_results.len != 1) {
+        fprintf(stderr, "typed candidate vector search: unexpected result length\n");
+        return 1;
+    }
+    expect_result_id(&typed_filtered_results, 0, "far", "typed candidate vector search");
+    zova_vector_search_results_free(&typed_filtered_results);
+
     zova_vector_search_within_request within_req = {
         .db = db,
         .collection_name = "chunks",

@@ -831,6 +831,17 @@ pub struct zova_vector_search_in_request {
 }
 
 #[repr(C)]
+pub struct zova_vector_search_in_typed_request {
+    pub db: *mut zova_database,
+    pub collection_name: *const c_char,
+    pub query: zova_vector_values,
+    pub candidate_ids: *const *const c_char,
+    pub candidate_count: usize,
+    pub limit: usize,
+    pub out_results: *mut zova_vector_search_results,
+}
+
+#[repr(C)]
 pub struct zova_vector_collection_info_get_request {
     pub db: *mut zova_database,
     pub name: *const c_char,
@@ -1283,6 +1294,9 @@ extern "C" {
         request: *const zova_vector_search_typed_request,
     ) -> zova_status;
     pub fn zova_vector_search_in(request: *const zova_vector_search_in_request) -> zova_status;
+    pub fn zova_vector_search_in_typed(
+        request: *const zova_vector_search_in_typed_request,
+    ) -> zova_status;
     pub fn zova_vector_search_within(
         request: *const zova_vector_search_within_request,
     ) -> zova_status;

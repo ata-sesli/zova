@@ -53,8 +53,10 @@
  *   returns vector ids and distances only.
  * - zova_database connections register read-only SQL vector helpers:
  *   zova_vector_distance, zova_vector_distance_by_id, and zova_vector_search.
- *   Query vector blobs for those SQL helpers are little-endian IEEE-754 f32
- *   arrays with exactly the collection dimension count.
+ *   Query vector blobs for f32 collections are little-endian IEEE-754 f32
+ *   arrays. Typed collections use blobs matching their collection element type:
+ *   f16 blobs are little-endian uint16 bit patterns and i8 blobs are raw signed
+ *   bytes.
  * - zova_database connections register read-only SQL graph virtual tables:
  *   zova_graph_neighbors and zova_graph_walk. These are connection-local
  *   helpers for joining returned graph node ids back to application SQL rows.
@@ -830,6 +832,16 @@ typedef struct zova_vector_search_in_request {
     zova_vector_search_results *out_results;
 } zova_vector_search_in_request;
 
+typedef struct zova_vector_search_in_typed_request {
+    zova_database *db;
+    const char *collection_name;
+    zova_vector_values query;
+    const char *const *candidate_ids;
+    size_t candidate_count;
+    size_t limit;
+    zova_vector_search_results *out_results;
+} zova_vector_search_in_typed_request;
+
 typedef struct zova_vector_collection_info_get_request {
     zova_database *db;
     const char *name;
@@ -1200,6 +1212,7 @@ zova_status zova_vector_collection_delete(const zova_vector_collection_delete_re
 zova_status zova_vector_search(const zova_vector_search_request *request);
 zova_status zova_vector_search_typed(const zova_vector_search_typed_request *request);
 zova_status zova_vector_search_in(const zova_vector_search_in_request *request);
+zova_status zova_vector_search_in_typed(const zova_vector_search_in_typed_request *request);
 zova_status zova_vector_search_within(const zova_vector_search_within_request *request);
 zova_status zova_vector_search_in_within(const zova_vector_search_in_within_request *request);
 zova_status zova_vector_search_by_id(const zova_vector_search_by_id_request *request);
