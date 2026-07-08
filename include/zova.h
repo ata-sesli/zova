@@ -477,6 +477,43 @@ typedef struct zova_database_open_options_request {
     zova_message *out_error_message;
 } zova_database_open_options_request;
 
+/*
+ * Open/create while loading explicitly trusted local .zovaext bundles. The
+ * bundle code is kept loaded for the lifetime of the returned database handle.
+ * Passing extension_bundle_count = 0 is equivalent to the normal bundled
+ * registry path. create_with_extensions requires flags = 0 and
+ * busy_timeout_ms = 0; open_with_extensions accepts ZOVA_OPEN_READ_ONLY and a
+ * busy timeout like zova_database_open_with_options.
+ */
+typedef struct zova_database_open_extensions_request {
+    const char *path;
+    uint32_t flags;
+    uint32_t busy_timeout_ms;
+    const char *const *extension_bundle_paths;
+    size_t extension_bundle_count;
+    const char *trust_store_path;
+    zova_database **out_db;
+    zova_message *out_error_message;
+} zova_database_open_extensions_request;
+
+/*
+ * Local extension bundle management. verify loads the entrypoint without
+ * trusting the bundle. trust records the manifest/library hash in the selected
+ * trust store. A NULL trust_store_path uses Zova's default trust store.
+ */
+typedef struct zova_extension_bundle_request {
+    const char *bundle_path;
+    const char *trust_store_path;
+    zova_message *out_error_message;
+} zova_extension_bundle_request;
+
+typedef struct zova_extension_bundle_untrust_request {
+    const char *identifier;
+    const char *trust_store_path;
+    uint8_t *out_removed;
+    zova_message *out_error_message;
+} zova_extension_bundle_untrust_request;
+
 /* Conversion never mutates the source and never overwrites the destination. */
 typedef struct zova_convert_sqlite_to_zova_request {
     const char *source_path;
@@ -1078,8 +1115,13 @@ void zova_graph_walk_results_free(zova_graph_walk_results *results);
 
 /* Database lifecycle, SQL passthrough, prepared statements, and conversion. */
 zova_status zova_database_create(const zova_database_open_request *request);
+zova_status zova_database_create_with_extensions(const zova_database_open_extensions_request *request);
 zova_status zova_database_open(const zova_database_open_request *request);
 zova_status zova_database_open_with_options(const zova_database_open_options_request *request);
+zova_status zova_database_open_with_extensions(const zova_database_open_extensions_request *request);
+zova_status zova_extension_bundle_verify(const zova_extension_bundle_request *request);
+zova_status zova_extension_bundle_trust(const zova_extension_bundle_request *request);
+zova_status zova_extension_bundle_untrust(const zova_extension_bundle_untrust_request *request);
 zova_status zova_database_close(zova_database *db);
 zova_status zova_database_exec(const zova_database_exec_request *request);
 zova_status zova_database_register_function(const zova_sql_function_register_request *request);

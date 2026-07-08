@@ -430,6 +430,33 @@ pub struct zova_database_open_options_request {
 }
 
 #[repr(C)]
+pub struct zova_database_open_extensions_request {
+    pub path: *const c_char,
+    pub flags: u32,
+    pub busy_timeout_ms: u32,
+    pub extension_bundle_paths: *const *const c_char,
+    pub extension_bundle_count: usize,
+    pub trust_store_path: *const c_char,
+    pub out_db: *mut *mut zova_database,
+    pub out_error_message: *mut zova_message,
+}
+
+#[repr(C)]
+pub struct zova_extension_bundle_request {
+    pub bundle_path: *const c_char,
+    pub trust_store_path: *const c_char,
+    pub out_error_message: *mut zova_message,
+}
+
+#[repr(C)]
+pub struct zova_extension_bundle_untrust_request {
+    pub identifier: *const c_char,
+    pub trust_store_path: *const c_char,
+    pub out_removed: *mut u8,
+    pub out_error_message: *mut zova_message,
+}
+
+#[repr(C)]
 pub struct zova_convert_sqlite_to_zova_request {
     pub source_path: *const c_char,
     pub dest_path: *const c_char,
@@ -1075,9 +1102,24 @@ extern "C" {
     pub fn zova_vector_collection_list_free(list: *mut zova_vector_collection_list);
 
     pub fn zova_database_create(request: *const zova_database_open_request) -> zova_status;
+    pub fn zova_database_create_with_extensions(
+        request: *const zova_database_open_extensions_request,
+    ) -> zova_status;
     pub fn zova_database_open(request: *const zova_database_open_request) -> zova_status;
     pub fn zova_database_open_with_options(
         request: *const zova_database_open_options_request,
+    ) -> zova_status;
+    pub fn zova_database_open_with_extensions(
+        request: *const zova_database_open_extensions_request,
+    ) -> zova_status;
+    pub fn zova_extension_bundle_verify(
+        request: *const zova_extension_bundle_request,
+    ) -> zova_status;
+    pub fn zova_extension_bundle_trust(
+        request: *const zova_extension_bundle_request,
+    ) -> zova_status;
+    pub fn zova_extension_bundle_untrust(
+        request: *const zova_extension_bundle_untrust_request,
     ) -> zova_status;
     pub fn zova_database_close(db: *mut zova_database) -> zova_status;
     pub fn zova_database_exec(request: *const zova_database_exec_request) -> zova_status;

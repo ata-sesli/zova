@@ -39,8 +39,9 @@ pub fn build(b: *std.Build) void {
     cli_options.addOption([]const u8, "zova_exe_path", zova_exe_path);
     cli_module.addOptions("cli_options", cli_options);
 
+    var dynamic_extension_fixture: ?*std.Build.Step.Compile = null;
     if (supports_dynamic_extension_fixture) {
-        const dynamic_extension_fixture = b.addLibrary(.{
+        const fixture = b.addLibrary(.{
             .name = "zova_dyn_test",
             .linkage = .dynamic,
             .root_module = b.createModule(.{
@@ -49,10 +50,11 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
             }),
         });
-        dynamic_extension_fixture.root_module.addImport("zova", zova_dynamic_module);
-        dynamic_extension_fixture.linker_allow_shlib_undefined = true;
-        dynamic_extension_fixture.root_module.link_libc = true;
-        cli_options.addOptionPath("dynamic_extension_library_path", dynamic_extension_fixture.getEmittedBin());
+        fixture.root_module.addImport("zova", zova_dynamic_module);
+        fixture.linker_allow_shlib_undefined = true;
+        fixture.root_module.link_libc = true;
+        dynamic_extension_fixture = fixture;
+        cli_options.addOptionPath("dynamic_extension_library_path", fixture.getEmittedBin());
     } else {
         cli_options.addOption([]const u8, "dynamic_extension_library_path", "");
     }
@@ -169,9 +171,17 @@ pub fn build(b: *std.Build) void {
         .name = "zova_c_abi_smoke",
         .root_module = c_smoke_module,
     });
+    if (supports_dynamic_extension_fixture) c_smoke.rdynamic = true;
     const c_abi_smoke_db_path = b.pathJoin(&.{ b.cache_root.path orelse ".zig-cache", "c-abi-smoke.zova" });
     const c_smoke_cmd = b.addRunArtifact(c_smoke);
     c_smoke_cmd.addArg(c_abi_smoke_db_path);
+    if (dynamic_extension_fixture) |fixture| {
+        const c_abi_bundle_path = b.pathJoin(&.{ b.cache_root.path orelse ".zig-cache", "c-abi-dyn-test.zovaext" });
+        const c_abi_trust_path = b.pathJoin(&.{ b.cache_root.path orelse ".zig-cache", "c-abi-trusted-extensions.json" });
+        c_smoke_cmd.addArtifactArg(fixture);
+        c_smoke_cmd.addArg(c_abi_bundle_path);
+        c_smoke_cmd.addArg(c_abi_trust_path);
+    }
 
     const cli_info_c_abi_db_cmd = b.addRunArtifact(exe);
     cli_info_c_abi_db_cmd.step.dependOn(&c_smoke_cmd.step);

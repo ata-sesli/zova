@@ -70,6 +70,8 @@ pub const zova_subscription = opaque {};
 
 const DatabaseHandle = struct {
     db: zova.Database,
+    dynamic_extensions: ?zova.DynamicExtensionSet = null,
+    extension_registry: ?zova.DynamicExtensionOwnedRegistry = null,
     // One C ABI database handle is internally serialized. This mutex protects
     // the SQLite/Zova handle, child-handle counts, and connection-scoped error
     // message. It is intentionally per-handle, not global; separate handles can
@@ -479,6 +481,30 @@ pub const zova_database_open_options_request = extern struct {
     flags: u32,
     busy_timeout_ms: u32,
     out_db: ?*?*zova_database,
+    out_error_message: ?*zova_message,
+};
+
+pub const zova_database_open_extensions_request = extern struct {
+    path: ?[*:0]const u8,
+    flags: u32,
+    busy_timeout_ms: u32,
+    extension_bundle_paths: ?[*]const ?[*:0]const u8,
+    extension_bundle_count: usize,
+    trust_store_path: ?[*:0]const u8,
+    out_db: ?*?*zova_database,
+    out_error_message: ?*zova_message,
+};
+
+pub const zova_extension_bundle_request = extern struct {
+    bundle_path: ?[*:0]const u8,
+    trust_store_path: ?[*:0]const u8,
+    out_error_message: ?*zova_message,
+};
+
+pub const zova_extension_bundle_untrust_request = extern struct {
+    identifier: ?[*:0]const u8,
+    trust_store_path: ?[*:0]const u8,
+    out_removed: ?*u8,
     out_error_message: ?*zova_message,
 };
 
@@ -1204,12 +1230,52 @@ pub fn zova_database_create(request: ?*const zova_database_open_request) callcon
     return openDatabase(request, .create);
 }
 
+pub fn zova_database_create_with_extensions(request: ?*const zova_database_open_extensions_request) callconv(.c) zova_status {
+    return openDatabaseWithExtensions(request, .create);
+}
+
 pub fn zova_database_open(request: ?*const zova_database_open_request) callconv(.c) zova_status {
     return openDatabase(request, .open);
 }
 
 pub fn zova_database_open_with_options(request: ?*const zova_database_open_options_request) callconv(.c) zova_status {
     return openDatabaseWithOptions(request);
+}
+
+pub fn zova_database_open_with_extensions(request: ?*const zova_database_open_extensions_request) callconv(.c) zova_status {
+    return openDatabaseWithExtensions(request, .open);
+}
+
+pub fn zova_extension_bundle_verify(request: ?*const zova_extension_bundle_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    clearMessage(req.out_error_message);
+    const bundle_path = req.bundle_path orelse return failMessage(req.out_error_message, error.InvalidArgument);
+    zova.extension_dynamic.verifyBundleEntrypoint(allocator, std.mem.span(bundle_path)) catch |err| {
+        return failMessage(req.out_error_message, err);
+    };
+    return .OK;
+}
+
+pub fn zova_extension_bundle_trust(request: ?*const zova_extension_bundle_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    clearMessage(req.out_error_message);
+    const bundle_path = req.bundle_path orelse return failMessage(req.out_error_message, error.InvalidArgument);
+    var record = zova.extension_dynamic.trustBundle(allocator, std.mem.span(bundle_path), trustStoreOptions(req.trust_store_path)) catch |err| {
+        return failMessage(req.out_error_message, err);
+    };
+    record.deinit(allocator);
+    return .OK;
+}
+
+pub fn zova_extension_bundle_untrust(request: ?*const zova_extension_bundle_untrust_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    clearMessage(req.out_error_message);
+    const identifier = req.identifier orelse return failMessage(req.out_error_message, error.InvalidArgument);
+    const removed = zova.extension_dynamic.untrust(allocator, std.mem.span(identifier), trustStoreOptions(req.trust_store_path)) catch |err| {
+        return failMessage(req.out_error_message, err);
+    };
+    if (req.out_removed) |out| out.* = if (removed) 1 else 0;
+    return .OK;
 }
 
 pub fn zova_database_close(db: ?*zova_database) callconv(.c) zova_status {
@@ -1227,6 +1293,8 @@ pub fn zova_database_close(db: ?*zova_database) callconv(.c) zova_status {
     }
     clearLastError(handle);
     handle.db.deinit();
+    if (handle.extension_registry) |*registry| registry.deinit();
+    if (handle.dynamic_extensions) |*dynamic_extensions| dynamic_extensions.deinit();
     deinitSqlFunctionRegistrations(handle);
     handle.mutex.unlock();
     allocator.destroy(handle);
@@ -2649,6 +2717,95 @@ fn openDatabaseWithOptions(request: ?*const zova_database_open_options_request) 
     return .OK;
 }
 
+fn openDatabaseWithExtensions(request: ?*const zova_database_open_extensions_request, mode: OpenMode) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    clearMessage(req.out_error_message);
+    const out = req.out_db orelse return failMessage(req.out_error_message, error.InvalidArgument);
+    out.* = null;
+    const path = req.path orelse return failMessage(req.out_error_message, error.InvalidArgument);
+    if ((req.flags & ~ZOVA_OPEN_READ_ONLY) != 0) return failMessage(req.out_error_message, error.InvalidArgument);
+    if (mode == .create and (req.flags != 0 or req.busy_timeout_ms != 0)) return failMessage(req.out_error_message, error.InvalidArgument);
+    if (req.busy_timeout_ms > std.math.maxInt(c_int)) return failMessage(req.out_error_message, error.InvalidArgument);
+
+    const bundle_paths = bundlePathSlices(allocator, req.extension_bundle_paths, req.extension_bundle_count) catch |err| {
+        return failMessage(req.out_error_message, err);
+    };
+    defer allocator.free(bundle_paths);
+
+    if (bundle_paths.len == 0) {
+        return switch (mode) {
+            .create => openDatabase(&.{
+                .path = req.path,
+                .out_db = req.out_db,
+                .out_error_message = req.out_error_message,
+            }, .create),
+            .open => openDatabaseWithOptions(&.{
+                .path = req.path,
+                .flags = req.flags,
+                .busy_timeout_ms = req.busy_timeout_ms,
+                .out_db = req.out_db,
+                .out_error_message = req.out_error_message,
+            }),
+        };
+    }
+
+    var dynamic_extensions = zova.DynamicExtensionSet.loadTrustedBundles(
+        allocator,
+        bundle_paths,
+        trustStoreOptions(req.trust_store_path),
+    ) catch |err| return failMessage(req.out_error_message, err);
+
+    var owned_registry = zova.DynamicExtensionOwnedRegistry.init(allocator, &.{
+        zova.bundledExtensionRegistry(),
+        dynamic_extensions.registry(),
+    }) catch |err| {
+        dynamic_extensions.deinit();
+        return failMessage(req.out_error_message, err);
+    };
+
+    var db = switch (mode) {
+        .create => zova.Database.createWithExtensions(std.mem.span(path), owned_registry.registry()),
+        .open => zova.Database.openWithOptionsAndExtensions(std.mem.span(path), .{
+            .read_only = (req.flags & ZOVA_OPEN_READ_ONLY) != 0,
+            .busy_timeout_ms = req.busy_timeout_ms,
+        }, owned_registry.registry()),
+    } catch |err| {
+        owned_registry.deinit();
+        dynamic_extensions.deinit();
+        return failMessage(req.out_error_message, err);
+    };
+
+    const handle = allocator.create(DatabaseHandle) catch |err| {
+        db.deinit();
+        owned_registry.deinit();
+        dynamic_extensions.deinit();
+        return failMessage(req.out_error_message, err);
+    };
+    handle.* = .{
+        .db = db,
+        .dynamic_extensions = dynamic_extensions,
+        .extension_registry = owned_registry,
+    };
+    out.* = @ptrCast(handle);
+    return .OK;
+}
+
+fn bundlePathSlices(gpa: std.mem.Allocator, paths: ?[*]const ?[*:0]const u8, count: usize) ![]const []const u8 {
+    if (count == 0) return try gpa.alloc([]const u8, 0);
+    const raw_paths = paths orelse return error.InvalidArgument;
+    const out = try gpa.alloc([]const u8, count);
+    errdefer gpa.free(out);
+    for (raw_paths[0..count], 0..) |path, index| {
+        const path_z = path orelse return error.InvalidArgument;
+        out[index] = std.mem.span(path_z);
+    }
+    return out;
+}
+
+fn trustStoreOptions(path: ?[*:0]const u8) zova.DynamicExtensionTrustStoreOptions {
+    return .{ .path = if (path) |value| std.mem.span(value) else null };
+}
+
 // Opaque handles are just erased DatabaseHandle/WriterHandle pointers. Casts
 // stay local to this module so the ABI can keep exposing incomplete C structs.
 fn databaseHandle(db: ?*zova_database) ?*DatabaseHandle {
@@ -3675,6 +3832,8 @@ fn statusFromError(err: anyerror) zova_status {
         error.ExtensionInvalid => .EXTENSION_INVALID,
         error.ExtensionIncompatible => .EXTENSION_INCOMPATIBLE,
         error.ExtensionUnavailable => .EXTENSION_UNAVAILABLE,
+        error.ExtensionUntrusted => .EXTENSION_UNAVAILABLE,
+        error.ExtensionLoadFailed => .EXTENSION_UNAVAILABLE,
         error.InvalidArgument => .INVALID_ARGUMENT,
         else => .SQLITE_ERROR,
     };
@@ -3762,7 +3921,12 @@ test "c abi status names and versions are stable" {
 
 test "c abi validates null pointers" {
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_create(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_create_with_extensions(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_open_with_options(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_open_with_extensions(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_extension_bundle_verify(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_extension_bundle_trust(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_extension_bundle_untrust(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_register_function(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_set_busy_timeout(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_object_id_from_bytes(null, 1, null));
@@ -3834,6 +3998,103 @@ test "c abi validates null pointers" {
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_column_text(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_column_blob(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_buffer_free_and_status_for_test());
+}
+
+test "c abi validates external extension bundle requests" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-external-extension-validation.zova", .{tmp.sub_path[0..]});
+    var message = zova_message{ .data = null, .len = 0 };
+    defer zova_message_free(&message);
+
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_extension_bundle_verify(&.{
+        .bundle_path = null,
+        .trust_store_path = null,
+        .out_error_message = &message,
+    }));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_extension_bundle_trust(&.{
+        .bundle_path = null,
+        .trust_store_path = null,
+        .out_error_message = &message,
+    }));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_extension_bundle_untrust(&.{
+        .identifier = null,
+        .trust_store_path = null,
+        .out_removed = null,
+        .out_error_message = &message,
+    }));
+
+    var db: ?*zova_database = null;
+    const null_bundles = [_]?[*:0]const u8{null};
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_create_with_extensions(&.{
+        .path = db_path,
+        .flags = 0,
+        .busy_timeout_ms = 0,
+        .extension_bundle_paths = null,
+        .extension_bundle_count = 1,
+        .trust_store_path = null,
+        .out_db = &db,
+        .out_error_message = &message,
+    }));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_open_with_extensions(&.{
+        .path = db_path,
+        .flags = 0,
+        .busy_timeout_ms = 0,
+        .extension_bundle_paths = &null_bundles,
+        .extension_bundle_count = 1,
+        .trust_store_path = null,
+        .out_db = &db,
+        .out_error_message = &message,
+    }));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_create_with_extensions(&.{
+        .path = db_path,
+        .flags = ZOVA_OPEN_READ_ONLY,
+        .busy_timeout_ms = 0,
+        .extension_bundle_paths = null,
+        .extension_bundle_count = 0,
+        .trust_store_path = null,
+        .out_db = &db,
+        .out_error_message = &message,
+    }));
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_create_with_extensions(&.{
+        .path = db_path,
+        .flags = 0,
+        .busy_timeout_ms = 0,
+        .extension_bundle_paths = null,
+        .extension_bundle_count = 0,
+        .trust_store_path = null,
+        .out_db = &db,
+        .out_error_message = &message,
+    }));
+    try std.testing.expect(db != null);
+    try std.testing.expectEqual(zova_status.OK, zova_database_close(db));
+    db = null;
+
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_open_with_extensions(&.{
+        .path = db_path,
+        .flags = 0xffff_ffff,
+        .busy_timeout_ms = 0,
+        .extension_bundle_paths = null,
+        .extension_bundle_count = 0,
+        .trust_store_path = null,
+        .out_db = &db,
+        .out_error_message = &message,
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_open_with_extensions(&.{
+        .path = db_path,
+        .flags = 0,
+        .busy_timeout_ms = 0,
+        .extension_bundle_paths = null,
+        .extension_bundle_count = 0,
+        .trust_store_path = null,
+        .out_db = &db,
+        .out_error_message = &message,
+    }));
+    try std.testing.expect(db != null);
+    try std.testing.expectEqual(zova_status.OK, zova_database_close(db));
 }
 
 const SqlFunctionTestState = struct {

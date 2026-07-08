@@ -185,6 +185,70 @@ fn raw_extension_lifecycle_smoke() {
 }
 
 #[test]
+fn raw_extension_bundle_ffi_surface_smoke() {
+    let path = temp_path("external-extension-zero-bundles");
+    let c_path = CString::new(path.as_str()).unwrap();
+    let mut db = ptr::null_mut();
+    let mut message = zova_sys::zova_message {
+        data: ptr::null_mut(),
+        len: 0,
+    };
+
+    unsafe {
+        assert_eq!(
+            zova_sys::zova_extension_bundle_verify(ptr::null()),
+            zova_sys::ZOVA_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            zova_sys::zova_extension_bundle_trust(ptr::null()),
+            zova_sys::ZOVA_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            zova_sys::zova_extension_bundle_untrust(ptr::null()),
+            zova_sys::ZOVA_INVALID_ARGUMENT
+        );
+
+        let create = zova_sys::zova_database_open_extensions_request {
+            path: c_path.as_ptr(),
+            flags: 0,
+            busy_timeout_ms: 0,
+            extension_bundle_paths: ptr::null(),
+            extension_bundle_count: 0,
+            trust_store_path: ptr::null(),
+            out_db: &mut db,
+            out_error_message: &mut message,
+        };
+        assert_eq!(
+            zova_sys::zova_database_create_with_extensions(&create),
+            zova_sys::ZOVA_OK
+        );
+        assert!(!db.is_null());
+        assert_eq!(zova_sys::zova_database_close(db), zova_sys::ZOVA_OK);
+        db = ptr::null_mut();
+
+        let open = zova_sys::zova_database_open_extensions_request {
+            path: c_path.as_ptr(),
+            flags: 0,
+            busy_timeout_ms: 0,
+            extension_bundle_paths: ptr::null(),
+            extension_bundle_count: 0,
+            trust_store_path: ptr::null(),
+            out_db: &mut db,
+            out_error_message: &mut message,
+        };
+        assert_eq!(
+            zova_sys::zova_database_open_with_extensions(&open),
+            zova_sys::ZOVA_OK
+        );
+        assert!(!db.is_null());
+        assert_eq!(zova_sys::zova_database_close(db), zova_sys::ZOVA_OK);
+        zova_sys::zova_message_free(&mut message);
+    }
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn raw_create_exec_prepare_step_close_smoke() {
     let path = temp_path("raw");
     let c_path = CString::new(path.as_str()).unwrap();

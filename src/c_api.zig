@@ -56,6 +56,9 @@ pub const ZOVA_SQL_FUNCTION_DIRECT_ONLY = internal.ZOVA_SQL_FUNCTION_DIRECT_ONLY
 pub const ZOVA_SQL_FUNCTION_INNOCUOUS = internal.ZOVA_SQL_FUNCTION_INNOCUOUS;
 pub const zova_database_open_request = internal.zova_database_open_request;
 pub const zova_database_open_options_request = internal.zova_database_open_options_request;
+pub const zova_database_open_extensions_request = internal.zova_database_open_extensions_request;
+pub const zova_extension_bundle_request = internal.zova_extension_bundle_request;
+pub const zova_extension_bundle_untrust_request = internal.zova_extension_bundle_untrust_request;
 pub const zova_convert_sqlite_to_zova_request = internal.zova_convert_sqlite_to_zova_request;
 pub const zova_database_backup_request = internal.zova_database_backup_request;
 pub const zova_database_compact_request = internal.zova_database_compact_request;
@@ -232,12 +235,32 @@ export fn zova_database_create(request: ?*const zova_database_open_request) call
     return internal.zova_database_create(request);
 }
 
+export fn zova_database_create_with_extensions(request: ?*const zova_database_open_extensions_request) callconv(.c) zova_status {
+    return internal.zova_database_create_with_extensions(request);
+}
+
 export fn zova_database_open(request: ?*const zova_database_open_request) callconv(.c) zova_status {
     return internal.zova_database_open(request);
 }
 
 export fn zova_database_open_with_options(request: ?*const zova_database_open_options_request) callconv(.c) zova_status {
     return internal.zova_database_open_with_options(request);
+}
+
+export fn zova_database_open_with_extensions(request: ?*const zova_database_open_extensions_request) callconv(.c) zova_status {
+    return internal.zova_database_open_with_extensions(request);
+}
+
+export fn zova_extension_bundle_verify(request: ?*const zova_extension_bundle_request) callconv(.c) zova_status {
+    return internal.zova_extension_bundle_verify(request);
+}
+
+export fn zova_extension_bundle_trust(request: ?*const zova_extension_bundle_request) callconv(.c) zova_status {
+    return internal.zova_extension_bundle_trust(request);
+}
+
+export fn zova_extension_bundle_untrust(request: ?*const zova_extension_bundle_untrust_request) callconv(.c) zova_status {
+    return internal.zova_extension_bundle_untrust(request);
 }
 
 export fn zova_database_close(db: ?*zova_database) callconv(.c) zova_status {

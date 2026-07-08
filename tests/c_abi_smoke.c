@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 static void expect_status(zova_status actual, zova_status expected, const char *label) {
     if (actual != expected) {
@@ -85,6 +87,105 @@ static void expect_graph_text(const char *actual, size_t actual_len, const char 
         fprintf(stderr, "%s: unexpected graph text\n", label);
         exit(1);
     }
+}
+
+static void expect_message_contains(zova_message *message, const char *needle, const char *label) {
+    size_t needle_len = strlen(needle);
+    int found = 0;
+    if (message->data != NULL && message->len >= needle_len) {
+        for (size_t i = 0; i + needle_len <= message->len; i += 1) {
+            if (memcmp(message->data + i, needle, needle_len) == 0) {
+                found = 1;
+                break;
+            }
+        }
+    }
+    if (!found) {
+        fprintf(stderr, "%s: expected message containing %s\n", label, needle);
+        exit(1);
+    }
+}
+
+static void copy_file(const char *source_path, const char *dest_path, const char *label) {
+    FILE *source = fopen(source_path, "rb");
+    if (source == NULL) {
+        fprintf(stderr, "%s: unable to open source\n", label);
+        exit(1);
+    }
+    FILE *dest = fopen(dest_path, "wb");
+    if (dest == NULL) {
+        fclose(source);
+        fprintf(stderr, "%s: unable to open destination\n", label);
+        exit(1);
+    }
+    unsigned char buffer[4096];
+    size_t n = 0;
+    while ((n = fread(buffer, 1, sizeof(buffer), source)) != 0) {
+        if (fwrite(buffer, 1, n, dest) != n) {
+            fclose(source);
+            fclose(dest);
+            fprintf(stderr, "%s: write failed\n", label);
+            exit(1);
+        }
+    }
+    if (ferror(source)) {
+        fclose(source);
+        fclose(dest);
+        fprintf(stderr, "%s: read failed\n", label);
+        exit(1);
+    }
+    fclose(source);
+    fclose(dest);
+}
+
+static void write_text_file(const char *path, const char *data, const char *label) {
+    FILE *file = fopen(path, "wb");
+    if (file == NULL) {
+        fprintf(stderr, "%s: unable to open file\n", label);
+        exit(1);
+    }
+    size_t len = strlen(data);
+    if (fwrite(data, 1, len, file) != len) {
+        fclose(file);
+        fprintf(stderr, "%s: write failed\n", label);
+        exit(1);
+    }
+    fclose(file);
+}
+
+static void path_join(char *out, size_t out_len, const char *dir, const char *name) {
+    int written = snprintf(out, out_len, "%s/%s", dir, name);
+    if (written < 0 || (size_t)written >= out_len) {
+        fprintf(stderr, "path too long\n");
+        exit(1);
+    }
+}
+
+static void make_dyn_test_bundle(const char *library_path, const char *bundle_path) {
+    char library_dest[1024];
+    char manifest_path[1024];
+    path_join(library_dest, sizeof(library_dest), bundle_path, "libdyn_test");
+    path_join(manifest_path, sizeof(manifest_path), bundle_path, "extension.json");
+    remove(library_dest);
+    remove(manifest_path);
+    rmdir(bundle_path);
+    if (mkdir(bundle_path, 0700) != 0) {
+        fprintf(stderr, "make dyn bundle: mkdir failed\n");
+        exit(1);
+    }
+    copy_file(library_path, library_dest, "copy dyn library");
+    write_text_file(
+        manifest_path,
+        "{\n"
+        "  \"name\": \"dyn_test\",\n"
+        "  \"version\": \"0.1.0\",\n"
+        "  \"storage_prefix\": \"_zova_ext_dyn_test_\",\n"
+        "  \"zova_abi_min\": \"0.21.0\",\n"
+        "  \"capabilities\": \"sql,dynamic-test\",\n"
+        "  \"library\": \"libdyn_test\"\n"
+        "}\n",
+        "write dyn manifest"
+    );
 }
 
 typedef struct sql_callback_state {
@@ -878,9 +979,284 @@ static void run_notification_smoke(zova_database *db) {
     expect_status(zova_subscription_close(subscription), ZOVA_OK, "close subscription");
 }
 
+static void expect_dyn_test_value(zova_database *db, const char *label) {
+    zova_statement *stmt = NULL;
+    expect_status(zova_database_prepare(&(zova_database_prepare_request){
+                      .db = db,
+                      .sql = "select zova_dyn_test_value()",
+                      .out_statement = &stmt,
+                  }),
+                  ZOVA_OK,
+                  label);
+    zova_step_result step = ZOVA_STEP_DONE;
+    expect_status(zova_statement_step(&(zova_statement_step_request){
+                      .statement = stmt,
+                      .out_result = &step,
+                  }),
+                  ZOVA_OK,
+                  "dynamic extension sql step");
+    if (step != ZOVA_STEP_ROW) {
+        fprintf(stderr, "dynamic extension sql: expected row\n");
+        exit(1);
+    }
+    int64_t value = 0;
+    expect_status(zova_statement_column_int64(&(zova_statement_column_int64_request){
+                      .statement = stmt,
+                      .index = 0,
+                      .out_value = &value,
+                  }),
+                  ZOVA_OK,
+                  "dynamic extension sql value");
+    if (value != 21) {
+        fprintf(stderr, "dynamic extension sql: unexpected value\n");
+        exit(1);
+    }
+    expect_status(zova_statement_finalize(stmt), ZOVA_OK, "dynamic extension sql finalize");
+}
+
+static void expect_dynamic_vector_sql_helper(zova_database *db) {
+    float query_vector_blob[] = {1.0f, 2.0f};
+    zova_statement *stmt = NULL;
+    expect_status(zova_database_prepare(&(zova_database_prepare_request){
+                      .db = db,
+                      .sql = "select vector_id from zova_vector_search where collection = 'dynamic_vectors' and query_vector = ? and top_k = 1",
+                      .out_statement = &stmt,
+                  }),
+                  ZOVA_OK,
+                  "prepare dynamic vector sql search");
+    expect_status(zova_statement_bind_blob(&(zova_statement_bind_blob_request){
+                      .statement = stmt,
+                      .index = 1,
+                      .data = (const uint8_t *)query_vector_blob,
+                      .len = sizeof(query_vector_blob),
+                  }),
+                  ZOVA_OK,
+                  "bind dynamic vector sql search query");
+    zova_step_result step = ZOVA_STEP_DONE;
+    expect_status(zova_statement_step(&(zova_statement_step_request){
+                      .statement = stmt,
+                      .out_result = &step,
+                  }),
+                  ZOVA_OK,
+                  "step dynamic vector sql search");
+    if (step != ZOVA_STEP_ROW) {
+        fprintf(stderr, "dynamic vector sql search: expected row\n");
+        exit(1);
+    }
+    zova_text vector_id = {0};
+    expect_status(zova_statement_column_text(&(zova_statement_column_text_request){
+                      .statement = stmt,
+                      .index = 0,
+                      .out_text = &vector_id,
+                  }),
+                  ZOVA_OK,
+                  "read dynamic vector sql search id");
+    expect_graph_text(vector_id.data, vector_id.len, "v1", "dynamic vector sql search id");
+    zova_text_free(&vector_id);
+    expect_status(zova_statement_finalize(stmt), ZOVA_OK, "finalize dynamic vector sql search");
+}
+
+static void run_dynamic_extension_bundle_smoke(
+    const char *base_db_path,
+    const char *library_path,
+    const char *bundle_path,
+    const char *trust_path
+) {
+    char ext_db_path[1024];
+    snprintf(ext_db_path, sizeof(ext_db_path), "%s.dynamic.zova", base_db_path);
+    remove(ext_db_path);
+    remove(trust_path);
+    make_dyn_test_bundle(library_path, bundle_path);
+
+    zova_message message = {0};
+    expect_status(zova_extension_bundle_verify(&(zova_extension_bundle_request){
+                      .bundle_path = bundle_path,
+                      .trust_store_path = trust_path,
+                      .out_error_message = &message,
+                  }),
+                  ZOVA_OK,
+                  "verify dynamic bundle");
+    zova_message_free(&message);
+
+    const char *bundle_paths[1] = {bundle_path};
+    zova_database *db = NULL;
+    zova_status untrusted = zova_database_create_with_extensions(&(zova_database_open_extensions_request){
+        .path = ext_db_path,
+        .flags = 0,
+        .busy_timeout_ms = 0,
+        .extension_bundle_paths = bundle_paths,
+        .extension_bundle_count = 1,
+        .trust_store_path = trust_path,
+        .out_db = &db,
+        .out_error_message = &message,
+    });
+    if (untrusted != ZOVA_EXTENSION_UNAVAILABLE) {
+        fprintf(stderr,
+                "create with untrusted extension: expected %s, got %s\n",
+                zova_status_name(ZOVA_EXTENSION_UNAVAILABLE),
+                zova_status_name(untrusted));
+        exit(1);
+    }
+    expect_message_contains(&message, "ExtensionUntrusted", "create with untrusted extension");
+    zova_message_free(&message);
+
+    expect_status(zova_extension_bundle_trust(&(zova_extension_bundle_request){
+                      .bundle_path = bundle_path,
+                      .trust_store_path = trust_path,
+                      .out_error_message = &message,
+                  }),
+                  ZOVA_OK,
+                  "trust dynamic bundle");
+    zova_message_free(&message);
+
+    expect_status(zova_database_create_with_extensions(&(zova_database_open_extensions_request){
+                      .path = ext_db_path,
+                      .flags = 0,
+                      .busy_timeout_ms = 0,
+                      .extension_bundle_paths = bundle_paths,
+                      .extension_bundle_count = 1,
+                      .trust_store_path = trust_path,
+                      .out_db = &db,
+                      .out_error_message = &message,
+                  }),
+                  ZOVA_OK,
+                  "create with trusted dynamic bundle");
+    zova_message_free(&message);
+
+    expect_status(zova_database_extension_install(&(zova_database_extension_request){
+                      .db = db,
+                      .name = "dyn_test",
+                  }),
+                  ZOVA_OK,
+                  "install dynamic extension");
+    expect_status(zova_database_extension_check(&(zova_database_extension_request){
+                      .db = db,
+                      .name = "dyn_test",
+                  }),
+                  ZOVA_OK,
+                  "check dynamic extension");
+    expect_dyn_test_value(db, "prepare dynamic extension sql after install");
+
+    sql_callback_state state = {0};
+    run_sql_function_smoke(db, &state);
+    if (state.destroyed) {
+        fprintf(stderr, "dynamic extension c callback destructor ran too early\n");
+        exit(1);
+    }
+
+    expect_status(zova_vector_collection_create(&(zova_vector_collection_create_request){
+                      .db = db,
+                      .name = "dynamic_vectors",
+                      .options = {.dimensions = 2, .metric = ZOVA_VECTOR_METRIC_L2, .element_type = ZOVA_VECTOR_ELEMENT_TYPE_F32},
+                  }),
+                  ZOVA_OK,
+                  "dynamic vector collection");
+    float vector_values[] = {1.0f, 2.0f};
+    expect_status(zova_vector_put(&(zova_vector_put_request){
+                      .db = db,
+                      .collection_name = "dynamic_vectors",
+                      .vector_id = "v1",
+                      .values = f32_values(vector_values, 2),
+                  }),
+                  ZOVA_OK,
+                  "dynamic vector put");
+    expect_dynamic_vector_sql_helper(db);
+    run_graph_smoke(db);
+    run_notification_smoke(db);
+    expect_status(zova_database_close(db), ZOVA_OK, "close dynamic extension db");
+    if (!state.destroyed) {
+        fprintf(stderr, "close dynamic extension db: expected SQL callback destructor\n");
+        exit(1);
+    }
+    db = NULL;
+
+    expect_status(zova_database_open(&(zova_database_open_request){
+                      .path = ext_db_path,
+                      .out_db = &db,
+                      .out_error_message = &message,
+                  }),
+                  ZOVA_EXTENSION_UNAVAILABLE,
+                  "open installed dynamic extension without bundle code");
+    expect_message_contains(&message, "ExtensionUnavailable", "open without dynamic bundle message");
+    if (message.data != NULL && strstr(message.data, bundle_path) != NULL) {
+        fprintf(stderr, "open without dynamic bundle leaked bundle path\n");
+        exit(1);
+    }
+    if (message.data != NULL && strstr(message.data, "create table") != NULL) {
+        fprintf(stderr, "open without dynamic bundle leaked private schema\n");
+        exit(1);
+    }
+    zova_message_free(&message);
+
+    expect_status(zova_database_open_with_extensions(&(zova_database_open_extensions_request){
+                      .path = ext_db_path,
+                      .flags = 0,
+                      .busy_timeout_ms = 0,
+                      .extension_bundle_paths = bundle_paths,
+                      .extension_bundle_count = 1,
+                      .trust_store_path = trust_path,
+                      .out_db = &db,
+                      .out_error_message = &message,
+                  }),
+                  ZOVA_OK,
+                  "reopen with trusted dynamic bundle");
+    zova_message_free(&message);
+    expect_dyn_test_value(db, "prepare dynamic extension sql after reopen");
+    expect_status(zova_database_close(db), ZOVA_OK, "close reopened dynamic extension db");
+
+    char manifest_path[1024];
+    path_join(manifest_path, sizeof(manifest_path), bundle_path, "extension.json");
+    write_text_file(
+        manifest_path,
+        "{\n"
+        "  \"name\": \"dyn_test\",\n"
+        "  \"version\": \"0.1.1\",\n"
+        "  \"storage_prefix\": \"_zova_ext_dyn_test_\",\n"
+        "  \"zova_abi_min\": \"0.21.0\",\n"
+        "  \"capabilities\": \"sql,dynamic-test\",\n"
+        "  \"library\": \"libdyn_test\"\n"
+        "}\n",
+        "modify dynamic manifest"
+    );
+    zova_status mismatch = zova_database_open_with_extensions(&(zova_database_open_extensions_request){
+        .path = ext_db_path,
+        .flags = 0,
+        .busy_timeout_ms = 0,
+        .extension_bundle_paths = bundle_paths,
+        .extension_bundle_count = 1,
+        .trust_store_path = trust_path,
+        .out_db = &db,
+        .out_error_message = &message,
+    });
+    if (mismatch != ZOVA_EXTENSION_UNAVAILABLE) {
+        fprintf(stderr,
+                "reopen with modified trusted bundle: expected %s, got %s\n",
+                zova_status_name(ZOVA_EXTENSION_UNAVAILABLE),
+                zova_status_name(mismatch));
+        exit(1);
+    }
+    expect_message_contains(&message, "ExtensionUntrusted", "modified trusted bundle message");
+    zova_message_free(&message);
+
+    uint8_t removed = 0;
+    expect_status(zova_extension_bundle_untrust(&(zova_extension_bundle_untrust_request){
+                      .identifier = "dyn_test",
+                      .trust_store_path = trust_path,
+                      .out_removed = &removed,
+                      .out_error_message = &message,
+                  }),
+                  ZOVA_OK,
+                  "untrust dynamic bundle");
+    if (removed != 1) {
+        fprintf(stderr, "untrust dynamic bundle: expected removed\n");
+        exit(1);
+    }
+    zova_message_free(&message);
+}
+
 int main(int argc, char **argv) {
-    if (argc != 2) {
-        fprintf(stderr, "usage: %s <db-path>\n", argv[0]);
+    if (argc != 2 && argc != 5) {
+        fprintf(stderr, "usage: %s <db-path> [dynamic-library bundle-path trust-store-path]\n", argv[0]);
         return 2;
     }
 
@@ -896,6 +1272,10 @@ int main(int argc, char **argv) {
     remove(backup_path);
     remove(compact_path);
     remove(restored_path);
+
+    if (argc == 5) {
+        run_dynamic_extension_bundle_smoke(db_path, argv[2], argv[3], argv[4]);
+    }
 
     zova_database *db = NULL;
     zova_message open_message = {0};

@@ -24,8 +24,13 @@ require_symbol() {
 }
 
 require_symbol zova_database_create
+require_symbol zova_database_create_with_extensions
 require_symbol zova_database_open
+require_symbol zova_database_open_with_extensions
 require_symbol zova_database_close
+require_symbol zova_extension_bundle_verify
+require_symbol zova_extension_bundle_trust
+require_symbol zova_extension_bundle_untrust
 require_symbol zova_database_register_function
 require_symbol zova_object_put
 require_symbol zova_object_get

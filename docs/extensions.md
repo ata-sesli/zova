@@ -107,6 +107,27 @@ an extension by name, but it cannot make Zova load a library path. The process
 opening the database must provide the bundle with `--extension` or with a
 registry-aware native API.
 
+C callers use the same trust boundary through the C ABI:
+
+- `zova_extension_bundle_verify` checks a local bundle and entrypoint without
+  writing trust.
+- `zova_extension_bundle_trust` records the current manifest/library hashes in
+  the selected trust store.
+- `zova_extension_bundle_untrust` removes a trust record by identifier.
+- `zova_database_create_with_extensions` and
+  `zova_database_open_with_extensions` open a handle with explicitly supplied
+  trusted bundle paths composed with Zova's bundled registry.
+
+Opening with a bundle never trusts it automatically. If the bundle is missing,
+untrusted, or has changed since trust was recorded, open/create fails before the
+database handle is returned. Loaded bundle libraries stay alive until the C ABI
+database handle is closed. After opening, C callers use the existing extension
+lifecycle calls such as `zova_database_extension_install`,
+`zova_database_extension_check`, `zova_database_extension_list`, and
+`zova_database_extension_info`. SQL functions from an extension `register_sql`
+hook are available on Zova-owned C ABI connections once that extension is
+installed and on later opens when its bundle code is provided.
+
 Remove trust by name or bundle path:
 
 ```sh
