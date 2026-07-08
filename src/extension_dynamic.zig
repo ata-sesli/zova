@@ -209,21 +209,46 @@ pub const DynamicExtensionSet = struct {
     }
 };
 
+pub const LoadedBundle = struct {
+    library: DynamicLibrary,
+    extensions: [1]extension.Extension,
+
+    pub fn load(allocator: std.mem.Allocator, bundle_path: []const u8) Error!LoadedBundle {
+        if (comptime !supports_dynamic_loading) return error.ExtensionLoadFailed;
+
+        var info = try loadBundleInfo(allocator, bundle_path);
+        defer info.deinit(allocator);
+
+        var library = std.DynLib.open(info.library_path) catch return error.ExtensionLoadFailed;
+        errdefer library.close();
+
+        const entry_name = try allocator.dupeZ(u8, info.manifest.entrypoint);
+        defer allocator.free(entry_name);
+        const Entry = *const fn () callconv(.c) *const extension.Extension;
+        const entry = library.lookup(Entry, entry_name) orelse return error.ExtensionLoadFailed;
+        const loaded = entry().*;
+        try ensureLoadedExtensionMatches(info, loaded);
+
+        const bundle = LoadedBundle{
+            .library = library,
+            .extensions = .{loaded},
+        };
+        try bundle.registry().validate();
+        return bundle;
+    }
+
+    pub fn registry(self: *const LoadedBundle) extension.Registry {
+        return extension.Registry.init(self.extensions[0..]);
+    }
+
+    pub fn deinit(self: *LoadedBundle) void {
+        if (comptime supports_dynamic_loading) self.library.close();
+    }
+};
+
 pub fn verifyBundleEntrypoint(allocator: std.mem.Allocator, bundle_path: []const u8) Error!void {
-    if (comptime !supports_dynamic_loading) return error.ExtensionLoadFailed;
-
-    var info = try loadBundleInfo(allocator, bundle_path);
-    defer info.deinit(allocator);
-
-    var library = std.DynLib.open(info.library_path) catch return error.ExtensionLoadFailed;
-    defer library.close();
-
-    const entry_name = try allocator.dupeZ(u8, info.manifest.entrypoint);
-    defer allocator.free(entry_name);
-    const Entry = *const fn () callconv(.c) *const extension.Extension;
-    const entry = library.lookup(Entry, entry_name) orelse return error.ExtensionLoadFailed;
-    const loaded = entry().*;
-    try ensureLoadedExtensionMatches(info, loaded);
+    var bundle = try LoadedBundle.load(allocator, bundle_path);
+    defer bundle.deinit();
 }
 
 pub fn loadBundleInfo(allocator: std.mem.Allocator, bundle_path: []const u8) Error!BundleInfo {

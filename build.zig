@@ -27,9 +27,16 @@ pub fn build(b: *std.Build) void {
     });
     cli_module.addImport("zova", zova_module);
     const cli_options = b.addOptions();
+    const zova_exe_filename = std.zig.binNameAlloc(b.allocator, .{
+        .root_name = "zova",
+        .target = &target.result,
+        .output_mode = .Exe,
+    }) catch @panic("out of memory");
+    const zova_exe_path = b.getInstallPath(.bin, zova_exe_filename);
     cli_options.addOption([]const u8, "package_version", package_version);
     cli_options.addOptionPath("source_root", b.path("."));
     cli_options.addOption([]const u8, "zig_exe", b.graph.zig_exe);
+    cli_options.addOption([]const u8, "zova_exe_path", zova_exe_path);
     cli_module.addOptions("cli_options", cli_options);
 
     if (supports_dynamic_extension_fixture) {
@@ -124,6 +131,7 @@ pub fn build(b: *std.Build) void {
     });
     cli_tests.rdynamic = true;
     const cli_tests_cmd = b.addRunArtifact(cli_tests);
+    cli_tests_cmd.step.dependOn(b.getInstallStep());
     const cli_test_step = b.step("cli-test", "Run CLI tests");
     cli_test_step.dependOn(&cli_tests_cmd.step);
     test_step.dependOn(&cli_tests_cmd.step);

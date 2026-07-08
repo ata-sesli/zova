@@ -253,6 +253,12 @@ test "cli experimental extension builder scaffolds builds packs verifies and ins
     const extension_dir = try std.fmt.bufPrint(&extension_dir_buffer, ".zig-cache/tmp/{s}/sample_ext", .{tmp.sub_path});
     var bundle_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const bundle_path = try std.fmt.bufPrint(&bundle_buffer, ".zig-cache/tmp/{s}/sample_ext.zovaext", .{tmp.sub_path});
+    var backup_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const backup_path = try testingDbPath(&backup_buffer, tmp.sub_path[0..], "builder-extension-backup.zova");
+    var compact_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const compact_path = try testingDbPath(&compact_buffer, tmp.sub_path[0..], "builder-extension-compact.zova");
+    var restored_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const restored_path = try testingDbPath(&restored_buffer, tmp.sub_path[0..], "builder-extension-restored.zova");
     var trust_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const trust_path = try std.fmt.bufPrint(&trust_buffer, ".zig-cache/tmp/{s}/trusted_builder_extensions.json", .{tmp.sub_path});
     try setTestEnv("ZOVA_TRUST_STORE", trust_path);
@@ -317,6 +323,268 @@ test "cli experimental extension builder scaffolds builds packs verifies and ins
     var check = try runCli(&.{ "zova", "--extension", bundle_path, "extension", "check", "--json", db_path, "sample_ext" });
     defer check.deinit();
     try std.testing.expectEqual(@as(u8, 0), check.code);
+
+    var source_deep_without_extension = try runCli(&.{ "zova", "check", "--json", "--deep", db_path });
+    defer source_deep_without_extension.deinit();
+    try std.testing.expectEqual(@as(u8, 4), source_deep_without_extension.code);
+    try expectContains(source_deep_without_extension.stderr, "ExtensionUnavailable");
+    try std.testing.expect(std.mem.indexOf(u8, source_deep_without_extension.stderr, bundle_path) == null);
+    try std.testing.expect(std.mem.indexOf(u8, source_deep_without_extension.stderr, "create table") == null);
+
+    var source_deep = try runCli(&.{ "zova", "--extension", bundle_path, "check", "--json", "--deep", db_path });
+    defer source_deep.deinit();
+    try std.testing.expectEqual(@as(u8, 0), source_deep.code);
+
+    var backup = try runCli(&.{ "zova", "--extension", bundle_path, "backup", "--json", db_path, backup_path });
+    defer backup.deinit();
+    try std.testing.expectEqual(@as(u8, 0), backup.code);
+    var backup_json = try parseJson(backup.stdout);
+    defer backup_json.deinit();
+    try expectJsonString(backup_json.value.object, "command", "backup");
+    try expectJsonBool(backup_json.value.object, "verified", true);
+
+    var compact = try runCli(&.{ "zova", "--extension", bundle_path, "compact", "--json", db_path, compact_path });
+    defer compact.deinit();
+    try std.testing.expectEqual(@as(u8, 0), compact.code);
+    var compact_json = try parseJson(compact.stdout);
+    defer compact_json.deinit();
+    try expectJsonString(compact_json.value.object, "command", "compact");
+    try expectJsonBool(compact_json.value.object, "verified", true);
+
+    var restore = try runCli(&.{ "zova", "--extension", bundle_path, "restore", "--json", backup_path, restored_path });
+    defer restore.deinit();
+    try std.testing.expectEqual(@as(u8, 0), restore.code);
+    var restore_json = try parseJson(restore.stdout);
+    defer restore_json.deinit();
+    try expectJsonString(restore_json.value.object, "command", "restore");
+    try expectJsonBool(restore_json.value.object, "verified", true);
+
+    for ([_][:0]const u8{ backup_path, compact_path, restored_path }) |copy_path| {
+        var list = try runCli(&.{ "zova", "extension", "list", "--json", copy_path });
+        defer list.deinit();
+        try std.testing.expectEqual(@as(u8, 0), list.code);
+        try expectContains(list.stdout, "\"name\": \"sample_ext\"");
+
+        var copy_without_extension = try runCli(&.{ "zova", "check", "--json", "--deep", copy_path });
+        defer copy_without_extension.deinit();
+        try std.testing.expectEqual(@as(u8, 4), copy_without_extension.code);
+        try expectContains(copy_without_extension.stderr, "ExtensionUnavailable");
+        try std.testing.expect(std.mem.indexOf(u8, copy_without_extension.stderr, bundle_path) == null);
+        try std.testing.expect(std.mem.indexOf(u8, copy_without_extension.stderr, "create table") == null);
+
+        var copy_with_extension = try runCli(&.{ "zova", "--extension", bundle_path, "check", "--json", "--deep", copy_path });
+        defer copy_with_extension.deinit();
+        try std.testing.expectEqual(@as(u8, 0), copy_with_extension.code);
+
+        var copy_extension_check = try runCli(&.{ "zova", "--extension", bundle_path, "extension", "check", "--json", copy_path, "sample_ext" });
+        defer copy_extension_check.deinit();
+        try std.testing.expectEqual(@as(u8, 0), copy_extension_check.code);
+    }
+}
+
+test "cli extension verify smoke runs install and check hooks" {
+    if (comptime !zova.extension_dynamic.supports_dynamic_loading) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var extension_dir_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const extension_dir = try std.fmt.bufPrint(&extension_dir_buffer, ".zig-cache/tmp/{s}/smoke_marker_ext", .{tmp.sub_path});
+    var bundle_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const bundle_path = try std.fmt.bufPrint(&bundle_buffer, ".zig-cache/tmp/{s}/smoke_marker_ext.zovaext", .{tmp.sub_path});
+    var marker_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const marker_path = try std.fmt.bufPrint(&marker_buffer, ".zig-cache/tmp/{s}/smoke-marker.txt", .{tmp.sub_path});
+
+    var scaffold = try runCli(&.{ "zova", "extension", "scaffold", "--json", extension_dir, "--name", "smoke_marker_ext", "--version", "0.1.0" });
+    defer scaffold.deinit();
+    try std.testing.expectEqual(@as(u8, 0), scaffold.code);
+
+    const source_path = try std.fs.path.join(std.testing.allocator, &.{ extension_dir, "extension.zig" });
+    defer std.testing.allocator.free(source_path);
+    const source = try markerExtensionSource(marker_path);
+    defer std.testing.allocator.free(source);
+    try std.Io.Dir.cwd().writeFile(defaultIo(), .{ .sub_path = source_path, .data = source });
+
+    var build = try runCli(&.{ "zova", "extension", "build", "--json", extension_dir });
+    defer build.deinit();
+    try std.testing.expectEqual(@as(u8, 0), build.code);
+
+    var pack = try runCli(&.{ "zova", "extension", "pack", "--json", extension_dir, "--out", bundle_path });
+    defer pack.deinit();
+    try std.testing.expectEqual(@as(u8, 0), pack.code);
+
+    var verify = try runCli(&.{ "zova", "extension", "verify", "--json", bundle_path });
+    defer verify.deinit();
+    try std.testing.expectEqual(@as(u8, 0), verify.code);
+    try expectPathMissing(marker_path);
+
+    var smoke = try runCli(&.{ "zova", "extension", "verify", "--json", "--smoke", bundle_path });
+    defer smoke.deinit();
+    try std.testing.expectEqual(@as(u8, 0), smoke.code);
+    try expectFileExists(std.Io.Dir.cwd(), marker_path);
+}
+
+test "cli extension verify smoke uses os temp directory" {
+    if (comptime !zova.extension_dynamic.supports_dynamic_loading) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var extension_dir_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const extension_dir = try std.fmt.bufPrint(&extension_dir_buffer, ".zig-cache/tmp/{s}/smoke_temp_ext", .{tmp.sub_path});
+    var bundle_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const bundle_path = try std.fmt.bufPrint(&bundle_buffer, ".zig-cache/tmp/{s}/smoke_temp_ext.zovaext", .{tmp.sub_path});
+    var marker_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const marker_path = try std.fmt.bufPrint(&marker_buffer, ".zig-cache/tmp/{s}/smoke-temp-marker.txt", .{tmp.sub_path});
+    var cwd_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const smoke_cwd = try std.fmt.bufPrint(&cwd_buffer, ".zig-cache/tmp/{s}/smoke-cwd", .{tmp.sub_path});
+
+    const absolute_marker_path = try absolutePathAlloc(marker_path);
+    defer std.testing.allocator.free(absolute_marker_path);
+    const absolute_bundle_path = try absolutePathAlloc(bundle_path);
+    defer std.testing.allocator.free(absolute_bundle_path);
+
+    var scaffold = try runCli(&.{ "zova", "extension", "scaffold", "--json", extension_dir, "--name", "smoke_temp_ext", "--version", "0.1.0" });
+    defer scaffold.deinit();
+    try std.testing.expectEqual(@as(u8, 0), scaffold.code);
+
+    const source_path = try std.fs.path.join(std.testing.allocator, &.{ extension_dir, "extension.zig" });
+    defer std.testing.allocator.free(source_path);
+    const source = try markerExtensionSourceFor("smoke_temp_ext", absolute_marker_path);
+    defer std.testing.allocator.free(source);
+    try std.Io.Dir.cwd().writeFile(defaultIo(), .{ .sub_path = source_path, .data = source });
+
+    var build = try runCli(&.{ "zova", "extension", "build", "--json", extension_dir });
+    defer build.deinit();
+    try std.testing.expectEqual(@as(u8, 0), build.code);
+
+    var pack = try runCli(&.{ "zova", "extension", "pack", "--json", extension_dir, "--out", bundle_path });
+    defer pack.deinit();
+    try std.testing.expectEqual(@as(u8, 0), pack.code);
+
+    try std.Io.Dir.cwd().createDirPath(defaultIo(), smoke_cwd);
+    const original_cwd = try std.process.currentPathAlloc(defaultIo(), std.testing.allocator);
+    defer std.testing.allocator.free(original_cwd);
+    try std.process.setCurrentPath(defaultIo(), smoke_cwd);
+    defer std.process.setCurrentPath(defaultIo(), original_cwd) catch {};
+
+    var smoke = try runCli(&.{ "zova", "extension", "verify", "--json", "--smoke", absolute_bundle_path });
+    defer smoke.deinit();
+    try std.testing.expectEqual(@as(u8, 0), smoke.code);
+    try expectPathMissing(".zig-cache");
+}
+
+test "cli extension verify smoke contains hook errors in child process" {
+    if (comptime !zova.extension_dynamic.supports_dynamic_loading) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var extension_dir_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const extension_dir = try std.fmt.bufPrint(&extension_dir_buffer, ".zig-cache/tmp/{s}/smoke_bad_ext", .{tmp.sub_path});
+    var bundle_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const bundle_path = try std.fmt.bufPrint(&bundle_buffer, ".zig-cache/tmp/{s}/smoke_bad_ext.zovaext", .{tmp.sub_path});
+
+    var scaffold = try runCli(&.{ "zova", "extension", "scaffold", "--json", extension_dir, "--name", "smoke_bad_ext", "--version", "0.1.0" });
+    defer scaffold.deinit();
+    try std.testing.expectEqual(@as(u8, 0), scaffold.code);
+
+    const source_path = try std.fs.path.join(std.testing.allocator, &.{ extension_dir, "extension.zig" });
+    defer std.testing.allocator.free(source_path);
+    try std.Io.Dir.cwd().writeFile(defaultIo(), .{ .sub_path = source_path, .data = failingCheckExtensionSource() });
+
+    var build = try runCli(&.{ "zova", "extension", "build", "--json", extension_dir });
+    defer build.deinit();
+    try std.testing.expectEqual(@as(u8, 0), build.code);
+
+    var pack = try runCli(&.{ "zova", "extension", "pack", "--json", extension_dir, "--out", bundle_path });
+    defer pack.deinit();
+    try std.testing.expectEqual(@as(u8, 0), pack.code);
+
+    var verify = try runCli(&.{ "zova", "extension", "verify", "--json", bundle_path });
+    defer verify.deinit();
+    try std.testing.expectEqual(@as(u8, 0), verify.code);
+
+    var smoke = try runCli(&.{ "zova", "extension", "verify", "--json", "--smoke", bundle_path });
+    defer smoke.deinit();
+    try std.testing.expectEqual(@as(u8, 4), smoke.code);
+    try expectContains(smoke.stderr, "extension-verify");
+    try expectContains(smoke.stderr, "extension failed");
+}
+
+test "cli extension verify rejects broken bundle artifacts" {
+    if (comptime !zova.extension_dynamic.supports_dynamic_loading) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = defaultIo();
+
+    const library_bytes = try std.Io.Dir.cwd().readFileAlloc(io, cli.dynamic_extension_library_path, std.testing.allocator, .limited(64 * 1024 * 1024));
+    defer std.testing.allocator.free(library_bytes);
+
+    try tmp.dir.createDir(io, "missing_lib.zovaext", .default_dir);
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "missing_lib.zovaext/extension.json",
+        .data =
+        \\{
+        \\  "name": "dyn_test",
+        \\  "version": "0.1.0",
+        \\  "storage_prefix": "_zova_ext_dyn_test_",
+        \\  "zova_abi_min": "0.21.0",
+        \\  "capabilities": "sql,dynamic-test",
+        \\  "library": "libmissing"
+        \\}
+        ,
+    });
+
+    try tmp.dir.createDir(io, "empty_lib.zovaext", .default_dir);
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "empty_lib.zovaext/extension.json",
+        .data =
+        \\{
+        \\  "name": "dyn_test",
+        \\  "version": "0.1.0",
+        \\  "storage_prefix": "_zova_ext_dyn_test_",
+        \\  "zova_abi_min": "0.21.0",
+        \\  "capabilities": "sql,dynamic-test",
+        \\  "library": "libdyn_test"
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "empty_lib.zovaext/libdyn_test", .data = "" });
+
+    try tmp.dir.createDir(io, "missing_entrypoint.zovaext", .default_dir);
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "missing_entrypoint.zovaext/extension.json",
+        .data =
+        \\{
+        \\  "name": "dyn_test",
+        \\  "version": "0.1.0",
+        \\  "storage_prefix": "_zova_ext_dyn_test_",
+        \\  "zova_abi_min": "0.21.0",
+        \\  "capabilities": "sql,dynamic-test",
+        \\  "library": "libdyn_test",
+        \\  "entrypoint": "zova_missing_entry"
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "missing_entrypoint.zovaext/libdyn_test", .data = library_bytes });
+
+    var missing_lib_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const missing_lib_path = try std.fmt.bufPrint(&missing_lib_buffer, ".zig-cache/tmp/{s}/missing_lib.zovaext", .{tmp.sub_path});
+    var empty_lib_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const empty_lib_path = try std.fmt.bufPrint(&empty_lib_buffer, ".zig-cache/tmp/{s}/empty_lib.zovaext", .{tmp.sub_path});
+    var missing_entrypoint_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const missing_entrypoint_path = try std.fmt.bufPrint(&missing_entrypoint_buffer, ".zig-cache/tmp/{s}/missing_entrypoint.zovaext", .{tmp.sub_path});
+
+    for ([_][]const u8{ missing_lib_path, empty_lib_path, missing_entrypoint_path }) |bundle_path| {
+        var verify = try runCli(&.{ "zova", "extension", "verify", "--json", "--smoke", bundle_path });
+        defer verify.deinit();
+        try std.testing.expectEqual(@as(u8, 4), verify.code);
+        try std.testing.expect(std.mem.indexOf(u8, verify.stderr, "ExtensionInvalid") != null or
+            std.mem.indexOf(u8, verify.stderr, "ExtensionLoadFailed") != null or
+            std.mem.indexOf(u8, verify.stderr, "FileNotFound") != null);
+    }
 }
 
 test "cli extension list info and diagnostics inspect unavailable extension metadata" {
@@ -3221,6 +3489,23 @@ fn expectFileExists(dir: std.Io.Dir, sub_path: []const u8) !void {
     file.close(io);
 }
 
+fn expectPathMissing(path: []const u8) !void {
+    const io = defaultIo();
+    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    file.close(io);
+    return error.UnexpectedFile;
+}
+
+fn absolutePathAlloc(path: []const u8) ![]u8 {
+    if (std.fs.path.isAbsolute(path)) return try std.testing.allocator.dupe(u8, path);
+    const cwd = try std.process.currentPathAlloc(defaultIo(), std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+    return try std.fs.path.join(std.testing.allocator, &.{ cwd, path });
+}
+
 fn missingHexId() []const u8 {
     return "0000000000000000000000000000000000000000000000000000000000000000";
 }
@@ -3258,6 +3543,93 @@ fn fillDeterministic(bytes: []u8) void {
     for (bytes, 0..) |*byte, index| {
         byte.* = @intCast((index * 31 + index / 7 + 11) % 256);
     }
+}
+
+fn markerExtensionSource(marker_path: []const u8) ![]u8 {
+    return markerExtensionSourceFor("smoke_marker_ext", marker_path);
+}
+
+fn markerExtensionSourceFor(extension_name: []const u8, marker_path: []const u8) ![]u8 {
+    return std.fmt.allocPrint(std.testing.allocator,
+        \\const std = @import("std");
+        \\const zova = @import("zova");
+        \\
+        \\const HookError = error{{ ExtensionInvalid }};
+        \\
+        \\const manifest = zova.ExtensionManifest{{
+        \\    .name = "{s}",
+        \\    .version = "0.1.0",
+        \\    .storage_prefix = "_zova_ext_{s}_",
+        \\    .zova_abi_min = "{s}",
+        \\    .capabilities = "experimental-builder",
+        \\    .required = true,
+        \\}};
+        \\
+        \\const extension = zova.Extension{{
+        \\    .manifest = manifest,
+        \\    .install = install,
+        \\    .check = check,
+        \\    .drop = drop,
+        \\}};
+        \\
+        \\pub export fn zova_extension_entry() callconv(.c) *const zova.Extension {{
+        \\    return &extension;
+        \\}}
+        \\
+        \\fn install(_: *zova.sqlite.Database, _: zova.ExtensionManifest) HookError!void {{
+        \\    const io = std.Io.Threaded.global_single_threaded.io();
+        \\    std.Io.Dir.cwd().writeFile(io, .{{ .sub_path = "{s}", .data = "installed" }}) catch return error.ExtensionInvalid;
+        \\}}
+        \\
+        \\fn check(_: *zova.sqlite.Database, _: zova.ExtensionManifest) HookError!void {{
+        \\    const io = std.Io.Threaded.global_single_threaded.io();
+        \\    var file = std.Io.Dir.cwd().openFile(io, "{s}", .{{}}) catch return error.ExtensionInvalid;
+        \\    file.close(io);
+        \\}}
+        \\
+        \\fn drop(_: *zova.sqlite.Database, _: zova.ExtensionManifest) HookError!void {{
+        \\}}
+        \\
+    , .{ extension_name, extension_name, cli.package_version, marker_path, marker_path });
+}
+
+fn failingCheckExtensionSource() []const u8 {
+    return
+    \\const zova = @import("zova");
+    \\
+    \\const HookError = error{ ExtensionInvalid };
+    \\
+    \\const manifest = zova.ExtensionManifest{
+    \\    .name = "smoke_bad_ext",
+    \\    .version = "0.1.0",
+    \\    .storage_prefix = "_zova_ext_smoke_bad_ext_",
+    \\    .zova_abi_min = "0.21.2",
+    \\    .capabilities = "experimental-builder",
+    \\    .required = true,
+    \\};
+    \\
+    \\const extension = zova.Extension{
+    \\    .manifest = manifest,
+    \\    .install = install,
+    \\    .check = check,
+    \\    .drop = drop,
+    \\};
+    \\
+    \\pub export fn zova_extension_entry() callconv(.c) *const zova.Extension {
+    \\    return &extension;
+    \\}
+    \\
+    \\fn install(_: *zova.sqlite.Database, _: zova.ExtensionManifest) HookError!void {
+    \\}
+    \\
+    \\fn check(_: *zova.sqlite.Database, _: zova.ExtensionManifest) HookError!void {
+    \\    return error.ExtensionInvalid;
+    \\}
+    \\
+    \\fn drop(_: *zova.sqlite.Database, _: zova.ExtensionManifest) HookError!void {
+    \\}
+    \\
+    ;
 }
 
 fn parseJson(bytes: []const u8) !std.json.Parsed(std.json.Value) {

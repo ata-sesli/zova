@@ -149,14 +149,21 @@ zova extension verify ./sample_ext.zovaext
 zova extension verify --smoke ./sample_ext.zovaext
 ```
 
-`--smoke` opens the native library and verifies the configured entrypoint
-against the bundle manifest. It does not trust the bundle for later commands.
+`--smoke` opens the native library, verifies the configured entrypoint against
+the bundle manifest, creates a temporary `.zova`, installs the extension, runs
+the extension check hook, and reopens the temporary database with the same
+loaded registry. It does not trust the bundle for later commands.
 Trust and install remain explicit:
 
 ```sh
 zova extension trust ./sample_ext.zovaext
 zova --extension ./sample_ext.zovaext extension install app.zova sample_ext
 ```
+
+The builder path expects the dynamic library to export the configured entrypoint
+symbol, defaulting to `zova_extension_entry`. Empty libraries, missing libraries,
+and missing entrypoint symbols fail during `pack` or `verify --smoke` before the
+bundle can be trusted or installed.
 
 ## Bundled `trgm`
 

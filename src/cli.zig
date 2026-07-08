@@ -14,6 +14,7 @@ pub const package_version = cli_options.package_version;
 pub const dynamic_extension_library_path = cli_options.dynamic_extension_library_path;
 pub const source_root = cli_options.source_root;
 pub const zig_exe = cli_options.zig_exe;
+pub const zova_exe_path = cli_options.zova_exe_path;
 
 const ExitCode = struct {
     const ok: u8 = 0;
@@ -1515,10 +1516,181 @@ fn extensionVerifyCommand(allocator: std.mem.Allocator, parsed: ExtensionCommand
     const bundle_path = parsed.path.?;
     var info = try zova.extension_dynamic.loadBundleInfo(allocator, bundle_path);
     defer info.deinit(allocator);
+    try zova.extension_dynamic.verifyBundleEntrypoint(allocator, bundle_path);
     if (parsed.smoke) {
-        try zova.extension_dynamic.verifyBundleEntrypoint(allocator, bundle_path);
+        try extensionSmokeInstallCheck(allocator, bundle_path, info.manifest.name);
     }
     try writeExtensionBuilderSuccess(stdout, parsed.format, "extension-verify", bundle_path, bundle_path, null);
+}
+
+fn extensionSmokeInstallCheck(allocator: std.mem.Allocator, bundle_path: []const u8, extension_name: []const u8) !void {
+    const smoke_path = try extensionSmokeTempPath(allocator, extension_name);
+    defer allocator.free(smoke_path);
+    defer deleteExtensionSmokeDatabaseFiles(allocator, smoke_path);
+    const smoke_trust_path = try extensionSmokeTrustPath(allocator, extension_name);
+    defer allocator.free(smoke_trust_path);
+    defer std.Io.Dir.cwd().deleteFile(defaultIo(), smoke_trust_path) catch {};
+
+    {
+        var db = try zova.Database.create(smoke_path);
+        defer db.deinit();
+    }
+
+    var smoke_trust = try zova.extension_dynamic.trustBundle(allocator, bundle_path, .{ .path = smoke_trust_path });
+    defer smoke_trust.deinit(allocator);
+
+    const exe_path = try extensionSmokeExecutablePath(allocator);
+    defer allocator.free(exe_path);
+
+    try runExtensionSmokeChild(smoke_trust_path, &.{
+        exe_path,
+        "--extension",
+        bundle_path,
+        "extension",
+        "install",
+        "--json",
+        smoke_path,
+        extension_name,
+    });
+    try runExtensionSmokeChild(smoke_trust_path, &.{
+        exe_path,
+        "--extension",
+        bundle_path,
+        "extension",
+        "check",
+        "--json",
+        smoke_path,
+        extension_name,
+    });
+    try runExtensionSmokeChild(smoke_trust_path, &.{
+        exe_path,
+        "--extension",
+        bundle_path,
+        "check",
+        "--json",
+        "--deep",
+        smoke_path,
+    });
+}
+
+fn extensionSmokeExecutablePath(allocator: std.mem.Allocator) ![]u8 {
+    const self_path = try std.process.executablePathAlloc(defaultIo(), allocator);
+    errdefer allocator.free(self_path);
+    if (isZigTestExecutable(self_path) and zova_exe_path.len != 0 and fileExists(zova_exe_path)) {
+        allocator.free(self_path);
+        return try allocator.dupe(u8, zova_exe_path);
+    }
+    return self_path;
+}
+
+fn isZigTestExecutable(path: []const u8) bool {
+    const basename = std.fs.path.basename(path);
+    return std.mem.eql(u8, basename, "test") or std.mem.eql(u8, basename, "test.exe");
+}
+
+fn runExtensionSmokeChild(smoke_trust_path: []const u8, argv: []const []const u8) !void {
+    const process_allocator = std.heap.page_allocator;
+    var threaded = std.Io.Threaded.init(process_allocator, .{});
+    defer threaded.deinit();
+    var env = std.process.Environ.Map.init(process_allocator);
+    defer env.deinit();
+    try copyEnv(&env, "PATH");
+    try copyEnv(&env, "HOME");
+    try copyEnv(&env, "TMPDIR");
+    try copyEnv(&env, "TMP");
+    try copyEnv(&env, "TEMP");
+    try copyEnv(&env, "DYLD_LIBRARY_PATH");
+    try copyEnv(&env, "LD_LIBRARY_PATH");
+    try copyEnv(&env, "ZIG_GLOBAL_CACHE_DIR");
+    try env.put("ZOVA_TRUST_STORE", smoke_trust_path);
+
+    const result = std.process.run(process_allocator, threaded.io(), .{
+        .argv = argv,
+        .environ_map = &env,
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(1024 * 1024),
+    }) catch return error.ExtensionInvalid;
+    defer process_allocator.free(result.stdout);
+    defer process_allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| if (code != 0) return error.ExtensionInvalid,
+        else => return error.ExtensionInvalid,
+    }
+}
+
+fn extensionSmokeTempPath(allocator: std.mem.Allocator, name: []const u8) ![:0]u8 {
+    return extensionSmokeTempFilePath(allocator, "db", name, ".zova");
+}
+
+fn extensionSmokeTrustPath(allocator: std.mem.Allocator, name: []const u8) ![:0]u8 {
+    return extensionSmokeTempFilePath(allocator, "trust", name, ".json");
+}
+
+fn extensionSmokeTempFilePath(allocator: std.mem.Allocator, kind: []const u8, name: []const u8, suffix: []const u8) ![:0]u8 {
+    var random_bytes: [16]u8 = undefined;
+    sqlite.c.sqlite3_randomness(random_bytes.len, &random_bytes);
+    var random_hex: [32]u8 = undefined;
+    lowerHex32(&random_hex, &random_bytes);
+
+    const filename = try std.fmt.allocPrint(allocator, "zova-extension-smoke-{s}-{s}-{s}{s}", .{ kind, name, random_hex, suffix });
+    defer allocator.free(filename);
+    const path = try std.fs.path.join(allocator, &.{ extensionSmokeTempRoot(), filename });
+    defer allocator.free(path);
+    return try allocator.dupeZ(u8, path);
+}
+
+fn deleteExtensionSmokeDatabaseFiles(allocator: std.mem.Allocator, path: []const u8) void {
+    const io = defaultIo();
+    std.Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    const wal_path = std.fmt.allocPrint(allocator, "{s}-wal", .{path}) catch return;
+    defer allocator.free(wal_path);
+    std.Io.Dir.cwd().deleteFile(io, wal_path) catch {};
+
+    const journal_path = std.fmt.allocPrint(allocator, "{s}-journal", .{path}) catch return;
+    defer allocator.free(journal_path);
+    std.Io.Dir.cwd().deleteFile(io, journal_path) catch {};
+
+    const shm_path = std.fmt.allocPrint(allocator, "{s}-shm", .{path}) catch return;
+    defer allocator.free(shm_path);
+    std.Io.Dir.cwd().deleteFile(io, shm_path) catch {};
+}
+
+fn lowerHex32(dest: *[32]u8, bytes: *const [16]u8) void {
+    const alphabet = "0123456789abcdef";
+    for (bytes.*, 0..) |byte, index| {
+        dest[index * 2] = alphabet[byte >> 4];
+        dest[index * 2 + 1] = alphabet[byte & 0x0f];
+    }
+}
+
+fn extensionSmokeTempRoot() []const u8 {
+    if (absoluteNonEmptyEnv("TMPDIR")) |path| return path;
+    if (absoluteNonEmptyEnv("TMP")) |path| return path;
+    if (absoluteNonEmptyEnv("TEMP")) |path| return path;
+    return "/tmp";
+}
+
+fn absoluteNonEmptyEnv(name: [:0]const u8) ?[]const u8 {
+    const value = getenv(name) orelse return null;
+    if (value.len == 0 or !std.fs.path.isAbsolute(value)) return null;
+    return value;
+}
+
+fn getenv(name: [:0]const u8) ?[]const u8 {
+    const value = std.c.getenv(name.ptr) orelse return null;
+    return std.mem.span(value);
+}
+
+fn copyEnv(env: *std.process.Environ.Map, name: [:0]const u8) !void {
+    if (getenv(name)) |value| try env.put(name, value);
+}
+
+fn fileExists(path: []const u8) bool {
+    var file = std.Io.Dir.cwd().openFile(defaultIo(), path, .{}) catch return false;
+    file.close(defaultIo());
+    return true;
 }
 
 fn writeExtensionBuilderSuccess(
