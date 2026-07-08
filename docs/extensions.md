@@ -18,10 +18,14 @@ must use `_zova_ext_<name>_...` names. For example, an extension named `trgm`
 owns `_zova_ext_trgm_docs`, `_zova_ext_trgm_postings`, and indexes with the
 same prefix.
 
-In v0.21, all installed extensions are required. Opening a database with
-installed extension metadata but without matching process code fails during
-normal open. Diagnostic commands can still inspect the metadata so they can
-explain what is missing.
+In the current v0.22.0 model, all installed extensions are required. Opening a
+database with installed extension metadata but without matching process code
+fails during normal open. Diagnostic commands can still inspect the metadata so
+they can explain what is missing.
+
+Registry composition is validated before create, open, install, or check work
+starts. Duplicate extension names or duplicate storage prefixes are invalid, and
+external extensions cannot shadow bundled extensions such as `trgm`.
 
 ## Trust Boundary
 
@@ -32,7 +36,7 @@ A `.zova` file may say which extensions it needs, but the application or CLI
 process decides which extension code is available. Zova never loads code just
 because a database asks for it.
 
-Zova supports three process-owned extension sources in v0.21:
+Zova supports three process-owned extension sources in v0.22.0:
 
 - bundled extensions shipped with Zova, such as `trgm`
 - app-registered native Zig extensions supplied by the application process
@@ -43,7 +47,7 @@ Deferred for later work:
 - extension signing
 - marketplace or network fetching
 - optional installed extensions
-- binding-level extension authoring and dynamic loading APIs
+- high-level Rust, Go, or Python extension authoring APIs
 
 ## Trusted Local `.zovaext` Bundles
 
@@ -127,6 +131,16 @@ lifecycle calls such as `zova_database_extension_install`,
 `zova_database_extension_info`. SQL functions from an extension `register_sql`
 hook are available on Zova-owned C ABI connections once that extension is
 installed and on later opens when its bundle code is provided.
+
+The registry is fixed for the lifetime of a database handle. To change the set
+of available external bundles, close the handle and open/create another one with
+the desired bundle list.
+
+The staged v0.22.0 integration model is the combination of app-defined scalar
+SQL callbacks and explicitly trusted `.zovaext` bundles. Zova does not expose a
+raw `sqlite3 *` accessor as the extension path; code that needs SQL functions on
+Zova-owned connections should use `zova_database_register_function`, trusted
+extension bundles, or native Zig registry injection.
 
 Remove trust by name or bundle path:
 
@@ -309,6 +323,14 @@ SQL registration runs when a Zova connection opens with matching registered
 extension code. It also runs after install before the lifecycle savepoint is
 released, so extension checks can use the SQL surface immediately.
 
+Read-only opens still register connection-local extension SQL hooks and run
+extension checks. Hooks and checks used during read-only open must not write
+schema or data; SQLite's read-only error path rejects any attempted write.
+
+If `register_sql` fails during install, the install savepoint rolls back the
+extension metadata and private storage created by that install. If it fails
+during normal open, the handle is not returned.
+
 Do not put executable code paths in database metadata. Do not load extension
 code from SQL.
 
@@ -330,7 +352,7 @@ diagnostics as extension issues.
 Extension private storage lives in the main database in this host slice.
 Extensions can still refer to objects and vectors in bound stores through
 normal target refs; the extension-owned tables themselves are not stored in the
-bound store in v0.21.
+bound store.
 
 ## Diagnostics
 
@@ -350,9 +372,9 @@ The C ABI, Rust, Go, and Python bindings can manage extensions that are already
 registered in the current process. In the default Zova build that means bundled
 extensions such as `trgm`: install, list, info, check, check all, and drop.
 
-Those binding APIs do not make `.zova` files executable and do not load dynamic
-bundles. App-registered extension authoring and dynamic `.zovaext` loading are
-still native Zig/CLI-only in v0.21.
+Those binding APIs do not make `.zova` files executable. C callers can supply
+trusted `.zovaext` bundles at handle create/open time; high-level Rust, Go, and
+Python dynamic-loading APIs are still deferred.
 
 When a dynamic bundle is missing or untrusted, diagnostics point back to the
 process boundary: supply the bundle with `--extension <bundle.zovaext>` for that
@@ -388,7 +410,9 @@ zova_database_register_function(&request);
 Function names are ASCII identifiers, 1-64 bytes, and may not use `zova_` or
 `_zova_` prefixes. Arity is `-1` for varargs or `0..127` for fixed arity.
 Registration is per open SQLite connection; registering a function on one
-`zova_database` handle does not install it on other handles.
+`zova_database` handle does not install it on other handles. Functions
+registered on an application-owned raw SQLite handle are not automatically
+present on Zova-owned handles.
 
 The callback receives borrowed `zova_sql_value` arguments and fills one
 `zova_sql_result`. Zova copies text, blob, and error bytes before SQLite
@@ -473,7 +497,8 @@ const registry = zova.ExtensionRegistry.init(&.{ext});
 var db = try zova.Database.openWithExtensions("app.zova", registry);
 ```
 
-The v0.21 binding APIs can manage extensions already present in the process
-registry, such as bundled `trgm`. Extension authoring and dynamic loading APIs
-remain native Zig/CLI-only. The stable contract is the trust boundary:
+The v0.22 binding APIs can manage extensions already present in the process
+registry, such as bundled `trgm`, and the C ABI can open handles with explicitly
+trusted `.zovaext` bundles. Stable high-level Rust, Go, and Python extension
+authoring APIs are still deferred. The stable contract is the trust boundary:
 extension code comes from the process, not from the database file.

@@ -1056,6 +1056,135 @@ static void expect_dynamic_vector_sql_helper(zova_database *db) {
     expect_status(zova_statement_finalize(stmt), ZOVA_OK, "finalize dynamic vector sql search");
 }
 
+static void expect_dynamic_sql_coexistence(zova_database *db) {
+    expect_status(zova_database_exec(&(zova_database_exec_request){
+                      .db = db,
+                      .sql = "create table dynamic_candidates (vector_id text primary key, keep integer not null)",
+                  }),
+                  ZOVA_OK,
+                  "create dynamic vector candidates");
+    expect_status(zova_database_exec(&(zova_database_exec_request){
+                      .db = db,
+                      .sql = "insert into dynamic_candidates (vector_id, keep) values ('v1', 1)",
+                  }),
+                  ZOVA_OK,
+                  "insert dynamic vector candidates");
+
+    float query_vector_blob[] = {1.0f, 2.0f};
+    zova_statement *prefilter = NULL;
+    expect_status(zova_database_prepare(&(zova_database_prepare_request){
+                      .db = db,
+                      .sql = "select s.vector_id "
+                             "from dynamic_candidates c "
+                             "join zova_vector_search s on s.vector_id = c.vector_id "
+                             "where s.collection = 'dynamic_vectors' "
+                             "and s.query_vector = ? "
+                             "and s.top_k = 1 "
+                             "and c.keep = 1 "
+                             "and app_c_mix(4, 'cat', x'0102') = 99",
+                      .out_statement = &prefilter,
+                  }),
+                  ZOVA_OK,
+                  "prepare dynamic vector sql prefilter");
+    expect_status(zova_statement_bind_blob(&(zova_statement_bind_blob_request){
+                      .statement = prefilter,
+                      .index = 1,
+                      .data = (const uint8_t *)query_vector_blob,
+                      .len = sizeof(query_vector_blob),
+                  }),
+                  ZOVA_OK,
+                  "bind dynamic vector sql prefilter");
+    zova_step_result step = ZOVA_STEP_DONE;
+    expect_status(zova_statement_step(&(zova_statement_step_request){
+                      .statement = prefilter,
+                      .out_result = &step,
+                  }),
+                  ZOVA_OK,
+                  "step dynamic vector sql prefilter");
+    if (step != ZOVA_STEP_ROW) {
+        fprintf(stderr, "dynamic vector sql prefilter: expected row\n");
+        exit(1);
+    }
+    zova_text vector_id = {0};
+    expect_status(zova_statement_column_text(&(zova_statement_column_text_request){
+                      .statement = prefilter,
+                      .index = 0,
+                      .out_text = &vector_id,
+                  }),
+                  ZOVA_OK,
+                  "read dynamic vector sql prefilter id");
+    expect_graph_text(vector_id.data, vector_id.len, "v1", "dynamic vector sql prefilter id");
+    zova_text_free(&vector_id);
+    expect_status(zova_statement_finalize(prefilter), ZOVA_OK, "finalize dynamic vector sql prefilter");
+
+    expect_status(zova_database_exec(&(zova_database_exec_request){
+                      .db = db,
+                      .sql = "create virtual table dynamic_docs using fts5(body)",
+                  }),
+                  ZOVA_OK,
+                  "create dynamic fts table");
+    expect_status(zova_database_exec(&(zova_database_exec_request){
+                      .db = db,
+                      .sql = "insert into dynamic_docs (body) values ('alpha beta')",
+                  }),
+                  ZOVA_OK,
+                  "insert dynamic fts row");
+
+    zova_statement *fts = NULL;
+    expect_status(zova_database_prepare(&(zova_database_prepare_request){
+                      .db = db,
+                      .sql = "select app_c_text(), zova_dyn_test_value(), rowid from dynamic_docs where dynamic_docs match 'alpha'",
+                      .out_statement = &fts,
+                  }),
+                  ZOVA_OK,
+                  "prepare dynamic fts coexistence");
+    expect_status(zova_statement_step(&(zova_statement_step_request){
+                      .statement = fts,
+                      .out_result = &step,
+                  }),
+                  ZOVA_OK,
+                  "step dynamic fts coexistence");
+    if (step != ZOVA_STEP_ROW) {
+        fprintf(stderr, "dynamic fts coexistence: expected row\n");
+        exit(1);
+    }
+    zova_text text = {0};
+    expect_status(zova_statement_column_text(&(zova_statement_column_text_request){
+                      .statement = fts,
+                      .index = 0,
+                      .out_text = &text,
+                  }),
+                  ZOVA_OK,
+                  "read dynamic fts c function text");
+    expect_graph_text(text.data, text.len, "from-c", "dynamic fts c function text");
+    zova_text_free(&text);
+    int64_t extension_value = 0;
+    expect_status(zova_statement_column_int64(&(zova_statement_column_int64_request){
+                      .statement = fts,
+                      .index = 1,
+                      .out_value = &extension_value,
+                  }),
+                  ZOVA_OK,
+                  "read dynamic fts extension value");
+    if (extension_value != 21) {
+        fprintf(stderr, "dynamic fts extension value: unexpected value\n");
+        exit(1);
+    }
+    int64_t rowid = 0;
+    expect_status(zova_statement_column_int64(&(zova_statement_column_int64_request){
+                      .statement = fts,
+                      .index = 2,
+                      .out_value = &rowid,
+                  }),
+                  ZOVA_OK,
+                  "read dynamic fts rowid");
+    if (rowid != 1) {
+        fprintf(stderr, "dynamic fts rowid: unexpected rowid\n");
+        exit(1);
+    }
+    expect_status(zova_statement_finalize(fts), ZOVA_OK, "finalize dynamic fts coexistence");
+}
+
 static void run_dynamic_extension_bundle_smoke(
     const char *base_db_path,
     const char *library_path,
@@ -1161,6 +1290,7 @@ static void run_dynamic_extension_bundle_smoke(
                   ZOVA_OK,
                   "dynamic vector put");
     expect_dynamic_vector_sql_helper(db);
+    expect_dynamic_sql_coexistence(db);
     run_graph_smoke(db);
     run_notification_smoke(db);
     expect_status(zova_database_close(db), ZOVA_OK, "close dynamic extension db");

@@ -3404,6 +3404,71 @@ test "app registered extension installs checks registers sql and drops" {
     }
 }
 
+test "multiple app registered extensions register sql on one connection" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "registered-extension-sql-multiple.zova");
+
+    const registry = ExtensionRegistry.init(&.{ testExtension(), secondSqlExtension() });
+
+    {
+        var db = try Database.createWithExtensions(db_path, registry);
+        defer db.deinit();
+
+        try db.installExtension("test");
+        try db.installExtension("test_two");
+
+        var scalar = try db.prepare("select zova_test_extension_value(), zova_test_extension_two_value()");
+        defer scalar.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try scalar.step());
+        try std.testing.expectEqual(@as(i64, 7), scalar.columnInt64(0));
+        try std.testing.expectEqual(@as(i64, 42), scalar.columnInt64(1));
+    }
+
+    {
+        var db = try Database.openWithExtensions(db_path, registry);
+        defer db.deinit();
+
+        try db.checkExtension("test");
+        try db.checkExtension("test_two");
+
+        var scalar = try db.prepare("select zova_test_extension_value(), zova_test_extension_two_value()");
+        defer scalar.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try scalar.step());
+        try std.testing.expectEqual(@as(i64, 7), scalar.columnInt64(0));
+        try std.testing.expectEqual(@as(i64, 42), scalar.columnInt64(1));
+    }
+}
+
+test "read only open registers extension sql and checks installed extension" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "registered-extension-read-only.zova");
+
+    const registry = ExtensionRegistry.init(&.{testExtension()});
+    {
+        var db = try Database.createWithExtensions(db_path, registry);
+        defer db.deinit();
+        try db.installExtension("test");
+    }
+
+    var db = try Database.openWithOptionsAndExtensions(db_path, .{ .read_only = true }, registry);
+    defer db.deinit();
+
+    try db.checkExtension("test");
+
+    var scalar = try db.prepare("select zova_test_extension_value()");
+    defer scalar.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try scalar.step());
+    try std.testing.expectEqual(@as(i64, 7), scalar.columnInt64(0));
+
+    try std.testing.expectError(error.ReadOnly, db.exec("create table read_only_extension_write_blocked (id integer)"));
+}
+
 test "open with missing registered extension code fails clearly" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3566,6 +3631,38 @@ test "extension manifests validate names prefixes and duplicate registry prefixe
     try std.testing.expectError(error.ExtensionInvalid, ExtensionRegistry.init(&.{ duplicate_one, duplicate_two }).validate());
 }
 
+test "extension registry rejects bundled trgm collisions before create or open" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const trgm_collision = Extension{
+        .manifest = .{
+            .name = "trgm",
+            .version = "0.1.0",
+            .storage_prefix = "_zova_ext_trgm_",
+            .zova_abi_min = "0.21.0",
+        },
+        .install = testExtensionInstall,
+        .check = testExtensionCheck,
+        .drop = testExtensionDrop,
+    };
+    const registry = ExtensionRegistry.init(&.{ bundled_extensions[0], trgm_collision });
+    try std.testing.expectError(error.ExtensionInvalid, registry.validate());
+
+    var create_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const create_path = try testingDbPath(&create_buffer, tmp.sub_path[0..], "extension-trgm-collision-create.zova");
+    try std.testing.expectError(error.ExtensionInvalid, Database.createWithExtensions(create_path, registry));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(defaultIo(), create_path, .{}));
+
+    var open_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const open_path = try testingDbPath(&open_buffer, tmp.sub_path[0..], "extension-trgm-collision-open.zova");
+    {
+        var db = try Database.create(open_path);
+        defer db.deinit();
+    }
+    try std.testing.expectError(error.ExtensionInvalid, Database.openWithExtensions(open_path, registry));
+}
+
 test "extension duplicate install and failed hooks roll back cleanly" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3587,6 +3684,41 @@ test "extension duplicate install and failed hooks roll back cleanly" {
     try std.testing.expectError(error.ExtensionInvalid, db.installExtension("register_fail"));
     try std.testing.expectError(error.ExtensionNotFound, db.extensionInfo(std.testing.allocator, "register_fail"));
     try std.testing.expect(!try tableExists(&db.sqlite_db, "_zova_ext_register_fail_meta"));
+}
+
+test "register_sql failure during open fails without mutating installed metadata" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "extension-register-open-fail.zova");
+
+    const registry = ExtensionRegistry.init(&.{reopenRegisterFailExtension()});
+    {
+        var db = try Database.createWithExtensions(db_path, registry);
+        defer db.deinit();
+
+        try db.installExtension("reopen_fail");
+        var scalar = try db.prepare("select zova_reopen_fail_value()");
+        defer scalar.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try scalar.step());
+        try std.testing.expectEqual(@as(i64, 13), scalar.columnInt64(0));
+    }
+
+    try std.testing.expectError(error.ExtensionInvalid, Database.openWithExtensions(db_path, registry));
+
+    var inspected = try Database.openForExtensionInspectionWithExtensions(db_path, .{}, registry);
+    defer inspected.deinit();
+
+    var extensions = try inspected.listExtensions(std.testing.allocator);
+    defer extensions.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), extensions.items.len);
+    try std.testing.expectEqualStrings("reopen_fail", extensions.items[0].name);
+
+    var mode = try inspected.prepare("select value from _zova_ext_reopen_fail_meta where key = 'mode'");
+    defer mode.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try mode.step());
+    try std.testing.expectEqualStrings("fail", mode.columnText(0));
 }
 
 test "extension lifecycle audits namespace and drop cleanup" {
@@ -3765,6 +3897,37 @@ fn registerFailingExtension() Extension {
         .check = registerFailingExtensionCheck,
         .drop = registerFailingExtensionDrop,
         .register_sql = registerFailingExtensionRegisterSql,
+    };
+}
+
+fn reopenRegisterFailExtension() Extension {
+    return .{
+        .manifest = .{
+            .name = "reopen_fail",
+            .version = "0.1.0",
+            .storage_prefix = "_zova_ext_reopen_fail_",
+            .zova_abi_min = "0.21.0",
+        },
+        .install = reopenRegisterFailExtensionInstall,
+        .check = reopenRegisterFailExtensionCheck,
+        .drop = reopenRegisterFailExtensionDrop,
+        .register_sql = reopenRegisterFailExtensionRegisterSql,
+    };
+}
+
+fn secondSqlExtension() Extension {
+    return .{
+        .manifest = .{
+            .name = "test_two",
+            .version = "0.1.0",
+            .storage_prefix = "_zova_ext_test_two_",
+            .zova_abi_min = "0.21.0",
+            .capabilities = "sql",
+        },
+        .install = secondSqlExtensionInstall,
+        .check = secondSqlExtensionCheck,
+        .drop = secondSqlExtensionDrop,
+        .register_sql = secondSqlExtensionRegisterSql,
     };
 }
 
@@ -3950,6 +4113,91 @@ fn registerFailingExtensionRegisterSql(db: *sqlite.Database, manifest: Extension
     return error.ExtensionInvalid;
 }
 
+fn reopenRegisterFailExtensionInstall(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
+    try extension_impl.validateManifest(manifest);
+    try db.exec("create table _zova_ext_reopen_fail_meta (key text primary key, value text not null)");
+    try db.exec("insert into _zova_ext_reopen_fail_meta (key, value) values ('mode', 'install')");
+}
+
+fn reopenRegisterFailExtensionCheck(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
+    try extension_impl.validateManifest(manifest);
+    var stmt = try db.prepare("select value from _zova_ext_reopen_fail_meta where key = 'mode'");
+    defer stmt.deinit();
+    if ((try stmt.step()) != .row) return error.ExtensionInvalid;
+}
+
+fn reopenRegisterFailExtensionDrop(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
+    try extension_impl.validateManifest(manifest);
+    try db.exec("drop table _zova_ext_reopen_fail_meta");
+}
+
+fn reopenRegisterFailExtensionRegisterSql(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
+    try extension_impl.validateManifest(manifest);
+    var mode = try db.prepare("select value from _zova_ext_reopen_fail_meta where key = 'mode'");
+    defer mode.deinit();
+    if ((try mode.step()) != .row) return error.ExtensionInvalid;
+    if (std.mem.eql(u8, mode.columnText(0), "fail")) return error.ExtensionInvalid;
+
+    const rc = sqlite.c.sqlite3_create_function_v2(
+        db.handle,
+        "zova_reopen_fail_value",
+        0,
+        sqlite.c.SQLITE_UTF8,
+        null,
+        reopenFailValueFunc,
+        null,
+        null,
+        null,
+    );
+    if (rc != sqlite.c.SQLITE_OK) return error.SqliteError;
+    try db.exec("update _zova_ext_reopen_fail_meta set value = 'fail' where key = 'mode'");
+}
+
+fn secondSqlExtensionInstall(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
+    try extension_impl.validateManifest(manifest);
+    try db.exec("create table _zova_ext_test_two_meta (key text primary key, value text not null)");
+    var stmt = try db.prepare("insert into _zova_ext_test_two_meta (key, value) values ('installed', ?)");
+    defer stmt.deinit();
+    try stmt.bindText(1, manifest.version);
+    std.debug.assert((try stmt.step()) == .done);
+}
+
+fn secondSqlExtensionCheck(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
+    try extension_impl.validateManifest(manifest);
+    var stmt = try db.prepare("select value from _zova_ext_test_two_meta where key = 'installed'");
+    defer stmt.deinit();
+    switch (try stmt.step()) {
+        .row => if (!std.mem.eql(u8, stmt.columnText(0), manifest.version)) return error.ExtensionInvalid,
+        .done => return error.ExtensionInvalid,
+    }
+
+    var scalar = try db.prepare("select zova_test_extension_two_value()");
+    defer scalar.deinit();
+    if ((try scalar.step()) != .row) return error.ExtensionInvalid;
+    if (scalar.columnInt64(0) != 42) return error.ExtensionInvalid;
+}
+
+fn secondSqlExtensionDrop(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
+    try extension_impl.validateManifest(manifest);
+    try db.exec("drop table _zova_ext_test_two_meta");
+}
+
+fn secondSqlExtensionRegisterSql(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
+    try extension_impl.validateManifest(manifest);
+    const rc = sqlite.c.sqlite3_create_function_v2(
+        db.handle,
+        "zova_test_extension_two_value",
+        0,
+        sqlite.c.SQLITE_UTF8,
+        null,
+        secondSqlExtensionValueFunc,
+        null,
+        null,
+        null,
+    );
+    if (rc != sqlite.c.SQLITE_OK) return error.SqliteError;
+}
+
 fn escapingExtensionInstall(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
     try extension_impl.validateManifest(manifest);
     try db.exec("create table _zova_ext_escape_meta (key text primary key, value text not null)");
@@ -4001,6 +4249,18 @@ fn testExtensionValueFunc(ctx: ?*sqlite.c.sqlite3_context, argc: c_int, argv: [*
     _ = argv;
     if (argc != 0) return;
     sqlite.c.sqlite3_result_int64(ctx, 7);
+}
+
+fn reopenFailValueFunc(ctx: ?*sqlite.c.sqlite3_context, argc: c_int, argv: [*c]?*sqlite.c.sqlite3_value) callconv(.c) void {
+    _ = argv;
+    if (argc != 0) return;
+    sqlite.c.sqlite3_result_int64(ctx, 13);
+}
+
+fn secondSqlExtensionValueFunc(ctx: ?*sqlite.c.sqlite3_context, argc: c_int, argv: [*c]?*sqlite.c.sqlite3_value) callconv(.c) void {
+    _ = argv;
+    if (argc != 0) return;
+    sqlite.c.sqlite3_result_int64(ctx, 42);
 }
 
 test "zova database rejects non zova paths" {
