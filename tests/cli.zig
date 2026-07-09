@@ -3669,7 +3669,9 @@ fn runZigBridgeArtifactCommand(
     defer allocator.free(zova_root_path);
     const zova_arg = try std.fmt.allocPrint(allocator, "-Mzova={s}", .{zova_root_path});
     defer allocator.free(zova_arg);
-    const sqlite_include_path = try std.fs.path.join(allocator, &.{ cli.source_root, "vendor/sqlite3.53.2" });
+    const sqlite_vendor_dir = try std.fmt.allocPrint(allocator, "sqlite{s}", .{zova.version.sqlite_version});
+    defer allocator.free(sqlite_vendor_dir);
+    const sqlite_include_path = try std.fs.path.join(allocator, &.{ cli.source_root, "vendor", sqlite_vendor_dir });
     defer allocator.free(sqlite_include_path);
 
     const command = comptime if (std.mem.eql(u8, mode, "build-obj"))

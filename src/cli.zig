@@ -1419,7 +1419,9 @@ fn extensionBuildCommand(allocator: std.mem.Allocator, parsed: ExtensionCommandA
     defer allocator.free(global_cache_path);
     const zova_root_path = try std.fs.path.join(allocator, &.{ source_root, "src/root.zig" });
     defer allocator.free(zova_root_path);
-    const sqlite_include_path = try std.fs.path.join(allocator, &.{ source_root, "vendor/sqlite3.53.2" });
+    const sqlite_vendor_dir = try std.fmt.allocPrint(allocator, "sqlite{s}", .{zova.version.sqlite_version});
+    defer allocator.free(sqlite_vendor_dir);
+    const sqlite_include_path = try std.fs.path.join(allocator, &.{ source_root, "vendor", sqlite_vendor_dir });
     defer allocator.free(sqlite_include_path);
 
     const argv = [_][]const u8{

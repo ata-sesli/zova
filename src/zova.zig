@@ -1722,8 +1722,12 @@ fn initializeMetadata(db: *sqlite.Database) sqlite.Error!void {
         \\  value text not null
         \\);
         \\insert into _zova_meta (key, value) values ('magic', 'zova');
-        \\insert into _zova_meta (key, value) values ('format_version', '6');
     );
+
+    var insert_format = try db.prepare("insert into _zova_meta (key, value) values ('format_version', ?)");
+    defer insert_format.deinit();
+    try insert_format.bindText(1, format_version);
+    std.debug.assert((try insert_format.step()) == .done);
 
     var insert_id = try db.prepare("insert into _zova_meta (key, value) values ('database_id', ?)");
     defer insert_id.deinit();
