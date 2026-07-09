@@ -421,7 +421,7 @@ test "cli extension verify smoke runs install and check hooks" {
 
     var smoke = try runCli(&.{ "zova", "extension", "verify", "--json", "--smoke", bundle_path });
     defer smoke.deinit();
-    try std.testing.expectEqual(@as(u8, 0), smoke.code);
+    try expectCliCode(&smoke, 0);
     try expectFileExists(std.Io.Dir.cwd(), marker_path);
 }
 
@@ -464,15 +464,13 @@ test "cli extension verify smoke uses os temp directory" {
     try std.testing.expectEqual(@as(u8, 0), pack.code);
 
     try std.Io.Dir.cwd().createDirPath(defaultIo(), smoke_cwd);
-    const original_cwd = try std.process.currentPathAlloc(defaultIo(), std.testing.allocator);
-    defer std.testing.allocator.free(original_cwd);
-    try std.process.setCurrentPath(defaultIo(), smoke_cwd);
-    defer std.process.setCurrentPath(defaultIo(), original_cwd) catch {};
-
-    var smoke = try runCli(&.{ "zova", "extension", "verify", "--json", "--smoke", absolute_bundle_path });
+    var smoke = try runCliProcessInCwd(&.{ "zova", "extension", "verify", "--json", "--smoke", absolute_bundle_path }, smoke_cwd);
     defer smoke.deinit();
-    try std.testing.expectEqual(@as(u8, 0), smoke.code);
-    try expectPathMissing(".zig-cache");
+    try expectCliCode(&smoke, 0);
+
+    var smoke_cache_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const smoke_cache_path = try std.fmt.bufPrint(&smoke_cache_buffer, "{s}/.zig-cache", .{smoke_cwd});
+    try expectPathMissing(smoke_cache_path);
 }
 
 test "cli extension verify smoke contains hook errors in child process" {
@@ -3442,6 +3440,41 @@ fn runCli(args: []const []const u8) !CliResult {
     };
 }
 
+fn runCliProcessInCwd(args: []const []const u8, cwd: []const u8) !CliResult {
+    if (args.len == 0) return error.InvalidArguments;
+
+    const allocator = std.testing.allocator;
+    const exe_path = try absolutePathAlloc(cli.zova_exe_path);
+    defer allocator.free(exe_path);
+
+    const argv = try allocator.alloc([]const u8, args.len);
+    defer allocator.free(argv);
+    argv[0] = exe_path;
+    @memcpy(argv[1..], args[1..]);
+
+    var result = try runProcessForTestInCwd(argv, null, null, cwd);
+    errdefer result.deinit();
+    return .{
+        .code = result.code,
+        .stdout = result.stdout,
+        .stderr = result.stderr,
+    };
+}
+
+fn expectCliCode(result: *const CliResult, expected: u8) !void {
+    if (result.code != expected) {
+        std.debug.print(
+            \\expected CLI exit code {d}, found {d}
+            \\stdout:
+            \\{s}
+            \\stderr:
+            \\{s}
+            \\
+        , .{ expected, result.code, result.stdout, result.stderr });
+    }
+    try std.testing.expectEqual(expected, result.code);
+}
+
 fn createHealthyDatabase(path: [:0]const u8) !void {
     var db = try zova.Database.create(path);
     defer db.deinit();
@@ -3746,19 +3779,33 @@ fn runZigBridgeArtifactCommand(
 }
 
 fn runProcessForTest(argv: []const []const u8, cache_path: ?[]const u8, global_cache_path: ?[]const u8) !ProcessResult {
+    return runProcessForTestInCwd(argv, cache_path, global_cache_path, null);
+}
+
+fn runProcessForTestInCwd(argv: []const []const u8, cache_path: ?[]const u8, global_cache_path: ?[]const u8, cwd: ?[]const u8) !ProcessResult {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
     var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();
-    try env.put("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
+    try copyTestEnv(&env, "PATH");
+    if (env.get("PATH") == null) try env.put("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
+    try copyTestEnv(&env, "HOME");
+    try copyTestEnv(&env, "TMPDIR");
+    try copyTestEnv(&env, "TMP");
+    try copyTestEnv(&env, "TEMP");
+    try copyTestEnv(&env, "DYLD_LIBRARY_PATH");
+    try copyTestEnv(&env, "LD_LIBRARY_PATH");
+    try copyTestEnv(&env, "ZIG_GLOBAL_CACHE_DIR");
     if (global_cache_path) |path| {
         try env.put("ZIG_GLOBAL_CACHE_DIR", path);
         try env.put("HOME", path);
     }
     if (cache_path) |path| try env.put("TMPDIR", path);
 
+    const child_cwd: std.process.Child.Cwd = if (cwd) |path| .{ .path = path } else .inherit;
     const result = try std.process.run(std.testing.allocator, threaded.io(), .{
         .argv = argv,
+        .cwd = child_cwd,
         .environ_map = &env,
         .stdout_limit = .limited(1024 * 1024),
         .stderr_limit = .limited(1024 * 1024),
@@ -3771,6 +3818,11 @@ fn runProcessForTest(argv: []const []const u8, cache_path: ?[]const u8, global_c
         .stdout = result.stdout,
         .stderr = result.stderr,
     };
+}
+
+fn copyTestEnv(env: *std.process.Environ.Map, name: [:0]const u8) !void {
+    const value = std.c.getenv(name.ptr) orelse return;
+    try env.put(name, std.mem.span(value));
 }
 
 fn absolutePathAlloc(path: []const u8) ![]u8 {
