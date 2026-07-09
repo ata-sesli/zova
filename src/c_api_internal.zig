@@ -46,6 +46,7 @@
 const std = @import("std");
 const zova = @import("zova.zig");
 const sqlite = @import("sqlite.zig");
+const zova_version = @import("version.zig");
 
 const allocator = std.heap.c_allocator;
 
@@ -1055,19 +1056,19 @@ pub const zova_graph_walk_request = extern struct {
 
 // Version helpers describe the C ABI boundary, not the .zova file format.
 pub fn zova_abi_version_major() callconv(.c) u32 {
-    return 0;
+    return zova_version.abi_version_major;
 }
 
 pub fn zova_abi_version_minor() callconv(.c) u32 {
-    return 21;
+    return zova_version.abi_version_minor;
 }
 
 pub fn zova_abi_version_patch() callconv(.c) u32 {
-    return 2;
+    return zova_version.abi_version_patch;
 }
 
 pub fn zova_abi_version_string() callconv(.c) [*:0]const u8 {
-    return "0.21.2";
+    return zova_version.abi_version_string;
 }
 
 // Accept a raw integer instead of a Zig enum so accidental or future C enum
@@ -3160,6 +3161,16 @@ fn f32AbiValues(values: []const f32) zova_vector_values {
     };
 }
 
+fn i8AbiValues(values: []const i8) zova_vector_values {
+    return .{
+        .element_type = @intFromEnum(zova_vector_element_type.I8),
+        .f32_values = null,
+        .f16_values = null,
+        .i8_values = if (values.len == 0) null else values.ptr,
+        .values_len = values.len,
+    };
+}
+
 fn graphTargetTypeFromAbi(target_type: c_int) ?zova.GraphTargetType {
     return switch (target_type) {
         @intFromEnum(zova_graph_target_type.NONE) => .none,
@@ -3906,10 +3917,10 @@ fn statusName(status: c_int) [*:0]const u8 {
 }
 
 test "c abi status names and versions are stable" {
-    try std.testing.expectEqual(@as(u32, 0), zova_abi_version_major());
-    try std.testing.expectEqual(@as(u32, 21), zova_abi_version_minor());
-    try std.testing.expectEqual(@as(u32, 2), zova_abi_version_patch());
-    try std.testing.expectEqualStrings("0.21.2", std.mem.span(zova_abi_version_string()));
+    try std.testing.expectEqual(zova_version.abi_version_major, zova_abi_version_major());
+    try std.testing.expectEqual(zova_version.abi_version_minor, zova_abi_version_minor());
+    try std.testing.expectEqual(zova_version.abi_version_patch, zova_abi_version_patch());
+    try std.testing.expectEqualStrings(zova_version.abi_version_string, std.mem.span(zova_abi_version_string()));
     try std.testing.expectEqualStrings("ZOVA_OK", std.mem.span(zova_status_name(@intFromEnum(zova_status.OK))));
     try std.testing.expectEqualStrings("ZOVA_OBJECT_NOT_FOUND", std.mem.span(zova_status_name(@intFromEnum(zova_status.OBJECT_NOT_FOUND))));
     try std.testing.expectEqualStrings("ZOVA_BOUND_STORE_INVALID", std.mem.span(zova_status_name(@intFromEnum(zova_status.BOUND_STORE_INVALID))));
@@ -4140,6 +4151,46 @@ fn sqlFunctionError(_: ?*anyopaque, _: ?*const zova_sql_function_call, out: ?*zo
     out.?.* = .{ .result_type = @intFromEnum(zova_sql_result_type.ERROR), .error_message = "callback failed".ptr, .error_message_len = "callback failed".len };
 }
 
+fn sqlFunctionContains(_: ?*anyopaque, call: ?*const zova_sql_function_call, out: ?*zova_sql_result) callconv(.c) void {
+    const args = call.?.argv.?[0..call.?.argc];
+    if (args.len != 2 or args[0].value_type != .TEXT or args[1].value_type != .TEXT) {
+        out.?.* = .{ .result_type = @intFromEnum(zova_sql_result_type.ERROR), .error_message = "regexp expects two text args".ptr, .error_message_len = "regexp expects two text args".len };
+        return;
+    }
+    const needle = bytesFromAny(args[0].data, args[0].data_len);
+    const haystack = bytesFromAny(args[1].data, args[1].data_len);
+    const matched = std.mem.indexOf(u8, haystack, needle) != null;
+    out.?.* = .{ .result_type = @intFromEnum(zova_sql_result_type.INTEGER), .int64_value = @intFromBool(matched) };
+}
+
+fn sqlFunctionContainsIgnoreCase(_: ?*anyopaque, call: ?*const zova_sql_function_call, out: ?*zova_sql_result) callconv(.c) void {
+    const args = call.?.argv.?[0..call.?.argc];
+    if (args.len != 2 or args[0].value_type != .TEXT or args[1].value_type != .TEXT) {
+        out.?.* = .{ .result_type = @intFromEnum(zova_sql_result_type.ERROR), .error_message = "iregexp expects two text args".ptr, .error_message_len = "iregexp expects two text args".len };
+        return;
+    }
+    const needle = bytesFromAny(args[0].data, args[0].data_len);
+    const haystack = bytesFromAny(args[1].data, args[1].data_len);
+    const matched = asciiContainsIgnoreCase(haystack, needle);
+    out.?.* = .{ .result_type = @intFromEnum(zova_sql_result_type.INTEGER), .int64_value = @intFromBool(matched) };
+}
+
+fn asciiContainsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+    for (0..haystack.len - needle.len + 1) |start| {
+        var matched = true;
+        for (needle, 0..) |needle_byte, offset| {
+            if (std.ascii.toLower(haystack[start + offset]) != std.ascii.toLower(needle_byte)) {
+                matched = false;
+                break;
+            }
+        }
+        if (matched) return true;
+    }
+    return false;
+}
+
 fn bytesFromAny(ptr: ?*const anyopaque, len: usize) []const u8 {
     const many: [*]const u8 = @ptrCast(ptr.?);
     return many[0..len];
@@ -4345,6 +4396,227 @@ test "c abi registers scalar sql functions on zova owned connections" {
     try std.testing.expect(!state.destroyed);
     try std.testing.expectEqual(zova_status.OK, zova_database_close(db));
     try std.testing.expect(state.destroyed);
+}
+
+test "c abi app regexp callbacks coexist with fts5 on zova owned connection" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-fts-regexp.zova", .{tmp.sub_path[0..]});
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(db);
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_register_function(&.{
+        .db = db,
+        .name = "regexp",
+        .arity = 2,
+        .flags = ZOVA_SQL_FUNCTION_DETERMINISTIC | ZOVA_SQL_FUNCTION_INNOCUOUS,
+        .user_data = null,
+        .callback = sqlFunctionContains,
+        .destroy = null,
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_register_function(&.{
+        .db = db,
+        .name = "iregexp",
+        .arity = 2,
+        .flags = ZOVA_SQL_FUNCTION_DETERMINISTIC | ZOVA_SQL_FUNCTION_INNOCUOUS,
+        .user_data = null,
+        .callback = sqlFunctionContainsIgnoreCase,
+        .destroy = null,
+    }));
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = db, .sql =
+        \\create virtual table docs using fts5(body);
+        \\insert into docs (body) values ('zova wraps sqlite');
+        \\insert into docs (body) values ('plain unrelated row');
+    }));
+
+    var stmt: ?*zova_statement = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_prepare(&.{
+        .db = db,
+        .sql = "select body from docs where docs match 'sqlite' and regexp('zova', body) and iregexp('SQLITE', body)",
+        .out_statement = &stmt,
+    }));
+    defer _ = zova_statement_finalize(stmt);
+
+    var step_result: zova_step_result = undefined;
+    try std.testing.expectEqual(zova_status.OK, zova_statement_step(&.{ .statement = stmt, .out_result = &step_result }));
+    try std.testing.expectEqual(zova_step_result.ROW, step_result);
+
+    var text = zova_text{ .data = null, .len = 0 };
+    defer zova_text_free(&text);
+    try std.testing.expectEqual(zova_status.OK, zova_statement_column_text(&.{ .statement = stmt, .index = 0, .out_text = &text }));
+    try std.testing.expectEqualStrings("zova wraps sqlite", text.data.?[0..text.len]);
+
+    try std.testing.expectEqual(zova_status.OK, zova_statement_step(&.{ .statement = stmt, .out_result = &step_result }));
+    try std.testing.expectEqual(zova_step_result.DONE, step_result);
+}
+
+test "c abi app callbacks coexist with bundled extension vector graph and notification sql" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-coexistence.zova", .{tmp.sub_path[0..]});
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(db);
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_register_function(&.{
+        .db = db,
+        .name = "regexp",
+        .arity = 2,
+        .flags = ZOVA_SQL_FUNCTION_DETERMINISTIC | ZOVA_SQL_FUNCTION_INNOCUOUS,
+        .user_data = null,
+        .callback = sqlFunctionContains,
+        .destroy = null,
+    }));
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_extension_install(&.{
+        .db = db,
+        .name = "trgm",
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_extension_check(&.{
+        .db = db,
+        .name = "trgm",
+    }));
+
+    try std.testing.expectEqual(zova_status.OK, zova_vector_collection_create(&.{
+        .db = db,
+        .name = "co_vectors",
+        .options = .{ .dimensions = 2, .metric = @intFromEnum(zova_vector_metric.L2), .element_type = @intFromEnum(zova_vector_element_type.I8) },
+    }));
+    const near = [_]i8{ 1, 0 };
+    const far = [_]i8{ 5, 0 };
+    try std.testing.expectEqual(zova_status.OK, zova_vector_put(&.{
+        .db = db,
+        .collection_name = "co_vectors",
+        .vector_id = "near",
+        .values = i8AbiValues(&near),
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_vector_put(&.{
+        .db = db,
+        .collection_name = "co_vectors",
+        .vector_id = "far",
+        .values = i8AbiValues(&far),
+    }));
+
+    try std.testing.expectEqual(zova_status.OK, zova_graph_create(&.{ .db = db, .name = "co_graph" }));
+    try std.testing.expectEqual(zova_status.OK, zova_graph_node_put(&.{
+        .db = db,
+        .graph_name = "co_graph",
+        .node_id = "near",
+        .kind = "vector",
+        .target_type = @intFromEnum(zova_graph_target_type.VECTOR),
+        .target_namespace = "co_vectors",
+        .target_ref = "near",
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_graph_node_put(&.{
+        .db = db,
+        .graph_name = "co_graph",
+        .node_id = "far",
+        .kind = "vector",
+        .target_type = @intFromEnum(zova_graph_target_type.VECTOR),
+        .target_namespace = "co_vectors",
+        .target_ref = "far",
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_graph_edge_put(&.{
+        .db = db,
+        .graph_name = "co_graph",
+        .from_node_id = "near",
+        .edge_type = "compares_to",
+        .to_node_id = "far",
+    }));
+
+    {
+        var statement: ?*zova_statement = null;
+        try std.testing.expectEqual(zova_status.OK, zova_database_prepare(&.{
+            .db = db,
+            .sql = "select regexp('zova', 'zova callbacks')",
+            .out_statement = &statement,
+        }));
+        defer _ = zova_statement_finalize(statement);
+
+        var step_result: zova_step_result = undefined;
+        try std.testing.expectEqual(zova_status.OK, zova_statement_step(&.{ .statement = statement, .out_result = &step_result }));
+        try std.testing.expectEqual(zova_step_result.ROW, step_result);
+        var matched: i64 = 0;
+        try std.testing.expectEqual(zova_status.OK, zova_statement_column_int64(&.{ .statement = statement, .index = 0, .out_value = &matched }));
+        try std.testing.expectEqual(@as(i64, 1), matched);
+    }
+
+    {
+        var statement: ?*zova_statement = null;
+        try std.testing.expectEqual(zova_status.OK, zova_database_prepare(&.{
+            .db = db,
+            .sql = "select zova_notify('coexistence', 'ok')",
+            .out_statement = &statement,
+        }));
+        defer _ = zova_statement_finalize(statement);
+
+        var step_result: zova_step_result = undefined;
+        try std.testing.expectEqual(zova_status.OK, zova_statement_step(&.{ .statement = statement, .out_result = &step_result }));
+        try std.testing.expectEqual(zova_step_result.ROW, step_result);
+    }
+
+    {
+        const query = [_]u8{ 1, 0 };
+        var statement: ?*zova_statement = null;
+        try std.testing.expectEqual(zova_status.OK, zova_database_prepare(&.{
+            .db = db,
+            .sql = "select vector_id from zova_vector_search where collection = 'co_vectors' and query_vector = zova_vector_encode_i8(?) and top_k = 1 order by rank",
+            .out_statement = &statement,
+        }));
+        defer _ = zova_statement_finalize(statement);
+        try std.testing.expectEqual(zova_status.OK, zova_statement_bind_blob(&.{ .statement = statement, .index = 1, .data = &query, .len = query.len }));
+
+        var step_result: zova_step_result = undefined;
+        try std.testing.expectEqual(zova_status.OK, zova_statement_step(&.{ .statement = statement, .out_result = &step_result }));
+        try std.testing.expectEqual(zova_step_result.ROW, step_result);
+
+        var text = zova_text{ .data = null, .len = 0 };
+        defer zova_text_free(&text);
+        try std.testing.expectEqual(zova_status.OK, zova_statement_column_text(&.{ .statement = statement, .index = 0, .out_text = &text }));
+        try std.testing.expectEqualStrings("near", text.data.?[0..text.len]);
+    }
+
+    {
+        var statement: ?*zova_statement = null;
+        try std.testing.expectEqual(zova_status.OK, zova_database_prepare(&.{
+            .db = db,
+            .sql =
+            \\select node_id
+            \\from zova_graph_neighbors
+            \\where graph_name = 'co_graph'
+            \\  and source_node_id = 'near'
+            \\  and direction = 'outgoing'
+            \\  and "limit" = 1
+            ,
+            .out_statement = &statement,
+        }));
+        defer _ = zova_statement_finalize(statement);
+
+        var step_result: zova_step_result = undefined;
+        try std.testing.expectEqual(zova_status.OK, zova_statement_step(&.{ .statement = statement, .out_result = &step_result }));
+        try std.testing.expectEqual(zova_step_result.ROW, step_result);
+
+        var text = zova_text{ .data = null, .len = 0 };
+        defer zova_text_free(&text);
+        try std.testing.expectEqual(zova_status.OK, zova_statement_column_text(&.{ .statement = statement, .index = 0, .out_text = &text }));
+        try std.testing.expectEqualStrings("far", text.data.?[0..text.len]);
+    }
 }
 
 test "c abi open options validate flags and support read-only handles" {

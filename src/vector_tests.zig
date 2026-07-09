@@ -268,6 +268,10 @@ test "typed vector search covers raw i8 and f16 metrics and candidate filtering"
 
     try std.testing.expectError(error.VectorInvalid, db.putVector("i8-cosine", "zero", .{ .i8 = &.{ @as(i8, 0), @as(i8, 0) } }));
     try std.testing.expectError(error.VectorInvalid, db.searchVectors(std.testing.allocator, "i8-cosine", .{ .i8 = &.{ @as(i8, 0), @as(i8, 0) } }, 5));
+    {
+        const candidates = [_][]const u8{"east"};
+        try std.testing.expectError(error.VectorInvalid, db.searchVectorsIn(std.testing.allocator, "i8-cosine", .{ .i8 = &.{ @as(i8, 0), @as(i8, 0) } }, &candidates, 5));
+    }
 
     try db.createVectorCollection("i8-dot", .{ .dimensions = 2, .metric = .dot, .element_type = .i8 });
     try db.putVector("i8-dot", "strong", .{ .i8 = &.{ @as(i8, 4), @as(i8, 0) } });

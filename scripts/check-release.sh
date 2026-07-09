@@ -38,7 +38,8 @@ require_command cargo
 require_command go
 require_command uv
 
-zig fmt --check build.zig build.zig.zon src/root.zig src/sqlite.zig src/zova.zig src/zova_error.zig src/zova_test_support.zig src/extension.zig src/extension_dynamic.zig src/notify.zig src/object.zig src/object_fastcdc.zig src/object_tests.zig src/vector.zig src/vector_tests.zig src/vector_sql.zig src/vector_sql_tests.zig src/graph.zig src/graph_tests.zig src/graph_sql.zig src/graph_sql_tests.zig src/trgm.zig src/trgm_tests.zig src/c_api.zig src/c_api_internal.zig src/c_api_tests.zig src/cli.zig src/main.zig tests/dynamic_extension_fixture.zig tests/e2e.zig tests/cli.zig
+sh scripts/check-versions.sh
+zig fmt --check build.zig build.zig.zon src/root.zig src/version.zig src/sqlite.zig src/zova.zig src/zova_error.zig src/zova_test_support.zig src/extension.zig src/extension_dynamic.zig src/notify.zig src/object.zig src/object_fastcdc.zig src/object_tests.zig src/vector.zig src/vector_tests.zig src/vector_sql.zig src/vector_sql_tests.zig src/graph.zig src/graph_tests.zig src/graph_sql.zig src/graph_sql_tests.zig src/trgm.zig src/trgm_tests.zig src/c_api.zig src/c_api_internal.zig src/c_api_tests.zig src/cli.zig src/main.zig tests/dynamic_extension_fixture.zig tests/e2e.zig tests/cli.zig
 zig build test
 zig build e2e
 zig build c-abi

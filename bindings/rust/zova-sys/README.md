@@ -33,3 +33,13 @@ snapshot. The generated C is compiler output, not a human-authored API.
 This crate exposes raw C ABI declarations. It does not manage pointer lifetime,
 owned buffers, or error mapping for you. The safe `zova` crate handles those
 details.
+
+`zova-sys` is also the first Rust surface for v0.22 SQL callback experiments.
+It exposes the raw C ABI structs and functions for scalar SQL registration and
+trusted `.zovaext` bundle loading. Callbacks are unsafe FFI: argument pointers
+are borrowed for the duration of the call, text/blob/error result bytes are
+copied by Zova before SQLite observes them, and callbacks must not re-enter the
+same `zova_database` handle.
+
+The safe Rust `zova` crate does not yet wrap app-defined SQL callbacks or
+dynamic extension bundle loading. Go and Python callback APIs are also deferred.

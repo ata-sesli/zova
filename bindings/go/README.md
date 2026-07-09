@@ -267,8 +267,10 @@ contract.
 Go exposes lifecycle methods for extensions already present in the current
 process registry. The default registry includes bundled extensions such as
 `trgm`, so Go applications can install, list, check, and drop `trgm` directly.
-App-registered extension authoring and dynamic `.zovaext` loading remain
-native Zig/CLI-only in v0.21.
+The v0.22 C ABI has scalar SQL callback registration and trusted `.zovaext`
+bundle loading, but this Go binding does not expose arbitrary Go callback
+registration yet. Use bundled/process-provided extensions or a host-owned C/Zig
+bridge when SQL functions must run on Zova-owned connections.
 
 See [../../docs/extensions.md](../../docs/extensions.md) for the current host
 contract and trust model. A fuller records/objects/vectors/graphs example lives

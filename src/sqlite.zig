@@ -55,6 +55,48 @@ pub fn version() []const u8 {
     return std.mem.span(c.sqlite3_libversion());
 }
 
+/// Return UTF-8 text from a SQLite scalar function callback.
+///
+/// Zig cannot safely use SQLite's `SQLITE_TRANSIENT` function-pointer macro
+/// directly, so this makes a SQLite-owned copy and asks SQLite to free it.
+pub fn resultText(ctx: *c.sqlite3_context, value: []const u8) void {
+    const raw_copy = c.sqlite3_malloc64(@intCast(value.len + 1)) orelse {
+        c.sqlite3_result_error_nomem(ctx);
+        return;
+    };
+    const copy: [*]u8 = @ptrCast(raw_copy);
+    @memcpy(copy[0..value.len], value);
+    copy[value.len] = 0;
+
+    c.sqlite3_result_text64(
+        ctx,
+        copy,
+        @intCast(value.len),
+        c.sqlite3_free,
+        c.SQLITE_UTF8,
+    );
+}
+
+/// Return blob bytes from a SQLite scalar function callback.
+///
+/// Non-empty blobs are copied into SQLite-owned memory. Empty blobs use
+/// SQLite's zeroblob API so they stay zero-length blobs instead of SQL NULL.
+pub fn resultBlob(ctx: *c.sqlite3_context, value: []const u8) void {
+    if (value.len == 0) {
+        _ = c.sqlite3_result_zeroblob64(ctx, 0);
+        return;
+    }
+
+    const raw_copy = c.sqlite3_malloc64(@intCast(value.len)) orelse {
+        c.sqlite3_result_error_nomem(ctx);
+        return;
+    };
+    const copy: [*]u8 = @ptrCast(raw_copy);
+    @memcpy(copy[0..value.len], value);
+
+    c.sqlite3_result_blob64(ctx, copy, @intCast(value.len), c.sqlite3_free);
+}
+
 /// Explicit SQLite open mode used when callers need to avoid SQLite's default
 /// create-on-open behavior.
 pub const OpenFlags = enum {
@@ -666,6 +708,54 @@ test "vendored sqlite supports fts5 virtual tables" {
     try std.testing.expectEqual(Step.row, try search.step());
     try std.testing.expectEqualStrings("zova wraps sqlite", search.columnText(0));
     try std.testing.expectEqual(Step.done, try search.step());
+}
+
+test "result helpers copy text and blob for extension sql callbacks" {
+    var db = try Database.open(":memory:");
+    defer db.deinit();
+
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_create_function_v2(
+        db.handle,
+        "zova_test_result_text",
+        0,
+        c.SQLITE_UTF8,
+        null,
+        testResultTextFunc,
+        null,
+        null,
+        null,
+    ));
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_create_function_v2(
+        db.handle,
+        "zova_test_result_blob",
+        0,
+        c.SQLITE_UTF8,
+        null,
+        testResultBlobFunc,
+        null,
+        null,
+        null,
+    ));
+
+    var row = try db.prepare("select zova_test_result_text(), zova_test_result_blob()");
+    defer row.deinit();
+
+    try std.testing.expectEqual(Step.row, try row.step());
+    try std.testing.expectEqualStrings("owned text", row.columnText(0));
+    try std.testing.expectEqualSlices(u8, &.{ 0xde, 0xad, 0xbe, 0xef }, row.columnBlob(1));
+    try std.testing.expectEqual(Step.done, try row.step());
+}
+
+fn testResultTextFunc(context: ?*c.sqlite3_context, argc: c_int, argv: [*c]?*c.sqlite3_value) callconv(.c) void {
+    _ = argc;
+    _ = argv;
+    resultText(context.?, "owned text");
+}
+
+fn testResultBlobFunc(context: ?*c.sqlite3_context, argc: c_int, argv: [*c]?*c.sqlite3_value) callconv(.c) void {
+    _ = argc;
+    _ = argv;
+    resultBlob(context.?, &.{ 0xde, 0xad, 0xbe, 0xef });
 }
 
 test "database open leaves user controlled pragmas alone" {

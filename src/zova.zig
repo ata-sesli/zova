@@ -50,6 +50,7 @@ const sqlite = @import("sqlite.zig");
 const trgm_impl = @import("trgm.zig");
 const vector_impl = @import("vector.zig");
 const vector_sql = @import("vector_sql.zig");
+const version = @import("version.zig");
 const zova_error = @import("zova_error.zig");
 
 const metadata_table = "_zova_meta";
@@ -58,7 +59,7 @@ const chunks_table = "_zova_chunks";
 const object_chunks_table = "_zova_object_chunks";
 const bound_stores_table = "_zova_bound_stores";
 const magic_value = "zova";
-const format_version = "6";
+const format_version = version.format_version;
 const bound_object_store_role = "object_store";
 const bound_vector_store_role = "vector_store";
 const bound_object_store_name = "default";
@@ -3332,7 +3333,7 @@ test "created zova database stores metadata" {
 
     try std.testing.expectEqual(sqlite.Step.row, try meta.step());
     try std.testing.expectEqualStrings("format_version", meta.columnText(0));
-    try std.testing.expectEqualStrings("6", meta.columnText(1));
+    try std.testing.expectEqualStrings(format_version, meta.columnText(1));
 
     try std.testing.expectEqual(sqlite.Step.row, try meta.step());
     try std.testing.expectEqualStrings("magic", meta.columnText(0));
@@ -5220,7 +5221,7 @@ test "open rejects current format database missing required object table without
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "6");
+        try testingWriteMetadata(&raw, "zova", format_version);
         try raw.exec(extension_impl.extensions_schema_sql ++ ";");
     }
 
@@ -5245,7 +5246,7 @@ test "open rejects current format database missing required vector table without
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "6");
+        try testingWriteMetadata(&raw, "zova", format_version);
         try raw.exec(extension_impl.extensions_schema_sql ++ ";");
         try raw.exec(object_impl.objects_schema_sql ++ ";");
         try raw.exec(object_impl.chunks_schema_sql ++ ";");
@@ -5272,7 +5273,7 @@ test "open rejects required object table missing required column" {
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "6");
+        try testingWriteMetadata(&raw, "zova", format_version);
         try raw.exec(extension_impl.extensions_schema_sql ++ ";");
         try raw.exec(
             \\create table _zova_objects (
@@ -5312,7 +5313,7 @@ test "open rejects required object table missing required constraint" {
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "6");
+        try testingWriteMetadata(&raw, "zova", format_version);
         try raw.exec(extension_impl.extensions_schema_sql ++ ";");
         try raw.exec(
             \\create table _zova_objects (
@@ -5353,7 +5354,7 @@ test "open rejects fake constraint text in required object table" {
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "6");
+        try testingWriteMetadata(&raw, "zova", format_version);
         try raw.exec(extension_impl.extensions_schema_sql ++ ";");
         try raw.exec(
             \\create table _zova_objects (
@@ -5394,7 +5395,7 @@ test "open rejects required vector table missing required column" {
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "6");
+        try testingWriteMetadata(&raw, "zova", format_version);
         try raw.exec(extension_impl.extensions_schema_sql ++ ";");
         try raw.exec(object_impl.objects_schema_sql ++ ";");
         try raw.exec(object_impl.chunks_schema_sql ++ ";");
@@ -5531,6 +5532,56 @@ test "convert sqlite to zova preserves table rows and source file" {
     }
 }
 
+test "convert sqlite to zova keeps extension adjacent app tables uninstalled" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "extension-adjacent.db");
+
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "extension-adjacent.zova");
+
+    {
+        var source = try sqlite.Database.open(source_path);
+        defer source.deinit();
+
+        try source.exec(
+            \\create table extension_documents (
+            \\  id integer primary key,
+            \\  body text not null
+            \\);
+            \\create table zovaext_cache (
+            \\  key text primary key,
+            \\  value text not null
+            \\);
+            \\insert into extension_documents (body) values ('app owned');
+            \\insert into zovaext_cache (key, value) values ('state', 'kept');
+        );
+    }
+
+    try convertSqliteToZova(source_path, dest_path);
+
+    var dest = try Database.open(dest_path);
+    defer dest.deinit();
+
+    var extensions = try dest.listExtensions(std.testing.allocator);
+    defer extensions.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), extensions.items.len);
+
+    var row = try dest.prepare(
+        \\select d.body, c.value
+        \\from extension_documents d
+        \\join zovaext_cache c on c.key = 'state'
+    );
+    defer row.deinit();
+
+    try std.testing.expectEqual(sqlite.Step.row, try row.step());
+    try std.testing.expectEqualStrings("app owned", row.columnText(0));
+    try std.testing.expectEqualStrings("kept", row.columnText(1));
+    try std.testing.expectEqual(sqlite.Step.done, try row.step());
+}
+
 test "converted zova remains readable through sqlite wrapper" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -5562,7 +5613,7 @@ test "converted zova remains readable through sqlite wrapper" {
     defer meta.deinit();
 
     try std.testing.expectEqual(sqlite.Step.row, try meta.step());
-    try std.testing.expectEqualStrings("6", meta.columnText(0));
+    try std.testing.expectEqualStrings(format_version, meta.columnText(0));
 
     try testingExpectTableCount(&raw, "_zova_objects", 1);
     try testingExpectTableCount(&raw, "_zova_chunks", 1);
@@ -6194,6 +6245,31 @@ test "failed conversion cleans up destination file" {
         var source = try sqlite.Database.open(source_path);
         defer source.deinit();
         try source.exec("create table _zova_user_data (id integer primary key)");
+    }
+
+    try std.testing.expectError(error.ZovaNameConflict, convertSqliteToZova(source_path, dest_path));
+    try std.testing.expectError(error.NotZovaDatabase, Database.open(dest_path));
+}
+
+test "conversion rejects extension private source names and cleans destination" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "extension-private-source.db");
+
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "extension-private-source.zova");
+
+    {
+        var source = try sqlite.Database.open(source_path);
+        defer source.deinit();
+        try source.exec(
+            \\create table _zova_ext_external_documents (
+            \\  id integer primary key,
+            \\  body text not null
+            \\)
+        );
     }
 
     try std.testing.expectError(error.ZovaNameConflict, convertSqliteToZova(source_path, dest_path));

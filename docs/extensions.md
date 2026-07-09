@@ -61,6 +61,12 @@ my_ext.zovaext/
   libmy_ext
 ```
 
+The library name is recorded in `extension.json`. The experimental builder uses
+the platform dynamic-library convention: `my_ext.dll` on Windows,
+`libmy_ext.dylib` on Apple platforms, and `libmy_ext.so` elsewhere. Whatever
+name is chosen, the path must remain relative to the bundle and the native
+artifact must be built against a compatible Zova extension ABI.
+
 `extension.json` contains:
 
 ```json
@@ -199,6 +205,13 @@ The builder path expects the dynamic library to export the configured entrypoint
 symbol, defaulting to `zova_extension_entry`. Empty libraries, missing libraries,
 and missing entrypoint symbols fail during `pack` or `verify --smoke` before the
 bundle can be trusted or installed.
+
+For downstream bridge builds, `zig build-obj` is the simplest fallback shape:
+link the produced object into the host and verify it is non-empty and exports
+the expected C symbols. `zig build-lib -static` should produce a non-empty
+archive with the same symbols; do not trust a static archive unless an explicit
+symbol check passes. These object/static modes are diagnostics for host-owned
+bridge builds, not new `zova extension build` modes.
 
 ## Bundled `trgm`
 
@@ -419,10 +432,20 @@ The callback receives borrowed `zova_sql_value` arguments and fills one
 observes the result, so result buffers only need to stay valid until the
 callback returns. Argument pointers are valid only during the callback.
 
+See `examples/c_callbacks/` for small C snippets covering deterministic scalar
+registration, text/blob arguments and results, and callback error propagation.
+
 Callbacks run while the database handle is inside Zova's serialization boundary.
 They must not re-enter the same `zova_database` handle. The destructor, when
 provided, runs when SQLite releases the registered function, normally during
 database close.
+
+Function flags are caller-selected. Zova does not silently add deterministic,
+direct-only, innocuous, or subtype behavior. Aggregate/window functions, SQLite
+subtype support, and unregister support are deferred v0.22+ decisions.
+Callbacks that should not run from schema contexts such as generated columns,
+indexes, triggers, or views should be registered with
+`ZOVA_SQL_FUNCTION_DIRECT_ONLY`.
 
 This iteration exposes the low-level C ABI and `zova-sys` declarations only.
 Safe high-level Rust, Go, and Python callback APIs are still separate v0.22
@@ -438,6 +461,14 @@ If required extension code is unavailable during verification, the operation
 fails clearly instead of silently treating extension-owned storage as healthy.
 Use diagnostics with the same process registry or CLI `--extension` bundle list
 that the application will use.
+
+SQLite-to-Zova conversion does not install external extensions and never loads
+extension code from the source database. It copies normal application tables,
+indexes, views, and triggers into a new `.zova` file, then initializes Zova core
+metadata. Source objects whose names start with `_zova_`, including
+`_zova_ext_*`, are rejected as reserved and the failed destination is removed.
+Application tables with extension-adjacent names outside that reserved prefix
+remain ordinary app-owned SQL tables.
 
 Salvage support is hook-based. Zova core never copies `_zova_ext_*` tables by
 guessing their meaning. During salvage, core asks installed extension code for
@@ -502,3 +533,35 @@ registry, such as bundled `trgm`, and the C ABI can open handles with explicitly
 trusted `.zovaext` bundles. Stable high-level Rust, Go, and Python extension
 authoring APIs are still deferred. The stable contract is the trust boundary:
 extension code comes from the process, not from the database file.
+
+Use Zig `comptime` helpers where they make extension glue safer, such as
+validating function signatures or generating repetitive registration wrappers.
+Keep direct SQLite calls and the core `zova.sqlite` layer thin and explicit so
+downstream bridge builds remain easy to inspect and debug.
+
+See `examples/zig_bridge/` for a minimal bridge that exposes one C-callable
+smoke function while registering SQL on a Zova-owned connection through a Zig
+extension registry.
+
+## Native Artifact Notes
+
+Native extension artifacts must be built for the target platform and a
+compatible Zova extension ABI. On macOS, build extension bundles and bridge
+objects with the same deployment-target policy used by the host application and
+Zova release artifacts. A library built for a newer macOS deployment target may
+link with warnings or fail in older host deployments.
+
+The current release workflow keeps produced Zova artifacts on the existing
+platform matrix. External extension builders should treat deployment target,
+architecture, and ABI compatibility as part of their own release contract.
+
+## v0.22.0 Stability Limits
+
+v0.22.0 is the first downstream extension-platform release. The stable boundary
+is controlled scalar SQL callbacks through the C ABI, low-level `zova-sys`
+declarations, trusted local `.zovaext` bundle loading, and Zig registry
+injection for native hosts.
+
+Deferred from this release: aggregate/window SQL callbacks, SQLite subtype
+support, unregister APIs, raw `sqlite3 *` exposure as the normal extension path,
+safe high-level Rust callbacks, Go callbacks, and Python callbacks.

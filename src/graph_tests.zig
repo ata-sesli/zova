@@ -7,6 +7,16 @@ const test_support = @import("zova_test_support.zig");
 
 const testingDbPath = test_support.testingDbPath;
 
+fn lowerHexAlloc(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    const digits = "0123456789abcdef";
+    const out = try allocator.alloc(u8, bytes.len * 2);
+    for (bytes, 0..) |byte, index| {
+        out[index * 2] = digits[@intCast(byte >> 4)];
+        out[index * 2 + 1] = digits[@intCast(byte & 0x0f)];
+    }
+    return out;
+}
+
 test "graph CRUD and traversal use application stable node ids" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -76,6 +86,89 @@ test "graph CRUD and traversal use application stable node ids" {
     try std.testing.expectEqual(@as(usize, 3), walk.items.len);
     try std.testing.expectEqualStrings("message:1", walk.items[0].node_id);
     try std.testing.expectEqual(@as(u32, 0), walk.items[0].depth);
+}
+
+test "graph target examples cover records objects chunks and vectors" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "graph-target-examples.zova");
+
+    var db = try zova.Database.create(db_path);
+    defer db.deinit();
+
+    try db.exec("create table records (id text primary key, title text not null)");
+    try db.exec("insert into records (id, title) values ('rec-1', 'record target')");
+
+    const object_id = try db.putObject("object target bytes");
+    const object_ref = try lowerHexAlloc(std.testing.allocator, &object_id);
+    defer std.testing.allocator.free(object_ref);
+
+    const chunk_bytes = "chunk target bytes";
+    const chunk_id = zova.objectChunkId(chunk_bytes);
+    const chunk_ref = try lowerHexAlloc(std.testing.allocator, &chunk_id);
+    defer std.testing.allocator.free(chunk_ref);
+    try db.putObjectChunk(chunk_id, chunk_bytes);
+
+    try db.createVectorCollection("embeddings", .{ .dimensions = 2, .metric = .l2, .element_type = .i8 });
+    try db.putVector("embeddings", "rec-1", .{ .i8 = &.{ @as(i8, 3), @as(i8, -4) } });
+
+    try db.createGraph("targets");
+    try db.putGraphNode(.{
+        .graph_name = "targets",
+        .node_id = "record:rec-1",
+        .kind = "record",
+        .target_type = .record,
+        .target_namespace = "records",
+        .target_ref = "rec-1",
+    });
+    try db.putGraphNode(.{
+        .graph_name = "targets",
+        .node_id = "object:primary",
+        .kind = "object",
+        .target_type = .object,
+        .target_ref = object_ref,
+    });
+    try db.putGraphNode(.{
+        .graph_name = "targets",
+        .node_id = "chunk:primary",
+        .kind = "chunk",
+        .target_type = .object_chunk,
+        .target_ref = chunk_ref,
+    });
+    try db.putGraphNode(.{
+        .graph_name = "targets",
+        .node_id = "vector:rec-1",
+        .kind = "embedding",
+        .target_type = .vector,
+        .target_namespace = "embeddings",
+        .target_ref = "rec-1",
+    });
+
+    const expected = [_]struct {
+        node_id: []const u8,
+        target_type: zova.GraphTargetType,
+        target_namespace: ?[]const u8,
+        target_ref: []const u8,
+    }{
+        .{ .node_id = "record:rec-1", .target_type = .record, .target_namespace = "records", .target_ref = "rec-1" },
+        .{ .node_id = "object:primary", .target_type = .object, .target_namespace = null, .target_ref = object_ref },
+        .{ .node_id = "chunk:primary", .target_type = .object_chunk, .target_namespace = null, .target_ref = chunk_ref },
+        .{ .node_id = "vector:rec-1", .target_type = .vector, .target_namespace = "embeddings", .target_ref = "rec-1" },
+    };
+
+    for (expected) |item| {
+        var node = try db.getGraphNode(std.testing.allocator, "targets", item.node_id);
+        defer node.deinit(std.testing.allocator);
+        try std.testing.expectEqual(item.target_type, node.target_type);
+        if (item.target_namespace) |namespace| {
+            try std.testing.expectEqualStrings(namespace, node.target_namespace.?);
+        } else {
+            try std.testing.expectEqual(@as(?[]u8, null), node.target_namespace);
+        }
+        try std.testing.expectEqualStrings(item.target_ref, node.target_ref.?);
+    }
 }
 
 test "graph validation rejects invalid ids and missing edge endpoints" {

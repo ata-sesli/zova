@@ -3,6 +3,7 @@ set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${1:-$ROOT/bindings/rust/zova-sys/native/generated}"
+VERSION_ZIG="$ROOT/src/version.zig"
 
 require_command() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -12,6 +13,17 @@ require_command() {
 }
 
 require_command zig
+
+SQLITE_VERSION="$(sed -n 's/^[[:space:]]*pub const sqlite_version[[:space:]]*=[[:space:]]*"\([^"]*\)";.*/\1/p' "$VERSION_ZIG" | head -n 1)"
+if [ -z "$SQLITE_VERSION" ]; then
+    echo "could not read sqlite_version from src/version.zig" >&2
+    exit 1
+fi
+SQLITE_DIR="$ROOT/vendor/sqlite$SQLITE_VERSION"
+if [ ! -d "$SQLITE_DIR" ]; then
+    echo "missing SQLite vendor directory: $SQLITE_DIR" >&2
+    exit 1
+fi
 
 ZIG_LIB_DIR="$(zig env | sed -n 's/^[[:space:]]*\.lib_dir[[:space:]]*=[[:space:]]*"\([^"]*\)",[[:space:]]*$/\1/p')"
 if [ -z "$ZIG_LIB_DIR" ]; then
@@ -36,7 +48,7 @@ mkdir -p "$TMP" "$OUT"
 zig build-lib "$ROOT/src/c_api.zig" \
     -ofmt=c \
     -O ReleaseSafe \
-    -I "$ROOT/vendor/sqlite3.53.2" \
+    -I "$SQLITE_DIR" \
     -lc \
     -femit-bin="$OUT/zova_c.c" \
     --cache-dir "$TMP/zig-cache" \
@@ -44,8 +56,8 @@ zig build-lib "$ROOT/src/c_api.zig" \
 
 cp "$ZIG_LIB_DIR/zig.h" "$OUT/zig.h"
 cp "$ROOT/include/zova.h" "$OUT/zova.h"
-cp "$ROOT/vendor/sqlite3.53.2/sqlite3.c" "$OUT/sqlite3.c"
-cp "$ROOT/vendor/sqlite3.53.2/sqlite3.h" "$OUT/sqlite3.h"
-cp "$ROOT/vendor/sqlite3.53.2/sqlite3ext.h" "$OUT/sqlite3ext.h"
+cp "$SQLITE_DIR/sqlite3.c" "$OUT/sqlite3.c"
+cp "$SQLITE_DIR/sqlite3.h" "$OUT/sqlite3.h"
+cp "$SQLITE_DIR/sqlite3ext.h" "$OUT/sqlite3ext.h"
 
 echo "generated C bundle written to $OUT"

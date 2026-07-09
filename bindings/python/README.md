@@ -161,7 +161,13 @@ Python exposes lifecycle methods for extensions already present in the current
 process registry. The default registry includes bundled extensions such as
 `trgm`, so Python applications can install, list, check, and drop `trgm`
 directly. App-registered extension authoring and dynamic `.zovaext` loading
-remain native Zig/CLI-only in v0.21.
+are not exposed as Python APIs yet.
+
+The v0.22 C ABI has scalar SQL callback registration and trusted `.zovaext`
+bundle loading, but Python callback conversion, GIL behavior, and callback
+lifetime rules are deferred to a later binding slice. Use bundled extensions,
+trusted extension bundles through the CLI/C layer, or a host-owned bridge when
+SQL functions must run on Zova-owned connections.
 
 See [../../docs/extensions.md](../../docs/extensions.md) for the current host
 contract and trust model. A fuller records/objects/vectors/graphs example lives

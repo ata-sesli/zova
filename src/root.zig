@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const sqlite = @import("sqlite.zig");
+pub const version = @import("version.zig");
 const zova = @import("zova.zig");
 
 pub const Database = zova.Database;
@@ -80,6 +81,20 @@ test "package exports sqlite namespace" {
     try std.testing.expect(@hasDecl(sqlite, "Database"));
     try std.testing.expect(@hasDecl(sqlite, "Statement"));
     try std.testing.expect(@hasDecl(sqlite, "c"));
+}
+
+test "package exports central version constants" {
+    try std.testing.expectEqualStrings(version.package_version, version.abi_version_string);
+    const abi_from_parts = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{}.{}.{}",
+        .{ version.abi_version_major, version.abi_version_minor, version.abi_version_patch },
+    );
+    defer std.testing.allocator.free(abi_from_parts);
+    try std.testing.expectEqualStrings(abi_from_parts, version.abi_version_string);
+    try std.testing.expect(version.format_version.len > 0);
+    try std.testing.expect(version.sqlite_version.len > 0);
+    try std.testing.expect(version.minimum_zig_version.len > 0);
 }
 
 test "package exports zova database namespace" {

@@ -627,7 +627,8 @@ Queue details:
 
 ## Extensions
 
-The v0.21 line includes the extension host plus the first bundled extension,
+The v0.22 line includes the extension host, controlled app-defined SQL
+callbacks, trusted local extension bundles, and the first bundled extension,
 `trgm`.
 
 An extension is trusted process code plus private Zova metadata:
@@ -637,7 +638,8 @@ An extension is trusted process code plus private Zova metadata:
 - extension code is provided by the process, not loaded from the `.zova` file
 - SQL functions or virtual tables are registered on each opened Zova connection
 - install, check, and drop hooks run inside Zova-managed transactions
-- extension registry and private storage live in the main database in v0.21
+- extension registry and private storage live in the main database in the
+  current v0 model
 
 This keeps `.zova` files non-executable. A file may say it requires an
 extension, but the application or CLI process decides which extension code is
@@ -686,7 +688,9 @@ At the low-level C ABI, apps can register scalar SQL functions on Zova-owned
 connections with `zova_database_register_function`. Callback arguments are
 borrowed for the call only, result bytes are copied by Zova, and callbacks must
 not re-enter the same `zova_database` handle. Safe high-level Rust, Go, and
-Python callback APIs are not part of this first v0.22 slice.
+Python callback APIs are not part of this first v0.22 slice. See
+`examples/c_callbacks/` for C callback snippets and `examples/zig_bridge/` for
+a minimal native Zig registry bridge.
 
 `install` succeeds only for extensions registered in the current process or
 bundled with Zova. The default Zova process registry includes `trgm`, so this
@@ -1007,9 +1011,11 @@ Zova `0.21.2` does not include:
 - binding-level dynamic `.zovaext` loading APIs
 - safe high-level Rust, Go, or Python SQL callback APIs
 - ANN indexes such as HNSW or IVFFlat
+- Zova-owned BM25 abstraction
 - vector SQL operators
 - object or chunk virtual tables
 - Cypher, GQL, Gremlin, SPARQL, or Neo4j compatibility
+- graph reconciliation/import engine
 - automatic graph extraction from SQL, documents, or LLM output
 - embedding generation
 - TypeScript or Swift bindings

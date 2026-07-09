@@ -337,6 +337,21 @@ unsafe extern "C" fn sql_destroy(user_data: *mut c_void) {
     state.destroyed += 1;
 }
 
+unsafe extern "C" fn rust_sql_error(
+    _user_data: *mut c_void,
+    _call: *const zova_sys::zova_sql_function_call,
+    out_result: *mut zova_sys::zova_sql_result,
+) {
+    static MESSAGE: &[u8] = b"rust callback failed";
+    (*out_result).result_type = zova_sys::ZOVA_SQL_RESULT_ERROR;
+    (*out_result).int64_value = 0;
+    (*out_result).double_value = 0.0;
+    (*out_result).data = ptr::null();
+    (*out_result).data_len = 0;
+    (*out_result).error_message = MESSAGE.as_ptr().cast();
+    (*out_result).error_message_len = MESSAGE.len();
+}
+
 #[test]
 fn raw_scalar_sql_function_registration_smoke() {
     let path = temp_path("sql-fn");
@@ -414,6 +429,60 @@ fn raw_scalar_sql_function_registration_smoke() {
         assert_eq!(state.destroyed, 0);
         assert_eq!(zova_sys::zova_database_close(db), zova_sys::ZOVA_OK);
         assert_eq!(state.destroyed, 1);
+    }
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn raw_scalar_sql_function_callback_errors_propagate() {
+    let path = temp_path("sql-fn-error");
+    let c_path = CString::new(path.as_str()).unwrap();
+    let mut db = ptr::null_mut();
+    let mut message = zova_sys::zova_message {
+        data: ptr::null_mut(),
+        len: 0,
+    };
+    let create = zova_sys::zova_database_open_request {
+        path: c_path.as_ptr(),
+        out_db: &mut db,
+        out_error_message: &mut message,
+    };
+
+    unsafe {
+        assert_eq!(zova_sys::zova_database_create(&create), zova_sys::ZOVA_OK);
+        assert!(!db.is_null());
+
+        let name = CString::new("rust_fail").unwrap();
+        let register = zova_sys::zova_sql_function_register_request {
+            db,
+            name: name.as_ptr(),
+            arity: 0,
+            flags: 0,
+            user_data: ptr::null_mut(),
+            callback: Some(rust_sql_error),
+            destroy: None,
+        };
+        assert_eq!(
+            zova_sys::zova_database_register_function(&register),
+            zova_sys::ZOVA_OK
+        );
+
+        let sql = CString::new("select rust_fail()").unwrap();
+        let exec = zova_sys::zova_database_exec_request {
+            db,
+            sql: sql.as_ptr(),
+        };
+        assert_eq!(
+            zova_sys::zova_database_exec(&exec),
+            zova_sys::ZOVA_SQLITE_ERROR
+        );
+        let last_error = CStr::from_ptr(zova_sys::zova_database_last_error_message(db))
+            .to_str()
+            .unwrap();
+        assert!(last_error.contains("rust callback failed"));
+
+        assert_eq!(zova_sys::zova_database_close(db), zova_sys::ZOVA_OK);
     }
 
     let _ = std::fs::remove_file(path);

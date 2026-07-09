@@ -246,15 +246,15 @@ fn addSqlite(module: *std.Build.Module, b: *std.Build) void {
 }
 
 fn packageVersion(b: *std.Build) []const u8 {
-    const manifest = b.build_root.handle.readFileAlloc(
+    const version_source = b.build_root.handle.readFileAlloc(
         b.graph.io,
-        "build.zig.zon",
+        "src/version.zig",
         b.allocator,
         .limited(64 * 1024),
-    ) catch @panic("unable to read build.zig.zon");
-    const marker = ".version = \"";
-    const start = std.mem.indexOf(u8, manifest, marker) orelse @panic("build.zig.zon is missing .version");
+    ) catch @panic("unable to read src/version.zig");
+    const marker = "pub const package_version = \"";
+    const start = std.mem.indexOf(u8, version_source, marker) orelse @panic("src/version.zig is missing package_version");
     const value_start = start + marker.len;
-    const value_end = std.mem.indexOfScalarPos(u8, manifest, value_start, '"') orelse @panic("build.zig.zon has malformed .version");
-    return manifest[value_start..value_end];
+    const value_end = std.mem.indexOfScalarPos(u8, version_source, value_start, '"') orelse @panic("src/version.zig has malformed package_version");
+    return version_source[value_start..value_end];
 }

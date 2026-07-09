@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const cli = @import("cli");
 const zova = @import("zova");
 
@@ -584,6 +585,126 @@ test "cli extension verify rejects broken bundle artifacts" {
         try std.testing.expect(std.mem.indexOf(u8, verify.stderr, "ExtensionInvalid") != null or
             std.mem.indexOf(u8, verify.stderr, "ExtensionLoadFailed") != null or
             std.mem.indexOf(u8, verify.stderr, "FileNotFound") != null);
+    }
+}
+
+test "cli extension pack rejects broken source artifacts and removes bundle output" {
+    if (comptime !zova.extension_dynamic.supports_dynamic_loading) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = defaultIo();
+
+    const library_bytes = try std.Io.Dir.cwd().readFileAlloc(io, cli.dynamic_extension_library_path, std.testing.allocator, .limited(64 * 1024 * 1024));
+    defer std.testing.allocator.free(library_bytes);
+
+    const cases = [_]struct {
+        dir_name: []const u8,
+        library: []const u8,
+        entrypoint: ?[]const u8 = null,
+        library_bytes: ?[]const u8 = null,
+    }{
+        .{ .dir_name = "pack_missing_lib", .library = "libmissing" },
+        .{ .dir_name = "pack_empty_lib", .library = "libdyn_test", .library_bytes = "" },
+        .{ .dir_name = "pack_missing_entrypoint", .library = "libdyn_test", .entrypoint = "zova_missing_entry", .library_bytes = library_bytes },
+    };
+
+    for (cases) |case| {
+        try tmp.dir.createDir(io, case.dir_name, .default_dir);
+        const manifest_sub_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/{s}", .{ case.dir_name, zova.extension_dynamic.bundle_manifest_file });
+        defer std.testing.allocator.free(manifest_sub_path);
+        const manifest = try testBuilderManifest("dyn_test", "0.1.0", "_zova_ext_dyn_test_", "sql,dynamic-test", case.library, case.entrypoint);
+        defer std.testing.allocator.free(manifest);
+        try tmp.dir.writeFile(io, .{ .sub_path = manifest_sub_path, .data = manifest });
+        if (case.library_bytes) |bytes| {
+            const library_sub_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/{s}", .{ case.dir_name, case.library });
+            defer std.testing.allocator.free(library_sub_path);
+            try tmp.dir.writeFile(io, .{ .sub_path = library_sub_path, .data = bytes });
+        }
+
+        var dir_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const dir_path = try std.fmt.bufPrint(&dir_buffer, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, case.dir_name });
+        var bundle_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const bundle_path = try std.fmt.bufPrint(&bundle_buffer, ".zig-cache/tmp/{s}/{s}.zovaext", .{ tmp.sub_path, case.dir_name });
+
+        var pack = try runCli(&.{ "zova", "extension", "pack", "--json", dir_path, "--out", bundle_path });
+        defer pack.deinit();
+        try std.testing.expectEqual(@as(u8, 4), pack.code);
+        try std.testing.expect(std.mem.indexOf(u8, pack.stderr, "ExtensionInvalid") != null or
+            std.mem.indexOf(u8, pack.stderr, "ExtensionLoadFailed") != null or
+            std.mem.indexOf(u8, pack.stderr, "FileNotFound") != null);
+        try expectPathMissing(bundle_path);
+    }
+}
+
+test "cli extension build produces symbol-bearing bundle artifact" {
+    if (comptime !zova.extension_dynamic.supports_dynamic_loading) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var extension_dir_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const extension_dir = try std.fmt.bufPrint(&extension_dir_buffer, ".zig-cache/tmp/{s}/artifact_ext", .{tmp.sub_path});
+    var bundle_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const bundle_path = try std.fmt.bufPrint(&bundle_buffer, ".zig-cache/tmp/{s}/artifact_ext.zovaext", .{tmp.sub_path});
+
+    var scaffold = try runCli(&.{ "zova", "extension", "scaffold", "--json", extension_dir, "--name", "artifact_ext", "--version", "0.1.0" });
+    defer scaffold.deinit();
+    try std.testing.expectEqual(@as(u8, 0), scaffold.code);
+
+    var build = try runCli(&.{ "zova", "extension", "build", "--json", extension_dir });
+    defer build.deinit();
+    try std.testing.expectEqual(@as(u8, 0), build.code);
+
+    const library_name = try testDynamicLibraryFileName("artifact_ext");
+    defer std.testing.allocator.free(library_name);
+    const library_path = try std.fs.path.join(std.testing.allocator, &.{ extension_dir, library_name });
+    defer std.testing.allocator.free(library_path);
+    try expectArtifactHasSymbol(library_path, "zova_extension_entry");
+
+    var pack = try runCli(&.{ "zova", "extension", "pack", "--json", extension_dir, "--out", bundle_path });
+    defer pack.deinit();
+    try std.testing.expectEqual(@as(u8, 0), pack.code);
+
+    var verify = try runCli(&.{ "zova", "extension", "verify", "--json", "--smoke", bundle_path });
+    defer verify.deinit();
+    try std.testing.expectEqual(@as(u8, 0), verify.code);
+}
+
+test "downstream bridge object and static artifacts expose extension entrypoint" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = defaultIo();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try std.fmt.bufPrint(&source_buffer, ".zig-cache/tmp/{s}/bridge_artifact_extension.zig", .{tmp.sub_path});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = source_path, .data = simpleArtifactExtensionSource() });
+
+    var object_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const object_path = try std.fmt.bufPrint(&object_buffer, ".zig-cache/tmp/{s}/bridge_artifact_extension.o", .{tmp.sub_path});
+    var object_cache_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const object_cache = try std.fmt.bufPrint(&object_cache_buffer, ".zig-cache/tmp/{s}/object-cache", .{tmp.sub_path});
+    var object_global_cache_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const object_global_cache = try std.fmt.bufPrint(&object_global_cache_buffer, ".zig-cache/tmp/{s}/object-global-cache", .{tmp.sub_path});
+    var object_result = try runZigBridgeArtifactCommand("build-obj", source_path, object_path, object_cache, object_global_cache);
+    defer object_result.deinit();
+    try std.testing.expectEqual(@as(u8, 0), object_result.code);
+    try expectArtifactHasSymbol(object_path, "zova_extension_entry");
+
+    var archive_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const archive_path = try std.fmt.bufPrint(&archive_buffer, ".zig-cache/tmp/{s}/libbridge_artifact_extension.a", .{tmp.sub_path});
+    var archive_cache_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const archive_cache = try std.fmt.bufPrint(&archive_cache_buffer, ".zig-cache/tmp/{s}/archive-cache", .{tmp.sub_path});
+    var archive_global_cache_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const archive_global_cache = try std.fmt.bufPrint(&archive_global_cache_buffer, ".zig-cache/tmp/{s}/archive-global-cache", .{tmp.sub_path});
+    var archive_result = try runZigBridgeArtifactCommand("build-lib-static", source_path, archive_path, archive_cache, archive_global_cache);
+    defer archive_result.deinit();
+    if (archive_result.code == 0) {
+        try expectArtifactHasSymbol(archive_path, "zova_extension_entry");
+    } else {
+        try std.testing.expect(archive_result.stderr.len != 0 or archive_result.stdout.len != 0);
     }
 }
 
@@ -3293,6 +3414,17 @@ const CliResult = struct {
     }
 };
 
+const ProcessResult = struct {
+    code: u8,
+    stdout: []u8,
+    stderr: []u8,
+
+    fn deinit(self: *ProcessResult) void {
+        std.testing.allocator.free(self.stdout);
+        std.testing.allocator.free(self.stderr);
+    }
+};
+
 fn runCli(args: []const []const u8) !CliResult {
     var stdout_buffer: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer stdout_buffer.deinit();
@@ -3499,6 +3631,128 @@ fn expectPathMissing(path: []const u8) !void {
     return error.UnexpectedFile;
 }
 
+fn expectArtifactHasSymbol(path: []const u8, symbol: []const u8) !void {
+    try expectArtifactNonEmpty(path);
+
+    var result = try runSymbolTool(path);
+    defer result.deinit();
+    try std.testing.expectEqual(@as(u8, 0), result.code);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, symbol) != null or
+        std.mem.indexOf(u8, result.stderr, symbol) != null);
+}
+
+fn expectArtifactNonEmpty(path: []const u8) !void {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(defaultIo(), path, std.testing.allocator, .limited(256 * 1024 * 1024));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expect(bytes.len > 0);
+}
+
+fn runSymbolTool(path: []const u8) !ProcessResult {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    const argv = [_][]const u8{ "nm", path };
+    return runProcessForTest(&argv, null, null);
+}
+
+fn runZigBridgeArtifactCommand(
+    comptime mode: []const u8,
+    source_path: []const u8,
+    output_path: []const u8,
+    cache_path: []const u8,
+    global_cache_path: []const u8,
+) !ProcessResult {
+    const allocator = std.testing.allocator;
+    const emit_arg = try std.fmt.allocPrint(allocator, "-femit-bin={s}", .{output_path});
+    defer allocator.free(emit_arg);
+    const root_arg = try std.fmt.allocPrint(allocator, "-Mroot={s}", .{source_path});
+    defer allocator.free(root_arg);
+    const zova_root_path = try std.fs.path.join(allocator, &.{ cli.source_root, "src/root.zig" });
+    defer allocator.free(zova_root_path);
+    const zova_arg = try std.fmt.allocPrint(allocator, "-Mzova={s}", .{zova_root_path});
+    defer allocator.free(zova_arg);
+    const sqlite_include_path = try std.fs.path.join(allocator, &.{ cli.source_root, "vendor/sqlite3.53.2" });
+    defer allocator.free(sqlite_include_path);
+
+    const command = comptime if (std.mem.eql(u8, mode, "build-obj"))
+        "build-obj"
+    else if (std.mem.eql(u8, mode, "build-lib-static"))
+        "build-lib"
+    else
+        @compileError("unsupported bridge artifact command");
+
+    if (comptime std.mem.eql(u8, mode, "build-lib-static")) {
+        const argv = [_][]const u8{
+            cli.zig_exe,
+            command,
+            "-static",
+            "-fPIC",
+            "-lc",
+            emit_arg,
+            "--cache-dir",
+            cache_path,
+            "--global-cache-dir",
+            global_cache_path,
+            "--name",
+            "bridge_artifact_extension",
+            "--dep",
+            "zova",
+            root_arg,
+            "-I",
+            sqlite_include_path,
+            zova_arg,
+        };
+        return runProcessForTest(&argv, cache_path, global_cache_path);
+    }
+
+    const argv = [_][]const u8{
+        cli.zig_exe,
+        command,
+        "-fPIC",
+        "-lc",
+        emit_arg,
+        "--cache-dir",
+        cache_path,
+        "--global-cache-dir",
+        global_cache_path,
+        "--name",
+        "bridge_artifact_extension",
+        "--dep",
+        "zova",
+        root_arg,
+        "-I",
+        sqlite_include_path,
+        zova_arg,
+    };
+    return runProcessForTest(&argv, cache_path, global_cache_path);
+}
+
+fn runProcessForTest(argv: []const []const u8, cache_path: ?[]const u8, global_cache_path: ?[]const u8) !ProcessResult {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
+    if (global_cache_path) |path| {
+        try env.put("ZIG_GLOBAL_CACHE_DIR", path);
+        try env.put("HOME", path);
+    }
+    if (cache_path) |path| try env.put("TMPDIR", path);
+
+    const result = try std.process.run(std.testing.allocator, threaded.io(), .{
+        .argv = argv,
+        .environ_map = &env,
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(1024 * 1024),
+    });
+    return .{
+        .code = switch (result.term) {
+            .exited => |value| @intCast(@min(value, 255)),
+            else => 255,
+        },
+        .stdout = result.stdout,
+        .stderr = result.stderr,
+    };
+}
+
 fn absolutePathAlloc(path: []const u8) ![]u8 {
     if (std.fs.path.isAbsolute(path)) return try std.testing.allocator.dupe(u8, path);
     const cwd = try std.process.currentPathAlloc(defaultIo(), std.testing.allocator);
@@ -3591,6 +3845,88 @@ fn markerExtensionSourceFor(extension_name: []const u8, marker_path: []const u8)
         \\}}
         \\
     , .{ extension_name, extension_name, cli.package_version, marker_path, marker_path });
+}
+
+fn testBuilderManifest(
+    name: []const u8,
+    version: []const u8,
+    storage_prefix: []const u8,
+    capabilities: []const u8,
+    library: []const u8,
+    entrypoint: ?[]const u8,
+) ![]u8 {
+    if (entrypoint) |value| {
+        return std.fmt.allocPrint(std.testing.allocator,
+            \\{{
+            \\  "name": "{s}",
+            \\  "version": "{s}",
+            \\  "storage_prefix": "{s}",
+            \\  "zova_abi_min": "{s}",
+            \\  "capabilities": "{s}",
+            \\  "library": "{s}",
+            \\  "entrypoint": "{s}"
+            \\}}
+            \\
+        , .{ name, version, storage_prefix, cli.package_version, capabilities, library, value });
+    }
+
+    return std.fmt.allocPrint(std.testing.allocator,
+        \\{{
+        \\  "name": "{s}",
+        \\  "version": "{s}",
+        \\  "storage_prefix": "{s}",
+        \\  "zova_abi_min": "{s}",
+        \\  "capabilities": "{s}",
+        \\  "library": "{s}"
+        \\}}
+        \\
+    , .{ name, version, storage_prefix, cli.package_version, capabilities, library });
+}
+
+fn testDynamicLibraryFileName(name: []const u8) ![]u8 {
+    return switch (builtin.os.tag) {
+        .windows => try std.fmt.allocPrint(std.testing.allocator, "{s}.dll", .{name}),
+        .macos, .ios, .tvos, .watchos, .visionos => try std.fmt.allocPrint(std.testing.allocator, "lib{s}.dylib", .{name}),
+        else => try std.fmt.allocPrint(std.testing.allocator, "lib{s}.so", .{name}),
+    };
+}
+
+fn simpleArtifactExtensionSource() []const u8 {
+    return
+    \\const zova = @import("zova");
+    \\
+    \\const HookError = error{ ExtensionInvalid };
+    \\
+    \\const manifest = zova.ExtensionManifest{
+    \\    .name = "bridge_artifact",
+    \\    .version = "0.1.0",
+    \\    .storage_prefix = "_zova_ext_bridge_artifact_",
+    \\    .zova_abi_min = "0.21.2",
+    \\    .capabilities = "artifact-test",
+    \\    .required = true,
+    \\};
+    \\
+    \\const extension = zova.Extension{
+    \\    .manifest = manifest,
+    \\    .install = install,
+    \\    .check = check,
+    \\    .drop = drop,
+    \\};
+    \\
+    \\pub export fn zova_extension_entry() callconv(.c) *const zova.Extension {
+    \\    return &extension;
+    \\}
+    \\
+    \\fn install(_: *zova.sqlite.Database, _: zova.ExtensionManifest) HookError!void {
+    \\}
+    \\
+    \\fn check(_: *zova.sqlite.Database, _: zova.ExtensionManifest) HookError!void {
+    \\}
+    \\
+    \\fn drop(_: *zova.sqlite.Database, _: zova.ExtensionManifest) HookError!void {
+    \\}
+    \\
+    ;
 }
 
 fn failingCheckExtensionSource() []const u8 {
