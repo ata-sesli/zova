@@ -3903,18 +3903,13 @@ fn markerExtensionSourceFor(extension_name: []const u8, marker_path: []const u8)
         \\}}
         \\
         \\fn install(_: *zova.sqlite.Database, _: zova.ExtensionManifest) HookError!void {{
-        \\    var threaded = std.Io.Threaded.init(std.heap.c_allocator, .{{}});
-        \\    defer threaded.deinit();
-        \\    const io = threaded.io();
-        \\    std.Io.Dir.cwd().writeFile(io, .{{ .sub_path = "{s}", .data = "installed" }}) catch return error.ExtensionInvalid;
+        \\    const file = std.c.fopen("{s}", "wb") orelse return error.ExtensionInvalid;
+        \\    defer _ = std.c.fclose(file);
+        \\    if (std.c.fwrite("installed", 1, "installed".len, file) != "installed".len) return error.ExtensionInvalid;
         \\}}
         \\
         \\fn check(_: *zova.sqlite.Database, _: zova.ExtensionManifest) HookError!void {{
-        \\    var threaded = std.Io.Threaded.init(std.heap.c_allocator, .{{}});
-        \\    defer threaded.deinit();
-        \\    const io = threaded.io();
-        \\    var file = std.Io.Dir.cwd().openFile(io, "{s}", .{{}}) catch return error.ExtensionInvalid;
-        \\    file.close(io);
+        \\    if (std.c.access("{s}", std.c.F_OK) != 0) return error.ExtensionInvalid;
         \\}}
         \\
         \\fn drop(_: *zova.sqlite.Database, _: zova.ExtensionManifest) HookError!void {{
