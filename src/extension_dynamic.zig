@@ -6,9 +6,10 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("zova_build_options");
 const extension = @import("extension.zig");
 
-pub const supports_dynamic_loading = builtin.os.tag != .windows;
+pub const supports_dynamic_loading = build_options.enable_dynamic_extensions and builtin.os.tag != .windows;
 const DynamicLibrary = if (supports_dynamic_loading) std.DynLib else struct {};
 
 pub const default_entrypoint = "zova_extension_entry";
@@ -92,6 +93,8 @@ pub const TrustRecord = struct {
     }
 };
 
+const max_json_token_len = 64 * 1024;
+
 pub const TrustedList = struct {
     records: []TrustRecord,
 
@@ -151,7 +154,15 @@ pub const DynamicExtensionSet = struct {
             };
         }
 
-        var libraries: std.ArrayList(DynamicLibrary) = .empty;
+        return loadTrustedBundlesDynamic(allocator, bundle_paths, options);
+    }
+
+    fn loadTrustedBundlesDynamic(
+        allocator: std.mem.Allocator,
+        bundle_paths: []const []const u8,
+        options: TrustStoreOptions,
+    ) Error!DynamicExtensionSet {
+        var libraries: std.ArrayList(std.DynLib) = .empty;
         errdefer {
             for (libraries.items) |*library| library.close();
             libraries.deinit(allocator);
@@ -216,6 +227,10 @@ pub const LoadedBundle = struct {
     pub fn load(allocator: std.mem.Allocator, bundle_path: []const u8) Error!LoadedBundle {
         if (comptime !supports_dynamic_loading) return error.ExtensionLoadFailed;
 
+        return loadDynamic(allocator, bundle_path);
+    }
+
+    fn loadDynamic(allocator: std.mem.Allocator, bundle_path: []const u8) Error!LoadedBundle {
         var info = try loadBundleInfo(allocator, bundle_path);
         defer info.deinit(allocator);
 
@@ -361,13 +376,8 @@ pub fn loadTrusted(allocator: std.mem.Allocator, options: TrustStoreOptions) Err
     };
     defer allocator.free(bytes);
 
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch return error.ExtensionInvalid;
-    defer parsed.deinit();
-    if (std.meta.activeTag(parsed.value) != .object) return error.ExtensionInvalid;
-    const version_value = parsed.value.object.get("version") orelse return error.ExtensionInvalid;
-    if (std.meta.activeTag(version_value) != .integer or version_value.integer != trust_store_version) return error.ExtensionInvalid;
-    const extensions_value = parsed.value.object.get("extensions") orelse return error.ExtensionInvalid;
-    if (std.meta.activeTag(extensions_value) != .array) return error.ExtensionInvalid;
+    var scanner = std.json.Scanner.initCompleteInput(allocator, bytes);
+    defer scanner.deinit();
 
     var records: std.ArrayList(TrustRecord) = .empty;
     errdefer {
@@ -375,15 +385,35 @@ pub fn loadTrusted(allocator: std.mem.Allocator, options: TrustStoreOptions) Err
         records.deinit(allocator);
     }
 
-    for (extensions_value.array.items) |item| {
-        if (std.meta.activeTag(item) != .object) return error.ExtensionInvalid;
-        const record = try parseTrustRecord(allocator, item.object);
-        errdefer {
-            var mutable = record;
-            mutable.deinit(allocator);
+    try expectJsonToken(&scanner, allocator, .object_begin);
+    var saw_version = false;
+    var saw_extensions = false;
+    while (true) {
+        const key = try nextJsonObjectKey(&scanner, allocator) orelse break;
+        defer allocator.free(key);
+        if (std.mem.eql(u8, key, "version")) {
+            if (saw_version) return error.ExtensionInvalid;
+            saw_version = true;
+            if (try expectJsonU32(&scanner, allocator) != trust_store_version) return error.ExtensionInvalid;
+        } else if (std.mem.eql(u8, key, "extensions")) {
+            if (saw_extensions) return error.ExtensionInvalid;
+            saw_extensions = true;
+            try expectJsonToken(&scanner, allocator, .array_begin);
+            while (true) {
+                if (try nextJsonArrayEnd(&scanner, allocator)) break;
+                const record = try parseTrustRecord(allocator, &scanner);
+                errdefer {
+                    var mutable = record;
+                    mutable.deinit(allocator);
+                }
+                try records.append(allocator, record);
+            }
+        } else {
+            return error.ExtensionInvalid;
         }
-        try records.append(allocator, record);
     }
+    if (!saw_version or !saw_extensions) return error.ExtensionInvalid;
+    try expectJsonToken(&scanner, allocator, .end_of_document);
 
     return .{ .records = try records.toOwnedSlice(allocator) };
 }
@@ -445,32 +475,232 @@ fn trustStorePath(allocator: std.mem.Allocator, options: TrustStoreOptions) Erro
 }
 
 fn parseBundleManifest(allocator: std.mem.Allocator, bytes: []const u8) Error!BundleManifest {
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch return error.ExtensionInvalid;
-    defer parsed.deinit();
-    if (std.meta.activeTag(parsed.value) != .object) return error.ExtensionInvalid;
-    const object = parsed.value.object;
+    var scanner = std.json.Scanner.initCompleteInput(allocator, bytes);
+    defer scanner.deinit();
 
-    return .{
-        .name = try allocator.dupe(u8, try jsonString(object, "name")),
-        .version = try allocator.dupe(u8, try jsonString(object, "version")),
-        .storage_prefix = try allocator.dupe(u8, try jsonString(object, "storage_prefix")),
-        .zova_abi_min = try allocator.dupe(u8, try jsonString(object, "zova_abi_min")),
-        .capabilities = try allocator.dupe(u8, try jsonString(object, "capabilities")),
-        .library = try allocator.dupe(u8, try jsonString(object, "library")),
-        .entrypoint = try allocator.dupe(u8, jsonString(object, "entrypoint") catch default_entrypoint),
+    var fields: ManifestFields = .{};
+    errdefer fields.deinit(allocator);
+
+    try expectJsonToken(&scanner, allocator, .object_begin);
+    while (true) {
+        const key = try nextJsonObjectKey(&scanner, allocator) orelse break;
+        defer allocator.free(key);
+        if (std.mem.eql(u8, key, "name")) {
+            if (fields.name != null) return error.ExtensionInvalid;
+            fields.name = try expectJsonStringOwned(&scanner, allocator);
+        } else if (std.mem.eql(u8, key, "version")) {
+            if (fields.version != null) return error.ExtensionInvalid;
+            fields.version = try expectJsonStringOwned(&scanner, allocator);
+        } else if (std.mem.eql(u8, key, "storage_prefix")) {
+            if (fields.storage_prefix != null) return error.ExtensionInvalid;
+            fields.storage_prefix = try expectJsonStringOwned(&scanner, allocator);
+        } else if (std.mem.eql(u8, key, "zova_abi_min")) {
+            if (fields.zova_abi_min != null) return error.ExtensionInvalid;
+            fields.zova_abi_min = try expectJsonStringOwned(&scanner, allocator);
+        } else if (std.mem.eql(u8, key, "capabilities")) {
+            if (fields.capabilities != null) return error.ExtensionInvalid;
+            fields.capabilities = try expectJsonStringOwned(&scanner, allocator);
+        } else if (std.mem.eql(u8, key, "library")) {
+            if (fields.library != null) return error.ExtensionInvalid;
+            fields.library = try expectJsonStringOwned(&scanner, allocator);
+        } else if (std.mem.eql(u8, key, "entrypoint")) {
+            if (fields.entrypoint != null) return error.ExtensionInvalid;
+            fields.entrypoint = try expectJsonOptionalStringOwned(&scanner, allocator, default_entrypoint);
+        } else {
+            return error.ExtensionInvalid;
+        }
+    }
+    try expectJsonToken(&scanner, allocator, .end_of_document);
+    if (fields.entrypoint == null) fields.entrypoint = try allocator.dupe(u8, default_entrypoint);
+
+    const result: BundleManifest = .{
+        .name = fields.name orelse return error.ExtensionInvalid,
+        .version = fields.version orelse return error.ExtensionInvalid,
+        .storage_prefix = fields.storage_prefix orelse return error.ExtensionInvalid,
+        .zova_abi_min = fields.zova_abi_min orelse return error.ExtensionInvalid,
+        .capabilities = fields.capabilities orelse return error.ExtensionInvalid,
+        .library = fields.library orelse return error.ExtensionInvalid,
+        .entrypoint = fields.entrypoint orelse unreachable,
+    };
+    fields = .{};
+    return result;
+}
+
+const ManifestFields = struct {
+    name: ?[]u8 = null,
+    version: ?[]u8 = null,
+    storage_prefix: ?[]u8 = null,
+    zova_abi_min: ?[]u8 = null,
+    capabilities: ?[]u8 = null,
+    library: ?[]u8 = null,
+    entrypoint: ?[]u8 = null,
+
+    fn deinit(self: *ManifestFields, allocator: std.mem.Allocator) void {
+        if (self.name) |value| allocator.free(value);
+        if (self.version) |value| allocator.free(value);
+        if (self.storage_prefix) |value| allocator.free(value);
+        if (self.zova_abi_min) |value| allocator.free(value);
+        if (self.capabilities) |value| allocator.free(value);
+        if (self.library) |value| allocator.free(value);
+        if (self.entrypoint) |value| allocator.free(value);
+    }
+};
+
+const TrustRecordFields = struct {
+    name: ?[]u8 = null,
+    version: ?[]u8 = null,
+    storage_prefix: ?[]u8 = null,
+    bundle_path: ?[]u8 = null,
+    manifest_sha256: ?[64]u8 = null,
+    library_sha256: ?[64]u8 = null,
+    trusted_at_unix: ?i64 = null,
+
+    fn deinit(self: *TrustRecordFields, allocator: std.mem.Allocator) void {
+        if (self.name) |value| allocator.free(value);
+        if (self.version) |value| allocator.free(value);
+        if (self.storage_prefix) |value| allocator.free(value);
+        if (self.bundle_path) |value| allocator.free(value);
+    }
+};
+
+fn parseTrustRecord(allocator: std.mem.Allocator, scanner: *std.json.Scanner) Error!TrustRecord {
+    var fields: TrustRecordFields = .{};
+    errdefer fields.deinit(allocator);
+
+    while (true) {
+        const key = try nextJsonObjectKey(scanner, allocator) orelse break;
+        defer allocator.free(key);
+        if (std.mem.eql(u8, key, "name")) {
+            if (fields.name != null) return error.ExtensionInvalid;
+            fields.name = try expectJsonStringOwned(scanner, allocator);
+        } else if (std.mem.eql(u8, key, "version")) {
+            if (fields.version != null) return error.ExtensionInvalid;
+            fields.version = try expectJsonStringOwned(scanner, allocator);
+        } else if (std.mem.eql(u8, key, "storage_prefix")) {
+            if (fields.storage_prefix != null) return error.ExtensionInvalid;
+            fields.storage_prefix = try expectJsonStringOwned(scanner, allocator);
+        } else if (std.mem.eql(u8, key, "bundle_path")) {
+            if (fields.bundle_path != null) return error.ExtensionInvalid;
+            fields.bundle_path = try expectJsonStringOwned(scanner, allocator);
+        } else if (std.mem.eql(u8, key, "manifest_sha256")) {
+            if (fields.manifest_sha256 != null) return error.ExtensionInvalid;
+            fields.manifest_sha256 = try expectJsonHex64(scanner, allocator);
+        } else if (std.mem.eql(u8, key, "library_sha256")) {
+            if (fields.library_sha256 != null) return error.ExtensionInvalid;
+            fields.library_sha256 = try expectJsonHex64(scanner, allocator);
+        } else if (std.mem.eql(u8, key, "trusted_at_unix")) {
+            if (fields.trusted_at_unix != null) return error.ExtensionInvalid;
+            fields.trusted_at_unix = try expectJsonI64(scanner, allocator);
+        } else {
+            return error.ExtensionInvalid;
+        }
+    }
+
+    const result: TrustRecord = .{
+        .name = fields.name orelse return error.ExtensionInvalid,
+        .version = fields.version orelse return error.ExtensionInvalid,
+        .storage_prefix = fields.storage_prefix orelse return error.ExtensionInvalid,
+        .bundle_path = fields.bundle_path orelse return error.ExtensionInvalid,
+        .manifest_sha256 = fields.manifest_sha256 orelse return error.ExtensionInvalid,
+        .library_sha256 = fields.library_sha256 orelse return error.ExtensionInvalid,
+        .trusted_at_unix = fields.trusted_at_unix orelse return error.ExtensionInvalid,
+    };
+    fields = .{};
+    return result;
+}
+
+fn nextJsonToken(scanner: *std.json.Scanner, allocator: std.mem.Allocator) Error!std.json.Token {
+    return scanner.nextAllocMax(allocator, .alloc_if_needed, max_json_token_len) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.ExtensionInvalid,
     };
 }
 
-fn parseTrustRecord(allocator: std.mem.Allocator, object: std.json.ObjectMap) Error!TrustRecord {
-    return .{
-        .name = try allocator.dupe(u8, try jsonString(object, "name")),
-        .version = try allocator.dupe(u8, try jsonString(object, "version")),
-        .storage_prefix = try allocator.dupe(u8, try jsonString(object, "storage_prefix")),
-        .bundle_path = try allocator.dupe(u8, try jsonString(object, "bundle_path")),
-        .manifest_sha256 = try parseHex64(try jsonString(object, "manifest_sha256")),
-        .library_sha256 = try parseHex64(try jsonString(object, "library_sha256")),
-        .trusted_at_unix = try jsonInteger(object, "trusted_at_unix"),
+fn freeJsonToken(allocator: std.mem.Allocator, token: std.json.Token) void {
+    switch (token) {
+        .allocated_number, .allocated_string => |value| allocator.free(value),
+        else => {},
+    }
+}
+
+fn expectJsonToken(scanner: *std.json.Scanner, allocator: std.mem.Allocator, expected: std.meta.Tag(std.json.Token)) Error!void {
+    const token = try nextJsonToken(scanner, allocator);
+    defer freeJsonToken(allocator, token);
+    if (std.meta.activeTag(token) != expected) return error.ExtensionInvalid;
+}
+
+fn nextJsonObjectKey(scanner: *std.json.Scanner, allocator: std.mem.Allocator) Error!?[]u8 {
+    const token = try nextJsonToken(scanner, allocator);
+    defer freeJsonToken(allocator, token);
+    switch (token) {
+        .object_end => return null,
+        .string, .allocated_string => |value| return try allocator.dupe(u8, value),
+        else => return error.ExtensionInvalid,
+    }
+}
+
+fn nextJsonArrayEnd(scanner: *std.json.Scanner, allocator: std.mem.Allocator) Error!bool {
+    const token = try nextJsonToken(scanner, allocator);
+    defer freeJsonToken(allocator, token);
+    switch (token) {
+        .array_end => return true,
+        .object_begin => return false,
+        else => return error.ExtensionInvalid,
+    }
+}
+
+fn expectJsonStringOwned(scanner: *std.json.Scanner, allocator: std.mem.Allocator) Error![]u8 {
+    const token = try nextJsonToken(scanner, allocator);
+    defer freeJsonToken(allocator, token);
+    switch (token) {
+        .string, .allocated_string => |value| return try allocator.dupe(u8, value),
+        else => return error.ExtensionInvalid,
+    }
+}
+
+fn expectJsonOptionalStringOwned(
+    scanner: *std.json.Scanner,
+    allocator: std.mem.Allocator,
+    default_value: []const u8,
+) Error![]u8 {
+    const token = try nextJsonToken(scanner, allocator);
+    defer freeJsonToken(allocator, token);
+    switch (token) {
+        .null => return try allocator.dupe(u8, default_value),
+        .string, .allocated_string => |value| return try allocator.dupe(u8, value),
+        else => return error.ExtensionInvalid,
+    }
+}
+
+fn expectJsonHex64(scanner: *std.json.Scanner, allocator: std.mem.Allocator) Error![64]u8 {
+    const token = try nextJsonToken(scanner, allocator);
+    defer freeJsonToken(allocator, token);
+    switch (token) {
+        .string, .allocated_string => |value| return parseHex64(value),
+        else => return error.ExtensionInvalid,
+    }
+}
+
+fn expectJsonU32(scanner: *std.json.Scanner, allocator: std.mem.Allocator) Error!u32 {
+    const token = try nextJsonToken(scanner, allocator);
+    defer freeJsonToken(allocator, token);
+    const value = switch (token) {
+        .number, .allocated_number => |raw| raw,
+        else => return error.ExtensionInvalid,
     };
+    if (std.mem.indexOfAny(u8, value, ".eE+") != null) return error.ExtensionInvalid;
+    return std.fmt.parseInt(u32, value, 10) catch return error.ExtensionInvalid;
+}
+
+fn expectJsonI64(scanner: *std.json.Scanner, allocator: std.mem.Allocator) Error!i64 {
+    const token = try nextJsonToken(scanner, allocator);
+    defer freeJsonToken(allocator, token);
+    const value = switch (token) {
+        .number, .allocated_number => |raw| raw,
+        else => return error.ExtensionInvalid,
+    };
+    if (std.mem.indexOfAny(u8, value, ".eE+") != null) return error.ExtensionInvalid;
+    return std.fmt.parseInt(i64, value, 10) catch return error.ExtensionInvalid;
 }
 
 fn trustRecordFromBundleInfo(allocator: std.mem.Allocator, info: BundleInfo) Error!TrustRecord {
@@ -609,18 +839,6 @@ fn parseHex64(value: []const u8) Error![64]u8 {
         out[index] = std.ascii.toLower(byte);
     }
     return out;
-}
-
-fn jsonString(object: std.json.ObjectMap, key: []const u8) Error![]const u8 {
-    const value = object.get(key) orelse return error.ExtensionInvalid;
-    if (std.meta.activeTag(value) != .string) return error.ExtensionInvalid;
-    return value.string;
-}
-
-fn jsonInteger(object: std.json.ObjectMap, key: []const u8) Error!i64 {
-    const value = object.get(key) orelse return error.ExtensionInvalid;
-    if (std.meta.activeTag(value) != .integer) return error.ExtensionInvalid;
-    return value.integer;
 }
 
 fn writeJsonString(writer: *std.Io.Writer, value: []const u8) !void {

@@ -45,14 +45,20 @@ trap cleanup EXIT INT TERM
 rm -rf "$TMP" "$OUT"
 mkdir -p "$TMP" "$OUT"
 
-zig build-lib "$ROOT/src/c_api.zig" \
+BUILD_OPTIONS="$TMP/zova_build_options.zig"
+printf '%s\n' 'pub const enable_dynamic_extensions = false;' >"$BUILD_OPTIONS"
+
+zig build-lib \
     -ofmt=c \
     -O ReleaseSafe \
     -I "$SQLITE_DIR" \
     -lc \
     -femit-bin="$OUT/zova_c.c" \
     --cache-dir "$TMP/zig-cache" \
-    --global-cache-dir "$TMP/global-zig-cache"
+    --global-cache-dir "$TMP/global-zig-cache" \
+    --dep zova_build_options \
+    -Mroot="$ROOT/src/c_api.zig" \
+    -Mzova_build_options="$BUILD_OPTIONS"
 
 cp "$ZIG_LIB_DIR/zig.h" "$OUT/zig.h"
 cp "$ROOT/include/zova.h" "$OUT/zova.h"

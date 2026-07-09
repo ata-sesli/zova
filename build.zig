@@ -4,13 +4,18 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const package_version = packageVersion(b);
-    const supports_dynamic_extension_fixture = target.result.os.tag != .windows;
+    const enable_dynamic_extensions = b.option(bool, "enable-dynamic-extensions", "Enable dynamic .zovaext loading") orelse true;
+    const supports_dynamic_extension_fixture = enable_dynamic_extensions and target.result.os.tag != .windows;
+
+    const zova_build_options = b.addOptions();
+    zova_build_options.addOption(bool, "enable_dynamic_extensions", enable_dynamic_extensions);
 
     const zova_module = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
+    zova_module.addOptions("zova_build_options", zova_build_options);
     addSqlite(zova_module, b);
 
     const zova_dynamic_module = b.createModule(.{
@@ -18,6 +23,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    zova_dynamic_module.addOptions("zova_build_options", zova_build_options);
     zova_dynamic_module.addIncludePath(b.path("vendor/sqlite3.53.2"));
 
     const cli_module = b.createModule(.{
@@ -86,6 +92,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    tests.root_module.addOptions("zova_build_options", zova_build_options);
     addSqlite(tests.root_module, b);
 
     const test_cmd = b.addRunArtifact(tests);
@@ -100,6 +107,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    c_api_tests.root_module.addOptions("zova_build_options", zova_build_options);
     addSqlite(c_api_tests.root_module, b);
     const c_api_test_cmd = b.addRunArtifact(c_api_tests);
     test_step.dependOn(&c_api_test_cmd.step);
@@ -147,6 +155,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    c_abi_lib.root_module.addOptions("zova_build_options", zova_build_options);
     addSqlite(c_abi_lib.root_module, b);
 
     const install_c_abi_lib = b.addInstallArtifact(c_abi_lib, .{});

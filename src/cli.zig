@@ -1288,7 +1288,7 @@ fn extensionCommand(
             return ExitCode.ok;
         },
         .verify => {
-            extensionVerifyCommand(allocator, parsed, stdout) catch |err| return extensionErrorFormat(stderr, "extension-verify", parsed.format, err);
+            extensionVerifyCommand(allocator, parsed, stdout, stderr) catch |err| return extensionErrorFormat(stderr, "extension-verify", parsed.format, err);
             return ExitCode.ok;
         },
         .trust => {
@@ -1423,7 +1423,22 @@ fn extensionBuildCommand(allocator: std.mem.Allocator, parsed: ExtensionCommandA
     defer allocator.free(sqlite_vendor_dir);
     const sqlite_include_path = try std.fs.path.join(allocator, &.{ source_root, "vendor", sqlite_vendor_dir });
     defer allocator.free(sqlite_include_path);
+    const zova_build_options_path = try std.fs.path.join(allocator, &.{ cache_path, "zova_build_options.zig" });
+    defer allocator.free(zova_build_options_path);
+    try std.Io.Dir.cwd().createDirPath(defaultIo(), cache_path);
+    try std.Io.Dir.cwd().writeFile(defaultIo(), .{
+        .sub_path = zova_build_options_path,
+        .data = "pub const enable_dynamic_extensions = true;\n",
+    });
 
+    const emit_arg = try std.fmt.allocPrint(allocator, "-femit-bin={s}", .{output_path});
+    defer allocator.free(emit_arg);
+    const root_arg = try std.fmt.allocPrint(allocator, "-Mroot={s}", .{extension_source_path});
+    defer allocator.free(root_arg);
+    const zova_arg = try std.fmt.allocPrint(allocator, "-Mzova={s}", .{zova_root_path});
+    defer allocator.free(zova_arg);
+    const zova_build_options_arg = try std.fmt.allocPrint(allocator, "-Mzova_build_options={s}", .{zova_build_options_path});
+    defer allocator.free(zova_build_options_arg);
     const argv = [_][]const u8{
         zig_exe,
         "build-lib",
@@ -1431,7 +1446,7 @@ fn extensionBuildCommand(allocator: std.mem.Allocator, parsed: ExtensionCommandA
         "-fPIC",
         "-fallow-shlib-undefined",
         "-lc",
-        try std.fmt.allocPrint(allocator, "-femit-bin={s}", .{output_path}),
+        emit_arg,
         "--cache-dir",
         cache_path,
         "--global-cache-dir",
@@ -1440,14 +1455,14 @@ fn extensionBuildCommand(allocator: std.mem.Allocator, parsed: ExtensionCommandA
         manifest.name,
         "--dep",
         "zova",
-        try std.fmt.allocPrint(allocator, "-Mroot={s}", .{extension_source_path}),
+        root_arg,
         "-I",
         sqlite_include_path,
-        try std.fmt.allocPrint(allocator, "-Mzova={s}", .{zova_root_path}),
+        "--dep",
+        "zova_build_options",
+        zova_arg,
+        zova_build_options_arg,
     };
-    defer allocator.free(argv[6]);
-    defer allocator.free(argv[15]);
-    defer allocator.free(argv[18]);
 
     const process_allocator = std.heap.page_allocator;
     var threaded = std.Io.Threaded.init(process_allocator, .{});
@@ -1514,18 +1529,18 @@ fn extensionPackCommand(allocator: std.mem.Allocator, parsed: ExtensionCommandAr
     try writeExtensionBuilderSuccess(stdout, parsed.format, "extension-pack", dir_path, out_path, follow_up);
 }
 
-fn extensionVerifyCommand(allocator: std.mem.Allocator, parsed: ExtensionCommandArgs, stdout: *std.Io.Writer) !void {
+fn extensionVerifyCommand(allocator: std.mem.Allocator, parsed: ExtensionCommandArgs, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     const bundle_path = parsed.path.?;
     var info = try zova.extension_dynamic.loadBundleInfo(allocator, bundle_path);
     defer info.deinit(allocator);
     try zova.extension_dynamic.verifyBundleEntrypoint(allocator, bundle_path);
     if (parsed.smoke) {
-        try extensionSmokeInstallCheck(allocator, bundle_path, info.manifest.name);
+        try extensionSmokeInstallCheck(allocator, stderr, bundle_path, info.manifest.name);
     }
     try writeExtensionBuilderSuccess(stdout, parsed.format, "extension-verify", bundle_path, bundle_path, null);
 }
 
-fn extensionSmokeInstallCheck(allocator: std.mem.Allocator, bundle_path: []const u8, extension_name: []const u8) !void {
+fn extensionSmokeInstallCheck(allocator: std.mem.Allocator, stderr: *std.Io.Writer, bundle_path: []const u8, extension_name: []const u8) !void {
     const smoke_path = try extensionSmokeTempPath(allocator, extension_name);
     defer allocator.free(smoke_path);
     defer deleteExtensionSmokeDatabaseFiles(allocator, smoke_path);
@@ -1544,7 +1559,7 @@ fn extensionSmokeInstallCheck(allocator: std.mem.Allocator, bundle_path: []const
     const exe_path = try extensionSmokeExecutablePath(allocator);
     defer allocator.free(exe_path);
 
-    try runExtensionSmokeChild(smoke_trust_path, &.{
+    try runExtensionSmokeChild(stderr, smoke_trust_path, &.{
         exe_path,
         "--extension",
         bundle_path,
@@ -1554,7 +1569,7 @@ fn extensionSmokeInstallCheck(allocator: std.mem.Allocator, bundle_path: []const
         smoke_path,
         extension_name,
     });
-    try runExtensionSmokeChild(smoke_trust_path, &.{
+    try runExtensionSmokeChild(stderr, smoke_trust_path, &.{
         exe_path,
         "--extension",
         bundle_path,
@@ -1564,7 +1579,7 @@ fn extensionSmokeInstallCheck(allocator: std.mem.Allocator, bundle_path: []const
         smoke_path,
         extension_name,
     });
-    try runExtensionSmokeChild(smoke_trust_path, &.{
+    try runExtensionSmokeChild(stderr, smoke_trust_path, &.{
         exe_path,
         "--extension",
         bundle_path,
@@ -1590,7 +1605,7 @@ fn isZigTestExecutable(path: []const u8) bool {
     return std.mem.eql(u8, basename, "test") or std.mem.eql(u8, basename, "test.exe");
 }
 
-fn runExtensionSmokeChild(smoke_trust_path: []const u8, argv: []const []const u8) !void {
+fn runExtensionSmokeChild(stderr: *std.Io.Writer, smoke_trust_path: []const u8, argv: []const []const u8) !void {
     const process_allocator = std.heap.page_allocator;
     var threaded = std.Io.Threaded.init(process_allocator, .{});
     defer threaded.deinit();
@@ -1616,9 +1631,57 @@ fn runExtensionSmokeChild(smoke_trust_path: []const u8, argv: []const []const u8
     defer process_allocator.free(result.stderr);
 
     switch (result.term) {
-        .exited => |code| if (code != 0) return error.ExtensionInvalid,
-        else => return error.ExtensionInvalid,
+        .exited => |code| if (code != 0) {
+            writeExtensionSmokeChildFailure(stderr, argv, "exit", code, result.stdout, result.stderr);
+            return error.ExtensionInvalid;
+        },
+        else => {
+            writeExtensionSmokeChildFailure(stderr, argv, "signal", null, result.stdout, result.stderr);
+            return error.ExtensionInvalid;
+        },
     }
+}
+
+fn writeExtensionSmokeChildFailure(
+    stderr: *std.Io.Writer,
+    argv: []const []const u8,
+    term_kind: []const u8,
+    code: ?u8,
+    child_stdout: []const u8,
+    child_stderr: []const u8,
+) void {
+    stderr.writeAll("extension smoke child failed\nargv:") catch return;
+    for (argv) |arg| {
+        stderr.writeByte(' ') catch return;
+        writeShellishArg(stderr, arg) catch return;
+    }
+    if (code) |value| {
+        stderr.print("\nterm: {s} {d}\n", .{ term_kind, value }) catch return;
+    } else {
+        stderr.print("\nterm: {s}\n", .{term_kind}) catch return;
+    }
+    if (child_stdout.len != 0) {
+        stderr.writeAll("child stdout:\n") catch return;
+        stderr.writeAll(child_stdout) catch return;
+        if (child_stdout[child_stdout.len - 1] != '\n') stderr.writeByte('\n') catch return;
+    }
+    if (child_stderr.len != 0) {
+        stderr.writeAll("child stderr:\n") catch return;
+        stderr.writeAll(child_stderr) catch return;
+        if (child_stderr[child_stderr.len - 1] != '\n') stderr.writeByte('\n') catch return;
+    }
+}
+
+fn writeShellishArg(writer: *std.Io.Writer, arg: []const u8) !void {
+    try writer.writeByte('\'');
+    for (arg) |byte| {
+        if (byte == '\'') {
+            try writer.writeAll("'\\''");
+        } else {
+            try writer.writeByte(byte);
+        }
+    }
+    try writer.writeByte('\'');
 }
 
 fn extensionSmokeTempPath(allocator: std.mem.Allocator, name: []const u8) ![:0]u8 {

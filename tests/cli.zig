@@ -511,6 +511,9 @@ test "cli extension verify smoke contains hook errors in child process" {
     try std.testing.expectEqual(@as(u8, 4), smoke.code);
     try expectContains(smoke.stderr, "extension-verify");
     try expectContains(smoke.stderr, "extension failed");
+    try expectContains(smoke.stderr, "extension smoke child failed");
+    try expectContains(smoke.stderr, "child stderr");
+    try expectContains(smoke.stderr, "ExtensionInvalid");
 }
 
 test "cli extension verify rejects broken bundle artifacts" {
@@ -3673,6 +3676,15 @@ fn runZigBridgeArtifactCommand(
     defer allocator.free(sqlite_vendor_dir);
     const sqlite_include_path = try std.fs.path.join(allocator, &.{ cli.source_root, "vendor", sqlite_vendor_dir });
     defer allocator.free(sqlite_include_path);
+    const zova_build_options_path = try std.fs.path.join(allocator, &.{ cache_path, "zova_build_options.zig" });
+    defer allocator.free(zova_build_options_path);
+    try std.Io.Dir.cwd().createDirPath(defaultIo(), cache_path);
+    try std.Io.Dir.cwd().writeFile(defaultIo(), .{
+        .sub_path = zova_build_options_path,
+        .data = "pub const enable_dynamic_extensions = true;\n",
+    });
+    const zova_build_options_arg = try std.fmt.allocPrint(allocator, "-Mzova_build_options={s}", .{zova_build_options_path});
+    defer allocator.free(zova_build_options_arg);
 
     const command = comptime if (std.mem.eql(u8, mode, "build-obj"))
         "build-obj"
@@ -3700,7 +3712,10 @@ fn runZigBridgeArtifactCommand(
             root_arg,
             "-I",
             sqlite_include_path,
+            "--dep",
+            "zova_build_options",
             zova_arg,
+            zova_build_options_arg,
         };
         return runProcessForTest(&argv, cache_path, global_cache_path);
     }
@@ -3722,7 +3737,10 @@ fn runZigBridgeArtifactCommand(
         root_arg,
         "-I",
         sqlite_include_path,
+        "--dep",
+        "zova_build_options",
         zova_arg,
+        zova_build_options_arg,
     };
     return runProcessForTest(&argv, cache_path, global_cache_path);
 }

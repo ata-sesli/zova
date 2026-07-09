@@ -675,6 +675,14 @@ extension code just because a `.zova` file contains extension metadata.
 If a command needs a dynamic extension that is missing or untrusted, diagnostics
 tell you to provide `--extension <bundle.zovaext>` or trust the bundle first.
 
+Dynamic `.zovaext` loading is a native Zig/CLI/C ABI capability. The generated-C
+snapshot used by package builds intentionally disables dynamic loading because
+Zig `0.16` does not portably emit the `std.DynLib` loader path through its C
+backend. Those builds keep the C ABI bundle symbols for source compatibility,
+but calls that need to load an external bundle fail with an extension load or
+unavailable status. Use the native CLI or a Zig-built C ABI archive when an
+application needs external `.zovaext` loading.
+
 The v0.22 development line also includes an experimental bundle producer CLI:
 
 ```sh
@@ -1009,6 +1017,7 @@ Zova `0.22.0` does not include:
 
 - binding-level app-registered extension authoring APIs
 - binding-level dynamic `.zovaext` loading APIs
+- dynamic `.zovaext` loading from generated-C package artifacts
 - safe high-level Rust, Go, or Python SQL callback APIs
 - ANN indexes such as HNSW or IVFFlat
 - Zova-owned BM25 abstraction
