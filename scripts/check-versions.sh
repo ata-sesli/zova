@@ -72,6 +72,15 @@ expect_contains "$ROOT/include/zova.h" "Zova C ABI, v${abi_version_string} pre-1
 
 expect_contains "$ROOT/README.md" "Current package version: \`${package_version}\`."
 expect_contains "$ROOT/README.md" "format_version\` is \`${format_version}\`"
+expect_contains "$ROOT/README.md" "zova = \"${package_version}\""
+expect_contains "$ROOT/README.md" "zova-sys = \"${package_version}\""
+expect_contains "$ROOT/README.md" "bindings/go@v${package_version}"
+expect_contains "$ROOT/README.md" "zova-v${package_version}-<platform>-c-abi"
+expect_contains "$ROOT/README.md" "zova-v${package_version}-<platform>-cli"
+expect_contains "$ROOT/README.md" "Zova \`${package_version}\` does not include:"
+expect_contains "$ROOT/docs/extensions.md" "In v${package_version}, the bundled \`trgm\` extension"
+expect_contains "$ROOT/scripts/package-release.sh" "scripts/package-release.sh ${package_version}"
+expect_contains "$ROOT/scripts/build-release-artifacts.sh" "scripts/build-release-artifacts.sh ${package_version}"
 
 expect_contains "$ROOT/bindings/rust/Cargo.toml" "version = \"${package_version}\""
 expect_contains "$ROOT/bindings/rust/zova/Cargo.toml" "zova-sys = { version = \"${package_version}\""
@@ -82,6 +91,7 @@ expect_contains "$ROOT/bindings/rust/zova-sys/tests/abi.rs" "\"${abi_version_str
 
 expect_contains "$ROOT/bindings/go/README.md" "bindings/go/v${package_version}"
 expect_contains "$ROOT/bindings/go/zova_test.go" "got != \"${abi_version_string}\""
+expect_contains "$ROOT/bindings/go/zova_test.go" "major != ${abi_major} || minor != ${abi_minor} || patch != ${abi_patch}"
 
 expect_contains "$ROOT/bindings/python/pyproject.toml" "version = \"${package_version}\""
 expect_contains "$ROOT/bindings/python/Cargo.toml" "version = \"${package_version}\""

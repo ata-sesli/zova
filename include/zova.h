@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 /*
- * Zova C ABI, v0.21.2 pre-1.0.
+ * Zova C ABI, v0.22.0 pre-1.0.
  *
  * This header exposes a C-compatible object and vector API over Zova's Zig
  * implementation. The ABI is intentionally conservative: opaque handles,
@@ -1248,8 +1248,9 @@ zova_status zova_graphs_list(const zova_graph_list_request *request);
 /*
  * Extension lifecycle helpers manage extensions already present in the process
  * registry. Normal C-created handles use Zova's bundled registry, including
- * bundled extensions such as trgm. Dynamic local extension loading and
- * app-registered extension authoring remain outside the C ABI in v0.21.
+ * bundled extensions such as trgm. The C ABI also exposes controlled scalar SQL
+ * callback registration and trusted .zovaext bundle loading; it does not expose
+ * raw sqlite3 handles as the normal extension path.
  */
 zova_status zova_database_extension_install(const zova_database_extension_request *request);
 zova_status zova_database_extension_list(const zova_database_extension_list_request *request);

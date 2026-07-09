@@ -3903,7 +3903,7 @@ fn simpleArtifactExtensionSource() []const u8 {
     \\    .name = "bridge_artifact",
     \\    .version = "0.1.0",
     \\    .storage_prefix = "_zova_ext_bridge_artifact_",
-    \\    .zova_abi_min = "0.21.2",
+    \\    .zova_abi_min = "0.22.0",
     \\    .capabilities = "artifact-test",
     \\    .required = true,
     \\};
@@ -3941,7 +3941,7 @@ fn failingCheckExtensionSource() []const u8 {
     \\    .name = "smoke_bad_ext",
     \\    .version = "0.1.0",
     \\    .storage_prefix = "_zova_ext_smoke_bad_ext_",
-    \\    .zova_abi_min = "0.21.2",
+    \\    .zova_abi_min = "0.22.0",
     \\    .capabilities = "experimental-builder",
     \\    .required = true,
     \\};

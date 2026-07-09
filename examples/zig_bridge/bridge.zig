@@ -7,7 +7,7 @@ const manifest = zova.ExtensionManifest{
     .name = "codebase_memory_demo",
     .version = "0.1.0",
     .storage_prefix = "_zova_ext_codebase_memory_demo_",
-    .zova_abi_min = "0.21.2",
+    .zova_abi_min = "0.22.0",
     .capabilities = "sql",
     .required = true,
 };

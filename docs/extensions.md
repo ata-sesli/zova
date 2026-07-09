@@ -479,7 +479,7 @@ skips that extension's private storage and reports bounded skipped counts. The
 destination is not marked as having that extension installed unless the hook
 explicitly rebuilt enough storage and asks Zova to write installed metadata.
 
-In v0.21.2, the bundled `trgm` extension has a valid-subset salvage hook. When
+In v0.22.0, the bundled `trgm` extension has a valid-subset salvage hook. When
 the source has required trgm private schema and metadata, the hook copies valid
 indexes, documents, and postings, rebuilds derived term rows, and asks Zova to
 mark `trgm` installed in the destination only after the rebuilt storage passes

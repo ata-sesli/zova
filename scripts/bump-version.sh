@@ -61,8 +61,12 @@ replace_line "$VERSION_ZIG" 'pub const abi_version_patch: u32 = [0-9][0-9]*;' "p
 
 for file in \
     "$ROOT/build.zig.zon" \
+    "$ROOT/README.md" \
+    "$ROOT/docs/extensions.md" \
     "$ROOT/include/zova.h" \
     "$ROOT/examples/zig_bridge/bridge.zig" \
+    "$ROOT/scripts/package-release.sh" \
+    "$ROOT/scripts/build-release-artifacts.sh" \
     "$ROOT/tests/cli.zig" \
     "$ROOT/bindings/rust/Cargo.toml" \
     "$ROOT/bindings/rust/Cargo.lock" \
@@ -95,9 +99,6 @@ do
     replace_all "$file"
 done
 
-replace_line "$ROOT/README.md" 'Current package version: `[^`]*`.' "Current package version: \`$new_version\`."
-replace_line "$ROOT/README.md" 'Zova `[0-9][^`]*` does not include:' "Zova \`$new_version\` does not include:"
-
 for file in \
     "$ROOT/bindings/rust/zova-sys/tests/abi.rs" \
     "$ROOT/bindings/python/rust/zova-sys/tests/abi.rs"
@@ -106,6 +107,8 @@ do
     replace_line "$file" 'zova_abi_version_minor(), [0-9][0-9]*' "zova_abi_version_minor(), $minor"
     replace_line "$file" 'zova_abi_version_patch(), [0-9][0-9]*' "zova_abi_version_patch(), $patch"
 done
+
+replace_line "$ROOT/bindings/go/zova_test.go" 'major != [0-9][0-9]* || minor != [0-9][0-9]* || patch != [0-9][0-9]*' "major != $major || minor != $minor || patch != $patch"
 
 echo "bumped Zova version: $old_version -> $new_version"
 echo "run: sh scripts/check-versions.sh"

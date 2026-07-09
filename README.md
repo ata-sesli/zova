@@ -10,12 +10,12 @@ traversal, transaction-aware app events, bound object/vector stores,
 diagnostics, salvage, backup, compact copy, restore, and a trusted extension
 host foundation.
 
-Current package version: `0.21.2`.
+Current package version: `0.22.0`.
 
 Zova is pre-1.0. The current `.zova` file `format_version` is `6`.
-Zova `0.21.2` adds raw `f16` and `i8` vector element types while keeping the
-extension host, trusted extension lifecycle, local dynamic loading, and bundled
-target-aware `trgm` fuzzy lookup from the v0.21 line.
+Zova `0.22.0` keeps the raw `f16`/`i8` vector and `trgm` salvage work from the
+v0.21 line, and adds the first controlled extension-platform surfaces for
+app-defined SQL callbacks and trusted local extension bundles.
 
 ## Contents
 
@@ -56,7 +56,7 @@ or:
 
 ```toml
 [dependencies]
-zova = "0.21.2"
+zova = "0.22.0"
 ```
 
 Python:
@@ -74,7 +74,7 @@ python -m pip install zova
 Go:
 
 ```sh
-go get github.com/atasesli/zova/bindings/go@v0.21.2
+go get github.com/atasesli/zova/bindings/go@v0.22.0
 ```
 
 The Go binding uses cgo over Zova's C ABI. Build or provide the C ABI library
@@ -83,7 +83,7 @@ before using it from another project.
 C ABI:
 
 ```sh
-# Download a matching zova-v0.21.2-<platform>-c-abi archive
+# Download a matching zova-v0.22.0-<platform>-c-abi archive
 # from the GitHub Release, or build it locally:
 zig build c-abi
 ```
@@ -91,7 +91,7 @@ zig build c-abi
 CLI:
 
 ```sh
-# Download a matching zova-v0.21.2-<platform>-cli archive
+# Download a matching zova-v0.22.0-<platform>-cli archive
 # from the GitHub Release, or build it locally:
 zig build
 zig-out/bin/zova --help
@@ -105,7 +105,7 @@ Zova vendors SQLite. You do not need a system SQLite installation.
 |---|---|---:|---:|---:|---|
 | Rust | `cargo add zova` | no | yes | yes | `zova-sys` builds Zova's native C ABI from bundled generated C |
 | Python | `uv add zova` / `pip install zova` | no | only for sdist builds | only for sdist builds | wheels are published for Linux/macOS x86_64/arm64 on CPython 3.10/3.12; sdist fallback builds through Rust |
-| Go | `go get github.com/atasesli/zova/bindings/go@v0.21.2` | no, if using a release C ABI archive | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
+| Go | `go get github.com/atasesli/zova/bindings/go@v0.22.0` | no, if using a release C ABI archive | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
 | C ABI | release archive or `zig build c-abi` | no, if using a release archive | no | no, if using a release archive | static C ABI library and `zova.h` |
 | Zig | package source | yes | no | yes | native API |
 | CLI | release archive or `zig build` | no, if using a release archive | no | no, if using a release archive | source-built or prebuilt command line tool |
@@ -335,7 +335,7 @@ complete object from chunks.
 
 ### Optional Bound Object And Vector Stores
 
-Single-file `.zova` remains the default. In v0.21.2, applications can opt into
+Single-file `.zova` remains the default. In v0.22.0, applications can opt into
 one bound object store and one bound vector store when
 large object bytes or vector rows should live beside the main records database:
 
@@ -452,7 +452,7 @@ Zova supports collection create/info/list/delete, vector CRUD, batch upsert,
 exact search, candidate-filtered search, search-by-id, and inclusive distance
 thresholds.
 
-Search is exact and flat-scan in `0.21.2`. It is good for local datasets,
+Search is exact and flat-scan in `0.22.0`. It is good for local datasets,
 offline ranking, deterministic tests, and SQL-filter-first workflows. It is not
 yet an ANN engine for million-scale low-latency search.
 
@@ -767,7 +767,7 @@ zova salvage damaged.zova recovered.zova
 ```
 
 Salvage never mutates the source file and never overwrites the destination. A
-good backup is still preferred when one exists. In v0.21.2, salvage is
+good backup is still preferred when one exists. In v0.22.0, salvage is
 graph-aware and extension-aware: it copies valid graph topology, skips invalid
 graph nodes or edges, and lets trusted extension hooks recover their own private
 storage.
@@ -781,7 +781,7 @@ Extension-aware salvage is hook-based. Core Zova never copies `_zova_ext_*`
 tables by guessing their meaning. If trusted extension code provides a salvage
 hook, Zova lets that extension copy, rebuild, or skip its own storage. If the
 extension code is unavailable or the extension has no salvage hook, extension
-storage is skipped and reported. In v0.21.2, bundled `trgm` salvage recovers a
+storage is skipped and reported. In v0.22.0, bundled `trgm` salvage recovers a
 valid subset of trgm private storage, rebuilds derived term rows from copied
 postings, and still never prints indexed text or private schema SQL.
 
@@ -824,14 +824,14 @@ Rust users normally use the safe crate:
 
 ```toml
 [dependencies]
-zova = "0.21.2"
+zova = "0.22.0"
 ```
 
 The lower-level raw FFI crate is available as:
 
 ```toml
 [dependencies]
-zova-sys = "0.21.2"
+zova-sys = "0.22.0"
 ```
 
 `zova` exposes `Database` for single-owner code and `SharedDatabase` for an
@@ -840,7 +840,7 @@ serialized; open multiple handles for true SQLite concurrency.
 
 Existing Rust object and vector APIs transparently use a bound store after the
 database is opened. Store create/bind/unbind/split management remains
-native-Zig/CLI-only in v0.21.
+native-Zig/CLI-only in v0.22.
 
 From crates.io, the Rust crates build through a bundled generated C snapshot, so
 normal Rust users need Rust and a C compiler, not Zig. Zig is only needed when
@@ -873,14 +873,14 @@ developing Zova itself or regenerating the bundled native snapshot.
 
 Existing Python object and vector APIs transparently use a bound store after the
 database is opened. Store create/bind/unbind/split management remains
-native-Zig/CLI-only in v0.21.
+native-Zig/CLI-only in v0.22.
 
 ### Go
 
 Install:
 
 ```sh
-go get github.com/atasesli/zova/bindings/go@v0.21.2
+go get github.com/atasesli/zova/bindings/go@v0.22.0
 ```
 
 Import:
@@ -907,7 +907,7 @@ zig build c-abi
 
 Existing Go object and vector APIs transparently use a bound store after the
 database is opened. Store create/bind/unbind/split management remains
-native-Zig/CLI-only in v0.21.
+native-Zig/CLI-only in v0.22.
 
 External Go projects should point cgo at an installed Zova C ABI:
 
@@ -1005,7 +1005,7 @@ synchronous settings automatically.
 
 ## Current Boundaries
 
-Zova `0.21.2` does not include:
+Zova `0.22.0` does not include:
 
 - binding-level app-registered extension authoring APIs
 - binding-level dynamic `.zovaext` loading APIs
@@ -1063,7 +1063,7 @@ Zova publishes several release artifact types:
 - A GitHub Release source archive.
 - Rust crates on crates.io: `zova-sys` and `zova`.
 - Python wheels and sdist on PyPI.
-- A Go module tag: `bindings/go/v0.21.2`.
+- A Go module tag: `bindings/go/v0.22.0`.
 
 The source archive includes:
 
@@ -1092,13 +1092,13 @@ license needed to build the C ABI with a normal C compiler.
 Maintainer source-package command:
 
 ```sh
-scripts/package-release.sh 0.21.2
+scripts/package-release.sh 0.22.0
 ```
 
 Maintainer local distribution command for crates.io and PyPI, in that order:
 
 ```sh
-scripts/distribute-release.sh 0.21.2
+scripts/distribute-release.sh 0.22.0
 ```
 
 GitHub Actions provides the preferred release flow:

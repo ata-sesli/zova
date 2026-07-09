@@ -53,13 +53,13 @@ After the Python package is published to PyPI:
 python -m pip install zova
 ```
 
-The v0.21 Python package is source-first. It builds the PyO3 extension locally
-through maturin and Cargo, and the Rust crates `zova` and `zova-sys` must be
-available on crates.io first. Users need Python 3.10 or newer, Rust/Cargo, and
-a working C compiler/linker. Zig is only needed when developing Zova itself or
-regenerating the bundled native snapshot.
+The v0.22 Python package is backed by a PyO3 extension built through maturin and
+Cargo. Users need Python 3.10 or newer. Published wheels do not require Rust,
+Cargo, Zig, or a local C compiler; sdist fallback builds need Rust/Cargo and a C
+compiler/linker. Zig is only needed when developing Zova itself or regenerating
+the bundled native snapshot.
 
-No official platform wheel matrix is promised in v0.21.
+The v0.22 release workflow builds the documented Linux/macOS wheel matrix.
 
 ## Local Development
 
@@ -149,7 +149,7 @@ By default, each operation verifies the destination after copying. Pass
 `zova check --deep`.
 
 Diagnostic recovery commands such as `zova doctor`, `zova salvage --dry-run`,
-and `zova salvage <source> <destination>` are CLI-first. In v0.21, CLI salvage
+and `zova salvage <source> <destination>` are CLI-first. In v0.22, CLI salvage
 copies valid core data and uses extension salvage hooks for extension-owned
 storage. The Python package does not expose typed doctor/salvage report APIs
 yet, and library code should not parse the human text output as a stable
@@ -421,7 +421,7 @@ directed walks with `depth`, `predecessor_node_id`, and `edge_type` columns.
 
 ## Bound Stores
 
-In v0.21, a `.zova` file may be bound to one object store and one vector store
+In v0.22, a `.zova` file may be bound to one object store and one vector store
 through the native Zig API or CLI. The Python object and vector methods above
 transparently use those stores after `Database.open`. Store
 create/bind/unbind/split management is not exposed as a Python API yet.

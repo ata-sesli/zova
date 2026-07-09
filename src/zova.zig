@@ -6,7 +6,7 @@
 //! metadata before treating it as a Zova-owned database.
 //!
 //! Zova is currently pre-1.0, and internal `.zova` format compatibility is
-//! not preserved between experimental format versions. The current v0.21
+//! not preserved between experimental format versions. The current v0.22
 //! development format is version `6`: `_zova_meta.format_version = '6'` plus
 //! the required private object, vector, graph, and extension registry schemas.
 //! `Database.open` is intentionally non-mutating: it validates the file and
