@@ -11,6 +11,7 @@ bindings/python/rust/
 *.crate
 .DS_STORE
 notes
+docs/
 __pycache__
 .pytest_cache
 bindings/python/python/zova/*.so

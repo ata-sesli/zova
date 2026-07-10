@@ -129,6 +129,16 @@ int main() {
     search_request.query = typed_values;
     search_request.limit = 0;
     search_request.out_results = &search_results;
+    zova_vector_search_multi_i8_request multi_i8_request = {};
+    multi_i8_request.collection_name = "chunks";
+    multi_i8_request.query_values = nullptr;
+    multi_i8_request.query_values_len = 0;
+    multi_i8_request.query_count = 0;
+    multi_i8_request.dimensions = 0;
+    multi_i8_request.candidate_ids = nullptr;
+    multi_i8_request.mode = ZOVA_VECTOR_MULTI_I8_SEARCH_GLOBAL_MIN_COSINE;
+    multi_i8_request.aggregation = ZOVA_VECTOR_MULTI_I8_AGGREGATION_MIN_COSINE;
+    multi_i8_request.out_results = &search_results;
     zova_vector_put_request put_request = {};
     put_request.values = typed_values;
     zova_vector_get_request get_request = {};
@@ -175,8 +185,27 @@ int main() {
     graph_node_exists_request.out_exists = &graph_exists;
     zova_graph_node_delete_request graph_node_delete_request = {};
     graph_node_delete_request.node_id = "message:1";
+    zova_graph_node_input graph_node_input = {};
+    graph_node_input.graph_name = "app";
+    graph_node_input.node_id = "message:1";
+    graph_node_input.kind = "message";
+    graph_node_input.target_type = ZOVA_GRAPH_TARGET_NONE;
+    zova_graph_node_put_many_request graph_node_put_many_request = {};
+    graph_node_put_many_request.nodes = &graph_node_input;
+    graph_node_put_many_request.nodes_len = 1;
+    zova_graph_node_delete_many_request graph_node_delete_many_request = {};
+    graph_node_delete_many_request.graph_name = "app";
+    graph_node_delete_many_request.node_ids = nullptr;
     zova_graph_edge_put_request graph_edge_put_request = {};
     graph_edge_put_request.edge_type = "contains";
+    zova_graph_edge_input graph_edge_input = {};
+    graph_edge_input.graph_name = "app";
+    graph_edge_input.from_node_id = "message:1";
+    graph_edge_input.edge_type = "contains";
+    graph_edge_input.to_node_id = "message:2";
+    zova_graph_edge_put_many_request graph_edge_put_many_request = {};
+    graph_edge_put_many_request.edges = &graph_edge_input;
+    graph_edge_put_many_request.edges_len = 1;
     zova_graph_edge_get_request graph_edge_get_request = {};
     graph_edge_get_request.out_edge = &graph_edge;
     zova_graph_edge_exists_request graph_edge_exists_request = {};
@@ -186,9 +215,21 @@ int main() {
     zova_graph_neighbors_request graph_neighbors_request = {};
     graph_neighbors_request.direction = ZOVA_GRAPH_NEIGHBOR_OUTGOING;
     graph_neighbors_request.out_results = &graph_neighbors;
+    uint64_t graph_degree = 0;
+    zova_graph_degree_request graph_degree_request = {};
+    graph_degree_request.direction = ZOVA_GRAPH_NEIGHBOR_OUTGOING;
+    graph_degree_request.out_degree = &graph_degree;
     zova_graph_walk_request graph_walk_request = {};
     graph_walk_request.max_depth = 2;
     graph_walk_request.out_results = &graph_walk;
+    zova_graph_walk_direction_request graph_walk_direction_request = {};
+    graph_walk_direction_request.direction = ZOVA_GRAPH_NEIGHBOR_INCOMING;
+    graph_walk_direction_request.out_results = &graph_walk;
+    zova_graph_walk_profile graph_walk_profile = {};
+    zova_graph_walk_direction_profiled_request graph_walk_profiled_request = {};
+    graph_walk_profiled_request.direction = ZOVA_GRAPH_NEIGHBOR_OUTGOING;
+    graph_walk_profiled_request.out_results = &graph_walk;
+    graph_walk_profiled_request.out_profile = &graph_walk_profile;
     zova_database_extension_request extension_request = {};
     extension_request.db = db;
     extension_request.name = "trgm";
@@ -251,6 +292,12 @@ int main() {
                    graph_neighbors_request.out_results == &graph_neighbors &&
                    graph_walk_request.max_depth == 2 &&
                    graph_walk_request.out_results == &graph_walk &&
+                   graph_walk_direction_request.direction == ZOVA_GRAPH_NEIGHBOR_INCOMING &&
+                   graph_walk_direction_request.out_results == &graph_walk &&
+                   graph_walk_profiled_request.direction == ZOVA_GRAPH_NEIGHBOR_OUTGOING &&
+                   graph_walk_profiled_request.out_results == &graph_walk &&
+                   graph_walk_profiled_request.out_profile == &graph_walk_profile &&
+                   graph_walk_profile.result_count == 0 &&
                    extension_request.name != nullptr &&
                    extension_info_request.out_info == &extension_info &&
                    extension_list_request.out_list == &extension_list &&

@@ -478,6 +478,53 @@ static void run_graph_smoke(zova_database *db) {
     }
     zova_graph_list_free(&list);
 
+    const zova_graph_node_input batch_nodes[] = {
+        {.graph_name = "app", .node_id = "batch:1", .kind = "function", .target_type = ZOVA_GRAPH_TARGET_NONE, .target_namespace = NULL, .target_ref = NULL},
+        {.graph_name = "app", .node_id = "batch:2", .kind = "function", .target_type = ZOVA_GRAPH_TARGET_NONE, .target_namespace = NULL, .target_ref = NULL},
+    };
+    expect_status(zova_graph_node_put_many(&(zova_graph_node_put_many_request){
+                      .db = db,
+                      .nodes = batch_nodes,
+                      .nodes_len = sizeof(batch_nodes) / sizeof(batch_nodes[0]),
+                  }),
+                  ZOVA_OK,
+                  "graph node batch put");
+    const zova_graph_edge_input batch_edges[] = {
+        {.graph_name = "app", .from_node_id = "batch:1", .edge_type = "calls", .to_node_id = "batch:2"},
+        {.graph_name = "app", .from_node_id = "batch:1", .edge_type = "calls", .to_node_id = "batch:2"},
+    };
+    expect_status(zova_graph_edge_put_many(&(zova_graph_edge_put_many_request){
+                      .db = db,
+                      .edges = batch_edges,
+                      .edges_len = sizeof(batch_edges) / sizeof(batch_edges[0]),
+                  }),
+                  ZOVA_OK,
+                  "graph edge batch put");
+    uint64_t degree = 0;
+    expect_status(zova_graph_degree(&(zova_graph_degree_request){
+                      .db = db,
+                      .graph_name = "app",
+                      .node_id = "batch:1",
+                      .direction = ZOVA_GRAPH_NEIGHBOR_OUTGOING,
+                      .edge_type = "calls",
+                      .out_degree = &degree,
+                  }),
+                  ZOVA_OK,
+                  "graph degree");
+    if (degree != 1) {
+        fprintf(stderr, "graph degree: unexpected count\n");
+        exit(1);
+    }
+    const char *batch_delete_ids[] = {"batch:2", "missing"};
+    expect_status(zova_graph_node_delete_many(&(zova_graph_node_delete_many_request){
+                      .db = db,
+                      .graph_name = "app",
+                      .node_ids = batch_delete_ids,
+                      .node_count = sizeof(batch_delete_ids) / sizeof(batch_delete_ids[0]),
+                  }),
+                  ZOVA_OK,
+                  "graph node batch delete");
+
     zova_graph_neighbor_results neighbors = {0};
     expect_status(zova_graph_neighbors(&(zova_graph_neighbors_request){
                       .db = db,
@@ -511,6 +558,76 @@ static void run_graph_smoke(zova_database *db) {
     if (walk.len != 3 || walk.items[0].depth != 0 || walk.items[1].depth != 1 ||
         !walk.items[1].has_predecessor_node_id) {
         fprintf(stderr, "graph walk: unexpected result shape\n");
+        exit(1);
+    }
+    zova_graph_walk_results_free(&walk);
+
+    expect_status(zova_graph_walk_direction(&(zova_graph_walk_direction_request){
+                      .db = db,
+                      .graph_name = "app",
+                      .start_node_id = "message:1",
+                      .direction = ZOVA_GRAPH_NEIGHBOR_OUTGOING,
+                      .edge_type = "replies_to",
+                      .max_depth = 1,
+                      .limit = 10,
+                      .out_results = &walk,
+                  }),
+                  ZOVA_OK,
+                  "directional outgoing graph walk");
+    if (walk.len != 2 || walk.items[0].depth != 0 || walk.items[1].depth != 1) {
+        fprintf(stderr, "directional outgoing graph walk: unexpected result shape\n");
+        exit(1);
+    }
+    zova_graph_walk_results_free(&walk);
+
+    expect_status(zova_graph_walk_direction(&(zova_graph_walk_direction_request){
+                      .db = db,
+                      .graph_name = "app",
+                      .start_node_id = "message:2",
+                      .direction = ZOVA_GRAPH_NEIGHBOR_INCOMING,
+                      .edge_type = "replies_to",
+                      .max_depth = 1,
+                      .limit = 10,
+                      .out_results = &walk,
+                  }),
+                  ZOVA_OK,
+                  "directional incoming graph walk");
+    if (walk.len != 2 || walk.items[0].depth != 0 || walk.items[1].depth != 1 ||
+        walk.items[1].node_id_len != strlen("message:1") ||
+        memcmp(walk.items[1].node_id, "message:1", walk.items[1].node_id_len) != 0) {
+        fprintf(stderr, "directional incoming graph walk: unexpected result shape\n");
+        exit(1);
+    }
+    zova_graph_walk_results_free(&walk);
+
+    zova_graph_walk_profile walk_profile = {0};
+    expect_status(zova_graph_walk_direction_profiled(
+                      &(zova_graph_walk_direction_profiled_request){
+                          .db = db,
+                          .graph_name = "app",
+                          .start_node_id = "message:1",
+                          .direction = ZOVA_GRAPH_NEIGHBOR_OUTGOING,
+                          .edge_type = "replies_to",
+                          .max_depth = 1,
+                          .limit = 10,
+                          .out_results = &walk,
+                          .out_profile = &walk_profile,
+                      }),
+                  ZOVA_OK,
+                  "profiled directional outgoing graph walk");
+    if (walk.len != 2 || walk_profile.frontier_expansions != 1 ||
+        walk_profile.adjacency_query_binds != 1 || walk_profile.adjacency_rows_stepped != 1 ||
+        walk_profile.result_count != 2 || walk_profile.mutex_wait_ms < 0 ||
+        walk_profile.root_lookup_ms < 0 || walk_profile.adjacency_prepare_ms < 0 ||
+        walk_profile.adjacency_execute_ms < 0 ||
+        walk_profile.bfs_bookkeeping_allocation_ms < 0 ||
+        walk_profile.c_abi_result_export_ms < 0 ||
+        walk_profile.total_profiled_ms < walk_profile.mutex_wait_ms + walk_profile.root_lookup_ms +
+                                             walk_profile.adjacency_prepare_ms +
+                                             walk_profile.adjacency_execute_ms +
+                                             walk_profile.bfs_bookkeeping_allocation_ms +
+                                             walk_profile.c_abi_result_export_ms) {
+        fprintf(stderr, "profiled directional graph walk: unexpected profile\n");
         exit(1);
     }
     zova_graph_walk_results_free(&walk);
@@ -1829,6 +1946,74 @@ int main(int argc, char **argv) {
     }
     expect_result_id(&typed_filtered_results, 0, "far", "typed candidate vector search");
     zova_vector_search_results_free(&typed_filtered_results);
+
+    expect_status(zova_vector_collection_create(&(zova_vector_collection_create_request){
+                      .db = db,
+                      .name = "multi_i8",
+                      .options = {.dimensions = 2, .metric = ZOVA_VECTOR_METRIC_COSINE, .element_type = ZOVA_VECTOR_ELEMENT_TYPE_I8},
+                  }),
+                  ZOVA_OK,
+                  "create multi-query i8 cosine collection");
+    const int8_t multi_balanced[] = {10, 10};
+    const int8_t multi_east[] = {10, 0};
+    expect_status(zova_vector_put(&(zova_vector_put_request){
+                      .db = db,
+                      .collection_name = "multi_i8",
+                      .vector_id = "balanced",
+                      .values = {.element_type = ZOVA_VECTOR_ELEMENT_TYPE_I8, .f32_values = NULL, .f16_values = NULL, .i8_values = multi_balanced, .values_len = 2},
+                  }),
+                  ZOVA_OK,
+                  "put multi-query balanced vector");
+    expect_status(zova_vector_put(&(zova_vector_put_request){
+                      .db = db,
+                      .collection_name = "multi_i8",
+                      .vector_id = "east",
+                      .values = {.element_type = ZOVA_VECTOR_ELEMENT_TYPE_I8, .f32_values = NULL, .f16_values = NULL, .i8_values = multi_east, .values_len = 2},
+                  }),
+                  ZOVA_OK,
+                  "put multi-query east vector");
+    const int8_t multi_queries[] = {10, 0, 0, 10};
+    zova_vector_search_results multi_results = {0};
+    expect_status(zova_vector_search_multi_i8(&(zova_vector_search_multi_i8_request){
+                      .db = db,
+                      .collection_name = "multi_i8",
+                      .query_values = multi_queries,
+                      .query_values_len = sizeof(multi_queries) / sizeof(multi_queries[0]),
+                      .query_count = 2,
+                      .dimensions = 2,
+                      .candidate_ids = NULL,
+                      .candidate_count = 0,
+                      .mode = ZOVA_VECTOR_MULTI_I8_SEARCH_GLOBAL_MIN_COSINE,
+                      .aggregation = ZOVA_VECTOR_MULTI_I8_AGGREGATION_MIN_COSINE,
+                      .prefilter_query_index = 0,
+                      .prefilter_limit = 0,
+                      .limit = 1,
+                      .out_results = &multi_results,
+                  }),
+                  ZOVA_OK,
+                  "global multi-query i8 cosine search");
+    expect_result_id(&multi_results, 0, "balanced", "global multi-query i8 cosine search");
+    zova_vector_search_results_free(&multi_results);
+    expect_status(zova_vector_search_multi_i8(&(zova_vector_search_multi_i8_request){
+                      .db = db,
+                      .collection_name = "multi_i8",
+                      .query_values = multi_queries,
+                      .query_values_len = sizeof(multi_queries) / sizeof(multi_queries[0]),
+                      .query_count = 2,
+                      .dimensions = 2,
+                      .candidate_ids = NULL,
+                      .candidate_count = 0,
+                      .mode = ZOVA_VECTOR_MULTI_I8_SEARCH_CBM_PREFILTER_MIN_COSINE,
+                      .aggregation = ZOVA_VECTOR_MULTI_I8_AGGREGATION_MIN_COSINE,
+                      .prefilter_query_index = 0,
+                      .prefilter_limit = 1,
+                      .limit = 1,
+                      .out_results = &multi_results,
+                  }),
+                  ZOVA_OK,
+                  "CBM-compatible multi-query i8 cosine search");
+    expect_result_id(&multi_results, 0, "east", "CBM-compatible multi-query i8 cosine search");
+    zova_vector_search_results_free(&multi_results);
 
     zova_vector_search_within_request within_req = {
         .db = db,

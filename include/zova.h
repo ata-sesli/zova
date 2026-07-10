@@ -139,6 +139,15 @@ typedef enum zova_vector_element_type {
     ZOVA_VECTOR_ELEMENT_TYPE_I8 = 2,
 } zova_vector_element_type;
 
+typedef enum zova_vector_multi_i8_search_mode {
+    ZOVA_VECTOR_MULTI_I8_SEARCH_GLOBAL_MIN_COSINE = 0,
+    ZOVA_VECTOR_MULTI_I8_SEARCH_CBM_PREFILTER_MIN_COSINE = 1,
+} zova_vector_multi_i8_search_mode;
+
+typedef enum zova_vector_multi_i8_aggregation {
+    ZOVA_VECTOR_MULTI_I8_AGGREGATION_MIN_COSINE = 0,
+} zova_vector_multi_i8_aggregation;
+
 typedef enum zova_graph_target_type {
     ZOVA_GRAPH_TARGET_NONE = 0,
     ZOVA_GRAPH_TARGET_RECORD = 1,
@@ -446,6 +455,21 @@ typedef struct zova_graph_walk_results {
     zova_graph_walk_result *items;
     size_t len;
 } zova_graph_walk_results;
+
+/* Diagnostic stages and counters for one profiled directional graph walk. */
+typedef struct zova_graph_walk_profile {
+    double mutex_wait_ms;
+    double root_lookup_ms;
+    double adjacency_prepare_ms;
+    double adjacency_execute_ms;
+    double bfs_bookkeeping_allocation_ms;
+    double c_abi_result_export_ms;
+    double total_profiled_ms;
+    uint64_t frontier_expansions;
+    uint64_t adjacency_query_binds;
+    uint64_t adjacency_rows_stepped;
+    uint64_t result_count;
+} zova_graph_walk_profile;
 
 enum {
     ZOVA_OPEN_READ_ONLY = 1u << 0
@@ -879,6 +903,29 @@ typedef struct zova_vector_search_in_request {
     zova_vector_search_results *out_results;
 } zova_vector_search_in_request;
 
+/*
+ * Search a raw-i8 cosine collection with one or more contiguous query rows.
+ * query_values_len must equal query_count * dimensions. Results use distance
+ * = 1 - min cosine similarity, sorted by distance and then vector id. With
+ * candidate_count == 0, the whole collection is searched.
+ */
+typedef struct zova_vector_search_multi_i8_request {
+    zova_database *db;
+    const char *collection_name;
+    const int8_t *query_values;
+    size_t query_values_len;
+    size_t query_count;
+    size_t dimensions;
+    const char *const *candidate_ids;
+    size_t candidate_count;
+    int mode;
+    int aggregation;
+    size_t prefilter_query_index;
+    size_t prefilter_limit;
+    size_t limit;
+    zova_vector_search_results *out_results;
+} zova_vector_search_multi_i8_request;
+
 typedef struct zova_vector_collection_info_get_request {
     zova_database *db;
     const char *name;
@@ -1013,6 +1060,27 @@ typedef struct zova_graph_node_put_request {
     const char *target_ref;
 } zova_graph_node_put_request;
 
+/* Borrowed input row for zova_graph_node_put_many. */
+typedef struct zova_graph_node_input {
+    const char *graph_name;
+    const char *node_id;
+    const char *kind;
+    int target_type;
+    const char *target_namespace;
+    const char *target_ref;
+} zova_graph_node_input;
+
+/*
+ * All node inputs are validated before this atomic batch mutates the graph.
+ * It joins an active Zova transaction; otherwise Zova opens and commits one
+ * immediate transaction for the whole batch.
+ */
+typedef struct zova_graph_node_put_many_request {
+    zova_database *db;
+    const zova_graph_node_input *nodes;
+    size_t nodes_len;
+} zova_graph_node_put_many_request;
+
 typedef struct zova_graph_node_get_request {
     zova_database *db;
     const char *graph_name;
@@ -1033,6 +1101,17 @@ typedef struct zova_graph_node_delete_request {
     const char *node_id;
 } zova_graph_node_delete_request;
 
+/*
+ * Missing ids are ignored; every incident edge of an existing node is removed.
+ * It joins an active Zova transaction; otherwise Zova owns one transaction.
+ */
+typedef struct zova_graph_node_delete_many_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *const *node_ids;
+    size_t node_count;
+} zova_graph_node_delete_many_request;
+
 typedef struct zova_graph_edge_put_request {
     zova_database *db;
     const char *graph_name;
@@ -1040,6 +1119,25 @@ typedef struct zova_graph_edge_put_request {
     const char *edge_type;
     const char *to_node_id;
 } zova_graph_edge_put_request;
+
+/* Borrowed input row for zova_graph_edge_put_many. */
+typedef struct zova_graph_edge_input {
+    const char *graph_name;
+    const char *from_node_id;
+    const char *edge_type;
+    const char *to_node_id;
+} zova_graph_edge_input;
+
+/*
+ * All endpoints are validated before this atomic batch mutates the graph.
+ * Exact duplicate edges are idempotent. It joins an active Zova transaction;
+ * otherwise Zova opens and commits one immediate transaction for the batch.
+ */
+typedef struct zova_graph_edge_put_many_request {
+    zova_database *db;
+    const zova_graph_edge_input *edges;
+    size_t edges_len;
+} zova_graph_edge_put_many_request;
 
 typedef struct zova_graph_edge_get_request {
     zova_database *db;
@@ -1067,6 +1165,11 @@ typedef struct zova_graph_edge_delete_request {
     const char *to_node_id;
 } zova_graph_edge_delete_request;
 
+/*
+ * Neighbors are emitted in edge insertion order, then neighbor node id. limit
+ * bounds emitted neighbor rows; an existing source node with limit 0 succeeds
+ * with an empty result.
+ */
 typedef struct zova_graph_neighbors_request {
     zova_database *db;
     const char *graph_name;
@@ -1077,6 +1180,20 @@ typedef struct zova_graph_neighbors_request {
     zova_graph_neighbor_results *out_results;
 } zova_graph_neighbors_request;
 
+/* Count edges adjacent to one existing node, optionally filtered by type. */
+typedef struct zova_graph_degree_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *node_id;
+    int direction;
+    const char *edge_type;
+    uint64_t *out_degree;
+} zova_graph_degree_request;
+
+/*
+ * Walk follows outgoing edges in breadth-first order. The start node is the
+ * first emitted row at depth 0; limit bounds emitted walk rows, including it.
+ */
 typedef struct zova_graph_walk_request {
     zova_database *db;
     const char *graph_name;
@@ -1086,6 +1203,36 @@ typedef struct zova_graph_walk_request {
     size_t limit;
     zova_graph_walk_results *out_results;
 } zova_graph_walk_request;
+
+/*
+ * Directional bounded BFS. The start node is emitted at depth 0 and limit
+ * counts emitted rows including it. Outgoing walks use edge insertion order
+ * then destination node ID; incoming walks use edge insertion order then
+ * source node ID.
+ */
+typedef struct zova_graph_walk_direction_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *start_node_id;
+    int direction;
+    const char *edge_type;
+    uint32_t max_depth;
+    size_t limit;
+    zova_graph_walk_results *out_results;
+} zova_graph_walk_direction_request;
+
+/* ABI-additive diagnostic variant of zova_graph_walk_direction. */
+typedef struct zova_graph_walk_direction_profiled_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *start_node_id;
+    int direction;
+    const char *edge_type;
+    uint32_t max_depth;
+    size_t limit;
+    zova_graph_walk_results *out_results;
+    zova_graph_walk_profile *out_profile;
+} zova_graph_walk_direction_profiled_request;
 
 /* ABI version helpers describe this C boundary, not the .zova file format. */
 uint32_t zova_abi_version_major(void);
@@ -1224,6 +1371,7 @@ zova_status zova_vector_delete(const zova_vector_delete_request *request);
 zova_status zova_vector_collection_delete(const zova_vector_collection_delete_request *request);
 zova_status zova_vector_search(const zova_vector_search_request *request);
 zova_status zova_vector_search_in(const zova_vector_search_in_request *request);
+zova_status zova_vector_search_multi_i8(const zova_vector_search_multi_i8_request *request);
 zova_status zova_vector_search_within(const zova_vector_search_within_request *request);
 zova_status zova_vector_search_in_within(const zova_vector_search_in_within_request *request);
 zova_status zova_vector_search_by_id(const zova_vector_search_by_id_request *request);
@@ -1261,15 +1409,21 @@ zova_status zova_database_extension_drop(const zova_database_extension_request *
 
 zova_status zova_graph_delete(const zova_graph_delete_request *request);
 zova_status zova_graph_node_put(const zova_graph_node_put_request *request);
+zova_status zova_graph_node_put_many(const zova_graph_node_put_many_request *request);
 zova_status zova_graph_node_get(const zova_graph_node_get_request *request);
 zova_status zova_graph_node_exists(const zova_graph_node_exists_request *request);
 zova_status zova_graph_node_delete(const zova_graph_node_delete_request *request);
+zova_status zova_graph_node_delete_many(const zova_graph_node_delete_many_request *request);
 zova_status zova_graph_edge_put(const zova_graph_edge_put_request *request);
+zova_status zova_graph_edge_put_many(const zova_graph_edge_put_many_request *request);
 zova_status zova_graph_edge_get(const zova_graph_edge_get_request *request);
 zova_status zova_graph_edge_exists(const zova_graph_edge_exists_request *request);
 zova_status zova_graph_edge_delete(const zova_graph_edge_delete_request *request);
 zova_status zova_graph_neighbors(const zova_graph_neighbors_request *request);
+zova_status zova_graph_degree(const zova_graph_degree_request *request);
 zova_status zova_graph_walk(const zova_graph_walk_request *request);
+zova_status zova_graph_walk_direction(const zova_graph_walk_direction_request *request);
+zova_status zova_graph_walk_direction_profiled(const zova_graph_walk_direction_profiled_request *request);
 
 #ifdef __cplusplus
 }

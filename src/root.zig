@@ -38,6 +38,7 @@ pub const GraphNeighborsOptions = zova.GraphNeighborsOptions;
 pub const GraphNeighbor = zova.GraphNeighbor;
 pub const GraphNeighborList = zova.GraphNeighborList;
 pub const GraphWalkOptions = zova.GraphWalkOptions;
+pub const GraphWalkDirectionOptions = zova.GraphWalkDirectionOptions;
 pub const GraphWalkItem = zova.GraphWalkItem;
 pub const GraphWalk = zova.GraphWalk;
 pub const Extension = zova.Extension;
@@ -186,6 +187,7 @@ test "package exports zova database namespace" {
     try std.testing.expect(@hasDecl(Database, "deleteVectorCollection"));
     try std.testing.expect(@hasDecl(Database, "searchVectors"));
     try std.testing.expect(@hasDecl(Database, "searchVectorsIn"));
+    try std.testing.expect(@hasDecl(Database, "searchMultiI8Cosine"));
     try std.testing.expect(@hasDecl(Database, "searchVectorsById"));
     try std.testing.expect(@hasDecl(Database, "searchVectorsByIdIn"));
     try std.testing.expect(@hasDecl(Database, "searchVectorsWithin"));
@@ -213,6 +215,10 @@ test "package exports zova database namespace" {
     try std.testing.expect(@hasDecl(Database, "notify"));
     try std.testing.expect(@hasDecl(Database, "createGraph"));
     try std.testing.expect(@hasDecl(Database, "listGraphs"));
+    try std.testing.expect(@hasDecl(Database, "putGraphNodes"));
+    try std.testing.expect(@hasDecl(Database, "putGraphEdges"));
+    try std.testing.expect(@hasDecl(Database, "deleteGraphNodes"));
+    try std.testing.expect(@hasDecl(Database, "graphDegree"));
     try std.testing.expect(@hasDecl(Database, "graphInfo"));
     try std.testing.expect(@hasDecl(Database, "putGraphNode"));
     try std.testing.expect(@hasDecl(Database, "getGraphNode"));
@@ -220,6 +226,7 @@ test "package exports zova database namespace" {
     try std.testing.expect(@hasDecl(Database, "getGraphEdge"));
     try std.testing.expect(@hasDecl(Database, "graphNeighbors"));
     try std.testing.expect(@hasDecl(Database, "graphWalk"));
+    try std.testing.expect(@hasDecl(Database, "graphWalkDirection"));
     try std.testing.expect(@hasDecl(Database, "createWithExtensions"));
     try std.testing.expect(@hasDecl(Database, "openWithExtensions"));
     try std.testing.expect(@hasDecl(Database, "openWithOptionsAndExtensions"));

@@ -147,6 +147,8 @@ pub const VectorValuesOwned = vector_impl.VectorValuesOwned;
 pub const Vector = vector_impl.Vector;
 pub const VectorSearchResult = vector_impl.VectorSearchResult;
 pub const VectorSearchResults = vector_impl.VectorSearchResults;
+pub const MultiI8CosineSearchMode = vector_impl.MultiI8CosineSearchMode;
+pub const MultiI8CosineSearchOptions = vector_impl.MultiI8CosineSearchOptions;
 pub const Notification = notify_impl.Notification;
 pub const NotificationSubscription = notify_impl.NotificationSubscription;
 pub const GraphTargetType = graph_impl.GraphTargetType;
@@ -158,9 +160,12 @@ pub const GraphEdgeInput = graph_impl.GraphEdgeInput;
 pub const GraphEdge = graph_impl.GraphEdge;
 pub const GraphNeighborDirection = graph_impl.GraphNeighborDirection;
 pub const GraphNeighborsOptions = graph_impl.GraphNeighborsOptions;
+pub const GraphDegreeOptions = graph_impl.GraphDegreeOptions;
 pub const GraphNeighbor = graph_impl.GraphNeighbor;
 pub const GraphNeighborList = graph_impl.GraphNeighborList;
 pub const GraphWalkOptions = graph_impl.GraphWalkOptions;
+pub const GraphWalkDirectionOptions = graph_impl.GraphWalkDirectionOptions;
+pub const GraphWalkScanProfile = graph_impl.GraphWalkScanProfile;
 pub const GraphWalkItem = graph_impl.GraphWalkItem;
 pub const GraphWalk = graph_impl.GraphWalk;
 pub const Extension = extension_impl.Extension;
@@ -758,6 +763,18 @@ pub const Database = struct {
         try graphs.putGraphNode(input);
     }
 
+    /// Upsert graph nodes in one transaction unless the caller owns one.
+    pub fn putGraphNodes(self: *Database, inputs: []const GraphNodeInput) Error!void {
+        const owns_transaction = !hasActiveTransaction(&self.sqlite_db);
+        var committed = false;
+        if (owns_transaction) try self.beginImmediate();
+        errdefer if (owns_transaction and !committed) self.rollback() catch {};
+        var graphs = self.graphDatabase();
+        try graphs.putGraphNodes(inputs);
+        if (owns_transaction) try self.commit();
+        committed = true;
+    }
+
     /// Return an owned graph node.
     pub fn getGraphNode(self: *Database, allocator: std.mem.Allocator, graph_name: []const u8, node_id: []const u8) Error!GraphNode {
         var graphs = self.graphDatabase();
@@ -776,10 +793,34 @@ pub const Database = struct {
         try graphs.deleteGraphNode(graph_name, node_id);
     }
 
+    /// Delete graph nodes and all incident edges in one transaction unless the caller owns one.
+    pub fn deleteGraphNodes(self: *Database, graph_name: []const u8, node_ids: []const []const u8) Error!void {
+        const owns_transaction = !hasActiveTransaction(&self.sqlite_db);
+        var committed = false;
+        if (owns_transaction) try self.beginImmediate();
+        errdefer if (owns_transaction and !committed) self.rollback() catch {};
+        var graphs = self.graphDatabase();
+        try graphs.deleteGraphNodes(graph_name, node_ids);
+        if (owns_transaction) try self.commit();
+        committed = true;
+    }
+
     /// Create an explicit directed graph edge.
     pub fn putGraphEdge(self: *Database, input: GraphEdgeInput) Error!void {
         var graphs = self.graphDatabase();
         try graphs.putGraphEdge(input);
+    }
+
+    /// Insert graph edges in one transaction unless the caller owns one.
+    pub fn putGraphEdges(self: *Database, inputs: []const GraphEdgeInput) Error!void {
+        const owns_transaction = !hasActiveTransaction(&self.sqlite_db);
+        var committed = false;
+        if (owns_transaction) try self.beginImmediate();
+        errdefer if (owns_transaction and !committed) self.rollback() catch {};
+        var graphs = self.graphDatabase();
+        try graphs.putGraphEdges(inputs);
+        if (owns_transaction) try self.commit();
+        committed = true;
     }
 
     /// Return whether an explicit graph edge exists.
@@ -806,10 +847,33 @@ pub const Database = struct {
         return try graphs.graphNeighbors(allocator, options);
     }
 
+    /// Count incoming or outgoing graph edges, optionally restricted by type.
+    pub fn graphDegree(self: *Database, options: GraphDegreeOptions) Error!u64 {
+        var graphs = self.graphDatabase();
+        return try graphs.graphDegree(options);
+    }
+
     /// Return a bounded directed walk from one graph node.
     pub fn graphWalk(self: *Database, allocator: std.mem.Allocator, options: GraphWalkOptions) Error!GraphWalk {
         var graphs = self.graphDatabase();
         return try graphs.graphWalk(allocator, options);
+    }
+
+    /// Return a bounded incoming or outgoing directed walk from one graph node.
+    pub fn graphWalkDirection(self: *Database, allocator: std.mem.Allocator, options: GraphWalkDirectionOptions) Error!GraphWalk {
+        var graphs = self.graphDatabase();
+        return try graphs.graphWalkDirection(allocator, options);
+    }
+
+    /// Run an incoming or outgoing graph walk with diagnostic stage metrics.
+    pub fn graphWalkDirectionProfiled(
+        self: *Database,
+        allocator: std.mem.Allocator,
+        options: GraphWalkDirectionOptions,
+        profile: *GraphWalkScanProfile,
+    ) Error!GraphWalk {
+        var graphs = self.graphDatabase();
+        return try graphs.graphWalkDirectionProfiled(allocator, options, profile);
     }
 
     /// Copy this database to a new `.zova` destination with SQLite's online
@@ -1290,6 +1354,18 @@ pub const Database = struct {
         return vectors.searchVectors(allocator, collection_name, query, limit);
     }
 
+    /// Search a raw-i8 cosine collection against multiple queries.
+    pub fn searchMultiI8Cosine(
+        self: *Database,
+        allocator: std.mem.Allocator,
+        collection_name: []const u8,
+        options: MultiI8CosineSearchOptions,
+        limit: usize,
+    ) Error!VectorSearchResults {
+        var vectors = self.vectorDatabase();
+        return vectors.searchMultiI8Cosine(allocator, collection_name, options, limit);
+    }
+
     /// Search one vector collection with an exact flat scan and distance cap.
     pub fn searchVectorsWithin(
         self: *Database,
@@ -1748,12 +1824,19 @@ fn initializeObjectSchema(db: *sqlite.Database) sqlite.Error!void {
 fn initializeVectorSchema(db: *sqlite.Database) sqlite.Error!void {
     try db.exec(vector_impl.collections_schema_sql ++ ";");
     try db.exec(vector_impl.vectors_schema_sql ++ ";");
+    try db.exec(vector_impl.vector_norms_schema_sql ++ ";");
 }
 
 fn initializeGraphSchema(db: *sqlite.Database) sqlite.Error!void {
     try db.exec(graph_impl.graphs_schema_sql ++ ";");
     try db.exec(graph_impl.graph_nodes_schema_sql ++ ";");
     try db.exec(graph_impl.graph_edges_schema_sql ++ ";");
+    try db.exec(graph_impl.graph_nodes_created_order_index_sql ++ ";");
+    try db.exec(graph_impl.graph_edges_created_order_index_sql ++ ";");
+    try db.exec(graph_impl.graph_edges_from_node_index_sql ++ ";");
+    try db.exec(graph_impl.graph_edges_from_node_type_index_sql ++ ";");
+    try db.exec(graph_impl.graph_edges_to_node_index_sql ++ ";");
+    try db.exec(graph_impl.graph_edges_to_node_type_index_sql ++ ";");
 }
 
 fn markAsObjectStore(db: *sqlite.Database) Error!void {

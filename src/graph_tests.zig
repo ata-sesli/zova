@@ -2,6 +2,7 @@ const std = @import("std");
 const root = @import("root.zig");
 
 const zova = @import("zova.zig");
+const graph = @import("graph.zig");
 const sqlite = @import("sqlite.zig");
 const test_support = @import("zova_test_support.zig");
 
@@ -15,6 +16,27 @@ fn lowerHexAlloc(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
         out[index * 2 + 1] = digits[@intCast(byte & 0x0f)];
     }
     return out;
+}
+
+fn schemaIndexExists(db: *sqlite.Database, index_name: []const u8) !bool {
+    var stmt = try db.prepare("select count(*) from sqlite_master where type = 'index' and name = ?");
+    defer stmt.deinit();
+    try stmt.bindText(1, index_name);
+    try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+    return stmt.columnInt64(0) == 1;
+}
+
+fn expectQueryPlanUsesIndex(db: *sqlite.Database, sql: [:0]const u8, index_name: []const u8) !void {
+    var stmt = try db.prepare(sql);
+    defer stmt.deinit();
+
+    var saw_index = false;
+    while (try stmt.step() == .row) {
+        const detail = stmt.columnText(3);
+        try std.testing.expect(std.mem.indexOf(u8, detail, "USE TEMP B-TREE FOR ORDER BY") == null);
+        if (std.mem.indexOf(u8, detail, index_name) != null) saw_index = true;
+    }
+    try std.testing.expect(saw_index);
 }
 
 test "graph CRUD and traversal use application stable node ids" {
@@ -86,6 +108,239 @@ test "graph CRUD and traversal use application stable node ids" {
     try std.testing.expectEqual(@as(usize, 3), walk.items.len);
     try std.testing.expectEqualStrings("message:1", walk.items[0].node_id);
     try std.testing.expectEqual(@as(u32, 0), walk.items[0].depth);
+}
+
+test "directional graph walk preserves incoming BFS order and shortest hops" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "graph-directional-walk.zova");
+    var db = try zova.Database.create(db_path);
+    defer db.deinit();
+    try db.createGraph("app");
+    try db.putGraphNodes(&.{
+        .{ .graph_name = "app", .node_id = "a", .kind = "function" },
+        .{ .graph_name = "app", .node_id = "b", .kind = "function" },
+        .{ .graph_name = "app", .node_id = "c", .kind = "function" },
+        .{ .graph_name = "app", .node_id = "d", .kind = "function" },
+    });
+    try db.putGraphEdges(&.{
+        .{ .graph_name = "app", .from_node_id = "a", .edge_type = "calls", .to_node_id = "c" },
+        .{ .graph_name = "app", .from_node_id = "b", .edge_type = "calls", .to_node_id = "c" },
+        .{ .graph_name = "app", .from_node_id = "d", .edge_type = "calls", .to_node_id = "a" },
+        .{ .graph_name = "app", .from_node_id = "d", .edge_type = "calls", .to_node_id = "b" },
+        // This closes c -> d -> a -> c. The walk must not re-emit c when
+        // it reaches d at depth 2 and follows the cycle at depth 3.
+        .{ .graph_name = "app", .from_node_id = "c", .edge_type = "calls", .to_node_id = "d" },
+    });
+
+    var incoming = try db.graphWalkDirection(std.testing.allocator, .{
+        .graph_name = "app",
+        .start_node_id = "c",
+        .direction = .incoming,
+        .edge_type = "calls",
+        .max_depth = 3,
+        .limit = 4,
+    });
+    defer incoming.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 4), incoming.items.len);
+    try std.testing.expectEqualStrings("c", incoming.items[0].node_id);
+    try std.testing.expectEqualStrings("a", incoming.items[1].node_id);
+    try std.testing.expectEqualStrings("b", incoming.items[2].node_id);
+    try std.testing.expectEqualStrings("d", incoming.items[3].node_id);
+    try std.testing.expectEqual(@as(u32, 2), incoming.items[3].depth);
+    try std.testing.expectEqualStrings("a", incoming.items[3].predecessor_node_id.?);
+
+    var limited = try db.graphWalkDirection(std.testing.allocator, .{
+        .graph_name = "app",
+        .start_node_id = "c",
+        .direction = .incoming,
+        .max_depth = 2,
+        .limit = 2,
+    });
+    defer limited.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), limited.items.len);
+}
+
+test "graph batches are atomic delete incident edges and report filtered degree" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "graph-batches.zova");
+
+    var db = try zova.Database.create(db_path);
+    defer db.deinit();
+    try db.createGraph("app");
+
+    const nodes = [_]zova.GraphNodeInput{
+        .{ .graph_name = "app", .node_id = "a", .kind = "function" },
+        .{ .graph_name = "app", .node_id = "b", .kind = "function" },
+        .{ .graph_name = "app", .node_id = "c", .kind = "function" },
+    };
+    try db.putGraphNodes(&nodes);
+
+    const edges = [_]zova.GraphEdgeInput{
+        .{ .graph_name = "app", .from_node_id = "a", .edge_type = "calls", .to_node_id = "b" },
+        .{ .graph_name = "app", .from_node_id = "a", .edge_type = "calls", .to_node_id = "b" },
+        .{ .graph_name = "app", .from_node_id = "a", .edge_type = "imports", .to_node_id = "c" },
+    };
+    try db.putGraphEdges(&edges);
+
+    try std.testing.expectEqual(@as(u64, 2), try db.graphDegree(.{ .graph_name = "app", .node_id = "a", .direction = .outgoing }));
+    try std.testing.expectEqual(@as(u64, 1), try db.graphDegree(.{ .graph_name = "app", .node_id = "a", .direction = .outgoing, .edge_type = "calls" }));
+    try std.testing.expectEqual(@as(u64, 1), try db.graphDegree(.{ .graph_name = "app", .node_id = "b", .direction = .incoming }));
+
+    const invalid_edges = [_]zova.GraphEdgeInput{
+        .{ .graph_name = "app", .from_node_id = "c", .edge_type = "calls", .to_node_id = "a" },
+        .{ .graph_name = "app", .from_node_id = "c", .edge_type = "calls", .to_node_id = "missing" },
+    };
+    try std.testing.expectError(error.GraphNodeNotFound, db.putGraphEdges(&invalid_edges));
+    try std.testing.expect(!try db.hasGraphEdge("app", "c", "calls", "a"));
+
+    try db.deleteGraphNodes("app", &.{ "b", "missing" });
+    try std.testing.expect(!try db.hasGraphNode("app", "b"));
+    try std.testing.expect(!try db.hasGraphEdge("app", "a", "calls", "b"));
+    try std.testing.expectEqual(@as(u64, 1), try db.graphDegree(.{ .graph_name = "app", .node_id = "a", .direction = .outgoing }));
+
+    try db.beginImmediate();
+    try db.putGraphNodes(&.{.{ .graph_name = "app", .node_id = "rolled-back", .kind = "function" }});
+    try db.rollback();
+    try std.testing.expect(!try db.hasGraphNode("app", "rolled-back"));
+    try std.testing.expectError(error.GraphNodeNotFound, db.graphDegree(.{ .graph_name = "app", .node_id = "missing", .direction = .outgoing }));
+}
+
+test "graph batches ensure query indexes for direct ingestion" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "graph-batch-indexes.zova");
+
+    var db = try zova.Database.create(db_path);
+    defer db.deinit();
+
+    try std.testing.expect(try schemaIndexExists(&db.sqlite_db, "_zova_graph_nodes_created_order_idx"));
+    try std.testing.expect(try schemaIndexExists(&db.sqlite_db, "_zova_graph_edges_created_order_idx"));
+    try std.testing.expect(try schemaIndexExists(&db.sqlite_db, "_zova_graph_edges_from_node_idx"));
+    try std.testing.expect(try schemaIndexExists(&db.sqlite_db, "_zova_graph_edges_from_node_type_idx"));
+    try std.testing.expect(try schemaIndexExists(&db.sqlite_db, "_zova_graph_edges_to_node_idx"));
+    try std.testing.expect(try schemaIndexExists(&db.sqlite_db, "_zova_graph_edges_to_node_type_idx"));
+
+    try db.sqlite_db.exec("drop index _zova_graph_nodes_created_order_idx");
+    try db.sqlite_db.exec("drop index _zova_graph_edges_created_order_idx");
+    try db.sqlite_db.exec("drop index _zova_graph_edges_from_node_idx");
+    try db.sqlite_db.exec("drop index _zova_graph_edges_from_node_type_idx");
+    try db.sqlite_db.exec("drop index _zova_graph_edges_to_node_idx");
+    try db.sqlite_db.exec("drop index _zova_graph_edges_to_node_type_idx");
+    try db.createGraph("app");
+    try db.putGraphNodes(&.{.{ .graph_name = "app", .node_id = "a", .kind = "function" }});
+
+    try std.testing.expect(try schemaIndexExists(&db.sqlite_db, "_zova_graph_nodes_created_order_idx"));
+    try std.testing.expect(try schemaIndexExists(&db.sqlite_db, "_zova_graph_edges_created_order_idx"));
+    try std.testing.expect(try schemaIndexExists(&db.sqlite_db, "_zova_graph_edges_from_node_idx"));
+    try std.testing.expect(try schemaIndexExists(&db.sqlite_db, "_zova_graph_edges_from_node_type_idx"));
+    try std.testing.expect(try schemaIndexExists(&db.sqlite_db, "_zova_graph_edges_to_node_idx"));
+    try std.testing.expect(try schemaIndexExists(&db.sqlite_db, "_zova_graph_edges_to_node_type_idx"));
+}
+
+test "graph adjacency indexes cover ordered neighbor queries" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "graph-adjacency-indexes.zova");
+
+    var db = try zova.Database.create(db_path);
+    defer db.deinit();
+
+    try expectQueryPlanUsesIndex(&db.sqlite_db,
+        \\explain query plan
+        \\select n.node_id, n.kind, e.edge_type
+        \\from _zova_graph_edges e
+        \\join _zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.to_node_id
+        \\where e.graph_name = 'app' and e.from_node_id = 'a'
+        \\order by e.created_order, e.to_node_id
+        \\limit 10
+    , "_zova_graph_edges_from_node_idx");
+    try expectQueryPlanUsesIndex(&db.sqlite_db,
+        \\explain query plan
+        \\select n.node_id, n.kind, e.edge_type
+        \\from _zova_graph_edges e
+        \\join _zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.to_node_id
+        \\where e.graph_name = 'app' and e.from_node_id = 'a' and e.edge_type = 'calls'
+        \\order by e.created_order, e.to_node_id
+        \\limit 10
+    , "_zova_graph_edges_from_node_type_idx");
+    try expectQueryPlanUsesIndex(&db.sqlite_db,
+        \\explain query plan
+        \\select n.node_id, n.kind, e.edge_type
+        \\from _zova_graph_edges e
+        \\join _zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.from_node_id
+        \\where e.graph_name = 'app' and e.to_node_id = 'a'
+        \\order by e.created_order, e.from_node_id
+        \\limit 10
+    , "_zova_graph_edges_to_node_idx");
+    try expectQueryPlanUsesIndex(&db.sqlite_db,
+        \\explain query plan
+        \\select n.node_id, n.kind, e.edge_type
+        \\from _zova_graph_edges e
+        \\join _zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.from_node_id
+        \\where e.graph_name = 'app' and e.to_node_id = 'a' and e.edge_type = 'calls'
+        \\order by e.created_order, e.from_node_id
+        \\limit 10
+    , "_zova_graph_edges_to_node_type_idx");
+}
+
+test "profiled directional graph walk reports traversal stages and counters" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "graph-walk-profile.zova");
+
+    var db = try zova.Database.create(db_path);
+    defer db.deinit();
+    try db.createGraph("app");
+    try db.putGraphNodes(&.{
+        .{ .graph_name = "app", .node_id = "start", .kind = "function" },
+        .{ .graph_name = "app", .node_id = "calls-child", .kind = "function" },
+        .{ .graph_name = "app", .node_id = "imports-child", .kind = "module" },
+        .{ .graph_name = "app", .node_id = "leaf", .kind = "function" },
+    });
+    try db.putGraphEdges(&.{
+        .{ .graph_name = "app", .from_node_id = "start", .edge_type = "calls", .to_node_id = "calls-child" },
+        .{ .graph_name = "app", .from_node_id = "start", .edge_type = "imports", .to_node_id = "imports-child" },
+        .{ .graph_name = "app", .from_node_id = "calls-child", .edge_type = "calls", .to_node_id = "leaf" },
+    });
+
+    var profile: graph.GraphWalkScanProfile = .{};
+    var graph_db = graph.Database{ .sqlite_db = &db.sqlite_db };
+    var walk = try graph_db.graphWalkDirectionProfiled(std.testing.allocator, .{
+        .graph_name = "app",
+        .start_node_id = "start",
+        .direction = .outgoing,
+        .edge_type = "calls",
+        .max_depth = 2,
+        .limit = 3,
+    }, &profile);
+    defer walk.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 3), walk.items.len);
+    try std.testing.expectEqualStrings("start", walk.items[0].node_id);
+    try std.testing.expectEqualStrings("calls-child", walk.items[1].node_id);
+    try std.testing.expectEqualStrings("leaf", walk.items[2].node_id);
+    try std.testing.expectEqualStrings("start", walk.items[1].predecessor_node_id.?);
+    try std.testing.expectEqualStrings("calls", walk.items[1].edge_type.?);
+    try std.testing.expectEqual(@as(u64, 1), profile.adjacency_statement_prepares);
+    try std.testing.expectEqual(@as(u64, 2), profile.adjacency_query_binds);
+    try std.testing.expectEqual(@as(u64, 2), profile.adjacency_rows_stepped);
+    try std.testing.expectEqual(@as(u64, 2), profile.frontier_expansions);
+    try std.testing.expectEqual(@as(u64, 3), profile.result_count);
+    try std.testing.expect(profile.root_lookup_ms >= 0);
+    try std.testing.expect(profile.adjacency_prepare_ms >= 0);
+    try std.testing.expect(profile.adjacency_execute_ms >= 0);
+    try std.testing.expect(profile.bfs_bookkeeping_allocation_ms >= 0);
 }
 
 test "graph target examples cover records objects chunks and vectors" {
@@ -219,6 +474,25 @@ test "graph traversal rejects limits larger than sqlite int64" {
         .graph_name = "app",
         .start_node_id = "message:1",
         .limit = too_large_limit,
+    }));
+}
+
+test "graph walk reports a missing root after the single root fetch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "graph-walk-missing-root.zova");
+
+    var db = try zova.Database.create(db_path);
+    defer db.deinit();
+    try db.createGraph("app");
+
+    try std.testing.expectError(error.GraphNodeNotFound, db.graphWalk(std.testing.allocator, .{
+        .graph_name = "app",
+        .start_node_id = "missing",
+        .max_depth = 2,
+        .limit = 10,
     }));
 }
 

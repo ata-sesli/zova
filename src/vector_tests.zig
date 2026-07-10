@@ -21,6 +21,8 @@ const VectorCollectionOptions = zova.VectorCollectionOptions;
 const VectorElementType = zova.VectorElementType;
 const VectorInput = zova.VectorInput;
 const VectorMetric = zova.VectorMetric;
+const MultiI8CosineSearchMode = zova.MultiI8CosineSearchMode;
+const MultiI8CosineSearchOptions = zova.MultiI8CosineSearchOptions;
 const VectorSearchResult = zova.VectorSearchResult;
 const VectorSearchResults = zova.VectorSearchResults;
 const max_vector_dimensions = zova.max_vector_dimensions;
@@ -186,6 +188,30 @@ test "typed vector collections store list reopen search and delete raw i8 values
         defer results.deinit(std.testing.allocator);
         try expectSearchIds(&results, &.{ "near", "negative" });
     }
+}
+
+test "i8 cosine vector writes cache stored norm squared" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-i8-cached-norm.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.createVectorCollection("bytes", .{ .dimensions = 3, .metric = .cosine, .element_type = .i8 });
+    try db.putVector("bytes", "doc", .{ .i8 = &.{ 2, -3, 6 } });
+
+    var stmt = try db.prepare(
+        \\select norm_squared
+        \\from _zova_vector_norms
+        \\where collection_name = 'bytes' and vector_id = 'doc'
+    );
+    defer stmt.deinit();
+
+    try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+    try std.testing.expectApproxEqAbs(@as(f64, 49.0), stmt.columnDouble(0), 0.000001);
 }
 
 test "typed vector collections store search validate and detect corrupt raw f16 bits" {
@@ -863,6 +889,220 @@ test "search vectors reports corrupt private vector rows" {
     try std.testing.expectError(error.VectorCorrupt, db.searchVectors(std.testing.allocator, "chunks", .{ .f32 = &.{ 1.0, 2.0 } }, 10));
 }
 
+test "i8 cosine search reports corrupt private vector rows" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-search-i8-corrupt.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.createVectorCollection("bytes", .{ .dimensions = 2, .metric = .cosine, .element_type = .i8 });
+    try db.putVector("bytes", "bad", .{ .i8 = &.{ @as(i8, 1), @as(i8, 2) } });
+    try db.exec("pragma ignore_check_constraints = on");
+    try db.exec("update _zova_vectors set \"values\" = x'01' where vector_id = 'bad'");
+    try db.exec("pragma ignore_check_constraints = off");
+    try std.testing.expectError(error.VectorCorrupt, db.searchVectors(std.testing.allocator, "bytes", .{ .i8 = &.{ @as(i8, 1), @as(i8, 2) } }, 10));
+}
+
+test "multi i8 cosine search ranks global minimum cosine with deterministic ties" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-search-multi-i8-global.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.createVectorCollection("bytes", .{ .dimensions = 2, .metric = .cosine, .element_type = .i8 });
+    try db.putVectors("bytes", &.{
+        .{ .id = "east", .values = .{ .i8 = &.{ @as(i8, 10), @as(i8, 0) } } },
+        .{ .id = "north", .values = .{ .i8 = &.{ @as(i8, 0), @as(i8, 10) } } },
+        .{ .id = "tie-b", .values = .{ .i8 = &.{ @as(i8, 10), @as(i8, 10) } } },
+        .{ .id = "tie-a", .values = .{ .i8 = &.{ @as(i8, 10), @as(i8, 10) } } },
+    });
+
+    const queries = [_][]const i8{
+        &.{ @as(i8, 10), @as(i8, 0) },
+        &.{ @as(i8, 0), @as(i8, 10) },
+    };
+    var results = try db.searchMultiI8Cosine(
+        std.testing.allocator,
+        "bytes",
+        .{ .queries = &queries, .mode = MultiI8CosineSearchMode.global_min_cosine },
+        4,
+    );
+    defer results.deinit(std.testing.allocator);
+
+    try expectSearchIds(&results, &.{ "tie-a", "tie-b", "east", "north" });
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0 - 0.7071067811865475), results.items[0].distance, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), results.items[2].distance, 0.000001);
+}
+
+test "multi i8 cosine search ranks only supplied candidates with deterministic ties" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-search-multi-i8-candidates.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.createVectorCollection("bytes", .{ .dimensions = 2, .metric = .cosine, .element_type = .i8 });
+    try db.putVectors("bytes", &.{
+        .{ .id = "east", .values = .{ .i8 = &.{ @as(i8, 10), @as(i8, 0) } } },
+        .{ .id = "north", .values = .{ .i8 = &.{ @as(i8, 0), @as(i8, 10) } } },
+        .{ .id = "tie-b", .values = .{ .i8 = &.{ @as(i8, 10), @as(i8, 10) } } },
+        .{ .id = "tie-a", .values = .{ .i8 = &.{ @as(i8, 10), @as(i8, 10) } } },
+    });
+
+    const queries = [_][]const i8{
+        &.{ @as(i8, 10), @as(i8, 0) },
+        &.{ @as(i8, 0), @as(i8, 10) },
+    };
+    const candidates = [_][]const u8{ "east", "missing", "tie-b", "tie-a", "tie-b" };
+    var results = try db.searchMultiI8Cosine(
+        std.testing.allocator,
+        "bytes",
+        .{
+            .queries = &queries,
+            .candidate_ids = &candidates,
+            .mode = MultiI8CosineSearchMode.global_min_cosine,
+        },
+        4,
+    );
+    defer results.deinit(std.testing.allocator);
+
+    try expectSearchIds(&results, &.{ "tie-a", "tie-b", "east" });
+}
+
+test "multi i8 cosine search supports CBM deterministic prefilter compatibility" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-search-multi-i8-prefilter.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.createVectorCollection("bytes", .{ .dimensions = 2, .metric = .cosine, .element_type = .i8 });
+    try db.putVectors("bytes", &.{
+        .{ .id = "top-b", .values = .{ .i8 = &.{ @as(i8, 10), @as(i8, 0) } } },
+        .{ .id = "top-a", .values = .{ .i8 = &.{ @as(i8, 10), @as(i8, 0) } } },
+        .{ .id = "balanced", .values = .{ .i8 = &.{ @as(i8, 10), @as(i8, 10) } } },
+    });
+
+    const queries = [_][]const i8{
+        &.{ @as(i8, 10), @as(i8, 0) },
+        &.{ @as(i8, 0), @as(i8, 10) },
+    };
+
+    var global = try db.searchMultiI8Cosine(
+        std.testing.allocator,
+        "bytes",
+        .{ .queries = &queries, .mode = MultiI8CosineSearchMode.global_min_cosine },
+        1,
+    );
+    defer global.deinit(std.testing.allocator);
+    try expectSearchIds(&global, &.{"balanced"});
+
+    var compatible = try db.searchMultiI8Cosine(
+        std.testing.allocator,
+        "bytes",
+        .{
+            .queries = &queries,
+            .mode = MultiI8CosineSearchMode.cbm_prefilter_min_cosine,
+            .prefilter_query_index = 0,
+            .prefilter_limit = 1,
+        },
+        1,
+    );
+    defer compatible.deinit(std.testing.allocator);
+    try expectSearchIds(&compatible, &.{"top-a"});
+}
+
+test "multi i8 cosine search validates queries candidates and corrupt stored rows" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-search-multi-i8-validation.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.createVectorCollection("bytes", .{ .dimensions = 2, .metric = .cosine, .element_type = .i8 });
+    try db.putVector("bytes", "good", .{ .i8 = &.{ @as(i8, 3), @as(i8, 4) } });
+
+    const valid = [_][]const i8{&.{ @as(i8, 1), @as(i8, 0) }};
+    const zero = [_][]const i8{&.{ @as(i8, 0), @as(i8, 0) }};
+    const short = [_][]const i8{&.{@as(i8, 1)}};
+    const invalid_candidates = [_][]const u8{"_zova_bad"};
+
+    try std.testing.expectError(error.VectorInvalid, db.searchMultiI8Cosine(std.testing.allocator, "bytes", .{ .queries = &.{}, .mode = MultiI8CosineSearchMode.global_min_cosine }, 1));
+    try std.testing.expectError(error.VectorInvalid, db.searchMultiI8Cosine(std.testing.allocator, "bytes", .{ .queries = &zero, .mode = MultiI8CosineSearchMode.global_min_cosine }, 1));
+    try std.testing.expectError(error.VectorDimensionMismatch, db.searchMultiI8Cosine(std.testing.allocator, "bytes", .{ .queries = &short, .mode = MultiI8CosineSearchMode.global_min_cosine }, 1));
+    try std.testing.expectError(error.VectorInvalid, db.searchMultiI8Cosine(std.testing.allocator, "bytes", .{ .queries = &valid, .candidate_ids = &invalid_candidates, .mode = MultiI8CosineSearchMode.global_min_cosine }, 1));
+    try std.testing.expectError(error.VectorInvalid, db.searchMultiI8Cosine(std.testing.allocator, "bytes", .{ .queries = &valid, .mode = MultiI8CosineSearchMode.cbm_prefilter_min_cosine, .prefilter_query_index = 1, .prefilter_limit = 1 }, 1));
+
+    try db.exec("pragma ignore_check_constraints = on");
+    try db.exec("update _zova_vectors set \"values\" = x'01' where collection_name = 'bytes' and vector_id = 'good'");
+    try db.exec("pragma ignore_check_constraints = off");
+    try std.testing.expectError(error.VectorCorrupt, db.searchMultiI8Cosine(std.testing.allocator, "bytes", .{ .queries = &valid, .mode = MultiI8CosineSearchMode.global_min_cosine }, 1));
+}
+
+test "multi i8 cosine candidate scan ignores unselected corrupt rows" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-search-multi-i8-large-candidates.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+    try db.createVectorCollection("bytes", .{ .dimensions = 2, .metric = .cosine, .element_type = .i8 });
+
+    var ids: std.ArrayList([]u8) = .empty;
+    defer {
+        for (ids.items) |id| std.testing.allocator.free(id);
+        ids.deinit(std.testing.allocator);
+    }
+    for (0..140) |index| {
+        const id = try std.fmt.allocPrint(std.testing.allocator, "doc-{d:0>3}", .{index});
+        errdefer std.testing.allocator.free(id);
+        try ids.append(std.testing.allocator, id);
+        try db.putVector("bytes", id, .{ .i8 = &.{ @as(i8, @intCast((index % 120) + 1)), @as(i8, 1) } });
+    }
+
+    try db.exec("pragma ignore_check_constraints = on");
+    try db.exec("update _zova_vectors set \"values\" = x'01' where collection_name = 'bytes' and vector_id = 'doc-139'");
+    try db.exec("pragma ignore_check_constraints = off");
+
+    var candidates: std.ArrayList([]const u8) = .empty;
+    defer candidates.deinit(std.testing.allocator);
+    for (ids.items[0..130]) |id| try candidates.append(std.testing.allocator, id);
+    try candidates.append(std.testing.allocator, "missing");
+    try candidates.append(std.testing.allocator, ids.items[1]);
+
+    const queries = [_][]const i8{
+        &.{ @as(i8, 1), @as(i8, 0) },
+        &.{ @as(i8, 0), @as(i8, 1) },
+    };
+    var results = try db.searchMultiI8Cosine(
+        std.testing.allocator,
+        "bytes",
+        .{ .queries = &queries, .candidate_ids = candidates.items, .mode = MultiI8CosineSearchMode.global_min_cosine },
+        5,
+    );
+    defer results.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 5), results.items.len);
+}
+
 test "candidate-filtered vector search ranks only supplied ids" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1000,6 +1240,49 @@ test "candidate-filtered vector search reports only selected corrupt private vec
 
     const selected_bad = [_][]const u8{"bad"};
     try std.testing.expectError(error.VectorCorrupt, db.searchVectorsIn(std.testing.allocator, "docs", .{ .f32 = &.{ 1.0, 2.0 } }, &selected_bad, 10));
+}
+
+test "large candidate-filtered vector search scans candidates and ignores unselected corrupt rows" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-search-large-candidates.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .l2 });
+
+    var ids: std.ArrayList([]u8) = .empty;
+    defer {
+        for (ids.items) |id| std.testing.allocator.free(id);
+        ids.deinit(std.testing.allocator);
+    }
+
+    for (0..140) |index| {
+        const id = try std.fmt.allocPrint(std.testing.allocator, "doc-{d:0>3}", .{index});
+        errdefer std.testing.allocator.free(id);
+        try ids.append(std.testing.allocator, id);
+
+        const value: f32 = @floatFromInt(index);
+        try db.putVector("docs", id, .{ .f32 = &.{ value, 0.0 } });
+    }
+
+    try db.exec("pragma ignore_check_constraints = on");
+    try db.exec("update _zova_vectors set \"values\" = x'0000803f' where vector_id = 'doc-139'");
+    try db.exec("pragma ignore_check_constraints = off");
+
+    var candidates: std.ArrayList([]const u8) = .empty;
+    defer candidates.deinit(std.testing.allocator);
+    for (ids.items[0..130]) |id| try candidates.append(std.testing.allocator, id);
+    try candidates.append(std.testing.allocator, "missing");
+    try candidates.append(std.testing.allocator, ids.items[1]);
+
+    var results = try db.searchVectorsIn(std.testing.allocator, "docs", .{ .f32 = &.{ 0.0, 0.0 } }, candidates.items, 5);
+    defer results.deinit(std.testing.allocator);
+
+    try expectSearchIds(&results, &.{ "doc-000", "doc-001", "doc-002", "doc-003", "doc-004" });
 }
 
 test "search vectors by id excludes source and supports candidates" {

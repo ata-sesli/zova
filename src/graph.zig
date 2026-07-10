@@ -50,6 +50,36 @@ pub const graph_edges_schema_sql =
     \\)
 ;
 
+pub const graph_nodes_created_order_index_sql =
+    \\create index if not exists _zova_graph_nodes_created_order_idx
+    \\on _zova_graph_nodes (graph_name, created_order)
+;
+
+pub const graph_edges_created_order_index_sql =
+    \\create index if not exists _zova_graph_edges_created_order_idx
+    \\on _zova_graph_edges (graph_name, created_order)
+;
+
+pub const graph_edges_from_node_index_sql =
+    \\create index if not exists _zova_graph_edges_from_node_idx
+    \\on _zova_graph_edges (graph_name, from_node_id, created_order, to_node_id)
+;
+
+pub const graph_edges_from_node_type_index_sql =
+    \\create index if not exists _zova_graph_edges_from_node_type_idx
+    \\on _zova_graph_edges (graph_name, from_node_id, edge_type, created_order, to_node_id)
+;
+
+pub const graph_edges_to_node_index_sql =
+    \\create index if not exists _zova_graph_edges_to_node_idx
+    \\on _zova_graph_edges (graph_name, to_node_id, created_order, from_node_id)
+;
+
+pub const graph_edges_to_node_type_index_sql =
+    \\create index if not exists _zova_graph_edges_to_node_type_idx
+    \\on _zova_graph_edges (graph_name, to_node_id, edge_type, created_order, from_node_id)
+;
+
 pub const GraphTargetType = enum {
     none,
     record,
@@ -141,6 +171,14 @@ pub const GraphNeighborsOptions = struct {
     limit: usize = 10,
 };
 
+/// Count directed graph edges adjacent to one existing node.
+pub const GraphDegreeOptions = struct {
+    graph_name: []const u8 = default_graph_name,
+    node_id: []const u8,
+    direction: GraphNeighborDirection = .outgoing,
+    edge_type: ?[]const u8 = null,
+};
+
 pub const GraphNeighbor = struct {
     node_id: []u8,
     kind: []u8,
@@ -168,6 +206,29 @@ pub const GraphWalkOptions = struct {
     edge_type: ?[]const u8 = null,
     max_depth: u32 = 1,
     limit: usize = 10,
+};
+
+/// Options for a bounded graph walk with an explicit edge direction.
+pub const GraphWalkDirectionOptions = struct {
+    graph_name: []const u8 = default_graph_name,
+    start_node_id: []const u8,
+    direction: GraphNeighborDirection = .outgoing,
+    edge_type: ?[]const u8 = null,
+    max_depth: u32 = 1,
+    limit: usize = 10,
+};
+
+/// Internal diagnostics for one graph walk's reusable adjacency scan.
+pub const GraphWalkScanProfile = struct {
+    root_lookup_ms: f64 = 0,
+    adjacency_prepare_ms: f64 = 0,
+    adjacency_execute_ms: f64 = 0,
+    bfs_bookkeeping_allocation_ms: f64 = 0,
+    adjacency_statement_prepares: u64 = 0,
+    adjacency_query_binds: u64 = 0,
+    adjacency_rows_stepped: u64 = 0,
+    frontier_expansions: u64 = 0,
+    result_count: u64 = 0,
 };
 
 pub const GraphWalkItem = struct {
@@ -323,6 +384,53 @@ pub const Database = struct {
         std.debug.assert((try stmt.step()) == .done);
     }
 
+    /// Upsert graph nodes as one all-or-nothing batch.
+    ///
+    /// Every graph must already exist. Repeated node ids are applied in input
+    /// order, so the final occurrence supplies the stored node fields.
+    pub fn putGraphNodes(self: *Database, inputs: []const GraphNodeInput) Error!void {
+        for (inputs) |input| {
+            try validateGraphName(input.graph_name);
+            try validateNodeId(input.node_id);
+            try validateNodeKind(input.kind);
+            if (input.target_namespace) |value| try validateOptionalText(value);
+            if (input.target_ref) |value| try validateOptionalText(value);
+            if (!try self.hasGraph(input.graph_name)) return error.GraphNotFound;
+        }
+        if (inputs.len == 0) return;
+
+        try ensureGraphBatchIndexes(self);
+
+        var stmt = try self.sqlite_db.prepare(
+            \\insert into _zova_graph_nodes
+            \\  (graph_name, node_id, kind, target_type, target_namespace, target_ref, created_order)
+            \\values (?, ?, ?, ?, ?, ?, ?)
+            \\on conflict(graph_name, node_id) do update set
+            \\  kind = excluded.kind,
+            \\  target_type = excluded.target_type,
+            \\  target_namespace = excluded.target_namespace,
+            \\  target_ref = excluded.target_ref
+        );
+        defer stmt.deinit();
+
+        var next_order_stmt = try self.sqlite_db.prepare(
+            \\select coalesce(max(created_order), 0) + 1
+            \\from _zova_graph_nodes
+            \\where graph_name = ?
+        );
+        defer next_order_stmt.deinit();
+        var next_orders: std.StringHashMap(i64) = .init(std.heap.c_allocator);
+        defer next_orders.deinit();
+
+        for (inputs) |input| {
+            const created_order = try nextGraphCreatedOrder(&next_order_stmt, &next_orders, input.graph_name);
+            try bindGraphNodeInput(&stmt, input, created_order);
+            std.debug.assert((try stmt.step()) == .done);
+            try stmt.reset();
+            try stmt.clearBindings();
+        }
+    }
+
     pub fn getGraphNode(self: *Database, allocator: std.mem.Allocator, graph_name: []const u8, node_id: []const u8) Error!GraphNode {
         try validateGraphName(graph_name);
         try validateNodeId(node_id);
@@ -376,6 +484,62 @@ pub const Database = struct {
         std.debug.assert((try delete_node.step()) == .done);
     }
 
+    /// Delete graph nodes and all of their incident edges as one batch.
+    ///
+    /// Missing node ids are ignored so repeated incremental deletions are
+    /// idempotent. A missing graph remains an error.
+    pub fn deleteGraphNodes(self: *Database, graph_name: []const u8, node_ids: []const []const u8) Error!void {
+        try validateGraphName(graph_name);
+        for (node_ids) |node_id| try validateNodeId(node_id);
+        if (!try self.hasGraph(graph_name)) return error.GraphNotFound;
+        if (node_ids.len == 0) return;
+
+        try ensureGraphBatchIndexes(self);
+        try self.sqlite_db.exec(
+            \\create temp table if not exists _zova_graph_batch_delete_ids (
+            \\  node_id text not null primary key
+            \\) without rowid;
+            \\delete from _zova_graph_batch_delete_ids;
+        );
+        defer self.sqlite_db.exec("delete from _zova_graph_batch_delete_ids") catch {};
+
+        var insert_id = try self.sqlite_db.prepare("insert or ignore into _zova_graph_batch_delete_ids (node_id) values (?)");
+        defer insert_id.deinit();
+        for (node_ids) |node_id| {
+            try insert_id.bindText(1, node_id);
+            std.debug.assert((try insert_id.step()) == .done);
+            try insert_id.reset();
+            try insert_id.clearBindings();
+        }
+
+        var delete_outgoing = try self.sqlite_db.prepare(
+            \\delete from _zova_graph_edges
+            \\where graph_name = ?
+            \\  and from_node_id in (select node_id from _zova_graph_batch_delete_ids)
+        );
+        defer delete_outgoing.deinit();
+        try delete_outgoing.bindText(1, graph_name);
+        std.debug.assert((try delete_outgoing.step()) == .done);
+
+        var delete_incoming = try self.sqlite_db.prepare(
+            \\delete from _zova_graph_edges
+            \\where graph_name = ?
+            \\  and to_node_id in (select node_id from _zova_graph_batch_delete_ids)
+        );
+        defer delete_incoming.deinit();
+        try delete_incoming.bindText(1, graph_name);
+        std.debug.assert((try delete_incoming.step()) == .done);
+
+        var delete_nodes = try self.sqlite_db.prepare(
+            \\delete from _zova_graph_nodes
+            \\where graph_name = ?
+            \\  and node_id in (select node_id from _zova_graph_batch_delete_ids)
+        );
+        defer delete_nodes.deinit();
+        try delete_nodes.bindText(1, graph_name);
+        std.debug.assert((try delete_nodes.step()) == .done);
+    }
+
     pub fn putGraphEdge(self: *Database, input: GraphEdgeInput) Error!void {
         try validateGraphName(input.graph_name);
         try validateNodeId(input.from_node_id);
@@ -397,6 +561,52 @@ pub const Database = struct {
         try stmt.bindText(4, input.to_node_id);
         try stmt.bindText(5, input.graph_name);
         std.debug.assert((try stmt.step()) == .done);
+    }
+
+    /// Insert typed directed graph edges as one all-or-nothing batch.
+    ///
+    /// Both endpoints must already exist for every input. Exact duplicate edges
+    /// are idempotent and retain their original insertion order.
+    pub fn putGraphEdges(self: *Database, inputs: []const GraphEdgeInput) Error!void {
+        for (inputs) |input| {
+            try validateGraphName(input.graph_name);
+            try validateNodeId(input.from_node_id);
+            try validateNodeId(input.to_node_id);
+            try validateEdgeType(input.edge_type);
+            if (!try self.hasGraphNode(input.graph_name, input.from_node_id)) return error.GraphNodeNotFound;
+            if (!try self.hasGraphNode(input.graph_name, input.to_node_id)) return error.GraphNodeNotFound;
+        }
+        if (inputs.len == 0) return;
+
+        try ensureGraphBatchIndexes(self);
+
+        var stmt = try self.sqlite_db.prepare(
+            \\insert into _zova_graph_edges (graph_name, from_node_id, edge_type, to_node_id, created_order)
+            \\values (?, ?, ?, ?, ?)
+            \\on conflict(graph_name, from_node_id, edge_type, to_node_id) do nothing
+        );
+        defer stmt.deinit();
+
+        var next_order_stmt = try self.sqlite_db.prepare(
+            \\select coalesce(max(created_order), 0) + 1
+            \\from _zova_graph_edges
+            \\where graph_name = ?
+        );
+        defer next_order_stmt.deinit();
+        var next_orders: std.StringHashMap(i64) = .init(std.heap.c_allocator);
+        defer next_orders.deinit();
+
+        for (inputs) |input| {
+            const created_order = try nextGraphCreatedOrder(&next_order_stmt, &next_orders, input.graph_name);
+            try stmt.bindText(1, input.graph_name);
+            try stmt.bindText(2, input.from_node_id);
+            try stmt.bindText(3, input.edge_type);
+            try stmt.bindText(4, input.to_node_id);
+            try stmt.bindInt64(5, created_order);
+            std.debug.assert((try stmt.step()) == .done);
+            try stmt.reset();
+            try stmt.clearBindings();
+        }
     }
 
     pub fn hasGraphEdge(self: *Database, graph_name: []const u8, from_node_id: []const u8, edge_type: []const u8, to_node_id: []const u8) Error!bool {
@@ -482,7 +692,7 @@ pub const Database = struct {
                     \\from _zova_graph_edges e
                     \\join _zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.to_node_id
                     \\where e.graph_name = ? and e.from_node_id = ?
-                    \\order by e.created_order, n.node_id
+                    \\order by e.created_order, e.to_node_id
                     \\limit ?
                 )
             else
@@ -491,7 +701,7 @@ pub const Database = struct {
                     \\from _zova_graph_edges e
                     \\join _zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.to_node_id
                     \\where e.graph_name = ? and e.from_node_id = ? and e.edge_type = ?
-                    \\order by e.created_order, n.node_id
+                    \\order by e.created_order, e.to_node_id
                     \\limit ?
                 ),
             .incoming => if (options.edge_type == null)
@@ -500,7 +710,7 @@ pub const Database = struct {
                     \\from _zova_graph_edges e
                     \\join _zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.from_node_id
                     \\where e.graph_name = ? and e.to_node_id = ?
-                    \\order by e.created_order, n.node_id
+                    \\order by e.created_order, e.from_node_id
                     \\limit ?
                 )
             else
@@ -509,7 +719,7 @@ pub const Database = struct {
                     \\from _zova_graph_edges e
                     \\join _zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.from_node_id
                     \\where e.graph_name = ? and e.to_node_id = ? and e.edge_type = ?
-                    \\order by e.created_order, n.node_id
+                    \\order by e.created_order, e.from_node_id
                     \\limit ?
                 ),
         };
@@ -537,12 +747,85 @@ pub const Database = struct {
         return .{ .items = try items.toOwnedSlice(allocator) };
     }
 
+    /// Count edges adjacent to one existing graph node.
+    pub fn graphDegree(self: *Database, options: GraphDegreeOptions) Error!u64 {
+        try validateGraphName(options.graph_name);
+        try validateNodeId(options.node_id);
+        if (options.edge_type) |edge_type| try validateEdgeType(edge_type);
+        if (!try self.hasGraphNode(options.graph_name, options.node_id)) return error.GraphNodeNotFound;
+
+        var stmt = switch (options.direction) {
+            .outgoing => if (options.edge_type != null)
+                try self.sqlite_db.prepare("select count(*) from _zova_graph_edges where graph_name = ? and from_node_id = ? and edge_type = ?")
+            else
+                try self.sqlite_db.prepare("select count(*) from _zova_graph_edges where graph_name = ? and from_node_id = ?"),
+            .incoming => if (options.edge_type != null)
+                try self.sqlite_db.prepare("select count(*) from _zova_graph_edges where graph_name = ? and to_node_id = ? and edge_type = ?")
+            else
+                try self.sqlite_db.prepare("select count(*) from _zova_graph_edges where graph_name = ? and to_node_id = ?"),
+        };
+        defer stmt.deinit();
+        try stmt.bindText(1, options.graph_name);
+        try stmt.bindText(2, options.node_id);
+        if (options.edge_type) |edge_type| try stmt.bindText(3, edge_type);
+        std.debug.assert((try stmt.step()) == .row);
+        const count = stmt.columnInt64(0);
+        if (count < 0) return error.GraphInvalid;
+        return @intCast(count);
+    }
+
     pub fn graphWalk(self: *Database, allocator: std.mem.Allocator, options: GraphWalkOptions) Error!GraphWalk {
+        return self.graphWalkInternal(allocator, .{
+            .graph_name = options.graph_name,
+            .start_node_id = options.start_node_id,
+            .direction = .outgoing,
+            .edge_type = options.edge_type,
+            .max_depth = options.max_depth,
+            .limit = options.limit,
+        }, null);
+    }
+
+    /// Return a bounded incoming or outgoing directed walk from one graph node.
+    pub fn graphWalkDirection(self: *Database, allocator: std.mem.Allocator, options: GraphWalkDirectionOptions) Error!GraphWalk {
+        return self.graphWalkInternal(allocator, options, null);
+    }
+
+    /// Run a walk with internal adjacency-scan counters for benchmark and test use.
+    pub fn graphWalkProfiled(self: *Database, allocator: std.mem.Allocator, options: GraphWalkOptions, profile: *GraphWalkScanProfile) Error!GraphWalk {
+        profile.* = .{};
+        return self.graphWalkInternal(allocator, .{
+            .graph_name = options.graph_name,
+            .start_node_id = options.start_node_id,
+            .direction = .outgoing,
+            .edge_type = options.edge_type,
+            .max_depth = options.max_depth,
+            .limit = options.limit,
+        }, profile);
+    }
+
+    /// Run an incoming or outgoing walk with internal timing and scan counters.
+    pub fn graphWalkDirectionProfiled(
+        self: *Database,
+        allocator: std.mem.Allocator,
+        options: GraphWalkDirectionOptions,
+        profile: *GraphWalkScanProfile,
+    ) Error!GraphWalk {
+        profile.* = .{};
+        return self.graphWalkInternal(allocator, options, profile);
+    }
+
+    fn graphWalkInternal(
+        self: *Database,
+        allocator: std.mem.Allocator,
+        options: GraphWalkDirectionOptions,
+        profile: ?*GraphWalkScanProfile,
+    ) Error!GraphWalk {
         try validateGraphName(options.graph_name);
         try validateNodeId(options.start_node_id);
         if (options.edge_type) |edge_type| try validateEdgeType(edge_type);
-        _ = try sqliteLimit(options.limit);
-        if (!try self.hasGraphNode(options.graph_name, options.start_node_id)) return error.GraphNodeNotFound;
+        const sqlite_limit = try sqliteLimit(options.limit);
+        const walk_start = if (profile != null) graphProfileTimestamp() else std.Io.Timestamp.zero;
+        const root_lookup_start = if (profile != null) graphProfileTimestamp() else std.Io.Timestamp.zero;
 
         var visited: std.StringHashMap(void) = .init(allocator);
         defer freeVisitedKeys(allocator, &visited);
@@ -562,8 +845,18 @@ pub const Database = struct {
             var owned_start = start;
             owned_start.deinit(allocator);
         }
+        if (profile) |value| value.root_lookup_ms = graphProfileElapsedMs(root_lookup_start);
         try putVisited(&visited, allocator, options.start_node_id);
         try appendGraphWalkItem(&frontier, allocator, start.node_id, start.kind, 0, null, null);
+
+        const adjacency_prepare_start = if (profile != null) graphProfileTimestamp() else std.Io.Timestamp.zero;
+        var adjacency_stmt = try self.prepareWalkAdjacency(options.direction, options.edge_type);
+        defer adjacency_stmt.deinit();
+        try bindWalkAdjacencyConstants(&adjacency_stmt, options, sqlite_limit);
+        if (profile) |value| {
+            value.adjacency_prepare_ms = graphProfileElapsedMs(adjacency_prepare_start);
+            value.adjacency_statement_prepares += 1;
+        }
 
         var frontier_index: usize = 0;
         while (frontier_index < frontier.items.len and results.items.len < options.limit) : (frontier_index += 1) {
@@ -577,25 +870,212 @@ pub const Database = struct {
             try appendGraphWalkItem(&results, allocator, current_node_id, current_kind, current_depth, current_predecessor_node_id, current_edge_type);
             if (current_depth >= options.max_depth) continue;
 
-            var neighbors = try self.graphNeighbors(allocator, .{
-                .graph_name = options.graph_name,
-                .node_id = current_node_id,
-                .direction = .outgoing,
-                .edge_type = options.edge_type,
-                .limit = options.limit,
-            });
-            defer neighbors.deinit(allocator);
+            if (profile) |value| {
+                const operation_start = graphProfileTimestamp();
+                try bindWalkAdjacencyNode(&adjacency_stmt, current_node_id);
+                value.adjacency_execute_ms += graphProfileElapsedMs(operation_start);
+                value.adjacency_query_binds += 1;
+                value.frontier_expansions += 1;
+            } else {
+                try bindWalkAdjacencyNode(&adjacency_stmt, current_node_id);
+            }
 
-            for (neighbors.items) |neighbor| {
-                if (visited.contains(neighbor.node_id)) continue;
-                try putVisited(&visited, allocator, neighbor.node_id);
-                try appendGraphWalkItem(&frontier, allocator, neighbor.node_id, neighbor.kind, current_depth + 1, current_node_id, neighbor.edge_type);
+            while (true) {
+                const step_result = if (profile) |value| result: {
+                    const operation_start = graphProfileTimestamp();
+                    const operation_result = try adjacency_stmt.step();
+                    value.adjacency_execute_ms += graphProfileElapsedMs(operation_start);
+                    break :result operation_result;
+                } else try adjacency_stmt.step();
+                if (step_result != .row) break;
+                if (profile) |value| value.adjacency_rows_stepped += 1;
+                const neighbor_node_id = adjacency_stmt.columnText(0);
+                const neighbor_kind = adjacency_stmt.columnText(1);
+                const neighbor_edge_type = adjacency_stmt.columnText(2);
+                if (visited.contains(neighbor_node_id)) continue;
+                try putVisited(&visited, allocator, neighbor_node_id);
+                try appendGraphWalkItem(&frontier, allocator, neighbor_node_id, neighbor_kind, current_depth + 1, current_node_id, neighbor_edge_type);
+            }
+            if (profile) |value| {
+                const operation_start = graphProfileTimestamp();
+                try resetWalkAdjacency(&adjacency_stmt);
+                value.adjacency_execute_ms += graphProfileElapsedMs(operation_start);
+            } else {
+                try resetWalkAdjacency(&adjacency_stmt);
             }
         }
 
-        return .{ .items = try results.toOwnedSlice(allocator) };
+        const owned_results = try results.toOwnedSlice(allocator);
+        if (profile) |value| {
+            value.result_count = @intCast(owned_results.len);
+            const accounted_ms = value.root_lookup_ms + value.adjacency_prepare_ms + value.adjacency_execute_ms;
+            value.bfs_bookkeeping_allocation_ms = @max(0, graphProfileElapsedMs(walk_start) - accounted_ms);
+        }
+        return .{ .items = owned_results };
+    }
+
+    fn prepareWalkAdjacency(self: *Database, direction: GraphNeighborDirection, edge_type: ?[]const u8) Error!sqlite.Statement {
+        return switch (direction) {
+            .outgoing => if (edge_type == null)
+                try self.sqlite_db.prepare(
+                    \\select n.node_id, n.kind, e.edge_type
+                    \\from _zova_graph_edges e
+                    \\join _zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.to_node_id
+                    \\where e.graph_name = ? and e.from_node_id = ?
+                    \\order by e.created_order, e.to_node_id
+                    \\limit ?
+                )
+            else
+                try self.sqlite_db.prepare(
+                    \\select n.node_id, n.kind, e.edge_type
+                    \\from _zova_graph_edges e
+                    \\join _zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.to_node_id
+                    \\where e.graph_name = ? and e.from_node_id = ? and e.edge_type = ?
+                    \\order by e.created_order, e.to_node_id
+                    \\limit ?
+                ),
+            .incoming => if (edge_type == null)
+                try self.sqlite_db.prepare(
+                    \\select n.node_id, n.kind, e.edge_type
+                    \\from _zova_graph_edges e
+                    \\join _zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.from_node_id
+                    \\where e.graph_name = ? and e.to_node_id = ?
+                    \\order by e.created_order, e.from_node_id
+                    \\limit ?
+                )
+            else
+                try self.sqlite_db.prepare(
+                    \\select n.node_id, n.kind, e.edge_type
+                    \\from _zova_graph_edges e
+                    \\join _zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.from_node_id
+                    \\where e.graph_name = ? and e.to_node_id = ? and e.edge_type = ?
+                    \\order by e.created_order, e.from_node_id
+                    \\limit ?
+                ),
+        };
     }
 };
+
+fn graphProfileIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+fn graphProfileTimestamp() std.Io.Timestamp {
+    return std.Io.Clock.awake.now(graphProfileIo());
+}
+
+fn graphProfileElapsedMs(start: std.Io.Timestamp) f64 {
+    const elapsed_ns = start.durationTo(graphProfileTimestamp()).toNanoseconds();
+    if (elapsed_ns <= 0) return 0;
+    return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, std.time.ns_per_ms);
+}
+
+fn bindWalkAdjacencyConstants(
+    stmt: *sqlite.Statement,
+    options: GraphWalkDirectionOptions,
+    sqlite_limit: i64,
+) Error!void {
+    try stmt.bindText(1, options.graph_name);
+    if (options.edge_type) |edge_type| {
+        try stmt.bindText(3, edge_type);
+        try stmt.bindInt64(4, sqlite_limit);
+    } else {
+        try stmt.bindInt64(3, sqlite_limit);
+    }
+}
+
+fn bindWalkAdjacencyNode(stmt: *sqlite.Statement, current_node_id: []const u8) Error!void {
+    try stmt.bindText(2, current_node_id);
+}
+
+fn resetWalkAdjacency(stmt: *sqlite.Statement) Error!void {
+    try stmt.reset();
+}
+
+test "walk adjacency reset retains invariant bindings" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.deinit();
+
+    try db.exec(
+        \\create table adjacency (
+        \\  graph_name text not null,
+        \\  node_id text not null,
+        \\  edge_type text not null,
+        \\  value text not null
+        \\);
+        \\insert into adjacency values
+        \\  ('app', 'first', 'calls', 'first-value'),
+        \\  ('app', 'second', 'calls', 'second-value');
+    );
+
+    var stmt = try db.prepare(
+        \\select value from adjacency
+        \\where graph_name = ?1 and node_id = ?2 and edge_type = ?3
+        \\limit ?4
+    );
+    defer stmt.deinit();
+
+    try stmt.bindText(1, "app");
+    try stmt.bindText(3, "calls");
+    try stmt.bindInt64(4, 1);
+
+    try stmt.bindText(2, "first");
+    try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+    try std.testing.expectEqualStrings("first-value", stmt.columnText(0));
+
+    try resetWalkAdjacency(&stmt);
+    try stmt.bindText(2, "second");
+    try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+    try std.testing.expectEqualStrings("second-value", stmt.columnText(0));
+}
+
+fn bindGraphNodeInput(stmt: *sqlite.Statement, input: GraphNodeInput, created_order: i64) Error!void {
+    try stmt.bindText(1, input.graph_name);
+    try stmt.bindText(2, input.node_id);
+    try stmt.bindText(3, input.kind);
+    try stmt.bindText(4, targetTypeText(input.target_type));
+    if (input.target_namespace) |value| {
+        try stmt.bindText(5, value);
+    } else {
+        try stmt.bindNull(5);
+    }
+    if (input.target_ref) |value| {
+        try stmt.bindText(6, value);
+    } else {
+        try stmt.bindNull(6);
+    }
+    try stmt.bindInt64(7, created_order);
+}
+
+fn nextGraphCreatedOrder(
+    stmt: *sqlite.Statement,
+    next_orders: *std.StringHashMap(i64),
+    graph_name: []const u8,
+) Error!i64 {
+    const entry = try next_orders.getOrPut(graph_name);
+    if (!entry.found_existing) {
+        try stmt.bindText(1, graph_name);
+        std.debug.assert((try stmt.step()) == .row);
+        const next_order = stmt.columnInt64(0);
+        try stmt.reset();
+        try stmt.clearBindings();
+        if (next_order < 1) return error.GraphInvalid;
+        entry.value_ptr.* = next_order;
+    }
+
+    const created_order = entry.value_ptr.*;
+    entry.value_ptr.* = std.math.add(i64, created_order, 1) catch return error.GraphInvalid;
+    return created_order;
+}
+
+fn ensureGraphBatchIndexes(self: *Database) Error!void {
+    try self.sqlite_db.exec(graph_nodes_created_order_index_sql ++ ";");
+    try self.sqlite_db.exec(graph_edges_created_order_index_sql ++ ";");
+    try self.sqlite_db.exec(graph_edges_from_node_index_sql ++ ";");
+    try self.sqlite_db.exec(graph_edges_from_node_type_index_sql ++ ";");
+    try self.sqlite_db.exec(graph_edges_to_node_index_sql ++ ";");
+    try self.sqlite_db.exec(graph_edges_to_node_type_index_sql ++ ";");
+}
 
 fn graphInfoFromRow(allocator: std.mem.Allocator, stmt: *sqlite.Statement) Error!GraphInfo {
     const name = try allocator.dupe(u8, stmt.columnText(0));

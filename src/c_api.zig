@@ -27,6 +27,8 @@ pub const zova_object_manifest_chunk = internal.zova_object_manifest_chunk;
 pub const zova_object_manifest = internal.zova_object_manifest;
 pub const zova_vector_metric = internal.zova_vector_metric;
 pub const zova_vector_element_type = internal.zova_vector_element_type;
+pub const zova_vector_multi_i8_search_mode = internal.zova_vector_multi_i8_search_mode;
+pub const zova_vector_multi_i8_aggregation = internal.zova_vector_multi_i8_aggregation;
 pub const zova_vector_collection_options = internal.zova_vector_collection_options;
 pub const zova_vector_values = internal.zova_vector_values;
 pub const zova_vector = internal.zova_vector;
@@ -47,6 +49,7 @@ pub const zova_graph_neighbor_result = internal.zova_graph_neighbor_result;
 pub const zova_graph_neighbor_results = internal.zova_graph_neighbor_results;
 pub const zova_graph_walk_result = internal.zova_graph_walk_result;
 pub const zova_graph_walk_results = internal.zova_graph_walk_results;
+pub const zova_graph_walk_profile = internal.zova_graph_walk_profile;
 pub const ZOVA_OPEN_READ_ONLY = internal.ZOVA_OPEN_READ_ONLY;
 pub const ZOVA_BACKUP_NO_VERIFY = internal.ZOVA_BACKUP_NO_VERIFY;
 pub const ZOVA_COMPACT_NO_VERIFY = internal.ZOVA_COMPACT_NO_VERIFY;
@@ -114,6 +117,7 @@ pub const zova_vector_exists_request = internal.zova_vector_exists_request;
 pub const zova_vector_delete_request = internal.zova_vector_delete_request;
 pub const zova_vector_search_request = internal.zova_vector_search_request;
 pub const zova_vector_search_in_request = internal.zova_vector_search_in_request;
+pub const zova_vector_search_multi_i8_request = internal.zova_vector_search_multi_i8_request;
 pub const zova_vector_collection_info_get_request = internal.zova_vector_collection_info_get_request;
 pub const zova_vector_collections_list_request = internal.zova_vector_collections_list_request;
 pub const zova_vector_put_many_request = internal.zova_vector_put_many_request;
@@ -133,15 +137,23 @@ pub const zova_database_extension_info_request = internal.zova_database_extensio
 pub const zova_database_extension_list_request = internal.zova_database_extension_list_request;
 pub const zova_graph_delete_request = internal.zova_graph_delete_request;
 pub const zova_graph_node_put_request = internal.zova_graph_node_put_request;
+pub const zova_graph_node_input = internal.zova_graph_node_input;
+pub const zova_graph_node_put_many_request = internal.zova_graph_node_put_many_request;
 pub const zova_graph_node_get_request = internal.zova_graph_node_get_request;
 pub const zova_graph_node_exists_request = internal.zova_graph_node_exists_request;
 pub const zova_graph_node_delete_request = internal.zova_graph_node_delete_request;
+pub const zova_graph_node_delete_many_request = internal.zova_graph_node_delete_many_request;
 pub const zova_graph_edge_put_request = internal.zova_graph_edge_put_request;
+pub const zova_graph_edge_input = internal.zova_graph_edge_input;
+pub const zova_graph_edge_put_many_request = internal.zova_graph_edge_put_many_request;
 pub const zova_graph_edge_get_request = internal.zova_graph_edge_get_request;
 pub const zova_graph_edge_exists_request = internal.zova_graph_edge_exists_request;
 pub const zova_graph_edge_delete_request = internal.zova_graph_edge_delete_request;
 pub const zova_graph_neighbors_request = internal.zova_graph_neighbors_request;
+pub const zova_graph_degree_request = internal.zova_graph_degree_request;
 pub const zova_graph_walk_request = internal.zova_graph_walk_request;
+pub const zova_graph_walk_direction_request = internal.zova_graph_walk_direction_request;
+pub const zova_graph_walk_direction_profiled_request = internal.zova_graph_walk_direction_profiled_request;
 
 export fn zova_abi_version_major() callconv(.c) u32 {
     return internal.zova_abi_version_major();
@@ -549,6 +561,10 @@ export fn zova_vector_search_in(request: ?*const zova_vector_search_in_request) 
     return internal.zova_vector_search_in(request);
 }
 
+export fn zova_vector_search_multi_i8(request: ?*const zova_vector_search_multi_i8_request) callconv(.c) zova_status {
+    return internal.zova_vector_search_multi_i8(request);
+}
+
 export fn zova_vector_collection_info_get(request: ?*const zova_vector_collection_info_get_request) callconv(.c) zova_status {
     return internal.zova_vector_collection_info_get(request);
 }
@@ -637,6 +653,10 @@ export fn zova_graph_node_put(request: ?*const zova_graph_node_put_request) call
     return internal.zova_graph_node_put(request);
 }
 
+export fn zova_graph_node_put_many(request: ?*const zova_graph_node_put_many_request) callconv(.c) zova_status {
+    return internal.zova_graph_node_put_many(request);
+}
+
 export fn zova_graph_node_get(request: ?*const zova_graph_node_get_request) callconv(.c) zova_status {
     return internal.zova_graph_node_get(request);
 }
@@ -649,8 +669,16 @@ export fn zova_graph_node_delete(request: ?*const zova_graph_node_delete_request
     return internal.zova_graph_node_delete(request);
 }
 
+export fn zova_graph_node_delete_many(request: ?*const zova_graph_node_delete_many_request) callconv(.c) zova_status {
+    return internal.zova_graph_node_delete_many(request);
+}
+
 export fn zova_graph_edge_put(request: ?*const zova_graph_edge_put_request) callconv(.c) zova_status {
     return internal.zova_graph_edge_put(request);
+}
+
+export fn zova_graph_edge_put_many(request: ?*const zova_graph_edge_put_many_request) callconv(.c) zova_status {
+    return internal.zova_graph_edge_put_many(request);
 }
 
 export fn zova_graph_edge_get(request: ?*const zova_graph_edge_get_request) callconv(.c) zova_status {
@@ -669,8 +697,20 @@ export fn zova_graph_neighbors(request: ?*const zova_graph_neighbors_request) ca
     return internal.zova_graph_neighbors(request);
 }
 
+export fn zova_graph_degree(request: ?*const zova_graph_degree_request) callconv(.c) zova_status {
+    return internal.zova_graph_degree(request);
+}
+
 export fn zova_graph_walk(request: ?*const zova_graph_walk_request) callconv(.c) zova_status {
     return internal.zova_graph_walk(request);
+}
+
+export fn zova_graph_walk_direction(request: ?*const zova_graph_walk_direction_request) callconv(.c) zova_status {
+    return internal.zova_graph_walk_direction(request);
+}
+
+export fn zova_graph_walk_direction_profiled(request: ?*const zova_graph_walk_direction_profiled_request) callconv(.c) zova_status {
+    return internal.zova_graph_walk_direction_profiled(request);
 }
 
 test {

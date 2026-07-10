@@ -8,6 +8,7 @@ pub const Error = zova_error.Error;
 
 pub const vector_collections_table = "_zova_vector_collections";
 pub const vectors_table = "_zova_vectors";
+pub const vector_norms_table = "_zova_vector_norms";
 const max_vector_collection_name_bytes: usize = 255;
 pub const max_vector_dimensions: u32 = 16_384;
 
@@ -149,6 +150,27 @@ pub const VectorSearchResults = struct {
     }
 };
 
+/// Aggregation mode for raw-i8 multi-query cosine search.
+pub const MultiI8CosineSearchMode = enum {
+    /// Score every eligible vector by the least similar query.
+    global_min_cosine,
+    /// Retain a deterministic query-prefilter first, then aggregate only it.
+    cbm_prefilter_min_cosine,
+};
+
+/// Input for raw-i8 multi-query cosine search.
+///
+/// All query slices must have the collection's exact dimension and must be
+/// non-zero. Results use Zova's lower-is-better distance convention:
+/// `max_i(1 - cosine(query[i], candidate))`.
+pub const MultiI8CosineSearchOptions = struct {
+    queries: []const []const i8,
+    candidate_ids: ?[]const []const u8 = null,
+    mode: MultiI8CosineSearchMode = .global_min_cosine,
+    prefilter_query_index: usize = 0,
+    prefilter_limit: usize = 0,
+};
+
 pub const StorageSchema = enum {
     main,
     vector_store,
@@ -167,6 +189,99 @@ const CollectionMetadata = struct {
     element_type: VectorElementType,
 };
 
+const candidate_scan_threshold = 128;
+
+const PreparedVectorQuery = struct {
+    element_type: VectorElementType,
+    metric: VectorMetric,
+    dimensions: u32,
+    values: VectorValuesConst,
+    cosine_query_norm: f64 = 0,
+    cosine_query_length: f64 = 0,
+
+    fn init(collection: CollectionMetadata, values: VectorValuesConst) Error!PreparedVectorQuery {
+        if (vectorValuesElementType(values) != collection.element_type) return error.VectorInvalid;
+        if (vectorValuesLen(values) != collection.dimensions) return error.VectorDimensionMismatch;
+
+        var cosine_query_norm: f64 = 0;
+        switch (collection.metric) {
+            .cosine => {
+                cosine_query_norm = switch (values) {
+                    .i8 => |typed| blk: {
+                        var norm: u64 = 0;
+                        for (typed) |value| {
+                            const wide: i32 = value;
+                            norm += @intCast(wide * wide);
+                        }
+                        if (norm == 0) return error.VectorInvalid;
+                        break :blk u64ToF64Exact(norm);
+                    },
+                    else => blk: {
+                        var norm: f64 = 0;
+                        for (0..vectorValuesLen(values)) |index| {
+                            const value_f64 = try inputValueAsF64(values, index);
+                            norm += value_f64 * value_f64;
+                        }
+                        if (norm == 0) return error.VectorInvalid;
+                        break :blk norm;
+                    },
+                };
+            },
+            .l2, .dot => {
+                for (0..vectorValuesLen(values)) |index| {
+                    _ = try inputValueAsF64(values, index);
+                }
+            },
+        }
+
+        const cosine_query_length = if (collection.metric == .cosine)
+            @sqrt(cosine_query_norm)
+        else
+            0;
+
+        return .{
+            .element_type = collection.element_type,
+            .metric = collection.metric,
+            .dimensions = collection.dimensions,
+            .values = values,
+            .cosine_query_norm = cosine_query_norm,
+            .cosine_query_length = cosine_query_length,
+        };
+    }
+
+    fn distanceFromEncoded(self: PreparedVectorQuery, encoded_values: []const u8) Error!f64 {
+        return self.distanceFromEncodedWithStoredNorm(encoded_values, null);
+    }
+
+    fn distanceFromEncodedWithStoredNorm(self: PreparedVectorQuery, encoded_values: []const u8, stored_norm_squared: ?f64) Error!f64 {
+        if (encoded_values.len != vectorByteLen(self.element_type, self.dimensions)) return error.VectorCorrupt;
+
+        return switch (self.metric) {
+            .cosine => switch (self.values) {
+                .i8 => |query| if (stored_norm_squared) |norm|
+                    i8CosineDistanceFromEncodedWithStoredNorm(query, self.cosine_query_norm, encoded_values, norm)
+                else
+                    i8CosineDistanceFromEncoded(query, self.cosine_query_norm, encoded_values),
+                else => cosineDistanceFromEncodedPrepared(self.element_type, self.values, encoded_values, self.cosine_query_norm),
+            },
+            .l2 => l2DistanceFromEncoded(self.element_type, self.values, encoded_values),
+            .dot => dotDistanceFromEncoded(self.element_type, self.values, encoded_values),
+        };
+    }
+
+    fn usesStoredNorms(self: PreparedVectorQuery) bool {
+        return self.metric == .cosine and self.element_type == .i8;
+    }
+
+    fn i8CosineQuery(self: PreparedVectorQuery) ?[]const i8 {
+        if (self.metric != .cosine) return null;
+        return switch (self.values) {
+            .i8 => |query| query,
+            else => null,
+        };
+    }
+};
+
 pub const collections_schema_sql =
     \\create table _zova_vector_collections (
     \\  name text not null primary key check (length(name) > 0 and length(name) <= 255),
@@ -183,6 +298,15 @@ pub const vectors_schema_sql =
     \\  "values" blob not null check (length("values") > 0),
     \\  primary key (collection_name, vector_id),
     \\  foreign key (collection_name) references _zova_vector_collections(name)
+    \\)
+;
+pub const vector_norms_schema_sql =
+    \\create table _zova_vector_norms (
+    \\  collection_name text not null,
+    \\  vector_id text not null check (length(vector_id) > 0),
+    \\  norm_squared real not null check (norm_squared >= 0),
+    \\  primary key (collection_name, vector_id),
+    \\  foreign key (collection_name, vector_id) references _zova_vectors(collection_name, vector_id)
     \\)
 ;
 
@@ -434,6 +558,8 @@ pub const Database = struct {
         try validateVectorId(vector_id);
         _ = try loadVectorCollection(self, collection_name);
 
+        try self.deleteVectorNormIfPresent(collection_name, vector_id);
+
         var stmt = try self.prepareSchema("delete from {s}_zova_vectors where collection_name = ? and vector_id = ?", .{self.storage_schema.prefix()});
         defer stmt.deinit();
 
@@ -453,6 +579,8 @@ pub const Database = struct {
     pub fn deleteVectorCollection(self: *Database, name: []const u8) Error!void {
         try validateVectorCollectionName(name);
         _ = try loadVectorCollection(self, name);
+
+        try self.deleteVectorCollectionNormsIfPresent(name);
 
         var delete_vectors = try self.prepareSchema("delete from {s}_zova_vectors where collection_name = ?", .{self.storage_schema.prefix()});
         defer delete_vectors.deinit();
@@ -482,9 +610,52 @@ pub const Database = struct {
     ) Error!VectorSearchResults {
         try validateVectorCollectionName(collection_name);
         const collection = try loadVectorCollection(self, collection_name);
-        try validateVectorValues(collection, query);
+        const prepared_query = try PreparedVectorQuery.init(collection, query);
 
-        return self.searchAllVectors(allocator, collection_name, collection, query, limit, null, null);
+        return self.searchAllVectors(allocator, collection_name, collection, prepared_query, limit, null, null);
+    }
+
+    /// Search one raw-i8 cosine collection against multiple queries.
+    ///
+    /// The returned distance is the greatest individual cosine distance, which
+    /// is equal to `1 - min_cosine_similarity`. Results sort by ascending
+    /// distance and then ascending vector id.
+    pub fn searchMultiI8Cosine(
+        self: *Database,
+        allocator: std.mem.Allocator,
+        collection_name: []const u8,
+        options: MultiI8CosineSearchOptions,
+        limit: usize,
+    ) Error!VectorSearchResults {
+        try validateVectorCollectionName(collection_name);
+        const collection = try loadVectorCollection(self, collection_name);
+        if (collection.element_type != .i8 or collection.metric != .cosine) return error.VectorInvalid;
+
+        var queries: std.ArrayList(PreparedI8CosineQuery) = .empty;
+        defer queries.deinit(allocator);
+        if (options.queries.len == 0) return error.VectorInvalid;
+        try queries.ensureTotalCapacity(allocator, options.queries.len);
+        for (options.queries) |query| {
+            const prepared = try PreparedVectorQuery.init(collection, .{ .i8 = query });
+            queries.appendAssumeCapacity(.{ .values = query, .length = prepared.cosine_query_length });
+        }
+
+        return switch (options.mode) {
+            .global_min_cosine => if (options.candidate_ids) |candidate_ids|
+                self.searchMultiI8CosineCandidates(allocator, collection_name, collection, queries.items, candidate_ids, limit)
+            else
+                self.searchMultiI8CosineAll(allocator, collection_name, collection, queries.items, limit),
+            .cbm_prefilter_min_cosine => self.searchMultiI8CosinePrefilter(
+                allocator,
+                collection_name,
+                collection,
+                queries.items,
+                options.candidate_ids,
+                options.prefilter_query_index,
+                options.prefilter_limit,
+                limit,
+            ),
+        };
     }
 
     /// Search one vector collection with an exact flat scan and distance cap.
@@ -503,10 +674,10 @@ pub const Database = struct {
     ) Error!VectorSearchResults {
         try validateVectorCollectionName(collection_name);
         const collection = try loadVectorCollection(self, collection_name);
-        try validateVectorValues(collection, query);
+        const prepared_query = try PreparedVectorQuery.init(collection, query);
         try validateVectorSearchThreshold(max_distance);
 
-        return self.searchAllVectors(allocator, collection_name, collection, query, limit, max_distance, null);
+        return self.searchAllVectors(allocator, collection_name, collection, prepared_query, limit, max_distance, null);
     }
 
     /// Search one vector collection over a caller-supplied candidate id set.
@@ -526,9 +697,9 @@ pub const Database = struct {
     ) Error!VectorSearchResults {
         try validateVectorCollectionName(collection_name);
         const collection = try loadVectorCollection(self, collection_name);
-        try validateVectorValues(collection, query);
+        const prepared_query = try PreparedVectorQuery.init(collection, query);
 
-        return self.searchCandidateVectors(allocator, collection_name, collection, query, candidate_ids, limit, null, null);
+        return self.searchCandidateVectors(allocator, collection_name, collection, prepared_query, candidate_ids, limit, null, null);
     }
 
     /// Search one vector collection over candidates with an inclusive distance cap.
@@ -543,10 +714,10 @@ pub const Database = struct {
     ) Error!VectorSearchResults {
         try validateVectorCollectionName(collection_name);
         const collection = try loadVectorCollection(self, collection_name);
-        try validateVectorValues(collection, query);
+        const prepared_query = try PreparedVectorQuery.init(collection, query);
         try validateVectorSearchThreshold(max_distance);
 
-        return self.searchCandidateVectors(allocator, collection_name, collection, query, candidate_ids, limit, max_distance, null);
+        return self.searchCandidateVectors(allocator, collection_name, collection, prepared_query, candidate_ids, limit, max_distance, null);
     }
 
     /// Search one vector collection using an existing vector as the query.
@@ -566,8 +737,9 @@ pub const Database = struct {
         const collection = try loadVectorCollection(self, collection_name);
         const query = try self.loadVectorValuesForSearch(allocator, collection_name, collection, source_vector_id);
         defer query.deinit(allocator);
+        const prepared_query = try PreparedVectorQuery.init(collection, vectorValuesConst(query));
 
-        return self.searchAllVectors(allocator, collection_name, collection, vectorValuesConst(query), limit, null, source_vector_id);
+        return self.searchAllVectors(allocator, collection_name, collection, prepared_query, limit, null, source_vector_id);
     }
 
     /// Search candidates using an existing vector as the query.
@@ -587,8 +759,9 @@ pub const Database = struct {
         const collection = try loadVectorCollection(self, collection_name);
         const query = try self.loadVectorValuesForSearch(allocator, collection_name, collection, source_vector_id);
         defer query.deinit(allocator);
+        const prepared_query = try PreparedVectorQuery.init(collection, vectorValuesConst(query));
 
-        return self.searchCandidateVectors(allocator, collection_name, collection, vectorValuesConst(query), candidate_ids, limit, null, source_vector_id);
+        return self.searchCandidateVectors(allocator, collection_name, collection, prepared_query, candidate_ids, limit, null, source_vector_id);
     }
 
     /// Search by existing vector id with an inclusive distance cap.
@@ -606,8 +779,9 @@ pub const Database = struct {
         try validateVectorSearchThreshold(max_distance);
         const query = try self.loadVectorValuesForSearch(allocator, collection_name, collection, source_vector_id);
         defer query.deinit(allocator);
+        const prepared_query = try PreparedVectorQuery.init(collection, vectorValuesConst(query));
 
-        return self.searchAllVectors(allocator, collection_name, collection, vectorValuesConst(query), limit, max_distance, source_vector_id);
+        return self.searchAllVectors(allocator, collection_name, collection, prepared_query, limit, max_distance, source_vector_id);
     }
 
     /// Search candidates by existing vector id with an inclusive distance cap.
@@ -626,8 +800,9 @@ pub const Database = struct {
         try validateVectorSearchThreshold(max_distance);
         const query = try self.loadVectorValuesForSearch(allocator, collection_name, collection, source_vector_id);
         defer query.deinit(allocator);
+        const prepared_query = try PreparedVectorQuery.init(collection, vectorValuesConst(query));
 
-        return self.searchCandidateVectors(allocator, collection_name, collection, vectorValuesConst(query), candidate_ids, limit, max_distance, source_vector_id);
+        return self.searchCandidateVectors(allocator, collection_name, collection, prepared_query, candidate_ids, limit, max_distance, source_vector_id);
     }
 
     fn searchAllVectors(
@@ -635,7 +810,80 @@ pub const Database = struct {
         allocator: std.mem.Allocator,
         collection_name: []const u8,
         collection: CollectionMetadata,
-        query: VectorValuesConst,
+        query: PreparedVectorQuery,
+        limit: usize,
+        max_distance: ?f64,
+        exclude_id: ?[]const u8,
+    ) Error!VectorSearchResults {
+        if (query.i8CosineQuery()) |i8_query| {
+            return self.searchAllI8CosineVectors(
+                allocator,
+                collection_name,
+                collection,
+                i8_query,
+                query.cosine_query_norm,
+                query.cosine_query_length,
+                limit,
+                max_distance,
+                exclude_id,
+            );
+        }
+
+        var results: std.ArrayList(VectorSearchResult) = .empty;
+        errdefer {
+            freeSearchItems(allocator, results.items);
+            results.deinit(allocator);
+        }
+
+        if (limit == 0) {
+            return .{ .items = try results.toOwnedSlice(allocator) };
+        }
+
+        const use_stored_norms = query.usesStoredNorms() and try self.hasVectorNormsTable();
+        var stmt = if (use_stored_norms)
+            try self.prepareSchema(
+                \\select v.vector_id, v.dimensions, v."values", n.norm_squared
+                \\from {s}_zova_vectors v
+                \\left join {s}_zova_vector_norms n
+                \\  on n.collection_name = v.collection_name and n.vector_id = v.vector_id
+                \\where v.collection_name = ?
+            , .{ self.storage_schema.prefix(), self.storage_schema.prefix() })
+        else
+            try self.prepareSchema(
+                \\select vector_id, dimensions, "values"
+                \\from {s}_zova_vectors
+                \\where collection_name = ?
+            , .{self.storage_schema.prefix()});
+        defer stmt.deinit();
+
+        try stmt.bindText(1, collection_name);
+        while ((try stmt.step()) == .row) {
+            const vector_id = stmt.columnText(0);
+            if (exclude_id) |excluded| {
+                if (std.mem.eql(u8, vector_id, excluded)) continue;
+            }
+
+            try validateStoredVectorDimensions(collection.dimensions, stmt.columnInt64(1));
+
+            const stored_norm = if (use_stored_norms) optionalColumnDouble(&stmt, 3) else null;
+            const distance = try query.distanceFromEncodedWithStoredNorm(stmt.columnBlob(2), stored_norm);
+            if (!distanceWithinThreshold(distance, max_distance)) continue;
+            try maybeInsertSearchResult(allocator, &results, limit, vector_id, distance);
+        }
+
+        const items = try results.toOwnedSlice(allocator);
+        std.mem.sort(VectorSearchResult, items, {}, searchResultLessThan);
+        return .{ .items = items };
+    }
+
+    fn searchAllI8CosineVectors(
+        self: *Database,
+        allocator: std.mem.Allocator,
+        collection_name: []const u8,
+        collection: CollectionMetadata,
+        query: []const i8,
+        query_norm: f64,
+        query_length: f64,
         limit: usize,
         max_distance: ?f64,
         exclude_id: ?[]const u8,
@@ -650,11 +898,21 @@ pub const Database = struct {
             return .{ .items = try results.toOwnedSlice(allocator) };
         }
 
-        var stmt = try self.prepareSchema(
-            \\select vector_id, dimensions, "values"
-            \\from {s}_zova_vectors
-            \\where collection_name = ?
-        , .{self.storage_schema.prefix()});
+        const use_stored_norms = try self.hasVectorNormsTable();
+        var stmt = if (use_stored_norms)
+            try self.prepareSchema(
+                \\select v.vector_id, v.dimensions, v."values", n.norm_squared
+                \\from {s}_zova_vectors v
+                \\left join {s}_zova_vector_norms n
+                \\  on n.collection_name = v.collection_name and n.vector_id = v.vector_id
+                \\where v.collection_name = ?
+            , .{ self.storage_schema.prefix(), self.storage_schema.prefix() })
+        else
+            try self.prepareSchema(
+                \\select vector_id, dimensions, "values"
+                \\from {s}_zova_vectors
+                \\where collection_name = ?
+            , .{self.storage_schema.prefix()});
         defer stmt.deinit();
 
         try stmt.bindText(1, collection_name);
@@ -666,13 +924,15 @@ pub const Database = struct {
 
             try validateStoredVectorDimensions(collection.dimensions, stmt.columnInt64(1));
 
-            const distance = try vectorDistanceFromEncoded(
-                collection.element_type,
-                collection.metric,
-                query,
-                stmt.columnBlob(2),
-                collection.dimensions,
-            );
+            const encoded_values = stmt.columnBlob(2);
+            if (encoded_values.len != query.len) return error.VectorCorrupt;
+            const distance = if (use_stored_norms)
+                if (optionalColumnDouble(&stmt, 3)) |stored_norm|
+                    try i8CosineDistanceFromEncodedWithQueryLengthSimd(query, query_length, encoded_values, stored_norm)
+                else
+                    try i8CosineDistanceFromEncoded(query, query_norm, encoded_values)
+            else
+                try i8CosineDistanceFromEncoded(query, query_norm, encoded_values);
             if (!distanceWithinThreshold(distance, max_distance)) continue;
             try maybeInsertSearchResult(allocator, &results, limit, vector_id, distance);
         }
@@ -682,12 +942,200 @@ pub const Database = struct {
         return .{ .items = items };
     }
 
+    fn searchMultiI8CosineAll(
+        self: *Database,
+        allocator: std.mem.Allocator,
+        collection_name: []const u8,
+        collection: CollectionMetadata,
+        queries: []const PreparedI8CosineQuery,
+        limit: usize,
+    ) Error!VectorSearchResults {
+        var results: std.ArrayList(VectorSearchResult) = .empty;
+        errdefer {
+            freeSearchItems(allocator, results.items);
+            results.deinit(allocator);
+        }
+        if (limit == 0) return .{ .items = try results.toOwnedSlice(allocator) };
+
+        const use_stored_norms = try self.hasVectorNormsTable();
+        var stmt = if (use_stored_norms)
+            try self.prepareSchema(
+                \\select v.vector_id, v.dimensions, v."values", n.norm_squared
+                \\from {s}_zova_vectors v
+                \\left join {s}_zova_vector_norms n
+                \\  on n.collection_name = v.collection_name and n.vector_id = v.vector_id
+                \\where v.collection_name = ?
+            , .{ self.storage_schema.prefix(), self.storage_schema.prefix() })
+        else
+            try self.prepareSchema(
+                \\select vector_id, dimensions, "values"
+                \\from {s}_zova_vectors
+                \\where collection_name = ?
+            , .{self.storage_schema.prefix()});
+        defer stmt.deinit();
+
+        try stmt.bindText(1, collection_name);
+        while ((try stmt.step()) == .row) {
+            try validateStoredVectorDimensions(collection.dimensions, stmt.columnInt64(1));
+            const encoded_values = stmt.columnBlob(2);
+            if (encoded_values.len != collection.dimensions) return error.VectorCorrupt;
+            const stored_norm = if (use_stored_norms) optionalColumnDouble(&stmt, 3) else null;
+            const distance = try multiI8CosineDistance(queries, encoded_values, stored_norm);
+            try maybeInsertSearchResult(allocator, &results, limit, stmt.columnText(0), distance);
+        }
+
+        const items = try results.toOwnedSlice(allocator);
+        std.mem.sort(VectorSearchResult, items, {}, searchResultLessThan);
+        return .{ .items = items };
+    }
+
+    fn searchMultiI8CosineCandidates(
+        self: *Database,
+        allocator: std.mem.Allocator,
+        collection_name: []const u8,
+        collection: CollectionMetadata,
+        queries: []const PreparedI8CosineQuery,
+        candidate_ids: []const []const u8,
+        limit: usize,
+    ) Error!VectorSearchResults {
+        var seen = std.StringHashMap(void).init(allocator);
+        defer seen.deinit();
+        for (candidate_ids) |candidate_id| {
+            try validateVectorId(candidate_id);
+            if (!seen.contains(candidate_id)) try seen.put(candidate_id, {});
+        }
+
+        var results: std.ArrayList(VectorSearchResult) = .empty;
+        errdefer {
+            freeSearchItems(allocator, results.items);
+            results.deinit(allocator);
+        }
+        if (limit == 0 or seen.count() == 0) return .{ .items = try results.toOwnedSlice(allocator) };
+
+        const collection_vector_count = if (seen.count() >= candidate_scan_threshold)
+            try self.countVectorsInCollection(collection_name)
+        else
+            0;
+        if (shouldScanCandidateVectors(seen.count(), collection_vector_count)) {
+            try self.searchMultiI8CosineCandidatesByScan(allocator, collection_name, collection, queries, &seen, &results, limit);
+        } else {
+            const use_stored_norms = try self.hasVectorNormsTable();
+            var stmt = if (use_stored_norms)
+                try self.prepareSchema(
+                    \\select v.dimensions, v."values", n.norm_squared
+                    \\from {s}_zova_vectors v
+                    \\left join {s}_zova_vector_norms n
+                    \\  on n.collection_name = v.collection_name and n.vector_id = v.vector_id
+                    \\where v.collection_name = ? and v.vector_id = ?
+                , .{ self.storage_schema.prefix(), self.storage_schema.prefix() })
+            else
+                try self.prepareSchema(
+                    \\select dimensions, "values"
+                    \\from {s}_zova_vectors
+                    \\where collection_name = ? and vector_id = ?
+                , .{self.storage_schema.prefix()});
+            defer stmt.deinit();
+
+            try stmt.bindText(1, collection_name);
+            var iterator = seen.keyIterator();
+            while (iterator.next()) |candidate_id| {
+                try stmt.bindText(2, candidate_id.*);
+                switch (try stmt.step()) {
+                    .done => {},
+                    .row => {
+                        try validateStoredVectorDimensions(collection.dimensions, stmt.columnInt64(0));
+                        const encoded_values = stmt.columnBlob(1);
+                        if (encoded_values.len != collection.dimensions) return error.VectorCorrupt;
+                        const stored_norm = if (use_stored_norms) optionalColumnDouble(&stmt, 2) else null;
+                        const distance = try multiI8CosineDistance(queries, encoded_values, stored_norm);
+                        try maybeInsertSearchResult(allocator, &results, limit, candidate_id.*, distance);
+                    },
+                }
+                try stmt.reset();
+            }
+        }
+
+        const items = try results.toOwnedSlice(allocator);
+        std.mem.sort(VectorSearchResult, items, {}, searchResultLessThan);
+        return .{ .items = items };
+    }
+
+    fn searchMultiI8CosinePrefilter(
+        self: *Database,
+        allocator: std.mem.Allocator,
+        collection_name: []const u8,
+        collection: CollectionMetadata,
+        queries: []const PreparedI8CosineQuery,
+        candidate_ids: ?[]const []const u8,
+        prefilter_query_index: usize,
+        prefilter_limit: usize,
+        limit: usize,
+    ) Error!VectorSearchResults {
+        if (prefilter_query_index >= queries.len) return error.VectorInvalid;
+        if (candidate_ids) |ids| {
+            for (ids) |id| try validateVectorId(id);
+        }
+        if (limit == 0 or prefilter_limit == 0) return .{ .items = try allocator.alloc(VectorSearchResult, 0) };
+
+        const prefilter_queries = queries[prefilter_query_index .. prefilter_query_index + 1];
+        var prefilter = if (candidate_ids) |ids|
+            try self.searchMultiI8CosineCandidates(allocator, collection_name, collection, prefilter_queries, ids, prefilter_limit)
+        else
+            try self.searchMultiI8CosineAll(allocator, collection_name, collection, prefilter_queries, prefilter_limit);
+        defer prefilter.deinit(allocator);
+
+        const prefilter_ids = try allocator.alloc([]const u8, prefilter.items.len);
+        defer allocator.free(prefilter_ids);
+        for (prefilter.items, prefilter_ids) |item, *id| id.* = item.id;
+        return self.searchMultiI8CosineCandidates(allocator, collection_name, collection, queries, prefilter_ids, limit);
+    }
+
+    fn searchMultiI8CosineCandidatesByScan(
+        self: *Database,
+        allocator: std.mem.Allocator,
+        collection_name: []const u8,
+        collection: CollectionMetadata,
+        queries: []const PreparedI8CosineQuery,
+        seen: *const std.StringHashMap(void),
+        results: *std.ArrayList(VectorSearchResult),
+        limit: usize,
+    ) Error!void {
+        const use_stored_norms = try self.hasVectorNormsTable();
+        var stmt = if (use_stored_norms)
+            try self.prepareSchema(
+                \\select v.vector_id, v.dimensions, v."values", n.norm_squared
+                \\from {s}_zova_vectors v
+                \\left join {s}_zova_vector_norms n
+                \\  on n.collection_name = v.collection_name and n.vector_id = v.vector_id
+                \\where v.collection_name = ?
+            , .{ self.storage_schema.prefix(), self.storage_schema.prefix() })
+        else
+            try self.prepareSchema(
+                \\select vector_id, dimensions, "values"
+                \\from {s}_zova_vectors
+                \\where collection_name = ?
+            , .{self.storage_schema.prefix()});
+        defer stmt.deinit();
+
+        try stmt.bindText(1, collection_name);
+        while ((try stmt.step()) == .row) {
+            const vector_id = stmt.columnText(0);
+            if (!seen.contains(vector_id)) continue;
+            try validateStoredVectorDimensions(collection.dimensions, stmt.columnInt64(1));
+            const encoded_values = stmt.columnBlob(2);
+            if (encoded_values.len != collection.dimensions) return error.VectorCorrupt;
+            const stored_norm = if (use_stored_norms) optionalColumnDouble(&stmt, 3) else null;
+            const distance = try multiI8CosineDistance(queries, encoded_values, stored_norm);
+            try maybeInsertSearchResult(allocator, results, limit, vector_id, distance);
+        }
+    }
+
     fn searchCandidateVectors(
         self: *Database,
         allocator: std.mem.Allocator,
         collection_name: []const u8,
         collection: CollectionMetadata,
-        query: VectorValuesConst,
+        query: PreparedVectorQuery,
         candidate_ids: []const []const u8,
         limit: usize,
         max_distance: ?f64,
@@ -716,11 +1164,33 @@ pub const Database = struct {
             return .{ .items = try results.toOwnedSlice(allocator) };
         }
 
-        var stmt = try self.prepareSchema(
-            \\select dimensions, "values"
-            \\from {s}_zova_vectors
-            \\where collection_name = ? and vector_id = ?
-        , .{self.storage_schema.prefix()});
+        const collection_vector_count = if (seen.count() >= candidate_scan_threshold)
+            try self.countVectorsInCollection(collection_name)
+        else
+            0;
+
+        if (shouldScanCandidateVectors(seen.count(), collection_vector_count)) {
+            try self.searchCandidateVectorsByScan(allocator, collection_name, collection, query, &seen, &results, limit, max_distance);
+            const items = try results.toOwnedSlice(allocator);
+            std.mem.sort(VectorSearchResult, items, {}, searchResultLessThan);
+            return .{ .items = items };
+        }
+
+        const use_stored_norms = query.usesStoredNorms() and try self.hasVectorNormsTable();
+        var stmt = if (use_stored_norms)
+            try self.prepareSchema(
+                \\select v.dimensions, v."values", n.norm_squared
+                \\from {s}_zova_vectors v
+                \\left join {s}_zova_vector_norms n
+                \\  on n.collection_name = v.collection_name and n.vector_id = v.vector_id
+                \\where v.collection_name = ? and v.vector_id = ?
+            , .{ self.storage_schema.prefix(), self.storage_schema.prefix() })
+        else
+            try self.prepareSchema(
+                \\select dimensions, "values"
+                \\from {s}_zova_vectors
+                \\where collection_name = ? and vector_id = ?
+            , .{self.storage_schema.prefix()});
         defer stmt.deinit();
 
         try stmt.bindText(1, collection_name);
@@ -734,13 +1204,8 @@ pub const Database = struct {
                 .row => {
                     try validateStoredVectorDimensions(collection.dimensions, stmt.columnInt64(0));
 
-                    const distance = try vectorDistanceFromEncoded(
-                        collection.element_type,
-                        collection.metric,
-                        query,
-                        stmt.columnBlob(1),
-                        collection.dimensions,
-                    );
+                    const stored_norm = if (use_stored_norms) optionalColumnDouble(&stmt, 2) else null;
+                    const distance = try query.distanceFromEncodedWithStoredNorm(stmt.columnBlob(1), stored_norm);
                     if (distanceWithinThreshold(distance, max_distance)) {
                         try maybeInsertSearchResult(allocator, &results, limit, candidate_id.*, distance);
                     }
@@ -753,6 +1218,60 @@ pub const Database = struct {
         const items = try results.toOwnedSlice(allocator);
         std.mem.sort(VectorSearchResult, items, {}, searchResultLessThan);
         return .{ .items = items };
+    }
+
+    fn searchCandidateVectorsByScan(
+        self: *Database,
+        allocator: std.mem.Allocator,
+        collection_name: []const u8,
+        collection: CollectionMetadata,
+        query: PreparedVectorQuery,
+        seen: *const std.StringHashMap(void),
+        results: *std.ArrayList(VectorSearchResult),
+        limit: usize,
+        max_distance: ?f64,
+    ) Error!void {
+        const use_stored_norms = query.usesStoredNorms() and try self.hasVectorNormsTable();
+        var stmt = if (use_stored_norms)
+            try self.prepareSchema(
+                \\select v.vector_id, v.dimensions, v."values", n.norm_squared
+                \\from {s}_zova_vectors v
+                \\left join {s}_zova_vector_norms n
+                \\  on n.collection_name = v.collection_name and n.vector_id = v.vector_id
+                \\where v.collection_name = ?
+            , .{ self.storage_schema.prefix(), self.storage_schema.prefix() })
+        else
+            try self.prepareSchema(
+                \\select vector_id, dimensions, "values"
+                \\from {s}_zova_vectors
+                \\where collection_name = ?
+            , .{self.storage_schema.prefix()});
+        defer stmt.deinit();
+
+        try stmt.bindText(1, collection_name);
+        while ((try stmt.step()) == .row) {
+            const vector_id = stmt.columnText(0);
+            if (!seen.contains(vector_id)) continue;
+
+            try validateStoredVectorDimensions(collection.dimensions, stmt.columnInt64(1));
+            const stored_norm = if (use_stored_norms) optionalColumnDouble(&stmt, 3) else null;
+            const distance = try query.distanceFromEncodedWithStoredNorm(stmt.columnBlob(2), stored_norm);
+            if (!distanceWithinThreshold(distance, max_distance)) continue;
+            try maybeInsertSearchResult(allocator, results, limit, vector_id, distance);
+        }
+    }
+
+    fn countVectorsInCollection(self: *Database, collection_name: []const u8) Error!usize {
+        var stmt = try self.prepareSchema(
+            \\select count(*)
+            \\from {s}_zova_vectors
+            \\where collection_name = ?
+        , .{self.storage_schema.prefix()});
+        defer stmt.deinit();
+
+        try stmt.bindText(1, collection_name);
+        std.debug.assert((try stmt.step()) == .row);
+        return @intCast(try sqliteI64ToU64(stmt.columnInt64(0)));
     }
 
     fn loadVectorValuesForSearch(
@@ -792,6 +1311,8 @@ pub const Database = struct {
     ) Error!void {
         if (vectors.len == 0) return;
 
+        try self.ensureVectorNormsTable();
+
         var stmt = try self.prepareSchema(
             \\insert into {s}_zova_vectors (collection_name, vector_id, dimensions, "values")
             \\values (?, ?, ?, ?)
@@ -801,9 +1322,18 @@ pub const Database = struct {
         , .{self.storage_schema.prefix()});
         defer stmt.deinit();
 
+        var norm_stmt = try self.prepareSchema(
+            \\insert into {s}_zova_vector_norms (collection_name, vector_id, norm_squared)
+            \\values (?, ?, ?)
+            \\on conflict(collection_name, vector_id) do update set
+            \\  norm_squared = excluded.norm_squared
+        , .{self.storage_schema.prefix()});
+        defer norm_stmt.deinit();
+
         for (vectors) |vector| {
             const encoded = try encodeValuesLe(std.heap.page_allocator, vector.values);
             defer std.heap.page_allocator.free(encoded);
+            const norm_squared = try vectorNormSquared(vector.values);
 
             try stmt.bindText(1, collection_name);
             try stmt.bindText(2, vector.id);
@@ -812,9 +1342,92 @@ pub const Database = struct {
             std.debug.assert((try stmt.step()) == .done);
             try stmt.reset();
             try stmt.clearBindings();
+
+            try norm_stmt.bindText(1, collection_name);
+            try norm_stmt.bindText(2, vector.id);
+            try norm_stmt.bindDouble(3, norm_squared);
+            std.debug.assert((try norm_stmt.step()) == .done);
+            try norm_stmt.reset();
+            try norm_stmt.clearBindings();
         }
     }
+
+    fn ensureVectorNormsTable(self: *Database) Error!void {
+        var stmt = try self.prepareSchema(
+            \\create table if not exists {s}_zova_vector_norms (
+            \\  collection_name text not null,
+            \\  vector_id text not null check (length(vector_id) > 0),
+            \\  norm_squared real not null check (norm_squared >= 0),
+            \\  primary key (collection_name, vector_id),
+            \\  foreign key (collection_name, vector_id) references _zova_vectors(collection_name, vector_id)
+            \\)
+        , .{self.storage_schema.prefix()});
+        defer stmt.deinit();
+        std.debug.assert((try stmt.step()) == .done);
+    }
+
+    fn hasVectorNormsTable(self: *Database) Error!bool {
+        var stmt = try self.prepareSchema(
+            \\select count(*)
+            \\from {s}sqlite_master
+            \\where type = 'table' and name = ?
+        , .{self.storage_schema.prefix()});
+        defer stmt.deinit();
+
+        try stmt.bindText(1, vector_norms_table);
+        std.debug.assert((try stmt.step()) == .row);
+        return stmt.columnInt64(0) == 1;
+    }
+
+    fn deleteVectorNormIfPresent(self: *Database, collection_name: []const u8, vector_id: []const u8) Error!void {
+        if (!try self.hasVectorNormsTable()) return;
+
+        var stmt = try self.prepareSchema("delete from {s}_zova_vector_norms where collection_name = ? and vector_id = ?", .{self.storage_schema.prefix()});
+        defer stmt.deinit();
+
+        try stmt.bindText(1, collection_name);
+        try stmt.bindText(2, vector_id);
+        std.debug.assert((try stmt.step()) == .done);
+    }
+
+    fn deleteVectorCollectionNormsIfPresent(self: *Database, collection_name: []const u8) Error!void {
+        if (!try self.hasVectorNormsTable()) return;
+
+        var stmt = try self.prepareSchema("delete from {s}_zova_vector_norms where collection_name = ?", .{self.storage_schema.prefix()});
+        defer stmt.deinit();
+
+        try stmt.bindText(1, collection_name);
+        std.debug.assert((try stmt.step()) == .done);
+    }
 };
+
+const PreparedI8CosineQuery = struct {
+    values: []const i8,
+    length: f64,
+};
+
+fn multiI8CosineDistance(
+    queries: []const PreparedI8CosineQuery,
+    encoded_values: []const u8,
+    stored_norm: ?f64,
+) Error!f64 {
+    std.debug.assert(queries.len > 0);
+    var aggregate_distance: f64 = -std.math.inf(f64);
+    for (queries) |query| {
+        const distance = if (stored_norm) |norm|
+            try i8CosineDistanceFromEncodedWithQueryLengthSimd(query.values, query.length, encoded_values, norm)
+        else blk: {
+            var query_norm_squared: u64 = 0;
+            for (query.values) |value| {
+                const wide: i32 = value;
+                query_norm_squared += @intCast(wide * wide);
+            }
+            break :blk try i8CosineDistanceFromEncoded(query.values, u64ToF64Exact(query_norm_squared), encoded_values);
+        };
+        aggregate_distance = @max(aggregate_distance, distance);
+    }
+    return aggregate_distance;
+}
 
 fn validateVectorCollectionName(name: []const u8) Error!void {
     if (name.len == 0) return error.VectorInvalid;
@@ -870,11 +1483,52 @@ fn validateStoredVectorValues(collection: CollectionMetadata, values: VectorValu
     if (collection.metric == .cosine and norm_squared == 0) return error.VectorCorrupt;
 }
 
+fn vectorNormSquared(values: VectorValuesConst) Error!f64 {
+    return switch (values) {
+        .i8 => |typed| blk: {
+            var norm: u64 = 0;
+            for (typed) |value| {
+                const wide: i32 = value;
+                norm += @intCast(wide * wide);
+            }
+            break :blk u64ToF64Exact(norm);
+        },
+        else => blk: {
+            var norm: f64 = 0;
+            for (0..vectorValuesLen(values)) |index| {
+                const value = try inputValueAsF64(values, index);
+                norm += value * value;
+            }
+            break :blk norm;
+        },
+    };
+}
+
 fn distanceWithinThreshold(distance: f64, max_distance: ?f64) bool {
     if (max_distance) |threshold| {
         return distance <= threshold;
     }
     return true;
+}
+
+fn optionalColumnDouble(stmt: *sqlite.Statement, index: c_int) ?f64 {
+    if (stmt.columnType(index) == .null) return null;
+    return stmt.columnDouble(index);
+}
+
+fn shouldScanCandidateVectors(deduped_candidate_count: usize, collection_vector_count: usize) bool {
+    if (deduped_candidate_count < candidate_scan_threshold) return false;
+    if (collection_vector_count == 0) return false;
+    return deduped_candidate_count >= (collection_vector_count + 3) / 4;
+}
+
+test "candidate search strategy scans large candidate sets" {
+    try std.testing.expect(!shouldScanCandidateVectors(0, 100));
+    try std.testing.expect(!shouldScanCandidateVectors(1, 100));
+    try std.testing.expect(!shouldScanCandidateVectors(127, 128));
+    try std.testing.expect(!shouldScanCandidateVectors(128, 1_000));
+    try std.testing.expect(shouldScanCandidateVectors(128, 512));
+    try std.testing.expect(shouldScanCandidateVectors(11_167, 11_167));
 }
 
 fn vectorMetricText(metric: VectorMetric) []const u8 {
@@ -1093,6 +1747,90 @@ fn cosineDistanceFromEncoded(element_type: VectorElementType, query: VectorValue
     return 1.0 - (dot / (@sqrt(query_norm) * @sqrt(stored_norm)));
 }
 
+fn cosineDistanceFromEncodedPrepared(element_type: VectorElementType, query: VectorValuesConst, encoded_values: []const u8, query_norm: f64) Error!f64 {
+    var dot: f64 = 0;
+    var stored_norm: f64 = 0;
+
+    for (0..vectorValuesLen(query)) |index| {
+        const query_f64 = try inputValueAsF64(query, index);
+        const stored_f64 = try encodedValueAsF64(element_type, encoded_values, index);
+        dot += query_f64 * stored_f64;
+        stored_norm += stored_f64 * stored_f64;
+    }
+
+    if (stored_norm == 0) return error.VectorCorrupt;
+    return 1.0 - (dot / (@sqrt(query_norm) * @sqrt(stored_norm)));
+}
+
+fn i8CosineDistanceFromEncoded(query: []const i8, query_norm: f64, encoded_values: []const u8) Error!f64 {
+    var dot: i64 = 0;
+    var stored_norm: u64 = 0;
+
+    for (query, encoded_values) |query_value, encoded_value| {
+        const query_wide: i32 = query_value;
+        const stored_value: i8 = @bitCast(encoded_value);
+        const stored_wide: i32 = stored_value;
+        dot += query_wide * stored_wide;
+        stored_norm += @intCast(stored_wide * stored_wide);
+    }
+
+    if (stored_norm == 0) return error.VectorCorrupt;
+    const dot_f64 = i64ToF64Exact(dot);
+    const stored_norm_f64 = u64ToF64Exact(stored_norm);
+    return 1.0 - (dot_f64 / (@sqrt(query_norm) * @sqrt(stored_norm_f64)));
+}
+
+fn i8CosineDistanceFromEncodedWithStoredNorm(query: []const i8, query_norm: f64, encoded_values: []const u8, stored_norm: f64) Error!f64 {
+    return i8CosineDistanceFromEncodedWithQueryLength(query, @sqrt(query_norm), encoded_values, stored_norm);
+}
+
+fn i8CosineDistanceFromEncodedWithQueryLength(query: []const i8, query_length: f64, encoded_values: []const u8, stored_norm: f64) Error!f64 {
+    if (stored_norm <= 0 or std.math.isNan(stored_norm) or std.math.isInf(stored_norm)) return error.VectorCorrupt;
+
+    var dot: i64 = 0;
+    for (query, encoded_values) |query_value, encoded_value| {
+        const query_wide: i32 = query_value;
+        const stored_value: i8 = @bitCast(encoded_value);
+        const stored_wide: i32 = stored_value;
+        dot += query_wide * stored_wide;
+    }
+
+    const dot_f64 = i64ToF64Exact(dot);
+    return 1.0 - (dot_f64 / (query_length * @sqrt(stored_norm)));
+}
+
+fn i8CosineDistanceFromEncodedWithQueryLengthSimd(query: []const i8, query_length: f64, encoded_values: []const u8, stored_norm: f64) Error!f64 {
+    if (stored_norm <= 0 or std.math.isNan(stored_norm) or std.math.isInf(stored_norm)) return error.VectorCorrupt;
+
+    const lanes = 16;
+    const I8x16 = @Vector(lanes, i8);
+    const I32x16 = @Vector(lanes, i32);
+    const I64x16 = @Vector(lanes, i64);
+
+    var dot: i64 = 0;
+    var index: usize = 0;
+    while (index + lanes <= query.len) : (index += lanes) {
+        const query_array = @as(*align(1) const [lanes]i8, @ptrCast(query.ptr + index)).*;
+        const encoded_array = @as(*align(1) const [lanes]u8, @ptrCast(encoded_values.ptr + index)).*;
+        const query_vector: I8x16 = @bitCast(query_array);
+        const encoded_vector: I8x16 = @bitCast(encoded_array);
+        const query_wide: I32x16 = @intCast(query_vector);
+        const encoded_wide: I32x16 = @intCast(encoded_vector);
+        const products = query_wide * encoded_wide;
+        dot += @reduce(.Add, @as(I64x16, @intCast(products)));
+    }
+
+    for (query[index..], encoded_values[index..]) |query_value, encoded_value| {
+        const query_wide: i32 = query_value;
+        const stored_value: i8 = @bitCast(encoded_value);
+        const stored_wide: i32 = stored_value;
+        dot += query_wide * stored_wide;
+    }
+
+    const dot_f64 = i64ToF64Exact(dot);
+    return 1.0 - (dot_f64 / (query_length * @sqrt(stored_norm)));
+}
+
 fn l2DistanceFromEncoded(element_type: VectorElementType, query: VectorValuesConst, encoded_values: []const u8) Error!f64 {
     var sum: f64 = 0;
     for (0..vectorValuesLen(query)) |index| {
@@ -1236,6 +1974,32 @@ pub fn i8ToF64(value: i8) f64 {
     return @bitCast(sign | (exponent64 << 52) | mantissa);
 }
 
+fn i64ToF64Exact(value: i64) f64 {
+    if (value == 0) return 0.0;
+    const sign = if (value < 0) @as(u64, 1) << 63 else 0;
+    const magnitude: u64 = if (value < 0)
+        @as(u64, @intCast(-(value + 1))) + 1
+    else
+        @intCast(value);
+    return unsignedMagnitudeToF64(sign, magnitude);
+}
+
+fn u64ToF64Exact(value: u64) f64 {
+    if (value == 0) return 0.0;
+    return unsignedMagnitudeToF64(0, value);
+}
+
+fn unsignedMagnitudeToF64(sign: u64, magnitude: u64) f64 {
+    std.debug.assert(magnitude > 0);
+    const top_bit: u6 = @intCast(63 - @clz(magnitude));
+    std.debug.assert(top_bit <= 52);
+    const exponent64 = @as(u64, top_bit) + 1023;
+    const mantissa_source = magnitude - (@as(u64, 1) << top_bit);
+    const shift: u6 = @intCast(52 - top_bit);
+    const mantissa = mantissa_source << shift;
+    return @bitCast(sign | (exponent64 << 52) | mantissa);
+}
+
 test "f32ToF64 matches Zig float widening" {
     const values = [_]f32{
         0.0,
@@ -1277,6 +2041,31 @@ test "i8ToF64 matches Zig float widening" {
     for (values) |value| {
         const expected: f64 = @floatFromInt(value);
         try std.testing.expectEqual(@as(u64, @bitCast(expected)), @as(u64, @bitCast(i8ToF64(value))));
+    }
+}
+
+test "integer exact widening helpers match Zig float widening" {
+    const signed_values = [_]i64{
+        -268_435_456,
+        -16_384,
+        -1,
+        1,
+        16_384,
+        268_435_456,
+    };
+    for (signed_values) |value| {
+        const expected: f64 = @floatFromInt(value);
+        try std.testing.expectEqual(@as(u64, @bitCast(expected)), @as(u64, @bitCast(i64ToF64Exact(value))));
+    }
+
+    const unsigned_values = [_]u64{
+        1,
+        16_384,
+        268_435_456,
+    };
+    for (unsigned_values) |value| {
+        const expected: f64 = @floatFromInt(value);
+        try std.testing.expectEqual(@as(u64, @bitCast(expected)), @as(u64, @bitCast(u64ToF64Exact(value))));
     }
 }
 
@@ -1348,4 +2137,58 @@ fn isReservedZovaName(name: []const u8) bool {
     const reserved_prefix = "_zova_";
     return name.len >= reserved_prefix.len and
         std.ascii.eqlIgnoreCase(name[0..reserved_prefix.len], reserved_prefix);
+}
+
+test "i8 cosine accepts a precomputed query length" {
+    const query = [_]i8{ 127, -64, 32, -16 };
+    const stored = [_]u8{ 96, @bitCast(@as(i8, -48)), 24, @bitCast(@as(i8, -12)) };
+    const query_norm_squared: f64 = 21585;
+    const stored_norm_squared: f64 = 12240;
+
+    const expected = try i8CosineDistanceFromEncodedWithStoredNorm(
+        &query,
+        query_norm_squared,
+        &stored,
+        stored_norm_squared,
+    );
+    const actual = try i8CosineDistanceFromEncodedWithQueryLength(
+        &query,
+        @sqrt(query_norm_squared),
+        &stored,
+        stored_norm_squared,
+    );
+
+    try std.testing.expectEqual(expected, actual);
+}
+
+test "i8 cosine SIMD scorer preserves exact distance" {
+    const query = [_]i8{ 127, -64, 32, -16, 8, -4, 2, -1, 96, -48, 24, -12, 6, -3, 1, -1, 5 };
+    const stored = [_]u8{ 96, @bitCast(@as(i8, -48)), 24, @bitCast(@as(i8, -12)), 6, @bitCast(@as(i8, -3)), 1, @bitCast(@as(i8, -1)), 127, @bitCast(@as(i8, -64)), 32, @bitCast(@as(i8, -16)), 8, @bitCast(@as(i8, -4)), 2, @bitCast(@as(i8, -1)), 1 };
+    const query_length = @sqrt(@as(f64, 30622));
+    const stored_norm_squared: f64 = 28118;
+
+    const expected = try i8CosineDistanceFromEncodedWithQueryLength(&query, query_length, &stored, stored_norm_squared);
+    const actual = try i8CosineDistanceFromEncodedWithQueryLengthSimd(&query, query_length, &stored, stored_norm_squared);
+
+    try std.testing.expectEqual(expected, actual);
+}
+
+test "multi i8 cosine SIMD aggregation preserves scalar distance" {
+    const first = [_]i8{ 127, -64, 32, -16, 8, -4, 2, -1, 5 };
+    const second = [_]i8{ -32, 64, -96, 48, -24, 12, -6, 3, -1 };
+    const stored = [_]u8{ 96, @bitCast(@as(i8, -48)), 24, @bitCast(@as(i8, -12)), 6, @bitCast(@as(i8, -3)), 1, @bitCast(@as(i8, -1)), 1 };
+    const stored_norm_squared: f64 = 12288;
+    const first_length = @sqrt(@as(f64, 21615));
+    const second_length = @sqrt(@as(f64, 17406));
+    const queries = [_]PreparedI8CosineQuery{
+        .{ .values = &first, .length = first_length },
+        .{ .values = &second, .length = second_length },
+    };
+
+    const expected = @max(
+        try i8CosineDistanceFromEncodedWithQueryLength(&first, first_length, &stored, stored_norm_squared),
+        try i8CosineDistanceFromEncodedWithQueryLength(&second, second_length, &stored, stored_norm_squared),
+    );
+    const actual = try multiI8CosineDistance(&queries, &stored, stored_norm_squared);
+    try std.testing.expectEqual(expected, actual);
 }
