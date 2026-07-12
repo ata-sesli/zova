@@ -318,7 +318,7 @@ default, each operation verifies the destination after copying. Pass
 `RestoreOptions { verify: false }` only when you will verify separately.
 
 Diagnostic recovery commands such as `zova doctor`, `zova salvage --dry-run`,
-and `zova salvage <source> <destination>` are CLI-first. In v0.22, CLI salvage
+and `zova salvage <source> <destination>` are CLI-first. In v0.23, CLI salvage
 copies valid core data and uses extension salvage hooks for extension-owned
 storage. The Rust crates do not expose typed doctor/salvage report APIs yet,
 and library code should not parse the human text output as a stable binding
@@ -329,7 +329,7 @@ contract.
 Rust exposes lifecycle methods for extensions already present in the current
 process registry. The default registry includes bundled extensions such as
 `trgm`, so Rust applications can install, list, check, and drop `trgm` directly.
-The low-level `zova-sys` crate exposes the v0.22 C ABI for scalar SQL callback
+The low-level `zova-sys` crate exposes the v0.23 C ABI for scalar SQL callback
 registration and trusted `.zovaext` bundle loading. The safe Rust crate does not
 yet wrap those callback or bundle-loading APIs.
 
@@ -459,7 +459,8 @@ metadata join example.
 
 ## Bound Stores
 
-In v0.22, a `.zova` file may be bound to one object store and one vector store
-through the native Zig API or CLI. The Rust object and vector methods above
-transparently use those stores after `Database::open` or `SharedDatabase::open`.
+In v0.23, a `.zova` file may be bound to one object store, one vector store,
+and one graph store through the native Zig API or CLI. The Rust object, vector,
+and graph methods above transparently use those stores after `Database::open`
+or `SharedDatabase::open`.
 Store create/bind/unbind/split management is not exposed as a Rust API yet.

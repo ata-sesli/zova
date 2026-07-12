@@ -34,7 +34,7 @@ This crate exposes raw C ABI declarations. It does not manage pointer lifetime,
 owned buffers, or error mapping for you. The safe `zova` crate handles those
 details.
 
-`zova-sys` is also the first Rust surface for v0.22 SQL callback experiments.
+`zova-sys` exposes the v0.23 low-level Rust surface for SQL callbacks.
 It exposes the raw C ABI structs and functions for scalar SQL registration and
 trusted `.zovaext` bundle loading. Callbacks are unsafe FFI: argument pointers
 are borrowed for the duration of the call, text/blob/error result bytes are

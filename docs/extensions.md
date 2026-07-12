@@ -157,7 +157,7 @@ zova extension untrust ./my_ext.zovaext
 
 ## Experimental Bundle Builder
 
-The v0.22 development line includes an experimental producer-side CLI for
+The v0.23 release includes an experimental producer-side CLI for
 local Zig extensions. It is meant to remove the manual bundle-shape work while
 the stable extension-authoring contract is still being designed.
 
@@ -296,6 +296,11 @@ The foundation manifest contains:
 Names, prefixes, duplicate registry prefixes, duplicate installed prefixes, and
 invalid installed rows are rejected.
 
+`zova_abi_min` must be a canonical `major.minor.patch` version. Zova rejects a
+manifest when its ABI major differs from the host or its minimum version is
+newer than the host. Because the extension ABI is still pre-1.0, extension
+authors should rebuild and retest bundles for every Zova minor release.
+
 ## Lifecycle
 
 Install and drop run inside a lifecycle savepoint.
@@ -404,7 +409,7 @@ they want listeners to react to an indexing workflow.
 
 ## C ABI Scalar SQL Functions
 
-The v0.22 development line adds a controlled C ABI path for registering scalar
+The v0.23 release exposes a controlled C ABI path for registering scalar
 SQL functions on a Zova-owned connection:
 
 ```c
@@ -442,14 +447,13 @@ database close.
 
 Function flags are caller-selected. Zova does not silently add deterministic,
 direct-only, innocuous, or subtype behavior. Aggregate/window functions, SQLite
-subtype support, and unregister support are deferred v0.22+ decisions.
+subtype support, and unregister support are deferred beyond v0.23.
 Callbacks that should not run from schema contexts such as generated columns,
 indexes, triggers, or views should be registered with
 `ZOVA_SQL_FUNCTION_DIRECT_ONLY`.
 
 This iteration exposes the low-level C ABI and `zova-sys` declarations only.
-Safe high-level Rust, Go, and Python callback APIs are still separate v0.22
-checklist work.
+Safe high-level Rust, Go, and Python callback APIs are deferred beyond v0.23.
 
 ## Operational Copies
 
@@ -528,7 +532,7 @@ const registry = zova.ExtensionRegistry.init(&.{ext});
 var db = try zova.Database.openWithExtensions("app.zova", registry);
 ```
 
-The v0.22 binding APIs can manage extensions already present in the process
+The v0.23 binding APIs can manage extensions already present in the process
 registry, such as bundled `trgm`, and the C ABI can open handles with explicitly
 trusted `.zovaext` bundles. Stable high-level Rust, Go, and Python extension
 authoring APIs are still deferred. The stable contract is the trust boundary:

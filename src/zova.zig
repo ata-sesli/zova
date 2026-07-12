@@ -4577,6 +4577,43 @@ test "extension registry is used for backup compact and restore verification" {
 }
 
 test "extension manifests validate names prefixes and duplicate registry prefixes" {
+    try extension_impl.validateManifest(.{
+        .name = "older_abi",
+        .version = "0.1.0",
+        .storage_prefix = "_zova_ext_older_abi_",
+        .zova_abi_min = "0.22.9",
+    });
+    try extension_impl.validateManifest(.{
+        .name = "current_abi",
+        .version = "0.1.0",
+        .storage_prefix = "_zova_ext_current_abi_",
+        .zova_abi_min = "0.23.0",
+    });
+    try std.testing.expectError(error.ExtensionInvalid, extension_impl.validateManifest(.{
+        .name = "malformed_abi",
+        .version = "0.1.0",
+        .storage_prefix = "_zova_ext_malformed_abi_",
+        .zova_abi_min = "0.23",
+    }));
+    try std.testing.expectError(error.ExtensionInvalid, extension_impl.validateManifest(.{
+        .name = "prefixed_abi",
+        .version = "0.1.0",
+        .storage_prefix = "_zova_ext_prefixed_abi_",
+        .zova_abi_min = "v0.23.0",
+    }));
+    try std.testing.expectError(error.ExtensionIncompatible, extension_impl.validateManifest(.{
+        .name = "newer_minor_abi",
+        .version = "0.1.0",
+        .storage_prefix = "_zova_ext_newer_minor_abi_",
+        .zova_abi_min = "0.24.0",
+    }));
+    try std.testing.expectError(error.ExtensionIncompatible, extension_impl.validateManifest(.{
+        .name = "different_major_abi",
+        .version = "0.1.0",
+        .storage_prefix = "_zova_ext_different_major_abi_",
+        .zova_abi_min = "1.0.0",
+    }));
+
     try std.testing.expectError(error.ExtensionInvalid, extension_impl.validateManifest(.{
         .name = "",
         .version = "0.1.0",

@@ -49,13 +49,13 @@ zig build cli-test
 zig build test -Doptimize=ReleaseSafe
 zig build
 zig build run
+# Binding tests must consume native snapshots generated from the current tree,
+# not ignored files left behind by an earlier release version.
+sh bindings/rust/zova-sys/tools/sync-native-source.sh
+sh bindings/rust/zova-sys/tools/check-native-source.sh
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo fmt --all --manifest-path bindings/rust/Cargo.toml --check
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo test --workspace --manifest-path bindings/rust/Cargo.toml
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo check --examples --manifest-path bindings/rust/Cargo.toml
-sh bindings/rust/zova-sys/tools/sync-native-source.sh
-sh bindings/rust/zova-sys/tools/check-native-source.sh
-sh bindings/python/tools/sync-rust-source.sh
-sh bindings/python/tools/check-rust-source.sh
 # zova-sys intentionally packages a generated native source snapshot that stays
 # git-ignored in the repository. Sync and check it first. Release smoke may run
 # before committing local changes, so package dry-runs use the current tree.
@@ -70,6 +70,8 @@ fi
 sh scripts/repack-darwin-c-abi.sh
 (cd bindings/go && GOCACHE="$GO_CACHE_REPO" go test ./...)
 (cd bindings/go && GOCACHE="$GO_CACHE_REPO" go vet ./...)
+sh bindings/python/tools/sync-rust-source.sh
+sh bindings/python/tools/check-rust-source.sh
 CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" cargo fmt --manifest-path bindings/python/Cargo.toml --check
 CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" cargo test --manifest-path bindings/python/Cargo.toml
 CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" uv run --isolated --with maturin --with pytest --directory bindings/python maturin develop

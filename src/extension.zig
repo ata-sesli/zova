@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
+const zova_version = @import("version.zig");
 
 pub const extensions_table = "_zova_extensions";
 pub const storage_prefix_prefix = "_zova_ext_";
@@ -172,11 +173,44 @@ pub fn validateStoragePrefix(name: []const u8, prefix: []const u8) Error!void {
 pub fn validateManifest(manifest: Manifest) Error!void {
     try validateName(manifest.name);
     if (manifest.version.len == 0 or manifest.version.len > 64) return error.ExtensionInvalid;
-    if (manifest.zova_abi_min.len == 0 or manifest.zova_abi_min.len > 64) return error.ExtensionInvalid;
+    const minimum_abi = try parseAbiVersion(manifest.zova_abi_min);
+    if (minimum_abi.major != zova_version.abi_version_major or
+        minimum_abi.minor > zova_version.abi_version_minor or
+        (minimum_abi.minor == zova_version.abi_version_minor and
+            minimum_abi.patch > zova_version.abi_version_patch))
+    {
+        return error.ExtensionIncompatible;
+    }
     if (manifest.capabilities.len > 512) return error.ExtensionInvalid;
     if (manifest.manifest_json.len > 4096) return error.ExtensionInvalid;
     if (!manifest.required) return error.ExtensionInvalid;
     try validateStoragePrefix(manifest.name, manifest.storage_prefix);
+}
+
+const AbiVersion = struct {
+    major: u32,
+    minor: u32,
+    patch: u32,
+};
+
+fn parseAbiVersion(value: []const u8) Error!AbiVersion {
+    if (value.len == 0 or value.len > 64) return error.ExtensionInvalid;
+
+    var parts = std.mem.splitScalar(u8, value, '.');
+    const major = try parseAbiVersionPart(parts.next() orelse return error.ExtensionInvalid);
+    const minor = try parseAbiVersionPart(parts.next() orelse return error.ExtensionInvalid);
+    const patch = try parseAbiVersionPart(parts.next() orelse return error.ExtensionInvalid);
+    if (parts.next() != null) return error.ExtensionInvalid;
+
+    return .{ .major = major, .minor = minor, .patch = patch };
+}
+
+fn parseAbiVersionPart(value: []const u8) Error!u32 {
+    if (value.len == 0 or (value.len > 1 and value[0] == '0')) return error.ExtensionInvalid;
+    for (value) |byte| {
+        if (!std.ascii.isDigit(byte)) return error.ExtensionInvalid;
+    }
+    return std.fmt.parseInt(u32, value, 10) catch error.ExtensionInvalid;
 }
 
 pub fn install(db: *sqlite.Database, registry: Registry, name: []const u8, validate_core: ?ValidationHook) Error!void {

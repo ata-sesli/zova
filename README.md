@@ -646,7 +646,7 @@ Queue details:
 
 ## Extensions
 
-The v0.22 line includes the extension host, controlled app-defined SQL
+The v0.23 release includes the extension host, controlled app-defined SQL
 callbacks, trusted local extension bundles, and the first bundled extension,
 `trgm`.
 
@@ -702,7 +702,7 @@ but calls that need to load an external bundle fail with an extension load or
 unavailable status. Use the native CLI or a Zig-built C ABI archive when an
 application needs external `.zovaext` loading.
 
-The v0.22 development line also includes an experimental bundle producer CLI:
+The v0.23 release also includes an experimental bundle producer CLI:
 
 ```sh
 zova extension scaffold ./sample_ext --name sample_ext --version 0.1.0
@@ -715,7 +715,7 @@ At the low-level C ABI, apps can register scalar SQL functions on Zova-owned
 connections with `zova_database_register_function`. Callback arguments are
 borrowed for the call only, result bytes are copied by Zova, and callbacks must
 not re-enter the same `zova_database` handle. Safe high-level Rust, Go, and
-Python callback APIs are not part of this first v0.22 slice. See
+Python callback APIs are not part of the v0.23 release. See
 `examples/c_callbacks/` for C callback snippets and `examples/zig_bridge/` for
 a minimal native Zig registry bridge.
 
@@ -869,7 +869,7 @@ serialized; open multiple handles for true SQLite concurrency.
 
 Existing Rust object, vector, and graph APIs transparently use a bound store after the
 database is opened. Store create/bind/unbind/split management remains
-native-Zig/CLI-only in v0.22.
+native-Zig/CLI-only in v0.23.
 
 From crates.io, the Rust crates build through a bundled generated C snapshot, so
 normal Rust users need Rust and a C compiler, not Zig. Zig is only needed when
@@ -902,7 +902,7 @@ developing Zova itself or regenerating the bundled native snapshot.
 
 Existing Python object, vector, and graph APIs transparently use a bound store after the
 database is opened. Store create/bind/unbind/split management remains
-native-Zig/CLI-only in v0.22.
+native-Zig/CLI-only in v0.23.
 
 ### Go
 
@@ -936,7 +936,7 @@ zig build c-abi
 
 Existing Go object, vector, and graph APIs transparently use a bound store after the
 database is opened. Store create/bind/unbind/split management remains
-native-Zig/CLI-only in v0.22.
+native-Zig/CLI-only in v0.23.
 
 External Go projects should point cgo at an installed Zova C ABI:
 

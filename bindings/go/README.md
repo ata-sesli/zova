@@ -256,7 +256,7 @@ The zero-value options verify destinations after copying. Use
 `RestoreOptions{NoVerify: true}` only when you will verify separately.
 
 Diagnostic recovery commands such as `zova doctor`, `zova salvage --dry-run`,
-and `zova salvage <source> <destination>` are CLI-first. In v0.22, CLI salvage
+and `zova salvage <source> <destination>` are CLI-first. In v0.23, CLI salvage
 copies valid core data and uses extension salvage hooks for extension-owned
 storage. The Go package does not expose typed doctor/salvage report APIs yet,
 and library code should not parse the human text output as a stable binding
@@ -267,7 +267,7 @@ contract.
 Go exposes lifecycle methods for extensions already present in the current
 process registry. The default registry includes bundled extensions such as
 `trgm`, so Go applications can install, list, check, and drop `trgm` directly.
-The v0.22 C ABI has scalar SQL callback registration and trusted `.zovaext`
+The v0.23 C ABI has scalar SQL callback registration and trusted `.zovaext`
 bundle loading, but this Go binding does not expose arbitrary Go callback
 registration yet. Use bundled/process-provided extensions or a host-owned C/Zig
 bridge when SQL functions must run on Zova-owned connections.
@@ -463,9 +463,10 @@ lower-is-better.
 
 ## Bound Stores
 
-In v0.22, a `.zova` file may be bound to one object store and one vector store
-through the native Zig API or CLI. The Go object and vector methods above
-transparently use those stores after `Open`. Store create/bind/unbind/split
+In v0.23, a `.zova` file may be bound to one object store, one vector store,
+and one graph store through the native Zig API or CLI. The Go object, vector,
+and graph methods above transparently use those stores after `Open`. Store
+create/bind/unbind/split
 management is not exposed as a Go API yet.
 
 Zova also registers SQL-native exact vector search on `.zova` connections. Use
