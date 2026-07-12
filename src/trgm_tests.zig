@@ -229,6 +229,92 @@ test "trgm validates object and vector targets routed through bound stores" {
     try std.testing.expectError(error.ExtensionInvalid, db.checkExtension("trgm"));
 }
 
+test "object vector and graph stores coexist through reopen and backup" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "three-store-main.zova");
+    var object_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const object_path = try testingDbPath(&object_buffer, tmp.sub_path[0..], "three-store-objects.zova");
+    var vector_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const vector_path = try testingDbPath(&vector_buffer, tmp.sub_path[0..], "three-store-vectors.zova");
+    var graph_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const graph_path = try testingDbPath(&graph_buffer, tmp.sub_path[0..], "three-store-graph.zova");
+    var backup_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const backup_path = try testingDbPath(&backup_buffer, tmp.sub_path[0..], "three-store-backup.zova");
+
+    try zova.createObjectStore(object_path);
+    try zova.createVectorStore(vector_path);
+    try zova.createGraphStore(graph_path);
+
+    const object_id = objectId: {
+        var db = try zova.Database.create(main_path);
+        defer db.deinit();
+        try db.bindObjectStore(object_path);
+        try db.bindVectorStore(vector_path);
+        try db.bindGraphStore(graph_path);
+        try expectAttachedStoreCount(&db, 3);
+        try expectStoreEpochs(&db, 0, 0, 0);
+
+        const id = try db.putObject("three attached stores");
+        try expectStoreEpochs(&db, 1, 0, 0);
+        try db.createVectorCollection("chunks", .{ .dimensions = 2, .metric = .cosine });
+        try db.putVector("chunks", "vec:three", .{ .f32 = &.{ 1.0, 0.0 } });
+        try expectStoreEpochs(&db, 1, 2, 0);
+
+        var object_hex_buffer: [64]u8 = undefined;
+        const object_hex = try hexObjectId(&object_hex_buffer, id);
+        try db.createGraph("links");
+        try db.putGraphNode(.{ .graph_name = "links", .node_id = "object", .kind = "attachment", .target_type = .object, .target_ref = object_hex });
+        try db.putGraphNode(.{ .graph_name = "links", .node_id = "vector", .kind = "embedding", .target_type = .vector, .target_namespace = "chunks", .target_ref = "vec:three" });
+        try db.putGraphEdge(.{ .graph_name = "links", .from_node_id = "object", .edge_type = "embedded_as", .to_node_id = "vector" });
+        try expectStoreEpochs(&db, 1, 2, 4);
+        break :objectId id;
+    };
+
+    {
+        var reopened = try zova.Database.open(main_path);
+        defer reopened.deinit();
+        try expectAttachedStoreCount(&reopened, 3);
+        try expectStoreEpochs(&reopened, 1, 2, 4);
+
+        var object = try reopened.getObject(std.testing.allocator, object_id);
+        defer object.deinit(std.testing.allocator);
+        try std.testing.expectEqualSlices(u8, "three attached stores", object.bytes);
+        var vectors = try reopened.searchVectors(std.testing.allocator, "chunks", .{ .f32 = &.{ 1.0, 0.0 } }, 1);
+        defer vectors.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 1), vectors.items.len);
+        try std.testing.expectEqualStrings("vec:three", vectors.items[0].id);
+        try expectThreeStoreGraphTargets(&reopened, object_id);
+        var walk = try reopened.graphWalk(std.testing.allocator, .{ .graph_name = "links", .start_node_id = "object", .max_depth = 1, .limit = 10 });
+        defer walk.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 2), walk.items.len);
+        try std.testing.expectEqualStrings("vector", walk.items[1].node_id);
+
+        try reopened.backupTo(backup_path, .{});
+    }
+
+    {
+        var backup = try zova.Database.open(backup_path);
+        defer backup.deinit();
+        try std.testing.expectEqual(@as(i64, 1), try countSqlRows(&backup.sqlite_db, "select count(*) from pragma_database_list"));
+        try std.testing.expectEqual(@as(?zova.BoundObjectStoreInfo, null), try backup.boundObjectStore(std.testing.allocator));
+        try std.testing.expectEqual(@as(?zova.BoundVectorStoreInfo, null), try backup.boundVectorStore(std.testing.allocator));
+        try std.testing.expectEqual(@as(?zova.BoundGraphStoreInfo, null), try backup.boundGraphStore(std.testing.allocator));
+        var object = try backup.getObject(std.testing.allocator, object_id);
+        defer object.deinit(std.testing.allocator);
+        try std.testing.expectEqualSlices(u8, "three attached stores", object.bytes);
+        var vectors = try backup.searchVectors(std.testing.allocator, "chunks", .{ .f32 = &.{ 1.0, 0.0 } }, 1);
+        defer vectors.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("vec:three", vectors.items[0].id);
+        var walk = try backup.graphWalk(std.testing.allocator, .{ .graph_name = "links", .start_node_id = "object", .max_depth = 1, .limit = 10 });
+        defer walk.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 2), walk.items.len);
+        try expectThreeStoreGraphTargets(&backup, object_id);
+    }
+}
+
 test "split object and vector stores preserve trgm metadata and target references" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -467,6 +553,46 @@ fn execSql(db: *zova.Database, sql: [:0]const u8) !void {
     try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
     try std.testing.expectEqual(@as(i64, 1), stmt.columnInt64(0));
     try std.testing.expectEqual(sqlite.Step.done, try stmt.step());
+}
+
+fn expectAttachedStoreCount(db: *zova.Database, expected: i64) !void {
+    try std.testing.expectEqual(expected, try countSqlRows(
+        &db.sqlite_db,
+        "select count(*) from pragma_database_list where name in ('object_store', 'vector_store', 'graph_store')",
+    ));
+}
+
+fn expectStoreEpochs(db: *zova.Database, object: i64, vector: i64, graph: i64) !void {
+    var stmt = try db.prepare(
+        \\select
+        \\  max(case when role = 'object_store' then object_epoch end),
+        \\  max(case when role = 'vector_store' then vector_epoch end),
+        \\  max(case when role = 'graph_store' then graph_epoch end)
+        \\from _zova_bound_stores
+    );
+    defer stmt.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+    try std.testing.expectEqual(object, stmt.columnInt64(0));
+    try std.testing.expectEqual(vector, stmt.columnInt64(1));
+    try std.testing.expectEqual(graph, stmt.columnInt64(2));
+    try std.testing.expectEqual(sqlite.Step.done, try stmt.step());
+}
+
+fn expectThreeStoreGraphTargets(db: *zova.Database, object_id: zova.ObjectId) !void {
+    var object_hex_buffer: [64]u8 = undefined;
+    const object_hex = try hexObjectId(&object_hex_buffer, object_id);
+
+    var object_node = try db.getGraphNode(std.testing.allocator, "links", "object");
+    defer object_node.deinit(std.testing.allocator);
+    try std.testing.expectEqual(zova.GraphTargetType.object, object_node.target_type);
+    try std.testing.expectEqual(@as(?[]const u8, null), object_node.target_namespace);
+    try std.testing.expectEqualStrings(object_hex, object_node.target_ref.?);
+
+    var vector_node = try db.getGraphNode(std.testing.allocator, "links", "vector");
+    defer vector_node.deinit(std.testing.allocator);
+    try std.testing.expectEqual(zova.GraphTargetType.vector, vector_node.target_type);
+    try std.testing.expectEqualStrings("chunks", vector_node.target_namespace.?);
+    try std.testing.expectEqualStrings("vec:three", vector_node.target_ref.?);
 }
 
 fn expectTrgmCopy(path: [:0]const u8) !void {

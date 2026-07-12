@@ -162,6 +162,99 @@ test "directional graph walk preserves incoming BFS order and shortest hops" {
     try std.testing.expectEqual(@as(usize, 2), limited.items.len);
 }
 
+test "native graph database routes persistent queries to attached graph store" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "graph-schema-main.zova");
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "graph-schema-store.zova");
+
+    var main = try zova.Database.create(main_path);
+    main.deinit();
+    try zova.createGraphStore(store_path);
+
+    var raw = try sqlite.Database.open(main_path);
+    defer raw.deinit();
+    try raw.attachDatabase(store_path, "graph_store");
+    try raw.exec(
+        \\drop index main._zova_graph_nodes_created_order_idx;
+        \\drop index graph_store._zova_graph_nodes_created_order_idx;
+    );
+
+    var graphs = graph.Database{
+        .sqlite_db = &raw,
+        .storage_schema = .graph_store,
+    };
+    try graphs.createGraph("external");
+    try graphs.putGraphNodes(&.{
+        .{ .graph_name = "external", .node_id = "a", .kind = "test" },
+        .{ .graph_name = "external", .node_id = "b", .kind = "test" },
+    });
+
+    var indexes = try raw.prepare(
+        \\select
+        \\  (select count(*) from main.sqlite_master where type = 'index' and name = '_zova_graph_nodes_created_order_idx'),
+        \\  (select count(*) from graph_store.sqlite_master where type = 'index' and name = '_zova_graph_nodes_created_order_idx')
+    );
+    defer indexes.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try indexes.step());
+    try std.testing.expectEqual(@as(i64, 0), indexes.columnInt64(0));
+    try std.testing.expectEqual(@as(i64, 1), indexes.columnInt64(1));
+
+    try graphs.putGraphEdge(.{
+        .graph_name = "external",
+        .from_node_id = "a",
+        .edge_type = "links",
+        .to_node_id = "b",
+    });
+
+    var counts = try raw.prepare(
+        \\select
+        \\  (select count(*) from main._zova_graphs),
+        \\  (select count(*) from main._zova_graph_nodes),
+        \\  (select count(*) from main._zova_graph_edges),
+        \\  (select count(*) from graph_store._zova_graphs),
+        \\  (select count(*) from graph_store._zova_graph_nodes),
+        \\  (select count(*) from graph_store._zova_graph_edges)
+    );
+    defer counts.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try counts.step());
+    try std.testing.expectEqual(@as(i64, 0), counts.columnInt64(0));
+    try std.testing.expectEqual(@as(i64, 0), counts.columnInt64(1));
+    try std.testing.expectEqual(@as(i64, 0), counts.columnInt64(2));
+    try std.testing.expectEqual(@as(i64, 1), counts.columnInt64(3));
+    try std.testing.expectEqual(@as(i64, 2), counts.columnInt64(4));
+    try std.testing.expectEqual(@as(i64, 1), counts.columnInt64(5));
+
+    var walk = try graphs.graphWalkDirection(std.testing.allocator, .{
+        .graph_name = "external",
+        .start_node_id = "a",
+        .direction = .outgoing,
+        .max_depth = 2,
+        .limit = 10,
+    });
+    defer walk.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), walk.items.len);
+    try std.testing.expectEqualStrings("a", walk.items[0].node_id);
+    try std.testing.expectEqualStrings("b", walk.items[1].node_id);
+    try std.testing.expectEqual(@as(u32, 1), walk.items[1].depth);
+    try std.testing.expectEqualStrings("a", walk.items[1].predecessor_node_id.?);
+    try std.testing.expectEqualStrings("links", walk.items[1].edge_type.?);
+
+    try graphs.deleteGraphNodes("external", &.{"b"});
+    var deleted_counts = try raw.prepare(
+        \\select
+        \\  (select count(*) from graph_store._zova_graph_nodes),
+        \\  (select count(*) from graph_store._zova_graph_edges)
+    );
+    defer deleted_counts.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try deleted_counts.step());
+    try std.testing.expectEqual(@as(i64, 1), deleted_counts.columnInt64(0));
+    try std.testing.expectEqual(@as(i64, 0), deleted_counts.columnInt64(1));
+}
+
 test "graph batches are atomic delete incident edges and report filtered degree" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -622,12 +715,12 @@ test "graph workflow uses explicit notifications after commit" {
     try std.testing.expectEqual(@as(?zova.Notification, null), try sub.tryReceive(std.testing.allocator));
 }
 
-test "format version six requires graph schema" {
+test "format version seven requires graph schema" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "format-five.zova");
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "format-seven.zova");
 
     {
         var db = try zova.Database.create(db_path);
@@ -641,7 +734,7 @@ test "format version six requires graph schema" {
         var meta = try raw.prepare("select value from _zova_meta where key = 'format_version'");
         defer meta.deinit();
         try std.testing.expectEqual(sqlite.Step.row, try meta.step());
-        try std.testing.expectEqualStrings("6", meta.columnText(0));
+        try std.testing.expectEqualStrings("7", meta.columnText(0));
     }
 
     try std.testing.expect(try tableExists(&raw, "_zova_graphs"));

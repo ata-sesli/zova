@@ -1,5 +1,6 @@
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
+const graph = @import("graph.zig");
 const test_support = @import("zova_test_support.zig");
 const zova = @import("zova.zig");
 
@@ -146,6 +147,77 @@ test "sql graph walk returns bounded traversal rows" {
         try std.testing.expectEqual(@as(i64, 1), stmt.columnInt64(1));
         try std.testing.expectEqualStrings("message:1", stmt.columnText(2));
         try std.testing.expectEqualStrings("mentions", stmt.columnText(3));
+        try std.testing.expectEqual(sqlite.Step.done, try stmt.step());
+    }
+}
+
+test "sql graph virtual tables route to attached graph store" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "graph-sql-bound-main.zova");
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "graph-sql-bound-store.zova");
+
+    try zova.createGraphStore(store_path);
+    var db = try Database.create(main_path);
+    defer db.deinit();
+    try db.sqlite_db.attachDatabase(store_path, "graph_store");
+
+    var graphs = graph.Database{
+        .sqlite_db = &db.sqlite_db,
+        .storage_schema = .graph_store,
+    };
+    try graphs.createGraph("external");
+    try graphs.putGraphNodes(&.{
+        .{ .graph_name = "external", .node_id = "a", .kind = "test" },
+        .{ .graph_name = "external", .node_id = "b", .kind = "test" },
+    });
+    try graphs.putGraphEdge(.{
+        .graph_name = "external",
+        .from_node_id = "a",
+        .edge_type = "links",
+        .to_node_id = "b",
+    });
+
+    {
+        var stmt = try db.prepare(
+            \\select node_id, kind, edge_type
+            \\from zova_graph_neighbors
+            \\where graph_name = 'external'
+            \\  and source_node_id = 'a'
+            \\  and direction = 'outgoing'
+            \\  and "limit" = 10
+            \\order by rank
+        );
+        defer stmt.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+        try std.testing.expectEqualStrings("b", stmt.columnText(0));
+        try std.testing.expectEqualStrings("test", stmt.columnText(1));
+        try std.testing.expectEqualStrings("links", stmt.columnText(2));
+        try std.testing.expectEqual(sqlite.Step.done, try stmt.step());
+    }
+
+    {
+        var stmt = try db.prepare(
+            \\select node_id, depth, predecessor_node_id, edge_type
+            \\from zova_graph_walk
+            \\where graph_name = 'external'
+            \\  and start_node_id = 'a'
+            \\  and max_depth = 2
+            \\  and "limit" = 10
+            \\order by rank
+        );
+        defer stmt.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+        try std.testing.expectEqualStrings("a", stmt.columnText(0));
+        try std.testing.expectEqual(@as(i64, 0), stmt.columnInt64(1));
+        try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+        try std.testing.expectEqualStrings("b", stmt.columnText(0));
+        try std.testing.expectEqual(@as(i64, 1), stmt.columnInt64(1));
+        try std.testing.expectEqualStrings("a", stmt.columnText(2));
+        try std.testing.expectEqualStrings("links", stmt.columnText(3));
         try std.testing.expectEqual(sqlite.Step.done, try stmt.step());
     }
 }

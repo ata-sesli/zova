@@ -11,6 +11,18 @@ pub const graph_nodes_table = "_zova_graph_nodes";
 pub const graph_edges_table = "_zova_graph_edges";
 pub const default_graph_name = "default";
 
+pub const StorageSchema = enum {
+    main,
+    graph_store,
+
+    pub fn prefix(self: StorageSchema) []const u8 {
+        return switch (self) {
+            .main => "main.",
+            .graph_store => "graph_store.",
+        };
+    }
+};
+
 const max_graph_name_bytes: usize = 128;
 const max_node_id_bytes: usize = 512;
 const max_edge_type_bytes: usize = 128;
@@ -257,13 +269,25 @@ pub const GraphWalk = struct {
 
 pub const Database = struct {
     sqlite_db: *sqlite.Database,
+    storage_schema: StorageSchema = .main,
+
+    fn prepareSchema(self: *Database, comptime sql_template: []const u8) Error!sqlite.Statement {
+        var sql_buffer: [4096]u8 = undefined;
+        const prefix = self.storage_schema.prefix();
+        const sql_len = std.mem.replacementSize(u8, sql_template, "{s}", prefix);
+        if (sql_len >= sql_buffer.len) return error.SqliteError;
+        _ = std.mem.replace(u8, sql_template, "{s}", prefix, sql_buffer[0..sql_len]);
+        sql_buffer[sql_len] = 0;
+        const db = self.sqlite_db;
+        return try db.prepare(sql_buffer[0..sql_len :0]);
+    }
 
     pub fn createGraph(self: *Database, name: []const u8) Error!void {
         try validateGraphName(name);
 
-        var stmt = try self.sqlite_db.prepare(
-            \\insert into _zova_graphs (name, created_order)
-            \\values (?, coalesce((select max(created_order) + 1 from _zova_graphs), 1))
+        var stmt = try self.prepareSchema(
+            \\insert into {s}_zova_graphs (name, created_order)
+            \\values (?, coalesce((select max(created_order) + 1 from {s}_zova_graphs), 1))
         );
         defer stmt.deinit();
 
@@ -278,17 +302,17 @@ pub const Database = struct {
         try validateGraphName(name);
 
         if (!try self.hasGraph(name)) return error.GraphNotFound;
-        var delete_edges = try self.sqlite_db.prepare("delete from _zova_graph_edges where graph_name = ?");
+        var delete_edges = try self.prepareSchema("delete from {s}_zova_graph_edges where graph_name = ?");
         defer delete_edges.deinit();
         try delete_edges.bindText(1, name);
         std.debug.assert((try delete_edges.step()) == .done);
 
-        var delete_nodes = try self.sqlite_db.prepare("delete from _zova_graph_nodes where graph_name = ?");
+        var delete_nodes = try self.prepareSchema("delete from {s}_zova_graph_nodes where graph_name = ?");
         defer delete_nodes.deinit();
         try delete_nodes.bindText(1, name);
         std.debug.assert((try delete_nodes.step()) == .done);
 
-        var delete_graph = try self.sqlite_db.prepare("delete from _zova_graphs where name = ?");
+        var delete_graph = try self.prepareSchema("delete from {s}_zova_graphs where name = ?");
         defer delete_graph.deinit();
         try delete_graph.bindText(1, name);
         std.debug.assert((try delete_graph.step()) == .done);
@@ -297,7 +321,7 @@ pub const Database = struct {
     pub fn hasGraph(self: *Database, name: []const u8) Error!bool {
         try validateGraphName(name);
 
-        var stmt = try self.sqlite_db.prepare("select count(*) from _zova_graphs where name = ?");
+        var stmt = try self.prepareSchema("select count(*) from {s}_zova_graphs where name = ?");
         defer stmt.deinit();
         try stmt.bindText(1, name);
         std.debug.assert((try stmt.step()) == .row);
@@ -307,11 +331,11 @@ pub const Database = struct {
     pub fn graphInfo(self: *Database, allocator: std.mem.Allocator, name: []const u8) Error!GraphInfo {
         try validateGraphName(name);
 
-        var stmt = try self.sqlite_db.prepare(
+        var stmt = try self.prepareSchema(
             \\select g.name,
-            \\  (select count(*) from _zova_graph_nodes n where n.graph_name = g.name),
-            \\  (select count(*) from _zova_graph_edges e where e.graph_name = g.name)
-            \\from _zova_graphs g
+            \\  (select count(*) from {s}_zova_graph_nodes n where n.graph_name = g.name),
+            \\  (select count(*) from {s}_zova_graph_edges e where e.graph_name = g.name)
+            \\from {s}_zova_graphs g
             \\where g.name = ?
         );
         defer stmt.deinit();
@@ -324,11 +348,11 @@ pub const Database = struct {
     }
 
     pub fn listGraphs(self: *Database, allocator: std.mem.Allocator) Error!GraphList {
-        var stmt = try self.sqlite_db.prepare(
+        var stmt = try self.prepareSchema(
             \\select g.name,
-            \\  (select count(*) from _zova_graph_nodes n where n.graph_name = g.name),
-            \\  (select count(*) from _zova_graph_edges e where e.graph_name = g.name)
-            \\from _zova_graphs g
+            \\  (select count(*) from {s}_zova_graph_nodes n where n.graph_name = g.name),
+            \\  (select count(*) from {s}_zova_graph_edges e where e.graph_name = g.name)
+            \\from {s}_zova_graphs g
             \\order by g.name
         );
         defer stmt.deinit();
@@ -354,10 +378,10 @@ pub const Database = struct {
         if (input.target_ref) |value| try validateOptionalText(value);
         if (!try self.hasGraph(input.graph_name)) return error.GraphNotFound;
 
-        var stmt = try self.sqlite_db.prepare(
-            \\insert into _zova_graph_nodes
+        var stmt = try self.prepareSchema(
+            \\insert into {s}_zova_graph_nodes
             \\  (graph_name, node_id, kind, target_type, target_namespace, target_ref, created_order)
-            \\values (?, ?, ?, ?, ?, ?, coalesce((select max(created_order) + 1 from _zova_graph_nodes where graph_name = ?), 1))
+            \\values (?, ?, ?, ?, ?, ?, coalesce((select max(created_order) + 1 from {s}_zova_graph_nodes where graph_name = ?), 1))
             \\on conflict(graph_name, node_id) do update set
             \\  kind = excluded.kind,
             \\  target_type = excluded.target_type,
@@ -401,8 +425,8 @@ pub const Database = struct {
 
         try ensureGraphBatchIndexes(self);
 
-        var stmt = try self.sqlite_db.prepare(
-            \\insert into _zova_graph_nodes
+        var stmt = try self.prepareSchema(
+            \\insert into {s}_zova_graph_nodes
             \\  (graph_name, node_id, kind, target_type, target_namespace, target_ref, created_order)
             \\values (?, ?, ?, ?, ?, ?, ?)
             \\on conflict(graph_name, node_id) do update set
@@ -413,9 +437,9 @@ pub const Database = struct {
         );
         defer stmt.deinit();
 
-        var next_order_stmt = try self.sqlite_db.prepare(
+        var next_order_stmt = try self.prepareSchema(
             \\select coalesce(max(created_order), 0) + 1
-            \\from _zova_graph_nodes
+            \\from {s}_zova_graph_nodes
             \\where graph_name = ?
         );
         defer next_order_stmt.deinit();
@@ -435,9 +459,9 @@ pub const Database = struct {
         try validateGraphName(graph_name);
         try validateNodeId(node_id);
 
-        var stmt = try self.sqlite_db.prepare(
+        var stmt = try self.prepareSchema(
             \\select graph_name, node_id, kind, target_type, target_namespace, target_ref
-            \\from _zova_graph_nodes
+            \\from {s}_zova_graph_nodes
             \\where graph_name = ? and node_id = ?
         );
         defer stmt.deinit();
@@ -454,7 +478,7 @@ pub const Database = struct {
         try validateGraphName(graph_name);
         try validateNodeId(node_id);
 
-        var stmt = try self.sqlite_db.prepare("select count(*) from _zova_graph_nodes where graph_name = ? and node_id = ?");
+        var stmt = try self.prepareSchema("select count(*) from {s}_zova_graph_nodes where graph_name = ? and node_id = ?");
         defer stmt.deinit();
         try stmt.bindText(1, graph_name);
         try stmt.bindText(2, node_id);
@@ -467,8 +491,8 @@ pub const Database = struct {
         try validateNodeId(node_id);
         if (!try self.hasGraphNode(graph_name, node_id)) return error.GraphNodeNotFound;
 
-        var delete_edges = try self.sqlite_db.prepare(
-            \\delete from _zova_graph_edges
+        var delete_edges = try self.prepareSchema(
+            \\delete from {s}_zova_graph_edges
             \\where graph_name = ? and (from_node_id = ? or to_node_id = ?)
         );
         defer delete_edges.deinit();
@@ -477,7 +501,7 @@ pub const Database = struct {
         try delete_edges.bindText(3, node_id);
         std.debug.assert((try delete_edges.step()) == .done);
 
-        var delete_node = try self.sqlite_db.prepare("delete from _zova_graph_nodes where graph_name = ? and node_id = ?");
+        var delete_node = try self.prepareSchema("delete from {s}_zova_graph_nodes where graph_name = ? and node_id = ?");
         defer delete_node.deinit();
         try delete_node.bindText(1, graph_name);
         try delete_node.bindText(2, node_id);
@@ -496,14 +520,14 @@ pub const Database = struct {
 
         try ensureGraphBatchIndexes(self);
         try self.sqlite_db.exec(
-            \\create temp table if not exists _zova_graph_batch_delete_ids (
+            \\create temp table if not exists temp._zova_graph_batch_delete_ids (
             \\  node_id text not null primary key
             \\) without rowid;
-            \\delete from _zova_graph_batch_delete_ids;
+            \\delete from temp._zova_graph_batch_delete_ids;
         );
-        defer self.sqlite_db.exec("delete from _zova_graph_batch_delete_ids") catch {};
+        defer self.sqlite_db.exec("delete from temp._zova_graph_batch_delete_ids") catch {};
 
-        var insert_id = try self.sqlite_db.prepare("insert or ignore into _zova_graph_batch_delete_ids (node_id) values (?)");
+        var insert_id = try self.prepareSchema("insert or ignore into temp._zova_graph_batch_delete_ids (node_id) values (?)");
         defer insert_id.deinit();
         for (node_ids) |node_id| {
             try insert_id.bindText(1, node_id);
@@ -512,28 +536,28 @@ pub const Database = struct {
             try insert_id.clearBindings();
         }
 
-        var delete_outgoing = try self.sqlite_db.prepare(
-            \\delete from _zova_graph_edges
+        var delete_outgoing = try self.prepareSchema(
+            \\delete from {s}_zova_graph_edges
             \\where graph_name = ?
-            \\  and from_node_id in (select node_id from _zova_graph_batch_delete_ids)
+            \\  and from_node_id in (select node_id from temp._zova_graph_batch_delete_ids)
         );
         defer delete_outgoing.deinit();
         try delete_outgoing.bindText(1, graph_name);
         std.debug.assert((try delete_outgoing.step()) == .done);
 
-        var delete_incoming = try self.sqlite_db.prepare(
-            \\delete from _zova_graph_edges
+        var delete_incoming = try self.prepareSchema(
+            \\delete from {s}_zova_graph_edges
             \\where graph_name = ?
-            \\  and to_node_id in (select node_id from _zova_graph_batch_delete_ids)
+            \\  and to_node_id in (select node_id from temp._zova_graph_batch_delete_ids)
         );
         defer delete_incoming.deinit();
         try delete_incoming.bindText(1, graph_name);
         std.debug.assert((try delete_incoming.step()) == .done);
 
-        var delete_nodes = try self.sqlite_db.prepare(
-            \\delete from _zova_graph_nodes
+        var delete_nodes = try self.prepareSchema(
+            \\delete from {s}_zova_graph_nodes
             \\where graph_name = ?
-            \\  and node_id in (select node_id from _zova_graph_batch_delete_ids)
+            \\  and node_id in (select node_id from temp._zova_graph_batch_delete_ids)
         );
         defer delete_nodes.deinit();
         try delete_nodes.bindText(1, graph_name);
@@ -549,9 +573,9 @@ pub const Database = struct {
         if (!try self.hasGraphNode(input.graph_name, input.from_node_id)) return error.GraphNodeNotFound;
         if (!try self.hasGraphNode(input.graph_name, input.to_node_id)) return error.GraphNodeNotFound;
 
-        var stmt = try self.sqlite_db.prepare(
-            \\insert into _zova_graph_edges (graph_name, from_node_id, edge_type, to_node_id, created_order)
-            \\values (?, ?, ?, ?, coalesce((select max(created_order) + 1 from _zova_graph_edges where graph_name = ?), 1))
+        var stmt = try self.prepareSchema(
+            \\insert into {s}_zova_graph_edges (graph_name, from_node_id, edge_type, to_node_id, created_order)
+            \\values (?, ?, ?, ?, coalesce((select max(created_order) + 1 from {s}_zova_graph_edges where graph_name = ?), 1))
             \\on conflict(graph_name, from_node_id, edge_type, to_node_id) do nothing
         );
         defer stmt.deinit();
@@ -580,16 +604,16 @@ pub const Database = struct {
 
         try ensureGraphBatchIndexes(self);
 
-        var stmt = try self.sqlite_db.prepare(
-            \\insert into _zova_graph_edges (graph_name, from_node_id, edge_type, to_node_id, created_order)
+        var stmt = try self.prepareSchema(
+            \\insert into {s}_zova_graph_edges (graph_name, from_node_id, edge_type, to_node_id, created_order)
             \\values (?, ?, ?, ?, ?)
             \\on conflict(graph_name, from_node_id, edge_type, to_node_id) do nothing
         );
         defer stmt.deinit();
 
-        var next_order_stmt = try self.sqlite_db.prepare(
+        var next_order_stmt = try self.prepareSchema(
             \\select coalesce(max(created_order), 0) + 1
-            \\from _zova_graph_edges
+            \\from {s}_zova_graph_edges
             \\where graph_name = ?
         );
         defer next_order_stmt.deinit();
@@ -615,9 +639,9 @@ pub const Database = struct {
         try validateEdgeType(edge_type);
         try validateNodeId(to_node_id);
 
-        var stmt = try self.sqlite_db.prepare(
+        var stmt = try self.prepareSchema(
             \\select count(*)
-            \\from _zova_graph_edges
+            \\from {s}_zova_graph_edges
             \\where graph_name = ? and from_node_id = ? and edge_type = ? and to_node_id = ?
         );
         defer stmt.deinit();
@@ -642,9 +666,9 @@ pub const Database = struct {
         try validateEdgeType(edge_type);
         try validateNodeId(to_node_id);
 
-        var stmt = try self.sqlite_db.prepare(
+        var stmt = try self.prepareSchema(
             \\select graph_name, from_node_id, edge_type, to_node_id
-            \\from _zova_graph_edges
+            \\from {s}_zova_graph_edges
             \\where graph_name = ? and from_node_id = ? and edge_type = ? and to_node_id = ?
         );
         defer stmt.deinit();
@@ -666,8 +690,8 @@ pub const Database = struct {
         try validateNodeId(input.to_node_id);
         if (!try self.hasGraphEdge(input.graph_name, input.from_node_id, input.edge_type, input.to_node_id)) return error.GraphEdgeNotFound;
 
-        var stmt = try self.sqlite_db.prepare(
-            \\delete from _zova_graph_edges
+        var stmt = try self.prepareSchema(
+            \\delete from {s}_zova_graph_edges
             \\where graph_name = ? and from_node_id = ? and edge_type = ? and to_node_id = ?
         );
         defer stmt.deinit();
@@ -687,37 +711,37 @@ pub const Database = struct {
 
         var stmt = switch (options.direction) {
             .outgoing => if (options.edge_type == null)
-                try self.sqlite_db.prepare(
+                try self.prepareSchema(
                     \\select n.node_id, n.kind, e.edge_type
-                    \\from _zova_graph_edges e
-                    \\join _zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.to_node_id
+                    \\from {s}_zova_graph_edges e
+                    \\join {s}_zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.to_node_id
                     \\where e.graph_name = ? and e.from_node_id = ?
                     \\order by e.created_order, e.to_node_id
                     \\limit ?
                 )
             else
-                try self.sqlite_db.prepare(
+                try self.prepareSchema(
                     \\select n.node_id, n.kind, e.edge_type
-                    \\from _zova_graph_edges e
-                    \\join _zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.to_node_id
+                    \\from {s}_zova_graph_edges e
+                    \\join {s}_zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.to_node_id
                     \\where e.graph_name = ? and e.from_node_id = ? and e.edge_type = ?
                     \\order by e.created_order, e.to_node_id
                     \\limit ?
                 ),
             .incoming => if (options.edge_type == null)
-                try self.sqlite_db.prepare(
+                try self.prepareSchema(
                     \\select n.node_id, n.kind, e.edge_type
-                    \\from _zova_graph_edges e
-                    \\join _zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.from_node_id
+                    \\from {s}_zova_graph_edges e
+                    \\join {s}_zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.from_node_id
                     \\where e.graph_name = ? and e.to_node_id = ?
                     \\order by e.created_order, e.from_node_id
                     \\limit ?
                 )
             else
-                try self.sqlite_db.prepare(
+                try self.prepareSchema(
                     \\select n.node_id, n.kind, e.edge_type
-                    \\from _zova_graph_edges e
-                    \\join _zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.from_node_id
+                    \\from {s}_zova_graph_edges e
+                    \\join {s}_zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.from_node_id
                     \\where e.graph_name = ? and e.to_node_id = ? and e.edge_type = ?
                     \\order by e.created_order, e.from_node_id
                     \\limit ?
@@ -756,13 +780,13 @@ pub const Database = struct {
 
         var stmt = switch (options.direction) {
             .outgoing => if (options.edge_type != null)
-                try self.sqlite_db.prepare("select count(*) from _zova_graph_edges where graph_name = ? and from_node_id = ? and edge_type = ?")
+                try self.prepareSchema("select count(*) from {s}_zova_graph_edges where graph_name = ? and from_node_id = ? and edge_type = ?")
             else
-                try self.sqlite_db.prepare("select count(*) from _zova_graph_edges where graph_name = ? and from_node_id = ?"),
+                try self.prepareSchema("select count(*) from {s}_zova_graph_edges where graph_name = ? and from_node_id = ?"),
             .incoming => if (options.edge_type != null)
-                try self.sqlite_db.prepare("select count(*) from _zova_graph_edges where graph_name = ? and to_node_id = ? and edge_type = ?")
+                try self.prepareSchema("select count(*) from {s}_zova_graph_edges where graph_name = ? and to_node_id = ? and edge_type = ?")
             else
-                try self.sqlite_db.prepare("select count(*) from _zova_graph_edges where graph_name = ? and to_node_id = ?"),
+                try self.prepareSchema("select count(*) from {s}_zova_graph_edges where graph_name = ? and to_node_id = ?"),
         };
         defer stmt.deinit();
         try stmt.bindText(1, options.graph_name);
@@ -917,37 +941,37 @@ pub const Database = struct {
     fn prepareWalkAdjacency(self: *Database, direction: GraphNeighborDirection, edge_type: ?[]const u8) Error!sqlite.Statement {
         return switch (direction) {
             .outgoing => if (edge_type == null)
-                try self.sqlite_db.prepare(
+                try self.prepareSchema(
                     \\select n.node_id, n.kind, e.edge_type
-                    \\from _zova_graph_edges e
-                    \\join _zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.to_node_id
+                    \\from {s}_zova_graph_edges e
+                    \\join {s}_zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.to_node_id
                     \\where e.graph_name = ? and e.from_node_id = ?
                     \\order by e.created_order, e.to_node_id
                     \\limit ?
                 )
             else
-                try self.sqlite_db.prepare(
+                try self.prepareSchema(
                     \\select n.node_id, n.kind, e.edge_type
-                    \\from _zova_graph_edges e
-                    \\join _zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.to_node_id
+                    \\from {s}_zova_graph_edges e
+                    \\join {s}_zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.to_node_id
                     \\where e.graph_name = ? and e.from_node_id = ? and e.edge_type = ?
                     \\order by e.created_order, e.to_node_id
                     \\limit ?
                 ),
             .incoming => if (edge_type == null)
-                try self.sqlite_db.prepare(
+                try self.prepareSchema(
                     \\select n.node_id, n.kind, e.edge_type
-                    \\from _zova_graph_edges e
-                    \\join _zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.from_node_id
+                    \\from {s}_zova_graph_edges e
+                    \\join {s}_zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.from_node_id
                     \\where e.graph_name = ? and e.to_node_id = ?
                     \\order by e.created_order, e.from_node_id
                     \\limit ?
                 )
             else
-                try self.sqlite_db.prepare(
+                try self.prepareSchema(
                     \\select n.node_id, n.kind, e.edge_type
-                    \\from _zova_graph_edges e
-                    \\join _zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.from_node_id
+                    \\from {s}_zova_graph_edges e
+                    \\join {s}_zova_graph_nodes n on n.graph_name = e.graph_name and n.node_id = e.from_node_id
                     \\where e.graph_name = ? and e.to_node_id = ? and e.edge_type = ?
                     \\order by e.created_order, e.from_node_id
                     \\limit ?
@@ -1069,12 +1093,47 @@ fn nextGraphCreatedOrder(
 }
 
 fn ensureGraphBatchIndexes(self: *Database) Error!void {
-    try self.sqlite_db.exec(graph_nodes_created_order_index_sql ++ ";");
-    try self.sqlite_db.exec(graph_edges_created_order_index_sql ++ ";");
-    try self.sqlite_db.exec(graph_edges_from_node_index_sql ++ ";");
-    try self.sqlite_db.exec(graph_edges_from_node_type_index_sql ++ ";");
-    try self.sqlite_db.exec(graph_edges_to_node_index_sql ++ ";");
-    try self.sqlite_db.exec(graph_edges_to_node_type_index_sql ++ ";");
+    var nodes_created_order = try self.prepareSchema(
+        \\create index if not exists {s}_zova_graph_nodes_created_order_idx
+        \\on _zova_graph_nodes (graph_name, created_order)
+    );
+    defer nodes_created_order.deinit();
+    std.debug.assert((try nodes_created_order.step()) == .done);
+
+    var edges_created_order = try self.prepareSchema(
+        \\create index if not exists {s}_zova_graph_edges_created_order_idx
+        \\on _zova_graph_edges (graph_name, created_order)
+    );
+    defer edges_created_order.deinit();
+    std.debug.assert((try edges_created_order.step()) == .done);
+
+    var edges_from_node = try self.prepareSchema(
+        \\create index if not exists {s}_zova_graph_edges_from_node_idx
+        \\on _zova_graph_edges (graph_name, from_node_id, created_order, to_node_id)
+    );
+    defer edges_from_node.deinit();
+    std.debug.assert((try edges_from_node.step()) == .done);
+
+    var edges_from_node_type = try self.prepareSchema(
+        \\create index if not exists {s}_zova_graph_edges_from_node_type_idx
+        \\on _zova_graph_edges (graph_name, from_node_id, edge_type, created_order, to_node_id)
+    );
+    defer edges_from_node_type.deinit();
+    std.debug.assert((try edges_from_node_type.step()) == .done);
+
+    var edges_to_node = try self.prepareSchema(
+        \\create index if not exists {s}_zova_graph_edges_to_node_idx
+        \\on _zova_graph_edges (graph_name, to_node_id, created_order, from_node_id)
+    );
+    defer edges_to_node.deinit();
+    std.debug.assert((try edges_to_node.step()) == .done);
+
+    var edges_to_node_type = try self.prepareSchema(
+        \\create index if not exists {s}_zova_graph_edges_to_node_type_idx
+        \\on _zova_graph_edges (graph_name, to_node_id, edge_type, created_order, from_node_id)
+    );
+    defer edges_to_node_type.deinit();
+    std.debug.assert((try edges_to_node_type.step()) == .done);
 }
 
 fn graphInfoFromRow(allocator: std.mem.Allocator, stmt: *sqlite.Statement) Error!GraphInfo {

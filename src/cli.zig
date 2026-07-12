@@ -103,6 +103,7 @@ const OperationalCommandArgs = struct {
 const SplitRole = enum {
     objects,
     vectors,
+    graphs,
 };
 
 const SplitCommandArgs = struct {
@@ -516,6 +517,9 @@ const DiagnosticReport = struct {
     issues: []DiagnosticIssue = &.{},
     issues_truncated: bool = false,
     issue_limit: usize = 10,
+    missing_object_store: bool = false,
+    missing_vector_store: bool = false,
+    missing_graph_store: bool = false,
 
     fn deinit(self: *DiagnosticReport, allocator: std.mem.Allocator) void {
         for (self.issues) |*issue| issue.deinit(allocator);
@@ -694,6 +698,9 @@ pub fn run(
     if (std.mem.eql(u8, command, "vector-store")) {
         return vectorStoreCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
+    if (std.mem.eql(u8, command, "graph-store")) {
+        return graphStoreCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
+    }
     if (std.mem.eql(u8, command, "extension")) {
         return extensionCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
@@ -783,7 +790,7 @@ fn writeUsage(writer: *std.Io.Writer) !void {
         \\  zova backup [--json] [--no-verify] <source.zova> <destination.zova>
         \\  zova compact [--json] [--no-verify] <source.zova> <destination.zova>
         \\  zova restore [--json] [--no-verify] <backup.zova> <destination.zova>
-        \\  zova split (--objects | --vectors) [--json] <main.zova> <store.zova>
+        \\  zova split (--objects | --vectors | --graphs) [--json] <main.zova> <store.zova>
         \\  zova object-store create [--json] <objects.zova>
         \\  zova object-store bind [--json] <main.zova> <objects.zova>
         \\  zova object-store info [--json] <main.zova>
@@ -792,6 +799,10 @@ fn writeUsage(writer: *std.Io.Writer) !void {
         \\  zova vector-store bind [--json] <main.zova> <vectors.zova>
         \\  zova vector-store info [--json] <main.zova>
         \\  zova vector-store unbind [--json] <main.zova>
+        \\  zova graph-store create [--json] <graphs.zova>
+        \\  zova graph-store bind [--json] <main.zova> <graphs.zova>
+        \\  zova graph-store info [--json] <main.zova>
+        \\  zova graph-store unbind [--json] <main.zova>
         \\  zova extension list [--json] <file.zova>
         \\  zova extension info [--json] <file.zova> <name>
         \\  zova extension check [--json] <file.zova> [name]
@@ -826,9 +837,10 @@ fn writeUsage(writer: *std.Io.Writer) !void {
         \\  backup create a verified snapshot copy without overwriting destination
         \\  compact create a verified space-reclaiming copy with VACUUM INTO
         \\  restore restore a backup into a new destination file
-        \\  split  move existing single-file object or vector storage into a new bound store
+        \\  split  move existing single-file object, vector, or graph storage into a new bound store
         \\  object-store manage one optional bound object store
         \\  vector-store manage one optional bound vector store
+        \\  graph-store manage one optional bound graph store
         \\  extension inspect, trust, load, and manage process-provided extensions
         \\
         \\exit codes:
@@ -1047,6 +1059,10 @@ fn splitCommand(
             const result = db.splitVectorStore(store_z) catch |err| return splitErrorFormat(stderr, parsed.format, err);
             try writeSplitVectorSuccess(stdout, parsed, result);
         },
+        .graphs => {
+            const result = db.splitGraphStore(store_z) catch |err| return splitErrorFormat(stderr, parsed.format, err);
+            try writeSplitGraphSuccess(stdout, parsed, result);
+        },
     }
     return ExitCode.ok;
 }
@@ -1067,6 +1083,9 @@ fn parseSplitCommandArgs(args: []const []const u8) SplitCommandParseError!SplitC
         } else if (std.mem.eql(u8, arg, "--vectors")) {
             if (role != null) return error.DuplicateRole;
             role = .vectors;
+        } else if (std.mem.eql(u8, arg, "--graphs")) {
+            if (role != null) return error.DuplicateRole;
+            role = .graphs;
         } else if (std.mem.startsWith(u8, arg, "-")) {
             return error.UnknownFlag;
         } else if (main_path == null) {
@@ -1093,14 +1112,14 @@ fn parseSplitCommandArgs(args: []const []const u8) SplitCommandParseError!SplitC
 
 fn splitUsageMessage(err: SplitCommandParseError) []const u8 {
     return switch (err) {
-        error.MissingRole => "split requires exactly one of --objects or --vectors",
+        error.MissingRole => "split requires exactly one of --objects, --vectors, or --graphs",
         error.DuplicateRole => "split accepts only one role flag",
         error.DuplicateJson => "duplicate --json",
         error.UnknownFlag => "unknown flag",
         error.MissingMainPath => "split requires <main.zova>",
         error.MissingStorePath => "split requires <store.zova>",
         error.SamePath => "split store path must differ from main path",
-        error.ExtraArgs => "split accepts only (--objects | --vectors) [--json] <main.zova> <store.zova>",
+        error.ExtraArgs => "split accepts only (--objects | --vectors | --graphs) [--json] <main.zova> <store.zova>",
     };
 }
 
@@ -1256,6 +1275,74 @@ fn vectorStoreCommand(
             defer db.deinit();
 
             db.unbindVectorStore() catch |err| return objectStoreErrorFormat(stderr, command_name, parsed.format, err);
+            try writeObjectStoreSuccess(stdout, parsed.format, command_name, main_path, null, null, false, false);
+            return ExitCode.ok;
+        },
+    }
+}
+
+fn graphStoreCommand(
+    ctx: CommandContext,
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !u8 {
+    const parsed = parseObjectStoreCommandArgs(args) catch |err| {
+        const format: OutputFormat = if (argsContain(args, "--json")) .json else .text;
+        return usageErrorFormat(stderr, "graph-store", format, graphStoreUsageMessage(err));
+    };
+
+    const command_name = graphStoreCommandName(parsed.action);
+    switch (parsed.action) {
+        .create => {
+            const store_path = parsed.store_path.?;
+            const store_z = try allocator.dupeZ(u8, store_path);
+            defer allocator.free(store_z);
+            zova.createGraphStore(store_z) catch |err| return objectStoreErrorFormat(stderr, command_name, parsed.format, err);
+            try writeObjectStoreSuccess(stdout, parsed.format, command_name, null, store_path, null, true, true);
+            return ExitCode.ok;
+        },
+        .bind => {
+            const main_path = parsed.main_path.?;
+            const store_path = parsed.store_path.?;
+            const main_z = try allocator.dupeZ(u8, main_path);
+            defer allocator.free(main_z);
+            const store_z = try allocator.dupeZ(u8, store_path);
+            defer allocator.free(store_z);
+            var db = openManagementDatabase(ctx, main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
+            defer db.deinit();
+            db.bindGraphStore(store_z) catch |err| {
+                if (err == error.BoundStoreExists) return boundStoreMigrationRequiredFormat(stderr, command_name, parsed.format, .graphs, main_path, store_path);
+                return objectStoreErrorFormat(stderr, command_name, parsed.format, err);
+            };
+            var info = (try db.boundGraphStore(allocator)).?;
+            defer info.deinit(allocator);
+            try writeObjectStoreSuccess(stdout, parsed.format, command_name, main_path, info.path, info.store_id, false, true);
+            return ExitCode.ok;
+        },
+        .info => {
+            const main_path = parsed.main_path.?;
+            const main_z = try allocator.dupeZ(u8, main_path);
+            defer allocator.free(main_z);
+            var db = openManagementDatabase(ctx, main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
+            defer db.deinit();
+            var maybe_info = try db.boundGraphStore(allocator);
+            if (maybe_info) |*info| {
+                defer info.deinit(allocator);
+                try writeObjectStoreSuccess(stdout, parsed.format, command_name, main_path, info.path, info.store_id, false, true);
+            } else {
+                try writeObjectStoreSuccess(stdout, parsed.format, command_name, main_path, null, null, false, false);
+            }
+            return ExitCode.ok;
+        },
+        .unbind => {
+            const main_path = parsed.main_path.?;
+            const main_z = try allocator.dupeZ(u8, main_path);
+            defer allocator.free(main_z);
+            var db = openManagementDatabase(ctx, main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
+            defer db.deinit();
+            db.unbindGraphStore() catch |err| return objectStoreErrorFormat(stderr, command_name, parsed.format, err);
             try writeObjectStoreSuccess(stdout, parsed.format, command_name, main_path, null, null, false, false);
             return ExitCode.ok;
         },
@@ -2148,6 +2235,15 @@ fn vectorStoreCommandName(action: ObjectStoreAction) []const u8 {
     };
 }
 
+fn graphStoreCommandName(action: ObjectStoreAction) []const u8 {
+    return switch (action) {
+        .create => "graph-store-create",
+        .bind => "graph-store-bind",
+        .info => "graph-store-info",
+        .unbind => "graph-store-unbind",
+    };
+}
+
 fn objectStoreUsageMessage(err: ObjectStoreCommandParseError) []const u8 {
     return switch (err) {
         error.MissingAction => "object-store requires create, bind, info, or unbind",
@@ -2169,6 +2265,18 @@ fn vectorStoreUsageMessage(err: ObjectStoreCommandParseError) []const u8 {
         error.MissingMainPath => "vector-store action requires <main.zova>",
         error.MissingStorePath => "vector-store action requires <vectors.zova>",
         error.ExtraArgs => "vector-store action received extra arguments",
+    };
+}
+
+fn graphStoreUsageMessage(err: ObjectStoreCommandParseError) []const u8 {
+    return switch (err) {
+        error.MissingAction => "graph-store requires create, bind, info, or unbind",
+        error.UnknownAction => "unknown graph-store action",
+        error.DuplicateJson => "duplicate --json",
+        error.UnknownFlag => "unknown flag",
+        error.MissingMainPath => "graph-store action requires <main.zova>",
+        error.MissingStorePath => "graph-store action requires <graphs.zova>",
+        error.ExtraArgs => "graph-store action received extra arguments",
     };
 }
 
@@ -2271,6 +2379,36 @@ fn writeSplitVectorSuccess(stdout: *std.Io.Writer, parsed: SplitCommandArgs, res
     }
 }
 
+fn writeSplitGraphSuccess(stdout: *std.Io.Writer, parsed: SplitCommandArgs, result: zova.SplitGraphStoreResult) !void {
+    switch (parsed.format) {
+        .text => {
+            try stdout.writeAll("split: ok\n");
+            try stdout.writeAll("role: graphs\n");
+            try stdout.print("main_path: {s}\n", .{parsed.main_path});
+            try stdout.print("store_path: {s}\n", .{parsed.store_path});
+            try stdout.print("copied_graphs: {d}\n", .{result.copied.graphs});
+            try stdout.print("copied_nodes: {d}\n", .{result.copied.nodes});
+            try stdout.print("copied_edges: {d}\n", .{result.copied.edges});
+            try stdout.print("cleared_graphs: {d}\n", .{result.cleared.graphs});
+            try stdout.print("cleared_nodes: {d}\n", .{result.cleared.nodes});
+            try stdout.print("cleared_edges: {d}\n", .{result.cleared.edges});
+            try stdout.print("verified: {}\n", .{result.verified});
+        },
+        .json => {
+            try writeSplitJsonHeader(stdout, parsed, result.store_id, result.bound_set_id, result.verified);
+            try stdout.writeAll(",\n  \"copied\": {\n");
+            try stdout.print("    \"graphs\": {d},\n", .{result.copied.graphs});
+            try stdout.print("    \"nodes\": {d},\n", .{result.copied.nodes});
+            try stdout.print("    \"edges\": {d}\n", .{result.copied.edges});
+            try stdout.writeAll("  },\n  \"cleared\": {\n");
+            try stdout.print("    \"graphs\": {d},\n", .{result.cleared.graphs});
+            try stdout.print("    \"nodes\": {d},\n", .{result.cleared.nodes});
+            try stdout.print("    \"edges\": {d}\n", .{result.cleared.edges});
+            try stdout.writeAll("  }\n}\n");
+        },
+    }
+}
+
 fn writeSplitJsonHeader(
     stdout: *std.Io.Writer,
     parsed: SplitCommandArgs,
@@ -2301,6 +2439,7 @@ fn splitRoleJsonName(role: SplitRole) []const u8 {
     return switch (role) {
         .objects => "objects",
         .vectors => "vectors",
+        .graphs => "graphs",
     };
 }
 
@@ -2308,6 +2447,7 @@ fn splitRoleFlag(role: SplitRole) []const u8 {
     return switch (role) {
         .objects => "--objects",
         .vectors => "--vectors",
+        .graphs => "--graphs",
     };
 }
 
@@ -2315,6 +2455,7 @@ fn splitRoleStorageName(role: SplitRole) []const u8 {
     return switch (role) {
         .objects => "object",
         .vectors => "vector",
+        .graphs => "graph",
     };
 }
 
@@ -3502,6 +3643,11 @@ fn writeBoundStoreOpenFailureCheck(
         info.deinit(allocator);
         has_bound_store = true;
     }
+    if (try db.boundGraphStore(allocator)) |info_value| {
+        var info = info_value;
+        info.deinit(allocator);
+        has_bound_store = true;
+    }
     if (!has_bound_store) return null;
 
     var report = try runDiagnostics(allocator, &db, 10);
@@ -3515,11 +3661,8 @@ fn writeBoundStoreOpenFailureCheck(
         .text => {
             try writeDeepCheckFailureText(stderr, report);
             if (reportHasIssue(report, .bound_store, "missing_or_unreadable_store")) {
-                try stderr.print(
-                    \\suggested_actions:
-                    \\  run zova object-store bind {s} <objects.zova> or zova vector-store bind {s} <vectors.zova>
-                    \\
-                , .{ path, path });
+                try stderr.writeAll("suggested_actions:\n");
+                try writeMissingBoundStoreActions(stderr, path, report);
             }
         },
         .json => try writeDeepCheckFailureJson(stderr, report),
@@ -3546,6 +3689,11 @@ fn writeBoundStoreOpenFailureDoctor(
         has_bound_store = true;
     }
     if (try db.boundVectorStore(allocator)) |info_value| {
+        var info = info_value;
+        info.deinit(allocator);
+        has_bound_store = true;
+    }
+    if (try db.boundGraphStore(allocator)) |info_value| {
         var info = info_value;
         info.deinit(allocator);
         has_bound_store = true;
@@ -5774,12 +5922,17 @@ fn writeDoctorText(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
     try writer.writeAll("suggested_actions:\n");
     try writeSuggestedActionsText(writer, source_path, has_issues);
     if (reportHasIssue(report, .bound_store, "missing_or_unreadable_store")) {
-        try writer.print("  run zova object-store bind {s} <objects.zova>\n", .{source_path});
-        try writer.print("  run zova vector-store bind {s} <vectors.zova>\n", .{source_path});
+        try writeMissingBoundStoreActions(writer, source_path, report);
     }
     if (report.issue_counts.extension != 0) {
         try writeExtensionSuggestedActionsText(writer, source_path);
     }
+}
+
+fn writeMissingBoundStoreActions(writer: *std.Io.Writer, source_path: []const u8, report: DiagnosticReport) !void {
+    if (report.missing_object_store) try writer.print("  run zova object-store bind {s} <objects.zova>\n", .{source_path});
+    if (report.missing_vector_store) try writer.print("  run zova vector-store bind {s} <vectors.zova>\n", .{source_path});
+    if (report.missing_graph_store) try writer.print("  run zova graph-store bind {s} <graphs.zova>\n", .{source_path});
 }
 
 fn writeDoctorJson(writer: *std.Io.Writer, source_path: []const u8, summary: DatabaseSummary, report: DiagnosticReport) !void {
@@ -6400,9 +6553,21 @@ fn fileSizeWithSuffix(allocator: std.mem.Allocator, path: [:0]const u8, suffix: 
 }
 
 fn quickCheck(db: *zova.Database) !void {
-    var stmt = try db.prepare("pragma quick_check");
-    defer stmt.deinit();
+    try quickCheckSchema(db, "pragma quick_check");
+    if (hasAttachedSchema(db, "object_store")) try quickCheckSchema(db, "pragma object_store.quick_check");
+    if (hasAttachedSchema(db, "vector_store")) try quickCheckSchema(db, "pragma vector_store.quick_check");
+    if (hasAttachedSchema(db, "graph_store")) try quickCheckSchema(db, "pragma graph_store.quick_check");
+}
 
+fn hasAttachedSchema(db: *zova.Database, comptime schema: []const u8) bool {
+    var stmt = db.prepare("select 1 from " ++ schema ++ ".sqlite_master limit 1") catch return false;
+    defer stmt.deinit();
+    return true;
+}
+
+fn quickCheckSchema(db: *zova.Database, sql: [:0]const u8) !void {
+    var stmt = try db.prepare(sql);
+    defer stmt.deinit();
     while ((try stmt.step()) == .row) {
         if (!std.mem.eql(u8, stmt.columnText(0), "ok")) return error.CheckFailed;
     }
@@ -6506,6 +6671,26 @@ fn validateBoundStores(allocator: std.mem.Allocator, db: *zova.Database, report:
             info.vector_epoch,
         );
     }
+
+    if (try db.boundGraphStore(allocator)) |info_value| {
+        var info = info_value;
+        defer info.deinit(allocator);
+        try validateOneBoundStore(
+            allocator,
+            report,
+            issues,
+            info.path,
+            "graph_store",
+            info.store_id,
+            info.bound_set_id,
+            "graph_epoch",
+            "missing_graph_epoch",
+            "graph_epoch_unreadable",
+            "graph_epoch_invalid",
+            "graph_epoch_mismatch",
+            info.graph_epoch,
+        );
+    }
 }
 
 fn validateOneBoundStore(
@@ -6527,6 +6712,9 @@ fn validateOneBoundStore(
     defer allocator.free(path_z);
 
     var store = sqlite.Database.openWithFlags(path_z, .read_only) catch |err| {
+        if (std.mem.eql(u8, expected_role, "object_store")) report.missing_object_store = true;
+        if (std.mem.eql(u8, expected_role, "vector_store")) report.missing_vector_store = true;
+        if (std.mem.eql(u8, expected_role, "graph_store")) report.missing_graph_store = true;
         try addDiagnosticIssue(allocator, report, issues, .bound_store, "missing_or_unreadable_store", @errorName(err), null, null, null, null);
         return;
     };
@@ -7306,6 +7494,10 @@ fn diagnosticVectorSchemaPrefix(db: *zova.Database) []const u8 {
     return "vector_store.";
 }
 
+fn diagnosticGraphSchemaPrefix(db: *zova.Database) []const u8 {
+    return if (hasAttachedSchema(db, "graph_store")) "graph_store." else "";
+}
+
 fn validateVectors(allocator: std.mem.Allocator, db: *zova.Database, report: *DiagnosticReport, issues: *std.ArrayList(DiagnosticIssue)) !void {
     const prefix = diagnosticVectorSchemaPrefix(db);
     const sql = try std.fmt.allocPrintSentinel(allocator,
@@ -7331,7 +7523,10 @@ fn validateVectors(allocator: std.mem.Allocator, db: *zova.Database, report: *Di
 }
 
 fn validateGraphs(allocator: std.mem.Allocator, db: *zova.Database, report: *DiagnosticReport, issues: *std.ArrayList(DiagnosticIssue)) !void {
-    var graphs = try db.prepare("select name from _zova_graphs order by name");
+    const prefix = diagnosticGraphSchemaPrefix(db);
+    const graphs_sql = try std.fmt.allocPrintSentinel(allocator, "select name from {s}_zova_graphs order by name", .{prefix}, 0);
+    defer allocator.free(graphs_sql);
+    var graphs = try db.prepare(graphs_sql);
     defer graphs.deinit();
     while ((try graphs.step()) == .row) {
         const graph_name = graphs.columnText(0);
@@ -7341,11 +7536,13 @@ fn validateGraphs(allocator: std.mem.Allocator, db: *zova.Database, report: *Dia
         }
     }
 
-    var nodes = try db.prepare(
+    const nodes_sql = try std.fmt.allocPrintSentinel(allocator,
         \\select graph_name, node_id, kind, target_type, target_namespace, target_ref
-        \\from _zova_graph_nodes
+        \\from {s}_zova_graph_nodes
         \\order by graph_name, node_id
-    );
+    , .{prefix}, 0);
+    defer allocator.free(nodes_sql);
+    var nodes = try db.prepare(nodes_sql);
     defer nodes.deinit();
     while ((try nodes.step()) == .row) {
         const graph_name = nodes.columnText(0);
@@ -7387,17 +7584,19 @@ fn validateGraphs(allocator: std.mem.Allocator, db: *zova.Database, report: *Dia
         }
     }
 
-    var edges = try db.prepare(
+    const edges_sql = try std.fmt.allocPrintSentinel(allocator,
         \\select e.graph_name, e.from_node_id, e.edge_type, e.to_node_id,
         \\  from_node.node_id is null,
         \\  to_node.node_id is null
-        \\from _zova_graph_edges e
-        \\left join _zova_graph_nodes from_node
+        \\from {s}_zova_graph_edges e
+        \\left join {s}_zova_graph_nodes from_node
         \\  on from_node.graph_name = e.graph_name and from_node.node_id = e.from_node_id
-        \\left join _zova_graph_nodes to_node
+        \\left join {s}_zova_graph_nodes to_node
         \\  on to_node.graph_name = e.graph_name and to_node.node_id = e.to_node_id
         \\order by e.graph_name, e.from_node_id, e.edge_type, e.to_node_id
-    );
+    , .{ prefix, prefix, prefix }, 0);
+    defer allocator.free(edges_sql);
+    var edges = try db.prepare(edges_sql);
     defer edges.deinit();
     while ((try edges.step()) == .row) {
         const graph_name = edges.columnText(0);

@@ -7,7 +7,7 @@
 //!
 //! Zova is currently pre-1.0, and internal `.zova` format compatibility is
 //! not preserved between experimental format versions. The current v0.22
-//! development format is version `6`: `_zova_meta.format_version = '6'` plus
+//! development format is version `7`: `_zova_meta.format_version = '7'` plus
 //! the required private object, vector, graph, and extension registry schemas.
 //! `Database.open` is intentionally non-mutating: it validates the file and
 //! rejects old, future, incomplete, or invalid private schemas instead of
@@ -62,22 +62,26 @@ const magic_value = "zova";
 const format_version = version.format_version;
 const bound_object_store_role = "object_store";
 const bound_vector_store_role = "vector_store";
+const bound_graph_store_role = "graph_store";
 const bound_object_store_name = "default";
 const bound_vector_store_name = "default";
+const bound_graph_store_name = "default";
 const bound_object_store_schema_name = "object_store";
 const bound_vector_store_schema_name = "vector_store";
+const bound_graph_store_schema_name = "graph_store";
 const bundled_extensions = [_]extension_impl.Extension{
     trgm_impl.extension(),
 };
 const bound_stores_schema_sql =
     \\create table _zova_bound_stores (
-    \\  role text not null check (role in ('object_store', 'vector_store')),
+    \\  role text not null check (role in ('object_store', 'vector_store', 'graph_store')),
     \\  name text not null check (name = 'default'),
     \\  path text not null,
     \\  store_id text not null check (length(store_id) = 64),
     \\  bound_set_id text not null check (length(bound_set_id) = 64),
     \\  object_epoch integer check (object_epoch is null or object_epoch >= 0),
     \\  vector_epoch integer check (vector_epoch is null or vector_epoch >= 0),
+    \\  graph_epoch integer check (graph_epoch is null or graph_epoch >= 0),
     \\  created_at_unix integer not null,
     \\  primary key (role, name)
     \\)
@@ -255,6 +259,38 @@ pub const SplitVectorStoreResult = struct {
     verified: bool,
 };
 
+/// Information about the optional graph store bound to a main `.zova` file.
+pub const BoundGraphStoreInfo = struct {
+    path: []u8,
+    store_id: []u8,
+    bound_set_id: []u8,
+    graph_epoch: u64,
+
+    pub fn deinit(self: *BoundGraphStoreInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        allocator.free(self.store_id);
+        allocator.free(self.bound_set_id);
+    }
+};
+
+const BoundGraphStore = struct {};
+
+pub const SplitGraphStoreCounts = struct {
+    graphs: u64 = 0,
+    nodes: u64 = 0,
+    edges: u64 = 0,
+};
+
+pub const SplitGraphStoreResult = struct {
+    role: []const u8 = bound_graph_store_role,
+    store_path: []const u8,
+    store_id: [64]u8,
+    bound_set_id: [64]u8,
+    copied: SplitGraphStoreCounts,
+    cleared: SplitGraphStoreCounts,
+    verified: bool,
+};
+
 /// Options for opening an existing `.zova` database.
 pub const OpenOptions = struct {
     /// Open the SQLite handle read-only. Read APIs and SQL queries work, while
@@ -336,6 +372,26 @@ pub fn createVectorStore(path: [:0]const u8) Error!void {
 
     try initializeZovaSchema(&raw);
     try markAsVectorStore(&raw);
+}
+
+/// Create a standalone graph-store `.zova` file.
+pub fn createGraphStore(path: [:0]const u8) Error!void {
+    if (!isZovaPath(path)) return error.NotZovaPath;
+
+    const io = defaultIo();
+    var file = std.Io.Dir.cwd().createFile(io, path, .{ .exclusive = true }) catch |err| switch (err) {
+        error.PathAlreadyExists => return error.DestinationExists,
+        else => return error.CantOpen,
+    };
+    file.close(io);
+
+    errdefer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    var raw = try sqlite.Database.open(path);
+    defer raw.deinit();
+
+    try initializeZovaSchema(&raw);
+    try markAsGraphStore(&raw);
 }
 
 /// Convert an existing SQLite database file into a new `.zova` database.
@@ -425,12 +481,13 @@ pub const Database = struct {
     notifications: *notify_impl.Hub,
     bound_object_store: ?BoundObjectStore = null,
     bound_vector_store: ?BoundVectorStore = null,
+    bound_graph_store: ?BoundGraphStore = null,
     extension_registry: ExtensionRegistry = ExtensionRegistry.empty(),
 
     /// Create a new initialized `.zova` database.
     ///
     /// This never overwrites an existing file. The file is initialized with the
-    /// private `_zova_meta` table, format version `6`, and the required
+    /// private `_zova_meta` table, format version `7`, and the required
     /// object, vector, graph, and extension registry schemas.
     pub fn create(path: [:0]const u8) Error!Database {
         return createWithExtensions(path, bundledExtensionRegistry());
@@ -516,7 +573,7 @@ pub const Database = struct {
     /// Open only the main `.zova` file for bound-store binding management.
     ///
     /// This is for repairing or replacing binding metadata when the configured
-    /// store path is no longer available. Object/vector APIs on the returned
+    /// store path is no longer available. Object/vector/graph APIs on the returned
     /// handle use the main file only; normal application code should use `open`
     /// or `openWithOptions`.
     pub fn openForObjectStoreManagement(path: [:0]const u8, options: OpenOptions) Error!Database {
@@ -550,6 +607,11 @@ pub const Database = struct {
         else
             null;
         errdefer if (bound_vector_store != null) raw.detachDatabase(bound_vector_store_schema_name) catch {};
+        const bound_graph_store = if (load_bound_stores)
+            try openConfiguredBoundGraphStore(&raw, options)
+        else
+            null;
+        errdefer if (bound_graph_store != null) raw.detachDatabase(bound_graph_store_schema_name) catch {};
         try vector_sql.register(&raw);
         try graph_sql.register(&raw);
         switch (extension_mode) {
@@ -566,6 +628,7 @@ pub const Database = struct {
             .notifications = notifications,
             .bound_object_store = bound_object_store,
             .bound_vector_store = bound_vector_store,
+            .bound_graph_store = bound_graph_store,
             .extension_registry = registry,
         };
     }
@@ -729,14 +792,26 @@ pub const Database = struct {
 
     /// Create a named graph for application-provided relationship nodes.
     pub fn createGraph(self: *Database, name: []const u8) Error!void {
+        const owns_transaction = try self.beginBoundGraphMutation();
+        var committed = false;
+        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
         var graphs = self.graphDatabase();
         try graphs.createGraph(name);
+        if (self.bound_graph_store != null) try incrementBoundGraphEpoch(&self.sqlite_db);
+        try self.finishBoundGraphMutation(owns_transaction);
+        committed = true;
     }
 
     /// Delete a graph and all of its Zova-owned graph nodes and edges.
     pub fn deleteGraph(self: *Database, name: []const u8) Error!void {
+        const owns_transaction = try self.beginBoundGraphMutation();
+        var committed = false;
+        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
         var graphs = self.graphDatabase();
         try graphs.deleteGraph(name);
+        if (self.bound_graph_store != null) try incrementBoundGraphEpoch(&self.sqlite_db);
+        try self.finishBoundGraphMutation(owns_transaction);
+        committed = true;
     }
 
     /// Return whether a graph exists.
@@ -759,19 +834,25 @@ pub const Database = struct {
 
     /// Create or update a graph node.
     pub fn putGraphNode(self: *Database, input: GraphNodeInput) Error!void {
+        const owns_transaction = try self.beginBoundGraphMutation();
+        var committed = false;
+        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
         var graphs = self.graphDatabase();
         try graphs.putGraphNode(input);
+        if (self.bound_graph_store != null) try incrementBoundGraphEpoch(&self.sqlite_db);
+        try self.finishBoundGraphMutation(owns_transaction);
+        committed = true;
     }
 
     /// Upsert graph nodes in one transaction unless the caller owns one.
     pub fn putGraphNodes(self: *Database, inputs: []const GraphNodeInput) Error!void {
-        const owns_transaction = !hasActiveTransaction(&self.sqlite_db);
+        const owns_transaction = try self.beginGraphBatchMutation();
         var committed = false;
-        if (owns_transaction) try self.beginImmediate();
-        errdefer if (owns_transaction and !committed) self.rollback() catch {};
+        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
         var graphs = self.graphDatabase();
         try graphs.putGraphNodes(inputs);
-        if (owns_transaction) try self.commit();
+        if (self.bound_graph_store != null and inputs.len != 0) try incrementBoundGraphEpoch(&self.sqlite_db);
+        try self.finishBoundGraphMutation(owns_transaction);
         committed = true;
     }
 
@@ -789,37 +870,49 @@ pub const Database = struct {
 
     /// Delete a graph node and its incident graph edges only.
     pub fn deleteGraphNode(self: *Database, graph_name: []const u8, node_id: []const u8) Error!void {
+        const owns_transaction = try self.beginBoundGraphMutation();
+        var committed = false;
+        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
         var graphs = self.graphDatabase();
         try graphs.deleteGraphNode(graph_name, node_id);
+        if (self.bound_graph_store != null) try incrementBoundGraphEpoch(&self.sqlite_db);
+        try self.finishBoundGraphMutation(owns_transaction);
+        committed = true;
     }
 
     /// Delete graph nodes and all incident edges in one transaction unless the caller owns one.
     pub fn deleteGraphNodes(self: *Database, graph_name: []const u8, node_ids: []const []const u8) Error!void {
-        const owns_transaction = !hasActiveTransaction(&self.sqlite_db);
+        const owns_transaction = try self.beginGraphBatchMutation();
         var committed = false;
-        if (owns_transaction) try self.beginImmediate();
-        errdefer if (owns_transaction and !committed) self.rollback() catch {};
+        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
         var graphs = self.graphDatabase();
         try graphs.deleteGraphNodes(graph_name, node_ids);
-        if (owns_transaction) try self.commit();
+        if (self.bound_graph_store != null and node_ids.len != 0) try incrementBoundGraphEpoch(&self.sqlite_db);
+        try self.finishBoundGraphMutation(owns_transaction);
         committed = true;
     }
 
     /// Create an explicit directed graph edge.
     pub fn putGraphEdge(self: *Database, input: GraphEdgeInput) Error!void {
+        const owns_transaction = try self.beginBoundGraphMutation();
+        var committed = false;
+        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
         var graphs = self.graphDatabase();
         try graphs.putGraphEdge(input);
+        if (self.bound_graph_store != null) try incrementBoundGraphEpoch(&self.sqlite_db);
+        try self.finishBoundGraphMutation(owns_transaction);
+        committed = true;
     }
 
     /// Insert graph edges in one transaction unless the caller owns one.
     pub fn putGraphEdges(self: *Database, inputs: []const GraphEdgeInput) Error!void {
-        const owns_transaction = !hasActiveTransaction(&self.sqlite_db);
+        const owns_transaction = try self.beginGraphBatchMutation();
         var committed = false;
-        if (owns_transaction) try self.beginImmediate();
-        errdefer if (owns_transaction and !committed) self.rollback() catch {};
+        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
         var graphs = self.graphDatabase();
         try graphs.putGraphEdges(inputs);
-        if (owns_transaction) try self.commit();
+        if (self.bound_graph_store != null and inputs.len != 0) try incrementBoundGraphEpoch(&self.sqlite_db);
+        try self.finishBoundGraphMutation(owns_transaction);
         committed = true;
     }
 
@@ -837,8 +930,14 @@ pub const Database = struct {
 
     /// Delete an explicit graph edge.
     pub fn deleteGraphEdge(self: *Database, input: GraphEdgeInput) Error!void {
+        const owns_transaction = try self.beginBoundGraphMutation();
+        var committed = false;
+        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
         var graphs = self.graphDatabase();
         try graphs.deleteGraphEdge(input);
+        if (self.bound_graph_store != null) try incrementBoundGraphEpoch(&self.sqlite_db);
+        try self.finishBoundGraphMutation(owns_transaction);
+        committed = true;
     }
 
     /// Return bounded incoming or outgoing graph neighbors.
@@ -881,7 +980,7 @@ pub const Database = struct {
     ///
     /// The destination must not already exist. When verification is enabled,
     /// Zova opens the copy, runs SQLite `quick_check`, and validates object,
-    /// chunk, and vector rows through the public read paths.
+    /// chunk, vector, and graph rows through the public read paths.
     pub fn backupTo(self: *Database, destination_path: [:0]const u8, options: BackupOptions) Error!void {
         try reserveDestinationZovaFile(destination_path);
         errdefer deleteDestinationFile(destination_path);
@@ -940,6 +1039,111 @@ pub const Database = struct {
     /// Current SQLite error message for the underlying connection.
     pub fn errorMessage(self: *Database) []const u8 {
         return self.sqlite_db.errorMessage();
+    }
+
+    pub fn bindGraphStore(self: *Database, path: [:0]const u8) Error!void {
+        try self.rejectBoundStoreManagementInsideMainTransaction();
+        try ensureMainDatabaseRole(&self.sqlite_db);
+        try ensureBoundStoreTable(&self.sqlite_db);
+        if (sqlite.c.sqlite3_db_readonly(self.sqlite_db.handle, "main") == 1) return error.ReadOnly;
+
+        const stored_path = try std.heap.c_allocator.dupeZ(u8, path);
+        defer std.heap.c_allocator.free(stored_path);
+        const had_binding = try hasBoundGraphStoreRow(&self.sqlite_db);
+        if (!had_binding and try mainGraphStorageHasRows(&self.sqlite_db)) return error.BoundStoreExists;
+
+        const had_attached_store = self.bound_graph_store != null;
+        var detached_old = false;
+        if (had_binding and had_attached_store) {
+            try self.sqlite_db.detachDatabase(bound_graph_store_schema_name);
+            self.bound_graph_store = null;
+            detached_old = true;
+        }
+        errdefer if (detached_old) self.restoreConfiguredBoundGraphStore() catch {};
+
+        try attachGraphStore(&self.sqlite_db, stored_path, false);
+        errdefer self.sqlite_db.detachDatabase(bound_graph_store_schema_name) catch {};
+        const store_id = try validateAttachedGraphStoreAlloc(std.heap.c_allocator, &self.sqlite_db, bound_graph_store_schema_name);
+        defer std.heap.c_allocator.free(store_id);
+
+        var bound_set_id: [64]u8 = undefined;
+        randomHex64(&bound_set_id);
+        try setAttachedMetadataValue(&self.sqlite_db, bound_graph_store_schema_name, "bound_set_id", &bound_set_id);
+        try setAttachedMetadataValue(&self.sqlite_db, bound_graph_store_schema_name, "graph_epoch", "0");
+        if (had_binding)
+            try updateBoundGraphStoreRow(&self.sqlite_db, stored_path, store_id, &bound_set_id)
+        else
+            try insertBoundGraphStoreRow(&self.sqlite_db, stored_path, store_id, &bound_set_id);
+        self.bound_graph_store = .{};
+    }
+
+    /// Move existing single-file graph storage into a new bound graph store.
+    pub fn splitGraphStore(self: *Database, store_path: [:0]const u8) Error!SplitGraphStoreResult {
+        try self.rejectBoundStoreManagementInsideMainTransaction();
+        try ensureMainDatabaseRole(&self.sqlite_db);
+        try ensureBoundStoreTable(&self.sqlite_db);
+        if (sqlite.c.sqlite3_db_readonly(self.sqlite_db.handle, "main") == 1) return error.ReadOnly;
+        if (try hasBoundGraphStoreRow(&self.sqlite_db)) return error.BoundStoreExists;
+
+        const copied_counts = try graphStorageCounts(&self.sqlite_db, .main);
+
+        try createGraphStore(store_path);
+        errdefer deleteDestinationFile(store_path);
+
+        try attachGraphStore(&self.sqlite_db, store_path, false);
+        errdefer self.sqlite_db.detachDatabase(bound_graph_store_schema_name) catch {};
+
+        try self.sqlite_db.beginImmediate();
+        var committed = false;
+        errdefer if (!committed) self.sqlite_db.rollback() catch {};
+
+        const store_id_alloc = try validateAttachedGraphStoreAlloc(std.heap.c_allocator, &self.sqlite_db, bound_graph_store_schema_name);
+        defer std.heap.c_allocator.free(store_id_alloc);
+        const store_id = try copyStoreId(store_id_alloc);
+
+        var bound_set_id: [64]u8 = undefined;
+        randomHex64(&bound_set_id);
+        try setAttachedMetadataValue(&self.sqlite_db, bound_graph_store_schema_name, "bound_set_id", &bound_set_id);
+        try setAttachedMetadataValue(&self.sqlite_db, bound_graph_store_schema_name, "graph_epoch", "0");
+        try insertBoundGraphStoreRow(&self.sqlite_db, store_path, store_id_alloc, &bound_set_id);
+
+        self.bound_graph_store = .{};
+        errdefer self.bound_graph_store = null;
+
+        try copyGraphStorage(&self.sqlite_db, .main, &self.sqlite_db, .graph_store);
+        try clearMainGraphStorage(&self.sqlite_db);
+        const remaining_main_counts = try graphStorageCounts(&self.sqlite_db, .main);
+        if (remaining_main_counts.graphs != 0 or remaining_main_counts.nodes != 0 or remaining_main_counts.edges != 0) {
+            return error.GraphInvalid;
+        }
+
+        try verifyCurrentDatabase(self);
+        try self.sqlite_db.commit();
+        committed = true;
+
+        return .{
+            .store_path = store_path,
+            .store_id = store_id,
+            .bound_set_id = bound_set_id,
+            .copied = copied_counts,
+            .cleared = copied_counts,
+            .verified = true,
+        };
+    }
+
+    pub fn boundGraphStore(self: *Database, allocator: std.mem.Allocator) Error!?BoundGraphStoreInfo {
+        return try loadBoundGraphStoreInfo(allocator, &self.sqlite_db);
+    }
+
+    pub fn unbindGraphStore(self: *Database) Error!void {
+        try self.rejectBoundStoreManagementInsideMainTransaction();
+        if (!try hasBoundGraphStoreRow(&self.sqlite_db)) return error.BoundStoreNotFound;
+        const had_attached_store = self.bound_graph_store != null;
+        try self.detachBoundGraphStore();
+        var deleted = false;
+        errdefer if (had_attached_store and !deleted) self.restoreConfiguredBoundGraphStore() catch {};
+        try deleteBoundGraphStoreRows(&self.sqlite_db);
+        deleted = true;
     }
 
     /// Set this main database's optional external object-store binding.
@@ -1619,6 +1823,22 @@ pub const Database = struct {
         if (owns_transaction) try self.sqlite_db.commit();
     }
 
+    fn beginBoundGraphMutation(self: *Database) Error!bool {
+        if (self.bound_graph_store == null or hasActiveTransaction(&self.sqlite_db)) return false;
+        try self.sqlite_db.beginImmediate();
+        return true;
+    }
+
+    fn beginGraphBatchMutation(self: *Database) Error!bool {
+        if (hasActiveTransaction(&self.sqlite_db)) return false;
+        try self.sqlite_db.beginImmediate();
+        return true;
+    }
+
+    fn finishBoundGraphMutation(self: *Database, owns_transaction: bool) Error!void {
+        if (owns_transaction) try self.sqlite_db.commit();
+    }
+
     fn vectorDatabase(self: *Database) vector_impl.Database {
         return .{
             .sqlite_db = &self.sqlite_db,
@@ -1627,7 +1847,10 @@ pub const Database = struct {
     }
 
     fn graphDatabase(self: *Database) graph_impl.Database {
-        return .{ .sqlite_db = &self.sqlite_db };
+        return .{
+            .sqlite_db = &self.sqlite_db,
+            .storage_schema = if (self.bound_graph_store != null) .graph_store else .main,
+        };
     }
 
     fn rejectBoundStoreManagementInsideMainTransaction(self: *Database) Error!void {
@@ -1637,7 +1860,7 @@ pub const Database = struct {
     }
 
     fn inlineBoundStoresIntoDestination(self: *Database, destination_path: [:0]const u8) Error!void {
-        if (self.bound_object_store == null and self.bound_vector_store == null) return;
+        if (self.bound_object_store == null and self.bound_vector_store == null and self.bound_graph_store == null) return;
 
         var destination = try sqlite.Database.open(destination_path);
         defer destination.deinit();
@@ -1652,6 +1875,12 @@ pub const Database = struct {
             try clearMainVectorStorage(&destination);
             try copyVectorStorage(&self.sqlite_db, .vector_store, &destination, .main);
             try deleteBoundVectorStoreRows(&destination);
+        }
+
+        if (self.bound_graph_store != null) {
+            try clearMainGraphStorage(&destination);
+            try copyGraphStorage(&self.sqlite_db, .graph_store, &destination, .main);
+            try deleteBoundGraphStoreRows(&destination);
         }
     }
 
@@ -1675,6 +1904,17 @@ pub const Database = struct {
     fn restoreConfiguredBoundVectorStore(self: *Database) Error!void {
         if (self.bound_vector_store != null) return;
         self.bound_vector_store = try openConfiguredBoundVectorStore(&self.sqlite_db, .{});
+    }
+
+    fn detachBoundGraphStore(self: *Database) Error!void {
+        if (self.bound_graph_store == null) return;
+        try self.sqlite_db.detachDatabase(bound_graph_store_schema_name);
+        self.bound_graph_store = null;
+    }
+
+    fn restoreConfiguredBoundGraphStore(self: *Database) Error!void {
+        if (self.bound_graph_store != null) return;
+        self.bound_graph_store = try openConfiguredBoundGraphStore(&self.sqlite_db, .{});
     }
 };
 
@@ -1877,6 +2117,33 @@ fn markAsVectorStore(db: *sqlite.Database) Error!void {
     std.debug.assert((try insert_epoch.step()) == .done);
 }
 
+fn markAsGraphStore(db: *sqlite.Database) Error!void {
+    try deleteBoundObjectStoreRows(db);
+    try deleteBoundVectorStoreRows(db);
+    try deleteBoundGraphStoreRows(db);
+    try db.exec(
+        \\delete from _zova_meta
+        \\where key in ('store_role', 'store_id', 'bound_set_id', 'object_epoch', 'vector_epoch', 'graph_epoch');
+    );
+
+    var store_id: [64]u8 = undefined;
+    randomHex64(&store_id);
+
+    var insert_role = try db.prepare("insert into _zova_meta (key, value) values ('store_role', ?)");
+    defer insert_role.deinit();
+    try insert_role.bindText(1, bound_graph_store_role);
+    std.debug.assert((try insert_role.step()) == .done);
+
+    var insert_id = try db.prepare("insert into _zova_meta (key, value) values ('store_id', ?)");
+    defer insert_id.deinit();
+    try insert_id.bindText(1, &store_id);
+    std.debug.assert((try insert_id.step()) == .done);
+
+    var insert_epoch = try db.prepare("insert into _zova_meta (key, value) values ('graph_epoch', '0')");
+    defer insert_epoch.deinit();
+    std.debug.assert((try insert_epoch.step()) == .done);
+}
+
 fn ensureBoundStoreTable(db: *sqlite.Database) Error!void {
     if (try tableExists(db, bound_stores_table)) {
         try validateBoundStoreTable(db);
@@ -1898,6 +2165,7 @@ fn validateBoundStoreTable(db: *sqlite.Database) Error!void {
         "bound_set_id",
         "object_epoch",
         "vector_epoch",
+        "graph_epoch",
         "created_at_unix",
     };
     try validateRequiredTable(db, bound_stores_table, &columns, bound_stores_schema_sql);
@@ -1908,6 +2176,7 @@ fn ensureMainDatabaseRole(db: *sqlite.Database) Error!void {
         defer std.heap.c_allocator.free(role);
         if (std.mem.eql(u8, role, bound_object_store_role)) return error.BoundStoreInvalid;
         if (std.mem.eql(u8, role, bound_vector_store_role)) return error.BoundStoreInvalid;
+        if (std.mem.eql(u8, role, bound_graph_store_role)) return error.BoundStoreInvalid;
         return error.NotZovaDatabase;
     }
 }
@@ -1964,6 +2233,32 @@ fn openConfiguredBoundVectorStore(db: *sqlite.Database, options: OpenOptions) Er
     return .{};
 }
 
+fn openConfiguredBoundGraphStore(db: *sqlite.Database, options: OpenOptions) Error!?BoundGraphStore {
+    if (!try tableExists(db, bound_stores_table)) return null;
+
+    var info = (try loadBoundGraphStoreInfo(std.heap.c_allocator, db)) orelse return null;
+    defer info.deinit(std.heap.c_allocator);
+
+    const path_z = try std.heap.c_allocator.dupeZ(u8, info.path);
+    defer std.heap.c_allocator.free(path_z);
+
+    try attachGraphStore(db, path_z, options.read_only);
+    errdefer db.detachDatabase(bound_graph_store_schema_name) catch {};
+
+    const actual_store_id = try validateAttachedGraphStoreAlloc(std.heap.c_allocator, db, bound_graph_store_schema_name);
+    defer std.heap.c_allocator.free(actual_store_id);
+    if (!std.mem.eql(u8, actual_store_id, info.store_id)) return error.BoundStoreInvalid;
+
+    const actual_bound_set_id = (try attachedMetadataValueAlloc(std.heap.c_allocator, db, bound_graph_store_schema_name, "bound_set_id")) orelse return error.BoundStoreInvalid;
+    defer std.heap.c_allocator.free(actual_bound_set_id);
+    if (!isValidStoreId(actual_bound_set_id) or !std.mem.eql(u8, actual_bound_set_id, info.bound_set_id)) return error.BoundStoreInvalid;
+
+    const actual_epoch = try attachedMetadataU64(db, bound_graph_store_schema_name, "graph_epoch");
+    if (actual_epoch != info.graph_epoch) return error.BoundStoreInvalid;
+
+    return .{};
+}
+
 fn attachObjectStore(db: *sqlite.Database, path: []const u8, read_only: bool) Error!void {
     if (!isZovaPath(path)) return error.NotZovaPath;
     try ensurePathExists(path);
@@ -1977,6 +2272,14 @@ fn attachVectorStore(db: *sqlite.Database, path: []const u8, read_only: bool) Er
     try ensurePathExists(path);
     try db.attachDatabase(path, bound_vector_store_schema_name);
     errdefer db.detachDatabase(bound_vector_store_schema_name) catch {};
+    if (read_only) try db.setQueryOnly(true);
+}
+
+fn attachGraphStore(db: *sqlite.Database, path: []const u8, read_only: bool) Error!void {
+    if (!isZovaPath(path)) return error.NotZovaPath;
+    try ensurePathExists(path);
+    try db.attachDatabase(path, bound_graph_store_schema_name);
+    errdefer db.detachDatabase(bound_graph_store_schema_name) catch {};
     if (read_only) try db.setQueryOnly(true);
 }
 
@@ -2148,6 +2451,123 @@ fn copyVectorStorage(
     }
 }
 
+fn copyGraphStorage(
+    source: *sqlite.Database,
+    source_schema: graph_impl.StorageSchema,
+    destination: *sqlite.Database,
+    destination_schema: graph_impl.StorageSchema,
+) Error!void {
+    var destination_graphs = graph_impl.Database{
+        .sqlite_db = destination,
+        .storage_schema = destination_schema,
+    };
+
+    var graphs = try prepareSchemaSql(source,
+        \\select name, created_order
+        \\from {s}_zova_graphs
+        \\order by created_order, name
+    , .{source_schema.prefix()});
+    defer graphs.deinit();
+    var insert_graph = try prepareSchemaSql(
+        destination,
+        "insert into {s}_zova_graphs (name, created_order) values (?, ?)",
+        .{destination_schema.prefix()},
+    );
+    defer insert_graph.deinit();
+    while ((try graphs.step()) == .row) {
+        try insert_graph.bindText(1, graphs.columnText(0));
+        try insert_graph.bindInt64(2, graphs.columnInt64(1));
+        std.debug.assert((try insert_graph.step()) == .done);
+        try insert_graph.reset();
+        try insert_graph.clearBindings();
+
+        var info = try destination_graphs.graphInfo(std.heap.c_allocator, graphs.columnText(0));
+        const info_matches = std.mem.eql(u8, info.name, graphs.columnText(0));
+        info.deinit(std.heap.c_allocator);
+        if (!info_matches) return error.GraphInvalid;
+    }
+
+    var nodes = try prepareSchemaSql(source,
+        \\select graph_name, node_id, kind, target_type, target_namespace, target_ref, created_order
+        \\from {s}_zova_graph_nodes
+        \\order by graph_name, created_order, node_id
+    , .{source_schema.prefix()});
+    defer nodes.deinit();
+    var insert_node = try prepareSchemaSql(destination,
+        \\insert into {s}_zova_graph_nodes
+        \\  (graph_name, node_id, kind, target_type, target_namespace, target_ref, created_order)
+        \\values (?, ?, ?, ?, ?, ?, ?)
+    , .{destination_schema.prefix()});
+    defer insert_node.deinit();
+    while ((try nodes.step()) == .row) {
+        try insert_node.bindText(1, nodes.columnText(0));
+        try insert_node.bindText(2, nodes.columnText(1));
+        try insert_node.bindText(3, nodes.columnText(2));
+        try insert_node.bindText(4, nodes.columnText(3));
+        if (nodes.columnType(4) == .null) try insert_node.bindNull(5) else try insert_node.bindText(5, nodes.columnText(4));
+        if (nodes.columnType(5) == .null) try insert_node.bindNull(6) else try insert_node.bindText(6, nodes.columnText(5));
+        try insert_node.bindInt64(7, nodes.columnInt64(6));
+        std.debug.assert((try insert_node.step()) == .done);
+        try insert_node.reset();
+        try insert_node.clearBindings();
+
+        var node = try destination_graphs.getGraphNode(std.heap.c_allocator, nodes.columnText(0), nodes.columnText(1));
+        const node_matches = std.mem.eql(u8, node.graph_name, nodes.columnText(0)) and
+            std.mem.eql(u8, node.node_id, nodes.columnText(1)) and
+            std.mem.eql(u8, node.kind, nodes.columnText(2)) and
+            std.mem.eql(u8, @tagName(node.target_type), nodes.columnText(3)) and
+            optionalTextMatchesColumn(node.target_namespace, &nodes, 4) and
+            optionalTextMatchesColumn(node.target_ref, &nodes, 5);
+        node.deinit(std.heap.c_allocator);
+        if (!node_matches) return error.GraphInvalid;
+    }
+
+    var edges = try prepareSchemaSql(source,
+        \\select graph_name, from_node_id, edge_type, to_node_id, created_order
+        \\from {s}_zova_graph_edges
+        \\order by graph_name, created_order, from_node_id, edge_type, to_node_id
+    , .{source_schema.prefix()});
+    defer edges.deinit();
+    var insert_edge = try prepareSchemaSql(destination,
+        \\insert into {s}_zova_graph_edges
+        \\  (graph_name, from_node_id, edge_type, to_node_id, created_order)
+        \\values (?, ?, ?, ?, ?)
+    , .{destination_schema.prefix()});
+    defer insert_edge.deinit();
+    while ((try edges.step()) == .row) {
+        try insert_edge.bindText(1, edges.columnText(0));
+        try insert_edge.bindText(2, edges.columnText(1));
+        try insert_edge.bindText(3, edges.columnText(2));
+        try insert_edge.bindText(4, edges.columnText(3));
+        try insert_edge.bindInt64(5, edges.columnInt64(4));
+        std.debug.assert((try insert_edge.step()) == .done);
+        try insert_edge.reset();
+        try insert_edge.clearBindings();
+
+        var edge = try destination_graphs.getGraphEdge(std.heap.c_allocator, edges.columnText(0), edges.columnText(1), edges.columnText(2), edges.columnText(3));
+        const edge_matches = std.mem.eql(u8, edge.graph_name, edges.columnText(0)) and
+            std.mem.eql(u8, edge.from_node_id, edges.columnText(1)) and
+            std.mem.eql(u8, edge.edge_type, edges.columnText(2)) and
+            std.mem.eql(u8, edge.to_node_id, edges.columnText(3));
+        edge.deinit(std.heap.c_allocator);
+        if (!edge_matches) return error.GraphInvalid;
+    }
+
+    const source_counts = try graphStorageCounts(source, source_schema);
+    const destination_counts = try graphStorageCounts(destination, destination_schema);
+    if (source_counts.graphs != destination_counts.graphs or
+        source_counts.nodes != destination_counts.nodes or
+        source_counts.edges != destination_counts.edges)
+    {
+        return error.GraphInvalid;
+    }
+}
+
+fn optionalTextMatchesColumn(value: ?[]const u8, row: *sqlite.Statement, column: c_int) bool {
+    if (row.columnType(column) == .null) return value == null;
+    return if (value) |text| std.mem.eql(u8, text, row.columnText(column)) else false;
+}
+
 fn clearMainObjectStorage(db: *sqlite.Database) Error!void {
     try db.exec(
         \\delete from _zova_object_chunks;
@@ -2163,6 +2583,14 @@ fn clearMainVectorStorage(db: *sqlite.Database) Error!void {
     );
 }
 
+fn clearMainGraphStorage(db: *sqlite.Database) Error!void {
+    try db.exec(
+        \\delete from _zova_graph_edges;
+        \\delete from _zova_graph_nodes;
+        \\delete from _zova_graphs;
+    );
+}
+
 fn mainObjectStorageHasRows(db: *sqlite.Database) Error!bool {
     const counts = try objectStorageCounts(db, .main);
     return counts.objects != 0 or counts.chunks != 0 or counts.manifest_rows != 0;
@@ -2171,6 +2599,12 @@ fn mainObjectStorageHasRows(db: *sqlite.Database) Error!bool {
 fn mainVectorStorageHasRows(db: *sqlite.Database) Error!bool {
     const counts = try vectorStorageCounts(db, .main);
     return counts.vector_collections != 0 or counts.vectors != 0;
+}
+
+fn mainGraphStorageHasRows(db: *sqlite.Database) Error!bool {
+    return try countStorageRows(db, "select count(*) from {s}_zova_graphs", .{""}) != 0 or
+        try countStorageRows(db, "select count(*) from {s}_zova_graph_nodes", .{""}) != 0 or
+        try countStorageRows(db, "select count(*) from {s}_zova_graph_edges", .{""}) != 0;
 }
 
 fn objectStorageCounts(db: *sqlite.Database, storage_schema: object_impl.StorageSchema) Error!SplitObjectStoreCounts {
@@ -2185,6 +2619,14 @@ fn vectorStorageCounts(db: *sqlite.Database, storage_schema: vector_impl.Storage
     return .{
         .vector_collections = try countStorageRows(db, "select count(*) from {s}_zova_vector_collections", .{storage_schema.prefix()}),
         .vectors = try countStorageRows(db, "select count(*) from {s}_zova_vectors", .{storage_schema.prefix()}),
+    };
+}
+
+fn graphStorageCounts(db: *sqlite.Database, storage_schema: graph_impl.StorageSchema) Error!SplitGraphStoreCounts {
+    return .{
+        .graphs = try countStorageRows(db, "select count(*) from {s}_zova_graphs", .{storage_schema.prefix()}),
+        .nodes = try countStorageRows(db, "select count(*) from {s}_zova_graph_nodes", .{storage_schema.prefix()}),
+        .edges = try countStorageRows(db, "select count(*) from {s}_zova_graph_edges", .{storage_schema.prefix()}),
     };
 }
 
@@ -2222,6 +2664,17 @@ fn deleteBoundVectorStoreRows(db: *sqlite.Database) Error!void {
     var stmt = try db.prepare(
         \\delete from _zova_bound_stores
         \\where role = 'vector_store' and name = 'default'
+    );
+    defer stmt.deinit();
+    std.debug.assert((try stmt.step()) == .done);
+}
+
+fn deleteBoundGraphStoreRows(db: *sqlite.Database) Error!void {
+    if (!try tableExists(db, bound_stores_table)) return;
+
+    var stmt = try db.prepare(
+        \\delete from _zova_bound_stores
+        \\where role = 'graph_store' and name = 'default'
     );
     defer stmt.deinit();
     std.debug.assert((try stmt.step()) == .done);
@@ -2277,6 +2730,31 @@ fn validateAttachedVectorStoreAlloc(
     return store_id;
 }
 
+fn validateGraphStoreDatabase(db: *sqlite.Database) Error!void {
+    try expectMetadataValue(db, "magic", magic_value, .magic);
+    try expectMetadataValue(db, "format_version", format_version, .format_version);
+    try expectMetadataValue(db, "store_role", bound_graph_store_role, .magic);
+    const store_id = try objectStoreIdAlloc(std.heap.c_allocator, db);
+    defer std.heap.c_allocator.free(store_id);
+    try validateExtensionSchema(db);
+    try validateGraphSchema(db);
+}
+
+fn validateAttachedGraphStoreAlloc(
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    comptime schema_name: []const u8,
+) Error![]u8 {
+    try expectAttachedMetadataValue(db, schema_name, "magic", magic_value, .magic);
+    try expectAttachedMetadataValue(db, schema_name, "format_version", format_version, .format_version);
+    try expectAttachedMetadataValue(db, schema_name, "store_role", bound_graph_store_role, .magic);
+    const store_id = try attachedObjectStoreIdAlloc(allocator, db, schema_name);
+    errdefer allocator.free(store_id);
+    try validateAttachedExtensionSchema(db, schema_name);
+    try validateAttachedGraphSchema(db, schema_name);
+    return store_id;
+}
+
 fn validateAttachedObjectSchema(db: *sqlite.Database, comptime schema_name: []const u8) Error!void {
     const object_columns = [_][]const u8{
         "object_id",
@@ -2319,6 +2797,17 @@ fn validateAttachedVectorSchema(db: *sqlite.Database, comptime schema_name: []co
         "values",
     };
     try validateAttachedRequiredTable(db, schema_name, vector_impl.vectors_table, &vector_columns, vector_impl.vectors_schema_sql);
+}
+
+fn validateAttachedGraphSchema(db: *sqlite.Database, comptime schema_name: []const u8) Error!void {
+    const graph_columns = [_][]const u8{ "name", "created_order" };
+    try validateAttachedRequiredTable(db, schema_name, graph_impl.graphs_table, &graph_columns, graph_impl.graphs_schema_sql);
+
+    const node_columns = [_][]const u8{ "graph_name", "node_id", "kind", "target_type", "target_namespace", "target_ref", "created_order" };
+    try validateAttachedRequiredTable(db, schema_name, graph_impl.graph_nodes_table, &node_columns, graph_impl.graph_nodes_schema_sql);
+
+    const edge_columns = [_][]const u8{ "graph_name", "from_node_id", "edge_type", "to_node_id", "created_order" };
+    try validateAttachedRequiredTable(db, schema_name, graph_impl.graph_edges_table, &edge_columns, graph_impl.graph_edges_schema_sql);
 }
 
 fn validateAttachedExtensionSchema(db: *sqlite.Database, comptime schema_name: []const u8) Error!void {
@@ -2526,6 +3015,23 @@ fn hasBoundVectorStoreRow(db: *sqlite.Database) Error!bool {
     };
 }
 
+fn hasBoundGraphStoreRow(db: *sqlite.Database) Error!bool {
+    if (!try tableExists(db, bound_stores_table)) return false;
+
+    var stmt = try db.prepare(
+        \\select 1
+        \\from _zova_bound_stores
+        \\where role = 'graph_store' and name = 'default'
+        \\limit 1
+    );
+    defer stmt.deinit();
+
+    return switch (try stmt.step()) {
+        .row => true,
+        .done => false,
+    };
+}
+
 fn loadBoundObjectStoreInfo(allocator: std.mem.Allocator, db: *sqlite.Database) Error!?BoundObjectStoreInfo {
     if (!try tableExists(db, bound_stores_table)) return null;
 
@@ -2598,10 +3104,44 @@ fn loadBoundVectorStoreInfo(allocator: std.mem.Allocator, db: *sqlite.Database) 
     }
 }
 
+fn loadBoundGraphStoreInfo(allocator: std.mem.Allocator, db: *sqlite.Database) Error!?BoundGraphStoreInfo {
+    if (!try tableExists(db, bound_stores_table)) return null;
+
+    var stmt = try db.prepare(
+        \\select path, store_id, bound_set_id, graph_epoch
+        \\from _zova_bound_stores
+        \\where role = 'graph_store' and name = 'default'
+    );
+    defer stmt.deinit();
+
+    switch (try stmt.step()) {
+        .done => return null,
+        .row => {
+            const path = try allocator.dupe(u8, stmt.columnText(0));
+            errdefer allocator.free(path);
+
+            const store_id = try allocator.dupe(u8, stmt.columnText(1));
+            errdefer allocator.free(store_id);
+            if (!isValidStoreId(store_id)) return error.BoundStoreInvalid;
+
+            const bound_set_id = try allocator.dupe(u8, stmt.columnText(2));
+            errdefer allocator.free(bound_set_id);
+            if (!isValidStoreId(bound_set_id)) return error.BoundStoreInvalid;
+
+            const graph_epoch = try sqliteI64ToU64(stmt.columnInt64(3));
+            switch (try stmt.step()) {
+                .done => {},
+                .row => return error.BoundStoreInvalid,
+            }
+            return .{ .path = path, .store_id = store_id, .bound_set_id = bound_set_id, .graph_epoch = graph_epoch };
+        },
+    }
+}
+
 fn insertBoundObjectStoreRow(db: *sqlite.Database, path: []const u8, store_id: []const u8, bound_set_id: []const u8) Error!void {
     var stmt = try db.prepare(
-        \\insert into _zova_bound_stores (role, name, path, store_id, bound_set_id, object_epoch, vector_epoch, created_at_unix)
-        \\values ('object_store', 'default', ?, ?, ?, 0, null, unixepoch())
+        \\insert into _zova_bound_stores (role, name, path, store_id, bound_set_id, object_epoch, vector_epoch, graph_epoch, created_at_unix)
+        \\values ('object_store', 'default', ?, ?, ?, 0, null, null, unixepoch())
     );
     defer stmt.deinit();
 
@@ -2614,7 +3154,7 @@ fn insertBoundObjectStoreRow(db: *sqlite.Database, path: []const u8, store_id: [
 fn updateBoundObjectStoreRow(db: *sqlite.Database, path: []const u8, store_id: []const u8, bound_set_id: []const u8) Error!void {
     var stmt = try db.prepare(
         \\update _zova_bound_stores
-        \\set path = ?, store_id = ?, bound_set_id = ?, object_epoch = 0, vector_epoch = null
+        \\set path = ?, store_id = ?, bound_set_id = ?, object_epoch = 0, vector_epoch = null, graph_epoch = null
         \\where role = 'object_store' and name = 'default'
     );
     defer stmt.deinit();
@@ -2627,8 +3167,8 @@ fn updateBoundObjectStoreRow(db: *sqlite.Database, path: []const u8, store_id: [
 
 fn insertBoundVectorStoreRow(db: *sqlite.Database, path: []const u8, store_id: []const u8, bound_set_id: []const u8) Error!void {
     var stmt = try db.prepare(
-        \\insert into _zova_bound_stores (role, name, path, store_id, bound_set_id, object_epoch, vector_epoch, created_at_unix)
-        \\values ('vector_store', 'default', ?, ?, ?, null, 0, unixepoch())
+        \\insert into _zova_bound_stores (role, name, path, store_id, bound_set_id, object_epoch, vector_epoch, graph_epoch, created_at_unix)
+        \\values ('vector_store', 'default', ?, ?, ?, null, 0, null, unixepoch())
     );
     defer stmt.deinit();
 
@@ -2641,7 +3181,7 @@ fn insertBoundVectorStoreRow(db: *sqlite.Database, path: []const u8, store_id: [
 fn updateBoundVectorStoreRow(db: *sqlite.Database, path: []const u8, store_id: []const u8, bound_set_id: []const u8) Error!void {
     var stmt = try db.prepare(
         \\update _zova_bound_stores
-        \\set path = ?, store_id = ?, bound_set_id = ?, object_epoch = null, vector_epoch = 0
+        \\set path = ?, store_id = ?, bound_set_id = ?, object_epoch = null, vector_epoch = 0, graph_epoch = null
         \\where role = 'vector_store' and name = 'default'
     );
     defer stmt.deinit();
@@ -2650,6 +3190,31 @@ fn updateBoundVectorStoreRow(db: *sqlite.Database, path: []const u8, store_id: [
     try stmt.bindText(2, store_id);
     try stmt.bindText(3, bound_set_id);
     std.debug.assert((try stmt.step()) == .done);
+}
+
+fn insertBoundGraphStoreRow(db: *sqlite.Database, path: []const u8, store_id: []const u8, bound_set_id: []const u8) Error!void {
+    var stmt = try db.prepare(
+        \\insert into _zova_bound_stores (role, name, path, store_id, bound_set_id, object_epoch, vector_epoch, graph_epoch, created_at_unix)
+        \\values ('graph_store', 'default', ?, ?, ?, null, null, 0, unixepoch())
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, path);
+    try stmt.bindText(2, store_id);
+    try stmt.bindText(3, bound_set_id);
+    try expectDone(&stmt);
+}
+
+fn updateBoundGraphStoreRow(db: *sqlite.Database, path: []const u8, store_id: []const u8, bound_set_id: []const u8) Error!void {
+    var stmt = try db.prepare(
+        \\update _zova_bound_stores
+        \\set path = ?, store_id = ?, bound_set_id = ?, object_epoch = null, vector_epoch = null, graph_epoch = 0
+        \\where role = 'graph_store' and name = 'default'
+    );
+    defer stmt.deinit();
+    try stmt.bindText(1, path);
+    try stmt.bindText(2, store_id);
+    try stmt.bindText(3, bound_set_id);
+    try expectDone(&stmt);
 }
 
 fn incrementBoundObjectEpoch(db: *sqlite.Database) Error!void {
@@ -2702,6 +3267,29 @@ fn incrementBoundVectorEpoch(db: *sqlite.Database) Error!void {
     var epoch_buffer: [32]u8 = undefined;
     const epoch_text = std.fmt.bufPrint(&epoch_buffer, "{d}", .{epoch}) catch return error.BoundStoreInvalid;
     try setAttachedMetadataValue(db, bound_vector_store_schema_name, "vector_epoch", epoch_text);
+}
+
+fn incrementBoundGraphEpoch(db: *sqlite.Database) Error!void {
+    var update_main = try db.prepare(
+        \\update _zova_bound_stores set graph_epoch = graph_epoch + 1
+        \\where role = 'graph_store' and name = 'default'
+    );
+    defer update_main.deinit();
+    try expectDone(&update_main);
+
+    var read_epoch = try db.prepare(
+        \\select graph_epoch from _zova_bound_stores
+        \\where role = 'graph_store' and name = 'default'
+    );
+    defer read_epoch.deinit();
+    const epoch = switch (try read_epoch.step()) {
+        .done => return error.BoundStoreInvalid,
+        .row => read_epoch.columnInt64(0),
+    };
+    if (epoch < 0) return error.BoundStoreInvalid;
+    var buffer: [32]u8 = undefined;
+    const text = std.fmt.bufPrint(&buffer, "{d}", .{epoch}) catch return error.BoundStoreInvalid;
+    try setAttachedMetadataValue(db, bound_graph_store_schema_name, "graph_epoch", text);
 }
 
 fn objectStoreIdAlloc(allocator: std.mem.Allocator, db: *sqlite.Database) Error![]u8 {
@@ -2814,6 +3402,7 @@ fn verifyQuickCheck(db: *Database) Error!void {
     try verifyQuickCheckMain(&db.sqlite_db);
     if (db.bound_object_store != null) try verifyQuickCheckAttached(&db.sqlite_db, bound_object_store_schema_name);
     if (db.bound_vector_store != null) try verifyQuickCheckAttached(&db.sqlite_db, bound_vector_store_schema_name);
+    if (db.bound_graph_store != null) try verifyQuickCheckAttached(&db.sqlite_db, bound_graph_store_schema_name);
 }
 
 fn verifyQuickCheckMain(db: *sqlite.Database) Error!void {
@@ -3427,6 +4016,335 @@ test "created zova database stores metadata" {
     try std.testing.expectEqualStrings("zova", meta.columnText(1));
 
     try std.testing.expectEqual(sqlite.Step.done, try meta.step());
+}
+
+test "current format reserves graph store metadata" {
+    try std.testing.expectEqualStrings("7", format_version);
+    try std.testing.expect(std.mem.indexOf(u8, bound_stores_schema_sql, "'graph_store'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bound_stores_schema_sql, "graph_epoch integer") != null);
+
+    const result: SplitGraphStoreResult = .{
+        .store_path = "graph.zova",
+        .store_id = [_]u8{'0'} ** 64,
+        .bound_set_id = [_]u8{'1'} ** 64,
+        .copied = .{},
+        .cleared = .{},
+        .verified = true,
+    };
+    try std.testing.expectEqualStrings(bound_graph_store_role, result.role);
+}
+
+test "create graph store writes metadata and rejects main database open" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "graph-store.zova");
+
+    try createGraphStore(store_path);
+
+    {
+        var raw = try sqlite.Database.open(store_path);
+        defer raw.deinit();
+
+        try testingExpectScalarText(&raw, "select value from _zova_meta where key = 'magic'", "zova");
+        try testingExpectScalarText(&raw, "select value from _zova_meta where key = 'format_version'", "7");
+        try testingExpectScalarText(&raw, "select value from _zova_meta where key = 'store_role'", "graph_store");
+        try testingExpectScalarText(&raw, "select value from _zova_meta where key = 'graph_epoch'", "0");
+
+        var store_id = try raw.prepare("select value from _zova_meta where key = 'store_id'");
+        defer store_id.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try store_id.step());
+        try std.testing.expect(isValidStoreId(store_id.columnText(0)));
+        try std.testing.expectEqual(sqlite.Step.done, try store_id.step());
+    }
+
+    try std.testing.expectError(error.BoundStoreInvalid, Database.open(store_path));
+}
+
+test "bind and unbind graph store preserve external graph data" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "bind-graph-main.zova");
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "bind-graph-store.zova");
+    try createGraphStore(store_path);
+
+    var db = try Database.create(main_path);
+    defer db.deinit();
+    try db.bindGraphStore(store_path);
+    try db.createGraph("deps");
+    try db.putGraphNode(.{ .graph_name = "deps", .node_id = "a", .kind = "file" });
+    var info = (try db.boundGraphStore(std.testing.allocator)).?;
+    defer info.deinit(std.testing.allocator);
+
+    try db.unbindGraphStore();
+    try std.testing.expect(!(try db.hasGraph("deps")));
+    try db.bindGraphStore(store_path);
+    try std.testing.expect(try db.hasGraphNode("deps", "a"));
+}
+
+test "bound graph epochs participate in transactions and skip empty batches" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "graph-epoch-main.zova");
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "graph-epoch-store.zova");
+    try createGraphStore(store_path);
+    var db = try Database.create(main_path);
+    defer db.deinit();
+    try db.bindGraphStore(store_path);
+    try db.createGraph("deps");
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select graph_epoch from _zova_bound_stores where role = 'graph_store'"));
+    try db.putGraphNodes(&.{});
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select graph_epoch from _zova_bound_stores where role = 'graph_store'"));
+
+    try db.begin();
+    try db.putGraphNode(.{ .graph_name = "deps", .node_id = "rolled-back", .kind = "file" });
+    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select graph_epoch from _zova_bound_stores where role = 'graph_store'"));
+    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select cast(value as integer) from graph_store._zova_meta where key = 'graph_epoch'"));
+    try db.rollback();
+    try std.testing.expect(!(try db.hasGraphNode("deps", "rolled-back")));
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select graph_epoch from _zova_bound_stores where role = 'graph_store'"));
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select cast(value as integer) from graph_store._zova_meta where key = 'graph_epoch'"));
+
+    try db.savepoint("graph_epoch_rollback");
+    try db.putGraphNode(.{ .graph_name = "deps", .node_id = "savepoint-rolled-back", .kind = "file" });
+    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select graph_epoch from _zova_bound_stores where role = 'graph_store'"));
+    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select cast(value as integer) from graph_store._zova_meta where key = 'graph_epoch'"));
+    try db.rollbackToSavepoint("graph_epoch_rollback");
+    try db.releaseSavepoint("graph_epoch_rollback");
+    try std.testing.expect(!(try db.hasGraphNode("deps", "savepoint-rolled-back")));
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select graph_epoch from _zova_bound_stores where role = 'graph_store'"));
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select cast(value as integer) from graph_store._zova_meta where key = 'graph_epoch'"));
+}
+
+test "graph binding rejects nonempty main storage and active transactions" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "graph-reject-main.zova");
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "graph-reject-store.zova");
+    try createGraphStore(store_path);
+    var db = try Database.create(main_path);
+    defer db.deinit();
+    try db.createGraph("local");
+    try std.testing.expectError(error.BoundStoreExists, db.bindGraphStore(store_path));
+    try db.deleteGraph("local");
+    try db.begin();
+    try std.testing.expectError(error.ObjectTransactionActive, db.bindGraphStore(store_path));
+    try db.rollback();
+}
+
+test "unbound graph node batch rolls back earlier writes when a later write fails" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "graph-unbound-batch-rollback.zova");
+    var db = try Database.create(db_path);
+    defer db.deinit();
+    try db.createGraph("deps");
+    try db.exec(
+        \\create trigger reject_second_graph_node before insert on _zova_graph_nodes
+        \\when new.node_id = 'second' begin select raise(abort, 'reject second'); end;
+    );
+    try std.testing.expectError(error.Constraint, db.putGraphNodes(&.{
+        .{ .graph_name = "deps", .node_id = "first", .kind = "file" },
+        .{ .graph_name = "deps", .node_id = "second", .kind = "file" },
+    }));
+    try std.testing.expect(!(try db.hasGraphNode("deps", "first")));
+}
+
+test "failed graph replacement restores old attachment and savepoints reject management" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "graph-replace-main.zova");
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "graph-replace-store.zova");
+    var invalid_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const invalid_path = try testingDbPath(&invalid_buffer, tmp.sub_path[0..], "graph-replace-invalid.zova");
+    try createGraphStore(store_path);
+    {
+        var invalid = try Database.create(invalid_path);
+        invalid.deinit();
+    }
+    var db = try Database.create(main_path);
+    defer db.deinit();
+    try db.bindGraphStore(store_path);
+    try db.createGraph("deps");
+    try std.testing.expectError(error.NotZovaDatabase, db.bindGraphStore(invalid_path));
+    try std.testing.expect(try db.hasGraph("deps"));
+
+    try db.savepoint("management_guard");
+    try std.testing.expectError(error.ObjectTransactionActive, db.bindGraphStore(store_path));
+    try std.testing.expectError(error.ObjectTransactionActive, db.unbindGraphStore());
+    try db.rollbackToSavepoint("management_guard");
+    try db.releaseSavepoint("management_guard");
+}
+
+test "read only graph store management rejects bind replacement and unbind without state changes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var empty_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const empty_path = try testingDbPath(&empty_buffer, tmp.sub_path[0..], "graph-read-only-empty.zova");
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "graph-read-only-main.zova");
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "graph-read-only-store.zova");
+    var replacement_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const replacement_path = try testingDbPath(&replacement_buffer, tmp.sub_path[0..], "graph-read-only-replacement.zova");
+    try createGraphStore(store_path);
+    try createGraphStore(replacement_path);
+    {
+        var empty = try Database.create(empty_path);
+        empty.deinit();
+    }
+    {
+        var db = try Database.create(main_path);
+        defer db.deinit();
+        try db.bindGraphStore(store_path);
+        try db.createGraph("visible");
+    }
+    {
+        var empty = try Database.openWithOptions(empty_path, .{ .read_only = true });
+        defer empty.deinit();
+        try std.testing.expectError(error.ReadOnly, empty.bindGraphStore(store_path));
+        try std.testing.expectEqual(@as(?BoundGraphStoreInfo, null), try empty.boundGraphStore(std.testing.allocator));
+    }
+    {
+        var read_only = try Database.openWithOptions(main_path, .{ .read_only = true });
+        defer read_only.deinit();
+        var before = (try read_only.boundGraphStore(std.testing.allocator)).?;
+        defer before.deinit(std.testing.allocator);
+        try std.testing.expectError(error.ReadOnly, read_only.bindGraphStore(replacement_path));
+        try std.testing.expectError(error.ReadOnly, read_only.unbindGraphStore());
+        var after = (try read_only.boundGraphStore(std.testing.allocator)).?;
+        defer after.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings(before.path, after.path);
+        try std.testing.expectEqualStrings(before.bound_set_id, after.bound_set_id);
+        try std.testing.expect(try read_only.hasGraph("visible"));
+    }
+}
+
+test "open validates configured graph store identity role and format" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "graph-open-validation-main.zova");
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "graph-open-validation-store.zova");
+    try createGraphStore(store_path);
+    var expected_store_id: [64]u8 = undefined;
+    var expected_bound_set_id: [64]u8 = undefined;
+    {
+        var db = try Database.create(main_path);
+        defer db.deinit();
+        try db.bindGraphStore(store_path);
+        var info = (try db.boundGraphStore(std.testing.allocator)).?;
+        defer info.deinit(std.testing.allocator);
+        @memcpy(expected_store_id[0..], info.store_id);
+        @memcpy(expected_bound_set_id[0..], info.bound_set_id);
+    }
+    {
+        var raw = try sqlite.Database.open(main_path);
+        defer raw.deinit();
+        try raw.exec("update _zova_bound_stores set store_id = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' where role = 'graph_store'");
+    }
+    try std.testing.expectError(error.BoundStoreInvalid, Database.open(main_path));
+    {
+        var raw = try sqlite.Database.open(main_path);
+        defer raw.deinit();
+        var stmt = try raw.prepare("update _zova_bound_stores set store_id = ?, bound_set_id = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' where role = 'graph_store'");
+        defer stmt.deinit();
+        try stmt.bindText(1, &expected_store_id);
+        try expectDone(&stmt);
+    }
+    try std.testing.expectError(error.BoundStoreInvalid, Database.open(main_path));
+    {
+        var raw = try sqlite.Database.open(main_path);
+        defer raw.deinit();
+        var stmt = try raw.prepare("update _zova_bound_stores set bound_set_id = ? where role = 'graph_store'");
+        defer stmt.deinit();
+        try stmt.bindText(1, &expected_bound_set_id);
+        try expectDone(&stmt);
+    }
+    {
+        var raw = try sqlite.Database.open(store_path);
+        defer raw.deinit();
+        try raw.exec("update _zova_meta set value = 'vector_store' where key = 'store_role'");
+    }
+    try std.testing.expectError(error.NotZovaDatabase, Database.open(main_path));
+    {
+        var raw = try sqlite.Database.open(store_path);
+        defer raw.deinit();
+        try raw.exec("update _zova_meta set value = 'graph_store' where key = 'store_role'; update _zova_meta set value = '6' where key = 'format_version'");
+    }
+    try std.testing.expectError(error.UnsupportedZovaVersion, Database.open(main_path));
+}
+
+test "configured graph store attaches routes graph APIs and reopens" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "graph-main.zova");
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "graph-store.zova");
+
+    try createGraphStore(store_path);
+    {
+        var db = try Database.create(main_path);
+        defer db.deinit();
+
+        try ensureBoundStoreTable(&db.sqlite_db);
+        try attachGraphStore(&db.sqlite_db, store_path, false);
+        defer db.sqlite_db.detachDatabase(bound_graph_store_schema_name) catch {};
+
+        const store_id = try validateAttachedGraphStoreAlloc(std.testing.allocator, &db.sqlite_db, bound_graph_store_schema_name);
+        defer std.testing.allocator.free(store_id);
+        var bound_set_id: [64]u8 = undefined;
+        randomHex64(&bound_set_id);
+        try setAttachedMetadataValue(&db.sqlite_db, bound_graph_store_schema_name, "bound_set_id", &bound_set_id);
+
+        var insert = try db.sqlite_db.prepare(
+            \\insert into _zova_bound_stores
+            \\  (role, name, path, store_id, bound_set_id, object_epoch, vector_epoch, graph_epoch, created_at_unix)
+            \\values ('graph_store', 'default', ?, ?, ?, null, null, 0, unixepoch())
+        );
+        defer insert.deinit();
+        try insert.bindText(1, store_path);
+        try insert.bindText(2, store_id);
+        try insert.bindText(3, &bound_set_id);
+        try std.testing.expectEqual(sqlite.Step.done, try insert.step());
+    }
+
+    {
+        var db = try Database.open(main_path);
+        defer db.deinit();
+        try db.createGraph("deps");
+        try db.putGraphNode(.{ .graph_name = "deps", .node_id = "a", .kind = "file" });
+        try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from main._zova_graphs"));
+        try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from graph_store._zova_graphs"));
+    }
+
+    {
+        var reopened = try Database.open(main_path);
+        defer reopened.deinit();
+        try std.testing.expect(try reopened.hasGraph("deps"));
+        try std.testing.expect(try reopened.hasGraphNode("deps", "a"));
+    }
+
+    {
+        var raw = try sqlite.Database.open(main_path);
+        defer raw.deinit();
+        try raw.exec("update _zova_bound_stores set graph_epoch = 1 where role = 'graph_store' and name = 'default'");
+    }
+    try std.testing.expectError(error.BoundStoreInvalid, Database.open(main_path));
 }
 
 test "created zova database stores required extension registry" {
@@ -4446,7 +5364,7 @@ test "open rejects old format version" {
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
 
-        try testingWriteMetadata(&raw, "zova", "1");
+        try testingWriteMetadata(&raw, "zova", "6");
     }
 
     try std.testing.expectError(error.UnsupportedZovaVersion, Database.open(db_path));
@@ -4466,7 +5384,7 @@ test "open rejects future format version" {
         try raw.exec(
             \\create table _zova_meta (key text primary key, value text not null);
             \\insert into _zova_meta (key, value) values ('magic', 'zova');
-            \\insert into _zova_meta (key, value) values ('format_version', '7');
+            \\insert into _zova_meta (key, value) values ('format_version', '8');
         );
     }
 
@@ -4722,6 +5640,107 @@ test "operational copies inline bound object store data into single-file destina
         defer chunk.deinit(std.testing.allocator);
         try std.testing.expectEqualSlices(u8, "loose chunk copied too", chunk.bytes);
     }
+}
+
+test "split graph store and operational copies preserve graph storage and traversal order" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "split-graph-main.zova");
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "split-graph-store.zova");
+    var backup_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const backup_path = try testingDbPath(&backup_buffer, tmp.sub_path[0..], "split-graph-backup.zova");
+    var compact_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const compact_path = try testingDbPath(&compact_buffer, tmp.sub_path[0..], "split-graph-compact.zova");
+    var restore_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const restore_path = try testingDbPath(&restore_buffer, tmp.sub_path[0..], "split-graph-restore.zova");
+
+    var db = try Database.create(main_path);
+    defer db.deinit();
+    try db.createGraph("alpha");
+    try db.createGraph("beta");
+    try db.putGraphNode(.{ .graph_name = "alpha", .node_id = "root", .kind = "document", .target_type = .record, .target_namespace = "docs", .target_ref = "1" });
+    try db.putGraphNode(.{ .graph_name = "alpha", .node_id = "object", .kind = "blob", .target_type = .object, .target_ref = "abc" });
+    try db.putGraphNode(.{ .graph_name = "alpha", .node_id = "external", .kind = "link", .target_type = .external, .target_namespace = "web", .target_ref = "https://example.test" });
+    try db.putGraphNode(.{ .graph_name = "beta", .node_id = "plain", .kind = "note" });
+    try db.putGraphEdge(.{ .graph_name = "alpha", .from_node_id = "root", .edge_type = "second", .to_node_id = "external" });
+    try db.putGraphEdge(.{ .graph_name = "alpha", .from_node_id = "root", .edge_type = "first", .to_node_id = "object" });
+    try db.putGraphEdge(.{ .graph_name = "alpha", .from_node_id = "object", .edge_type = "links", .to_node_id = "external" });
+
+    var before = try db.graphNeighbors(std.testing.allocator, .{ .graph_name = "alpha", .node_id = "root", .limit = 10 });
+    defer before.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("external", before.items[0].node_id);
+    try std.testing.expectEqualStrings("object", before.items[1].node_id);
+
+    const result = try db.splitGraphStore(store_path);
+    try std.testing.expectEqual(@as(u64, 2), result.copied.graphs);
+    try std.testing.expectEqual(@as(u64, 4), result.copied.nodes);
+    try std.testing.expectEqual(@as(u64, 3), result.copied.edges);
+    try std.testing.expectEqual(result.copied, result.cleared);
+    try std.testing.expect(result.verified);
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_graphs"));
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_graph_nodes"));
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_graph_edges"));
+    try std.testing.expectEqual(@as(i64, 4), try testingCount(&db, "select count(*) from graph_store._zova_graph_nodes"));
+    try std.testing.expectEqual(@as(i64, 3), try testingCount(&db, "select count(*) from graph_store._zova_graph_edges"));
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(
+        &db,
+        "select count(*) from graph_store._zova_graph_nodes where graph_name = 'alpha' and node_id = 'root' and created_order = 1",
+    ));
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(
+        &db,
+        "select count(*) from graph_store._zova_graph_edges where graph_name = 'alpha' and edge_type = 'second' and created_order = 1",
+    ));
+
+    var after = try db.graphNeighbors(std.testing.allocator, .{ .graph_name = "alpha", .node_id = "root", .limit = 10 });
+    defer after.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(before.items[0].node_id, after.items[0].node_id);
+    try std.testing.expectEqualStrings(before.items[1].node_id, after.items[1].node_id);
+    var object = try db.getGraphNode(std.testing.allocator, "alpha", "object");
+    defer object.deinit(std.testing.allocator);
+    try std.testing.expectEqual(GraphTargetType.object, object.target_type);
+    try std.testing.expectEqualStrings("abc", object.target_ref.?);
+
+    try db.backupTo(backup_path, .{});
+    try db.compactTo(compact_path, .{});
+    try restoreBackup(main_path, restore_path, .{});
+    const copy_paths = [_][:0]const u8{ backup_path, compact_path, restore_path };
+    for (copy_paths) |copy_path| {
+        var copy = try Database.open(copy_path);
+        defer copy.deinit();
+        try std.testing.expectEqual(@as(?BoundGraphStoreInfo, null), try copy.boundGraphStore(std.testing.allocator));
+        try std.testing.expectEqual(@as(i64, 2), try testingCount(&copy, "select count(*) from _zova_graphs"));
+        var neighbors = try copy.graphNeighbors(std.testing.allocator, .{ .graph_name = "alpha", .node_id = "root", .limit = 10 });
+        defer neighbors.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("external", neighbors.items[0].node_id);
+        try std.testing.expectEqualStrings("object", neighbors.items[1].node_id);
+    }
+}
+
+test "failed graph split removes destination and keeps main graph storage" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "split-graph-failure-main.zova");
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "split-graph-failure-store.zova");
+
+    var db = try Database.create(main_path);
+    defer db.deinit();
+    try db.createGraph("broken");
+    try db.putGraphNode(.{ .graph_name = "broken", .node_id = "node", .kind = "note" });
+    try db.exec("pragma ignore_check_constraints = on");
+    try db.exec("update _zova_graph_nodes set target_type = 'invalid' where node_id = 'node'");
+    try db.exec("pragma ignore_check_constraints = off");
+
+    try std.testing.expectError(error.Constraint, db.splitGraphStore(store_path));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(defaultIo(), store_path, .{}));
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from _zova_graphs"));
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from _zova_graph_nodes"));
+    try std.testing.expectEqual(@as(?BoundGraphStoreInfo, null), try db.boundGraphStore(std.testing.allocator));
 }
 
 test "split object store moves existing object storage into a bound store" {

@@ -18,6 +18,12 @@ const Error = sqlite.Error || graph.Error || error{
 
 const default_sql_limit: usize = 10;
 
+fn graphStorageSchema(db: *sqlite.Database) graph.StorageSchema {
+    var stmt = db.prepare("select 1 from graph_store.sqlite_master limit 1") catch return .main;
+    defer stmt.deinit();
+    return .graph_store;
+}
+
 const NeighborTable = extern struct {
     base: c.sqlite3_vtab,
     db: ?*c.sqlite3,
@@ -313,7 +319,10 @@ fn neighborsFilter(
 
     const db = neighbor_cursor.db orelse return c.SQLITE_ERROR;
     var wrapper = sqlite.Database{ .handle = db };
-    var graph_db = graph.Database{ .sqlite_db = &wrapper };
+    var graph_db = graph.Database{
+        .sqlite_db = &wrapper,
+        .storage_schema = graphStorageSchema(&wrapper),
+    };
     const rows = graph_db.graphNeighbors(allocator, .{
         .graph_name = graph_name,
         .node_id = source_node_id,
@@ -518,7 +527,10 @@ fn walkFilter(
 
     const db = walk_cursor.db orelse return c.SQLITE_ERROR;
     var wrapper = sqlite.Database{ .handle = db };
-    var graph_db = graph.Database{ .sqlite_db = &wrapper };
+    var graph_db = graph.Database{
+        .sqlite_db = &wrapper,
+        .storage_schema = graphStorageSchema(&wrapper),
+    };
     const rows = graph_db.graphWalk(allocator, .{
         .graph_name = graph_name,
         .start_node_id = start_node_id,

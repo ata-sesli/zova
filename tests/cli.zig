@@ -25,7 +25,7 @@ test "cli version and help are successful" {
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "backup [--json] [--no-verify] <source.zova> <destination.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "compact [--json] [--no-verify] <source.zova> <destination.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "restore [--json] [--no-verify] <backup.zova> <destination.zova>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "split (--objects | --vectors) [--json] <main.zova> <store.zova>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "split (--objects | --vectors | --graphs) [--json] <main.zova> <store.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "doctor [--json] [--limit <n>] <file.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "salvage --dry-run [--json] [--limit <n>] <source.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "salvage [--json] [--limit <n>] <source.zova> <destination.zova>") != null);
@@ -1372,6 +1372,279 @@ test "cli bind rejects non-empty main storage and split usage errors are bounded
     }
 }
 
+test "cli graph-store commands create bind inspect repair and unbind" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "graph-store-main.zova");
+    var store_one_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_one_path = try testingDbPath(&store_one_buffer, tmp.sub_path[0..], "graph-store-one.zova");
+    var store_two_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_two_path = try testingDbPath(&store_two_buffer, tmp.sub_path[0..], "graph-store-two.zova");
+
+    {
+        var db = try zova.Database.create(main_path);
+        defer db.deinit();
+    }
+
+    var unbound_info = try runCli(&.{ "zova", "graph-store", "info", main_path });
+    defer unbound_info.deinit();
+    try std.testing.expectEqual(@as(u8, 0), unbound_info.code);
+    try expectContains(unbound_info.stdout, "graph-store-info: ok");
+    try expectContains(unbound_info.stdout, "bound: false");
+
+    var create_one = try runCli(&.{ "zova", "graph-store", "create", "--json", store_one_path });
+    defer create_one.deinit();
+    try std.testing.expectEqual(@as(u8, 0), create_one.code);
+    var create_json = try parseJson(create_one.stdout);
+    defer create_json.deinit();
+    try expectJsonString(create_json.value.object, "command", "graph-store-create");
+    try expectJsonBool(create_json.value.object, "created", true);
+
+    var bind = try runCli(&.{ "zova", "graph-store", "bind", "--json", main_path, store_one_path });
+    defer bind.deinit();
+    try std.testing.expectEqual(@as(u8, 0), bind.code);
+    var bind_json = try parseJson(bind.stdout);
+    defer bind_json.deinit();
+    try expectJsonString(bind_json.value.object, "command", "graph-store-bind");
+    try expectJsonString(bind_json.value.object, "path", store_one_path);
+    try expectJsonBool(bind_json.value.object, "bound", true);
+
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try tmp.dir.deleteFile(io, "graph-store-one.zova");
+    try zova.createGraphStore(store_two_path);
+
+    var repair = try runCli(&.{ "zova", "graph-store", "bind", "--json", main_path, store_two_path });
+    defer repair.deinit();
+    try std.testing.expectEqual(@as(u8, 0), repair.code);
+    var repair_json = try parseJson(repair.stdout);
+    defer repair_json.deinit();
+    try expectJsonString(repair_json.value.object, "path", store_two_path);
+
+    var info = try runCli(&.{ "zova", "graph-store", "info", "--json", main_path });
+    defer info.deinit();
+    try std.testing.expectEqual(@as(u8, 0), info.code);
+    var info_json = try parseJson(info.stdout);
+    defer info_json.deinit();
+    try expectJsonString(info_json.value.object, "command", "graph-store-info");
+    try expectJsonString(info_json.value.object, "path", store_two_path);
+    try expectJsonBool(info_json.value.object, "bound", true);
+
+    var unbind = try runCli(&.{ "zova", "graph-store", "unbind", "--json", main_path });
+    defer unbind.deinit();
+    try std.testing.expectEqual(@as(u8, 0), unbind.code);
+    var unbind_json = try parseJson(unbind.stdout);
+    defer unbind_json.deinit();
+    try expectJsonString(unbind_json.value.object, "command", "graph-store-unbind");
+    try expectJsonBool(unbind_json.value.object, "bound", false);
+}
+
+test "cli graph-store text success output follows store contracts" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "graph-store-text-main.zova");
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "graph-store-text.zova");
+    {
+        var db = try zova.Database.create(main_path);
+        defer db.deinit();
+    }
+
+    var create = try runCli(&.{ "zova", "graph-store", "create", store_path });
+    defer create.deinit();
+    const store_line = try std.fmt.allocPrint(std.testing.allocator, "path: {s}\n", .{store_path});
+    defer std.testing.allocator.free(store_line);
+    const main_line = try std.fmt.allocPrint(std.testing.allocator, "main_path: {s}\n", .{main_path});
+    defer std.testing.allocator.free(main_line);
+    try std.testing.expectEqual(@as(u8, 0), create.code);
+    try expectContains(create.stdout, "graph-store-create: ok\n");
+    try expectContains(create.stdout, store_line);
+    try expectContains(create.stdout, "created: true\n");
+    try expectContains(create.stdout, "bound: true\n");
+
+    var bind = try runCli(&.{ "zova", "graph-store", "bind", main_path, store_path });
+    defer bind.deinit();
+    try std.testing.expectEqual(@as(u8, 0), bind.code);
+    try expectContains(bind.stdout, "graph-store-bind: ok\n");
+    try expectContains(bind.stdout, main_line);
+    try expectContains(bind.stdout, store_line);
+    try expectContains(bind.stdout, "store_id: ");
+    try expectContains(bind.stdout, "bound: true\n");
+
+    var info = try runCli(&.{ "zova", "graph-store", "info", main_path });
+    defer info.deinit();
+    try std.testing.expectEqual(@as(u8, 0), info.code);
+    try expectContains(info.stdout, "graph-store-info: ok\n");
+    try expectContains(info.stdout, main_line);
+    try expectContains(info.stdout, store_line);
+    try expectContains(info.stdout, "store_id: ");
+    try expectContains(info.stdout, "bound: true\n");
+
+    var unbind = try runCli(&.{ "zova", "graph-store", "unbind", main_path });
+    defer unbind.deinit();
+    try std.testing.expectEqual(@as(u8, 0), unbind.code);
+    try expectContains(unbind.stdout, "graph-store-unbind: ok\n");
+    try expectContains(unbind.stdout, main_line);
+    try expectContains(unbind.stdout, "bound: false\n");
+}
+
+test "cli split graphs moves graph storage and reports exact counts" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "split-graph-main.zova");
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "split-graph-store.zova");
+
+    {
+        var db = try zova.Database.create(main_path);
+        defer db.deinit();
+        try db.createGraph("one");
+        try db.createGraph("two");
+        try db.putGraphNodes(&.{
+            .{ .graph_name = "one", .node_id = "a", .kind = "item", .target_type = .external, .target_ref = "a" },
+            .{ .graph_name = "one", .node_id = "b", .kind = "item", .target_type = .external, .target_ref = "b" },
+            .{ .graph_name = "two", .node_id = "c", .kind = "item", .target_type = .external, .target_ref = "c" },
+            .{ .graph_name = "two", .node_id = "d", .kind = "item", .target_type = .external, .target_ref = "d" },
+        });
+        try db.putGraphEdges(&.{
+            .{ .graph_name = "one", .from_node_id = "a", .edge_type = "next", .to_node_id = "b" },
+            .{ .graph_name = "two", .from_node_id = "c", .edge_type = "next", .to_node_id = "d" },
+            .{ .graph_name = "two", .from_node_id = "d", .edge_type = "next", .to_node_id = "c" },
+        });
+    }
+
+    var split = try runCli(&.{ "zova", "split", "--graphs", "--json", main_path, store_path });
+    defer split.deinit();
+    try std.testing.expectEqual(@as(u8, 0), split.code);
+    var parsed = try parseJson(split.stdout);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try std.testing.expectEqual(@as(usize, 13), root.count());
+    try expectJsonInt(root, "cli_json_version", 1);
+    try expectJsonString(root, "status", "ok");
+    try expectJsonString(root, "command", "split");
+    try expectJsonString(root, "role", "graphs");
+    try expectJsonString(root, "main_path", main_path);
+    try expectJsonString(root, "store_path", store_path);
+    try expectJsonBool(root, "created", true);
+    try expectJsonBool(root, "bound", true);
+    try expectJsonBool(root, "verified", true);
+    try std.testing.expectEqual(@as(usize, 64), root.get("store_id").?.string.len);
+    try std.testing.expectEqual(@as(usize, 64), root.get("bound_set_id").?.string.len);
+    const copied = root.get("copied").?.object;
+    try std.testing.expectEqual(@as(usize, 3), copied.count());
+    try expectJsonInt(copied, "graphs", 2);
+    try expectJsonInt(copied, "nodes", 4);
+    try expectJsonInt(copied, "edges", 3);
+    const cleared = root.get("cleared").?.object;
+    try std.testing.expectEqual(@as(usize, 3), cleared.count());
+    try expectJsonInt(cleared, "graphs", 2);
+    try expectJsonInt(cleared, "nodes", 4);
+    try expectJsonInt(cleared, "edges", 3);
+
+    var db = try zova.Database.open(main_path);
+    defer db.deinit();
+    try std.testing.expect(try db.hasGraphEdge("two", "d", "next", "c"));
+    try std.testing.expectEqual(@as(i64, 0), try countRawRows(&db.sqlite_db, "select count(*) from main._zova_graphs"));
+}
+
+test "cli split graphs text output reports exact labels and counts" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "split-graph-text-main.zova");
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "split-graph-text-store.zova");
+    {
+        var db = try zova.Database.create(main_path);
+        defer db.deinit();
+        try db.createGraph("graph");
+        try db.putGraphNodes(&.{
+            .{ .graph_name = "graph", .node_id = "a", .kind = "item", .target_type = .external, .target_ref = "a" },
+            .{ .graph_name = "graph", .node_id = "b", .kind = "item", .target_type = .external, .target_ref = "b" },
+        });
+        try db.putGraphEdge(.{ .graph_name = "graph", .from_node_id = "a", .edge_type = "next", .to_node_id = "b" });
+    }
+    var split = try runCli(&.{ "zova", "split", "--graphs", main_path, store_path });
+    defer split.deinit();
+    const main_line = try std.fmt.allocPrint(std.testing.allocator, "main_path: {s}\n", .{main_path});
+    defer std.testing.allocator.free(main_line);
+    const store_line = try std.fmt.allocPrint(std.testing.allocator, "store_path: {s}\n", .{store_path});
+    defer std.testing.allocator.free(store_line);
+    try std.testing.expectEqual(@as(u8, 0), split.code);
+    try expectContains(split.stdout, "split: ok\n");
+    try expectContains(split.stdout, "role: graphs\n");
+    try expectContains(split.stdout, main_line);
+    try expectContains(split.stdout, store_line);
+    try expectContains(split.stdout, "copied_graphs: 1\n");
+    try expectContains(split.stdout, "copied_nodes: 2\n");
+    try expectContains(split.stdout, "copied_edges: 1\n");
+    try expectContains(split.stdout, "cleared_graphs: 1\n");
+    try expectContains(split.stdout, "cleared_nodes: 2\n");
+    try expectContains(split.stdout, "cleared_edges: 1\n");
+    try expectContains(split.stdout, "verified: true\n");
+}
+
+test "cli graph-store validates usage migration and store roles" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "graph-bind-main.zova");
+    var graph_store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const graph_store_path = try testingDbPath(&graph_store_buffer, tmp.sub_path[0..], "graph-bind-store.zova");
+    var invalid_store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const invalid_store_path = try testingDbPath(&invalid_store_buffer, tmp.sub_path[0..], "object-not-graph.zova");
+    var empty_main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const empty_main_path = try testingDbPath(&empty_main_buffer, tmp.sub_path[0..], "graph-bind-empty-main.zova");
+
+    {
+        var db = try zova.Database.create(main_path);
+        defer db.deinit();
+        try db.createGraph("existing");
+    }
+    {
+        var db = try zova.Database.create(empty_main_path);
+        defer db.deinit();
+    }
+    try zova.createGraphStore(graph_store_path);
+    try zova.createObjectStore(invalid_store_path);
+
+    var migration = try runCli(&.{ "zova", "graph-store", "bind", main_path, graph_store_path });
+    defer migration.deinit();
+    try std.testing.expectEqual(@as(u8, 3), migration.code);
+    try expectContains(migration.stderr, "split --graphs");
+
+    var invalid = try runCli(&.{ "zova", "graph-store", "bind", "--json", empty_main_path, invalid_store_path });
+    defer invalid.deinit();
+    try std.testing.expectEqual(@as(u8, 3), invalid.code);
+    var invalid_json = try parseJson(invalid.stderr);
+    defer invalid_json.deinit();
+    try expectJsonString(invalid_json.value.object, "command", "graph-store-bind");
+
+    const usage_cases = [_][]const []const u8{
+        &.{ "zova", "graph-store" },
+        &.{ "zova", "graph-store", "bind", main_path },
+        &.{ "zova", "graph-store", "info", main_path, graph_store_path },
+        &.{ "zova", "split", "--graphs", "--objects", main_path, graph_store_path },
+        &.{ "zova", "split", "--graphs", main_path, main_path },
+    };
+    for (usage_cases) |case| {
+        var result = try runCli(case);
+        defer result.deinit();
+        try std.testing.expectEqual(@as(u8, 2), result.code);
+    }
+
+    var missing = try runCli(&.{ "zova", "graph-store", "bind", empty_main_path, "missing-graph-store.zova" });
+    defer missing.deinit();
+    try std.testing.expectEqual(@as(u8, 3), missing.code);
+}
+
 test "cli doctor and check report healthy bound object stores" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1540,6 +1813,199 @@ test "cli doctor categorizes bound vector store marker failures" {
     try std.testing.expect(std.mem.indexOf(u8, doctor.stderr, "private-vector-id") == null);
 }
 
+test "cli doctor validates bound graph store identity and epoch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "bound-graph-main.zova");
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "bound-graph-store.zova");
+
+    {
+        var db = try zova.Database.create(main_path);
+        defer db.deinit();
+        try zova.createGraphStore(store_path);
+        try db.bindGraphStore(store_path);
+        try db.createGraph("diagnostic");
+    }
+
+    var healthy = try runCli(&.{ "zova", "doctor", "--json", main_path });
+    defer healthy.deinit();
+    try std.testing.expectEqual(@as(u8, 0), healthy.code);
+    var healthy_json = try parseJson(healthy.stdout);
+    defer healthy_json.deinit();
+    try std.testing.expectEqual(@as(i64, 0), try jsonObjectInt(healthy_json.value.object, "issue_counts", "bound_store"));
+
+    {
+        var store = try zova.sqlite.Database.open(store_path);
+        defer store.deinit();
+        try store.exec("update _zova_meta set value = '999' where key = 'graph_epoch'");
+    }
+
+    var mismatch = try runCli(&.{ "zova", "doctor", "--json", main_path });
+    defer mismatch.deinit();
+    try std.testing.expectEqual(@as(u8, 4), mismatch.code);
+    try expectContains(mismatch.stderr, "graph_epoch_mismatch");
+    var mismatch_json = try parseJson(mismatch.stderr);
+    defer mismatch_json.deinit();
+    try std.testing.expect((try jsonObjectInt(mismatch_json.value.object, "issue_counts", "bound_store")) > 0);
+}
+
+test "cli doctor categorizes every bound graph store marker failure" {
+    const cases = [_]struct { name: []const u8, sql: [:0]const u8, kind: []const u8 }{
+        .{ .name = "magic", .sql = "update _zova_meta set value = 'wrong' where key = 'magic'", .kind = "store_magic_mismatch" },
+        .{ .name = "format", .sql = "update _zova_meta set value = '999' where key = 'format_version'", .kind = "store_format_version_mismatch" },
+        .{ .name = "role", .sql = "update _zova_meta set value = 'object_store' where key = 'store_role'", .kind = "store_role_mismatch" },
+        .{ .name = "store-id", .sql = "update _zova_meta set value = replace(value, substr(value, 1, 1), case substr(value, 1, 1) when '0' then '1' else '0' end) where key = 'store_id'", .kind = "store_id_mismatch" },
+        .{ .name = "bound-set", .sql = "update _zova_meta set value = replace(value, substr(value, 1, 1), case substr(value, 1, 1) when '0' then '1' else '0' end) where key = 'bound_set_id'", .kind = "bound_set_id_mismatch" },
+        .{ .name = "epoch-missing", .sql = "delete from _zova_meta where key = 'graph_epoch'", .kind = "missing_graph_epoch" },
+        .{ .name = "epoch-unreadable", .sql = "alter table _zova_meta rename to saved_meta; create view _zova_meta as select key, case when key = 'graph_epoch' then json_extract('invalid', '$') else value end as value from saved_meta", .kind = "graph_epoch_unreadable" },
+        .{ .name = "epoch-text", .sql = "update _zova_meta set value = 'not-an-integer' where key = 'graph_epoch'", .kind = "graph_epoch_invalid" },
+        .{ .name = "epoch-negative", .sql = "update _zova_meta set value = '-1' where key = 'graph_epoch'", .kind = "graph_epoch_invalid" },
+        .{ .name = "epoch-mismatch", .sql = "update _zova_meta set value = '999' where key = 'graph_epoch'", .kind = "graph_epoch_mismatch" },
+    };
+
+    inline for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], case.name ++ "-main.zova");
+        var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], case.name ++ "-store.zova");
+        {
+            var db = try zova.Database.create(main_path);
+            defer db.deinit();
+            try zova.createGraphStore(store_path);
+            try db.bindGraphStore(store_path);
+        }
+        {
+            var store = try zova.sqlite.Database.open(store_path);
+            defer store.deinit();
+            try store.exec(case.sql);
+        }
+        var doctor = try runCli(&.{ "zova", "doctor", "--json", main_path });
+        defer doctor.deinit();
+        try std.testing.expectEqual(@as(u8, 4), doctor.code);
+        try expectContains(doctor.stderr, case.kind);
+        try expectContains(doctor.stderr, "\"area\": \"bound_store\"");
+        try expectContains(doctor.stderr, "\"severity\": \"error\"");
+    }
+}
+
+test "cli missing bound store guidance is role specific" {
+    const roles = [_]struct { name: []const u8, expected: []const u8, absent_one: []const u8, absent_two: []const u8 }{
+        .{ .name = "object", .expected = "zova object-store bind", .absent_one = "zova vector-store bind", .absent_two = "zova graph-store bind" },
+        .{ .name = "vector", .expected = "zova vector-store bind", .absent_one = "zova object-store bind", .absent_two = "zova graph-store bind" },
+        .{ .name = "graph", .expected = "zova graph-store bind", .absent_one = "zova object-store bind", .absent_two = "zova vector-store bind" },
+    };
+    inline for (roles) |role| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], role.name ++ "-missing-main.zova");
+        var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], role.name ++ "-missing-store.zova");
+        {
+            var db = try zova.Database.create(main_path);
+            defer db.deinit();
+            if (std.mem.eql(u8, role.name, "object")) {
+                try zova.createObjectStore(store_path);
+                try db.bindObjectStore(store_path);
+            } else if (std.mem.eql(u8, role.name, "vector")) {
+                try zova.createVectorStore(store_path);
+                try db.bindVectorStore(store_path);
+            } else {
+                try zova.createGraphStore(store_path);
+                try db.bindGraphStore(store_path);
+            }
+        }
+        try tmp.dir.deleteFile(std.Io.Threaded.global_single_threaded.io(), role.name ++ "-missing-store.zova");
+        var doctor = try runCli(&.{ "zova", "doctor", main_path });
+        defer doctor.deinit();
+        try std.testing.expectEqual(@as(u8, 4), doctor.code);
+        try expectContains(doctor.stderr, role.expected);
+        try std.testing.expect(std.mem.indexOf(u8, doctor.stderr, role.absent_one) == null);
+        try std.testing.expect(std.mem.indexOf(u8, doctor.stderr, role.absent_two) == null);
+        var check = try runCli(&.{ "zova", "check", "--deep", main_path });
+        defer check.deinit();
+        try std.testing.expectEqual(@as(u8, 4), check.code);
+        try expectContains(check.stderr, role.expected);
+        try std.testing.expect(std.mem.indexOf(u8, check.stderr, role.absent_one) == null);
+        try std.testing.expect(std.mem.indexOf(u8, check.stderr, role.absent_two) == null);
+    }
+}
+
+test "cli deep check includes bound graph store quick check" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "graph-quick-main.zova");
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "graph-quick-store.zova");
+
+    {
+        var db = try zova.Database.create(main_path);
+        defer db.deinit();
+        try zova.createGraphStore(store_path);
+        try db.bindGraphStore(store_path);
+    }
+    {
+        var store = try zova.sqlite.Database.open(store_path);
+        defer store.deinit();
+        try store.exec("pragma ignore_check_constraints = on");
+        try store.exec("insert into _zova_graphs (name, created_order) values ('', 1)");
+        try store.exec("pragma ignore_check_constraints = off");
+    }
+
+    var check = try runCli(&.{ "zova", "check", "--deep", "--json", main_path });
+    defer check.deinit();
+    try std.testing.expectEqual(@as(u8, 4), check.code);
+    try expectContains(check.stderr, "sqlite quick_check failed");
+    try expectContains(check.stderr, "CheckFailed");
+}
+
+test "cli graph inspection reads the active bound graph store" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "graph-inspect-main.zova");
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "graph-inspect-store.zova");
+    {
+        var db = try zova.Database.create(main_path);
+        defer db.deinit();
+        try zova.createGraphStore(store_path);
+        try db.bindGraphStore(store_path);
+        try db.createGraph("bound");
+        try db.putGraphNode(.{ .graph_name = "bound", .node_id = "node", .kind = "item" });
+        try db.putGraphNode(.{ .graph_name = "bound", .node_id = "other", .kind = "item" });
+        try db.putGraphEdge(.{ .graph_name = "bound", .from_node_id = "node", .edge_type = "next", .to_node_id = "other" });
+        try std.testing.expectEqual(@as(i64, 0), try countRawRows(&db.sqlite_db, "select count(*) from main._zova_graphs"));
+    }
+
+    var graphs = try runCli(&.{ "zova", "graphs", "--json", main_path });
+    defer graphs.deinit();
+    try std.testing.expectEqual(@as(u8, 0), graphs.code);
+    try expectContains(graphs.stdout, "bound");
+    var graph = try runCli(&.{ "zova", "graph", "--json", main_path, "bound" });
+    defer graph.deinit();
+    try std.testing.expectEqual(@as(u8, 0), graph.code);
+    try expectContains(graph.stdout, "\"node_count\": 2");
+    var node = try runCli(&.{ "zova", "graph-node", "--json", main_path, "bound", "node" });
+    defer node.deinit();
+    try std.testing.expectEqual(@as(u8, 0), node.code);
+    try expectContains(node.stdout, "\"node_id\": \"node\"");
+    var neighbors = try runCli(&.{ "zova", "graph-neighbors", "--json", main_path, "bound", "node" });
+    defer neighbors.deinit();
+    try std.testing.expectEqual(@as(u8, 0), neighbors.code);
+    try expectContains(neighbors.stdout, "\"node_id\": \"other\"");
+    var walk = try runCli(&.{ "zova", "graph-walk", "--json", main_path, "bound", "node" });
+    defer walk.deinit();
+    try std.testing.expectEqual(@as(u8, 0), walk.code);
+    try expectContains(walk.stdout, "\"node_id\": \"other\"");
+}
+
 test "cli doctor reports existing bound store with unreadable metadata" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1588,7 +2054,7 @@ test "cli info reports bounded database summary" {
     defer result.deinit();
     try std.testing.expectEqual(@as(u8, 0), result.code);
     try expectContains(result.stdout, "Zova database");
-    try expectContains(result.stdout, "format_version: 6");
+    try expectContains(result.stdout, "format_version: 7");
     try expectContains(result.stdout, "objects:");
     try expectContains(result.stdout, "chunks:");
     try expectContains(result.stdout, "loose_chunks:");
@@ -1728,7 +2194,7 @@ test "cli info json reports bounded database summary" {
     try expectJsonInt(root, "cli_json_version", 1);
     try expectJsonString(root, "package_version", cli.package_version);
     try expectJsonString(root, "sqlite_version", zova.sqlite.version());
-    try expectJsonString(root, "format_version", "6");
+    try expectJsonString(root, "format_version", "7");
     try expectJsonObjectHasInt(root, "files", "database_bytes");
     try expectJsonObjectHasInt(root, "sqlite", "page_count");
     try expectJsonObjectHasInt(root, "objects", "count");
@@ -3972,7 +4438,7 @@ fn simpleArtifactExtensionSource() []const u8 {
     \\    .name = "bridge_artifact",
     \\    .version = "0.1.0",
     \\    .storage_prefix = "_zova_ext_bridge_artifact_",
-    \\    .zova_abi_min = "0.22.0",
+    \\    .zova_abi_min = "0.23.0",
     \\    .capabilities = "artifact-test",
     \\    .required = true,
     \\};
@@ -4010,7 +4476,7 @@ fn failingCheckExtensionSource() []const u8 {
     \\    .name = "smoke_bad_ext",
     \\    .version = "0.1.0",
     \\    .storage_prefix = "_zova_ext_smoke_bad_ext_",
-    \\    .zova_abi_min = "0.22.0",
+    \\    .zova_abi_min = "0.23.0",
     \\    .capabilities = "experimental-builder",
     \\    .required = true,
     \\};
