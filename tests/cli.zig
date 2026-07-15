@@ -930,8 +930,10 @@ test "cli graph usage errors and diagnostics are bounded" {
         var raw = try zova.sqlite.Database.open(db_path);
         defer raw.deinit();
         try raw.exec(
-            \\insert into _zova_graph_edges (graph_name, from_node_id, edge_type, to_node_id, created_order)
-            \\values ('app', 'message:1', 'mentions', 'missing:entity', 1)
+            \\insert into _zova_graph_edges (graph_key, from_node_key, edge_type, to_node_key, created_order)
+            \\select g.graph_key, n.node_key, 'mentions', 999999, 1
+            \\from _zova_graphs g join _zova_graph_nodes n on n.graph_key = g.graph_key
+            \\where g.name = 'app' and n.node_id = 'message:1'
         );
     }
 
@@ -2054,7 +2056,7 @@ test "cli info reports bounded database summary" {
     defer result.deinit();
     try std.testing.expectEqual(@as(u8, 0), result.code);
     try expectContains(result.stdout, "Zova database");
-    try expectContains(result.stdout, "format_version: 7");
+    try expectContains(result.stdout, "format_version: 8");
     try expectContains(result.stdout, "objects:");
     try expectContains(result.stdout, "chunks:");
     try expectContains(result.stdout, "loose_chunks:");
@@ -2194,7 +2196,7 @@ test "cli info json reports bounded database summary" {
     try expectJsonInt(root, "cli_json_version", 1);
     try expectJsonString(root, "package_version", cli.package_version);
     try expectJsonString(root, "sqlite_version", zova.sqlite.version());
-    try expectJsonString(root, "format_version", "7");
+    try expectJsonString(root, "format_version", "8");
     try expectJsonObjectHasInt(root, "files", "database_bytes");
     try expectJsonObjectHasInt(root, "sqlite", "page_count");
     try expectJsonObjectHasInt(root, "objects", "count");
@@ -2798,7 +2800,7 @@ test "cli doctor reports corruption with bounded json issues" {
             \\set data = x'636f7272757074', size_bytes = 7
             \\where rowid = (select rowid from _zova_chunks limit 1);
             \\update _zova_vectors
-            \\set dimensions = 1, "values" = x'0000c07f'
+            \\set "values" = x'0000c07f'
             \\where vector_id = 'doc-1';
         );
     }
@@ -2912,7 +2914,7 @@ test "cli salvage dry-run reports corrupt recoverability with bounded issues" {
             \\set data = x'636f7272757074', size_bytes = 7
             \\where rowid = (select rowid from _zova_chunks limit 1);
             \\update _zova_vectors
-            \\set dimensions = 1, "values" = x'0000c07f'
+            \\set "values" = x'0000c07f'
             \\where vector_id = 'doc-1';
         );
     }
@@ -3411,7 +3413,7 @@ test "cli salvage skips cosine zero stored vectors" {
     {
         var raw = try zova.sqlite.Database.open(source_path);
         defer raw.deinit();
-        try raw.exec("insert into _zova_vectors (collection_name, vector_id, dimensions, \"values\") values ('cosines', 'zero', 2, x'0000000000000000')");
+        try raw.exec("insert into _zova_vectors (collection_key, vector_id, \"values\", norm_squared) values ((select collection_key from _zova_vector_collections where name='cosines'), 'zero', x'0000000000000000', 0)");
     }
 
     var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
@@ -3576,6 +3578,7 @@ test "cli json mode preserves open and corruption exit codes" {
     {
         var db = try zova.Database.open(db_path);
         defer db.deinit();
+        try db.exec("pragma foreign_keys = off");
         try db.exec("delete from _zova_chunks");
     }
 
@@ -3651,6 +3654,7 @@ test "cli deep check reports object corruption with exit code 4" {
     {
         var db = try zova.Database.open(db_path);
         defer db.deinit();
+        try db.exec("pragma foreign_keys = off");
         try db.exec("delete from _zova_chunks");
     }
 
@@ -3678,7 +3682,7 @@ test "cli deep check reports multiple structured issue categories" {
             \\set data = x'636f7272757074', size_bytes = 7
             \\where rowid = (select rowid from _zova_chunks limit 1);
             \\update _zova_vectors
-            \\set dimensions = 1, "values" = x'0000c07f'
+            \\set "values" = x'0000c07f'
             \\where vector_id = 'doc-1';
         );
     }
@@ -3834,7 +3838,7 @@ test "cli deep check reports vector corruption" {
     {
         var raw = try zova.sqlite.Database.open(db_path);
         defer raw.deinit();
-        try raw.exec("update _zova_vectors set dimensions = 1, \"values\" = x'0000803f' where vector_id = 'doc-1'");
+        try raw.exec("update _zova_vectors set \"values\" = x'0000803f' where vector_id = 'doc-1'");
     }
 
     var result = try runCli(&.{ "zova", "check", "--deep", db_path });

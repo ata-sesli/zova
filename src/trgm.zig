@@ -1349,8 +1349,9 @@ fn validateVectorTarget(db: *sqlite.Database, collection: []const u8, vector_id:
     if (try attachedSchemaExists(db, "vector_store")) {
         var stmt = try db.prepare(
             \\select count(*)
-            \\from vector_store._zova_vectors
-            \\where collection_name = ? and vector_id = ?
+            \\from vector_store._zova_vectors v
+            \\join vector_store._zova_vector_collections c on c.collection_key = v.collection_key
+            \\where c.name = ? and v.vector_id = ?
         );
         defer stmt.deinit();
         try stmt.bindText(1, collection);
@@ -1362,12 +1363,20 @@ fn validateVectorTarget(db: *sqlite.Database, collection: []const u8, vector_id:
 }
 
 fn validateGraphTarget(db: *sqlite.Database, graph_name: []const u8, node_id: []const u8) Error!void {
-    var stmt = try db.prepare("select count(*) from _zova_graph_nodes where graph_name = ? and node_id = ?");
+    if (try graphNodeExists(db, "", graph_name, node_id)) return;
+    if (try attachedSchemaExists(db, "graph_store") and try graphNodeExists(db, "graph_store.", graph_name, node_id)) return;
+    return error.TrgmInvalid;
+}
+
+fn graphNodeExists(db: *sqlite.Database, comptime prefix: []const u8, graph_name: []const u8, node_id: []const u8) Error!bool {
+    var stmt = try db.prepare(
+        "select count(*) from " ++ prefix ++ "_zova_graph_nodes n join " ++ prefix ++ "_zova_graphs g on g.graph_key = n.graph_key where g.name = ? and n.node_id = ?",
+    );
     defer stmt.deinit();
     try stmt.bindText(1, graph_name);
     try stmt.bindText(2, node_id);
     std.debug.assert((try stmt.step()) == .row);
-    if (stmt.columnInt64(0) != 1) return error.TrgmInvalid;
+    return stmt.columnInt64(0) == 1;
 }
 
 fn blobExists(db: *sqlite.Database, table_name: []const u8, column_name: []const u8, id: *const [32]u8) Error!bool {
@@ -1381,8 +1390,8 @@ fn blobExists(db: *sqlite.Database, table_name: []const u8, column_name: []const
 }
 
 fn vectorExists(db: *sqlite.Database, table_name: []const u8, collection: []const u8, vector_id: []const u8) Error!bool {
-    var sql_buffer: [160]u8 = undefined;
-    const sql = std.fmt.bufPrintZ(&sql_buffer, "select count(*) from {s} where collection_name = ? and vector_id = ?", .{table_name}) catch return error.SqliteError;
+    _ = table_name;
+    const sql = "select count(*) from _zova_vectors v join _zova_vector_collections c on c.collection_key = v.collection_key where c.name = ? and v.vector_id = ?";
     var stmt = try db.prepare(sql);
     defer stmt.deinit();
     try stmt.bindText(1, collection);

@@ -29,8 +29,9 @@
 //! statement-scoped column lifetimes across FFI boundaries.
 //!
 //! Maintenance is explicit. The ABI exposes in-place `VACUUM`, but Zova never
-//! runs it automatically and never changes connection PRAGMAs such as
-//! `foreign_keys`, journal mode, or synchronous mode on behalf of callers.
+//! runs it automatically. Format-8 handles enable `foreign_keys` so private
+//! graph endpoint constraints and cascades are enforced; journal and
+//! synchronous modes remain caller-controlled.
 //!
 //! Runtime model: one `zova_database` handle is internally serialized by a
 //! per-handle mutex. Calls on that handle are safe from multiple threads but
@@ -905,6 +906,13 @@ pub const zova_vector_put_many_request = extern struct {
     vectors_len: usize,
 };
 
+pub const zova_vector_delete_many_request = extern struct {
+    db: ?*zova_database,
+    collection_name: ?[*:0]const u8,
+    vector_ids: ?[*]const ?[*:0]const u8,
+    vector_count: usize,
+};
+
 pub const zova_vector_collection_delete_request = extern struct {
     db: ?*zova_database,
     name: ?[*:0]const u8,
@@ -1081,6 +1089,12 @@ pub const zova_graph_edge_input = extern struct {
 };
 
 pub const zova_graph_edge_put_many_request = extern struct {
+    db: ?*zova_database,
+    edges: ?[*]const zova_graph_edge_input,
+    edges_len: usize,
+};
+
+pub const zova_graph_edge_delete_many_request = extern struct {
     db: ?*zova_database,
     edges: ?[*]const zova_graph_edge_input,
     edges_len: usize,
@@ -2383,6 +2397,18 @@ pub fn zova_vector_put_many(request: ?*const zova_vector_put_many_request) callc
     return okDb(handle);
 }
 
+pub fn zova_vector_delete_many(request: ?*const zova_vector_delete_many_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
+    const vector_ids = candidateIdSlices(req.vector_ids, req.vector_count) catch |err| return failDb(handle, err);
+    defer if (vector_ids.len != 0) allocator.free(vector_ids);
+    handle.db.deleteVectors(std.mem.span(collection_name), vector_ids) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
 pub fn zova_vector_collection_delete(request: ?*const zova_vector_collection_delete_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
@@ -2749,6 +2775,17 @@ pub fn zova_graph_edge_put_many(request: ?*const zova_graph_edge_put_many_reques
     const edges = graphEdgeInputSlices(req.edges, req.edges_len) catch |err| return failDb(handle, err);
     defer if (edges.len != 0) allocator.free(edges);
     handle.db.putGraphEdges(edges) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_graph_edge_delete_many(request: ?*const zova_graph_edge_delete_many_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const edges = graphEdgeInputSlices(req.edges, req.edges_len) catch |err| return failDb(handle, err);
+    defer if (edges.len != 0) allocator.free(edges);
+    handle.db.deleteGraphEdges(edges) catch |err| return failDb(handle, err);
     return okDb(handle);
 }
 
@@ -4350,6 +4387,7 @@ test "c abi validates null pointers" {
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_node_delete_many(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_edge_put(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_edge_put_many(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_edge_delete_many(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_edge_get(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_edge_exists(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_edge_delete(null));
@@ -4357,6 +4395,7 @@ test "c abi validates null pointers" {
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_degree(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_walk(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_walk_direction(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_delete_many(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_prepare(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_finalize(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_step(null));
@@ -5566,6 +5605,70 @@ test "c abi batches graph mutations and reads degree" {
     try std.testing.expectEqual(@as(u64, 0), degree);
 }
 
+test "c abi graph edge delete many is validated atomic and idempotent" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-graph-edge-delete-many.zova", .{tmp.sub_path[0..]});
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{ .path = db_path, .out_db = &db, .out_error_message = null }));
+    defer _ = zova_database_close(db);
+    try std.testing.expectEqual(zova_status.OK, zova_graph_create(&.{ .db = db, .name = "app" }));
+    const nodes = [_]zova_graph_node_input{
+        .{ .graph_name = "app", .node_id = "a", .kind = "function", .target_type = @intFromEnum(zova_graph_target_type.NONE), .target_namespace = null, .target_ref = null },
+        .{ .graph_name = "app", .node_id = "b", .kind = "function", .target_type = @intFromEnum(zova_graph_target_type.NONE), .target_namespace = null, .target_ref = null },
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_graph_node_put_many(&.{ .db = db, .nodes = &nodes, .nodes_len = nodes.len }));
+    const inserted = [_]zova_graph_edge_input{
+        .{ .graph_name = "app", .from_node_id = "a", .edge_type = "calls", .to_node_id = "b" },
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_graph_edge_put_many(&.{ .db = db, .edges = &inserted, .edges_len = inserted.len }));
+
+    const invalid = [_]zova_graph_edge_input{
+        .{ .graph_name = "app", .from_node_id = "a", .edge_type = "calls", .to_node_id = "b" },
+        .{ .graph_name = "app", .from_node_id = "a", .edge_type = "", .to_node_id = "b" },
+    };
+    try std.testing.expectEqual(zova_status.GRAPH_INVALID, zova_graph_edge_delete_many(&.{
+        .db = db,
+        .edges = &invalid,
+        .edges_len = invalid.len,
+    }));
+    var exists: u8 = 0;
+    try std.testing.expectEqual(zova_status.OK, zova_graph_edge_exists(&.{ .db = db, .graph_name = "app", .from_node_id = "a", .edge_type = "calls", .to_node_id = "b", .out_exists = &exists }));
+    try std.testing.expectEqual(@as(u8, 1), exists);
+
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_edge_delete_many(&.{
+        .db = db,
+        .edges = null,
+        .edges_len = 1,
+    }));
+
+    var deleted = [_]zova_graph_edge_input{
+        .{ .graph_name = "app", .from_node_id = "a", .edge_type = "calls", .to_node_id = "b" },
+        .{ .graph_name = "app", .from_node_id = "a", .edge_type = "calls", .to_node_id = "b" },
+        .{ .graph_name = "app", .from_node_id = "a", .edge_type = "calls", .to_node_id = "a" },
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_database_begin(&.{ .db = db }));
+    try std.testing.expectEqual(zova_status.OK, zova_graph_edge_delete_many(&.{
+        .db = db,
+        .edges = &deleted,
+        .edges_len = deleted.len,
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_rollback(&.{ .db = db }));
+    try std.testing.expectEqual(zova_status.OK, zova_graph_edge_exists(&.{ .db = db, .graph_name = "app", .from_node_id = "a", .edge_type = "calls", .to_node_id = "b", .out_exists = &exists }));
+    try std.testing.expectEqual(@as(u8, 1), exists);
+
+    try std.testing.expectEqual(zova_status.OK, zova_graph_edge_delete_many(&.{
+        .db = db,
+        .edges = &deleted,
+        .edges_len = deleted.len,
+    }));
+    deleted[0].edge_type = "borrowed-input-was-not-retained";
+    exists = 1;
+    try std.testing.expectEqual(zova_status.OK, zova_graph_edge_exists(&.{ .db = db, .graph_name = "app", .from_node_id = "a", .edge_type = "calls", .to_node_id = "b", .out_exists = &exists }));
+    try std.testing.expectEqual(@as(u8, 0), exists);
+}
+
 test "c abi validates vector request shapes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -5669,6 +5772,46 @@ test "c abi validates vector request shapes" {
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_search_by_id_in(&bad_by_id_candidates));
 
     zova_vector_search_results_free(&search_results);
+}
+
+test "c abi vector delete many validates atomically and does not retain inputs" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-vector-delete-many.zova", .{tmp.sub_path[0..]});
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{ .path = db_path, .out_db = &db, .out_error_message = null }));
+    defer _ = zova_database_close(db);
+    try std.testing.expectEqual(zova_status.OK, zova_vector_collection_create(&.{
+        .db = db,
+        .name = "chunks",
+        .options = .{ .dimensions = 2, .metric = @intFromEnum(zova_vector_metric.L2), .element_type = @intFromEnum(zova_vector_element_type.F32) },
+    }));
+    const values = [_]f32{ 1, 2 };
+    try std.testing.expectEqual(zova_status.OK, zova_vector_put(&.{ .db = db, .collection_name = "chunks", .vector_id = "a", .values = f32AbiValues(&values) }));
+
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_delete_many(&.{ .db = db, .collection_name = "chunks", .vector_ids = null, .vector_count = 1 }));
+    const invalid_ids = [_]?[*:0]const u8{ "a", null };
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_delete_many(&.{ .db = db, .collection_name = "chunks", .vector_ids = &invalid_ids, .vector_count = invalid_ids.len }));
+
+    var exists: u8 = 0;
+    try std.testing.expectEqual(zova_status.OK, zova_vector_exists(&.{ .db = db, .collection_name = "chunks", .vector_id = "a", .out_exists = &exists }));
+    try std.testing.expectEqual(@as(u8, 1), exists);
+
+    var ids = [_]?[*:0]const u8{ "a", "missing", "a" };
+    try std.testing.expectEqual(zova_status.OK, zova_database_begin(&.{ .db = db }));
+    try std.testing.expectEqual(zova_status.OK, zova_vector_delete_many(&.{ .db = db, .collection_name = "chunks", .vector_ids = &ids, .vector_count = ids.len }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_rollback(&.{ .db = db }));
+    try std.testing.expectEqual(zova_status.OK, zova_vector_exists(&.{ .db = db, .collection_name = "chunks", .vector_id = "a", .out_exists = &exists }));
+    try std.testing.expectEqual(@as(u8, 1), exists);
+
+    try std.testing.expectEqual(zova_status.OK, zova_vector_delete_many(&.{ .db = db, .collection_name = "chunks", .vector_ids = &ids, .vector_count = ids.len }));
+    ids[0] = "borrowed-input-was-not-retained";
+    exists = 1;
+    try std.testing.expectEqual(zova_status.OK, zova_vector_exists(&.{ .db = db, .collection_name = "chunks", .vector_id = "a", .out_exists = &exists }));
+    try std.testing.expectEqual(@as(u8, 0), exists);
+    try std.testing.expectEqual(zova_status.OK, zova_vector_delete_many(&.{ .db = db, .collection_name = "chunks", .vector_ids = null, .vector_count = 0 }));
+    try std.testing.expectEqual(zova_status.VECTOR_COLLECTION_NOT_FOUND, zova_vector_delete_many(&.{ .db = db, .collection_name = "missing", .vector_ids = null, .vector_count = 0 }));
 }
 
 test "c abi exposes vector collection management batch writes and expanded search" {

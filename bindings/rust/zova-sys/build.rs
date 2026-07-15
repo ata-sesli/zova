@@ -97,6 +97,7 @@ fn build_generated_c(generated_dir: &Path) -> PathBuf {
             "-fno-sanitize=undefined",
             "-DSQLITE_THREADSAFE=1",
             "-DSQLITE_ENABLE_FTS5",
+            "-DSQLITE_ENABLE_DBSTAT_VTAB",
         ],
     );
 

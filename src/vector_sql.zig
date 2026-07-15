@@ -62,6 +62,7 @@ const VectorValuesOwned = union(VectorElementType) {
 };
 
 const Collection = struct {
+    collection_key: i64,
     dimensions: u32,
     metric: VectorMetric,
     element_type: VectorElementType,
@@ -544,7 +545,7 @@ fn loadCollection(db: *sqlite.Database, name: []const u8) Error!Collection {
 
     const prefix = vectorSchemaPrefix(db);
     var stmt = try prepareSchema(db,
-        \\select dimensions, metric, element_type
+        \\select collection_key, dimensions, metric, element_type
         \\from {s}_zova_vector_collections
         \\where name = ?
     , .{prefix});
@@ -554,12 +555,13 @@ fn loadCollection(db: *sqlite.Database, name: []const u8) Error!Collection {
     return switch (try stmt.step()) {
         .done => error.VectorCollectionNotFound,
         .row => {
-            const dimensions_i64 = stmt.columnInt64(0);
+            const dimensions_i64 = stmt.columnInt64(1);
             if (dimensions_i64 <= 0 or dimensions_i64 > max_vector_dimensions) return error.VectorCorrupt;
             return .{
+                .collection_key = stmt.columnInt64(0),
                 .dimensions = @intCast(dimensions_i64),
-                .metric = try metricFromText(stmt.columnText(1)),
-                .element_type = try elementTypeFromText(stmt.columnText(2)),
+                .metric = try metricFromText(stmt.columnText(2)),
+                .element_type = try elementTypeFromText(stmt.columnText(3)),
             };
         },
     };
@@ -570,19 +572,19 @@ fn loadVectorEncoded(db: *sqlite.Database, collection_name: []const u8, vector_i
 
     const prefix = vectorSchemaPrefix(db);
     var stmt = try prepareSchema(db,
-        \\select dimensions, "values"
+        \\select "values"
         \\from {s}_zova_vectors
-        \\where collection_name = ? and vector_id = ?
+        \\where collection_key = ? and vector_id = ?
     , .{prefix});
     defer stmt.deinit();
 
-    try stmt.bindText(1, collection_name);
+    _ = collection_name;
+    try stmt.bindInt64(1, collection.collection_key);
     try stmt.bindText(2, vector_id);
     return switch (try stmt.step()) {
         .done => error.VectorNotFound,
         .row => {
-            try validateStoredDimensions(collection.dimensions, stmt.columnInt64(0));
-            const blob = stmt.columnBlob(1);
+            const blob = stmt.columnBlob(0);
             if (blob.len != vectorByteLen(collection.element_type, collection.dimensions)) return error.VectorCorrupt;
             return allocator.dupe(u8, blob) catch return error.OutOfMemory;
         },
@@ -619,21 +621,21 @@ fn searchAll(
 
     const prefix = vectorSchemaPrefix(db);
     var stmt = try prepareSchema(db,
-        \\select vector_id, dimensions, "values"
+        \\select vector_id, "values"
         \\from {s}_zova_vectors
-        \\where collection_name = ?
+        \\where collection_key = ?
     , .{prefix});
     defer stmt.deinit();
 
-    try stmt.bindText(1, collection_name);
+    _ = collection_name;
+    try stmt.bindInt64(1, collection.collection_key);
     while ((try stmt.step()) == .row) {
         const vector_id = stmt.columnText(0);
         if (exclude_id) |excluded| {
             if (std.mem.eql(u8, vector_id, excluded)) continue;
         }
 
-        try validateStoredDimensions(collection.dimensions, stmt.columnInt64(1));
-        const distance = try vectorDistanceFromEncoded(collection.element_type, collection.metric, query, stmt.columnBlob(2), collection.dimensions);
+        const distance = try vectorDistanceFromEncoded(collection.element_type, collection.metric, query, stmt.columnBlob(1), collection.dimensions);
         if (!within(distance, max_distance)) continue;
         try maybeInsertRow(&rows, top_k, vector_id, distance);
     }

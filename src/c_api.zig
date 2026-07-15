@@ -121,6 +121,7 @@ pub const zova_vector_search_multi_i8_request = internal.zova_vector_search_mult
 pub const zova_vector_collection_info_get_request = internal.zova_vector_collection_info_get_request;
 pub const zova_vector_collections_list_request = internal.zova_vector_collections_list_request;
 pub const zova_vector_put_many_request = internal.zova_vector_put_many_request;
+pub const zova_vector_delete_many_request = internal.zova_vector_delete_many_request;
 pub const zova_vector_collection_delete_request = internal.zova_vector_collection_delete_request;
 pub const zova_vector_search_within_request = internal.zova_vector_search_within_request;
 pub const zova_vector_search_in_within_request = internal.zova_vector_search_in_within_request;
@@ -146,6 +147,7 @@ pub const zova_graph_node_delete_many_request = internal.zova_graph_node_delete_
 pub const zova_graph_edge_put_request = internal.zova_graph_edge_put_request;
 pub const zova_graph_edge_input = internal.zova_graph_edge_input;
 pub const zova_graph_edge_put_many_request = internal.zova_graph_edge_put_many_request;
+pub const zova_graph_edge_delete_many_request = internal.zova_graph_edge_delete_many_request;
 pub const zova_graph_edge_get_request = internal.zova_graph_edge_get_request;
 pub const zova_graph_edge_exists_request = internal.zova_graph_edge_exists_request;
 pub const zova_graph_edge_delete_request = internal.zova_graph_edge_delete_request;
@@ -577,6 +579,10 @@ export fn zova_vector_put_many(request: ?*const zova_vector_put_many_request) ca
     return internal.zova_vector_put_many(request);
 }
 
+export fn zova_vector_delete_many(request: ?*const zova_vector_delete_many_request) callconv(.c) zova_status {
+    return internal.zova_vector_delete_many(request);
+}
+
 export fn zova_vector_collection_delete(request: ?*const zova_vector_collection_delete_request) callconv(.c) zova_status {
     return internal.zova_vector_collection_delete(request);
 }
@@ -679,6 +685,10 @@ export fn zova_graph_edge_put(request: ?*const zova_graph_edge_put_request) call
 
 export fn zova_graph_edge_put_many(request: ?*const zova_graph_edge_put_many_request) callconv(.c) zova_status {
     return internal.zova_graph_edge_put_many(request);
+}
+
+export fn zova_graph_edge_delete_many(request: ?*const zova_graph_edge_delete_many_request) callconv(.c) zova_status {
+    return internal.zova_graph_edge_delete_many(request);
 }
 
 export fn zova_graph_edge_get(request: ?*const zova_graph_edge_get_request) callconv(.c) zova_status {

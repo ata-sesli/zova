@@ -4348,9 +4348,9 @@ fn loadChunkReferences(allocator: std.mem.Allocator, db: *zova.Database, id: zov
 
 fn loadVectorCollectionStats(allocator: std.mem.Allocator, db: *zova.Database) ![]VectorCollectionStats {
     var stmt = try db.prepare(
-        \\select vc.name, vc.dimensions, vc.metric, count(v.vector_id), coalesce(sum(v.dimensions * 4), 0)
+        \\select vc.name, vc.dimensions, vc.metric, count(v.vector_id), coalesce(sum(length(v."values")), 0)
         \\from _zova_vector_collections vc
-        \\left join _zova_vectors v on v.collection_name = vc.name
+        \\left join _zova_vectors v on v.collection_key = vc.collection_key
         \\group by vc.name, vc.dimensions, vc.metric
         \\order by vc.name
     );
@@ -4377,9 +4377,9 @@ fn loadVectorCollectionStats(allocator: std.mem.Allocator, db: *zova.Database) !
 
 fn loadVectorCollectionList(allocator: std.mem.Allocator, db: *zova.Database, limit: usize) !VectorCollectionListSummary {
     var stmt = try db.prepare(
-        \\select vc.name, vc.dimensions, vc.metric, count(v.vector_id), coalesce(sum(v.dimensions * 4), 0)
+        \\select vc.name, vc.dimensions, vc.metric, count(v.vector_id), coalesce(sum(length(v."values")), 0)
         \\from _zova_vector_collections vc
-        \\left join _zova_vectors v on v.collection_name = vc.name
+        \\left join _zova_vectors v on v.collection_key = vc.collection_key
         \\group by vc.name, vc.dimensions, vc.metric
         \\order by vc.name
         \\limit ?
@@ -4411,9 +4411,9 @@ fn loadVectorCollectionList(allocator: std.mem.Allocator, db: *zova.Database, li
 
 fn loadVectorCollectionDetail(allocator: std.mem.Allocator, db: *zova.Database, name: []const u8, limit: usize) !VectorCollectionDetail {
     var stmt = try db.prepare(
-        \\select vc.name, vc.dimensions, vc.metric, count(v.vector_id), coalesce(sum(v.dimensions * 4), 0)
+        \\select vc.name, vc.dimensions, vc.metric, count(v.vector_id), coalesce(sum(length(v."values")), 0)
         \\from _zova_vector_collections vc
-        \\left join _zova_vectors v on v.collection_name = vc.name
+        \\left join _zova_vectors v on v.collection_key = vc.collection_key
         \\where vc.name = ?
         \\group by vc.name, vc.dimensions, vc.metric
     );
@@ -4448,10 +4448,11 @@ fn loadVectorCollectionDetail(allocator: std.mem.Allocator, db: *zova.Database, 
 
 fn loadVectorIds(allocator: std.mem.Allocator, db: *zova.Database, collection_name: []const u8, limit: usize) ![][]u8 {
     var stmt = try db.prepare(
-        \\select vector_id
-        \\from _zova_vectors
-        \\where collection_name = ?
-        \\order by vector_id asc
+        \\select v.vector_id
+        \\from _zova_vectors v
+        \\join _zova_vector_collections c on c.collection_key = v.collection_key
+        \\where c.name = ?
+        \\order by v.vector_id asc
         \\limit ?
     );
     defer stmt.deinit();
@@ -7144,14 +7145,16 @@ fn copyValidVectors(
         destination.createVectorCollection(collection.name, .{
             .dimensions = collection.dimensions,
             .metric = collection.metric,
+            .element_type = collection.element_type,
         }) catch continue;
         copied.vector_collections += 1;
 
         var vectors = try source.prepare(
-            \\select vector_id
-            \\from _zova_vectors
-            \\where collection_name = ?
-            \\order by vector_id asc
+            \\select v.vector_id
+            \\from _zova_vectors v
+            \\join _zova_vector_collections c on c.collection_key = v.collection_key
+            \\where c.name = ?
+            \\order by v.vector_id asc
         );
         defer vectors.deinit();
         try vectors.bindText(1, collection.name);
@@ -7194,9 +7197,10 @@ fn copyValidGraphs(
     }
 
     var nodes = try source.prepare(
-        \\select graph_name, node_id, kind, target_type, target_namespace, target_ref
-        \\from _zova_graph_nodes
-        \\order by created_order, graph_name, node_id
+        \\select g.name, n.node_id, n.kind, n.target_type, n.target_namespace, n.target_ref
+        \\from _zova_graph_nodes n
+        \\join _zova_graphs g on g.graph_key = n.graph_key
+        \\order by n.created_order, g.name, n.node_id
     );
     defer nodes.deinit();
     while ((try nodes.step()) == .row) {
@@ -7229,9 +7233,12 @@ fn copyValidGraphs(
     }
 
     var edges = try source.prepare(
-        \\select graph_name, from_node_id, edge_type, to_node_id
-        \\from _zova_graph_edges
-        \\order by created_order, graph_name, from_node_id, edge_type, to_node_id
+        \\select g.name, from_node.node_id, e.edge_type, to_node.node_id
+        \\from _zova_graph_edges e
+        \\join _zova_graphs g on g.graph_key = e.graph_key
+        \\join _zova_graph_nodes from_node on from_node.graph_key = e.graph_key and from_node.node_key = e.from_node_key
+        \\join _zova_graph_nodes to_node on to_node.graph_key = e.graph_key and to_node.node_key = e.to_node_key
+        \\order by e.created_order, g.name, from_node.node_id, e.edge_type, to_node.node_id
     );
     defer edges.deinit();
     while ((try edges.step()) == .row) {
@@ -7501,10 +7508,11 @@ fn diagnosticGraphSchemaPrefix(db: *zova.Database) []const u8 {
 fn validateVectors(allocator: std.mem.Allocator, db: *zova.Database, report: *DiagnosticReport, issues: *std.ArrayList(DiagnosticIssue)) !void {
     const prefix = diagnosticVectorSchemaPrefix(db);
     const sql = try std.fmt.allocPrintSentinel(allocator,
-        \\select collection_name, vector_id
-        \\from {s}_zova_vectors
-        \\order by collection_name, vector_id
-    , .{prefix}, 0);
+        \\select c.name, v.vector_id
+        \\from {s}_zova_vectors v
+        \\join {s}_zova_vector_collections c on c.collection_key = v.collection_key
+        \\order by c.name, v.vector_id
+    , .{ prefix, prefix }, 0);
     defer allocator.free(sql);
 
     var stmt = try db.prepare(sql);
@@ -7537,10 +7545,11 @@ fn validateGraphs(allocator: std.mem.Allocator, db: *zova.Database, report: *Dia
     }
 
     const nodes_sql = try std.fmt.allocPrintSentinel(allocator,
-        \\select graph_name, node_id, kind, target_type, target_namespace, target_ref
-        \\from {s}_zova_graph_nodes
-        \\order by graph_name, node_id
-    , .{prefix}, 0);
+        \\select g.name, n.node_id, n.kind, n.target_type, n.target_namespace, n.target_ref
+        \\from {s}_zova_graph_nodes n
+        \\join {s}_zova_graphs g on g.graph_key = n.graph_key
+        \\order by g.name, n.node_id
+    , .{ prefix, prefix }, 0);
     defer allocator.free(nodes_sql);
     var nodes = try db.prepare(nodes_sql);
     defer nodes.deinit();
@@ -7585,16 +7594,17 @@ fn validateGraphs(allocator: std.mem.Allocator, db: *zova.Database, report: *Dia
     }
 
     const edges_sql = try std.fmt.allocPrintSentinel(allocator,
-        \\select e.graph_name, e.from_node_id, e.edge_type, e.to_node_id,
+        \\select g.name, from_node.node_id, e.edge_type, to_node.node_id,
         \\  from_node.node_id is null,
         \\  to_node.node_id is null
         \\from {s}_zova_graph_edges e
+        \\join {s}_zova_graphs g on g.graph_key = e.graph_key
         \\left join {s}_zova_graph_nodes from_node
-        \\  on from_node.graph_name = e.graph_name and from_node.node_id = e.from_node_id
+        \\  on from_node.graph_key = e.graph_key and from_node.node_key = e.from_node_key
         \\left join {s}_zova_graph_nodes to_node
-        \\  on to_node.graph_name = e.graph_name and to_node.node_id = e.to_node_id
-        \\order by e.graph_name, e.from_node_id, e.edge_type, e.to_node_id
-    , .{ prefix, prefix, prefix }, 0);
+        \\  on to_node.graph_key = e.graph_key and to_node.node_key = e.to_node_key
+        \\order by g.name, from_node.node_id, e.edge_type, to_node.node_id
+    , .{ prefix, prefix, prefix, prefix }, 0);
     defer allocator.free(edges_sql);
     var edges = try db.prepare(edges_sql);
     defer edges.deinit();

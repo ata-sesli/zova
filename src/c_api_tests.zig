@@ -131,8 +131,8 @@ test "c abi graph operations route through a bound store after reopen" {
     {
         var store_after_edge_delete = try sqlite.Database.open(store_path);
         defer store_after_edge_delete.deinit();
-        try expectCount(&store_after_edge_delete, "select count(*) from _zova_graph_edges where graph_name = 'deps' and from_node_id = 'c' and edge_type = 'imports' and to_node_id = 'a'", 0);
-        try expectCount(&store_after_edge_delete, "select count(*) from _zova_graph_nodes where graph_name = 'deps' and node_id = 'c'", 1);
+        try expectCount(&store_after_edge_delete, "select count(*) from _zova_graph_edges e join _zova_graphs g on g.graph_key=e.graph_key join _zova_graph_nodes f on f.node_key=e.from_node_key join _zova_graph_nodes t on t.node_key=e.to_node_key where g.name='deps' and f.node_id='c' and e.edge_type='imports' and t.node_id='a'", 0);
+        try expectCount(&store_after_edge_delete, "select count(*) from _zova_graph_nodes n join _zova_graphs g on g.graph_key=n.graph_key where g.name='deps' and n.node_id='c'", 1);
     }
     try std.testing.expectEqual(internal.zova_status.OK, internal.zova_graph_node_delete(&.{
         .db = handle,
@@ -152,11 +152,11 @@ test "c abi graph operations route through a bound store after reopen" {
     var store = try sqlite.Database.open(store_path);
     defer store.deinit();
     try expectCount(&store, "select count(*) from _zova_graphs where name = 'deps'", 1);
-    try expectCount(&store, "select count(*) from _zova_graph_nodes where graph_name = 'deps'", 3);
-    try expectCount(&store, "select count(*) from _zova_graph_nodes where graph_name = 'deps' and node_id = 'd'", 1);
-    try expectCount(&store, "select count(*) from _zova_graph_nodes where graph_name = 'deps' and node_id = 'c'", 0);
-    try expectCount(&store, "select count(*) from _zova_graph_edges where graph_name = 'deps'", 2);
-    try expectCount(&store, "select count(*) from _zova_graph_edges where graph_name = 'deps' and from_node_id = 'b' and to_node_id = 'd'", 1);
+    try expectCount(&store, "select count(*) from _zova_graph_nodes n join _zova_graphs g on g.graph_key=n.graph_key where g.name='deps'", 3);
+    try expectCount(&store, "select count(*) from _zova_graph_nodes n join _zova_graphs g on g.graph_key=n.graph_key where g.name='deps' and n.node_id='d'", 1);
+    try expectCount(&store, "select count(*) from _zova_graph_nodes n join _zova_graphs g on g.graph_key=n.graph_key where g.name='deps' and n.node_id='c'", 0);
+    try expectCount(&store, "select count(*) from _zova_graph_edges e join _zova_graphs g on g.graph_key=e.graph_key where g.name='deps'", 2);
+    try expectCount(&store, "select count(*) from _zova_graph_edges e join _zova_graphs g on g.graph_key=e.graph_key join _zova_graph_nodes f on f.node_key=e.from_node_key join _zova_graph_nodes t on t.node_key=e.to_node_key where g.name='deps' and f.node_id='b' and t.node_id='d'", 1);
 }
 
 fn expectCount(db: *sqlite.Database, sql: [:0]const u8, expected: i64) !void {

@@ -63,6 +63,11 @@ int main() {
     zova_vector_put_many_request put_many_request = {};
     put_many_request.vectors = vector_inputs;
     put_many_request.vectors_len = 1;
+    const char *vector_ids[1] = {"chunk-001"};
+    zova_vector_delete_many_request vector_delete_many_request = {};
+    vector_delete_many_request.collection_name = "chunks";
+    vector_delete_many_request.vector_ids = vector_ids;
+    vector_delete_many_request.vector_count = 1;
     zova_database_prepare_request prepare_request = {};
     prepare_request.out_statement = &statement;
     zova_database_last_insert_rowid_request last_rowid_request = {};
@@ -206,6 +211,9 @@ int main() {
     zova_graph_edge_put_many_request graph_edge_put_many_request = {};
     graph_edge_put_many_request.edges = &graph_edge_input;
     graph_edge_put_many_request.edges_len = 1;
+    zova_graph_edge_delete_many_request graph_edge_delete_many_request = {};
+    graph_edge_delete_many_request.edges = &graph_edge_input;
+    graph_edge_delete_many_request.edges_len = 1;
     zova_graph_edge_get_request graph_edge_get_request = {};
     graph_edge_get_request.out_edge = &graph_edge;
     zova_graph_edge_exists_request graph_edge_exists_request = {};

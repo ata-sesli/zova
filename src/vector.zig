@@ -8,7 +8,6 @@ pub const Error = zova_error.Error;
 
 pub const vector_collections_table = "_zova_vector_collections";
 pub const vectors_table = "_zova_vectors";
-pub const vector_norms_table = "_zova_vector_norms";
 const max_vector_collection_name_bytes: usize = 255;
 pub const max_vector_dimensions: u32 = 16_384;
 
@@ -184,12 +183,14 @@ pub const StorageSchema = enum {
 };
 
 const CollectionMetadata = struct {
+    collection_key: i64,
     dimensions: u32,
     metric: VectorMetric,
     element_type: VectorElementType,
 };
 
 const candidate_scan_threshold = 128;
+const search_heap_threshold = 32;
 
 const PreparedVectorQuery = struct {
     element_type: VectorElementType,
@@ -284,7 +285,8 @@ const PreparedVectorQuery = struct {
 
 pub const collections_schema_sql =
     \\create table _zova_vector_collections (
-    \\  name text not null primary key check (length(name) > 0 and length(name) <= 255),
+    \\  collection_key integer primary key,
+    \\  name text not null unique check (length(name) > 0 and length(name) <= 255),
     \\  dimensions integer not null check (dimensions > 0 and dimensions <= 16384),
     \\  metric text not null check (metric in ('cosine', 'l2', 'dot')),
     \\  element_type text not null check (element_type in ('f32', 'f16', 'i8'))
@@ -292,21 +294,13 @@ pub const collections_schema_sql =
 ;
 pub const vectors_schema_sql =
     \\create table _zova_vectors (
-    \\  collection_name text not null,
+    \\  vector_key integer primary key,
+    \\  collection_key integer not null,
     \\  vector_id text not null check (length(vector_id) > 0),
-    \\  dimensions integer not null check (dimensions > 0 and dimensions <= 16384),
     \\  "values" blob not null check (length("values") > 0),
-    \\  primary key (collection_name, vector_id),
-    \\  foreign key (collection_name) references _zova_vector_collections(name)
-    \\)
-;
-pub const vector_norms_schema_sql =
-    \\create table _zova_vector_norms (
-    \\  collection_name text not null,
-    \\  vector_id text not null check (length(vector_id) > 0),
-    \\  norm_squared real not null check (norm_squared >= 0),
-    \\  primary key (collection_name, vector_id),
-    \\  foreign key (collection_name, vector_id) references _zova_vectors(collection_name, vector_id)
+    \\  norm_squared real check (norm_squared is null or norm_squared >= 0),
+    \\  unique (collection_key, vector_id),
+    \\  foreign key (collection_key) references _zova_vector_collections(collection_key) on delete cascade
     \\)
 ;
 
@@ -386,7 +380,7 @@ pub const Database = struct {
         var stmt = try self.prepareSchema(
             \\select c.name, c.dimensions, c.metric, c.element_type, count(v.vector_id)
             \\from {s}_zova_vector_collections c
-            \\left join {s}_zova_vectors v on v.collection_name = c.name
+            \\left join {s}_zova_vectors v on v.collection_key = c.collection_key
             \\where c.name = ?
             \\group by c.name, c.dimensions, c.metric, c.element_type
         , .{ self.storage_schema.prefix(), self.storage_schema.prefix() });
@@ -411,7 +405,7 @@ pub const Database = struct {
         var stmt = try self.prepareSchema(
             \\select c.name, c.dimensions, c.metric, c.element_type, count(v.vector_id)
             \\from {s}_zova_vector_collections c
-            \\left join {s}_zova_vectors v on v.collection_name = c.name
+            \\left join {s}_zova_vectors v on v.collection_key = c.collection_key
             \\group by c.name, c.dimensions, c.metric, c.element_type
             \\order by c.name asc
         , .{ self.storage_schema.prefix(), self.storage_schema.prefix() });
@@ -487,27 +481,23 @@ pub const Database = struct {
         const collection = try loadVectorCollection(self, collection_name);
 
         var stmt = try self.prepareSchema(
-            \\select vector_id, dimensions, "values"
+            \\select vector_id, "values"
             \\from {s}_zova_vectors
-            \\where collection_name = ? and vector_id = ?
+            \\where collection_key = ? and vector_id = ?
         , .{self.storage_schema.prefix()});
         defer stmt.deinit();
 
-        try stmt.bindText(1, collection_name);
+        try stmt.bindInt64(1, collection.collection_key);
         try stmt.bindText(2, vector_id);
 
         switch (try stmt.step()) {
             .done => return error.VectorNotFound,
             .row => {
                 const stored_id = stmt.columnText(0);
-                const stored_dimensions = stmt.columnInt64(1);
-                if (stored_dimensions < 0) return error.VectorCorrupt;
-                if (@as(u64, @intCast(stored_dimensions)) != collection.dimensions) return error.VectorCorrupt;
-
                 const id = try allocator.dupe(u8, stored_id);
                 errdefer allocator.free(id);
 
-                const values = try decodeValuesLe(allocator, collection.element_type, stmt.columnBlob(2), collection.dimensions);
+                const values = try decodeValuesLe(allocator, collection.element_type, stmt.columnBlob(1), collection.dimensions);
                 errdefer values.deinit(allocator);
                 try validateStoredVectorValues(collection, values.asConst());
 
@@ -527,17 +517,17 @@ pub const Database = struct {
     ) Error!bool {
         try validateVectorCollectionName(collection_name);
         try validateVectorId(vector_id);
-        _ = try loadVectorCollection(self, collection_name);
+        const collection = try loadVectorCollection(self, collection_name);
 
         var stmt = try self.prepareSchema(
             \\select 1
             \\from {s}_zova_vectors
-            \\where collection_name = ? and vector_id = ?
+            \\where collection_key = ? and vector_id = ?
             \\limit 1
         , .{self.storage_schema.prefix()});
         defer stmt.deinit();
 
-        try stmt.bindText(1, collection_name);
+        try stmt.bindInt64(1, collection.collection_key);
         try stmt.bindText(2, vector_id);
         return switch (try stmt.step()) {
             .row => true,
@@ -556,18 +546,58 @@ pub const Database = struct {
     ) Error!void {
         try validateVectorCollectionName(collection_name);
         try validateVectorId(vector_id);
-        _ = try loadVectorCollection(self, collection_name);
+        const collection = try loadVectorCollection(self, collection_name);
 
-        try self.deleteVectorNormIfPresent(collection_name, vector_id);
-
-        var stmt = try self.prepareSchema("delete from {s}_zova_vectors where collection_name = ? and vector_id = ?", .{self.storage_schema.prefix()});
+        var stmt = try self.prepareSchema("delete from {s}_zova_vectors where collection_key = ? and vector_id = ?", .{self.storage_schema.prefix()});
         defer stmt.deinit();
 
-        try stmt.bindText(1, collection_name);
+        try stmt.bindInt64(1, collection.collection_key);
         try stmt.bindText(2, vector_id);
         std.debug.assert((try stmt.step()) == .done);
 
         if (self.sqlite_db.changes() == 0) return error.VectorNotFound;
+    }
+
+    /// Delete multiple vector rows from an existing collection.
+    ///
+    /// The complete request is validated before any private row is changed.
+    /// Duplicate and missing ids are ignored, which makes replay safe. The
+    /// caller is responsible for wrapping this method in a transaction when
+    /// atomicity with other Zova operations is required.
+    pub fn deleteVectors(
+        self: *Database,
+        collection_name: []const u8,
+        vector_ids: []const []const u8,
+    ) Error!void {
+        try validateVectorCollectionName(collection_name);
+        const collection = try loadVectorCollection(self, collection_name);
+        for (vector_ids) |vector_id| try validateVectorId(vector_id);
+
+        try self.sqlite_db.exec(
+            \\create temp table if not exists _zova_vector_delete_ids (
+            \\  vector_id text primary key
+            \\) without rowid
+        );
+        try self.sqlite_db.exec("delete from temp._zova_vector_delete_ids");
+
+        var insert_id = try self.sqlite_db.prepare(
+            "insert or ignore into temp._zova_vector_delete_ids (vector_id) values (?)",
+        );
+        defer insert_id.deinit();
+        for (vector_ids) |vector_id| {
+            try insert_id.bindText(1, vector_id);
+            std.debug.assert((try insert_id.step()) == .done);
+            try insert_id.reset();
+        }
+
+        var delete = try self.prepareSchema(
+            \\delete from {s}_zova_vectors
+            \\where collection_key = ?
+            \\  and vector_id in (select vector_id from temp._zova_vector_delete_ids)
+        , .{self.storage_schema.prefix()});
+        defer delete.deinit();
+        try delete.bindInt64(1, collection.collection_key);
+        std.debug.assert((try delete.step()) == .done);
     }
 
     /// Delete a vector collection and all private vector rows in it.
@@ -579,13 +609,6 @@ pub const Database = struct {
     pub fn deleteVectorCollection(self: *Database, name: []const u8) Error!void {
         try validateVectorCollectionName(name);
         _ = try loadVectorCollection(self, name);
-
-        try self.deleteVectorCollectionNormsIfPresent(name);
-
-        var delete_vectors = try self.prepareSchema("delete from {s}_zova_vectors where collection_name = ?", .{self.storage_schema.prefix()});
-        defer delete_vectors.deinit();
-        try delete_vectors.bindText(1, name);
-        std.debug.assert((try delete_vectors.step()) == .done);
 
         var delete_collection = try self.prepareSchema("delete from {s}_zova_vector_collections where name = ?", .{self.storage_schema.prefix()});
         defer delete_collection.deinit();
@@ -839,34 +862,22 @@ pub const Database = struct {
             return .{ .items = try results.toOwnedSlice(allocator) };
         }
 
-        const use_stored_norms = query.usesStoredNorms() and try self.hasVectorNormsTable();
-        var stmt = if (use_stored_norms)
-            try self.prepareSchema(
-                \\select v.vector_id, v.dimensions, v."values", n.norm_squared
-                \\from {s}_zova_vectors v
-                \\left join {s}_zova_vector_norms n
-                \\  on n.collection_name = v.collection_name and n.vector_id = v.vector_id
-                \\where v.collection_name = ?
-            , .{ self.storage_schema.prefix(), self.storage_schema.prefix() })
-        else
-            try self.prepareSchema(
-                \\select vector_id, dimensions, "values"
-                \\from {s}_zova_vectors
-                \\where collection_name = ?
-            , .{self.storage_schema.prefix()});
+        var stmt = try self.prepareSchema(
+            \\select vector_id, "values", norm_squared
+            \\from {s}_zova_vectors
+            \\where collection_key = ?
+        , .{self.storage_schema.prefix()});
         defer stmt.deinit();
 
-        try stmt.bindText(1, collection_name);
+        try stmt.bindInt64(1, collection.collection_key);
         while ((try stmt.step()) == .row) {
             const vector_id = stmt.columnText(0);
             if (exclude_id) |excluded| {
                 if (std.mem.eql(u8, vector_id, excluded)) continue;
             }
 
-            try validateStoredVectorDimensions(collection.dimensions, stmt.columnInt64(1));
-
-            const stored_norm = if (use_stored_norms) optionalColumnDouble(&stmt, 3) else null;
-            const distance = try query.distanceFromEncodedWithStoredNorm(stmt.columnBlob(2), stored_norm);
+            const stored_norm = optionalColumnDouble(&stmt, 2);
+            const distance = try query.distanceFromEncodedWithStoredNorm(stmt.columnBlob(1), stored_norm);
             if (!distanceWithinThreshold(distance, max_distance)) continue;
             try maybeInsertSearchResult(allocator, &results, limit, vector_id, distance);
         }
@@ -898,39 +909,25 @@ pub const Database = struct {
             return .{ .items = try results.toOwnedSlice(allocator) };
         }
 
-        const use_stored_norms = try self.hasVectorNormsTable();
-        var stmt = if (use_stored_norms)
-            try self.prepareSchema(
-                \\select v.vector_id, v.dimensions, v."values", n.norm_squared
-                \\from {s}_zova_vectors v
-                \\left join {s}_zova_vector_norms n
-                \\  on n.collection_name = v.collection_name and n.vector_id = v.vector_id
-                \\where v.collection_name = ?
-            , .{ self.storage_schema.prefix(), self.storage_schema.prefix() })
-        else
-            try self.prepareSchema(
-                \\select vector_id, dimensions, "values"
-                \\from {s}_zova_vectors
-                \\where collection_name = ?
-            , .{self.storage_schema.prefix()});
+        _ = collection_name;
+        var stmt = try self.prepareSchema(
+            \\select vector_id, "values", norm_squared
+            \\from {s}_zova_vectors
+            \\where collection_key = ?
+        , .{self.storage_schema.prefix()});
         defer stmt.deinit();
 
-        try stmt.bindText(1, collection_name);
+        try stmt.bindInt64(1, collection.collection_key);
         while ((try stmt.step()) == .row) {
             const vector_id = stmt.columnText(0);
             if (exclude_id) |excluded| {
                 if (std.mem.eql(u8, vector_id, excluded)) continue;
             }
 
-            try validateStoredVectorDimensions(collection.dimensions, stmt.columnInt64(1));
-
-            const encoded_values = stmt.columnBlob(2);
+            const encoded_values = stmt.columnBlob(1);
             if (encoded_values.len != query.len) return error.VectorCorrupt;
-            const distance = if (use_stored_norms)
-                if (optionalColumnDouble(&stmt, 3)) |stored_norm|
-                    try i8CosineDistanceFromEncodedWithQueryLengthSimd(query, query_length, encoded_values, stored_norm)
-                else
-                    try i8CosineDistanceFromEncoded(query, query_norm, encoded_values)
+            const distance = if (optionalColumnDouble(&stmt, 2)) |stored_norm|
+                try i8CosineDistanceFromEncodedWithQueryLengthSimd(query, query_length, encoded_values, stored_norm)
             else
                 try i8CosineDistanceFromEncoded(query, query_norm, encoded_values);
             if (!distanceWithinThreshold(distance, max_distance)) continue;
@@ -957,29 +954,19 @@ pub const Database = struct {
         }
         if (limit == 0) return .{ .items = try results.toOwnedSlice(allocator) };
 
-        const use_stored_norms = try self.hasVectorNormsTable();
-        var stmt = if (use_stored_norms)
-            try self.prepareSchema(
-                \\select v.vector_id, v.dimensions, v."values", n.norm_squared
-                \\from {s}_zova_vectors v
-                \\left join {s}_zova_vector_norms n
-                \\  on n.collection_name = v.collection_name and n.vector_id = v.vector_id
-                \\where v.collection_name = ?
-            , .{ self.storage_schema.prefix(), self.storage_schema.prefix() })
-        else
-            try self.prepareSchema(
-                \\select vector_id, dimensions, "values"
-                \\from {s}_zova_vectors
-                \\where collection_name = ?
-            , .{self.storage_schema.prefix()});
+        var stmt = try self.prepareSchema(
+            \\select vector_id, "values", norm_squared
+            \\from {s}_zova_vectors
+            \\where collection_key = ?
+        , .{self.storage_schema.prefix()});
         defer stmt.deinit();
 
-        try stmt.bindText(1, collection_name);
+        _ = collection_name;
+        try stmt.bindInt64(1, collection.collection_key);
         while ((try stmt.step()) == .row) {
-            try validateStoredVectorDimensions(collection.dimensions, stmt.columnInt64(1));
-            const encoded_values = stmt.columnBlob(2);
+            const encoded_values = stmt.columnBlob(1);
             if (encoded_values.len != collection.dimensions) return error.VectorCorrupt;
-            const stored_norm = if (use_stored_norms) optionalColumnDouble(&stmt, 3) else null;
+            const stored_norm = optionalColumnDouble(&stmt, 2);
             const distance = try multiI8CosineDistance(queries, encoded_values, stored_norm);
             try maybeInsertSearchResult(allocator, &results, limit, stmt.columnText(0), distance);
         }
@@ -1013,40 +1000,29 @@ pub const Database = struct {
         if (limit == 0 or seen.count() == 0) return .{ .items = try results.toOwnedSlice(allocator) };
 
         const collection_vector_count = if (seen.count() >= candidate_scan_threshold)
-            try self.countVectorsInCollection(collection_name)
+            try self.countVectorsInCollection(collection.collection_key)
         else
             0;
         if (shouldScanCandidateVectors(seen.count(), collection_vector_count)) {
             try self.searchMultiI8CosineCandidatesByScan(allocator, collection_name, collection, queries, &seen, &results, limit);
         } else {
-            const use_stored_norms = try self.hasVectorNormsTable();
-            var stmt = if (use_stored_norms)
-                try self.prepareSchema(
-                    \\select v.dimensions, v."values", n.norm_squared
-                    \\from {s}_zova_vectors v
-                    \\left join {s}_zova_vector_norms n
-                    \\  on n.collection_name = v.collection_name and n.vector_id = v.vector_id
-                    \\where v.collection_name = ? and v.vector_id = ?
-                , .{ self.storage_schema.prefix(), self.storage_schema.prefix() })
-            else
-                try self.prepareSchema(
-                    \\select dimensions, "values"
-                    \\from {s}_zova_vectors
-                    \\where collection_name = ? and vector_id = ?
-                , .{self.storage_schema.prefix()});
+            var stmt = try self.prepareSchema(
+                \\select "values", norm_squared
+                \\from {s}_zova_vectors
+                \\where collection_key = ? and vector_id = ?
+            , .{self.storage_schema.prefix()});
             defer stmt.deinit();
 
-            try stmt.bindText(1, collection_name);
+            try stmt.bindInt64(1, collection.collection_key);
             var iterator = seen.keyIterator();
             while (iterator.next()) |candidate_id| {
                 try stmt.bindText(2, candidate_id.*);
                 switch (try stmt.step()) {
                     .done => {},
                     .row => {
-                        try validateStoredVectorDimensions(collection.dimensions, stmt.columnInt64(0));
-                        const encoded_values = stmt.columnBlob(1);
+                        const encoded_values = stmt.columnBlob(0);
                         if (encoded_values.len != collection.dimensions) return error.VectorCorrupt;
-                        const stored_norm = if (use_stored_norms) optionalColumnDouble(&stmt, 2) else null;
+                        const stored_norm = optionalColumnDouble(&stmt, 1);
                         const distance = try multiI8CosineDistance(queries, encoded_values, stored_norm);
                         try maybeInsertSearchResult(allocator, &results, limit, candidate_id.*, distance);
                     },
@@ -1100,31 +1076,21 @@ pub const Database = struct {
         results: *std.ArrayList(VectorSearchResult),
         limit: usize,
     ) Error!void {
-        const use_stored_norms = try self.hasVectorNormsTable();
-        var stmt = if (use_stored_norms)
-            try self.prepareSchema(
-                \\select v.vector_id, v.dimensions, v."values", n.norm_squared
-                \\from {s}_zova_vectors v
-                \\left join {s}_zova_vector_norms n
-                \\  on n.collection_name = v.collection_name and n.vector_id = v.vector_id
-                \\where v.collection_name = ?
-            , .{ self.storage_schema.prefix(), self.storage_schema.prefix() })
-        else
-            try self.prepareSchema(
-                \\select vector_id, dimensions, "values"
-                \\from {s}_zova_vectors
-                \\where collection_name = ?
-            , .{self.storage_schema.prefix()});
+        var stmt = try self.prepareSchema(
+            \\select vector_id, "values", norm_squared
+            \\from {s}_zova_vectors
+            \\where collection_key = ?
+        , .{self.storage_schema.prefix()});
         defer stmt.deinit();
 
-        try stmt.bindText(1, collection_name);
+        _ = collection_name;
+        try stmt.bindInt64(1, collection.collection_key);
         while ((try stmt.step()) == .row) {
             const vector_id = stmt.columnText(0);
             if (!seen.contains(vector_id)) continue;
-            try validateStoredVectorDimensions(collection.dimensions, stmt.columnInt64(1));
-            const encoded_values = stmt.columnBlob(2);
+            const encoded_values = stmt.columnBlob(1);
             if (encoded_values.len != collection.dimensions) return error.VectorCorrupt;
-            const stored_norm = if (use_stored_norms) optionalColumnDouble(&stmt, 3) else null;
+            const stored_norm = optionalColumnDouble(&stmt, 2);
             const distance = try multiI8CosineDistance(queries, encoded_values, stored_norm);
             try maybeInsertSearchResult(allocator, results, limit, vector_id, distance);
         }
@@ -1165,7 +1131,7 @@ pub const Database = struct {
         }
 
         const collection_vector_count = if (seen.count() >= candidate_scan_threshold)
-            try self.countVectorsInCollection(collection_name)
+            try self.countVectorsInCollection(collection.collection_key)
         else
             0;
 
@@ -1176,24 +1142,14 @@ pub const Database = struct {
             return .{ .items = items };
         }
 
-        const use_stored_norms = query.usesStoredNorms() and try self.hasVectorNormsTable();
-        var stmt = if (use_stored_norms)
-            try self.prepareSchema(
-                \\select v.dimensions, v."values", n.norm_squared
-                \\from {s}_zova_vectors v
-                \\left join {s}_zova_vector_norms n
-                \\  on n.collection_name = v.collection_name and n.vector_id = v.vector_id
-                \\where v.collection_name = ? and v.vector_id = ?
-            , .{ self.storage_schema.prefix(), self.storage_schema.prefix() })
-        else
-            try self.prepareSchema(
-                \\select dimensions, "values"
-                \\from {s}_zova_vectors
-                \\where collection_name = ? and vector_id = ?
-            , .{self.storage_schema.prefix()});
+        var stmt = try self.prepareSchema(
+            \\select "values", norm_squared
+            \\from {s}_zova_vectors
+            \\where collection_key = ? and vector_id = ?
+        , .{self.storage_schema.prefix()});
         defer stmt.deinit();
 
-        try stmt.bindText(1, collection_name);
+        try stmt.bindInt64(1, collection.collection_key);
 
         var iterator = seen.keyIterator();
         while (iterator.next()) |candidate_id| {
@@ -1202,10 +1158,8 @@ pub const Database = struct {
             switch (try stmt.step()) {
                 .done => {},
                 .row => {
-                    try validateStoredVectorDimensions(collection.dimensions, stmt.columnInt64(0));
-
-                    const stored_norm = if (use_stored_norms) optionalColumnDouble(&stmt, 2) else null;
-                    const distance = try query.distanceFromEncodedWithStoredNorm(stmt.columnBlob(1), stored_norm);
+                    const stored_norm = optionalColumnDouble(&stmt, 1);
+                    const distance = try query.distanceFromEncodedWithStoredNorm(stmt.columnBlob(0), stored_norm);
                     if (distanceWithinThreshold(distance, max_distance)) {
                         try maybeInsertSearchResult(allocator, &results, limit, candidate_id.*, distance);
                     }
@@ -1231,45 +1185,35 @@ pub const Database = struct {
         limit: usize,
         max_distance: ?f64,
     ) Error!void {
-        const use_stored_norms = query.usesStoredNorms() and try self.hasVectorNormsTable();
-        var stmt = if (use_stored_norms)
-            try self.prepareSchema(
-                \\select v.vector_id, v.dimensions, v."values", n.norm_squared
-                \\from {s}_zova_vectors v
-                \\left join {s}_zova_vector_norms n
-                \\  on n.collection_name = v.collection_name and n.vector_id = v.vector_id
-                \\where v.collection_name = ?
-            , .{ self.storage_schema.prefix(), self.storage_schema.prefix() })
-        else
-            try self.prepareSchema(
-                \\select vector_id, dimensions, "values"
-                \\from {s}_zova_vectors
-                \\where collection_name = ?
-            , .{self.storage_schema.prefix()});
+        var stmt = try self.prepareSchema(
+            \\select vector_id, "values", norm_squared
+            \\from {s}_zova_vectors
+            \\where collection_key = ?
+        , .{self.storage_schema.prefix()});
         defer stmt.deinit();
 
-        try stmt.bindText(1, collection_name);
+        _ = collection_name;
+        try stmt.bindInt64(1, collection.collection_key);
         while ((try stmt.step()) == .row) {
             const vector_id = stmt.columnText(0);
             if (!seen.contains(vector_id)) continue;
 
-            try validateStoredVectorDimensions(collection.dimensions, stmt.columnInt64(1));
-            const stored_norm = if (use_stored_norms) optionalColumnDouble(&stmt, 3) else null;
-            const distance = try query.distanceFromEncodedWithStoredNorm(stmt.columnBlob(2), stored_norm);
+            const stored_norm = optionalColumnDouble(&stmt, 2);
+            const distance = try query.distanceFromEncodedWithStoredNorm(stmt.columnBlob(1), stored_norm);
             if (!distanceWithinThreshold(distance, max_distance)) continue;
             try maybeInsertSearchResult(allocator, results, limit, vector_id, distance);
         }
     }
 
-    fn countVectorsInCollection(self: *Database, collection_name: []const u8) Error!usize {
+    fn countVectorsInCollection(self: *Database, collection_key: i64) Error!usize {
         var stmt = try self.prepareSchema(
             \\select count(*)
             \\from {s}_zova_vectors
-            \\where collection_name = ?
+            \\where collection_key = ?
         , .{self.storage_schema.prefix()});
         defer stmt.deinit();
 
-        try stmt.bindText(1, collection_name);
+        try stmt.bindInt64(1, collection_key);
         std.debug.assert((try stmt.step()) == .row);
         return @intCast(try sqliteI64ToU64(stmt.columnInt64(0)));
     }
@@ -1282,20 +1226,20 @@ pub const Database = struct {
         vector_id: []const u8,
     ) Error!VectorValuesOwned {
         var stmt = try self.prepareSchema(
-            \\select dimensions, "values"
+            \\select "values"
             \\from {s}_zova_vectors
-            \\where collection_name = ? and vector_id = ?
+            \\where collection_key = ? and vector_id = ?
         , .{self.storage_schema.prefix()});
         defer stmt.deinit();
 
-        try stmt.bindText(1, collection_name);
+        _ = collection_name;
+        try stmt.bindInt64(1, collection.collection_key);
         try stmt.bindText(2, vector_id);
 
         return switch (try stmt.step()) {
             .done => error.VectorNotFound,
             .row => {
-                try validateStoredVectorDimensions(collection.dimensions, stmt.columnInt64(0));
-                const values = try decodeValuesLe(allocator, collection.element_type, stmt.columnBlob(1), collection.dimensions);
+                const values = try decodeValuesLe(allocator, collection.element_type, stmt.columnBlob(0), collection.dimensions);
                 errdefer values.deinit(allocator);
                 try validateStoredVectorValues(collection, vectorValuesConst(values));
                 return values;
@@ -1310,94 +1254,34 @@ pub const Database = struct {
         vectors: []const VectorInput,
     ) Error!void {
         if (vectors.len == 0) return;
-
-        try self.ensureVectorNormsTable();
+        _ = collection_name;
 
         var stmt = try self.prepareSchema(
-            \\insert into {s}_zova_vectors (collection_name, vector_id, dimensions, "values")
+            \\insert into {s}_zova_vectors (collection_key, vector_id, "values", norm_squared)
             \\values (?, ?, ?, ?)
-            \\on conflict(collection_name, vector_id) do update set
-            \\  dimensions = excluded.dimensions,
-            \\  "values" = excluded."values"
-        , .{self.storage_schema.prefix()});
-        defer stmt.deinit();
-
-        var norm_stmt = try self.prepareSchema(
-            \\insert into {s}_zova_vector_norms (collection_name, vector_id, norm_squared)
-            \\values (?, ?, ?)
-            \\on conflict(collection_name, vector_id) do update set
+            \\on conflict(collection_key, vector_id) do update set
+            \\  "values" = excluded."values",
             \\  norm_squared = excluded.norm_squared
         , .{self.storage_schema.prefix()});
-        defer norm_stmt.deinit();
+        defer stmt.deinit();
+        var scratch: std.ArrayList(u8) = .empty;
+        defer scratch.deinit(std.heap.c_allocator);
 
         for (vectors) |vector| {
-            const encoded = try encodeValuesLe(std.heap.page_allocator, vector.values);
-            defer std.heap.page_allocator.free(encoded);
+            const encoded = switch (vector.values) {
+                .i8 => |values| std.mem.sliceAsBytes(values),
+                else => try encodeValuesLeInto(&scratch, vector.values),
+            };
             const norm_squared = try vectorNormSquared(vector.values);
 
-            try stmt.bindText(1, collection_name);
+            try stmt.bindInt64(1, collection.collection_key);
             try stmt.bindText(2, vector.id);
-            try stmt.bindInt64(3, @intCast(collection.dimensions));
-            try stmt.bindBlob(4, encoded);
+            try stmt.bindBlobBorrowed(3, encoded);
+            try stmt.bindDouble(4, norm_squared);
             std.debug.assert((try stmt.step()) == .done);
             try stmt.reset();
             try stmt.clearBindings();
-
-            try norm_stmt.bindText(1, collection_name);
-            try norm_stmt.bindText(2, vector.id);
-            try norm_stmt.bindDouble(3, norm_squared);
-            std.debug.assert((try norm_stmt.step()) == .done);
-            try norm_stmt.reset();
-            try norm_stmt.clearBindings();
         }
-    }
-
-    fn ensureVectorNormsTable(self: *Database) Error!void {
-        var stmt = try self.prepareSchema(
-            \\create table if not exists {s}_zova_vector_norms (
-            \\  collection_name text not null,
-            \\  vector_id text not null check (length(vector_id) > 0),
-            \\  norm_squared real not null check (norm_squared >= 0),
-            \\  primary key (collection_name, vector_id),
-            \\  foreign key (collection_name, vector_id) references _zova_vectors(collection_name, vector_id)
-            \\)
-        , .{self.storage_schema.prefix()});
-        defer stmt.deinit();
-        std.debug.assert((try stmt.step()) == .done);
-    }
-
-    fn hasVectorNormsTable(self: *Database) Error!bool {
-        var stmt = try self.prepareSchema(
-            \\select count(*)
-            \\from {s}sqlite_master
-            \\where type = 'table' and name = ?
-        , .{self.storage_schema.prefix()});
-        defer stmt.deinit();
-
-        try stmt.bindText(1, vector_norms_table);
-        std.debug.assert((try stmt.step()) == .row);
-        return stmt.columnInt64(0) == 1;
-    }
-
-    fn deleteVectorNormIfPresent(self: *Database, collection_name: []const u8, vector_id: []const u8) Error!void {
-        if (!try self.hasVectorNormsTable()) return;
-
-        var stmt = try self.prepareSchema("delete from {s}_zova_vector_norms where collection_name = ? and vector_id = ?", .{self.storage_schema.prefix()});
-        defer stmt.deinit();
-
-        try stmt.bindText(1, collection_name);
-        try stmt.bindText(2, vector_id);
-        std.debug.assert((try stmt.step()) == .done);
-    }
-
-    fn deleteVectorCollectionNormsIfPresent(self: *Database, collection_name: []const u8) Error!void {
-        if (!try self.hasVectorNormsTable()) return;
-
-        var stmt = try self.prepareSchema("delete from {s}_zova_vector_norms where collection_name = ?", .{self.storage_schema.prefix()});
-        defer stmt.deinit();
-
-        try stmt.bindText(1, collection_name);
-        std.debug.assert((try stmt.step()) == .done);
     }
 };
 
@@ -1563,7 +1447,7 @@ fn vectorElementTypeFromText(text: []const u8) Error!VectorElementType {
 
 fn loadVectorCollection(db: *Database, name: []const u8) Error!CollectionMetadata {
     var stmt = try db.prepareSchema(
-        \\select dimensions, metric, element_type
+        \\select collection_key, dimensions, metric, element_type
         \\from {s}_zova_vector_collections
         \\where name = ?
     , .{db.storage_schema.prefix()});
@@ -1573,12 +1457,13 @@ fn loadVectorCollection(db: *Database, name: []const u8) Error!CollectionMetadat
     return switch (try stmt.step()) {
         .done => error.VectorCollectionNotFound,
         .row => {
-            const dimensions_i64 = stmt.columnInt64(0);
+            const dimensions_i64 = stmt.columnInt64(1);
             if (dimensions_i64 <= 0 or dimensions_i64 > max_vector_dimensions) return error.NotZovaDatabase;
             return .{
+                .collection_key = stmt.columnInt64(0),
                 .dimensions = @intCast(dimensions_i64),
-                .metric = try vectorMetricFromText(stmt.columnText(1)),
-                .element_type = try vectorElementTypeFromText(stmt.columnText(2)),
+                .metric = try vectorMetricFromText(stmt.columnText(2)),
+                .element_type = try vectorElementTypeFromText(stmt.columnText(3)),
             };
         },
     };
@@ -1627,6 +1512,27 @@ fn encodeValuesLe(allocator: std.mem.Allocator, values: VectorValuesConst) Error
         .f16 => |f16_values| encodeF16Le(allocator, f16_values),
         .i8 => |i8_values| encodeI8(allocator, i8_values),
     };
+}
+
+fn encodeValuesLeInto(scratch: *std.ArrayList(u8), values: VectorValuesConst) Error![]const u8 {
+    const byte_len = switch (values) {
+        .f32 => |typed| typed.len * @sizeOf(f32),
+        .f16 => |typed| typed.len * @sizeOf(u16),
+        .i8 => |typed| typed.len,
+    };
+    try scratch.resize(std.heap.c_allocator, byte_len);
+    switch (values) {
+        .f32 => |typed| for (typed, 0..) |value, index| {
+            std.mem.writeInt(u32, scratch.items[index * 4 ..][0..4], @bitCast(value), .little);
+        },
+        .f16 => |typed| for (typed, 0..) |value, index| {
+            std.mem.writeInt(u16, scratch.items[index * 2 ..][0..2], value, .little);
+        },
+        .i8 => |typed| {
+            for (typed, 0..) |value, index| scratch.items[index] = @bitCast(value);
+        },
+    }
+    return scratch.items;
 }
 
 pub fn encodeF16Le(allocator: std.mem.Allocator, values: []const u16) Error![]u8 {
@@ -2084,6 +1990,16 @@ fn maybeInsertSearchResult(
             .id = id_copy,
             .distance = distance,
         });
+        if (limit > search_heap_threshold) siftSearchHeapUp(results.items, results.items.len - 1);
+        return;
+    }
+
+    if (limit > search_heap_threshold) {
+        if (!searchCandidateLessThan(id, distance, results.items[0])) return;
+        const id_copy = try allocator.dupe(u8, id);
+        allocator.free(results.items[0].id);
+        results.items[0] = .{ .id = id_copy, .distance = distance };
+        siftSearchHeapDown(results.items, 0);
         return;
     }
 
@@ -2096,6 +2012,30 @@ fn maybeInsertSearchResult(
         .id = id_copy,
         .distance = distance,
     };
+}
+
+fn siftSearchHeapUp(items: []VectorSearchResult, start_index: usize) void {
+    var index = start_index;
+    while (index != 0) {
+        const parent = (index - 1) / 2;
+        if (!searchResultLessThan({}, items[parent], items[index])) break;
+        std.mem.swap(VectorSearchResult, &items[parent], &items[index]);
+        index = parent;
+    }
+}
+
+fn siftSearchHeapDown(items: []VectorSearchResult, start_index: usize) void {
+    var index = start_index;
+    while (true) {
+        const left = index * 2 + 1;
+        if (left >= items.len) return;
+        const right = left + 1;
+        var worse_child = left;
+        if (right < items.len and searchResultLessThan({}, items[left], items[right])) worse_child = right;
+        if (!searchResultLessThan({}, items[index], items[worse_child])) return;
+        std.mem.swap(VectorSearchResult, &items[index], &items[worse_child]);
+        index = worse_child;
+    }
 }
 
 fn worstSearchResultIndex(items: []const VectorSearchResult) usize {

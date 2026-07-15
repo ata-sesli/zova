@@ -85,6 +85,20 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run Zova");
     run_step.dependOn(&run_cmd.step);
 
+    const storage_benchmark = b.addExecutable(.{
+        .name = "zova_storage_benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/storage_format.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    storage_benchmark.root_module.addImport("zova", zova_module);
+    const storage_benchmark_cmd = b.addRunArtifact(storage_benchmark);
+    storage_benchmark_cmd.addArg(b.pathJoin(&.{ b.cache_root.path orelse ".zig-cache", "storage-format-benchmark.zova" }));
+    const storage_benchmark_step = b.step("bench-storage", "Run deterministic graph/vector storage benchmark");
+    storage_benchmark_step.dependOn(&storage_benchmark_cmd.step);
+
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/root.zig"),
@@ -249,6 +263,7 @@ fn addSqlite(module: *std.Build.Module, b: *std.Build) void {
             // Promise FTS5 as part of Zova's vendored SQLite build, without
             // adding a Zova-specific search API.
             "-DSQLITE_ENABLE_FTS5",
+            "-DSQLITE_ENABLE_DBSTAT_VTAB",
         },
     });
     module.link_libc = true;

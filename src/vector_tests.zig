@@ -51,6 +51,27 @@ const testingSharedChunkCount = test_support.testingSharedChunkCount;
 const testingStreamObject = test_support.testingStreamObject;
 const testingWriteMetadata = test_support.testingWriteMetadata;
 
+const ExpectedVectorColumn = struct {
+    name: []const u8,
+    kind: []const u8,
+    not_null: i64,
+    primary_key: i64,
+};
+
+fn expectVectorTableColumns(db: *sqlite.Database, table_name: []const u8, expected: []const ExpectedVectorColumn) !void {
+    var stmt = try db.prepare("select name,type,\"notnull\",pk from pragma_table_info(?) order by cid");
+    defer stmt.deinit();
+    try stmt.bindText(1, table_name);
+    for (expected) |column| {
+        try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+        try std.testing.expectEqualStrings(column.name, stmt.columnText(0));
+        try std.testing.expectEqualStrings(column.kind, stmt.columnText(1));
+        try std.testing.expectEqual(column.not_null, stmt.columnInt64(2));
+        try std.testing.expectEqual(column.primary_key, stmt.columnInt64(3));
+    }
+    try std.testing.expectEqual(sqlite.Step.done, try stmt.step());
+}
+
 test "created zova database contains required vector tables" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -68,6 +89,41 @@ test "created zova database contains required vector tables" {
 
     try testingExpectTableCount(&raw, "_zova_vector_collections", 1);
     try testingExpectTableCount(&raw, "_zova_vectors", 1);
+    try testingExpectTableCount(&raw, "_zova_vector_norms", 0);
+}
+
+test "vector v8 schema uses integer keys inline norms and collection cascades" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-v8-schema.zova");
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try expectVectorTableColumns(&db.sqlite_db, "_zova_vector_collections", &.{
+        .{ .name = "collection_key", .kind = "INTEGER", .not_null = 0, .primary_key = 1 },
+        .{ .name = "name", .kind = "TEXT", .not_null = 1, .primary_key = 0 },
+        .{ .name = "dimensions", .kind = "INTEGER", .not_null = 1, .primary_key = 0 },
+        .{ .name = "metric", .kind = "TEXT", .not_null = 1, .primary_key = 0 },
+        .{ .name = "element_type", .kind = "TEXT", .not_null = 1, .primary_key = 0 },
+    });
+    try expectVectorTableColumns(&db.sqlite_db, "_zova_vectors", &.{
+        .{ .name = "vector_key", .kind = "INTEGER", .not_null = 0, .primary_key = 1 },
+        .{ .name = "collection_key", .kind = "INTEGER", .not_null = 1, .primary_key = 0 },
+        .{ .name = "vector_id", .kind = "TEXT", .not_null = 1, .primary_key = 0 },
+        .{ .name = "values", .kind = "BLOB", .not_null = 1, .primary_key = 0 },
+        .{ .name = "norm_squared", .kind = "REAL", .not_null = 0, .primary_key = 0 },
+    });
+
+    try db.createVectorCollection("bytes", .{ .dimensions = 2, .metric = .cosine, .element_type = .i8 });
+    try db.putVector("bytes", "one", .{ .i8 = &.{ 3, 4 } });
+    try db.exec("update _zova_vectors set norm_squared=null where vector_id='one'");
+    var results = try db.searchVectors(std.testing.allocator, "bytes", .{ .i8 = &.{ 3, 4 } }, 1);
+    defer results.deinit(std.testing.allocator);
+    try std.testing.expectApproxEqAbs(@as(f64, 0), results.items[0].distance, 0.000001);
+    try std.testing.expectError(error.Constraint, db.exec("update _zova_vectors set norm_squared=-1 where vector_id='one'"));
+    try db.deleteVectorCollection("bytes");
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_vectors"));
 }
 
 test "sqlite wrapper can inspect zova vector tables" {
@@ -205,8 +261,9 @@ test "i8 cosine vector writes cache stored norm squared" {
 
     var stmt = try db.prepare(
         \\select norm_squared
-        \\from _zova_vector_norms
-        \\where collection_name = 'bytes' and vector_id = 'doc'
+        \\from _zova_vectors v
+        \\join _zova_vector_collections c on c.collection_key = v.collection_key
+        \\where c.name = 'bytes' and v.vector_id = 'doc'
     );
     defer stmt.deinit();
 
@@ -250,7 +307,7 @@ test "typed vector collections store search validate and detect corrupt raw f16 
     try std.testing.expectError(error.VectorInvalid, db.putVector("half-cosine", "zero", .{ .f16 = &.{ 0x0000, 0x0000 } }));
 
     try db.exec("pragma ignore_check_constraints = on");
-    try db.exec("update _zova_vectors set \"values\" = x'003c' where collection_name = 'halves' and vector_id = 'near'");
+    try db.exec("update _zova_vectors set \"values\" = x'003c' where vector_id = 'near' and collection_key = (select collection_key from _zova_vector_collections where name = 'halves')");
     try db.exec("pragma ignore_check_constraints = off");
 
     try std.testing.expectError(error.VectorCorrupt, db.getVector(std.testing.allocator, "halves", "near"));
@@ -462,7 +519,7 @@ test "batch vector upsert validates before writing and last duplicate wins" {
     }
 
     try db.putVectors("chunks", &.{});
-    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from _zova_vectors where collection_name = 'chunks'"));
+    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from _zova_vectors where collection_key = (select collection_key from _zova_vector_collections where name = 'chunks')"));
 
     try std.testing.expectError(error.VectorCollectionNotFound, db.putVectors("missing", &batch));
     const invalid_id = [_]VectorInput{.{ .id = "_zova_bad", .values = .{ .f32 = &.{ 1.0, 2.0 } } }};
@@ -472,6 +529,36 @@ test "batch vector upsert validates before writing and last duplicate wins" {
     try db.putVectors("chunks", &[_]VectorInput{.{ .id = "tx", .values = .{ .f32 = &.{ 7.0, 8.0 } } }});
     try db.exec("commit");
     try std.testing.expect(try db.hasVector("chunks", "tx"));
+}
+
+test "vector delete many validates atomically joins transactions and is replay safe" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-delete-many.zova");
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.createVectorCollection("chunks", .{ .dimensions = 2, .metric = .l2 });
+    try db.putVectors("chunks", &.{
+        .{ .id = "a", .values = .{ .f32 = &.{ 1, 1 } } },
+        .{ .id = "b", .values = .{ .f32 = &.{ 2, 2 } } },
+        .{ .id = "c", .values = .{ .f32 = &.{ 3, 3 } } },
+    });
+
+    try std.testing.expectError(error.VectorInvalid, db.deleteVectors("chunks", &.{ "a", "_zova_invalid" }));
+    try std.testing.expect(try db.hasVector("chunks", "a"));
+    try db.deleteVectors("chunks", &.{ "a", "missing", "a" });
+    try std.testing.expect(!try db.hasVector("chunks", "a"));
+    try db.deleteVectors("chunks", &.{ "a", "missing" });
+
+    try db.beginImmediate();
+    try db.deleteVectors("chunks", &.{"b"});
+    try db.rollback();
+    try std.testing.expect(try db.hasVector("chunks", "b"));
+
+    try db.deleteVectors("chunks", &.{});
+    try std.testing.expectError(error.VectorCollectionNotFound, db.deleteVectors("missing", &.{}));
 }
 
 test "vector upsert delete and sql references remain application owned" {
@@ -561,7 +648,7 @@ test "delete vector collection removes private vectors and leaves sql references
     try db.deleteVectorCollection("chunks");
     try db.exec("commit");
 
-    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_vectors where collection_name = 'chunks'"));
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_vectors where collection_key = (select collection_key from _zova_vector_collections where name = 'chunks')"));
     try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_vector_collections where name = 'chunks'"));
     try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from chunks"));
     try std.testing.expectError(error.VectorCollectionNotFound, db.hasVector("chunks", "keep-ref-1"));
@@ -661,7 +748,7 @@ test "get vector detects corrupt private rows" {
 
     try db.exec("pragma ignore_check_constraints = on");
     try db.exec("update _zova_vectors set \"values\" = x'0000803f' where vector_id = 'bad-len'");
-    try db.exec("update _zova_vectors set dimensions = 3 where vector_id = 'bad-dim'");
+    try db.exec("update _zova_vector_collections set dimensions = 3 where name = 'chunks'");
 
     var inf_bytes = [_]u8{
         0x00, 0x00, 0x80, 0x3f,
@@ -1051,7 +1138,7 @@ test "multi i8 cosine search validates queries candidates and corrupt stored row
     try std.testing.expectError(error.VectorInvalid, db.searchMultiI8Cosine(std.testing.allocator, "bytes", .{ .queries = &valid, .mode = MultiI8CosineSearchMode.cbm_prefilter_min_cosine, .prefilter_query_index = 1, .prefilter_limit = 1 }, 1));
 
     try db.exec("pragma ignore_check_constraints = on");
-    try db.exec("update _zova_vectors set \"values\" = x'01' where collection_name = 'bytes' and vector_id = 'good'");
+    try db.exec("update _zova_vectors set \"values\" = x'01' where vector_id = 'good' and collection_key = (select collection_key from _zova_vector_collections where name = 'bytes')");
     try db.exec("pragma ignore_check_constraints = off");
     try std.testing.expectError(error.VectorCorrupt, db.searchMultiI8Cosine(std.testing.allocator, "bytes", .{ .queries = &valid, .mode = MultiI8CosineSearchMode.global_min_cosine }, 1));
 }
@@ -1080,7 +1167,7 @@ test "multi i8 cosine candidate scan ignores unselected corrupt rows" {
     }
 
     try db.exec("pragma ignore_check_constraints = on");
-    try db.exec("update _zova_vectors set \"values\" = x'01' where collection_name = 'bytes' and vector_id = 'doc-139'");
+    try db.exec("update _zova_vectors set \"values\" = x'01' where vector_id = 'doc-139' and collection_key = (select collection_key from _zova_vector_collections where name = 'bytes')");
     try db.exec("pragma ignore_check_constraints = off");
 
     var candidates: std.ArrayList([]const u8) = .empty;

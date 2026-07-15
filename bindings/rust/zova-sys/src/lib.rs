@@ -870,6 +870,14 @@ pub struct zova_vector_put_many_request {
 }
 
 #[repr(C)]
+pub struct zova_vector_delete_many_request {
+    pub db: *mut zova_database,
+    pub collection_name: *const c_char,
+    pub vector_ids: *const *const c_char,
+    pub vector_count: usize,
+}
+
+#[repr(C)]
 pub struct zova_vector_collection_delete_request {
     pub db: *mut zova_database,
     pub name: *const c_char,
@@ -1031,6 +1039,21 @@ pub struct zova_graph_edge_put_request {
     pub from_node_id: *const c_char,
     pub edge_type: *const c_char,
     pub to_node_id: *const c_char,
+}
+
+#[repr(C)]
+pub struct zova_graph_edge_input {
+    pub graph_name: *const c_char,
+    pub from_node_id: *const c_char,
+    pub edge_type: *const c_char,
+    pub to_node_id: *const c_char,
+}
+
+#[repr(C)]
+pub struct zova_graph_edge_delete_many_request {
+    pub db: *mut zova_database,
+    pub edges: *const zova_graph_edge_input,
+    pub edges_len: usize,
 }
 
 #[repr(C)]
@@ -1268,6 +1291,7 @@ extern "C" {
     ) -> zova_status;
     pub fn zova_vector_put(request: *const zova_vector_put_request) -> zova_status;
     pub fn zova_vector_put_many(request: *const zova_vector_put_many_request) -> zova_status;
+    pub fn zova_vector_delete_many(request: *const zova_vector_delete_many_request) -> zova_status;
     pub fn zova_vector_get(request: *const zova_vector_get_request) -> zova_status;
     pub fn zova_vector_exists(request: *const zova_vector_exists_request) -> zova_status;
     pub fn zova_vector_delete(request: *const zova_vector_delete_request) -> zova_status;
@@ -1334,6 +1358,9 @@ extern "C" {
     pub fn zova_graph_edge_get(request: *const zova_graph_edge_get_request) -> zova_status;
     pub fn zova_graph_edge_exists(request: *const zova_graph_edge_exists_request) -> zova_status;
     pub fn zova_graph_edge_delete(request: *const zova_graph_edge_delete_request) -> zova_status;
+    pub fn zova_graph_edge_delete_many(
+        request: *const zova_graph_edge_delete_many_request,
+    ) -> zova_status;
     pub fn zova_graph_neighbors(request: *const zova_graph_neighbors_request) -> zova_status;
     pub fn zova_graph_walk(request: *const zova_graph_walk_request) -> zova_status;
 }

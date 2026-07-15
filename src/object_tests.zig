@@ -1606,6 +1606,7 @@ test "object range reads report corrupt private rows" {
 
         const id = try db.putObject("missing chunk");
         var buffer: [16]u8 = undefined;
+        try db.exec("pragma foreign_keys = off");
         try db.exec("delete from _zova_chunks");
         try std.testing.expectError(error.ObjectCorrupt, db.readObjectRange(id, 0, &buffer));
     }
@@ -1802,6 +1803,7 @@ test "manifest and chunk reads report corrupt private rows" {
         defer db.deinit();
 
         const id = try db.putObject("missing chunk");
+        try db.exec("pragma foreign_keys = off");
         try db.exec("delete from _zova_chunks");
         try std.testing.expectError(error.ObjectCorrupt, db.objectManifest(std.testing.allocator, id));
     }
@@ -1903,6 +1905,7 @@ test "get object reports corruption for missing chunks" {
     defer db.deinit();
 
     const id = try db.putObject("missing chunk");
+    try db.exec("pragma foreign_keys = off");
     try db.exec("delete from _zova_chunks");
 
     try std.testing.expectError(error.ObjectCorrupt, db.getObject(std.testing.allocator, id));
@@ -1987,6 +1990,7 @@ test "get object reports corruption for full object hash mismatch" {
 
     const real_id = try db.putObject("real bytes");
     const wrong_id = objectId("wrong bytes");
+    try db.exec("pragma foreign_keys = off");
 
     {
         var update_object = try db.prepare("update _zova_objects set object_id = ? where object_id = ?");
@@ -2113,7 +2117,12 @@ test "put and get vector rows use little endian f32 blobs" {
     try std.testing.expectEqualStrings("chunk-1", vector.id);
     try std.testing.expectEqualSlices(f32, &.{ 1.0, -2.5, 0.25 }, vector.values.f32);
 
-    var raw = try db.prepare("select dimensions, \"values\" from _zova_vectors where collection_name = 'chunks' and vector_id = 'chunk-1'");
+    var raw = try db.prepare(
+        \\select c.dimensions, v."values"
+        \\from _zova_vectors v
+        \\join _zova_vector_collections c on c.collection_key = v.collection_key
+        \\where c.name = 'chunks' and v.vector_id = 'chunk-1'
+    );
     defer raw.deinit();
 
     try std.testing.expectEqual(sqlite.Step.row, try raw.step());
@@ -2559,6 +2568,7 @@ test "delete corrupt object with missing chunk data still cleans object and mani
     defer db.deinit();
 
     const id = try db.putObject("missing chunk during delete");
+    try db.exec("pragma foreign_keys = off");
     try db.exec("delete from _zova_chunks");
     try std.testing.expectError(error.ObjectCorrupt, db.getObject(std.testing.allocator, id));
 

@@ -68,6 +68,7 @@ clang -std=c99 \
     -fno-sanitize=undefined \
     -DSQLITE_THREADSAFE=1 \
     -DSQLITE_ENABLE_FTS5 \
+    -DSQLITE_ENABLE_DBSTAT_VTAB \
     -I "$BUNDLE" \
     -O2 \
     -c "$BUNDLE/sqlite3.c" \

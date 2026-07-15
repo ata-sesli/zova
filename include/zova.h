@@ -944,6 +944,13 @@ typedef struct zova_vector_put_many_request {
     size_t vectors_len;
 } zova_vector_put_many_request;
 
+typedef struct zova_vector_delete_many_request {
+    zova_database *db;
+    const char *collection_name;
+    const char *const *vector_ids;
+    size_t vector_count;
+} zova_vector_delete_many_request;
+
 typedef struct zova_vector_collection_delete_request {
     zova_database *db;
     const char *name;
@@ -1138,6 +1145,12 @@ typedef struct zova_graph_edge_put_many_request {
     const zova_graph_edge_input *edges;
     size_t edges_len;
 } zova_graph_edge_put_many_request;
+
+typedef struct zova_graph_edge_delete_many_request {
+    zova_database *db;
+    const zova_graph_edge_input *edges;
+    size_t edges_len;
+} zova_graph_edge_delete_many_request;
 
 typedef struct zova_graph_edge_get_request {
     zova_database *db;
@@ -1365,6 +1378,7 @@ zova_status zova_vector_collection_info_get(const zova_vector_collection_info_ge
 zova_status zova_vector_collections_list(const zova_vector_collections_list_request *request);
 zova_status zova_vector_put(const zova_vector_put_request *request);
 zova_status zova_vector_put_many(const zova_vector_put_many_request *request);
+zova_status zova_vector_delete_many(const zova_vector_delete_many_request *request);
 zova_status zova_vector_get(const zova_vector_get_request *request);
 zova_status zova_vector_exists(const zova_vector_exists_request *request);
 zova_status zova_vector_delete(const zova_vector_delete_request *request);
@@ -1416,6 +1430,7 @@ zova_status zova_graph_node_delete(const zova_graph_node_delete_request *request
 zova_status zova_graph_node_delete_many(const zova_graph_node_delete_many_request *request);
 zova_status zova_graph_edge_put(const zova_graph_edge_put_request *request);
 zova_status zova_graph_edge_put_many(const zova_graph_edge_put_many_request *request);
+zova_status zova_graph_edge_delete_many(const zova_graph_edge_delete_many_request *request);
 zova_status zova_graph_edge_get(const zova_graph_edge_get_request *request);
 zova_status zova_graph_edge_exists(const zova_graph_edge_exists_request *request);
 zova_status zova_graph_edge_delete(const zova_graph_edge_delete_request *request);

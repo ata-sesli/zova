@@ -12,9 +12,13 @@ host foundation.
 
 Current package version: `0.23.0`.
 
-Zova is pre-1.0. The current `.zova` file `format_version` is `7`. Format-7
-files require Zova 0.23.0 or newer. Older builds reject them; the format 6 to 7
+Zova is pre-1.0. The current `.zova` file `format_version` is `8`. Format-8
+files require a format-8-capable Zova build. Older builds reject them; the format 7 to 8
 transition is an intentional pre-1.0 compatibility boundary.
+
+Zova's bundled SQLite enables FTS5 and the read-only `dbstat` virtual table.
+`dbstat` is available for storage diagnostics; it is not a portable guarantee
+for databases opened through an unrelated system SQLite build.
 
 Zova `0.23.0` adds one optional bound graph store alongside the existing object
 and vector stores. Graph reads and writes route transparently after open, while

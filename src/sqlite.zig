@@ -455,6 +455,22 @@ pub const Statement = struct {
         if (rc != c.SQLITE_OK) return mapResultCode(rc);
     }
 
+    /// Bind blob bytes without copying them.
+    ///
+    /// The caller must keep `value` alive and unchanged until this parameter
+    /// is rebound or the statement is finalized. Resetting a statement keeps
+    /// the borrowed binding active. Empty values are bound as zero-length
+    /// blobs and do not borrow caller memory.
+    pub fn bindBlobBorrowed(self: *Statement, index: c_int, value: []const u8) Error!void {
+        if (value.len == 0) {
+            const rc = c.sqlite3_bind_zeroblob64(self.handle, index, 0);
+            if (rc != c.SQLITE_OK) return mapResultCode(rc);
+            return;
+        }
+        const rc = c.sqlite3_bind_blob64(self.handle, index, value.ptr, @intCast(value.len), null);
+        if (rc != c.SQLITE_OK) return mapResultCode(rc);
+    }
+
     /// Advance the statement once.
     ///
     /// Returns `.row` when a result row is available and `.done` when the
@@ -1035,6 +1051,51 @@ test "bound text and blob are copied from caller buffers" {
     try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x02, 0x03 }, select.columnBlob(1));
 }
 
+test "borrowed blob binding remains active through reset and ends on rebind" {
+    var db = try Database.open(":memory:");
+    defer db.deinit();
+
+    var first = [_]u8{ 1, 2, 3 };
+    var second = [_]u8{ 4, 5, 6 };
+    var select = try db.prepare("select ?1");
+
+    try select.bindBlobBorrowed(1, &first);
+    try std.testing.expectEqual(Step.row, try select.step());
+    try std.testing.expectEqualSlices(u8, &first, select.columnBlob(0));
+    try select.reset();
+    try std.testing.expectEqual(Step.row, try select.step());
+    try std.testing.expectEqualSlices(u8, &first, select.columnBlob(0));
+
+    try select.reset();
+    try select.bindBlobBorrowed(1, &second);
+    @memset(first[0..], 0xff);
+    try std.testing.expectEqual(Step.row, try select.step());
+    try std.testing.expectEqualSlices(u8, &second, select.columnBlob(0));
+
+    try select.reset();
+    try select.bindBlobBorrowed(1, &.{});
+    try std.testing.expectEqual(Step.row, try select.step());
+    try std.testing.expectEqual(@as(usize, 0), select.columnBlob(0).len);
+    select.deinit();
+    @memset(second[0..], 0xee);
+}
+
+test "bundled sqlite exposes dbstat for storage diagnostics" {
+    var db = try Database.open(":memory:");
+    defer db.deinit();
+    try db.exec("create table measured (id integer primary key, value text not null)");
+
+    var compile_option = try db.prepare("select sqlite_compileoption_used('ENABLE_DBSTAT_VTAB')");
+    defer compile_option.deinit();
+    try std.testing.expectEqual(Step.row, try compile_option.step());
+    try std.testing.expectEqual(@as(i64, 1), compile_option.columnInt64(0));
+
+    var pages = try db.prepare("select count(*) from dbstat where name='measured'");
+    defer pages.deinit();
+    try std.testing.expectEqual(Step.row, try pages.step());
+    try std.testing.expect(pages.columnInt64(0) > 0);
+}
+
 test "statement reports parameter count and named parameter index" {
     var db = try Database.open(":memory:");
     defer db.deinit();
@@ -1055,6 +1116,8 @@ test "invalid parameter indexes map to generic sqlite error" {
 
     try std.testing.expectError(error.SqliteError, select.bindInt64(0, 1));
     try std.testing.expectError(error.SqliteError, select.bindInt64(2, 1));
+    try std.testing.expectError(error.SqliteError, select.bindBlobBorrowed(0, &.{1}));
+    try std.testing.expectError(error.SqliteError, select.bindBlobBorrowed(2, &.{1}));
 }
 
 test "statement reset and clear bindings prevent stale values" {
