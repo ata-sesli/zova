@@ -28,13 +28,17 @@ Build order is:
 Inside the Zova repository, Zig is also used to regenerate the bundled C
 snapshot. The generated C is compiler output, not a human-authored API.
 
+Zova 0.24 uses `.zova` format 8 and does not migrate format-7 databases in
+place. Keep a compatible backup or use a 0.23.x build to export data before
+creating a format-8 database.
+
 ## Safety
 
 This crate exposes raw C ABI declarations. It does not manage pointer lifetime,
 owned buffers, or error mapping for you. The safe `zova` crate handles those
 details.
 
-`zova-sys` exposes the v0.23 low-level Rust surface for SQL callbacks.
+`zova-sys` exposes the v0.24 low-level Rust surface for SQL callbacks.
 It exposes the raw C ABI structs and functions for scalar SQL registration and
 trusted `.zovaext` bundle loading. Callbacks are unsafe FFI: argument pointers
 are borrowed for the duration of the call, text/blob/error result bytes are

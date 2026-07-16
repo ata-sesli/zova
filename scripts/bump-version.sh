@@ -40,6 +40,7 @@ replace_all() {
     [ -f "$file" ] || return 0
     old_re="$(printf '%s' "$old_version" | sed 's/[.[\*^$()+?{}|]/\\&/g')"
     tmp="${file}.tmp.$$"
+    cp -p "$file" "$tmp"
     sed "s/$old_re/$new_version/g" "$file" >"$tmp"
     mv "$tmp" "$file"
 }
@@ -50,6 +51,7 @@ replace_line() {
     replacement="$3"
     [ -f "$file" ] || return 0
     tmp="${file}.tmp.$$"
+    cp -p "$file" "$tmp"
     sed "s/$pattern/$replacement/" "$file" >"$tmp"
     mv "$tmp" "$file"
 }

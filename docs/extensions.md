@@ -18,7 +18,7 @@ must use `_zova_ext_<name>_...` names. For example, an extension named `trgm`
 owns `_zova_ext_trgm_docs`, `_zova_ext_trgm_postings`, and indexes with the
 same prefix.
 
-In the current v0.23.0 model, all installed extensions are required. Opening a
+In the current v0.24.0 model, all installed extensions are required. Opening a
 database with installed extension metadata but without matching process code
 fails during normal open. Diagnostic commands can still inspect the metadata so
 they can explain what is missing.
@@ -36,7 +36,7 @@ A `.zova` file may say which extensions it needs, but the application or CLI
 process decides which extension code is available. Zova never loads code just
 because a database asks for it.
 
-Zova supports three process-owned extension sources in v0.23.0:
+Zova supports three process-owned extension sources in v0.24.0:
 
 - bundled extensions shipped with Zova, such as `trgm`
 - app-registered native Zig extensions supplied by the application process
@@ -142,7 +142,7 @@ The registry is fixed for the lifetime of a database handle. To change the set
 of available external bundles, close the handle and open/create another one with
 the desired bundle list.
 
-The staged v0.23.0 integration model is the combination of app-defined scalar
+The staged v0.24.0 integration model is the combination of app-defined scalar
 SQL callbacks and explicitly trusted `.zovaext` bundles. Zova does not expose a
 raw `sqlite3 *` accessor as the extension path; code that needs SQL functions on
 Zova-owned connections should use `zova_database_register_function`, trusted
@@ -447,13 +447,13 @@ database close.
 
 Function flags are caller-selected. Zova does not silently add deterministic,
 direct-only, innocuous, or subtype behavior. Aggregate/window functions, SQLite
-subtype support, and unregister support are deferred beyond v0.23.
+subtype support, and unregister support are not exposed in v0.24.
 Callbacks that should not run from schema contexts such as generated columns,
 indexes, triggers, or views should be registered with
 `ZOVA_SQL_FUNCTION_DIRECT_ONLY`.
 
 This iteration exposes the low-level C ABI and `zova-sys` declarations only.
-Safe high-level Rust, Go, and Python callback APIs are deferred beyond v0.23.
+Safe high-level Rust, Go, and Python callback APIs are not exposed in v0.24.
 
 ## Operational Copies
 
@@ -483,7 +483,7 @@ skips that extension's private storage and reports bounded skipped counts. The
 destination is not marked as having that extension installed unless the hook
 explicitly rebuilt enough storage and asks Zova to write installed metadata.
 
-In v0.23.0, the bundled `trgm` extension has a valid-subset salvage hook. When
+In v0.24.0, the bundled `trgm` extension has a valid-subset salvage hook. When
 the source has required trgm private schema and metadata, the hook copies valid
 indexes, documents, and postings, rebuilds derived term rows, and asks Zova to
 mark `trgm` installed in the destination only after the rebuilt storage passes
@@ -532,7 +532,7 @@ const registry = zova.ExtensionRegistry.init(&.{ext});
 var db = try zova.Database.openWithExtensions("app.zova", registry);
 ```
 
-The v0.23 binding APIs can manage extensions already present in the process
+The v0.24 binding APIs can manage extensions already present in the process
 registry, such as bundled `trgm`, and the C ABI can open handles with explicitly
 trusted `.zovaext` bundles. Stable high-level Rust, Go, and Python extension
 authoring APIs are still deferred. The stable contract is the trust boundary:
@@ -559,9 +559,9 @@ The current release workflow keeps produced Zova artifacts on the existing
 platform matrix. External extension builders should treat deployment target,
 architecture, and ABI compatibility as part of their own release contract.
 
-## v0.23.0 Stability Limits
+## v0.24.0 Stability Limits
 
-v0.23.0 is the first downstream extension-platform release. The stable boundary
+v0.24.0 is the first downstream extension-platform release. The stable boundary
 is controlled scalar SQL callbacks through the C ABI, low-level `zova-sys`
 declarations, trusted local `.zovaext` bundle loading, and Zig registry
 injection for native hosts.

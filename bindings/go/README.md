@@ -59,7 +59,7 @@ flowchart LR
 After the Go module tag is pushed, applications can add the binding with:
 
 ```sh
-go get github.com/atasesli/zova/bindings/go@v0.23.0
+go get github.com/atasesli/zova/bindings/go@v0.24.0
 ```
 
 Import it as:
@@ -71,6 +71,10 @@ import zova "github.com/atasesli/zova/bindings/go"
 The Go package is source-only and uses cgo. It does not download or build the
 native Zova C ABI automatically during `go get`; your build environment must
 provide `zova.h` and `libzova_c.a`.
+
+Zova 0.24 uses `.zova` format 8 and does not migrate format-7 databases in
+place. Keep a compatible backup or use a 0.23.x build to export data before
+creating a format-8 database.
 
 ## Build Requirements
 
@@ -153,14 +157,14 @@ Because this module lives in the `bindings/go` subdirectory, the release tag
 must include that subdirectory prefix:
 
 ```sh
-git tag -a bindings/go/v0.23.0 -m "Zova Go bindings v0.23.0"
-git push origin bindings/go/v0.23.0
+git tag -a bindings/go/v0.24.0 -m "Zova Go bindings v0.24.0"
+git push origin bindings/go/v0.24.0
 ```
 
 After pushing the tag, ask the public Go module proxy to resolve it:
 
 ```sh
-GOPROXY=proxy.golang.org go list -m github.com/atasesli/zova/bindings/go@v0.23.0
+GOPROXY=proxy.golang.org go list -m github.com/atasesli/zova/bindings/go@v0.24.0
 ```
 
 The module path is:
@@ -256,7 +260,7 @@ The zero-value options verify destinations after copying. Use
 `RestoreOptions{NoVerify: true}` only when you will verify separately.
 
 Diagnostic recovery commands such as `zova doctor`, `zova salvage --dry-run`,
-and `zova salvage <source> <destination>` are CLI-first. In v0.23, CLI salvage
+and `zova salvage <source> <destination>` are CLI-first. In v0.24, CLI salvage
 copies valid core data and uses extension salvage hooks for extension-owned
 storage. The Go package does not expose typed doctor/salvage report APIs yet,
 and library code should not parse the human text output as a stable binding
@@ -267,7 +271,7 @@ contract.
 Go exposes lifecycle methods for extensions already present in the current
 process registry. The default registry includes bundled extensions such as
 `trgm`, so Go applications can install, list, check, and drop `trgm` directly.
-The v0.23 C ABI has scalar SQL callback registration and trusted `.zovaext`
+The v0.24 C ABI has scalar SQL callback registration and trusted `.zovaext`
 bundle loading, but this Go binding does not expose arbitrary Go callback
 registration yet. Use bundled/process-provided extensions or a host-owned C/Zig
 bridge when SQL functions must run on Zova-owned connections.
@@ -463,7 +467,7 @@ lower-is-better.
 
 ## Bound Stores
 
-In v0.23, a `.zova` file may be bound to one object store, one vector store,
+In v0.24, a `.zova` file may be bound to one object store, one vector store,
 and one graph store through the native Zig API or CLI. The Go object, vector,
 and graph methods above transparently use those stores after `Open`. Store
 create/bind/unbind/split

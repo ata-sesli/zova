@@ -736,7 +736,7 @@ test "cli doctor reports sql introduced corruption in realistic file" {
             \\set data = x'636f7272757074', size_bytes = 7
             \\where rowid = (select rowid from _zova_chunks limit 1);
             \\update _zova_vectors
-            \\set dimensions = 1, "values" = x'0000c07f'
+            \\set "values" = x'0000c07f'
             \\where vector_id = 'chunk-1';
         );
     }

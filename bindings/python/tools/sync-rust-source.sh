@@ -8,8 +8,8 @@ VERSION="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' "$ROOT/bindings/rust/Cargo.t
 mkdir -p "$DEST"
 rm -f "$DEST/Cargo.toml" "$DEST/Cargo.lock"
 
-rsync -a --delete "$ROOT/bindings/rust/zova/" "$DEST/zova/"
-rsync -a --delete \
+rsync -a --checksum --delete "$ROOT/bindings/rust/zova/" "$DEST/zova/"
+rsync -a --checksum --delete \
     --exclude native \
     "$ROOT/bindings/rust/zova-sys/" \
     "$DEST/zova-sys/"
@@ -42,7 +42,7 @@ for path in (zova_manifest, sys_manifest):
 PY
 
 mkdir -p "$DEST/zova-sys/native"
-rsync -a --delete "$ROOT/LICENSE" "$DEST/zova-sys/native/LICENSE"
+rsync -a --checksum --delete "$ROOT/LICENSE" "$DEST/zova-sys/native/LICENSE"
 "$ROOT/scripts/update-generated-c.sh" "$DEST/zova-sys/native/generated"
 
 rm -rf "$DEST/target" "$DEST/zova/target" "$DEST/zova-sys/target"
