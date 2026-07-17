@@ -1526,13 +1526,47 @@ int main(int argc, char **argv) {
 
     zova_database *db = NULL;
     zova_message open_message = {0};
-    zova_database_open_request create_req = {
+    zova_database_create_options_request create_req = {
         .path = db_path,
+        .page_size = 65536,
         .out_db = &db,
         .out_error_message = &open_message,
     };
-    expect_status(zova_database_create(&create_req), ZOVA_OK, "create database");
+    expect_status(zova_database_create_with_options(&create_req), ZOVA_OK, "create database with options");
     zova_message_free(&open_message);
+
+    zova_statement *page_size_statement = NULL;
+    expect_status(zova_database_prepare(&(zova_database_prepare_request){
+                      .db = db,
+                      .sql = "pragma page_size",
+                      .out_statement = &page_size_statement,
+                  }),
+                  ZOVA_OK,
+                  "prepare page size");
+    zova_step_result page_size_step = ZOVA_STEP_DONE;
+    expect_status(zova_statement_step(&(zova_statement_step_request){
+                      .statement = page_size_statement,
+                      .out_result = &page_size_step,
+                  }),
+                  ZOVA_OK,
+                  "step page size");
+    if (page_size_step != ZOVA_STEP_ROW) {
+        fprintf(stderr, "page size row missing\n");
+        exit(1);
+    }
+    int64_t page_size = 0;
+    expect_status(zova_statement_column_int64(&(zova_statement_column_int64_request){
+                      .statement = page_size_statement,
+                      .index = 0,
+                      .out_value = &page_size,
+                  }),
+                  ZOVA_OK,
+                  "read page size");
+    if (page_size != 65536) {
+        fprintf(stderr, "unexpected page size\n");
+        exit(1);
+    }
+    expect_status(zova_statement_finalize(page_size_statement), ZOVA_OK, "finalize page size");
 
     zova_database_exec_request exec_req = {
         .db = db,

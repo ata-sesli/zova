@@ -421,6 +421,14 @@ pub struct zova_database_open_request {
 }
 
 #[repr(C)]
+pub struct zova_database_create_options_request {
+    pub path: *const c_char,
+    pub page_size: u32,
+    pub out_db: *mut *mut zova_database,
+    pub out_error_message: *mut zova_message,
+}
+
+#[repr(C)]
 pub struct zova_database_open_options_request {
     pub path: *const c_char,
     pub flags: u32,
@@ -1125,6 +1133,9 @@ extern "C" {
     pub fn zova_vector_collection_list_free(list: *mut zova_vector_collection_list);
 
     pub fn zova_database_create(request: *const zova_database_open_request) -> zova_status;
+    pub fn zova_database_create_with_options(
+        request: *const zova_database_create_options_request,
+    ) -> zova_status;
     pub fn zova_database_create_with_extensions(
         request: *const zova_database_open_extensions_request,
     ) -> zova_status;

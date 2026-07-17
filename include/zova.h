@@ -488,6 +488,14 @@ typedef struct zova_database_open_request {
     zova_message *out_error_message;
 } zova_database_open_request;
 
+/* Fresh-database options. page_size = 0 preserves SQLite's default. */
+typedef struct zova_database_create_options_request {
+    const char *path;
+    uint32_t page_size;
+    zova_database **out_db;
+    zova_message *out_error_message;
+} zova_database_create_options_request;
+
 /*
  * Additive open options for existing .zova files. flags = 0 opens read/write.
  * ZOVA_OPEN_READ_ONLY opens the SQLite handle read-only. busy_timeout_ms = 0
@@ -1275,6 +1283,7 @@ void zova_graph_walk_results_free(zova_graph_walk_results *results);
 
 /* Database lifecycle, SQL passthrough, prepared statements, and conversion. */
 zova_status zova_database_create(const zova_database_open_request *request);
+zova_status zova_database_create_with_options(const zova_database_create_options_request *request);
 zova_status zova_database_create_with_extensions(const zova_database_open_extensions_request *request);
 zova_status zova_database_open(const zova_database_open_request *request);
 zova_status zova_database_open_with_options(const zova_database_open_options_request *request);

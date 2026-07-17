@@ -502,6 +502,13 @@ pub const zova_database_open_request = extern struct {
     out_error_message: ?*zova_message,
 };
 
+pub const zova_database_create_options_request = extern struct {
+    path: ?[*:0]const u8,
+    page_size: u32,
+    out_db: ?*?*zova_database,
+    out_error_message: ?*zova_message,
+};
+
 pub const zova_database_open_options_request = extern struct {
     path: ?[*:0]const u8,
     flags: u32,
@@ -1353,6 +1360,10 @@ pub fn zova_graph_walk_results_free(results: ?*zova_graph_walk_results) callconv
 
 pub fn zova_database_create(request: ?*const zova_database_open_request) callconv(.c) zova_status {
     return openDatabase(request, .create);
+}
+
+pub fn zova_database_create_with_options(request: ?*const zova_database_create_options_request) callconv(.c) zova_status {
+    return createDatabaseWithOptions(request);
 }
 
 pub fn zova_database_create_with_extensions(request: ?*const zova_database_open_extensions_request) callconv(.c) zova_status {
@@ -3002,6 +3013,26 @@ fn openDatabase(request: ?*const zova_database_open_request, mode: OpenMode) zov
         .create => zova.Database.create(std.mem.span(path)),
         .open => zova.Database.open(std.mem.span(path)),
     } catch |err| return failMessage(req.out_error_message, err);
+
+    const handle = allocator.create(DatabaseHandle) catch |err| {
+        db.deinit();
+        return failMessage(req.out_error_message, err);
+    };
+    handle.* = .{ .db = db };
+    out.* = @ptrCast(handle);
+    return .OK;
+}
+
+fn createDatabaseWithOptions(request: ?*const zova_database_create_options_request) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    clearMessage(req.out_error_message);
+    const out = req.out_db orelse return failMessage(req.out_error_message, error.InvalidArgument);
+    out.* = null;
+    const path = req.path orelse return failMessage(req.out_error_message, error.InvalidArgument);
+
+    var db = zova.Database.createWithOptions(std.mem.span(path), .{
+        .page_size = req.page_size,
+    }) catch |err| return failMessage(req.out_error_message, err);
 
     const handle = allocator.create(DatabaseHandle) catch |err| {
         db.deinit();

@@ -58,6 +58,7 @@ pub const ZOVA_SQL_FUNCTION_DETERMINISTIC = internal.ZOVA_SQL_FUNCTION_DETERMINI
 pub const ZOVA_SQL_FUNCTION_DIRECT_ONLY = internal.ZOVA_SQL_FUNCTION_DIRECT_ONLY;
 pub const ZOVA_SQL_FUNCTION_INNOCUOUS = internal.ZOVA_SQL_FUNCTION_INNOCUOUS;
 pub const zova_database_open_request = internal.zova_database_open_request;
+pub const zova_database_create_options_request = internal.zova_database_create_options_request;
 pub const zova_database_open_options_request = internal.zova_database_open_options_request;
 pub const zova_database_open_extensions_request = internal.zova_database_open_extensions_request;
 pub const zova_extension_bundle_request = internal.zova_extension_bundle_request;
@@ -247,6 +248,10 @@ export fn zova_graph_walk_results_free(results: ?*zova_graph_walk_results) callc
 
 export fn zova_database_create(request: ?*const zova_database_open_request) callconv(.c) zova_status {
     return internal.zova_database_create(request);
+}
+
+export fn zova_database_create_with_options(request: ?*const zova_database_create_options_request) callconv(.c) zova_status {
+    return internal.zova_database_create_with_options(request);
 }
 
 export fn zova_database_create_with_extensions(request: ?*const zova_database_open_extensions_request) callconv(.c) zova_status {

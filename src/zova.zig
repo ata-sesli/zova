@@ -139,6 +139,13 @@ pub fn objectChunkId(bytes: []const u8) ObjectChunkId {
 
 pub const Error = zova_error.Error;
 
+/// Options applied only while creating a fresh Zova database.
+pub const CreateOptions = struct {
+    /// SQLite page size selected before Zova creates its private schema.
+    /// Zero preserves SQLite's default page size.
+    page_size: u32 = 0,
+};
+
 pub const max_vector_dimensions = vector_impl.max_vector_dimensions;
 pub const VectorMetric = vector_impl.VectorMetric;
 pub const VectorElementType = vector_impl.VectorElementType;
@@ -470,6 +477,32 @@ pub fn salvageInstalledExtensions(
     return extension_impl.salvageInstalled(allocator, source, destination, registry, mode);
 }
 
+fn validateCreateOptions(options: CreateOptions) Error!void {
+    if (options.page_size == 0) return;
+    if (options.page_size < 512 or options.page_size > 65536 or
+        !std.math.isPowerOfTwo(options.page_size))
+    {
+        return error.InvalidArgument;
+    }
+}
+
+fn applyCreateOptions(db: *sqlite.Database, options: CreateOptions) Error!void {
+    if (options.page_size == 0) return;
+
+    var sql_buffer: [64]u8 = undefined;
+    const sql = std.fmt.bufPrintZ(&sql_buffer, "pragma page_size={d}", .{options.page_size}) catch
+        return error.InvalidArgument;
+    try db.exec(sql);
+
+    var query = try db.prepare("pragma page_size");
+    defer query.deinit();
+    if (try query.step() != .row or query.columnInt64(0) != options.page_size or
+        try query.step() != .done)
+    {
+        return error.SqliteError;
+    }
+}
+
 /// Owns one initialized `.zova` database.
 ///
 /// A Zova database is physically SQLite, but it must use the `.zova` extension
@@ -490,13 +523,25 @@ pub const Database = struct {
     /// private `_zova_meta` table, format version `8`, and the required
     /// object, vector, graph, and extension registry schemas.
     pub fn create(path: [:0]const u8) Error!Database {
-        return createWithExtensions(path, bundledExtensionRegistry());
+        return createWithOptionsAndExtensions(path, .{}, bundledExtensionRegistry());
+    }
+
+    /// Create a new initialized `.zova` database with fresh-file options.
+    pub fn createWithOptions(path: [:0]const u8, options: CreateOptions) Error!Database {
+        return createWithOptionsAndExtensions(path, options, bundledExtensionRegistry());
     }
 
     /// Create a new initialized `.zova` database with process-registered
     /// extension code available for later extension lifecycle calls.
     pub fn createWithExtensions(path: [:0]const u8, registry: ExtensionRegistry) Error!Database {
+        return createWithOptionsAndExtensions(path, .{}, registry);
+    }
+
+    /// Create a new initialized `.zova` database with fresh-file options and
+    /// process-registered extension code.
+    pub fn createWithOptionsAndExtensions(path: [:0]const u8, options: CreateOptions, registry: ExtensionRegistry) Error!Database {
         try registry.validate();
+        try validateCreateOptions(options);
         if (!isZovaPath(path)) return error.NotZovaPath;
 
         const io = defaultIo();
@@ -511,6 +556,7 @@ pub const Database = struct {
         var raw = try sqlite.Database.open(path);
         errdefer raw.deinit();
 
+        try applyCreateOptions(&raw, options);
         try enableForeignKeys(&raw);
         try initializeZovaSchema(&raw);
         try vector_sql.register(&raw);
@@ -4038,6 +4084,23 @@ test "create initializes and open validates zova database" {
         try std.testing.expectEqual(sqlite.Step.row, try select.step());
         try std.testing.expectEqualStrings("hello", select.columnText(0));
     }
+}
+
+test "create options apply page size before private schema initialization" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "page-size.zova");
+
+    var db = try Database.createWithOptions(db_path, .{ .page_size = 65536 });
+    defer db.deinit();
+
+    var page_size = try db.prepare("pragma page_size");
+    defer page_size.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try page_size.step());
+    try std.testing.expectEqual(@as(i64, 65536), page_size.columnInt64(0));
+    try std.testing.expectEqual(sqlite.Step.done, try page_size.step());
 }
 
 test "created zova database stores metadata" {
