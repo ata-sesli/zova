@@ -17,8 +17,10 @@ const edge_types = [_][]const u8{ "calls", "imports", "contains", "related" };
 const edge_offsets = [_]usize{ 1, 7, 31, 127 };
 
 const TraceCounter = struct {
-    endpoint_resolution_statements: usize = 0,
-    marked_resolver_seen: bool = false,
+    graph_endpoint_stage_steps: usize = 0,
+    graph_endpoint_resolution_statements: usize = 0,
+    graph_edge_insert_steps: usize = 0,
+    resolver_seen: bool = false,
 };
 
 fn traceCallback(mask: c_uint, context: ?*anyopaque, _: ?*anyopaque, sql_pointer: ?*anyopaque) callconv(.c) c_int {
@@ -26,15 +28,15 @@ fn traceCallback(mask: c_uint, context: ?*anyopaque, _: ?*anyopaque, sql_pointer
         const counter: *TraceCounter = @ptrCast(@alignCast(context.?));
         const sql: [*:0]const u8 = @ptrCast(sql_pointer.?);
         const sql_slice = std.mem.span(sql);
-        if (std.mem.indexOf(u8, sql_slice, "zova_graph_batch_resolve") != null) {
-            if (!counter.marked_resolver_seen) {
-                counter.marked_resolver_seen = true;
-                counter.endpoint_resolution_statements += 1;
+        if (std.mem.indexOf(u8, sql_slice, "zova_graph_endpoint_stage") != null) {
+            counter.graph_endpoint_stage_steps += 1;
+        } else if (std.mem.indexOf(u8, sql_slice, "zova_graph_batch_resolve") != null) {
+            if (!counter.resolver_seen) {
+                counter.resolver_seen = true;
+                counter.graph_endpoint_resolution_statements += 1;
             }
-        } else if (std.mem.indexOf(u8, sql_slice, "select count(*) from") != null and
-            std.mem.indexOf(u8, sql_slice, "_zova_graph_nodes") != null)
-        {
-            counter.endpoint_resolution_statements += 1;
+        } else if (std.mem.indexOf(u8, sql_slice, "zova_graph_edge_insert") != null) {
+            counter.graph_edge_insert_steps += 1;
         }
     }
     return 0;
@@ -197,7 +199,15 @@ pub fn main(init: std.process.Init) !void {
     try db.putGraphEdges(edges);
     const graph_put_ms = elapsedMs(graph_put_start);
     _ = zova.sqlite.c.sqlite3_trace_v2(db.sqlite_db.handle, 0, null, null);
-    std.debug.print("graph_put_many_ms={d:.6} graph_endpoint_resolution_statements={d}\n", .{ graph_put_ms, trace_counter.endpoint_resolution_statements });
+    std.debug.print(
+        "graph_put_many_ms={d:.6} graph_endpoint_stage_steps={d} graph_endpoint_resolution_statements={d} graph_edge_insert_steps={d}\n",
+        .{
+            graph_put_ms,
+            trace_counter.graph_endpoint_stage_steps,
+            trace_counter.graph_endpoint_resolution_statements,
+            trace_counter.graph_edge_insert_steps,
+        },
+    );
 
     var graph_samples: [single_samples]f64 = undefined;
     const root_id = node_ids[0];

@@ -63,7 +63,9 @@ fn expectTableColumns(db: *sqlite.Database, table_name: []const u8, expected: []
 }
 
 const GraphTraceCounter = struct {
-    node_resolution_statements: usize = 0,
+    graph_endpoint_stage_steps: usize = 0,
+    graph_endpoint_resolution_statements: usize = 0,
+    graph_edge_insert_steps: usize = 0,
     resolver_seen: bool = false,
 };
 
@@ -72,12 +74,20 @@ fn graphTraceCallback(mask: c_uint, context: ?*anyopaque, statement: ?*anyopaque
     const stmt: *sqlite.c.sqlite3_stmt = @ptrCast(@alignCast(statement.?));
     const sql_ptr = sqlite.c.sqlite3_sql(stmt) orelse return 0;
     const sql = std.mem.span(sql_ptr);
-    if (std.mem.indexOf(u8, sql, "zova_graph_batch_resolve") != null) {
-        const counter: *GraphTraceCounter = @ptrCast(@alignCast(context.?));
+    const counter: *GraphTraceCounter = @ptrCast(@alignCast(context.?));
+    if (std.mem.indexOf(u8, sql, "zova_graph_endpoint_stage") != null or
+        std.mem.indexOf(u8, sql, "insert or ignore into temp._zova_graph_batch_endpoints") != null)
+    {
+        counter.graph_endpoint_stage_steps += 1;
+    } else if (std.mem.indexOf(u8, sql, "zova_graph_batch_resolve") != null) {
         if (!counter.resolver_seen) {
             counter.resolver_seen = true;
-            counter.node_resolution_statements += 1;
+            counter.graph_endpoint_resolution_statements += 1;
         }
+    } else if (std.mem.indexOf(u8, sql, "zova_graph_edge_insert") != null or
+        std.mem.indexOf(u8, sql, "insert into main._zova_graph_edges") != null)
+    {
+        counter.graph_edge_insert_steps += 1;
     }
     return 0;
 }
@@ -468,24 +478,57 @@ test "graph edge batches resolve each graph's repeated endpoints once before wri
 
     try db.putGraphEdges(&.{
         .{ .graph_name = "app", .from_node_id = "a", .edge_type = "calls", .to_node_id = "b" },
+        .{ .graph_name = "app", .from_node_id = "a", .edge_type = "calls", .to_node_id = "b" },
         .{ .graph_name = "app", .from_node_id = "a", .edge_type = "imports", .to_node_id = "c" },
         .{ .graph_name = "app", .from_node_id = "b", .edge_type = "calls", .to_node_id = "c" },
         .{ .graph_name = "other", .from_node_id = "a", .edge_type = "calls", .to_node_id = "b" },
     });
-    try std.testing.expectEqual(@as(usize, 1), counter.node_resolution_statements);
+    try std.testing.expectEqual(@as(usize, 5), counter.graph_endpoint_stage_steps);
+    try std.testing.expectEqual(@as(usize, 1), counter.graph_endpoint_resolution_statements);
+    try std.testing.expectEqual(@as(usize, 5), counter.graph_edge_insert_steps);
+
+    var order = try db.sqlite_db.prepare(
+        \\select e.edge_type
+        \\from _zova_graph_edges e
+        \\join _zova_graphs g on g.graph_key = e.graph_key
+        \\where g.name = 'app'
+        \\order by e.created_order, e.edge_key
+    );
+    defer order.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try order.step());
+    try std.testing.expectEqualStrings("calls", order.columnText(0));
+    try std.testing.expectEqual(sqlite.Step.row, try order.step());
+    try std.testing.expectEqualStrings("imports", order.columnText(0));
+    try std.testing.expectEqual(sqlite.Step.row, try order.step());
+    try std.testing.expectEqualStrings("calls", order.columnText(0));
+    try std.testing.expectEqual(sqlite.Step.done, try order.step());
 
     const before = try db.graphInfo(std.testing.allocator, "app");
     defer {
         var owned = before;
         owned.deinit(std.testing.allocator);
     }
+    counter = .{};
     try std.testing.expectError(error.GraphNodeNotFound, db.putGraphEdges(&.{
         .{ .graph_name = "app", .from_node_id = "c", .edge_type = "calls", .to_node_id = "a" },
         .{ .graph_name = "app", .from_node_id = "missing", .edge_type = "calls", .to_node_id = "a" },
     }));
+    try std.testing.expectEqual(@as(usize, 3), counter.graph_endpoint_stage_steps);
+    try std.testing.expectEqual(@as(usize, 1), counter.graph_endpoint_resolution_statements);
+    try std.testing.expectEqual(@as(usize, 0), counter.graph_edge_insert_steps);
     var after = try db.graphInfo(std.testing.allocator, "app");
     defer after.deinit(std.testing.allocator);
     try std.testing.expectEqual(before.edge_count, after.edge_count);
+
+    counter = .{};
+    try db.begin();
+    try db.putGraphEdges(&.{.{ .graph_name = "app", .from_node_id = "c", .edge_type = "calls", .to_node_id = "a" }});
+    try std.testing.expect(try db.hasGraphEdge("app", "c", "calls", "a"));
+    try db.rollback();
+    try std.testing.expect(!try db.hasGraphEdge("app", "c", "calls", "a"));
+    try std.testing.expectEqual(@as(usize, 2), counter.graph_endpoint_stage_steps);
+    try std.testing.expectEqual(@as(usize, 1), counter.graph_endpoint_resolution_statements);
+    try std.testing.expectEqual(@as(usize, 1), counter.graph_edge_insert_steps);
 }
 
 test "graph batches ensure query indexes for direct ingestion" {
