@@ -30,7 +30,9 @@ fn traceCallback(mask: c_uint, context: ?*anyopaque, _: ?*anyopaque, sql_pointer
         const sql_slice = std.mem.span(sql);
         if (std.mem.indexOf(u8, sql_slice, "zova_graph_endpoint_stage") != null) {
             counter.graph_endpoint_stage_steps += 1;
-        } else if (std.mem.indexOf(u8, sql_slice, "zova_graph_batch_resolve") != null) {
+        } else if (std.mem.indexOf(u8, sql_slice, "zova_graph_batch_slot_resolve") != null or
+            std.mem.indexOf(u8, sql_slice, "zova_graph_batch_resolve") != null)
+        {
             if (!counter.resolver_seen) {
                 counter.resolver_seen = true;
                 counter.graph_endpoint_resolution_statements += 1;

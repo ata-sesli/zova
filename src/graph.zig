@@ -80,6 +80,32 @@ const GraphBatchEndpointSet = std.HashMap(
     std.hash_map.default_max_load_percentage,
 );
 
+const GraphBatchEndpointSlotMap = std.HashMap(
+    GraphBatchEndpoint,
+    usize,
+    GraphBatchEndpointContext,
+    std.hash_map.default_max_load_percentage,
+);
+
+const NormalizedGraphEdge = struct {
+    input: GraphEdgeInput,
+    from_slot: usize,
+    to_slot: usize,
+};
+
+const ResolvedGraphEndpoint = struct {
+    graph_key: i64,
+    node_key: i64,
+};
+
+const ResolvedGraphEndpointSlots = struct {
+    items: []?ResolvedGraphEndpoint,
+
+    fn deinit(self: *ResolvedGraphEndpointSlots) void {
+        std.heap.c_allocator.free(self.items);
+    }
+};
+
 const max_graph_name_bytes: usize = 128;
 const max_node_id_bytes: usize = 512;
 const max_edge_type_bytes: usize = 128;
@@ -625,33 +651,50 @@ pub const Database = struct {
     /// Both endpoints must already exist for every input. Exact duplicate edges
     /// are idempotent and retain their original insertion order.
     pub fn putGraphEdges(self: *Database, inputs: []const GraphEdgeInput) Error!void {
-        var endpoint_set = GraphBatchEndpointSet.init(std.heap.c_allocator);
-        defer endpoint_set.deinit();
-        var distinct_endpoints: std.ArrayList(GraphBatchEndpoint) = .empty;
-        defer distinct_endpoints.deinit(std.heap.c_allocator);
-
-        for (inputs) |input| {
-            try validateGraphName(input.graph_name);
-            try validateNodeId(input.from_node_id);
-            try validateNodeId(input.to_node_id);
-            try validateEdgeType(input.edge_type);
-
-            const endpoints = [_]GraphBatchEndpoint{
-                .{ .graph_name = input.graph_name, .node_id = input.from_node_id },
-                .{ .graph_name = input.graph_name, .node_id = input.to_node_id },
-            };
-            for (endpoints) |endpoint| {
-                const entry = try endpoint_set.getOrPut(endpoint);
-                if (!entry.found_existing) try distinct_endpoints.append(std.heap.c_allocator, endpoint);
-            }
-        }
         if (inputs.len == 0) return;
 
+        var graph_names = std.StringHashMap(void).init(std.heap.c_allocator);
+        defer graph_names.deinit();
+        var edge_types = std.StringHashMap(void).init(std.heap.c_allocator);
+        defer edge_types.deinit();
+        var endpoint_slots = GraphBatchEndpointSlotMap.init(std.heap.c_allocator);
+        defer endpoint_slots.deinit();
+        var distinct_endpoints: std.ArrayList(GraphBatchEndpoint) = .empty;
+        defer distinct_endpoints.deinit(std.heap.c_allocator);
+        const normalized_edges = try std.heap.c_allocator.alloc(NormalizedGraphEdge, inputs.len);
+        defer std.heap.c_allocator.free(normalized_edges);
+
+        for (inputs, 0..) |input, index| {
+            if (!graph_names.contains(input.graph_name)) {
+                try validateGraphName(input.graph_name);
+                try graph_names.put(input.graph_name, {});
+            }
+            if (!edge_types.contains(input.edge_type)) {
+                try validateEdgeType(input.edge_type);
+                try edge_types.put(input.edge_type, {});
+            }
+
+            const from_slot = try graphEndpointSlot(
+                &endpoint_slots,
+                &distinct_endpoints,
+                .{ .graph_name = input.graph_name, .node_id = input.from_node_id },
+            );
+            const to_slot = try graphEndpointSlot(
+                &endpoint_slots,
+                &distinct_endpoints,
+                .{ .graph_name = input.graph_name, .node_id = input.to_node_id },
+            );
+            normalized_edges[index] = .{
+                .input = input,
+                .from_slot = from_slot,
+                .to_slot = to_slot,
+            };
+        }
+
         try ensureGraphBatchIndexes(self);
-        try self.resolveGraphBatchEndpoints(inputs, distinct_endpoints.items, true);
-        defer self.clearGraphBatchEndpoints();
-        var endpoints = try self.loadResolvedBatchEndpoints(inputs);
-        defer endpoints.deinit();
+        var resolved_endpoints = try self.resolvePutGraphBatchEndpoints(distinct_endpoints.items);
+        defer resolved_endpoints.deinit();
+        defer self.clearPutGraphBatchEndpoints();
 
         var stmt = try self.prepareSchema(
             \\/* zova_graph_edge_insert */
@@ -670,15 +713,16 @@ pub const Database = struct {
         var next_orders: std.AutoHashMap(i64, i64) = .init(std.heap.c_allocator);
         defer next_orders.deinit();
 
-        for (inputs) |input| {
-            const graph_key = endpoints.graphKey(input.graph_name) orelse return error.GraphNotFound;
-            const from_node_key = endpoints.nodeKey(input.graph_name, input.from_node_id) orelse return error.GraphNodeNotFound;
-            const to_node_key = endpoints.nodeKey(input.graph_name, input.to_node_id) orelse return error.GraphNodeNotFound;
+        for (normalized_edges) |edge| {
+            const from_endpoint = resolved_endpoints.items[edge.from_slot] orelse return error.GraphNodeNotFound;
+            const to_endpoint = resolved_endpoints.items[edge.to_slot] orelse return error.GraphNodeNotFound;
+            if (from_endpoint.graph_key != to_endpoint.graph_key) return error.GraphInvalid;
+            const graph_key = from_endpoint.graph_key;
             const created_order = try nextGraphCreatedOrder(&next_order_stmt, &next_orders, graph_key);
             try stmt.bindInt64(1, graph_key);
-            try stmt.bindInt64(2, from_node_key);
-            try stmt.bindText(3, input.edge_type);
-            try stmt.bindInt64(4, to_node_key);
+            try stmt.bindInt64(2, from_endpoint.node_key);
+            try stmt.bindText(3, edge.input.edge_type);
+            try stmt.bindInt64(4, to_endpoint.node_key);
             try stmt.bindInt64(5, created_order);
             std.debug.assert((try stmt.step()) == .done);
             try stmt.reset();
@@ -809,6 +853,83 @@ pub const Database = struct {
             try stmt.reset();
             try stmt.clearBindings();
         }
+    }
+
+    fn graphEndpointSlot(
+        endpoint_slots: *GraphBatchEndpointSlotMap,
+        distinct_endpoints: *std.ArrayList(GraphBatchEndpoint),
+        endpoint: GraphBatchEndpoint,
+    ) Error!usize {
+        if (endpoint_slots.get(endpoint)) |slot| return slot;
+
+        try validateNodeId(endpoint.node_id);
+        const slot = distinct_endpoints.items.len;
+        try distinct_endpoints.append(std.heap.c_allocator, endpoint);
+        errdefer _ = distinct_endpoints.pop();
+        try endpoint_slots.put(endpoint, slot);
+        return slot;
+    }
+
+    fn resolvePutGraphBatchEndpoints(
+        self: *Database,
+        distinct_endpoints: []const GraphBatchEndpoint,
+    ) Error!ResolvedGraphEndpointSlots {
+        try self.sqlite_db.exec(
+            \\create temp table if not exists temp._zova_graph_put_batch_endpoints (
+            \\  slot integer primary key,
+            \\  graph_name text not null,
+            \\  node_id text not null
+            \\);
+            \\delete from temp._zova_graph_put_batch_endpoints;
+        );
+        errdefer self.clearPutGraphBatchEndpoints();
+
+        var insert_endpoint = try self.prepareSchema(
+            \\/* zova_graph_endpoint_stage */
+            \\insert into temp._zova_graph_put_batch_endpoints (slot, graph_name, node_id) values (?, ?, ?)
+        );
+        defer insert_endpoint.deinit();
+        for (distinct_endpoints, 0..) |endpoint, slot| {
+            try insert_endpoint.bindInt64(1, @intCast(slot));
+            try insert_endpoint.bindText(2, endpoint.graph_name);
+            try insert_endpoint.bindText(3, endpoint.node_id);
+            std.debug.assert((try insert_endpoint.step()) == .done);
+            try insert_endpoint.reset();
+            try insert_endpoint.clearBindings();
+        }
+
+        const items = try std.heap.c_allocator.alloc(?ResolvedGraphEndpoint, distinct_endpoints.len);
+        errdefer std.heap.c_allocator.free(items);
+        @memset(items, null);
+
+        var resolve = try self.prepareSchema(
+            \\/* zova_graph_batch_slot_resolve */
+            \\select batch.slot, g.graph_key, n.node_key
+            \\from temp._zova_graph_put_batch_endpoints batch
+            \\join {s}_zova_graphs g on g.name = batch.graph_name
+            \\join {s}_zova_graph_nodes n on n.graph_key = g.graph_key and n.node_id = batch.node_id
+        );
+        defer resolve.deinit();
+
+        var resolved_count: usize = 0;
+        while ((try resolve.step()) == .row) {
+            const raw_slot = resolve.columnInt64(0);
+            if (raw_slot < 0) return error.GraphInvalid;
+            const slot: usize = @intCast(raw_slot);
+            if (slot >= items.len or items[slot] != null) return error.GraphInvalid;
+            items[slot] = .{
+                .graph_key = resolve.columnInt64(1),
+                .node_key = resolve.columnInt64(2),
+            };
+            resolved_count += 1;
+        }
+        if (resolved_count != distinct_endpoints.len) return error.GraphNodeNotFound;
+
+        return .{ .items = items };
+    }
+
+    fn clearPutGraphBatchEndpoints(self: *Database) void {
+        self.sqlite_db.exec("delete from temp._zova_graph_put_batch_endpoints") catch {};
     }
 
     fn resolveGraphBatchEndpoints(

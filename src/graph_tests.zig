@@ -67,6 +67,7 @@ const GraphTraceCounter = struct {
     graph_endpoint_resolution_statements: usize = 0,
     graph_edge_insert_steps: usize = 0,
     resolver_seen: bool = false,
+    slot_resolver_seen: bool = false,
 };
 
 fn graphTraceCallback(mask: c_uint, context: ?*anyopaque, statement: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
@@ -79,6 +80,12 @@ fn graphTraceCallback(mask: c_uint, context: ?*anyopaque, statement: ?*anyopaque
         std.mem.indexOf(u8, sql, "insert or ignore into temp._zova_graph_batch_endpoints") != null)
     {
         counter.graph_endpoint_stage_steps += 1;
+    } else if (std.mem.indexOf(u8, sql, "zova_graph_batch_slot_resolve") != null) {
+        counter.slot_resolver_seen = true;
+        if (!counter.resolver_seen) {
+            counter.resolver_seen = true;
+            counter.graph_endpoint_resolution_statements += 1;
+        }
     } else if (std.mem.indexOf(u8, sql, "zova_graph_batch_resolve") != null) {
         if (!counter.resolver_seen) {
             counter.resolver_seen = true;
@@ -486,6 +493,15 @@ test "graph edge batches resolve each graph's repeated endpoints once before wri
     try std.testing.expectEqual(@as(usize, 5), counter.graph_endpoint_stage_steps);
     try std.testing.expectEqual(@as(usize, 1), counter.graph_endpoint_resolution_statements);
     try std.testing.expectEqual(@as(usize, 5), counter.graph_edge_insert_steps);
+    try std.testing.expect(counter.slot_resolver_seen);
+    try std.testing.expect(try db.hasGraphEdge("other", "a", "calls", "b"));
+
+    var legacy_resolved_table = try db.sqlite_db.prepare(
+        "select count(*) from sqlite_temp_master where type = 'table' and name = '_zova_graph_batch_resolved'",
+    );
+    defer legacy_resolved_table.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try legacy_resolved_table.step());
+    try std.testing.expectEqual(@as(i64, 0), legacy_resolved_table.columnInt64(0));
 
     var order = try db.sqlite_db.prepare(
         \\select e.edge_type
@@ -513,6 +529,12 @@ test "graph edge batches resolve each graph's repeated endpoints once before wri
         .{ .graph_name = "app", .from_node_id = "c", .edge_type = "calls", .to_node_id = "a" },
         .{ .graph_name = "app", .from_node_id = "missing", .edge_type = "calls", .to_node_id = "a" },
     }));
+    var staged_after_error = try db.sqlite_db.prepare(
+        "select count(*) from temp._zova_graph_put_batch_endpoints",
+    );
+    defer staged_after_error.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try staged_after_error.step());
+    try std.testing.expectEqual(@as(i64, 0), staged_after_error.columnInt64(0));
     try std.testing.expectEqual(@as(usize, 3), counter.graph_endpoint_stage_steps);
     try std.testing.expectEqual(@as(usize, 1), counter.graph_endpoint_resolution_statements);
     try std.testing.expectEqual(@as(usize, 0), counter.graph_edge_insert_steps);
