@@ -93,6 +93,57 @@ const NormalizedGraphEdge = struct {
     to_slot: usize,
 };
 
+const GraphNodeKeyTuple = struct {
+    graph_key: i64,
+    node_id: []const u8,
+};
+
+const GraphNodeKeyTupleContext = struct {
+    pub fn hash(_: GraphNodeKeyTupleContext, value: GraphNodeKeyTuple) u64 {
+        return std.hash.Wyhash.hash(@bitCast(value.graph_key), value.node_id);
+    }
+
+    pub fn eql(_: GraphNodeKeyTupleContext, left: GraphNodeKeyTuple, right: GraphNodeKeyTuple) bool {
+        return left.graph_key == right.graph_key and std.mem.eql(u8, left.node_id, right.node_id);
+    }
+};
+
+const GraphNodeKeySlotMap = std.HashMap(
+    GraphNodeKeyTuple,
+    usize,
+    GraphNodeKeyTupleContext,
+    std.hash_map.default_max_load_percentage,
+);
+
+const GraphEdgeKeyTuple = struct {
+    graph_key: i64,
+    from_node_key: i64,
+    edge_type: []const u8,
+    to_node_key: i64,
+};
+
+const GraphEdgeKeyTupleContext = struct {
+    pub fn hash(_: GraphEdgeKeyTupleContext, value: GraphEdgeKeyTuple) u64 {
+        var digest = std.hash.Wyhash.hash(@bitCast(value.graph_key), std.mem.asBytes(&value.from_node_key));
+        digest = std.hash.Wyhash.hash(digest, value.edge_type);
+        return std.hash.Wyhash.hash(digest, std.mem.asBytes(&value.to_node_key));
+    }
+
+    pub fn eql(_: GraphEdgeKeyTupleContext, left: GraphEdgeKeyTuple, right: GraphEdgeKeyTuple) bool {
+        return left.graph_key == right.graph_key and
+            left.from_node_key == right.from_node_key and
+            left.to_node_key == right.to_node_key and
+            std.mem.eql(u8, left.edge_type, right.edge_type);
+    }
+};
+
+const GraphEdgeKeySlotMap = std.HashMap(
+    GraphEdgeKeyTuple,
+    usize,
+    GraphEdgeKeyTupleContext,
+    std.hash_map.default_max_load_percentage,
+);
+
 const ResolvedGraphEndpoint = struct {
     graph_key: i64,
     node_key: i64,
@@ -297,6 +348,122 @@ pub const GraphNeighborList = struct {
     pub fn deinit(self: *GraphNeighborList, allocator: std.mem.Allocator) void {
         for (self.items) |*item| item.deinit(allocator);
         allocator.free(self.items);
+    }
+};
+
+pub const GraphKeyedNeighbor = struct {
+    edge_key: i64,
+    neighbor_node_key: i64,
+    node_id: []u8,
+    kind: []u8,
+    edge_type: []u8,
+
+    pub fn deinit(self: *GraphKeyedNeighbor, allocator: std.mem.Allocator) void {
+        allocator.free(self.node_id);
+        allocator.free(self.kind);
+        allocator.free(self.edge_type);
+    }
+};
+
+pub const GraphKeyedNeighborList = struct {
+    items: []GraphKeyedNeighbor,
+
+    pub fn deinit(self: *GraphKeyedNeighborList, allocator: std.mem.Allocator) void {
+        for (self.items) |*item| item.deinit(allocator);
+        allocator.free(self.items);
+    }
+};
+
+pub const GraphKeyedNodeLookup = struct {
+    found: bool,
+    node_key: i64,
+    node_id: ?[]u8 = null,
+    kind: ?[]u8 = null,
+    created_order: i64 = 0,
+
+    pub fn deinit(self: *GraphKeyedNodeLookup, allocator: std.mem.Allocator) void {
+        if (self.node_id) |value| allocator.free(value);
+        if (self.kind) |value| allocator.free(value);
+    }
+};
+
+pub const GraphKeyedNodeLookupList = struct {
+    items: []GraphKeyedNodeLookup,
+    pub fn deinit(self: *GraphKeyedNodeLookupList, allocator: std.mem.Allocator) void {
+        for (self.items) |*item| item.deinit(allocator);
+        allocator.free(self.items);
+    }
+};
+
+pub const GraphKeyedEdgeLookup = struct {
+    found: bool,
+    edge_key: i64,
+    source_node_key: i64 = 0,
+    edge_type: ?[]u8 = null,
+    target_node_key: i64 = 0,
+    created_order: i64 = 0,
+
+    pub fn deinit(self: *GraphKeyedEdgeLookup, allocator: std.mem.Allocator) void {
+        if (self.edge_type) |value| allocator.free(value);
+    }
+};
+
+pub const GraphKeyedEdgeLookupList = struct {
+    items: []GraphKeyedEdgeLookup,
+    pub fn deinit(self: *GraphKeyedEdgeLookupList, allocator: std.mem.Allocator) void {
+        for (self.items) |*item| item.deinit(allocator);
+        allocator.free(self.items);
+    }
+};
+
+pub const GraphScanCursor = struct {
+    created_order: i64 = 0,
+    key: i64 = 0,
+};
+
+pub const GraphScanOptions = struct {
+    graph_name: []const u8 = default_graph_name,
+    node_after: GraphScanCursor = .{},
+    edge_after: GraphScanCursor = .{},
+    node_limit: usize = 0,
+    edge_limit: usize = 0,
+};
+
+pub const GraphScanNode = struct {
+    node_key: i64,
+    node_id: []u8,
+    kind: []u8,
+    created_order: i64,
+
+    pub fn deinit(self: *GraphScanNode, allocator: std.mem.Allocator) void {
+        allocator.free(self.node_id);
+        allocator.free(self.kind);
+    }
+};
+
+pub const GraphScanEdge = struct {
+    edge_key: i64,
+    source_node_key: i64,
+    edge_type: []u8,
+    target_node_key: i64,
+    created_order: i64,
+
+    pub fn deinit(self: *GraphScanEdge, allocator: std.mem.Allocator) void {
+        allocator.free(self.edge_type);
+    }
+};
+
+pub const GraphScanResult = struct {
+    nodes: []GraphScanNode,
+    edges: []GraphScanEdge,
+    has_more_nodes: bool,
+    has_more_edges: bool,
+
+    pub fn deinit(self: *GraphScanResult, allocator: std.mem.Allocator) void {
+        for (self.nodes) |*node| node.deinit(allocator);
+        allocator.free(self.nodes);
+        for (self.edges) |*edge| edge.deinit(allocator);
+        allocator.free(self.edges);
     }
 };
 
@@ -547,6 +714,96 @@ pub const Database = struct {
         }
     }
 
+    /// Upsert graph nodes and return one opaque database-local key per input.
+    pub fn putGraphNodesKeyed(self: *Database, inputs: []const GraphNodeInput, out_keys: []i64) Error!void {
+        if (out_keys.len != inputs.len) return error.InvalidArgument;
+        var graph_keys: std.StringHashMap(i64) = .init(std.heap.c_allocator);
+        defer graph_keys.deinit();
+        var key_slots = GraphNodeKeySlotMap.init(std.heap.c_allocator);
+        defer key_slots.deinit();
+        const input_slots = try std.heap.c_allocator.alloc(usize, inputs.len);
+        defer std.heap.c_allocator.free(input_slots);
+        var distinct_key_count: usize = 0;
+        for (inputs, input_slots) |input, *input_slot| {
+            try validateGraphName(input.graph_name);
+            try validateNodeId(input.node_id);
+            try validateNodeKind(input.kind);
+            if (input.target_namespace) |value| try validateOptionalText(value);
+            if (input.target_ref) |value| try validateOptionalText(value);
+            if (!graph_keys.contains(input.graph_name)) {
+                try graph_keys.put(input.graph_name, try self.graphKey(input.graph_name));
+            }
+            const graph_key = graph_keys.get(input.graph_name) orelse return error.GraphNotFound;
+            const result = try key_slots.getOrPut(.{ .graph_key = graph_key, .node_id = input.node_id });
+            if (!result.found_existing) {
+                result.value_ptr.* = distinct_key_count;
+                distinct_key_count += 1;
+            }
+            input_slot.* = result.value_ptr.*;
+        }
+        if (inputs.len == 0) return;
+
+        const resolved_keys = try std.heap.c_allocator.alloc(?i64, distinct_key_count);
+        defer std.heap.c_allocator.free(resolved_keys);
+        @memset(resolved_keys, null);
+        var preload = try self.prepareSchema(
+            \\/* zova_graph_node_key_preload */
+            \\select node_id,node_key from {s}_zova_graph_nodes where graph_key=?
+        );
+        defer preload.deinit();
+        var graph_key_iterator = graph_keys.valueIterator();
+        while (graph_key_iterator.next()) |graph_key| {
+            try preload.bindInt64(1, graph_key.*);
+            while ((try preload.step()) == .row) {
+                const slot = key_slots.get(.{ .graph_key = graph_key.*, .node_id = preload.columnText(0) }) orelse continue;
+                const node_key = preload.columnInt64(1);
+                if (node_key <= 0) return error.GraphInvalid;
+                resolved_keys[slot] = node_key;
+            }
+            try preload.reset();
+            try preload.clearBindings();
+        }
+
+        try ensureGraphBatchIndexes(self);
+        var stmt = try self.prepareSchema(
+            \\insert into {s}_zova_graph_nodes
+            \\  (graph_key, node_id, kind, target_type, target_namespace, target_ref, created_order)
+            \\values (?, ?, ?, ?, ?, ?, ?)
+            \\on conflict(graph_key, node_id) do update set
+            \\  kind = excluded.kind,
+            \\  target_type = excluded.target_type,
+            \\  target_namespace = excluded.target_namespace,
+            \\  target_ref = excluded.target_ref
+        );
+        defer stmt.deinit();
+        var next_order_stmt = try self.prepareSchema(
+            \\select coalesce(max(created_order), 0) + 1
+            \\from {s}_zova_graph_nodes
+            \\where graph_key = ?
+        );
+        defer next_order_stmt.deinit();
+        var next_orders: std.AutoHashMap(i64, i64) = .init(std.heap.c_allocator);
+        defer next_orders.deinit();
+
+        for (inputs, input_slots, out_keys) |input, slot, *out_key| {
+            const graph_key = graph_keys.get(input.graph_name) orelse return error.GraphNotFound;
+            const created_order = try nextGraphCreatedOrder(&next_order_stmt, &next_orders, graph_key);
+            try bindGraphNodeInput(&stmt, graph_key, input, created_order);
+            if ((try stmt.step()) != .done) return error.GraphInvalid;
+            if (resolved_keys[slot]) |node_key| {
+                out_key.* = node_key;
+            } else {
+                if (self.sqlite_db.changes() != 1) return error.GraphInvalid;
+                const node_key = self.sqlite_db.lastInsertRowId();
+                if (node_key <= 0) return error.GraphInvalid;
+                resolved_keys[slot] = node_key;
+                out_key.* = node_key;
+            }
+            try stmt.reset();
+            try stmt.clearBindings();
+        }
+    }
+
     pub fn getGraphNode(self: *Database, allocator: std.mem.Allocator, graph_name: []const u8, node_id: []const u8) Error!GraphNode {
         const resolved = try self.getGraphNodeWithKey(allocator, graph_name, node_id);
         return resolved.node;
@@ -727,6 +984,141 @@ pub const Database = struct {
             std.debug.assert((try stmt.step()) == .done);
             try stmt.reset();
             try stmt.clearBindings();
+        }
+    }
+
+    /// Insert graph edges and return one opaque database-local key per input.
+    pub fn putGraphEdgesKeyed(self: *Database, inputs: []const GraphEdgeInput, out_keys: []i64) Error!void {
+        if (out_keys.len != inputs.len) return error.InvalidArgument;
+        if (inputs.len == 0) return;
+
+        var graph_names = std.StringHashMap(void).init(std.heap.c_allocator);
+        defer graph_names.deinit();
+        var edge_types = std.StringHashMap(void).init(std.heap.c_allocator);
+        defer edge_types.deinit();
+        var endpoint_slots = GraphBatchEndpointSlotMap.init(std.heap.c_allocator);
+        defer endpoint_slots.deinit();
+        var distinct_endpoints: std.ArrayList(GraphBatchEndpoint) = .empty;
+        defer distinct_endpoints.deinit(std.heap.c_allocator);
+        const normalized_edges = try std.heap.c_allocator.alloc(NormalizedGraphEdge, inputs.len);
+        defer std.heap.c_allocator.free(normalized_edges);
+
+        for (inputs, 0..) |input, index| {
+            if (!graph_names.contains(input.graph_name)) {
+                try validateGraphName(input.graph_name);
+                try graph_names.put(input.graph_name, {});
+            }
+            if (!edge_types.contains(input.edge_type)) {
+                try validateEdgeType(input.edge_type);
+                try edge_types.put(input.edge_type, {});
+            }
+            normalized_edges[index] = .{
+                .input = input,
+                .from_slot = try graphEndpointSlot(&endpoint_slots, &distinct_endpoints, .{
+                    .graph_name = input.graph_name,
+                    .node_id = input.from_node_id,
+                }),
+                .to_slot = try graphEndpointSlot(&endpoint_slots, &distinct_endpoints, .{
+                    .graph_name = input.graph_name,
+                    .node_id = input.to_node_id,
+                }),
+            };
+        }
+
+        try ensureGraphBatchIndexes(self);
+        var resolved_endpoints = try self.resolvePutGraphBatchEndpoints(distinct_endpoints.items);
+        defer resolved_endpoints.deinit();
+        defer self.clearPutGraphBatchEndpoints();
+
+        var key_slots = GraphEdgeKeySlotMap.init(std.heap.c_allocator);
+        defer key_slots.deinit();
+        const input_key_slots = try std.heap.c_allocator.alloc(usize, normalized_edges.len);
+        defer std.heap.c_allocator.free(input_key_slots);
+        var affected_graph_keys = std.AutoHashMap(i64, void).init(std.heap.c_allocator);
+        defer affected_graph_keys.deinit();
+        var distinct_key_count: usize = 0;
+        for (normalized_edges, input_key_slots) |edge, *input_key_slot| {
+            const from = resolved_endpoints.items[edge.from_slot] orelse return error.GraphNodeNotFound;
+            const to = resolved_endpoints.items[edge.to_slot] orelse return error.GraphNodeNotFound;
+            if (from.graph_key != to.graph_key) return error.GraphInvalid;
+            try affected_graph_keys.put(from.graph_key, {});
+            const result = try key_slots.getOrPut(.{
+                .graph_key = from.graph_key,
+                .from_node_key = from.node_key,
+                .edge_type = edge.input.edge_type,
+                .to_node_key = to.node_key,
+            });
+            if (!result.found_existing) {
+                result.value_ptr.* = distinct_key_count;
+                distinct_key_count += 1;
+            }
+            input_key_slot.* = result.value_ptr.*;
+        }
+        const resolved_keys = try std.heap.c_allocator.alloc(?i64, distinct_key_count);
+        defer std.heap.c_allocator.free(resolved_keys);
+        @memset(resolved_keys, null);
+        var preload = try self.prepareSchema(
+            \\/* zova_graph_edge_key_preload */
+            \\select from_node_key,edge_type,to_node_key,edge_key
+            \\from {s}_zova_graph_edges where graph_key=?
+        );
+        defer preload.deinit();
+        var affected_graph_key_iterator = affected_graph_keys.keyIterator();
+        while (affected_graph_key_iterator.next()) |graph_key| {
+            try preload.bindInt64(1, graph_key.*);
+            while ((try preload.step()) == .row) {
+                const slot = key_slots.get(.{
+                    .graph_key = graph_key.*,
+                    .from_node_key = preload.columnInt64(0),
+                    .edge_type = preload.columnText(1),
+                    .to_node_key = preload.columnInt64(2),
+                }) orelse continue;
+                const edge_key = preload.columnInt64(3);
+                if (edge_key <= 0) return error.GraphInvalid;
+                resolved_keys[slot] = edge_key;
+            }
+            try preload.reset();
+            try preload.clearBindings();
+        }
+
+        var insert = try self.prepareSchema(
+            \\/* zova_graph_edge_insert */
+            \\insert into {s}_zova_graph_edges (graph_key, from_node_key, edge_type, to_node_key, created_order)
+            \\values (?, ?, ?, ?, ?)
+            \\on conflict(graph_key, from_node_key, edge_type, to_node_key) do nothing
+        );
+        defer insert.deinit();
+        var next_order_stmt = try self.prepareSchema(
+            \\select coalesce(max(created_order), 0) + 1
+            \\from {s}_zova_graph_edges
+            \\where graph_key = ?
+        );
+        defer next_order_stmt.deinit();
+        var next_orders: std.AutoHashMap(i64, i64) = .init(std.heap.c_allocator);
+        defer next_orders.deinit();
+
+        for (normalized_edges, input_key_slots, out_keys) |edge, key_slot, *out_key| {
+            const from = resolved_endpoints.items[edge.from_slot] orelse return error.GraphNodeNotFound;
+            const to = resolved_endpoints.items[edge.to_slot] orelse return error.GraphNodeNotFound;
+            if (from.graph_key != to.graph_key) return error.GraphInvalid;
+            const created_order = try nextGraphCreatedOrder(&next_order_stmt, &next_orders, from.graph_key);
+            if (resolved_keys[key_slot]) |edge_key| {
+                out_key.* = edge_key;
+                continue;
+            }
+            try insert.bindInt64(1, from.graph_key);
+            try insert.bindInt64(2, from.node_key);
+            try insert.bindText(3, edge.input.edge_type);
+            try insert.bindInt64(4, to.node_key);
+            try insert.bindInt64(5, created_order);
+            if ((try insert.step()) != .done) return error.GraphInvalid;
+            if (self.sqlite_db.changes() != 1) return error.GraphInvalid;
+            const edge_key = self.sqlite_db.lastInsertRowId();
+            if (edge_key <= 0) return error.GraphInvalid;
+            resolved_keys[key_slot] = edge_key;
+            out_key.* = edge_key;
+            try insert.reset();
+            try insert.clearBindings();
         }
     }
 
@@ -1121,6 +1513,171 @@ pub const Database = struct {
         return .{ .items = try items.toOwnedSlice(allocator) };
     }
 
+    pub fn graphNeighborsKeyed(self: *Database, allocator: std.mem.Allocator, options: GraphNeighborsOptions) Error!GraphKeyedNeighborList {
+        try validateGraphName(options.graph_name);
+        try validateNodeId(options.node_id);
+        if (options.edge_type) |edge_type| try validateEdgeType(edge_type);
+        const sqlite_limit = try sqliteLimit(options.limit);
+        var stmt = switch (options.direction) {
+            .outgoing => if (options.edge_type == null)
+                try self.prepareSchema(
+                    \\select e.edge_key,n.node_key,n.node_id,n.kind,e.edge_type
+                    \\from {s}_zova_graph_edges e join {s}_zova_graph_nodes n on n.node_key=e.to_node_key
+                    \\where (e.graph_key,e.from_node_key)=(
+                    \\ select g.graph_key,current.node_key from {s}_zova_graphs g
+                    \\ join {s}_zova_graph_nodes current on current.graph_key=g.graph_key
+                    \\ where g.name=?1 and current.node_id=?2)
+                    \\order by e.created_order,n.node_id collate binary,n.node_key limit ?3
+                )
+            else
+                try self.prepareSchema(
+                    \\select e.edge_key,n.node_key,n.node_id,n.kind,e.edge_type
+                    \\from {s}_zova_graph_edges e join {s}_zova_graph_nodes n on n.node_key=e.to_node_key
+                    \\where (e.graph_key,e.from_node_key)=(
+                    \\ select g.graph_key,current.node_key from {s}_zova_graphs g
+                    \\ join {s}_zova_graph_nodes current on current.graph_key=g.graph_key
+                    \\ where g.name=?1 and current.node_id=?2) and e.edge_type=?3
+                    \\order by e.created_order,n.node_id collate binary,n.node_key limit ?4
+                ),
+            .incoming => if (options.edge_type == null)
+                try self.prepareSchema(
+                    \\select e.edge_key,n.node_key,n.node_id,n.kind,e.edge_type
+                    \\from {s}_zova_graph_edges e join {s}_zova_graph_nodes n on n.node_key=e.from_node_key
+                    \\where (e.graph_key,e.to_node_key)=(
+                    \\ select g.graph_key,current.node_key from {s}_zova_graphs g
+                    \\ join {s}_zova_graph_nodes current on current.graph_key=g.graph_key
+                    \\ where g.name=?1 and current.node_id=?2)
+                    \\order by e.created_order,n.node_id collate binary,n.node_key limit ?3
+                )
+            else
+                try self.prepareSchema(
+                    \\select e.edge_key,n.node_key,n.node_id,n.kind,e.edge_type
+                    \\from {s}_zova_graph_edges e join {s}_zova_graph_nodes n on n.node_key=e.from_node_key
+                    \\where (e.graph_key,e.to_node_key)=(
+                    \\ select g.graph_key,current.node_key from {s}_zova_graphs g
+                    \\ join {s}_zova_graph_nodes current on current.graph_key=g.graph_key
+                    \\ where g.name=?1 and current.node_id=?2) and e.edge_type=?3
+                    \\order by e.created_order,n.node_id collate binary,n.node_key limit ?4
+                ),
+        };
+        defer stmt.deinit();
+        try stmt.bindText(1, options.graph_name);
+        try stmt.bindText(2, options.node_id);
+        if (options.edge_type) |edge_type| {
+            try stmt.bindText(3, edge_type);
+            try stmt.bindInt64(4, sqlite_limit);
+        } else try stmt.bindInt64(3, sqlite_limit);
+
+        var items: std.ArrayList(GraphKeyedNeighbor) = .empty;
+        errdefer {
+            for (items.items) |*item| item.deinit(allocator);
+            items.deinit(allocator);
+        }
+        while ((try stmt.step()) == .row) try appendGraphKeyedNeighborFromRow(&items, allocator, &stmt);
+        if (items.items.len == 0 and !try self.hasGraphNode(options.graph_name, options.node_id)) return error.GraphNodeNotFound;
+        return .{ .items = try items.toOwnedSlice(allocator) };
+    }
+
+    pub fn graphNodesGetManyKeyed(self: *Database, allocator: std.mem.Allocator, graph_name: []const u8, keys: []const i64) Error!GraphKeyedNodeLookupList {
+        try validateGraphName(graph_name);
+        for (keys) |key| if (key <= 0) return error.InvalidArgument;
+        const graph_key = try self.graphKey(graph_name);
+        var items = try allocator.alloc(GraphKeyedNodeLookup, keys.len);
+        errdefer allocator.free(items);
+        for (keys, items) |key, *item| item.* = .{ .found = false, .node_key = key };
+        errdefer for (items) |*item| item.deinit(allocator);
+        if (keys.len == 0) return .{ .items = items };
+
+        try self.stageOpaqueKeys("_zova_graph_nodes_get_many_keys", keys);
+        defer self.clearOpaqueKeys("_zova_graph_nodes_get_many_keys");
+        var stmt = try self.prepareSchema(
+            \\select batch.ordinal,n.node_key,n.node_id,n.kind,n.created_order
+            \\from temp._zova_graph_nodes_get_many_keys batch
+            \\left join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=batch.row_key
+            \\order by batch.ordinal
+        );
+        defer stmt.deinit();
+        try stmt.bindInt64(1, graph_key);
+        var seen: usize = 0;
+        while ((try stmt.step()) == .row) : (seen += 1) {
+            const ordinal = stmt.columnInt64(0);
+            if (ordinal < 0 or @as(usize, @intCast(ordinal)) >= items.len) return error.GraphInvalid;
+            const item = &items[@intCast(ordinal)];
+            if (stmt.columnType(1) == .null) continue;
+            const node_key = stmt.columnInt64(1);
+            const created_order = stmt.columnInt64(4);
+            if (node_key != item.node_key or created_order <= 0) return error.GraphInvalid;
+            item.node_id = try allocator.dupe(u8, stmt.columnText(2));
+            item.kind = allocator.dupe(u8, stmt.columnText(3)) catch |err| {
+                allocator.free(item.node_id.?);
+                item.node_id = null;
+                return err;
+            };
+            item.created_order = created_order;
+            item.found = true;
+        }
+        if (seen != keys.len) return error.GraphInvalid;
+        return .{ .items = items };
+    }
+
+    pub fn graphEdgesGetManyKeyed(self: *Database, allocator: std.mem.Allocator, graph_name: []const u8, keys: []const i64) Error!GraphKeyedEdgeLookupList {
+        try validateGraphName(graph_name);
+        for (keys) |key| if (key <= 0) return error.InvalidArgument;
+        const graph_key = try self.graphKey(graph_name);
+        var items = try allocator.alloc(GraphKeyedEdgeLookup, keys.len);
+        errdefer allocator.free(items);
+        for (keys, items) |key, *item| item.* = .{ .found = false, .edge_key = key };
+        errdefer for (items) |*item| item.deinit(allocator);
+        if (keys.len == 0) return .{ .items = items };
+
+        try self.stageOpaqueKeys("_zova_graph_edges_get_many_keys", keys);
+        defer self.clearOpaqueKeys("_zova_graph_edges_get_many_keys");
+        var stmt = try self.prepareSchema(
+            \\select batch.ordinal,e.edge_key,e.from_node_key,e.edge_type,e.to_node_key,e.created_order
+            \\from temp._zova_graph_edges_get_many_keys batch
+            \\left join {s}_zova_graph_edges e on e.graph_key=?1 and e.edge_key=batch.row_key
+            \\order by batch.ordinal
+        );
+        defer stmt.deinit();
+        try stmt.bindInt64(1, graph_key);
+        var seen: usize = 0;
+        while ((try stmt.step()) == .row) : (seen += 1) {
+            const ordinal = stmt.columnInt64(0);
+            if (ordinal < 0 or @as(usize, @intCast(ordinal)) >= items.len) return error.GraphInvalid;
+            const item = &items[@intCast(ordinal)];
+            if (stmt.columnType(1) == .null) continue;
+            const edge_key = stmt.columnInt64(1);
+            const source = stmt.columnInt64(2);
+            const target = stmt.columnInt64(4);
+            const created_order = stmt.columnInt64(5);
+            if (edge_key != item.edge_key or source <= 0 or target <= 0 or created_order <= 0) return error.GraphInvalid;
+            item.edge_type = try allocator.dupe(u8, stmt.columnText(3));
+            item.source_node_key = source;
+            item.target_node_key = target;
+            item.created_order = created_order;
+            item.found = true;
+        }
+        if (seen != keys.len) return error.GraphInvalid;
+        return .{ .items = items };
+    }
+
+    fn stageOpaqueKeys(self: *Database, comptime table: []const u8, keys: []const i64) Error!void {
+        try self.sqlite_db.exec("create temp table if not exists temp." ++ table ++ " (ordinal integer primary key,row_key integer not null) without rowid; delete from temp." ++ table);
+        var stmt = try self.sqlite_db.prepare("insert into temp." ++ table ++ "(ordinal,row_key) values(?,?)");
+        defer stmt.deinit();
+        for (keys, 0..) |key, ordinal| {
+            try stmt.bindInt64(1, @intCast(ordinal));
+            try stmt.bindInt64(2, key);
+            std.debug.assert((try stmt.step()) == .done);
+            try stmt.reset();
+            try stmt.clearBindings();
+        }
+    }
+
+    fn clearOpaqueKeys(self: *Database, comptime table: []const u8) void {
+        self.sqlite_db.exec("delete from temp." ++ table) catch {};
+    }
+
     /// Count edges adjacent to one existing graph node.
     pub fn graphDegree(self: *Database, options: GraphDegreeOptions) Error!u64 {
         try validateGraphName(options.graph_name);
@@ -1173,6 +1730,161 @@ pub const Database = struct {
         if (count < 0) return error.GraphInvalid;
         if (count == 0 and !try self.hasGraphNode(options.graph_name, options.node_id)) return error.GraphNodeNotFound;
         return @intCast(count);
+    }
+
+    pub fn graphDegreeManyKeyed(
+        self: *Database,
+        graph_name: []const u8,
+        node_keys: []const i64,
+        direction: GraphNeighborDirection,
+        edge_type: ?[]const u8,
+        out_degrees: []u64,
+    ) Error!void {
+        if (out_degrees.len != node_keys.len) return error.InvalidArgument;
+        try validateGraphName(graph_name);
+        if (edge_type) |value| try validateEdgeType(value);
+        const graph_key = try self.graphKey(graph_name);
+        for (node_keys) |node_key| if (node_key <= 0) return error.InvalidArgument;
+        if (node_keys.len == 0) return;
+
+        try self.sqlite_db.exec(
+            \\create temp table if not exists temp._zova_graph_degree_many_keys (
+            \\ ordinal integer primary key,
+            \\ node_key integer not null
+            \\) without rowid;
+            \\delete from temp._zova_graph_degree_many_keys;
+        );
+        defer self.sqlite_db.exec("delete from temp._zova_graph_degree_many_keys") catch {};
+        var stage = try self.sqlite_db.prepare("insert into temp._zova_graph_degree_many_keys(ordinal,node_key) values(?,?)");
+        defer stage.deinit();
+        for (node_keys, 0..) |node_key, ordinal| {
+            try stage.bindInt64(1, @intCast(ordinal));
+            try stage.bindInt64(2, node_key);
+            std.debug.assert((try stage.step()) == .done);
+            try stage.reset();
+            try stage.clearBindings();
+        }
+
+        var query = switch (direction) {
+            .outgoing => if (edge_type == null)
+                try self.prepareSchema(
+                    \\select batch.ordinal,count(e.edge_key)
+                    \\from temp._zova_graph_degree_many_keys batch
+                    \\join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=batch.node_key
+                    \\left join {s}_zova_graph_edges e on e.graph_key=n.graph_key and e.from_node_key=n.node_key
+                    \\group by batch.ordinal order by batch.ordinal
+                )
+            else
+                try self.prepareSchema(
+                    \\select batch.ordinal,count(e.edge_key)
+                    \\from temp._zova_graph_degree_many_keys batch
+                    \\join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=batch.node_key
+                    \\left join {s}_zova_graph_edges e on e.graph_key=n.graph_key and e.from_node_key=n.node_key and e.edge_type=?2
+                    \\group by batch.ordinal order by batch.ordinal
+                ),
+            .incoming => if (edge_type == null)
+                try self.prepareSchema(
+                    \\select batch.ordinal,count(e.edge_key)
+                    \\from temp._zova_graph_degree_many_keys batch
+                    \\join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=batch.node_key
+                    \\left join {s}_zova_graph_edges e on e.graph_key=n.graph_key and e.to_node_key=n.node_key
+                    \\group by batch.ordinal order by batch.ordinal
+                )
+            else
+                try self.prepareSchema(
+                    \\select batch.ordinal,count(e.edge_key)
+                    \\from temp._zova_graph_degree_many_keys batch
+                    \\join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=batch.node_key
+                    \\left join {s}_zova_graph_edges e on e.graph_key=n.graph_key and e.to_node_key=n.node_key and e.edge_type=?2
+                    \\group by batch.ordinal order by batch.ordinal
+                ),
+        };
+        defer query.deinit();
+        try query.bindInt64(1, graph_key);
+        if (edge_type) |value| try query.bindText(2, value);
+        var resolved: usize = 0;
+        while ((try query.step()) == .row) {
+            const ordinal = query.columnInt64(0);
+            const degree = query.columnInt64(1);
+            if (ordinal < 0 or degree < 0) return error.GraphInvalid;
+            const index: usize = @intCast(ordinal);
+            if (index >= out_degrees.len) return error.GraphInvalid;
+            out_degrees[index] = @intCast(degree);
+            resolved += 1;
+        }
+        if (resolved != node_keys.len) return error.GraphNodeNotFound;
+    }
+
+    pub fn graphScan(self: *Database, allocator: std.mem.Allocator, options: GraphScanOptions) Error!GraphScanResult {
+        try validateGraphName(options.graph_name);
+        try validateGraphScanCursor(options.node_after);
+        try validateGraphScanCursor(options.edge_after);
+        const graph_key = try self.graphKey(options.graph_name);
+        var nodes: std.ArrayList(GraphScanNode) = .empty;
+        errdefer {
+            for (nodes.items) |*node| node.deinit(allocator);
+            nodes.deinit(allocator);
+        }
+        var edges: std.ArrayList(GraphScanEdge) = .empty;
+        errdefer {
+            for (edges.items) |*edge| edge.deinit(allocator);
+            edges.deinit(allocator);
+        }
+        var has_more_nodes = false;
+        var has_more_edges = false;
+
+        if (options.node_limit != 0) {
+            const query_limit = std.math.add(usize, options.node_limit, 1) catch return error.InvalidArgument;
+            var stmt = try self.prepareSchema(
+                \\select node_key,node_id,kind,created_order from {s}_zova_graph_nodes
+                \\where graph_key=?1 and (created_order>?2 or (created_order=?2 and node_key>?3))
+                \\order by created_order,node_key limit ?4
+            );
+            defer stmt.deinit();
+            try stmt.bindInt64(1, graph_key);
+            try stmt.bindInt64(2, options.node_after.created_order);
+            try stmt.bindInt64(3, options.node_after.key);
+            try stmt.bindInt64(4, try sqliteLimit(query_limit));
+            while ((try stmt.step()) == .row) {
+                if (nodes.items.len == options.node_limit) {
+                    has_more_nodes = true;
+                    break;
+                }
+                try appendGraphScanNode(&nodes, allocator, &stmt);
+            }
+        }
+        if (options.edge_limit != 0) {
+            const query_limit = std.math.add(usize, options.edge_limit, 1) catch return error.InvalidArgument;
+            var stmt = try self.prepareSchema(
+                \\select edge_key,from_node_key,edge_type,to_node_key,created_order from {s}_zova_graph_edges
+                \\where graph_key=?1 and (created_order>?2 or (created_order=?2 and edge_key>?3))
+                \\order by created_order,edge_key limit ?4
+            );
+            defer stmt.deinit();
+            try stmt.bindInt64(1, graph_key);
+            try stmt.bindInt64(2, options.edge_after.created_order);
+            try stmt.bindInt64(3, options.edge_after.key);
+            try stmt.bindInt64(4, try sqliteLimit(query_limit));
+            while ((try stmt.step()) == .row) {
+                if (edges.items.len == options.edge_limit) {
+                    has_more_edges = true;
+                    break;
+                }
+                try appendGraphScanEdge(&edges, allocator, &stmt);
+            }
+        }
+        const owned_nodes = try nodes.toOwnedSlice(allocator);
+        errdefer {
+            for (owned_nodes) |*node| node.deinit(allocator);
+            allocator.free(owned_nodes);
+        }
+        const owned_edges = try edges.toOwnedSlice(allocator);
+        return .{
+            .nodes = owned_nodes,
+            .edges = owned_edges,
+            .has_more_nodes = has_more_nodes,
+            .has_more_edges = has_more_edges,
+        };
     }
 
     pub fn graphWalk(self: *Database, allocator: std.mem.Allocator, options: GraphWalkOptions) Error!GraphWalk {
@@ -1600,6 +2312,75 @@ fn appendGraphNeighborFromRow(items: *std.ArrayList(GraphNeighbor), allocator: s
     var item = try graphNeighborFromRow(allocator, stmt);
     errdefer item.deinit(allocator);
     try items.append(allocator, item);
+}
+
+fn appendGraphKeyedNeighborFromRow(
+    items: *std.ArrayList(GraphKeyedNeighbor),
+    allocator: std.mem.Allocator,
+    stmt: *sqlite.Statement,
+) Error!void {
+    const edge_key = stmt.columnInt64(0);
+    const neighbor_node_key = stmt.columnInt64(1);
+    if (edge_key <= 0 or neighbor_node_key <= 0) return error.GraphInvalid;
+    const node_id = try allocator.dupe(u8, stmt.columnText(2));
+    errdefer allocator.free(node_id);
+    const kind = try allocator.dupe(u8, stmt.columnText(3));
+    errdefer allocator.free(kind);
+    const edge_type = try allocator.dupe(u8, stmt.columnText(4));
+    errdefer allocator.free(edge_type);
+    try items.append(allocator, .{
+        .edge_key = edge_key,
+        .neighbor_node_key = neighbor_node_key,
+        .node_id = node_id,
+        .kind = kind,
+        .edge_type = edge_type,
+    });
+}
+
+fn appendGraphScanNode(
+    items: *std.ArrayList(GraphScanNode),
+    allocator: std.mem.Allocator,
+    stmt: *sqlite.Statement,
+) Error!void {
+    const node_key = stmt.columnInt64(0);
+    const created_order = stmt.columnInt64(3);
+    if (node_key <= 0 or created_order <= 0) return error.GraphInvalid;
+    const node_id = try allocator.dupe(u8, stmt.columnText(1));
+    errdefer allocator.free(node_id);
+    const kind = try allocator.dupe(u8, stmt.columnText(2));
+    errdefer allocator.free(kind);
+    try items.append(allocator, .{
+        .node_key = node_key,
+        .node_id = node_id,
+        .kind = kind,
+        .created_order = created_order,
+    });
+}
+
+fn appendGraphScanEdge(
+    items: *std.ArrayList(GraphScanEdge),
+    allocator: std.mem.Allocator,
+    stmt: *sqlite.Statement,
+) Error!void {
+    const edge_key = stmt.columnInt64(0);
+    const source_node_key = stmt.columnInt64(1);
+    const target_node_key = stmt.columnInt64(3);
+    const created_order = stmt.columnInt64(4);
+    if (edge_key <= 0 or source_node_key <= 0 or target_node_key <= 0 or created_order <= 0) return error.GraphInvalid;
+    const edge_type = try allocator.dupe(u8, stmt.columnText(2));
+    errdefer allocator.free(edge_type);
+    try items.append(allocator, .{
+        .edge_key = edge_key,
+        .source_node_key = source_node_key,
+        .edge_type = edge_type,
+        .target_node_key = target_node_key,
+        .created_order = created_order,
+    });
+}
+
+fn validateGraphScanCursor(cursor: GraphScanCursor) Error!void {
+    if (cursor.created_order == 0 and cursor.key == 0) return;
+    if (cursor.created_order <= 0 or cursor.key <= 0) return error.InvalidArgument;
 }
 
 fn graphWalkItemOwned(

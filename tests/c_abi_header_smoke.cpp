@@ -44,6 +44,10 @@ int main() {
     zova_graph_node graph_node = {};
     zova_graph_edge graph_edge = {};
     zova_graph_neighbor_results graph_neighbors = {};
+    zova_graph_keyed_neighbor_results graph_keyed_neighbors = {};
+    zova_graph_keyed_node_results graph_keyed_nodes = {};
+    zova_graph_keyed_edge_results graph_keyed_edges = {};
+    zova_graph_scan_results graph_scan = {};
     zova_graph_walk_results graph_walk = {};
     zova_extension_info extension_info = {};
     zova_extension_list extension_list = {};
@@ -198,6 +202,12 @@ int main() {
     zova_graph_node_put_many_request graph_node_put_many_request = {};
     graph_node_put_many_request.nodes = &graph_node_input;
     graph_node_put_many_request.nodes_len = 1;
+    int64_t graph_node_key = 0;
+    zova_graph_node_put_many_keyed_request graph_node_put_many_keyed_request = {};
+    graph_node_put_many_keyed_request.nodes = &graph_node_input;
+    graph_node_put_many_keyed_request.nodes_len = 1;
+    graph_node_put_many_keyed_request.out_node_keys = &graph_node_key;
+    graph_node_put_many_keyed_request.out_node_keys_capacity = 1;
     zova_graph_node_delete_many_request graph_node_delete_many_request = {};
     graph_node_delete_many_request.graph_name = "app";
     graph_node_delete_many_request.node_ids = nullptr;
@@ -211,6 +221,12 @@ int main() {
     zova_graph_edge_put_many_request graph_edge_put_many_request = {};
     graph_edge_put_many_request.edges = &graph_edge_input;
     graph_edge_put_many_request.edges_len = 1;
+    int64_t graph_edge_key = 0;
+    zova_graph_edge_put_many_keyed_request graph_edge_put_many_keyed_request = {};
+    graph_edge_put_many_keyed_request.edges = &graph_edge_input;
+    graph_edge_put_many_keyed_request.edges_len = 1;
+    graph_edge_put_many_keyed_request.out_edge_keys = &graph_edge_key;
+    graph_edge_put_many_keyed_request.out_edge_keys_capacity = 1;
     zova_graph_edge_delete_many_request graph_edge_delete_many_request = {};
     graph_edge_delete_many_request.edges = &graph_edge_input;
     graph_edge_delete_many_request.edges_len = 1;
@@ -223,10 +239,32 @@ int main() {
     zova_graph_neighbors_request graph_neighbors_request = {};
     graph_neighbors_request.direction = ZOVA_GRAPH_NEIGHBOR_OUTGOING;
     graph_neighbors_request.out_results = &graph_neighbors;
+    zova_graph_neighbors_keyed_request graph_neighbors_keyed_request = {};
+    graph_neighbors_keyed_request.direction = ZOVA_GRAPH_NEIGHBOR_OUTGOING;
+    graph_neighbors_keyed_request.out_results = &graph_keyed_neighbors;
+    zova_graph_nodes_get_many_keyed_request graph_nodes_get_many_keyed_request = {};
+    graph_nodes_get_many_keyed_request.node_keys = &graph_node_key;
+    graph_nodes_get_many_keyed_request.key_count = 1;
+    graph_nodes_get_many_keyed_request.out_results = &graph_keyed_nodes;
+    zova_graph_edges_get_many_keyed_request graph_edges_get_many_keyed_request = {};
+    graph_edges_get_many_keyed_request.edge_keys = &graph_edge_key;
+    graph_edges_get_many_keyed_request.key_count = 1;
+    graph_edges_get_many_keyed_request.out_results = &graph_keyed_edges;
     uint64_t graph_degree = 0;
     zova_graph_degree_request graph_degree_request = {};
     graph_degree_request.direction = ZOVA_GRAPH_NEIGHBOR_OUTGOING;
     graph_degree_request.out_degree = &graph_degree;
+    uint64_t graph_degrees[1] = {};
+    zova_graph_degree_many_keyed_request graph_degree_many_keyed_request = {};
+    graph_degree_many_keyed_request.node_keys = &graph_node_key;
+    graph_degree_many_keyed_request.node_count = 1;
+    graph_degree_many_keyed_request.direction = ZOVA_GRAPH_NEIGHBOR_OUTGOING;
+    graph_degree_many_keyed_request.out_degrees = graph_degrees;
+    graph_degree_many_keyed_request.out_degrees_capacity = 1;
+    zova_graph_scan_request graph_scan_request = {};
+    graph_scan_request.node_after = {0, 0};
+    graph_scan_request.edge_after = {0, 0};
+    graph_scan_request.out_results = &graph_scan;
     zova_graph_walk_request graph_walk_request = {};
     graph_walk_request.max_depth = 2;
     graph_walk_request.out_results = &graph_walk;
@@ -262,6 +300,10 @@ int main() {
     zova_graph_node_free(&graph_node);
     zova_graph_edge_free(&graph_edge);
     zova_graph_neighbor_results_free(&graph_neighbors);
+    zova_graph_keyed_neighbor_results_free(&graph_keyed_neighbors);
+    zova_graph_keyed_node_results_free(&graph_keyed_nodes);
+    zova_graph_keyed_edge_results_free(&graph_keyed_edges);
+    zova_graph_scan_results_free(&graph_scan);
     zova_graph_walk_results_free(&graph_walk);
     zova_extension_info_free(&extension_info);
     zova_extension_list_free(&extension_list);
@@ -298,6 +340,13 @@ int main() {
                    graph_edge_delete_request.edge_type != nullptr &&
                    graph_neighbors_request.direction == ZOVA_GRAPH_NEIGHBOR_OUTGOING &&
                    graph_neighbors_request.out_results == &graph_neighbors &&
+                   graph_node_put_many_keyed_request.out_node_keys == &graph_node_key &&
+                   graph_node_put_many_keyed_request.out_node_keys_capacity == 1 &&
+                   graph_edge_put_many_keyed_request.out_edge_keys == &graph_edge_key &&
+                   graph_edge_put_many_keyed_request.out_edge_keys_capacity == 1 &&
+                   graph_neighbors_keyed_request.out_results == &graph_keyed_neighbors &&
+                   graph_degree_many_keyed_request.out_degrees == graph_degrees &&
+                   graph_scan_request.out_results == &graph_scan &&
                    graph_walk_request.max_depth == 2 &&
                    graph_walk_request.out_results == &graph_walk &&
                    graph_walk_direction_request.direction == ZOVA_GRAPH_NEIGHBOR_INCOMING &&

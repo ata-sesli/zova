@@ -99,6 +99,20 @@ pub fn build(b: *std.Build) void {
     const storage_benchmark_step = b.step("bench-storage", "Run deterministic graph/vector storage benchmark");
     storage_benchmark_step.dependOn(&storage_benchmark_cmd.step);
 
+    const graph_keyed_benchmark = b.addExecutable(.{
+        .name = "zova_graph_keyed_benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/graph_keyed.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    graph_keyed_benchmark.root_module.addImport("zova", zova_module);
+    const graph_keyed_benchmark_cmd = b.addRunArtifact(graph_keyed_benchmark);
+    if (b.args) |args| graph_keyed_benchmark_cmd.addArgs(args);
+    const graph_keyed_benchmark_step = b.step("bench-graph-keyed", "Compare current and opaque-key graph batches");
+    graph_keyed_benchmark_step.dependOn(&graph_keyed_benchmark_cmd.step);
+
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/root.zig"),

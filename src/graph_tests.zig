@@ -68,6 +68,9 @@ const GraphTraceCounter = struct {
     graph_edge_insert_steps: usize = 0,
     resolver_seen: bool = false,
     slot_resolver_seen: bool = false,
+    node_key_preload_statements: usize = 0,
+    edge_key_preload_statements: usize = 0,
+    keyed_returning_statements: usize = 0,
 };
 
 fn graphTraceCallback(mask: c_uint, context: ?*anyopaque, statement: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
@@ -76,7 +79,15 @@ fn graphTraceCallback(mask: c_uint, context: ?*anyopaque, statement: ?*anyopaque
     const sql_ptr = sqlite.c.sqlite3_sql(stmt) orelse return 0;
     const sql = std.mem.span(sql_ptr);
     const counter: *GraphTraceCounter = @ptrCast(@alignCast(context.?));
-    if (std.mem.indexOf(u8, sql, "zova_graph_endpoint_stage") != null or
+    if (std.mem.indexOf(u8, sql, "returning node_key") != null or
+        std.mem.indexOf(u8, sql, "returning edge_key") != null)
+    {
+        counter.keyed_returning_statements += 1;
+    } else if (std.mem.indexOf(u8, sql, "zova_graph_node_key_preload") != null) {
+        counter.node_key_preload_statements += 1;
+    } else if (std.mem.indexOf(u8, sql, "zova_graph_edge_key_preload") != null) {
+        counter.edge_key_preload_statements += 1;
+    } else if (std.mem.indexOf(u8, sql, "zova_graph_endpoint_stage") != null or
         std.mem.indexOf(u8, sql, "insert or ignore into temp._zova_graph_batch_endpoints") != null)
     {
         counter.graph_endpoint_stage_steps += 1;
@@ -342,10 +353,11 @@ test "native graph database routes persistent queries to attached graph store" {
         .storage_schema = .graph_store,
     };
     try graphs.createGraph("external");
-    try graphs.putGraphNodes(&.{
+    var external_node_keys: [2]i64 = undefined;
+    try graphs.putGraphNodesKeyed(&.{
         .{ .graph_name = "external", .node_id = "a", .kind = "test" },
         .{ .graph_name = "external", .node_id = "b", .kind = "test" },
-    });
+    }, &external_node_keys);
 
     var indexes = try raw.prepare(
         \\select
@@ -357,12 +369,27 @@ test "native graph database routes persistent queries to attached graph store" {
     try std.testing.expectEqual(@as(i64, 0), indexes.columnInt64(0));
     try std.testing.expectEqual(@as(i64, 1), indexes.columnInt64(1));
 
-    try graphs.putGraphEdge(.{
+    var external_edge_keys: [1]i64 = undefined;
+    try graphs.putGraphEdgesKeyed(&.{.{
         .graph_name = "external",
         .from_node_id = "a",
         .edge_type = "links",
         .to_node_id = "b",
+    }}, &external_edge_keys);
+    var external_scan = try graphs.graphScan(std.testing.allocator, .{
+        .graph_name = "external",
+        .node_limit = 10,
+        .edge_limit = 10,
     });
+    defer external_scan.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(i64, &external_node_keys, &.{ external_scan.nodes[0].node_key, external_scan.nodes[1].node_key });
+    try std.testing.expectEqual(external_edge_keys[0], external_scan.edges[0].edge_key);
+    var external_nodes = try graphs.graphNodesGetManyKeyed(std.testing.allocator, "external", &external_node_keys);
+    defer external_nodes.deinit(std.testing.allocator);
+    try std.testing.expect(external_nodes.items[0].found and external_nodes.items[1].found);
+    var external_edges = try graphs.graphEdgesGetManyKeyed(std.testing.allocator, "external", &external_edge_keys);
+    defer external_edges.deinit(std.testing.allocator);
+    try std.testing.expect(external_edges.items[0].found);
 
     var counts = try raw.prepare(
         \\select
@@ -585,6 +612,300 @@ test "graph batches ensure query indexes for direct ingestion" {
     try std.testing.expect(try schemaIndexExists(&db.sqlite_db, "_zova_graph_edges_from_node_type_idx"));
     try std.testing.expect(try schemaIndexExists(&db.sqlite_db, "_zova_graph_edges_to_node_idx"));
     try std.testing.expect(try schemaIndexExists(&db.sqlite_db, "_zova_graph_edges_to_node_type_idx"));
+}
+
+test "keyed graph batches return stable aligned node and edge keys" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "graph-keyed-batches.zova");
+    var db = try zova.Database.create(db_path);
+    defer db.deinit();
+    try db.createGraph("app");
+    try db.createGraph("other");
+
+    var node_keys: [4]i64 = undefined;
+    try db.putGraphNodesKeyed(&.{
+        .{ .graph_name = "app", .node_id = "a", .kind = "first" },
+        .{ .graph_name = "app", .node_id = "b", .kind = "function" },
+        .{ .graph_name = "app", .node_id = "a", .kind = "updated" },
+        .{ .graph_name = "other", .node_id = "a", .kind = "function" },
+    }, &node_keys);
+    try std.testing.expect(node_keys[0] > 0);
+    try std.testing.expectEqual(node_keys[0], node_keys[2]);
+    try std.testing.expect(node_keys[0] != node_keys[1]);
+    try std.testing.expect(node_keys[0] != node_keys[3]);
+    var updated = try db.getGraphNode(std.testing.allocator, "app", "a");
+    defer updated.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("updated", updated.kind);
+
+    try db.putGraphEdge(.{ .graph_name = "app", .from_node_id = "b", .edge_type = "existing", .to_node_id = "a" });
+    var edge_keys: [5]i64 = undefined;
+    try db.putGraphEdgesKeyed(&.{
+        .{ .graph_name = "app", .from_node_id = "a", .edge_type = "calls", .to_node_id = "b" },
+        .{ .graph_name = "app", .from_node_id = "a", .edge_type = "calls", .to_node_id = "b" },
+        .{ .graph_name = "app", .from_node_id = "b", .edge_type = "existing", .to_node_id = "a" },
+        .{ .graph_name = "other", .from_node_id = "a", .edge_type = "self", .to_node_id = "a" },
+        .{ .graph_name = "app", .from_node_id = "b", .edge_type = "calls", .to_node_id = "a" },
+    }, &edge_keys);
+    try std.testing.expect(edge_keys[0] > 0);
+    try std.testing.expectEqual(edge_keys[0], edge_keys[1]);
+    try std.testing.expect(edge_keys[0] != edge_keys[2]);
+    try std.testing.expect(edge_keys[0] != edge_keys[3]);
+    try std.testing.expect(edge_keys[0] != edge_keys[4]);
+
+    try db.begin();
+    var rolled_back_key: [1]i64 = undefined;
+    try db.putGraphNodesKeyed(&.{.{ .graph_name = "app", .node_id = "rolled-back", .kind = "function" }}, &rolled_back_key);
+    try std.testing.expect(rolled_back_key[0] > 0);
+    try db.rollback();
+    try std.testing.expect(!try db.hasGraphNode("app", "rolled-back"));
+}
+
+test "keyed graph batches preload keys and retain the fast non-returning inserts" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "graph-keyed-fast-insert.zova");
+    var db = try zova.Database.create(db_path);
+    defer db.deinit();
+    try db.createGraph("app");
+    try db.putGraphNode(.{ .graph_name = "app", .node_id = "a", .kind = "existing" });
+
+    var counter: GraphTraceCounter = .{};
+    _ = sqlite.c.sqlite3_trace_v2(db.sqlite_db.handle, sqlite.c.SQLITE_TRACE_STMT, graphTraceCallback, &counter);
+    defer _ = sqlite.c.sqlite3_trace_v2(db.sqlite_db.handle, 0, null, null);
+    var node_keys: [3]i64 = undefined;
+    try db.putGraphNodesKeyed(&.{
+        .{ .graph_name = "app", .node_id = "a", .kind = "updated" },
+        .{ .graph_name = "app", .node_id = "b", .kind = "new" },
+        .{ .graph_name = "app", .node_id = "b", .kind = "final" },
+    }, &node_keys);
+    var edge_keys: [2]i64 = undefined;
+    try db.putGraphEdgesKeyed(&.{
+        .{ .graph_name = "app", .from_node_id = "a", .edge_type = "calls", .to_node_id = "b" },
+        .{ .graph_name = "app", .from_node_id = "a", .edge_type = "calls", .to_node_id = "b" },
+    }, &edge_keys);
+    var replay_edge_keys: [2]i64 = undefined;
+    try db.putGraphEdgesKeyed(&.{
+        .{ .graph_name = "app", .from_node_id = "a", .edge_type = "calls", .to_node_id = "b" },
+        .{ .graph_name = "app", .from_node_id = "a", .edge_type = "calls", .to_node_id = "b" },
+    }, &replay_edge_keys);
+
+    try std.testing.expectEqual(@as(usize, 1), counter.node_key_preload_statements);
+    try std.testing.expectEqual(@as(usize, 2), counter.edge_key_preload_statements);
+    try std.testing.expectEqual(@as(usize, 0), counter.keyed_returning_statements);
+    try std.testing.expectEqual(@as(usize, 1), counter.graph_edge_insert_steps);
+    try std.testing.expectEqual(node_keys[1], node_keys[2]);
+    try std.testing.expectEqual(edge_keys[0], edge_keys[1]);
+    try std.testing.expectEqualSlices(i64, &edge_keys, &replay_edge_keys);
+}
+
+test "keyed graph reads preserve order degree alignment and exclusive scan cursors" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "graph-keyed-reads.zova");
+    var db = try zova.Database.create(db_path);
+    defer db.deinit();
+    try db.createGraph("app");
+
+    var node_keys: [3]i64 = undefined;
+    try db.putGraphNodesKeyed(&.{
+        .{ .graph_name = "app", .node_id = "root", .kind = "root" },
+        .{ .graph_name = "app", .node_id = "zeta", .kind = "leaf" },
+        .{ .graph_name = "app", .node_id = "alpha", .kind = "leaf" },
+    }, &node_keys);
+    var edge_keys: [2]i64 = undefined;
+    try db.putGraphEdgesKeyed(&.{
+        .{ .graph_name = "app", .from_node_id = "root", .edge_type = "calls", .to_node_id = "zeta" },
+        .{ .graph_name = "app", .from_node_id = "root", .edge_type = "calls", .to_node_id = "alpha" },
+    }, &edge_keys);
+    try db.exec("update _zova_graph_edges set created_order=1");
+
+    var neighbors = try db.graphNeighborsKeyed(std.testing.allocator, .{
+        .graph_name = "app",
+        .node_id = "root",
+        .direction = .outgoing,
+        .limit = 10,
+    });
+    defer neighbors.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), neighbors.items.len);
+    try std.testing.expectEqualStrings("alpha", neighbors.items[0].node_id);
+    try std.testing.expectEqual(node_keys[2], neighbors.items[0].neighbor_node_key);
+    try std.testing.expectEqual(edge_keys[1], neighbors.items[0].edge_key);
+    try std.testing.expectEqualStrings("zeta", neighbors.items[1].node_id);
+
+    var degrees: [3]u64 = undefined;
+    try db.graphDegreeManyKeyed("app", &.{ node_keys[0], node_keys[2], node_keys[0] }, .outgoing, "calls", &degrees);
+    try std.testing.expectEqualSlices(u64, &.{ 2, 0, 2 }, &degrees);
+
+    var first = try db.graphScan(std.testing.allocator, .{
+        .graph_name = "app",
+        .node_limit = 2,
+        .edge_limit = 1,
+    });
+    defer first.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), first.nodes.len);
+    try std.testing.expect(first.has_more_nodes);
+    try std.testing.expectEqual(@as(usize, 1), first.edges.len);
+    try std.testing.expect(first.has_more_edges);
+
+    const node_cursor = zova.GraphScanCursor{
+        .created_order = first.nodes[1].created_order,
+        .key = first.nodes[1].node_key,
+    };
+    const edge_cursor = zova.GraphScanCursor{
+        .created_order = first.edges[0].created_order,
+        .key = first.edges[0].edge_key,
+    };
+    var second = try db.graphScan(std.testing.allocator, .{
+        .graph_name = "app",
+        .node_after = node_cursor,
+        .edge_after = edge_cursor,
+        .node_limit = 2,
+        .edge_limit = 2,
+    });
+    defer second.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), second.nodes.len);
+    try std.testing.expect(!second.has_more_nodes);
+    try std.testing.expectEqual(@as(usize, 1), second.edges.len);
+    try std.testing.expect(!second.has_more_edges);
+    try std.testing.expect(second.nodes[0].node_key != first.nodes[1].node_key);
+    try std.testing.expect(second.edges[0].edge_key != first.edges[0].edge_key);
+}
+
+test "keyed graph mutation savepoint rolls back only its own partial work" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "graph-keyed-savepoint.zova");
+    var db = try zova.Database.create(db_path);
+    defer db.deinit();
+    try db.createGraph("app");
+    try db.exec(
+        \\create temp trigger reject_keyed_node before insert on _zova_graph_nodes
+        \\when new.node_id='reject'
+        \\begin select raise(abort, 'forced keyed failure'); end
+    );
+
+    try db.begin();
+    try db.putGraphNode(.{ .graph_name = "app", .node_id = "caller-work", .kind = "function" });
+    var keys: [2]i64 = undefined;
+    try std.testing.expectError(error.Constraint, db.putGraphNodesKeyed(&.{
+        .{ .graph_name = "app", .node_id = "partial", .kind = "function" },
+        .{ .graph_name = "app", .node_id = "reject", .kind = "function" },
+    }, &keys));
+    try std.testing.expect(try db.hasGraphNode("app", "caller-work"));
+    try std.testing.expect(!try db.hasGraphNode("app", "partial"));
+    try std.testing.expect(!try db.hasGraphNode("app", "reject"));
+    try db.commit();
+    try std.testing.expect(try db.hasGraphNode("app", "caller-work"));
+}
+
+test "keyed degree and scan reject invalid keys and cursors without partial output" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "graph-keyed-validation.zova");
+    var db = try zova.Database.create(db_path);
+    defer db.deinit();
+    try db.createGraph("one");
+    try db.createGraph("two");
+    var keys: [2]i64 = undefined;
+    try db.putGraphNodesKeyed(&.{
+        .{ .graph_name = "one", .node_id = "one", .kind = "node" },
+        .{ .graph_name = "two", .node_id = "two", .kind = "node" },
+    }, &keys);
+
+    var degrees = [_]u64{ 77, 88 };
+    try std.testing.expectError(error.GraphNodeNotFound, db.graphDegreeManyKeyed("one", &keys, .outgoing, null, &degrees));
+    try std.testing.expectEqualSlices(u64, &.{ 0, 88 }, &degrees);
+    try std.testing.expectError(error.InvalidArgument, db.graphDegreeManyKeyed("one", &.{0}, .outgoing, null, degrees[0..1]));
+    try db.graphDegreeManyKeyed("one", &.{}, .outgoing, null, &.{});
+    try std.testing.expectError(error.GraphNotFound, db.graphDegreeManyKeyed("missing", &.{}, .outgoing, null, &.{}));
+
+    try std.testing.expectError(error.InvalidArgument, db.graphScan(std.testing.allocator, .{
+        .graph_name = "one",
+        .node_after = .{ .created_order = 1, .key = 0 },
+        .node_limit = 1,
+    }));
+    var disabled = try db.graphScan(std.testing.allocator, .{ .graph_name = "one" });
+    defer disabled.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), disabled.nodes.len);
+    try std.testing.expectEqual(@as(usize, 0), disabled.edges.len);
+    try std.testing.expect(!disabled.has_more_nodes and !disabled.has_more_edges);
+}
+
+test "graph scan pages retain a caller transaction WAL snapshot" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "graph-keyed-snapshot.zova");
+    var reader = try zova.Database.create(db_path);
+    defer reader.deinit();
+    try reader.exec("pragma journal_mode=wal");
+    try reader.createGraph("app");
+    try reader.putGraphNodes(&.{
+        .{ .graph_name = "app", .node_id = "root", .kind = "node" },
+        .{ .graph_name = "app", .node_id = "a", .kind = "node" },
+        .{ .graph_name = "app", .node_id = "b", .kind = "node" },
+    });
+    try reader.putGraphEdges(&.{
+        .{ .graph_name = "app", .from_node_id = "root", .edge_type = "links", .to_node_id = "a" },
+        .{ .graph_name = "app", .from_node_id = "root", .edge_type = "links", .to_node_id = "b" },
+    });
+    var writer = try zova.Database.open(db_path);
+    defer writer.deinit();
+
+    try reader.begin();
+    var first = try reader.graphScan(std.testing.allocator, .{ .graph_name = "app", .node_limit = 1, .edge_limit = 1 });
+    defer first.deinit(std.testing.allocator);
+    const node_after = zova.GraphScanCursor{ .created_order = first.nodes[0].created_order, .key = first.nodes[0].node_key };
+    const edge_after = zova.GraphScanCursor{ .created_order = first.edges[0].created_order, .key = first.edges[0].edge_key };
+
+    var new_node_key: [1]i64 = undefined;
+    try writer.putGraphNodesKeyed(&.{.{ .graph_name = "app", .node_id = "c", .kind = "node" }}, &new_node_key);
+    var new_edge_key: [1]i64 = undefined;
+    try writer.putGraphEdgesKeyed(&.{.{ .graph_name = "app", .from_node_id = "root", .edge_type = "links", .to_node_id = "c" }}, &new_edge_key);
+
+    var stable = try reader.graphScan(std.testing.allocator, .{
+        .graph_name = "app",
+        .node_after = node_after,
+        .edge_after = edge_after,
+        .node_limit = 10,
+        .edge_limit = 10,
+    });
+    defer stable.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), stable.nodes.len);
+    try std.testing.expectEqual(@as(usize, 1), stable.edges.len);
+    for (stable.nodes) |node| try std.testing.expect(node.node_key != new_node_key[0]);
+    for (stable.edges) |edge| try std.testing.expect(edge.edge_key != new_edge_key[0]);
+    var stable_nodes = try reader.graphNodesGetManyKeyed(std.testing.allocator, "app", &new_node_key);
+    defer stable_nodes.deinit(std.testing.allocator);
+    try std.testing.expect(!stable_nodes.items[0].found);
+    var stable_edges = try reader.graphEdgesGetManyKeyed(std.testing.allocator, "app", &new_edge_key);
+    defer stable_edges.deinit(std.testing.allocator);
+    try std.testing.expect(!stable_edges.items[0].found);
+    try reader.commit();
+
+    var visible_nodes = try reader.graphNodesGetManyKeyed(std.testing.allocator, "app", &new_node_key);
+    defer visible_nodes.deinit(std.testing.allocator);
+    try std.testing.expect(visible_nodes.items[0].found);
+    var visible_edges = try reader.graphEdgesGetManyKeyed(std.testing.allocator, "app", &new_edge_key);
+    defer visible_edges.deinit(std.testing.allocator);
+    try std.testing.expect(visible_edges.items[0].found);
+
+    var current = try reader.graphScan(std.testing.allocator, .{
+        .graph_name = "app",
+        .node_after = node_after,
+        .edge_after = edge_after,
+        .node_limit = 10,
+        .edge_limit = 10,
+    });
+    defer current.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 3), current.nodes.len);
+    try std.testing.expectEqual(@as(usize, 2), current.edges.len);
 }
 
 test "graph adjacency indexes cover ordered neighbor queries" {
@@ -1009,6 +1330,56 @@ test "format version eight requires graph schema" {
 
     try raw.exec("drop table _zova_graph_edges");
     try std.testing.expectError(error.NotZovaDatabase, zova.Database.open(db_path));
+}
+
+test "opaque keyed batch reads preserve order duplicates and graph scope" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "keyed-reads.zova");
+    var db = try zova.Database.create(db_path);
+    defer db.deinit();
+    try db.createGraph("app");
+    try db.createGraph("other");
+
+    const nodes = [_]zova.GraphNodeInput{
+        .{ .graph_name = "app", .node_id = "b", .kind = "beta" },
+        .{ .graph_name = "app", .node_id = "a", .kind = "alpha" },
+        .{ .graph_name = "other", .node_id = "a", .kind = "foreign" },
+    };
+    var node_keys: [3]i64 = undefined;
+    try db.putGraphNodesKeyed(&nodes, &node_keys);
+    const edges = [_]zova.GraphEdgeInput{
+        .{ .graph_name = "app", .from_node_id = "a", .edge_type = "links", .to_node_id = "b" },
+        .{ .graph_name = "other", .from_node_id = "a", .edge_type = "self", .to_node_id = "a" },
+    };
+    var edge_keys: [2]i64 = undefined;
+    try db.putGraphEdgesKeyed(&edges, &edge_keys);
+
+    const requested_nodes = [_]i64{ node_keys[1], node_keys[0], node_keys[1], node_keys[2], std.math.maxInt(i64) };
+    var found_nodes = try db.graphNodesGetManyKeyed(std.testing.allocator, "app", &requested_nodes);
+    defer found_nodes.deinit(std.testing.allocator);
+    try std.testing.expectEqual(requested_nodes.len, found_nodes.items.len);
+    try std.testing.expectEqualStrings("a", found_nodes.items[0].node_id.?);
+    try std.testing.expectEqualStrings("b", found_nodes.items[1].node_id.?);
+    try std.testing.expectEqualStrings("a", found_nodes.items[2].node_id.?);
+    try std.testing.expect(!found_nodes.items[3].found);
+    try std.testing.expectEqual(node_keys[2], found_nodes.items[3].node_key);
+    try std.testing.expect(!found_nodes.items[4].found);
+
+    const requested_edges = [_]i64{ edge_keys[0], edge_keys[0], edge_keys[1], std.math.maxInt(i64) };
+    var found_edges = try db.graphEdgesGetManyKeyed(std.testing.allocator, "app", &requested_edges);
+    defer found_edges.deinit(std.testing.allocator);
+    try std.testing.expect(found_edges.items[0].found);
+    try std.testing.expectEqualStrings("links", found_edges.items[0].edge_type.?);
+    try std.testing.expect(found_edges.items[1].found);
+    try std.testing.expect(!found_edges.items[2].found);
+    try std.testing.expect(!found_edges.items[3].found);
+
+    var empty = try db.graphNodesGetManyKeyed(std.testing.allocator, "app", &.{});
+    defer empty.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), empty.items.len);
+    try std.testing.expectError(error.InvalidArgument, db.graphEdgesGetManyKeyed(std.testing.allocator, "app", &.{0}));
 }
 
 test "root exports graph API" {

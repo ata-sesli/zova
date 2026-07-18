@@ -63,6 +63,9 @@ const format_version = version.format_version;
 const bound_object_store_role = "object_store";
 const bound_vector_store_role = "vector_store";
 const bound_graph_store_role = "graph_store";
+const graph_keyed_batch_savepoint = "zova_graph_keyed_batch";
+
+const GraphKeyedMutationScope = enum { transaction, savepoint };
 const bound_object_store_name = "default";
 const bound_vector_store_name = "default";
 const bound_graph_store_name = "default";
@@ -174,6 +177,17 @@ pub const GraphNeighborsOptions = graph_impl.GraphNeighborsOptions;
 pub const GraphDegreeOptions = graph_impl.GraphDegreeOptions;
 pub const GraphNeighbor = graph_impl.GraphNeighbor;
 pub const GraphNeighborList = graph_impl.GraphNeighborList;
+pub const GraphKeyedNeighbor = graph_impl.GraphKeyedNeighbor;
+pub const GraphKeyedNeighborList = graph_impl.GraphKeyedNeighborList;
+pub const GraphKeyedNodeLookup = graph_impl.GraphKeyedNodeLookup;
+pub const GraphKeyedNodeLookupList = graph_impl.GraphKeyedNodeLookupList;
+pub const GraphKeyedEdgeLookup = graph_impl.GraphKeyedEdgeLookup;
+pub const GraphKeyedEdgeLookupList = graph_impl.GraphKeyedEdgeLookupList;
+pub const GraphScanCursor = graph_impl.GraphScanCursor;
+pub const GraphScanOptions = graph_impl.GraphScanOptions;
+pub const GraphScanNode = graph_impl.GraphScanNode;
+pub const GraphScanEdge = graph_impl.GraphScanEdge;
+pub const GraphScanResult = graph_impl.GraphScanResult;
 pub const GraphWalkOptions = graph_impl.GraphWalkOptions;
 pub const GraphWalkDirectionOptions = graph_impl.GraphWalkDirectionOptions;
 pub const GraphWalkScanProfile = graph_impl.GraphWalkScanProfile;
@@ -904,6 +918,19 @@ pub const Database = struct {
         committed = true;
     }
 
+    /// Upsert graph nodes atomically and return aligned opaque row keys.
+    pub fn putGraphNodesKeyed(self: *Database, inputs: []const GraphNodeInput, out_keys: []i64) Error!void {
+        if (out_keys.len != inputs.len) return error.InvalidArgument;
+        const scope = try self.beginGraphKeyedMutation();
+        var finished = false;
+        errdefer if (!finished) self.rollbackGraphKeyedMutation(scope) catch {};
+        var graphs = self.graphDatabase();
+        try graphs.putGraphNodesKeyed(inputs, out_keys);
+        if (self.bound_graph_store != null and inputs.len != 0) try incrementBoundGraphEpoch(&self.sqlite_db);
+        try self.finishGraphKeyedMutation(scope);
+        finished = true;
+    }
+
     /// Return an owned graph node.
     pub fn getGraphNode(self: *Database, allocator: std.mem.Allocator, graph_name: []const u8, node_id: []const u8) Error!GraphNode {
         var graphs = self.graphDatabase();
@@ -964,6 +991,19 @@ pub const Database = struct {
         committed = true;
     }
 
+    /// Insert graph edges atomically and return aligned opaque row keys.
+    pub fn putGraphEdgesKeyed(self: *Database, inputs: []const GraphEdgeInput, out_keys: []i64) Error!void {
+        if (out_keys.len != inputs.len) return error.InvalidArgument;
+        const scope = try self.beginGraphKeyedMutation();
+        var finished = false;
+        errdefer if (!finished) self.rollbackGraphKeyedMutation(scope) catch {};
+        var graphs = self.graphDatabase();
+        try graphs.putGraphEdgesKeyed(inputs, out_keys);
+        if (self.bound_graph_store != null and inputs.len != 0) try incrementBoundGraphEpoch(&self.sqlite_db);
+        try self.finishGraphKeyedMutation(scope);
+        finished = true;
+    }
+
     /// Return whether an explicit graph edge exists.
     pub fn hasGraphEdge(self: *Database, graph_name: []const u8, from_node_id: []const u8, edge_type: []const u8, to_node_id: []const u8) Error!bool {
         var graphs = self.graphDatabase();
@@ -1007,10 +1047,57 @@ pub const Database = struct {
         return try graphs.graphNeighbors(allocator, options);
     }
 
+    /// Return bounded incoming or outgoing neighbors with opaque row keys.
+    pub fn graphNeighborsKeyed(self: *Database, allocator: std.mem.Allocator, options: GraphNeighborsOptions) Error!GraphKeyedNeighborList {
+        var graphs = self.graphDatabase();
+        return try graphs.graphNeighborsKeyed(allocator, options);
+    }
+
+    pub fn graphNodesGetManyKeyed(self: *Database, allocator: std.mem.Allocator, graph_name: []const u8, keys: []const i64) Error!GraphKeyedNodeLookupList {
+        const owns_transaction = !hasActiveTransaction(&self.sqlite_db);
+        if (owns_transaction) try self.sqlite_db.begin();
+        errdefer if (owns_transaction) self.sqlite_db.rollback() catch {};
+        var graphs = self.graphDatabase();
+        var result = try graphs.graphNodesGetManyKeyed(allocator, graph_name, keys);
+        errdefer result.deinit(allocator);
+        if (owns_transaction) try self.sqlite_db.commit();
+        return result;
+    }
+
+    pub fn graphEdgesGetManyKeyed(self: *Database, allocator: std.mem.Allocator, graph_name: []const u8, keys: []const i64) Error!GraphKeyedEdgeLookupList {
+        const owns_transaction = !hasActiveTransaction(&self.sqlite_db);
+        if (owns_transaction) try self.sqlite_db.begin();
+        errdefer if (owns_transaction) self.sqlite_db.rollback() catch {};
+        var graphs = self.graphDatabase();
+        var result = try graphs.graphEdgesGetManyKeyed(allocator, graph_name, keys);
+        errdefer result.deinit(allocator);
+        if (owns_transaction) try self.sqlite_db.commit();
+        return result;
+    }
+
     /// Count incoming or outgoing graph edges, optionally restricted by type.
     pub fn graphDegree(self: *Database, options: GraphDegreeOptions) Error!u64 {
         var graphs = self.graphDatabase();
         return try graphs.graphDegree(options);
+    }
+
+    /// Count degrees for opaque node keys while preserving caller order.
+    pub fn graphDegreeManyKeyed(
+        self: *Database,
+        graph_name: []const u8,
+        node_keys: []const i64,
+        direction: GraphNeighborDirection,
+        edge_type: ?[]const u8,
+        out_degrees: []u64,
+    ) Error!void {
+        var graphs = self.graphDatabase();
+        return try graphs.graphDegreeManyKeyed(graph_name, node_keys, direction, edge_type, out_degrees);
+    }
+
+    /// Return independently bounded opaque-key node and edge topology pages.
+    pub fn graphScan(self: *Database, allocator: std.mem.Allocator, options: GraphScanOptions) Error!GraphScanResult {
+        var graphs = self.graphDatabase();
+        return try graphs.graphScan(allocator, options);
     }
 
     /// Return a bounded directed walk from one graph node.
@@ -1912,6 +1999,32 @@ pub const Database = struct {
         if (hasActiveTransaction(&self.sqlite_db)) return false;
         try self.sqlite_db.beginImmediate();
         return true;
+    }
+
+    fn beginGraphKeyedMutation(self: *Database) Error!GraphKeyedMutationScope {
+        if (hasActiveTransaction(&self.sqlite_db)) {
+            try self.sqlite_db.savepoint(graph_keyed_batch_savepoint);
+            return .savepoint;
+        }
+        try self.sqlite_db.beginImmediate();
+        return .transaction;
+    }
+
+    fn finishGraphKeyedMutation(self: *Database, scope: GraphKeyedMutationScope) Error!void {
+        switch (scope) {
+            .transaction => try self.sqlite_db.commit(),
+            .savepoint => try self.sqlite_db.releaseSavepoint(graph_keyed_batch_savepoint),
+        }
+    }
+
+    fn rollbackGraphKeyedMutation(self: *Database, scope: GraphKeyedMutationScope) Error!void {
+        switch (scope) {
+            .transaction => try self.sqlite_db.rollback(),
+            .savepoint => {
+                try self.sqlite_db.rollbackToSavepoint(graph_keyed_batch_savepoint);
+                try self.sqlite_db.releaseSavepoint(graph_keyed_batch_savepoint);
+            },
+        }
     }
 
     fn finishBoundGraphMutation(self: *Database, owns_transaction: bool) Error!void {

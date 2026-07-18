@@ -500,6 +500,216 @@ static void run_graph_smoke(zova_database *db) {
                   }),
                   ZOVA_OK,
                   "graph edge batch put");
+
+    const zova_graph_node_input keyed_nodes[] = {
+        {.graph_name = "app", .node_id = "keyed:z", .kind = "first", .target_type = ZOVA_GRAPH_TARGET_NONE},
+        {.graph_name = "app", .node_id = "keyed:a", .kind = "neighbor", .target_type = ZOVA_GRAPH_TARGET_NONE},
+        {.graph_name = "app", .node_id = "keyed:z", .kind = "final", .target_type = ZOVA_GRAPH_TARGET_NONE},
+    };
+    int64_t node_keys[] = {-1, -1, -1};
+    expect_status(zova_graph_node_put_many_keyed(&(zova_graph_node_put_many_keyed_request){
+                      .db = db,
+                      .nodes = keyed_nodes,
+                      .nodes_len = 3,
+                      .out_node_keys = node_keys,
+                      .out_node_keys_capacity = 2,
+                  }),
+                  ZOVA_INVALID_ARGUMENT,
+                  "keyed node capacity");
+    if (node_keys[0] != -1 || node_keys[1] != -1 || node_keys[2] != -1) {
+        fprintf(stderr, "keyed node capacity changed output\n");
+        exit(1);
+    }
+    expect_status(zova_graph_node_put_many_keyed(&(zova_graph_node_put_many_keyed_request){
+                      .db = db,
+                      .nodes = keyed_nodes,
+                      .nodes_len = 3,
+                      .out_node_keys = node_keys,
+                      .out_node_keys_capacity = 3,
+                  }),
+                  ZOVA_OK,
+                  "keyed node put many");
+    if (node_keys[0] <= 0 || node_keys[1] <= 0 || node_keys[0] != node_keys[2] || node_keys[0] == node_keys[1]) {
+        fprintf(stderr, "keyed node outputs are not aligned or stable\n");
+        exit(1);
+    }
+
+    const zova_graph_edge_input keyed_edges[] = {
+        {.graph_name = "app", .from_node_id = "keyed:z", .edge_type = "calls", .to_node_id = "keyed:a"},
+        {.graph_name = "app", .from_node_id = "keyed:z", .edge_type = "calls", .to_node_id = "keyed:a"},
+    };
+    int64_t edge_keys[] = {-1, -1};
+    expect_status(zova_graph_edge_put_many_keyed(&(zova_graph_edge_put_many_keyed_request){
+                      .db = db,
+                      .edges = keyed_edges,
+                      .edges_len = 2,
+                      .out_edge_keys = edge_keys,
+                      .out_edge_keys_capacity = 2,
+                  }),
+                  ZOVA_OK,
+                  "keyed edge put many");
+    if (edge_keys[0] <= 0 || edge_keys[0] != edge_keys[1]) {
+        fprintf(stderr, "keyed duplicate edge did not return one stable key\n");
+        exit(1);
+    }
+    int64_t untouched_edge_keys[] = {-7, -8};
+    expect_status(zova_graph_edge_put_many_keyed(&(zova_graph_edge_put_many_keyed_request){
+                      .db = db,
+                      .edges = keyed_edges,
+                      .edges_len = 2,
+                      .out_edge_keys = untouched_edge_keys,
+                      .out_edge_keys_capacity = 1,
+                  }),
+                  ZOVA_INVALID_ARGUMENT,
+                  "keyed edge capacity");
+    if (untouched_edge_keys[0] != -7 || untouched_edge_keys[1] != -8) {
+        fprintf(stderr, "keyed edge capacity changed output\n");
+        exit(1);
+    }
+
+    zova_graph_keyed_neighbor_results keyed_neighbors = {0};
+    expect_status(zova_graph_neighbors_keyed(&(zova_graph_neighbors_keyed_request){
+                      .db = db,
+                      .graph_name = "app",
+                      .node_id = "keyed:z",
+                      .direction = ZOVA_GRAPH_NEIGHBOR_OUTGOING,
+                      .edge_type = "calls",
+                      .limit = 10,
+                      .out_results = &keyed_neighbors,
+                  }),
+                  ZOVA_OK,
+                  "keyed graph neighbors");
+    if (keyed_neighbors.len != 1 || keyed_neighbors.items[0].edge_key != edge_keys[0] ||
+        keyed_neighbors.items[0].neighbor_node_key != node_keys[1]) {
+        fprintf(stderr, "keyed graph neighbor keys are incorrect\n");
+        exit(1);
+    }
+    zova_graph_keyed_neighbor_results_free(&keyed_neighbors);
+    zova_graph_keyed_neighbor_results_free(&keyed_neighbors);
+
+    const int64_t read_node_keys[] = {node_keys[1], node_keys[0], node_keys[1], INT64_MAX};
+    zova_graph_keyed_node_results keyed_node_rows = {0};
+    expect_status(zova_graph_nodes_get_many_keyed(&(zova_graph_nodes_get_many_keyed_request){
+                      .db = db, .graph_name = "app", .node_keys = read_node_keys,
+                      .key_count = 4, .out_results = &keyed_node_rows}),
+                  ZOVA_OK, "keyed node get many");
+    if (keyed_node_rows.len != 4 || !keyed_node_rows.items[0].found ||
+        keyed_node_rows.items[0].node_key != node_keys[1] ||
+        keyed_node_rows.items[2].node_key != node_keys[1] || keyed_node_rows.items[3].found) {
+        fprintf(stderr, "keyed node batch read alignment is incorrect\n");
+        exit(1);
+    }
+    zova_graph_keyed_node_results_free(&keyed_node_rows);
+    zova_graph_keyed_node_results_free(&keyed_node_rows);
+
+    const int64_t read_edge_keys[] = {edge_keys[0], edge_keys[0], INT64_MAX};
+    zova_graph_keyed_edge_results keyed_edge_rows = {0};
+    expect_status(zova_graph_edges_get_many_keyed(&(zova_graph_edges_get_many_keyed_request){
+                      .db = db, .graph_name = "app", .edge_keys = read_edge_keys,
+                      .key_count = 3, .out_results = &keyed_edge_rows}),
+                  ZOVA_OK, "keyed edge get many");
+    if (keyed_edge_rows.len != 3 || !keyed_edge_rows.items[0].found ||
+        keyed_edge_rows.items[0].edge_key != edge_keys[0] ||
+        keyed_edge_rows.items[1].edge_key != edge_keys[0] || keyed_edge_rows.items[2].found) {
+        fprintf(stderr, "keyed edge batch read alignment is incorrect\n");
+        exit(1);
+    }
+    zova_graph_keyed_edge_results_free(&keyed_edge_rows);
+    zova_graph_keyed_edge_results_free(&keyed_edge_rows);
+
+    const int64_t degree_keys[] = {node_keys[0], node_keys[1], node_keys[0]};
+    uint64_t keyed_degrees[] = {99, 99, 99};
+    expect_status(zova_graph_degree_many_keyed(&(zova_graph_degree_many_keyed_request){
+                      .db = db,
+                      .graph_name = "app",
+                      .node_keys = degree_keys,
+                      .node_count = 3,
+                      .direction = ZOVA_GRAPH_NEIGHBOR_OUTGOING,
+                      .edge_type = "calls",
+                      .out_degrees = keyed_degrees,
+                      .out_degrees_capacity = 3,
+                  }),
+                  ZOVA_OK,
+                  "keyed graph degree many");
+    if (keyed_degrees[0] != 1 || keyed_degrees[1] != 0 || keyed_degrees[2] != 1) {
+        fprintf(stderr, "keyed graph degrees are incorrect\n");
+        exit(1);
+    }
+    const int64_t missing_degree_key = INT64_MAX;
+    uint64_t untouched_degree = 1234;
+    expect_status(zova_graph_degree_many_keyed(&(zova_graph_degree_many_keyed_request){
+                      .db = db,
+                      .graph_name = "app",
+                      .node_keys = &missing_degree_key,
+                      .node_count = 1,
+                      .direction = ZOVA_GRAPH_NEIGHBOR_OUTGOING,
+                      .out_degrees = &untouched_degree,
+                      .out_degrees_capacity = 1,
+                  }),
+                  ZOVA_GRAPH_NODE_NOT_FOUND,
+                  "keyed graph degree missing key");
+    if (untouched_degree != 1234) {
+        fprintf(stderr, "failed keyed degree changed caller output\n");
+        exit(1);
+    }
+
+    zova_graph_scan_results scan = {0};
+    expect_status(zova_graph_scan(&(zova_graph_scan_request){
+                      .db = db,
+                      .graph_name = "app",
+                      .node_after = {0, 0},
+                      .edge_after = {0, 0},
+                      .node_limit = 1,
+                      .edge_limit = 1,
+                      .out_results = &scan,
+                  }),
+                  ZOVA_OK,
+                  "keyed graph scan");
+    if (scan.nodes_len != 1 || scan.edges_len != 1 || !scan.has_more_nodes || !scan.has_more_edges ||
+        scan.nodes[0].node_key <= 0 || scan.edges[0].edge_key <= 0) {
+        fprintf(stderr, "keyed graph scan page is incorrect\n");
+        exit(1);
+    }
+    zova_graph_scan_results_free(&scan);
+    zova_graph_scan_results_free(&scan);
+    expect_status(zova_graph_scan(&(zova_graph_scan_request){
+                      .db = db,
+                      .graph_name = "app",
+                      .node_after = {1, 0},
+                      .edge_after = {0, 0},
+                      .node_limit = 1,
+                      .out_results = &scan,
+                  }),
+                  ZOVA_INVALID_ARGUMENT,
+                  "keyed graph scan malformed cursor");
+    if (scan.nodes != NULL || scan.nodes_len != 0 || scan.edges != NULL || scan.edges_len != 0) {
+        fprintf(stderr, "failed keyed scan did not retain empty output\n");
+        exit(1);
+    }
+
+    expect_status(zova_database_begin(&(zova_database_simple_request){.db = db}), ZOVA_OK, "keyed begin caller transaction");
+    const zova_graph_node_input rollback_node = {
+        .graph_name = "app", .node_id = "keyed:rollback", .kind = "temporary", .target_type = ZOVA_GRAPH_TARGET_NONE};
+    int64_t rollback_key = 0;
+    expect_status(zova_graph_node_put_many_keyed(&(zova_graph_node_put_many_keyed_request){
+                      .db = db,
+                      .nodes = &rollback_node,
+                      .nodes_len = 1,
+                      .out_node_keys = &rollback_key,
+                      .out_node_keys_capacity = 1,
+                  }),
+                  ZOVA_OK,
+                  "keyed put in caller transaction");
+    expect_status(zova_database_rollback(&(zova_database_simple_request){.db = db}), ZOVA_OK, "keyed caller rollback");
+    uint8_t rollback_exists = 1;
+    expect_status(zova_graph_node_exists(&(zova_graph_node_exists_request){
+                      .db = db, .graph_name = "app", .node_id = "keyed:rollback", .out_exists = &rollback_exists}),
+                  ZOVA_OK,
+                  "keyed rollback exists");
+    if (rollback_exists) {
+        fprintf(stderr, "keyed caller rollback retained node\n");
+        exit(1);
+    }
     uint64_t degree = 0;
     expect_status(zova_graph_degree(&(zova_graph_degree_request){
                       .db = db,

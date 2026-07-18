@@ -436,6 +436,67 @@ typedef struct zova_graph_neighbor_results {
     size_t len;
 } zova_graph_neighbor_results;
 
+typedef struct zova_graph_keyed_neighbor_result {
+    int64_t edge_key;
+    int64_t neighbor_node_key;
+    char *node_id;
+    size_t node_id_len;
+    char *kind;
+    size_t kind_len;
+    char *edge_type;
+    size_t edge_type_len;
+} zova_graph_keyed_neighbor_result;
+
+/* Owned keyed graph neighbor results. */
+typedef struct zova_graph_keyed_neighbor_results {
+    zova_graph_keyed_neighbor_result *items;
+    size_t len;
+} zova_graph_keyed_neighbor_results;
+
+typedef struct zova_graph_keyed_node_result {
+    uint8_t found; int64_t node_key; char *node_id; size_t node_id_len;
+    char *kind; size_t kind_len; int64_t created_order;
+} zova_graph_keyed_node_result;
+typedef struct zova_graph_keyed_node_results { zova_graph_keyed_node_result *items; size_t len; } zova_graph_keyed_node_results;
+typedef struct zova_graph_keyed_edge_result {
+    uint8_t found; int64_t edge_key; int64_t source_node_key;
+    char *edge_type; size_t edge_type_len; int64_t target_node_key; int64_t created_order;
+} zova_graph_keyed_edge_result;
+typedef struct zova_graph_keyed_edge_results { zova_graph_keyed_edge_result *items; size_t len; } zova_graph_keyed_edge_results;
+
+typedef struct zova_graph_scan_cursor {
+    int64_t created_order;
+    int64_t key;
+} zova_graph_scan_cursor;
+
+typedef struct zova_graph_scan_node {
+    int64_t node_key;
+    char *node_id;
+    size_t node_id_len;
+    char *kind;
+    size_t kind_len;
+    int64_t created_order;
+} zova_graph_scan_node;
+
+typedef struct zova_graph_scan_edge {
+    int64_t edge_key;
+    int64_t source_node_key;
+    char *edge_type;
+    size_t edge_type_len;
+    int64_t target_node_key;
+    int64_t created_order;
+} zova_graph_scan_edge;
+
+/* Owned independently paged node and edge topology rows. */
+typedef struct zova_graph_scan_results {
+    zova_graph_scan_node *nodes;
+    size_t nodes_len;
+    zova_graph_scan_edge *edges;
+    size_t edges_len;
+    uint8_t has_more_nodes;
+    uint8_t has_more_edges;
+} zova_graph_scan_results;
+
 typedef struct zova_graph_walk_result {
     char *node_id;
     size_t node_id_len;
@@ -1096,6 +1157,14 @@ typedef struct zova_graph_node_put_many_request {
     size_t nodes_len;
 } zova_graph_node_put_many_request;
 
+typedef struct zova_graph_node_put_many_keyed_request {
+    zova_database *db;
+    const zova_graph_node_input *nodes;
+    size_t nodes_len;
+    int64_t *out_node_keys;
+    size_t out_node_keys_capacity;
+} zova_graph_node_put_many_keyed_request;
+
 typedef struct zova_graph_node_get_request {
     zova_database *db;
     const char *graph_name;
@@ -1154,6 +1223,14 @@ typedef struct zova_graph_edge_put_many_request {
     size_t edges_len;
 } zova_graph_edge_put_many_request;
 
+typedef struct zova_graph_edge_put_many_keyed_request {
+    zova_database *db;
+    const zova_graph_edge_input *edges;
+    size_t edges_len;
+    int64_t *out_edge_keys;
+    size_t out_edge_keys_capacity;
+} zova_graph_edge_put_many_keyed_request;
+
 typedef struct zova_graph_edge_delete_many_request {
     zova_database *db;
     const zova_graph_edge_input *edges;
@@ -1201,6 +1278,25 @@ typedef struct zova_graph_neighbors_request {
     zova_graph_neighbor_results *out_results;
 } zova_graph_neighbors_request;
 
+typedef struct zova_graph_neighbors_keyed_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *node_id;
+    int direction;
+    const char *edge_type;
+    size_t limit;
+    zova_graph_keyed_neighbor_results *out_results;
+} zova_graph_neighbors_keyed_request;
+
+typedef struct zova_graph_nodes_get_many_keyed_request {
+    zova_database *db; const char *graph_name; const int64_t *node_keys;
+    size_t key_count; zova_graph_keyed_node_results *out_results;
+} zova_graph_nodes_get_many_keyed_request;
+typedef struct zova_graph_edges_get_many_keyed_request {
+    zova_database *db; const char *graph_name; const int64_t *edge_keys;
+    size_t key_count; zova_graph_keyed_edge_results *out_results;
+} zova_graph_edges_get_many_keyed_request;
+
 /* Count edges adjacent to one existing node, optionally filtered by type. */
 typedef struct zova_graph_degree_request {
     zova_database *db;
@@ -1210,6 +1306,27 @@ typedef struct zova_graph_degree_request {
     const char *edge_type;
     uint64_t *out_degree;
 } zova_graph_degree_request;
+
+typedef struct zova_graph_degree_many_keyed_request {
+    zova_database *db;
+    const char *graph_name;
+    const int64_t *node_keys;
+    size_t node_count;
+    int direction;
+    const char *edge_type;
+    uint64_t *out_degrees;
+    size_t out_degrees_capacity;
+} zova_graph_degree_many_keyed_request;
+
+typedef struct zova_graph_scan_request {
+    zova_database *db;
+    const char *graph_name;
+    zova_graph_scan_cursor node_after;
+    zova_graph_scan_cursor edge_after;
+    size_t node_limit;
+    size_t edge_limit;
+    zova_graph_scan_results *out_results;
+} zova_graph_scan_request;
 
 /*
  * Walk follows outgoing edges in breadth-first order. The start node is the
@@ -1279,6 +1396,10 @@ void zova_extension_list_free(zova_extension_list *list);
 void zova_graph_node_free(zova_graph_node *node);
 void zova_graph_edge_free(zova_graph_edge *edge);
 void zova_graph_neighbor_results_free(zova_graph_neighbor_results *results);
+void zova_graph_keyed_neighbor_results_free(zova_graph_keyed_neighbor_results *results);
+void zova_graph_keyed_node_results_free(zova_graph_keyed_node_results *results);
+void zova_graph_keyed_edge_results_free(zova_graph_keyed_edge_results *results);
+void zova_graph_scan_results_free(zova_graph_scan_results *results);
 void zova_graph_walk_results_free(zova_graph_walk_results *results);
 
 /* Database lifecycle, SQL passthrough, prepared statements, and conversion. */
@@ -1433,18 +1554,25 @@ zova_status zova_database_extension_drop(const zova_database_extension_request *
 zova_status zova_graph_delete(const zova_graph_delete_request *request);
 zova_status zova_graph_node_put(const zova_graph_node_put_request *request);
 zova_status zova_graph_node_put_many(const zova_graph_node_put_many_request *request);
+zova_status zova_graph_node_put_many_keyed(const zova_graph_node_put_many_keyed_request *request);
 zova_status zova_graph_node_get(const zova_graph_node_get_request *request);
 zova_status zova_graph_node_exists(const zova_graph_node_exists_request *request);
 zova_status zova_graph_node_delete(const zova_graph_node_delete_request *request);
 zova_status zova_graph_node_delete_many(const zova_graph_node_delete_many_request *request);
 zova_status zova_graph_edge_put(const zova_graph_edge_put_request *request);
 zova_status zova_graph_edge_put_many(const zova_graph_edge_put_many_request *request);
+zova_status zova_graph_edge_put_many_keyed(const zova_graph_edge_put_many_keyed_request *request);
 zova_status zova_graph_edge_delete_many(const zova_graph_edge_delete_many_request *request);
 zova_status zova_graph_edge_get(const zova_graph_edge_get_request *request);
 zova_status zova_graph_edge_exists(const zova_graph_edge_exists_request *request);
 zova_status zova_graph_edge_delete(const zova_graph_edge_delete_request *request);
 zova_status zova_graph_neighbors(const zova_graph_neighbors_request *request);
+zova_status zova_graph_neighbors_keyed(const zova_graph_neighbors_keyed_request *request);
+zova_status zova_graph_nodes_get_many_keyed(const zova_graph_nodes_get_many_keyed_request *request);
+zova_status zova_graph_edges_get_many_keyed(const zova_graph_edges_get_many_keyed_request *request);
 zova_status zova_graph_degree(const zova_graph_degree_request *request);
+zova_status zova_graph_degree_many_keyed(const zova_graph_degree_many_keyed_request *request);
+zova_status zova_graph_scan(const zova_graph_scan_request *request);
 zova_status zova_graph_walk(const zova_graph_walk_request *request);
 zova_status zova_graph_walk_direction(const zova_graph_walk_direction_request *request);
 zova_status zova_graph_walk_direction_profiled(const zova_graph_walk_direction_profiled_request *request);

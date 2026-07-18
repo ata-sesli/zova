@@ -47,6 +47,12 @@ pub const zova_graph_node = internal.zova_graph_node;
 pub const zova_graph_edge = internal.zova_graph_edge;
 pub const zova_graph_neighbor_result = internal.zova_graph_neighbor_result;
 pub const zova_graph_neighbor_results = internal.zova_graph_neighbor_results;
+pub const zova_graph_keyed_neighbor_result = internal.zova_graph_keyed_neighbor_result;
+pub const zova_graph_keyed_neighbor_results = internal.zova_graph_keyed_neighbor_results;
+pub const zova_graph_scan_cursor = internal.zova_graph_scan_cursor;
+pub const zova_graph_scan_node = internal.zova_graph_scan_node;
+pub const zova_graph_scan_edge = internal.zova_graph_scan_edge;
+pub const zova_graph_scan_results = internal.zova_graph_scan_results;
 pub const zova_graph_walk_result = internal.zova_graph_walk_result;
 pub const zova_graph_walk_results = internal.zova_graph_walk_results;
 pub const zova_graph_walk_profile = internal.zova_graph_walk_profile;
@@ -141,6 +147,7 @@ pub const zova_graph_delete_request = internal.zova_graph_delete_request;
 pub const zova_graph_node_put_request = internal.zova_graph_node_put_request;
 pub const zova_graph_node_input = internal.zova_graph_node_input;
 pub const zova_graph_node_put_many_request = internal.zova_graph_node_put_many_request;
+pub const zova_graph_node_put_many_keyed_request = internal.zova_graph_node_put_many_keyed_request;
 pub const zova_graph_node_get_request = internal.zova_graph_node_get_request;
 pub const zova_graph_node_exists_request = internal.zova_graph_node_exists_request;
 pub const zova_graph_node_delete_request = internal.zova_graph_node_delete_request;
@@ -148,12 +155,22 @@ pub const zova_graph_node_delete_many_request = internal.zova_graph_node_delete_
 pub const zova_graph_edge_put_request = internal.zova_graph_edge_put_request;
 pub const zova_graph_edge_input = internal.zova_graph_edge_input;
 pub const zova_graph_edge_put_many_request = internal.zova_graph_edge_put_many_request;
+pub const zova_graph_edge_put_many_keyed_request = internal.zova_graph_edge_put_many_keyed_request;
 pub const zova_graph_edge_delete_many_request = internal.zova_graph_edge_delete_many_request;
 pub const zova_graph_edge_get_request = internal.zova_graph_edge_get_request;
 pub const zova_graph_edge_exists_request = internal.zova_graph_edge_exists_request;
 pub const zova_graph_edge_delete_request = internal.zova_graph_edge_delete_request;
 pub const zova_graph_neighbors_request = internal.zova_graph_neighbors_request;
+pub const zova_graph_neighbors_keyed_request = internal.zova_graph_neighbors_keyed_request;
+pub const zova_graph_keyed_node_result = internal.zova_graph_keyed_node_result;
+pub const zova_graph_keyed_node_results = internal.zova_graph_keyed_node_results;
+pub const zova_graph_keyed_edge_result = internal.zova_graph_keyed_edge_result;
+pub const zova_graph_keyed_edge_results = internal.zova_graph_keyed_edge_results;
+pub const zova_graph_nodes_get_many_keyed_request = internal.zova_graph_nodes_get_many_keyed_request;
+pub const zova_graph_edges_get_many_keyed_request = internal.zova_graph_edges_get_many_keyed_request;
 pub const zova_graph_degree_request = internal.zova_graph_degree_request;
+pub const zova_graph_degree_many_keyed_request = internal.zova_graph_degree_many_keyed_request;
+pub const zova_graph_scan_request = internal.zova_graph_scan_request;
 pub const zova_graph_walk_request = internal.zova_graph_walk_request;
 pub const zova_graph_walk_direction_request = internal.zova_graph_walk_direction_request;
 pub const zova_graph_walk_direction_profiled_request = internal.zova_graph_walk_direction_profiled_request;
@@ -240,6 +257,20 @@ export fn zova_graph_edge_free(edge: ?*zova_graph_edge) callconv(.c) void {
 
 export fn zova_graph_neighbor_results_free(results: ?*zova_graph_neighbor_results) callconv(.c) void {
     return internal.zova_graph_neighbor_results_free(results);
+}
+
+export fn zova_graph_keyed_neighbor_results_free(results: ?*zova_graph_keyed_neighbor_results) callconv(.c) void {
+    return internal.zova_graph_keyed_neighbor_results_free(results);
+}
+export fn zova_graph_keyed_node_results_free(results: ?*zova_graph_keyed_node_results) callconv(.c) void {
+    return internal.zova_graph_keyed_node_results_free(results);
+}
+export fn zova_graph_keyed_edge_results_free(results: ?*zova_graph_keyed_edge_results) callconv(.c) void {
+    return internal.zova_graph_keyed_edge_results_free(results);
+}
+
+export fn zova_graph_scan_results_free(results: ?*zova_graph_scan_results) callconv(.c) void {
+    return internal.zova_graph_scan_results_free(results);
 }
 
 export fn zova_graph_walk_results_free(results: ?*zova_graph_walk_results) callconv(.c) void {
@@ -668,6 +699,10 @@ export fn zova_graph_node_put_many(request: ?*const zova_graph_node_put_many_req
     return internal.zova_graph_node_put_many(request);
 }
 
+export fn zova_graph_node_put_many_keyed(request: ?*const zova_graph_node_put_many_keyed_request) callconv(.c) zova_status {
+    return internal.zova_graph_node_put_many_keyed(request);
+}
+
 export fn zova_graph_node_get(request: ?*const zova_graph_node_get_request) callconv(.c) zova_status {
     return internal.zova_graph_node_get(request);
 }
@@ -692,6 +727,10 @@ export fn zova_graph_edge_put_many(request: ?*const zova_graph_edge_put_many_req
     return internal.zova_graph_edge_put_many(request);
 }
 
+export fn zova_graph_edge_put_many_keyed(request: ?*const zova_graph_edge_put_many_keyed_request) callconv(.c) zova_status {
+    return internal.zova_graph_edge_put_many_keyed(request);
+}
+
 export fn zova_graph_edge_delete_many(request: ?*const zova_graph_edge_delete_many_request) callconv(.c) zova_status {
     return internal.zova_graph_edge_delete_many(request);
 }
@@ -712,8 +751,26 @@ export fn zova_graph_neighbors(request: ?*const zova_graph_neighbors_request) ca
     return internal.zova_graph_neighbors(request);
 }
 
+export fn zova_graph_neighbors_keyed(request: ?*const zova_graph_neighbors_keyed_request) callconv(.c) zova_status {
+    return internal.zova_graph_neighbors_keyed(request);
+}
+export fn zova_graph_nodes_get_many_keyed(request: ?*const zova_graph_nodes_get_many_keyed_request) callconv(.c) zova_status {
+    return internal.zova_graph_nodes_get_many_keyed(request);
+}
+export fn zova_graph_edges_get_many_keyed(request: ?*const zova_graph_edges_get_many_keyed_request) callconv(.c) zova_status {
+    return internal.zova_graph_edges_get_many_keyed(request);
+}
+
 export fn zova_graph_degree(request: ?*const zova_graph_degree_request) callconv(.c) zova_status {
     return internal.zova_graph_degree(request);
+}
+
+export fn zova_graph_degree_many_keyed(request: ?*const zova_graph_degree_many_keyed_request) callconv(.c) zova_status {
+    return internal.zova_graph_degree_many_keyed(request);
+}
+
+export fn zova_graph_scan(request: ?*const zova_graph_scan_request) callconv(.c) zova_status {
+    return internal.zova_graph_scan(request);
 }
 
 export fn zova_graph_walk(request: ?*const zova_graph_walk_request) callconv(.c) zova_status {

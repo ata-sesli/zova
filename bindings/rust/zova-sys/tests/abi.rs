@@ -1136,6 +1136,47 @@ fn raw_graph_crud_and_traversal_smoke() {
             zova_sys::ZOVA_OK
         );
 
+        let keyed_node_inputs = [
+            zova_sys::zova_graph_node_input {
+                graph_name: graph.as_ptr(),
+                node_id: message_1.as_ptr(),
+                kind: kind_message.as_ptr(),
+                target_type: zova_sys::ZOVA_GRAPH_TARGET_RECORD,
+                target_namespace: table.as_ptr(),
+                target_ref: row_ref.as_ptr(),
+            },
+            zova_sys::zova_graph_node_input {
+                graph_name: graph.as_ptr(),
+                node_id: message_2.as_ptr(),
+                kind: kind_message.as_ptr(),
+                target_type: zova_sys::ZOVA_GRAPH_TARGET_NONE,
+                target_namespace: ptr::null(),
+                target_ref: ptr::null(),
+            },
+            zova_sys::zova_graph_node_input {
+                graph_name: graph.as_ptr(),
+                node_id: message_1.as_ptr(),
+                kind: kind_message.as_ptr(),
+                target_type: zova_sys::ZOVA_GRAPH_TARGET_RECORD,
+                target_namespace: table.as_ptr(),
+                target_ref: row_ref.as_ptr(),
+            },
+        ];
+        let mut node_keys = [-1_i64; 3];
+        let keyed_nodes = zova_sys::zova_graph_node_put_many_keyed_request {
+            db,
+            nodes: keyed_node_inputs.as_ptr(),
+            nodes_len: keyed_node_inputs.len(),
+            out_node_keys: node_keys.as_mut_ptr(),
+            out_node_keys_capacity: node_keys.len(),
+        };
+        assert_eq!(
+            zova_sys::zova_graph_node_put_many_keyed(&keyed_nodes),
+            zova_sys::ZOVA_OK
+        );
+        assert!(node_keys[0] > 0 && node_keys[1] > 0);
+        assert_eq!(node_keys[0], node_keys[2]);
+
         let mut node = zova_sys::zova_graph_node {
             graph_name: ptr::null_mut(),
             graph_name_len: 0,
@@ -1181,6 +1222,35 @@ fn raw_graph_crud_and_traversal_smoke() {
         };
         assert_eq!(zova_sys::zova_graph_edge_put(&edge_2), zova_sys::ZOVA_OK);
 
+        let keyed_edge_inputs = [
+            zova_sys::zova_graph_edge_input {
+                graph_name: graph.as_ptr(),
+                from_node_id: message_1.as_ptr(),
+                edge_type: replies_to.as_ptr(),
+                to_node_id: message_2.as_ptr(),
+            },
+            zova_sys::zova_graph_edge_input {
+                graph_name: graph.as_ptr(),
+                from_node_id: message_1.as_ptr(),
+                edge_type: replies_to.as_ptr(),
+                to_node_id: message_2.as_ptr(),
+            },
+        ];
+        let mut edge_keys = [-1_i64; 2];
+        let keyed_edges = zova_sys::zova_graph_edge_put_many_keyed_request {
+            db,
+            edges: keyed_edge_inputs.as_ptr(),
+            edges_len: keyed_edge_inputs.len(),
+            out_edge_keys: edge_keys.as_mut_ptr(),
+            out_edge_keys_capacity: edge_keys.len(),
+        };
+        assert_eq!(
+            zova_sys::zova_graph_edge_put_many_keyed(&keyed_edges),
+            zova_sys::ZOVA_OK
+        );
+        assert!(edge_keys[0] > 0);
+        assert_eq!(edge_keys[0], edge_keys[1]);
+
         let mut edge = zova_sys::zova_graph_edge {
             graph_name: ptr::null_mut(),
             graph_name_len: 0,
@@ -1221,6 +1291,78 @@ fn raw_graph_crud_and_traversal_smoke() {
         );
         assert_eq!(neighbors.len, 2);
         zova_sys::zova_graph_neighbor_results_free(&mut neighbors);
+
+        let mut keyed_neighbors = zova_sys::zova_graph_keyed_neighbor_results {
+            items: ptr::null_mut(),
+            len: 0,
+        };
+        let keyed_neighbor_request = zova_sys::zova_graph_neighbors_keyed_request {
+            db,
+            graph_name: graph.as_ptr(),
+            node_id: message_1.as_ptr(),
+            direction: zova_sys::ZOVA_GRAPH_NEIGHBOR_OUTGOING,
+            edge_type: replies_to.as_ptr(),
+            limit: 10,
+            out_results: &mut keyed_neighbors,
+        };
+        assert_eq!(
+            zova_sys::zova_graph_neighbors_keyed(&keyed_neighbor_request),
+            zova_sys::ZOVA_OK
+        );
+        assert_eq!(keyed_neighbors.len, 1);
+        assert_eq!((*keyed_neighbors.items).edge_key, edge_keys[0]);
+        assert_eq!((*keyed_neighbors.items).neighbor_node_key, node_keys[1]);
+        zova_sys::zova_graph_keyed_neighbor_results_free(&mut keyed_neighbors);
+        zova_sys::zova_graph_keyed_neighbor_results_free(&mut keyed_neighbors);
+
+        let degree_node_keys = [node_keys[0], node_keys[1], node_keys[0]];
+        let mut degrees = [99_u64; 3];
+        let degree_request = zova_sys::zova_graph_degree_many_keyed_request {
+            db,
+            graph_name: graph.as_ptr(),
+            node_keys: degree_node_keys.as_ptr(),
+            node_count: degree_node_keys.len(),
+            direction: zova_sys::ZOVA_GRAPH_NEIGHBOR_OUTGOING,
+            edge_type: replies_to.as_ptr(),
+            out_degrees: degrees.as_mut_ptr(),
+            out_degrees_capacity: degrees.len(),
+        };
+        assert_eq!(
+            zova_sys::zova_graph_degree_many_keyed(&degree_request),
+            zova_sys::ZOVA_OK
+        );
+        assert_eq!(degrees, [1, 0, 1]);
+
+        let mut scan = zova_sys::zova_graph_scan_results {
+            nodes: ptr::null_mut(),
+            nodes_len: 0,
+            edges: ptr::null_mut(),
+            edges_len: 0,
+            has_more_nodes: 0,
+            has_more_edges: 0,
+        };
+        let scan_request = zova_sys::zova_graph_scan_request {
+            db,
+            graph_name: graph.as_ptr(),
+            node_after: zova_sys::zova_graph_scan_cursor {
+                created_order: 0,
+                key: 0,
+            },
+            edge_after: zova_sys::zova_graph_scan_cursor {
+                created_order: 0,
+                key: 0,
+            },
+            node_limit: 1,
+            edge_limit: 1,
+            out_results: &mut scan,
+        };
+        assert_eq!(zova_sys::zova_graph_scan(&scan_request), zova_sys::ZOVA_OK);
+        assert_eq!(scan.nodes_len, 1);
+        assert_eq!(scan.edges_len, 1);
+        assert_eq!(scan.has_more_nodes, 1);
+        assert_eq!(scan.has_more_edges, 1);
+        zova_sys::zova_graph_scan_results_free(&mut scan);
+        zova_sys::zova_graph_scan_results_free(&mut scan);
 
         let mut walk = zova_sys::zova_graph_walk_results {
             items: ptr::null_mut(),
