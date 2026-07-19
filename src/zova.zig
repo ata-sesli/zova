@@ -7,7 +7,7 @@
 //!
 //! Zova is currently pre-1.0, and internal `.zova` format compatibility is
 //! not preserved between experimental format versions. The current v0.22
-//! development format is version `8`: `_zova_meta.format_version = '8'` plus
+//! development format is version `9`: `_zova_meta.format_version = '9'` plus
 //! the required private object, vector, graph, and extension registry schemas.
 //! `Database.open` is intentionally non-mutating: it validates the file and
 //! rejects old, future, incomplete, or invalid private schemas instead of
@@ -169,8 +169,11 @@ pub const GraphTargetType = graph_impl.GraphTargetType;
 pub const GraphInfo = graph_impl.GraphInfo;
 pub const GraphList = graph_impl.GraphList;
 pub const GraphNodeInput = graph_impl.GraphNodeInput;
+pub const FreshGraphNodeInput = graph_impl.FreshGraphNodeInput;
 pub const GraphNode = graph_impl.GraphNode;
 pub const GraphEdgeInput = graph_impl.GraphEdgeInput;
+pub const FreshGraphEdgeInput = graph_impl.FreshGraphEdgeInput;
+pub const FreshGraphBuildProfile = graph_impl.FreshGraphBuildProfile;
 pub const GraphEdge = graph_impl.GraphEdge;
 pub const GraphNeighborDirection = graph_impl.GraphNeighborDirection;
 pub const GraphNeighborsOptions = graph_impl.GraphNeighborsOptions;
@@ -529,12 +532,14 @@ pub const Database = struct {
     bound_object_store: ?BoundObjectStore = null,
     bound_vector_store: ?BoundVectorStore = null,
     bound_graph_store: ?BoundGraphStore = null,
+    main_graph_edge_types: graph_impl.GraphEdgeTypeCache = .{},
+    bound_graph_edge_types: graph_impl.GraphEdgeTypeCache = .{},
     extension_registry: ExtensionRegistry = ExtensionRegistry.empty(),
 
     /// Create a new initialized `.zova` database.
     ///
     /// This never overwrites an existing file. The file is initialized with the
-    /// private `_zova_meta` table, format version `8`, and the required
+    /// private `_zova_meta` table, format version `9`, and the required
     /// object, vector, graph, and extension registry schemas.
     pub fn create(path: [:0]const u8) Error!Database {
         return createWithOptionsAndExtensions(path, .{}, bundledExtensionRegistry());
@@ -697,6 +702,8 @@ pub const Database = struct {
 
     /// Close the underlying SQLite connection.
     pub fn deinit(self: *Database) void {
+        self.main_graph_edge_types.deinit();
+        self.bound_graph_edge_types.deinit();
         self.sqlite_db.deinit();
         deinitNotifications(self.notifications);
     }
@@ -854,6 +861,7 @@ pub const Database = struct {
 
     /// Create a named graph for application-provided relationship nodes.
     pub fn createGraph(self: *Database, name: []const u8) Error!void {
+        self.invalidateActiveGraphEdgeTypes();
         const owns_transaction = try self.beginBoundGraphMutation();
         var committed = false;
         errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
@@ -866,6 +874,7 @@ pub const Database = struct {
 
     /// Delete a graph and all of its Zova-owned graph nodes and edges.
     pub fn deleteGraph(self: *Database, name: []const u8) Error!void {
+        self.invalidateActiveGraphEdgeTypes();
         const owns_transaction = try self.beginBoundGraphMutation();
         var committed = false;
         errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
@@ -931,6 +940,45 @@ pub const Database = struct {
         finished = true;
     }
 
+    /// Build one graph atomically in an otherwise empty native graph store.
+    pub fn buildFreshGraphKeyed(
+        self: *Database,
+        graph_name: []const u8,
+        nodes: []const FreshGraphNodeInput,
+        edges: []const FreshGraphEdgeInput,
+        out_node_keys: []i64,
+        out_edge_keys: []i64,
+    ) Error!void {
+        return self.buildFreshGraphKeyedProfiled(graph_name, nodes, edges, out_node_keys, out_edge_keys, null);
+    }
+
+    pub fn buildFreshGraphKeyedProfiled(
+        self: *Database,
+        graph_name: []const u8,
+        nodes: []const FreshGraphNodeInput,
+        edges: []const FreshGraphEdgeInput,
+        out_node_keys: []i64,
+        out_edge_keys: []i64,
+        profile: ?*FreshGraphBuildProfile,
+    ) Error!void {
+        self.invalidateActiveGraphEdgeTypes();
+        if (out_node_keys.len != nodes.len or out_edge_keys.len != edges.len) return error.InvalidArgument;
+        const temporary_node_keys = try std.heap.c_allocator.alloc(i64, nodes.len);
+        defer std.heap.c_allocator.free(temporary_node_keys);
+        const temporary_edge_keys = try std.heap.c_allocator.alloc(i64, edges.len);
+        defer std.heap.c_allocator.free(temporary_edge_keys);
+        const scope = try self.beginGraphKeyedMutation();
+        var finished = false;
+        errdefer if (!finished) self.rollbackGraphKeyedMutation(scope) catch {};
+        var graphs = self.graphDatabase();
+        try graphs.buildFreshGraphKeyedProfiled(graph_name, nodes, edges, temporary_node_keys, temporary_edge_keys, profile);
+        if (self.bound_graph_store != null) try incrementBoundGraphEpoch(&self.sqlite_db);
+        try self.finishGraphKeyedMutation(scope);
+        finished = true;
+        @memcpy(out_node_keys, temporary_node_keys);
+        @memcpy(out_edge_keys, temporary_edge_keys);
+    }
+
     /// Return an owned graph node.
     pub fn getGraphNode(self: *Database, allocator: std.mem.Allocator, graph_name: []const u8, node_id: []const u8) Error!GraphNode {
         var graphs = self.graphDatabase();
@@ -969,6 +1017,7 @@ pub const Database = struct {
 
     /// Create an explicit directed graph edge.
     pub fn putGraphEdge(self: *Database, input: GraphEdgeInput) Error!void {
+        self.invalidateActiveGraphEdgeTypes();
         const owns_transaction = try self.beginBoundGraphMutation();
         var committed = false;
         errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
@@ -981,6 +1030,7 @@ pub const Database = struct {
 
     /// Insert graph edges in one transaction unless the caller owns one.
     pub fn putGraphEdges(self: *Database, inputs: []const GraphEdgeInput) Error!void {
+        self.invalidateActiveGraphEdgeTypes();
         const owns_transaction = try self.beginGraphBatchMutation();
         var committed = false;
         errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
@@ -993,6 +1043,7 @@ pub const Database = struct {
 
     /// Insert graph edges atomically and return aligned opaque row keys.
     pub fn putGraphEdgesKeyed(self: *Database, inputs: []const GraphEdgeInput, out_keys: []i64) Error!void {
+        self.invalidateActiveGraphEdgeTypes();
         if (out_keys.len != inputs.len) return error.InvalidArgument;
         const scope = try self.beginGraphKeyedMutation();
         var finished = false;
@@ -1190,6 +1241,7 @@ pub const Database = struct {
     }
 
     pub fn bindGraphStore(self: *Database, path: [:0]const u8) Error!void {
+        self.bound_graph_edge_types.clear();
         try self.rejectBoundStoreManagementInsideMainTransaction();
         try ensureMainDatabaseRole(&self.sqlite_db);
         try ensureBoundStoreTable(&self.sqlite_db);
@@ -1227,6 +1279,8 @@ pub const Database = struct {
 
     /// Move existing single-file graph storage into a new bound graph store.
     pub fn splitGraphStore(self: *Database, store_path: [:0]const u8) Error!SplitGraphStoreResult {
+        self.main_graph_edge_types.clear();
+        self.bound_graph_edge_types.clear();
         try self.rejectBoundStoreManagementInsideMainTransaction();
         try ensureMainDatabaseRole(&self.sqlite_db);
         try ensureBoundStoreTable(&self.sqlite_db);
@@ -1284,6 +1338,7 @@ pub const Database = struct {
     }
 
     pub fn unbindGraphStore(self: *Database) Error!void {
+        self.bound_graph_edge_types.clear();
         try self.rejectBoundStoreManagementInsideMainTransaction();
         if (!try hasBoundGraphStoreRow(&self.sqlite_db)) return error.BoundStoreNotFound;
         const had_attached_store = self.bound_graph_store != null;
@@ -2042,7 +2097,12 @@ pub const Database = struct {
         return .{
             .sqlite_db = &self.sqlite_db,
             .storage_schema = if (self.bound_graph_store != null) .graph_store else .main,
+            .edge_type_cache = if (self.bound_graph_store != null) &self.bound_graph_edge_types else &self.main_graph_edge_types,
         };
+    }
+
+    fn invalidateActiveGraphEdgeTypes(self: *Database) void {
+        if (self.bound_graph_store != null) self.bound_graph_edge_types.clear() else self.main_graph_edge_types.clear();
     }
 
     fn rejectBoundStoreManagementInsideMainTransaction(self: *Database) Error!void {
@@ -2265,6 +2325,7 @@ fn initializeVectorSchema(db: *sqlite.Database) sqlite.Error!void {
 fn initializeGraphSchema(db: *sqlite.Database) sqlite.Error!void {
     try db.exec(graph_impl.graphs_schema_sql ++ ";");
     try db.exec(graph_impl.graph_nodes_schema_sql ++ ";");
+    try db.exec(graph_impl.graph_edge_types_schema_sql ++ ";");
     try db.exec(graph_impl.graph_edges_schema_sql ++ ";");
     try db.exec(graph_impl.graph_nodes_created_order_index_sql ++ ";");
     try db.exec(graph_impl.graph_edges_created_order_index_sql ++ ";");
@@ -2720,25 +2781,40 @@ fn copyGraphStorage(
     }
 
     var edges = try prepareSchemaSql(source,
-        \\select g.name, from_node.node_id, e.edge_type, to_node.node_id, e.created_order
+        \\select g.name, from_node.node_id, et.name, to_node.node_id, e.created_order
         \\from {s}_zova_graph_edges e
         \\join {s}_zova_graphs g on g.graph_key = e.graph_key
+        \\join {s}_zova_graph_edge_types et on et.graph_key=e.graph_key and et.edge_type_key=e.edge_type_key
         \\join {s}_zova_graph_nodes from_node on from_node.graph_key = e.graph_key and from_node.node_key = e.from_node_key
         \\join {s}_zova_graph_nodes to_node on to_node.graph_key = e.graph_key and to_node.node_key = e.to_node_key
-        \\order by g.name, e.created_order, from_node.node_id, e.edge_type, to_node.node_id
-    , .{ source_schema.prefix(), source_schema.prefix(), source_schema.prefix(), source_schema.prefix() });
+        \\order by g.name, e.created_order, from_node.node_id, et.name, to_node.node_id
+    , .{ source_schema.prefix(), source_schema.prefix(), source_schema.prefix(), source_schema.prefix(), source_schema.prefix() });
     defer edges.deinit();
     var insert_edge = try prepareSchemaSql(destination,
         \\insert into {s}_zova_graph_edges
-        \\  (graph_key, from_node_key, edge_type, to_node_key, created_order)
-        \\select g.graph_key, from_node.node_key, ?, to_node.node_key, ?
+        \\  (graph_key, from_node_key, edge_type_key, to_node_key, created_order)
+        \\select g.graph_key, from_node.node_key,
+        \\  (select edge_type_key from {s}_zova_graph_edge_types where graph_key=g.graph_key and name=?),
+        \\  to_node.node_key, ?
         \\from {s}_zova_graphs g
         \\join {s}_zova_graph_nodes from_node on from_node.graph_key = g.graph_key and from_node.node_id = ?
         \\join {s}_zova_graph_nodes to_node on to_node.graph_key = g.graph_key and to_node.node_id = ?
         \\where g.name = ?
-    , .{ destination_schema.prefix(), destination_schema.prefix(), destination_schema.prefix(), destination_schema.prefix() });
+    , .{ destination_schema.prefix(), destination_schema.prefix(), destination_schema.prefix(), destination_schema.prefix(), destination_schema.prefix() });
     defer insert_edge.deinit();
+    var insert_type = try prepareSchemaSql(
+        destination,
+        "insert into {s}_zova_graph_edge_types(graph_key,name) values((select graph_key from {s}_zova_graphs where name=?),?) on conflict(graph_key,name) do nothing",
+        .{ destination_schema.prefix(), destination_schema.prefix() },
+    );
+    defer insert_type.deinit();
     while ((try edges.step()) == .row) {
+        try insert_type.bindText(1, edges.columnText(0));
+        try insert_type.bindText(2, edges.columnText(2));
+        std.debug.assert((try insert_type.step()) == .done);
+        try insert_type.reset();
+        try insert_type.clearBindings();
+
         try insert_edge.bindText(1, edges.columnText(2));
         try insert_edge.bindInt64(2, edges.columnInt64(4));
         try insert_edge.bindText(3, edges.columnText(1));
@@ -2790,6 +2866,7 @@ fn clearMainVectorStorage(db: *sqlite.Database) Error!void {
 fn clearMainGraphStorage(db: *sqlite.Database) Error!void {
     try db.exec(
         \\delete from _zova_graph_edges;
+        \\delete from _zova_graph_edge_types;
         \\delete from _zova_graph_nodes;
         \\delete from _zova_graphs;
     );
@@ -2808,6 +2885,7 @@ fn mainVectorStorageHasRows(db: *sqlite.Database) Error!bool {
 fn mainGraphStorageHasRows(db: *sqlite.Database) Error!bool {
     return try countStorageRows(db, "select count(*) from {s}_zova_graphs", .{""}) != 0 or
         try countStorageRows(db, "select count(*) from {s}_zova_graph_nodes", .{""}) != 0 or
+        try countStorageRows(db, "select count(*) from {s}_zova_graph_edge_types", .{""}) != 0 or
         try countStorageRows(db, "select count(*) from {s}_zova_graph_edges", .{""}) != 0;
 }
 
@@ -3013,7 +3091,10 @@ fn validateAttachedGraphSchema(db: *sqlite.Database, comptime schema_name: []con
     const node_columns = [_][]const u8{ "node_key", "graph_key", "node_id", "kind", "target_type", "target_namespace", "target_ref", "created_order" };
     try validateAttachedRequiredTable(db, schema_name, graph_impl.graph_nodes_table, &node_columns, graph_impl.graph_nodes_schema_sql);
 
-    const edge_columns = [_][]const u8{ "edge_key", "graph_key", "from_node_key", "edge_type", "to_node_key", "created_order" };
+    const edge_type_columns = [_][]const u8{ "edge_type_key", "graph_key", "name" };
+    try validateAttachedRequiredTable(db, schema_name, graph_impl.graph_edge_types_table, &edge_type_columns, graph_impl.graph_edge_types_schema_sql);
+
+    const edge_columns = [_][]const u8{ "edge_key", "graph_key", "from_node_key", "edge_type_key", "to_node_key", "created_order" };
     try validateAttachedRequiredTable(db, schema_name, graph_impl.graph_edges_table, &edge_columns, graph_impl.graph_edges_schema_sql);
 }
 
@@ -3812,11 +3893,18 @@ fn validateGraphSchema(db: *sqlite.Database) Error!void {
     };
     try validateRequiredTable(db, graph_impl.graph_nodes_table, &node_columns, graph_impl.graph_nodes_schema_sql);
 
+    const edge_type_columns = [_][]const u8{
+        "edge_type_key",
+        "graph_key",
+        "name",
+    };
+    try validateRequiredTable(db, graph_impl.graph_edge_types_table, &edge_type_columns, graph_impl.graph_edge_types_schema_sql);
+
     const edge_columns = [_][]const u8{
         "edge_key",
         "graph_key",
         "from_node_key",
-        "edge_type",
+        "edge_type_key",
         "to_node_key",
         "created_order",
     };
@@ -4250,7 +4338,7 @@ test "created zova database stores metadata" {
 }
 
 test "current format reserves graph store metadata" {
-    try std.testing.expectEqualStrings("8", format_version);
+    try std.testing.expectEqualStrings("9", format_version);
     try std.testing.expect(std.mem.indexOf(u8, bound_stores_schema_sql, "'graph_store'") != null);
     try std.testing.expect(std.mem.indexOf(u8, bound_stores_schema_sql, "graph_epoch integer") != null);
 
@@ -4279,7 +4367,7 @@ test "create graph store writes metadata and rejects main database open" {
         defer raw.deinit();
 
         try testingExpectScalarText(&raw, "select value from _zova_meta where key = 'magic'", "zova");
-        try testingExpectScalarText(&raw, "select value from _zova_meta where key = 'format_version'", "8");
+        try testingExpectScalarText(&raw, "select value from _zova_meta where key = 'format_version'", "9");
         try testingExpectScalarText(&raw, "select value from _zova_meta where key = 'store_role'", "graph_store");
         try testingExpectScalarText(&raw, "select value from _zova_meta where key = 'graph_epoch'", "0");
 
@@ -5639,7 +5727,7 @@ test "open rejects old format version" {
 }
 
 fn testingFileSha256(path: []const u8) ![32]u8 {
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(defaultIo(), path, std.testing.allocator, .limited(1024 * 1024));
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(defaultIo(), path, std.testing.allocator, .limited(16 * 1024 * 1024));
     defer std.testing.allocator.free(bytes);
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
@@ -5654,18 +5742,21 @@ fn testingCopySqliteFile(source_path: [:0]const u8, destination_path: [:0]const 
     try backupMainDatabase(&source, &destination);
 }
 
-test "format seven main graph and vector fixtures are rejected without mutation" {
+test "older main graph and vector fixtures are rejected without mutation" {
     const fixtures = .{
         .{ .path = "tests/fixtures/empty-format-7.zova", .role = StorageRole.main },
         .{ .path = "tests/fixtures/empty-graph-store-format-7.zova", .role = StorageRole.graph },
         .{ .path = "tests/fixtures/empty-vector-store-format-7.zova", .role = StorageRole.vector },
+        .{ .path = "tests/fixtures/format-8.zova", .role = StorageRole.main },
+        .{ .path = "tests/fixtures/empty-graph-store-format-8.zova", .role = StorageRole.graph },
+        .{ .path = "tests/fixtures/empty-vector-store-format-8.zova", .role = StorageRole.vector },
     };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
     inline for (fixtures, 0..) |fixture, index| {
         var copy_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const copy_path = try std.fmt.bufPrintZ(&copy_buffer, ".zig-cache/tmp/{s}/format-7-copy-{d}.zova", .{ tmp.sub_path[0..], index });
+        const copy_path = try std.fmt.bufPrintZ(&copy_buffer, ".zig-cache/tmp/{s}/old-format-copy-{d}.zova", .{ tmp.sub_path[0..], index });
         try testingCopySqliteFile(fixture.path, copy_path);
         const before = try testingFileSha256(copy_path);
 
@@ -5673,14 +5764,14 @@ test "format seven main graph and vector fixtures are rejected without mutation"
             .main => try std.testing.expectError(error.UnsupportedZovaVersion, Database.open(copy_path)),
             .graph => {
                 var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
-                const main_path = try std.fmt.bufPrintZ(&main_buffer, ".zig-cache/tmp/{s}/format-8-main-graph.zova", .{tmp.sub_path[0..]});
+                const main_path = try std.fmt.bufPrintZ(&main_buffer, ".zig-cache/tmp/{s}/format-9-main-graph-{d}.zova", .{ tmp.sub_path[0..], index });
                 var db = try Database.create(main_path);
                 defer db.deinit();
                 try std.testing.expectError(error.UnsupportedZovaVersion, db.bindGraphStore(copy_path));
             },
             .vector => {
                 var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
-                const main_path = try std.fmt.bufPrintZ(&main_buffer, ".zig-cache/tmp/{s}/format-8-main-vector.zova", .{tmp.sub_path[0..]});
+                const main_path = try std.fmt.bufPrintZ(&main_buffer, ".zig-cache/tmp/{s}/format-9-main-vector-{d}.zova", .{ tmp.sub_path[0..], index });
                 var db = try Database.create(main_path);
                 defer db.deinit();
                 try std.testing.expectError(error.UnsupportedZovaVersion, db.bindVectorStore(copy_path));
@@ -5708,7 +5799,7 @@ test "open rejects future format version" {
         try raw.exec(
             \\create table _zova_meta (key text primary key, value text not null);
             \\insert into _zova_meta (key, value) values ('magic', 'zova');
-            \\insert into _zova_meta (key, value) values ('format_version', '9');
+            \\insert into _zova_meta (key, value) values ('format_version', '10');
         );
     }
 
@@ -6015,7 +6106,7 @@ test "split graph store and operational copies preserve graph storage and traver
     ));
     try std.testing.expectEqual(@as(i64, 1), try testingCount(
         &db,
-        "select count(*) from graph_store._zova_graph_edges e join graph_store._zova_graphs g on g.graph_key=e.graph_key where g.name='alpha' and e.edge_type='second' and e.created_order=1",
+        "select count(*) from graph_store._zova_graph_edges e join graph_store._zova_graphs g on g.graph_key=e.graph_key join graph_store._zova_graph_edge_types et on et.graph_key=e.graph_key and et.edge_type_key=e.edge_type_key where g.name='alpha' and et.name='second' and e.created_order=1",
     ));
 
     var after = try db.graphNeighbors(std.testing.allocator, .{ .graph_name = "alpha", .node_id = "root", .limit = 10 });

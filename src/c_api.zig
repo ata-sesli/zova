@@ -148,6 +148,9 @@ pub const zova_graph_node_put_request = internal.zova_graph_node_put_request;
 pub const zova_graph_node_input = internal.zova_graph_node_input;
 pub const zova_graph_node_put_many_request = internal.zova_graph_node_put_many_request;
 pub const zova_graph_node_put_many_keyed_request = internal.zova_graph_node_put_many_keyed_request;
+pub const zova_graph_fresh_node_input = internal.zova_graph_fresh_node_input;
+pub const zova_graph_fresh_edge_input = internal.zova_graph_fresh_edge_input;
+pub const zova_graph_build_fresh_keyed_request = internal.zova_graph_build_fresh_keyed_request;
 pub const zova_graph_node_get_request = internal.zova_graph_node_get_request;
 pub const zova_graph_node_exists_request = internal.zova_graph_node_exists_request;
 pub const zova_graph_node_delete_request = internal.zova_graph_node_delete_request;
@@ -701,6 +704,10 @@ export fn zova_graph_node_put_many(request: ?*const zova_graph_node_put_many_req
 
 export fn zova_graph_node_put_many_keyed(request: ?*const zova_graph_node_put_many_keyed_request) callconv(.c) zova_status {
     return internal.zova_graph_node_put_many_keyed(request);
+}
+
+export fn zova_graph_build_fresh_keyed(request: ?*const zova_graph_build_fresh_keyed_request) callconv(.c) zova_status {
+    return internal.zova_graph_build_fresh_keyed(request);
 }
 
 export fn zova_graph_node_get(request: ?*const zova_graph_node_get_request) callconv(.c) zova_status {

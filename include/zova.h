@@ -1165,6 +1165,33 @@ typedef struct zova_graph_node_put_many_keyed_request {
     size_t out_node_keys_capacity;
 } zova_graph_node_put_many_keyed_request;
 
+typedef struct zova_graph_fresh_node_input {
+    const char *node_id;
+    const char *kind;
+    int target_type;
+    const char *target_namespace;
+    const char *target_ref;
+} zova_graph_fresh_node_input;
+
+typedef struct zova_graph_fresh_edge_input {
+    size_t from_node_ordinal;
+    const char *edge_type;
+    size_t to_node_ordinal;
+} zova_graph_fresh_edge_input;
+
+typedef struct zova_graph_build_fresh_keyed_request {
+    zova_database *db;
+    const char *graph_name;
+    const zova_graph_fresh_node_input *nodes;
+    size_t nodes_len;
+    const zova_graph_fresh_edge_input *edges;
+    size_t edges_len;
+    int64_t *out_node_keys;
+    size_t out_node_keys_capacity;
+    int64_t *out_edge_keys;
+    size_t out_edge_keys_capacity;
+} zova_graph_build_fresh_keyed_request;
+
 typedef struct zova_graph_node_get_request {
     zova_database *db;
     const char *graph_name;
@@ -1555,6 +1582,7 @@ zova_status zova_graph_delete(const zova_graph_delete_request *request);
 zova_status zova_graph_node_put(const zova_graph_node_put_request *request);
 zova_status zova_graph_node_put_many(const zova_graph_node_put_many_request *request);
 zova_status zova_graph_node_put_many_keyed(const zova_graph_node_put_many_keyed_request *request);
+zova_status zova_graph_build_fresh_keyed(const zova_graph_build_fresh_keyed_request *request);
 zova_status zova_graph_node_get(const zova_graph_node_get_request *request);
 zova_status zova_graph_node_exists(const zova_graph_node_exists_request *request);
 zova_status zova_graph_node_delete(const zova_graph_node_delete_request *request);

@@ -131,7 +131,7 @@ test "c abi graph operations route through a bound store after reopen" {
     {
         var store_after_edge_delete = try sqlite.Database.open(store_path);
         defer store_after_edge_delete.deinit();
-        try expectCount(&store_after_edge_delete, "select count(*) from _zova_graph_edges e join _zova_graphs g on g.graph_key=e.graph_key join _zova_graph_nodes f on f.node_key=e.from_node_key join _zova_graph_nodes t on t.node_key=e.to_node_key where g.name='deps' and f.node_id='c' and e.edge_type='imports' and t.node_id='a'", 0);
+        try expectCount(&store_after_edge_delete, "select count(*) from _zova_graph_edges e join _zova_graphs g on g.graph_key=e.graph_key join _zova_graph_edge_types et on et.graph_key=e.graph_key and et.edge_type_key=e.edge_type_key join _zova_graph_nodes f on f.node_key=e.from_node_key join _zova_graph_nodes t on t.node_key=e.to_node_key where g.name='deps' and f.node_id='c' and et.name='imports' and t.node_id='a'", 0);
         try expectCount(&store_after_edge_delete, "select count(*) from _zova_graph_nodes n join _zova_graphs g on g.graph_key=n.graph_key where g.name='deps' and n.node_id='c'", 1);
     }
     try std.testing.expectEqual(internal.zova_status.OK, internal.zova_graph_node_delete(&.{

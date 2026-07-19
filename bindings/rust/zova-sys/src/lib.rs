@@ -1135,6 +1135,36 @@ pub struct zova_graph_node_put_many_keyed_request {
 }
 
 #[repr(C)]
+pub struct zova_graph_fresh_node_input {
+    pub node_id: *const c_char,
+    pub kind: *const c_char,
+    pub target_type: c_int,
+    pub target_namespace: *const c_char,
+    pub target_ref: *const c_char,
+}
+
+#[repr(C)]
+pub struct zova_graph_fresh_edge_input {
+    pub from_node_ordinal: usize,
+    pub edge_type: *const c_char,
+    pub to_node_ordinal: usize,
+}
+
+#[repr(C)]
+pub struct zova_graph_build_fresh_keyed_request {
+    pub db: *mut zova_database,
+    pub graph_name: *const c_char,
+    pub nodes: *const zova_graph_fresh_node_input,
+    pub nodes_len: usize,
+    pub edges: *const zova_graph_fresh_edge_input,
+    pub edges_len: usize,
+    pub out_node_keys: *mut i64,
+    pub out_node_keys_capacity: usize,
+    pub out_edge_keys: *mut i64,
+    pub out_edge_keys_capacity: usize,
+}
+
+#[repr(C)]
 pub struct zova_graph_node_get_request {
     pub db: *mut zova_database,
     pub graph_name: *const c_char,
@@ -1555,6 +1585,9 @@ extern "C" {
     ) -> zova_status;
     pub fn zova_graph_node_put_many_keyed(
         request: *const zova_graph_node_put_many_keyed_request,
+    ) -> zova_status;
+    pub fn zova_graph_build_fresh_keyed(
+        request: *const zova_graph_build_fresh_keyed_request,
     ) -> zova_status;
     pub fn zova_graph_node_get(request: *const zova_graph_node_get_request) -> zova_status;
     pub fn zova_graph_node_exists(request: *const zova_graph_node_exists_request) -> zova_status;

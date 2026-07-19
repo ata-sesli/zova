@@ -8,6 +8,7 @@ pub const Error = zova_error.Error;
 
 pub const graphs_table = "_zova_graphs";
 pub const graph_nodes_table = "_zova_graph_nodes";
+pub const graph_edge_types_table = "_zova_graph_edge_types";
 pub const graph_edges_table = "_zova_graph_edges";
 pub const default_graph_name = "default";
 
@@ -118,22 +119,22 @@ const GraphNodeKeySlotMap = std.HashMap(
 const GraphEdgeKeyTuple = struct {
     graph_key: i64,
     from_node_key: i64,
-    edge_type: []const u8,
+    edge_type_key: i64,
     to_node_key: i64,
 };
 
 const GraphEdgeKeyTupleContext = struct {
     pub fn hash(_: GraphEdgeKeyTupleContext, value: GraphEdgeKeyTuple) u64 {
         var digest = std.hash.Wyhash.hash(@bitCast(value.graph_key), std.mem.asBytes(&value.from_node_key));
-        digest = std.hash.Wyhash.hash(digest, value.edge_type);
+        digest = std.hash.Wyhash.hash(digest, std.mem.asBytes(&value.edge_type_key));
         return std.hash.Wyhash.hash(digest, std.mem.asBytes(&value.to_node_key));
     }
 
     pub fn eql(_: GraphEdgeKeyTupleContext, left: GraphEdgeKeyTuple, right: GraphEdgeKeyTuple) bool {
         return left.graph_key == right.graph_key and
             left.from_node_key == right.from_node_key and
-            left.to_node_key == right.to_node_key and
-            std.mem.eql(u8, left.edge_type, right.edge_type);
+            left.edge_type_key == right.edge_type_key and
+            left.to_node_key == right.to_node_key;
     }
 };
 
@@ -143,6 +144,73 @@ const GraphEdgeKeySlotMap = std.HashMap(
     GraphEdgeKeyTupleContext,
     std.hash_map.default_max_load_percentage,
 );
+
+const GraphEdgeTypeTuple = struct {
+    graph_key: i64,
+    name: []const u8,
+};
+
+const GraphEdgeTypeTupleContext = struct {
+    pub fn hash(_: GraphEdgeTypeTupleContext, value: GraphEdgeTypeTuple) u64 {
+        return std.hash.Wyhash.hash(@bitCast(value.graph_key), value.name);
+    }
+
+    pub fn eql(_: GraphEdgeTypeTupleContext, left: GraphEdgeTypeTuple, right: GraphEdgeTypeTuple) bool {
+        return left.graph_key == right.graph_key and std.mem.eql(u8, left.name, right.name);
+    }
+};
+
+const GraphEdgeTypeKeyMap = std.HashMap(
+    GraphEdgeTypeTuple,
+    i64,
+    GraphEdgeTypeTupleContext,
+    std.hash_map.default_max_load_percentage,
+);
+
+const GraphEdgeTypeKeyMapUnmanaged = std.HashMapUnmanaged(
+    GraphEdgeTypeTuple,
+    i64,
+    GraphEdgeTypeTupleContext,
+    std.hash_map.default_max_load_percentage,
+);
+
+pub const GraphEdgeTypeCache = struct {
+    loaded: bool = false,
+    by_key: std.AutoHashMapUnmanaged(i64, []u8) = .empty,
+    by_type: GraphEdgeTypeKeyMapUnmanaged = .empty,
+
+    pub fn clear(self: *GraphEdgeTypeCache) void {
+        var values = self.by_key.valueIterator();
+        while (values.next()) |name| std.heap.c_allocator.free(name.*);
+        self.by_key.clearAndFree(std.heap.c_allocator);
+        self.by_type.clearAndFree(std.heap.c_allocator);
+        self.loaded = false;
+    }
+
+    pub fn deinit(self: *GraphEdgeTypeCache) void {
+        self.clear();
+    }
+};
+
+const FreshGraphEdgeTuple = struct {
+    from_node_key: i64,
+    edge_type_key: i64,
+    to_node_key: i64,
+};
+
+const FreshGraphEdgeTupleContext = struct {
+    pub fn hash(_: FreshGraphEdgeTupleContext, value: FreshGraphEdgeTuple) u64 {
+        var digest = std.hash.Wyhash.hash(0, std.mem.asBytes(&value.from_node_key));
+        digest = std.hash.Wyhash.hash(digest, std.mem.asBytes(&value.edge_type_key));
+        return std.hash.Wyhash.hash(digest, std.mem.asBytes(&value.to_node_key));
+    }
+
+    pub fn eql(_: FreshGraphEdgeTupleContext, left: FreshGraphEdgeTuple, right: FreshGraphEdgeTuple) bool {
+        return left.from_node_key == right.from_node_key and left.edge_type_key == right.edge_type_key and left.to_node_key == right.to_node_key;
+    }
+};
+
+const FreshGraphEdgeMap = std.HashMap(FreshGraphEdgeTuple, usize, FreshGraphEdgeTupleContext, std.hash_map.default_max_load_percentage);
 
 const ResolvedGraphEndpoint = struct {
     graph_key: i64,
@@ -186,18 +254,30 @@ pub const graph_nodes_schema_sql =
     \\)
 ;
 
+pub const graph_edge_types_schema_sql =
+    \\create table _zova_graph_edge_types (
+    \\  edge_type_key integer primary key,
+    \\  graph_key integer not null,
+    \\  name text not null check (length(name) > 0 and length(name) <= 128),
+    \\  unique (graph_key, name),
+    \\  unique (graph_key, edge_type_key),
+    \\  foreign key (graph_key) references _zova_graphs(graph_key) on delete cascade
+    \\)
+;
+
 pub const graph_edges_schema_sql =
     \\create table _zova_graph_edges (
     \\  edge_key integer primary key,
     \\  graph_key integer not null,
     \\  from_node_key integer not null,
-    \\  edge_type text not null check (length(edge_type) > 0 and length(edge_type) <= 128),
+    \\  edge_type_key integer not null,
     \\  to_node_key integer not null,
     \\  created_order integer not null,
-    \\  unique (graph_key, from_node_key, edge_type, to_node_key),
+    \\  unique (graph_key, from_node_key, edge_type_key, to_node_key),
     \\  foreign key (graph_key) references _zova_graphs(graph_key) on delete cascade,
     \\  foreign key (graph_key, from_node_key) references _zova_graph_nodes(graph_key, node_key) on delete cascade,
-    \\  foreign key (graph_key, to_node_key) references _zova_graph_nodes(graph_key, node_key) on delete cascade
+    \\  foreign key (graph_key, to_node_key) references _zova_graph_nodes(graph_key, node_key) on delete cascade,
+    \\  foreign key (graph_key, edge_type_key) references _zova_graph_edge_types(graph_key, edge_type_key) on delete cascade
     \\)
 ;
 
@@ -218,7 +298,7 @@ pub const graph_edges_from_node_index_sql =
 
 pub const graph_edges_from_node_type_index_sql =
     \\create index if not exists _zova_graph_edges_from_node_type_idx
-    \\on _zova_graph_edges (graph_key, from_node_key, edge_type, created_order, to_node_key)
+    \\on _zova_graph_edges (graph_key, from_node_key, edge_type_key, created_order, to_node_key)
 ;
 
 pub const graph_edges_to_node_index_sql =
@@ -228,7 +308,7 @@ pub const graph_edges_to_node_index_sql =
 
 pub const graph_edges_to_node_type_index_sql =
     \\create index if not exists _zova_graph_edges_to_node_type_idx
-    \\on _zova_graph_edges (graph_key, to_node_key, edge_type, created_order, from_node_key)
+    \\on _zova_graph_edges (graph_key, to_node_key, edge_type_key, created_order, from_node_key)
 ;
 
 pub const GraphTargetType = enum {
@@ -271,6 +351,14 @@ pub const GraphNodeInput = struct {
     target_ref: ?[]const u8 = null,
 };
 
+pub const FreshGraphNodeInput = struct {
+    node_id: []const u8,
+    kind: []const u8,
+    target_type: GraphTargetType = .none,
+    target_namespace: ?[]const u8 = null,
+    target_ref: ?[]const u8 = null,
+};
+
 pub const GraphNode = struct {
     graph_name: []u8,
     node_id: []u8,
@@ -293,6 +381,21 @@ pub const GraphEdgeInput = struct {
     from_node_id: []const u8,
     edge_type: []const u8,
     to_node_id: []const u8,
+};
+
+pub const FreshGraphEdgeInput = struct {
+    from_node_ordinal: usize,
+    edge_type: []const u8,
+    to_node_ordinal: usize,
+};
+
+pub const FreshGraphBuildProfile = struct {
+    validation_ms: f64 = 0,
+    index_drop_ms: f64 = 0,
+    graph_and_types_ms: f64 = 0,
+    node_load_ms: f64 = 0,
+    edge_load_ms: f64 = 0,
+    index_build_ms: f64 = 0,
 };
 
 pub const GraphEdge = struct {
@@ -525,6 +628,7 @@ pub const GraphWalk = struct {
 pub const Database = struct {
     sqlite_db: *sqlite.Database,
     storage_schema: StorageSchema = .main,
+    edge_type_cache: ?*GraphEdgeTypeCache = null,
 
     fn prepareSchema(self: *Database, comptime sql_template: []const u8) Error!sqlite.Statement {
         var sql_buffer: [4096]u8 = undefined;
@@ -535,6 +639,127 @@ pub const Database = struct {
         sql_buffer[sql_len] = 0;
         const db = self.sqlite_db;
         return try db.prepare(sql_buffer[0..sql_len :0]);
+    }
+
+    fn execSchema(self: *Database, comptime sql_template: []const u8) Error!void {
+        var sql_buffer: [4096]u8 = undefined;
+        const prefix = self.storage_schema.prefix();
+        const sql_len = std.mem.replacementSize(u8, sql_template, "{s}", prefix);
+        if (sql_len >= sql_buffer.len) return error.SqliteError;
+        _ = std.mem.replace(u8, sql_template, "{s}", prefix, sql_buffer[0..sql_len]);
+        sql_buffer[sql_len] = 0;
+        try self.sqlite_db.exec(sql_buffer[0..sql_len :0]);
+    }
+
+    fn ensureEdgeTypeCache(self: *Database) Error!void {
+        const cache = self.edge_type_cache orelse return;
+        if (cache.loaded) return;
+        errdefer cache.clear();
+        var stmt = try self.prepareSchema("select graph_key,edge_type_key,name from {s}_zova_graph_edge_types order by edge_type_key");
+        defer stmt.deinit();
+        while ((try stmt.step()) == .row) {
+            const graph_key = stmt.columnInt64(0);
+            const edge_type_key = stmt.columnInt64(1);
+            if (graph_key <= 0 or edge_type_key <= 0 or cache.by_key.contains(edge_type_key)) return error.GraphInvalid;
+            const name = try std.heap.c_allocator.dupe(u8, stmt.columnText(2));
+            cache.by_key.put(std.heap.c_allocator, edge_type_key, name) catch |err| {
+                std.heap.c_allocator.free(name);
+                return err;
+            };
+            cache.by_type.put(std.heap.c_allocator, .{ .graph_key = graph_key, .name = name }, edge_type_key) catch |err| {
+                _ = cache.by_key.remove(edge_type_key);
+                std.heap.c_allocator.free(name);
+                return err;
+            };
+        }
+        cache.loaded = true;
+    }
+
+    fn graphKeyForRead(self: *Database, name: []const u8) Error!i64 {
+        return self.graphKey(name);
+    }
+
+    fn edgeTypeKeyForRead(self: *Database, graph_key: i64, name: []const u8) Error!?i64 {
+        if (self.edge_type_cache) |cache| {
+            try self.ensureEdgeTypeCache();
+            if (cache.by_type.get(.{ .graph_key = graph_key, .name = name })) |key| return key;
+            var stmt = try self.prepareSchema("select edge_type_key,name from {s}_zova_graph_edge_types where graph_key=? and name=?");
+            defer stmt.deinit();
+            try stmt.bindInt64(1, graph_key);
+            try stmt.bindText(2, name);
+            if ((try stmt.step()) != .row) return null;
+            const key = stmt.columnInt64(0);
+            const owned_name = try std.heap.c_allocator.dupe(u8, stmt.columnText(1));
+            cache.by_key.put(std.heap.c_allocator, key, owned_name) catch |err| {
+                std.heap.c_allocator.free(owned_name);
+                return err;
+            };
+            cache.by_type.put(std.heap.c_allocator, .{ .graph_key = graph_key, .name = owned_name }, key) catch |err| {
+                _ = cache.by_key.remove(key);
+                std.heap.c_allocator.free(owned_name);
+                return err;
+            };
+            return key;
+        }
+        var stmt = try self.prepareSchema("select edge_type_key from {s}_zova_graph_edge_types where graph_key=? and name=?");
+        defer stmt.deinit();
+        try stmt.bindInt64(1, graph_key);
+        try stmt.bindText(2, name);
+        return switch (try stmt.step()) {
+            .done => null,
+            .row => stmt.columnInt64(0),
+        };
+    }
+
+    fn dupeEdgeTypeNameForRead(self: *Database, allocator: std.mem.Allocator, edge_type_key: i64) Error![]u8 {
+        if (edge_type_key <= 0) return error.GraphInvalid;
+        if (self.edge_type_cache) |cache| {
+            try self.ensureEdgeTypeCache();
+            if (cache.by_key.get(edge_type_key)) |name| return allocator.dupe(u8, name);
+            var stmt = try self.prepareSchema("select graph_key,name from {s}_zova_graph_edge_types where edge_type_key=?");
+            defer stmt.deinit();
+            try stmt.bindInt64(1, edge_type_key);
+            if ((try stmt.step()) != .row) return error.GraphInvalid;
+            const graph_key = stmt.columnInt64(0);
+            const owned_name = try std.heap.c_allocator.dupe(u8, stmt.columnText(1));
+            cache.by_key.put(std.heap.c_allocator, edge_type_key, owned_name) catch |err| {
+                std.heap.c_allocator.free(owned_name);
+                return err;
+            };
+            cache.by_type.put(std.heap.c_allocator, .{ .graph_key = graph_key, .name = owned_name }, edge_type_key) catch |err| {
+                _ = cache.by_key.remove(edge_type_key);
+                std.heap.c_allocator.free(owned_name);
+                return err;
+            };
+            return allocator.dupe(u8, owned_name);
+        }
+        var stmt = try self.prepareSchema("select name from {s}_zova_graph_edge_types where edge_type_key=?");
+        defer stmt.deinit();
+        try stmt.bindInt64(1, edge_type_key);
+        if ((try stmt.step()) != .row) return error.GraphInvalid;
+        return allocator.dupe(u8, stmt.columnText(0));
+    }
+
+    fn dropGraphSecondaryIndexes(self: *Database) Error!void {
+        try self.execSchema(
+            \\drop index {s}_zova_graph_nodes_created_order_idx;
+            \\drop index {s}_zova_graph_edges_created_order_idx;
+            \\drop index {s}_zova_graph_edges_from_node_idx;
+            \\drop index {s}_zova_graph_edges_from_node_type_idx;
+            \\drop index {s}_zova_graph_edges_to_node_idx;
+            \\drop index {s}_zova_graph_edges_to_node_type_idx;
+        );
+    }
+
+    fn createGraphSecondaryIndexes(self: *Database) Error!void {
+        try self.execSchema(
+            \\create index {s}_zova_graph_nodes_created_order_idx on _zova_graph_nodes(graph_key,created_order,node_key);
+            \\create index {s}_zova_graph_edges_created_order_idx on _zova_graph_edges(graph_key,created_order,edge_key);
+            \\create index {s}_zova_graph_edges_from_node_idx on _zova_graph_edges(graph_key,from_node_key,created_order,to_node_key);
+            \\create index {s}_zova_graph_edges_from_node_type_idx on _zova_graph_edges(graph_key,from_node_key,edge_type_key,created_order,to_node_key);
+            \\create index {s}_zova_graph_edges_to_node_idx on _zova_graph_edges(graph_key,to_node_key,created_order,from_node_key);
+            \\create index {s}_zova_graph_edges_to_node_type_idx on _zova_graph_edges(graph_key,to_node_key,edge_type_key,created_order,from_node_key);
+        );
     }
 
     pub fn createGraph(self: *Database, name: []const u8) Error!void {
@@ -551,6 +776,164 @@ pub const Database = struct {
             error.Constraint => return error.GraphExists,
             else => return err,
         };
+    }
+
+    /// Build the sole graph in an empty native graph store using ordinal endpoints.
+    /// The caller owns the surrounding transaction or savepoint.
+    pub fn buildFreshGraphKeyed(
+        self: *Database,
+        graph_name: []const u8,
+        nodes: []const FreshGraphNodeInput,
+        edges: []const FreshGraphEdgeInput,
+        out_node_keys: []i64,
+        out_edge_keys: []i64,
+    ) Error!void {
+        return self.buildFreshGraphKeyedProfiled(graph_name, nodes, edges, out_node_keys, out_edge_keys, null);
+    }
+
+    pub fn buildFreshGraphKeyedProfiled(
+        self: *Database,
+        graph_name: []const u8,
+        nodes: []const FreshGraphNodeInput,
+        edges: []const FreshGraphEdgeInput,
+        out_node_keys: []i64,
+        out_edge_keys: []i64,
+        profile: ?*FreshGraphBuildProfile,
+    ) Error!void {
+        if (profile) |value| value.* = .{};
+        const validation_start = graphProfileTimestamp();
+        if (out_node_keys.len != nodes.len or out_edge_keys.len != edges.len) return error.InvalidArgument;
+        try validateGraphName(graph_name);
+
+        var node_slots = std.StringHashMap(usize).init(std.heap.c_allocator);
+        defer node_slots.deinit();
+        const input_node_slots = try std.heap.c_allocator.alloc(usize, nodes.len);
+        defer std.heap.c_allocator.free(input_node_slots);
+        var final_node_inputs: std.ArrayList(usize) = .empty;
+        defer final_node_inputs.deinit(std.heap.c_allocator);
+        for (nodes, 0..) |node, input_index| {
+            try validateNodeId(node.node_id);
+            try validateNodeKind(node.kind);
+            if (node.target_namespace) |value| try validateOptionalText(value);
+            if (node.target_ref) |value| try validateOptionalText(value);
+            const entry = try node_slots.getOrPut(node.node_id);
+            if (!entry.found_existing) {
+                entry.value_ptr.* = final_node_inputs.items.len;
+                try final_node_inputs.append(std.heap.c_allocator, input_index);
+            } else {
+                final_node_inputs.items[entry.value_ptr.*] = input_index;
+            }
+            input_node_slots[input_index] = entry.value_ptr.*;
+        }
+
+        var type_slots = std.StringHashMap(usize).init(std.heap.c_allocator);
+        defer type_slots.deinit();
+        var type_names: std.ArrayList([]const u8) = .empty;
+        defer type_names.deinit(std.heap.c_allocator);
+        var edge_slots = FreshGraphEdgeMap.init(std.heap.c_allocator);
+        defer edge_slots.deinit();
+        var distinct_edges: std.ArrayList(FreshGraphEdgeTuple) = .empty;
+        defer distinct_edges.deinit(std.heap.c_allocator);
+        const input_edge_slots = try std.heap.c_allocator.alloc(usize, edges.len);
+        defer std.heap.c_allocator.free(input_edge_slots);
+        for (edges, 0..) |edge, input_index| {
+            if (edge.from_node_ordinal >= nodes.len or edge.to_node_ordinal >= nodes.len) return error.InvalidArgument;
+            try validateEdgeType(edge.edge_type);
+            const type_entry = try type_slots.getOrPut(edge.edge_type);
+            if (!type_entry.found_existing) {
+                type_entry.value_ptr.* = type_names.items.len;
+                try type_names.append(std.heap.c_allocator, edge.edge_type);
+            }
+            const tuple: FreshGraphEdgeTuple = .{
+                .from_node_key = @intCast(input_node_slots[edge.from_node_ordinal] + 1),
+                .edge_type_key = @intCast(type_entry.value_ptr.* + 1),
+                .to_node_key = @intCast(input_node_slots[edge.to_node_ordinal] + 1),
+            };
+            const entry = try edge_slots.getOrPut(tuple);
+            if (!entry.found_existing) {
+                entry.value_ptr.* = distinct_edges.items.len;
+                try distinct_edges.append(std.heap.c_allocator, tuple);
+            }
+            input_edge_slots[input_index] = entry.value_ptr.*;
+        }
+
+        {
+            var empty = try self.prepareSchema(
+                \\select
+                \\ (select count(*) from {s}_zova_graphs) +
+                \\ (select count(*) from {s}_zova_graph_nodes) +
+                \\ (select count(*) from {s}_zova_graph_edge_types) +
+                \\ (select count(*) from {s}_zova_graph_edges)
+            );
+            defer empty.deinit();
+            if ((try empty.step()) != .row or empty.columnInt64(0) != 0) return error.GraphInvalid;
+        }
+
+        if (profile) |value| value.validation_ms = graphProfileElapsedMs(validation_start);
+        const drop_start = graphProfileTimestamp();
+        try self.dropGraphSecondaryIndexes();
+        if (profile) |value| value.index_drop_ms = graphProfileElapsedMs(drop_start);
+        const metadata_start = graphProfileTimestamp();
+        var graph_insert = try self.prepareSchema("insert into {s}_zova_graphs(graph_key,name,created_order) values(1,?,1)");
+        defer graph_insert.deinit();
+        try graph_insert.bindText(1, graph_name);
+        if ((try graph_insert.step()) != .done or self.sqlite_db.changes() != 1) return error.GraphInvalid;
+
+        var type_insert = try self.prepareSchema("insert into {s}_zova_graph_edge_types(edge_type_key,graph_key,name) values(?,1,?)");
+        defer type_insert.deinit();
+        for (type_names.items, 0..) |name, type_index| {
+            try type_insert.bindInt64(1, @intCast(type_index + 1));
+            try type_insert.bindText(2, name);
+            if ((try type_insert.step()) != .done or self.sqlite_db.changes() != 1) return error.GraphInvalid;
+            try type_insert.reset();
+            try type_insert.clearBindings();
+        }
+        if (profile) |value| value.graph_and_types_ms = graphProfileElapsedMs(metadata_start);
+
+        const node_start = graphProfileTimestamp();
+        var node_insert = try self.prepareSchema(
+            "insert into {s}_zova_graph_nodes(node_key,graph_key,node_id,kind,target_type,target_namespace,target_ref,created_order) values(?,1,?,?,?,?,?,?)",
+        );
+        defer node_insert.deinit();
+        for (final_node_inputs.items, 0..) |input_index, slot| {
+            const node = nodes[input_index];
+            const node_key: i64 = @intCast(slot + 1);
+            try node_insert.bindInt64(1, node_key);
+            try node_insert.bindText(2, node.node_id);
+            try node_insert.bindText(3, node.kind);
+            try node_insert.bindText(4, targetTypeText(node.target_type));
+            if (node.target_namespace) |value| try node_insert.bindText(5, value) else try node_insert.bindNull(5);
+            if (node.target_ref) |value| try node_insert.bindText(6, value) else try node_insert.bindNull(6);
+            try node_insert.bindInt64(7, node_key);
+            if ((try node_insert.step()) != .done or self.sqlite_db.changes() != 1) return error.GraphInvalid;
+            try node_insert.reset();
+            try node_insert.clearBindings();
+        }
+        if (profile) |value| value.node_load_ms = graphProfileElapsedMs(node_start);
+
+        const edge_start = graphProfileTimestamp();
+        var edge_insert = try self.prepareSchema(
+            "insert into {s}_zova_graph_edges(edge_key,graph_key,from_node_key,edge_type_key,to_node_key,created_order) values(?,1,?,?,?,?)",
+        );
+        defer edge_insert.deinit();
+        for (distinct_edges.items, 0..) |edge, slot| {
+            const edge_key: i64 = @intCast(slot + 1);
+            try edge_insert.bindInt64(1, edge_key);
+            try edge_insert.bindInt64(2, edge.from_node_key);
+            try edge_insert.bindInt64(3, edge.edge_type_key);
+            try edge_insert.bindInt64(4, edge.to_node_key);
+            try edge_insert.bindInt64(5, edge_key);
+            if ((try edge_insert.step()) != .done or self.sqlite_db.changes() != 1) return error.GraphInvalid;
+            try edge_insert.reset();
+            try edge_insert.clearBindings();
+        }
+        if (profile) |value| value.edge_load_ms = graphProfileElapsedMs(edge_start);
+        const indexes_start = graphProfileTimestamp();
+        try self.createGraphSecondaryIndexes();
+        if (profile) |value| value.index_build_ms = graphProfileElapsedMs(indexes_start);
+
+        for (input_node_slots, out_node_keys) |slot, *key| key.* = @intCast(slot + 1);
+        for (input_edge_slots, out_edge_keys) |slot, *key| key.* = @intCast(slot + 1);
     }
 
     pub fn deleteGraph(self: *Database, name: []const u8) Error!void {
@@ -580,6 +963,43 @@ pub const Database = struct {
             .done => error.GraphNotFound,
             .row => stmt.columnInt64(0),
         };
+    }
+
+    fn ensureGraphEdgeType(self: *Database, graph_key: i64, name: []const u8) Error!i64 {
+        var insert = try self.prepareSchema(
+            \\insert into {s}_zova_graph_edge_types(graph_key,name) values(?1,?2)
+            \\on conflict(graph_key,name) do nothing
+        );
+        defer insert.deinit();
+        try insert.bindInt64(1, graph_key);
+        try insert.bindText(2, name);
+        if ((try insert.step()) != .done) return error.GraphInvalid;
+
+        var select = try self.prepareSchema(
+            "select edge_type_key from {s}_zova_graph_edge_types where graph_key=?1 and name=?2",
+        );
+        defer select.deinit();
+        try select.bindInt64(1, graph_key);
+        try select.bindText(2, name);
+        if ((try select.step()) != .row) return error.GraphInvalid;
+        const key = select.columnInt64(0);
+        if (key <= 0) return error.GraphInvalid;
+        return key;
+    }
+
+    fn resolveGraphEdgeTypes(
+        self: *Database,
+        normalized_edges: []const NormalizedGraphEdge,
+        endpoints: *const ResolvedGraphEndpointSlots,
+    ) Error!GraphEdgeTypeKeyMap {
+        var result = GraphEdgeTypeKeyMap.init(std.heap.c_allocator);
+        errdefer result.deinit();
+        for (normalized_edges) |edge| {
+            const endpoint = endpoints.items[edge.from_slot] orelse return error.GraphNodeNotFound;
+            const tuple = GraphEdgeTypeTuple{ .graph_key = endpoint.graph_key, .name = edge.input.edge_type };
+            if (!result.contains(tuple)) try result.put(tuple, try self.ensureGraphEdgeType(tuple.graph_key, tuple.name));
+        }
+        return result;
     }
 
     pub fn graphInfo(self: *Database, allocator: std.mem.Allocator, name: []const u8) Error!GraphInfo {
@@ -952,12 +1372,14 @@ pub const Database = struct {
         var resolved_endpoints = try self.resolvePutGraphBatchEndpoints(distinct_endpoints.items);
         defer resolved_endpoints.deinit();
         defer self.clearPutGraphBatchEndpoints();
+        var resolved_edge_types = try self.resolveGraphEdgeTypes(normalized_edges, &resolved_endpoints);
+        defer resolved_edge_types.deinit();
 
         var stmt = try self.prepareSchema(
             \\/* zova_graph_edge_insert */
-            \\insert into {s}_zova_graph_edges (graph_key, from_node_key, edge_type, to_node_key, created_order)
+            \\insert into {s}_zova_graph_edges (graph_key, from_node_key, edge_type_key, to_node_key, created_order)
             \\values (?, ?, ?, ?, ?)
-            \\on conflict(graph_key, from_node_key, edge_type, to_node_key) do nothing
+            \\on conflict(graph_key, from_node_key, edge_type_key, to_node_key) do nothing
         );
         defer stmt.deinit();
 
@@ -975,10 +1397,11 @@ pub const Database = struct {
             const to_endpoint = resolved_endpoints.items[edge.to_slot] orelse return error.GraphNodeNotFound;
             if (from_endpoint.graph_key != to_endpoint.graph_key) return error.GraphInvalid;
             const graph_key = from_endpoint.graph_key;
+            const edge_type_key = resolved_edge_types.get(.{ .graph_key = graph_key, .name = edge.input.edge_type }) orelse return error.GraphInvalid;
             const created_order = try nextGraphCreatedOrder(&next_order_stmt, &next_orders, graph_key);
             try stmt.bindInt64(1, graph_key);
             try stmt.bindInt64(2, from_endpoint.node_key);
-            try stmt.bindText(3, edge.input.edge_type);
+            try stmt.bindInt64(3, edge_type_key);
             try stmt.bindInt64(4, to_endpoint.node_key);
             try stmt.bindInt64(5, created_order);
             std.debug.assert((try stmt.step()) == .done);
@@ -1029,6 +1452,8 @@ pub const Database = struct {
         var resolved_endpoints = try self.resolvePutGraphBatchEndpoints(distinct_endpoints.items);
         defer resolved_endpoints.deinit();
         defer self.clearPutGraphBatchEndpoints();
+        var resolved_edge_types = try self.resolveGraphEdgeTypes(normalized_edges, &resolved_endpoints);
+        defer resolved_edge_types.deinit();
 
         var key_slots = GraphEdgeKeySlotMap.init(std.heap.c_allocator);
         defer key_slots.deinit();
@@ -1041,11 +1466,12 @@ pub const Database = struct {
             const from = resolved_endpoints.items[edge.from_slot] orelse return error.GraphNodeNotFound;
             const to = resolved_endpoints.items[edge.to_slot] orelse return error.GraphNodeNotFound;
             if (from.graph_key != to.graph_key) return error.GraphInvalid;
+            const edge_type_key = resolved_edge_types.get(.{ .graph_key = from.graph_key, .name = edge.input.edge_type }) orelse return error.GraphInvalid;
             try affected_graph_keys.put(from.graph_key, {});
             const result = try key_slots.getOrPut(.{
                 .graph_key = from.graph_key,
                 .from_node_key = from.node_key,
-                .edge_type = edge.input.edge_type,
+                .edge_type_key = edge_type_key,
                 .to_node_key = to.node_key,
             });
             if (!result.found_existing) {
@@ -1059,8 +1485,8 @@ pub const Database = struct {
         @memset(resolved_keys, null);
         var preload = try self.prepareSchema(
             \\/* zova_graph_edge_key_preload */
-            \\select from_node_key,edge_type,to_node_key,edge_key
-            \\from {s}_zova_graph_edges where graph_key=?
+            \\select e.from_node_key,e.edge_type_key,e.to_node_key,e.edge_key
+            \\from {s}_zova_graph_edges e where e.graph_key=?
         );
         defer preload.deinit();
         var affected_graph_key_iterator = affected_graph_keys.keyIterator();
@@ -1070,7 +1496,7 @@ pub const Database = struct {
                 const slot = key_slots.get(.{
                     .graph_key = graph_key.*,
                     .from_node_key = preload.columnInt64(0),
-                    .edge_type = preload.columnText(1),
+                    .edge_type_key = preload.columnInt64(1),
                     .to_node_key = preload.columnInt64(2),
                 }) orelse continue;
                 const edge_key = preload.columnInt64(3);
@@ -1083,9 +1509,9 @@ pub const Database = struct {
 
         var insert = try self.prepareSchema(
             \\/* zova_graph_edge_insert */
-            \\insert into {s}_zova_graph_edges (graph_key, from_node_key, edge_type, to_node_key, created_order)
+            \\insert into {s}_zova_graph_edges (graph_key, from_node_key, edge_type_key, to_node_key, created_order)
             \\values (?, ?, ?, ?, ?)
-            \\on conflict(graph_key, from_node_key, edge_type, to_node_key) do nothing
+            \\on conflict(graph_key, from_node_key, edge_type_key, to_node_key) do nothing
         );
         defer insert.deinit();
         var next_order_stmt = try self.prepareSchema(
@@ -1101,6 +1527,7 @@ pub const Database = struct {
             const from = resolved_endpoints.items[edge.from_slot] orelse return error.GraphNodeNotFound;
             const to = resolved_endpoints.items[edge.to_slot] orelse return error.GraphNodeNotFound;
             if (from.graph_key != to.graph_key) return error.GraphInvalid;
+            const edge_type_key = resolved_edge_types.get(.{ .graph_key = from.graph_key, .name = edge.input.edge_type }) orelse return error.GraphInvalid;
             const created_order = try nextGraphCreatedOrder(&next_order_stmt, &next_orders, from.graph_key);
             if (resolved_keys[key_slot]) |edge_key| {
                 out_key.* = edge_key;
@@ -1108,7 +1535,7 @@ pub const Database = struct {
             }
             try insert.bindInt64(1, from.graph_key);
             try insert.bindInt64(2, from.node_key);
-            try insert.bindText(3, edge.input.edge_type);
+            try insert.bindInt64(3, edge_type_key);
             try insert.bindInt64(4, to.node_key);
             try insert.bindInt64(5, created_order);
             if ((try insert.step()) != .done) return error.GraphInvalid;
@@ -1131,13 +1558,14 @@ pub const Database = struct {
         var stmt = try self.prepareSchema(
             \\select count(*)
             \\from {s}_zova_graph_edges e
+            \\join {s}_zova_graph_edge_types et on et.edge_type_key=e.edge_type_key
             \\where (e.graph_key,e.from_node_key,e.to_node_key)=(
             \\  select g.graph_key,src.node_key,dst.node_key
             \\  from {s}_zova_graphs g
             \\  join {s}_zova_graph_nodes src on src.graph_key=g.graph_key and src.node_id=?2
             \\  join {s}_zova_graph_nodes dst on dst.graph_key=g.graph_key and dst.node_id=?4
             \\  where g.name=?1
-            \\) and e.edge_type=?3
+            \\) and et.name=?3
         );
         defer stmt.deinit();
         try stmt.bindText(1, graph_name);
@@ -1162,12 +1590,13 @@ pub const Database = struct {
         try validateNodeId(to_node_id);
 
         var stmt = try self.prepareSchema(
-            \\select g.name, src.node_id, e.edge_type, dst.node_id
+            \\select g.name, src.node_id, et.name, dst.node_id
             \\from {s}_zova_graph_edges e
             \\join {s}_zova_graphs g on g.graph_key = e.graph_key
+            \\join {s}_zova_graph_edge_types et on et.edge_type_key=e.edge_type_key
             \\join {s}_zova_graph_nodes src on src.node_key = e.from_node_key
             \\join {s}_zova_graph_nodes dst on dst.node_key = e.to_node_key
-            \\where g.name = ? and src.node_id = ? and e.edge_type = ? and dst.node_id = ?
+            \\where g.name = ? and src.node_id = ? and et.name = ? and dst.node_id = ?
         );
         defer stmt.deinit();
         try stmt.bindText(1, graph_name);
@@ -1192,16 +1621,17 @@ pub const Database = struct {
             \\delete from {s}_zova_graph_edges
             \\where graph_key = (select graph_key from {s}_zova_graphs where name = ?)
             \\  and from_node_key = (select node_key from {s}_zova_graph_nodes where graph_key = (select graph_key from {s}_zova_graphs where name = ?) and node_id = ?)
-            \\  and edge_type = ?
+            \\  and edge_type_key = (select edge_type_key from {s}_zova_graph_edge_types where graph_key=(select graph_key from {s}_zova_graphs where name=?) and name=?)
             \\  and to_node_key = (select node_key from {s}_zova_graph_nodes where graph_key = (select graph_key from {s}_zova_graphs where name = ?) and node_id = ?)
         );
         defer stmt.deinit();
         try stmt.bindText(1, input.graph_name);
         try stmt.bindText(2, input.graph_name);
         try stmt.bindText(3, input.from_node_id);
-        try stmt.bindText(4, input.edge_type);
-        try stmt.bindText(5, input.graph_name);
-        try stmt.bindText(6, input.to_node_id);
+        try stmt.bindText(4, input.graph_name);
+        try stmt.bindText(5, input.edge_type);
+        try stmt.bindText(6, input.graph_name);
+        try stmt.bindText(7, input.to_node_id);
         std.debug.assert((try stmt.step()) == .done);
     }
 
@@ -1229,7 +1659,7 @@ pub const Database = struct {
             \\delete from {s}_zova_graph_edges
             \\where graph_key = ?
             \\  and from_node_key = ?
-            \\  and edge_type = ?
+            \\  and edge_type_key = (select edge_type_key from {s}_zova_graph_edge_types where graph_key=? and name=?)
             \\  and to_node_key = ?
         );
         defer stmt.deinit();
@@ -1239,8 +1669,9 @@ pub const Database = struct {
             const to_node_key = endpoints.nodeKey(input.graph_name, input.to_node_id) orelse continue;
             try stmt.bindInt64(1, graph_key);
             try stmt.bindInt64(2, from_node_key);
-            try stmt.bindText(3, input.edge_type);
-            try stmt.bindInt64(4, to_node_key);
+            try stmt.bindInt64(3, graph_key);
+            try stmt.bindText(4, input.edge_type);
+            try stmt.bindInt64(5, to_node_key);
             std.debug.assert((try stmt.step()) == .done);
             try stmt.reset();
             try stmt.clearBindings();
@@ -1427,71 +1858,53 @@ pub const Database = struct {
         try validateGraphName(options.graph_name);
         try validateNodeId(options.node_id);
         if (options.edge_type) |edge_type| try validateEdgeType(edge_type);
+        const graph_key = try self.graphKeyForRead(options.graph_name);
+        const edge_type_key = if (options.edge_type) |edge_type| (try self.edgeTypeKeyForRead(graph_key, edge_type)) orelse -1 else null;
         const sqlite_limit = try sqliteLimit(options.limit);
         var stmt = switch (options.direction) {
             .outgoing => if (options.edge_type == null)
                 try self.prepareSchema(
-                    \\select n.node_id, n.kind, e.edge_type
+                    \\select n.node_id,n.kind,e.edge_type_key
                     \\from {s}_zova_graph_edges e
                     \\join {s}_zova_graph_nodes n on n.node_key=e.to_node_key
-                    \\where (e.graph_key,e.from_node_key)=(
-                    \\  select g.graph_key,current.node_key
-                    \\  from {s}_zova_graphs g
-                    \\  join {s}_zova_graph_nodes current on current.graph_key=g.graph_key
-                    \\  where g.name=?1 and current.node_id=?2
-                    \\)
+                    \\where e.graph_key=?1 and e.from_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2)
                     \\order by e.created_order, e.to_node_key
                     \\limit ?3
                 )
             else
                 try self.prepareSchema(
-                    \\select n.node_id, n.kind, e.edge_type
+                    \\select n.node_id,n.kind,e.edge_type_key
                     \\from {s}_zova_graph_edges e
                     \\join {s}_zova_graph_nodes n on n.node_key=e.to_node_key
-                    \\where (e.graph_key,e.from_node_key)=(
-                    \\  select g.graph_key,current.node_key
-                    \\  from {s}_zova_graphs g
-                    \\  join {s}_zova_graph_nodes current on current.graph_key=g.graph_key
-                    \\  where g.name=?1 and current.node_id=?2
-                    \\) and e.edge_type=?3
+                    \\where e.graph_key=?1 and e.from_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2) and e.edge_type_key=?3
                     \\order by e.created_order, e.to_node_key
                     \\limit ?4
                 ),
             .incoming => if (options.edge_type == null)
                 try self.prepareSchema(
-                    \\select n.node_id, n.kind, e.edge_type
+                    \\select n.node_id,n.kind,e.edge_type_key
                     \\from {s}_zova_graph_edges e
                     \\join {s}_zova_graph_nodes n on n.node_key=e.from_node_key
-                    \\where (e.graph_key,e.to_node_key)=(
-                    \\  select g.graph_key,current.node_key
-                    \\  from {s}_zova_graphs g
-                    \\  join {s}_zova_graph_nodes current on current.graph_key=g.graph_key
-                    \\  where g.name=?1 and current.node_id=?2
-                    \\)
+                    \\where e.graph_key=?1 and e.to_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2)
                     \\order by e.created_order, e.from_node_key
                     \\limit ?3
                 )
             else
                 try self.prepareSchema(
-                    \\select n.node_id, n.kind, e.edge_type
+                    \\select n.node_id,n.kind,e.edge_type_key
                     \\from {s}_zova_graph_edges e
                     \\join {s}_zova_graph_nodes n on n.node_key=e.from_node_key
-                    \\where (e.graph_key,e.to_node_key)=(
-                    \\  select g.graph_key,current.node_key
-                    \\  from {s}_zova_graphs g
-                    \\  join {s}_zova_graph_nodes current on current.graph_key=g.graph_key
-                    \\  where g.name=?1 and current.node_id=?2
-                    \\) and e.edge_type=?3
+                    \\where e.graph_key=?1 and e.to_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2) and e.edge_type_key=?3
                     \\order by e.created_order, e.from_node_key
                     \\limit ?4
                 ),
         };
         defer stmt.deinit();
 
-        try stmt.bindText(1, options.graph_name);
+        try stmt.bindInt64(1, graph_key);
         try stmt.bindText(2, options.node_id);
-        if (options.edge_type) |edge_type| {
-            try stmt.bindText(3, edge_type);
+        if (edge_type_key) |key| {
+            try stmt.bindInt64(3, key);
             try stmt.bindInt64(4, sqlite_limit);
         } else {
             try stmt.bindInt64(3, sqlite_limit);
@@ -1504,7 +1917,13 @@ pub const Database = struct {
         }
 
         while (try stmt.step() == .row) {
-            try appendGraphNeighborFromRow(&items, allocator, &stmt);
+            const node_id = try allocator.dupe(u8, stmt.columnText(0));
+            errdefer allocator.free(node_id);
+            const kind = try allocator.dupe(u8, stmt.columnText(1));
+            errdefer allocator.free(kind);
+            const edge_type = try self.dupeEdgeTypeNameForRead(allocator, stmt.columnInt64(2));
+            errdefer allocator.free(edge_type);
+            try items.append(allocator, .{ .node_id = node_id, .kind = kind, .edge_type = edge_type });
         }
         if (items.items.len == 0 and !try self.hasGraphNode(options.graph_name, options.node_id)) {
             return error.GraphNodeNotFound;
@@ -1517,54 +1936,44 @@ pub const Database = struct {
         try validateGraphName(options.graph_name);
         try validateNodeId(options.node_id);
         if (options.edge_type) |edge_type| try validateEdgeType(edge_type);
+        const graph_key = try self.graphKeyForRead(options.graph_name);
+        const edge_type_key = if (options.edge_type) |edge_type| (try self.edgeTypeKeyForRead(graph_key, edge_type)) orelse -1 else null;
         const sqlite_limit = try sqliteLimit(options.limit);
         var stmt = switch (options.direction) {
             .outgoing => if (options.edge_type == null)
                 try self.prepareSchema(
-                    \\select e.edge_key,n.node_key,n.node_id,n.kind,e.edge_type
+                    \\select e.edge_key,n.node_key,n.node_id,n.kind,e.edge_type_key
                     \\from {s}_zova_graph_edges e join {s}_zova_graph_nodes n on n.node_key=e.to_node_key
-                    \\where (e.graph_key,e.from_node_key)=(
-                    \\ select g.graph_key,current.node_key from {s}_zova_graphs g
-                    \\ join {s}_zova_graph_nodes current on current.graph_key=g.graph_key
-                    \\ where g.name=?1 and current.node_id=?2)
+                    \\where e.graph_key=?1 and e.from_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2)
                     \\order by e.created_order,n.node_id collate binary,n.node_key limit ?3
                 )
             else
                 try self.prepareSchema(
-                    \\select e.edge_key,n.node_key,n.node_id,n.kind,e.edge_type
+                    \\select e.edge_key,n.node_key,n.node_id,n.kind,e.edge_type_key
                     \\from {s}_zova_graph_edges e join {s}_zova_graph_nodes n on n.node_key=e.to_node_key
-                    \\where (e.graph_key,e.from_node_key)=(
-                    \\ select g.graph_key,current.node_key from {s}_zova_graphs g
-                    \\ join {s}_zova_graph_nodes current on current.graph_key=g.graph_key
-                    \\ where g.name=?1 and current.node_id=?2) and e.edge_type=?3
+                    \\where e.graph_key=?1 and e.from_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2) and e.edge_type_key=?3
                     \\order by e.created_order,n.node_id collate binary,n.node_key limit ?4
                 ),
             .incoming => if (options.edge_type == null)
                 try self.prepareSchema(
-                    \\select e.edge_key,n.node_key,n.node_id,n.kind,e.edge_type
+                    \\select e.edge_key,n.node_key,n.node_id,n.kind,e.edge_type_key
                     \\from {s}_zova_graph_edges e join {s}_zova_graph_nodes n on n.node_key=e.from_node_key
-                    \\where (e.graph_key,e.to_node_key)=(
-                    \\ select g.graph_key,current.node_key from {s}_zova_graphs g
-                    \\ join {s}_zova_graph_nodes current on current.graph_key=g.graph_key
-                    \\ where g.name=?1 and current.node_id=?2)
+                    \\where e.graph_key=?1 and e.to_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2)
                     \\order by e.created_order,n.node_id collate binary,n.node_key limit ?3
                 )
             else
                 try self.prepareSchema(
-                    \\select e.edge_key,n.node_key,n.node_id,n.kind,e.edge_type
+                    \\select e.edge_key,n.node_key,n.node_id,n.kind,e.edge_type_key
                     \\from {s}_zova_graph_edges e join {s}_zova_graph_nodes n on n.node_key=e.from_node_key
-                    \\where (e.graph_key,e.to_node_key)=(
-                    \\ select g.graph_key,current.node_key from {s}_zova_graphs g
-                    \\ join {s}_zova_graph_nodes current on current.graph_key=g.graph_key
-                    \\ where g.name=?1 and current.node_id=?2) and e.edge_type=?3
+                    \\where e.graph_key=?1 and e.to_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2) and e.edge_type_key=?3
                     \\order by e.created_order,n.node_id collate binary,n.node_key limit ?4
                 ),
         };
         defer stmt.deinit();
-        try stmt.bindText(1, options.graph_name);
+        try stmt.bindInt64(1, graph_key);
         try stmt.bindText(2, options.node_id);
-        if (options.edge_type) |edge_type| {
-            try stmt.bindText(3, edge_type);
+        if (edge_type_key) |key| {
+            try stmt.bindInt64(3, key);
             try stmt.bindInt64(4, sqlite_limit);
         } else try stmt.bindInt64(3, sqlite_limit);
 
@@ -1573,7 +1982,18 @@ pub const Database = struct {
             for (items.items) |*item| item.deinit(allocator);
             items.deinit(allocator);
         }
-        while ((try stmt.step()) == .row) try appendGraphKeyedNeighborFromRow(&items, allocator, &stmt);
+        while ((try stmt.step()) == .row) {
+            const edge_key = stmt.columnInt64(0);
+            const neighbor_node_key = stmt.columnInt64(1);
+            if (edge_key <= 0 or neighbor_node_key <= 0) return error.GraphInvalid;
+            const node_id = try allocator.dupe(u8, stmt.columnText(2));
+            errdefer allocator.free(node_id);
+            const kind = try allocator.dupe(u8, stmt.columnText(3));
+            errdefer allocator.free(kind);
+            const edge_type = try self.dupeEdgeTypeNameForRead(allocator, stmt.columnInt64(4));
+            errdefer allocator.free(edge_type);
+            try items.append(allocator, .{ .edge_key = edge_key, .neighbor_node_key = neighbor_node_key, .node_id = node_id, .kind = kind, .edge_type = edge_type });
+        }
         if (items.items.len == 0 and !try self.hasGraphNode(options.graph_name, options.node_id)) return error.GraphNodeNotFound;
         return .{ .items = try items.toOwnedSlice(allocator) };
     }
@@ -1581,7 +2001,7 @@ pub const Database = struct {
     pub fn graphNodesGetManyKeyed(self: *Database, allocator: std.mem.Allocator, graph_name: []const u8, keys: []const i64) Error!GraphKeyedNodeLookupList {
         try validateGraphName(graph_name);
         for (keys) |key| if (key <= 0) return error.InvalidArgument;
-        const graph_key = try self.graphKey(graph_name);
+        const graph_key = try self.graphKeyForRead(graph_name);
         var items = try allocator.alloc(GraphKeyedNodeLookup, keys.len);
         errdefer allocator.free(items);
         for (keys, items) |key, *item| item.* = .{ .found = false, .node_key = key };
@@ -1623,17 +2043,19 @@ pub const Database = struct {
     pub fn graphEdgesGetManyKeyed(self: *Database, allocator: std.mem.Allocator, graph_name: []const u8, keys: []const i64) Error!GraphKeyedEdgeLookupList {
         try validateGraphName(graph_name);
         for (keys) |key| if (key <= 0) return error.InvalidArgument;
-        const graph_key = try self.graphKey(graph_name);
+        const graph_key = try self.graphKeyForRead(graph_name);
         var items = try allocator.alloc(GraphKeyedEdgeLookup, keys.len);
         errdefer allocator.free(items);
         for (keys, items) |key, *item| item.* = .{ .found = false, .edge_key = key };
         errdefer for (items) |*item| item.deinit(allocator);
         if (keys.len == 0) return .{ .items = items };
 
+        try self.ensureEdgeTypeCache();
+
         try self.stageOpaqueKeys("_zova_graph_edges_get_many_keys", keys);
         defer self.clearOpaqueKeys("_zova_graph_edges_get_many_keys");
         var stmt = try self.prepareSchema(
-            \\select batch.ordinal,e.edge_key,e.from_node_key,e.edge_type,e.to_node_key,e.created_order
+            \\select batch.ordinal,e.edge_key,e.from_node_key,e.edge_type_key,e.to_node_key,e.created_order
             \\from temp._zova_graph_edges_get_many_keys batch
             \\left join {s}_zova_graph_edges e on e.graph_key=?1 and e.edge_key=batch.row_key
             \\order by batch.ordinal
@@ -1651,7 +2073,7 @@ pub const Database = struct {
             const target = stmt.columnInt64(4);
             const created_order = stmt.columnInt64(5);
             if (edge_key != item.edge_key or source <= 0 or target <= 0 or created_order <= 0) return error.GraphInvalid;
-            item.edge_type = try allocator.dupe(u8, stmt.columnText(3));
+            item.edge_type = try self.dupeEdgeTypeNameForRead(allocator, stmt.columnInt64(3));
             item.source_node_key = source;
             item.target_node_key = target;
             item.created_order = created_order;
@@ -1683,48 +2105,34 @@ pub const Database = struct {
         try validateGraphName(options.graph_name);
         try validateNodeId(options.node_id);
         if (options.edge_type) |edge_type| try validateEdgeType(edge_type);
+        const graph_key = try self.graphKeyForRead(options.graph_name);
+        const edge_type_key = if (options.edge_type) |edge_type| (try self.edgeTypeKeyForRead(graph_key, edge_type)) orelse -1 else null;
         var stmt = switch (options.direction) {
             .outgoing => if (options.edge_type != null)
                 try self.prepareSchema(
                     \\select count(*) from {s}_zova_graph_edges e
-                    \\where (e.graph_key,e.from_node_key)=(
-                    \\  select g.graph_key,n.node_key from {s}_zova_graphs g
-                    \\  join {s}_zova_graph_nodes n on n.graph_key=g.graph_key
-                    \\  where g.name=? and n.node_id=?
-                    \\) and e.edge_type=?
+                    \\where e.graph_key=?1 and e.from_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2) and e.edge_type_key=?3
                 )
             else
                 try self.prepareSchema(
                     \\select count(*) from {s}_zova_graph_edges e
-                    \\where (e.graph_key,e.from_node_key)=(
-                    \\  select g.graph_key,n.node_key from {s}_zova_graphs g
-                    \\  join {s}_zova_graph_nodes n on n.graph_key=g.graph_key
-                    \\  where g.name=? and n.node_id=?
-                    \\)
+                    \\where e.graph_key=?1 and e.from_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2)
                 ),
             .incoming => if (options.edge_type != null)
                 try self.prepareSchema(
                     \\select count(*) from {s}_zova_graph_edges e
-                    \\where (e.graph_key,e.to_node_key)=(
-                    \\  select g.graph_key,n.node_key from {s}_zova_graphs g
-                    \\  join {s}_zova_graph_nodes n on n.graph_key=g.graph_key
-                    \\  where g.name=? and n.node_id=?
-                    \\) and e.edge_type=?
+                    \\where e.graph_key=?1 and e.to_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2) and e.edge_type_key=?3
                 )
             else
                 try self.prepareSchema(
                     \\select count(*) from {s}_zova_graph_edges e
-                    \\where (e.graph_key,e.to_node_key)=(
-                    \\  select g.graph_key,n.node_key from {s}_zova_graphs g
-                    \\  join {s}_zova_graph_nodes n on n.graph_key=g.graph_key
-                    \\  where g.name=? and n.node_id=?
-                    \\)
+                    \\where e.graph_key=?1 and e.to_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2)
                 ),
         };
         defer stmt.deinit();
-        try stmt.bindText(1, options.graph_name);
+        try stmt.bindInt64(1, graph_key);
         try stmt.bindText(2, options.node_id);
-        if (options.edge_type) |edge_type| try stmt.bindText(3, edge_type);
+        if (edge_type_key) |key| try stmt.bindInt64(3, key);
         std.debug.assert((try stmt.step()) == .row);
         const count = stmt.columnInt64(0);
         if (count < 0) return error.GraphInvalid;
@@ -1743,7 +2151,8 @@ pub const Database = struct {
         if (out_degrees.len != node_keys.len) return error.InvalidArgument;
         try validateGraphName(graph_name);
         if (edge_type) |value| try validateEdgeType(value);
-        const graph_key = try self.graphKey(graph_name);
+        const graph_key = try self.graphKeyForRead(graph_name);
+        const edge_type_key = if (edge_type) |value| (try self.edgeTypeKeyForRead(graph_key, value)) orelse -1 else null;
         for (node_keys) |node_key| if (node_key <= 0) return error.InvalidArgument;
         if (node_keys.len == 0) return;
 
@@ -1779,7 +2188,7 @@ pub const Database = struct {
                     \\select batch.ordinal,count(e.edge_key)
                     \\from temp._zova_graph_degree_many_keys batch
                     \\join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=batch.node_key
-                    \\left join {s}_zova_graph_edges e on e.graph_key=n.graph_key and e.from_node_key=n.node_key and e.edge_type=?2
+                    \\left join {s}_zova_graph_edges e on e.graph_key=n.graph_key and e.from_node_key=n.node_key and e.edge_type_key=?2
                     \\group by batch.ordinal order by batch.ordinal
                 ),
             .incoming => if (edge_type == null)
@@ -1795,13 +2204,13 @@ pub const Database = struct {
                     \\select batch.ordinal,count(e.edge_key)
                     \\from temp._zova_graph_degree_many_keys batch
                     \\join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=batch.node_key
-                    \\left join {s}_zova_graph_edges e on e.graph_key=n.graph_key and e.to_node_key=n.node_key and e.edge_type=?2
+                    \\left join {s}_zova_graph_edges e on e.graph_key=n.graph_key and e.to_node_key=n.node_key and e.edge_type_key=?2
                     \\group by batch.ordinal order by batch.ordinal
                 ),
         };
         defer query.deinit();
         try query.bindInt64(1, graph_key);
-        if (edge_type) |value| try query.bindText(2, value);
+        if (edge_type_key) |key| try query.bindInt64(2, key);
         var resolved: usize = 0;
         while ((try query.step()) == .row) {
             const ordinal = query.columnInt64(0);
@@ -1856,9 +2265,9 @@ pub const Database = struct {
         if (options.edge_limit != 0) {
             const query_limit = std.math.add(usize, options.edge_limit, 1) catch return error.InvalidArgument;
             var stmt = try self.prepareSchema(
-                \\select edge_key,from_node_key,edge_type,to_node_key,created_order from {s}_zova_graph_edges
-                \\where graph_key=?1 and (created_order>?2 or (created_order=?2 and edge_key>?3))
-                \\order by created_order,edge_key limit ?4
+                \\select e.edge_key,e.from_node_key,e.edge_type_key,e.to_node_key,e.created_order from {s}_zova_graph_edges e
+                \\where e.graph_key=?1 and (e.created_order>?2 or (e.created_order=?2 and e.edge_key>?3))
+                \\order by e.created_order,e.edge_key limit ?4
             );
             defer stmt.deinit();
             try stmt.bindInt64(1, graph_key);
@@ -1870,7 +2279,14 @@ pub const Database = struct {
                     has_more_edges = true;
                     break;
                 }
-                try appendGraphScanEdge(&edges, allocator, &stmt);
+                const edge_key = stmt.columnInt64(0);
+                const source_node_key = stmt.columnInt64(1);
+                const target_node_key = stmt.columnInt64(3);
+                const created_order = stmt.columnInt64(4);
+                if (edge_key <= 0 or source_node_key <= 0 or target_node_key <= 0 or created_order <= 0) return error.GraphInvalid;
+                const edge_type = try self.dupeEdgeTypeNameForRead(allocator, stmt.columnInt64(2));
+                errdefer allocator.free(edge_type);
+                try edges.append(allocator, .{ .edge_key = edge_key, .source_node_key = source_node_key, .edge_type = edge_type, .target_node_key = target_node_key, .created_order = created_order });
             }
         }
         const owned_nodes = try nodes.toOwnedSlice(allocator);
@@ -1964,9 +2380,10 @@ pub const Database = struct {
         try appendGraphWalkItem(&frontier, allocator, start.node_id, start.kind, 0, null, null);
 
         const adjacency_prepare_start = if (profile != null) graphProfileTimestamp() else std.Io.Timestamp.zero;
-        var adjacency_stmt = try self.prepareWalkAdjacency(options.direction, options.edge_type);
+        const edge_type_key = if (options.edge_type) |edge_type| (try self.edgeTypeKeyForRead(resolved_start.graph_key, edge_type)) orelse -1 else null;
+        var adjacency_stmt = try self.prepareWalkAdjacency(options.direction, edge_type_key != null);
         defer adjacency_stmt.deinit();
-        try bindWalkAdjacencyConstants(&adjacency_stmt, resolved_start.graph_key, options, sqlite_limit);
+        try bindWalkAdjacencyConstants(&adjacency_stmt, resolved_start.graph_key, edge_type_key, sqlite_limit);
         if (profile) |value| {
             value.adjacency_prepare_ms = graphProfileElapsedMs(adjacency_prepare_start);
             value.adjacency_statement_prepares += 1;
@@ -2005,10 +2422,23 @@ pub const Database = struct {
                 if (profile) |value| value.adjacency_rows_stepped += 1;
                 const neighbor_node_id = adjacency_stmt.columnText(0);
                 const neighbor_kind = adjacency_stmt.columnText(1);
-                const neighbor_edge_type = adjacency_stmt.columnText(2);
+                const neighbor_edge_type_key = adjacency_stmt.columnInt64(2);
                 if (visited.contains(neighbor_node_id)) continue;
                 try putVisited(&visited, allocator, neighbor_node_id);
-                try appendGraphWalkItem(&frontier, allocator, neighbor_node_id, neighbor_kind, current_depth + 1, current_node_id, neighbor_edge_type);
+                if (self.edge_type_cache) |cache| {
+                    try self.ensureEdgeTypeCache();
+                    if (cache.by_key.get(neighbor_edge_type_key)) |neighbor_edge_type| {
+                        try appendGraphWalkItem(&frontier, allocator, neighbor_node_id, neighbor_kind, current_depth + 1, current_node_id, neighbor_edge_type);
+                    } else {
+                        const neighbor_edge_type = try self.dupeEdgeTypeNameForRead(allocator, neighbor_edge_type_key);
+                        defer allocator.free(neighbor_edge_type);
+                        try appendGraphWalkItem(&frontier, allocator, neighbor_node_id, neighbor_kind, current_depth + 1, current_node_id, neighbor_edge_type);
+                    }
+                } else {
+                    const neighbor_edge_type = try self.dupeEdgeTypeNameForRead(allocator, neighbor_edge_type_key);
+                    defer allocator.free(neighbor_edge_type);
+                    try appendGraphWalkItem(&frontier, allocator, neighbor_node_id, neighbor_kind, current_depth + 1, current_node_id, neighbor_edge_type);
+                }
             }
             if (profile) |value| {
                 const operation_start = graphProfileTimestamp();
@@ -2028,11 +2458,11 @@ pub const Database = struct {
         return .{ .items = owned_results };
     }
 
-    fn prepareWalkAdjacency(self: *Database, direction: GraphNeighborDirection, edge_type: ?[]const u8) Error!sqlite.Statement {
+    fn prepareWalkAdjacency(self: *Database, direction: GraphNeighborDirection, filtered: bool) Error!sqlite.Statement {
         return switch (direction) {
-            .outgoing => if (edge_type == null)
+            .outgoing => if (!filtered)
                 try self.prepareSchema(
-                    \\select n.node_id, n.kind, e.edge_type
+                    \\select n.node_id,n.kind,e.edge_type_key
                     \\from {s}_zova_graph_edges e
                     \\join {s}_zova_graph_nodes n on n.node_key = e.to_node_key
                     \\where e.graph_key=?1 and e.from_node_key=(
@@ -2043,18 +2473,18 @@ pub const Database = struct {
                 )
             else
                 try self.prepareSchema(
-                    \\select n.node_id, n.kind, e.edge_type
+                    \\select n.node_id,n.kind,e.edge_type_key
                     \\from {s}_zova_graph_edges e
                     \\join {s}_zova_graph_nodes n on n.node_key = e.to_node_key
                     \\where e.graph_key=?1 and e.from_node_key=(
                     \\  select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2
-                    \\) and e.edge_type=?3
+                    \\) and e.edge_type_key=?3
                     \\order by e.created_order, e.to_node_key
                     \\limit ?
                 ),
-            .incoming => if (edge_type == null)
+            .incoming => if (!filtered)
                 try self.prepareSchema(
-                    \\select n.node_id, n.kind, e.edge_type
+                    \\select n.node_id,n.kind,e.edge_type_key
                     \\from {s}_zova_graph_edges e
                     \\join {s}_zova_graph_nodes n on n.node_key = e.from_node_key
                     \\where e.graph_key=?1 and e.to_node_key=(
@@ -2065,12 +2495,12 @@ pub const Database = struct {
                 )
             else
                 try self.prepareSchema(
-                    \\select n.node_id, n.kind, e.edge_type
+                    \\select n.node_id,n.kind,e.edge_type_key
                     \\from {s}_zova_graph_edges e
                     \\join {s}_zova_graph_nodes n on n.node_key = e.from_node_key
                     \\where e.graph_key=?1 and e.to_node_key=(
                     \\  select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2
-                    \\) and e.edge_type=?3
+                    \\) and e.edge_type_key=?3
                     \\order by e.created_order, e.from_node_key
                     \\limit ?
                 ),
@@ -2095,12 +2525,12 @@ fn graphProfileElapsedMs(start: std.Io.Timestamp) f64 {
 fn bindWalkAdjacencyConstants(
     stmt: *sqlite.Statement,
     graph_key: i64,
-    options: GraphWalkDirectionOptions,
+    edge_type_key: ?i64,
     sqlite_limit: i64,
 ) Error!void {
     try stmt.bindInt64(1, graph_key);
-    if (options.edge_type) |edge_type| {
-        try stmt.bindText(3, edge_type);
+    if (edge_type_key) |key| {
+        try stmt.bindInt64(3, key);
         try stmt.bindInt64(4, sqlite_limit);
     } else {
         try stmt.bindInt64(3, sqlite_limit);
@@ -2215,7 +2645,7 @@ fn ensureGraphBatchIndexes(self: *Database) Error!void {
 
     var edges_from_node_type = try self.prepareSchema(
         \\create index if not exists {s}_zova_graph_edges_from_node_type_idx
-        \\on _zova_graph_edges (graph_key, from_node_key, edge_type, created_order, to_node_key)
+        \\on _zova_graph_edges (graph_key, from_node_key, edge_type_key, created_order, to_node_key)
     );
     defer edges_from_node_type.deinit();
     std.debug.assert((try edges_from_node_type.step()) == .done);
@@ -2229,7 +2659,7 @@ fn ensureGraphBatchIndexes(self: *Database) Error!void {
 
     var edges_to_node_type = try self.prepareSchema(
         \\create index if not exists {s}_zova_graph_edges_to_node_type_idx
-        \\on _zova_graph_edges (graph_key, to_node_key, edge_type, created_order, from_node_key)
+        \\on _zova_graph_edges (graph_key, to_node_key, edge_type_key, created_order, from_node_key)
     );
     defer edges_to_node_type.deinit();
     std.debug.assert((try edges_to_node_type.step()) == .done);

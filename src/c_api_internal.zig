@@ -1129,6 +1129,33 @@ pub const zova_graph_node_put_many_keyed_request = extern struct {
     out_node_keys_capacity: usize,
 };
 
+pub const zova_graph_fresh_node_input = extern struct {
+    node_id: ?[*:0]const u8,
+    kind: ?[*:0]const u8,
+    target_type: c_int,
+    target_namespace: ?[*:0]const u8,
+    target_ref: ?[*:0]const u8,
+};
+
+pub const zova_graph_fresh_edge_input = extern struct {
+    from_node_ordinal: usize,
+    edge_type: ?[*:0]const u8,
+    to_node_ordinal: usize,
+};
+
+pub const zova_graph_build_fresh_keyed_request = extern struct {
+    db: ?*zova_database,
+    graph_name: ?[*:0]const u8,
+    nodes: ?[*]const zova_graph_fresh_node_input,
+    nodes_len: usize,
+    edges: ?[*]const zova_graph_fresh_edge_input,
+    edges_len: usize,
+    out_node_keys: ?[*]i64,
+    out_node_keys_capacity: usize,
+    out_edge_keys: ?[*]i64,
+    out_edge_keys_capacity: usize,
+};
+
 pub const zova_graph_node_get_request = extern struct {
     db: ?*zova_database,
     graph_name: ?[*:0]const u8,
@@ -2899,6 +2926,29 @@ pub fn zova_graph_node_put_many_keyed(request: ?*const zova_graph_node_put_many_
     return okDb(handle);
 }
 
+pub fn zova_graph_build_fresh_keyed(request: ?*const zova_graph_build_fresh_keyed_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    if (req.out_node_keys_capacity < req.nodes_len or req.out_edge_keys_capacity < req.edges_len) return .INVALID_ARGUMENT;
+    if (req.nodes_len != 0 and (req.nodes == null or req.out_node_keys == null)) return .INVALID_ARGUMENT;
+    if (req.edges_len != 0 and (req.edges == null or req.out_edge_keys == null)) return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    const graph_name = req.graph_name orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const nodes = freshGraphNodeInputSlices(req.nodes, req.nodes_len) catch |err| return failDb(handle, err);
+    defer if (nodes.len != 0) allocator.free(nodes);
+    const edges = freshGraphEdgeInputSlices(req.edges, req.edges_len) catch |err| return failDb(handle, err);
+    defer if (edges.len != 0) allocator.free(edges);
+    const node_keys = allocator.alloc(i64, nodes.len) catch |err| return failDb(handle, err);
+    defer allocator.free(node_keys);
+    const edge_keys = allocator.alloc(i64, edges.len) catch |err| return failDb(handle, err);
+    defer allocator.free(edge_keys);
+    handle.db.buildFreshGraphKeyed(std.mem.span(graph_name), nodes, edges, node_keys, edge_keys) catch |err| return failDb(handle, err);
+    if (node_keys.len != 0) @memcpy(req.out_node_keys.?[0..node_keys.len], node_keys);
+    if (edge_keys.len != 0) @memcpy(req.out_edge_keys.?[0..edge_keys.len], edge_keys);
+    return okDb(handle);
+}
+
 pub fn zova_graph_node_get(request: ?*const zova_graph_node_get_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
@@ -3763,6 +3813,48 @@ fn graphNodeInputSlices(
             .target_type = target_type,
             .target_namespace = optionalCStringSpan(input.target_namespace),
             .target_ref = optionalCStringSpan(input.target_ref),
+        };
+    }
+    return result;
+}
+
+fn freshGraphNodeInputSlices(
+    inputs: ?[*]const zova_graph_fresh_node_input,
+    len: usize,
+) (error{ OutOfMemory, InvalidArgument }![]const zova.FreshGraphNodeInput) {
+    if (len == 0) return &.{};
+    const ptr = inputs orelse return error.InvalidArgument;
+    const result = try allocator.alloc(zova.FreshGraphNodeInput, len);
+    errdefer allocator.free(result);
+    for (ptr[0..len], result) |input, *out| {
+        const node_id = input.node_id orelse return error.InvalidArgument;
+        const kind = input.kind orelse return error.InvalidArgument;
+        const target_type = graphTargetTypeFromAbi(input.target_type) orelse return error.InvalidArgument;
+        out.* = .{
+            .node_id = std.mem.span(node_id),
+            .kind = std.mem.span(kind),
+            .target_type = target_type,
+            .target_namespace = optionalCStringSpan(input.target_namespace),
+            .target_ref = optionalCStringSpan(input.target_ref),
+        };
+    }
+    return result;
+}
+
+fn freshGraphEdgeInputSlices(
+    inputs: ?[*]const zova_graph_fresh_edge_input,
+    len: usize,
+) (error{ OutOfMemory, InvalidArgument }![]const zova.FreshGraphEdgeInput) {
+    if (len == 0) return &.{};
+    const ptr = inputs orelse return error.InvalidArgument;
+    const result = try allocator.alloc(zova.FreshGraphEdgeInput, len);
+    errdefer allocator.free(result);
+    for (ptr[0..len], result) |input, *out| {
+        const edge_type = input.edge_type orelse return error.InvalidArgument;
+        out.* = .{
+            .from_node_ordinal = input.from_node_ordinal,
+            .edge_type = std.mem.span(edge_type),
+            .to_node_ordinal = input.to_node_ordinal,
         };
     }
     return result;
@@ -4892,6 +4984,7 @@ test "c abi validates null pointers" {
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_node_put(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_node_put_many(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_node_put_many_keyed(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_build_fresh_keyed(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_node_get(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_node_exists(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_node_delete(null));
@@ -7924,6 +8017,68 @@ test "c abi opaque keyed batch reads align and zero error outputs" {
     try std.testing.expectEqual(@as(usize, 0), node_results.len);
     zova_graph_keyed_node_results_free(&node_results);
     zova_graph_keyed_node_results_free(&node_results);
+}
+
+test "c abi fresh graph build returns aligned keys and rejects partial output" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/fresh-build.zova", .{tmp.sub_path[0..]});
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{ .path = path, .out_db = &db, .out_error_message = null }));
+    defer _ = zova_database_close(db);
+
+    const nodes = [_]zova_graph_fresh_node_input{
+        .{ .node_id = "a", .kind = "old", .target_type = 0, .target_namespace = null, .target_ref = null },
+        .{ .node_id = "b", .kind = "node", .target_type = 0, .target_namespace = null, .target_ref = null },
+        .{ .node_id = "a", .kind = "final", .target_type = 0, .target_namespace = null, .target_ref = null },
+    };
+    const edges = [_]zova_graph_fresh_edge_input{
+        .{ .from_node_ordinal = 0, .edge_type = "links", .to_node_ordinal = 1 },
+        .{ .from_node_ordinal = 2, .edge_type = "links", .to_node_ordinal = 1 },
+    };
+    var node_keys = [_]i64{ 71, 72, 73 };
+    var edge_keys = [_]i64{ 81, 82 };
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_build_fresh_keyed(&.{
+        .db = db,
+        .graph_name = "app",
+        .nodes = &nodes,
+        .nodes_len = nodes.len,
+        .edges = &edges,
+        .edges_len = edges.len,
+        .out_node_keys = &node_keys,
+        .out_node_keys_capacity = nodes.len - 1,
+        .out_edge_keys = &edge_keys,
+        .out_edge_keys_capacity = edges.len,
+    }));
+    try std.testing.expectEqualSlices(i64, &.{ 71, 72, 73 }, &node_keys);
+    try std.testing.expectEqualSlices(i64, &.{ 81, 82 }, &edge_keys);
+    try std.testing.expectEqual(zova_status.OK, zova_graph_build_fresh_keyed(&.{
+        .db = db,
+        .graph_name = "app",
+        .nodes = &nodes,
+        .nodes_len = nodes.len,
+        .edges = &edges,
+        .edges_len = edges.len,
+        .out_node_keys = &node_keys,
+        .out_node_keys_capacity = node_keys.len,
+        .out_edge_keys = &edge_keys,
+        .out_edge_keys_capacity = edge_keys.len,
+    }));
+    try std.testing.expectEqualSlices(i64, &.{ 1, 2, 1 }, &node_keys);
+    try std.testing.expectEqualSlices(i64, &.{ 1, 1 }, &edge_keys);
+    try std.testing.expectEqual(zova_status.GRAPH_INVALID, zova_graph_build_fresh_keyed(&.{
+        .db = db,
+        .graph_name = "other",
+        .nodes = &nodes,
+        .nodes_len = nodes.len,
+        .edges = &edges,
+        .edges_len = edges.len,
+        .out_node_keys = &node_keys,
+        .out_node_keys_capacity = node_keys.len,
+        .out_edge_keys = &edge_keys,
+        .out_edge_keys_capacity = edge_keys.len,
+    }));
 }
 
 test "c abi manages bundled extension lifecycle" {

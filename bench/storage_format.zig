@@ -257,6 +257,39 @@ pub fn main(init: std.process.Init) !void {
     }
     printDistribution("graph_multi_neighbors", &graph_multi_samples);
 
+    for (0..single_warmups + single_samples) |index| {
+        const start = now();
+        var neighbors = try db.graphNeighbors(std.heap.c_allocator, .{ .graph_name = graph_names[index % graph_count], .node_id = root_id, .edge_type = edge_types[0], .limit = 64 });
+        neighbors.deinit(std.heap.c_allocator);
+        if (index >= single_warmups) graph_samples[index - single_warmups] = elapsedMs(start);
+    }
+    printDistribution("graph_typed_neighbors", &graph_samples);
+
+    for (0..single_warmups + single_samples) |index| {
+        const start = now();
+        std.mem.doNotOptimizeAway(try db.graphDegree(.{ .graph_name = graph_names[index % graph_count], .node_id = root_id, .edge_type = edge_types[0] }));
+        if (index >= single_warmups) graph_samples[index - single_warmups] = elapsedMs(start);
+    }
+    printDistribution("graph_typed_degree", &graph_samples);
+
+    for (0..single_warmups + single_samples) |index| {
+        const start = now();
+        var walk = try db.graphWalkDirection(std.heap.c_allocator, .{ .graph_name = graph_names[index % graph_count], .start_node_id = root_id, .edge_type = edge_types[0], .max_depth = 2, .limit = 64 });
+        walk.deinit(std.heap.c_allocator);
+        if (index >= single_warmups) graph_samples[index - single_warmups] = elapsedMs(start);
+    }
+    printDistribution("graph_typed_walk", &graph_samples);
+
+    for (0..multi_warmups + multi_samples) |index| {
+        const start = now();
+        for (graph_names) |graph_name| {
+            var neighbors = try db.graphNeighbors(std.heap.c_allocator, .{ .graph_name = graph_name, .node_id = root_id, .edge_type = edge_types[0], .limit = 64 });
+            neighbors.deinit(std.heap.c_allocator);
+        }
+        if (index >= multi_warmups) graph_multi_samples[index - multi_warmups] = elapsedMs(start);
+    }
+    printDistribution("graph_typed_multi_neighbors", &graph_multi_samples);
+
     const flat_values = try allocator.alloc(i8, vector_count * vector_dimensions);
     fillVectors(flat_values);
     var vector_inputs = try allocator.alloc(zova.VectorInput, vector_count);

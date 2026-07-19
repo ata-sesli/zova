@@ -930,9 +930,12 @@ test "cli graph usage errors and diagnostics are bounded" {
         var raw = try zova.sqlite.Database.open(db_path);
         defer raw.deinit();
         try raw.exec(
-            \\insert into _zova_graph_edges (graph_key, from_node_key, edge_type, to_node_key, created_order)
-            \\select g.graph_key, n.node_key, 'mentions', 999999, 1
+            \\insert into _zova_graph_edge_types(graph_key,name)
+            \\select graph_key,'mentions' from _zova_graphs where name='app';
+            \\insert into _zova_graph_edges (graph_key, from_node_key, edge_type_key, to_node_key, created_order)
+            \\select g.graph_key, n.node_key, et.edge_type_key, 999999, 1
             \\from _zova_graphs g join _zova_graph_nodes n on n.graph_key = g.graph_key
+            \\join _zova_graph_edge_types et on et.graph_key=g.graph_key and et.name='mentions'
             \\where g.name = 'app' and n.node_id = 'message:1'
         );
     }
@@ -2056,7 +2059,7 @@ test "cli info reports bounded database summary" {
     defer result.deinit();
     try std.testing.expectEqual(@as(u8, 0), result.code);
     try expectContains(result.stdout, "Zova database");
-    try expectContains(result.stdout, "format_version: 8");
+    try expectContains(result.stdout, "format_version: 9");
     try expectContains(result.stdout, "objects:");
     try expectContains(result.stdout, "chunks:");
     try expectContains(result.stdout, "loose_chunks:");
@@ -2196,7 +2199,7 @@ test "cli info json reports bounded database summary" {
     try expectJsonInt(root, "cli_json_version", 1);
     try expectJsonString(root, "package_version", cli.package_version);
     try expectJsonString(root, "sqlite_version", zova.sqlite.version());
-    try expectJsonString(root, "format_version", "8");
+    try expectJsonString(root, "format_version", "9");
     try expectJsonObjectHasInt(root, "files", "database_bytes");
     try expectJsonObjectHasInt(root, "sqlite", "page_count");
     try expectJsonObjectHasInt(root, "objects", "count");

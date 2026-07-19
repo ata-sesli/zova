@@ -61,9 +61,9 @@ the bundled native snapshot.
 
 The v0.24 release workflow builds the documented Linux/macOS wheel matrix.
 
-Zova 0.24 uses `.zova` format 8 and does not migrate format-7 databases in
-place. Keep a compatible backup or use a 0.23.x build to export data before
-creating a format-8 database.
+Zova 0.24 uses `.zova` format 9 and does not migrate format-8 databases in
+place. Keep a compatible backup and export data with a format-8 build before
+creating a format-9 database.
 
 ## Local Development
 

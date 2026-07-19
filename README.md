@@ -12,22 +12,22 @@ host foundation.
 
 Current package version: `0.24.0`.
 
-Zova is pre-1.0. The current `.zova` file `format_version` is `8`. Format-8
+Zova is pre-1.0. The current `.zova` file `format_version` is `9`. Format-9
 files require Zova 0.24.0 or newer, and older builds reject them. Zova 0.24.0
-does not migrate format-7 files in place: keep a compatible backup or use a
-0.23.x build to export data before moving it into a new format-8 database.
+does not migrate format-8 files in place: keep a compatible backup and export
+data with a format-8 build before moving it into a new format-9 database.
 
 Zova's bundled SQLite enables FTS5 and the read-only `dbstat` virtual table.
 `dbstat` is available for storage diagnostics; it is not a portable guarantee
 for databases opened through an unrelated system SQLite build.
 
-Zova 0.24.0 is the format-8 storage optimization release. Graphs and vectors
+Zova 0.24.0 is the storage optimization release. Graphs and vectors
 use compact private integer keys, vector norms live with their vectors, graph
 edge batches resolve endpoints once, and large exact searches use adaptive
-top-k selection. The release also adds atomic C batch deletion for graph edges
-and vectors while preserving public names, IDs, ordering, distances, and error
-behavior. In the retained format benchmark, graph storage falls by 42.9%,
-vector storage by 6.9%, graph ingestion by 37%, and vector ingestion by 45%.
+top-k selection. Format 9 dictionaries graph edge types and adds an atomic
+fresh-store graph builder with ordinal endpoints and aligned opaque keys. The
+existing keyed APIs remain the incremental and replay path; public graph APIs
+continue to accept and return edge-type strings.
 
 ## Contents
 
@@ -1035,7 +1035,7 @@ uv run --isolated --with pytest --directory bindings/python python -m pytest
 Zova does not hide SQLite. SQL remains SQLite SQL, locking remains SQLite
 locking, and PRAGMAs remain application policy.
 
-Zova enables `PRAGMA foreign_keys = ON` on its owned connections so format-8
+Zova enables `PRAGMA foreign_keys = ON` on its owned connections so format-9
 private graph and vector cascades remain enforced. It does not run `VACUUM`
 automatically, enable `auto_vacuum`, or change journal and synchronous settings
 automatically.

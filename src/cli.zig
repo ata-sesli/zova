@@ -7233,12 +7233,13 @@ fn copyValidGraphs(
     }
 
     var edges = try source.prepare(
-        \\select g.name, from_node.node_id, e.edge_type, to_node.node_id
+        \\select g.name, from_node.node_id, et.name, to_node.node_id
         \\from _zova_graph_edges e
         \\join _zova_graphs g on g.graph_key = e.graph_key
+        \\join _zova_graph_edge_types et on et.graph_key=e.graph_key and et.edge_type_key=e.edge_type_key
         \\join _zova_graph_nodes from_node on from_node.graph_key = e.graph_key and from_node.node_key = e.from_node_key
         \\join _zova_graph_nodes to_node on to_node.graph_key = e.graph_key and to_node.node_key = e.to_node_key
-        \\order by e.created_order, g.name, from_node.node_id, e.edge_type, to_node.node_id
+        \\order by e.created_order, g.name, from_node.node_id, et.name, to_node.node_id
     );
     defer edges.deinit();
     while ((try edges.step()) == .row) {
@@ -7594,24 +7595,27 @@ fn validateGraphs(allocator: std.mem.Allocator, db: *zova.Database, report: *Dia
     }
 
     const edges_sql = try std.fmt.allocPrintSentinel(allocator,
-        \\select g.name, from_node.node_id, e.edge_type, to_node.node_id,
+        \\select g.name, from_node.node_id, et.name, to_node.node_id,
         \\  from_node.node_id is null,
-        \\  to_node.node_id is null
+        \\  to_node.node_id is null,
+        \\  et.edge_type_key is null
         \\from {s}_zova_graph_edges e
         \\join {s}_zova_graphs g on g.graph_key = e.graph_key
+        \\left join {s}_zova_graph_edge_types et on et.graph_key=e.graph_key and et.edge_type_key=e.edge_type_key
         \\left join {s}_zova_graph_nodes from_node
         \\  on from_node.graph_key = e.graph_key and from_node.node_key = e.from_node_key
         \\left join {s}_zova_graph_nodes to_node
         \\  on to_node.graph_key = e.graph_key and to_node.node_key = e.to_node_key
-        \\order by g.name, from_node.node_id, e.edge_type, to_node.node_id
-    , .{ prefix, prefix, prefix, prefix }, 0);
+        \\order by g.name, from_node.node_id, et.name, to_node.node_id
+    , .{ prefix, prefix, prefix, prefix, prefix }, 0);
     defer allocator.free(edges_sql);
     var edges = try db.prepare(edges_sql);
     defer edges.deinit();
     while ((try edges.step()) == .row) {
         const graph_name = edges.columnText(0);
         const from_node_id = edges.columnText(1);
-        const edge_type = edges.columnText(2);
+        const missing_type = edges.columnInt64(6) != 0;
+        const edge_type = if (missing_type) "" else edges.columnText(2);
         const to_node_id = edges.columnText(3);
         const missing_from = edges.columnInt64(4) != 0;
         const missing_to = edges.columnInt64(5) != 0;
@@ -7626,7 +7630,9 @@ fn validateGraphs(allocator: std.mem.Allocator, db: *zova.Database, report: *Dia
         if (!isValidGraphNodeId(to_node_id)) {
             try addGraphDiagnosticIssue(allocator, report, issues, "edge_to_node_invalid", @errorName(error.GraphInvalid), graph_name, to_node_id, edge_type);
         }
-        if (!isValidGraphAsciiName(edge_type, 128)) {
+        if (missing_type) {
+            try addGraphDiagnosticIssue(allocator, report, issues, "missing_edge_type", @errorName(error.GraphInvalid), graph_name, from_node_id, null);
+        } else if (!isValidGraphAsciiName(edge_type, 128)) {
             try addGraphDiagnosticIssue(allocator, report, issues, "edge_type_invalid", @errorName(error.GraphInvalid), graph_name, from_node_id, edge_type);
         }
         if (missing_from) {

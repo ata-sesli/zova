@@ -113,6 +113,20 @@ pub fn build(b: *std.Build) void {
     const graph_keyed_benchmark_step = b.step("bench-graph-keyed", "Compare current and opaque-key graph batches");
     graph_keyed_benchmark_step.dependOn(&graph_keyed_benchmark_cmd.step);
 
+    const graph_fresh_benchmark = b.addExecutable(.{
+        .name = "zova_graph_fresh_benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/graph_fresh.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    graph_fresh_benchmark.root_module.addImport("zova", zova_module);
+    const graph_fresh_benchmark_cmd = b.addRunArtifact(graph_fresh_benchmark);
+    if (b.args) |args| graph_fresh_benchmark_cmd.addArgs(args);
+    const graph_fresh_benchmark_step = b.step("bench-graph-fresh", "Compare incremental and fresh graph publication at Deno scale");
+    graph_fresh_benchmark_step.dependOn(&graph_fresh_benchmark_cmd.step);
+
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/root.zig"),
