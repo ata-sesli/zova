@@ -2926,7 +2926,7 @@ pub fn zova_graph_node_put_many_keyed(request: ?*const zova_graph_node_put_many_
     return okDb(handle);
 }
 
-pub fn zova_graph_build_fresh_keyed(request: ?*const zova_graph_build_fresh_keyed_request) callconv(.c) zova_status {
+fn graphBuildFreshKeyed(request: ?*const zova_graph_build_fresh_keyed_request, comptime prepared: bool) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     if (req.out_node_keys_capacity < req.nodes_len or req.out_edge_keys_capacity < req.edges_len) return .INVALID_ARGUMENT;
     if (req.nodes_len != 0 and (req.nodes == null or req.out_node_keys == null)) return .INVALID_ARGUMENT;
@@ -2943,10 +2943,22 @@ pub fn zova_graph_build_fresh_keyed(request: ?*const zova_graph_build_fresh_keye
     defer allocator.free(node_keys);
     const edge_keys = allocator.alloc(i64, edges.len) catch |err| return failDb(handle, err);
     defer allocator.free(edge_keys);
-    handle.db.buildFreshGraphKeyed(std.mem.span(graph_name), nodes, edges, node_keys, edge_keys) catch |err| return failDb(handle, err);
+    if (prepared) {
+        handle.db.buildFreshGraphPreparedKeyed(std.mem.span(graph_name), nodes, edges, node_keys, edge_keys) catch |err| return failDb(handle, err);
+    } else {
+        handle.db.buildFreshGraphKeyed(std.mem.span(graph_name), nodes, edges, node_keys, edge_keys) catch |err| return failDb(handle, err);
+    }
     if (node_keys.len != 0) @memcpy(req.out_node_keys.?[0..node_keys.len], node_keys);
     if (edge_keys.len != 0) @memcpy(req.out_edge_keys.?[0..edge_keys.len], edge_keys);
     return okDb(handle);
+}
+
+pub fn zova_graph_build_fresh_keyed(request: ?*const zova_graph_build_fresh_keyed_request) callconv(.c) zova_status {
+    return graphBuildFreshKeyed(request, false);
+}
+
+pub fn zova_graph_build_fresh_prepared_keyed(request: ?*const zova_graph_build_fresh_keyed_request) callconv(.c) zova_status {
+    return graphBuildFreshKeyed(request, true);
 }
 
 pub fn zova_graph_node_get(request: ?*const zova_graph_node_get_request) callconv(.c) zova_status {
@@ -4985,6 +4997,7 @@ test "c abi validates null pointers" {
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_node_put_many(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_node_put_many_keyed(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_build_fresh_keyed(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_build_fresh_prepared_keyed(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_node_get(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_node_exists(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_node_delete(null));
@@ -8079,6 +8092,40 @@ test "c abi fresh graph build returns aligned keys and rejects partial output" {
         .out_edge_keys = &edge_keys,
         .out_edge_keys_capacity = edge_keys.len,
     }));
+}
+
+test "c abi prepared fresh graph build returns deterministic aligned keys" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/prepared-fresh-build.zova", .{tmp.sub_path[0..]});
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{ .path = path, .out_db = &db, .out_error_message = null }));
+    defer _ = zova_database_close(db);
+
+    const nodes = [_]zova_graph_fresh_node_input{
+        .{ .node_id = "a", .kind = "node", .target_type = 0, .target_namespace = null, .target_ref = null },
+        .{ .node_id = "b", .kind = "node", .target_type = 0, .target_namespace = null, .target_ref = null },
+    };
+    const edges = [_]zova_graph_fresh_edge_input{
+        .{ .from_node_ordinal = 0, .edge_type = "links", .to_node_ordinal = 1 },
+    };
+    var node_keys = [_]i64{ 71, 72 };
+    var edge_keys = [_]i64{81};
+    try std.testing.expectEqual(zova_status.OK, zova_graph_build_fresh_prepared_keyed(&.{
+        .db = db,
+        .graph_name = "app",
+        .nodes = &nodes,
+        .nodes_len = nodes.len,
+        .edges = &edges,
+        .edges_len = edges.len,
+        .out_node_keys = &node_keys,
+        .out_node_keys_capacity = node_keys.len,
+        .out_edge_keys = &edge_keys,
+        .out_edge_keys_capacity = edge_keys.len,
+    }));
+    try std.testing.expectEqualSlices(i64, &.{ 1, 2 }, &node_keys);
+    try std.testing.expectEqualSlices(i64, &.{1}, &edge_keys);
 }
 
 test "c abi manages bundled extension lifecycle" {

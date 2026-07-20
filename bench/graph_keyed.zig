@@ -221,8 +221,9 @@ fn runSample(
 }
 
 const FreshBuildSample = struct { total_ms: f64, profile: zova.FreshGraphBuildProfile };
+const FreshBuildVariant = enum { normal, prepared };
 
-fn runFreshBuildSample(allocator: std.mem.Allocator, fixture: Fixture, label: []const u8, ordinal: usize) !FreshBuildSample {
+fn runFreshBuildSample(allocator: std.mem.Allocator, fixture: Fixture, label: []const u8, ordinal: usize, variant: FreshBuildVariant) !FreshBuildSample {
     if (fixture.graph_names.len != 1) return error.InvalidFixture;
     const graph_name = fixture.graph_names[0];
     const nodes = try allocator.alloc(zova.FreshGraphNodeInput, fixture.nodes.len);
@@ -253,7 +254,10 @@ fn runFreshBuildSample(allocator: std.mem.Allocator, fixture: Fixture, label: []
     defer db.deinit();
     var profile: zova.FreshGraphBuildProfile = .{};
     const start = now();
-    try db.buildFreshGraphKeyedProfiled(graph_name, nodes, edges, node_keys, edge_keys, &profile);
+    switch (variant) {
+        .normal => try db.buildFreshGraphKeyedProfiled(graph_name, nodes, edges, node_keys, edge_keys, &profile),
+        .prepared => try db.buildFreshGraphPreparedKeyedProfiled(graph_name, nodes, edges, node_keys, edge_keys, &profile),
+    }
     return .{ .total_ms = elapsedMs(start), .profile = profile };
 }
 
@@ -417,14 +421,18 @@ pub fn main(init: std.process.Init) !void {
     const label = args[2];
     const fixture = try loadFixture(allocator, source_path);
     std.debug.print("fixture={s} nodes={d} edges={d}\n", .{ label, fixture.nodes.len, fixture.edges.len });
-    _ = try runFreshBuildSample(allocator, fixture, label, 1000);
+    _ = try runFreshBuildSample(allocator, fixture, label, 1000, .normal);
+    _ = try runFreshBuildSample(allocator, fixture, label, 1001, .prepared);
     var fresh_build_samples: [measured_runs]f64 = undefined;
-    for (&fresh_build_samples, 0..) |*sample, index| {
-        const result = try runFreshBuildSample(allocator, fixture, label, index);
-        sample.* = result.total_ms;
-        std.debug.print("fresh_build_sample index={d} total_ms={d:.6} validation_ms={d:.6} index_drop_ms={d:.6} metadata_ms={d:.6} nodes_ms={d:.6} edges_ms={d:.6} indexes_ms={d:.6}\n", .{ index + 1, result.total_ms, result.profile.validation_ms, result.profile.index_drop_ms, result.profile.graph_and_types_ms, result.profile.node_load_ms, result.profile.edge_load_ms, result.profile.index_build_ms });
+    var prepared_build_samples: [measured_runs]f64 = undefined;
+    for (&fresh_build_samples, &prepared_build_samples, 0..) |*normal_sample, *prepared_sample, index| {
+        const normal = try runFreshBuildSample(allocator, fixture, label, index * 2, .normal);
+        const prepared = try runFreshBuildSample(allocator, fixture, label, index * 2 + 1, .prepared);
+        normal_sample.* = normal.total_ms;
+        prepared_sample.* = prepared.total_ms;
+        std.debug.print("fresh_build_sample index={d} normal_ms={d:.6} prepared_ms={d:.6} validation_ms={d:.6} key_generation_ms={d:.6} index_drop_ms={d:.6} metadata_ms={d:.6} nodes_ms={d:.6} edges_ms={d:.6} indexes_ms={d:.6}\n", .{ index + 1, normal.total_ms, prepared.total_ms, prepared.profile.validation_ms, prepared.profile.key_generation_ms, prepared.profile.index_drop_ms, prepared.profile.graph_and_types_ms, prepared.profile.node_load_ms, prepared.profile.edge_load_ms, prepared.profile.index_build_ms });
     }
-    std.debug.print("fresh_build_summary median_ms={d:.6} mad_ms={d:.6}\n", .{ median(&fresh_build_samples), mad(&fresh_build_samples) });
+    std.debug.print("fresh_build_summary normal_median_ms={d:.6} normal_mad_ms={d:.6} prepared_median_ms={d:.6} prepared_mad_ms={d:.6} ratio={d:.6}\n", .{ median(&fresh_build_samples), mad(&fresh_build_samples), median(&prepared_build_samples), mad(&prepared_build_samples), median(&prepared_build_samples) / median(&fresh_build_samples) });
     try runKeyedReadBenchmark(allocator, fixture, label);
 
     _ = try runSample(allocator, fixture, .current, label, 1000);

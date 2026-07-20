@@ -710,6 +710,10 @@ export fn zova_graph_build_fresh_keyed(request: ?*const zova_graph_build_fresh_k
     return internal.zova_graph_build_fresh_keyed(request);
 }
 
+export fn zova_graph_build_fresh_prepared_keyed(request: ?*const zova_graph_build_fresh_keyed_request) callconv(.c) zova_status {
+    return internal.zova_graph_build_fresh_prepared_keyed(request);
+}
+
 export fn zova_graph_node_get(request: ?*const zova_graph_node_get_request) callconv(.c) zova_status {
     return internal.zova_graph_node_get(request);
 }

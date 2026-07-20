@@ -979,6 +979,45 @@ pub const Database = struct {
         @memcpy(out_edge_keys, temporary_edge_keys);
     }
 
+    /// Build trusted, final-order graph input atomically without normalization.
+    pub fn buildFreshGraphPreparedKeyed(
+        self: *Database,
+        graph_name: []const u8,
+        nodes: []const FreshGraphNodeInput,
+        edges: []const FreshGraphEdgeInput,
+        out_node_keys: []i64,
+        out_edge_keys: []i64,
+    ) Error!void {
+        return self.buildFreshGraphPreparedKeyedProfiled(graph_name, nodes, edges, out_node_keys, out_edge_keys, null);
+    }
+
+    pub fn buildFreshGraphPreparedKeyedProfiled(
+        self: *Database,
+        graph_name: []const u8,
+        nodes: []const FreshGraphNodeInput,
+        edges: []const FreshGraphEdgeInput,
+        out_node_keys: []i64,
+        out_edge_keys: []i64,
+        profile: ?*FreshGraphBuildProfile,
+    ) Error!void {
+        self.invalidateActiveGraphEdgeTypes();
+        if (out_node_keys.len != nodes.len or out_edge_keys.len != edges.len) return error.InvalidArgument;
+        const temporary_node_keys = try std.heap.c_allocator.alloc(i64, nodes.len);
+        defer std.heap.c_allocator.free(temporary_node_keys);
+        const temporary_edge_keys = try std.heap.c_allocator.alloc(i64, edges.len);
+        defer std.heap.c_allocator.free(temporary_edge_keys);
+        const scope = try self.beginGraphKeyedMutation();
+        var finished = false;
+        errdefer if (!finished) self.rollbackGraphKeyedMutation(scope) catch {};
+        var graphs = self.graphDatabase();
+        try graphs.buildFreshGraphPreparedKeyedProfiled(graph_name, nodes, edges, temporary_node_keys, temporary_edge_keys, profile);
+        if (self.bound_graph_store != null) try incrementBoundGraphEpoch(&self.sqlite_db);
+        try self.finishGraphKeyedMutation(scope);
+        finished = true;
+        @memcpy(out_node_keys, temporary_node_keys);
+        @memcpy(out_edge_keys, temporary_edge_keys);
+    }
+
     /// Return an owned graph node.
     pub fn getGraphNode(self: *Database, allocator: std.mem.Allocator, graph_name: []const u8, node_id: []const u8) Error!GraphNode {
         var graphs = self.graphDatabase();
@@ -2327,6 +2366,7 @@ fn initializeGraphSchema(db: *sqlite.Database) sqlite.Error!void {
     try db.exec(graph_impl.graph_nodes_schema_sql ++ ";");
     try db.exec(graph_impl.graph_edge_types_schema_sql ++ ";");
     try db.exec(graph_impl.graph_edges_schema_sql ++ ";");
+    try db.exec(graph_impl.graph_edges_topology_index_sql ++ ";");
     try db.exec(graph_impl.graph_nodes_created_order_index_sql ++ ";");
     try db.exec(graph_impl.graph_edges_created_order_index_sql ++ ";");
     try db.exec(graph_impl.graph_edges_from_node_index_sql ++ ";");

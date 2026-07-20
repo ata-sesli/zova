@@ -1713,6 +1713,7 @@ static void run_dynamic_extension_bundle_smoke(
 
 int main(int argc, char **argv) {
     expect_status(zova_graph_build_fresh_keyed(NULL), ZOVA_INVALID_ARGUMENT, "fresh graph null request");
+    expect_status(zova_graph_build_fresh_prepared_keyed(NULL), ZOVA_INVALID_ARGUMENT, "prepared fresh graph null request");
     if (argc != 2 && argc != 5) {
         fprintf(stderr, "usage: %s <db-path> [dynamic-library bundle-path trust-store-path]\n", argv[0]);
         return 2;

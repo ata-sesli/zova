@@ -1583,6 +1583,10 @@ zova_status zova_graph_node_put(const zova_graph_node_put_request *request);
 zova_status zova_graph_node_put_many(const zova_graph_node_put_many_request *request);
 zova_status zova_graph_node_put_many_keyed(const zova_graph_node_put_many_keyed_request *request);
 zova_status zova_graph_build_fresh_keyed(const zova_graph_build_fresh_keyed_request *request);
+/* Trusted single-graph build: nodes are final-order unique rows and edges are
+ * final-order, deduplicated ordinal topology. Contract violations fail
+ * atomically; input-aligned opaque keys are published only on success. */
+zova_status zova_graph_build_fresh_prepared_keyed(const zova_graph_build_fresh_keyed_request *request);
 zova_status zova_graph_node_get(const zova_graph_node_get_request *request);
 zova_status zova_graph_node_exists(const zova_graph_node_exists_request *request);
 zova_status zova_graph_node_delete(const zova_graph_node_delete_request *request);

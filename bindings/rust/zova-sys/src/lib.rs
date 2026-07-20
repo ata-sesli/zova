@@ -1589,6 +1589,10 @@ extern "C" {
     pub fn zova_graph_build_fresh_keyed(
         request: *const zova_graph_build_fresh_keyed_request,
     ) -> zova_status;
+    /// Trusted final-order, deduplicated ordinal-topology build.
+    pub fn zova_graph_build_fresh_prepared_keyed(
+        request: *const zova_graph_build_fresh_keyed_request,
+    ) -> zova_status;
     pub fn zova_graph_node_get(request: *const zova_graph_node_get_request) -> zova_status;
     pub fn zova_graph_node_exists(request: *const zova_graph_node_exists_request) -> zova_status;
     pub fn zova_graph_node_delete(request: *const zova_graph_node_delete_request) -> zova_status;

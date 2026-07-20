@@ -219,6 +219,8 @@ int main() {
     fresh_build_request.nodes_len = 1;
     fresh_build_request.edges = &fresh_edge_input;
     fresh_build_request.edges_len = 1;
+    const auto prepared_fresh_build = &zova_graph_build_fresh_prepared_keyed;
+    (void)prepared_fresh_build;
     zova_graph_node_delete_many_request graph_node_delete_many_request = {};
     graph_node_delete_many_request.graph_name = "app";
     graph_node_delete_many_request.node_ids = nullptr;

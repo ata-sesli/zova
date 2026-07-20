@@ -7,7 +7,7 @@ const measured_runs = 7;
 const graph_name = "deno-shaped";
 const edge_types = [_][]const u8{ "calls", "imports", "defines", "tests", "contains", "reads", "writes", "exports", "extends", "implements", "references", "uses", "owns", "returns", "accepts", "documents", "related" };
 
-const Variant = enum { incremental, fresh };
+const Variant = enum { incremental, fresh, prepared };
 const Fixture = struct {
     nodes: []zova.GraphNodeInput,
     fresh_nodes: []zova.FreshGraphNodeInput,
@@ -92,6 +92,7 @@ fn runSample(allocator: std.mem.Allocator, fixture: Fixture, variant: Variant, o
             try db.putGraphEdgesKeyed(fixture.edges, edge_keys);
         },
         .fresh => try db.buildFreshGraphKeyedProfiled(graph_name, fixture.fresh_nodes, fixture.fresh_edges, node_keys, edge_keys, &profile),
+        .prepared => try db.buildFreshGraphPreparedKeyedProfiled(graph_name, fixture.fresh_nodes, fixture.fresh_edges, node_keys, edge_keys, &profile),
     }
     const result: Sample = .{ .total_ms = elapsedMs(start), .storage_bytes = try storageBytes(&db), .profile = profile };
     if (report_dbstat) try reportDbstat(&db);
@@ -110,25 +111,37 @@ pub fn main(init: std.process.Init) !void {
     }
     _ = try runSample(allocator, fixture, .incremental, 1000, false);
     _ = try runSample(allocator, fixture, .fresh, 1001, false);
-    const order = [_]Variant{ .incremental, .fresh, .fresh, .incremental, .incremental, .fresh, .fresh, .incremental, .incremental, .fresh, .fresh, .incremental, .incremental, .fresh };
+    _ = try runSample(allocator, fixture, .prepared, 1002, false);
+    const order = [_]Variant{ .incremental, .fresh, .prepared, .prepared, .fresh, .incremental, .incremental, .prepared, .fresh, .fresh, .prepared, .incremental, .incremental, .fresh, .prepared, .prepared, .fresh, .incremental, .incremental, .prepared, .fresh };
     var incremental: [measured_runs]f64 = undefined;
     var fresh: [measured_runs]f64 = undefined;
+    var prepared: [measured_runs]f64 = undefined;
     var incremental_len: usize = 0;
     var fresh_len: usize = 0;
+    var prepared_len: usize = 0;
     for (order, 0..) |variant, ordinal| {
         const sample = try runSample(allocator, fixture, variant, ordinal, false);
-        const index = if (variant == .incremental) index: {
-            defer incremental_len += 1;
-            incremental[incremental_len] = sample.total_ms;
-            break :index incremental_len;
-        } else index: {
-            defer fresh_len += 1;
-            fresh[fresh_len] = sample.total_ms;
-            break :index fresh_len;
+        const index = switch (variant) {
+            .incremental => index: {
+                defer incremental_len += 1;
+                incremental[incremental_len] = sample.total_ms;
+                break :index incremental_len;
+            },
+            .fresh => index: {
+                defer fresh_len += 1;
+                fresh[fresh_len] = sample.total_ms;
+                break :index fresh_len;
+            },
+            .prepared => index: {
+                defer prepared_len += 1;
+                prepared[prepared_len] = sample.total_ms;
+                break :index prepared_len;
+            },
         };
-        std.debug.print("sample variant={s} index={d} total_ms={d:.3} storage_bytes={d} validation_ms={d:.3} nodes_ms={d:.3} edges_ms={d:.3} indexes_ms={d:.3}\n", .{ @tagName(variant), index + 1, sample.total_ms, sample.storage_bytes, sample.profile.validation_ms, sample.profile.node_load_ms, sample.profile.edge_load_ms, sample.profile.index_build_ms });
+        std.debug.print("sample variant={s} index={d} total_ms={d:.3} storage_bytes={d} validation_ms={d:.3} key_generation_ms={d:.3} nodes_ms={d:.3} edges_ms={d:.3} indexes_ms={d:.3}\n", .{ @tagName(variant), index + 1, sample.total_ms, sample.storage_bytes, sample.profile.validation_ms, sample.profile.key_generation_ms, sample.profile.node_load_ms, sample.profile.edge_load_ms, sample.profile.index_build_ms });
     }
     const incremental_median = median(&incremental);
     const fresh_median = median(&fresh);
-    std.debug.print("summary incremental_median_ms={d:.3} incremental_mad_ms={d:.3} fresh_median_ms={d:.3} fresh_mad_ms={d:.3} ratio={d:.6}\n", .{ incremental_median, mad(&incremental), fresh_median, mad(&fresh), fresh_median / incremental_median });
+    const prepared_median = median(&prepared);
+    std.debug.print("summary incremental_median_ms={d:.3} incremental_mad_ms={d:.3} fresh_median_ms={d:.3} fresh_mad_ms={d:.3} prepared_median_ms={d:.3} prepared_mad_ms={d:.3} prepared_vs_fresh={d:.6}\n", .{ incremental_median, mad(&incremental), fresh_median, mad(&fresh), prepared_median, mad(&prepared), prepared_median / fresh_median });
 }

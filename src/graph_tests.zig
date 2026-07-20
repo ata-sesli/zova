@@ -26,6 +26,17 @@ fn schemaIndexExists(db: *sqlite.Database, index_name: []const u8) !bool {
     return stmt.columnInt64(0) == 1;
 }
 
+fn expectIndexColumns(db: *sqlite.Database, index_name: []const u8, expected: []const []const u8) !void {
+    var stmt = try db.prepare("select name from pragma_index_info(?) order by seqno");
+    defer stmt.deinit();
+    try stmt.bindText(1, index_name);
+    for (expected) |column| {
+        try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+        try std.testing.expectEqualStrings(column, stmt.columnText(0));
+    }
+    try std.testing.expectEqual(sqlite.Step.done, try stmt.step());
+}
+
 fn expectQueryPlanUsesIndex(db: *sqlite.Database, sql: [:0]const u8, index_name: []const u8) !void {
     var stmt = try db.prepare(sql);
     defer stmt.deinit();
@@ -149,6 +160,7 @@ test "graph v9 schema interns edge types behind integer keys" {
 
     const expected_indexes = [_][]const u8{
         "_zova_graph_nodes_created_order_idx",
+        "_zova_graph_edges_topology_idx",
         "_zova_graph_edges_created_order_idx",
         "_zova_graph_edges_from_node_idx",
         "_zova_graph_edges_from_node_type_idx",
@@ -156,6 +168,11 @@ test "graph v9 schema interns edge types behind integer keys" {
         "_zova_graph_edges_to_node_type_idx",
     };
     for (expected_indexes) |index_name| try std.testing.expect(try schemaIndexExists(&db.sqlite_db, index_name));
+    try expectIndexColumns(&db.sqlite_db, "_zova_graph_edges_topology_idx", &.{ "from_node_key", "edge_type_key", "to_node_key" });
+    try expectIndexColumns(&db.sqlite_db, "_zova_graph_edges_from_node_idx", &.{ "graph_key", "from_node_key", "created_order", "to_node_key" });
+    try expectIndexColumns(&db.sqlite_db, "_zova_graph_edges_from_node_type_idx", &.{ "graph_key", "from_node_key", "edge_type_key", "created_order", "to_node_key" });
+    try expectIndexColumns(&db.sqlite_db, "_zova_graph_edges_to_node_idx", &.{ "graph_key", "to_node_key", "created_order", "from_node_key" });
+    try expectIndexColumns(&db.sqlite_db, "_zova_graph_edges_to_node_type_idx", &.{ "graph_key", "to_node_key", "edge_type_key", "created_order", "from_node_key" });
 
     var foreign_keys = try db.prepare("pragma foreign_keys");
     defer foreign_keys.deinit();
@@ -378,6 +395,133 @@ test "fresh keyed graph build deduplicates before mutation and is atomic" {
     try std.testing.expectEqualSlices(i64, &.{93}, &rejected_edge_keys);
 }
 
+test "prepared fresh keyed graph build preserves input keys and rejects invalid topology atomically" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "prepared-fresh-keyed-build.zova");
+    var db = try zova.Database.create(path);
+    defer db.deinit();
+
+    const nodes = [_]zova.FreshGraphNodeInput{
+        .{ .node_id = "a", .kind = "node" },
+        .{ .node_id = "b", .kind = "node" },
+        .{ .node_id = "c", .kind = "node" },
+    };
+    const edges = [_]zova.FreshGraphEdgeInput{
+        .{ .from_node_ordinal = 0, .edge_type = "calls", .to_node_ordinal = 1 },
+        .{ .from_node_ordinal = 1, .edge_type = "calls", .to_node_ordinal = 2 },
+    };
+    var node_keys: [nodes.len]i64 = undefined;
+    var edge_keys: [edges.len]i64 = undefined;
+    var profile: zova.FreshGraphBuildProfile = .{};
+    try db.buildFreshGraphPreparedKeyedProfiled("app", &nodes, &edges, &node_keys, &edge_keys, &profile);
+    try std.testing.expectEqualSlices(i64, &.{ 1, 2, 3 }, &node_keys);
+    try std.testing.expectEqualSlices(i64, &.{ 1, 2 }, &edge_keys);
+    try std.testing.expect(profile.validation_ms >= 0);
+    try std.testing.expect(profile.key_generation_ms >= 0);
+
+    var scan = try db.graphScan(std.testing.allocator, .{ .graph_name = "app", .node_limit = 10, .edge_limit = 10 });
+    defer scan.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 3), scan.nodes.len);
+    try std.testing.expectEqual(@as(usize, 2), scan.edges.len);
+
+    var invalid_db_path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const invalid_db_path = try testingDbPath(&invalid_db_path_buffer, tmp.sub_path[0..], "prepared-invalid-ordinal.zova");
+    var invalid_db = try zova.Database.create(invalid_db_path);
+    defer invalid_db.deinit();
+    var rejected_node_keys = [_]i64{ 41, 42 };
+    var rejected_edge_keys = [_]i64{43};
+    try std.testing.expectError(error.InvalidArgument, invalid_db.buildFreshGraphPreparedKeyed(
+        "app",
+        &.{ .{ .node_id = "a", .kind = "node" }, .{ .node_id = "b", .kind = "node" } },
+        &.{.{ .from_node_ordinal = 0, .edge_type = "calls", .to_node_ordinal = 2 }},
+        &rejected_node_keys,
+        &rejected_edge_keys,
+    ));
+    try std.testing.expectEqualSlices(i64, &.{ 41, 42 }, &rejected_node_keys);
+    try std.testing.expectEqualSlices(i64, &.{43}, &rejected_edge_keys);
+    try std.testing.expect(!(try invalid_db.hasGraph("app")));
+}
+
+test "prepared fresh keyed graph build rejects duplicate trusted input and rolls back caller work" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "prepared-fresh-duplicates.zova");
+    var db = try zova.Database.create(path);
+    defer db.deinit();
+
+    try db.beginImmediate();
+    var node_keys = [_]i64{ 11, 12 };
+    var edge_keys = [_]i64{ 13, 14 };
+    try std.testing.expectError(error.Constraint, db.buildFreshGraphPreparedKeyed(
+        "app",
+        &.{ .{ .node_id = "a", .kind = "node" }, .{ .node_id = "b", .kind = "node" } },
+        &.{
+            .{ .from_node_ordinal = 0, .edge_type = "calls", .to_node_ordinal = 1 },
+            .{ .from_node_ordinal = 0, .edge_type = "calls", .to_node_ordinal = 1 },
+        },
+        &node_keys,
+        &edge_keys,
+    ));
+    try std.testing.expectEqualSlices(i64, &.{ 11, 12 }, &node_keys);
+    try std.testing.expectEqualSlices(i64, &.{ 13, 14 }, &edge_keys);
+    try std.testing.expect(!(try db.hasGraph("app")));
+    try db.rollback();
+}
+
+test "prepared and untrusted fresh builds have identical public topology and keys" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var normal_path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const normal_path = try testingDbPath(&normal_path_buffer, tmp.sub_path[0..], "fresh-parity-normal.zova");
+    var prepared_path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const prepared_path = try testingDbPath(&prepared_path_buffer, tmp.sub_path[0..], "fresh-parity-prepared.zova");
+    var normal = try zova.Database.create(normal_path);
+    defer normal.deinit();
+    var prepared = try zova.Database.create(prepared_path);
+    defer prepared.deinit();
+
+    const nodes = [_]zova.FreshGraphNodeInput{
+        .{ .node_id = "a", .kind = "root" },
+        .{ .node_id = "b", .kind = "leaf" },
+        .{ .node_id = "c", .kind = "leaf" },
+    };
+    const edges = [_]zova.FreshGraphEdgeInput{
+        .{ .from_node_ordinal = 0, .edge_type = "calls", .to_node_ordinal = 1 },
+        .{ .from_node_ordinal = 0, .edge_type = "imports", .to_node_ordinal = 2 },
+    };
+    var normal_node_keys: [nodes.len]i64 = undefined;
+    var normal_edge_keys: [edges.len]i64 = undefined;
+    var prepared_node_keys: [nodes.len]i64 = undefined;
+    var prepared_edge_keys: [edges.len]i64 = undefined;
+    try normal.buildFreshGraphKeyed("app", &nodes, &edges, &normal_node_keys, &normal_edge_keys);
+    try prepared.buildFreshGraphPreparedKeyed("app", &nodes, &edges, &prepared_node_keys, &prepared_edge_keys);
+    try std.testing.expectEqualSlices(i64, &normal_node_keys, &prepared_node_keys);
+    try std.testing.expectEqualSlices(i64, &normal_edge_keys, &prepared_edge_keys);
+
+    var normal_scan = try normal.graphScan(std.testing.allocator, .{ .graph_name = "app", .node_limit = 10, .edge_limit = 10 });
+    defer normal_scan.deinit(std.testing.allocator);
+    var prepared_scan = try prepared.graphScan(std.testing.allocator, .{ .graph_name = "app", .node_limit = 10, .edge_limit = 10 });
+    defer prepared_scan.deinit(std.testing.allocator);
+    try std.testing.expectEqual(normal_scan.nodes.len, prepared_scan.nodes.len);
+    try std.testing.expectEqual(normal_scan.edges.len, prepared_scan.edges.len);
+    for (normal_scan.nodes, prepared_scan.nodes) |left, right| {
+        try std.testing.expectEqual(left.node_key, right.node_key);
+        try std.testing.expectEqual(left.created_order, right.created_order);
+        try std.testing.expectEqualStrings(left.node_id, right.node_id);
+        try std.testing.expectEqualStrings(left.kind, right.kind);
+    }
+    for (normal_scan.edges, prepared_scan.edges) |left, right| {
+        try std.testing.expectEqual(left.edge_key, right.edge_key);
+        try std.testing.expectEqual(left.source_node_key, right.source_node_key);
+        try std.testing.expectEqual(left.target_node_key, right.target_node_key);
+        try std.testing.expectEqual(left.created_order, right.created_order);
+        try std.testing.expectEqualStrings(left.edge_type, right.edge_type);
+    }
+}
+
 test "fresh keyed graph build restores rows indexes and outputs on SQL failure" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -409,7 +553,7 @@ test "fresh keyed graph build restores rows indexes and outputs on SQL failure" 
     defer state.deinit();
     try std.testing.expectEqual(sqlite.Step.row, try state.step());
     try std.testing.expectEqual(@as(i64, 0), state.columnInt64(0));
-    try std.testing.expectEqual(@as(i64, 6), state.columnInt64(1));
+    try std.testing.expectEqual(@as(i64, 7), state.columnInt64(1));
 }
 
 test "fresh keyed graph build joins and rolls back a caller transaction" {
