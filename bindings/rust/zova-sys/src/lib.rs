@@ -1233,6 +1233,8 @@ pub struct zova_graph_build_fresh_prepared_keyed_with_payloads_request {
     pub nodes_len: usize,
     pub edges: *const zova_graph_fresh_edge_payload_input,
     pub edges_len: usize,
+    /// Optional immediate output. Keys are invalid if the build is aborted or
+    /// `zova_fresh_build_finish` fails.
     pub out_node_keys: *mut i64,
     pub out_node_keys_capacity: usize,
     pub out_edge_keys: *mut i64,
@@ -1414,6 +1416,10 @@ pub struct zova_fresh_build_graph_request {
     pub nodes_len: usize,
     pub edges: *const zova_graph_fresh_edge_payload_input,
     pub edges_len: usize,
+    pub out_node_keys: *mut i64,
+    pub out_node_keys_capacity: usize,
+    pub out_edge_keys: *mut i64,
+    pub out_edge_keys_capacity: usize,
 }
 #[repr(C)]
 pub struct zova_fresh_build_vectors_request {

@@ -1430,6 +1430,14 @@ typedef struct zova_fresh_build_graph_request {
     size_t nodes_len;
     const zova_graph_fresh_edge_payload_input *edges;
     size_t edges_len;
+    /*
+     * Optional immediate outputs. Keys remain provisional until finish succeeds;
+     * abort or a failed finish invalidates every key returned here.
+     */
+    int64_t *out_node_keys;
+    size_t out_node_keys_capacity;
+    int64_t *out_edge_keys;
+    size_t out_edge_keys_capacity;
 } zova_fresh_build_graph_request;
 
 typedef struct zova_fresh_build_vectors_request {

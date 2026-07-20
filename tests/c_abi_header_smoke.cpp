@@ -298,6 +298,13 @@ int main() {
     fresh_rows_request.values = &fresh_value;
     fresh_rows_request.row_count = 1;
     zova_fresh_build_profile fresh_profile = {};
+    zova_fresh_build_graph_request fresh_graph_request = {};
+    int64_t provisional_node_key = 0;
+    int64_t provisional_edge_key = 0;
+    fresh_graph_request.out_node_keys = &provisional_node_key;
+    fresh_graph_request.out_node_keys_capacity = 1;
+    fresh_graph_request.out_edge_keys = &provisional_edge_key;
+    fresh_graph_request.out_edge_keys_capacity = 1;
     zova_fresh_build_finish_request fresh_finish_request = {};
     fresh_finish_request.out_profile = &fresh_profile;
     const auto fresh_table_rows = &zova_fresh_build_table_rows;

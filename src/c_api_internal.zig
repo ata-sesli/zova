@@ -1407,6 +1407,10 @@ pub const zova_fresh_build_graph_request = extern struct {
     nodes_len: usize,
     edges: ?[*]const zova_graph_fresh_edge_payload_input,
     edges_len: usize,
+    out_node_keys: ?[*]i64,
+    out_node_keys_capacity: usize,
+    out_edge_keys: ?[*]i64,
+    out_edge_keys_capacity: usize,
 };
 
 pub const zova_fresh_build_vectors_request = extern struct {
@@ -3248,6 +3252,14 @@ pub fn zova_fresh_build_graph(request: ?*const zova_fresh_build_graph_request) c
     const database = build.database;
     database.mutex.lock();
     defer database.mutex.unlock();
+    if ((req.out_node_keys == null and req.out_node_keys_capacity != 0) or
+        (req.out_node_keys != null and req.out_node_keys_capacity < req.nodes_len) or
+        (req.out_edge_keys == null and req.out_edge_keys_capacity != 0) or
+        (req.out_edge_keys != null and req.out_edge_keys_capacity < req.edges_len))
+    {
+        freshBuildRollback(build);
+        return failDb(database, error.InvalidArgument);
+    }
     if (build.graph_loaded) {
         freshBuildRollback(build);
         return failDb(database, error.InvalidArgument);
@@ -3287,6 +3299,8 @@ pub fn zova_fresh_build_graph(request: ?*const zova_fresh_build_graph_request) c
     build.profile.index_build_ms += profile.index_build_ms;
     build.profile.payload_bytes = profile.payload_bytes;
     build.graph_loaded = true;
+    if (req.out_node_keys) |out| @memcpy(out[0..build.node_keys.len], build.node_keys);
+    if (req.out_edge_keys) |out| @memcpy(out[0..build.edge_keys.len], build.edge_keys);
     return okDb(database);
 }
 
@@ -8783,7 +8797,7 @@ test "c abi fresh builder loads predeclared tables fts graph payloads and vector
     try std.testing.expectEqual(zova_status.OK, zova_database_begin(&.{ .db = db }));
     try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{
         .db = db,
-        .sql = "create table records(id integer primary key,body text not null); create index records_body_idx on records(body); create virtual table records_fts using fts5(body)",
+        .sql = "create table records(id integer primary key,body text not null); create index records_body_idx on records(body); create virtual table records_fts using fts5(body); create table topology_refs(node_key integer not null,edge_key integer not null); create virtual table topology_fts using fts5(node_key unindexed,body)",
     }));
     try std.testing.expectEqual(zova_status.OK, zova_vector_collection_create(&.{
         .db = db,
@@ -8833,6 +8847,8 @@ test "c abi fresh builder loads predeclared tables fts graph payloads and vector
     const edges = [_]zova_graph_fresh_edge_payload_input{
         .{ .from_node_ordinal = 0, .edge_type = "links", .to_node_ordinal = 1, .payload = &payload, .payload_len = payload.len },
     };
+    var provisional_node_keys = [_]i64{ -1, -1 };
+    var provisional_edge_keys = [_]i64{-1};
     try std.testing.expectEqual(zova_status.OK, zova_fresh_build_graph(&.{
         .build = build,
         .graph_name = "app",
@@ -8840,10 +8856,44 @@ test "c abi fresh builder loads predeclared tables fts graph payloads and vector
         .nodes_len = nodes.len,
         .edges = &edges,
         .edges_len = edges.len,
+        .out_node_keys = &provisional_node_keys,
+        .out_node_keys_capacity = provisional_node_keys.len,
+        .out_edge_keys = &provisional_edge_keys,
+        .out_edge_keys_capacity = provisional_edge_keys.len,
+    }));
+    try std.testing.expectEqualSlices(i64, &.{ 1, 2 }, &provisional_node_keys);
+    try std.testing.expectEqualSlices(i64, &.{1}, &provisional_edge_keys);
+    const topology_columns = [_]?[*:0]const u8{ "node_key", "edge_key" };
+    const topology_values = [_]zova_fresh_value{
+        .{ .value_type = 1, .int64_value = provisional_node_keys[1], .float64_value = 0, .bytes = null, .bytes_len = 0 },
+        .{ .value_type = 1, .int64_value = provisional_edge_keys[0], .float64_value = 0, .bytes = null, .bytes_len = 0 },
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_fresh_build_table_rows(&.{
+        .build = build,
+        .table_name = "topology_refs",
+        .column_names = &topology_columns,
+        .column_count = topology_columns.len,
+        .values = &topology_values,
+        .row_count = 1,
+    }));
+    const topology_fts_columns = [_]?[*:0]const u8{ "node_key", "body" };
+    const topology_fts_values = [_]zova_fresh_value{
+        .{ .value_type = 1, .int64_value = provisional_node_keys[0], .float64_value = 0, .bytes = null, .bytes_len = 0 },
+        .{ .value_type = 3, .int64_value = 0, .float64_value = 0, .bytes = "linked", .bytes_len = 6 },
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_fresh_build_fts_rows(&.{
+        .build = build,
+        .table_name = "topology_fts",
+        .column_names = &topology_fts_columns,
+        .column_count = topology_fts_columns.len,
+        .values = &topology_fts_values,
+        .row_count = 1,
     }));
     const vector_values = [_]i8{ 3, 4 };
+    var vector_id_buffer: [32]u8 = undefined;
+    const vector_id = try std.fmt.bufPrintZ(&vector_id_buffer, "edge:{d}", .{provisional_edge_keys[0]});
     const vectors = [_]zova_vector_input{.{
-        .id = "v1",
+        .id = vector_id,
         .values = .{ .element_type = 2, .f32_values = null, .f16_values = null, .i8_values = &vector_values, .values_len = vector_values.len },
     }};
     try std.testing.expectEqual(zova_status.OK, zova_fresh_build_vectors(&.{ .build = build, .collection_name = "embedding", .vectors = &vectors, .vectors_len = 1 }));
@@ -8861,8 +8911,8 @@ test "c abi fresh builder loads predeclared tables fts graph payloads and vector
     }));
     try std.testing.expectEqualSlices(i64, &.{ 1, 2 }, &node_keys);
     try std.testing.expectEqualSlices(i64, &.{1}, &edge_keys);
-    try std.testing.expectEqual(@as(u64, 2), profile.table_rows);
-    try std.testing.expectEqual(@as(u64, 2), profile.fts_rows);
+    try std.testing.expectEqual(@as(u64, 3), profile.table_rows);
+    try std.testing.expectEqual(@as(u64, 3), profile.fts_rows);
     try std.testing.expectEqual(@as(u64, 1), profile.vector_rows);
     try std.testing.expectEqual(@as(u64, 4), profile.payload_bytes);
 
@@ -8876,7 +8926,19 @@ test "c abi fresh builder loads predeclared tables fts graph payloads and vector
         defer index.deinit();
         try std.testing.expectEqual(sqlite.Step.row, try index.step());
         try std.testing.expectEqual(@as(i64, 1), index.columnInt64(0));
+        var refs = try handle.db.prepare("select node_key,edge_key from topology_refs");
+        defer refs.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try refs.step());
+        try std.testing.expectEqual(provisional_node_keys[1], refs.columnInt64(0));
+        try std.testing.expectEqual(provisional_edge_keys[0], refs.columnInt64(1));
+        var fts = try handle.db.prepare("select node_key from topology_fts where topology_fts match 'linked'");
+        defer fts.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try fts.step());
+        try std.testing.expectEqual(provisional_node_keys[0], fts.columnInt64(0));
     }
+    var stored_vector: zova_vector = .{ .id = null, .id_len = 0, .element_type = 0, .f32_values = null, .f16_values = null, .i8_values = null, .values_len = 0 };
+    defer zova_vector_free(&stored_vector);
+    try std.testing.expectEqual(zova_status.OK, zova_vector_get(&.{ .db = db, .collection_name = "embedding", .vector_id = vector_id, .out_vector = &stored_vector }));
 
     var payload_results: zova_graph_edge_payload_results = .{ .items = null, .len = 0 };
     defer zova_graph_edge_payload_results_free(&payload_results);
@@ -8914,9 +8976,58 @@ test "c abi fresh builder loads predeclared tables fts graph payloads and vector
         try std.testing.expectEqual(@as(i64, 0), schema.columnInt64(0));
     }
 
+    {
+        var capacity_build: ?*zova_fresh_build = null;
+        try std.testing.expectEqual(zova_status.OK, zova_fresh_build_begin(&.{ .db = db, .out_build = &capacity_build }));
+        defer zova_fresh_build_destroy(capacity_build);
+        var capacity_node_keys = [_]i64{ 31, 32 };
+        var capacity_edge_keys = [_]i64{33};
+        try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_fresh_build_graph(&.{
+            .build = capacity_build,
+            .graph_name = "capacity-rejected",
+            .nodes = &nodes,
+            .nodes_len = nodes.len,
+            .edges = &edges,
+            .edges_len = edges.len,
+            .out_node_keys = &capacity_node_keys,
+            .out_node_keys_capacity = 1,
+            .out_edge_keys = &capacity_edge_keys,
+            .out_edge_keys_capacity = capacity_edge_keys.len,
+        }));
+        try std.testing.expectEqualSlices(i64, &.{ 31, 32 }, &capacity_node_keys);
+        try std.testing.expectEqualSlices(i64, &.{33}, &capacity_edge_keys);
+        try std.testing.expect(!(try handle.db.hasGraph("capacity-rejected")));
+    }
+
+    {
+        var aborted_build: ?*zova_fresh_build = null;
+        try std.testing.expectEqual(zova_status.OK, zova_fresh_build_begin(&.{ .db = db, .out_build = &aborted_build }));
+        defer zova_fresh_build_destroy(aborted_build);
+        var aborted_node_keys = [_]i64{ -1, -1 };
+        var aborted_edge_keys = [_]i64{-1};
+        try std.testing.expectEqual(zova_status.OK, zova_fresh_build_graph(&.{
+            .build = aborted_build,
+            .graph_name = "aborted",
+            .nodes = &nodes,
+            .nodes_len = nodes.len,
+            .edges = &edges,
+            .edges_len = edges.len,
+            .out_node_keys = &aborted_node_keys,
+            .out_node_keys_capacity = aborted_node_keys.len,
+            .out_edge_keys = &aborted_edge_keys,
+            .out_edge_keys_capacity = aborted_edge_keys.len,
+        }));
+        try std.testing.expectEqualSlices(i64, &.{ 1, 2 }, &aborted_node_keys);
+        try std.testing.expectEqualSlices(i64, &.{1}, &aborted_edge_keys);
+        try std.testing.expectEqual(zova_status.OK, zova_fresh_build_abort(aborted_build));
+        try std.testing.expect(!(try handle.db.hasGraph("aborted")));
+    }
+
     var rejected_build: ?*zova_fresh_build = null;
     try std.testing.expectEqual(zova_status.OK, zova_fresh_build_begin(&.{ .db = db, .out_build = &rejected_build }));
     defer zova_fresh_build_destroy(rejected_build);
+    var unchanged_node_keys = [_]i64{ 71, 72 };
+    var unchanged_edge_keys = [_]i64{73};
     try std.testing.expectEqual(zova_status.OK, zova_fresh_build_graph(&.{
         .build = rejected_build,
         .graph_name = "rejected",
@@ -8924,20 +9035,54 @@ test "c abi fresh builder loads predeclared tables fts graph payloads and vector
         .nodes_len = nodes.len,
         .edges = &edges,
         .edges_len = edges.len,
+        .out_node_keys = &unchanged_node_keys,
+        .out_node_keys_capacity = unchanged_node_keys.len,
+        .out_edge_keys = &unchanged_edge_keys,
+        .out_edge_keys_capacity = unchanged_edge_keys.len,
     }));
-    var unchanged_node_keys = [_]i64{ 71, 72 };
-    var unchanged_edge_keys = [_]i64{73};
+    try std.testing.expectEqualSlices(i64, &.{ 1, 2 }, &unchanged_node_keys);
+    try std.testing.expectEqualSlices(i64, &.{1}, &unchanged_edge_keys);
+    var finish_node_keys = [_]i64{ 71, 72 };
+    var finish_edge_keys = [_]i64{73};
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_fresh_build_finish(&.{
         .build = rejected_build,
-        .out_node_keys = &unchanged_node_keys,
+        .out_node_keys = &finish_node_keys,
         .out_node_keys_capacity = 0,
-        .out_edge_keys = &unchanged_edge_keys,
+        .out_edge_keys = &finish_edge_keys,
         .out_edge_keys_capacity = 0,
         .out_profile = null,
     }));
-    try std.testing.expectEqualSlices(i64, &.{ 71, 72 }, &unchanged_node_keys);
-    try std.testing.expectEqualSlices(i64, &.{73}, &unchanged_edge_keys);
+    try std.testing.expectEqualSlices(i64, &.{ 71, 72 }, &finish_node_keys);
+    try std.testing.expectEqualSlices(i64, &.{73}, &finish_edge_keys);
     try std.testing.expect(!(try handle.db.hasGraph("rejected")));
+
+    var finish_only_build: ?*zova_fresh_build = null;
+    try std.testing.expectEqual(zova_status.OK, zova_fresh_build_begin(&.{ .db = db, .out_build = &finish_only_build }));
+    defer zova_fresh_build_destroy(finish_only_build);
+    try std.testing.expectEqual(zova_status.OK, zova_fresh_build_graph(&.{
+        .build = finish_only_build,
+        .graph_name = "finish-only",
+        .nodes = &nodes,
+        .nodes_len = nodes.len,
+        .edges = &edges,
+        .edges_len = edges.len,
+        .out_node_keys = null,
+        .out_node_keys_capacity = 0,
+        .out_edge_keys = null,
+        .out_edge_keys_capacity = 0,
+    }));
+    var finish_only_node_keys = [_]i64{ -1, -1 };
+    var finish_only_edge_keys = [_]i64{-1};
+    try std.testing.expectEqual(zova_status.OK, zova_fresh_build_finish(&.{
+        .build = finish_only_build,
+        .out_node_keys = &finish_only_node_keys,
+        .out_node_keys_capacity = finish_only_node_keys.len,
+        .out_edge_keys = &finish_only_edge_keys,
+        .out_edge_keys_capacity = finish_only_edge_keys.len,
+        .out_profile = null,
+    }));
+    try std.testing.expectEqualSlices(i64, &.{ 1, 2 }, &finish_only_node_keys);
+    try std.testing.expectEqualSlices(i64, &.{1}, &finish_only_edge_keys);
 }
 
 test "c abi manages bundled extension lifecycle" {
