@@ -124,6 +124,11 @@ fn runCompatibilitySearch(db: *zova.Database, query: []const i8, limit: usize) !
 }
 
 fn reportStorage(db: *zova.Database) !void {
+    var payloads = try db.prepare("select coalesce(sum(length(payload)),0),count(*) from _zova_graph_edges where length(payload) != 0");
+    defer payloads.deinit();
+    if ((try payloads.step()) == .row) {
+        std.debug.print("graph_payload_bytes={d} graph_edges_with_payload={d}\n", .{ payloads.columnInt64(0), payloads.columnInt64(1) });
+    }
     var objects = try db.prepare(
         \\select name, sum(pgsize)
         \\from dbstat

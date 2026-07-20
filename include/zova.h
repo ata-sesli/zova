@@ -19,7 +19,7 @@
  *   handles of their parent database; their calls use the same parent
  *   serialization boundary.
  * - zova_database_close fails with ZOVA_MISUSE while live statements, object
- *   writers, or subscriptions still exist. Finalize/destroy/close child
+ *   writers, subscriptions, or a fresh-build session still exist. Finalize/destroy/close child
  *   handles before closing.
  * - After a successful close, statement finalize, or writer destroy, that C
  *   pointer is invalid and must not be used again. Coordinate these terminal
@@ -77,6 +77,15 @@ typedef struct zova_database zova_database;
 typedef struct zova_object_writer zova_object_writer;
 typedef struct zova_statement zova_statement;
 typedef struct zova_subscription zova_subscription;
+typedef struct zova_fresh_build zova_fresh_build;
+
+enum {
+    ZOVA_FRESH_VALUE_NULL = 0,
+    ZOVA_FRESH_VALUE_INT64 = 1,
+    ZOVA_FRESH_VALUE_FLOAT64 = 2,
+    ZOVA_FRESH_VALUE_TEXT = 3,
+    ZOVA_FRESH_VALUE_BLOB = 4
+};
 
 /* Stable status values for the pre-1.0 ABI surface. */
 typedef enum zova_status {
@@ -463,6 +472,39 @@ typedef struct zova_graph_keyed_edge_result {
     char *edge_type; size_t edge_type_len; int64_t target_node_key; int64_t created_order;
 } zova_graph_keyed_edge_result;
 typedef struct zova_graph_keyed_edge_results { zova_graph_keyed_edge_result *items; size_t len; } zova_graph_keyed_edge_results;
+typedef struct zova_graph_edge_payload_result {
+    uint8_t found;
+    int64_t edge_key;
+    uint8_t *payload;
+    size_t payload_len;
+} zova_graph_edge_payload_result;
+typedef struct zova_graph_edge_payload_results { zova_graph_edge_payload_result *items; size_t len; } zova_graph_edge_payload_results;
+
+typedef struct zova_fresh_build_profile {
+    double validation_ms;
+    double table_load_ms;
+    double fts_load_ms;
+    double graph_load_ms;
+    double graph_validation_ms;
+    double graph_key_generation_ms;
+    double graph_node_load_ms;
+    double graph_edge_load_ms;
+    double vector_load_ms;
+    double index_build_ms;
+    double commit_ms;
+    uint64_t table_rows;
+    uint64_t fts_rows;
+    uint64_t vector_rows;
+    uint64_t payload_bytes;
+} zova_fresh_build_profile;
+
+typedef struct zova_fresh_value {
+    int value_type;
+    int64_t int64_value;
+    double float64_value;
+    const uint8_t *bytes;
+    size_t bytes_len;
+} zova_fresh_value;
 
 typedef struct zova_graph_scan_cursor {
     int64_t created_order;
@@ -1179,6 +1221,14 @@ typedef struct zova_graph_fresh_edge_input {
     size_t to_node_ordinal;
 } zova_graph_fresh_edge_input;
 
+typedef struct zova_graph_fresh_edge_payload_input {
+    size_t from_node_ordinal;
+    const char *edge_type;
+    size_t to_node_ordinal;
+    const uint8_t *payload;
+    size_t payload_len;
+} zova_graph_fresh_edge_payload_input;
+
 typedef struct zova_graph_build_fresh_keyed_request {
     zova_database *db;
     const char *graph_name;
@@ -1191,6 +1241,19 @@ typedef struct zova_graph_build_fresh_keyed_request {
     int64_t *out_edge_keys;
     size_t out_edge_keys_capacity;
 } zova_graph_build_fresh_keyed_request;
+
+typedef struct zova_graph_build_fresh_prepared_keyed_with_payloads_request {
+    zova_database *db;
+    const char *graph_name;
+    const zova_graph_fresh_node_input *nodes;
+    size_t nodes_len;
+    const zova_graph_fresh_edge_payload_input *edges;
+    size_t edges_len;
+    int64_t *out_node_keys;
+    size_t out_node_keys_capacity;
+    int64_t *out_edge_keys;
+    size_t out_edge_keys_capacity;
+} zova_graph_build_fresh_prepared_keyed_with_payloads_request;
 
 typedef struct zova_graph_node_get_request {
     zova_database *db;
@@ -1324,6 +1387,67 @@ typedef struct zova_graph_edges_get_many_keyed_request {
     size_t key_count; zova_graph_keyed_edge_results *out_results;
 } zova_graph_edges_get_many_keyed_request;
 
+typedef struct zova_graph_edge_payload_get_many_request {
+    zova_database *db;
+    const char *graph_name;
+    const int64_t *edge_keys;
+    size_t key_count;
+    zova_graph_edge_payload_results *out_results;
+} zova_graph_edge_payload_get_many_request;
+
+typedef struct zova_graph_edge_payload_replacement {
+    int64_t edge_key;
+    const uint8_t *payload;
+    size_t payload_len;
+} zova_graph_edge_payload_replacement;
+
+typedef struct zova_graph_edge_payload_replace_many_request {
+    zova_database *db;
+    const char *graph_name;
+    const zova_graph_edge_payload_replacement *replacements;
+    size_t replacement_count;
+} zova_graph_edge_payload_replace_many_request;
+
+typedef struct zova_fresh_build_begin_request {
+    zova_database *db;
+    zova_fresh_build **out_build;
+} zova_fresh_build_begin_request;
+
+/* Typed row-major input for one predeclared, initially empty table or FTS target. */
+typedef struct zova_fresh_build_rows_request {
+    zova_fresh_build *build;
+    const char *table_name;
+    const char *const *column_names;
+    size_t column_count;
+    const zova_fresh_value *values;
+    size_t row_count;
+} zova_fresh_build_rows_request;
+
+typedef struct zova_fresh_build_graph_request {
+    zova_fresh_build *build;
+    const char *graph_name;
+    const zova_graph_fresh_node_input *nodes;
+    size_t nodes_len;
+    const zova_graph_fresh_edge_payload_input *edges;
+    size_t edges_len;
+} zova_fresh_build_graph_request;
+
+typedef struct zova_fresh_build_vectors_request {
+    zova_fresh_build *build;
+    const char *collection_name;
+    const zova_vector_input *vectors;
+    size_t vectors_len;
+} zova_fresh_build_vectors_request;
+
+typedef struct zova_fresh_build_finish_request {
+    zova_fresh_build *build;
+    int64_t *out_node_keys;
+    size_t out_node_keys_capacity;
+    int64_t *out_edge_keys;
+    size_t out_edge_keys_capacity;
+    zova_fresh_build_profile *out_profile;
+} zova_fresh_build_finish_request;
+
 /* Count edges adjacent to one existing node, optionally filtered by type. */
 typedef struct zova_graph_degree_request {
     zova_database *db;
@@ -1426,8 +1550,19 @@ void zova_graph_neighbor_results_free(zova_graph_neighbor_results *results);
 void zova_graph_keyed_neighbor_results_free(zova_graph_keyed_neighbor_results *results);
 void zova_graph_keyed_node_results_free(zova_graph_keyed_node_results *results);
 void zova_graph_keyed_edge_results_free(zova_graph_keyed_edge_results *results);
+void zova_graph_edge_payload_results_free(zova_graph_edge_payload_results *results);
 void zova_graph_scan_results_free(zova_graph_scan_results *results);
 void zova_graph_walk_results_free(zova_graph_walk_results *results);
+
+/* Atomic data loader for predeclared, initially empty targets. */
+zova_status zova_fresh_build_begin(const zova_fresh_build_begin_request *request);
+zova_status zova_fresh_build_table_rows(const zova_fresh_build_rows_request *request);
+zova_status zova_fresh_build_fts_rows(const zova_fresh_build_rows_request *request);
+zova_status zova_fresh_build_graph(const zova_fresh_build_graph_request *request);
+zova_status zova_fresh_build_vectors(const zova_fresh_build_vectors_request *request);
+zova_status zova_fresh_build_finish(const zova_fresh_build_finish_request *request);
+zova_status zova_fresh_build_abort(zova_fresh_build *build);
+void zova_fresh_build_destroy(zova_fresh_build *build);
 
 /* Database lifecycle, SQL passthrough, prepared statements, and conversion. */
 zova_status zova_database_create(const zova_database_open_request *request);
@@ -1587,6 +1722,7 @@ zova_status zova_graph_build_fresh_keyed(const zova_graph_build_fresh_keyed_requ
  * final-order, deduplicated ordinal topology. Contract violations fail
  * atomically; input-aligned opaque keys are published only on success. */
 zova_status zova_graph_build_fresh_prepared_keyed(const zova_graph_build_fresh_keyed_request *request);
+zova_status zova_graph_build_fresh_prepared_keyed_with_payloads(const zova_graph_build_fresh_prepared_keyed_with_payloads_request *request);
 zova_status zova_graph_node_get(const zova_graph_node_get_request *request);
 zova_status zova_graph_node_exists(const zova_graph_node_exists_request *request);
 zova_status zova_graph_node_delete(const zova_graph_node_delete_request *request);
@@ -1602,6 +1738,8 @@ zova_status zova_graph_neighbors(const zova_graph_neighbors_request *request);
 zova_status zova_graph_neighbors_keyed(const zova_graph_neighbors_keyed_request *request);
 zova_status zova_graph_nodes_get_many_keyed(const zova_graph_nodes_get_many_keyed_request *request);
 zova_status zova_graph_edges_get_many_keyed(const zova_graph_edges_get_many_keyed_request *request);
+zova_status zova_graph_edge_payload_get_many(const zova_graph_edge_payload_get_many_request *request);
+zova_status zova_graph_edge_payload_replace_many(const zova_graph_edge_payload_replace_many_request *request);
 zova_status zova_graph_degree(const zova_graph_degree_request *request);
 zova_status zova_graph_degree_many_keyed(const zova_graph_degree_many_keyed_request *request);
 zova_status zova_graph_scan(const zova_graph_scan_request *request);

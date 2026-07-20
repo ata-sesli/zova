@@ -70,6 +70,7 @@ pub const zova_database = opaque {};
 pub const zova_object_writer = opaque {};
 pub const zova_statement = opaque {};
 pub const zova_subscription = opaque {};
+pub const zova_fresh_build = opaque {};
 
 const DatabaseHandle = struct {
     db: zova.Database,
@@ -83,11 +84,41 @@ const DatabaseHandle = struct {
     live_statements: usize = 0,
     live_writers: usize = 0,
     live_subscriptions: usize = 0,
+    fresh_build_active: bool = false,
     sql_functions: std.ArrayList(SqlFunctionRegistration) = .empty,
     // Connection-scoped diagnostic text. This mirrors SQLite's model closely:
     // callers can ask the database handle for the most recent useful message,
     // and the pointer is borrowed until another call on the handle replaces it.
     last_error: ?[:0]u8 = null,
+};
+
+const DeferredFreshIndex = struct {
+    name: [:0]u8,
+    sql: [:0]u8,
+};
+
+const FreshBuildHandle = struct {
+    database: *DatabaseHandle,
+    owns_transaction: bool,
+    active: bool = true,
+    deferred_indexes: std.ArrayList(DeferredFreshIndex) = .empty,
+    prepared_tables: std.ArrayList([]u8) = .empty,
+    node_keys: []i64 = &.{},
+    edge_keys: []i64 = &.{},
+    graph_loaded: bool = false,
+    profile: zova_fresh_build_profile = .{},
+
+    fn deinit(self: *FreshBuildHandle) void {
+        for (self.deferred_indexes.items) |item| {
+            allocator.free(item.name);
+            allocator.free(item.sql);
+        }
+        self.deferred_indexes.deinit(allocator);
+        for (self.prepared_tables.items) |name| allocator.free(name);
+        self.prepared_tables.deinit(allocator);
+        if (self.node_keys.len != 0) allocator.free(self.node_keys);
+        if (self.edge_keys.len != 0) allocator.free(self.edge_keys);
+    }
 };
 
 const SqlFunctionRegistration = struct {
@@ -494,6 +525,39 @@ pub const zova_graph_keyed_edge_result = extern struct {
     created_order: i64,
 };
 pub const zova_graph_keyed_edge_results = extern struct { items: ?[*]zova_graph_keyed_edge_result, len: usize };
+pub const zova_graph_edge_payload_result = extern struct {
+    found: u8,
+    edge_key: i64,
+    payload: ?[*]u8,
+    payload_len: usize,
+};
+pub const zova_graph_edge_payload_results = extern struct { items: ?[*]zova_graph_edge_payload_result, len: usize };
+
+pub const zova_fresh_build_profile = extern struct {
+    validation_ms: f64 = 0,
+    table_load_ms: f64 = 0,
+    fts_load_ms: f64 = 0,
+    graph_load_ms: f64 = 0,
+    graph_validation_ms: f64 = 0,
+    graph_key_generation_ms: f64 = 0,
+    graph_node_load_ms: f64 = 0,
+    graph_edge_load_ms: f64 = 0,
+    vector_load_ms: f64 = 0,
+    index_build_ms: f64 = 0,
+    commit_ms: f64 = 0,
+    table_rows: u64 = 0,
+    fts_rows: u64 = 0,
+    vector_rows: u64 = 0,
+    payload_bytes: u64 = 0,
+};
+
+pub const zova_fresh_value = extern struct {
+    value_type: c_int,
+    int64_value: i64,
+    float64_value: f64,
+    bytes: ?[*]const u8,
+    bytes_len: usize,
+};
 
 pub const zova_graph_scan_cursor = extern struct {
     created_order: i64,
@@ -1143,12 +1207,33 @@ pub const zova_graph_fresh_edge_input = extern struct {
     to_node_ordinal: usize,
 };
 
+pub const zova_graph_fresh_edge_payload_input = extern struct {
+    from_node_ordinal: usize,
+    edge_type: ?[*:0]const u8,
+    to_node_ordinal: usize,
+    payload: ?[*]const u8,
+    payload_len: usize,
+};
+
 pub const zova_graph_build_fresh_keyed_request = extern struct {
     db: ?*zova_database,
     graph_name: ?[*:0]const u8,
     nodes: ?[*]const zova_graph_fresh_node_input,
     nodes_len: usize,
     edges: ?[*]const zova_graph_fresh_edge_input,
+    edges_len: usize,
+    out_node_keys: ?[*]i64,
+    out_node_keys_capacity: usize,
+    out_edge_keys: ?[*]i64,
+    out_edge_keys_capacity: usize,
+};
+
+pub const zova_graph_build_fresh_prepared_keyed_with_payloads_request = extern struct {
+    db: ?*zova_database,
+    graph_name: ?[*:0]const u8,
+    nodes: ?[*]const zova_graph_fresh_node_input,
+    nodes_len: usize,
+    edges: ?[*]const zova_graph_fresh_edge_payload_input,
     edges_len: usize,
     out_node_keys: ?[*]i64,
     out_node_keys_capacity: usize,
@@ -1278,6 +1363,66 @@ pub const zova_graph_edges_get_many_keyed_request = extern struct {
     edge_keys: ?[*]const i64,
     key_count: usize,
     out_results: ?*zova_graph_keyed_edge_results,
+};
+
+pub const zova_graph_edge_payload_get_many_request = extern struct {
+    db: ?*zova_database,
+    graph_name: ?[*:0]const u8,
+    edge_keys: ?[*]const i64,
+    key_count: usize,
+    out_results: ?*zova_graph_edge_payload_results,
+};
+
+pub const zova_graph_edge_payload_replacement = extern struct {
+    edge_key: i64,
+    payload: ?[*]const u8,
+    payload_len: usize,
+};
+
+pub const zova_graph_edge_payload_replace_many_request = extern struct {
+    db: ?*zova_database,
+    graph_name: ?[*:0]const u8,
+    replacements: ?[*]const zova_graph_edge_payload_replacement,
+    replacement_count: usize,
+};
+
+pub const zova_fresh_build_begin_request = extern struct {
+    db: ?*zova_database,
+    out_build: ?*?*zova_fresh_build,
+};
+
+pub const zova_fresh_build_rows_request = extern struct {
+    build: ?*zova_fresh_build,
+    table_name: ?[*:0]const u8,
+    column_names: ?[*]const ?[*:0]const u8,
+    column_count: usize,
+    values: ?[*]const zova_fresh_value,
+    row_count: usize,
+};
+
+pub const zova_fresh_build_graph_request = extern struct {
+    build: ?*zova_fresh_build,
+    graph_name: ?[*:0]const u8,
+    nodes: ?[*]const zova_graph_fresh_node_input,
+    nodes_len: usize,
+    edges: ?[*]const zova_graph_fresh_edge_payload_input,
+    edges_len: usize,
+};
+
+pub const zova_fresh_build_vectors_request = extern struct {
+    build: ?*zova_fresh_build,
+    collection_name: ?[*:0]const u8,
+    vectors: ?[*]const zova_vector_input,
+    vectors_len: usize,
+};
+
+pub const zova_fresh_build_finish_request = extern struct {
+    build: ?*zova_fresh_build,
+    out_node_keys: ?[*]i64,
+    out_node_keys_capacity: usize,
+    out_edge_keys: ?[*]i64,
+    out_edge_keys_capacity: usize,
+    out_profile: ?*zova_fresh_build_profile,
 };
 
 pub const zova_graph_degree_request = extern struct {
@@ -1537,6 +1682,15 @@ pub fn zova_graph_keyed_edge_results_free(results: ?*zova_graph_keyed_edge_resul
     out.* = .{ .items = null, .len = 0 };
 }
 
+pub fn zova_graph_edge_payload_results_free(results: ?*zova_graph_edge_payload_results) callconv(.c) void {
+    const out = results orelse return;
+    if (out.items) |items| {
+        for (items[0..out.len]) |*item| if (item.payload) |value| allocator.free(value[0..item.payload_len]);
+        allocator.free(items[0..out.len]);
+    }
+    out.* = .{ .items = null, .len = 0 };
+}
+
 pub fn zova_graph_scan_results_free(results: ?*zova_graph_scan_results) callconv(.c) void {
     const out = results orelse return;
     if (out.nodes) |nodes| {
@@ -1616,15 +1770,15 @@ pub fn zova_extension_bundle_untrust(request: ?*const zova_extension_bundle_untr
 }
 
 pub fn zova_database_close(db: ?*zova_database) callconv(.c) zova_status {
-    const handle = databaseHandle(db) orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandleRaw(db) orelse return .INVALID_ARGUMENT;
     handle.mutex.lock();
-    if (handle.live_statements != 0 or handle.live_writers != 0 or handle.live_subscriptions != 0) {
+    if (handle.live_statements != 0 or handle.live_writers != 0 or handle.live_subscriptions != 0 or handle.fresh_build_active) {
         defer handle.mutex.unlock();
         var message_buffer: [192]u8 = undefined;
         const message = std.fmt.bufPrint(
             &message_buffer,
-            "cannot close database with live child handles: {d} statements, {d} object writers, {d} subscriptions",
-            .{ handle.live_statements, handle.live_writers, handle.live_subscriptions },
+            "cannot close database with live child handles: {d} statements, {d} object writers, {d} subscriptions, fresh build active={}",
+            .{ handle.live_statements, handle.live_writers, handle.live_subscriptions, handle.fresh_build_active },
         ) catch "cannot close database with live child handles";
         return failDbStatusString(handle, .MISUSE, message);
     }
@@ -2869,6 +3023,370 @@ pub fn zova_database_extension_drop(request: ?*const zova_database_extension_req
     return okDb(handle);
 }
 
+fn freshBuildTimestamp() std.Io.Timestamp {
+    return std.Io.Clock.awake.now(std.Io.Threaded.global_single_threaded.io());
+}
+
+fn freshBuildElapsedMs(start: std.Io.Timestamp) f64 {
+    const elapsed_ns = start.durationTo(freshBuildTimestamp()).toNanoseconds();
+    if (elapsed_ns <= 0) return 0;
+    return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, std.time.ns_per_ms);
+}
+
+fn validateFreshIdentifier(name: []const u8, reject_private: bool) error{InvalidArgument}!void {
+    if (name.len == 0 or name.len > 128) return error.InvalidArgument;
+    if (reject_private and name.len >= 6 and std.ascii.eqlIgnoreCase(name[0..6], "_zova_")) return error.InvalidArgument;
+    for (name, 0..) |byte, index| {
+        const valid = std.ascii.isAlphabetic(byte) or byte == '_' or (index != 0 and std.ascii.isDigit(byte));
+        if (!valid) return error.InvalidArgument;
+    }
+}
+
+fn appendFreshQuotedIdentifier(buffer: *std.ArrayList(u8), name: []const u8) !void {
+    try buffer.append(allocator, '"');
+    try buffer.appendSlice(allocator, name);
+    try buffer.append(allocator, '"');
+}
+
+fn freshBuildPrepareTable(build: *FreshBuildHandle, table_name: []const u8) !void {
+    try validateFreshIdentifier(table_name, true);
+    for (build.prepared_tables.items) |existing| if (std.mem.eql(u8, existing, table_name)) return;
+
+    var count_sql: std.ArrayList(u8) = .empty;
+    defer count_sql.deinit(allocator);
+    try count_sql.appendSlice(allocator, "select count(*) from ");
+    try appendFreshQuotedIdentifier(&count_sql, table_name);
+    try count_sql.append(allocator, 0);
+    {
+        var count = try build.database.db.prepare(count_sql.items[0 .. count_sql.items.len - 1 :0]);
+        defer count.deinit();
+        if ((try count.step()) != .row or count.columnInt64(0) != 0) return error.InvalidArgument;
+    }
+
+    var captured: std.ArrayList(DeferredFreshIndex) = .empty;
+    defer captured.deinit(allocator);
+    errdefer for (captured.items) |item| {
+        allocator.free(item.name);
+        allocator.free(item.sql);
+    };
+    {
+        var indexes = try build.database.db.prepare("select name,sql from sqlite_schema where type='index' and tbl_name=?1 and sql is not null order by name");
+        defer indexes.deinit();
+        try indexes.bindText(1, table_name);
+        while ((try indexes.step()) == .row) {
+            const name = try allocator.dupeZ(u8, indexes.columnText(0));
+            errdefer allocator.free(name);
+            const sql = try allocator.dupeZ(u8, indexes.columnText(1));
+            try captured.append(allocator, .{ .name = name, .sql = sql });
+        }
+    }
+    for (captured.items) |item| {
+        var drop_sql: std.ArrayList(u8) = .empty;
+        defer drop_sql.deinit(allocator);
+        try drop_sql.appendSlice(allocator, "drop index ");
+        try appendFreshQuotedIdentifier(&drop_sql, item.name);
+        try drop_sql.append(allocator, 0);
+        try build.database.db.exec(drop_sql.items[0 .. drop_sql.items.len - 1 :0]);
+        try build.deferred_indexes.append(allocator, item);
+    }
+    captured.clearRetainingCapacity();
+    try build.prepared_tables.append(allocator, try allocator.dupe(u8, table_name));
+}
+
+fn freshBuildLoadRows(build: *FreshBuildHandle, request: *const zova_fresh_build_rows_request, fts: bool) !void {
+    const table_name_ptr = request.table_name orelse return error.InvalidArgument;
+    if (request.column_count == 0) return error.InvalidArgument;
+    const column_ptrs = request.column_names orelse return error.InvalidArgument;
+    const value_count = std.math.mul(usize, request.row_count, request.column_count) catch return error.InvalidArgument;
+    if (value_count != 0 and request.values == null) return error.InvalidArgument;
+    const table_name = std.mem.span(table_name_ptr);
+    for (column_ptrs[0..request.column_count], 0..) |column_ptr, index| {
+        const column = std.mem.span(column_ptr orelse return error.InvalidArgument);
+        try validateFreshIdentifier(column, false);
+        for (column_ptrs[0..index]) |prior_ptr| {
+            if (std.mem.eql(u8, column, std.mem.span(prior_ptr orelse return error.InvalidArgument))) return error.InvalidArgument;
+        }
+    }
+    const values: []const zova_fresh_value = if (value_count == 0) &.{} else request.values.?[0..value_count];
+    for (values) |value| switch (value.value_type) {
+        0, 1, 2 => if (value.bytes != null or value.bytes_len != 0) return error.InvalidArgument,
+        3 => {
+            if (value.bytes_len != 0 and value.bytes == null) return error.InvalidArgument;
+            const bytes: []const u8 = if (value.bytes_len == 0) &.{} else value.bytes.?[0..value.bytes_len];
+            if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidArgument;
+        },
+        4 => if (value.bytes_len != 0 and value.bytes == null) return error.InvalidArgument,
+        else => return error.InvalidArgument,
+    };
+    try freshBuildPrepareTable(build, table_name);
+
+    var sql: std.ArrayList(u8) = .empty;
+    defer sql.deinit(allocator);
+    try sql.appendSlice(allocator, "insert into ");
+    try appendFreshQuotedIdentifier(&sql, table_name);
+    try sql.append(allocator, '(');
+    for (column_ptrs[0..request.column_count], 0..) |column_ptr, index| {
+        const column = std.mem.span(column_ptr orelse return error.InvalidArgument);
+        try validateFreshIdentifier(column, false);
+        if (index != 0) try sql.append(allocator, ',');
+        try appendFreshQuotedIdentifier(&sql, column);
+    }
+    try sql.appendSlice(allocator, ") values(");
+    for (0..request.column_count) |index| {
+        if (index != 0) try sql.append(allocator, ',');
+        try sql.append(allocator, '?');
+    }
+    try sql.appendSlice(allocator, ")");
+    try sql.append(allocator, 0);
+
+    var stmt = try build.database.db.prepare(sql.items[0 .. sql.items.len - 1 :0]);
+    defer stmt.deinit();
+    for (0..request.row_count) |row| {
+        for (values[row * request.column_count ..][0..request.column_count], 0..) |value, column| {
+            const index: c_int = @intCast(column + 1);
+            switch (value.value_type) {
+                0 => try stmt.bindNull(index),
+                1 => try stmt.bindInt64(index, value.int64_value),
+                2 => try stmt.bindDouble(index, value.float64_value),
+                3 => {
+                    if (value.bytes_len != 0 and value.bytes == null) return error.InvalidArgument;
+                    const bytes: []const u8 = if (value.bytes_len == 0) &.{} else value.bytes.?[0..value.bytes_len];
+                    if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidArgument;
+                    try stmt.bindText(index, bytes);
+                },
+                4 => {
+                    if (value.bytes_len != 0 and value.bytes == null) return error.InvalidArgument;
+                    const bytes: []const u8 = if (value.bytes_len == 0) &.{} else value.bytes.?[0..value.bytes_len];
+                    try stmt.bindBlobBorrowed(index, bytes);
+                },
+                else => return error.InvalidArgument,
+            }
+        }
+        if ((try stmt.step()) != .done) return error.InvalidArgument;
+        try stmt.reset();
+        try stmt.clearBindings();
+    }
+    const rows: u64 = @intCast(request.row_count);
+    if (fts) build.profile.fts_rows = std.math.add(u64, build.profile.fts_rows, rows) catch return error.InvalidArgument else build.profile.table_rows = std.math.add(u64, build.profile.table_rows, rows) catch return error.InvalidArgument;
+}
+
+fn freshBuildRollback(build: *FreshBuildHandle) void {
+    if (!build.active) return;
+    if (build.owns_transaction) {
+        build.database.db.rollback() catch {};
+    } else {
+        build.database.db.rollbackToSavepoint("fresh_build_session") catch {};
+        build.database.db.releaseSavepoint("fresh_build_session") catch {};
+    }
+    build.database.fresh_build_active = false;
+    build.active = false;
+}
+
+pub fn zova_fresh_build_begin(request: ?*const zova_fresh_build_begin_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const out = req.out_build orelse return .INVALID_ARGUMENT;
+    out.* = null;
+    const database = databaseHandleRaw(req.db) orelse return .INVALID_ARGUMENT;
+    database.mutex.lock();
+    defer database.mutex.unlock();
+    if (database.fresh_build_active or database.live_statements != 0 or database.live_writers != 0) return failDb(database, error.InvalidArgument);
+    const start = freshBuildTimestamp();
+    var empty = database.db.prepare(
+        "select (select count(*) from _zova_objects)+(select count(*) from _zova_chunks)+(select count(*) from _zova_object_chunks)+(select count(*) from _zova_vectors)+(select count(*) from _zova_graphs)+(select count(*) from _zova_graph_nodes)+(select count(*) from _zova_graph_edges)",
+    ) catch |err| return failDb(database, err);
+    defer empty.deinit();
+    if ((empty.step() catch |err| return failDb(database, err)) != .row or empty.columnInt64(0) != 0) return failDb(database, error.InvalidArgument);
+    const owns_transaction = sqlite.c.sqlite3_get_autocommit(database.db.sqlite_db.handle) != 0;
+    if (owns_transaction) database.db.beginImmediate() catch |err| return failDb(database, err) else database.db.savepoint("fresh_build_session") catch |err| return failDb(database, err);
+    const build = allocator.create(FreshBuildHandle) catch |err| {
+        if (owns_transaction) database.db.rollback() catch {} else {
+            database.db.rollbackToSavepoint("fresh_build_session") catch {};
+            database.db.releaseSavepoint("fresh_build_session") catch {};
+        }
+        return failDb(database, err);
+    };
+    build.* = .{ .database = database, .owns_transaction = owns_transaction };
+    build.profile.validation_ms = freshBuildElapsedMs(start);
+    database.fresh_build_active = true;
+    out.* = @ptrCast(build);
+    return okDb(database);
+}
+
+pub fn zova_fresh_build_table_rows(request: ?*const zova_fresh_build_rows_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const build = freshBuildHandle(req.build) orelse return .INVALID_ARGUMENT;
+    const database = build.database;
+    database.mutex.lock();
+    defer database.mutex.unlock();
+    const start = freshBuildTimestamp();
+    freshBuildLoadRows(build, req, false) catch |err| {
+        freshBuildRollback(build);
+        return failDb(database, err);
+    };
+    build.profile.table_load_ms += freshBuildElapsedMs(start);
+    return okDb(database);
+}
+
+pub fn zova_fresh_build_fts_rows(request: ?*const zova_fresh_build_rows_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const build = freshBuildHandle(req.build) orelse return .INVALID_ARGUMENT;
+    const database = build.database;
+    database.mutex.lock();
+    defer database.mutex.unlock();
+    const start = freshBuildTimestamp();
+    freshBuildLoadRows(build, req, true) catch |err| {
+        freshBuildRollback(build);
+        return failDb(database, err);
+    };
+    build.profile.fts_load_ms += freshBuildElapsedMs(start);
+    return okDb(database);
+}
+
+pub fn zova_fresh_build_graph(request: ?*const zova_fresh_build_graph_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const build = freshBuildHandle(req.build) orelse return .INVALID_ARGUMENT;
+    const database = build.database;
+    database.mutex.lock();
+    defer database.mutex.unlock();
+    if (build.graph_loaded) {
+        freshBuildRollback(build);
+        return failDb(database, error.InvalidArgument);
+    }
+    const graph_name = req.graph_name orelse {
+        freshBuildRollback(build);
+        return failDb(database, error.InvalidArgument);
+    };
+    const nodes = freshGraphNodeInputSlices(req.nodes, req.nodes_len) catch |err| {
+        freshBuildRollback(build);
+        return failDb(database, err);
+    };
+    defer if (nodes.len != 0) allocator.free(nodes);
+    const edges = freshGraphEdgePayloadInputSlices(req.edges, req.edges_len) catch |err| {
+        freshBuildRollback(build);
+        return failDb(database, err);
+    };
+    defer if (edges.len != 0) allocator.free(edges);
+    build.node_keys = allocator.alloc(i64, nodes.len) catch |err| {
+        freshBuildRollback(build);
+        return failDb(database, err);
+    };
+    build.edge_keys = allocator.alloc(i64, edges.len) catch |err| {
+        freshBuildRollback(build);
+        return failDb(database, err);
+    };
+    var profile: zova.FreshGraphBuildProfile = .{};
+    database.db.buildFreshGraphPreparedKeyedProfiled(std.mem.span(graph_name), nodes, edges, build.node_keys, build.edge_keys, &profile) catch |err| {
+        freshBuildRollback(build);
+        return failDb(database, err);
+    };
+    build.profile.graph_load_ms += profile.graph_and_types_ms + profile.node_load_ms + profile.edge_load_ms;
+    build.profile.graph_validation_ms += profile.validation_ms;
+    build.profile.graph_key_generation_ms += profile.key_generation_ms;
+    build.profile.graph_node_load_ms += profile.node_load_ms;
+    build.profile.graph_edge_load_ms += profile.edge_load_ms;
+    build.profile.index_build_ms += profile.index_build_ms;
+    build.profile.payload_bytes = profile.payload_bytes;
+    build.graph_loaded = true;
+    return okDb(database);
+}
+
+pub fn zova_fresh_build_vectors(request: ?*const zova_fresh_build_vectors_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const build = freshBuildHandle(req.build) orelse return .INVALID_ARGUMENT;
+    const database = build.database;
+    database.mutex.lock();
+    defer database.mutex.unlock();
+    const collection_name = req.collection_name orelse {
+        freshBuildRollback(build);
+        return failDb(database, error.InvalidArgument);
+    };
+    const vectors = vectorInputSlices(req.vectors, req.vectors_len) catch |err| {
+        freshBuildRollback(build);
+        return failDb(database, err);
+    };
+    defer if (vectors.len != 0) allocator.free(vectors);
+    const start = freshBuildTimestamp();
+    database.db.putVectors(std.mem.span(collection_name), vectors) catch |err| {
+        freshBuildRollback(build);
+        return failDb(database, err);
+    };
+    build.profile.vector_load_ms += freshBuildElapsedMs(start);
+    build.profile.vector_rows = std.math.add(u64, build.profile.vector_rows, vectors.len) catch {
+        freshBuildRollback(build);
+        return failDb(database, error.InvalidArgument);
+    };
+    return okDb(database);
+}
+
+pub fn zova_fresh_build_finish(request: ?*const zova_fresh_build_finish_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const build = freshBuildHandle(req.build) orelse return .INVALID_ARGUMENT;
+    const database = build.database;
+    database.mutex.lock();
+    defer database.mutex.unlock();
+    if (req.out_node_keys_capacity < build.node_keys.len or req.out_edge_keys_capacity < build.edge_keys.len or
+        (build.node_keys.len != 0 and req.out_node_keys == null) or (build.edge_keys.len != 0 and req.out_edge_keys == null))
+    {
+        freshBuildRollback(build);
+        return failDb(database, error.InvalidArgument);
+    }
+    const indexes_start = freshBuildTimestamp();
+    for (build.deferred_indexes.items) |item| database.db.exec(item.sql) catch |err| {
+        freshBuildRollback(build);
+        return failDb(database, err);
+    };
+    build.profile.index_build_ms += freshBuildElapsedMs(indexes_start);
+    const validation_start = freshBuildTimestamp();
+    var foreign_keys = database.db.prepare("pragma foreign_key_check") catch |err| {
+        freshBuildRollback(build);
+        return failDb(database, err);
+    };
+    defer foreign_keys.deinit();
+    if ((foreign_keys.step() catch |err| {
+        freshBuildRollback(build);
+        return failDb(database, err);
+    }) != .done) {
+        freshBuildRollback(build);
+        return failDb(database, error.InvalidArgument);
+    }
+    build.profile.validation_ms += freshBuildElapsedMs(validation_start);
+    const commit_start = freshBuildTimestamp();
+    if (build.owns_transaction) database.db.commit() catch |err| {
+        freshBuildRollback(build);
+        return failDb(database, err);
+    } else database.db.releaseSavepoint("fresh_build_session") catch |err| {
+        freshBuildRollback(build);
+        return failDb(database, err);
+    };
+    build.profile.commit_ms = freshBuildElapsedMs(commit_start);
+    if (build.node_keys.len != 0) @memcpy(req.out_node_keys.?[0..build.node_keys.len], build.node_keys);
+    if (build.edge_keys.len != 0) @memcpy(req.out_edge_keys.?[0..build.edge_keys.len], build.edge_keys);
+    if (req.out_profile) |profile| profile.* = build.profile;
+    build.active = false;
+    database.fresh_build_active = false;
+    return okDb(database);
+}
+
+pub fn zova_fresh_build_abort(build_ptr: ?*zova_fresh_build) callconv(.c) zova_status {
+    const build = freshBuildHandle(build_ptr) orelse return .INVALID_ARGUMENT;
+    const database = build.database;
+    database.mutex.lock();
+    defer database.mutex.unlock();
+    freshBuildRollback(build);
+    return okDb(database);
+}
+
+pub fn zova_fresh_build_destroy(build_ptr: ?*zova_fresh_build) callconv(.c) void {
+    const ptr = build_ptr orelse return;
+    const build: *FreshBuildHandle = @ptrCast(@alignCast(ptr));
+    const database = build.database;
+    database.mutex.lock();
+    defer database.mutex.unlock();
+    freshBuildRollback(build);
+    build.deinit();
+    allocator.destroy(build);
+}
+
 pub fn zova_graph_delete(request: ?*const zova_graph_delete_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
@@ -2959,6 +3477,29 @@ pub fn zova_graph_build_fresh_keyed(request: ?*const zova_graph_build_fresh_keye
 
 pub fn zova_graph_build_fresh_prepared_keyed(request: ?*const zova_graph_build_fresh_keyed_request) callconv(.c) zova_status {
     return graphBuildFreshKeyed(request, true);
+}
+
+pub fn zova_graph_build_fresh_prepared_keyed_with_payloads(request: ?*const zova_graph_build_fresh_prepared_keyed_with_payloads_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    if (req.out_node_keys_capacity < req.nodes_len or req.out_edge_keys_capacity < req.edges_len) return .INVALID_ARGUMENT;
+    if (req.nodes_len != 0 and (req.nodes == null or req.out_node_keys == null)) return .INVALID_ARGUMENT;
+    if (req.edges_len != 0 and (req.edges == null or req.out_edge_keys == null)) return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    const graph_name = req.graph_name orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const nodes = freshGraphNodeInputSlices(req.nodes, req.nodes_len) catch |err| return failDb(handle, err);
+    defer if (nodes.len != 0) allocator.free(nodes);
+    const edges = freshGraphEdgePayloadInputSlices(req.edges, req.edges_len) catch |err| return failDb(handle, err);
+    defer if (edges.len != 0) allocator.free(edges);
+    const node_keys = allocator.alloc(i64, nodes.len) catch |err| return failDb(handle, err);
+    defer allocator.free(node_keys);
+    const edge_keys = allocator.alloc(i64, edges.len) catch |err| return failDb(handle, err);
+    defer allocator.free(edge_keys);
+    handle.db.buildFreshGraphPreparedKeyed(std.mem.span(graph_name), nodes, edges, node_keys, edge_keys) catch |err| return failDb(handle, err);
+    if (node_keys.len != 0) @memcpy(req.out_node_keys.?[0..node_keys.len], node_keys);
+    if (edge_keys.len != 0) @memcpy(req.out_edge_keys.?[0..edge_keys.len], edge_keys);
+    return okDb(handle);
 }
 
 pub fn zova_graph_node_get(request: ?*const zova_graph_node_get_request) callconv(.c) zova_status {
@@ -3193,6 +3734,36 @@ pub fn zova_graph_edges_get_many_keyed(request: ?*const zova_graph_edges_get_man
     var results = handle.db.graphEdgesGetManyKeyed(allocator, std.mem.span(graph_name), keys) catch |err| return failDb(handle, err);
     defer results.deinit(allocator);
     fillGraphKeyedEdgeResults(out, results.items) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_graph_edge_payload_get_many(request: ?*const zova_graph_edge_payload_get_many_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const out = req.out_results orelse return .INVALID_ARGUMENT;
+    out.* = .{ .items = null, .len = 0 };
+    const graph_name = req.graph_name orelse return .INVALID_ARGUMENT;
+    if (req.key_count != 0 and req.edge_keys == null) return .INVALID_ARGUMENT;
+    const keys: []const i64 = if (req.key_count == 0) &.{} else req.edge_keys.?[0..req.key_count];
+    for (keys) |key| if (key <= 0) return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    var results = handle.db.graphEdgePayloadsGetMany(allocator, std.mem.span(graph_name), keys) catch |err| return failDb(handle, err);
+    defer results.deinit(allocator);
+    fillGraphEdgePayloadResults(out, results.items) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_graph_edge_payload_replace_many(request: ?*const zova_graph_edge_payload_replace_many_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const graph_name = req.graph_name orelse return .INVALID_ARGUMENT;
+    if (req.replacement_count != 0 and req.replacements == null) return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    const replacements = graphEdgePayloadReplacementSlices(req.replacements, req.replacement_count) catch |err| return failDb(handle, err);
+    defer if (replacements.len != 0) allocator.free(replacements);
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    handle.db.replaceGraphEdgePayloads(std.mem.span(graph_name), replacements) catch |err| return failDb(handle, err);
     return okDb(handle);
 }
 
@@ -3526,7 +4097,21 @@ fn trustStoreOptions(path: ?[*:0]const u8) zova.DynamicExtensionTrustStoreOption
 // stay local to this module so the ABI can keep exposing incomplete C structs.
 fn databaseHandle(db: ?*zova_database) ?*DatabaseHandle {
     const ptr = db orelse return null;
+    const handle: *DatabaseHandle = @ptrCast(@alignCast(ptr));
+    if (handle.fresh_build_active) return null;
+    return handle;
+}
+
+fn databaseHandleRaw(db: ?*zova_database) ?*DatabaseHandle {
+    const ptr = db orelse return null;
     return @ptrCast(@alignCast(ptr));
+}
+
+fn freshBuildHandle(build: ?*zova_fresh_build) ?*FreshBuildHandle {
+    const ptr = build orelse return null;
+    const handle: *FreshBuildHandle = @ptrCast(@alignCast(ptr));
+    if (!handle.active) return null;
+    return handle;
 }
 
 fn writerHandle(writer: ?*zova_object_writer) ?*WriterHandle {
@@ -3867,6 +4452,45 @@ fn freshGraphEdgeInputSlices(
             .from_node_ordinal = input.from_node_ordinal,
             .edge_type = std.mem.span(edge_type),
             .to_node_ordinal = input.to_node_ordinal,
+        };
+    }
+    return result;
+}
+
+fn freshGraphEdgePayloadInputSlices(
+    inputs: ?[*]const zova_graph_fresh_edge_payload_input,
+    len: usize,
+) (error{ OutOfMemory, InvalidArgument }![]const zova.FreshGraphEdgeInput) {
+    if (len == 0) return &.{};
+    const ptr = inputs orelse return error.InvalidArgument;
+    const result = try allocator.alloc(zova.FreshGraphEdgeInput, len);
+    errdefer allocator.free(result);
+    for (ptr[0..len], result) |input, *out| {
+        const edge_type = input.edge_type orelse return error.InvalidArgument;
+        if (input.payload_len != 0 and input.payload == null) return error.InvalidArgument;
+        out.* = .{
+            .from_node_ordinal = input.from_node_ordinal,
+            .edge_type = std.mem.span(edge_type),
+            .to_node_ordinal = input.to_node_ordinal,
+            .payload = if (input.payload_len == 0) &.{} else input.payload.?[0..input.payload_len],
+        };
+    }
+    return result;
+}
+
+fn graphEdgePayloadReplacementSlices(
+    inputs: ?[*]const zova_graph_edge_payload_replacement,
+    len: usize,
+) (error{ OutOfMemory, InvalidArgument }![]const zova.GraphEdgePayloadReplacement) {
+    if (len == 0) return &.{};
+    const ptr = inputs orelse return error.InvalidArgument;
+    const result = try allocator.alloc(zova.GraphEdgePayloadReplacement, len);
+    errdefer allocator.free(result);
+    for (ptr[0..len], result) |input, *out| {
+        if (input.edge_key <= 0 or (input.payload_len != 0 and input.payload == null)) return error.InvalidArgument;
+        out.* = .{
+            .edge_key = input.edge_key,
+            .payload = if (input.payload_len == 0) &.{} else input.payload.?[0..input.payload_len],
         };
     }
     return result;
@@ -4571,6 +5195,25 @@ fn fillGraphKeyedEdgeResults(out: *zova_graph_keyed_edge_results, items: []const
         if (!item.found) continue;
         const edge_type = try allocator.dupeZ(u8, item.edge_type.?);
         abi_item.* = .{ .found = 1, .edge_key = item.edge_key, .source_node_key = item.source_node_key, .edge_type = edge_type.ptr, .edge_type_len = edge_type.len, .target_node_key = item.target_node_key, .created_order = item.created_order };
+    }
+    out.* = .{ .items = abi_items.ptr, .len = abi_items.len };
+}
+
+fn fillGraphEdgePayloadResults(out: *zova_graph_edge_payload_results, items: []const zova.GraphEdgePayloadLookup) error{OutOfMemory}!void {
+    out.* = .{ .items = null, .len = 0 };
+    if (items.len == 0) return;
+    const abi_items = try allocator.alloc(zova_graph_edge_payload_result, items.len);
+    errdefer {
+        var tmp = zova_graph_edge_payload_results{ .items = abi_items.ptr, .len = abi_items.len };
+        zova_graph_edge_payload_results_free(&tmp);
+    }
+    for (abi_items) |*item| item.* = .{ .found = 0, .edge_key = 0, .payload = null, .payload_len = 0 };
+    for (items, abi_items) |item, *abi_item| {
+        abi_item.edge_key = item.edge_key;
+        if (!item.found) continue;
+        const payload = item.payload.?;
+        const copied = if (payload.len == 0) null else (try allocator.dupe(u8, payload)).ptr;
+        abi_item.* = .{ .found = 1, .edge_key = item.edge_key, .payload = copied, .payload_len = payload.len };
     }
     out.* = .{ .items = abi_items.ptr, .len = abi_items.len };
 }
@@ -8126,6 +8769,175 @@ test "c abi prepared fresh graph build returns deterministic aligned keys" {
     }));
     try std.testing.expectEqualSlices(i64, &.{ 1, 2 }, &node_keys);
     try std.testing.expectEqualSlices(i64, &.{1}, &edge_keys);
+}
+
+test "c abi fresh builder loads predeclared tables fts graph payloads and vectors atomically" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/fresh-builder.zova", .{tmp.sub_path[0..]});
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{ .path = path, .out_db = &db, .out_error_message = null }));
+    defer _ = zova_database_close(db);
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_begin(&.{ .db = db }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{
+        .db = db,
+        .sql = "create table records(id integer primary key,body text not null); create index records_body_idx on records(body); create virtual table records_fts using fts5(body)",
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_vector_collection_create(&.{
+        .db = db,
+        .name = "embedding",
+        .options = .{ .dimensions = 2, .metric = 0, .element_type = 2 },
+    }));
+
+    var build: ?*zova_fresh_build = null;
+    try std.testing.expectEqual(zova_status.OK, zova_fresh_build_begin(&.{ .db = db, .out_build = &build }));
+    defer zova_fresh_build_destroy(build);
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_exec(&.{ .db = db, .sql = "select 1" }));
+
+    const columns = [_]?[*:0]const u8{ "id", "body" };
+    const values = [_]zova_fresh_value{
+        .{ .value_type = 1, .int64_value = 1, .float64_value = 0, .bytes = null, .bytes_len = 0 },
+        .{ .value_type = 3, .int64_value = 0, .float64_value = 0, .bytes = "first", .bytes_len = 5 },
+        .{ .value_type = 1, .int64_value = 2, .float64_value = 0, .bytes = null, .bytes_len = 0 },
+        .{ .value_type = 3, .int64_value = 0, .float64_value = 0, .bytes = "second", .bytes_len = 6 },
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_fresh_build_table_rows(&.{
+        .build = build,
+        .table_name = "records",
+        .column_names = &columns,
+        .column_count = columns.len,
+        .values = &values,
+        .row_count = 2,
+    }));
+    const fts_columns = [_]?[*:0]const u8{"body"};
+    const fts_values = [_]zova_fresh_value{
+        .{ .value_type = 3, .int64_value = 0, .float64_value = 0, .bytes = "first", .bytes_len = 5 },
+        .{ .value_type = 3, .int64_value = 0, .float64_value = 0, .bytes = "second", .bytes_len = 6 },
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_fresh_build_fts_rows(&.{
+        .build = build,
+        .table_name = "records_fts",
+        .column_names = &fts_columns,
+        .column_count = 1,
+        .values = &fts_values,
+        .row_count = 2,
+    }));
+
+    const nodes = [_]zova_graph_fresh_node_input{
+        .{ .node_id = "a", .kind = "node", .target_type = 0, .target_namespace = null, .target_ref = null },
+        .{ .node_id = "b", .kind = "node", .target_type = 0, .target_namespace = null, .target_ref = null },
+    };
+    const payload = [_]u8{ 1, 2, 3, 4 };
+    const edges = [_]zova_graph_fresh_edge_payload_input{
+        .{ .from_node_ordinal = 0, .edge_type = "links", .to_node_ordinal = 1, .payload = &payload, .payload_len = payload.len },
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_fresh_build_graph(&.{
+        .build = build,
+        .graph_name = "app",
+        .nodes = &nodes,
+        .nodes_len = nodes.len,
+        .edges = &edges,
+        .edges_len = edges.len,
+    }));
+    const vector_values = [_]i8{ 3, 4 };
+    const vectors = [_]zova_vector_input{.{
+        .id = "v1",
+        .values = .{ .element_type = 2, .f32_values = null, .f16_values = null, .i8_values = &vector_values, .values_len = vector_values.len },
+    }};
+    try std.testing.expectEqual(zova_status.OK, zova_fresh_build_vectors(&.{ .build = build, .collection_name = "embedding", .vectors = &vectors, .vectors_len = 1 }));
+
+    var node_keys = [_]i64{ 91, 92 };
+    var edge_keys = [_]i64{93};
+    var profile: zova_fresh_build_profile = .{};
+    try std.testing.expectEqual(zova_status.OK, zova_fresh_build_finish(&.{
+        .build = build,
+        .out_node_keys = &node_keys,
+        .out_node_keys_capacity = node_keys.len,
+        .out_edge_keys = &edge_keys,
+        .out_edge_keys_capacity = edge_keys.len,
+        .out_profile = &profile,
+    }));
+    try std.testing.expectEqualSlices(i64, &.{ 1, 2 }, &node_keys);
+    try std.testing.expectEqualSlices(i64, &.{1}, &edge_keys);
+    try std.testing.expectEqual(@as(u64, 2), profile.table_rows);
+    try std.testing.expectEqual(@as(u64, 2), profile.fts_rows);
+    try std.testing.expectEqual(@as(u64, 1), profile.vector_rows);
+    try std.testing.expectEqual(@as(u64, 4), profile.payload_bytes);
+
+    const handle = databaseHandle(db).?;
+    {
+        var rows = try handle.db.prepare("select count(*) from records");
+        defer rows.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try rows.step());
+        try std.testing.expectEqual(@as(i64, 2), rows.columnInt64(0));
+        var index = try handle.db.prepare("select count(*) from sqlite_schema where name='records_body_idx'");
+        defer index.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try index.step());
+        try std.testing.expectEqual(@as(i64, 1), index.columnInt64(0));
+    }
+
+    var payload_results: zova_graph_edge_payload_results = .{ .items = null, .len = 0 };
+    defer zova_graph_edge_payload_results_free(&payload_results);
+    try std.testing.expectEqual(zova_status.OK, zova_graph_edge_payload_get_many(&.{
+        .db = db,
+        .graph_name = "app",
+        .edge_keys = &edge_keys,
+        .key_count = 1,
+        .out_results = &payload_results,
+    }));
+    try std.testing.expectEqualSlices(u8, &payload, payload_results.items.?[0].payload.?[0..payload.len]);
+    const replacement_payload = [_]u8{9};
+    const replacements = [_]zova_graph_edge_payload_replacement{.{ .edge_key = edge_keys[0], .payload = &replacement_payload, .payload_len = 1 }};
+    try std.testing.expectEqual(zova_status.OK, zova_graph_edge_payload_replace_many(&.{
+        .db = db,
+        .graph_name = "app",
+        .replacements = &replacements,
+        .replacement_count = 1,
+    }));
+    zova_graph_edge_payload_results_free(&payload_results);
+    try std.testing.expectEqual(zova_status.OK, zova_graph_edge_payload_get_many(&.{
+        .db = db,
+        .graph_name = "app",
+        .edge_keys = &edge_keys,
+        .key_count = 1,
+        .out_results = &payload_results,
+    }));
+    try std.testing.expectEqualSlices(u8, &replacement_payload, payload_results.items.?[0].payload.?[0..1]);
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_rollback(&.{ .db = db }));
+    {
+        var schema = try handle.db.prepare("select count(*) from sqlite_schema where name='records'");
+        defer schema.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try schema.step());
+        try std.testing.expectEqual(@as(i64, 0), schema.columnInt64(0));
+    }
+
+    var rejected_build: ?*zova_fresh_build = null;
+    try std.testing.expectEqual(zova_status.OK, zova_fresh_build_begin(&.{ .db = db, .out_build = &rejected_build }));
+    defer zova_fresh_build_destroy(rejected_build);
+    try std.testing.expectEqual(zova_status.OK, zova_fresh_build_graph(&.{
+        .build = rejected_build,
+        .graph_name = "rejected",
+        .nodes = &nodes,
+        .nodes_len = nodes.len,
+        .edges = &edges,
+        .edges_len = edges.len,
+    }));
+    var unchanged_node_keys = [_]i64{ 71, 72 };
+    var unchanged_edge_keys = [_]i64{73};
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_fresh_build_finish(&.{
+        .build = rejected_build,
+        .out_node_keys = &unchanged_node_keys,
+        .out_node_keys_capacity = 0,
+        .out_edge_keys = &unchanged_edge_keys,
+        .out_edge_keys_capacity = 0,
+        .out_profile = null,
+    }));
+    try std.testing.expectEqualSlices(i64, &.{ 71, 72 }, &unchanged_node_keys);
+    try std.testing.expectEqualSlices(i64, &.{73}, &unchanged_edge_keys);
+    try std.testing.expect(!(try handle.db.hasGraph("rejected")));
 }
 
 test "c abi manages bundled extension lifecycle" {

@@ -24,10 +24,13 @@ for databases opened through an unrelated system SQLite build.
 Zova 0.24.0 is the storage optimization release. Graphs and vectors
 use compact private integer keys, vector norms live with their vectors, graph
 edge batches resolve endpoints once, and large exact searches use adaptive
-top-k selection. Format 9 dictionaries graph edge types and adds an atomic
-fresh-store graph builder with ordinal endpoints and aligned opaque keys. The
-existing keyed APIs remain the incremental and replay path; public graph APIs
-continue to accept and return edge-type strings.
+top-k selection. Format 9 dictionaries graph edge types and adds one opaque
+payload BLOB to each authoritative
+graph edge without adding payload bytes to adjacency indexes. Additive C APIs
+provide payload-aware prepared graph builds, keyed payload reads/replacements,
+and an atomic fresh-build session for predeclared table, FTS, graph, and vector
+targets. Existing keyed APIs remain the incremental and replay path; public
+graph APIs continue to accept and return edge-type strings.
 
 ## Contents
 

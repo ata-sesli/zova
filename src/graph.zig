@@ -273,6 +273,7 @@ pub const graph_edges_schema_sql =
     \\  edge_type_key integer not null,
     \\  to_node_key integer not null,
     \\  created_order integer not null,
+    \\  payload blob not null default x'',
     \\  foreign key (graph_key) references _zova_graphs(graph_key) on delete cascade,
     \\  foreign key (graph_key, from_node_key) references _zova_graph_nodes(graph_key, node_key) on delete cascade,
     \\  foreign key (graph_key, to_node_key) references _zova_graph_nodes(graph_key, node_key) on delete cascade,
@@ -391,6 +392,7 @@ pub const FreshGraphEdgeInput = struct {
     from_node_ordinal: usize,
     edge_type: []const u8,
     to_node_ordinal: usize,
+    payload: []const u8 = &.{},
 };
 
 pub const FreshGraphBuildProfile = struct {
@@ -401,6 +403,31 @@ pub const FreshGraphBuildProfile = struct {
     node_load_ms: f64 = 0,
     edge_load_ms: f64 = 0,
     index_build_ms: f64 = 0,
+    payload_bytes: u64 = 0,
+};
+
+pub const GraphEdgePayloadReplacement = struct {
+    edge_key: i64,
+    payload: []const u8,
+};
+
+pub const GraphEdgePayloadLookup = struct {
+    found: bool,
+    edge_key: i64,
+    payload: ?[]u8 = null,
+
+    pub fn deinit(self: *GraphEdgePayloadLookup, allocator: std.mem.Allocator) void {
+        if (self.payload) |value| allocator.free(value);
+    }
+};
+
+pub const GraphEdgePayloadLookupList = struct {
+    items: []GraphEdgePayloadLookup,
+
+    pub fn deinit(self: *GraphEdgePayloadLookupList, allocator: std.mem.Allocator) void {
+        for (self.items) |*item| item.deinit(allocator);
+        allocator.free(self.items);
+    }
 };
 
 pub const GraphEdge = struct {
@@ -1054,9 +1081,10 @@ pub const Database = struct {
 
         const edge_start = graphProfileTimestamp();
         var edge_insert = try self.prepareSchema(
-            "insert into {s}_zova_graph_edges(edge_key,graph_key,from_node_key,edge_type_key,to_node_key,created_order) values(?,1,?,?,?,?)",
+            "insert into {s}_zova_graph_edges(edge_key,graph_key,from_node_key,edge_type_key,to_node_key,created_order,payload) values(?,1,?,?,?,?,?)",
         );
         defer edge_insert.deinit();
+        var payload_bytes: u64 = 0;
         for (edges, edge_type_slots, 0..) |edge, type_slot, index| {
             const edge_key: i64 = @intCast(index + 1);
             try edge_insert.bindInt64(1, edge_key);
@@ -1064,11 +1092,16 @@ pub const Database = struct {
             try edge_insert.bindInt64(3, @intCast(type_slot + 1));
             try edge_insert.bindInt64(4, @intCast(edge.to_node_ordinal + 1));
             try edge_insert.bindInt64(5, edge_key);
+            try edge_insert.bindBlobBorrowed(6, edge.payload);
+            payload_bytes = std.math.add(u64, payload_bytes, edge.payload.len) catch return error.InvalidArgument;
             if ((try edge_insert.step()) != .done or self.sqlite_db.changes() != 1) return error.GraphInvalid;
             try edge_insert.reset();
             try edge_insert.clearBindings();
         }
-        if (profile) |value| value.edge_load_ms = graphProfileElapsedMs(edge_start);
+        if (profile) |value| {
+            value.edge_load_ms = graphProfileElapsedMs(edge_start);
+            value.payload_bytes = payload_bytes;
+        }
 
         const indexes_start = graphProfileTimestamp();
         try self.createGraphSecondaryIndexes();
@@ -2220,6 +2253,72 @@ pub const Database = struct {
         }
         if (seen != keys.len) return error.GraphInvalid;
         return .{ .items = items };
+    }
+
+    pub fn graphEdgePayloadsGetMany(self: *Database, allocator: std.mem.Allocator, graph_name: []const u8, keys: []const i64) Error!GraphEdgePayloadLookupList {
+        try validateGraphName(graph_name);
+        for (keys) |key| if (key <= 0) return error.InvalidArgument;
+        const graph_key = try self.graphKeyForRead(graph_name);
+        var items = try allocator.alloc(GraphEdgePayloadLookup, keys.len);
+        errdefer allocator.free(items);
+        for (keys, items) |key, *item| item.* = .{ .found = false, .edge_key = key };
+        errdefer for (items) |*item| item.deinit(allocator);
+        if (keys.len == 0) return .{ .items = items };
+
+        try self.stageOpaqueKeys("_zova_graph_edge_payload_keys", keys);
+        defer self.clearOpaqueKeys("_zova_graph_edge_payload_keys");
+        var stmt = try self.prepareSchema(
+            \\select batch.ordinal,e.edge_key,e.payload
+            \\from temp._zova_graph_edge_payload_keys batch
+            \\left join {s}_zova_graph_edges e on e.graph_key=?1 and e.edge_key=batch.row_key
+            \\order by batch.ordinal
+        );
+        defer stmt.deinit();
+        try stmt.bindInt64(1, graph_key);
+        var seen: usize = 0;
+        while ((try stmt.step()) == .row) : (seen += 1) {
+            const ordinal = stmt.columnInt64(0);
+            if (ordinal < 0 or @as(usize, @intCast(ordinal)) >= items.len) return error.GraphInvalid;
+            const item = &items[@intCast(ordinal)];
+            if (stmt.columnType(1) == .null) continue;
+            if (stmt.columnInt64(1) != item.edge_key) return error.GraphInvalid;
+            item.payload = try allocator.dupe(u8, stmt.columnBlob(2));
+            item.found = true;
+        }
+        if (seen != keys.len) return error.GraphInvalid;
+        return .{ .items = items };
+    }
+
+    pub fn replaceGraphEdgePayloads(self: *Database, graph_name: []const u8, replacements: []const GraphEdgePayloadReplacement) Error!void {
+        try validateGraphName(graph_name);
+        for (replacements) |replacement| if (replacement.edge_key <= 0) return error.InvalidArgument;
+        const graph_key = try self.graphKeyForRead(graph_name);
+        if (replacements.len == 0) return;
+
+        const keys = try std.heap.c_allocator.alloc(i64, replacements.len);
+        defer std.heap.c_allocator.free(keys);
+        for (replacements, keys) |replacement, *key| key.* = replacement.edge_key;
+        try self.stageOpaqueKeys("_zova_graph_edge_payload_replace_keys", keys);
+        defer self.clearOpaqueKeys("_zova_graph_edge_payload_replace_keys");
+        var validate = try self.prepareSchema(
+            \\select count(*)
+            \\from temp._zova_graph_edge_payload_replace_keys batch
+            \\join {s}_zova_graph_edges e on e.graph_key=?1 and e.edge_key=batch.row_key
+        );
+        defer validate.deinit();
+        try validate.bindInt64(1, graph_key);
+        if ((try validate.step()) != .row or validate.columnInt64(0) != @as(i64, @intCast(replacements.len))) return error.GraphEdgeNotFound;
+
+        var update = try self.prepareSchema("update {s}_zova_graph_edges set payload=?1 where graph_key=?2 and edge_key=?3");
+        defer update.deinit();
+        for (replacements) |replacement| {
+            try update.bindBlobBorrowed(1, replacement.payload);
+            try update.bindInt64(2, graph_key);
+            try update.bindInt64(3, replacement.edge_key);
+            if ((try update.step()) != .done or self.sqlite_db.changes() != 1) return error.GraphEdgeNotFound;
+            try update.reset();
+            try update.clearBindings();
+        }
     }
 
     fn stageOpaqueKeys(self: *Database, comptime table: []const u8, keys: []const i64) Error!void {

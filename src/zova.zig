@@ -174,6 +174,9 @@ pub const GraphNode = graph_impl.GraphNode;
 pub const GraphEdgeInput = graph_impl.GraphEdgeInput;
 pub const FreshGraphEdgeInput = graph_impl.FreshGraphEdgeInput;
 pub const FreshGraphBuildProfile = graph_impl.FreshGraphBuildProfile;
+pub const GraphEdgePayloadReplacement = graph_impl.GraphEdgePayloadReplacement;
+pub const GraphEdgePayloadLookup = graph_impl.GraphEdgePayloadLookup;
+pub const GraphEdgePayloadLookupList = graph_impl.GraphEdgePayloadLookupList;
 pub const GraphEdge = graph_impl.GraphEdge;
 pub const GraphNeighborDirection = graph_impl.GraphNeighborDirection;
 pub const GraphNeighborsOptions = graph_impl.GraphNeighborsOptions;
@@ -1090,6 +1093,22 @@ pub const Database = struct {
         var graphs = self.graphDatabase();
         try graphs.putGraphEdgesKeyed(inputs, out_keys);
         if (self.bound_graph_store != null and inputs.len != 0) try incrementBoundGraphEpoch(&self.sqlite_db);
+        try self.finishGraphKeyedMutation(scope);
+        finished = true;
+    }
+
+    pub fn graphEdgePayloadsGetMany(self: *Database, allocator: std.mem.Allocator, graph_name: []const u8, keys: []const i64) Error!GraphEdgePayloadLookupList {
+        var graphs = self.graphDatabase();
+        return try graphs.graphEdgePayloadsGetMany(allocator, graph_name, keys);
+    }
+
+    pub fn replaceGraphEdgePayloads(self: *Database, graph_name: []const u8, replacements: []const GraphEdgePayloadReplacement) Error!void {
+        const scope = try self.beginGraphKeyedMutation();
+        var finished = false;
+        errdefer if (!finished) self.rollbackGraphKeyedMutation(scope) catch {};
+        var graphs = self.graphDatabase();
+        try graphs.replaceGraphEdgePayloads(graph_name, replacements);
+        if (self.bound_graph_store != null and replacements.len != 0) try incrementBoundGraphEpoch(&self.sqlite_db);
         try self.finishGraphKeyedMutation(scope);
         finished = true;
     }
@@ -2821,7 +2840,7 @@ fn copyGraphStorage(
     }
 
     var edges = try prepareSchemaSql(source,
-        \\select g.name, from_node.node_id, et.name, to_node.node_id, e.created_order
+        \\select g.name, from_node.node_id, et.name, to_node.node_id, e.created_order, e.payload
         \\from {s}_zova_graph_edges e
         \\join {s}_zova_graphs g on g.graph_key = e.graph_key
         \\join {s}_zova_graph_edge_types et on et.graph_key=e.graph_key and et.edge_type_key=e.edge_type_key
@@ -2832,10 +2851,10 @@ fn copyGraphStorage(
     defer edges.deinit();
     var insert_edge = try prepareSchemaSql(destination,
         \\insert into {s}_zova_graph_edges
-        \\  (graph_key, from_node_key, edge_type_key, to_node_key, created_order)
+        \\  (graph_key, from_node_key, edge_type_key, to_node_key, created_order, payload)
         \\select g.graph_key, from_node.node_key,
         \\  (select edge_type_key from {s}_zova_graph_edge_types where graph_key=g.graph_key and name=?),
-        \\  to_node.node_key, ?
+        \\  to_node.node_key, ?, ?
         \\from {s}_zova_graphs g
         \\join {s}_zova_graph_nodes from_node on from_node.graph_key = g.graph_key and from_node.node_id = ?
         \\join {s}_zova_graph_nodes to_node on to_node.graph_key = g.graph_key and to_node.node_id = ?
@@ -2857,9 +2876,10 @@ fn copyGraphStorage(
 
         try insert_edge.bindText(1, edges.columnText(2));
         try insert_edge.bindInt64(2, edges.columnInt64(4));
-        try insert_edge.bindText(3, edges.columnText(1));
-        try insert_edge.bindText(4, edges.columnText(3));
-        try insert_edge.bindText(5, edges.columnText(0));
+        try insert_edge.bindBlobBorrowed(3, edges.columnBlob(5));
+        try insert_edge.bindText(4, edges.columnText(1));
+        try insert_edge.bindText(5, edges.columnText(3));
+        try insert_edge.bindText(6, edges.columnText(0));
         std.debug.assert((try insert_edge.step()) == .done);
         try insert_edge.reset();
         try insert_edge.clearBindings();
@@ -3134,7 +3154,7 @@ fn validateAttachedGraphSchema(db: *sqlite.Database, comptime schema_name: []con
     const edge_type_columns = [_][]const u8{ "edge_type_key", "graph_key", "name" };
     try validateAttachedRequiredTable(db, schema_name, graph_impl.graph_edge_types_table, &edge_type_columns, graph_impl.graph_edge_types_schema_sql);
 
-    const edge_columns = [_][]const u8{ "edge_key", "graph_key", "from_node_key", "edge_type_key", "to_node_key", "created_order" };
+    const edge_columns = [_][]const u8{ "edge_key", "graph_key", "from_node_key", "edge_type_key", "to_node_key", "created_order", "payload" };
     try validateAttachedRequiredTable(db, schema_name, graph_impl.graph_edges_table, &edge_columns, graph_impl.graph_edges_schema_sql);
 }
 
@@ -3947,6 +3967,7 @@ fn validateGraphSchema(db: *sqlite.Database) Error!void {
         "edge_type_key",
         "to_node_key",
         "created_order",
+        "payload",
     };
     try validateRequiredTable(db, graph_impl.graph_edges_table, &edge_columns, graph_impl.graph_edges_schema_sql);
 }
@@ -5839,7 +5860,7 @@ test "open rejects future format version" {
         try raw.exec(
             \\create table _zova_meta (key text primary key, value text not null);
             \\insert into _zova_meta (key, value) values ('magic', 'zova');
-            \\insert into _zova_meta (key, value) values ('format_version', '10');
+            \\insert into _zova_meta (key, value) values ('format_version', '11');
         );
     }
 

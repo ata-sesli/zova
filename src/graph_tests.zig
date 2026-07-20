@@ -156,6 +156,7 @@ test "graph v9 schema interns edge types behind integer keys" {
         .{ .name = "edge_type_key", .kind = "INTEGER", .not_null = 1, .primary_key = 0 },
         .{ .name = "to_node_key", .kind = "INTEGER", .not_null = 1, .primary_key = 0 },
         .{ .name = "created_order", .kind = "INTEGER", .not_null = 1, .primary_key = 0 },
+        .{ .name = "payload", .kind = "BLOB", .not_null = 1, .primary_key = 0 },
     });
 
     const expected_indexes = [_][]const u8{
@@ -442,6 +443,66 @@ test "prepared fresh keyed graph build preserves input keys and rejects invalid 
     try std.testing.expectEqualSlices(i64, &.{ 41, 42 }, &rejected_node_keys);
     try std.testing.expectEqualSlices(i64, &.{43}, &rejected_edge_keys);
     try std.testing.expect(!(try invalid_db.hasGraph("app")));
+}
+
+test "prepared fresh graph edge payloads round trip replace and roll back atomically" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "prepared-edge-payloads.zova");
+    var db = try zova.Database.create(path);
+    defer db.deinit();
+
+    const nodes = [_]zova.FreshGraphNodeInput{
+        .{ .node_id = "a", .kind = "node" },
+        .{ .node_id = "b", .kind = "node" },
+        .{ .node_id = "c", .kind = "node" },
+    };
+    const edges = [_]zova.FreshGraphEdgeInput{
+        .{ .from_node_ordinal = 0, .edge_type = "calls", .to_node_ordinal = 1, .payload = "first" },
+        .{ .from_node_ordinal = 1, .edge_type = "calls", .to_node_ordinal = 2, .payload = &.{ 0, 1, 2, 255 } },
+    };
+    var node_keys: [nodes.len]i64 = undefined;
+    var edge_keys: [edges.len]i64 = undefined;
+    var profile: zova.FreshGraphBuildProfile = .{};
+    try db.buildFreshGraphPreparedKeyedProfiled("app", &nodes, &edges, &node_keys, &edge_keys, &profile);
+    try std.testing.expectEqual(@as(u64, 9), profile.payload_bytes);
+
+    const requested = [_]i64{ edge_keys[1], edge_keys[0], edge_keys[1], 9999 };
+    var payloads = try db.graphEdgePayloadsGetMany(std.testing.allocator, "app", &requested);
+    defer payloads.deinit(std.testing.allocator);
+    try std.testing.expect(payloads.items[0].found);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 1, 2, 255 }, payloads.items[0].payload.?);
+    try std.testing.expectEqualStrings("first", payloads.items[1].payload.?);
+    try std.testing.expectEqualSlices(u8, payloads.items[0].payload.?, payloads.items[2].payload.?);
+    try std.testing.expect(!payloads.items[3].found);
+
+    try db.replaceGraphEdgePayloads("app", &.{
+        .{ .edge_key = edge_keys[0], .payload = "replaced" },
+        .{ .edge_key = edge_keys[1], .payload = &.{} },
+    });
+    var replaced = try db.graphEdgePayloadsGetMany(std.testing.allocator, "app", &edge_keys);
+    defer replaced.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("replaced", replaced.items[0].payload.?);
+    try std.testing.expectEqual(@as(usize, 0), replaced.items[1].payload.?.len);
+
+    try std.testing.expectError(error.GraphEdgeNotFound, db.replaceGraphEdgePayloads("app", &.{
+        .{ .edge_key = edge_keys[0], .payload = "must-roll-back" },
+        .{ .edge_key = 9999, .payload = "missing" },
+    }));
+    var after_failure = try db.graphEdgePayloadsGetMany(std.testing.allocator, "app", &edge_keys);
+    defer after_failure.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("replaced", after_failure.items[0].payload.?);
+
+    var backup_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const backup_path = try testingDbPath(&backup_buffer, tmp.sub_path[0..], "prepared-edge-payloads-backup.zova");
+    try db.backupTo(backup_path, .{});
+    var backup = try zova.Database.open(backup_path);
+    defer backup.deinit();
+    var copied = try backup.graphEdgePayloadsGetMany(std.testing.allocator, "app", &edge_keys);
+    defer copied.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("replaced", copied.items[0].payload.?);
+    try std.testing.expectEqual(@as(usize, 0), copied.items[1].payload.?.len);
 }
 
 test "prepared fresh keyed graph build rejects duplicate trusted input and rolls back caller work" {
@@ -1621,7 +1682,7 @@ test "graph workflow uses explicit notifications after commit" {
     try std.testing.expectEqual(@as(?zova.Notification, null), try sub.tryReceive(std.testing.allocator));
 }
 
-test "format version nine requires graph edge type dictionary" {
+test "format version nine requires graph edge type dictionary and edge payloads" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 

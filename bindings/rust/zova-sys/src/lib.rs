@@ -100,6 +100,11 @@ pub const ZOVA_GRAPH_TARGET_CONCEPT: zova_graph_target_type = 7;
 pub const ZOVA_GRAPH_TARGET_EXTERNAL: zova_graph_target_type = 8;
 pub const ZOVA_GRAPH_NEIGHBOR_OUTGOING: zova_graph_neighbor_direction = 0;
 pub const ZOVA_GRAPH_NEIGHBOR_INCOMING: zova_graph_neighbor_direction = 1;
+pub const ZOVA_FRESH_VALUE_NULL: c_int = 0;
+pub const ZOVA_FRESH_VALUE_INT64: c_int = 1;
+pub const ZOVA_FRESH_VALUE_FLOAT64: c_int = 2;
+pub const ZOVA_FRESH_VALUE_TEXT: c_int = 3;
+pub const ZOVA_FRESH_VALUE_BLOB: c_int = 4;
 pub const ZOVA_OPEN_READ_ONLY: u32 = 1 << 0;
 pub const ZOVA_BACKUP_NO_VERIFY: u32 = 1 << 0;
 pub const ZOVA_COMPACT_NO_VERIFY: u32 = 1 << 0;
@@ -122,6 +127,11 @@ pub struct zova_object_writer {
 
 #[repr(C)]
 pub struct zova_subscription {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct zova_fresh_build {
     _private: [u8; 0],
 }
 
@@ -439,6 +449,48 @@ pub struct zova_graph_keyed_edge_result {
 pub struct zova_graph_keyed_edge_results {
     pub items: *mut zova_graph_keyed_edge_result,
     pub len: usize,
+}
+
+#[repr(C)]
+pub struct zova_graph_edge_payload_result {
+    pub found: u8,
+    pub edge_key: i64,
+    pub payload: *mut u8,
+    pub payload_len: usize,
+}
+#[repr(C)]
+pub struct zova_graph_edge_payload_results {
+    pub items: *mut zova_graph_edge_payload_result,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Default)]
+pub struct zova_fresh_build_profile {
+    pub validation_ms: f64,
+    pub table_load_ms: f64,
+    pub fts_load_ms: f64,
+    pub graph_load_ms: f64,
+    pub graph_validation_ms: f64,
+    pub graph_key_generation_ms: f64,
+    pub graph_node_load_ms: f64,
+    pub graph_edge_load_ms: f64,
+    pub vector_load_ms: f64,
+    pub index_build_ms: f64,
+    pub commit_ms: f64,
+    pub table_rows: u64,
+    pub fts_rows: u64,
+    pub vector_rows: u64,
+    pub payload_bytes: u64,
+}
+
+#[repr(C)]
+pub struct zova_fresh_value {
+    pub value_type: c_int,
+    pub int64_value: i64,
+    pub float64_value: f64,
+    pub bytes: *const u8,
+    pub bytes_len: usize,
 }
 
 #[repr(C)]
@@ -1151,12 +1203,35 @@ pub struct zova_graph_fresh_edge_input {
 }
 
 #[repr(C)]
+pub struct zova_graph_fresh_edge_payload_input {
+    pub from_node_ordinal: usize,
+    pub edge_type: *const c_char,
+    pub to_node_ordinal: usize,
+    pub payload: *const u8,
+    pub payload_len: usize,
+}
+
+#[repr(C)]
 pub struct zova_graph_build_fresh_keyed_request {
     pub db: *mut zova_database,
     pub graph_name: *const c_char,
     pub nodes: *const zova_graph_fresh_node_input,
     pub nodes_len: usize,
     pub edges: *const zova_graph_fresh_edge_input,
+    pub edges_len: usize,
+    pub out_node_keys: *mut i64,
+    pub out_node_keys_capacity: usize,
+    pub out_edge_keys: *mut i64,
+    pub out_edge_keys_capacity: usize,
+}
+
+#[repr(C)]
+pub struct zova_graph_build_fresh_prepared_keyed_with_payloads_request {
+    pub db: *mut zova_database,
+    pub graph_name: *const c_char,
+    pub nodes: *const zova_graph_fresh_node_input,
+    pub nodes_len: usize,
+    pub edges: *const zova_graph_fresh_edge_payload_input,
     pub edges_len: usize,
     pub out_node_keys: *mut i64,
     pub out_node_keys_capacity: usize,
@@ -1293,6 +1368,68 @@ pub struct zova_graph_edges_get_many_keyed_request {
     pub edge_keys: *const i64,
     pub key_count: usize,
     pub out_results: *mut zova_graph_keyed_edge_results,
+}
+
+#[repr(C)]
+pub struct zova_graph_edge_payload_get_many_request {
+    pub db: *mut zova_database,
+    pub graph_name: *const c_char,
+    pub edge_keys: *const i64,
+    pub key_count: usize,
+    pub out_results: *mut zova_graph_edge_payload_results,
+}
+#[repr(C)]
+pub struct zova_graph_edge_payload_replacement {
+    pub edge_key: i64,
+    pub payload: *const u8,
+    pub payload_len: usize,
+}
+#[repr(C)]
+pub struct zova_graph_edge_payload_replace_many_request {
+    pub db: *mut zova_database,
+    pub graph_name: *const c_char,
+    pub replacements: *const zova_graph_edge_payload_replacement,
+    pub replacement_count: usize,
+}
+
+#[repr(C)]
+pub struct zova_fresh_build_begin_request {
+    pub db: *mut zova_database,
+    pub out_build: *mut *mut zova_fresh_build,
+}
+#[repr(C)]
+pub struct zova_fresh_build_rows_request {
+    pub build: *mut zova_fresh_build,
+    pub table_name: *const c_char,
+    pub column_names: *const *const c_char,
+    pub column_count: usize,
+    pub values: *const zova_fresh_value,
+    pub row_count: usize,
+}
+#[repr(C)]
+pub struct zova_fresh_build_graph_request {
+    pub build: *mut zova_fresh_build,
+    pub graph_name: *const c_char,
+    pub nodes: *const zova_graph_fresh_node_input,
+    pub nodes_len: usize,
+    pub edges: *const zova_graph_fresh_edge_payload_input,
+    pub edges_len: usize,
+}
+#[repr(C)]
+pub struct zova_fresh_build_vectors_request {
+    pub build: *mut zova_fresh_build,
+    pub collection_name: *const c_char,
+    pub vectors: *const zova_vector_input,
+    pub vectors_len: usize,
+}
+#[repr(C)]
+pub struct zova_fresh_build_finish_request {
+    pub build: *mut zova_fresh_build,
+    pub out_node_keys: *mut i64,
+    pub out_node_keys_capacity: usize,
+    pub out_edge_keys: *mut i64,
+    pub out_edge_keys_capacity: usize,
+    pub out_profile: *mut zova_fresh_build_profile,
 }
 
 #[repr(C)]
@@ -1554,6 +1691,19 @@ extern "C" {
     pub fn zova_graph_keyed_neighbor_results_free(results: *mut zova_graph_keyed_neighbor_results);
     pub fn zova_graph_keyed_node_results_free(results: *mut zova_graph_keyed_node_results);
     pub fn zova_graph_keyed_edge_results_free(results: *mut zova_graph_keyed_edge_results);
+    pub fn zova_graph_edge_payload_results_free(results: *mut zova_graph_edge_payload_results);
+    pub fn zova_fresh_build_begin(request: *const zova_fresh_build_begin_request) -> zova_status;
+    pub fn zova_fresh_build_table_rows(
+        request: *const zova_fresh_build_rows_request,
+    ) -> zova_status;
+    pub fn zova_fresh_build_fts_rows(request: *const zova_fresh_build_rows_request) -> zova_status;
+    pub fn zova_fresh_build_graph(request: *const zova_fresh_build_graph_request) -> zova_status;
+    pub fn zova_fresh_build_vectors(
+        request: *const zova_fresh_build_vectors_request,
+    ) -> zova_status;
+    pub fn zova_fresh_build_finish(request: *const zova_fresh_build_finish_request) -> zova_status;
+    pub fn zova_fresh_build_abort(build: *mut zova_fresh_build) -> zova_status;
+    pub fn zova_fresh_build_destroy(build: *mut zova_fresh_build);
     pub fn zova_graph_scan_results_free(results: *mut zova_graph_scan_results);
     pub fn zova_graph_walk_results_free(results: *mut zova_graph_walk_results);
     pub fn zova_graph_create(request: *const zova_graph_create_request) -> zova_status;
@@ -1593,6 +1743,9 @@ extern "C" {
     pub fn zova_graph_build_fresh_prepared_keyed(
         request: *const zova_graph_build_fresh_keyed_request,
     ) -> zova_status;
+    pub fn zova_graph_build_fresh_prepared_keyed_with_payloads(
+        request: *const zova_graph_build_fresh_prepared_keyed_with_payloads_request,
+    ) -> zova_status;
     pub fn zova_graph_node_get(request: *const zova_graph_node_get_request) -> zova_status;
     pub fn zova_graph_node_exists(request: *const zova_graph_node_exists_request) -> zova_status;
     pub fn zova_graph_node_delete(request: *const zova_graph_node_delete_request) -> zova_status;
@@ -1618,6 +1771,12 @@ extern "C" {
     ) -> zova_status;
     pub fn zova_graph_edges_get_many_keyed(
         request: *const zova_graph_edges_get_many_keyed_request,
+    ) -> zova_status;
+    pub fn zova_graph_edge_payload_get_many(
+        request: *const zova_graph_edge_payload_get_many_request,
+    ) -> zova_status;
+    pub fn zova_graph_edge_payload_replace_many(
+        request: *const zova_graph_edge_payload_replace_many_request,
     ) -> zova_status;
     pub fn zova_graph_degree_many_keyed(
         request: *const zova_graph_degree_many_keyed_request,

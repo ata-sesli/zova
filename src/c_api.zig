@@ -4,6 +4,7 @@
 //! ABI type aliases only. Implementation details live in `c_api_internal.zig`.
 const internal = @import("c_api_internal.zig");
 pub const zova_database = internal.zova_database;
+pub const zova_fresh_build = internal.zova_fresh_build;
 pub const zova_object_writer = internal.zova_object_writer;
 pub const zova_statement = internal.zova_statement;
 pub const zova_subscription = internal.zova_subscription;
@@ -150,7 +151,9 @@ pub const zova_graph_node_put_many_request = internal.zova_graph_node_put_many_r
 pub const zova_graph_node_put_many_keyed_request = internal.zova_graph_node_put_many_keyed_request;
 pub const zova_graph_fresh_node_input = internal.zova_graph_fresh_node_input;
 pub const zova_graph_fresh_edge_input = internal.zova_graph_fresh_edge_input;
+pub const zova_graph_fresh_edge_payload_input = internal.zova_graph_fresh_edge_payload_input;
 pub const zova_graph_build_fresh_keyed_request = internal.zova_graph_build_fresh_keyed_request;
+pub const zova_graph_build_fresh_prepared_keyed_with_payloads_request = internal.zova_graph_build_fresh_prepared_keyed_with_payloads_request;
 pub const zova_graph_node_get_request = internal.zova_graph_node_get_request;
 pub const zova_graph_node_exists_request = internal.zova_graph_node_exists_request;
 pub const zova_graph_node_delete_request = internal.zova_graph_node_delete_request;
@@ -171,6 +174,18 @@ pub const zova_graph_keyed_edge_result = internal.zova_graph_keyed_edge_result;
 pub const zova_graph_keyed_edge_results = internal.zova_graph_keyed_edge_results;
 pub const zova_graph_nodes_get_many_keyed_request = internal.zova_graph_nodes_get_many_keyed_request;
 pub const zova_graph_edges_get_many_keyed_request = internal.zova_graph_edges_get_many_keyed_request;
+pub const zova_graph_edge_payload_result = internal.zova_graph_edge_payload_result;
+pub const zova_graph_edge_payload_results = internal.zova_graph_edge_payload_results;
+pub const zova_graph_edge_payload_get_many_request = internal.zova_graph_edge_payload_get_many_request;
+pub const zova_graph_edge_payload_replacement = internal.zova_graph_edge_payload_replacement;
+pub const zova_graph_edge_payload_replace_many_request = internal.zova_graph_edge_payload_replace_many_request;
+pub const zova_fresh_build_profile = internal.zova_fresh_build_profile;
+pub const zova_fresh_value = internal.zova_fresh_value;
+pub const zova_fresh_build_begin_request = internal.zova_fresh_build_begin_request;
+pub const zova_fresh_build_rows_request = internal.zova_fresh_build_rows_request;
+pub const zova_fresh_build_graph_request = internal.zova_fresh_build_graph_request;
+pub const zova_fresh_build_vectors_request = internal.zova_fresh_build_vectors_request;
+pub const zova_fresh_build_finish_request = internal.zova_fresh_build_finish_request;
 pub const zova_graph_degree_request = internal.zova_graph_degree_request;
 pub const zova_graph_degree_many_keyed_request = internal.zova_graph_degree_many_keyed_request;
 pub const zova_graph_scan_request = internal.zova_graph_scan_request;
@@ -270,6 +285,34 @@ export fn zova_graph_keyed_node_results_free(results: ?*zova_graph_keyed_node_re
 }
 export fn zova_graph_keyed_edge_results_free(results: ?*zova_graph_keyed_edge_results) callconv(.c) void {
     return internal.zova_graph_keyed_edge_results_free(results);
+}
+export fn zova_graph_edge_payload_results_free(results: ?*zova_graph_edge_payload_results) callconv(.c) void {
+    return internal.zova_graph_edge_payload_results_free(results);
+}
+
+export fn zova_fresh_build_begin(request: ?*const zova_fresh_build_begin_request) callconv(.c) zova_status {
+    return internal.zova_fresh_build_begin(request);
+}
+export fn zova_fresh_build_table_rows(request: ?*const zova_fresh_build_rows_request) callconv(.c) zova_status {
+    return internal.zova_fresh_build_table_rows(request);
+}
+export fn zova_fresh_build_fts_rows(request: ?*const zova_fresh_build_rows_request) callconv(.c) zova_status {
+    return internal.zova_fresh_build_fts_rows(request);
+}
+export fn zova_fresh_build_graph(request: ?*const zova_fresh_build_graph_request) callconv(.c) zova_status {
+    return internal.zova_fresh_build_graph(request);
+}
+export fn zova_fresh_build_vectors(request: ?*const zova_fresh_build_vectors_request) callconv(.c) zova_status {
+    return internal.zova_fresh_build_vectors(request);
+}
+export fn zova_fresh_build_finish(request: ?*const zova_fresh_build_finish_request) callconv(.c) zova_status {
+    return internal.zova_fresh_build_finish(request);
+}
+export fn zova_fresh_build_abort(build: ?*zova_fresh_build) callconv(.c) zova_status {
+    return internal.zova_fresh_build_abort(build);
+}
+export fn zova_fresh_build_destroy(build: ?*zova_fresh_build) callconv(.c) void {
+    return internal.zova_fresh_build_destroy(build);
 }
 
 export fn zova_graph_scan_results_free(results: ?*zova_graph_scan_results) callconv(.c) void {
@@ -714,6 +757,10 @@ export fn zova_graph_build_fresh_prepared_keyed(request: ?*const zova_graph_buil
     return internal.zova_graph_build_fresh_prepared_keyed(request);
 }
 
+export fn zova_graph_build_fresh_prepared_keyed_with_payloads(request: ?*const zova_graph_build_fresh_prepared_keyed_with_payloads_request) callconv(.c) zova_status {
+    return internal.zova_graph_build_fresh_prepared_keyed_with_payloads(request);
+}
+
 export fn zova_graph_node_get(request: ?*const zova_graph_node_get_request) callconv(.c) zova_status {
     return internal.zova_graph_node_get(request);
 }
@@ -770,6 +817,12 @@ export fn zova_graph_nodes_get_many_keyed(request: ?*const zova_graph_nodes_get_
 }
 export fn zova_graph_edges_get_many_keyed(request: ?*const zova_graph_edges_get_many_keyed_request) callconv(.c) zova_status {
     return internal.zova_graph_edges_get_many_keyed(request);
+}
+export fn zova_graph_edge_payload_get_many(request: ?*const zova_graph_edge_payload_get_many_request) callconv(.c) zova_status {
+    return internal.zova_graph_edge_payload_get_many(request);
+}
+export fn zova_graph_edge_payload_replace_many(request: ?*const zova_graph_edge_payload_replace_many_request) callconv(.c) zova_status {
+    return internal.zova_graph_edge_payload_replace_many(request);
 }
 
 export fn zova_graph_degree(request: ?*const zova_graph_degree_request) callconv(.c) zova_status {

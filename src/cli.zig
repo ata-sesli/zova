@@ -7598,7 +7598,8 @@ fn validateGraphs(allocator: std.mem.Allocator, db: *zova.Database, report: *Dia
         \\select g.name, from_node.node_id, et.name, to_node.node_id,
         \\  from_node.node_id is null,
         \\  to_node.node_id is null,
-        \\  et.edge_type_key is null
+        \\  et.edge_type_key is null,
+        \\  typeof(e.payload) != 'blob'
         \\from {s}_zova_graph_edges e
         \\join {s}_zova_graphs g on g.graph_key = e.graph_key
         \\left join {s}_zova_graph_edge_types et on et.graph_key=e.graph_key and et.edge_type_key=e.edge_type_key
@@ -7619,6 +7620,7 @@ fn validateGraphs(allocator: std.mem.Allocator, db: *zova.Database, report: *Dia
         const to_node_id = edges.columnText(3);
         const missing_from = edges.columnInt64(4) != 0;
         const missing_to = edges.columnInt64(5) != 0;
+        const invalid_payload = edges.columnInt64(7) != 0;
         report.stats.graph_edges += 1;
 
         if (!isValidGraphAsciiName(graph_name, 128)) {
@@ -7640,6 +7642,9 @@ fn validateGraphs(allocator: std.mem.Allocator, db: *zova.Database, report: *Dia
         }
         if (missing_to) {
             try addGraphDiagnosticIssue(allocator, report, issues, "missing_edge_to_node", @errorName(error.GraphNodeNotFound), graph_name, to_node_id, edge_type);
+        }
+        if (invalid_payload) {
+            try addGraphDiagnosticIssue(allocator, report, issues, "edge_payload_invalid", @errorName(error.GraphInvalid), graph_name, from_node_id, edge_type);
         }
     }
 }

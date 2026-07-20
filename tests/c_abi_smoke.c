@@ -1714,6 +1714,17 @@ static void run_dynamic_extension_bundle_smoke(
 int main(int argc, char **argv) {
     expect_status(zova_graph_build_fresh_keyed(NULL), ZOVA_INVALID_ARGUMENT, "fresh graph null request");
     expect_status(zova_graph_build_fresh_prepared_keyed(NULL), ZOVA_INVALID_ARGUMENT, "prepared fresh graph null request");
+    expect_status(zova_graph_build_fresh_prepared_keyed_with_payloads(NULL), ZOVA_INVALID_ARGUMENT, "prepared payload graph null request");
+    expect_status(zova_graph_edge_payload_get_many(NULL), ZOVA_INVALID_ARGUMENT, "payload get null request");
+    expect_status(zova_graph_edge_payload_replace_many(NULL), ZOVA_INVALID_ARGUMENT, "payload replace null request");
+    expect_status(zova_fresh_build_begin(NULL), ZOVA_INVALID_ARGUMENT, "fresh builder null begin");
+    expect_status(zova_fresh_build_table_rows(NULL), ZOVA_INVALID_ARGUMENT, "fresh builder null table rows");
+    expect_status(zova_fresh_build_fts_rows(NULL), ZOVA_INVALID_ARGUMENT, "fresh builder null fts rows");
+    expect_status(zova_fresh_build_graph(NULL), ZOVA_INVALID_ARGUMENT, "fresh builder null graph");
+    expect_status(zova_fresh_build_vectors(NULL), ZOVA_INVALID_ARGUMENT, "fresh builder null vectors");
+    expect_status(zova_fresh_build_finish(NULL), ZOVA_INVALID_ARGUMENT, "fresh builder null finish");
+    expect_status(zova_fresh_build_abort(NULL), ZOVA_INVALID_ARGUMENT, "fresh builder null abort");
+    zova_fresh_build_destroy(NULL);
     if (argc != 2 && argc != 5) {
         fprintf(stderr, "usage: %s <db-path> [dynamic-library bundle-path trust-store-path]\n", argv[0]);
         return 2;

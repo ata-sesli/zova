@@ -138,7 +138,7 @@ pub fn main(init: std.process.Init) !void {
                 break :index prepared_len;
             },
         };
-        std.debug.print("sample variant={s} index={d} total_ms={d:.3} storage_bytes={d} validation_ms={d:.3} key_generation_ms={d:.3} nodes_ms={d:.3} edges_ms={d:.3} indexes_ms={d:.3}\n", .{ @tagName(variant), index + 1, sample.total_ms, sample.storage_bytes, sample.profile.validation_ms, sample.profile.key_generation_ms, sample.profile.node_load_ms, sample.profile.edge_load_ms, sample.profile.index_build_ms });
+        std.debug.print("sample variant={s} index={d} total_ms={d:.3} storage_bytes={d} payload_bytes={d} validation_ms={d:.3} key_generation_ms={d:.3} nodes_ms={d:.3} edges_ms={d:.3} indexes_ms={d:.3}\n", .{ @tagName(variant), index + 1, sample.total_ms, sample.storage_bytes, sample.profile.payload_bytes, sample.profile.validation_ms, sample.profile.key_generation_ms, sample.profile.node_load_ms, sample.profile.edge_load_ms, sample.profile.index_build_ms });
     }
     const incremental_median = median(&incremental);
     const fresh_median = median(&fresh);
