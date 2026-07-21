@@ -145,8 +145,16 @@ fn loadVectors(
     }
 }
 
-fn runStage(allocator: std.mem.Allocator, size: FixtureSize, fixture: Fixture, stage: Stage, ordinal: usize) !void {
-    const path = try std.fmt.allocPrintSentinel(allocator, "/tmp/zova-fresh-ablation-{s}-{s}-{d}.zova", .{ size.name, @tagName(stage), ordinal }, 0);
+fn runStage(
+    allocator: std.mem.Allocator,
+    size: FixtureSize,
+    fixture: Fixture,
+    stage: Stage,
+    policy: api.FreshBuildCachePolicy,
+    ordinal: usize,
+) !void {
+    api.setFreshBuildCachePolicyForBenchmark(policy);
+    const path = try std.fmt.allocPrintSentinel(allocator, "/tmp/zova-fresh-ablation-{s}-{s}-{s}-{d}.zova", .{ size.name, @tagName(stage), @tagName(policy), ordinal }, 0);
     std.Io.Dir.cwd().deleteFile(std.Io.Threaded.global_single_threaded.io(), path) catch {};
     defer std.Io.Dir.cwd().deleteFile(std.Io.Threaded.global_single_threaded.io(), path) catch {};
 
@@ -228,22 +236,52 @@ fn runStage(allocator: std.mem.Allocator, size: FixtureSize, fixture: Fixture, s
         .out_profile = &profile,
     }));
     const finish_ms = elapsedMs(finish_start);
+    const outer_commit_start = now();
     try requireOk(api.zova_database_commit(&.{ .db = db }));
+    const outer_commit_ms = elapsedMs(outer_commit_start);
     const total_ms = elapsedMs(total_start);
+    const cache_diagnostics = api.freshBuildCacheDiagnostics(build) orelse return error.InvalidArgument;
     const file_size = (try std.Io.Dir.cwd().statFile(std.Io.Threaded.global_single_threaded.io(), path, .{})).size;
     std.debug.print(
-        "ablation fixture={s} stage={s} total_ms={d:.3} graph_ms={d:.3} metadata_ms={d:.3} fts_ms={d:.3} node_vectors_ms={d:.3} token_vectors_ms={d:.3} finish_ms={d:.3} deferred_index_ms={d:.3} validation_ms={d:.3} commit_ms={d:.3} bytes={d} rows={d}/{d}/{d}\n",
-        .{ size.name, @tagName(stage), total_ms, graph_ms, metadata_ms, fts_ms, node_vector_ms, token_vector_ms, finish_ms, profile.index_build_ms, profile.validation_ms, profile.commit_ms, file_size, profile.table_rows, profile.fts_rows, profile.vector_rows },
+        "ablation fixture={s} policy={s} stage={s} total_ms={d:.3} graph_ms={d:.3} metadata_ms={d:.3} fts_ms={d:.3} node_vectors_ms={d:.3} token_vectors_ms={d:.3} finish_ms={d:.3} graph_and_deferred_index_ms={d:.3} deferred_index_ms={d:.3} validation_ms={d:.3} cache_restore_ms={d:.3} savepoint_release_ms={d:.3} outer_commit_ms={d:.3} bytes={d} rows={d}/{d}/{d}\n",
+        .{ size.name, @tagName(policy), @tagName(stage), total_ms, graph_ms, metadata_ms, fts_ms, node_vector_ms, token_vector_ms, finish_ms, profile.index_build_ms, cache_diagnostics.deferred_index_ms, profile.validation_ms, cache_diagnostics.cache_restore_ms, cache_diagnostics.transaction_finish_ms, outer_commit_ms, file_size, profile.table_rows, profile.fts_rows, profile.vector_rows },
     );
 }
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
-    if (args.len > 2) return error.InvalidArgument;
-    const size = if (args.len == 2 and std.mem.eql(u8, args[1], "--tops")) tops else deno;
+    var size = deno;
+    var full_only = false;
+    var policy: api.FreshBuildCachePolicy = .session;
+    var ordinal: usize = 0;
+    for (args[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "--tops")) {
+            size = tops;
+        } else if (std.mem.eql(u8, arg, "--full-only")) {
+            full_only = true;
+        } else if (std.mem.startsWith(u8, arg, "--policy=")) {
+            const value = arg["--policy=".len..];
+            if (std.mem.eql(u8, value, "graph-only"))
+                policy = .graph_only
+            else if (std.mem.eql(u8, value, "session"))
+                policy = .session
+            else if (std.mem.eql(u8, value, "graph-indexes"))
+                policy = .graph_and_deferred_indexes
+            else
+                return error.InvalidArgument;
+        } else if (std.mem.startsWith(u8, arg, "--ordinal=")) {
+            ordinal = try std.fmt.parseInt(usize, arg["--ordinal=".len..], 10);
+        } else {
+            return error.InvalidArgument;
+        }
+    }
     const fixture = try makeFixture(allocator, size);
-    inline for (std.meta.fields(Stage), 0..) |field, ordinal| {
-        try runStage(allocator, size, fixture, @enumFromInt(field.value), ordinal);
+    if (full_only) {
+        try runStage(allocator, size, fixture, .token_vectors, policy, ordinal);
+    } else {
+        inline for (std.meta.fields(Stage), 0..) |field, stage_ordinal| {
+            try runStage(allocator, size, fixture, @enumFromInt(field.value), policy, stage_ordinal);
+        }
     }
 }

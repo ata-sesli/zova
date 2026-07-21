@@ -97,9 +97,29 @@ const DeferredFreshIndex = struct {
     sql: [:0]u8,
 };
 
+pub const FreshBuildCachePolicy = enum {
+    graph_only,
+    session,
+    graph_and_deferred_indexes,
+};
+
+pub const FreshBuildCacheDiagnostics = struct {
+    deferred_index_ms: f64 = 0,
+    cache_restore_ms: f64 = 0,
+    transaction_finish_ms: f64 = 0,
+};
+
+var fresh_build_cache_policy: FreshBuildCachePolicy = .graph_and_deferred_indexes;
+
+/// Internal benchmark control. This is intentionally not exported through the C ABI.
+pub fn setFreshBuildCachePolicyForBenchmark(policy: FreshBuildCachePolicy) void {
+    fresh_build_cache_policy = policy;
+}
+
 const FreshBuildHandle = struct {
     database: *DatabaseHandle,
     owns_transaction: bool,
+    previous_cache_size: ?i64 = null,
     active: bool = true,
     deferred_indexes: std.ArrayList(DeferredFreshIndex) = .empty,
     prepared_tables: std.ArrayList([]u8) = .empty,
@@ -107,6 +127,7 @@ const FreshBuildHandle = struct {
     edge_keys: []i64 = &.{},
     graph_loaded: bool = false,
     profile: zova_fresh_build_profile = .{},
+    cache_diagnostics: FreshBuildCacheDiagnostics = .{},
 
     fn deinit(self: *FreshBuildHandle) void {
         for (self.deferred_indexes.items) |item| {
@@ -120,6 +141,13 @@ const FreshBuildHandle = struct {
         if (self.edge_keys.len != 0) allocator.free(self.edge_keys);
     }
 };
+
+/// Internal benchmark diagnostics. The build handle remains owned until destroy.
+pub fn freshBuildCacheDiagnostics(build_ptr: ?*zova_fresh_build) ?FreshBuildCacheDiagnostics {
+    const ptr = build_ptr orelse return null;
+    const build: *FreshBuildHandle = @ptrCast(@alignCast(ptr));
+    return build.cache_diagnostics;
+}
 
 const SqlFunctionRegistration = struct {
     name: [:0]u8,
@@ -3182,8 +3210,17 @@ fn freshBuildRollback(build: *FreshBuildHandle) void {
         build.database.db.rollbackToSavepoint("fresh_build_session") catch {};
         build.database.db.releaseSavepoint("fresh_build_session") catch {};
     }
+    freshBuildRestoreCache(build);
     build.database.fresh_build_active = false;
     build.active = false;
+}
+
+fn freshBuildRestoreCache(build: *FreshBuildHandle) void {
+    if (build.previous_cache_size == null) return;
+    const start = freshBuildTimestamp();
+    graph.restoreFreshBuildCache(&build.database.db.sqlite_db, build.previous_cache_size) catch {};
+    build.cache_diagnostics.cache_restore_ms += freshBuildElapsedMs(start);
+    build.previous_cache_size = null;
 }
 
 pub fn zova_fresh_build_begin(request: ?*const zova_fresh_build_begin_request) callconv(.c) zova_status {
@@ -3202,14 +3239,25 @@ pub fn zova_fresh_build_begin(request: ?*const zova_fresh_build_begin_request) c
     if ((empty.step() catch |err| return failDb(database, err)) != .row or empty.columnInt64(0) != 0) return failDb(database, error.InvalidArgument);
     const owns_transaction = sqlite.c.sqlite3_get_autocommit(database.db.sqlite_db.handle) != 0;
     if (owns_transaction) database.db.beginImmediate() catch |err| return failDb(database, err) else database.db.savepoint("fresh_build_session") catch |err| return failDb(database, err);
+    const previous_cache_size = if (fresh_build_cache_policy == .session)
+        graph.increaseFreshBuildCache(&database.db.sqlite_db) catch |err| {
+            if (owns_transaction) database.db.rollback() catch {} else {
+                database.db.rollbackToSavepoint("fresh_build_session") catch {};
+                database.db.releaseSavepoint("fresh_build_session") catch {};
+            }
+            return failDb(database, err);
+        }
+    else
+        null;
     const build = allocator.create(FreshBuildHandle) catch |err| {
+        graph.restoreFreshBuildCache(&database.db.sqlite_db, previous_cache_size) catch {};
         if (owns_transaction) database.db.rollback() catch {} else {
             database.db.rollbackToSavepoint("fresh_build_session") catch {};
             database.db.releaseSavepoint("fresh_build_session") catch {};
         }
         return failDb(database, err);
     };
-    build.* = .{ .database = database, .owns_transaction = owns_transaction };
+    build.* = .{ .database = database, .owns_transaction = owns_transaction, .previous_cache_size = previous_cache_size };
     build.profile.validation_ms = freshBuildElapsedMs(start);
     database.fresh_build_active = true;
     out.* = @ptrCast(build);
@@ -3344,12 +3392,21 @@ pub fn zova_fresh_build_finish(request: ?*const zova_fresh_build_finish_request)
         freshBuildRollback(build);
         return failDb(database, error.InvalidArgument);
     }
+    if (fresh_build_cache_policy == .graph_and_deferred_indexes) {
+        build.previous_cache_size = graph.increaseFreshBuildCache(&database.db.sqlite_db) catch |err| {
+            freshBuildRollback(build);
+            return failDb(database, err);
+        };
+    }
     const indexes_start = freshBuildTimestamp();
     for (build.deferred_indexes.items) |item| database.db.exec(item.sql) catch |err| {
         freshBuildRollback(build);
         return failDb(database, err);
     };
-    build.profile.index_build_ms += freshBuildElapsedMs(indexes_start);
+    const deferred_index_ms = freshBuildElapsedMs(indexes_start);
+    build.profile.index_build_ms += deferred_index_ms;
+    build.cache_diagnostics.deferred_index_ms = deferred_index_ms;
+    if (fresh_build_cache_policy == .graph_and_deferred_indexes) freshBuildRestoreCache(build);
     const validation_start = freshBuildTimestamp();
     var foreign_keys = database.db.prepare("pragma foreign_key_check") catch |err| {
         freshBuildRollback(build);
@@ -3373,6 +3430,8 @@ pub fn zova_fresh_build_finish(request: ?*const zova_fresh_build_finish_request)
         return failDb(database, err);
     };
     build.profile.commit_ms = freshBuildElapsedMs(commit_start);
+    build.cache_diagnostics.transaction_finish_ms = build.profile.commit_ms;
+    freshBuildRestoreCache(build);
     if (build.node_keys.len != 0) @memcpy(req.out_node_keys.?[0..build.node_keys.len], build.node_keys);
     if (build.edge_keys.len != 0) @memcpy(req.out_edge_keys.?[0..build.edge_keys.len], build.edge_keys);
     if (req.out_profile) |profile| profile.* = build.profile;
@@ -8793,6 +8852,8 @@ test "c abi fresh builder loads predeclared tables fts graph payloads and vector
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{ .path = path, .out_db = &db, .out_error_message = null }));
     defer _ = zova_database_close(db);
+    const handle = databaseHandle(db).?;
+    try handle.db.exec("pragma cache_size=-4096");
 
     try std.testing.expectEqual(zova_status.OK, zova_database_begin(&.{ .db = db }));
     try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{
@@ -8808,6 +8869,12 @@ test "c abi fresh builder loads predeclared tables fts graph payloads and vector
     var build: ?*zova_fresh_build = null;
     try std.testing.expectEqual(zova_status.OK, zova_fresh_build_begin(&.{ .db = db, .out_build = &build }));
     defer zova_fresh_build_destroy(build);
+    {
+        var cache_size = try handle.db.prepare("pragma cache_size");
+        defer cache_size.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try cache_size.step());
+        try std.testing.expectEqual(@as(i64, -4096), cache_size.columnInt64(0));
+    }
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_exec(&.{ .db = db, .sql = "select 1" }));
 
     const columns = [_]?[*:0]const u8{ "id", "body" };
@@ -8915,8 +8982,14 @@ test "c abi fresh builder loads predeclared tables fts graph payloads and vector
     try std.testing.expectEqual(@as(u64, 3), profile.fts_rows);
     try std.testing.expectEqual(@as(u64, 1), profile.vector_rows);
     try std.testing.expectEqual(@as(u64, 4), profile.payload_bytes);
+    try std.testing.expect(freshBuildCacheDiagnostics(build).?.cache_restore_ms > 0);
 
-    const handle = databaseHandle(db).?;
+    {
+        var cache_size = try handle.db.prepare("pragma cache_size");
+        defer cache_size.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try cache_size.step());
+        try std.testing.expectEqual(@as(i64, -4096), cache_size.columnInt64(0));
+    }
     {
         var rows = try handle.db.prepare("select count(*) from records");
         defer rows.deinit();
@@ -9021,6 +9094,10 @@ test "c abi fresh builder loads predeclared tables fts graph payloads and vector
         try std.testing.expectEqualSlices(i64, &.{1}, &aborted_edge_keys);
         try std.testing.expectEqual(zova_status.OK, zova_fresh_build_abort(aborted_build));
         try std.testing.expect(!(try handle.db.hasGraph("aborted")));
+        var cache_size = try handle.db.prepare("pragma cache_size");
+        defer cache_size.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try cache_size.step());
+        try std.testing.expectEqual(@as(i64, -4096), cache_size.columnInt64(0));
     }
 
     var rejected_build: ?*zova_fresh_build = null;
@@ -9055,6 +9132,12 @@ test "c abi fresh builder loads predeclared tables fts graph payloads and vector
     try std.testing.expectEqualSlices(i64, &.{ 71, 72 }, &finish_node_keys);
     try std.testing.expectEqualSlices(i64, &.{73}, &finish_edge_keys);
     try std.testing.expect(!(try handle.db.hasGraph("rejected")));
+    {
+        var cache_size = try handle.db.prepare("pragma cache_size");
+        defer cache_size.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try cache_size.step());
+        try std.testing.expectEqual(@as(i64, -4096), cache_size.columnInt64(0));
+    }
 
     var finish_only_build: ?*zova_fresh_build = null;
     try std.testing.expectEqual(zova_status.OK, zova_fresh_build_begin(&.{ .db = db, .out_build = &finish_only_build }));

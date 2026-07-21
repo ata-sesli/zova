@@ -919,8 +919,8 @@ pub const Database = struct {
         profile: ?*FreshGraphBuildProfile,
     ) Error!void {
         if (profile) |value| value.* = .{};
-        const previous_cache_size = try increaseFreshGraphCache(self.sqlite_db);
-        defer restoreFreshGraphCache(self.sqlite_db, previous_cache_size) catch {};
+        const previous_cache_size = try increaseFreshBuildCache(self.sqlite_db);
+        defer restoreFreshBuildCache(self.sqlite_db, previous_cache_size) catch {};
         const validation_start = graphProfileTimestamp();
         if (out_node_keys.len != nodes.len or out_edge_keys.len != edges.len) return error.InvalidArgument;
         try validateGraphName(graph_name);
@@ -1079,8 +1079,8 @@ pub const Database = struct {
         profile: ?*FreshGraphBuildProfile,
     ) Error!void {
         if (profile) |value| value.* = .{};
-        const previous_cache_size = try increaseFreshGraphCache(self.sqlite_db);
-        defer restoreFreshGraphCache(self.sqlite_db, previous_cache_size) catch {};
+        const previous_cache_size = try increaseFreshBuildCache(self.sqlite_db);
+        defer restoreFreshBuildCache(self.sqlite_db, previous_cache_size) catch {};
         const validation_start = graphProfileTimestamp();
         if (out_node_keys.len != nodes.len or out_edge_keys.len != edges.len) return error.InvalidArgument;
         try validateGraphName(graph_name);
@@ -2860,7 +2860,7 @@ fn graphProfileElapsedMs(start: std.Io.Timestamp) f64 {
     return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, std.time.ns_per_ms);
 }
 
-fn increaseFreshGraphCache(db: *sqlite.Database) Error!?i64 {
+pub fn increaseFreshBuildCache(db: *sqlite.Database) Error!?i64 {
     var cache_query = try db.prepare("pragma cache_size");
     defer cache_query.deinit();
     if ((try cache_query.step()) != .row) return error.SqliteError;
@@ -2880,7 +2880,7 @@ fn increaseFreshGraphCache(db: *sqlite.Database) Error!?i64 {
     return previous;
 }
 
-fn restoreFreshGraphCache(db: *sqlite.Database, previous: ?i64) Error!void {
+pub fn restoreFreshBuildCache(db: *sqlite.Database, previous: ?i64) Error!void {
     const value = previous orelse return;
     var buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintZ(&buffer, "pragma cache_size={d}", .{value}) catch return error.SqliteError;
