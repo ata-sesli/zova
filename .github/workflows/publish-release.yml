@@ -116,7 +116,13 @@ jobs:
           version="${{ inputs.version }}"
           tag="v$version"
           go_tag="bindings/go/v$version"
+          notes_file=".github/release-notes/v$version.md"
           head_commit="$(git rev-parse HEAD)"
+
+          if [ ! -f "$notes_file" ]; then
+            echo "missing release notes: $notes_file" >&2
+            exit 1
+          fi
 
           create_or_verify_tag() {
             tag_name="$1"
@@ -135,11 +141,12 @@ jobs:
 
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "GitHub Release already exists: $tag; uploading assets with --clobber"
+            gh release edit "$tag" --title "Zova $tag" --notes-file "$notes_file"
             gh release upload "$tag" zig-out/release-assets/* --clobber
           else
             gh release create "$tag" zig-out/release-assets/* \
               --title "Zova $tag" \
-              --notes "Zova $tag" \
+              --notes-file "$notes_file" \
               --verify-tag
           fi
 

@@ -4,12 +4,12 @@
 //! code should read release, ABI, storage-format, and dependency version values
 //! from this module instead of hardcoding them locally.
 
-pub const package_version = "0.24.0";
+pub const package_version = "0.25.0";
 
 pub const abi_version_major: u32 = 0;
-pub const abi_version_minor: u32 = 24;
+pub const abi_version_minor: u32 = 25;
 pub const abi_version_patch: u32 = 0;
-pub const abi_version_string = "0.24.0";
+pub const abi_version_string = "0.25.0";
 
 pub const format_version = "9";
 pub const sqlite_version = "3.53.2";

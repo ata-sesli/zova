@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 usage() {
     echo "usage: scripts/package-release.sh <version> [out-dir]" >&2
-    echo "example: scripts/package-release.sh 0.24.0" >&2
+    echo "example: scripts/package-release.sh 0.25.0" >&2
 }
 
 run() {
@@ -28,6 +28,7 @@ fi
 VERSION="${1#v}"
 TAG="v$VERSION"
 GO_TAG="bindings/go/v$VERSION"
+RELEASE_NOTES="$ROOT/.github/release-notes/$TAG.md"
 OUT_DIR="${2:-$ROOT/zig-out/release}"
 MANIFEST_VERSION="$(sed -n 's/^[[:space:]]*\.version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/build.zig.zon" | head -n 1)"
 DRY_RUN="${ZOVA_PACKAGE_RELEASE_DRY_RUN:-0}"
@@ -72,6 +73,10 @@ cd "$ROOT"
 require_command git
 require_command tar
 require_command cargo
+if [ ! -f "$RELEASE_NOTES" ]; then
+    echo "missing release notes: $RELEASE_NOTES" >&2
+    exit 1
+fi
 if [ "$DRY_RUN" -eq 0 ]; then
     require_command gh
 fi
@@ -82,9 +87,13 @@ if [ "$DRY_RUN" -eq 0 ] && ! gh auth status >/dev/null 2>&1; then
 fi
 
 if [ -n "$(git status --porcelain)" ]; then
-    echo "working tree is not clean; commit or stash changes before tagging a release" >&2
-    git status --short >&2
-    exit 1
+    if [ "$DRY_RUN" -ne 0 ]; then
+        echo "dry run: packaging the current uncommitted working tree"
+    else
+        echo "working tree is not clean; commit or stash changes before tagging a release" >&2
+        git status --short >&2
+        exit 1
+    fi
 fi
 
 CURRENT_BRANCH="$(git branch --show-current)"
@@ -152,6 +161,7 @@ cp -R scripts "$TMP/$PKG/"
 cp -R src "$TMP/$PKG/"
 cp -R tests "$TMP/$PKG/"
 cp -R vendor "$TMP/$PKG/"
+rm -rf "$TMP/$PKG/docs/superpowers"
 rm -rf "$TMP/$PKG/bindings/rust/target"
 rm -rf "$TMP/$PKG/bindings/python/rust"
 rm -rf "$TMP/$PKG/bindings/python/target"
@@ -503,7 +513,7 @@ if [ -z "$REMOTE_GO_TAG_COMMIT" ]; then
 else
     echo "reusing origin tag: $GO_TAG"
 fi
-run gh release create "$TAG" "$ARCHIVE" --title "Zova $TAG" --notes "Zova $TAG" --verify-tag
+run gh release create "$TAG" "$ARCHIVE" --title "Zova $TAG" --notes-file "$RELEASE_NOTES" --verify-tag
 
 GO_TAG_CREATED=0
 TAG_CREATED=0

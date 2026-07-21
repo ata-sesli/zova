@@ -34,13 +34,13 @@ fn f32_values(values: &[f32]) -> zova_sys::zova_vector_values {
 fn abi_version_and_status_names_are_available() {
     unsafe {
         assert_eq!(zova_sys::zova_abi_version_major(), 0);
-        assert_eq!(zova_sys::zova_abi_version_minor(), 24);
+        assert_eq!(zova_sys::zova_abi_version_minor(), 25);
         assert_eq!(zova_sys::zova_abi_version_patch(), 0);
         assert_eq!(
             CStr::from_ptr(zova_sys::zova_abi_version_string())
                 .to_str()
                 .unwrap(),
-            "0.24.0"
+            "0.25.0"
         );
         assert_eq!(
             CStr::from_ptr(zova_sys::zova_status_name(zova_sys::ZOVA_OK))

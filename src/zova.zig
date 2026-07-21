@@ -4967,7 +4967,7 @@ test "extension manifests validate names prefixes and duplicate registry prefixe
         .name = "current_abi",
         .version = "0.1.0",
         .storage_prefix = "_zova_ext_current_abi_",
-        .zova_abi_min = "0.24.0",
+        .zova_abi_min = version.abi_version_string,
     });
     try std.testing.expectError(error.ExtensionInvalid, extension_impl.validateManifest(.{
         .name = "malformed_abi",
@@ -4981,11 +4981,16 @@ test "extension manifests validate names prefixes and duplicate registry prefixe
         .storage_prefix = "_zova_ext_prefixed_abi_",
         .zova_abi_min = "v0.23.0",
     }));
+    var newer_abi_buffer: [32]u8 = undefined;
+    const newer_abi = try std.fmt.bufPrint(&newer_abi_buffer, "{d}.{d}.0", .{
+        version.abi_version_major,
+        version.abi_version_minor + 1,
+    });
     try std.testing.expectError(error.ExtensionIncompatible, extension_impl.validateManifest(.{
         .name = "newer_minor_abi",
         .version = "0.1.0",
         .storage_prefix = "_zova_ext_newer_minor_abi_",
-        .zova_abi_min = "0.25.0",
+        .zova_abi_min = newer_abi,
     }));
     try std.testing.expectError(error.ExtensionIncompatible, extension_impl.validateManifest(.{
         .name = "different_major_abi",

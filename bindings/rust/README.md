@@ -49,14 +49,14 @@ Use the safe crate for normal Rust applications:
 
 ```toml
 [dependencies]
-zova = "0.24.0"
+zova = "0.25.0"
 ```
 
 Use the raw FFI crate only when you want to call the C ABI directly:
 
 ```toml
 [dependencies]
-zova-sys = "0.24.0"
+zova-sys = "0.25.0"
 ```
 
 Both crates contain native code. The default build path compiles Zova's static C
@@ -68,8 +68,13 @@ users still need:
 
 Zova is still pre-1.0. The Rust API, C ABI, and `.zova` format are usable, but
 they may evolve before the 1.0 line. The current `.zova` `format_version` is
-`9`. Zova 0.24 does not migrate format-8 databases in place; keep a compatible
+`9`. Zova 0.25 does not migrate format-8 databases in place; keep a compatible
 backup and export data with a format-8 build before creating a format-9 database.
+
+The v0.25 opaque-key graph, payload, topology-scan, prepared-build, and generic
+fresh-build session APIs are available through raw `zova-sys`. The safe `zova`
+crate continues to expose the established graph CRUD and traversal API and does
+not yet wrap those low-level publication surfaces.
 
 ## Native Build
 
@@ -319,7 +324,7 @@ default, each operation verifies the destination after copying. Pass
 `RestoreOptions { verify: false }` only when you will verify separately.
 
 Diagnostic recovery commands such as `zova doctor`, `zova salvage --dry-run`,
-and `zova salvage <source> <destination>` are CLI-first. In v0.24, CLI salvage
+and `zova salvage <source> <destination>` are CLI-first. In v0.25, CLI salvage
 copies valid core data and uses extension salvage hooks for extension-owned
 storage. The Rust crates do not expose typed doctor/salvage report APIs yet,
 and library code should not parse the human text output as a stable binding
@@ -330,7 +335,7 @@ contract.
 Rust exposes lifecycle methods for extensions already present in the current
 process registry. The default registry includes bundled extensions such as
 `trgm`, so Rust applications can install, list, check, and drop `trgm` directly.
-The low-level `zova-sys` crate exposes the v0.24 C ABI for scalar SQL callback
+The low-level `zova-sys` crate exposes the v0.25 C ABI for scalar SQL callback
 registration and trusted `.zovaext` bundle loading. The safe Rust crate does not
 yet wrap those callback or bundle-loading APIs.
 
@@ -460,7 +465,7 @@ metadata join example.
 
 ## Bound Stores
 
-In v0.24, a `.zova` file may be bound to one object store, one vector store,
+In v0.25, a `.zova` file may be bound to one object store, one vector store,
 and one graph store through the native Zig API or CLI. The Rust object, vector,
 and graph methods above transparently use those stores after `Database::open`
 or `SharedDatabase::open`.

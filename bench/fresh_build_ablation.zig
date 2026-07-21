@@ -243,8 +243,8 @@ fn runStage(
     const cache_diagnostics = api.freshBuildCacheDiagnostics(build) orelse return error.InvalidArgument;
     const file_size = (try std.Io.Dir.cwd().statFile(std.Io.Threaded.global_single_threaded.io(), path, .{})).size;
     std.debug.print(
-        "ablation fixture={s} policy={s} stage={s} total_ms={d:.3} graph_ms={d:.3} metadata_ms={d:.3} fts_ms={d:.3} node_vectors_ms={d:.3} token_vectors_ms={d:.3} finish_ms={d:.3} graph_and_deferred_index_ms={d:.3} deferred_index_ms={d:.3} validation_ms={d:.3} cache_restore_ms={d:.3} savepoint_release_ms={d:.3} outer_commit_ms={d:.3} bytes={d} rows={d}/{d}/{d}\n",
-        .{ size.name, @tagName(policy), @tagName(stage), total_ms, graph_ms, metadata_ms, fts_ms, node_vector_ms, token_vector_ms, finish_ms, profile.index_build_ms, cache_diagnostics.deferred_index_ms, profile.validation_ms, cache_diagnostics.cache_restore_ms, cache_diagnostics.transaction_finish_ms, outer_commit_ms, file_size, profile.table_rows, profile.fts_rows, profile.vector_rows },
+        "ablation fixture={s} policy={s} stage={s} total_ms={d:.3} graph_ms={d:.3} metadata_ms={d:.3} fts_ms={d:.3} node_vectors_ms={d:.3} token_vectors_ms={d:.3} finish_ms={d:.3} graph_and_deferred_index_ms={d:.3} deferred_index_ms={d:.3} validation_ms={d:.3} baseline_fk_check_ms={d:.3} finish_fk_check_ms={d:.3} finish_fk_check_ran={} deferred_fk_pending={} validation_fast_path={} cache_restore_ms={d:.3} savepoint_release_ms={d:.3} outer_commit_ms={d:.3} bytes={d} rows={d}/{d}/{d}\n",
+        .{ size.name, @tagName(policy), @tagName(stage), total_ms, graph_ms, metadata_ms, fts_ms, node_vector_ms, token_vector_ms, finish_ms, profile.index_build_ms, cache_diagnostics.deferred_index_ms, profile.validation_ms, cache_diagnostics.baseline_foreign_key_check_ms, cache_diagnostics.foreign_key_check_ms, cache_diagnostics.foreign_key_check_ran, cache_diagnostics.deferred_foreign_keys_pending, cache_diagnostics.validation_fast_path, cache_diagnostics.cache_restore_ms, cache_diagnostics.transaction_finish_ms, outer_commit_ms, file_size, profile.table_rows, profile.fts_rows, profile.vector_rows },
     );
 }
 

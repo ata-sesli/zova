@@ -21,7 +21,7 @@ include = [
 ]
 
 [dependencies]
-zova-sys = { version = "0.24.0", path = "../zova-sys" }
+zova-sys = { version = "0.25.0", path = "../zova-sys" }
 
 [lib]
 path = "src/lib.rs"

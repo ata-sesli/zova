@@ -107,9 +107,20 @@ pub const FreshBuildCacheDiagnostics = struct {
     deferred_index_ms: f64 = 0,
     cache_restore_ms: f64 = 0,
     transaction_finish_ms: f64 = 0,
+    baseline_foreign_key_check_ms: f64 = 0,
+    baseline_foreign_key_check_ran: bool = false,
+    foreign_key_check_ms: f64 = 0,
+    foreign_key_check_ran: bool = false,
+    deferred_foreign_keys_pending: bool = false,
+    validation_fast_path: bool = false,
 };
 
 var fresh_build_cache_policy: FreshBuildCachePolicy = .graph_and_deferred_indexes;
+
+const FreshBuildValidationEvidence = struct {
+    foreign_keys_enforced: bool,
+    baseline_foreign_keys_validated: bool,
+};
 
 /// Internal benchmark control. This is intentionally not exported through the C ABI.
 pub fn setFreshBuildCachePolicyForBenchmark(policy: FreshBuildCachePolicy) void {
@@ -126,6 +137,7 @@ const FreshBuildHandle = struct {
     node_keys: []i64 = &.{},
     edge_keys: []i64 = &.{},
     graph_loaded: bool = false,
+    validation: FreshBuildValidationEvidence,
     profile: zova_fresh_build_profile = .{},
     cache_diagnostics: FreshBuildCacheDiagnostics = .{},
 
@@ -3202,6 +3214,33 @@ fn freshBuildLoadRows(build: *FreshBuildHandle, request: *const zova_fresh_build
     if (fts) build.profile.fts_rows = std.math.add(u64, build.profile.fts_rows, rows) catch return error.InvalidArgument else build.profile.table_rows = std.math.add(u64, build.profile.table_rows, rows) catch return error.InvalidArgument;
 }
 
+fn freshBuildRunForeignKeyCheck(database: *DatabaseHandle) !void {
+    var foreign_keys = try database.db.prepare("pragma foreign_key_check");
+    defer foreign_keys.deinit();
+    if ((try foreign_keys.step()) != .done) return error.InvalidArgument;
+}
+
+fn freshBuildForeignKeysEnabled(database: *DatabaseHandle) !bool {
+    var foreign_keys = try database.db.prepare("pragma foreign_keys");
+    defer foreign_keys.deinit();
+    if ((try foreign_keys.step()) != .row) return error.SqliteError;
+    return foreign_keys.columnInt64(0) != 0;
+}
+
+fn freshBuildDeferredForeignKeysPending(database: *DatabaseHandle) !bool {
+    var current: c_int = 0;
+    var highwater: c_int = 0;
+    const rc = sqlite.c.sqlite3_db_status(
+        database.db.sqlite_db.handle,
+        sqlite.c.SQLITE_DBSTATUS_DEFERRED_FKS,
+        &current,
+        &highwater,
+        0,
+    );
+    if (rc != sqlite.c.SQLITE_OK) return error.SqliteError;
+    return current != 0;
+}
+
 fn freshBuildRollback(build: *FreshBuildHandle) void {
     if (!build.active) return;
     if (build.owns_transaction) {
@@ -3232,6 +3271,8 @@ pub fn zova_fresh_build_begin(request: ?*const zova_fresh_build_begin_request) c
     defer database.mutex.unlock();
     if (database.fresh_build_active or database.live_statements != 0 or database.live_writers != 0) return failDb(database, error.InvalidArgument);
     const start = freshBuildTimestamp();
+    const foreign_keys_enforced = freshBuildForeignKeysEnabled(database) catch |err| return failDb(database, err);
+    if (!foreign_keys_enforced) return failDb(database, error.InvalidArgument);
     var empty = database.db.prepare(
         "select (select count(*) from _zova_objects)+(select count(*) from _zova_chunks)+(select count(*) from _zova_object_chunks)+(select count(*) from _zova_vectors)+(select count(*) from _zova_graphs)+(select count(*) from _zova_graph_nodes)+(select count(*) from _zova_graph_edges)",
     ) catch |err| return failDb(database, err);
@@ -3239,6 +3280,15 @@ pub fn zova_fresh_build_begin(request: ?*const zova_fresh_build_begin_request) c
     if ((empty.step() catch |err| return failDb(database, err)) != .row or empty.columnInt64(0) != 0) return failDb(database, error.InvalidArgument);
     const owns_transaction = sqlite.c.sqlite3_get_autocommit(database.db.sqlite_db.handle) != 0;
     if (owns_transaction) database.db.beginImmediate() catch |err| return failDb(database, err) else database.db.savepoint("fresh_build_session") catch |err| return failDb(database, err);
+    const baseline_foreign_key_check_start = freshBuildTimestamp();
+    freshBuildRunForeignKeyCheck(database) catch |err| {
+        if (owns_transaction) database.db.rollback() catch {} else {
+            database.db.rollbackToSavepoint("fresh_build_session") catch {};
+            database.db.releaseSavepoint("fresh_build_session") catch {};
+        }
+        return failDb(database, err);
+    };
+    const baseline_foreign_key_check_ms = freshBuildElapsedMs(baseline_foreign_key_check_start);
     const previous_cache_size = if (fresh_build_cache_policy == .session)
         graph.increaseFreshBuildCache(&database.db.sqlite_db) catch |err| {
             if (owns_transaction) database.db.rollback() catch {} else {
@@ -3257,7 +3307,17 @@ pub fn zova_fresh_build_begin(request: ?*const zova_fresh_build_begin_request) c
         }
         return failDb(database, err);
     };
-    build.* = .{ .database = database, .owns_transaction = owns_transaction, .previous_cache_size = previous_cache_size };
+    build.* = .{
+        .database = database,
+        .owns_transaction = owns_transaction,
+        .previous_cache_size = previous_cache_size,
+        .validation = .{
+            .foreign_keys_enforced = foreign_keys_enforced,
+            .baseline_foreign_keys_validated = true,
+        },
+    };
+    build.cache_diagnostics.baseline_foreign_key_check_ms = baseline_foreign_key_check_ms;
+    build.cache_diagnostics.baseline_foreign_key_check_ran = true;
     build.profile.validation_ms = freshBuildElapsedMs(start);
     database.fresh_build_active = true;
     out.* = @ptrCast(build);
@@ -3408,17 +3468,22 @@ pub fn zova_fresh_build_finish(request: ?*const zova_fresh_build_finish_request)
     build.cache_diagnostics.deferred_index_ms = deferred_index_ms;
     if (fresh_build_cache_policy == .graph_and_deferred_indexes) freshBuildRestoreCache(build);
     const validation_start = freshBuildTimestamp();
-    var foreign_keys = database.db.prepare("pragma foreign_key_check") catch |err| {
+    const deferred_foreign_keys_pending = freshBuildDeferredForeignKeysPending(database) catch |err| {
         freshBuildRollback(build);
         return failDb(database, err);
     };
-    defer foreign_keys.deinit();
-    if ((foreign_keys.step() catch |err| {
-        freshBuildRollback(build);
-        return failDb(database, err);
-    }) != .done) {
-        freshBuildRollback(build);
-        return failDb(database, error.InvalidArgument);
+    build.cache_diagnostics.deferred_foreign_keys_pending = deferred_foreign_keys_pending;
+    if (build.validation.foreign_keys_enforced and build.validation.baseline_foreign_keys_validated and !deferred_foreign_keys_pending) {
+        build.cache_diagnostics.validation_fast_path = true;
+    } else {
+        const foreign_key_check_start = freshBuildTimestamp();
+        build.cache_diagnostics.foreign_key_check_ran = true;
+        freshBuildRunForeignKeyCheck(database) catch |err| {
+            build.cache_diagnostics.foreign_key_check_ms = freshBuildElapsedMs(foreign_key_check_start);
+            freshBuildRollback(build);
+            return failDb(database, err);
+        };
+        build.cache_diagnostics.foreign_key_check_ms = freshBuildElapsedMs(foreign_key_check_start);
     }
     build.profile.validation_ms += freshBuildElapsedMs(validation_start);
     const commit_start = freshBuildTimestamp();
@@ -9166,6 +9231,155 @@ test "c abi fresh builder loads predeclared tables fts graph payloads and vector
     }));
     try std.testing.expectEqualSlices(i64, &.{ 1, 2 }, &finish_only_node_keys);
     try std.testing.expectEqualSlices(i64, &.{1}, &finish_only_edge_keys);
+}
+
+test "c abi fresh builder reuses enforced foreign-key validation evidence" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/fresh-builder-validation-evidence.zova", .{tmp.sub_path[0..]});
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(db);
+
+    var build: ?*zova_fresh_build = null;
+    try std.testing.expectEqual(zova_status.OK, zova_fresh_build_begin(&.{ .db = db, .out_build = &build }));
+    defer zova_fresh_build_destroy(build);
+    try std.testing.expectEqual(zova_status.OK, zova_fresh_build_finish(&.{
+        .build = build,
+        .out_node_keys = null,
+        .out_node_keys_capacity = 0,
+        .out_edge_keys = null,
+        .out_edge_keys_capacity = 0,
+        .out_profile = null,
+    }));
+
+    const diagnostics = freshBuildCacheDiagnostics(build).?;
+    try std.testing.expect(diagnostics.baseline_foreign_key_check_ran);
+    try std.testing.expect(diagnostics.validation_fast_path);
+    try std.testing.expect(!diagnostics.foreign_key_check_ran);
+    try std.testing.expect(!diagnostics.deferred_foreign_keys_pending);
+}
+
+test "c abi fresh builder retains full validation for unresolved deferred foreign keys" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/fresh-builder-deferred-foreign-key.zova", .{tmp.sub_path[0..]});
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(db);
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{
+        .db = db,
+        .sql =
+        \\create table parents(id integer primary key);
+        \\create table children(
+        \\  parent_id integer references parents(id) deferrable initially deferred
+        \\);
+        ,
+    }));
+    var build: ?*zova_fresh_build = null;
+    try std.testing.expectEqual(zova_status.OK, zova_fresh_build_begin(&.{ .db = db, .out_build = &build }));
+    defer zova_fresh_build_destroy(build);
+    const columns = [_]?[*:0]const u8{"parent_id"};
+    const values = [_]zova_fresh_value{.{
+        .value_type = 1,
+        .int64_value = 42,
+        .float64_value = 0,
+        .bytes = null,
+        .bytes_len = 0,
+    }};
+    try std.testing.expectEqual(zova_status.OK, zova_fresh_build_table_rows(&.{
+        .build = build,
+        .table_name = "children",
+        .column_names = &columns,
+        .column_count = columns.len,
+        .values = &values,
+        .row_count = 1,
+    }));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_fresh_build_finish(&.{
+        .build = build,
+        .out_node_keys = null,
+        .out_node_keys_capacity = 0,
+        .out_edge_keys = null,
+        .out_edge_keys_capacity = 0,
+        .out_profile = null,
+    }));
+
+    const diagnostics = freshBuildCacheDiagnostics(build).?;
+    try std.testing.expect(!diagnostics.validation_fast_path);
+    try std.testing.expect(diagnostics.foreign_key_check_ran);
+    try std.testing.expect(diagnostics.deferred_foreign_keys_pending);
+    const handle = databaseHandle(db).?;
+    var children = try handle.db.prepare("select count(*) from children");
+    defer children.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try children.step());
+    try std.testing.expectEqual(@as(i64, 0), children.columnInt64(0));
+}
+
+test "c abi fresh builder rejects sessions without foreign-key enforcement" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/fresh-builder-foreign-keys-off.zova", .{tmp.sub_path[0..]});
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(db);
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = db, .sql = "pragma foreign_keys=off" }));
+    var build: ?*zova_fresh_build = null;
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_fresh_build_begin(&.{ .db = db, .out_build = &build }));
+    try std.testing.expectEqual(@as(?*zova_fresh_build, null), build);
+}
+
+test "c abi fresh builder requires clean foreign-key evidence before loading" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/fresh-builder-preexisting-foreign-key.zova", .{tmp.sub_path[0..]});
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(db);
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{
+        .db = db,
+        .sql =
+        \\pragma foreign_keys=off;
+        \\create table parents(id integer primary key);
+        \\create table children(parent_id integer references parents(id));
+        \\insert into children(parent_id) values (42);
+        \\pragma foreign_keys=on;
+        ,
+    }));
+
+    var build: ?*zova_fresh_build = null;
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_fresh_build_begin(&.{ .db = db, .out_build = &build }));
+    try std.testing.expectEqual(@as(?*zova_fresh_build, null), build);
 }
 
 test "c abi manages bundled extension lifecycle" {

@@ -53,17 +53,22 @@ After the Python package is published to PyPI:
 python -m pip install zova
 ```
 
-The v0.24 Python package is backed by a PyO3 extension built through maturin and
+The v0.25 Python package is backed by a PyO3 extension built through maturin and
 Cargo. Users need Python 3.10 or newer. Published wheels do not require Rust,
 Cargo, Zig, or a local C compiler; sdist fallback builds need Rust/Cargo and a C
 compiler/linker. Zig is only needed when developing Zova itself or regenerating
 the bundled native snapshot.
 
-The v0.24 release workflow builds the documented Linux/macOS wheel matrix.
+The v0.25 release workflow builds the documented Linux/macOS wheel matrix.
 
-Zova 0.24 uses `.zova` format 9 and does not migrate format-8 databases in
+Zova 0.25 uses `.zova` format 9 and does not migrate format-8 databases in
 place. Keep a compatible backup and export data with a format-8 build before
 creating a format-9 database.
+
+The v0.25 opaque-key graph, edge-payload, topology-scan, prepared-build, and
+generic fresh-build session APIs are low-level C/raw `zova-sys` surfaces. The
+Python package continues to expose the established graph CRUD and traversal API
+and does not yet wrap those publication APIs.
 
 ## Local Development
 
@@ -153,7 +158,7 @@ By default, each operation verifies the destination after copying. Pass
 `zova check --deep`.
 
 Diagnostic recovery commands such as `zova doctor`, `zova salvage --dry-run`,
-and `zova salvage <source> <destination>` are CLI-first. In v0.24, CLI salvage
+and `zova salvage <source> <destination>` are CLI-first. In v0.25, CLI salvage
 copies valid core data and uses extension salvage hooks for extension-owned
 storage. The Python package does not expose typed doctor/salvage report APIs
 yet, and library code should not parse the human text output as a stable
@@ -167,7 +172,7 @@ process registry. The default registry includes bundled extensions such as
 directly. App-registered extension authoring and dynamic `.zovaext` loading
 are not exposed as Python APIs yet.
 
-The v0.24 C ABI has scalar SQL callback registration and trusted `.zovaext`
+The v0.25 C ABI has scalar SQL callback registration and trusted `.zovaext`
 bundle loading, but Python callback conversion, GIL behavior, and callback
 lifetime rules are deferred to a later binding slice. Use bundled extensions,
 trusted extension bundles through the CLI/C layer, or a host-owned bridge when
@@ -425,7 +430,7 @@ directed walks with `depth`, `predecessor_node_id`, and `edge_type` columns.
 
 ## Bound Stores
 
-In v0.24, a `.zova` file may be bound to one object store, one vector store,
+In v0.25, a `.zova` file may be bound to one object store, one vector store,
 and one graph store through the native Zig API or CLI. The Python object,
 vector, and graph methods above transparently use those stores after
 `Database.open`. Store
