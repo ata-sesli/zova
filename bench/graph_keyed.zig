@@ -371,13 +371,13 @@ fn reportMetric(label: []const u8, current: []const f64, keyed: []const f64) voi
 }
 
 fn runKeyedReadBenchmark(allocator: std.mem.Allocator, fixture: Fixture, label: []const u8) !void {
-    if (fixture.graph_names.len != 1) return error.InvalidFixture;
+    if (fixture.graph_names.len == 0) return error.InvalidFixture;
     const path = try std.fmt.allocPrintSentinel(allocator, "/tmp/zova-keyed-read-{s}.zova", .{label}, 0);
     std.Io.Dir.cwd().deleteFile(std.Io.Threaded.global_single_threaded.io(), path) catch {};
     defer std.Io.Dir.cwd().deleteFile(std.Io.Threaded.global_single_threaded.io(), path) catch {};
     var db = try zova.Database.create(path);
     defer db.deinit();
-    try db.createGraph(fixture.graph_names[0]);
+    for (fixture.graph_names) |graph_name| try db.createGraph(graph_name);
     const node_keys = try allocator.alloc(i64, fixture.nodes.len);
     const edge_keys = try allocator.alloc(i64, fixture.edges.len);
     try db.putGraphNodesKeyed(fixture.nodes, node_keys);
@@ -416,11 +416,15 @@ fn runKeyedReadBenchmark(allocator: std.mem.Allocator, fixture: Fixture, label: 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
-    if (args.len != 3) return error.InvalidArgument;
+    if (args.len < 3 or args.len > 4) return error.InvalidArgument;
     const source_path = try allocator.dupeZ(u8, args[1]);
     const label = args[2];
     const fixture = try loadFixture(allocator, source_path);
     std.debug.print("fixture={s} nodes={d} edges={d}\n", .{ label, fixture.nodes.len, fixture.edges.len });
+    if (args.len == 4 and std.mem.eql(u8, args[3], "--reads-only")) {
+        try runKeyedReadBenchmark(allocator, fixture, label);
+        return;
+    }
     _ = try runFreshBuildSample(allocator, fixture, label, 1000, .normal);
     _ = try runFreshBuildSample(allocator, fixture, label, 1001, .prepared);
     var fresh_build_samples: [measured_runs]f64 = undefined;

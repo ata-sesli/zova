@@ -416,11 +416,28 @@ test "prepared fresh keyed graph build preserves input keys and rejects invalid 
     var node_keys: [nodes.len]i64 = undefined;
     var edge_keys: [edges.len]i64 = undefined;
     var profile: zova.FreshGraphBuildProfile = .{};
+    var cache_before = try db.prepare("pragma cache_size");
+    defer cache_before.deinit();
+    try std.testing.expectEqual(.row, try cache_before.step());
+    const original_cache_size = cache_before.columnInt64(0);
     try db.buildFreshGraphPreparedKeyedProfiled("app", &nodes, &edges, &node_keys, &edge_keys, &profile);
+    var cache_after = try db.prepare("pragma cache_size");
+    defer cache_after.deinit();
+    try std.testing.expectEqual(.row, try cache_after.step());
+    try std.testing.expectEqual(original_cache_size, cache_after.columnInt64(0));
     try std.testing.expectEqualSlices(i64, &.{ 1, 2, 3 }, &node_keys);
     try std.testing.expectEqualSlices(i64, &.{ 1, 2 }, &edge_keys);
     try std.testing.expect(profile.validation_ms >= 0);
     try std.testing.expect(profile.key_generation_ms >= 0);
+    try std.testing.expect(profile.nodes_created_order_index_ms >= 0);
+    try std.testing.expect(profile.edges_topology_index_ms >= 0);
+    try std.testing.expect(profile.edges_created_order_index_ms >= 0);
+    try std.testing.expect(profile.edges_from_node_index_ms >= 0);
+    try std.testing.expect(profile.edges_from_node_type_index_ms >= 0);
+    try std.testing.expect(profile.edges_to_node_index_ms >= 0);
+    try std.testing.expect(profile.edges_to_node_type_index_ms >= 0);
+    try std.testing.expectEqual(@as(u64, 1), profile.node_insert_statements);
+    try std.testing.expectEqual(@as(u64, 1), profile.edge_insert_statements);
 
     var scan = try db.graphScan(std.testing.allocator, .{ .graph_name = "app", .node_limit = 10, .edge_limit = 10 });
     defer scan.deinit(std.testing.allocator);
@@ -443,6 +460,48 @@ test "prepared fresh keyed graph build preserves input keys and rejects invalid 
     try std.testing.expectEqualSlices(i64, &.{ 41, 42 }, &rejected_node_keys);
     try std.testing.expectEqualSlices(i64, &.{43}, &rejected_edge_keys);
     try std.testing.expect(!(try invalid_db.hasGraph("app")));
+}
+
+test "prepared fresh graph batches nodes and edges in 256 row statements" {
+    const row_count = 513;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "prepared-batched-build.zova");
+    var db = try zova.Database.create(path);
+    defer db.deinit();
+
+    const node_ids = try std.testing.allocator.alloc([]u8, row_count);
+    defer {
+        for (node_ids) |node_id| std.testing.allocator.free(node_id);
+        std.testing.allocator.free(node_ids);
+    }
+    const nodes = try std.testing.allocator.alloc(zova.FreshGraphNodeInput, row_count);
+    defer std.testing.allocator.free(nodes);
+    const edges = try std.testing.allocator.alloc(zova.FreshGraphEdgeInput, row_count);
+    defer std.testing.allocator.free(edges);
+    for (node_ids, nodes, edges, 0..) |*node_id, *node, *edge, index| {
+        node_id.* = try std.fmt.allocPrint(std.testing.allocator, "node-{d}", .{index});
+        node.* = .{ .node_id = node_id.*, .kind = "node" };
+        edge.* = .{ .from_node_ordinal = index, .edge_type = "links", .to_node_ordinal = (index + 1) % row_count };
+    }
+    const node_keys = try std.testing.allocator.alloc(i64, row_count);
+    defer std.testing.allocator.free(node_keys);
+    const edge_keys = try std.testing.allocator.alloc(i64, row_count);
+    defer std.testing.allocator.free(edge_keys);
+    var profile: zova.FreshGraphBuildProfile = .{};
+    try db.buildFreshGraphPreparedKeyedProfiled("batched", nodes, edges, node_keys, edge_keys, &profile);
+
+    try std.testing.expectEqual(@as(u64, 3), profile.node_insert_statements);
+    try std.testing.expectEqual(@as(u64, 3), profile.edge_insert_statements);
+    try std.testing.expectEqual(@as(i64, 1), node_keys[0]);
+    try std.testing.expectEqual(@as(i64, row_count), node_keys[row_count - 1]);
+    try std.testing.expectEqual(@as(i64, 1), edge_keys[0]);
+    try std.testing.expectEqual(@as(i64, row_count), edge_keys[row_count - 1]);
+    var scan = try db.graphScan(std.testing.allocator, .{ .graph_name = "batched", .node_limit = row_count, .edge_limit = row_count });
+    defer scan.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, row_count), scan.nodes.len);
+    try std.testing.expectEqual(@as(usize, row_count), scan.edges.len);
 }
 
 test "prepared fresh graph edge payloads round trip replace and roll back atomically" {

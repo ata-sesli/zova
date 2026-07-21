@@ -96,6 +96,7 @@ pub fn build(b: *std.Build) void {
     storage_benchmark.root_module.addImport("zova", zova_module);
     const storage_benchmark_cmd = b.addRunArtifact(storage_benchmark);
     storage_benchmark_cmd.addArg(b.pathJoin(&.{ b.cache_root.path orelse ".zig-cache", "storage-format-benchmark.zova" }));
+    if (b.args) |args| storage_benchmark_cmd.addArgs(args);
     const storage_benchmark_step = b.step("bench-storage", "Run deterministic graph/vector storage benchmark");
     storage_benchmark_step.dependOn(&storage_benchmark_cmd.step);
 
@@ -126,6 +127,27 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| graph_fresh_benchmark_cmd.addArgs(args);
     const graph_fresh_benchmark_step = b.step("bench-graph-fresh", "Compare incremental and fresh graph publication at Deno scale");
     graph_fresh_benchmark_step.dependOn(&graph_fresh_benchmark_cmd.step);
+
+    const ablation_api_module = b.createModule(.{
+        .root_source_file = b.path("src/c_api_internal.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ablation_api_module.addOptions("zova_build_options", zova_build_options);
+    addSqlite(ablation_api_module, b);
+    const fresh_ablation_benchmark = b.addExecutable(.{
+        .name = "zova_fresh_build_ablation",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/fresh_build_ablation.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    fresh_ablation_benchmark.root_module.addImport("zova_c", ablation_api_module);
+    const fresh_ablation_cmd = b.addRunArtifact(fresh_ablation_benchmark);
+    if (b.args) |args| fresh_ablation_cmd.addArgs(args);
+    const fresh_ablation_step = b.step("bench-fresh-ablation", "Run cumulative graph, metadata, FTS, and vector fresh-build ablations");
+    fresh_ablation_step.dependOn(&fresh_ablation_cmd.step);
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{

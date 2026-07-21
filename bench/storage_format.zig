@@ -164,7 +164,8 @@ fn reportStorage(db: *zova.Database) !void {
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
-    if (args.len != 2) return error.InvalidArgument;
+    if (args.len < 2 or args.len > 3) return error.InvalidArgument;
+    const drop_typed_graph_indexes = args.len == 3 and std.mem.eql(u8, args[2], "--drop-typed-graph-indexes");
     const db_path = try allocator.dupeZ(u8, args[1]);
     std.Io.Dir.cwd().deleteFile(init.io, db_path) catch {};
 
@@ -215,6 +216,13 @@ pub fn main(init: std.process.Init) !void {
             trace_counter.graph_edge_insert_steps,
         },
     );
+    if (drop_typed_graph_indexes) {
+        try db.exec(
+            \\drop index _zova_graph_edges_from_node_type_idx;
+            \\drop index _zova_graph_edges_to_node_type_idx;
+        );
+        std.debug.print("graph_index_ablation=typed_adjacency\n", .{});
+    }
 
     var graph_samples: [single_samples]f64 = undefined;
     const root_id = node_ids[0];

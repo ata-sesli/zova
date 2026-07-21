@@ -11,6 +11,8 @@ pub const graph_nodes_table = "_zova_graph_nodes";
 pub const graph_edge_types_table = "_zova_graph_edge_types";
 pub const graph_edges_table = "_zova_graph_edges";
 pub const default_graph_name = "default";
+const fresh_graph_cache_kib: i64 = 128 * 1024;
+const fresh_graph_batch_rows: usize = 256;
 
 pub const StorageSchema = enum {
     main,
@@ -403,6 +405,15 @@ pub const FreshGraphBuildProfile = struct {
     node_load_ms: f64 = 0,
     edge_load_ms: f64 = 0,
     index_build_ms: f64 = 0,
+    nodes_created_order_index_ms: f64 = 0,
+    edges_topology_index_ms: f64 = 0,
+    edges_created_order_index_ms: f64 = 0,
+    edges_from_node_index_ms: f64 = 0,
+    edges_from_node_type_index_ms: f64 = 0,
+    edges_to_node_index_ms: f64 = 0,
+    edges_to_node_type_index_ms: f64 = 0,
+    node_insert_statements: u64 = 0,
+    edge_insert_statements: u64 = 0,
     payload_bytes: u64 = 0,
 };
 
@@ -784,16 +795,89 @@ pub const Database = struct {
         );
     }
 
-    fn createGraphSecondaryIndexes(self: *Database) Error!void {
-        try self.execSchema(
-            \\create index {s}_zova_graph_nodes_created_order_idx on _zova_graph_nodes(graph_key,created_order,node_key);
-            \\create unique index {s}_zova_graph_edges_topology_idx on _zova_graph_edges(from_node_key,edge_type_key,to_node_key);
-            \\create index {s}_zova_graph_edges_created_order_idx on _zova_graph_edges(graph_key,created_order,edge_key);
-            \\create index {s}_zova_graph_edges_from_node_idx on _zova_graph_edges(graph_key,from_node_key,created_order,to_node_key);
-            \\create index {s}_zova_graph_edges_from_node_type_idx on _zova_graph_edges(graph_key,from_node_key,edge_type_key,created_order,to_node_key);
-            \\create index {s}_zova_graph_edges_to_node_idx on _zova_graph_edges(graph_key,to_node_key,created_order,from_node_key);
-            \\create index {s}_zova_graph_edges_to_node_type_idx on _zova_graph_edges(graph_key,to_node_key,edge_type_key,created_order,from_node_key);
-        );
+    fn createGraphSecondaryIndexes(self: *Database, profile: ?*FreshGraphBuildProfile) Error!void {
+        var started = graphProfileTimestamp();
+        try self.execSchema("create index {s}_zova_graph_nodes_created_order_idx on _zova_graph_nodes(graph_key,created_order,node_key)");
+        if (profile) |value| value.nodes_created_order_index_ms = graphProfileElapsedMs(started);
+
+        started = graphProfileTimestamp();
+        try self.execSchema("create unique index {s}_zova_graph_edges_topology_idx on _zova_graph_edges(from_node_key,edge_type_key,to_node_key)");
+        if (profile) |value| value.edges_topology_index_ms = graphProfileElapsedMs(started);
+
+        started = graphProfileTimestamp();
+        try self.execSchema("create index {s}_zova_graph_edges_created_order_idx on _zova_graph_edges(graph_key,created_order,edge_key)");
+        if (profile) |value| value.edges_created_order_index_ms = graphProfileElapsedMs(started);
+
+        started = graphProfileTimestamp();
+        try self.execSchema("create index {s}_zova_graph_edges_from_node_idx on _zova_graph_edges(graph_key,from_node_key,created_order,to_node_key)");
+        if (profile) |value| value.edges_from_node_index_ms = graphProfileElapsedMs(started);
+
+        started = graphProfileTimestamp();
+        try self.execSchema("create index {s}_zova_graph_edges_from_node_type_idx on _zova_graph_edges(graph_key,from_node_key,edge_type_key,created_order,to_node_key)");
+        if (profile) |value| value.edges_from_node_type_index_ms = graphProfileElapsedMs(started);
+
+        started = graphProfileTimestamp();
+        try self.execSchema("create index {s}_zova_graph_edges_to_node_idx on _zova_graph_edges(graph_key,to_node_key,created_order,from_node_key)");
+        if (profile) |value| value.edges_to_node_index_ms = graphProfileElapsedMs(started);
+
+        started = graphProfileTimestamp();
+        try self.execSchema("create index {s}_zova_graph_edges_to_node_type_idx on _zova_graph_edges(graph_key,to_node_key,edge_type_key,created_order,from_node_key)");
+        if (profile) |value| value.edges_to_node_type_index_ms = graphProfileElapsedMs(started);
+    }
+
+    fn prepareFreshGraphBatchInsert(self: *Database, comptime kind: enum { nodes, edges }, row_count: usize) Error!sqlite.Statement {
+        if (row_count == 0 or row_count > fresh_graph_batch_rows) return error.InvalidArgument;
+        var sql: std.ArrayList(u8) = .empty;
+        defer sql.deinit(std.heap.c_allocator);
+        try sql.appendSlice(std.heap.c_allocator, "insert into ");
+        try sql.appendSlice(std.heap.c_allocator, self.storage_schema.prefix());
+        switch (kind) {
+            .nodes => try sql.appendSlice(std.heap.c_allocator, "_zova_graph_nodes(node_key,graph_key,node_id,kind,target_type,target_namespace,target_ref,created_order) values"),
+            .edges => try sql.appendSlice(std.heap.c_allocator, "_zova_graph_edges(edge_key,graph_key,from_node_key,edge_type_key,to_node_key,created_order,payload) values"),
+        }
+        for (0..row_count) |row| {
+            if (row != 0) try sql.append(std.heap.c_allocator, ',');
+            switch (kind) {
+                .nodes => try sql.appendSlice(std.heap.c_allocator, "(?,1,?,?,?,?,?,?)"),
+                .edges => try sql.appendSlice(std.heap.c_allocator, "(?,1,?,?,?,?,?)"),
+            }
+        }
+        try sql.append(std.heap.c_allocator, 0);
+        return self.sqlite_db.prepare(sql.items[0 .. sql.items.len - 1 :0]);
+    }
+
+    fn bindFreshGraphNodeBatch(stmt: *sqlite.Statement, nodes: []const FreshGraphNodeInput, first_index: usize) Error!void {
+        for (nodes, 0..) |node, batch_index| {
+            const node_key: i64 = @intCast(first_index + batch_index + 1);
+            const base: c_int = @intCast(batch_index * 7);
+            try stmt.bindInt64(base + 1, node_key);
+            try stmt.bindText(base + 2, node.node_id);
+            try stmt.bindText(base + 3, node.kind);
+            try stmt.bindText(base + 4, targetTypeText(node.target_type));
+            if (node.target_namespace) |value| try stmt.bindText(base + 5, value) else try stmt.bindNull(base + 5);
+            if (node.target_ref) |value| try stmt.bindText(base + 6, value) else try stmt.bindNull(base + 6);
+            try stmt.bindInt64(base + 7, node_key);
+        }
+    }
+
+    fn bindFreshGraphEdgeBatch(
+        stmt: *sqlite.Statement,
+        edges: []const FreshGraphEdgeInput,
+        edge_type_slots: []const usize,
+        first_index: usize,
+        payload_bytes: *u64,
+    ) Error!void {
+        for (edges, edge_type_slots, 0..) |edge, type_slot, batch_index| {
+            const edge_key: i64 = @intCast(first_index + batch_index + 1);
+            const base: c_int = @intCast(batch_index * 6);
+            try stmt.bindInt64(base + 1, edge_key);
+            try stmt.bindInt64(base + 2, @intCast(edge.from_node_ordinal + 1));
+            try stmt.bindInt64(base + 3, @intCast(type_slot + 1));
+            try stmt.bindInt64(base + 4, @intCast(edge.to_node_ordinal + 1));
+            try stmt.bindInt64(base + 5, edge_key);
+            try stmt.bindBlobBorrowed(base + 6, edge.payload);
+            payload_bytes.* = std.math.add(u64, payload_bytes.*, edge.payload.len) catch return error.InvalidArgument;
+        }
     }
 
     pub fn createGraph(self: *Database, name: []const u8) Error!void {
@@ -835,6 +919,8 @@ pub const Database = struct {
         profile: ?*FreshGraphBuildProfile,
     ) Error!void {
         if (profile) |value| value.* = .{};
+        const previous_cache_size = try increaseFreshGraphCache(self.sqlite_db);
+        defer restoreFreshGraphCache(self.sqlite_db, previous_cache_size) catch {};
         const validation_start = graphProfileTimestamp();
         if (out_node_keys.len != nodes.len or out_edge_keys.len != edges.len) return error.InvalidArgument;
         try validateGraphName(graph_name);
@@ -963,7 +1049,7 @@ pub const Database = struct {
         }
         if (profile) |value| value.edge_load_ms = graphProfileElapsedMs(edge_start);
         const indexes_start = graphProfileTimestamp();
-        try self.createGraphSecondaryIndexes();
+        try self.createGraphSecondaryIndexes(profile);
         if (profile) |value| value.index_build_ms = graphProfileElapsedMs(indexes_start);
 
         for (input_node_slots, out_node_keys) |slot, *key| key.* = @intCast(slot + 1);
@@ -993,6 +1079,8 @@ pub const Database = struct {
         profile: ?*FreshGraphBuildProfile,
     ) Error!void {
         if (profile) |value| value.* = .{};
+        const previous_cache_size = try increaseFreshGraphCache(self.sqlite_db);
+        defer restoreFreshGraphCache(self.sqlite_db, previous_cache_size) catch {};
         const validation_start = graphProfileTimestamp();
         if (out_node_keys.len != nodes.len or out_edge_keys.len != edges.len) return error.InvalidArgument;
         try validateGraphName(graph_name);
@@ -1060,51 +1148,63 @@ pub const Database = struct {
         if (profile) |value| value.graph_and_types_ms = graphProfileElapsedMs(metadata_start);
 
         const node_start = graphProfileTimestamp();
-        var node_insert = try self.prepareSchema(
-            "insert into {s}_zova_graph_nodes(node_key,graph_key,node_id,kind,target_type,target_namespace,target_ref,created_order) values(?,1,?,?,?,?,?,?)",
-        );
-        defer node_insert.deinit();
-        for (nodes, 0..) |node, index| {
-            const node_key: i64 = @intCast(index + 1);
-            try node_insert.bindInt64(1, node_key);
-            try node_insert.bindText(2, node.node_id);
-            try node_insert.bindText(3, node.kind);
-            try node_insert.bindText(4, targetTypeText(node.target_type));
-            if (node.target_namespace) |value| try node_insert.bindText(5, value) else try node_insert.bindNull(5);
-            if (node.target_ref) |value| try node_insert.bindText(6, value) else try node_insert.bindNull(6);
-            try node_insert.bindInt64(7, node_key);
-            if ((try node_insert.step()) != .done or self.sqlite_db.changes() != 1) return error.GraphInvalid;
-            try node_insert.reset();
-            try node_insert.clearBindings();
+        const full_node_batch_count = nodes.len / fresh_graph_batch_rows;
+        if (full_node_batch_count != 0) {
+            var node_insert = try self.prepareFreshGraphBatchInsert(.nodes, fresh_graph_batch_rows);
+            defer node_insert.deinit();
+            for (0..full_node_batch_count) |batch_index| {
+                const first = batch_index * fresh_graph_batch_rows;
+                const batch = nodes[first..][0..fresh_graph_batch_rows];
+                try bindFreshGraphNodeBatch(&node_insert, batch, first);
+                if ((try node_insert.step()) != .done or self.sqlite_db.changes() != fresh_graph_batch_rows) return error.GraphInvalid;
+                try node_insert.reset();
+                try node_insert.clearBindings();
+            }
         }
-        if (profile) |value| value.node_load_ms = graphProfileElapsedMs(node_start);
+        const node_remainder_start = full_node_batch_count * fresh_graph_batch_rows;
+        if (node_remainder_start != nodes.len) {
+            const batch = nodes[node_remainder_start..];
+            var node_insert = try self.prepareFreshGraphBatchInsert(.nodes, batch.len);
+            defer node_insert.deinit();
+            try bindFreshGraphNodeBatch(&node_insert, batch, node_remainder_start);
+            if ((try node_insert.step()) != .done or self.sqlite_db.changes() != batch.len) return error.GraphInvalid;
+        }
+        if (profile) |value| {
+            value.node_load_ms = graphProfileElapsedMs(node_start);
+            value.node_insert_statements = @intCast(full_node_batch_count + @intFromBool(node_remainder_start != nodes.len));
+        }
 
         const edge_start = graphProfileTimestamp();
-        var edge_insert = try self.prepareSchema(
-            "insert into {s}_zova_graph_edges(edge_key,graph_key,from_node_key,edge_type_key,to_node_key,created_order,payload) values(?,1,?,?,?,?,?)",
-        );
-        defer edge_insert.deinit();
         var payload_bytes: u64 = 0;
-        for (edges, edge_type_slots, 0..) |edge, type_slot, index| {
-            const edge_key: i64 = @intCast(index + 1);
-            try edge_insert.bindInt64(1, edge_key);
-            try edge_insert.bindInt64(2, @intCast(edge.from_node_ordinal + 1));
-            try edge_insert.bindInt64(3, @intCast(type_slot + 1));
-            try edge_insert.bindInt64(4, @intCast(edge.to_node_ordinal + 1));
-            try edge_insert.bindInt64(5, edge_key);
-            try edge_insert.bindBlobBorrowed(6, edge.payload);
-            payload_bytes = std.math.add(u64, payload_bytes, edge.payload.len) catch return error.InvalidArgument;
-            if ((try edge_insert.step()) != .done or self.sqlite_db.changes() != 1) return error.GraphInvalid;
-            try edge_insert.reset();
-            try edge_insert.clearBindings();
+        const full_edge_batch_count = edges.len / fresh_graph_batch_rows;
+        if (full_edge_batch_count != 0) {
+            var edge_insert = try self.prepareFreshGraphBatchInsert(.edges, fresh_graph_batch_rows);
+            defer edge_insert.deinit();
+            for (0..full_edge_batch_count) |batch_index| {
+                const first = batch_index * fresh_graph_batch_rows;
+                const batch = edges[first..][0..fresh_graph_batch_rows];
+                try bindFreshGraphEdgeBatch(&edge_insert, batch, edge_type_slots[first..][0..fresh_graph_batch_rows], first, &payload_bytes);
+                if ((try edge_insert.step()) != .done or self.sqlite_db.changes() != fresh_graph_batch_rows) return error.GraphInvalid;
+                try edge_insert.reset();
+                try edge_insert.clearBindings();
+            }
+        }
+        const edge_remainder_start = full_edge_batch_count * fresh_graph_batch_rows;
+        if (edge_remainder_start != edges.len) {
+            const batch = edges[edge_remainder_start..];
+            var edge_insert = try self.prepareFreshGraphBatchInsert(.edges, batch.len);
+            defer edge_insert.deinit();
+            try bindFreshGraphEdgeBatch(&edge_insert, batch, edge_type_slots[edge_remainder_start..], edge_remainder_start, &payload_bytes);
+            if ((try edge_insert.step()) != .done or self.sqlite_db.changes() != batch.len) return error.GraphInvalid;
         }
         if (profile) |value| {
             value.edge_load_ms = graphProfileElapsedMs(edge_start);
+            value.edge_insert_statements = @intCast(full_edge_batch_count + @intFromBool(edge_remainder_start != edges.len));
             value.payload_bytes = payload_bytes;
         }
 
         const indexes_start = graphProfileTimestamp();
-        try self.createGraphSecondaryIndexes();
+        try self.createGraphSecondaryIndexes(profile);
         if (profile) |value| value.index_build_ms = graphProfileElapsedMs(indexes_start);
     }
 
@@ -2758,6 +2858,33 @@ fn graphProfileElapsedMs(start: std.Io.Timestamp) f64 {
     const elapsed_ns = start.durationTo(graphProfileTimestamp()).toNanoseconds();
     if (elapsed_ns <= 0) return 0;
     return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, std.time.ns_per_ms);
+}
+
+fn increaseFreshGraphCache(db: *sqlite.Database) Error!?i64 {
+    var cache_query = try db.prepare("pragma cache_size");
+    defer cache_query.deinit();
+    if ((try cache_query.step()) != .row) return error.SqliteError;
+    const previous = cache_query.columnInt64(0);
+
+    var page_size_query = try db.prepare("pragma page_size");
+    defer page_size_query.deinit();
+    if ((try page_size_query.step()) != .row) return error.SqliteError;
+    const page_size = page_size_query.columnInt64(0);
+    if (page_size <= 0) return error.SqliteError;
+    const current_kib = if (previous < 0)
+        -previous
+    else
+        @divTrunc(std.math.mul(i64, previous, page_size) catch return error.SqliteError, 1024);
+    if (current_kib >= fresh_graph_cache_kib) return null;
+    try db.exec("pragma cache_size=-131072");
+    return previous;
+}
+
+fn restoreFreshGraphCache(db: *sqlite.Database, previous: ?i64) Error!void {
+    const value = previous orelse return;
+    var buffer: [64]u8 = undefined;
+    const pragma = std.fmt.bufPrintZ(&buffer, "pragma cache_size={d}", .{value}) catch return error.SqliteError;
+    try db.exec(pragma);
 }
 
 fn bindWalkAdjacencyConstants(

@@ -1,8 +1,10 @@
 const std = @import("std");
 const zova = @import("zova");
 
-const node_count = 124_818;
-const edge_count = 481_770;
+const deno_node_count = 124_818;
+const deno_edge_count = 481_770;
+const tops_node_count = 2_375;
+const tops_edge_count = 10_818;
 const measured_runs = 7;
 const graph_name = "deno-shaped";
 const edge_types = [_][]const u8{ "calls", "imports", "defines", "tests", "contains", "reads", "writes", "exports", "extends", "implements", "references", "uses", "owns", "returns", "accepts", "documents", "related" };
@@ -39,7 +41,7 @@ fn mad(values: []const f64) f64 {
     return median(&deviations);
 }
 
-fn makeFixture(allocator: std.mem.Allocator) !Fixture {
+fn makeFixture(allocator: std.mem.Allocator, node_count: usize, edge_count: usize) !Fixture {
     const node_ids = try allocator.alloc([]const u8, node_count);
     const nodes = try allocator.alloc(zova.GraphNodeInput, node_count);
     const fresh_nodes = try allocator.alloc(zova.FreshGraphNodeInput, node_count);
@@ -75,14 +77,20 @@ fn reportDbstat(db: *zova.Database) !void {
     while ((try stmt.step()) == .row) std.debug.print("dbstat name={s} bytes={d}\n", .{ stmt.columnText(0), stmt.columnInt64(1) });
 }
 
-fn runSample(allocator: std.mem.Allocator, fixture: Fixture, variant: Variant, ordinal: usize, report_dbstat: bool) !Sample {
+fn runSample(allocator: std.mem.Allocator, fixture: Fixture, variant: Variant, ordinal: usize, report_dbstat: bool, cache_kib: usize, memory_temp: bool) !Sample {
     const path = try std.fmt.allocPrintSentinel(allocator, "/tmp/zova-deno-shaped-{s}-{d}.zova", .{ @tagName(variant), ordinal }, 0);
     std.Io.Dir.cwd().deleteFile(std.Io.Threaded.global_single_threaded.io(), path) catch {};
     defer std.Io.Dir.cwd().deleteFile(std.Io.Threaded.global_single_threaded.io(), path) catch {};
     var db = try zova.Database.create(path);
     defer db.deinit();
-    const node_keys = try allocator.alloc(i64, node_count);
-    const edge_keys = try allocator.alloc(i64, edge_count);
+    if (cache_kib != 0) {
+        var pragma_buffer: [64]u8 = undefined;
+        const pragma = try std.fmt.bufPrintZ(&pragma_buffer, "pragma cache_size=-{d}", .{cache_kib});
+        try db.exec(pragma);
+    }
+    if (memory_temp) try db.exec("pragma temp_store=memory");
+    const node_keys = try allocator.alloc(i64, fixture.fresh_nodes.len);
+    const edge_keys = try allocator.alloc(i64, fixture.fresh_edges.len);
     var profile: zova.FreshGraphBuildProfile = .{};
     const start = now();
     switch (variant) {
@@ -102,16 +110,25 @@ fn runSample(allocator: std.mem.Allocator, fixture: Fixture, variant: Variant, o
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
-    const fixture = try makeFixture(allocator);
+    var tops = false;
+    var dbstat_only = false;
+    var cache_kib: usize = 0;
+    var memory_temp = false;
+    for (args[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "--tops")) tops = true else if (std.mem.eql(u8, arg, "--dbstat-only")) dbstat_only = true else if (std.mem.eql(u8, arg, "--cache-64")) cache_kib = 64 * 1024 else if (std.mem.eql(u8, arg, "--cache-128")) cache_kib = 128 * 1024 else if (std.mem.eql(u8, arg, "--large-cache")) cache_kib = 256 * 1024 else if (std.mem.eql(u8, arg, "--memory-temp")) memory_temp = true else return error.InvalidArgument;
+    }
+    const node_count: usize = if (tops) tops_node_count else deno_node_count;
+    const edge_count: usize = if (tops) tops_edge_count else deno_edge_count;
+    const fixture = try makeFixture(allocator, node_count, edge_count);
     std.debug.print("fixture nodes={d} edges={d} format={s}\n", .{ node_count, edge_count, zova.version.format_version });
-    if (args.len == 2 and std.mem.eql(u8, args[1], "--dbstat-only")) {
-        const sample = try runSample(allocator, fixture, .fresh, 9999, true);
-        std.debug.print("dbstat_sample total_ms={d:.3} storage_bytes={d}\n", .{ sample.total_ms, sample.storage_bytes });
+    if (dbstat_only) {
+        const sample = try runSample(allocator, fixture, .fresh, 9999, true, cache_kib, memory_temp);
+        std.debug.print("dbstat_sample total_ms={d:.3} storage_bytes={d} validation_ms={d:.3} nodes_ms={d:.3} edges_ms={d:.3} indexes_ms={d:.3} node_order_index_ms={d:.3} topology_index_ms={d:.3} edge_order_index_ms={d:.3} outgoing_index_ms={d:.3} typed_outgoing_index_ms={d:.3} incoming_index_ms={d:.3} typed_incoming_index_ms={d:.3}\n", .{ sample.total_ms, sample.storage_bytes, sample.profile.validation_ms, sample.profile.node_load_ms, sample.profile.edge_load_ms, sample.profile.index_build_ms, sample.profile.nodes_created_order_index_ms, sample.profile.edges_topology_index_ms, sample.profile.edges_created_order_index_ms, sample.profile.edges_from_node_index_ms, sample.profile.edges_from_node_type_index_ms, sample.profile.edges_to_node_index_ms, sample.profile.edges_to_node_type_index_ms });
         return;
     }
-    _ = try runSample(allocator, fixture, .incremental, 1000, false);
-    _ = try runSample(allocator, fixture, .fresh, 1001, false);
-    _ = try runSample(allocator, fixture, .prepared, 1002, false);
+    _ = try runSample(allocator, fixture, .incremental, 1000, false, cache_kib, memory_temp);
+    _ = try runSample(allocator, fixture, .fresh, 1001, false, cache_kib, memory_temp);
+    _ = try runSample(allocator, fixture, .prepared, 1002, false, cache_kib, memory_temp);
     const order = [_]Variant{ .incremental, .fresh, .prepared, .prepared, .fresh, .incremental, .incremental, .prepared, .fresh, .fresh, .prepared, .incremental, .incremental, .fresh, .prepared, .prepared, .fresh, .incremental, .incremental, .prepared, .fresh };
     var incremental: [measured_runs]f64 = undefined;
     var fresh: [measured_runs]f64 = undefined;
@@ -120,7 +137,7 @@ pub fn main(init: std.process.Init) !void {
     var fresh_len: usize = 0;
     var prepared_len: usize = 0;
     for (order, 0..) |variant, ordinal| {
-        const sample = try runSample(allocator, fixture, variant, ordinal, false);
+        const sample = try runSample(allocator, fixture, variant, ordinal, false, cache_kib, memory_temp);
         const index = switch (variant) {
             .incremental => index: {
                 defer incremental_len += 1;
@@ -138,7 +155,7 @@ pub fn main(init: std.process.Init) !void {
                 break :index prepared_len;
             },
         };
-        std.debug.print("sample variant={s} index={d} total_ms={d:.3} storage_bytes={d} payload_bytes={d} validation_ms={d:.3} key_generation_ms={d:.3} nodes_ms={d:.3} edges_ms={d:.3} indexes_ms={d:.3}\n", .{ @tagName(variant), index + 1, sample.total_ms, sample.storage_bytes, sample.profile.payload_bytes, sample.profile.validation_ms, sample.profile.key_generation_ms, sample.profile.node_load_ms, sample.profile.edge_load_ms, sample.profile.index_build_ms });
+        std.debug.print("sample variant={s} index={d} total_ms={d:.3} storage_bytes={d} payload_bytes={d} validation_ms={d:.3} key_generation_ms={d:.3} nodes_ms={d:.3} node_statements={d} edges_ms={d:.3} edge_statements={d} indexes_ms={d:.3} node_order_index_ms={d:.3} topology_index_ms={d:.3} edge_order_index_ms={d:.3} outgoing_index_ms={d:.3} typed_outgoing_index_ms={d:.3} incoming_index_ms={d:.3} typed_incoming_index_ms={d:.3}\n", .{ @tagName(variant), index + 1, sample.total_ms, sample.storage_bytes, sample.profile.payload_bytes, sample.profile.validation_ms, sample.profile.key_generation_ms, sample.profile.node_load_ms, sample.profile.node_insert_statements, sample.profile.edge_load_ms, sample.profile.edge_insert_statements, sample.profile.index_build_ms, sample.profile.nodes_created_order_index_ms, sample.profile.edges_topology_index_ms, sample.profile.edges_created_order_index_ms, sample.profile.edges_from_node_index_ms, sample.profile.edges_from_node_type_index_ms, sample.profile.edges_to_node_index_ms, sample.profile.edges_to_node_type_index_ms });
     }
     const incremental_median = median(&incremental);
     const fresh_median = median(&fresh);
