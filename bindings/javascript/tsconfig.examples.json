@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "outDir": "examples/dist",
+    "baseUrl": ".",
+    "paths": {
+      "zova": ["dist/index.d.ts"]
+    },
+    "rootDir": "examples",
+    "strict": true,
+    "target": "ES2022"
+  },
+  "include": ["examples/*.ts"]
+}

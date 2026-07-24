@@ -1,0 +1,61 @@
+{
+  "name": "zova",
+  "version": "0.25.0",
+  "private": true,
+  "description": "JavaScript and TypeScript bindings for Zova.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/atasesli/zova.git",
+    "directory": "bindings/javascript"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "examples",
+    "index.js",
+    "index.d.ts",
+    "*.node",
+    "README.md"
+  ],
+  "engines": {
+    "node": "^22.13.0 || >=24.0.0"
+  },
+  "optionalDependencies": {
+    "zova-darwin-arm64": "0.25.0",
+    "zova-darwin-x64": "0.25.0",
+    "zova-linux-arm64-gnu": "0.25.0",
+    "zova-linux-x64-gnu": "0.25.0",
+    "zova-win32-x64-msvc": "0.25.0"
+  },
+  "scripts": {
+    "build": "bun run build:native && bun run build:typescript",
+    "build:native": "napi build --platform --release --target-dir target",
+    "build:native:debug": "napi build --platform --target-dir target",
+    "build:typescript": "tsc --project tsconfig.json && tsc --project tsconfig.examples.json",
+    "test": "bun test",
+    "typecheck": "tsc --project tsconfig.json --noEmit && tsc --project tsconfig.examples.json --noEmit"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "3.7.1",
+    "typescript": "5.9.3"
+  },
+  "napi": {
+    "binaryName": "zova",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc"
+    ]
+  }
+}

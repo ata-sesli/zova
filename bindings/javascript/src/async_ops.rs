@@ -1,0 +1,569 @@
+use std::sync::Arc;
+
+use napi::bindgen_prelude::{AsyncTask, Either3, Float32Array, Int8Array, Uint16Array, Uint8Array};
+use napi::{Env, Result, Task};
+use napi_derive::napi;
+
+use crate::database::{DatabaseState, NativeDatabase};
+use crate::error::zova_error;
+use crate::graph::{
+    target_type, NativeGraphEdgeInput, NativeGraphNodeInput, NativeGraphWalkItem,
+    NativeGraphWalkOptions,
+};
+use crate::vector::{native_search_results, NativeVectorInput, NativeVectorSearchResult};
+
+pub struct RestoreTask {
+    source: String,
+    destination: String,
+    verify: bool,
+}
+
+impl Task for RestoreTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        zova::restore_backup(
+            &self.source,
+            &self.destination,
+            zova::RestoreOptions {
+                verify: self.verify,
+            },
+        )
+        .map_err(zova_error)
+    }
+
+    fn resolve(&mut self, _: Env, _: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
+    }
+}
+
+struct DatabaseTaskState {
+    database: zova::SharedDatabase,
+    state: Arc<DatabaseState>,
+}
+
+impl DatabaseTaskState {
+    fn new(database: &NativeDatabase) -> Result<Self> {
+        Ok(Self {
+            database: database.state.register_child()?,
+            state: database.state.clone(),
+        })
+    }
+
+    fn finish(self) {
+        self.state.child_closed();
+    }
+}
+
+pub struct ExecTask {
+    state: Option<DatabaseTaskState>,
+    sql: String,
+}
+
+impl Task for ExecTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.state
+            .as_ref()
+            .expect("task state")
+            .database
+            .exec(&self.sql)
+            .map_err(zova_error)
+    }
+
+    fn resolve(&mut self, _: Env, _: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
+    }
+
+    fn finally(mut self, _: Env) -> Result<()> {
+        self.state.take().expect("task state").finish();
+        Ok(())
+    }
+}
+
+enum FileTaskKind {
+    Backup,
+    Compact,
+}
+
+pub struct FileTask {
+    state: Option<DatabaseTaskState>,
+    destination: String,
+    verify: bool,
+    kind: FileTaskKind,
+}
+
+impl Task for FileTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let database = &self.state.as_ref().expect("task state").database;
+        match self.kind {
+            FileTaskKind::Backup => database
+                .backup_to(
+                    &self.destination,
+                    zova::BackupOptions {
+                        verify: self.verify,
+                    },
+                )
+                .map_err(zova_error),
+            FileTaskKind::Compact => database
+                .compact_to(
+                    &self.destination,
+                    zova::CompactOptions {
+                        verify: self.verify,
+                    },
+                )
+                .map_err(zova_error),
+        }
+    }
+
+    fn resolve(&mut self, _: Env, _: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
+    }
+
+    fn finally(mut self, _: Env) -> Result<()> {
+        self.state.take().expect("task state").finish();
+        Ok(())
+    }
+}
+
+enum ObjectTaskKind {
+    Put(Vec<u8>),
+    Get(zova::ObjectId),
+}
+
+pub struct ObjectTask {
+    state: Option<DatabaseTaskState>,
+    kind: ObjectTaskKind,
+}
+
+enum OwnedVectorValues {
+    F32(Vec<f32>),
+    F16(Vec<u16>),
+    I8(Vec<i8>),
+}
+
+impl OwnedVectorValues {
+    fn from_native(values: Either3<Float32Array, Uint16Array, Int8Array>) -> Self {
+        match values {
+            Either3::A(values) => Self::F32(values.to_vec()),
+            Either3::B(values) => Self::F16(values.to_vec()),
+            Either3::C(values) => Self::I8(values.to_vec()),
+        }
+    }
+
+    fn borrowed(&self) -> zova::VectorValues<'_> {
+        match self {
+            Self::F32(values) => zova::VectorValues::F32(values),
+            Self::F16(values) => zova::VectorValues::F16(values),
+            Self::I8(values) => zova::VectorValues::I8(values),
+        }
+    }
+}
+
+struct OwnedVectorInput {
+    id: String,
+    values: OwnedVectorValues,
+}
+
+pub struct VectorPutTask {
+    state: Option<DatabaseTaskState>,
+    collection_name: String,
+    vectors: Vec<OwnedVectorInput>,
+}
+
+impl Task for VectorPutTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let vectors = self
+            .vectors
+            .iter()
+            .map(|vector| zova::VectorInput {
+                id: &vector.id,
+                values: vector.values.borrowed(),
+            })
+            .collect::<Vec<_>>();
+        self.state
+            .as_ref()
+            .expect("task state")
+            .database
+            .put_vectors(&self.collection_name, &vectors)
+            .map_err(zova_error)
+    }
+
+    fn resolve(&mut self, _: Env, _: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
+    }
+
+    fn finally(mut self, _: Env) -> Result<()> {
+        self.state.take().expect("task state").finish();
+        Ok(())
+    }
+}
+
+pub struct VectorSearchTask {
+    state: Option<DatabaseTaskState>,
+    collection_name: String,
+    query: OwnedVectorValues,
+    candidate_ids: Option<Vec<String>>,
+    max_distance: Option<f64>,
+    limit: usize,
+}
+
+impl Task for VectorSearchTask {
+    type Output = Vec<zova::VectorSearchResult>;
+    type JsValue = Vec<NativeVectorSearchResult>;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let candidates = self
+            .candidate_ids
+            .as_ref()
+            .map(|items| items.iter().map(String::as_str).collect::<Vec<_>>());
+        let database = &self.state.as_ref().expect("task state").database;
+        match (candidates.as_deref(), self.max_distance) {
+            (None, None) => {
+                database.search_vectors(&self.collection_name, self.query.borrowed(), self.limit)
+            }
+            (Some(candidates), None) => database.search_vectors_in(
+                &self.collection_name,
+                self.query.borrowed(),
+                candidates,
+                self.limit,
+            ),
+            (None, Some(distance)) => database.search_vectors_within(
+                &self.collection_name,
+                self.query.borrowed(),
+                distance,
+                self.limit,
+            ),
+            (Some(candidates), Some(distance)) => database.search_vectors_in_within(
+                &self.collection_name,
+                self.query.borrowed(),
+                candidates,
+                distance,
+                self.limit,
+            ),
+        }
+        .map_err(zova_error)
+    }
+
+    fn resolve(&mut self, _: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(native_search_results(output))
+    }
+
+    fn finally(mut self, _: Env) -> Result<()> {
+        self.state.take().expect("task state").finish();
+        Ok(())
+    }
+}
+
+struct OwnedGraphNodeInput {
+    graph_name: String,
+    node_id: String,
+    kind: String,
+    target_type: zova::GraphTargetType,
+    target_namespace: Option<String>,
+    target_ref: Option<String>,
+}
+
+struct OwnedGraphEdgeInput {
+    graph_name: String,
+    from_node_id: String,
+    edge_type: String,
+    to_node_id: String,
+}
+
+enum GraphBatchKind {
+    Nodes(Vec<OwnedGraphNodeInput>),
+    Edges(Vec<OwnedGraphEdgeInput>),
+}
+
+pub struct GraphBatchTask {
+    state: Option<DatabaseTaskState>,
+    kind: GraphBatchKind,
+}
+
+impl Task for GraphBatchTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let database = &self.state.as_ref().expect("task state").database;
+        match &self.kind {
+            GraphBatchKind::Nodes(inputs) => {
+                let inputs = inputs
+                    .iter()
+                    .map(|input| zova::GraphNodeInput {
+                        graph_name: &input.graph_name,
+                        node_id: &input.node_id,
+                        kind: &input.kind,
+                        target_type: input.target_type,
+                        target_namespace: input.target_namespace.as_deref(),
+                        target_ref: input.target_ref.as_deref(),
+                    })
+                    .collect::<Vec<_>>();
+                database.put_graph_nodes(&inputs)
+            }
+            GraphBatchKind::Edges(inputs) => {
+                let inputs = inputs
+                    .iter()
+                    .map(|input| zova::GraphEdgeInput {
+                        graph_name: &input.graph_name,
+                        from_node_id: &input.from_node_id,
+                        edge_type: &input.edge_type,
+                        to_node_id: &input.to_node_id,
+                    })
+                    .collect::<Vec<_>>();
+                database.put_graph_edges(&inputs)
+            }
+        }
+        .map_err(zova_error)
+    }
+
+    fn resolve(&mut self, _: Env, _: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
+    }
+
+    fn finally(mut self, _: Env) -> Result<()> {
+        self.state.take().expect("task state").finish();
+        Ok(())
+    }
+}
+
+pub struct GraphWalkTask {
+    state: Option<DatabaseTaskState>,
+    options: NativeGraphWalkOptions,
+}
+
+impl Task for GraphWalkTask {
+    type Output = Vec<zova::GraphWalkItem>;
+    type JsValue = Vec<NativeGraphWalkItem>;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.state
+            .as_ref()
+            .expect("task state")
+            .database
+            .graph_walk(zova::GraphWalkOptions {
+                graph_name: &self.options.graph_name,
+                start_node_id: &self.options.start_node_id,
+                edge_type: self.options.edge_type.as_deref(),
+                max_depth: self.options.max_depth,
+                limit: self.options.limit as usize,
+            })
+            .map_err(zova_error)
+    }
+
+    fn resolve(&mut self, _: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output
+            .into_iter()
+            .map(|item| NativeGraphWalkItem {
+                node_id: item.node_id,
+                kind: item.kind,
+                depth: item.depth,
+                predecessor_node_id: item.predecessor_node_id,
+                edge_type: item.edge_type,
+            })
+            .collect())
+    }
+
+    fn finally(mut self, _: Env) -> Result<()> {
+        self.state.take().expect("task state").finish();
+        Ok(())
+    }
+}
+
+impl Task for ObjectTask {
+    type Output = Vec<u8>;
+    type JsValue = Uint8Array;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let database = &self.state.as_ref().expect("task state").database;
+        match &self.kind {
+            ObjectTaskKind::Put(bytes) => database
+                .put_object(bytes)
+                .map(|id| id.into_bytes().to_vec())
+                .map_err(zova_error),
+            ObjectTaskKind::Get(id) => database.get_object(*id).map_err(zova_error),
+        }
+    }
+
+    fn resolve(&mut self, _: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(Uint8Array::new(output))
+    }
+
+    fn finally(mut self, _: Env) -> Result<()> {
+        self.state.take().expect("task state").finish();
+        Ok(())
+    }
+}
+
+#[napi(ts_return_type = "Promise<void>")]
+pub fn async_restore_backup(
+    source: String,
+    destination: String,
+    verify: Option<bool>,
+) -> AsyncTask<RestoreTask> {
+    AsyncTask::new(RestoreTask {
+        source,
+        destination,
+        verify: verify.unwrap_or(true),
+    })
+}
+
+#[napi]
+impl NativeDatabase {
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn async_exec(&self, sql: String) -> Result<AsyncTask<ExecTask>> {
+        Ok(AsyncTask::new(ExecTask {
+            state: Some(DatabaseTaskState::new(self)?),
+            sql,
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn async_backup_to(
+        &self,
+        destination: String,
+        verify: Option<bool>,
+    ) -> Result<AsyncTask<FileTask>> {
+        Ok(AsyncTask::new(FileTask {
+            state: Some(DatabaseTaskState::new(self)?),
+            destination,
+            verify: verify.unwrap_or(true),
+            kind: FileTaskKind::Backup,
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn async_compact_to(
+        &self,
+        destination: String,
+        verify: Option<bool>,
+    ) -> Result<AsyncTask<FileTask>> {
+        Ok(AsyncTask::new(FileTask {
+            state: Some(DatabaseTaskState::new(self)?),
+            destination,
+            verify: verify.unwrap_or(true),
+            kind: FileTaskKind::Compact,
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<Uint8Array>")]
+    pub fn async_put_object(&self, data: Uint8Array) -> Result<AsyncTask<ObjectTask>> {
+        Ok(AsyncTask::new(ObjectTask {
+            state: Some(DatabaseTaskState::new(self)?),
+            kind: ObjectTaskKind::Put(data.to_vec()),
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<Uint8Array>")]
+    pub fn async_get_object(&self, id: Uint8Array) -> Result<AsyncTask<ObjectTask>> {
+        let id = zova::ObjectId::try_from(id.as_ref()).map_err(zova_error)?;
+        Ok(AsyncTask::new(ObjectTask {
+            state: Some(DatabaseTaskState::new(self)?),
+            kind: ObjectTaskKind::Get(id),
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn async_put_vectors(
+        &self,
+        collection_name: String,
+        vectors: Vec<NativeVectorInput>,
+    ) -> Result<AsyncTask<VectorPutTask>> {
+        let vectors = vectors
+            .into_iter()
+            .map(|vector| OwnedVectorInput {
+                id: vector.id,
+                values: OwnedVectorValues::from_native(vector.values),
+            })
+            .collect();
+        Ok(AsyncTask::new(VectorPutTask {
+            state: Some(DatabaseTaskState::new(self)?),
+            collection_name,
+            vectors,
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<Array<NativeVectorSearchResult>>")]
+    pub fn async_search_vectors(
+        &self,
+        collection_name: String,
+        query: Either3<Float32Array, Uint16Array, Int8Array>,
+        candidate_ids: Option<Vec<String>>,
+        max_distance: Option<f64>,
+        limit: u32,
+    ) -> Result<AsyncTask<VectorSearchTask>> {
+        Ok(AsyncTask::new(VectorSearchTask {
+            state: Some(DatabaseTaskState::new(self)?),
+            collection_name,
+            query: OwnedVectorValues::from_native(query),
+            candidate_ids,
+            max_distance,
+            limit: limit as usize,
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn async_put_graph_nodes(
+        &self,
+        inputs: Vec<NativeGraphNodeInput>,
+    ) -> Result<AsyncTask<GraphBatchTask>> {
+        let inputs = inputs
+            .into_iter()
+            .map(|input| {
+                Ok(OwnedGraphNodeInput {
+                    graph_name: input.graph_name,
+                    node_id: input.node_id,
+                    kind: input.kind,
+                    target_type: target_type(&input.target_type)?,
+                    target_namespace: input.target_namespace,
+                    target_ref: input.target_ref,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(AsyncTask::new(GraphBatchTask {
+            state: Some(DatabaseTaskState::new(self)?),
+            kind: GraphBatchKind::Nodes(inputs),
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn async_put_graph_edges(
+        &self,
+        inputs: Vec<NativeGraphEdgeInput>,
+    ) -> Result<AsyncTask<GraphBatchTask>> {
+        let inputs = inputs
+            .into_iter()
+            .map(|input| OwnedGraphEdgeInput {
+                graph_name: input.graph_name,
+                from_node_id: input.from_node_id,
+                edge_type: input.edge_type,
+                to_node_id: input.to_node_id,
+            })
+            .collect();
+        Ok(AsyncTask::new(GraphBatchTask {
+            state: Some(DatabaseTaskState::new(self)?),
+            kind: GraphBatchKind::Edges(inputs),
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<Array<NativeGraphWalkItem>>")]
+    pub fn async_graph_walk(
+        &self,
+        options: NativeGraphWalkOptions,
+    ) -> Result<AsyncTask<GraphWalkTask>> {
+        Ok(AsyncTask::new(GraphWalkTask {
+            state: Some(DatabaseTaskState::new(self)?),
+            options,
+        }))
+    }
+}
