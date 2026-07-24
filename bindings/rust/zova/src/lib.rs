@@ -24,9 +24,9 @@ pub use database::{
 pub use error::{Error, Result, Status};
 pub use extension::ExtensionInfo;
 pub use graph::{
-    GraphEdge, GraphEdgeInput, GraphInfo, GraphNeighbor, GraphNeighborDirection,
-    GraphNeighborsOptions, GraphNode, GraphNodeInput, GraphTargetType, GraphWalkItem,
-    GraphWalkOptions, DEFAULT_GRAPH_NAME,
+    GraphDegreeOptions, GraphEdge, GraphEdgeInput, GraphInfo, GraphNeighbor,
+    GraphNeighborDirection, GraphNeighborsOptions, GraphNode, GraphNodeInput, GraphTargetType,
+    GraphWalkItem, GraphWalkOptions, DEFAULT_GRAPH_NAME,
 };
 pub use notification::{Notification, Subscription};
 pub use object::{

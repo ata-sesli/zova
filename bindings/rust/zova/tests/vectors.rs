@@ -99,7 +99,7 @@ fn vector_collection_lifecycle_crud_batch_and_delete() {
 
     db.exec("insert into chunks(id, vector_id) values ('row-a', 'a')")
         .unwrap();
-    db.delete_vector("chunks", "a").unwrap();
+    db.delete_vectors("chunks", &["a", "missing"]).unwrap();
     assert!(!db.has_vector("chunks", "a").unwrap());
     assert_eq!(
         db.delete_vector("chunks", "a").unwrap_err().status(),

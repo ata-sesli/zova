@@ -1,9 +1,9 @@
 use std::thread;
 use zova::{
-    object_id, GraphEdgeInput, GraphNeighborDirection, GraphNeighborsOptions, GraphNodeInput,
-    GraphTargetType, GraphWalkOptions, SharedDatabase, SharedObjectWriter, SharedStatement, Status,
-    Step, VectorCollectionOptions, VectorElementType, VectorInput, VectorMetric, VectorValues,
-    DEFAULT_GRAPH_NAME,
+    object_id, GraphDegreeOptions, GraphEdgeInput, GraphNeighborDirection, GraphNeighborsOptions,
+    GraphNodeInput, GraphTargetType, GraphWalkOptions, SharedDatabase, SharedObjectWriter,
+    SharedStatement, Status, Step, VectorCollectionOptions, VectorElementType, VectorInput,
+    VectorMetric, VectorValues, DEFAULT_GRAPH_NAME,
 };
 
 fn temp_path(name: &str) -> String {
@@ -252,10 +252,18 @@ fn shared_graph_operations_work_inside_transactions_and_savepoints() {
         .unwrap());
 
     db.transaction_immediate(|guard| {
-        guard.put_graph_node(graph_node("root"))?;
+        guard.put_graph_nodes(&[graph_node("root"), graph_node("child")])?;
         guard.with_savepoint("sp_graph", |guard| {
-            guard.put_graph_node(graph_node("child"))?;
-            guard.put_graph_edge(graph_edge("root", "links", "child"))?;
+            guard.put_graph_edges(&[graph_edge("root", "links", "child")])?;
+            assert_eq!(
+                guard.graph_degree(GraphDegreeOptions {
+                    graph_name: DEFAULT_GRAPH_NAME,
+                    node_id: "root",
+                    direction: GraphNeighborDirection::Outgoing,
+                    edge_type: Some("links"),
+                })?,
+                1
+            );
             Ok(())
         })?;
         Ok(())
@@ -277,6 +285,11 @@ fn shared_graph_operations_work_inside_transactions_and_savepoints() {
             .collect::<Vec<_>>(),
         ["root", "child"]
     );
+
+    db.delete_graph_edges(&[graph_edge("root", "links", "child")])
+        .unwrap();
+    db.delete_graph_nodes(DEFAULT_GRAPH_NAME, &["child"])
+        .unwrap();
     let _ = std::fs::remove_file(path);
 }
 
@@ -536,5 +549,8 @@ fn shared_batch_vectors_and_candidate_search_match_database_api() {
             .collect::<Vec<_>>(),
         ["c"]
     );
+    db.delete_vectors("docs", &["b", "missing"]).unwrap();
+    assert!(!db.has_vector("docs", "b").unwrap());
+    assert!(db.has_vector("docs", "a").unwrap());
     let _ = std::fs::remove_file(path);
 }

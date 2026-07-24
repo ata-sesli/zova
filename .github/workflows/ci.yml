@@ -124,3 +124,57 @@ jobs:
       - run: uv run --isolated --with maturin --with pytest --directory bindings/python maturin develop
       - run: uv run --isolated --with pytest --directory bindings/python python -m pytest
       - run: uv run --isolated --with maturin --directory bindings/python maturin build --out /tmp/zova-python-wheels
+
+  javascript:
+    name: JavaScript Node ${{ matrix.node-version }} (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["22", "24"]
+        target:
+          - linux-x86_64
+          - linux-arm64
+          - macos-x86_64
+          - macos-arm64
+          - windows-x86_64
+        include:
+          - target: linux-x86_64
+            os: ubuntu-latest
+          - target: linux-arm64
+            os: ubuntu-24.04-arm
+          - target: macos-x86_64
+            os: macos-15-intel
+          - target: macos-arm64
+            os: macos-latest
+          - target: windows-x86_64
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@nextest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: bindings/javascript/bun.lock
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+        working-directory: bindings/javascript
+      - run: cargo fmt --manifest-path bindings/javascript/Cargo.toml --check
+      - run: cargo nextest run --manifest-path bindings/javascript/Cargo.toml
+      - run: bun run build:native:debug
+        working-directory: bindings/javascript
+      - run: bun run build:typescript
+        working-directory: bindings/javascript
+      - run: bun run typecheck
+        working-directory: bindings/javascript
+      - run: bun test
+        working-directory: bindings/javascript
+      - run: node bindings/javascript/tests/runtime-smoke.mjs
+      - run: node bindings/javascript/tests/runtime-smoke.cjs
+      - run: bun bindings/javascript/tests/runtime-smoke.mjs
+      - run: npm pack --dry-run --ignore-scripts
+        working-directory: bindings/javascript

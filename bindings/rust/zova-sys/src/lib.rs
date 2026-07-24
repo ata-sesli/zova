@@ -1265,6 +1265,14 @@ pub struct zova_graph_node_delete_request {
 }
 
 #[repr(C)]
+pub struct zova_graph_node_delete_many_request {
+    pub db: *mut zova_database,
+    pub graph_name: *const c_char,
+    pub node_ids: *const *const c_char,
+    pub node_count: usize,
+}
+
+#[repr(C)]
 pub struct zova_graph_edge_put_request {
     pub db: *mut zova_database,
     pub graph_name: *const c_char,
@@ -1392,6 +1400,16 @@ pub struct zova_graph_edge_payload_replace_many_request {
     pub graph_name: *const c_char,
     pub replacements: *const zova_graph_edge_payload_replacement,
     pub replacement_count: usize,
+}
+
+#[repr(C)]
+pub struct zova_graph_degree_request {
+    pub db: *mut zova_database,
+    pub graph_name: *const c_char,
+    pub node_id: *const c_char,
+    pub direction: c_int,
+    pub edge_type: *const c_char,
+    pub out_degree: *mut u64,
 }
 
 #[repr(C)]
@@ -1755,6 +1773,9 @@ extern "C" {
     pub fn zova_graph_node_get(request: *const zova_graph_node_get_request) -> zova_status;
     pub fn zova_graph_node_exists(request: *const zova_graph_node_exists_request) -> zova_status;
     pub fn zova_graph_node_delete(request: *const zova_graph_node_delete_request) -> zova_status;
+    pub fn zova_graph_node_delete_many(
+        request: *const zova_graph_node_delete_many_request,
+    ) -> zova_status;
     pub fn zova_graph_edge_put(request: *const zova_graph_edge_put_request) -> zova_status;
     pub fn zova_graph_edge_put_many(
         request: *const zova_graph_edge_put_many_request,
@@ -1784,6 +1805,7 @@ extern "C" {
     pub fn zova_graph_edge_payload_replace_many(
         request: *const zova_graph_edge_payload_replace_many_request,
     ) -> zova_status;
+    pub fn zova_graph_degree(request: *const zova_graph_degree_request) -> zova_status;
     pub fn zova_graph_degree_many_keyed(
         request: *const zova_graph_degree_many_keyed_request,
     ) -> zova_status;

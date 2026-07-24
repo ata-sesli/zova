@@ -8,6 +8,16 @@ bindings/rust/target*/
 bindings/rust/zova-sys/native/
 bindings/python/target
 bindings/python/rust/
+bindings/javascript/node_modules/
+bindings/javascript/target/
+bindings/javascript/dist/
+bindings/javascript/examples/dist/
+bindings/javascript/npm/
+bindings/javascript/package/
+bindings/javascript/package-smoke/
+bindings/javascript/*.node
+bindings/javascript/index.js
+bindings/javascript/index.d.ts
 *.crate
 .DS_STORE
 notes

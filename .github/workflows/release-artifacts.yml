@@ -138,6 +138,106 @@ jobs:
           path: zig-out/python-sdist/*
           if-no-files-found: error
 
+  javascript-native:
+    name: JavaScript Native (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+          - os: ubuntu-24.04-arm
+            platform: linux-arm64
+          - os: macos-15-intel
+            platform: macos-x86_64
+          - os: macos-latest
+            platform: macos-arm64
+          - os: windows-latest
+            platform: windows-x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: bindings/javascript/bun.lock
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+        working-directory: bindings/javascript
+      - run: bun run build:native
+        working-directory: bindings/javascript
+      - run: bun run build:typescript
+        working-directory: bindings/javascript
+      - run: bun test
+        working-directory: bindings/javascript
+      - run: node bindings/javascript/tests/runtime-smoke.mjs
+      - run: node bindings/javascript/tests/runtime-smoke.cjs
+      - run: bun bindings/javascript/tests/runtime-smoke.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zova-${{ inputs.version }}-${{ matrix.platform }}-javascript
+          path: bindings/javascript/*.node
+          if-no-files-found: error
+
+  javascript-packages:
+    name: JavaScript npm packages
+    runs-on: ubuntu-latest
+    needs: javascript-native
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: bindings/javascript/bun.lock
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+        working-directory: bindings/javascript
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: zova-${{ inputs.version }}-*-javascript
+          path: bindings/javascript/artifacts
+          merge-multiple: true
+      - run: bunx napi create-npm-dirs
+        working-directory: bindings/javascript
+      - run: bunx napi artifacts --output-dir artifacts
+        working-directory: bindings/javascript
+      - run: bun run build:typescript
+        working-directory: bindings/javascript
+      - run: |
+          mkdir -p package
+          for directory in npm/*; do
+            npm pack "./$directory" --ignore-scripts --pack-destination package
+          done
+          rm -f ./*.node
+          npm pack --dry-run --ignore-scripts
+          npm pack --ignore-scripts --pack-destination package
+        working-directory: bindings/javascript
+      - run: |
+          mkdir -p package-smoke
+          cd package-smoke
+          npm init -y
+          npm install \
+            "../package/zova-linux-x64-gnu-${{ inputs.version }}.tgz" \
+            "../package/zova-${{ inputs.version }}.tgz"
+          node -e "const zova = require('zova'); if (zova.packageVersion !== '${{ inputs.version }}') process.exit(1)"
+        working-directory: bindings/javascript
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zova-${{ inputs.version }}-javascript-packages
+          path: |
+            bindings/javascript/npm
+            bindings/javascript/artifacts
+            bindings/javascript/package
+            bindings/javascript/dist
+            bindings/javascript/index.js
+            bindings/javascript/index.d.ts
+          if-no-files-found: error
+
   source:
     name: Source Package
     runs-on: ubuntu-latest
@@ -156,6 +256,13 @@ jobs:
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: bindings/javascript/bun.lock
+      - uses: oven-sh/setup-bun@v2
+      - uses: taiki-e/install-action@nextest
       - run: scripts/package-release.sh "${{ inputs.version }}" "zig-out/source-release"
         env:
           ZOVA_PACKAGE_RELEASE_DRY_RUN: "1"

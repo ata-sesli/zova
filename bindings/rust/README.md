@@ -267,9 +267,11 @@ db.put_graph_edge(GraphEdgeInput {
 })?;
 ```
 
-`Database` and `SharedDatabase` expose graph create/list/info/delete, node CRUD,
-edge CRUD, neighbor queries, and bounded walks. `SharedDatabaseGuard` exposes
-the same graph methods for transaction and savepoint closures.
+`Database` and `SharedDatabase` expose graph create/list/info/delete, node and
+edge CRUD, atomic node/edge batch mutation, neighbor queries, degree, and
+bounded walks. `SharedDatabaseGuard` exposes the same graph methods for
+transaction and savepoint closures. Vector batch deletion is also available
+through `delete_vectors`.
 
 Zova validates Zova-owned target references for objects, object chunks, and
 vectors during diagnostics. It does not validate arbitrary user SQL row

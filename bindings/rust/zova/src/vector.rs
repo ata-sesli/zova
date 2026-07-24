@@ -209,6 +209,16 @@ impl Database {
         self.status(unsafe { zova_sys::zova_vector_delete(&request) })
     }
 
+    pub fn delete_vectors(&mut self, collection_name: &str, vector_ids: &[&str]) -> Result<()> {
+        let db = self.raw_ptr();
+        delete_vectors_raw(
+            db,
+            |status| self.status(status),
+            collection_name,
+            vector_ids,
+        )
+    }
+
     pub fn search_vectors(
         &mut self,
         collection_name: &str,
@@ -513,6 +523,29 @@ pub(crate) fn candidate_ptrs(
         .collect::<Result<Vec<_>>>()?;
     let pointers = candidates.iter().map(|id| id.as_ptr()).collect();
     Ok((candidates, pointers))
+}
+
+pub(crate) fn delete_vectors_raw(
+    db: *mut zova_sys::zova_database,
+    status: impl FnOnce(i32) -> Result<()>,
+    collection_name: &str,
+    vector_ids: &[&str],
+) -> Result<()> {
+    let collection_name = cstring(collection_name, "vector collection name")?;
+    let (vector_ids, vector_id_ptrs) = candidate_ptrs(vector_ids)?;
+    let request = zova_sys::zova_vector_delete_many_request {
+        db,
+        collection_name: collection_name.as_ptr(),
+        vector_ids: if vector_id_ptrs.is_empty() {
+            ptr::null()
+        } else {
+            vector_id_ptrs.as_ptr()
+        },
+        vector_count: vector_id_ptrs.len(),
+    };
+    let result = status(unsafe { zova_sys::zova_vector_delete_many(&request) });
+    drop(vector_ids);
+    result
 }
 
 pub(crate) fn vector_inputs(

@@ -78,6 +78,14 @@ pub struct GraphNeighborsOptions<'a> {
     pub limit: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct GraphDegreeOptions<'a> {
+    pub graph_name: &'a str,
+    pub node_id: &'a str,
+    pub direction: GraphNeighborDirection,
+    pub edge_type: Option<&'a str>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphNeighbor {
     pub node_id: String,
@@ -134,6 +142,11 @@ impl Database {
         put_graph_node_raw(db, |status| self.status(status), input)
     }
 
+    pub fn put_graph_nodes(&mut self, inputs: &[GraphNodeInput<'_>]) -> Result<()> {
+        let db = self.raw_ptr();
+        put_graph_nodes_raw(db, |status| self.status(status), inputs)
+    }
+
     pub fn get_graph_node(&mut self, graph_name: &str, node_id: &str) -> Result<GraphNode> {
         let db = self.raw_ptr();
         get_graph_node_raw(db, |status| self.status(status), graph_name, node_id)
@@ -149,9 +162,19 @@ impl Database {
         delete_graph_node_raw(db, |status| self.status(status), graph_name, node_id)
     }
 
+    pub fn delete_graph_nodes(&mut self, graph_name: &str, node_ids: &[&str]) -> Result<()> {
+        let db = self.raw_ptr();
+        delete_graph_nodes_raw(db, |status| self.status(status), graph_name, node_ids)
+    }
+
     pub fn put_graph_edge(&mut self, input: GraphEdgeInput<'_>) -> Result<()> {
         let db = self.raw_ptr();
         put_graph_edge_raw(db, |status| self.status(status), input)
+    }
+
+    pub fn put_graph_edges(&mut self, inputs: &[GraphEdgeInput<'_>]) -> Result<()> {
+        let db = self.raw_ptr();
+        put_graph_edges_raw(db, |status| self.status(status), inputs)
     }
 
     pub fn get_graph_edge(
@@ -193,6 +216,16 @@ impl Database {
     pub fn delete_graph_edge(&mut self, input: GraphEdgeInput<'_>) -> Result<()> {
         let db = self.raw_ptr();
         delete_graph_edge_raw(db, |status| self.status(status), input)
+    }
+
+    pub fn delete_graph_edges(&mut self, inputs: &[GraphEdgeInput<'_>]) -> Result<()> {
+        let db = self.raw_ptr();
+        delete_graph_edges_raw(db, |status| self.status(status), inputs)
+    }
+
+    pub fn graph_degree(&mut self, options: GraphDegreeOptions<'_>) -> Result<u64> {
+        let db = self.raw_ptr();
+        graph_degree_raw(db, |status| self.status(status), options)
     }
 
     pub fn graph_neighbors(
@@ -342,6 +375,46 @@ pub(crate) fn put_graph_node_raw(
     status(unsafe { zova_sys::zova_graph_node_put(&request) })
 }
 
+pub(crate) fn put_graph_nodes_raw(
+    db: *mut zova_sys::zova_database,
+    status: impl FnOnce(i32) -> Result<()>,
+    inputs: &[GraphNodeInput<'_>],
+) -> Result<()> {
+    let strings = inputs
+        .iter()
+        .map(|input| {
+            Ok(GraphNodeInputStrings {
+                graph_name: cstring(input.graph_name, "graph name")?,
+                node_id: cstring(input.node_id, "graph node id")?,
+                kind: cstring(input.kind, "graph node kind")?,
+                target_namespace: optional_cstring(
+                    input.target_namespace,
+                    "graph target namespace",
+                )?,
+                target_ref: optional_cstring(input.target_ref, "graph target ref")?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let raw = inputs
+        .iter()
+        .zip(strings.iter())
+        .map(|(input, strings)| zova_sys::zova_graph_node_input {
+            graph_name: strings.graph_name.as_ptr(),
+            node_id: strings.node_id.as_ptr(),
+            kind: strings.kind.as_ptr(),
+            target_type: input.target_type.to_c(),
+            target_namespace: optional_ptr(&strings.target_namespace),
+            target_ref: optional_ptr(&strings.target_ref),
+        })
+        .collect::<Vec<_>>();
+    let request = zova_sys::zova_graph_node_put_many_request {
+        db,
+        nodes: slice_ptr(&raw),
+        nodes_len: raw.len(),
+    };
+    status(unsafe { zova_sys::zova_graph_node_put_many(&request) })
+}
+
 pub(crate) fn get_graph_node_raw(
     db: *mut zova_sys::zova_database,
     status: impl FnOnce(i32) -> Result<()>,
@@ -396,6 +469,30 @@ pub(crate) fn delete_graph_node_raw(
     status(unsafe { zova_sys::zova_graph_node_delete(&request) })
 }
 
+pub(crate) fn delete_graph_nodes_raw(
+    db: *mut zova_sys::zova_database,
+    status: impl FnOnce(i32) -> Result<()>,
+    graph_name: &str,
+    node_ids: &[&str],
+) -> Result<()> {
+    let graph_name = cstring(graph_name, "graph name")?;
+    let node_ids = node_ids
+        .iter()
+        .map(|node_id| cstring(node_id, "graph node id"))
+        .collect::<Result<Vec<_>>>()?;
+    let node_id_ptrs = node_ids
+        .iter()
+        .map(|node_id| node_id.as_ptr())
+        .collect::<Vec<_>>();
+    let request = zova_sys::zova_graph_node_delete_many_request {
+        db,
+        graph_name: graph_name.as_ptr(),
+        node_ids: slice_ptr(&node_id_ptrs),
+        node_count: node_id_ptrs.len(),
+    };
+    status(unsafe { zova_sys::zova_graph_node_delete_many(&request) })
+}
+
 pub(crate) fn put_graph_edge_raw(
     db: *mut zova_sys::zova_database,
     status: impl FnOnce(i32) -> Result<()>,
@@ -413,6 +510,22 @@ pub(crate) fn put_graph_edge_raw(
         to_node_id: to_node_id.as_ptr(),
     };
     status(unsafe { zova_sys::zova_graph_edge_put(&request) })
+}
+
+pub(crate) fn put_graph_edges_raw(
+    db: *mut zova_sys::zova_database,
+    status: impl FnOnce(i32) -> Result<()>,
+    inputs: &[GraphEdgeInput<'_>],
+) -> Result<()> {
+    let (strings, raw) = graph_edge_inputs(inputs)?;
+    let request = zova_sys::zova_graph_edge_put_many_request {
+        db,
+        edges: slice_ptr(&raw),
+        edges_len: raw.len(),
+    };
+    let result = status(unsafe { zova_sys::zova_graph_edge_put_many(&request) });
+    drop(strings);
+    result
 }
 
 pub(crate) fn get_graph_edge_raw(
@@ -482,6 +595,43 @@ pub(crate) fn delete_graph_edge_raw(
         to_node_id: to_node_id.as_ptr(),
     };
     status(unsafe { zova_sys::zova_graph_edge_delete(&request) })
+}
+
+pub(crate) fn delete_graph_edges_raw(
+    db: *mut zova_sys::zova_database,
+    status: impl FnOnce(i32) -> Result<()>,
+    inputs: &[GraphEdgeInput<'_>],
+) -> Result<()> {
+    let (strings, raw) = graph_edge_inputs(inputs)?;
+    let request = zova_sys::zova_graph_edge_delete_many_request {
+        db,
+        edges: slice_ptr(&raw),
+        edges_len: raw.len(),
+    };
+    let result = status(unsafe { zova_sys::zova_graph_edge_delete_many(&request) });
+    drop(strings);
+    result
+}
+
+pub(crate) fn graph_degree_raw(
+    db: *mut zova_sys::zova_database,
+    status: impl FnOnce(i32) -> Result<()>,
+    options: GraphDegreeOptions<'_>,
+) -> Result<u64> {
+    let graph_name = cstring(options.graph_name, "graph name")?;
+    let node_id = cstring(options.node_id, "graph node id")?;
+    let edge_type = optional_cstring(options.edge_type, "graph edge type")?;
+    let mut degree = 0;
+    let request = zova_sys::zova_graph_degree_request {
+        db,
+        graph_name: graph_name.as_ptr(),
+        node_id: node_id.as_ptr(),
+        direction: options.direction.to_c(),
+        edge_type: optional_ptr(&edge_type),
+        out_degree: &mut degree,
+    };
+    status(unsafe { zova_sys::zova_graph_degree(&request) })?;
+    Ok(degree)
 }
 
 pub(crate) fn graph_neighbors_raw(
@@ -732,6 +882,58 @@ fn optional_cstring(value: Option<&str>, context: &'static str) -> Result<Option
 
 fn optional_ptr(value: &Option<CString>) -> *const c_char {
     value.as_ref().map_or(ptr::null(), |value| value.as_ptr())
+}
+
+struct GraphNodeInputStrings {
+    graph_name: CString,
+    node_id: CString,
+    kind: CString,
+    target_namespace: Option<CString>,
+    target_ref: Option<CString>,
+}
+
+struct GraphEdgeInputStrings {
+    graph_name: CString,
+    from_node_id: CString,
+    edge_type: CString,
+    to_node_id: CString,
+}
+
+fn graph_edge_inputs(
+    inputs: &[GraphEdgeInput<'_>],
+) -> Result<(
+    Vec<GraphEdgeInputStrings>,
+    Vec<zova_sys::zova_graph_edge_input>,
+)> {
+    let strings = inputs
+        .iter()
+        .map(|input| {
+            Ok(GraphEdgeInputStrings {
+                graph_name: cstring(input.graph_name, "graph name")?,
+                from_node_id: cstring(input.from_node_id, "from graph node id")?,
+                edge_type: cstring(input.edge_type, "graph edge type")?,
+                to_node_id: cstring(input.to_node_id, "to graph node id")?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let raw = strings
+        .iter()
+        .map(|strings| zova_sys::zova_graph_edge_input {
+            graph_name: strings.graph_name.as_ptr(),
+            from_node_id: strings.from_node_id.as_ptr(),
+            edge_type: strings.edge_type.as_ptr(),
+            to_node_id: strings.to_node_id.as_ptr(),
+        })
+        .collect();
+    Ok((strings, raw))
+}
+
+fn slice_ptr<T>(values: &[T]) -> *const T {
+    if values.is_empty() {
+        ptr::null()
+    } else {
+        values.as_ptr()
+    }
 }
 
 fn string_from_parts(data: *const c_char, len: usize) -> Result<String> {

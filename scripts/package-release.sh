@@ -104,14 +104,18 @@ fi
 
 HEAD_COMMIT="$(git rev-parse HEAD)"
 LOCAL_TAG_COMMIT=""
-REMOTE_TAG_COMMIT="$(git ls-remote --tags origin "refs/tags/$TAG^{}" | awk 'NR == 1 {print $1}')"
-if [ -z "$REMOTE_TAG_COMMIT" ]; then
-    REMOTE_TAG_COMMIT="$(git ls-remote --tags origin "refs/tags/$TAG" | awk 'NR == 1 {print $1}')"
-fi
 LOCAL_GO_TAG_COMMIT=""
-REMOTE_GO_TAG_COMMIT="$(git ls-remote --tags origin "refs/tags/$GO_TAG^{}" | awk 'NR == 1 {print $1}')"
-if [ -z "$REMOTE_GO_TAG_COMMIT" ]; then
-    REMOTE_GO_TAG_COMMIT="$(git ls-remote --tags origin "refs/tags/$GO_TAG" | awk 'NR == 1 {print $1}')"
+REMOTE_TAG_COMMIT=""
+REMOTE_GO_TAG_COMMIT=""
+if [ "$DRY_RUN" -eq 0 ]; then
+    REMOTE_TAG_COMMIT="$(git ls-remote --tags origin "refs/tags/$TAG^{}" | awk 'NR == 1 {print $1}')"
+    if [ -z "$REMOTE_TAG_COMMIT" ]; then
+        REMOTE_TAG_COMMIT="$(git ls-remote --tags origin "refs/tags/$TAG" | awk 'NR == 1 {print $1}')"
+    fi
+    REMOTE_GO_TAG_COMMIT="$(git ls-remote --tags origin "refs/tags/$GO_TAG^{}" | awk 'NR == 1 {print $1}')"
+    if [ -z "$REMOTE_GO_TAG_COMMIT" ]; then
+        REMOTE_GO_TAG_COMMIT="$(git ls-remote --tags origin "refs/tags/$GO_TAG" | awk 'NR == 1 {print $1}')"
+    fi
 fi
 
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
@@ -170,10 +174,20 @@ rm -rf "$TMP/$PKG/bindings/python/.pytest_cache"
 rm -rf "$TMP/$PKG/bindings/python/dist"
 find "$TMP/$PKG/bindings/python" -type d -name '__pycache__' -prune -exec rm -rf {} +
 find "$TMP/$PKG/bindings/python" \( -name '*.so' -o -name '*.pyd' -o -name '*.dylib' -o -name '*.dll' -o -name '*.whl' \) -delete
+rm -rf "$TMP/$PKG/bindings/javascript/node_modules"
+rm -rf "$TMP/$PKG/bindings/javascript/target"
+rm -rf "$TMP/$PKG/bindings/javascript/dist"
+rm -rf "$TMP/$PKG/bindings/javascript/examples/dist"
+rm -rf "$TMP/$PKG/bindings/javascript/npm"
+rm -rf "$TMP/$PKG/bindings/javascript/package"
+rm -rf "$TMP/$PKG/bindings/javascript/package-smoke"
+rm -f "$TMP/$PKG/bindings/javascript/index.js"
+rm -f "$TMP/$PKG/bindings/javascript/index.d.ts"
+find "$TMP/$PKG/bindings/javascript" -maxdepth 1 -name '*.node' -delete
 
-if find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/docs/extensions.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" | grep -q .; then
+if find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/docs/extensions.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" ! -path "$TMP/$PKG/bindings/javascript/README.md" | grep -q .; then
     echo "release package contains unexpected markdown files" >&2
-    find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/docs/extensions.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" >&2
+    find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/docs/extensions.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" ! -path "$TMP/$PKG/bindings/javascript/README.md" >&2
     exit 1
 fi
 
@@ -453,6 +467,26 @@ if [ ! -f "$TMP/$PKG/bindings/python/examples/extensions.py" ]; then
     exit 1
 fi
 
+if [ ! -f "$TMP/$PKG/bindings/javascript/Cargo.toml" ]; then
+    echo "release package is missing bindings/javascript/Cargo.toml" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/bindings/javascript/package.json" ]; then
+    echo "release package is missing bindings/javascript/package.json" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/bindings/javascript/bun.lock" ]; then
+    echo "release package is missing bindings/javascript/bun.lock" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/bindings/javascript/README.md" ]; then
+    echo "release package is missing bindings/javascript/README.md" >&2
+    exit 1
+fi
+
 if [ -e "$TMP/$PKG/zig-out" ]; then
     echo "release package must not contain compiled CLI artifacts" >&2
     exit 1
@@ -477,6 +511,17 @@ fi
 if find "$TMP/$PKG/bindings/python" \( -name '__pycache__' -o -name '.pytest_cache' -o -name '*.so' -o -name '*.pyd' -o -name '*.dylib' -o -name '*.dll' -o -name '*.whl' \) | grep -q .; then
     echo "release package must not contain Python cache/native/wheel artifacts" >&2
     find "$TMP/$PKG/bindings/python" \( -name '__pycache__' -o -name '.pytest_cache' -o -name '*.so' -o -name '*.pyd' -o -name '*.dylib' -o -name '*.dll' -o -name '*.whl' \) >&2
+    exit 1
+fi
+
+if [ -e "$TMP/$PKG/bindings/javascript/node_modules" ] || [ -e "$TMP/$PKG/bindings/javascript/target" ] || [ -e "$TMP/$PKG/bindings/javascript/dist" ] || [ -e "$TMP/$PKG/bindings/javascript/examples/dist" ] || [ -e "$TMP/$PKG/bindings/javascript/npm" ] || [ -e "$TMP/$PKG/bindings/javascript/package" ] || [ -e "$TMP/$PKG/bindings/javascript/package-smoke" ]; then
+    echo "release package must not contain compiled JavaScript binding artifacts" >&2
+    exit 1
+fi
+
+if find "$TMP/$PKG/bindings/javascript" -maxdepth 1 \( -name '*.node' -o -name 'index.js' -o -name 'index.d.ts' \) | grep -q .; then
+    echo "release package must not contain generated JavaScript binding artifacts" >&2
+    find "$TMP/$PKG/bindings/javascript" -maxdepth 1 \( -name '*.node' -o -name 'index.js' -o -name 'index.d.ts' \) >&2
     exit 1
 fi
 

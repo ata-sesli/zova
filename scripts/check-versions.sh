@@ -106,4 +106,14 @@ expect_contains "$ROOT/bindings/python/rust/zova-sys/tests/abi.rs" "zova_abi_ver
 expect_contains "$ROOT/bindings/python/rust/zova-sys/tests/abi.rs" "zova_abi_version_patch(), ${abi_patch}"
 expect_contains "$ROOT/bindings/python/rust/zova-sys/tests/abi.rs" "\"${abi_version_string}\""
 
+expect_contains "$ROOT/bindings/javascript/Cargo.toml" "version = \"${package_version}\""
+expect_contains "$ROOT/bindings/javascript/Cargo.toml" "zova = { version = \"${package_version}\""
+expect_contains "$ROOT/bindings/javascript/Cargo.toml" "zova-sys = { version = \"${package_version}\""
+expect_contains "$ROOT/bindings/javascript/package.json" "\"version\": \"${package_version}\""
+expect_contains "$ROOT/bindings/javascript/package.json" "\"zova-darwin-arm64\": \"${package_version}\""
+expect_contains "$ROOT/bindings/javascript/package.json" "\"zova-darwin-x64\": \"${package_version}\""
+expect_contains "$ROOT/bindings/javascript/package.json" "\"zova-linux-arm64-gnu\": \"${package_version}\""
+expect_contains "$ROOT/bindings/javascript/package.json" "\"zova-linux-x64-gnu\": \"${package_version}\""
+expect_contains "$ROOT/bindings/javascript/package.json" "\"zova-win32-x64-msvc\": \"${package_version}\""
+
 echo "version check ok: ${package_version}"

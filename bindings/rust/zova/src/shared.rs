@@ -8,11 +8,13 @@ use crate::extension::{
     install_extension_raw, list_extensions_raw, ExtensionInfo,
 };
 use crate::graph::{
-    create_graph_raw, delete_graph_edge_raw, delete_graph_node_raw, delete_graph_raw,
-    get_graph_edge_raw, get_graph_node_raw, graph_info_raw, graph_neighbors_raw, graph_walk_raw,
-    has_graph_edge_raw, has_graph_node_raw, has_graph_raw, list_graphs_raw, put_graph_edge_raw,
-    put_graph_node_raw, GraphEdge, GraphEdgeInput, GraphInfo, GraphNeighbor, GraphNeighborsOptions,
-    GraphNode, GraphNodeInput, GraphWalkItem, GraphWalkOptions,
+    create_graph_raw, delete_graph_edge_raw, delete_graph_edges_raw, delete_graph_node_raw,
+    delete_graph_nodes_raw, delete_graph_raw, get_graph_edge_raw, get_graph_node_raw,
+    graph_degree_raw, graph_info_raw, graph_neighbors_raw, graph_walk_raw, has_graph_edge_raw,
+    has_graph_node_raw, has_graph_raw, list_graphs_raw, put_graph_edge_raw, put_graph_edges_raw,
+    put_graph_node_raw, put_graph_nodes_raw, GraphDegreeOptions, GraphEdge, GraphEdgeInput,
+    GraphInfo, GraphNeighbor, GraphNeighborsOptions, GraphNode, GraphNodeInput, GraphWalkItem,
+    GraphWalkOptions,
 };
 use crate::notification::{
     empty_notification, listen_raw, notify_raw, take_notification, Notification,
@@ -23,7 +25,7 @@ use crate::object::{
 };
 use crate::statement::{ColumnType, Step};
 use crate::vector::{
-    candidate_ptrs, empty_collection_info, empty_search_results, empty_vector,
+    candidate_ptrs, delete_vectors_raw, empty_collection_info, empty_search_results, empty_vector,
     take_collection_info, take_collection_list, take_search_results, take_vector, vector_inputs,
     Vector, VectorCollectionInfo, VectorCollectionOptions, VectorInput, VectorSearchResult,
     VectorValues,
@@ -667,6 +669,16 @@ impl SharedDatabase {
             .status_locked(unsafe { zova_sys::zova_vector_delete(&request) })
     }
 
+    pub fn delete_vectors(&self, collection_name: &str, vector_ids: &[&str]) -> Result<()> {
+        let _guard = self.inner.lock();
+        delete_vectors_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            collection_name,
+            vector_ids,
+        )
+    }
+
     pub fn search_vectors(
         &self,
         collection_name: &str,
@@ -943,6 +955,15 @@ impl SharedDatabase {
         )
     }
 
+    pub fn put_graph_nodes(&self, inputs: &[GraphNodeInput<'_>]) -> Result<()> {
+        let _guard = self.inner.lock();
+        put_graph_nodes_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            inputs,
+        )
+    }
+
     pub fn get_graph_node(&self, graph_name: &str, node_id: &str) -> Result<GraphNode> {
         let _guard = self.inner.lock();
         get_graph_node_raw(
@@ -973,12 +994,31 @@ impl SharedDatabase {
         )
     }
 
+    pub fn delete_graph_nodes(&self, graph_name: &str, node_ids: &[&str]) -> Result<()> {
+        let _guard = self.inner.lock();
+        delete_graph_nodes_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            node_ids,
+        )
+    }
+
     pub fn put_graph_edge(&self, input: GraphEdgeInput<'_>) -> Result<()> {
         let _guard = self.inner.lock();
         put_graph_edge_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
             input,
+        )
+    }
+
+    pub fn put_graph_edges(&self, inputs: &[GraphEdgeInput<'_>]) -> Result<()> {
+        let _guard = self.inner.lock();
+        put_graph_edges_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            inputs,
         )
     }
 
@@ -1024,6 +1064,24 @@ impl SharedDatabase {
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
             input,
+        )
+    }
+
+    pub fn delete_graph_edges(&self, inputs: &[GraphEdgeInput<'_>]) -> Result<()> {
+        let _guard = self.inner.lock();
+        delete_graph_edges_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            inputs,
+        )
+    }
+
+    pub fn graph_degree(&self, options: GraphDegreeOptions<'_>) -> Result<u64> {
+        let _guard = self.inner.lock();
+        graph_degree_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            options,
         )
     }
 
@@ -1310,6 +1368,14 @@ impl SharedDatabaseGuard<'_> {
         )
     }
 
+    pub fn put_graph_nodes(&mut self, inputs: &[GraphNodeInput<'_>]) -> Result<()> {
+        put_graph_nodes_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            inputs,
+        )
+    }
+
     pub fn get_graph_node(&mut self, graph_name: &str, node_id: &str) -> Result<GraphNode> {
         get_graph_node_raw(
             self.inner.raw_ptr(),
@@ -1337,11 +1403,28 @@ impl SharedDatabaseGuard<'_> {
         )
     }
 
+    pub fn delete_graph_nodes(&mut self, graph_name: &str, node_ids: &[&str]) -> Result<()> {
+        delete_graph_nodes_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            node_ids,
+        )
+    }
+
     pub fn put_graph_edge(&mut self, input: GraphEdgeInput<'_>) -> Result<()> {
         put_graph_edge_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
             input,
+        )
+    }
+
+    pub fn put_graph_edges(&mut self, inputs: &[GraphEdgeInput<'_>]) -> Result<()> {
+        put_graph_edges_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            inputs,
         )
     }
 
@@ -1384,6 +1467,22 @@ impl SharedDatabaseGuard<'_> {
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
             input,
+        )
+    }
+
+    pub fn delete_graph_edges(&mut self, inputs: &[GraphEdgeInput<'_>]) -> Result<()> {
+        delete_graph_edges_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            inputs,
+        )
+    }
+
+    pub fn graph_degree(&mut self, options: GraphDegreeOptions<'_>) -> Result<u64> {
+        graph_degree_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            options,
         )
     }
 

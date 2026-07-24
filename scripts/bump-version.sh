@@ -96,7 +96,11 @@ for file in \
     "$ROOT/bindings/python/rust/zova-sys/native/include/zova.h" \
     "$ROOT/bindings/python/rust/zova-sys/native/src/version.zig" \
     "$ROOT/bindings/python/rust/zova-sys/native/tests/cli.zig" \
-    "$ROOT/bindings/python/rust/zova-sys/native/src/c_api_internal.zig"
+    "$ROOT/bindings/python/rust/zova-sys/native/src/c_api_internal.zig" \
+    "$ROOT/bindings/javascript/Cargo.toml" \
+    "$ROOT/bindings/javascript/Cargo.lock" \
+    "$ROOT/bindings/javascript/package.json" \
+    "$ROOT/bindings/javascript/README.md"
 do
     replace_all "$file"
 done

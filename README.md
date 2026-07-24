@@ -118,6 +118,7 @@ Zova vendors SQLite. You do not need a system SQLite installation.
 
 | Path | Main Command | Needs Zig | Needs Rust | Needs C Compiler | Notes |
 |---|---|---:|---:|---:|---|
+| JavaScript / TypeScript | `bun add zova` / `npm install zova` | no | no | no | prebuilt Node-API 8 packages for Node 22/24 and Bun; npm publication is not enabled yet |
 | Rust | `cargo add zova` | no | yes | yes | `zova-sys` builds Zova's native C ABI from bundled generated C |
 | Python | `uv add zova` / `pip install zova` | no | only for sdist builds | only for sdist builds | wheels are published for Linux/macOS x86_64/arm64 on CPython 3.10/3.12; sdist fallback builds through Rust |
 | Go | `go get github.com/atasesli/zova/bindings/go@v0.25.0` | no, if using a release C ABI archive | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
@@ -133,9 +134,27 @@ Minimum tool versions used by the project:
 | Rust | `1.79` or newer |
 | Go | `1.22` or newer |
 | Python | `3.10` or newer |
+| Node.js | `22.13` or newer in the Node 22 line, or Node 24 |
+| Bun | current blocking CI release |
 | SQLite | vendored `3.53.2` |
 
 ## Quick Start
+
+### JavaScript / TypeScript
+
+```ts
+import { Database } from "zova";
+
+const db = Database.create("app.zova");
+db.exec("create table notes(id integer primary key, body text not null)");
+db.transaction((transaction) => {
+  transaction.exec("insert into notes(body) values ('hello from TypeScript')");
+});
+db.close();
+```
+
+The npm package is implemented but publication remains disabled until its
+external name and npm ownership are approved.
 
 ### Rust
 
@@ -857,6 +876,23 @@ row values.
 
 ## Bindings
 
+### JavaScript and TypeScript
+
+The Node-API 8 package under `bindings/javascript` supports Node.js 22/24 and
+Bun on Linux glibc and macOS x86_64/arm64 plus Windows x86_64. Prebuilt installs
+need no Zig, Rust, compiler, or install-time binary download.
+
+It exposes synchronous SQL/transactions, objects, vectors, public graph CRUD,
+atomic graph batches, neighbors, degree, walks, and bundled extension
+lifecycle. A separate FIFO `AsyncDatabase` runs one-shot expensive work on
+native workers and does not expose async transaction callbacks.
+
+All SQL integers and counts are `bigint`; binary values use `Uint8Array`;
+vectors preserve `Float32Array`, `Uint16Array`, or `Int8Array`. Advanced
+opaque-key graph, payload, scan, and fresh-build APIs remain C ABI/raw
+`zova-sys` surfaces for this release. See `bindings/javascript/README.md` for
+ownership and runtime details.
+
 ### Rust
 
 Rust users normally use the safe crate:
@@ -1074,7 +1110,7 @@ Zova `0.25.0` does not include:
 - graph reconciliation/import engine
 - automatic graph extraction from SQL, documents, or LLM output
 - embedding generation
-- TypeScript or Swift bindings
+- Swift bindings
 - background worker threads hidden inside Zova
 - cross-process notifications, durable notification replay, or automatic
   mutation logging
@@ -1120,6 +1156,8 @@ Zova publishes several release artifact types:
 - Rust crates on crates.io: `zova-sys` and `zova`.
 - Python wheels and sdist on PyPI.
 - A Go module tag: `bindings/go/v0.25.0`.
+- JavaScript/TypeScript Node-API artifacts for the supported native matrix;
+  npm publication remains disabled pending package-name approval.
 
 The source archive includes:
 
@@ -1132,6 +1170,7 @@ The source archive includes:
 - `bindings/rust`
 - `bindings/go`
 - `bindings/python`
+- `bindings/javascript`
 - `include`
 - `src`
 - `tests`

@@ -1,7 +1,7 @@
 use zova::{
-    Database, GraphEdgeInput, GraphNeighborDirection, GraphNeighborsOptions, GraphNodeInput,
-    GraphTargetType, GraphWalkOptions, OpenOptions, Status, Step, VectorCollectionOptions,
-    VectorElementType, VectorMetric, VectorValues, DEFAULT_GRAPH_NAME,
+    Database, GraphDegreeOptions, GraphEdgeInput, GraphNeighborDirection, GraphNeighborsOptions,
+    GraphNodeInput, GraphTargetType, GraphWalkOptions, OpenOptions, Status, Step,
+    VectorCollectionOptions, VectorElementType, VectorMetric, VectorValues, DEFAULT_GRAPH_NAME,
 };
 
 fn temp_path(name: &str) -> String {
@@ -52,6 +52,70 @@ fn edge<'a>(
         edge_type,
         to_node_id,
     }
+}
+
+#[test]
+fn graph_batch_mutation_and_degree_use_the_safe_rust_api() {
+    let path = temp_path("batch-degree");
+    let mut db = Database::create(&path).unwrap();
+    db.create_graph("app").unwrap();
+
+    db.put_graph_nodes(&[
+        node("app", "a", "message", GraphTargetType::None, None, None),
+        node("app", "b", "message", GraphTargetType::None, None, None),
+        node("app", "c", "message", GraphTargetType::None, None, None),
+    ])
+    .unwrap();
+    db.put_graph_edges(&[
+        edge("app", "a", "links", "b"),
+        edge("app", "a", "links", "c"),
+        edge("app", "a", "links", "b"),
+    ])
+    .unwrap();
+
+    assert_eq!(
+        db.graph_degree(GraphDegreeOptions {
+            graph_name: "app",
+            node_id: "a",
+            direction: GraphNeighborDirection::Outgoing,
+            edge_type: Some("links"),
+        })
+        .unwrap(),
+        2
+    );
+    assert_eq!(
+        db.graph_degree(GraphDegreeOptions {
+            graph_name: "app",
+            node_id: "b",
+            direction: GraphNeighborDirection::Incoming,
+            edge_type: None,
+        })
+        .unwrap(),
+        1
+    );
+
+    let before = db.graph_info("app").unwrap();
+    assert_eq!(
+        db.put_graph_edges(&[
+            edge("app", "a", "links", "b"),
+            edge("app", "a", "links", "missing")
+        ])
+        .unwrap_err()
+        .status(),
+        Some(Status::GraphNodeNotFound)
+    );
+    assert_eq!(db.graph_info("app").unwrap(), before);
+
+    db.delete_graph_edges(&[
+        edge("app", "a", "links", "b"),
+        edge("app", "a", "missing", "c"),
+    ])
+    .unwrap();
+    db.delete_graph_nodes("app", &["b", "missing"]).unwrap();
+    assert!(!db.has_graph_node("app", "b").unwrap());
+    assert!(db.has_graph_node("app", "c").unwrap());
+
+    let _ = std::fs::remove_file(path);
 }
 
 #[test]

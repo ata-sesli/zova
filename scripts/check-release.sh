@@ -27,6 +27,8 @@ CARGO_TARGET_REPO="$TMP/cargo-target/repo"
 PY_CARGO_TARGET_REPO="$TMP/cargo-target/python-repo"
 PY_WHEEL_REPO="$TMP/python-wheels/repo"
 GO_CACHE_REPO="$TMP/go-cache/repo"
+JS_CARGO_TARGET_REPO="$TMP/cargo-target/javascript-repo"
+NPM_CACHE_REPO="$TMP/npm-cache"
 
 cleanup() {
     rm -rf "$TMP"
@@ -37,6 +39,9 @@ require_command zig
 require_command cargo
 require_command go
 require_command uv
+require_command bun
+require_command node
+require_command npm
 
 sh scripts/check-versions.sh
 zig fmt --check build.zig build.zig.zon src/root.zig src/version.zig src/sqlite.zig src/zova.zig src/zova_error.zig src/zova_test_support.zig src/extension.zig src/extension_dynamic.zig src/notify.zig src/object.zig src/object_fastcdc.zig src/object_tests.zig src/vector.zig src/vector_tests.zig src/vector_sql.zig src/vector_sql_tests.zig src/graph.zig src/graph_tests.zig src/graph_sql.zig src/graph_sql_tests.zig src/trgm.zig src/trgm_tests.zig src/c_api.zig src/c_api_internal.zig src/c_api_tests.zig src/cli.zig src/main.zig tests/dynamic_extension_fixture.zig tests/e2e.zig tests/cli.zig
@@ -89,5 +94,18 @@ fi
 rm -rf bindings/python/target bindings/python/.venv bindings/python/.pytest_cache bindings/python/dist
 find bindings/python -type d -name '__pycache__' -prune -exec rm -rf {} +
 find bindings/python \( -name '*.so' -o -name '*.pyd' -o -name '*.dylib' -o -name '*.dll' -o -name '*.whl' \) -delete
+
+(cd bindings/javascript && bun install --frozen-lockfile)
+CARGO_TARGET_DIR="$JS_CARGO_TARGET_REPO" cargo fmt --manifest-path bindings/javascript/Cargo.toml --check
+CARGO_TARGET_DIR="$JS_CARGO_TARGET_REPO" cargo nextest run --manifest-path bindings/javascript/Cargo.toml
+(cd bindings/javascript && bun run build)
+(cd bindings/javascript && bun run typecheck)
+(cd bindings/javascript && bun test)
+node bindings/javascript/tests/runtime-smoke.mjs
+node bindings/javascript/tests/runtime-smoke.cjs
+bun bindings/javascript/tests/runtime-smoke.mjs
+(cd bindings/javascript && npm_config_cache="$NPM_CACHE_REPO" npm pack --dry-run --ignore-scripts >/dev/null)
+rm -rf bindings/javascript/target bindings/javascript/dist bindings/javascript/npm
+find bindings/javascript -maxdepth 1 -name '*.node' -delete
 
 echo "release check ok: $MANIFEST_VERSION"

@@ -30,12 +30,17 @@ require_command zig
 require_command cargo
 require_command go
 require_command uv
+require_command bun
+require_command node
+require_command npm
 
 TMP="${TMPDIR:-/tmp}/zova-verify-source-package.$$"
 CARGO_TARGET_VERIFY="$TMP/cargo-target/rust"
 PY_CARGO_TARGET_VERIFY="$TMP/cargo-target/python"
+JS_CARGO_TARGET_VERIFY="$TMP/cargo-target/javascript"
 GO_CACHE_VERIFY="$TMP/go-cache"
 PY_WHEEL_VERIFY="$TMP/python-wheels"
+NPM_CACHE_VERIFY="$TMP/npm-cache"
 
 cleanup() {
     rm -rf "$TMP"
@@ -76,6 +81,14 @@ if find bindings/go \( -name '*.test' -o -name '*.out' -o -name '*.exe' -o -name
 fi
 if find bindings/python \( -name '__pycache__' -o -name '.pytest_cache' -o -name '*.so' -o -name '*.pyd' -o -name '*.dylib' -o -name '*.dll' -o -name '*.whl' \) | grep -q .; then
     echo "source package must not contain Python cache/native/wheel artifacts" >&2
+    exit 1
+fi
+if [ -e bindings/javascript/node_modules ] || [ -e bindings/javascript/target ] || [ -e bindings/javascript/dist ] || [ -e bindings/javascript/examples/dist ] || [ -e bindings/javascript/npm ] || [ -e bindings/javascript/package ] || [ -e bindings/javascript/package-smoke ]; then
+    echo "source package must not contain compiled JavaScript binding artifacts" >&2
+    exit 1
+fi
+if find bindings/javascript -maxdepth 1 \( -name '*.node' -o -name 'index.js' -o -name 'index.d.ts' \) | grep -q .; then
+    echo "source package must not contain generated JavaScript binding artifacts" >&2
     exit 1
 fi
 
@@ -122,5 +135,16 @@ if [ ! -f "$PY_WHEEL_VERIFY/zova-$VERSION.tar.gz" ]; then
     echo "Python source package verification is missing an sdist" >&2
     exit 1
 fi
+
+(cd bindings/javascript && bun install --frozen-lockfile)
+CARGO_TARGET_DIR="$JS_CARGO_TARGET_VERIFY" cargo fmt --manifest-path bindings/javascript/Cargo.toml --check
+CARGO_TARGET_DIR="$JS_CARGO_TARGET_VERIFY" cargo nextest run --manifest-path bindings/javascript/Cargo.toml
+(cd bindings/javascript && bun run build)
+(cd bindings/javascript && bun run typecheck)
+(cd bindings/javascript && bun test)
+node bindings/javascript/tests/runtime-smoke.mjs
+node bindings/javascript/tests/runtime-smoke.cjs
+bun bindings/javascript/tests/runtime-smoke.mjs
+(cd bindings/javascript && npm_config_cache="$NPM_CACHE_VERIFY" npm pack --dry-run --ignore-scripts >/dev/null)
 
 echo "source package verification ok: $ARCHIVE"
