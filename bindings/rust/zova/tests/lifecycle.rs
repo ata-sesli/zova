@@ -537,11 +537,15 @@ fn shared_database_backup_and_compact_work() {
     let reader = db.clone();
     let handle = std::thread::spawn(move || {
         for _ in 0..8 {
-            let mut stmt = reader
-                .prepare("select count(*) from records where body = 'shared'")
+            reader
+                .with_exclusive(|database| {
+                    let mut stmt =
+                        database.prepare("select count(*) from records where body = 'shared'")?;
+                    assert_eq!(stmt.step()?, Step::Row);
+                    assert_eq!(stmt.column_i64(0)?, 1);
+                    Ok(())
+                })
                 .unwrap();
-            assert_eq!(stmt.step().unwrap(), Step::Row);
-            assert_eq!(stmt.column_i64(0).unwrap(), 1);
         }
     });
     db.backup_to(&backup_path, BackupOptions::default())
