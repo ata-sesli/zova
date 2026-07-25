@@ -185,6 +185,14 @@ jobs:
           name: zova-${{ inputs.version }}-${{ matrix.platform }}-javascript
           path: bindings/javascript/*.node
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: matrix.platform == 'linux-x86_64'
+        with:
+          name: zova-${{ inputs.version }}-javascript-bindings
+          path: |
+            bindings/javascript/index.js
+            bindings/javascript/index.d.ts
+          if-no-files-found: error
 
   javascript-packages:
     name: JavaScript npm packages
@@ -200,6 +208,10 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
         working-directory: bindings/javascript
+      - uses: actions/download-artifact@v4
+        with:
+          name: zova-${{ inputs.version }}-javascript-bindings
+          path: bindings/javascript
       - uses: actions/download-artifact@v4
         with:
           pattern: zova-${{ inputs.version }}-*-javascript
