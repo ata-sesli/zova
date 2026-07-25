@@ -39,6 +39,10 @@ jobs:
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
 
       - name: Validate version
         run: |
@@ -47,9 +51,11 @@ jobs:
           manifest_version="$(sed -n 's/^[[:space:]]*\.version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' build.zig.zon | head -n 1)"
           rust_version="$(sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' bindings/rust/Cargo.toml | head -n 1)"
           python_version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' bindings/python/pyproject.toml | head -n 1)"
+          javascript_version="$(node -p "require('./bindings/javascript/package.json').version")"
           test "$version" = "$manifest_version"
           test "$version" = "$rust_version"
           test "$version" = "$python_version"
+          test "$version" = "$javascript_version"
 
       - name: Download release artifacts
         env:
@@ -195,3 +201,32 @@ jobs:
           else
             uv publish --check-url https://pypi.org/simple/ zig-out/python-assets/zova-${{ inputs.version }}*
           fi
+
+      - name: Publish JavaScript packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -eu
+          version="${{ inputs.version }}"
+          package_dir="zig-out/release-download/zova-${version}-javascript-packages/package"
+
+          publish_package() {
+            package_name="$1"
+            tarball="$package_dir/$package_name-$version.tgz"
+            if [ ! -f "$tarball" ]; then
+              echo "missing npm package: $tarball" >&2
+              exit 1
+            fi
+            if npm view "$package_name@$version" version >/dev/null 2>&1; then
+              echo "npm package already published: $package_name@$version"
+            else
+              npm publish "$tarball" --access public
+            fi
+          }
+
+          publish_package zova-db-darwin-arm64
+          publish_package zova-db-darwin-x64
+          publish_package zova-db-linux-arm64-gnu
+          publish_package zova-db-linux-x64-gnu
+          publish_package zova-db-win32-x64-msvc
+          publish_package zova-db

@@ -10,10 +10,10 @@ traversal, transaction-aware app events, bound object/vector/graph stores,
 diagnostics, salvage, backup, compact copy, restore, and a trusted extension
 host foundation.
 
-Current package version: `0.25.0`.
+Current package version: `0.26.0`.
 
 Zova is pre-1.0. The current `.zova` file `format_version` is `9`. Format-9
-files require Zova 0.25.0 or newer, and older builds reject them. Zova 0.25.0
+files require Zova 0.26.0 or newer, and older builds reject them. Zova 0.26.0
 does not migrate format-8 files in place: keep a compatible backup and export
 data with a format-8 build before moving it into a new format-9 database.
 
@@ -21,7 +21,7 @@ Zova's bundled SQLite enables FTS5 and the read-only `dbstat` virtual table.
 `dbstat` is available for storage diagnostics; it is not a portable guarantee
 for databases opened through an unrelated system SQLite build.
 
-Zova 0.25.0 is the native graph publication release. Format 9 stores graph
+Zova 0.26.0 is the native graph publication release. Format 9 stores graph
 edge types through a private dictionary and keeps one opaque payload BLOB on
 each authoritative edge without duplicating payload bytes into adjacency
 indexes. Additive C APIs provide opaque-key graph mutation and reads,
@@ -71,7 +71,7 @@ or:
 
 ```toml
 [dependencies]
-zova = "0.25.0"
+zova = "0.26.0"
 ```
 
 Python:
@@ -89,7 +89,7 @@ python -m pip install zova
 Go:
 
 ```sh
-go get github.com/atasesli/zova/bindings/go@v0.25.0
+go get github.com/atasesli/zova/bindings/go@v0.26.0
 ```
 
 The Go binding uses cgo over Zova's C ABI. Build or provide the C ABI library
@@ -98,7 +98,7 @@ before using it from another project.
 C ABI:
 
 ```sh
-# Download a matching zova-v0.25.0-<platform>-c-abi archive
+# Download a matching zova-v0.26.0-<platform>-c-abi archive
 # from the GitHub Release, or build it locally:
 zig build c-abi
 ```
@@ -106,7 +106,7 @@ zig build c-abi
 CLI:
 
 ```sh
-# Download a matching zova-v0.25.0-<platform>-cli archive
+# Download a matching zova-v0.26.0-<platform>-cli archive
 # from the GitHub Release, or build it locally:
 zig build
 zig-out/bin/zova --help
@@ -118,10 +118,10 @@ Zova vendors SQLite. You do not need a system SQLite installation.
 
 | Path | Main Command | Needs Zig | Needs Rust | Needs C Compiler | Notes |
 |---|---|---:|---:|---:|---|
-| JavaScript / TypeScript | `bun add zova` / `npm install zova` | no | no | no | prebuilt Node-API 8 packages for Node 22/24 and Bun; npm publication is not enabled yet |
+| JavaScript / TypeScript | `bun add zova-db` / `npm install zova-db` | no | no | no | prebuilt Node-API 8 packages for Node 22/24 and Bun |
 | Rust | `cargo add zova` | no | yes | yes | `zova-sys` builds Zova's native C ABI from bundled generated C |
 | Python | `uv add zova` / `pip install zova` | no | only for sdist builds | only for sdist builds | wheels are published for Linux/macOS x86_64/arm64 on CPython 3.10/3.12; sdist fallback builds through Rust |
-| Go | `go get github.com/atasesli/zova/bindings/go@v0.25.0` | no, if using a release C ABI archive | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
+| Go | `go get github.com/atasesli/zova/bindings/go@v0.26.0` | no, if using a release C ABI archive | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
 | C ABI | release archive or `zig build c-abi` | no, if using a release archive | no | no, if using a release archive | static C ABI library and `zova.h` |
 | Zig | package source | yes | no | yes | native API |
 | CLI | release archive or `zig build` | no, if using a release archive | no | no, if using a release archive | source-built or prebuilt command line tool |
@@ -143,7 +143,7 @@ Minimum tool versions used by the project:
 ### JavaScript / TypeScript
 
 ```ts
-import { Database } from "zova";
+import { Database } from "zova-db";
 
 const db = Database.create("app.zova");
 db.exec("create table notes(id integer primary key, body text not null)");
@@ -153,8 +153,8 @@ db.transaction((transaction) => {
 db.close();
 ```
 
-The npm package is implemented but publication remains disabled until its
-external name and npm ownership are approved.
+The npm package name is `zova-db`; the Zova product and native library names
+remain unchanged.
 
 ### Rust
 
@@ -369,7 +369,7 @@ complete object from chunks.
 
 ### Optional Bound Object, Vector, And Graph Stores
 
-Single-file `.zova` remains the default. In v0.25.0, applications can opt into
+Single-file `.zova` remains the default. In v0.26.0, applications can opt into
 one bound object store, one bound vector store, and one bound graph store when
 large object bytes, vector rows, or graph topology should live beside the main
 records database:
@@ -500,7 +500,7 @@ Zova supports collection create/info/list/delete, vector CRUD, batch upsert,
 exact search, candidate-filtered search, search-by-id, and inclusive distance
 thresholds.
 
-Search is exact and flat-scan in `0.25.0`. It is good for local datasets,
+Search is exact and flat-scan in `0.26.0`. It is good for local datasets,
 offline ranking, deterministic tests, and SQL-filter-first workflows. It is not
 yet an ANN engine for million-scale low-latency search.
 
@@ -823,7 +823,7 @@ zova salvage damaged.zova recovered.zova
 ```
 
 Salvage never mutates the source file and never overwrites the destination. A
-good backup is still preferred when one exists. In v0.25.0, salvage is
+good backup is still preferred when one exists. In v0.26.0, salvage is
 graph-aware and extension-aware: it copies valid graph topology, skips invalid
 graph nodes or edges, and lets trusted extension hooks recover their own private
 storage.
@@ -837,7 +837,7 @@ Extension-aware salvage is hook-based. Core Zova never copies `_zova_ext_*`
 tables by guessing their meaning. If trusted extension code provides a salvage
 hook, Zova lets that extension copy, rebuild, or skip its own storage. If the
 extension code is unavailable or the extension has no salvage hook, extension
-storage is skipped and reported. In v0.25.0, bundled `trgm` salvage recovers a
+storage is skipped and reported. In v0.26.0, bundled `trgm` salvage recovers a
 valid subset of trgm private storage, rebuilds derived term rows from copied
 postings, and still never prints indexed text or private schema SQL.
 
@@ -899,14 +899,14 @@ Rust users normally use the safe crate:
 
 ```toml
 [dependencies]
-zova = "0.25.0"
+zova = "0.26.0"
 ```
 
 The lower-level raw FFI crate is available as:
 
 ```toml
 [dependencies]
-zova-sys = "0.25.0"
+zova-sys = "0.26.0"
 ```
 
 `zova` exposes `Database` for single-owner code and `SharedDatabase` for an
@@ -962,7 +962,7 @@ edge-payload, topology-scan, and fresh-build session APIs remain C ABI/raw
 Install:
 
 ```sh
-go get github.com/atasesli/zova/bindings/go@v0.25.0
+go get github.com/atasesli/zova/bindings/go@v0.26.0
 ```
 
 Import:
@@ -1096,7 +1096,7 @@ automatically.
 
 ## Current Boundaries
 
-Zova `0.25.0` does not include:
+Zova `0.26.0` does not include:
 
 - binding-level app-registered extension authoring APIs
 - binding-level dynamic `.zovaext` loading APIs
@@ -1155,9 +1155,9 @@ Zova publishes several release artifact types:
 - A GitHub Release source archive.
 - Rust crates on crates.io: `zova-sys` and `zova`.
 - Python wheels and sdist on PyPI.
-- A Go module tag: `bindings/go/v0.25.0`.
-- JavaScript/TypeScript Node-API artifacts for the supported native matrix;
-  npm publication remains disabled pending package-name approval.
+- A Go module tag: `bindings/go/v0.26.0`.
+- JavaScript/TypeScript Node-API packages on npm as `zova-db`, with native
+  packages for the supported platform matrix.
 
 The source archive includes:
 
@@ -1187,13 +1187,13 @@ license needed to build the C ABI with a normal C compiler.
 Maintainer source-package command:
 
 ```sh
-scripts/package-release.sh 0.25.0
+scripts/package-release.sh 0.26.0
 ```
 
 Maintainer local distribution command for crates.io and PyPI, in that order:
 
 ```sh
-scripts/distribute-release.sh 0.25.0
+scripts/distribute-release.sh 0.26.0
 ```
 
 GitHub Actions provides the preferred release flow:
@@ -1206,10 +1206,15 @@ GitHub Actions provides the preferred release flow:
    ID. The publish workflow verifies that the artifacts came from the checked
    out commit, uses the protected `release` environment, creates the GitHub and
    Go module tags, creates or updates the GitHub Release, then publishes
-   crates.io and PyPI packages.
+   crates.io, PyPI, and npm packages.
 
 The publish workflow is intentionally tied to a specific Release Artifacts run:
 it refuses to publish artifacts built from a different commit.
+
+The first npm publication can use an `NPM_TOKEN` secret in the protected
+`release` environment. After the packages exist, configure npm trusted
+publishing for `publish-release.yml`; the workflow's OIDC permission then
+allows token-free subsequent releases.
 
 The local scripts remain useful for maintainer smoke tests. Do not run release
 or distribution commands until the exact commit is ready to tag and publish.

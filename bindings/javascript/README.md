@@ -4,8 +4,8 @@ Synchronous and queued asynchronous Node-API bindings for Zova. The package is
 built with napi-rs, uses the same native Zova engine as the Rust, Python, Go,
 Zig, and C APIs, and ships TypeScript declarations.
 
-The package is not published yet. Its external npm name remains unapproved;
-local development currently uses the placeholder package name `zova`.
+The npm package is named `zova-db`. The Zova product, `.zova` file extension,
+and native library names remain unchanged.
 
 ## Runtime support
 
@@ -37,18 +37,18 @@ node tests/runtime-smoke.mjs
 bun tests/runtime-smoke.mjs
 ```
 
-After publication, installation will use the final approved npm name:
+Install the published package with:
 
 ```sh
-bun add zova
+bun add zova-db
 # or
-npm install zova
+npm install zova-db
 ```
 
 ## SQL and transactions
 
 ```ts
-import { Database, Step } from "zova";
+import { Database, Step } from "zova-db";
 
 const db = Database.create("app.zova");
 db.exec("create table notes(id integer primary key, body text not null)");
@@ -103,7 +103,7 @@ runs native work on Node's worker pool, rejects new calls as soon as close
 begins, waits for already queued work, and closes exactly once.
 
 ```ts
-import { AsyncDatabase } from "zova";
+import { AsyncDatabase } from "zova-db";
 
 const db = AsyncDatabase.create("app.zova");
 await db.exec("create table notes(body text)");

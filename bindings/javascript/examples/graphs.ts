@@ -1,4 +1,4 @@
-import { Database } from "zova";
+import { Database } from "zova-db";
 
 const db = Database.create("graphs-example.zova");
 db.createGraph("knowledge");

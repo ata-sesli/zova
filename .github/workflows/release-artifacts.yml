@@ -222,9 +222,9 @@ jobs:
           cd package-smoke
           npm init -y
           npm install \
-            "../package/zova-linux-x64-gnu-${{ inputs.version }}.tgz" \
-            "../package/zova-${{ inputs.version }}.tgz"
-          node -e "const zova = require('zova'); if (zova.packageVersion !== '${{ inputs.version }}') process.exit(1)"
+            "../package/zova-db-linux-x64-gnu-${{ inputs.version }}.tgz" \
+            "../package/zova-db-${{ inputs.version }}.tgz"
+          node -e "const zova = require('zova-db'); if (zova.packageVersion !== '${{ inputs.version }}') process.exit(1)"
         working-directory: bindings/javascript
       - uses: actions/upload-artifact@v4
         with:

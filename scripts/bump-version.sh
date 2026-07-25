@@ -100,7 +100,11 @@ for file in \
     "$ROOT/bindings/javascript/Cargo.toml" \
     "$ROOT/bindings/javascript/Cargo.lock" \
     "$ROOT/bindings/javascript/package.json" \
-    "$ROOT/bindings/javascript/README.md"
+    "$ROOT/bindings/javascript/bun.lock" \
+    "$ROOT/bindings/javascript/README.md" \
+    "$ROOT/bindings/javascript/tests/load.test.ts" \
+    "$ROOT/bindings/javascript/tests/runtime-smoke.mjs" \
+    "$ROOT/bindings/javascript/tests/runtime-smoke.cjs"
 do
     replace_all "$file"
 done
