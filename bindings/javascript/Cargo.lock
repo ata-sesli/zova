@@ -269,14 +269,14 @@ checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
 
 [[package]]
 name = "zova"
-version = "0.26.0"
+version = "0.26.1"
 dependencies = [
  "zova-sys",
 ]
 
 [[package]]
 name = "zova-javascript"
-version = "0.26.0"
+version = "0.26.1"
 dependencies = [
  "napi",
  "napi-build",
@@ -287,4 +287,4 @@ dependencies = [
 
 [[package]]
 name = "zova-sys"
-version = "0.26.0"
+version = "0.26.1"

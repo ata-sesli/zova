@@ -1,6 +1,6 @@
 [package]
 name = "zova-javascript"
-version = "0.26.0"
+version = "0.26.1"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT"
@@ -15,8 +15,8 @@ crate-type = ["cdylib"]
 [dependencies]
 napi = { version = "3.11.0", default-features = false, features = ["dyn-symbols", "napi8"] }
 napi-derive = "3.5.10"
-zova = { version = "0.26.0", path = "../rust/zova" }
-zova-sys = { version = "0.26.0", path = "../rust/zova-sys" }
+zova = { version = "0.26.1", path = "../rust/zova" }
+zova-sys = { version = "0.26.1", path = "../rust/zova-sys" }
 
 [build-dependencies]
 napi-build = "2.3.2"

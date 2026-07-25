@@ -102,6 +102,7 @@ for file in \
     "$ROOT/bindings/javascript/package.json" \
     "$ROOT/bindings/javascript/bun.lock" \
     "$ROOT/bindings/javascript/README.md" \
+    "$ROOT/bindings/javascript/tests/package-names.test.ts" \
     "$ROOT/bindings/javascript/tests/load.test.ts" \
     "$ROOT/bindings/javascript/tests/runtime-smoke.mjs" \
     "$ROOT/bindings/javascript/tests/runtime-smoke.cjs"
