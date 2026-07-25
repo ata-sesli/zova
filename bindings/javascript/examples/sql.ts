@@ -1,4 +1,4 @@
-import { Database } from "zova-db";
+import { Database } from "zova-js";
 
 const db = Database.create("sql-example.zova");
 db.exec("create table notes(id integer primary key, body text not null)");

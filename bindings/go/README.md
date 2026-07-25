@@ -59,13 +59,13 @@ flowchart LR
 After the Go module tag is pushed, applications can add the binding with:
 
 ```sh
-go get github.com/atasesli/zova/bindings/go@v0.26.0
+go get github.com/ata-sesli/zova/bindings/go@v0.26.0
 ```
 
 Import it as:
 
 ```go
-import zova "github.com/atasesli/zova/bindings/go"
+import zova "github.com/ata-sesli/zova/bindings/go"
 ```
 
 The Go package is source-only and uses cgo. It does not download or build the
@@ -169,13 +169,13 @@ git push origin bindings/go/v0.26.0
 After pushing the tag, ask the public Go module proxy to resolve it:
 
 ```sh
-GOPROXY=proxy.golang.org go list -m github.com/atasesli/zova/bindings/go@v0.26.0
+GOPROXY=proxy.golang.org go list -m github.com/ata-sesli/zova/bindings/go@v0.26.0
 ```
 
 The module path is:
 
 ```text
-github.com/atasesli/zova/bindings/go
+github.com/ata-sesli/zova/bindings/go
 ```
 
 ## Handle Policy
@@ -576,7 +576,7 @@ import (
     "fmt"
     "log"
 
-    zova "github.com/atasesli/zova/bindings/go"
+    zova "github.com/ata-sesli/zova/bindings/go"
 )
 
 func main() {

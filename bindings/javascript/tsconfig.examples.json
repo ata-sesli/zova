@@ -7,7 +7,7 @@
     "outDir": "examples/dist",
     "baseUrl": ".",
     "paths": {
-      "zova-db": ["dist/index.d.ts"]
+      "zova-js": ["dist/index.d.ts"]
     },
     "rootDir": "examples",
     "strict": true,

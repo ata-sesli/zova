@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	zova "github.com/atasesli/zova/bindings/go"
+	zova "github.com/ata-sesli/zova/bindings/go"
 )
 
 func main() {

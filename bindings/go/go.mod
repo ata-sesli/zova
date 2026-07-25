@@ -1,3 +1,3 @@
-module github.com/atasesli/zova/bindings/go
+module github.com/ata-sesli/zova/bindings/go
 
 go 1.22

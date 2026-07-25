@@ -26,8 +26,8 @@ common = f"""version = "{version}"
 edition = "2021"
 rust-version = "1.79"
 license = "MIT"
-repository = "https://github.com/atasesli/zova"
-homepage = "https://github.com/atasesli/zova"
+repository = "https://github.com/ata-sesli/zova"
+homepage = "https://github.com/ata-sesli/zova"
 """
 
 for path in (zova_manifest, sys_manifest):

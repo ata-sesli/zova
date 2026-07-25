@@ -36,6 +36,14 @@ expect_contains() {
     fi
 }
 
+expect_not_contains() {
+    file="$1"
+    needle="$2"
+    if grep -F "$needle" "$file" >/dev/null 2>&1; then
+        fail "$file unexpectedly contains: $needle"
+    fi
+}
+
 package_version="$(read_zig_string package_version)"
 abi_major="$(read_zig_u32 abi_version_major)"
 abi_minor="$(read_zig_u32 abi_version_minor)"
@@ -83,6 +91,7 @@ expect_contains "$ROOT/scripts/package-release.sh" "scripts/package-release.sh $
 expect_contains "$ROOT/scripts/build-release-artifacts.sh" "scripts/build-release-artifacts.sh ${package_version}"
 
 expect_contains "$ROOT/bindings/rust/Cargo.toml" "version = \"${package_version}\""
+expect_contains "$ROOT/bindings/rust/Cargo.toml" "repository = \"https://github.com/ata-sesli/zova\""
 expect_contains "$ROOT/bindings/rust/zova/Cargo.toml" "zova-sys = { version = \"${package_version}\""
 expect_contains "$ROOT/bindings/rust/zova-sys/tests/abi.rs" "zova_abi_version_major(), ${abi_major}"
 expect_contains "$ROOT/bindings/rust/zova-sys/tests/abi.rs" "zova_abi_version_minor(), ${abi_minor}"
@@ -90,10 +99,12 @@ expect_contains "$ROOT/bindings/rust/zova-sys/tests/abi.rs" "zova_abi_version_pa
 expect_contains "$ROOT/bindings/rust/zova-sys/tests/abi.rs" "\"${abi_version_string}\""
 
 expect_contains "$ROOT/bindings/go/README.md" "bindings/go/v${package_version}"
+expect_contains "$ROOT/bindings/go/go.mod" "module github.com/ata-sesli/zova/bindings/go"
 expect_contains "$ROOT/bindings/go/zova_test.go" "got != \"${abi_version_string}\""
 expect_contains "$ROOT/bindings/go/zova_test.go" "major != ${abi_major} || minor != ${abi_minor} || patch != ${abi_patch}"
 
 expect_contains "$ROOT/bindings/python/pyproject.toml" "version = \"${package_version}\""
+expect_contains "$ROOT/bindings/python/pyproject.toml" "Repository = \"https://github.com/ata-sesli/zova\""
 expect_contains "$ROOT/bindings/python/Cargo.toml" "version = \"${package_version}\""
 expect_contains "$ROOT/bindings/python/Cargo.toml" "zova\", version = \"${package_version}\""
 expect_contains "$ROOT/bindings/python/python/zova/__init__.py" "__version__ = \"${package_version}\""
@@ -110,23 +121,27 @@ expect_contains "$ROOT/bindings/javascript/Cargo.toml" "version = \"${package_ve
 expect_contains "$ROOT/bindings/javascript/Cargo.toml" "zova = { version = \"${package_version}\""
 expect_contains "$ROOT/bindings/javascript/Cargo.toml" "zova-sys = { version = \"${package_version}\""
 expect_contains "$ROOT/bindings/javascript/package.json" "\"version\": \"${package_version}\""
-expect_contains "$ROOT/bindings/javascript/package.json" "\"name\": \"zova-db\""
-expect_contains "$ROOT/bindings/javascript/bun.lock" "\"name\": \"zova-db\""
+expect_contains "$ROOT/bindings/javascript/package.json" "\"name\": \"zova-js\""
+expect_contains "$ROOT/bindings/javascript/package.json" "\"url\": \"git+https://github.com/ata-sesli/zova.git\""
+expect_contains "$ROOT/bindings/javascript/bun.lock" "\"name\": \"zova-js\""
 expect_contains "$ROOT/bindings/javascript/package.json" "\"zova-db-darwin-arm64\": \"${package_version}\""
 expect_contains "$ROOT/bindings/javascript/package.json" "\"zova-db-darwin-x64\": \"${package_version}\""
 expect_contains "$ROOT/bindings/javascript/package.json" "\"zova-db-linux-arm64-gnu\": \"${package_version}\""
 expect_contains "$ROOT/bindings/javascript/package.json" "\"zova-db-linux-x64-gnu\": \"${package_version}\""
-expect_contains "$ROOT/bindings/javascript/package.json" "\"zova-db-win32-x64-msvc\": \"${package_version}\""
+expect_contains "$ROOT/bindings/javascript/package.json" "\"zova-db-windows-x64\": \"${package_version}\""
 expect_contains "$ROOT/bindings/javascript/bun.lock" "\"zova-db-darwin-arm64\": \"${package_version}\""
 expect_contains "$ROOT/bindings/javascript/bun.lock" "\"zova-db-darwin-x64\": \"${package_version}\""
 expect_contains "$ROOT/bindings/javascript/bun.lock" "\"zova-db-linux-arm64-gnu\": \"${package_version}\""
 expect_contains "$ROOT/bindings/javascript/bun.lock" "\"zova-db-linux-x64-gnu\": \"${package_version}\""
-expect_contains "$ROOT/bindings/javascript/bun.lock" "\"zova-db-win32-x64-msvc\": \"${package_version}\""
+expect_contains "$ROOT/bindings/javascript/bun.lock" "\"zova-db-windows-x64\": \"${package_version}\""
 expect_contains "$ROOT/bindings/javascript/tests/load.test.ts" "expect(packageVersion).toBe(\"${package_version}\")"
 expect_contains "$ROOT/bindings/javascript/tests/load.test.ts" "expect(abiVersion).toBe(\"${abi_version_string}\")"
 expect_contains "$ROOT/bindings/javascript/tests/runtime-smoke.mjs" "assert.equal(packageVersion, \"${package_version}\")"
 expect_contains "$ROOT/bindings/javascript/tests/runtime-smoke.mjs" "assert.equal(abiVersion, \"${abi_version_string}\")"
 expect_contains "$ROOT/bindings/javascript/tests/runtime-smoke.cjs" "assert.equal(packageVersion, \"${package_version}\")"
 expect_contains "$ROOT/bindings/javascript/tests/runtime-smoke.cjs" "assert.equal(abiVersion, \"${abi_version_string}\")"
+expect_contains "$ROOT/.github/workflows/publish-release.yml" "id-token: write"
+expect_contains "$ROOT/.github/workflows/publish-release.yml" "npm install --global npm@11"
+expect_not_contains "$ROOT/.github/workflows/publish-release.yml" "NODE_AUTH_TOKEN"
 
 echo "version check ok: ${package_version}"

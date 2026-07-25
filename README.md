@@ -89,7 +89,7 @@ python -m pip install zova
 Go:
 
 ```sh
-go get github.com/atasesli/zova/bindings/go@v0.26.0
+go get github.com/ata-sesli/zova/bindings/go@v0.26.0
 ```
 
 The Go binding uses cgo over Zova's C ABI. Build or provide the C ABI library
@@ -118,10 +118,10 @@ Zova vendors SQLite. You do not need a system SQLite installation.
 
 | Path | Main Command | Needs Zig | Needs Rust | Needs C Compiler | Notes |
 |---|---|---:|---:|---:|---|
-| JavaScript / TypeScript | `bun add zova-db` / `npm install zova-db` | no | no | no | prebuilt Node-API 8 packages for Node 22/24 and Bun |
+| JavaScript / TypeScript | `bun add zova-js` / `npm install zova-js` | no | no | no | prebuilt Node-API 8 packages for Node 22/24 and Bun |
 | Rust | `cargo add zova` | no | yes | yes | `zova-sys` builds Zova's native C ABI from bundled generated C |
 | Python | `uv add zova` / `pip install zova` | no | only for sdist builds | only for sdist builds | wheels are published for Linux/macOS x86_64/arm64 on CPython 3.10/3.12; sdist fallback builds through Rust |
-| Go | `go get github.com/atasesli/zova/bindings/go@v0.26.0` | no, if using a release C ABI archive | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
+| Go | `go get github.com/ata-sesli/zova/bindings/go@v0.26.0` | no, if using a release C ABI archive | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
 | C ABI | release archive or `zig build c-abi` | no, if using a release archive | no | no, if using a release archive | static C ABI library and `zova.h` |
 | Zig | package source | yes | no | yes | native API |
 | CLI | release archive or `zig build` | no, if using a release archive | no | no, if using a release archive | source-built or prebuilt command line tool |
@@ -143,7 +143,7 @@ Minimum tool versions used by the project:
 ### JavaScript / TypeScript
 
 ```ts
-import { Database } from "zova-db";
+import { Database } from "zova-js";
 
 const db = Database.create("app.zova");
 db.exec("create table notes(id integer primary key, body text not null)");
@@ -153,7 +153,7 @@ db.transaction((transaction) => {
 db.close();
 ```
 
-The npm package name is `zova-db`; the Zova product and native library names
+The npm package name is `zova-js`; the Zova product and native library names
 remain unchanged.
 
 ### Rust
@@ -211,7 +211,7 @@ with zova.Database.create("app.zova") as db:
 ```go
 package main
 
-import zova "github.com/atasesli/zova/bindings/go"
+import zova "github.com/ata-sesli/zova/bindings/go"
 
 func main() {
     db, err := zova.Create("app.zova")
@@ -962,13 +962,13 @@ edge-payload, topology-scan, and fresh-build session APIs remain C ABI/raw
 Install:
 
 ```sh
-go get github.com/atasesli/zova/bindings/go@v0.26.0
+go get github.com/ata-sesli/zova/bindings/go@v0.26.0
 ```
 
 Import:
 
 ```go
-import zova "github.com/atasesli/zova/bindings/go"
+import zova "github.com/ata-sesli/zova/bindings/go"
 ```
 
 The Go package uses cgo over `include/zova.h` and links `libzova_c.a`. The
@@ -1156,7 +1156,7 @@ Zova publishes several release artifact types:
 - Rust crates on crates.io: `zova-sys` and `zova`.
 - Python wheels and sdist on PyPI.
 - A Go module tag: `bindings/go/v0.26.0`.
-- JavaScript/TypeScript Node-API packages on npm as `zova-db`, with native
+- JavaScript/TypeScript Node-API packages on npm as `zova-js`, with native
   packages for the supported platform matrix.
 
 The source archive includes:

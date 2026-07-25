@@ -50,7 +50,7 @@ write_manifest() {
         echo "version: $version"
         echo "artifact_id: $artifact_id"
         echo "commit: $(git rev-parse HEAD 2>/dev/null || echo unknown)"
-        echo "source: https://github.com/atasesli/zova"
+        echo "source: https://github.com/ata-sesli/zova"
     } >"$destination/MANIFEST.txt"
 }
 

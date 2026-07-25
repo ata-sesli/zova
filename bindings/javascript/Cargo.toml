@@ -5,8 +5,8 @@ edition = "2021"
 rust-version = "1.88"
 license = "MIT"
 description = "Node-API bindings for Zova."
-repository = "https://github.com/atasesli/zova"
-homepage = "https://github.com/atasesli/zova"
+repository = "https://github.com/ata-sesli/zova"
+homepage = "https://github.com/ata-sesli/zova"
 readme = "README.md"
 
 [lib]

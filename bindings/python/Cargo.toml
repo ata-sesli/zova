@@ -4,8 +4,8 @@ version = "0.26.0"
 edition = "2021"
 license = "MIT"
 description = "PyO3 extension for the Zova Python package."
-repository = "https://github.com/atasesli/zova"
-homepage = "https://github.com/atasesli/zova"
+repository = "https://github.com/ata-sesli/zova"
+homepage = "https://github.com/ata-sesli/zova"
 readme = "README.md"
 
 [lib]

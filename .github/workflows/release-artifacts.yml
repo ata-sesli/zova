@@ -221,6 +221,8 @@ jobs:
         working-directory: bindings/javascript
       - run: bunx napi artifacts --output-dir artifacts
         working-directory: bindings/javascript
+      - run: bun run normalize:package-names
+        working-directory: bindings/javascript
       - run: bun run build:typescript
         working-directory: bindings/javascript
       - run: |
@@ -238,8 +240,8 @@ jobs:
           npm init -y
           npm install \
             "../package/zova-db-linux-x64-gnu-${{ inputs.version }}.tgz" \
-            "../package/zova-db-${{ inputs.version }}.tgz"
-          node -e "const zova = require('zova-db'); if (zova.packageVersion !== '${{ inputs.version }}') process.exit(1)"
+            "../package/zova-js-${{ inputs.version }}.tgz"
+          node -e "const zova = require('zova-js'); if (zova.packageVersion !== '${{ inputs.version }}') process.exit(1)"
         working-directory: bindings/javascript
       - uses: actions/upload-artifact@v4
         with:

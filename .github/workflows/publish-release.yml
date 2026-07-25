@@ -43,6 +43,8 @@ jobs:
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
+      - name: Enable npm trusted publishing
+        run: npm install --global npm@11
 
       - name: Validate version
         run: |
@@ -203,8 +205,6 @@ jobs:
           fi
 
       - name: Publish JavaScript packages
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -eu
           version="${{ inputs.version }}"
@@ -228,5 +228,5 @@ jobs:
           publish_package zova-db-darwin-x64
           publish_package zova-db-linux-arm64-gnu
           publish_package zova-db-linux-x64-gnu
-          publish_package zova-db-win32-x64-msvc
-          publish_package zova-db
+          publish_package zova-db-windows-x64
+          publish_package zova-js

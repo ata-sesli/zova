@@ -1,11 +1,11 @@
 {
-  "name": "zova-db",
+  "name": "zova-js",
   "version": "0.26.0",
   "description": "JavaScript and TypeScript bindings for Zova.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/atasesli/zova.git",
+    "url": "git+https://github.com/ata-sesli/zova.git",
     "directory": "bindings/javascript"
   },
   "main": "dist/index.js",
@@ -36,13 +36,14 @@
     "zova-db-darwin-x64": "0.26.0",
     "zova-db-linux-arm64-gnu": "0.26.0",
     "zova-db-linux-x64-gnu": "0.26.0",
-    "zova-db-win32-x64-msvc": "0.26.0"
+    "zova-db-windows-x64": "0.26.0"
   },
   "scripts": {
     "build": "bun run build:native && bun run build:typescript",
-    "build:native": "napi build --platform --release --target-dir target",
-    "build:native:debug": "napi build --platform --target-dir target",
+    "build:native": "napi build --platform --release --target-dir target && bun run normalize:package-names",
+    "build:native:debug": "napi build --platform --target-dir target && bun run normalize:package-names",
     "build:typescript": "tsc --project tsconfig.json && tsc --project tsconfig.examples.json",
+    "normalize:package-names": "bun tools/normalize-package-names.ts",
     "test": "bun test --timeout 30000",
     "typecheck": "tsc --project tsconfig.json --noEmit && tsc --project tsconfig.examples.json --noEmit"
   },

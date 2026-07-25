@@ -1,4 +1,4 @@
-import { Database } from "zova-db";
+import { Database } from "zova-js";
 
 const db = Database.create("vectors-example.zova");
 db.createVectorCollection("documents", {

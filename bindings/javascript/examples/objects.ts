@@ -1,4 +1,4 @@
-import { Database, objectIdToHex } from "zova-db";
+import { Database, objectIdToHex } from "zova-js";
 
 const db = Database.create("objects-example.zova");
 const id = db.putObject(new TextEncoder().encode("content-addressed bytes"));

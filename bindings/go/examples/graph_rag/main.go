@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/atasesli/zova/bindings/go"
+	"github.com/ata-sesli/zova/bindings/go"
 )
 
 func strptr(value string) *string {

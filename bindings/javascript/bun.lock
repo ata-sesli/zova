@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "zova-db",
+      "name": "zova-js",
       "devDependencies": {
         "@napi-rs/cli": "3.7.1",
         "typescript": "5.9.3",
@@ -13,7 +13,7 @@
         "zova-db-darwin-x64": "0.26.0",
         "zova-db-linux-arm64-gnu": "0.26.0",
         "zova-db-linux-x64-gnu": "0.26.0",
-        "zova-db-win32-x64-msvc": "0.26.0",
+        "zova-db-windows-x64": "0.26.0",
       },
     },
   },

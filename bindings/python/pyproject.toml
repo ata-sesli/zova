@@ -29,9 +29,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/atasesli/zova"
-Repository = "https://github.com/atasesli/zova"
-Issues = "https://github.com/atasesli/zova/issues"
+Homepage = "https://github.com/ata-sesli/zova"
+Repository = "https://github.com/ata-sesli/zova"
+Issues = "https://github.com/ata-sesli/zova/issues"
 
 [tool.maturin]
 module-name = "zova._native"
