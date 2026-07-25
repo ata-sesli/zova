@@ -141,7 +141,7 @@ CARGO_TARGET_DIR="$JS_CARGO_TARGET_VERIFY" cargo fmt --manifest-path bindings/ja
 CARGO_TARGET_DIR="$JS_CARGO_TARGET_VERIFY" cargo nextest run --manifest-path bindings/javascript/Cargo.toml
 (cd bindings/javascript && bun run build)
 (cd bindings/javascript && bun run typecheck)
-(cd bindings/javascript && bun test)
+(cd bindings/javascript && bun run test)
 node bindings/javascript/tests/runtime-smoke.mjs
 node bindings/javascript/tests/runtime-smoke.cjs
 bun bindings/javascript/tests/runtime-smoke.mjs

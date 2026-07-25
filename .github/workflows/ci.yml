@@ -174,7 +174,7 @@ jobs:
         working-directory: bindings/javascript
       - run: bun run typecheck
         working-directory: bindings/javascript
-      - run: bun test
+      - run: bun run test
         working-directory: bindings/javascript
       - run: node bindings/javascript/tests/runtime-smoke.mjs
       - run: node bindings/javascript/tests/runtime-smoke.cjs

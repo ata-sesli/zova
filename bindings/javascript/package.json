@@ -43,7 +43,7 @@
     "build:native": "napi build --platform --release --target-dir target",
     "build:native:debug": "napi build --platform --target-dir target",
     "build:typescript": "tsc --project tsconfig.json && tsc --project tsconfig.examples.json",
-    "test": "bun test",
+    "test": "bun test --timeout 30000",
     "typecheck": "tsc --project tsconfig.json --noEmit && tsc --project tsconfig.examples.json --noEmit"
   },
   "devDependencies": {

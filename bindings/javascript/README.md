@@ -27,7 +27,7 @@ snapshot.
 cd bindings/javascript
 bun install --frozen-lockfile
 bun run build
-bun test
+bun run test
 ```
 
 Node and Bun load the same `.node` addon:
