@@ -221,6 +221,9 @@ pub fn build(b: *std.Build) void {
     });
     c_abi_lib.root_module.addOptions("zova_build_options", zova_build_options);
     addSqlite(c_abi_lib.root_module, b);
+    if (target.result.os.tag == .windows) {
+        c_abi_lib.bundle_compiler_rt = true;
+    }
 
     const install_c_abi_lib = b.addInstallArtifact(c_abi_lib, .{});
 
