@@ -206,10 +206,23 @@ fn build_zig_source(source_root: &Path) -> PathBuf {
     let prefix = out_dir.join("zova-c-abi");
     let cache_dir = absolute_dir(&out_dir.join("zig-cache"));
     let global_cache_dir = absolute_dir(&out_dir.join("zig-global-cache"));
-    let status = Command::new("zig")
+    let mut command = Command::new("zig");
+    command
         .arg("build")
         .arg("c-abi")
-        .arg("-Doptimize=ReleaseFast")
+        .arg("-Doptimize=ReleaseFast");
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        let zig_arch = match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+            Ok("x86_64") => "x86_64",
+            Ok("aarch64") => "aarch64",
+            Ok(arch) => panic!("unsupported Windows MSVC architecture for Zig build: {arch}"),
+            Err(err) => panic!("missing CARGO_CFG_TARGET_ARCH for Windows MSVC build: {err}"),
+        };
+        command.arg(format!("-Dtarget={zig_arch}-windows-msvc"));
+    }
+    let status = command
         .arg("--cache-dir")
         .arg(&cache_dir)
         .arg("--global-cache-dir")
