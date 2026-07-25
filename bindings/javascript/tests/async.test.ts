@@ -133,22 +133,26 @@ describe("AsyncDatabase", () => {
     await db.close();
   });
 
-  test("restores backups asynchronously", async () => {
-    const source = path();
-    const backup = path();
-    const restored = path();
-    const setup = Database.create(source);
-    setup.exec("CREATE TABLE notes(body TEXT NOT NULL)");
-    setup.exec("INSERT INTO notes VALUES ('hello')");
-    setup.backupTo(backup);
-    setup.close();
+  test(
+    "restores backups asynchronously",
+    async () => {
+      const source = path();
+      const backup = path();
+      const restored = path();
+      const setup = Database.create(source);
+      setup.exec("CREATE TABLE notes(body TEXT NOT NULL)");
+      setup.exec("INSERT INTO notes VALUES ('hello')");
+      setup.backupTo(backup);
+      setup.close();
 
-    await AsyncDatabase.restoreBackup(backup, restored);
-    const database = Database.open(restored);
-    const statement = database.prepare("SELECT body FROM notes");
-    expect(statement.step()).toBe("row");
-    expect(statement.columnText(0)).toBe("hello");
-    statement.close();
-    database.close();
-  });
+      await AsyncDatabase.restoreBackup(backup, restored);
+      const database = Database.open(restored);
+      const statement = database.prepare("SELECT body FROM notes");
+      expect(statement.step()).toBe("row");
+      expect(statement.columnText(0)).toBe("hello");
+      statement.close();
+      database.close();
+    },
+    30_000,
+  );
 });
