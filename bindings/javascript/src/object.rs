@@ -78,6 +78,7 @@ fn native_manifest(manifest: zova::ObjectManifest) -> NativeObjectManifest {
 }
 
 #[napi]
+#[cfg_attr(test, allow(dead_code))]
 pub fn object_id(data: Uint8Array) -> Result<Uint8Array> {
     zova::object_id(data.as_ref())
         .map(object_id_array)
@@ -85,6 +86,7 @@ pub fn object_id(data: Uint8Array) -> Result<Uint8Array> {
 }
 
 #[napi]
+#[cfg_attr(test, allow(dead_code))]
 pub fn object_chunk_id(data: Uint8Array) -> Result<Uint8Array> {
     zova::object_chunk_id(data.as_ref())
         .map(chunk_id_array)

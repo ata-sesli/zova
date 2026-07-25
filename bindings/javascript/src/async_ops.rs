@@ -12,6 +12,7 @@ use crate::graph::{
 };
 use crate::vector::{native_search_results, NativeVectorInput, NativeVectorSearchResult};
 
+#[cfg_attr(test, allow(dead_code))]
 pub struct RestoreTask {
     source: String,
     destination: String,
@@ -406,6 +407,7 @@ impl Task for ObjectTask {
 }
 
 #[napi(ts_return_type = "Promise<void>")]
+#[cfg_attr(test, allow(dead_code))]
 pub fn async_restore_backup(
     source: String,
     destination: String,

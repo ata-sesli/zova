@@ -108,6 +108,7 @@ fn extension_info(info: zova::ExtensionInfo) -> NativeExtensionInfo {
 }
 
 #[napi]
+#[cfg_attr(test, allow(dead_code))]
 pub fn restore_backup(source: String, destination: String, verify: Option<bool>) -> Result<()> {
     zova::restore_backup(
         source,
@@ -120,6 +121,7 @@ pub fn restore_backup(source: String, destination: String, verify: Option<bool>)
 }
 
 #[napi]
+#[cfg_attr(test, allow(dead_code))]
 pub fn convert_sqlite_to_zova(source: String, destination: String) -> Result<()> {
     zova::SharedDatabase::convert_sqlite_to_zova(source, destination).map_err(zova_error)
 }
