@@ -397,20 +397,12 @@ pub const Database = struct {
         try insertObjectRow(self.sqlite_db, self.storage_schema, id, size_bytes, chunk_count);
 
         var offset: usize = 0;
-        while (offset < bytes.len) {
-            const chunk_len = fastcdc.cut(bytes[offset..]);
-            const chunk = bytes[offset .. offset + chunk_len];
-            const chunk_hash = objectId(chunk);
-            try insertChunkRow(self.sqlite_db, self.storage_schema, chunk_hash, chunk);
-            offset += chunk_len;
-        }
-
-        offset = 0;
         var chunk_index: i64 = 0;
         while (offset < bytes.len) {
             const chunk_len = fastcdc.cut(bytes[offset..]);
             const chunk = bytes[offset .. offset + chunk_len];
             const chunk_hash = objectId(chunk);
+            try insertChunkRow(self.sqlite_db, self.storage_schema, chunk_hash, chunk);
             try insertManifestRow(
                 self.sqlite_db,
                 self.storage_schema,
