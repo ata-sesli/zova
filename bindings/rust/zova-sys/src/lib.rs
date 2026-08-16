@@ -564,6 +564,20 @@ pub struct zova_database_open_request {
 }
 
 #[repr(C)]
+pub struct zova_database_create_memory_request {
+    pub out_db: *mut *mut zova_database,
+    pub out_error_message: *mut zova_message,
+}
+
+#[repr(C)]
+pub struct zova_database_restore_to_memory_request {
+    pub source_path: *const c_char,
+    pub flags: u32,
+    pub out_db: *mut *mut zova_database,
+    pub out_error_message: *mut zova_message,
+}
+
+#[repr(C)]
 pub struct zova_database_create_options_request {
     pub path: *const c_char,
     pub page_size: u32,
@@ -1508,6 +1522,9 @@ extern "C" {
     pub fn zova_vector_collection_list_free(list: *mut zova_vector_collection_list);
 
     pub fn zova_database_create(request: *const zova_database_open_request) -> zova_status;
+    pub fn zova_database_create_memory(
+        request: *const zova_database_create_memory_request,
+    ) -> zova_status;
     pub fn zova_database_create_with_options(
         request: *const zova_database_create_options_request,
     ) -> zova_status;
@@ -1573,6 +1590,9 @@ extern "C" {
         request: *const zova_convert_sqlite_to_zova_request,
     ) -> zova_status;
     pub fn zova_database_restore(request: *const zova_database_restore_request) -> zova_status;
+    pub fn zova_database_restore_to_memory(
+        request: *const zova_database_restore_to_memory_request,
+    ) -> zova_status;
 
     pub fn zova_statement_finalize(statement: *mut zova_statement) -> zova_status;
     pub fn zova_statement_step(request: *const zova_statement_step_request) -> zova_status;

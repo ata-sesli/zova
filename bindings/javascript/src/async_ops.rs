@@ -39,6 +39,33 @@ impl Task for RestoreTask {
     }
 }
 
+#[cfg_attr(test, allow(dead_code))]
+pub struct RestoreToMemoryTask {
+    source: String,
+    verify: bool,
+}
+
+impl Task for RestoreToMemoryTask {
+    type Output = zova::SharedDatabase;
+    type JsValue = NativeDatabase;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        zova::SharedDatabase::restore_backup_to_memory(
+            &self.source,
+            zova::RestoreOptions {
+                verify: self.verify,
+            },
+        )
+        .map_err(zova_error)
+    }
+
+    fn resolve(&mut self, _: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(NativeDatabase {
+            state: Arc::new(DatabaseState::new(output)),
+        })
+    }
+}
+
 struct DatabaseTaskState {
     database: zova::SharedDatabase,
     state: Arc<DatabaseState>,
@@ -416,6 +443,18 @@ pub fn async_restore_backup(
     AsyncTask::new(RestoreTask {
         source,
         destination,
+        verify: verify.unwrap_or(true),
+    })
+}
+
+#[napi(ts_return_type = "Promise<NativeDatabase>")]
+#[cfg_attr(test, allow(dead_code))]
+pub fn async_restore_backup_to_memory(
+    source: String,
+    verify: Option<bool>,
+) -> AsyncTask<RestoreToMemoryTask> {
+    AsyncTask::new(RestoreToMemoryTask {
+        source,
         verify: verify.unwrap_or(true),
     })
 }

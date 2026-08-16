@@ -24,6 +24,7 @@ require_symbol() {
 }
 
 require_symbol zova_database_create
+require_symbol zova_database_create_memory
 require_symbol zova_database_create_with_extensions
 require_symbol zova_database_open
 require_symbol zova_database_open_with_extensions
@@ -54,6 +55,7 @@ require_symbol zova_database_extension_info
 require_symbol zova_database_extension_check
 require_symbol zova_database_extension_check_all
 require_symbol zova_database_extension_drop
+require_symbol zova_database_restore_to_memory
 require_symbol zova_status_name
 
 if grep -E '(^|[[:space:]])_?(Zova|zova)[A-Za-z0-9_]*$' "$TMP" | grep -Ev '(^|[[:space:]])_?zova_' >/dev/null; then

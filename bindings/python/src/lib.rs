@@ -7,7 +7,10 @@ mod object;
 mod statement;
 mod vector;
 
-use database::{convert_sqlite_to_zova, restore_backup, PyDatabase, PySavepointContext};
+use database::{
+    convert_sqlite_to_zova, restore_backup, restore_backup_to_memory, PyDatabase,
+    PySavepointContext,
+};
 use error::{ClosedHandleError, ZovaError};
 use extension::PyExtensionInfo;
 use graph::{
@@ -57,6 +60,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGraphWalkItem>()?;
     m.add_function(wrap_pyfunction!(convert_sqlite_to_zova, m)?)?;
     m.add_function(wrap_pyfunction!(restore_backup, m)?)?;
+    m.add_function(wrap_pyfunction!(restore_backup_to_memory, m)?)?;
     m.add_function(wrap_pyfunction!(object_id, m)?)?;
     m.add_function(wrap_pyfunction!(object_chunk_id, m)?)?;
     m.add_function(wrap_pyfunction!(encode_f32_le, m)?)?;

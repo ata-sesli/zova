@@ -422,6 +422,75 @@ func TestBackupCompactAndRestore(t *testing.T) {
 	}
 }
 
+func TestCreateMemoryAndRestoreBackupToMemory(t *testing.T) {
+	source := tempZovaPath(t, "memory-source")
+	backup := tempZovaPath(t, "memory-backup")
+	{
+		db, err := Create(source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		must(t, db.Exec("create table payload(id integer primary key, body text not null)"))
+		must(t, db.Exec("insert into payload(body) values ('from file')"))
+		must(t, db.Close())
+	}
+
+	restored, err := RestoreBackupToMemory(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	if got := scalarInt(t, restored, "select count(*) from payload"); got != 1 {
+		t.Fatalf("restored memory row count = %d", got)
+	}
+
+	memory, err := CreateMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	must(t, memory.Exec("create table memory_rows(id integer primary key, body text not null)"))
+	must(t, memory.Exec("insert into memory_rows(body) values ('volatile only')"))
+	must(t, memory.BackupTo(backup))
+	must(t, memory.Close())
+
+	other, err := CreateMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	if err := other.Exec("select * from memory_rows"); !errorStatusIs(err, StatusSqliteError) {
+		t.Fatalf("isolated memory exec = %v, want StatusSqliteError", err)
+	}
+
+	file, err := Open(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	must(t, file.Close())
+	verifyMemoryBackup(t, backup)
+
+	roundTrip, err := RestoreBackupToMemory(backup, RestoreOptions{NoVerify: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer roundTrip.Close()
+	if got := scalarInt(t, roundTrip, "select count(*) from memory_rows"); got != 1 {
+		t.Fatalf("round-trip memory row count = %d", got)
+	}
+}
+
+func verifyMemoryBackup(t *testing.T, path string) {
+	t.Helper()
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if got := scalarInt(t, db, "select count(*) from memory_rows"); got != 1 {
+		t.Fatalf("backup memory row count = %d", got)
+	}
+}
+
 func TestConversionInteriorNULAndUseAfterClose(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source.db")

@@ -30,6 +30,10 @@ export class AsyncDatabase {
     return new AsyncDatabase(native.NativeDatabase.create(path));
   }
 
+  static createMemory(): AsyncDatabase {
+    return new AsyncDatabase(native.NativeDatabase.createMemory());
+  }
+
   static open(path: string, options: OpenOptions = {}): AsyncDatabase {
     return new AsyncDatabase(
       native.NativeDatabase.open(path, {
@@ -37,6 +41,15 @@ export class AsyncDatabase {
         busyTimeoutMs: options.busyTimeoutMs,
       }),
     );
+  }
+
+  static restoreBackupToMemory(source: string, verify = true): Promise<AsyncDatabase> {
+    return native
+      .asyncRestoreBackupToMemory(source, verify)
+      .then((database: native.NativeDatabase) => new AsyncDatabase(database))
+      .catch((error: unknown) => {
+        throw normalizeNativeError(error);
+      });
   }
 
   static restoreBackup(

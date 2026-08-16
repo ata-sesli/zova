@@ -17,7 +17,7 @@ pub(crate) struct DatabaseState {
 }
 
 impl DatabaseState {
-    fn new(database: zova::SharedDatabase) -> Self {
+    pub(crate) fn new(database: zova::SharedDatabase) -> Self {
         Self {
             inner: Mutex::new(DatabaseStateInner {
                 database: Some(database),
@@ -122,6 +122,21 @@ pub fn restore_backup(source: String, destination: String, verify: Option<bool>)
 
 #[napi]
 #[cfg_attr(test, allow(dead_code))]
+pub fn restore_backup_to_memory(source: String, verify: Option<bool>) -> Result<NativeDatabase> {
+    let database = zova::SharedDatabase::restore_backup_to_memory(
+        source,
+        zova::RestoreOptions {
+            verify: verify.unwrap_or(true),
+        },
+    )
+    .map_err(zova_error)?;
+    Ok(NativeDatabase {
+        state: Arc::new(DatabaseState::new(database)),
+    })
+}
+
+#[napi]
+#[cfg_attr(test, allow(dead_code))]
 pub fn convert_sqlite_to_zova(source: String, destination: String) -> Result<()> {
     zova::SharedDatabase::convert_sqlite_to_zova(source, destination).map_err(zova_error)
 }
@@ -136,6 +151,14 @@ impl NativeDatabase {
     #[napi(factory)]
     pub fn create(path: String) -> Result<Self> {
         let database = zova::SharedDatabase::create(path).map_err(zova_error)?;
+        Ok(Self {
+            state: Arc::new(DatabaseState::new(database)),
+        })
+    }
+
+    #[napi(factory)]
+    pub fn create_memory() -> Result<Self> {
+        let database = zova::SharedDatabase::create_memory().map_err(zova_error)?;
         Ok(Self {
             state: Arc::new(DatabaseState::new(database)),
         })
