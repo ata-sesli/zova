@@ -32,6 +32,7 @@ from ._native import (
     object_chunk_id,
     object_id,
     restore_backup,
+    restore_backup_to_memory,
 )
 
 __version__ = "0.26.1"
@@ -122,4 +123,5 @@ __all__ = [
     "object_chunk_id",
     "object_id",
     "restore_backup",
+    "restore_backup_to_memory",
 ]

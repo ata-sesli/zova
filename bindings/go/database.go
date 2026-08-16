@@ -59,6 +59,35 @@ func Create(path string) (*DB, error) {
 	return openOrCreate(path, true)
 }
 
+// CreateMemory creates a new fully initialized volatile in-memory database.
+//
+// The database never creates database, WAL, or journal files, is isolated from
+// every other in-memory database, and is reclaimed when closed.
+func CreateMemory() (*DB, error) {
+	outRaw := (**C.zova_database)(C.calloc(1, C.size_t(unsafe.Sizeof(uintptr(0)))))
+	defer C.free(unsafe.Pointer(outRaw))
+	message := newCMessage()
+	defer freeCMessage(message)
+	request := C.zova_database_create_memory_request{
+		out_db:            outRaw,
+		out_error_message: message,
+	}
+	status := C.zova_database_create_memory(&request)
+	if status != C.ZOVA_OK {
+		return nil, statusWithMessage(status, takeMessage(message))
+	}
+	raw := *outRaw
+	if raw == nil {
+		return nil, newError(StatusInvalidArgument, "Zova returned a nil database handle")
+	}
+	return &DB{
+		ptr:        raw,
+		statements: make(map[*Stmt]struct{}),
+		writers:    make(map[*ObjectWriter]struct{}),
+		subs:       make(map[*Subscription]struct{}),
+	}, nil
+}
+
 // Open opens an existing .zova database.
 func Open(path string) (*DB, error) {
 	return openOrCreate(path, false)
@@ -122,6 +151,48 @@ func RestoreBackup(source, destination string, options ...RestoreOptions) error 
 	}
 	status := C.zova_database_restore(&request)
 	return statusWithMessage(status, takeMessage(message))
+}
+
+// RestoreBackupToMemory restores a backup .zova file into a new volatile
+// in-memory database.
+//
+// The returned database owns the source's schema and data entirely in memory
+// and never creates database, WAL, or journal files.
+func RestoreBackupToMemory(source string, options ...RestoreOptions) (*DB, error) {
+	option, err := singleRestoreOptions(options)
+	if err != nil {
+		return nil, err
+	}
+	cSource, err := cString("source path", source)
+	if err != nil {
+		return nil, err
+	}
+	defer freeCString(cSource)
+
+	outRaw := (**C.zova_database)(C.calloc(1, C.size_t(unsafe.Sizeof(uintptr(0)))))
+	defer C.free(unsafe.Pointer(outRaw))
+	message := newCMessage()
+	defer freeCMessage(message)
+	request := C.zova_database_restore_to_memory_request{
+		source_path:       cSource,
+		flags:             restoreFlags(option),
+		out_db:            outRaw,
+		out_error_message: message,
+	}
+	status := C.zova_database_restore_to_memory(&request)
+	if status != C.ZOVA_OK {
+		return nil, statusWithMessage(status, takeMessage(message))
+	}
+	raw := *outRaw
+	if raw == nil {
+		return nil, newError(StatusInvalidArgument, "Zova returned a nil database handle")
+	}
+	return &DB{
+		ptr:        raw,
+		statements: make(map[*Stmt]struct{}),
+		writers:    make(map[*ObjectWriter]struct{}),
+		subs:       make(map[*Subscription]struct{}),
+	}, nil
 }
 
 func openOrCreate(path string, create bool) (*DB, error) {

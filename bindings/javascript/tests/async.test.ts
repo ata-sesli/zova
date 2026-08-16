@@ -155,4 +155,33 @@ describe("AsyncDatabase", () => {
     },
     30_000,
   );
+
+  test(
+    "creates in-memory databases and restores backups to memory asynchronously",
+    async () => {
+      const source = path();
+      const backup = path();
+      const setup = Database.create(source);
+      setup.exec("CREATE TABLE payload(id INTEGER PRIMARY KEY, body TEXT)");
+      setup.exec("INSERT INTO payload(body) VALUES ('from file')");
+      setup.close();
+
+      const restored = await AsyncDatabase.restoreBackupToMemory(source);
+      await restored.close();
+
+      const memory = AsyncDatabase.createMemory();
+      await memory.exec("CREATE TABLE memory_rows(id INTEGER PRIMARY KEY, body TEXT)");
+      await memory.exec("INSERT INTO memory_rows(body) VALUES ('volatile only')");
+      await memory.backupTo(backup);
+      await memory.close();
+
+      const fileCopy = Database.open(backup);
+      const statement = fileCopy.prepare("SELECT body FROM memory_rows WHERE id = 1");
+      expect(statement.step()).toBe("row");
+      expect(statement.columnText(0)).toBe("volatile only");
+      statement.close();
+      fileCopy.close();
+    },
+    30_000,
+  );
 });

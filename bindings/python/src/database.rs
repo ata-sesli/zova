@@ -40,6 +40,17 @@ impl PyDatabase {
         })
     }
 
+    /// Create a new fully initialized volatile in-memory database.
+    ///
+    /// The database never creates database, WAL, or journal files, is isolated
+    /// from every other in-memory database, and is reclaimed when closed.
+    #[staticmethod]
+    pub(crate) fn create_memory() -> PyResult<Self> {
+        Ok(Self {
+            inner: Some(zova_rust::Database::create_memory().map_err(zova_error)?),
+        })
+    }
+
     #[staticmethod]
     #[pyo3(signature = (path, *, read_only = false, busy_timeout_ms = 0))]
     pub(crate) fn open(path: &str, read_only: bool, busy_timeout_ms: u32) -> PyResult<Self> {
@@ -700,4 +711,19 @@ pub(crate) fn convert_sqlite_to_zova(source: &str, destination: &str) -> PyResul
 pub(crate) fn restore_backup(source: &str, destination: &str, verify: bool) -> PyResult<()> {
     zova_rust::restore_backup(source, destination, zova_rust::RestoreOptions { verify })
         .map_err(zova_error)
+}
+
+/// Restore a valid `.zova` backup file into a new volatile in-memory database.
+///
+/// The returned database owns the source's schema and data entirely in memory
+/// and never creates database, WAL, or journal files.
+#[pyfunction]
+#[pyo3(signature = (source, *, verify = true))]
+pub(crate) fn restore_backup_to_memory(source: &str, verify: bool) -> PyResult<PyDatabase> {
+    let database =
+        zova_rust::restore_backup_to_memory(source, zova_rust::RestoreOptions { verify })
+            .map_err(zova_error)?;
+    Ok(PyDatabase {
+        inner: Some(database),
+    })
 }

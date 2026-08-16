@@ -50,6 +50,16 @@ export class Database {
     return new Database(callNative(() => native.NativeDatabase.create(path)));
   }
 
+  static createMemory(): Database {
+    return new Database(callNative(() => native.NativeDatabase.createMemory()));
+  }
+
+  static restoreBackupToMemory(source: string, verify = true): Database {
+    return new Database(
+      callNative(() => native.restoreBackupToMemory(source, verify)),
+    );
+  }
+
   static open(path: string, options: OpenOptions = {}): Database {
     return new Database(
       callNative(() =>

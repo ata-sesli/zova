@@ -19,7 +19,8 @@ mod statement;
 mod vector;
 
 pub use database::{
-    restore_backup, BackupOptions, CompactOptions, Database, OpenOptions, RestoreOptions,
+    restore_backup, restore_backup_to_memory, BackupOptions, CompactOptions, Database, OpenOptions,
+    RestoreOptions,
 };
 pub use error::{Error, Result, Status};
 pub use extension::ExtensionInfo;

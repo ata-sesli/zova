@@ -410,6 +410,40 @@ def test_backup_compact_and_restore(tmp_path):
                 assert stmt.column_float(0) == 0.0
 
 
+def test_create_memory_and_restore_backup_to_memory(tmp_path):
+    source = tmp_path / "memory-source.zova"
+    backup = tmp_path / "memory-backup.zova"
+
+    with zova.Database.create(str(source)) as db:
+        db.exec("create table payload(id integer primary key, body text not null)")
+        db.exec("insert into payload(body) values ('from file')")
+
+    with zova.restore_backup_to_memory(str(source)) as restored:
+        with restored.prepare("select count(*) from payload") as stmt:
+            assert stmt.step() == zova.Step.ROW
+            assert stmt.column_int(0) == 1
+
+    with zova.Database.create_memory() as memory:
+        memory.exec("create table memory_rows(id integer primary key, body text not null)")
+        memory.exec("insert into memory_rows(body) values ('volatile only')")
+        memory.backup_to(str(backup))
+
+        with zova.Database.create_memory() as other:
+            with pytest.raises(zova.ZovaError) as exc:
+                other.exec("select * from memory_rows")
+            assert exc.value.status_name == "ZOVA_SQLITE_ERROR"
+
+    with zova.Database.open(str(backup)) as file:
+        with file.prepare("select count(*) from memory_rows") as stmt:
+            assert stmt.step() == zova.Step.ROW
+            assert stmt.column_int(0) == 1
+
+    with zova.restore_backup_to_memory(str(backup), verify=False) as round_trip:
+        with round_trip.prepare("select body from memory_rows where id = 1") as stmt:
+            assert stmt.step() == zova.Step.ROW
+            assert stmt.column_text(0) == "volatile only"
+
+
 def test_read_only_open_and_busy_timeout(tmp_path):
     path = tmp_path / "readonly.zova"
     with zova.Database.create(str(path)) as db:

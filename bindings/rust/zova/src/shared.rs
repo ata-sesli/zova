@@ -1,6 +1,6 @@
 use crate::database::{
-    backup_flags, compact_flags, cstring, empty_message, path_to_cstring, take_message,
-    BackupOptions, CompactOptions,
+    backup_flags, compact_flags, cstring, empty_message, path_to_cstring, restore_flags,
+    take_message, BackupOptions, CompactOptions, RestoreOptions,
 };
 use crate::error::{Error, Result, Status};
 use crate::extension::{
@@ -115,6 +115,25 @@ impl SharedDatabase {
         Self::open_or_create(path, true)
     }
 
+    /// Create a new fully initialized volatile in-memory database.
+    ///
+    /// The database never creates database, WAL, or journal files, is isolated
+    /// from every other in-memory database, and is reclaimed when the last
+    /// clone is dropped.
+    pub fn create_memory() -> Result<Self> {
+        let mut db = ptr::null_mut();
+        let mut message = empty_message();
+        let request = zova_sys::zova_database_create_memory_request {
+            out_db: &mut db,
+            out_error_message: &mut message,
+        };
+        let status = unsafe { zova_sys::zova_database_create_memory(&request) };
+        if status != zova_sys::ZOVA_OK {
+            return Err(Error::from_status(status, take_message(&mut message)));
+        }
+        Self::from_raw(db)
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_or_create(path, false)
     }
@@ -159,6 +178,30 @@ impl SharedDatabase {
             return Ok(());
         }
         Err(Error::from_status(status, take_message(&mut message)))
+    }
+
+    /// Restore a valid `.zova` backup file into a new volatile in-memory database.
+    ///
+    /// The returned database owns the source's schema and data entirely in
+    /// memory and never creates database, WAL, or journal files.
+    pub fn restore_backup_to_memory(
+        source: impl AsRef<Path>,
+        options: RestoreOptions,
+    ) -> Result<Self> {
+        let source = path_to_cstring(source.as_ref())?;
+        let mut db = ptr::null_mut();
+        let mut message = empty_message();
+        let request = zova_sys::zova_database_restore_to_memory_request {
+            source_path: source.as_ptr(),
+            flags: restore_flags(options.verify),
+            out_db: &mut db,
+            out_error_message: &mut message,
+        };
+        let status = unsafe { zova_sys::zova_database_restore_to_memory(&request) };
+        if status != zova_sys::ZOVA_OK {
+            return Err(Error::from_status(status, take_message(&mut message)));
+        }
+        Self::from_raw(db)
     }
 
     pub fn exec(&self, sql: &str) -> Result<()> {

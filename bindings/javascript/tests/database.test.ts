@@ -231,4 +231,47 @@ describe("Database and Statement", () => {
     }
     database.close();
   });
+
+  test("in-memory databases create, isolate, back up, and restore", () => {
+    const directory = mkdtempSync(join(tmpdir(), "zova-javascript-memory-"));
+    temporaryDirectories.push(directory);
+    const source = join(directory, "source.zova");
+    const backup = join(directory, "backup.zova");
+
+    const file = Database.create(source);
+    file.exec("CREATE TABLE payload(id INTEGER PRIMARY KEY, body TEXT)");
+    file.exec("INSERT INTO payload(body) VALUES ('from file')");
+    file.close();
+
+    const restored = Database.restoreBackupToMemory(source);
+    const count = restored.prepare("SELECT count(*) FROM payload");
+    expect(count.step()).toBe(Step.Row);
+    expect(count.columnInteger(0)).toBe(1n);
+    count.close();
+    restored.close();
+
+    const memory = Database.createMemory();
+    memory.exec("CREATE TABLE memory_rows(id INTEGER PRIMARY KEY, body TEXT)");
+    memory.exec("INSERT INTO memory_rows(body) VALUES ('volatile only')");
+    memory.backupTo(backup);
+    memory.close();
+
+    const isolated = Database.createMemory();
+    expect(() => isolated.exec("SELECT * FROM memory_rows")).toThrow(ZovaError);
+    isolated.close();
+
+    const fileCopy = Database.open(backup);
+    const fileCount = fileCopy.prepare("SELECT count(*) FROM memory_rows");
+    expect(fileCount.step()).toBe(Step.Row);
+    expect(fileCount.columnInteger(0)).toBe(1n);
+    fileCount.close();
+    fileCopy.close();
+
+    const roundTrip = Database.restoreBackupToMemory(backup, false);
+    const body = roundTrip.prepare("SELECT body FROM memory_rows WHERE id = 1");
+    expect(body.step()).toBe(Step.Row);
+    expect(body.columnText(0)).toBe("volatile only");
+    body.close();
+    roundTrip.close();
+  });
 });

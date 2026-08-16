@@ -47,8 +47,9 @@
  * Scope:
  * - This ABI exposes database lifecycle, SQL exec, prepared statements,
  *   explicit transactions, explicit vacuum, conversion, backup, compact copy,
- *   restore-to-new-file, objects, chunks, manifests, range reads, assembly,
- *   ObjectWriter, native vectors, and native graph relationships.
+ *   restore-to-new-file, in-memory databases, objects, chunks, manifests,
+ *   range reads, assembly, ObjectWriter, native vectors, and native graph
+ *   relationships.
  * - Vector metadata remains application-owned in user SQL tables. Vector search
  *   returns vector ids and distances only.
  * - zova_database connections register read-only SQL vector helpers:
@@ -590,6 +591,29 @@ typedef struct zova_database_open_request {
     zova_database **out_db;
     zova_message *out_error_message;
 } zova_database_open_request;
+
+/*
+ * Create a fully initialized volatile in-memory database. The database is
+ * isolated, never creates database/WAL/journal files, and is reclaimed when
+ * the returned handle is closed. The path-based zova_database_create also
+ * accepts ":memory:" as its path.
+ */
+typedef struct zova_database_create_memory_request {
+    zova_database **out_db;
+    zova_message *out_error_message;
+} zova_database_create_memory_request;
+
+/*
+ * Restore a valid .zova backup file into a new volatile in-memory database
+ * handle. flags uses ZOVA_RESTORE_NO_VERIFY; by default the in-memory copy is
+ * verified after the restore.
+ */
+typedef struct zova_database_restore_to_memory_request {
+    const char *source_path;
+    uint32_t flags;
+    zova_database **out_db;
+    zova_message *out_error_message;
+} zova_database_restore_to_memory_request;
 
 /* Fresh-database options. page_size = 0 preserves SQLite's default. */
 typedef struct zova_database_create_options_request {
@@ -1574,6 +1598,7 @@ void zova_fresh_build_destroy(zova_fresh_build *build);
 
 /* Database lifecycle, SQL passthrough, prepared statements, and conversion. */
 zova_status zova_database_create(const zova_database_open_request *request);
+zova_status zova_database_create_memory(const zova_database_create_memory_request *request);
 zova_status zova_database_create_with_options(const zova_database_create_options_request *request);
 zova_status zova_database_create_with_extensions(const zova_database_open_extensions_request *request);
 zova_status zova_database_open(const zova_database_open_request *request);
@@ -1607,6 +1632,7 @@ zova_status zova_database_prepare(const zova_database_prepare_request *request);
 const char *zova_database_last_error_message(zova_database *db);
 zova_status zova_convert_sqlite_to_zova(const zova_convert_sqlite_to_zova_request *request);
 zova_status zova_database_restore(const zova_database_restore_request *request);
+zova_status zova_database_restore_to_memory(const zova_database_restore_to_memory_request *request);
 
 /*
  * Prepared statements.

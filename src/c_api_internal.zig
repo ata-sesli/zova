@@ -675,6 +675,18 @@ pub const zova_database_open_request = extern struct {
     out_error_message: ?*zova_message,
 };
 
+pub const zova_database_create_memory_request = extern struct {
+    out_db: ?*?*zova_database,
+    out_error_message: ?*zova_message,
+};
+
+pub const zova_database_restore_to_memory_request = extern struct {
+    source_path: ?[*:0]const u8,
+    flags: u32,
+    out_db: ?*?*zova_database,
+    out_error_message: ?*zova_message,
+};
+
 pub const zova_database_create_options_request = extern struct {
     path: ?[*:0]const u8,
     page_size: u32,
@@ -1761,6 +1773,23 @@ pub fn zova_database_create(request: ?*const zova_database_open_request) callcon
     return openDatabase(request, .create);
 }
 
+pub fn zova_database_create_memory(request: ?*const zova_database_create_memory_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    clearMessage(req.out_error_message);
+    const out = req.out_db orelse return failMessage(req.out_error_message, error.InvalidArgument);
+    out.* = null;
+
+    var db = zova.Database.createMemory() catch |err| return failMessage(req.out_error_message, err);
+
+    const handle = allocator.create(DatabaseHandle) catch |err| {
+        db.deinit();
+        return failMessage(req.out_error_message, err);
+    };
+    handle.* = .{ .db = db };
+    out.* = @ptrCast(handle);
+    return .OK;
+}
+
 pub fn zova_database_create_with_options(request: ?*const zova_database_create_options_request) callconv(.c) zova_status {
     return createDatabaseWithOptions(request);
 }
@@ -2360,6 +2389,27 @@ pub fn zova_database_restore(request: ?*const zova_database_restore_request) cal
     }) catch |err| {
         return failMessage(req.out_error_message, err);
     };
+    return .OK;
+}
+
+pub fn zova_database_restore_to_memory(request: ?*const zova_database_restore_to_memory_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    clearMessage(req.out_error_message);
+    const out = req.out_db orelse return failMessage(req.out_error_message, error.InvalidArgument);
+    out.* = null;
+    const source_path = req.source_path orelse return failMessage(req.out_error_message, error.InvalidArgument);
+    if ((req.flags & ~ZOVA_RESTORE_NO_VERIFY) != 0) return failMessage(req.out_error_message, error.InvalidArgument);
+
+    var db = zova.restoreBackupToMemory(std.mem.span(source_path), .{
+        .verify = (req.flags & ZOVA_RESTORE_NO_VERIFY) == 0,
+    }) catch |err| return failMessage(req.out_error_message, err);
+
+    const handle = allocator.create(DatabaseHandle) catch |err| {
+        db.deinit();
+        return failMessage(req.out_error_message, err);
+    };
+    handle.* = .{ .db = db };
+    out.* = @ptrCast(handle);
     return .OK;
 }
 

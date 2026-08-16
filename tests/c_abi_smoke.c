@@ -2965,5 +2965,121 @@ int main(int argc, char **argv) {
     expect_bytes(range, (const uint8_t *)"from ", sizeof(range), "range read after reopen");
 
     expect_status(zova_database_close(db), ZOVA_OK, "close reopened database");
+
+    /* In-memory mode: create_memory is fully usable and backup can persist it. */
+    {
+        zova_database *mem = NULL;
+        expect_status(zova_database_create_memory(&(zova_database_create_memory_request){
+                          .out_db = &mem,
+                          .out_error_message = &open_message,
+                      }),
+                      ZOVA_OK,
+                      "create in-memory database");
+        zova_message_free(&open_message);
+        expect_status(zova_database_exec(&(zova_database_exec_request){
+                          .db = mem,
+                          .sql = "create table memory_rows (id integer primary key, value text not null)",
+                      }),
+                      ZOVA_OK,
+                      "in-memory exec sql");
+        expect_status(zova_database_exec(&(zova_database_exec_request){
+                          .db = mem,
+                          .sql = "insert into memory_rows (value) values ('in-memory data')",
+                      }),
+                      ZOVA_OK,
+                      "in-memory insert");
+        char mem_backup[1024];
+        snprintf(mem_backup, sizeof(mem_backup), "%s.memory.zova", db_path);
+        remove(mem_backup);
+        expect_status(zova_database_backup(&(zova_database_backup_request){
+                          .db = mem,
+                          .destination_path = mem_backup,
+                          .flags = ZOVA_BACKUP_NO_VERIFY,
+                      }),
+                      ZOVA_OK,
+                      "backup in-memory database");
+
+        zova_database *mem_copy = NULL;
+        expect_status(zova_database_open(&(zova_database_open_request){
+                          .path = mem_backup,
+                          .out_db = &mem_copy,
+                          .out_error_message = &open_message,
+                      }),
+                      ZOVA_OK,
+                      "open in-memory backup copy");
+        zova_message_free(&open_message);
+        zova_statement *mem_count_statement = NULL;
+        zova_step_result mem_count_step = ZOVA_STEP_DONE;
+        int64_t mem_row_count = 0;
+        expect_status(zova_database_prepare(&(zova_database_prepare_request){
+                          .db = mem_copy,
+                          .sql = "select count(*) from memory_rows",
+                          .out_statement = &mem_count_statement,
+                      }),
+                      ZOVA_OK,
+                      "prepare in-memory backup count");
+        expect_status(zova_statement_step(&(zova_statement_step_request){
+                          .statement = mem_count_statement,
+                          .out_result = &mem_count_step,
+                      }),
+                      ZOVA_OK,
+                      "step in-memory backup count");
+        expect_status(zova_statement_column_int64(&(zova_statement_column_int64_request){
+                          .statement = mem_count_statement,
+                          .index = 0,
+                          .out_value = &mem_row_count,
+                      }),
+                      ZOVA_OK,
+                      "read in-memory backup count");
+        if (mem_row_count != 1) {
+            fprintf(stderr, "in-memory backup: wrong row count\n");
+            return 1;
+        }
+        expect_status(zova_statement_finalize(mem_count_statement), ZOVA_OK, "finalize in-memory backup count");
+        expect_status(zova_database_close(mem_copy), ZOVA_OK, "close in-memory backup copy");
+
+        zova_database *restored = NULL;
+        expect_status(zova_database_restore_to_memory(&(zova_database_restore_to_memory_request){
+                          .source_path = mem_backup,
+                          .flags = 0,
+                          .out_db = &restored,
+                          .out_error_message = &open_message,
+                      }),
+                      ZOVA_OK,
+                      "restore backup into in-memory database");
+        zova_message_free(&open_message);
+        zova_statement *count_statement = NULL;
+        expect_status(zova_database_prepare(&(zova_database_prepare_request){
+                          .db = restored,
+                          .sql = "select count(*) from memory_rows",
+                          .out_statement = &count_statement,
+                      }),
+                      ZOVA_OK,
+                      "prepare in-memory restore count");
+        zova_step_result count_step = ZOVA_STEP_DONE;
+        expect_status(zova_statement_step(&(zova_statement_step_request){
+                          .statement = count_statement,
+                          .out_result = &count_step,
+                      }),
+                      ZOVA_OK,
+                      "step in-memory restore count");
+        int64_t row_count = 0;
+        expect_status(zova_statement_column_int64(&(zova_statement_column_int64_request){
+                          .statement = count_statement,
+                          .index = 0,
+                          .out_value = &row_count,
+                      }),
+                      ZOVA_OK,
+                      "read in-memory restore count");
+        if (row_count != 1) {
+            fprintf(stderr, "in-memory restore: wrong row count\n");
+            return 1;
+        }
+        expect_status(zova_statement_finalize(count_statement), ZOVA_OK, "finalize in-memory restore count");
+        expect_status(zova_database_close(restored), ZOVA_OK, "close in-memory restore");
+        expect_status(zova_database_close(mem), ZOVA_OK, "close in-memory database");
+        remove(mem_backup);
+    }
+
     return 0;
 }

@@ -468,6 +468,31 @@ pub fn restoreBackupWithExtensions(source_path: [:0]const u8, dest_path: [:0]con
     try source.backupTo(dest_path, .{ .verify = options.verify });
 }
 
+/// Restore a backup `.zova` file into a new volatile in-memory database.
+///
+/// This reuses the same SQLite online backup guarantees as file-backed
+/// restore. The returned database owns the source's schema and data entirely
+/// in memory and never creates database, WAL, or journal files.
+pub fn restoreBackupToMemory(source_path: [:0]const u8, options: RestoreOptions) Error!Database {
+    return restoreBackupToMemoryWithExtensions(source_path, options, bundledExtensionRegistry());
+}
+
+/// Restore a backup `.zova` file into a new in-memory database with
+/// process-registered extension code.
+pub fn restoreBackupToMemoryWithExtensions(source_path: [:0]const u8, options: RestoreOptions, registry: ExtensionRegistry) Error!Database {
+    if (!isZovaPath(source_path)) return error.NotZovaPath;
+
+    var source = try Database.openWithOptionsAndExtensions(source_path, .{ .read_only = true }, registry);
+    defer source.deinit();
+
+    var memory = try source.restoreIntoMemory(registry);
+    if (options.verify) {
+        errdefer memory.deinit();
+        try verifyCurrentDatabase(&memory);
+    }
+    return memory;
+}
+
 fn initNotifications(db: *sqlite.Database) Error!*notify_impl.Hub {
     const allocator = std.heap.c_allocator;
     const hub = allocator.create(notify_impl.Hub) catch return error.OutOfMemory;
@@ -561,19 +586,27 @@ pub const Database = struct {
 
     /// Create a new initialized `.zova` database with fresh-file options and
     /// process-registered extension code.
+    ///
+    /// A path of `":memory:"` creates a fully initialized volatile in-memory
+    /// database instead of a file-backed one. No database, WAL, or journal
+    /// file is created, and the database is reclaimed when its lifetime ends.
+    /// Prefer the idiomatic `createMemory` family for that mode.
     pub fn createWithOptionsAndExtensions(path: [:0]const u8, options: CreateOptions, registry: ExtensionRegistry) Error!Database {
         try registry.validate();
         try validateCreateOptions(options);
-        if (!isZovaPath(path)) return error.NotZovaPath;
+        const memory = isMemoryPath(path);
+        if (!memory) {
+            if (!isZovaPath(path)) return error.NotZovaPath;
 
-        const io = defaultIo();
-        var file = std.Io.Dir.cwd().createFile(io, path, .{ .exclusive = true }) catch |err| switch (err) {
-            error.PathAlreadyExists => return error.DestinationExists,
-            else => return error.CantOpen,
-        };
-        file.close(io);
+            const io = defaultIo();
+            var file = std.Io.Dir.cwd().createFile(io, path, .{ .exclusive = true }) catch |err| switch (err) {
+                error.PathAlreadyExists => return error.DestinationExists,
+                else => return error.CantOpen,
+            };
+            file.close(io);
 
-        errdefer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+            errdefer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+        }
 
         var raw = try sqlite.Database.open(path);
         errdefer raw.deinit();
@@ -587,6 +620,31 @@ pub const Database = struct {
         const notifications = try initNotifications(&raw);
         errdefer deinitNotifications(notifications);
         return .{ .sqlite_db = raw, .notifications = notifications, .extension_registry = registry };
+    }
+
+    /// Create a new initialized volatile in-memory database.
+    ///
+    /// The database lives entirely in memory and is initialized with the same
+    /// private `_zova_meta` metadata, format version, and object, vector, graph,
+    /// and extension registry schemas as a file-backed `.zova` database. It
+    /// never creates database, WAL, or journal files, is isolated from every
+    /// other in-memory database, and is reclaimed when its lifetime ends. All
+    /// SQL, object, vector, graph, extension, transaction, and diagnostic APIs
+    /// behave exactly as they do for a file-backed database.
+    pub fn createMemory() Error!Database {
+        return createMemoryWithExtensions(bundledExtensionRegistry());
+    }
+
+    /// Create a new initialized in-memory database with process-registered
+    /// extension code available for later extension lifecycle calls.
+    pub fn createMemoryWithExtensions(registry: ExtensionRegistry) Error!Database {
+        return createMemoryWithOptionsAndExtensions(.{}, registry);
+    }
+
+    /// Create a new initialized in-memory database with fresh-file options and
+    /// process-registered extension code.
+    pub fn createMemoryWithOptionsAndExtensions(options: CreateOptions, registry: ExtensionRegistry) Error!Database {
+        return createWithOptionsAndExtensions(":memory:", options, registry);
     }
 
     /// Open an existing initialized `.zova` database.
@@ -1250,6 +1308,25 @@ pub const Database = struct {
 
         try self.inlineBoundStoresIntoDestination(destination_path);
         if (options.verify) try verifyOperationalCopy(destination_path, self.extension_registry);
+    }
+
+    /// Copy this database's main schema and data into a new in-memory database
+    /// using SQLite's online backup API.
+    ///
+    /// The returned database is isolated, volatile, and initialized with the
+    /// same connection-local SQL vector/graph helpers and notification wiring
+    /// as an opened database.
+    fn restoreIntoMemory(self: *Database, registry: ExtensionRegistry) Error!Database {
+        var raw = try sqlite.Database.open(":memory:");
+        errdefer raw.deinit();
+        try backupMainDatabase(&self.sqlite_db, &raw);
+        try enableForeignKeys(&raw);
+        try vector_sql.register(&raw);
+        try graph_sql.register(&raw);
+        try extension_impl.registerSqlForInstalled(&raw, registry);
+        const notifications = try initNotifications(&raw);
+        errdefer deinitNotifications(notifications);
+        return .{ .sqlite_db = raw, .notifications = notifications, .extension_registry = registry };
     }
 
     /// Write a compact copy to a new `.zova` destination using SQLite
@@ -2230,6 +2307,10 @@ pub const Database = struct {
 
 fn isZovaPath(path: []const u8) bool {
     return std.mem.endsWith(u8, path, ".zova");
+}
+
+fn isMemoryPath(path: []const u8) bool {
+    return std.mem.eql(u8, path, ":memory:");
 }
 
 fn defaultIo() std.Io {
@@ -4247,12 +4328,22 @@ fn expectOperationalFixture(
     var db = try Database.open(path);
     defer db.deinit();
 
-    try testingQuickCheckOk(&db);
-    try testingIntegrityCheckOk(&db);
+    try expectOperationalFixtureHandle(&db, ids, primary_bytes, streamed_bytes, loose_bytes);
+}
 
-    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from docs"));
-    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from doc_log"));
-    try std.testing.expectEqual(@as(i64, 3), try testingCount(&db,
+fn expectOperationalFixtureHandle(
+    db: *Database,
+    ids: OperationalFixtureIds,
+    primary_bytes: []const u8,
+    streamed_bytes: []const u8,
+    loose_bytes: []const u8,
+) !void {
+    try testingQuickCheckOk(db);
+    try testingIntegrityCheckOk(db);
+
+    try std.testing.expectEqual(@as(i64, 2), try testingCount(db, "select count(*) from docs"));
+    try std.testing.expectEqual(@as(i64, 2), try testingCount(db, "select count(*) from doc_log"));
+    try std.testing.expectEqual(@as(i64, 3), try testingCount(db,
         \\select count(*)
         \\from sqlite_master
         \\where name in ('docs_title_idx', 'doc_titles', 'docs_after_insert')
@@ -4363,6 +4454,173 @@ test "create options apply page size before private schema initialization" {
     try std.testing.expectEqual(sqlite.Step.row, try page_size.step());
     try std.testing.expectEqual(@as(i64, 65536), page_size.columnInt64(0));
     try std.testing.expectEqual(sqlite.Step.done, try page_size.step());
+}
+
+test "createMemory initializes complete schema without creating files" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var db = try Database.createMemory();
+    defer db.deinit();
+
+    var meta = try db.prepare("select value from _zova_meta where key = 'format_version'");
+    defer meta.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try meta.step());
+    try std.testing.expectEqualStrings(format_version, meta.columnText(0));
+    try std.testing.expectEqual(sqlite.Step.done, try meta.step());
+
+    var tables = try db.prepare(
+        \\select count(*) from sqlite_master
+        \\where type = 'table' and name in (
+        \\  '_zova_extensions',
+        \\  '_zova_objects',
+        \\  '_zova_chunks',
+        \\  '_zova_object_chunks',
+        \\  '_zova_vector_collections',
+        \\  '_zova_vectors',
+        \\  '_zova_graphs',
+        \\  '_zova_graph_nodes',
+        \\  '_zova_graph_edge_types',
+        \\  '_zova_graph_edges'
+        \\)
+    );
+    defer tables.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try tables.step());
+    try std.testing.expectEqual(@as(i64, 10), tables.columnInt64(0));
+    try std.testing.expectEqual(sqlite.Step.done, try tables.step());
+
+    const io = defaultIo();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const memory_base = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/memory.zova", .{tmp.sub_path[0..]});
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, memory_base, .{}));
+    var wal_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const wal_path = try std.fmt.bufPrint(&wal_buffer, ".zig-cache/tmp/{s}/memory.zova-wal", .{tmp.sub_path[0..]});
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, wal_path, .{}));
+    var journal_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const journal_path = try std.fmt.bufPrint(&journal_buffer, ".zig-cache/tmp/{s}/memory.zova-journal", .{tmp.sub_path[0..]});
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, journal_path, .{}));
+}
+
+test "create treats memory path as the core volatile target" {
+    var db = try Database.create(":memory:");
+    defer db.deinit();
+
+    try db.exec("create table memory_rows (id integer primary key, value text not null)");
+    try db.exec("insert into memory_rows (value) values ('core target')");
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from memory_rows"));
+}
+
+test "createMemory matches file backed records objects chunks and vectors" {
+    var db = try Database.createMemory();
+    defer db.deinit();
+
+    const primary_bytes = "memory primary object bytes\x00with nul";
+    const loose_bytes = "verified in-memory loose operational chunk";
+    const streamed_bytes = try std.testing.allocator.alloc(u8, 140_000);
+    defer std.testing.allocator.free(streamed_bytes);
+    fillOperationalLargeFixture(streamed_bytes);
+
+    const ids = try populateOperationalFixture(&db, primary_bytes, streamed_bytes, loose_bytes);
+    try expectOperationalFixtureHandle(&db, ids, primary_bytes, streamed_bytes, loose_bytes);
+}
+
+test "in-memory database backups to a persistent zova file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const backup_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "memory-backup.zova");
+
+    const primary_bytes = "memory backup object bytes";
+    const loose_bytes = "memory backup loose chunk";
+    const streamed_bytes = try std.testing.allocator.alloc(u8, 140_000);
+    defer std.testing.allocator.free(streamed_bytes);
+    fillOperationalLargeFixture(streamed_bytes);
+
+    const ids = blk: {
+        var memory = try Database.createMemory();
+        defer memory.deinit();
+        const populated = try populateOperationalFixture(&memory, primary_bytes, streamed_bytes, loose_bytes);
+        try memory.backupTo(backup_path, .{});
+        break :blk populated;
+    };
+
+    try expectOperationalFixture(backup_path, ids, primary_bytes, streamed_bytes, loose_bytes);
+}
+
+test "restoreBackupToMemory restores schema and data into volatile memory" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "memory-restore-source.zova");
+
+    const primary_bytes = "file backed restore source object";
+    const loose_bytes = "file backed restore source chunk";
+    const streamed_bytes = try std.testing.allocator.alloc(u8, 140_000);
+    defer std.testing.allocator.free(streamed_bytes);
+    fillOperationalLargeFixture(streamed_bytes);
+
+    const ids = blk: {
+        var file = try Database.create(source_path);
+        defer file.deinit();
+        break :blk try populateOperationalFixture(&file, primary_bytes, streamed_bytes, loose_bytes);
+    };
+
+    var restored = try restoreBackupToMemory(source_path, .{});
+    defer restored.deinit();
+
+    try expectOperationalFixtureHandle(&restored, ids, primary_bytes, streamed_bytes, loose_bytes);
+}
+
+test "in-memory databases are isolated and reclaim their data" {
+    var left = try Database.createMemory();
+    defer left.deinit();
+    var right = try Database.createMemory();
+    defer right.deinit();
+
+    try left.exec("create table only_left (value text not null)");
+    try left.exec("insert into only_left (value) values ('left only')");
+    try right.exec("create table only_right (value text not null)");
+    try right.exec("insert into only_right (value) values ('right only')");
+
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&left, "select count(*) from only_left"));
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&right, "select count(*) from only_right"));
+
+    // Nothing written to the left handle is visible to the right handle.
+    try std.testing.expectError(error.SqliteError, right.prepare("select * from only_left"));
+    try std.testing.expectError(error.SqliteError, left.prepare("select * from only_right"));
+}
+
+test "memory rollback and savepoints match file backed behavior" {
+    var db = try Database.createMemory();
+    defer db.deinit();
+
+    try db.exec("create table notes (body text not null)");
+    try db.exec("insert into notes (body) values ('committed')");
+
+    try db.begin();
+    try db.exec("insert into notes (body) values ('rolled back')");
+    try db.rollback();
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from notes"));
+
+    try db.savepoint("sp");
+    try db.exec("insert into notes (body) values ('savepoint rolled back')");
+    try db.rollbackToSavepoint("sp");
+    try db.releaseSavepoint("sp");
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from notes"));
+
+    try db.savepoint("sp_keep");
+    try db.exec("insert into notes (body) values ('savepoint kept')");
+    try db.releaseSavepoint("sp_keep");
+    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from notes"));
+}
+
+test "file-only operations reject the memory target explicitly" {
+    try std.testing.expectError(error.NotZovaPath, Database.open(":memory:"));
+    try std.testing.expectError(error.NotZovaPath, createObjectStore(":memory:"));
+    try std.testing.expectError(error.NotZovaPath, createVectorStore(":memory:"));
+    try std.testing.expectError(error.NotZovaPath, createGraphStore(":memory:"));
 }
 
 test "created zova database stores metadata" {

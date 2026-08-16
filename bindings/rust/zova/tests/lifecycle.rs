@@ -1,7 +1,7 @@
 use zova::{
-    restore_backup, BackupOptions, ColumnType, CompactOptions, Database, Error, OpenOptions,
-    RestoreOptions, SharedDatabase, Status, Step, VectorCollectionOptions, VectorElementType,
-    VectorMetric, VectorValues,
+    restore_backup, restore_backup_to_memory, BackupOptions, ColumnType, CompactOptions, Database,
+    Error, OpenOptions, RestoreOptions, SharedDatabase, Status, Step, VectorCollectionOptions,
+    VectorElementType, VectorMetric, VectorValues,
 };
 
 fn temp_path(name: &str) -> String {
@@ -622,4 +622,96 @@ fn errors_preserve_status_and_reject_bad_strings() {
     assert_eq!(err.status(), Some(Status::SqliteError));
     assert!(err.to_string().contains("no_such_table"));
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn create_memory_is_isolated_and_matches_file_backed_sql() {
+    let mut db = Database::create_memory().unwrap();
+    db.exec("create table memory_rows(id integer primary key, value text not null)")
+        .unwrap();
+    db.exec("insert into memory_rows(value) values ('in memory')")
+        .unwrap();
+
+    let mut other = Database::create_memory().unwrap();
+    other.exec("create table only_other(value text)").unwrap();
+    let err = db.exec("select * from only_other").unwrap_err();
+    assert_eq!(err.status(), Some(Status::SqliteError));
+
+    let mut count = db.prepare("select count(*) from memory_rows").unwrap();
+    assert_eq!(count.step().unwrap(), Step::Row);
+    assert_eq!(count.column_i64(0).unwrap(), 1);
+}
+
+#[test]
+fn create_memory_backup_and_restore_to_memory_roundtrip() {
+    let source = temp_path("memory-roundtrip-source");
+    let backup = temp_path("memory-roundtrip-backup");
+    {
+        let mut db = Database::create(&source).unwrap();
+        db.exec("create table payload(id integer primary key, value text not null)")
+            .unwrap();
+        db.exec("insert into payload(value) values ('from file')")
+            .unwrap();
+    }
+    {
+        // A file-backed .zova restores into volatile memory.
+        let mut restored = restore_backup_to_memory(&source, RestoreOptions::default()).unwrap();
+        let mut value = restored
+            .prepare("select value from payload where id = 1")
+            .unwrap();
+        assert_eq!(value.step().unwrap(), Step::Row);
+        assert_eq!(value.column_text(0).unwrap(), Some("from file".to_string()));
+        drop(value);
+
+        // A memory database backs up to a persistent .zova file.
+        let mut memory = Database::create_memory().unwrap();
+        memory
+            .exec("create table payload(id integer primary key, value text not null)")
+            .unwrap();
+        memory
+            .exec("insert into payload(value) values ('volatile only')")
+            .unwrap();
+        memory.backup_to(&backup, BackupOptions::default()).unwrap();
+        drop(memory);
+
+        let mut file = Database::open(&backup).unwrap();
+        let mut count = file.prepare("select count(*) from payload").unwrap();
+        assert_eq!(count.step().unwrap(), Step::Row);
+        assert_eq!(count.column_i64(0).unwrap(), 1);
+        drop(count);
+
+        let mut restored_from_backup =
+            restore_backup_to_memory(&backup, RestoreOptions::default()).unwrap();
+        let mut value = restored_from_backup
+            .prepare("select value from payload where id = 1")
+            .unwrap();
+        assert_eq!(value.step().unwrap(), Step::Row);
+        assert_eq!(
+            value.column_text(0).unwrap(),
+            Some("volatile only".to_string())
+        );
+    }
+
+    let _ = std::fs::remove_file(source);
+    let _ = std::fs::remove_file(backup);
+}
+
+#[test]
+fn shared_create_memory_supports_sql_and_backup() {
+    let backup = temp_path("shared-memory-backup");
+    {
+        let db = SharedDatabase::create_memory().unwrap();
+        db.exec("create table shared_rows(id integer primary key, value text)")
+            .unwrap();
+        db.exec("insert into shared_rows(value) values ('shared memory')")
+            .unwrap();
+        db.backup_to(&backup, BackupOptions::default()).unwrap();
+    }
+    {
+        let mut file = Database::open(&backup).unwrap();
+        let mut count = file.prepare("select count(*) from shared_rows").unwrap();
+        assert_eq!(count.step().unwrap(), Step::Row);
+        assert_eq!(count.column_i64(0).unwrap(), 1);
+    }
+    let _ = std::fs::remove_file(backup);
 }
