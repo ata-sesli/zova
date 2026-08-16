@@ -458,8 +458,8 @@ func TestCreateMemoryAndRestoreBackupToMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer other.Close()
-	if err := other.Exec("select * from memory_rows"); !errorStatusIs(err, StatusSqliteError) {
-		t.Fatalf("isolated memory exec = %v, want StatusSqliteError", err)
+	if err := other.Exec("select * from memory_rows"); !errorStatusIs(err, StatusSQLiteError) {
+		t.Fatalf("isolated memory exec = %v, want StatusSQLiteError", err)
 	}
 
 	file, err := Open(backup)
