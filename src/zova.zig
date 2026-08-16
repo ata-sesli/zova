@@ -1320,6 +1320,7 @@ pub const Database = struct {
         var raw = try sqlite.Database.open(":memory:");
         errdefer raw.deinit();
         try backupMainDatabase(&self.sqlite_db, &raw);
+        try self.inlineBoundStoresIntoDatabase(&raw);
         try enableForeignKeys(&raw);
         try vector_sql.register(&raw);
         try graph_sql.register(&raw);
@@ -2251,23 +2252,34 @@ pub const Database = struct {
 
         var destination = try sqlite.Database.open(destination_path);
         defer destination.deinit();
+        try self.inlineBoundStoresIntoDatabase(&destination);
+    }
+
+    /// Copy the contents of every attached bound store into the destination's
+    /// main storage and remove the copied binding metadata.
+    ///
+    /// This is the in-memory counterpart of `inlineBoundStoresIntoDestination`:
+    /// it makes the destination self-contained regardless of the source's
+    /// bound object, vector, or graph store configuration.
+    fn inlineBoundStoresIntoDatabase(self: *Database, destination: *sqlite.Database) Error!void {
+        if (self.bound_object_store == null and self.bound_vector_store == null and self.bound_graph_store == null) return;
 
         if (self.bound_object_store != null) {
-            try clearMainObjectStorage(&destination);
-            try copyObjectStorage(&self.sqlite_db, .object_store, &destination, .main);
-            try deleteBoundObjectStoreRows(&destination);
+            try clearMainObjectStorage(destination);
+            try copyObjectStorage(&self.sqlite_db, .object_store, destination, .main);
+            try deleteBoundObjectStoreRows(destination);
         }
 
         if (self.bound_vector_store != null) {
-            try clearMainVectorStorage(&destination);
-            try copyVectorStorage(&self.sqlite_db, .vector_store, &destination, .main);
-            try deleteBoundVectorStoreRows(&destination);
+            try clearMainVectorStorage(destination);
+            try copyVectorStorage(&self.sqlite_db, .vector_store, destination, .main);
+            try deleteBoundVectorStoreRows(destination);
         }
 
         if (self.bound_graph_store != null) {
-            try clearMainGraphStorage(&destination);
-            try copyGraphStorage(&self.sqlite_db, .graph_store, &destination, .main);
-            try deleteBoundGraphStoreRows(&destination);
+            try clearMainGraphStorage(destination);
+            try copyGraphStorage(&self.sqlite_db, .graph_store, destination, .main);
+            try deleteBoundGraphStoreRows(destination);
         }
     }
 
@@ -4571,6 +4583,87 @@ test "restoreBackupToMemory restores schema and data into volatile memory" {
     defer restored.deinit();
 
     try expectOperationalFixtureHandle(&restored, ids, primary_bytes, streamed_bytes, loose_bytes);
+}
+
+test "restoreBackupToMemory inlines bound object vector and graph stores with source parity" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "memory-bound-restore-main.zova");
+    var objects_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const objects_path = try testingDbPath(&objects_buffer, tmp.sub_path[0..], "memory-bound-restore-objects.zova");
+    var vectors_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const vectors_path = try testingDbPath(&vectors_buffer, tmp.sub_path[0..], "memory-bound-restore-vectors.zova");
+    var graphs_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const graphs_path = try testingDbPath(&graphs_buffer, tmp.sub_path[0..], "memory-bound-restore-graphs.zova");
+
+    try createObjectStore(objects_path);
+    try createVectorStore(vectors_path);
+    try createGraphStore(graphs_path);
+
+    const object_bytes = "bound object inline restored into memory";
+    const loose_bytes = "bound loose chunk inline restored into memory";
+
+    const object_id = blk: {
+        var db = try Database.create(main_path);
+        defer db.deinit();
+        try db.bindObjectStore(objects_path);
+        try db.bindVectorStore(vectors_path);
+        try db.bindGraphStore(graphs_path);
+
+        const id = try db.putObject(object_bytes);
+        const loose_chunk = objectChunkId("bound loose chunk inline restored into memory");
+        try db.putObjectChunk(loose_chunk, loose_bytes);
+
+        try db.createVectorCollection("docs", .{ .dimensions = 2, .metric = .l2 });
+        try db.putVectors("docs", &.{
+            .{ .id = "doc-a", .values = .{ .f32 = &.{ 1.0, 0.0 } } },
+            .{ .id = "doc-b", .values = .{ .f32 = &.{ 0.0, 2.0 } } },
+        });
+
+        try db.createGraph("alpha");
+        try db.putGraphNode(.{ .graph_name = "alpha", .node_id = "root", .kind = "document" });
+        try db.putGraphNode(.{ .graph_name = "alpha", .node_id = "leaf", .kind = "note" });
+        try db.putGraphEdge(.{ .graph_name = "alpha", .from_node_id = "root", .edge_type = "links", .to_node_id = "leaf" });
+
+        try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_objects"));
+        try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from object_store._zova_objects"));
+        try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_vectors"));
+        try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from vector_store._zova_vectors"));
+        try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_graph_nodes"));
+        try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from graph_store._zova_graph_nodes"));
+        break :blk id;
+    };
+
+    var restored = try restoreBackupToMemory(main_path, .{});
+    defer restored.deinit();
+
+    try std.testing.expectEqual(@as(?BoundObjectStoreInfo, null), try restored.boundObjectStore(std.testing.allocator));
+    try std.testing.expectEqual(@as(?BoundVectorStoreInfo, null), try restored.boundVectorStore(std.testing.allocator));
+    try std.testing.expectEqual(@as(?BoundGraphStoreInfo, null), try restored.boundGraphStore(std.testing.allocator));
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&restored, "select count(*) from _zova_objects"));
+    try std.testing.expectEqual(@as(i64, 2), try testingCount(&restored, "select count(*) from _zova_vectors"));
+    try std.testing.expectEqual(@as(i64, 2), try testingCount(&restored, "select count(*) from _zova_graph_nodes"));
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&restored, "select count(*) from _zova_graph_edges"));
+
+    var object = try restored.getObject(std.testing.allocator, object_id);
+    defer object.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, object_bytes, object.bytes);
+
+    var chunk = try restored.getObjectChunk(std.testing.allocator, objectChunkId("bound loose chunk inline restored into memory"));
+    defer chunk.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, loose_bytes, chunk.bytes);
+
+    var results = try restored.searchVectors(std.testing.allocator, "docs", .{ .f32 = &.{ 1.0, 0.0 } }, 2);
+    defer results.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), results.items.len);
+    try std.testing.expectEqualStrings("doc-a", results.items[0].id);
+
+    var neighbors = try restored.graphNeighbors(std.testing.allocator, .{ .graph_name = "alpha", .node_id = "root", .limit = 10 });
+    defer neighbors.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), neighbors.items.len);
+    try std.testing.expectEqualStrings("leaf", neighbors.items[0].node_id);
 }
 
 test "in-memory databases are isolated and reclaim their data" {
