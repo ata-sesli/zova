@@ -399,12 +399,7 @@ impl NativeDatabase {
     }
 
     #[napi]
-    pub fn kv_put(
-        &self,
-        namespace: Uint8Array,
-        key: Uint8Array,
-        value: Uint8Array,
-    ) -> Result<()> {
+    pub fn kv_put(&self, namespace: Uint8Array, key: Uint8Array, value: Uint8Array) -> Result<()> {
         self.state
             .database()?
             .kv_put(namespace.as_ref(), key.as_ref(), value.as_ref())
@@ -412,11 +407,7 @@ impl NativeDatabase {
     }
 
     #[napi]
-    pub fn kv_put_many(
-        &self,
-        namespace: Uint8Array,
-        entries: Vec<NativeKvEntry>,
-    ) -> Result<()> {
+    pub fn kv_put_many(&self, namespace: Uint8Array, entries: Vec<NativeKvEntry>) -> Result<()> {
         let owned: Vec<(Vec<u8>, Vec<u8>)> = entries
             .into_iter()
             .map(|entry| (entry.key.to_vec(), entry.value.to_vec()))

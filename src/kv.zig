@@ -88,6 +88,8 @@ pub const Database = struct {
         }
         for (results) |*item| item.* = .{ .found = false, .value = &.{} };
 
+        if (keys.len == 0) return results;
+
         var stmt = try self.sqlite_db.prepare(
             \\select value from _zova_kv where namespace = ? and key = ?
         );
@@ -130,12 +132,14 @@ pub const Database = struct {
     /// Insert or replace many entries in one atomic operation.
     ///
     /// The whole batch validates before any mutation and either commits
-    /// together or rolls back together. Empty batches succeed. When the
-    /// caller already owns a transaction, the batch joins it under an
-    /// internal savepoint so a fault rolls back only this batch's partial
-    /// mutations while preserving the caller's earlier work.
+    /// together or rolls back together. Empty batches are lock-free no-ops
+    /// that succeed without acquiring a transaction. When the caller already
+    /// owns a transaction, the batch joins it under an internal savepoint so
+    /// a fault rolls back only this batch's partial mutations while
+    /// preserving the caller's earlier work.
     pub fn putMany(self: *Database, namespace: []const u8, entries: []const PutEntry) Error!void {
         try validateBatchEntries(entries);
+        if (entries.len == 0) return;
 
         const scope = try beginMutation(self);
         var committed = false;
@@ -179,11 +183,13 @@ pub const Database = struct {
     }
 
     /// Delete many entries in one atomic operation. Missing keys are
-    /// ignored. Empty batches succeed. Like `putMany`, a caller-owned
-    /// transaction is joined under an internal savepoint so a fault rolls
-    /// back only this batch's partial mutations.
+    /// ignored. Empty batches are lock-free no-ops that succeed without
+    /// acquiring a transaction. Like `putMany`, a caller-owned transaction
+    /// is joined under an internal savepoint so a fault rolls back only this
+    /// batch's partial mutations.
     pub fn deleteMany(self: *Database, namespace: []const u8, keys: []const []const u8) Error!void {
         try validateBatchKeys(keys);
+        if (keys.len == 0) return;
 
         const scope = try beginMutation(self);
         var committed = false;

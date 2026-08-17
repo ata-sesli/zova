@@ -57,8 +57,7 @@ pub(crate) fn kv_get_many_raw(
     namespace: &[u8],
     keys: &[&[u8]],
 ) -> Result<Vec<Option<Vec<u8>>>> {
-    let raw_keys: Vec<zova_sys::zova_kv_bytes> =
-        keys.iter().map(|key| raw_bytes(key)).collect();
+    let raw_keys: Vec<zova_sys::zova_kv_bytes> = keys.iter().map(|key| raw_bytes(key)).collect();
     let mut results = zova_sys::zova_kv_get_many_results {
         items: ptr::null_mut(),
         len: 0,
@@ -143,8 +142,7 @@ pub(crate) fn kv_delete_many_raw(
     namespace: &[u8],
     keys: &[&[u8]],
 ) -> Result<()> {
-    let raw_keys: Vec<zova_sys::zova_kv_bytes> =
-        keys.iter().map(|key| raw_bytes(key)).collect();
+    let raw_keys: Vec<zova_sys::zova_kv_bytes> = keys.iter().map(|key| raw_bytes(key)).collect();
     let request = zova_sys::zova_kv_delete_many_request {
         db,
         ns: raw_bytes(namespace),
