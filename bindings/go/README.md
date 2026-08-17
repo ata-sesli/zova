@@ -72,9 +72,9 @@ The Go package is source-only and uses cgo. It does not download or build the
 native Zova C ABI automatically during `go get`; your build environment must
 provide `zova.h` and `libzova_c.a`.
 
-Zova 0.25 uses `.zova` format 9 and does not migrate format-8 databases in
-place. Keep a compatible backup and export data with a format-8 build before
-creating a format-9 database.
+The current development build uses `.zova` format 10 and does not migrate
+older format databases in place. Keep a compatible backup and export data
+with an older build before creating a format-10 database.
 
 The v0.25 opaque-key graph, edge-payload, topology-scan, prepared-build, and
 generic fresh-build session APIs are low-level C/raw `zova-sys` surfaces. The

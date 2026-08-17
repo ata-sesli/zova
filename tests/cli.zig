@@ -2059,7 +2059,7 @@ test "cli info reports bounded database summary" {
     defer result.deinit();
     try std.testing.expectEqual(@as(u8, 0), result.code);
     try expectContains(result.stdout, "Zova database");
-    try expectContains(result.stdout, "format_version: 9");
+    try expectContains(result.stdout, "format_version: 10");
     try expectContains(result.stdout, "objects:");
     try expectContains(result.stdout, "chunks:");
     try expectContains(result.stdout, "loose_chunks:");
@@ -2232,7 +2232,7 @@ test "cli info json reports bounded database summary" {
     try expectJsonInt(root, "cli_json_version", 1);
     try expectJsonString(root, "package_version", cli.package_version);
     try expectJsonString(root, "sqlite_version", zova.sqlite.version());
-    try expectJsonString(root, "format_version", "9");
+    try expectJsonString(root, "format_version", "10");
     try expectJsonObjectHasInt(root, "files", "database_bytes");
     try expectJsonObjectHasInt(root, "sqlite", "page_count");
     try expectJsonObjectHasInt(root, "objects", "count");

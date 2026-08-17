@@ -27,6 +27,56 @@ test "kv schema is created for every database and is private" {
     try testingIntegrityCheckOk(&db);
 }
 
+test "open rejects current-format database with missing kv table" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "kv-missing.zova");
+
+    {
+        var db = try Database.create(db_path);
+        defer db.deinit();
+        try db.kvPut("n", "k", "v");
+    }
+
+    {
+        var raw = try sqlite.Database.open(db_path);
+        defer raw.deinit();
+        try raw.exec("drop table _zova_kv");
+    }
+
+    try std.testing.expectError(error.NotZovaDatabase, Database.open(db_path));
+}
+
+test "open rejects current-format database with malformed kv table" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "kv-malformed.zova");
+
+    {
+        var db = try Database.create(db_path);
+        defer db.deinit();
+    }
+
+    {
+        var raw = try sqlite.Database.open(db_path);
+        defer raw.deinit();
+        try raw.exec("drop table _zova_kv");
+        try raw.exec(
+            \\create table _zova_kv (
+            \\  namespace blob not null,
+            \\  key blob not null,
+            \\  primary key (namespace, key)
+            \\) without rowid
+        );
+    }
+
+    try std.testing.expectError(error.NotZovaDatabase, Database.open(db_path));
+}
+
 test "kv put get delete count roundtrip with binary and empty bytes" {
     var db = try Database.createMemory();
     defer db.deinit();
@@ -364,6 +414,86 @@ test "kv batch validate rejects too-large entries before mutation" {
     var existing = try db.kvGet(std.testing.allocator, "n", "existing");
     defer existing.deinit(std.testing.allocator);
     try std.testing.expectEqualSlices(u8, "value", existing.value);
+}
+
+test "kv get_many failure cleanup never deinitializes uninitialized slots" {
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 2 });
+    const allocator = failing_allocator.allocator();
+
+    var db = try Database.createMemory();
+    defer db.deinit();
+
+    try db.kvPut("n", "a", "1");
+    try db.kvPut("n", "b", "2");
+    try db.kvPut("n", "c", "3");
+
+    const keys = [_][]const u8{ "a", "c", "absent", "b" };
+    try std.testing.expectError(error.OutOfMemory, db.kvGetMany(allocator, "n", &keys));
+    try std.testing.expect(failing_allocator.has_induced_failure);
+}
+
+test "kv put_many rolls back only its own mutations inside a caller transaction" {
+    var db = try Database.createMemory();
+    defer db.deinit();
+
+    try db.begin();
+    try db.kvPut("n", "keep", "caller");
+    try db.exec(
+        \\create trigger kv_fail before insert on _zova_kv
+        \\when new.value = cast('boom' as blob)
+        \\begin select raise(abort,'injected kv put failure'); end
+    );
+
+    const entries = [_]kv_impl.PutEntry{
+        .{ .key = "first", .value = "1" },
+        .{ .key = "boom", .value = "boom" },
+        .{ .key = "later", .value = "3" },
+    };
+    try std.testing.expectError(error.Constraint, db.kvPutMany("n", &entries));
+
+    var keep = try db.kvGet(std.testing.allocator, "n", "keep");
+    defer keep.deinit(std.testing.allocator);
+    try std.testing.expect(keep.found);
+    try std.testing.expectEqualSlices(u8, "caller", keep.value);
+    try std.testing.expectEqual(@as(u64, 1), try db.kvCount("n"));
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db,
+        \\select count(*) from _zova_kv
+    ));
+
+    try db.commit();
+    try std.testing.expectEqual(@as(u64, 1), try db.kvCount("n"));
+}
+
+test "kv delete_many rolls back only its own mutations inside a caller transaction" {
+    var db = try Database.createMemory();
+    defer db.deinit();
+
+    try db.kvPut("n", "d1", "1");
+    try db.kvPut("n", "d2", "2");
+    try db.kvPut("n", "keep", "caller");
+
+    try db.begin();
+    try db.kvPut("n", "caller_row", "x");
+    try db.exec(
+        \\create trigger kv_del_fail before delete on _zova_kv
+        \\when old.key = cast('d2' as blob)
+        \\begin select raise(abort,'injected kv delete failure'); end
+    );
+
+    const keys = [_][]const u8{ "d1", "d2", "keep" };
+    try std.testing.expectError(error.Constraint, db.kvDeleteMany("n", &keys));
+
+    var d1 = try db.kvGet(std.testing.allocator, "n", "d1");
+    defer d1.deinit(std.testing.allocator);
+    try std.testing.expect(d1.found);
+    try std.testing.expectEqualSlices(u8, "1", d1.value);
+    var caller_row = try db.kvGet(std.testing.allocator, "n", "caller_row");
+    defer caller_row.deinit(std.testing.allocator);
+    try std.testing.expect(caller_row.found);
+    try std.testing.expectEqual(@as(u64, 4), try db.kvCount("n"));
+
+    try db.commit();
+    try std.testing.expectEqual(@as(u64, 4), try db.kvCount("n"));
 }
 
 test "kv all methods reject empty keys and values correctly under transaction" {

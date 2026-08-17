@@ -32,8 +32,8 @@ mod tests {
 
     #[test]
     fn reads_zig_string_constants() {
-        let source = "pub const format_version = \"9\";\n";
-        assert_eq!(zig_string_constant(source, "format_version"), Some("9"));
+        let source = "pub const format_version = \"10\";\n";
+        assert_eq!(zig_string_constant(source, "format_version"), Some("10"));
         assert_eq!(zig_string_constant(source, "missing"), None);
     }
 }

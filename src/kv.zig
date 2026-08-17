@@ -35,6 +35,15 @@ pub const PutEntry = struct {
     value: []const u8,
 };
 
+/// How an atomic key-value batch scopes its writes.
+///
+/// An operation that owns the transaction uses a real SQLite transaction. An
+/// operation that joins a caller-owned transaction uses an internal savepoint
+/// so a failed batch rolls back only its own partial mutations while leaving
+/// the caller's prior work intact.
+const KvMutationScope = enum { transaction, savepoint };
+const kv_batch_savepoint = "zova_kv_batch";
+
 /// The `_zova_kv` key-value table is a private Zova-owned representation.
 /// Zova does not expose or stabilize its schema name.
 pub const Database = struct {
@@ -77,6 +86,7 @@ pub const Database = struct {
             for (results) |item| item.deinit(allocator);
             allocator.free(results);
         }
+        for (results) |*item| item.* = .{ .found = false, .value = &.{} };
 
         var stmt = try self.sqlite_db.prepare(
             \\select value from _zova_kv where namespace = ? and key = ?
@@ -98,9 +108,9 @@ pub const Database = struct {
     /// Insert or replace one entry. Existing values for the same
     /// namespace/key are replaced atomically.
     pub fn put(self: *Database, namespace: []const u8, key: []const u8, value: []const u8) Error!void {
-        const owns_transaction = try beginOwnedWrite(self.sqlite_db);
+        const scope = try beginMutation(self);
         var committed = false;
-        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) rollbackMutation(self, scope) catch {};
 
         var stmt = try self.sqlite_db.prepare(
             \\insert into _zova_kv (namespace, key, value) values (?, ?, ?)
@@ -113,20 +123,23 @@ pub const Database = struct {
         try stmt.bindBlob(3, value);
         std.debug.assert((try stmt.step()) == .done);
 
-        if (owns_transaction) try self.sqlite_db.commit();
+        try finishMutation(self, scope);
         committed = true;
     }
 
-    /// Insert or replace many entries in one atomic transaction.
+    /// Insert or replace many entries in one atomic operation.
     ///
     /// The whole batch validates before any mutation and either commits
-    /// together or rolls back together. Empty batches succeed.
+    /// together or rolls back together. Empty batches succeed. When the
+    /// caller already owns a transaction, the batch joins it under an
+    /// internal savepoint so a fault rolls back only this batch's partial
+    /// mutations while preserving the caller's earlier work.
     pub fn putMany(self: *Database, namespace: []const u8, entries: []const PutEntry) Error!void {
         try validateBatchEntries(entries);
 
-        const owns_transaction = try beginOwnedWrite(self.sqlite_db);
+        const scope = try beginMutation(self);
         var committed = false;
-        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) rollbackMutation(self, scope) catch {};
 
         var stmt = try self.sqlite_db.prepare(
             \\insert into _zova_kv (namespace, key, value) values (?, ?, ?)
@@ -142,15 +155,15 @@ pub const Database = struct {
             try stmt.reset();
         }
 
-        if (owns_transaction) try self.sqlite_db.commit();
+        try finishMutation(self, scope);
         committed = true;
     }
 
     /// Delete one entry. Missing keys are ignored for replay safety.
     pub fn delete(self: *Database, namespace: []const u8, key: []const u8) Error!void {
-        const owns_transaction = try beginOwnedWrite(self.sqlite_db);
+        const scope = try beginMutation(self);
         var committed = false;
-        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) rollbackMutation(self, scope) catch {};
 
         var stmt = try self.sqlite_db.prepare(
             \\delete from _zova_kv where namespace = ? and key = ?
@@ -161,18 +174,20 @@ pub const Database = struct {
         try stmt.bindBlob(2, key);
         std.debug.assert((try stmt.step()) == .done);
 
-        if (owns_transaction) try self.sqlite_db.commit();
+        try finishMutation(self, scope);
         committed = true;
     }
 
-    /// Delete many entries in one atomic transaction. Missing keys are
-    /// ignored. Empty batches succeed.
+    /// Delete many entries in one atomic operation. Missing keys are
+    /// ignored. Empty batches succeed. Like `putMany`, a caller-owned
+    /// transaction is joined under an internal savepoint so a fault rolls
+    /// back only this batch's partial mutations.
     pub fn deleteMany(self: *Database, namespace: []const u8, keys: []const []const u8) Error!void {
         try validateBatchKeys(keys);
 
-        const owns_transaction = try beginOwnedWrite(self.sqlite_db);
+        const scope = try beginMutation(self);
         var committed = false;
-        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) rollbackMutation(self, scope) catch {};
 
         var stmt = try self.sqlite_db.prepare(
             \\delete from _zova_kv where namespace = ? and key = ?
@@ -186,7 +201,7 @@ pub const Database = struct {
             try stmt.reset();
         }
 
-        if (owns_transaction) try self.sqlite_db.commit();
+        try finishMutation(self, scope);
         committed = true;
     }
 
@@ -204,9 +219,9 @@ pub const Database = struct {
 
     /// Delete every entry in one namespace.
     pub fn clearNamespace(self: *Database, namespace: []const u8) Error!void {
-        const owns_transaction = try beginOwnedWrite(self.sqlite_db);
+        const scope = try beginMutation(self);
         var committed = false;
-        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) rollbackMutation(self, scope) catch {};
 
         var stmt = try self.sqlite_db.prepare(
             \\delete from _zova_kv where namespace = ?
@@ -216,7 +231,7 @@ pub const Database = struct {
         try stmt.bindBlob(1, namespace);
         std.debug.assert((try stmt.step()) == .done);
 
-        if (owns_transaction) try self.sqlite_db.commit();
+        try finishMutation(self, scope);
         committed = true;
     }
 };
@@ -234,10 +249,30 @@ fn validateBatchKeys(keys: []const []const u8) Error!void {
     }
 }
 
-fn beginOwnedWrite(db: *sqlite.Database) Error!bool {
-    if (hasActiveTransaction(db)) return false;
-    try db.beginImmediate();
-    return true;
+fn beginMutation(self: *Database) Error!KvMutationScope {
+    if (hasActiveTransaction(self.sqlite_db)) {
+        try self.sqlite_db.savepoint(kv_batch_savepoint);
+        return .savepoint;
+    }
+    try self.sqlite_db.beginImmediate();
+    return .transaction;
+}
+
+fn finishMutation(self: *Database, scope: KvMutationScope) Error!void {
+    switch (scope) {
+        .transaction => try self.sqlite_db.commit(),
+        .savepoint => try self.sqlite_db.releaseSavepoint(kv_batch_savepoint),
+    }
+}
+
+fn rollbackMutation(self: *Database, scope: KvMutationScope) Error!void {
+    switch (scope) {
+        .transaction => try self.sqlite_db.rollback(),
+        .savepoint => {
+            try self.sqlite_db.rollbackToSavepoint(kv_batch_savepoint);
+            try self.sqlite_db.releaseSavepoint(kv_batch_savepoint);
+        },
+    }
 }
 
 fn hasActiveTransaction(db: *sqlite.Database) bool {

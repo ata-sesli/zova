@@ -28,9 +28,9 @@ Build order is:
 Inside the Zova repository, Zig is also used to regenerate the bundled C
 snapshot. The generated C is compiler output, not a human-authored API.
 
-Zova 0.25 uses `.zova` format 9 and does not migrate format-8 databases in
-place. Keep a compatible backup and export data with a format-8 build before
-creating a format-9 database.
+The current development build uses `.zova` format 10 and does not migrate
+older format databases in place. Keep a compatible backup and export data
+with an older build before creating a format-10 database.
 
 ## Safety
 

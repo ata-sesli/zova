@@ -1741,12 +1741,12 @@ test "graph workflow uses explicit notifications after commit" {
     try std.testing.expectEqual(@as(?zova.Notification, null), try sub.tryReceive(std.testing.allocator));
 }
 
-test "format version nine requires graph edge type dictionary and edge payloads" {
+test "current format requires graph edge type dictionary and edge payloads" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "format-nine.zova");
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "format-ten.zova");
 
     {
         var db = try zova.Database.create(db_path);
@@ -1760,7 +1760,7 @@ test "format version nine requires graph edge type dictionary and edge payloads"
         var meta = try raw.prepare("select value from _zova_meta where key = 'format_version'");
         defer meta.deinit();
         try std.testing.expectEqual(sqlite.Step.row, try meta.step());
-        try std.testing.expectEqualStrings("9", meta.columnText(0));
+        try std.testing.expectEqualStrings("10", meta.columnText(0));
     }
 
     try std.testing.expect(try tableExists(&raw, "_zova_graphs"));
