@@ -9,5 +9,5 @@ import {
 
 assert.equal(packageVersion, "0.26.1");
 assert.equal(abiVersion, "0.26.1");
-assert.equal(formatVersion, "9");
+assert.equal(formatVersion, "10");
 assert.equal(sqliteVersion, "3.53.2");
