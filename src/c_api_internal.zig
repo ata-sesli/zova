@@ -49,6 +49,7 @@ const zova = @import("zova.zig");
 const graph = @import("graph.zig");
 const sqlite = @import("sqlite.zig");
 const zova_version = @import("version.zig");
+const kv_impl = @import("kv.zig");
 
 const allocator = std.heap.c_allocator;
 
@@ -246,6 +247,8 @@ pub const zova_status = enum(c_int) {
     EXTENSION_INVALID = 92,
     EXTENSION_INCOMPATIBLE = 93,
     EXTENSION_UNAVAILABLE = 94,
+    KV_TOO_LARGE = 95,
+    KV_CORRUPT = 96,
 };
 
 pub const zova_step_result = enum(c_int) {
@@ -1006,6 +1009,84 @@ pub const zova_object_writer_cancel_request = extern struct {
     writer: ?*zova_object_writer,
 };
 
+/// Borrowed byte slice for key-value operations. Zova copies caller input
+/// during the call and retains no caller memory.
+pub const zova_kv_bytes = extern struct {
+    data: ?[*]const u8,
+    len: usize,
+};
+
+/// Owned key-value get result. Free with `zova_kv_get_result_free`.
+pub const zova_kv_get_result = extern struct {
+    found: u8,
+    value: zova_buffer,
+};
+
+/// Owned many-get results. Free with `zova_kv_get_many_results_free`.
+pub const zova_kv_get_many_results = extern struct {
+    items: ?[*]zova_kv_get_result,
+    len: usize,
+};
+
+/// Borrowed batch put entry.
+pub const zova_kv_put_entry = extern struct {
+    key: zova_kv_bytes,
+    value: zova_kv_bytes,
+};
+
+pub const zova_kv_get_request = extern struct {
+    db: ?*zova_database,
+    ns: zova_kv_bytes,
+    key: zova_kv_bytes,
+    out_result: ?*zova_kv_get_result,
+};
+
+pub const zova_kv_get_many_request = extern struct {
+    db: ?*zova_database,
+    ns: zova_kv_bytes,
+    keys: ?[*]const zova_kv_bytes,
+    keys_len: usize,
+    out_results: ?*zova_kv_get_many_results,
+};
+
+pub const zova_kv_put_request = extern struct {
+    db: ?*zova_database,
+    ns: zova_kv_bytes,
+    key: zova_kv_bytes,
+    value: zova_kv_bytes,
+};
+
+pub const zova_kv_put_many_request = extern struct {
+    db: ?*zova_database,
+    ns: zova_kv_bytes,
+    entries: ?[*]const zova_kv_put_entry,
+    entries_len: usize,
+};
+
+pub const zova_kv_delete_request = extern struct {
+    db: ?*zova_database,
+    ns: zova_kv_bytes,
+    key: zova_kv_bytes,
+};
+
+pub const zova_kv_delete_many_request = extern struct {
+    db: ?*zova_database,
+    ns: zova_kv_bytes,
+    keys: ?[*]const zova_kv_bytes,
+    keys_len: usize,
+};
+
+pub const zova_kv_count_request = extern struct {
+    db: ?*zova_database,
+    ns: zova_kv_bytes,
+    out_count: ?*u64,
+};
+
+pub const zova_kv_clear_namespace_request = extern struct {
+    db: ?*zova_database,
+    ns: zova_kv_bytes,
+};
+
 pub const zova_vector_collection_create_request = extern struct {
     db: ?*zova_database,
     name: ?[*:0]const u8,
@@ -1575,6 +1656,27 @@ pub fn zova_buffer_free(buffer: ?*zova_buffer) callconv(.c) void {
         allocator.free(data[0..out.len]);
     }
     out.* = .{ .data = null, .len = 0 };
+}
+
+pub fn zova_kv_get_result_free(result: ?*zova_kv_get_result) callconv(.c) void {
+    const out = result orelse return;
+    if (out.value.data) |data| {
+        allocator.free(data[0..out.value.len]);
+    }
+    out.* = .{ .found = 0, .value = .{ .data = null, .len = 0 } };
+}
+
+pub fn zova_kv_get_many_results_free(results: ?*zova_kv_get_many_results) callconv(.c) void {
+    const out = results orelse return;
+    if (out.items) |items| {
+        for (items[0..out.len]) |*item| {
+            if (item.value.data) |data| {
+                allocator.free(data[0..item.value.len]);
+            }
+        }
+        allocator.free(items[0..out.len]);
+    }
+    out.* = .{ .items = null, .len = 0 };
 }
 
 pub fn zova_message_free(message: ?*zova_message) callconv(.c) void {
@@ -2509,6 +2611,120 @@ pub fn zova_object_chunk_count(request: ?*const zova_object_chunk_count_request)
     defer handle.mutex.unlock();
     const out = req.out_count orelse return failDb(handle, error.InvalidArgument);
     out.* = handle.db.objectChunkCount(toObjectId(req.id)) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_kv_get(request: ?*const zova_kv_get_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const out = req.out_result orelse return failDb(handle, error.InvalidArgument);
+    out.* = .{ .found = 0, .value = .{ .data = null, .len = 0 } };
+
+    const namespace = bytesConst(req.ns.data, req.ns.len) orelse return failDb(handle, error.InvalidArgument);
+    const key = bytesConst(req.key.data, req.key.len) orelse return failDb(handle, error.InvalidArgument);
+
+    var result = handle.db.kvGet(allocator, namespace, key) catch |err| return failDb(handle, err);
+    // Transfer ownership of the allocation from kv_impl.GetResult to zova_kv_get_result.
+    out.* = .{ .found = if (result.found) 1 else 0, .value = .{ .data = result.value.ptr, .len = result.value.len } };
+    result.value = &.{};
+    return okDb(handle);
+}
+
+pub fn zova_kv_get_many(request: ?*const zova_kv_get_many_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
+    out.* = .{ .items = null, .len = 0 };
+
+    const namespace = bytesConst(req.ns.data, req.ns.len) orelse return failDb(handle, error.InvalidArgument);
+    const keys = kvKeySlices(req.keys, req.keys_len) catch |err| return failDb(handle, err);
+    defer allocator.free(keys);
+
+    const results = handle.db.kvGetMany(allocator, namespace, keys) catch |err| return failDb(handle, err);
+    errdefer {
+        for (results) |item| item.deinit(allocator);
+        allocator.free(results);
+    }
+
+    const items = allocator.alloc(zova_kv_get_result, results.len) catch |err| return failDb(handle, err);
+    for (results, items) |*result, *item| {
+        item.* = .{ .found = if (result.found) 1 else 0, .value = .{ .data = result.value.ptr, .len = result.value.len } };
+        result.value = &.{};
+    }
+    allocator.free(results);
+    out.* = .{ .items = items.ptr, .len = items.len };
+    return okDb(handle);
+}
+
+pub fn zova_kv_put(request: ?*const zova_kv_put_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const namespace = bytesConst(req.ns.data, req.ns.len) orelse return failDb(handle, error.InvalidArgument);
+    const key = bytesConst(req.key.data, req.key.len) orelse return failDb(handle, error.InvalidArgument);
+    const value = bytesConst(req.value.data, req.value.len) orelse return failDb(handle, error.InvalidArgument);
+    handle.db.kvPut(namespace, key, value) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_kv_put_many(request: ?*const zova_kv_put_many_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const namespace = bytesConst(req.ns.data, req.ns.len) orelse return failDb(handle, error.InvalidArgument);
+    const entries = kvPutEntrySlices(req.entries, req.entries_len) catch |err| return failDb(handle, err);
+    defer allocator.free(entries);
+    handle.db.kvPutMany(namespace, entries) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_kv_delete(request: ?*const zova_kv_delete_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const namespace = bytesConst(req.ns.data, req.ns.len) orelse return failDb(handle, error.InvalidArgument);
+    const key = bytesConst(req.key.data, req.key.len) orelse return failDb(handle, error.InvalidArgument);
+    handle.db.kvDelete(namespace, key) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_kv_delete_many(request: ?*const zova_kv_delete_many_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const namespace = bytesConst(req.ns.data, req.ns.len) orelse return failDb(handle, error.InvalidArgument);
+    const keys = kvKeySlices(req.keys, req.keys_len) catch |err| return failDb(handle, err);
+    defer allocator.free(keys);
+    handle.db.kvDeleteMany(namespace, keys) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_kv_count(request: ?*const zova_kv_count_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const out = req.out_count orelse return failDb(handle, error.InvalidArgument);
+    const namespace = bytesConst(req.ns.data, req.ns.len) orelse return failDb(handle, error.InvalidArgument);
+    out.* = handle.db.kvCount(namespace) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_kv_clear_namespace(request: ?*const zova_kv_clear_namespace_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const namespace = bytesConst(req.ns.data, req.ns.len) orelse return failDb(handle, error.InvalidArgument);
+    handle.db.kvClearNamespace(namespace) catch |err| return failDb(handle, err);
     return okDb(handle);
 }
 
@@ -4578,6 +4794,31 @@ fn candidateIdSlices(
     return candidates;
 }
 
+fn kvKeySlices(keys: ?[*]const zova_kv_bytes, len: usize) (error{ OutOfMemory, InvalidArgument }![]const []const u8) {
+    if (len == 0) return &.{};
+    const ptr = keys orelse return error.InvalidArgument;
+    const result = try allocator.alloc([]const u8, len);
+    errdefer allocator.free(result);
+    for (ptr[0..len], result) |key, *out| {
+        const bytes = bytesConst(key.data, key.len) orelse return error.InvalidArgument;
+        out.* = bytes;
+    }
+    return result;
+}
+
+fn kvPutEntrySlices(entries: ?[*]const zova_kv_put_entry, len: usize) (error{ OutOfMemory, InvalidArgument }![]const kv_impl.PutEntry) {
+    if (len == 0) return &.{};
+    const ptr = entries orelse return error.InvalidArgument;
+    const result = try allocator.alloc(kv_impl.PutEntry, len);
+    errdefer allocator.free(result);
+    for (ptr[0..len], result) |entry, *out| {
+        const key = bytesConst(entry.key.data, entry.key.len) orelse return error.InvalidArgument;
+        const value = bytesConst(entry.value.data, entry.value.len) orelse return error.InvalidArgument;
+        out.* = .{ .key = key, .value = value };
+    }
+    return result;
+}
+
 fn graphNodeInputSlices(
     inputs: ?[*]const zova_graph_node_input,
     len: usize,
@@ -5689,6 +5930,8 @@ fn statusFromError(err: anyerror) zova_status {
         error.ExtensionUnavailable => .EXTENSION_UNAVAILABLE,
         error.ExtensionUntrusted => .EXTENSION_UNAVAILABLE,
         error.ExtensionLoadFailed => .EXTENSION_UNAVAILABLE,
+        error.KvTooLarge => .KV_TOO_LARGE,
+        error.KvCorrupt => .KV_CORRUPT,
         error.InvalidArgument => .INVALID_ARGUMENT,
         else => .SQLITE_ERROR,
     };
@@ -5756,6 +5999,8 @@ fn statusName(status: c_int) [*:0]const u8 {
         @intFromEnum(zova_status.EXTENSION_INVALID) => "ZOVA_EXTENSION_INVALID",
         @intFromEnum(zova_status.EXTENSION_INCOMPATIBLE) => "ZOVA_EXTENSION_INCOMPATIBLE",
         @intFromEnum(zova_status.EXTENSION_UNAVAILABLE) => "ZOVA_EXTENSION_UNAVAILABLE",
+        @intFromEnum(zova_status.KV_TOO_LARGE) => "ZOVA_KV_TOO_LARGE",
+        @intFromEnum(zova_status.KV_CORRUPT) => "ZOVA_KV_CORRUPT",
         else => "ZOVA_UNKNOWN_STATUS",
     };
 }
@@ -7477,6 +7722,146 @@ test "c abi exposes vector collection management batch writes and expanded searc
     try std.testing.expectEqual(zova_status.OK, zova_vector_collection_delete(&delete_collection));
     try std.testing.expectEqual(zova_status.VECTOR_COLLECTION_NOT_FOUND, zova_vector_get(&get_near));
     try std.testing.expectEqual(zova_status.VECTOR_COLLECTION_NOT_FOUND, zova_vector_collection_delete(&delete_collection));
+}
+
+test "c abi exposes transactional key-value operations" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-kv.zova", .{tmp.sub_path[0..]});
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(db);
+
+    try std.testing.expectEqual(zova_status.OK, zova_kv_put(&.{
+        .db = db,
+        .ns = .{ .data = "settings", .len = 8 },
+        .key = .{ .data = "theme", .len = 5 },
+        .value = .{ .data = "dark", .len = 4 },
+    }));
+
+    var result = zova_kv_get_result{ .found = 0, .value = .{ .data = null, .len = 0 } };
+    try std.testing.expectEqual(zova_status.OK, zova_kv_get(&.{
+        .db = db,
+        .ns = .{ .data = "settings", .len = 8 },
+        .key = .{ .data = "theme", .len = 5 },
+        .out_result = &result,
+    }));
+    try std.testing.expectEqual(@as(u8, 1), result.found);
+    try std.testing.expectEqualSlices(u8, "dark", result.value.data.?[0..result.value.len]);
+    zova_kv_get_result_free(&result);
+    try std.testing.expectEqual(@as(u8, 0), result.found);
+
+    var missing = zova_kv_get_result{ .found = 0, .value = .{ .data = null, .len = 0 } };
+    try std.testing.expectEqual(zova_status.OK, zova_kv_get(&.{
+        .db = db,
+        .ns = .{ .data = "settings", .len = 8 },
+        .key = .{ .data = "nope", .len = 4 },
+        .out_result = &missing,
+    }));
+    try std.testing.expectEqual(@as(u8, 0), missing.found);
+    try std.testing.expectEqual(@as(usize, 0), missing.value.len);
+    zova_kv_get_result_free(&missing);
+
+    const keys = [_]zova_kv_bytes{
+        .{ .data = "theme", .len = 5 },
+        .{ .data = "theme", .len = 5 },
+        .{ .data = "nope", .len = 4 },
+    };
+    var many = zova_kv_get_many_results{ .items = null, .len = 0 };
+    try std.testing.expectEqual(zova_status.OK, zova_kv_get_many(&.{
+        .db = db,
+        .ns = .{ .data = "settings", .len = 8 },
+        .keys = &keys,
+        .keys_len = keys.len,
+        .out_results = &many,
+    }));
+    try std.testing.expectEqual(@as(usize, 3), many.len);
+    try std.testing.expectEqual(@as(u8, 1), many.items.?[0].found);
+    try std.testing.expectEqual(@as(u8, 1), many.items.?[1].found);
+    try std.testing.expectEqual(@as(u8, 0), many.items.?[2].found);
+    try std.testing.expectEqualSlices(u8, "dark", many.items.?[0].value.data.?[0..many.items.?[0].value.len]);
+    zova_kv_get_many_results_free(&many);
+    try std.testing.expectEqual(@as(usize, 0), many.len);
+
+    var count: u64 = 0;
+    try std.testing.expectEqual(zova_status.OK, zova_kv_count(&.{
+        .db = db,
+        .ns = .{ .data = "settings", .len = 8 },
+        .out_count = &count,
+    }));
+    try std.testing.expectEqual(@as(u64, 1), count);
+
+    const batch_entries = [_]zova_kv_put_entry{
+        .{ .key = .{ .data = "retries", .len = 7 }, .value = .{ .data = "\x00\x01\x02", .len = 3 } },
+        .{ .key = .{ .data = "theme", .len = 5 }, .value = .{ .data = "light", .len = 5 } },
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_kv_put_many(&.{
+        .db = db,
+        .ns = .{ .data = "settings", .len = 8 },
+        .entries = &batch_entries,
+        .entries_len = batch_entries.len,
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_kv_count(&.{
+        .db = db,
+        .ns = .{ .data = "settings", .len = 8 },
+        .out_count = &count,
+    }));
+    try std.testing.expectEqual(@as(u64, 2), count);
+
+    try std.testing.expectEqual(zova_status.OK, zova_kv_put_many(&.{
+        .db = db,
+        .ns = .{ .data = "settings", .len = 8 },
+        .entries = null,
+        .entries_len = 0,
+    }));
+
+    const del_keys = [_]zova_kv_bytes{
+        .{ .data = "theme", .len = 5 },
+        .{ .data = "ghost", .len = 5 },
+    };
+    try std.testing.expectEqual(zova_status.OK, zova_kv_delete_many(&.{
+        .db = db,
+        .ns = .{ .data = "settings", .len = 8 },
+        .keys = &del_keys,
+        .keys_len = del_keys.len,
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_kv_count(&.{
+        .db = db,
+        .ns = .{ .data = "settings", .len = 8 },
+        .out_count = &count,
+    }));
+    try std.testing.expectEqual(@as(u64, 1), count);
+
+    try std.testing.expectEqual(zova_status.OK, zova_kv_clear_namespace(&.{
+        .db = db,
+        .ns = .{ .data = "settings", .len = 8 },
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_kv_count(&.{
+        .db = db,
+        .ns = .{ .data = "settings", .len = 8 },
+        .out_count = &count,
+    }));
+    try std.testing.expectEqual(@as(u64, 0), count);
+
+    try std.testing.expectEqual(zova_status.OK, zova_kv_delete(&.{
+        .db = db,
+        .ns = .{ .data = "settings", .len = 8 },
+        .key = .{ .data = "theme", .len = 5 },
+    }));
+
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_kv_put(&.{
+        .db = db,
+        .ns = .{ .data = null, .len = 8 },
+        .key = .{ .data = "theme", .len = 5 },
+        .value = .{ .data = "dark", .len = 4 },
+    }));
 }
 
 test "c abi exposes raw typed i8 and f16 vectors" {

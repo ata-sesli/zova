@@ -135,6 +135,8 @@ typedef enum zova_status {
     ZOVA_EXTENSION_INVALID = 92,
     ZOVA_EXTENSION_INCOMPATIBLE = 93,
     ZOVA_EXTENSION_UNAVAILABLE = 94,
+    ZOVA_KV_TOO_LARGE = 95,
+    ZOVA_KV_CORRUPT = 96,
 } zova_status;
 
 typedef enum zova_vector_metric {
@@ -981,6 +983,84 @@ typedef struct zova_object_writer_cancel_request {
     zova_object_writer *writer;
 } zova_object_writer_cancel_request;
 
+/* Borrowed byte slice for key-value operations. Zova copies caller input
+ * during the call and retains no caller memory. */
+typedef struct zova_kv_bytes {
+    const uint8_t *data;
+    size_t len;
+} zova_kv_bytes;
+
+/* Owned key-value get result. Free with zova_kv_get_result_free. */
+typedef struct zova_kv_get_result {
+    uint8_t found;
+    zova_buffer value;
+} zova_kv_get_result;
+
+/* Owned many-get results. Free with zova_kv_get_many_results_free. */
+typedef struct zova_kv_get_many_results {
+    zova_kv_get_result *items;
+    size_t len;
+} zova_kv_get_many_results;
+
+/* Borrowed batch put entry. */
+typedef struct zova_kv_put_entry {
+    zova_kv_bytes key;
+    zova_kv_bytes value;
+} zova_kv_put_entry;
+
+typedef struct zova_kv_get_request {
+    zova_database *db;
+    zova_kv_bytes ns;
+    zova_kv_bytes key;
+    zova_kv_get_result *out_result;
+} zova_kv_get_request;
+
+typedef struct zova_kv_get_many_request {
+    zova_database *db;
+    zova_kv_bytes ns;
+    const zova_kv_bytes *keys;
+    size_t keys_len;
+    zova_kv_get_many_results *out_results;
+} zova_kv_get_many_request;
+
+typedef struct zova_kv_put_request {
+    zova_database *db;
+    zova_kv_bytes ns;
+    zova_kv_bytes key;
+    zova_kv_bytes value;
+} zova_kv_put_request;
+
+typedef struct zova_kv_put_many_request {
+    zova_database *db;
+    zova_kv_bytes ns;
+    const zova_kv_put_entry *entries;
+    size_t entries_len;
+} zova_kv_put_many_request;
+
+typedef struct zova_kv_delete_request {
+    zova_database *db;
+    zova_kv_bytes ns;
+    zova_kv_bytes key;
+} zova_kv_delete_request;
+
+typedef struct zova_kv_delete_many_request {
+    zova_database *db;
+    zova_kv_bytes ns;
+    const zova_kv_bytes *keys;
+    size_t keys_len;
+} zova_kv_delete_many_request;
+
+typedef struct zova_kv_count_request {
+    zova_database *db;
+    zova_kv_bytes ns;
+    uint64_t *out_count;
+} zova_kv_count_request;
+
+typedef struct zova_kv_clear_namespace_request {
+    zova_database *db;
+    zova_kv_bytes ns;
+} zova_kv_clear_namespace_request;
+
 typedef struct zova_vector_collection_create_request {
     zova_database *db;
     const char *name;
@@ -1688,6 +1768,27 @@ zova_status zova_object_writer_write(const zova_object_writer_write_request *req
 zova_status zova_object_writer_finish(const zova_object_writer_finish_request *request);
 zova_status zova_object_writer_cancel(const zova_object_writer_cancel_request *request);
 zova_status zova_object_writer_destroy(zova_object_writer *writer);
+
+/*
+ * Native transactional key-value operations.
+ *
+ * Namespaces, keys, and values are opaque byte strings; byte equality is
+ * exact. Batch requests validate completely before any mutation. Operations
+ * join an active Zova transaction or own one atomic transaction. Callers
+ * never retain Zova memory and Zova never retains caller input memory.
+ * Returned values are Zova-owned; free with zova_kv_get_result_free /
+ * zova_kv_get_many_results_free.
+ */
+zova_status zova_kv_get(const zova_kv_get_request *request);
+zova_status zova_kv_get_many(const zova_kv_get_many_request *request);
+zova_status zova_kv_put(const zova_kv_put_request *request);
+zova_status zova_kv_put_many(const zova_kv_put_many_request *request);
+zova_status zova_kv_delete(const zova_kv_delete_request *request);
+zova_status zova_kv_delete_many(const zova_kv_delete_many_request *request);
+zova_status zova_kv_count(const zova_kv_count_request *request);
+zova_status zova_kv_clear_namespace(const zova_kv_clear_namespace_request *request);
+void zova_kv_get_result_free(zova_kv_get_result *result);
+void zova_kv_get_many_results_free(zova_kv_get_many_results *results);
 
 /*
  * Native vector operations.

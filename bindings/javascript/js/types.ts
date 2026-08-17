@@ -20,3 +20,8 @@ export interface ExtensionInfo {
   installedAtUnix: bigint;
   manifestJson: string;
 }
+
+export interface KvEntry {
+  readonly key: Uint8Array;
+  readonly value: Uint8Array;
+}

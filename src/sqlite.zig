@@ -1315,3 +1315,4 @@ test "beginImmediate maps busy when another connection holds write lock" {
 
     try std.testing.expectError(error.Busy, second.beginImmediate());
 }
+

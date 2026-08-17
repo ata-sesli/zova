@@ -249,6 +249,10 @@ const DatabaseSummary = struct {
     chunk_bytes: u64,
     vector_collection_count: u64,
     vector_count: u64,
+    kv_entry_count: u64,
+    kv_key_bytes: u64,
+    kv_value_bytes: u64,
+    kv_allocated_bytes: u64,
     user_table_count: u64,
     private_table_count: u64,
 
@@ -4061,6 +4065,14 @@ fn loadDatabaseSummary(allocator: std.mem.Allocator, db: *zova.Database, path: [
         .chunk_bytes = try scalarU64(db, "select coalesce(sum(size_bytes), 0) from _zova_chunks"),
         .vector_collection_count = try scalarU64(db, "select count(*) from _zova_vector_collections"),
         .vector_count = try scalarU64(db, "select count(*) from _zova_vectors"),
+        .kv_entry_count = try scalarU64(db, "select count(*) from _zova_kv"),
+        .kv_key_bytes = try scalarU64(db, "select coalesce(sum(length(namespace) + length(key)), 0) from _zova_kv"),
+        .kv_value_bytes = try scalarU64(db, "select coalesce(sum(length(value)), 0) from _zova_kv"),
+        .kv_allocated_bytes = try scalarU64(db,
+            \\select coalesce(sum(pgsize), 0)
+            \\from dbstat
+            \\where name = '_zova_kv'
+        ),
         .user_table_count = try scalarU64(db,
             \\select count(*)
             \\from sqlite_master
@@ -4094,6 +4106,10 @@ fn emptyDatabaseSummary(allocator: std.mem.Allocator) !DatabaseSummary {
         .chunk_bytes = 0,
         .vector_collection_count = 0,
         .vector_count = 0,
+        .kv_entry_count = 0,
+        .kv_key_bytes = 0,
+        .kv_value_bytes = 0,
+        .kv_allocated_bytes = 0,
         .user_table_count = 0,
         .private_table_count = 0,
     };
@@ -4644,6 +4660,9 @@ fn writeInfoText(stdout: *std.Io.Writer, path: []const u8, summary: DatabaseSumm
         \\stored_chunk_bytes: {d}
         \\vector_collections: {d}
         \\vectors: {d}
+        \\kv_entries: {d}
+        \\kv_logical_bytes: {d}
+        \\kv_allocated_bytes: {d}
         \\user_tables: {d}
         \\private_tables: {d}
         \\
@@ -4666,6 +4685,9 @@ fn writeInfoText(stdout: *std.Io.Writer, path: []const u8, summary: DatabaseSumm
         summary.chunk_bytes,
         summary.vector_collection_count,
         summary.vector_count,
+        summary.kv_entry_count,
+        summary.kv_key_bytes + summary.kv_value_bytes,
+        summary.kv_allocated_bytes,
         summary.user_table_count,
         summary.private_table_count,
     });
@@ -4708,6 +4730,11 @@ fn writeInfoJson(stdout: *std.Io.Writer, summary: DatabaseSummary) !void {
         \\    "collections": {d},
         \\    "rows": {d}
         \\  }},
+        \\  "kv": {{
+        \\    "entries": {d},
+        \\    "logical_bytes": {d},
+        \\    "allocated_bytes": {d}
+        \\  }},
         \\  "tables": {{
         \\    "user": {d},
         \\    "private": {d}
@@ -4729,6 +4756,9 @@ fn writeInfoJson(stdout: *std.Io.Writer, summary: DatabaseSummary) !void {
         summary.chunk_bytes,
         summary.vector_collection_count,
         summary.vector_count,
+        summary.kv_entry_count,
+        summary.kv_key_bytes + summary.kv_value_bytes,
+        summary.kv_allocated_bytes,
         summary.user_table_count,
         summary.private_table_count,
     });

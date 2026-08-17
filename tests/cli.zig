@@ -2069,6 +2069,39 @@ test "cli info reports bounded database summary" {
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, "7.25") == null);
 }
 
+test "cli info reports kv storage diagnostics" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "kv-info.zova");
+
+    var db = try zova.Database.create(db_path);
+    defer db.deinit();
+    try db.kvPut("settings", "theme", "dark");
+    try db.kvPut("settings", "retries", "\x00\x01\x02");
+    try db.kvPut("cache", "k1", "v1");
+    try db.kvPut("cache", "k2", "v2");
+    try db.kvPut("cache", "k3", "v3");
+
+    var result = try runCli(&.{ "zova", "info", db_path });
+    defer result.deinit();
+    try std.testing.expectEqual(@as(u8, 0), result.code);
+    try expectContains(result.stdout, "kv_entries: 5");
+    try expectContains(result.stdout, "kv_logical_bytes:");
+    try expectContains(result.stdout, "kv_allocated_bytes:");
+
+    var json = try runCli(&.{ "zova", "info", "--json", db_path });
+    defer json.deinit();
+    try std.testing.expectEqual(@as(u8, 0), json.code);
+    var parsed = try parseJson(json.stdout);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try std.testing.expectEqual(@as(i64, 5), try jsonObjectInt(root, "kv", "entries"));
+    _ = try jsonObjectInt(root, "kv", "logical_bytes");
+    _ = try jsonObjectInt(root, "kv", "allocated_bytes");
+}
+
 test "cli backup compact and restore create usable copies" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2208,6 +2241,9 @@ test "cli info json reports bounded database summary" {
     try expectJsonObjectHasInt(root, "chunks", "manifest_rows");
     try expectJsonObjectHasInt(root, "chunks", "loose_count");
     try expectJsonObjectHasInt(root, "vectors", "collections");
+    try expectJsonObjectHasInt(root, "kv", "entries");
+    try expectJsonObjectHasInt(root, "kv", "logical_bytes");
+    try expectJsonObjectHasInt(root, "kv", "allocated_bytes");
     try expectJsonObjectHasInt(root, "tables", "user");
     try expectJsonObjectHasInt(root, "tables", "private");
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, "hello object") == null);

@@ -42,5 +42,7 @@ pub const Error = sqlite.Error || error{
     ExtensionUnavailable,
     ExtensionUntrusted,
     ExtensionLoadFailed,
+    KvTooLarge,
+    KvCorrupt,
     OutOfMemory,
 };

@@ -1,4 +1,8 @@
 use crate::error::{Error, Result};
+use crate::kv::{
+    kv_clear_namespace_raw, kv_count_raw, kv_delete_many_raw, kv_delete_raw, kv_get_many_raw,
+    kv_get_raw, kv_put_many_raw, kv_put_raw, KvEntry,
+};
 use crate::notification::{listen_raw, notify_raw, Subscription};
 use crate::statement::{OwnedStatement, Statement};
 use std::ffi::{CStr, CString};
@@ -202,6 +206,68 @@ impl Database {
         let raw = NonNull::new(statement)
             .ok_or_else(|| Error::from_status(zova_sys::ZOVA_INVALID_ARGUMENT, None))?;
         Ok(OwnedStatement::new(raw, self.inner.clone()))
+    }
+
+    /// Get one key-value entry. Returns `Ok(None)` when the key is absent.
+    pub fn kv_get(&mut self, namespace: &[u8], key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let db = self.raw_ptr();
+        let status = |status| self.status(status);
+        kv_get_raw(db, status, namespace, key)
+    }
+
+    /// Get several key-value entries, preserving input order and duplicates.
+    /// Missing keys map to `None`.
+    pub fn kv_get_many(
+        &mut self,
+        namespace: &[u8],
+        keys: &[&[u8]],
+    ) -> Result<Vec<Option<Vec<u8>>>> {
+        let db = self.raw_ptr();
+        let status = |status| self.status(status);
+        kv_get_many_raw(db, status, namespace, keys)
+    }
+
+    /// Insert or replace one key-value entry.
+    pub fn kv_put(&mut self, namespace: &[u8], key: &[u8], value: &[u8]) -> Result<()> {
+        let db = self.raw_ptr();
+        let status = |status| self.status(status);
+        kv_put_raw(db, status, namespace, key, value)
+    }
+
+    /// Insert or replace several key-value entries in one atomic operation.
+    pub fn kv_put_many(&mut self, namespace: &[u8], entries: &[KvEntry<'_>]) -> Result<()> {
+        let db = self.raw_ptr();
+        let status = |status| self.status(status);
+        kv_put_many_raw(db, status, namespace, entries)
+    }
+
+    /// Delete one key-value entry. Deleting a missing key is not an error.
+    pub fn kv_delete(&mut self, namespace: &[u8], key: &[u8]) -> Result<()> {
+        let db = self.raw_ptr();
+        let status = |status| self.status(status);
+        kv_delete_raw(db, status, namespace, key)
+    }
+
+    /// Delete several key-value entries in one atomic operation. Missing keys
+    /// are ignored.
+    pub fn kv_delete_many(&mut self, namespace: &[u8], keys: &[&[u8]]) -> Result<()> {
+        let db = self.raw_ptr();
+        let status = |status| self.status(status);
+        kv_delete_many_raw(db, status, namespace, keys)
+    }
+
+    /// Count entries in a namespace.
+    pub fn kv_count(&mut self, namespace: &[u8]) -> Result<u64> {
+        let db = self.raw_ptr();
+        let status = |status| self.status(status);
+        kv_count_raw(db, status, namespace)
+    }
+
+    /// Delete every entry in a namespace. An empty namespace is not an error.
+    pub fn kv_clear_namespace(&mut self, namespace: &[u8]) -> Result<()> {
+        let db = self.raw_ptr();
+        let status = |status| self.status(status);
+        kv_clear_namespace_raw(db, status, namespace)
     }
 
     pub fn begin(&mut self) -> Result<()> {

@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use napi::bindgen_prelude::BigInt;
+use napi::bindgen_prelude::{BigInt, Uint8Array};
 use napi::Result;
 use napi_derive::napi;
 
@@ -371,4 +371,104 @@ impl NativeDatabase {
             .map(BigInt::from)
             .map_err(zova_error)
     }
+
+    #[napi]
+    pub fn kv_get(&self, namespace: Uint8Array, key: Uint8Array) -> Result<Option<Uint8Array>> {
+        let database = self.state.database()?;
+        let value = database
+            .kv_get(namespace.as_ref(), key.as_ref())
+            .map_err(zova_error)?;
+        Ok(value.map(|value| Uint8Array::new(value)))
+    }
+
+    #[napi]
+    pub fn kv_get_many(
+        &self,
+        namespace: Uint8Array,
+        keys: Vec<Uint8Array>,
+    ) -> Result<Vec<Option<Uint8Array>>> {
+        let database = self.state.database()?;
+        let key_refs: Vec<&[u8]> = keys.iter().map(|key| key.as_ref()).collect();
+        let values = database
+            .kv_get_many(namespace.as_ref(), &key_refs)
+            .map_err(zova_error)?;
+        Ok(values
+            .into_iter()
+            .map(|value| value.map(|value| Uint8Array::new(value)))
+            .collect())
+    }
+
+    #[napi]
+    pub fn kv_put(
+        &self,
+        namespace: Uint8Array,
+        key: Uint8Array,
+        value: Uint8Array,
+    ) -> Result<()> {
+        self.state
+            .database()?
+            .kv_put(namespace.as_ref(), key.as_ref(), value.as_ref())
+            .map_err(zova_error)
+    }
+
+    #[napi]
+    pub fn kv_put_many(
+        &self,
+        namespace: Uint8Array,
+        entries: Vec<NativeKvEntry>,
+    ) -> Result<()> {
+        let owned: Vec<(Vec<u8>, Vec<u8>)> = entries
+            .into_iter()
+            .map(|entry| (entry.key.to_vec(), entry.value.to_vec()))
+            .collect();
+        let entries = owned
+            .iter()
+            .map(|(key, value)| zova::KvEntry {
+                key: key.as_slice(),
+                value: value.as_slice(),
+            })
+            .collect::<Vec<_>>();
+        self.state
+            .database()?
+            .kv_put_many(namespace.as_ref(), &entries)
+            .map_err(zova_error)
+    }
+
+    #[napi]
+    pub fn kv_delete(&self, namespace: Uint8Array, key: Uint8Array) -> Result<()> {
+        self.state
+            .database()?
+            .kv_delete(namespace.as_ref(), key.as_ref())
+            .map_err(zova_error)
+    }
+
+    #[napi]
+    pub fn kv_delete_many(&self, namespace: Uint8Array, keys: Vec<Uint8Array>) -> Result<()> {
+        let key_refs: Vec<&[u8]> = keys.iter().map(|key| key.as_ref()).collect();
+        self.state
+            .database()?
+            .kv_delete_many(namespace.as_ref(), &key_refs)
+            .map_err(zova_error)
+    }
+
+    #[napi]
+    pub fn kv_count(&self, namespace: Uint8Array) -> Result<BigInt> {
+        let database = self.state.database()?;
+        let count = database.kv_count(namespace.as_ref()).map_err(zova_error)?;
+        Ok(BigInt::from(count))
+    }
+
+    #[napi]
+    pub fn kv_clear_namespace(&self, namespace: Uint8Array) -> Result<()> {
+        self.state
+            .database()?
+            .kv_clear_namespace(namespace.as_ref())
+            .map_err(zova_error)
+    }
+}
+
+#[napi(object)]
+pub struct NativeKvEntry {
+    pub key: Uint8Array,
+    pub value: Uint8Array,
 }

@@ -650,6 +650,94 @@ impl PyDatabase {
         slf
     }
 
+    pub(crate) fn kv_get<'py>(
+        &mut self,
+        py: Python<'py>,
+        namespace: Vec<u8>,
+        key: Vec<u8>,
+    ) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        match self
+            .db_mut()?
+            .kv_get(&namespace, &key)
+            .map_err(zova_error)?
+        {
+            Some(value) => Ok(Some(PyBytes::new(py, &value))),
+            None => Ok(None),
+        }
+    }
+
+    #[pyo3(signature = (namespace, keys))]
+    pub(crate) fn kv_get_many<'py>(
+        &mut self,
+        py: Python<'py>,
+        namespace: Vec<u8>,
+        keys: Vec<Vec<u8>>,
+    ) -> PyResult<Vec<Option<Bound<'py, PyBytes>>>> {
+        let key_refs: Vec<&[u8]> = keys.iter().map(|key| key.as_slice()).collect();
+        let values = self
+            .db_mut()?
+            .kv_get_many(&namespace, &key_refs)
+            .map_err(zova_error)?;
+        Ok(values
+            .into_iter()
+            .map(|value| value.map(|value| PyBytes::new(py, &value)))
+            .collect())
+    }
+
+    pub(crate) fn kv_put(
+        &mut self,
+        namespace: Vec<u8>,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> PyResult<()> {
+        self.db_mut()?
+            .kv_put(&namespace, &key, &value)
+            .map_err(zova_error)
+    }
+
+    #[pyo3(signature = (namespace, entries))]
+    pub(crate) fn kv_put_many(
+        &mut self,
+        namespace: Vec<u8>,
+        entries: Vec<(Vec<u8>, Vec<u8>)>,
+    ) -> PyResult<()> {
+        let rust_entries: Vec<zova_rust::KvEntry> = entries
+            .iter()
+            .map(|(key, value)| zova_rust::KvEntry::new(key, value))
+            .collect();
+        self.db_mut()?
+            .kv_put_many(&namespace, &rust_entries)
+            .map_err(zova_error)
+    }
+
+    pub(crate) fn kv_delete(&mut self, namespace: Vec<u8>, key: Vec<u8>) -> PyResult<()> {
+        self.db_mut()?
+            .kv_delete(&namespace, &key)
+            .map_err(zova_error)
+    }
+
+    #[pyo3(signature = (namespace, keys))]
+    pub(crate) fn kv_delete_many(
+        &mut self,
+        namespace: Vec<u8>,
+        keys: Vec<Vec<u8>>,
+    ) -> PyResult<()> {
+        let key_refs: Vec<&[u8]> = keys.iter().map(|key| key.as_slice()).collect();
+        self.db_mut()?
+            .kv_delete_many(&namespace, &key_refs)
+            .map_err(zova_error)
+    }
+
+    pub(crate) fn kv_count(&mut self, namespace: Vec<u8>) -> PyResult<u64> {
+        self.db_mut()?.kv_count(&namespace).map_err(zova_error)
+    }
+
+    pub(crate) fn kv_clear_namespace(&mut self, namespace: Vec<u8>) -> PyResult<()> {
+        self.db_mut()?
+            .kv_clear_namespace(&namespace)
+            .map_err(zova_error)
+    }
+
     pub(crate) fn __exit__(
         &mut self,
         _exc_type: Option<&Bound<'_, PyAny>>,

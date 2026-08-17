@@ -109,6 +109,8 @@ pub const ZOVA_OPEN_READ_ONLY: u32 = 1 << 0;
 pub const ZOVA_BACKUP_NO_VERIFY: u32 = 1 << 0;
 pub const ZOVA_COMPACT_NO_VERIFY: u32 = 1 << 0;
 pub const ZOVA_RESTORE_NO_VERIFY: u32 = 1 << 0;
+pub const ZOVA_KV_TOO_LARGE: zova_status = 95;
+pub const ZOVA_KV_CORRUPT: zova_status = 96;
 
 #[repr(C)]
 pub struct zova_database {
@@ -152,6 +154,103 @@ pub struct zova_object_chunk_id {
 pub struct zova_buffer {
     pub data: *mut u8,
     pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_kv_bytes {
+    pub data: *const u8,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_kv_get_result {
+    pub found: u8,
+    pub value: zova_buffer,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_kv_get_many_results {
+    pub items: *mut zova_kv_get_result,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_kv_put_entry {
+    pub key: zova_kv_bytes,
+    pub value: zova_kv_bytes,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_kv_get_request {
+    pub db: *mut zova_database,
+    pub ns: zova_kv_bytes,
+    pub key: zova_kv_bytes,
+    pub out_result: *mut zova_kv_get_result,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_kv_get_many_request {
+    pub db: *mut zova_database,
+    pub ns: zova_kv_bytes,
+    pub keys: *const zova_kv_bytes,
+    pub keys_len: usize,
+    pub out_results: *mut zova_kv_get_many_results,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_kv_put_request {
+    pub db: *mut zova_database,
+    pub ns: zova_kv_bytes,
+    pub key: zova_kv_bytes,
+    pub value: zova_kv_bytes,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_kv_put_many_request {
+    pub db: *mut zova_database,
+    pub ns: zova_kv_bytes,
+    pub entries: *const zova_kv_put_entry,
+    pub entries_len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_kv_delete_request {
+    pub db: *mut zova_database,
+    pub ns: zova_kv_bytes,
+    pub key: zova_kv_bytes,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_kv_delete_many_request {
+    pub db: *mut zova_database,
+    pub ns: zova_kv_bytes,
+    pub keys: *const zova_kv_bytes,
+    pub keys_len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_kv_count_request {
+    pub db: *mut zova_database,
+    pub ns: zova_kv_bytes,
+    pub out_count: *mut u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_kv_clear_namespace_request {
+    pub db: *mut zova_database,
+    pub ns: zova_kv_bytes,
 }
 
 #[repr(C)]
@@ -1831,4 +1930,14 @@ extern "C" {
     ) -> zova_status;
     pub fn zova_graph_scan(request: *const zova_graph_scan_request) -> zova_status;
     pub fn zova_graph_walk(request: *const zova_graph_walk_request) -> zova_status;
+    pub fn zova_kv_get(request: *const zova_kv_get_request) -> zova_status;
+    pub fn zova_kv_get_many(request: *const zova_kv_get_many_request) -> zova_status;
+    pub fn zova_kv_put(request: *const zova_kv_put_request) -> zova_status;
+    pub fn zova_kv_put_many(request: *const zova_kv_put_many_request) -> zova_status;
+    pub fn zova_kv_delete(request: *const zova_kv_delete_request) -> zova_status;
+    pub fn zova_kv_delete_many(request: *const zova_kv_delete_many_request) -> zova_status;
+    pub fn zova_kv_count(request: *const zova_kv_count_request) -> zova_status;
+    pub fn zova_kv_clear_namespace(request: *const zova_kv_clear_namespace_request) -> zova_status;
+    pub fn zova_kv_get_result_free(result: *mut zova_kv_get_result);
+    pub fn zova_kv_get_many_results_free(results: *mut zova_kv_get_many_results);
 }

@@ -8,6 +8,7 @@ import type {
   GraphWalkOptions,
 } from "./graph.js";
 import type { OpenOptions } from "./types.js";
+import type { KvEntry } from "./types.js";
 import type {
   VectorInput,
   VectorSearchOptions,
@@ -110,6 +111,125 @@ export class AsyncDatabase {
 
   getObject(id: Uint8Array): Promise<Uint8Array> {
     return this.#enqueue(() => this.#native.asyncGetObject(id));
+  }
+
+  kvGet(namespace: Uint8Array, key: Uint8Array): Promise<Uint8Array | null> {
+    return this.#enqueue(async () => {
+      const result = await this.#native.asyncKvGet(namespace, key);
+      if (result.kind !== "get") {
+        throw new ZovaError(
+          "ZOVA_MISUSE",
+          16,
+          "unexpected kv get result kind",
+        );
+      }
+      return result.value ?? null;
+    });
+  }
+
+  kvGetMany(
+    namespace: Uint8Array,
+    keys: readonly Uint8Array[],
+  ): Promise<(Uint8Array | null)[]> {
+    return this.#enqueue(async () => {
+      const result = await this.#native.asyncKvGetMany(namespace, [...keys]);
+      if (result.kind !== "many") {
+        throw new ZovaError(
+          "ZOVA_MISUSE",
+          16,
+          "unexpected kv get many result kind",
+        );
+      }
+      return (result.values ?? []).map((value) => value ?? null);
+    });
+  }
+
+  kvPut(namespace: Uint8Array, key: Uint8Array, value: Uint8Array): Promise<void> {
+    return this.#enqueue(async () => {
+      const result = await this.#native.asyncKvPut(namespace, key, value);
+      if (result.kind !== "void") {
+        throw new ZovaError(
+          "ZOVA_MISUSE",
+          16,
+          "unexpected kv put result kind",
+        );
+      }
+    });
+  }
+
+  kvPutMany(
+    namespace: Uint8Array,
+    entries: readonly KvEntry[],
+  ): Promise<void> {
+    return this.#enqueue(async () => {
+      const result = await this.#native.asyncKvPutMany(
+        namespace,
+        entries.map((entry) => ({
+          key: entry.key,
+          value: entry.value,
+        })),
+      );
+      if (result.kind !== "void") {
+        throw new ZovaError(
+          "ZOVA_MISUSE",
+          16,
+          "unexpected kv put many result kind",
+        );
+      }
+    });
+  }
+
+  kvDelete(namespace: Uint8Array, key: Uint8Array): Promise<void> {
+    return this.#enqueue(async () => {
+      const result = await this.#native.asyncKvDelete(namespace, key);
+      if (result.kind !== "void") {
+        throw new ZovaError(
+          "ZOVA_MISUSE",
+          16,
+          "unexpected kv delete result kind",
+        );
+      }
+    });
+  }
+
+  kvDeleteMany(namespace: Uint8Array, keys: readonly Uint8Array[]): Promise<void> {
+    return this.#enqueue(async () => {
+      const result = await this.#native.asyncKvDeleteMany(namespace, [...keys]);
+      if (result.kind !== "void") {
+        throw new ZovaError(
+          "ZOVA_MISUSE",
+          16,
+          "unexpected kv delete many result kind",
+        );
+      }
+    });
+  }
+
+  kvCount(namespace: Uint8Array): Promise<bigint> {
+    return this.#enqueue(async () => {
+      const result = await this.#native.asyncKvCount(namespace);
+      if (result.kind !== "count" || result.count === undefined) {
+        throw new ZovaError(
+          "ZOVA_MISUSE",
+          16,
+          "unexpected kv count result kind",
+        );
+      }
+      return result.count;
+    });
+  }
+
+  kvClearNamespace(namespace: Uint8Array): Promise<void> {
+    return this.#enqueue(async () => {
+      const result = await this.#native.asyncKvClearNamespace(namespace);
+      if (result.kind !== "void") {
+        throw new ZovaError(
+          "ZOVA_MISUSE",
+          16,
+          "unexpected kv clear namespace result kind",
+        );
+      }
+    });
   }
 
   putVectors(

@@ -16,6 +16,10 @@ use crate::graph::{
     GraphInfo, GraphNeighbor, GraphNeighborsOptions, GraphNode, GraphNodeInput, GraphWalkItem,
     GraphWalkOptions,
 };
+use crate::kv::{
+    kv_clear_namespace_raw, kv_count_raw, kv_delete_many_raw, kv_delete_raw, kv_get_many_raw,
+    kv_get_raw, kv_put_many_raw, kv_put_raw, KvEntry,
+};
 use crate::notification::{
     empty_notification, listen_raw, notify_raw, take_notification, Notification,
 };
@@ -390,6 +394,76 @@ impl SharedDatabase {
         self.inner
             .status_locked(unsafe { zova_sys::zova_object_get(&request) })?;
         Ok(take_buffer(&mut buffer))
+    }
+
+    /// Get one key-value entry. Returns `Ok(None)` when the key is absent.
+    pub fn kv_get(&self, namespace: &[u8], key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let _guard = self.inner.lock();
+        let db = self.inner.raw_ptr();
+        let status = |status| self.inner.status_locked(status);
+        kv_get_raw(db, status, namespace, key)
+    }
+
+    /// Get several key-value entries, preserving input order and duplicates.
+    /// Missing keys map to `None`.
+    pub fn kv_get_many(
+        &self,
+        namespace: &[u8],
+        keys: &[&[u8]],
+    ) -> Result<Vec<Option<Vec<u8>>>> {
+        let _guard = self.inner.lock();
+        let db = self.inner.raw_ptr();
+        let status = |status| self.inner.status_locked(status);
+        kv_get_many_raw(db, status, namespace, keys)
+    }
+
+    /// Insert or replace one key-value entry.
+    pub fn kv_put(&self, namespace: &[u8], key: &[u8], value: &[u8]) -> Result<()> {
+        let _guard = self.inner.lock();
+        let db = self.inner.raw_ptr();
+        let status = |status| self.inner.status_locked(status);
+        kv_put_raw(db, status, namespace, key, value)
+    }
+
+    /// Insert or replace several key-value entries in one atomic operation.
+    pub fn kv_put_many(&self, namespace: &[u8], entries: &[KvEntry<'_>]) -> Result<()> {
+        let _guard = self.inner.lock();
+        let db = self.inner.raw_ptr();
+        let status = |status| self.inner.status_locked(status);
+        kv_put_many_raw(db, status, namespace, entries)
+    }
+
+    /// Delete one key-value entry. Deleting a missing key is not an error.
+    pub fn kv_delete(&self, namespace: &[u8], key: &[u8]) -> Result<()> {
+        let _guard = self.inner.lock();
+        let db = self.inner.raw_ptr();
+        let status = |status| self.inner.status_locked(status);
+        kv_delete_raw(db, status, namespace, key)
+    }
+
+    /// Delete several key-value entries in one atomic operation. Missing keys
+    /// are ignored.
+    pub fn kv_delete_many(&self, namespace: &[u8], keys: &[&[u8]]) -> Result<()> {
+        let _guard = self.inner.lock();
+        let db = self.inner.raw_ptr();
+        let status = |status| self.inner.status_locked(status);
+        kv_delete_many_raw(db, status, namespace, keys)
+    }
+
+    /// Count entries in a namespace.
+    pub fn kv_count(&self, namespace: &[u8]) -> Result<u64> {
+        let _guard = self.inner.lock();
+        let db = self.inner.raw_ptr();
+        let status = |status| self.inner.status_locked(status);
+        kv_count_raw(db, status, namespace)
+    }
+
+    /// Delete every entry in a namespace. An empty namespace is not an error.
+    pub fn kv_clear_namespace(&self, namespace: &[u8]) -> Result<()> {
+        let _guard = self.inner.lock();
+        let db = self.inner.raw_ptr();
+        let status = |status| self.inner.status_locked(status);
+        kv_clear_namespace_raw(db, status, namespace)
     }
 
     pub fn read_object_range(&self, id: ObjectId, offset: u64, buffer: &mut [u8]) -> Result<usize> {
@@ -1297,6 +1371,68 @@ impl SharedDatabaseGuard<'_> {
         };
         self.inner
             .status_locked(unsafe { zova_sys::zova_database_exec(&request) })
+    }
+
+    /// Get one key-value entry. Returns `Ok(None)` when the key is absent.
+    pub fn kv_get(&mut self, namespace: &[u8], key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let db = self.inner.raw_ptr();
+        let status = |status| self.inner.status_locked(status);
+        kv_get_raw(db, status, namespace, key)
+    }
+
+    /// Get several key-value entries, preserving input order and duplicates.
+    /// Missing keys map to `None`.
+    pub fn kv_get_many(
+        &mut self,
+        namespace: &[u8],
+        keys: &[&[u8]],
+    ) -> Result<Vec<Option<Vec<u8>>>> {
+        let db = self.inner.raw_ptr();
+        let status = |status| self.inner.status_locked(status);
+        kv_get_many_raw(db, status, namespace, keys)
+    }
+
+    /// Insert or replace one key-value entry.
+    pub fn kv_put(&mut self, namespace: &[u8], key: &[u8], value: &[u8]) -> Result<()> {
+        let db = self.inner.raw_ptr();
+        let status = |status| self.inner.status_locked(status);
+        kv_put_raw(db, status, namespace, key, value)
+    }
+
+    /// Insert or replace several key-value entries in one atomic operation.
+    pub fn kv_put_many(&mut self, namespace: &[u8], entries: &[KvEntry<'_>]) -> Result<()> {
+        let db = self.inner.raw_ptr();
+        let status = |status| self.inner.status_locked(status);
+        kv_put_many_raw(db, status, namespace, entries)
+    }
+
+    /// Delete one key-value entry. Deleting a missing key is not an error.
+    pub fn kv_delete(&mut self, namespace: &[u8], key: &[u8]) -> Result<()> {
+        let db = self.inner.raw_ptr();
+        let status = |status| self.inner.status_locked(status);
+        kv_delete_raw(db, status, namespace, key)
+    }
+
+    /// Delete several key-value entries in one atomic operation. Missing keys
+    /// are ignored.
+    pub fn kv_delete_many(&mut self, namespace: &[u8], keys: &[&[u8]]) -> Result<()> {
+        let db = self.inner.raw_ptr();
+        let status = |status| self.inner.status_locked(status);
+        kv_delete_many_raw(db, status, namespace, keys)
+    }
+
+    /// Count entries in a namespace.
+    pub fn kv_count(&mut self, namespace: &[u8]) -> Result<u64> {
+        let db = self.inner.raw_ptr();
+        let status = |status| self.inner.status_locked(status);
+        kv_count_raw(db, status, namespace)
+    }
+
+    /// Delete every entry in a namespace. An empty namespace is not an error.
+    pub fn kv_clear_namespace(&mut self, namespace: &[u8]) -> Result<()> {
+        let db = self.inner.raw_ptr();
+        let status = |status| self.inner.status_locked(status);
+        kv_clear_namespace_raw(db, status, namespace)
     }
 
     pub fn notify(&mut self, channel: &str, payload: &str) -> Result<()> {
