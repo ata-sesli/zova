@@ -2904,6 +2904,124 @@ int main(int argc, char **argv) {
     expect_status(zova_object_writer_finish(&writer_finish_req), ZOVA_OK, "writer finish");
     expect_status(zova_object_writer_destroy(writer), ZOVA_OK, "writer destroy");
 
+    {
+        zova_kv_bytes settings_namespace = {(const uint8_t *)"settings", 8};
+        zova_kv_put_request kv_put = {
+            .db = db,
+            .ns = settings_namespace,
+            .key = (zova_kv_bytes){(const uint8_t *)"theme", 5},
+            .value = (zova_kv_bytes){(const uint8_t *)"dark", 4},
+        };
+        expect_status(zova_kv_put(&kv_put), ZOVA_OK, "kv put");
+
+        zova_kv_get_result kv_result = {0};
+        zova_kv_get_request kv_get = {
+            .db = db,
+            .ns = settings_namespace,
+            .key = (zova_kv_bytes){(const uint8_t *)"theme", 5},
+            .out_result = &kv_result,
+        };
+        expect_status(zova_kv_get(&kv_get), ZOVA_OK, "kv get");
+        if (!kv_result.found || kv_result.value.len != 4) {
+            fprintf(stderr, "kv get: unexpected result\n");
+            return 1;
+        }
+        expect_bytes(kv_result.value.data, (const uint8_t *)"dark", 4, "kv get value");
+        zova_kv_get_result_free(&kv_result);
+        if (kv_result.found) {
+            fprintf(stderr, "kv get result free: not idempotent\n");
+            return 1;
+        }
+
+        zova_kv_get_result kv_missing = {0};
+        zova_kv_get_request kv_get_missing = {
+            .db = db,
+            .ns = settings_namespace,
+            .key = (zova_kv_bytes){(const uint8_t *)"ghost", 5},
+            .out_result = &kv_missing,
+        };
+        expect_status(zova_kv_get(&kv_get_missing), ZOVA_OK, "kv get missing");
+        if (kv_missing.found) {
+            fprintf(stderr, "kv get missing: should not be found\n");
+            return 1;
+        }
+        zova_kv_get_result_free(&kv_missing);
+
+        zova_kv_get_many_results kv_many = {0};
+        zova_kv_bytes kv_keys[2] = {
+            {(const uint8_t *)"theme", 5},
+            {(const uint8_t *)"ghost", 5},
+        };
+        zova_kv_get_many_request kv_get_many = {
+            .db = db,
+            .ns = settings_namespace,
+            .keys = kv_keys,
+            .keys_len = 2,
+            .out_results = &kv_many,
+        };
+        expect_status(zova_kv_get_many(&kv_get_many), ZOVA_OK, "kv get many");
+        if (kv_many.len != 2 || !kv_many.items[0].found || kv_many.items[1].found) {
+            fprintf(stderr, "kv get many: unexpected alignment\n");
+            return 1;
+        }
+        zova_kv_get_many_results_free(&kv_many);
+        if (kv_many.len != 0) {
+            fprintf(stderr, "kv get many free: not idempotent\n");
+            return 1;
+        }
+
+        uint64_t kv_count = 0;
+        zova_kv_count_request kv_count_req = {
+            .db = db,
+            .ns = settings_namespace,
+            .out_count = &kv_count,
+        };
+        expect_status(zova_kv_count(&kv_count_req), ZOVA_OK, "kv count");
+        if (kv_count != 1) {
+            fprintf(stderr, "kv count: expected 1, got %llu\n", (unsigned long long)kv_count);
+            return 1;
+        }
+
+        zova_kv_put_entry kv_batch[2] = {
+            {(zova_kv_bytes){(const uint8_t *)"retries", 7}, (zova_kv_bytes){(const uint8_t *)"\x00\x01\x02", 3}},
+            {(zova_kv_bytes){(const uint8_t *)"theme", 5}, (zova_kv_bytes){(const uint8_t *)"light", 5}},
+        };
+        zova_kv_put_many_request kv_put_many = {
+            .db = db,
+            .ns = settings_namespace,
+            .entries = kv_batch,
+            .entries_len = 2,
+        };
+        expect_status(zova_kv_put_many(&kv_put_many), ZOVA_OK, "kv put many");
+
+        zova_kv_delete_many_request kv_delete_many = {
+            .db = db,
+            .ns = settings_namespace,
+            .keys = kv_keys,
+            .keys_len = 2,
+        };
+        expect_status(zova_kv_delete_many(&kv_delete_many), ZOVA_OK, "kv delete many");
+
+        kv_count_req.out_count = &kv_count;
+        expect_status(zova_kv_count(&kv_count_req), ZOVA_OK, "kv count after delete");
+        if (kv_count != 1) {
+            fprintf(stderr, "kv count after delete: expected 1, got %llu\n", (unsigned long long)kv_count);
+            return 1;
+        }
+
+        zova_kv_clear_namespace_request kv_clear = {
+            .db = db,
+            .ns = settings_namespace,
+        };
+        expect_status(zova_kv_clear_namespace(&kv_clear), ZOVA_OK, "kv clear namespace");
+        kv_count_req.out_count = &kv_count;
+        expect_status(zova_kv_count(&kv_count_req), ZOVA_OK, "kv count after clear");
+        if (kv_count != 0) {
+            fprintf(stderr, "kv count after clear: expected 0, got %llu\n", (unsigned long long)kv_count);
+            return 1;
+        }
+    }
+
     zova_object_delete_request missing_delete = {
         .db = db,
         .id = {{0}},

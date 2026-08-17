@@ -256,6 +256,7 @@ test {
     _ = @import("extension_dynamic.zig");
     _ = @import("graph_sql_tests.zig");
     _ = @import("graph_tests.zig");
+    _ = @import("kv_tests.zig");
     _ = @import("object_tests.zig");
     _ = @import("trgm_tests.zig");
     _ = @import("vector_tests.zig");

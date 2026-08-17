@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use napi::bindgen_prelude::{AsyncTask, Either3, Float32Array, Int8Array, Uint16Array, Uint8Array};
+use napi::bindgen_prelude::{AsyncTask, BigInt, Either3, Float32Array, Int8Array, Uint16Array, Uint8Array};
 use napi::{Env, Result, Task};
 use napi_derive::napi;
 
-use crate::database::{DatabaseState, NativeDatabase};
+use crate::database::{DatabaseState, NativeDatabase, NativeKvEntry};
 use crate::error::zova_error;
 use crate::graph::{
     target_type, NativeGraphEdgeInput, NativeGraphNodeInput, NativeGraphWalkItem,
@@ -433,6 +433,134 @@ impl Task for ObjectTask {
     }
 }
 
+enum KvTaskKind {
+    Get(Vec<u8>, Vec<u8>),
+    GetMany(Vec<u8>, Vec<Vec<u8>>),
+    Put(Vec<u8>, Vec<u8>, Vec<u8>),
+    PutMany(Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>),
+    Delete(Vec<u8>, Vec<u8>),
+    DeleteMany(Vec<u8>, Vec<Vec<u8>>),
+    Count(Vec<u8>),
+    ClearNamespace(Vec<u8>),
+}
+
+pub enum KvTaskOutput {
+    Void,
+    Get(Option<Vec<u8>>),
+    Many(Vec<Option<Vec<u8>>>),
+    Count(u64),
+}
+
+pub struct KvTask {
+    state: Option<DatabaseTaskState>,
+    kind: KvTaskKind,
+}
+
+impl Task for KvTask {
+    type Output = KvTaskOutput;
+    type JsValue = KvTaskValue;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let database = &self.state.as_ref().expect("task state").database;
+        match &self.kind {
+            KvTaskKind::Get(namespace, key) => database
+                .kv_get(namespace, key)
+                .map(KvTaskOutput::Get)
+                .map_err(zova_error),
+            KvTaskKind::GetMany(namespace, keys) => {
+                let key_refs: Vec<&[u8]> = keys.iter().map(|key| key.as_slice()).collect();
+                database
+                    .kv_get_many(namespace, &key_refs)
+                    .map(KvTaskOutput::Many)
+                    .map_err(zova_error)
+            }
+            KvTaskKind::Put(namespace, key, value) => database
+                .kv_put(namespace, key, value)
+                .map(|()| KvTaskOutput::Void)
+                .map_err(zova_error),
+            KvTaskKind::PutMany(namespace, entries) => {
+                let entries = entries
+                    .iter()
+                    .map(|(key, value)| zova::KvEntry {
+                        key: key.as_slice(),
+                        value: value.as_slice(),
+                    })
+                    .collect::<Vec<_>>();
+                database
+                    .kv_put_many(namespace, &entries)
+                    .map(|()| KvTaskOutput::Void)
+                    .map_err(zova_error)
+            }
+            KvTaskKind::Delete(namespace, key) => database
+                .kv_delete(namespace, key)
+                .map(|()| KvTaskOutput::Void)
+                .map_err(zova_error),
+            KvTaskKind::DeleteMany(namespace, keys) => {
+                let key_refs: Vec<&[u8]> = keys.iter().map(|key| key.as_slice()).collect();
+                database
+                    .kv_delete_many(namespace, &key_refs)
+                    .map(|()| KvTaskOutput::Void)
+                    .map_err(zova_error)
+            }
+            KvTaskKind::Count(namespace) => database
+                .kv_count(namespace)
+                .map(KvTaskOutput::Count)
+                .map_err(zova_error),
+            KvTaskKind::ClearNamespace(namespace) => database
+                .kv_clear_namespace(namespace)
+                .map(|()| KvTaskOutput::Void)
+                .map_err(zova_error),
+        }
+    }
+
+    fn resolve(&mut self, _: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(match output {
+            KvTaskOutput::Void => KvTaskValue {
+                kind: "void".into(),
+                value: None,
+                values: None,
+                count: None,
+            },
+            KvTaskOutput::Get(value) => KvTaskValue {
+                kind: "get".into(),
+                value: value.map(|value| Uint8Array::new(value)),
+                values: None,
+                count: None,
+            },
+            KvTaskOutput::Many(values) => KvTaskValue {
+                kind: "many".into(),
+                value: None,
+                values: Some(
+                    values
+                        .into_iter()
+                        .map(|value| value.map(|value| Uint8Array::new(value)))
+                        .collect(),
+                ),
+                count: None,
+            },
+            KvTaskOutput::Count(count) => KvTaskValue {
+                kind: "count".into(),
+                value: None,
+                values: None,
+                count: Some(BigInt::from(count)),
+            },
+        })
+    }
+
+    fn finally(mut self, _: Env) -> Result<()> {
+        self.state.take().expect("task state").finish();
+        Ok(())
+    }
+}
+
+#[napi(object)]
+pub struct KvTaskValue {
+    pub kind: String,
+    pub value: Option<Uint8Array>,
+    pub values: Option<Vec<Option<Uint8Array>>>,
+    pub count: Option<BigInt>,
+}
+
 #[napi(ts_return_type = "Promise<void>")]
 #[cfg_attr(test, allow(dead_code))]
 pub fn async_restore_backup(
@@ -605,6 +733,110 @@ impl NativeDatabase {
         Ok(AsyncTask::new(GraphWalkTask {
             state: Some(DatabaseTaskState::new(self)?),
             options,
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<KvTaskValue>")]
+    pub fn async_kv_get(
+        &self,
+        namespace: Uint8Array,
+        key: Uint8Array,
+    ) -> Result<AsyncTask<KvTask>> {
+        Ok(AsyncTask::new(KvTask {
+            state: Some(DatabaseTaskState::new(self)?),
+            kind: KvTaskKind::Get(namespace.to_vec(), key.to_vec()),
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<KvTaskValue>")]
+    pub fn async_kv_get_many(
+        &self,
+        namespace: Uint8Array,
+        keys: Vec<Uint8Array>,
+    ) -> Result<AsyncTask<KvTask>> {
+        Ok(AsyncTask::new(KvTask {
+            state: Some(DatabaseTaskState::new(self)?),
+            kind: KvTaskKind::GetMany(
+                namespace.to_vec(),
+                keys.into_iter().map(|key| key.to_vec()).collect(),
+            ),
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<KvTaskValue>")]
+    pub fn async_kv_put(
+        &self,
+        namespace: Uint8Array,
+        key: Uint8Array,
+        value: Uint8Array,
+    ) -> Result<AsyncTask<KvTask>> {
+        Ok(AsyncTask::new(KvTask {
+            state: Some(DatabaseTaskState::new(self)?),
+            kind: KvTaskKind::Put(namespace.to_vec(), key.to_vec(), value.to_vec()),
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<KvTaskValue>")]
+    pub fn async_kv_put_many(
+        &self,
+        namespace: Uint8Array,
+        entries: Vec<NativeKvEntry>,
+    ) -> Result<AsyncTask<KvTask>> {
+        Ok(AsyncTask::new(KvTask {
+            state: Some(DatabaseTaskState::new(self)?),
+            kind: KvTaskKind::PutMany(
+                namespace.to_vec(),
+                entries
+                    .into_iter()
+                    .map(|entry| (entry.key.to_vec(), entry.value.to_vec()))
+                    .collect(),
+            ),
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<KvTaskValue>")]
+    pub fn async_kv_delete(
+        &self,
+        namespace: Uint8Array,
+        key: Uint8Array,
+    ) -> Result<AsyncTask<KvTask>> {
+        Ok(AsyncTask::new(KvTask {
+            state: Some(DatabaseTaskState::new(self)?),
+            kind: KvTaskKind::Delete(namespace.to_vec(), key.to_vec()),
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<KvTaskValue>")]
+    pub fn async_kv_delete_many(
+        &self,
+        namespace: Uint8Array,
+        keys: Vec<Uint8Array>,
+    ) -> Result<AsyncTask<KvTask>> {
+        Ok(AsyncTask::new(KvTask {
+            state: Some(DatabaseTaskState::new(self)?),
+            kind: KvTaskKind::DeleteMany(
+                namespace.to_vec(),
+                keys.into_iter().map(|key| key.to_vec()).collect(),
+            ),
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<KvTaskValue>")]
+    pub fn async_kv_count(&self, namespace: Uint8Array) -> Result<AsyncTask<KvTask>> {
+        Ok(AsyncTask::new(KvTask {
+            state: Some(DatabaseTaskState::new(self)?),
+            kind: KvTaskKind::Count(namespace.to_vec()),
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<KvTaskValue>")]
+    pub fn async_kv_clear_namespace(
+        &self,
+        namespace: Uint8Array,
+    ) -> Result<AsyncTask<KvTask>> {
+        Ok(AsyncTask::new(KvTask {
+            state: Some(DatabaseTaskState::new(self)?),
+            kind: KvTaskKind::ClearNamespace(namespace.to_vec()),
         }))
     }
 }

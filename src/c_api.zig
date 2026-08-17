@@ -119,6 +119,18 @@ pub const zova_object_writer_create_request = internal.zova_object_writer_create
 pub const zova_object_writer_write_request = internal.zova_object_writer_write_request;
 pub const zova_object_writer_finish_request = internal.zova_object_writer_finish_request;
 pub const zova_object_writer_cancel_request = internal.zova_object_writer_cancel_request;
+pub const zova_kv_bytes = internal.zova_kv_bytes;
+pub const zova_kv_get_result = internal.zova_kv_get_result;
+pub const zova_kv_get_many_results = internal.zova_kv_get_many_results;
+pub const zova_kv_put_entry = internal.zova_kv_put_entry;
+pub const zova_kv_get_request = internal.zova_kv_get_request;
+pub const zova_kv_get_many_request = internal.zova_kv_get_many_request;
+pub const zova_kv_put_request = internal.zova_kv_put_request;
+pub const zova_kv_put_many_request = internal.zova_kv_put_many_request;
+pub const zova_kv_delete_request = internal.zova_kv_delete_request;
+pub const zova_kv_delete_many_request = internal.zova_kv_delete_many_request;
+pub const zova_kv_count_request = internal.zova_kv_count_request;
+pub const zova_kv_clear_namespace_request = internal.zova_kv_clear_namespace_request;
 pub const zova_vector_collection_create_request = internal.zova_vector_collection_create_request;
 pub const zova_vector_collection_exists_request = internal.zova_vector_collection_exists_request;
 pub const zova_vector_put_request = internal.zova_vector_put_request;
@@ -217,6 +229,14 @@ export fn zova_status_name(status: c_int) callconv(.c) [*:0]const u8 {
 
 export fn zova_buffer_free(buffer: ?*zova_buffer) callconv(.c) void {
     return internal.zova_buffer_free(buffer);
+}
+
+export fn zova_kv_get_result_free(result: ?*zova_kv_get_result) callconv(.c) void {
+    return internal.zova_kv_get_result_free(result);
+}
+
+export fn zova_kv_get_many_results_free(results: ?*zova_kv_get_many_results) callconv(.c) void {
+    return internal.zova_kv_get_many_results_free(results);
 }
 
 export fn zova_message_free(message: ?*zova_message) callconv(.c) void {
@@ -579,6 +599,38 @@ export fn zova_object_size(request: ?*const zova_object_size_request) callconv(.
 
 export fn zova_object_chunk_count(request: ?*const zova_object_chunk_count_request) callconv(.c) zova_status {
     return internal.zova_object_chunk_count(request);
+}
+
+export fn zova_kv_get(request: ?*const zova_kv_get_request) callconv(.c) zova_status {
+    return internal.zova_kv_get(request);
+}
+
+export fn zova_kv_get_many(request: ?*const zova_kv_get_many_request) callconv(.c) zova_status {
+    return internal.zova_kv_get_many(request);
+}
+
+export fn zova_kv_put(request: ?*const zova_kv_put_request) callconv(.c) zova_status {
+    return internal.zova_kv_put(request);
+}
+
+export fn zova_kv_put_many(request: ?*const zova_kv_put_many_request) callconv(.c) zova_status {
+    return internal.zova_kv_put_many(request);
+}
+
+export fn zova_kv_delete(request: ?*const zova_kv_delete_request) callconv(.c) zova_status {
+    return internal.zova_kv_delete(request);
+}
+
+export fn zova_kv_delete_many(request: ?*const zova_kv_delete_many_request) callconv(.c) zova_status {
+    return internal.zova_kv_delete_many(request);
+}
+
+export fn zova_kv_count(request: ?*const zova_kv_count_request) callconv(.c) zova_status {
+    return internal.zova_kv_count(request);
+}
+
+export fn zova_kv_clear_namespace(request: ?*const zova_kv_clear_namespace_request) callconv(.c) zova_status {
+    return internal.zova_kv_clear_namespace(request);
 }
 
 export fn zova_object_manifest_get(request: ?*const zova_object_manifest_get_request) callconv(.c) zova_status {

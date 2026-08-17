@@ -12,6 +12,7 @@ mod database;
 mod error;
 mod extension;
 mod graph;
+mod kv;
 mod notification;
 mod object;
 mod shared;
@@ -29,6 +30,7 @@ pub use graph::{
     GraphNeighborDirection, GraphNeighborsOptions, GraphNode, GraphNodeInput, GraphTargetType,
     GraphWalkItem, GraphWalkOptions, DEFAULT_GRAPH_NAME,
 };
+pub use kv::KvEntry;
 pub use notification::{Notification, Subscription};
 pub use object::{
     object_chunk_id, object_id, ObjectChunkId, ObjectId, ObjectManifest, ObjectManifestChunk,

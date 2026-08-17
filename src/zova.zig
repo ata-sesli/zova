@@ -44,6 +44,7 @@ const extension_impl = @import("extension.zig");
 const fastcdc = @import("object_fastcdc.zig");
 const graph_impl = @import("graph.zig");
 const graph_sql = @import("graph_sql.zig");
+const kv_impl = @import("kv.zig");
 const notify_impl = @import("notify.zig");
 const object_impl = @import("object.zig");
 const sqlite = @import("sqlite.zig");
@@ -57,6 +58,7 @@ const metadata_table = "_zova_meta";
 const objects_table = "_zova_objects";
 const chunks_table = "_zova_chunks";
 const object_chunks_table = "_zova_object_chunks";
+const kv_table = kv_impl.kv_table;
 const bound_stores_table = "_zova_bound_stores";
 const magic_value = "zova";
 const format_version = version.format_version;
@@ -2151,6 +2153,72 @@ pub const Database = struct {
         committed = true;
     }
 
+    /// Load one transactional key-value entry.
+    ///
+    /// Missing keys return `found = false`, not an error. Byte comparison is
+    /// exact; no text normalization or implicit encoding is applied. The
+    /// returned value is caller-owned when `found` is true.
+    pub fn kvGet(self: *Database, allocator: std.mem.Allocator, namespace: []const u8, key: []const u8) Error!kv_impl.GetResult {
+        var kv = self.kvDatabase();
+        return kv.get(allocator, namespace, key);
+    }
+
+    /// Load many transactional key-value entries.
+    ///
+    /// Results align with the input key order and preserve duplicate keys
+    /// exactly. Missing keys return `found = false`.
+    pub fn kvGetMany(self: *Database, allocator: std.mem.Allocator, namespace: []const u8, keys: []const []const u8) Error![]kv_impl.GetResult {
+        var kv = self.kvDatabase();
+        return kv.getMany(allocator, namespace, keys);
+    }
+
+    /// Insert or replace one transactional key-value entry.
+    pub fn kvPut(self: *Database, namespace: []const u8, key: []const u8, value: []const u8) Error!void {
+        var kv = self.kvDatabase();
+        return kv.put(namespace, key, value);
+    }
+
+    /// Insert or replace many transactional key-value entries atomically.
+    ///
+    /// The whole batch validates before any mutation and either commits
+    /// together or rolls back together. Empty batches succeed.
+    pub fn kvPutMany(self: *Database, namespace: []const u8, entries: []const kv_impl.PutEntry) Error!void {
+        var kv = self.kvDatabase();
+        return kv.putMany(namespace, entries);
+    }
+
+    /// Delete one transactional key-value entry.
+    ///
+    /// Missing keys are ignored for replay safety.
+    pub fn kvDelete(self: *Database, namespace: []const u8, key: []const u8) Error!void {
+        var kv = self.kvDatabase();
+        return kv.delete(namespace, key);
+    }
+
+    /// Delete many transactional key-value entries atomically.
+    ///
+    /// Missing keys are ignored. Empty batches succeed.
+    pub fn kvDeleteMany(self: *Database, namespace: []const u8, keys: []const []const u8) Error!void {
+        var kv = self.kvDatabase();
+        return kv.deleteMany(namespace, keys);
+    }
+
+    /// Return the number of entries in one transactional key-value namespace.
+    pub fn kvCount(self: *Database, namespace: []const u8) Error!u64 {
+        var kv = self.kvDatabase();
+        return kv.count(namespace);
+    }
+
+    /// Delete every entry in one transactional key-value namespace.
+    pub fn kvClearNamespace(self: *Database, namespace: []const u8) Error!void {
+        var kv = self.kvDatabase();
+        return kv.clearNamespace(namespace);
+    }
+
+    fn kvDatabase(self: *Database) kv_impl.Database {
+        return .{ .sqlite_db = &self.sqlite_db };
+    }
+
     fn beginBoundObjectMutation(self: *Database) Error!bool {
         if (self.bound_object_store == null or hasActiveTransaction(&self.sqlite_db)) return false;
         try self.sqlite_db.beginImmediate();
@@ -2426,6 +2494,7 @@ fn initializeZovaSchema(db: *sqlite.Database) sqlite.Error!void {
     try initializeObjectSchema(db);
     try initializeVectorSchema(db);
     try initializeGraphSchema(db);
+    try initializeKvSchema(db);
 }
 
 fn enableForeignKeys(db: *sqlite.Database) sqlite.Error!void {
@@ -2485,6 +2554,10 @@ fn initializeGraphSchema(db: *sqlite.Database) sqlite.Error!void {
     try db.exec(graph_impl.graph_edges_from_node_type_index_sql ++ ";");
     try db.exec(graph_impl.graph_edges_to_node_index_sql ++ ";");
     try db.exec(graph_impl.graph_edges_to_node_type_index_sql ++ ";");
+}
+
+fn initializeKvSchema(db: *sqlite.Database) sqlite.Error!void {
+    try db.exec(kv_impl.kv_schema_sql ++ ";");
 }
 
 fn markAsObjectStore(db: *sqlite.Database) Error!void {
@@ -3837,6 +3910,7 @@ fn verifyCurrentDatabase(db: *Database) Error!void {
     try verifyStoredObjects(db);
     try verifyStoredChunks(db);
     try verifyStoredVectors(db);
+    try verifyStoredKv(db);
 }
 
 fn verifyQuickCheck(db: *Database) Error!void {
@@ -3931,6 +4005,22 @@ fn verifyStoredVectors(db: *Database) Error!void {
 
         var vector = try db.getVector(allocator, collection_name, vector_id);
         defer vector.deinit(allocator);
+    }
+}
+
+fn verifyStoredKv(db: *Database) Error!void {
+    var stmt = try prepareSchemaSql(&db.sqlite_db,
+        \\select namespace, key, value from _zova_kv order by namespace, key
+    , .{});
+    defer stmt.deinit();
+
+    while ((try stmt.step()) == .row) {
+        const namespace = stmt.columnBlob(0);
+        const key = stmt.columnBlob(1);
+        const value = stmt.columnBlob(2);
+        _ = namespace;
+        _ = key;
+        _ = value;
     }
 }
 

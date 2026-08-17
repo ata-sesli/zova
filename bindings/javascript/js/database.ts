@@ -19,7 +19,7 @@ import {
   type ObjectManifestChunkInput,
 } from "./object.js";
 import { Statement } from "./statement.js";
-import type { ExtensionInfo, OpenOptions } from "./types.js";
+import type { ExtensionInfo, KvEntry, OpenOptions } from "./types.js";
 import type {
   Vector,
   VectorCollectionInfo,
@@ -239,6 +239,54 @@ export class Database {
 
   totalChanges(): bigint {
     return callNative(() => this.#native.totalChanges());
+  }
+
+  kvGet(namespace: Uint8Array, key: Uint8Array): Uint8Array | null {
+    return callNative(() => this.#native.kvGet(namespace, key));
+  }
+
+  kvGetMany(
+    namespace: Uint8Array,
+    keys: readonly Uint8Array[],
+  ): (Uint8Array | null)[] {
+    return callNative(() =>
+      this.#native.kvGetMany(namespace, [...keys]).map((value) => value ?? null),
+    );
+  }
+
+  kvPut(namespace: Uint8Array, key: Uint8Array, value: Uint8Array): void {
+    callNative(() => this.#native.kvPut(namespace, key, value));
+  }
+
+  kvPutMany(
+    namespace: Uint8Array,
+    entries: readonly KvEntry[],
+  ): void {
+    callNative(() =>
+      this.#native.kvPutMany(
+        namespace,
+        entries.map((entry) => ({
+          key: entry.key,
+          value: entry.value,
+        })),
+      ),
+    );
+  }
+
+  kvDelete(namespace: Uint8Array, key: Uint8Array): void {
+    callNative(() => this.#native.kvDelete(namespace, key));
+  }
+
+  kvDeleteMany(namespace: Uint8Array, keys: readonly Uint8Array[]): void {
+    callNative(() => this.#native.kvDeleteMany(namespace, [...keys]));
+  }
+
+  kvCount(namespace: Uint8Array): bigint {
+    return callNative(() => this.#native.kvCount(namespace));
+  }
+
+  kvClearNamespace(namespace: Uint8Array): void {
+    callNative(() => this.#native.kvClearNamespace(namespace));
   }
 
   putObject(data: Uint8Array): Uint8Array {

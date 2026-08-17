@@ -63,6 +63,8 @@ const (
 	StatusExtensionInvalid         Status = C.ZOVA_EXTENSION_INVALID
 	StatusExtensionIncompatible    Status = C.ZOVA_EXTENSION_INCOMPATIBLE
 	StatusExtensionUnavailable     Status = C.ZOVA_EXTENSION_UNAVAILABLE
+	StatusKVTooLarge               Status = C.ZOVA_KV_TOO_LARGE
+	StatusKVCorrupt                Status = C.ZOVA_KV_CORRUPT
 )
 
 // Step is the result of advancing a prepared statement.

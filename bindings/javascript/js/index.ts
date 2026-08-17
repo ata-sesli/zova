@@ -40,7 +40,7 @@ export type {
   ObjectManifestChunk,
   ObjectManifestChunkInput,
 } from "./object.js";
-export type { ColumnType, ExtensionInfo, OpenOptions } from "./types.js";
+export type { ColumnType, ExtensionInfo, KvEntry, OpenOptions } from "./types.js";
 export type {
   Vector,
   VectorCollectionInfo,
