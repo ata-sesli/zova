@@ -7,8 +7,9 @@
 //!
 //! Zova is currently pre-1.0, and internal `.zova` format compatibility is
 //! not preserved between experimental format versions. The current v0.22
-//! development format is version `9`: `_zova_meta.format_version = '9'` plus
-//! the required private object, vector, graph, and extension registry schemas.
+//! development format is version `10`: `_zova_meta.format_version = '10'` plus
+//! the required private object, vector, graph, key-value, and extension
+//! registry schemas.
 //! `Database.open` is intentionally non-mutating: it validates the file and
 //! rejects old, future, incomplete, or invalid private schemas instead of
 //! repairing or migrating them.
@@ -569,8 +570,8 @@ pub const Database = struct {
     /// Create a new initialized `.zova` database.
     ///
     /// This never overwrites an existing file. The file is initialized with the
-    /// private `_zova_meta` table, format version `9`, and the required
-    /// object, vector, graph, and extension registry schemas.
+    /// private `_zova_meta` table, format version `10`, and the required
+    /// object, vector, graph, key-value, and extension registry schemas.
     pub fn create(path: [:0]const u8) Error!Database {
         return createWithOptionsAndExtensions(path, .{}, bundledExtensionRegistry());
     }
@@ -4048,6 +4049,7 @@ fn validateZovaSchema(db: *sqlite.Database) Error!void {
     try validateObjectSchema(db);
     try validateVectorSchema(db);
     try validateGraphSchema(db);
+    try validateKvSchema(db);
     try validateOptionalBoundStoreSchema(db);
 }
 
@@ -4153,6 +4155,15 @@ fn validateGraphSchema(db: *sqlite.Database) Error!void {
         "payload",
     };
     try validateRequiredTable(db, graph_impl.graph_edges_table, &edge_columns, graph_impl.graph_edges_schema_sql);
+}
+
+fn validateKvSchema(db: *sqlite.Database) Error!void {
+    const kv_columns = [_][]const u8{
+        "namespace",
+        "key",
+        "value",
+    };
+    try validateRequiredTable(db, kv_impl.kv_table, &kv_columns, kv_impl.kv_schema_sql);
 }
 
 fn validateRequiredTable(
@@ -4840,7 +4851,7 @@ test "created zova database stores metadata" {
 }
 
 test "current format reserves graph store metadata" {
-    try std.testing.expectEqualStrings("9", format_version);
+    try std.testing.expectEqualStrings("10", format_version);
     try std.testing.expect(std.mem.indexOf(u8, bound_stores_schema_sql, "'graph_store'") != null);
     try std.testing.expect(std.mem.indexOf(u8, bound_stores_schema_sql, "graph_epoch integer") != null);
 
@@ -4869,7 +4880,7 @@ test "create graph store writes metadata and rejects main database open" {
         defer raw.deinit();
 
         try testingExpectScalarText(&raw, "select value from _zova_meta where key = 'magic'", "zova");
-        try testingExpectScalarText(&raw, "select value from _zova_meta where key = 'format_version'", "9");
+        try testingExpectScalarText(&raw, "select value from _zova_meta where key = 'format_version'", "10");
         try testingExpectScalarText(&raw, "select value from _zova_meta where key = 'store_role'", "graph_store");
         try testingExpectScalarText(&raw, "select value from _zova_meta where key = 'graph_epoch'", "0");
 
@@ -6257,6 +6268,9 @@ test "older main graph and vector fixtures are rejected without mutation" {
         .{ .path = "tests/fixtures/format-8.zova", .role = StorageRole.main },
         .{ .path = "tests/fixtures/empty-graph-store-format-8.zova", .role = StorageRole.graph },
         .{ .path = "tests/fixtures/empty-vector-store-format-8.zova", .role = StorageRole.vector },
+        .{ .path = "tests/fixtures/format-9.zova", .role = StorageRole.main },
+        .{ .path = "tests/fixtures/empty-graph-store-format-9.zova", .role = StorageRole.graph },
+        .{ .path = "tests/fixtures/empty-vector-store-format-9.zova", .role = StorageRole.vector },
     };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -6271,14 +6285,14 @@ test "older main graph and vector fixtures are rejected without mutation" {
             .main => try std.testing.expectError(error.UnsupportedZovaVersion, Database.open(copy_path)),
             .graph => {
                 var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
-                const main_path = try std.fmt.bufPrintZ(&main_buffer, ".zig-cache/tmp/{s}/format-9-main-graph-{d}.zova", .{ tmp.sub_path[0..], index });
+                const main_path = try std.fmt.bufPrintZ(&main_buffer, ".zig-cache/tmp/{s}/format-10-main-graph-{d}.zova", .{ tmp.sub_path[0..], index });
                 var db = try Database.create(main_path);
                 defer db.deinit();
                 try std.testing.expectError(error.UnsupportedZovaVersion, db.bindGraphStore(copy_path));
             },
             .vector => {
                 var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
-                const main_path = try std.fmt.bufPrintZ(&main_buffer, ".zig-cache/tmp/{s}/format-9-main-vector-{d}.zova", .{ tmp.sub_path[0..], index });
+                const main_path = try std.fmt.bufPrintZ(&main_buffer, ".zig-cache/tmp/{s}/format-10-main-vector-{d}.zova", .{ tmp.sub_path[0..], index });
                 var db = try Database.create(main_path);
                 defer db.deinit();
                 try std.testing.expectError(error.UnsupportedZovaVersion, db.bindVectorStore(copy_path));

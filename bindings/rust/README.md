@@ -68,8 +68,8 @@ users still need:
 
 Zova is still pre-1.0. The Rust API, C ABI, and `.zova` format are usable, but
 they may evolve before the 1.0 line. The current `.zova` `format_version` is
-`9`. Zova 0.25 does not migrate format-8 databases in place; keep a compatible
-backup and export data with a format-8 build before creating a format-9 database.
+`10`. Zova does not migrate older format databases in place; keep a compatible
+backup and export data with an older build before creating a format-10 database.
 
 The v0.25 opaque-key graph, payload, topology-scan, prepared-build, and generic
 fresh-build session APIs are available through raw `zova-sys`. The safe `zova`
