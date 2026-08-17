@@ -23,19 +23,28 @@ fn database_kv_crud_preserves_exact_bytes() {
     db.kv_put(b"settings", b"retries", b"\x00\x01\x02").unwrap();
     db.kv_put(b"settings", b"empty", b"").unwrap();
 
-    assert_eq!(db.kv_get(b"settings", b"theme").unwrap().as_deref(), Some(&b"dark"[..]));
+    assert_eq!(
+        db.kv_get(b"settings", b"theme").unwrap().as_deref(),
+        Some(&b"dark"[..])
+    );
     assert_eq!(
         db.kv_get(b"settings", b"retries").unwrap().as_deref(),
         Some(&b"\x00\x01\x02"[..])
     );
-    assert_eq!(db.kv_get(b"settings", b"empty").unwrap().as_deref(), Some(&b""[..]));
+    assert_eq!(
+        db.kv_get(b"settings", b"empty").unwrap().as_deref(),
+        Some(&b""[..])
+    );
     assert_eq!(db.kv_get(b"settings", b"ghost").unwrap(), None);
     assert_eq!(db.kv_get(b"other", b"theme").unwrap(), None);
 
     assert_eq!(db.kv_count(b"settings").unwrap(), 3);
 
     db.kv_put(b"settings", b"theme", b"light").unwrap();
-    assert_eq!(db.kv_get(b"settings", b"theme").unwrap().as_deref(), Some(&b"light"[..]));
+    assert_eq!(
+        db.kv_get(b"settings", b"theme").unwrap().as_deref(),
+        Some(&b"light"[..])
+    );
     assert_eq!(db.kv_count(b"settings").unwrap(), 3);
 
     db.kv_delete(b"settings", b"theme").unwrap();
@@ -89,7 +98,10 @@ fn database_kv_put_many_is_atomic_and_delete_many_ignores_missing() {
 
     db.kv_delete_many(b"ns", &[b"k1", b"ghost", b"k3"]).unwrap();
     assert_eq!(db.kv_count(b"ns").unwrap(), 1);
-    assert_eq!(db.kv_get(b"ns", b"k2").unwrap().as_deref(), Some(&b"v2"[..]));
+    assert_eq!(
+        db.kv_get(b"ns", b"k2").unwrap().as_deref(),
+        Some(&b"v2"[..])
+    );
 
     db.kv_put_many(b"ns", &[]).unwrap();
     assert_eq!(db.kv_count(b"ns").unwrap(), 1);
@@ -127,17 +139,26 @@ fn shared_database_kv_crud_and_many() {
 
     db.kv_put(b"cfg", b"mode", b"fast").unwrap();
     db.kv_put(b"cfg", b"limit", b"10").unwrap();
-    assert_eq!(db.kv_get(b"cfg", b"mode").unwrap().as_deref(), Some(&b"fast"[..]));
+    assert_eq!(
+        db.kv_get(b"cfg", b"mode").unwrap().as_deref(),
+        Some(&b"fast"[..])
+    );
     assert_eq!(db.kv_get(b"cfg", b"nope").unwrap(), None);
     assert_eq!(db.kv_count(b"cfg").unwrap(), 2);
 
-    let results = db.kv_get_many(b"cfg", &[b"mode", b"nope", b"limit"]).unwrap();
+    let results = db
+        .kv_get_many(b"cfg", &[b"mode", b"nope", b"limit"])
+        .unwrap();
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].as_deref(), Some(&b"fast"[..]));
     assert_eq!(results[1], None);
     assert_eq!(results[2].as_deref(), Some(&b"10"[..]));
 
-    db.kv_put_many(b"cfg", &[KvEntry::new(b"x", b"1"), KvEntry::new(b"y", b"2")]).unwrap();
+    db.kv_put_many(
+        b"cfg",
+        &[KvEntry::new(b"x", b"1"), KvEntry::new(b"y", b"2")],
+    )
+    .unwrap();
     assert_eq!(db.kv_count(b"cfg").unwrap(), 4);
 
     db.kv_delete_many(b"cfg", &[b"x", b"nope", b"y"]).unwrap();
@@ -161,7 +182,10 @@ fn shared_database_guard_kv_joins_transaction() {
         guard.kv_delete(b"ns", b"a").unwrap();
         guard.kv_put(b"ns", b"c", b"3").unwrap();
         assert_eq!(guard.kv_count(b"ns").unwrap(), 2);
-        assert_eq!(guard.kv_get(b"ns", b"c").unwrap().as_deref(), Some(&b"3"[..]));
+        assert_eq!(
+            guard.kv_get(b"ns", b"c").unwrap().as_deref(),
+            Some(&b"3"[..])
+        );
         let results = guard.kv_get_many(b"ns", &[b"b", b"ghost", b"c"]).unwrap();
         assert_eq!(results[0].as_deref(), Some(&b"2"[..]));
         assert_eq!(results[1], None);

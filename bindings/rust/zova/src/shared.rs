@@ -406,11 +406,7 @@ impl SharedDatabase {
 
     /// Get several key-value entries, preserving input order and duplicates.
     /// Missing keys map to `None`.
-    pub fn kv_get_many(
-        &self,
-        namespace: &[u8],
-        keys: &[&[u8]],
-    ) -> Result<Vec<Option<Vec<u8>>>> {
+    pub fn kv_get_many(&self, namespace: &[u8], keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>> {
         let _guard = self.inner.lock();
         let db = self.inner.raw_ptr();
         let status = |status| self.inner.status_locked(status);

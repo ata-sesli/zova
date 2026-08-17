@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use napi::bindgen_prelude::{AsyncTask, BigInt, Either3, Float32Array, Int8Array, Uint16Array, Uint8Array};
+use napi::bindgen_prelude::{
+    AsyncTask, BigInt, Either3, Float32Array, Int8Array, Uint16Array, Uint8Array,
+};
 use napi::{Env, Result, Task};
 use napi_derive::napi;
 
@@ -830,10 +832,7 @@ impl NativeDatabase {
     }
 
     #[napi(ts_return_type = "Promise<KvTaskValue>")]
-    pub fn async_kv_clear_namespace(
-        &self,
-        namespace: Uint8Array,
-    ) -> Result<AsyncTask<KvTask>> {
+    pub fn async_kv_clear_namespace(&self, namespace: Uint8Array) -> Result<AsyncTask<KvTask>> {
         Ok(AsyncTask::new(KvTask {
             state: Some(DatabaseTaskState::new(self)?),
             kind: KvTaskKind::ClearNamespace(namespace.to_vec()),

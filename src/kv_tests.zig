@@ -168,6 +168,40 @@ test "kv empty get_many returns an empty aligned result" {
     try std.testing.expectEqual(@as(usize, 0), results.len);
 }
 
+test "kv empty mutation batches are lock-free no-ops under writer contention" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "kv-empty-busy.zova");
+
+    {
+        var setup = try Database.create(db_path);
+        defer setup.deinit();
+    }
+
+    var writer = try Database.open(db_path);
+    defer writer.deinit();
+    var reader = try Database.open(db_path);
+    defer reader.deinit();
+
+    try writer.sqlite_db.beginImmediate();
+    defer writer.sqlite_db.rollback() catch {};
+
+    const entries = [_]kv_impl.PutEntry{};
+    try reader.kvPutMany("n", &entries);
+
+    const keys = [_][]const u8{};
+    try reader.kvDeleteMany("n", &keys);
+
+    const results = try reader.kvGetMany(std.testing.allocator, "n", &keys);
+    defer {
+        for (results) |item| item.deinit(std.testing.allocator);
+        std.testing.allocator.free(results);
+    }
+    try std.testing.expectEqual(@as(usize, 0), results.len);
+}
+
 test "kv put_many and delete_many batches validate completely and mutate atomically" {
     var db = try Database.createMemory();
     defer db.deinit();
