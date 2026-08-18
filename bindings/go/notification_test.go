@@ -140,6 +140,50 @@ func TestSubscriptionCloseAndValidation(t *testing.T) {
 	}
 }
 
+func TestInMemoryKvBatchEmitsOneAggregateNotification(t *testing.T) {
+	db, err := CreateMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	sub, err := db.Listen("cache:search-results")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Close()
+
+	must(t, db.BeginImmediate())
+	must(t, db.KvPutMany([]byte("search-results"), []KvEntry{
+		{Key: []byte("result-1"), Value: []byte("one")},
+		{Key: []byte("result-2"), Value: []byte("two")},
+	}))
+	must(t, db.Notify("cache:search-results", "generation:42"))
+	if note, err := sub.TryReceive(); err != nil || note != nil {
+		t.Fatalf("notification before commit = %#v, %v", note, err)
+	}
+	must(t, db.Commit())
+
+	note, err := sub.TryReceive()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if note == nil || note.Channel != "cache:search-results" || note.Payload != "generation:42" || note.Sequence != 1 {
+		t.Fatalf("unexpected aggregate notification: %#v", note)
+	}
+	if note, err := sub.TryReceive(); err != nil || note != nil {
+		t.Fatalf("unexpected second notification: %#v, %v", note, err)
+	}
+
+	value, err := db.KvGet([]byte("search-results"), []byte("result-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(value) != "one" {
+		t.Fatalf("stored value = %q", value)
+	}
+}
+
 func TestNotificationObjectMetadataWorkflow(t *testing.T) {
 	path := tempZovaPath(t, "notification-object-workflow")
 	db, err := Create(path)
