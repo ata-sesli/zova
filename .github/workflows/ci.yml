@@ -30,6 +30,7 @@ jobs:
       - run: zig build e2e
       - run: zig build c-abi
       - run: zig build c-abi-test
+      - run: zig build bench-notifications-c
       - run: zig build cli-test
       - run: zig build test -Doptimize=ReleaseSafe
 

@@ -712,14 +712,14 @@ events, timing only the drain).
 Core (`zig build bench-notifications`):
 
 ```
-commit_no_notify                    median_ms=0.005254 mad_ms=0.000054 p95_ms=0.005439
-commit_one_notify                   median_ms=0.007486 mad_ms=0.001404 p95_ms=0.009477
-commit_one_notify_no_receive        median_ms=0.004749 mad_ms=0.000034 p95_ms=0.004821
-commit_256_four_listeners           median_ms=1.918638 mad_ms=0.039030 p95_ms=2.988580
-kv_batch_4096_commit_no_notify      median_ms=17.428253 mad_ms=0.656750 p95_ms=19.448615
-kv_batch_4096_commit_one_notify     median_ms=18.179680 mad_ms=0.488266 p95_ms=20.660117
-receive_256_prefilled               median_ms=0.307307 mad_ms=0.002736 p95_ms=0.484760
-notify_256_overflow_drop_oldest     median_ms=1.662944 mad_ms=0.014854 p95_ms=2.165695
+commit_no_notify                    median_ms=0.003578 mad_ms=0.000126 p95_ms=0.003773
+commit_one_notify                   median_ms=0.008493 mad_ms=0.000762 p95_ms=0.011308
+commit_one_notify_no_receive        median_ms=0.007241 mad_ms=0.000070 p95_ms=0.007488
+commit_256_four_listeners           median_ms=1.927514 mad_ms=0.050987 p95_ms=3.007601
+kv_batch_4096_commit_no_notify      median_ms=19.161459 mad_ms=0.754627 p95_ms=21.712915
+kv_batch_4096_commit_one_notify     median_ms=16.633315 mad_ms=0.726236 p95_ms=23.738989
+receive_256_prefilled               median_ms=0.309051 mad_ms=0.001663 p95_ms=0.375438
+notify_256_overflow_drop_oldest     median_ms=1.658519 mad_ms=0.010386 p95_ms=2.300395
 ```
 
 C ABI (`zig build bench-notifications-c`):

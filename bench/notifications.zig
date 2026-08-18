@@ -143,11 +143,13 @@ pub fn main(init: std.process.Init) !void {
     }
 
     {
-        // Baseline for the aggregate case: large atomic KV batch, no notification.
+        // One shared deterministic unique entry array for the aggregate case so
+        // the no-notify and one-notify sides run the same batch. Keys are
+        // `k-0` through `k-<kv_batch_entries - 1>` to match every binding.
         const entries = try allocator.alloc(zova.KvPutEntry, kv_batch_entries);
-        for (entries) |*entry| {
+        for (entries, 0..) |*entry, index| {
             entry.* = .{
-                .key = try std.fmt.allocPrint(allocator, "k-{d}", .{nextRandom(&state) & 0xffff}),
+                .key = try std.fmt.allocPrint(allocator, "k-{d}", .{index}),
                 .value = "v",
             };
         }
@@ -159,17 +161,7 @@ pub fn main(init: std.process.Init) !void {
             if (index >= warmups) samples_slice[index - warmups] = elapsedMs(start);
         }
         printDistribution("kv_batch_4096_commit_no_notify", &samples_slice);
-    }
 
-    {
-        // One aggregate notification after a large atomic KV batch, then receive.
-        const entries = try allocator.alloc(zova.KvPutEntry, kv_batch_entries);
-        for (entries) |*entry| {
-            entry.* = .{
-                .key = try std.fmt.allocPrint(allocator, "k-{d}", .{nextRandom(&state) & 0xffff}),
-                .value = "v",
-            };
-        }
         var sub = try db.listen("cache:search-results");
         defer sub.deinit();
         for (0..warmups + samples) |index| {
