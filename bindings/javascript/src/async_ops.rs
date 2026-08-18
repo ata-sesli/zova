@@ -12,6 +12,7 @@ use crate::graph::{
     target_type, NativeGraphEdgeInput, NativeGraphNodeInput, NativeGraphWalkItem,
     NativeGraphWalkOptions,
 };
+use crate::subscription::NativeSubscription;
 use crate::vector::{native_search_results, NativeVectorInput, NativeVectorSearchResult};
 
 #[cfg_attr(test, allow(dead_code))]
@@ -837,5 +838,74 @@ impl NativeDatabase {
             state: Some(DatabaseTaskState::new(self)?),
             kind: KvTaskKind::ClearNamespace(namespace.to_vec()),
         }))
+    }
+
+    #[napi(ts_return_type = "Promise<NativeSubscription>")]
+    pub fn async_listen(&self, channel: String) -> Result<AsyncTask<ListenTask>> {
+        Ok(AsyncTask::new(ListenTask {
+            state: self.state.clone(),
+            channel,
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn async_notify(&self, channel: String, payload: String) -> Result<AsyncTask<NotifyTask>> {
+        Ok(AsyncTask::new(NotifyTask {
+            state: Some(DatabaseTaskState::new(self)?),
+            channel,
+            payload,
+        }))
+    }
+}
+
+pub struct ListenTask {
+    state: Arc<DatabaseState>,
+    channel: String,
+}
+
+impl Task for ListenTask {
+    type Output = NativeSubscription;
+    type JsValue = NativeSubscription;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let database = self.state.register_child()?;
+        match database.listen(&self.channel) {
+            Ok(subscription) => Ok(NativeSubscription::new(subscription, self.state.clone())),
+            Err(error) => {
+                self.state.child_closed();
+                Err(zova_error(error))
+            }
+        }
+    }
+
+    fn resolve(&mut self, _: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+pub struct NotifyTask {
+    state: Option<DatabaseTaskState>,
+    channel: String,
+    payload: String,
+}
+
+impl Task for NotifyTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let database = &self.state.as_ref().expect("task state").database;
+        database
+            .notify(&self.channel, &self.payload)
+            .map_err(zova_error)
+    }
+
+    fn resolve(&mut self, _: Env, _: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
+    }
+
+    fn finally(mut self, _: Env) -> Result<()> {
+        self.state.take().expect("task state").finish();
+        Ok(())
     }
 }

@@ -9,6 +9,7 @@ import type {
 } from "./graph.js";
 import type { OpenOptions } from "./types.js";
 import type { KvEntry } from "./types.js";
+import { Subscription } from "./subscription.js";
 import type {
   VectorInput,
   VectorSearchOptions,
@@ -230,6 +231,15 @@ export class AsyncDatabase {
         );
       }
     });
+  }
+
+  async listen(channel: string): Promise<Subscription> {
+    const native = await this.#enqueue(() => this.#native.asyncListen(channel));
+    return Subscription.create(native);
+  }
+
+  notify(channel: string, payload: string): Promise<void> {
+    return this.#enqueue(() => this.#native.asyncNotify(channel, payload));
   }
 
   putVectors(

@@ -8,6 +8,7 @@ mod error;
 mod graph;
 mod object;
 mod statement;
+mod subscription;
 mod vector;
 
 #[napi]
