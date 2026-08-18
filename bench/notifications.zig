@@ -185,18 +185,19 @@ pub fn main(init: std.process.Init) !void {
     }
 
     {
-        // Queue receive overhead: drain a fresh 256-event batch per iteration.
+        // Queue receive overhead: prefill a 256-event queue, then time only
+        // draining it.
         var sub = try db.listen("bench:receive");
         defer sub.deinit();
         for (0..warmups + samples) |index| {
-            const start = now();
             for (payloads_slice) |payload| {
                 try db.notify("bench:receive", payload);
             }
+            const start = now();
             try receiveAll(&sub);
             if (index >= warmups) samples_slice[index - warmups] = elapsedMs(start);
         }
-        printDistribution("notify_256_receive_all", &samples_slice);
+        printDistribution("receive_256_prefilled", &samples_slice);
     }
 
     {

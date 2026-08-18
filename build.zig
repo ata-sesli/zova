@@ -254,6 +254,27 @@ pub fn build(b: *std.Build) void {
     c_smoke_module.linkSystemLibrary("pthread", .{});
     c_smoke_module.linkLibrary(c_abi_lib);
 
+    const c_notifications_benchmark_module = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    c_notifications_benchmark_module.addIncludePath(b.path("include"));
+    c_notifications_benchmark_module.addCSourceFile(.{
+        .file = b.path("bench/notifications_c.c"),
+        .flags = &.{"-std=c99"},
+    });
+    c_notifications_benchmark_module.linkSystemLibrary("pthread", .{});
+    c_notifications_benchmark_module.linkLibrary(c_abi_lib);
+    const c_notifications_benchmark = b.addExecutable(.{
+        .name = "zova_c_notifications_benchmark",
+        .root_module = c_notifications_benchmark_module,
+    });
+    const c_notifications_benchmark_cmd = b.addRunArtifact(c_notifications_benchmark);
+    if (b.args) |args| c_notifications_benchmark_cmd.addArgs(args);
+    const c_notifications_benchmark_step = b.step("bench-notifications-c", "Run C ABI transaction-aware notification throughput benchmark");
+    c_notifications_benchmark_step.dependOn(&c_notifications_benchmark_cmd.step);
+
     const c_smoke = b.addExecutable(.{
         .name = "zova_c_abi_smoke",
         .root_module = c_smoke_module,

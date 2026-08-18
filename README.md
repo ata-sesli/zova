@@ -701,39 +701,90 @@ Queue details:
 
 ### Benchmarks
 
-The event implementation is benchmarked at the core and per-binding level. Both
-report median, median absolute deviation, and p95 over 100 samples after 20
-warmups.
+The event implementation is benchmarked at the core level and through every
+binding. All report median, median absolute deviation, and p95 over 100 samples
+after 20 warmups, using the same six scenarios: transaction commit with no
+notification (baseline), commit with one notification, multi-listener fan-out,
+an aggregate notification after a 4096-entry atomic KV batch (paired with the
+no-notification batch baseline), and queue receive overhead (256 prefilled
+events, timing only the drain).
 
 Core (`zig build bench-notifications`):
 
 ```
-commit_no_notify                    median_ms=0.003520 mad_ms=0.000137 p95_ms=0.003696
-commit_one_notify                   median_ms=0.005715 mad_ms=0.000028 p95_ms=0.005774
-commit_one_notify_no_receive        median_ms=0.004714 mad_ms=0.000038 p95_ms=0.004833
-commit_256_four_listeners           median_ms=1.870820 mad_ms=0.019067 p95_ms=2.675490
-kv_batch_4096_commit_no_notify      median_ms=17.972456 mad_ms=0.709421 p95_ms=21.291898
-kv_batch_4096_commit_one_notify     median_ms=18.765142 mad_ms=0.732002 p95_ms=22.399291
-notify_256_receive_all              median_ms=0.594896 mad_ms=0.006255 p95_ms=0.923965
-notify_256_overflow_drop_oldest     median_ms=1.613274 mad_ms=0.042961 p95_ms=2.388205
+commit_no_notify                    median_ms=0.005254 mad_ms=0.000054 p95_ms=0.005439
+commit_one_notify                   median_ms=0.007486 mad_ms=0.001404 p95_ms=0.009477
+commit_one_notify_no_receive        median_ms=0.004749 mad_ms=0.000034 p95_ms=0.004821
+commit_256_four_listeners           median_ms=1.918638 mad_ms=0.039030 p95_ms=2.988580
+kv_batch_4096_commit_no_notify      median_ms=17.428253 mad_ms=0.656750 p95_ms=19.448615
+kv_batch_4096_commit_one_notify     median_ms=18.179680 mad_ms=0.488266 p95_ms=20.660117
+receive_256_prefilled               median_ms=0.307307 mad_ms=0.002736 p95_ms=0.484760
+notify_256_overflow_drop_oldest     median_ms=1.662944 mad_ms=0.014854 p95_ms=2.165695
+```
+
+C ABI (`zig build bench-notifications-c`):
+
+```
+commit_no_notify                    median_ms=0.003564 mad_ms=0.000134 p95_ms=0.007056
+commit_one_notify                   median_ms=0.006514 mad_ms=0.000023 p95_ms=0.006565
+commit_256_four_listeners           median_ms=2.574601 mad_ms=0.090395 p95_ms=3.710081
+kv_batch_4096_commit_no_notify      median_ms=18.166286 mad_ms=0.808803 p95_ms=22.187889
+kv_batch_4096_commit_one_notify     median_ms=18.081479 mad_ms=1.015322 p95_ms=21.408133
+receive_256_prefilled               median_ms=1.430252 mad_ms=0.012749 p95_ms=2.007642
+```
+
+Rust (`cargo run --release --example notifications_bench`):
+
+```
+commit_no_notify                    median_ms=0.001050 mad_ms=0.000002 p95_ms=0.001054
+commit_one_notify                   median_ms=0.001691 mad_ms=0.000012 p95_ms=0.001726
+commit_256_four_listeners           median_ms=0.754689 mad_ms=0.004277 p95_ms=1.468700
+kv_batch_4096_commit_no_notify      median_ms=6.716830 mad_ms=0.363157 p95_ms=9.560357
+kv_batch_4096_commit_one_notify     median_ms=6.627833 mad_ms=0.254954 p95_ms=8.764389
+receive_256_prefilled               median_ms=0.146913 mad_ms=0.000780 p95_ms=0.321646
+```
+
+Python (`python bench/notifications.py` in `bindings/python`):
+
+```
+commit_no_notify                    median_ms=0.002861 mad_ms=0.000051 p95_ms=0.007184
+commit_one_notify                   median_ms=0.009502 mad_ms=0.000057 p95_ms=0.009853
+commit_256_four_listeners           median_ms=2.984105 mad_ms=0.096359 p95_ms=4.922503
+kv_batch_4096_commit_no_notify      median_ms=10.310229 mad_ms=0.812025 p95_ms=13.662522
+kv_batch_4096_commit_one_notify     median_ms=10.936225 mad_ms=1.053548 p95_ms=14.344746
+receive_256_prefilled               median_ms=0.609753 mad_ms=0.006064 p95_ms=1.251470
+```
+
+Go (`go test -run '^$' -bench BenchmarkNotifications -benchtime=1x` in
+`bindings/go`):
+
+```
+commit_no_notify                    median_ms=0.005000 mad_ms=0.000000 p95_ms=0.008000
+commit_one_notify                   median_ms=0.008000 mad_ms=0.000000 p95_ms=0.008000
+commit_256_four_listeners           median_ms=3.514000 mad_ms=0.122000 p95_ms=5.200000
+kv_batch_4096_commit_no_notify      median_ms=19.196000 mad_ms=0.887000 p95_ms=22.505000
+kv_batch_4096_commit_one_notify     median_ms=19.017000 mad_ms=0.836000 p95_ms=21.675000
+receive_256_prefilled               median_ms=0.662000 mad_ms=0.024000 p95_ms=1.016000
+```
+
+JavaScript (`bun run bench:notifications`):
+
+```
+commit_no_notify                    median_ms=0.007860 mad_ms=0.000880 p95_ms=0.018424
+commit_one_notify                   median_ms=0.021574 mad_ms=0.002513 p95_ms=0.041517
+commit_256_four_listeners           median_ms=4.394772 mad_ms=0.640949 p95_ms=6.581401
+kv_batch_4096_commit_no_notify      median_ms=17.775350 mad_ms=1.516011 p95_ms=24.756578
+kv_batch_4096_commit_one_notify     median_ms=18.357205 mad_ms=1.396160 p95_ms=23.914743
+receive_256_prefilled               median_ms=0.816664 mad_ms=0.037648 p95_ms=1.620231
 ```
 
 The `kv_batch_4096_commit_*` pair is the aggregate-invalidation path: a 4096-entry
 atomic KV batch with and without a single aggregate `notify` at commit; the
 notification adds sub-millisecond overhead to the batch. The
 `commit_no_notify` / `commit_one_notify` pair shows the marginal cost of one
-notification per committed transaction.
-
-JavaScript binding (`bun run bench:notifications`):
-
-```
-commit_no_notify                    median_ms=0.003957 mad_ms=0.000506 p95_ms=0.027578
-commit_one_notify                   median_ms=0.035871 mad_ms=0.008992 p95_ms=0.071342
-commit_256_four_listeners           median_ms=4.193040 mad_ms=0.454778 p95_ms=6.486412
-kv_batch_4096_commit_no_notify      median_ms=17.024758 mad_ms=0.918538 p95_ms=20.456698
-kv_batch_4096_commit_one_notify     median_ms=16.776673 mad_ms=1.107810 p95_ms=20.620515
-notify_256_receive_all              median_ms=1.218628 mad_ms=0.063216 p95_ms=2.117899
-```
+notification per committed transaction. Numbers are a snapshot for one host;
+they demonstrate the measurement harness and relative costs, not absolute
+cross-language throughput.
 
 ## Extensions
 
