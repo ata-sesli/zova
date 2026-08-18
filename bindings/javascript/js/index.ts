@@ -34,6 +34,8 @@ export {
   objectIdToHex,
 } from "./object.js";
 export { Statement } from "./statement.js";
+export { Subscription } from "./subscription.js";
+export type { Notification } from "./subscription.js";
 export { Step } from "./types.js";
 export type {
   ObjectManifest,

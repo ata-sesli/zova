@@ -6,6 +6,7 @@ use napi_derive::napi;
 
 use crate::error::{misuse_error, zova_error};
 use crate::statement::NativeStatement;
+use crate::subscription::NativeSubscription;
 
 struct DatabaseStateInner {
     database: Option<zova::SharedDatabase>,
@@ -454,6 +455,26 @@ impl NativeDatabase {
         self.state
             .database()?
             .kv_clear_namespace(namespace.as_ref())
+            .map_err(zova_error)
+    }
+
+    #[napi]
+    pub fn listen(&self, channel: String) -> Result<NativeSubscription> {
+        let database = self.state.register_child()?;
+        match database.listen(&channel) {
+            Ok(subscription) => Ok(NativeSubscription::new(subscription, self.state.clone())),
+            Err(error) => {
+                self.state.child_closed();
+                Err(zova_error(error))
+            }
+        }
+    }
+
+    #[napi]
+    pub fn notify(&self, channel: String, payload: String) -> Result<()> {
+        self.state
+            .database()?
+            .notify(&channel, &payload)
             .map_err(zova_error)
     }
 }

@@ -19,6 +19,7 @@ import {
   type ObjectManifestChunkInput,
 } from "./object.js";
 import { Statement } from "./statement.js";
+import { Subscription } from "./subscription.js";
 import type { ExtensionInfo, KvEntry, OpenOptions } from "./types.js";
 import type {
   Vector,
@@ -287,6 +288,14 @@ export class Database {
 
   kvClearNamespace(namespace: Uint8Array): void {
     callNative(() => this.#native.kvClearNamespace(namespace));
+  }
+
+  listen(channel: string): Subscription {
+    return Subscription.create(callNative(() => this.#native.listen(channel)));
+  }
+
+  notify(channel: string, payload: string): void {
+    callNative(() => this.#native.notify(channel, payload));
   }
 
   putObject(data: Uint8Array): Uint8Array {
