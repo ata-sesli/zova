@@ -49,14 +49,14 @@ try {
     db.commit();
   });
 
+  const oneSub = db.listen("bench:one");
   run("commit_one_notify", warmups, samples, () => {
-    const sub = db.listen("bench:one");
     db.beginImmediate();
     db.notify("bench:one", payloads[0]);
     db.commit();
-    sub.tryReceive();
-    sub.close();
+    oneSub.tryReceive();
   });
+  oneSub.close();
 
   const multi = Array.from({ length: 4 }, () => db.listen("bench:multi"));
   run("commit_256_four_listeners", warmups, samples, () => {
@@ -92,10 +92,14 @@ try {
   aggSub.close();
 
   const receiveSub = db.listen("bench:receive");
-  run("notify_256_receive_all", warmups, samples, () => {
+  const receiveSamples = [];
+  for (let i = 0; i < warmups + samples; i += 1) {
     for (const payload of payloads) db.notify("bench:receive", payload);
-    for (let i = 0; i < events; i += 1) receiveSub.tryReceive();
-  });
+    const start = nowMs();
+    for (let j = 0; j < events; j += 1) receiveSub.tryReceive();
+    if (i >= warmups) receiveSamples.push(nowMs() - start);
+  }
+  report("receive_256_prefilled", receiveSamples);
   receiveSub.close();
 } finally {
   db.close();

@@ -41,3 +41,7 @@ path = "examples/vectors.rs"
 [[example]]
 name = "notifications"
 path = "examples/notifications.rs"
+
+[[example]]
+name = "notifications_bench"
+path = "examples/notifications_bench.rs"
