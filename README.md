@@ -699,6 +699,42 @@ Queue details:
 - the current event API has polling only: use `try_receive` / drain loops, not
   callbacks
 
+### Benchmarks
+
+The event implementation is benchmarked at the core and per-binding level. Both
+report median, median absolute deviation, and p95 over 100 samples after 20
+warmups.
+
+Core (`zig build bench-notifications`):
+
+```
+commit_no_notify                    median_ms=0.003520 mad_ms=0.000137 p95_ms=0.003696
+commit_one_notify                   median_ms=0.005715 mad_ms=0.000028 p95_ms=0.005774
+commit_one_notify_no_receive        median_ms=0.004714 mad_ms=0.000038 p95_ms=0.004833
+commit_256_four_listeners           median_ms=1.870820 mad_ms=0.019067 p95_ms=2.675490
+kv_batch_4096_commit_no_notify      median_ms=17.972456 mad_ms=0.709421 p95_ms=21.291898
+kv_batch_4096_commit_one_notify     median_ms=18.765142 mad_ms=0.732002 p95_ms=22.399291
+notify_256_receive_all              median_ms=0.594896 mad_ms=0.006255 p95_ms=0.923965
+notify_256_overflow_drop_oldest     median_ms=1.613274 mad_ms=0.042961 p95_ms=2.388205
+```
+
+The `kv_batch_4096_commit_*` pair is the aggregate-invalidation path: a 4096-entry
+atomic KV batch with and without a single aggregate `notify` at commit; the
+notification adds sub-millisecond overhead to the batch. The
+`commit_no_notify` / `commit_one_notify` pair shows the marginal cost of one
+notification per committed transaction.
+
+JavaScript binding (`bun run bench:notifications`):
+
+```
+commit_no_notify                    median_ms=0.003957 mad_ms=0.000506 p95_ms=0.027578
+commit_one_notify                   median_ms=0.035871 mad_ms=0.008992 p95_ms=0.071342
+commit_256_four_listeners           median_ms=4.193040 mad_ms=0.454778 p95_ms=6.486412
+kv_batch_4096_commit_no_notify      median_ms=17.024758 mad_ms=0.918538 p95_ms=20.456698
+kv_batch_4096_commit_one_notify     median_ms=16.776673 mad_ms=1.107810 p95_ms=20.620515
+notify_256_receive_all              median_ms=1.218628 mad_ms=0.063216 p95_ms=2.117899
+```
+
 ## Extensions
 
 The v0.23 release includes the extension host, controlled app-defined SQL

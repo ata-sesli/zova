@@ -165,6 +165,55 @@ describe("Database notifications", () => {
     database.close();
     expect(database.closed).toBe(true);
   });
+
+  test("rejects database close while a subscription is live", () => {
+    const database = Database.create(temporaryDatabasePath());
+    const subscription = database.listen("messages");
+    try {
+      expect(() => database.close()).toThrow();
+      expect(database.closed).toBe(false);
+
+      database.notify("messages", "after-rejected-close");
+      const note = subscription.tryReceive();
+      expect(note!.payload).toBe("after-rejected-close");
+      expect(subscription.closed).toBe(false);
+    } finally {
+      subscription.close();
+      database.close();
+      expect(database.closed).toBe(true);
+    }
+  });
+
+  test("discards state and pending notifications when a kv batch fails", () => {
+    const database = Database.createMemory();
+    const subscription = database.listen("cache:search-results");
+    try {
+      database.kvPut(bytes("search-results"), bytes("stable"), bytes("kept"));
+
+      database.beginImmediate();
+      database.notify("cache:search-results", "generation:1");
+      database.exec(
+        `create trigger zova_kv_fail before insert on _zova_kv
+         when new.value = cast('boom' as blob)
+         begin select raise(abort, 'injected kv failure'); end`,
+      );
+      expect(() =>
+        database.kvPutMany(bytes("search-results"), [
+          { key: bytes("result-1"), value: bytes("one") },
+          { key: bytes("boom"), value: bytes("boom") },
+        ]),
+      ).toThrow();
+      database.rollback();
+
+      expect(subscription.tryReceive()).toBeNull();
+      expect(database.kvGet(bytes("search-results"), bytes("result-1"))).toBeNull();
+      expect(database.kvGet(bytes("search-results"), bytes("stable"))).toEqual(bytes("kept"));
+      expect(database.kvCount(bytes("search-results"))).toBe(1n);
+    } finally {
+      subscription.close();
+      database.close();
+    }
+  });
 });
 
 describe("AsyncDatabase notifications", () => {
@@ -186,6 +235,22 @@ describe("AsyncDatabase notifications", () => {
 
       subscription.close();
     } finally {
+      await database.close();
+    }
+  });
+
+  test("rejects async database close while a live subscription exists", async () => {
+    const database = AsyncDatabase.create(temporaryDatabasePath());
+    const subscription = await database.listen("messages");
+    try {
+      await expect(database.close()).rejects.toThrow();
+
+      await database.notify("messages", "after-rejected-close");
+      const note = await subscription.tryReceiveAsync();
+      expect(note!.payload).toBe("after-rejected-close");
+      expect(subscription.closed).toBe(false);
+    } finally {
+      subscription.close();
       await database.close();
     }
   });

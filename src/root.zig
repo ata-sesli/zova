@@ -27,6 +27,7 @@ pub const VectorSearchResult = zova.VectorSearchResult;
 pub const VectorSearchResults = zova.VectorSearchResults;
 pub const Notification = zova.Notification;
 pub const NotificationSubscription = zova.NotificationSubscription;
+pub const KvPutEntry = zova.KvPutEntry;
 pub const GraphTargetType = zova.GraphTargetType;
 pub const GraphInfo = zova.GraphInfo;
 pub const GraphList = zova.GraphList;
