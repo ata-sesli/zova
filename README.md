@@ -655,13 +655,38 @@ SQL `zova_notify(...)` participates in this model when transactions/savepoints
 are opened through Zova helpers; raw SQL transaction scopes that Zova cannot
 track are rejected instead of guessed.
 
+In-memory databases support the full event model with no changes:
+
+```python
+with zova.Database.create_memory() as db:
+    with db.listen("cache:search-results") as sub:
+        db.begin_immediate()
+        db.kv_put_many(b"search-results", [(b"result-1", b"one"), (b"result-2", b"two")])
+        db.notify("cache:search-results", "generation:42")
+        db.commit()
+        assert sub.try_receive().payload == "generation:42"
+```
+
 This is useful when one process wants a clean storage-runtime boundary: a write
 workflow stores records, objects, vectors, or graph relationships, then notifies
 another part of the same process to reload by id. Graph mutations do not emit
 automatic events; call `notify("graph:changed", "...")` explicitly inside the
 same transaction when your app wants listeners to refresh graph-derived views.
-It is not cross-process delivery, replay, replication, audit logging, or
-automatic mutation tracking.
+KV mutation batches commit atomically with a caller-owned transaction, so a
+single explicit `notify` next to the batch fires exactly once on commit — use it
+as an aggregate cache-invalidation signal. It is not cross-process delivery,
+replay, replication, audit logging, or automatic mutation tracking.
+
+The JavaScript bindings expose events on both the synchronous and asynchronous
+database wrappers:
+
+```ts
+const db = AsyncDatabase.create(path);
+const sub = await db.listen("cache:search-results");
+await db.notify("cache:search-results", "generation:42");
+const note = await sub.tryReceiveAsync(); // { channel, payload, sequence, droppedBefore }
+sub.close();
+```
 
 Queue details:
 

@@ -128,6 +128,20 @@ pub fn build(b: *std.Build) void {
     const graph_fresh_benchmark_step = b.step("bench-graph-fresh", "Compare incremental and fresh graph publication at Deno scale");
     graph_fresh_benchmark_step.dependOn(&graph_fresh_benchmark_cmd.step);
 
+    const notifications_benchmark = b.addExecutable(.{
+        .name = "zova_notifications_benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/notifications.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    notifications_benchmark.root_module.addImport("zova", zova_module);
+    const notifications_benchmark_cmd = b.addRunArtifact(notifications_benchmark);
+    if (b.args) |args| notifications_benchmark_cmd.addArgs(args);
+    const notifications_benchmark_step = b.step("bench-notifications", "Run deterministic transaction-aware notification throughput benchmark");
+    notifications_benchmark_step.dependOn(&notifications_benchmark_cmd.step);
+
     const ablation_api_module = b.createModule(.{
         .root_source_file = b.path("src/c_api_internal.zig"),
         .target = target,
