@@ -9137,6 +9137,52 @@ test "c abi notifications are transaction aware and SQL callable" {
     try std.testing.expectEqual(zova_status.OK, zova_database_close(db));
 }
 
+test "c abi in-memory notifications follow transaction boundaries and close ordering" {
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create_memory(&.{
+        .out_db = &db,
+        .out_error_message = null,
+    }));
+
+    var subscription: ?*zova_subscription = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_listen(&.{
+        .db = db,
+        .channel = "messages",
+        .out_subscription = &subscription,
+    }));
+
+    var out = emptyNotification();
+    defer zova_notification_free(&out);
+    var has_notification: u8 = 0;
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_begin_immediate(&.{ .db = db }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_notify(&.{
+        .db = db,
+        .channel = "messages",
+        .payload = "committed",
+        .payload_len = "committed".len,
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_subscription_try_receive(&.{
+        .subscription = subscription,
+        .out_notification = &out,
+        .out_has_notification = &has_notification,
+    }));
+    try std.testing.expectEqual(@as(u8, 0), has_notification);
+    try std.testing.expectEqual(zova_status.OK, zova_database_commit(&.{ .db = db }));
+    try std.testing.expectEqual(zova_status.OK, zova_subscription_try_receive(&.{
+        .subscription = subscription,
+        .out_notification = &out,
+        .out_has_notification = &has_notification,
+    }));
+    try std.testing.expectEqual(@as(u8, 1), has_notification);
+    try std.testing.expectEqualStrings("committed", out.payload.?[0..out.payload_len]);
+    try std.testing.expectEqual(@as(u64, 1), out.sequence);
+    try std.testing.expectEqual(@as(u64, 0), out.dropped_before);
+
+    try std.testing.expectEqual(zova_status.OK, zova_subscription_close(subscription));
+    try std.testing.expectEqual(zova_status.OK, zova_database_close(db));
+}
+
 test "c abi can query bundled trgm SQL surface through prepared statements" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

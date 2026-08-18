@@ -1,5 +1,5 @@
 use zova::{
-    Database, SharedDatabase, Status, Step, VectorCollectionOptions, VectorElementType,
+    Database, KvEntry, SharedDatabase, Status, Step, VectorCollectionOptions, VectorElementType,
     VectorMetric, VectorValues,
 };
 
@@ -107,6 +107,43 @@ fn shared_database_notifications_work_across_threads() {
     drop(sub);
     drop(db);
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn in_memory_kv_batch_emits_one_aggregate_notification_on_commit() {
+    let mut db = Database::create_memory().unwrap();
+    let mut sub = db.listen("cache:search-results").unwrap();
+
+    db.begin_immediate().unwrap();
+    db.kv_put_many(
+        b"search-results",
+        &[
+            KvEntry {
+                key: b"result-1",
+                value: b"one",
+            },
+            KvEntry {
+                key: b"result-2",
+                value: b"two",
+            },
+        ],
+    )
+    .unwrap();
+    db.notify("cache:search-results", "generation:42").unwrap();
+    assert!(sub.try_receive().unwrap().is_none());
+    db.commit().unwrap();
+
+    let note = sub.try_receive().unwrap().unwrap();
+    assert_eq!(note.channel, "cache:search-results");
+    assert_eq!(note.payload, "generation:42");
+    assert_eq!(note.sequence, 1);
+    assert!(sub.try_receive().unwrap().is_none());
+
+    let value = db.kv_get(b"search-results", b"result-1").unwrap();
+    assert_eq!(value.unwrap(), b"one");
+
+    drop(sub);
+    drop(db);
 }
 
 #[test]

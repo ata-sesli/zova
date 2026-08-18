@@ -292,6 +292,34 @@ test "kv participates in savepoint rollback alongside SQL" {
     try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_meta where key = 'kv_sp_sql'"));
 }
 
+test "kv batch join a caller transaction and one notification fires on commit" {
+    var db = try Database.createMemory();
+    defer db.deinit();
+
+    var sub = try db.listen("cache:search-results");
+    defer sub.deinit();
+
+    try db.begin();
+    try db.kvPutMany("search-results", &.{
+        .{ .key = "result-1", .value = "one" },
+        .{ .key = "result-2", .value = "two" },
+    });
+    try db.notify("cache:search-results", "generation:42");
+    try std.testing.expectEqual(@as(?zova.Notification, null), try sub.tryReceive(std.testing.allocator));
+    try db.commit();
+
+    var note = (try sub.tryReceive(std.testing.allocator)).?;
+    defer note.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("cache:search-results", note.channel);
+    try std.testing.expectEqualStrings("generation:42", note.payload);
+
+    var value = try db.kvGet(std.testing.allocator, "search-results", "result-1");
+    defer value.deinit(std.testing.allocator);
+    try std.testing.expect(value.found);
+    try std.testing.expectEqualSlices(u8, "one", value.value);
+    try std.testing.expectEqual(@as(?zova.Notification, null), try sub.tryReceive(std.testing.allocator));
+}
+
 test "kv persists across reopen" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

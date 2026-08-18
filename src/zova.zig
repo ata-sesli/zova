@@ -8055,6 +8055,144 @@ test "notification validation rejects invalid channels payloads and SQL notify i
     try std.testing.expectEqual(@as(?Notification, null), try sub.tryReceive(std.testing.allocator));
 }
 
+test "in-memory notifications follow transaction savepoint and overflow semantics" {
+    var db = try Database.createMemory();
+    defer db.deinit();
+
+    var sub = try db.listen("cache:search-results");
+    defer sub.deinit();
+
+    try db.notify("cache:search-results", "outside");
+    var outside_note = (try sub.tryReceive(std.testing.allocator)).?;
+    defer outside_note.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("cache:search-results", outside_note.channel);
+    try std.testing.expectEqualStrings("outside", outside_note.payload);
+
+    try db.beginImmediate();
+    try db.notify("cache:search-results", "committed");
+    try std.testing.expectEqual(@as(?Notification, null), try sub.tryReceive(std.testing.allocator));
+    try db.commit();
+    {
+        var note = (try sub.tryReceive(std.testing.allocator)).?;
+        defer note.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("committed", note.payload);
+    }
+
+    try db.beginImmediate();
+    try db.savepoint("inner");
+    try db.notify("cache:search-results", "discarded");
+    try db.rollbackToSavepoint("inner");
+    try db.notify("cache:search-results", "kept");
+    try db.releaseSavepoint("inner");
+    try db.rollback();
+    try std.testing.expectEqual(@as(?Notification, null), try sub.tryReceive(std.testing.allocator));
+
+    var index: usize = 0;
+    while (index < notify_impl.queue_capacity + 1) : (index += 1) {
+        var payload_buffer: [32]u8 = undefined;
+        const payload = try std.fmt.bufPrint(&payload_buffer, "event-{d}", .{index});
+        try db.notify("cache:search-results", payload);
+    }
+    var overflowed = (try sub.tryReceive(std.testing.allocator)).?;
+    defer overflowed.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("event-1", overflowed.payload);
+    try std.testing.expectEqual(@as(u64, 1), overflowed.dropped_before);
+}
+
+test "notifications and SQL transactions share one deferred delivery scope" {
+    var db = try Database.createMemory();
+    defer db.deinit();
+
+    var sql_sub = try db.listen("sql:changed");
+    defer sql_sub.deinit();
+    var kv_sub = try db.listen("cache:search-results");
+    defer kv_sub.deinit();
+
+    try db.beginImmediate();
+    try db.exec("select zova_notify('sql:changed', 'row-updated')");
+    try db.kvPutMany("search-results", &.{ .{ .key = "result-1", .value = "one" }, .{ .key = "result-2", .value = "two" } });
+    try db.notify("cache:search-results", "generation:42");
+    try std.testing.expectEqual(@as(?Notification, null), try sql_sub.tryReceive(std.testing.allocator));
+    try std.testing.expectEqual(@as(?Notification, null), try kv_sub.tryReceive(std.testing.allocator));
+    try db.commit();
+
+    var sql_note = (try sql_sub.tryReceive(std.testing.allocator)).?;
+    defer sql_note.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("row-updated", sql_note.payload);
+
+    var kv_note = (try kv_sub.tryReceive(std.testing.allocator)).?;
+    defer kv_note.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("generation:42", kv_note.payload);
+
+    var value = try db.kvGet(std.testing.allocator, "search-results", "result-1");
+    defer value.deinit(std.testing.allocator);
+    try std.testing.expect(value.found);
+    try std.testing.expectEqualSlices(u8, "one", value.value);
+    try std.testing.expectEqual(@as(?Notification, null), try sql_sub.tryReceive(std.testing.allocator));
+    try std.testing.expectEqual(@as(?Notification, null), try kv_sub.tryReceive(std.testing.allocator));
+}
+
+test "closing a subscription releases its delivery hub and never re-delivers" {
+    var db = try Database.createMemory();
+    defer db.deinit();
+
+    var sub = try db.listen("events");
+    try db.notify("events", "before-close");
+    {
+        var note = (try sub.tryReceive(std.testing.allocator)).?;
+        defer note.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("before-close", note.payload);
+    }
+
+    sub.deinit();
+    try std.testing.expectError(error.InvalidArgument, sub.tryReceive(std.testing.allocator));
+
+    var reopened = try db.listen("events");
+    defer reopened.deinit();
+    try std.testing.expectEqual(@as(?Notification, null), try reopened.tryReceive(std.testing.allocator));
+
+    try db.notify("events", "after-reopen");
+    var note = (try reopened.tryReceive(std.testing.allocator)).?;
+    defer note.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("after-reopen", note.payload);
+}
+
+test "notifications defer across one transaction spanning SQL vector graph and kv" {
+    var db = try Database.createMemory();
+    defer db.deinit();
+
+    try db.createVectorCollection("chunks", .{ .dimensions = 2, .metric = .cosine });
+    try db.createGraph("app");
+
+    var sub = try db.listen("app:changed");
+    defer sub.deinit();
+
+    try db.beginImmediate();
+    try db.exec("insert into _zova_meta (key, value) values ('app:version', '2')");
+    try db.putVectors("chunks", &.{.{ .id = "vec-1", .values = .{ .f32 = &.{ 1.0, 2.0 } } }});
+    try db.putGraphNode(.{ .graph_name = "app", .node_id = "node-a", .kind = "entity" });
+    try db.putGraphNode(.{ .graph_name = "app", .node_id = "node-b", .kind = "entity" });
+    try db.putGraphEdge(.{ .graph_name = "app", .from_node_id = "node-a", .edge_type = "links", .to_node_id = "node-b" });
+    try db.kvPut("app", "key", "value");
+    try db.notify("app:changed", "all-subsystems");
+    try std.testing.expectEqual(@as(?Notification, null), try sub.tryReceive(std.testing.allocator));
+    try db.commit();
+
+    var note = (try sub.tryReceive(std.testing.allocator)).?;
+    defer note.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("app:changed", note.channel);
+    try std.testing.expectEqualStrings("all-subsystems", note.payload);
+    try std.testing.expectEqual(@as(u64, 1), note.sequence);
+
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from _zova_meta where key = 'app:version'"));
+    try std.testing.expect(try db.hasGraphNode("app", "node-a"));
+    try std.testing.expect(try db.hasGraphEdge("app", "node-a", "links", "node-b"));
+    var kv_value = try db.kvGet(std.testing.allocator, "app", "key");
+    defer kv_value.deinit(std.testing.allocator);
+    try std.testing.expect(kv_value.found);
+    try std.testing.expectEqualSlices(u8, "value", kv_value.value);
+}
+
 test "scoped savepoint helper releases rolls back nests and reports cleanup failure" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

@@ -97,6 +97,25 @@ def test_notification_object_metadata_workflow(tmp_path):
             assert db.get_object(stored_id) == b"attachment bytes"
 
 
+def test_in_memory_kv_batch_emits_one_aggregate_notification():
+    with zova.Database.create_memory() as db:
+        with db.listen("cache:search-results") as sub:
+            db.begin_immediate()
+            db.kv_put_many(b"search-results", [(b"result-1", b"one"), (b"result-2", b"two")])
+            db.notify("cache:search-results", "generation:42")
+            assert sub.try_receive() is None
+            db.commit()
+
+            note = sub.try_receive()
+            assert note is not None
+            assert note.channel == "cache:search-results"
+            assert note.payload == "generation:42"
+            assert note.sequence == 1
+            assert sub.try_receive() is None
+
+            assert db.kv_get(b"search-results", b"result-1") == b"one"
+
+
 def test_notification_vector_metadata_workflow(tmp_path):
     path = tmp_path / "notification-vector-workflow.zova"
     with zova.Database.create(str(path)) as db:
