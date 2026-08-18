@@ -98,6 +98,7 @@ pub const ObjectChunk = object_impl.ObjectChunk;
 pub const ObjectManifest = object_impl.ObjectManifest;
 pub const ObjectChunkData = object_impl.ObjectChunkData;
 pub const Object = object_impl.Object;
+pub const KvPutEntry = kv_impl.PutEntry;
 
 pub const ObjectWriter = struct {
     inner: object_impl.ObjectWriter,

@@ -45,6 +45,7 @@
     "build:typescript": "tsc --project tsconfig.json && tsc --project tsconfig.examples.json",
     "normalize:package-names": "bun tools/normalize-package-names.ts",
     "test": "bun test --timeout 30000",
+    "bench:notifications": "bun bench/notifications.mjs",
     "typecheck": "tsc --project tsconfig.json --noEmit && tsc --project tsconfig.examples.json --noEmit"
   },
   "devDependencies": {

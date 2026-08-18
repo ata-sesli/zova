@@ -2,6 +2,7 @@ const std = @import("std");
 const zova = @import("zova");
 
 const events_per_iteration = 256;
+const kv_batch_entries = 4096;
 const warmups = 20;
 const samples = 100;
 const queue_capacity = 1024;
@@ -22,15 +23,34 @@ fn percentile(samples_slice: []f64, numerator: usize, denominator: usize) f64 {
     return samples_slice[index];
 }
 
+fn median(samples_slice: []f64) f64 {
+    return percentile(samples_slice, 50, 100);
+}
+
+fn medianAbsoluteDeviation(samples_slice: []f64, median_value: f64) f64 {
+    const deviations = std.heap.c_allocator.alloc(f64, samples_slice.len) catch return 0;
+    defer std.heap.c_allocator.free(deviations);
+    for (samples_slice, 0..) |sample, index| {
+        deviations[index] = @abs(sample - median_value);
+    }
+    return percentile(deviations, 50, 100);
+}
+
 fn printDistribution(label: []const u8, samples_slice: []f64) void {
-    const p50 = percentile(samples_slice, 50, 100);
+    const p50 = median(samples_slice);
+    const mad = medianAbsoluteDeviation(samples_slice, p50);
     const p95 = percentile(samples_slice, 95, 100);
-    std.debug.print("{s} p50_ms={d:.6} p95_ms={d:.6}\n", .{ label, p50, p95 });
+    std.debug.print("{s} median_ms={d:.6} mad_ms={d:.6} p95_ms={d:.6}\n", .{ label, p50, mad, p95 });
 }
 
 fn nextRandom(state: *u64) u64 {
     state.* = state.* *% 6364136223846793005 +% 1442695040888963407;
     return state.*;
+}
+
+fn receiveOne(sub: *zova.NotificationSubscription) !void {
+    var note = (try sub.tryReceive(std.heap.c_allocator)).?;
+    note.deinit(std.heap.c_allocator);
 }
 
 fn receiveAll(sub: *zova.NotificationSubscription) !void {
@@ -44,12 +64,13 @@ fn receiveAll(sub: *zova.NotificationSubscription) !void {
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
 
-    std.debug.print("seed=0x{x} zig={s} sqlite={s} queue_capacity={d} events_per_iteration={d}\n", .{
+    std.debug.print("seed=0x{x} zig={s} sqlite={s} queue_capacity={d} events_per_iteration={d} kv_batch_entries={d}\n", .{
         seed,
         @import("builtin").zig_version_string,
         zova.version.sqlite_version,
         queue_capacity,
         events_per_iteration,
+        kv_batch_entries,
     });
 
     var db = try zova.Database.createMemory();
@@ -63,36 +84,45 @@ pub fn main(init: std.process.Init) !void {
     var samples_slice: [samples]f64 = undefined;
 
     {
-        var sub = try db.listen("bench:single");
-        defer sub.deinit();
+        // Baseline: transaction commit with no notification.
         for (0..warmups + samples) |index| {
             const start = now();
-            for (payloads_slice) |payload| {
-                try db.notify("bench:single", payload);
-            }
-            try receiveAll(&sub);
+            try db.beginImmediate();
+            try db.commit();
             if (index >= warmups) samples_slice[index - warmups] = elapsedMs(start);
         }
-        printDistribution("notify_single_256_delivered", &samples_slice);
+        printDistribution("commit_no_notify", &samples_slice);
     }
 
     {
-        var sub = try db.listen("bench:transaction");
+        // Commit with one notification, delivered and received after commit.
+        var sub = try db.listen("bench:one");
         defer sub.deinit();
         for (0..warmups + samples) |index| {
             const start = now();
             try db.beginImmediate();
-            for (payloads_slice) |payload| {
-                try db.notify("bench:transaction", payload);
-            }
+            try db.notify("bench:one", payloads_slice[0]);
             try db.commit();
-            try receiveAll(&sub);
+            try receiveOne(&sub);
             if (index >= warmups) samples_slice[index - warmups] = elapsedMs(start);
         }
-        printDistribution("notify_transaction_256_committed", &samples_slice);
+        printDistribution("commit_one_notify", &samples_slice);
     }
 
     {
+        // Commit with one notification, but no listener receives it (delivery cost only).
+        for (0..warmups + samples) |index| {
+            const start = now();
+            try db.beginImmediate();
+            try db.notify("bench:no-listener", payloads_slice[0]);
+            try db.commit();
+            if (index >= warmups) samples_slice[index - warmups] = elapsedMs(start);
+        }
+        printDistribution("commit_one_notify_no_receive", &samples_slice);
+    }
+
+    {
+        // Commit with multiple listeners, each draining the same 256-event batch.
         const subs = try allocator.alloc(zova.NotificationSubscription, 4);
         for (subs) |*listener| listener.* = try db.listen("bench:multi");
         defer for (subs) |*listener| listener.deinit();
@@ -109,7 +139,64 @@ pub fn main(init: std.process.Init) !void {
             }
             if (index >= warmups) samples_slice[index - warmups] = elapsedMs(start);
         }
-        printDistribution("notify_transaction_256_four_listeners", &samples_slice);
+        printDistribution("commit_256_four_listeners", &samples_slice);
+    }
+
+    {
+        // Baseline for the aggregate case: large atomic KV batch, no notification.
+        const entries = try allocator.alloc(zova.KvPutEntry, kv_batch_entries);
+        for (entries) |*entry| {
+            entry.* = .{
+                .key = try std.fmt.allocPrint(allocator, "k-{d}", .{nextRandom(&state) & 0xffff}),
+                .value = "v",
+            };
+        }
+        for (0..warmups + samples) |index| {
+            const start = now();
+            try db.beginImmediate();
+            try db.kvPutMany("bench:kv", entries);
+            try db.commit();
+            if (index >= warmups) samples_slice[index - warmups] = elapsedMs(start);
+        }
+        printDistribution("kv_batch_4096_commit_no_notify", &samples_slice);
+    }
+
+    {
+        // One aggregate notification after a large atomic KV batch, then receive.
+        const entries = try allocator.alloc(zova.KvPutEntry, kv_batch_entries);
+        for (entries) |*entry| {
+            entry.* = .{
+                .key = try std.fmt.allocPrint(allocator, "k-{d}", .{nextRandom(&state) & 0xffff}),
+                .value = "v",
+            };
+        }
+        var sub = try db.listen("cache:search-results");
+        defer sub.deinit();
+        for (0..warmups + samples) |index| {
+            const start = now();
+            try db.beginImmediate();
+            try db.kvPutMany("bench:kv", entries);
+            try db.notify("cache:search-results", "generation:42");
+            try db.commit();
+            try receiveOne(&sub);
+            if (index >= warmups) samples_slice[index - warmups] = elapsedMs(start);
+        }
+        printDistribution("kv_batch_4096_commit_one_notify", &samples_slice);
+    }
+
+    {
+        // Queue receive overhead: drain a fresh 256-event batch per iteration.
+        var sub = try db.listen("bench:receive");
+        defer sub.deinit();
+        for (0..warmups + samples) |index| {
+            const start = now();
+            for (payloads_slice) |payload| {
+                try db.notify("bench:receive", payload);
+            }
+            try receiveAll(&sub);
+            if (index >= warmups) samples_slice[index - warmups] = elapsedMs(start);
+        }
+        printDistribution("notify_256_receive_all", &samples_slice);
     }
 
     {
@@ -124,6 +211,6 @@ pub fn main(init: std.process.Init) !void {
             note.deinit(std.heap.c_allocator);
             if (index >= warmups) samples_slice[index - warmups] = elapsedMs(start);
         }
-        printDistribution("notify_overflow_256_dropped_oldest", &samples_slice);
+        printDistribution("notify_256_overflow_drop_oldest", &samples_slice);
     }
 }

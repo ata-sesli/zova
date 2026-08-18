@@ -9179,6 +9179,90 @@ test "c abi in-memory notifications follow transaction boundaries and close orde
     try std.testing.expectEqual(@as(u64, 1), out.sequence);
     try std.testing.expectEqual(@as(u64, 0), out.dropped_before);
 
+    try std.testing.expectEqual(zova_status.MISUSE, zova_database_close(db));
+    try std.testing.expectEqual(zova_status.OK, zova_database_notify(&.{
+        .db = db,
+        .channel = "messages",
+        .payload = "after-rejected-close",
+        .payload_len = "after-rejected-close".len,
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_subscription_try_receive(&.{
+        .subscription = subscription,
+        .out_notification = &out,
+        .out_has_notification = &has_notification,
+    }));
+    try std.testing.expectEqual(@as(u8, 1), has_notification);
+    try std.testing.expectEqualStrings("after-rejected-close", out.payload.?[0..out.payload_len]);
+
+    try std.testing.expectEqual(zova_status.OK, zova_subscription_close(subscription));
+    try std.testing.expectEqual(zova_status.OK, zova_database_close(db));
+}
+
+test "c abi in-memory kv failure discards state and pending notifications" {
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create_memory(&.{
+        .out_db = &db,
+        .out_error_message = null,
+    }));
+
+    var subscription: ?*zova_subscription = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_listen(&.{
+        .db = db,
+        .channel = "cache:search-results",
+        .out_subscription = &subscription,
+    }));
+
+    var out = emptyNotification();
+    defer zova_notification_free(&out);
+    var has_notification: u8 = 0;
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{
+        .db = db,
+        .sql = "insert into _zova_kv(namespace, key, value) values (cast('search-results' as blob), cast('stable' as blob), cast('kept' as blob))",
+    }));
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_begin_immediate(&.{ .db = db }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_notify(&.{
+        .db = db,
+        .channel = "cache:search-results",
+        .payload = "generation:1",
+        .payload_len = "generation:1".len,
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{
+        .db = db,
+        .sql = "create trigger zova_kv_fail before insert on _zova_kv when new.value = cast('boom' as blob) begin select raise(abort,'injected kv failure'); end",
+    }));
+    try std.testing.expectEqual(zova_status.CONSTRAINT, zova_database_exec(&.{
+        .db = db,
+        .sql = "insert into _zova_kv(namespace, key, value) values (cast('search-results' as blob), cast('boom' as blob), cast('boom' as blob))",
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_rollback(&.{ .db = db }));
+
+    try std.testing.expectEqual(zova_status.OK, zova_subscription_try_receive(&.{
+        .subscription = subscription,
+        .out_notification = &out,
+        .out_has_notification = &has_notification,
+    }));
+    try std.testing.expectEqual(@as(u8, 0), has_notification);
+
+    var statement: ?*zova_statement = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_prepare(&.{
+        .db = db,
+        .sql = "select count(*) from _zova_kv where namespace = cast('search-results' as blob)",
+        .out_statement = &statement,
+    }));
+    var step_result: zova_step_result = undefined;
+    try std.testing.expectEqual(zova_status.OK, zova_statement_step(&.{ .statement = statement, .out_result = &step_result }));
+    try std.testing.expectEqual(zova_step_result.ROW, step_result);
+    var kv_count: i64 = 0;
+    try std.testing.expectEqual(zova_status.OK, zova_statement_column_int64(&.{
+        .statement = statement,
+        .index = 0,
+        .out_value = &kv_count,
+    }));
+    try std.testing.expectEqual(@as(i64, 1), kv_count);
+    try std.testing.expectEqual(zova_status.OK, zova_statement_finalize(statement));
+
     try std.testing.expectEqual(zova_status.OK, zova_subscription_close(subscription));
     try std.testing.expectEqual(zova_status.OK, zova_database_close(db));
 }

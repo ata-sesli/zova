@@ -320,6 +320,46 @@ test "kv batch join a caller transaction and one notification fires on commit" {
     try std.testing.expectEqual(@as(?zova.Notification, null), try sub.tryReceive(std.testing.allocator));
 }
 
+test "kv failure inside a caller transaction discards state and pending notifications" {
+    var db = try Database.createMemory();
+    defer db.deinit();
+
+    var sub = try db.listen("cache:search-results");
+    defer sub.deinit();
+
+    try db.kvPut("search-results", "stable", "kept");
+
+    try db.begin();
+    try db.notify("cache:search-results", "generation:1");
+    try db.exec(
+        \\create trigger kv_fail before insert on _zova_kv
+        \\when new.value = cast('boom' as blob)
+        \\begin select raise(abort,'injected kv failure'); end
+    );
+    const entries = [_]kv_impl.PutEntry{
+        .{ .key = "result-1", .value = "one" },
+        .{ .key = "boom", .value = "boom" },
+    };
+    try std.testing.expectError(error.Constraint, db.kvPutMany("search-results", &entries));
+    try db.rollback();
+
+    var stable = try db.kvGet(std.testing.allocator, "search-results", "stable");
+    defer stable.deinit(std.testing.allocator);
+    try std.testing.expect(stable.found);
+    try std.testing.expectEqualSlices(u8, "kept", stable.value);
+    var failed = try db.kvGet(std.testing.allocator, "search-results", "result-1");
+    defer failed.deinit(std.testing.allocator);
+    try std.testing.expect(!failed.found);
+    try std.testing.expectEqual(@as(u64, 1), try db.kvCount("search-results"));
+    try std.testing.expectEqual(@as(?zova.Notification, null), try sub.tryReceive(std.testing.allocator));
+
+    try db.begin();
+    try db.kvPut("search-results", "result-2", "two");
+    try db.commit();
+    try std.testing.expectEqual(@as(u64, 2), try db.kvCount("search-results"));
+    try std.testing.expectEqual(@as(?zova.Notification, null), try sub.tryReceive(std.testing.allocator));
+}
+
 test "kv persists across reopen" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

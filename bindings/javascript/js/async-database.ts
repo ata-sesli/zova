@@ -292,11 +292,13 @@ export class AsyncDatabase {
     this.#closing = true;
     this.#closePromise = this.#tail
       .then(() => this.#native.close())
-      .catch((error) => {
-        throw normalizeNativeError(error);
-      })
-      .finally(() => {
+      .then(() => {
         this.#closed = true;
+      })
+      .catch((error) => {
+        this.#closing = false;
+        this.#closePromise = undefined;
+        throw normalizeNativeError(error);
       });
     return this.#closePromise;
   }
