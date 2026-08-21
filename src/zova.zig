@@ -94,6 +94,56 @@ fn classifyFormatVersion(value: []const u8) ?FormatCompatibility {
     return .unsupported_legacy;
 }
 
+/// Non-mutating classification result for one Zova database file.
+///
+/// `format_version` is the strictly parsed `_zova_meta.format_version` value
+/// and `compatibility` is how this release treats that format.
+pub const DatabaseFormatInfo = struct {
+    format_version: u32,
+    compatibility: FormatCompatibility,
+};
+
+/// Probe one database's storage format without mutation.
+///
+/// The probe opens the file with a raw read-only SQLite connection, reads only
+/// the historical identity metadata required for classification, and never
+/// attaches bound stores, repairs schemas, or writes. Recognized but
+/// incompatible databases probe successfully; malformed or non-Zova inputs are
+/// rejected exactly as `Database.open` rejects them.
+pub fn probeDatabaseFormat(path: [:0]const u8) Error!DatabaseFormatInfo {
+    if (!isZovaPath(path)) return error.NotZovaPath;
+    try ensurePathExists(path);
+
+    var raw = sqlite.Database.openWithFlags(path, .read_only) catch |err| switch (err) {
+        error.SqliteError => return error.NotZovaDatabase,
+        else => return err,
+    };
+    defer raw.deinit();
+
+    try expectMetadataValue(&raw, "magic", magic_value, .magic);
+    return readFormatClassification(&raw);
+}
+
+/// Read and classify `_zova_meta.format_version` using the same strict parsing
+/// as `probeDatabaseFormat`, so open and probe cannot disagree.
+fn readFormatClassification(db: *sqlite.Database) Error!DatabaseFormatInfo {
+    var stmt = db.prepare("select value from _zova_meta where key = 'format_version'") catch |err| switch (err) {
+        error.SqliteError => return error.NotZovaDatabase,
+        else => return err,
+    };
+    defer stmt.deinit();
+
+    return switch (try stmt.step()) {
+        .done => error.NotZovaDatabase,
+        .row => {
+            const version_text = stmt.columnText(0);
+            const format_version_value = parseFormatVersion(version_text) orelse return error.NotZovaDatabase;
+            const compatibility = classifyFormatVersion(version_text) orelse return error.NotZovaDatabase;
+            return .{ .format_version = format_version_value, .compatibility = compatibility };
+        },
+    };
+}
+
 const bound_object_store_role = "object_store";
 const bound_vector_store_role = "vector_store";
 const bound_graph_store_role = "graph_store";
@@ -4075,7 +4125,15 @@ fn mapSqliteResultCode(rc: c_int) Error {
 
 fn validateZovaSchema(db: *sqlite.Database) Error!void {
     try expectMetadataValue(db, "magic", magic_value, .magic);
-    try expectMetadataValue(db, "format_version", format_version, .format_version);
+    // Classify the storage format before role and schema validation so
+    // recognized but incompatible databases receive the precise migration
+    // error instead of a generic schema mismatch.
+    switch ((try readFormatClassification(db)).compatibility) {
+        .current => {},
+        .migratable => return error.MigrationRequired,
+        .unsupported_legacy => return error.UnsupportedLegacyFormat,
+        .unsupported_future => return error.UnsupportedFutureFormat,
+    }
     try ensureMainDatabaseRole(db);
     try validateExtensionSchema(db);
     try validateObjectSchema(db);
@@ -6273,7 +6331,7 @@ test "open rejects old format version" {
         try testingWriteMetadata(&raw, "zova", "7");
     }
 
-    try std.testing.expectError(error.UnsupportedZovaVersion, Database.open(db_path));
+    try std.testing.expectError(error.UnsupportedLegacyFormat, Database.open(db_path));
 }
 
 fn testingFileSha256(path: []const u8) ![32]u8 {
@@ -6294,13 +6352,13 @@ fn testingCopySqliteFile(source_path: [:0]const u8, destination_path: [:0]const 
 
 test "older main graph and vector fixtures are rejected without mutation" {
     const fixtures = .{
-        .{ .path = "tests/fixtures/empty-format-7.zova", .role = StorageRole.main },
+        .{ .path = "tests/fixtures/empty-format-7.zova", .role = StorageRole.main, .open_error = error.UnsupportedLegacyFormat },
         .{ .path = "tests/fixtures/empty-graph-store-format-7.zova", .role = StorageRole.graph },
         .{ .path = "tests/fixtures/empty-vector-store-format-7.zova", .role = StorageRole.vector },
-        .{ .path = "tests/fixtures/format-8.zova", .role = StorageRole.main },
+        .{ .path = "tests/fixtures/format-8.zova", .role = StorageRole.main, .open_error = error.UnsupportedLegacyFormat },
         .{ .path = "tests/fixtures/empty-graph-store-format-8.zova", .role = StorageRole.graph },
         .{ .path = "tests/fixtures/empty-vector-store-format-8.zova", .role = StorageRole.vector },
-        .{ .path = "tests/fixtures/format-9.zova", .role = StorageRole.main },
+        .{ .path = "tests/fixtures/format-9.zova", .role = StorageRole.main, .open_error = error.MigrationRequired },
         .{ .path = "tests/fixtures/empty-graph-store-format-9.zova", .role = StorageRole.graph },
         .{ .path = "tests/fixtures/empty-vector-store-format-9.zova", .role = StorageRole.vector },
     };
@@ -6314,7 +6372,7 @@ test "older main graph and vector fixtures are rejected without mutation" {
         const before = try testingFileSha256(copy_path);
 
         switch (fixture.role) {
-            .main => try std.testing.expectError(error.UnsupportedZovaVersion, Database.open(copy_path)),
+            .main => try std.testing.expectError(fixture.open_error, Database.open(copy_path)),
             .graph => {
                 var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
                 const main_path = try std.fmt.bufPrintZ(&main_buffer, ".zig-cache/tmp/{s}/format-10-main-graph-{d}.zova", .{ tmp.sub_path[0..], index });
@@ -6356,7 +6414,7 @@ test "open rejects future format version" {
         );
     }
 
-    try std.testing.expectError(error.UnsupportedZovaVersion, Database.open(db_path));
+    try std.testing.expectError(error.UnsupportedFutureFormat, Database.open(db_path));
 }
 
 test "format version classification distinguishes current migratable legacy future and malformed" {
@@ -6404,7 +6462,7 @@ test "open rejects v0.4 format version two database" {
         try raw.exec(object_impl.object_chunks_schema_sql ++ ";");
     }
 
-    try std.testing.expectError(error.UnsupportedZovaVersion, Database.open(db_path));
+    try std.testing.expectError(error.UnsupportedLegacyFormat, Database.open(db_path));
 }
 
 test "created zova database contains required object tables" {
