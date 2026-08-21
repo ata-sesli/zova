@@ -87,7 +87,29 @@ for path in sorted(output_dir.glob("*.zova")):
             raise SystemExit(f"error: {path.name} does not report format version 9")
     finally:
         connection.close()
-print("verified all exports report format version 9")
+
+# Bound stores must be recorded as portable relative sibling names, never
+# absolute paths into the exporter's temporary directory.
+main_path = output_dir / "bound-main-format-9.zova"
+connection = sqlite3.connect(f"file:{main_path}?mode=ro", uri=True)
+try:
+    rows = connection.execute(
+        "select role, path from _zova_bound_stores order by role"
+    ).fetchall()
+finally:
+    connection.close()
+
+expected = {
+    "graph_store": "bound-main-format-9.graphs.zova",
+    "object_store": "bound-main-format-9.objects.zova",
+    "vector_store": "bound-main-format-9.vectors.zova",
+}
+for role, stored_path in rows:
+    if pathlib.Path(stored_path).is_absolute() or expected.get(role) != stored_path:
+        raise SystemExit(
+            f"error: bound {role} records non-portable path {stored_path!r}"
+        )
+print("verified format version 9 and portable bound-store paths")
 PY
 
 cp "${FIXTURES[@]/#/$OUTPUT_DIR/}" "$FIXTURE_DIR/"

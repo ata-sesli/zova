@@ -48,17 +48,52 @@ fn populateUserSql(db: *zova.Database) !void {
     }
 }
 
-fn writeObjects(db: *zova.Database, alloc: std.mem.Allocator) !void {
-    const payloads = [_][]const u8{
+fn writeObjects(db: *zova.Database, alloc: std.mem.Allocator, bound_store: bool) !void {
+    // Small single-chunk payloads.
+    const small_payloads = [_][]const u8{
         "first object payload: small enough for a single chunk.",
-        "second object payload: repeated bytes bytes bytes bytes bytes bytes to exercise chunking behavior across FastCDC boundaries and produce multiple chunks in the manifest so migration moves manifests, ranges, and reconstructed bytes identically.",
+        "second object payload with modest size.",
     };
 
-    for (payloads) |payload| {
+    for (small_payloads) |payload| {
         var writer = try db.objectWriter(alloc);
         defer writer.deinit();
         try writer.write(payload);
         _ = try writer.finish();
+    }
+
+    // One deterministic multi-chunk payload well beyond the 64 KiB maximum
+    // chunk size so manifest ordering, offsets/ranges, and repeated chunk rows
+    // are represented in the fixture evidence.
+    const large_size = 320 * 1024;
+    const large_payload = try alloc.alloc(u8, large_size);
+    defer alloc.free(large_payload);
+
+    var state: u32 = 0x9e3779b9;
+    for (large_payload) |*byte| {
+        state = state *% 1664525 +% 1013904223;
+        byte.* = @truncate(state >> 16);
+    }
+
+    var writer = try db.objectWriter(alloc);
+    defer writer.deinit();
+    try writer.write(large_payload);
+    const large_id = try writer.finish();
+
+    // With a bound store, object bytes live in the attached object_store
+    // schema instead of main.
+    const count_sql: [:0]const u8 = if (bound_store)
+        "select count(*) from object_store._zova_object_chunks where object_id = ?"
+    else
+        "select count(*) from _zova_object_chunks where object_id = ?";
+    var chunk_count = try db.prepare(count_sql);
+    defer chunk_count.deinit();
+    try chunk_count.bindBlob(1, &large_id);
+    _ = try chunk_count.step();
+    const chunks = chunk_count.columnInt64(0);
+    if (chunks < 2) {
+        std.debug.print("error: multi-chunk object produced only {d} chunk(s)\n", .{chunks});
+        return error.MultiChunkObjectExpected;
     }
 }
 
@@ -164,7 +199,7 @@ fn createPopulatedDatabase(path: [:0]const u8, alloc: std.mem.Allocator) !void {
 
     try populateUserSql(&db);
     try db.installExtension("trgm");
-    try writeObjects(&db, alloc);
+    try writeObjects(&db, alloc, false);
     try populateVectors(&db);
     try populateGraphs(&db);
 }
@@ -195,9 +230,37 @@ fn createBoundSet(init: std.process.Init, paths: BoundSetPaths, alloc: std.mem.A
 
     try populateUserSql(&main_db);
     try main_db.installExtension("trgm");
-    try writeObjects(&main_db, alloc);
+    try writeObjects(&main_db, alloc, true);
     try populateVectors(&main_db);
     try populateGraphs(&main_db);
+}
+
+/// Reopen the bound main through the released build and verify every attached
+/// store is locatable via its recorded relative path and still holds data.
+fn smokeCheckBoundSet(main_path: [:0]const u8) !void {
+    var db = try zova.Database.open(main_path);
+    defer db.deinit();
+
+    const checks = [_]struct { sql: [:0]const u8, minimum: i64 }{
+        .{ .sql = "select count(*) from object_store._zova_objects", .minimum = 3 },
+        .{ .sql = "select count(*) from object_store._zova_object_chunks", .minimum = 4 },
+        .{ .sql = "select count(*) from vector_store._zova_vectors", .minimum = 6 },
+        .{ .sql = "select count(*) from vector_store._zova_vector_collections", .minimum = 3 },
+        .{ .sql = "select count(*) from graph_store._zova_graph_nodes", .minimum = 4 },
+        .{ .sql = "select count(*) from graph_store._zova_graph_edges", .minimum = 3 },
+        .{ .sql = "select count(*) from graph_store._zova_graph_edges where length(payload) > 0", .minimum = 2 },
+    };
+
+    for (checks) |check| {
+        var stmt = try db.prepare(check.sql);
+        defer stmt.deinit();
+        _ = try stmt.step();
+        const count = stmt.columnInt64(0);
+        if (count < check.minimum) {
+            std.debug.print("error: bound-store smoke check failed: {s} returned {d}\n", .{ check.sql, count });
+            return error.BoundStoreSmokeCheckFailed;
+        }
+    }
 }
 
 pub fn main(init: std.process.Init) !u8 {
@@ -207,41 +270,35 @@ pub fn main(init: std.process.Init) !u8 {
 
     const args = try init.minimal.args.toSlice(alloc);
     if (args.len != 2) return 2;
-    const out_dir = args[1];
+
+    // Run from inside the output directory so bound stores are recorded as
+    // stable relative sibling names instead of absolute temporary paths.
+    try std.process.setCurrentPath(init.io, args[1]);
 
     // 1. Empty main database.
     {
-        const path = try std.fmt.allocPrintSentinel(alloc, "{s}/empty-main-format-9.zova", .{out_dir}, 0);
-        var db = try zova.Database.create(path);
+        var db = try zova.Database.create("empty-main-format-9.zova");
         defer db.deinit();
     }
 
     // 2. Populated single-file database.
-    {
-        const path = try std.fmt.allocPrintSentinel(alloc, "{s}/format-9.zova", .{out_dir}, 0);
-        try createPopulatedDatabase(path, alloc);
-    }
+    try createPopulatedDatabase("format-9.zova", alloc);
 
     // 3. Main database with bound object, vector, and graph stores.
     {
         const paths = BoundSetPaths{
-            .main = try std.fmt.allocPrintSentinel(alloc, "{s}/bound-main-format-9.zova", .{out_dir}, 0),
-            .objects = try std.fmt.allocPrintSentinel(alloc, "{s}/bound-main-format-9.objects.zova", .{out_dir}, 0),
-            .vectors = try std.fmt.allocPrintSentinel(alloc, "{s}/bound-main-format-9.vectors.zova", .{out_dir}, 0),
-            .graphs = try std.fmt.allocPrintSentinel(alloc, "{s}/bound-main-format-9.graphs.zova", .{out_dir}, 0),
+            .main = "bound-main-format-9.zova",
+            .objects = "bound-main-format-9.objects.zova",
+            .vectors = "bound-main-format-9.vectors.zova",
+            .graphs = "bound-main-format-9.graphs.zova",
         };
         try createBoundSet(init, paths, alloc);
+        try smokeCheckBoundSet(paths.main);
     }
 
     // 4. Standalone empty stores retained for legacy rejection tests.
-    {
-        const path = try std.fmt.allocPrintSentinel(alloc, "{s}/empty-vector-store-format-9.zova", .{out_dir}, 0);
-        try zova.createVectorStore(path);
-    }
-    {
-        const path = try std.fmt.allocPrintSentinel(alloc, "{s}/empty-graph-store-format-9.zova", .{out_dir}, 0);
-        try zova.createGraphStore(path);
-    }
+    try zova.createVectorStore("empty-vector-store-format-9.zova");
+    try zova.createGraphStore("empty-graph-store-format-9.zova");
 
     return 0;
 }
