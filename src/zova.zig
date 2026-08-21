@@ -63,6 +63,37 @@ const kv_table = kv_impl.kv_table;
 const bound_stores_table = "_zova_bound_stores";
 const magic_value = "zova";
 const format_version = version.format_version;
+const minimum_migratable_format = "9";
+
+/// Compatibility class assigned to a Zova storage format version.
+///
+/// `migratable` marks formats this release can migrate explicitly into the
+/// current format; `unsupported_legacy` marks formats older than the earliest
+/// migratable format, and `unsupported_future` marks formats newer than this
+/// release.
+pub const FormatCompatibility = enum {
+    current,
+    migratable,
+    unsupported_legacy,
+    unsupported_future,
+};
+
+fn parseFormatVersion(value: []const u8) ?u32 {
+    if (value.len == 0 or value[0] == '+' or value[0] == '-') return null;
+    return std.fmt.parseInt(u32, value, 10) catch null;
+}
+
+fn classifyFormatVersion(value: []const u8) ?FormatCompatibility {
+    const format = parseFormatVersion(value) orelse return null;
+    const current = parseFormatVersion(format_version) orelse return null;
+    const minimum_migratable = parseFormatVersion(minimum_migratable_format) orelse return null;
+
+    if (format == current) return .current;
+    if (format > current) return .unsupported_future;
+    if (format >= minimum_migratable) return .migratable;
+    return .unsupported_legacy;
+}
+
 const bound_object_store_role = "object_store";
 const bound_vector_store_role = "vector_store";
 const bound_graph_store_role = "graph_store";
@@ -6325,6 +6356,34 @@ test "open rejects future format version" {
     }
 
     try std.testing.expectError(error.UnsupportedZovaVersion, Database.open(db_path));
+}
+
+test "format version classification distinguishes current migratable legacy future and malformed" {
+    try std.testing.expectEqual(FormatCompatibility.current, classifyFormatVersion(format_version).?);
+    try std.testing.expectEqual(FormatCompatibility.current, classifyFormatVersion("10").?);
+    try std.testing.expectEqual(FormatCompatibility.migratable, classifyFormatVersion("9").?);
+    try std.testing.expectEqual(FormatCompatibility.unsupported_legacy, classifyFormatVersion("8").?);
+    try std.testing.expectEqual(FormatCompatibility.unsupported_legacy, classifyFormatVersion("7").?);
+    try std.testing.expectEqual(FormatCompatibility.unsupported_legacy, classifyFormatVersion("2").?);
+    try std.testing.expectEqual(FormatCompatibility.unsupported_future, classifyFormatVersion("11").?);
+    try std.testing.expectEqual(FormatCompatibility.unsupported_future, classifyFormatVersion("999").?);
+
+    const malformed = [_][]const u8{
+        "",
+        "ten",
+        "Ten",
+        "9x",
+        "x9",
+        "+9",
+        "-1",
+        " 10",
+        "10 ",
+        "4294967296",
+        "0x9",
+    };
+    for (malformed) |value| {
+        try std.testing.expectEqual(@as(?FormatCompatibility, null), classifyFormatVersion(value));
+    }
 }
 
 test "open rejects v0.4 format version two database" {

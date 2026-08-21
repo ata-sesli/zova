@@ -1,0 +1,247 @@
+//! Format-9 fixture exporter for Zova storage-format migration testing.
+//!
+//! This program must be compiled against an unmodified checkout of the
+//! released `v0.26.1` tag; never against current development sources. See
+//! `scripts/export-format-9-fixtures.sh` for the supported invocation.
+//!
+//! Usage: export-format-9-fixtures <output-directory>
+
+const std = @import("std");
+const zova = @import("zova");
+
+const populated_user_sql =
+    \\create table user_documents (
+    \\  id integer primary key,
+    \\  title text not null,
+    \\  body text not null,
+    \\  word_count integer not null default 0,
+    \\  created_at_unix integer not null
+    \\);
+    \\create index user_documents_title_idx on user_documents (title);
+    \\create unique index user_documents_created_idx on user_documents (created_at_unix, id);
+    \\create view user_document_titles as select id, title from user_documents order by id;
+    \\create trigger user_documents_touch after insert on user_documents begin
+    \\  update user_documents set word_count = length(new.body) where id = new.id;
+    \\end;
+;
+
+fn populateUserSql(db: *zova.Database) !void {
+    try db.exec(populated_user_sql);
+
+    var insert = try db.prepare(
+        "insert into user_documents (title, body, created_at_unix) values (?, ?, ?)",
+    );
+    defer insert.deinit();
+
+    const rows = [_]struct { title: []const u8, body: []const u8, at: i64 }{
+        .{ .title = "alpha", .body = "alpha document body", .at = 1750000000 },
+        .{ .title = "beta", .body = "beta document body with more words", .at = 1750000100 },
+        .{ .title = "gamma", .body = "gamma", .at = 1750000200 },
+    };
+
+    for (rows) |row| {
+        try insert.reset();
+        try insert.bindText(1, row.title);
+        try insert.bindText(2, row.body);
+        try insert.bindInt64(3, row.at);
+        _ = try insert.step();
+    }
+}
+
+fn writeObjects(db: *zova.Database, alloc: std.mem.Allocator) !void {
+    const payloads = [_][]const u8{
+        "first object payload: small enough for a single chunk.",
+        "second object payload: repeated bytes bytes bytes bytes bytes bytes to exercise chunking behavior across FastCDC boundaries and produce multiple chunks in the manifest so migration moves manifests, ranges, and reconstructed bytes identically.",
+    };
+
+    for (payloads) |payload| {
+        var writer = try db.objectWriter(alloc);
+        defer writer.deinit();
+        try writer.write(payload);
+        _ = try writer.finish();
+    }
+}
+
+fn putVectorRows(
+    db: *zova.Database,
+    comptime element: std.meta.Tag(zova.VectorValuesConst),
+    collection: []const u8,
+    inputs: []const zova.VectorInput,
+) !void {
+    _ = element;
+    try db.putVectors(collection, inputs);
+}
+
+fn populateVectors(db: *zova.Database) !void {
+    try db.createVectorCollection("embeddings_f32", .{
+        .dimensions = 4,
+        .metric = .cosine,
+        .element_type = .f32,
+    });
+    try db.createVectorCollection("embeddings_f16", .{
+        .dimensions = 4,
+        .metric = .l2,
+        .element_type = .f16,
+    });
+    try db.createVectorCollection("embeddings_i8", .{
+        .dimensions = 4,
+        .metric = .cosine,
+        .element_type = .i8,
+    });
+
+    const f32_rows = [_]zova.VectorInput{
+        .{ .id = "f32-a", .values = .{ .f32 = &.{ 0.25, -0.5, 1.0, 2.0 } } },
+        .{ .id = "f32-b", .values = .{ .f32 = &.{ -1.5, 0.125, 0.75, -2.25 } } },
+    };
+    try putVectorRows(db, .f32, "embeddings_f32", &f32_rows);
+
+    // IEEE 754 binary16 bit patterns transported as u16.
+    const f16_rows = [_]zova.VectorInput{
+        .{ .id = "f16-a", .values = .{ .f16 = &.{ 0x3c00, 0xbc00, 0x4200, 0xc200 } } },
+        .{ .id = "f16-b", .values = .{ .f16 = &.{ 0x3800, 0xb800, 0x4000, 0x4400 } } },
+    };
+    try putVectorRows(db, .f16, "embeddings_f16", &f16_rows);
+
+    const i8_rows = [_]zova.VectorInput{
+        .{ .id = "i8-a", .values = .{ .i8 = &.{ 12, -34, 56, -78 } } },
+        .{ .id = "i8-b", .values = .{ .i8 = &.{ -100, 100, 7, -7 } } },
+    };
+    try putVectorRows(db, .i8, "embeddings_i8", &i8_rows);
+}
+
+fn populateGraphs(db: *zova.Database) !void {
+    try db.createGraph("social");
+    try db.createGraph("workflow");
+
+    try db.putGraphNode(.{
+        .graph_name = "social",
+        .node_id = "alice",
+        .kind = "person",
+        .target_type = .record,
+        .target_namespace = "user_documents",
+        .target_ref = "1",
+    });
+    try db.putGraphNode(.{
+        .graph_name = "social",
+        .node_id = "bob",
+        .kind = "person",
+        .target_type = .object,
+        .target_namespace = "objects",
+        .target_ref = "second-object",
+    });
+
+    var social_keys: [2]i64 = undefined;
+    try db.putGraphEdgesKeyed(&.{
+        .{ .graph_name = "social", .from_node_id = "alice", .edge_type = "knows", .to_node_id = "bob" },
+        .{ .graph_name = "social", .from_node_id = "bob", .edge_type = "follows", .to_node_id = "alice" },
+    }, &social_keys);
+
+    try db.replaceGraphEdgePayloads("social", &.{
+        .{ .edge_key = social_keys[0], .payload = "edge payload knows" },
+        .{ .edge_key = social_keys[1], .payload = "edge payload follows" },
+    });
+
+    try db.putGraphNode(.{
+        .graph_name = "workflow",
+        .node_id = "start",
+        .kind = "state",
+    });
+    try db.putGraphNode(.{
+        .graph_name = "workflow",
+        .node_id = "done",
+        .kind = "state",
+    });
+
+    var workflow_keys: [1]i64 = undefined;
+    try db.putGraphEdgesKeyed(&.{
+        .{ .graph_name = "workflow", .from_node_id = "start", .edge_type = "transitions-to", .to_node_id = "done" },
+    }, &workflow_keys);
+}
+
+fn createPopulatedDatabase(path: [:0]const u8, alloc: std.mem.Allocator) !void {
+    var db = try zova.Database.create(path);
+    defer db.deinit();
+
+    try populateUserSql(&db);
+    try db.installExtension("trgm");
+    try writeObjects(&db, alloc);
+    try populateVectors(&db);
+    try populateGraphs(&db);
+}
+
+const BoundSetPaths = struct {
+    main: [:0]const u8,
+    objects: [:0]const u8,
+    vectors: [:0]const u8,
+    graphs: [:0]const u8,
+};
+
+fn createBoundSet(init: std.process.Init, paths: BoundSetPaths, alloc: std.mem.Allocator) !void {
+    try zova.createObjectStore(paths.objects);
+    errdefer std.Io.Dir.cwd().deleteFile(init.io, paths.objects) catch {};
+
+    try zova.createVectorStore(paths.vectors);
+    errdefer std.Io.Dir.cwd().deleteFile(init.io, paths.vectors) catch {};
+
+    try zova.createGraphStore(paths.graphs);
+    errdefer std.Io.Dir.cwd().deleteFile(init.io, paths.graphs) catch {};
+
+    var main_db = try zova.Database.create(paths.main);
+    defer main_db.deinit();
+
+    try main_db.bindObjectStore(paths.objects);
+    try main_db.bindVectorStore(paths.vectors);
+    try main_db.bindGraphStore(paths.graphs);
+
+    try populateUserSql(&main_db);
+    try main_db.installExtension("trgm");
+    try writeObjects(&main_db, alloc);
+    try populateVectors(&main_db);
+    try populateGraphs(&main_db);
+}
+
+pub fn main(init: std.process.Init) !u8 {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    const args = try init.minimal.args.toSlice(alloc);
+    if (args.len != 2) return 2;
+    const out_dir = args[1];
+
+    // 1. Empty main database.
+    {
+        const path = try std.fmt.allocPrintSentinel(alloc, "{s}/empty-main-format-9.zova", .{out_dir}, 0);
+        var db = try zova.Database.create(path);
+        defer db.deinit();
+    }
+
+    // 2. Populated single-file database.
+    {
+        const path = try std.fmt.allocPrintSentinel(alloc, "{s}/format-9.zova", .{out_dir}, 0);
+        try createPopulatedDatabase(path, alloc);
+    }
+
+    // 3. Main database with bound object, vector, and graph stores.
+    {
+        const paths = BoundSetPaths{
+            .main = try std.fmt.allocPrintSentinel(alloc, "{s}/bound-main-format-9.zova", .{out_dir}, 0),
+            .objects = try std.fmt.allocPrintSentinel(alloc, "{s}/bound-main-format-9.objects.zova", .{out_dir}, 0),
+            .vectors = try std.fmt.allocPrintSentinel(alloc, "{s}/bound-main-format-9.vectors.zova", .{out_dir}, 0),
+            .graphs = try std.fmt.allocPrintSentinel(alloc, "{s}/bound-main-format-9.graphs.zova", .{out_dir}, 0),
+        };
+        try createBoundSet(init, paths, alloc);
+    }
+
+    // 4. Standalone empty stores retained for legacy rejection tests.
+    {
+        const path = try std.fmt.allocPrintSentinel(alloc, "{s}/empty-vector-store-format-9.zova", .{out_dir}, 0);
+        try zova.createVectorStore(path);
+    }
+    {
+        const path = try std.fmt.allocPrintSentinel(alloc, "{s}/empty-graph-store-format-9.zova", .{out_dir}, 0);
+        try zova.createGraphStore(path);
+    }
+
+    return 0;
+}
