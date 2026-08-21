@@ -1,17 +1,14 @@
-//! RED coverage for storage-format classification and non-mutating open
-//! behavior. Part of the Zova 1.0 storage-format migration epic.
+//! Storage-format classification and non-mutating open behavior tests.
 //!
-//! These tests define the target contract: format 9 is migratable, formats
-//! below the minimum migratable format are unsupported legacy, formats above
-//! the current format are unsupported future, malformed inputs are rejected,
-//! and every open attempt leaves the source byte-identical.
-//!
-//! They intentionally fail until precise open errors are emitted by the open
-//! path, and therefore run in the opt-in `migration-red-test` build step
-//! instead of the default test suite.
+//! These tests define the contract established by the storage-format migration
+//! epic: format 9 is migratable, formats below the minimum migratable format
+//! are unsupported legacy, formats above the current format are unsupported
+//! future, malformed inputs are rejected, and every open attempt leaves the
+//! source byte-identical. They run in the default test suite.
 
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
+const version = @import("version.zig");
 const zova = @import("zova.zig");
 
 const Database = zova.Database;
@@ -292,4 +289,115 @@ test "open rejects non-zova inputs without mutation" {
         const after = try fileSha256(db_path);
         try std.testing.expectEqualSlices(u8, &before, &after);
     }
+}
+
+fn expectProbeInfo(
+    tmp_sub_path: []const u8,
+    index: usize,
+    fixture_name: []const u8,
+    expected_compatibility: zova.FormatCompatibility,
+) !void {
+    const copy_path = try copyFixture(tmp_sub_path, index, fixture_name);
+    defer std.testing.allocator.free(copy_path);
+
+    const before = try fileSha256(copy_path);
+    const info = try zova.probeDatabaseFormat(copy_path);
+    const after = try fileSha256(copy_path);
+
+    try std.testing.expectEqual(@as(u32, 9), info.format_version);
+    try std.testing.expectEqual(expected_compatibility, info.compatibility);
+    try std.testing.expectEqualSlices(u8, &before, &after);
+}
+
+test "probe reports migratable format information for every format-9 fixture without mutation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    inline for (format_9_main_fixtures, 0..) |name, index| {
+        try expectProbeInfo(tmp.sub_path[0..], index, name, .migratable);
+    }
+    inline for (format_9_store_fixtures, 0..) |name, index| {
+        try expectProbeInfo(tmp.sub_path[0..], format_9_main_fixtures.len + index, name, .migratable);
+    }
+}
+
+test "probe and open agree on classification for synthetic databases" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // A genuinely created database probes as current and opens.
+    {
+        var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/probe-current.zova", .{tmp.sub_path});
+        {
+            var db = try Database.create(db_path);
+            db.deinit();
+        }
+
+        const expected_current = try std.fmt.parseInt(u32, version.format_version, 10);
+        const info = try zova.probeDatabaseFormat(db_path);
+        try std.testing.expectEqual(expected_current, info.format_version);
+        try std.testing.expectEqual(zova.FormatCompatibility.current, info.compatibility);
+
+        var reopened = try Database.open(db_path);
+        reopened.deinit();
+    }
+
+    const AgreementCase = struct {
+        version_value: []const u8,
+        compatibility: zova.FormatCompatibility,
+        open_error: anyerror,
+    };
+
+    const cases = [_]AgreementCase{
+        .{ .version_value = "9", .compatibility = .migratable, .open_error = error.MigrationRequired },
+        .{ .version_value = "8", .compatibility = .unsupported_legacy, .open_error = error.UnsupportedLegacyFormat },
+        .{ .version_value = "2", .compatibility = .unsupported_legacy, .open_error = error.UnsupportedLegacyFormat },
+        .{ .version_value = "11", .compatibility = .unsupported_future, .open_error = error.UnsupportedFutureFormat },
+    };
+
+    for (cases, 0..) |case, index| {
+        var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const file_name = try std.fmt.bufPrint(&path_buffer, "probe-agree-{d}.zova", .{index});
+
+        const db_path = try writeSyntheticFormatDatabase(tmp.sub_path[0..], file_name, case.version_value, "zova");
+        defer std.testing.allocator.free(db_path);
+
+        const info = try zova.probeDatabaseFormat(db_path);
+        try std.testing.expectEqual(case.compatibility, info.compatibility);
+        try std.testing.expectError(case.open_error, Database.open(db_path));
+    }
+
+    // Malformed versions reject both probe and open identically.
+    const malformed_versions = [_][]const u8{ "", "ten", "9x", "+9", "-1", " 10", "4294967296" };
+    for (malformed_versions, 0..) |version_value, index| {
+        var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const file_name = try std.fmt.bufPrint(&path_buffer, "probe-malformed-{d}.zova", .{index});
+
+        const db_path = try writeSyntheticFormatDatabase(tmp.sub_path[0..], file_name, version_value, "zova");
+        defer std.testing.allocator.free(db_path);
+
+        try std.testing.expectError(error.NotZovaDatabase, zova.probeDatabaseFormat(db_path));
+        try std.testing.expectError(error.NotZovaDatabase, Database.open(db_path));
+    }
+}
+
+test "probe rejects non-zova inputs without mutation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Text file wearing a .zova extension.
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const file_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/not-a-database-probe.zova", .{tmp.sub_path});
+    try std.Io.Dir.cwd().writeFile(io(), .{ .sub_path = file_path, .data = "definitely not a sqlite database\n" });
+
+    const before = try fileSha256(file_path);
+    try std.testing.expectError(error.NotZovaDatabase, zova.probeDatabaseFormat(file_path));
+    const after = try fileSha256(file_path);
+    try std.testing.expectEqualSlices(u8, &before, &after);
+
+    // Missing database file.
+    var missing_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const missing_path = try std.fmt.bufPrintZ(&missing_buffer, ".zig-cache/tmp/{s}/does-not-exist.zova", .{tmp.sub_path});
+    try std.testing.expectError(error.NotZovaDatabase, zova.probeDatabaseFormat(missing_path));
 }

@@ -7,6 +7,8 @@ const zova = @import("zova.zig");
 pub const Database = zova.Database;
 pub const Error = zova.Error;
 pub const FormatCompatibility = zova.FormatCompatibility;
+pub const DatabaseFormatInfo = zova.DatabaseFormatInfo;
+pub const probeDatabaseFormat = zova.probeDatabaseFormat;
 pub const CreateOptions = zova.CreateOptions;
 pub const Object = zova.Object;
 pub const ObjectChunk = zova.ObjectChunk;
@@ -259,6 +261,7 @@ test {
     _ = @import("graph_sql_tests.zig");
     _ = @import("graph_tests.zig");
     _ = @import("kv_tests.zig");
+    _ = @import("migration_red_tests.zig");
     _ = @import("object_tests.zig");
     _ = @import("trgm_tests.zig");
     _ = @import("vector_tests.zig");
