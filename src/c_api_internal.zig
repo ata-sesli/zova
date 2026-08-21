@@ -5896,7 +5896,14 @@ fn statusFromError(err: anyerror) zova_status {
         error.Misuse => .MISUSE,
         error.NotZovaPath => .NOT_ZOVA_PATH,
         error.NotZovaDatabase => .NOT_ZOVA_DATABASE,
-        error.UnsupportedZovaVersion => .UNSUPPORTED_ZOVA_VERSION,
+        // Temporary mapping until the additive migration statuses
+        // (ZOVA_MIGRATION_REQUIRED = 35, ZOVA_UNSUPPORTED_FUTURE_FORMAT = 36,
+        // ZOVA_UNSUPPORTED_LEGACY_FORMAT = 37) land with the C ABI issue.
+        error.UnsupportedZovaVersion,
+        error.MigrationRequired,
+        error.UnsupportedLegacyFormat,
+        error.UnsupportedFutureFormat,
+        => .UNSUPPORTED_ZOVA_VERSION,
         error.DestinationExists => .DESTINATION_EXISTS,
         error.ZovaNameConflict => .ZOVA_NAME_CONFLICT,
         error.ObjectNotFound => .OBJECT_NOT_FOUND,
@@ -6721,6 +6728,62 @@ test "c abi app callbacks coexist with bundled extension vector graph and notifi
         try std.testing.expectEqual(zova_status.OK, zova_statement_column_text(&.{ .statement = statement, .index = 0, .out_text = &text }));
         try std.testing.expectEqualStrings("far", text.data.?[0..text.len]);
     }
+}
+
+test "c abi maps incompatible storage formats to unsupported zova version" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const Cases = struct {
+        file_name: []const u8,
+        version_value: []const u8,
+    };
+
+    // Synthetic recognized-but-incompatible databases: migratable, legacy,
+    // and future formats must all surface as UNSUPPORTED_ZOVA_VERSION through
+    // the public ABI until the additive migration statuses land.
+    const cases = [_]Cases{
+        .{ .file_name = "c-abi-format-9.zova", .version_value = "9" },
+        .{ .file_name = "c-abi-format-8.zova", .version_value = "8" },
+        .{ .file_name = "c-abi-format-11.zova", .version_value = "11" },
+    };
+
+    for (cases) |case| {
+        var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path[0..], case.file_name });
+
+        {
+            var raw = try sqlite.Database.open(db_path);
+            defer raw.deinit();
+            try raw.exec("create table _zova_meta (key text primary key, value text not null)");
+            try raw.exec("insert into _zova_meta (key, value) values ('magic', 'zova')");
+            var insert = try raw.prepare("insert into _zova_meta (key, value) values ('format_version', ?)");
+            defer insert.deinit();
+            try insert.bindText(1, case.version_value);
+            _ = try insert.step();
+        }
+
+        var db: ?*zova_database = null;
+        const status = zova_database_open(&.{
+            .path = db_path,
+            .out_db = &db,
+            .out_error_message = null,
+        });
+        try std.testing.expectEqual(zova_status.UNSUPPORTED_ZOVA_VERSION, status);
+        try std.testing.expect(db == null);
+    }
+
+    // The genuine released format-9 fixture through the public ABI.
+    var fixture_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const fixture_path = try std.fmt.bufPrintZ(&fixture_buffer, "tests/fixtures/format-9.zova", .{});
+    var fixture_db: ?*zova_database = null;
+    const fixture_status = zova_database_open(&.{
+        .path = fixture_path,
+        .out_db = &fixture_db,
+        .out_error_message = null,
+    });
+    try std.testing.expectEqual(zova_status.UNSUPPORTED_ZOVA_VERSION, fixture_status);
+    try std.testing.expect(fixture_db == null);
 }
 
 test "c abi open options validate flags and support read-only handles" {
