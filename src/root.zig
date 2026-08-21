@@ -6,6 +6,7 @@ const zova = @import("zova.zig");
 
 pub const Database = zova.Database;
 pub const Error = zova.Error;
+pub const FormatCompatibility = zova.FormatCompatibility;
 pub const CreateOptions = zova.CreateOptions;
 pub const Object = zova.Object;
 pub const ObjectChunk = zova.ObjectChunk;

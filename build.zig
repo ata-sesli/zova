@@ -177,6 +177,27 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&test_cmd.step);
 
+    // RED coverage for storage-format classification. Deliberately excluded
+    // from the default `test` step: these tests assert the migration contract
+    // (MigrationRequired / UnsupportedLegacyFormat / UnsupportedFutureFormat)
+    // and stay red until the open path emits precise errors.
+    const migration_red_tests = b.addTest(.{
+        .name = "migration-red-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/migration_red_test_root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    migration_red_tests.root_module.addOptions("zova_build_options", zova_build_options);
+    addSqlite(migration_red_tests.root_module, b);
+    const migration_red_cmd = b.addRunArtifact(migration_red_tests);
+    const migration_red_step = b.step(
+        "migration-red-test",
+        "Run storage-format classification RED tests (expected to fail until migration lands)",
+    );
+    migration_red_step.dependOn(&migration_red_cmd.step);
+
     const c_api_tests = b.addTest(.{
         .name = "c-api-test",
         .root_module = b.createModule(.{

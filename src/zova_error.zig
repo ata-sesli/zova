@@ -9,6 +9,15 @@ pub const Error = sqlite.Error || error{
     NotZovaPath,
     NotZovaDatabase,
     UnsupportedZovaVersion,
+    /// The database reports a storage format this release no longer opens but
+    /// can still migrate explicitly. Reserved for format probing and
+    /// classification; emitted by the open path once precise open errors land.
+    MigrationRequired,
+    /// The database reports a storage format newer than this release.
+    UnsupportedFutureFormat,
+    /// The database reports a pre-migration storage format with no direct
+    /// migration path into this release.
+    UnsupportedLegacyFormat,
     DestinationExists,
     ZovaNameConflict,
     ObjectNotFound,
