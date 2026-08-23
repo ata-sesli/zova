@@ -355,3 +355,167 @@ test "migration rolls back completely when schema work fails and never advances 
     try std.testing.expectEqual(sqlite.Step.row, try quick_check.step());
     try std.testing.expectEqualStrings("ok", quick_check.columnText(0));
 }
+
+fn writeForgedDatabase(
+    tmp_sub_path: []const u8,
+    file_name: []const u8,
+    magic_row: ?[]const u8,
+    version_row: ?[]const u8,
+) ![:0]const u8 {
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/{s}", .{ tmp_sub_path, file_name });
+
+    var raw = try sqlite.Database.open(db_path);
+    defer raw.deinit();
+    try raw.exec("create table _zova_meta (key text primary key, value text not null)");
+
+    if (magic_row) |magic| {
+        var insert = try raw.prepare("insert into _zova_meta (key, value) values ('magic', ?1)");
+        defer insert.deinit();
+        try insert.bindText(1, magic);
+        _ = try insert.step();
+    }
+    if (version_row) |version| {
+        var insert = try raw.prepare("insert into _zova_meta (key, value) values ('format_version', ?1)");
+        defer insert.deinit();
+        try insert.bindText(1, version);
+        _ = try insert.step();
+    }
+
+    return try std.testing.allocator.dupeZ(u8, db_path);
+}
+
+fn expectSourceRejectedWithoutKv(db_path: [:0]const u8, expected_version: ?[]const u8) !void {
+    // The step must fail as a non-Zova database and never create the KV
+    // table; the file must remain structurally sound.
+    {
+        var raw = try sqlite.Database.open(db_path);
+        defer raw.deinit();
+        try std.testing.expectError(error.NotZovaDatabase, zova.runMigrationStep(&raw));
+    }
+
+    var raw = try sqlite.Database.openWithFlags(db_path, .read_only);
+    defer raw.deinit();
+    if (expected_version) |version| {
+        try expectScalarTextRaw(&raw, "select value from _zova_meta where key = 'format_version'", version);
+    } else {
+        var missing = try raw.prepare("select count(*) from _zova_meta where key = 'format_version'");
+        defer missing.deinit();
+        try std.testing.expectEqual(sqlite.Step.row, try missing.step());
+        try std.testing.expectEqual(@as(i64, 0), missing.columnInt64(0));
+    }
+    try expectScalarTextRaw(&raw, "select count(*) from sqlite_master where type = 'table' and name = '_zova_kv'", "0");
+
+    var quick_check = try raw.prepare("pragma quick_check");
+    defer quick_check.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try quick_check.step());
+    try std.testing.expectEqualStrings("ok", quick_check.columnText(0));
+}
+
+test "migration rejects forged format-9 files with bad or missing identity metadata" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const cases = [_]struct { name: []const u8, magic: ?[]const u8, version: ?[]const u8 }{
+        .{ .name = "forged-wrong-magic.zova", .magic = "not-zova", .version = "9" },
+        .{ .name = "forged-missing-magic.zova", .magic = null, .version = "9" },
+        .{ .name = "forged-missing-version.zova", .magic = "zova", .version = null },
+    };
+
+    inline for (cases) |case| {
+        const db_path = try writeForgedDatabase(tmp.sub_path[0..], case.name, case.magic, case.version);
+        defer std.testing.allocator.free(db_path);
+        try expectSourceRejectedWithoutKv(db_path, case.version);
+    }
+}
+
+test "migration rejects format-9 sources with malformed required tables" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // A main database missing a required private schema.
+    {
+        const copy_path = try copyFixture(tmp.sub_path[0..], 0, "format-9.zova");
+        defer std.testing.allocator.free(copy_path);
+
+        {
+            var raw = try sqlite.Database.open(copy_path);
+            defer raw.deinit();
+            try raw.exec("drop table _zova_objects");
+        }
+
+        try expectSourceRejectedWithoutKv(copy_path, "9");
+    }
+
+    // A main database whose required table exists but lost its shape.
+    {
+        const copy_path = try copyFixture(tmp.sub_path[0..], 1, "format-9.zova");
+        defer std.testing.allocator.free(copy_path);
+
+        {
+            var raw = try sqlite.Database.open(copy_path);
+            defer raw.deinit();
+            try raw.exec(
+                \\drop table _zova_object_chunks;
+                \\create table _zova_object_chunks (
+                \\  object_id blob not null,
+                \\  chunk_index integer not null,
+                \\  chunk_hash blob not null
+                \\);
+            );
+        }
+
+        try expectSourceRejectedWithoutKv(copy_path, "9");
+    }
+
+    // A store file whose role-required schema is broken.
+    {
+        const copy_path = try copyFixture(tmp.sub_path[0..], 2, "empty-vector-store-format-9.zova");
+        defer std.testing.allocator.free(copy_path);
+
+        {
+            var raw = try sqlite.Database.open(copy_path);
+            defer raw.deinit();
+            try raw.exec("drop table _zova_vectors");
+        }
+
+        try expectSourceRejectedWithoutKv(copy_path, "9");
+    }
+}
+
+test "migration rejects unknown store roles and store roles without their schema" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Unknown store_role value.
+    {
+        const copy_path = try copyFixture(tmp.sub_path[0..], 0, "empty-graph-store-format-9.zova");
+        defer std.testing.allocator.free(copy_path);
+
+        {
+            var raw = try sqlite.Database.open(copy_path);
+            defer raw.deinit();
+            try raw.exec("update _zova_meta set value = 'quarantine' where key = 'store_role'");
+        }
+
+        try expectSourceRejectedWithoutKv(copy_path, "9");
+    }
+
+    // Role/schema mismatch: claims to be a graph store but its graph tables
+    // were replaced by malformed shapes.
+    {
+        const copy_path = try copyFixture(tmp.sub_path[0..], 1, "empty-graph-store-format-9.zova");
+        defer std.testing.allocator.free(copy_path);
+
+        {
+            var raw = try sqlite.Database.open(copy_path);
+            defer raw.deinit();
+            try raw.exec(
+                \\drop table _zova_graph_edges;
+                \\create table _zova_graph_edges (edge_key integer);
+            );
+        }
+
+        try expectSourceRejectedWithoutKv(copy_path, "9");
+    }
+}
