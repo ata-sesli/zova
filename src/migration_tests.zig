@@ -385,13 +385,17 @@ fn writeForgedDatabase(
     return try std.testing.allocator.dupeZ(u8, db_path);
 }
 
-fn expectSourceRejectedWithoutKv(db_path: [:0]const u8, expected_version: ?[]const u8) !void {
+fn expectSourceRejectedWithoutKv(
+    db_path: [:0]const u8,
+    expected_version: ?[]const u8,
+    expected_error: anyerror,
+) !void {
     // The step must fail as a non-Zova database and never create the KV
     // table; the file must remain structurally sound.
     {
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
-        try std.testing.expectError(error.NotZovaDatabase, zova.runMigrationStep(&raw));
+        try std.testing.expectError(expected_error, zova.runMigrationStep(&raw));
     }
 
     var raw = try sqlite.Database.openWithFlags(db_path, .read_only);
@@ -425,7 +429,7 @@ test "migration rejects forged format-9 files with bad or missing identity metad
     inline for (cases) |case| {
         const db_path = try writeForgedDatabase(tmp.sub_path[0..], case.name, case.magic, case.version);
         defer std.testing.allocator.free(db_path);
-        try expectSourceRejectedWithoutKv(db_path, case.version);
+        try expectSourceRejectedWithoutKv(db_path, case.version, error.NotZovaDatabase);
     }
 }
 
@@ -444,7 +448,7 @@ test "migration rejects format-9 sources with malformed required tables" {
             try raw.exec("drop table _zova_objects");
         }
 
-        try expectSourceRejectedWithoutKv(copy_path, "9");
+        try expectSourceRejectedWithoutKv(copy_path, "9", error.NotZovaDatabase);
     }
 
     // A main database whose required table exists but lost its shape.
@@ -465,7 +469,7 @@ test "migration rejects format-9 sources with malformed required tables" {
             );
         }
 
-        try expectSourceRejectedWithoutKv(copy_path, "9");
+        try expectSourceRejectedWithoutKv(copy_path, "9", error.NotZovaDatabase);
     }
 
     // A store file whose role-required schema is broken.
@@ -479,7 +483,7 @@ test "migration rejects format-9 sources with malformed required tables" {
             try raw.exec("drop table _zova_vectors");
         }
 
-        try expectSourceRejectedWithoutKv(copy_path, "9");
+        try expectSourceRejectedWithoutKv(copy_path, "9", error.NotZovaDatabase);
     }
 }
 
@@ -498,7 +502,7 @@ test "migration rejects unknown store roles and store roles without their schema
             try raw.exec("update _zova_meta set value = 'quarantine' where key = 'store_role'");
         }
 
-        try expectSourceRejectedWithoutKv(copy_path, "9");
+        try expectSourceRejectedWithoutKv(copy_path, "9", error.NotZovaDatabase);
     }
 
     // Role/schema mismatch: claims to be a graph store but its graph tables
@@ -516,6 +520,93 @@ test "migration rejects unknown store roles and store roles without their schema
             );
         }
 
-        try expectSourceRejectedWithoutKv(copy_path, "9");
+        try expectSourceRejectedWithoutKv(copy_path, "9", error.NotZovaDatabase);
+    }
+}
+
+test "migration rejects mains with a malformed bound-store table" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // A format-9 main whose optional _zova_bound_stores table lost its shape
+    // must not be transformed; open-time validation would reject it too.
+    {
+        const copy_path = try copyFixture(tmp.sub_path[0..], 0, "bound-main-format-9.zova");
+        defer std.testing.allocator.free(copy_path);
+
+        {
+            var raw = try sqlite.Database.open(copy_path);
+            defer raw.deinit();
+            try raw.exec(
+                \\drop table _zova_bound_stores;
+                \\create table _zova_bound_stores (role text);
+            );
+        }
+
+        try expectSourceRejectedWithoutKv(copy_path, "9", error.NotZovaDatabase);
+    }
+
+    // Same for a populated single-file main carrying a malformed table.
+    {
+        const copy_path = try copyFixture(tmp.sub_path[0..], 1, "format-9.zova");
+        defer std.testing.allocator.free(copy_path);
+
+        {
+            var raw = try sqlite.Database.open(copy_path);
+            defer raw.deinit();
+            try raw.exec("create table _zova_bound_stores (role text)");
+        }
+
+        try expectSourceRejectedWithoutKv(copy_path, "9", error.NotZovaDatabase);
+    }
+}
+
+test "migration rejects stores with missing or invalid store identity" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Missing store_id row on a vector store.
+    {
+        const copy_path = try copyFixture(tmp.sub_path[0..], 0, "empty-vector-store-format-9.zova");
+        defer std.testing.allocator.free(copy_path);
+
+        {
+            var raw = try sqlite.Database.open(copy_path);
+            defer raw.deinit();
+            try raw.exec("delete from _zova_meta where key = 'store_id'");
+        }
+
+        try expectSourceRejectedWithoutKv(copy_path, "9", error.BoundStoreInvalid);
+    }
+
+    // Malformed store_id (wrong length) on a graph store.
+    {
+        const copy_path = try copyFixture(tmp.sub_path[0..], 1, "empty-graph-store-format-9.zova");
+        defer std.testing.allocator.free(copy_path);
+
+        {
+            var raw = try sqlite.Database.open(copy_path);
+            defer raw.deinit();
+            try raw.exec("update _zova_meta set value = 'deadbeef' where key = 'store_id'");
+        }
+
+        try expectSourceRejectedWithoutKv(copy_path, "9", error.BoundStoreInvalid);
+    }
+
+    // Non-hex store_id characters on an object store.
+    {
+        const copy_path = try copyFixture(tmp.sub_path[0..], 2, "bound-main-format-9.objects.zova");
+        defer std.testing.allocator.free(copy_path);
+
+        {
+            var raw = try sqlite.Database.open(copy_path);
+            defer raw.deinit();
+            var update = try raw.prepare("update _zova_meta set value = ?1 where key = 'store_id'");
+            defer update.deinit();
+            try update.bindText(1, "zzzz" ** 16);
+            _ = try update.step();
+        }
+
+        try expectSourceRejectedWithoutKv(copy_path, "9", error.BoundStoreInvalid);
     }
 }

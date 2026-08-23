@@ -176,43 +176,40 @@ fn migrateFormat9To10(db: *sqlite.Database) Error!void {
 }
 
 /// Role-aware validation of one Zova file at an exact expected storage
-/// format, mirroring the open-time and attach-time validators while
-/// intentionally omitting requirements introduced by later formats (currently
-/// only the format-10 private key-value schema that migration itself adds).
+/// format, structurally equivalent to the existing open-time and attach-time
+/// validators while intentionally omitting only requirements introduced by
+/// later formats (currently the format-10 private key-value schema that
+/// migration itself adds).
 ///
 /// Used by migration preflight so a forged or malformed file — wrong or
-/// missing magic, missing metadata, malformed required tables, or a store role
-/// without its expected schema — can never be transformed.
+/// missing magic, missing metadata, malformed required tables, a store role
+/// without its identity or schema, or a main with a malformed bound-store
+/// table — can never be transformed.
 fn validateMigrationSourceSchema(db: *sqlite.Database, expected_format: []const u8) Error!void {
-    try expectMetadataValue(db, "magic", magic_value, .magic);
-    try expectMetadataValue(db, "format_version", expected_format, .format_version);
-
     if (try metadataValueAlloc(std.heap.c_allocator, db, "store_role")) |role| {
         defer std.heap.c_allocator.free(role);
 
         if (std.mem.eql(u8, role, bound_object_store_role)) {
-            try validateExtensionSchema(db);
-            try validateObjectSchema(db);
-            return;
+            return validateObjectStoreDatabaseExpected(db, expected_format);
         }
         if (std.mem.eql(u8, role, bound_vector_store_role)) {
-            try validateExtensionSchema(db);
-            try validateVectorSchema(db);
-            return;
+            return validateVectorStoreDatabaseExpected(db, expected_format);
         }
         if (std.mem.eql(u8, role, bound_graph_store_role)) {
-            try validateExtensionSchema(db);
-            try validateGraphSchema(db);
-            return;
+            return validateGraphStoreDatabaseExpected(db, expected_format);
         }
         return error.NotZovaDatabase;
     }
 
-    // Main database: every private schema except the format-10 KV requirement.
+    // Main database: every private schema plus the optional bound-store
+    // table, except the format-10 KV requirement.
+    try expectMetadataValue(db, "magic", magic_value, .magic);
+    try expectMetadataValue(db, "format_version", expected_format, .format_version);
     try validateExtensionSchema(db);
     try validateObjectSchema(db);
     try validateVectorSchema(db);
     try validateGraphSchema(db);
+    try validateOptionalBoundStoreSchema(db);
 }
 
 /// Apply the single registered adjacent migration step for this database's
@@ -3381,14 +3378,18 @@ fn deleteBoundGraphStoreRows(db: *sqlite.Database) Error!void {
     std.debug.assert((try stmt.step()) == .done);
 }
 
-fn validateObjectStoreDatabase(db: *sqlite.Database) Error!void {
+fn validateObjectStoreDatabaseExpected(db: *sqlite.Database, expected_format: []const u8) Error!void {
     try expectMetadataValue(db, "magic", magic_value, .magic);
-    try expectMetadataValue(db, "format_version", format_version, .format_version);
+    try expectMetadataValue(db, "format_version", expected_format, .format_version);
     try expectMetadataValue(db, "store_role", bound_object_store_role, .magic);
     const store_id = try objectStoreIdAlloc(std.heap.c_allocator, db);
     defer std.heap.c_allocator.free(store_id);
     try validateExtensionSchema(db);
     try validateObjectSchema(db);
+}
+
+fn validateObjectStoreDatabase(db: *sqlite.Database) Error!void {
+    try validateObjectStoreDatabaseExpected(db, format_version);
 }
 
 fn validateAttachedObjectStoreAlloc(
@@ -3406,14 +3407,18 @@ fn validateAttachedObjectStoreAlloc(
     return store_id;
 }
 
-fn validateVectorStoreDatabase(db: *sqlite.Database) Error!void {
+fn validateVectorStoreDatabaseExpected(db: *sqlite.Database, expected_format: []const u8) Error!void {
     try expectMetadataValue(db, "magic", magic_value, .magic);
-    try expectMetadataValue(db, "format_version", format_version, .format_version);
+    try expectMetadataValue(db, "format_version", expected_format, .format_version);
     try expectMetadataValue(db, "store_role", bound_vector_store_role, .magic);
     const store_id = try objectStoreIdAlloc(std.heap.c_allocator, db);
     defer std.heap.c_allocator.free(store_id);
     try validateExtensionSchema(db);
     try validateVectorSchema(db);
+}
+
+fn validateVectorStoreDatabase(db: *sqlite.Database) Error!void {
+    try validateVectorStoreDatabaseExpected(db, format_version);
 }
 
 fn validateAttachedVectorStoreAlloc(
@@ -3431,14 +3436,18 @@ fn validateAttachedVectorStoreAlloc(
     return store_id;
 }
 
-fn validateGraphStoreDatabase(db: *sqlite.Database) Error!void {
+fn validateGraphStoreDatabaseExpected(db: *sqlite.Database, expected_format: []const u8) Error!void {
     try expectMetadataValue(db, "magic", magic_value, .magic);
-    try expectMetadataValue(db, "format_version", format_version, .format_version);
+    try expectMetadataValue(db, "format_version", expected_format, .format_version);
     try expectMetadataValue(db, "store_role", bound_graph_store_role, .magic);
     const store_id = try objectStoreIdAlloc(std.heap.c_allocator, db);
     defer std.heap.c_allocator.free(store_id);
     try validateExtensionSchema(db);
     try validateGraphSchema(db);
+}
+
+fn validateGraphStoreDatabase(db: *sqlite.Database) Error!void {
+    try validateGraphStoreDatabaseExpected(db, format_version);
 }
 
 fn validateAttachedGraphStoreAlloc(
