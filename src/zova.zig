@@ -144,6 +144,70 @@ fn readFormatClassification(db: *sqlite.Database) Error!DatabaseFormatInfo {
     };
 }
 
+/// One registered storage-format migration.
+///
+/// Steps are keyed by exact `(from, to)` versions and must be adjacent:
+/// `to == from + 1`. There is deliberately no catch-all upgrader and no way to
+/// skip versions; migrating across several formats applies one registered step
+/// at a time.
+const MigrationStep = struct {
+    from_version: u32,
+    to_version: u32,
+    apply: *const fn (db: *sqlite.Database) Error!void,
+};
+
+pub const migration_steps = [_]MigrationStep{
+    .{ .from_version = 9, .to_version = 10, .apply = migrateFormat9To10 },
+};
+
+pub fn findMigrationStep(from_version: u32, to_version: u32) ?*const MigrationStep {
+    for (&migration_steps) |*step| {
+        if (step.from_version == from_version and step.to_version == to_version) return step;
+    }
+    return null;
+}
+
+fn migrateFormat9To10(db: *sqlite.Database) Error!void {
+    // Format 10 introduces the private key-value schema. Extension-owned
+    // tables are left unchanged; normal open-time extension compatibility
+    // validation applies after migration.
+    try db.exec(kv_impl.kv_schema_sql);
+    try validateKvSchema(db);
+}
+
+/// Apply the single registered adjacent migration step for this database's
+/// storage format and return the new version.
+///
+/// The exact expected source version is validated before any mutation. The
+/// whole per-file step runs inside one SQLite transaction: schema work happens
+/// first, `_zova_meta.format_version` is updated as the final statement, and
+/// every failure path rolls back completely so the version never advances on
+/// SQL, allocation, constraint, or validation failure.
+pub fn runMigrationStep(db: *sqlite.Database) Error!u32 {
+    const info = try readFormatClassification(db);
+
+    const current = parseFormatVersion(format_version) orelse unreachable;
+    const target = std.math.add(u32, info.format_version, 1) catch return error.NoMigrationPath;
+    if (target > current or info.compatibility != .migratable) return error.NoMigrationPath;
+
+    const step = findMigrationStep(info.format_version, target) orelse return error.NoMigrationPath;
+
+    try db.beginImmediate();
+    errdefer db.rollback() catch {};
+
+    try step.apply(db);
+
+    var update = try db.prepare("update _zova_meta set value = ?1 where key = 'format_version'");
+    defer update.deinit();
+    var version_buffer: [16]u8 = undefined;
+    const version_text = std.fmt.bufPrint(&version_buffer, "{d}", .{target}) catch unreachable;
+    try update.bindText(1, version_text);
+    _ = try update.step();
+
+    try db.commit();
+    return target;
+}
+
 const bound_object_store_role = "object_store";
 const bound_vector_store_role = "vector_store";
 const bound_graph_store_role = "graph_store";
