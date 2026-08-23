@@ -175,14 +175,55 @@ fn migrateFormat9To10(db: *sqlite.Database) Error!void {
     try validateKvSchema(db);
 }
 
+/// Role-aware validation of one Zova file at an exact expected storage
+/// format, mirroring the open-time and attach-time validators while
+/// intentionally omitting requirements introduced by later formats (currently
+/// only the format-10 private key-value schema that migration itself adds).
+///
+/// Used by migration preflight so a forged or malformed file — wrong or
+/// missing magic, missing metadata, malformed required tables, or a store role
+/// without its expected schema — can never be transformed.
+fn validateMigrationSourceSchema(db: *sqlite.Database, expected_format: []const u8) Error!void {
+    try expectMetadataValue(db, "magic", magic_value, .magic);
+    try expectMetadataValue(db, "format_version", expected_format, .format_version);
+
+    if (try metadataValueAlloc(std.heap.c_allocator, db, "store_role")) |role| {
+        defer std.heap.c_allocator.free(role);
+
+        if (std.mem.eql(u8, role, bound_object_store_role)) {
+            try validateExtensionSchema(db);
+            try validateObjectSchema(db);
+            return;
+        }
+        if (std.mem.eql(u8, role, bound_vector_store_role)) {
+            try validateExtensionSchema(db);
+            try validateVectorSchema(db);
+            return;
+        }
+        if (std.mem.eql(u8, role, bound_graph_store_role)) {
+            try validateExtensionSchema(db);
+            try validateGraphSchema(db);
+            return;
+        }
+        return error.NotZovaDatabase;
+    }
+
+    // Main database: every private schema except the format-10 KV requirement.
+    try validateExtensionSchema(db);
+    try validateObjectSchema(db);
+    try validateVectorSchema(db);
+    try validateGraphSchema(db);
+}
+
 /// Apply the single registered adjacent migration step for this database's
 /// storage format and return the new version.
 ///
-/// The exact expected source version is validated before any mutation. The
-/// whole per-file step runs inside one SQLite transaction: schema work happens
-/// first, `_zova_meta.format_version` is updated as the final statement, and
-/// every failure path rolls back completely so the version never advances on
-/// SQL, allocation, constraint, or validation failure.
+/// The exact expected source identity, version, role, and schema are validated
+/// after `BEGIN IMMEDIATE` so validation and mutation share one stable
+/// transaction. Schema work happens first, `_zova_meta.format_version` is
+/// updated as the final statement, and every failure path rolls back
+/// completely so the version never advances on SQL, allocation, constraint,
+/// or validation failure.
 pub fn runMigrationStep(db: *sqlite.Database) Error!u32 {
     const info = try readFormatClassification(db);
 
@@ -192,8 +233,13 @@ pub fn runMigrationStep(db: *sqlite.Database) Error!u32 {
 
     const step = findMigrationStep(info.format_version, target) orelse return error.NoMigrationPath;
 
+    var format_buffer: [16]u8 = undefined;
+    const expected_format = std.fmt.bufPrint(&format_buffer, "{d}", .{info.format_version}) catch unreachable;
+
     try db.beginImmediate();
     errdefer db.rollback() catch {};
+
+    try validateMigrationSourceSchema(db, expected_format);
 
     try step.apply(db);
 
