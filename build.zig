@@ -1,5 +1,18 @@
 const std = @import("std");
 
+const sqlite_c_flags = &.{
+    "-std=c99",
+    // Keep the static C ABI library consumable by external linkers such as
+    // cgo without requiring Zig/Clang sanitizer runtimes.
+    "-fno-sanitize=undefined",
+    // Keep SQLite's mutex support enabled for normal embedded use.
+    "-DSQLITE_THREADSAFE=1",
+    // Promise FTS5 as part of Zova's vendored SQLite build, without adding a
+    // Zova-specific search API.
+    "-DSQLITE_ENABLE_FTS5",
+    "-DSQLITE_ENABLE_DBSTAT_VTAB",
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -10,13 +23,28 @@ pub fn build(b: *std.Build) void {
     const zova_build_options = b.addOptions();
     zova_build_options.addOption(bool, "enable_dynamic_extensions", enable_dynamic_extensions);
 
+    const sqlite_module = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    sqlite_module.addCSourceFile(.{
+        .file = b.path("vendor/sqlite3.53.2/sqlite3.c"),
+        .flags = sqlite_c_flags,
+    });
+    const sqlite_lib = b.addLibrary(.{
+        .name = "zova_sqlite",
+        .linkage = .static,
+        .root_module = sqlite_module,
+    });
+
     const zova_module = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
     zova_module.addOptions("zova_build_options", zova_build_options);
-    addSqlite(zova_module, b);
+    addSqlite(zova_module, b, sqlite_lib);
 
     const zova_dynamic_module = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
@@ -148,7 +176,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     ablation_api_module.addOptions("zova_build_options", zova_build_options);
-    addSqlite(ablation_api_module, b);
+    addSqlite(ablation_api_module, b, sqlite_lib);
     const fresh_ablation_benchmark = b.addExecutable(.{
         .name = "zova_fresh_build_ablation",
         .root_module = b.createModule(.{
@@ -163,32 +191,106 @@ pub fn build(b: *std.Build) void {
     const fresh_ablation_step = b.step("bench-fresh-ablation", "Run cumulative graph, metadata, FTS, and vector fresh-build ablations");
     fresh_ablation_step.dependOn(&fresh_ablation_cmd.step);
 
-    const tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/root.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    tests.root_module.addOptions("zova_build_options", zova_build_options);
-    addSqlite(tests.root_module, b);
+    const test_step = b.step("test", "Run all tests");
+    const core_test_step = addZigTestSuite(
+        b,
+        "test-core",
+        "Run core database and public API tests",
+        "src/root.zig",
+        &.{},
+        target,
+        optimize,
+        zova_build_options,
+        sqlite_lib,
+    );
+    const object_test_step = addZigTestSuite(
+        b,
+        "test-objects",
+        "Run object storage tests",
+        "src/test_objects_root.zig",
+        &.{ "object_tests", "object.test." },
+        target,
+        optimize,
+        zova_build_options,
+        sqlite_lib,
+    );
+    const vector_test_step = addZigTestSuite(
+        b,
+        "test-vectors",
+        "Run vector storage and SQL tests",
+        "src/test_vectors_root.zig",
+        &.{ "vector_tests", "vector_sql_tests", "vector.test." },
+        target,
+        optimize,
+        zova_build_options,
+        sqlite_lib,
+    );
+    const graph_test_step = addZigTestSuite(
+        b,
+        "test-graphs",
+        "Run graph storage and SQL tests",
+        "src/test_graphs_root.zig",
+        &.{ "graph_tests", "graph_sql_tests", "graph.test." },
+        target,
+        optimize,
+        zova_build_options,
+        sqlite_lib,
+    );
+    const kv_test_step = addZigTestSuite(
+        b,
+        "test-kv",
+        "Run key-value storage tests",
+        "src/test_kv_root.zig",
+        &.{ "kv_tests", "kv.test." },
+        target,
+        optimize,
+        zova_build_options,
+        sqlite_lib,
+    );
+    const extension_test_step = addZigTestSuite(
+        b,
+        "test-extensions",
+        "Run extension and trigram tests",
+        "src/test_extensions_root.zig",
+        &.{ "extension test suite", "extension_dynamic", "trgm_tests" },
+        target,
+        optimize,
+        zova_build_options,
+        sqlite_lib,
+    );
+    const migration_test_step = addZigTestSuite(
+        b,
+        "test-migration",
+        "Run storage-format migration tests",
+        "src/test_migration_root.zig",
+        &.{"migration_red_tests"},
+        target,
+        optimize,
+        zova_build_options,
+        sqlite_lib,
+    );
+    const c_api_test_step = addZigTestSuite(
+        b,
+        "test-c-api",
+        "Run Zig C API tests",
+        "src/c_api.zig",
+        &.{},
+        target,
+        optimize,
+        zova_build_options,
+        sqlite_lib,
+    );
 
-    const test_cmd = b.addRunArtifact(tests);
-    const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&test_cmd.step);
-
-    const c_api_tests = b.addTest(.{
-        .name = "c-api-test",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/c_api.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    c_api_tests.root_module.addOptions("zova_build_options", zova_build_options);
-    addSqlite(c_api_tests.root_module, b);
-    const c_api_test_cmd = b.addRunArtifact(c_api_tests);
-    test_step.dependOn(&c_api_test_cmd.step);
+    inline for (.{
+        core_test_step,
+        object_test_step,
+        vector_test_step,
+        graph_test_step,
+        kv_test_step,
+        extension_test_step,
+        migration_test_step,
+        c_api_test_step,
+    }) |suite_step| test_step.dependOn(suite_step);
 
     const e2e_module = b.createModule(.{
         .root_source_file = b.path("tests/e2e.zig"),
@@ -222,7 +324,9 @@ pub fn build(b: *std.Build) void {
     cli_tests_cmd.step.dependOn(b.getInstallStep());
     const cli_test_step = b.step("cli-test", "Run CLI tests");
     cli_test_step.dependOn(&cli_tests_cmd.step);
-    test_step.dependOn(&cli_tests_cmd.step);
+    const test_cli_step = b.step("test-cli", "Run CLI tests");
+    test_cli_step.dependOn(&cli_tests_cmd.step);
+    test_step.dependOn(test_cli_step);
 
     const c_abi_lib = b.addLibrary(.{
         .name = "zova_c",
@@ -234,7 +338,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     c_abi_lib.root_module.addOptions("zova_build_options", zova_build_options);
-    addSqlite(c_abi_lib.root_module, b);
+    addEmbeddedSqlite(c_abi_lib.root_module, b);
 
     const install_c_abi_lib = b.addInstallArtifact(c_abi_lib, .{});
 
@@ -334,22 +438,49 @@ pub fn build(b: *std.Build) void {
     c_abi_test_step.dependOn(&c_abi_symbols_cmd.step);
 }
 
-fn addSqlite(module: *std.Build.Module, b: *std.Build) void {
+fn addZigTestSuite(
+    b: *std.Build,
+    name: []const u8,
+    description: []const u8,
+    root_source: []const u8,
+    filters: []const []const u8,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    zova_build_options: *std.Build.Step.Options,
+    sqlite_lib: *std.Build.Step.Compile,
+) *std.Build.Step {
+    const suite_step = b.step(name, description);
+    const root_module = b.createModule(.{
+        .root_source_file = b.path(root_source),
+        .target = target,
+        .optimize = optimize,
+    });
+    root_module.addOptions("zova_build_options", zova_build_options);
+    addSqlite(root_module, b, sqlite_lib);
+    const tests = b.addTest(.{
+        .name = name,
+        .root_module = root_module,
+        .filters = filters,
+    });
+    const test_cmd = b.addRunArtifact(tests);
+    suite_step.dependOn(&test_cmd.step);
+    return suite_step;
+}
+
+fn addSqlite(
+    module: *std.Build.Module,
+    b: *std.Build,
+    sqlite_lib: *std.Build.Step.Compile,
+) void {
+    module.addIncludePath(b.path("vendor/sqlite3.53.2"));
+    module.linkLibrary(sqlite_lib);
+}
+
+fn addEmbeddedSqlite(module: *std.Build.Module, b: *std.Build) void {
     module.addIncludePath(b.path("vendor/sqlite3.53.2"));
     module.addCSourceFile(.{
         .file = b.path("vendor/sqlite3.53.2/sqlite3.c"),
-        .flags = &.{
-            "-std=c99",
-            // Keep the static C ABI library consumable by external linkers
-            // such as cgo without requiring Zig/Clang sanitizer runtimes.
-            "-fno-sanitize=undefined",
-            // Keep SQLite's mutex support enabled for normal embedded use.
-            "-DSQLITE_THREADSAFE=1",
-            // Promise FTS5 as part of Zova's vendored SQLite build, without
-            // adding a Zova-specific search API.
-            "-DSQLITE_ENABLE_FTS5",
-            "-DSQLITE_ENABLE_DBSTAT_VTAB",
-        },
+        .flags = sqlite_c_flags,
     });
     module.link_libc = true;
 }
