@@ -15,6 +15,10 @@ pub const Error = sqlite.Error || error{
     MigrationRequired,
     /// The database reports a storage format newer than this release.
     UnsupportedFutureFormat,
+    /// No adjacent migration step is registered for the database's storage
+    /// format: current formats cannot migrate again, pre-migratable formats
+    /// have no registered path, and future formats are never migratable.
+    NoMigrationPath,
     /// The database reports a pre-migration storage format with no direct
     /// migration path into this release.
     UnsupportedLegacyFormat,

@@ -5903,6 +5903,7 @@ fn statusFromError(err: anyerror) zova_status {
         error.MigrationRequired,
         error.UnsupportedLegacyFormat,
         error.UnsupportedFutureFormat,
+        error.NoMigrationPath,
         => .UNSUPPORTED_ZOVA_VERSION,
         error.DestinationExists => .DESTINATION_EXISTS,
         error.ZovaNameConflict => .ZOVA_NAME_CONFLICT,
