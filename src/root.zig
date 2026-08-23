@@ -88,6 +88,9 @@ pub const createVectorStore = zova.createVectorStore;
 pub const createGraphStore = zova.createGraphStore;
 pub const restoreBackup = zova.restoreBackup;
 pub const restoreBackupWithExtensions = zova.restoreBackupWithExtensions;
+pub const migrateDatabase = zova.migrateDatabase;
+pub const migrateDatabaseWithExtensions = zova.migrateDatabaseWithExtensions;
+pub const MigrateOptions = zova.MigrateOptions;
 
 test "package exports sqlite namespace" {
     try std.testing.expect(@hasDecl(@This(), "sqlite"));
