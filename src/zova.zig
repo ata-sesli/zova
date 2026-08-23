@@ -543,6 +543,12 @@ pub const RestoreOptions = struct {
     verify: bool = true,
 };
 
+/// Options for `migrateDatabase`.
+pub const MigrateOptions = struct {
+    /// Open and validate the migrated destination set after copying.
+    verify: bool = true,
+};
+
 /// Create a standalone object-store `.zova` file.
 ///
 /// This is opt-in storage for a main database that later calls
@@ -683,6 +689,289 @@ pub fn restoreBackupToMemoryWithExtensions(source_path: [:0]const u8, options: R
         try verifyCurrentDatabase(&memory);
     }
     return memory;
+}
+
+/// Explicitly migrate one `.zova` database and every bound store from its
+/// released storage format to the current format.
+///
+/// Migration is offline and copy-forward: the source main and store files are
+/// never modified, all work happens in same-directory staging files, migrated
+/// stores are published before the destination main database, and the
+/// destination main is published last as the commit marker. Any ordinary
+/// failure removes every file the attempt created. The caller must keep the
+/// source set offline; the source main is locked for the duration of the copy.
+pub fn migrateDatabase(source_path: [:0]const u8, destination_path: [:0]const u8, options: MigrateOptions) Error!void {
+    return migrateDatabaseWithExtensions(source_path, destination_path, options, bundledExtensionRegistry());
+}
+
+/// `migrateDatabase` with process-registered extension code. The registry
+/// participates in staged-set verification exactly as it does for open.
+pub fn migrateDatabaseWithExtensions(
+    source_path: [:0]const u8,
+    destination_path: [:0]const u8,
+    options: MigrateOptions,
+    registry: ExtensionRegistry,
+) Error!void {
+    if (!isZovaPath(source_path)) return error.NotZovaPath;
+    if (!isZovaPath(destination_path)) return error.NotZovaPath;
+    try ensureSourcePathExists(source_path);
+
+    // Fast classification before touching destinations so unsupported sources
+    // are rejected without creating anything.
+    {
+        var probe = try sqlite.Database.openWithFlags(source_path, .read_only);
+        defer probe.deinit();
+        const early = try readFormatClassification(&probe);
+        switch (early.compatibility) {
+            .migratable => {},
+            .current => return error.NoMigrationPath,
+            .unsupported_legacy => return error.UnsupportedLegacyFormat,
+            .unsupported_future => return error.UnsupportedFutureFormat,
+        }
+    }
+
+    const allocator = std.heap.c_allocator;
+
+    // Learn which bound stores exist so their sibling destinations can be
+    // derived and reserved before any mutation. Everything allocated from
+    // here on is owned by the single guarded cleanup below.
+    var bindings: [3]MigrateBindingPlan = undefined;
+    var binding_count: usize = 0;
+    var committed = false;
+    var main_final: ?[:0]u8 = null;
+    var main_staging: ?[:0]u8 = null;
+    var main_reserved = false;
+    errdefer if (!committed) {
+        if (main_staging) |staging| deleteDestinationFile(staging);
+        if (main_reserved) deleteDestinationFile(main_final.?);
+        for (bindings[0..binding_count]) |*binding| {
+            deleteDestinationFile(binding.staging_path);
+            if (binding.reserved) deleteDestinationFile(binding.final_path);
+            binding.deinit();
+        }
+        if (main_final) |final| allocator.free(final);
+    };
+
+    try collectMigrationBindings(source_path, &bindings, &binding_count);
+
+    // Reserve every destination up front; existing destinations are rejected
+    // before anything else happens.
+    main_final = try allocator.dupeZ(u8, destination_path);
+
+    try reserveDestinationZovaFile(main_final.?);
+    main_reserved = true;
+    for (bindings[0..binding_count]) |*binding| {
+        binding.final_path = try migrationSiblingPath(allocator, destination_path, binding.suffix);
+        try reserveDestinationZovaFile(binding.final_path);
+        binding.reserved = true;
+    }
+
+    // Lock the source main database for a stable offline copy. Concurrent
+    // writers receive Busy/Locked instead of a torn snapshot. The lock lives
+    // on its own connection so the backup reads below never contend with it.
+    {
+        var lock = try sqlite.Database.open(source_path);
+        errdefer lock.deinit();
+        try lock.beginImmediate();
+        defer lock.rollback() catch {};
+
+        // Preflight the whole set under the lock: exact source schema plus
+        // every recorded store's identity, role, schema, and cross-checked IDs.
+        var snapshot = try sqlite.Database.openWithFlags(source_path, .read_only);
+        defer snapshot.deinit();
+        try validateMigrationSourceSchema(&snapshot, minimum_migratable_format);
+        for (bindings[0..binding_count]) |*binding| {
+            try validateMigrationStoreBinding(binding);
+        }
+
+        // Stage, copy-forward, and transform every member.
+        main_staging = try migrationStagingPath(allocator, main_final.?);
+        {
+            var main_copy_source = try sqlite.Database.openWithFlags(source_path, .read_only);
+            defer main_copy_source.deinit();
+            try stageAndMigrateMember(&main_copy_source, main_staging.?);
+        }
+        for (bindings[0..binding_count]) |*binding| {
+            binding.staging_path = try migrationStagingPath(allocator, binding.final_path);
+            var store_source = try sqlite.Database.openWithFlags(binding.store_path, .read_only);
+            defer store_source.deinit();
+            try stageAndMigrateMember(&store_source, binding.staging_path);
+        }
+    }
+
+    // Verify the staged set with bindings pointing at staging paths, then
+    // rewrite only the destination binding paths for publication.
+    try rebindMigrationSet(main_staging.?, bindings[0..binding_count], .staging);
+    if (options.verify) try verifyOperationalCopy(main_staging.?, registry);
+    try rebindMigrationSet(main_staging.?, bindings[0..binding_count], .final);
+
+    // The source lock was released when staging completed. Publish stores
+    // first and the main database last as the commit marker.
+    const cwd = std.Io.Dir.cwd();
+    for (bindings[0..binding_count]) |*binding| {
+        cwd.rename(binding.staging_path, cwd, binding.final_path, defaultIo()) catch return error.CantOpen;
+    }
+    cwd.rename(main_staging.?, cwd, main_final.?, defaultIo()) catch return error.CantOpen;
+
+    committed = true;
+    allocator.free(main_final.?);
+    for (bindings[0..binding_count]) |*binding| binding.deinit();
+    binding_count = 0;
+}
+/// One planned bound-store member of a migration set.
+///
+/// `role` and `suffix` are static strings; the other five fields are owned.
+const MigrateBindingPlan = struct {
+    role: []const u8,
+    suffix: []const u8,
+    store_path: [:0]u8,
+    store_id: []u8,
+    bound_set_id: []u8,
+    final_path: [:0]u8,
+    staging_path: [:0]u8,
+    /// True once this attempt created the destination placeholder; pre-existing
+    /// destinations are never removed by cleanup.
+    reserved: bool = false,
+
+    fn deinit(self: *MigrateBindingPlan) void {
+        const allocator = std.heap.c_allocator;
+        allocator.free(self.store_path);
+        allocator.free(self.store_id);
+        allocator.free(self.bound_set_id);
+        allocator.free(self.final_path);
+        allocator.free(self.staging_path);
+    }
+};
+
+/// Collect the main database's bound-store rows, if any. Single-file mains
+/// produce zero bindings.
+fn collectMigrationBindings(
+    source_path: [:0]const u8,
+    out: *[3]MigrateBindingPlan,
+    count: *usize,
+) Error!void {
+    count.* = 0;
+
+    var raw = try sqlite.Database.openWithFlags(source_path, .read_only);
+    defer raw.deinit();
+    if (!try tableExists(&raw, bound_stores_table)) return;
+
+    inline for (.{
+        .{ .role = bound_object_store_role, .suffix = "objects" },
+        .{ .role = bound_vector_store_role, .suffix = "vectors" },
+        .{ .role = bound_graph_store_role, .suffix = "graphs" },
+    }) |entry| {
+        var stmt = try raw.prepare(
+            \\select path, store_id, bound_set_id from _zova_bound_stores
+            \\where role = ?1 and name = 'default'
+        );
+        defer stmt.deinit();
+        try stmt.bindText(1, entry.role);
+
+        if ((try stmt.step()) == .row) {
+            out[count.*] = .{
+                .role = entry.role,
+                .suffix = entry.suffix,
+                .store_path = try std.heap.c_allocator.dupeZ(u8, stmt.columnText(0)),
+                .store_id = try std.heap.c_allocator.dupe(u8, stmt.columnText(1)),
+                .bound_set_id = try std.heap.c_allocator.dupe(u8, stmt.columnText(2)),
+                .final_path = try std.heap.c_allocator.dupeZ(u8, ""),
+                .staging_path = try std.heap.c_allocator.dupeZ(u8, ""),
+            };
+            count.* += 1;
+        }
+    }
+}
+
+/// Validate one recorded bound store before any copying: the file must exist,
+/// carry a genuine migratable format-9 schema under its role, and its stored
+/// identity must match the main database's binding row exactly.
+fn validateMigrationStoreBinding(binding: *MigrateBindingPlan) Error!void {
+    var store = sqlite.Database.openWithFlags(binding.store_path, .read_only) catch |err| switch (err) {
+        error.CantOpen, error.SqliteError => return error.BoundStoreNotFound,
+        else => return err,
+    };
+    defer store.deinit();
+
+    try validateMigrationSourceSchema(&store, minimum_migratable_format);
+
+    const store_id = (try metadataValueAlloc(std.heap.c_allocator, &store, "store_id")) orelse return error.BoundStoreInvalid;
+    defer std.heap.c_allocator.free(store_id);
+    if (!std.mem.eql(u8, store_id, binding.store_id)) return error.BoundStoreInvalid;
+
+    const bound_set_id = (try metadataValueAlloc(std.heap.c_allocator, &store, "bound_set_id")) orelse return error.BoundStoreInvalid;
+    defer std.heap.c_allocator.free(bound_set_id);
+    if (!std.mem.eql(u8, bound_set_id, binding.bound_set_id)) return error.BoundStoreInvalid;
+}
+
+/// Copy one source member forward into a fresh staging file and apply the
+/// registered adjacent migration step to the staged copy.
+fn stageAndMigrateMember(source: *sqlite.Database, staging_path: [:0]const u8) Error!void {
+    var staged = try sqlite.Database.open(staging_path);
+    defer staged.deinit();
+    try backupMainDatabase(source, &staged);
+    _ = try runMigrationStep(&staged);
+}
+
+const MigrateRebindTarget = enum { staging, final };
+
+/// Rewrite only the destination binding paths in a staged main database.
+fn rebindMigrationSet(
+    staged_main_path: [:0]const u8,
+    bindings: []MigrateBindingPlan,
+    target: MigrateRebindTarget,
+) Error!void {
+    var staged = try sqlite.Database.open(staged_main_path);
+    defer staged.deinit();
+
+    for (bindings) |*binding| {
+        const destination = switch (target) {
+            .staging => binding.staging_path,
+            .final => binding.final_path,
+        };
+        var update = try staged.prepare("update _zova_bound_stores set path = ?1 where role = ?2 and name = 'default'");
+        defer update.deinit();
+        try update.bindText(1, destination);
+        try update.bindText(2, binding.role);
+        _ = try update.step();
+    }
+}
+
+/// Derive a destination sibling name `<stem>.<suffix>.zova` from a
+/// destination whose name ends in `.zova`.
+fn migrationSiblingPath(allocator: std.mem.Allocator, destination_path: []const u8, suffix: []const u8) Error![:0]u8 {
+    const stem = destination_path[0 .. destination_path.len - ".zova".len];
+    const joined = std.fmt.allocPrint(allocator, "{s}.{s}.zova", .{ stem, suffix }) catch return error.OutOfMemory;
+    errdefer allocator.free(joined);
+    return allocator.dupeZ(u8, joined);
+}
+
+/// Derive a unique hidden same-directory staging path for one final path.
+///
+/// Staging names keep the `.zova` extension so the staged set can be verified
+/// through the full open path before publication.
+fn migrationStagingPath(allocator: std.mem.Allocator, final_path: []const u8) Error![:0]u8 {
+    const dirname = std.fs.path.dirname(final_path) orelse "";
+    const basename = std.fs.path.basename(final_path);
+    const stem = basename[0 .. basename.len - ".zova".len];
+
+    var random_bytes: [8]u8 = undefined;
+    sqlite.c.sqlite3_randomness(random_bytes.len, &random_bytes);
+    const hex_alphabet = "0123456789abcdef";
+    var hex: [16]u8 = undefined;
+    for (0..16) |index| {
+        hex[index] = hex_alphabet[random_bytes[index / 2] % 16];
+        if (index % 2 == 1) random_bytes[index / 2] /= 16;
+    }
+
+    if (dirname.len == 0) {
+        const printed = std.fmt.allocPrint(allocator, ".{s}.migrate-{s}.zova", .{ stem, hex }) catch return error.OutOfMemory;
+        errdefer allocator.free(printed);
+        return allocator.dupeZ(u8, printed) catch return error.OutOfMemory;
+    }
+    const printed = std.fmt.allocPrint(allocator, "{s}/.{s}.migrate-{s}.zova", .{ dirname, stem, hex }) catch return error.OutOfMemory;
+    errdefer allocator.free(printed);
+    return allocator.dupeZ(u8, printed) catch return error.OutOfMemory;
 }
 
 fn initNotifications(db: *sqlite.Database) Error!*notify_impl.Hub {
