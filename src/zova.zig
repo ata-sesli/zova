@@ -791,7 +791,7 @@ pub fn migrateDatabaseInternal(
     // destinations are still rejected before anything is copied.
     {
         var lock = try sqlite.Database.open(source_path);
-        errdefer lock.deinit();
+        defer lock.deinit();
         try lock.beginImmediate();
         defer lock.rollback() catch {};
 
@@ -802,7 +802,9 @@ pub fn migrateDatabaseInternal(
         try reserveDestinationZovaFile(main_final.?);
         main_reserved = true;
         for (bindings[0..binding_count]) |*binding| {
-            binding.final_path = try migrationSiblingPath(allocator, destination_path, binding.suffix);
+            const sibling = try migrationSiblingPath(allocator, destination_path, binding.suffix);
+            allocator.free(binding.final_path);
+            binding.final_path = sibling;
             try reserveDestinationZovaFile(binding.final_path);
             binding.reserved = true;
         }
@@ -958,6 +960,10 @@ fn validateMigrationStoreBinding(binding: *MigrateBindingPlan) Error!void {
         else => return err,
     };
     defer store.deinit();
+
+    const store_role = (try metadataValueAlloc(std.heap.c_allocator, &store, "store_role")) orelse return error.BoundStoreInvalid;
+    defer std.heap.c_allocator.free(store_role);
+    if (!std.mem.eql(u8, store_role, binding.role)) return error.BoundStoreInvalid;
 
     try validateMigrationSourceSchema(&store, minimum_migratable_format);
 
