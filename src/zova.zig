@@ -712,6 +712,29 @@ pub fn migrateDatabaseWithExtensions(
     options: MigrateOptions,
     registry: ExtensionRegistry,
 ) Error!void {
+    return migrateDatabaseInternal(source_path, destination_path, options, registry, null);
+}
+
+/// Test-only fault points covering every phase boundary required by the
+/// migration safety model. Production callers always pass `null`. Module-pub
+/// for the test suite but deliberately absent from the package exports.
+pub const MigrateFaultPoint = enum {
+    after_main_copy,
+    after_store_copy,
+    after_validation,
+    after_store_publication,
+    before_main_publication,
+};
+
+pub const MigrateFaultHook = *const fn (point: MigrateFaultPoint) Error!void;
+
+pub fn migrateDatabaseInternal(
+    source_path: [:0]const u8,
+    destination_path: [:0]const u8,
+    options: MigrateOptions,
+    registry: ExtensionRegistry,
+    fault_hook: ?MigrateFaultHook,
+) Error!void {
     if (!isZovaPath(source_path)) return error.NotZovaPath;
     if (!isZovaPath(destination_path)) return error.NotZovaPath;
     try ensureSourcePathExists(source_path);
@@ -742,10 +765,14 @@ pub fn migrateDatabaseWithExtensions(
     var main_staging: ?[:0]u8 = null;
     var main_reserved = false;
     errdefer if (!committed) {
-        if (main_staging) |staging| deleteDestinationFile(staging);
+        if (main_staging) |staging| {
+            deleteDestinationFile(staging);
+            allocator.free(staging);
+            main_staging = null;
+        }
         if (main_reserved) deleteDestinationFile(main_final.?);
         for (bindings[0..binding_count]) |*binding| {
-            deleteDestinationFile(binding.staging_path);
+            if (binding.staged) deleteDestinationFile(binding.staging_path);
             if (binding.reserved) deleteDestinationFile(binding.final_path);
             binding.deinit();
         }
@@ -784,25 +811,35 @@ pub fn migrateDatabaseWithExtensions(
             try validateMigrationStoreBinding(binding);
         }
 
-        // Stage, copy-forward, and transform every member.
-        main_staging = try migrationStagingPath(allocator, main_final.?);
+        // Stage, copy-forward, and transform every member. Staging files are
+        // exclusively created before use so a name collision can never open
+        // or delete a caller's file.
+        main_staging = try reserveMigrationStagingPath(allocator, main_final.?);
         {
             var main_copy_source = try sqlite.Database.openWithFlags(source_path, .read_only);
             defer main_copy_source.deinit();
             try stageAndMigrateMember(&main_copy_source, main_staging.?);
+            if (fault_hook) |hook| try hook(.after_main_copy);
         }
         for (bindings[0..binding_count]) |*binding| {
-            binding.staging_path = try migrationStagingPath(allocator, binding.final_path);
+            const staged = try reserveMigrationStagingPath(allocator, binding.final_path);
+            allocator.free(binding.staging_path);
+            binding.staging_path = staged;
+            binding.staged = true;
             var store_source = try sqlite.Database.openWithFlags(binding.store_path, .read_only);
             defer store_source.deinit();
             try stageAndMigrateMember(&store_source, binding.staging_path);
+            if (fault_hook) |hook| try hook(.after_store_copy);
         }
     }
 
     // Verify the staged set with bindings pointing at staging paths, then
     // rewrite only the destination binding paths for publication.
     try rebindMigrationSet(main_staging.?, bindings[0..binding_count], .staging);
-    if (options.verify) try verifyOperationalCopy(main_staging.?, registry);
+    if (options.verify) {
+        try verifyOperationalCopy(main_staging.?, registry);
+        if (fault_hook) |hook| try hook(.after_validation);
+    }
     try rebindMigrationSet(main_staging.?, bindings[0..binding_count], .final);
 
     // The source lock was released when staging completed. Publish stores
@@ -811,10 +848,14 @@ pub fn migrateDatabaseWithExtensions(
     for (bindings[0..binding_count]) |*binding| {
         cwd.rename(binding.staging_path, cwd, binding.final_path, defaultIo()) catch return error.CantOpen;
     }
+    if (fault_hook) |hook| try hook(.after_store_publication);
+
+    if (fault_hook) |hook| try hook(.before_main_publication);
     cwd.rename(main_staging.?, cwd, main_final.?, defaultIo()) catch return error.CantOpen;
 
     committed = true;
     allocator.free(main_final.?);
+    if (main_staging) |staging| allocator.free(staging);
     for (bindings[0..binding_count]) |*binding| binding.deinit();
     binding_count = 0;
 }
@@ -824,6 +865,9 @@ pub fn migrateDatabaseWithExtensions(
 const MigrateBindingPlan = struct {
     role: []const u8,
     suffix: []const u8,
+    /// Role-specific epoch name shared by the binding row column and the
+    /// store file's identity metadata key.
+    epoch_key: []const u8,
     store_path: [:0]u8,
     store_id: []u8,
     bound_set_id: []u8,
@@ -832,6 +876,10 @@ const MigrateBindingPlan = struct {
     /// True once this attempt created the destination placeholder; pre-existing
     /// destinations are never removed by cleanup.
     reserved: bool = false,
+    /// True once this attempt exclusively created the staging file; cleanup
+    /// only ever removes staging files this attempt owns.
+    staged: bool = false,
+    epoch: u64,
 
     fn deinit(self: *MigrateBindingPlan) void {
         const allocator = std.heap.c_allocator;
@@ -857,24 +905,25 @@ fn collectMigrationBindings(
     if (!try tableExists(&raw, bound_stores_table)) return;
 
     inline for (.{
-        .{ .role = bound_object_store_role, .suffix = "objects" },
-        .{ .role = bound_vector_store_role, .suffix = "vectors" },
-        .{ .role = bound_graph_store_role, .suffix = "graphs" },
+        .{ .role = bound_object_store_role, .suffix = "objects", .epoch_key = "object_epoch" },
+        .{ .role = bound_vector_store_role, .suffix = "vectors", .epoch_key = "vector_epoch" },
+        .{ .role = bound_graph_store_role, .suffix = "graphs", .epoch_key = "graph_epoch" },
     }) |entry| {
-        var stmt = try raw.prepare(
-            \\select path, store_id, bound_set_id from _zova_bound_stores
-            \\where role = ?1 and name = 'default'
-        );
+        const binding_sql = "select path, store_id, bound_set_id, " ++ entry.epoch_key ++ " from _zova_bound_stores where role = '" ++ entry.role ++ "' and name = 'default'";
+        var stmt = try raw.prepare(binding_sql);
         defer stmt.deinit();
-        try stmt.bindText(1, entry.role);
 
         if ((try stmt.step()) == .row) {
+            const epoch_value = stmt.columnInt64(3);
+            if (epoch_value < 0) return error.BoundStoreInvalid;
             out[count.*] = .{
                 .role = entry.role,
                 .suffix = entry.suffix,
+                .epoch_key = entry.epoch_key,
                 .store_path = try std.heap.c_allocator.dupeZ(u8, stmt.columnText(0)),
                 .store_id = try std.heap.c_allocator.dupe(u8, stmt.columnText(1)),
                 .bound_set_id = try std.heap.c_allocator.dupe(u8, stmt.columnText(2)),
+                .epoch = @intCast(epoch_value),
                 .final_path = try std.heap.c_allocator.dupeZ(u8, ""),
                 .staging_path = try std.heap.c_allocator.dupeZ(u8, ""),
             };
@@ -902,6 +951,11 @@ fn validateMigrationStoreBinding(binding: *MigrateBindingPlan) Error!void {
     const bound_set_id = (try metadataValueAlloc(std.heap.c_allocator, &store, "bound_set_id")) orelse return error.BoundStoreInvalid;
     defer std.heap.c_allocator.free(bound_set_id);
     if (!std.mem.eql(u8, bound_set_id, binding.bound_set_id)) return error.BoundStoreInvalid;
+
+    const epoch_text = (try metadataValueAlloc(std.heap.c_allocator, &store, binding.epoch_key)) orelse return error.BoundStoreInvalid;
+    defer std.heap.c_allocator.free(epoch_text);
+    const stored_epoch = std.fmt.parseInt(u64, epoch_text, 10) catch return error.BoundStoreInvalid;
+    if (stored_epoch != binding.epoch) return error.BoundStoreInvalid;
 }
 
 /// Copy one source member forward into a fresh staging file and apply the
@@ -941,15 +995,40 @@ fn rebindMigrationSet(
 /// destination whose name ends in `.zova`.
 fn migrationSiblingPath(allocator: std.mem.Allocator, destination_path: []const u8, suffix: []const u8) Error![:0]u8 {
     const stem = destination_path[0 .. destination_path.len - ".zova".len];
-    const joined = std.fmt.allocPrint(allocator, "{s}.{s}.zova", .{ stem, suffix }) catch return error.OutOfMemory;
-    errdefer allocator.free(joined);
-    return allocator.dupeZ(u8, joined);
+    const length = stem.len + 1 + suffix.len + ".zova".len;
+    const buffer = allocator.allocSentinel(u8, length, 0) catch return error.OutOfMemory;
+    errdefer allocator.free(buffer);
+    _ = std.fmt.bufPrint(buffer[0..length], "{s}.{s}.zova", .{ stem, suffix }) catch unreachable;
+    return buffer;
 }
 
 /// Derive a unique hidden same-directory staging path for one final path.
 ///
 /// Staging names keep the `.zova` extension so the staged set can be verified
 /// through the full open path before publication.
+/// Derive and exclusively create one staging file, retrying with fresh random
+/// names on collision so a pre-existing caller file can never be opened or
+/// deleted by this attempt.
+fn reserveMigrationStagingPath(allocator: std.mem.Allocator, final_path: []const u8) Error![:0]u8 {
+    var attempt: usize = 0;
+    while (attempt < 16) : (attempt += 1) {
+        const candidate = try migrationStagingPath(allocator, final_path);
+        var file = std.Io.Dir.cwd().createFile(defaultIo(), candidate, .{ .exclusive = true }) catch |err| switch (err) {
+            error.PathAlreadyExists => {
+                allocator.free(candidate);
+                continue;
+            },
+            else => {
+                allocator.free(candidate);
+                return error.CantOpen;
+            },
+        };
+        file.close(defaultIo());
+        return candidate;
+    }
+    return error.CantOpen;
+}
+
 fn migrationStagingPath(allocator: std.mem.Allocator, final_path: []const u8) Error![:0]u8 {
     const dirname = std.fs.path.dirname(final_path) orelse "";
     const basename = std.fs.path.basename(final_path);
@@ -964,14 +1043,17 @@ fn migrationStagingPath(allocator: std.mem.Allocator, final_path: []const u8) Er
         if (index % 2 == 1) random_bytes[index / 2] /= 16;
     }
 
+    // Hidden same-directory name keeping the `.zova` extension so staged sets
+    // pass full open validation before publication.
+    const prefix_len = dirname.len + (if (dirname.len != 0) @as(usize, 1) else 0) + 1 + stem.len + ".migrate-".len + hex.len + ".zova".len;
+    const buffer = allocator.allocSentinel(u8, prefix_len, 0) catch return error.OutOfMemory;
+    errdefer allocator.free(buffer);
     if (dirname.len == 0) {
-        const printed = std.fmt.allocPrint(allocator, ".{s}.migrate-{s}.zova", .{ stem, hex }) catch return error.OutOfMemory;
-        errdefer allocator.free(printed);
-        return allocator.dupeZ(u8, printed) catch return error.OutOfMemory;
+        _ = std.fmt.bufPrint(buffer[0..prefix_len], ".{s}.migrate-{s}.zova", .{ stem, hex }) catch unreachable;
+    } else {
+        _ = std.fmt.bufPrint(buffer[0..prefix_len], "{s}/.{s}.migrate-{s}.zova", .{ dirname, stem, hex }) catch unreachable;
     }
-    const printed = std.fmt.allocPrint(allocator, "{s}/.{s}.migrate-{s}.zova", .{ dirname, stem, hex }) catch return error.OutOfMemory;
-    errdefer allocator.free(printed);
-    return allocator.dupeZ(u8, printed) catch return error.OutOfMemory;
+    return buffer;
 }
 
 fn initNotifications(db: *sqlite.Database) Error!*notify_impl.Hub {

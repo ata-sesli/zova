@@ -876,3 +876,110 @@ fn copyFixtureInto(destination_path: [:0]const u8, fixture_name: []const u8) !vo
     defer std.testing.allocator.free(bytes);
     try std.Io.Dir.cwd().writeFile(io(), .{ .sub_path = destination_path, .data = bytes });
 }
+
+test "migrateDatabase cleans up after a fault at every phase boundary" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const points = [_]zova.MigrateFaultPoint{
+        .after_main_copy,
+        .after_store_copy,
+        .after_validation,
+        .after_store_publication,
+        .before_main_publication,
+    };
+
+    const FaultHook = struct {
+        var target: ?zova.MigrateFaultPoint = null;
+
+        fn fire(point: zova.MigrateFaultPoint) zova.Error!void {
+            if (target != null and target.? == point) return error.CantOpen;
+        }
+    };
+
+    for (points) |point| {
+        // Per-point staging directory so leftover assertions are exact.
+        var dir_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const set_dir = try std.fmt.bufPrint(&dir_buffer, ".zig-cache/tmp/{s}/fault-{s}", .{
+            tmp.sub_path[0..],
+            @tagName(point),
+        });
+        try std.Io.Dir.cwd().createDirPath(io(), set_dir);
+
+        const members = [_][]const u8{
+            "bound-main-format-9.zova",
+            "bound-main-format-9.objects.zova",
+            "bound-main-format-9.vectors.zova",
+            "bound-main-format-9.graphs.zova",
+        };
+        inline for (members) |name| {
+            var member_buffer: [std.fs.max_path_bytes]u8 = undefined;
+            const member_path = try std.fmt.bufPrintZ(&member_buffer, "{s}/{s}", .{ set_dir, name });
+            try copyFixtureInto(member_path, name);
+        }
+
+        var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const source_main = try std.fmt.bufPrintZ(&source_buffer, "{s}/bound-main-format-9.zova", .{set_dir});
+
+        // Relocate bindings into this directory (caller concern before migration).
+        {
+            var raw = try sqlite.Database.open(source_main);
+            defer raw.deinit();
+            inline for (.{
+                .{ .role = "object_store", .suffix = "objects" },
+                .{ .role = "vector_store", .suffix = "vectors" },
+                .{ .role = "graph_store", .suffix = "graphs" },
+            }) |entry| {
+                var update = try raw.prepare("update _zova_bound_stores set path = ?1 where role = ?2");
+                defer update.deinit();
+                var sibling_buffer: [std.fs.max_path_bytes]u8 = undefined;
+                const sibling = try std.fmt.bufPrintZ(&sibling_buffer, "{s}/bound-main-format-9.{s}.zova", .{ set_dir, entry.suffix });
+                try update.bindText(1, sibling);
+                try update.bindText(2, entry.role);
+                _ = try update.step();
+            }
+        }
+
+        var hashes: [members.len][32]u8 = undefined;
+        inline for (members, 0..) |name, index| {
+            var member_buffer: [std.fs.max_path_bytes]u8 = undefined;
+            const member_path = try std.fmt.bufPrintZ(&member_buffer, "{s}/{s}", .{ set_dir, name });
+            hashes[index] = try fileSha256(member_path);
+        }
+
+        var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const dest_main = try std.fmt.bufPrintZ(&dest_buffer, "{s}/migrated-set.zova", .{set_dir});
+
+        FaultHook.target = point;
+        defer FaultHook.target = null;
+
+        try std.testing.expectError(
+            error.CantOpen,
+            zova.migrateDatabaseInternal(source_main, dest_main, .{}, zova.bundledExtensionRegistry(), FaultHook.fire),
+        );
+
+        // Every source file is byte-identical after the failed attempt.
+        inline for (members, 0..) |name, index| {
+            var member_buffer: [std.fs.max_path_bytes]u8 = undefined;
+            const member_path = try std.fmt.bufPrintZ(&member_buffer, "{s}/{s}", .{ set_dir, name });
+            const member_after = try fileSha256(member_path);
+            try std.testing.expectEqualSlices(u8, &hashes[index], &member_after);
+        }
+
+        // The directory contains exactly the four sources: no destination
+        // main, no published stores or placeholders, no staging leftovers.
+        var dir = try std.Io.Dir.cwd().openDir(io(), set_dir, .{ .iterate = true });
+        defer dir.close(io());
+        var seen: usize = 0;
+        var iterator = dir.iterate();
+        while (try iterator.next(io())) |entry| {
+            seen += 1;
+            var matched = false;
+            inline for (members) |name| {
+                if (std.mem.eql(u8, entry.name, name)) matched = true;
+            }
+            try std.testing.expect(matched);
+        }
+        try std.testing.expectEqual(@as(usize, members.len), seen);
+    }
+}
