@@ -776,7 +776,7 @@ pub fn migrateDatabaseInternal(
         for (bindings[0..binding_count]) |*binding| {
             if (binding.staged) deleteDestinationFile(binding.staging_path);
             if (binding.reserved) deleteDestinationFile(binding.final_path);
-            binding.deinit();
+            binding.deinit(allocator);
         }
         if (main_final) |final| allocator.free(final);
     };
@@ -796,7 +796,7 @@ pub fn migrateDatabaseInternal(
         defer lock.rollback() catch {};
 
         // Plan from the locked stable state.
-        try collectMigrationBindings(source_path, &bindings, &binding_count);
+        try collectMigrationBindings(allocator, source_path, &bindings, &binding_count);
 
         main_final = try allocator.dupeZ(u8, destination_path);
         try reserveDestinationZovaFile(main_final.?);
@@ -875,13 +875,13 @@ pub fn migrateDatabaseInternal(
     committed = true;
     allocator.free(main_final.?);
     if (main_staging) |staging| allocator.free(staging);
-    for (bindings[0..binding_count]) |*binding| binding.deinit();
+    for (bindings[0..binding_count]) |*binding| binding.deinit(allocator);
     binding_count = 0;
 }
 /// One planned bound-store member of a migration set.
 ///
 /// `role` and `suffix` are static strings; the other five fields are owned.
-const MigrateBindingPlan = struct {
+pub const MigrateBindingPlan = struct {
     role: []const u8,
     suffix: []const u8,
     /// Role-specific epoch name shared by the binding row column and the
@@ -900,8 +900,7 @@ const MigrateBindingPlan = struct {
     staged: bool = false,
     epoch: u64,
 
-    fn deinit(self: *MigrateBindingPlan) void {
-        const allocator = std.heap.c_allocator;
+    pub fn deinit(self: *MigrateBindingPlan, allocator: std.mem.Allocator) void {
         allocator.free(self.store_path);
         allocator.free(self.store_id);
         allocator.free(self.bound_set_id);
@@ -912,7 +911,8 @@ const MigrateBindingPlan = struct {
 
 /// Collect the main database's bound-store rows, if any. Single-file mains
 /// produce zero bindings.
-fn collectMigrationBindings(
+pub fn collectMigrationBindings(
+    allocator: std.mem.Allocator,
     source_path: [:0]const u8,
     out: *[3]MigrateBindingPlan,
     count: *usize,
@@ -935,16 +935,26 @@ fn collectMigrationBindings(
         if ((try stmt.step()) == .row) {
             const epoch_value = stmt.columnInt64(3);
             if (epoch_value < 0) return error.BoundStoreInvalid;
+            const store_path = try allocator.dupeZ(u8, stmt.columnText(0));
+            errdefer allocator.free(store_path);
+            const store_id = try allocator.dupe(u8, stmt.columnText(1));
+            errdefer allocator.free(store_id);
+            const bound_set_id = try allocator.dupe(u8, stmt.columnText(2));
+            errdefer allocator.free(bound_set_id);
+            const final_path = try allocator.dupeZ(u8, "");
+            errdefer allocator.free(final_path);
+            const staging_path = try allocator.dupeZ(u8, "");
+            errdefer allocator.free(staging_path);
             out[count.*] = .{
                 .role = entry.role,
                 .suffix = entry.suffix,
                 .epoch_key = entry.epoch_key,
-                .store_path = try std.heap.c_allocator.dupeZ(u8, stmt.columnText(0)),
-                .store_id = try std.heap.c_allocator.dupe(u8, stmt.columnText(1)),
-                .bound_set_id = try std.heap.c_allocator.dupe(u8, stmt.columnText(2)),
+                .store_path = store_path,
+                .store_id = store_id,
+                .bound_set_id = bound_set_id,
                 .epoch = @intCast(epoch_value),
-                .final_path = try std.heap.c_allocator.dupeZ(u8, ""),
-                .staging_path = try std.heap.c_allocator.dupeZ(u8, ""),
+                .final_path = final_path,
+                .staging_path = staging_path,
             };
             count.* += 1;
         }

@@ -1100,3 +1100,69 @@ test "migration rejects bound stores whose role mismatches the binding with veri
     }
     try std.testing.expectEqual(@as(usize, members.len), seen);
 }
+
+test "collectMigrationBindings does not leak on allocation failure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var dir_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const set_dir = try std.fmt.bufPrint(&dir_buffer, ".zig-cache/tmp/{s}/oom-bindings", .{tmp.sub_path[0..]});
+    try std.Io.Dir.cwd().createDirPath(io(), set_dir);
+
+    const members = [_][]const u8{
+        "bound-main-format-9.zova",
+        "bound-main-format-9.objects.zova",
+        "bound-main-format-9.vectors.zova",
+        "bound-main-format-9.graphs.zova",
+    };
+    inline for (members) |name| {
+        var member_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const member_path = try std.fmt.bufPrintZ(&member_buffer, "{s}/{s}", .{ set_dir, name });
+        try copyFixtureInto(member_path, name);
+    }
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_main = try std.fmt.bufPrintZ(&source_buffer, "{s}/bound-main-format-9.zova", .{set_dir});
+
+    // Relocate bindings as done for normal bound-set migration tests.
+    {
+        var raw = try sqlite.Database.open(source_main);
+        defer raw.deinit();
+        inline for (.{
+            .{ .role = "object_store", .suffix = "objects" },
+            .{ .role = "vector_store", .suffix = "vectors" },
+            .{ .role = "graph_store", .suffix = "graphs" },
+        }) |entry| {
+            var update = try raw.prepare("update _zova_bound_stores set path = ?1 where role = ?2");
+            defer update.deinit();
+            var sibling_buffer: [std.fs.max_path_bytes]u8 = undefined;
+            const sibling = try std.fmt.bufPrintZ(&sibling_buffer, "{s}/bound-main-format-9.{s}.zova", .{ set_dir, entry.suffix });
+            try update.bindText(1, sibling);
+            try update.bindText(2, entry.role);
+            _ = try update.step();
+        }
+    }
+
+    // Each binding needs 5 allocations; 3 bindings need 15. Test every
+    // failing point plus one past the end to exercise the success path.
+    var fail_index: usize = 0;
+    while (fail_index < 20) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        var out: [3]zova.MigrateBindingPlan = undefined;
+        var count: usize = 0;
+        const result = zova.collectMigrationBindings(failing.allocator(), source_main, &out, &count);
+        if (result) |_| {
+            // Success: free what was allocated and verify no leak.
+            for (out[0..count]) |*binding| binding.deinit(failing.allocator());
+            try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+            break;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            // Prior completed bindings must be freed by the caller; the failing
+            // binding's partial allocations are freed by errdefer inside
+            // collectMigrationBindings.
+            for (out[0..count]) |*binding| binding.deinit(failing.allocator());
+            try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        }
+    }
+}
