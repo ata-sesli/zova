@@ -720,7 +720,9 @@ pub fn migrateDatabaseWithExtensions(
 /// for the test suite but deliberately absent from the package exports.
 pub const MigrateFaultPoint = enum {
     after_main_copy,
+    after_main_migration,
     after_store_copy,
+    after_store_migration,
     after_validation,
     after_store_publication,
     before_main_publication,
@@ -779,31 +781,35 @@ pub fn migrateDatabaseInternal(
         if (main_final) |final| allocator.free(final);
     };
 
-    try collectMigrationBindings(source_path, &bindings, &binding_count);
-
-    // Reserve every destination up front; existing destinations are rejected
-    // before anything else happens.
-    main_final = try allocator.dupeZ(u8, destination_path);
-
-    try reserveDestinationZovaFile(main_final.?);
-    main_reserved = true;
-    for (bindings[0..binding_count]) |*binding| {
-        binding.final_path = try migrationSiblingPath(allocator, destination_path, binding.suffix);
-        try reserveDestinationZovaFile(binding.final_path);
-        binding.reserved = true;
-    }
-
-    // Lock the source main database for a stable offline copy. Concurrent
-    // writers receive Busy/Locked instead of a torn snapshot. The lock lives
-    // on its own connection so the backup reads below never contend with it.
+    // Lock the source main database before collecting the binding plan so no
+    // writer can unbind or rebind a store between planning and copying:
+    // concurrent writers receive Busy/Locked instead of a torn snapshot. The
+    // lock lives on its own connection so the backup reads below never
+    // contend with it.
+    //
+    // Destination reservation happens under the same lock; existing
+    // destinations are still rejected before anything is copied.
     {
         var lock = try sqlite.Database.open(source_path);
         errdefer lock.deinit();
         try lock.beginImmediate();
         defer lock.rollback() catch {};
 
+        // Plan from the locked stable state.
+        try collectMigrationBindings(source_path, &bindings, &binding_count);
+
+        main_final = try allocator.dupeZ(u8, destination_path);
+        try reserveDestinationZovaFile(main_final.?);
+        main_reserved = true;
+        for (bindings[0..binding_count]) |*binding| {
+            binding.final_path = try migrationSiblingPath(allocator, destination_path, binding.suffix);
+            try reserveDestinationZovaFile(binding.final_path);
+            binding.reserved = true;
+        }
+
         // Preflight the whole set under the lock: exact source schema plus
-        // every recorded store's identity, role, schema, and cross-checked IDs.
+        // every recorded store's identity, role, epoch, schema, and
+        // cross-checked IDs.
         var snapshot = try sqlite.Database.openWithFlags(source_path, .read_only);
         defer snapshot.deinit();
         try validateMigrationSourceSchema(&snapshot, minimum_migratable_format);
@@ -813,23 +819,34 @@ pub fn migrateDatabaseInternal(
 
         // Stage, copy-forward, and transform every member. Staging files are
         // exclusively created before use so a name collision can never open
-        // or delete a caller's file.
+        // or delete a caller's file. Copy and migration are separate phases
+        // with their own fault boundaries.
         main_staging = try reserveMigrationStagingPath(allocator, main_final.?);
         {
             var main_copy_source = try sqlite.Database.openWithFlags(source_path, .read_only);
             defer main_copy_source.deinit();
-            try stageAndMigrateMember(&main_copy_source, main_staging.?);
+            try copyForwardMember(&main_copy_source, main_staging.?);
             if (fault_hook) |hook| try hook(.after_main_copy);
         }
+        {
+            var staged = try sqlite.Database.open(main_staging.?);
+            defer staged.deinit();
+            _ = try runMigrationStep(&staged);
+            if (fault_hook) |hook| try hook(.after_main_migration);
+        }
         for (bindings[0..binding_count]) |*binding| {
-            const staged = try reserveMigrationStagingPath(allocator, binding.final_path);
+            const staged_path = try reserveMigrationStagingPath(allocator, binding.final_path);
             allocator.free(binding.staging_path);
-            binding.staging_path = staged;
+            binding.staging_path = staged_path;
             binding.staged = true;
             var store_source = try sqlite.Database.openWithFlags(binding.store_path, .read_only);
             defer store_source.deinit();
-            try stageAndMigrateMember(&store_source, binding.staging_path);
+            try copyForwardMember(&store_source, binding.staging_path);
             if (fault_hook) |hook| try hook(.after_store_copy);
+            var staged = try sqlite.Database.open(binding.staging_path);
+            defer staged.deinit();
+            _ = try runMigrationStep(&staged);
+            if (fault_hook) |hook| try hook(.after_store_migration);
         }
     }
 
@@ -847,8 +864,8 @@ pub fn migrateDatabaseInternal(
     const cwd = std.Io.Dir.cwd();
     for (bindings[0..binding_count]) |*binding| {
         cwd.rename(binding.staging_path, cwd, binding.final_path, defaultIo()) catch return error.CantOpen;
+        if (fault_hook) |hook| try hook(.after_store_publication);
     }
-    if (fault_hook) |hook| try hook(.after_store_publication);
 
     if (fault_hook) |hook| try hook(.before_main_publication);
     cwd.rename(main_staging.?, cwd, main_final.?, defaultIo()) catch return error.CantOpen;
@@ -958,13 +975,12 @@ fn validateMigrationStoreBinding(binding: *MigrateBindingPlan) Error!void {
     if (stored_epoch != binding.epoch) return error.BoundStoreInvalid;
 }
 
-/// Copy one source member forward into a fresh staging file and apply the
-/// registered adjacent migration step to the staged copy.
-fn stageAndMigrateMember(source: *sqlite.Database, staging_path: [:0]const u8) Error!void {
+/// Copy one source member forward into a fresh staging file. Migration of the
+/// staged copy is a separate step so each phase has its own fault boundary.
+fn copyForwardMember(source: *sqlite.Database, staging_path: [:0]const u8) Error!void {
     var staged = try sqlite.Database.open(staging_path);
     defer staged.deinit();
     try backupMainDatabase(source, &staged);
-    _ = try runMigrationStep(&staged);
 }
 
 const MigrateRebindTarget = enum { staging, final };

@@ -883,7 +883,9 @@ test "migrateDatabase cleans up after a fault at every phase boundary" {
 
     const points = [_]zova.MigrateFaultPoint{
         .after_main_copy,
+        .after_main_migration,
         .after_store_copy,
+        .after_store_migration,
         .after_validation,
         .after_store_publication,
         .before_main_publication,
