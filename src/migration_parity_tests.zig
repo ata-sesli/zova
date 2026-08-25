@@ -137,9 +137,64 @@ fn captureUserSchemaAndRows(allocator: std.mem.Allocator, raw: *sqlite.Database,
 
         if (!std.mem.eql(u8, entry.kind, "table")) continue;
 
-        // Deterministic full-row dump ordered by rowid.
-        var rows_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const rows_sql = try std.fmt.bufPrintZ(&rows_buffer, "select * from \"{s}\" order by rowid", .{entry.name});
+        // Deterministic full-row dump with deterministic ordering. WITHOUT
+        // ROWID tables lack rowid; fall back to primary-key ordering. All
+        // values use length-prefixed canonical encoding to avoid delimiter
+        // collisions.
+        var order_clause: []const u8 = "rowid";
+        var order_storage: ?[]u8 = null;
+        defer if (order_storage) |storage| allocator.free(storage);
+
+        if (std.ascii.indexOfIgnoreCase(entry.sql, "without rowid") != null) {
+            var pk_stmt_buffer: [std.fs.max_path_bytes]u8 = undefined;
+            const pk_sql = try std.fmt.bufPrintZ(&pk_stmt_buffer, "pragma table_info(\"{s}\")", .{entry.name});
+            var pk_stmt = try raw.prepare(pk_sql);
+            defer pk_stmt.deinit();
+
+            const PkCol = struct { pk: i64, name: []u8 };
+            var pk_entries: std.ArrayList(PkCol) = .empty;
+            defer {
+                for (pk_entries.items) |*pk_entry| allocator.free(pk_entry.name);
+                pk_entries.deinit(allocator);
+            }
+
+            while (true) {
+                const step = try pk_stmt.step();
+                if (step == .done) break;
+                const pk = pk_stmt.columnInt64(5);
+                if (pk > 0) {
+                    try pk_entries.append(allocator, .{
+                        .pk = pk,
+                        .name = try allocator.dupe(u8, pk_stmt.columnText(1)),
+                    });
+                }
+            }
+
+            std.mem.sort(PkCol, pk_entries.items, {}, struct {
+                fn lessThan(_: void, a: PkCol, b: PkCol) bool {
+                    return a.pk < b.pk;
+                }
+            }.lessThan);
+
+            if (pk_entries.items.len > 0) {
+                var out2: std.ArrayList(u8) = .empty;
+                defer out2.deinit(allocator);
+                for (pk_entries.items, 0..) |pk_entry, idx| {
+                    if (idx > 0) try out2.appendSlice(allocator, ", ");
+                    const quoted = try std.fmt.allocPrint(allocator, "\"{s}\"", .{pk_entry.name});
+                    defer allocator.free(quoted);
+                    try out2.appendSlice(allocator, quoted);
+                }
+                order_storage = try out2.toOwnedSlice(allocator);
+                order_clause = order_storage.?;
+            } else {
+                // No primary key; order by all columns for determinism.
+                order_clause = "rowid";
+            }
+        }
+
+        var rows_sql_buffer: [1024]u8 = undefined;
+        const rows_sql = try std.fmt.bufPrintZ(&rows_sql_buffer, "select * from \"{s}\" order by {s}", .{ entry.name, order_clause });
         var rows = try raw.prepare(rows_sql);
         defer rows.deinit();
 
@@ -152,8 +207,14 @@ fn captureUserSchemaAndRows(allocator: std.mem.Allocator, raw: *sqlite.Database,
                 switch (rows.columnType(column_index)) {
                     .integer => try out.print(allocator, "i:{d};", .{rows.columnInt64(column_index)}),
                     .float => try out.print(allocator, "f:{d};", .{rows.columnDouble(column_index)}),
-                    .text => try out.print(allocator, "t:{s};", .{rows.columnText(column_index)}),
-                    .blob => try out.print(allocator, "b:{x};", .{rows.columnBlob(column_index)}),
+                    .text => {
+                        const text = rows.columnText(column_index);
+                        try out.print(allocator, "t{d}:{s};", .{ text.len, text });
+                    },
+                    .blob => {
+                        const blob = rows.columnBlob(column_index);
+                        try out.print(allocator, "b{d}:{x};", .{ blob.len, blob });
+                    },
                     .null => try out.appendSlice(allocator, "n;"),
                 }
             }
@@ -205,6 +266,63 @@ fn captureObjects(allocator: std.mem.Allocator, db: *Database) ![]u8 {
             try out.print(allocator, "  chunk index={d} hash={x} offset={d} size={d}\n", .{
                 chunk.index, chunk.hash, chunk.offset, chunk.size_bytes,
             });
+        }
+
+        // Range reads: zero, EOF, and across chunk boundaries (exercised for the
+        // multi-chunk object). Comparison is length-prefixed to avoid delimiter
+        // collisions.
+        {
+            var buffer: [64]u8 = undefined;
+
+            // Full read via range at offset 0 must equal getObject bytes.
+            {
+                var range_buf = try allocator.alloc(u8, object.bytes.len);
+                defer allocator.free(range_buf);
+                const n = try db.readObjectRange(id, 0, range_buf);
+                try std.testing.expectEqual(object.bytes.len, n);
+                try std.testing.expectEqualSlices(u8, object.bytes, range_buf[0..n]);
+                try out.print(allocator, "  range full len={d} ok\n", .{n});
+            }
+
+            // Small prefix.
+            {
+                const len = @min(@as(usize, 5), object.bytes.len);
+                const n = try db.readObjectRange(id, 0, buffer[0..len]);
+                try std.testing.expectEqual(len, n);
+                try std.testing.expectEqualSlices(u8, object.bytes[0..len], buffer[0..n]);
+                try out.print(allocator, "  range prefix offset=0 len={d} bytes={x}\n", .{ n, buffer[0..n] });
+            }
+
+            // EOF: offset at size returns 0.
+            {
+                const n = try db.readObjectRange(id, object.bytes.len, buffer[0..10]);
+                try std.testing.expectEqual(@as(usize, 0), n);
+                try out.print(allocator, "  range eof offset={d} len=0\n", .{object.bytes.len});
+            }
+
+            // Last byte.
+            if (object.bytes.len > 0) {
+                const n = try db.readObjectRange(id, object.bytes.len - 1, buffer[0..1]);
+                try std.testing.expectEqual(@as(usize, 1), n);
+                try std.testing.expectEqual(object.bytes[object.bytes.len - 1], buffer[0]);
+                try out.print(allocator, "  range last offset={d} byte={x}\n", .{ object.bytes.len - 1, buffer[0..1] });
+            }
+
+            // Across chunk boundary for multi-chunk objects.
+            if (manifest.chunk_count > 1) {
+                const first_size: usize = @intCast(manifest.chunks[0].size_bytes);
+                const offset = if (first_size >= 2) first_size - 2 else 0;
+                const len: usize = 5;
+                const n = try db.readObjectRange(id, offset, buffer[0..len]);
+                try std.testing.expectEqual(len, n);
+                try std.testing.expectEqualSlices(u8, object.bytes[offset .. offset + len], buffer[0..n]);
+                try out.print(allocator, "  range cross offset={d} len={d} bytes={x}\n", .{ offset, n, buffer[0..n] });
+
+                const n2 = try db.readObjectRange(id, first_size, buffer[0..len]);
+                try std.testing.expectEqual(len, n2);
+                try std.testing.expectEqualSlices(u8, object.bytes[first_size .. first_size + len], buffer[0..n2]);
+                try out.print(allocator, "  range boundary offset={d} len={d} bytes={x}\n", .{ first_size, n2, buffer[0..n2] });
+            }
         }
     }
     return out.toOwnedSlice(allocator);
@@ -261,6 +379,17 @@ fn captureVectors(allocator: std.mem.Allocator, db: *Database) ![]u8 {
             for (results.items) |*result| {
                 try out.print(allocator, "  search hit {s} distance={d}\n", .{ result.id, result.distance });
             }
+        } else if (info.element_type == .f16) {
+            var results = try db.searchVectors(
+                allocator,
+                info.name,
+                .{ .f16 = &.{ 0x3c00, 0xbc00, 0x4200, 0xc200 } },
+                10,
+            );
+            defer results.deinit(allocator);
+            for (results.items) |*result| {
+                try out.print(allocator, "  search hit {s} distance={d}\n", .{ result.id, result.distance });
+            }
         } else if (info.element_type == .i8) {
             var results = try db.searchVectors(
                 allocator,
@@ -299,94 +428,132 @@ fn captureGraphs(allocator: std.mem.Allocator, db: *Database) ![]u8 {
     for (graph_names.items) |graph_name| {
         try out.print(allocator, "graph {s}\n", .{graph_name});
 
-        var scan = try db.graphScan(allocator, .{
-            .graph_name = graph_name,
-            .node_limit = 1000,
-            .edge_limit = 1000,
-        });
-        defer scan.deinit(allocator);
-
-        for (scan.nodes) |*node| {
-            var full = try db.getGraphNode(allocator, graph_name, node.node_id);
-            defer full.deinit(allocator);
-            try out.print(allocator, "  node key={d} id={s} kind={s} target={s}/{s}/{s} order={d}\n", .{
-                node.node_key,
-                full.node_id,
-                full.kind,
-                @tagName(full.target_type),
-                full.target_namespace orelse "-",
-                full.target_ref orelse "-",
-                node.created_order,
-            });
-        }
-        for (scan.edges) |*edge| {
-            var payload_lookup = try db.graphEdgePayloadsGetMany(allocator, graph_name, &.{edge.edge_key});
-            defer payload_lookup.deinit(allocator);
-            const payload: []const u8 = if (payload_lookup.items.len > 0 and payload_lookup.items[0].found)
-                payload_lookup.items[0].payload orelse ""
-            else
-                "";
-            try out.print(allocator, "  edge key={d} type={s} order={d} payload={s}\n", .{
-                edge.edge_key, edge.edge_type, edge.created_order, payload,
-            });
-        }
-    }
-
-    // Neighbors, degrees, walks, and pagination windows on the social graph.
-    // Bound-set mains carry no graphs themselves (they live in the store), so
-    // these sections are conditional.
-    if (!try db.hasGraph("social")) return out.toOwnedSlice(allocator);
-
-    inline for (.{
-        .{ .node = "alice" },
-        .{ .node = "bob" },
-    }) |entry| {
-        inline for (.{
-            zova.GraphNeighborDirection.outgoing,
-            zova.GraphNeighborDirection.incoming,
-        }) |direction| {
-            var neighbors = try db.graphNeighbors(allocator, .{
-                .graph_name = "social",
-                .node_id = entry.node,
-                .direction = direction,
-                .limit = 100,
-            });
-            defer neighbors.deinit(allocator);
-            for (neighbors.items) |*neighbor| {
-                try out.print(allocator, "  neighbor of {s} ({s}) -> {s} kind={s} via {s}\n", .{
-                    entry.node, @tagName(direction), neighbor.node_id, neighbor.kind, neighbor.edge_type,
+        // Capture all nodes and edges via cursor pagination with small limits,
+        // recording every page boundary. This proves ordering and cursor logic
+        // survive migration.
+        {
+            var node_cursor = zova.GraphScanCursor{};
+            var edge_cursor = zova.GraphScanCursor{};
+            var page_index: usize = 0;
+            var has_more_nodes = true;
+            var has_more_edges = true;
+            while (has_more_nodes or has_more_edges) {
+                var page = try db.graphScan(allocator, .{
+                    .graph_name = graph_name,
+                    .node_after = node_cursor,
+                    .edge_after = edge_cursor,
+                    .node_limit = 1,
+                    .edge_limit = 1,
                 });
+                defer page.deinit(allocator);
+
+                try out.print(allocator, "  page {d} nodes={d} edges={d} more_n={} more_e={} cursor=({d},{d})/({d},{d})\n", .{
+                    page_index,
+                    page.nodes.len,
+                    page.edges.len,
+                    page.has_more_nodes,
+                    page.has_more_edges,
+                    node_cursor.created_order,
+                    node_cursor.key,
+                    edge_cursor.created_order,
+                    edge_cursor.key,
+                });
+
+                for (page.nodes) |*node| {
+                    var full = try db.getGraphNode(allocator, graph_name, node.node_id);
+                    defer full.deinit(allocator);
+                    try out.print(allocator, "    node key={d} id={s} kind={s} target={s}/{s}/{s} order={d}\n", .{
+                        node.node_key,
+                        full.node_id,
+                        full.kind,
+                        @tagName(full.target_type),
+                        full.target_namespace orelse "-",
+                        full.target_ref orelse "-",
+                        node.created_order,
+                    });
+                }
+                for (page.edges) |*edge| {
+                    var payload_lookup = try db.graphEdgePayloadsGetMany(allocator, graph_name, &.{edge.edge_key});
+                    defer payload_lookup.deinit(allocator);
+                    const payload: []const u8 = if (payload_lookup.items.len > 0 and payload_lookup.items[0].found)
+                        payload_lookup.items[0].payload orelse ""
+                    else
+                        "";
+                    try out.print(allocator, "    edge key={d} from={d} to={d} type={s} order={d} payload={s}\n", .{
+                        edge.edge_key,
+                        edge.source_node_key,
+                        edge.target_node_key,
+                        edge.edge_type,
+                        edge.created_order,
+                        payload,
+                    });
+                }
+
+                if (page.has_more_nodes and page.nodes.len > 0) {
+                    const last = page.nodes[page.nodes.len - 1];
+                    node_cursor = .{ .created_order = last.created_order, .key = last.node_key };
+                } else {
+                    has_more_nodes = false;
+                }
+                if (page.has_more_edges and page.edges.len > 0) {
+                    const last = page.edges[page.edges.len - 1];
+                    edge_cursor = .{ .created_order = last.created_order, .key = last.edge_key };
+                } else {
+                    has_more_edges = false;
+                }
+                page_index += 1;
             }
-            const degree = try db.graphDegree(.{
-                .graph_name = "social",
-                .node_id = entry.node,
-                .direction = direction,
+        }
+
+        // Neighbors, degree, and walks for every node in this graph.
+        // Bound-set mains carry no graphs themselves (they live in the stores),
+        // so we enumerate nodes dynamically.
+        {
+            var scan_nodes = try db.graphScan(allocator, .{
+                .graph_name = graph_name,
+                .node_limit = 1000,
+                .edge_limit = 0,
             });
-            try out.print(allocator, "  degree of {s} ({s}) = {d}\n", .{ entry.node, @tagName(direction), degree });
+            defer scan_nodes.deinit(allocator);
+
+            for (scan_nodes.nodes) |*node| {
+                inline for (.{
+                    zova.GraphNeighborDirection.outgoing,
+                    zova.GraphNeighborDirection.incoming,
+                }) |direction| {
+                    var neighbors = try db.graphNeighbors(allocator, .{
+                        .graph_name = graph_name,
+                        .node_id = node.node_id,
+                        .direction = direction,
+                        .limit = 100,
+                    });
+                    defer neighbors.deinit(allocator);
+                    for (neighbors.items) |*neighbor| {
+                        try out.print(allocator, "    neighbor of {s} ({s}) -> {s} kind={s} via {s}\n", .{
+                            node.node_id, @tagName(direction), neighbor.node_id, neighbor.kind, neighbor.edge_type,
+                        });
+                    }
+                    const degree = try db.graphDegree(.{
+                        .graph_name = graph_name,
+                        .node_id = node.node_id,
+                        .direction = direction,
+                    });
+                    try out.print(allocator, "    degree of {s} ({s}) = {d}\n", .{ node.node_id, @tagName(direction), degree });
+                }
+
+                var walk = try db.graphWalk(allocator, .{
+                    .graph_name = graph_name,
+                    .start_node_id = node.node_id,
+                    .max_depth = 3,
+                    .limit = 100,
+                });
+                defer walk.deinit(allocator);
+                for (walk.items) |*item| {
+                    try out.print(allocator, "    walk from {s} depth={d} node={s}\n", .{ node.node_id, item.depth, item.node_id });
+                }
+            }
         }
     }
-
-    var walk = try db.graphWalk(allocator, .{
-        .graph_name = "social",
-        .start_node_id = "alice",
-        .max_depth = 3,
-        .limit = 100,
-    });
-    defer walk.deinit(allocator);
-    for (walk.items) |*item| {
-        try out.print(allocator, "  walk depth={d} node={s}\n", .{ item.depth, item.node_id });
-    }
-
-    // Pagination windows must be stable across migration.
-    var page_one = try db.graphScan(allocator, .{
-        .graph_name = "social",
-        .node_limit = 1,
-        .edge_limit = 1,
-    });
-    defer page_one.deinit(allocator);
-    try out.print(allocator, "page1 nodes={d} edges={d} more_n={} more_e={}\n", .{
-        page_one.nodes.len, page_one.edges.len, page_one.has_more_nodes, page_one.has_more_edges,
-    });
 
     return out.toOwnedSlice(allocator);
 }
@@ -427,18 +594,27 @@ fn tableExistsRaw(raw: *sqlite.Database, name: []const u8) !bool {
     return stmt.columnInt64(0) != 0;
 }
 
-/// Installed extension records sorted by name.
+/// Installed extension records sorted by name (all fields, to prove exact parity).
 fn captureExtensions(allocator: std.mem.Allocator, raw: *sqlite.Database) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
-    var stmt = try raw.prepare("select name, version, required from _zova_extensions order by name");
+    var stmt = try raw.prepare(
+        "select name, version, storage_prefix, zova_abi_min, capabilities, required, installed_at_unix, manifest_json from _zova_extensions order by name",
+    );
     defer stmt.deinit();
     while (true) {
         const step = try stmt.step();
         if (step == .done) break;
-        try out.print(allocator, "extension {s} v{s} required={}\n", .{
-            stmt.columnText(0), stmt.columnText(1), stmt.columnInt64(2) != 0,
+        try out.print(allocator, "extension {s} v{s} prefix={s} abi={s} caps={s} required={} installed={d} manifest={s}\n", .{
+            stmt.columnText(0),
+            stmt.columnText(1),
+            stmt.columnText(2),
+            stmt.columnText(3),
+            stmt.columnText(4),
+            stmt.columnInt64(5) != 0,
+            stmt.columnInt64(6),
+            stmt.columnText(7),
         });
     }
     return out.toOwnedSlice(allocator);
@@ -694,9 +870,8 @@ test "migrated format-9 database receives an empty transactional key-value store
 // ---------------------------------------------------------------------------
 
 fn expectIntegrityOk(path: [:0]const u8) !void {
-    // Full public open runs identity/schema/extension/bound-store validation.
-    var db = try Database.open(path);
-    defer db.deinit();
+    // Exercise the actual verification used by check/doctor.
+    try zova.verifyOperationalCopy(path, zova.bundledExtensionRegistry());
 
     var raw = try sqlite.Database.openWithFlags(path, .read_only);
     defer raw.deinit();
@@ -802,13 +977,18 @@ test "migrated database supports backup restore compact salvage and memory resto
     {
         var migrated_raw = try sqlite.Database.openWithFlags(dest_path, .read_only);
         defer migrated_raw.deinit();
-        _ = try zova.salvageInstalledExtensions(
+        const result = try zova.salvageInstalledExtensions(
             std.testing.allocator,
             &migrated_raw,
             null,
             zova.bundledExtensionRegistry(),
             .plan,
         );
+        try std.testing.expectEqual(@as(u64, 0), result.skipped_extensions);
+        try std.testing.expectEqual(@as(u64, 0), result.skipped_private_objects);
+        // The plan should account for the installed trgm extension without
+        // reporting it as skipped.
+        try std.testing.expect(result.copied_extensions > 0 or result.copied_private_objects > 0);
     }
 
     _ = &ids;

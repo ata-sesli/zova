@@ -4525,7 +4525,7 @@ fn expectDone(stmt: *sqlite.Statement) Error!void {
     }
 }
 
-fn verifyOperationalCopy(path: [:0]const u8, registry: ExtensionRegistry) Error!void {
+pub fn verifyOperationalCopy(path: [:0]const u8, registry: ExtensionRegistry) Error!void {
     var db = try Database.openWithOptionsAndExtensions(path, .{ .read_only = true }, registry);
     defer db.deinit();
 
