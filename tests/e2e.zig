@@ -763,6 +763,43 @@ test "cli doctor reports sql introduced corruption in realistic file" {
     try std.testing.expect(std.mem.indexOf(u8, salvage.stderr, "private body should not be printed") == null);
 }
 
+test "cli check and doctor accept a migrated format-9 database" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "check-migrate-source.zova");
+    try copyFixtureInto(source_path, "format-9.zova");
+
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "check-migrate-dest.zova");
+    try zova.migrateDatabase(source_path, dest_path, .{});
+
+    var check = try runCli(&.{ "zova", "check", "--json", dest_path });
+    defer check.deinit();
+    try std.testing.expectEqual(@as(u8, 0), check.code);
+    var check_json = try parseJson(check.stdout);
+    defer check_json.deinit();
+    try expectJsonString(check_json.value.object, "command", "check");
+    try expectJsonString(check_json.value.object, "status", "ok");
+
+    var deep_check = try runCli(&.{ "zova", "check", "--json", "--deep", dest_path });
+    defer deep_check.deinit();
+    try std.testing.expectEqual(@as(u8, 0), deep_check.code);
+    var deep_check_json = try parseJson(deep_check.stdout);
+    defer deep_check_json.deinit();
+    try expectJsonString(deep_check_json.value.object, "command", "check");
+    try expectJsonString(deep_check_json.value.object, "status", "ok");
+
+    var doctor = try runCli(&.{ "zova", "doctor", "--json", dest_path });
+    defer doctor.deinit();
+    try std.testing.expectEqual(@as(u8, 0), doctor.code);
+    var doctor_json = try parseJson(doctor.stdout);
+    defer doctor_json.deinit();
+    try expectJsonString(doctor_json.value.object, "command", "doctor");
+    try expectJsonString(doctor_json.value.object, "status", "ok");
+}
+
 const CliResult = struct {
     code: u8,
     stdout: []u8,
@@ -804,6 +841,15 @@ fn expectContains(haystack: []const u8, needle: []const u8) !void {
 
 fn parseJson(bytes: []const u8) !std.json.Parsed(std.json.Value) {
     return std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+}
+
+fn copyFixtureInto(destination_path: [:0]const u8, fixture_name: []const u8) !void {
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try std.fmt.bufPrintZ(&source_buffer, "tests/fixtures/{s}", .{fixture_name});
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, source_path, std.testing.allocator, .limited(64 * 1024 * 1024));
+    defer std.testing.allocator.free(bytes);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = destination_path, .data = bytes });
 }
 
 fn expectJsonString(object: std.json.ObjectMap, key: []const u8, expected: []const u8) !void {

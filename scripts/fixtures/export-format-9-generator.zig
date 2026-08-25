@@ -66,18 +66,20 @@ fn populateUserSql(db: *zova.Database) !void {
     }
 }
 
-fn writeObjects(db: *zova.Database, alloc: std.mem.Allocator, bound_store: bool) !void {
+fn writeObjects(db: *zova.Database, alloc: std.mem.Allocator, bound_store: bool) !zova.ObjectId {
     // Small single-chunk payloads.
     const small_payloads = [_][]const u8{
         "first object payload: small enough for a single chunk.",
         "second object payload with modest size.",
     };
 
-    for (small_payloads) |payload| {
+    var second_small_id: zova.ObjectId = undefined;
+    for (small_payloads, 0..) |payload, index| {
         var writer = try db.objectWriter(alloc);
         defer writer.deinit();
         try writer.write(payload);
-        _ = try writer.finish();
+        const id = try writer.finish();
+        if (index == 1) second_small_id = id;
     }
 
     // One deterministic multi-chunk payload well beyond the 64 KiB maximum
@@ -113,6 +115,17 @@ fn writeObjects(db: *zova.Database, alloc: std.mem.Allocator, bound_store: bool)
         std.debug.print("error: multi-chunk object produced only {d} chunk(s)\n", .{chunks});
         return error.MultiChunkObjectExpected;
     }
+
+    return second_small_id;
+}
+
+fn hexId(out: *[64]u8, id: zova.ObjectId) []const u8 {
+    const digits = "0123456789abcdef";
+    for (id, 0..) |byte, index| {
+        out[index * 2] = digits[byte >> 4];
+        out[index * 2 + 1] = digits[byte & 0x0f];
+    }
+    return out;
 }
 
 fn putVectorRows(
@@ -162,7 +175,7 @@ fn populateVectors(db: *zova.Database) !void {
     try putVectorRows(db, .i8, "embeddings_i8", &i8_rows);
 }
 
-fn populateGraphs(db: *zova.Database) !void {
+fn populateGraphs(db: *zova.Database, object_target_hex: []const u8) !void {
     try db.createGraph("social");
     try db.createGraph("workflow");
 
@@ -180,7 +193,7 @@ fn populateGraphs(db: *zova.Database) !void {
         .kind = "person",
         .target_type = .object,
         .target_namespace = "objects",
-        .target_ref = "second-object",
+        .target_ref = object_target_hex,
     });
 
     var social_keys: [2]i64 = undefined;
@@ -217,9 +230,10 @@ fn createPopulatedDatabase(path: [:0]const u8, alloc: std.mem.Allocator) !void {
 
     try populateUserSql(&db);
     try db.installExtension("trgm");
-    try writeObjects(&db, alloc, false);
+    const object_target_id = try writeObjects(&db, alloc, false);
+    var target_hex_buffer: [64]u8 = undefined;
+    try populateGraphs(&db, hexId(&target_hex_buffer, object_target_id));
     try populateVectors(&db);
-    try populateGraphs(&db);
 }
 
 const BoundSetPaths = struct {
@@ -248,9 +262,10 @@ fn createBoundSet(init: std.process.Init, paths: BoundSetPaths, alloc: std.mem.A
 
     try populateUserSql(&main_db);
     try main_db.installExtension("trgm");
-    try writeObjects(&main_db, alloc, true);
+    const bound_object_target_id = try writeObjects(&main_db, alloc, true);
+    var bound_target_hex_buffer: [64]u8 = undefined;
+    try populateGraphs(&main_db, hexId(&bound_target_hex_buffer, bound_object_target_id));
     try populateVectors(&main_db);
-    try populateGraphs(&main_db);
 }
 
 /// Reopen the bound main through the released build and verify every attached
