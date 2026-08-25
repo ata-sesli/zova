@@ -5,3 +5,7 @@ test "migration_red_tests suite" {
 test "migration_tests suite" {
     _ = @import("migration_tests.zig");
 }
+
+test "migration_parity_tests suite" {
+    _ = @import("migration_parity_tests.zig");
+}

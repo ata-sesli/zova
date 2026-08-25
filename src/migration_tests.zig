@@ -977,7 +977,7 @@ test "migrateDatabase cleans up after a fault at every phase boundary" {
 
             try std.testing.expectError(
                 error.CantOpen,
-                zova.migrateDatabaseInternal(source_main, dest_main, .{}, zova.bundledExtensionRegistry(), FaultHook.fire),
+                zova.migrateDatabaseInternal(std.testing.allocator, source_main, dest_main, .{}, zova.bundledExtensionRegistry(), FaultHook.fire),
             );
 
             FaultHook.target = null;
@@ -1075,7 +1075,7 @@ test "migration rejects bound stores whose role mismatches the binding with veri
 
     try std.testing.expectError(
         error.BoundStoreInvalid,
-        zova.migrateDatabaseInternal(source_main, dest_main, .{ .verify = false }, zova.bundledExtensionRegistry(), null),
+        zova.migrateDatabaseInternal(std.testing.allocator, source_main, dest_main, .{ .verify = false }, zova.bundledExtensionRegistry(), null),
     );
 
     // Source hashes unchanged, nothing published, no staging leftovers.
