@@ -428,38 +428,36 @@ fn captureGraphs(allocator: std.mem.Allocator, db: *Database) ![]u8 {
     for (graph_names.items) |graph_name| {
         try out.print(allocator, "graph {s}\n", .{graph_name});
 
-        // Capture all nodes and edges via cursor pagination with small limits,
-        // recording every page boundary. This proves ordering and cursor logic
-        // survive migration.
+        // Capture nodes and edges via independent cursor pagination with
+        // small per-side limits, recording every page and cursor boundary.
+        // Each side follows its exclusive cursor until exhausted; strictly
+        // increasing keys prove every row is captured exactly once.
         {
             var node_cursor = zova.GraphScanCursor{};
-            var edge_cursor = zova.GraphScanCursor{};
-            var page_index: usize = 0;
-            var has_more_nodes = true;
-            var has_more_edges = true;
-            while (has_more_nodes or has_more_edges) {
+            var previous_node_key: ?i64 = null;
+            var node_page_index: usize = 0;
+            while (true) {
                 var page = try db.graphScan(allocator, .{
                     .graph_name = graph_name,
                     .node_after = node_cursor,
-                    .edge_after = edge_cursor,
-                    .node_limit = 1,
-                    .edge_limit = 1,
+                    .node_limit = 2,
+                    .edge_limit = 0,
                 });
                 defer page.deinit(allocator);
 
-                try out.print(allocator, "  page {d} nodes={d} edges={d} more_n={} more_e={} cursor=({d},{d})/({d},{d})\n", .{
-                    page_index,
+                try out.print(allocator, "  node page {d} rows={d} more={} cursor_before=({d},{d})\n", .{
+                    node_page_index,
                     page.nodes.len,
-                    page.edges.len,
                     page.has_more_nodes,
-                    page.has_more_edges,
                     node_cursor.created_order,
                     node_cursor.key,
-                    edge_cursor.created_order,
-                    edge_cursor.key,
                 });
 
+                if (page.nodes.len == 0) break;
                 for (page.nodes) |*node| {
+                    try std.testing.expect(previous_node_key == null or node.node_key > previous_node_key.?);
+                    previous_node_key = node.node_key;
+
                     var full = try db.getGraphNode(allocator, graph_name, node.node_id);
                     defer full.deinit(allocator);
                     try out.print(allocator, "    node key={d} id={s} kind={s} target={s}/{s}/{s} order={d}\n", .{
@@ -472,7 +470,42 @@ fn captureGraphs(allocator: std.mem.Allocator, db: *Database) ![]u8 {
                         node.created_order,
                     });
                 }
+                const node_last = page.nodes[page.nodes.len - 1];
+                try out.print(allocator, "  node page {d} cursor_after=({d},{d})\n", .{
+                    node_page_index,
+                    node_last.created_order,
+                    node_last.node_key,
+                });
+                if (!page.has_more_nodes) break;
+                node_cursor = .{ .created_order = node_last.created_order, .key = node_last.node_key };
+                node_page_index += 1;
+            }
+
+            var edge_cursor = zova.GraphScanCursor{};
+            var previous_edge_key: ?i64 = null;
+            var edge_page_index: usize = 0;
+            while (true) {
+                var page = try db.graphScan(allocator, .{
+                    .graph_name = graph_name,
+                    .edge_after = edge_cursor,
+                    .node_limit = 0,
+                    .edge_limit = 3,
+                });
+                defer page.deinit(allocator);
+
+                try out.print(allocator, "  edge page {d} rows={d} more={} cursor_before=({d},{d})\n", .{
+                    edge_page_index,
+                    page.edges.len,
+                    page.has_more_edges,
+                    edge_cursor.created_order,
+                    edge_cursor.key,
+                });
+
+                if (page.edges.len == 0) break;
                 for (page.edges) |*edge| {
+                    try std.testing.expect(previous_edge_key == null or edge.edge_key > previous_edge_key.?);
+                    previous_edge_key = edge.edge_key;
+
                     var payload_lookup = try db.graphEdgePayloadsGetMany(allocator, graph_name, &.{edge.edge_key});
                     defer payload_lookup.deinit(allocator);
                     const payload: []const u8 = if (payload_lookup.items.len > 0 and payload_lookup.items[0].found)
@@ -488,20 +521,15 @@ fn captureGraphs(allocator: std.mem.Allocator, db: *Database) ![]u8 {
                         payload,
                     });
                 }
-
-                if (page.has_more_nodes and page.nodes.len > 0) {
-                    const last = page.nodes[page.nodes.len - 1];
-                    node_cursor = .{ .created_order = last.created_order, .key = last.node_key };
-                } else {
-                    has_more_nodes = false;
-                }
-                if (page.has_more_edges and page.edges.len > 0) {
-                    const last = page.edges[page.edges.len - 1];
-                    edge_cursor = .{ .created_order = last.created_order, .key = last.edge_key };
-                } else {
-                    has_more_edges = false;
-                }
-                page_index += 1;
+                const edge_last = page.edges[page.edges.len - 1];
+                try out.print(allocator, "  edge page {d} cursor_after=({d},{d})\n", .{
+                    edge_page_index,
+                    edge_last.created_order,
+                    edge_last.edge_key,
+                });
+                if (!page.has_more_edges) break;
+                edge_cursor = .{ .created_order = edge_last.created_order, .key = edge_last.edge_key };
+                edge_page_index += 1;
             }
         }
 
