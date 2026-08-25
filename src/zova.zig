@@ -656,6 +656,29 @@ pub fn restoreBackup(source_path: [:0]const u8, dest_path: [:0]const u8, options
     try restoreBackupWithExtensions(source_path, dest_path, options, bundledExtensionRegistry());
 }
 
+/// Open any Zova database file for read-only logical inspection.
+///
+/// Unlike `Database.open`, this does not enforce the current storage format,
+/// role, or schema: the runtime SQL helpers are registered so vector, graph,
+/// and notification APIs work against migratable format-9 sources during
+/// migration verification. The handle is always read-only.
+pub fn openForLogicalInspection(path: [:0]const u8) Error!Database {
+    if (!isZovaPath(path)) return error.NotZovaPath;
+    try ensureSourcePathExists(path);
+
+    var raw = try sqlite.Database.openWithFlags(path, .read_only);
+    errdefer raw.deinit();
+    try enableForeignKeys(&raw);
+    try vector_sql.register(&raw);
+    try graph_sql.register(&raw);
+    // Installed-extension SQL is registered so bundled behavior (for example
+    // trigram functions) can be exercised against migratable sources.
+    try extension_impl.registerSqlForInstalled(&raw, bundledExtensionRegistry());
+    const notifications = try initNotifications(&raw);
+    errdefer deinitNotifications(notifications);
+    return .{ .sqlite_db = raw, .notifications = notifications };
+}
+
 /// Restore a backup `.zova` file with process-registered extension code.
 pub fn restoreBackupWithExtensions(source_path: [:0]const u8, dest_path: [:0]const u8, options: RestoreOptions, registry: ExtensionRegistry) Error!void {
     if (!isZovaPath(source_path)) return error.NotZovaPath;
@@ -712,7 +735,7 @@ pub fn migrateDatabaseWithExtensions(
     options: MigrateOptions,
     registry: ExtensionRegistry,
 ) Error!void {
-    return migrateDatabaseInternal(source_path, destination_path, options, registry, null);
+    return migrateDatabaseInternal(std.heap.c_allocator, source_path, destination_path, options, registry, null);
 }
 
 /// Test-only fault points covering every phase boundary required by the
@@ -731,6 +754,7 @@ pub const MigrateFaultPoint = enum {
 pub const MigrateFaultHook = *const fn (point: MigrateFaultPoint) Error!void;
 
 pub fn migrateDatabaseInternal(
+    allocator: std.mem.Allocator,
     source_path: [:0]const u8,
     destination_path: [:0]const u8,
     options: MigrateOptions,
@@ -755,11 +779,9 @@ pub fn migrateDatabaseInternal(
         }
     }
 
-    const allocator = std.heap.c_allocator;
-
-    // Learn which bound stores exist so their sibling destinations can be
-    // derived and reserved before any mutation. Everything allocated from
-    // here on is owned by the single guarded cleanup below.
+    // Everything allocated from here on is owned by the single guarded
+    // cleanup below and flows through the caller-supplied allocator so
+    // allocation-fault injection can exercise every path.
     var bindings: [3]MigrateBindingPlan = undefined;
     var binding_count: usize = 0;
     var committed = false;
