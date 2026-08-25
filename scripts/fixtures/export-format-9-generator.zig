@@ -23,6 +23,10 @@ const populated_user_sql =
     \\create trigger user_documents_touch after insert on user_documents begin
     \\  update user_documents set word_count = length(new.body) where id = new.id;
     \\end;
+    \\create table user_settings (
+    \\  key text primary key,
+    \\  value text not null
+    \\) without rowid;
 ;
 
 fn populateUserSql(db: *zova.Database) !void {
@@ -45,6 +49,20 @@ fn populateUserSql(db: *zova.Database) !void {
         try insert.bindText(2, row.body);
         try insert.bindInt64(3, row.at);
         _ = try insert.step();
+    }
+
+    var settings = try db.prepare("insert into user_settings (key, value) values (?, ?)");
+    defer settings.deinit();
+
+    const settings_rows = [_]struct { key: []const u8, value: []const u8 }{
+        .{ .key = "theme", .value = "dark;light\nwith\ndelimiter" },
+        .{ .key = "language", .value = "en-US" },
+    };
+    for (settings_rows) |row| {
+        try settings.reset();
+        try settings.bindText(1, row.key);
+        try settings.bindText(2, row.value);
+        _ = try settings.step();
     }
 }
 
