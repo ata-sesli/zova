@@ -21,6 +21,8 @@ test "cli version and help are successful" {
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "vectors [--json] [--limit <n>] <file.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "vector-collection [--json] [--limit <n>] <file.zova> <name>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "tables [--json] [--limit <n>] <file.zova>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "format [--json] <database.zova>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "migrate [--json] [--no-verify] <source.zova> <destination.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "check [--deep] <file.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "backup [--json] [--no-verify] <source.zova> <destination.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "compact [--json] [--no-verify] <source.zova> <destination.zova>") != null);

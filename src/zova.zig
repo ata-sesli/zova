@@ -63,7 +63,7 @@ const kv_table = kv_impl.kv_table;
 const bound_stores_table = "_zova_bound_stores";
 const magic_value = "zova";
 const format_version = version.format_version;
-const minimum_migratable_format = "9";
+pub const minimum_migratable_format = "9";
 
 /// Compatibility class assigned to a Zova storage format version.
 ///
