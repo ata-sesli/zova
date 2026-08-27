@@ -1261,24 +1261,24 @@ fn collectMigrateBoundPaths(
     allocator: std.mem.Allocator,
     ctx: CommandContext,
     destination_path: [:0]const u8,
-) MigrateBoundPaths {
+) !MigrateBoundPaths {
     var result: MigrateBoundPaths = .{};
-    var db = zova.Database.openWithExtensions(destination_path, ctx.registry) catch return result;
+    var db = try zova.Database.openWithExtensions(destination_path, ctx.registry);
     defer db.deinit();
-    if (db.boundObjectStore(allocator) catch null) |info| {
+    if (try db.boundObjectStore(allocator)) |info| {
         var tmp = info;
         defer tmp.deinit(allocator);
-        result.objects = allocator.dupe(u8, tmp.path) catch null;
+        result.objects = try allocator.dupe(u8, tmp.path);
     }
-    if (db.boundVectorStore(allocator) catch null) |info| {
+    if (try db.boundVectorStore(allocator)) |info| {
         var tmp = info;
         defer tmp.deinit(allocator);
-        result.vectors = allocator.dupe(u8, tmp.path) catch null;
+        result.vectors = try allocator.dupe(u8, tmp.path);
     }
-    if (db.boundGraphStore(allocator) catch null) |info| {
+    if (try db.boundGraphStore(allocator)) |info| {
         var tmp = info;
         defer tmp.deinit(allocator);
-        result.graphs = allocator.dupe(u8, tmp.path) catch null;
+        result.graphs = try allocator.dupe(u8, tmp.path);
     }
     return result;
 }
@@ -1314,7 +1314,9 @@ fn migrateCommand(
 
     const dest_format = std.fmt.parseInt(u32, zova.version.format_version, 10) catch 0;
 
-    const bound = collectMigrateBoundPaths(allocator, ctx, dest_z);
+    const bound = collectMigrateBoundPaths(allocator, ctx, dest_z) catch |err| {
+        return migrateErrorFormat(stderr, parsed.format, err);
+    };
     defer {
         if (bound.objects) |p| allocator.free(p);
         if (bound.vectors) |p| allocator.free(p);
