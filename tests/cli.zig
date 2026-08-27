@@ -4352,6 +4352,106 @@ test "cli migrate reports derived bound stores accurately" {
     try std.testing.expectEqual(@as(u8, 0), check.code);
 }
 
+test "cli migrate busy source is rejected without publication" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "migrate-busy-source.zova");
+    try copyFixtureFile("tests/fixtures/format-9.zova", source_path);
+    const before_hash = try fileSha256(source_path);
+
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "migrate-busy-dest.zova");
+
+    // Hold a write lock on the source
+    var lock = try zova.sqlite.Database.open(source_path);
+    defer lock.deinit();
+    try lock.exec("begin immediate");
+
+    var json = try runCli(&.{ "zova", "migrate", "--json", source_path, dest_path });
+    defer json.deinit();
+    try std.testing.expectEqual(@as(u8, 3), json.code);
+    var parsed = try parseJson(json.stderr);
+    defer parsed.deinit();
+    try expectJsonString(parsed.value.object, "command", "migrate");
+    try expectJsonString(parsed.value.object, "status", "error");
+    const err_val = parsed.value.object.get("error") orelse return error.MissingJsonField;
+    const err_str = switch (err_val) {
+        .string => |s| s,
+        else => return error.MissingJsonField,
+    };
+    try std.testing.expect(std.mem.eql(u8, err_str, "Busy") or std.mem.eql(u8, err_str, "Locked"));
+    try expectPathMissing(dest_path);
+    const after_hash = try fileSha256(source_path);
+    try std.testing.expectEqualSlices(u8, &before_hash, &after_hash);
+
+    // text mode also reports busy without leaking private names
+    var text_dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const text_dest_path = try testingDbPath(&text_dest_buffer, tmp.sub_path[0..], "migrate-busy-dest-text.zova");
+    var text = try runCli(&.{ "zova", "migrate", source_path, text_dest_path });
+    defer text.deinit();
+    try std.testing.expectEqual(@as(u8, 3), text.code);
+    try std.testing.expect(std.mem.indexOf(u8, text.stderr, "Busy") != null or std.mem.indexOf(u8, text.stderr, "Locked") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.stderr, "_zova_") == null);
+    try expectPathMissing(text_dest_path);
+}
+
+test "cli migrate verification failure is reported without publication" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "migrate-verify-source.zova");
+    try copyFixtureFile("tests/fixtures/format-9.zova", source_path);
+    const before_hash = try fileSha256(source_path);
+
+    // Corrupt a chunk relation in the migratable source so staged copy fails verification
+    {
+        var raw = try zova.sqlite.Database.open(source_path);
+        defer raw.deinit();
+        // Corrupt first chunk's data but keep size_bytes, so hash mismatch -> verification fails
+        try raw.exec("update _zova_chunks set data = randomblob(size_bytes) where rowid = (select rowid from _zova_chunks limit 1)");
+    }
+    // Ensure probe still sees migratable
+    {
+        const info = try zova.probeDatabaseFormat(source_path);
+        try std.testing.expectEqual(@as(u32, 9), info.format_version);
+        try std.testing.expectEqual(zova.FormatCompatibility.migratable, info.compatibility);
+    }
+
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "migrate-verify-dest.zova");
+
+    var json = try runCli(&.{ "zova", "migrate", "--json", source_path, dest_path });
+    defer json.deinit();
+    try std.testing.expectEqual(@as(u8, 4), json.code);
+    var parsed = try parseJson(json.stderr);
+    defer parsed.deinit();
+    try expectJsonString(parsed.value.object, "command", "migrate");
+    try expectJsonString(parsed.value.object, "status", "error");
+    // kind is "verification failed" for verification errors
+    const kind_val = parsed.value.object.get("kind") orelse return error.MissingJsonField;
+    try std.testing.expect(std.mem.indexOf(u8, kind_val.string, "verification") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.stderr, "_zova_") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json.stderr, "select") == null);
+    try expectPathMissing(dest_path);
+    // source preserved
+    const after_hash = try fileSha256(source_path);
+    // hash should differ from before due to corruption, but not further changed by failed migrate
+    // re-hash after migrate should equal hash after corruption (i.e., stable)
+    const corrupted_hash = after_hash;
+    var second_json = try runCli(&.{ "zova", "migrate", "--json", source_path, dest_path });
+    defer second_json.deinit();
+    try std.testing.expectEqual(@as(u8, 4), second_json.code);
+    const after_second_hash = try fileSha256(source_path);
+    try std.testing.expectEqualSlices(u8, &corrupted_hash, &after_second_hash);
+    try expectPathMissing(dest_path);
+
+    // --no-verify would still publish (but we don't test that it bypasses verification here to avoid masking)
+    _ = before_hash;
+}
+
 fn copyFixtureFile(fixture_path: []const u8, dest_path: [:0]const u8) !void {
     const io = defaultIo();
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, fixture_path, std.testing.allocator, .limited(64 * 1024 * 1024));

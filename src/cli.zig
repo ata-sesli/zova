@@ -1255,6 +1255,13 @@ const MigrateBoundPaths = struct {
     objects: ?[]u8 = null,
     vectors: ?[]u8 = null,
     graphs: ?[]u8 = null,
+
+    fn deinit(self: *MigrateBoundPaths, allocator: std.mem.Allocator) void {
+        if (self.objects) |p| allocator.free(p);
+        if (self.vectors) |p| allocator.free(p);
+        if (self.graphs) |p| allocator.free(p);
+        self.* = .{};
+    }
 };
 
 fn collectMigrateBoundPaths(
@@ -1263,6 +1270,7 @@ fn collectMigrateBoundPaths(
     destination_path: [:0]const u8,
 ) !MigrateBoundPaths {
     var result: MigrateBoundPaths = .{};
+    errdefer result.deinit(allocator);
     var db = try zova.Database.openWithExtensions(destination_path, ctx.registry);
     defer db.deinit();
     if (try db.boundObjectStore(allocator)) |info| {
