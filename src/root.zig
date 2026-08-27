@@ -91,6 +91,7 @@ pub const restoreBackupWithExtensions = zova.restoreBackupWithExtensions;
 pub const migrateDatabase = zova.migrateDatabase;
 pub const migrateDatabaseWithExtensions = zova.migrateDatabaseWithExtensions;
 pub const MigrateOptions = zova.MigrateOptions;
+pub const minimum_migratable_format = zova.minimum_migratable_format;
 
 test "package exports sqlite namespace" {
     try std.testing.expect(@hasDecl(@This(), "sqlite"));

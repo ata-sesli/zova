@@ -705,6 +705,12 @@ pub fn run(
     if (std.mem.eql(u8, command, "graph-store")) {
         return graphStoreCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
+    if (std.mem.eql(u8, command, "format")) {
+        return formatCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
+    }
+    if (std.mem.eql(u8, command, "migrate")) {
+        return migrateCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
+    }
     if (std.mem.eql(u8, command, "extension")) {
         return extensionCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
@@ -807,6 +813,8 @@ fn writeUsage(writer: *std.Io.Writer) !void {
         \\  zova graph-store bind [--json] <main.zova> <graphs.zova>
         \\  zova graph-store info [--json] <main.zova>
         \\  zova graph-store unbind [--json] <main.zova>
+        \\  zova format [--json] <database.zova>
+        \\  zova migrate [--json] [--no-verify] <source.zova> <destination.zova>
         \\  zova extension list [--json] <file.zova>
         \\  zova extension info [--json] <file.zova> <name>
         \\  zova extension check [--json] <file.zova> [name]
@@ -821,6 +829,8 @@ fn writeUsage(writer: *std.Io.Writer) !void {
         \\  zova extension verify [--json] [--smoke] <bundle.zovaext>
         \\
         \\commands:
+        \\  format inspect storage format and migration compatibility without mutation
+        \\  migrate copy a database forward into the current storage format
         \\  info   print a bounded summary of a current-format Zova database
         \\  stats  print deeper bounded storage statistics
         \\  objects list bounded object metadata
@@ -960,6 +970,359 @@ fn operationalErrorFormat(stderr: *std.Io.Writer, command: []const u8, format: O
         .json => try writeJsonErrorWithKind(stderr, command, label, @errorName(err)),
     }
     return exit_code;
+}
+
+const FormatCommandArgs = struct {
+    format: OutputFormat,
+    path: []const u8,
+};
+
+const MigrateCommandArgs = struct {
+    format: OutputFormat,
+    verify: bool,
+    source_path: []const u8,
+    destination_path: []const u8,
+};
+
+const FormatCommandParseError = error{
+    DuplicateJson,
+    UnknownFlag,
+    MissingPath,
+    ExtraArgs,
+};
+
+const MigrateCommandParseError = error{
+    DuplicateJson,
+    DuplicateNoVerify,
+    UnknownFlag,
+    MissingSource,
+    MissingDestination,
+    ExtraArgs,
+};
+
+fn formatCompatibilityString(compatibility: zova.FormatCompatibility) []const u8 {
+    return switch (compatibility) {
+        .current => "current",
+        .migratable => "migratable",
+        .unsupported_legacy => "unsupported_legacy",
+        .unsupported_future => "unsupported_future",
+    };
+}
+
+fn recommendedActionForCompatibility(compatibility: ?zova.FormatCompatibility) []const u8 {
+    const compat = compatibility orelse return "unsupported";
+    return switch (compat) {
+        .current => "none",
+        .migratable => "run 'zova migrate <source> <destination>'",
+        .unsupported_legacy => "unsupported",
+        .unsupported_future => "upgrade Zova",
+    };
+}
+
+fn parseFormatCommandArgs(args: []const []const u8) FormatCommandParseError!FormatCommandArgs {
+    var format: OutputFormat = .text;
+    var path: ?[]const u8 = null;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            if (format == .json) return error.DuplicateJson;
+            format = .json;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            return error.UnknownFlag;
+        } else if (path == null) {
+            path = arg;
+        } else {
+            return error.ExtraArgs;
+        }
+    }
+    const p = path orelse return error.MissingPath;
+    return .{ .format = format, .path = p };
+}
+
+fn formatUsageMessage(err: FormatCommandParseError) []const u8 {
+    return switch (err) {
+        error.DuplicateJson => "duplicate --json",
+        error.UnknownFlag => "unknown flag",
+        error.MissingPath => "format requires <database.zova>",
+        error.ExtraArgs => "format accepts only [--json] <database.zova>",
+    };
+}
+
+fn parseMigrateCommandArgs(args: []const []const u8) MigrateCommandParseError!MigrateCommandArgs {
+    var format: OutputFormat = .text;
+    var verify = true;
+    var saw_no_verify = false;
+    var source_path: ?[]const u8 = null;
+    var destination_path: ?[]const u8 = null;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            if (format == .json) return error.DuplicateJson;
+            format = .json;
+        } else if (std.mem.eql(u8, arg, "--no-verify")) {
+            if (saw_no_verify) return error.DuplicateNoVerify;
+            saw_no_verify = true;
+            verify = false;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            return error.UnknownFlag;
+        } else if (source_path == null) {
+            source_path = arg;
+        } else if (destination_path == null) {
+            destination_path = arg;
+        } else {
+            return error.ExtraArgs;
+        }
+    }
+    const source = source_path orelse return error.MissingSource;
+    const destination = destination_path orelse return error.MissingDestination;
+    return .{
+        .format = format,
+        .verify = verify,
+        .source_path = source,
+        .destination_path = destination,
+    };
+}
+
+fn migrateUsageMessage(err: MigrateCommandParseError) []const u8 {
+    return switch (err) {
+        error.DuplicateJson => "duplicate --json",
+        error.DuplicateNoVerify => "duplicate --no-verify",
+        error.UnknownFlag => "unknown flag",
+        error.MissingSource => "migrate requires <source.zova>",
+        error.MissingDestination => "migrate requires <destination.zova>",
+        error.ExtraArgs => "migrate accepts only [--json] [--no-verify] <source.zova> <destination.zova>",
+    };
+}
+
+fn migrateErrorExitCode(err: anyerror) u8 {
+    return switch (err) {
+        error.Corrupt,
+        error.ObjectCorrupt,
+        error.ObjectNotFound,
+        error.ObjectChunkNotFound,
+        error.VectorCorrupt,
+        error.VectorCollectionNotFound,
+        error.VectorNotFound,
+        => ExitCode.check_failed,
+        else => ExitCode.open,
+    };
+}
+
+fn migrateErrorFormat(stderr: *std.Io.Writer, format: OutputFormat, err: anyerror) !u8 {
+    const exit_code = migrateErrorExitCode(err);
+    const label = if (exit_code == ExitCode.check_failed) "verification failed" else "operation failed";
+    const command: []const u8 = "migrate";
+    switch (format) {
+        .text => try stderr.print("{s}: {s}: {s}\n", .{ command, label, @errorName(err) }),
+        .json => try writeJsonErrorWithKind(stderr, command, label, @errorName(err)),
+    }
+    return exit_code;
+}
+
+fn writeFormatSuccess(
+    writer: *std.Io.Writer,
+    parsed: FormatCommandArgs,
+    info: ?zova.DatabaseFormatInfo,
+) !void {
+    const current_format = std.fmt.parseInt(u32, zova.version.format_version, 10) catch 0;
+    const minimum_format = std.fmt.parseInt(u32, zova.minimum_migratable_format, 10) catch 0;
+    const compatibility: ?zova.FormatCompatibility = if (info) |v| v.compatibility else null;
+    const source_format: ?u32 = if (info) |v| v.format_version else null;
+    const compat_str: []const u8 = if (compatibility) |c| formatCompatibilityString(c) else "invalid";
+    const action = recommendedActionForCompatibility(compatibility);
+    switch (parsed.format) {
+        .text => {
+            try writer.print("source: {s}\n", .{parsed.path});
+            if (source_format) |sf| {
+                try writer.print("source_format: {d}\n", .{sf});
+            } else {
+                try writer.writeAll("source_format: null\n");
+            }
+            try writer.print("current_format: {d}\n", .{current_format});
+            try writer.print("minimum_migratable_format: {d}\n", .{minimum_format});
+            try writer.print("compatibility: {s}\n", .{compat_str});
+            try writer.print("recommended_action: {s}\n", .{action});
+        },
+        .json => {
+            try writer.writeAll("{\n");
+            try writer.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
+            try writer.writeAll("  \"status\": \"ok\",\n");
+            try writer.writeAll("  \"command\": \"format\",\n");
+            try writer.writeAll("  \"source_path\": ");
+            try writeJsonString(writer, parsed.path);
+            try writer.writeAll(",\n");
+            if (source_format) |sf| {
+                try writer.print("  \"source_format\": {d},\n", .{sf});
+            } else {
+                try writer.writeAll("  \"source_format\": null,\n");
+            }
+            try writer.print("  \"current_format\": {d},\n", .{current_format});
+            try writer.print("  \"minimum_migratable_format\": {d},\n", .{minimum_format});
+            try writer.writeAll("  \"compatibility\": ");
+            try writeJsonString(writer, compat_str);
+            try writer.writeAll(",\n  \"recommended_action\": ");
+            try writeJsonString(writer, action);
+            try writer.writeAll("\n}\n");
+        },
+    }
+}
+
+fn formatCommand(
+    ctx: CommandContext,
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !u8 {
+    _ = ctx;
+    const parsed = parseFormatCommandArgs(args) catch |err| {
+        const fmt: OutputFormat = if (argsContain(args, "--json")) .json else .text;
+        return usageErrorFormat(stderr, "format", fmt, formatUsageMessage(err));
+    };
+    const path_z = allocator.dupeZ(u8, parsed.path) catch return ExitCode.unexpected;
+    defer allocator.free(path_z);
+    const info_or_err = zova.probeDatabaseFormat(path_z);
+    if (info_or_err) |info| {
+        try writeFormatSuccess(stdout, parsed, info);
+        return ExitCode.ok;
+    } else |err| switch (err) {
+        error.NotZovaDatabase, error.NotZovaPath => {
+            try writeFormatSuccess(stdout, parsed, null);
+            return ExitCode.ok;
+        },
+        else => return openErrorFormat(stderr, "format", parsed.format, err),
+    }
+}
+
+fn writeMigrateSuccess(
+    writer: *std.Io.Writer,
+    parsed: MigrateCommandArgs,
+    source_format: u32,
+    destination_format: u32,
+    bound_objects: ?[]const u8,
+    bound_vectors: ?[]const u8,
+    bound_graphs: ?[]const u8,
+) !void {
+    switch (parsed.format) {
+        .text => {
+            try writer.writeAll("migrate: ok\n");
+            try writer.print("source: {s}\n", .{parsed.source_path});
+            try writer.print("destination: {s}\n", .{parsed.destination_path});
+            try writer.print("source_format: {d}\n", .{source_format});
+            try writer.print("destination_format: {d}\n", .{destination_format});
+            try writer.print("verified: {}\n", .{parsed.verify});
+            if (bound_objects) |p| try writer.print("bound_objects: {s}\n", .{p});
+            if (bound_vectors) |p| try writer.print("bound_vectors: {s}\n", .{p});
+            if (bound_graphs) |p| try writer.print("bound_graphs: {s}\n", .{p});
+        },
+        .json => {
+            try writer.writeAll("{\n");
+            try writer.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
+            try writer.writeAll("  \"status\": \"ok\",\n");
+            try writer.writeAll("  \"command\": \"migrate\",\n");
+            try writer.writeAll("  \"source_path\": ");
+            try writeJsonString(writer, parsed.source_path);
+            try writer.writeAll(",\n  \"destination_path\": ");
+            try writeJsonString(writer, parsed.destination_path);
+            try writer.print(",\n  \"source_format\": {d},\n", .{source_format});
+            try writer.print("  \"destination_format\": {d},\n", .{destination_format});
+            try writer.print("  \"verified\": {s},\n", .{if (parsed.verify) "true" else "false"});
+            try writer.writeAll("  \"bound_stores\": {\n");
+            if (bound_objects) |p| {
+                try writer.writeAll("    \"objects\": ");
+                try writeJsonString(writer, p);
+            } else {
+                try writer.writeAll("    \"objects\": null");
+            }
+            try writer.writeAll(",\n");
+            if (bound_vectors) |p| {
+                try writer.writeAll("    \"vectors\": ");
+                try writeJsonString(writer, p);
+            } else {
+                try writer.writeAll("    \"vectors\": null");
+            }
+            try writer.writeAll(",\n");
+            if (bound_graphs) |p| {
+                try writer.writeAll("    \"graphs\": ");
+                try writeJsonString(writer, p);
+            } else {
+                try writer.writeAll("    \"graphs\": null");
+            }
+            try writer.writeAll("\n  }\n}\n");
+        },
+    }
+}
+
+const MigrateBoundPaths = struct {
+    objects: ?[]u8 = null,
+    vectors: ?[]u8 = null,
+    graphs: ?[]u8 = null,
+};
+
+fn collectMigrateBoundPaths(
+    allocator: std.mem.Allocator,
+    ctx: CommandContext,
+    destination_path: [:0]const u8,
+) MigrateBoundPaths {
+    var result: MigrateBoundPaths = .{};
+    var db = zova.Database.openWithExtensions(destination_path, ctx.registry) catch return result;
+    defer db.deinit();
+    if (db.boundObjectStore(allocator) catch null) |info| {
+        var tmp = info;
+        defer tmp.deinit(allocator);
+        result.objects = allocator.dupe(u8, tmp.path) catch null;
+    }
+    if (db.boundVectorStore(allocator) catch null) |info| {
+        var tmp = info;
+        defer tmp.deinit(allocator);
+        result.vectors = allocator.dupe(u8, tmp.path) catch null;
+    }
+    if (db.boundGraphStore(allocator) catch null) |info| {
+        var tmp = info;
+        defer tmp.deinit(allocator);
+        result.graphs = allocator.dupe(u8, tmp.path) catch null;
+    }
+    return result;
+}
+
+fn migrateCommand(
+    ctx: CommandContext,
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !u8 {
+    const parsed = parseMigrateCommandArgs(args) catch |err| {
+        const fmt: OutputFormat = if (argsContain(args, "--json")) .json else .text;
+        return usageErrorFormat(stderr, "migrate", fmt, migrateUsageMessage(err));
+    };
+    if (std.mem.eql(u8, parsed.source_path, parsed.destination_path)) {
+        const fmt = parsed.format;
+        return usageErrorFormat(stderr, "migrate", fmt, "source and destination must differ");
+    }
+    const source_z = allocator.dupeZ(u8, parsed.source_path) catch return ExitCode.unexpected;
+    defer allocator.free(source_z);
+    const dest_z = allocator.dupeZ(u8, parsed.destination_path) catch return ExitCode.unexpected;
+    defer allocator.free(dest_z);
+
+    const probe_before = zova.probeDatabaseFormat(source_z) catch |err| {
+        return openErrorFormat(stderr, "migrate", parsed.format, err);
+    };
+    const source_format = probe_before.format_version;
+
+    zova.migrateDatabaseWithExtensions(source_z, dest_z, .{ .verify = parsed.verify }, ctx.registry) catch |err| {
+        return migrateErrorFormat(stderr, parsed.format, err);
+    };
+
+    const dest_format = std.fmt.parseInt(u32, zova.version.format_version, 10) catch 0;
+
+    const bound = collectMigrateBoundPaths(allocator, ctx, dest_z);
+    defer {
+        if (bound.objects) |p| allocator.free(p);
+        if (bound.vectors) |p| allocator.free(p);
+        if (bound.graphs) |p| allocator.free(p);
+    }
+
+    try writeMigrateSuccess(stdout, parsed, source_format, dest_format, bound.objects, bound.vectors, bound.graphs);
+    return ExitCode.ok;
 }
 
 fn backupCommand(
