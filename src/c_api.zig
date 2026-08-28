@@ -6,6 +6,7 @@ const internal = @import("c_api_internal.zig");
 pub const zova_database = internal.zova_database;
 pub const zova_fresh_build = internal.zova_fresh_build;
 pub const zova_object_writer = internal.zova_object_writer;
+pub const zova_object_reader = internal.zova_object_reader;
 pub const zova_statement = internal.zova_statement;
 pub const zova_subscription = internal.zova_subscription;
 pub const zova_status = internal.zova_status;
@@ -26,6 +27,8 @@ pub const zova_text = internal.zova_text;
 pub const zova_notification = internal.zova_notification;
 pub const zova_object_manifest_chunk = internal.zova_object_manifest_chunk;
 pub const zova_object_manifest = internal.zova_object_manifest;
+pub const zova_object_storage_profile = internal.zova_object_storage_profile;
+pub const zova_object_put_options = internal.zova_object_put_options;
 pub const zova_vector_metric = internal.zova_vector_metric;
 pub const zova_vector_element_type = internal.zova_vector_element_type;
 pub const zova_vector_multi_i8_search_mode = internal.zova_vector_multi_i8_search_mode;
@@ -109,6 +112,7 @@ pub const zova_statement_column_double_request = internal.zova_statement_column_
 pub const zova_statement_column_text_request = internal.zova_statement_column_text_request;
 pub const zova_statement_column_blob_request = internal.zova_statement_column_blob_request;
 pub const zova_object_put_request = internal.zova_object_put_request;
+pub const zova_object_put_with_options_request = internal.zova_object_put_with_options_request;
 pub const zova_object_get_request = internal.zova_object_get_request;
 pub const zova_object_read_range_request = internal.zova_object_read_range_request;
 pub const zova_object_exists_request = internal.zova_object_exists_request;
@@ -118,12 +122,18 @@ pub const zova_object_delete_request = internal.zova_object_delete_request;
 pub const zova_object_manifest_get_request = internal.zova_object_manifest_get_request;
 pub const zova_object_chunk_get_request = internal.zova_object_chunk_get_request;
 pub const zova_object_chunk_put_request = internal.zova_object_chunk_put_request;
+pub const zova_object_chunk_put_with_options_request = internal.zova_object_chunk_put_with_options_request;
 pub const zova_object_chunk_delete_request = internal.zova_object_chunk_delete_request;
 pub const zova_object_assemble_from_chunks_request = internal.zova_object_assemble_from_chunks_request;
+pub const zova_object_assemble_from_chunks_with_options_request = internal.zova_object_assemble_from_chunks_with_options_request;
 pub const zova_object_writer_create_request = internal.zova_object_writer_create_request;
+pub const zova_object_writer_create_with_options_request = internal.zova_object_writer_create_with_options_request;
 pub const zova_object_writer_write_request = internal.zova_object_writer_write_request;
 pub const zova_object_writer_finish_request = internal.zova_object_writer_finish_request;
 pub const zova_object_writer_cancel_request = internal.zova_object_writer_cancel_request;
+pub const zova_object_reader_create_request = internal.zova_object_reader_create_request;
+pub const zova_object_reader_read_request = internal.zova_object_reader_read_request;
+pub const zova_object_reader_destroy_request = internal.zova_object_reader_destroy_request;
 pub const zova_kv_bytes = internal.zova_kv_bytes;
 pub const zova_kv_get_result = internal.zova_kv_get_result;
 pub const zova_kv_get_many_results = internal.zova_kv_get_many_results;
@@ -590,6 +600,12 @@ export fn zova_object_put(request: ?*const zova_object_put_request) callconv(.c)
     return internal.zova_object_put(request);
 }
 
+export fn zova_object_put_with_options(
+    request: ?*const zova_object_put_with_options_request,
+) callconv(.c) zova_status {
+    return internal.zova_object_put_with_options(request);
+}
+
 export fn zova_object_get(request: ?*const zova_object_get_request) callconv(.c) zova_status {
     return internal.zova_object_get(request);
 }
@@ -658,6 +674,12 @@ export fn zova_object_chunk_put(request: ?*const zova_object_chunk_put_request) 
     return internal.zova_object_chunk_put(request);
 }
 
+export fn zova_object_chunk_put_with_options(
+    request: ?*const zova_object_chunk_put_with_options_request,
+) callconv(.c) zova_status {
+    return internal.zova_object_chunk_put_with_options(request);
+}
+
 export fn zova_object_chunk_delete(request: ?*const zova_object_chunk_delete_request) callconv(.c) zova_status {
     return internal.zova_object_chunk_delete(request);
 }
@@ -668,8 +690,20 @@ export fn zova_object_assemble_from_chunks(
     return internal.zova_object_assemble_from_chunks(request);
 }
 
+export fn zova_object_assemble_from_chunks_with_options(
+    request: ?*const zova_object_assemble_from_chunks_with_options_request,
+) callconv(.c) zova_status {
+    return internal.zova_object_assemble_from_chunks_with_options(request);
+}
+
 export fn zova_object_writer_create(request: ?*const zova_object_writer_create_request) callconv(.c) zova_status {
     return internal.zova_object_writer_create(request);
+}
+
+export fn zova_object_writer_create_with_options(
+    request: ?*const zova_object_writer_create_with_options_request,
+) callconv(.c) zova_status {
+    return internal.zova_object_writer_create_with_options(request);
 }
 
 export fn zova_object_writer_write(request: ?*const zova_object_writer_write_request) callconv(.c) zova_status {
@@ -686,6 +720,24 @@ export fn zova_object_writer_cancel(request: ?*const zova_object_writer_cancel_r
 
 export fn zova_object_writer_destroy(writer: ?*zova_object_writer) callconv(.c) zova_status {
     return internal.zova_object_writer_destroy(writer);
+}
+
+export fn zova_object_reader_create(
+    request: ?*const zova_object_reader_create_request,
+) callconv(.c) zova_status {
+    return internal.zova_object_reader_create(request);
+}
+
+export fn zova_object_reader_read(
+    request: ?*const zova_object_reader_read_request,
+) callconv(.c) zova_status {
+    return internal.zova_object_reader_read(request);
+}
+
+export fn zova_object_reader_destroy(
+    request: ?*const zova_object_reader_destroy_request,
+) callconv(.c) zova_status {
+    return internal.zova_object_reader_destroy(request);
 }
 
 export fn zova_vector_collection_create(request: ?*const zova_vector_collection_create_request) callconv(.c) zova_status {

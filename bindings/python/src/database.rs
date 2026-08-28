@@ -7,8 +7,8 @@ use crate::graph::{
 };
 use crate::notification::PySubscription;
 use crate::object::{
-    chunk_id_from_py, manifest_chunks_from_py, object_id_from_py, PyObjectId, PyObjectManifest,
-    PyObjectWriter,
+    chunk_id_from_py, manifest_chunks_from_py, object_id_from_py, put_options_from_py, PyObjectId,
+    PyObjectManifest, PyObjectReader, PyObjectWriter,
 };
 use crate::statement::PyStatement;
 use crate::vector::{
@@ -199,6 +199,19 @@ impl PyDatabase {
         ))
     }
 
+    pub(crate) fn put_object_with_options(
+        &mut self,
+        data: Vec<u8>,
+        options: &Bound<'_, PyAny>,
+    ) -> PyResult<PyObjectId> {
+        let options = put_options_from_py(options)?;
+        Ok(PyObjectId::from_rust(
+            self.db_mut()?
+                .put_object_with_options(&data, options)
+                .map_err(zova_error)?,
+        ))
+    }
+
     pub(crate) fn get_object<'py>(
         &mut self,
         py: Python<'py>,
@@ -278,6 +291,19 @@ impl PyDatabase {
             .map_err(zova_error)
     }
 
+    pub(crate) fn put_object_chunk_with_options(
+        &mut self,
+        expected_hash: &Bound<'_, PyAny>,
+        data: Vec<u8>,
+        options: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let expected_hash = chunk_id_from_py(expected_hash)?;
+        let options = put_options_from_py(options)?;
+        self.db_mut()?
+            .put_object_chunk_with_options(expected_hash, &data, options)
+            .map_err(zova_error)
+    }
+
     pub(crate) fn delete_object_chunk(&mut self, hash: &Bound<'_, PyAny>) -> PyResult<bool> {
         let hash = chunk_id_from_py(hash)?;
         self.db_mut()?.delete_object_chunk(hash).map_err(zova_error)
@@ -296,9 +322,45 @@ impl PyDatabase {
             .map_err(zova_error)
     }
 
+    pub(crate) fn assemble_object_from_chunks_with_options(
+        &mut self,
+        id: &Bound<'_, PyAny>,
+        size_bytes: u64,
+        chunks: &Bound<'_, PyAny>,
+        options: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let id = object_id_from_py(id)?;
+        let chunks = manifest_chunks_from_py(chunks)?;
+        let options = put_options_from_py(options)?;
+        self.db_mut()?
+            .assemble_object_from_chunks_with_options(id, size_bytes, &chunks, options)
+            .map_err(zova_error)
+    }
+
     pub(crate) fn object_writer(&mut self) -> PyResult<PyObjectWriter> {
         Ok(PyObjectWriter {
             inner: Some(self.db_mut()?.object_writer_owned().map_err(zova_error)?),
+        })
+    }
+
+    pub(crate) fn object_writer_with_options(
+        &mut self,
+        options: &Bound<'_, PyAny>,
+    ) -> PyResult<PyObjectWriter> {
+        let options = put_options_from_py(options)?;
+        Ok(PyObjectWriter {
+            inner: Some(
+                self.db_mut()?
+                    .object_writer_owned_with_options(options)
+                    .map_err(zova_error)?,
+            ),
+        })
+    }
+
+    pub(crate) fn object_reader(&mut self, id: &Bound<'_, PyAny>) -> PyResult<PyObjectReader> {
+        let id = object_id_from_py(id)?;
+        Ok(PyObjectReader {
+            inner: Some(self.db_mut()?.object_reader_owned(id).map_err(zova_error)?),
         })
     }
 

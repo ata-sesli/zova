@@ -12,15 +12,15 @@ host foundation.
 
 Current package version: `0.26.1`.
 
-Zova is pre-1.0. The current `.zova` file `format_version` is `10`, and the
-earliest migratable format is `9`. Open never migrates silently: a format-9
-database is reported as migration-required and left byte-identical, and
-downgrades are unsupported. Format-9 databases created by the released 0.26.1
-build migrate forward with the explicit, copy-forward probe and migration
-surfaces (`zova format` and `zova migrate` on the CLI,
-`zova_database_probe_format` and `zova_database_migrate` on the C ABI, and
-aligned APIs in the Rust, Python, Go, and JavaScript bindings). Migration writes
-only to a new destination file and never mutates the source.
+Zova is pre-1.0. The current `.zova` file `format_version` is `11`, and the
+earliest migratable format is `9`. Open never migrates silently: format-9 and
+format-10 databases are reported as migration-required and left byte-identical,
+and downgrades are unsupported. Older databases migrate forward with the
+explicit, copy-forward probe and migration surfaces (`zova format` and
+`zova migrate` on the CLI, `zova_database_probe_format` and
+`zova_database_migrate` on the C ABI, and aligned APIs in the Rust, Python, Go,
+and JavaScript bindings). Migration writes only to a new, separately validated
+format-11 destination and never mutates the source.
 
 [Storage compatibility](docs/storage-compatibility.md) is the normative 1.x
 contract. It distinguishes package version, C ABI version, SQLite version, and
@@ -243,8 +243,8 @@ func main() {
 Zova has four first-class storage shapes:
 
 - **Records:** normal SQLite tables, indexes, views, triggers, and SQL.
-- **Objects:** content-addressed bytes, chunked with FastCDC-v1 and addressed by
-  `SHA-256(full bytes)`.
+- **Objects:** content-addressed bytes using either deduplicating FastCDC-v1
+  chunks or fixed 1 MiB streaming chunks, addressed by `SHA-256(full bytes)`.
 - **Vectors:** named vector collections with exact flat search and SQL-native
   query helpers.
 - **Graphs:** named relationship graphs with application-provided stable node
@@ -374,10 +374,16 @@ Objects are raw bytes stored by content identity:
 ObjectId = SHA-256(full object bytes)
 ```
 
-Zova splits objects into FastCDC-v1 chunks and deduplicates chunks inside the
-same `.zova` file. You can put/get whole objects, range-read object bytes,
-inspect manifests, fetch verified chunks, store loose chunks, and assemble a
-complete object from chunks.
+The default `deduplication` profile preserves FastCDC-v1 chunking. The additive
+`streaming` profile stores exact 1 MiB chunks except for the final remainder,
+which sharply reduces manifest rows for large low-deduplication payloads. Both
+profiles keep the same full-object identity and verified chunk model. Existing
+objects retain their first valid physical representation when replayed through
+another profile.
+
+You can put/get whole objects, range-read object bytes, inspect manifests,
+fetch verified chunks, store loose chunks, assemble complete objects, or use a
+sequential reader whose memory stays bounded independently of object size.
 
 ### Optional Bound Object, Vector, And Graph Stores
 
@@ -1226,7 +1232,7 @@ with `zova migrate`:
 
 ```sh
 zova format app.zova
-zova migrate app.zova app-format-10.zova
+zova migrate app.zova app-format-11.zova
 ```
 
 The same workflow is available through `zova_database_probe_format` and
@@ -1247,7 +1253,7 @@ contract, including operational rules and a recorded format-9 migration.
 Zova does not hide SQLite. SQL remains SQLite SQL, locking remains SQLite
 locking, and PRAGMAs remain application policy.
 
-Zova enables `PRAGMA foreign_keys = ON` on its owned connections so format-10
+Zova enables `PRAGMA foreign_keys = ON` on its owned connections so format-11
 private graph and vector cascades remain enforced. It does not run `VACUUM`
 automatically, enable `auto_vacuum`, or change journal and synchronous settings
 automatically.

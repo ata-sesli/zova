@@ -69,6 +69,7 @@ const AbiMutex = struct {
 // DatabaseHandle and WriterHandle below so C callers cannot depend on layout.
 pub const zova_database = opaque {};
 pub const zova_object_writer = opaque {};
+pub const zova_object_reader = opaque {};
 pub const zova_statement = opaque {};
 pub const zova_subscription = opaque {};
 pub const zova_fresh_build = opaque {};
@@ -84,6 +85,7 @@ const DatabaseHandle = struct {
     mutex: AbiMutex = .{},
     live_statements: usize = 0,
     live_writers: usize = 0,
+    live_readers: usize = 0,
     live_subscriptions: usize = 0,
     fresh_build_active: bool = false,
     sql_functions: std.ArrayList(SqlFunctionRegistration) = .empty,
@@ -184,6 +186,14 @@ const WriterHandle = struct {
     writer: zova.ObjectWriter,
 };
 
+const ReaderHandle = struct {
+    // Readers retain a manifest statement and therefore borrow the parent
+    // database handle for their entire lifetime. Reader calls serialize
+    // through the same parent mutex as statements and writers.
+    db: *DatabaseHandle,
+    reader: zova.ObjectReader,
+};
+
 const StatementHandle = struct {
     // Statements borrow their parent database handle and must be finalized
     // before closing the database. Statement methods serialize through the
@@ -232,6 +242,7 @@ pub const zova_status = enum(c_int) {
     OBJECT_TOO_LARGE = 57,
     OBJECT_TRANSACTION_ACTIVE = 58,
     OBJECT_WRITER_CLOSED = 59,
+    OBJECT_READER_CLOSED = 63,
     BOUND_STORE_EXISTS = 60,
     BOUND_STORE_NOT_FOUND = 61,
     BOUND_STORE_INVALID = 62,
@@ -364,6 +375,18 @@ pub const zova_object_manifest = extern struct {
     chunker: ?[*:0]const u8,
     chunks: ?[*]zova_object_manifest_chunk,
     chunks_len: usize,
+};
+
+/// Additive object storage profile values. The underlying field is a raw C
+/// integer in request structs so invalid foreign values can be rejected
+/// without triggering Zig enum safety traps.
+pub const zova_object_storage_profile = enum(c_int) {
+    DEDUPLICATION = 0,
+    STREAMING = 1,
+};
+
+pub const zova_object_put_options = extern struct {
+    profile: c_int = @intFromEnum(zova_object_storage_profile.DEDUPLICATION),
 };
 
 pub const zova_vector_metric = enum(c_int) {
@@ -948,6 +971,14 @@ pub const zova_object_put_request = extern struct {
     out_id: ?*zova_object_id,
 };
 
+pub const zova_object_put_with_options_request = extern struct {
+    db: ?*zova_database,
+    data: ?[*]const u8,
+    len: usize,
+    options: zova_object_put_options,
+    out_id: ?*zova_object_id,
+};
+
 pub const zova_object_get_request = extern struct {
     db: ?*zova_database,
     id: zova_object_id,
@@ -1005,6 +1036,14 @@ pub const zova_object_chunk_put_request = extern struct {
     len: usize,
 };
 
+pub const zova_object_chunk_put_with_options_request = extern struct {
+    db: ?*zova_database,
+    expected_hash: zova_object_chunk_id,
+    data: ?[*]const u8,
+    len: usize,
+    options: zova_object_put_options,
+};
+
 pub const zova_object_chunk_delete_request = extern struct {
     db: ?*zova_database,
     hash: zova_object_chunk_id,
@@ -1019,8 +1058,23 @@ pub const zova_object_assemble_from_chunks_request = extern struct {
     chunk_count: usize,
 };
 
+pub const zova_object_assemble_from_chunks_with_options_request = extern struct {
+    db: ?*zova_database,
+    id: zova_object_id,
+    size_bytes: u64,
+    chunks: ?[*]const zova_object_manifest_chunk,
+    chunk_count: usize,
+    options: zova_object_put_options,
+};
+
 pub const zova_object_writer_create_request = extern struct {
     db: ?*zova_database,
+    out_writer: ?*?*zova_object_writer,
+};
+
+pub const zova_object_writer_create_with_options_request = extern struct {
+    db: ?*zova_database,
+    options: zova_object_put_options,
     out_writer: ?*?*zova_object_writer,
 };
 
@@ -1037,6 +1091,23 @@ pub const zova_object_writer_finish_request = extern struct {
 
 pub const zova_object_writer_cancel_request = extern struct {
     writer: ?*zova_object_writer,
+};
+
+pub const zova_object_reader_create_request = extern struct {
+    db: ?*zova_database,
+    id: zova_object_id,
+    out_reader: ?*?*zova_object_reader,
+};
+
+pub const zova_object_reader_read_request = extern struct {
+    reader: ?*zova_object_reader,
+    buffer: ?[*]u8,
+    buffer_len: usize,
+    out_read: ?*usize,
+};
+
+pub const zova_object_reader_destroy_request = extern struct {
+    reader: ?*?*zova_object_reader,
 };
 
 /// Borrowed byte slice for key-value operations. Zova copies caller input
@@ -1738,6 +1809,9 @@ pub fn zova_notification_free(notification: ?*zova_notification) callconv(.c) vo
 
 pub fn zova_object_manifest_free(manifest: ?*zova_object_manifest) callconv(.c) void {
     const out = manifest orelse return;
+    if (out.chunker) |chunker| {
+        allocator.free(@constCast(chunker[0 .. std.mem.len(chunker) + 1]));
+    }
     if (out.chunks) |chunks| {
         allocator.free(chunks[0..out.chunks_len]);
     }
@@ -1977,13 +2051,13 @@ pub fn zova_extension_bundle_untrust(request: ?*const zova_extension_bundle_untr
 pub fn zova_database_close(db: ?*zova_database) callconv(.c) zova_status {
     const handle = databaseHandleRaw(db) orelse return .INVALID_ARGUMENT;
     handle.mutex.lock();
-    if (handle.live_statements != 0 or handle.live_writers != 0 or handle.live_subscriptions != 0 or handle.fresh_build_active) {
+    if (handle.live_statements != 0 or handle.live_writers != 0 or handle.live_readers != 0 or handle.live_subscriptions != 0 or handle.fresh_build_active) {
         defer handle.mutex.unlock();
         var message_buffer: [192]u8 = undefined;
         const message = std.fmt.bufPrint(
             &message_buffer,
-            "cannot close database with live child handles: {d} statements, {d} object writers, {d} subscriptions, fresh build active={}",
-            .{ handle.live_statements, handle.live_writers, handle.live_subscriptions, handle.fresh_build_active },
+            "cannot close database with live child handles: {d} statements, {d} object writers, {d} object readers, {d} subscriptions, fresh build active={}",
+            .{ handle.live_statements, handle.live_writers, handle.live_readers, handle.live_subscriptions, handle.fresh_build_active },
         ) catch "cannot close database with live child handles";
         return failDbStatusString(handle, .MISUSE, message);
     }
@@ -2614,6 +2688,22 @@ pub fn zova_object_put(request: ?*const zova_object_put_request) callconv(.c) zo
     return okDb(handle);
 }
 
+pub fn zova_object_put_with_options(
+    request: ?*const zova_object_put_with_options_request,
+) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const out = req.out_id orelse return failDb(handle, error.InvalidArgument);
+    out.* = .{ .bytes = [_]u8{0} ** 32 };
+    const options = objectOptionsFromAbi(req.options) orelse return failDb(handle, error.InvalidArgument);
+    const bytes = bytesConst(req.data, req.len) orelse return failDb(handle, error.InvalidArgument);
+    const id = handle.db.putObjectWithOptions(bytes, options) catch |err| return failDb(handle, err);
+    out.* = fromObjectId(id);
+    return okDb(handle);
+}
+
 pub fn zova_object_get(request: ?*const zova_object_get_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
@@ -2817,11 +2907,16 @@ pub fn zova_object_manifest_get(request: ?*const zova_object_manifest_get_reques
         };
     }
 
+    const chunker = allocator.dupeZ(u8, manifest.chunker) catch |err| {
+        allocator.free(chunks);
+        return failDb(handle, err);
+    };
+
     out.* = .{
         .object_id = fromObjectId(manifest.object_id),
         .size_bytes = manifest.size_bytes,
         .chunk_count = manifest.chunk_count,
-        .chunker = "fastcdc-v1",
+        .chunker = chunker.ptr,
         .chunks = if (chunks.len == 0) null else chunks.ptr,
         .chunks_len = chunks.len,
     };
@@ -2849,6 +2944,19 @@ pub fn zova_object_chunk_put(request: ?*const zova_object_chunk_put_request) cal
     defer handle.mutex.unlock();
     const bytes = bytesConst(req.data, req.len) orelse return failDb(handle, error.InvalidArgument);
     handle.db.putObjectChunk(toChunkId(req.expected_hash), bytes) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
+pub fn zova_object_chunk_put_with_options(
+    request: ?*const zova_object_chunk_put_with_options_request,
+) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const options = objectOptionsFromAbi(req.options) orelse return failDb(handle, error.InvalidArgument);
+    const bytes = bytesConst(req.data, req.len) orelse return failDb(handle, error.InvalidArgument);
+    handle.db.putObjectChunkWithOptions(toChunkId(req.expected_hash), bytes, options) catch |err| return failDb(handle, err);
     return okDb(handle);
 }
 
@@ -2885,6 +2993,29 @@ pub fn zova_object_assemble_from_chunks(
     return okDb(handle);
 }
 
+pub fn zova_object_assemble_from_chunks_with_options(
+    request: ?*const zova_object_assemble_from_chunks_with_options_request,
+) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const options = objectOptionsFromAbi(req.options) orelse return failDb(handle, error.InvalidArgument);
+    const input_chunks = manifestChunks(req.chunks, req.chunk_count) orelse return failDb(handle, error.InvalidArgument);
+    const chunks = allocator.alloc(zova.ObjectChunk, input_chunks.len) catch |err| return failDb(handle, err);
+    defer allocator.free(chunks);
+    for (input_chunks, chunks) |chunk, *out_chunk| {
+        out_chunk.* = .{
+            .index = chunk.index,
+            .hash = toChunkId(chunk.hash),
+            .offset = chunk.offset,
+            .size_bytes = chunk.size_bytes,
+        };
+    }
+    handle.db.assembleObjectFromChunksWithOptions(toObjectId(req.id), req.size_bytes, chunks, options) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
 pub fn zova_object_writer_create(request: ?*const zova_object_writer_create_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
@@ -2894,6 +3025,27 @@ pub fn zova_object_writer_create(request: ?*const zova_object_writer_create_requ
     out.* = null;
 
     var writer = handle.db.objectWriter(allocator) catch |err| return failDb(handle, err);
+    const writer_handle = allocator.create(WriterHandle) catch |err| {
+        writer.deinit();
+        return failDb(handle, err);
+    };
+    writer_handle.* = .{ .db = handle, .writer = writer };
+    handle.live_writers += 1;
+    out.* = @ptrCast(writer_handle);
+    return okDb(handle);
+}
+
+pub fn zova_object_writer_create_with_options(
+    request: ?*const zova_object_writer_create_with_options_request,
+) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const out = req.out_writer orelse return failDb(handle, error.InvalidArgument);
+    out.* = null;
+    const options = objectOptionsFromAbi(req.options) orelse return failDb(handle, error.InvalidArgument);
+    var writer = handle.db.objectWriterWithOptions(allocator, options) catch |err| return failDb(handle, err);
     const writer_handle = allocator.create(WriterHandle) catch |err| {
         writer.deinit();
         return failDb(handle, err);
@@ -2942,6 +3094,61 @@ pub fn zova_object_writer_destroy(writer: ?*zova_object_writer) callconv(.c) zov
     handle.writer.deinit();
     std.debug.assert(db_handle.live_writers > 0);
     db_handle.live_writers -= 1;
+    allocator.destroy(handle);
+    return okDb(db_handle);
+}
+
+pub fn zova_object_reader_create(
+    request: ?*const zova_object_reader_create_request,
+) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const out = req.out_reader orelse return failDb(handle, error.InvalidArgument);
+    out.* = null;
+
+    const reader = handle.db.objectReader(toObjectId(req.id)) catch |err| return failDb(handle, err);
+    const reader_handle = allocator.create(ReaderHandle) catch |err| {
+        var cleanup = reader;
+        cleanup.deinit();
+        return failDb(handle, err);
+    };
+    reader_handle.* = .{ .db = handle, .reader = reader };
+    handle.live_readers += 1;
+    out.* = @ptrCast(reader_handle);
+    return okDb(handle);
+}
+
+pub fn zova_object_reader_read(
+    request: ?*const zova_object_reader_read_request,
+) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = readerHandle(req.reader) orelse return .INVALID_ARGUMENT;
+    handle.db.mutex.lock();
+    defer handle.db.mutex.unlock();
+    const out = req.out_read orelse return failDb(handle.db, error.InvalidArgument);
+    out.* = 0;
+    const buffer = bytesMut(req.buffer, req.buffer_len) orelse return failDb(handle.db, error.InvalidArgument);
+    const read = handle.reader.read(buffer) catch |err| return failDb(handle.db, err);
+    out.* = read;
+    return okDb(handle.db);
+}
+
+pub fn zova_object_reader_destroy(
+    request: ?*const zova_object_reader_destroy_request,
+) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const slot = req.reader orelse return .INVALID_ARGUMENT;
+    const raw = slot.* orelse return .OK;
+    const handle = readerHandle(raw) orelse return .INVALID_ARGUMENT;
+    const db_handle = handle.db;
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    slot.* = null;
+    handle.reader.deinit();
+    std.debug.assert(db_handle.live_readers > 0);
+    db_handle.live_readers -= 1;
     allocator.destroy(handle);
     return okDb(db_handle);
 }
@@ -4590,6 +4797,11 @@ fn writerHandle(writer: ?*zova_object_writer) ?*WriterHandle {
     return @ptrCast(@alignCast(ptr));
 }
 
+fn readerHandle(reader: ?*zova_object_reader) ?*ReaderHandle {
+    const ptr = reader orelse return null;
+    return @ptrCast(@alignCast(ptr));
+}
+
 fn statementHandle(statement: ?*zova_statement) ?*StatementHandle {
     const ptr = statement orelse return null;
     return @ptrCast(@alignCast(ptr));
@@ -5174,6 +5386,14 @@ fn optionalCStringSpan(value: ?[*:0]const u8) ?[]const u8 {
 
 fn toObjectId(id: zova_object_id) zova.ObjectId {
     return id.bytes;
+}
+
+fn objectOptionsFromAbi(options: zova_object_put_options) ?zova.ObjectPutOptions {
+    return switch (options.profile) {
+        @intFromEnum(zova_object_storage_profile.DEDUPLICATION) => .{ .profile = .deduplication },
+        @intFromEnum(zova_object_storage_profile.STREAMING) => .{ .profile = .streaming },
+        else => null,
+    };
 }
 
 fn fromObjectId(id: zova.ObjectId) zova_object_id {
@@ -5980,6 +6200,7 @@ fn statusFromError(err: anyerror) zova_status {
         error.ObjectTooLarge => .OBJECT_TOO_LARGE,
         error.ObjectTransactionActive => .OBJECT_TRANSACTION_ACTIVE,
         error.ObjectWriterClosed => .OBJECT_WRITER_CLOSED,
+        error.ObjectReaderClosed => .OBJECT_READER_CLOSED,
         error.BoundStoreExists => .BOUND_STORE_EXISTS,
         error.BoundStoreNotFound => .BOUND_STORE_NOT_FOUND,
         error.BoundStoreInvalid => .BOUND_STORE_INVALID,
@@ -6055,6 +6276,7 @@ fn statusName(status: c_int) [*:0]const u8 {
         @intFromEnum(zova_status.OBJECT_TOO_LARGE) => "ZOVA_OBJECT_TOO_LARGE",
         @intFromEnum(zova_status.OBJECT_TRANSACTION_ACTIVE) => "ZOVA_OBJECT_TRANSACTION_ACTIVE",
         @intFromEnum(zova_status.OBJECT_WRITER_CLOSED) => "ZOVA_OBJECT_WRITER_CLOSED",
+        @intFromEnum(zova_status.OBJECT_READER_CLOSED) => "ZOVA_OBJECT_READER_CLOSED",
         @intFromEnum(zova_status.BOUND_STORE_EXISTS) => "ZOVA_BOUND_STORE_EXISTS",
         @intFromEnum(zova_status.BOUND_STORE_NOT_FOUND) => "ZOVA_BOUND_STORE_NOT_FOUND",
         @intFromEnum(zova_status.BOUND_STORE_INVALID) => "ZOVA_BOUND_STORE_INVALID",
@@ -6321,7 +6543,7 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
         var msg = zova_message{ .data = null, .len = 0 };
         defer zova_message_free(&msg);
         try std.testing.expectEqual(zova_status.OK, zova_database_probe_format(&.{ .path = path, .out_info = &out, .out_error_message = &msg }));
-        try std.testing.expectEqual(@as(u32, 10), out.format_version);
+        try std.testing.expectEqual(@as(u32, 11), out.format_version);
         try std.testing.expectEqual(@intFromEnum(zova_format_compatibility.CURRENT), out.compatibility);
     }
     // Migratable fixture
@@ -6339,7 +6561,7 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
     }
     // Future and legacy synthetic
     for ([_]struct { ver: []const u8, expected: zova_format_compatibility }{
-        .{ .ver = "11", .expected = .UNSUPPORTED_FUTURE },
+        .{ .ver = "12", .expected = .UNSUPPORTED_FUTURE },
         .{ .ver = "8", .expected = .UNSUPPORTED_LEGACY },
     }) |case| {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -6382,12 +6604,12 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
         var probe_msg = zova_message{ .data = null, .len = 0 };
         defer zova_message_free(&probe_msg);
         try std.testing.expectEqual(zova_status.OK, zova_database_probe_format(&.{ .path = dst, .out_info = &out, .out_error_message = &probe_msg }));
-        try std.testing.expectEqual(@as(u32, 10), out.format_version);
+        try std.testing.expectEqual(@as(u32, 11), out.format_version);
         try std.testing.expectEqual(@intFromEnum(zova_format_compatibility.CURRENT), out.compatibility);
         // destination is openable and no private names leaked via C output (checked via probe/migrate out_info)
         var db = try zova.Database.open(dst);
         defer db.deinit();
-        try std.testing.expectEqual(@as(u32, 10), try std.fmt.parseInt(u32, zova_version.format_version, 10));
+        try std.testing.expectEqual(@as(u32, 11), try std.fmt.parseInt(u32, zova_version.format_version, 10));
     }
     // Destination exists
     {
@@ -6406,7 +6628,7 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
     }
     // Unsupported future/legacy via C
     for ([_]struct { ver: []const u8, expected: zova_status }{
-        .{ .ver = "11", .expected = .UNSUPPORTED_FUTURE_FORMAT },
+        .{ .ver = "12", .expected = .UNSUPPORTED_FUTURE_FORMAT },
         .{ .ver = "8", .expected = .UNSUPPORTED_LEGACY_FORMAT },
     }) |case| {
         var src_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -7120,7 +7342,7 @@ test "c abi maps incompatible storage formats to unsupported zova version" {
     const cases = [_]struct { file_name: []const u8, version_value: []const u8, expected: zova_status }{
         .{ .file_name = "c-abi-format-9.zova", .version_value = "9", .expected = .MIGRATION_REQUIRED },
         .{ .file_name = "c-abi-format-8.zova", .version_value = "8", .expected = .UNSUPPORTED_LEGACY_FORMAT },
-        .{ .file_name = "c-abi-format-11.zova", .version_value = "11", .expected = .UNSUPPORTED_FUTURE_FORMAT },
+        .{ .file_name = "c-abi-format-12.zova", .version_value = "12", .expected = .UNSUPPORTED_FUTURE_FORMAT },
     };
 
     for (cases) |case| {
@@ -8836,6 +9058,103 @@ fn expectCAbiOperationalCopy(path: [:0]const u8, object_id: zova_object_id) !voi
         .out_exists = &exists,
     }));
     try std.testing.expectEqual(@as(u8, 1), exists);
+}
+
+test "c abi object profile options and sequential reader preserve compatibility" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-object-options.zova", .{tmp.sub_path[0..]});
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(db);
+
+    const bytes = "option-bearing object payload";
+    var id = zova_object_id{ .bytes = [_]u8{0} ** 32 };
+    try std.testing.expectEqual(zova_status.OK, zova_object_put_with_options(&.{
+        .db = db,
+        .data = bytes,
+        .len = bytes.len,
+        .options = .{ .profile = @intFromEnum(zova_object_storage_profile.DEDUPLICATION) },
+        .out_id = &id,
+    }));
+
+    var manifest = std.mem.zeroes(zova_object_manifest);
+    defer zova_object_manifest_free(&manifest);
+    try std.testing.expectEqual(zova_status.OK, zova_object_manifest_get(&.{
+        .db = db,
+        .id = id,
+        .out_manifest = &manifest,
+    }));
+    try std.testing.expectEqualStrings("fastcdc-v1", std.mem.span(manifest.chunker.?));
+
+    var reader: ?*zova_object_reader = null;
+    try std.testing.expectEqual(zova_status.OK, zova_object_reader_create(&.{
+        .db = db,
+        .id = id,
+        .out_reader = &reader,
+    }));
+    try std.testing.expect(reader != null);
+
+    var output: [bytes.len]u8 = undefined;
+    var copied: usize = 0;
+    try std.testing.expectEqual(zova_status.OK, zova_object_reader_read(&.{
+        .reader = reader,
+        .buffer = &output,
+        .buffer_len = output.len,
+        .out_read = &copied,
+    }));
+    try std.testing.expectEqual(bytes.len, copied);
+    try std.testing.expectEqualStrings(bytes, &output);
+    try std.testing.expectEqual(zova_status.MISUSE, zova_database_close(db));
+    try std.testing.expectEqual(zova_status.OK, zova_object_reader_destroy(&.{ .reader = &reader }));
+    try std.testing.expectEqual(zova_status.OK, zova_object_reader_destroy(&.{ .reader = &reader }));
+
+    const loose = "option-bearing loose chunk";
+    var loose_hash = zova_object_chunk_id{ .bytes = [_]u8{0} ** 32 };
+    try std.testing.expectEqual(zova_status.OK, zova_object_chunk_id_from_bytes(loose, loose.len, &loose_hash));
+    try std.testing.expectEqual(zova_status.OK, zova_object_chunk_put_with_options(&.{
+        .db = db,
+        .expected_hash = loose_hash,
+        .data = loose,
+        .len = loose.len,
+        .options = .{ .profile = @intFromEnum(zova_object_storage_profile.DEDUPLICATION) },
+    }));
+
+    var writer: ?*zova_object_writer = null;
+    try std.testing.expectEqual(zova_status.OK, zova_object_writer_create_with_options(&.{
+        .db = db,
+        .options = .{ .profile = @intFromEnum(zova_object_storage_profile.DEDUPLICATION) },
+        .out_writer = &writer,
+    }));
+    try std.testing.expectEqual(zova_status.OK, zova_object_writer_write(&.{
+        .writer = writer,
+        .data = bytes,
+        .len = bytes.len,
+    }));
+    var writer_id = zova_object_id{ .bytes = [_]u8{0} ** 32 };
+    try std.testing.expectEqual(zova_status.OK, zova_object_writer_finish(&.{
+        .writer = writer,
+        .out_id = &writer_id,
+    }));
+    try std.testing.expectEqual(id, writer_id);
+    try std.testing.expectEqual(zova_status.OK, zova_object_writer_destroy(writer));
+
+    var invalid_id = zova_object_id{ .bytes = [_]u8{0} ** 32 };
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_object_put_with_options(&.{
+        .db = db,
+        .data = bytes,
+        .len = bytes.len,
+        .options = .{ .profile = 99 },
+        .out_id = &invalid_id,
+    }));
+    try std.testing.expectEqual(@as(zova_object_id, .{ .bytes = [_]u8{0} ** 32 }), invalid_id);
 }
 
 test "c abi backs up compacts and restores zova databases" {

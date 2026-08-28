@@ -1760,7 +1760,7 @@ test "current format requires graph edge type dictionary and edge payloads" {
         var meta = try raw.prepare("select value from _zova_meta where key = 'format_version'");
         defer meta.deinit();
         try std.testing.expectEqual(sqlite.Step.row, try meta.step());
-        try std.testing.expectEqualStrings("10", meta.columnText(0));
+        try std.testing.expectEqualStrings("11", meta.columnText(0));
     }
 
     try std.testing.expect(try tableExists(&raw, "_zova_graphs"));

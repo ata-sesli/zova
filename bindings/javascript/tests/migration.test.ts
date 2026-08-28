@@ -55,7 +55,7 @@ describe("Storage-format migration", () => {
     database.close();
 
     const currentInfo = probeFormat(current);
-    expect(currentInfo.formatVersion).toBe(10);
+    expect(currentInfo.formatVersion).toBe(11);
     expect(currentInfo.compatibility).toBe("current");
 
     expect(sameBytes(readFileSync(source), before)).toBe(true);
@@ -80,7 +80,7 @@ describe("Storage-format migration", () => {
     migrateDatabase(source, destination);
 
     const info = probeFormat(destination);
-    expect(info.formatVersion).toBe(10);
+    expect(info.formatVersion).toBe(11);
     expect(info.compatibility).toBe("current");
     expect(sameBytes(readFileSync(source), before)).toBe(true);
 
@@ -136,7 +136,7 @@ describe("Storage-format migration", () => {
     await AsyncDatabase.migrateDatabase(source, destination);
 
     const migratedInfo = await AsyncDatabase.probeFormat(destination);
-    expect(migratedInfo.formatVersion).toBe(10);
+    expect(migratedInfo.formatVersion).toBe(11);
     expect(migratedInfo.compatibility).toBe("current");
 
     const syncInfo = probeFormat(destination);

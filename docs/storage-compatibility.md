@@ -19,7 +19,7 @@ in another.
 | Package version | Zova release identity across every distribution channel | `src/version.zig` `package_version` | `0.26.1` |
 | C ABI version | Compatibility of the exported C ABI and generated C | `src/version.zig` `abi_version_*` | `0.26.1` |
 | SQLite version | The vendored SQLite amalgamation, and separately SQLite's own file format | `src/version.zig` `sqlite_version` | `3.53.2` |
-| Zova storage format | The layout of a `.zova` database, recorded in `_zova_meta.format_version` | `src/version.zig` `format_version` | `10` |
+| Zova storage format | The layout of a `.zova` database, recorded in `_zova_meta.format_version` | `src/version.zig` `format_version` | `11` |
 
 A SQLite upgrade does not change the Zova storage format and never requires a
 Zova migration. A package or ABI release does not by itself change the storage
@@ -55,7 +55,7 @@ Probing is separate from opening and is always safe: `zova format` and
 `probeDatabaseFormat` open a read-only raw SQLite connection, read only the
 identity metadata required for classification, and never write.
 
-## Migrating format 9 to format 10
+## Migrating formats 9 and 10 to format 11
 
 A migration runs offline, writes only to a new destination, and leaves the source
 untouched. Probe first, then migrate.
@@ -64,7 +64,7 @@ untouched. Probe first, then migrate.
 
 ```sh
 zova format app.zova
-zova migrate app.zova app-format-10.zova
+zova migrate app.zova app-format-11.zova
 ```
 
 `zova format` prints the source format, the current format, the earliest
@@ -90,7 +90,7 @@ zova_status status = zova_database_probe_format(&probe);
 
 zova_database_migrate_request migrate = {
     .source_path = "app.zova",
-    .destination_path = "app-format-10.zova",
+    .destination_path = "app-format-11.zova",
     .flags = 0, /* ZOVA_MIGRATE_NO_VERIFY skips destination verification */
     .out_error_message = &message,
 };
@@ -107,7 +107,7 @@ use zova::{migrate_database, probe_format, MigrateOptions};
 
 let info = probe_format("app.zova")?;
 assert_eq!(info.compatibility, zova::FormatCompatibility::Migratable);
-migrate_database("app.zova", "app-format-10.zova", MigrateOptions::default())?;
+migrate_database("app.zova", "app-format-11.zova", MigrateOptions::default())?;
 ```
 
 ### Python
@@ -117,7 +117,7 @@ import zova
 
 info = zova.probe_format("app.zova")
 assert info.compatibility is zova.FormatCompatibility.MIGRATABLE
-zova.migrate_database("app.zova", "app-format-10.zova")  # verify=True by default
+zova.migrate_database("app.zova", "app-format-11.zova")  # verify=True by default
 ```
 
 ### Go
@@ -127,7 +127,7 @@ info, err := zova.ProbeFormat("app.zova")
 if info.Compatibility != zova.FormatMigratable {
     return fmt.Errorf("unexpected compatibility: %v", info.Compatibility)
 }
-if err := zova.MigrateDatabase("app.zova", "app-format-10.zova"); err != nil {
+if err := zova.MigrateDatabase("app.zova", "app-format-11.zova"); err != nil {
     return err
 }
 ```
@@ -142,7 +142,7 @@ import { migrateDatabase, probeFormat } from "zova-js";
 
 const info = probeFormat("app.zova");
 if (info.compatibility !== "migratable") throw new Error("cannot migrate");
-migrateDatabase("app.zova", "app-format-10.zova"); // verify defaults to true
+migrateDatabase("app.zova", "app-format-11.zova"); // verify defaults to true
 ```
 
 `asyncProbeFormat` and `asyncMigrateDatabase` are the promise-returning variants.
@@ -174,18 +174,19 @@ running a migration.
   unpublished staging files. Delete any leftover `.*.migrate-*.zova` files in the
   destination directory and re-run the migration. Never hand-publish a staging
   file.
-- **Extensions.** Format 9 to 10 leaves extension-owned tables unchanged.
-  Normal open-time extension compatibility validation applies to the migrated
-  destination, exactly as it does when opening any database.
+- **Extensions.** Both adjacent migration steps leave extension-owned tables
+  unchanged. Normal open-time extension compatibility validation applies to the
+  migrated destination, exactly as it does when opening any database.
 
 ## What a migration preserves
 
 A migration preserves the logical database. User SQLite schema and rows are
 copied unchanged, and Zova preserves public identities, values, ordering,
 payloads, opaque keys, extension records, store IDs, bound-set IDs, and epochs.
-The only intended difference after a format 9 to 10 migration is the private
-key-value schema introduced by format 10, and the format metadata itself, which
-is updated last inside the same transaction as the final step.
+The intended private differences are the key-value schema introduced by format
+10, the canonical object schemas required by format 11, and the format metadata
+itself, which is updated last inside each atomic adjacent step. Public objects,
+chunks, manifests, and their ordering remain unchanged.
 
 ## Retained fixtures and the release check
 
@@ -215,10 +216,10 @@ each fails the release. Correctness, atomicity, source preservation, and binding
 parity remain hard gates; the timing and size figures the check reports are
 diagnostic and cannot weaken them.
 
-## Appendix: recorded format-9 migration
+## Appendix: recorded adjacent format-9 to format-10 step
 
-A real migration of `tests/fixtures/format-9.zova`, a genuine export of the
-released Zova 0.26.1 build, through the released CLI with verification enabled:
+The first adjacent step was recorded from `tests/fixtures/format-9.zova`, a
+genuine export of the released Zova 0.26.1 build, with verification enabled:
 
 ```sh
 zova format app.zova
@@ -249,7 +250,8 @@ Elapsed wall time was 0.15 s and verification passed: the CLI reported
 path. The source hash is identical before and after, and the only structural
 difference is the private key-value schema format 10 introduces.
 
-This run is evidence, not a gate. The gates are the correctness, atomicity,
+This recorded adjacent step is evidence, not a gate. Current migrations continue
+through format 10 to format 11. The gates are the correctness, atomicity,
 source-preservation, and binding-parity assertions in
 `zig build check-storage-compat`, which recompute hashes, sizes, and counts on
 every run against every retained fixture.

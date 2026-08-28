@@ -51,6 +51,12 @@ fn abi_version_and_status_names_are_available() {
         assert_eq!(zova_sys::ZOVA_GRAPH_EXISTS, 80);
         assert_eq!(zova_sys::ZOVA_GRAPH_INVALID, 84);
         assert_eq!(zova_sys::ZOVA_EXTENSION_UNAVAILABLE, 94);
+        assert_eq!(zova_sys::ZOVA_OBJECT_PROFILE_DEDUPLICATION, 0);
+        assert_eq!(zova_sys::ZOVA_OBJECT_PROFILE_STREAMING, 1);
+        assert_eq!(
+            std::mem::size_of::<zova_sys::zova_object_put_options>(),
+            std::mem::size_of::<std::os::raw::c_int>()
+        );
         assert_eq!(
             CStr::from_ptr(zova_sys::zova_status_name(zova_sys::ZOVA_GRAPH_INVALID))
                 .to_str()

@@ -20,7 +20,7 @@ use graph::{
 use notification::{PyNotification, PySubscription};
 use object::{
     object_chunk_id, object_id, PyObjectChunkId, PyObjectId, PyObjectManifest,
-    PyObjectManifestChunk, PyObjectWriter,
+    PyObjectManifestChunk, PyObjectPutOptions, PyObjectReader, PyObjectWriter,
 };
 use pyo3::prelude::*;
 use statement::PyStatement;
@@ -42,6 +42,8 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyObjectChunkId>()?;
     m.add_class::<PyObjectManifestChunk>()?;
     m.add_class::<PyObjectManifest>()?;
+    m.add_class::<PyObjectPutOptions>()?;
+    m.add_class::<PyObjectReader>()?;
     m.add_class::<PyObjectWriter>()?;
     m.add_class::<PyVectorCollectionOptions>()?;
     m.add_class::<PyVectorCollectionInfo>()?;

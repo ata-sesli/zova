@@ -76,6 +76,7 @@ extern "C" {
 /* Opaque handles. Callers must only pass them back to Zova functions. */
 typedef struct zova_database zova_database;
 typedef struct zova_object_writer zova_object_writer;
+typedef struct zova_object_reader zova_object_reader;
 typedef struct zova_statement zova_statement;
 typedef struct zova_subscription zova_subscription;
 typedef struct zova_fresh_build zova_fresh_build;
@@ -120,6 +121,7 @@ typedef enum zova_status {
     ZOVA_OBJECT_TOO_LARGE = 57,
     ZOVA_OBJECT_TRANSACTION_ACTIVE = 58,
     ZOVA_OBJECT_WRITER_CLOSED = 59,
+    ZOVA_OBJECT_READER_CLOSED = 63,
     ZOVA_BOUND_STORE_EXISTS = 60,
     ZOVA_BOUND_STORE_NOT_FOUND = 61,
     ZOVA_BOUND_STORE_INVALID = 62,
@@ -305,6 +307,15 @@ typedef struct zova_object_manifest {
     zova_object_manifest_chunk *chunks;
     size_t chunks_len;
 } zova_object_manifest;
+
+typedef enum zova_object_storage_profile {
+    ZOVA_OBJECT_PROFILE_DEDUPLICATION = 0,
+    ZOVA_OBJECT_PROFILE_STREAMING = 1,
+} zova_object_storage_profile;
+
+typedef struct zova_object_put_options {
+    int profile;
+} zova_object_put_options;
 
 typedef struct zova_vector_collection_options {
     uint32_t dimensions;
@@ -922,6 +933,15 @@ typedef struct zova_object_put_request {
     zova_object_id *out_id;
 } zova_object_put_request;
 
+/* Stores bytes using an explicitly selected object storage profile. */
+typedef struct zova_object_put_with_options_request {
+    zova_database *db;
+    const uint8_t *data;
+    size_t len;
+    zova_object_put_options options;
+    zova_object_id *out_id;
+} zova_object_put_with_options_request;
+
 /* Returns full object bytes in an owned zova_buffer. */
 typedef struct zova_object_get_request {
     zova_database *db;
@@ -981,6 +1001,14 @@ typedef struct zova_object_chunk_put_request {
     size_t len;
 } zova_object_chunk_put_request;
 
+typedef struct zova_object_chunk_put_with_options_request {
+    zova_database *db;
+    zova_object_chunk_id expected_hash;
+    const uint8_t *data;
+    size_t len;
+    zova_object_put_options options;
+} zova_object_chunk_put_with_options_request;
+
 typedef struct zova_object_chunk_delete_request {
     zova_database *db;
     zova_object_chunk_id hash;
@@ -995,11 +1023,26 @@ typedef struct zova_object_assemble_from_chunks_request {
     size_t chunk_count;
 } zova_object_assemble_from_chunks_request;
 
+typedef struct zova_object_assemble_from_chunks_with_options_request {
+    zova_database *db;
+    zova_object_id id;
+    uint64_t size_bytes;
+    const zova_object_manifest_chunk *chunks;
+    size_t chunk_count;
+    zova_object_put_options options;
+} zova_object_assemble_from_chunks_with_options_request;
+
 /* Streaming writers are explicit resources; destroy them when finished. */
 typedef struct zova_object_writer_create_request {
     zova_database *db;
     zova_object_writer **out_writer;
 } zova_object_writer_create_request;
+
+typedef struct zova_object_writer_create_with_options_request {
+    zova_database *db;
+    zova_object_put_options options;
+    zova_object_writer **out_writer;
+} zova_object_writer_create_with_options_request;
 
 typedef struct zova_object_writer_write_request {
     zova_object_writer *writer;
@@ -1015,6 +1058,24 @@ typedef struct zova_object_writer_finish_request {
 typedef struct zova_object_writer_cancel_request {
     zova_object_writer *writer;
 } zova_object_writer_cancel_request;
+
+typedef struct zova_object_reader_create_request {
+    zova_database *db;
+    zova_object_id id;
+    zova_object_reader **out_reader;
+} zova_object_reader_create_request;
+
+typedef struct zova_object_reader_read_request {
+    zova_object_reader *reader;
+    uint8_t *buffer;
+    size_t buffer_len;
+    size_t *out_read;
+} zova_object_reader_read_request;
+
+/* Passing a null *reader makes destruction idempotent. */
+typedef struct zova_object_reader_destroy_request {
+    zova_object_reader **reader;
+} zova_object_reader_destroy_request;
 
 /* Borrowed byte slice for key-value operations. Zova copies caller input
  * during the call and retains no caller memory. */
@@ -1785,6 +1846,7 @@ zova_status zova_statement_column_blob(const zova_statement_column_blob_request 
 zova_status zova_object_id_from_bytes(const uint8_t *data, size_t len, zova_object_id *out_id);
 zova_status zova_object_chunk_id_from_bytes(const uint8_t *data, size_t len, zova_object_chunk_id *out_id);
 zova_status zova_object_put(const zova_object_put_request *request);
+zova_status zova_object_put_with_options(const zova_object_put_with_options_request *request);
 zova_status zova_object_get(const zova_object_get_request *request);
 zova_status zova_object_read_range(const zova_object_read_range_request *request);
 zova_status zova_object_delete(const zova_object_delete_request *request);
@@ -1794,15 +1856,21 @@ zova_status zova_object_chunk_count(const zova_object_chunk_count_request *reque
 zova_status zova_object_manifest_get(const zova_object_manifest_get_request *request);
 zova_status zova_object_chunk_get(const zova_object_chunk_get_request *request);
 zova_status zova_object_chunk_put(const zova_object_chunk_put_request *request);
+zova_status zova_object_chunk_put_with_options(const zova_object_chunk_put_with_options_request *request);
 zova_status zova_object_chunk_delete(const zova_object_chunk_delete_request *request);
 zova_status zova_object_assemble_from_chunks(const zova_object_assemble_from_chunks_request *request);
+zova_status zova_object_assemble_from_chunks_with_options(const zova_object_assemble_from_chunks_with_options_request *request);
 
 /* ObjectWriter streams bytes into verified chunks and finishes as one object. */
 zova_status zova_object_writer_create(const zova_object_writer_create_request *request);
+zova_status zova_object_writer_create_with_options(const zova_object_writer_create_with_options_request *request);
 zova_status zova_object_writer_write(const zova_object_writer_write_request *request);
 zova_status zova_object_writer_finish(const zova_object_writer_finish_request *request);
 zova_status zova_object_writer_cancel(const zova_object_writer_cancel_request *request);
 zova_status zova_object_writer_destroy(zova_object_writer *writer);
+zova_status zova_object_reader_create(const zova_object_reader_create_request *request);
+zova_status zova_object_reader_read(const zova_object_reader_read_request *request);
+zova_status zova_object_reader_destroy(const zova_object_reader_destroy_request *request);
 
 /*
  * Native transactional key-value operations.

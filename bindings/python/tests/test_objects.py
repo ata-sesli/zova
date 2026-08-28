@@ -168,6 +168,54 @@ def test_object_writer_finish_cancel_close_context_and_errors(tmp_path):
             close_writer.cancel()
 
 
+def test_profile_aware_object_apis_and_sequential_reader(tmp_path):
+    path = tmp_path / "profile-reader.zova"
+    options = zova.ObjectPutOptions(zova.ObjectStorageProfile.DEDUPLICATION)
+    data = b"profile-aware object"
+
+    with zova.Database.create(str(path)) as db:
+        object_id = db.put_object_with_options(data, options)
+        assert object_id == zova.object_id(data)
+
+        reader = db.object_reader(object_id)
+        assert isinstance(reader, zova.ObjectReader)
+        assert reader.read(3) == data[:3]
+        assert reader.read(100) == data[3:]
+        assert reader.read(1) == b""
+        assert reader.read(1) == b""
+        reader.close()
+        reader.close()
+        with pytest.raises(zova.ClosedHandleError):
+            reader.read(1)
+
+        writer = db.object_writer_with_options(options)
+        writer.write(b"profile writer")
+        assert writer.finish() == zova.object_id(b"profile writer")
+
+        chunk = b"profile chunk"
+        chunk_hash = zova.object_chunk_id(chunk)
+        db.put_object_chunk_with_options(chunk_hash, chunk, options)
+        assembled_id = zova.object_id(chunk)
+        db.assemble_object_from_chunks_with_options(
+            assembled_id,
+            len(chunk),
+            [zova.ObjectManifestChunk(0, chunk_hash, 0, len(chunk))],
+            options,
+        )
+        assert db.get_object(assembled_id) == chunk
+
+
+def test_owned_object_reader_keeps_database_alive_after_close(tmp_path):
+    path = tmp_path / "owned-reader.zova"
+    data = b"owned reader"
+    db = zova.Database.create(str(path))
+    object_id = db.put_object(data)
+    reader = db.object_reader(object_id)
+    db.close()
+    assert reader.read(5) == data[:5]
+    reader.close()
+
+
 def test_objects_work_after_sqlite_conversion(tmp_path):
     source = tmp_path / "source.db"
     destination = tmp_path / "converted.zova"

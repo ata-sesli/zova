@@ -96,6 +96,55 @@ describe("objects", () => {
     db.close();
   });
 
+  test("profile-aware APIs and sequential readers preserve object identity", () => {
+    const db = database();
+    const bytes = deterministicBytes(180_000);
+    const options = { profile: "deduplication" } as const;
+
+    const id = db.putObjectWithOptions(bytes, options);
+    expect(id).toEqual(objectId(bytes));
+
+    const reader = db.objectReader(id);
+    expect(reader.read(7)).toEqual(bytes.slice(0, 7));
+    expect(reader.read(1_000_000)).toEqual(bytes.slice(7));
+    expect(reader.read(1)).toEqual(new Uint8Array());
+    reader.close();
+    reader.close();
+    expect(() => reader.read(1)).toThrow(ZovaError);
+
+    const writer = db.objectWriterWithOptions(options);
+    writer.write(bytes);
+    expect(writer.finish()).toEqual(id);
+
+    const chunk = deterministicBytes(32_000);
+    const hash = objectChunkId(chunk);
+    db.putObjectChunkWithOptions(hash, chunk, options);
+    const assembledId = objectId(chunk);
+    db.assembleObjectFromChunksWithOptions(
+      assembledId,
+      BigInt(chunk.length),
+      [{ index: 0n, hash, offset: 0n, sizeBytes: BigInt(chunk.length) }],
+      options,
+    );
+    expect(db.getObject(assembledId)).toEqual(chunk);
+
+    expect(() =>
+      db.putObjectWithOptions(bytes, { profile: "unknown" as never }),
+    ).toThrow(ZovaError);
+    db.close();
+  });
+
+  test("object reader participates in native child-handle lifetime", () => {
+    const db = database();
+    const bytes = deterministicBytes(2048);
+    const id = db.putObject(bytes);
+    const reader = db.objectReader(id);
+    expect(() => db.close()).toThrow(ZovaError);
+    expect(reader.read(2048)).toEqual(bytes);
+    reader.close();
+    db.close();
+  });
+
   test("main-store object mutation preserves active-transaction rejection", () => {
     const db = database();
     const bytes = deterministicBytes(100_000);

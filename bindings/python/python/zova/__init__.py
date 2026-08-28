@@ -19,6 +19,8 @@ from ._native import (
     ObjectId,
     ObjectManifest,
     ObjectManifestChunk,
+    ObjectPutOptions,
+    ObjectReader,
     ObjectWriter,
     SavepointContext,
     Subscription,
@@ -81,6 +83,11 @@ class GraphTargetType(IntEnum):
 class GraphNeighborDirection(IntEnum):
     OUTGOING = 0
     INCOMING = 1
+
+
+class ObjectStorageProfile(IntEnum):
+    DEDUPLICATION = 0
+    STREAMING = 1
 
 
 DEFAULT_GRAPH_NAME = "default"
@@ -158,6 +165,9 @@ __all__ = [
     "ObjectId",
     "ObjectManifest",
     "ObjectManifestChunk",
+    "ObjectPutOptions",
+    "ObjectReader",
+    "ObjectStorageProfile",
     "ObjectWriter",
     "SavepointContext",
     "Subscription",

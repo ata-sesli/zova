@@ -13,6 +13,7 @@ pub type zova_vector_metric = c_int;
 pub type zova_vector_element_type = c_int;
 pub type zova_graph_target_type = c_int;
 pub type zova_graph_neighbor_direction = c_int;
+pub type zova_object_storage_profile = c_int;
 
 pub const ZOVA_OK: zova_status = 0;
 pub const ZOVA_INVALID_ARGUMENT: zova_status = 1;
@@ -44,6 +45,7 @@ pub const ZOVA_OBJECT_RANGE_INVALID: zova_status = 56;
 pub const ZOVA_OBJECT_TOO_LARGE: zova_status = 57;
 pub const ZOVA_OBJECT_TRANSACTION_ACTIVE: zova_status = 58;
 pub const ZOVA_OBJECT_WRITER_CLOSED: zova_status = 59;
+pub const ZOVA_OBJECT_READER_CLOSED: zova_status = 63;
 pub const ZOVA_BOUND_STORE_EXISTS: zova_status = 60;
 pub const ZOVA_BOUND_STORE_NOT_FOUND: zova_status = 61;
 pub const ZOVA_BOUND_STORE_INVALID: zova_status = 62;
@@ -104,6 +106,8 @@ pub const ZOVA_GRAPH_TARGET_CONCEPT: zova_graph_target_type = 7;
 pub const ZOVA_GRAPH_TARGET_EXTERNAL: zova_graph_target_type = 8;
 pub const ZOVA_GRAPH_NEIGHBOR_OUTGOING: zova_graph_neighbor_direction = 0;
 pub const ZOVA_GRAPH_NEIGHBOR_INCOMING: zova_graph_neighbor_direction = 1;
+pub const ZOVA_OBJECT_PROFILE_DEDUPLICATION: zova_object_storage_profile = 0;
+pub const ZOVA_OBJECT_PROFILE_STREAMING: zova_object_storage_profile = 1;
 pub const ZOVA_FRESH_VALUE_NULL: c_int = 0;
 pub const ZOVA_FRESH_VALUE_INT64: c_int = 1;
 pub const ZOVA_FRESH_VALUE_FLOAT64: c_int = 2;
@@ -134,6 +138,11 @@ pub struct zova_statement {
 
 #[repr(C)]
 pub struct zova_object_writer {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct zova_object_reader {
     _private: [u8; 0],
 }
 
@@ -973,6 +982,22 @@ pub struct zova_object_put_request {
 }
 
 #[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_object_put_options {
+    pub profile: c_int,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_object_put_with_options_request {
+    pub db: *mut zova_database,
+    pub data: *const u8,
+    pub len: usize,
+    pub options: zova_object_put_options,
+    pub out_id: *mut zova_object_id,
+}
+
+#[repr(C)]
 pub struct zova_object_get_request {
     pub db: *mut zova_database,
     pub id: zova_object_id,
@@ -1039,6 +1064,16 @@ pub struct zova_object_chunk_put_request {
 }
 
 #[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_object_chunk_put_with_options_request {
+    pub db: *mut zova_database,
+    pub expected_hash: zova_object_chunk_id,
+    pub data: *const u8,
+    pub len: usize,
+    pub options: zova_object_put_options,
+}
+
+#[repr(C)]
 pub struct zova_object_chunk_delete_request {
     pub db: *mut zova_database,
     pub hash: zova_object_chunk_id,
@@ -1055,8 +1090,27 @@ pub struct zova_object_assemble_from_chunks_request {
 }
 
 #[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_object_assemble_from_chunks_with_options_request {
+    pub db: *mut zova_database,
+    pub id: zova_object_id,
+    pub size_bytes: u64,
+    pub chunks: *const zova_object_manifest_chunk,
+    pub chunk_count: usize,
+    pub options: zova_object_put_options,
+}
+
+#[repr(C)]
 pub struct zova_object_writer_create_request {
     pub db: *mut zova_database,
+    pub out_writer: *mut *mut zova_object_writer,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_object_writer_create_with_options_request {
+    pub db: *mut zova_database,
+    pub options: zova_object_put_options,
     pub out_writer: *mut *mut zova_object_writer,
 }
 
@@ -1076,6 +1130,29 @@ pub struct zova_object_writer_finish_request {
 #[repr(C)]
 pub struct zova_object_writer_cancel_request {
     pub writer: *mut zova_object_writer,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_object_reader_create_request {
+    pub db: *mut zova_database,
+    pub id: zova_object_id,
+    pub out_reader: *mut *mut zova_object_reader,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_object_reader_read_request {
+    pub reader: *mut zova_object_reader,
+    pub buffer: *mut u8,
+    pub buffer_len: usize,
+    pub out_read: *mut usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_object_reader_destroy_request {
+    pub reader: *mut *mut zova_object_reader,
 }
 
 #[repr(C)]
@@ -1786,6 +1863,9 @@ extern "C" {
         out_id: *mut zova_object_chunk_id,
     ) -> zova_status;
     pub fn zova_object_put(request: *const zova_object_put_request) -> zova_status;
+    pub fn zova_object_put_with_options(
+        request: *const zova_object_put_with_options_request,
+    ) -> zova_status;
     pub fn zova_object_get(request: *const zova_object_get_request) -> zova_status;
     pub fn zova_object_read_range(request: *const zova_object_read_range_request) -> zova_status;
     pub fn zova_object_delete(request: *const zova_object_delete_request) -> zova_status;
@@ -1797,14 +1877,23 @@ extern "C" {
     ) -> zova_status;
     pub fn zova_object_chunk_get(request: *const zova_object_chunk_get_request) -> zova_status;
     pub fn zova_object_chunk_put(request: *const zova_object_chunk_put_request) -> zova_status;
+    pub fn zova_object_chunk_put_with_options(
+        request: *const zova_object_chunk_put_with_options_request,
+    ) -> zova_status;
     pub fn zova_object_chunk_delete(
         request: *const zova_object_chunk_delete_request,
     ) -> zova_status;
     pub fn zova_object_assemble_from_chunks(
         request: *const zova_object_assemble_from_chunks_request,
     ) -> zova_status;
+    pub fn zova_object_assemble_from_chunks_with_options(
+        request: *const zova_object_assemble_from_chunks_with_options_request,
+    ) -> zova_status;
     pub fn zova_object_writer_create(
         request: *const zova_object_writer_create_request,
+    ) -> zova_status;
+    pub fn zova_object_writer_create_with_options(
+        request: *const zova_object_writer_create_with_options_request,
     ) -> zova_status;
     pub fn zova_object_writer_write(
         request: *const zova_object_writer_write_request,
@@ -1816,6 +1905,13 @@ extern "C" {
         request: *const zova_object_writer_cancel_request,
     ) -> zova_status;
     pub fn zova_object_writer_destroy(writer: *mut zova_object_writer) -> zova_status;
+    pub fn zova_object_reader_create(
+        request: *const zova_object_reader_create_request,
+    ) -> zova_status;
+    pub fn zova_object_reader_read(request: *const zova_object_reader_read_request) -> zova_status;
+    pub fn zova_object_reader_destroy(
+        request: *const zova_object_reader_destroy_request,
+    ) -> zova_status;
 
     pub fn zova_vector_collection_create(
         request: *const zova_vector_collection_create_request,

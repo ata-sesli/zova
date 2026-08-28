@@ -7,6 +7,24 @@ use napi_derive::napi;
 use crate::database::{DatabaseState, NativeDatabase};
 use crate::error::{invalid_argument_error, misuse_error, zova_error};
 
+#[napi(object)]
+pub struct NativeObjectPutOptions {
+    pub profile: String,
+}
+
+fn put_options(options: &NativeObjectPutOptions) -> Result<zova::ObjectPutOptions> {
+    let profile = match options.profile.as_str() {
+        "deduplication" => zova::ObjectStorageProfile::Deduplication,
+        "streaming" => zova::ObjectStorageProfile::Streaming,
+        value => {
+            return Err(invalid_argument_error(format!(
+                "unsupported object storage profile: {value}"
+            )))
+        }
+    };
+    Ok(zova::ObjectPutOptions { profile })
+}
+
 fn object_id_from_array(value: &Uint8Array) -> Result<zova::ObjectId> {
     zova::ObjectId::try_from(value.as_ref()).map_err(zova_error)
 }
@@ -100,6 +118,19 @@ impl NativeDatabase {
         self.state
             .database()?
             .put_object(data.as_ref())
+            .map(object_id_array)
+            .map_err(zova_error)
+    }
+
+    #[napi]
+    pub fn put_object_with_options(
+        &self,
+        data: Uint8Array,
+        options: NativeObjectPutOptions,
+    ) -> Result<Uint8Array> {
+        self.state
+            .database()?
+            .put_object_with_options(data.as_ref(), put_options(&options)?)
             .map(object_id_array)
             .map_err(zova_error)
     }
@@ -203,6 +234,23 @@ impl NativeDatabase {
     }
 
     #[napi]
+    pub fn put_object_chunk_with_options(
+        &self,
+        hash: Uint8Array,
+        data: Uint8Array,
+        options: NativeObjectPutOptions,
+    ) -> Result<()> {
+        self.state
+            .database()?
+            .put_object_chunk_with_options(
+                chunk_id_from_array(&hash)?,
+                data.as_ref(),
+                put_options(&options)?,
+            )
+            .map_err(zova_error)
+    }
+
+    #[napi]
     pub fn delete_object_chunk(&self, hash: Uint8Array) -> Result<bool> {
         self.state
             .database()?
@@ -239,6 +287,36 @@ impl NativeDatabase {
     }
 
     #[napi]
+    pub fn assemble_object_from_chunks_with_options(
+        &self,
+        id: Uint8Array,
+        size_bytes: BigInt,
+        chunks: Vec<NativeObjectManifestChunkInput>,
+        options: NativeObjectPutOptions,
+    ) -> Result<()> {
+        let chunks = chunks
+            .into_iter()
+            .map(|chunk| {
+                Ok(zova::ObjectManifestChunk {
+                    index: bigint_to_u64(&chunk.index, "manifest chunk index")?,
+                    hash: chunk_id_from_array(&chunk.hash)?,
+                    offset: bigint_to_u64(&chunk.offset, "manifest chunk offset")?,
+                    size_bytes: bigint_to_u64(&chunk.size_bytes, "manifest chunk size")?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.state
+            .database()?
+            .assemble_object_from_chunks_with_options(
+                object_id_from_array(&id)?,
+                bigint_to_u64(&size_bytes, "object size")?,
+                &chunks,
+                put_options(&options)?,
+            )
+            .map_err(zova_error)
+    }
+
+    #[napi]
     pub fn object_writer(&self) -> Result<NativeObjectWriter> {
         let database = self.state.register_child()?;
         match database.object_writer() {
@@ -248,6 +326,92 @@ impl NativeDatabase {
                 Err(zova_error(error))
             }
         }
+    }
+
+    #[napi]
+    pub fn object_writer_with_options(
+        &self,
+        options: NativeObjectPutOptions,
+    ) -> Result<NativeObjectWriter> {
+        let database = self.state.register_child()?;
+        match database.object_writer_with_options(put_options(&options)?) {
+            Ok(writer) => Ok(NativeObjectWriter::new(writer, self.state.clone())),
+            Err(error) => {
+                self.state.child_closed();
+                Err(zova_error(error))
+            }
+        }
+    }
+
+    #[napi]
+    pub fn object_reader(&self, id: Uint8Array) -> Result<NativeObjectReader> {
+        let database = self.state.register_child()?;
+        match database.object_reader(object_id_from_array(&id)?) {
+            Ok(reader) => Ok(NativeObjectReader::new(reader, self.state.clone())),
+            Err(error) => {
+                self.state.child_closed();
+                Err(zova_error(error))
+            }
+        }
+    }
+}
+
+#[napi(js_name = "NativeObjectReader")]
+pub struct NativeObjectReader {
+    reader: Option<zova::SharedObjectReader>,
+    database: Arc<DatabaseState>,
+}
+
+impl NativeObjectReader {
+    fn new(reader: zova::SharedObjectReader, database: Arc<DatabaseState>) -> Self {
+        Self {
+            reader: Some(reader),
+            database,
+        }
+    }
+
+    fn reader(&mut self) -> Result<&mut zova::SharedObjectReader> {
+        self.reader
+            .as_mut()
+            .ok_or_else(|| misuse_error("object reader is closed"))
+    }
+
+    fn drop_reader(&mut self) {
+        if self.reader.take().is_some() {
+            self.database.child_closed();
+        }
+    }
+}
+
+#[napi]
+impl NativeObjectReader {
+    #[napi(getter)]
+    pub fn closed(&self) -> bool {
+        self.reader.is_none()
+    }
+
+    #[napi]
+    pub fn read(&mut self, size: u32) -> Result<Uint8Array> {
+        let mut bytes = vec![0; size as usize];
+        let read = self.reader()?.read(&mut bytes).map_err(zova_error)?;
+        bytes.truncate(read);
+        Ok(Uint8Array::new(bytes))
+    }
+
+    #[napi]
+    pub fn close(&mut self) -> Result<()> {
+        let Some(reader) = self.reader.as_mut() else {
+            return Ok(());
+        };
+        reader.close().map_err(zova_error)?;
+        self.drop_reader();
+        Ok(())
+    }
+}
+
+impl Drop for NativeObjectReader {
+    fn drop(&mut self) {
+        self.drop_reader();
     }
 }
 

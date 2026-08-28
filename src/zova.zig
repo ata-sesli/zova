@@ -7,7 +7,7 @@
 //!
 //! Zova is currently pre-1.0, and internal `.zova` format compatibility is
 //! not preserved between experimental format versions. The current v0.22
-//! development format is version `10`: `_zova_meta.format_version = '10'` plus
+//! development format is version `11`: `_zova_meta.format_version = '11'` plus
 //! the required private object, vector, graph, key-value, and extension
 //! registry schemas.
 //! `Database.open` is intentionally non-mutating: it validates the file and
@@ -20,7 +20,7 @@
 //! source file.
 //!
 //! Zova object APIs use deterministic SHA-256 object identity and private
-//! FastCDC chunking. `putObject` stores whole caller bytes as content-addressed
+//! FastCDC chunking by default. `putObject` stores whole caller bytes as content-addressed
 //! chunk BLOB rows, `putObjectChunk` stores verified loose chunks for
 //! receive-side transfer workflows, `assembleObjectFromChunks` turns verified
 //! chunks into complete objects, `getObject` reconstructs and verifies the full
@@ -158,6 +158,7 @@ const MigrationStep = struct {
 
 pub const migration_steps = [_]MigrationStep{
     .{ .from_version = 9, .to_version = 10, .apply = migrateFormat9To10 },
+    .{ .from_version = 10, .to_version = 11, .apply = migrateFormat10To11 },
 };
 
 pub fn findMigrationStep(from_version: u32, to_version: u32) ?*const MigrationStep {
@@ -175,6 +176,36 @@ fn migrateFormat9To10(db: *sqlite.Database) Error!void {
     try validateKvSchema(db);
 }
 
+fn migrateFormat10To11(db: *sqlite.Database) Error!void {
+    // Rename the format-10 tables out of the way first, then create the final
+    // format-11 tables from their canonical schema declarations. This keeps
+    // sqlite_master text identical to a newly-created format-11 database and
+    // lets the whole rebuild roll back atomically with the migration step.
+    try db.exec(
+        \\alter table _zova_object_chunks rename to _zova_object_chunks_format10;
+        \\alter table _zova_objects rename to _zova_objects_format10;
+        \\alter table _zova_chunks rename to _zova_chunks_format10;
+    );
+
+    try db.exec(object_impl.objects_schema_sql);
+    try db.exec(object_impl.chunks_schema_sql);
+    try db.exec(object_impl.object_chunks_schema_sql);
+
+    try db.exec(
+        \\insert into _zova_objects(object_id,size_bytes,chunk_count,chunker)
+        \\select object_id,size_bytes,chunk_count,chunker from _zova_objects_format10;
+        \\insert into _zova_chunks(chunk_hash,size_bytes,data)
+        \\select chunk_hash,size_bytes,data from _zova_chunks_format10;
+        \\insert into _zova_object_chunks(object_id,chunk_index,chunk_hash,offset,size_bytes)
+        \\select object_id,chunk_index,chunk_hash,offset,size_bytes from _zova_object_chunks_format10;
+        \\drop table _zova_object_chunks_format10;
+        \\drop table _zova_objects_format10;
+        \\drop table _zova_chunks_format10;
+    );
+
+    try validateObjectSchema(db);
+}
+
 /// Role-aware validation of one Zova file at an exact expected storage
 /// format, structurally equivalent to the existing open-time and attach-time
 /// validators while intentionally omitting only requirements introduced by
@@ -184,7 +215,9 @@ fn migrateFormat9To10(db: *sqlite.Database) Error!void {
 /// Used by migration preflight so a forged or malformed file — wrong or
 /// missing magic, missing metadata, malformed required tables, a store role
 /// without its identity or schema, or a main with a malformed bound-store
-/// table — can never be transformed.
+/// table — can never be transformed. Object and KV validation is selected by
+/// the exact source format so every adjacent step validates the schema that
+/// actually existed at that version.
 fn validateMigrationSourceSchema(db: *sqlite.Database, expected_format: []const u8) Error!void {
     if (try metadataValueAlloc(std.heap.c_allocator, db, "store_role")) |role| {
         defer std.heap.c_allocator.free(role);
@@ -201,14 +234,17 @@ fn validateMigrationSourceSchema(db: *sqlite.Database, expected_format: []const 
         return error.NotZovaDatabase;
     }
 
+    const expected_version = parseFormatVersion(expected_format) orelse return error.NotZovaDatabase;
+
     // Main database: every private schema plus the optional bound-store
-    // table, except the format-10 KV requirement.
+    // table, with version-specific object and KV requirements.
     try expectMetadataValue(db, "magic", magic_value, .magic);
     try expectMetadataValue(db, "format_version", expected_format, .format_version);
     try validateExtensionSchema(db);
-    try validateObjectSchema(db);
+    try validateObjectSchemaExpected(db, expected_format);
     try validateVectorSchema(db);
     try validateGraphSchema(db);
+    if (expected_version >= 10) try validateKvSchema(db);
     try validateOptionalBoundStoreSchema(db);
 }
 
@@ -240,15 +276,39 @@ pub fn runMigrationStep(db: *sqlite.Database) Error!u32 {
 
     try step.apply(db);
 
-    var update = try db.prepare("update _zova_meta set value = ?1 where key = 'format_version'");
-    defer update.deinit();
     var version_buffer: [16]u8 = undefined;
     const version_text = std.fmt.bufPrint(&version_buffer, "{d}", .{target}) catch unreachable;
-    try update.bindText(1, version_text);
-    _ = try update.step();
+    {
+        var update = try db.prepare("update _zova_meta set value = ?1 where key = 'format_version'");
+        defer update.deinit();
+        try update.bindText(1, version_text);
+        _ = try update.step();
+    }
+
+    // Metadata is the final mutation. Structural and referential validation
+    // run afterward inside the same transaction and therefore still roll the
+    // complete step back on failure.
+    try validateMigrationSourceSchema(db, version_text);
+    try validateForeignKeys(db);
 
     try db.commit();
     return target;
+}
+
+fn runMigrationsToCurrent(db: *sqlite.Database) Error!void {
+    const current = parseFormatVersion(format_version) orelse unreachable;
+    while (true) {
+        const info = try readFormatClassification(db);
+        if (info.format_version == current and info.compatibility == .current) return;
+        if (info.compatibility != .migratable) return error.NoMigrationPath;
+        _ = try runMigrationStep(db);
+    }
+}
+
+fn validateForeignKeys(db: *sqlite.Database) Error!void {
+    var stmt = try db.prepare("pragma foreign_key_check");
+    defer stmt.deinit();
+    if ((try stmt.step()) != .done) return error.NotZovaDatabase;
 }
 
 const bound_object_store_role = "object_store";
@@ -286,7 +346,24 @@ pub const ObjectChunk = object_impl.ObjectChunk;
 pub const ObjectManifest = object_impl.ObjectManifest;
 pub const ObjectChunkData = object_impl.ObjectChunkData;
 pub const Object = object_impl.Object;
+/// Physical object chunking profile. Existing methods use `.deduplication`;
+/// `.streaming` stores fixed 1 MiB chunks for large sequential workloads.
+pub const ObjectStorageProfile = object_impl.ObjectStorageProfile;
+pub const ObjectPutOptions = object_impl.ObjectPutOptions;
+pub const ObjectReaderError = object_impl.ObjectReaderError;
 pub const KvPutEntry = kv_impl.PutEntry;
+
+pub const ObjectReader = struct {
+    inner: object_impl.ObjectReader,
+
+    pub fn read(self: *ObjectReader, buffer: []u8) object_impl.ObjectReaderError!usize {
+        return self.inner.read(buffer);
+    }
+
+    pub fn deinit(self: *ObjectReader) void {
+        self.inner.deinit();
+    }
+};
 
 pub const ObjectWriter = struct {
     inner: object_impl.ObjectWriter,
@@ -767,10 +844,12 @@ pub fn migrateDatabaseInternal(
 
     // Fast classification before touching destinations so unsupported sources
     // are rejected without creating anything.
+    var source_format_version: u32 = undefined;
     {
         var probe = try sqlite.Database.openWithFlags(source_path, .read_only);
         defer probe.deinit();
         const early = try readFormatClassification(&probe);
+        source_format_version = early.format_version;
         switch (early.compatibility) {
             .migratable => {},
             .current => return error.NoMigrationPath,
@@ -836,9 +915,15 @@ pub fn migrateDatabaseInternal(
         // cross-checked IDs.
         var snapshot = try sqlite.Database.openWithFlags(source_path, .read_only);
         defer snapshot.deinit();
-        try validateMigrationSourceSchema(&snapshot, minimum_migratable_format);
+        var source_format_buffer: [16]u8 = undefined;
+        const source_format_text = std.fmt.bufPrint(
+            &source_format_buffer,
+            "{d}",
+            .{source_format_version},
+        ) catch unreachable;
+        try validateMigrationSourceSchema(&snapshot, source_format_text);
         for (bindings[0..binding_count]) |*binding| {
-            try validateMigrationStoreBinding(binding);
+            try validateMigrationStoreBinding(binding, source_format_text);
         }
 
         // Stage, copy-forward, and transform every member. Staging files are
@@ -855,7 +940,7 @@ pub fn migrateDatabaseInternal(
         {
             var staged = try sqlite.Database.open(main_staging.?);
             defer staged.deinit();
-            _ = try runMigrationStep(&staged);
+            try runMigrationsToCurrent(&staged);
             if (fault_hook) |hook| try hook(.after_main_migration);
         }
         for (bindings[0..binding_count]) |*binding| {
@@ -869,7 +954,7 @@ pub fn migrateDatabaseInternal(
             if (fault_hook) |hook| try hook(.after_store_copy);
             var staged = try sqlite.Database.open(binding.staging_path);
             defer staged.deinit();
-            _ = try runMigrationStep(&staged);
+            try runMigrationsToCurrent(&staged);
             if (fault_hook) |hook| try hook(.after_store_migration);
         }
     }
@@ -986,7 +1071,10 @@ pub fn collectMigrationBindings(
 /// Validate one recorded bound store before any copying: the file must exist,
 /// carry a genuine migratable format-9 schema under its role, and its stored
 /// identity must match the main database's binding row exactly.
-fn validateMigrationStoreBinding(binding: *MigrateBindingPlan) Error!void {
+fn validateMigrationStoreBinding(
+    binding: *MigrateBindingPlan,
+    expected_format: []const u8,
+) Error!void {
     var store = sqlite.Database.openWithFlags(binding.store_path, .read_only) catch |err| switch (err) {
         error.CantOpen, error.SqliteError => return error.BoundStoreNotFound,
         else => return err,
@@ -997,7 +1085,7 @@ fn validateMigrationStoreBinding(binding: *MigrateBindingPlan) Error!void {
     defer std.heap.c_allocator.free(store_role);
     if (!std.mem.eql(u8, store_role, binding.role)) return error.BoundStoreInvalid;
 
-    try validateMigrationSourceSchema(&store, minimum_migratable_format);
+    try validateMigrationSourceSchema(&store, expected_format);
 
     const store_id = (try metadataValueAlloc(std.heap.c_allocator, &store, "store_id")) orelse return error.BoundStoreInvalid;
     defer std.heap.c_allocator.free(store_id);
@@ -1184,7 +1272,7 @@ pub const Database = struct {
     /// Create a new initialized `.zova` database.
     ///
     /// This never overwrites an existing file. The file is initialized with the
-    /// private `_zova_meta` table, format version `10`, and the required
+    /// private `_zova_meta` table, format version `11`, and the required
     /// object, vector, graph, key-value, and extension registry schemas.
     pub fn create(path: [:0]const u8) Error!Database {
         return createWithOptionsAndExtensions(path, .{}, bundledExtensionRegistry());
@@ -2374,6 +2462,24 @@ pub const Database = struct {
         };
     }
 
+    /// Create an object writer using an explicitly selected storage profile.
+    /// The streaming profile is accepted by this facade once the selected
+    /// object store supports the fixed-1MiB representation.
+    pub fn objectWriterWithOptions(self: *Database, allocator: std.mem.Allocator, options: ObjectPutOptions) Error!ObjectWriter {
+        var objects = self.objectDatabase();
+        return .{
+            .inner = try objects.objectWriterWithOptions(allocator, options),
+            .sqlite_db = &self.sqlite_db,
+            .bound = self.bound_object_store != null,
+        };
+    }
+
+    /// Open a sequential reader over one stored object and pin its snapshot.
+    pub fn objectReader(self: *Database, id: ObjectId) Error!ObjectReader {
+        var objects = self.objectDatabase();
+        return .{ .inner = try objects.objectReader(id) };
+    }
+
     /// Create a native vector collection.
     pub fn createVectorCollection(
         self: *Database,
@@ -2657,6 +2763,27 @@ pub const Database = struct {
         return result;
     }
 
+    /// Store raw bytes using an explicitly selected storage profile.
+    pub fn putObjectWithOptions(self: *Database, bytes: []const u8, options: ObjectPutOptions) Error!ObjectId {
+        if (self.bound_object_store == null) {
+            var objects = self.objectDatabase();
+            return objects.putObjectWithOptions(bytes, options);
+        }
+
+        const id = objectId(bytes);
+        const existed = try self.hasObject(id);
+        const owns_transaction = try self.beginBoundObjectMutation();
+        var committed = false;
+        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+
+        var objects = self.objectDatabase();
+        const result = try objects.putObjectWithOptions(bytes, options);
+        if (!existed) try incrementBoundObjectEpoch(&self.sqlite_db);
+        try self.finishBoundObjectMutation(owns_transaction);
+        committed = true;
+        return result;
+    }
+
     /// Load and verify an object by id.
     pub fn getObject(self: *Database, allocator: std.mem.Allocator, id: ObjectId) Error!Object {
         var objects = self.objectDatabase();
@@ -2695,6 +2822,25 @@ pub const Database = struct {
         committed = true;
     }
 
+    /// Store one verified loose chunk using an explicitly selected profile.
+    pub fn putObjectChunkWithOptions(
+        self: *Database,
+        expected_hash: ObjectChunkId,
+        bytes: []const u8,
+        options: ObjectPutOptions,
+    ) Error!void {
+        const existed = if (self.bound_object_store != null) try self.hasObjectChunk(expected_hash) else false;
+        const owns_transaction = try self.beginBoundObjectMutation();
+        var committed = false;
+        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+
+        var objects = self.objectDatabase();
+        try objects.putObjectChunkWithOptions(expected_hash, bytes, options);
+        if (self.bound_object_store != null and !existed) try incrementBoundObjectEpoch(&self.sqlite_db);
+        try self.finishBoundObjectMutation(owns_transaction);
+        committed = true;
+    }
+
     /// Assemble a complete object from already-verified chunks.
     pub fn assembleObjectFromChunks(
         self: *Database,
@@ -2708,6 +2854,25 @@ pub const Database = struct {
 
         var objects = self.objectDatabase();
         try objects.assembleObjectFromChunks(id, size_bytes, chunks);
+        if (self.bound_object_store != null) try incrementBoundObjectEpoch(&self.sqlite_db);
+        try self.finishBoundObjectMutation(owns_transaction);
+        committed = true;
+    }
+
+    /// Assemble an object using an explicitly selected storage profile.
+    pub fn assembleObjectFromChunksWithOptions(
+        self: *Database,
+        id: ObjectId,
+        size_bytes: u64,
+        chunks: []const ObjectChunk,
+        options: ObjectPutOptions,
+    ) Error!void {
+        const owns_transaction = try self.beginBoundObjectMutation();
+        var committed = false;
+        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+
+        var objects = self.objectDatabase();
+        try objects.assembleObjectFromChunksWithOptions(id, size_bytes, chunks, options);
         if (self.bound_object_store != null) try incrementBoundObjectEpoch(&self.sqlite_db);
         try self.finishBoundObjectMutation(owns_transaction);
         committed = true;
@@ -3810,7 +3975,7 @@ fn validateObjectStoreDatabaseExpected(db: *sqlite.Database, expected_format: []
     const store_id = try objectStoreIdAlloc(std.heap.c_allocator, db);
     defer std.heap.c_allocator.free(store_id);
     try validateExtensionSchema(db);
-    try validateObjectSchema(db);
+    try validateObjectSchemaExpected(db, expected_format);
 }
 
 fn validateObjectStoreDatabase(db: *sqlite.Database) Error!void {
@@ -4706,20 +4871,48 @@ fn validateExtensionSchema(db: *sqlite.Database) Error!void {
 }
 
 fn validateObjectSchema(db: *sqlite.Database) Error!void {
+    return validateObjectSchemaSql(
+        db,
+        object_impl.objects_schema_sql,
+        object_impl.chunks_schema_sql,
+        object_impl.object_chunks_schema_sql,
+    );
+}
+
+fn validateObjectSchemaExpected(db: *sqlite.Database, expected_format: []const u8) Error!void {
+    const expected_version = parseFormatVersion(expected_format) orelse return error.NotZovaDatabase;
+    if (expected_version <= 10) {
+        return validateObjectSchemaSql(
+            db,
+            object_impl.format10_objects_schema_sql,
+            object_impl.format10_chunks_schema_sql,
+            object_impl.format10_object_chunks_schema_sql,
+        );
+    }
+    if (expected_version == 11) return validateObjectSchema(db);
+    return error.NotZovaDatabase;
+}
+
+fn validateObjectSchemaSql(
+    db: *sqlite.Database,
+    expected_objects_sql: []const u8,
+    expected_chunks_sql: []const u8,
+    expected_object_chunks_sql: []const u8,
+) Error!void {
     const object_columns = [_][]const u8{
         "object_id",
         "size_bytes",
         "chunk_count",
         "chunker",
     };
-    try validateRequiredTable(db, object_impl.objects_table, &object_columns, object_impl.objects_schema_sql);
+    try validateRequiredTable(db, object_impl.objects_table, &object_columns, expected_objects_sql);
 
     const chunk_columns = [_][]const u8{
         "chunk_hash",
         "size_bytes",
         "data",
     };
-    try validateRequiredTable(db, object_impl.chunks_table, &chunk_columns, object_impl.chunks_schema_sql);
+    try validateRequiredTable(db, object_impl.chunks_table, &chunk_columns, expected_chunks_sql);
 
     const object_chunk_columns = [_][]const u8{
         "object_id",
@@ -4728,7 +4921,7 @@ fn validateObjectSchema(db: *sqlite.Database) Error!void {
         "offset",
         "size_bytes",
     };
-    try validateRequiredTable(db, object_impl.object_chunks_table, &object_chunk_columns, object_impl.object_chunks_schema_sql);
+    try validateRequiredTable(db, object_impl.object_chunks_table, &object_chunk_columns, expected_object_chunks_sql);
 }
 
 fn validateVectorSchema(db: *sqlite.Database) Error!void {
@@ -5485,7 +5678,7 @@ test "created zova database stores metadata" {
 }
 
 test "current format reserves graph store metadata" {
-    try std.testing.expectEqualStrings("10", format_version);
+    try std.testing.expectEqualStrings("11", format_version);
     try std.testing.expect(std.mem.indexOf(u8, bound_stores_schema_sql, "'graph_store'") != null);
     try std.testing.expect(std.mem.indexOf(u8, bound_stores_schema_sql, "graph_epoch integer") != null);
 
@@ -5514,7 +5707,7 @@ test "create graph store writes metadata and rejects main database open" {
         defer raw.deinit();
 
         try testingExpectScalarText(&raw, "select value from _zova_meta where key = 'magic'", "zova");
-        try testingExpectScalarText(&raw, "select value from _zova_meta where key = 'format_version'", "10");
+        try testingExpectScalarText(&raw, "select value from _zova_meta where key = 'format_version'", "11");
         try testingExpectScalarText(&raw, "select value from _zova_meta where key = 'store_role'", "graph_store");
         try testingExpectScalarText(&raw, "select value from _zova_meta where key = 'graph_epoch'", "0");
 
@@ -6905,6 +7098,10 @@ test "older main graph and vector fixtures are rejected without mutation" {
         .{ .path = "tests/fixtures/format-9.zova", .role = StorageRole.main, .open_error = error.MigrationRequired },
         .{ .path = "tests/fixtures/empty-graph-store-format-9.zova", .role = StorageRole.graph },
         .{ .path = "tests/fixtures/empty-vector-store-format-9.zova", .role = StorageRole.vector },
+        .{ .path = "tests/fixtures/format-10.zova", .role = StorageRole.main, .open_error = error.MigrationRequired },
+        .{ .path = "tests/fixtures/bound-main-format-10.objects.zova", .role = StorageRole.object },
+        .{ .path = "tests/fixtures/empty-graph-store-format-10.zova", .role = StorageRole.graph },
+        .{ .path = "tests/fixtures/empty-vector-store-format-10.zova", .role = StorageRole.vector },
     };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -6919,14 +7116,21 @@ test "older main graph and vector fixtures are rejected without mutation" {
             .main => try std.testing.expectError(fixture.open_error, Database.open(copy_path)),
             .graph => {
                 var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
-                const main_path = try std.fmt.bufPrintZ(&main_buffer, ".zig-cache/tmp/{s}/format-10-main-graph-{d}.zova", .{ tmp.sub_path[0..], index });
+                const main_path = try std.fmt.bufPrintZ(&main_buffer, ".zig-cache/tmp/{s}/format-11-main-graph-{d}.zova", .{ tmp.sub_path[0..], index });
                 var db = try Database.create(main_path);
                 defer db.deinit();
                 try std.testing.expectError(error.UnsupportedZovaVersion, db.bindGraphStore(copy_path));
             },
+            .object => {
+                var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+                const main_path = try std.fmt.bufPrintZ(&main_buffer, ".zig-cache/tmp/{s}/format-11-main-object-{d}.zova", .{ tmp.sub_path[0..], index });
+                var db = try Database.create(main_path);
+                defer db.deinit();
+                try std.testing.expectError(error.UnsupportedZovaVersion, db.bindObjectStore(copy_path));
+            },
             .vector => {
                 var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
-                const main_path = try std.fmt.bufPrintZ(&main_buffer, ".zig-cache/tmp/{s}/format-10-main-vector-{d}.zova", .{ tmp.sub_path[0..], index });
+                const main_path = try std.fmt.bufPrintZ(&main_buffer, ".zig-cache/tmp/{s}/format-11-main-vector-{d}.zova", .{ tmp.sub_path[0..], index });
                 var db = try Database.create(main_path);
                 defer db.deinit();
                 try std.testing.expectError(error.UnsupportedZovaVersion, db.bindVectorStore(copy_path));
@@ -6938,7 +7142,7 @@ test "older main graph and vector fixtures are rejected without mutation" {
     }
 }
 
-const StorageRole = enum { main, graph, vector };
+const StorageRole = enum { main, object, graph, vector };
 
 test "open rejects future format version" {
     var tmp = std.testing.tmpDir(.{});
@@ -6954,7 +7158,7 @@ test "open rejects future format version" {
         try raw.exec(
             \\create table _zova_meta (key text primary key, value text not null);
             \\insert into _zova_meta (key, value) values ('magic', 'zova');
-            \\insert into _zova_meta (key, value) values ('format_version', '11');
+            \\insert into _zova_meta (key, value) values ('format_version', '12');
         );
     }
 
@@ -6963,12 +7167,13 @@ test "open rejects future format version" {
 
 test "format version classification distinguishes current migratable legacy future and malformed" {
     try std.testing.expectEqual(FormatCompatibility.current, classifyFormatVersion(format_version).?);
-    try std.testing.expectEqual(FormatCompatibility.current, classifyFormatVersion("10").?);
+    try std.testing.expectEqual(FormatCompatibility.current, classifyFormatVersion("11").?);
+    try std.testing.expectEqual(FormatCompatibility.migratable, classifyFormatVersion("10").?);
     try std.testing.expectEqual(FormatCompatibility.migratable, classifyFormatVersion("9").?);
     try std.testing.expectEqual(FormatCompatibility.unsupported_legacy, classifyFormatVersion("8").?);
     try std.testing.expectEqual(FormatCompatibility.unsupported_legacy, classifyFormatVersion("7").?);
     try std.testing.expectEqual(FormatCompatibility.unsupported_legacy, classifyFormatVersion("2").?);
-    try std.testing.expectEqual(FormatCompatibility.unsupported_future, classifyFormatVersion("11").?);
+    try std.testing.expectEqual(FormatCompatibility.unsupported_future, classifyFormatVersion("12").?);
     try std.testing.expectEqual(FormatCompatibility.unsupported_future, classifyFormatVersion("999").?);
 
     const malformed = [_][]const u8{
@@ -7047,6 +7252,31 @@ test "single file remains the default object store" {
     var object = try db.getObject(std.testing.allocator, id);
     defer object.deinit(std.testing.allocator);
     try std.testing.expectEqualSlices(u8, "stored in the main database", object.bytes);
+}
+
+test "sequential object reader routes through a bound object store" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "reader-main.zova");
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "reader-objects.zova");
+    try createObjectStore(store_path);
+
+    var db = try Database.create(main_path);
+    defer db.deinit();
+    try db.bindObjectStore(store_path);
+
+    const payload = "sequential bytes from the bound object store";
+    const id = try db.putObjectWithOptions(payload, .{ .profile = .deduplication });
+    var reader = try db.objectReader(id);
+    defer reader.deinit();
+
+    var output: [payload.len]u8 = undefined;
+    try std.testing.expectEqual(output.len, try reader.read(&output));
+    try std.testing.expectEqualSlices(u8, payload, &output);
+    try std.testing.expectEqual(@as(usize, 0), try reader.read(&output));
 }
 
 test "optional bound object store routes object APIs after reopen" {

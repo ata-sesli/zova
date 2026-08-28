@@ -70,7 +70,7 @@ const Snapshot = struct {
 
 fn captureSnapshot(allocator: std.mem.Allocator, path: [:0]const u8) !Snapshot {
     // Inspection handles register the runtime SQL helpers without enforcing
-    // the current storage format, so format-9 sources and format-10 results
+    // the current storage format, so format-9 sources and format-11 results
     // are captured through identical code paths.
     var db = try zova.openForLogicalInspection(path);
     defer db.deinit();

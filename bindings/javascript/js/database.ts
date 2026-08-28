@@ -14,9 +14,11 @@ import type {
   GraphWalkOptions,
 } from "./graph.js";
 import {
+  ObjectReader,
   ObjectWriter,
   type ObjectManifest,
   type ObjectManifestChunkInput,
+  type ObjectPutOptions,
 } from "./object.js";
 import { Statement } from "./statement.js";
 import { Subscription } from "./subscription.js";
@@ -302,6 +304,13 @@ export class Database {
     return callNative(() => this.#native.putObject(data));
   }
 
+  putObjectWithOptions(
+    data: Uint8Array,
+    options: ObjectPutOptions,
+  ): Uint8Array {
+    return callNative(() => this.#native.putObjectWithOptions(data, options));
+  }
+
   getObject(id: Uint8Array): Uint8Array {
     return callNative(() => this.#native.getObject(id));
   }
@@ -342,6 +351,14 @@ export class Database {
     callNative(() => this.#native.putObjectChunk(hash, data));
   }
 
+  putObjectChunkWithOptions(
+    hash: Uint8Array,
+    data: Uint8Array,
+    options: ObjectPutOptions,
+  ): void {
+    callNative(() => this.#native.putObjectChunkWithOptions(hash, data, options));
+  }
+
   deleteObjectChunk(hash: Uint8Array): boolean {
     return callNative(() => this.#native.deleteObjectChunk(hash));
   }
@@ -356,8 +373,34 @@ export class Database {
     );
   }
 
+  assembleObjectFromChunksWithOptions(
+    id: Uint8Array,
+    sizeBytes: bigint,
+    chunks: readonly ObjectManifestChunkInput[],
+    options: ObjectPutOptions,
+  ): void {
+    callNative(() =>
+      this.#native.assembleObjectFromChunksWithOptions(
+        id,
+        sizeBytes,
+        [...chunks],
+        options,
+      ),
+    );
+  }
+
   objectWriter(): ObjectWriter {
     return new ObjectWriter(callNative(() => this.#native.objectWriter()));
+  }
+
+  objectWriterWithOptions(options: ObjectPutOptions): ObjectWriter {
+    return new ObjectWriter(
+      callNative(() => this.#native.objectWriterWithOptions(options)),
+    );
+  }
+
+  objectReader(id: Uint8Array): ObjectReader {
+    return new ObjectReader(callNative(() => this.#native.objectReader(id)));
   }
 
   createVectorCollection(

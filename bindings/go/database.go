@@ -21,6 +21,7 @@ type DB struct {
 	closed     bool
 	statements map[*Stmt]struct{}
 	writers    map[*ObjectWriter]struct{}
+	readers    map[*ObjectReader]struct{}
 	subs       map[*Subscription]struct{}
 }
 
@@ -166,6 +167,7 @@ func CreateMemory() (*DB, error) {
 		ptr:        raw,
 		statements: make(map[*Stmt]struct{}),
 		writers:    make(map[*ObjectWriter]struct{}),
+		readers:    make(map[*ObjectReader]struct{}),
 		subs:       make(map[*Subscription]struct{}),
 	}, nil
 }
@@ -273,6 +275,7 @@ func RestoreBackupToMemory(source string, options ...RestoreOptions) (*DB, error
 		ptr:        raw,
 		statements: make(map[*Stmt]struct{}),
 		writers:    make(map[*ObjectWriter]struct{}),
+		readers:    make(map[*ObjectReader]struct{}),
 		subs:       make(map[*Subscription]struct{}),
 	}, nil
 }
@@ -311,6 +314,7 @@ func openOrCreate(path string, create bool) (*DB, error) {
 		ptr:        raw,
 		statements: make(map[*Stmt]struct{}),
 		writers:    make(map[*ObjectWriter]struct{}),
+		readers:    make(map[*ObjectReader]struct{}),
 		subs:       make(map[*Subscription]struct{}),
 	}, nil
 }
@@ -350,6 +354,7 @@ func openWithOptions(path string, options OpenOptions) (*DB, error) {
 		ptr:        raw,
 		statements: make(map[*Stmt]struct{}),
 		writers:    make(map[*ObjectWriter]struct{}),
+		readers:    make(map[*ObjectReader]struct{}),
 		subs:       make(map[*Subscription]struct{}),
 	}, nil
 }
@@ -381,6 +386,20 @@ func (db *DB) Close() error {
 			writer.closed = true
 		}
 		delete(db.writers, writer)
+	}
+	for reader := range db.readers {
+		if !reader.closed && reader.ptr != nil {
+			raw := (**C.zova_object_reader)(C.malloc(C.size_t(unsafe.Sizeof(uintptr(0)))))
+			if raw != nil {
+				*raw = reader.ptr
+				request := C.zova_object_reader_destroy_request{reader: raw}
+				_ = C.zova_object_reader_destroy(&request)
+				C.free(unsafe.Pointer(raw))
+			}
+			reader.ptr = nil
+			reader.closed = true
+		}
+		delete(db.readers, reader)
 	}
 	for sub := range db.subs {
 		if !sub.closed && sub.ptr != nil {

@@ -25,7 +25,7 @@ use crate::notification::{
 };
 use crate::object::{
     empty_buffer, empty_manifest, from_c_object_id, take_buffer, take_manifest, ObjectChunkId,
-    ObjectId, ObjectManifest, ObjectManifestChunk,
+    ObjectId, ObjectManifest, ObjectManifestChunk, ObjectPutOptions,
 };
 use crate::statement::{ColumnType, Step};
 use crate::vector::{
@@ -63,6 +63,13 @@ pub struct SharedStatement {
 /// Owned streaming object writer tied to a [`SharedDatabase`].
 pub struct SharedObjectWriter {
     raw: Option<NonNull<zova_sys::zova_object_writer>>,
+    database: Arc<SharedDatabaseInner>,
+    _not_sync: PhantomData<Cell<()>>,
+}
+
+/// Owned sequential object reader tied to a [`SharedDatabase`].
+pub struct SharedObjectReader {
+    raw: Option<NonNull<zova_sys::zova_object_reader>>,
     database: Arc<SharedDatabaseInner>,
     _not_sync: PhantomData<Cell<()>>,
 }
@@ -109,6 +116,10 @@ unsafe impl Send for SharedStatement {}
 // Safety: methods require `&mut self`, the raw writer is used only while the
 // parent database lock is held, and the parent Arc keeps the native handle alive.
 unsafe impl Send for SharedObjectWriter {}
+
+// Safety: methods require `&mut self`, the raw reader is used only while the
+// parent database lock is held, and the parent Arc keeps the native handle alive.
+unsafe impl Send for SharedObjectReader {}
 
 // Safety: methods require `&mut self`, and the parent Arc keeps the native
 // database handle alive while receive/close serialize through the Rust mutex.
@@ -383,6 +394,25 @@ impl SharedDatabase {
         Ok(from_c_object_id(out))
     }
 
+    pub fn put_object_with_options(
+        &self,
+        bytes: &[u8],
+        options: ObjectPutOptions,
+    ) -> Result<ObjectId> {
+        let _guard = self.inner.lock();
+        let mut out = zova_sys::zova_object_id { bytes: [0; 32] };
+        let request = zova_sys::zova_object_put_with_options_request {
+            db: self.inner.raw_ptr(),
+            data: bytes.as_ptr(),
+            len: bytes.len(),
+            options: options.to_raw(),
+            out_id: &mut out,
+        };
+        self.inner
+            .status_locked(unsafe { zova_sys::zova_object_put_with_options(&request) })?;
+        Ok(from_c_object_id(out))
+    }
+
     pub fn get_object(&self, id: ObjectId) -> Result<Vec<u8>> {
         let _guard = self.inner.lock();
         let mut buffer = empty_buffer();
@@ -573,6 +603,24 @@ impl SharedDatabase {
             .status_locked(unsafe { zova_sys::zova_object_chunk_put(&request) })
     }
 
+    pub fn put_object_chunk_with_options(
+        &self,
+        expected_hash: ObjectChunkId,
+        bytes: &[u8],
+        options: ObjectPutOptions,
+    ) -> Result<()> {
+        let _guard = self.inner.lock();
+        let request = zova_sys::zova_object_chunk_put_with_options_request {
+            db: self.inner.raw_ptr(),
+            expected_hash: expected_hash.to_c(),
+            data: bytes.as_ptr(),
+            len: bytes.len(),
+            options: options.to_raw(),
+        };
+        self.inner
+            .status_locked(unsafe { zova_sys::zova_object_chunk_put_with_options(&request) })
+    }
+
     pub fn delete_object_chunk(&self, hash: ObjectChunkId) -> Result<bool> {
         let _guard = self.inner.lock();
         let mut deleted = 0;
@@ -605,6 +653,28 @@ impl SharedDatabase {
             .status_locked(unsafe { zova_sys::zova_object_assemble_from_chunks(&request) })
     }
 
+    pub fn assemble_object_from_chunks_with_options(
+        &self,
+        id: ObjectId,
+        size_bytes: u64,
+        chunks: &[ObjectManifestChunk],
+        options: ObjectPutOptions,
+    ) -> Result<()> {
+        let c_chunks: Vec<_> = chunks.iter().map(ObjectManifestChunk::to_c).collect();
+        let _guard = self.inner.lock();
+        let request = zova_sys::zova_object_assemble_from_chunks_with_options_request {
+            db: self.inner.raw_ptr(),
+            id: id.to_c(),
+            size_bytes,
+            chunks: c_chunks.as_ptr(),
+            chunk_count: c_chunks.len(),
+            options: options.to_raw(),
+        };
+        self.inner.status_locked(unsafe {
+            zova_sys::zova_object_assemble_from_chunks_with_options(&request)
+        })
+    }
+
     pub fn object_writer(&self) -> Result<SharedObjectWriter> {
         let _guard = self.inner.lock();
         let mut writer = ptr::null_mut();
@@ -617,6 +687,47 @@ impl SharedDatabase {
         let raw = NonNull::new(writer)
             .ok_or_else(|| Error::from_status(zova_sys::ZOVA_INVALID_ARGUMENT, None))?;
         Ok(SharedObjectWriter {
+            raw: Some(raw),
+            database: self.inner.clone(),
+            _not_sync: PhantomData,
+        })
+    }
+
+    pub fn object_writer_with_options(
+        &self,
+        options: ObjectPutOptions,
+    ) -> Result<SharedObjectWriter> {
+        let _guard = self.inner.lock();
+        let mut writer = ptr::null_mut();
+        let request = zova_sys::zova_object_writer_create_with_options_request {
+            db: self.inner.raw_ptr(),
+            options: options.to_raw(),
+            out_writer: &mut writer,
+        };
+        self.inner
+            .status_locked(unsafe { zova_sys::zova_object_writer_create_with_options(&request) })?;
+        let raw = NonNull::new(writer)
+            .ok_or_else(|| Error::from_status(zova_sys::ZOVA_INVALID_ARGUMENT, None))?;
+        Ok(SharedObjectWriter {
+            raw: Some(raw),
+            database: self.inner.clone(),
+            _not_sync: PhantomData,
+        })
+    }
+
+    pub fn object_reader(&self, id: ObjectId) -> Result<SharedObjectReader> {
+        let _guard = self.inner.lock();
+        let mut reader = ptr::null_mut();
+        let request = zova_sys::zova_object_reader_create_request {
+            db: self.inner.raw_ptr(),
+            id: id.to_c(),
+            out_reader: &mut reader,
+        };
+        self.inner
+            .status_locked(unsafe { zova_sys::zova_object_reader_create(&request) })?;
+        let raw = NonNull::new(reader)
+            .ok_or_else(|| Error::from_status(zova_sys::ZOVA_INVALID_ARGUMENT, None))?;
+        Ok(SharedObjectReader {
             raw: Some(raw),
             database: self.inner.clone(),
             _not_sync: PhantomData,
@@ -1936,6 +2047,72 @@ impl SharedObjectWriter {
         let database = self.database.clone();
         let _guard = database.lock();
         self.destroy_locked();
+    }
+}
+
+impl SharedObjectReader {
+    pub fn read(&mut self, buffer: &mut [u8]) -> Result<usize> {
+        let raw = self.raw()?;
+        let database = self.database.clone();
+        let _guard = database.lock();
+        let mut read = 0;
+        let request = zova_sys::zova_object_reader_read_request {
+            reader: raw.as_ptr(),
+            buffer: buffer.as_mut_ptr(),
+            buffer_len: buffer.len(),
+            out_read: &mut read,
+        };
+        database.status_locked(unsafe { zova_sys::zova_object_reader_read(&request) })?;
+        Ok(read)
+    }
+
+    pub fn close(&mut self) -> Result<()> {
+        if self.raw.is_none() {
+            return Ok(());
+        }
+        let database = self.database.clone();
+        let _guard = database.lock();
+        self.destroy_locked(true)
+    }
+
+    fn raw(&self) -> Result<NonNull<zova_sys::zova_object_reader>> {
+        self.raw
+            .ok_or_else(|| Error::from_status(zova_sys::ZOVA_OBJECT_READER_CLOSED, None))
+    }
+
+    fn destroy_locked(&mut self, report_error: bool) -> Result<()> {
+        let Some(raw) = self.raw else {
+            return Ok(());
+        };
+        let mut raw_ptr = raw.as_ptr();
+        let request = zova_sys::zova_object_reader_destroy_request {
+            reader: &mut raw_ptr,
+        };
+        let status = unsafe { zova_sys::zova_object_reader_destroy(&request) };
+        if status == zova_sys::ZOVA_OK {
+            self.raw = None;
+            return Ok(());
+        }
+        if report_error {
+            self.database.status_locked(status)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn destroy(&mut self) {
+        if self.raw.is_none() {
+            return;
+        }
+        let database = self.database.clone();
+        let _guard = database.lock();
+        let _ = self.destroy_locked(false);
+    }
+}
+
+impl Drop for SharedObjectReader {
+    fn drop(&mut self) {
+        self.destroy();
     }
 }
 

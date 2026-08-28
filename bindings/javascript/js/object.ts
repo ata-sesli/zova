@@ -24,6 +24,12 @@ export interface ObjectManifestChunkInput {
   readonly sizeBytes: bigint;
 }
 
+export type ObjectStorageProfile = "deduplication" | "streaming";
+
+export interface ObjectPutOptions {
+  readonly profile: ObjectStorageProfile;
+}
+
 export function objectId(data: Uint8Array): Uint8Array {
   return callNative(() => native.objectId(data));
 }
@@ -71,6 +77,29 @@ export class ObjectWriter {
 
   cancel(): void {
     callNative(() => this.#native.cancel());
+  }
+
+  close(): void {
+    callNative(() => this.#native.close());
+  }
+}
+
+export class ObjectReader {
+  readonly #native: native.NativeObjectReader;
+
+  constructor(reader: native.NativeObjectReader) {
+    this.#native = reader;
+  }
+
+  get closed(): boolean {
+    return this.#native.closed;
+  }
+
+  read(size: number): Uint8Array {
+    if (!Number.isInteger(size) || size < 0 || size > 0xffff_ffff) {
+      throw invalidArgument("object reader size must be a non-negative 32-bit integer");
+    }
+    return callNative(() => this.#native.read(size));
   }
 
   close(): void {

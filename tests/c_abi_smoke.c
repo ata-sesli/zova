@@ -1790,8 +1790,8 @@ static void run_probe_migrate_smoke(void) {
         expect_status(zova_database_close(db), ZOVA_OK, "close current for probe");
         zova_database_format_info out = {0};
         expect_status(zova_database_probe_format(&(zova_database_probe_format_request){.path = path, .out_info = &out, .out_error_message = &msg}), ZOVA_OK, "probe current");
-        if (out.format_version != 10 || out.compatibility != ZOVA_FORMAT_CURRENT) {
-            fprintf(stderr, "probe current: expected 10/CURRENT got %u/%d\n", out.format_version, out.compatibility);
+        if (out.format_version != 11 || out.compatibility != ZOVA_FORMAT_CURRENT) {
+            fprintf(stderr, "probe current: expected 11/CURRENT got %u/%d\n", out.format_version, out.compatibility);
             exit(1);
         }
         zova_message_free(&msg);
@@ -1853,7 +1853,7 @@ static void run_probe_migrate_smoke(void) {
         zova_database *db = NULL; zova_message msg = {0};
         expect_status(zova_database_create(&(zova_database_open_request){.path = src, .out_db = &db, .out_error_message = &msg}), ZOVA_OK, "create future base");
         zova_message_free(&msg);
-        expect_status(zova_database_exec(&(zova_database_exec_request){.db = db, .sql = "update _zova_meta set value = '11' where key = 'format_version'"}), ZOVA_OK, "patch future");
+        expect_status(zova_database_exec(&(zova_database_exec_request){.db = db, .sql = "update _zova_meta set value = '12' where key = 'format_version'"}), ZOVA_OK, "patch future");
         expect_status(zova_database_close(db), ZOVA_OK, "close future base");
         zova_message err = {0};
         expect_status(zova_database_migrate(&(zova_database_migrate_request){.source_path = src, .destination_path = dst, .flags = 0, .out_error_message = &err}), ZOVA_UNSUPPORTED_FUTURE_FORMAT, "migrate future");
@@ -1898,7 +1898,7 @@ static void run_probe_migrate_smoke(void) {
         // dest exists and probe is current
         zova_database_format_info out = {0}; zova_message pmsg = {0};
         expect_status(zova_database_probe_format(&(zova_database_probe_format_request){.path = dst, .out_info = &out, .out_error_message = &pmsg}), ZOVA_OK, "probe migrated dest");
-        if (out.format_version != 10 || out.compatibility != ZOVA_FORMAT_CURRENT) { fprintf(stderr, "migrate dest probe wrong\n"); exit(1); }
+        if (out.format_version != 11 || out.compatibility != ZOVA_FORMAT_CURRENT) { fprintf(stderr, "migrate dest probe wrong\n"); exit(1); }
         zova_message_free(&pmsg);
         // second migrate with same dest should be DESTINATION_EXISTS
         zova_message err2 = {0};
@@ -3048,6 +3048,44 @@ int main(int argc, char **argv) {
     }
     expect_bytes(range, (const uint8_t *)"from ", sizeof(range), "range read");
 
+    zova_object_reader *reader = NULL;
+    expect_status(zova_object_reader_create(&(zova_object_reader_create_request){
+                      .db = db,
+                      .id = object_id,
+                      .out_reader = &reader,
+                  }),
+                  ZOVA_OK,
+                  "reader create");
+    uint8_t reader_bytes[sizeof(object_bytes) - 1] = {0};
+    size_t reader_copied = 99;
+    expect_status(zova_object_reader_read(&(zova_object_reader_read_request){
+                      .reader = reader,
+                      .buffer = reader_bytes,
+                      .buffer_len = sizeof(reader_bytes),
+                      .out_read = &reader_copied,
+                  }),
+                  ZOVA_OK,
+                  "reader read");
+    if (reader_copied != sizeof(reader_bytes)) {
+        fprintf(stderr, "reader read: wrong copied length\n");
+        return 1;
+    }
+    expect_bytes(reader_bytes, object_bytes, reader_copied, "reader read");
+    expect_status(zova_object_reader_destroy(&(zova_object_reader_destroy_request){.reader = &reader}), ZOVA_OK, "reader destroy");
+    expect_status(zova_object_reader_destroy(&(zova_object_reader_destroy_request){.reader = &reader}), ZOVA_OK, "reader destroy twice");
+
+    zova_object_id option_id = {{0}};
+    expect_status(zova_object_put_with_options(&(zova_object_put_with_options_request){
+                      .db = db,
+                      .data = object_bytes,
+                      .len = sizeof(object_bytes) - 1,
+                      .options = {.profile = ZOVA_OBJECT_PROFILE_DEDUPLICATION},
+                      .out_id = &option_id,
+                  }),
+                  ZOVA_OK,
+                  "put object with options");
+    expect_bytes(option_id.bytes, object_id.bytes, sizeof(object_id.bytes), "put object with options id");
+
     zova_buffer full = {0};
     zova_object_get_request get_req = {
         .db = db,
@@ -3071,6 +3109,10 @@ int main(int argc, char **argv) {
     expect_status(zova_object_manifest_get(&manifest_req), ZOVA_OK, "manifest");
     if (manifest.chunks_len != 1 || manifest.chunk_count != 1 || manifest.size_bytes != sizeof(object_bytes) - 1) {
         fprintf(stderr, "manifest: unexpected shape\n");
+        return 1;
+    }
+    if (manifest.chunker == NULL || strcmp(manifest.chunker, "fastcdc-v1") != 0) {
+        fprintf(stderr, "manifest: unexpected chunker\n");
         return 1;
     }
 
@@ -3107,7 +3149,15 @@ int main(int argc, char **argv) {
         .len = sizeof(right) - 1,
     };
     expect_status(zova_object_chunk_put(&left_put), ZOVA_OK, "put left chunk");
-    expect_status(zova_object_chunk_put(&right_put), ZOVA_OK, "put right chunk");
+    expect_status(zova_object_chunk_put_with_options(&(zova_object_chunk_put_with_options_request){
+                      .db = db,
+                      .expected_hash = right_hash,
+                      .data = right,
+                      .len = sizeof(right) - 1,
+                      .options = {.profile = ZOVA_OBJECT_PROFILE_DEDUPLICATION},
+                  }),
+                  ZOVA_OK,
+                  "put right chunk with options");
 
     zova_object_manifest_chunk chunks[2] = {
         {.index = 0, .hash = left_hash, .offset = 0, .size_bytes = sizeof(left) - 1},
@@ -3121,6 +3171,37 @@ int main(int argc, char **argv) {
         .chunk_count = 2,
     };
     expect_status(zova_object_assemble_from_chunks(&assemble_req), ZOVA_OK, "assemble object");
+
+    const uint8_t option_assembled_bytes[] = "option-assembly";
+    zova_object_id option_assembled_id = {{0}};
+    zova_object_chunk_id option_assembled_hash = {{0}};
+    expect_status(zova_object_id_from_bytes(option_assembled_bytes, sizeof(option_assembled_bytes) - 1, &option_assembled_id), ZOVA_OK, "option assembly id");
+    expect_status(zova_object_chunk_id_from_bytes(option_assembled_bytes, sizeof(option_assembled_bytes) - 1, &option_assembled_hash), ZOVA_OK, "option assembly hash");
+    expect_status(zova_object_chunk_put_with_options(&(zova_object_chunk_put_with_options_request){
+                      .db = db,
+                      .expected_hash = option_assembled_hash,
+                      .data = option_assembled_bytes,
+                      .len = sizeof(option_assembled_bytes) - 1,
+                      .options = {.profile = ZOVA_OBJECT_PROFILE_DEDUPLICATION},
+                  }),
+                  ZOVA_OK,
+                  "put option assembly chunk");
+    zova_object_manifest_chunk option_assembled_chunk = {
+        .index = 0,
+        .hash = option_assembled_hash,
+        .offset = 0,
+        .size_bytes = sizeof(option_assembled_bytes) - 1,
+    };
+    expect_status(zova_object_assemble_from_chunks_with_options(&(zova_object_assemble_from_chunks_with_options_request){
+                      .db = db,
+                      .id = option_assembled_id,
+                      .size_bytes = sizeof(option_assembled_bytes) - 1,
+                      .chunks = &option_assembled_chunk,
+                      .chunk_count = 1,
+                      .options = {.profile = ZOVA_OBJECT_PROFILE_DEDUPLICATION},
+                  }),
+                  ZOVA_OK,
+                  "assemble object with options");
 
     zova_object_writer *writer = NULL;
     zova_object_writer_create_request writer_create_req = {
@@ -3147,6 +3228,17 @@ int main(int argc, char **argv) {
     };
     expect_status(zova_object_writer_finish(&writer_finish_req), ZOVA_OK, "writer finish");
     expect_status(zova_object_writer_destroy(writer), ZOVA_OK, "writer destroy");
+
+    zova_object_writer *option_writer = NULL;
+    expect_status(zova_object_writer_create_with_options(&(zova_object_writer_create_with_options_request){
+                      .db = db,
+                      .options = {.profile = ZOVA_OBJECT_PROFILE_DEDUPLICATION},
+                      .out_writer = &option_writer,
+                  }),
+                  ZOVA_OK,
+                  "writer create with options");
+    expect_status(zova_object_writer_cancel(&(zova_object_writer_cancel_request){.writer = option_writer}), ZOVA_OK, "option writer cancel");
+    expect_status(zova_object_writer_destroy(option_writer), ZOVA_OK, "option writer destroy");
 
     {
         zova_kv_bytes settings_namespace = {(const uint8_t *)"settings", 8};

@@ -1,7 +1,10 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 use std::ptr;
-use zova::{object_chunk_id, object_id, Database, ObjectChunkId, ObjectId, Status, Step};
+use zova::{
+    object_chunk_id, object_id, Database, ObjectChunkId, ObjectId, ObjectManifestChunk,
+    ObjectPutOptions, ObjectStorageProfile, Status, Step,
+};
 
 #[repr(C)]
 struct sqlite3 {
@@ -287,6 +290,88 @@ fn object_ids_can_live_in_user_sql_rows() {
     let stored_id = ObjectId::try_from(stored.as_slice()).unwrap();
     drop(select);
     assert_eq!(db.get_object(stored_id).unwrap(), b"stored through Rust");
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn option_bearing_object_apis_and_sequential_reader_preserve_dedup_behavior() {
+    let path = temp_path("profile-reader");
+    let mut db = Database::create(&path).unwrap();
+    let options = ObjectPutOptions {
+        profile: ObjectStorageProfile::Deduplication,
+    };
+
+    let bytes = b"profile-aware object";
+    let id = db.put_object_with_options(bytes, options).unwrap();
+    assert_eq!(id, object_id(bytes).unwrap());
+
+    let mut reader = db.object_reader(id).unwrap();
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; 3];
+    loop {
+        let read = reader.read(&mut buffer).unwrap();
+        if read == 0 {
+            break;
+        }
+        output.extend_from_slice(&buffer[..read]);
+    }
+    assert_eq!(output, bytes);
+    assert_eq!(reader.read(&mut buffer).unwrap(), 0);
+    reader.close().unwrap();
+    reader.close().unwrap();
+    assert_eq!(
+        reader.read(&mut buffer).unwrap_err().status(),
+        Some(Status::ObjectReaderClosed)
+    );
+    drop(reader);
+
+    let writer_bytes = b"profile writer";
+    let mut writer = db.object_writer_with_options(options).unwrap();
+    writer.write(writer_bytes).unwrap();
+    assert_eq!(writer.finish().unwrap(), object_id(writer_bytes).unwrap());
+
+    let chunk_bytes = b"assembled with profile";
+    let chunk_hash = object_chunk_id(chunk_bytes).unwrap();
+    db.put_object_chunk_with_options(chunk_hash, chunk_bytes, options)
+        .unwrap();
+    let assembled_id = object_id(chunk_bytes).unwrap();
+    db.assemble_object_from_chunks_with_options(
+        assembled_id,
+        chunk_bytes.len() as u64,
+        &[ObjectManifestChunk {
+            index: 0,
+            hash: chunk_hash,
+            offset: 0,
+            size_bytes: chunk_bytes.len() as u64,
+        }],
+        options,
+    )
+    .unwrap();
+    assert_eq!(db.get_object(assembled_id).unwrap(), chunk_bytes);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn owned_object_reader_keeps_database_handle_alive() {
+    let path = temp_path("owned-reader");
+    let bytes = b"owned sequential reader";
+    let mut db = Database::create(&path).unwrap();
+    let id = db.put_object(bytes).unwrap();
+    let mut reader = db.object_reader_owned(id).unwrap();
+    drop(db);
+
+    let mut output = [0_u8; 5];
+    let mut reconstructed = Vec::new();
+    loop {
+        let read = reader.read(&mut output).unwrap();
+        if read == 0 {
+            break;
+        }
+        reconstructed.extend_from_slice(&output[..read]);
+    }
+    assert_eq!(reconstructed, bytes);
+    reader.close().unwrap();
     let _ = std::fs::remove_file(path);
 }
 

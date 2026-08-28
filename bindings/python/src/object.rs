@@ -36,6 +36,17 @@ pub(crate) struct PyObjectManifest {
     chunks: Vec<PyObjectManifestChunk>,
 }
 
+#[pyclass(name = "ObjectPutOptions", frozen, skip_from_py_object)]
+#[derive(Clone, Copy)]
+pub(crate) struct PyObjectPutOptions {
+    profile: i32,
+}
+
+#[pyclass(name = "ObjectReader", unsendable)]
+pub(crate) struct PyObjectReader {
+    pub(crate) inner: Option<zova_rust::OwnedObjectReader>,
+}
+
 #[pyclass(name = "ObjectWriter", unsendable)]
 pub(crate) struct PyObjectWriter {
     pub(crate) inner: Option<zova_rust::OwnedObjectWriter>,
@@ -210,6 +221,25 @@ impl PyObjectManifest {
 }
 
 #[pymethods]
+impl PyObjectPutOptions {
+    #[new]
+    #[pyo3(signature = (profile = 0))]
+    pub(crate) fn new(profile: i32) -> PyResult<Self> {
+        validate_profile(profile)?;
+        Ok(Self { profile })
+    }
+
+    #[getter]
+    pub(crate) fn profile(&self) -> i32 {
+        self.profile
+    }
+
+    pub(crate) fn __repr__(&self) -> String {
+        format!("ObjectPutOptions(profile={})", self.profile)
+    }
+}
+
+#[pymethods]
 impl PyObjectWriter {
     pub(crate) fn write(&mut self, data: Vec<u8>) -> PyResult<()> {
         self.writer_mut()?.write(&data).map_err(zova_error)
@@ -236,6 +266,51 @@ impl PyObjectWriter {
             writer.cancel().map_err(zova_error)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn __enter__(slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
+        slf
+    }
+
+    pub(crate) fn __exit__(
+        &mut self,
+        _exc_type: Option<&Bound<'_, PyAny>>,
+        _exc_value: Option<&Bound<'_, PyAny>>,
+        _traceback: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<bool> {
+        self.close()?;
+        Ok(false)
+    }
+}
+
+#[pymethods]
+impl PyObjectReader {
+    pub(crate) fn read<'py>(
+        &mut self,
+        py: Python<'py>,
+        size: usize,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let reader = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| closed_error("object reader"))?;
+        let mut buffer = vec![0; size];
+        let read = reader.read(&mut buffer).map_err(zova_error)?;
+        buffer.truncate(read);
+        Ok(PyBytes::new(py, &buffer))
+    }
+
+    pub(crate) fn close(&mut self) -> PyResult<()> {
+        let Some(mut reader) = self.inner.take() else {
+            return Ok(());
+        };
+        match reader.close() {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.inner = Some(reader);
+                Err(zova_error(error))
+            }
+        }
     }
 
     pub(crate) fn __enter__(slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
@@ -350,6 +425,28 @@ pub(crate) fn manifest_chunks_from_py(
         chunks.push(chunk.to_rust());
     }
     Ok(chunks)
+}
+
+pub(crate) fn put_options_from_py(
+    value: &Bound<'_, PyAny>,
+) -> PyResult<zova_rust::ObjectPutOptions> {
+    let options = value.extract::<PyRef<'_, PyObjectPutOptions>>()?;
+    let profile = match options.profile {
+        0 => zova_rust::ObjectStorageProfile::Deduplication,
+        1 => zova_rust::ObjectStorageProfile::Streaming,
+        _ => unreachable!("ObjectPutOptions validates profile values"),
+    };
+    Ok(zova_rust::ObjectPutOptions { profile })
+}
+
+fn validate_profile(profile: i32) -> PyResult<()> {
+    if matches!(profile, 0 | 1) {
+        Ok(())
+    } else {
+        Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown object storage profile: {profile}"
+        )))
+    }
 }
 
 fn richcmp_bytes(lhs: &[u8; 32], rhs: &[u8; 32], op: CompareOp) -> PyResult<bool> {

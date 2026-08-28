@@ -74,8 +74,8 @@ func TestProbeFormatClassifiesFormats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProbeFormat(current) = %v", err)
 	}
-	if info.FormatVersion != 10 || info.Compatibility != FormatCurrent {
-		t.Fatalf("ProbeFormat(current) = %+v, want format 10 current", info)
+	if info.FormatVersion != 11 || info.Compatibility != FormatCurrent {
+		t.Fatalf("ProbeFormat(current) = %+v, want format 11 current", info)
 	}
 	if name := FormatCompatibilityName(info.Compatibility); name != "current" {
 		t.Fatalf("compatibility name = %q, want current", name)
@@ -109,8 +109,8 @@ func TestMigrateFixtureForwardAndReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProbeFormat(destination) = %v", err)
 	}
-	if info.FormatVersion != 10 || info.Compatibility != FormatCurrent {
-		t.Fatalf("ProbeFormat(destination) = %+v, want format 10 current", info)
+	if info.FormatVersion != 11 || info.Compatibility != FormatCurrent {
+		t.Fatalf("ProbeFormat(destination) = %+v, want format 11 current", info)
 	}
 	if after := readAllBytes(t, source); !sameBytes(before, after) {
 		t.Fatalf("MigrateDatabase mutated the source")
@@ -150,8 +150,8 @@ func TestMigrateNoVerifyFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProbeFormat = %v", err)
 	}
-	if info.FormatVersion != 10 || info.Compatibility != FormatCurrent {
-		t.Fatalf("ProbeFormat = %+v, want format 10 current", info)
+	if info.FormatVersion != 11 || info.Compatibility != FormatCurrent {
+		t.Fatalf("ProbeFormat = %+v, want format 11 current", info)
 	}
 }
 
