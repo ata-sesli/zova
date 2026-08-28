@@ -29,8 +29,10 @@ from ._native import (
     ZovaError,
     convert_sqlite_to_zova,
     encode_f32_le,
+    migrate_database,
     object_chunk_id,
     object_id,
+    probe_format,
     restore_backup,
     restore_backup_to_memory,
 )
@@ -83,12 +85,36 @@ class GraphNeighborDirection(IntEnum):
 DEFAULT_GRAPH_NAME = "default"
 
 
+class FormatCompatibility(IntEnum):
+    """Compatibility class assigned to a Zova storage format version."""
+
+    CURRENT = 0
+    MIGRATABLE = 1
+    UNSUPPORTED_LEGACY = 2
+    UNSUPPORTED_FUTURE = 3
+
+    @property
+    def name_value(self) -> str:
+        """Stable machine-readable name shared by every Zova binding."""
+        return _FORMAT_COMPATIBILITY_NAMES[self]
+
+
+_FORMAT_COMPATIBILITY_NAMES = {
+    FormatCompatibility.CURRENT: "current",
+    FormatCompatibility.MIGRATABLE: "migratable",
+    FormatCompatibility.UNSUPPORTED_LEGACY: "unsupported_legacy",
+    FormatCompatibility.UNSUPPORTED_FUTURE: "unsupported_future",
+}
+
+
 __all__ = [
     "ClosedHandleError",
     "ColumnType",
     "Database",
     "DEFAULT_GRAPH_NAME",
     "ExtensionInfo",
+    "FormatCompatibility",
+    "FormatInfo",
     "GraphEdge",
     "GraphEdgeInput",
     "GraphInfo",
@@ -120,6 +146,7 @@ __all__ = [
     "__version__",
     "convert_sqlite_to_zova",
     "encode_f32_le",
+    "migrate_database",
     "object_chunk_id",
     "object_id",
     "restore_backup",

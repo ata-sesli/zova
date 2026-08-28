@@ -50,6 +50,9 @@ pub enum Status {
     ExtensionInvalid,
     ExtensionIncompatible,
     ExtensionUnavailable,
+    MigrationRequired,
+    UnsupportedFutureFormat,
+    UnsupportedLegacyFormat,
     Unknown(i32),
 }
 
@@ -100,6 +103,9 @@ impl Status {
             zova_sys::ZOVA_EXTENSION_INVALID => Self::ExtensionInvalid,
             zova_sys::ZOVA_EXTENSION_INCOMPATIBLE => Self::ExtensionIncompatible,
             zova_sys::ZOVA_EXTENSION_UNAVAILABLE => Self::ExtensionUnavailable,
+            zova_sys::ZOVA_MIGRATION_REQUIRED => Self::MigrationRequired,
+            zova_sys::ZOVA_UNSUPPORTED_FUTURE_FORMAT => Self::UnsupportedFutureFormat,
+            zova_sys::ZOVA_UNSUPPORTED_LEGACY_FORMAT => Self::UnsupportedLegacyFormat,
             other => Self::Unknown(other),
         }
     }
@@ -150,6 +156,9 @@ impl Status {
             Self::ExtensionInvalid => zova_sys::ZOVA_EXTENSION_INVALID,
             Self::ExtensionIncompatible => zova_sys::ZOVA_EXTENSION_INCOMPATIBLE,
             Self::ExtensionUnavailable => zova_sys::ZOVA_EXTENSION_UNAVAILABLE,
+            Self::MigrationRequired => zova_sys::ZOVA_MIGRATION_REQUIRED,
+            Self::UnsupportedFutureFormat => zova_sys::ZOVA_UNSUPPORTED_FUTURE_FORMAT,
+            Self::UnsupportedLegacyFormat => zova_sys::ZOVA_UNSUPPORTED_LEGACY_FORMAT,
             Self::Unknown(code) => code,
         }
     }

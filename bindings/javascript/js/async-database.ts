@@ -7,7 +7,7 @@ import type {
   GraphWalkItem,
   GraphWalkOptions,
 } from "./graph.js";
-import type { OpenOptions } from "./types.js";
+import type { FormatInfo, OpenOptions } from "./types.js";
 import type { KvEntry } from "./types.js";
 import { Subscription } from "./subscription.js";
 import type {
@@ -61,6 +61,30 @@ export class AsyncDatabase {
   ): Promise<void> {
     return native
       .asyncRestoreBackup(source, destination, verify)
+      .catch((error: unknown) => {
+        throw normalizeNativeError(error);
+      });
+  }
+
+  static probeFormat(path: string): Promise<FormatInfo> {
+    return native
+      .asyncProbeFormat(path)
+      .then((info: native.NativeFormatInfo) => ({
+        formatVersion: info.formatVersion,
+        compatibility: info.compatibility as FormatInfo["compatibility"],
+      }))
+      .catch((error: unknown) => {
+        throw normalizeNativeError(error);
+      });
+  }
+
+  static migrateDatabase(
+    source: string,
+    destination: string,
+    verify = true,
+  ): Promise<void> {
+    return native
+      .asyncMigrateDatabase(source, destination, verify)
       .catch((error: unknown) => {
         throw normalizeNativeError(error);
       });

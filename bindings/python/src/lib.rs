@@ -8,8 +8,8 @@ mod statement;
 mod vector;
 
 use database::{
-    convert_sqlite_to_zova, restore_backup, restore_backup_to_memory, PyDatabase,
-    PySavepointContext,
+    convert_sqlite_to_zova, migrate_database, probe_format, restore_backup,
+    restore_backup_to_memory, PyDatabase, PyFormatInfo, PySavepointContext,
 };
 use error::{ClosedHandleError, ZovaError};
 use extension::PyExtensionInfo;
@@ -49,6 +49,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVectorInput>()?;
     m.add_class::<PyVectorSearchResult>()?;
     m.add_class::<PyExtensionInfo>()?;
+    m.add_class::<PyFormatInfo>()?;
     m.add_class::<PyGraphInfo>()?;
     m.add_class::<PyGraphNodeInput>()?;
     m.add_class::<PyGraphNode>()?;
@@ -61,6 +62,8 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(convert_sqlite_to_zova, m)?)?;
     m.add_function(wrap_pyfunction!(restore_backup, m)?)?;
     m.add_function(wrap_pyfunction!(restore_backup_to_memory, m)?)?;
+    m.add_function(wrap_pyfunction!(probe_format, m)?)?;
+    m.add_function(wrap_pyfunction!(migrate_database, m)?)?;
     m.add_function(wrap_pyfunction!(object_id, m)?)?;
     m.add_function(wrap_pyfunction!(object_chunk_id, m)?)?;
     m.add_function(wrap_pyfunction!(encode_f32_le, m)?)?;

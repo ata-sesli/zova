@@ -14,9 +14,13 @@ Current package version: `0.26.1`.
 
 Zova is pre-1.0. The current `.zova` file `format_version` is `10`. Format-10
 files require the current development build, and older builds reject them.
-Zova does not migrate older format files in place: keep a compatible backup
-and export data with an older build before moving it into a new format-10
-database.
+Zova does not migrate older format files in place: open never migrates
+silently, and downgrades are unsupported. Format-9 databases created by the
+released 0.26.1 build can be migrated forward with the explicit, copy-forward
+probe and migration surfaces (`zova format` and `zova migrate` on the CLI,
+`zova_database_probe_format` and `zova_database_migrate` on the C ABI, and
+aligned APIs in the Rust, Python, Go, and JavaScript bindings). Migration
+writes only to a new destination file and never mutates the source.
 
 Zova's bundled SQLite enables FTS5 and the read-only `dbstat` virtual table.
 `dbstat` is available for storage diagnostics; it is not a portable guarantee
@@ -974,6 +978,8 @@ zova graph-neighbors --limit 20 app.zova app message:123
 zova graph-walk --max-depth 2 --limit 50 app.zova app message:123
 zova tables app.zova
 zova check --deep app.zova
+zova format --json app.zova
+zova migrate --json old-9.zova new-10.zova
 zova doctor --json app.zova
 zova object-store info app.zova
 zova vector-store info app.zova

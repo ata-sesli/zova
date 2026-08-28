@@ -20,7 +20,7 @@ import {
 } from "./object.js";
 import { Statement } from "./statement.js";
 import { Subscription } from "./subscription.js";
-import type { ExtensionInfo, KvEntry, OpenOptions } from "./types.js";
+import type { ExtensionInfo, FormatInfo, KvEntry, OpenOptions } from "./types.js";
 import type {
   Vector,
   VectorCollectionInfo,
@@ -585,6 +585,24 @@ export function restoreBackup(
   verify = true,
 ): void {
   callNative(() => native.restoreBackup(source, destination, verify));
+}
+
+export function probeFormat(path: string): FormatInfo {
+  return callNative(() => {
+    const info = native.probeFormat(path);
+    return {
+      formatVersion: info.formatVersion,
+      compatibility: info.compatibility as FormatInfo["compatibility"],
+    };
+  });
+}
+
+export function migrateDatabase(
+  source: string,
+  destination: string,
+  verify = true,
+): void {
+  callNative(() => native.migrateDatabase(source, destination, verify));
 }
 
 export function convertSqliteToZova(

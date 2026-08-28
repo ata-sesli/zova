@@ -108,6 +108,41 @@ fn extension_info(info: zova::ExtensionInfo) -> NativeExtensionInfo {
     }
 }
 
+#[napi(object)]
+pub struct NativeFormatInfo {
+    pub format_version: u32,
+    pub compatibility: String,
+}
+
+/// Probe a `.zova` file's storage format without opening or mutating it.
+#[napi]
+#[cfg_attr(test, allow(dead_code))]
+pub fn probe_format(path: String) -> Result<NativeFormatInfo> {
+    let info = zova::probe_format(path).map_err(zova_error)?;
+    Ok(NativeFormatInfo {
+        format_version: info.format_version,
+        compatibility: info.compatibility.name().to_owned(),
+    })
+}
+
+/// Migrate a `.zova` file forward to this release's storage format.
+#[napi]
+#[cfg_attr(test, allow(dead_code))]
+pub fn migrate_database(
+    source: String,
+    destination: String,
+    verify: Option<bool>,
+) -> Result<()> {
+    zova::migrate_database(
+        source,
+        destination,
+        zova::MigrateOptions {
+            verify: verify.unwrap_or(true),
+        },
+    )
+    .map_err(zova_error)
+}
+
 #[napi]
 #[cfg_attr(test, allow(dead_code))]
 pub fn restore_backup(source: String, destination: String, verify: Option<bool>) -> Result<()> {

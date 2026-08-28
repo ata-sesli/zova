@@ -6,7 +6,7 @@ use napi::bindgen_prelude::{
 use napi::{Env, Result, Task};
 use napi_derive::napi;
 
-use crate::database::{DatabaseState, NativeDatabase, NativeKvEntry};
+use crate::database::{DatabaseState, NativeDatabase, NativeFormatInfo, NativeKvEntry};
 use crate::error::zova_error;
 use crate::graph::{
     target_type, NativeGraphEdgeInput, NativeGraphNodeInput, NativeGraphWalkItem,
@@ -562,6 +562,74 @@ pub struct KvTaskValue {
     pub value: Option<Uint8Array>,
     pub values: Option<Vec<Option<Uint8Array>>>,
     pub count: Option<BigInt>,
+}
+
+#[cfg_attr(test, allow(dead_code))]
+pub struct ProbeFormatTask {
+    path: String,
+}
+
+impl Task for ProbeFormatTask {
+    type Output = zova::FormatInfo;
+    type JsValue = NativeFormatInfo;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        zova::probe_format(&self.path).map_err(zova_error)
+    }
+
+    fn resolve(&mut self, _: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(NativeFormatInfo {
+            format_version: output.format_version,
+            compatibility: output.compatibility.name().to_owned(),
+        })
+    }
+}
+
+#[cfg_attr(test, allow(dead_code))]
+pub struct MigrateTask {
+    source: String,
+    destination: String,
+    verify: bool,
+}
+
+impl Task for MigrateTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        zova::migrate_database(
+            &self.source,
+            &self.destination,
+            zova::MigrateOptions {
+                verify: self.verify,
+            },
+        )
+        .map_err(zova_error)
+    }
+
+    fn resolve(&mut self, _: Env, _: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
+    }
+}
+
+#[napi(ts_return_type = "Promise<NativeFormatInfo>")]
+#[cfg_attr(test, allow(dead_code))]
+pub fn async_probe_format(path: String) -> AsyncTask<ProbeFormatTask> {
+    AsyncTask::new(ProbeFormatTask { path })
+}
+
+#[napi(ts_return_type = "Promise<void>")]
+#[cfg_attr(test, allow(dead_code))]
+pub fn async_migrate_database(
+    source: String,
+    destination: String,
+    verify: Option<bool>,
+) -> AsyncTask<MigrateTask> {
+    AsyncTask::new(MigrateTask {
+        source,
+        destination,
+        verify: verify.unwrap_or(true),
+    })
 }
 
 #[napi(ts_return_type = "Promise<void>")]

@@ -21,6 +21,17 @@ export interface ExtensionInfo {
   manifestJson: string;
 }
 
+export type FormatCompatibilityName =
+  | "current"
+  | "migratable"
+  | "unsupported_legacy"
+  | "unsupported_future";
+
+export interface FormatInfo {
+  readonly formatVersion: number;
+  readonly compatibility: FormatCompatibilityName;
+}
+
 export interface KvEntry {
   readonly key: Uint8Array;
   readonly value: Uint8Array;

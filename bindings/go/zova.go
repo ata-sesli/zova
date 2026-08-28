@@ -65,6 +65,9 @@ const (
 	StatusExtensionUnavailable     Status = C.ZOVA_EXTENSION_UNAVAILABLE
 	StatusKVTooLarge               Status = C.ZOVA_KV_TOO_LARGE
 	StatusKVCorrupt                Status = C.ZOVA_KV_CORRUPT
+	StatusMigrationRequired        Status = C.ZOVA_MIGRATION_REQUIRED
+	StatusUnsupportedFutureFormat  Status = C.ZOVA_UNSUPPORTED_FUTURE_FORMAT
+	StatusUnsupportedLegacyFormat  Status = C.ZOVA_UNSUPPORTED_LEGACY_FORMAT
 )
 
 // Step is the result of advancing a prepared statement.
@@ -77,6 +80,32 @@ const (
 
 // ColumnType is SQLite's runtime column type.
 type ColumnType int
+
+// FormatCompatibility is the compatibility class assigned to a Zova storage
+// format version.
+type FormatCompatibility int
+
+const (
+	FormatCurrent           FormatCompatibility = C.ZOVA_FORMAT_CURRENT
+	FormatMigratable        FormatCompatibility = C.ZOVA_FORMAT_MIGRATABLE
+	FormatUnsupportedLegacy FormatCompatibility = C.ZOVA_FORMAT_UNSUPPORTED_LEGACY
+	FormatUnsupportedFuture FormatCompatibility = C.ZOVA_FORMAT_UNSUPPORTED_FUTURE
+)
+
+// FormatCompatibilityName returns the stable machine-readable name shared by
+// every Zova binding.
+func FormatCompatibilityName(compatibility FormatCompatibility) string {
+	switch compatibility {
+	case FormatMigratable:
+		return "migratable"
+	case FormatUnsupportedLegacy:
+		return "unsupported_legacy"
+	case FormatUnsupportedFuture:
+		return "unsupported_future"
+	default:
+		return "current"
+	}
+}
 
 const (
 	ColumnInteger ColumnType = C.ZOVA_COLUMN_INTEGER

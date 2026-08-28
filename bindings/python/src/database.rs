@@ -801,6 +801,47 @@ pub(crate) fn restore_backup(source: &str, destination: &str, verify: bool) -> P
         .map_err(zova_error)
 }
 
+/// Storage-format facts about a `.zova` file, reported without opening or
+/// mutating the file.
+///
+/// `compatibility` is one of the stable machine-readable names shared by every
+/// Zova binding: `current`, `migratable`, `unsupported_legacy`, or
+/// `unsupported_future`.
+#[pyclass(name = "FormatInfo", frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub(crate) struct PyFormatInfo {
+    #[pyo3(get)]
+    format_version: u32,
+    #[pyo3(get)]
+    compatibility: String,
+}
+
+/// Probe a `.zova` file's storage format without opening or mutating it.
+///
+/// The probe never requires an open database handle and never writes to the
+/// probed file.
+#[pyfunction]
+pub(crate) fn probe_format(path: &str) -> PyResult<PyFormatInfo> {
+    let info = zova_rust::probe_format(path).map_err(zova_error)?;
+    Ok(PyFormatInfo {
+        format_version: info.format_version,
+        compatibility: info.compatibility.name().to_string(),
+    })
+}
+
+/// Migrate a `.zova` file forward to this release's storage format.
+///
+/// Migration is explicit, copy-forward, and source-preserving: the source file
+/// is never mutated, the destination must not already exist, and any failure
+/// removes attempted output. When `verify` is true (the default), the migrated
+/// destination is verified after the copy.
+#[pyfunction]
+#[pyo3(signature = (source, destination, *, verify = true))]
+pub(crate) fn migrate_database(source: &str, destination: &str, verify: bool) -> PyResult<()> {
+    zova_rust::migrate_database(source, destination, zova_rust::MigrateOptions { verify })
+        .map_err(zova_error)
+}
+
 /// Restore a valid `.zova` backup file into a new volatile in-memory database.
 ///
 /// The returned database owns the source's schema and data entirely in memory

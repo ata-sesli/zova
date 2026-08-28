@@ -55,6 +55,61 @@ impl Default for RestoreOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MigrateOptions {
+    pub verify: bool,
+}
+
+impl Default for MigrateOptions {
+    fn default() -> Self {
+        Self { verify: true }
+    }
+}
+
+/// Compatibility class assigned to a Zova storage format version.
+///
+/// `Current` marks this release's storage format, `Migratable` marks an older
+/// format this release can migrate forward, `UnsupportedLegacy` marks formats
+/// older than the earliest migratable format, and `UnsupportedFuture` marks
+/// formats newer than this release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FormatCompatibility {
+    Current,
+    Migratable,
+    UnsupportedLegacy,
+    UnsupportedFuture,
+}
+
+impl FormatCompatibility {
+    pub(crate) fn from_raw(code: i32) -> Self {
+        match code {
+            zova_sys::ZOVA_FORMAT_MIGRATABLE => Self::Migratable,
+            zova_sys::ZOVA_FORMAT_UNSUPPORTED_LEGACY => Self::UnsupportedLegacy,
+            zova_sys::ZOVA_FORMAT_UNSUPPORTED_FUTURE => Self::UnsupportedFuture,
+            _ => Self::Current,
+        }
+    }
+
+    /// Stable machine-readable name shared by every Zova binding.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::Migratable => "migratable",
+            Self::UnsupportedLegacy => "unsupported_legacy",
+            Self::UnsupportedFuture => "unsupported_future",
+        }
+    }
+}
+
+/// Storage-format facts about a `.zova` file, reported without opening or
+/// mutating the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FormatInfo {
+    pub format_version: u32,
+    pub compatibility: FormatCompatibility,
+}
+
 pub(crate) struct DatabaseInner {
     raw: NonNull<zova_sys::zova_database>,
     _not_send_sync: PhantomData<Rc<()>>,
@@ -543,11 +598,72 @@ pub(crate) fn compact_flags(verify: bool) -> u32 {
     }
 }
 
+/// Probe a `.zova` file's storage format without opening or mutating it.
+///
+/// The probe never requires an open database handle and never writes to the
+/// probed file.
+pub fn probe_format(path: impl AsRef<Path>) -> Result<FormatInfo> {
+    let path = path_to_cstring(path.as_ref())?;
+    let mut info = zova_sys::zova_database_format_info {
+        format_version: 0,
+        compatibility: zova_sys::ZOVA_FORMAT_CURRENT,
+    };
+    let mut message = empty_message();
+    let request = zova_sys::zova_database_probe_format_request {
+        path: path.as_ptr(),
+        out_info: &mut info,
+        out_error_message: &mut message,
+    };
+    let status = unsafe { zova_sys::zova_database_probe_format(&request) };
+    if status != zova_sys::ZOVA_OK {
+        return Err(Error::from_status(status, take_message(&mut message)));
+    }
+    Ok(FormatInfo {
+        format_version: info.format_version,
+        compatibility: FormatCompatibility::from_raw(info.compatibility),
+    })
+}
+
+/// Migrate a `.zova` file forward to this release's storage format.
+///
+/// Migration is explicit, copy-forward, and source-preserving: the source file
+/// is never mutated, the destination must not already exist, and any failure
+/// removes attempted output. When `options.verify` is true (the default), the
+/// migrated destination is verified after the copy.
+pub fn migrate_database(
+    source: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+    options: MigrateOptions,
+) -> Result<()> {
+    let source = path_to_cstring(source.as_ref())?;
+    let destination = path_to_cstring(destination.as_ref())?;
+    let mut message = empty_message();
+    let request = zova_sys::zova_database_migrate_request {
+        source_path: source.as_ptr(),
+        destination_path: destination.as_ptr(),
+        flags: migrate_flags(options.verify),
+        out_error_message: &mut message,
+    };
+    let status = unsafe { zova_sys::zova_database_migrate(&request) };
+    if status == zova_sys::ZOVA_OK {
+        return Ok(());
+    }
+    Err(Error::from_status(status, take_message(&mut message)))
+}
+
 pub(crate) fn restore_flags(verify: bool) -> u32 {
     if verify {
         0
     } else {
         zova_sys::ZOVA_RESTORE_NO_VERIFY
+    }
+}
+
+pub(crate) fn migrate_flags(verify: bool) -> u32 {
+    if verify {
+        0
+    } else {
+        zova_sys::ZOVA_MIGRATE_NO_VERIFY
     }
 }
 
