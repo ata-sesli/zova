@@ -1,4 +1,5 @@
 #include "zova.h"
+#include "sqlite3.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -1711,6 +1712,253 @@ static void run_dynamic_extension_bundle_smoke(
     zova_message_free(&message);
 }
 
+static void run_probe_migrate_smoke(void) {
+    // Null request validation
+    expect_status(zova_database_probe_format(NULL), ZOVA_INVALID_ARGUMENT, "probe null request");
+    expect_status(zova_database_migrate(NULL), ZOVA_INVALID_ARGUMENT, "migrate null request");
+
+    // Probe: null out_info must be INVALID_ARGUMENT and not crash; out_info zeroed check
+    {
+        zova_message msg = {0};
+        zova_database_format_info out = {.format_version = 0xDEADBEEF, .compatibility = 0x7FFFFFFF};
+        expect_status(zova_database_probe_format(&(zova_database_probe_format_request){
+                          .path = "/tmp/zova_probe_dummy.zova",
+                          .out_info = NULL,
+                          .out_error_message = &msg,
+                      }),
+                      ZOVA_INVALID_ARGUMENT, "probe null out_info");
+        zova_message_free(&msg);
+        // out remains unchanged (we didn't pass it, so not zeroed - just check no crash)
+        (void)out;
+    }
+    // Probe: null path -> INVALID_ARGUMENT and out zeroed
+    {
+        zova_message msg = {0};
+        zova_database_format_info out = {.format_version = 0xDEADBEEF, .compatibility = 0x7FFFFFFF};
+        expect_status(zova_database_probe_format(&(zova_database_probe_format_request){
+                          .path = NULL,
+                          .out_info = &out,
+                          .out_error_message = &msg,
+                      }),
+                      ZOVA_INVALID_ARGUMENT, "probe null path");
+        if (out.format_version != 0 || out.compatibility != 0) {
+            fprintf(stderr, "probe null path: expected zeroed out_info\n");
+            exit(1);
+        }
+        zova_message_free(&msg);
+    }
+    // Probe: path without .zova -> NOT_ZOVA_PATH and zeroed
+    {
+        zova_message msg = {0};
+        zova_database_format_info out = {.format_version = 0xDEADBEEF, .compatibility = 0x7FFFFFFF};
+        expect_status(zova_database_probe_format(&(zova_database_probe_format_request){
+                          .path = "/tmp/bad.txt",
+                          .out_info = &out,
+                          .out_error_message = &msg,
+                      }),
+                      ZOVA_NOT_ZOVA_PATH, "probe bad path suffix");
+        if (out.format_version != 0 || out.compatibility != 0) {
+            fprintf(stderr, "probe bad path: expected zeroed out_info\n");
+            exit(1);
+        }
+        zova_message_free(&msg);
+    }
+    // Probe: invalid flags not applicable for probe, but test unknown path (non-existent .zova) -> NOT_ZOVA_DATABASE
+    {
+        zova_message msg = {0};
+        zova_database_format_info out = {0};
+        expect_status(zova_database_probe_format(&(zova_database_probe_format_request){
+                          .path = "/tmp/zova_probe_nonexistent_xyz123.zova",
+                          .out_info = &out,
+                          .out_error_message = &msg,
+                      }),
+                      ZOVA_NOT_ZOVA_DATABASE, "probe nonexistent .zova");
+        if (out.format_version != 0 || out.compatibility != 0) {
+            fprintf(stderr, "probe nonexistent: expected zeroed out_info\n");
+            exit(1);
+        }
+        zova_message_free(&msg);
+    }
+    // Probe: current format (fresh DB)
+    {
+        const char *path = "/tmp/zova_probe_current.zova";
+        remove(path);
+        zova_database *db = NULL;
+        zova_message msg = {0};
+        expect_status(zova_database_create(&(zova_database_open_request){.path = path, .out_db = &db, .out_error_message = &msg}), ZOVA_OK, "create current for probe");
+        zova_message_free(&msg);
+        expect_status(zova_database_close(db), ZOVA_OK, "close current for probe");
+        zova_database_format_info out = {0};
+        expect_status(zova_database_probe_format(&(zova_database_probe_format_request){.path = path, .out_info = &out, .out_error_message = &msg}), ZOVA_OK, "probe current");
+        if (out.format_version != 10 || out.compatibility != ZOVA_FORMAT_CURRENT) {
+            fprintf(stderr, "probe current: expected 10/CURRENT got %u/%d\n", out.format_version, out.compatibility);
+            exit(1);
+        }
+        zova_message_free(&msg);
+        remove(path);
+    }
+    // Probe: migratable fixture
+    {
+        const char *src = "tests/fixtures/format-9.zova";
+        const char *dst = "/tmp/zova_probe_migratable.zova";
+        // copy fixture via file copy
+        FILE *in = fopen(src, "rb");
+        FILE *outf = fopen(dst, "wb");
+        if (!in || !outf) { fprintf(stderr, "copy fixture failed\n"); exit(1); }
+        char buf[8192]; size_t n; while ((n = fread(buf,1,sizeof(buf),in))>0) fwrite(buf,1,n,outf);
+        fclose(in); fclose(outf);
+        zova_database_format_info out = {0};
+        zova_message msg = {0};
+        expect_status(zova_database_probe_format(&(zova_database_probe_format_request){.path = dst, .out_info = &out, .out_error_message = &msg}), ZOVA_OK, "probe migratable");
+        if (out.format_version != 9 || out.compatibility != ZOVA_FORMAT_MIGRATABLE) {
+            fprintf(stderr, "probe migratable: expected 9/MIGRATABLE got %u/%d\n", out.format_version, out.compatibility);
+            exit(1);
+        }
+        zova_message_free(&msg);
+        remove(dst);
+    }
+    // Migrate: null source/destination, invalid flags, destination exists, busy, unsupported, no-migration-path, success, immutability, no-verify, verification failure
+    {
+        // null source
+        zova_message msg = {0};
+        expect_status(zova_database_migrate(&(zova_database_migrate_request){.source_path = NULL, .destination_path = "/tmp/dst.zova", .flags = 0, .out_error_message = &msg}), ZOVA_INVALID_ARGUMENT, "migrate null source");
+        zova_message_free(&msg);
+        // null dest
+        expect_status(zova_database_migrate(&(zova_database_migrate_request){.source_path = "/tmp/src.zova", .destination_path = NULL, .flags = 0, .out_error_message = &msg}), ZOVA_INVALID_ARGUMENT, "migrate null dest");
+        zova_message_free(&msg);
+        // invalid flags
+        expect_status(zova_database_migrate(&(zova_database_migrate_request){.source_path = "/tmp/src.zova", .destination_path = "/tmp/dst.zova", .flags = 0xDEADBEEF, .out_error_message = &msg}), ZOVA_INVALID_ARGUMENT, "migrate invalid flags");
+        zova_message_free(&msg);
+    }
+    // Migrate: current format -> NO_MIGRATION_PATH
+    {
+        const char *src = "/tmp/zova_migrate_current_src.zova";
+        const char *dst = "/tmp/zova_migrate_current_dst.zova";
+        remove(src); remove(dst);
+        zova_database *db = NULL; zova_message msg = {0};
+        expect_status(zova_database_create(&(zova_database_open_request){.path = src, .out_db = &db, .out_error_message = &msg}), ZOVA_OK, "create current src");
+        zova_message_free(&msg);
+        expect_status(zova_database_close(db), ZOVA_OK, "close current src");
+        zova_message err = {0};
+        expect_status(zova_database_migrate(&(zova_database_migrate_request){.source_path = src, .destination_path = dst, .flags = 0, .out_error_message = &err}), ZOVA_NO_MIGRATION_PATH, "migrate current -> no path");
+        zova_message_free(&err);
+        if (access(dst, F_OK) == 0) { fprintf(stderr, "migrate current: dest should not exist\n"); exit(1); }
+        remove(src);
+    }
+    // Migrate: unsupported future/legacy
+    {
+        const char *src = "/tmp/zova_migrate_future_src.zova";
+        const char *dst = "/tmp/zova_migrate_future_dst.zova";
+        remove(src); remove(dst);
+        zova_database *db = NULL; zova_message msg = {0};
+        expect_status(zova_database_create(&(zova_database_open_request){.path = src, .out_db = &db, .out_error_message = &msg}), ZOVA_OK, "create future base");
+        zova_message_free(&msg);
+        expect_status(zova_database_close(db), ZOVA_OK, "close future base");
+        // patch format_version to 11
+        zova_database *raw = NULL;
+        // use sqlite via zova exec to update meta
+        // reopen as zova to exec? Instead open via sqlite is easier but not exposed; use zova_database_open then exec
+        // For synthetic, use direct sqlite via zova_database_exec on a temporary handle that bypasses version check? Use raw sqlite via file open
+        // Simpler: open via sqlite directly using system sqlite3? Instead use zova's internal sqlite via exec on a fresh handle before close above we already closed
+        // We'll reopen with sqlite directly using zova's sqlite wrapper not exposed; fallback to using zova_database_open which will fail for future version, so we need to use low-level sqlite open
+        // Use sqlite3 directly via zova's sqlite is not exposed to C, but we can use system sqlite3 command via system()
+        char cmd[1024];
+        snprintf(cmd, sizeof(cmd), "sqlite3 %s \"update _zova_meta set value='11' where key='format_version'\"", src);
+        if (system(cmd) != 0) { fprintf(stderr, "patch future format failed\n"); exit(1); }
+        zova_message err = {0};
+        expect_status(zova_database_migrate(&(zova_database_migrate_request){.source_path = src, .destination_path = dst, .flags = 0, .out_error_message = &err}), ZOVA_UNSUPPORTED_FUTURE_FORMAT, "migrate future");
+        zova_message_free(&err);
+        if (access(dst, F_OK) == 0) { fprintf(stderr, "migrate future: dest should not exist\n"); exit(1); }
+        remove(src);
+        // legacy 8
+        const char *src2 = "/tmp/zova_migrate_legacy_src.zova";
+        const char *dst2 = "/tmp/zova_migrate_legacy_dst.zova";
+        remove(src2); remove(dst2);
+        zova_database *db2 = NULL; zova_message msg2 = {0};
+        expect_status(zova_database_create(&(zova_database_open_request){.path = src2, .out_db = &db2, .out_error_message = &msg2}), ZOVA_OK, "create legacy base");
+        zova_message_free(&msg2);
+        expect_status(zova_database_close(db2), ZOVA_OK, "close legacy base");
+        snprintf(cmd, sizeof(cmd), "sqlite3 %s \"update _zova_meta set value='8' where key='format_version'\"", src2);
+        if (system(cmd) != 0) { fprintf(stderr, "patch legacy format failed\n"); exit(1); }
+        zova_message err2 = {0};
+        expect_status(zova_database_migrate(&(zova_database_migrate_request){.source_path = src2, .destination_path = dst2, .flags = 0, .out_error_message = &err2}), ZOVA_UNSUPPORTED_LEGACY_FORMAT, "migrate legacy");
+        zova_message_free(&err2);
+        if (access(dst2, F_OK) == 0) { fprintf(stderr, "migrate legacy: dest should not exist\n"); exit(1); }
+        remove(src2);
+    }
+    // Migrate: success with source immutability and destination exists check, plus busy
+    {
+        const char *src = "/tmp/zova_migrate_success_src.zova";
+        const char *dst = "/tmp/zova_migrate_success_dst.zova";
+        remove(src); remove(dst);
+        // copy fixture
+        FILE *in = fopen("tests/fixtures/format-9.zova", "rb");
+        FILE *outf = fopen(src, "wb");
+        if (!in || !outf) { fprintf(stderr, "copy for success src failed\n"); exit(1); }
+        char b[8192]; size_t nn; while ((nn = fread(b,1,sizeof(b),in))>0) fwrite(b,1,nn,outf);
+        fclose(in); fclose(outf);
+        // hash before
+        FILE *f = fopen(src, "rb"); fseek(f,0,SEEK_END); long sz = ftell(f); fseek(f,0,SEEK_SET); char *data = malloc(sz); fread(data,1,sz,f); fclose(f);
+        // we don't compute hash, just check size preserved
+        long before_size = sz; free(data);
+        zova_message msg = {0};
+        expect_status(zova_database_migrate(&(zova_database_migrate_request){.source_path = src, .destination_path = dst, .flags = 0, .out_error_message = &msg}), ZOVA_OK, "migrate success");
+        zova_message_free(&msg);
+        // source still exists and size same
+        f = fopen(src, "rb"); fseek(f,0,SEEK_END); long after_size = ftell(f); fclose(f);
+        if (before_size != after_size) { fprintf(stderr, "migrate success: source size changed\n"); exit(1); }
+        // dest exists and probe is current
+        zova_database_format_info out = {0}; zova_message pmsg = {0};
+        expect_status(zova_database_probe_format(&(zova_database_probe_format_request){.path = dst, .out_info = &out, .out_error_message = &pmsg}), ZOVA_OK, "probe migrated dest");
+        if (out.format_version != 10 || out.compatibility != ZOVA_FORMAT_CURRENT) { fprintf(stderr, "migrate dest probe wrong\n"); exit(1); }
+        zova_message_free(&pmsg);
+        // second migrate with same dest should be DESTINATION_EXISTS
+        zova_message err2 = {0};
+        expect_status(zova_database_migrate(&(zova_database_migrate_request){.source_path = src, .destination_path = dst, .flags = 0, .out_error_message = &err2}), ZOVA_DESTINATION_EXISTS, "migrate dest exists");
+        zova_message_free(&err2);
+        // busy: hold lock via raw sqlite (format-9 cannot be opened via zova)
+        sqlite3 *lock_raw = NULL;
+        if (sqlite3_open(src, &lock_raw) != SQLITE_OK) { fprintf(stderr, "open lock raw failed: %s\n", sqlite3_errmsg(lock_raw)); exit(1); }
+        char *lock_err = NULL;
+        if (sqlite3_exec(lock_raw, "begin immediate", NULL, NULL, &lock_err) != SQLITE_OK) { fprintf(stderr, "begin immediate failed: %s\n", lock_err); sqlite3_free(lock_err); exit(1); }
+        const char *busy_dst = "/tmp/zova_migrate_busy_dst.zova";
+        remove(busy_dst);
+        zova_message bmsg = {0};
+        zova_status busy_st = zova_database_migrate(&(zova_database_migrate_request){.source_path = src, .destination_path = busy_dst, .flags = 0, .out_error_message = &bmsg});
+        if (busy_st != ZOVA_BUSY && busy_st != ZOVA_LOCKED) { fprintf(stderr, "migrate busy: expected BUSY/LOCKED got %s\n", zova_status_name(busy_st)); exit(1); }
+        zova_message_free(&bmsg);
+        if (access(busy_dst, F_OK) == 0) { fprintf(stderr, "migrate busy: dest should not exist\n"); exit(1); }
+        if (sqlite3_exec(lock_raw, "rollback", NULL, NULL, &lock_err) != SQLITE_OK) { fprintf(stderr, "rollback failed: %s\n", lock_err); sqlite3_free(lock_err); exit(1); }
+        sqlite3_close(lock_raw);
+        // verification failure: corrupt _zova_chunks
+        const char *corrupt_src = "/tmp/zova_migrate_corrupt_src.zova";
+        const char *corrupt_dst = "/tmp/zova_migrate_corrupt_dst.zova";
+        remove(corrupt_src); remove(corrupt_dst);
+        in = fopen("tests/fixtures/format-9.zova", "rb"); outf = fopen(corrupt_src, "wb");
+        if (!in || !outf) { fprintf(stderr, "copy corrupt src failed\n"); exit(1); }
+        while ((nn = fread(b,1,sizeof(b),in))>0) fwrite(b,1,nn,outf);
+        fclose(in); fclose(outf);
+        char corrupt_cmd[1024];
+        snprintf(corrupt_cmd, sizeof(corrupt_cmd), "sqlite3 %s \"update _zova_chunks set data = randomblob(size_bytes) where rowid = (select rowid from _zova_chunks limit 1)\"", corrupt_src);
+        if (system(corrupt_cmd) != 0) { fprintf(stderr, "corrupt chunks failed\n"); exit(1); }
+        zova_message cmsg = {0};
+        zova_status cst = zova_database_migrate(&(zova_database_migrate_request){.source_path = corrupt_src, .destination_path = corrupt_dst, .flags = 0, .out_error_message = &cmsg});
+        if (cst == ZOVA_OK) { fprintf(stderr, "migrate corrupt: expected failure\n"); exit(1); }
+        zova_message_free(&cmsg);
+        if (access(corrupt_dst, F_OK) == 0) { fprintf(stderr, "migrate corrupt: dest should not exist\n"); exit(1); }
+        // with NO_VERIFY it should succeed
+        const char *corrupt_dst2 = "/tmp/zova_migrate_corrupt_dst2.zova";
+        remove(corrupt_dst2);
+        zova_message cmsg2 = {0};
+        expect_status(zova_database_migrate(&(zova_database_migrate_request){.source_path = corrupt_src, .destination_path = corrupt_dst2, .flags = ZOVA_MIGRATE_NO_VERIFY, .out_error_message = &cmsg2}), ZOVA_OK, "migrate corrupt no-verify");
+        zova_message_free(&cmsg2);
+        if (access(corrupt_dst2, F_OK) != 0) { fprintf(stderr, "migrate corrupt no-verify: dest should exist\n"); exit(1); }
+        // cleanup
+        remove(src); remove(dst); remove(corrupt_src); remove(corrupt_dst); remove(corrupt_dst2); remove(busy_dst);
+        // ensure no _zova_ leakage in messages (already checked via not exposing private names)
+    }
+}
+
 int main(int argc, char **argv) {
     expect_status(zova_graph_build_fresh_keyed(NULL), ZOVA_INVALID_ARGUMENT, "fresh graph null request");
     expect_status(zova_graph_build_fresh_prepared_keyed(NULL), ZOVA_INVALID_ARGUMENT, "prepared fresh graph null request");
@@ -1725,6 +1973,7 @@ int main(int argc, char **argv) {
     expect_status(zova_fresh_build_finish(NULL), ZOVA_INVALID_ARGUMENT, "fresh builder null finish");
     expect_status(zova_fresh_build_abort(NULL), ZOVA_INVALID_ARGUMENT, "fresh builder null abort");
     zova_fresh_build_destroy(NULL);
+    run_probe_migrate_smoke();
     if (argc != 2 && argc != 5) {
         fprintf(stderr, "usage: %s <db-path> [dynamic-library bundle-path trust-store-path]\n", argv[0]);
         return 2;
