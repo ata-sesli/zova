@@ -87,6 +87,12 @@ expect_contains "$ROOT/README.md" "zova-v${package_version}-<platform>-c-abi"
 expect_contains "$ROOT/README.md" "zova-v${package_version}-<platform>-cli"
 expect_contains "$ROOT/README.md" "Zova \`${package_version}\` does not include:"
 expect_contains "$ROOT/docs/extensions.md" "In v${package_version}, the bundled \`trgm\` extension"
+
+# The 1.x storage compatibility contract must describe the formats this tree
+# actually ships, so a format bump cannot leave the published promise stale.
+expect_contains "$ROOT/docs/storage-compatibility.md" "minimum_migratable_format"
+expect_contains "$ROOT/docs/storage-compatibility.md" "\`${format_version}\`"
+expect_contains "$ROOT/README.md" "earliest migratable format is \`9\`"
 expect_contains "$ROOT/scripts/package-release.sh" "scripts/package-release.sh ${package_version}"
 expect_contains "$ROOT/scripts/build-release-artifacts.sh" "scripts/build-release-artifacts.sh ${package_version}"
 

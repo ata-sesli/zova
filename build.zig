@@ -191,6 +191,20 @@ pub fn build(b: *std.Build) void {
     const fresh_ablation_step = b.step("bench-fresh-ablation", "Run cumulative graph, metadata, FTS, and vector fresh-build ablations");
     fresh_ablation_step.dependOn(&fresh_ablation_cmd.step);
 
+    const storage_compat_check = b.addExecutable(.{
+        .name = "zova_storage_compat_check",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/storage_compat_check.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    storage_compat_check.root_module.addOptions("zova_build_options", zova_build_options);
+    addSqlite(storage_compat_check.root_module, b, sqlite_lib);
+    const storage_compat_check_cmd = b.addRunArtifact(storage_compat_check);
+    const storage_compat_check_step = b.step("check-storage-compat", "Verify the storage compatibility policy against the retained fixtures");
+    storage_compat_check_step.dependOn(&storage_compat_check_cmd.step);
+
     const test_step = b.step("test", "Run all tests");
     const core_test_step = addZigTestSuite(
         b,
