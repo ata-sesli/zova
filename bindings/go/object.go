@@ -34,10 +34,33 @@ type ObjectManifest struct {
 	Chunks     []ObjectChunk
 }
 
+// ObjectStorageProfile selects the physical representation used for an object.
+type ObjectStorageProfile int
+
+const (
+	// ObjectStorageProfileDeduplication uses the existing FastCDC representation.
+	ObjectStorageProfileDeduplication ObjectStorageProfile = C.ZOVA_OBJECT_PROFILE_DEDUPLICATION
+	// ObjectStorageProfileStreaming selects fixed 1 MiB chunks in format 11.
+	ObjectStorageProfileStreaming ObjectStorageProfile = C.ZOVA_OBJECT_PROFILE_STREAMING
+)
+
+// ObjectPutOptions configures a profile-aware object operation.
+type ObjectPutOptions struct {
+	Profile ObjectStorageProfile
+}
+
 // ObjectWriter streams bytes into Zova as a content-addressed object.
 type ObjectWriter struct {
 	db     *DB
 	ptr    *C.zova_object_writer
+	closed bool
+}
+
+// ObjectReader sequentially reads one stored object. The reader owns a native
+// resource registered with its DB and must be closed when no longer needed.
+type ObjectReader struct {
+	db     *DB
+	ptr    *C.zova_object_reader
 	closed bool
 }
 
@@ -66,6 +89,28 @@ func (db *DB) PutObject(bytes []byte) (ObjectID, error) {
 			out_id: out,
 		}
 		return statusFromDB(db, C.zova_object_put(&request))
+	})
+	return objectIDFromC(*out), err
+}
+
+// PutObjectWithOptions stores bytes using an explicitly selected profile.
+func (db *DB) PutObjectWithOptions(bytes []byte, options ObjectPutOptions) (ObjectID, error) {
+	data, cleanup := cBytes(bytes)
+	defer cleanup()
+
+	out := (*C.zova_object_id)(C.calloc(1, C.size_t(unsafe.Sizeof(C.zova_object_id{}))))
+	defer C.free(unsafe.Pointer(out))
+	err := db.withLock(func() error {
+		request := C.zova_object_put_with_options_request{
+			db:   db.ptr,
+			data: data,
+			len:  C.size_t(len(bytes)),
+			options: C.zova_object_put_options{
+				profile: C.int(options.Profile),
+			},
+			out_id: out,
+		}
+		return statusFromDB(db, C.zova_object_put_with_options(&request))
 	})
 	return objectIDFromC(*out), err
 }
@@ -241,6 +286,25 @@ func (db *DB) PutObjectChunk(hash ObjectChunkID, bytes []byte) error {
 	})
 }
 
+// PutObjectChunkWithOptions stores one verified loose chunk using an
+// explicitly selected profile.
+func (db *DB) PutObjectChunkWithOptions(hash ObjectChunkID, bytes []byte, options ObjectPutOptions) error {
+	data, cleanup := cBytes(bytes)
+	defer cleanup()
+	return db.withLock(func() error {
+		request := C.zova_object_chunk_put_with_options_request{
+			db:            db.ptr,
+			expected_hash: hash.toC(),
+			data:          data,
+			len:           C.size_t(len(bytes)),
+			options: C.zova_object_put_options{
+				profile: C.int(options.Profile),
+			},
+		}
+		return statusFromDB(db, C.zova_object_chunk_put_with_options(&request))
+	})
+}
+
 // DeleteObjectChunk deletes one unreferenced loose chunk.
 func (db *DB) DeleteObjectChunk(hash ObjectChunkID) (bool, error) {
 	out := (*C.uint8_t)(C.calloc(1, C.size_t(unsafe.Sizeof(C.uint8_t(0)))))
@@ -272,6 +336,26 @@ func (db *DB) AssembleObjectFromChunks(id ObjectID, sizeBytes uint64, chunks []O
 	})
 }
 
+// AssembleObjectFromChunksWithOptions assembles an object using an explicitly
+// selected profile.
+func (db *DB) AssembleObjectFromChunksWithOptions(id ObjectID, sizeBytes uint64, chunks []ObjectChunk, options ObjectPutOptions) error {
+	cChunks, cleanup := cManifestChunks(chunks)
+	defer cleanup()
+	return db.withLock(func() error {
+		request := C.zova_object_assemble_from_chunks_with_options_request{
+			db:          db.ptr,
+			id:          id.toC(),
+			size_bytes:  C.uint64_t(sizeBytes),
+			chunks:      cChunks,
+			chunk_count: C.size_t(len(chunks)),
+			options: C.zova_object_put_options{
+				profile: C.int(options.Profile),
+			},
+		}
+		return statusFromDB(db, C.zova_object_assemble_from_chunks_with_options(&request))
+	})
+}
+
 // ObjectWriter creates a streaming object writer.
 func (db *DB) ObjectWriter() (*ObjectWriter, error) {
 	var writer *ObjectWriter
@@ -294,6 +378,59 @@ func (db *DB) ObjectWriter() (*ObjectWriter, error) {
 		return nil
 	})
 	return writer, err
+}
+
+// ObjectWriterWithOptions creates a streaming writer using an explicitly
+// selected profile.
+func (db *DB) ObjectWriterWithOptions(options ObjectPutOptions) (*ObjectWriter, error) {
+	var writer *ObjectWriter
+	err := db.withLock(func() error {
+		outRaw := (**C.zova_object_writer)(C.calloc(1, C.size_t(unsafe.Sizeof(uintptr(0)))))
+		defer C.free(unsafe.Pointer(outRaw))
+		request := C.zova_object_writer_create_with_options_request{
+			db: db.ptr,
+			options: C.zova_object_put_options{
+				profile: C.int(options.Profile),
+			},
+			out_writer: outRaw,
+		}
+		if err := statusFromDB(db, C.zova_object_writer_create_with_options(&request)); err != nil {
+			return err
+		}
+		raw := *outRaw
+		if raw == nil {
+			return newError(StatusInvalidArgument, "Zova returned a nil object writer handle")
+		}
+		writer = &ObjectWriter{db: db, ptr: raw}
+		db.writers[writer] = struct{}{}
+		return nil
+	})
+	return writer, err
+}
+
+// ObjectReader opens a sequential reader for one stored object.
+func (db *DB) ObjectReader(id ObjectID) (*ObjectReader, error) {
+	var reader *ObjectReader
+	err := db.withLock(func() error {
+		outRaw := (**C.zova_object_reader)(C.calloc(1, C.size_t(unsafe.Sizeof(uintptr(0)))))
+		defer C.free(unsafe.Pointer(outRaw))
+		request := C.zova_object_reader_create_request{
+			db:         db.ptr,
+			id:         id.toC(),
+			out_reader: outRaw,
+		}
+		if err := statusFromDB(db, C.zova_object_reader_create(&request)); err != nil {
+			return err
+		}
+		raw := *outRaw
+		if raw == nil {
+			return newError(StatusInvalidArgument, "Zova returned a nil object reader handle")
+		}
+		reader = &ObjectReader{db: db, ptr: raw}
+		db.readers[reader] = struct{}{}
+		return nil
+	})
+	return reader, err
 }
 
 // Write appends bytes to the streaming writer.
@@ -378,6 +515,93 @@ func (w *ObjectWriter) destroyLocked(db *DB) error {
 	w.closed = true
 	delete(db.writers, w)
 	return statusFromDB(db, status)
+}
+
+// Read copies up to len(buffer) bytes and advances the reader. A zero return
+// with no error indicates verified end-of-object.
+func (r *ObjectReader) Read(buffer []byte) (int, error) {
+	if r == nil || r.db == nil {
+		return 0, newError(StatusObjectReaderClosed, "object reader is closed")
+	}
+	if r.closed || r.ptr == nil {
+		return 0, newError(StatusObjectReaderClosed, "object reader is closed")
+	}
+	var data *C.uint8_t
+	if len(buffer) != 0 {
+		data = (*C.uint8_t)(C.malloc(C.size_t(len(buffer))))
+		if data == nil {
+			return 0, newError(StatusOutOfMemory, "could not allocate object reader buffer")
+		}
+		defer C.free(unsafe.Pointer(data))
+	}
+	outRead := (*C.size_t)(C.calloc(1, C.size_t(unsafe.Sizeof(C.size_t(0)))))
+	if outRead == nil {
+		return 0, newError(StatusOutOfMemory, "could not allocate object reader output")
+	}
+	defer C.free(unsafe.Pointer(outRead))
+	err := r.db.withLock(func() error {
+		if r.closed || r.ptr == nil {
+			return newError(StatusObjectReaderClosed, "object reader is closed")
+		}
+		request := C.zova_object_reader_read_request{
+			reader:     r.ptr,
+			buffer:     data,
+			buffer_len: C.size_t(len(buffer)),
+			out_read:   outRead,
+		}
+		return statusFromDB(r.db, C.zova_object_reader_read(&request))
+	})
+	if err != nil {
+		return 0, err
+	}
+	read := int(*outRead)
+	if read != 0 {
+		copy(buffer, unsafe.Slice((*byte)(unsafe.Pointer(data)), read))
+	}
+	return read, nil
+}
+
+// Close destroys the reader. Repeated calls are successful no-ops.
+func (r *ObjectReader) Close() error {
+	if r == nil || r.db == nil || r.closed || r.ptr == nil {
+		return nil
+	}
+	db, err := r.lock()
+	if err != nil {
+		return err
+	}
+	defer db.mu.Unlock()
+	raw := (**C.zova_object_reader)(C.malloc(C.size_t(unsafe.Sizeof(uintptr(0)))))
+	if raw == nil {
+		return newError(StatusOutOfMemory, "could not allocate object reader destroy request")
+	}
+	*raw = r.ptr
+	defer C.free(unsafe.Pointer(raw))
+	request := C.zova_object_reader_destroy_request{reader: raw}
+	status := C.zova_object_reader_destroy(&request)
+	if err := statusFromDB(db, status); err != nil {
+		return err
+	}
+	r.ptr = nil
+	r.closed = true
+	delete(db.readers, r)
+	return nil
+}
+
+func (r *ObjectReader) lock() (*DB, error) {
+	if r == nil || r.db == nil || r.closed || r.ptr == nil {
+		return nil, newError(StatusObjectReaderClosed, "object reader is closed")
+	}
+	r.db.mu.Lock()
+	if r.db.closed || r.db.ptr == nil {
+		r.db.mu.Unlock()
+		return nil, closedError("database")
+	}
+	if r.closed || r.ptr == nil {
+		r.db.mu.Unlock()
+		return nil, newError(StatusObjectReaderClosed, "object reader is closed")
+	}
+	return r.db, nil
 }
 
 func (id ObjectID) toC() C.zova_object_id {

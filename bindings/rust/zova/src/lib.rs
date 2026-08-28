@@ -35,10 +35,12 @@ pub use kv::KvEntry;
 pub use notification::{Notification, Subscription};
 pub use object::{
     object_chunk_id, object_id, ObjectChunkId, ObjectId, ObjectManifest, ObjectManifestChunk,
-    ObjectWriter, OwnedObjectWriter,
+    ObjectPutOptions, ObjectReader, ObjectStorageProfile, ObjectWriter, OwnedObjectReader,
+    OwnedObjectWriter,
 };
 pub use shared::{
-    SharedDatabase, SharedDatabaseGuard, SharedObjectWriter, SharedStatement, SharedSubscription,
+    SharedDatabase, SharedDatabaseGuard, SharedObjectReader, SharedObjectWriter, SharedStatement,
+    SharedSubscription,
 };
 pub use statement::{ColumnType, OwnedStatement, Statement, Step};
 pub use vector::{

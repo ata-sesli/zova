@@ -345,6 +345,105 @@ func TestRecordsObjectsAndConvertedDatabases(t *testing.T) {
 	}
 }
 
+func TestProfileAwareObjectOperationsAndReader(t *testing.T) {
+	db, err := Create(tempZovaPath(t, "profile-reader"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	payload := deterministicBytes(180 * 1024)
+	options := ObjectPutOptions{Profile: ObjectStorageProfileDeduplication}
+
+	id, err := db.PutObjectWithOptions(payload, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != ObjectIDFor(payload) {
+		t.Fatal("profile-aware object id mismatch")
+	}
+
+	reader, err := db.ObjectReader(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got bytes.Buffer
+	buf := make([]byte, 7)
+	for {
+		n, err := reader.Read(buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 {
+			break
+		}
+		_, _ = got.Write(buf[:n])
+	}
+	if !bytes.Equal(got.Bytes(), payload) {
+		t.Fatal("sequential reader mismatch")
+	}
+	if n, err := reader.Read(buf); err != nil || n != 0 {
+		t.Fatalf("repeated EOF = %d, %v", n, err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Read(buf); !hasStatus(err, StatusObjectReaderClosed) {
+		t.Fatalf("read after close = %v", err)
+	}
+
+	writer, err := db.ObjectWriterWithOptions(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	writerID, err := writer.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writerID != id {
+		t.Fatal("profile-aware writer id mismatch")
+	}
+
+	manifest, err := db.ObjectManifest(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver, err := Create(tempZovaPath(t, "profile-assembly"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer receiver.Close()
+	for _, chunk := range manifest.Chunks {
+		chunkBytes, err := db.GetObjectChunk(chunk.Hash)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := receiver.PutObjectChunkWithOptions(chunk.Hash, chunkBytes, options); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := receiver.AssembleObjectFromChunksWithOptions(id, manifest.SizeBytes, manifest.Chunks, options); err != nil {
+		t.Fatal(err)
+	}
+
+	openReader, err := db.ObjectReader(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openReader.Read(buf); !hasStatus(err, StatusObjectReaderClosed) {
+		t.Fatalf("read after database close = %v", err)
+	}
+}
+
 func deterministicBytes(size int) []byte {
 	out := make([]byte, size)
 	for i := range out {

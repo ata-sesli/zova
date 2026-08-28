@@ -34,11 +34,75 @@ pub struct ObjectManifest {
     pub chunks: Vec<ObjectManifestChunk>,
 }
 
+/// Physical representation used when storing an object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectStorageProfile {
+    /// Content-addressed FastCDC-v1 chunks (the existing default).
+    Deduplication,
+    /// Fixed-size streaming chunks. Format 11 stores this representation as
+    /// fixed 1 MiB chunks.
+    Streaming,
+}
+
+impl Default for ObjectStorageProfile {
+    fn default() -> Self {
+        Self::Deduplication
+    }
+}
+
+impl ObjectStorageProfile {
+    fn to_raw(self) -> zova_sys::zova_object_storage_profile {
+        match self {
+            Self::Deduplication => zova_sys::ZOVA_OBJECT_PROFILE_DEDUPLICATION,
+            Self::Streaming => zova_sys::ZOVA_OBJECT_PROFILE_STREAMING,
+        }
+    }
+}
+
+/// Options for profile-aware object operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectPutOptions {
+    pub profile: ObjectStorageProfile,
+}
+
+impl Default for ObjectPutOptions {
+    fn default() -> Self {
+        Self {
+            profile: ObjectStorageProfile::Deduplication,
+        }
+    }
+}
+
+impl ObjectPutOptions {
+    pub(crate) fn to_raw(self) -> zova_sys::zova_object_put_options {
+        zova_sys::zova_object_put_options {
+            profile: self.profile.to_raw(),
+        }
+    }
+}
+
 /// Streaming writer for storing an object without holding the full object in memory.
 pub struct ObjectWriter<'db> {
     raw: Option<NonNull<zova_sys::zova_object_writer>>,
     db: *mut zova_sys::zova_database,
     _database: PhantomData<&'db mut Database>,
+    _not_send_sync: PhantomData<Rc<()>>,
+}
+
+/// Sequential reader for one stored object.
+pub struct ObjectReader<'db> {
+    raw: Option<NonNull<zova_sys::zova_object_reader>>,
+    db: *mut zova_sys::zova_database,
+    _database: PhantomData<&'db mut Database>,
+    _not_send_sync: PhantomData<Rc<()>>,
+}
+
+/// Owned sequential reader for language bindings and other callers that need
+/// the reader to keep the database handle alive independently.
+pub struct OwnedObjectReader {
+    raw: Option<NonNull<zova_sys::zova_object_reader>>,
+    db: *mut zova_sys::zova_database,
+    _database: Rc<DatabaseInner>,
     _not_send_sync: PhantomData<Rc<()>>,
 }
 
@@ -146,6 +210,27 @@ impl Database {
             out_id: &mut out,
         };
         self.status(unsafe { zova_sys::zova_object_put(&request) })?;
+        Ok(from_c_object_id(out))
+    }
+
+    /// Store full object bytes using an explicitly selected representation.
+    ///
+    /// `ObjectStorageProfile::Deduplication` is identical to `put_object`.
+    /// The streaming profile stores fixed 1 MiB chunks in format 11.
+    pub fn put_object_with_options(
+        &mut self,
+        bytes: &[u8],
+        options: ObjectPutOptions,
+    ) -> Result<ObjectId> {
+        let mut out = zova_sys::zova_object_id { bytes: [0; 32] };
+        let request = zova_sys::zova_object_put_with_options_request {
+            db: self.raw_ptr(),
+            data: bytes.as_ptr(),
+            len: bytes.len(),
+            options: options.to_raw(),
+            out_id: &mut out,
+        };
+        self.status(unsafe { zova_sys::zova_object_put_with_options(&request) })?;
         Ok(from_c_object_id(out))
     }
 
@@ -270,6 +355,23 @@ impl Database {
         self.status(unsafe { zova_sys::zova_object_chunk_put(&request) })
     }
 
+    /// Store one verified loose chunk using an explicitly selected profile.
+    pub fn put_object_chunk_with_options(
+        &mut self,
+        expected_hash: ObjectChunkId,
+        bytes: &[u8],
+        options: ObjectPutOptions,
+    ) -> Result<()> {
+        let request = zova_sys::zova_object_chunk_put_with_options_request {
+            db: self.raw_ptr(),
+            expected_hash: expected_hash.to_c(),
+            data: bytes.as_ptr(),
+            len: bytes.len(),
+            options: options.to_raw(),
+        };
+        self.status(unsafe { zova_sys::zova_object_chunk_put_with_options(&request) })
+    }
+
     /// Delete an unreferenced loose chunk.
     pub fn delete_object_chunk(&mut self, hash: ObjectChunkId) -> Result<bool> {
         let mut deleted = 0;
@@ -300,6 +402,26 @@ impl Database {
         self.status(unsafe { zova_sys::zova_object_assemble_from_chunks(&request) })
     }
 
+    /// Assemble an object using an explicitly selected representation.
+    pub fn assemble_object_from_chunks_with_options(
+        &mut self,
+        id: ObjectId,
+        size_bytes: u64,
+        chunks: &[ObjectManifestChunk],
+        options: ObjectPutOptions,
+    ) -> Result<()> {
+        let c_chunks: Vec<_> = chunks.iter().map(ObjectManifestChunk::to_c).collect();
+        let request = zova_sys::zova_object_assemble_from_chunks_with_options_request {
+            db: self.raw_ptr(),
+            id: id.to_c(),
+            size_bytes,
+            chunks: c_chunks.as_ptr(),
+            chunk_count: c_chunks.len(),
+            options: options.to_raw(),
+        };
+        self.status(unsafe { zova_sys::zova_object_assemble_from_chunks_with_options(&request) })
+    }
+
     /// Create a streaming object writer.
     pub fn object_writer(&mut self) -> Result<ObjectWriter<'_>> {
         let mut writer = ptr::null_mut();
@@ -308,6 +430,29 @@ impl Database {
             out_writer: &mut writer,
         };
         self.status(unsafe { zova_sys::zova_object_writer_create(&request) })?;
+        let raw = NonNull::new(writer)
+            .ok_or_else(|| Error::from_status(zova_sys::ZOVA_INVALID_ARGUMENT, None))?;
+        Ok(ObjectWriter {
+            raw: Some(raw),
+            db: self.raw_ptr(),
+            _database: PhantomData,
+            _not_send_sync: PhantomData,
+        })
+    }
+
+    /// Create a streaming writer using an explicitly selected representation.
+    /// The streaming profile stores fixed 1 MiB chunks in format 11.
+    pub fn object_writer_with_options(
+        &mut self,
+        options: ObjectPutOptions,
+    ) -> Result<ObjectWriter<'_>> {
+        let mut writer = ptr::null_mut();
+        let request = zova_sys::zova_object_writer_create_with_options_request {
+            db: self.raw_ptr(),
+            options: options.to_raw(),
+            out_writer: &mut writer,
+        };
+        self.status(unsafe { zova_sys::zova_object_writer_create_with_options(&request) })?;
         let raw = NonNull::new(writer)
             .ok_or_else(|| Error::from_status(zova_sys::ZOVA_INVALID_ARGUMENT, None))?;
         Ok(ObjectWriter {
@@ -329,6 +474,70 @@ impl Database {
         let raw = NonNull::new(writer)
             .ok_or_else(|| Error::from_status(zova_sys::ZOVA_INVALID_ARGUMENT, None))?;
         Ok(OwnedObjectWriter {
+            raw: Some(raw),
+            db: self.raw_ptr(),
+            _database: self.inner.clone(),
+            _not_send_sync: PhantomData,
+        })
+    }
+
+    /// Create an owned profile-aware writer that keeps the database handle
+    /// alive until the writer is finished, cancelled, or dropped.
+    pub fn object_writer_owned_with_options(
+        &mut self,
+        options: ObjectPutOptions,
+    ) -> Result<OwnedObjectWriter> {
+        let mut writer = ptr::null_mut();
+        let request = zova_sys::zova_object_writer_create_with_options_request {
+            db: self.raw_ptr(),
+            options: options.to_raw(),
+            out_writer: &mut writer,
+        };
+        self.status(unsafe { zova_sys::zova_object_writer_create_with_options(&request) })?;
+        let raw = NonNull::new(writer)
+            .ok_or_else(|| Error::from_status(zova_sys::ZOVA_INVALID_ARGUMENT, None))?;
+        Ok(OwnedObjectWriter {
+            raw: Some(raw),
+            db: self.raw_ptr(),
+            _database: self.inner.clone(),
+            _not_send_sync: PhantomData,
+        })
+    }
+
+    /// Open a sequential reader over one stored object.
+    ///
+    /// The reader borrows the database exclusively for its lifetime, so the
+    /// database cannot be closed while the native reader is live.
+    pub fn object_reader(&mut self, id: ObjectId) -> Result<ObjectReader<'_>> {
+        let mut reader = ptr::null_mut();
+        let request = zova_sys::zova_object_reader_create_request {
+            db: self.raw_ptr(),
+            id: id.to_c(),
+            out_reader: &mut reader,
+        };
+        self.status(unsafe { zova_sys::zova_object_reader_create(&request) })?;
+        let raw = NonNull::new(reader)
+            .ok_or_else(|| Error::from_status(zova_sys::ZOVA_INVALID_ARGUMENT, None))?;
+        Ok(ObjectReader {
+            raw: Some(raw),
+            db: self.raw_ptr(),
+            _database: PhantomData,
+            _not_send_sync: PhantomData,
+        })
+    }
+
+    /// Open an owned sequential reader that keeps the database handle alive.
+    pub fn object_reader_owned(&mut self, id: ObjectId) -> Result<OwnedObjectReader> {
+        let mut reader = ptr::null_mut();
+        let request = zova_sys::zova_object_reader_create_request {
+            db: self.raw_ptr(),
+            id: id.to_c(),
+            out_reader: &mut reader,
+        };
+        self.status(unsafe { zova_sys::zova_object_reader_create(&request) })?;
+        let raw = NonNull::new(reader)
+            .ok_or_else(|| Error::from_status(zova_sys::ZOVA_INVALID_ARGUMENT, None))?;
+        Ok(OwnedObjectReader {
             raw: Some(raw),
             db: self.raw_ptr(),
             _database: self.inner.clone(),
@@ -396,6 +605,121 @@ impl ObjectWriter<'_> {
 impl Drop for ObjectWriter<'_> {
     fn drop(&mut self) {
         self.destroy();
+    }
+}
+
+impl ObjectReader<'_> {
+    /// Read up to `buffer.len()` bytes and advance the reader.
+    ///
+    /// A return value of zero indicates verified end-of-object. Repeated EOF
+    /// reads continue to return zero; reads after an explicit close return the
+    /// native closed-reader error.
+    pub fn read(&mut self, buffer: &mut [u8]) -> Result<usize> {
+        let raw = self.raw()?;
+        let mut read = 0;
+        let request = zova_sys::zova_object_reader_read_request {
+            reader: raw.as_ptr(),
+            buffer: buffer.as_mut_ptr(),
+            buffer_len: buffer.len(),
+            out_read: &mut read,
+        };
+        db_status(self.db, unsafe {
+            zova_sys::zova_object_reader_read(&request)
+        })?;
+        Ok(read)
+    }
+
+    /// Explicitly close the reader. Drop also closes it, and repeated calls
+    /// are successful no-ops.
+    pub fn close(&mut self) -> Result<()> {
+        self.destroy(true)
+    }
+
+    fn raw(&self) -> Result<NonNull<zova_sys::zova_object_reader>> {
+        self.raw
+            .ok_or_else(|| Error::from_status(zova_sys::ZOVA_OBJECT_READER_CLOSED, None))
+    }
+
+    fn destroy(&mut self, report_error: bool) -> Result<()> {
+        let Some(raw) = self.raw else {
+            return Ok(());
+        };
+
+        let mut raw_ptr = raw.as_ptr();
+        let request = zova_sys::zova_object_reader_destroy_request {
+            reader: &mut raw_ptr,
+        };
+        let status = unsafe { zova_sys::zova_object_reader_destroy(&request) };
+        if status == zova_sys::ZOVA_OK {
+            self.raw = None;
+            return Ok(());
+        }
+        if report_error {
+            db_status(self.db, status)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for ObjectReader<'_> {
+    fn drop(&mut self) {
+        let _ = self.destroy(false);
+    }
+}
+
+impl OwnedObjectReader {
+    /// Read up to `buffer.len()` bytes and advance the reader.
+    pub fn read(&mut self, buffer: &mut [u8]) -> Result<usize> {
+        let raw = self.raw()?;
+        let mut read = 0;
+        let request = zova_sys::zova_object_reader_read_request {
+            reader: raw.as_ptr(),
+            buffer: buffer.as_mut_ptr(),
+            buffer_len: buffer.len(),
+            out_read: &mut read,
+        };
+        db_status(self.db, unsafe {
+            zova_sys::zova_object_reader_read(&request)
+        })?;
+        Ok(read)
+    }
+
+    /// Explicitly close the reader. Drop also closes it.
+    pub fn close(&mut self) -> Result<()> {
+        self.destroy(true)
+    }
+
+    fn raw(&self) -> Result<NonNull<zova_sys::zova_object_reader>> {
+        self.raw
+            .ok_or_else(|| Error::from_status(zova_sys::ZOVA_OBJECT_READER_CLOSED, None))
+    }
+
+    fn destroy(&mut self, report_error: bool) -> Result<()> {
+        let Some(raw) = self.raw else {
+            return Ok(());
+        };
+
+        let mut raw_ptr = raw.as_ptr();
+        let request = zova_sys::zova_object_reader_destroy_request {
+            reader: &mut raw_ptr,
+        };
+        let status = unsafe { zova_sys::zova_object_reader_destroy(&request) };
+        if status == zova_sys::ZOVA_OK {
+            self.raw = None;
+            return Ok(());
+        }
+        if report_error {
+            db_status(self.db, status)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for OwnedObjectReader {
+    fn drop(&mut self) {
+        let _ = self.destroy(false);
     }
 }
 

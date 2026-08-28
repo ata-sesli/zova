@@ -1,5 +1,6 @@
 const std = @import("std");
 const fastcdc = @import("object_fastcdc.zig");
+const fixed_chunks = @import("object_fixed_chunks.zig");
 const object_impl = @import("object.zig");
 const sqlite = @import("sqlite.zig");
 const test_support = @import("zova_test_support.zig");
@@ -31,6 +32,41 @@ const objects_schema_sql = object_impl.objects_schema_sql;
 const chunks_schema_sql = object_impl.chunks_schema_sql;
 const object_chunks_schema_sql = object_impl.object_chunks_schema_sql;
 
+// These tables are test-owned storage so physical policy behavior can be
+// exercised directly without routing through the package facade.
+const prototype_objects_schema_sql =
+    \\create table _zova_objects (
+    \\  object_id blob not null primary key check (length(object_id) = 32),
+    \\  size_bytes integer not null check (size_bytes >= 0),
+    \\  chunk_count integer not null check (chunk_count >= 0),
+    \\  chunker text not null check (chunker in ('fastcdc-v1', 'fixed-1m-v1'))
+    \\)
+;
+const prototype_chunks_schema_sql =
+    \\create table _zova_chunks (
+    \\  chunk_hash blob not null primary key check (length(chunk_hash) = 32),
+    \\  size_bytes integer not null check (size_bytes > 0 and size_bytes <= 1048576),
+    \\  data blob not null check (length(data) = size_bytes)
+    \\)
+;
+const prototype_object_chunks_schema_sql =
+    \\create table _zova_object_chunks (
+    \\  object_id blob not null check (length(object_id) = 32),
+    \\  chunk_index integer not null check (chunk_index >= 0),
+    \\  chunk_hash blob not null check (length(chunk_hash) = 32),
+    \\  offset integer not null check (offset >= 0),
+    \\  size_bytes integer not null check (size_bytes > 0 and size_bytes <= 1048576),
+    \\  primary key (object_id, chunk_index),
+    \\  foreign key (object_id) references _zova_objects(object_id),
+    \\  foreign key (chunk_hash) references _zova_chunks(chunk_hash)
+    \\)
+;
+
+fn preparePrototypeDatabase(raw: *sqlite.Database) !object_impl.Database {
+    try raw.exec(prototype_objects_schema_sql ++ ";" ++ prototype_chunks_schema_sql ++ ";" ++ prototype_object_chunks_schema_sql ++ ";");
+    return object_impl.Database.initForPrototype(raw, .main);
+}
+
 const TestingTrackingAllocator = test_support.TestingTrackingAllocator;
 const expectSearchIds = test_support.expectSearchIds;
 const expectSqlPrepareOrStepError = test_support.expectSqlPrepareOrStepError;
@@ -47,6 +83,306 @@ const testingQuickCheckOk = test_support.testingQuickCheckOk;
 const testingSharedChunkCount = test_support.testingSharedChunkCount;
 const testingStreamObject = test_support.testingStreamObject;
 const testingWriteMetadata = test_support.testingWriteMetadata;
+
+test "fixed profile has an explicit 1 MiB object contract" {
+    var raw = try sqlite.Database.open(":memory:");
+    defer raw.deinit();
+    var db = try preparePrototypeDatabase(&raw);
+
+    const one_mib = fixed_chunks.chunk_size;
+    var bytes: [one_mib * 2 + 123]u8 = undefined;
+    for (&bytes, 0..) |*byte, index| byte.* = @intCast((index * 31 + index / 7 + 13) % 251);
+
+    const id = try db.putObjectWithOptions(&bytes, .{ .profile = .streaming });
+    var manifest = try db.objectManifest(std.testing.allocator, id);
+    defer manifest.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("fixed-1m-v1", manifest.chunker);
+    try std.testing.expectEqual(@as(u64, 3), manifest.chunk_count);
+    try std.testing.expectEqual(@as(u64, one_mib), manifest.chunks[0].size_bytes);
+    try std.testing.expectEqual(@as(u64, one_mib), manifest.chunks[1].size_bytes);
+    try std.testing.expectEqual(@as(u64, 123), manifest.chunks[2].size_bytes);
+
+    const empty_id = try db.putObjectWithOptions("", .{ .profile = .streaming });
+    var empty_manifest = try db.objectManifest(std.testing.allocator, empty_id);
+    defer empty_manifest.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("fixed-1m-v1", empty_manifest.chunker);
+    try std.testing.expectEqual(@as(u64, 0), empty_manifest.chunk_count);
+}
+
+test "fixed profile writer retains its profile and same bytes remain idempotent" {
+    var raw = try sqlite.Database.open(":memory:");
+    defer raw.deinit();
+    var db = try preparePrototypeDatabase(&raw);
+
+    const bytes = [_]u8{0x5a} ** (fixed_chunks.chunk_size * 2 + 17);
+    var writer = try db.objectWriterWithOptions(std.testing.allocator, .{ .profile = .streaming });
+    try writer.write(bytes[0..333]);
+    try writer.write(bytes[333..]);
+    const writer_id = try writer.finish();
+    defer writer.deinit();
+
+    const direct_id = try db.putObjectWithOptions(&bytes, .{ .profile = .deduplication });
+    try std.testing.expectEqualSlices(u8, &writer_id, &direct_id);
+
+    var manifest = try db.objectManifest(std.testing.allocator, writer_id);
+    defer manifest.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("fixed-1m-v1", manifest.chunker);
+    try std.testing.expectEqual(@as(u64, 3), manifest.chunk_count);
+    try std.testing.expectEqual(fixed_chunks.chunk_size, manifest.chunks[0].size_bytes);
+    try std.testing.expectEqual(fixed_chunks.chunk_size, manifest.chunks[1].size_bytes);
+}
+
+test "fixed profile transfer chunks accept 1 MiB and assemble atomically" {
+    var raw = try sqlite.Database.open(":memory:");
+    defer raw.deinit();
+    var db = try preparePrototypeDatabase(&raw);
+
+    const first = [_]u8{0x1a} ** fixed_chunks.chunk_size;
+    const tail = [_]u8{0x2b} ** 37;
+    const first_hash = objectChunkId(&first);
+    const tail_hash = objectChunkId(&tail);
+    try db.putObjectChunkWithOptions(first_hash, &first, .{ .profile = .streaming });
+    try db.putObjectChunkWithOptions(tail_hash, &tail, .{ .profile = .streaming });
+    try db.putObjectChunkWithOptions(first_hash, &first, .{ .profile = .streaming });
+    try std.testing.expectError(error.ObjectCorrupt, db.putObjectChunk(first_hash, &first));
+
+    var bytes: [fixed_chunks.chunk_size + tail.len]u8 = undefined;
+    @memcpy(bytes[0..first.len], &first);
+    @memcpy(bytes[first.len..], &tail);
+    const id = objectId(&bytes);
+    const shuffled = [_]ObjectChunk{
+        .{ .index = 1, .hash = tail_hash, .offset = first.len, .size_bytes = tail.len },
+        .{ .index = 0, .hash = first_hash, .offset = 0, .size_bytes = first.len },
+    };
+
+    try db.assembleObjectFromChunksWithOptions(id, bytes.len, &shuffled, .{ .profile = .streaming });
+    var manifest = try db.objectManifest(std.testing.allocator, id);
+    defer manifest.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(fixed_chunks.version, manifest.chunker);
+    try std.testing.expectEqual(@as(u64, 2), manifest.chunk_count);
+    try std.testing.expectEqual(first.len, manifest.chunks[0].size_bytes);
+    try std.testing.expectEqual(tail.len, manifest.chunks[1].size_bytes);
+
+    var malformed = shuffled;
+    malformed[1].size_bytes = first.len - 1;
+    const malformed_id = objectId("malformed fixed transfer");
+    try std.testing.expectError(
+        error.ObjectManifestInvalid,
+        db.assembleObjectFromChunksWithOptions(malformed_id, bytes.len, &malformed, .{ .profile = .streaming }),
+    );
+    try std.testing.expect(!try db.hasObject(malformed_id));
+}
+
+test "fixed profile writer replay cancel and failure cleanup preserve atomicity" {
+    var raw = try sqlite.Database.open(":memory:");
+    defer raw.deinit();
+    var db = try preparePrototypeDatabase(&raw);
+
+    var bytes: [fixed_chunks.chunk_size + 17]u8 = undefined;
+    for (&bytes, 0..) |*byte, index| byte.* = @intCast((index * 23 + 9) % 251);
+    const expected_id = objectId(&bytes);
+
+    var writer = try db.objectWriterWithOptions(std.testing.allocator, .{ .profile = .streaming });
+    try writer.write(bytes[0..123]);
+    try writer.write(bytes[123..fixed_chunks.chunk_size]);
+    try writer.write(bytes[fixed_chunks.chunk_size..]);
+    const first_id = try writer.finish();
+    defer writer.deinit();
+    try std.testing.expectEqualSlices(u8, &expected_id, &first_id);
+
+    var replay = try db.objectWriterWithOptions(std.testing.allocator, .{ .profile = .streaming });
+    defer replay.deinit();
+    try replay.write(&bytes);
+    const replay_id = try replay.finish();
+    try std.testing.expectEqualSlices(u8, &first_id, &replay_id);
+
+    const chunks_before_cancel = try testingCount(&raw, "select count(*) from _zova_chunks");
+    const cancel_bytes = [_]u8{0xa5} ** (fixed_chunks.chunk_size + 11);
+    var cancelled = try db.objectWriterWithOptions(std.testing.allocator, .{ .profile = .streaming });
+    try cancelled.write(&cancel_bytes);
+    try cancelled.cancel();
+    defer cancelled.deinit();
+    try std.testing.expectEqual(chunks_before_cancel, try testingCount(&raw, "select count(*) from _zova_chunks"));
+
+    const retry_bytes = "fixed writer failure cleanup";
+    const retry_id = objectId(retry_bytes);
+    var retry = try db.objectWriterWithOptions(std.testing.allocator, .{ .profile = .streaming });
+    defer retry.deinit();
+    try retry.write(retry_bytes);
+    try raw.exec("create trigger force_fixed_manifest_failure " ++
+        "before insert on _zova_object_chunks " ++
+        "begin select raise(abort, 'forced fixed manifest failure'); end;");
+    try std.testing.expectError(error.Constraint, retry.finish());
+    try std.testing.expect(!try db.hasObject(retry_id));
+    try std.testing.expect(try db.hasObjectChunk(objectChunkId(retry_bytes)));
+    try raw.exec("drop trigger force_fixed_manifest_failure");
+    const retried_id = try retry.finish();
+    try std.testing.expectEqualSlices(u8, &retry_id, &retried_id);
+
+    try raw.begin();
+    try std.testing.expectError(
+        error.ObjectTransactionActive,
+        db.objectWriterWithOptions(std.testing.allocator, .{ .profile = .streaming }),
+    );
+    try raw.rollback();
+
+    const chunks_before_allocation_failure = try testingCount(&raw, "select count(*) from _zova_chunks");
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var failed = try db.objectWriterWithOptions(failing.allocator(), .{ .profile = .streaming });
+    try std.testing.expectError(error.OutOfMemory, failed.write(&cancel_bytes));
+    failed.deinit();
+    try std.testing.expectEqual(chunks_before_allocation_failure, try testingCount(&raw, "select count(*) from _zova_chunks"));
+}
+
+test "fixed profile range reads validate only through the selected policy" {
+    var raw = try sqlite.Database.open(":memory:");
+    defer raw.deinit();
+    var db = try preparePrototypeDatabase(&raw);
+
+    var bytes: [1024 * 1024 * 2 + 4096]u8 = undefined;
+    for (&bytes, 0..) |*byte, index| byte.* = @intCast((index * 17 + index / 3 + 7) % 251);
+    const id = try db.putObjectWithOptions(&bytes, .{ .profile = .streaming });
+
+    var range: [64 * 1024]u8 = undefined;
+    try std.testing.expectEqual(range.len, try db.readObjectRange(id, 1024 * 1024 - 8192, &range));
+    try std.testing.expectEqualSlices(u8, bytes[1024 * 1024 - 8192 ..][0..range.len], &range);
+
+    var output: [4097]u8 = undefined;
+    var output_offset: usize = 0;
+    while (output_offset < bytes.len) {
+        const read_len = @min(output.len, bytes.len - output_offset);
+        try std.testing.expectEqual(read_len, try db.readObjectRange(id, output_offset, output[0..read_len]));
+        try std.testing.expectEqualSlices(u8, bytes[output_offset .. output_offset + read_len], output[0..read_len]);
+        output_offset += read_len;
+    }
+}
+
+test "fixed profile validates malformed manifests and allocation failures safely" {
+    var raw = try sqlite.Database.open(":memory:");
+    defer raw.deinit();
+    var db = try preparePrototypeDatabase(&raw);
+
+    const bytes = [_]u8{0x33} ** (1024 * 1024 + 1);
+    const id = try db.putObjectWithOptions(&bytes, .{ .profile = .streaming });
+
+    try raw.exec("pragma ignore_check_constraints = on");
+    defer raw.exec("pragma ignore_check_constraints = off") catch {};
+    var corrupt = try raw.prepare("update _zova_object_chunks set size_bytes = 1 where object_id = ? and chunk_index = 0");
+    defer corrupt.deinit();
+    try corrupt.bindBlob(1, &id);
+    try std.testing.expectEqual(sqlite.Step.done, try corrupt.step());
+
+    try std.testing.expectError(error.ObjectCorrupt, db.objectManifest(std.testing.allocator, id));
+
+    const valid_id = try db.putObjectWithOptions("allocation failure", .{ .profile = .streaming });
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, db.getObject(failing.allocator(), valid_id));
+}
+
+test "fixed partial ranges skip validation of untouched manifest rows" {
+    var raw = try sqlite.Database.open(":memory:");
+    defer raw.deinit();
+    var db = try preparePrototypeDatabase(&raw);
+
+    const bytes = [_]u8{0x4a} ** (fixed_chunks.chunk_size * 2 + 17);
+    const id = try db.putObjectWithOptions(&bytes, .{ .profile = .streaming });
+
+    try raw.exec("pragma ignore_check_constraints = on");
+    defer raw.exec("pragma ignore_check_constraints = off") catch {};
+    try raw.exec("update _zova_object_chunks set size_bytes = 1 where chunk_index = 2");
+    try raw.exec("update _zova_chunks set data = zeroblob(length(data)) where chunk_hash = (select chunk_hash from _zova_object_chunks where chunk_index = 2)");
+
+    var output: [64]u8 = undefined;
+    try std.testing.expectEqual(output.len, try db.readObjectRange(id, 0, &output));
+    try std.testing.expectEqualSlices(u8, bytes[0..output.len], &output);
+}
+
+test "fixed partial ranges verify touched chunk bytes" {
+    var raw = try sqlite.Database.open(":memory:");
+    defer raw.deinit();
+    var db = try preparePrototypeDatabase(&raw);
+
+    const bytes = [_]u8{0x2c} ** (fixed_chunks.chunk_size * 2 + 17);
+    const id = try db.putObjectWithOptions(&bytes, .{ .profile = .streaming });
+
+    try raw.exec("pragma ignore_check_constraints = on");
+    defer raw.exec("pragma ignore_check_constraints = off") catch {};
+    try raw.exec("update _zova_chunks set data = zeroblob(1048576) where rowid = 1");
+
+    var output: [64]u8 = undefined;
+    try std.testing.expectError(error.ObjectCorrupt, db.readObjectRange(id, 0, &output));
+}
+
+test "sequential object reader streams fixed chunks and verifies EOF" {
+    var raw = try sqlite.Database.open(":memory:");
+    defer raw.deinit();
+    var db = try preparePrototypeDatabase(&raw);
+
+    var bytes: [fixed_chunks.chunk_size * 2 + 17]u8 = undefined;
+    for (&bytes, 0..) |*byte, index| byte.* = @intCast((index * 17 + 3) % 251);
+    const id = try db.putObjectWithOptions(&bytes, .{ .profile = .streaming });
+
+    var reader = try db.objectReader(id);
+    defer reader.deinit();
+    var output: [4097]u8 = undefined;
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const requested = @min(output.len, bytes.len - offset);
+        const count = try reader.read(output[0..requested]);
+        try std.testing.expectEqual(requested, count);
+        try std.testing.expectEqualSlices(u8, bytes[offset .. offset + count], output[0..count]);
+        offset += count;
+    }
+    try std.testing.expectEqual(@as(usize, 0), try reader.read(&output));
+    try std.testing.expectEqual(@as(usize, 0), try reader.read(&output));
+}
+
+test "sequential object reader handles empty objects and early close" {
+    var raw = try sqlite.Database.open(":memory:");
+    defer raw.deinit();
+    var db = try preparePrototypeDatabase(&raw);
+
+    const id = try db.putObjectWithOptions("", .{ .profile = .streaming });
+    var reader = try db.objectReader(id);
+    var output: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), try reader.read(&output));
+    reader.deinit();
+    reader.deinit();
+    try std.testing.expectError(error.ObjectReaderClosed, reader.read(&output));
+}
+
+test "sequential object reader holds a stable WAL snapshot" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "object-reader-snapshot.zova");
+    var first_raw = try sqlite.Database.open(db_path);
+    defer first_raw.deinit();
+    try first_raw.exec(objects_schema_sql ++ ";" ++ chunks_schema_sql ++ ";" ++ object_chunks_schema_sql ++ ";");
+    var first = object_impl.Database.initForPrototype(&first_raw, .main);
+    try first_raw.exec("pragma journal_mode = wal");
+
+    const payload = "stable reader snapshot";
+    const id = try first.putObject(payload);
+
+    var second_raw = try sqlite.Database.open(db_path);
+    defer second_raw.deinit();
+    try second_raw.exec("pragma journal_mode = wal");
+
+    var reader = try first.objectReader(id);
+    defer reader.deinit();
+    try second_raw.exec("update _zova_chunks set data = zeroblob(length(data))");
+
+    var bytes: [payload.len]u8 = undefined;
+    try std.testing.expectEqual(bytes.len, try reader.read(&bytes));
+    try std.testing.expectEqualSlices(u8, payload, &bytes);
+
+    reader.deinit();
+    var current: [payload.len]u8 = undefined;
+    try std.testing.expectError(error.ObjectCorrupt, first.readObjectRange(id, 0, &current));
+}
 
 test "object ids are sha256 of full object bytes" {
     const empty_expected = ObjectId{
@@ -1594,6 +1930,27 @@ test "object range reads copy caller requested bytes" {
     try std.testing.expectEqualSlices(u8, bytes[1234 .. 1234 + repeated.len], &repeated);
 }
 
+test "multi-chunk range reads release each blob before opening the next" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "range-blob-lifetime.zova");
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    var bytes: [fastcdc.max_size * 4 + 123]u8 = undefined;
+    for (&bytes, 0..) |*byte, index| byte.* = @intCast((index * 29 + index / 5 + 17) % 251);
+    const id = try db.putObject(&bytes);
+
+    var output: [bytes.len]u8 = undefined;
+    object_impl.resetRangeBlobTestMetrics();
+    try std.testing.expectEqual(bytes.len, try db.readObjectRange(id, 0, &output));
+    try std.testing.expectEqualSlices(u8, &bytes, &output);
+    try std.testing.expectEqual(@as(usize, 1), object_impl.maxRangeBlobTestHandles());
+    try std.testing.expectEqual(@as(usize, 0), object_impl.activeRangeBlobTestHandles());
+}
+
 test "object range reads report corrupt private rows" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1655,7 +2012,7 @@ test "object range reads report corrupt private rows" {
 
         const id = try db.putObject("inflated count");
         var buffer: [14]u8 = undefined;
-        try db.exec("update _zova_objects set size_bytes = 1000000, chunk_count = 1000000");
+        try db.exec("update _zova_objects set chunk_count = 1000000");
         try std.testing.expectError(error.ObjectCorrupt, db.readObjectRange(id, 0, &buffer));
     }
 }
@@ -2229,10 +2586,10 @@ test "chunk table constraints reject invalid chunk rows" {
 
     {
         var chunk_hash = [_]u8{0xee} ** 32;
-        var too_large_data = [_]u8{0x11} ** (fastcdc.max_size + 1);
+        var too_large_data = [_]u8{0x11} ** (fixed_chunks.max_size + 1);
         var too_large = try db.prepare(
             \\insert into _zova_chunks (chunk_hash, size_bytes, data)
-            \\values (?, 65537, ?)
+            \\values (?, 1048577, ?)
         );
         defer too_large.deinit();
 

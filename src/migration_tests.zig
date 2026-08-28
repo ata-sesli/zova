@@ -1,7 +1,7 @@
 //! Storage-format migration registry and per-file step tests.
 //!
 //! Covers the sequential adjacent migration registry and the exact
-//! format 9 -> 10 transformation over the genuine released format-9 fixtures:
+//! format 9 -> 10 and format 10 -> 11 transformations over genuine fixtures:
 //! successful transforms reopen as valid current-format databases, refusals
 //! leave sources byte-identical, and schema failures roll back completely so
 //! the recorded format version never advances.
@@ -25,6 +25,16 @@ fn fileSha256(path: []const u8) ![32]u8 {
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
     return digest;
+}
+
+fn lowerHexAlloc(bytes: []const u8) ![]u8 {
+    const digits = "0123456789abcdef";
+    const out = try std.testing.allocator.alloc(u8, bytes.len * 2);
+    for (bytes, 0..) |byte, index| {
+        out[index * 2] = digits[@intCast(byte >> 4)];
+        out[index * 2 + 1] = digits[@intCast(byte & 0x0f)];
+    }
+    return out;
 }
 
 fn copyFixture(tmp_sub_path: []const u8, index: usize, name: []const u8) ![:0]const u8 {
@@ -63,14 +73,155 @@ test "migration registry only registers adjacent steps with exact version pairs"
 
     // Exact pair matching: no skipping, no catch-all.
     try std.testing.expect(zova.findMigrationStep(9, 10) != null);
+    try std.testing.expect(zova.findMigrationStep(10, 11) != null);
     try std.testing.expect(zova.findMigrationStep(8, 10) == null);
     try std.testing.expect(zova.findMigrationStep(8, 9) == null);
-    try std.testing.expect(zova.findMigrationStep(10, 11) == null);
+    try std.testing.expect(zova.findMigrationStep(9, 11) == null);
+    try std.testing.expect(zova.findMigrationStep(11, 12) == null);
     try std.testing.expect(zova.findMigrationStep(9, 9) == null);
     try std.testing.expect(zova.findMigrationStep(7, 8) == null);
 }
 
-test "migration transforms genuine format-9 fixtures into valid format-10 databases" {
+test "genuine format-10 fixture hashes are immutable" {
+    const fixtures = .{
+        .{ .name = "empty-main-format-10.zova", .sha256 = "0d0797d37c6f55cad4b1e296920ee047b329f4a3859bbfd6e1c7e9c48b68a761" },
+        .{ .name = "format-10.zova", .sha256 = "d0eda996bd5dbdac44f2c4abfada2433048c1c54e253ee101ac611cb9346f5a3" },
+        .{ .name = "bound-main-format-10.zova", .sha256 = "1d6f96ca5f8b4152dace31b19a7bd618a58348d709737a513f521ee50ad19d36" },
+        .{ .name = "bound-main-format-10.objects.zova", .sha256 = "5ea2086d1740a639a702fd330a4bd45a1e238462a306ac60ae59c666a59b2304" },
+        .{ .name = "bound-main-format-10.vectors.zova", .sha256 = "9cc8dddd43ffa5b55c3a6142fb00bd27ec9a926551d9f39ec060e2a247ba6217" },
+        .{ .name = "bound-main-format-10.graphs.zova", .sha256 = "51c6460eb5d8a8ff82be60a7a6cd83e97676ed6c3c85ebf07897b4c60717cc6c" },
+        .{ .name = "empty-vector-store-format-10.zova", .sha256 = "dfbaebed1195878c1ad40ed32f4c6fcef7982923c42e7b509f10b8f8c253c8ff" },
+        .{ .name = "empty-graph-store-format-10.zova", .sha256 = "c9bd4f66f77fe758292f5b34cdf49bd5291f0f165e6f3ea686897db9542faceb" },
+    };
+
+    inline for (fixtures) |fixture| {
+        var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ fixture_dir, fixture.name });
+        const digest = try fileSha256(path);
+        const actual = try lowerHexAlloc(&digest);
+        defer std.testing.allocator.free(actual);
+        try std.testing.expectEqualStrings(fixture.sha256, actual);
+    }
+}
+
+test "genuine format-10 object schema migrates atomically to fixed-1MiB format 11" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const copy_path = try copyFixture(tmp.sub_path[0..], 0, "format-10.zova");
+    defer std.testing.allocator.free(copy_path);
+
+    const before_objects = blk: {
+        var raw = try sqlite.Database.openWithFlags(copy_path, .read_only);
+        defer raw.deinit();
+        break :blk try scalarCount(&raw, "select count(*) from _zova_objects");
+    };
+
+    {
+        var raw = try sqlite.Database.open(copy_path);
+        defer raw.deinit();
+        try std.testing.expectEqual(@as(u32, 11), try zova.runMigrationStep(&raw));
+        try expectScalarTextRaw(&raw, "select value from _zova_meta where key = 'format_version'", "11");
+        try std.testing.expectEqual(before_objects, try scalarCount(&raw, "select count(*) from _zova_objects"));
+        try std.testing.expectEqual(@as(i64, 0), try scalarCount(
+            &raw,
+            "select count(*) from sqlite_master where name like '%_format10'",
+        ));
+    }
+
+    var db = try Database.open(copy_path);
+    defer db.deinit();
+
+    const bytes = try std.testing.allocator.alloc(u8, 1024 * 1024 + 7);
+    defer std.testing.allocator.free(bytes);
+    for (bytes, 0..) |*byte, index| byte.* = @truncate(index *% 131 +% 17);
+
+    const id = try db.putObjectWithOptions(bytes, .{ .profile = .streaming });
+    var manifest = try db.objectManifest(std.testing.allocator, id);
+    defer manifest.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("fixed-1m-v1", manifest.chunker);
+    try std.testing.expectEqual(@as(u64, 2), manifest.chunk_count);
+    try std.testing.expectEqual(@as(u64, 1024 * 1024), manifest.chunks[0].size_bytes);
+    try std.testing.expectEqual(@as(u64, 7), manifest.chunks[1].size_bytes);
+}
+
+test "genuine format-10 bound-store set migrates copy-forward to format 11" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var dir_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const set_dir = try std.fmt.bufPrint(&dir_buffer, ".zig-cache/tmp/{s}/format10-bound", .{tmp.sub_path[0..]});
+    try std.Io.Dir.cwd().createDirPath(io(), set_dir);
+
+    const members = [_][]const u8{
+        "bound-main-format-10.zova",
+        "bound-main-format-10.objects.zova",
+        "bound-main-format-10.vectors.zova",
+        "bound-main-format-10.graphs.zova",
+    };
+    inline for (members) |name| {
+        var member_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const member_path = try std.fmt.bufPrintZ(&member_buffer, "{s}/{s}", .{ set_dir, name });
+        try copyFixtureInto(member_path, name);
+    }
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_main = try std.fmt.bufPrintZ(&source_buffer, "{s}/bound-main-format-10.zova", .{set_dir});
+    {
+        var raw = try sqlite.Database.open(source_main);
+        defer raw.deinit();
+        inline for (.{
+            .{ .role = "object_store", .suffix = "objects" },
+            .{ .role = "vector_store", .suffix = "vectors" },
+            .{ .role = "graph_store", .suffix = "graphs" },
+        }) |entry| {
+            var update = try raw.prepare("update _zova_bound_stores set path = ?1 where role = ?2");
+            defer update.deinit();
+            var sibling_buffer: [std.fs.max_path_bytes]u8 = undefined;
+            const sibling = try std.fmt.bufPrintZ(&sibling_buffer, "{s}/bound-main-format-10.{s}.zova", .{ set_dir, entry.suffix });
+            try update.bindText(1, sibling);
+            try update.bindText(2, entry.role);
+            _ = try update.step();
+        }
+    }
+
+    var source_hashes: [members.len][32]u8 = undefined;
+    inline for (members, 0..) |name, index| {
+        var member_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const member_path = try std.fmt.bufPrintZ(&member_buffer, "{s}/{s}", .{ set_dir, name });
+        source_hashes[index] = try fileSha256(member_path);
+    }
+
+    var destination_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const destination_main = try std.fmt.bufPrintZ(&destination_buffer, "{s}/migrated-format10.zova", .{set_dir});
+    try zova.migrateDatabase(source_main, destination_main, .{});
+
+    inline for (members, 0..) |name, index| {
+        var member_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const member_path = try std.fmt.bufPrintZ(&member_buffer, "{s}/{s}", .{ set_dir, name });
+        const after_hash = try fileSha256(member_path);
+        try std.testing.expectEqualSlices(u8, &source_hashes[index], &after_hash);
+    }
+
+    var db = try Database.open(destination_main);
+    defer db.deinit();
+    var object_store = (try db.boundObjectStore(std.testing.allocator)).?;
+    defer object_store.deinit(std.testing.allocator);
+    var vector_store = (try db.boundVectorStore(std.testing.allocator)).?;
+    defer vector_store.deinit(std.testing.allocator);
+    var graph_store = (try db.boundGraphStore(std.testing.allocator)).?;
+    defer graph_store.deinit(std.testing.allocator);
+
+    inline for (.{ "objects", "vectors", "graphs" }) |suffix| {
+        var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const store_path = try std.fmt.bufPrintZ(&store_buffer, "{s}/migrated-format10.{s}.zova", .{ set_dir, suffix });
+        var raw = try sqlite.Database.openWithFlags(store_path, .read_only);
+        defer raw.deinit();
+        try expectScalarTextRaw(&raw, "select value from _zova_meta where key = 'format_version'", "11");
+    }
+}
+
+test "migration transforms genuine format-9 fixtures through adjacent steps into format 11" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -101,6 +252,15 @@ test "migration transforms genuine format-9 fixtures into valid format-10 databa
             try expectScalarTextRaw(&raw, "select value from _zova_meta where key = 'magic'", "zova");
         }
         try std.testing.expectEqual(@as(u32, 10), new_version);
+
+        // Format 10 is now an intermediate format and remains rejected by the
+        // normal open path until its own adjacent step has completed.
+        try std.testing.expectError(error.MigrationRequired, Database.open(copy_path));
+        {
+            var raw = try sqlite.Database.open(copy_path);
+            defer raw.deinit();
+            try std.testing.expectEqual(@as(u32, 11), try zova.runMigrationStep(&raw));
+        }
 
         // The migrated file reopens through the full open path.
         var db = try Database.open(copy_path);
@@ -144,7 +304,8 @@ test "migration transforms genuine format-9 fixtures into valid format-10 databa
             var raw = try sqlite.Database.open(staged_path);
             defer raw.deinit();
             _ = try zova.runMigrationStep(&raw);
-            try expectScalarTextRaw(&raw, "select value from _zova_meta where key = 'format_version'", "10");
+            _ = try zova.runMigrationStep(&raw);
+            try expectScalarTextRaw(&raw, "select value from _zova_meta where key = 'format_version'", "11");
         }
     }
 
@@ -200,6 +361,7 @@ test "migrated populated format-9 database preserves object vector graph and ext
     {
         var raw = try sqlite.Database.open(copy_path);
         defer raw.deinit();
+        _ = try zova.runMigrationStep(&raw);
         _ = try zova.runMigrationStep(&raw);
     }
 
@@ -678,7 +840,7 @@ fn expectMigratedSetParity(allocator: std.mem.Allocator, destination_path: []con
         const sibling = try std.fmt.bufPrintZ(&sibling_buffer, "{s}.{s}.zova", .{ stem, suffix });
         var store_db = try sqlite.Database.openWithFlags(sibling, .read_only);
         defer store_db.deinit();
-        try expectScalarTextRaw(&store_db, "select value from _zova_meta where key = 'format_version'", "10");
+        try expectScalarTextRaw(&store_db, "select value from _zova_meta where key = 'format_version'", "11");
         try expectScalarTextRaw(&store_db, "select count(*) from sqlite_master where type = 'table' and name = '_zova_kv'", "1");
     }
 }

@@ -313,6 +313,102 @@ pub const Database = struct {
     }
 };
 
+/// Read-only incremental access to one SQLite BLOB row.
+///
+/// The handle is deliberately limited to the SQLite primitive. Callers must
+/// supply the active schema, table, column, and rowid; higher-level storage
+/// code keeps those private and never returns the rowid to its callers. A
+/// successful open pins the connection's read snapshot until the handle is
+/// closed or the connection is closed.
+pub const Blob = struct {
+    db: *Database,
+    handle: ?*c.sqlite3_blob,
+    size: usize,
+
+    pub fn open(
+        db: *Database,
+        schema_name: [:0]const u8,
+        table_name: [:0]const u8,
+        column_name: [:0]const u8,
+        rowid: i64,
+    ) Error!Blob {
+        if (rowid <= 0) return error.InvalidArgument;
+
+        var raw_blob: ?*c.sqlite3_blob = null;
+        const rc = c.sqlite3_blob_open(
+            db.handle,
+            schema_name.ptr,
+            table_name.ptr,
+            column_name.ptr,
+            rowid,
+            0,
+            &raw_blob,
+        );
+        if (rc != c.SQLITE_OK) return mapResultCode(rc);
+
+        const handle = raw_blob orelse return error.NoMemory;
+        const size = c.sqlite3_blob_bytes(handle);
+        if (size < 0) {
+            _ = c.sqlite3_blob_close(handle);
+            return error.SqliteError;
+        }
+        return .{ .db = db, .handle = handle, .size = @intCast(size) };
+    }
+
+    /// Return the current BLOB length.
+    pub fn bytes(self: *const Blob) Error!usize {
+        const handle = self.handle orelse return error.Misuse;
+        const size = c.sqlite3_blob_bytes(handle);
+        if (size < 0) return error.SqliteError;
+        return @intCast(size);
+    }
+
+    /// Read bytes at an in-range offset without allocating.
+    pub fn read(self: *Blob, destination: []u8, offset: u64) Error!void {
+        const handle = self.handle orelse return error.Misuse;
+        if (offset > self.size) return error.InvalidArgument;
+        const offset_usize: usize = @intCast(offset);
+        if (destination.len > self.size - offset_usize) return error.InvalidArgument;
+        if (destination.len == 0) return;
+        if (destination.len > std.math.maxInt(c_int) or offset > std.math.maxInt(c_int)) {
+            return error.InvalidArgument;
+        }
+
+        const rc = c.sqlite3_blob_read(
+            handle,
+            destination.ptr,
+            @intCast(destination.len),
+            @intCast(offset),
+        );
+        if (rc != c.SQLITE_OK) return mapResultCode(rc);
+    }
+
+    /// Move the read-only handle to another row in the same table/column.
+    pub fn reopen(self: *Blob, rowid: i64) Error!void {
+        const handle = self.handle orelse return error.Misuse;
+        if (rowid <= 0) return error.InvalidArgument;
+        const rc = c.sqlite3_blob_reopen(handle, rowid);
+        if (rc != c.SQLITE_OK) return mapResultCode(rc);
+        const size = c.sqlite3_blob_bytes(handle);
+        if (size < 0) return error.SqliteError;
+        self.size = @intCast(size);
+    }
+
+    /// Close the handle. SQLite closes it even when close reports an error.
+    pub fn close(self: *Blob) Error!void {
+        const handle = self.handle orelse return;
+        self.handle = null;
+        self.size = 0;
+        const rc = c.sqlite3_blob_close(handle);
+        if (rc != c.SQLITE_OK) return mapResultCode(rc);
+    }
+
+    /// Idempotent cleanup for error paths and deferred destruction.
+    pub fn deinit(self: *Blob) void {
+        self.close() catch {};
+    }
+};
+
 fn validateSavepointName(name: []const u8) Error!void {
     if (name.len == 0 or name.len > 64) return error.InvalidArgument;
     if (hasReservedZovaPrefix(name)) return error.InvalidArgument;
@@ -696,6 +792,55 @@ test "database exec runs multiline schema sql unchanged" {
 
     try std.testing.expectEqual(Step.row, try objects.step());
     try std.testing.expectEqual(@as(i64, 3), objects.columnInt64(0));
+}
+
+test "read-only blob handles read, reopen, bounds, and idempotent cleanup" {
+    var db = try Database.open(":memory:");
+    defer db.deinit();
+
+    try db.exec("create table payloads (data blob not null)");
+    try db.exec("insert into payloads (data) values (x'616263646566')");
+    try db.exec("insert into payloads (data) values (x'313233')");
+
+    var blob = try Blob.open(&db, "main", "payloads", "data", 1);
+    try std.testing.expectEqual(@as(usize, 6), try blob.bytes());
+
+    var bytes: [3]u8 = undefined;
+    try blob.read(&bytes, 1);
+    try std.testing.expectEqualSlices(u8, "bcd", &bytes);
+    try std.testing.expectError(error.InvalidArgument, blob.read(&bytes, 4));
+
+    try blob.reopen(2);
+    try std.testing.expectEqual(@as(usize, 3), try blob.bytes());
+    var replacement: [3]u8 = undefined;
+    try blob.read(&replacement, 0);
+    try std.testing.expectEqualSlices(u8, "123", &replacement);
+
+    blob.deinit();
+    blob.deinit();
+}
+
+test "read-only blob handles address attached schemas" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "blob-store.zova");
+    var store = try Database.open(db_path);
+    defer store.deinit();
+    try store.exec("create table payloads (data blob not null)");
+    try store.exec("insert into payloads (data) values (x'6174746163686564')");
+
+    var db = try Database.open(":memory:");
+    defer db.deinit();
+    try db.attachDatabase(db_path, "object_store");
+
+    var blob = try Blob.open(&db, "object_store", "payloads", "data", 1);
+    defer blob.deinit();
+    try std.testing.expectEqual(@as(usize, 8), try blob.bytes());
+    var bytes: [8]u8 = undefined;
+    try blob.read(&bytes, 0);
+    try std.testing.expectEqualSlices(u8, "attached", &bytes);
 }
 
 test "vendored sqlite supports built in json functions" {

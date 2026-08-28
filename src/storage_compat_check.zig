@@ -48,6 +48,17 @@ const migration_sets = [_]MigrationSet{
             "bound-main-format-9.graphs.zova",
         },
     },
+    .{ .format = 10, .members = &.{"empty-main-format-10.zova"} },
+    .{ .format = 10, .members = &.{"format-10.zova"} },
+    .{
+        .format = 10,
+        .members = &.{
+            "bound-main-format-10.zova",
+            "bound-main-format-10.objects.zova",
+            "bound-main-format-10.vectors.zova",
+            "bound-main-format-10.graphs.zova",
+        },
+    },
 };
 
 const store_suffixes = [_][2][]const u8{

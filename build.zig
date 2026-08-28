@@ -128,6 +128,31 @@ pub fn build(b: *std.Build) void {
     const storage_benchmark_step = b.step("bench-storage", "Run deterministic graph/vector storage benchmark");
     storage_benchmark_step.dependOn(&storage_benchmark_cmd.step);
 
+    const object_benchmark = b.addExecutable(.{
+        .name = "zova_object_storage_benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/object_storage.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    object_benchmark.root_module.addImport("object_impl", b.createModule(.{
+        .root_source_file = b.path("src/object.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+    object_benchmark.root_module.addImport("version_impl", b.createModule(.{
+        .root_source_file = b.path("src/version.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+    object_benchmark.root_module.addIncludePath(b.path("vendor/sqlite3.53.2"));
+    object_benchmark.root_module.linkLibrary(sqlite_lib);
+    const object_benchmark_cmd = b.addRunArtifact(object_benchmark);
+    if (b.args) |args| object_benchmark_cmd.addArgs(args);
+    const object_benchmark_step = b.step("bench-objects", "Run FastCDC object storage benchmark");
+    object_benchmark_step.dependOn(&object_benchmark_cmd.step);
+
     const graph_keyed_benchmark = b.addExecutable(.{
         .name = "zova_graph_keyed_benchmark",
         .root_module = b.createModule(.{

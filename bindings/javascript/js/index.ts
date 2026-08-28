@@ -29,6 +29,7 @@ export type {
   GraphWalkOptions,
 } from "./graph.js";
 export {
+  ObjectReader,
   ObjectWriter,
   objectChunkId,
   objectId,
@@ -43,6 +44,8 @@ export type {
   ObjectManifest,
   ObjectManifestChunk,
   ObjectManifestChunkInput,
+  ObjectPutOptions,
+  ObjectStorageProfile,
 } from "./object.js";
 export type {
   ColumnType,

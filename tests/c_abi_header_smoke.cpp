@@ -49,6 +49,9 @@ static_assert(offsetof(zova_database_migrate_request, source_path) == 0, "migrat
 static_assert(offsetof(zova_database_migrate_request, destination_path) == 8, "migrate request layout is stable");
 static_assert(offsetof(zova_database_migrate_request, flags) == 16, "migrate request layout is stable");
 static_assert(offsetof(zova_database_migrate_request, out_error_message) == 24, "migrate request layout is stable");
+static_assert(ZOVA_OBJECT_PROFILE_DEDUPLICATION == 0, "object profile values are stable");
+static_assert(ZOVA_OBJECT_PROFILE_STREAMING == 1, "object profile values are stable");
+static_assert(sizeof(zova_object_put_options) == sizeof(int), "object options use a C int");
 
 int main() {
     zova_database *db = nullptr;
@@ -58,6 +61,18 @@ int main() {
     zova_text text = {};
     zova_notification notification = {};
     zova_object_manifest manifest = {};
+    zova_object_reader *object_reader = nullptr;
+    zova_object_put_options object_options = {ZOVA_OBJECT_PROFILE_DEDUPLICATION};
+    zova_object_put_with_options_request object_put_with_options = {};
+    object_put_with_options.options = object_options;
+    zova_object_writer_create_with_options_request object_writer_with_options = {};
+    object_writer_with_options.options = object_options;
+    zova_object_reader_create_request object_reader_create = {};
+    object_reader_create.out_reader = &object_reader;
+    zova_object_reader_read_request object_reader_read = {};
+    object_reader_read.reader = object_reader;
+    zova_object_reader_destroy_request object_reader_destroy = {};
+    object_reader_destroy.reader = &object_reader;
     zova_object_id id = {};
     zova_vector vector = {};
     zova_vector_search_results search_results = {};

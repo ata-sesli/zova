@@ -265,6 +265,14 @@ const DiagnosticStats = struct {
     extensions: u64 = 0,
     objects: u64 = 0,
     chunks: u64 = 0,
+    object_logical_bytes: u64 = 0,
+    object_physical_chunk_bytes: u64 = 0,
+    object_referenced_chunk_bytes: u64 = 0,
+    fastcdc_manifest_rows: u64 = 0,
+    fixed_1m_manifest_rows: u64 = 0,
+    fastcdc_chunk_rows: u64 = 0,
+    fixed_1m_chunk_rows: u64 = 0,
+    object_deduplicated_bytes: u64 = 0,
     vectors: u64 = 0,
     loose_chunks: u64 = 0,
     graphs: u64 = 0,
@@ -6082,6 +6090,15 @@ fn writeCheckText(stdout: *std.Io.Writer, report: ?DiagnosticReport) !void {
             \\extensions_checked: {d}
             \\objects_checked: {d}
             \\chunks_checked: {d}
+            \\object_logical_bytes: {d}
+            \\object_physical_chunk_bytes: {d}
+            \\object_referenced_chunk_bytes: {d}
+            \\fastcdc_manifest_rows: {d}
+            \\fixed_1m_manifest_rows: {d}
+            \\fastcdc_chunk_rows: {d}
+            \\fixed_1m_chunk_rows: {d}
+            \\object_deduplicated_bytes: {d}
+            \\object_corruption_issues: {d}
             \\vectors_checked: {d}
             \\loose_chunks: {d}
             \\graphs_checked: {d}
@@ -6101,6 +6118,15 @@ fn writeCheckText(stdout: *std.Io.Writer, report: ?DiagnosticReport) !void {
             deep_report.stats.extensions,
             deep_report.stats.objects,
             deep_report.stats.chunks,
+            deep_report.stats.object_logical_bytes,
+            deep_report.stats.object_physical_chunk_bytes,
+            deep_report.stats.object_referenced_chunk_bytes,
+            deep_report.stats.fastcdc_manifest_rows,
+            deep_report.stats.fixed_1m_manifest_rows,
+            deep_report.stats.fastcdc_chunk_rows,
+            deep_report.stats.fixed_1m_chunk_rows,
+            deep_report.stats.object_deduplicated_bytes,
+            deep_report.issue_counts.object + deep_report.issue_counts.chunk,
             deep_report.stats.vectors,
             deep_report.stats.loose_chunks,
             deep_report.stats.graphs,
@@ -6140,6 +6166,17 @@ fn writeCheckJson(stdout: *std.Io.Writer, report: ?DiagnosticReport) !void {
             \\    "graph_nodes": {d},
             \\    "graph_edges": {d}
             \\  }},
+            \\  "object_storage": {{
+            \\    "logical_bytes": {d},
+            \\    "physical_chunk_bytes": {d},
+            \\    "referenced_chunk_bytes": {d},
+            \\    "fastcdc_manifest_rows": {d},
+            \\    "fixed_1m_manifest_rows": {d},
+            \\    "fastcdc_chunk_rows": {d},
+            \\    "fixed_1m_chunk_rows": {d},
+            \\    "deduplicated_bytes": {d},
+            \\    "corruption_issues": {d}
+            \\  }},
             \\  "issue_count": {d},
             \\  "issue_counts":
         , .{
@@ -6151,6 +6188,15 @@ fn writeCheckJson(stdout: *std.Io.Writer, report: ?DiagnosticReport) !void {
             deep_report.stats.graphs,
             deep_report.stats.graph_nodes,
             deep_report.stats.graph_edges,
+            deep_report.stats.object_logical_bytes,
+            deep_report.stats.object_physical_chunk_bytes,
+            deep_report.stats.object_referenced_chunk_bytes,
+            deep_report.stats.fastcdc_manifest_rows,
+            deep_report.stats.fixed_1m_manifest_rows,
+            deep_report.stats.fastcdc_chunk_rows,
+            deep_report.stats.fixed_1m_chunk_rows,
+            deep_report.stats.object_deduplicated_bytes,
+            deep_report.issue_counts.object + deep_report.issue_counts.chunk,
             deep_report.issue_count,
         });
         try stdout.writeByte(' ');
@@ -6254,6 +6300,15 @@ fn writeDoctorText(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
         \\extensions_checked: {d}
         \\objects_checked: {d}
         \\chunks_checked: {d}
+        \\object_logical_bytes: {d}
+        \\object_physical_chunk_bytes: {d}
+        \\object_referenced_chunk_bytes: {d}
+        \\fastcdc_manifest_rows: {d}
+        \\fixed_1m_manifest_rows: {d}
+        \\fastcdc_chunk_rows: {d}
+        \\fixed_1m_chunk_rows: {d}
+        \\object_deduplicated_bytes: {d}
+        \\object_corruption_issues: {d}
         \\vectors_checked: {d}
         \\loose_chunks: {d}
         \\graphs_checked: {d}
@@ -6278,6 +6333,15 @@ fn writeDoctorText(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
         report.stats.extensions,
         report.stats.objects,
         report.stats.chunks,
+        report.stats.object_logical_bytes,
+        report.stats.object_physical_chunk_bytes,
+        report.stats.object_referenced_chunk_bytes,
+        report.stats.fastcdc_manifest_rows,
+        report.stats.fixed_1m_manifest_rows,
+        report.stats.fastcdc_chunk_rows,
+        report.stats.fixed_1m_chunk_rows,
+        report.stats.object_deduplicated_bytes,
+        report.issue_counts.object + report.issue_counts.chunk,
         report.stats.vectors,
         report.stats.loose_chunks,
         report.stats.graphs,
@@ -6361,6 +6425,17 @@ fn writeDoctorJson(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
         \\    "graph_nodes": {d},
         \\    "graph_edges": {d}
         \\  }},
+        \\  "object_storage": {{
+        \\    "logical_bytes": {d},
+        \\    "physical_chunk_bytes": {d},
+        \\    "referenced_chunk_bytes": {d},
+        \\    "fastcdc_manifest_rows": {d},
+        \\    "fixed_1m_manifest_rows": {d},
+        \\    "fastcdc_chunk_rows": {d},
+        \\    "fixed_1m_chunk_rows": {d},
+        \\    "deduplicated_bytes": {d},
+        \\    "corruption_issues": {d}
+        \\  }},
         \\  "tables": {{
         \\    "user": {d},
         \\    "private": {d}
@@ -6376,6 +6451,15 @@ fn writeDoctorJson(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
         report.stats.graphs,
         report.stats.graph_nodes,
         report.stats.graph_edges,
+        report.stats.object_logical_bytes,
+        report.stats.object_physical_chunk_bytes,
+        report.stats.object_referenced_chunk_bytes,
+        report.stats.fastcdc_manifest_rows,
+        report.stats.fixed_1m_manifest_rows,
+        report.stats.fastcdc_chunk_rows,
+        report.stats.fixed_1m_chunk_rows,
+        report.stats.object_deduplicated_bytes,
+        report.issue_counts.object + report.issue_counts.chunk,
         summary.user_table_count,
         summary.private_table_count,
         report.issue_count,
@@ -6987,12 +7071,46 @@ fn runDiagnostics(allocator: std.mem.Allocator, db: *zova.Database, issue_limit:
     var report = DiagnosticReport{ .issue_limit = issue_limit };
     try validateBoundStores(allocator, db, &report, &issues);
     try validateExtensions(allocator, db, &report, &issues);
+    try collectObjectStorageStats(allocator, db, &report);
     try validateObjects(allocator, db, &report, &issues);
     try validateLooseChunks(allocator, db, &report, &issues);
     try validateVectors(allocator, db, &report, &issues);
     try validateGraphs(allocator, db, &report, &issues);
     report.issues = try issues.toOwnedSlice(allocator);
     return report;
+}
+
+fn collectObjectStorageStats(allocator: std.mem.Allocator, db: *zova.Database, report: *DiagnosticReport) !void {
+    const prefix = diagnosticObjectSchemaPrefix(db);
+    const sql = try std.fmt.allocPrintSentinel(allocator,
+        \\select
+        \\  coalesce((select sum(size_bytes) from {s}_zova_objects), 0),
+        \\  coalesce((select sum(size_bytes) from {s}_zova_chunks), 0),
+        \\  coalesce((select sum(c.size_bytes) from {s}_zova_chunks c
+        \\    where exists (select 1 from {s}_zova_object_chunks oc where oc.chunk_hash = c.chunk_hash)), 0),
+        \\  coalesce((select count(*) from {s}_zova_object_chunks oc
+        \\    join {s}_zova_objects o on o.object_id = oc.object_id where o.chunker = 'fastcdc-v1'), 0),
+        \\  coalesce((select count(*) from {s}_zova_object_chunks oc
+        \\    join {s}_zova_objects o on o.object_id = oc.object_id where o.chunker = 'fixed-1m-v1'), 0),
+        \\  coalesce((select count(distinct oc.chunk_hash) from {s}_zova_object_chunks oc
+        \\    join {s}_zova_objects o on o.object_id = oc.object_id where o.chunker = 'fastcdc-v1'), 0),
+        \\  coalesce((select count(distinct oc.chunk_hash) from {s}_zova_object_chunks oc
+        \\    join {s}_zova_objects o on o.object_id = oc.object_id where o.chunker = 'fixed-1m-v1'), 0)
+    , .{ prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix }, 0);
+    defer allocator.free(sql);
+
+    var stmt = try db.prepare(sql);
+    defer stmt.deinit();
+    if ((try stmt.step()) != .row) return error.CheckFailed;
+
+    report.stats.object_logical_bytes = @intCast(stmt.columnInt64(0));
+    report.stats.object_physical_chunk_bytes = @intCast(stmt.columnInt64(1));
+    report.stats.object_referenced_chunk_bytes = @intCast(stmt.columnInt64(2));
+    report.stats.fastcdc_manifest_rows = @intCast(stmt.columnInt64(3));
+    report.stats.fixed_1m_manifest_rows = @intCast(stmt.columnInt64(4));
+    report.stats.fastcdc_chunk_rows = @intCast(stmt.columnInt64(5));
+    report.stats.fixed_1m_chunk_rows = @intCast(stmt.columnInt64(6));
+    report.stats.object_deduplicated_bytes = report.stats.object_logical_bytes -| report.stats.object_referenced_chunk_bytes;
 }
 
 fn validateExtensions(allocator: std.mem.Allocator, db: *zova.Database, report: *DiagnosticReport, issues: *std.ArrayList(DiagnosticIssue)) !void {
@@ -7793,9 +7911,18 @@ fn validateObjects(allocator: std.mem.Allocator, db: *zova.Database, report: *Di
     const prefix = diagnosticObjectSchemaPrefix(db);
     const sql = try std.fmt.allocPrintSentinel(allocator, "select object_id from {s}_zova_objects order by hex(object_id)", .{prefix}, 0);
     defer allocator.free(sql);
+    const chunk_sql = try std.fmt.allocPrintSentinel(
+        allocator,
+        "select size_bytes, data from {s}_zova_chunks where chunk_hash = ?",
+        .{prefix},
+        0,
+    );
+    defer allocator.free(chunk_sql);
 
     var stmt = try db.prepare(sql);
     defer stmt.deinit();
+    var chunk_stmt = try db.prepare(chunk_sql);
+    defer chunk_stmt.deinit();
 
     while ((try stmt.step()) == .row) {
         const raw_id = stmt.columnBlob(0);
@@ -7815,11 +7942,24 @@ fn validateObjects(allocator: std.mem.Allocator, db: *zova.Database, report: *Di
         defer manifest.deinit(allocator);
         for (manifest.chunks) |chunk| {
             report.stats.chunks += 1;
-            var chunk_data = db.getObjectChunk(allocator, chunk.hash) catch |err| {
-                try addDiagnosticIssue(allocator, report, issues, .chunk, "chunk_integrity", @errorName(err), id[0..], chunk.hash[0..], null, null);
-                continue;
+            try chunk_stmt.bindBlob(1, &chunk.hash);
+            const chunk_error: ?[]const u8 = switch (try chunk_stmt.step()) {
+                .done => "ObjectChunkNotFound",
+                .row => blk: {
+                    const stored_size = chunk_stmt.columnInt64(0);
+                    const data = chunk_stmt.columnBlob(1);
+                    if (stored_size <= 0 or @as(u64, @intCast(stored_size)) != chunk.size_bytes or @as(u64, @intCast(data.len)) != chunk.size_bytes) {
+                        break :blk "ObjectCorrupt";
+                    }
+                    if (!std.mem.eql(u8, &zova.objectChunkId(data), &chunk.hash)) break :blk "ObjectCorrupt";
+                    break :blk null;
+                },
             };
-            chunk_data.deinit(allocator);
+            try chunk_stmt.reset();
+            try chunk_stmt.clearBindings();
+            if (chunk_error) |detail| {
+                try addDiagnosticIssue(allocator, report, issues, .chunk, "chunk_integrity", detail, id[0..], chunk.hash[0..], null, null);
+            }
         }
 
         var object = db.getObject(allocator, id) catch |err| {

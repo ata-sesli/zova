@@ -1,9 +1,10 @@
 use std::thread;
 use zova::{
     object_id, GraphDegreeOptions, GraphEdgeInput, GraphNeighborDirection, GraphNeighborsOptions,
-    GraphNodeInput, GraphTargetType, GraphWalkOptions, SharedDatabase, SharedObjectWriter,
-    SharedStatement, Status, Step, VectorCollectionOptions, VectorElementType, VectorInput,
-    VectorMetric, VectorValues, DEFAULT_GRAPH_NAME,
+    GraphNodeInput, GraphTargetType, GraphWalkOptions, ObjectPutOptions, ObjectStorageProfile,
+    SharedDatabase, SharedObjectReader, SharedObjectWriter, SharedStatement, Status, Step,
+    VectorCollectionOptions, VectorElementType, VectorInput, VectorMetric, VectorValues,
+    DEFAULT_GRAPH_NAME,
 };
 
 fn temp_path(name: &str) -> String {
@@ -139,6 +140,41 @@ fn shared_object_writer_can_move_to_another_thread() {
     .unwrap();
 
     assert_eq!(id, expected);
+    assert_eq!(db.get_object(id).unwrap(), bytes);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn shared_profile_options_and_reader_preserve_dedup_behavior() {
+    assert_send::<SharedObjectReader>();
+
+    let path = temp_path("profile-reader");
+    let db = SharedDatabase::create(&path).unwrap();
+    let options = ObjectPutOptions {
+        profile: ObjectStorageProfile::Deduplication,
+    };
+    let bytes = b"shared profile-aware object";
+    let id = db.put_object_with_options(bytes, options).unwrap();
+    let reader = db.object_reader(id).unwrap();
+
+    let output = thread::spawn(move || {
+        let mut reader = reader;
+        let mut scratch = [0_u8; 4];
+        let mut output = Vec::new();
+        loop {
+            let read = reader.read(&mut scratch).unwrap();
+            if read == 0 {
+                break;
+            }
+            output.extend_from_slice(&scratch[..read]);
+        }
+        reader.close().unwrap();
+        output
+    })
+    .join()
+    .unwrap();
+
+    assert_eq!(output, bytes);
     assert_eq!(db.get_object(id).unwrap(), bytes);
     let _ = std::fs::remove_file(path);
 }

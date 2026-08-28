@@ -44,6 +44,7 @@ const (
 	StatusObjectTooLarge           Status = C.ZOVA_OBJECT_TOO_LARGE
 	StatusObjectTransactionActive  Status = C.ZOVA_OBJECT_TRANSACTION_ACTIVE
 	StatusObjectWriterClosed       Status = C.ZOVA_OBJECT_WRITER_CLOSED
+	StatusObjectReaderClosed       Status = C.ZOVA_OBJECT_READER_CLOSED
 	StatusBoundStoreExists         Status = C.ZOVA_BOUND_STORE_EXISTS
 	StatusBoundStoreNotFound       Status = C.ZOVA_BOUND_STORE_NOT_FOUND
 	StatusBoundStoreInvalid        Status = C.ZOVA_BOUND_STORE_INVALID

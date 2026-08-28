@@ -11,6 +11,6 @@ pub const abi_version_minor: u32 = 26;
 pub const abi_version_patch: u32 = 1;
 pub const abi_version_string = "0.26.1";
 
-pub const format_version = "10";
+pub const format_version = "11";
 pub const sqlite_version = "3.53.2";
 pub const minimum_zig_version = "0.16.0";
