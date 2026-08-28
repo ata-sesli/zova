@@ -25,6 +25,30 @@ static_assert(ZOVA_EXTENSION_UNAVAILABLE == 94, "extension status values are sta
 static_assert(ZOVA_BACKUP_NO_VERIFY == 1u, "backup flags are stable");
 static_assert(ZOVA_COMPACT_NO_VERIFY == 1u, "compact flags are stable");
 static_assert(ZOVA_RESTORE_NO_VERIFY == 1u, "restore flags are stable");
+static_assert(ZOVA_MIGRATE_NO_VERIFY == 1u, "migrate flags are stable");
+static_assert(ZOVA_MIGRATION_REQUIRED == 35, "migration status values are stable");
+static_assert(ZOVA_UNSUPPORTED_FUTURE_FORMAT == 36, "future format status values are stable");
+static_assert(ZOVA_UNSUPPORTED_LEGACY_FORMAT == 37, "legacy format status values are stable");
+static_assert(ZOVA_NO_MIGRATION_PATH == 38, "no migration path status values are stable");
+static_assert(ZOVA_FORMAT_CURRENT == 0, "format compatibility values are stable");
+static_assert(ZOVA_FORMAT_MIGRATABLE == 1, "format compatibility values are stable");
+static_assert(ZOVA_FORMAT_UNSUPPORTED_LEGACY == 2, "format compatibility values are stable");
+static_assert(ZOVA_FORMAT_UNSUPPORTED_FUTURE == 3, "format compatibility values are stable");
+static_assert(sizeof(zova_database_format_info) == 8, "format info is fixed 8-byte layout");
+static_assert(alignof(zova_database_format_info) == 4, "format info alignment is stable");
+static_assert(offsetof(zova_database_format_info, format_version) == 0, "format info layout is stable");
+static_assert(offsetof(zova_database_format_info, compatibility) == 4, "format info layout is stable");
+static_assert(sizeof(zova_database_probe_format_request) == 24, "probe request is fixed layout");
+static_assert(alignof(zova_database_probe_format_request) == 8, "probe request alignment is stable");
+static_assert(offsetof(zova_database_probe_format_request, path) == 0, "probe request layout is stable");
+static_assert(offsetof(zova_database_probe_format_request, out_info) == 8, "probe request layout is stable");
+static_assert(offsetof(zova_database_probe_format_request, out_error_message) == 16, "probe request layout is stable");
+static_assert(sizeof(zova_database_migrate_request) == 32, "migrate request is fixed layout");
+static_assert(alignof(zova_database_migrate_request) == 8, "migrate request alignment is stable");
+static_assert(offsetof(zova_database_migrate_request, source_path) == 0, "migrate request layout is stable");
+static_assert(offsetof(zova_database_migrate_request, destination_path) == 8, "migrate request layout is stable");
+static_assert(offsetof(zova_database_migrate_request, flags) == 16, "migrate request layout is stable");
+static_assert(offsetof(zova_database_migrate_request, out_error_message) == 24, "migrate request layout is stable");
 
 int main() {
     zova_database *db = nullptr;
@@ -126,6 +150,18 @@ int main() {
     zova_database_restore_request restore_request = {};
     restore_request.source_path = "backup.zova";
     restore_request.destination_path = "restored.zova";
+    zova_database_format_info format_info = {};
+    zova_database_probe_format_request probe_request = {};
+    probe_request.path = "test.zova";
+    probe_request.out_info = &format_info;
+    zova_database_migrate_request migrate_request = {};
+    migrate_request.source_path = "src.zova";
+    migrate_request.destination_path = "dst.zova";
+    migrate_request.flags = ZOVA_MIGRATE_NO_VERIFY;
+    const auto probe_fn = &zova_database_probe_format;
+    const auto migrate_fn = &zova_database_migrate;
+    (void)probe_fn;
+    (void)migrate_fn;
     zova_vector_collection_info_get_request info_request = {};
     info_request.out_info = &collection_info;
     zova_vector_collection_create_request create_collection_request = {};
@@ -445,8 +481,14 @@ int main() {
                    column_name_request.out_name == &text &&
                    column_text_request.out_text == &text &&
                    column_blob_request.out_buffer == &buffer &&
-                   simple_request.db == db &&
-                   savepoint_request.name != nullptr &&
+                    simple_request.db == db &&
+                    probe_request.path != nullptr &&
+                    probe_request.out_info == &format_info &&
+                    migrate_request.flags == ZOVA_MIGRATE_NO_VERIFY &&
+                    format_info.format_version == 0 &&
+                    probe_fn != nullptr &&
+                    migrate_fn != nullptr &&
+                    savepoint_request.name != nullptr &&
                    backup_request.destination_path != nullptr &&
                    compact_request.destination_path != nullptr &&
                    restore_request.source_path != nullptr &&

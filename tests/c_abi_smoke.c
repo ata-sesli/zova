@@ -1853,18 +1853,8 @@ static void run_probe_migrate_smoke(void) {
         zova_database *db = NULL; zova_message msg = {0};
         expect_status(zova_database_create(&(zova_database_open_request){.path = src, .out_db = &db, .out_error_message = &msg}), ZOVA_OK, "create future base");
         zova_message_free(&msg);
+        expect_status(zova_database_exec(&(zova_database_exec_request){.db = db, .sql = "update _zova_meta set value = '11' where key = 'format_version'"}), ZOVA_OK, "patch future");
         expect_status(zova_database_close(db), ZOVA_OK, "close future base");
-        // patch format_version to 11
-        zova_database *raw = NULL;
-        // use sqlite via zova exec to update meta
-        // reopen as zova to exec? Instead open via sqlite is easier but not exposed; use zova_database_open then exec
-        // For synthetic, use direct sqlite via zova_database_exec on a temporary handle that bypasses version check? Use raw sqlite via file open
-        // Simpler: open via sqlite directly using system sqlite3? Instead use zova's internal sqlite via exec on a fresh handle before close above we already closed
-        // We'll reopen with sqlite directly using zova's sqlite wrapper not exposed; fallback to using zova_database_open which will fail for future version, so we need to use low-level sqlite open
-        // Use sqlite3 directly via zova's sqlite is not exposed to C, but we can use system sqlite3 command via system()
-        char cmd[1024];
-        snprintf(cmd, sizeof(cmd), "sqlite3 %s \"update _zova_meta set value='11' where key='format_version'\"", src);
-        if (system(cmd) != 0) { fprintf(stderr, "patch future format failed\n"); exit(1); }
         zova_message err = {0};
         expect_status(zova_database_migrate(&(zova_database_migrate_request){.source_path = src, .destination_path = dst, .flags = 0, .out_error_message = &err}), ZOVA_UNSUPPORTED_FUTURE_FORMAT, "migrate future");
         zova_message_free(&err);
@@ -1877,9 +1867,8 @@ static void run_probe_migrate_smoke(void) {
         zova_database *db2 = NULL; zova_message msg2 = {0};
         expect_status(zova_database_create(&(zova_database_open_request){.path = src2, .out_db = &db2, .out_error_message = &msg2}), ZOVA_OK, "create legacy base");
         zova_message_free(&msg2);
+        expect_status(zova_database_exec(&(zova_database_exec_request){.db = db2, .sql = "update _zova_meta set value = '8' where key = 'format_version'"}), ZOVA_OK, "patch legacy");
         expect_status(zova_database_close(db2), ZOVA_OK, "close legacy base");
-        snprintf(cmd, sizeof(cmd), "sqlite3 %s \"update _zova_meta set value='8' where key='format_version'\"", src2);
-        if (system(cmd) != 0) { fprintf(stderr, "patch legacy format failed\n"); exit(1); }
         zova_message err2 = {0};
         expect_status(zova_database_migrate(&(zova_database_migrate_request){.source_path = src2, .destination_path = dst2, .flags = 0, .out_error_message = &err2}), ZOVA_UNSUPPORTED_LEGACY_FORMAT, "migrate legacy");
         zova_message_free(&err2);
@@ -1897,16 +1886,15 @@ static void run_probe_migrate_smoke(void) {
         if (!in || !outf) { fprintf(stderr, "copy for success src failed\n"); exit(1); }
         char b[8192]; size_t nn; while ((nn = fread(b,1,sizeof(b),in))>0) fwrite(b,1,nn,outf);
         fclose(in); fclose(outf);
-        // hash before
-        FILE *f = fopen(src, "rb"); fseek(f,0,SEEK_END); long sz = ftell(f); fseek(f,0,SEEK_SET); char *data = malloc(sz); fread(data,1,sz,f); fclose(f);
-        // we don't compute hash, just check size preserved
-        long before_size = sz; free(data);
+        // hash before: read file bytes for immutability check
+        FILE *f = fopen(src, "rb"); fseek(f,0,SEEK_END); long before_size = ftell(f); fseek(f,0,SEEK_SET); char *before_data = malloc(before_size); if ((long)fread(before_data,1,before_size,f) != before_size) { fprintf(stderr, "read before failed\n"); exit(1); } fclose(f);
         zova_message msg = {0};
         expect_status(zova_database_migrate(&(zova_database_migrate_request){.source_path = src, .destination_path = dst, .flags = 0, .out_error_message = &msg}), ZOVA_OK, "migrate success");
         zova_message_free(&msg);
-        // source still exists and size same
-        f = fopen(src, "rb"); fseek(f,0,SEEK_END); long after_size = ftell(f); fclose(f);
-        if (before_size != after_size) { fprintf(stderr, "migrate success: source size changed\n"); exit(1); }
+        // source still exists and bytes equal
+        FILE *f2 = fopen(src, "rb"); fseek(f2,0,SEEK_END); long after_size = ftell(f2); fseek(f2,0,SEEK_SET); char *after_data = malloc(after_size); if ((long)fread(after_data,1,after_size,f2) != after_size) { fprintf(stderr, "read after failed\n"); exit(1); } fclose(f2);
+        if (before_size != after_size || memcmp(before_data, after_data, before_size) != 0) { fprintf(stderr, "migrate success: source bytes changed\n"); exit(1); }
+        free(before_data); free(after_data);
         // dest exists and probe is current
         zova_database_format_info out = {0}; zova_message pmsg = {0};
         expect_status(zova_database_probe_format(&(zova_database_probe_format_request){.path = dst, .out_info = &out, .out_error_message = &pmsg}), ZOVA_OK, "probe migrated dest");
@@ -1938,14 +1926,21 @@ static void run_probe_migrate_smoke(void) {
         if (!in || !outf) { fprintf(stderr, "copy corrupt src failed\n"); exit(1); }
         while ((nn = fread(b,1,sizeof(b),in))>0) fwrite(b,1,nn,outf);
         fclose(in); fclose(outf);
-        char corrupt_cmd[1024];
-        snprintf(corrupt_cmd, sizeof(corrupt_cmd), "sqlite3 %s \"update _zova_chunks set data = randomblob(size_bytes) where rowid = (select rowid from _zova_chunks limit 1)\"", corrupt_src);
-        if (system(corrupt_cmd) != 0) { fprintf(stderr, "corrupt chunks failed\n"); exit(1); }
+        sqlite3 *corrupt_db = NULL;
+        if (sqlite3_open(corrupt_src, &corrupt_db) != SQLITE_OK) { fprintf(stderr, "open corrupt src failed: %s\n", sqlite3_errmsg(corrupt_db)); exit(1); }
+        char *corrupt_err = NULL;
+        if (sqlite3_exec(corrupt_db, "update _zova_chunks set data = randomblob(size_bytes) where rowid = (select rowid from _zova_chunks limit 1)", NULL, NULL, &corrupt_err) != SQLITE_OK) { fprintf(stderr, "corrupt chunks failed: %s\n", corrupt_err); sqlite3_free(corrupt_err); exit(1); }
+        sqlite3_close(corrupt_db);
+        // capture hash after corruption for immutability check
+        FILE *cf = fopen(corrupt_src, "rb"); fseek(cf,0,SEEK_END); long csz = ftell(cf); fseek(cf,0,SEEK_SET); char *cdata = malloc(csz); if ((long)fread(cdata,1,csz,cf) != csz) { fprintf(stderr, "read corrupt src failed\n"); exit(1); } fclose(cf);
         zova_message cmsg = {0};
         zova_status cst = zova_database_migrate(&(zova_database_migrate_request){.source_path = corrupt_src, .destination_path = corrupt_dst, .flags = 0, .out_error_message = &cmsg});
         if (cst == ZOVA_OK) { fprintf(stderr, "migrate corrupt: expected failure\n"); exit(1); }
         zova_message_free(&cmsg);
         if (access(corrupt_dst, F_OK) == 0) { fprintf(stderr, "migrate corrupt: dest should not exist\n"); exit(1); }
+        FILE *cf2 = fopen(corrupt_src, "rb"); fseek(cf2,0,SEEK_END); long csz2 = ftell(cf2); fseek(cf2,0,SEEK_SET); char *cdata2 = malloc(csz2); if ((long)fread(cdata2,1,csz2,cf2) != csz2) { fprintf(stderr, "read corrupt src after failed migrate failed\n"); exit(1); } fclose(cf2);
+        if (csz != csz2 || memcmp(cdata, cdata2, csz) != 0) { fprintf(stderr, "corrupt source changed after failed migrate\n"); exit(1); }
+        free(cdata); free(cdata2);
         // with NO_VERIFY it should succeed
         const char *corrupt_dst2 = "/tmp/zova_migrate_corrupt_dst2.zova";
         remove(corrupt_dst2);
