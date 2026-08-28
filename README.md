@@ -12,15 +12,21 @@ host foundation.
 
 Current package version: `0.26.1`.
 
-Zova is pre-1.0. The current `.zova` file `format_version` is `10`. Format-10
-files require the current development build, and older builds reject them.
-Zova does not migrate older format files in place: open never migrates
-silently, and downgrades are unsupported. Format-9 databases created by the
-released 0.26.1 build can be migrated forward with the explicit, copy-forward
-probe and migration surfaces (`zova format` and `zova migrate` on the CLI,
+Zova is pre-1.0. The current `.zova` file `format_version` is `10`, and the
+earliest migratable format is `9`. Open never migrates silently: a format-9
+database is reported as migration-required and left byte-identical, and
+downgrades are unsupported. Format-9 databases created by the released 0.26.1
+build migrate forward with the explicit, copy-forward probe and migration
+surfaces (`zova format` and `zova migrate` on the CLI,
 `zova_database_probe_format` and `zova_database_migrate` on the C ABI, and
-aligned APIs in the Rust, Python, Go, and JavaScript bindings). Migration
-writes only to a new destination file and never mutates the source.
+aligned APIs in the Rust, Python, Go, and JavaScript bindings). Migration writes
+only to a new destination file and never mutates the source.
+
+[Storage compatibility](docs/storage-compatibility.md) is the normative 1.x
+contract. It distinguishes package version, C ABI version, SQLite version, and
+Zova storage format, states which formats migrate forward, and documents the
+migration workflow, offline locking, bound-store naming, temporary disk
+requirements, interruption recovery, and extension compatibility.
 
 Zova's bundled SQLite enables FTS5 and the read-only `dbstat` virtual table.
 `dbstat` is available for storage diagnostics; it is not a portable guarantee
@@ -58,11 +64,12 @@ return edge-type strings.
 17. [CLI](#cli)
 18. [Bindings](#bindings)
 19. [Build From Source](#build-from-source)
-20. [SQLite Policy](#sqlite-policy)
-21. [Current Boundaries](#current-boundaries)
-22. [Testing](#testing)
-23. [Release Package Policy](#release-package-policy)
-24. [License](#license)
+20. [Storage Compatibility](#storage-compatibility)
+21. [SQLite Policy](#sqlite-policy)
+22. [Current Boundaries](#current-boundaries)
+23. [Testing](#testing)
+24. [Release Package Policy](#release-package-policy)
+25. [License](#license)
 
 ## Install
 
@@ -1202,6 +1209,38 @@ Run Python checks:
 uv run --isolated --with maturin --with pytest --directory bindings/python maturin develop
 uv run --isolated --with pytest --directory bindings/python python -m pytest
 ```
+
+## Storage Compatibility
+
+Zova reports four independent versions: the package version, the C ABI version,
+the bundled SQLite version, and the Zova storage format recorded in
+`_zova_meta.format_version`. Changing one never implies a change in another.
+
+For the 1.x series, every release can migrate databases created by every earlier
+1.x release. Format 9, used by the released 0.26.1 build, is the only pre-1.0
+format guaranteed a direct migration into 1.0; older formats are rejected rather
+than migrated. Open never migrates silently, and downgrades are unsupported.
+
+Migration is explicit and copy-forward. Probe with `zova format`, then migrate
+with `zova migrate`:
+
+```sh
+zova format app.zova
+zova migrate app.zova app-format-10.zova
+```
+
+The same workflow is available through `zova_database_probe_format` and
+`zova_database_migrate` on the C ABI and through the aligned Rust, Python, Go,
+and JavaScript APIs. A migration runs offline, writes only to a new destination,
+publishes bound stores before the main database, and leaves the source
+byte-identical.
+
+`zig build check-storage-compat` enforces this contract against the retained
+fixtures in `tests/fixtures/`. It runs in `scripts/check-release.sh` and in CI,
+and it fails the release if a promised migration path is missing.
+
+[docs/storage-compatibility.md](docs/storage-compatibility.md) is the normative
+contract, including operational rules and a recorded format-9 migration.
 
 ## SQLite Policy
 

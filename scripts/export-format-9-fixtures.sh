@@ -8,7 +8,7 @@
 # exporter against that exact source tree plus its vendored SQLite amalgamation,
 # runs it into a staging directory, verifies every output reports format
 # version 9, copies results into tests/fixtures/, and refreshes
-# tests/fixtures/format-9.sha256.
+# tests/fixtures/fixtures.sha256.
 #
 # Usage: scripts/export-format-9-fixtures.sh
 
@@ -114,10 +114,13 @@ PY
 
 cp "${FIXTURES[@]/#/$OUTPUT_DIR/}" "$FIXTURE_DIR/"
 
+# The manifest pins every retained fixture, not only the format-9 files this
+# script regenerates: legacy fixtures are committed inputs whose bytes must not
+# drift silently either.
 (
   cd "$FIXTURE_DIR"
-  sha256sum "${FIXTURES[@]}" > format-9.sha256
+  find . -maxdepth 1 -name '*.zova' -printf '%f\n' | LC_ALL=C sort | xargs sha256sum > fixtures.sha256
 )
 
-echo "format-9 fixtures refreshed:"
-cat "$FIXTURE_DIR/format-9.sha256"
+echo "storage fixtures refreshed:"
+cat "$FIXTURE_DIR/fixtures.sha256"

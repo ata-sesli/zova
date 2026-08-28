@@ -38,6 +38,10 @@ const legacy_fixtures = [_][]const u8{
     "empty-graph-store-format-8.zova",
 };
 
+/// Every retained fixture, and therefore every entry the pinned manifest must
+/// contain.
+const all_declared_fixtures = format_9_main_fixtures ++ format_9_store_fixtures ++ legacy_fixtures;
+
 fn io() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
@@ -68,10 +72,10 @@ fn expectManifestHash(name: []const u8, expected_hex: []const u8) !void {
     }
 }
 
-test "format-9 fixture manifest matches recorded hashes" {
+test "fixture manifest matches recorded hashes and declared fixtures" {
     const manifest_bytes = try std.Io.Dir.cwd().readFileAlloc(
         io(),
-        fixture_dir ++ "/format-9.sha256",
+        fixture_dir ++ "/fixtures.sha256",
         std.testing.allocator,
         .limited(64 * 1024),
     );
@@ -88,11 +92,22 @@ test "format-9 fixture manifest matches recorded hashes" {
         const remainder = std.mem.trim(u8, trimmed[hash_end..], " ");
         const name = if (std.mem.startsWith(u8, remainder, "*")) remainder[1..] else remainder;
 
+        // Every pinned fixture must also be declared above, so a fixture added
+        // to tests/fixtures/ cannot silently escape the classification tests.
+        var declared = false;
+        for (all_declared_fixtures) |declared_name| {
+            if (std.mem.eql(u8, declared_name, name)) declared = true;
+        }
+        if (!declared) {
+            std.debug.print("fixture {s} is pinned but not declared\n", .{name});
+            return error.TestUnexpectedResult;
+        }
+
         try expectManifestHash(name, expected_hex);
         checked += 1;
     }
 
-    try std.testing.expectEqual(@as(usize, 8), checked);
+    try std.testing.expectEqual(all_declared_fixtures.len, checked);
 }
 
 fn copyFixture(tmp_sub_path: []const u8, index: usize, name: []const u8) ![:0]const u8 {

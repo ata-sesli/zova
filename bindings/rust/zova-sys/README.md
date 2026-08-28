@@ -28,9 +28,13 @@ Build order is:
 Inside the Zova repository, Zig is also used to regenerate the bundled C
 snapshot. The generated C is compiler output, not a human-authored API.
 
-The current development build uses `.zova` format 10 and does not migrate
-older format databases in place. Keep a compatible backup and export data
-with an older build before creating a format-10 database.
+The current development build uses `.zova` format 10, and the earliest
+migratable format is 9. Open never migrates silently: a format-9 database is
+reported as migration-required and left byte-identical. Migrate it explicitly
+with `zova_database_probe_format` and `zova_database_migrate`, or with
+`zova format` and `zova migrate` on the CLI. Keep a backup before migrating,
+and see `docs/storage-compatibility.md` in the Zova repository for the full
+compatibility contract.
 
 ## Safety
 
