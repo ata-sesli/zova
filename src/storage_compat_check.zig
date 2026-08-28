@@ -253,7 +253,7 @@ pub fn main(init: std.process.Init) !void {
     check.heading("retained fixtures ({d} pinned)", .{entries.items.len});
 
     var migratable_mains: std.ArrayListUnmanaged([]const u8) = .empty;
-    var probed_formats: std.ArrayListUnmanaged(u32) = .empty;
+    var probed_main_formats: std.ArrayListUnmanaged(u32) = .empty;
     var covered_mains: std.ArrayListUnmanaged(bool) = .empty;
 
     for (entries.items) |entry| {
@@ -284,23 +284,32 @@ pub fn main(init: std.process.Init) !void {
             .{ entry.name, info.format_version, compatibilityName(info.compatibility) },
         );
 
-        try probed_formats.append(allocator, info.format_version);
-
+        // Only a main database can be migrated and reopened on its own, so
+        // coverage counts mains: a store fixture alone proves nothing about
+        // the migration path for its format.
         if (info.compatibility == .migratable and !try hasStoreRole(path)) {
+            try probed_main_formats.append(allocator, info.format_version);
             try migratable_mains.append(allocator, entry.name);
         }
     }
 
-    // Every promised format needs retained evidence: widening the promise
-    // without a fixture would otherwise leave the migration path untested.
+    // Every promised format needs a retained non-store main database and a
+    // migration set that exercises it. Widening the promise without either
+    // one would leave that format's migration path unproven.
     check.heading("promised format coverage", .{});
     var promised = minimum_format;
     while (promised < current_format) : (promised += 1) {
-        var retained = false;
-        for (probed_formats.items) |format| {
-            if (format == promised) retained = true;
+        var retained_main = false;
+        for (probed_main_formats.items) |format| {
+            if (format == promised) retained_main = true;
         }
-        check.record(retained, "format {d} has a retained fixture", .{promised});
+        check.record(retained_main, "format {d} has a retained main database", .{promised});
+
+        var has_set = false;
+        for (migration_sets) |set| {
+            if (set.format == promised) has_set = true;
+        }
+        check.record(has_set, "format {d} has a migration set", .{promised});
     }
 
     // Every migratable main database must be covered by the migration matrix,
@@ -330,6 +339,32 @@ pub fn main(init: std.process.Init) !void {
         }
 
         const main_path = try pathJoin(allocator, "{s}/{s}", .{ dir, set.members[0] });
+
+        // A set's declared format must match the main fixture it actually
+        // names, and that main must be a migratable main rather than a store
+        // file. Otherwise the set could silently stop exercising its format.
+        const main_probe = zova.probeDatabaseFormat(main_path) catch |err| {
+            check.fail("{s}: set probe failed ({s})", .{ set.members[0], @errorName(err) });
+            continue;
+        };
+        if (main_probe.format_version != set.format) {
+            check.fail(
+                "{s}: set declares format {d} but its main is format {d}",
+                .{ set.members[0], set.format, main_probe.format_version },
+            );
+            continue;
+        }
+        check.record(true, "{s}: set declares format {d}", .{ set.members[0], set.format });
+
+        var main_is_migratable = false;
+        for (migratable_mains.items) |name| {
+            if (std.mem.eql(u8, name, set.members[0])) main_is_migratable = true;
+        }
+        if (!main_is_migratable) {
+            check.fail("{s}: set main is not a migratable main database", .{set.members[0]});
+            continue;
+        }
+
         if (set.members.len > 1) {
             try rewriteBoundStorePaths(allocator, main_path, dir, set.members[0]);
         }
