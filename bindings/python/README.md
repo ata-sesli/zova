@@ -62,8 +62,10 @@ the bundled native snapshot.
 The v0.25 release workflow builds the documented Linux/macOS wheel matrix.
 
 The current development build uses `.zova` format 10 and does not migrate
-older format databases in place. Keep a compatible backup and export data
-with an older build before creating a format-10 database.
+older format databases in place. Format-9 databases created by the released
+0.26.1 build can be probed and migrated forward with the module-level
+`probe_format(path)` and `migrate_database(source, destination, *, verify=True)`
+functions: migration is explicit, copy-forward, and never mutates the source.
 
 The v0.25 opaque-key graph, edge-payload, topology-scan, prepared-build, and
 generic fresh-build session APIs are low-level C/raw `zova-sys` surfaces. The

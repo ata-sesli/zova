@@ -20,7 +20,8 @@ mod statement;
 mod vector;
 
 pub use database::{
-    restore_backup, restore_backup_to_memory, BackupOptions, CompactOptions, Database, OpenOptions,
+    migrate_database, probe_format, restore_backup, restore_backup_to_memory, BackupOptions,
+    CompactOptions, Database, FormatCompatibility, FormatInfo, MigrateOptions, OpenOptions,
     RestoreOptions,
 };
 pub use error::{Error, Result, Status};

@@ -8,6 +8,8 @@ export const sqliteVersion = native.sqliteVersion();
 export {
   convertSqliteToZova,
   Database,
+  migrateDatabase,
+  probeFormat,
   restoreBackup,
 } from "./database.js";
 export { AsyncDatabase } from "./async-database.js";
@@ -42,7 +44,14 @@ export type {
   ObjectManifestChunk,
   ObjectManifestChunkInput,
 } from "./object.js";
-export type { ColumnType, ExtensionInfo, KvEntry, OpenOptions } from "./types.js";
+export type {
+  ColumnType,
+  ExtensionInfo,
+  FormatCompatibilityName,
+  FormatInfo,
+  KvEntry,
+  OpenOptions,
+} from "./types.js";
 export type {
   Vector,
   VectorCollectionInfo,

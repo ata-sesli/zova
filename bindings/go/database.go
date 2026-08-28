@@ -54,6 +54,88 @@ type RestoreOptions struct {
 	NoVerify bool
 }
 
+// MigrateOptions controls storage-format migration behavior.
+//
+// The zero value verifies the migrated destination after copying. Set NoVerify
+// to skip that validation.
+type MigrateOptions struct {
+	NoVerify bool
+}
+
+// FormatInfo reports storage-format facts about a .zova file without opening
+// or mutating it.
+type FormatInfo struct {
+	FormatVersion uint32
+	Compatibility FormatCompatibility
+}
+
+// ProbeFormat probes a .zova file's storage format without opening or
+// mutating it.
+//
+// The probe never requires an open database handle and never writes to the
+// probed file.
+func ProbeFormat(path string) (FormatInfo, error) {
+	cPath, err := cString("path", path)
+	if err != nil {
+		return FormatInfo{}, err
+	}
+	defer freeCString(cPath)
+
+	outInfo := (*C.zova_database_format_info)(C.calloc(1, C.size_t(unsafe.Sizeof(C.zova_database_format_info{}))))
+	defer C.free(unsafe.Pointer(outInfo))
+	message := newCMessage()
+	defer freeCMessage(message)
+	request := C.zova_database_probe_format_request{
+		path:              cPath,
+		out_info:          outInfo,
+		out_error_message: message,
+	}
+	status := C.zova_database_probe_format(&request)
+	if status != C.ZOVA_OK {
+		return FormatInfo{}, statusWithMessage(status, takeMessage(message))
+	}
+	return FormatInfo{
+		FormatVersion: uint32(outInfo.format_version),
+		Compatibility: FormatCompatibility(outInfo.compatibility),
+	}, nil
+}
+
+// MigrateDatabase migrates a .zova file forward to this release's storage
+// format.
+//
+// Migration is explicit, copy-forward, and source-preserving: the source file
+// is never mutated, the destination must not already exist, and any failure
+// removes attempted output. The zero-value options verify the migrated
+// destination after the copy.
+func MigrateDatabase(source, destination string, options ...MigrateOptions) error {
+	option, err := singleMigrateOptions(options)
+	if err != nil {
+		return err
+	}
+	cSource, err := cString("source path", source)
+	if err != nil {
+		return err
+	}
+	defer freeCString(cSource)
+
+	cDestination, err := cString("destination path", destination)
+	if err != nil {
+		return err
+	}
+	defer freeCString(cDestination)
+
+	message := newCMessage()
+	defer freeCMessage(message)
+	request := C.zova_database_migrate_request{
+		source_path:       cSource,
+		destination_path:  cDestination,
+		flags:             migrateFlags(option),
+		out_error_message: message,
+	}
+	status := C.zova_database_migrate(&request)
+	return statusWithMessage(status, takeMessage(message))
+}
+
 // Create creates a new .zova database.
 func Create(path string) (*DB, error) {
 	return openOrCreate(path, true)
@@ -612,6 +694,16 @@ func singleRestoreOptions(options []RestoreOptions) (RestoreOptions, error) {
 	return options[0], nil
 }
 
+func singleMigrateOptions(options []MigrateOptions) (MigrateOptions, error) {
+	if len(options) > 1 {
+		return MigrateOptions{}, newError(StatusInvalidArgument, "MigrateDatabase accepts at most one options value")
+	}
+	if len(options) == 0 {
+		return MigrateOptions{}, nil
+	}
+	return options[0], nil
+}
+
 func backupFlags(options BackupOptions) C.uint32_t {
 	if options.NoVerify {
 		return C.ZOVA_BACKUP_NO_VERIFY
@@ -629,6 +721,13 @@ func compactFlags(options CompactOptions) C.uint32_t {
 func restoreFlags(options RestoreOptions) C.uint32_t {
 	if options.NoVerify {
 		return C.ZOVA_RESTORE_NO_VERIFY
+	}
+	return 0
+}
+
+func migrateFlags(options MigrateOptions) C.uint32_t {
+	if options.NoVerify {
+		return C.ZOVA_MIGRATE_NO_VERIFY
 	}
 	return 0
 }

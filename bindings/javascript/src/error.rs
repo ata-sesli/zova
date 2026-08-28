@@ -97,6 +97,9 @@ mod tests {
             zova::Status::ExtensionInvalid,
             zova::Status::ExtensionIncompatible,
             zova::Status::ExtensionUnavailable,
+            zova::Status::MigrationRequired,
+            zova::Status::UnsupportedFutureFormat,
+            zova::Status::UnsupportedLegacyFormat,
             zova::Status::Unknown(-91),
         ];
 
