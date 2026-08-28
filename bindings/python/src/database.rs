@@ -804,16 +804,16 @@ pub(crate) fn restore_backup(source: &str, destination: &str, verify: bool) -> P
 /// Storage-format facts about a `.zova` file, reported without opening or
 /// mutating the file.
 ///
-/// `compatibility` is one of the stable machine-readable names shared by every
-/// Zova binding: `current`, `migratable`, `unsupported_legacy`, or
-/// `unsupported_future`.
+/// `compatibility` is the raw C ABI `zova_format_compatibility` code; the
+/// public Python `zova.probe_format` wrapper converts it into the
+/// `FormatCompatibility` enum.
 #[pyclass(name = "FormatInfo", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PyFormatInfo {
     #[pyo3(get)]
     format_version: u32,
     #[pyo3(get)]
-    compatibility: String,
+    compatibility: i32,
 }
 
 /// Probe a `.zova` file's storage format without opening or mutating it.
@@ -825,7 +825,7 @@ pub(crate) fn probe_format(path: &str) -> PyResult<PyFormatInfo> {
     let info = zova_rust::probe_format(path).map_err(zova_error)?;
     Ok(PyFormatInfo {
         format_version: info.format_version,
-        compatibility: info.compatibility.name().to_string(),
+        compatibility: info.compatibility as i32,
     })
 }
 

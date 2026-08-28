@@ -169,3 +169,24 @@ func TestMigrateFailureStatuses(t *testing.T) {
 		t.Fatalf("MigrateDatabase(missing) = %v, want StatusCantOpen", err)
 	}
 }
+
+// Migrating an already-current database reports that no migration path
+// exists instead of copying anything.
+func TestMigrateCurrentFormatReportsNoMigrationPath(t *testing.T) {
+	current := tempZovaPath(t, "migrate-current-source")
+	db, err := Create(current)
+	if err != nil {
+		t.Fatalf("Create = %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close = %v", err)
+	}
+
+	destination := tempZovaPath(t, "migrate-current-destination")
+	if err := MigrateDatabase(current, destination); !errorStatusIs(err, StatusNoMigrationPath) {
+		t.Fatalf("MigrateDatabase(current) = %v, want StatusNoMigrationPath", err)
+	}
+	if _, err := os.Stat(destination); !os.IsNotExist(err) {
+		t.Fatalf("current-format migration published output")
+	}
+}

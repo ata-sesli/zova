@@ -107,6 +107,24 @@ describe("Storage-format migration", () => {
     }
   });
 
+  test("migrateDatabase reports no migration path for current formats", () => {
+    const directory = temporaryDirectory();
+    const current = join(directory, "current-source.zova");
+    const destination = join(directory, "current-destination.zova");
+    const database = Database.create(current);
+    database.exec("create table t(id integer)");
+    database.close();
+
+    try {
+      migrateDatabase(current, destination);
+      throw new Error("expected migrateDatabase to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ZovaError);
+      expect((error as ZovaError).code).toBe("ZOVA_NO_MIGRATION_PATH");
+    }
+    expect(() => readFileSync(destination)).toThrow();
+  });
+
   test("async probe and migration run off the event loop and match sync results", async () => {
     const source = format9FixtureCopy("async-migrate-source.zova");
     const destination = join(temporaryDirectory(), "async-migrate-destination.zova");

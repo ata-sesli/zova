@@ -144,7 +144,8 @@ fn migrate_with_no_verify_flag() {
 }
 
 /// Migration refuses existing destinations and unknown paths with stable
-/// statuses.
+/// statuses, and migrating a current-format database reports that no
+/// migration path exists.
 #[test]
 fn migrate_failure_statuses() {
     let fixture = fixture_path("format-9.zova");
@@ -162,4 +163,26 @@ fn migrate_failure_statuses() {
 
     let _ = std::fs::remove_file(source);
     let _ = std::fs::remove_file(destination);
+}
+
+/// Migrating an already-current database deterministically reports
+/// `NoMigrationPath` instead of copying anything.
+#[test]
+fn migrate_current_format_reports_no_migration_path() {
+    let current = temp_path("migrate-current-source");
+    let destination = temp_path("migrate-current-destination");
+    {
+        let mut db = Database::create(&current).unwrap();
+        db.exec("create table t(id integer)").unwrap();
+    }
+
+    let error = migrate_database(&current, &destination, MigrateOptions::default()).unwrap_err();
+    assert_eq!(error.status(), Some(Status::NoMigrationPath));
+    assert_eq!(error.status().unwrap().name(), "ZOVA_NO_MIGRATION_PATH");
+    assert!(
+        !destination.exists(),
+        "current-format migration published output"
+    );
+
+    let _ = std::fs::remove_file(current);
 }

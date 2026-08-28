@@ -68,6 +68,7 @@ const (
 	StatusMigrationRequired        Status = C.ZOVA_MIGRATION_REQUIRED
 	StatusUnsupportedFutureFormat  Status = C.ZOVA_UNSUPPORTED_FUTURE_FORMAT
 	StatusUnsupportedLegacyFormat  Status = C.ZOVA_UNSUPPORTED_LEGACY_FORMAT
+	StatusNoMigrationPath          Status = C.ZOVA_NO_MIGRATION_PATH
 )
 
 // Step is the result of advancing a prepared statement.
