@@ -53,6 +53,7 @@ pub enum Status {
     MigrationRequired,
     UnsupportedFutureFormat,
     UnsupportedLegacyFormat,
+    NoMigrationPath,
     Unknown(i32),
 }
 
@@ -106,6 +107,7 @@ impl Status {
             zova_sys::ZOVA_MIGRATION_REQUIRED => Self::MigrationRequired,
             zova_sys::ZOVA_UNSUPPORTED_FUTURE_FORMAT => Self::UnsupportedFutureFormat,
             zova_sys::ZOVA_UNSUPPORTED_LEGACY_FORMAT => Self::UnsupportedLegacyFormat,
+            zova_sys::ZOVA_NO_MIGRATION_PATH => Self::NoMigrationPath,
             other => Self::Unknown(other),
         }
     }
@@ -159,6 +161,7 @@ impl Status {
             Self::MigrationRequired => zova_sys::ZOVA_MIGRATION_REQUIRED,
             Self::UnsupportedFutureFormat => zova_sys::ZOVA_UNSUPPORTED_FUTURE_FORMAT,
             Self::UnsupportedLegacyFormat => zova_sys::ZOVA_UNSUPPORTED_LEGACY_FORMAT,
+            Self::NoMigrationPath => zova_sys::ZOVA_NO_MIGRATION_PATH,
             Self::Unknown(code) => code,
         }
     }

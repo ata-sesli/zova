@@ -100,6 +100,7 @@ mod tests {
             zova::Status::MigrationRequired,
             zova::Status::UnsupportedFutureFormat,
             zova::Status::UnsupportedLegacyFormat,
+            zova::Status::NoMigrationPath,
             zova::Status::Unknown(-91),
         ];
 

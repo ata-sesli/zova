@@ -128,11 +128,7 @@ pub fn probe_format(path: String) -> Result<NativeFormatInfo> {
 /// Migrate a `.zova` file forward to this release's storage format.
 #[napi]
 #[cfg_attr(test, allow(dead_code))]
-pub fn migrate_database(
-    source: String,
-    destination: String,
-    verify: Option<bool>,
-) -> Result<()> {
+pub fn migrate_database(source: String, destination: String, verify: Option<bool>) -> Result<()> {
     zova::migrate_database(
         source,
         destination,

@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from enum import IntEnum
 
 from ._native import (
@@ -32,7 +33,7 @@ from ._native import (
     migrate_database,
     object_chunk_id,
     object_id,
-    probe_format,
+    probe_format as _probe_format,
     restore_backup,
     restore_backup_to_memory,
 )
@@ -107,6 +108,32 @@ _FORMAT_COMPATIBILITY_NAMES = {
 }
 
 
+@dataclass(frozen=True)
+class FormatInfo:
+    """Storage-format facts about a `.zova` file, reported without opening or
+    mutating the file.
+
+    `compatibility` is a `FormatCompatibility` member whose `name_value` is the
+    stable machine-readable name shared by every Zova binding.
+    """
+
+    format_version: int
+    compatibility: FormatCompatibility
+
+
+def probe_format(path: str) -> FormatInfo:
+    """Probe a `.zova` file's storage format without opening or mutating it.
+
+    The probe never requires an open database handle and never writes to the
+    probed file.
+    """
+    info = _probe_format(path)
+    return FormatInfo(
+        format_version=info.format_version,
+        compatibility=FormatCompatibility(info.compatibility),
+    )
+
+
 __all__ = [
     "ClosedHandleError",
     "ColumnType",
@@ -149,6 +176,7 @@ __all__ = [
     "migrate_database",
     "object_chunk_id",
     "object_id",
+    "probe_format",
     "restore_backup",
     "restore_backup_to_memory",
 ]

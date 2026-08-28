@@ -27,15 +27,16 @@ def test_probe_format_classifies_formats(tmp_path):
 
     info = zova.probe_format(str(source))
     assert info.format_version == 9
-    assert info.compatibility == "migratable"
-    assert zova.FormatCompatibility.MIGRATABLE.name_value == "migratable"
+    assert info.compatibility is zova.FormatCompatibility.MIGRATABLE
+    assert info.compatibility.name_value == "migratable"
 
     current = tmp_path / "current.zova"
     with zova.Database.create(str(current)) as db:
         db.exec("create table t(id integer)")
     info = zova.probe_format(str(current))
     assert info.format_version == 10
-    assert info.compatibility == "current"
+    assert info.compatibility is zova.FormatCompatibility.CURRENT
+    assert info.compatibility.name_value == "current"
 
     assert source.read_bytes() == before
 
@@ -57,7 +58,7 @@ def test_migrate_fixture_forward_and_reopen(tmp_path):
 
     info = zova.probe_format(str(destination))
     assert info.format_version == 10
-    assert info.compatibility == "current"
+    assert info.compatibility is zova.FormatCompatibility.CURRENT
     assert source.read_bytes() == before
 
     with zova.Database.open(str(destination)) as db:
@@ -80,7 +81,7 @@ def test_migrate_no_verify_flag(tmp_path):
     zova.migrate_database(str(source), str(destination), verify=False)
     info = zova.probe_format(str(destination))
     assert info.format_version == 10
-    assert info.compatibility == "current"
+    assert info.compatibility is zova.FormatCompatibility.CURRENT
 
 
 def test_migrate_failure_statuses(tmp_path):
@@ -95,3 +96,33 @@ def test_migrate_failure_statuses(tmp_path):
     with pytest.raises(zova.ZovaError) as exc:
         zova.migrate_database(str(tmp_path / "missing.zova"), str(destination))
     assert exc.value.status_name == "ZOVA_CANT_OPEN"
+
+
+def test_public_format_surface_is_coherent():
+    # The advertised names must all resolve on the package itself.
+    assert zova.FormatInfo is not None
+    assert callable(zova.probe_format)
+    assert callable(zova.migrate_database)
+
+    # `from zova import *` must succeed and expose every __all__ entry.
+    namespace = {}
+    exec("from zova import *", namespace)
+    for name in zova.__all__:
+        assert name in namespace, f"__all__ entry {name!r} is not importable"
+        assert getattr(zova, name) is namespace[name]
+
+    # The probe result type carries the public enum, not a raw code or string.
+    field = zova.FormatInfo.__dataclass_fields__["compatibility"]
+    assert field.type is zova.FormatCompatibility
+
+
+def test_migrate_current_format_reports_no_migration_path(tmp_path):
+    current = tmp_path / "current-source.zova"
+    destination = tmp_path / "current-destination.zova"
+    with zova.Database.create(str(current)) as db:
+        db.exec("create table t(id integer)")
+
+    with pytest.raises(zova.ZovaError) as exc:
+        zova.migrate_database(str(current), str(destination))
+    assert exc.value.status_name == "ZOVA_NO_MIGRATION_PATH"
+    assert not destination.exists()
