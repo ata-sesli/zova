@@ -106,6 +106,10 @@ typedef enum zova_status {
     ZOVA_UNSUPPORTED_ZOVA_VERSION = 32,
     ZOVA_DESTINATION_EXISTS = 33,
     ZOVA_ZOVA_NAME_CONFLICT = 34,
+    ZOVA_MIGRATION_REQUIRED = 35,
+    ZOVA_UNSUPPORTED_FUTURE_FORMAT = 36,
+    ZOVA_UNSUPPORTED_LEGACY_FORMAT = 37,
+    ZOVA_NO_MIGRATION_PATH = 38,
     ZOVA_OBJECT_NOT_FOUND = 50,
     ZOVA_OBJECT_ALREADY_EXISTS = 51,
     ZOVA_OBJECT_CHUNK_NOT_FOUND = 52,
@@ -586,6 +590,35 @@ enum {
     ZOVA_COMPACT_NO_VERIFY = 1u << 0,
     ZOVA_RESTORE_NO_VERIFY = 1u << 0
 };
+
+enum {
+    ZOVA_MIGRATE_NO_VERIFY = 1u << 0
+};
+
+typedef enum zova_format_compatibility {
+    ZOVA_FORMAT_CURRENT = 0,
+    ZOVA_FORMAT_MIGRATABLE = 1,
+    ZOVA_FORMAT_UNSUPPORTED_LEGACY = 2,
+    ZOVA_FORMAT_UNSUPPORTED_FUTURE = 3
+} zova_format_compatibility;
+
+typedef struct zova_database_format_info {
+    uint32_t format_version;
+    int compatibility;
+} zova_database_format_info;
+
+typedef struct zova_database_probe_format_request {
+    const char *path;
+    zova_database_format_info *out_info;
+    zova_message *out_error_message;
+} zova_database_probe_format_request;
+
+typedef struct zova_database_migrate_request {
+    const char *source_path;
+    const char *destination_path;
+    uint32_t flags;
+    zova_message *out_error_message;
+} zova_database_migrate_request;
 
 /* Open/create requests use C strings and may return an owned error message. */
 typedef struct zova_database_open_request {
@@ -1713,6 +1746,8 @@ const char *zova_database_last_error_message(zova_database *db);
 zova_status zova_convert_sqlite_to_zova(const zova_convert_sqlite_to_zova_request *request);
 zova_status zova_database_restore(const zova_database_restore_request *request);
 zova_status zova_database_restore_to_memory(const zova_database_restore_to_memory_request *request);
+zova_status zova_database_probe_format(const zova_database_probe_format_request *request);
+zova_status zova_database_migrate(const zova_database_migrate_request *request);
 
 /*
  * Prepared statements.

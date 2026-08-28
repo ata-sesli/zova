@@ -30,6 +30,10 @@ pub const ZOVA_NOT_ZOVA_DATABASE: zova_status = 31;
 pub const ZOVA_UNSUPPORTED_ZOVA_VERSION: zova_status = 32;
 pub const ZOVA_DESTINATION_EXISTS: zova_status = 33;
 pub const ZOVA_ZOVA_NAME_CONFLICT: zova_status = 34;
+pub const ZOVA_MIGRATION_REQUIRED: zova_status = 35;
+pub const ZOVA_UNSUPPORTED_FUTURE_FORMAT: zova_status = 36;
+pub const ZOVA_UNSUPPORTED_LEGACY_FORMAT: zova_status = 37;
+pub const ZOVA_NO_MIGRATION_PATH: zova_status = 38;
 pub const ZOVA_OBJECT_NOT_FOUND: zova_status = 50;
 pub const ZOVA_OBJECT_ALREADY_EXISTS: zova_status = 51;
 pub const ZOVA_OBJECT_CHUNK_NOT_FOUND: zova_status = 52;
@@ -109,6 +113,12 @@ pub const ZOVA_OPEN_READ_ONLY: u32 = 1 << 0;
 pub const ZOVA_BACKUP_NO_VERIFY: u32 = 1 << 0;
 pub const ZOVA_COMPACT_NO_VERIFY: u32 = 1 << 0;
 pub const ZOVA_RESTORE_NO_VERIFY: u32 = 1 << 0;
+pub const ZOVA_MIGRATE_NO_VERIFY: u32 = 1 << 0;
+
+pub const ZOVA_FORMAT_CURRENT: c_int = 0;
+pub const ZOVA_FORMAT_MIGRATABLE: c_int = 1;
+pub const ZOVA_FORMAT_UNSUPPORTED_LEGACY: c_int = 2;
+pub const ZOVA_FORMAT_UNSUPPORTED_FUTURE: c_int = 3;
 pub const ZOVA_KV_TOO_LARGE: zova_status = 95;
 pub const ZOVA_KV_CORRUPT: zova_status = 96;
 
@@ -743,6 +753,27 @@ pub struct zova_database_compact_request {
 
 #[repr(C)]
 pub struct zova_database_restore_request {
+    pub source_path: *const c_char,
+    pub destination_path: *const c_char,
+    pub flags: u32,
+    pub out_error_message: *mut zova_message,
+}
+
+#[repr(C)]
+pub struct zova_database_format_info {
+    pub format_version: u32,
+    pub compatibility: c_int,
+}
+
+#[repr(C)]
+pub struct zova_database_probe_format_request {
+    pub path: *const c_char,
+    pub out_info: *mut zova_database_format_info,
+    pub out_error_message: *mut zova_message,
+}
+
+#[repr(C)]
+pub struct zova_database_migrate_request {
     pub source_path: *const c_char,
     pub destination_path: *const c_char,
     pub flags: u32,
@@ -1692,6 +1723,10 @@ extern "C" {
     pub fn zova_database_restore_to_memory(
         request: *const zova_database_restore_to_memory_request,
     ) -> zova_status;
+    pub fn zova_database_probe_format(
+        request: *const zova_database_probe_format_request,
+    ) -> zova_status;
+    pub fn zova_database_migrate(request: *const zova_database_migrate_request) -> zova_status;
 
     pub fn zova_statement_finalize(statement: *mut zova_statement) -> zova_status;
     pub fn zova_statement_step(request: *const zova_statement_step_request) -> zova_status;

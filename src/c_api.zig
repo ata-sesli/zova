@@ -61,6 +61,11 @@ pub const ZOVA_OPEN_READ_ONLY = internal.ZOVA_OPEN_READ_ONLY;
 pub const ZOVA_BACKUP_NO_VERIFY = internal.ZOVA_BACKUP_NO_VERIFY;
 pub const ZOVA_COMPACT_NO_VERIFY = internal.ZOVA_COMPACT_NO_VERIFY;
 pub const ZOVA_RESTORE_NO_VERIFY = internal.ZOVA_RESTORE_NO_VERIFY;
+pub const ZOVA_MIGRATE_NO_VERIFY = internal.ZOVA_MIGRATE_NO_VERIFY;
+pub const zova_format_compatibility = internal.zova_format_compatibility;
+pub const zova_database_format_info = internal.zova_database_format_info;
+pub const zova_database_probe_format_request = internal.zova_database_probe_format_request;
+pub const zova_database_migrate_request = internal.zova_database_migrate_request;
 pub const ZOVA_SQL_FUNCTION_DETERMINISTIC = internal.ZOVA_SQL_FUNCTION_DETERMINISTIC;
 pub const ZOVA_SQL_FUNCTION_DIRECT_ONLY = internal.ZOVA_SQL_FUNCTION_DIRECT_ONLY;
 pub const ZOVA_SQL_FUNCTION_INNOCUOUS = internal.ZOVA_SQL_FUNCTION_INNOCUOUS;
@@ -559,6 +564,14 @@ export fn zova_convert_sqlite_to_zova(request: ?*const zova_convert_sqlite_to_zo
 
 export fn zova_database_restore(request: ?*const zova_database_restore_request) callconv(.c) zova_status {
     return internal.zova_database_restore(request);
+}
+
+export fn zova_database_probe_format(request: ?*const zova_database_probe_format_request) callconv(.c) zova_status {
+    return internal.zova_database_probe_format(request);
+}
+
+export fn zova_database_migrate(request: ?*const zova_database_migrate_request) callconv(.c) zova_status {
+    return internal.zova_database_migrate(request);
 }
 
 export fn zova_object_id_from_bytes(data: ?[*]const u8, len: usize, out_id: ?*zova_object_id) callconv(.c) zova_status {

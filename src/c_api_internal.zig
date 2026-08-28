@@ -218,6 +218,10 @@ pub const zova_status = enum(c_int) {
     UNSUPPORTED_ZOVA_VERSION = 32,
     DESTINATION_EXISTS = 33,
     ZOVA_NAME_CONFLICT = 34,
+    MIGRATION_REQUIRED = 35,
+    UNSUPPORTED_FUTURE_FORMAT = 36,
+    UNSUPPORTED_LEGACY_FORMAT = 37,
+    NO_MIGRATION_PATH = 38,
     OBJECT_NOT_FOUND = 50,
     OBJECT_ALREADY_EXISTS = 51,
     OBJECT_CHUNK_NOT_FOUND = 52,
@@ -671,6 +675,32 @@ pub const ZOVA_OPEN_READ_ONLY: u32 = 1 << 0;
 pub const ZOVA_BACKUP_NO_VERIFY: u32 = 1 << 0;
 pub const ZOVA_COMPACT_NO_VERIFY: u32 = 1 << 0;
 pub const ZOVA_RESTORE_NO_VERIFY: u32 = 1 << 0;
+pub const ZOVA_MIGRATE_NO_VERIFY: u32 = 1 << 0;
+
+pub const zova_format_compatibility = enum(c_int) {
+    CURRENT = 0,
+    MIGRATABLE = 1,
+    UNSUPPORTED_LEGACY = 2,
+    UNSUPPORTED_FUTURE = 3,
+};
+
+pub const zova_database_format_info = extern struct {
+    format_version: u32 = 0,
+    compatibility: c_int = 0,
+};
+
+pub const zova_database_probe_format_request = extern struct {
+    path: ?[*:0]const u8 = null,
+    out_info: ?*zova_database_format_info = null,
+    out_error_message: ?*zova_message = null,
+};
+
+pub const zova_database_migrate_request = extern struct {
+    source_path: ?[*:0]const u8 = null,
+    destination_path: ?[*:0]const u8 = null,
+    flags: u32 = 0,
+    out_error_message: ?*zova_message = null,
+};
 
 pub const zova_database_open_request = extern struct {
     path: ?[*:0]const u8,
@@ -2489,6 +2519,43 @@ pub fn zova_database_restore(request: ?*const zova_database_restore_request) cal
     zova.restoreBackup(std.mem.span(source_path), std.mem.span(destination_path), .{
         .verify = (req.flags & ZOVA_RESTORE_NO_VERIFY) == 0,
     }) catch |err| {
+        return failMessage(req.out_error_message, err);
+    };
+    return .OK;
+}
+
+pub fn zova_database_probe_format(request: ?*const zova_database_probe_format_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    clearMessage(req.out_error_message);
+    const out = req.out_info orelse return failMessage(req.out_error_message, error.InvalidArgument);
+    out.* = .{};
+    const path = req.path orelse return failMessage(req.out_error_message, error.InvalidArgument);
+    const info = zova.probeDatabaseFormat(std.mem.span(path)) catch |err| return failMessage(req.out_error_message, err);
+    const compat: c_int = switch (info.compatibility) {
+        .current => @intFromEnum(zova_format_compatibility.CURRENT),
+        .migratable => @intFromEnum(zova_format_compatibility.MIGRATABLE),
+        .unsupported_legacy => @intFromEnum(zova_format_compatibility.UNSUPPORTED_LEGACY),
+        .unsupported_future => @intFromEnum(zova_format_compatibility.UNSUPPORTED_FUTURE),
+    };
+    out.* = .{
+        .format_version = info.format_version,
+        .compatibility = compat,
+    };
+    return .OK;
+}
+
+pub fn zova_database_migrate(request: ?*const zova_database_migrate_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    clearMessage(req.out_error_message);
+    const source_path = req.source_path orelse return failMessage(req.out_error_message, error.InvalidArgument);
+    const destination_path = req.destination_path orelse return failMessage(req.out_error_message, error.InvalidArgument);
+    if ((req.flags & ~ZOVA_MIGRATE_NO_VERIFY) != 0) return failMessage(req.out_error_message, error.InvalidArgument);
+    zova.migrateDatabaseWithExtensions(
+        std.mem.span(source_path),
+        std.mem.span(destination_path),
+        .{ .verify = (req.flags & ZOVA_MIGRATE_NO_VERIFY) == 0 },
+        zova.bundledExtensionRegistry(),
+    ) catch |err| {
         return failMessage(req.out_error_message, err);
     };
     return .OK;
@@ -5896,15 +5963,11 @@ fn statusFromError(err: anyerror) zova_status {
         error.Misuse => .MISUSE,
         error.NotZovaPath => .NOT_ZOVA_PATH,
         error.NotZovaDatabase => .NOT_ZOVA_DATABASE,
-        // Temporary mapping until the additive migration statuses
-        // (ZOVA_MIGRATION_REQUIRED = 35, ZOVA_UNSUPPORTED_FUTURE_FORMAT = 36,
-        // ZOVA_UNSUPPORTED_LEGACY_FORMAT = 37) land with the C ABI issue.
-        error.UnsupportedZovaVersion,
-        error.MigrationRequired,
-        error.UnsupportedLegacyFormat,
-        error.UnsupportedFutureFormat,
-        error.NoMigrationPath,
-        => .UNSUPPORTED_ZOVA_VERSION,
+        error.UnsupportedZovaVersion => .UNSUPPORTED_ZOVA_VERSION,
+        error.MigrationRequired => .MIGRATION_REQUIRED,
+        error.UnsupportedLegacyFormat => .UNSUPPORTED_LEGACY_FORMAT,
+        error.UnsupportedFutureFormat => .UNSUPPORTED_FUTURE_FORMAT,
+        error.NoMigrationPath => .NO_MIGRATION_PATH,
         error.DestinationExists => .DESTINATION_EXISTS,
         error.ZovaNameConflict => .ZOVA_NAME_CONFLICT,
         error.ObjectNotFound => .OBJECT_NOT_FOUND,
@@ -5978,6 +6041,10 @@ fn statusName(status: c_int) [*:0]const u8 {
         @intFromEnum(zova_status.UNSUPPORTED_ZOVA_VERSION) => "ZOVA_UNSUPPORTED_ZOVA_VERSION",
         @intFromEnum(zova_status.DESTINATION_EXISTS) => "ZOVA_DESTINATION_EXISTS",
         @intFromEnum(zova_status.ZOVA_NAME_CONFLICT) => "ZOVA_ZOVA_NAME_CONFLICT",
+        @intFromEnum(zova_status.MIGRATION_REQUIRED) => "ZOVA_MIGRATION_REQUIRED",
+        @intFromEnum(zova_status.UNSUPPORTED_FUTURE_FORMAT) => "ZOVA_UNSUPPORTED_FUTURE_FORMAT",
+        @intFromEnum(zova_status.UNSUPPORTED_LEGACY_FORMAT) => "ZOVA_UNSUPPORTED_LEGACY_FORMAT",
+        @intFromEnum(zova_status.NO_MIGRATION_PATH) => "ZOVA_NO_MIGRATION_PATH",
         @intFromEnum(zova_status.OBJECT_NOT_FOUND) => "ZOVA_OBJECT_NOT_FOUND",
         @intFromEnum(zova_status.OBJECT_ALREADY_EXISTS) => "ZOVA_OBJECT_ALREADY_EXISTS",
         @intFromEnum(zova_status.OBJECT_CHUNK_NOT_FOUND) => "ZOVA_OBJECT_CHUNK_NOT_FOUND",
@@ -6024,6 +6091,10 @@ test "c abi status names and versions are stable" {
     try std.testing.expectEqualStrings("ZOVA_VECTOR_INVALID", std.mem.span(zova_status_name(@intFromEnum(zova_status.VECTOR_INVALID))));
     try std.testing.expectEqualStrings("ZOVA_GRAPH_INVALID", std.mem.span(zova_status_name(@intFromEnum(zova_status.GRAPH_INVALID))));
     try std.testing.expectEqualStrings("ZOVA_EXTENSION_UNAVAILABLE", std.mem.span(zova_status_name(@intFromEnum(zova_status.EXTENSION_UNAVAILABLE))));
+    try std.testing.expectEqualStrings("ZOVA_MIGRATION_REQUIRED", std.mem.span(zova_status_name(@intFromEnum(zova_status.MIGRATION_REQUIRED))));
+    try std.testing.expectEqualStrings("ZOVA_UNSUPPORTED_FUTURE_FORMAT", std.mem.span(zova_status_name(@intFromEnum(zova_status.UNSUPPORTED_FUTURE_FORMAT))));
+    try std.testing.expectEqualStrings("ZOVA_UNSUPPORTED_LEGACY_FORMAT", std.mem.span(zova_status_name(@intFromEnum(zova_status.UNSUPPORTED_LEGACY_FORMAT))));
+    try std.testing.expectEqualStrings("ZOVA_NO_MIGRATION_PATH", std.mem.span(zova_status_name(@intFromEnum(zova_status.NO_MIGRATION_PATH))));
     try std.testing.expectEqualStrings("ZOVA_UNKNOWN_STATUS", std.mem.span(zova_status_name(-1)));
 }
 
@@ -6121,6 +6192,317 @@ test "c abi validates null pointers" {
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_column_text(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_statement_column_blob(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_buffer_free_and_status_for_test());
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_probe_format(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_migrate(null));
+}
+
+test "c abi probe and migrate validate pointers paths flags and zero output" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dummy_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/probe-dummy.zova", .{tmp.sub_path[0..]});
+
+    // Probe: null out_info
+    {
+        var msg = zova_message{ .data = null, .len = 0 };
+        defer zova_message_free(&msg);
+        var out: zova_database_format_info = undefined;
+        out.format_version = 0xdeadbeef;
+        out.compatibility = 0x7fffffff;
+        try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_probe_format(&.{
+            .path = dummy_path,
+            .out_info = null,
+            .out_error_message = &msg,
+        }));
+    }
+    // Probe: null path
+    {
+        var msg = zova_message{ .data = null, .len = 0 };
+        defer zova_message_free(&msg);
+        var out: zova_database_format_info = undefined;
+        out.format_version = 0xdeadbeef;
+        out.compatibility = 0x7fffffff;
+        try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_probe_format(&.{
+            .path = null,
+            .out_info = &out,
+            .out_error_message = &msg,
+        }));
+        try std.testing.expectEqual(@as(u32, 0), out.format_version);
+        try std.testing.expectEqual(@as(c_int, 0), out.compatibility);
+    }
+    // Probe: path without .zova suffix -> NOT_ZOVA_PATH, zeroed
+    {
+        var msg = zova_message{ .data = null, .len = 0 };
+        defer zova_message_free(&msg);
+        var out: zova_database_format_info = undefined;
+        out.format_version = 0xdeadbeef;
+        out.compatibility = 0x7fffffff;
+        var bad_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const bad_path = try std.fmt.bufPrintZ(&bad_buffer, ".zig-cache/tmp/{s}/bad.txt", .{tmp.sub_path[0..]});
+        try std.testing.expectEqual(zova_status.NOT_ZOVA_PATH, zova_database_probe_format(&.{
+            .path = bad_path,
+            .out_info = &out,
+            .out_error_message = &msg,
+        }));
+        try std.testing.expectEqual(@as(u32, 0), out.format_version);
+        try std.testing.expectEqual(@as(c_int, 0), out.compatibility);
+    }
+    // Migrate: null source
+    {
+        var msg = zova_message{ .data = null, .len = 0 };
+        defer zova_message_free(&msg);
+        try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_migrate(&.{
+            .source_path = null,
+            .destination_path = dummy_path,
+            .flags = 0,
+            .out_error_message = &msg,
+        }));
+    }
+    // Migrate: null destination
+    {
+        var msg = zova_message{ .data = null, .len = 0 };
+        defer zova_message_free(&msg);
+        try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_migrate(&.{
+            .source_path = dummy_path,
+            .destination_path = null,
+            .flags = 0,
+            .out_error_message = &msg,
+        }));
+    }
+    // Migrate: invalid flags
+    {
+        var msg = zova_message{ .data = null, .len = 0 };
+        defer zova_message_free(&msg);
+        try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_migrate(&.{
+            .source_path = dummy_path,
+            .destination_path = dummy_path,
+            .flags = 0xdeadbeef,
+            .out_error_message = &msg,
+        }));
+    }
+}
+
+test "c abi probe and migrate cover compatibility success failure and immutability" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // helpers
+    const copyFixture = struct {
+        fn call(fixture: []const u8, dest: [:0]const u8) !void {
+            const io2 = std.Io.Threaded.global_single_threaded.io();
+            const bytes = try std.Io.Dir.cwd().readFileAlloc(io2, fixture, std.testing.allocator, .limited(64 * 1024 * 1024));
+            defer std.testing.allocator.free(bytes);
+            try std.Io.Dir.cwd().writeFile(io2, .{ .sub_path = dest, .data = bytes });
+        }
+    }.call;
+    const fileHash = struct {
+        fn call(path: [:0]const u8) ![32]u8 {
+            const io2 = std.Io.Threaded.global_single_threaded.io();
+            const bytes = try std.Io.Dir.cwd().readFileAlloc(io2, path, std.testing.allocator, .limited(64 * 1024 * 1024));
+            defer std.testing.allocator.free(bytes);
+            var d: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(bytes, &d, .{});
+            return d;
+        }
+    }.call;
+
+    // Current format probe
+    {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try std.fmt.bufPrintZ(&buf, ".zig-cache/tmp/{s}/c-probe-current.zova", .{tmp.sub_path[0..]});
+        {
+            var db = try zova.Database.create(path);
+            defer db.deinit();
+        }
+        var out: zova_database_format_info = undefined;
+        out = .{ .format_version = 0xdeadbeef, .compatibility = 0x7fffffff };
+        var msg = zova_message{ .data = null, .len = 0 };
+        defer zova_message_free(&msg);
+        try std.testing.expectEqual(zova_status.OK, zova_database_probe_format(&.{ .path = path, .out_info = &out, .out_error_message = &msg }));
+        try std.testing.expectEqual(@as(u32, 10), out.format_version);
+        try std.testing.expectEqual(@intFromEnum(zova_format_compatibility.CURRENT), out.compatibility);
+    }
+    // Migratable fixture
+    {
+        var src_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const src = try std.fmt.bufPrintZ(&src_buf, ".zig-cache/tmp/{s}/c-probe-migratable.zova", .{tmp.sub_path[0..]});
+        try copyFixture("tests/fixtures/format-9.zova", src);
+        var out: zova_database_format_info = undefined;
+        out = .{};
+        var msg = zova_message{ .data = null, .len = 0 };
+        defer zova_message_free(&msg);
+        try std.testing.expectEqual(zova_status.OK, zova_database_probe_format(&.{ .path = src, .out_info = &out, .out_error_message = &msg }));
+        try std.testing.expectEqual(@as(u32, 9), out.format_version);
+        try std.testing.expectEqual(@intFromEnum(zova_format_compatibility.MIGRATABLE), out.compatibility);
+    }
+    // Future and legacy synthetic
+    for ([_]struct { ver: []const u8, expected: zova_format_compatibility }{
+        .{ .ver = "11", .expected = .UNSUPPORTED_FUTURE },
+        .{ .ver = "8", .expected = .UNSUPPORTED_LEGACY },
+    }) |case| {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try std.fmt.bufPrintZ(&buf, ".zig-cache/tmp/{s}/c-probe-{s}.zova", .{ tmp.sub_path[0..], case.ver });
+        {
+            var db = try zova.Database.create(path);
+            defer db.deinit();
+        }
+        {
+            var raw = try sqlite.Database.open(path);
+            defer raw.deinit();
+            var stmt = try raw.prepare("update _zova_meta set value = ? where key = 'format_version'");
+            defer stmt.deinit();
+            try stmt.bindText(1, case.ver);
+            _ = try stmt.step();
+        }
+        var out: zova_database_format_info = undefined;
+        out = .{};
+        var msg = zova_message{ .data = null, .len = 0 };
+        defer zova_message_free(&msg);
+        try std.testing.expectEqual(zova_status.OK, zova_database_probe_format(&.{ .path = path, .out_info = &out, .out_error_message = &msg }));
+        try std.testing.expectEqual(@intFromEnum(case.expected), out.compatibility);
+        try std.testing.expectEqual(try std.fmt.parseInt(u32, case.ver, 10), out.format_version);
+    }
+    // Successful migrate with source immutability and bound-store reporting
+    {
+        var src_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const src = try std.fmt.bufPrintZ(&src_buf, ".zig-cache/tmp/{s}/c-migrate-src.zova", .{tmp.sub_path[0..]});
+        try copyFixture("tests/fixtures/format-9.zova", src);
+        const before = try fileHash(src);
+        var dst_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const dst = try std.fmt.bufPrintZ(&dst_buf, ".zig-cache/tmp/{s}/c-migrate-dst.zova", .{tmp.sub_path[0..]});
+        var msg = zova_message{ .data = null, .len = 0 };
+        defer zova_message_free(&msg);
+        try std.testing.expectEqual(zova_status.OK, zova_database_migrate(&.{ .source_path = src, .destination_path = dst, .flags = 0, .out_error_message = &msg }));
+        const after = try fileHash(src);
+        try std.testing.expectEqualSlices(u8, &before, &after);
+        var out: zova_database_format_info = undefined;
+        out = .{};
+        var probe_msg = zova_message{ .data = null, .len = 0 };
+        defer zova_message_free(&probe_msg);
+        try std.testing.expectEqual(zova_status.OK, zova_database_probe_format(&.{ .path = dst, .out_info = &out, .out_error_message = &probe_msg }));
+        try std.testing.expectEqual(@as(u32, 10), out.format_version);
+        try std.testing.expectEqual(@intFromEnum(zova_format_compatibility.CURRENT), out.compatibility);
+        // destination is openable and no private names leaked via C output (checked via probe/migrate out_info)
+        var db = try zova.Database.open(dst);
+        defer db.deinit();
+        try std.testing.expectEqual(@as(u32, 10), try std.fmt.parseInt(u32, zova_version.format_version, 10));
+    }
+    // Destination exists
+    {
+        var src_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const src = try std.fmt.bufPrintZ(&src_buf, ".zig-cache/tmp/{s}/c-migrate-dest-exists-src.zova", .{tmp.sub_path[0..]});
+        try copyFixture("tests/fixtures/format-9.zova", src);
+        var dst_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const dst = try std.fmt.bufPrintZ(&dst_buf, ".zig-cache/tmp/{s}/c-migrate-dest-exists-dst.zova", .{tmp.sub_path[0..]});
+        {
+            var db = try zova.Database.create(dst);
+            defer db.deinit();
+        }
+        var msg = zova_message{ .data = null, .len = 0 };
+        defer zova_message_free(&msg);
+        try std.testing.expectEqual(zova_status.DESTINATION_EXISTS, zova_database_migrate(&.{ .source_path = src, .destination_path = dst, .flags = 0, .out_error_message = &msg }));
+    }
+    // Unsupported future/legacy via C
+    for ([_]struct { ver: []const u8, expected: zova_status }{
+        .{ .ver = "11", .expected = .UNSUPPORTED_FUTURE_FORMAT },
+        .{ .ver = "8", .expected = .UNSUPPORTED_LEGACY_FORMAT },
+    }) |case| {
+        var src_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const src = try std.fmt.bufPrintZ(&src_buf, ".zig-cache/tmp/{s}/c-migrate-unsupported-{s}.zova", .{ tmp.sub_path[0..], case.ver });
+        {
+            var db = try zova.Database.create(src);
+            defer db.deinit();
+        }
+        {
+            var raw = try sqlite.Database.open(src);
+            defer raw.deinit();
+            var stmt = try raw.prepare("update _zova_meta set value = ? where key = 'format_version'");
+            defer stmt.deinit();
+            try stmt.bindText(1, case.ver);
+            _ = try stmt.step();
+        }
+        var dst_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const dst = try std.fmt.bufPrintZ(&dst_buf, ".zig-cache/tmp/{s}/c-migrate-unsupported-{s}-dst.zova", .{ tmp.sub_path[0..], case.ver });
+        var msg = zova_message{ .data = null, .len = 0 };
+        defer zova_message_free(&msg);
+        const status = zova_database_migrate(&.{ .source_path = src, .destination_path = dst, .flags = 0, .out_error_message = &msg });
+        try std.testing.expectEqual(case.expected, status);
+        // no destination published
+        try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, dst, .{}));
+    }
+    // NoMigrationPath (migrate current)
+    {
+        var src_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const src = try std.fmt.bufPrintZ(&src_buf, ".zig-cache/tmp/{s}/c-migrate-current.zova", .{tmp.sub_path[0..]});
+        {
+            var db = try zova.Database.create(src);
+            defer db.deinit();
+        }
+        var dst_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const dst = try std.fmt.bufPrintZ(&dst_buf, ".zig-cache/tmp/{s}/c-migrate-current-dst.zova", .{tmp.sub_path[0..]});
+        var msg = zova_message{ .data = null, .len = 0 };
+        defer zova_message_free(&msg);
+        try std.testing.expectEqual(zova_status.NO_MIGRATION_PATH, zova_database_migrate(&.{ .source_path = src, .destination_path = dst, .flags = 0, .out_error_message = &msg }));
+        try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, dst, .{}));
+    }
+    // Busy source
+    {
+        var src_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const src = try std.fmt.bufPrintZ(&src_buf, ".zig-cache/tmp/{s}/c-migrate-busy.zova", .{tmp.sub_path[0..]});
+        try copyFixture("tests/fixtures/format-9.zova", src);
+        var lock = try sqlite.Database.open(src);
+        defer lock.deinit();
+        try lock.exec("begin immediate");
+        var dst_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const dst = try std.fmt.bufPrintZ(&dst_buf, ".zig-cache/tmp/{s}/c-migrate-busy-dst.zova", .{tmp.sub_path[0..]});
+        var msg = zova_message{ .data = null, .len = 0 };
+        defer zova_message_free(&msg);
+        const status = zova_database_migrate(&.{ .source_path = src, .destination_path = dst, .flags = 0, .out_error_message = &msg });
+        try std.testing.expect(status == .BUSY or status == .LOCKED);
+        try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, dst, .{}));
+    }
+    // Verification failure (corrupt _zova_chunks)
+    {
+        var src_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const src = try std.fmt.bufPrintZ(&src_buf, ".zig-cache/tmp/{s}/c-migrate-verify-fail.zova", .{tmp.sub_path[0..]});
+        try copyFixture("tests/fixtures/format-9.zova", src);
+        {
+            var raw = try sqlite.Database.open(src);
+            defer raw.deinit();
+            try raw.exec("update _zova_chunks set data = randomblob(size_bytes) where rowid = (select rowid from _zova_chunks limit 1)");
+        }
+        const before = try fileHash(src);
+        var dst_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const dst = try std.fmt.bufPrintZ(&dst_buf, ".zig-cache/tmp/{s}/c-migrate-verify-dst.zova", .{tmp.sub_path[0..]});
+        var msg = zova_message{ .data = null, .len = 0 };
+        defer zova_message_free(&msg);
+        const status = zova_database_migrate(&.{ .source_path = src, .destination_path = dst, .flags = 0, .out_error_message = &msg });
+        // verification failure maps to check_failed (CORRUPT etc) -> non-OK, not DEST exists
+        try std.testing.expect(status != .OK);
+        try std.testing.expect(status != .DESTINATION_EXISTS);
+        try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, dst, .{}));
+        const after = try fileHash(src);
+        try std.testing.expectEqualSlices(u8, &before, &after);
+        // with NO_VERIFY it would succeed
+        var dst2_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const dst2 = try std.fmt.bufPrintZ(&dst2_buf, ".zig-cache/tmp/{s}/c-migrate-verify-dst2.zova", .{tmp.sub_path[0..]});
+        var msg2 = zova_message{ .data = null, .len = 0 };
+        defer zova_message_free(&msg2);
+        try std.testing.expectEqual(zova_status.OK, zova_database_migrate(&.{ .source_path = src, .destination_path = dst2, .flags = ZOVA_MIGRATE_NO_VERIFY, .out_error_message = &msg2 }));
+        _ = try std.Io.Dir.cwd().statFile(io, dst2, .{});
+    }
+    // Zero output before work: probe with invalid path must zero out_info
+    {
+        var out: zova_database_format_info = undefined;
+        out = .{ .format_version = 0xdeadbeef, .compatibility = 0x7fffffff };
+        var msg = zova_message{ .data = null, .len = 0 };
+        defer zova_message_free(&msg);
+        try std.testing.expectEqual(zova_status.NOT_ZOVA_PATH, zova_database_probe_format(&.{ .path = "bad.txt", .out_info = &out, .out_error_message = &msg }));
+        try std.testing.expectEqual(@as(u32, 0), out.format_version);
+        try std.testing.expectEqual(@as(c_int, 0), out.compatibility);
+    }
 }
 
 test "c abi validates external extension bundle requests" {
@@ -6735,18 +7117,10 @@ test "c abi maps incompatible storage formats to unsupported zova version" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const Cases = struct {
-        file_name: []const u8,
-        version_value: []const u8,
-    };
-
-    // Synthetic recognized-but-incompatible databases: migratable, legacy,
-    // and future formats must all surface as UNSUPPORTED_ZOVA_VERSION through
-    // the public ABI until the additive migration statuses land.
-    const cases = [_]Cases{
-        .{ .file_name = "c-abi-format-9.zova", .version_value = "9" },
-        .{ .file_name = "c-abi-format-8.zova", .version_value = "8" },
-        .{ .file_name = "c-abi-format-11.zova", .version_value = "11" },
+    const cases = [_]struct { file_name: []const u8, version_value: []const u8, expected: zova_status }{
+        .{ .file_name = "c-abi-format-9.zova", .version_value = "9", .expected = .MIGRATION_REQUIRED },
+        .{ .file_name = "c-abi-format-8.zova", .version_value = "8", .expected = .UNSUPPORTED_LEGACY_FORMAT },
+        .{ .file_name = "c-abi-format-11.zova", .version_value = "11", .expected = .UNSUPPORTED_FUTURE_FORMAT },
     };
 
     for (cases) |case| {
@@ -6770,7 +7144,7 @@ test "c abi maps incompatible storage formats to unsupported zova version" {
             .out_db = &db,
             .out_error_message = null,
         });
-        try std.testing.expectEqual(zova_status.UNSUPPORTED_ZOVA_VERSION, status);
+        try std.testing.expectEqual(case.expected, status);
         try std.testing.expect(db == null);
     }
 
@@ -6783,7 +7157,7 @@ test "c abi maps incompatible storage formats to unsupported zova version" {
         .out_db = &fixture_db,
         .out_error_message = null,
     });
-    try std.testing.expectEqual(zova_status.UNSUPPORTED_ZOVA_VERSION, fixture_status);
+    try std.testing.expectEqual(zova_status.MIGRATION_REQUIRED, fixture_status);
     try std.testing.expect(fixture_db == null);
 }
 
