@@ -157,7 +157,7 @@ sh bindings/python/tools/check-rust-source.sh
 rm -rf "$TMP"
 mkdir -p "$TMP/$PKG" "$OUT_DIR"
 
-cp build.zig build.zig.zon LICENSE README.md "$TMP/$PKG/"
+cp build.zig build.zig.zon LICENSE README.md API_STABILITY.md "$TMP/$PKG/"
 cp -R bench "$TMP/$PKG/"
 cp -R bindings "$TMP/$PKG/"
 cp -R docs "$TMP/$PKG/"
@@ -185,14 +185,24 @@ rm -f "$TMP/$PKG/bindings/javascript/index.js"
 rm -f "$TMP/$PKG/bindings/javascript/index.d.ts"
 find "$TMP/$PKG/bindings/javascript" -maxdepth 1 -name '*.node' -delete
 
-if find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/docs/extensions.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" ! -path "$TMP/$PKG/bindings/javascript/README.md" | grep -q .; then
+if find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/API_STABILITY.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/docs/extensions.md" ! -path "$TMP/$PKG/docs/storage-compatibility.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" ! -path "$TMP/$PKG/bindings/javascript/README.md" | grep -q .; then
     echo "release package contains unexpected markdown files" >&2
-    find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/docs/extensions.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" ! -path "$TMP/$PKG/bindings/javascript/README.md" >&2
+    find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/API_STABILITY.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/docs/extensions.md" ! -path "$TMP/$PKG/docs/storage-compatibility.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" ! -path "$TMP/$PKG/bindings/javascript/README.md" >&2
     exit 1
 fi
 
 if [ ! -f "$TMP/$PKG/LICENSE" ]; then
     echo "release package is missing LICENSE" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/API_STABILITY.md" ]; then
+    echo "release package is missing API_STABILITY.md" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/docs/storage-compatibility.md" ]; then
+    echo "release package is missing docs/storage-compatibility.md" >&2
     exit 1
 fi
 
