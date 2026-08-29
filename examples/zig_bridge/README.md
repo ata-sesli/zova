@@ -24,11 +24,11 @@ zig build-obj \
   --name zova_bridge \
   --dep zova \
   -Mroot=examples/zig_bridge/bridge.zig \
-  -I vendor/sqlite3.53.2 \
+  -I vendor/sqlite3.53.4 \
   -Mzova=src/root.zig
 ```
 
-The `-I vendor/sqlite3.53.2` include path is required because importing
+The `-I vendor/sqlite3.53.4` include path is required because importing
 `zova.sqlite` performs a C import of `sqlite3.h`.
 
 Check that the artifact is non-empty and exports the C-callable bridge symbol:
@@ -51,7 +51,7 @@ zig build-lib \
   --name zova_bridge \
   --dep zova \
   -Mroot=examples/zig_bridge/bridge.zig \
-  -I vendor/sqlite3.53.2 \
+  -I vendor/sqlite3.53.4 \
   -Mzova=src/root.zig
 
 nm libzig_bridge.a | grep zova_bridge_smoke

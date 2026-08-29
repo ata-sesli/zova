@@ -118,6 +118,14 @@ test "package exports central version constants" {
     try std.testing.expect(version.minimum_zig_version.len > 0);
 }
 
+// The C ABI exposes no SQLite version accessor, so every binding reports the
+// compile-time constant. This is the only check that the declared version is
+// also the library actually linked, which catches a vendored directory renamed
+// without its contents, and a `build.zig` bump left behind by `version.zig`.
+test "package sqlite version matches the linked sqlite library" {
+    try std.testing.expectEqualStrings(version.sqlite_version, sqlite.version());
+}
+
 test "package exports zova database namespace" {
     try std.testing.expect(@hasDecl(@This(), "Database"));
     try std.testing.expect(@hasDecl(@This(), "Error"));

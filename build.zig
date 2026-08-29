@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     sqlite_module.addCSourceFile(.{
-        .file = b.path("vendor/sqlite3.53.2/sqlite3.c"),
+        .file = b.path("vendor/sqlite3.53.4/sqlite3.c"),
         .flags = sqlite_c_flags,
     });
     const sqlite_lib = b.addLibrary(.{
@@ -52,7 +52,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     zova_dynamic_module.addOptions("zova_build_options", zova_build_options);
-    zova_dynamic_module.addIncludePath(b.path("vendor/sqlite3.53.2"));
+    zova_dynamic_module.addIncludePath(b.path("vendor/sqlite3.53.4"));
 
     const cli_module = b.createModule(.{
         .root_source_file = b.path("src/cli.zig"),
@@ -146,7 +146,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     }));
-    object_benchmark.root_module.addIncludePath(b.path("vendor/sqlite3.53.2"));
+    object_benchmark.root_module.addIncludePath(b.path("vendor/sqlite3.53.4"));
     object_benchmark.root_module.linkLibrary(sqlite_lib);
     const object_benchmark_cmd = b.addRunArtifact(object_benchmark);
     if (b.args) |args| object_benchmark_cmd.addArgs(args);
@@ -511,14 +511,14 @@ fn addSqlite(
     b: *std.Build,
     sqlite_lib: *std.Build.Step.Compile,
 ) void {
-    module.addIncludePath(b.path("vendor/sqlite3.53.2"));
+    module.addIncludePath(b.path("vendor/sqlite3.53.4"));
     module.linkLibrary(sqlite_lib);
 }
 
 fn addEmbeddedSqlite(module: *std.Build.Module, b: *std.Build) void {
-    module.addIncludePath(b.path("vendor/sqlite3.53.2"));
+    module.addIncludePath(b.path("vendor/sqlite3.53.4"));
     module.addCSourceFile(.{
-        .file = b.path("vendor/sqlite3.53.2/sqlite3.c"),
+        .file = b.path("vendor/sqlite3.53.4/sqlite3.c"),
         .flags = sqlite_c_flags,
     });
     module.link_libc = true;

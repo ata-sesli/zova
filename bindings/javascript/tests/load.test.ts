@@ -12,6 +12,6 @@ describe("native binding metadata", () => {
     expect(packageVersion).toBe("0.26.1");
     expect(abiVersion).toBe("0.26.1");
     expect(formatVersion).toBe("11");
-    expect(sqliteVersion).toBe("3.53.2");
+    expect(sqliteVersion).toBe("3.53.4");
   });
 });

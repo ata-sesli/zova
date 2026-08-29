@@ -70,6 +70,11 @@ expect_value "build.zig.zon .version" "$package_version" "$manifest_version"
 expect_value "build.zig.zon .minimum_zig_version" "$minimum_zig_version" "$manifest_min_zig"
 
 [ -d "$ROOT/vendor/sqlite${sqlite_version}" ] || fail "missing vendor/sqlite${sqlite_version}"
+# The published SQLite version must agree with src/version.zig everywhere a
+# reader can observe it, so a bump cannot leave stale docs behind.
+expect_contains "$ROOT/README.md" "| SQLite | vendored \`${sqlite_version}\` |"
+expect_contains "$ROOT/README.md" "SQLite is vendored in \`vendor/sqlite${sqlite_version}\` and is public domain."
+expect_contains "$ROOT/docs/storage-compatibility.md" "\`sqlite_version\` | \`${sqlite_version}\` |"
 expect_contains "$ROOT/build.zig" 'src/version.zig'
 expect_contains "$ROOT/src/zova.zig" 'const format_version = version.format_version;'
 expect_contains "$ROOT/src/cli.zig" 'zova.version.format_version'
