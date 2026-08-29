@@ -7,7 +7,7 @@ cd "$ROOT"
 usage() {
     cat >&2 <<'EOF'
 usage: scripts/build-release-artifacts.sh <version> <artifact-id> [out-dir]
-example: scripts/build-release-artifacts.sh 0.26.1 macos-arm64 zig-out/artifacts
+example: scripts/build-release-artifacts.sh 1.0.0-rc.1 macos-arm64 zig-out/artifacts
 
 Builds host-platform release artifacts:
   - CLI archive
@@ -64,7 +64,7 @@ ARTIFACT_ID="$2"
 OUT_DIR="${3:-$ROOT/zig-out/artifacts}"
 MANIFEST_VERSION="$(manifest_version)"
 
-if ! printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+if ! printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-rc\.(0|[1-9][0-9]*))?$'; then
     echo "invalid version: $VERSION" >&2
     usage
     exit 2

@@ -110,19 +110,20 @@ release_python_package() {
 
     run sh bindings/python/tools/sync-rust-source.sh
     run sh bindings/python/tools/check-rust-source.sh
+    run uv run --isolated --with maturin --directory bindings/python maturin build --out "$wheel_dir"
     run uv run --isolated --with maturin --directory bindings/python maturin build --sdist --out "$wheel_dir"
 
-    if ! find "$wheel_dir" -name "zova-$VERSION-*.whl" | grep -q .; then
+    if ! find "$wheel_dir" -name "zova-$PYTHON_DISTRIBUTION_VERSION-*.whl" | grep -q .; then
         die "Python release artifacts are missing a wheel"
     fi
-    if [ ! -f "$wheel_dir/zova-$VERSION.tar.gz" ]; then
+    if [ ! -f "$wheel_dir/zova-$PYTHON_DISTRIBUTION_VERSION.tar.gz" ]; then
         die "Python release artifacts are missing an sdist"
     fi
 
     if [ "$DRY_RUN" -eq 1 ]; then
-        run uv publish --dry-run --check-url https://pypi.org/simple/ "$wheel_dir"/zova-"$VERSION"*
+        run uv publish --dry-run --check-url https://pypi.org/simple/ "$wheel_dir"/zova-"$PYTHON_DISTRIBUTION_VERSION"*
     else
-        run uv publish --check-url https://pypi.org/simple/ "$wheel_dir"/zova-"$VERSION"*
+        run uv publish --check-url https://pypi.org/simple/ "$wheel_dir"/zova-"$PYTHON_DISTRIBUTION_VERSION"*
     fi
 }
 
@@ -159,13 +160,17 @@ if [ -z "$VERSION" ]; then
     usage_error "missing version"
 fi
 
-if ! printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+if ! printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-rc\.(0|[1-9][0-9]*))?$'; then
     usage_error "invalid version: $VERSION"
 fi
 
 MANIFEST_VERSION="$(manifest_version)"
 RUST_VERSION="$(rust_workspace_version)"
 PYTHON_VERSION="$(python_project_version)"
+PYTHON_DISTRIBUTION_VERSION="$VERSION"
+case "$VERSION" in
+    *-rc.*) PYTHON_DISTRIBUTION_VERSION="${VERSION%%-rc.*}rc${VERSION##*-rc.}" ;;
+esac
 
 if [ "$VERSION" != "$MANIFEST_VERSION" ]; then
     die "version argument ($VERSION) does not match build.zig.zon ($MANIFEST_VERSION)"
@@ -173,8 +178,8 @@ fi
 if [ "$VERSION" != "$RUST_VERSION" ]; then
     die "version argument ($VERSION) does not match bindings/rust/Cargo.toml ($RUST_VERSION)"
 fi
-if [ "$VERSION" != "$PYTHON_VERSION" ]; then
-    die "version argument ($VERSION) does not match bindings/python/pyproject.toml ($PYTHON_VERSION)"
+if [ "$PYTHON_DISTRIBUTION_VERSION" != "$PYTHON_VERSION" ]; then
+    die "Python distribution version ($PYTHON_DISTRIBUTION_VERSION) does not match bindings/python/pyproject.toml ($PYTHON_VERSION)"
 fi
 
 require_command git

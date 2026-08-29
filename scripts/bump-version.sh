@@ -5,20 +5,29 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION_ZIG="$ROOT/src/version.zig"
 
 usage() {
-    echo "usage: scripts/bump-version.sh <major.minor.patch>" >&2
+    echo "usage: scripts/bump-version.sh <major.minor.patch[-rc.N]>" >&2
     exit 2
 }
 
 [ "$#" -eq 1 ] || usage
 new_version="$1"
+core_version="${new_version%%-*}"
+prerelease=""
+if [ "$core_version" != "$new_version" ]; then
+    prerelease="${new_version#*-}"
+    case "$prerelease" in
+        rc.[0-9]*) ;;
+        *) usage ;;
+    esac
+fi
 
-case "$new_version" in
+case "$core_version" in
     *[!0-9.]* | .* | *. | *..*) usage ;;
 esac
 
-major="${new_version%%.*}"
-rest="${new_version#*.}"
-[ "$rest" != "$new_version" ] || usage
+major="${core_version%%.*}"
+rest="${core_version#*.}"
+[ "$rest" != "$core_version" ] || usage
 minor="${rest%%.*}"
 patch="${rest#*.}"
 [ "$patch" != "$rest" ] || usage
@@ -26,8 +35,18 @@ case "$patch" in
     *.*) usage ;;
 esac
 
-[ "$major.$minor.$patch" = "$new_version" ] || usage
+[ "$major.$minor.$patch" = "$core_version" ] || usage
 [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] || usage
+
+python_version="$core_version"
+if [ -n "$prerelease" ]; then
+    rc_number="${prerelease#rc.}"
+    case "$rc_number" in
+        0 | [1-9] | [1-9][0-9]*) ;;
+        *) usage ;;
+    esac
+    python_version="${core_version}rc${rc_number}"
+fi
 
 old_version="$(sed -n 's/^[[:space:]]*pub const package_version[[:space:]]*=[[:space:]]*"\([^"]*\)";.*/\1/p' "$VERSION_ZIG" | head -n 1)"
 [ -n "$old_version" ] || {
@@ -35,14 +54,20 @@ old_version="$(sed -n 's/^[[:space:]]*pub const package_version[[:space:]]*=[[:s
     exit 1
 }
 
-replace_all() {
+replace_literal() {
     file="$1"
+    old_value="$2"
+    new_value="$3"
     [ -f "$file" ] || return 0
-    old_re="$(printf '%s' "$old_version" | sed 's/[.[\*^$()+?{}|]/\\&/g')"
+    old_re="$(printf '%s' "$old_value" | sed 's/[.[\*^$()+?{}|]/\\&/g')"
     tmp="${file}.tmp.$$"
     cp -p "$file" "$tmp"
-    sed "s/$old_re/$new_version/g" "$file" >"$tmp"
+    sed "s/$old_re/$new_value/g" "$file" >"$tmp"
     mv "$tmp" "$file"
+}
+
+replace_all() {
+    replace_literal "$1" "$old_version" "$new_version"
 }
 
 replace_line() {
@@ -64,7 +89,9 @@ replace_line "$VERSION_ZIG" 'pub const abi_version_patch: u32 = [0-9][0-9]*;' "p
 for file in \
     "$ROOT/build.zig.zon" \
     "$ROOT/README.md" \
+    "$ROOT/API_STABILITY.md" \
     "$ROOT/docs/extensions.md" \
+    "$ROOT/docs/storage-compatibility.md" \
     "$ROOT/include/zova.h" \
     "$ROOT/examples/zig_bridge/bridge.zig" \
     "$ROOT/scripts/package-release.sh" \
@@ -78,12 +105,9 @@ for file in \
     "$ROOT/bindings/rust/zova-sys/tests/abi.rs" \
     "$ROOT/bindings/go/README.md" \
     "$ROOT/bindings/go/zova_test.go" \
-    "$ROOT/bindings/python/pyproject.toml" \
     "$ROOT/bindings/python/Cargo.toml" \
     "$ROOT/bindings/python/Cargo.lock" \
     "$ROOT/bindings/python/README.md" \
-    "$ROOT/bindings/python/python/zova/__init__.py" \
-    "$ROOT/bindings/python/tests/test_lifecycle.py" \
     "$ROOT/bindings/python/rust/zova/Cargo.toml" \
     "$ROOT/bindings/python/rust/zova-sys/Cargo.toml" \
     "$ROOT/bindings/python/rust/zova-sys/tests/abi.rs" \
@@ -101,6 +125,7 @@ for file in \
     "$ROOT/bindings/javascript/Cargo.lock" \
     "$ROOT/bindings/javascript/package.json" \
     "$ROOT/bindings/javascript/bun.lock" \
+    "$ROOT/bindings/javascript/index.js" \
     "$ROOT/bindings/javascript/README.md" \
     "$ROOT/bindings/javascript/tests/package-names.test.ts" \
     "$ROOT/bindings/javascript/tests/load.test.ts" \
@@ -108,6 +133,24 @@ for file in \
     "$ROOT/bindings/javascript/tests/runtime-smoke.cjs"
 do
     replace_all "$file"
+done
+
+# Extension manifests deliberately use numeric major.minor.patch ABI minima,
+# even when the package release itself is a prerelease.
+replace_line "$ROOT/examples/zig_bridge/bridge.zig" '\.zova_abi_min = "[^"]*"' ".zova_abi_min = \"$core_version\""
+replace_line "$ROOT/tests/cli.zig" '\.zova_abi_min = "[^"]*"' ".zova_abi_min = \"$core_version\""
+
+old_python_version="$old_version"
+case "$old_version" in
+    *-rc.*) old_python_version="${old_version%%-rc.*}rc${old_version##*-rc.}" ;;
+esac
+
+for file in \
+    "$ROOT/bindings/python/pyproject.toml" \
+    "$ROOT/bindings/python/python/zova/__init__.py" \
+    "$ROOT/bindings/python/tests/test_lifecycle.py"
+do
+    replace_literal "$file" "$old_python_version" "$python_version"
 done
 
 for file in \

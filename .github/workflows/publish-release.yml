@@ -52,11 +52,15 @@ jobs:
           version="${{ inputs.version }}"
           manifest_version="$(sed -n 's/^[[:space:]]*\.version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' build.zig.zon | head -n 1)"
           rust_version="$(sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' bindings/rust/Cargo.toml | head -n 1)"
-          python_version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' bindings/python/pyproject.toml | head -n 1)"
+          python_manifest_version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' bindings/python/pyproject.toml | head -n 1)"
           javascript_version="$(node -p "require('./bindings/javascript/package.json').version")"
+          python_version="$version"
+          case "$version" in
+            *-rc.*) python_version="${version%%-rc.*}rc${version##*-rc.}" ;;
+          esac
           test "$version" = "$manifest_version"
           test "$version" = "$rust_version"
-          test "$version" = "$python_version"
+          test "$python_version" = "$python_manifest_version"
           test "$version" = "$javascript_version"
 
       - name: Download release artifacts
@@ -101,6 +105,11 @@ jobs:
       - name: Prepare release assets
         run: |
           set -eu
+          version="${{ inputs.version }}"
+          python_version="$version"
+          case "$version" in
+            *-rc.*) python_version="${version%%-rc.*}rc${version##*-rc.}" ;;
+          esac
           mkdir -p zig-out/release-assets zig-out/python-assets
           find zig-out/release-download -type f \( \
             -name '*.tar.gz' -o \
@@ -108,8 +117,8 @@ jobs:
             -name '*.txt' \
           \) -exec cp {} zig-out/release-assets/ \;
           find zig-out/release-download -path '*python*' -type f \( \
-            -name 'zova-${{ inputs.version }}-*.whl' -o \
-            -name 'zova-${{ inputs.version }}.tar.gz' \
+            -name "zova-${python_version}-*.whl" -o \
+            -name "zova-${python_version}.tar.gz" \
           \) -exec cp {} zig-out/python-assets/ \;
           ls -lh zig-out/release-assets zig-out/python-assets
 
@@ -126,6 +135,10 @@ jobs:
           go_tag="bindings/go/v$version"
           notes_file=".github/release-notes/v$version.md"
           head_commit="$(git rev-parse HEAD)"
+          release_flags="--latest"
+          case "$version" in
+            *-*) release_flags="--prerelease --latest=false" ;;
+          esac
 
           if [ ! -f "$notes_file" ]; then
             echo "missing release notes: $notes_file" >&2
@@ -149,13 +162,14 @@ jobs:
 
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "GitHub Release already exists: $tag; uploading assets with --clobber"
-            gh release edit "$tag" --title "Zova $tag" --notes-file "$notes_file"
+            gh release edit "$tag" --title "Zova $tag" --notes-file "$notes_file" $release_flags
             gh release upload "$tag" zig-out/release-assets/* --clobber
           else
             gh release create "$tag" zig-out/release-assets/* \
               --title "Zova $tag" \
               --notes-file "$notes_file" \
-              --verify-tag
+              --verify-tag \
+              $release_flags
           fi
 
       - name: Publish Rust crates
@@ -194,14 +208,19 @@ jobs:
           PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
         run: |
           set -eu
-          if ! find zig-out/python-assets -name 'zova-${{ inputs.version }}*' | grep -q .; then
+          version="${{ inputs.version }}"
+          python_version="$version"
+          case "$version" in
+            *-rc.*) python_version="${version%%-rc.*}rc${version##*-rc.}" ;;
+          esac
+          if ! find zig-out/python-assets -name "zova-${python_version}*" | grep -q .; then
             echo "no Python artifacts found to publish" >&2
             exit 1
           fi
           if [ -n "${PYPI_API_TOKEN:-}" ]; then
-            UV_PUBLISH_TOKEN="$PYPI_API_TOKEN" uv publish --check-url https://pypi.org/simple/ zig-out/python-assets/zova-${{ inputs.version }}*
+            UV_PUBLISH_TOKEN="$PYPI_API_TOKEN" uv publish --check-url https://pypi.org/simple/ zig-out/python-assets/zova-${python_version}*
           else
-            uv publish --check-url https://pypi.org/simple/ zig-out/python-assets/zova-${{ inputs.version }}*
+            uv publish --check-url https://pypi.org/simple/ zig-out/python-assets/zova-${python_version}*
           fi
 
       - name: Publish JavaScript packages
@@ -209,6 +228,10 @@ jobs:
           set -eu
           version="${{ inputs.version }}"
           package_dir="zig-out/release-download/zova-${version}-javascript-packages/package"
+          npm_tag="latest"
+          case "$version" in
+            *-*) npm_tag="next" ;;
+          esac
 
           publish_package() {
             package_name="$1"
@@ -219,8 +242,11 @@ jobs:
             fi
             if npm view "$package_name@$version" version >/dev/null 2>&1; then
               echo "npm package already published: $package_name@$version"
+              if [ "$npm_tag" = "next" ]; then
+                npm dist-tag add "$package_name@$version" next
+              fi
             else
-              npm publish "$tarball" --access public
+              npm publish "$tarball" --access public --tag "$npm_tag"
             fi
           }
 

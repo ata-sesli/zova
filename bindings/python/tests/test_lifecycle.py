@@ -6,7 +6,7 @@ import zova
 
 
 def test_import_and_error_mapping(tmp_path):
-    assert zova.__version__ == "0.26.1"
+    assert zova.__version__ == "1.0.0rc1"
 
     with pytest.raises(zova.ZovaError) as exc:
         zova.Database.create(str(tmp_path / "plain.db"))

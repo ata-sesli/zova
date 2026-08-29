@@ -882,7 +882,7 @@ test "dynamic extension bundle validation rejects unsafe library paths" {
         \\  "name": "dyn_test",
         \\  "version": "0.1.0",
         \\  "storage_prefix": "_zova_ext_dyn_test_",
-        \\  "zova_abi_min": "0.21.0",
+        \\  "zova_abi_min": "1.0.0",
         \\  "capabilities": "sql",
         \\  "library": "../libdyn_test.dylib"
         \\}
@@ -916,7 +916,7 @@ test "dynamic extension trust store detects changed bundle contents" {
         \\  "name": "dyn_test",
         \\  "version": "0.1.0",
         \\  "storage_prefix": "_zova_ext_dyn_test_",
-        \\  "zova_abi_min": "0.21.0",
+        \\  "zova_abi_min": "1.0.0",
         \\  "capabilities": "sql",
         \\  "library": "libdyn_test.dylib"
         \\}

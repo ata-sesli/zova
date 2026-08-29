@@ -5,14 +5,14 @@
 //! The file is still a SQLite database underneath, but Zova validates private
 //! metadata before treating it as a Zova-owned database.
 //!
-//! Zova is currently pre-1.0, and internal `.zova` format compatibility is
-//! not preserved between experimental format versions. The current v0.22
-//! development format is version `11`: `_zova_meta.format_version = '11'` plus
+//! Zova 1.x preserves the explicit migration path documented in
+//! `docs/storage-compatibility.md`. The current storage format is version `11`:
+//! `_zova_meta.format_version = '11'` plus
 //! the required private object, vector, graph, key-value, and extension
 //! registry schemas.
 //! `Database.open` is intentionally non-mutating: it validates the file and
-//! rejects old, future, incomplete, or invalid private schemas instead of
-//! repairing or migrating them.
+//! rejects migration-required, future, unsupported legacy, incomplete, or
+//! invalid private schemas instead of repairing or migrating them.
 //!
 //! Existing SQLite files can be converted into new `.zova` files with
 //! `convertSqliteToZova`. Conversion copies the source with SQLite's backup
@@ -6237,16 +6237,16 @@ test "extension registry is used for backup compact and restore verification" {
 
 test "extension manifests validate names prefixes and duplicate registry prefixes" {
     try extension_impl.validateManifest(.{
-        .name = "older_abi",
+        .name = "compatible_abi",
         .version = "0.1.0",
-        .storage_prefix = "_zova_ext_older_abi_",
-        .zova_abi_min = "0.22.9",
+        .storage_prefix = "_zova_ext_compatible_abi_",
+        .zova_abi_min = "1.0.0",
     });
     try extension_impl.validateManifest(.{
         .name = "current_abi",
         .version = "0.1.0",
         .storage_prefix = "_zova_ext_current_abi_",
-        .zova_abi_min = version.abi_version_string,
+        .zova_abi_min = "1.0.0",
     });
     try std.testing.expectError(error.ExtensionInvalid, extension_impl.validateManifest(.{
         .name = "malformed_abi",
@@ -6275,38 +6275,38 @@ test "extension manifests validate names prefixes and duplicate registry prefixe
         .name = "different_major_abi",
         .version = "0.1.0",
         .storage_prefix = "_zova_ext_different_major_abi_",
-        .zova_abi_min = "1.0.0",
+        .zova_abi_min = "2.0.0",
     }));
 
     try std.testing.expectError(error.ExtensionInvalid, extension_impl.validateManifest(.{
         .name = "",
         .version = "0.1.0",
         .storage_prefix = "_zova_ext__",
-        .zova_abi_min = "0.21.0",
+        .zova_abi_min = "1.0.0",
     }));
     try std.testing.expectError(error.ExtensionInvalid, extension_impl.validateManifest(.{
         .name = "_zova_hidden",
         .version = "0.1.0",
         .storage_prefix = "_zova_ext__zova_hidden_",
-        .zova_abi_min = "0.21.0",
+        .zova_abi_min = "1.0.0",
     }));
     try std.testing.expectError(error.ExtensionInvalid, extension_impl.validateManifest(.{
         .name = "bad name",
         .version = "0.1.0",
         .storage_prefix = "_zova_ext_bad name_",
-        .zova_abi_min = "0.21.0",
+        .zova_abi_min = "1.0.0",
     }));
     try std.testing.expectError(error.ExtensionInvalid, extension_impl.validateManifest(.{
         .name = "test",
         .version = "0.1.0",
         .storage_prefix = "_zova_objects",
-        .zova_abi_min = "0.21.0",
+        .zova_abi_min = "1.0.0",
     }));
     try std.testing.expectError(error.ExtensionInvalid, extension_impl.validateManifest(.{
         .name = "optional",
         .version = "0.1.0",
         .storage_prefix = "_zova_ext_optional_",
-        .zova_abi_min = "0.21.0",
+        .zova_abi_min = "1.0.0",
         .required = false,
     }));
 
@@ -6316,7 +6316,7 @@ test "extension manifests validate names prefixes and duplicate registry prefixe
             .name = "test",
             .version = "0.1.0",
             .storage_prefix = "_zova_ext_test_two_",
-            .zova_abi_min = "0.21.0",
+            .zova_abi_min = "1.0.0",
         },
         .install = testExtensionInstall,
         .check = testExtensionCheck,
@@ -6329,7 +6329,7 @@ test "extension manifests validate names prefixes and duplicate registry prefixe
             .name = "other",
             .version = "0.1.0",
             .storage_prefix = "_zova_ext_test_",
-            .zova_abi_min = "0.21.0",
+            .zova_abi_min = "1.0.0",
         },
         .install = testExtensionInstall,
         .check = testExtensionCheck,
@@ -6347,7 +6347,7 @@ test "extension registry rejects bundled trgm collisions before create or open" 
             .name = "trgm",
             .version = "0.1.0",
             .storage_prefix = "_zova_ext_trgm_",
-            .zova_abi_min = "0.21.0",
+            .zova_abi_min = "1.0.0",
         },
         .install = testExtensionInstall,
         .check = testExtensionCheck,
@@ -6538,7 +6538,7 @@ fn testExtension() Extension {
             .name = "test",
             .version = "0.1.0",
             .storage_prefix = "_zova_ext_test_",
-            .zova_abi_min = "0.21.0",
+            .zova_abi_min = "1.0.0",
             .capabilities = "sql",
         },
         .install = testExtensionInstall,
@@ -6554,7 +6554,7 @@ fn salvageExtension() Extension {
             .name = "salvage",
             .version = "0.1.0",
             .storage_prefix = "_zova_ext_salvage_",
-            .zova_abi_min = "0.21.0",
+            .zova_abi_min = "1.0.0",
         },
         .install = salvageExtensionInstall,
         .check = salvageExtensionCheck,
@@ -6569,7 +6569,7 @@ fn badSalvageExtension() Extension {
             .name = "bad_salvage",
             .version = "0.1.0",
             .storage_prefix = "_zova_ext_bad_salvage_",
-            .zova_abi_min = "0.21.0",
+            .zova_abi_min = "1.0.0",
         },
         .install = badSalvageExtensionInstall,
         .check = badSalvageExtensionCheck,
@@ -6584,7 +6584,7 @@ fn failingExtension() Extension {
             .name = "failing",
             .version = "0.1.0",
             .storage_prefix = "_zova_ext_failing_",
-            .zova_abi_min = "0.21.0",
+            .zova_abi_min = "1.0.0",
         },
         .install = failingExtensionInstall,
         .check = testExtensionCheck,
@@ -6598,7 +6598,7 @@ fn registerFailingExtension() Extension {
             .name = "register_fail",
             .version = "0.1.0",
             .storage_prefix = "_zova_ext_register_fail_",
-            .zova_abi_min = "0.21.0",
+            .zova_abi_min = "1.0.0",
         },
         .install = registerFailingExtensionInstall,
         .check = registerFailingExtensionCheck,
@@ -6613,7 +6613,7 @@ fn reopenRegisterFailExtension() Extension {
             .name = "reopen_fail",
             .version = "0.1.0",
             .storage_prefix = "_zova_ext_reopen_fail_",
-            .zova_abi_min = "0.21.0",
+            .zova_abi_min = "1.0.0",
         },
         .install = reopenRegisterFailExtensionInstall,
         .check = reopenRegisterFailExtensionCheck,
@@ -6628,7 +6628,7 @@ fn secondSqlExtension() Extension {
             .name = "test_two",
             .version = "0.1.0",
             .storage_prefix = "_zova_ext_test_two_",
-            .zova_abi_min = "0.21.0",
+            .zova_abi_min = "1.0.0",
             .capabilities = "sql",
         },
         .install = secondSqlExtensionInstall,
@@ -6644,7 +6644,7 @@ fn escapingExtension() Extension {
             .name = "escape",
             .version = "0.1.0",
             .storage_prefix = "_zova_ext_escape_",
-            .zova_abi_min = "0.21.0",
+            .zova_abi_min = "1.0.0",
         },
         .install = escapingExtensionInstall,
         .check = escapingExtensionCheck,
@@ -6658,7 +6658,7 @@ fn leakyDropExtension() Extension {
             .name = "leaky",
             .version = "0.1.0",
             .storage_prefix = "_zova_ext_leaky_",
-            .zova_abi_min = "0.21.0",
+            .zova_abi_min = "1.0.0",
         },
         .install = leakyDropExtensionInstall,
         .check = leakyDropExtensionCheck,
@@ -6672,7 +6672,7 @@ fn crossNamespaceExtension() Extension {
             .name = "cross",
             .version = "0.1.0",
             .storage_prefix = "_zova_ext_cross_",
-            .zova_abi_min = "0.21.0",
+            .zova_abi_min = "1.0.0",
         },
         .install = crossNamespaceExtensionInstall,
         .check = crossNamespaceExtensionCheck,

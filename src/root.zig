@@ -112,7 +112,8 @@ test "package exports central version constants" {
         .{ version.abi_version_major, version.abi_version_minor, version.abi_version_patch },
     );
     defer std.testing.allocator.free(abi_from_parts);
-    try std.testing.expectEqualStrings(abi_from_parts, version.abi_version_string);
+    const prerelease_index = std.mem.indexOfScalar(u8, version.abi_version_string, '-') orelse version.abi_version_string.len;
+    try std.testing.expectEqualStrings(abi_from_parts, version.abi_version_string[0..prerelease_index]);
     try std.testing.expect(version.format_version.len > 0);
     try std.testing.expect(version.sqlite_version.len > 0);
     try std.testing.expect(version.minimum_zig_version.len > 0);

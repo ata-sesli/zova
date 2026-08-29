@@ -20,10 +20,10 @@ func tempZovaPath(t *testing.T, name string) string {
 
 func TestABIVersionAndStatusNames(t *testing.T) {
 	major, minor, patch := ABIVersionNumbers()
-	if major != 0 || minor != 26 || patch != 1 {
+	if major != 1 || minor != 0 || patch != 0 {
 		t.Fatalf("unexpected ABI version: %d.%d.%d", major, minor, patch)
 	}
-	if got := ABIVersion(); got != "0.26.1" {
+	if got := ABIVersion(); got != "1.0.0-rc.1" {
 		t.Fatalf("unexpected ABI version string: %q", got)
 	}
 	if got := StatusName(StatusOK); got != "ZOVA_OK" {

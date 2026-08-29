@@ -114,7 +114,7 @@ pub fn extension() extension_impl.Extension {
             .name = name,
             .version = version,
             .storage_prefix = storage_prefix,
-            .zova_abi_min = "0.21.0",
+            .zova_abi_min = "1.0.0",
             .capabilities = "sql,trgm",
             .manifest_json = "{\"extension\":\"trgm\",\"version\":\"0.1.0\"}",
         },

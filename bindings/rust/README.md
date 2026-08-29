@@ -49,14 +49,14 @@ Use the safe crate for normal Rust applications:
 
 ```toml
 [dependencies]
-zova = "0.26.1"
+zova = "1.0.0-rc.1"
 ```
 
 Use the raw FFI crate only when you want to call the C ABI directly:
 
 ```toml
 [dependencies]
-zova-sys = "0.26.1"
+zova-sys = "1.0.0-rc.1"
 ```
 
 Both crates contain native code. The default build path compiles Zova's static C
@@ -66,18 +66,19 @@ users still need:
 - Rust,
 - a C compiler/linker for their platform.
 
-Zova is still pre-1.0. The Rust API, C ABI, and `.zova` format are usable, but
-they may evolve before the 1.0 line. The current `.zova` `format_version` is
-`11`. Zova does not migrate older format databases in place. Format-9 and
+Zova 1.0.0-rc.1 is the candidate for the stable 1.x contract. RC fixes may
+still refine compatibility before 1.0.0, but new feature exploration is no
+longer part of this release line. The current `.zova` `format_version` is `11`.
+Zova does not migrate older format databases in place. Format-9 and
 format-10 databases can be probed and migrated forward with the crate-level
 `probe_format(path)` and `migrate_database(source, destination, options)`
 functions: migration is explicit, copy-forward, publishes a separately
 validated format-11 destination, and never mutates the source.
 
-The v0.25 opaque-key graph, payload, topology-scan, prepared-build, and generic
-fresh-build session APIs are available through raw `zova-sys`. The safe `zova`
-crate continues to expose the established graph CRUD and traversal API and does
-not yet wrap those low-level publication surfaces.
+Opaque-key graph, payload, topology-scan, prepared-build, and generic
+fresh-build session APIs are supported low-level C ABI/raw `zova-sys` surfaces.
+The safe `zova` crate deliberately exposes the established graph CRUD and
+traversal API instead of those specialized publication surfaces.
 
 ## Native Build
 

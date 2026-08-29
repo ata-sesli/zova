@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 usage() {
     echo "usage: scripts/package-release.sh <version> [out-dir]" >&2
-    echo "example: scripts/package-release.sh 0.26.1" >&2
+    echo "example: scripts/package-release.sh 1.0.0-rc.1" >&2
 }
 
 run() {
@@ -33,7 +33,7 @@ OUT_DIR="${2:-$ROOT/zig-out/release}"
 MANIFEST_VERSION="$(sed -n 's/^[[:space:]]*\.version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/build.zig.zon" | head -n 1)"
 DRY_RUN="${ZOVA_PACKAGE_RELEASE_DRY_RUN:-0}"
 
-if ! printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+if ! printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-rc\.(0|[1-9][0-9]*))?$'; then
     echo "invalid version: $1" >&2
     usage
     exit 2

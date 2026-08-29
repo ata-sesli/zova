@@ -181,7 +181,7 @@ static void make_dyn_test_bundle(const char *library_path, const char *bundle_pa
         "  \"name\": \"dyn_test\",\n"
         "  \"version\": \"0.1.0\",\n"
         "  \"storage_prefix\": \"_zova_ext_dyn_test_\",\n"
-        "  \"zova_abi_min\": \"0.21.0\",\n"
+        "  \"zova_abi_min\": \"1.0.0\",\n"
         "  \"capabilities\": \"sql,dynamic-test\",\n"
         "  \"library\": \"libdyn_test\"\n"
         "}\n",
@@ -1670,7 +1670,7 @@ static void run_dynamic_extension_bundle_smoke(
         "  \"name\": \"dyn_test\",\n"
         "  \"version\": \"0.1.1\",\n"
         "  \"storage_prefix\": \"_zova_ext_dyn_test_\",\n"
-        "  \"zova_abi_min\": \"0.21.0\",\n"
+        "  \"zova_abi_min\": \"1.0.0\",\n"
         "  \"capabilities\": \"sql,dynamic-test\",\n"
         "  \"library\": \"libdyn_test\"\n"
         "}\n",

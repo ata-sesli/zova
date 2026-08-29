@@ -59,7 +59,7 @@ flowchart LR
 After the Go module tag is pushed, applications can add the binding with:
 
 ```sh
-go get github.com/ata-sesli/zova/bindings/go@v0.26.1
+go get github.com/ata-sesli/zova/bindings/go@v1.0.0-rc.1
 ```
 
 Import it as:
@@ -79,10 +79,10 @@ migrated forward with the package-level `ProbeFormat(path)` and
 explicit, copy-forward, publishes a separately validated format-11 destination,
 and never mutates the source.
 
-The v0.25 opaque-key graph, edge-payload, topology-scan, prepared-build, and
-generic fresh-build session APIs are low-level C/raw `zova-sys` surfaces. The
-Go package continues to expose the established graph CRUD and traversal API and
-does not yet wrap those publication APIs.
+Opaque-key graph, edge-payload, topology-scan, prepared-build, and generic
+fresh-build session APIs are supported low-level C/raw `zova-sys` surfaces.
+The Go package deliberately exposes the established graph CRUD and traversal
+API instead of those specialized publication surfaces.
 
 ## Build Requirements
 
@@ -165,14 +165,14 @@ Because this module lives in the `bindings/go` subdirectory, the release tag
 must include that subdirectory prefix:
 
 ```sh
-git tag -a bindings/go/v0.26.1 -m "Zova Go bindings v0.26.1"
-git push origin bindings/go/v0.26.1
+git tag -a bindings/go/v1.0.0-rc.1 -m "Zova Go bindings v1.0.0-rc.1"
+git push origin bindings/go/v1.0.0-rc.1
 ```
 
 After pushing the tag, ask the public Go module proxy to resolve it:
 
 ```sh
-GOPROXY=proxy.golang.org go list -m github.com/ata-sesli/zova/bindings/go@v0.26.1
+GOPROXY=proxy.golang.org go list -m github.com/ata-sesli/zova/bindings/go@v1.0.0-rc.1
 ```
 
 The module path is:

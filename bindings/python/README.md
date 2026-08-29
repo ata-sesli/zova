@@ -68,10 +68,10 @@ migrated forward with the module-level `probe_format(path)` and
 explicit, copy-forward, publishes a separately validated format-11 destination,
 and never mutates the source.
 
-The v0.25 opaque-key graph, edge-payload, topology-scan, prepared-build, and
-generic fresh-build session APIs are low-level C/raw `zova-sys` surfaces. The
-Python package continues to expose the established graph CRUD and traversal API
-and does not yet wrap those publication APIs.
+Opaque-key graph, edge-payload, topology-scan, prepared-build, and generic
+fresh-build session APIs are supported low-level C/raw `zova-sys` surfaces.
+The Python package deliberately exposes the established graph CRUD and
+traversal API instead of those specialized publication surfaces.
 
 ## Local Development
 
@@ -85,7 +85,8 @@ uv run --isolated --with pytest python -m pytest
 The native build uses maturin, Cargo, and the Rust `zova` crate. Users do not
 need to locate a shared C library manually.
 
-The Python API is pre-1.0 and may still change alongside the Rust binding.
+The Python API is part of the candidate 1.x contract described in
+`../../API_STABILITY.md`.
 
 ## What It Covers
 

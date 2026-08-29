@@ -2313,7 +2313,17 @@ fn dynamicLibraryFileName(allocator: std.mem.Allocator, name: []const u8) ![]u8 
     };
 }
 
+fn extensionAbiMinimum(buffer: *[32]u8) []const u8 {
+    return std.fmt.bufPrint(buffer, "{d}.{d}.{d}", .{
+        zova.version.abi_version_major,
+        zova.version.abi_version_minor,
+        zova.version.abi_version_patch,
+    }) catch unreachable;
+}
+
 fn scaffoldExtensionManifest(allocator: std.mem.Allocator, name: []const u8, version: []const u8, storage_prefix: []const u8, library: []const u8) ![]u8 {
+    var abi_buffer: [32]u8 = undefined;
+    const abi_minimum = extensionAbiMinimum(&abi_buffer);
     return std.fmt.allocPrint(allocator,
         \\{{
         \\  "name": "{s}",
@@ -2324,10 +2334,12 @@ fn scaffoldExtensionManifest(allocator: std.mem.Allocator, name: []const u8, ver
         \\  "library": "{s}"
         \\}}
         \\
-    , .{ name, version, storage_prefix, package_version, library });
+    , .{ name, version, storage_prefix, abi_minimum, library });
 }
 
 fn scaffoldExtensionSource(allocator: std.mem.Allocator, name: []const u8, version: []const u8, storage_prefix: []const u8) ![]u8 {
+    var abi_buffer: [32]u8 = undefined;
+    const abi_minimum = extensionAbiMinimum(&abi_buffer);
     return std.fmt.allocPrint(allocator,
         \\const zova = @import("zova");
         \\
@@ -2363,7 +2375,7 @@ fn scaffoldExtensionSource(allocator: std.mem.Allocator, name: []const u8, versi
         \\fn drop(_: *zova.sqlite.Database, _: zova.ExtensionManifest) HookError!void {{
         \\}}
         \\
-    , .{ name, version, storage_prefix, package_version, name });
+    , .{ name, version, storage_prefix, abi_minimum, name });
 }
 
 fn isValidExtensionScaffoldName(name: []const u8) bool {

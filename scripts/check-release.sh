@@ -21,6 +21,10 @@ if [ -z "$RUST_WORKSPACE_VERSION" ]; then
     echo "could not read version from bindings/rust/Cargo.toml" >&2
     exit 1
 fi
+PYTHON_DISTRIBUTION_VERSION="$MANIFEST_VERSION"
+case "$MANIFEST_VERSION" in
+    *-rc.*) PYTHON_DISTRIBUTION_VERSION="${MANIFEST_VERSION%%-rc.*}rc${MANIFEST_VERSION##*-rc.}" ;;
+esac
 
 TMP="${TMPDIR:-/tmp}/zova-check-release.$$"
 CARGO_TARGET_REPO="$TMP/cargo-target/repo"
@@ -86,12 +90,13 @@ CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" cargo test --manifest-path bindings/pyt
 CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" uv run --isolated --with maturin --with pytest --directory bindings/python maturin develop
 uv run --isolated --with pytest --directory bindings/python python -m pytest
 mkdir -p "$PY_WHEEL_REPO"
+CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" uv run --isolated --with maturin --directory bindings/python maturin build --out "$PY_WHEEL_REPO"
 CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" uv run --isolated --with maturin --directory bindings/python maturin build --sdist --out "$PY_WHEEL_REPO"
-if ! find "$PY_WHEEL_REPO" -name "zova-$MANIFEST_VERSION-*.whl" | grep -q .; then
+if ! find "$PY_WHEEL_REPO" -name "zova-$PYTHON_DISTRIBUTION_VERSION-*.whl" | grep -q .; then
     echo "Python release artifacts are missing a wheel" >&2
     exit 1
 fi
-if [ ! -f "$PY_WHEEL_REPO/zova-$MANIFEST_VERSION.tar.gz" ]; then
+if [ ! -f "$PY_WHEEL_REPO/zova-$PYTHON_DISTRIBUTION_VERSION.tar.gz" ]; then
     echo "Python release artifacts are missing an sdist" >&2
     exit 1
 fi

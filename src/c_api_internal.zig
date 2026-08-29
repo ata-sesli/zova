@@ -8,8 +8,8 @@
 //! - `include/zova.h` documents what C/Rust/foreign callers may rely on.
 //! - this file documents the bridge decisions maintainers must preserve.
 //!
-//! The C ABI is pre-1.0. It is still designed as if consumers will generate
-//! bindings from it: stable numeric statuses, opaque handles, explicit free
+//! The C ABI is the candidate 1.x contract. Consumers may generate bindings
+//! from it: stable numeric statuses, opaque handles, explicit free
 //! functions, no global mutable error state, and `zova_`-prefixed symbols.
 //!
 //! Exported functions should never let Zig implementation details escape. Convert
@@ -10753,7 +10753,7 @@ test "c abi manages bundled extension lifecycle" {
     try std.testing.expectEqualStrings("trgm", info.name.?[0..info.name_len]);
     try std.testing.expectEqualStrings("0.1.0", info.version.?[0..info.version_len]);
     try std.testing.expectEqualStrings("_zova_ext_trgm_", info.storage_prefix.?[0..info.storage_prefix_len]);
-    try std.testing.expectEqualStrings("0.21.0", info.zova_abi_min.?[0..info.zova_abi_min_len]);
+    try std.testing.expectEqualStrings("1.0.0", info.zova_abi_min.?[0..info.zova_abi_min_len]);
     try std.testing.expectEqualStrings("sql,trgm", info.capabilities.?[0..info.capabilities_len]);
     try std.testing.expectEqual(@as(u8, 1), info.required);
 

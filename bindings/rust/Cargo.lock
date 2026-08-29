@@ -4,11 +4,11 @@ version = 3
 
 [[package]]
 name = "zova"
-version = "0.26.1"
+version = "1.0.0-rc.1"
 dependencies = [
  "zova-sys",
 ]
 
 [[package]]
 name = "zova-sys"
-version = "0.26.1"
+version = "1.0.0-rc.1"

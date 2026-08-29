@@ -16,8 +16,8 @@ in another.
 
 | Version | Meaning | Declared in | Current |
 | --- | --- | --- | --- |
-| Package version | Zova release identity across every distribution channel | `src/version.zig` `package_version` | `0.26.1` |
-| C ABI version | Compatibility of the exported C ABI and generated C | `src/version.zig` `abi_version_*` | `0.26.1` |
+| Package version | Zova release identity across every distribution channel | `src/version.zig` `package_version` | `1.0.0-rc.1` |
+| C ABI version | Compatibility of the exported C ABI and generated C | `src/version.zig` `abi_version_*` | `1.0.0-rc.1` (`1.0.0` numeric components) |
 | SQLite version | The vendored SQLite amalgamation, and separately SQLite's own file format | `src/version.zig` `sqlite_version` | `3.53.4` |
 | Zova storage format | The layout of a `.zova` database, recorded in `_zova_meta.format_version` | `src/version.zig` `format_version` | `11` |
 
@@ -29,8 +29,10 @@ format either. Only `format_version` describes what a `.zova` file contains.
 
 - Every Zova 1.x release can migrate databases created by every earlier 1.x
   release.
-- Format 9 is the only pre-1.0 format guaranteed a direct migration into 1.0.
+- Format 9 is the only pre-1.0 format guaranteed a migration into 1.0.
   Databases created by released Zova 0.26.1 use format 9.
+- Migration follows registered adjacent steps. The first RC therefore migrates
+  format 9 through 9 → 10 → 11 and format 10 through 10 → 11.
 - Formats older than 9 are unsupported legacy. They are rejected, not migrated.
 - Downgrades are unsupported. No release migrates a database backward, and no
   release promises to open a format newer than itself.

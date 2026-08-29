@@ -93,7 +93,12 @@ jobs:
       - run: sh bindings/python/tools/check-rust-source.sh
       - run: uv run --isolated --with maturin --directory bindings/python maturin build --out "${{ github.workspace }}/zig-out/python-artifacts"
       - run: |
-          uv run --isolated --with pytest --with "$(find zig-out/python-artifacts -name 'zova-${{ inputs.version }}-*.whl' | head -n 1)" python - <<'PY'
+          version="${{ inputs.version }}"
+          python_version="$version"
+          case "$version" in
+            *-rc.*) python_version="${version%%-rc.*}rc${version##*-rc.}" ;;
+          esac
+          uv run --isolated --with pytest --with "$(find zig-out/python-artifacts -name "zova-${python_version}-*.whl" | head -n 1)" python - <<'PY'
           import tempfile
           from pathlib import Path
           import zova

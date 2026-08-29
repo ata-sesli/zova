@@ -62,7 +62,15 @@ minimum_zig_version="$(read_zig_string minimum_zig_version)"
 [ -n "$minimum_zig_version" ] || fail "missing src/version.zig minimum_zig_version"
 
 expect_value "package ABI version" "$package_version" "$abi_version_string"
-expect_value "ABI numeric string" "$abi_major.$abi_minor.$abi_patch" "$abi_version_string"
+package_core="${package_version%%-*}"
+expect_value "ABI numeric string" "$abi_major.$abi_minor.$abi_patch" "$package_core"
+
+python_version="$package_version"
+case "$package_version" in
+    *-rc.*)
+        python_version="${package_version%%-rc.*}rc${package_version##*-rc.}"
+        ;;
+esac
 
 manifest_version="$(sed -n 's/^[[:space:]]*\.version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/build.zig.zon" | head -n 1)"
 manifest_min_zig="$(sed -n 's/^[[:space:]]*\.minimum_zig_version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/build.zig.zon" | head -n 1)"
@@ -81,10 +89,13 @@ expect_contains "$ROOT/src/cli.zig" 'zova.version.format_version'
 expect_contains "$ROOT/src/cli.zig" 'zova.version.sqlite_version'
 expect_contains "$ROOT/tests/cli.zig" 'zova.version.sqlite_version'
 expect_contains "$ROOT/scripts/update-generated-c.sh" 'sqlite_version'
-expect_contains "$ROOT/include/zova.h" "Zova C ABI, v${abi_version_string} pre-1.0."
+expect_contains "$ROOT/include/zova.h" "Zova C ABI, v${abi_version_string}."
 
 expect_contains "$ROOT/README.md" "Current package version: \`${package_version}\`."
 expect_contains "$ROOT/README.md" "format_version\` is \`${format_version}\`"
+expect_contains "$ROOT/API_STABILITY.md" "\`${package_version}\` release"
+expect_contains "$ROOT/.github/release-notes/v${package_version}.md" "Zova ${package_version}"
+expect_contains "$ROOT/examples/zig_bridge/bridge.zig" ".zova_abi_min = \"${package_core}\""
 expect_contains "$ROOT/README.md" "zova = \"${package_version}\""
 expect_contains "$ROOT/README.md" "zova-sys = \"${package_version}\""
 expect_contains "$ROOT/README.md" "bindings/go@v${package_version}"
@@ -114,12 +125,12 @@ expect_contains "$ROOT/bindings/go/go.mod" "module github.com/ata-sesli/zova/bin
 expect_contains "$ROOT/bindings/go/zova_test.go" "got != \"${abi_version_string}\""
 expect_contains "$ROOT/bindings/go/zova_test.go" "major != ${abi_major} || minor != ${abi_minor} || patch != ${abi_patch}"
 
-expect_contains "$ROOT/bindings/python/pyproject.toml" "version = \"${package_version}\""
+expect_contains "$ROOT/bindings/python/pyproject.toml" "version = \"${python_version}\""
 expect_contains "$ROOT/bindings/python/pyproject.toml" "Repository = \"https://github.com/ata-sesli/zova\""
 expect_contains "$ROOT/bindings/python/Cargo.toml" "version = \"${package_version}\""
 expect_contains "$ROOT/bindings/python/Cargo.toml" "zova\", version = \"${package_version}\""
-expect_contains "$ROOT/bindings/python/python/zova/__init__.py" "__version__ = \"${package_version}\""
-expect_contains "$ROOT/bindings/python/tests/test_lifecycle.py" "zova.__version__ == \"${package_version}\""
+expect_contains "$ROOT/bindings/python/python/zova/__init__.py" "__version__ = \"${python_version}\""
+expect_contains "$ROOT/bindings/python/tests/test_lifecycle.py" "zova.__version__ == \"${python_version}\""
 expect_contains "$ROOT/bindings/python/rust/zova/Cargo.toml" "version = \"${package_version}\""
 expect_contains "$ROOT/bindings/python/rust/zova/Cargo.toml" "zova-sys = { version = \"${package_version}\""
 expect_contains "$ROOT/bindings/python/rust/zova-sys/Cargo.toml" "version = \"${package_version}\""
@@ -153,6 +164,10 @@ expect_contains "$ROOT/bindings/javascript/tests/runtime-smoke.cjs" "assert.equa
 expect_contains "$ROOT/bindings/javascript/tests/runtime-smoke.cjs" "assert.equal(abiVersion, \"${abi_version_string}\")"
 expect_contains "$ROOT/.github/workflows/publish-release.yml" "id-token: write"
 expect_contains "$ROOT/.github/workflows/publish-release.yml" "npm install --global npm@11"
+expect_contains "$ROOT/.github/workflows/publish-release.yml" 'release_flags="--prerelease --latest=false"'
+expect_contains "$ROOT/.github/workflows/publish-release.yml" 'npm_tag="next"'
+expect_contains "$ROOT/.github/workflows/publish-release.yml" 'npm publish "$tarball" --access public --tag "$npm_tag"'
+expect_contains "$ROOT/.github/workflows/release-artifacts.yml" 'python_version="${version%%-rc.*}rc${version##*-rc.}"'
 expect_not_contains "$ROOT/.github/workflows/publish-release.yml" "NODE_AUTH_TOKEN"
 
 echo "version check ok: ${package_version}"

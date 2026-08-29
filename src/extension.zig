@@ -631,7 +631,23 @@ fn ensureManifestMatchesInstalled(manifest: Manifest, installed: InstalledInfo) 
     if (!std.mem.eql(u8, manifest.name, installed.name)) return error.ExtensionInvalid;
     if (!std.mem.eql(u8, manifest.version, installed.version)) return error.ExtensionIncompatible;
     if (!std.mem.eql(u8, manifest.storage_prefix, installed.storage_prefix)) return error.ExtensionInvalid;
-    if (!std.mem.eql(u8, manifest.zova_abi_min, installed.zova_abi_min)) return error.ExtensionIncompatible;
+    if (!abiMinimumMatchesInstalled(manifest.zova_abi_min, installed.zova_abi_min)) return error.ExtensionIncompatible;
+}
+
+fn abiMinimumMatchesInstalled(current: []const u8, installed: []const u8) bool {
+    if (std.mem.eql(u8, current, installed)) return true;
+
+    // Format-9/10/11 databases can retain extension metadata written by the
+    // pre-1.0 host. The trusted registry supplies the code that is actually
+    // loaded and declares its current 1.0.0 compatibility; accepting the old
+    // stored minimum preserves those databases without accepting 0.x code as
+    // compatible with the 1.x runtime.
+    const current_version = parseAbiVersion(current) catch return false;
+    const installed_version = parseAbiVersion(installed) catch return false;
+    return current_version.major == 1 and
+        current_version.minor == 0 and
+        current_version.patch == 0 and
+        installed_version.major == 0;
 }
 
 fn hasReservedZovaPrefix(name: []const u8) bool {

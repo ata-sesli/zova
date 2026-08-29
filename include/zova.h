@@ -5,9 +5,9 @@
 #include <stdint.h>
 
 /*
- * Zova C ABI, v0.26.1 pre-1.0.
+ * Zova C ABI, v1.0.0-rc.1.
  *
- * This header exposes a C-compatible object and vector API over Zova's Zig
+ * This release-candidate header exposes a C-compatible API over Zova's Zig
  * implementation. The ABI is intentionally conservative: opaque handles,
  * request structs, fixed-size ids, explicit status codes, and caller-visible
  * ownership rules.
@@ -89,7 +89,7 @@ enum {
     ZOVA_FRESH_VALUE_BLOB = 4
 };
 
-/* Stable status values for the pre-1.0 ABI surface. */
+/* Stable status values for the 1.x ABI surface. */
 typedef enum zova_status {
     ZOVA_OK = 0,
     ZOVA_INVALID_ARGUMENT = 1,

@@ -94,9 +94,9 @@ The synchronous `Database` facade exposes:
 - public graph CRUD, atomic batches, neighbors, degree, and walks
 - bundled extension install/list/info/check/drop
 
-The advanced opaque-key, graph-scan, edge-payload, and fresh-build APIs remain
-available through Zova's C ABI and raw `zova-sys`; they are intentionally
-deferred from the JavaScript package.
+The advanced opaque-key, graph-scan, edge-payload, and fresh-build APIs are
+supported low-level C ABI/raw `zova-sys` surfaces. They are an intentional
+binding boundary and are not part of the JavaScript package's 1.x contract.
 
 ## Queued async work
 
