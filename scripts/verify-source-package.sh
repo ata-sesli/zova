@@ -62,6 +62,10 @@ if [ -z "$VERSION" ]; then
     echo "could not read source package version from build.zig.zon" >&2
     exit 1
 fi
+PYTHON_DISTRIBUTION_VERSION="$VERSION"
+case "$VERSION" in
+    *-rc.*) PYTHON_DISTRIBUTION_VERSION="${VERSION%%-rc.*}rc${VERSION##*-rc.}" ;;
+esac
 
 if [ -e zig-out ]; then
     echo "source package must not contain compiled Zig artifacts" >&2
@@ -127,11 +131,11 @@ CARGO_TARGET_DIR="$PY_CARGO_TARGET_VERIFY" cargo fmt --manifest-path bindings/py
 CARGO_TARGET_DIR="$PY_CARGO_TARGET_VERIFY" cargo check --manifest-path bindings/python/Cargo.toml
 mkdir -p "$PY_WHEEL_VERIFY"
 CARGO_TARGET_DIR="$PY_CARGO_TARGET_VERIFY" uv run --isolated --with maturin --directory bindings/python maturin build --sdist --out "$PY_WHEEL_VERIFY"
-if ! find "$PY_WHEEL_VERIFY" -name "zova-$VERSION-*.whl" | grep -q .; then
+if ! find "$PY_WHEEL_VERIFY" -name "zova-$PYTHON_DISTRIBUTION_VERSION-*.whl" | grep -q .; then
     echo "Python source package verification is missing a wheel" >&2
     exit 1
 fi
-if [ ! -f "$PY_WHEEL_VERIFY/zova-$VERSION.tar.gz" ]; then
+if [ ! -f "$PY_WHEEL_VERIFY/zova-$PYTHON_DISTRIBUTION_VERSION.tar.gz" ]; then
     echo "Python source package verification is missing an sdist" >&2
     exit 1
 fi

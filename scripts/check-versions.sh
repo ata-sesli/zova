@@ -168,6 +168,8 @@ expect_contains "$ROOT/.github/workflows/publish-release.yml" 'release_flags="--
 expect_contains "$ROOT/.github/workflows/publish-release.yml" 'npm_tag="next"'
 expect_contains "$ROOT/.github/workflows/publish-release.yml" 'npm publish "$tarball" --access public --tag "$npm_tag"'
 expect_contains "$ROOT/.github/workflows/release-artifacts.yml" 'python_version="${version%%-rc.*}rc${version##*-rc.}"'
+expect_contains "$ROOT/scripts/verify-source-package.sh" 'PYTHON_DISTRIBUTION_VERSION="${VERSION%%-rc.*}rc${VERSION##*-rc.}"'
+expect_contains "$ROOT/scripts/verify-source-package.sh" 'zova-$PYTHON_DISTRIBUTION_VERSION-*.whl'
 expect_not_contains "$ROOT/.github/workflows/publish-release.yml" "NODE_AUTH_TOKEN"
 
 echo "version check ok: ${package_version}"
