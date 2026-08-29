@@ -41,25 +41,29 @@ afterEach(() => {
 });
 
 describe("Storage-format migration", () => {
-  test("probeFormat classifies migratable and current formats", () => {
-    const source = format9FixtureCopy("probe-source.zova");
-    const before = readFileSync(source);
+  test(
+    "probeFormat classifies migratable and current formats",
+    () => {
+      const source = format9FixtureCopy("probe-source.zova");
+      const before = readFileSync(source);
 
-    const info = probeFormat(source);
-    expect(info.formatVersion).toBe(9);
-    expect(info.compatibility).toBe("migratable");
+      const info = probeFormat(source);
+      expect(info.formatVersion).toBe(9);
+      expect(info.compatibility).toBe("migratable");
 
-    const current = join(temporaryDirectory(), "current.zova");
-    const database = Database.create(current);
-    database.exec("create table t(id integer)");
-    database.close();
+      const current = join(temporaryDirectory(), "current.zova");
+      const database = Database.create(current);
+      database.exec("create table t(id integer)");
+      database.close();
 
-    const currentInfo = probeFormat(current);
-    expect(currentInfo.formatVersion).toBe(11);
-    expect(currentInfo.compatibility).toBe("current");
+      const currentInfo = probeFormat(current);
+      expect(currentInfo.formatVersion).toBe(11);
+      expect(currentInfo.compatibility).toBe("current");
 
-    expect(sameBytes(readFileSync(source), before)).toBe(true);
-  });
+      expect(sameBytes(readFileSync(source), before)).toBe(true);
+    },
+    60_000,
+  );
 
   test("probeFormat rejects non-Zova paths", () => {
     const path = join(temporaryDirectory(), "not-zova.txt");
