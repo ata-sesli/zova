@@ -148,7 +148,7 @@ Minimum tool versions used by the project:
 | Python | `3.10` or newer |
 | Node.js | `22.13` or newer in the Node 22 line, or Node 24 |
 | Bun | current blocking CI release |
-| SQLite | vendored `3.53.2` |
+| SQLite | vendored `3.53.4` |
 
 ## Quick Start
 
@@ -1389,4 +1389,4 @@ The Go module tag is created by the protected publish workflow.
 
 Zova is MIT licensed. See `LICENSE`.
 
-SQLite is vendored in `vendor/sqlite3.53.2` and is public domain.
+SQLite is vendored in `vendor/sqlite3.53.4` and is public domain.

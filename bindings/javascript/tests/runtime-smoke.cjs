@@ -10,4 +10,4 @@ const {
 assert.equal(packageVersion, "0.26.1");
 assert.equal(abiVersion, "0.26.1");
 assert.equal(formatVersion, "11");
-assert.equal(sqliteVersion, "3.53.2");
+assert.equal(sqliteVersion, "3.53.4");
