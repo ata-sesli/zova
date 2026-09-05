@@ -63,6 +63,8 @@ fn receiveAll(sub: *zova.NotificationSubscription) !void {
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
+    const args = try init.minimal.args.toSlice(allocator);
+    if (args.len == 2 and std.mem.eql(u8, args[1], "queue")) return queueBenchmark();
 
     std.debug.print("seed=0x{x} zig={s} sqlite={s} queue_capacity={d} events_per_iteration={d} kv_batch_entries={d}\n", .{
         seed,
@@ -205,5 +207,47 @@ pub fn main(init: std.process.Init) !void {
             if (index >= warmups) samples_slice[index - warmups] = elapsedMs(start);
         }
         printDistribution("notify_256_overflow_drop_oldest", &samples_slice);
+    }
+}
+
+// Bounded queue-only mode: no KV workload or durable transactions. Each line
+// reports the mean of 32 bursts, with enqueue and drain timed separately.
+fn queueBenchmark() !void {
+    const rounds = 32;
+    for ([_]usize{ 1, 16, 256, 1024, 2048 }) |depth| {
+        var counter = std.testing.FailingAllocator.init(std.heap.c_allocator, .{});
+        var db = try zova.Database.createMemory();
+        defer db.deinit();
+        // The newly initialized hub owns no subscription/scope allocations yet.
+        std.debug.assert(db.notifications.subscriptions.items.len == 0 and db.notifications.scopes.items.len == 0);
+        db.notifications.allocator = counter.allocator();
+        var sub = try db.listen("bench:queue");
+        defer sub.deinit();
+        var enqueue_ns: i128 = 0;
+        var drain_ns: i128 = 0;
+        const before = counter.allocations;
+        const retained = @min(depth, queue_capacity);
+        for (0..rounds) |round| {
+            var start = now();
+            for (0..depth) |_| try db.notify("bench:queue", "event");
+            enqueue_ns += start.durationTo(now()).toNanoseconds();
+            start = now();
+            for (0..retained) |index| {
+                var note = (try sub.tryReceive(counter.allocator())) orelse return error.MissingNotification;
+                defer note.deinit(counter.allocator());
+                if (note.sequence != round * depth + depth - retained + index + 1 or
+                    note.dropped_before != (if (index == 0) depth - retained else @as(usize, 0)) or
+                    !std.mem.eql(u8, note.payload, "event")) return error.BadNotification;
+            }
+            drain_ns += start.durationTo(now()).toNanoseconds();
+            if (try sub.tryReceive(counter.allocator()) != null) return error.ExtraNotification;
+        }
+        std.debug.print("depth={d} enqueue_us={d:.6} drain_us={d:.6} allocations={d} retained_bytes={d}\n", .{
+            depth,
+            @as(f64, @floatFromInt(enqueue_ns)) / rounds / 1000,
+            @as(f64, @floatFromInt(drain_ns)) / rounds / 1000,
+            counter.allocations - before,
+            counter.allocated_bytes - counter.freed_bytes,
+        });
     }
 }
