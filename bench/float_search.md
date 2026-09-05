@@ -2,6 +2,10 @@
 
 ## Status
 
+**Update:** the [same-process wall/CPU experiment](float_tail.md) did not reproduce
+the two regressions; both cases improve in every paired trial. The observations
+below are retained as historical evidence, not the current acceptance verdict.
+
 See [the buffered follow-up](float_search_followup.md) for the newer focused and
 full-matrix investigation. The data below retains the original harness results.
 
