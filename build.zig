@@ -179,6 +179,18 @@ pub fn build(b: *std.Build) void {
     const install_kv_benchmark = b.addInstallArtifact(kv_benchmark, .{});
     b.step("build-kv-calls", "Build bounded single-call KV benchmark").dependOn(&install_kv_benchmark.step);
 
+    const float_benchmark = b.addExecutable(.{
+        .name = "zova_float_search_benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/float_search.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    float_benchmark.root_module.addImport("zova", zova_module);
+    const install_float_benchmark = b.addInstallArtifact(float_benchmark, .{});
+    b.step("build-float-search", "Build bounded floating-point search benchmark").dependOn(&install_float_benchmark.step);
+
     const walk_benchmark = b.addExecutable(.{
         .name = "zova_walk_keys_benchmark",
         .root_module = b.createModule(.{
