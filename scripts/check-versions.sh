@@ -127,8 +127,16 @@ expect_contains "$ROOT/bindings/go/zova_test.go" "major != ${abi_major} || minor
 
 expect_contains "$ROOT/bindings/python/pyproject.toml" "version = \"${python_version}\""
 expect_contains "$ROOT/bindings/python/pyproject.toml" "Repository = \"https://github.com/ata-sesli/zova\""
+expect_contains "$ROOT/bindings/python/pyproject.toml" 'requires-python = ">=3.13"'
+expect_contains "$ROOT/bindings/python/pyproject.toml" 'Programming Language :: Python :: 3.13'
+expect_contains "$ROOT/bindings/python/pyproject.toml" 'Programming Language :: Python :: 3.14'
+expect_not_contains "$ROOT/bindings/python/pyproject.toml" 'Programming Language :: Python :: 3.10'
+expect_not_contains "$ROOT/bindings/python/pyproject.toml" 'Programming Language :: Python :: 3.11'
+expect_not_contains "$ROOT/bindings/python/pyproject.toml" 'Programming Language :: Python :: 3.12'
+expect_not_contains "$ROOT/bindings/python/pyproject.toml" 'format = "sdist"'
 expect_contains "$ROOT/bindings/python/Cargo.toml" "version = \"${package_version}\""
 expect_contains "$ROOT/bindings/python/Cargo.toml" "zova\", version = \"${package_version}\""
+expect_contains "$ROOT/bindings/python/Cargo.toml" 'features = ["extension-module", "abi3-py313"]'
 expect_contains "$ROOT/bindings/python/python/zova/__init__.py" "__version__ = \"${python_version}\""
 expect_contains "$ROOT/bindings/python/tests/test_lifecycle.py" "zova.__version__ == \"${python_version}\""
 expect_contains "$ROOT/bindings/python/rust/zova/Cargo.toml" "version = \"${package_version}\""
@@ -168,8 +176,20 @@ expect_contains "$ROOT/.github/workflows/publish-release.yml" 'release_flags="--
 expect_contains "$ROOT/.github/workflows/publish-release.yml" 'npm_tag="next"'
 expect_contains "$ROOT/.github/workflows/publish-release.yml" 'npm publish "$tarball" --access public --tag "$npm_tag"'
 expect_contains "$ROOT/.github/workflows/release-artifacts.yml" 'python_version="${version%%-rc.*}rc${version##*-rc.}"'
+expect_contains "$ROOT/.github/workflows/ci.yml" 'python-version: ["3.13", "3.14"]'
+expect_not_contains "$ROOT/.github/workflows/release-artifacts.yml" 'python-sdist:'
+expect_not_contains "$ROOT/.github/workflows/release-artifacts.yml" 'maturin build --sdist'
+expect_contains "$ROOT/.github/workflows/release-artifacts.yml" 'manylinux: 2_28'
+expect_contains "$ROOT/.github/workflows/release-artifacts.yml" 'maturin-version: v1.15.0'
+expect_contains "$ROOT/.github/workflows/release-artifacts.yml" 'quay.io/pypa/manylinux_2_28_aarch64:latest'
+expect_not_contains "$ROOT/.github/workflows/publish-release.yml" 'zova-${python_version}.tar.gz'
+expect_contains "$ROOT/.github/workflows/publish-release.yml" 'expected_wheel_count=4'
+expect_not_contains "$ROOT/scripts/check-release.sh" 'maturin build --sdist'
+expect_not_contains "$ROOT/scripts/distribute-release.sh" 'maturin build --sdist'
+expect_not_contains "$ROOT/scripts/distribute-release.sh" 'release_python_package'
+expect_not_contains "$ROOT/scripts/verify-source-package.sh" 'maturin build --sdist'
 expect_contains "$ROOT/scripts/verify-source-package.sh" 'PYTHON_DISTRIBUTION_VERSION="${VERSION%%-rc.*}rc${VERSION##*-rc.}"'
-expect_contains "$ROOT/scripts/verify-source-package.sh" 'zova-$PYTHON_DISTRIBUTION_VERSION-*.whl'
+expect_contains "$ROOT/scripts/verify-source-package.sh" 'zova-$PYTHON_DISTRIBUTION_VERSION-cp313-abi3-*.whl'
 expect_not_contains "$ROOT/.github/workflows/publish-release.yml" "NODE_AUTH_TOKEN"
 
 echo "version check ok: ${package_version}"

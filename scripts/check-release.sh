@@ -91,13 +91,8 @@ CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" uv run --isolated --with maturin --with
 uv run --isolated --with pytest --directory bindings/python python -m pytest
 mkdir -p "$PY_WHEEL_REPO"
 CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" uv run --isolated --with maturin --directory bindings/python maturin build --out "$PY_WHEEL_REPO"
-CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" uv run --isolated --with maturin --directory bindings/python maturin build --sdist --out "$PY_WHEEL_REPO"
-if ! find "$PY_WHEEL_REPO" -name "zova-$PYTHON_DISTRIBUTION_VERSION-*.whl" | grep -q .; then
-    echo "Python release artifacts are missing a wheel" >&2
-    exit 1
-fi
-if [ ! -f "$PY_WHEEL_REPO/zova-$PYTHON_DISTRIBUTION_VERSION.tar.gz" ]; then
-    echo "Python release artifacts are missing an sdist" >&2
+if ! find "$PY_WHEEL_REPO" -name "zova-$PYTHON_DISTRIBUTION_VERSION-cp313-abi3-*.whl" | grep -q .; then
+    echo "Python release artifacts are missing a CPython 3.13 stable-ABI wheel" >&2
     exit 1
 fi
 rm -rf bindings/python/target bindings/python/.venv bindings/python/.pytest_cache bindings/python/dist

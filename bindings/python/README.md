@@ -53,13 +53,15 @@ After the Python package is published to PyPI:
 python -m pip install zova
 ```
 
-The v0.25 Python package is backed by a PyO3 extension built through maturin and
-Cargo. Users need Python 3.10 or newer. Published wheels do not require Rust,
-Cargo, Zig, or a local C compiler; sdist fallback builds need Rust/Cargo and a C
-compiler/linker. Zig is only needed when developing Zova itself or regenerating
-the bundled native snapshot.
+The Python package is backed by a PyO3 extension built through maturin and
+Cargo. Users need Python 3.13 or newer; CPython 3.13 and 3.14 are the tested
+runtime matrix. Linux wheels target glibc 2.28 or newer. Published stable-ABI
+wheels do not require Rust, Cargo, Zig, or a local C compiler. Zova does not
+publish a Python source distribution, so an unsupported platform or
+interpreter fails without attempting a native build.
 
-The v0.25 release workflow builds the documented Linux/macOS wheel matrix.
+The release workflow builds the documented Linux/macOS x86_64/arm64 wheel
+matrix.
 
 The current development build uses `.zova` format 11 and does not migrate older
 format databases in place. Format-9 and format-10 databases can be probed and

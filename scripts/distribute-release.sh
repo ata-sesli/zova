@@ -9,9 +9,9 @@ usage() {
 usage: scripts/distribute-release.sh <version> [--dry-run] [--yes]
 example: scripts/distribute-release.sh 0.20.0
 
-Publishes distribution channels in this order:
-  1. Rust crates: zova-sys, then zova
-  2. Python package artifacts to PyPI
+Publishes Rust crates in this order: zova-sys, then zova.
+Python wheels are published only by the Publish Release workflow so all
+supported platform wheels are uploaded together.
 
 Options:
   --dry-run  run publish dry-runs where supported and do not push/upload
@@ -104,29 +104,6 @@ release_rust_crates() {
     wait_for_crate zova
 }
 
-release_python_package() {
-    wheel_dir="$TMP/python-dist"
-    mkdir -p "$wheel_dir"
-
-    run sh bindings/python/tools/sync-rust-source.sh
-    run sh bindings/python/tools/check-rust-source.sh
-    run uv run --isolated --with maturin --directory bindings/python maturin build --out "$wheel_dir"
-    run uv run --isolated --with maturin --directory bindings/python maturin build --sdist --out "$wheel_dir"
-
-    if ! find "$wheel_dir" -name "zova-$PYTHON_DISTRIBUTION_VERSION-*.whl" | grep -q .; then
-        die "Python release artifacts are missing a wheel"
-    fi
-    if [ ! -f "$wheel_dir/zova-$PYTHON_DISTRIBUTION_VERSION.tar.gz" ]; then
-        die "Python release artifacts are missing an sdist"
-    fi
-
-    if [ "$DRY_RUN" -eq 1 ]; then
-        run uv publish --dry-run --check-url https://pypi.org/simple/ "$wheel_dir"/zova-"$PYTHON_DISTRIBUTION_VERSION"*
-    else
-        run uv publish --check-url https://pypi.org/simple/ "$wheel_dir"/zova-"$PYTHON_DISTRIBUTION_VERSION"*
-    fi
-}
-
 VERSION=""
 DRY_RUN=0
 YES=0
@@ -184,7 +161,6 @@ fi
 
 require_command git
 require_command cargo
-require_command uv
 
 if [ "$DRY_RUN" -eq 0 ] && [ -n "$(git status --porcelain)" ]; then
     echo "working tree is not clean; commit or stash changes before publishing distributions" >&2
@@ -200,7 +176,7 @@ trap cleanup EXIT INT TERM
 mkdir -p "$TMP"
 
 if [ "$DRY_RUN" -eq 0 ] && [ "$YES" -eq 0 ]; then
-    echo "This will publish Zova $VERSION to crates.io and PyPI."
+    echo "This will publish Zova $VERSION to crates.io."
     echo "Type 'release $VERSION' to continue:"
     read answer
     if [ "$answer" != "release $VERSION" ]; then
@@ -212,7 +188,6 @@ fi
 echo "==> Rust crates"
 release_rust_crates
 
-echo "==> Python package"
-release_python_package
+echo "Python wheels are published only by the Publish Release workflow so the complete platform matrix stays atomic."
 
 echo "distributed Zova $VERSION"
