@@ -199,10 +199,21 @@ const PreparedVectorQuery = struct {
     values: VectorValuesConst,
     cosine_query_norm: f64 = 0,
     cosine_query_length: f64 = 0,
+    float_values: ?[]f64 = null,
 
-    fn init(collection: CollectionMetadata, values: VectorValuesConst) Error!PreparedVectorQuery {
+    fn init(allocator: std.mem.Allocator, collection: CollectionMetadata, values: VectorValuesConst) Error!PreparedVectorQuery {
         if (vectorValuesElementType(values) != collection.element_type) return error.VectorInvalid;
         if (vectorValuesLen(values) != collection.dimensions) return error.VectorDimensionMismatch;
+
+        // Keep exact, generated-C-safe widening, but perform it once per query.
+        const float_values = if (collection.element_type != .i8)
+            try allocator.alloc(f64, collection.dimensions)
+        else
+            null;
+        errdefer if (float_values) |prepared| allocator.free(prepared);
+        if (float_values) |prepared| {
+            for (prepared, 0..) |*value, index| value.* = try inputValueAsF64(values, index);
+        }
 
         var cosine_query_norm: f64 = 0;
         switch (collection.metric) {
@@ -219,8 +230,7 @@ const PreparedVectorQuery = struct {
                     },
                     else => blk: {
                         var norm: f64 = 0;
-                        for (0..vectorValuesLen(values)) |index| {
-                            const value_f64 = try inputValueAsF64(values, index);
+                        for (float_values.?) |value_f64| {
                             norm += value_f64 * value_f64;
                         }
                         if (norm == 0) return error.VectorInvalid;
@@ -229,9 +239,7 @@ const PreparedVectorQuery = struct {
                 };
             },
             .l2, .dot => {
-                for (0..vectorValuesLen(values)) |index| {
-                    _ = try inputValueAsF64(values, index);
-                }
+                // Float inputs were validated while preparing; i8 is always finite.
             },
         }
 
@@ -247,7 +255,12 @@ const PreparedVectorQuery = struct {
             .values = values,
             .cosine_query_norm = cosine_query_norm,
             .cosine_query_length = cosine_query_length,
+            .float_values = float_values,
         };
+    }
+
+    fn deinit(self: PreparedVectorQuery, allocator: std.mem.Allocator) void {
+        if (self.float_values) |values| allocator.free(values);
     }
 
     fn distanceFromEncoded(self: PreparedVectorQuery, encoded_values: []const u8) Error!f64 {
@@ -256,6 +269,17 @@ const PreparedVectorQuery = struct {
 
     fn distanceFromEncodedWithStoredNorm(self: PreparedVectorQuery, encoded_values: []const u8, stored_norm_squared: ?f64) Error!f64 {
         if (encoded_values.len != vectorByteLen(self.element_type, self.dimensions)) return error.VectorCorrupt;
+
+        if (self.float_values) |values| {
+            // Specialize outside the dimension loop. Accumulation order remains
+            // scalar and strict: reassociating a SIMD reduction changes ties.
+            switch (self.element_type) {
+                inline .f32, .f16 => |element_type| switch (self.metric) {
+                    inline else => |metric| return floatDistancePrepared(element_type, metric, values, encoded_values, self.cosine_query_length),
+                },
+                .i8 => unreachable,
+            }
+        }
 
         return switch (self.metric) {
             .cosine => switch (self.values) {
@@ -633,7 +657,8 @@ pub const Database = struct {
     ) Error!VectorSearchResults {
         try validateVectorCollectionName(collection_name);
         const collection = try loadVectorCollection(self, collection_name);
-        const prepared_query = try PreparedVectorQuery.init(collection, query);
+        const prepared_query = try PreparedVectorQuery.init(allocator, collection, query);
+        defer prepared_query.deinit(allocator);
 
         return self.searchAllVectors(allocator, collection_name, collection, prepared_query, limit, null, null);
     }
@@ -659,7 +684,8 @@ pub const Database = struct {
         if (options.queries.len == 0) return error.VectorInvalid;
         try queries.ensureTotalCapacity(allocator, options.queries.len);
         for (options.queries) |query| {
-            const prepared = try PreparedVectorQuery.init(collection, .{ .i8 = query });
+            const prepared = try PreparedVectorQuery.init(allocator, collection, .{ .i8 = query });
+            defer prepared.deinit(allocator);
             queries.appendAssumeCapacity(.{ .values = query, .length = prepared.cosine_query_length });
         }
 
@@ -697,7 +723,8 @@ pub const Database = struct {
     ) Error!VectorSearchResults {
         try validateVectorCollectionName(collection_name);
         const collection = try loadVectorCollection(self, collection_name);
-        const prepared_query = try PreparedVectorQuery.init(collection, query);
+        const prepared_query = try PreparedVectorQuery.init(allocator, collection, query);
+        defer prepared_query.deinit(allocator);
         try validateVectorSearchThreshold(max_distance);
 
         return self.searchAllVectors(allocator, collection_name, collection, prepared_query, limit, max_distance, null);
@@ -720,7 +747,8 @@ pub const Database = struct {
     ) Error!VectorSearchResults {
         try validateVectorCollectionName(collection_name);
         const collection = try loadVectorCollection(self, collection_name);
-        const prepared_query = try PreparedVectorQuery.init(collection, query);
+        const prepared_query = try PreparedVectorQuery.init(allocator, collection, query);
+        defer prepared_query.deinit(allocator);
 
         return self.searchCandidateVectors(allocator, collection_name, collection, prepared_query, candidate_ids, limit, null, null);
     }
@@ -737,7 +765,8 @@ pub const Database = struct {
     ) Error!VectorSearchResults {
         try validateVectorCollectionName(collection_name);
         const collection = try loadVectorCollection(self, collection_name);
-        const prepared_query = try PreparedVectorQuery.init(collection, query);
+        const prepared_query = try PreparedVectorQuery.init(allocator, collection, query);
+        defer prepared_query.deinit(allocator);
         try validateVectorSearchThreshold(max_distance);
 
         return self.searchCandidateVectors(allocator, collection_name, collection, prepared_query, candidate_ids, limit, max_distance, null);
@@ -760,7 +789,8 @@ pub const Database = struct {
         const collection = try loadVectorCollection(self, collection_name);
         const query = try self.loadVectorValuesForSearch(allocator, collection_name, collection, source_vector_id);
         defer query.deinit(allocator);
-        const prepared_query = try PreparedVectorQuery.init(collection, vectorValuesConst(query));
+        const prepared_query = try PreparedVectorQuery.init(allocator, collection, vectorValuesConst(query));
+        defer prepared_query.deinit(allocator);
 
         return self.searchAllVectors(allocator, collection_name, collection, prepared_query, limit, null, source_vector_id);
     }
@@ -782,7 +812,8 @@ pub const Database = struct {
         const collection = try loadVectorCollection(self, collection_name);
         const query = try self.loadVectorValuesForSearch(allocator, collection_name, collection, source_vector_id);
         defer query.deinit(allocator);
-        const prepared_query = try PreparedVectorQuery.init(collection, vectorValuesConst(query));
+        const prepared_query = try PreparedVectorQuery.init(allocator, collection, vectorValuesConst(query));
+        defer prepared_query.deinit(allocator);
 
         return self.searchCandidateVectors(allocator, collection_name, collection, prepared_query, candidate_ids, limit, null, source_vector_id);
     }
@@ -802,7 +833,8 @@ pub const Database = struct {
         try validateVectorSearchThreshold(max_distance);
         const query = try self.loadVectorValuesForSearch(allocator, collection_name, collection, source_vector_id);
         defer query.deinit(allocator);
-        const prepared_query = try PreparedVectorQuery.init(collection, vectorValuesConst(query));
+        const prepared_query = try PreparedVectorQuery.init(allocator, collection, vectorValuesConst(query));
+        defer prepared_query.deinit(allocator);
 
         return self.searchAllVectors(allocator, collection_name, collection, prepared_query, limit, max_distance, source_vector_id);
     }
@@ -823,7 +855,8 @@ pub const Database = struct {
         try validateVectorSearchThreshold(max_distance);
         const query = try self.loadVectorValuesForSearch(allocator, collection_name, collection, source_vector_id);
         defer query.deinit(allocator);
-        const prepared_query = try PreparedVectorQuery.init(collection, vectorValuesConst(query));
+        const prepared_query = try PreparedVectorQuery.init(allocator, collection, vectorValuesConst(query));
+        defer prepared_query.deinit(allocator);
 
         return self.searchCandidateVectors(allocator, collection_name, collection, prepared_query, candidate_ids, limit, max_distance, source_vector_id);
     }
@@ -1737,6 +1770,27 @@ fn i8CosineDistanceFromEncodedWithQueryLengthSimd(query: []const i8, query_lengt
     return 1.0 - (dot_f64 / (query_length * @sqrt(stored_norm)));
 }
 
+fn floatDistancePrepared(comptime element_type: VectorElementType, comptime metric: VectorMetric, query: []const f64, encoded_values: []const u8, query_length: f64) Error!f64 {
+    @setFloatMode(.strict);
+    var sum: f64 = 0;
+    var stored_norm: f64 = 0;
+    for (query, 0..) |query_value, index| {
+        const stored_value = try encodedValueAsF64(element_type, encoded_values, index);
+        if (metric == .l2) {
+            const difference = query_value - stored_value;
+            sum += difference * difference;
+        } else {
+            sum += query_value * stored_value;
+            if (metric == .cosine) stored_norm += stored_value * stored_value;
+        }
+    }
+    return switch (metric) {
+        .l2 => @sqrt(sum),
+        .dot => -sum,
+        .cosine => if (stored_norm == 0) error.VectorCorrupt else 1.0 - (sum / (query_length * @sqrt(stored_norm))),
+    };
+}
+
 fn l2DistanceFromEncoded(element_type: VectorElementType, query: VectorValuesConst, encoded_values: []const u8) Error!f64 {
     var sum: f64 = 0;
     for (0..vectorValuesLen(query)) |index| {
@@ -2077,6 +2131,79 @@ fn isReservedZovaName(name: []const u8) bool {
     const reserved_prefix = "_zova_";
     return name.len >= reserved_prefix.len and
         std.ascii.eqlIgnoreCase(name[0..reserved_prefix.len], reserved_prefix);
+}
+
+test "prepared float queries own exact widened values and match reference scoring" {
+    const floats = [_]f32{ 1, -2, @bitCast(@as(u32, 1)), -0.0, 3.5, @bitCast(@as(u32, 0x7f7fffff)), 0.25 };
+    const halves = [_]u16{ 0x3c00, 0xc000, 1, 0x8000, 0x4300, 0x7bff, 0x3400 };
+    for ([_]VectorValuesConst{ .{ .f32 = &floats }, .{ .f16 = &halves } }) |values| {
+        for ([_]VectorMetric{ .cosine, .dot, .l2 }) |metric| {
+            for (1..8) |length| {
+                const query: VectorValuesConst = switch (values) {
+                    .f32 => |v| .{ .f32 = v[0..length] },
+                    .f16 => |v| .{ .f16 = v[0..length] },
+                    else => unreachable,
+                };
+                const metadata: CollectionMetadata = .{ .collection_key = 1, .dimensions = @intCast(length), .metric = metric, .element_type = vectorValuesElementType(query) };
+                const prepared = try PreparedVectorQuery.init(std.testing.allocator, metadata, query);
+                defer prepared.deinit(std.testing.allocator);
+                for (prepared.float_values.?, 0..) |value, index| {
+                    try std.testing.expectEqual(@as(u64, @bitCast(try inputValueAsF64(query, index))), @as(u64, @bitCast(value)));
+                }
+                const bytes = try encodeValuesLe(std.testing.allocator, query);
+                defer std.testing.allocator.free(bytes);
+                const expected = try vectorDistanceFromEncoded(metadata.element_type, metric, query, bytes, metadata.dimensions);
+                const actual = try prepared.distanceFromEncoded(bytes);
+                try std.testing.expectEqual(@as(u64, @bitCast(expected)), @as(u64, @bitCast(actual)));
+                try std.testing.expectError(error.VectorCorrupt, prepared.distanceFromEncoded(bytes[1..]));
+                if (metadata.element_type == .f32) {
+                    std.mem.writeInt(u32, bytes[0..4], 0x7f800000, .little);
+                } else {
+                    std.mem.writeInt(u16, bytes[0..2], 0x7c00, .little);
+                }
+                try std.testing.expectError(error.VectorCorrupt, prepared.distanceFromEncoded(bytes));
+            }
+        }
+    }
+}
+
+fn checkPreparedFloatAllocation(allocator: std.mem.Allocator) !void {
+    const prepared = try PreparedVectorQuery.init(allocator, .{ .collection_key = 1, .dimensions = 3, .metric = .dot, .element_type = .f32 }, .{ .f32 = &.{ 1, 2, 3 } });
+    defer prepared.deinit(allocator);
+}
+
+test "prepared floating scoring handles tails cancellation and allocation failures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkPreparedFloatAllocation, .{});
+    var floats: [385]f32 = undefined;
+    var halves: [385]u16 = undefined;
+    for (&floats, &halves, 0..) |*f, *h, i| {
+        const n: i32 = @as(i32, @intCast((i * 17) % 127)) - 63;
+        f.* = @as(f32, @floatFromInt(n)) / 16;
+        h.* = @bitCast(@as(f16, @floatCast(f.*)));
+    }
+    for ([_]usize{ 1, 3, 16, 17, 32, 33, 384, 385 }) |length| {
+        for ([_]VectorValuesConst{ .{ .f32 = floats[0..length] }, .{ .f16 = halves[0..length] } }) |query| {
+            const bytes = try encodeValuesLe(std.testing.allocator, query);
+            defer std.testing.allocator.free(bytes);
+            // Different stored vector, including cancellation of opposite signs.
+            const width: usize = if (vectorValuesElementType(query) == .f32) 4 else 2;
+            for (0..length) |i| if (i % 2 == 0) {
+                bytes[i * width + width - 1] ^= 0x80;
+            };
+            for ([_]VectorMetric{ .cosine, .dot, .l2 }) |metric| {
+                const metadata: CollectionMetadata = .{ .collection_key = 1, .dimensions = @intCast(length), .metric = metric, .element_type = vectorValuesElementType(query) };
+                const prepared = try PreparedVectorQuery.init(std.testing.allocator, metadata, query);
+                defer prepared.deinit(std.testing.allocator);
+                const expected = try vectorDistanceFromEncoded(metadata.element_type, metric, query, bytes, metadata.dimensions);
+                const actual = try prepared.distanceFromEncoded(bytes);
+                try std.testing.expectEqual(@as(u64, @bitCast(expected)), @as(u64, @bitCast(actual)));
+            }
+        }
+    }
+    const metadata: CollectionMetadata = .{ .collection_key = 1, .dimensions = 1, .metric = .cosine, .element_type = .f32 };
+    try std.testing.expectError(error.VectorInvalid, PreparedVectorQuery.init(std.testing.allocator, metadata, .{ .f32 = &.{0} }));
+    try std.testing.expectError(error.VectorInvalid, PreparedVectorQuery.init(std.testing.allocator, metadata, .{ .f32 = &.{std.math.nan(f32)} }));
+    try std.testing.expectError(error.VectorInvalid, PreparedVectorQuery.init(std.testing.allocator, metadata, .{ .f32 = &.{std.math.inf(f32)} }));
 }
 
 test "i8 cosine accepts a precomputed query length" {
