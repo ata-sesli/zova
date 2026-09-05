@@ -797,7 +797,6 @@ pub const Database = struct {
         const policy = ChunkingPolicy.fromProfile(options.profile);
         const id = objectId(bytes);
         const size_bytes = try usizeToSqliteI64(bytes.len);
-        const chunk_count = try usizeToSqliteI64(countObjectChunks(policy, bytes));
 
         const owns_transaction = try beginOwnedWrite(self.sqlite_db, self.allow_active_transactions);
         var committed = false;
@@ -813,6 +812,9 @@ pub const Database = struct {
             return id;
         }
 
+        // Existing objects need only their whole-object hash and stored metadata;
+        // do not scan their bytes again to derive an unused chunk count.
+        const chunk_count = try usizeToSqliteI64(countObjectChunks(policy, bytes));
         try insertObjectRow(self.sqlite_db, self.storage_schema, id, size_bytes, chunk_count, policy);
 
         var inserts = try ObjectInsertStatements.init(self.sqlite_db, self.storage_schema);
