@@ -52,17 +52,63 @@ pub const NotificationSubscription = struct {
     }
 };
 
+const NotificationQueue = struct {
+    storage: []Notification = &.{},
+    head: usize = 0,
+    len: usize = 0,
+
+    fn index(self: *const NotificationQueue, offset: usize) usize {
+        const position = self.head + offset;
+        return if (position >= self.storage.len) position - self.storage.len else position;
+    }
+
+    fn front(self: *NotificationQueue) *Notification {
+        std.debug.assert(self.len > 0);
+        return &self.storage[self.head];
+    }
+
+    fn pop(self: *NotificationQueue) Notification {
+        const value = self.front().*;
+        self.head = self.index(1);
+        self.len -= 1;
+        return value;
+    }
+
+    fn ensureUnusedCapacity(self: *NotificationQueue, allocator: std.mem.Allocator) !void {
+        if (self.len < self.storage.len) return;
+        std.debug.assert(self.len < queue_capacity);
+        const capacity = @min(queue_capacity, @max(@as(usize, 8), self.storage.len * 2));
+        const storage = try allocator.alloc(Notification, capacity);
+        for (0..self.len) |i| storage[i] = self.storage[self.index(i)];
+        allocator.free(self.storage);
+        self.storage = storage;
+        self.head = 0;
+    }
+
+    fn appendAssumeCapacity(self: *NotificationQueue, value: Notification) void {
+        std.debug.assert(self.len < self.storage.len);
+        self.storage[self.index(self.len)] = value;
+        self.len += 1;
+    }
+
+    fn deinit(self: *NotificationQueue, allocator: std.mem.Allocator) void {
+        while (self.len > 0) {
+            var notification = self.pop();
+            notification.deinit(allocator);
+        }
+        allocator.free(self.storage);
+        self.* = .{};
+    }
+};
+
 const SubscriptionState = struct {
     id: u64,
     channel: []u8,
-    queue: std.ArrayList(Notification) = .empty,
+    queue: NotificationQueue = .{},
     dropped_pending: u64 = 0,
 
     fn deinit(self: *SubscriptionState, allocator: std.mem.Allocator) void {
         allocator.free(self.channel);
-        for (self.queue.items) |*notification| {
-            notification.deinit(allocator);
-        }
         self.queue.deinit(allocator);
         self.* = .{ .id = 0, .channel = &.{} };
     }
@@ -86,6 +132,96 @@ const PendingScope = struct {
         self.* = .{};
     }
 };
+
+test "failed receive allocation leaves the oldest notification available" {
+    for (0..2) |fail_index| {
+        var hub = Hub.init(std.testing.allocator);
+        defer hub.deinit();
+        var sub = try hub.listen("test");
+        defer sub.deinit();
+        try hub.notify("test", "payload");
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        try std.testing.expectError(error.OutOfMemory, sub.tryReceive(failing.allocator()));
+        var retry = try sub.tryReceive(std.testing.allocator);
+        try std.testing.expect(retry != null);
+        defer retry.?.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(u64, 1), retry.?.sequence);
+        try std.testing.expectEqualStrings("payload", retry.?.payload);
+    }
+}
+
+test "notification queue wraps and repeatedly transfers overflow counts" {
+    var hub = Hub.init(std.testing.allocator);
+    defer hub.deinit();
+    var sub = try hub.listen("test");
+    defer sub.deinit();
+    for (0..3) |round| {
+        const base = round * 2024;
+        for (0..1024) |_| try hub.notify("test", "payload");
+        for (0..700) |i| {
+            var note = (try sub.tryReceive(std.testing.allocator)).?;
+            defer note.deinit(std.testing.allocator);
+            try std.testing.expectEqual(@as(u64, base + i + 1), note.sequence);
+            try std.testing.expectEqual(@as(u64, 0), note.dropped_before);
+        }
+        for (0..1000) |_| try hub.notify("test", "payload");
+        for (0..1024) |i| {
+            var note = (try sub.tryReceive(std.testing.allocator)).?;
+            defer note.deinit(std.testing.allocator);
+            try std.testing.expectEqual(@as(u64, base + 1001 + i), note.sequence);
+            try std.testing.expectEqual(@as(u64, if (i == 0) 300 else 0), note.dropped_before);
+        }
+        try std.testing.expectEqual(@as(?Notification, null), try sub.tryReceive(std.testing.allocator));
+    }
+    sub.deinit();
+    try std.testing.expectError(error.InvalidArgument, sub.tryReceive(std.testing.allocator));
+}
+
+test "wrapped queue growth failure preserves live entries and ownership" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var hub = Hub.init(failing.allocator());
+    defer hub.deinit();
+    var sub = try hub.listen("test");
+    defer sub.deinit();
+    for (0..8) |_| try hub.notify("test", "payload");
+    for (0..3) |_| {
+        var note = (try sub.tryReceive(std.testing.allocator)).?;
+        note.deinit(std.testing.allocator);
+    }
+    for (0..3) |_| try hub.notify("test", "payload");
+    // makeNotification + delivery clone allocate twice each; fail the grow.
+    failing.fail_index = failing.alloc_index + 4;
+    try std.testing.expectError(error.OutOfMemory, hub.notify("test", "failed"));
+    failing.fail_index = std.math.maxInt(usize);
+    try hub.notify("test", "retry");
+    for (0..9) |i| {
+        var note = (try sub.tryReceive(std.testing.allocator)).?;
+        defer note.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(u64, if (i < 8) i + 4 else 13), note.sequence);
+        try std.testing.expectEqual(@as(u64, 0), note.dropped_before);
+    }
+    // Destruction also frees unread entries when the head is not zero.
+    for (0..10) |_| try hub.notify("test", "unread");
+}
+
+test "commit allocation failure is reported on the next notification" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var hub = Hub.init(failing.allocator());
+    defer hub.deinit();
+    var sub = try hub.listen("test");
+    defer sub.deinit();
+    try hub.begin();
+    try hub.notify("test", "pending");
+    failing.fail_index = failing.alloc_index;
+    hub.commit();
+    failing.fail_index = std.math.maxInt(usize);
+    try hub.notify("test", "next");
+    var note = (try sub.tryReceive(std.testing.allocator)).?;
+    defer note.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 2), note.sequence);
+    try std.testing.expectEqual(@as(u64, 1), note.dropped_before);
+    try std.testing.expectEqualStrings("next", note.payload);
+}
 
 pub const Hub = struct {
     allocator: std.mem.Allocator,
@@ -219,14 +355,11 @@ pub const Hub = struct {
 
     pub fn tryReceive(self: *Hub, allocator: std.mem.Allocator, id: u64) Error!?Notification {
         const subscription = self.findSubscription(id) orelse return error.InvalidArgument;
-        if (subscription.queue.items.len == 0) return null;
-        var notification = subscription.queue.items[0];
-        if (subscription.queue.items.len > 1) {
-            std.mem.copyForwards(Notification, subscription.queue.items[0 .. subscription.queue.items.len - 1], subscription.queue.items[1..subscription.queue.items.len]);
-        }
-        subscription.queue.items.len -= 1;
-
-        const clone = try cloneNotification(allocator, notification);
+        if (subscription.queue.len == 0) return null;
+        // The caller may use a different allocator. Clone before consuming so
+        // either allocation can fail without losing the notification or owner.
+        const clone = try cloneNotification(allocator, subscription.queue.front().*);
+        var notification = subscription.queue.pop();
         notification.deinit(self.allocator);
         return clone;
     }
@@ -281,8 +414,8 @@ pub const Hub = struct {
         var queued = clone;
         errdefer queued.deinit(self.allocator);
 
-        if (subscription.queue.items.len < queue_capacity) {
-            try subscription.queue.ensureUnusedCapacity(self.allocator, 1);
+        if (subscription.queue.len < queue_capacity) {
+            try subscription.queue.ensureUnusedCapacity(self.allocator);
         }
 
         if (subscription.dropped_pending != 0) {
@@ -290,16 +423,12 @@ pub const Hub = struct {
             subscription.dropped_pending = 0;
         }
 
-        if (subscription.queue.items.len >= queue_capacity) {
-            var dropped = subscription.queue.items[0];
+        if (subscription.queue.len >= queue_capacity) {
+            var dropped = subscription.queue.pop();
             const dropped_before_next = dropped.dropped_before + 1;
-            if (subscription.queue.items.len > 1) {
-                std.mem.copyForwards(Notification, subscription.queue.items[0 .. subscription.queue.items.len - 1], subscription.queue.items[1..subscription.queue.items.len]);
-            }
-            subscription.queue.items.len -= 1;
             dropped.deinit(self.allocator);
-            if (subscription.queue.items.len > 0) {
-                subscription.queue.items[0].dropped_before += dropped_before_next;
+            if (subscription.queue.len > 0) {
+                subscription.queue.front().dropped_before += dropped_before_next;
             } else {
                 queued.dropped_before += dropped_before_next;
             }

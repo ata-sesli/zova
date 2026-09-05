@@ -216,6 +216,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     notifications_benchmark.root_module.addImport("zova", zova_module);
+    const install_notifications_benchmark = b.addInstallArtifact(notifications_benchmark, .{});
+    b.step("build-notifications", "Build notification benchmark without running it").dependOn(&install_notifications_benchmark.step);
     const notifications_benchmark_cmd = b.addRunArtifact(notifications_benchmark);
     if (b.args) |args| notifications_benchmark_cmd.addArgs(args);
     const notifications_benchmark_step = b.step("bench-notifications", "Run deterministic transaction-aware notification throughput benchmark");
