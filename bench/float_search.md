@@ -2,6 +2,9 @@
 
 ## Status
 
+See [the buffered follow-up](float_search_followup.md) for the newer focused and
+full-matrix investigation. The data below retains the original harness results.
+
 **Draft: median gains demonstrated, tail acceptance unresolved.**
 Do not merge solely on these median results. Several 33-dimensional cases have
 higher measured p95 after the change. Repeating the same bounded trials did not
