@@ -179,6 +179,25 @@ pub fn build(b: *std.Build) void {
     const install_kv_benchmark = b.addInstallArtifact(kv_benchmark, .{});
     b.step("build-kv-calls", "Build bounded single-call KV benchmark").dependOn(&install_kv_benchmark.step);
 
+    const walk_benchmark = b.addExecutable(.{
+        .name = "zova_walk_keys_benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/walk_keys.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const walk_module = b.createModule(.{
+        .root_source_file = b.path("src/zova.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    walk_module.addOptions("zova_build_options", zova_build_options);
+    addSqlite(walk_module, b, sqlite_lib);
+    walk_benchmark.root_module.addImport("zova", walk_module);
+    const install_walk_benchmark = b.addInstallArtifact(walk_benchmark, .{});
+    b.step("build-walk-keys", "Build bounded traversal benchmark").dependOn(&install_walk_benchmark.step);
+
     const graph_keyed_benchmark = b.addExecutable(.{
         .name = "zova_graph_keyed_benchmark",
         .root_module = b.createModule(.{

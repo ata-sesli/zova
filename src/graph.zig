@@ -1501,12 +1501,12 @@ pub const Database = struct {
         return resolved.node;
     }
 
-    fn getGraphNodeWithKey(self: *Database, allocator: std.mem.Allocator, graph_name: []const u8, node_id: []const u8) Error!struct { node: GraphNode, graph_key: i64 } {
+    fn getGraphNodeWithKey(self: *Database, allocator: std.mem.Allocator, graph_name: []const u8, node_id: []const u8) Error!struct { node: GraphNode, graph_key: i64, node_key: i64 } {
         try validateGraphName(graph_name);
         try validateNodeId(node_id);
 
         var stmt = try self.prepareSchema(
-            \\select g.name, n.node_id, n.kind, n.target_type, n.target_namespace, n.target_ref, g.graph_key
+            \\select g.name, n.node_id, n.kind, n.target_type, n.target_namespace, n.target_ref, g.graph_key, n.node_key
             \\from {s}_zova_graph_nodes n
             \\join {s}_zova_graphs g on g.graph_key = n.graph_key
             \\where g.name = ? and n.node_id = ?
@@ -1517,7 +1517,7 @@ pub const Database = struct {
 
         return switch (try stmt.step()) {
             .done => error.GraphNodeNotFound,
-            .row => .{ .node = try nodeFromRow(allocator, &stmt), .graph_key = stmt.columnInt64(6) },
+            .row => .{ .node = try nodeFromRow(allocator, &stmt), .graph_key = stmt.columnInt64(6), .node_key = stmt.columnInt64(7) },
         };
     }
 
@@ -2694,17 +2694,13 @@ pub const Database = struct {
         const walk_start = if (profile != null) graphProfileTimestamp() else std.Io.Timestamp.zero;
         const root_lookup_start = if (profile != null) graphProfileTimestamp() else std.Io.Timestamp.zero;
 
-        var visited: std.StringHashMap(void) = .init(allocator);
-        defer freeVisitedKeys(allocator, &visited);
-        var frontier: std.ArrayList(GraphWalkItem) = .empty;
+        var visited: std.AutoHashMap(i64, void) = .init(allocator);
+        defer visited.deinit();
+        var frontier: std.ArrayList(GraphWalkEntry) = .empty;
+        var transferred: usize = 0;
         defer {
-            for (frontier.items) |*item| item.deinit(allocator);
+            for (frontier.items[transferred..]) |*entry| entry.item.deinit(allocator);
             frontier.deinit(allocator);
-        }
-        var results: std.ArrayList(GraphWalkItem) = .empty;
-        errdefer {
-            for (results.items) |*item| item.deinit(allocator);
-            results.deinit(allocator);
         }
 
         const resolved_start = try self.getGraphNodeWithKey(allocator, options.graph_name, options.start_node_id);
@@ -2714,8 +2710,8 @@ pub const Database = struct {
             owned_start.deinit(allocator);
         }
         if (profile) |value| value.root_lookup_ms = graphProfileElapsedMs(root_lookup_start);
-        try putVisited(&visited, allocator, options.start_node_id);
-        try appendGraphWalkItem(&frontier, allocator, start.node_id, start.kind, 0, null, null);
+        try visited.put(resolved_start.node_key, {});
+        try appendGraphWalkEntry(&frontier, allocator, resolved_start.node_key, start.node_id, start.kind, 0, null, null);
 
         const adjacency_prepare_start = if (profile != null) graphProfileTimestamp() else std.Io.Timestamp.zero;
         const edge_type_key = if (options.edge_type) |edge_type| (try self.edgeTypeKeyForRead(resolved_start.graph_key, edge_type)) orelse -1 else null;
@@ -2728,25 +2724,21 @@ pub const Database = struct {
         }
 
         var frontier_index: usize = 0;
-        while (frontier_index < frontier.items.len and results.items.len < options.limit) : (frontier_index += 1) {
-            const current = &frontier.items[frontier_index];
+        while (frontier_index < frontier.items.len and frontier_index < options.limit) : (frontier_index += 1) {
+            const current_node_key = frontier.items[frontier_index].node_key;
+            const current = &frontier.items[frontier_index].item;
             const current_node_id = current.node_id;
-            const current_kind = current.kind;
             const current_depth = current.depth;
-            const current_predecessor_node_id = current.predecessor_node_id;
-            const current_edge_type = current.edge_type;
-
-            try appendGraphWalkItem(&results, allocator, current_node_id, current_kind, current_depth, current_predecessor_node_id, current_edge_type);
             if (current_depth >= options.max_depth) continue;
 
             if (profile) |value| {
                 const operation_start = graphProfileTimestamp();
-                try bindWalkAdjacencyNode(&adjacency_stmt, current_node_id);
+                try bindWalkAdjacencyNode(&adjacency_stmt, current_node_key);
                 value.adjacency_execute_ms += graphProfileElapsedMs(operation_start);
                 value.adjacency_query_binds += 1;
                 value.frontier_expansions += 1;
             } else {
-                try bindWalkAdjacencyNode(&adjacency_stmt, current_node_id);
+                try bindWalkAdjacencyNode(&adjacency_stmt, current_node_key);
             }
 
             while (true) {
@@ -2761,21 +2753,22 @@ pub const Database = struct {
                 const neighbor_node_id = adjacency_stmt.columnText(0);
                 const neighbor_kind = adjacency_stmt.columnText(1);
                 const neighbor_edge_type_key = adjacency_stmt.columnInt64(2);
-                if (visited.contains(neighbor_node_id)) continue;
-                try putVisited(&visited, allocator, neighbor_node_id);
+                const neighbor_node_key = adjacency_stmt.columnInt64(3);
+                if (visited.contains(neighbor_node_key)) continue;
+                try visited.put(neighbor_node_key, {});
                 if (self.edge_type_cache) |cache| {
                     try self.ensureEdgeTypeCache();
                     if (cache.by_key.get(neighbor_edge_type_key)) |neighbor_edge_type| {
-                        try appendGraphWalkItem(&frontier, allocator, neighbor_node_id, neighbor_kind, current_depth + 1, current_node_id, neighbor_edge_type);
+                        try appendGraphWalkEntry(&frontier, allocator, neighbor_node_key, neighbor_node_id, neighbor_kind, current_depth + 1, current_node_id, neighbor_edge_type);
                     } else {
                         const neighbor_edge_type = try self.dupeEdgeTypeNameForRead(allocator, neighbor_edge_type_key);
                         defer allocator.free(neighbor_edge_type);
-                        try appendGraphWalkItem(&frontier, allocator, neighbor_node_id, neighbor_kind, current_depth + 1, current_node_id, neighbor_edge_type);
+                        try appendGraphWalkEntry(&frontier, allocator, neighbor_node_key, neighbor_node_id, neighbor_kind, current_depth + 1, current_node_id, neighbor_edge_type);
                     }
                 } else {
                     const neighbor_edge_type = try self.dupeEdgeTypeNameForRead(allocator, neighbor_edge_type_key);
                     defer allocator.free(neighbor_edge_type);
-                    try appendGraphWalkItem(&frontier, allocator, neighbor_node_id, neighbor_kind, current_depth + 1, current_node_id, neighbor_edge_type);
+                    try appendGraphWalkEntry(&frontier, allocator, neighbor_node_key, neighbor_node_id, neighbor_kind, current_depth + 1, current_node_id, neighbor_edge_type);
                 }
             }
             if (profile) |value| {
@@ -2787,7 +2780,11 @@ pub const Database = struct {
             }
         }
 
-        const owned_results = try results.toOwnedSlice(allocator);
+        // Transfer the visited prefix only after allocation succeeds. Entries
+        // queued beyond the result limit remain frontier-owned and are freed.
+        const owned_results = try allocator.alloc(GraphWalkItem, frontier_index);
+        for (owned_results, frontier.items[0..frontier_index]) |*result, entry| result.* = entry.item;
+        transferred = frontier_index;
         if (profile) |value| {
             value.result_count = @intCast(owned_results.len);
             const accounted_ms = value.root_lookup_ms + value.adjacency_prepare_ms + value.adjacency_execute_ms;
@@ -2800,45 +2797,37 @@ pub const Database = struct {
         return switch (direction) {
             .outgoing => if (!filtered)
                 try self.prepareSchema(
-                    \\select n.node_id,n.kind,e.edge_type_key
+                    \\select n.node_id,n.kind,e.edge_type_key,n.node_key
                     \\from {s}_zova_graph_edges e
                     \\join {s}_zova_graph_nodes n on n.node_key = e.to_node_key
-                    \\where e.graph_key=?1 and e.from_node_key=(
-                    \\  select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2
-                    \\)
+                    \\where e.graph_key=?1 and e.from_node_key=?2
                     \\order by e.created_order, e.to_node_key
                     \\limit ?
                 )
             else
                 try self.prepareSchema(
-                    \\select n.node_id,n.kind,e.edge_type_key
+                    \\select n.node_id,n.kind,e.edge_type_key,n.node_key
                     \\from {s}_zova_graph_edges e
                     \\join {s}_zova_graph_nodes n on n.node_key = e.to_node_key
-                    \\where e.graph_key=?1 and e.from_node_key=(
-                    \\  select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2
-                    \\) and e.edge_type_key=?3
+                    \\where e.graph_key=?1 and e.from_node_key=?2 and e.edge_type_key=?3
                     \\order by e.created_order, e.to_node_key
                     \\limit ?
                 ),
             .incoming => if (!filtered)
                 try self.prepareSchema(
-                    \\select n.node_id,n.kind,e.edge_type_key
+                    \\select n.node_id,n.kind,e.edge_type_key,n.node_key
                     \\from {s}_zova_graph_edges e
                     \\join {s}_zova_graph_nodes n on n.node_key = e.from_node_key
-                    \\where e.graph_key=?1 and e.to_node_key=(
-                    \\  select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2
-                    \\)
+                    \\where e.graph_key=?1 and e.to_node_key=?2
                     \\order by e.created_order, e.from_node_key
                     \\limit ?
                 )
             else
                 try self.prepareSchema(
-                    \\select n.node_id,n.kind,e.edge_type_key
+                    \\select n.node_id,n.kind,e.edge_type_key,n.node_key
                     \\from {s}_zova_graph_edges e
                     \\join {s}_zova_graph_nodes n on n.node_key = e.from_node_key
-                    \\where e.graph_key=?1 and e.to_node_key=(
-                    \\  select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2
-                    \\) and e.edge_type_key=?3
+                    \\where e.graph_key=?1 and e.to_node_key=?2 and e.edge_type_key=?3
                     \\order by e.created_order, e.from_node_key
                     \\limit ?
                 ),
@@ -2902,8 +2891,8 @@ fn bindWalkAdjacencyConstants(
     }
 }
 
-fn bindWalkAdjacencyNode(stmt: *sqlite.Statement, current_node_id: []const u8) Error!void {
-    try stmt.bindText(2, current_node_id);
+fn bindWalkAdjacencyNode(stmt: *sqlite.Statement, current_node_key: i64) Error!void {
+    try stmt.bindInt64(2, current_node_key);
 }
 
 fn resetWalkAdjacency(stmt: *sqlite.Statement) Error!void {
@@ -3211,9 +3200,15 @@ fn graphWalkItemOwned(
     };
 }
 
-fn appendGraphWalkItem(
-    items: *std.ArrayList(GraphWalkItem),
+const GraphWalkEntry = struct {
+    node_key: i64,
+    item: GraphWalkItem,
+};
+
+fn appendGraphWalkEntry(
+    items: *std.ArrayList(GraphWalkEntry),
     allocator: std.mem.Allocator,
+    node_key: i64,
     node_id: []const u8,
     kind: []const u8,
     depth: u32,
@@ -3222,19 +3217,7 @@ fn appendGraphWalkItem(
 ) Error!void {
     var item = try graphWalkItemOwned(allocator, node_id, kind, depth, predecessor_node_id, edge_type);
     errdefer item.deinit(allocator);
-    try items.append(allocator, item);
-}
-
-fn putVisited(visited: *std.StringHashMap(void), allocator: std.mem.Allocator, node_id: []const u8) Error!void {
-    const owned_node_id = try allocator.dupe(u8, node_id);
-    errdefer allocator.free(owned_node_id);
-    try visited.put(owned_node_id, {});
-}
-
-fn freeVisitedKeys(allocator: std.mem.Allocator, visited: *std.StringHashMap(void)) void {
-    var key_it = visited.keyIterator();
-    while (key_it.next()) |key| allocator.free(key.*);
-    visited.deinit();
+    try items.append(allocator, .{ .node_key = node_key, .item = item });
 }
 
 pub fn validateGraphName(name: []const u8) Error!void {
