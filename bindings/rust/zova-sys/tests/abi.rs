@@ -40,7 +40,7 @@ fn abi_version_and_status_names_are_available() {
             CStr::from_ptr(zova_sys::zova_abi_version_string())
                 .to_str()
                 .unwrap(),
-            "1.0.0-rc.1"
+            "1.0.0-rc.2"
         );
         assert_eq!(
             CStr::from_ptr(zova_sys::zova_status_name(zova_sys::ZOVA_OK))

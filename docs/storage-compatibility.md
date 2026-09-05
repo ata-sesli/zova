@@ -16,8 +16,8 @@ in another.
 
 | Version | Meaning | Declared in | Current |
 | --- | --- | --- | --- |
-| Package version | Zova release identity across every distribution channel | `src/version.zig` `package_version` | `1.0.0-rc.1` |
-| C ABI version | Compatibility of the exported C ABI and generated C | `src/version.zig` `abi_version_*` | `1.0.0-rc.1` (`1.0.0` numeric components) |
+| Package version | Zova release identity across every distribution channel | `src/version.zig` `package_version` | `1.0.0-rc.2` |
+| C ABI version | Compatibility of the exported C ABI and generated C | `src/version.zig` `abi_version_*` | `1.0.0-rc.2` (`1.0.0` numeric components) |
 | SQLite version | The vendored SQLite amalgamation, and separately SQLite's own file format | `src/version.zig` `sqlite_version` | `3.53.4` |
 | Zova storage format | The layout of a `.zova` database, recorded in `_zova_meta.format_version` | `src/version.zig` `format_version` | `11` |
 

@@ -7,7 +7,7 @@ cd "$ROOT"
 usage() {
     cat >&2 <<'EOF'
 usage: scripts/build-release-artifacts.sh <version> <artifact-id> [out-dir]
-example: scripts/build-release-artifacts.sh 1.0.0-rc.1 macos-arm64 zig-out/artifacts
+example: scripts/build-release-artifacts.sh 1.0.0-rc.2 macos-arm64 zig-out/artifacts
 
 Builds host-platform release artifacts:
   - CLI archive

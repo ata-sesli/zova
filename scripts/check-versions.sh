@@ -84,9 +84,10 @@ expect_contains "$ROOT/README.md" "| SQLite | vendored \`${sqlite_version}\` |"
 expect_contains "$ROOT/README.md" "SQLite is vendored in \`vendor/sqlite${sqlite_version}\` and is public domain."
 expect_contains "$ROOT/docs/storage-compatibility.md" "\`sqlite_version\` | \`${sqlite_version}\` |"
 expect_contains "$ROOT/build.zig" 'src/version.zig'
-expect_contains "$ROOT/src/zova.zig" 'const format_version = version.format_version;'
-expect_contains "$ROOT/src/cli.zig" 'zova.version.format_version'
-expect_contains "$ROOT/src/cli.zig" 'zova.version.sqlite_version'
+expect_contains "$ROOT/src/database/types.zig" 'pub const format_version = version.format_version;'
+expect_contains "$ROOT/src/zova.zig" 'const format_version = @import("database/types.zig").format_version;'
+expect_contains "$ROOT/src/cli/maintenance.zig" 'zova.version.format_version'
+expect_contains "$ROOT/src/cli/extensions.zig" 'zova.version.sqlite_version'
 expect_contains "$ROOT/tests/cli.zig" 'zova.version.sqlite_version'
 expect_contains "$ROOT/scripts/update-generated-c.sh" 'sqlite_version'
 expect_contains "$ROOT/include/zova.h" "Zova C ABI, v${abi_version_string}."

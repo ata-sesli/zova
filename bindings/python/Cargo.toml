@@ -1,6 +1,6 @@
 [package]
 name = "zova-python"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 edition = "2021"
 license = "MIT"
 description = "PyO3 extension for the Zova Python package."
@@ -14,4 +14,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { version = "0.29.0", features = ["extension-module", "abi3-py313"] }
-zova_rust = { package = "zova", version = "1.0.0-rc.1", path = "rust/zova" }
+zova_rust = { package = "zova", version = "1.0.0-rc.2", path = "rust/zova" }

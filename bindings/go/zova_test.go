@@ -23,7 +23,7 @@ func TestABIVersionAndStatusNames(t *testing.T) {
 	if major != 1 || minor != 0 || patch != 0 {
 		t.Fatalf("unexpected ABI version: %d.%d.%d", major, minor, patch)
 	}
-	if got := ABIVersion(); got != "1.0.0-rc.1" {
+	if got := ABIVersion(); got != "1.0.0-rc.2" {
 		t.Fatalf("unexpected ABI version string: %q", got)
 	}
 	if got := StatusName(StatusOK); got != "ZOVA_OK" {

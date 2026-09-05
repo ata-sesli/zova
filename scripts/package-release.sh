@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 usage() {
     echo "usage: scripts/package-release.sh <version> [out-dir]" >&2
-    echo "example: scripts/package-release.sh 1.0.0-rc.1" >&2
+    echo "example: scripts/package-release.sh 1.0.0-rc.2" >&2
 }
 
 run() {
@@ -185,9 +185,9 @@ rm -f "$TMP/$PKG/bindings/javascript/index.js"
 rm -f "$TMP/$PKG/bindings/javascript/index.d.ts"
 find "$TMP/$PKG/bindings/javascript" -maxdepth 1 -name '*.node' -delete
 
-if find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/API_STABILITY.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/docs/extensions.md" ! -path "$TMP/$PKG/docs/storage-compatibility.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" ! -path "$TMP/$PKG/bindings/javascript/README.md" | grep -q .; then
+if find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/bench/*.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/native/bench/*.md" ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/API_STABILITY.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/docs/extensions.md" ! -path "$TMP/$PKG/docs/storage-compatibility.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" ! -path "$TMP/$PKG/bindings/javascript/README.md" | grep -q .; then
     echo "release package contains unexpected markdown files" >&2
-    find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/API_STABILITY.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/docs/extensions.md" ! -path "$TMP/$PKG/docs/storage-compatibility.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" ! -path "$TMP/$PKG/bindings/javascript/README.md" >&2
+    find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/bench/*.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/native/bench/*.md" ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/API_STABILITY.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/docs/extensions.md" ! -path "$TMP/$PKG/docs/storage-compatibility.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" ! -path "$TMP/$PKG/bindings/javascript/README.md" >&2
     exit 1
 fi
 

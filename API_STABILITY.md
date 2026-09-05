@@ -1,7 +1,7 @@
 # Zova 1.x API stability
 
 This document defines the candidate public contract for Zova 1.x. The
-`1.0.0-rc.1` release is the first implementation of that contract. Release
+`1.0.0-rc.2` release continues the contract introduced in `1.0.0-rc.1`. Release
 candidate fixes may still correct inconsistencies before `1.0.0`, but the RC
 line is closed to open-ended feature expansion.
 
@@ -111,7 +111,7 @@ authoritative for these stricter rules.
 The bundled-extension lifecycle, manifest validation, ABI minimum enforcement,
 and extension records are supported. Extension minimum ABI values use numeric
 `major.minor.patch`; the running RC reports numeric ABI components `1.0.0` and
-the full release identity `1.0.0-rc.1` separately.
+the full release identity `1.0.0-rc.2` separately.
 
 The experimental bundle-producer CLI and application-authored callback surfaces
 remain outside the stable 1.x authoring contract. Dynamic native extensions run

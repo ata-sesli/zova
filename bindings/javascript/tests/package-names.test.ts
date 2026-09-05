@@ -57,9 +57,9 @@ describe("native npm package names", () => {
       `${JSON.stringify(
         {
           name: "zova-js",
-          version: "1.0.0-rc.1",
+          version: "1.0.0-rc.2",
           optionalDependencies: Object.fromEntries(
-            targets.map(({ generated }) => [generated, "1.0.0-rc.1"]),
+            targets.map(({ generated }) => [generated, "1.0.0-rc.2"]),
           ),
         },
         null,
@@ -83,7 +83,7 @@ describe("native npm package names", () => {
         `${JSON.stringify(
           {
             name: generated,
-            version: "1.0.0-rc.1",
+            version: "1.0.0-rc.2",
             marker: directory,
           },
           null,
@@ -104,7 +104,7 @@ describe("native npm package names", () => {
     );
     expect(rootPackage.optionalDependencies).toEqual(
       Object.fromEntries(
-        targets.map(({ published }) => [published, "1.0.0-rc.1"]),
+        targets.map(({ published }) => [published, "1.0.0-rc.2"]),
       ),
     );
 

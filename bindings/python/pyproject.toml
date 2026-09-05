@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "zova"
-version = "1.0.0rc1"
+version = "1.0.0rc2"
 description = "SQLite-backed embedded database for records, objects, vectors, and graph relationships in one local file."
 readme = "README.md"
 requires-python = ">=3.13"
