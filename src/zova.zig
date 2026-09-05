@@ -1267,6 +1267,7 @@ pub const Database = struct {
     bound_graph_store: ?BoundGraphStore = null,
     main_graph_edge_types: graph_impl.GraphEdgeTypeCache = .{},
     bound_graph_edge_types: graph_impl.GraphEdgeTypeCache = .{},
+    kv_statements: kv_impl.StatementCache = .{},
     extension_registry: ExtensionRegistry = ExtensionRegistry.empty(),
 
     /// Create a new initialized `.zova` database.
@@ -1470,6 +1471,7 @@ pub const Database = struct {
     pub fn deinit(self: *Database) void {
         self.main_graph_edge_types.deinit();
         self.bound_graph_edge_types.deinit();
+        self.kv_statements.deinit();
         self.sqlite_db.deinit();
         deinitNotifications(self.notifications);
     }
@@ -2996,7 +2998,7 @@ pub const Database = struct {
     }
 
     fn kvDatabase(self: *Database) kv_impl.Database {
-        return .{ .sqlite_db = &self.sqlite_db };
+        return .{ .sqlite_db = &self.sqlite_db, .statement_cache = &self.kv_statements };
     }
 
     fn beginBoundObjectMutation(self: *Database) Error!bool {

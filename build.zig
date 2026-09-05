@@ -167,6 +167,18 @@ pub fn build(b: *std.Build) void {
     const install_ingestion = b.addInstallArtifact(ingestion_benchmark, .{});
     b.step("build-object-ingestion", "Build bounded object ingestion benchmark").dependOn(&install_ingestion.step);
 
+    const kv_benchmark = b.addExecutable(.{
+        .name = "zova_kv_calls_benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/kv_calls.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    kv_benchmark.root_module.addImport("zova", zova_module);
+    const install_kv_benchmark = b.addInstallArtifact(kv_benchmark, .{});
+    b.step("build-kv-calls", "Build bounded single-call KV benchmark").dependOn(&install_kv_benchmark.step);
+
     const graph_keyed_benchmark = b.addExecutable(.{
         .name = "zova_graph_keyed_benchmark",
         .root_module = b.createModule(.{
