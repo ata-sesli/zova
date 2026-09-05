@@ -45,6262 +45,864 @@
 //! events and must be coordinated by callers as final uses of those pointers.
 
 const std = @import("std");
+
 const zova = @import("zova.zig");
+
 const graph = @import("graph.zig");
+
 const sqlite = @import("sqlite.zig");
+
 const zova_version = @import("version.zig");
+
 const kv_impl = @import("kv.zig");
 
-const allocator = std.heap.c_allocator;
+pub const zova_database = @import("c_api/types.zig").zova_database;
 
-const AbiMutex = struct {
-    state: std.Io.Mutex = .init,
+pub const zova_object_writer = @import("c_api/types.zig").zova_object_writer;
 
-    fn lock(self: *AbiMutex) void {
-        std.Io.Threaded.mutexLock(&self.state);
-    }
+pub const zova_object_reader = @import("c_api/types.zig").zova_object_reader;
 
-    fn unlock(self: *AbiMutex) void {
-        std.Io.Threaded.mutexUnlock(&self.state);
-    }
-};
+pub const zova_statement = @import("c_api/types.zig").zova_statement;
 
-// These opaque declarations match `include/zova.h`. The real state lives in
-// DatabaseHandle and WriterHandle below so C callers cannot depend on layout.
-pub const zova_database = opaque {};
-pub const zova_object_writer = opaque {};
-pub const zova_object_reader = opaque {};
-pub const zova_statement = opaque {};
-pub const zova_subscription = opaque {};
-pub const zova_fresh_build = opaque {};
+pub const zova_subscription = @import("c_api/types.zig").zova_subscription;
 
-const DatabaseHandle = struct {
-    db: zova.Database,
-    dynamic_extensions: ?zova.DynamicExtensionSet = null,
-    extension_registry: ?zova.DynamicExtensionOwnedRegistry = null,
-    // One C ABI database handle is internally serialized. This mutex protects
-    // the SQLite/Zova handle, child-handle counts, and connection-scoped error
-    // message. It is intentionally per-handle, not global; separate handles can
-    // still run independently and follow normal SQLite locking behavior.
-    mutex: AbiMutex = .{},
-    live_statements: usize = 0,
-    live_writers: usize = 0,
-    live_readers: usize = 0,
-    live_subscriptions: usize = 0,
-    fresh_build_active: bool = false,
-    sql_functions: std.ArrayList(SqlFunctionRegistration) = .empty,
-    // Connection-scoped diagnostic text. This mirrors SQLite's model closely:
-    // callers can ask the database handle for the most recent useful message,
-    // and the pointer is borrowed until another call on the handle replaces it.
-    last_error: ?[:0]u8 = null,
-};
+pub const zova_fresh_build = @import("c_api/types.zig").zova_fresh_build;
 
-const DeferredFreshIndex = struct {
-    name: [:0]u8,
-    sql: [:0]u8,
-};
+pub const FreshBuildCachePolicy = @import("c_api/handles.zig").FreshBuildCachePolicy;
 
-pub const FreshBuildCachePolicy = enum {
-    graph_only,
-    session,
-    graph_and_deferred_indexes,
-};
-
-pub const FreshBuildCacheDiagnostics = struct {
-    deferred_index_ms: f64 = 0,
-    cache_restore_ms: f64 = 0,
-    transaction_finish_ms: f64 = 0,
-    baseline_foreign_key_check_ms: f64 = 0,
-    baseline_foreign_key_check_ran: bool = false,
-    foreign_key_check_ms: f64 = 0,
-    foreign_key_check_ran: bool = false,
-    deferred_foreign_keys_pending: bool = false,
-    validation_fast_path: bool = false,
-};
-
-var fresh_build_cache_policy: FreshBuildCachePolicy = .graph_and_deferred_indexes;
-
-const FreshBuildValidationEvidence = struct {
-    foreign_keys_enforced: bool,
-    baseline_foreign_keys_validated: bool,
-};
+pub const FreshBuildCacheDiagnostics = @import("c_api/handles.zig").FreshBuildCacheDiagnostics;
 
 /// Internal benchmark control. This is intentionally not exported through the C ABI.
-pub fn setFreshBuildCachePolicyForBenchmark(policy: FreshBuildCachePolicy) void {
-    fresh_build_cache_policy = policy;
-}
-
-const FreshBuildHandle = struct {
-    database: *DatabaseHandle,
-    owns_transaction: bool,
-    previous_cache_size: ?i64 = null,
-    active: bool = true,
-    deferred_indexes: std.ArrayList(DeferredFreshIndex) = .empty,
-    prepared_tables: std.ArrayList([]u8) = .empty,
-    node_keys: []i64 = &.{},
-    edge_keys: []i64 = &.{},
-    graph_loaded: bool = false,
-    validation: FreshBuildValidationEvidence,
-    profile: zova_fresh_build_profile = .{},
-    cache_diagnostics: FreshBuildCacheDiagnostics = .{},
-
-    fn deinit(self: *FreshBuildHandle) void {
-        for (self.deferred_indexes.items) |item| {
-            allocator.free(item.name);
-            allocator.free(item.sql);
-        }
-        self.deferred_indexes.deinit(allocator);
-        for (self.prepared_tables.items) |name| allocator.free(name);
-        self.prepared_tables.deinit(allocator);
-        if (self.node_keys.len != 0) allocator.free(self.node_keys);
-        if (self.edge_keys.len != 0) allocator.free(self.edge_keys);
-    }
-};
+pub const setFreshBuildCachePolicyForBenchmark = @import("c_api/fresh_build.zig").setFreshBuildCachePolicyForBenchmark;
 
 /// Internal benchmark diagnostics. The build handle remains owned until destroy.
-pub fn freshBuildCacheDiagnostics(build_ptr: ?*zova_fresh_build) ?FreshBuildCacheDiagnostics {
-    const ptr = build_ptr orelse return null;
-    const build: *FreshBuildHandle = @ptrCast(@alignCast(ptr));
-    return build.cache_diagnostics;
-}
+pub const freshBuildCacheDiagnostics = @import("c_api/fresh_build.zig").freshBuildCacheDiagnostics;
 
-const SqlFunctionRegistration = struct {
-    name: [:0]u8,
-    arity: c_int,
+pub const zova_status = @import("c_api/types.zig").zova_status;
 
-    fn deinit(self: *SqlFunctionRegistration) void {
-        allocator.free(self.name);
-    }
-};
+pub const zova_step_result = @import("c_api/types.zig").zova_step_result;
 
-const SqlScalarFunctionContext = struct {
-    user_data: ?*anyopaque,
-    callback: *const fn (?*anyopaque, ?*const zova_sql_function_call, ?*zova_sql_result) callconv(.c) void,
-    destroy: zova_sql_destroy_callback,
-};
+pub const zova_column_type = @import("c_api/types.zig").zova_column_type;
 
-const WriterHandle = struct {
-    // Writers are child handles tied to one database handle. Writer methods
-    // serialize through the parent database mutex.
-    db: *DatabaseHandle,
-    writer: zova.ObjectWriter,
-};
+pub const zova_sql_value_type = @import("c_api/types.zig").zova_sql_value_type;
 
-const ReaderHandle = struct {
-    // Readers retain a manifest statement and therefore borrow the parent
-    // database handle for their entire lifetime. Reader calls serialize
-    // through the same parent mutex as statements and writers.
-    db: *DatabaseHandle,
-    reader: zova.ObjectReader,
-};
+pub const zova_sql_result_type = @import("c_api/types.zig").zova_sql_result_type;
 
-const StatementHandle = struct {
-    // Statements borrow their parent database handle and must be finalized
-    // before closing the database. Statement methods serialize through the
-    // parent database mutex.
-    db: *DatabaseHandle,
-    statement: sqlite.Statement,
-};
+pub const ZOVA_SQL_FUNCTION_DETERMINISTIC = @import("c_api/types.zig").ZOVA_SQL_FUNCTION_DETERMINISTIC;
 
-const SubscriptionHandle = struct {
-    // Subscriptions are child handles tied to one database handle. Receive and
-    // close operations serialize through the parent database mutex.
-    db: *DatabaseHandle,
-    subscription: zova.NotificationSubscription,
-};
+pub const ZOVA_SQL_FUNCTION_DIRECT_ONLY = @import("c_api/types.zig").ZOVA_SQL_FUNCTION_DIRECT_ONLY;
 
-// Keep these numeric values synchronized with `include/zova.h`. Existing values
-// should be treated as ABI surface once a release containing them is published.
-pub const zova_status = enum(c_int) {
-    OK = 0,
-    INVALID_ARGUMENT = 1,
-    OUT_OF_MEMORY = 2,
-    BUSY = 10,
-    LOCKED = 11,
-    CONSTRAINT = 12,
-    CANT_OPEN = 13,
-    READ_ONLY = 14,
-    CORRUPT = 15,
-    MISUSE = 16,
-    SQLITE_ERROR = 17,
-    NOT_ZOVA_PATH = 30,
-    NOT_ZOVA_DATABASE = 31,
-    UNSUPPORTED_ZOVA_VERSION = 32,
-    DESTINATION_EXISTS = 33,
-    ZOVA_NAME_CONFLICT = 34,
-    MIGRATION_REQUIRED = 35,
-    UNSUPPORTED_FUTURE_FORMAT = 36,
-    UNSUPPORTED_LEGACY_FORMAT = 37,
-    NO_MIGRATION_PATH = 38,
-    OBJECT_NOT_FOUND = 50,
-    OBJECT_ALREADY_EXISTS = 51,
-    OBJECT_CHUNK_NOT_FOUND = 52,
-    OBJECT_CHUNK_HASH_MISMATCH = 53,
-    OBJECT_CORRUPT = 54,
-    OBJECT_MANIFEST_INVALID = 55,
-    OBJECT_RANGE_INVALID = 56,
-    OBJECT_TOO_LARGE = 57,
-    OBJECT_TRANSACTION_ACTIVE = 58,
-    OBJECT_WRITER_CLOSED = 59,
-    OBJECT_READER_CLOSED = 63,
-    BOUND_STORE_EXISTS = 60,
-    BOUND_STORE_NOT_FOUND = 61,
-    BOUND_STORE_INVALID = 62,
-    VECTOR_COLLECTION_EXISTS = 70,
-    VECTOR_COLLECTION_NOT_FOUND = 71,
-    VECTOR_NOT_FOUND = 72,
-    VECTOR_DIMENSION_MISMATCH = 73,
-    VECTOR_CORRUPT = 74,
-    VECTOR_INVALID = 75,
-    GRAPH_EXISTS = 80,
-    GRAPH_NOT_FOUND = 81,
-    GRAPH_NODE_NOT_FOUND = 82,
-    GRAPH_EDGE_NOT_FOUND = 83,
-    GRAPH_INVALID = 84,
-    EXTENSION_NOT_FOUND = 90,
-    EXTENSION_EXISTS = 91,
-    EXTENSION_INVALID = 92,
-    EXTENSION_INCOMPATIBLE = 93,
-    EXTENSION_UNAVAILABLE = 94,
-    KV_TOO_LARGE = 95,
-    KV_CORRUPT = 96,
-};
+pub const ZOVA_SQL_FUNCTION_INNOCUOUS = @import("c_api/types.zig").ZOVA_SQL_FUNCTION_INNOCUOUS;
 
-pub const zova_step_result = enum(c_int) {
-    ROW = 1,
-    DONE = 2,
-};
+pub const zova_sql_value = @import("c_api/types.zig").zova_sql_value;
 
-pub const zova_column_type = enum(c_int) {
-    INTEGER = 1,
-    FLOAT = 2,
-    TEXT = 3,
-    BLOB = 4,
-    NULL = 5,
-};
+pub const zova_sql_result = @import("c_api/types.zig").zova_sql_result;
 
-pub const zova_sql_value_type = enum(c_int) {
-    NULL = 0,
-    INTEGER = 1,
-    FLOAT = 2,
-    TEXT = 3,
-    BLOB = 4,
-};
+pub const zova_sql_function_call = @import("c_api/types.zig").zova_sql_function_call;
 
-pub const zova_sql_result_type = enum(c_int) {
-    NULL = 0,
-    INTEGER = 1,
-    FLOAT = 2,
-    TEXT = 3,
-    BLOB = 4,
-    ERROR = 5,
-};
+pub const zova_sql_scalar_callback = @import("c_api/types.zig").zova_sql_scalar_callback;
 
-pub const ZOVA_SQL_FUNCTION_DETERMINISTIC: u32 = 1 << 0;
-pub const ZOVA_SQL_FUNCTION_DIRECT_ONLY: u32 = 1 << 1;
-pub const ZOVA_SQL_FUNCTION_INNOCUOUS: u32 = 1 << 2;
+pub const zova_sql_destroy_callback = @import("c_api/types.zig").zova_sql_destroy_callback;
 
-pub const zova_sql_value = extern struct {
-    value_type: zova_sql_value_type = .NULL,
-    int64_value: i64 = 0,
-    double_value: f64 = 0,
-    data: ?*const anyopaque = null,
-    data_len: usize = 0,
-};
+pub const zova_object_id = @import("c_api/types.zig").zova_object_id;
 
-pub const zova_sql_result = extern struct {
-    // Raw C integer so invalid callback result types can be reported as SQLite
-    // callback errors instead of becoming Zig enum-safety traps.
-    result_type: c_int = @intFromEnum(zova_sql_result_type.NULL),
-    int64_value: i64 = 0,
-    double_value: f64 = 0,
-    data: ?*const anyopaque = null,
-    data_len: usize = 0,
-    error_message: ?[*]const u8 = null,
-    error_message_len: usize = 0,
-};
+pub const zova_object_chunk_id = @import("c_api/types.zig").zova_object_chunk_id;
 
-pub const zova_sql_function_call = extern struct {
-    user_data: ?*anyopaque,
-    argc: usize,
-    argv: ?[*]const zova_sql_value,
-};
+pub const zova_buffer = @import("c_api/types.zig").zova_buffer;
 
-pub const zova_sql_scalar_callback = ?*const fn (?*anyopaque, ?*const zova_sql_function_call, ?*zova_sql_result) callconv(.c) void;
-pub const zova_sql_destroy_callback = ?*const fn (?*anyopaque) callconv(.c) void;
+pub const zova_message = @import("c_api/types.zig").zova_message;
 
-pub const zova_object_id = extern struct {
-    bytes: [32]u8,
-};
+pub const zova_text = @import("c_api/types.zig").zova_text;
 
-pub const zova_object_chunk_id = extern struct {
-    bytes: [32]u8,
-};
+pub const zova_notification = @import("c_api/types.zig").zova_notification;
 
-pub const zova_buffer = extern struct {
-    data: ?[*]u8,
-    len: usize,
-};
+pub const zova_object_manifest_chunk = @import("c_api/types.zig").zova_object_manifest_chunk;
 
-pub const zova_message = extern struct {
-    data: ?[*]u8,
-    len: usize,
-};
-
-pub const zova_text = extern struct {
-    data: ?[*]u8,
-    len: usize,
-};
-
-pub const zova_notification = extern struct {
-    channel: ?[*]u8,
-    channel_len: usize,
-    payload: ?[*]u8,
-    payload_len: usize,
-    sequence: u64,
-    dropped_before: u64,
-};
-
-pub const zova_object_manifest_chunk = extern struct {
-    index: u64,
-    hash: zova_object_chunk_id,
-    offset: u64,
-    size_bytes: u64,
-};
-
-pub const zova_object_manifest = extern struct {
-    object_id: zova_object_id,
-    size_bytes: u64,
-    chunk_count: u64,
-    chunker: ?[*:0]const u8,
-    chunks: ?[*]zova_object_manifest_chunk,
-    chunks_len: usize,
-};
+pub const zova_object_manifest = @import("c_api/types.zig").zova_object_manifest;
 
 /// Additive object storage profile values. The underlying field is a raw C
 /// integer in request structs so invalid foreign values can be rejected
 /// without triggering Zig enum safety traps.
-pub const zova_object_storage_profile = enum(c_int) {
-    DEDUPLICATION = 0,
-    STREAMING = 1,
-};
-
-pub const zova_object_put_options = extern struct {
-    profile: c_int = @intFromEnum(zova_object_storage_profile.DEDUPLICATION),
-};
-
-pub const zova_vector_metric = enum(c_int) {
-    COSINE = 0,
-    L2 = 1,
-    DOT = 2,
-};
-
-pub const zova_vector_element_type = enum(c_int) {
-    F32 = 0,
-    F16 = 1,
-    I8 = 2,
-};
-
-pub const zova_vector_multi_i8_search_mode = enum(c_int) {
-    GLOBAL_MIN_COSINE = 0,
-    CBM_PREFILTER_MIN_COSINE = 1,
-};
-
-pub const zova_vector_multi_i8_aggregation = enum(c_int) {
-    MIN_COSINE = 0,
-};
-
-pub const zova_graph_target_type = enum(c_int) {
-    NONE = 0,
-    RECORD = 1,
-    OBJECT = 2,
-    OBJECT_CHUNK = 3,
-    VECTOR = 4,
-    ENTITY = 5,
-    FACT = 6,
-    CONCEPT = 7,
-    EXTERNAL = 8,
-};
-
-pub const zova_graph_neighbor_direction = enum(c_int) {
-    OUTGOING = 0,
-    INCOMING = 1,
-};
-
-pub const zova_vector_collection_options = extern struct {
-    dimensions: u32,
-    // Keep this as a raw C integer instead of a Zig enum field so invalid C
-    // enum values can be reported as ZOVA_INVALID_ARGUMENT rather than tripping
-    // Zig enum safety checks.
-    metric: c_int,
-    element_type: c_int,
-};
-
-pub const zova_vector_values = extern struct {
-    element_type: c_int,
-    f32_values: ?[*]const f32,
-    f16_values: ?[*]const u16,
-    i8_values: ?[*]const i8,
-    values_len: usize,
-};
-
-pub const zova_vector = extern struct {
-    id: ?[*]u8,
-    id_len: usize,
-    element_type: c_int,
-    f32_values: ?[*]f32,
-    f16_values: ?[*]u16,
-    i8_values: ?[*]i8,
-    values_len: usize,
-};
-
-pub const zova_vector_search_result = extern struct {
-    id: ?[*]u8,
-    id_len: usize,
-    distance: f64,
-};
-
-pub const zova_vector_search_results = extern struct {
-    items: ?[*]zova_vector_search_result,
-    len: usize,
-};
-
-pub const zova_vector_collection_info = extern struct {
-    name: ?[*]u8,
-    name_len: usize,
-    dimensions: u32,
-    metric: c_int,
-    element_type: c_int,
-    vector_count: u64,
-};
-
-pub const zova_vector_collection_list = extern struct {
-    items: ?[*]zova_vector_collection_info,
-    len: usize,
-};
-
-pub const zova_vector_input = extern struct {
-    id: ?[*:0]const u8,
-    values: zova_vector_values,
-};
-
-pub const zova_graph_info = extern struct {
-    name: ?[*]u8,
-    name_len: usize,
-    node_count: u64,
-    edge_count: u64,
-};
-
-pub const zova_graph_list = extern struct {
-    items: ?[*]zova_graph_info,
-    len: usize,
-};
-
-pub const zova_extension_info = extern struct {
-    name: ?[*]u8,
-    name_len: usize,
-    version: ?[*]u8,
-    version_len: usize,
-    storage_prefix: ?[*]u8,
-    storage_prefix_len: usize,
-    zova_abi_min: ?[*]u8,
-    zova_abi_min_len: usize,
-    capabilities: ?[*]u8,
-    capabilities_len: usize,
-    required: u8,
-    installed_at_unix: i64,
-    manifest_json: ?[*]u8,
-    manifest_json_len: usize,
-};
-
-pub const zova_extension_list = extern struct {
-    items: ?[*]zova_extension_info,
-    len: usize,
-};
-
-pub const zova_graph_node = extern struct {
-    graph_name: ?[*]u8,
-    graph_name_len: usize,
-    node_id: ?[*]u8,
-    node_id_len: usize,
-    kind: ?[*]u8,
-    kind_len: usize,
-    target_type: c_int,
-    target_namespace: ?[*]u8,
-    target_namespace_len: usize,
-    has_target_namespace: u8,
-    target_ref: ?[*]u8,
-    target_ref_len: usize,
-    has_target_ref: u8,
-};
-
-pub const zova_graph_edge = extern struct {
-    graph_name: ?[*]u8,
-    graph_name_len: usize,
-    from_node_id: ?[*]u8,
-    from_node_id_len: usize,
-    edge_type: ?[*]u8,
-    edge_type_len: usize,
-    to_node_id: ?[*]u8,
-    to_node_id_len: usize,
-};
-
-pub const zova_graph_neighbor_result = extern struct {
-    node_id: ?[*]u8,
-    node_id_len: usize,
-    kind: ?[*]u8,
-    kind_len: usize,
-    edge_type: ?[*]u8,
-    edge_type_len: usize,
-};
-
-pub const zova_graph_neighbor_results = extern struct {
-    items: ?[*]zova_graph_neighbor_result,
-    len: usize,
-};
-
-pub const zova_graph_keyed_neighbor_result = extern struct {
-    edge_key: i64,
-    neighbor_node_key: i64,
-    node_id: ?[*]u8,
-    node_id_len: usize,
-    kind: ?[*]u8,
-    kind_len: usize,
-    edge_type: ?[*]u8,
-    edge_type_len: usize,
-};
-
-pub const zova_graph_keyed_neighbor_results = extern struct {
-    items: ?[*]zova_graph_keyed_neighbor_result,
-    len: usize,
-};
-
-pub const zova_graph_keyed_node_result = extern struct {
-    found: u8,
-    node_key: i64,
-    node_id: ?[*]u8,
-    node_id_len: usize,
-    kind: ?[*]u8,
-    kind_len: usize,
-    created_order: i64,
-};
-pub const zova_graph_keyed_node_results = extern struct { items: ?[*]zova_graph_keyed_node_result, len: usize };
-pub const zova_graph_keyed_edge_result = extern struct {
-    found: u8,
-    edge_key: i64,
-    source_node_key: i64,
-    edge_type: ?[*]u8,
-    edge_type_len: usize,
-    target_node_key: i64,
-    created_order: i64,
-};
-pub const zova_graph_keyed_edge_results = extern struct { items: ?[*]zova_graph_keyed_edge_result, len: usize };
-pub const zova_graph_edge_payload_result = extern struct {
-    found: u8,
-    edge_key: i64,
-    payload: ?[*]u8,
-    payload_len: usize,
-};
-pub const zova_graph_edge_payload_results = extern struct { items: ?[*]zova_graph_edge_payload_result, len: usize };
-
-pub const zova_fresh_build_profile = extern struct {
-    validation_ms: f64 = 0,
-    table_load_ms: f64 = 0,
-    fts_load_ms: f64 = 0,
-    graph_load_ms: f64 = 0,
-    graph_validation_ms: f64 = 0,
-    graph_key_generation_ms: f64 = 0,
-    graph_node_load_ms: f64 = 0,
-    graph_edge_load_ms: f64 = 0,
-    vector_load_ms: f64 = 0,
-    index_build_ms: f64 = 0,
-    commit_ms: f64 = 0,
-    table_rows: u64 = 0,
-    fts_rows: u64 = 0,
-    vector_rows: u64 = 0,
-    payload_bytes: u64 = 0,
-};
-
-pub const zova_fresh_value = extern struct {
-    value_type: c_int,
-    int64_value: i64,
-    float64_value: f64,
-    bytes: ?[*]const u8,
-    bytes_len: usize,
-};
-
-pub const zova_graph_scan_cursor = extern struct {
-    created_order: i64,
-    key: i64,
-};
-
-pub const zova_graph_scan_node = extern struct {
-    node_key: i64,
-    node_id: ?[*]u8,
-    node_id_len: usize,
-    kind: ?[*]u8,
-    kind_len: usize,
-    created_order: i64,
-};
-
-pub const zova_graph_scan_edge = extern struct {
-    edge_key: i64,
-    source_node_key: i64,
-    edge_type: ?[*]u8,
-    edge_type_len: usize,
-    target_node_key: i64,
-    created_order: i64,
-};
-
-pub const zova_graph_scan_results = extern struct {
-    nodes: ?[*]zova_graph_scan_node,
-    nodes_len: usize,
-    edges: ?[*]zova_graph_scan_edge,
-    edges_len: usize,
-    has_more_nodes: u8,
-    has_more_edges: u8,
-};
-
-pub const zova_graph_walk_result = extern struct {
-    node_id: ?[*]u8,
-    node_id_len: usize,
-    kind: ?[*]u8,
-    kind_len: usize,
-    depth: u32,
-    predecessor_node_id: ?[*]u8,
-    predecessor_node_id_len: usize,
-    has_predecessor_node_id: u8,
-    edge_type: ?[*]u8,
-    edge_type_len: usize,
-    has_edge_type: u8,
-};
-
-pub const zova_graph_walk_results = extern struct {
-    items: ?[*]zova_graph_walk_result,
-    len: usize,
-};
-
-pub const zova_graph_walk_profile = extern struct {
-    mutex_wait_ms: f64 = 0,
-    root_lookup_ms: f64 = 0,
-    adjacency_prepare_ms: f64 = 0,
-    adjacency_execute_ms: f64 = 0,
-    bfs_bookkeeping_allocation_ms: f64 = 0,
-    c_abi_result_export_ms: f64 = 0,
-    total_profiled_ms: f64 = 0,
-    frontier_expansions: u64 = 0,
-    adjacency_query_binds: u64 = 0,
-    adjacency_rows_stepped: u64 = 0,
-    result_count: u64 = 0,
-};
-
-pub const ZOVA_OPEN_READ_ONLY: u32 = 1 << 0;
-pub const ZOVA_BACKUP_NO_VERIFY: u32 = 1 << 0;
-pub const ZOVA_COMPACT_NO_VERIFY: u32 = 1 << 0;
-pub const ZOVA_RESTORE_NO_VERIFY: u32 = 1 << 0;
-pub const ZOVA_MIGRATE_NO_VERIFY: u32 = 1 << 0;
-
-pub const zova_format_compatibility = enum(c_int) {
-    CURRENT = 0,
-    MIGRATABLE = 1,
-    UNSUPPORTED_LEGACY = 2,
-    UNSUPPORTED_FUTURE = 3,
-};
-
-pub const zova_database_format_info = extern struct {
-    format_version: u32 = 0,
-    compatibility: c_int = 0,
-};
-
-pub const zova_database_probe_format_request = extern struct {
-    path: ?[*:0]const u8 = null,
-    out_info: ?*zova_database_format_info = null,
-    out_error_message: ?*zova_message = null,
-};
-
-pub const zova_database_migrate_request = extern struct {
-    source_path: ?[*:0]const u8 = null,
-    destination_path: ?[*:0]const u8 = null,
-    flags: u32 = 0,
-    out_error_message: ?*zova_message = null,
-};
-
-pub const zova_database_open_request = extern struct {
-    path: ?[*:0]const u8,
-    out_db: ?*?*zova_database,
-    out_error_message: ?*zova_message,
-};
-
-pub const zova_database_create_memory_request = extern struct {
-    out_db: ?*?*zova_database,
-    out_error_message: ?*zova_message,
-};
-
-pub const zova_database_restore_to_memory_request = extern struct {
-    source_path: ?[*:0]const u8,
-    flags: u32,
-    out_db: ?*?*zova_database,
-    out_error_message: ?*zova_message,
-};
-
-pub const zova_database_create_options_request = extern struct {
-    path: ?[*:0]const u8,
-    page_size: u32,
-    out_db: ?*?*zova_database,
-    out_error_message: ?*zova_message,
-};
-
-pub const zova_database_open_options_request = extern struct {
-    path: ?[*:0]const u8,
-    flags: u32,
-    busy_timeout_ms: u32,
-    out_db: ?*?*zova_database,
-    out_error_message: ?*zova_message,
-};
-
-pub const zova_database_open_extensions_request = extern struct {
-    path: ?[*:0]const u8,
-    flags: u32,
-    busy_timeout_ms: u32,
-    extension_bundle_paths: ?[*]const ?[*:0]const u8,
-    extension_bundle_count: usize,
-    trust_store_path: ?[*:0]const u8,
-    out_db: ?*?*zova_database,
-    out_error_message: ?*zova_message,
-};
-
-pub const zova_extension_bundle_request = extern struct {
-    bundle_path: ?[*:0]const u8,
-    trust_store_path: ?[*:0]const u8,
-    out_error_message: ?*zova_message,
-};
-
-pub const zova_extension_bundle_untrust_request = extern struct {
-    identifier: ?[*:0]const u8,
-    trust_store_path: ?[*:0]const u8,
-    out_removed: ?*u8,
-    out_error_message: ?*zova_message,
-};
-
-pub const zova_convert_sqlite_to_zova_request = extern struct {
-    source_path: ?[*:0]const u8,
-    dest_path: ?[*:0]const u8,
-    out_error_message: ?*zova_message,
-};
-
-pub const zova_database_backup_request = extern struct {
-    db: ?*zova_database,
-    destination_path: ?[*:0]const u8,
-    flags: u32,
-};
-
-pub const zova_database_compact_request = extern struct {
-    db: ?*zova_database,
-    destination_path: ?[*:0]const u8,
-    flags: u32,
-};
-
-pub const zova_database_restore_request = extern struct {
-    source_path: ?[*:0]const u8,
-    destination_path: ?[*:0]const u8,
-    flags: u32,
-    out_error_message: ?*zova_message,
-};
-
-pub const zova_database_exec_request = extern struct {
-    db: ?*zova_database,
-    sql: ?[*:0]const u8,
-};
-
-pub const zova_sql_function_register_request = extern struct {
-    db: ?*zova_database,
-    name: ?[*:0]const u8,
-    arity: c_int,
-    flags: u32,
-    user_data: ?*anyopaque,
-    callback: zova_sql_scalar_callback,
-    destroy: zova_sql_destroy_callback,
-};
-
-pub const zova_database_simple_request = extern struct {
-    db: ?*zova_database,
-};
-
-pub const zova_database_savepoint_request = extern struct {
-    db: ?*zova_database,
-    name: ?[*:0]const u8,
-};
-
-pub const zova_database_busy_timeout_request = extern struct {
-    db: ?*zova_database,
-    milliseconds: u32,
-};
-
-pub const zova_database_last_insert_rowid_request = extern struct {
-    db: ?*zova_database,
-    out_rowid: ?*i64,
-};
-
-pub const zova_database_changes_request = extern struct {
-    db: ?*zova_database,
-    out_changes: ?*i64,
-};
-
-pub const zova_database_total_changes_request = extern struct {
-    db: ?*zova_database,
-    out_total_changes: ?*i64,
-};
-
-pub const zova_database_notify_request = extern struct {
-    db: ?*zova_database,
-    channel: ?[*:0]const u8,
-    payload: ?[*]const u8,
-    payload_len: usize,
-};
-
-pub const zova_database_listen_request = extern struct {
-    db: ?*zova_database,
-    channel: ?[*:0]const u8,
-    out_subscription: ?*?*zova_subscription,
-};
-
-pub const zova_subscription_try_receive_request = extern struct {
-    subscription: ?*zova_subscription,
-    out_notification: ?*zova_notification,
-    out_has_notification: ?*u8,
-};
-
-pub const zova_database_prepare_request = extern struct {
-    db: ?*zova_database,
-    sql: ?[*:0]const u8,
-    out_statement: ?*?*zova_statement,
-};
-
-pub const zova_statement_step_request = extern struct {
-    statement: ?*zova_statement,
-    out_result: ?*zova_step_result,
-};
-
-pub const zova_statement_bind_null_request = extern struct {
-    statement: ?*zova_statement,
-    index: c_int,
-};
-
-pub const zova_statement_bind_int64_request = extern struct {
-    statement: ?*zova_statement,
-    index: c_int,
-    value: i64,
-};
-
-pub const zova_statement_bind_double_request = extern struct {
-    statement: ?*zova_statement,
-    index: c_int,
-    value: f64,
-};
-
-pub const zova_statement_bind_text_request = extern struct {
-    statement: ?*zova_statement,
-    index: c_int,
-    data: ?[*]const u8,
-    len: usize,
-};
-
-pub const zova_statement_bind_blob_request = extern struct {
-    statement: ?*zova_statement,
-    index: c_int,
-    data: ?[*]const u8,
-    len: usize,
-};
-
-pub const zova_statement_parameter_count_request = extern struct {
-    statement: ?*zova_statement,
-    out_count: ?*c_int,
-};
-
-pub const zova_statement_parameter_index_request = extern struct {
-    statement: ?*zova_statement,
-    name: ?[*:0]const u8,
-    out_index: ?*c_int,
-};
-
-pub const zova_statement_column_count_request = extern struct {
-    statement: ?*zova_statement,
-    out_count: ?*c_int,
-};
-
-pub const zova_statement_column_name_request = extern struct {
-    statement: ?*zova_statement,
-    index: c_int,
-    out_name: ?*zova_text,
-};
-
-pub const zova_statement_column_type_request = extern struct {
-    statement: ?*zova_statement,
-    index: c_int,
-    out_type: ?*zova_column_type,
-};
-
-pub const zova_statement_column_int64_request = extern struct {
-    statement: ?*zova_statement,
-    index: c_int,
-    out_value: ?*i64,
-};
-
-pub const zova_statement_column_double_request = extern struct {
-    statement: ?*zova_statement,
-    index: c_int,
-    out_value: ?*f64,
-};
-
-pub const zova_statement_column_text_request = extern struct {
-    statement: ?*zova_statement,
-    index: c_int,
-    out_text: ?*zova_text,
-};
-
-pub const zova_statement_column_blob_request = extern struct {
-    statement: ?*zova_statement,
-    index: c_int,
-    out_buffer: ?*zova_buffer,
-};
-
-pub const zova_object_put_request = extern struct {
-    db: ?*zova_database,
-    data: ?[*]const u8,
-    len: usize,
-    out_id: ?*zova_object_id,
-};
-
-pub const zova_object_put_with_options_request = extern struct {
-    db: ?*zova_database,
-    data: ?[*]const u8,
-    len: usize,
-    options: zova_object_put_options,
-    out_id: ?*zova_object_id,
-};
-
-pub const zova_object_get_request = extern struct {
-    db: ?*zova_database,
-    id: zova_object_id,
-    out_buffer: ?*zova_buffer,
-};
-
-pub const zova_object_read_range_request = extern struct {
-    db: ?*zova_database,
-    id: zova_object_id,
-    offset: u64,
-    buffer: ?[*]u8,
-    buffer_len: usize,
-    out_copied: ?*usize,
-};
-
-pub const zova_object_exists_request = extern struct {
-    db: ?*zova_database,
-    id: zova_object_id,
-    out_exists: ?*u8,
-};
-
-pub const zova_object_size_request = extern struct {
-    db: ?*zova_database,
-    id: zova_object_id,
-    out_size: ?*u64,
-};
-
-pub const zova_object_chunk_count_request = extern struct {
-    db: ?*zova_database,
-    id: zova_object_id,
-    out_count: ?*u64,
-};
-
-pub const zova_object_delete_request = extern struct {
-    db: ?*zova_database,
-    id: zova_object_id,
-};
-
-pub const zova_object_manifest_get_request = extern struct {
-    db: ?*zova_database,
-    id: zova_object_id,
-    out_manifest: ?*zova_object_manifest,
-};
-
-pub const zova_object_chunk_get_request = extern struct {
-    db: ?*zova_database,
-    hash: zova_object_chunk_id,
-    out_buffer: ?*zova_buffer,
-};
-
-pub const zova_object_chunk_put_request = extern struct {
-    db: ?*zova_database,
-    expected_hash: zova_object_chunk_id,
-    data: ?[*]const u8,
-    len: usize,
-};
-
-pub const zova_object_chunk_put_with_options_request = extern struct {
-    db: ?*zova_database,
-    expected_hash: zova_object_chunk_id,
-    data: ?[*]const u8,
-    len: usize,
-    options: zova_object_put_options,
-};
-
-pub const zova_object_chunk_delete_request = extern struct {
-    db: ?*zova_database,
-    hash: zova_object_chunk_id,
-    out_deleted: ?*u8,
-};
-
-pub const zova_object_assemble_from_chunks_request = extern struct {
-    db: ?*zova_database,
-    id: zova_object_id,
-    size_bytes: u64,
-    chunks: ?[*]const zova_object_manifest_chunk,
-    chunk_count: usize,
-};
-
-pub const zova_object_assemble_from_chunks_with_options_request = extern struct {
-    db: ?*zova_database,
-    id: zova_object_id,
-    size_bytes: u64,
-    chunks: ?[*]const zova_object_manifest_chunk,
-    chunk_count: usize,
-    options: zova_object_put_options,
-};
-
-pub const zova_object_writer_create_request = extern struct {
-    db: ?*zova_database,
-    out_writer: ?*?*zova_object_writer,
-};
-
-pub const zova_object_writer_create_with_options_request = extern struct {
-    db: ?*zova_database,
-    options: zova_object_put_options,
-    out_writer: ?*?*zova_object_writer,
-};
-
-pub const zova_object_writer_write_request = extern struct {
-    writer: ?*zova_object_writer,
-    data: ?[*]const u8,
-    len: usize,
-};
-
-pub const zova_object_writer_finish_request = extern struct {
-    writer: ?*zova_object_writer,
-    out_id: ?*zova_object_id,
-};
-
-pub const zova_object_writer_cancel_request = extern struct {
-    writer: ?*zova_object_writer,
-};
-
-pub const zova_object_reader_create_request = extern struct {
-    db: ?*zova_database,
-    id: zova_object_id,
-    out_reader: ?*?*zova_object_reader,
-};
-
-pub const zova_object_reader_read_request = extern struct {
-    reader: ?*zova_object_reader,
-    buffer: ?[*]u8,
-    buffer_len: usize,
-    out_read: ?*usize,
-};
-
-pub const zova_object_reader_destroy_request = extern struct {
-    reader: ?*?*zova_object_reader,
-};
+pub const zova_object_storage_profile = @import("c_api/types.zig").zova_object_storage_profile;
+
+pub const zova_object_put_options = @import("c_api/types.zig").zova_object_put_options;
+
+pub const zova_vector_metric = @import("c_api/types.zig").zova_vector_metric;
+
+pub const zova_vector_element_type = @import("c_api/types.zig").zova_vector_element_type;
+
+pub const zova_vector_multi_i8_search_mode = @import("c_api/types.zig").zova_vector_multi_i8_search_mode;
+
+pub const zova_vector_multi_i8_aggregation = @import("c_api/types.zig").zova_vector_multi_i8_aggregation;
+
+pub const zova_graph_target_type = @import("c_api/types.zig").zova_graph_target_type;
+
+pub const zova_graph_neighbor_direction = @import("c_api/types.zig").zova_graph_neighbor_direction;
+
+pub const zova_vector_collection_options = @import("c_api/types.zig").zova_vector_collection_options;
+
+pub const zova_vector_values = @import("c_api/types.zig").zova_vector_values;
+
+pub const zova_vector = @import("c_api/types.zig").zova_vector;
+
+pub const zova_vector_search_result = @import("c_api/types.zig").zova_vector_search_result;
+
+pub const zova_vector_search_results = @import("c_api/types.zig").zova_vector_search_results;
+
+pub const zova_vector_collection_info = @import("c_api/types.zig").zova_vector_collection_info;
+
+pub const zova_vector_collection_list = @import("c_api/types.zig").zova_vector_collection_list;
+
+pub const zova_vector_input = @import("c_api/types.zig").zova_vector_input;
+
+pub const zova_graph_info = @import("c_api/types.zig").zova_graph_info;
+
+pub const zova_graph_list = @import("c_api/types.zig").zova_graph_list;
+
+pub const zova_extension_info = @import("c_api/types.zig").zova_extension_info;
+
+pub const zova_extension_list = @import("c_api/types.zig").zova_extension_list;
+
+pub const zova_graph_node = @import("c_api/types.zig").zova_graph_node;
+
+pub const zova_graph_edge = @import("c_api/types.zig").zova_graph_edge;
+
+pub const zova_graph_neighbor_result = @import("c_api/types.zig").zova_graph_neighbor_result;
+
+pub const zova_graph_neighbor_results = @import("c_api/types.zig").zova_graph_neighbor_results;
+
+pub const zova_graph_keyed_neighbor_result = @import("c_api/types.zig").zova_graph_keyed_neighbor_result;
+
+pub const zova_graph_keyed_neighbor_results = @import("c_api/types.zig").zova_graph_keyed_neighbor_results;
+
+pub const zova_graph_keyed_node_result = @import("c_api/types.zig").zova_graph_keyed_node_result;
+
+pub const zova_graph_keyed_node_results = @import("c_api/types.zig").zova_graph_keyed_node_results;
+
+pub const zova_graph_keyed_edge_result = @import("c_api/types.zig").zova_graph_keyed_edge_result;
+
+pub const zova_graph_keyed_edge_results = @import("c_api/types.zig").zova_graph_keyed_edge_results;
+
+pub const zova_graph_edge_payload_result = @import("c_api/types.zig").zova_graph_edge_payload_result;
+
+pub const zova_graph_edge_payload_results = @import("c_api/types.zig").zova_graph_edge_payload_results;
+
+pub const zova_fresh_build_profile = @import("c_api/types.zig").zova_fresh_build_profile;
+
+pub const zova_fresh_value = @import("c_api/types.zig").zova_fresh_value;
+
+pub const zova_graph_scan_cursor = @import("c_api/types.zig").zova_graph_scan_cursor;
+
+pub const zova_graph_scan_node = @import("c_api/types.zig").zova_graph_scan_node;
+
+pub const zova_graph_scan_edge = @import("c_api/types.zig").zova_graph_scan_edge;
+
+pub const zova_graph_scan_results = @import("c_api/types.zig").zova_graph_scan_results;
+
+pub const zova_graph_walk_result = @import("c_api/types.zig").zova_graph_walk_result;
+
+pub const zova_graph_walk_results = @import("c_api/types.zig").zova_graph_walk_results;
+
+pub const zova_graph_walk_profile = @import("c_api/types.zig").zova_graph_walk_profile;
+
+pub const ZOVA_OPEN_READ_ONLY = @import("c_api/types.zig").ZOVA_OPEN_READ_ONLY;
+
+pub const ZOVA_BACKUP_NO_VERIFY = @import("c_api/types.zig").ZOVA_BACKUP_NO_VERIFY;
+
+pub const ZOVA_COMPACT_NO_VERIFY = @import("c_api/types.zig").ZOVA_COMPACT_NO_VERIFY;
+
+pub const ZOVA_RESTORE_NO_VERIFY = @import("c_api/types.zig").ZOVA_RESTORE_NO_VERIFY;
+
+pub const ZOVA_MIGRATE_NO_VERIFY = @import("c_api/types.zig").ZOVA_MIGRATE_NO_VERIFY;
+
+pub const zova_format_compatibility = @import("c_api/types.zig").zova_format_compatibility;
+
+pub const zova_database_format_info = @import("c_api/types.zig").zova_database_format_info;
+
+pub const zova_database_probe_format_request = @import("c_api/types.zig").zova_database_probe_format_request;
+
+pub const zova_database_migrate_request = @import("c_api/types.zig").zova_database_migrate_request;
+
+pub const zova_database_open_request = @import("c_api/types.zig").zova_database_open_request;
+
+pub const zova_database_create_memory_request = @import("c_api/types.zig").zova_database_create_memory_request;
+
+pub const zova_database_restore_to_memory_request = @import("c_api/types.zig").zova_database_restore_to_memory_request;
+
+pub const zova_database_create_options_request = @import("c_api/types.zig").zova_database_create_options_request;
+
+pub const zova_database_open_options_request = @import("c_api/types.zig").zova_database_open_options_request;
+
+pub const zova_database_open_extensions_request = @import("c_api/types.zig").zova_database_open_extensions_request;
+
+pub const zova_extension_bundle_request = @import("c_api/types.zig").zova_extension_bundle_request;
+
+pub const zova_extension_bundle_untrust_request = @import("c_api/types.zig").zova_extension_bundle_untrust_request;
+
+pub const zova_convert_sqlite_to_zova_request = @import("c_api/types.zig").zova_convert_sqlite_to_zova_request;
+
+pub const zova_database_backup_request = @import("c_api/types.zig").zova_database_backup_request;
+
+pub const zova_database_compact_request = @import("c_api/types.zig").zova_database_compact_request;
+
+pub const zova_database_restore_request = @import("c_api/types.zig").zova_database_restore_request;
+
+pub const zova_database_exec_request = @import("c_api/types.zig").zova_database_exec_request;
+
+pub const zova_sql_function_register_request = @import("c_api/types.zig").zova_sql_function_register_request;
+
+pub const zova_database_simple_request = @import("c_api/types.zig").zova_database_simple_request;
+
+pub const zova_database_savepoint_request = @import("c_api/types.zig").zova_database_savepoint_request;
+
+pub const zova_database_busy_timeout_request = @import("c_api/types.zig").zova_database_busy_timeout_request;
+
+pub const zova_database_last_insert_rowid_request = @import("c_api/types.zig").zova_database_last_insert_rowid_request;
+
+pub const zova_database_changes_request = @import("c_api/types.zig").zova_database_changes_request;
+
+pub const zova_database_total_changes_request = @import("c_api/types.zig").zova_database_total_changes_request;
+
+pub const zova_database_notify_request = @import("c_api/types.zig").zova_database_notify_request;
+
+pub const zova_database_listen_request = @import("c_api/types.zig").zova_database_listen_request;
+
+pub const zova_subscription_try_receive_request = @import("c_api/types.zig").zova_subscription_try_receive_request;
+
+pub const zova_database_prepare_request = @import("c_api/types.zig").zova_database_prepare_request;
+
+pub const zova_statement_step_request = @import("c_api/types.zig").zova_statement_step_request;
+
+pub const zova_statement_bind_null_request = @import("c_api/types.zig").zova_statement_bind_null_request;
+
+pub const zova_statement_bind_int64_request = @import("c_api/types.zig").zova_statement_bind_int64_request;
+
+pub const zova_statement_bind_double_request = @import("c_api/types.zig").zova_statement_bind_double_request;
+
+pub const zova_statement_bind_text_request = @import("c_api/types.zig").zova_statement_bind_text_request;
+
+pub const zova_statement_bind_blob_request = @import("c_api/types.zig").zova_statement_bind_blob_request;
+
+pub const zova_statement_parameter_count_request = @import("c_api/types.zig").zova_statement_parameter_count_request;
+
+pub const zova_statement_parameter_index_request = @import("c_api/types.zig").zova_statement_parameter_index_request;
+
+pub const zova_statement_column_count_request = @import("c_api/types.zig").zova_statement_column_count_request;
+
+pub const zova_statement_column_name_request = @import("c_api/types.zig").zova_statement_column_name_request;
+
+pub const zova_statement_column_type_request = @import("c_api/types.zig").zova_statement_column_type_request;
+
+pub const zova_statement_column_int64_request = @import("c_api/types.zig").zova_statement_column_int64_request;
+
+pub const zova_statement_column_double_request = @import("c_api/types.zig").zova_statement_column_double_request;
+
+pub const zova_statement_column_text_request = @import("c_api/types.zig").zova_statement_column_text_request;
+
+pub const zova_statement_column_blob_request = @import("c_api/types.zig").zova_statement_column_blob_request;
+
+pub const zova_object_put_request = @import("c_api/types.zig").zova_object_put_request;
+
+pub const zova_object_put_with_options_request = @import("c_api/types.zig").zova_object_put_with_options_request;
+
+pub const zova_object_get_request = @import("c_api/types.zig").zova_object_get_request;
+
+pub const zova_object_read_range_request = @import("c_api/types.zig").zova_object_read_range_request;
+
+pub const zova_object_exists_request = @import("c_api/types.zig").zova_object_exists_request;
+
+pub const zova_object_size_request = @import("c_api/types.zig").zova_object_size_request;
+
+pub const zova_object_chunk_count_request = @import("c_api/types.zig").zova_object_chunk_count_request;
+
+pub const zova_object_delete_request = @import("c_api/types.zig").zova_object_delete_request;
+
+pub const zova_object_manifest_get_request = @import("c_api/types.zig").zova_object_manifest_get_request;
+
+pub const zova_object_chunk_get_request = @import("c_api/types.zig").zova_object_chunk_get_request;
+
+pub const zova_object_chunk_put_request = @import("c_api/types.zig").zova_object_chunk_put_request;
+
+pub const zova_object_chunk_put_with_options_request = @import("c_api/types.zig").zova_object_chunk_put_with_options_request;
+
+pub const zova_object_chunk_delete_request = @import("c_api/types.zig").zova_object_chunk_delete_request;
+
+pub const zova_object_assemble_from_chunks_request = @import("c_api/types.zig").zova_object_assemble_from_chunks_request;
+
+pub const zova_object_assemble_from_chunks_with_options_request = @import("c_api/types.zig").zova_object_assemble_from_chunks_with_options_request;
+
+pub const zova_object_writer_create_request = @import("c_api/types.zig").zova_object_writer_create_request;
+
+pub const zova_object_writer_create_with_options_request = @import("c_api/types.zig").zova_object_writer_create_with_options_request;
+
+pub const zova_object_writer_write_request = @import("c_api/types.zig").zova_object_writer_write_request;
+
+pub const zova_object_writer_finish_request = @import("c_api/types.zig").zova_object_writer_finish_request;
+
+pub const zova_object_writer_cancel_request = @import("c_api/types.zig").zova_object_writer_cancel_request;
+
+pub const zova_object_reader_create_request = @import("c_api/types.zig").zova_object_reader_create_request;
+
+pub const zova_object_reader_read_request = @import("c_api/types.zig").zova_object_reader_read_request;
+
+pub const zova_object_reader_destroy_request = @import("c_api/types.zig").zova_object_reader_destroy_request;
 
 /// Borrowed byte slice for key-value operations. Zova copies caller input
 /// during the call and retains no caller memory.
-pub const zova_kv_bytes = extern struct {
-    data: ?[*]const u8,
-    len: usize,
-};
+pub const zova_kv_bytes = @import("c_api/types.zig").zova_kv_bytes;
 
 /// Owned key-value get result. Free with `zova_kv_get_result_free`.
-pub const zova_kv_get_result = extern struct {
-    found: u8,
-    value: zova_buffer,
-};
+pub const zova_kv_get_result = @import("c_api/types.zig").zova_kv_get_result;
 
 /// Owned many-get results. Free with `zova_kv_get_many_results_free`.
-pub const zova_kv_get_many_results = extern struct {
-    items: ?[*]zova_kv_get_result,
-    len: usize,
-};
+pub const zova_kv_get_many_results = @import("c_api/types.zig").zova_kv_get_many_results;
 
 /// Borrowed batch put entry.
-pub const zova_kv_put_entry = extern struct {
-    key: zova_kv_bytes,
-    value: zova_kv_bytes,
-};
+pub const zova_kv_put_entry = @import("c_api/types.zig").zova_kv_put_entry;
 
-pub const zova_kv_get_request = extern struct {
-    db: ?*zova_database,
-    ns: zova_kv_bytes,
-    key: zova_kv_bytes,
-    out_result: ?*zova_kv_get_result,
-};
+pub const zova_kv_get_request = @import("c_api/types.zig").zova_kv_get_request;
 
-pub const zova_kv_get_many_request = extern struct {
-    db: ?*zova_database,
-    ns: zova_kv_bytes,
-    keys: ?[*]const zova_kv_bytes,
-    keys_len: usize,
-    out_results: ?*zova_kv_get_many_results,
-};
+pub const zova_kv_get_many_request = @import("c_api/types.zig").zova_kv_get_many_request;
 
-pub const zova_kv_put_request = extern struct {
-    db: ?*zova_database,
-    ns: zova_kv_bytes,
-    key: zova_kv_bytes,
-    value: zova_kv_bytes,
-};
+pub const zova_kv_put_request = @import("c_api/types.zig").zova_kv_put_request;
 
-pub const zova_kv_put_many_request = extern struct {
-    db: ?*zova_database,
-    ns: zova_kv_bytes,
-    entries: ?[*]const zova_kv_put_entry,
-    entries_len: usize,
-};
+pub const zova_kv_put_many_request = @import("c_api/types.zig").zova_kv_put_many_request;
 
-pub const zova_kv_delete_request = extern struct {
-    db: ?*zova_database,
-    ns: zova_kv_bytes,
-    key: zova_kv_bytes,
-};
+pub const zova_kv_delete_request = @import("c_api/types.zig").zova_kv_delete_request;
 
-pub const zova_kv_delete_many_request = extern struct {
-    db: ?*zova_database,
-    ns: zova_kv_bytes,
-    keys: ?[*]const zova_kv_bytes,
-    keys_len: usize,
-};
+pub const zova_kv_delete_many_request = @import("c_api/types.zig").zova_kv_delete_many_request;
 
-pub const zova_kv_count_request = extern struct {
-    db: ?*zova_database,
-    ns: zova_kv_bytes,
-    out_count: ?*u64,
-};
+pub const zova_kv_count_request = @import("c_api/types.zig").zova_kv_count_request;
 
-pub const zova_kv_clear_namespace_request = extern struct {
-    db: ?*zova_database,
-    ns: zova_kv_bytes,
-};
+pub const zova_kv_clear_namespace_request = @import("c_api/types.zig").zova_kv_clear_namespace_request;
 
-pub const zova_vector_collection_create_request = extern struct {
-    db: ?*zova_database,
-    name: ?[*:0]const u8,
-    options: zova_vector_collection_options,
-};
+pub const zova_vector_collection_create_request = @import("c_api/types.zig").zova_vector_collection_create_request;
 
-pub const zova_vector_collection_exists_request = extern struct {
-    db: ?*zova_database,
-    name: ?[*:0]const u8,
-    out_exists: ?*u8,
-};
+pub const zova_vector_collection_exists_request = @import("c_api/types.zig").zova_vector_collection_exists_request;
 
-pub const zova_vector_put_request = extern struct {
-    db: ?*zova_database,
-    collection_name: ?[*:0]const u8,
-    vector_id: ?[*:0]const u8,
-    values: zova_vector_values,
-};
+pub const zova_vector_put_request = @import("c_api/types.zig").zova_vector_put_request;
 
-pub const zova_vector_get_request = extern struct {
-    db: ?*zova_database,
-    collection_name: ?[*:0]const u8,
-    vector_id: ?[*:0]const u8,
-    out_vector: ?*zova_vector,
-};
+pub const zova_vector_get_request = @import("c_api/types.zig").zova_vector_get_request;
 
-pub const zova_vector_exists_request = extern struct {
-    db: ?*zova_database,
-    collection_name: ?[*:0]const u8,
-    vector_id: ?[*:0]const u8,
-    out_exists: ?*u8,
-};
+pub const zova_vector_exists_request = @import("c_api/types.zig").zova_vector_exists_request;
 
-pub const zova_vector_delete_request = extern struct {
-    db: ?*zova_database,
-    collection_name: ?[*:0]const u8,
-    vector_id: ?[*:0]const u8,
-};
+pub const zova_vector_delete_request = @import("c_api/types.zig").zova_vector_delete_request;
 
-pub const zova_vector_search_request = extern struct {
-    db: ?*zova_database,
-    collection_name: ?[*:0]const u8,
-    query: zova_vector_values,
-    limit: usize,
-    out_results: ?*zova_vector_search_results,
-};
+pub const zova_vector_search_request = @import("c_api/types.zig").zova_vector_search_request;
 
-pub const zova_vector_search_in_request = extern struct {
-    db: ?*zova_database,
-    collection_name: ?[*:0]const u8,
-    query: zova_vector_values,
-    candidate_ids: ?[*]const ?[*:0]const u8,
-    candidate_count: usize,
-    limit: usize,
-    out_results: ?*zova_vector_search_results,
-};
+pub const zova_vector_search_in_request = @import("c_api/types.zig").zova_vector_search_in_request;
 
-pub const zova_vector_search_multi_i8_request = extern struct {
-    db: ?*zova_database,
-    collection_name: ?[*:0]const u8,
-    query_values: ?[*]const i8,
-    query_values_len: usize,
-    query_count: usize,
-    dimensions: usize,
-    candidate_ids: ?[*]const ?[*:0]const u8,
-    candidate_count: usize,
-    mode: c_int,
-    aggregation: c_int,
-    prefilter_query_index: usize,
-    prefilter_limit: usize,
-    limit: usize,
-    out_results: ?*zova_vector_search_results,
-};
+pub const zova_vector_search_multi_i8_request = @import("c_api/types.zig").zova_vector_search_multi_i8_request;
 
-pub const zova_vector_collection_info_get_request = extern struct {
-    db: ?*zova_database,
-    name: ?[*:0]const u8,
-    out_info: ?*zova_vector_collection_info,
-};
+pub const zova_vector_collection_info_get_request = @import("c_api/types.zig").zova_vector_collection_info_get_request;
 
-pub const zova_vector_collections_list_request = extern struct {
-    db: ?*zova_database,
-    out_list: ?*zova_vector_collection_list,
-};
+pub const zova_vector_collections_list_request = @import("c_api/types.zig").zova_vector_collections_list_request;
 
-pub const zova_vector_put_many_request = extern struct {
-    db: ?*zova_database,
-    collection_name: ?[*:0]const u8,
-    vectors: ?[*]const zova_vector_input,
-    vectors_len: usize,
-};
+pub const zova_vector_put_many_request = @import("c_api/types.zig").zova_vector_put_many_request;
 
-pub const zova_vector_delete_many_request = extern struct {
-    db: ?*zova_database,
-    collection_name: ?[*:0]const u8,
-    vector_ids: ?[*]const ?[*:0]const u8,
-    vector_count: usize,
-};
+pub const zova_vector_delete_many_request = @import("c_api/types.zig").zova_vector_delete_many_request;
 
-pub const zova_vector_collection_delete_request = extern struct {
-    db: ?*zova_database,
-    name: ?[*:0]const u8,
-};
+pub const zova_vector_collection_delete_request = @import("c_api/types.zig").zova_vector_collection_delete_request;
 
-pub const zova_vector_search_within_request = extern struct {
-    db: ?*zova_database,
-    collection_name: ?[*:0]const u8,
-    query: zova_vector_values,
-    max_distance: f64,
-    limit: usize,
-    out_results: ?*zova_vector_search_results,
-};
+pub const zova_vector_search_within_request = @import("c_api/types.zig").zova_vector_search_within_request;
 
-pub const zova_vector_search_in_within_request = extern struct {
-    db: ?*zova_database,
-    collection_name: ?[*:0]const u8,
-    query: zova_vector_values,
-    candidate_ids: ?[*]const ?[*:0]const u8,
-    candidate_count: usize,
-    max_distance: f64,
-    limit: usize,
-    out_results: ?*zova_vector_search_results,
-};
+pub const zova_vector_search_in_within_request = @import("c_api/types.zig").zova_vector_search_in_within_request;
 
-pub const zova_vector_search_by_id_request = extern struct {
-    db: ?*zova_database,
-    collection_name: ?[*:0]const u8,
-    source_vector_id: ?[*:0]const u8,
-    limit: usize,
-    out_results: ?*zova_vector_search_results,
-};
+pub const zova_vector_search_by_id_request = @import("c_api/types.zig").zova_vector_search_by_id_request;
 
-pub const zova_vector_search_by_id_in_request = extern struct {
-    db: ?*zova_database,
-    collection_name: ?[*:0]const u8,
-    source_vector_id: ?[*:0]const u8,
-    candidate_ids: ?[*]const ?[*:0]const u8,
-    candidate_count: usize,
-    limit: usize,
-    out_results: ?*zova_vector_search_results,
-};
+pub const zova_vector_search_by_id_in_request = @import("c_api/types.zig").zova_vector_search_by_id_in_request;
 
-pub const zova_vector_search_by_id_within_request = extern struct {
-    db: ?*zova_database,
-    collection_name: ?[*:0]const u8,
-    source_vector_id: ?[*:0]const u8,
-    max_distance: f64,
-    limit: usize,
-    out_results: ?*zova_vector_search_results,
-};
+pub const zova_vector_search_by_id_within_request = @import("c_api/types.zig").zova_vector_search_by_id_within_request;
 
-pub const zova_vector_search_by_id_in_within_request = extern struct {
-    db: ?*zova_database,
-    collection_name: ?[*:0]const u8,
-    source_vector_id: ?[*:0]const u8,
-    candidate_ids: ?[*]const ?[*:0]const u8,
-    candidate_count: usize,
-    max_distance: f64,
-    limit: usize,
-    out_results: ?*zova_vector_search_results,
-};
+pub const zova_vector_search_by_id_in_within_request = @import("c_api/types.zig").zova_vector_search_by_id_in_within_request;
 
-pub const zova_graph_create_request = extern struct {
-    db: ?*zova_database,
-    name: ?[*:0]const u8,
-};
+pub const zova_graph_create_request = @import("c_api/types.zig").zova_graph_create_request;
 
-pub const zova_graph_exists_request = extern struct {
-    db: ?*zova_database,
-    name: ?[*:0]const u8,
-    out_exists: ?*u8,
-};
+pub const zova_graph_exists_request = @import("c_api/types.zig").zova_graph_exists_request;
 
-pub const zova_graph_info_get_request = extern struct {
-    db: ?*zova_database,
-    name: ?[*:0]const u8,
-    out_info: ?*zova_graph_info,
-};
+pub const zova_graph_info_get_request = @import("c_api/types.zig").zova_graph_info_get_request;
 
-pub const zova_graph_list_request = extern struct {
-    db: ?*zova_database,
-    out_list: ?*zova_graph_list,
-};
+pub const zova_graph_list_request = @import("c_api/types.zig").zova_graph_list_request;
 
-pub const zova_database_extension_request = extern struct {
-    db: ?*zova_database,
-    name: ?[*:0]const u8,
-};
+pub const zova_database_extension_request = @import("c_api/types.zig").zova_database_extension_request;
 
-pub const zova_database_extension_info_request = extern struct {
-    db: ?*zova_database,
-    name: ?[*:0]const u8,
-    out_info: ?*zova_extension_info,
-};
+pub const zova_database_extension_info_request = @import("c_api/types.zig").zova_database_extension_info_request;
 
-pub const zova_database_extension_list_request = extern struct {
-    db: ?*zova_database,
-    out_list: ?*zova_extension_list,
-};
+pub const zova_database_extension_list_request = @import("c_api/types.zig").zova_database_extension_list_request;
 
-pub const zova_graph_delete_request = extern struct {
-    db: ?*zova_database,
-    name: ?[*:0]const u8,
-};
+pub const zova_graph_delete_request = @import("c_api/types.zig").zova_graph_delete_request;
 
-pub const zova_graph_node_put_request = extern struct {
-    db: ?*zova_database,
-    graph_name: ?[*:0]const u8,
-    node_id: ?[*:0]const u8,
-    kind: ?[*:0]const u8,
-    target_type: c_int,
-    target_namespace: ?[*:0]const u8,
-    target_ref: ?[*:0]const u8,
-};
+pub const zova_graph_node_put_request = @import("c_api/types.zig").zova_graph_node_put_request;
 
 /// Borrowed graph node input for zova_graph_node_put_many.
-pub const zova_graph_node_input = extern struct {
-    graph_name: ?[*:0]const u8,
-    node_id: ?[*:0]const u8,
-    kind: ?[*:0]const u8,
-    target_type: c_int,
-    target_namespace: ?[*:0]const u8,
-    target_ref: ?[*:0]const u8,
-};
+pub const zova_graph_node_input = @import("c_api/types.zig").zova_graph_node_input;
 
-pub const zova_graph_node_put_many_request = extern struct {
-    db: ?*zova_database,
-    nodes: ?[*]const zova_graph_node_input,
-    nodes_len: usize,
-};
+pub const zova_graph_node_put_many_request = @import("c_api/types.zig").zova_graph_node_put_many_request;
 
-pub const zova_graph_node_put_many_keyed_request = extern struct {
-    db: ?*zova_database,
-    nodes: ?[*]const zova_graph_node_input,
-    nodes_len: usize,
-    out_node_keys: ?[*]i64,
-    out_node_keys_capacity: usize,
-};
+pub const zova_graph_node_put_many_keyed_request = @import("c_api/types.zig").zova_graph_node_put_many_keyed_request;
 
-pub const zova_graph_fresh_node_input = extern struct {
-    node_id: ?[*:0]const u8,
-    kind: ?[*:0]const u8,
-    target_type: c_int,
-    target_namespace: ?[*:0]const u8,
-    target_ref: ?[*:0]const u8,
-};
+pub const zova_graph_fresh_node_input = @import("c_api/types.zig").zova_graph_fresh_node_input;
 
-pub const zova_graph_fresh_edge_input = extern struct {
-    from_node_ordinal: usize,
-    edge_type: ?[*:0]const u8,
-    to_node_ordinal: usize,
-};
+pub const zova_graph_fresh_edge_input = @import("c_api/types.zig").zova_graph_fresh_edge_input;
 
-pub const zova_graph_fresh_edge_payload_input = extern struct {
-    from_node_ordinal: usize,
-    edge_type: ?[*:0]const u8,
-    to_node_ordinal: usize,
-    payload: ?[*]const u8,
-    payload_len: usize,
-};
+pub const zova_graph_fresh_edge_payload_input = @import("c_api/types.zig").zova_graph_fresh_edge_payload_input;
 
-pub const zova_graph_build_fresh_keyed_request = extern struct {
-    db: ?*zova_database,
-    graph_name: ?[*:0]const u8,
-    nodes: ?[*]const zova_graph_fresh_node_input,
-    nodes_len: usize,
-    edges: ?[*]const zova_graph_fresh_edge_input,
-    edges_len: usize,
-    out_node_keys: ?[*]i64,
-    out_node_keys_capacity: usize,
-    out_edge_keys: ?[*]i64,
-    out_edge_keys_capacity: usize,
-};
+pub const zova_graph_build_fresh_keyed_request = @import("c_api/types.zig").zova_graph_build_fresh_keyed_request;
 
-pub const zova_graph_build_fresh_prepared_keyed_with_payloads_request = extern struct {
-    db: ?*zova_database,
-    graph_name: ?[*:0]const u8,
-    nodes: ?[*]const zova_graph_fresh_node_input,
-    nodes_len: usize,
-    edges: ?[*]const zova_graph_fresh_edge_payload_input,
-    edges_len: usize,
-    out_node_keys: ?[*]i64,
-    out_node_keys_capacity: usize,
-    out_edge_keys: ?[*]i64,
-    out_edge_keys_capacity: usize,
-};
+pub const zova_graph_build_fresh_prepared_keyed_with_payloads_request = @import("c_api/types.zig").zova_graph_build_fresh_prepared_keyed_with_payloads_request;
 
-pub const zova_graph_node_get_request = extern struct {
-    db: ?*zova_database,
-    graph_name: ?[*:0]const u8,
-    node_id: ?[*:0]const u8,
-    out_node: ?*zova_graph_node,
-};
+pub const zova_graph_node_get_request = @import("c_api/types.zig").zova_graph_node_get_request;
 
-pub const zova_graph_node_exists_request = extern struct {
-    db: ?*zova_database,
-    graph_name: ?[*:0]const u8,
-    node_id: ?[*:0]const u8,
-    out_exists: ?*u8,
-};
+pub const zova_graph_node_exists_request = @import("c_api/types.zig").zova_graph_node_exists_request;
 
-pub const zova_graph_node_delete_request = extern struct {
-    db: ?*zova_database,
-    graph_name: ?[*:0]const u8,
-    node_id: ?[*:0]const u8,
-};
+pub const zova_graph_node_delete_request = @import("c_api/types.zig").zova_graph_node_delete_request;
 
-pub const zova_graph_node_delete_many_request = extern struct {
-    db: ?*zova_database,
-    graph_name: ?[*:0]const u8,
-    node_ids: ?[*]const ?[*:0]const u8,
-    node_count: usize,
-};
+pub const zova_graph_node_delete_many_request = @import("c_api/types.zig").zova_graph_node_delete_many_request;
 
-pub const zova_graph_edge_put_request = extern struct {
-    db: ?*zova_database,
-    graph_name: ?[*:0]const u8,
-    from_node_id: ?[*:0]const u8,
-    edge_type: ?[*:0]const u8,
-    to_node_id: ?[*:0]const u8,
-};
+pub const zova_graph_edge_put_request = @import("c_api/types.zig").zova_graph_edge_put_request;
 
 /// Borrowed graph edge input for zova_graph_edge_put_many.
-pub const zova_graph_edge_input = extern struct {
-    graph_name: ?[*:0]const u8,
-    from_node_id: ?[*:0]const u8,
-    edge_type: ?[*:0]const u8,
-    to_node_id: ?[*:0]const u8,
-};
-
-pub const zova_graph_edge_put_many_request = extern struct {
-    db: ?*zova_database,
-    edges: ?[*]const zova_graph_edge_input,
-    edges_len: usize,
-};
-
-pub const zova_graph_edge_put_many_keyed_request = extern struct {
-    db: ?*zova_database,
-    edges: ?[*]const zova_graph_edge_input,
-    edges_len: usize,
-    out_edge_keys: ?[*]i64,
-    out_edge_keys_capacity: usize,
-};
-
-pub const zova_graph_edge_delete_many_request = extern struct {
-    db: ?*zova_database,
-    edges: ?[*]const zova_graph_edge_input,
-    edges_len: usize,
-};
-
-pub const zova_graph_edge_get_request = extern struct {
-    db: ?*zova_database,
-    graph_name: ?[*:0]const u8,
-    from_node_id: ?[*:0]const u8,
-    edge_type: ?[*:0]const u8,
-    to_node_id: ?[*:0]const u8,
-    out_edge: ?*zova_graph_edge,
-};
-
-pub const zova_graph_edge_exists_request = extern struct {
-    db: ?*zova_database,
-    graph_name: ?[*:0]const u8,
-    from_node_id: ?[*:0]const u8,
-    edge_type: ?[*:0]const u8,
-    to_node_id: ?[*:0]const u8,
-    out_exists: ?*u8,
-};
-
-pub const zova_graph_edge_delete_request = extern struct {
-    db: ?*zova_database,
-    graph_name: ?[*:0]const u8,
-    from_node_id: ?[*:0]const u8,
-    edge_type: ?[*:0]const u8,
-    to_node_id: ?[*:0]const u8,
-};
-
-pub const zova_graph_neighbors_request = extern struct {
-    db: ?*zova_database,
-    graph_name: ?[*:0]const u8,
-    node_id: ?[*:0]const u8,
-    direction: c_int,
-    edge_type: ?[*:0]const u8,
-    limit: usize,
-    out_results: ?*zova_graph_neighbor_results,
-};
-
-pub const zova_graph_neighbors_keyed_request = extern struct {
-    db: ?*zova_database,
-    graph_name: ?[*:0]const u8,
-    node_id: ?[*:0]const u8,
-    direction: c_int,
-    edge_type: ?[*:0]const u8,
-    limit: usize,
-    out_results: ?*zova_graph_keyed_neighbor_results,
-};
-
-pub const zova_graph_nodes_get_many_keyed_request = extern struct {
-    db: ?*zova_database,
-    graph_name: ?[*:0]const u8,
-    node_keys: ?[*]const i64,
-    key_count: usize,
-    out_results: ?*zova_graph_keyed_node_results,
-};
-pub const zova_graph_edges_get_many_keyed_request = extern struct {
-    db: ?*zova_database,
-    graph_name: ?[*:0]const u8,
-    edge_keys: ?[*]const i64,
-    key_count: usize,
-    out_results: ?*zova_graph_keyed_edge_results,
-};
-
-pub const zova_graph_edge_payload_get_many_request = extern struct {
-    db: ?*zova_database,
-    graph_name: ?[*:0]const u8,
-    edge_keys: ?[*]const i64,
-    key_count: usize,
-    out_results: ?*zova_graph_edge_payload_results,
-};
-
-pub const zova_graph_edge_payload_replacement = extern struct {
-    edge_key: i64,
-    payload: ?[*]const u8,
-    payload_len: usize,
-};
-
-pub const zova_graph_edge_payload_replace_many_request = extern struct {
-    db: ?*zova_database,
-    graph_name: ?[*:0]const u8,
-    replacements: ?[*]const zova_graph_edge_payload_replacement,
-    replacement_count: usize,
-};
-
-pub const zova_fresh_build_begin_request = extern struct {
-    db: ?*zova_database,
-    out_build: ?*?*zova_fresh_build,
-};
-
-pub const zova_fresh_build_rows_request = extern struct {
-    build: ?*zova_fresh_build,
-    table_name: ?[*:0]const u8,
-    column_names: ?[*]const ?[*:0]const u8,
-    column_count: usize,
-    values: ?[*]const zova_fresh_value,
-    row_count: usize,
-};
-
-pub const zova_fresh_build_graph_request = extern struct {
-    build: ?*zova_fresh_build,
-    graph_name: ?[*:0]const u8,
-    nodes: ?[*]const zova_graph_fresh_node_input,
-    nodes_len: usize,
-    edges: ?[*]const zova_graph_fresh_edge_payload_input,
-    edges_len: usize,
-    out_node_keys: ?[*]i64,
-    out_node_keys_capacity: usize,
-    out_edge_keys: ?[*]i64,
-    out_edge_keys_capacity: usize,
-};
-
-pub const zova_fresh_build_vectors_request = extern struct {
-    build: ?*zova_fresh_build,
-    collection_name: ?[*:0]const u8,
-    vectors: ?[*]const zova_vector_input,
-    vectors_len: usize,
-};
-
-pub const zova_fresh_build_finish_request = extern struct {
-    build: ?*zova_fresh_build,
-    out_node_keys: ?[*]i64,
-    out_node_keys_capacity: usize,
-    out_edge_keys: ?[*]i64,
-    out_edge_keys_capacity: usize,
-    out_profile: ?*zova_fresh_build_profile,
-};
-
-pub const zova_graph_degree_request = extern struct {
-    db: ?*zova_database,
-    graph_name: ?[*:0]const u8,
-    node_id: ?[*:0]const u8,
-    direction: c_int,
-    edge_type: ?[*:0]const u8,
-    out_degree: ?*u64,
-};
-
-pub const zova_graph_degree_many_keyed_request = extern struct {
-    db: ?*zova_database,
-    graph_name: ?[*:0]const u8,
-    node_keys: ?[*]const i64,
-    node_count: usize,
-    direction: c_int,
-    edge_type: ?[*:0]const u8,
-    out_degrees: ?[*]u64,
-    out_degrees_capacity: usize,
-};
-
-pub const zova_graph_scan_request = extern struct {
-    db: ?*zova_database,
-    graph_name: ?[*:0]const u8,
-    node_after: zova_graph_scan_cursor,
-    edge_after: zova_graph_scan_cursor,
-    node_limit: usize,
-    edge_limit: usize,
-    out_results: ?*zova_graph_scan_results,
-};
-
-pub const zova_graph_walk_request = extern struct {
-    db: ?*zova_database,
-    graph_name: ?[*:0]const u8,
-    start_node_id: ?[*:0]const u8,
-    edge_type: ?[*:0]const u8,
-    max_depth: u32,
-    limit: usize,
-    out_results: ?*zova_graph_walk_results,
-};
-
-pub const zova_graph_walk_direction_request = extern struct {
-    db: ?*zova_database,
-    graph_name: ?[*:0]const u8,
-    start_node_id: ?[*:0]const u8,
-    direction: c_int,
-    edge_type: ?[*:0]const u8,
-    max_depth: u32,
-    limit: usize,
-    out_results: ?*zova_graph_walk_results,
-};
-
-pub const zova_graph_walk_direction_profiled_request = extern struct {
-    db: ?*zova_database,
-    graph_name: ?[*:0]const u8,
-    start_node_id: ?[*:0]const u8,
-    direction: c_int,
-    edge_type: ?[*:0]const u8,
-    max_depth: u32,
-    limit: usize,
-    out_results: ?*zova_graph_walk_results,
-    out_profile: ?*zova_graph_walk_profile,
-};
-
-// Version helpers describe the C ABI boundary, not the .zova file format.
-pub fn zova_abi_version_major() callconv(.c) u32 {
-    return zova_version.abi_version_major;
-}
-
-pub fn zova_abi_version_minor() callconv(.c) u32 {
-    return zova_version.abi_version_minor;
-}
-
-pub fn zova_abi_version_patch() callconv(.c) u32 {
-    return zova_version.abi_version_patch;
-}
-
-pub fn zova_abi_version_string() callconv(.c) [*:0]const u8 {
-    return zova_version.abi_version_string;
-}
-
-// Accept a raw integer instead of a Zig enum so accidental or future C enum
-// values cannot trigger a Zig enum safety check.
-pub fn zova_status_name(status: c_int) callconv(.c) [*:0]const u8 {
-    return statusName(status);
-}
-
-// Free functions are null-safe and reset containers. That makes repeated frees
-// harmless for callers that follow the container API instead of freeing fields.
-pub fn zova_buffer_free(buffer: ?*zova_buffer) callconv(.c) void {
-    const out = buffer orelse return;
-    if (out.data) |data| {
-        allocator.free(data[0..out.len]);
-    }
-    out.* = .{ .data = null, .len = 0 };
-}
-
-pub fn zova_kv_get_result_free(result: ?*zova_kv_get_result) callconv(.c) void {
-    const out = result orelse return;
-    if (out.value.data) |data| {
-        allocator.free(data[0..out.value.len]);
-    }
-    out.* = .{ .found = 0, .value = .{ .data = null, .len = 0 } };
-}
-
-pub fn zova_kv_get_many_results_free(results: ?*zova_kv_get_many_results) callconv(.c) void {
-    const out = results orelse return;
-    if (out.items) |items| {
-        for (items[0..out.len]) |*item| {
-            if (item.value.data) |data| {
-                allocator.free(data[0..item.value.len]);
-            }
-        }
-        allocator.free(items[0..out.len]);
-    }
-    out.* = .{ .items = null, .len = 0 };
-}
-
-pub fn zova_message_free(message: ?*zova_message) callconv(.c) void {
-    const out = message orelse return;
-    if (out.data) |data| {
-        allocator.free(data[0 .. out.len + 1]);
-    }
-    out.* = .{ .data = null, .len = 0 };
-}
-
-pub fn zova_text_free(text: ?*zova_text) callconv(.c) void {
-    const out = text orelse return;
-    if (out.data) |data| {
-        allocator.free(data[0 .. out.len + 1]);
-    }
-    out.* = emptyText();
-}
-
-pub fn zova_notification_free(notification: ?*zova_notification) callconv(.c) void {
-    const out = notification orelse return;
-    if (out.channel) |channel| {
-        allocator.free(channel[0 .. out.channel_len + 1]);
-    }
-    if (out.payload) |payload| {
-        allocator.free(payload[0 .. out.payload_len + 1]);
-    }
-    out.* = emptyNotification();
-}
-
-pub fn zova_object_manifest_free(manifest: ?*zova_object_manifest) callconv(.c) void {
-    const out = manifest orelse return;
-    if (out.chunker) |chunker| {
-        allocator.free(@constCast(chunker[0 .. std.mem.len(chunker) + 1]));
-    }
-    if (out.chunks) |chunks| {
-        allocator.free(chunks[0..out.chunks_len]);
-    }
-    out.* = emptyManifest();
-}
-
-pub fn zova_vector_free(vector: ?*zova_vector) callconv(.c) void {
-    const out = vector orelse return;
-    if (out.id) |id| {
-        allocator.free(id[0 .. out.id_len + 1]);
-    }
-    if (out.f32_values) |values| {
-        allocator.free(values[0..out.values_len]);
-    }
-    if (out.f16_values) |values| {
-        allocator.free(values[0..out.values_len]);
-    }
-    if (out.i8_values) |values| {
-        allocator.free(values[0..out.values_len]);
-    }
-    out.* = emptyVector();
-}
-
-pub fn zova_vector_search_results_free(results: ?*zova_vector_search_results) callconv(.c) void {
-    const out = results orelse return;
-    if (out.items) |items| {
-        for (items[0..out.len]) |item| {
-            if (item.id) |id| {
-                allocator.free(id[0 .. item.id_len + 1]);
-            }
-        }
-        allocator.free(items[0..out.len]);
-    }
-    out.* = emptyVectorSearchResults();
-}
-
-pub fn zova_vector_collection_info_free(info: ?*zova_vector_collection_info) callconv(.c) void {
-    const out = info orelse return;
-    freeVectorCollectionInfo(out);
-    out.* = emptyVectorCollectionInfo();
-}
-
-pub fn zova_vector_collection_list_free(list: ?*zova_vector_collection_list) callconv(.c) void {
-    const out = list orelse return;
-    if (out.items) |items| {
-        for (items[0..out.len]) |*item| freeVectorCollectionInfo(item);
-        allocator.free(items[0..out.len]);
-    }
-    out.* = emptyVectorCollectionList();
-}
-
-pub fn zova_graph_info_free(info: ?*zova_graph_info) callconv(.c) void {
-    const out = info orelse return;
-    freeGraphInfo(out);
-    out.* = emptyGraphInfo();
-}
-
-pub fn zova_graph_list_free(list: ?*zova_graph_list) callconv(.c) void {
-    const out = list orelse return;
-    if (out.items) |items| {
-        for (items[0..out.len]) |*item| freeGraphInfo(item);
-        allocator.free(items[0..out.len]);
-    }
-    out.* = emptyGraphList();
-}
-
-pub fn zova_extension_info_free(info: ?*zova_extension_info) callconv(.c) void {
-    const out = info orelse return;
-    freeExtensionInfo(out);
-    out.* = emptyExtensionInfo();
-}
-
-pub fn zova_extension_list_free(list: ?*zova_extension_list) callconv(.c) void {
-    const out = list orelse return;
-    if (out.items) |items| {
-        for (items[0..out.len]) |*item| freeExtensionInfo(item);
-        allocator.free(items[0..out.len]);
-    }
-    out.* = emptyExtensionList();
-}
-
-pub fn zova_graph_node_free(node: ?*zova_graph_node) callconv(.c) void {
-    const out = node orelse return;
-    freeGraphNode(out);
-    out.* = emptyGraphNode();
-}
-
-pub fn zova_graph_edge_free(edge: ?*zova_graph_edge) callconv(.c) void {
-    const out = edge orelse return;
-    freeGraphEdge(out);
-    out.* = emptyGraphEdge();
-}
-
-pub fn zova_graph_neighbor_results_free(results: ?*zova_graph_neighbor_results) callconv(.c) void {
-    const out = results orelse return;
-    if (out.items) |items| {
-        for (items[0..out.len]) |*item| freeGraphNeighborResult(item);
-        allocator.free(items[0..out.len]);
-    }
-    out.* = emptyGraphNeighborResults();
-}
-
-pub fn zova_graph_keyed_neighbor_results_free(results: ?*zova_graph_keyed_neighbor_results) callconv(.c) void {
-    const out = results orelse return;
-    if (out.items) |items| {
-        for (items[0..out.len]) |*item| freeGraphKeyedNeighborResult(item);
-        allocator.free(items[0..out.len]);
-    }
-    out.* = emptyGraphKeyedNeighborResults();
-}
-
-pub fn zova_graph_keyed_node_results_free(results: ?*zova_graph_keyed_node_results) callconv(.c) void {
-    const out = results orelse return;
-    if (out.items) |items| {
-        for (items[0..out.len]) |*item| {
-            if (item.node_id) |value| allocator.free(value[0 .. item.node_id_len + 1]);
-            if (item.kind) |value| allocator.free(value[0 .. item.kind_len + 1]);
-        }
-        allocator.free(items[0..out.len]);
-    }
-    out.* = .{ .items = null, .len = 0 };
-}
-
-pub fn zova_graph_keyed_edge_results_free(results: ?*zova_graph_keyed_edge_results) callconv(.c) void {
-    const out = results orelse return;
-    if (out.items) |items| {
-        for (items[0..out.len]) |*item| if (item.edge_type) |value| allocator.free(value[0 .. item.edge_type_len + 1]);
-        allocator.free(items[0..out.len]);
-    }
-    out.* = .{ .items = null, .len = 0 };
-}
-
-pub fn zova_graph_edge_payload_results_free(results: ?*zova_graph_edge_payload_results) callconv(.c) void {
-    const out = results orelse return;
-    if (out.items) |items| {
-        for (items[0..out.len]) |*item| if (item.payload) |value| allocator.free(value[0..item.payload_len]);
-        allocator.free(items[0..out.len]);
-    }
-    out.* = .{ .items = null, .len = 0 };
-}
-
-pub fn zova_graph_scan_results_free(results: ?*zova_graph_scan_results) callconv(.c) void {
-    const out = results orelse return;
-    if (out.nodes) |nodes| {
-        for (nodes[0..out.nodes_len]) |*node| freeGraphScanNode(node);
-        allocator.free(nodes[0..out.nodes_len]);
-    }
-    if (out.edges) |edges| {
-        for (edges[0..out.edges_len]) |*edge| freeGraphScanEdge(edge);
-        allocator.free(edges[0..out.edges_len]);
-    }
-    out.* = emptyGraphScanResults();
-}
-
-pub fn zova_graph_walk_results_free(results: ?*zova_graph_walk_results) callconv(.c) void {
-    const out = results orelse return;
-    if (out.items) |items| {
-        for (items[0..out.len]) |*item| freeGraphWalkResult(item);
-        allocator.free(items[0..out.len]);
-    }
-    out.* = emptyGraphWalkResults();
-}
-
-pub fn zova_database_create(request: ?*const zova_database_open_request) callconv(.c) zova_status {
-    return openDatabase(request, .create);
-}
-
-pub fn zova_database_create_memory(request: ?*const zova_database_create_memory_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    clearMessage(req.out_error_message);
-    const out = req.out_db orelse return failMessage(req.out_error_message, error.InvalidArgument);
-    out.* = null;
-
-    var db = zova.Database.createMemory() catch |err| return failMessage(req.out_error_message, err);
-
-    const handle = allocator.create(DatabaseHandle) catch |err| {
-        db.deinit();
-        return failMessage(req.out_error_message, err);
-    };
-    handle.* = .{ .db = db };
-    out.* = @ptrCast(handle);
-    return .OK;
-}
-
-pub fn zova_database_create_with_options(request: ?*const zova_database_create_options_request) callconv(.c) zova_status {
-    return createDatabaseWithOptions(request);
-}
-
-pub fn zova_database_create_with_extensions(request: ?*const zova_database_open_extensions_request) callconv(.c) zova_status {
-    return openDatabaseWithExtensions(request, .create);
-}
-
-pub fn zova_database_open(request: ?*const zova_database_open_request) callconv(.c) zova_status {
-    return openDatabase(request, .open);
-}
-
-pub fn zova_database_open_with_options(request: ?*const zova_database_open_options_request) callconv(.c) zova_status {
-    return openDatabaseWithOptions(request);
-}
-
-pub fn zova_database_open_with_extensions(request: ?*const zova_database_open_extensions_request) callconv(.c) zova_status {
-    return openDatabaseWithExtensions(request, .open);
-}
-
-pub fn zova_extension_bundle_verify(request: ?*const zova_extension_bundle_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    clearMessage(req.out_error_message);
-    const bundle_path = req.bundle_path orelse return failMessage(req.out_error_message, error.InvalidArgument);
-    zova.extension_dynamic.verifyBundleEntrypoint(allocator, std.mem.span(bundle_path)) catch |err| {
-        return failMessage(req.out_error_message, err);
-    };
-    return .OK;
-}
-
-pub fn zova_extension_bundle_trust(request: ?*const zova_extension_bundle_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    clearMessage(req.out_error_message);
-    const bundle_path = req.bundle_path orelse return failMessage(req.out_error_message, error.InvalidArgument);
-    var record = zova.extension_dynamic.trustBundle(allocator, std.mem.span(bundle_path), trustStoreOptions(req.trust_store_path)) catch |err| {
-        return failMessage(req.out_error_message, err);
-    };
-    record.deinit(allocator);
-    return .OK;
-}
-
-pub fn zova_extension_bundle_untrust(request: ?*const zova_extension_bundle_untrust_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    clearMessage(req.out_error_message);
-    const identifier = req.identifier orelse return failMessage(req.out_error_message, error.InvalidArgument);
-    const removed = zova.extension_dynamic.untrust(allocator, std.mem.span(identifier), trustStoreOptions(req.trust_store_path)) catch |err| {
-        return failMessage(req.out_error_message, err);
-    };
-    if (req.out_removed) |out| out.* = if (removed) 1 else 0;
-    return .OK;
-}
-
-pub fn zova_database_close(db: ?*zova_database) callconv(.c) zova_status {
-    const handle = databaseHandleRaw(db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    if (handle.live_statements != 0 or handle.live_writers != 0 or handle.live_readers != 0 or handle.live_subscriptions != 0 or handle.fresh_build_active) {
-        defer handle.mutex.unlock();
-        var message_buffer: [192]u8 = undefined;
-        const message = std.fmt.bufPrint(
-            &message_buffer,
-            "cannot close database with live child handles: {d} statements, {d} object writers, {d} object readers, {d} subscriptions, fresh build active={}",
-            .{ handle.live_statements, handle.live_writers, handle.live_readers, handle.live_subscriptions, handle.fresh_build_active },
-        ) catch "cannot close database with live child handles";
-        return failDbStatusString(handle, .MISUSE, message);
-    }
-    clearLastError(handle);
-    handle.db.deinit();
-    if (handle.extension_registry) |*registry| registry.deinit();
-    if (handle.dynamic_extensions) |*dynamic_extensions| dynamic_extensions.deinit();
-    deinitSqlFunctionRegistrations(handle);
-    handle.mutex.unlock();
-    allocator.destroy(handle);
-    return .OK;
-}
-
-pub fn zova_database_exec(request: ?*const zova_database_exec_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const sql = req.sql orelse return failDb(handle, error.InvalidArgument);
-    handle.db.exec(std.mem.span(sql)) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_database_register_function(request: ?*const zova_sql_function_register_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-
-    const name_z = req.name orelse return failDb(handle, error.InvalidArgument);
-    const name = std.mem.span(name_z);
-    validateSqlFunctionName(name) catch |err| return failDb(handle, err);
-    if (!isValidSqlFunctionArity(req.arity)) return failDb(handle, error.InvalidArgument);
-    if ((req.flags & ~allowed_sql_function_flags) != 0) return failDb(handle, error.InvalidArgument);
-    const callback = req.callback orelse return failDb(handle, error.InvalidArgument);
-    if (hasRegisteredSqlFunction(handle, name, req.arity)) return failDb(handle, error.InvalidArgument);
-
-    handle.sql_functions.ensureUnusedCapacity(allocator, 1) catch |err| return failDb(handle, err);
-
-    const context = allocator.create(SqlScalarFunctionContext) catch |err| return failDb(handle, err);
-    context.* = .{
-        .user_data = req.user_data,
-        .callback = callback,
-        .destroy = req.destroy,
-    };
-
-    const name_copy = allocator.dupeZ(u8, name) catch |err| {
-        destroySqlScalarContext(@ptrCast(context));
-        return failDb(handle, err);
-    };
-
-    const rc = sqlite.c.sqlite3_create_function_v2(
-        handle.db.sqlite_db.handle,
-        name_z,
-        req.arity,
-        sqlFunctionFlagsToSqlite(req.flags),
-        context,
-        sqlScalarTrampoline,
-        null,
-        null,
-        destroySqlScalarContext,
-    );
-    if (rc != sqlite.c.SQLITE_OK) {
-        allocator.free(name_copy);
-        return failDbSqliteResult(handle, rc);
-    }
-
-    handle.sql_functions.appendAssumeCapacity(.{ .name = name_copy, .arity = req.arity });
-
-    return okDb(handle);
-}
-
-pub fn zova_database_begin(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    handle.db.begin() catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_database_begin_immediate(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    handle.db.beginImmediate() catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_database_commit(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    handle.db.commit() catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_database_rollback(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    handle.db.rollback() catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_database_savepoint(request: ?*const zova_database_savepoint_request) callconv(.c) zova_status {
-    return databaseSavepoint(request, .savepoint);
-}
-
-pub fn zova_database_rollback_to_savepoint(request: ?*const zova_database_savepoint_request) callconv(.c) zova_status {
-    return databaseSavepoint(request, .rollback_to);
-}
-
-pub fn zova_database_release_savepoint(request: ?*const zova_database_savepoint_request) callconv(.c) zova_status {
-    return databaseSavepoint(request, .release);
-}
-
-pub fn zova_database_vacuum(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    handle.db.vacuum() catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_database_backup(request: ?*const zova_database_backup_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const destination_path = req.destination_path orelse return failDb(handle, error.InvalidArgument);
-    if ((req.flags & ~ZOVA_BACKUP_NO_VERIFY) != 0) return failDb(handle, error.InvalidArgument);
-
-    handle.db.backupTo(std.mem.span(destination_path), .{
-        .verify = (req.flags & ZOVA_BACKUP_NO_VERIFY) == 0,
-    }) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_database_compact(request: ?*const zova_database_compact_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const destination_path = req.destination_path orelse return failDb(handle, error.InvalidArgument);
-    if ((req.flags & ~ZOVA_COMPACT_NO_VERIFY) != 0) return failDb(handle, error.InvalidArgument);
-
-    handle.db.compactTo(std.mem.span(destination_path), .{
-        .verify = (req.flags & ZOVA_COMPACT_NO_VERIFY) == 0,
-    }) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_database_set_busy_timeout(request: ?*const zova_database_busy_timeout_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    if (req.milliseconds > std.math.maxInt(c_int)) return failDb(handle, error.InvalidArgument);
-    handle.db.setBusyTimeout(req.milliseconds) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_database_last_insert_rowid(request: ?*const zova_database_last_insert_rowid_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const out = req.out_rowid orelse return failDb(handle, error.InvalidArgument);
-    out.* = handle.db.lastInsertRowid();
-    return okDb(handle);
-}
-
-pub fn zova_database_changes(request: ?*const zova_database_changes_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const out = req.out_changes orelse return failDb(handle, error.InvalidArgument);
-    out.* = handle.db.changes();
-    return okDb(handle);
-}
-
-pub fn zova_database_total_changes(request: ?*const zova_database_total_changes_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const out = req.out_total_changes orelse return failDb(handle, error.InvalidArgument);
-    out.* = handle.db.totalChanges();
-    return okDb(handle);
-}
-
-pub fn zova_database_notify(request: ?*const zova_database_notify_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const channel = req.channel orelse return failDb(handle, error.InvalidArgument);
-    const payload = bytesConst(req.payload, req.payload_len) orelse return failDb(handle, error.InvalidArgument);
-    handle.db.notify(std.mem.span(channel), payload) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_database_listen(request: ?*const zova_database_listen_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const channel = req.channel orelse return failDb(handle, error.InvalidArgument);
-    const out = req.out_subscription orelse return failDb(handle, error.InvalidArgument);
-    out.* = null;
-
-    const subscription = handle.db.listen(std.mem.span(channel)) catch |err| return failDb(handle, err);
-    const subscription_handle = allocator.create(SubscriptionHandle) catch |err| {
-        var cleanup = subscription;
-        cleanup.deinit();
-        return failDb(handle, err);
-    };
-    subscription_handle.* = .{ .db = handle, .subscription = subscription };
-    handle.live_subscriptions += 1;
-    out.* = @ptrCast(subscription_handle);
-    return okDb(handle);
-}
-
-pub fn zova_subscription_try_receive(request: ?*const zova_subscription_try_receive_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = subscriptionHandle(req.subscription) orelse return .INVALID_ARGUMENT;
-    handle.db.mutex.lock();
-    defer handle.db.mutex.unlock();
-    const out_notification = req.out_notification orelse return failDb(handle.db, error.InvalidArgument);
-    const out_has_notification = req.out_has_notification orelse return failDb(handle.db, error.InvalidArgument);
-
-    zova_notification_free(out_notification);
-    out_has_notification.* = 0;
-    var notification = handle.subscription.tryReceive(allocator) catch |err| return failDb(handle.db, err);
-    if (notification) |*value| {
-        defer value.deinit(allocator);
-        fillNotification(out_notification, value.*) catch |err| return failDb(handle.db, err);
-        out_has_notification.* = 1;
-    }
-    return okDb(handle.db);
-}
-
-pub fn zova_subscription_close(subscription: ?*zova_subscription) callconv(.c) zova_status {
-    const handle = subscriptionHandle(subscription) orelse return .INVALID_ARGUMENT;
-    const db_handle = handle.db;
-    db_handle.mutex.lock();
-    defer db_handle.mutex.unlock();
-    handle.subscription.deinit();
-    std.debug.assert(db_handle.live_subscriptions > 0);
-    db_handle.live_subscriptions -= 1;
-    allocator.destroy(handle);
-    return okDb(db_handle);
-}
-
-const SavepointOperation = enum {
-    savepoint,
-    rollback_to,
-    release,
-};
-
-fn databaseSavepoint(request: ?*const zova_database_savepoint_request, operation: SavepointOperation) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const name = req.name orelse return failDb(handle, error.InvalidArgument);
-    const result = switch (operation) {
-        .savepoint => handle.db.savepoint(std.mem.span(name)),
-        .rollback_to => handle.db.rollbackToSavepoint(std.mem.span(name)),
-        .release => handle.db.releaseSavepoint(std.mem.span(name)),
-    };
-    result catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_database_prepare(request: ?*const zova_database_prepare_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const sql = req.sql orelse return failDb(handle, error.InvalidArgument);
-    const out = req.out_statement orelse return failDb(handle, error.InvalidArgument);
-    out.* = null;
-
-    const statement = handle.db.prepare(std.mem.span(sql)) catch |err| return failDb(handle, err);
-    const statement_handle = allocator.create(StatementHandle) catch |err| {
-        var cleanup = statement;
-        cleanup.deinit();
-        return failDb(handle, err);
-    };
-    statement_handle.* = .{ .db = handle, .statement = statement };
-    handle.live_statements += 1;
-    out.* = @ptrCast(statement_handle);
-    return okDb(handle);
-}
-
-pub fn zova_statement_finalize(statement: ?*zova_statement) callconv(.c) zova_status {
-    const handle = statementHandle(statement) orelse return .INVALID_ARGUMENT;
-    const db_handle = handle.db;
-    db_handle.mutex.lock();
-    defer db_handle.mutex.unlock();
-    handle.statement.deinit();
-    std.debug.assert(db_handle.live_statements > 0);
-    db_handle.live_statements -= 1;
-    allocator.destroy(handle);
-    return okDb(db_handle);
-}
-
-pub fn zova_statement_step(request: ?*const zova_statement_step_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
-    handle.db.mutex.lock();
-    defer handle.db.mutex.unlock();
-    const out = req.out_result orelse return failDb(handle.db, error.InvalidArgument);
-    const result = handle.statement.step() catch |err| return failDb(handle.db, err);
-    out.* = switch (result) {
-        .row => .ROW,
-        .done => .DONE,
-    };
-    return okDb(handle.db);
-}
-
-pub fn zova_statement_reset(statement: ?*zova_statement) callconv(.c) zova_status {
-    const handle = statementHandle(statement) orelse return .INVALID_ARGUMENT;
-    handle.db.mutex.lock();
-    defer handle.db.mutex.unlock();
-    handle.statement.reset() catch |err| return failDb(handle.db, err);
-    return okDb(handle.db);
-}
-
-pub fn zova_statement_clear_bindings(statement: ?*zova_statement) callconv(.c) zova_status {
-    const handle = statementHandle(statement) orelse return .INVALID_ARGUMENT;
-    handle.db.mutex.lock();
-    defer handle.db.mutex.unlock();
-    handle.statement.clearBindings() catch |err| return failDb(handle.db, err);
-    return okDb(handle.db);
-}
-
-pub fn zova_statement_bind_null(request: ?*const zova_statement_bind_null_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
-    handle.db.mutex.lock();
-    defer handle.db.mutex.unlock();
-    handle.statement.bindNull(req.index) catch |err| return failDb(handle.db, err);
-    return okDb(handle.db);
-}
-
-pub fn zova_statement_bind_int64(request: ?*const zova_statement_bind_int64_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
-    handle.db.mutex.lock();
-    defer handle.db.mutex.unlock();
-    handle.statement.bindInt64(req.index, req.value) catch |err| return failDb(handle.db, err);
-    return okDb(handle.db);
-}
-
-pub fn zova_statement_bind_double(request: ?*const zova_statement_bind_double_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
-    handle.db.mutex.lock();
-    defer handle.db.mutex.unlock();
-    handle.statement.bindDouble(req.index, req.value) catch |err| return failDb(handle.db, err);
-    return okDb(handle.db);
-}
-
-pub fn zova_statement_bind_text(request: ?*const zova_statement_bind_text_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
-    handle.db.mutex.lock();
-    defer handle.db.mutex.unlock();
-    const bytes = bytesConst(req.data, req.len) orelse return failDb(handle.db, error.InvalidArgument);
-    handle.statement.bindText(req.index, bytes) catch |err| return failDb(handle.db, err);
-    return okDb(handle.db);
-}
-
-pub fn zova_statement_bind_blob(request: ?*const zova_statement_bind_blob_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
-    handle.db.mutex.lock();
-    defer handle.db.mutex.unlock();
-    const bytes = bytesConst(req.data, req.len) orelse return failDb(handle.db, error.InvalidArgument);
-    handle.statement.bindBlob(req.index, bytes) catch |err| return failDb(handle.db, err);
-    return okDb(handle.db);
-}
-
-pub fn zova_statement_parameter_count(request: ?*const zova_statement_parameter_count_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
-    handle.db.mutex.lock();
-    defer handle.db.mutex.unlock();
-    const out = req.out_count orelse return failDb(handle.db, error.InvalidArgument);
-    out.* = handle.statement.parameterCount();
-    return okDb(handle.db);
-}
-
-pub fn zova_statement_parameter_index(request: ?*const zova_statement_parameter_index_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
-    handle.db.mutex.lock();
-    defer handle.db.mutex.unlock();
-    const name = req.name orelse return failDb(handle.db, error.InvalidArgument);
-    const out = req.out_index orelse return failDb(handle.db, error.InvalidArgument);
-    out.* = handle.statement.parameterIndex(std.mem.span(name));
-    return okDb(handle.db);
-}
-
-pub fn zova_statement_column_count(request: ?*const zova_statement_column_count_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
-    handle.db.mutex.lock();
-    defer handle.db.mutex.unlock();
-    const out = req.out_count orelse return failDb(handle.db, error.InvalidArgument);
-    out.* = handle.statement.columnCount();
-    return okDb(handle.db);
-}
-
-pub fn zova_statement_column_name(request: ?*const zova_statement_column_name_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
-    handle.db.mutex.lock();
-    defer handle.db.mutex.unlock();
-    const out = req.out_name orelse return failDb(handle.db, error.InvalidArgument);
-    zova_text_free(out);
-
-    const name = handle.statement.columnName(req.index) catch |err| return failDb(handle.db, err);
-    const copy = allocator.alloc(u8, name.len + 1) catch |err| return failDb(handle.db, err);
-    @memcpy(copy[0..name.len], name);
-    copy[name.len] = 0;
-    out.* = .{ .data = copy.ptr, .len = name.len };
-    return okDb(handle.db);
-}
-
-pub fn zova_statement_column_type(request: ?*const zova_statement_column_type_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
-    handle.db.mutex.lock();
-    defer handle.db.mutex.unlock();
-    const out = req.out_type orelse return failDb(handle.db, error.InvalidArgument);
-    out.* = columnTypeToAbi(handle.statement.columnType(req.index));
-    return okDb(handle.db);
-}
-
-pub fn zova_statement_column_int64(request: ?*const zova_statement_column_int64_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
-    handle.db.mutex.lock();
-    defer handle.db.mutex.unlock();
-    const out = req.out_value orelse return failDb(handle.db, error.InvalidArgument);
-    out.* = handle.statement.columnInt64(req.index);
-    return okDb(handle.db);
-}
-
-pub fn zova_statement_column_double(request: ?*const zova_statement_column_double_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
-    handle.db.mutex.lock();
-    defer handle.db.mutex.unlock();
-    const out = req.out_value orelse return failDb(handle.db, error.InvalidArgument);
-    out.* = handle.statement.columnDouble(req.index);
-    return okDb(handle.db);
-}
-
-pub fn zova_statement_column_text(request: ?*const zova_statement_column_text_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
-    handle.db.mutex.lock();
-    defer handle.db.mutex.unlock();
-    const out = req.out_text orelse return failDb(handle.db, error.InvalidArgument);
-    zova_text_free(out);
-
-    if (handle.statement.columnType(req.index) == .null) return okDb(handle.db);
-    const text = handle.statement.columnText(req.index);
-    const copy = allocator.alloc(u8, text.len + 1) catch |err| return failDb(handle.db, err);
-    @memcpy(copy[0..text.len], text);
-    copy[text.len] = 0;
-    out.* = .{ .data = copy.ptr, .len = text.len };
-    return okDb(handle.db);
-}
-
-pub fn zova_statement_column_blob(request: ?*const zova_statement_column_blob_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = statementHandle(req.statement) orelse return .INVALID_ARGUMENT;
-    handle.db.mutex.lock();
-    defer handle.db.mutex.unlock();
-    const out = req.out_buffer orelse return failDb(handle.db, error.InvalidArgument);
-    zova_buffer_free(out);
-
-    if (handle.statement.columnType(req.index) == .null) return okDb(handle.db);
-    const blob = handle.statement.columnBlob(req.index);
-    if (blob.len == 0) return okDb(handle.db);
-
-    const copy = allocator.alloc(u8, blob.len) catch |err| return failDb(handle.db, err);
-    @memcpy(copy, blob);
-    out.* = .{ .data = copy.ptr, .len = copy.len };
-    return okDb(handle.db);
-}
-
-pub fn zova_database_last_error_message(db: ?*zova_database) callconv(.c) [*:0]const u8 {
-    const handle = databaseHandle(db) orelse return "invalid database handle";
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    if (handle.last_error) |message| return message.ptr;
-    return "";
-}
-
-// No-handle operations cannot use connection-scoped diagnostics, so request
-// structs optionally carry an owned zova_message for callers that want details.
-pub fn zova_convert_sqlite_to_zova(request: ?*const zova_convert_sqlite_to_zova_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    clearMessage(req.out_error_message);
-    const source_path = req.source_path orelse return failMessage(req.out_error_message, error.InvalidArgument);
-    const dest_path = req.dest_path orelse return failMessage(req.out_error_message, error.InvalidArgument);
-
-    zova.convertSqliteToZova(std.mem.span(source_path), std.mem.span(dest_path)) catch |err| {
-        return failMessage(req.out_error_message, err);
-    };
-    return .OK;
-}
-
-pub fn zova_database_restore(request: ?*const zova_database_restore_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    clearMessage(req.out_error_message);
-    const source_path = req.source_path orelse return failMessage(req.out_error_message, error.InvalidArgument);
-    const destination_path = req.destination_path orelse return failMessage(req.out_error_message, error.InvalidArgument);
-    if ((req.flags & ~ZOVA_RESTORE_NO_VERIFY) != 0) return failMessage(req.out_error_message, error.InvalidArgument);
-
-    zova.restoreBackup(std.mem.span(source_path), std.mem.span(destination_path), .{
-        .verify = (req.flags & ZOVA_RESTORE_NO_VERIFY) == 0,
-    }) catch |err| {
-        return failMessage(req.out_error_message, err);
-    };
-    return .OK;
-}
-
-pub fn zova_database_probe_format(request: ?*const zova_database_probe_format_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    clearMessage(req.out_error_message);
-    const out = req.out_info orelse return failMessage(req.out_error_message, error.InvalidArgument);
-    out.* = .{};
-    const path = req.path orelse return failMessage(req.out_error_message, error.InvalidArgument);
-    const info = zova.probeDatabaseFormat(std.mem.span(path)) catch |err| return failMessage(req.out_error_message, err);
-    const compat: c_int = switch (info.compatibility) {
-        .current => @intFromEnum(zova_format_compatibility.CURRENT),
-        .migratable => @intFromEnum(zova_format_compatibility.MIGRATABLE),
-        .unsupported_legacy => @intFromEnum(zova_format_compatibility.UNSUPPORTED_LEGACY),
-        .unsupported_future => @intFromEnum(zova_format_compatibility.UNSUPPORTED_FUTURE),
-    };
-    out.* = .{
-        .format_version = info.format_version,
-        .compatibility = compat,
-    };
-    return .OK;
-}
-
-pub fn zova_database_migrate(request: ?*const zova_database_migrate_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    clearMessage(req.out_error_message);
-    const source_path = req.source_path orelse return failMessage(req.out_error_message, error.InvalidArgument);
-    const destination_path = req.destination_path orelse return failMessage(req.out_error_message, error.InvalidArgument);
-    if ((req.flags & ~ZOVA_MIGRATE_NO_VERIFY) != 0) return failMessage(req.out_error_message, error.InvalidArgument);
-    zova.migrateDatabaseWithExtensions(
-        std.mem.span(source_path),
-        std.mem.span(destination_path),
-        .{ .verify = (req.flags & ZOVA_MIGRATE_NO_VERIFY) == 0 },
-        zova.bundledExtensionRegistry(),
-    ) catch |err| {
-        return failMessage(req.out_error_message, err);
-    };
-    return .OK;
-}
-
-pub fn zova_database_restore_to_memory(request: ?*const zova_database_restore_to_memory_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    clearMessage(req.out_error_message);
-    const out = req.out_db orelse return failMessage(req.out_error_message, error.InvalidArgument);
-    out.* = null;
-    const source_path = req.source_path orelse return failMessage(req.out_error_message, error.InvalidArgument);
-    if ((req.flags & ~ZOVA_RESTORE_NO_VERIFY) != 0) return failMessage(req.out_error_message, error.InvalidArgument);
-
-    var db = zova.restoreBackupToMemory(std.mem.span(source_path), .{
-        .verify = (req.flags & ZOVA_RESTORE_NO_VERIFY) == 0,
-    }) catch |err| return failMessage(req.out_error_message, err);
-
-    const handle = allocator.create(DatabaseHandle) catch |err| {
-        db.deinit();
-        return failMessage(req.out_error_message, err);
-    };
-    handle.* = .{ .db = db };
-    out.* = @ptrCast(handle);
-    return .OK;
-}
-
-// The public helper name is not `zova_object_id`: in C, typedef names and
-// function names share one namespace, so that would collide with the id type.
-pub fn zova_object_id_from_bytes(data: ?[*]const u8, len: usize, out_id: ?*zova_object_id) callconv(.c) zova_status {
-    const out = out_id orelse return .INVALID_ARGUMENT;
-    const bytes = bytesConst(data, len) orelse return .INVALID_ARGUMENT;
-    out.* = fromObjectId(zova.objectId(bytes));
-    return .OK;
-}
-
-pub fn zova_object_chunk_id_from_bytes(
-    data: ?[*]const u8,
-    len: usize,
-    out_id: ?*zova_object_chunk_id,
-) callconv(.c) zova_status {
-    const out = out_id orelse return .INVALID_ARGUMENT;
-    const bytes = bytesConst(data, len) orelse return .INVALID_ARGUMENT;
-    out.* = fromChunkId(zova.objectChunkId(bytes));
-    return .OK;
-}
-
-pub fn zova_object_put(request: ?*const zova_object_put_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const out = req.out_id orelse return failDb(handle, error.InvalidArgument);
-    const bytes = bytesConst(req.data, req.len) orelse return failDb(handle, error.InvalidArgument);
-    const id = handle.db.putObject(bytes) catch |err| return failDb(handle, err);
-    out.* = fromObjectId(id);
-    return okDb(handle);
-}
-
-pub fn zova_object_put_with_options(
-    request: ?*const zova_object_put_with_options_request,
-) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const out = req.out_id orelse return failDb(handle, error.InvalidArgument);
-    out.* = .{ .bytes = [_]u8{0} ** 32 };
-    const options = objectOptionsFromAbi(req.options) orelse return failDb(handle, error.InvalidArgument);
-    const bytes = bytesConst(req.data, req.len) orelse return failDb(handle, error.InvalidArgument);
-    const id = handle.db.putObjectWithOptions(bytes, options) catch |err| return failDb(handle, err);
-    out.* = fromObjectId(id);
-    return okDb(handle);
-}
-
-pub fn zova_object_get(request: ?*const zova_object_get_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const out = req.out_buffer orelse return failDb(handle, error.InvalidArgument);
-    out.* = emptyBuffer();
-    var object = handle.db.getObject(allocator, toObjectId(req.id)) catch |err| return failDb(handle, err);
-    // Transfer ownership of the allocation from zova.Object to zova_buffer.
-    out.* = .{ .data = object.bytes.ptr, .len = object.bytes.len };
-    object.bytes = &.{};
-    return okDb(handle);
-}
-
-pub fn zova_object_read_range(request: ?*const zova_object_read_range_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const out = req.out_copied orelse return failDb(handle, error.InvalidArgument);
-    out.* = 0;
-    const buffer = bytesMut(req.buffer, req.buffer_len) orelse return failDb(handle, error.InvalidArgument);
-    const copied = handle.db.readObjectRange(toObjectId(req.id), req.offset, buffer) catch |err| return failDb(handle, err);
-    out.* = copied;
-    return okDb(handle);
-}
-
-pub fn zova_object_delete(request: ?*const zova_object_delete_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    handle.db.deleteObject(toObjectId(req.id)) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_object_exists(request: ?*const zova_object_exists_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const out = req.out_exists orelse return failDb(handle, error.InvalidArgument);
-    const exists = handle.db.hasObject(toObjectId(req.id)) catch |err| return failDb(handle, err);
-    out.* = if (exists) 1 else 0;
-    return okDb(handle);
-}
-
-pub fn zova_object_size(request: ?*const zova_object_size_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const out = req.out_size orelse return failDb(handle, error.InvalidArgument);
-    out.* = handle.db.objectSize(toObjectId(req.id)) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_object_chunk_count(request: ?*const zova_object_chunk_count_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const out = req.out_count orelse return failDb(handle, error.InvalidArgument);
-    out.* = handle.db.objectChunkCount(toObjectId(req.id)) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_kv_get(request: ?*const zova_kv_get_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const out = req.out_result orelse return failDb(handle, error.InvalidArgument);
-    out.* = .{ .found = 0, .value = .{ .data = null, .len = 0 } };
-
-    const namespace = bytesConst(req.ns.data, req.ns.len) orelse return failDb(handle, error.InvalidArgument);
-    const key = bytesConst(req.key.data, req.key.len) orelse return failDb(handle, error.InvalidArgument);
-
-    var result = handle.db.kvGet(allocator, namespace, key) catch |err| return failDb(handle, err);
-    // Transfer ownership of the allocation from kv_impl.GetResult to zova_kv_get_result.
-    out.* = .{ .found = if (result.found) 1 else 0, .value = .{ .data = result.value.ptr, .len = result.value.len } };
-    result.value = &.{};
-    return okDb(handle);
-}
-
-pub fn zova_kv_get_many(request: ?*const zova_kv_get_many_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
-    out.* = .{ .items = null, .len = 0 };
-
-    const namespace = bytesConst(req.ns.data, req.ns.len) orelse return failDb(handle, error.InvalidArgument);
-    const keys = kvKeySlices(req.keys, req.keys_len) catch |err| return failDb(handle, err);
-    defer allocator.free(keys);
-
-    const results = handle.db.kvGetMany(allocator, namespace, keys) catch |err| return failDb(handle, err);
-    errdefer {
-        for (results) |item| item.deinit(allocator);
-        allocator.free(results);
-    }
-
-    const items = allocator.alloc(zova_kv_get_result, results.len) catch |err| return failDb(handle, err);
-    for (results, items) |*result, *item| {
-        item.* = .{ .found = if (result.found) 1 else 0, .value = .{ .data = result.value.ptr, .len = result.value.len } };
-        result.value = &.{};
-    }
-    allocator.free(results);
-    out.* = .{ .items = items.ptr, .len = items.len };
-    return okDb(handle);
-}
-
-pub fn zova_kv_put(request: ?*const zova_kv_put_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const namespace = bytesConst(req.ns.data, req.ns.len) orelse return failDb(handle, error.InvalidArgument);
-    const key = bytesConst(req.key.data, req.key.len) orelse return failDb(handle, error.InvalidArgument);
-    const value = bytesConst(req.value.data, req.value.len) orelse return failDb(handle, error.InvalidArgument);
-    handle.db.kvPut(namespace, key, value) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_kv_put_many(request: ?*const zova_kv_put_many_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const namespace = bytesConst(req.ns.data, req.ns.len) orelse return failDb(handle, error.InvalidArgument);
-    const entries = kvPutEntrySlices(req.entries, req.entries_len) catch |err| return failDb(handle, err);
-    defer allocator.free(entries);
-    handle.db.kvPutMany(namespace, entries) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_kv_delete(request: ?*const zova_kv_delete_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const namespace = bytesConst(req.ns.data, req.ns.len) orelse return failDb(handle, error.InvalidArgument);
-    const key = bytesConst(req.key.data, req.key.len) orelse return failDb(handle, error.InvalidArgument);
-    handle.db.kvDelete(namespace, key) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_kv_delete_many(request: ?*const zova_kv_delete_many_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const namespace = bytesConst(req.ns.data, req.ns.len) orelse return failDb(handle, error.InvalidArgument);
-    const keys = kvKeySlices(req.keys, req.keys_len) catch |err| return failDb(handle, err);
-    defer allocator.free(keys);
-    handle.db.kvDeleteMany(namespace, keys) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_kv_count(request: ?*const zova_kv_count_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const out = req.out_count orelse return failDb(handle, error.InvalidArgument);
-    const namespace = bytesConst(req.ns.data, req.ns.len) orelse return failDb(handle, error.InvalidArgument);
-    out.* = handle.db.kvCount(namespace) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_kv_clear_namespace(request: ?*const zova_kv_clear_namespace_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const namespace = bytesConst(req.ns.data, req.ns.len) orelse return failDb(handle, error.InvalidArgument);
-    handle.db.kvClearNamespace(namespace) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_object_manifest_get(request: ?*const zova_object_manifest_get_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const out = req.out_manifest orelse return failDb(handle, error.InvalidArgument);
-    out.* = emptyManifest();
-
-    var manifest = handle.db.objectManifest(allocator, toObjectId(req.id)) catch |err| return failDb(handle, err);
-    defer manifest.deinit(allocator);
-
-    const chunks = allocator.alloc(zova_object_manifest_chunk, manifest.chunks.len) catch |err| return failDb(handle, err);
-    errdefer allocator.free(chunks);
-    for (manifest.chunks, chunks) |chunk, *out_chunk| {
-        out_chunk.* = .{
-            .index = chunk.index,
-            .hash = fromChunkId(chunk.hash),
-            .offset = chunk.offset,
-            .size_bytes = chunk.size_bytes,
-        };
-    }
-
-    const chunker = allocator.dupeZ(u8, manifest.chunker) catch |err| {
-        allocator.free(chunks);
-        return failDb(handle, err);
-    };
-
-    out.* = .{
-        .object_id = fromObjectId(manifest.object_id),
-        .size_bytes = manifest.size_bytes,
-        .chunk_count = manifest.chunk_count,
-        .chunker = chunker.ptr,
-        .chunks = if (chunks.len == 0) null else chunks.ptr,
-        .chunks_len = chunks.len,
-    };
-    return okDb(handle);
-}
-
-pub fn zova_object_chunk_get(request: ?*const zova_object_chunk_get_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const out = req.out_buffer orelse return failDb(handle, error.InvalidArgument);
-    out.* = emptyBuffer();
-    var chunk = handle.db.getObjectChunk(allocator, toChunkId(req.hash)) catch |err| return failDb(handle, err);
-    // Transfer ownership of the allocation from zova.ObjectChunkData to zova_buffer.
-    out.* = .{ .data = chunk.bytes.ptr, .len = chunk.bytes.len };
-    chunk.bytes = &.{};
-    return okDb(handle);
-}
-
-pub fn zova_object_chunk_put(request: ?*const zova_object_chunk_put_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const bytes = bytesConst(req.data, req.len) orelse return failDb(handle, error.InvalidArgument);
-    handle.db.putObjectChunk(toChunkId(req.expected_hash), bytes) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_object_chunk_put_with_options(
-    request: ?*const zova_object_chunk_put_with_options_request,
-) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const options = objectOptionsFromAbi(req.options) orelse return failDb(handle, error.InvalidArgument);
-    const bytes = bytesConst(req.data, req.len) orelse return failDb(handle, error.InvalidArgument);
-    handle.db.putObjectChunkWithOptions(toChunkId(req.expected_hash), bytes, options) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_object_chunk_delete(request: ?*const zova_object_chunk_delete_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const out = req.out_deleted orelse return failDb(handle, error.InvalidArgument);
-    const deleted = handle.db.deleteObjectChunk(toChunkId(req.hash)) catch |err| return failDb(handle, err);
-    out.* = if (deleted) 1 else 0;
-    return okDb(handle);
-}
-
-pub fn zova_object_assemble_from_chunks(
-    request: ?*const zova_object_assemble_from_chunks_request,
-) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const input_chunks = manifestChunks(req.chunks, req.chunk_count) orelse return failDb(handle, error.InvalidArgument);
-    const chunks = allocator.alloc(zova.ObjectChunk, input_chunks.len) catch |err| return failDb(handle, err);
-    defer allocator.free(chunks);
-    for (input_chunks, chunks) |chunk, *out_chunk| {
-        out_chunk.* = .{
-            .index = chunk.index,
-            .hash = toChunkId(chunk.hash),
-            .offset = chunk.offset,
-            .size_bytes = chunk.size_bytes,
-        };
-    }
-    handle.db.assembleObjectFromChunks(toObjectId(req.id), req.size_bytes, chunks) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_object_assemble_from_chunks_with_options(
-    request: ?*const zova_object_assemble_from_chunks_with_options_request,
-) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const options = objectOptionsFromAbi(req.options) orelse return failDb(handle, error.InvalidArgument);
-    const input_chunks = manifestChunks(req.chunks, req.chunk_count) orelse return failDb(handle, error.InvalidArgument);
-    const chunks = allocator.alloc(zova.ObjectChunk, input_chunks.len) catch |err| return failDb(handle, err);
-    defer allocator.free(chunks);
-    for (input_chunks, chunks) |chunk, *out_chunk| {
-        out_chunk.* = .{
-            .index = chunk.index,
-            .hash = toChunkId(chunk.hash),
-            .offset = chunk.offset,
-            .size_bytes = chunk.size_bytes,
-        };
-    }
-    handle.db.assembleObjectFromChunksWithOptions(toObjectId(req.id), req.size_bytes, chunks, options) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_object_writer_create(request: ?*const zova_object_writer_create_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const out = req.out_writer orelse return failDb(handle, error.InvalidArgument);
-    out.* = null;
-
-    var writer = handle.db.objectWriter(allocator) catch |err| return failDb(handle, err);
-    const writer_handle = allocator.create(WriterHandle) catch |err| {
-        writer.deinit();
-        return failDb(handle, err);
-    };
-    writer_handle.* = .{ .db = handle, .writer = writer };
-    handle.live_writers += 1;
-    out.* = @ptrCast(writer_handle);
-    return okDb(handle);
-}
-
-pub fn zova_object_writer_create_with_options(
-    request: ?*const zova_object_writer_create_with_options_request,
-) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const out = req.out_writer orelse return failDb(handle, error.InvalidArgument);
-    out.* = null;
-    const options = objectOptionsFromAbi(req.options) orelse return failDb(handle, error.InvalidArgument);
-    var writer = handle.db.objectWriterWithOptions(allocator, options) catch |err| return failDb(handle, err);
-    const writer_handle = allocator.create(WriterHandle) catch |err| {
-        writer.deinit();
-        return failDb(handle, err);
-    };
-    writer_handle.* = .{ .db = handle, .writer = writer };
-    handle.live_writers += 1;
-    out.* = @ptrCast(writer_handle);
-    return okDb(handle);
-}
-
-pub fn zova_object_writer_write(request: ?*const zova_object_writer_write_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = writerHandle(req.writer) orelse return .INVALID_ARGUMENT;
-    handle.db.mutex.lock();
-    defer handle.db.mutex.unlock();
-    const bytes = bytesConst(req.data, req.len) orelse return failDb(handle.db, error.InvalidArgument);
-    handle.writer.write(bytes) catch |err| return failDb(handle.db, err);
-    return okDb(handle.db);
-}
-
-pub fn zova_object_writer_finish(request: ?*const zova_object_writer_finish_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = writerHandle(req.writer) orelse return .INVALID_ARGUMENT;
-    handle.db.mutex.lock();
-    defer handle.db.mutex.unlock();
-    const out = req.out_id orelse return failDb(handle.db, error.InvalidArgument);
-    const id = handle.writer.finish() catch |err| return failDb(handle.db, err);
-    out.* = fromObjectId(id);
-    return okDb(handle.db);
-}
-
-pub fn zova_object_writer_cancel(request: ?*const zova_object_writer_cancel_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = writerHandle(req.writer) orelse return .INVALID_ARGUMENT;
-    handle.db.mutex.lock();
-    defer handle.db.mutex.unlock();
-    handle.writer.cancel() catch |err| return failDb(handle.db, err);
-    return okDb(handle.db);
-}
-
-pub fn zova_object_writer_destroy(writer: ?*zova_object_writer) callconv(.c) zova_status {
-    const handle = writerHandle(writer) orelse return .INVALID_ARGUMENT;
-    const db_handle = handle.db;
-    db_handle.mutex.lock();
-    defer db_handle.mutex.unlock();
-    handle.writer.deinit();
-    std.debug.assert(db_handle.live_writers > 0);
-    db_handle.live_writers -= 1;
-    allocator.destroy(handle);
-    return okDb(db_handle);
-}
-
-pub fn zova_object_reader_create(
-    request: ?*const zova_object_reader_create_request,
-) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const out = req.out_reader orelse return failDb(handle, error.InvalidArgument);
-    out.* = null;
-
-    const reader = handle.db.objectReader(toObjectId(req.id)) catch |err| return failDb(handle, err);
-    const reader_handle = allocator.create(ReaderHandle) catch |err| {
-        var cleanup = reader;
-        cleanup.deinit();
-        return failDb(handle, err);
-    };
-    reader_handle.* = .{ .db = handle, .reader = reader };
-    handle.live_readers += 1;
-    out.* = @ptrCast(reader_handle);
-    return okDb(handle);
-}
-
-pub fn zova_object_reader_read(
-    request: ?*const zova_object_reader_read_request,
-) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = readerHandle(req.reader) orelse return .INVALID_ARGUMENT;
-    handle.db.mutex.lock();
-    defer handle.db.mutex.unlock();
-    const out = req.out_read orelse return failDb(handle.db, error.InvalidArgument);
-    out.* = 0;
-    const buffer = bytesMut(req.buffer, req.buffer_len) orelse return failDb(handle.db, error.InvalidArgument);
-    const read = handle.reader.read(buffer) catch |err| return failDb(handle.db, err);
-    out.* = read;
-    return okDb(handle.db);
-}
-
-pub fn zova_object_reader_destroy(
-    request: ?*const zova_object_reader_destroy_request,
-) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const slot = req.reader orelse return .INVALID_ARGUMENT;
-    const raw = slot.* orelse return .OK;
-    const handle = readerHandle(raw) orelse return .INVALID_ARGUMENT;
-    const db_handle = handle.db;
-    db_handle.mutex.lock();
-    defer db_handle.mutex.unlock();
-    slot.* = null;
-    handle.reader.deinit();
-    std.debug.assert(db_handle.live_readers > 0);
-    db_handle.live_readers -= 1;
-    allocator.destroy(handle);
-    return okDb(db_handle);
-}
-
-pub fn zova_vector_collection_create(request: ?*const zova_vector_collection_create_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const name = req.name orelse return failDb(handle, error.InvalidArgument);
-    const metric = vectorMetricFromAbi(req.options.metric) orelse return failDb(handle, error.InvalidArgument);
-    const element_type = vectorElementTypeFromAbi(req.options.element_type) orelse return failDb(handle, error.InvalidArgument);
-
-    handle.db.createVectorCollection(std.mem.span(name), .{
-        .dimensions = req.options.dimensions,
-        .metric = metric,
-        .element_type = element_type,
-    }) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_vector_collection_exists(request: ?*const zova_vector_collection_exists_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const name = req.name orelse return failDb(handle, error.InvalidArgument);
-    const out = req.out_exists orelse return failDb(handle, error.InvalidArgument);
-    const exists = handle.db.hasVectorCollection(std.mem.span(name)) catch |err| return failDb(handle, err);
-    out.* = if (exists) 1 else 0;
-    return okDb(handle);
-}
-
-pub fn zova_vector_put(request: ?*const zova_vector_put_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
-    const vector_id = req.vector_id orelse return failDb(handle, error.InvalidArgument);
-    const values = vectorValuesConst(req.values) orelse return failDb(handle, error.InvalidArgument);
-
-    handle.db.putVector(std.mem.span(collection_name), std.mem.span(vector_id), values) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_vector_get(request: ?*const zova_vector_get_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
-    const vector_id = req.vector_id orelse return failDb(handle, error.InvalidArgument);
-    const out = req.out_vector orelse return failDb(handle, error.InvalidArgument);
-    out.* = emptyVector();
-
-    var vector = handle.db.getVector(allocator, std.mem.span(collection_name), std.mem.span(vector_id)) catch |err| return failDb(handle, err);
-    errdefer vector.deinit(allocator);
-    fillVector(out, &vector) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_vector_exists(request: ?*const zova_vector_exists_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
-    const vector_id = req.vector_id orelse return failDb(handle, error.InvalidArgument);
-    const out = req.out_exists orelse return failDb(handle, error.InvalidArgument);
-    const exists = handle.db.hasVector(std.mem.span(collection_name), std.mem.span(vector_id)) catch |err| return failDb(handle, err);
-    out.* = if (exists) 1 else 0;
-    return okDb(handle);
-}
-
-pub fn zova_vector_delete(request: ?*const zova_vector_delete_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
-    const vector_id = req.vector_id orelse return failDb(handle, error.InvalidArgument);
-
-    handle.db.deleteVector(std.mem.span(collection_name), std.mem.span(vector_id)) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_vector_search(request: ?*const zova_vector_search_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
-    const query = vectorValuesConst(req.query) orelse return failDb(handle, error.InvalidArgument);
-    const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
-    out.* = emptyVectorSearchResults();
-
-    var results = handle.db.searchVectors(allocator, std.mem.span(collection_name), query, req.limit) catch |err| return failDb(handle, err);
-    defer results.deinit(allocator);
-
-    fillSearchResults(out, results.items) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_vector_search_in(request: ?*const zova_vector_search_in_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
-    const query = vectorValuesConst(req.query) orelse return failDb(handle, error.InvalidArgument);
-    const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
-    out.* = emptyVectorSearchResults();
-
-    const candidates = candidateIdSlices(req.candidate_ids, req.candidate_count) catch |err| return failDb(handle, err);
-    defer if (candidates.len != 0) allocator.free(candidates);
-
-    var results = handle.db.searchVectorsIn(allocator, std.mem.span(collection_name), query, candidates, req.limit) catch |err| return failDb(handle, err);
-    defer results.deinit(allocator);
-
-    fillSearchResults(out, results.items) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_vector_search_multi_i8(request: ?*const zova_vector_search_multi_i8_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
-    const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
-    out.* = emptyVectorSearchResults();
-    const mode = multiI8SearchModeFromAbi(req.mode) orelse return failDb(handle, error.InvalidArgument);
-    if (multiI8AggregationFromAbi(req.aggregation) == null) return failDb(handle, error.InvalidArgument);
-
-    const queries = multiI8QuerySlices(req.query_values, req.query_values_len, req.query_count, req.dimensions) catch |err| return failDb(handle, err);
-    defer allocator.free(queries);
-    const candidates = candidateIdSlices(req.candidate_ids, req.candidate_count) catch |err| return failDb(handle, err);
-    defer if (candidates.len != 0) allocator.free(candidates);
-
-    var results = handle.db.searchMultiI8Cosine(allocator, std.mem.span(collection_name), .{
-        .queries = queries,
-        .candidate_ids = if (req.candidate_count == 0) null else candidates,
-        .mode = mode,
-        .prefilter_query_index = req.prefilter_query_index,
-        .prefilter_limit = req.prefilter_limit,
-    }, req.limit) catch |err| return failDb(handle, err);
-    defer results.deinit(allocator);
-
-    fillSearchResults(out, results.items) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_vector_collection_info_get(request: ?*const zova_vector_collection_info_get_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const name = req.name orelse return failDb(handle, error.InvalidArgument);
-    const out = req.out_info orelse return failDb(handle, error.InvalidArgument);
-    out.* = emptyVectorCollectionInfo();
-
-    var info = handle.db.vectorCollectionInfo(allocator, std.mem.span(name)) catch |err| return failDb(handle, err);
-    defer info.deinit(allocator);
-
-    fillVectorCollectionInfo(out, info) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_vector_collections_list(request: ?*const zova_vector_collections_list_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const out = req.out_list orelse return failDb(handle, error.InvalidArgument);
-    out.* = emptyVectorCollectionList();
-
-    var list = handle.db.listVectorCollections(allocator) catch |err| return failDb(handle, err);
-    defer list.deinit(allocator);
-
-    fillVectorCollectionList(out, list.items) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_vector_put_many(request: ?*const zova_vector_put_many_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
-
-    const vectors = vectorInputSlices(req.vectors, req.vectors_len) catch |err| return failDb(handle, err);
-    defer if (vectors.len != 0) allocator.free(vectors);
-
-    handle.db.putVectors(std.mem.span(collection_name), vectors) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_vector_delete_many(request: ?*const zova_vector_delete_many_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
-    const vector_ids = candidateIdSlices(req.vector_ids, req.vector_count) catch |err| return failDb(handle, err);
-    defer if (vector_ids.len != 0) allocator.free(vector_ids);
-    handle.db.deleteVectors(std.mem.span(collection_name), vector_ids) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_vector_collection_delete(request: ?*const zova_vector_collection_delete_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const name = req.name orelse return failDb(handle, error.InvalidArgument);
-
-    handle.db.deleteVectorCollection(std.mem.span(name)) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_vector_search_within(request: ?*const zova_vector_search_within_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
-    const query = vectorValuesConst(req.query) orelse return failDb(handle, error.InvalidArgument);
-    const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
-    out.* = emptyVectorSearchResults();
-
-    var results = handle.db.searchVectorsWithin(allocator, std.mem.span(collection_name), query, req.max_distance, req.limit) catch |err| return failDb(handle, err);
-    defer results.deinit(allocator);
-
-    fillSearchResults(out, results.items) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_vector_search_in_within(request: ?*const zova_vector_search_in_within_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
-    const query = vectorValuesConst(req.query) orelse return failDb(handle, error.InvalidArgument);
-    const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
-    out.* = emptyVectorSearchResults();
-
-    const candidates = candidateIdSlices(req.candidate_ids, req.candidate_count) catch |err| return failDb(handle, err);
-    defer if (candidates.len != 0) allocator.free(candidates);
-
-    var results = handle.db.searchVectorsInWithin(allocator, std.mem.span(collection_name), query, candidates, req.max_distance, req.limit) catch |err| return failDb(handle, err);
-    defer results.deinit(allocator);
-
-    fillSearchResults(out, results.items) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_vector_search_by_id(request: ?*const zova_vector_search_by_id_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
-    const source_vector_id = req.source_vector_id orelse return failDb(handle, error.InvalidArgument);
-    const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
-    out.* = emptyVectorSearchResults();
-
-    var results = handle.db.searchVectorsById(allocator, std.mem.span(collection_name), std.mem.span(source_vector_id), req.limit) catch |err| return failDb(handle, err);
-    defer results.deinit(allocator);
-
-    fillSearchResults(out, results.items) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_vector_search_by_id_in(request: ?*const zova_vector_search_by_id_in_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
-    const source_vector_id = req.source_vector_id orelse return failDb(handle, error.InvalidArgument);
-    const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
-    out.* = emptyVectorSearchResults();
-
-    const candidates = candidateIdSlices(req.candidate_ids, req.candidate_count) catch |err| return failDb(handle, err);
-    defer if (candidates.len != 0) allocator.free(candidates);
-
-    var results = handle.db.searchVectorsByIdIn(allocator, std.mem.span(collection_name), std.mem.span(source_vector_id), candidates, req.limit) catch |err| return failDb(handle, err);
-    defer results.deinit(allocator);
-
-    fillSearchResults(out, results.items) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_vector_search_by_id_within(request: ?*const zova_vector_search_by_id_within_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
-    const source_vector_id = req.source_vector_id orelse return failDb(handle, error.InvalidArgument);
-    const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
-    out.* = emptyVectorSearchResults();
-
-    var results = handle.db.searchVectorsByIdWithin(allocator, std.mem.span(collection_name), std.mem.span(source_vector_id), req.max_distance, req.limit) catch |err| return failDb(handle, err);
-    defer results.deinit(allocator);
-
-    fillSearchResults(out, results.items) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_vector_search_by_id_in_within(request: ?*const zova_vector_search_by_id_in_within_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
-    const source_vector_id = req.source_vector_id orelse return failDb(handle, error.InvalidArgument);
-    const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
-    out.* = emptyVectorSearchResults();
-
-    const candidates = candidateIdSlices(req.candidate_ids, req.candidate_count) catch |err| return failDb(handle, err);
-    defer if (candidates.len != 0) allocator.free(candidates);
-
-    var results = handle.db.searchVectorsByIdInWithin(
-        allocator,
-        std.mem.span(collection_name),
-        std.mem.span(source_vector_id),
-        candidates,
-        req.max_distance,
-        req.limit,
-    ) catch |err| return failDb(handle, err);
-    defer results.deinit(allocator);
-
-    fillSearchResults(out, results.items) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_graph_create(request: ?*const zova_graph_create_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const name = req.name orelse return failDb(handle, error.InvalidArgument);
-    handle.db.createGraph(std.mem.span(name)) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_graph_exists(request: ?*const zova_graph_exists_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const name = req.name orelse return failDb(handle, error.InvalidArgument);
-    const out = req.out_exists orelse return failDb(handle, error.InvalidArgument);
-    const exists = handle.db.hasGraph(std.mem.span(name)) catch |err| return failDb(handle, err);
-    out.* = if (exists) 1 else 0;
-    return okDb(handle);
-}
-
-pub fn zova_graph_info_get(request: ?*const zova_graph_info_get_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const name = req.name orelse return failDb(handle, error.InvalidArgument);
-    const out = req.out_info orelse return failDb(handle, error.InvalidArgument);
-    out.* = emptyGraphInfo();
-    var info = handle.db.graphInfo(allocator, std.mem.span(name)) catch |err| return failDb(handle, err);
-    defer info.deinit(allocator);
-    fillGraphInfo(out, info) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_graphs_list(request: ?*const zova_graph_list_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const out = req.out_list orelse return failDb(handle, error.InvalidArgument);
-    out.* = emptyGraphList();
-    var list = handle.db.listGraphs(allocator) catch |err| return failDb(handle, err);
-    defer list.deinit(allocator);
-    fillGraphList(out, list.items) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_database_extension_install(request: ?*const zova_database_extension_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const name = req.name orelse return failDb(handle, error.InvalidArgument);
-    handle.db.installExtension(std.mem.span(name)) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_database_extension_list(request: ?*const zova_database_extension_list_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const out = req.out_list orelse return failDb(handle, error.InvalidArgument);
-    out.* = emptyExtensionList();
-    var list = handle.db.listExtensions(allocator) catch |err| return failDb(handle, err);
-    defer list.deinit(allocator);
-    fillExtensionList(out, list.items) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_database_extension_info(request: ?*const zova_database_extension_info_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const name = req.name orelse return failDb(handle, error.InvalidArgument);
-    const out = req.out_info orelse return failDb(handle, error.InvalidArgument);
-    out.* = emptyExtensionInfo();
-    var info = handle.db.extensionInfo(allocator, std.mem.span(name)) catch |err| return failDb(handle, err);
-    defer info.deinit(allocator);
-    fillExtensionInfo(out, info) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_database_extension_check(request: ?*const zova_database_extension_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const name = req.name orelse return failDb(handle, error.InvalidArgument);
-    handle.db.checkExtension(std.mem.span(name)) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_database_extension_check_all(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    var list = handle.db.listExtensions(allocator) catch |err| return failDb(handle, err);
-    defer list.deinit(allocator);
-    for (list.items) |item| {
-        handle.db.checkExtension(item.name) catch |err| return failDb(handle, err);
-    }
-    return okDb(handle);
-}
-
-pub fn zova_database_extension_drop(request: ?*const zova_database_extension_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const name = req.name orelse return failDb(handle, error.InvalidArgument);
-    handle.db.dropExtension(std.mem.span(name)) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-fn freshBuildTimestamp() std.Io.Timestamp {
-    return std.Io.Clock.awake.now(std.Io.Threaded.global_single_threaded.io());
-}
-
-fn freshBuildElapsedMs(start: std.Io.Timestamp) f64 {
-    const elapsed_ns = start.durationTo(freshBuildTimestamp()).toNanoseconds();
-    if (elapsed_ns <= 0) return 0;
-    return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, std.time.ns_per_ms);
-}
-
-fn validateFreshIdentifier(name: []const u8, reject_private: bool) error{InvalidArgument}!void {
-    if (name.len == 0 or name.len > 128) return error.InvalidArgument;
-    if (reject_private and name.len >= 6 and std.ascii.eqlIgnoreCase(name[0..6], "_zova_")) return error.InvalidArgument;
-    for (name, 0..) |byte, index| {
-        const valid = std.ascii.isAlphabetic(byte) or byte == '_' or (index != 0 and std.ascii.isDigit(byte));
-        if (!valid) return error.InvalidArgument;
-    }
-}
-
-fn appendFreshQuotedIdentifier(buffer: *std.ArrayList(u8), name: []const u8) !void {
-    try buffer.append(allocator, '"');
-    try buffer.appendSlice(allocator, name);
-    try buffer.append(allocator, '"');
-}
-
-fn freshBuildPrepareTable(build: *FreshBuildHandle, table_name: []const u8) !void {
-    try validateFreshIdentifier(table_name, true);
-    for (build.prepared_tables.items) |existing| if (std.mem.eql(u8, existing, table_name)) return;
-
-    var count_sql: std.ArrayList(u8) = .empty;
-    defer count_sql.deinit(allocator);
-    try count_sql.appendSlice(allocator, "select count(*) from ");
-    try appendFreshQuotedIdentifier(&count_sql, table_name);
-    try count_sql.append(allocator, 0);
-    {
-        var count = try build.database.db.prepare(count_sql.items[0 .. count_sql.items.len - 1 :0]);
-        defer count.deinit();
-        if ((try count.step()) != .row or count.columnInt64(0) != 0) return error.InvalidArgument;
-    }
-
-    var captured: std.ArrayList(DeferredFreshIndex) = .empty;
-    defer captured.deinit(allocator);
-    errdefer for (captured.items) |item| {
-        allocator.free(item.name);
-        allocator.free(item.sql);
-    };
-    {
-        var indexes = try build.database.db.prepare("select name,sql from sqlite_schema where type='index' and tbl_name=?1 and sql is not null order by name");
-        defer indexes.deinit();
-        try indexes.bindText(1, table_name);
-        while ((try indexes.step()) == .row) {
-            const name = try allocator.dupeZ(u8, indexes.columnText(0));
-            errdefer allocator.free(name);
-            const sql = try allocator.dupeZ(u8, indexes.columnText(1));
-            try captured.append(allocator, .{ .name = name, .sql = sql });
-        }
-    }
-    for (captured.items) |item| {
-        var drop_sql: std.ArrayList(u8) = .empty;
-        defer drop_sql.deinit(allocator);
-        try drop_sql.appendSlice(allocator, "drop index ");
-        try appendFreshQuotedIdentifier(&drop_sql, item.name);
-        try drop_sql.append(allocator, 0);
-        try build.database.db.exec(drop_sql.items[0 .. drop_sql.items.len - 1 :0]);
-        try build.deferred_indexes.append(allocator, item);
-    }
-    captured.clearRetainingCapacity();
-    try build.prepared_tables.append(allocator, try allocator.dupe(u8, table_name));
-}
-
-fn freshBuildLoadRows(build: *FreshBuildHandle, request: *const zova_fresh_build_rows_request, fts: bool) !void {
-    const table_name_ptr = request.table_name orelse return error.InvalidArgument;
-    if (request.column_count == 0) return error.InvalidArgument;
-    const column_ptrs = request.column_names orelse return error.InvalidArgument;
-    const value_count = std.math.mul(usize, request.row_count, request.column_count) catch return error.InvalidArgument;
-    if (value_count != 0 and request.values == null) return error.InvalidArgument;
-    const table_name = std.mem.span(table_name_ptr);
-    for (column_ptrs[0..request.column_count], 0..) |column_ptr, index| {
-        const column = std.mem.span(column_ptr orelse return error.InvalidArgument);
-        try validateFreshIdentifier(column, false);
-        for (column_ptrs[0..index]) |prior_ptr| {
-            if (std.mem.eql(u8, column, std.mem.span(prior_ptr orelse return error.InvalidArgument))) return error.InvalidArgument;
-        }
-    }
-    const values: []const zova_fresh_value = if (value_count == 0) &.{} else request.values.?[0..value_count];
-    for (values) |value| switch (value.value_type) {
-        0, 1, 2 => if (value.bytes != null or value.bytes_len != 0) return error.InvalidArgument,
-        3 => {
-            if (value.bytes_len != 0 and value.bytes == null) return error.InvalidArgument;
-            const bytes: []const u8 = if (value.bytes_len == 0) &.{} else value.bytes.?[0..value.bytes_len];
-            if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidArgument;
-        },
-        4 => if (value.bytes_len != 0 and value.bytes == null) return error.InvalidArgument,
-        else => return error.InvalidArgument,
-    };
-    try freshBuildPrepareTable(build, table_name);
-
-    var sql: std.ArrayList(u8) = .empty;
-    defer sql.deinit(allocator);
-    try sql.appendSlice(allocator, "insert into ");
-    try appendFreshQuotedIdentifier(&sql, table_name);
-    try sql.append(allocator, '(');
-    for (column_ptrs[0..request.column_count], 0..) |column_ptr, index| {
-        const column = std.mem.span(column_ptr orelse return error.InvalidArgument);
-        try validateFreshIdentifier(column, false);
-        if (index != 0) try sql.append(allocator, ',');
-        try appendFreshQuotedIdentifier(&sql, column);
-    }
-    try sql.appendSlice(allocator, ") values(");
-    for (0..request.column_count) |index| {
-        if (index != 0) try sql.append(allocator, ',');
-        try sql.append(allocator, '?');
-    }
-    try sql.appendSlice(allocator, ")");
-    try sql.append(allocator, 0);
-
-    var stmt = try build.database.db.prepare(sql.items[0 .. sql.items.len - 1 :0]);
-    defer stmt.deinit();
-    for (0..request.row_count) |row| {
-        for (values[row * request.column_count ..][0..request.column_count], 0..) |value, column| {
-            const index: c_int = @intCast(column + 1);
-            switch (value.value_type) {
-                0 => try stmt.bindNull(index),
-                1 => try stmt.bindInt64(index, value.int64_value),
-                2 => try stmt.bindDouble(index, value.float64_value),
-                3 => {
-                    if (value.bytes_len != 0 and value.bytes == null) return error.InvalidArgument;
-                    const bytes: []const u8 = if (value.bytes_len == 0) &.{} else value.bytes.?[0..value.bytes_len];
-                    if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidArgument;
-                    try stmt.bindText(index, bytes);
-                },
-                4 => {
-                    if (value.bytes_len != 0 and value.bytes == null) return error.InvalidArgument;
-                    const bytes: []const u8 = if (value.bytes_len == 0) &.{} else value.bytes.?[0..value.bytes_len];
-                    try stmt.bindBlobBorrowed(index, bytes);
-                },
-                else => return error.InvalidArgument,
-            }
-        }
-        if ((try stmt.step()) != .done) return error.InvalidArgument;
-        try stmt.reset();
-        try stmt.clearBindings();
-    }
-    const rows: u64 = @intCast(request.row_count);
-    if (fts) build.profile.fts_rows = std.math.add(u64, build.profile.fts_rows, rows) catch return error.InvalidArgument else build.profile.table_rows = std.math.add(u64, build.profile.table_rows, rows) catch return error.InvalidArgument;
-}
-
-fn freshBuildRunForeignKeyCheck(database: *DatabaseHandle) !void {
-    var foreign_keys = try database.db.prepare("pragma foreign_key_check");
-    defer foreign_keys.deinit();
-    if ((try foreign_keys.step()) != .done) return error.InvalidArgument;
-}
-
-fn freshBuildForeignKeysEnabled(database: *DatabaseHandle) !bool {
-    var foreign_keys = try database.db.prepare("pragma foreign_keys");
-    defer foreign_keys.deinit();
-    if ((try foreign_keys.step()) != .row) return error.SqliteError;
-    return foreign_keys.columnInt64(0) != 0;
-}
-
-fn freshBuildDeferredForeignKeysPending(database: *DatabaseHandle) !bool {
-    var current: c_int = 0;
-    var highwater: c_int = 0;
-    const rc = sqlite.c.sqlite3_db_status(
-        database.db.sqlite_db.handle,
-        sqlite.c.SQLITE_DBSTATUS_DEFERRED_FKS,
-        &current,
-        &highwater,
-        0,
-    );
-    if (rc != sqlite.c.SQLITE_OK) return error.SqliteError;
-    return current != 0;
-}
-
-fn freshBuildRollback(build: *FreshBuildHandle) void {
-    if (!build.active) return;
-    if (build.owns_transaction) {
-        build.database.db.rollback() catch {};
-    } else {
-        build.database.db.rollbackToSavepoint("fresh_build_session") catch {};
-        build.database.db.releaseSavepoint("fresh_build_session") catch {};
-    }
-    freshBuildRestoreCache(build);
-    build.database.fresh_build_active = false;
-    build.active = false;
-}
-
-fn freshBuildRestoreCache(build: *FreshBuildHandle) void {
-    if (build.previous_cache_size == null) return;
-    const start = freshBuildTimestamp();
-    graph.restoreFreshBuildCache(&build.database.db.sqlite_db, build.previous_cache_size) catch {};
-    build.cache_diagnostics.cache_restore_ms += freshBuildElapsedMs(start);
-    build.previous_cache_size = null;
-}
-
-pub fn zova_fresh_build_begin(request: ?*const zova_fresh_build_begin_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const out = req.out_build orelse return .INVALID_ARGUMENT;
-    out.* = null;
-    const database = databaseHandleRaw(req.db) orelse return .INVALID_ARGUMENT;
-    database.mutex.lock();
-    defer database.mutex.unlock();
-    if (database.fresh_build_active or database.live_statements != 0 or database.live_writers != 0) return failDb(database, error.InvalidArgument);
-    const start = freshBuildTimestamp();
-    const foreign_keys_enforced = freshBuildForeignKeysEnabled(database) catch |err| return failDb(database, err);
-    if (!foreign_keys_enforced) return failDb(database, error.InvalidArgument);
-    var empty = database.db.prepare(
-        "select (select count(*) from _zova_objects)+(select count(*) from _zova_chunks)+(select count(*) from _zova_object_chunks)+(select count(*) from _zova_vectors)+(select count(*) from _zova_graphs)+(select count(*) from _zova_graph_nodes)+(select count(*) from _zova_graph_edges)",
-    ) catch |err| return failDb(database, err);
-    defer empty.deinit();
-    if ((empty.step() catch |err| return failDb(database, err)) != .row or empty.columnInt64(0) != 0) return failDb(database, error.InvalidArgument);
-    const owns_transaction = sqlite.c.sqlite3_get_autocommit(database.db.sqlite_db.handle) != 0;
-    if (owns_transaction) database.db.beginImmediate() catch |err| return failDb(database, err) else database.db.savepoint("fresh_build_session") catch |err| return failDb(database, err);
-    const baseline_foreign_key_check_start = freshBuildTimestamp();
-    freshBuildRunForeignKeyCheck(database) catch |err| {
-        if (owns_transaction) database.db.rollback() catch {} else {
-            database.db.rollbackToSavepoint("fresh_build_session") catch {};
-            database.db.releaseSavepoint("fresh_build_session") catch {};
-        }
-        return failDb(database, err);
-    };
-    const baseline_foreign_key_check_ms = freshBuildElapsedMs(baseline_foreign_key_check_start);
-    const previous_cache_size = if (fresh_build_cache_policy == .session)
-        graph.increaseFreshBuildCache(&database.db.sqlite_db) catch |err| {
-            if (owns_transaction) database.db.rollback() catch {} else {
-                database.db.rollbackToSavepoint("fresh_build_session") catch {};
-                database.db.releaseSavepoint("fresh_build_session") catch {};
-            }
-            return failDb(database, err);
-        }
-    else
-        null;
-    const build = allocator.create(FreshBuildHandle) catch |err| {
-        graph.restoreFreshBuildCache(&database.db.sqlite_db, previous_cache_size) catch {};
-        if (owns_transaction) database.db.rollback() catch {} else {
-            database.db.rollbackToSavepoint("fresh_build_session") catch {};
-            database.db.releaseSavepoint("fresh_build_session") catch {};
-        }
-        return failDb(database, err);
-    };
-    build.* = .{
-        .database = database,
-        .owns_transaction = owns_transaction,
-        .previous_cache_size = previous_cache_size,
-        .validation = .{
-            .foreign_keys_enforced = foreign_keys_enforced,
-            .baseline_foreign_keys_validated = true,
-        },
-    };
-    build.cache_diagnostics.baseline_foreign_key_check_ms = baseline_foreign_key_check_ms;
-    build.cache_diagnostics.baseline_foreign_key_check_ran = true;
-    build.profile.validation_ms = freshBuildElapsedMs(start);
-    database.fresh_build_active = true;
-    out.* = @ptrCast(build);
-    return okDb(database);
-}
-
-pub fn zova_fresh_build_table_rows(request: ?*const zova_fresh_build_rows_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const build = freshBuildHandle(req.build) orelse return .INVALID_ARGUMENT;
-    const database = build.database;
-    database.mutex.lock();
-    defer database.mutex.unlock();
-    const start = freshBuildTimestamp();
-    freshBuildLoadRows(build, req, false) catch |err| {
-        freshBuildRollback(build);
-        return failDb(database, err);
-    };
-    build.profile.table_load_ms += freshBuildElapsedMs(start);
-    return okDb(database);
-}
-
-pub fn zova_fresh_build_fts_rows(request: ?*const zova_fresh_build_rows_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const build = freshBuildHandle(req.build) orelse return .INVALID_ARGUMENT;
-    const database = build.database;
-    database.mutex.lock();
-    defer database.mutex.unlock();
-    const start = freshBuildTimestamp();
-    freshBuildLoadRows(build, req, true) catch |err| {
-        freshBuildRollback(build);
-        return failDb(database, err);
-    };
-    build.profile.fts_load_ms += freshBuildElapsedMs(start);
-    return okDb(database);
-}
-
-pub fn zova_fresh_build_graph(request: ?*const zova_fresh_build_graph_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const build = freshBuildHandle(req.build) orelse return .INVALID_ARGUMENT;
-    const database = build.database;
-    database.mutex.lock();
-    defer database.mutex.unlock();
-    if ((req.out_node_keys == null and req.out_node_keys_capacity != 0) or
-        (req.out_node_keys != null and req.out_node_keys_capacity < req.nodes_len) or
-        (req.out_edge_keys == null and req.out_edge_keys_capacity != 0) or
-        (req.out_edge_keys != null and req.out_edge_keys_capacity < req.edges_len))
-    {
-        freshBuildRollback(build);
-        return failDb(database, error.InvalidArgument);
-    }
-    if (build.graph_loaded) {
-        freshBuildRollback(build);
-        return failDb(database, error.InvalidArgument);
-    }
-    const graph_name = req.graph_name orelse {
-        freshBuildRollback(build);
-        return failDb(database, error.InvalidArgument);
-    };
-    const nodes = freshGraphNodeInputSlices(req.nodes, req.nodes_len) catch |err| {
-        freshBuildRollback(build);
-        return failDb(database, err);
-    };
-    defer if (nodes.len != 0) allocator.free(nodes);
-    const edges = freshGraphEdgePayloadInputSlices(req.edges, req.edges_len) catch |err| {
-        freshBuildRollback(build);
-        return failDb(database, err);
-    };
-    defer if (edges.len != 0) allocator.free(edges);
-    build.node_keys = allocator.alloc(i64, nodes.len) catch |err| {
-        freshBuildRollback(build);
-        return failDb(database, err);
-    };
-    build.edge_keys = allocator.alloc(i64, edges.len) catch |err| {
-        freshBuildRollback(build);
-        return failDb(database, err);
-    };
-    var profile: zova.FreshGraphBuildProfile = .{};
-    database.db.buildFreshGraphPreparedKeyedProfiled(std.mem.span(graph_name), nodes, edges, build.node_keys, build.edge_keys, &profile) catch |err| {
-        freshBuildRollback(build);
-        return failDb(database, err);
-    };
-    build.profile.graph_load_ms += profile.graph_and_types_ms + profile.node_load_ms + profile.edge_load_ms;
-    build.profile.graph_validation_ms += profile.validation_ms;
-    build.profile.graph_key_generation_ms += profile.key_generation_ms;
-    build.profile.graph_node_load_ms += profile.node_load_ms;
-    build.profile.graph_edge_load_ms += profile.edge_load_ms;
-    build.profile.index_build_ms += profile.index_build_ms;
-    build.profile.payload_bytes = profile.payload_bytes;
-    build.graph_loaded = true;
-    if (req.out_node_keys) |out| @memcpy(out[0..build.node_keys.len], build.node_keys);
-    if (req.out_edge_keys) |out| @memcpy(out[0..build.edge_keys.len], build.edge_keys);
-    return okDb(database);
-}
-
-pub fn zova_fresh_build_vectors(request: ?*const zova_fresh_build_vectors_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const build = freshBuildHandle(req.build) orelse return .INVALID_ARGUMENT;
-    const database = build.database;
-    database.mutex.lock();
-    defer database.mutex.unlock();
-    const collection_name = req.collection_name orelse {
-        freshBuildRollback(build);
-        return failDb(database, error.InvalidArgument);
-    };
-    const vectors = vectorInputSlices(req.vectors, req.vectors_len) catch |err| {
-        freshBuildRollback(build);
-        return failDb(database, err);
-    };
-    defer if (vectors.len != 0) allocator.free(vectors);
-    const start = freshBuildTimestamp();
-    database.db.putVectors(std.mem.span(collection_name), vectors) catch |err| {
-        freshBuildRollback(build);
-        return failDb(database, err);
-    };
-    build.profile.vector_load_ms += freshBuildElapsedMs(start);
-    build.profile.vector_rows = std.math.add(u64, build.profile.vector_rows, vectors.len) catch {
-        freshBuildRollback(build);
-        return failDb(database, error.InvalidArgument);
-    };
-    return okDb(database);
-}
-
-pub fn zova_fresh_build_finish(request: ?*const zova_fresh_build_finish_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const build = freshBuildHandle(req.build) orelse return .INVALID_ARGUMENT;
-    const database = build.database;
-    database.mutex.lock();
-    defer database.mutex.unlock();
-    if (req.out_node_keys_capacity < build.node_keys.len or req.out_edge_keys_capacity < build.edge_keys.len or
-        (build.node_keys.len != 0 and req.out_node_keys == null) or (build.edge_keys.len != 0 and req.out_edge_keys == null))
-    {
-        freshBuildRollback(build);
-        return failDb(database, error.InvalidArgument);
-    }
-    if (fresh_build_cache_policy == .graph_and_deferred_indexes) {
-        build.previous_cache_size = graph.increaseFreshBuildCache(&database.db.sqlite_db) catch |err| {
-            freshBuildRollback(build);
-            return failDb(database, err);
-        };
-    }
-    const indexes_start = freshBuildTimestamp();
-    for (build.deferred_indexes.items) |item| database.db.exec(item.sql) catch |err| {
-        freshBuildRollback(build);
-        return failDb(database, err);
-    };
-    const deferred_index_ms = freshBuildElapsedMs(indexes_start);
-    build.profile.index_build_ms += deferred_index_ms;
-    build.cache_diagnostics.deferred_index_ms = deferred_index_ms;
-    if (fresh_build_cache_policy == .graph_and_deferred_indexes) freshBuildRestoreCache(build);
-    const validation_start = freshBuildTimestamp();
-    const deferred_foreign_keys_pending = freshBuildDeferredForeignKeysPending(database) catch |err| {
-        freshBuildRollback(build);
-        return failDb(database, err);
-    };
-    build.cache_diagnostics.deferred_foreign_keys_pending = deferred_foreign_keys_pending;
-    if (build.validation.foreign_keys_enforced and build.validation.baseline_foreign_keys_validated and !deferred_foreign_keys_pending) {
-        build.cache_diagnostics.validation_fast_path = true;
-    } else {
-        const foreign_key_check_start = freshBuildTimestamp();
-        build.cache_diagnostics.foreign_key_check_ran = true;
-        freshBuildRunForeignKeyCheck(database) catch |err| {
-            build.cache_diagnostics.foreign_key_check_ms = freshBuildElapsedMs(foreign_key_check_start);
-            freshBuildRollback(build);
-            return failDb(database, err);
-        };
-        build.cache_diagnostics.foreign_key_check_ms = freshBuildElapsedMs(foreign_key_check_start);
-    }
-    build.profile.validation_ms += freshBuildElapsedMs(validation_start);
-    const commit_start = freshBuildTimestamp();
-    if (build.owns_transaction) database.db.commit() catch |err| {
-        freshBuildRollback(build);
-        return failDb(database, err);
-    } else database.db.releaseSavepoint("fresh_build_session") catch |err| {
-        freshBuildRollback(build);
-        return failDb(database, err);
-    };
-    build.profile.commit_ms = freshBuildElapsedMs(commit_start);
-    build.cache_diagnostics.transaction_finish_ms = build.profile.commit_ms;
-    freshBuildRestoreCache(build);
-    if (build.node_keys.len != 0) @memcpy(req.out_node_keys.?[0..build.node_keys.len], build.node_keys);
-    if (build.edge_keys.len != 0) @memcpy(req.out_edge_keys.?[0..build.edge_keys.len], build.edge_keys);
-    if (req.out_profile) |profile| profile.* = build.profile;
-    build.active = false;
-    database.fresh_build_active = false;
-    return okDb(database);
-}
-
-pub fn zova_fresh_build_abort(build_ptr: ?*zova_fresh_build) callconv(.c) zova_status {
-    const build = freshBuildHandle(build_ptr) orelse return .INVALID_ARGUMENT;
-    const database = build.database;
-    database.mutex.lock();
-    defer database.mutex.unlock();
-    freshBuildRollback(build);
-    return okDb(database);
-}
-
-pub fn zova_fresh_build_destroy(build_ptr: ?*zova_fresh_build) callconv(.c) void {
-    const ptr = build_ptr orelse return;
-    const build: *FreshBuildHandle = @ptrCast(@alignCast(ptr));
-    const database = build.database;
-    database.mutex.lock();
-    defer database.mutex.unlock();
-    freshBuildRollback(build);
-    build.deinit();
-    allocator.destroy(build);
-}
-
-pub fn zova_graph_delete(request: ?*const zova_graph_delete_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const name = req.name orelse return failDb(handle, error.InvalidArgument);
-    handle.db.deleteGraph(std.mem.span(name)) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_graph_node_put(request: ?*const zova_graph_node_put_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
-    const node_id = req.node_id orelse return failDb(handle, error.InvalidArgument);
-    const kind = req.kind orelse return failDb(handle, error.InvalidArgument);
-    const target_type = graphTargetTypeFromAbi(req.target_type) orelse return failDb(handle, error.InvalidArgument);
-    handle.db.putGraphNode(.{
-        .graph_name = std.mem.span(graph_name),
-        .node_id = std.mem.span(node_id),
-        .kind = std.mem.span(kind),
-        .target_type = target_type,
-        .target_namespace = optionalCStringSpan(req.target_namespace),
-        .target_ref = optionalCStringSpan(req.target_ref),
-    }) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_graph_node_put_many(request: ?*const zova_graph_node_put_many_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const nodes = graphNodeInputSlices(req.nodes, req.nodes_len) catch |err| return failDb(handle, err);
-    defer if (nodes.len != 0) allocator.free(nodes);
-    handle.db.putGraphNodes(nodes) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_graph_node_put_many_keyed(request: ?*const zova_graph_node_put_many_keyed_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    if (req.out_node_keys_capacity < req.nodes_len) return .INVALID_ARGUMENT;
-    if (req.nodes_len != 0 and (req.nodes == null or req.out_node_keys == null)) return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const nodes = graphNodeInputSlices(req.nodes, req.nodes_len) catch |err| return failDb(handle, err);
-    defer if (nodes.len != 0) allocator.free(nodes);
-    const keys = allocator.alloc(i64, nodes.len) catch |err| return failDb(handle, err);
-    defer allocator.free(keys);
-    handle.db.putGraphNodesKeyed(nodes, keys) catch |err| return failDb(handle, err);
-    if (keys.len != 0) @memcpy(req.out_node_keys.?[0..keys.len], keys);
-    return okDb(handle);
-}
-
-fn graphBuildFreshKeyed(request: ?*const zova_graph_build_fresh_keyed_request, comptime prepared: bool) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    if (req.out_node_keys_capacity < req.nodes_len or req.out_edge_keys_capacity < req.edges_len) return .INVALID_ARGUMENT;
-    if (req.nodes_len != 0 and (req.nodes == null or req.out_node_keys == null)) return .INVALID_ARGUMENT;
-    if (req.edges_len != 0 and (req.edges == null or req.out_edge_keys == null)) return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    const graph_name = req.graph_name orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const nodes = freshGraphNodeInputSlices(req.nodes, req.nodes_len) catch |err| return failDb(handle, err);
-    defer if (nodes.len != 0) allocator.free(nodes);
-    const edges = freshGraphEdgeInputSlices(req.edges, req.edges_len) catch |err| return failDb(handle, err);
-    defer if (edges.len != 0) allocator.free(edges);
-    const node_keys = allocator.alloc(i64, nodes.len) catch |err| return failDb(handle, err);
-    defer allocator.free(node_keys);
-    const edge_keys = allocator.alloc(i64, edges.len) catch |err| return failDb(handle, err);
-    defer allocator.free(edge_keys);
-    if (prepared) {
-        handle.db.buildFreshGraphPreparedKeyed(std.mem.span(graph_name), nodes, edges, node_keys, edge_keys) catch |err| return failDb(handle, err);
-    } else {
-        handle.db.buildFreshGraphKeyed(std.mem.span(graph_name), nodes, edges, node_keys, edge_keys) catch |err| return failDb(handle, err);
-    }
-    if (node_keys.len != 0) @memcpy(req.out_node_keys.?[0..node_keys.len], node_keys);
-    if (edge_keys.len != 0) @memcpy(req.out_edge_keys.?[0..edge_keys.len], edge_keys);
-    return okDb(handle);
-}
-
-pub fn zova_graph_build_fresh_keyed(request: ?*const zova_graph_build_fresh_keyed_request) callconv(.c) zova_status {
-    return graphBuildFreshKeyed(request, false);
-}
-
-pub fn zova_graph_build_fresh_prepared_keyed(request: ?*const zova_graph_build_fresh_keyed_request) callconv(.c) zova_status {
-    return graphBuildFreshKeyed(request, true);
-}
-
-pub fn zova_graph_build_fresh_prepared_keyed_with_payloads(request: ?*const zova_graph_build_fresh_prepared_keyed_with_payloads_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    if (req.out_node_keys_capacity < req.nodes_len or req.out_edge_keys_capacity < req.edges_len) return .INVALID_ARGUMENT;
-    if (req.nodes_len != 0 and (req.nodes == null or req.out_node_keys == null)) return .INVALID_ARGUMENT;
-    if (req.edges_len != 0 and (req.edges == null or req.out_edge_keys == null)) return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    const graph_name = req.graph_name orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const nodes = freshGraphNodeInputSlices(req.nodes, req.nodes_len) catch |err| return failDb(handle, err);
-    defer if (nodes.len != 0) allocator.free(nodes);
-    const edges = freshGraphEdgePayloadInputSlices(req.edges, req.edges_len) catch |err| return failDb(handle, err);
-    defer if (edges.len != 0) allocator.free(edges);
-    const node_keys = allocator.alloc(i64, nodes.len) catch |err| return failDb(handle, err);
-    defer allocator.free(node_keys);
-    const edge_keys = allocator.alloc(i64, edges.len) catch |err| return failDb(handle, err);
-    defer allocator.free(edge_keys);
-    handle.db.buildFreshGraphPreparedKeyed(std.mem.span(graph_name), nodes, edges, node_keys, edge_keys) catch |err| return failDb(handle, err);
-    if (node_keys.len != 0) @memcpy(req.out_node_keys.?[0..node_keys.len], node_keys);
-    if (edge_keys.len != 0) @memcpy(req.out_edge_keys.?[0..edge_keys.len], edge_keys);
-    return okDb(handle);
-}
-
-pub fn zova_graph_node_get(request: ?*const zova_graph_node_get_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
-    const node_id = req.node_id orelse return failDb(handle, error.InvalidArgument);
-    const out = req.out_node orelse return failDb(handle, error.InvalidArgument);
-    out.* = emptyGraphNode();
-    var node = handle.db.getGraphNode(allocator, std.mem.span(graph_name), std.mem.span(node_id)) catch |err| return failDb(handle, err);
-    defer node.deinit(allocator);
-    fillGraphNode(out, node) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_graph_node_exists(request: ?*const zova_graph_node_exists_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
-    const node_id = req.node_id orelse return failDb(handle, error.InvalidArgument);
-    const out = req.out_exists orelse return failDb(handle, error.InvalidArgument);
-    const exists = handle.db.hasGraphNode(std.mem.span(graph_name), std.mem.span(node_id)) catch |err| return failDb(handle, err);
-    out.* = if (exists) 1 else 0;
-    return okDb(handle);
-}
-
-pub fn zova_graph_node_delete(request: ?*const zova_graph_node_delete_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
-    const node_id = req.node_id orelse return failDb(handle, error.InvalidArgument);
-    handle.db.deleteGraphNode(std.mem.span(graph_name), std.mem.span(node_id)) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_graph_node_delete_many(request: ?*const zova_graph_node_delete_many_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
-    const node_ids = candidateIdSlices(req.node_ids, req.node_count) catch |err| return failDb(handle, err);
-    defer if (node_ids.len != 0) allocator.free(node_ids);
-    handle.db.deleteGraphNodes(std.mem.span(graph_name), node_ids) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_graph_edge_put(request: ?*const zova_graph_edge_put_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
-    const from_node_id = req.from_node_id orelse return failDb(handle, error.InvalidArgument);
-    const edge_type = req.edge_type orelse return failDb(handle, error.InvalidArgument);
-    const to_node_id = req.to_node_id orelse return failDb(handle, error.InvalidArgument);
-    handle.db.putGraphEdge(.{
-        .graph_name = std.mem.span(graph_name),
-        .from_node_id = std.mem.span(from_node_id),
-        .edge_type = std.mem.span(edge_type),
-        .to_node_id = std.mem.span(to_node_id),
-    }) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_graph_edge_put_many(request: ?*const zova_graph_edge_put_many_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const edges = graphEdgeInputSlices(req.edges, req.edges_len) catch |err| return failDb(handle, err);
-    defer if (edges.len != 0) allocator.free(edges);
-    handle.db.putGraphEdges(edges) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_graph_edge_put_many_keyed(request: ?*const zova_graph_edge_put_many_keyed_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    if (req.out_edge_keys_capacity < req.edges_len) return .INVALID_ARGUMENT;
-    if (req.edges_len != 0 and (req.edges == null or req.out_edge_keys == null)) return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const edges = graphEdgeInputSlices(req.edges, req.edges_len) catch |err| return failDb(handle, err);
-    defer if (edges.len != 0) allocator.free(edges);
-    const keys = allocator.alloc(i64, edges.len) catch |err| return failDb(handle, err);
-    defer allocator.free(keys);
-    handle.db.putGraphEdgesKeyed(edges, keys) catch |err| return failDb(handle, err);
-    if (keys.len != 0) @memcpy(req.out_edge_keys.?[0..keys.len], keys);
-    return okDb(handle);
-}
-
-pub fn zova_graph_edge_delete_many(request: ?*const zova_graph_edge_delete_many_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const edges = graphEdgeInputSlices(req.edges, req.edges_len) catch |err| return failDb(handle, err);
-    defer if (edges.len != 0) allocator.free(edges);
-    handle.db.deleteGraphEdges(edges) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_graph_edge_get(request: ?*const zova_graph_edge_get_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
-    const from_node_id = req.from_node_id orelse return failDb(handle, error.InvalidArgument);
-    const edge_type = req.edge_type orelse return failDb(handle, error.InvalidArgument);
-    const to_node_id = req.to_node_id orelse return failDb(handle, error.InvalidArgument);
-    const out = req.out_edge orelse return failDb(handle, error.InvalidArgument);
-    out.* = emptyGraphEdge();
-    var edge = handle.db.getGraphEdge(allocator, std.mem.span(graph_name), std.mem.span(from_node_id), std.mem.span(edge_type), std.mem.span(to_node_id)) catch |err| return failDb(handle, err);
-    defer edge.deinit(allocator);
-    fillGraphEdge(out, edge) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_graph_edge_exists(request: ?*const zova_graph_edge_exists_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
-    const from_node_id = req.from_node_id orelse return failDb(handle, error.InvalidArgument);
-    const edge_type = req.edge_type orelse return failDb(handle, error.InvalidArgument);
-    const to_node_id = req.to_node_id orelse return failDb(handle, error.InvalidArgument);
-    const out = req.out_exists orelse return failDb(handle, error.InvalidArgument);
-    const exists = handle.db.hasGraphEdge(std.mem.span(graph_name), std.mem.span(from_node_id), std.mem.span(edge_type), std.mem.span(to_node_id)) catch |err| return failDb(handle, err);
-    out.* = if (exists) 1 else 0;
-    return okDb(handle);
-}
-
-pub fn zova_graph_edge_delete(request: ?*const zova_graph_edge_delete_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
-    const from_node_id = req.from_node_id orelse return failDb(handle, error.InvalidArgument);
-    const edge_type = req.edge_type orelse return failDb(handle, error.InvalidArgument);
-    const to_node_id = req.to_node_id orelse return failDb(handle, error.InvalidArgument);
-    handle.db.deleteGraphEdge(.{
-        .graph_name = std.mem.span(graph_name),
-        .from_node_id = std.mem.span(from_node_id),
-        .edge_type = std.mem.span(edge_type),
-        .to_node_id = std.mem.span(to_node_id),
-    }) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_graph_neighbors(request: ?*const zova_graph_neighbors_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
-    const node_id = req.node_id orelse return failDb(handle, error.InvalidArgument);
-    const direction = graphDirectionFromAbi(req.direction) orelse return failDb(handle, error.InvalidArgument);
-    const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
-    out.* = emptyGraphNeighborResults();
-    var results = handle.db.graphNeighbors(allocator, .{
-        .graph_name = std.mem.span(graph_name),
-        .node_id = std.mem.span(node_id),
-        .direction = direction,
-        .edge_type = optionalCStringSpan(req.edge_type),
-        .limit = req.limit,
-    }) catch |err| return failDb(handle, err);
-    defer results.deinit(allocator);
-    fillGraphNeighborResults(out, results.items) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_graph_neighbors_keyed(request: ?*const zova_graph_neighbors_keyed_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const out = req.out_results orelse return .INVALID_ARGUMENT;
-    out.* = emptyGraphKeyedNeighborResults();
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
-    const node_id = req.node_id orelse return failDb(handle, error.InvalidArgument);
-    const direction = graphDirectionFromAbi(req.direction) orelse return failDb(handle, error.InvalidArgument);
-    var results = handle.db.graphNeighborsKeyed(allocator, .{
-        .graph_name = std.mem.span(graph_name),
-        .node_id = std.mem.span(node_id),
-        .direction = direction,
-        .edge_type = optionalCStringSpan(req.edge_type),
-        .limit = req.limit,
-    }) catch |err| return failDb(handle, err);
-    defer results.deinit(allocator);
-    fillGraphKeyedNeighborResults(out, results.items) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_graph_nodes_get_many_keyed(request: ?*const zova_graph_nodes_get_many_keyed_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const out = req.out_results orelse return .INVALID_ARGUMENT;
-    out.* = .{ .items = null, .len = 0 };
-    const graph_name = req.graph_name orelse return .INVALID_ARGUMENT;
-    if (req.key_count != 0 and req.node_keys == null) return .INVALID_ARGUMENT;
-    const keys: []const i64 = if (req.key_count == 0) &.{} else req.node_keys.?[0..req.key_count];
-    for (keys) |key| if (key <= 0) return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    var results = handle.db.graphNodesGetManyKeyed(allocator, std.mem.span(graph_name), keys) catch |err| return failDb(handle, err);
-    defer results.deinit(allocator);
-    fillGraphKeyedNodeResults(out, results.items) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_graph_edges_get_many_keyed(request: ?*const zova_graph_edges_get_many_keyed_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const out = req.out_results orelse return .INVALID_ARGUMENT;
-    out.* = .{ .items = null, .len = 0 };
-    const graph_name = req.graph_name orelse return .INVALID_ARGUMENT;
-    if (req.key_count != 0 and req.edge_keys == null) return .INVALID_ARGUMENT;
-    const keys: []const i64 = if (req.key_count == 0) &.{} else req.edge_keys.?[0..req.key_count];
-    for (keys) |key| if (key <= 0) return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    var results = handle.db.graphEdgesGetManyKeyed(allocator, std.mem.span(graph_name), keys) catch |err| return failDb(handle, err);
-    defer results.deinit(allocator);
-    fillGraphKeyedEdgeResults(out, results.items) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_graph_edge_payload_get_many(request: ?*const zova_graph_edge_payload_get_many_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const out = req.out_results orelse return .INVALID_ARGUMENT;
-    out.* = .{ .items = null, .len = 0 };
-    const graph_name = req.graph_name orelse return .INVALID_ARGUMENT;
-    if (req.key_count != 0 and req.edge_keys == null) return .INVALID_ARGUMENT;
-    const keys: []const i64 = if (req.key_count == 0) &.{} else req.edge_keys.?[0..req.key_count];
-    for (keys) |key| if (key <= 0) return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    var results = handle.db.graphEdgePayloadsGetMany(allocator, std.mem.span(graph_name), keys) catch |err| return failDb(handle, err);
-    defer results.deinit(allocator);
-    fillGraphEdgePayloadResults(out, results.items) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_graph_edge_payload_replace_many(request: ?*const zova_graph_edge_payload_replace_many_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const graph_name = req.graph_name orelse return .INVALID_ARGUMENT;
-    if (req.replacement_count != 0 and req.replacements == null) return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    const replacements = graphEdgePayloadReplacementSlices(req.replacements, req.replacement_count) catch |err| return failDb(handle, err);
-    defer if (replacements.len != 0) allocator.free(replacements);
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    handle.db.replaceGraphEdgePayloads(std.mem.span(graph_name), replacements) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_graph_degree(request: ?*const zova_graph_degree_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
-    const node_id = req.node_id orelse return failDb(handle, error.InvalidArgument);
-    const direction = graphDirectionFromAbi(req.direction) orelse return failDb(handle, error.InvalidArgument);
-    const out_degree = req.out_degree orelse return failDb(handle, error.InvalidArgument);
-    out_degree.* = handle.db.graphDegree(.{
-        .graph_name = std.mem.span(graph_name),
-        .node_id = std.mem.span(node_id),
-        .direction = direction,
-        .edge_type = optionalCStringSpan(req.edge_type),
-    }) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_graph_degree_many_keyed(request: ?*const zova_graph_degree_many_keyed_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    if (req.out_degrees_capacity < req.node_count) return .INVALID_ARGUMENT;
-    if (req.node_count != 0 and (req.node_keys == null or req.out_degrees == null)) return .INVALID_ARGUMENT;
-    const graph_name = req.graph_name orelse return .INVALID_ARGUMENT;
-    const direction = graphDirectionFromAbi(req.direction) orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const node_keys: []const i64 = if (req.node_count == 0) &.{} else req.node_keys.?[0..req.node_count];
-    const degrees = allocator.alloc(u64, req.node_count) catch |err| return failDb(handle, err);
-    defer allocator.free(degrees);
-    handle.db.graphDegreeManyKeyed(
-        std.mem.span(graph_name),
-        node_keys,
-        direction,
-        optionalCStringSpan(req.edge_type),
-        degrees,
-    ) catch |err| return failDb(handle, err);
-    if (degrees.len != 0) @memcpy(req.out_degrees.?[0..degrees.len], degrees);
-    return okDb(handle);
-}
-
-pub fn zova_graph_scan(request: ?*const zova_graph_scan_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const out = req.out_results orelse return .INVALID_ARGUMENT;
-    out.* = emptyGraphScanResults();
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
-    var results = handle.db.graphScan(allocator, .{
-        .graph_name = std.mem.span(graph_name),
-        .node_after = .{ .created_order = req.node_after.created_order, .key = req.node_after.key },
-        .edge_after = .{ .created_order = req.edge_after.created_order, .key = req.edge_after.key },
-        .node_limit = req.node_limit,
-        .edge_limit = req.edge_limit,
-    }) catch |err| return failDb(handle, err);
-    defer results.deinit(allocator);
-    fillGraphScanResults(out, results) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_graph_walk(request: ?*const zova_graph_walk_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
-    const start_node_id = req.start_node_id orelse return failDb(handle, error.InvalidArgument);
-    const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
-    out.* = emptyGraphWalkResults();
-    var results = handle.db.graphWalk(allocator, .{
-        .graph_name = std.mem.span(graph_name),
-        .start_node_id = std.mem.span(start_node_id),
-        .edge_type = optionalCStringSpan(req.edge_type),
-        .max_depth = req.max_depth,
-        .limit = req.limit,
-    }) catch |err| return failDb(handle, err);
-    defer results.deinit(allocator);
-    fillGraphWalkResults(out, results.items) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_graph_walk_direction(request: ?*const zova_graph_walk_direction_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
-    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
-    const start_node_id = req.start_node_id orelse return failDb(handle, error.InvalidArgument);
-    const direction = graphDirectionFromAbi(req.direction) orelse return failDb(handle, error.InvalidArgument);
-    const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
-    out.* = emptyGraphWalkResults();
-    var results = handle.db.graphWalkDirection(allocator, .{
-        .graph_name = std.mem.span(graph_name),
-        .start_node_id = std.mem.span(start_node_id),
-        .direction = direction,
-        .edge_type = optionalCStringSpan(req.edge_type),
-        .max_depth = req.max_depth,
-        .limit = req.limit,
-    }) catch |err| return failDb(handle, err);
-    defer results.deinit(allocator);
-    fillGraphWalkResults(out, results.items) catch |err| return failDb(handle, err);
-    return okDb(handle);
-}
-
-pub fn zova_graph_walk_direction_profiled(request: ?*const zova_graph_walk_direction_profiled_request) callconv(.c) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    const out = req.out_results orelse return .INVALID_ARGUMENT;
-    const out_profile = req.out_profile orelse return .INVALID_ARGUMENT;
-    out.* = emptyGraphWalkResults();
-    out_profile.* = .{};
-
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    const total_start = cAbiProfileTimestamp();
-    const mutex_start = cAbiProfileTimestamp();
-    handle.mutex.lock();
-    out_profile.mutex_wait_ms = cAbiProfileElapsedMs(mutex_start);
-    defer handle.mutex.unlock();
-
-    const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
-    const start_node_id = req.start_node_id orelse return failDb(handle, error.InvalidArgument);
-    const direction = graphDirectionFromAbi(req.direction) orelse return failDb(handle, error.InvalidArgument);
-    var scan_profile: graph.GraphWalkScanProfile = .{};
-    const traversal_start = cAbiProfileTimestamp();
-    var results = handle.db.graphWalkDirectionProfiled(allocator, .{
-        .graph_name = std.mem.span(graph_name),
-        .start_node_id = std.mem.span(start_node_id),
-        .direction = direction,
-        .edge_type = optionalCStringSpan(req.edge_type),
-        .max_depth = req.max_depth,
-        .limit = req.limit,
-    }, &scan_profile) catch |err| return failDb(handle, err);
-    var results_active = true;
-    defer if (results_active) results.deinit(allocator);
-    const traversal_ms = cAbiProfileElapsedMs(traversal_start);
-
-    out_profile.root_lookup_ms = scan_profile.root_lookup_ms;
-    out_profile.adjacency_prepare_ms = scan_profile.adjacency_prepare_ms;
-    out_profile.adjacency_execute_ms = scan_profile.adjacency_execute_ms;
-    const traversal_accounted_ms = scan_profile.root_lookup_ms + scan_profile.adjacency_prepare_ms + scan_profile.adjacency_execute_ms;
-    out_profile.bfs_bookkeeping_allocation_ms = @max(0, traversal_ms - traversal_accounted_ms);
-    out_profile.frontier_expansions = scan_profile.frontier_expansions;
-    out_profile.adjacency_query_binds = scan_profile.adjacency_query_binds;
-    out_profile.adjacency_rows_stepped = scan_profile.adjacency_rows_stepped;
-    out_profile.result_count = scan_profile.result_count;
-
-    const export_start = cAbiProfileTimestamp();
-    fillGraphWalkResults(out, results.items) catch |err| return failDb(handle, err);
-    out_profile.c_abi_result_export_ms = cAbiProfileElapsedMs(export_start);
-    const cleanup_start = cAbiProfileTimestamp();
-    results.deinit(allocator);
-    results_active = false;
-    out_profile.bfs_bookkeeping_allocation_ms += cAbiProfileElapsedMs(cleanup_start);
-    out_profile.total_profiled_ms = cAbiProfileElapsedMs(total_start);
-    return okDb(handle);
-}
-
-fn cAbiProfileIo() std.Io {
-    return std.Io.Threaded.global_single_threaded.io();
-}
-
-fn cAbiProfileTimestamp() std.Io.Timestamp {
-    return std.Io.Clock.awake.now(cAbiProfileIo());
-}
-
-fn cAbiProfileElapsedMs(start: std.Io.Timestamp) f64 {
-    const elapsed_ns = start.durationTo(cAbiProfileTimestamp()).toNanoseconds();
-    if (elapsed_ns <= 0) return 0;
-    return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, std.time.ns_per_ms);
-}
-
-const OpenMode = enum { create, open };
-
-fn openDatabase(request: ?*const zova_database_open_request, mode: OpenMode) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    clearMessage(req.out_error_message);
-    const out = req.out_db orelse return failMessage(req.out_error_message, error.InvalidArgument);
-    out.* = null;
-    const path = req.path orelse return failMessage(req.out_error_message, error.InvalidArgument);
-
-    var db = switch (mode) {
-        .create => zova.Database.create(std.mem.span(path)),
-        .open => zova.Database.open(std.mem.span(path)),
-    } catch |err| return failMessage(req.out_error_message, err);
-
-    const handle = allocator.create(DatabaseHandle) catch |err| {
-        db.deinit();
-        return failMessage(req.out_error_message, err);
-    };
-    handle.* = .{ .db = db };
-    out.* = @ptrCast(handle);
-    return .OK;
-}
-
-fn createDatabaseWithOptions(request: ?*const zova_database_create_options_request) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    clearMessage(req.out_error_message);
-    const out = req.out_db orelse return failMessage(req.out_error_message, error.InvalidArgument);
-    out.* = null;
-    const path = req.path orelse return failMessage(req.out_error_message, error.InvalidArgument);
-
-    var db = zova.Database.createWithOptions(std.mem.span(path), .{
-        .page_size = req.page_size,
-    }) catch |err| return failMessage(req.out_error_message, err);
-
-    const handle = allocator.create(DatabaseHandle) catch |err| {
-        db.deinit();
-        return failMessage(req.out_error_message, err);
-    };
-    handle.* = .{ .db = db };
-    out.* = @ptrCast(handle);
-    return .OK;
-}
-
-fn openDatabaseWithOptions(request: ?*const zova_database_open_options_request) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    clearMessage(req.out_error_message);
-    const out = req.out_db orelse return failMessage(req.out_error_message, error.InvalidArgument);
-    out.* = null;
-    const path = req.path orelse return failMessage(req.out_error_message, error.InvalidArgument);
-    if ((req.flags & ~ZOVA_OPEN_READ_ONLY) != 0) return failMessage(req.out_error_message, error.InvalidArgument);
-    if (req.busy_timeout_ms > std.math.maxInt(c_int)) return failMessage(req.out_error_message, error.InvalidArgument);
-
-    var db = zova.Database.openWithOptions(std.mem.span(path), .{
-        .read_only = (req.flags & ZOVA_OPEN_READ_ONLY) != 0,
-        .busy_timeout_ms = req.busy_timeout_ms,
-    }) catch |err| return failMessage(req.out_error_message, err);
-
-    const handle = allocator.create(DatabaseHandle) catch |err| {
-        db.deinit();
-        return failMessage(req.out_error_message, err);
-    };
-    handle.* = .{ .db = db };
-    out.* = @ptrCast(handle);
-    return .OK;
-}
-
-fn openDatabaseWithExtensions(request: ?*const zova_database_open_extensions_request, mode: OpenMode) zova_status {
-    const req = request orelse return .INVALID_ARGUMENT;
-    clearMessage(req.out_error_message);
-    const out = req.out_db orelse return failMessage(req.out_error_message, error.InvalidArgument);
-    out.* = null;
-    const path = req.path orelse return failMessage(req.out_error_message, error.InvalidArgument);
-    if ((req.flags & ~ZOVA_OPEN_READ_ONLY) != 0) return failMessage(req.out_error_message, error.InvalidArgument);
-    if (mode == .create and (req.flags != 0 or req.busy_timeout_ms != 0)) return failMessage(req.out_error_message, error.InvalidArgument);
-    if (req.busy_timeout_ms > std.math.maxInt(c_int)) return failMessage(req.out_error_message, error.InvalidArgument);
-
-    const bundle_paths = bundlePathSlices(allocator, req.extension_bundle_paths, req.extension_bundle_count) catch |err| {
-        return failMessage(req.out_error_message, err);
-    };
-    defer allocator.free(bundle_paths);
-
-    if (bundle_paths.len == 0) {
-        return switch (mode) {
-            .create => openDatabase(&.{
-                .path = req.path,
-                .out_db = req.out_db,
-                .out_error_message = req.out_error_message,
-            }, .create),
-            .open => openDatabaseWithOptions(&.{
-                .path = req.path,
-                .flags = req.flags,
-                .busy_timeout_ms = req.busy_timeout_ms,
-                .out_db = req.out_db,
-                .out_error_message = req.out_error_message,
-            }),
-        };
-    }
-
-    var dynamic_extensions = zova.DynamicExtensionSet.loadTrustedBundles(
-        allocator,
-        bundle_paths,
-        trustStoreOptions(req.trust_store_path),
-    ) catch |err| return failMessage(req.out_error_message, err);
-
-    var owned_registry = zova.DynamicExtensionOwnedRegistry.init(allocator, &.{
-        zova.bundledExtensionRegistry(),
-        dynamic_extensions.registry(),
-    }) catch |err| {
-        dynamic_extensions.deinit();
-        return failMessage(req.out_error_message, err);
-    };
-
-    var db = switch (mode) {
-        .create => zova.Database.createWithExtensions(std.mem.span(path), owned_registry.registry()),
-        .open => zova.Database.openWithOptionsAndExtensions(std.mem.span(path), .{
-            .read_only = (req.flags & ZOVA_OPEN_READ_ONLY) != 0,
-            .busy_timeout_ms = req.busy_timeout_ms,
-        }, owned_registry.registry()),
-    } catch |err| {
-        owned_registry.deinit();
-        dynamic_extensions.deinit();
-        return failMessage(req.out_error_message, err);
-    };
-
-    const handle = allocator.create(DatabaseHandle) catch |err| {
-        db.deinit();
-        owned_registry.deinit();
-        dynamic_extensions.deinit();
-        return failMessage(req.out_error_message, err);
-    };
-    handle.* = .{
-        .db = db,
-        .dynamic_extensions = dynamic_extensions,
-        .extension_registry = owned_registry,
-    };
-    out.* = @ptrCast(handle);
-    return .OK;
-}
-
-fn bundlePathSlices(gpa: std.mem.Allocator, paths: ?[*]const ?[*:0]const u8, count: usize) ![]const []const u8 {
-    if (count == 0) return try gpa.alloc([]const u8, 0);
-    const raw_paths = paths orelse return error.InvalidArgument;
-    const out = try gpa.alloc([]const u8, count);
-    errdefer gpa.free(out);
-    for (raw_paths[0..count], 0..) |path, index| {
-        const path_z = path orelse return error.InvalidArgument;
-        out[index] = std.mem.span(path_z);
-    }
-    return out;
-}
-
-fn trustStoreOptions(path: ?[*:0]const u8) zova.DynamicExtensionTrustStoreOptions {
-    return .{ .path = if (path) |value| std.mem.span(value) else null };
-}
-
-// Opaque handles are just erased DatabaseHandle/WriterHandle pointers. Casts
-// stay local to this module so the ABI can keep exposing incomplete C structs.
-fn databaseHandle(db: ?*zova_database) ?*DatabaseHandle {
-    const ptr = db orelse return null;
-    const handle: *DatabaseHandle = @ptrCast(@alignCast(ptr));
-    if (handle.fresh_build_active) return null;
-    return handle;
-}
-
-fn databaseHandleRaw(db: ?*zova_database) ?*DatabaseHandle {
-    const ptr = db orelse return null;
-    return @ptrCast(@alignCast(ptr));
-}
-
-fn freshBuildHandle(build: ?*zova_fresh_build) ?*FreshBuildHandle {
-    const ptr = build orelse return null;
-    const handle: *FreshBuildHandle = @ptrCast(@alignCast(ptr));
-    if (!handle.active) return null;
-    return handle;
-}
-
-fn writerHandle(writer: ?*zova_object_writer) ?*WriterHandle {
-    const ptr = writer orelse return null;
-    return @ptrCast(@alignCast(ptr));
-}
-
-fn readerHandle(reader: ?*zova_object_reader) ?*ReaderHandle {
-    const ptr = reader orelse return null;
-    return @ptrCast(@alignCast(ptr));
-}
-
-fn statementHandle(statement: ?*zova_statement) ?*StatementHandle {
-    const ptr = statement orelse return null;
-    return @ptrCast(@alignCast(ptr));
-}
-
-fn subscriptionHandle(subscription: ?*zova_subscription) ?*SubscriptionHandle {
-    const ptr = subscription orelse return null;
-    return @ptrCast(@alignCast(ptr));
-}
-
-// A null pointer is valid only for empty byte slices. That keeps empty objects
-// and zero-length range buffers ergonomic while still catching bad lengths.
-fn bytesConst(data: ?[*]const u8, len: usize) ?[]const u8 {
-    if (len == 0) return &.{};
-    const ptr = data orelse return null;
-    return ptr[0..len];
-}
-
-fn bytesMut(data: ?[*]u8, len: usize) ?[]u8 {
-    if (len == 0) return &.{};
-    const ptr = data orelse return null;
-    return ptr[0..len];
-}
-
-const allowed_sql_function_flags =
-    ZOVA_SQL_FUNCTION_DETERMINISTIC |
-    ZOVA_SQL_FUNCTION_DIRECT_ONLY |
-    ZOVA_SQL_FUNCTION_INNOCUOUS;
-
-fn validateSqlFunctionName(name: []const u8) error{InvalidArgument}!void {
-    if (name.len == 0 or name.len > 64) return error.InvalidArgument;
-    if (hasAsciiInsensitivePrefix(name, "zova_") or hasAsciiInsensitivePrefix(name, "_zova_")) return error.InvalidArgument;
-    if (!isAsciiIdentStart(name[0])) return error.InvalidArgument;
-    for (name[1..]) |byte| {
-        if (!isAsciiIdentContinue(byte)) return error.InvalidArgument;
-    }
-}
-
-fn isValidSqlFunctionArity(arity: c_int) bool {
-    return arity == -1 or (arity >= 0 and arity <= 127);
-}
-
-fn hasRegisteredSqlFunction(handle: *DatabaseHandle, name: []const u8, arity: c_int) bool {
-    for (handle.sql_functions.items) |item| {
-        if (item.arity == arity and asciiInsensitiveEql(item.name, name)) return true;
-    }
-    return false;
-}
-
-fn sqlFunctionFlagsToSqlite(flags: u32) c_int {
-    var sqlite_flags: c_int = sqlite.c.SQLITE_UTF8;
-    if ((flags & ZOVA_SQL_FUNCTION_DETERMINISTIC) != 0) sqlite_flags |= sqlite.c.SQLITE_DETERMINISTIC;
-    if ((flags & ZOVA_SQL_FUNCTION_DIRECT_ONLY) != 0) sqlite_flags |= sqlite.c.SQLITE_DIRECTONLY;
-    if ((flags & ZOVA_SQL_FUNCTION_INNOCUOUS) != 0) sqlite_flags |= sqlite.c.SQLITE_INNOCUOUS;
-    return sqlite_flags;
-}
-
-fn deinitSqlFunctionRegistrations(handle: *DatabaseHandle) void {
-    for (handle.sql_functions.items) |*item| item.deinit();
-    handle.sql_functions.deinit(allocator);
-}
-
-fn destroySqlScalarContext(user_data: ?*anyopaque) callconv(.c) void {
-    const context_ptr = user_data orelse return;
-    const context: *SqlScalarFunctionContext = @ptrCast(@alignCast(context_ptr));
-    if (context.destroy) |destroy| destroy(context.user_data);
-    allocator.destroy(context);
-}
-
-fn sqlScalarTrampoline(
-    sqlite_context: ?*sqlite.c.sqlite3_context,
-    argc: c_int,
-    argv: [*c]?*sqlite.c.sqlite3_value,
-) callconv(.c) void {
-    const raw_context = sqlite_context orelse return;
-    const user_data = sqlite.c.sqlite3_user_data(raw_context) orelse {
-        sqlite.c.sqlite3_result_error(raw_context, "missing zova sql callback context", -1);
-        return;
-    };
-    const context: *SqlScalarFunctionContext = @ptrCast(@alignCast(user_data));
-    if (argc < 0) {
-        sqlite.c.sqlite3_result_error(raw_context, "invalid zova sql callback argc", -1);
-        return;
-    }
-
-    const count: usize = @intCast(argc);
-    const values = allocator.alloc(zova_sql_value, count) catch {
-        sqlite.c.sqlite3_result_error_nomem(raw_context);
-        return;
-    };
-    defer allocator.free(values);
-
-    for (values, 0..) |*value, index| {
-        const sqlite_value = argv[index] orelse {
-            sqlite.c.sqlite3_result_error(raw_context, "invalid zova sql callback argv", -1);
-            return;
-        };
-        value.* = sqlValueFromSqlite(sqlite_value);
-    }
-
-    var call = zova_sql_function_call{
-        .user_data = context.user_data,
-        .argc = count,
-        .argv = if (values.len == 0) null else values.ptr,
-    };
-    var result = zova_sql_result{};
-    context.callback(context.user_data, &call, &result);
-    applySqlResult(raw_context, result);
-}
-
-fn sqlValueFromSqlite(value: *sqlite.c.sqlite3_value) zova_sql_value {
-    return switch (sqlite.c.sqlite3_value_type(value)) {
-        sqlite.c.SQLITE_INTEGER => .{
-            .value_type = .INTEGER,
-            .int64_value = sqlite.c.sqlite3_value_int64(value),
-        },
-        sqlite.c.SQLITE_FLOAT => .{
-            .value_type = .FLOAT,
-            .double_value = sqlite.c.sqlite3_value_double(value),
-        },
-        sqlite.c.SQLITE_TEXT => textSqlValue(value),
-        sqlite.c.SQLITE_BLOB => blobSqlValue(value),
-        sqlite.c.SQLITE_NULL => .{ .value_type = .NULL },
-        else => .{ .value_type = .NULL },
-    };
-}
-
-fn textSqlValue(value: *sqlite.c.sqlite3_value) zova_sql_value {
-    const len_raw = sqlite.c.sqlite3_value_bytes(value);
-    const len: usize = if (len_raw <= 0) 0 else @intCast(len_raw);
-    const ptr = sqlite.c.sqlite3_value_text(value);
-    return .{
-        .value_type = .TEXT,
-        .data = if (ptr == null) null else @ptrCast(ptr),
-        .data_len = len,
-    };
-}
-
-fn blobSqlValue(value: *sqlite.c.sqlite3_value) zova_sql_value {
-    const len_raw = sqlite.c.sqlite3_value_bytes(value);
-    const len: usize = if (len_raw <= 0) 0 else @intCast(len_raw);
-    const ptr = sqlite.c.sqlite3_value_blob(value);
-    return .{
-        .value_type = .BLOB,
-        .data = if (ptr == null) null else @ptrCast(ptr),
-        .data_len = len,
-    };
-}
-
-fn applySqlResult(sqlite_context: *sqlite.c.sqlite3_context, result: zova_sql_result) void {
-    switch (result.result_type) {
-        @intFromEnum(zova_sql_result_type.NULL) => sqlite.c.sqlite3_result_null(sqlite_context),
-        @intFromEnum(zova_sql_result_type.INTEGER) => sqlite.c.sqlite3_result_int64(sqlite_context, result.int64_value),
-        @intFromEnum(zova_sql_result_type.FLOAT) => sqlite.c.sqlite3_result_double(sqlite_context, result.double_value),
-        @intFromEnum(zova_sql_result_type.TEXT) => applySqlTextResult(sqlite_context, result.data, result.data_len),
-        @intFromEnum(zova_sql_result_type.BLOB) => applySqlBlobResult(sqlite_context, result.data, result.data_len),
-        @intFromEnum(zova_sql_result_type.ERROR) => applySqlErrorResult(sqlite_context, result.error_message, result.error_message_len),
-        else => sqlite.c.sqlite3_result_error(sqlite_context, "invalid zova sql callback result type", -1),
-    }
-}
-
-fn applySqlTextResult(sqlite_context: *sqlite.c.sqlite3_context, data: ?*const anyopaque, len: usize) void {
-    const copy = copySqlResultBytes(sqlite_context, data, len, true) orelse return;
-    sqlite.c.sqlite3_result_text64(sqlite_context, @ptrCast(copy), @intCast(len), sqlite.c.sqlite3_free, sqlite.c.SQLITE_UTF8);
-}
-
-fn applySqlBlobResult(sqlite_context: *sqlite.c.sqlite3_context, data: ?*const anyopaque, len: usize) void {
-    const copy = copySqlResultBytes(sqlite_context, data, len, false) orelse return;
-    sqlite.c.sqlite3_result_blob64(sqlite_context, copy, @intCast(len), sqlite.c.sqlite3_free);
-}
-
-fn applySqlErrorResult(sqlite_context: *sqlite.c.sqlite3_context, message: ?[*]const u8, len: usize) void {
-    if (message == null or len == 0) {
-        sqlite.c.sqlite3_result_error(sqlite_context, "zova sql callback error", -1);
-        return;
-    }
-    if (len > std.math.maxInt(c_int)) {
-        sqlite.c.sqlite3_result_error(sqlite_context, "zova sql callback error too large", -1);
-        return;
-    }
-    sqlite.c.sqlite3_result_error(sqlite_context, @ptrCast(message), @intCast(len));
-}
-
-fn copySqlResultBytes(sqlite_context: *sqlite.c.sqlite3_context, data: ?*const anyopaque, len: usize, nul_terminate: bool) ?*anyopaque {
-    if (data == null and len != 0) {
-        sqlite.c.sqlite3_result_error(sqlite_context, "zova sql callback result has null data", -1);
-        return null;
-    }
-    const extra: usize = if (nul_terminate) 1 else 0;
-    const alloc_len = std.math.add(usize, len, extra) catch {
-        sqlite.c.sqlite3_result_error_nomem(sqlite_context);
-        return null;
-    };
-    const effective_alloc_len = @max(alloc_len, 1);
-    const copy = sqlite.c.sqlite3_malloc64(@intCast(effective_alloc_len)) orelse {
-        sqlite.c.sqlite3_result_error_nomem(sqlite_context);
-        return null;
-    };
-    const dest: [*]u8 = @ptrCast(copy);
-    if (len != 0) {
-        const src: [*]const u8 = @ptrCast(data.?);
-        @memcpy(dest[0..len], src[0..len]);
-    }
-    if (nul_terminate) dest[len] = 0;
-    return copy;
-}
-
-fn isAsciiIdentStart(byte: u8) bool {
-    return byte == '_' or (byte >= 'A' and byte <= 'Z') or (byte >= 'a' and byte <= 'z');
-}
-
-fn isAsciiIdentContinue(byte: u8) bool {
-    return isAsciiIdentStart(byte) or (byte >= '0' and byte <= '9');
-}
-
-fn hasAsciiInsensitivePrefix(value: []const u8, prefix: []const u8) bool {
-    if (value.len < prefix.len) return false;
-    return asciiInsensitiveEql(value[0..prefix.len], prefix);
-}
-
-fn asciiInsensitiveEql(a: []const u8, b: []const u8) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |left, right| {
-        if (asciiLower(left) != asciiLower(right)) return false;
-    }
-    return true;
-}
-
-fn asciiLower(byte: u8) u8 {
-    return if (byte >= 'A' and byte <= 'Z') byte + ('a' - 'A') else byte;
-}
-
-fn manifestChunks(chunks: ?[*]const zova_object_manifest_chunk, len: usize) ?[]const zova_object_manifest_chunk {
-    if (len == 0) return &.{};
-    const ptr = chunks orelse return null;
-    return ptr[0..len];
-}
-
-fn floatsConst(data: ?[*]const f32, len: usize) ?[]const f32 {
-    if (len == 0) return &.{};
-    const ptr = data orelse return null;
-    return ptr[0..len];
-}
-
-fn u16Const(data: ?[*]const u16, len: usize) ?[]const u16 {
-    if (len == 0) return &.{};
-    const ptr = data orelse return null;
-    return ptr[0..len];
-}
-
-fn i8Const(data: ?[*]const i8, len: usize) ?[]const i8 {
-    if (len == 0) return &.{};
-    const ptr = data orelse return null;
-    return ptr[0..len];
-}
-
-fn candidateIdSlices(
-    candidate_ids: ?[*]const ?[*:0]const u8,
-    len: usize,
-) (error{ OutOfMemory, InvalidArgument }![]const []const u8) {
-    if (len == 0) return &.{};
-    const ptr = candidate_ids orelse return error.InvalidArgument;
-    const candidates = try allocator.alloc([]const u8, len);
-    errdefer allocator.free(candidates);
-    for (ptr[0..len], candidates) |candidate, *out| {
-        const id = candidate orelse return error.InvalidArgument;
-        out.* = std.mem.span(id);
-    }
-    return candidates;
-}
-
-fn kvKeySlices(keys: ?[*]const zova_kv_bytes, len: usize) (error{ OutOfMemory, InvalidArgument }![]const []const u8) {
-    if (len == 0) return &.{};
-    const ptr = keys orelse return error.InvalidArgument;
-    const result = try allocator.alloc([]const u8, len);
-    errdefer allocator.free(result);
-    for (ptr[0..len], result) |key, *out| {
-        const bytes = bytesConst(key.data, key.len) orelse return error.InvalidArgument;
-        out.* = bytes;
-    }
-    return result;
-}
-
-fn kvPutEntrySlices(entries: ?[*]const zova_kv_put_entry, len: usize) (error{ OutOfMemory, InvalidArgument }![]const kv_impl.PutEntry) {
-    if (len == 0) return &.{};
-    const ptr = entries orelse return error.InvalidArgument;
-    const result = try allocator.alloc(kv_impl.PutEntry, len);
-    errdefer allocator.free(result);
-    for (ptr[0..len], result) |entry, *out| {
-        const key = bytesConst(entry.key.data, entry.key.len) orelse return error.InvalidArgument;
-        const value = bytesConst(entry.value.data, entry.value.len) orelse return error.InvalidArgument;
-        out.* = .{ .key = key, .value = value };
-    }
-    return result;
-}
-
-fn graphNodeInputSlices(
-    inputs: ?[*]const zova_graph_node_input,
-    len: usize,
-) (error{ OutOfMemory, InvalidArgument }![]const zova.GraphNodeInput) {
-    if (len == 0) return &.{};
-    const ptr = inputs orelse return error.InvalidArgument;
-    const result = try allocator.alloc(zova.GraphNodeInput, len);
-    errdefer allocator.free(result);
-    for (ptr[0..len], result) |input, *out| {
-        const graph_name = input.graph_name orelse return error.InvalidArgument;
-        const node_id = input.node_id orelse return error.InvalidArgument;
-        const kind = input.kind orelse return error.InvalidArgument;
-        const target_type = graphTargetTypeFromAbi(input.target_type) orelse return error.InvalidArgument;
-        out.* = .{
-            .graph_name = std.mem.span(graph_name),
-            .node_id = std.mem.span(node_id),
-            .kind = std.mem.span(kind),
-            .target_type = target_type,
-            .target_namespace = optionalCStringSpan(input.target_namespace),
-            .target_ref = optionalCStringSpan(input.target_ref),
-        };
-    }
-    return result;
-}
-
-fn freshGraphNodeInputSlices(
-    inputs: ?[*]const zova_graph_fresh_node_input,
-    len: usize,
-) (error{ OutOfMemory, InvalidArgument }![]const zova.FreshGraphNodeInput) {
-    if (len == 0) return &.{};
-    const ptr = inputs orelse return error.InvalidArgument;
-    const result = try allocator.alloc(zova.FreshGraphNodeInput, len);
-    errdefer allocator.free(result);
-    for (ptr[0..len], result) |input, *out| {
-        const node_id = input.node_id orelse return error.InvalidArgument;
-        const kind = input.kind orelse return error.InvalidArgument;
-        const target_type = graphTargetTypeFromAbi(input.target_type) orelse return error.InvalidArgument;
-        out.* = .{
-            .node_id = std.mem.span(node_id),
-            .kind = std.mem.span(kind),
-            .target_type = target_type,
-            .target_namespace = optionalCStringSpan(input.target_namespace),
-            .target_ref = optionalCStringSpan(input.target_ref),
-        };
-    }
-    return result;
-}
-
-fn freshGraphEdgeInputSlices(
-    inputs: ?[*]const zova_graph_fresh_edge_input,
-    len: usize,
-) (error{ OutOfMemory, InvalidArgument }![]const zova.FreshGraphEdgeInput) {
-    if (len == 0) return &.{};
-    const ptr = inputs orelse return error.InvalidArgument;
-    const result = try allocator.alloc(zova.FreshGraphEdgeInput, len);
-    errdefer allocator.free(result);
-    for (ptr[0..len], result) |input, *out| {
-        const edge_type = input.edge_type orelse return error.InvalidArgument;
-        out.* = .{
-            .from_node_ordinal = input.from_node_ordinal,
-            .edge_type = std.mem.span(edge_type),
-            .to_node_ordinal = input.to_node_ordinal,
-        };
-    }
-    return result;
-}
-
-fn freshGraphEdgePayloadInputSlices(
-    inputs: ?[*]const zova_graph_fresh_edge_payload_input,
-    len: usize,
-) (error{ OutOfMemory, InvalidArgument }![]const zova.FreshGraphEdgeInput) {
-    if (len == 0) return &.{};
-    const ptr = inputs orelse return error.InvalidArgument;
-    const result = try allocator.alloc(zova.FreshGraphEdgeInput, len);
-    errdefer allocator.free(result);
-    for (ptr[0..len], result) |input, *out| {
-        const edge_type = input.edge_type orelse return error.InvalidArgument;
-        if (input.payload_len != 0 and input.payload == null) return error.InvalidArgument;
-        out.* = .{
-            .from_node_ordinal = input.from_node_ordinal,
-            .edge_type = std.mem.span(edge_type),
-            .to_node_ordinal = input.to_node_ordinal,
-            .payload = if (input.payload_len == 0) &.{} else input.payload.?[0..input.payload_len],
-        };
-    }
-    return result;
-}
-
-fn graphEdgePayloadReplacementSlices(
-    inputs: ?[*]const zova_graph_edge_payload_replacement,
-    len: usize,
-) (error{ OutOfMemory, InvalidArgument }![]const zova.GraphEdgePayloadReplacement) {
-    if (len == 0) return &.{};
-    const ptr = inputs orelse return error.InvalidArgument;
-    const result = try allocator.alloc(zova.GraphEdgePayloadReplacement, len);
-    errdefer allocator.free(result);
-    for (ptr[0..len], result) |input, *out| {
-        if (input.edge_key <= 0 or (input.payload_len != 0 and input.payload == null)) return error.InvalidArgument;
-        out.* = .{
-            .edge_key = input.edge_key,
-            .payload = if (input.payload_len == 0) &.{} else input.payload.?[0..input.payload_len],
-        };
-    }
-    return result;
-}
-
-fn graphEdgeInputSlices(
-    inputs: ?[*]const zova_graph_edge_input,
-    len: usize,
-) (error{ OutOfMemory, InvalidArgument }![]const zova.GraphEdgeInput) {
-    if (len == 0) return &.{};
-    const ptr = inputs orelse return error.InvalidArgument;
-    const result = try allocator.alloc(zova.GraphEdgeInput, len);
-    errdefer allocator.free(result);
-    for (ptr[0..len], result) |input, *out| {
-        const graph_name = input.graph_name orelse return error.InvalidArgument;
-        const from_node_id = input.from_node_id orelse return error.InvalidArgument;
-        const edge_type = input.edge_type orelse return error.InvalidArgument;
-        const to_node_id = input.to_node_id orelse return error.InvalidArgument;
-        out.* = .{
-            .graph_name = std.mem.span(graph_name),
-            .from_node_id = std.mem.span(from_node_id),
-            .edge_type = std.mem.span(edge_type),
-            .to_node_id = std.mem.span(to_node_id),
-        };
-    }
-    return result;
-}
-
-fn multiI8QuerySlices(
-    query_values: ?[*]const i8,
-    query_values_len: usize,
-    query_count: usize,
-    dimensions: usize,
-) (error{ OutOfMemory, InvalidArgument }![]const []const i8) {
-    if (query_count == 0 or dimensions == 0) return error.InvalidArgument;
-    const expected_len = std.math.mul(usize, query_count, dimensions) catch return error.InvalidArgument;
-    if (query_values_len != expected_len) return error.InvalidArgument;
-    const values = (query_values orelse return error.InvalidArgument)[0..query_values_len];
-    const queries = try allocator.alloc([]const i8, query_count);
-    errdefer allocator.free(queries);
-    for (queries, 0..) |*query, index| {
-        const start = index * dimensions;
-        query.* = values[start .. start + dimensions];
-    }
-    return queries;
-}
-
-fn vectorInputSlices(
-    vector_inputs: ?[*]const zova_vector_input,
-    len: usize,
-) (error{ OutOfMemory, InvalidArgument }![]const zova.VectorInput) {
-    if (len == 0) return &.{};
-    const ptr = vector_inputs orelse return error.InvalidArgument;
-    const inputs = try allocator.alloc(zova.VectorInput, len);
-    errdefer allocator.free(inputs);
-
-    for (ptr[0..len], inputs) |input, *out| {
-        const id = input.id orelse return error.InvalidArgument;
-        const values = vectorValuesConst(input.values) orelse return error.InvalidArgument;
-        out.* = .{ .id = std.mem.span(id), .values = values };
-    }
-
-    return inputs;
-}
-
-fn vectorMetricFromAbi(metric: c_int) ?zova.VectorMetric {
-    return switch (metric) {
-        @intFromEnum(zova_vector_metric.COSINE) => .cosine,
-        @intFromEnum(zova_vector_metric.L2) => .l2,
-        @intFromEnum(zova_vector_metric.DOT) => .dot,
-        else => null,
-    };
-}
-
-fn multiI8SearchModeFromAbi(mode: c_int) ?zova.MultiI8CosineSearchMode {
-    return switch (mode) {
-        @intFromEnum(zova_vector_multi_i8_search_mode.GLOBAL_MIN_COSINE) => .global_min_cosine,
-        @intFromEnum(zova_vector_multi_i8_search_mode.CBM_PREFILTER_MIN_COSINE) => .cbm_prefilter_min_cosine,
-        else => null,
-    };
-}
-
-fn multiI8AggregationFromAbi(aggregation: c_int) ?void {
-    return switch (aggregation) {
-        @intFromEnum(zova_vector_multi_i8_aggregation.MIN_COSINE) => {},
-        else => null,
-    };
-}
-
-fn vectorMetricToAbi(metric: zova.VectorMetric) c_int {
-    return switch (metric) {
-        .cosine => @intFromEnum(zova_vector_metric.COSINE),
-        .l2 => @intFromEnum(zova_vector_metric.L2),
-        .dot => @intFromEnum(zova_vector_metric.DOT),
-    };
-}
-
-fn vectorElementTypeFromAbi(element_type: c_int) ?zova.VectorElementType {
-    return switch (element_type) {
-        @intFromEnum(zova_vector_element_type.F32) => .f32,
-        @intFromEnum(zova_vector_element_type.F16) => .f16,
-        @intFromEnum(zova_vector_element_type.I8) => .i8,
-        else => null,
-    };
-}
-
-fn vectorElementTypeToAbi(element_type: zova.VectorElementType) c_int {
-    return switch (element_type) {
-        .f32 => @intFromEnum(zova_vector_element_type.F32),
-        .f16 => @intFromEnum(zova_vector_element_type.F16),
-        .i8 => @intFromEnum(zova_vector_element_type.I8),
-    };
-}
-
-fn vectorValuesConst(values: zova_vector_values) ?zova.VectorValuesConst {
-    const element_type = vectorElementTypeFromAbi(values.element_type) orelse return null;
-    return switch (element_type) {
-        .f32 => .{ .f32 = floatsConst(values.f32_values, values.values_len) orelse return null },
-        .f16 => .{ .f16 = u16Const(values.f16_values, values.values_len) orelse return null },
-        .i8 => .{ .i8 = i8Const(values.i8_values, values.values_len) orelse return null },
-    };
-}
-
-fn f32AbiValues(values: []const f32) zova_vector_values {
-    return .{
-        .element_type = @intFromEnum(zova_vector_element_type.F32),
-        .f32_values = if (values.len == 0) null else values.ptr,
-        .f16_values = null,
-        .i8_values = null,
-        .values_len = values.len,
-    };
-}
-
-fn i8AbiValues(values: []const i8) zova_vector_values {
-    return .{
-        .element_type = @intFromEnum(zova_vector_element_type.I8),
-        .f32_values = null,
-        .f16_values = null,
-        .i8_values = if (values.len == 0) null else values.ptr,
-        .values_len = values.len,
-    };
-}
-
-fn graphTargetTypeFromAbi(target_type: c_int) ?zova.GraphTargetType {
-    return switch (target_type) {
-        @intFromEnum(zova_graph_target_type.NONE) => .none,
-        @intFromEnum(zova_graph_target_type.RECORD) => .record,
-        @intFromEnum(zova_graph_target_type.OBJECT) => .object,
-        @intFromEnum(zova_graph_target_type.OBJECT_CHUNK) => .object_chunk,
-        @intFromEnum(zova_graph_target_type.VECTOR) => .vector,
-        @intFromEnum(zova_graph_target_type.ENTITY) => .entity,
-        @intFromEnum(zova_graph_target_type.FACT) => .fact,
-        @intFromEnum(zova_graph_target_type.CONCEPT) => .concept,
-        @intFromEnum(zova_graph_target_type.EXTERNAL) => .external,
-        else => null,
-    };
-}
-
-fn graphTargetTypeToAbi(target_type: zova.GraphTargetType) c_int {
-    return switch (target_type) {
-        .none => @intFromEnum(zova_graph_target_type.NONE),
-        .record => @intFromEnum(zova_graph_target_type.RECORD),
-        .object => @intFromEnum(zova_graph_target_type.OBJECT),
-        .object_chunk => @intFromEnum(zova_graph_target_type.OBJECT_CHUNK),
-        .vector => @intFromEnum(zova_graph_target_type.VECTOR),
-        .entity => @intFromEnum(zova_graph_target_type.ENTITY),
-        .fact => @intFromEnum(zova_graph_target_type.FACT),
-        .concept => @intFromEnum(zova_graph_target_type.CONCEPT),
-        .external => @intFromEnum(zova_graph_target_type.EXTERNAL),
-    };
-}
-
-fn graphDirectionFromAbi(direction: c_int) ?zova.GraphNeighborDirection {
-    return switch (direction) {
-        @intFromEnum(zova_graph_neighbor_direction.OUTGOING) => .outgoing,
-        @intFromEnum(zova_graph_neighbor_direction.INCOMING) => .incoming,
-        else => null,
-    };
-}
-
-fn optionalCStringSpan(value: ?[*:0]const u8) ?[]const u8 {
-    const ptr = value orelse return null;
-    return std.mem.span(ptr);
-}
-
-fn toObjectId(id: zova_object_id) zova.ObjectId {
-    return id.bytes;
-}
-
-fn objectOptionsFromAbi(options: zova_object_put_options) ?zova.ObjectPutOptions {
-    return switch (options.profile) {
-        @intFromEnum(zova_object_storage_profile.DEDUPLICATION) => .{ .profile = .deduplication },
-        @intFromEnum(zova_object_storage_profile.STREAMING) => .{ .profile = .streaming },
-        else => null,
-    };
-}
-
-fn fromObjectId(id: zova.ObjectId) zova_object_id {
-    return .{ .bytes = id };
-}
-
-fn toChunkId(id: zova_object_chunk_id) zova.ObjectChunkId {
-    return id.bytes;
-}
-
-fn fromChunkId(id: zova.ObjectChunkId) zova_object_chunk_id {
-    return .{ .bytes = id };
-}
-
-fn emptyBuffer() zova_buffer {
-    return .{ .data = null, .len = 0 };
-}
-
-fn emptyText() zova_text {
-    return .{ .data = null, .len = 0 };
-}
-
-fn emptyNotification() zova_notification {
-    return .{
-        .channel = null,
-        .channel_len = 0,
-        .payload = null,
-        .payload_len = 0,
-        .sequence = 0,
-        .dropped_before = 0,
-    };
-}
-
-fn emptyManifest() zova_object_manifest {
-    return .{
-        .object_id = .{ .bytes = [_]u8{0} ** 32 },
-        .size_bytes = 0,
-        .chunk_count = 0,
-        .chunker = null,
-        .chunks = null,
-        .chunks_len = 0,
-    };
-}
-
-fn emptyVector() zova_vector {
-    return .{
-        .id = null,
-        .id_len = 0,
-        .element_type = @intFromEnum(zova_vector_element_type.F32),
-        .f32_values = null,
-        .f16_values = null,
-        .i8_values = null,
-        .values_len = 0,
-    };
-}
-
-fn emptyVectorSearchResults() zova_vector_search_results {
-    return .{ .items = null, .len = 0 };
-}
-
-fn emptyVectorCollectionInfo() zova_vector_collection_info {
-    return .{
-        .name = null,
-        .name_len = 0,
-        .dimensions = 0,
-        .metric = 0,
-        .element_type = @intFromEnum(zova_vector_element_type.F32),
-        .vector_count = 0,
-    };
-}
-
-fn emptyVectorCollectionList() zova_vector_collection_list {
-    return .{ .items = null, .len = 0 };
-}
-
-fn emptyGraphInfo() zova_graph_info {
-    return .{ .name = null, .name_len = 0, .node_count = 0, .edge_count = 0 };
-}
-
-fn emptyGraphList() zova_graph_list {
-    return .{ .items = null, .len = 0 };
-}
-
-fn emptyExtensionInfo() zova_extension_info {
-    return .{
-        .name = null,
-        .name_len = 0,
-        .version = null,
-        .version_len = 0,
-        .storage_prefix = null,
-        .storage_prefix_len = 0,
-        .zova_abi_min = null,
-        .zova_abi_min_len = 0,
-        .capabilities = null,
-        .capabilities_len = 0,
-        .required = 0,
-        .installed_at_unix = 0,
-        .manifest_json = null,
-        .manifest_json_len = 0,
-    };
-}
-
-fn emptyExtensionList() zova_extension_list {
-    return .{ .items = null, .len = 0 };
-}
-
-fn emptyGraphNode() zova_graph_node {
-    return .{
-        .graph_name = null,
-        .graph_name_len = 0,
-        .node_id = null,
-        .node_id_len = 0,
-        .kind = null,
-        .kind_len = 0,
-        .target_type = @intFromEnum(zova_graph_target_type.NONE),
-        .target_namespace = null,
-        .target_namespace_len = 0,
-        .has_target_namespace = 0,
-        .target_ref = null,
-        .target_ref_len = 0,
-        .has_target_ref = 0,
-    };
-}
-
-fn emptyGraphEdge() zova_graph_edge {
-    return .{
-        .graph_name = null,
-        .graph_name_len = 0,
-        .from_node_id = null,
-        .from_node_id_len = 0,
-        .edge_type = null,
-        .edge_type_len = 0,
-        .to_node_id = null,
-        .to_node_id_len = 0,
-    };
-}
-
-fn emptyGraphNeighborResults() zova_graph_neighbor_results {
-    return .{ .items = null, .len = 0 };
-}
-
-fn emptyGraphKeyedNeighborResults() zova_graph_keyed_neighbor_results {
-    return .{ .items = null, .len = 0 };
-}
-
-fn emptyGraphScanResults() zova_graph_scan_results {
-    return .{
-        .nodes = null,
-        .nodes_len = 0,
-        .edges = null,
-        .edges_len = 0,
-        .has_more_nodes = 0,
-        .has_more_edges = 0,
-    };
-}
-
-fn emptyGraphWalkResults() zova_graph_walk_results {
-    return .{ .items = null, .len = 0 };
-}
-
-fn columnTypeToAbi(column_type: sqlite.ColumnType) zova_column_type {
-    return switch (column_type) {
-        .integer => .INTEGER,
-        .float => .FLOAT,
-        .text => .TEXT,
-        .blob => .BLOB,
-        .null => .NULL,
-    };
-}
-
-fn freeVectorCollectionInfo(info: *zova_vector_collection_info) void {
-    if (info.name) |name| allocator.free(name[0 .. info.name_len + 1]);
-}
-
-fn freeGraphInfo(info: *zova_graph_info) void {
-    if (info.name) |name| allocator.free(name[0 .. info.name_len + 1]);
-}
-
-fn freeExtensionInfo(info: *zova_extension_info) void {
-    if (info.name) |value| allocator.free(value[0 .. info.name_len + 1]);
-    if (info.version) |value| allocator.free(value[0 .. info.version_len + 1]);
-    if (info.storage_prefix) |value| allocator.free(value[0 .. info.storage_prefix_len + 1]);
-    if (info.zova_abi_min) |value| allocator.free(value[0 .. info.zova_abi_min_len + 1]);
-    if (info.capabilities) |value| allocator.free(value[0 .. info.capabilities_len + 1]);
-    if (info.manifest_json) |value| allocator.free(value[0 .. info.manifest_json_len + 1]);
-}
-
-fn freeGraphNode(node: *zova_graph_node) void {
-    if (node.graph_name) |value| allocator.free(value[0 .. node.graph_name_len + 1]);
-    if (node.node_id) |value| allocator.free(value[0 .. node.node_id_len + 1]);
-    if (node.kind) |value| allocator.free(value[0 .. node.kind_len + 1]);
-    if (node.target_namespace) |value| allocator.free(value[0 .. node.target_namespace_len + 1]);
-    if (node.target_ref) |value| allocator.free(value[0 .. node.target_ref_len + 1]);
-}
-
-fn freeGraphEdge(edge: *zova_graph_edge) void {
-    if (edge.graph_name) |value| allocator.free(value[0 .. edge.graph_name_len + 1]);
-    if (edge.from_node_id) |value| allocator.free(value[0 .. edge.from_node_id_len + 1]);
-    if (edge.edge_type) |value| allocator.free(value[0 .. edge.edge_type_len + 1]);
-    if (edge.to_node_id) |value| allocator.free(value[0 .. edge.to_node_id_len + 1]);
-}
-
-fn freeGraphNeighborResult(result: *zova_graph_neighbor_result) void {
-    if (result.node_id) |value| allocator.free(value[0 .. result.node_id_len + 1]);
-    if (result.kind) |value| allocator.free(value[0 .. result.kind_len + 1]);
-    if (result.edge_type) |value| allocator.free(value[0 .. result.edge_type_len + 1]);
-}
-
-fn freeGraphKeyedNeighborResult(result: *zova_graph_keyed_neighbor_result) void {
-    if (result.node_id) |value| allocator.free(value[0 .. result.node_id_len + 1]);
-    if (result.kind) |value| allocator.free(value[0 .. result.kind_len + 1]);
-    if (result.edge_type) |value| allocator.free(value[0 .. result.edge_type_len + 1]);
-}
-
-fn freeGraphScanNode(node: *zova_graph_scan_node) void {
-    if (node.node_id) |value| allocator.free(value[0 .. node.node_id_len + 1]);
-    if (node.kind) |value| allocator.free(value[0 .. node.kind_len + 1]);
-}
-
-fn freeGraphScanEdge(edge: *zova_graph_scan_edge) void {
-    if (edge.edge_type) |value| allocator.free(value[0 .. edge.edge_type_len + 1]);
-}
-
-fn freeGraphWalkResult(result: *zova_graph_walk_result) void {
-    if (result.node_id) |value| allocator.free(value[0 .. result.node_id_len + 1]);
-    if (result.kind) |value| allocator.free(value[0 .. result.kind_len + 1]);
-    if (result.predecessor_node_id) |value| allocator.free(value[0 .. result.predecessor_node_id_len + 1]);
-    if (result.edge_type) |value| allocator.free(value[0 .. result.edge_type_len + 1]);
-}
-
-fn fillSearchResults(out: *zova_vector_search_results, items: []const zova.VectorSearchResult) error{OutOfMemory}!void {
-    out.* = emptyVectorSearchResults();
-    if (items.len == 0) return;
-
-    const abi_items = try allocator.alloc(zova_vector_search_result, items.len);
-    errdefer {
-        for (abi_items[0..items.len]) |item| {
-            if (item.id) |id| allocator.free(id[0 .. item.id_len + 1]);
-        }
-        allocator.free(abi_items);
-    }
-
-    for (abi_items) |*item| item.* = .{ .id = null, .id_len = 0, .distance = 0 };
-    for (items, abi_items) |item, *abi_item| {
-        const id = try allocator.dupeZ(u8, item.id);
-        abi_item.* = .{
-            .id = id.ptr,
-            .id_len = id.len,
-            .distance = item.distance,
-        };
-    }
-
-    out.* = .{ .items = abi_items.ptr, .len = abi_items.len };
-}
-
-fn fillVector(out: *zova_vector, vector: *zova.Vector) error{OutOfMemory}!void {
-    out.* = emptyVector();
-    const id = try allocator.dupeZ(u8, vector.id);
-    errdefer allocator.free(id);
-
-    out.id = id.ptr;
-    out.id_len = id.len;
-    allocator.free(vector.id);
-    vector.id = &.{};
-
-    switch (vector.values) {
-        .f32 => |values| {
-            out.element_type = vectorElementTypeToAbi(.f32);
-            out.f32_values = if (values.len == 0) null else values.ptr;
-            out.values_len = values.len;
-        },
-        .f16 => |values| {
-            out.element_type = vectorElementTypeToAbi(.f16);
-            out.f16_values = if (values.len == 0) null else values.ptr;
-            out.values_len = values.len;
-        },
-        .i8 => |values| {
-            out.element_type = vectorElementTypeToAbi(.i8);
-            out.i8_values = if (values.len == 0) null else values.ptr;
-            out.values_len = values.len;
-        },
-    }
-}
-
-fn fillGraphInfo(out: *zova_graph_info, info: zova.GraphInfo) error{OutOfMemory}!void {
-    out.* = emptyGraphInfo();
-    const name = try allocator.dupeZ(u8, info.name);
-    out.* = .{
-        .name = name.ptr,
-        .name_len = name.len,
-        .node_count = info.node_count,
-        .edge_count = info.edge_count,
-    };
-}
-
-fn fillGraphList(out: *zova_graph_list, items: []const zova.GraphInfo) error{OutOfMemory}!void {
-    out.* = emptyGraphList();
-    if (items.len == 0) return;
-
-    const abi_items = try allocator.alloc(zova_graph_info, items.len);
-    errdefer {
-        for (abi_items[0..items.len]) |*item| freeGraphInfo(item);
-        allocator.free(abi_items);
-    }
-
-    for (abi_items) |*item| item.* = emptyGraphInfo();
-    for (items, abi_items) |item, *abi_item| try fillGraphInfo(abi_item, item);
-    out.* = .{ .items = abi_items.ptr, .len = abi_items.len };
-}
-
-fn fillExtensionInfo(out: *zova_extension_info, info: zova.ExtensionInfo) error{OutOfMemory}!void {
-    out.* = emptyExtensionInfo();
-    const name = try allocator.dupeZ(u8, info.name);
-    errdefer allocator.free(name);
-    const version = try allocator.dupeZ(u8, info.version);
-    errdefer allocator.free(version);
-    const storage_prefix = try allocator.dupeZ(u8, info.storage_prefix);
-    errdefer allocator.free(storage_prefix);
-    const zova_abi_min = try allocator.dupeZ(u8, info.zova_abi_min);
-    errdefer allocator.free(zova_abi_min);
-    const capabilities = try allocator.dupeZ(u8, info.capabilities);
-    errdefer allocator.free(capabilities);
-    const manifest_json = try allocator.dupeZ(u8, info.manifest_json);
-    errdefer allocator.free(manifest_json);
-
-    out.* = .{
-        .name = name.ptr,
-        .name_len = name.len,
-        .version = version.ptr,
-        .version_len = version.len,
-        .storage_prefix = storage_prefix.ptr,
-        .storage_prefix_len = storage_prefix.len,
-        .zova_abi_min = zova_abi_min.ptr,
-        .zova_abi_min_len = zova_abi_min.len,
-        .capabilities = capabilities.ptr,
-        .capabilities_len = capabilities.len,
-        .required = if (info.required) 1 else 0,
-        .installed_at_unix = info.installed_at_unix,
-        .manifest_json = manifest_json.ptr,
-        .manifest_json_len = manifest_json.len,
-    };
-}
-
-fn fillExtensionList(out: *zova_extension_list, items: []const zova.ExtensionInfo) error{OutOfMemory}!void {
-    out.* = emptyExtensionList();
-    if (items.len == 0) return;
-
-    const abi_items = try allocator.alloc(zova_extension_info, items.len);
-    errdefer {
-        for (abi_items[0..items.len]) |*item| freeExtensionInfo(item);
-        allocator.free(abi_items);
-    }
-
-    for (abi_items) |*item| item.* = emptyExtensionInfo();
-    for (items, abi_items) |item, *abi_item| try fillExtensionInfo(abi_item, item);
-    out.* = .{ .items = abi_items.ptr, .len = abi_items.len };
-}
-
-fn fillGraphNode(out: *zova_graph_node, node: zova.GraphNode) error{OutOfMemory}!void {
-    out.* = emptyGraphNode();
-    const graph_name = try allocator.dupeZ(u8, node.graph_name);
-    errdefer allocator.free(graph_name);
-    const node_id = try allocator.dupeZ(u8, node.node_id);
-    errdefer allocator.free(node_id);
-    const kind = try allocator.dupeZ(u8, node.kind);
-    errdefer allocator.free(kind);
-    const target_namespace = if (node.target_namespace) |value| try allocator.dupeZ(u8, value) else null;
-    errdefer if (target_namespace) |value| allocator.free(value);
-    const target_ref = if (node.target_ref) |value| try allocator.dupeZ(u8, value) else null;
-    errdefer if (target_ref) |value| allocator.free(value);
-
-    out.* = .{
-        .graph_name = graph_name.ptr,
-        .graph_name_len = graph_name.len,
-        .node_id = node_id.ptr,
-        .node_id_len = node_id.len,
-        .kind = kind.ptr,
-        .kind_len = kind.len,
-        .target_type = graphTargetTypeToAbi(node.target_type),
-        .target_namespace = if (target_namespace) |value| value.ptr else null,
-        .target_namespace_len = if (target_namespace) |value| value.len else 0,
-        .has_target_namespace = if (target_namespace != null) 1 else 0,
-        .target_ref = if (target_ref) |value| value.ptr else null,
-        .target_ref_len = if (target_ref) |value| value.len else 0,
-        .has_target_ref = if (target_ref != null) 1 else 0,
-    };
-}
-
-fn fillGraphEdge(out: *zova_graph_edge, edge: zova.GraphEdge) error{OutOfMemory}!void {
-    out.* = emptyGraphEdge();
-    const graph_name = try allocator.dupeZ(u8, edge.graph_name);
-    errdefer allocator.free(graph_name);
-    const from_node_id = try allocator.dupeZ(u8, edge.from_node_id);
-    errdefer allocator.free(from_node_id);
-    const edge_type = try allocator.dupeZ(u8, edge.edge_type);
-    errdefer allocator.free(edge_type);
-    const to_node_id = try allocator.dupeZ(u8, edge.to_node_id);
-    errdefer allocator.free(to_node_id);
-
-    out.* = .{
-        .graph_name = graph_name.ptr,
-        .graph_name_len = graph_name.len,
-        .from_node_id = from_node_id.ptr,
-        .from_node_id_len = from_node_id.len,
-        .edge_type = edge_type.ptr,
-        .edge_type_len = edge_type.len,
-        .to_node_id = to_node_id.ptr,
-        .to_node_id_len = to_node_id.len,
-    };
-}
-
-fn fillGraphNeighborResults(out: *zova_graph_neighbor_results, items: []const zova.GraphNeighbor) error{OutOfMemory}!void {
-    out.* = emptyGraphNeighborResults();
-    if (items.len == 0) return;
-
-    const abi_items = try allocator.alloc(zova_graph_neighbor_result, items.len);
-    errdefer {
-        for (abi_items[0..items.len]) |*item| freeGraphNeighborResult(item);
-        allocator.free(abi_items);
-    }
-
-    for (abi_items) |*item| item.* = .{ .node_id = null, .node_id_len = 0, .kind = null, .kind_len = 0, .edge_type = null, .edge_type_len = 0 };
-    for (items, abi_items) |item, *abi_item| {
-        const node_id = try allocator.dupeZ(u8, item.node_id);
-        errdefer allocator.free(node_id);
-        const kind = try allocator.dupeZ(u8, item.kind);
-        errdefer allocator.free(kind);
-        const edge_type = try allocator.dupeZ(u8, item.edge_type);
-        abi_item.* = .{
-            .node_id = node_id.ptr,
-            .node_id_len = node_id.len,
-            .kind = kind.ptr,
-            .kind_len = kind.len,
-            .edge_type = edge_type.ptr,
-            .edge_type_len = edge_type.len,
-        };
-    }
-
-    out.* = .{ .items = abi_items.ptr, .len = abi_items.len };
-}
-
-fn fillGraphKeyedNeighborResults(
-    out: *zova_graph_keyed_neighbor_results,
-    items: []const zova.GraphKeyedNeighbor,
-) error{OutOfMemory}!void {
-    out.* = emptyGraphKeyedNeighborResults();
-    if (items.len == 0) return;
-
-    const abi_items = try allocator.alloc(zova_graph_keyed_neighbor_result, items.len);
-    errdefer {
-        for (abi_items) |*item| freeGraphKeyedNeighborResult(item);
-        allocator.free(abi_items);
-    }
-    for (abi_items) |*item| item.* = .{
-        .edge_key = 0,
-        .neighbor_node_key = 0,
-        .node_id = null,
-        .node_id_len = 0,
-        .kind = null,
-        .kind_len = 0,
-        .edge_type = null,
-        .edge_type_len = 0,
-    };
-    for (items, abi_items) |item, *abi_item| {
-        const node_id = try allocator.dupeZ(u8, item.node_id);
-        errdefer allocator.free(node_id);
-        const kind = try allocator.dupeZ(u8, item.kind);
-        errdefer allocator.free(kind);
-        const edge_type = try allocator.dupeZ(u8, item.edge_type);
-        abi_item.* = .{
-            .edge_key = item.edge_key,
-            .neighbor_node_key = item.neighbor_node_key,
-            .node_id = node_id.ptr,
-            .node_id_len = node_id.len,
-            .kind = kind.ptr,
-            .kind_len = kind.len,
-            .edge_type = edge_type.ptr,
-            .edge_type_len = edge_type.len,
-        };
-    }
-    out.* = .{ .items = abi_items.ptr, .len = abi_items.len };
-}
-
-fn fillGraphKeyedNodeResults(out: *zova_graph_keyed_node_results, items: []const zova.GraphKeyedNodeLookup) error{OutOfMemory}!void {
-    out.* = .{ .items = null, .len = 0 };
-    if (items.len == 0) return;
-    const abi_items = try allocator.alloc(zova_graph_keyed_node_result, items.len);
-    errdefer {
-        var tmp = zova_graph_keyed_node_results{ .items = abi_items.ptr, .len = abi_items.len };
-        zova_graph_keyed_node_results_free(&tmp);
-    }
-    for (abi_items) |*item| item.* = .{ .found = 0, .node_key = 0, .node_id = null, .node_id_len = 0, .kind = null, .kind_len = 0, .created_order = 0 };
-    for (items, abi_items) |item, *abi_item| {
-        abi_item.node_key = item.node_key;
-        if (!item.found) continue;
-        const node_id = try allocator.dupeZ(u8, item.node_id.?);
-        errdefer allocator.free(node_id);
-        const kind = try allocator.dupeZ(u8, item.kind.?);
-        abi_item.* = .{ .found = 1, .node_key = item.node_key, .node_id = node_id.ptr, .node_id_len = node_id.len, .kind = kind.ptr, .kind_len = kind.len, .created_order = item.created_order };
-    }
-    out.* = .{ .items = abi_items.ptr, .len = abi_items.len };
-}
-
-fn fillGraphKeyedEdgeResults(out: *zova_graph_keyed_edge_results, items: []const zova.GraphKeyedEdgeLookup) error{OutOfMemory}!void {
-    out.* = .{ .items = null, .len = 0 };
-    if (items.len == 0) return;
-    const abi_items = try allocator.alloc(zova_graph_keyed_edge_result, items.len);
-    errdefer {
-        var tmp = zova_graph_keyed_edge_results{ .items = abi_items.ptr, .len = abi_items.len };
-        zova_graph_keyed_edge_results_free(&tmp);
-    }
-    for (abi_items) |*item| item.* = .{ .found = 0, .edge_key = 0, .source_node_key = 0, .edge_type = null, .edge_type_len = 0, .target_node_key = 0, .created_order = 0 };
-    for (items, abi_items) |item, *abi_item| {
-        abi_item.edge_key = item.edge_key;
-        if (!item.found) continue;
-        const edge_type = try allocator.dupeZ(u8, item.edge_type.?);
-        abi_item.* = .{ .found = 1, .edge_key = item.edge_key, .source_node_key = item.source_node_key, .edge_type = edge_type.ptr, .edge_type_len = edge_type.len, .target_node_key = item.target_node_key, .created_order = item.created_order };
-    }
-    out.* = .{ .items = abi_items.ptr, .len = abi_items.len };
-}
-
-fn fillGraphEdgePayloadResults(out: *zova_graph_edge_payload_results, items: []const zova.GraphEdgePayloadLookup) error{OutOfMemory}!void {
-    out.* = .{ .items = null, .len = 0 };
-    if (items.len == 0) return;
-    const abi_items = try allocator.alloc(zova_graph_edge_payload_result, items.len);
-    errdefer {
-        var tmp = zova_graph_edge_payload_results{ .items = abi_items.ptr, .len = abi_items.len };
-        zova_graph_edge_payload_results_free(&tmp);
-    }
-    for (abi_items) |*item| item.* = .{ .found = 0, .edge_key = 0, .payload = null, .payload_len = 0 };
-    for (items, abi_items) |item, *abi_item| {
-        abi_item.edge_key = item.edge_key;
-        if (!item.found) continue;
-        const payload = item.payload.?;
-        const copied = if (payload.len == 0) null else (try allocator.dupe(u8, payload)).ptr;
-        abi_item.* = .{ .found = 1, .edge_key = item.edge_key, .payload = copied, .payload_len = payload.len };
-    }
-    out.* = .{ .items = abi_items.ptr, .len = abi_items.len };
-}
-
-fn fillGraphScanResults(out: *zova_graph_scan_results, result: zova.GraphScanResult) error{OutOfMemory}!void {
-    out.* = emptyGraphScanResults();
-    const nodes = try allocator.alloc(zova_graph_scan_node, result.nodes.len);
-    errdefer {
-        for (nodes) |*node| freeGraphScanNode(node);
-        allocator.free(nodes);
-    }
-    for (nodes) |*node| node.* = .{
-        .node_key = 0,
-        .node_id = null,
-        .node_id_len = 0,
-        .kind = null,
-        .kind_len = 0,
-        .created_order = 0,
-    };
-    for (result.nodes, nodes) |source, *node| {
-        const node_id = try allocator.dupeZ(u8, source.node_id);
-        errdefer allocator.free(node_id);
-        const kind = try allocator.dupeZ(u8, source.kind);
-        node.* = .{
-            .node_key = source.node_key,
-            .node_id = node_id.ptr,
-            .node_id_len = node_id.len,
-            .kind = kind.ptr,
-            .kind_len = kind.len,
-            .created_order = source.created_order,
-        };
-    }
-
-    const edges = try allocator.alloc(zova_graph_scan_edge, result.edges.len);
-    errdefer {
-        for (edges) |*edge| freeGraphScanEdge(edge);
-        allocator.free(edges);
-    }
-    for (edges) |*edge| edge.* = .{
-        .edge_key = 0,
-        .source_node_key = 0,
-        .edge_type = null,
-        .edge_type_len = 0,
-        .target_node_key = 0,
-        .created_order = 0,
-    };
-    for (result.edges, edges) |source, *edge| {
-        const edge_type = try allocator.dupeZ(u8, source.edge_type);
-        edge.* = .{
-            .edge_key = source.edge_key,
-            .source_node_key = source.source_node_key,
-            .edge_type = edge_type.ptr,
-            .edge_type_len = edge_type.len,
-            .target_node_key = source.target_node_key,
-            .created_order = source.created_order,
-        };
-    }
-
-    out.* = .{
-        .nodes = if (nodes.len == 0) null else nodes.ptr,
-        .nodes_len = nodes.len,
-        .edges = if (edges.len == 0) null else edges.ptr,
-        .edges_len = edges.len,
-        .has_more_nodes = if (result.has_more_nodes) 1 else 0,
-        .has_more_edges = if (result.has_more_edges) 1 else 0,
-    };
-}
-
-fn fillGraphWalkResults(out: *zova_graph_walk_results, items: []const zova.GraphWalkItem) error{OutOfMemory}!void {
-    out.* = emptyGraphWalkResults();
-    if (items.len == 0) return;
-
-    const abi_items = try allocator.alloc(zova_graph_walk_result, items.len);
-    errdefer {
-        for (abi_items[0..items.len]) |*item| freeGraphWalkResult(item);
-        allocator.free(abi_items);
-    }
-
-    for (abi_items) |*item| {
-        item.* = .{
-            .node_id = null,
-            .node_id_len = 0,
-            .kind = null,
-            .kind_len = 0,
-            .depth = 0,
-            .predecessor_node_id = null,
-            .predecessor_node_id_len = 0,
-            .has_predecessor_node_id = 0,
-            .edge_type = null,
-            .edge_type_len = 0,
-            .has_edge_type = 0,
-        };
-    }
-
-    for (items, abi_items) |item, *abi_item| {
-        const node_id = try allocator.dupeZ(u8, item.node_id);
-        errdefer allocator.free(node_id);
-        const kind = try allocator.dupeZ(u8, item.kind);
-        errdefer allocator.free(kind);
-        const predecessor = if (item.predecessor_node_id) |value| try allocator.dupeZ(u8, value) else null;
-        errdefer if (predecessor) |value| allocator.free(value);
-        const edge_type = if (item.edge_type) |value| try allocator.dupeZ(u8, value) else null;
-
-        abi_item.* = .{
-            .node_id = node_id.ptr,
-            .node_id_len = node_id.len,
-            .kind = kind.ptr,
-            .kind_len = kind.len,
-            .depth = item.depth,
-            .predecessor_node_id = if (predecessor) |value| value.ptr else null,
-            .predecessor_node_id_len = if (predecessor) |value| value.len else 0,
-            .has_predecessor_node_id = if (predecessor != null) 1 else 0,
-            .edge_type = if (edge_type) |value| value.ptr else null,
-            .edge_type_len = if (edge_type) |value| value.len else 0,
-            .has_edge_type = if (edge_type != null) 1 else 0,
-        };
-    }
-
-    out.* = .{ .items = abi_items.ptr, .len = abi_items.len };
-}
-
-fn fillVectorCollectionInfo(out: *zova_vector_collection_info, info: zova.VectorCollectionInfo) error{OutOfMemory}!void {
-    out.* = emptyVectorCollectionInfo();
-    const name = try allocator.dupeZ(u8, info.name);
-    out.* = .{
-        .name = name.ptr,
-        .name_len = name.len,
-        .dimensions = info.dimensions,
-        .metric = vectorMetricToAbi(info.metric),
-        .element_type = vectorElementTypeToAbi(info.element_type),
-        .vector_count = info.vector_count,
-    };
-}
-
-fn fillVectorCollectionList(out: *zova_vector_collection_list, items: []const zova.VectorCollectionInfo) error{OutOfMemory}!void {
-    out.* = emptyVectorCollectionList();
-    if (items.len == 0) return;
-
-    const abi_items = try allocator.alloc(zova_vector_collection_info, items.len);
-    errdefer {
-        for (abi_items[0..items.len]) |*item| freeVectorCollectionInfo(item);
-        allocator.free(abi_items);
-    }
-
-    for (abi_items) |*item| item.* = emptyVectorCollectionInfo();
-    for (items, abi_items) |item, *abi_item| {
-        try fillVectorCollectionInfo(abi_item, item);
-    }
-
-    out.* = .{ .items = abi_items.ptr, .len = abi_items.len };
-}
-
-fn fillNotification(out: *zova_notification, notification: zova.Notification) error{OutOfMemory}!void {
-    const channel = try allocator.alloc(u8, notification.channel.len + 1);
-    errdefer allocator.free(channel);
-    @memcpy(channel[0..notification.channel.len], notification.channel);
-    channel[notification.channel.len] = 0;
-
-    const payload = try allocator.alloc(u8, notification.payload.len + 1);
-    errdefer allocator.free(payload);
-    @memcpy(payload[0..notification.payload.len], notification.payload);
-    payload[notification.payload.len] = 0;
-
-    out.* = .{
-        .channel = channel.ptr,
-        .channel_len = notification.channel.len,
-        .payload = payload.ptr,
-        .payload_len = notification.payload.len,
-        .sequence = notification.sequence,
-        .dropped_before = notification.dropped_before,
-    };
-}
-
-fn failDb(handle: *DatabaseHandle, err: anyerror) zova_status {
-    const status = statusFromError(err);
-    setLastError(handle, err);
-    return status;
-}
-
-fn failDbSqliteResult(handle: *DatabaseHandle, rc: c_int) zova_status {
-    const sqlite_message = handle.db.errorMessage();
-    if (!std.mem.eql(u8, sqlite_message, "not an error") and sqlite_message.len > 0) {
-        setLastErrorString(handle, sqlite_message);
-    } else {
-        setLastErrorString(handle, "SQLite error");
-    }
-    return statusFromSqliteResultCode(rc);
-}
-
-fn failDbStatusString(handle: *DatabaseHandle, status: zova_status, message: []const u8) zova_status {
-    setLastErrorString(handle, message);
-    return status;
-}
-
-fn okDb(handle: *DatabaseHandle) zova_status {
-    clearLastError(handle);
-    return .OK;
-}
-
-fn failMessage(message: ?*zova_message, err: anyerror) zova_status {
-    setMessage(message, @errorName(err));
-    return statusFromError(err);
-}
-
-// Prefer SQLite's detailed connection error when it has one; fall back to the
-// Zig error name for Zova-native failures or argument validation.
-fn setLastError(handle: *DatabaseHandle, err: anyerror) void {
-    const sqlite_message = handle.db.errorMessage();
-    if (!std.mem.eql(u8, sqlite_message, "not an error") and sqlite_message.len > 0) {
-        setLastErrorString(handle, sqlite_message);
-    } else {
-        setLastErrorString(handle, @errorName(err));
-    }
-}
-
-fn setLastErrorString(handle: *DatabaseHandle, message: []const u8) void {
-    clearLastError(handle);
-    handle.last_error = allocator.dupeZ(u8, message) catch null;
-}
-
-fn clearLastError(handle: *DatabaseHandle) void {
-    if (handle.last_error) |message| {
-        allocator.free(message);
-    }
-    handle.last_error = null;
-}
-
-fn setMessage(message: ?*zova_message, text: []const u8) void {
-    const out = message orelse return;
-    clearMessage(out);
-    const copy = allocator.dupeZ(u8, text) catch return;
-    out.* = .{ .data = copy.ptr, .len = text.len };
-}
-
-fn clearMessage(message: ?*zova_message) void {
-    const out = message orelse return;
-    zova_message_free(out);
-}
-
-// This is the only error translation table for the ABI. New public Zova errors
-// should be considered here deliberately instead of leaking as SQLITE_ERROR.
-fn statusFromError(err: anyerror) zova_status {
-    return switch (err) {
-        error.OutOfMemory, error.NoMemory => .OUT_OF_MEMORY,
-        error.Busy => .BUSY,
-        error.Locked => .LOCKED,
-        error.Constraint => .CONSTRAINT,
-        error.CantOpen => .CANT_OPEN,
-        error.ReadOnly => .READ_ONLY,
-        error.Corrupt => .CORRUPT,
-        error.Misuse => .MISUSE,
-        error.NotZovaPath => .NOT_ZOVA_PATH,
-        error.NotZovaDatabase => .NOT_ZOVA_DATABASE,
-        error.UnsupportedZovaVersion => .UNSUPPORTED_ZOVA_VERSION,
-        error.MigrationRequired => .MIGRATION_REQUIRED,
-        error.UnsupportedLegacyFormat => .UNSUPPORTED_LEGACY_FORMAT,
-        error.UnsupportedFutureFormat => .UNSUPPORTED_FUTURE_FORMAT,
-        error.NoMigrationPath => .NO_MIGRATION_PATH,
-        error.DestinationExists => .DESTINATION_EXISTS,
-        error.ZovaNameConflict => .ZOVA_NAME_CONFLICT,
-        error.ObjectNotFound => .OBJECT_NOT_FOUND,
-        error.ObjectAlreadyExists => .OBJECT_ALREADY_EXISTS,
-        error.ObjectChunkNotFound => .OBJECT_CHUNK_NOT_FOUND,
-        error.ObjectChunkHashMismatch => .OBJECT_CHUNK_HASH_MISMATCH,
-        error.ObjectCorrupt => .OBJECT_CORRUPT,
-        error.ObjectManifestInvalid => .OBJECT_MANIFEST_INVALID,
-        error.ObjectRangeInvalid => .OBJECT_RANGE_INVALID,
-        error.ObjectTooLarge => .OBJECT_TOO_LARGE,
-        error.ObjectTransactionActive => .OBJECT_TRANSACTION_ACTIVE,
-        error.ObjectWriterClosed => .OBJECT_WRITER_CLOSED,
-        error.ObjectReaderClosed => .OBJECT_READER_CLOSED,
-        error.BoundStoreExists => .BOUND_STORE_EXISTS,
-        error.BoundStoreNotFound => .BOUND_STORE_NOT_FOUND,
-        error.BoundStoreInvalid => .BOUND_STORE_INVALID,
-        error.VectorCollectionExists => .VECTOR_COLLECTION_EXISTS,
-        error.VectorCollectionNotFound => .VECTOR_COLLECTION_NOT_FOUND,
-        error.VectorNotFound => .VECTOR_NOT_FOUND,
-        error.VectorDimensionMismatch => .VECTOR_DIMENSION_MISMATCH,
-        error.VectorCorrupt => .VECTOR_CORRUPT,
-        error.VectorInvalid => .VECTOR_INVALID,
-        error.GraphExists => .GRAPH_EXISTS,
-        error.GraphNotFound => .GRAPH_NOT_FOUND,
-        error.GraphNodeNotFound => .GRAPH_NODE_NOT_FOUND,
-        error.GraphEdgeNotFound => .GRAPH_EDGE_NOT_FOUND,
-        error.GraphInvalid => .GRAPH_INVALID,
-        error.ExtensionNotFound => .EXTENSION_NOT_FOUND,
-        error.ExtensionExists => .EXTENSION_EXISTS,
-        error.ExtensionInvalid => .EXTENSION_INVALID,
-        error.ExtensionIncompatible => .EXTENSION_INCOMPATIBLE,
-        error.ExtensionUnavailable => .EXTENSION_UNAVAILABLE,
-        error.ExtensionUntrusted => .EXTENSION_UNAVAILABLE,
-        error.ExtensionLoadFailed => .EXTENSION_UNAVAILABLE,
-        error.KvTooLarge => .KV_TOO_LARGE,
-        error.KvCorrupt => .KV_CORRUPT,
-        error.InvalidArgument => .INVALID_ARGUMENT,
-        else => .SQLITE_ERROR,
-    };
-}
-
-fn statusFromSqliteResultCode(rc: c_int) zova_status {
-    return switch (rc) {
-        sqlite.c.SQLITE_OK => .OK,
-        sqlite.c.SQLITE_BUSY => .BUSY,
-        sqlite.c.SQLITE_LOCKED => .LOCKED,
-        sqlite.c.SQLITE_CONSTRAINT => .CONSTRAINT,
-        sqlite.c.SQLITE_CANTOPEN => .CANT_OPEN,
-        sqlite.c.SQLITE_READONLY => .READ_ONLY,
-        sqlite.c.SQLITE_CORRUPT => .CORRUPT,
-        sqlite.c.SQLITE_MISUSE => .MISUSE,
-        sqlite.c.SQLITE_NOMEM => .OUT_OF_MEMORY,
-        else => .SQLITE_ERROR,
-    };
-}
-
-fn statusName(status: c_int) [*:0]const u8 {
-    return switch (status) {
-        @intFromEnum(zova_status.OK) => "ZOVA_OK",
-        @intFromEnum(zova_status.INVALID_ARGUMENT) => "ZOVA_INVALID_ARGUMENT",
-        @intFromEnum(zova_status.OUT_OF_MEMORY) => "ZOVA_OUT_OF_MEMORY",
-        @intFromEnum(zova_status.BUSY) => "ZOVA_BUSY",
-        @intFromEnum(zova_status.LOCKED) => "ZOVA_LOCKED",
-        @intFromEnum(zova_status.CONSTRAINT) => "ZOVA_CONSTRAINT",
-        @intFromEnum(zova_status.CANT_OPEN) => "ZOVA_CANT_OPEN",
-        @intFromEnum(zova_status.READ_ONLY) => "ZOVA_READ_ONLY",
-        @intFromEnum(zova_status.CORRUPT) => "ZOVA_CORRUPT",
-        @intFromEnum(zova_status.MISUSE) => "ZOVA_MISUSE",
-        @intFromEnum(zova_status.SQLITE_ERROR) => "ZOVA_SQLITE_ERROR",
-        @intFromEnum(zova_status.NOT_ZOVA_PATH) => "ZOVA_NOT_ZOVA_PATH",
-        @intFromEnum(zova_status.NOT_ZOVA_DATABASE) => "ZOVA_NOT_ZOVA_DATABASE",
-        @intFromEnum(zova_status.UNSUPPORTED_ZOVA_VERSION) => "ZOVA_UNSUPPORTED_ZOVA_VERSION",
-        @intFromEnum(zova_status.DESTINATION_EXISTS) => "ZOVA_DESTINATION_EXISTS",
-        @intFromEnum(zova_status.ZOVA_NAME_CONFLICT) => "ZOVA_ZOVA_NAME_CONFLICT",
-        @intFromEnum(zova_status.MIGRATION_REQUIRED) => "ZOVA_MIGRATION_REQUIRED",
-        @intFromEnum(zova_status.UNSUPPORTED_FUTURE_FORMAT) => "ZOVA_UNSUPPORTED_FUTURE_FORMAT",
-        @intFromEnum(zova_status.UNSUPPORTED_LEGACY_FORMAT) => "ZOVA_UNSUPPORTED_LEGACY_FORMAT",
-        @intFromEnum(zova_status.NO_MIGRATION_PATH) => "ZOVA_NO_MIGRATION_PATH",
-        @intFromEnum(zova_status.OBJECT_NOT_FOUND) => "ZOVA_OBJECT_NOT_FOUND",
-        @intFromEnum(zova_status.OBJECT_ALREADY_EXISTS) => "ZOVA_OBJECT_ALREADY_EXISTS",
-        @intFromEnum(zova_status.OBJECT_CHUNK_NOT_FOUND) => "ZOVA_OBJECT_CHUNK_NOT_FOUND",
-        @intFromEnum(zova_status.OBJECT_CHUNK_HASH_MISMATCH) => "ZOVA_OBJECT_CHUNK_HASH_MISMATCH",
-        @intFromEnum(zova_status.OBJECT_CORRUPT) => "ZOVA_OBJECT_CORRUPT",
-        @intFromEnum(zova_status.OBJECT_MANIFEST_INVALID) => "ZOVA_OBJECT_MANIFEST_INVALID",
-        @intFromEnum(zova_status.OBJECT_RANGE_INVALID) => "ZOVA_OBJECT_RANGE_INVALID",
-        @intFromEnum(zova_status.OBJECT_TOO_LARGE) => "ZOVA_OBJECT_TOO_LARGE",
-        @intFromEnum(zova_status.OBJECT_TRANSACTION_ACTIVE) => "ZOVA_OBJECT_TRANSACTION_ACTIVE",
-        @intFromEnum(zova_status.OBJECT_WRITER_CLOSED) => "ZOVA_OBJECT_WRITER_CLOSED",
-        @intFromEnum(zova_status.OBJECT_READER_CLOSED) => "ZOVA_OBJECT_READER_CLOSED",
-        @intFromEnum(zova_status.BOUND_STORE_EXISTS) => "ZOVA_BOUND_STORE_EXISTS",
-        @intFromEnum(zova_status.BOUND_STORE_NOT_FOUND) => "ZOVA_BOUND_STORE_NOT_FOUND",
-        @intFromEnum(zova_status.BOUND_STORE_INVALID) => "ZOVA_BOUND_STORE_INVALID",
-        @intFromEnum(zova_status.VECTOR_COLLECTION_EXISTS) => "ZOVA_VECTOR_COLLECTION_EXISTS",
-        @intFromEnum(zova_status.VECTOR_COLLECTION_NOT_FOUND) => "ZOVA_VECTOR_COLLECTION_NOT_FOUND",
-        @intFromEnum(zova_status.VECTOR_NOT_FOUND) => "ZOVA_VECTOR_NOT_FOUND",
-        @intFromEnum(zova_status.VECTOR_DIMENSION_MISMATCH) => "ZOVA_VECTOR_DIMENSION_MISMATCH",
-        @intFromEnum(zova_status.VECTOR_CORRUPT) => "ZOVA_VECTOR_CORRUPT",
-        @intFromEnum(zova_status.VECTOR_INVALID) => "ZOVA_VECTOR_INVALID",
-        @intFromEnum(zova_status.GRAPH_EXISTS) => "ZOVA_GRAPH_EXISTS",
-        @intFromEnum(zova_status.GRAPH_NOT_FOUND) => "ZOVA_GRAPH_NOT_FOUND",
-        @intFromEnum(zova_status.GRAPH_NODE_NOT_FOUND) => "ZOVA_GRAPH_NODE_NOT_FOUND",
-        @intFromEnum(zova_status.GRAPH_EDGE_NOT_FOUND) => "ZOVA_GRAPH_EDGE_NOT_FOUND",
-        @intFromEnum(zova_status.GRAPH_INVALID) => "ZOVA_GRAPH_INVALID",
-        @intFromEnum(zova_status.EXTENSION_NOT_FOUND) => "ZOVA_EXTENSION_NOT_FOUND",
-        @intFromEnum(zova_status.EXTENSION_EXISTS) => "ZOVA_EXTENSION_EXISTS",
-        @intFromEnum(zova_status.EXTENSION_INVALID) => "ZOVA_EXTENSION_INVALID",
-        @intFromEnum(zova_status.EXTENSION_INCOMPATIBLE) => "ZOVA_EXTENSION_INCOMPATIBLE",
-        @intFromEnum(zova_status.EXTENSION_UNAVAILABLE) => "ZOVA_EXTENSION_UNAVAILABLE",
-        @intFromEnum(zova_status.KV_TOO_LARGE) => "ZOVA_KV_TOO_LARGE",
-        @intFromEnum(zova_status.KV_CORRUPT) => "ZOVA_KV_CORRUPT",
-        else => "ZOVA_UNKNOWN_STATUS",
-    };
-}
+pub const zova_graph_edge_input = @import("c_api/types.zig").zova_graph_edge_input;
+
+pub const zova_graph_edge_put_many_request = @import("c_api/types.zig").zova_graph_edge_put_many_request;
+
+pub const zova_graph_edge_put_many_keyed_request = @import("c_api/types.zig").zova_graph_edge_put_many_keyed_request;
+
+pub const zova_graph_edge_delete_many_request = @import("c_api/types.zig").zova_graph_edge_delete_many_request;
+
+pub const zova_graph_edge_get_request = @import("c_api/types.zig").zova_graph_edge_get_request;
+
+pub const zova_graph_edge_exists_request = @import("c_api/types.zig").zova_graph_edge_exists_request;
+
+pub const zova_graph_edge_delete_request = @import("c_api/types.zig").zova_graph_edge_delete_request;
+
+pub const zova_graph_neighbors_request = @import("c_api/types.zig").zova_graph_neighbors_request;
+
+pub const zova_graph_neighbors_keyed_request = @import("c_api/types.zig").zova_graph_neighbors_keyed_request;
+
+pub const zova_graph_nodes_get_many_keyed_request = @import("c_api/types.zig").zova_graph_nodes_get_many_keyed_request;
+
+pub const zova_graph_edges_get_many_keyed_request = @import("c_api/types.zig").zova_graph_edges_get_many_keyed_request;
+
+pub const zova_graph_edge_payload_get_many_request = @import("c_api/types.zig").zova_graph_edge_payload_get_many_request;
+
+pub const zova_graph_edge_payload_replacement = @import("c_api/types.zig").zova_graph_edge_payload_replacement;
+
+pub const zova_graph_edge_payload_replace_many_request = @import("c_api/types.zig").zova_graph_edge_payload_replace_many_request;
+
+pub const zova_fresh_build_begin_request = @import("c_api/types.zig").zova_fresh_build_begin_request;
+
+pub const zova_fresh_build_rows_request = @import("c_api/types.zig").zova_fresh_build_rows_request;
+
+pub const zova_fresh_build_graph_request = @import("c_api/types.zig").zova_fresh_build_graph_request;
+
+pub const zova_fresh_build_vectors_request = @import("c_api/types.zig").zova_fresh_build_vectors_request;
+
+pub const zova_fresh_build_finish_request = @import("c_api/types.zig").zova_fresh_build_finish_request;
+
+pub const zova_graph_degree_request = @import("c_api/types.zig").zova_graph_degree_request;
+
+pub const zova_graph_degree_many_keyed_request = @import("c_api/types.zig").zova_graph_degree_many_keyed_request;
+
+pub const zova_graph_scan_request = @import("c_api/types.zig").zova_graph_scan_request;
+
+pub const zova_graph_walk_request = @import("c_api/types.zig").zova_graph_walk_request;
+
+pub const zova_graph_walk_direction_request = @import("c_api/types.zig").zova_graph_walk_direction_request;
+
+pub const zova_graph_walk_direction_profiled_request = @import("c_api/types.zig").zova_graph_walk_direction_profiled_request;
+
+pub const zova_abi_version_major = @import("c_api/errors.zig").zova_abi_version_major;
+
+pub const zova_abi_version_minor = @import("c_api/errors.zig").zova_abi_version_minor;
+
+pub const zova_abi_version_patch = @import("c_api/errors.zig").zova_abi_version_patch;
+
+pub const zova_abi_version_string = @import("c_api/errors.zig").zova_abi_version_string;
+
+pub const zova_status_name = @import("c_api/errors.zig").zova_status_name;
+
+pub const zova_buffer_free = @import("c_api/results.zig").zova_buffer_free;
+
+pub const zova_kv_get_result_free = @import("c_api/results.zig").zova_kv_get_result_free;
+
+pub const zova_kv_get_many_results_free = @import("c_api/results.zig").zova_kv_get_many_results_free;
+
+pub const zova_message_free = @import("c_api/results.zig").zova_message_free;
+
+pub const zova_text_free = @import("c_api/results.zig").zova_text_free;
+
+pub const zova_notification_free = @import("c_api/results.zig").zova_notification_free;
+
+pub const zova_object_manifest_free = @import("c_api/results.zig").zova_object_manifest_free;
+
+pub const zova_vector_free = @import("c_api/results.zig").zova_vector_free;
+
+pub const zova_vector_search_results_free = @import("c_api/results.zig").zova_vector_search_results_free;
+
+pub const zova_vector_collection_info_free = @import("c_api/results.zig").zova_vector_collection_info_free;
+
+pub const zova_vector_collection_list_free = @import("c_api/results.zig").zova_vector_collection_list_free;
+
+pub const zova_graph_info_free = @import("c_api/results.zig").zova_graph_info_free;
+
+pub const zova_graph_list_free = @import("c_api/results.zig").zova_graph_list_free;
+
+pub const zova_extension_info_free = @import("c_api/results.zig").zova_extension_info_free;
+
+pub const zova_extension_list_free = @import("c_api/results.zig").zova_extension_list_free;
+
+pub const zova_graph_node_free = @import("c_api/results.zig").zova_graph_node_free;
+
+pub const zova_graph_edge_free = @import("c_api/results.zig").zova_graph_edge_free;
+
+pub const zova_graph_neighbor_results_free = @import("c_api/results.zig").zova_graph_neighbor_results_free;
+
+pub const zova_graph_keyed_neighbor_results_free = @import("c_api/results.zig").zova_graph_keyed_neighbor_results_free;
+
+pub const zova_graph_keyed_node_results_free = @import("c_api/results.zig").zova_graph_keyed_node_results_free;
+
+pub const zova_graph_keyed_edge_results_free = @import("c_api/results.zig").zova_graph_keyed_edge_results_free;
+
+pub const zova_graph_edge_payload_results_free = @import("c_api/results.zig").zova_graph_edge_payload_results_free;
+
+pub const zova_graph_scan_results_free = @import("c_api/results.zig").zova_graph_scan_results_free;
+
+pub const zova_graph_walk_results_free = @import("c_api/results.zig").zova_graph_walk_results_free;
+
+pub const zova_database_create = @import("c_api/database.zig").zova_database_create;
+
+pub const zova_database_create_memory = @import("c_api/database.zig").zova_database_create_memory;
+
+pub const zova_database_create_with_options = @import("c_api/database.zig").zova_database_create_with_options;
+
+pub const zova_database_create_with_extensions = @import("c_api/database.zig").zova_database_create_with_extensions;
+
+pub const zova_database_open = @import("c_api/database.zig").zova_database_open;
+
+pub const zova_database_open_with_options = @import("c_api/database.zig").zova_database_open_with_options;
+
+pub const zova_database_open_with_extensions = @import("c_api/database.zig").zova_database_open_with_extensions;
+
+pub const zova_extension_bundle_verify = @import("c_api/extensions.zig").zova_extension_bundle_verify;
+
+pub const zova_extension_bundle_trust = @import("c_api/extensions.zig").zova_extension_bundle_trust;
+
+pub const zova_extension_bundle_untrust = @import("c_api/extensions.zig").zova_extension_bundle_untrust;
+
+pub const zova_database_close = @import("c_api/database.zig").zova_database_close;
+
+pub const zova_database_exec = @import("c_api/database.zig").zova_database_exec;
+
+pub const zova_database_register_function = @import("c_api/sql_functions.zig").zova_database_register_function;
+
+pub const zova_database_begin = @import("c_api/database.zig").zova_database_begin;
+
+pub const zova_database_begin_immediate = @import("c_api/database.zig").zova_database_begin_immediate;
+
+pub const zova_database_commit = @import("c_api/database.zig").zova_database_commit;
+
+pub const zova_database_rollback = @import("c_api/database.zig").zova_database_rollback;
+
+pub const zova_database_savepoint = @import("c_api/database.zig").zova_database_savepoint;
+
+pub const zova_database_rollback_to_savepoint = @import("c_api/database.zig").zova_database_rollback_to_savepoint;
+
+pub const zova_database_release_savepoint = @import("c_api/database.zig").zova_database_release_savepoint;
+
+pub const zova_database_vacuum = @import("c_api/database.zig").zova_database_vacuum;
+
+pub const zova_database_backup = @import("c_api/database.zig").zova_database_backup;
+
+pub const zova_database_compact = @import("c_api/database.zig").zova_database_compact;
+
+pub const zova_database_set_busy_timeout = @import("c_api/database.zig").zova_database_set_busy_timeout;
+
+pub const zova_database_last_insert_rowid = @import("c_api/database.zig").zova_database_last_insert_rowid;
+
+pub const zova_database_changes = @import("c_api/database.zig").zova_database_changes;
+
+pub const zova_database_total_changes = @import("c_api/database.zig").zova_database_total_changes;
+
+pub const zova_database_notify = @import("c_api/notifications.zig").zova_database_notify;
+
+pub const zova_database_listen = @import("c_api/notifications.zig").zova_database_listen;
+
+pub const zova_subscription_try_receive = @import("c_api/notifications.zig").zova_subscription_try_receive;
+
+pub const zova_subscription_close = @import("c_api/notifications.zig").zova_subscription_close;
+
+pub const zova_database_prepare = @import("c_api/statements.zig").zova_database_prepare;
+
+pub const zova_statement_finalize = @import("c_api/statements.zig").zova_statement_finalize;
+
+pub const zova_statement_step = @import("c_api/statements.zig").zova_statement_step;
+
+pub const zova_statement_reset = @import("c_api/statements.zig").zova_statement_reset;
+
+pub const zova_statement_clear_bindings = @import("c_api/statements.zig").zova_statement_clear_bindings;
+
+pub const zova_statement_bind_null = @import("c_api/statements.zig").zova_statement_bind_null;
+
+pub const zova_statement_bind_int64 = @import("c_api/statements.zig").zova_statement_bind_int64;
+
+pub const zova_statement_bind_double = @import("c_api/statements.zig").zova_statement_bind_double;
+
+pub const zova_statement_bind_text = @import("c_api/statements.zig").zova_statement_bind_text;
+
+pub const zova_statement_bind_blob = @import("c_api/statements.zig").zova_statement_bind_blob;
+
+pub const zova_statement_parameter_count = @import("c_api/statements.zig").zova_statement_parameter_count;
+
+pub const zova_statement_parameter_index = @import("c_api/statements.zig").zova_statement_parameter_index;
+
+pub const zova_statement_column_count = @import("c_api/statements.zig").zova_statement_column_count;
+
+pub const zova_statement_column_name = @import("c_api/statements.zig").zova_statement_column_name;
+
+pub const zova_statement_column_type = @import("c_api/statements.zig").zova_statement_column_type;
+
+pub const zova_statement_column_int64 = @import("c_api/statements.zig").zova_statement_column_int64;
+
+pub const zova_statement_column_double = @import("c_api/statements.zig").zova_statement_column_double;
+
+pub const zova_statement_column_text = @import("c_api/statements.zig").zova_statement_column_text;
+
+pub const zova_statement_column_blob = @import("c_api/statements.zig").zova_statement_column_blob;
+
+pub const zova_database_last_error_message = @import("c_api/errors.zig").zova_database_last_error_message;
+
+pub const zova_convert_sqlite_to_zova = @import("c_api/database.zig").zova_convert_sqlite_to_zova;
+
+pub const zova_database_restore = @import("c_api/database.zig").zova_database_restore;
+
+pub const zova_database_probe_format = @import("c_api/database.zig").zova_database_probe_format;
+
+pub const zova_database_migrate = @import("c_api/database.zig").zova_database_migrate;
+
+pub const zova_database_restore_to_memory = @import("c_api/database.zig").zova_database_restore_to_memory;
+
+pub const zova_object_id_from_bytes = @import("c_api/objects.zig").zova_object_id_from_bytes;
+
+pub const zova_object_chunk_id_from_bytes = @import("c_api/objects.zig").zova_object_chunk_id_from_bytes;
+
+pub const zova_object_put = @import("c_api/objects.zig").zova_object_put;
+
+pub const zova_object_put_with_options = @import("c_api/objects.zig").zova_object_put_with_options;
+
+pub const zova_object_get = @import("c_api/objects.zig").zova_object_get;
+
+pub const zova_object_read_range = @import("c_api/objects.zig").zova_object_read_range;
+
+pub const zova_object_delete = @import("c_api/objects.zig").zova_object_delete;
+
+pub const zova_object_exists = @import("c_api/objects.zig").zova_object_exists;
+
+pub const zova_object_size = @import("c_api/objects.zig").zova_object_size;
+
+pub const zova_object_chunk_count = @import("c_api/objects.zig").zova_object_chunk_count;
+
+pub const zova_kv_get = @import("c_api/kv.zig").zova_kv_get;
+
+pub const zova_kv_get_many = @import("c_api/kv.zig").zova_kv_get_many;
+
+pub const zova_kv_put = @import("c_api/kv.zig").zova_kv_put;
+
+pub const zova_kv_put_many = @import("c_api/kv.zig").zova_kv_put_many;
+
+pub const zova_kv_delete = @import("c_api/kv.zig").zova_kv_delete;
+
+pub const zova_kv_delete_many = @import("c_api/kv.zig").zova_kv_delete_many;
+
+pub const zova_kv_count = @import("c_api/kv.zig").zova_kv_count;
+
+pub const zova_kv_clear_namespace = @import("c_api/kv.zig").zova_kv_clear_namespace;
+
+pub const zova_object_manifest_get = @import("c_api/objects.zig").zova_object_manifest_get;
+
+pub const zova_object_chunk_get = @import("c_api/objects.zig").zova_object_chunk_get;
+
+pub const zova_object_chunk_put = @import("c_api/objects.zig").zova_object_chunk_put;
+
+pub const zova_object_chunk_put_with_options = @import("c_api/objects.zig").zova_object_chunk_put_with_options;
+
+pub const zova_object_chunk_delete = @import("c_api/objects.zig").zova_object_chunk_delete;
+
+pub const zova_object_assemble_from_chunks = @import("c_api/objects.zig").zova_object_assemble_from_chunks;
+
+pub const zova_object_assemble_from_chunks_with_options = @import("c_api/objects.zig").zova_object_assemble_from_chunks_with_options;
+
+pub const zova_object_writer_create = @import("c_api/objects.zig").zova_object_writer_create;
+
+pub const zova_object_writer_create_with_options = @import("c_api/objects.zig").zova_object_writer_create_with_options;
+
+pub const zova_object_writer_write = @import("c_api/objects.zig").zova_object_writer_write;
+
+pub const zova_object_writer_finish = @import("c_api/objects.zig").zova_object_writer_finish;
+
+pub const zova_object_writer_cancel = @import("c_api/objects.zig").zova_object_writer_cancel;
+
+pub const zova_object_writer_destroy = @import("c_api/objects.zig").zova_object_writer_destroy;
+
+pub const zova_object_reader_create = @import("c_api/objects.zig").zova_object_reader_create;
+
+pub const zova_object_reader_read = @import("c_api/objects.zig").zova_object_reader_read;
+
+pub const zova_object_reader_destroy = @import("c_api/objects.zig").zova_object_reader_destroy;
+
+pub const zova_vector_collection_create = @import("c_api/vectors.zig").zova_vector_collection_create;
+
+pub const zova_vector_collection_exists = @import("c_api/vectors.zig").zova_vector_collection_exists;
+
+pub const zova_vector_put = @import("c_api/vectors.zig").zova_vector_put;
+
+pub const zova_vector_get = @import("c_api/vectors.zig").zova_vector_get;
+
+pub const zova_vector_exists = @import("c_api/vectors.zig").zova_vector_exists;
+
+pub const zova_vector_delete = @import("c_api/vectors.zig").zova_vector_delete;
+
+pub const zova_vector_search = @import("c_api/vectors.zig").zova_vector_search;
+
+pub const zova_vector_search_in = @import("c_api/vectors.zig").zova_vector_search_in;
+
+pub const zova_vector_search_multi_i8 = @import("c_api/vectors.zig").zova_vector_search_multi_i8;
+
+pub const zova_vector_collection_info_get = @import("c_api/vectors.zig").zova_vector_collection_info_get;
+
+pub const zova_vector_collections_list = @import("c_api/vectors.zig").zova_vector_collections_list;
+
+pub const zova_vector_put_many = @import("c_api/vectors.zig").zova_vector_put_many;
+
+pub const zova_vector_delete_many = @import("c_api/vectors.zig").zova_vector_delete_many;
+
+pub const zova_vector_collection_delete = @import("c_api/vectors.zig").zova_vector_collection_delete;
+
+pub const zova_vector_search_within = @import("c_api/vectors.zig").zova_vector_search_within;
+
+pub const zova_vector_search_in_within = @import("c_api/vectors.zig").zova_vector_search_in_within;
+
+pub const zova_vector_search_by_id = @import("c_api/vectors.zig").zova_vector_search_by_id;
+
+pub const zova_vector_search_by_id_in = @import("c_api/vectors.zig").zova_vector_search_by_id_in;
+
+pub const zova_vector_search_by_id_within = @import("c_api/vectors.zig").zova_vector_search_by_id_within;
+
+pub const zova_vector_search_by_id_in_within = @import("c_api/vectors.zig").zova_vector_search_by_id_in_within;
+
+pub const zova_graph_create = @import("c_api/graphs.zig").zova_graph_create;
+
+pub const zova_graph_exists = @import("c_api/graphs.zig").zova_graph_exists;
+
+pub const zova_graph_info_get = @import("c_api/graphs.zig").zova_graph_info_get;
+
+pub const zova_graphs_list = @import("c_api/graphs.zig").zova_graphs_list;
+
+pub const zova_database_extension_install = @import("c_api/extensions.zig").zova_database_extension_install;
+
+pub const zova_database_extension_list = @import("c_api/extensions.zig").zova_database_extension_list;
+
+pub const zova_database_extension_info = @import("c_api/extensions.zig").zova_database_extension_info;
+
+pub const zova_database_extension_check = @import("c_api/extensions.zig").zova_database_extension_check;
+
+pub const zova_database_extension_check_all = @import("c_api/extensions.zig").zova_database_extension_check_all;
+
+pub const zova_database_extension_drop = @import("c_api/extensions.zig").zova_database_extension_drop;
+
+pub const zova_fresh_build_begin = @import("c_api/fresh_build.zig").zova_fresh_build_begin;
+
+pub const zova_fresh_build_table_rows = @import("c_api/fresh_build.zig").zova_fresh_build_table_rows;
+
+pub const zova_fresh_build_fts_rows = @import("c_api/fresh_build.zig").zova_fresh_build_fts_rows;
+
+pub const zova_fresh_build_graph = @import("c_api/fresh_build.zig").zova_fresh_build_graph;
+
+pub const zova_fresh_build_vectors = @import("c_api/fresh_build.zig").zova_fresh_build_vectors;
+
+pub const zova_fresh_build_finish = @import("c_api/fresh_build.zig").zova_fresh_build_finish;
+
+pub const zova_fresh_build_abort = @import("c_api/fresh_build.zig").zova_fresh_build_abort;
+
+pub const zova_fresh_build_destroy = @import("c_api/fresh_build.zig").zova_fresh_build_destroy;
+
+pub const zova_graph_delete = @import("c_api/graphs.zig").zova_graph_delete;
+
+pub const zova_graph_node_put = @import("c_api/graphs.zig").zova_graph_node_put;
+
+pub const zova_graph_node_put_many = @import("c_api/graphs.zig").zova_graph_node_put_many;
+
+pub const zova_graph_node_put_many_keyed = @import("c_api/graphs.zig").zova_graph_node_put_many_keyed;
+
+pub const zova_graph_build_fresh_keyed = @import("c_api/graphs.zig").zova_graph_build_fresh_keyed;
+
+pub const zova_graph_build_fresh_prepared_keyed = @import("c_api/graphs.zig").zova_graph_build_fresh_prepared_keyed;
+
+pub const zova_graph_build_fresh_prepared_keyed_with_payloads = @import("c_api/graphs.zig").zova_graph_build_fresh_prepared_keyed_with_payloads;
+
+pub const zova_graph_node_get = @import("c_api/graphs.zig").zova_graph_node_get;
+
+pub const zova_graph_node_exists = @import("c_api/graphs.zig").zova_graph_node_exists;
+
+pub const zova_graph_node_delete = @import("c_api/graphs.zig").zova_graph_node_delete;
+
+pub const zova_graph_node_delete_many = @import("c_api/graphs.zig").zova_graph_node_delete_many;
+
+pub const zova_graph_edge_put = @import("c_api/graphs.zig").zova_graph_edge_put;
+
+pub const zova_graph_edge_put_many = @import("c_api/graphs.zig").zova_graph_edge_put_many;
+
+pub const zova_graph_edge_put_many_keyed = @import("c_api/graphs.zig").zova_graph_edge_put_many_keyed;
+
+pub const zova_graph_edge_delete_many = @import("c_api/graphs.zig").zova_graph_edge_delete_many;
+
+pub const zova_graph_edge_get = @import("c_api/graphs.zig").zova_graph_edge_get;
+
+pub const zova_graph_edge_exists = @import("c_api/graphs.zig").zova_graph_edge_exists;
+
+pub const zova_graph_edge_delete = @import("c_api/graphs.zig").zova_graph_edge_delete;
+
+pub const zova_graph_neighbors = @import("c_api/graphs.zig").zova_graph_neighbors;
+
+pub const zova_graph_neighbors_keyed = @import("c_api/graphs.zig").zova_graph_neighbors_keyed;
+
+pub const zova_graph_nodes_get_many_keyed = @import("c_api/graphs.zig").zova_graph_nodes_get_many_keyed;
+
+pub const zova_graph_edges_get_many_keyed = @import("c_api/graphs.zig").zova_graph_edges_get_many_keyed;
+
+pub const zova_graph_edge_payload_get_many = @import("c_api/graphs.zig").zova_graph_edge_payload_get_many;
+
+pub const zova_graph_edge_payload_replace_many = @import("c_api/graphs.zig").zova_graph_edge_payload_replace_many;
+
+pub const zova_graph_degree = @import("c_api/graphs.zig").zova_graph_degree;
+
+pub const zova_graph_degree_many_keyed = @import("c_api/graphs.zig").zova_graph_degree_many_keyed;
+
+pub const zova_graph_scan = @import("c_api/graphs.zig").zova_graph_scan;
+
+pub const zova_graph_walk = @import("c_api/graphs.zig").zova_graph_walk;
+
+pub const zova_graph_walk_direction = @import("c_api/graphs.zig").zova_graph_walk_direction;
+
+pub const zova_graph_walk_direction_profiled = @import("c_api/graphs.zig").zova_graph_walk_direction_profiled;
+
+const databaseHandle = @import("c_api/handles.zig").databaseHandle;
+
+const f32AbiValues = @import("c_api/values.zig").f32AbiValues;
+
+const i8AbiValues = @import("c_api/values.zig").i8AbiValues;
+
+const emptyNotification = @import("c_api/results.zig").emptyNotification;
+
+const emptyVector = @import("c_api/results.zig").emptyVector;
+
+const emptyVectorSearchResults = @import("c_api/results.zig").emptyVectorSearchResults;
+
+const emptyVectorCollectionInfo = @import("c_api/results.zig").emptyVectorCollectionInfo;
+
+const emptyExtensionInfo = @import("c_api/results.zig").emptyExtensionInfo;
+
+const emptyExtensionList = @import("c_api/results.zig").emptyExtensionList;
 
 test "c abi status names and versions are stable" {
     try std.testing.expectEqual(zova_version.abi_version_major, zova_abi_version_major());
