@@ -40,30 +40,52 @@
 //! intentionally absent from this release.
 
 const std = @import("std");
+
 const extension_dynamic_impl = @import("extension_dynamic.zig");
+
 const extension_impl = @import("extension.zig");
+
 const fastcdc = @import("object_fastcdc.zig");
+
 const graph_impl = @import("graph.zig");
+
 const graph_sql = @import("graph_sql.zig");
+
 const kv_impl = @import("kv.zig");
+
 const notify_impl = @import("notify.zig");
+
 const object_impl = @import("object.zig");
+
 const sqlite = @import("sqlite.zig");
+
 const trgm_impl = @import("trgm.zig");
+
 const vector_impl = @import("vector.zig");
+
 const vector_sql = @import("vector_sql.zig");
+
 const version = @import("version.zig");
+
 const zova_error = @import("zova_error.zig");
 
-const metadata_table = "_zova_meta";
-const objects_table = "_zova_objects";
-const chunks_table = "_zova_chunks";
-const object_chunks_table = "_zova_object_chunks";
-const kv_table = kv_impl.kv_table;
-const bound_stores_table = "_zova_bound_stores";
-const magic_value = "zova";
-const format_version = version.format_version;
-pub const minimum_migratable_format = "9";
+const metadata_table = @import("database/types.zig").metadata_table;
+
+const objects_table = @import("database/types.zig").objects_table;
+
+const chunks_table = @import("database/types.zig").chunks_table;
+
+const object_chunks_table = @import("database/types.zig").object_chunks_table;
+
+const kv_table = @import("database/types.zig").kv_table;
+
+const bound_stores_table = @import("database/types.zig").bound_stores_table;
+
+const magic_value = @import("database/types.zig").magic_value;
+
+const format_version = @import("database/types.zig").format_version;
+
+pub const minimum_migratable_format = @import("database/types.zig").minimum_migratable_format;
 
 /// Compatibility class assigned to a Zova storage format version.
 ///
@@ -71,37 +93,17 @@ pub const minimum_migratable_format = "9";
 /// current format; `unsupported_legacy` marks formats older than the earliest
 /// migratable format, and `unsupported_future` marks formats newer than this
 /// release.
-pub const FormatCompatibility = enum {
-    current,
-    migratable,
-    unsupported_legacy,
-    unsupported_future,
-};
+pub const FormatCompatibility = @import("database/types.zig").FormatCompatibility;
 
-fn parseFormatVersion(value: []const u8) ?u32 {
-    if (value.len == 0 or value[0] == '+' or value[0] == '-') return null;
-    return std.fmt.parseInt(u32, value, 10) catch null;
-}
+const parseFormatVersion = @import("database/format.zig").parseFormatVersion;
 
-fn classifyFormatVersion(value: []const u8) ?FormatCompatibility {
-    const format = parseFormatVersion(value) orelse return null;
-    const current = parseFormatVersion(format_version) orelse return null;
-    const minimum_migratable = parseFormatVersion(minimum_migratable_format) orelse return null;
-
-    if (format == current) return .current;
-    if (format > current) return .unsupported_future;
-    if (format >= minimum_migratable) return .migratable;
-    return .unsupported_legacy;
-}
+const classifyFormatVersion = @import("database/format.zig").classifyFormatVersion;
 
 /// Non-mutating classification result for one Zova database file.
 ///
 /// `format_version` is the strictly parsed `_zova_meta.format_version` value
 /// and `compatibility` is how this release treats that format.
-pub const DatabaseFormatInfo = struct {
-    format_version: u32,
-    compatibility: FormatCompatibility,
-};
+pub const DatabaseFormatInfo = @import("database/types.zig").DatabaseFormatInfo;
 
 /// Probe one database's storage format without mutation.
 ///
@@ -110,39 +112,11 @@ pub const DatabaseFormatInfo = struct {
 /// attaches bound stores, repairs schemas, or writes. Recognized but
 /// incompatible databases probe successfully; malformed or non-Zova inputs are
 /// rejected exactly as `Database.open` rejects them.
-pub fn probeDatabaseFormat(path: [:0]const u8) Error!DatabaseFormatInfo {
-    if (!isZovaPath(path)) return error.NotZovaPath;
-    try ensurePathExists(path);
-
-    var raw = sqlite.Database.openWithFlags(path, .read_only) catch |err| switch (err) {
-        error.SqliteError => return error.NotZovaDatabase,
-        else => return err,
-    };
-    defer raw.deinit();
-
-    try expectMetadataValue(&raw, "magic", magic_value, .magic);
-    return readFormatClassification(&raw);
-}
+pub const probeDatabaseFormat = @import("database/migration.zig").probeDatabaseFormat;
 
 /// Read and classify `_zova_meta.format_version` using the same strict parsing
 /// as `probeDatabaseFormat`, so open and probe cannot disagree.
-fn readFormatClassification(db: *sqlite.Database) Error!DatabaseFormatInfo {
-    var stmt = db.prepare("select value from _zova_meta where key = 'format_version'") catch |err| switch (err) {
-        error.SqliteError => return error.NotZovaDatabase,
-        else => return err,
-    };
-    defer stmt.deinit();
-
-    return switch (try stmt.step()) {
-        .done => error.NotZovaDatabase,
-        .row => {
-            const version_text = stmt.columnText(0);
-            const format_version_value = parseFormatVersion(version_text) orelse return error.NotZovaDatabase;
-            const compatibility = classifyFormatVersion(version_text) orelse return error.NotZovaDatabase;
-            return .{ .format_version = format_version_value, .compatibility = compatibility };
-        },
-    };
-}
+const readFormatClassification = @import("database/format.zig").readFormatClassification;
 
 /// One registered storage-format migration.
 ///
@@ -150,61 +124,15 @@ fn readFormatClassification(db: *sqlite.Database) Error!DatabaseFormatInfo {
 /// `to == from + 1`. There is deliberately no catch-all upgrader and no way to
 /// skip versions; migrating across several formats applies one registered step
 /// at a time.
-const MigrationStep = struct {
-    from_version: u32,
-    to_version: u32,
-    apply: *const fn (db: *sqlite.Database) Error!void,
-};
+const MigrationStep = @import("database/types.zig").MigrationStep;
 
-pub const migration_steps = [_]MigrationStep{
-    .{ .from_version = 9, .to_version = 10, .apply = migrateFormat9To10 },
-    .{ .from_version = 10, .to_version = 11, .apply = migrateFormat10To11 },
-};
+pub const migration_steps = @import("database/migration.zig").migration_steps;
 
-pub fn findMigrationStep(from_version: u32, to_version: u32) ?*const MigrationStep {
-    for (&migration_steps) |*step| {
-        if (step.from_version == from_version and step.to_version == to_version) return step;
-    }
-    return null;
-}
+pub const findMigrationStep = @import("database/migration.zig").findMigrationStep;
 
-fn migrateFormat9To10(db: *sqlite.Database) Error!void {
-    // Format 10 introduces the private key-value schema. Extension-owned
-    // tables are left unchanged; normal open-time extension compatibility
-    // validation applies after migration.
-    try db.exec(kv_impl.kv_schema_sql);
-    try validateKvSchema(db);
-}
+const migrateFormat9To10 = @import("database/migration.zig").migrateFormat9To10;
 
-fn migrateFormat10To11(db: *sqlite.Database) Error!void {
-    // Rename the format-10 tables out of the way first, then create the final
-    // format-11 tables from their canonical schema declarations. This keeps
-    // sqlite_master text identical to a newly-created format-11 database and
-    // lets the whole rebuild roll back atomically with the migration step.
-    try db.exec(
-        \\alter table _zova_object_chunks rename to _zova_object_chunks_format10;
-        \\alter table _zova_objects rename to _zova_objects_format10;
-        \\alter table _zova_chunks rename to _zova_chunks_format10;
-    );
-
-    try db.exec(object_impl.objects_schema_sql);
-    try db.exec(object_impl.chunks_schema_sql);
-    try db.exec(object_impl.object_chunks_schema_sql);
-
-    try db.exec(
-        \\insert into _zova_objects(object_id,size_bytes,chunk_count,chunker)
-        \\select object_id,size_bytes,chunk_count,chunker from _zova_objects_format10;
-        \\insert into _zova_chunks(chunk_hash,size_bytes,data)
-        \\select chunk_hash,size_bytes,data from _zova_chunks_format10;
-        \\insert into _zova_object_chunks(object_id,chunk_index,chunk_hash,offset,size_bytes)
-        \\select object_id,chunk_index,chunk_hash,offset,size_bytes from _zova_object_chunks_format10;
-        \\drop table _zova_object_chunks_format10;
-        \\drop table _zova_objects_format10;
-        \\drop table _zova_chunks_format10;
-    );
-
-    try validateObjectSchema(db);
-}
+const migrateFormat10To11 = @import("database/migration.zig").migrateFormat10To11;
 
 /// Role-aware validation of one Zova file at an exact expected storage
 /// format, structurally equivalent to the existing open-time and attach-time
@@ -218,35 +146,7 @@ fn migrateFormat10To11(db: *sqlite.Database) Error!void {
 /// table — can never be transformed. Object and KV validation is selected by
 /// the exact source format so every adjacent step validates the schema that
 /// actually existed at that version.
-fn validateMigrationSourceSchema(db: *sqlite.Database, expected_format: []const u8) Error!void {
-    if (try metadataValueAlloc(std.heap.c_allocator, db, "store_role")) |role| {
-        defer std.heap.c_allocator.free(role);
-
-        if (std.mem.eql(u8, role, bound_object_store_role)) {
-            return validateObjectStoreDatabaseExpected(db, expected_format);
-        }
-        if (std.mem.eql(u8, role, bound_vector_store_role)) {
-            return validateVectorStoreDatabaseExpected(db, expected_format);
-        }
-        if (std.mem.eql(u8, role, bound_graph_store_role)) {
-            return validateGraphStoreDatabaseExpected(db, expected_format);
-        }
-        return error.NotZovaDatabase;
-    }
-
-    const expected_version = parseFormatVersion(expected_format) orelse return error.NotZovaDatabase;
-
-    // Main database: every private schema plus the optional bound-store
-    // table, with version-specific object and KV requirements.
-    try expectMetadataValue(db, "magic", magic_value, .magic);
-    try expectMetadataValue(db, "format_version", expected_format, .format_version);
-    try validateExtensionSchema(db);
-    try validateObjectSchemaExpected(db, expected_format);
-    try validateVectorSchema(db);
-    try validateGraphSchema(db);
-    if (expected_version >= 10) try validateKvSchema(db);
-    try validateOptionalBoundStoreSchema(db);
-}
+const validateMigrationSourceSchema = @import("database/migration.zig").validateMigrationSourceSchema;
 
 /// Apply the single registered adjacent migration step for this database's
 /// storage format and return the new version.
@@ -257,101 +157,59 @@ fn validateMigrationSourceSchema(db: *sqlite.Database, expected_format: []const 
 /// updated as the final statement, and every failure path rolls back
 /// completely so the version never advances on SQL, allocation, constraint,
 /// or validation failure.
-pub fn runMigrationStep(db: *sqlite.Database) Error!u32 {
-    const info = try readFormatClassification(db);
+pub const runMigrationStep = @import("database/migration.zig").runMigrationStep;
 
-    const current = parseFormatVersion(format_version) orelse unreachable;
-    const target = std.math.add(u32, info.format_version, 1) catch return error.NoMigrationPath;
-    if (target > current or info.compatibility != .migratable) return error.NoMigrationPath;
+const runMigrationsToCurrent = @import("database/migration.zig").runMigrationsToCurrent;
 
-    const step = findMigrationStep(info.format_version, target) orelse return error.NoMigrationPath;
+const validateForeignKeys = @import("database/migration.zig").validateForeignKeys;
 
-    var format_buffer: [16]u8 = undefined;
-    const expected_format = std.fmt.bufPrint(&format_buffer, "{d}", .{info.format_version}) catch unreachable;
+const bound_object_store_role = @import("database/types.zig").bound_object_store_role;
 
-    try db.beginImmediate();
-    errdefer db.rollback() catch {};
+const bound_vector_store_role = @import("database/types.zig").bound_vector_store_role;
 
-    try validateMigrationSourceSchema(db, expected_format);
+const bound_graph_store_role = @import("database/types.zig").bound_graph_store_role;
 
-    try step.apply(db);
+const graph_keyed_batch_savepoint = @import("database/types.zig").graph_keyed_batch_savepoint;
 
-    var version_buffer: [16]u8 = undefined;
-    const version_text = std.fmt.bufPrint(&version_buffer, "{d}", .{target}) catch unreachable;
-    {
-        var update = try db.prepare("update _zova_meta set value = ?1 where key = 'format_version'");
-        defer update.deinit();
-        try update.bindText(1, version_text);
-        _ = try update.step();
-    }
+const GraphKeyedMutationScope = @import("database/types.zig").GraphKeyedMutationScope;
 
-    // Metadata is the final mutation. Structural and referential validation
-    // run afterward inside the same transaction and therefore still roll the
-    // complete step back on failure.
-    try validateMigrationSourceSchema(db, version_text);
-    try validateForeignKeys(db);
+const bound_object_store_name = @import("database/types.zig").bound_object_store_name;
 
-    try db.commit();
-    return target;
-}
+const bound_vector_store_name = @import("database/types.zig").bound_vector_store_name;
 
-fn runMigrationsToCurrent(db: *sqlite.Database) Error!void {
-    const current = parseFormatVersion(format_version) orelse unreachable;
-    while (true) {
-        const info = try readFormatClassification(db);
-        if (info.format_version == current and info.compatibility == .current) return;
-        if (info.compatibility != .migratable) return error.NoMigrationPath;
-        _ = try runMigrationStep(db);
-    }
-}
+const bound_graph_store_name = @import("database/types.zig").bound_graph_store_name;
 
-fn validateForeignKeys(db: *sqlite.Database) Error!void {
-    var stmt = try db.prepare("pragma foreign_key_check");
-    defer stmt.deinit();
-    if ((try stmt.step()) != .done) return error.NotZovaDatabase;
-}
+const bound_object_store_schema_name = @import("database/types.zig").bound_object_store_schema_name;
 
-const bound_object_store_role = "object_store";
-const bound_vector_store_role = "vector_store";
-const bound_graph_store_role = "graph_store";
-const graph_keyed_batch_savepoint = "zova_graph_keyed_batch";
+const bound_vector_store_schema_name = @import("database/types.zig").bound_vector_store_schema_name;
 
-const GraphKeyedMutationScope = enum { transaction, savepoint };
-const bound_object_store_name = "default";
-const bound_vector_store_name = "default";
-const bound_graph_store_name = "default";
-const bound_object_store_schema_name = "object_store";
-const bound_vector_store_schema_name = "vector_store";
-const bound_graph_store_schema_name = "graph_store";
-const bundled_extensions = [_]extension_impl.Extension{
-    trgm_impl.extension(),
-};
-const bound_stores_schema_sql =
-    \\create table _zova_bound_stores (
-    \\  role text not null check (role in ('object_store', 'vector_store', 'graph_store')),
-    \\  name text not null check (name = 'default'),
-    \\  path text not null,
-    \\  store_id text not null check (length(store_id) = 64),
-    \\  bound_set_id text not null check (length(bound_set_id) = 64),
-    \\  object_epoch integer check (object_epoch is null or object_epoch >= 0),
-    \\  vector_epoch integer check (vector_epoch is null or vector_epoch >= 0),
-    \\  graph_epoch integer check (graph_epoch is null or graph_epoch >= 0),
-    \\  created_at_unix integer not null,
-    \\  primary key (role, name)
-    \\)
-;
-pub const ObjectId = object_impl.ObjectId;
-pub const ObjectChunkId = object_impl.ObjectChunkId;
-pub const ObjectChunk = object_impl.ObjectChunk;
-pub const ObjectManifest = object_impl.ObjectManifest;
-pub const ObjectChunkData = object_impl.ObjectChunkData;
-pub const Object = object_impl.Object;
+const bound_graph_store_schema_name = @import("database/types.zig").bound_graph_store_schema_name;
+
+const bundled_extensions = @import("database/types.zig").bundled_extensions;
+
+const bound_stores_schema_sql = @import("database/types.zig").bound_stores_schema_sql;
+
+pub const ObjectId = @import("database/types.zig").ObjectId;
+
+pub const ObjectChunkId = @import("database/types.zig").ObjectChunkId;
+
+pub const ObjectChunk = @import("database/types.zig").ObjectChunk;
+
+pub const ObjectManifest = @import("database/types.zig").ObjectManifest;
+
+pub const ObjectChunkData = @import("database/types.zig").ObjectChunkData;
+
+pub const Object = @import("database/types.zig").Object;
+
 /// Physical object chunking profile. Existing methods use `.deduplication`;
 /// `.streaming` stores fixed 1 MiB chunks for large sequential workloads.
-pub const ObjectStorageProfile = object_impl.ObjectStorageProfile;
-pub const ObjectPutOptions = object_impl.ObjectPutOptions;
-pub const ObjectReaderError = object_impl.ObjectReaderError;
-pub const KvPutEntry = kv_impl.PutEntry;
+pub const ObjectStorageProfile = @import("database/types.zig").ObjectStorageProfile;
+
+pub const ObjectPutOptions = @import("database/types.zig").ObjectPutOptions;
+
+pub const ObjectReaderError = @import("database/types.zig").ObjectReaderError;
+
+pub const KvPutEntry = @import("database/types.zig").KvPutEntry;
 
 pub const ObjectReader = struct {
     inner: object_impl.ObjectReader,
@@ -409,222 +267,190 @@ pub fn objectChunkId(bytes: []const u8) ObjectChunkId {
     return object_impl.objectChunkId(bytes);
 }
 
-pub const Error = zova_error.Error;
+pub const Error = @import("database/types.zig").Error;
 
 /// Options applied only while creating a fresh Zova database.
-pub const CreateOptions = struct {
-    /// SQLite page size selected before Zova creates its private schema.
-    /// Zero preserves SQLite's default page size.
-    page_size: u32 = 0,
-};
+pub const CreateOptions = @import("database/types.zig").CreateOptions;
 
-pub const max_vector_dimensions = vector_impl.max_vector_dimensions;
-pub const VectorMetric = vector_impl.VectorMetric;
-pub const VectorElementType = vector_impl.VectorElementType;
-pub const VectorCollectionOptions = vector_impl.VectorCollectionOptions;
-pub const VectorCollectionInfo = vector_impl.VectorCollectionInfo;
-pub const VectorCollectionList = vector_impl.VectorCollectionList;
-pub const VectorInput = vector_impl.VectorInput;
-pub const VectorValuesConst = vector_impl.VectorValuesConst;
-pub const VectorValuesOwned = vector_impl.VectorValuesOwned;
-pub const Vector = vector_impl.Vector;
-pub const VectorSearchResult = vector_impl.VectorSearchResult;
-pub const VectorSearchResults = vector_impl.VectorSearchResults;
-pub const MultiI8CosineSearchMode = vector_impl.MultiI8CosineSearchMode;
-pub const MultiI8CosineSearchOptions = vector_impl.MultiI8CosineSearchOptions;
-pub const Notification = notify_impl.Notification;
-pub const NotificationSubscription = notify_impl.NotificationSubscription;
-pub const GraphTargetType = graph_impl.GraphTargetType;
-pub const GraphInfo = graph_impl.GraphInfo;
-pub const GraphList = graph_impl.GraphList;
-pub const GraphNodeInput = graph_impl.GraphNodeInput;
-pub const FreshGraphNodeInput = graph_impl.FreshGraphNodeInput;
-pub const GraphNode = graph_impl.GraphNode;
-pub const GraphEdgeInput = graph_impl.GraphEdgeInput;
-pub const FreshGraphEdgeInput = graph_impl.FreshGraphEdgeInput;
-pub const FreshGraphBuildProfile = graph_impl.FreshGraphBuildProfile;
-pub const GraphEdgePayloadReplacement = graph_impl.GraphEdgePayloadReplacement;
-pub const GraphEdgePayloadLookup = graph_impl.GraphEdgePayloadLookup;
-pub const GraphEdgePayloadLookupList = graph_impl.GraphEdgePayloadLookupList;
-pub const GraphEdge = graph_impl.GraphEdge;
-pub const GraphNeighborDirection = graph_impl.GraphNeighborDirection;
-pub const GraphNeighborsOptions = graph_impl.GraphNeighborsOptions;
-pub const GraphDegreeOptions = graph_impl.GraphDegreeOptions;
-pub const GraphNeighbor = graph_impl.GraphNeighbor;
-pub const GraphNeighborList = graph_impl.GraphNeighborList;
-pub const GraphKeyedNeighbor = graph_impl.GraphKeyedNeighbor;
-pub const GraphKeyedNeighborList = graph_impl.GraphKeyedNeighborList;
-pub const GraphKeyedNodeLookup = graph_impl.GraphKeyedNodeLookup;
-pub const GraphKeyedNodeLookupList = graph_impl.GraphKeyedNodeLookupList;
-pub const GraphKeyedEdgeLookup = graph_impl.GraphKeyedEdgeLookup;
-pub const GraphKeyedEdgeLookupList = graph_impl.GraphKeyedEdgeLookupList;
-pub const GraphScanCursor = graph_impl.GraphScanCursor;
-pub const GraphScanOptions = graph_impl.GraphScanOptions;
-pub const GraphScanNode = graph_impl.GraphScanNode;
-pub const GraphScanEdge = graph_impl.GraphScanEdge;
-pub const GraphScanResult = graph_impl.GraphScanResult;
-pub const GraphWalkOptions = graph_impl.GraphWalkOptions;
-pub const GraphWalkDirectionOptions = graph_impl.GraphWalkDirectionOptions;
-pub const GraphWalkScanProfile = graph_impl.GraphWalkScanProfile;
-pub const GraphWalkItem = graph_impl.GraphWalkItem;
-pub const GraphWalk = graph_impl.GraphWalk;
-pub const Extension = extension_impl.Extension;
-pub const ExtensionRegistry = extension_impl.Registry;
-pub const ExtensionManifest = extension_impl.Manifest;
-pub const ExtensionInfo = extension_impl.InstalledInfo;
-pub const ExtensionList = extension_impl.InstalledList;
-pub const ExtensionSalvageMode = extension_impl.SalvageMode;
-pub const ExtensionSalvageContext = extension_impl.SalvageContext;
-pub const ExtensionSalvageResult = extension_impl.SalvageResult;
-pub const DynamicExtensionSet = extension_dynamic_impl.DynamicExtensionSet;
-pub const DynamicExtensionTrustRecord = extension_dynamic_impl.TrustRecord;
-pub const DynamicExtensionTrustedList = extension_dynamic_impl.TrustedList;
-pub const DynamicExtensionTrustStoreOptions = extension_dynamic_impl.TrustStoreOptions;
-pub const DynamicExtensionBundleInfo = extension_dynamic_impl.BundleInfo;
-pub const DynamicExtensionOwnedRegistry = extension_dynamic_impl.OwnedRegistry;
-pub const extension_dynamic = extension_dynamic_impl;
+pub const max_vector_dimensions = @import("database/types.zig").max_vector_dimensions;
+
+pub const VectorMetric = @import("database/types.zig").VectorMetric;
+
+pub const VectorElementType = @import("database/types.zig").VectorElementType;
+
+pub const VectorCollectionOptions = @import("database/types.zig").VectorCollectionOptions;
+
+pub const VectorCollectionInfo = @import("database/types.zig").VectorCollectionInfo;
+
+pub const VectorCollectionList = @import("database/types.zig").VectorCollectionList;
+
+pub const VectorInput = @import("database/types.zig").VectorInput;
+
+pub const VectorValuesConst = @import("database/types.zig").VectorValuesConst;
+
+pub const VectorValuesOwned = @import("database/types.zig").VectorValuesOwned;
+
+pub const Vector = @import("database/types.zig").Vector;
+
+pub const VectorSearchResult = @import("database/types.zig").VectorSearchResult;
+
+pub const VectorSearchResults = @import("database/types.zig").VectorSearchResults;
+
+pub const MultiI8CosineSearchMode = @import("database/types.zig").MultiI8CosineSearchMode;
+
+pub const MultiI8CosineSearchOptions = @import("database/types.zig").MultiI8CosineSearchOptions;
+
+pub const Notification = @import("database/types.zig").Notification;
+
+pub const NotificationSubscription = @import("database/types.zig").NotificationSubscription;
+
+pub const GraphTargetType = @import("database/types.zig").GraphTargetType;
+
+pub const GraphInfo = @import("database/types.zig").GraphInfo;
+
+pub const GraphList = @import("database/types.zig").GraphList;
+
+pub const GraphNodeInput = @import("database/types.zig").GraphNodeInput;
+
+pub const FreshGraphNodeInput = @import("database/types.zig").FreshGraphNodeInput;
+
+pub const GraphNode = @import("database/types.zig").GraphNode;
+
+pub const GraphEdgeInput = @import("database/types.zig").GraphEdgeInput;
+
+pub const FreshGraphEdgeInput = @import("database/types.zig").FreshGraphEdgeInput;
+
+pub const FreshGraphBuildProfile = @import("database/types.zig").FreshGraphBuildProfile;
+
+pub const GraphEdgePayloadReplacement = @import("database/types.zig").GraphEdgePayloadReplacement;
+
+pub const GraphEdgePayloadLookup = @import("database/types.zig").GraphEdgePayloadLookup;
+
+pub const GraphEdgePayloadLookupList = @import("database/types.zig").GraphEdgePayloadLookupList;
+
+pub const GraphEdge = @import("database/types.zig").GraphEdge;
+
+pub const GraphNeighborDirection = @import("database/types.zig").GraphNeighborDirection;
+
+pub const GraphNeighborsOptions = @import("database/types.zig").GraphNeighborsOptions;
+
+pub const GraphDegreeOptions = @import("database/types.zig").GraphDegreeOptions;
+
+pub const GraphNeighbor = @import("database/types.zig").GraphNeighbor;
+
+pub const GraphNeighborList = @import("database/types.zig").GraphNeighborList;
+
+pub const GraphKeyedNeighbor = @import("database/types.zig").GraphKeyedNeighbor;
+
+pub const GraphKeyedNeighborList = @import("database/types.zig").GraphKeyedNeighborList;
+
+pub const GraphKeyedNodeLookup = @import("database/types.zig").GraphKeyedNodeLookup;
+
+pub const GraphKeyedNodeLookupList = @import("database/types.zig").GraphKeyedNodeLookupList;
+
+pub const GraphKeyedEdgeLookup = @import("database/types.zig").GraphKeyedEdgeLookup;
+
+pub const GraphKeyedEdgeLookupList = @import("database/types.zig").GraphKeyedEdgeLookupList;
+
+pub const GraphScanCursor = @import("database/types.zig").GraphScanCursor;
+
+pub const GraphScanOptions = @import("database/types.zig").GraphScanOptions;
+
+pub const GraphScanNode = @import("database/types.zig").GraphScanNode;
+
+pub const GraphScanEdge = @import("database/types.zig").GraphScanEdge;
+
+pub const GraphScanResult = @import("database/types.zig").GraphScanResult;
+
+pub const GraphWalkOptions = @import("database/types.zig").GraphWalkOptions;
+
+pub const GraphWalkDirectionOptions = @import("database/types.zig").GraphWalkDirectionOptions;
+
+pub const GraphWalkScanProfile = @import("database/types.zig").GraphWalkScanProfile;
+
+pub const GraphWalkItem = @import("database/types.zig").GraphWalkItem;
+
+pub const GraphWalk = @import("database/types.zig").GraphWalk;
+
+pub const Extension = @import("database/types.zig").Extension;
+
+pub const ExtensionRegistry = @import("database/types.zig").ExtensionRegistry;
+
+pub const ExtensionManifest = @import("database/types.zig").ExtensionManifest;
+
+pub const ExtensionInfo = @import("database/types.zig").ExtensionInfo;
+
+pub const ExtensionList = @import("database/types.zig").ExtensionList;
+
+pub const ExtensionSalvageMode = @import("database/types.zig").ExtensionSalvageMode;
+
+pub const ExtensionSalvageContext = @import("database/types.zig").ExtensionSalvageContext;
+
+pub const ExtensionSalvageResult = @import("database/types.zig").ExtensionSalvageResult;
+
+pub const DynamicExtensionSet = @import("database/types.zig").DynamicExtensionSet;
+
+pub const DynamicExtensionTrustRecord = @import("database/types.zig").DynamicExtensionTrustRecord;
+
+pub const DynamicExtensionTrustedList = @import("database/types.zig").DynamicExtensionTrustedList;
+
+pub const DynamicExtensionTrustStoreOptions = @import("database/types.zig").DynamicExtensionTrustStoreOptions;
+
+pub const DynamicExtensionBundleInfo = @import("database/types.zig").DynamicExtensionBundleInfo;
+
+pub const DynamicExtensionOwnedRegistry = @import("database/types.zig").DynamicExtensionOwnedRegistry;
+
+pub const extension_dynamic = @import("database/types.zig").extension_dynamic;
 
 /// Information about the optional object store bound to a main `.zova` file.
 ///
 /// Single-file Zova remains the default. This struct is returned only when a
 /// main database has explicitly been bound to one external object store.
-pub const BoundObjectStoreInfo = struct {
-    path: []u8,
-    store_id: []u8,
-    bound_set_id: []u8,
-    object_epoch: u64,
+pub const BoundObjectStoreInfo = @import("database/types.zig").BoundObjectStoreInfo;
 
-    /// Free owned strings returned by `Database.boundObjectStore`.
-    pub fn deinit(self: *BoundObjectStoreInfo, allocator: std.mem.Allocator) void {
-        allocator.free(self.path);
-        allocator.free(self.store_id);
-        allocator.free(self.bound_set_id);
-    }
-};
+const BoundObjectStore = @import("database/types.zig").BoundObjectStore;
 
-const BoundObjectStore = struct {};
+pub const SplitObjectStoreCounts = @import("database/types.zig").SplitObjectStoreCounts;
 
-pub const SplitObjectStoreCounts = struct {
-    objects: u64 = 0,
-    chunks: u64 = 0,
-    manifest_rows: u64 = 0,
-};
-
-pub const SplitObjectStoreResult = struct {
-    role: []const u8 = bound_object_store_role,
-    store_path: []const u8,
-    store_id: [64]u8,
-    bound_set_id: [64]u8,
-    copied: SplitObjectStoreCounts,
-    cleared: SplitObjectStoreCounts,
-    verified: bool,
-};
+pub const SplitObjectStoreResult = @import("database/types.zig").SplitObjectStoreResult;
 
 /// Information about the optional vector store bound to a main `.zova` file.
 ///
 /// Single-file Zova remains the default. This struct is returned only when a
 /// main database has explicitly been bound to one external vector store.
-pub const BoundVectorStoreInfo = struct {
-    path: []u8,
-    store_id: []u8,
-    bound_set_id: []u8,
-    vector_epoch: u64,
+pub const BoundVectorStoreInfo = @import("database/types.zig").BoundVectorStoreInfo;
 
-    /// Free owned strings returned by `Database.boundVectorStore`.
-    pub fn deinit(self: *BoundVectorStoreInfo, allocator: std.mem.Allocator) void {
-        allocator.free(self.path);
-        allocator.free(self.store_id);
-        allocator.free(self.bound_set_id);
-    }
-};
+const BoundVectorStore = @import("database/types.zig").BoundVectorStore;
 
-const BoundVectorStore = struct {};
+pub const SplitVectorStoreCounts = @import("database/types.zig").SplitVectorStoreCounts;
 
-pub const SplitVectorStoreCounts = struct {
-    vector_collections: u64 = 0,
-    vectors: u64 = 0,
-};
-
-pub const SplitVectorStoreResult = struct {
-    role: []const u8 = bound_vector_store_role,
-    store_path: []const u8,
-    store_id: [64]u8,
-    bound_set_id: [64]u8,
-    copied: SplitVectorStoreCounts,
-    cleared: SplitVectorStoreCounts,
-    verified: bool,
-};
+pub const SplitVectorStoreResult = @import("database/types.zig").SplitVectorStoreResult;
 
 /// Information about the optional graph store bound to a main `.zova` file.
-pub const BoundGraphStoreInfo = struct {
-    path: []u8,
-    store_id: []u8,
-    bound_set_id: []u8,
-    graph_epoch: u64,
+pub const BoundGraphStoreInfo = @import("database/types.zig").BoundGraphStoreInfo;
 
-    pub fn deinit(self: *BoundGraphStoreInfo, allocator: std.mem.Allocator) void {
-        allocator.free(self.path);
-        allocator.free(self.store_id);
-        allocator.free(self.bound_set_id);
-    }
-};
+const BoundGraphStore = @import("database/types.zig").BoundGraphStore;
 
-const BoundGraphStore = struct {};
+pub const SplitGraphStoreCounts = @import("database/types.zig").SplitGraphStoreCounts;
 
-pub const SplitGraphStoreCounts = struct {
-    graphs: u64 = 0,
-    nodes: u64 = 0,
-    edges: u64 = 0,
-};
-
-pub const SplitGraphStoreResult = struct {
-    role: []const u8 = bound_graph_store_role,
-    store_path: []const u8,
-    store_id: [64]u8,
-    bound_set_id: [64]u8,
-    copied: SplitGraphStoreCounts,
-    cleared: SplitGraphStoreCounts,
-    verified: bool,
-};
+pub const SplitGraphStoreResult = @import("database/types.zig").SplitGraphStoreResult;
 
 /// Options for opening an existing `.zova` database.
-pub const OpenOptions = struct {
-    /// Open the SQLite handle read-only. Read APIs and SQL queries work, while
-    /// SQLite-backed writes return `error.ReadOnly`.
-    read_only: bool = false,
-    /// Initial SQLite busy timeout in milliseconds. A value of 0 leaves
-    /// SQLite's default busy handling unchanged.
-    busy_timeout_ms: u32 = 0,
-};
+pub const OpenOptions = @import("database/types.zig").OpenOptions;
 
-const ExtensionOpenMode = enum {
-    enforce,
-    inspect,
-};
+const ExtensionOpenMode = @import("database/types.zig").ExtensionOpenMode;
 
 /// Options for `Database.backupTo`.
-pub const BackupOptions = struct {
-    /// Open and validate the destination after copying.
-    verify: bool = true,
-};
+pub const BackupOptions = @import("database/types.zig").BackupOptions;
 
 /// Options for `Database.compactTo`.
-pub const CompactOptions = struct {
-    /// Open and validate the destination after compacting.
-    verify: bool = true,
-};
+pub const CompactOptions = @import("database/types.zig").CompactOptions;
 
 /// Options for `restoreBackup`.
-pub const RestoreOptions = struct {
-    /// Open and validate the restored destination after copying.
-    verify: bool = true,
-};
+pub const RestoreOptions = @import("database/types.zig").RestoreOptions;
 
 /// Options for `migrateDatabase`.
-pub const MigrateOptions = struct {
-    /// Open and validate the migrated destination set after copying.
-    verify: bool = true,
-};
+pub const MigrateOptions = @import("database/types.zig").MigrateOptions;
 
 /// Create a standalone object-store `.zova` file.
 ///
@@ -632,24 +458,7 @@ pub const MigrateOptions = struct {
 /// `Database.bindObjectStore`. Normal `.zova` files remain single-file by
 /// default, and object-store files are rejected by `Database.open` as main
 /// databases.
-pub fn createObjectStore(path: [:0]const u8) Error!void {
-    if (!isZovaPath(path)) return error.NotZovaPath;
-
-    const io = defaultIo();
-    var file = std.Io.Dir.cwd().createFile(io, path, .{ .exclusive = true }) catch |err| switch (err) {
-        error.PathAlreadyExists => return error.DestinationExists,
-        else => return error.CantOpen,
-    };
-    file.close(io);
-
-    errdefer std.Io.Dir.cwd().deleteFile(io, path) catch {};
-
-    var raw = try sqlite.Database.open(path);
-    defer raw.deinit();
-
-    try initializeZovaSchema(&raw);
-    try markAsObjectStore(&raw);
-}
+pub const createObjectStore = @import("database/lifecycle.zig").createObjectStore;
 
 /// Create a standalone vector-store `.zova` file.
 ///
@@ -657,44 +466,10 @@ pub fn createObjectStore(path: [:0]const u8) Error!void {
 /// `Database.bindVectorStore`. Normal `.zova` files remain single-file by
 /// default, and vector-store files are rejected by `Database.open` as main
 /// databases.
-pub fn createVectorStore(path: [:0]const u8) Error!void {
-    if (!isZovaPath(path)) return error.NotZovaPath;
-
-    const io = defaultIo();
-    var file = std.Io.Dir.cwd().createFile(io, path, .{ .exclusive = true }) catch |err| switch (err) {
-        error.PathAlreadyExists => return error.DestinationExists,
-        else => return error.CantOpen,
-    };
-    file.close(io);
-
-    errdefer std.Io.Dir.cwd().deleteFile(io, path) catch {};
-
-    var raw = try sqlite.Database.open(path);
-    defer raw.deinit();
-
-    try initializeZovaSchema(&raw);
-    try markAsVectorStore(&raw);
-}
+pub const createVectorStore = @import("database/lifecycle.zig").createVectorStore;
 
 /// Create a standalone graph-store `.zova` file.
-pub fn createGraphStore(path: [:0]const u8) Error!void {
-    if (!isZovaPath(path)) return error.NotZovaPath;
-
-    const io = defaultIo();
-    var file = std.Io.Dir.cwd().createFile(io, path, .{ .exclusive = true }) catch |err| switch (err) {
-        error.PathAlreadyExists => return error.DestinationExists,
-        else => return error.CantOpen,
-    };
-    file.close(io);
-
-    errdefer std.Io.Dir.cwd().deleteFile(io, path) catch {};
-
-    var raw = try sqlite.Database.open(path);
-    defer raw.deinit();
-
-    try initializeZovaSchema(&raw);
-    try markAsGraphStore(&raw);
-}
+pub const createGraphStore = @import("database/lifecycle.zig").createGraphStore;
 
 /// Convert an existing SQLite database file into a new `.zova` database.
 ///
@@ -985,164 +760,33 @@ pub fn migrateDatabaseInternal(
     for (bindings[0..binding_count]) |*binding| binding.deinit(allocator);
     binding_count = 0;
 }
+
 /// One planned bound-store member of a migration set.
 ///
 /// `role` and `suffix` are static strings; the other five fields are owned.
-pub const MigrateBindingPlan = struct {
-    role: []const u8,
-    suffix: []const u8,
-    /// Role-specific epoch name shared by the binding row column and the
-    /// store file's identity metadata key.
-    epoch_key: []const u8,
-    store_path: [:0]u8,
-    store_id: []u8,
-    bound_set_id: []u8,
-    final_path: [:0]u8,
-    staging_path: [:0]u8,
-    /// True once this attempt created the destination placeholder; pre-existing
-    /// destinations are never removed by cleanup.
-    reserved: bool = false,
-    /// True once this attempt exclusively created the staging file; cleanup
-    /// only ever removes staging files this attempt owns.
-    staged: bool = false,
-    epoch: u64,
-
-    pub fn deinit(self: *MigrateBindingPlan, allocator: std.mem.Allocator) void {
-        allocator.free(self.store_path);
-        allocator.free(self.store_id);
-        allocator.free(self.bound_set_id);
-        allocator.free(self.final_path);
-        allocator.free(self.staging_path);
-    }
-};
+pub const MigrateBindingPlan = @import("database/migration.zig").MigrateBindingPlan;
 
 /// Collect the main database's bound-store rows, if any. Single-file mains
 /// produce zero bindings.
-pub fn collectMigrationBindings(
-    allocator: std.mem.Allocator,
-    source_path: [:0]const u8,
-    out: *[3]MigrateBindingPlan,
-    count: *usize,
-) Error!void {
-    count.* = 0;
-
-    var raw = try sqlite.Database.openWithFlags(source_path, .read_only);
-    defer raw.deinit();
-    if (!try tableExists(&raw, bound_stores_table)) return;
-
-    inline for (.{
-        .{ .role = bound_object_store_role, .suffix = "objects", .epoch_key = "object_epoch" },
-        .{ .role = bound_vector_store_role, .suffix = "vectors", .epoch_key = "vector_epoch" },
-        .{ .role = bound_graph_store_role, .suffix = "graphs", .epoch_key = "graph_epoch" },
-    }) |entry| {
-        const binding_sql = "select path, store_id, bound_set_id, " ++ entry.epoch_key ++ " from _zova_bound_stores where role = '" ++ entry.role ++ "' and name = 'default'";
-        var stmt = try raw.prepare(binding_sql);
-        defer stmt.deinit();
-
-        if ((try stmt.step()) == .row) {
-            const epoch_value = stmt.columnInt64(3);
-            if (epoch_value < 0) return error.BoundStoreInvalid;
-            const store_path = try allocator.dupeZ(u8, stmt.columnText(0));
-            errdefer allocator.free(store_path);
-            const store_id = try allocator.dupe(u8, stmt.columnText(1));
-            errdefer allocator.free(store_id);
-            const bound_set_id = try allocator.dupe(u8, stmt.columnText(2));
-            errdefer allocator.free(bound_set_id);
-            const final_path = try allocator.dupeZ(u8, "");
-            errdefer allocator.free(final_path);
-            const staging_path = try allocator.dupeZ(u8, "");
-            errdefer allocator.free(staging_path);
-            out[count.*] = .{
-                .role = entry.role,
-                .suffix = entry.suffix,
-                .epoch_key = entry.epoch_key,
-                .store_path = store_path,
-                .store_id = store_id,
-                .bound_set_id = bound_set_id,
-                .epoch = @intCast(epoch_value),
-                .final_path = final_path,
-                .staging_path = staging_path,
-            };
-            count.* += 1;
-        }
-    }
-}
+pub const collectMigrationBindings = @import("database/migration.zig").collectMigrationBindings;
 
 /// Validate one recorded bound store before any copying: the file must exist,
 /// carry a genuine migratable format-9 schema under its role, and its stored
 /// identity must match the main database's binding row exactly.
-fn validateMigrationStoreBinding(
-    binding: *MigrateBindingPlan,
-    expected_format: []const u8,
-) Error!void {
-    var store = sqlite.Database.openWithFlags(binding.store_path, .read_only) catch |err| switch (err) {
-        error.CantOpen, error.SqliteError => return error.BoundStoreNotFound,
-        else => return err,
-    };
-    defer store.deinit();
-
-    const store_role = (try metadataValueAlloc(std.heap.c_allocator, &store, "store_role")) orelse return error.BoundStoreInvalid;
-    defer std.heap.c_allocator.free(store_role);
-    if (!std.mem.eql(u8, store_role, binding.role)) return error.BoundStoreInvalid;
-
-    try validateMigrationSourceSchema(&store, expected_format);
-
-    const store_id = (try metadataValueAlloc(std.heap.c_allocator, &store, "store_id")) orelse return error.BoundStoreInvalid;
-    defer std.heap.c_allocator.free(store_id);
-    if (!std.mem.eql(u8, store_id, binding.store_id)) return error.BoundStoreInvalid;
-
-    const bound_set_id = (try metadataValueAlloc(std.heap.c_allocator, &store, "bound_set_id")) orelse return error.BoundStoreInvalid;
-    defer std.heap.c_allocator.free(bound_set_id);
-    if (!std.mem.eql(u8, bound_set_id, binding.bound_set_id)) return error.BoundStoreInvalid;
-
-    const epoch_text = (try metadataValueAlloc(std.heap.c_allocator, &store, binding.epoch_key)) orelse return error.BoundStoreInvalid;
-    defer std.heap.c_allocator.free(epoch_text);
-    const stored_epoch = std.fmt.parseInt(u64, epoch_text, 10) catch return error.BoundStoreInvalid;
-    if (stored_epoch != binding.epoch) return error.BoundStoreInvalid;
-}
+const validateMigrationStoreBinding = @import("database/migration.zig").validateMigrationStoreBinding;
 
 /// Copy one source member forward into a fresh staging file. Migration of the
 /// staged copy is a separate step so each phase has its own fault boundary.
-fn copyForwardMember(source: *sqlite.Database, staging_path: [:0]const u8) Error!void {
-    var staged = try sqlite.Database.open(staging_path);
-    defer staged.deinit();
-    try backupMainDatabase(source, &staged);
-}
+const copyForwardMember = @import("database/migration.zig").copyForwardMember;
 
-const MigrateRebindTarget = enum { staging, final };
+const MigrateRebindTarget = @import("database/migration.zig").MigrateRebindTarget;
 
 /// Rewrite only the destination binding paths in a staged main database.
-fn rebindMigrationSet(
-    staged_main_path: [:0]const u8,
-    bindings: []MigrateBindingPlan,
-    target: MigrateRebindTarget,
-) Error!void {
-    var staged = try sqlite.Database.open(staged_main_path);
-    defer staged.deinit();
-
-    for (bindings) |*binding| {
-        const destination = switch (target) {
-            .staging => binding.staging_path,
-            .final => binding.final_path,
-        };
-        var update = try staged.prepare("update _zova_bound_stores set path = ?1 where role = ?2 and name = 'default'");
-        defer update.deinit();
-        try update.bindText(1, destination);
-        try update.bindText(2, binding.role);
-        _ = try update.step();
-    }
-}
+const rebindMigrationSet = @import("database/migration.zig").rebindMigrationSet;
 
 /// Derive a destination sibling name `<stem>.<suffix>.zova` from a
 /// destination whose name ends in `.zova`.
-fn migrationSiblingPath(allocator: std.mem.Allocator, destination_path: []const u8, suffix: []const u8) Error![:0]u8 {
-    const stem = destination_path[0 .. destination_path.len - ".zova".len];
-    const length = stem.len + 1 + suffix.len + ".zova".len;
-    const buffer = allocator.allocSentinel(u8, length, 0) catch return error.OutOfMemory;
-    errdefer allocator.free(buffer);
-    _ = std.fmt.bufPrint(buffer[0..length], "{s}.{s}.zova", .{ stem, suffix }) catch unreachable;
-    return buffer;
-}
+const migrationSiblingPath = @import("database/migration.zig").migrationSiblingPath;
 
 /// Derive a unique hidden same-directory staging path for one final path.
 ///
@@ -1151,52 +795,9 @@ fn migrationSiblingPath(allocator: std.mem.Allocator, destination_path: []const 
 /// Derive and exclusively create one staging file, retrying with fresh random
 /// names on collision so a pre-existing caller file can never be opened or
 /// deleted by this attempt.
-fn reserveMigrationStagingPath(allocator: std.mem.Allocator, final_path: []const u8) Error![:0]u8 {
-    var attempt: usize = 0;
-    while (attempt < 16) : (attempt += 1) {
-        const candidate = try migrationStagingPath(allocator, final_path);
-        var file = std.Io.Dir.cwd().createFile(defaultIo(), candidate, .{ .exclusive = true }) catch |err| switch (err) {
-            error.PathAlreadyExists => {
-                allocator.free(candidate);
-                continue;
-            },
-            else => {
-                allocator.free(candidate);
-                return error.CantOpen;
-            },
-        };
-        file.close(defaultIo());
-        return candidate;
-    }
-    return error.CantOpen;
-}
+const reserveMigrationStagingPath = @import("database/migration.zig").reserveMigrationStagingPath;
 
-fn migrationStagingPath(allocator: std.mem.Allocator, final_path: []const u8) Error![:0]u8 {
-    const dirname = std.fs.path.dirname(final_path) orelse "";
-    const basename = std.fs.path.basename(final_path);
-    const stem = basename[0 .. basename.len - ".zova".len];
-
-    var random_bytes: [8]u8 = undefined;
-    sqlite.c.sqlite3_randomness(random_bytes.len, &random_bytes);
-    const hex_alphabet = "0123456789abcdef";
-    var hex: [16]u8 = undefined;
-    for (0..16) |index| {
-        hex[index] = hex_alphabet[random_bytes[index / 2] % 16];
-        if (index % 2 == 1) random_bytes[index / 2] /= 16;
-    }
-
-    // Hidden same-directory name keeping the `.zova` extension so staged sets
-    // pass full open validation before publication.
-    const prefix_len = dirname.len + (if (dirname.len != 0) @as(usize, 1) else 0) + 1 + stem.len + ".migrate-".len + hex.len + ".zova".len;
-    const buffer = allocator.allocSentinel(u8, prefix_len, 0) catch return error.OutOfMemory;
-    errdefer allocator.free(buffer);
-    if (dirname.len == 0) {
-        _ = std.fmt.bufPrint(buffer[0..prefix_len], ".{s}.migrate-{s}.zova", .{ stem, hex }) catch unreachable;
-    } else {
-        _ = std.fmt.bufPrint(buffer[0..prefix_len], "{s}/.{s}.migrate-{s}.zova", .{ dirname, stem, hex }) catch unreachable;
-    }
-    return buffer;
-}
+const migrationStagingPath = @import("database/migration.zig").migrationStagingPath;
 
 fn initNotifications(db: *sqlite.Database) Error!*notify_impl.Hub {
     const allocator = std.heap.c_allocator;
@@ -1227,31 +828,9 @@ pub fn salvageInstalledExtensions(
     return extension_impl.salvageInstalled(allocator, source, destination, registry, mode);
 }
 
-fn validateCreateOptions(options: CreateOptions) Error!void {
-    if (options.page_size == 0) return;
-    if (options.page_size < 512 or options.page_size > 65536 or
-        !std.math.isPowerOfTwo(options.page_size))
-    {
-        return error.InvalidArgument;
-    }
-}
+const validateCreateOptions = @import("database/lifecycle.zig").validateCreateOptions;
 
-fn applyCreateOptions(db: *sqlite.Database, options: CreateOptions) Error!void {
-    if (options.page_size == 0) return;
-
-    var sql_buffer: [64]u8 = undefined;
-    const sql = std.fmt.bufPrintZ(&sql_buffer, "pragma page_size={d}", .{options.page_size}) catch
-        return error.InvalidArgument;
-    try db.exec(sql);
-
-    var query = try db.prepare("pragma page_size");
-    defer query.deinit();
-    if (try query.step() != .row or query.columnInt64(0) != options.page_size or
-        try query.step() != .done)
-    {
-        return error.SqliteError;
-    }
-}
+const applyCreateOptions = @import("database/lifecycle.zig").applyCreateOptions;
 
 /// Owns one initialized `.zova` database.
 ///
@@ -3167,1530 +2746,203 @@ pub const Database = struct {
     }
 };
 
-fn isZovaPath(path: []const u8) bool {
-    return std.mem.endsWith(u8, path, ".zova");
-}
-
-fn isMemoryPath(path: []const u8) bool {
-    return std.mem.eql(u8, path, ":memory:");
-}
-
-fn defaultIo() std.Io {
-    return std.Io.Threaded.global_single_threaded.io();
-}
-
-fn ensureDestinationZovaPathAvailable(path: [:0]const u8) Error!void {
-    if (!isZovaPath(path)) return error.NotZovaPath;
-
-    const io = defaultIo();
-    if (std.fs.path.isAbsolute(path)) {
-        std.Io.Dir.accessAbsolute(io, path, .{}) catch |err| switch (err) {
-            error.FileNotFound => {
-                try ensureParentPathExists(io, path);
-                return;
-            },
-            else => return error.CantOpen,
-        };
-        return error.DestinationExists;
-    }
-
-    std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
-        error.FileNotFound => {
-            try ensureParentPathExists(io, path);
-            return;
-        },
-        else => return error.CantOpen,
-    };
-
-    return error.DestinationExists;
-}
-
-fn ensureParentPathExists(io: std.Io, path: []const u8) Error!void {
-    const parent = std.fs.path.dirname(path) orelse return;
-    if (parent.len == 0) return;
-
-    if (std.fs.path.isAbsolute(parent)) {
-        std.Io.Dir.accessAbsolute(io, parent, .{}) catch return error.CantOpen;
-    } else {
-        std.Io.Dir.cwd().access(io, parent, .{}) catch return error.CantOpen;
-    }
-}
-
-fn reserveDestinationZovaFile(path: [:0]const u8) Error!void {
-    try ensureDestinationZovaPathAvailable(path);
-
-    const io = defaultIo();
-    var file = std.Io.Dir.cwd().createFile(io, path, .{ .exclusive = true }) catch |err| switch (err) {
-        error.PathAlreadyExists => return error.DestinationExists,
-        else => return error.CantOpen,
-    };
-    file.close(io);
-}
-
-fn deleteDestinationFile(path: [:0]const u8) void {
-    std.Io.Dir.cwd().deleteFile(defaultIo(), path) catch {};
-}
-
-fn ensurePathExists(path: []const u8) Error!void {
-    const io = defaultIo();
-    if (std.fs.path.isAbsolute(path)) {
-        std.Io.Dir.accessAbsolute(io, path, .{}) catch |err| switch (err) {
-            error.FileNotFound => return missingPathError(io, path),
-            else => return error.CantOpen,
-        };
-        return;
-    }
-
-    std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return missingPathError(io, path),
-        else => return error.CantOpen,
-    };
-}
-
-fn missingPathError(io: std.Io, path: []const u8) Error {
-    const parent = std.fs.path.dirname(path) orelse return error.NotZovaDatabase;
-    if (parent.len == 0) return error.NotZovaDatabase;
-
-    if (std.fs.path.isAbsolute(parent)) {
-        std.Io.Dir.accessAbsolute(io, parent, .{}) catch return error.CantOpen;
-    } else {
-        std.Io.Dir.cwd().access(io, parent, .{}) catch return error.CantOpen;
-    }
-
-    return error.NotZovaDatabase;
-}
-
-fn ensureSourcePathExists(path: []const u8) Error!void {
-    const io = defaultIo();
-    if (std.fs.path.isAbsolute(path)) {
-        std.Io.Dir.accessAbsolute(io, path, .{}) catch return error.CantOpen;
-        return;
-    }
-
-    std.Io.Dir.cwd().access(io, path, .{}) catch return error.CantOpen;
-}
-
-fn initializeZovaSchema(db: *sqlite.Database) sqlite.Error!void {
-    try initializeMetadata(db);
-    try initializeExtensionSchema(db);
-    try initializeObjectSchema(db);
-    try initializeVectorSchema(db);
-    try initializeGraphSchema(db);
-    try initializeKvSchema(db);
-}
-
-fn enableForeignKeys(db: *sqlite.Database) sqlite.Error!void {
-    try db.exec("pragma foreign_keys = on");
-}
-
-fn initializeMetadata(db: *sqlite.Database) sqlite.Error!void {
-    var random_bytes: [32]u8 = undefined;
-    sqlite.c.sqlite3_randomness(random_bytes.len, &random_bytes);
-
-    var database_id: [64]u8 = undefined;
-    lowerHexInto(&database_id, &random_bytes);
-
-    try db.exec(
-        \\create table _zova_meta (
-        \\  key text primary key,
-        \\  value text not null
-        \\);
-        \\insert into _zova_meta (key, value) values ('magic', 'zova');
-    );
-
-    var insert_format = try db.prepare("insert into _zova_meta (key, value) values ('format_version', ?)");
-    defer insert_format.deinit();
-    try insert_format.bindText(1, format_version);
-    std.debug.assert((try insert_format.step()) == .done);
-
-    var insert_id = try db.prepare("insert into _zova_meta (key, value) values ('database_id', ?)");
-    defer insert_id.deinit();
-    try insert_id.bindText(1, &database_id);
-    std.debug.assert((try insert_id.step()) == .done);
-}
-
-fn initializeExtensionSchema(db: *sqlite.Database) sqlite.Error!void {
-    try db.exec(extension_impl.extensions_schema_sql ++ ";");
-}
-
-fn initializeObjectSchema(db: *sqlite.Database) sqlite.Error!void {
-    try db.exec(object_impl.objects_schema_sql ++ ";");
-    try db.exec(object_impl.chunks_schema_sql ++ ";");
-    try db.exec(object_impl.object_chunks_schema_sql ++ ";");
-}
-
-fn initializeVectorSchema(db: *sqlite.Database) sqlite.Error!void {
-    try db.exec(vector_impl.collections_schema_sql ++ ";");
-    try db.exec(vector_impl.vectors_schema_sql ++ ";");
-}
-
-fn initializeGraphSchema(db: *sqlite.Database) sqlite.Error!void {
-    try db.exec(graph_impl.graphs_schema_sql ++ ";");
-    try db.exec(graph_impl.graph_nodes_schema_sql ++ ";");
-    try db.exec(graph_impl.graph_edge_types_schema_sql ++ ";");
-    try db.exec(graph_impl.graph_edges_schema_sql ++ ";");
-    try db.exec(graph_impl.graph_edges_topology_index_sql ++ ";");
-    try db.exec(graph_impl.graph_nodes_created_order_index_sql ++ ";");
-    try db.exec(graph_impl.graph_edges_created_order_index_sql ++ ";");
-    try db.exec(graph_impl.graph_edges_from_node_index_sql ++ ";");
-    try db.exec(graph_impl.graph_edges_from_node_type_index_sql ++ ";");
-    try db.exec(graph_impl.graph_edges_to_node_index_sql ++ ";");
-    try db.exec(graph_impl.graph_edges_to_node_type_index_sql ++ ";");
-}
-
-fn initializeKvSchema(db: *sqlite.Database) sqlite.Error!void {
-    try db.exec(kv_impl.kv_schema_sql ++ ";");
-}
-
-fn markAsObjectStore(db: *sqlite.Database) Error!void {
-    var store_id: [64]u8 = undefined;
-    randomHex64(&store_id);
-
-    var insert_role = try db.prepare("insert into _zova_meta (key, value) values ('store_role', ?)");
-    defer insert_role.deinit();
-    try insert_role.bindText(1, bound_object_store_role);
-    std.debug.assert((try insert_role.step()) == .done);
-
-    var insert_id = try db.prepare("insert into _zova_meta (key, value) values ('store_id', ?)");
-    defer insert_id.deinit();
-    try insert_id.bindText(1, &store_id);
-    std.debug.assert((try insert_id.step()) == .done);
-
-    var insert_epoch = try db.prepare("insert into _zova_meta (key, value) values ('object_epoch', '0')");
-    defer insert_epoch.deinit();
-    std.debug.assert((try insert_epoch.step()) == .done);
-}
-
-fn markAsVectorStore(db: *sqlite.Database) Error!void {
-    var store_id: [64]u8 = undefined;
-    randomHex64(&store_id);
-
-    var insert_role = try db.prepare("insert into _zova_meta (key, value) values ('store_role', ?)");
-    defer insert_role.deinit();
-    try insert_role.bindText(1, bound_vector_store_role);
-    std.debug.assert((try insert_role.step()) == .done);
-
-    var insert_id = try db.prepare("insert into _zova_meta (key, value) values ('store_id', ?)");
-    defer insert_id.deinit();
-    try insert_id.bindText(1, &store_id);
-    std.debug.assert((try insert_id.step()) == .done);
-
-    var insert_epoch = try db.prepare("insert into _zova_meta (key, value) values ('vector_epoch', '0')");
-    defer insert_epoch.deinit();
-    std.debug.assert((try insert_epoch.step()) == .done);
-}
-
-fn markAsGraphStore(db: *sqlite.Database) Error!void {
-    try deleteBoundObjectStoreRows(db);
-    try deleteBoundVectorStoreRows(db);
-    try deleteBoundGraphStoreRows(db);
-    try db.exec(
-        \\delete from _zova_meta
-        \\where key in ('store_role', 'store_id', 'bound_set_id', 'object_epoch', 'vector_epoch', 'graph_epoch');
-    );
-
-    var store_id: [64]u8 = undefined;
-    randomHex64(&store_id);
-
-    var insert_role = try db.prepare("insert into _zova_meta (key, value) values ('store_role', ?)");
-    defer insert_role.deinit();
-    try insert_role.bindText(1, bound_graph_store_role);
-    std.debug.assert((try insert_role.step()) == .done);
-
-    var insert_id = try db.prepare("insert into _zova_meta (key, value) values ('store_id', ?)");
-    defer insert_id.deinit();
-    try insert_id.bindText(1, &store_id);
-    std.debug.assert((try insert_id.step()) == .done);
-
-    var insert_epoch = try db.prepare("insert into _zova_meta (key, value) values ('graph_epoch', '0')");
-    defer insert_epoch.deinit();
-    std.debug.assert((try insert_epoch.step()) == .done);
-}
-
-fn ensureBoundStoreTable(db: *sqlite.Database) Error!void {
-    if (try tableExists(db, bound_stores_table)) {
-        try validateBoundStoreTable(db);
-        return;
-    }
-    try db.exec(bound_stores_schema_sql ++ ";");
-}
-
-fn validateOptionalBoundStoreSchema(db: *sqlite.Database) Error!void {
-    if (try tableExists(db, bound_stores_table)) try validateBoundStoreTable(db);
-}
-
-fn validateBoundStoreTable(db: *sqlite.Database) Error!void {
-    const columns = [_][]const u8{
-        "role",
-        "name",
-        "path",
-        "store_id",
-        "bound_set_id",
-        "object_epoch",
-        "vector_epoch",
-        "graph_epoch",
-        "created_at_unix",
-    };
-    try validateRequiredTable(db, bound_stores_table, &columns, bound_stores_schema_sql);
-}
-
-fn ensureMainDatabaseRole(db: *sqlite.Database) Error!void {
-    if (try metadataValueAlloc(std.heap.c_allocator, db, "store_role")) |role| {
-        defer std.heap.c_allocator.free(role);
-        if (std.mem.eql(u8, role, bound_object_store_role)) return error.BoundStoreInvalid;
-        if (std.mem.eql(u8, role, bound_vector_store_role)) return error.BoundStoreInvalid;
-        if (std.mem.eql(u8, role, bound_graph_store_role)) return error.BoundStoreInvalid;
-        return error.NotZovaDatabase;
-    }
-}
-
-fn openConfiguredBoundObjectStore(db: *sqlite.Database, options: OpenOptions) Error!?BoundObjectStore {
-    if (!try tableExists(db, bound_stores_table)) return null;
-
-    var info = (try loadBoundObjectStoreInfo(std.heap.c_allocator, db)) orelse return null;
-    defer info.deinit(std.heap.c_allocator);
-
-    const path_z = try std.heap.c_allocator.dupeZ(u8, info.path);
-    defer std.heap.c_allocator.free(path_z);
-
-    try attachObjectStore(db, path_z, options.read_only);
-    errdefer db.detachDatabase(bound_object_store_schema_name) catch {};
-
-    const actual_store_id = try validateAttachedObjectStoreAlloc(std.heap.c_allocator, db, bound_object_store_schema_name);
-    defer std.heap.c_allocator.free(actual_store_id);
-    if (!std.mem.eql(u8, actual_store_id, info.store_id)) return error.BoundStoreInvalid;
-
-    const actual_bound_set_id = (try attachedMetadataValueAlloc(std.heap.c_allocator, db, bound_object_store_schema_name, "bound_set_id")) orelse return error.BoundStoreInvalid;
-    defer std.heap.c_allocator.free(actual_bound_set_id);
-    if (!std.mem.eql(u8, actual_bound_set_id, info.bound_set_id)) return error.BoundStoreInvalid;
-
-    const actual_epoch = try attachedMetadataU64(db, bound_object_store_schema_name, "object_epoch");
-    if (actual_epoch != info.object_epoch) return error.BoundStoreInvalid;
-
-    return .{};
-}
-
-fn openConfiguredBoundVectorStore(db: *sqlite.Database, options: OpenOptions) Error!?BoundVectorStore {
-    if (!try tableExists(db, bound_stores_table)) return null;
-
-    var info = (try loadBoundVectorStoreInfo(std.heap.c_allocator, db)) orelse return null;
-    defer info.deinit(std.heap.c_allocator);
-
-    const path_z = try std.heap.c_allocator.dupeZ(u8, info.path);
-    defer std.heap.c_allocator.free(path_z);
-
-    try attachVectorStore(db, path_z, options.read_only);
-    errdefer db.detachDatabase(bound_vector_store_schema_name) catch {};
-
-    const actual_store_id = try validateAttachedVectorStoreAlloc(std.heap.c_allocator, db, bound_vector_store_schema_name);
-    defer std.heap.c_allocator.free(actual_store_id);
-    if (!std.mem.eql(u8, actual_store_id, info.store_id)) return error.BoundStoreInvalid;
-
-    const actual_bound_set_id = (try attachedMetadataValueAlloc(std.heap.c_allocator, db, bound_vector_store_schema_name, "bound_set_id")) orelse return error.BoundStoreInvalid;
-    defer std.heap.c_allocator.free(actual_bound_set_id);
-    if (!std.mem.eql(u8, actual_bound_set_id, info.bound_set_id)) return error.BoundStoreInvalid;
-
-    const actual_epoch = try attachedMetadataU64(db, bound_vector_store_schema_name, "vector_epoch");
-    if (actual_epoch != info.vector_epoch) return error.BoundStoreInvalid;
-
-    return .{};
-}
-
-fn openConfiguredBoundGraphStore(db: *sqlite.Database, options: OpenOptions) Error!?BoundGraphStore {
-    if (!try tableExists(db, bound_stores_table)) return null;
-
-    var info = (try loadBoundGraphStoreInfo(std.heap.c_allocator, db)) orelse return null;
-    defer info.deinit(std.heap.c_allocator);
-
-    const path_z = try std.heap.c_allocator.dupeZ(u8, info.path);
-    defer std.heap.c_allocator.free(path_z);
-
-    try attachGraphStore(db, path_z, options.read_only);
-    errdefer db.detachDatabase(bound_graph_store_schema_name) catch {};
-
-    const actual_store_id = try validateAttachedGraphStoreAlloc(std.heap.c_allocator, db, bound_graph_store_schema_name);
-    defer std.heap.c_allocator.free(actual_store_id);
-    if (!std.mem.eql(u8, actual_store_id, info.store_id)) return error.BoundStoreInvalid;
-
-    const actual_bound_set_id = (try attachedMetadataValueAlloc(std.heap.c_allocator, db, bound_graph_store_schema_name, "bound_set_id")) orelse return error.BoundStoreInvalid;
-    defer std.heap.c_allocator.free(actual_bound_set_id);
-    if (!isValidStoreId(actual_bound_set_id) or !std.mem.eql(u8, actual_bound_set_id, info.bound_set_id)) return error.BoundStoreInvalid;
-
-    const actual_epoch = try attachedMetadataU64(db, bound_graph_store_schema_name, "graph_epoch");
-    if (actual_epoch != info.graph_epoch) return error.BoundStoreInvalid;
-
-    return .{};
-}
-
-fn attachObjectStore(db: *sqlite.Database, path: []const u8, read_only: bool) Error!void {
-    if (!isZovaPath(path)) return error.NotZovaPath;
-    try ensurePathExists(path);
-    try db.attachDatabase(path, bound_object_store_schema_name);
-    errdefer db.detachDatabase(bound_object_store_schema_name) catch {};
-    if (read_only) try db.setQueryOnly(true);
-}
-
-fn attachVectorStore(db: *sqlite.Database, path: []const u8, read_only: bool) Error!void {
-    if (!isZovaPath(path)) return error.NotZovaPath;
-    try ensurePathExists(path);
-    try db.attachDatabase(path, bound_vector_store_schema_name);
-    errdefer db.detachDatabase(bound_vector_store_schema_name) catch {};
-    if (read_only) try db.setQueryOnly(true);
-}
-
-fn attachGraphStore(db: *sqlite.Database, path: []const u8, read_only: bool) Error!void {
-    if (!isZovaPath(path)) return error.NotZovaPath;
-    try ensurePathExists(path);
-    try db.attachDatabase(path, bound_graph_store_schema_name);
-    errdefer db.detachDatabase(bound_graph_store_schema_name) catch {};
-    if (read_only) try db.setQueryOnly(true);
-}
-
-fn prepareSchemaSql(db: *sqlite.Database, comptime sql_format: []const u8, args: anytype) Error!sqlite.Statement {
-    var sql_buffer: [4096]u8 = undefined;
-    const sql = std.fmt.bufPrintZ(&sql_buffer, sql_format, args) catch return error.SqliteError;
-    return try db.prepare(sql);
-}
-
-fn copyObjectStorage(
-    source: *sqlite.Database,
-    source_schema: object_impl.StorageSchema,
-    destination: *sqlite.Database,
-    destination_schema: object_impl.StorageSchema,
-) Error!void {
-    var source_objects = object_impl.Database{
-        .sqlite_db = source,
-        .storage_schema = source_schema,
-        .allow_active_transactions = false,
-    };
-
-    var chunks = try prepareObjectSchemaSql(source, source_schema,
-        \\select chunk_hash, size_bytes, data
-        \\from {s}_zova_chunks
-        \\order by hex(chunk_hash)
-    , .{source_schema.prefix()});
-    defer chunks.deinit();
-
-    var insert_chunk = try prepareObjectSchemaSql(destination, destination_schema,
-        \\insert into {s}_zova_chunks (chunk_hash, size_bytes, data)
-        \\values (?, ?, ?)
-    , .{destination_schema.prefix()});
-    defer insert_chunk.deinit();
-
-    while ((try chunks.step()) == .row) {
-        const raw_hash = chunks.columnBlob(0);
-        if (raw_hash.len != @sizeOf(ObjectChunkId)) return error.ObjectCorrupt;
-
-        var hash: ObjectChunkId = undefined;
-        @memcpy(hash[0..], raw_hash);
-
-        var chunk = try source_objects.getObjectChunk(std.heap.c_allocator, hash);
-        chunk.deinit(std.heap.c_allocator);
-
-        try insert_chunk.bindBlob(1, raw_hash);
-        try insert_chunk.bindInt64(2, chunks.columnInt64(1));
-        try insert_chunk.bindBlob(3, chunks.columnBlob(2));
-        std.debug.assert((try insert_chunk.step()) == .done);
-        try insert_chunk.reset();
-        try insert_chunk.clearBindings();
-    }
-
-    var objects = try prepareObjectSchemaSql(
-        source,
-        source_schema,
-        "select object_id, size_bytes, chunk_count, chunker from {s}_zova_objects order by hex(object_id)",
-        .{source_schema.prefix()},
-    );
-    defer objects.deinit();
-
-    var insert_object = try prepareObjectSchemaSql(destination, destination_schema,
-        \\insert into {s}_zova_objects (object_id, size_bytes, chunk_count, chunker)
-        \\values (?, ?, ?, ?)
-    , .{destination_schema.prefix()});
-    defer insert_object.deinit();
-
-    while ((try objects.step()) == .row) {
-        const raw_id = objects.columnBlob(0);
-        if (raw_id.len != @sizeOf(ObjectId)) return error.ObjectCorrupt;
-
-        var id: ObjectId = undefined;
-        @memcpy(id[0..], raw_id);
-
-        var object = try source_objects.getObject(std.heap.c_allocator, id);
-        object.deinit(std.heap.c_allocator);
-
-        var manifest = try source_objects.objectManifest(std.heap.c_allocator, id);
-        manifest.deinit(std.heap.c_allocator);
-
-        try insert_object.bindBlob(1, raw_id);
-        try insert_object.bindInt64(2, objects.columnInt64(1));
-        try insert_object.bindInt64(3, objects.columnInt64(2));
-        try insert_object.bindText(4, objects.columnText(3));
-        std.debug.assert((try insert_object.step()) == .done);
-        try insert_object.reset();
-        try insert_object.clearBindings();
-    }
-
-    var manifest_rows = try prepareObjectSchemaSql(source, source_schema,
-        \\select object_id, chunk_index, chunk_hash, offset, size_bytes
-        \\from {s}_zova_object_chunks
-        \\order by hex(object_id), chunk_index
-    , .{source_schema.prefix()});
-    defer manifest_rows.deinit();
-
-    var insert_manifest = try prepareObjectSchemaSql(destination, destination_schema,
-        \\insert into {s}_zova_object_chunks (object_id, chunk_index, chunk_hash, offset, size_bytes)
-        \\values (?, ?, ?, ?, ?)
-    , .{destination_schema.prefix()});
-    defer insert_manifest.deinit();
-
-    while ((try manifest_rows.step()) == .row) {
-        try insert_manifest.bindBlob(1, manifest_rows.columnBlob(0));
-        try insert_manifest.bindInt64(2, manifest_rows.columnInt64(1));
-        try insert_manifest.bindBlob(3, manifest_rows.columnBlob(2));
-        try insert_manifest.bindInt64(4, manifest_rows.columnInt64(3));
-        try insert_manifest.bindInt64(5, manifest_rows.columnInt64(4));
-        std.debug.assert((try insert_manifest.step()) == .done);
-        try insert_manifest.reset();
-        try insert_manifest.clearBindings();
-    }
-}
-
-fn copyVectorStorage(
-    source: *sqlite.Database,
-    source_schema: vector_impl.StorageSchema,
-    destination: *sqlite.Database,
-    destination_schema: vector_impl.StorageSchema,
-) Error!void {
-    var source_vectors = vector_impl.Database{
-        .sqlite_db = source,
-        .storage_schema = source_schema,
-    };
-    var destination_vectors = vector_impl.Database{
-        .sqlite_db = destination,
-        .storage_schema = destination_schema,
-    };
-
-    var collections = try source_vectors.listVectorCollections(std.heap.c_allocator);
-    defer collections.deinit(std.heap.c_allocator);
-
-    for (collections.items) |collection| {
-        const destination_has_collection = try destination_vectors.hasVectorCollection(collection.name);
-        if (destination_has_collection) {
-            var destination_info = try destination_vectors.vectorCollectionInfo(std.heap.c_allocator, collection.name);
-            defer destination_info.deinit(std.heap.c_allocator);
-            if (destination_info.dimensions != collection.dimensions or
-                destination_info.metric != collection.metric or
-                destination_info.element_type != collection.element_type)
-            {
-                return error.VectorCollectionExists;
-            }
-        } else {
-            try destination_vectors.createVectorCollection(collection.name, .{
-                .dimensions = collection.dimensions,
-                .metric = collection.metric,
-                .element_type = collection.element_type,
-            });
-        }
-
-        var rows = try prepareSchemaSql(source,
-            \\select v.vector_id
-            \\from {s}_zova_vectors v
-            \\join {s}_zova_vector_collections c on c.collection_key = v.collection_key
-            \\where c.name = ?
-            \\order by v.vector_id
-        , .{ source_schema.prefix(), source_schema.prefix() });
-        defer rows.deinit();
-
-        try rows.bindText(1, collection.name);
-        while ((try rows.step()) == .row) {
-            const vector_id = try std.heap.c_allocator.dupe(u8, rows.columnText(0));
-            defer std.heap.c_allocator.free(vector_id);
-
-            var vector = try source_vectors.getVector(std.heap.c_allocator, collection.name, vector_id);
-            defer vector.deinit(std.heap.c_allocator);
-
-            try destination_vectors.putVector(collection.name, vector.id, vector.values.asConst());
-        }
-    }
-}
-
-fn copyGraphStorage(
-    source: *sqlite.Database,
-    source_schema: graph_impl.StorageSchema,
-    destination: *sqlite.Database,
-    destination_schema: graph_impl.StorageSchema,
-) Error!void {
-    var destination_graphs = graph_impl.Database{
-        .sqlite_db = destination,
-        .storage_schema = destination_schema,
-    };
-
-    var graphs = try prepareSchemaSql(source,
-        \\select name, created_order
-        \\from {s}_zova_graphs
-        \\order by created_order, name
-    , .{source_schema.prefix()});
-    defer graphs.deinit();
-    var insert_graph = try prepareSchemaSql(
-        destination,
-        "insert into {s}_zova_graphs (name, created_order) values (?, ?)",
-        .{destination_schema.prefix()},
-    );
-    defer insert_graph.deinit();
-    while ((try graphs.step()) == .row) {
-        try insert_graph.bindText(1, graphs.columnText(0));
-        try insert_graph.bindInt64(2, graphs.columnInt64(1));
-        std.debug.assert((try insert_graph.step()) == .done);
-        try insert_graph.reset();
-        try insert_graph.clearBindings();
-
-        var info = try destination_graphs.graphInfo(std.heap.c_allocator, graphs.columnText(0));
-        const info_matches = std.mem.eql(u8, info.name, graphs.columnText(0));
-        info.deinit(std.heap.c_allocator);
-        if (!info_matches) return error.GraphInvalid;
-    }
-
-    var nodes = try prepareSchemaSql(source,
-        \\select g.name, n.node_id, n.kind, n.target_type, n.target_namespace, n.target_ref, n.created_order
-        \\from {s}_zova_graph_nodes n
-        \\join {s}_zova_graphs g on g.graph_key = n.graph_key
-        \\order by g.name, n.created_order, n.node_id
-    , .{ source_schema.prefix(), source_schema.prefix() });
-    defer nodes.deinit();
-    var insert_node = try prepareSchemaSql(destination,
-        \\insert into {s}_zova_graph_nodes
-        \\  (graph_key, node_id, kind, target_type, target_namespace, target_ref, created_order)
-        \\values ((select graph_key from {s}_zova_graphs where name = ?), ?, ?, ?, ?, ?, ?)
-    , .{ destination_schema.prefix(), destination_schema.prefix() });
-    defer insert_node.deinit();
-    while ((try nodes.step()) == .row) {
-        try insert_node.bindText(1, nodes.columnText(0));
-        try insert_node.bindText(2, nodes.columnText(1));
-        try insert_node.bindText(3, nodes.columnText(2));
-        try insert_node.bindText(4, nodes.columnText(3));
-        if (nodes.columnType(4) == .null) try insert_node.bindNull(5) else try insert_node.bindText(5, nodes.columnText(4));
-        if (nodes.columnType(5) == .null) try insert_node.bindNull(6) else try insert_node.bindText(6, nodes.columnText(5));
-        try insert_node.bindInt64(7, nodes.columnInt64(6));
-        std.debug.assert((try insert_node.step()) == .done);
-        try insert_node.reset();
-        try insert_node.clearBindings();
-
-        var node = try destination_graphs.getGraphNode(std.heap.c_allocator, nodes.columnText(0), nodes.columnText(1));
-        const node_matches = std.mem.eql(u8, node.graph_name, nodes.columnText(0)) and
-            std.mem.eql(u8, node.node_id, nodes.columnText(1)) and
-            std.mem.eql(u8, node.kind, nodes.columnText(2)) and
-            std.mem.eql(u8, @tagName(node.target_type), nodes.columnText(3)) and
-            optionalTextMatchesColumn(node.target_namespace, &nodes, 4) and
-            optionalTextMatchesColumn(node.target_ref, &nodes, 5);
-        node.deinit(std.heap.c_allocator);
-        if (!node_matches) return error.GraphInvalid;
-    }
-
-    var edges = try prepareSchemaSql(source,
-        \\select g.name, from_node.node_id, et.name, to_node.node_id, e.created_order, e.payload
-        \\from {s}_zova_graph_edges e
-        \\join {s}_zova_graphs g on g.graph_key = e.graph_key
-        \\join {s}_zova_graph_edge_types et on et.graph_key=e.graph_key and et.edge_type_key=e.edge_type_key
-        \\join {s}_zova_graph_nodes from_node on from_node.graph_key = e.graph_key and from_node.node_key = e.from_node_key
-        \\join {s}_zova_graph_nodes to_node on to_node.graph_key = e.graph_key and to_node.node_key = e.to_node_key
-        \\order by g.name, e.created_order, from_node.node_id, et.name, to_node.node_id
-    , .{ source_schema.prefix(), source_schema.prefix(), source_schema.prefix(), source_schema.prefix(), source_schema.prefix() });
-    defer edges.deinit();
-    var insert_edge = try prepareSchemaSql(destination,
-        \\insert into {s}_zova_graph_edges
-        \\  (graph_key, from_node_key, edge_type_key, to_node_key, created_order, payload)
-        \\select g.graph_key, from_node.node_key,
-        \\  (select edge_type_key from {s}_zova_graph_edge_types where graph_key=g.graph_key and name=?),
-        \\  to_node.node_key, ?, ?
-        \\from {s}_zova_graphs g
-        \\join {s}_zova_graph_nodes from_node on from_node.graph_key = g.graph_key and from_node.node_id = ?
-        \\join {s}_zova_graph_nodes to_node on to_node.graph_key = g.graph_key and to_node.node_id = ?
-        \\where g.name = ?
-    , .{ destination_schema.prefix(), destination_schema.prefix(), destination_schema.prefix(), destination_schema.prefix(), destination_schema.prefix() });
-    defer insert_edge.deinit();
-    var insert_type = try prepareSchemaSql(
-        destination,
-        "insert into {s}_zova_graph_edge_types(graph_key,name) values((select graph_key from {s}_zova_graphs where name=?),?) on conflict(graph_key,name) do nothing",
-        .{ destination_schema.prefix(), destination_schema.prefix() },
-    );
-    defer insert_type.deinit();
-    while ((try edges.step()) == .row) {
-        try insert_type.bindText(1, edges.columnText(0));
-        try insert_type.bindText(2, edges.columnText(2));
-        std.debug.assert((try insert_type.step()) == .done);
-        try insert_type.reset();
-        try insert_type.clearBindings();
-
-        try insert_edge.bindText(1, edges.columnText(2));
-        try insert_edge.bindInt64(2, edges.columnInt64(4));
-        try insert_edge.bindBlobBorrowed(3, edges.columnBlob(5));
-        try insert_edge.bindText(4, edges.columnText(1));
-        try insert_edge.bindText(5, edges.columnText(3));
-        try insert_edge.bindText(6, edges.columnText(0));
-        std.debug.assert((try insert_edge.step()) == .done);
-        try insert_edge.reset();
-        try insert_edge.clearBindings();
-
-        var edge = try destination_graphs.getGraphEdge(std.heap.c_allocator, edges.columnText(0), edges.columnText(1), edges.columnText(2), edges.columnText(3));
-        const edge_matches = std.mem.eql(u8, edge.graph_name, edges.columnText(0)) and
-            std.mem.eql(u8, edge.from_node_id, edges.columnText(1)) and
-            std.mem.eql(u8, edge.edge_type, edges.columnText(2)) and
-            std.mem.eql(u8, edge.to_node_id, edges.columnText(3));
-        edge.deinit(std.heap.c_allocator);
-        if (!edge_matches) return error.GraphInvalid;
-    }
-
-    const source_counts = try graphStorageCounts(source, source_schema);
-    const destination_counts = try graphStorageCounts(destination, destination_schema);
-    if (source_counts.graphs != destination_counts.graphs or
-        source_counts.nodes != destination_counts.nodes or
-        source_counts.edges != destination_counts.edges)
-    {
-        return error.GraphInvalid;
-    }
-}
-
-fn optionalTextMatchesColumn(value: ?[]const u8, row: *sqlite.Statement, column: c_int) bool {
-    if (row.columnType(column) == .null) return value == null;
-    return if (value) |text| std.mem.eql(u8, text, row.columnText(column)) else false;
-}
-
-fn clearMainObjectStorage(db: *sqlite.Database) Error!void {
-    try db.exec(
-        \\delete from _zova_object_chunks;
-        \\delete from _zova_objects;
-        \\delete from _zova_chunks;
-    );
-}
-
-fn clearMainVectorStorage(db: *sqlite.Database) Error!void {
-    try db.exec(
-        \\delete from _zova_vectors;
-        \\delete from _zova_vector_collections;
-    );
-}
-
-fn clearMainGraphStorage(db: *sqlite.Database) Error!void {
-    try db.exec(
-        \\delete from _zova_graph_edges;
-        \\delete from _zova_graph_edge_types;
-        \\delete from _zova_graph_nodes;
-        \\delete from _zova_graphs;
-    );
-}
-
-fn mainObjectStorageHasRows(db: *sqlite.Database) Error!bool {
-    const counts = try objectStorageCounts(db, .main);
-    return counts.objects != 0 or counts.chunks != 0 or counts.manifest_rows != 0;
-}
-
-fn mainVectorStorageHasRows(db: *sqlite.Database) Error!bool {
-    const counts = try vectorStorageCounts(db, .main);
-    return counts.vector_collections != 0 or counts.vectors != 0;
-}
-
-fn mainGraphStorageHasRows(db: *sqlite.Database) Error!bool {
-    return try countStorageRows(db, "select count(*) from {s}_zova_graphs", .{""}) != 0 or
-        try countStorageRows(db, "select count(*) from {s}_zova_graph_nodes", .{""}) != 0 or
-        try countStorageRows(db, "select count(*) from {s}_zova_graph_edge_types", .{""}) != 0 or
-        try countStorageRows(db, "select count(*) from {s}_zova_graph_edges", .{""}) != 0;
-}
-
-fn objectStorageCounts(db: *sqlite.Database, storage_schema: object_impl.StorageSchema) Error!SplitObjectStoreCounts {
-    return .{
-        .objects = try countStorageRows(db, "select count(*) from {s}_zova_objects", .{storage_schema.prefix()}),
-        .chunks = try countStorageRows(db, "select count(*) from {s}_zova_chunks", .{storage_schema.prefix()}),
-        .manifest_rows = try countStorageRows(db, "select count(*) from {s}_zova_object_chunks", .{storage_schema.prefix()}),
-    };
-}
-
-fn vectorStorageCounts(db: *sqlite.Database, storage_schema: vector_impl.StorageSchema) Error!SplitVectorStoreCounts {
-    return .{
-        .vector_collections = try countStorageRows(db, "select count(*) from {s}_zova_vector_collections", .{storage_schema.prefix()}),
-        .vectors = try countStorageRows(db, "select count(*) from {s}_zova_vectors", .{storage_schema.prefix()}),
-    };
-}
-
-fn graphStorageCounts(db: *sqlite.Database, storage_schema: graph_impl.StorageSchema) Error!SplitGraphStoreCounts {
-    return .{
-        .graphs = try countStorageRows(db, "select count(*) from {s}_zova_graphs", .{storage_schema.prefix()}),
-        .nodes = try countStorageRows(db, "select count(*) from {s}_zova_graph_nodes", .{storage_schema.prefix()}),
-        .edges = try countStorageRows(db, "select count(*) from {s}_zova_graph_edges", .{storage_schema.prefix()}),
-    };
-}
-
-fn countStorageRows(db: *sqlite.Database, comptime sql_format: []const u8, args: anytype) Error!u64 {
-    var stmt = try prepareSchemaSql(db, sql_format, args);
-    defer stmt.deinit();
-    std.debug.assert((try stmt.step()) == .row);
-    return try sqliteI64ToU64(stmt.columnInt64(0));
-}
-
-fn prepareObjectSchemaSql(
-    db: *sqlite.Database,
-    storage_schema: object_impl.StorageSchema,
-    comptime sql_format: []const u8,
-    args: anytype,
-) Error!sqlite.Statement {
-    _ = storage_schema;
-    return try prepareSchemaSql(db, sql_format, args);
-}
-
-fn deleteBoundObjectStoreRows(db: *sqlite.Database) Error!void {
-    if (!try tableExists(db, bound_stores_table)) return;
-
-    var stmt = try db.prepare(
-        \\delete from _zova_bound_stores
-        \\where role = 'object_store' and name = 'default'
-    );
-    defer stmt.deinit();
-    std.debug.assert((try stmt.step()) == .done);
-}
-
-fn deleteBoundVectorStoreRows(db: *sqlite.Database) Error!void {
-    if (!try tableExists(db, bound_stores_table)) return;
-
-    var stmt = try db.prepare(
-        \\delete from _zova_bound_stores
-        \\where role = 'vector_store' and name = 'default'
-    );
-    defer stmt.deinit();
-    std.debug.assert((try stmt.step()) == .done);
-}
-
-fn deleteBoundGraphStoreRows(db: *sqlite.Database) Error!void {
-    if (!try tableExists(db, bound_stores_table)) return;
-
-    var stmt = try db.prepare(
-        \\delete from _zova_bound_stores
-        \\where role = 'graph_store' and name = 'default'
-    );
-    defer stmt.deinit();
-    std.debug.assert((try stmt.step()) == .done);
-}
-
-fn validateObjectStoreDatabaseExpected(db: *sqlite.Database, expected_format: []const u8) Error!void {
-    try expectMetadataValue(db, "magic", magic_value, .magic);
-    try expectMetadataValue(db, "format_version", expected_format, .format_version);
-    try expectMetadataValue(db, "store_role", bound_object_store_role, .magic);
-    const store_id = try objectStoreIdAlloc(std.heap.c_allocator, db);
-    defer std.heap.c_allocator.free(store_id);
-    try validateExtensionSchema(db);
-    try validateObjectSchemaExpected(db, expected_format);
-}
-
-fn validateObjectStoreDatabase(db: *sqlite.Database) Error!void {
-    try validateObjectStoreDatabaseExpected(db, format_version);
-}
-
-fn validateAttachedObjectStoreAlloc(
-    allocator: std.mem.Allocator,
-    db: *sqlite.Database,
-    comptime schema_name: []const u8,
-) Error![]u8 {
-    try expectAttachedMetadataValue(db, schema_name, "magic", magic_value, .magic);
-    try expectAttachedMetadataValue(db, schema_name, "format_version", format_version, .format_version);
-    try expectAttachedMetadataValue(db, schema_name, "store_role", bound_object_store_role, .magic);
-    const store_id = try attachedObjectStoreIdAlloc(allocator, db, schema_name);
-    errdefer allocator.free(store_id);
-    try validateAttachedExtensionSchema(db, schema_name);
-    try validateAttachedObjectSchema(db, schema_name);
-    return store_id;
-}
-
-fn validateVectorStoreDatabaseExpected(db: *sqlite.Database, expected_format: []const u8) Error!void {
-    try expectMetadataValue(db, "magic", magic_value, .magic);
-    try expectMetadataValue(db, "format_version", expected_format, .format_version);
-    try expectMetadataValue(db, "store_role", bound_vector_store_role, .magic);
-    const store_id = try objectStoreIdAlloc(std.heap.c_allocator, db);
-    defer std.heap.c_allocator.free(store_id);
-    try validateExtensionSchema(db);
-    try validateVectorSchema(db);
-}
-
-fn validateVectorStoreDatabase(db: *sqlite.Database) Error!void {
-    try validateVectorStoreDatabaseExpected(db, format_version);
-}
-
-fn validateAttachedVectorStoreAlloc(
-    allocator: std.mem.Allocator,
-    db: *sqlite.Database,
-    comptime schema_name: []const u8,
-) Error![]u8 {
-    try expectAttachedMetadataValue(db, schema_name, "magic", magic_value, .magic);
-    try expectAttachedMetadataValue(db, schema_name, "format_version", format_version, .format_version);
-    try expectAttachedMetadataValue(db, schema_name, "store_role", bound_vector_store_role, .magic);
-    const store_id = try attachedObjectStoreIdAlloc(allocator, db, schema_name);
-    errdefer allocator.free(store_id);
-    try validateAttachedExtensionSchema(db, schema_name);
-    try validateAttachedVectorSchema(db, schema_name);
-    return store_id;
-}
-
-fn validateGraphStoreDatabaseExpected(db: *sqlite.Database, expected_format: []const u8) Error!void {
-    try expectMetadataValue(db, "magic", magic_value, .magic);
-    try expectMetadataValue(db, "format_version", expected_format, .format_version);
-    try expectMetadataValue(db, "store_role", bound_graph_store_role, .magic);
-    const store_id = try objectStoreIdAlloc(std.heap.c_allocator, db);
-    defer std.heap.c_allocator.free(store_id);
-    try validateExtensionSchema(db);
-    try validateGraphSchema(db);
-}
-
-fn validateGraphStoreDatabase(db: *sqlite.Database) Error!void {
-    try validateGraphStoreDatabaseExpected(db, format_version);
-}
-
-fn validateAttachedGraphStoreAlloc(
-    allocator: std.mem.Allocator,
-    db: *sqlite.Database,
-    comptime schema_name: []const u8,
-) Error![]u8 {
-    try expectAttachedMetadataValue(db, schema_name, "magic", magic_value, .magic);
-    try expectAttachedMetadataValue(db, schema_name, "format_version", format_version, .format_version);
-    try expectAttachedMetadataValue(db, schema_name, "store_role", bound_graph_store_role, .magic);
-    const store_id = try attachedObjectStoreIdAlloc(allocator, db, schema_name);
-    errdefer allocator.free(store_id);
-    try validateAttachedExtensionSchema(db, schema_name);
-    try validateAttachedGraphSchema(db, schema_name);
-    return store_id;
-}
-
-fn validateAttachedObjectSchema(db: *sqlite.Database, comptime schema_name: []const u8) Error!void {
-    const object_columns = [_][]const u8{
-        "object_id",
-        "size_bytes",
-        "chunk_count",
-        "chunker",
-    };
-    try validateAttachedRequiredTable(db, schema_name, object_impl.objects_table, &object_columns, object_impl.objects_schema_sql);
-
-    const chunk_columns = [_][]const u8{
-        "chunk_hash",
-        "size_bytes",
-        "data",
-    };
-    try validateAttachedRequiredTable(db, schema_name, object_impl.chunks_table, &chunk_columns, object_impl.chunks_schema_sql);
-
-    const object_chunk_columns = [_][]const u8{
-        "object_id",
-        "chunk_index",
-        "chunk_hash",
-        "offset",
-        "size_bytes",
-    };
-    try validateAttachedRequiredTable(db, schema_name, object_impl.object_chunks_table, &object_chunk_columns, object_impl.object_chunks_schema_sql);
-}
-
-fn validateAttachedVectorSchema(db: *sqlite.Database, comptime schema_name: []const u8) Error!void {
-    if (try attachedTableExists(db, schema_name, "_zova_vector_norms")) return error.NotZovaDatabase;
-    const vector_collection_columns = [_][]const u8{
-        "collection_key",
-        "name",
-        "dimensions",
-        "metric",
-        "element_type",
-    };
-    try validateAttachedRequiredTable(db, schema_name, vector_impl.vector_collections_table, &vector_collection_columns, vector_impl.collections_schema_sql);
-
-    const vector_columns = [_][]const u8{
-        "vector_key",
-        "collection_key",
-        "vector_id",
-        "values",
-        "norm_squared",
-    };
-    try validateAttachedRequiredTable(db, schema_name, vector_impl.vectors_table, &vector_columns, vector_impl.vectors_schema_sql);
-}
-
-fn validateAttachedGraphSchema(db: *sqlite.Database, comptime schema_name: []const u8) Error!void {
-    const graph_columns = [_][]const u8{ "graph_key", "name", "created_order" };
-    try validateAttachedRequiredTable(db, schema_name, graph_impl.graphs_table, &graph_columns, graph_impl.graphs_schema_sql);
-
-    const node_columns = [_][]const u8{ "node_key", "graph_key", "node_id", "kind", "target_type", "target_namespace", "target_ref", "created_order" };
-    try validateAttachedRequiredTable(db, schema_name, graph_impl.graph_nodes_table, &node_columns, graph_impl.graph_nodes_schema_sql);
-
-    const edge_type_columns = [_][]const u8{ "edge_type_key", "graph_key", "name" };
-    try validateAttachedRequiredTable(db, schema_name, graph_impl.graph_edge_types_table, &edge_type_columns, graph_impl.graph_edge_types_schema_sql);
-
-    const edge_columns = [_][]const u8{ "edge_key", "graph_key", "from_node_key", "edge_type_key", "to_node_key", "created_order", "payload" };
-    try validateAttachedRequiredTable(db, schema_name, graph_impl.graph_edges_table, &edge_columns, graph_impl.graph_edges_schema_sql);
-}
-
-fn validateAttachedExtensionSchema(db: *sqlite.Database, comptime schema_name: []const u8) Error!void {
-    const extension_columns = [_][]const u8{
-        "name",
-        "version",
-        "storage_prefix",
-        "zova_abi_min",
-        "capabilities",
-        "required",
-        "installed_at_unix",
-        "manifest_json",
-    };
-    try validateAttachedRequiredTable(db, schema_name, extension_impl.extensions_table, &extension_columns, extension_impl.extensions_schema_sql);
-}
-
-fn validateAttachedRequiredTable(
-    db: *sqlite.Database,
-    comptime schema_name: []const u8,
-    table_name: []const u8,
-    required_columns: []const []const u8,
-    expected_sql: []const u8,
-) Error!void {
-    if (!try attachedTableExists(db, schema_name, table_name)) return error.NotZovaDatabase;
-
-    for (required_columns) |column_name| {
-        if (!try attachedTableColumnExists(db, schema_name, table_name, column_name)) return error.NotZovaDatabase;
-    }
-
-    var table_sql = try prepareSchemaSql(db,
-        \\select sql
-        \\from {s}.sqlite_master
-        \\where type = 'table' and name = ?
-    , .{schema_name});
-    defer table_sql.deinit();
-
-    try table_sql.bindText(1, table_name);
-
-    switch (try table_sql.step()) {
-        .done => return error.NotZovaDatabase,
-        .row => {
-            const sql_text = table_sql.columnText(0);
-            if (!schemaSqlEqual(sql_text, expected_sql)) return error.NotZovaDatabase;
-        },
-    }
-}
-
-fn attachedTableExists(db: *sqlite.Database, comptime schema_name: []const u8, table_name: []const u8) Error!bool {
-    var stmt = try prepareSchemaSql(db,
-        \\select count(*)
-        \\from {s}.sqlite_master
-        \\where type = 'table' and name = ?
-    , .{schema_name});
-    defer stmt.deinit();
-
-    try stmt.bindText(1, table_name);
-    const step = try stmt.step();
-    std.debug.assert(step == .row);
-    return stmt.columnInt64(0) == 1;
-}
-
-fn attachedTableColumnExists(
-    db: *sqlite.Database,
-    comptime schema_name: []const u8,
-    table_name: []const u8,
-    column_name: []const u8,
-) Error!bool {
-    var stmt = try prepareSchemaSql(db,
-        \\select count(*)
-        \\from {s}.pragma_table_info(?)
-        \\where name = ?
-    , .{schema_name});
-    defer stmt.deinit();
-
-    try stmt.bindText(1, table_name);
-    try stmt.bindText(2, column_name);
-    const step = try stmt.step();
-    std.debug.assert(step == .row);
-    return stmt.columnInt64(0) == 1;
-}
-
-fn attachedObjectStoreIdAlloc(
-    allocator: std.mem.Allocator,
-    db: *sqlite.Database,
-    comptime schema_name: []const u8,
-) Error![]u8 {
-    const store_id = (try attachedMetadataValueAlloc(allocator, db, schema_name, "store_id")) orelse return error.BoundStoreInvalid;
-    errdefer allocator.free(store_id);
-    if (!isValidStoreId(store_id)) return error.BoundStoreInvalid;
-    return store_id;
-}
-
-fn expectAttachedMetadataValue(
-    db: *sqlite.Database,
-    comptime schema_name: []const u8,
-    key: [:0]const u8,
-    expected: []const u8,
-    metadata_key: MetadataKey,
-) Error!void {
-    const actual_value = attachedMetadataValueAlloc(std.heap.c_allocator, db, schema_name, key) catch |err| switch (err) {
-        error.SqliteError => return error.NotZovaDatabase,
-        else => return err,
-    };
-    const actual = actual_value orelse return error.NotZovaDatabase;
-    defer std.heap.c_allocator.free(actual);
-
-    if (std.mem.eql(u8, actual, expected)) return;
-    return switch (metadata_key) {
-        .magic => error.NotZovaDatabase,
-        .format_version => error.UnsupportedZovaVersion,
-    };
-}
-
-fn attachedMetadataValueAlloc(
-    allocator: std.mem.Allocator,
-    db: *sqlite.Database,
-    comptime schema_name: []const u8,
-    key: []const u8,
-) Error!?[]u8 {
-    var stmt = try prepareSchemaSql(db, "select value from {s}._zova_meta where key = ?", .{schema_name});
-    defer stmt.deinit();
-
-    try stmt.bindText(1, key);
-    return switch (try stmt.step()) {
-        .done => null,
-        .row => try allocator.dupe(u8, stmt.columnText(0)),
-    };
-}
-
-fn attachedMetadataU64(
-    db: *sqlite.Database,
-    comptime schema_name: []const u8,
-    key: []const u8,
-) Error!u64 {
-    var stmt = try prepareSchemaSql(db, "select value from {s}._zova_meta where key = ?", .{schema_name});
-    defer stmt.deinit();
-
-    try stmt.bindText(1, key);
-    return switch (try stmt.step()) {
-        .done => error.BoundStoreInvalid,
-        .row => std.fmt.parseInt(u64, stmt.columnText(0), 10) catch error.BoundStoreInvalid,
-    };
-}
-
-fn setMetadataValue(db: *sqlite.Database, key: []const u8, value: []const u8) Error!void {
-    var stmt = try db.prepare(
-        \\insert into _zova_meta (key, value) values (?, ?)
-        \\on conflict(key) do update set value = excluded.value
-    );
-    defer stmt.deinit();
-
-    try stmt.bindText(1, key);
-    try stmt.bindText(2, value);
-    std.debug.assert((try stmt.step()) == .done);
-}
-
-fn setAttachedMetadataValue(
-    db: *sqlite.Database,
-    comptime schema_name: []const u8,
-    key: []const u8,
-    value: []const u8,
-) Error!void {
-    var stmt = try prepareSchemaSql(db,
-        \\insert into {s}._zova_meta (key, value) values (?, ?)
-        \\on conflict(key) do update set value = excluded.value
-    , .{schema_name});
-    defer stmt.deinit();
-
-    try stmt.bindText(1, key);
-    try stmt.bindText(2, value);
-    std.debug.assert((try stmt.step()) == .done);
-}
-
-fn hasBoundObjectStoreRow(db: *sqlite.Database) Error!bool {
-    if (!try tableExists(db, bound_stores_table)) return false;
-
-    var stmt = try db.prepare(
-        \\select 1
-        \\from _zova_bound_stores
-        \\where role = 'object_store' and name = 'default'
-        \\limit 1
-    );
-    defer stmt.deinit();
-
-    return switch (try stmt.step()) {
-        .row => true,
-        .done => false,
-    };
-}
-
-fn hasBoundVectorStoreRow(db: *sqlite.Database) Error!bool {
-    if (!try tableExists(db, bound_stores_table)) return false;
-
-    var stmt = try db.prepare(
-        \\select 1
-        \\from _zova_bound_stores
-        \\where role = 'vector_store' and name = 'default'
-        \\limit 1
-    );
-    defer stmt.deinit();
-
-    return switch (try stmt.step()) {
-        .row => true,
-        .done => false,
-    };
-}
-
-fn hasBoundGraphStoreRow(db: *sqlite.Database) Error!bool {
-    if (!try tableExists(db, bound_stores_table)) return false;
-
-    var stmt = try db.prepare(
-        \\select 1
-        \\from _zova_bound_stores
-        \\where role = 'graph_store' and name = 'default'
-        \\limit 1
-    );
-    defer stmt.deinit();
-
-    return switch (try stmt.step()) {
-        .row => true,
-        .done => false,
-    };
-}
-
-fn loadBoundObjectStoreInfo(allocator: std.mem.Allocator, db: *sqlite.Database) Error!?BoundObjectStoreInfo {
-    if (!try tableExists(db, bound_stores_table)) return null;
-
-    var stmt = try db.prepare(
-        \\select path, store_id, bound_set_id, object_epoch
-        \\from _zova_bound_stores
-        \\where role = 'object_store' and name = 'default'
-    );
-    defer stmt.deinit();
-
-    switch (try stmt.step()) {
-        .done => return null,
-        .row => {
-            const path = try allocator.dupe(u8, stmt.columnText(0));
-            errdefer allocator.free(path);
-
-            const store_id = try allocator.dupe(u8, stmt.columnText(1));
-            errdefer allocator.free(store_id);
-            if (!isValidStoreId(store_id)) return error.BoundStoreInvalid;
-
-            const bound_set_id = try allocator.dupe(u8, stmt.columnText(2));
-            errdefer allocator.free(bound_set_id);
-            if (!isValidStoreId(bound_set_id)) return error.BoundStoreInvalid;
-
-            const object_epoch = try sqliteI64ToU64(stmt.columnInt64(3));
-
-            switch (try stmt.step()) {
-                .done => {},
-                .row => return error.BoundStoreInvalid,
-            }
-
-            return .{ .path = path, .store_id = store_id, .bound_set_id = bound_set_id, .object_epoch = object_epoch };
-        },
-    }
-}
-
-fn loadBoundVectorStoreInfo(allocator: std.mem.Allocator, db: *sqlite.Database) Error!?BoundVectorStoreInfo {
-    if (!try tableExists(db, bound_stores_table)) return null;
-
-    var stmt = try db.prepare(
-        \\select path, store_id, bound_set_id, vector_epoch
-        \\from _zova_bound_stores
-        \\where role = 'vector_store' and name = 'default'
-    );
-    defer stmt.deinit();
-
-    switch (try stmt.step()) {
-        .done => return null,
-        .row => {
-            const path = try allocator.dupe(u8, stmt.columnText(0));
-            errdefer allocator.free(path);
-
-            const store_id = try allocator.dupe(u8, stmt.columnText(1));
-            errdefer allocator.free(store_id);
-            if (!isValidStoreId(store_id)) return error.BoundStoreInvalid;
-
-            const bound_set_id = try allocator.dupe(u8, stmt.columnText(2));
-            errdefer allocator.free(bound_set_id);
-            if (!isValidStoreId(bound_set_id)) return error.BoundStoreInvalid;
-
-            const vector_epoch = try sqliteI64ToU64(stmt.columnInt64(3));
-
-            switch (try stmt.step()) {
-                .done => {},
-                .row => return error.BoundStoreInvalid,
-            }
-
-            return .{ .path = path, .store_id = store_id, .bound_set_id = bound_set_id, .vector_epoch = vector_epoch };
-        },
-    }
-}
-
-fn loadBoundGraphStoreInfo(allocator: std.mem.Allocator, db: *sqlite.Database) Error!?BoundGraphStoreInfo {
-    if (!try tableExists(db, bound_stores_table)) return null;
-
-    var stmt = try db.prepare(
-        \\select path, store_id, bound_set_id, graph_epoch
-        \\from _zova_bound_stores
-        \\where role = 'graph_store' and name = 'default'
-    );
-    defer stmt.deinit();
-
-    switch (try stmt.step()) {
-        .done => return null,
-        .row => {
-            const path = try allocator.dupe(u8, stmt.columnText(0));
-            errdefer allocator.free(path);
-
-            const store_id = try allocator.dupe(u8, stmt.columnText(1));
-            errdefer allocator.free(store_id);
-            if (!isValidStoreId(store_id)) return error.BoundStoreInvalid;
-
-            const bound_set_id = try allocator.dupe(u8, stmt.columnText(2));
-            errdefer allocator.free(bound_set_id);
-            if (!isValidStoreId(bound_set_id)) return error.BoundStoreInvalid;
-
-            const graph_epoch = try sqliteI64ToU64(stmt.columnInt64(3));
-            switch (try stmt.step()) {
-                .done => {},
-                .row => return error.BoundStoreInvalid,
-            }
-            return .{ .path = path, .store_id = store_id, .bound_set_id = bound_set_id, .graph_epoch = graph_epoch };
-        },
-    }
-}
-
-fn insertBoundObjectStoreRow(db: *sqlite.Database, path: []const u8, store_id: []const u8, bound_set_id: []const u8) Error!void {
-    var stmt = try db.prepare(
-        \\insert into _zova_bound_stores (role, name, path, store_id, bound_set_id, object_epoch, vector_epoch, graph_epoch, created_at_unix)
-        \\values ('object_store', 'default', ?, ?, ?, 0, null, null, unixepoch())
-    );
-    defer stmt.deinit();
-
-    try stmt.bindText(1, path);
-    try stmt.bindText(2, store_id);
-    try stmt.bindText(3, bound_set_id);
-    std.debug.assert((try stmt.step()) == .done);
-}
-
-fn updateBoundObjectStoreRow(db: *sqlite.Database, path: []const u8, store_id: []const u8, bound_set_id: []const u8) Error!void {
-    var stmt = try db.prepare(
-        \\update _zova_bound_stores
-        \\set path = ?, store_id = ?, bound_set_id = ?, object_epoch = 0, vector_epoch = null, graph_epoch = null
-        \\where role = 'object_store' and name = 'default'
-    );
-    defer stmt.deinit();
-
-    try stmt.bindText(1, path);
-    try stmt.bindText(2, store_id);
-    try stmt.bindText(3, bound_set_id);
-    std.debug.assert((try stmt.step()) == .done);
-}
-
-fn insertBoundVectorStoreRow(db: *sqlite.Database, path: []const u8, store_id: []const u8, bound_set_id: []const u8) Error!void {
-    var stmt = try db.prepare(
-        \\insert into _zova_bound_stores (role, name, path, store_id, bound_set_id, object_epoch, vector_epoch, graph_epoch, created_at_unix)
-        \\values ('vector_store', 'default', ?, ?, ?, null, 0, null, unixepoch())
-    );
-    defer stmt.deinit();
-
-    try stmt.bindText(1, path);
-    try stmt.bindText(2, store_id);
-    try stmt.bindText(3, bound_set_id);
-    std.debug.assert((try stmt.step()) == .done);
-}
-
-fn updateBoundVectorStoreRow(db: *sqlite.Database, path: []const u8, store_id: []const u8, bound_set_id: []const u8) Error!void {
-    var stmt = try db.prepare(
-        \\update _zova_bound_stores
-        \\set path = ?, store_id = ?, bound_set_id = ?, object_epoch = null, vector_epoch = 0, graph_epoch = null
-        \\where role = 'vector_store' and name = 'default'
-    );
-    defer stmt.deinit();
-
-    try stmt.bindText(1, path);
-    try stmt.bindText(2, store_id);
-    try stmt.bindText(3, bound_set_id);
-    std.debug.assert((try stmt.step()) == .done);
-}
-
-fn insertBoundGraphStoreRow(db: *sqlite.Database, path: []const u8, store_id: []const u8, bound_set_id: []const u8) Error!void {
-    var stmt = try db.prepare(
-        \\insert into _zova_bound_stores (role, name, path, store_id, bound_set_id, object_epoch, vector_epoch, graph_epoch, created_at_unix)
-        \\values ('graph_store', 'default', ?, ?, ?, null, null, 0, unixepoch())
-    );
-    defer stmt.deinit();
-    try stmt.bindText(1, path);
-    try stmt.bindText(2, store_id);
-    try stmt.bindText(3, bound_set_id);
-    try expectDone(&stmt);
-}
-
-fn updateBoundGraphStoreRow(db: *sqlite.Database, path: []const u8, store_id: []const u8, bound_set_id: []const u8) Error!void {
-    var stmt = try db.prepare(
-        \\update _zova_bound_stores
-        \\set path = ?, store_id = ?, bound_set_id = ?, object_epoch = null, vector_epoch = null, graph_epoch = 0
-        \\where role = 'graph_store' and name = 'default'
-    );
-    defer stmt.deinit();
-    try stmt.bindText(1, path);
-    try stmt.bindText(2, store_id);
-    try stmt.bindText(3, bound_set_id);
-    try expectDone(&stmt);
-}
-
-fn incrementBoundObjectEpoch(db: *sqlite.Database) Error!void {
-    var update_main = try db.prepare(
-        \\update _zova_bound_stores
-        \\set object_epoch = object_epoch + 1
-        \\where role = 'object_store' and name = 'default'
-    );
-    defer update_main.deinit();
-    std.debug.assert((try update_main.step()) == .done);
-
-    var read_epoch = try db.prepare(
-        \\select object_epoch
-        \\from _zova_bound_stores
-        \\where role = 'object_store' and name = 'default'
-    );
-    defer read_epoch.deinit();
-    const epoch = switch (try read_epoch.step()) {
-        .done => return error.BoundStoreInvalid,
-        .row => read_epoch.columnInt64(0),
-    };
-    if (epoch < 0) return error.BoundStoreInvalid;
-
-    var epoch_buffer: [32]u8 = undefined;
-    const epoch_text = std.fmt.bufPrint(&epoch_buffer, "{d}", .{epoch}) catch return error.BoundStoreInvalid;
-    try setAttachedMetadataValue(db, bound_object_store_schema_name, "object_epoch", epoch_text);
-}
-
-fn incrementBoundVectorEpoch(db: *sqlite.Database) Error!void {
-    var update_main = try db.prepare(
-        \\update _zova_bound_stores
-        \\set vector_epoch = vector_epoch + 1
-        \\where role = 'vector_store' and name = 'default'
-    );
-    defer update_main.deinit();
-    std.debug.assert((try update_main.step()) == .done);
-
-    var read_epoch = try db.prepare(
-        \\select vector_epoch
-        \\from _zova_bound_stores
-        \\where role = 'vector_store' and name = 'default'
-    );
-    defer read_epoch.deinit();
-    const epoch = switch (try read_epoch.step()) {
-        .done => return error.BoundStoreInvalid,
-        .row => read_epoch.columnInt64(0),
-    };
-    if (epoch < 0) return error.BoundStoreInvalid;
-
-    var epoch_buffer: [32]u8 = undefined;
-    const epoch_text = std.fmt.bufPrint(&epoch_buffer, "{d}", .{epoch}) catch return error.BoundStoreInvalid;
-    try setAttachedMetadataValue(db, bound_vector_store_schema_name, "vector_epoch", epoch_text);
-}
-
-fn incrementBoundGraphEpoch(db: *sqlite.Database) Error!void {
-    var update_main = try db.prepare(
-        \\update _zova_bound_stores set graph_epoch = graph_epoch + 1
-        \\where role = 'graph_store' and name = 'default'
-    );
-    defer update_main.deinit();
-    try expectDone(&update_main);
-
-    var read_epoch = try db.prepare(
-        \\select graph_epoch from _zova_bound_stores
-        \\where role = 'graph_store' and name = 'default'
-    );
-    defer read_epoch.deinit();
-    const epoch = switch (try read_epoch.step()) {
-        .done => return error.BoundStoreInvalid,
-        .row => read_epoch.columnInt64(0),
-    };
-    if (epoch < 0) return error.BoundStoreInvalid;
-    var buffer: [32]u8 = undefined;
-    const text = std.fmt.bufPrint(&buffer, "{d}", .{epoch}) catch return error.BoundStoreInvalid;
-    try setAttachedMetadataValue(db, bound_graph_store_schema_name, "graph_epoch", text);
-}
-
-fn objectStoreIdAlloc(allocator: std.mem.Allocator, db: *sqlite.Database) Error![]u8 {
-    const store_id = (try metadataValueAlloc(allocator, db, "store_id")) orelse return error.BoundStoreInvalid;
-    errdefer allocator.free(store_id);
-    if (!isValidStoreId(store_id)) return error.BoundStoreInvalid;
-    return store_id;
-}
-
-fn metadataValueAlloc(allocator: std.mem.Allocator, db: *sqlite.Database, key: []const u8) Error!?[]u8 {
-    var stmt = try db.prepare("select value from _zova_meta where key = ?");
-    defer stmt.deinit();
-
-    try stmt.bindText(1, key);
-    return switch (try stmt.step()) {
-        .done => null,
-        .row => try allocator.dupe(u8, stmt.columnText(0)),
-    };
-}
-
-fn isValidStoreId(value: []const u8) bool {
-    if (value.len != 64) return false;
-    for (value) |byte| {
-        _ = std.fmt.charToDigit(byte, 16) catch return false;
-    }
-    return true;
-}
-
-fn randomHex64(dest: *[64]u8) void {
-    var random_bytes: [32]u8 = undefined;
-    sqlite.c.sqlite3_randomness(random_bytes.len, &random_bytes);
-    lowerHexInto(dest, &random_bytes);
-}
-
-fn lowerHexInto(dest: *[64]u8, bytes: *const [32]u8) void {
-    const alphabet = "0123456789abcdef";
-    for (bytes.*, 0..) |byte, index| {
-        dest[index * 2] = alphabet[byte >> 4];
-        dest[index * 2 + 1] = alphabet[byte & 0x0f];
-    }
-}
-
-fn sqliteI64ToU64(value: i64) Error!u64 {
-    if (value < 0) return error.BoundStoreInvalid;
-    return @intCast(value);
-}
-
-fn copyStoreId(value: []const u8) Error![64]u8 {
-    if (!isValidStoreId(value)) return error.BoundStoreInvalid;
-    var result: [64]u8 = undefined;
-    @memcpy(result[0..], value);
-    return result;
-}
-
-fn hasActiveTransaction(db: *sqlite.Database) bool {
-    return sqlite.c.sqlite3_get_autocommit(db.handle) == 0 or
-        sqlite.c.sqlite3_txn_state(db.handle, null) != sqlite.c.SQLITE_TXN_NONE;
-}
-
-fn rejectReservedZovaNames(db: *sqlite.Database) Error!void {
-    var objects = try db.prepare("select name from sqlite_master where name is not null");
-    defer objects.deinit();
-
-    while ((try objects.step()) == .row) {
-        const name = objects.columnText(0);
-        if (isReservedZovaName(name)) return error.ZovaNameConflict;
-    }
-}
-
-fn isReservedZovaName(name: []const u8) bool {
-    const reserved_prefix = "_zova_";
-    return name.len >= reserved_prefix.len and
-        std.ascii.eqlIgnoreCase(name[0..reserved_prefix.len], reserved_prefix);
-}
-
-fn backupMainDatabase(source: *sqlite.Database, dest: *sqlite.Database) Error!void {
-    const backup = sqlite.c.sqlite3_backup_init(dest.handle, "main", source.handle, "main") orelse {
-        return mapSqliteResultCode(sqlite.c.sqlite3_errcode(dest.handle));
-    };
-
-    const step_rc = sqlite.c.sqlite3_backup_step(backup, -1);
-    const finish_rc = sqlite.c.sqlite3_backup_finish(backup);
-
-    if (step_rc != sqlite.c.SQLITE_DONE) return mapSqliteResultCode(step_rc);
-    if (finish_rc != sqlite.c.SQLITE_OK) return mapSqliteResultCode(finish_rc);
-}
-
-fn expectDone(stmt: *sqlite.Statement) Error!void {
-    switch (try stmt.step()) {
-        .done => {},
-        .row => return error.SqliteError,
-    }
-}
+const isZovaPath = @import("database/paths.zig").isZovaPath;
+
+const isMemoryPath = @import("database/paths.zig").isMemoryPath;
+
+const defaultIo = @import("database/paths.zig").defaultIo;
+
+const ensureDestinationZovaPathAvailable = @import("database/paths.zig").ensureDestinationZovaPathAvailable;
+
+const ensureParentPathExists = @import("database/paths.zig").ensureParentPathExists;
+
+const reserveDestinationZovaFile = @import("database/paths.zig").reserveDestinationZovaFile;
+
+const deleteDestinationFile = @import("database/paths.zig").deleteDestinationFile;
+
+const ensurePathExists = @import("database/paths.zig").ensurePathExists;
+
+const missingPathError = @import("database/paths.zig").missingPathError;
+
+const ensureSourcePathExists = @import("database/paths.zig").ensureSourcePathExists;
+
+const initializeZovaSchema = @import("database/lifecycle.zig").initializeZovaSchema;
+
+const enableForeignKeys = @import("database/lifecycle.zig").enableForeignKeys;
+
+const initializeMetadata = @import("database/lifecycle.zig").initializeMetadata;
+
+const initializeExtensionSchema = @import("database/lifecycle.zig").initializeExtensionSchema;
+
+const initializeObjectSchema = @import("database/lifecycle.zig").initializeObjectSchema;
+
+const initializeVectorSchema = @import("database/lifecycle.zig").initializeVectorSchema;
+
+const initializeGraphSchema = @import("database/lifecycle.zig").initializeGraphSchema;
+
+const initializeKvSchema = @import("database/lifecycle.zig").initializeKvSchema;
+
+const markAsObjectStore = @import("database/lifecycle.zig").markAsObjectStore;
+
+const markAsVectorStore = @import("database/lifecycle.zig").markAsVectorStore;
+
+const markAsGraphStore = @import("database/lifecycle.zig").markAsGraphStore;
+
+const ensureBoundStoreTable = @import("database/lifecycle.zig").ensureBoundStoreTable;
+
+const validateOptionalBoundStoreSchema = @import("database/validation.zig").validateOptionalBoundStoreSchema;
+
+const validateBoundStoreTable = @import("database/validation.zig").validateBoundStoreTable;
+
+const ensureMainDatabaseRole = @import("database/validation.zig").ensureMainDatabaseRole;
+
+const openConfiguredBoundObjectStore = @import("database/bound_stores.zig").openConfiguredBoundObjectStore;
+
+const openConfiguredBoundVectorStore = @import("database/bound_stores.zig").openConfiguredBoundVectorStore;
+
+const openConfiguredBoundGraphStore = @import("database/bound_stores.zig").openConfiguredBoundGraphStore;
+
+const attachObjectStore = @import("database/bound_stores.zig").attachObjectStore;
+
+const attachVectorStore = @import("database/bound_stores.zig").attachVectorStore;
+
+const attachGraphStore = @import("database/bound_stores.zig").attachGraphStore;
+
+const prepareSchemaSql = @import("database/metadata.zig").prepareSchemaSql;
+
+const copyObjectStorage = @import("database/backup.zig").copyObjectStorage;
+
+const copyVectorStorage = @import("database/backup.zig").copyVectorStorage;
+
+const copyGraphStorage = @import("database/backup.zig").copyGraphStorage;
+
+const optionalTextMatchesColumn = @import("database/backup.zig").optionalTextMatchesColumn;
+
+const clearMainObjectStorage = @import("database/backup.zig").clearMainObjectStorage;
+
+const clearMainVectorStorage = @import("database/backup.zig").clearMainVectorStorage;
+
+const clearMainGraphStorage = @import("database/backup.zig").clearMainGraphStorage;
+
+const mainObjectStorageHasRows = @import("database/backup.zig").mainObjectStorageHasRows;
+
+const mainVectorStorageHasRows = @import("database/backup.zig").mainVectorStorageHasRows;
+
+const mainGraphStorageHasRows = @import("database/backup.zig").mainGraphStorageHasRows;
+
+const objectStorageCounts = @import("database/backup.zig").objectStorageCounts;
+
+const vectorStorageCounts = @import("database/backup.zig").vectorStorageCounts;
+
+const graphStorageCounts = @import("database/backup.zig").graphStorageCounts;
+
+const countStorageRows = @import("database/backup.zig").countStorageRows;
+
+const prepareObjectSchemaSql = @import("database/backup.zig").prepareObjectSchemaSql;
+
+const deleteBoundObjectStoreRows = @import("database/bound_stores.zig").deleteBoundObjectStoreRows;
+
+const deleteBoundVectorStoreRows = @import("database/bound_stores.zig").deleteBoundVectorStoreRows;
+
+const deleteBoundGraphStoreRows = @import("database/bound_stores.zig").deleteBoundGraphStoreRows;
+
+const validateObjectStoreDatabaseExpected = @import("database/validation.zig").validateObjectStoreDatabaseExpected;
+
+const validateObjectStoreDatabase = @import("database/validation.zig").validateObjectStoreDatabase;
+
+const validateAttachedObjectStoreAlloc = @import("database/validation.zig").validateAttachedObjectStoreAlloc;
+
+const validateVectorStoreDatabaseExpected = @import("database/validation.zig").validateVectorStoreDatabaseExpected;
+
+const validateVectorStoreDatabase = @import("database/validation.zig").validateVectorStoreDatabase;
+
+const validateAttachedVectorStoreAlloc = @import("database/validation.zig").validateAttachedVectorStoreAlloc;
+
+const validateGraphStoreDatabaseExpected = @import("database/validation.zig").validateGraphStoreDatabaseExpected;
+
+const validateGraphStoreDatabase = @import("database/validation.zig").validateGraphStoreDatabase;
+
+const validateAttachedGraphStoreAlloc = @import("database/validation.zig").validateAttachedGraphStoreAlloc;
+
+const validateAttachedObjectSchema = @import("database/validation.zig").validateAttachedObjectSchema;
+
+const validateAttachedVectorSchema = @import("database/validation.zig").validateAttachedVectorSchema;
+
+const validateAttachedGraphSchema = @import("database/validation.zig").validateAttachedGraphSchema;
+
+const validateAttachedExtensionSchema = @import("database/validation.zig").validateAttachedExtensionSchema;
+
+const validateAttachedRequiredTable = @import("database/validation.zig").validateAttachedRequiredTable;
+
+const attachedTableExists = @import("database/metadata.zig").attachedTableExists;
+
+const attachedTableColumnExists = @import("database/metadata.zig").attachedTableColumnExists;
+
+const attachedObjectStoreIdAlloc = @import("database/metadata.zig").attachedObjectStoreIdAlloc;
+
+const expectAttachedMetadataValue = @import("database/metadata.zig").expectAttachedMetadataValue;
+
+const attachedMetadataValueAlloc = @import("database/metadata.zig").attachedMetadataValueAlloc;
+
+const attachedMetadataU64 = @import("database/metadata.zig").attachedMetadataU64;
+
+const setMetadataValue = @import("database/metadata.zig").setMetadataValue;
+
+const setAttachedMetadataValue = @import("database/metadata.zig").setAttachedMetadataValue;
+
+const hasBoundObjectStoreRow = @import("database/bound_stores.zig").hasBoundObjectStoreRow;
+
+const hasBoundVectorStoreRow = @import("database/bound_stores.zig").hasBoundVectorStoreRow;
+
+const hasBoundGraphStoreRow = @import("database/bound_stores.zig").hasBoundGraphStoreRow;
+
+const loadBoundObjectStoreInfo = @import("database/bound_stores.zig").loadBoundObjectStoreInfo;
+
+const loadBoundVectorStoreInfo = @import("database/bound_stores.zig").loadBoundVectorStoreInfo;
+
+const loadBoundGraphStoreInfo = @import("database/bound_stores.zig").loadBoundGraphStoreInfo;
+
+const insertBoundObjectStoreRow = @import("database/bound_stores.zig").insertBoundObjectStoreRow;
+
+const updateBoundObjectStoreRow = @import("database/bound_stores.zig").updateBoundObjectStoreRow;
+
+const insertBoundVectorStoreRow = @import("database/bound_stores.zig").insertBoundVectorStoreRow;
+
+const updateBoundVectorStoreRow = @import("database/bound_stores.zig").updateBoundVectorStoreRow;
+
+const insertBoundGraphStoreRow = @import("database/bound_stores.zig").insertBoundGraphStoreRow;
+
+const updateBoundGraphStoreRow = @import("database/bound_stores.zig").updateBoundGraphStoreRow;
+
+const incrementBoundObjectEpoch = @import("database/bound_stores.zig").incrementBoundObjectEpoch;
+
+const incrementBoundVectorEpoch = @import("database/bound_stores.zig").incrementBoundVectorEpoch;
+
+const incrementBoundGraphEpoch = @import("database/bound_stores.zig").incrementBoundGraphEpoch;
+
+const objectStoreIdAlloc = @import("database/metadata.zig").objectStoreIdAlloc;
+
+const metadataValueAlloc = @import("database/metadata.zig").metadataValueAlloc;
+
+const isValidStoreId = @import("database/metadata.zig").isValidStoreId;
+
+const randomHex64 = @import("database/metadata.zig").randomHex64;
+
+const lowerHexInto = @import("database/metadata.zig").lowerHexInto;
+
+const sqliteI64ToU64 = @import("database/metadata.zig").sqliteI64ToU64;
+
+const copyStoreId = @import("database/bound_stores.zig").copyStoreId;
+
+const hasActiveTransaction = @import("database/bound_stores.zig").hasActiveTransaction;
+
+const rejectReservedZovaNames = @import("database/bound_stores.zig").rejectReservedZovaNames;
+
+const isReservedZovaName = @import("database/bound_stores.zig").isReservedZovaName;
+
+const backupMainDatabase = @import("database/backup.zig").backupMainDatabase;
+
+const expectDone = @import("database/metadata.zig").expectDone;
 
 pub fn verifyOperationalCopy(path: [:0]const u8, registry: ExtensionRegistry) Error!void {
     var db = try Database.openWithOptionsAndExtensions(path, .{ .read_only = true }, registry);
@@ -4714,31 +2966,11 @@ fn verifyQuickCheck(db: *Database) Error!void {
     if (db.bound_graph_store != null) try verifyQuickCheckAttached(&db.sqlite_db, bound_graph_store_schema_name);
 }
 
-fn verifyQuickCheckMain(db: *sqlite.Database) Error!void {
-    var stmt = try db.prepare("pragma quick_check");
-    defer stmt.deinit();
-    try expectQuickCheckOk(&stmt);
-}
+const verifyQuickCheckMain = @import("database/backup.zig").verifyQuickCheckMain;
 
-fn verifyQuickCheckAttached(db: *sqlite.Database, comptime schema_name: []const u8) Error!void {
-    var stmt = try prepareSchemaSql(db, "pragma {s}.quick_check", .{schema_name});
-    defer stmt.deinit();
-    try expectQuickCheckOk(&stmt);
-}
+const verifyQuickCheckAttached = @import("database/backup.zig").verifyQuickCheckAttached;
 
-fn expectQuickCheckOk(stmt: *sqlite.Statement) Error!void {
-    switch (try stmt.step()) {
-        .done => return error.Corrupt,
-        .row => {
-            if (!std.mem.eql(u8, stmt.columnText(0), "ok")) return error.Corrupt;
-        },
-    }
-
-    switch (try stmt.step()) {
-        .done => {},
-        .row => return error.Corrupt,
-    }
-}
+const expectQuickCheckOk = @import("database/backup.zig").expectQuickCheckOk;
 
 fn verifyStoredObjects(db: *Database) Error!void {
     const allocator = std.heap.page_allocator;
@@ -4818,307 +3050,52 @@ fn verifyStoredKv(db: *Database) Error!void {
     }
 }
 
-fn mapSqliteResultCode(rc: c_int) Error {
-    const primary = rc & 0xff;
-    return switch (primary) {
-        sqlite.c.SQLITE_BUSY => error.Busy,
-        sqlite.c.SQLITE_LOCKED => error.Locked,
-        sqlite.c.SQLITE_CONSTRAINT => error.Constraint,
-        sqlite.c.SQLITE_CANTOPEN => error.CantOpen,
-        sqlite.c.SQLITE_MISUSE => error.Misuse,
-        sqlite.c.SQLITE_NOMEM => error.NoMemory,
-        sqlite.c.SQLITE_INTERRUPT => error.Interrupt,
-        sqlite.c.SQLITE_READONLY => error.ReadOnly,
-        sqlite.c.SQLITE_CORRUPT => error.Corrupt,
-        else => error.SqliteError,
-    };
-}
+const mapSqliteResultCode = @import("database/metadata.zig").mapSqliteResultCode;
 
-fn validateZovaSchema(db: *sqlite.Database) Error!void {
-    try expectMetadataValue(db, "magic", magic_value, .magic);
-    // Classify the storage format before role and schema validation so
-    // recognized but incompatible databases receive the precise migration
-    // error instead of a generic schema mismatch.
-    switch ((try readFormatClassification(db)).compatibility) {
-        .current => {},
-        .migratable => return error.MigrationRequired,
-        .unsupported_legacy => return error.UnsupportedLegacyFormat,
-        .unsupported_future => return error.UnsupportedFutureFormat,
-    }
-    try ensureMainDatabaseRole(db);
-    try validateExtensionSchema(db);
-    try validateObjectSchema(db);
-    try validateVectorSchema(db);
-    try validateGraphSchema(db);
-    try validateKvSchema(db);
-    try validateOptionalBoundStoreSchema(db);
-}
+const validateZovaSchema = @import("database/validation.zig").validateZovaSchema;
 
-fn validateExtensionLifecycleCore(db: *sqlite.Database) anyerror!void {
-    try validateZovaSchema(db);
-}
+const validateExtensionLifecycleCore = @import("database/validation.zig").validateExtensionLifecycleCore;
 
-fn validateExtensionSchema(db: *sqlite.Database) Error!void {
-    const extension_columns = [_][]const u8{
-        "name",
-        "version",
-        "storage_prefix",
-        "zova_abi_min",
-        "capabilities",
-        "required",
-        "installed_at_unix",
-        "manifest_json",
-    };
-    try validateRequiredTable(db, extension_impl.extensions_table, &extension_columns, extension_impl.extensions_schema_sql);
-}
+const validateExtensionSchema = @import("database/validation.zig").validateExtensionSchema;
 
-fn validateObjectSchema(db: *sqlite.Database) Error!void {
-    return validateObjectSchemaSql(
-        db,
-        object_impl.objects_schema_sql,
-        object_impl.chunks_schema_sql,
-        object_impl.object_chunks_schema_sql,
-    );
-}
+const validateObjectSchema = @import("database/validation.zig").validateObjectSchema;
 
-fn validateObjectSchemaExpected(db: *sqlite.Database, expected_format: []const u8) Error!void {
-    const expected_version = parseFormatVersion(expected_format) orelse return error.NotZovaDatabase;
-    if (expected_version <= 10) {
-        return validateObjectSchemaSql(
-            db,
-            object_impl.format10_objects_schema_sql,
-            object_impl.format10_chunks_schema_sql,
-            object_impl.format10_object_chunks_schema_sql,
-        );
-    }
-    if (expected_version == 11) return validateObjectSchema(db);
-    return error.NotZovaDatabase;
-}
+const validateObjectSchemaExpected = @import("database/validation.zig").validateObjectSchemaExpected;
 
-fn validateObjectSchemaSql(
-    db: *sqlite.Database,
-    expected_objects_sql: []const u8,
-    expected_chunks_sql: []const u8,
-    expected_object_chunks_sql: []const u8,
-) Error!void {
-    const object_columns = [_][]const u8{
-        "object_id",
-        "size_bytes",
-        "chunk_count",
-        "chunker",
-    };
-    try validateRequiredTable(db, object_impl.objects_table, &object_columns, expected_objects_sql);
+const validateObjectSchemaSql = @import("database/validation.zig").validateObjectSchemaSql;
 
-    const chunk_columns = [_][]const u8{
-        "chunk_hash",
-        "size_bytes",
-        "data",
-    };
-    try validateRequiredTable(db, object_impl.chunks_table, &chunk_columns, expected_chunks_sql);
+const validateVectorSchema = @import("database/validation.zig").validateVectorSchema;
 
-    const object_chunk_columns = [_][]const u8{
-        "object_id",
-        "chunk_index",
-        "chunk_hash",
-        "offset",
-        "size_bytes",
-    };
-    try validateRequiredTable(db, object_impl.object_chunks_table, &object_chunk_columns, expected_object_chunks_sql);
-}
+const validateGraphSchema = @import("database/validation.zig").validateGraphSchema;
 
-fn validateVectorSchema(db: *sqlite.Database) Error!void {
-    if (try tableExists(db, "_zova_vector_norms")) return error.NotZovaDatabase;
-    const vector_collection_columns = [_][]const u8{
-        "collection_key",
-        "name",
-        "dimensions",
-        "metric",
-        "element_type",
-    };
-    try validateRequiredTable(db, "_zova_vector_collections", &vector_collection_columns, vector_impl.collections_schema_sql);
+const validateKvSchema = @import("database/validation.zig").validateKvSchema;
 
-    const vector_columns = [_][]const u8{
-        "vector_key",
-        "collection_key",
-        "vector_id",
-        "values",
-        "norm_squared",
-    };
-    try validateRequiredTable(db, "_zova_vectors", &vector_columns, vector_impl.vectors_schema_sql);
-}
+const validateRequiredTable = @import("database/validation.zig").validateRequiredTable;
 
-fn validateGraphSchema(db: *sqlite.Database) Error!void {
-    const graph_columns = [_][]const u8{
-        "graph_key",
-        "name",
-        "created_order",
-    };
-    try validateRequiredTable(db, graph_impl.graphs_table, &graph_columns, graph_impl.graphs_schema_sql);
+const tableExists = @import("database/metadata.zig").tableExists;
 
-    const node_columns = [_][]const u8{
-        "node_key",
-        "graph_key",
-        "node_id",
-        "kind",
-        "target_type",
-        "target_namespace",
-        "target_ref",
-        "created_order",
-    };
-    try validateRequiredTable(db, graph_impl.graph_nodes_table, &node_columns, graph_impl.graph_nodes_schema_sql);
+const tableColumnExists = @import("database/metadata.zig").tableColumnExists;
 
-    const edge_type_columns = [_][]const u8{
-        "edge_type_key",
-        "graph_key",
-        "name",
-    };
-    try validateRequiredTable(db, graph_impl.graph_edge_types_table, &edge_type_columns, graph_impl.graph_edge_types_schema_sql);
+const schemaSqlEqual = @import("database/metadata.zig").schemaSqlEqual;
 
-    const edge_columns = [_][]const u8{
-        "edge_key",
-        "graph_key",
-        "from_node_key",
-        "edge_type_key",
-        "to_node_key",
-        "created_order",
-        "payload",
-    };
-    try validateRequiredTable(db, graph_impl.graph_edges_table, &edge_columns, graph_impl.graph_edges_schema_sql);
-}
+const skipAsciiWhitespace = @import("database/metadata.zig").skipAsciiWhitespace;
 
-fn validateKvSchema(db: *sqlite.Database) Error!void {
-    const kv_columns = [_][]const u8{
-        "namespace",
-        "key",
-        "value",
-    };
-    try validateRequiredTable(db, kv_impl.kv_table, &kv_columns, kv_impl.kv_schema_sql);
-}
+const MetadataKey = @import("database/metadata.zig").MetadataKey;
 
-fn validateRequiredTable(
-    db: *sqlite.Database,
-    table_name: []const u8,
-    required_columns: []const []const u8,
-    expected_sql: []const u8,
-) Error!void {
-    if (!try tableExists(db, table_name)) return error.NotZovaDatabase;
-
-    for (required_columns) |column_name| {
-        if (!try tableColumnExists(db, table_name, column_name)) return error.NotZovaDatabase;
-    }
-
-    var table_sql = try db.prepare(
-        \\select sql
-        \\from sqlite_master
-        \\where type = 'table' and name = ?
-    );
-    defer table_sql.deinit();
-
-    try table_sql.bindText(1, table_name);
-
-    switch (try table_sql.step()) {
-        .done => return error.NotZovaDatabase,
-        .row => {
-            const sql_text = table_sql.columnText(0);
-            if (!schemaSqlEqual(sql_text, expected_sql)) return error.NotZovaDatabase;
-        },
-    }
-}
-
-fn tableExists(db: *sqlite.Database, table_name: []const u8) Error!bool {
-    var stmt = try db.prepare(
-        \\select count(*)
-        \\from sqlite_master
-        \\where type = 'table' and name = ?
-    );
-    defer stmt.deinit();
-
-    try stmt.bindText(1, table_name);
-    const step = try stmt.step();
-    std.debug.assert(step == .row);
-    return stmt.columnInt64(0) == 1;
-}
-
-fn tableColumnExists(db: *sqlite.Database, table_name: []const u8, column_name: []const u8) Error!bool {
-    var stmt = try db.prepare(
-        \\select count(*)
-        \\from pragma_table_info(?)
-        \\where name = ?
-    );
-    defer stmt.deinit();
-
-    try stmt.bindText(1, table_name);
-    try stmt.bindText(2, column_name);
-    const step = try stmt.step();
-    std.debug.assert(step == .row);
-    return stmt.columnInt64(0) == 1;
-}
-
-fn schemaSqlEqual(actual: []const u8, expected: []const u8) bool {
-    var actual_index: usize = 0;
-    var expected_index: usize = 0;
-
-    while (true) {
-        actual_index = skipAsciiWhitespace(actual, actual_index);
-        expected_index = skipAsciiWhitespace(expected, expected_index);
-
-        if (actual_index == actual.len or expected_index == expected.len) {
-            return actual_index == actual.len and expected_index == expected.len;
-        }
-
-        if (std.ascii.toLower(actual[actual_index]) != std.ascii.toLower(expected[expected_index])) {
-            return false;
-        }
-
-        actual_index += 1;
-        expected_index += 1;
-    }
-}
-
-fn skipAsciiWhitespace(bytes: []const u8, start_index: usize) usize {
-    var index = start_index;
-    while (index < bytes.len and std.ascii.isWhitespace(bytes[index])) : (index += 1) {}
-    return index;
-}
-
-const MetadataKey = enum {
-    magic,
-    format_version,
-};
-
-fn expectMetadataValue(
-    db: *sqlite.Database,
-    key: [:0]const u8,
-    expected: []const u8,
-    metadata_key: MetadataKey,
-) Error!void {
-    var stmt = db.prepare("select value from _zova_meta where key = ?") catch |err| switch (err) {
-        error.SqliteError => return error.NotZovaDatabase,
-        else => return err,
-    };
-    defer stmt.deinit();
-
-    try stmt.bindText(1, key);
-
-    return switch (try stmt.step()) {
-        .done => error.NotZovaDatabase,
-        .row => {
-            const actual = stmt.columnText(0);
-            if (std.mem.eql(u8, actual, expected)) return;
-            return switch (metadata_key) {
-                .magic => error.NotZovaDatabase,
-                .format_version => error.UnsupportedZovaVersion,
-            };
-        },
-    };
-}
+const expectMetadataValue = @import("database/metadata.zig").expectMetadataValue;
 
 const test_support = @import("zova_test_support.zig");
+
 const testingDbPath = test_support.testingDbPath;
+
 const testingWriteMetadata = test_support.testingWriteMetadata;
+
 const testingExpectTableCount = test_support.testingExpectTableCount;
+
 const testingCount = test_support.testingCount;
+
 const testingQuickCheckOk = test_support.testingQuickCheckOk;
+
 const testingIntegrityCheckOk = test_support.testingIntegrityCheckOk;
 
 fn testingExpectScalarText(db: *sqlite.Database, sql: [:0]const u8, expected: []const u8) !void {
