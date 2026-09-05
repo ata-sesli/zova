@@ -13,5 +13,5 @@ name = "zova_python"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.29.0", features = ["extension-module"] }
+pyo3 = { version = "0.29.0", features = ["extension-module", "abi3-py313"] }
 zova_rust = { package = "zova", version = "1.0.0-rc.1", path = "rust/zova" }

@@ -134,7 +134,7 @@ Zova vendors SQLite. You do not need a system SQLite installation.
 |---|---|---:|---:|---:|---|
 | JavaScript / TypeScript | `bun add zova-js` / `npm install zova-js` | no | no | no | prebuilt Node-API 8 packages for Node 22/24 and Bun |
 | Rust | `cargo add zova` | no | yes | yes | `zova-sys` builds Zova's native C ABI from bundled generated C |
-| Python | `uv add zova` / `pip install zova` | no | only for sdist builds | only for sdist builds | wheels are published for Linux/macOS x86_64/arm64 on CPython 3.10/3.12; sdist fallback builds through Rust |
+| Python | `uv add zova` / `pip install zova` | no | no | no | stable-ABI wheels are published for Linux/macOS x86_64/arm64 and tested on CPython 3.13/3.14; PyPI source builds are not supported |
 | Go | `go get github.com/ata-sesli/zova/bindings/go@v1.0.0-rc.1` | no, if using a release C ABI archive | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
 | C ABI | release archive or `zig build c-abi` | no, if using a release archive | no | no, if using a release archive | static C ABI library and `zova.h` |
 | Zig | package source | yes | no | yes | native API |
@@ -147,7 +147,7 @@ Minimum tool versions used by the project:
 | Zig | `0.16.0` or newer |
 | Rust | `1.79` or newer |
 | Go | `1.22` or newer |
-| Python | `3.10` or newer |
+| Python | `3.13` or newer; 3.13 and 3.14 are tested |
 | Node.js | `22.13` or newer in the Node 22 line, or Node 24 |
 | Bun | current blocking CI release |
 | SQLite | vendored `3.53.4` |
@@ -1079,11 +1079,12 @@ It exposes records, prepared statements, transactions, savepoints, app events,
 backup, compact, restore, objects, `ObjectWriter`, vectors, graphs,
 SQL-native vector and graph helpers, and bundled extension lifecycle APIs.
 
-PyPI releases include wheels for Linux/macOS x86_64/arm64 on CPython 3.10/3.12
-plus an sdist fallback. Wheel installs do not require Zig, Rust, or a local C
-compiler. If pip falls back to the sdist for an unsupported platform/Python
-combination, the build uses Rust/Cargo and a C compiler. Zig is only needed when
-developing Zova itself or regenerating the bundled native snapshot.
+PyPI releases include CPython 3.13 stable-ABI wheels for Linux/macOS
+x86_64/arm64. Linux wheels target glibc 2.28 or newer. The same wheels are
+tested on CPython 3.13 and 3.14 and do not require Zig, Rust, Cargo, or a local
+C compiler. Zova does not publish a Python source distribution; unsupported
+platform and interpreter combinations fail without attempting a native source
+build.
 
 Existing Python object, vector, and graph APIs transparently use a bound store after the
 database is opened. Store create/bind/unbind/split management remains
@@ -1289,7 +1290,8 @@ Zova `1.0.0-rc.1` does not include:
 - automatic bound-store path repair
 - C ABI, Rust, Go, or Python store-management APIs
 - remote sync, S3 compatibility, NATS integration, or Redis-like behavior
-- Python wheels outside the current Linux/macOS CPython 3.10/3.12 matrix
+- Python wheels outside the current Linux/macOS x86_64/arm64 CPython 3.13/3.14
+  matrix, including free-threaded CPython builds
 
 Diagnostics and salvage are CLI-first in this release. Bindings should not parse
 human text output as a stable library contract.
@@ -1322,7 +1324,7 @@ Zova publishes several release artifact types:
   build path.
 - A GitHub Release source archive.
 - Rust crates on crates.io: `zova-sys` and `zova`.
-- Python wheels and sdist on PyPI.
+- Python stable-ABI wheels on PyPI.
 - A Go module tag: `bindings/go/v1.0.0-rc.1`.
 - JavaScript/TypeScript Node-API packages on npm as `zova-js`, with native
   packages for the supported platform matrix.
@@ -1358,17 +1360,20 @@ Maintainer source-package command:
 scripts/package-release.sh 1.0.0-rc.1
 ```
 
-Maintainer local distribution command for crates.io and PyPI, in that order:
+Maintainer local distribution command for crates.io:
 
 ```sh
 scripts/distribute-release.sh 1.0.0-rc.1
 ```
 
+Python is wheel-only and is published through the **Publish Release** workflow,
+which uploads the complete supported platform matrix atomically.
+
 GitHub Actions provides the preferred release flow:
 
 1. Let CI pass on the exact commit.
 2. Run **Release Artifacts** with the release version to build source, CLI,
-   C ABI, generated-C, Python wheel, and Python sdist artifacts.
+   C ABI, generated-C, and Python wheel artifacts.
 3. Inspect the uploaded artifacts.
 4. Run **Publish Release** with the same version and the Release Artifacts run
    ID. The publish workflow verifies that the artifacts came from the checked

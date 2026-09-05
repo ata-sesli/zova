@@ -73,7 +73,7 @@ body:
         Zig 0.16.0
         Rust stable
         Go 1.22
-        Python 3.12
+        Python 3.13 or 3.14
   - type: textarea
     id: extra
     attributes:

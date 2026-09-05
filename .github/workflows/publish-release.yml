@@ -37,7 +37,7 @@ jobs:
           toolchain: stable
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.13"
       - uses: astral-sh/setup-uv@v5
       - uses: actions/setup-node@v4
         with:
@@ -117,8 +117,7 @@ jobs:
             -name '*.txt' \
           \) -exec cp {} zig-out/release-assets/ \;
           find zig-out/release-download -path '*python*' -type f \( \
-            -name "zova-${python_version}-*.whl" -o \
-            -name "zova-${python_version}.tar.gz" \
+            -name "zova-${python_version}-cp313-abi3-*.whl" \
           \) -exec cp {} zig-out/python-assets/ \;
           ls -lh zig-out/release-assets zig-out/python-assets
 
@@ -213,14 +212,21 @@ jobs:
           case "$version" in
             *-rc.*) python_version="${version%%-rc.*}rc${version##*-rc.}" ;;
           esac
-          if ! find zig-out/python-assets -name "zova-${python_version}*" | grep -q .; then
-            echo "no Python artifacts found to publish" >&2
+          set -- zig-out/python-assets/zova-"${python_version}"-cp313-abi3-*.whl
+          if [ ! -e "$1" ]; then
+            echo "no Python ABI3 wheels found to publish" >&2
+            exit 1
+          fi
+          expected_wheel_count=4
+          wheel_count="$#"
+          if [ "$wheel_count" -ne "$expected_wheel_count" ]; then
+            echo "expected $expected_wheel_count Python ABI3 wheels, found $wheel_count" >&2
             exit 1
           fi
           if [ -n "${PYPI_API_TOKEN:-}" ]; then
-            UV_PUBLISH_TOKEN="$PYPI_API_TOKEN" uv publish --check-url https://pypi.org/simple/ zig-out/python-assets/zova-${python_version}*
+            UV_PUBLISH_TOKEN="$PYPI_API_TOKEN" uv publish --check-url https://pypi.org/simple/ "$@"
           else
-            uv publish --check-url https://pypi.org/simple/ zig-out/python-assets/zova-${python_version}*
+            uv publish --check-url https://pypi.org/simple/ "$@"
           fi
 
       - name: Publish JavaScript packages
