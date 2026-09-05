@@ -1,9 +1,8 @@
 //! C ABI test entrypoint.
 //!
-//! The ABI implementation tests currently live beside the internal helpers so
-//! they can exercise non-exported conversion and validation paths. This module
-//! keeps `src/c_api.zig` free of test bodies while still pulling those tests
-//! into the `c-api-test` build root.
+//! Public-only behavior tests live in focused modules below; white-box tests
+//! remain beside the internal helpers they exercise. This entrypoint includes
+//! both groups without changing the test-c-api gate or exported ABI boundary.
 
 const internal = @import("c_api_internal.zig");
 const std = @import("std");
@@ -12,6 +11,12 @@ const zova = @import("zova.zig");
 
 test {
     _ = internal;
+    _ = @import("c_api_database_behavior_tests.zig");
+    _ = @import("c_api_statements_behavior_tests.zig");
+    _ = @import("c_api_graphs_behavior_tests.zig");
+    _ = @import("c_api_kv_behavior_tests.zig");
+    _ = @import("c_api_objects_behavior_tests.zig");
+    _ = @import("c_api_fresh_build_behavior_tests.zig");
 }
 
 test "c abi graph operations route through a bound store after reopen" {
