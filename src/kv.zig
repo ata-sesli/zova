@@ -44,10 +44,82 @@ pub const PutEntry = struct {
 const KvMutationScope = enum { transaction, savepoint };
 const kv_batch_savepoint = "zova_kv_batch";
 
+const SingleStatement = enum {
+    get,
+    put,
+
+    fn sql(comptime self: SingleStatement) [:0]const u8 {
+        return switch (self) {
+            .get => "select value from _zova_kv where namespace = ? and key = ?",
+            .put => "insert into _zova_kv (namespace, key, value) values (?, ?, ?) " ++
+                "on conflict(namespace, key) do update set value = excluded.value",
+        };
+    }
+};
+
+/// Private, bounded KV cache owned by the Zova connection, not the temporary
+/// subsystem facade. Raw handles avoid retaining pointers to a moved owner.
+/// Uses the connection's existing external serialization; this is not a lock.
+pub const StatementCache = struct {
+    get: ?*sqlite.c.sqlite3_stmt = null,
+    put: ?*sqlite.c.sqlite3_stmt = null,
+
+    pub fn deinit(self: *StatementCache) void {
+        if (self.get) |handle| _ = sqlite.c.sqlite3_finalize(handle);
+        if (self.put) |handle| _ = sqlite.c.sqlite3_finalize(handle);
+        self.* = .{};
+    }
+};
+
+const StatementLease = struct {
+    statement: sqlite.Statement,
+    slot: ?*?*sqlite.c.sqlite3_stmt,
+
+    fn release(self: *StatementLease) void {
+        // Reset ends active reads; clearing releases all parameter allocations.
+        // On any cleanup error discard the VM instead of caching bad state.
+        self.statement.reset() catch {
+            self.statement.deinit();
+            return;
+        };
+        self.statement.clearBindings() catch {
+            self.statement.deinit();
+            return;
+        };
+        if (self.slot) |slot| {
+            if (slot.* == null) {
+                slot.* = self.statement.handle;
+                return;
+            }
+        }
+        // A nested call may have populated the slot while this lease was out.
+        self.statement.deinit();
+    }
+};
+
 /// The `_zova_kv` key-value table is a private Zova-owned representation.
 /// Zova does not expose or stabilize its schema name.
 pub const Database = struct {
     sqlite_db: *sqlite.Database,
+    statement_cache: ?*StatementCache = null,
+
+    fn acquire(self: *Database, comptime kind: SingleStatement) Error!StatementLease {
+        const slot: ?*?*sqlite.c.sqlite3_stmt = if (self.statement_cache) |cache| switch (kind) {
+            .get => &cache.get,
+            .put => &cache.put,
+        } else null;
+        if (slot) |entry| {
+            if (entry.*) |handle| {
+                // Check out before entering SQLite, so a nested call never
+                // resets or rebinds an in-flight statement.
+                entry.* = null;
+                return .{ .statement = .{ .db = self.sqlite_db, .handle = handle }, .slot = slot };
+            }
+        }
+        // prepare_v2 statements automatically recompile on schema changes.
+        // A failed step is discarded by release when reset reports its error.
+        return .{ .statement = try self.sqlite_db.prepare(kind.sql()), .slot = slot };
+    }
 
     /// Load one value by opaque byte namespace and key.
     ///
@@ -59,10 +131,9 @@ pub const Database = struct {
         namespace: []const u8,
         key: []const u8,
     ) Error!GetResult {
-        var stmt = try self.sqlite_db.prepare(
-            \\select value from _zova_kv where namespace = ? and key = ?
-        );
-        defer stmt.deinit();
+        var lease = try self.acquire(.get);
+        defer lease.release();
+        const stmt = &lease.statement;
 
         try stmt.bindBlob(1, namespace);
         try stmt.bindBlob(2, key);
@@ -114,16 +185,15 @@ pub const Database = struct {
         var committed = false;
         errdefer if (!committed) rollbackMutation(self, scope) catch {};
 
-        var stmt = try self.sqlite_db.prepare(
-            \\insert into _zova_kv (namespace, key, value) values (?, ?, ?)
-            \\on conflict(namespace, key) do update set value = excluded.value
-        );
-        defer stmt.deinit();
-
-        try stmt.bindBlob(1, namespace);
-        try stmt.bindBlob(2, key);
-        try stmt.bindBlob(3, value);
-        std.debug.assert((try stmt.step()) == .done);
+        {
+            var lease = try self.acquire(.put);
+            defer lease.release();
+            const stmt = &lease.statement;
+            try stmt.bindBlob(1, namespace);
+            try stmt.bindBlob(2, key);
+            try stmt.bindBlob(3, value);
+            std.debug.assert((try stmt.step()) == .done);
+        }
 
         try finishMutation(self, scope);
         committed = true;

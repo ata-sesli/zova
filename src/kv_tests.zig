@@ -12,6 +12,118 @@ const testingDbPath = test_support.testingDbPath;
 const testingIntegrityCheckOk = test_support.testingIntegrityCheckOk;
 const testingQuickCheckOk = test_support.testingQuickCheckOk;
 
+test "single KV calls retain two idle unbound statements until connection close" {
+    var db = try Database.createMemory();
+    defer db.deinit();
+    for (0..4) |_| {
+        try db.kvPut("ns", "key", "value");
+        var value = try db.kvGet(std.testing.allocator, "ns", "key");
+        defer value.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("value", value.value);
+    }
+    var count: usize = 0;
+    var stmt = sqlite.c.sqlite3_next_stmt(db.sqlite_db.handle, null);
+    while (stmt) |handle| : (stmt = sqlite.c.sqlite3_next_stmt(db.sqlite_db.handle, handle)) {
+        const sql = std.mem.span(sqlite.c.sqlite3_sql(handle));
+        if (std.mem.indexOf(u8, sql, "_zova_kv") == null) continue;
+        count += 1;
+        try std.testing.expectEqual(@as(c_int, 0), sqlite.c.sqlite3_stmt_busy(handle));
+        const expanded = sqlite.c.sqlite3_expanded_sql(handle) orelse return error.OutOfMemory;
+        defer sqlite.c.sqlite3_free(expanded);
+        try std.testing.expect(std.mem.indexOf(u8, std.mem.span(expanded), "NULL") != null);
+        try std.testing.expect(std.mem.indexOf(u8, std.mem.span(expanded), "x'") == null);
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
+    try db.sqlite_db.exec("vacuum");
+}
+
+test "single KV statement reuse survives failures schema changes and namespaces" {
+    var db = try Database.createMemory();
+    defer db.deinit();
+    try db.kvPut("one", "key", "first");
+    try db.kvPut("two", "key", "second");
+    var first = try db.kvGet(std.testing.allocator, "one", "key");
+    defer first.deinit(std.testing.allocator);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, db.kvGet(failing.allocator(), "two", "key"));
+    try db.sqlite_db.exec("vacuum");
+    try db.sqlite_db.exec("create trigger reject_kv before insert on _zova_kv begin select raise(abort, 'injected'); end");
+    try db.begin();
+    try std.testing.expectError(error.Constraint, db.kvPut("one", "key", "rejected"));
+    try db.sqlite_db.exec("drop trigger reject_kv");
+    try db.kvPut("one", "key", "rolled-back");
+    try db.rollback();
+    var after = try db.kvGet(std.testing.allocator, "one", "key");
+    defer after.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("first", after.value);
+    try std.testing.expectEqualStrings("first", first.value);
+    try db.sqlite_db.exec("drop table _zova_kv");
+    try std.testing.expectError(error.SqliteError, db.kvGet(std.testing.allocator, "one", "key"));
+    try std.testing.expect(std.mem.indexOf(u8, db.errorMessage(), "no such table") != null);
+    try std.testing.expectError(error.SqliteError, db.kvPut("one", "key", "no-table"));
+    try db.sqlite_db.exec(kv_impl.kv_schema_sql);
+    try db.kvPut("two", "key", "new");
+    var missing = try db.kvGet(std.testing.allocator, "one", "key");
+    defer missing.deinit(std.testing.allocator);
+    try std.testing.expect(!missing.found);
+    var second = try db.kvGet(std.testing.allocator, "two", "key");
+    defer second.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("new", second.value);
+}
+
+test "single KV leases do not share an in-flight statement with a nested read" {
+    const Trace = struct {
+        db: *Database,
+        entered: bool = false,
+        called: bool = false,
+        failed: bool = false,
+
+        fn callback(_: c_uint, context: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (self.entered) return 0;
+            self.entered = true;
+            defer self.entered = false;
+            self.called = true;
+            var value = self.db.kvGet(std.testing.allocator, "nested", "key") catch {
+                self.failed = true;
+                return 0;
+            };
+            defer value.deinit(std.testing.allocator);
+            if (!value.found or !std.mem.eql(u8, value.value, "inner")) self.failed = true;
+            return 0;
+        }
+    };
+    var db = try Database.createMemory();
+    defer db.deinit();
+    try db.kvPut("outer", "key", "outer");
+    try db.kvPut("nested", "key", "inner");
+    var warm = try db.kvGet(std.testing.allocator, "outer", "key");
+    defer warm.deinit(std.testing.allocator);
+    var trace = Trace{ .db = &db };
+    try std.testing.expectEqual(@as(c_int, sqlite.c.SQLITE_OK), sqlite.c.sqlite3_trace_v2(db.sqlite_db.handle, sqlite.c.SQLITE_TRACE_STMT, Trace.callback, &trace));
+    var outer = try db.kvGet(std.testing.allocator, "outer", "key");
+    defer outer.deinit(std.testing.allocator);
+    _ = sqlite.c.sqlite3_trace_v2(db.sqlite_db.handle, 0, null, null);
+    try std.testing.expect(trace.called and !trace.failed);
+    try std.testing.expectEqualStrings("outer", outer.value);
+    try db.sqlite_db.exec("vacuum");
+}
+
+test "single KV put cleans cached bindings after a bind error" {
+    var db = try Database.createMemory();
+    defer db.deinit();
+    try db.kvPut("n", "k", "original");
+    const old_limit = sqlite.c.sqlite3_limit(db.sqlite_db.handle, sqlite.c.SQLITE_LIMIT_LENGTH, 64);
+    const large = [_]u8{1} ** 128;
+    try std.testing.expectError(error.SqliteError, db.kvPut("n", "k", &large));
+    _ = sqlite.c.sqlite3_limit(db.sqlite_db.handle, sqlite.c.SQLITE_LIMIT_LENGTH, old_limit);
+    try db.sqlite_db.exec("vacuum");
+    var value = try db.kvGet(std.testing.allocator, "n", "k");
+    defer value.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("original", value.value);
+    try db.kvPut("n", "k", "retry");
+}
+
 test "kv schema is created for every database and is private" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
