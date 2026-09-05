@@ -2,6 +2,10 @@
 
 ## Decision
 
+**Update:** the [same-process wall/CPU experiment](float_tail.md) did not reproduce
+the two regressions; both cases improve in every paired trial. The observations
+below are retained as historical evidence, not the current acceptance verdict.
+
 Keep PR #51 draft. Production scoring is unchanged from 39c74b0. The focused
 short-query run improves every real-search median and p95, but the separate full
 matrix still has two worse pooled real-search p95s. Allocation is not established
