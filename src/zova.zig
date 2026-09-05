@@ -3331,50 +3331,6 @@ fn expectOperationalFixtureHandle(
     try std.testing.expectEqual(sqlite.Step.done, try distance.step());
 }
 
-test "create initializes and open validates zova database" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "identity.zova");
-
-    {
-        var db = try Database.create(db_path);
-        defer db.deinit();
-
-        try db.exec("create table user_data (id integer primary key, body text not null)");
-        try db.exec("insert into user_data (body) values ('hello')");
-    }
-
-    {
-        var db = try Database.open(db_path);
-        defer db.deinit();
-
-        var select = try db.prepare("select body from user_data");
-        defer select.deinit();
-
-        try std.testing.expectEqual(sqlite.Step.row, try select.step());
-        try std.testing.expectEqualStrings("hello", select.columnText(0));
-    }
-}
-
-test "create options apply page size before private schema initialization" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "page-size.zova");
-
-    var db = try Database.createWithOptions(db_path, .{ .page_size = 65536 });
-    defer db.deinit();
-
-    var page_size = try db.prepare("pragma page_size");
-    defer page_size.deinit();
-    try std.testing.expectEqual(sqlite.Step.row, try page_size.step());
-    try std.testing.expectEqual(@as(i64, 65536), page_size.columnInt64(0));
-    try std.testing.expectEqual(sqlite.Step.done, try page_size.step());
-}
-
 test "createMemory initializes complete schema without creating files" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3418,15 +3374,6 @@ test "createMemory initializes complete schema without creating files" {
     var journal_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const journal_path = try std.fmt.bufPrint(&journal_buffer, ".zig-cache/tmp/{s}/memory.zova-journal", .{tmp.sub_path[0..]});
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, journal_path, .{}));
-}
-
-test "create treats memory path as the core volatile target" {
-    var db = try Database.create(":memory:");
-    defer db.deinit();
-
-    try db.exec("create table memory_rows (id integer primary key, value text not null)");
-    try db.exec("insert into memory_rows (value) values ('core target')");
-    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from memory_rows"));
 }
 
 test "createMemory matches file backed records objects chunks and vectors" {
@@ -3573,56 +3520,6 @@ test "restoreBackupToMemory inlines bound object vector and graph stores with so
     try std.testing.expectEqualStrings("leaf", neighbors.items[0].node_id);
 }
 
-test "in-memory databases are isolated and reclaim their data" {
-    var left = try Database.createMemory();
-    defer left.deinit();
-    var right = try Database.createMemory();
-    defer right.deinit();
-
-    try left.exec("create table only_left (value text not null)");
-    try left.exec("insert into only_left (value) values ('left only')");
-    try right.exec("create table only_right (value text not null)");
-    try right.exec("insert into only_right (value) values ('right only')");
-
-    try std.testing.expectEqual(@as(i64, 1), try testingCount(&left, "select count(*) from only_left"));
-    try std.testing.expectEqual(@as(i64, 1), try testingCount(&right, "select count(*) from only_right"));
-
-    // Nothing written to the left handle is visible to the right handle.
-    try std.testing.expectError(error.SqliteError, right.prepare("select * from only_left"));
-    try std.testing.expectError(error.SqliteError, left.prepare("select * from only_right"));
-}
-
-test "memory rollback and savepoints match file backed behavior" {
-    var db = try Database.createMemory();
-    defer db.deinit();
-
-    try db.exec("create table notes (body text not null)");
-    try db.exec("insert into notes (body) values ('committed')");
-
-    try db.begin();
-    try db.exec("insert into notes (body) values ('rolled back')");
-    try db.rollback();
-    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from notes"));
-
-    try db.savepoint("sp");
-    try db.exec("insert into notes (body) values ('savepoint rolled back')");
-    try db.rollbackToSavepoint("sp");
-    try db.releaseSavepoint("sp");
-    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from notes"));
-
-    try db.savepoint("sp_keep");
-    try db.exec("insert into notes (body) values ('savepoint kept')");
-    try db.releaseSavepoint("sp_keep");
-    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from notes"));
-}
-
-test "file-only operations reject the memory target explicitly" {
-    try std.testing.expectError(error.NotZovaPath, Database.open(":memory:"));
-    try std.testing.expectError(error.NotZovaPath, createObjectStore(":memory:"));
-    try std.testing.expectError(error.NotZovaPath, createVectorStore(":memory:"));
-    try std.testing.expectError(error.NotZovaPath, createGraphStore(":memory:"));
-}
-
 test "created zova database stores metadata" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3700,30 +3597,6 @@ test "create graph store writes metadata and rejects main database open" {
     try std.testing.expectError(error.BoundStoreInvalid, Database.open(store_path));
 }
 
-test "bind and unbind graph store preserve external graph data" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "bind-graph-main.zova");
-    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "bind-graph-store.zova");
-    try createGraphStore(store_path);
-
-    var db = try Database.create(main_path);
-    defer db.deinit();
-    try db.bindGraphStore(store_path);
-    try db.createGraph("deps");
-    try db.putGraphNode(.{ .graph_name = "deps", .node_id = "a", .kind = "file" });
-    var info = (try db.boundGraphStore(std.testing.allocator)).?;
-    defer info.deinit(std.testing.allocator);
-
-    try db.unbindGraphStore();
-    try std.testing.expect(!(try db.hasGraph("deps")));
-    try db.bindGraphStore(store_path);
-    try std.testing.expect(try db.hasGraphNode("deps", "a"));
-}
-
 test "bound graph epochs participate in transactions and skip empty batches" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3760,24 +3633,6 @@ test "bound graph epochs participate in transactions and skip empty batches" {
     try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select cast(value as integer) from graph_store._zova_meta where key = 'graph_epoch'"));
 }
 
-test "graph binding rejects nonempty main storage and active transactions" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "graph-reject-main.zova");
-    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "graph-reject-store.zova");
-    try createGraphStore(store_path);
-    var db = try Database.create(main_path);
-    defer db.deinit();
-    try db.createGraph("local");
-    try std.testing.expectError(error.BoundStoreExists, db.bindGraphStore(store_path));
-    try db.deleteGraph("local");
-    try db.begin();
-    try std.testing.expectError(error.ObjectTransactionActive, db.bindGraphStore(store_path));
-    try db.rollback();
-}
-
 test "unbound graph node batch rolls back earlier writes when a later write fails" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3795,34 +3650,6 @@ test "unbound graph node batch rolls back earlier writes when a later write fail
         .{ .graph_name = "deps", .node_id = "second", .kind = "file" },
     }));
     try std.testing.expect(!(try db.hasGraphNode("deps", "first")));
-}
-
-test "failed graph replacement restores old attachment and savepoints reject management" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "graph-replace-main.zova");
-    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "graph-replace-store.zova");
-    var invalid_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const invalid_path = try testingDbPath(&invalid_buffer, tmp.sub_path[0..], "graph-replace-invalid.zova");
-    try createGraphStore(store_path);
-    {
-        var invalid = try Database.create(invalid_path);
-        invalid.deinit();
-    }
-    var db = try Database.create(main_path);
-    defer db.deinit();
-    try db.bindGraphStore(store_path);
-    try db.createGraph("deps");
-    try std.testing.expectError(error.NotZovaDatabase, db.bindGraphStore(invalid_path));
-    try std.testing.expect(try db.hasGraph("deps"));
-
-    try db.savepoint("management_guard");
-    try std.testing.expectError(error.ObjectTransactionActive, db.bindGraphStore(store_path));
-    try std.testing.expectError(error.ObjectTransactionActive, db.unbindGraphStore());
-    try db.rollbackToSavepoint("management_guard");
-    try db.releaseSavepoint("management_guard");
 }
 
 test "read only graph store management rejects bind replacement and unbind without state changes" {
@@ -4949,69 +4776,6 @@ fn secondSqlExtensionValueFunc(ctx: ?*sqlite.c.sqlite3_context, argc: c_int, arg
     sqlite.c.sqlite3_result_int64(ctx, 42);
 }
 
-test "zova database rejects non zova paths" {
-    try std.testing.expectError(error.NotZovaPath, Database.open("plain.db"));
-    try std.testing.expectError(error.NotZovaPath, Database.create("plain.db"));
-}
-
-test "create refuses existing zova file" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "existing.zova");
-
-    var db = try Database.create(db_path);
-    defer db.deinit();
-
-    try std.testing.expectError(error.DestinationExists, Database.create(db_path));
-}
-
-test "create maps missing parent directory to CantOpen" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(
-        &path_buffer,
-        ".zig-cache/tmp/{s}/missing-parent/missing.zova",
-        .{tmp.sub_path[0..]},
-    );
-
-    try std.testing.expectError(error.CantOpen, Database.create(db_path));
-}
-
-test "open maps inaccessible parent directory to CantOpen" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(
-        &path_buffer,
-        ".zig-cache/tmp/{s}/missing-parent/missing.zova",
-        .{tmp.sub_path[0..]},
-    );
-
-    try std.testing.expectError(error.CantOpen, Database.open(db_path));
-}
-
-test "open rejects uninitialized zova file" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "plain.zova");
-
-    {
-        var raw = try sqlite.Database.open(db_path);
-        defer raw.deinit();
-
-        try raw.exec("create table user_data (id integer primary key)");
-    }
-
-    try std.testing.expectError(error.NotZovaDatabase, Database.open(db_path));
-}
-
 test "open rejects wrong magic" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -5231,31 +4995,6 @@ test "single file remains the default object store" {
     var object = try db.getObject(std.testing.allocator, id);
     defer object.deinit(std.testing.allocator);
     try std.testing.expectEqualSlices(u8, "stored in the main database", object.bytes);
-}
-
-test "sequential object reader routes through a bound object store" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "reader-main.zova");
-    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "reader-objects.zova");
-    try createObjectStore(store_path);
-
-    var db = try Database.create(main_path);
-    defer db.deinit();
-    try db.bindObjectStore(store_path);
-
-    const payload = "sequential bytes from the bound object store";
-    const id = try db.putObjectWithOptions(payload, .{ .profile = .deduplication });
-    var reader = try db.objectReader(id);
-    defer reader.deinit();
-
-    var output: [payload.len]u8 = undefined;
-    try std.testing.expectEqual(output.len, try reader.read(&output));
-    try std.testing.expectEqualSlices(u8, payload, &output);
-    try std.testing.expectEqual(@as(usize, 0), try reader.read(&output));
 }
 
 test "optional bound object store routes object APIs after reopen" {
@@ -5979,37 +5718,6 @@ test "open rejects bound object store id mismatch" {
     try std.testing.expectError(error.BoundStoreInvalid, Database.open(main_path));
 }
 
-test "failed replacement bind preserves the current attached object store" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "bound-bind-failure-main.zova");
-
-    var old_store_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const old_store_path = try testingDbPath(&old_store_buffer, tmp.sub_path[0..], "bound-bind-failure-old.zova");
-
-    var missing_store_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const missing_store_path = try testingDbPath(&missing_store_buffer, tmp.sub_path[0..], "bound-bind-failure-missing.zova");
-
-    try createObjectStore(old_store_path);
-
-    var db = try Database.create(main_path);
-    defer db.deinit();
-    try db.bindObjectStore(old_store_path);
-
-    const id = try db.putObject("old store remains attached");
-    try std.testing.expectError(error.NotZovaDatabase, db.bindObjectStore(missing_store_path));
-
-    var object = try db.getObject(std.testing.allocator, id);
-    defer object.deinit(std.testing.allocator);
-    try std.testing.expectEqualSlices(u8, "old store remains attached", object.bytes);
-
-    var info = (try db.boundObjectStore(std.testing.allocator)).?;
-    defer info.deinit(std.testing.allocator);
-    try std.testing.expect(std.mem.endsWith(u8, info.path, "bound-bind-failure-old.zova"));
-}
-
 test "bound object store participates in main transactions and savepoints" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -6079,48 +5787,6 @@ test "bound object store participates in main transactions and savepoints" {
     try db.releaseSavepoint("outer_sp");
     try db.commit();
     try std.testing.expectError(error.ObjectNotFound, db.getObject(std.testing.allocator, inner_released));
-}
-
-test "object store binding changes are rejected inside active transactions" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "bound-transaction-main.zova");
-
-    var store_one_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const store_one_path = try testingDbPath(&store_one_buffer, tmp.sub_path[0..], "bound-transaction-one.zova");
-
-    var store_two_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const store_two_path = try testingDbPath(&store_two_buffer, tmp.sub_path[0..], "bound-transaction-two.zova");
-
-    try createObjectStore(store_one_path);
-    try createObjectStore(store_two_path);
-
-    var db = try Database.create(main_path);
-    defer db.deinit();
-
-    try db.begin();
-    try std.testing.expectError(error.ObjectTransactionActive, db.bindObjectStore(store_one_path));
-    try db.rollback();
-
-    try db.bindObjectStore(store_one_path);
-
-    try db.savepoint("sp");
-    try std.testing.expectError(error.ObjectTransactionActive, db.unbindObjectStore());
-    try std.testing.expectError(error.ObjectTransactionActive, db.bindObjectStore(store_two_path));
-    try db.releaseSavepoint("sp");
-}
-
-test "object store files are not accepted as main databases" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "role-object-store.zova");
-
-    try createObjectStore(store_path);
-    try std.testing.expectError(error.BoundStoreInvalid, Database.open(store_path));
 }
 
 test "open rejects current format database missing required object table without mutating it" {
@@ -6445,56 +6111,6 @@ test "convert sqlite to zova preserves table rows and source file" {
     }
 }
 
-test "convert sqlite to zova keeps extension adjacent app tables uninstalled" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "extension-adjacent.db");
-
-    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "extension-adjacent.zova");
-
-    {
-        var source = try sqlite.Database.open(source_path);
-        defer source.deinit();
-
-        try source.exec(
-            \\create table extension_documents (
-            \\  id integer primary key,
-            \\  body text not null
-            \\);
-            \\create table zovaext_cache (
-            \\  key text primary key,
-            \\  value text not null
-            \\);
-            \\insert into extension_documents (body) values ('app owned');
-            \\insert into zovaext_cache (key, value) values ('state', 'kept');
-        );
-    }
-
-    try convertSqliteToZova(source_path, dest_path);
-
-    var dest = try Database.open(dest_path);
-    defer dest.deinit();
-
-    var extensions = try dest.listExtensions(std.testing.allocator);
-    defer extensions.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 0), extensions.items.len);
-
-    var row = try dest.prepare(
-        \\select d.body, c.value
-        \\from extension_documents d
-        \\join zovaext_cache c on c.key = 'state'
-    );
-    defer row.deinit();
-
-    try std.testing.expectEqual(sqlite.Step.row, try row.step());
-    try std.testing.expectEqualStrings("app owned", row.columnText(0));
-    try std.testing.expectEqualStrings("kept", row.columnText(1));
-    try std.testing.expectEqual(sqlite.Step.done, try row.step());
-}
-
 test "converted zova remains readable through sqlite wrapper" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -6536,67 +6152,6 @@ test "converted zova remains readable through sqlite wrapper" {
     try testingExpectTableCount(&raw, "_zova_graphs", 1);
     try testingExpectTableCount(&raw, "_zova_graph_nodes", 1);
     try testingExpectTableCount(&raw, "_zova_graph_edges", 1);
-}
-
-test "convert sqlite to zova preserves index view and trigger" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "schema.db");
-
-    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "schema.zova");
-
-    {
-        var source = try sqlite.Database.open(source_path);
-        defer source.deinit();
-
-        try source.exec(
-            \\create table notes (
-            \\  id integer primary key,
-            \\  body text not null
-            \\);
-            \\create table note_log (
-            \\  note_id integer not null,
-            \\  body text not null
-            \\);
-            \\create index notes_body_idx on notes (body);
-            \\create view note_bodies as select body from notes;
-            \\create trigger notes_after_insert
-            \\after insert on notes
-            \\begin
-            \\  insert into note_log (note_id, body) values (new.id, new.body);
-            \\end;
-            \\insert into notes (body) values ('first');
-        );
-    }
-
-    try convertSqliteToZova(source_path, dest_path);
-
-    var dest = try Database.open(dest_path);
-    defer dest.deinit();
-
-    var objects = try dest.prepare(
-        \\select count(*)
-        \\from sqlite_master
-        \\where name in ('notes_body_idx', 'note_bodies', 'notes_after_insert')
-    );
-    defer objects.deinit();
-
-    try std.testing.expectEqual(sqlite.Step.row, try objects.step());
-    try std.testing.expectEqual(@as(i64, 3), objects.columnInt64(0));
-
-    try dest.exec("insert into notes (body) values ('second')");
-
-    var log = try dest.prepare("select body from note_log order by note_id");
-    defer log.deinit();
-
-    try std.testing.expectEqual(sqlite.Step.row, try log.step());
-    try std.testing.expectEqualStrings("first", log.columnText(0));
-    try std.testing.expectEqual(sqlite.Step.row, try log.step());
-    try std.testing.expectEqualStrings("second", log.columnText(0));
-    try std.testing.expectEqual(sqlite.Step.done, try log.step());
 }
 
 test "backup compact and restore preserve zova records objects chunks and vectors" {
@@ -6644,161 +6199,6 @@ test "backup compact and restore preserve zova records objects chunks and vector
     try expectOperationalFixture(quoted_path, ids, primary_bytes, streamed_bytes, loose_bytes);
 }
 
-test "savepoints roll back zova records objects and vectors" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "savepoints.zova");
-
-    var db = try Database.create(db_path);
-    defer db.deinit();
-
-    try db.exec("create table notes (body text not null)");
-    const readable_object = try db.putObject("readable inside savepoint");
-    var pending_writer = try db.objectWriter(std.testing.allocator);
-    defer pending_writer.deinit();
-    try pending_writer.write("writer finish blocked inside savepoint");
-
-    try db.exec("begin immediate");
-    try db.exec("insert into notes (body) values ('outer')");
-
-    try db.savepoint("sp_vectors");
-    try db.exec("insert into notes (body) values ('rolled back')");
-    var readable = try db.getObject(std.testing.allocator, readable_object);
-    defer readable.deinit(std.testing.allocator);
-    try std.testing.expectEqualSlices(u8, "readable inside savepoint", readable.bytes);
-    var range_buffer: [8]u8 = undefined;
-    try std.testing.expectEqual(@as(usize, 8), try db.readObjectRange(readable_object, 0, &range_buffer));
-    try std.testing.expectEqualSlices(u8, "readable", &range_buffer);
-    try std.testing.expectError(error.ObjectTransactionActive, db.putObject("savepoint object"));
-    try std.testing.expectError(error.ObjectTransactionActive, db.deleteObject(readable_object));
-    try std.testing.expectError(error.ObjectTransactionActive, pending_writer.finish());
-    try db.createVectorCollection("save_vectors", .{ .dimensions = 2, .metric = .l2 });
-    try db.putVector("save_vectors", "v1", .{ .f32 = &.{ 1.0, 2.0 } });
-    try db.rollbackToSavepoint("sp_vectors");
-    try db.releaseSavepoint("sp_vectors");
-
-    try std.testing.expect(!try db.hasVectorCollection("save_vectors"));
-
-    try db.savepoint("sp_release");
-    try db.exec("insert into notes (body) values ('kept')");
-    try db.createVectorCollection("kept_vectors", .{ .dimensions = 2, .metric = .l2 });
-    try db.releaseSavepoint("sp_release");
-    try db.exec("commit");
-
-    try pending_writer.cancel();
-    const kept_object = try db.putObject("kept savepoint object");
-    try std.testing.expect(try db.hasObject(kept_object));
-    try std.testing.expect(try db.hasVectorCollection("kept_vectors"));
-    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from notes"));
-    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from notes where body = 'rolled back'"));
-    try testingQuickCheckOk(&db);
-}
-
-test "notifications deliver after commit and rollback suppresses pending events" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "notifications.zova");
-
-    var db = try Database.create(db_path);
-    defer db.deinit();
-
-    var sub = try db.listen("messages");
-    defer sub.deinit();
-
-    try db.notify("messages", "outside");
-    {
-        var note = (try sub.tryReceive(std.testing.allocator)).?;
-        defer note.deinit(std.testing.allocator);
-        try std.testing.expectEqualStrings("messages", note.channel);
-        try std.testing.expectEqualStrings("outside", note.payload);
-        try std.testing.expectEqual(@as(u64, 1), note.sequence);
-        try std.testing.expectEqual(@as(u64, 0), note.dropped_before);
-    }
-    try std.testing.expectEqual(@as(?Notification, null), try sub.tryReceive(std.testing.allocator));
-
-    try db.beginImmediate();
-    try db.notify("messages", "committed");
-    try std.testing.expectEqual(@as(?Notification, null), try sub.tryReceive(std.testing.allocator));
-    try db.commit();
-    {
-        var note = (try sub.tryReceive(std.testing.allocator)).?;
-        defer note.deinit(std.testing.allocator);
-        try std.testing.expectEqualStrings("committed", note.payload);
-    }
-
-    try db.beginImmediate();
-    try db.exec("select zova_notify('messages', 'sql-committed')");
-    try std.testing.expectEqual(@as(?Notification, null), try sub.tryReceive(std.testing.allocator));
-    try db.commit();
-    {
-        var note = (try sub.tryReceive(std.testing.allocator)).?;
-        defer note.deinit(std.testing.allocator);
-        try std.testing.expectEqualStrings("sql-committed", note.payload);
-    }
-
-    try db.exec("begin immediate");
-    try std.testing.expectError(error.SqliteError, db.exec("select zova_notify('messages', 'raw-sql-transaction')"));
-    try db.exec("rollback");
-    try std.testing.expectEqual(@as(?Notification, null), try sub.tryReceive(std.testing.allocator));
-
-    try db.beginImmediate();
-    try db.notify("messages", "rolled-back");
-    try db.rollback();
-    try std.testing.expectEqual(@as(?Notification, null), try sub.tryReceive(std.testing.allocator));
-}
-
-test "notification savepoint release and rollback follow sqlite savepoint semantics" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "notification-savepoints.zova");
-
-    var db = try Database.create(db_path);
-    defer db.deinit();
-
-    var sub = try db.listen("objects:changed");
-    defer sub.deinit();
-
-    try db.beginImmediate();
-    try db.notify("objects:changed", "outer");
-    try db.savepoint("inner");
-    try db.notify("objects:changed", "discarded");
-    try db.rollbackToSavepoint("inner");
-    try db.notify("objects:changed", "after-rollback-to");
-    try db.releaseSavepoint("inner");
-    try db.commit();
-
-    {
-        var note = (try sub.tryReceive(std.testing.allocator)).?;
-        defer note.deinit(std.testing.allocator);
-        try std.testing.expectEqualStrings("outer", note.payload);
-    }
-    {
-        var note = (try sub.tryReceive(std.testing.allocator)).?;
-        defer note.deinit(std.testing.allocator);
-        try std.testing.expectEqualStrings("after-rollback-to", note.payload);
-    }
-    try std.testing.expectEqual(@as(?Notification, null), try sub.tryReceive(std.testing.allocator));
-
-    try db.beginImmediate();
-    try db.savepoint("inner");
-    try db.notify("objects:changed", "released");
-    try db.releaseSavepoint("inner");
-    try std.testing.expectEqual(@as(?Notification, null), try sub.tryReceive(std.testing.allocator));
-    try db.commit();
-
-    {
-        var note = (try sub.tryReceive(std.testing.allocator)).?;
-        defer note.deinit(std.testing.allocator);
-        try std.testing.expectEqualStrings("released", note.payload);
-    }
-}
-
 test "notification queues drop oldest entries and report dropped count" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -6823,69 +6223,6 @@ test "notification queues drop oldest entries and report dropped count" {
     defer first.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("event-1", first.payload);
     try std.testing.expectEqual(@as(u64, 1), first.dropped_before);
-}
-
-test "notifications support multiple listeners read-only handles and per-handle hubs" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "notification-listeners.zova");
-
-    {
-        var db = try Database.create(db_path);
-        defer db.deinit();
-
-        var first = try db.listen("events");
-        defer first.deinit();
-        var second = try db.listen("events");
-        defer second.deinit();
-        var other = try db.listen("other");
-        defer other.deinit();
-        var closed = try db.listen("events");
-        closed.deinit();
-
-        try db.notify("events", "one");
-
-        var first_note = (try first.tryReceive(std.testing.allocator)).?;
-        defer first_note.deinit(std.testing.allocator);
-        try std.testing.expectEqualStrings("one", first_note.payload);
-
-        var second_note = (try second.tryReceive(std.testing.allocator)).?;
-        defer second_note.deinit(std.testing.allocator);
-        try std.testing.expectEqualStrings("one", second_note.payload);
-
-        try std.testing.expectEqual(@as(?Notification, null), try other.tryReceive(std.testing.allocator));
-    }
-
-    {
-        var writer = try Database.open(db_path);
-        defer writer.deinit();
-        var reader = try Database.open(db_path);
-        defer reader.deinit();
-
-        var writer_sub = try writer.listen("local");
-        defer writer_sub.deinit();
-        var reader_sub = try reader.listen("local");
-        defer reader_sub.deinit();
-
-        try writer.notify("local", "writer-only");
-        var note = (try writer_sub.tryReceive(std.testing.allocator)).?;
-        defer note.deinit(std.testing.allocator);
-        try std.testing.expectEqualStrings("writer-only", note.payload);
-        try std.testing.expectEqual(@as(?Notification, null), try reader_sub.tryReceive(std.testing.allocator));
-    }
-
-    {
-        var readonly = try Database.openWithOptions(db_path, .{ .read_only = true });
-        defer readonly.deinit();
-        var sub = try readonly.listen("readonly");
-        defer sub.deinit();
-        try readonly.notify("readonly", "local");
-        var note = (try sub.tryReceive(std.testing.allocator)).?;
-        defer note.deinit(std.testing.allocator);
-        try std.testing.expectEqualStrings("local", note.payload);
-    }
 }
 
 test "notification validation rejects invalid channels payloads and SQL notify inputs" {
@@ -6970,64 +6307,6 @@ test "in-memory notifications follow transaction savepoint and overflow semantic
     try std.testing.expectEqual(@as(u64, 1), overflowed.dropped_before);
 }
 
-test "notifications and SQL transactions share one deferred delivery scope" {
-    var db = try Database.createMemory();
-    defer db.deinit();
-
-    var sql_sub = try db.listen("sql:changed");
-    defer sql_sub.deinit();
-    var kv_sub = try db.listen("cache:search-results");
-    defer kv_sub.deinit();
-
-    try db.beginImmediate();
-    try db.exec("select zova_notify('sql:changed', 'row-updated')");
-    try db.kvPutMany("search-results", &.{ .{ .key = "result-1", .value = "one" }, .{ .key = "result-2", .value = "two" } });
-    try db.notify("cache:search-results", "generation:42");
-    try std.testing.expectEqual(@as(?Notification, null), try sql_sub.tryReceive(std.testing.allocator));
-    try std.testing.expectEqual(@as(?Notification, null), try kv_sub.tryReceive(std.testing.allocator));
-    try db.commit();
-
-    var sql_note = (try sql_sub.tryReceive(std.testing.allocator)).?;
-    defer sql_note.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("row-updated", sql_note.payload);
-
-    var kv_note = (try kv_sub.tryReceive(std.testing.allocator)).?;
-    defer kv_note.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("generation:42", kv_note.payload);
-
-    var value = try db.kvGet(std.testing.allocator, "search-results", "result-1");
-    defer value.deinit(std.testing.allocator);
-    try std.testing.expect(value.found);
-    try std.testing.expectEqualSlices(u8, "one", value.value);
-    try std.testing.expectEqual(@as(?Notification, null), try sql_sub.tryReceive(std.testing.allocator));
-    try std.testing.expectEqual(@as(?Notification, null), try kv_sub.tryReceive(std.testing.allocator));
-}
-
-test "closing a subscription releases its delivery hub and never re-delivers" {
-    var db = try Database.createMemory();
-    defer db.deinit();
-
-    var sub = try db.listen("events");
-    try db.notify("events", "before-close");
-    {
-        var note = (try sub.tryReceive(std.testing.allocator)).?;
-        defer note.deinit(std.testing.allocator);
-        try std.testing.expectEqualStrings("before-close", note.payload);
-    }
-
-    sub.deinit();
-    try std.testing.expectError(error.InvalidArgument, sub.tryReceive(std.testing.allocator));
-
-    var reopened = try db.listen("events");
-    defer reopened.deinit();
-    try std.testing.expectEqual(@as(?Notification, null), try reopened.tryReceive(std.testing.allocator));
-
-    try db.notify("events", "after-reopen");
-    var note = (try reopened.tryReceive(std.testing.allocator)).?;
-    defer note.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("after-reopen", note.payload);
-}
-
 test "notifications defer across one transaction spanning SQL vector graph and kv" {
     var db = try Database.createMemory();
     defer db.deinit();
@@ -7062,164 +6341,6 @@ test "notifications defer across one transaction spanning SQL vector graph and k
     defer kv_value.deinit(std.testing.allocator);
     try std.testing.expect(kv_value.found);
     try std.testing.expectEqualSlices(u8, "value", kv_value.value);
-}
-
-test "scoped savepoint helper releases rolls back nests and reports cleanup failure" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "scoped-savepoints.zova");
-
-    var db = try Database.create(db_path);
-    defer db.deinit();
-
-    try db.exec("create table notes (body text not null)");
-    try db.exec("begin immediate");
-
-    const Ctx = struct {
-        db: *Database,
-        invoked: *bool,
-
-        fn insertKept(self: *@This()) Error!void {
-            self.invoked.* = true;
-            try self.db.exec("insert into notes (body) values ('kept scoped')");
-        }
-
-        fn insertThenFail(self: *@This()) Error!void {
-            self.invoked.* = true;
-            try self.db.exec("insert into notes (body) values ('rolled back scoped')");
-            return error.InvalidArgument;
-        }
-
-        fn insertInner(self: *@This()) Error!void {
-            try self.db.exec("insert into notes (body) values ('inner rolled back')");
-        }
-
-        fn nestedThenFail(self: *@This()) Error!void {
-            self.invoked.* = true;
-            try self.db.exec("insert into notes (body) values ('outer rolled back')");
-            try self.db.withSavepoint("sp_inner", self, @This().insertInner);
-            return error.InvalidArgument;
-        }
-
-        fn releaseManually(self: *@This()) Error!void {
-            self.invoked.* = true;
-            try self.db.exec("insert into notes (body) values ('manual release kept')");
-            try self.db.releaseSavepoint("sp_manual");
-        }
-    };
-
-    var invoked = false;
-    var ctx = Ctx{ .db = &db, .invoked = &invoked };
-
-    try db.withSavepoint("sp_keep", &ctx, Ctx.insertKept);
-    try std.testing.expect(invoked);
-
-    invoked = false;
-    try std.testing.expectError(error.InvalidArgument, db.withSavepoint("sp_fail", &ctx, Ctx.insertThenFail));
-    try std.testing.expect(invoked);
-
-    invoked = false;
-    try std.testing.expectError(error.InvalidArgument, db.withSavepoint("sp_outer", &ctx, Ctx.nestedThenFail));
-    try std.testing.expect(invoked);
-
-    invoked = false;
-    try std.testing.expectError(error.InvalidArgument, db.withSavepoint("bad name", &ctx, Ctx.insertKept));
-    try std.testing.expect(!invoked);
-
-    invoked = false;
-    try std.testing.expectError(error.SqliteError, db.withSavepoint("sp_manual", &ctx, Ctx.releaseManually));
-    try std.testing.expect(invoked);
-
-    try db.exec("commit");
-    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from notes"));
-    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from notes where body = 'kept scoped'"));
-    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from notes where body = 'manual release kept'"));
-    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from notes where body like '%rolled back%'"));
-}
-
-test "operational copy APIs reject invalid and existing destinations" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "operations-reject-source.zova");
-
-    var invalid_dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const invalid_dest_path = try testingDbPath(&invalid_dest_buffer, tmp.sub_path[0..], "operations-reject.db");
-
-    var existing_backup_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const existing_backup_path = try testingDbPath(&existing_backup_buffer, tmp.sub_path[0..], "operations-existing-backup.zova");
-
-    var existing_compact_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const existing_compact_path = try testingDbPath(&existing_compact_buffer, tmp.sub_path[0..], "operations-existing-compact.zova");
-
-    var existing_restore_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const existing_restore_path = try testingDbPath(&existing_restore_buffer, tmp.sub_path[0..], "operations-existing-restore.zova");
-
-    var missing_parent_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const missing_parent_path = try std.fmt.bufPrintZ(&missing_parent_buffer, ".zig-cache/tmp/{s}/missing-parent/operations.zova", .{tmp.sub_path[0..]});
-
-    {
-        var db = try Database.create(source_path);
-        defer db.deinit();
-        _ = try db.putObject("copy me");
-
-        try std.testing.expectError(error.NotZovaPath, db.backupTo(invalid_dest_path, .{}));
-        try std.testing.expectError(error.NotZovaPath, db.compactTo(invalid_dest_path, .{}));
-    }
-
-    {
-        var dest = try Database.create(existing_backup_path);
-        defer dest.deinit();
-    }
-    {
-        var dest = try Database.create(existing_compact_path);
-        defer dest.deinit();
-    }
-    {
-        var dest = try Database.create(existing_restore_path);
-        defer dest.deinit();
-    }
-
-    var db = try Database.open(source_path);
-    defer db.deinit();
-
-    try std.testing.expectError(error.DestinationExists, db.backupTo(existing_backup_path, .{}));
-    try std.testing.expectError(error.DestinationExists, db.compactTo(existing_compact_path, .{}));
-    try std.testing.expectError(error.DestinationExists, restoreBackup(source_path, existing_restore_path, .{}));
-    try std.testing.expectError(error.CantOpen, db.backupTo(missing_parent_path, .{}));
-    try std.testing.expectError(error.NotZovaPath, restoreBackup(invalid_dest_path, existing_restore_path, .{}));
-}
-
-test "convert sqlite to zova rejects invalid destination path and existing destination" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "rejects.db");
-
-    var invalid_dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const invalid_dest_path = try testingDbPath(&invalid_dest_buffer, tmp.sub_path[0..], "rejects.db");
-
-    var existing_dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const existing_dest_path = try testingDbPath(&existing_dest_buffer, tmp.sub_path[0..], "existing-dest.zova");
-
-    {
-        var source = try sqlite.Database.open(source_path);
-        defer source.deinit();
-        try source.exec("create table data (id integer primary key)");
-    }
-
-    try std.testing.expectError(error.NotZovaPath, convertSqliteToZova(source_path, invalid_dest_path));
-
-    {
-        var dest = try Database.create(existing_dest_path);
-        defer dest.deinit();
-    }
-
-    try std.testing.expectError(error.DestinationExists, convertSqliteToZova(source_path, existing_dest_path));
 }
 
 test "convert sqlite to zova rejects non sqlite source file" {
@@ -7325,4 +6446,13 @@ test "conversion rejects extension private source names and cleans destination" 
 
     try std.testing.expectError(error.ZovaNameConflict, convertSqliteToZova(source_path, dest_path));
     try std.testing.expectError(error.NotZovaDatabase, Database.open(dest_path));
+}
+
+comptime {
+    if (@import("builtin").is_test) {
+        _ = @import("database_lifecycle_tests.zig");
+        _ = @import("database_transactions_tests.zig");
+        _ = @import("database_bound_stores_tests.zig");
+        _ = @import("database_notifications_tests.zig");
+    }
 }
