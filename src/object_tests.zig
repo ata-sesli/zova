@@ -1267,6 +1267,35 @@ test "put object rejects active user transactions" {
     try db.sqlite_db.rollback();
 }
 
+test "synchronous object puts release input on success and chunk SQL failure" {
+    for ([_]object_impl.ObjectStorageProfile{ .deduplication, .streaming }) |profile| {
+        var raw = try sqlite.Database.open(":memory:");
+        defer raw.deinit();
+        var db = try preparePrototypeDatabase(&raw);
+        const bytes = try std.testing.allocator.alloc(u8, fixed_chunks.chunk_size + 1);
+        defer std.testing.allocator.free(bytes);
+        @memset(bytes, 0x5a);
+        // Fail after a chunk has already been inserted, not just at prepare.
+        try raw.exec(
+            "create trigger fail_second_chunk before insert on _zova_object_chunks " ++
+                "when new.chunk_index = 1 begin select raise(abort, 'injected'); end",
+        );
+        try std.testing.expectError(error.Constraint, db.putObjectWithOptions(bytes, .{ .profile = profile }));
+        @memset(bytes, 0x6b);
+        try std.testing.expectEqual(@as(i64, 0), try testingCount(&raw, "select count(*) from _zova_objects"));
+        try std.testing.expectEqual(@as(i64, 0), try testingCount(&raw, "select count(*) from _zova_chunks"));
+        try raw.exec("drop trigger fail_second_chunk");
+        const id = try db.putObjectWithOptions(bytes, .{ .profile = profile });
+        const duplicate = try db.putObjectWithOptions(bytes, .{ .profile = profile });
+        try std.testing.expectEqualSlices(u8, &id, &duplicate);
+        @memset(bytes, 0);
+        var stored = try db.getObject(std.testing.allocator, id);
+        defer stored.deinit(std.testing.allocator);
+        try std.testing.expectEqual(fixed_chunks.chunk_size + 1, stored.bytes.len);
+        for (stored.bytes) |byte| try std.testing.expectEqual(@as(u8, 0x6b), byte);
+    }
+}
+
 test "failed put object rolls back visible private rows" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
