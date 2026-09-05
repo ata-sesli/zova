@@ -8,6 +8,79 @@ const test_support = @import("zova_test_support.zig");
 
 const testingDbPath = test_support.testingDbPath;
 
+fn checkLimitedWalkAllocations(allocator: std.mem.Allocator, db: *zova.Database) !void {
+    var walk = try db.graphWalkDirection(allocator, .{
+        .graph_name = "keys",
+        .start_node_id = "root",
+        .direction = .outgoing,
+        .max_depth = 4,
+        .limit = 2,
+    });
+    defer walk.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), walk.items.len);
+}
+
+test "walk cursors bind integer endpoints and preserve owned limited results" {
+    const Trace = struct {
+        calls: usize = 0,
+        lookups: usize = 0,
+        fn callback(_: c_uint, context: ?*anyopaque, statement: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            const handle: *sqlite.c.sqlite3_stmt = @ptrCast(@alignCast(statement.?));
+            const sql = std.mem.span(sqlite.c.sqlite3_sql(handle));
+            if (std.mem.indexOf(u8, sql, "select n.node_id,n.kind,e.edge_type_key") != null) {
+                self.calls += 1;
+                if (std.mem.indexOf(u8, sql, "node_id=?2") != null) self.lookups += 1;
+            }
+            return 0;
+        }
+    };
+    var db = try zova.Database.createMemory();
+    defer db.deinit();
+    try db.createGraph("keys");
+    try db.putGraphNodes(&.{
+        .{ .graph_name = "keys", .node_id = "root", .kind = "node" },
+        .{ .graph_name = "keys", .node_id = "z", .kind = "node" },
+        .{ .graph_name = "keys", .node_id = "a", .kind = "node" },
+    });
+    try db.putGraphEdges(&.{
+        .{ .graph_name = "keys", .from_node_id = "root", .to_node_id = "root", .edge_type = "link" },
+        .{ .graph_name = "keys", .from_node_id = "root", .to_node_id = "z", .edge_type = "link" },
+        .{ .graph_name = "keys", .from_node_id = "root", .to_node_id = "a", .edge_type = "link" },
+        .{ .graph_name = "keys", .from_node_id = "z", .to_node_id = "root", .edge_type = "link" },
+        .{ .graph_name = "keys", .from_node_id = "a", .to_node_id = "root", .edge_type = "link" },
+    });
+    var trace: Trace = .{};
+    _ = sqlite.c.sqlite3_trace_v2(db.sqlite_db.handle, sqlite.c.SQLITE_TRACE_STMT, Trace.callback, &trace);
+    defer _ = sqlite.c.sqlite3_trace_v2(db.sqlite_db.handle, 0, null, null);
+    for ([_]graph.GraphNeighborDirection{ .outgoing, .incoming }) |direction| {
+        for ([_]?[]const u8{ null, "link" }) |edge_type| {
+            const options = graph.GraphWalkDirectionOptions{
+                .graph_name = "keys",
+                .start_node_id = "root",
+                .direction = direction,
+                .edge_type = edge_type,
+                .max_depth = 4,
+                .limit = 3,
+            };
+            var ordinary = try db.graphWalkDirection(std.testing.allocator, options);
+            defer ordinary.deinit(std.testing.allocator);
+            var profile: graph.GraphWalkScanProfile = .{};
+            var profiled = try db.graphWalkDirectionProfiled(std.testing.allocator, options, &profile);
+            defer profiled.deinit(std.testing.allocator);
+            try std.testing.expectEqualDeep(ordinary.items, profiled.items);
+            try std.testing.expectEqual(@as(usize, 3), ordinary.items.len);
+            try std.testing.expectEqualStrings("z", ordinary.items[1].node_id);
+            try std.testing.expectEqualStrings("root", ordinary.items[1].predecessor_node_id.?);
+            try std.testing.expectEqualStrings("a", ordinary.items[2].node_id);
+        }
+    }
+    try std.testing.expect(trace.calls > 0);
+    try std.testing.expectEqual(@as(usize, 0), trace.lookups);
+    _ = sqlite.c.sqlite3_trace_v2(db.sqlite_db.handle, 0, null, null);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkLimitedWalkAllocations, .{&db});
+}
+
 fn lowerHexAlloc(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     const digits = "0123456789abcdef";
     const out = try allocator.alloc(u8, bytes.len * 2);
@@ -711,6 +784,54 @@ test "fresh keyed graph build routes to a bound graph store" {
     try std.testing.expectEqual(sqlite.Step.row, try counts.step());
     try std.testing.expectEqual(@as(i64, 0), counts.columnInt64(0));
     try std.testing.expectEqual(@as(i64, 1), counts.columnInt64(1));
+}
+
+test "integer walk keys route through a bound store and caller rollback" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "walk-bound-main.zova");
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "walk-bound-store.zova");
+    var db = try zova.Database.create(main_path);
+    defer db.deinit();
+    try zova.createGraphStore(store_path);
+    try db.bindGraphStore(store_path);
+    try db.createGraph("app");
+    try db.putGraphNodes(&.{
+        .{ .graph_name = "app", .node_id = "a", .kind = "node" },
+        .{ .graph_name = "app", .node_id = "b", .kind = "node" },
+    });
+    try db.beginImmediate();
+    try db.putGraphEdges(&.{.{ .graph_name = "app", .from_node_id = "a", .to_node_id = "b", .edge_type = "link" }});
+    for ([_]graph.GraphNeighborDirection{ .outgoing, .incoming }) |direction| {
+        const options = graph.GraphWalkDirectionOptions{
+            .graph_name = "app",
+            .start_node_id = if (direction == .outgoing) "a" else "b",
+            .direction = direction,
+            .edge_type = "link",
+            .max_depth = 2,
+            .limit = 10,
+        };
+        var walk = try db.graphWalkDirection(std.testing.allocator, options);
+        defer walk.deinit(std.testing.allocator);
+        var profile: graph.GraphWalkScanProfile = .{};
+        var profiled = try db.graphWalkDirectionProfiled(std.testing.allocator, options, &profile);
+        defer profiled.deinit(std.testing.allocator);
+        try std.testing.expectEqualDeep(walk.items, profiled.items);
+        try std.testing.expectEqual(@as(usize, 2), walk.items.len);
+        try std.testing.expectEqualStrings(options.start_node_id, walk.items[1].predecessor_node_id.?);
+    }
+    try db.rollback();
+    var after = try db.graphWalkDirection(std.testing.allocator, .{
+        .graph_name = "app",
+        .start_node_id = "a",
+        .direction = .outgoing,
+        .max_depth = 2,
+        .limit = 10,
+    });
+    defer after.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), after.items.len);
 }
 
 test "opaque row keys cannot replace per-graph created order" {
