@@ -1,67 +1,98 @@
-# Zova browser core spike
+# zova-wasm
 
-Experimental #38 go/no-go proof for the rc.3 WASM preview. This is not yet an
-npm package or a supported browser API. Package version remains 1.0.0-rc.2 and
-storage format remains 11 while feature work proceeds.
+Experimental, memory-only Zova SQL and binary KV for browsers. The real Zova
+core and bundled SQLite run inside a dedicated worker as one WebAssembly module.
 
-The build emits the real `src/c_api.zig` core for `wasm32-emscripten` using Zig
-0.16.0 ReleaseSafe, then links it with bundled SQLite 3.53.4 and a private C
-smoke fixture. Emscripten is pinned by `emscripten-version.txt` (6.0.9; the
-validated Homebrew build identifies itself as 6.0.9-git).
+This is an unpublished preview for the rc.3 work. Its current development
+version follows the repository (`1.0.0-rc.2`, format 11). Browser API stability
+and full native compatibility are not promised. Closing the database,
+terminating its worker, or leaving the page loses its data.
 
-## Run with Helium
+## Try a local package
 
-Install the pinned Emscripten version and Bun, then choose an output directory
-on the external disk:
+Build and pack using the instructions below, then install the resulting tarball
+with `bun add /absolute/path/zova-wasm-1.0.0-rc.2.tgz` in your browser application.
+The package exports browser ESM and TypeScript declarations, with no native
+addon dependency. Serve over HTTP(S), allowing module workers and WebAssembly.
+Worker and WASM URLs resolve relative to the package; keep its files together
+when deploying. Bundler compatibility is not yet a tested guarantee.
 
-```sh
-sh bindings/wasm/tools/build-wasm.sh /Volumes/wipesides/codebase-memory-mcp-cache/zova-wasm-38
-TMPDIR=/Volumes/wipesides/codebase-memory-mcp-cache/zova-object-1m \
-  bun bindings/wasm/tests/browser-smoke.mjs \
-  /Volumes/wipesides/codebase-memory-mcp-cache/zova-wasm-38 \
-  /Applications/Helium.app/Contents/MacOS/Helium
+```ts
+import { Database, ZovaWasmError } from 'zova-wasm';
+
+const db = await Database.createMemory();
+try {
+  await db.exec('CREATE TABLE tasks(id INTEGER, title TEXT)');
+  await db.query('INSERT INTO tasks VALUES (?, ?)', [1n, 'Try browser Zova']);
+  const result = await db.query('SELECT id, title FROM tasks WHERE id = ?', [1n]);
+  console.log(result.columns); // ['id', 'title']
+  console.log(result.rows);    // [[1n, 'Try browser Zova']]
+
+  const encode = (text: string) => new TextEncoder().encode(text);
+  await db.kv.put(encode('cache'), encode('greeting'), encode('hello'));
+  const value = await db.kv.get(encode('cache'), encode('greeting'));
+  console.log(value === null ? 'missing' : new TextDecoder().decode(value));
+  console.log(await db.kv.delete(encode('cache'), encode('greeting'))); // true
+} catch (error) {
+  if (error instanceof ZovaWasmError) console.error(error.status, error.message);
+  else throw error;
+} finally {
+  await db.close();
+}
 ```
 
-The test launches only the supplied browser, using a separate temporary profile
-and a loopback server. It downloads no browser and never uses your browsing
-profile. It runs a real dedicated module worker, checks an i64 result crosses
-the WASM boundary as `bigint`, and performs ten create/insert/query/close cycles.
-Each query checks both the inserted value and the real format-11 metadata.
-Close must succeed after statement finalization. The test has a 30-second
-deadline and terminates its browser and server afterward.
+## Values and lifecycle
 
-The report includes observed initialization and ten-cycle smoke duration, not
-performance promises. The build prints uncompressed JS and WASM byte counts.
+SQL accepts null, finite numbers, signed 64-bit bigint, strings, and Uint8Array.
+Numbers bind as floating-point values; use bigint for integer parameters.
+Integer result columns return bigint. Positional rows preserve column order
+even when names repeat. Text and blobs are copied out of native memory.
 
-Validated locally with Helium 152.0.7977.64 and Emscripten 6.0.9-git:
+KV namespaces, keys, and values are Uint8Array values. Missing get returns null;
+an empty stored value returns an empty Uint8Array. Delete reports whether the
+key existed. Caller buffers remain attached and are copied when requests send.
 
-| Observation | Result |
-| --- | --- |
-| Dedicated-worker lifecycle | 10/10 cycles passed |
-| Module initialization | 21.5 ms |
-| Ten lifecycle cycles | 57.4 ms |
-| Uncompressed WASM | 1,447,880 bytes |
-| Uncompressed JavaScript | 66,478 bytes |
+Each database owns one worker. Concurrent calls execute in request order.
+Close follows earlier work, is idempotent, and marks `closed` immediately.
+Operations after close reject. Worker failures reject outstanding work and
+mark the database closed. Errors include `status` and `statusCode`.
 
-These are single-run smoke observations, not benchmarks. Native verification
-also passed: 772 Zig tests, C/C++ smoke, generated-C symbol parity, 11 raw
-`zova-sys` tests, and 56 JavaScript tests.
+## Current boundaries
 
-## Boundaries
+There is no persistence, OPFS, import/export, public prepared-statement handle,
+transaction callback helper, graph/vector/object helper, native extension,
+bound-store API, migration, or shared access between workers. The native
+`zova-js` package is independent. There is no Node/CommonJS fallback.
 
-- Only the private smoke bridge is exposed to JavaScript. The native C ABI
-  retains all existing exports; browser builds select a lifecycle/query subset.
-- WASM requires single-threaded compilation and disabled dynamic extensions.
-  Native handle mutexes and SQLite thread-safety are unchanged.
-- Emscripten's volatile MEMFS supplies SQLite's Unix syscall behavior. It does
-  not provide disk persistence, OPFS, or a host filesystem. Do not disable it
-  with `FILESYSTEM=0`: no-op syscall stubs can hang SQLite's `robust_open` loop.
-- Browser safety violations trap instead of invoking Zig's native panic I/O.
-  Zig-side host filesystem operations are unavailable. Graph SQL registration
-  stays intact; any profiling timestamps use Emscripten's monotonic clock.
-- No pthreads, shared memory, browser persistence, dynamic loading, or alternate
-  SQLite engine is added.
+Emscripten's volatile MEMFS supplies SQLite's syscall environment; it is not
+host filesystem access or durable storage. The build is single-threaded and
+does not require SharedArrayBuffer. Safety traps become worker failures.
 
-The asynchronous bridge/runtime (#41), public SQL/KV package (#40), and packed
-artifact browser CI/publication (#39) remain separate work. Those workflows
-should consume the pinned SDK version file rather than select `latest`.
+## Build and test
+
+Use Zig 0.16.0, Bun, and the pinned Emscripten version in
+`emscripten-version.txt` (6.0.9). Install development dependencies with
+`bun install` in `bindings/wasm`. From the repository root:
+
+```sh
+sh bindings/wasm/tools/build-package.sh /absolute/external/build-output
+cd /absolute/external/build-output/package
+npm pack --ignore-scripts
+```
+
+Build products and caches default to the chosen output directory. Existing
+EM_CACHE, ZIG_LOCAL_CACHE_DIR, and ZIG_GLOBAL_CACHE_DIR settings can be reused.
+Validate the tarball from the repository root:
+
+```sh
+bun bindings/wasm/tools/check-package.mjs /absolute/path/zova-wasm-1.0.0-rc.2.tgz
+bun test bindings/wasm/tests/api.test.ts bindings/wasm/tests/channel.test.mjs
+```
+
+The browser runner accepts an explicitly supplied executable and uses a
+temporary profile; it downloads no browser. Set TMPDIR to external storage.
+Browser CI and registry publication remain issue #39.
+
+## License
+
+MIT; see LICENSE.

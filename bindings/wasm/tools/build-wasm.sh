@@ -31,8 +31,10 @@ echo "linking Zova, bundled SQLite, and private smoke bridge"
     -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_DBSTAT_VTAB \
     -DSQLITE_OMIT_LOAD_EXTENSION \
     "$OUT/zova_c.c" "$SQLITE/sqlite3.c" "$ROOT/bindings/wasm/native/smoke.c" \
+    "$ROOT/bindings/wasm/native/bridge.c" \
     --no-entry -sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=worker \
     -sALLOW_MEMORY_GROWTH=1 \
-    -sEXPORTED_FUNCTIONS='["_zova_wasm_smoke"]' \
+    -sEXPORTED_FUNCTIONS='["_zova_wasm_smoke","_malloc","_free"]' \
+    -sEXPORTED_RUNTIME_METHODS='["HEAPU8","UTF8ToString"]' \
     -o "$OUT/zova.mjs"
 wc -c "$OUT/zova.mjs" "$OUT/zova.wasm"

@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
-const [output, executable] = process.argv.slice(2);
+const [output, executable, mode] = process.argv.slice(2);
 if (!output || !executable) throw new Error("usage: bun browser-smoke.mjs <wasm-output> <browser-executable>");
 const profile = await mkdtemp(join(tmpdir(), "zova-wasm-browser-"));
 let browser;
@@ -22,6 +22,16 @@ const server = Bun.serve({
     if (path === "/result" && request.method === "POST") {
       resolveResult(await request.json());
       return new Response("ok");
+    }
+    if (path === "/" && mode === "runtime") return new Response('<!doctype html><script type="module" src="/runtime-test.mjs"></script>', { headers: { "Content-Type": "text/html" } });
+    if (path === "/runtime-test.mjs") return new Response(Bun.file(new URL("./runtime-browser.mjs", import.meta.url)));
+    if (path === "/" && mode === "package") return new Response('<!doctype html><script type="module" src="/package-test.mjs"></script>', { headers: { "Content-Type": "text/html" } });
+    if (path === "/package-test.mjs") return new Response(Bun.file(new URL("./package-browser.mjs", import.meta.url)));
+    if (mode === "package" && /^\/package\/(?:dist\/[a-z-]+\.(?:js|mjs)|zova\.(?:mjs|wasm))$/.test(path)) {
+      return new Response(Bun.file(join(resolve(output), path.slice("/package/".length))));
+    }
+    if (["/runtime/worker.mjs", "/runtime/runtime.mjs", "/runtime/channel.mjs"].includes(path)) {
+      return new Response(Bun.file(new URL(`../src/${path.split("/").pop()}`, import.meta.url)));
     }
     if (path === "/") return new Response(`<!doctype html><script type="module">
       const worker = new Worker('/worker.mjs', {type:'module'});
