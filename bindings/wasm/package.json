@@ -1,0 +1,26 @@
+{
+  "name": "zova-wasm",
+  "version": "1.0.0-rc.2",
+  "description": "Experimental memory-only Zova SQL and KV for browsers.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ata-sesli/zova.git",
+    "directory": "bindings/wasm"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "browser": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "zova.mjs", "zova.wasm", "LICENSE", "README.md"],
+  "publishConfig": { "access": "public" },
+  "scripts": {
+    "build": "sh tools/build-package.sh",
+    "test": "bun test tests/api.test.ts tests/channel.test.mjs"
+  },
+  "devDependencies": { "typescript": "5.9.3" }
+}
