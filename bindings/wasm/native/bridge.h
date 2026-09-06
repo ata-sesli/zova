@@ -5,6 +5,9 @@
 /* Private single-worker interface. Returned bytes remain owned by the bridge
  * until the next operation or close. Copy them before making another call. */
 int zw_create(void);
+#ifdef ZOVA_WASM_OPFS
+int zw_open_file(int exists);
+#endif
 int zw_close(void);
 void zw_release(void);
 int zw_exec(const char *sql);

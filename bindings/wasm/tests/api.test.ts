@@ -17,6 +17,16 @@ class TestWorker extends EventTarget {
 afterEach(() => { globalThis.Worker = originalWorker; });
 function installWorker() { globalThis.Worker = TestWorker as unknown as typeof Worker; }
 
+test("persistent opening validates names before worker creation", async () => {
+  installWorker();
+  for (const name of ["", "../db", "a/b", "a.b", "a\\b", "\0", "a".repeat(65), null, 1]) {
+    await expect(Database.openPersistent(name as string)).rejects.toBeInstanceOf(ZovaWasmError);
+  }
+  const db = await Database.openPersistent("notes-1");
+  expect(TestWorker.last.messages[0]).toMatchObject({operation:"initialize", args:{name:"notes-1"}});
+  await db.close();
+});
+
 test("validates values before posting and returns typed errors", async () => {
   installWorker();
   const db = await Database.createMemory();

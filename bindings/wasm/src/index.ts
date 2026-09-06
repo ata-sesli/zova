@@ -43,21 +43,32 @@ function validateParameters(parameters: readonly SqlValue[]): void {
 
 const constructionToken = Symbol("Database");
 
-/** Experimental memory-only database. Each instance owns a dedicated worker. */
+/** Experimental browser database. Each instance owns a dedicated worker. */
 export class Database {
   #channel: WorkerChannel;
   #closing?: Promise<void>;
 
   private constructor(channel: WorkerChannel, token: symbol) {
-    if (token !== constructionToken) invalid("Use Database.createMemory()");
+    if (token !== constructionToken) invalid("Use Database.createMemory() or Database.openPersistent()");
     this.#channel = channel;
   }
 
   static async createMemory(): Promise<Database> {
+    return Database.#open({});
+  }
+
+  static async openPersistent(name: string): Promise<Database> {
+    if (typeof name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(name)) {
+      invalid("Database name must be 1–64 ASCII letters, digits, underscores or hyphens, starting with a letter or digit");
+    }
+    return Database.#open({ name });
+  }
+
+  static async #open(args: { name?: string }): Promise<Database> {
     let channel: WorkerChannel | undefined;
     try {
       channel = new WorkerChannel(new Worker(new URL("./worker.mjs", import.meta.url), { type: "module" }));
-      await channel.request("initialize");
+      await channel.request("initialize", args);
       return new Database(channel, constructionToken);
     } catch (error) {
       channel?.terminate();

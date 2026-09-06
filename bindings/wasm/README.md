@@ -1,12 +1,12 @@
 # zova-wasm
 
-Experimental, memory-only Zova SQL and binary KV for browsers. The real Zova
+Experimental Zova SQL and binary KV for browsers, in memory or named OPFS storage. The real Zova
 core and bundled SQLite run inside a dedicated worker as one WebAssembly module.
 
 This is an unpublished preview for the rc.3 work. Its current development
 version follows the repository (`1.0.0-rc.2`, format 11). Browser API stability
-and full native compatibility are not promised. Closing the database,
-terminating its worker, or leaving the page loses its data.
+and full native compatibility are not promised. Memory databases lose their
+data when closed or when their worker/page terminates.
 
 ## Try a local package
 
@@ -41,6 +41,30 @@ try {
 }
 ```
 
+## Named persistent databases
+
+```ts
+const db = await Database.openPersistent('my-app'); // create or reopen
+try {
+  await db.exec('CREATE TABLE IF NOT EXISTS tasks(id INTEGER, title TEXT)');
+} finally {
+  await db.close();
+}
+```
+
+Names are case-sensitive: 1–64 ASCII letters, digits, underscores or hyphens,
+starting with a letter or digit. They are logical names, not filesystem paths.
+SQL and KV methods are unchanged. Existing files are validated before writable
+opening; incompatible or invalid databases reject without automatic migration.
+Missing OPFS support rejects rather than silently opening a memory database.
+
+Persistent opening requires a secure context (HTTPS or localhost), dedicated
+workers, and OPFS synchronous access handles. Each name has one exclusive pool;
+close releases its handles. Concurrent ownership of the same name is not supported.
+Storage belongs to the origin and browser profile. Clearing site data or browser
+eviction can remove it. There is no export/backup API yet. Broader crash, quota,
+and multi-tab recovery guarantees remain experimental.
+
 ## Values and lifecycle
 
 SQL accepts null, finite numbers, signed 64-bit bigint, strings, and Uint8Array.
@@ -59,13 +83,13 @@ mark the database closed. Errors include `status` and `statusCode`.
 
 ## Current boundaries
 
-There is no persistence, OPFS, import/export, public prepared-statement handle,
+There is no import/export, public prepared-statement handle,
 transaction callback helper, graph/vector/object helper, native extension,
 bound-store API, migration, or shared access between workers. The native
 `zova-js` package is independent. There is no Node/CommonJS fallback.
 
-Emscripten's volatile MEMFS supplies SQLite's syscall environment; it is not
-host filesystem access or durable storage. The build is single-threaded and
+Memory databases use volatile storage; named databases use the bundled SQLite's
+OPFS SAH-pool adapter, not a second engine. The build is single-threaded and
 does not require SharedArrayBuffer. Safety traps become worker failures.
 
 ## Build and test
@@ -81,7 +105,10 @@ npm pack --ignore-scripts
 ```
 
 Build products and caches default to the chosen output directory. Existing
-EM_CACHE, ZIG_LOCAL_CACHE_DIR, and ZIG_GLOBAL_CACHE_DIR settings can be reused.
+EM_CACHE can be reused. The build downloads checksum-pinned SQLite adapter
+sources matching the bundled SQLite, or uses ZOVA_SQLITE_WASM_SOURCE when set.
+Its failed-initialization cleanup is patched to release handles without deleting
+the pool's stored files; the build rejects an unexpected upstream cleanup shape.
 Validate the tarball from the repository root:
 
 ```sh

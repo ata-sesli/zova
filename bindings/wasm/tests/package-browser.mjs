@@ -55,6 +55,16 @@ try {
     assert((await db.query("SELECT 1")).rows[0][0] === 1n, "repeated lifecycle");
     await db.close();
   }
+  const persistentName = "test-" + crypto.randomUUID();
+  db = await Database.openPersistent(persistentName);
+  await db.exec("CREATE TABLE saved(value); INSERT INTO saved VALUES(42)");
+  await db.kv.put(new Uint8Array([1]), new Uint8Array([2]), new Uint8Array([3]));
+  await db.close();
+  db = await Database.openPersistent(persistentName);
+  assert((await db.query("SELECT value FROM saved")).rows[0][0] === 42n, "persistent SQL reopen");
+  assert((await db.kv.get(new Uint8Array([1]), new Uint8Array([2])))[0] === 3, "persistent KV reopen");
+  await rejects(db.query("INVALID SQL"));
+  await db.close();
   await fetch("/result", { method: "POST", body: JSON.stringify({ ok: true, packedPackage: true,
     initializationMs: initialized - started, firstQueryMs: queried - initialized }) });
 } catch (error) {
