@@ -23,6 +23,7 @@ export function serveWorker(createModule, port = globalThis) {
   let state = "new";
   let lastId = 0;
   let queue = Promise.resolve();
+  let pool;
   const check = status => {
     if (status === 0) return;
     const pointer = module._zw_error();
@@ -86,8 +87,35 @@ export function serveWorker(createModule, port = globalThis) {
     if (operation === "initialize") {
       if (state !== "new") throw invalid("Worker already initialized");
       state = "initializing";
-      module = await createModule();
-      check(module._zw_create());
+      if (args.name !== undefined && (typeof args.name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(args.name))) throw invalid("Invalid persistent database name");
+      let created = false;
+      try {
+        module = await createModule();
+        if (args.name === undefined) {
+          check(module._zw_create());
+        } else {
+          if (!globalThis.navigator?.storage?.getDirectory || typeof FileSystemFileHandle === "undefined" || !FileSystemFileHandle.prototype.createSyncAccessHandle) {
+            throw Object.assign(new Error("OPFS synchronous storage is unavailable"), {status:"ZOVA_CANT_OPEN",statusCode:13});
+          }
+          const sqlite = await module.zovaOpfsBootstrap();
+          pool = await sqlite.installOpfsSAHPoolVfs({directory:".zova-" + args.name,initialCapacity:6});
+          const vfs = sqlite.capi.sqlite3_vfs_find("opfs-sahpool");
+          if (!vfs || sqlite.capi.sqlite3_vfs_register(vfs,1)) throw new Error("Cannot select OPFS VFS");
+          created = !pool.getFileNames().includes("/db.zova");
+          check(module._zw_open_file(created ? 0 : 1));
+          withBytes(sqlText("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;"), pointer => check(module._zw_exec(pointer)));
+        }
+      } catch (error) {
+        if (module) module._zw_close();
+        if (pool) {
+          if (created) {
+            pool.unlink("/db.zova-journal");
+            pool.unlink("/db.zova");
+          }
+          pool.pauseVfs();
+        }
+        throw error;
+      }
       state = "open";
       return;
     }
@@ -106,7 +134,7 @@ export function serveWorker(createModule, port = globalThis) {
           if (op === 2) return Boolean(module._zw_number());
         })));
       }
-      case "close": check(module._zw_close()); state = "closed"; return;
+      case "close": check(module._zw_close()); pool?.pauseVfs(); state = "closed"; return;
       default: throw invalid("Unknown worker operation");
     }
   };
