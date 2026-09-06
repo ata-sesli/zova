@@ -20,6 +20,12 @@ const server = Bun.serve({
     if (path === "/") return new Response('<script type="module" src="/test.mjs"></script>', { headers: { "Content-Type": "text/html" } });
     if (path === "/failure") return new Response('<script type="module">import * as zova from "/package/dist/index.js"; globalThis.zova = zova;</script>', { headers: { "Content-Type": "text/html" } });
     if (path === "/test.mjs") return new Response(Bun.file(new URL("./package-browser.mjs", import.meta.url)));
+    if (path === "/readme-example.mjs") {
+      const readme = await Bun.file(new URL("../README.md", import.meta.url)).text();
+      const example = readme.match(/<!-- persistent-example -->\s*```js\n([\s\S]*?)```/);
+      if (!example) throw new Error('Persistent README example missing');
+      return new Response(example[1].replace("'zova-wasm'", "'/package/dist/index.js'"), {headers:{'Content-Type':'text/javascript'}});
+    }
     if (path === "/snapshot.mjs") return new Response(`
       import init from '/package/zova.mjs';
       onmessage = async ({data}) => {
@@ -142,6 +148,12 @@ try {
   }, preservedName);
   const wasmBytes = (await stat(join(installedPackage, "zova.wasm"))).size;
   await testDurability(context, base);
+  const examplePage = await context.newPage();
+  await examplePage.goto(`${base}/failure`);
+  const printed = [];
+  examplePage.on('console', message => printed.push(message.text()));
+  await examplePage.evaluate(() => import('/readme-example.mjs'));
+  if (!printed.includes('Keep this task') || !printed.includes('sage')) throw new Error('README example results differ');
   await testOwnership(browser, base);
   console.log(JSON.stringify({ ...result, initializationFailure: true, runtimeFailure: true,
     persistentReopen: true, rejectedOpenPreservesBytes: true, missingOpfs: true,

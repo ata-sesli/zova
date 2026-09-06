@@ -43,14 +43,31 @@ try {
 
 ## Named persistent databases
 
-```ts
+<!-- persistent-example -->
+```js
+import { Database } from 'zova-wasm';
+
+const encode = text => new TextEncoder().encode(text);
 const db = await Database.openPersistent('my-app'); // create or reopen
 try {
-  await db.exec('CREATE TABLE IF NOT EXISTS tasks(id INTEGER, title TEXT)');
+  await db.exec('CREATE TABLE IF NOT EXISTS tasks(id INTEGER PRIMARY KEY, title TEXT)');
+  await db.query('INSERT OR REPLACE INTO tasks VALUES (?, ?)', [1n, 'Keep this task']);
+  await db.kv.put(encode('settings'), encode('theme'), encode('sage'));
 } finally {
   await db.close();
 }
+
+const reopened = await Database.openPersistent('my-app');
+try {
+  const result = await reopened.query('SELECT title FROM tasks WHERE id = ?', [1n]);
+  const theme = await reopened.kv.get(encode('settings'), encode('theme'));
+  console.log(result.rows[0][0]); // Keep this task
+  console.log(new TextDecoder().decode(theme)); // sage
+} finally {
+  await reopened.close();
+}
 ```
+<!-- /persistent-example -->
 
 Names are case-sensitive: 1–64 ASCII letters, digits, underscores or hyphens,
 starting with a letter or digit. They are logical names, not filesystem paths.
@@ -68,6 +85,62 @@ release ownership. Retry opening after the owner has closed or terminated.
 Storage belongs to the origin and browser profile. Clearing site data or browser
 eviction can remove it. There is no export/backup API yet. Broader crash, quota,
 and multi-tab recovery guarantees remain experimental.
+
+### Errors and recovery
+
+Catch `ZovaWasmError` around opening and writes, inspecting `status` and
+`statusCode`. `ZOVA_BUSY` means another owner is active: wait for it to close,
+then retry with a bounded delay. Worker termination releases locks asynchronously;
+do not spin or try to steal them. `ZOVA_CANT_OPEN` can indicate missing storage or
+locking support. Invalid names produce `ZOVA_INVALID_ARGUMENT`.
+
+Format/schema errors are not a request to recreate or delete the database.
+There is no automatic migration here. Storage write/flush failures reject rather
+than fall back to memory; quota failures may surface through SQLite's storage
+error mapping, not as a JavaScript `QuotaExceededError`. Do not assume a failed
+write succeeded or blindly replay a larger application operation. For an explicit
+SQL transaction, attempt rollback, close, and handle recovery at the application
+boundary. SQL and KV writes in the example are separate commits, not one combined
+transaction.
+
+### Browser storage is not a backup
+
+The same name belongs to the same origin (scheme, host and port) and browser
+profile. It is neither a user-selected file nor synchronization with a server or
+another device. Changing the origin/profile gives different storage. Clearing
+site data can delete the database.
+
+Browsers normally use best-effort storage and can evict it under storage pressure.
+Your application may call `navigator.storage.persist()` from its window context
+and inspect its boolean result; the browser may grant or deny it, with permission
+UI varying by browser. Zova does not request this permission automatically.
+`openPersistent()` names the disk-backed mode, not a grant of that permission.
+A grant protects against automatic eviction but is not unlimited capacity, a
+backup, or protection from user deletion. `navigator.storage.estimate()` provides
+an estimate, not reserved space. See [browser quotas and eviction](https://developer.mozilla.org/en-US/docs/Web/API/Storage_API/Storage_quotas_and_eviction_criteria)
+and [persistent-storage permission](https://developer.mozilla.org/en-US/docs/Web/API/StorageManager/persist).
+
+The local packed-artifact gate is verified with Helium; Linux CI targets
+Playwright Chromium. Firefox, Safari, mobile browsers and private-browsing modes
+have not been qualified. Do not infer support from API presence alone. Private
+browsing can restrict storage and normally clears it when the private session
+ends; no private-mode persistence guarantee is made.
+
+Tests cover reload, rollback, worker termination, and injected quota/write/flush
+errors. Real quota exhaustion, browser-process crashes, OS crashes and power loss
+remain unverified. There is no unload-time save requirement for completed commits,
+but these tests are not a general crash-durability or performance guarantee.
+
+### 1.0.0-rc.3 WASM release notes (planned)
+
+- Adds experimental named OPFS SQL/KV storage alongside `createMemory()`.
+- Adds exclusive per-name ownership with explicit busy errors and cleanup.
+- Adds packed-artifact persistence, rollback and injected-storage-fault coverage.
+- Defers export/import, shared multi-tab connections and automatic migration.
+- Does not promise native feature parity, stable browser APIs or performance.
+
+These notes describe the rc.3 changes; the current development package remains
+rc.2 until the separate release bump.
 
 ## Values and lifecycle
 
