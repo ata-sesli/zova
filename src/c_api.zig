@@ -3,6 +3,15 @@
 //! Keep this file as the auditable C boundary: exported functions and public
 //! ABI type aliases only. Implementation details live in `c_api_internal.zig`.
 const internal = @import("c_api_internal.zig");
+// Browser safety failures trap; they cannot print through native process I/O.
+pub const panic = if (@import("builtin").os.tag == .emscripten)
+    @import("std").debug.FullPanic(struct {
+        fn panic(_: []const u8, _: ?usize) noreturn {
+            @trap();
+        }
+    }.panic)
+else
+    @import("std").debug.FullPanic(@import("std").debug.defaultPanic);
 pub const zova_database = internal.zova_database;
 pub const zova_fresh_build = internal.zova_fresh_build;
 pub const zova_object_writer = internal.zova_object_writer;
@@ -222,373 +231,373 @@ pub const zova_graph_walk_request = internal.zova_graph_walk_request;
 pub const zova_graph_walk_direction_request = internal.zova_graph_walk_direction_request;
 pub const zova_graph_walk_direction_profiled_request = internal.zova_graph_walk_direction_profiled_request;
 
-export fn zova_abi_version_major() callconv(.c) u32 {
+pub fn zova_abi_version_major() callconv(.c) u32 {
     return internal.zova_abi_version_major();
 }
 
-export fn zova_abi_version_minor() callconv(.c) u32 {
+pub fn zova_abi_version_minor() callconv(.c) u32 {
     return internal.zova_abi_version_minor();
 }
 
-export fn zova_abi_version_patch() callconv(.c) u32 {
+pub fn zova_abi_version_patch() callconv(.c) u32 {
     return internal.zova_abi_version_patch();
 }
 
-export fn zova_abi_version_string() callconv(.c) [*:0]const u8 {
+pub fn zova_abi_version_string() callconv(.c) [*:0]const u8 {
     return internal.zova_abi_version_string();
 }
 
-export fn zova_status_name(status: c_int) callconv(.c) [*:0]const u8 {
+pub fn zova_status_name(status: c_int) callconv(.c) [*:0]const u8 {
     return internal.zova_status_name(status);
 }
 
-export fn zova_buffer_free(buffer: ?*zova_buffer) callconv(.c) void {
+pub fn zova_buffer_free(buffer: ?*zova_buffer) callconv(.c) void {
     return internal.zova_buffer_free(buffer);
 }
 
-export fn zova_kv_get_result_free(result: ?*zova_kv_get_result) callconv(.c) void {
+pub fn zova_kv_get_result_free(result: ?*zova_kv_get_result) callconv(.c) void {
     return internal.zova_kv_get_result_free(result);
 }
 
-export fn zova_kv_get_many_results_free(results: ?*zova_kv_get_many_results) callconv(.c) void {
+pub fn zova_kv_get_many_results_free(results: ?*zova_kv_get_many_results) callconv(.c) void {
     return internal.zova_kv_get_many_results_free(results);
 }
 
-export fn zova_message_free(message: ?*zova_message) callconv(.c) void {
+pub fn zova_message_free(message: ?*zova_message) callconv(.c) void {
     return internal.zova_message_free(message);
 }
 
-export fn zova_text_free(text: ?*zova_text) callconv(.c) void {
+pub fn zova_text_free(text: ?*zova_text) callconv(.c) void {
     return internal.zova_text_free(text);
 }
 
-export fn zova_notification_free(notification: ?*zova_notification) callconv(.c) void {
+pub fn zova_notification_free(notification: ?*zova_notification) callconv(.c) void {
     return internal.zova_notification_free(notification);
 }
 
-export fn zova_object_manifest_free(manifest: ?*zova_object_manifest) callconv(.c) void {
+pub fn zova_object_manifest_free(manifest: ?*zova_object_manifest) callconv(.c) void {
     return internal.zova_object_manifest_free(manifest);
 }
 
-export fn zova_vector_free(vector: ?*zova_vector) callconv(.c) void {
+pub fn zova_vector_free(vector: ?*zova_vector) callconv(.c) void {
     return internal.zova_vector_free(vector);
 }
 
-export fn zova_vector_search_results_free(results: ?*zova_vector_search_results) callconv(.c) void {
+pub fn zova_vector_search_results_free(results: ?*zova_vector_search_results) callconv(.c) void {
     return internal.zova_vector_search_results_free(results);
 }
 
-export fn zova_vector_collection_info_free(info: ?*zova_vector_collection_info) callconv(.c) void {
+pub fn zova_vector_collection_info_free(info: ?*zova_vector_collection_info) callconv(.c) void {
     return internal.zova_vector_collection_info_free(info);
 }
 
-export fn zova_vector_collection_list_free(list: ?*zova_vector_collection_list) callconv(.c) void {
+pub fn zova_vector_collection_list_free(list: ?*zova_vector_collection_list) callconv(.c) void {
     return internal.zova_vector_collection_list_free(list);
 }
 
-export fn zova_graph_info_free(info: ?*zova_graph_info) callconv(.c) void {
+pub fn zova_graph_info_free(info: ?*zova_graph_info) callconv(.c) void {
     return internal.zova_graph_info_free(info);
 }
 
-export fn zova_graph_list_free(list: ?*zova_graph_list) callconv(.c) void {
+pub fn zova_graph_list_free(list: ?*zova_graph_list) callconv(.c) void {
     return internal.zova_graph_list_free(list);
 }
 
-export fn zova_extension_info_free(info: ?*zova_extension_info) callconv(.c) void {
+pub fn zova_extension_info_free(info: ?*zova_extension_info) callconv(.c) void {
     return internal.zova_extension_info_free(info);
 }
 
-export fn zova_extension_list_free(list: ?*zova_extension_list) callconv(.c) void {
+pub fn zova_extension_list_free(list: ?*zova_extension_list) callconv(.c) void {
     return internal.zova_extension_list_free(list);
 }
 
-export fn zova_graph_node_free(node: ?*zova_graph_node) callconv(.c) void {
+pub fn zova_graph_node_free(node: ?*zova_graph_node) callconv(.c) void {
     return internal.zova_graph_node_free(node);
 }
 
-export fn zova_graph_edge_free(edge: ?*zova_graph_edge) callconv(.c) void {
+pub fn zova_graph_edge_free(edge: ?*zova_graph_edge) callconv(.c) void {
     return internal.zova_graph_edge_free(edge);
 }
 
-export fn zova_graph_neighbor_results_free(results: ?*zova_graph_neighbor_results) callconv(.c) void {
+pub fn zova_graph_neighbor_results_free(results: ?*zova_graph_neighbor_results) callconv(.c) void {
     return internal.zova_graph_neighbor_results_free(results);
 }
 
-export fn zova_graph_keyed_neighbor_results_free(results: ?*zova_graph_keyed_neighbor_results) callconv(.c) void {
+pub fn zova_graph_keyed_neighbor_results_free(results: ?*zova_graph_keyed_neighbor_results) callconv(.c) void {
     return internal.zova_graph_keyed_neighbor_results_free(results);
 }
-export fn zova_graph_keyed_node_results_free(results: ?*zova_graph_keyed_node_results) callconv(.c) void {
+pub fn zova_graph_keyed_node_results_free(results: ?*zova_graph_keyed_node_results) callconv(.c) void {
     return internal.zova_graph_keyed_node_results_free(results);
 }
-export fn zova_graph_keyed_edge_results_free(results: ?*zova_graph_keyed_edge_results) callconv(.c) void {
+pub fn zova_graph_keyed_edge_results_free(results: ?*zova_graph_keyed_edge_results) callconv(.c) void {
     return internal.zova_graph_keyed_edge_results_free(results);
 }
-export fn zova_graph_edge_payload_results_free(results: ?*zova_graph_edge_payload_results) callconv(.c) void {
+pub fn zova_graph_edge_payload_results_free(results: ?*zova_graph_edge_payload_results) callconv(.c) void {
     return internal.zova_graph_edge_payload_results_free(results);
 }
 
-export fn zova_fresh_build_begin(request: ?*const zova_fresh_build_begin_request) callconv(.c) zova_status {
+pub fn zova_fresh_build_begin(request: ?*const zova_fresh_build_begin_request) callconv(.c) zova_status {
     return internal.zova_fresh_build_begin(request);
 }
-export fn zova_fresh_build_table_rows(request: ?*const zova_fresh_build_rows_request) callconv(.c) zova_status {
+pub fn zova_fresh_build_table_rows(request: ?*const zova_fresh_build_rows_request) callconv(.c) zova_status {
     return internal.zova_fresh_build_table_rows(request);
 }
-export fn zova_fresh_build_fts_rows(request: ?*const zova_fresh_build_rows_request) callconv(.c) zova_status {
+pub fn zova_fresh_build_fts_rows(request: ?*const zova_fresh_build_rows_request) callconv(.c) zova_status {
     return internal.zova_fresh_build_fts_rows(request);
 }
-export fn zova_fresh_build_graph(request: ?*const zova_fresh_build_graph_request) callconv(.c) zova_status {
+pub fn zova_fresh_build_graph(request: ?*const zova_fresh_build_graph_request) callconv(.c) zova_status {
     return internal.zova_fresh_build_graph(request);
 }
-export fn zova_fresh_build_vectors(request: ?*const zova_fresh_build_vectors_request) callconv(.c) zova_status {
+pub fn zova_fresh_build_vectors(request: ?*const zova_fresh_build_vectors_request) callconv(.c) zova_status {
     return internal.zova_fresh_build_vectors(request);
 }
-export fn zova_fresh_build_finish(request: ?*const zova_fresh_build_finish_request) callconv(.c) zova_status {
+pub fn zova_fresh_build_finish(request: ?*const zova_fresh_build_finish_request) callconv(.c) zova_status {
     return internal.zova_fresh_build_finish(request);
 }
-export fn zova_fresh_build_abort(build: ?*zova_fresh_build) callconv(.c) zova_status {
+pub fn zova_fresh_build_abort(build: ?*zova_fresh_build) callconv(.c) zova_status {
     return internal.zova_fresh_build_abort(build);
 }
-export fn zova_fresh_build_destroy(build: ?*zova_fresh_build) callconv(.c) void {
+pub fn zova_fresh_build_destroy(build: ?*zova_fresh_build) callconv(.c) void {
     return internal.zova_fresh_build_destroy(build);
 }
 
-export fn zova_graph_scan_results_free(results: ?*zova_graph_scan_results) callconv(.c) void {
+pub fn zova_graph_scan_results_free(results: ?*zova_graph_scan_results) callconv(.c) void {
     return internal.zova_graph_scan_results_free(results);
 }
 
-export fn zova_graph_walk_results_free(results: ?*zova_graph_walk_results) callconv(.c) void {
+pub fn zova_graph_walk_results_free(results: ?*zova_graph_walk_results) callconv(.c) void {
     return internal.zova_graph_walk_results_free(results);
 }
 
-export fn zova_database_create(request: ?*const zova_database_open_request) callconv(.c) zova_status {
+pub fn zova_database_create(request: ?*const zova_database_open_request) callconv(.c) zova_status {
     return internal.zova_database_create(request);
 }
 
-export fn zova_database_create_memory(request: ?*const zova_database_create_memory_request) callconv(.c) zova_status {
+pub fn zova_database_create_memory(request: ?*const zova_database_create_memory_request) callconv(.c) zova_status {
     return internal.zova_database_create_memory(request);
 }
 
-export fn zova_database_restore_to_memory(request: ?*const zova_database_restore_to_memory_request) callconv(.c) zova_status {
+pub fn zova_database_restore_to_memory(request: ?*const zova_database_restore_to_memory_request) callconv(.c) zova_status {
     return internal.zova_database_restore_to_memory(request);
 }
 
-export fn zova_database_create_with_options(request: ?*const zova_database_create_options_request) callconv(.c) zova_status {
+pub fn zova_database_create_with_options(request: ?*const zova_database_create_options_request) callconv(.c) zova_status {
     return internal.zova_database_create_with_options(request);
 }
 
-export fn zova_database_create_with_extensions(request: ?*const zova_database_open_extensions_request) callconv(.c) zova_status {
+pub fn zova_database_create_with_extensions(request: ?*const zova_database_open_extensions_request) callconv(.c) zova_status {
     return internal.zova_database_create_with_extensions(request);
 }
 
-export fn zova_database_open(request: ?*const zova_database_open_request) callconv(.c) zova_status {
+pub fn zova_database_open(request: ?*const zova_database_open_request) callconv(.c) zova_status {
     return internal.zova_database_open(request);
 }
 
-export fn zova_database_open_with_options(request: ?*const zova_database_open_options_request) callconv(.c) zova_status {
+pub fn zova_database_open_with_options(request: ?*const zova_database_open_options_request) callconv(.c) zova_status {
     return internal.zova_database_open_with_options(request);
 }
 
-export fn zova_database_open_with_extensions(request: ?*const zova_database_open_extensions_request) callconv(.c) zova_status {
+pub fn zova_database_open_with_extensions(request: ?*const zova_database_open_extensions_request) callconv(.c) zova_status {
     return internal.zova_database_open_with_extensions(request);
 }
 
-export fn zova_extension_bundle_verify(request: ?*const zova_extension_bundle_request) callconv(.c) zova_status {
+pub fn zova_extension_bundle_verify(request: ?*const zova_extension_bundle_request) callconv(.c) zova_status {
     return internal.zova_extension_bundle_verify(request);
 }
 
-export fn zova_extension_bundle_trust(request: ?*const zova_extension_bundle_request) callconv(.c) zova_status {
+pub fn zova_extension_bundle_trust(request: ?*const zova_extension_bundle_request) callconv(.c) zova_status {
     return internal.zova_extension_bundle_trust(request);
 }
 
-export fn zova_extension_bundle_untrust(request: ?*const zova_extension_bundle_untrust_request) callconv(.c) zova_status {
+pub fn zova_extension_bundle_untrust(request: ?*const zova_extension_bundle_untrust_request) callconv(.c) zova_status {
     return internal.zova_extension_bundle_untrust(request);
 }
 
-export fn zova_database_close(db: ?*zova_database) callconv(.c) zova_status {
+pub fn zova_database_close(db: ?*zova_database) callconv(.c) zova_status {
     return internal.zova_database_close(db);
 }
 
-export fn zova_database_exec(request: ?*const zova_database_exec_request) callconv(.c) zova_status {
+pub fn zova_database_exec(request: ?*const zova_database_exec_request) callconv(.c) zova_status {
     return internal.zova_database_exec(request);
 }
 
-export fn zova_database_register_function(request: ?*const zova_sql_function_register_request) callconv(.c) zova_status {
+pub fn zova_database_register_function(request: ?*const zova_sql_function_register_request) callconv(.c) zova_status {
     return internal.zova_database_register_function(request);
 }
 
-export fn zova_database_begin(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
+pub fn zova_database_begin(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
     return internal.zova_database_begin(request);
 }
 
-export fn zova_database_begin_immediate(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
+pub fn zova_database_begin_immediate(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
     return internal.zova_database_begin_immediate(request);
 }
 
-export fn zova_database_commit(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
+pub fn zova_database_commit(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
     return internal.zova_database_commit(request);
 }
 
-export fn zova_database_rollback(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
+pub fn zova_database_rollback(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
     return internal.zova_database_rollback(request);
 }
 
-export fn zova_database_savepoint(request: ?*const zova_database_savepoint_request) callconv(.c) zova_status {
+pub fn zova_database_savepoint(request: ?*const zova_database_savepoint_request) callconv(.c) zova_status {
     return internal.zova_database_savepoint(request);
 }
 
-export fn zova_database_rollback_to_savepoint(request: ?*const zova_database_savepoint_request) callconv(.c) zova_status {
+pub fn zova_database_rollback_to_savepoint(request: ?*const zova_database_savepoint_request) callconv(.c) zova_status {
     return internal.zova_database_rollback_to_savepoint(request);
 }
 
-export fn zova_database_release_savepoint(request: ?*const zova_database_savepoint_request) callconv(.c) zova_status {
+pub fn zova_database_release_savepoint(request: ?*const zova_database_savepoint_request) callconv(.c) zova_status {
     return internal.zova_database_release_savepoint(request);
 }
 
-export fn zova_database_vacuum(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
+pub fn zova_database_vacuum(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
     return internal.zova_database_vacuum(request);
 }
 
-export fn zova_database_backup(request: ?*const zova_database_backup_request) callconv(.c) zova_status {
+pub fn zova_database_backup(request: ?*const zova_database_backup_request) callconv(.c) zova_status {
     return internal.zova_database_backup(request);
 }
 
-export fn zova_database_compact(request: ?*const zova_database_compact_request) callconv(.c) zova_status {
+pub fn zova_database_compact(request: ?*const zova_database_compact_request) callconv(.c) zova_status {
     return internal.zova_database_compact(request);
 }
 
-export fn zova_database_set_busy_timeout(request: ?*const zova_database_busy_timeout_request) callconv(.c) zova_status {
+pub fn zova_database_set_busy_timeout(request: ?*const zova_database_busy_timeout_request) callconv(.c) zova_status {
     return internal.zova_database_set_busy_timeout(request);
 }
 
-export fn zova_database_last_insert_rowid(request: ?*const zova_database_last_insert_rowid_request) callconv(.c) zova_status {
+pub fn zova_database_last_insert_rowid(request: ?*const zova_database_last_insert_rowid_request) callconv(.c) zova_status {
     return internal.zova_database_last_insert_rowid(request);
 }
 
-export fn zova_database_changes(request: ?*const zova_database_changes_request) callconv(.c) zova_status {
+pub fn zova_database_changes(request: ?*const zova_database_changes_request) callconv(.c) zova_status {
     return internal.zova_database_changes(request);
 }
 
-export fn zova_database_total_changes(request: ?*const zova_database_total_changes_request) callconv(.c) zova_status {
+pub fn zova_database_total_changes(request: ?*const zova_database_total_changes_request) callconv(.c) zova_status {
     return internal.zova_database_total_changes(request);
 }
 
-export fn zova_database_notify(request: ?*const zova_database_notify_request) callconv(.c) zova_status {
+pub fn zova_database_notify(request: ?*const zova_database_notify_request) callconv(.c) zova_status {
     return internal.zova_database_notify(request);
 }
 
-export fn zova_database_listen(request: ?*const zova_database_listen_request) callconv(.c) zova_status {
+pub fn zova_database_listen(request: ?*const zova_database_listen_request) callconv(.c) zova_status {
     return internal.zova_database_listen(request);
 }
 
-export fn zova_subscription_try_receive(request: ?*const zova_subscription_try_receive_request) callconv(.c) zova_status {
+pub fn zova_subscription_try_receive(request: ?*const zova_subscription_try_receive_request) callconv(.c) zova_status {
     return internal.zova_subscription_try_receive(request);
 }
 
-export fn zova_subscription_close(subscription: ?*zova_subscription) callconv(.c) zova_status {
+pub fn zova_subscription_close(subscription: ?*zova_subscription) callconv(.c) zova_status {
     return internal.zova_subscription_close(subscription);
 }
 
-export fn zova_database_prepare(request: ?*const zova_database_prepare_request) callconv(.c) zova_status {
+pub fn zova_database_prepare(request: ?*const zova_database_prepare_request) callconv(.c) zova_status {
     return internal.zova_database_prepare(request);
 }
 
-export fn zova_statement_finalize(statement: ?*zova_statement) callconv(.c) zova_status {
+pub fn zova_statement_finalize(statement: ?*zova_statement) callconv(.c) zova_status {
     return internal.zova_statement_finalize(statement);
 }
 
-export fn zova_statement_step(request: ?*const zova_statement_step_request) callconv(.c) zova_status {
+pub fn zova_statement_step(request: ?*const zova_statement_step_request) callconv(.c) zova_status {
     return internal.zova_statement_step(request);
 }
 
-export fn zova_statement_reset(statement: ?*zova_statement) callconv(.c) zova_status {
+pub fn zova_statement_reset(statement: ?*zova_statement) callconv(.c) zova_status {
     return internal.zova_statement_reset(statement);
 }
 
-export fn zova_statement_clear_bindings(statement: ?*zova_statement) callconv(.c) zova_status {
+pub fn zova_statement_clear_bindings(statement: ?*zova_statement) callconv(.c) zova_status {
     return internal.zova_statement_clear_bindings(statement);
 }
 
-export fn zova_statement_bind_null(request: ?*const zova_statement_bind_null_request) callconv(.c) zova_status {
+pub fn zova_statement_bind_null(request: ?*const zova_statement_bind_null_request) callconv(.c) zova_status {
     return internal.zova_statement_bind_null(request);
 }
 
-export fn zova_statement_bind_int64(request: ?*const zova_statement_bind_int64_request) callconv(.c) zova_status {
+pub fn zova_statement_bind_int64(request: ?*const zova_statement_bind_int64_request) callconv(.c) zova_status {
     return internal.zova_statement_bind_int64(request);
 }
 
-export fn zova_statement_bind_double(request: ?*const zova_statement_bind_double_request) callconv(.c) zova_status {
+pub fn zova_statement_bind_double(request: ?*const zova_statement_bind_double_request) callconv(.c) zova_status {
     return internal.zova_statement_bind_double(request);
 }
 
-export fn zova_statement_bind_text(request: ?*const zova_statement_bind_text_request) callconv(.c) zova_status {
+pub fn zova_statement_bind_text(request: ?*const zova_statement_bind_text_request) callconv(.c) zova_status {
     return internal.zova_statement_bind_text(request);
 }
 
-export fn zova_statement_bind_blob(request: ?*const zova_statement_bind_blob_request) callconv(.c) zova_status {
+pub fn zova_statement_bind_blob(request: ?*const zova_statement_bind_blob_request) callconv(.c) zova_status {
     return internal.zova_statement_bind_blob(request);
 }
 
-export fn zova_statement_parameter_count(request: ?*const zova_statement_parameter_count_request) callconv(.c) zova_status {
+pub fn zova_statement_parameter_count(request: ?*const zova_statement_parameter_count_request) callconv(.c) zova_status {
     return internal.zova_statement_parameter_count(request);
 }
 
-export fn zova_statement_parameter_index(request: ?*const zova_statement_parameter_index_request) callconv(.c) zova_status {
+pub fn zova_statement_parameter_index(request: ?*const zova_statement_parameter_index_request) callconv(.c) zova_status {
     return internal.zova_statement_parameter_index(request);
 }
 
-export fn zova_statement_column_count(request: ?*const zova_statement_column_count_request) callconv(.c) zova_status {
+pub fn zova_statement_column_count(request: ?*const zova_statement_column_count_request) callconv(.c) zova_status {
     return internal.zova_statement_column_count(request);
 }
 
-export fn zova_statement_column_name(request: ?*const zova_statement_column_name_request) callconv(.c) zova_status {
+pub fn zova_statement_column_name(request: ?*const zova_statement_column_name_request) callconv(.c) zova_status {
     return internal.zova_statement_column_name(request);
 }
 
-export fn zova_statement_column_type(request: ?*const zova_statement_column_type_request) callconv(.c) zova_status {
+pub fn zova_statement_column_type(request: ?*const zova_statement_column_type_request) callconv(.c) zova_status {
     return internal.zova_statement_column_type(request);
 }
 
-export fn zova_statement_column_int64(request: ?*const zova_statement_column_int64_request) callconv(.c) zova_status {
+pub fn zova_statement_column_int64(request: ?*const zova_statement_column_int64_request) callconv(.c) zova_status {
     return internal.zova_statement_column_int64(request);
 }
 
-export fn zova_statement_column_double(request: ?*const zova_statement_column_double_request) callconv(.c) zova_status {
+pub fn zova_statement_column_double(request: ?*const zova_statement_column_double_request) callconv(.c) zova_status {
     return internal.zova_statement_column_double(request);
 }
 
-export fn zova_statement_column_text(request: ?*const zova_statement_column_text_request) callconv(.c) zova_status {
+pub fn zova_statement_column_text(request: ?*const zova_statement_column_text_request) callconv(.c) zova_status {
     return internal.zova_statement_column_text(request);
 }
 
-export fn zova_statement_column_blob(request: ?*const zova_statement_column_blob_request) callconv(.c) zova_status {
+pub fn zova_statement_column_blob(request: ?*const zova_statement_column_blob_request) callconv(.c) zova_status {
     return internal.zova_statement_column_blob(request);
 }
 
-export fn zova_database_last_error_message(db: ?*zova_database) callconv(.c) [*:0]const u8 {
+pub fn zova_database_last_error_message(db: ?*zova_database) callconv(.c) [*:0]const u8 {
     return internal.zova_database_last_error_message(db);
 }
 
-export fn zova_convert_sqlite_to_zova(request: ?*const zova_convert_sqlite_to_zova_request) callconv(.c) zova_status {
+pub fn zova_convert_sqlite_to_zova(request: ?*const zova_convert_sqlite_to_zova_request) callconv(.c) zova_status {
     return internal.zova_convert_sqlite_to_zova(request);
 }
 
-export fn zova_database_restore(request: ?*const zova_database_restore_request) callconv(.c) zova_status {
+pub fn zova_database_restore(request: ?*const zova_database_restore_request) callconv(.c) zova_status {
     return internal.zova_database_restore(request);
 }
 
-export fn zova_database_probe_format(request: ?*const zova_database_probe_format_request) callconv(.c) zova_status {
+pub fn zova_database_probe_format(request: ?*const zova_database_probe_format_request) callconv(.c) zova_status {
     return internal.zova_database_probe_format(request);
 }
 
-export fn zova_database_migrate(request: ?*const zova_database_migrate_request) callconv(.c) zova_status {
+pub fn zova_database_migrate(request: ?*const zova_database_migrate_request) callconv(.c) zova_status {
     return internal.zova_database_migrate(request);
 }
 
-export fn zova_object_id_from_bytes(data: ?[*]const u8, len: usize, out_id: ?*zova_object_id) callconv(.c) zova_status {
+pub fn zova_object_id_from_bytes(data: ?[*]const u8, len: usize, out_id: ?*zova_object_id) callconv(.c) zova_status {
     return internal.zova_object_id_from_bytes(data, len, out_id);
 }
 
-export fn zova_object_chunk_id_from_bytes(
+pub fn zova_object_chunk_id_from_bytes(
     data: ?[*]const u8,
     len: usize,
     out_id: ?*zova_object_chunk_id,
@@ -596,386 +605,415 @@ export fn zova_object_chunk_id_from_bytes(
     return internal.zova_object_chunk_id_from_bytes(data, len, out_id);
 }
 
-export fn zova_object_put(request: ?*const zova_object_put_request) callconv(.c) zova_status {
+pub fn zova_object_put(request: ?*const zova_object_put_request) callconv(.c) zova_status {
     return internal.zova_object_put(request);
 }
 
-export fn zova_object_put_with_options(
+pub fn zova_object_put_with_options(
     request: ?*const zova_object_put_with_options_request,
 ) callconv(.c) zova_status {
     return internal.zova_object_put_with_options(request);
 }
 
-export fn zova_object_get(request: ?*const zova_object_get_request) callconv(.c) zova_status {
+pub fn zova_object_get(request: ?*const zova_object_get_request) callconv(.c) zova_status {
     return internal.zova_object_get(request);
 }
 
-export fn zova_object_read_range(request: ?*const zova_object_read_range_request) callconv(.c) zova_status {
+pub fn zova_object_read_range(request: ?*const zova_object_read_range_request) callconv(.c) zova_status {
     return internal.zova_object_read_range(request);
 }
 
-export fn zova_object_delete(request: ?*const zova_object_delete_request) callconv(.c) zova_status {
+pub fn zova_object_delete(request: ?*const zova_object_delete_request) callconv(.c) zova_status {
     return internal.zova_object_delete(request);
 }
 
-export fn zova_object_exists(request: ?*const zova_object_exists_request) callconv(.c) zova_status {
+pub fn zova_object_exists(request: ?*const zova_object_exists_request) callconv(.c) zova_status {
     return internal.zova_object_exists(request);
 }
 
-export fn zova_object_size(request: ?*const zova_object_size_request) callconv(.c) zova_status {
+pub fn zova_object_size(request: ?*const zova_object_size_request) callconv(.c) zova_status {
     return internal.zova_object_size(request);
 }
 
-export fn zova_object_chunk_count(request: ?*const zova_object_chunk_count_request) callconv(.c) zova_status {
+pub fn zova_object_chunk_count(request: ?*const zova_object_chunk_count_request) callconv(.c) zova_status {
     return internal.zova_object_chunk_count(request);
 }
 
-export fn zova_kv_get(request: ?*const zova_kv_get_request) callconv(.c) zova_status {
+pub fn zova_kv_get(request: ?*const zova_kv_get_request) callconv(.c) zova_status {
     return internal.zova_kv_get(request);
 }
 
-export fn zova_kv_get_many(request: ?*const zova_kv_get_many_request) callconv(.c) zova_status {
+pub fn zova_kv_get_many(request: ?*const zova_kv_get_many_request) callconv(.c) zova_status {
     return internal.zova_kv_get_many(request);
 }
 
-export fn zova_kv_put(request: ?*const zova_kv_put_request) callconv(.c) zova_status {
+pub fn zova_kv_put(request: ?*const zova_kv_put_request) callconv(.c) zova_status {
     return internal.zova_kv_put(request);
 }
 
-export fn zova_kv_put_many(request: ?*const zova_kv_put_many_request) callconv(.c) zova_status {
+pub fn zova_kv_put_many(request: ?*const zova_kv_put_many_request) callconv(.c) zova_status {
     return internal.zova_kv_put_many(request);
 }
 
-export fn zova_kv_delete(request: ?*const zova_kv_delete_request) callconv(.c) zova_status {
+pub fn zova_kv_delete(request: ?*const zova_kv_delete_request) callconv(.c) zova_status {
     return internal.zova_kv_delete(request);
 }
 
-export fn zova_kv_delete_many(request: ?*const zova_kv_delete_many_request) callconv(.c) zova_status {
+pub fn zova_kv_delete_many(request: ?*const zova_kv_delete_many_request) callconv(.c) zova_status {
     return internal.zova_kv_delete_many(request);
 }
 
-export fn zova_kv_count(request: ?*const zova_kv_count_request) callconv(.c) zova_status {
+pub fn zova_kv_count(request: ?*const zova_kv_count_request) callconv(.c) zova_status {
     return internal.zova_kv_count(request);
 }
 
-export fn zova_kv_clear_namespace(request: ?*const zova_kv_clear_namespace_request) callconv(.c) zova_status {
+pub fn zova_kv_clear_namespace(request: ?*const zova_kv_clear_namespace_request) callconv(.c) zova_status {
     return internal.zova_kv_clear_namespace(request);
 }
 
-export fn zova_object_manifest_get(request: ?*const zova_object_manifest_get_request) callconv(.c) zova_status {
+pub fn zova_object_manifest_get(request: ?*const zova_object_manifest_get_request) callconv(.c) zova_status {
     return internal.zova_object_manifest_get(request);
 }
 
-export fn zova_object_chunk_get(request: ?*const zova_object_chunk_get_request) callconv(.c) zova_status {
+pub fn zova_object_chunk_get(request: ?*const zova_object_chunk_get_request) callconv(.c) zova_status {
     return internal.zova_object_chunk_get(request);
 }
 
-export fn zova_object_chunk_put(request: ?*const zova_object_chunk_put_request) callconv(.c) zova_status {
+pub fn zova_object_chunk_put(request: ?*const zova_object_chunk_put_request) callconv(.c) zova_status {
     return internal.zova_object_chunk_put(request);
 }
 
-export fn zova_object_chunk_put_with_options(
+pub fn zova_object_chunk_put_with_options(
     request: ?*const zova_object_chunk_put_with_options_request,
 ) callconv(.c) zova_status {
     return internal.zova_object_chunk_put_with_options(request);
 }
 
-export fn zova_object_chunk_delete(request: ?*const zova_object_chunk_delete_request) callconv(.c) zova_status {
+pub fn zova_object_chunk_delete(request: ?*const zova_object_chunk_delete_request) callconv(.c) zova_status {
     return internal.zova_object_chunk_delete(request);
 }
 
-export fn zova_object_assemble_from_chunks(
+pub fn zova_object_assemble_from_chunks(
     request: ?*const zova_object_assemble_from_chunks_request,
 ) callconv(.c) zova_status {
     return internal.zova_object_assemble_from_chunks(request);
 }
 
-export fn zova_object_assemble_from_chunks_with_options(
+pub fn zova_object_assemble_from_chunks_with_options(
     request: ?*const zova_object_assemble_from_chunks_with_options_request,
 ) callconv(.c) zova_status {
     return internal.zova_object_assemble_from_chunks_with_options(request);
 }
 
-export fn zova_object_writer_create(request: ?*const zova_object_writer_create_request) callconv(.c) zova_status {
+pub fn zova_object_writer_create(request: ?*const zova_object_writer_create_request) callconv(.c) zova_status {
     return internal.zova_object_writer_create(request);
 }
 
-export fn zova_object_writer_create_with_options(
+pub fn zova_object_writer_create_with_options(
     request: ?*const zova_object_writer_create_with_options_request,
 ) callconv(.c) zova_status {
     return internal.zova_object_writer_create_with_options(request);
 }
 
-export fn zova_object_writer_write(request: ?*const zova_object_writer_write_request) callconv(.c) zova_status {
+pub fn zova_object_writer_write(request: ?*const zova_object_writer_write_request) callconv(.c) zova_status {
     return internal.zova_object_writer_write(request);
 }
 
-export fn zova_object_writer_finish(request: ?*const zova_object_writer_finish_request) callconv(.c) zova_status {
+pub fn zova_object_writer_finish(request: ?*const zova_object_writer_finish_request) callconv(.c) zova_status {
     return internal.zova_object_writer_finish(request);
 }
 
-export fn zova_object_writer_cancel(request: ?*const zova_object_writer_cancel_request) callconv(.c) zova_status {
+pub fn zova_object_writer_cancel(request: ?*const zova_object_writer_cancel_request) callconv(.c) zova_status {
     return internal.zova_object_writer_cancel(request);
 }
 
-export fn zova_object_writer_destroy(writer: ?*zova_object_writer) callconv(.c) zova_status {
+pub fn zova_object_writer_destroy(writer: ?*zova_object_writer) callconv(.c) zova_status {
     return internal.zova_object_writer_destroy(writer);
 }
 
-export fn zova_object_reader_create(
+pub fn zova_object_reader_create(
     request: ?*const zova_object_reader_create_request,
 ) callconv(.c) zova_status {
     return internal.zova_object_reader_create(request);
 }
 
-export fn zova_object_reader_read(
+pub fn zova_object_reader_read(
     request: ?*const zova_object_reader_read_request,
 ) callconv(.c) zova_status {
     return internal.zova_object_reader_read(request);
 }
 
-export fn zova_object_reader_destroy(
+pub fn zova_object_reader_destroy(
     request: ?*const zova_object_reader_destroy_request,
 ) callconv(.c) zova_status {
     return internal.zova_object_reader_destroy(request);
 }
 
-export fn zova_vector_collection_create(request: ?*const zova_vector_collection_create_request) callconv(.c) zova_status {
+pub fn zova_vector_collection_create(request: ?*const zova_vector_collection_create_request) callconv(.c) zova_status {
     return internal.zova_vector_collection_create(request);
 }
 
-export fn zova_vector_collection_exists(request: ?*const zova_vector_collection_exists_request) callconv(.c) zova_status {
+pub fn zova_vector_collection_exists(request: ?*const zova_vector_collection_exists_request) callconv(.c) zova_status {
     return internal.zova_vector_collection_exists(request);
 }
 
-export fn zova_vector_put(request: ?*const zova_vector_put_request) callconv(.c) zova_status {
+pub fn zova_vector_put(request: ?*const zova_vector_put_request) callconv(.c) zova_status {
     return internal.zova_vector_put(request);
 }
 
-export fn zova_vector_get(request: ?*const zova_vector_get_request) callconv(.c) zova_status {
+pub fn zova_vector_get(request: ?*const zova_vector_get_request) callconv(.c) zova_status {
     return internal.zova_vector_get(request);
 }
 
-export fn zova_vector_exists(request: ?*const zova_vector_exists_request) callconv(.c) zova_status {
+pub fn zova_vector_exists(request: ?*const zova_vector_exists_request) callconv(.c) zova_status {
     return internal.zova_vector_exists(request);
 }
 
-export fn zova_vector_delete(request: ?*const zova_vector_delete_request) callconv(.c) zova_status {
+pub fn zova_vector_delete(request: ?*const zova_vector_delete_request) callconv(.c) zova_status {
     return internal.zova_vector_delete(request);
 }
 
-export fn zova_vector_search(request: ?*const zova_vector_search_request) callconv(.c) zova_status {
+pub fn zova_vector_search(request: ?*const zova_vector_search_request) callconv(.c) zova_status {
     return internal.zova_vector_search(request);
 }
 
-export fn zova_vector_search_in(request: ?*const zova_vector_search_in_request) callconv(.c) zova_status {
+pub fn zova_vector_search_in(request: ?*const zova_vector_search_in_request) callconv(.c) zova_status {
     return internal.zova_vector_search_in(request);
 }
 
-export fn zova_vector_search_multi_i8(request: ?*const zova_vector_search_multi_i8_request) callconv(.c) zova_status {
+pub fn zova_vector_search_multi_i8(request: ?*const zova_vector_search_multi_i8_request) callconv(.c) zova_status {
     return internal.zova_vector_search_multi_i8(request);
 }
 
-export fn zova_vector_collection_info_get(request: ?*const zova_vector_collection_info_get_request) callconv(.c) zova_status {
+pub fn zova_vector_collection_info_get(request: ?*const zova_vector_collection_info_get_request) callconv(.c) zova_status {
     return internal.zova_vector_collection_info_get(request);
 }
 
-export fn zova_vector_collections_list(request: ?*const zova_vector_collections_list_request) callconv(.c) zova_status {
+pub fn zova_vector_collections_list(request: ?*const zova_vector_collections_list_request) callconv(.c) zova_status {
     return internal.zova_vector_collections_list(request);
 }
 
-export fn zova_vector_put_many(request: ?*const zova_vector_put_many_request) callconv(.c) zova_status {
+pub fn zova_vector_put_many(request: ?*const zova_vector_put_many_request) callconv(.c) zova_status {
     return internal.zova_vector_put_many(request);
 }
 
-export fn zova_vector_delete_many(request: ?*const zova_vector_delete_many_request) callconv(.c) zova_status {
+pub fn zova_vector_delete_many(request: ?*const zova_vector_delete_many_request) callconv(.c) zova_status {
     return internal.zova_vector_delete_many(request);
 }
 
-export fn zova_vector_collection_delete(request: ?*const zova_vector_collection_delete_request) callconv(.c) zova_status {
+pub fn zova_vector_collection_delete(request: ?*const zova_vector_collection_delete_request) callconv(.c) zova_status {
     return internal.zova_vector_collection_delete(request);
 }
 
-export fn zova_vector_search_within(request: ?*const zova_vector_search_within_request) callconv(.c) zova_status {
+pub fn zova_vector_search_within(request: ?*const zova_vector_search_within_request) callconv(.c) zova_status {
     return internal.zova_vector_search_within(request);
 }
 
-export fn zova_vector_search_in_within(request: ?*const zova_vector_search_in_within_request) callconv(.c) zova_status {
+pub fn zova_vector_search_in_within(request: ?*const zova_vector_search_in_within_request) callconv(.c) zova_status {
     return internal.zova_vector_search_in_within(request);
 }
 
-export fn zova_vector_search_by_id(request: ?*const zova_vector_search_by_id_request) callconv(.c) zova_status {
+pub fn zova_vector_search_by_id(request: ?*const zova_vector_search_by_id_request) callconv(.c) zova_status {
     return internal.zova_vector_search_by_id(request);
 }
 
-export fn zova_vector_search_by_id_in(request: ?*const zova_vector_search_by_id_in_request) callconv(.c) zova_status {
+pub fn zova_vector_search_by_id_in(request: ?*const zova_vector_search_by_id_in_request) callconv(.c) zova_status {
     return internal.zova_vector_search_by_id_in(request);
 }
 
-export fn zova_vector_search_by_id_within(request: ?*const zova_vector_search_by_id_within_request) callconv(.c) zova_status {
+pub fn zova_vector_search_by_id_within(request: ?*const zova_vector_search_by_id_within_request) callconv(.c) zova_status {
     return internal.zova_vector_search_by_id_within(request);
 }
 
-export fn zova_vector_search_by_id_in_within(request: ?*const zova_vector_search_by_id_in_within_request) callconv(.c) zova_status {
+pub fn zova_vector_search_by_id_in_within(request: ?*const zova_vector_search_by_id_in_within_request) callconv(.c) zova_status {
     return internal.zova_vector_search_by_id_in_within(request);
 }
 
-export fn zova_graph_create(request: ?*const zova_graph_create_request) callconv(.c) zova_status {
+pub fn zova_graph_create(request: ?*const zova_graph_create_request) callconv(.c) zova_status {
     return internal.zova_graph_create(request);
 }
 
-export fn zova_graph_exists(request: ?*const zova_graph_exists_request) callconv(.c) zova_status {
+pub fn zova_graph_exists(request: ?*const zova_graph_exists_request) callconv(.c) zova_status {
     return internal.zova_graph_exists(request);
 }
 
-export fn zova_graph_info_get(request: ?*const zova_graph_info_get_request) callconv(.c) zova_status {
+pub fn zova_graph_info_get(request: ?*const zova_graph_info_get_request) callconv(.c) zova_status {
     return internal.zova_graph_info_get(request);
 }
 
-export fn zova_graphs_list(request: ?*const zova_graph_list_request) callconv(.c) zova_status {
+pub fn zova_graphs_list(request: ?*const zova_graph_list_request) callconv(.c) zova_status {
     return internal.zova_graphs_list(request);
 }
 
-export fn zova_database_extension_install(request: ?*const zova_database_extension_request) callconv(.c) zova_status {
+pub fn zova_database_extension_install(request: ?*const zova_database_extension_request) callconv(.c) zova_status {
     return internal.zova_database_extension_install(request);
 }
 
-export fn zova_database_extension_list(request: ?*const zova_database_extension_list_request) callconv(.c) zova_status {
+pub fn zova_database_extension_list(request: ?*const zova_database_extension_list_request) callconv(.c) zova_status {
     return internal.zova_database_extension_list(request);
 }
 
-export fn zova_database_extension_info(request: ?*const zova_database_extension_info_request) callconv(.c) zova_status {
+pub fn zova_database_extension_info(request: ?*const zova_database_extension_info_request) callconv(.c) zova_status {
     return internal.zova_database_extension_info(request);
 }
 
-export fn zova_database_extension_check(request: ?*const zova_database_extension_request) callconv(.c) zova_status {
+pub fn zova_database_extension_check(request: ?*const zova_database_extension_request) callconv(.c) zova_status {
     return internal.zova_database_extension_check(request);
 }
 
-export fn zova_database_extension_check_all(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
+pub fn zova_database_extension_check_all(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
     return internal.zova_database_extension_check_all(request);
 }
 
-export fn zova_database_extension_drop(request: ?*const zova_database_extension_request) callconv(.c) zova_status {
+pub fn zova_database_extension_drop(request: ?*const zova_database_extension_request) callconv(.c) zova_status {
     return internal.zova_database_extension_drop(request);
 }
 
-export fn zova_graph_delete(request: ?*const zova_graph_delete_request) callconv(.c) zova_status {
+pub fn zova_graph_delete(request: ?*const zova_graph_delete_request) callconv(.c) zova_status {
     return internal.zova_graph_delete(request);
 }
 
-export fn zova_graph_node_put(request: ?*const zova_graph_node_put_request) callconv(.c) zova_status {
+pub fn zova_graph_node_put(request: ?*const zova_graph_node_put_request) callconv(.c) zova_status {
     return internal.zova_graph_node_put(request);
 }
 
-export fn zova_graph_node_put_many(request: ?*const zova_graph_node_put_many_request) callconv(.c) zova_status {
+pub fn zova_graph_node_put_many(request: ?*const zova_graph_node_put_many_request) callconv(.c) zova_status {
     return internal.zova_graph_node_put_many(request);
 }
 
-export fn zova_graph_node_put_many_keyed(request: ?*const zova_graph_node_put_many_keyed_request) callconv(.c) zova_status {
+pub fn zova_graph_node_put_many_keyed(request: ?*const zova_graph_node_put_many_keyed_request) callconv(.c) zova_status {
     return internal.zova_graph_node_put_many_keyed(request);
 }
 
-export fn zova_graph_build_fresh_keyed(request: ?*const zova_graph_build_fresh_keyed_request) callconv(.c) zova_status {
+pub fn zova_graph_build_fresh_keyed(request: ?*const zova_graph_build_fresh_keyed_request) callconv(.c) zova_status {
     return internal.zova_graph_build_fresh_keyed(request);
 }
 
-export fn zova_graph_build_fresh_prepared_keyed(request: ?*const zova_graph_build_fresh_keyed_request) callconv(.c) zova_status {
+pub fn zova_graph_build_fresh_prepared_keyed(request: ?*const zova_graph_build_fresh_keyed_request) callconv(.c) zova_status {
     return internal.zova_graph_build_fresh_prepared_keyed(request);
 }
 
-export fn zova_graph_build_fresh_prepared_keyed_with_payloads(request: ?*const zova_graph_build_fresh_prepared_keyed_with_payloads_request) callconv(.c) zova_status {
+pub fn zova_graph_build_fresh_prepared_keyed_with_payloads(request: ?*const zova_graph_build_fresh_prepared_keyed_with_payloads_request) callconv(.c) zova_status {
     return internal.zova_graph_build_fresh_prepared_keyed_with_payloads(request);
 }
 
-export fn zova_graph_node_get(request: ?*const zova_graph_node_get_request) callconv(.c) zova_status {
+pub fn zova_graph_node_get(request: ?*const zova_graph_node_get_request) callconv(.c) zova_status {
     return internal.zova_graph_node_get(request);
 }
 
-export fn zova_graph_node_exists(request: ?*const zova_graph_node_exists_request) callconv(.c) zova_status {
+pub fn zova_graph_node_exists(request: ?*const zova_graph_node_exists_request) callconv(.c) zova_status {
     return internal.zova_graph_node_exists(request);
 }
 
-export fn zova_graph_node_delete(request: ?*const zova_graph_node_delete_request) callconv(.c) zova_status {
+pub fn zova_graph_node_delete(request: ?*const zova_graph_node_delete_request) callconv(.c) zova_status {
     return internal.zova_graph_node_delete(request);
 }
 
-export fn zova_graph_node_delete_many(request: ?*const zova_graph_node_delete_many_request) callconv(.c) zova_status {
+pub fn zova_graph_node_delete_many(request: ?*const zova_graph_node_delete_many_request) callconv(.c) zova_status {
     return internal.zova_graph_node_delete_many(request);
 }
 
-export fn zova_graph_edge_put(request: ?*const zova_graph_edge_put_request) callconv(.c) zova_status {
+pub fn zova_graph_edge_put(request: ?*const zova_graph_edge_put_request) callconv(.c) zova_status {
     return internal.zova_graph_edge_put(request);
 }
 
-export fn zova_graph_edge_put_many(request: ?*const zova_graph_edge_put_many_request) callconv(.c) zova_status {
+pub fn zova_graph_edge_put_many(request: ?*const zova_graph_edge_put_many_request) callconv(.c) zova_status {
     return internal.zova_graph_edge_put_many(request);
 }
 
-export fn zova_graph_edge_put_many_keyed(request: ?*const zova_graph_edge_put_many_keyed_request) callconv(.c) zova_status {
+pub fn zova_graph_edge_put_many_keyed(request: ?*const zova_graph_edge_put_many_keyed_request) callconv(.c) zova_status {
     return internal.zova_graph_edge_put_many_keyed(request);
 }
 
-export fn zova_graph_edge_delete_many(request: ?*const zova_graph_edge_delete_many_request) callconv(.c) zova_status {
+pub fn zova_graph_edge_delete_many(request: ?*const zova_graph_edge_delete_many_request) callconv(.c) zova_status {
     return internal.zova_graph_edge_delete_many(request);
 }
 
-export fn zova_graph_edge_get(request: ?*const zova_graph_edge_get_request) callconv(.c) zova_status {
+pub fn zova_graph_edge_get(request: ?*const zova_graph_edge_get_request) callconv(.c) zova_status {
     return internal.zova_graph_edge_get(request);
 }
 
-export fn zova_graph_edge_exists(request: ?*const zova_graph_edge_exists_request) callconv(.c) zova_status {
+pub fn zova_graph_edge_exists(request: ?*const zova_graph_edge_exists_request) callconv(.c) zova_status {
     return internal.zova_graph_edge_exists(request);
 }
 
-export fn zova_graph_edge_delete(request: ?*const zova_graph_edge_delete_request) callconv(.c) zova_status {
+pub fn zova_graph_edge_delete(request: ?*const zova_graph_edge_delete_request) callconv(.c) zova_status {
     return internal.zova_graph_edge_delete(request);
 }
 
-export fn zova_graph_neighbors(request: ?*const zova_graph_neighbors_request) callconv(.c) zova_status {
+pub fn zova_graph_neighbors(request: ?*const zova_graph_neighbors_request) callconv(.c) zova_status {
     return internal.zova_graph_neighbors(request);
 }
 
-export fn zova_graph_neighbors_keyed(request: ?*const zova_graph_neighbors_keyed_request) callconv(.c) zova_status {
+pub fn zova_graph_neighbors_keyed(request: ?*const zova_graph_neighbors_keyed_request) callconv(.c) zova_status {
     return internal.zova_graph_neighbors_keyed(request);
 }
-export fn zova_graph_nodes_get_many_keyed(request: ?*const zova_graph_nodes_get_many_keyed_request) callconv(.c) zova_status {
+pub fn zova_graph_nodes_get_many_keyed(request: ?*const zova_graph_nodes_get_many_keyed_request) callconv(.c) zova_status {
     return internal.zova_graph_nodes_get_many_keyed(request);
 }
-export fn zova_graph_edges_get_many_keyed(request: ?*const zova_graph_edges_get_many_keyed_request) callconv(.c) zova_status {
+pub fn zova_graph_edges_get_many_keyed(request: ?*const zova_graph_edges_get_many_keyed_request) callconv(.c) zova_status {
     return internal.zova_graph_edges_get_many_keyed(request);
 }
-export fn zova_graph_edge_payload_get_many(request: ?*const zova_graph_edge_payload_get_many_request) callconv(.c) zova_status {
+pub fn zova_graph_edge_payload_get_many(request: ?*const zova_graph_edge_payload_get_many_request) callconv(.c) zova_status {
     return internal.zova_graph_edge_payload_get_many(request);
 }
-export fn zova_graph_edge_payload_replace_many(request: ?*const zova_graph_edge_payload_replace_many_request) callconv(.c) zova_status {
+pub fn zova_graph_edge_payload_replace_many(request: ?*const zova_graph_edge_payload_replace_many_request) callconv(.c) zova_status {
     return internal.zova_graph_edge_payload_replace_many(request);
 }
 
-export fn zova_graph_degree(request: ?*const zova_graph_degree_request) callconv(.c) zova_status {
+pub fn zova_graph_degree(request: ?*const zova_graph_degree_request) callconv(.c) zova_status {
     return internal.zova_graph_degree(request);
 }
 
-export fn zova_graph_degree_many_keyed(request: ?*const zova_graph_degree_many_keyed_request) callconv(.c) zova_status {
+pub fn zova_graph_degree_many_keyed(request: ?*const zova_graph_degree_many_keyed_request) callconv(.c) zova_status {
     return internal.zova_graph_degree_many_keyed(request);
 }
 
-export fn zova_graph_scan(request: ?*const zova_graph_scan_request) callconv(.c) zova_status {
+pub fn zova_graph_scan(request: ?*const zova_graph_scan_request) callconv(.c) zova_status {
     return internal.zova_graph_scan(request);
 }
 
-export fn zova_graph_walk(request: ?*const zova_graph_walk_request) callconv(.c) zova_status {
+pub fn zova_graph_walk(request: ?*const zova_graph_walk_request) callconv(.c) zova_status {
     return internal.zova_graph_walk(request);
 }
 
-export fn zova_graph_walk_direction(request: ?*const zova_graph_walk_direction_request) callconv(.c) zova_status {
+pub fn zova_graph_walk_direction(request: ?*const zova_graph_walk_direction_request) callconv(.c) zova_status {
     return internal.zova_graph_walk_direction(request);
 }
 
-export fn zova_graph_walk_direction_profiled(request: ?*const zova_graph_walk_direction_profiled_request) callconv(.c) zova_status {
+pub fn zova_graph_walk_direction_profiled(request: ?*const zova_graph_walk_direction_profiled_request) callconv(.c) zova_status {
     return internal.zova_graph_walk_direction_profiled(request);
 }
 
 test {
     _ = @import("c_api_tests.zig");
+}
+
+// Native builds retain the complete C ABI. The browser spike exports only the
+// lifecycle/query subset so unsupported filesystem/process paths stay unreachable.
+comptime {
+    @setEvalBranchQuota(10000);
+    if (@import("builtin").os.tag == .emscripten) {
+        if (!@import("builtin").single_threaded) @compileError("browser ABI requires -fsingle-threaded");
+        if (@import("zova_build_options").enable_dynamic_extensions) @compileError("browser ABI requires dynamic extensions disabled");
+        const allowed = [_][]const u8{
+            "zova_database_create_memory",
+            "zova_database_close",
+            "zova_database_exec",
+            "zova_database_prepare",
+            "zova_statement_step",
+            "zova_statement_column_int64",
+            "zova_statement_finalize",
+            "zova_message_free",
+        };
+        for (allowed) |name| {
+            @export(&@field(@This(), name), .{ .name = name });
+        }
+    } else {
+        for (@typeInfo(@This()).@"struct".decls) |decl| {
+            if (!@import("std").mem.startsWith(u8, decl.name, "zova_")) continue;
+            const value = @field(@This(), decl.name);
+            if (@typeInfo(@TypeOf(value)) == .@"fn") @export(&value, .{ .name = decl.name });
+        }
+    }
 }
