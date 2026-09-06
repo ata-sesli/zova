@@ -3,6 +3,23 @@
 const std = @import("std");
 
 const Error = @import("types.zig").Error;
+const build_options = @import("zova_build_options");
+pub const wasm_opfs = @import("builtin").os.tag == .emscripten and
+    @hasDecl(build_options, "enable_wasm_opfs") and build_options.enable_wasm_opfs;
+
+// Only the private OPFS spike enables this path. The pool's exclusive handles
+// cover the synchronous check/open interval; never fall back to MEMFS.
+fn opfsPathExists(path: []const u8) Error!bool {
+    const c = @import("../sqlite.zig").c;
+    const vfs = c.sqlite3_vfs_find("opfs-sahpool");
+    if (vfs == null or c.sqlite3_vfs_find(null) != vfs) return error.CantOpen;
+    const name = try std.heap.c_allocator.dupeZ(u8, path);
+    defer std.heap.c_allocator.free(name);
+    var exists: c_int = 0;
+    if (vfs.*.xAccess.?(vfs, name.ptr, c.SQLITE_ACCESS_EXISTS, &exists) != c.SQLITE_OK)
+        return error.CantOpen;
+    return exists != 0;
+}
 
 pub fn isZovaPath(path: []const u8) bool {
     return std.mem.endsWith(u8, path, ".zova");
@@ -57,6 +74,11 @@ fn ensureParentPathExists(io: std.Io, path: []const u8) Error!void {
 }
 
 pub fn reserveDestinationZovaFile(path: [:0]const u8) Error!void {
+    if (wasm_opfs) {
+        if (!isZovaPath(path)) return error.NotZovaPath;
+        if (try opfsPathExists(path)) return error.DestinationExists;
+        return;
+    }
     try ensureDestinationZovaPathAvailable(path);
 
     const io = defaultIo();
@@ -72,6 +94,10 @@ pub fn deleteDestinationFile(path: [:0]const u8) void {
 }
 
 pub fn ensurePathExists(path: []const u8) Error!void {
+    if (wasm_opfs) {
+        if (!try opfsPathExists(path)) return error.NotZovaDatabase;
+        return;
+    }
     const io = defaultIo();
     if (std.fs.path.isAbsolute(path)) {
         std.Io.Dir.accessAbsolute(io, path, .{}) catch |err| switch (err) {
