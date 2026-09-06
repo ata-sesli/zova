@@ -59,6 +59,8 @@ jobs:
       - name: Install Playwright Chromium
         run: bunx --no-install playwright install --with-deps chromium
         working-directory: bindings/wasm
+      - name: Prepare bundled Python sources for repository version checks
+        run: sh bindings/python/tools/sync-rust-source.sh
       - run: sh scripts/check-versions.sh
       - run: bun run test
         working-directory: bindings/wasm
