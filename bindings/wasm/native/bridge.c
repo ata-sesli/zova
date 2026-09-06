@@ -19,6 +19,28 @@ static double real;
 static const uint8_t *bytes;
 static size_t length;
 
+#ifdef ZOVA_WASM_OPFS
+extern zova_status zova_opfs_create(const zova_database_open_request *);
+extern zova_status zova_opfs_open(const zova_database_open_request *);
+extern zova_status zova_opfs_open_options(const zova_database_open_options_request *);
+
+EXPORTED int zw_open_file(int exists) {
+    if (db) return ZOVA_INVALID_ARGUMENT;
+    zova_message_free(&message);
+    if (exists) {
+        /* Validate without writable access or implicit format migration. */
+        zova_database_open_options_request probe = {"/db.zova", ZOVA_OPEN_READ_ONLY, 0, &db, &message};
+        int status = zova_opfs_open_options(&probe);
+        if (status != ZOVA_OK) return status;
+        status = zova_database_close(db);
+        if (status != ZOVA_OK) return status;
+        db = NULL;
+    }
+    zova_database_open_request request = {"/db.zova", &db, &message};
+    return exists ? zova_opfs_open(&request) : zova_opfs_create(&request);
+}
+#endif
+
 static void clear_output(void) {
     zova_text_free(&text);
     zova_buffer_free(&buffer);
