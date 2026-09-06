@@ -883,14 +883,18 @@ pub const Database = struct {
         if (!memory) {
             if (!isZovaPath(path)) return error.NotZovaPath;
 
-            const io = defaultIo();
-            var file = std.Io.Dir.cwd().createFile(io, path, .{ .exclusive = true }) catch |err| switch (err) {
-                error.PathAlreadyExists => return error.DestinationExists,
-                else => return error.CantOpen,
-            };
-            file.close(io);
+            if (@import("database/paths.zig").wasm_opfs) {
+                try @import("database/paths.zig").reserveDestinationZovaFile(path);
+            } else {
+                const io = defaultIo();
+                var file = std.Io.Dir.cwd().createFile(io, path, .{ .exclusive = true }) catch |err| switch (err) {
+                    error.PathAlreadyExists => return error.DestinationExists,
+                    else => return error.CantOpen,
+                };
+                file.close(io);
 
-            errdefer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+                errdefer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+            }
         }
 
         var raw = try sqlite.Database.open(path);
