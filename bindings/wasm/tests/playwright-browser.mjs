@@ -2,6 +2,7 @@ import { chromium } from "playwright";
 import { resolve, join } from "node:path";
 import { stat } from "node:fs/promises";
 import { testOwnership } from "./ownership-browser.mjs";
+import { testDurability } from "./durability-browser.mjs";
 
 const [installedPackage, helium = process.env.HELIUM_EXECUTABLE] = process.argv.slice(2);
 if (!installedPackage) throw new Error("usage: bun playwright-browser.mjs <installed-zova-wasm-directory> [helium-executable]");
@@ -140,10 +141,12 @@ try {
     } finally { await db.close(); }
   }, preservedName);
   const wasmBytes = (await stat(join(installedPackage, "zova.wasm"))).size;
+  await testDurability(context, base);
   await testOwnership(browser, base);
   console.log(JSON.stringify({ ...result, initializationFailure: true, runtimeFailure: true,
     persistentReopen: true, rejectedOpenPreservesBytes: true, missingOpfs: true,
-    poolInitializationFailurePreservesData: true, exclusiveOwnership: true, wasmBytes }));
+    poolInitializationFailurePreservesData: true, exclusiveOwnership: true,
+    durabilityAndInjectedStorageFaults: true, wasmBytes }));
 } finally {
   clearTimeout(deadline);
   await browser?.close();
