@@ -59,8 +59,12 @@ opening; incompatible or invalid databases reject without automatic migration.
 Missing OPFS support rejects rather than silently opening a memory database.
 
 Persistent opening requires a secure context (HTTPS or localhost), dedicated
-workers, and OPFS synchronous access handles. Each name has one exclusive pool;
-close releases its handles. Concurrent ownership of the same name is not supported.
+workers, Web Locks, and OPFS synchronous access handles. Each name has one exclusive
+pool. An atomic, non-waiting Web Lock is acquired before storage initialization;
+a competing tab or worker rejects with `ZOVA_BUSY` (status code 10). No active
+owner is evicted. Different names can be open concurrently. Close releases storage
+handles before ownership; failed initialization and worker/tab termination also
+release ownership. Retry opening after the owner has closed or terminated.
 Storage belongs to the origin and browser profile. Clearing site data or browser
 eviction can remove it. There is no export/backup API yet. Broader crash, quota,
 and multi-tab recovery guarantees remain experimental.

@@ -1,6 +1,7 @@
 import { chromium } from "playwright";
 import { resolve, join } from "node:path";
 import { stat } from "node:fs/promises";
+import { testOwnership } from "./ownership-browser.mjs";
 
 const [installedPackage, helium = process.env.HELIUM_EXECUTABLE] = process.argv.slice(2);
 if (!installedPackage) throw new Error("usage: bun playwright-browser.mjs <installed-zova-wasm-directory> [helium-executable]");
@@ -43,7 +44,8 @@ let deadline;
 try {
   // Local runs use Helium; CI uses Playwright's bundled Chromium.
   browser = await chromium.launch({ ...(helium ? { executablePath: resolve(helium) } : {}), headless: true });
-  const page = await browser.newPage();
+  const context = await browser.newContext();
+  const page = await context.newPage();
   page.on("pageerror", error => resolveReport({ ok: false, error: error.message }));
   deadline = setTimeout(() => resolveReport({ ok: false, error: "Browser test timed out" }), 30000);
   const base = `http://127.0.0.1:${server.port}`;
@@ -53,7 +55,7 @@ try {
   clearTimeout(deadline);
 
   // Test actual worker initialization failure from the installed artifact.
-  const failedPage = await browser.newPage();
+  const failedPage = await context.newPage();
   await failedPage.route("**/dist/worker.mjs", route => route.abort());
   await failedPage.goto(`${base}/failure`);
   await failedPage.waitForFunction(() => Boolean(globalThis.zova));
@@ -63,7 +65,7 @@ try {
   });
   if (!initializationFailed) throw new Error("Worker initialization failure was not typed");
 
-  const failurePage = await browser.newPage();
+  const failurePage = await context.newPage();
   await failurePage.goto(`${base}/failure`);
   await failurePage.waitForFunction(() => Boolean(globalThis.zova));
   const workerReady = failurePage.waitForEvent("worker");
@@ -76,7 +78,7 @@ try {
     catch (error) { return error instanceof globalThis.zova.ZovaWasmError; }
   });
   if (!runtimeFailed) throw new Error("Worker runtime failure was not typed");
-  const persistencePage = await browser.newPage();
+  const persistencePage = await context.newPage();
   await persistencePage.goto(`${base}/failure`);
   await persistencePage.waitForFunction(() => Boolean(globalThis.zova));
   await persistencePage.evaluate(async () => {
@@ -101,7 +103,7 @@ try {
       }
     }
   });
-  const unavailablePage = await browser.newPage();
+  const unavailablePage = await context.newPage();
   await unavailablePage.route('**/dist/worker.mjs', async route => {
     const response = await route.fetch();
     await route.fulfill({response, body:'Object.defineProperty(navigator, "storage", {value:undefined});\n' + await response.text()});
@@ -119,7 +121,7 @@ try {
     await db.exec('CREATE TABLE kept(value); INSERT INTO kept VALUES(17)');
     await db.close();
   }, preservedName);
-  const acquisitionPage = await browser.newPage();
+  const acquisitionPage = await context.newPage();
   await acquisitionPage.route('**/dist/worker.mjs', async route => {
     const response = await route.fetch();
     await route.fulfill({response, body:'FileSystemFileHandle.prototype.createSyncAccessHandle = async () => { throw new Error("injected acquisition failure"); };\n' + await response.text()});
@@ -138,9 +140,10 @@ try {
     } finally { await db.close(); }
   }, preservedName);
   const wasmBytes = (await stat(join(installedPackage, "zova.wasm"))).size;
+  await testOwnership(browser, base);
   console.log(JSON.stringify({ ...result, initializationFailure: true, runtimeFailure: true,
     persistentReopen: true, rejectedOpenPreservesBytes: true, missingOpfs: true,
-    poolInitializationFailurePreservesData: true, wasmBytes }));
+    poolInitializationFailurePreservesData: true, exclusiveOwnership: true, wasmBytes }));
 } finally {
   clearTimeout(deadline);
   await browser?.close();

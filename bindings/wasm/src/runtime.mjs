@@ -2,6 +2,28 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const invalid = message => Object.assign(new Error(message), { status: "ZOVA_INVALID_ARGUMENT", statusCode: 1 });
 
+function acquireOwnership(name) {
+  if (!globalThis.navigator?.locks?.request) {
+    throw Object.assign(new Error("Web Locks are required for persistent databases"), { status: "ZOVA_CANT_OPEN", statusCode: 13 });
+  }
+  return new Promise((resolve, reject) => {
+    let unlock;
+    const held = new Promise(release => { unlock = release; });
+    // Hold the callback open for the entire storage lifetime. Never queue or
+    // steal a lock. Worker termination also releases this browser-owned lock.
+    const released = navigator.locks.request("zova:opfs:" + name,
+      { mode: "exclusive", ifAvailable: true }, lock => {
+        if (!lock) {
+          reject(Object.assign(new Error("Database is in use: " + name), { status: "ZOVA_BUSY", statusCode: 10 }));
+          return;
+        }
+        resolve(async () => { unlock(); await released; });
+        return held;
+      });
+    released.catch(reject);
+  });
+}
+
 function sqlText(sql) {
   if (typeof sql !== "string" || sql.includes("\0")) throw invalid("SQL must be a string without NUL bytes");
   return encoder.encode(sql + "\0");
@@ -24,6 +46,7 @@ export function serveWorker(createModule, port = globalThis) {
   let lastId = 0;
   let queue = Promise.resolve();
   let pool;
+  let releaseOwnership;
   const check = status => {
     if (status === 0) return;
     const pointer = module._zw_error();
@@ -90,6 +113,7 @@ export function serveWorker(createModule, port = globalThis) {
       if (args.name !== undefined && (typeof args.name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(args.name))) throw invalid("Invalid persistent database name");
       let created = false;
       try {
+        if (args.name !== undefined) releaseOwnership = await acquireOwnership(args.name);
         module = await createModule();
         if (args.name === undefined) {
           check(module._zw_create());
@@ -114,6 +138,7 @@ export function serveWorker(createModule, port = globalThis) {
           }
           pool.pauseVfs();
         }
+        await releaseOwnership?.();
         throw error;
       }
       state = "open";
@@ -134,7 +159,12 @@ export function serveWorker(createModule, port = globalThis) {
           if (op === 2) return Boolean(module._zw_number());
         })));
       }
-      case "close": check(module._zw_close()); pool?.pauseVfs(); state = "closed"; return;
+      case "close":
+        check(module._zw_close());
+        pool?.pauseVfs();
+        await releaseOwnership?.();
+        state = "closed";
+        return;
       default: throw invalid("Unknown worker operation");
     }
   };
