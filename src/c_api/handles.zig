@@ -16,7 +16,12 @@ const zova_sql_result = @import("types.zig").zova_sql_result;
 const zova_statement = @import("types.zig").zova_statement;
 const zova_subscription = @import("types.zig").zova_subscription;
 
-const AbiMutex = struct {
+// This mode is private to the single-worker Emscripten build. Native callers
+// always retain per-handle serialization.
+const AbiMutex = if (@import("builtin").os.tag == .emscripten) struct {
+    pub fn lock(_: *@This()) void {}
+    pub fn unlock(_: *@This()) void {}
+} else struct {
     state: std.Io.Mutex = .init,
 
     pub fn lock(self: *AbiMutex) void {

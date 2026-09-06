@@ -13,6 +13,9 @@ pub fn isMemoryPath(path: []const u8) bool {
 }
 
 pub fn defaultIo() std.Io {
+    // The browser preview has no host filesystem. Memory creation skips these
+    // operations; any accidental file operation must fail, not access a VFS.
+    if (@import("builtin").os.tag == .emscripten) return .failing;
     return std.Io.Threaded.global_single_threaded.io();
 }
 

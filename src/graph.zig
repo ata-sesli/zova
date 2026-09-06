@@ -2840,6 +2840,12 @@ fn graphProfileIo() std.Io {
 }
 
 fn graphProfileTimestamp() std.Io.Timestamp {
+    if (@import("builtin").os.tag == .emscripten) {
+        const browser = struct {
+            extern "c" fn emscripten_get_now() f64;
+        };
+        return .fromNanoseconds(@intFromFloat(browser.emscripten_get_now() * std.time.ns_per_ms));
+    }
     return std.Io.Clock.awake.now(graphProfileIo());
 }
 
