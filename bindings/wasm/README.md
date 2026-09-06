@@ -89,9 +89,25 @@ bun bindings/wasm/tools/check-package.mjs /absolute/path/zova-wasm-1.0.0-rc.2.tg
 bun test bindings/wasm/tests/api.test.ts bindings/wasm/tests/channel.test.mjs
 ```
 
-The browser runner accepts an explicitly supplied executable and uses a
-temporary profile; it downloads no browser. Set TMPDIR to external storage.
-Browser CI and registry publication remain issue #39.
+Test the actual packed and installed artifact with Playwright driving Helium:
+
+```sh
+HELIUM_EXECUTABLE=/Applications/Helium.app/Contents/MacOS/Helium \
+  sh bindings/wasm/tools/check-browser-package.sh /absolute/external/build-output
+```
+
+Local runs require an explicit Helium executable and use a temporary profile
+under the build output directory. They do not download Playwright's browser.
+Linux CI installs Playwright's bundled Chromium, builds once,
+and tests the installed npm tarball before uploading it. Playwright is pinned
+in the development lockfile. Native bindings remain independently tested.
+
+Release publication requires a successful Release Artifacts run at the exact
+release commit, including the WASM browser job. Experimental WASM prereleases
+use npm's `next` tag with trusted publishing. Before the first registry release,
+the npm package must exist and its trusted publisher must name this repository,
+`publish-release.yml`, and the `release` environment. This change does not publish
+the package or bump the repository version.
 
 ## License
 

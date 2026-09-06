@@ -9,6 +9,8 @@ bindings/rust/zova-sys/native/
 bindings/python/target
 bindings/python/rust/
 bindings/javascript/node_modules/
+bindings/wasm/node_modules/
+bindings/wasm/dist/
 bindings/javascript/target/
 bindings/javascript/dist/
 bindings/javascript/examples/dist/

@@ -193,4 +193,10 @@ expect_contains "$ROOT/scripts/verify-source-package.sh" 'PYTHON_DISTRIBUTION_VE
 expect_contains "$ROOT/scripts/verify-source-package.sh" 'zova-$PYTHON_DISTRIBUTION_VERSION-cp313-abi3-*.whl'
 expect_not_contains "$ROOT/.github/workflows/publish-release.yml" "NODE_AUTH_TOKEN"
 
+expect_contains "$ROOT/bindings/wasm/package.json" "\"version\": \"${package_version}\""
+expect_contains "$ROOT/bindings/wasm/package.json" '"name": "zova-wasm"'
+expect_contains "$ROOT/bindings/wasm/bun.lock" '"name": "zova-wasm"'
+expect_contains "$ROOT/.github/workflows/ci.yml" 'uses: ./.github/workflows/wasm.yml'
+expect_contains "$ROOT/.github/workflows/release-artifacts.yml" 'uses: ./.github/workflows/wasm.yml'
+
 echo "version check ok: ${package_version}"

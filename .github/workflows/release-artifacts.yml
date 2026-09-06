@@ -17,6 +17,11 @@ defaults:
     shell: bash
 
 jobs:
+  wasm:
+    uses: ./.github/workflows/wasm.yml
+    with:
+      version: ${{ inputs.version }}
+
   native:
     name: Native Artifacts (${{ matrix.artifact-id }})
     runs-on: ${{ matrix.os }}

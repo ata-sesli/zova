@@ -9,7 +9,7 @@ export TMPDIR="$OUT"
 EMCC="${EMCC:-emcc}"
 # Pin the installed and validated SDK; do not use the host native-C snapshot.
 EXPECTED="$(cat "$ROOT/bindings/wasm/emscripten-version.txt")"
-ACTUAL="$("$EMCC" --version | head -n 1 | awk '{print $NF}')"
+ACTUAL="$("$EMCC" -dumpversion)"
 test "${ACTUAL%-git}" = "$EXPECTED" || {
     echo "Emscripten $EXPECTED is required; found $ACTUAL" >&2; exit 1;
 }

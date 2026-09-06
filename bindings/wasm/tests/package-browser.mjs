@@ -50,6 +50,11 @@ try {
   db = await Database.createMemory();
   await rejects(db.query("SELECT * FROM tasks"));
   await db.close();
+  for (let cycle = 0; cycle < 8; cycle++) {
+    db = await Database.createMemory();
+    assert((await db.query("SELECT 1")).rows[0][0] === 1n, "repeated lifecycle");
+    await db.close();
+  }
   await fetch("/result", { method: "POST", body: JSON.stringify({ ok: true, packedPackage: true,
     initializationMs: initialized - started, firstQueryMs: queried - initialized }) });
 } catch (error) {

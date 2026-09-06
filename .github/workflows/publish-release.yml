@@ -19,6 +19,7 @@ concurrency:
 permissions:
   contents: write
   id-token: write
+  actions: read
 
 jobs:
   publish:
@@ -62,6 +63,17 @@ jobs:
           test "$version" = "$rust_version"
           test "$python_version" = "$python_manifest_version"
           test "$version" = "$javascript_version"
+          test "$version" = "$(node -p "require('./bindings/wasm/package.json').version")"
+
+      - name: Require successful browser-verified artifact run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACTS_RUN_ID: ${{ inputs.artifacts_run_id }}
+        run: |
+          set -eu
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ARTIFACTS_RUN_ID" > "$RUNNER_TEMP/artifact-run.json"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$ARTIFACTS_RUN_ID/jobs?per_page=100" > "$RUNNER_TEMP/artifact-jobs.json"
+          node bindings/wasm/tools/verify-artifact-run.mjs "$RUNNER_TEMP/artifact-run.json" "$RUNNER_TEMP/artifact-jobs.json" "$(git rev-parse HEAD)"
 
       - name: Download release artifacts
         env:
@@ -120,6 +132,9 @@ jobs:
             -name "zova-${python_version}-cp313-abi3-*.whl" \
           \) -exec cp {} zig-out/python-assets/ \;
           ls -lh zig-out/release-assets zig-out/python-assets
+          wasm_tarball="zig-out/release-download/zova-${version}-wasm/zova-wasm-${version}.tgz"
+          test -f "$wasm_tarball"
+          cp "$wasm_tarball" zig-out/release-assets/
 
       - name: Create tags and GitHub Release
         env:
@@ -262,3 +277,17 @@ jobs:
           publish_package zova-db-linux-x64-gnu
           publish_package zova-db-windows-x64
           publish_package zova-js
+
+      - name: Publish experimental WASM prerelease
+        if: contains(inputs.version, '-')
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -eu
+          tarball="zig-out/release-download/zova-${RELEASE_VERSION}-wasm/zova-wasm-${RELEASE_VERSION}.tgz"
+          test -f "$tarball"
+          if npm view "zova-wasm@$RELEASE_VERSION" version >/dev/null 2>&1; then
+            npm dist-tag add "zova-wasm@$RELEASE_VERSION" next
+          else
+            npm publish "$tarball" --access public --tag next
+          fi
