@@ -46,6 +46,13 @@ require_command uv
 require_command bun
 require_command node
 require_command npm
+require_command emcc
+if [ "${CI:-}" != "true" ]; then
+  : "${HELIUM_EXECUTABLE:?Set HELIUM_EXECUTABLE to the installed Helium binary}"
+fi
+if [ -n "${HELIUM_EXECUTABLE:-}" ]; then
+  test -x "$HELIUM_EXECUTABLE"
+fi
 
 sh scripts/check-versions.sh
 zig fmt --check build.zig build.zig.zon src tests
@@ -111,5 +118,11 @@ bun bindings/javascript/tests/runtime-smoke.mjs
 (cd bindings/javascript && npm_config_cache="$NPM_CACHE_REPO" npm pack --dry-run --ignore-scripts >/dev/null)
 rm -rf bindings/javascript/target bindings/javascript/dist bindings/javascript/npm
 find bindings/javascript -maxdepth 1 -name '*.node' -delete
+
+# The browser artifact has its own SDK and must pass as an installed tarball.
+(cd bindings/wasm && bun install --frozen-lockfile)
+(cd bindings/wasm && bun run test)
+sh bindings/wasm/tools/build-package.sh "$TMP/wasm"
+npm_config_cache="$NPM_CACHE_REPO" sh bindings/wasm/tools/check-browser-package.sh "$TMP/wasm"
 
 echo "release check ok: $MANIFEST_VERSION"

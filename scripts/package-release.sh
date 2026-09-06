@@ -175,6 +175,8 @@ rm -rf "$TMP/$PKG/bindings/python/dist"
 find "$TMP/$PKG/bindings/python" -type d -name '__pycache__' -prune -exec rm -rf {} +
 find "$TMP/$PKG/bindings/python" \( -name '*.so' -o -name '*.pyd' -o -name '*.dylib' -o -name '*.dll' -o -name '*.whl' \) -delete
 rm -rf "$TMP/$PKG/bindings/javascript/node_modules"
+rm -rf "$TMP/$PKG/bindings/wasm/node_modules"
+rm -rf "$TMP/$PKG/bindings/wasm/dist"
 rm -rf "$TMP/$PKG/bindings/javascript/target"
 rm -rf "$TMP/$PKG/bindings/javascript/dist"
 rm -rf "$TMP/$PKG/bindings/javascript/examples/dist"

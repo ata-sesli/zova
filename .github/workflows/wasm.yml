@@ -1,0 +1,77 @@
+name: WASM browser package
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  browser:
+    name: WASM browser package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: oven-sh/setup-bun@v2
+      - name: Read pinned versions
+        id: versions
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -eu
+          version="$(node -p "require('./bindings/wasm/package.json').version")"
+          test -z "$REQUESTED_VERSION" || test "$REQUESTED_VERSION" = "$version"
+          echo "package=$version" >> "$GITHUB_OUTPUT"
+          echo "emsdk=$(cat bindings/wasm/emscripten-version.txt)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        id: sdk-cache
+        with:
+          path: ${{ runner.temp }}/emsdk
+          key: ${{ runner.os }}-emsdk-${{ steps.versions.outputs.emsdk }}-v1
+      - name: Provision pinned Emscripten SDK
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        env:
+          EMSDK_VERSION: ${{ steps.versions.outputs.emsdk }}
+        run: |
+          git clone --depth 1 --branch "$EMSDK_VERSION" https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
+          "$RUNNER_TEMP/emsdk/emsdk" install "$EMSDK_VERSION"
+          "$RUNNER_TEMP/emsdk/emsdk" activate "$EMSDK_VERSION"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zig
+            ${{ runner.temp }}/zova-wasm-cache
+          key: ${{ runner.os }}-wasm-${{ steps.versions.outputs.emsdk }}-${{ hashFiles('build.zig.zon', 'src/version.zig', 'bindings/wasm/package.json', 'bindings/wasm/bun.lock', 'bindings/wasm/tools/build-wasm.sh') }}
+      - run: bun install --frozen-lockfile
+        working-directory: bindings/wasm
+      - name: Install Playwright Chromium
+        run: bunx --no-install playwright install --with-deps chromium
+        working-directory: bindings/wasm
+      - run: sh scripts/check-versions.sh
+      - run: bun run test
+        working-directory: bindings/wasm
+      - name: Build browser package once
+        run: |
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          export EM_CACHE="$RUNNER_TEMP/zova-wasm-cache/em-cache"
+          export ZIG_LOCAL_CACHE_DIR="$RUNNER_TEMP/zova-wasm-cache/zig-local"
+          sh bindings/wasm/tools/build-package.sh "$RUNNER_TEMP/zova-wasm-build"
+      - name: Verify installed npm tarball in Playwright Chromium
+        run: sh bindings/wasm/tools/check-browser-package.sh "$RUNNER_TEMP/zova-wasm-build"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zova-${{ steps.versions.outputs.package }}-wasm
+          path: ${{ runner.temp }}/zova-wasm-build/artifacts/*.tgz
+          if-no-files-found: error

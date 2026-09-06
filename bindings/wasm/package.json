@@ -20,7 +20,8 @@
   "publishConfig": { "access": "public" },
   "scripts": {
     "build": "sh tools/build-package.sh",
-    "test": "bun test tests/api.test.ts tests/channel.test.mjs"
+    "test": "bun test tests/api.test.ts tests/channel.test.mjs tests/release-gate.test.mjs",
+    "test:browser": "bun tests/playwright-browser.mjs"
   },
-  "devDependencies": { "typescript": "5.9.3" }
+  "devDependencies": { "typescript": "5.9.3", "playwright": "1.63.0" }
 }

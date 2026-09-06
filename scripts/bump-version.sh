@@ -130,7 +130,10 @@ for file in \
     "$ROOT/bindings/javascript/tests/package-names.test.ts" \
     "$ROOT/bindings/javascript/tests/load.test.ts" \
     "$ROOT/bindings/javascript/tests/runtime-smoke.mjs" \
-    "$ROOT/bindings/javascript/tests/runtime-smoke.cjs"
+    "$ROOT/bindings/javascript/tests/runtime-smoke.cjs" \
+    "$ROOT/bindings/wasm/package.json" \
+    "$ROOT/bindings/wasm/bun.lock" \
+    "$ROOT/bindings/wasm/README.md"
 do
     replace_all "$file"
 done
