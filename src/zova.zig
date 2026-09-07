@@ -977,6 +977,14 @@ pub const Database = struct {
         return openForExtensionInspectionWithExtensions(path, options, ExtensionRegistry.empty());
     }
 
+    /// Explicit maintenance connection: validate the file format/core schema,
+    /// but do not run incompatible extension hooks. Upgrade, close, then reopen
+    /// normally before application use. Never performs an implicit upgrade.
+    pub fn openForExtensionUpgradeWithExtensions(path: [:0]const u8, options: OpenOptions, registry: ExtensionRegistry) Error!Database {
+        if (options.read_only) return error.ExtensionInvalid;
+        return openInternal(path, options, true, registry, .inspect);
+    }
+
     /// Open a database for diagnostic extension metadata inspection with
     /// process-registered extension code available to explicit checks.
     pub fn openForExtensionInspectionWithExtensions(path: [:0]const u8, options: OpenOptions, registry: ExtensionRegistry) Error!Database {
@@ -1065,6 +1073,11 @@ pub const Database = struct {
     /// never records executable paths or auto-loads code from the file.
     pub fn installExtension(self: *Database, name: []const u8) Error!void {
         try extension_impl.install(&self.sqlite_db, self.extension_registry, name, validateExtensionLifecycleCore);
+    }
+
+    /// Execute one declared forward extension-data path, atomically.
+    pub fn upgradeExtension(self: *Database, name: []const u8) Error!void {
+        try extension_impl.upgrade(std.heap.c_allocator, &self.sqlite_db, self.extension_registry, name, validateExtensionLifecycleCore);
     }
 
     /// Return installed extension metadata sorted by extension name.

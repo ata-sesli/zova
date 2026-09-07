@@ -109,6 +109,7 @@ pub const OwnedRegistry = struct {
     allocator: std.mem.Allocator,
     extensions: []extension.Extension,
     plugins: []plugin.Descriptor,
+    upgrades: []extension.Upgrade,
 
     pub fn init(allocator: std.mem.Allocator, registries: []const extension.Registry) Error!OwnedRegistry {
         var total: usize = 0;
@@ -117,6 +118,15 @@ pub const OwnedRegistry = struct {
         const items = try allocator.alloc(extension.Extension, total);
         errdefer allocator.free(items);
         var plugin_total: usize = 0;
+        var upgrade_total: usize = 0;
+        for (registries) |item| upgrade_total += item.upgrades.len;
+        const upgrades = try allocator.alloc(extension.Upgrade, upgrade_total);
+        errdefer allocator.free(upgrades);
+        var upgrade_index: usize = 0;
+        for (registries) |item| {
+            @memcpy(upgrades[upgrade_index..][0..item.upgrades.len], item.upgrades);
+            upgrade_index += item.upgrades.len;
+        }
         for (registries) |item| plugin_total += item.plugins.len;
         const plugins = try allocator.alloc(plugin.Descriptor, plugin_total);
         errdefer allocator.free(plugins);
@@ -132,18 +142,19 @@ pub const OwnedRegistry = struct {
             index += item.extensions.len;
         }
 
-        const owned: OwnedRegistry = .{ .allocator = allocator, .extensions = items, .plugins = plugins };
+        const owned: OwnedRegistry = .{ .allocator = allocator, .extensions = items, .plugins = plugins, .upgrades = upgrades };
         try owned.registry().validate();
         return owned;
     }
 
     pub fn registry(self: OwnedRegistry) extension.Registry {
-        return .{ .extensions = self.extensions, .plugins = self.plugins };
+        return .{ .extensions = self.extensions, .plugins = self.plugins, .upgrades = self.upgrades };
     }
 
     pub fn deinit(self: *OwnedRegistry) void {
         self.allocator.free(self.extensions);
         self.allocator.free(self.plugins);
+        self.allocator.free(self.upgrades);
     }
 };
 
@@ -152,6 +163,7 @@ pub const DynamicExtensionSet = struct {
     libraries: []DynamicLibrary,
     extensions: []extension.Extension,
     plugins: []plugin.Descriptor,
+    upgrades: []extension.Upgrade,
 
     pub fn loadTrustedBundles(
         allocator: std.mem.Allocator,
@@ -165,6 +177,7 @@ pub const DynamicExtensionSet = struct {
                 .libraries = try allocator.alloc(DynamicLibrary, 0),
                 .extensions = try allocator.alloc(extension.Extension, 0),
                 .plugins = try allocator.alloc(plugin.Descriptor, 0),
+                .upgrades = try allocator.alloc(extension.Upgrade, 0),
             };
         }
 
@@ -186,6 +199,8 @@ pub const DynamicExtensionSet = struct {
         errdefer extensions.deinit(allocator);
         var plugins: std.ArrayList(plugin.Descriptor) = .empty;
         defer plugins.deinit(allocator);
+        var upgrades: std.ArrayList(extension.Upgrade) = .empty;
+        defer upgrades.deinit(allocator);
 
         for (bundle_paths) |bundle_path| {
             var info = try loadBundleInfo(allocator, bundle_path);
@@ -198,6 +213,7 @@ pub const DynamicExtensionSet = struct {
             const loaded = try loadDescriptor(allocator, &library, info);
             try extensions.append(allocator, loaded.extension);
             if (loaded.plugin) |descriptor| try plugins.append(allocator, descriptor);
+            if (loaded.upgrade) |path| try upgrades.append(allocator, path);
             // Transfer the handle last: avoid closing it twice on allocation failure.
             try libraries.append(allocator, library);
         }
@@ -211,19 +227,22 @@ pub const DynamicExtensionSet = struct {
         }
         const owned_plugins = try plugins.toOwnedSlice(allocator);
         errdefer allocator.free(owned_plugins);
+        const owned_upgrades = try upgrades.toOwnedSlice(allocator);
+        errdefer allocator.free(owned_upgrades);
 
         const set: DynamicExtensionSet = .{
             .allocator = allocator,
             .libraries = owned_libraries,
             .extensions = owned_extensions,
             .plugins = owned_plugins,
+            .upgrades = owned_upgrades,
         };
         try set.registry().validate();
         return set;
     }
 
     pub fn registry(self: DynamicExtensionSet) extension.Registry {
-        return .{ .extensions = self.extensions, .plugins = self.plugins };
+        return .{ .extensions = self.extensions, .plugins = self.plugins, .upgrades = self.upgrades };
     }
 
     pub fn deinit(self: *DynamicExtensionSet) void {
@@ -233,6 +252,7 @@ pub const DynamicExtensionSet = struct {
         self.allocator.free(self.libraries);
         self.allocator.free(self.extensions);
         self.allocator.free(self.plugins);
+        self.allocator.free(self.upgrades);
     }
 };
 
@@ -241,6 +261,8 @@ pub const LoadedBundle = struct {
     extensions: [1]extension.Extension,
     plugins: [1]plugin.Descriptor = undefined,
     plugin_count: usize = 0,
+    upgrades: [1]extension.Upgrade = undefined,
+    upgrade_count: usize = 0,
 
     pub fn load(allocator: std.mem.Allocator, bundle_path: []const u8) Error!LoadedBundle {
         if (comptime !supports_dynamic_loading) return error.ExtensionLoadFailed;
@@ -265,12 +287,16 @@ pub const LoadedBundle = struct {
             bundle.plugins[0] = descriptor;
             bundle.plugin_count = 1;
         }
+        if (loaded.upgrade) |path| {
+            bundle.upgrades[0] = path;
+            bundle.upgrade_count = 1;
+        }
         try bundle.registry().validate();
         return bundle;
     }
 
     pub fn registry(self: *const LoadedBundle) extension.Registry {
-        return .{ .extensions = self.extensions[0..], .plugins = self.plugins[0..self.plugin_count] };
+        return .{ .extensions = self.extensions[0..], .plugins = self.plugins[0..self.plugin_count], .upgrades = self.upgrades[0..self.upgrade_count] };
     }
 
     pub fn deinit(self: *LoadedBundle) void {
@@ -283,7 +309,7 @@ pub fn verifyBundleEntrypoint(allocator: std.mem.Allocator, bundle_path: []const
     defer bundle.deinit();
 }
 
-fn loadDescriptor(allocator: std.mem.Allocator, library: *std.DynLib, info: BundleInfo) Error!struct { extension: extension.Extension, plugin: ?plugin.Descriptor = null } {
+fn loadDescriptor(allocator: std.mem.Allocator, library: *std.DynLib, info: BundleInfo) Error!struct { extension: extension.Extension, plugin: ?plugin.Descriptor = null, upgrade: ?extension.Upgrade = null } {
     // The manifest explicitly selects the new signature. No symbol probing or
     // fallback may reinterpret an old Zig descriptor as a C structure.
     if (std.mem.eql(u8, info.manifest.entrypoint, plugin.entrypoint)) {
@@ -292,7 +318,7 @@ fn loadDescriptor(allocator: std.mem.Allocator, library: *std.DynLib, info: Bund
         const descriptor = entry(1);
         const loaded = try plugin.validate(descriptor);
         try ensureLoadedExtensionMatches(info, loaded);
-        return .{ .extension = loaded, .plugin = descriptor.?.* };
+        return .{ .extension = loaded, .plugin = descriptor.?.*, .upgrade = try plugin.upgradePath(descriptor.?) };
     }
     const entry_name = try allocator.dupeZ(u8, info.manifest.entrypoint);
     defer allocator.free(entry_name);

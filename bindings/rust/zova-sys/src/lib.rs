@@ -1987,6 +1987,12 @@ extern "C" {
     pub fn zova_database_extension_install(
         request: *const zova_database_extension_request,
     ) -> zova_status;
+    pub fn zova_database_extension_upgrade(
+        request: *const zova_database_extension_request,
+    ) -> zova_status;
+    pub fn zova_database_open_for_extension_upgrade(
+        request: *const zova_database_open_extensions_request,
+    ) -> zova_status;
     pub fn zova_database_extension_list(
         request: *const zova_database_extension_list_request,
     ) -> zova_status;

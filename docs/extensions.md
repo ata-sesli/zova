@@ -549,6 +549,68 @@ extension registry.
 
 ## Native Artifact Notes
 
+### Explicit extension-data upgrades
+
+The installed `_zova_extensions.version` value records the data contract that
+last completed installation or upgrade. The loaded manifest's `version` is the
+code release and its target data contract. These are deliberately coupled: even
+a code-only version change needs an explicit no-op upgrade hook. This avoids
+guessing whether a new binary understands old storage. No new metadata columns
+or Zova file-format change are required.
+
+Normal open still requires an exact installed/loaded version match. It never
+upgrades, drops, or reinstalls extension data. To upgrade, build and explicitly
+trust the target bundle, then run:
+
+```sh
+zova --extension ./new-plugin.zovaext extension upgrade app.zova my_plugin
+```
+
+An upgrade declares an exact source and target `major.minor.patch` version.
+Only forward numeric paths are supported. Equal versions, downgrades,
+undeclared paths, and non-triplet version strings return
+`ExtensionIncompatible` (`ZOVA_EXTENSION_INCOMPATIBLE` in C). Missing target
+code returns `ExtensionUnavailable`; an uninstalled name returns
+`ExtensionNotFound`. There is no automatic path search or multi-hop upgrade:
+install the intermediate code and explicitly execute each declared step.
+
+For portable plugins, return a `zova_plugin_upgrade_descriptor_v1` through the
+existing v1 entrypoint. Set `base.struct_size` to the extended size,
+`base.flags = ZOVA_PLUGIN_HAS_UPGRADE_V1`, `from_version` to the exact installed
+version, and `upgrade` to a non-null lifecycle hook. The base manifest version
+is the target. Old hosts reject the new flag safely; unflagged descriptors keep
+their original layout and behavior. Native Zig registries may instead supply
+`Registry.upgrades` entries with `name`, `from_version`, `to_version`, and
+`hook`. Legacy Zig descriptors are not enlarged: their manifests retain the
+same exact-version behavior, and they have no upgrade path unless a host
+registers one or the author explicitly adopts the portable extended descriptor.
+
+The hook must preserve logical data and must not edit extension metadata, issue
+transaction commands, or perform external irreversible work. It receives the
+target manifest (Zig) or the existing temporary host service/context (C).
+Upgrade, target SQL registration/checking, schema/core validation, and metadata
+publication are enclosed in one savepoint. SQL, allocation, hook, or validation
+failure rolls back the operation; earlier caller-transaction work survives.
+Success inside a caller transaction is provisional until that caller commits.
+Caller rollback undoes both data and metadata changes. Close the maintenance
+connection after commit or rollback and reopen with matching code before use.
+
+Zig exposes `openForExtensionUpgradeWithExtensions` and `upgradeExtension`.
+C/raw `zova-sys` expose `zova_database_open_for_extension_upgrade` (the existing
+trusted-bundle open request, with zero flags) and
+`zova_database_extension_upgrade` (the existing named extension request).
+The maintenance open validates the current core/file format but intentionally
+does not run installed extension hooks. It is not a normal application open.
+Existing high-level bindings are unchanged.
+
+Backups/restores preserve the installed version and upgraded data; verification
+needs the matching code. Salvage never invokes an upgrade hook: it uses an
+exact-version salvage hook when available, otherwise reports the extension as
+skipped. When both Zova file migration and extension upgrades are required,
+migrate the file first with code matching the installed extension version, then
+perform the explicit extension upgrade on the migrated database. Maintenance
+open is not a bypass for an old or unsupported Zova format.
+
 ### Language-neutral plugin ABI v1
 
 `include/zova_plugin.h` is the standalone C/C++ authoring contract. A portable
@@ -562,7 +624,8 @@ the database format and package version.
 Implement the header's entry function and return a static immutable
 `zova_plugin_descriptor_v1` for host ABI 1, or NULL for an unsupported host ABI.
 Set `struct_size = sizeof(zova_plugin_descriptor_v1)`, `abi_version = 1`, and
-`flags = 0`. Descriptor strings must match the bundle manifest. The host rejects
+`flags = 0` for a base-only descriptor (the upgrade tail above uses its explicit
+flag). Descriptor strings must match the bundle manifest. The host rejects
 short descriptors, unknown versions/flags and invalid manifests before invoking
 lifecycle hooks. Larger descriptors may append fields, which v1 ignores.
 Every v1 field must be present; optional hooks are represented by NULL.

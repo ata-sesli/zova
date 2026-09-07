@@ -61,6 +61,7 @@ pub fn writeUsage(writer: *std.Io.Writer) !void {
         \\  zova extension check [--json] <file.zova> [name]
         \\  zova extension drop [--json] <file.zova> <name>
         \\  zova extension install [--json] <file.zova> <name>
+        \\  zova extension upgrade [--json] <file.zova> <name>
         \\  zova extension trust [--json] <bundle.zovaext>
         \\  zova extension untrust [--json] <bundle.zovaext|name>
         \\  zova extension trusted [--json]

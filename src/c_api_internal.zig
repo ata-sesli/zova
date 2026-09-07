@@ -799,6 +799,8 @@ pub const zova_graph_info_get = @import("c_api/graphs.zig").zova_graph_info_get;
 pub const zova_graphs_list = @import("c_api/graphs.zig").zova_graphs_list;
 
 pub const zova_database_extension_install = @import("c_api/extensions.zig").zova_database_extension_install;
+pub const zova_database_extension_upgrade = @import("c_api/extensions.zig").zova_database_extension_upgrade;
+pub const zova_database_open_for_extension_upgrade = @import("c_api/database.zig").zova_database_open_for_extension_upgrade;
 
 pub const zova_database_extension_list = @import("c_api/extensions.zig").zova_database_extension_list;
 

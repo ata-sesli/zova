@@ -81,6 +81,11 @@ pub fn extensionCommand(
     defer allocator.free(path_z);
 
     var db = open_db: {
+        if (parsed.action == .upgrade) {
+            break :open_db zova.Database.openForExtensionUpgradeWithExtensions(path_z, .{}, ctx.registry) catch |err| {
+                return extensionOpenErrorFormat(stderr, parsed.format, err);
+            };
+        }
         const opened = openDatabase(ctx, path_z) catch |err| {
             if ((parsed.action == .list or parsed.action == .info) and isExtensionHealthError(err)) {
                 break :open_db zova.Database.openForExtensionInspectionWithExtensions(path_z, .{}, ctx.registry) catch |inspect_err| {
@@ -127,6 +132,12 @@ pub fn extensionCommand(
             const name = parsed.name.?;
             db.dropExtension(name) catch |err| return extensionErrorFormat(stderr, "extension-drop", parsed.format, err);
             try writeExtensionMutationSuccess(stdout, parsed.format, "extension-drop", parsed.path.?, name);
+            return ExitCode.ok;
+        },
+        .upgrade => {
+            const name = parsed.name.?;
+            db.upgradeExtension(name) catch |err| return extensionErrorFormat(stderr, "extension-upgrade", parsed.format, err);
+            try writeExtensionMutationSuccess(stdout, parsed.format, "extension-upgrade", parsed.path.?, name);
             return ExitCode.ok;
         },
         .install => {
