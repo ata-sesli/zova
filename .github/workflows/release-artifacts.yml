@@ -104,6 +104,10 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: 2_28
           container: ${{ matrix.container }}
+          # Runs inside the manylinux container, not on the Ubuntu host.
+          before-script-linux: |
+            yum install -y clang
+            clang --version
           working-directory: bindings/python
           args: --release --locked --compatibility pypi --out ../../zig-out/python-artifacts
       - name: Verify stable-ABI wheel tag
