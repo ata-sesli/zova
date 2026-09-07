@@ -88,6 +88,10 @@ cp "$SQLITE_DIR/sqlite3.c" "$OUT/sqlite3.c"
 cp "$SQLITE_DIR/sqlite3.h" "$OUT/sqlite3.h"
 cp "$SQLITE_DIR/sqlite3ext.h" "$OUT/sqlite3ext.h"
 
+if [ "$CARGO_TARGET" = x86_64-pc-windows-msvc ]; then
+    python3 "$ROOT/scripts/fix-windows-generated-c.py" "$OUT/zova_c.c"
+fi
+
 python3 "$ROOT/scripts/generated-c-metadata.py" "$ROOT" "$OUT" "$CARGO_TARGET" "$SQLITE_VERSION"
 
 echo "generated C bundle written to $OUT"
