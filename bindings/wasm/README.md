@@ -207,8 +207,18 @@ and tests the installed npm tarball before uploading it. Playwright is pinned
 in the development lockfile. Native bindings remain independently tested.
 
 Release publication requires a successful Release Artifacts run at the exact
-release commit, including the WASM browser job. Experimental WASM prereleases
-use npm's `next` tag with trusted publishing. Before the first registry release,
+release commit, including the WASM browser job. WASM publication uses trusted
+publishing with npm's `next` tag for prereleases (such as `1.0.0-rc.3`) and
+`latest` for stable versions (such as `1.0.0`). The API's experimental status is
+independent of the package version or dist-tag. Publication remains independent
+of `zova-js`.
+
+Both paths publish the exact versioned WASM tarball from the verified artifact
+run. A retry skips an already-published version only when its registry SHA-512
+integrity matches that tarball; a mismatch or registry lookup error stops
+publication. Successful retries leave existing dist-tags unchanged, so rerunning
+an older release cannot move a tag backwards. No artifacts are overwritten.
+Before the first registry release,
 the npm package must exist and its trusted publisher must name this repository,
 `publish-release.yml`, and the `release` environment. This change does not publish
 the package or bump the repository version.

@@ -306,16 +306,11 @@ jobs:
           publish_package zova-db-windows-x64
           publish_package zova-js
 
-      - name: Publish experimental WASM prerelease
-        if: contains(inputs.version, '-')
+      - name: Publish WASM package
         env:
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
           set -eu
-          tarball="zig-out/release-download/zova-${RELEASE_VERSION}-wasm/zova-wasm-${RELEASE_VERSION}.tgz"
-          test -f "$tarball"
-          if npm view "zova-wasm@$RELEASE_VERSION" version >/dev/null 2>&1; then
-            npm dist-tag add "zova-wasm@$RELEASE_VERSION" next
-          else
-            npm publish "$tarball" --access public --tag next
-          fi
+          node bindings/wasm/tools/publish-package.mjs "$RELEASE_VERSION" \
+            zig-out/release-download "$RUNNER_TEMP/artifact-run.json" \
+            "$RUNNER_TEMP/artifact-jobs.json" "$(git rev-parse HEAD)"
