@@ -1,6 +1,6 @@
 //! Dynamic trusted local extension loading.
 //!
-//! This is intentionally a Zig-native trusted ABI. A `.zovaext` bundle is
+//! Supports explicitly selected C-v1 and legacy Zig-native descriptors. A `.zovaext` bundle is
 //! local code that the process explicitly trusts and loads; database metadata
 //! never contains executable paths and never triggers loading by itself.
 
@@ -8,6 +8,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("zova_build_options");
 const extension = @import("extension.zig");
+const plugin = @import("extension_plugin.zig");
 
 pub const supports_dynamic_loading = build_options.enable_dynamic_extensions and builtin.os.tag != .windows;
 const DynamicLibrary = if (supports_dynamic_loading) std.DynLib else struct {};
@@ -107,6 +108,7 @@ pub const TrustedList = struct {
 pub const OwnedRegistry = struct {
     allocator: std.mem.Allocator,
     extensions: []extension.Extension,
+    plugins: []plugin.Descriptor,
 
     pub fn init(allocator: std.mem.Allocator, registries: []const extension.Registry) Error!OwnedRegistry {
         var total: usize = 0;
@@ -114,6 +116,15 @@ pub const OwnedRegistry = struct {
 
         const items = try allocator.alloc(extension.Extension, total);
         errdefer allocator.free(items);
+        var plugin_total: usize = 0;
+        for (registries) |item| plugin_total += item.plugins.len;
+        const plugins = try allocator.alloc(plugin.Descriptor, plugin_total);
+        errdefer allocator.free(plugins);
+        var plugin_index: usize = 0;
+        for (registries) |item| {
+            @memcpy(plugins[plugin_index..][0..item.plugins.len], item.plugins);
+            plugin_index += item.plugins.len;
+        }
 
         var index: usize = 0;
         for (registries) |item| {
@@ -121,17 +132,18 @@ pub const OwnedRegistry = struct {
             index += item.extensions.len;
         }
 
-        const owned: OwnedRegistry = .{ .allocator = allocator, .extensions = items };
+        const owned: OwnedRegistry = .{ .allocator = allocator, .extensions = items, .plugins = plugins };
         try owned.registry().validate();
         return owned;
     }
 
     pub fn registry(self: OwnedRegistry) extension.Registry {
-        return extension.Registry.init(self.extensions);
+        return .{ .extensions = self.extensions, .plugins = self.plugins };
     }
 
     pub fn deinit(self: *OwnedRegistry) void {
         self.allocator.free(self.extensions);
+        self.allocator.free(self.plugins);
     }
 };
 
@@ -139,6 +151,7 @@ pub const DynamicExtensionSet = struct {
     allocator: std.mem.Allocator,
     libraries: []DynamicLibrary,
     extensions: []extension.Extension,
+    plugins: []plugin.Descriptor,
 
     pub fn loadTrustedBundles(
         allocator: std.mem.Allocator,
@@ -151,6 +164,7 @@ pub const DynamicExtensionSet = struct {
                 .allocator = allocator,
                 .libraries = try allocator.alloc(DynamicLibrary, 0),
                 .extensions = try allocator.alloc(extension.Extension, 0),
+                .plugins = try allocator.alloc(plugin.Descriptor, 0),
             };
         }
 
@@ -170,6 +184,8 @@ pub const DynamicExtensionSet = struct {
 
         var extensions: std.ArrayList(extension.Extension) = .empty;
         errdefer extensions.deinit(allocator);
+        var plugins: std.ArrayList(plugin.Descriptor) = .empty;
+        defer plugins.deinit(allocator);
 
         for (bundle_paths) |bundle_path| {
             var info = try loadBundleInfo(allocator, bundle_path);
@@ -179,15 +195,11 @@ pub const DynamicExtensionSet = struct {
             var library = std.DynLib.open(info.library_path) catch return error.ExtensionLoadFailed;
             errdefer library.close();
 
-            const entry_name = try allocator.dupeZ(u8, info.manifest.entrypoint);
-            defer allocator.free(entry_name);
-            const Entry = *const fn () callconv(.c) *const extension.Extension;
-            const entry = library.lookup(Entry, entry_name) orelse return error.ExtensionLoadFailed;
-            const loaded = entry().*;
-            try ensureLoadedExtensionMatches(info, loaded);
-
+            const loaded = try loadDescriptor(allocator, &library, info);
+            try extensions.append(allocator, loaded.extension);
+            if (loaded.plugin) |descriptor| try plugins.append(allocator, descriptor);
+            // Transfer the handle last: avoid closing it twice on allocation failure.
             try libraries.append(allocator, library);
-            try extensions.append(allocator, loaded);
         }
 
         const owned_extensions = try extensions.toOwnedSlice(allocator);
@@ -197,18 +209,21 @@ pub const DynamicExtensionSet = struct {
             for (owned_libraries) |*library| library.close();
             allocator.free(owned_libraries);
         }
+        const owned_plugins = try plugins.toOwnedSlice(allocator);
+        errdefer allocator.free(owned_plugins);
 
         const set: DynamicExtensionSet = .{
             .allocator = allocator,
             .libraries = owned_libraries,
             .extensions = owned_extensions,
+            .plugins = owned_plugins,
         };
         try set.registry().validate();
         return set;
     }
 
     pub fn registry(self: DynamicExtensionSet) extension.Registry {
-        return extension.Registry.init(self.extensions);
+        return .{ .extensions = self.extensions, .plugins = self.plugins };
     }
 
     pub fn deinit(self: *DynamicExtensionSet) void {
@@ -217,12 +232,15 @@ pub const DynamicExtensionSet = struct {
         }
         self.allocator.free(self.libraries);
         self.allocator.free(self.extensions);
+        self.allocator.free(self.plugins);
     }
 };
 
 pub const LoadedBundle = struct {
     library: DynamicLibrary,
     extensions: [1]extension.Extension,
+    plugins: [1]plugin.Descriptor = undefined,
+    plugin_count: usize = 0,
 
     pub fn load(allocator: std.mem.Allocator, bundle_path: []const u8) Error!LoadedBundle {
         if (comptime !supports_dynamic_loading) return error.ExtensionLoadFailed;
@@ -237,23 +255,22 @@ pub const LoadedBundle = struct {
         var library = std.DynLib.open(info.library_path) catch return error.ExtensionLoadFailed;
         errdefer library.close();
 
-        const entry_name = try allocator.dupeZ(u8, info.manifest.entrypoint);
-        defer allocator.free(entry_name);
-        const Entry = *const fn () callconv(.c) *const extension.Extension;
-        const entry = library.lookup(Entry, entry_name) orelse return error.ExtensionLoadFailed;
-        const loaded = entry().*;
-        try ensureLoadedExtensionMatches(info, loaded);
+        const loaded = try loadDescriptor(allocator, &library, info);
 
-        const bundle = LoadedBundle{
+        var bundle = LoadedBundle{
             .library = library,
-            .extensions = .{loaded},
+            .extensions = .{loaded.extension},
         };
+        if (loaded.plugin) |descriptor| {
+            bundle.plugins[0] = descriptor;
+            bundle.plugin_count = 1;
+        }
         try bundle.registry().validate();
         return bundle;
     }
 
     pub fn registry(self: *const LoadedBundle) extension.Registry {
-        return extension.Registry.init(self.extensions[0..]);
+        return .{ .extensions = self.extensions[0..], .plugins = self.plugins[0..self.plugin_count] };
     }
 
     pub fn deinit(self: *LoadedBundle) void {
@@ -264,6 +281,26 @@ pub const LoadedBundle = struct {
 pub fn verifyBundleEntrypoint(allocator: std.mem.Allocator, bundle_path: []const u8) Error!void {
     var bundle = try LoadedBundle.load(allocator, bundle_path);
     defer bundle.deinit();
+}
+
+fn loadDescriptor(allocator: std.mem.Allocator, library: *std.DynLib, info: BundleInfo) Error!struct { extension: extension.Extension, plugin: ?plugin.Descriptor = null } {
+    // The manifest explicitly selects the new signature. No symbol probing or
+    // fallback may reinterpret an old Zig descriptor as a C structure.
+    if (std.mem.eql(u8, info.manifest.entrypoint, plugin.entrypoint)) {
+        const Entry = *const fn (u32) callconv(.c) ?*const plugin.Descriptor;
+        const entry = library.lookup(Entry, plugin.entrypoint) orelse return error.ExtensionLoadFailed;
+        const descriptor = entry(1);
+        const loaded = try plugin.validate(descriptor);
+        try ensureLoadedExtensionMatches(info, loaded);
+        return .{ .extension = loaded, .plugin = descriptor.?.* };
+    }
+    const entry_name = try allocator.dupeZ(u8, info.manifest.entrypoint);
+    defer allocator.free(entry_name);
+    const Entry = *const fn () callconv(.c) *const extension.Extension;
+    const entry = library.lookup(Entry, entry_name) orelse return error.ExtensionLoadFailed;
+    const loaded = entry().*;
+    try ensureLoadedExtensionMatches(info, loaded);
+    return .{ .extension = loaded };
 }
 
 pub fn loadBundleInfo(allocator: std.mem.Allocator, bundle_path: []const u8) Error!BundleInfo {

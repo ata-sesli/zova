@@ -549,6 +549,48 @@ extension registry.
 
 ## Native Artifact Notes
 
+### Language-neutral plugin ABI v1
+
+`include/zova_plugin.h` is the standalone C/C++ authoring contract. A portable
+bundle explicitly selects `"entrypoint": "zova_plugin_entry_v1"` in its
+`extension.json`. All other manifest fields and trust-store checks are unchanged.
+The default `zova_extension_entry` remains the legacy Zig-native contract; it is
+never interpreted as a portable descriptor. Existing Zig bundles still require
+their existing compiler/layout compatibility. Plugin ABI v1 is independent of
+the database format and package version.
+
+Implement the header's entry function and return a static immutable
+`zova_plugin_descriptor_v1` for host ABI 1, or NULL for an unsupported host ABI.
+Set `struct_size = sizeof(zova_plugin_descriptor_v1)`, `abi_version = 1`, and
+`flags = 0`. Descriptor strings must match the bundle manifest. The host rejects
+short descriptors, unknown versions/flags and invalid manifests before invoking
+lifecycle hooks. Larger descriptors may append fields, which v1 ignores.
+Every v1 field must be present; optional hooks are represented by NULL.
+
+Hooks receive a temporary host-service table and opaque connection context.
+`exec_sql` accepts a nonempty, NUL-free UTF-8 SQL buffer of at most 1 MiB and a
+64-bit byte length. It copies the buffer; the plugin retains ownership. Never
+retain the host table/context, use it from another thread, or issue transaction
+or savepoint commands. Install/drop run inside Zova's lifecycle savepoint;
+failure rolls back their work. Check hooks must be read-only. Registration hooks
+must be repeatable on reopen. This first host table supports SQL execution, not
+native scalar-function registration; the application callback API is unchanged.
+
+Status 0 means success, 2 maps to out-of-memory, and other nonzero hook statuses
+map to an extension error. Host execution returns 1 for SQL errors and 3 for
+invalid arguments. No allocation crosses the ABI: plugins must release their
+own temporary allocations before returning, and descriptor strings remain
+borrowed until the library unloads. No C++ exception may cross a hook or entry
+boundary. Use the header's calling-convention/export macros and default packing.
+See `tests/plugin_fixture.c` and `.cpp` for minimal compilable examples.
+
+This remains trusted in-process native code, not a sandbox. Loading a library
+can itself execute native initializers before descriptor validation. C/C++
+fixtures run under `zig build test-extensions` on the existing native Unix
+loader path. Windows dynamic loading and generated-C dynamic loading remain
+unsupported; this header does not enable them. Libraries must match the host's
+OS, architecture, and deployment target.
+
 Native extension artifacts must be built for the target platform and a
 compatible Zova extension ABI. On macOS, build extension bundles and bridge
 objects with the same deployment-target policy used by the host application and

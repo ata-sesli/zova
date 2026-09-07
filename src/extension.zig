@@ -6,6 +6,7 @@
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
 const zova_version = @import("version.zig");
+const plugin = @import("extension_plugin.zig");
 
 pub const extensions_table = "_zova_extensions";
 pub const storage_prefix_prefix = "_zova_ext_";
@@ -86,6 +87,21 @@ pub const Extension = struct {
 
 pub const Registry = struct {
     extensions: []const Extension = &.{},
+    plugins: []const plugin.Descriptor = &.{},
+
+    fn invoke(self: Registry, item: Extension, db: *sqlite.Database, phase: plugin.Phase) Error!void {
+        for (self.plugins) |descriptor| {
+            if (std.mem.eql(u8, item.manifest.name, std.mem.span(descriptor.name.?))) {
+                return plugin.invoke(descriptor, phase, db);
+            }
+        }
+        switch (phase) {
+            .install => try item.install(db, item.manifest),
+            .check => try item.check(db, item.manifest),
+            .drop => try item.drop(db, item.manifest),
+            .register_sql => if (item.register_sql) |hook| try hook(db, item.manifest),
+        }
+    }
 
     pub fn init(extensions: []const Extension) Registry {
         return .{ .extensions = extensions };
@@ -103,6 +119,14 @@ pub const Registry = struct {
     }
 
     pub fn validate(self: Registry) Error!void {
+        for (self.plugins, 0..) |*descriptor, i| {
+            const item = try plugin.validate(descriptor);
+            const registered = self.find(item.manifest.name) orelse return error.ExtensionInvalid;
+            if (!std.mem.eql(u8, registered.manifest.storage_prefix, item.manifest.storage_prefix)) return error.ExtensionInvalid;
+            for (self.plugins[0..i]) |previous| {
+                if (std.mem.eql(u8, std.mem.span(previous.name.?), item.manifest.name)) return error.ExtensionInvalid;
+            }
+        }
         for (self.extensions, 0..) |extension, index| {
             try validateManifest(extension.manifest);
             for (self.extensions[0..index]) |previous| {
@@ -230,9 +254,9 @@ pub fn install(db: *sqlite.Database, registry: Registry, name: []const u8, valid
         db.releaseSavepoint("extension_lifecycle") catch {};
     };
 
-    try extension.install(db, extension.manifest);
+    try registry.invoke(extension, db, .install);
     try insertInstalled(db, extension.manifest);
-    if (extension.register_sql) |register_sql| try register_sql(db, extension.manifest);
+    try registry.invoke(extension, db, .register_sql);
     try validateNewSchemaObjectsOwnedBy(std.heap.c_allocator, db, before_objects.names, extension.manifest.storage_prefix);
     try validateInstalledState(std.heap.c_allocator, db);
     if (validate_core) |hook| hook(db) catch return error.ExtensionInvalid;
@@ -259,7 +283,7 @@ pub fn drop(db: *sqlite.Database, registry: Registry, name: []const u8, validate
         db.releaseSavepoint("extension_lifecycle") catch {};
     };
 
-    try extension.drop(db, extension.manifest);
+    try registry.invoke(extension, db, .drop);
     var delete_row = try db.prepare("delete from _zova_extensions where name = ?");
     defer delete_row.deinit();
     try delete_row.bindText(1, name);
@@ -282,7 +306,7 @@ pub fn check(db: *sqlite.Database, registry: Registry, name: []const u8) Error!v
     }
     const extension = registry.find(name) orelse return error.ExtensionUnavailable;
     try ensureManifestMatchesInstalled(extension.manifest, installed);
-    try extension.check(db, extension.manifest);
+    try registry.invoke(extension, db, .check);
 }
 
 pub fn registerSqlForInstalledExtension(db: *sqlite.Database, registry: Registry, name: []const u8) Error!void {
@@ -295,7 +319,7 @@ pub fn registerSqlForInstalledExtension(db: *sqlite.Database, registry: Registry
     }
     const extension = registry.find(name) orelse return error.ExtensionUnavailable;
     try ensureManifestMatchesInstalled(extension.manifest, installed);
-    if (extension.register_sql) |register_sql| try register_sql(db, extension.manifest);
+    try registry.invoke(extension, db, .register_sql);
 }
 
 pub fn checkAll(db: *sqlite.Database, registry: Registry) Error!void {
@@ -306,7 +330,7 @@ pub fn checkAll(db: *sqlite.Database, registry: Registry) Error!void {
     for (list.items) |item| {
         const extension = registry.find(item.name) orelse return error.ExtensionUnavailable;
         try ensureManifestMatchesInstalled(extension.manifest, item);
-        try extension.check(db, extension.manifest);
+        try registry.invoke(extension, db, .check);
     }
 }
 
@@ -318,7 +342,7 @@ pub fn registerSqlForInstalled(db: *sqlite.Database, registry: Registry) Error!v
     for (list.items) |item| {
         const extension = registry.find(item.name) orelse return error.ExtensionUnavailable;
         try ensureManifestMatchesInstalled(extension.manifest, item);
-        if (extension.register_sql) |register_sql| try register_sql(db, extension.manifest);
+        try registry.invoke(extension, db, .register_sql);
     }
 }
 
