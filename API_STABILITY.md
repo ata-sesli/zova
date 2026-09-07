@@ -1,9 +1,14 @@
 # Zova 1.x API stability
 
 This document defines the candidate public contract for Zova 1.x. The
-`1.0.0-rc.2` release continues the contract introduced in `1.0.0-rc.1`. Release
+`1.0.0-rc.3` release continues the contract introduced in `1.0.0-rc.1`. Release
 candidate fixes may still correct inconsistencies before `1.0.0`, but the RC
 line is closed to open-ended feature expansion.
+
+The separate `zova-wasm` browser package introduced in rc.3 is experimental
+and excluded from this native compatibility commitment. Its SQL/KV subset,
+worker lifecycle, and OPFS APIs do not promise stable browser APIs or full
+native parity. JavaScript/TypeScript below refers to the native `zova-js` package.
 
 ## Supported public surfaces
 
@@ -111,7 +116,7 @@ authoritative for these stricter rules.
 The bundled-extension lifecycle, manifest validation, ABI minimum enforcement,
 and extension records are supported. Extension minimum ABI values use numeric
 `major.minor.patch`; the running RC reports numeric ABI components `1.0.0` and
-the full release identity `1.0.0-rc.2` separately.
+the full release identity `1.0.0-rc.3` separately.
 
 The experimental bundle-producer CLI and application-authored callback surfaces
 remain outside the stable 1.x authoring contract. Dynamic native extensions run

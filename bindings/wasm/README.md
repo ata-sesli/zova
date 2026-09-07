@@ -3,15 +3,15 @@
 Experimental Zova SQL and binary KV for browsers, in memory or named OPFS storage. The real Zova
 core and bundled SQLite run inside a dedicated worker as one WebAssembly module.
 
-This is an unpublished preview for the rc.3 work. Its current development
-version follows the repository (`1.0.0-rc.2`, format 11). Browser API stability
+This experimental package follows the repository release (`1.0.0-rc.3`,
+format 11). Browser API stability
 and full native compatibility are not promised. Memory databases lose their
 data when closed or when their worker/page terminates.
 
 ## Try a local package
 
 Build and pack using the instructions below, then install the resulting tarball
-with `bun add /absolute/path/zova-wasm-1.0.0-rc.2.tgz` in your browser application.
+with `bun add /absolute/path/zova-wasm-1.0.0-rc.3.tgz` in your browser application.
 The package exports browser ESM and TypeScript declarations, with no native
 addon dependency. Serve over HTTP(S), allowing module workers and WebAssembly.
 Worker and WASM URLs resolve relative to the package; keep its files together
@@ -131,16 +131,13 @@ errors. Real quota exhaustion, browser-process crashes, OS crashes and power los
 remain unverified. There is no unload-time save requirement for completed commits,
 but these tests are not a general crash-durability or performance guarantee.
 
-### 1.0.0-rc.3 WASM release notes (planned)
+### 1.0.0-rc.3 WASM release notes
 
 - Adds experimental named OPFS SQL/KV storage alongside `createMemory()`.
 - Adds exclusive per-name ownership with explicit busy errors and cleanup.
 - Adds packed-artifact persistence, rollback and injected-storage-fault coverage.
 - Defers export/import, shared multi-tab connections and automatic migration.
 - Does not promise native feature parity, stable browser APIs or performance.
-
-These notes describe the rc.3 changes; the current development package remains
-rc.2 until the separate release bump.
 
 ## Values and lifecycle
 
@@ -189,7 +186,7 @@ the pool's stored files; the build rejects an unexpected upstream cleanup shape.
 Validate the tarball from the repository root:
 
 ```sh
-bun bindings/wasm/tools/check-package.mjs /absolute/path/zova-wasm-1.0.0-rc.2.tgz
+bun bindings/wasm/tools/check-package.mjs /absolute/path/zova-wasm-1.0.0-rc.3.tgz
 bun test bindings/wasm/tests/api.test.ts bindings/wasm/tests/channel.test.mjs
 ```
 

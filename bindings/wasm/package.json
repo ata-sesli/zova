@@ -1,6 +1,6 @@
 {
   "name": "zova-wasm",
-  "version": "1.0.0-rc.2",
+  "version": "1.0.0-rc.3",
   "description": "Experimental Zova SQL and KV for browsers with memory and OPFS storage.",
   "type": "module",
   "license": "MIT",

@@ -49,14 +49,14 @@ Use the safe crate for normal Rust applications:
 
 ```toml
 [dependencies]
-zova = "1.0.0-rc.2"
+zova = "1.0.0-rc.3"
 ```
 
 Use the raw FFI crate only when you want to call the C ABI directly:
 
 ```toml
 [dependencies]
-zova-sys = "1.0.0-rc.2"
+zova-sys = "1.0.0-rc.3"
 ```
 
 Both crates contain native code. The default build path compiles Zova's static C
@@ -66,7 +66,7 @@ users still need:
 - Rust,
 - Clang and a platform linker/SDK (clang-cl and MSVC tools on Windows).
 
-Zova 1.0.0-rc.2 is the candidate for the stable 1.x contract. RC fixes may
+Zova 1.0.0-rc.3 is the candidate for the stable 1.x contract. RC fixes may
 still refine compatibility before 1.0.0, but new feature exploration is no
 longer part of this release line. The current `.zova` `format_version` is `11`.
 Zova does not migrate older format databases in place. Format-9 and

@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 /*
- * Zova C ABI, v1.0.0-rc.2.
+ * Zova C ABI, v1.0.0-rc.3.
  *
  * This release-candidate header exposes a C-compatible API over Zova's Zig
  * implementation. The ABI is intentionally conservative: opaque handles,
