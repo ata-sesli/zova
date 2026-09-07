@@ -15,6 +15,7 @@ rsync -a --checksum --delete "$ROOT/src/" "$NATIVE/src/"
 rsync -a --checksum --delete "$ROOT/tests/" "$NATIVE/tests/"
 rsync -a --checksum --delete "$ROOT/vendor/" "$NATIVE/vendor/"
 "$ROOT/scripts/update-generated-c.sh" "$NATIVE/generated"
+python3 "$ROOT/scripts/generate-rust-platforms.py" --host
 
 rm -rf "$NATIVE/.zig-cache" "$NATIVE/zig-out"
 find "$NATIVE" -name '.DS_Store' -delete

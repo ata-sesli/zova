@@ -60,11 +60,11 @@ zova-sys = "1.0.0-rc.2"
 ```
 
 Both crates contain native code. The default build path compiles Zova's static C
-ABI library through `zova-sys` from a bundled generated C snapshot, so registry
+ABI library through `zova-sys` from target-specific generated C, so registry
 users still need:
 
 - Rust,
-- a C compiler/linker for their platform.
+- Clang and a platform linker/SDK (clang-cl and MSVC tools on Windows).
 
 Zova 1.0.0-rc.2 is the candidate for the stable 1.x contract. RC fixes may
 still refine compatibility before 1.0.0, but new feature exploration is no
@@ -82,32 +82,19 @@ traversal API instead of those specialized publication surfaces.
 
 ## Native Build
 
-From crates.io, `zova-sys` builds Zova from a bundled generated C snapshot, so
-normal Rust users need Rust and a C compiler, not Zig.
+Registry builds use target-specific generated-C packages selected automatically
+by Cargo. Install Rust and Clang (clang-cl/MSVC tools on Windows); Zig is not
+needed. Supported release targets are Linux GNU x86_64/arm64, macOS x86_64/arm64,
+and Windows MSVC x86_64. Unsupported automatic targets fail explicitly.
 
-Inside this repository, the generated C snapshot is refreshed from Zig source
-before package/release checks:
+`ZOVA_LIB_DIR` selects a caller-provided native library. `ZOVA_SOURCE_DIR`
+selects an explicit Zig source tree and requires Zig 0.16.0. `ZOVA_INCLUDE_DIR`
+overrides header metadata. See [zova-sys build requirements](zova-sys/README.md#native-build).
 
-```sh
-sh bindings/rust/zova-sys/tools/sync-native-source.sh
-```
-
-You can point Cargo at an existing native build instead:
-
-```sh
-ZOVA_LIB_DIR=/path/to/lib ZOVA_INCLUDE_DIR=/path/to/include cargo test
-```
-
-`ZOVA_INCLUDE_DIR` is accepted for callers that vendor the header alongside the
-library. The current hand-written FFI does not run bindgen.
-
-Native build order is:
-
-1. `ZOVA_LIB_DIR` / `ZOVA_INCLUDE_DIR` if provided.
-2. Bundled generated C compiled with the platform C compiler at `-O2`.
-
-Zig is not part of the normal Rust install path. It is only needed for Zova
-development and for regenerating the bundled generated C snapshot.
+Maintainers generate all five source packages with
+`python3 scripts/generate-rust-platforms.py`. Each package records target and
+version metadata and hashes. CI verifies the same seven-crate artifact set on
+all five platforms before ordered publication.
 
 ## Handle Policy
 

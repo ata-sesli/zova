@@ -8,25 +8,30 @@ functions from `include/zova.h`.
 
 ## Native Build
 
-By default, crates.io builds compile the bundled generated C snapshot with the
-platform C compiler and link it into the Rust crate. You need:
+Default registry builds require Rust and Clang (clang-cl with the Visual Studio
+C++ tools on Windows). Zig is not required. Cargo selects an exact-version source
+package for the consumer target: Linux GNU x86_64/arm64, macOS x86_64/arm64,
+or Windows MSVC x86_64. Cross builds require a suitable target compiler/linker/SDK.
 
-- Rust
-- a C compiler/linker for your platform
+The five `zova-sys-{linux-x64,linux-arm64,darwin-x64,darwin-arm64,windows-x64}`
+crates carry explicitly targeted generated C, SQLite, headers, license and hashed
+provenance metadata. This crate contains only the dispatcher and FFI. No native
+sources are downloaded by build scripts and no host-target fallback is used.
 
-Advanced users can point the build script at an existing native build:
+Build order:
 
-```sh
-ZOVA_LIB_DIR=/path/to/lib ZOVA_INCLUDE_DIR=/path/to/include cargo build
-```
+1. `ZOVA_LIB_DIR`: link a caller-provided compatible static library.
+2. `ZOVA_SOURCE_DIR`: build an explicit Zig source tree for Cargo's target
+   (requires Zig 0.16.0).
+3. Compile the matching platform package with Clang.
 
-Build order is:
-
-1. `ZOVA_LIB_DIR` / `ZOVA_INCLUDE_DIR` if provided.
-2. Bundled generated C compiled with the platform C compiler at `-O2`.
-
-Inside the Zova repository, Zig is also used to regenerate the bundled C
-snapshot. The generated C is compiler output, not a human-authored API.
+`ZOVA_INCLUDE_DIR` overrides exported header metadata. `CC`, `CFLAGS`,
+`AR` and their target-qualified cc-rs variants remain supported for generated C.
+Other automatic targets fail explicitly; custom native libraries remain possible.
+Each platform's `native/metadata.json` records the Cargo target, Zova/SQLite/Zig
+versions, source revision and file hashes. The release pipeline packages all
+seven crates once, tests the same immutable set on five native runners, then
+publishes platform crates before this dispatcher and the safe crate.
 
 The current development build uses `.zova` format 11, and the earliest
 migratable format is 9. Open never migrates silently: format-9 and format-10

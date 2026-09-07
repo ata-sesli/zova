@@ -3,6 +3,28 @@
 version = 3
 
 [[package]]
+name = "cc"
+version = "1.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "005ec2760ca554fae18df7a11195552ec576cd665632a881bc011d5bb2fd4d80"
+dependencies = [
+ "find-msvc-tools",
+ "shlex",
+]
+
+[[package]]
+name = "find-msvc-tools"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
+
+[[package]]
+name = "shlex"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
 name = "zova"
 version = "1.0.0-rc.2"
 dependencies = [
@@ -11,4 +33,32 @@ dependencies = [
 
 [[package]]
 name = "zova-sys"
+version = "1.0.0-rc.2"
+dependencies = [
+ "cc",
+ "zova-sys-darwin-arm64",
+ "zova-sys-darwin-x64",
+ "zova-sys-linux-arm64",
+ "zova-sys-linux-x64",
+ "zova-sys-windows-x64",
+]
+
+[[package]]
+name = "zova-sys-darwin-arm64"
+version = "1.0.0-rc.2"
+
+[[package]]
+name = "zova-sys-darwin-x64"
+version = "1.0.0-rc.2"
+
+[[package]]
+name = "zova-sys-linux-arm64"
+version = "1.0.0-rc.2"
+
+[[package]]
+name = "zova-sys-linux-x64"
+version = "1.0.0-rc.2"
+
+[[package]]
+name = "zova-sys-windows-x64"
 version = "1.0.0-rc.2"

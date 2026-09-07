@@ -14,6 +14,27 @@ require_command() {
 
 require_command zig
 
+# Always pass an explicit target, including for the legacy host-only check.
+CARGO_TARGET="${2:-}"
+if [ -z "$CARGO_TARGET" ]; then
+    case "$(uname -s):$(uname -m)" in
+        Darwin:arm64) CARGO_TARGET=aarch64-apple-darwin ;;
+        Darwin:x86_64) CARGO_TARGET=x86_64-apple-darwin ;;
+        Linux:x86_64) CARGO_TARGET=x86_64-unknown-linux-gnu ;;
+        Linux:aarch64) CARGO_TARGET=aarch64-unknown-linux-gnu ;;
+        MINGW*:x86_64 | MSYS*:x86_64) CARGO_TARGET=x86_64-pc-windows-msvc ;;
+        *) echo 'supply a supported Cargo target as argument 2' >&2; exit 1 ;;
+    esac
+fi
+case "$CARGO_TARGET" in
+    x86_64-unknown-linux-gnu) ZIG_TARGET=x86_64-linux-gnu ;;
+    aarch64-unknown-linux-gnu) ZIG_TARGET=aarch64-linux-gnu ;;
+    x86_64-apple-darwin) ZIG_TARGET=x86_64-macos ;;
+    aarch64-apple-darwin) ZIG_TARGET=aarch64-macos ;;
+    x86_64-pc-windows-msvc) ZIG_TARGET=x86_64-windows-msvc ;;
+    *) echo "unsupported generated-C target: $CARGO_TARGET" >&2; exit 1 ;;
+esac
+
 SQLITE_VERSION="$(sed -n 's/^[[:space:]]*pub const sqlite_version[[:space:]]*=[[:space:]]*"\([^"]*\)";.*/\1/p' "$VERSION_ZIG" | head -n 1)"
 if [ -z "$SQLITE_VERSION" ]; then
     echo "could not read sqlite_version from src/version.zig" >&2
@@ -49,6 +70,7 @@ BUILD_OPTIONS="$TMP/zova_build_options.zig"
 printf '%s\n' 'pub const enable_dynamic_extensions = false;' >"$BUILD_OPTIONS"
 
 zig build-lib \
+    -target "$ZIG_TARGET" \
     -ofmt=c \
     -O ReleaseSafe \
     -I "$SQLITE_DIR" \
@@ -65,5 +87,11 @@ cp "$ROOT/include/zova.h" "$OUT/zova.h"
 cp "$SQLITE_DIR/sqlite3.c" "$OUT/sqlite3.c"
 cp "$SQLITE_DIR/sqlite3.h" "$OUT/sqlite3.h"
 cp "$SQLITE_DIR/sqlite3ext.h" "$OUT/sqlite3ext.h"
+
+if [ "$CARGO_TARGET" = x86_64-pc-windows-msvc ]; then
+    python3 "$ROOT/scripts/fix-windows-generated-c.py" "$OUT/zova_c.c"
+fi
+
+python3 "$ROOT/scripts/generated-c-metadata.py" "$ROOT" "$OUT" "$CARGO_TARGET" "$SQLITE_VERSION"
 
 echo "generated C bundle written to $OUT"

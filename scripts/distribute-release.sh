@@ -9,7 +9,7 @@ usage() {
 usage: scripts/distribute-release.sh <version> [--dry-run] [--yes]
 example: scripts/distribute-release.sh 0.20.0
 
-Publishes Rust crates in this order: zova-sys, then zova.
+Publishes Rust crates in this order: five platform sources, zova-sys, then zova.
 Python wheels are published only by the Publish Release workflow so all
 supported platform wheels are uploaded together.
 
@@ -95,8 +95,17 @@ publish_crate() {
 }
 
 release_rust_crates() {
-    run sh bindings/rust/zova-sys/tools/sync-native-source.sh
-    run sh bindings/rust/zova-sys/tools/check-native-source.sh
+    run python3 scripts/generate-rust-platforms.py
+    if [ "$DRY_RUN" -eq 1 ]; then
+        run cargo package --allow-dirty --no-verify --workspace --manifest-path bindings/rust/Cargo.toml
+        return
+    fi
+    for backend in linux-x64 linux-arm64 darwin-x64 darwin-arm64 windows-x64; do
+        publish_crate "zova-sys-$backend"
+    done
+    for backend in linux-x64 linux-arm64 darwin-x64 darwin-arm64 windows-x64; do
+        wait_for_crate "zova-sys-$backend"
+    done
 
     publish_crate zova-sys
     wait_for_crate zova-sys

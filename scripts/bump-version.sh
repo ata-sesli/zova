@@ -101,6 +101,7 @@ for file in \
     "$ROOT/bindings/rust/Cargo.lock" \
     "$ROOT/bindings/rust/README.md" \
     "$ROOT/bindings/rust/zova/Cargo.toml" \
+    "$ROOT/bindings/rust/zova-sys/Cargo.toml" \
     "$ROOT/bindings/rust/zova-sys/README.md" \
     "$ROOT/bindings/rust/zova-sys/tests/abi.rs" \
     "$ROOT/bindings/go/README.md" \

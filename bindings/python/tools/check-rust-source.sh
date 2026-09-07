@@ -43,6 +43,10 @@ rsync -a --delete \
     "$DEST/zova-sys/" \
     "$TMP/zova-sys-bundled/"
 
+for backend in linux-x64 linux-arm64 darwin-x64 darwin-arm64 windows-x64; do
+    rsync -a --checksum "$ROOT/bindings/rust/zova-sys-$backend" "$TMP/"
+done
+
 python3 - "$TMP/zova/Cargo.toml" "$TMP/zova-sys/Cargo.toml" "$VERSION" <<'PY'
 from pathlib import Path
 import sys
@@ -59,19 +63,25 @@ repository = "https://github.com/ata-sesli/zova"
 homepage = "https://github.com/ata-sesli/zova"
 """
 
-for path in (zova_manifest, sys_manifest):
+for path in [zova_manifest, sys_manifest, *(p for p in sys_manifest.parent.parent.glob('zova-sys-*/Cargo.toml') if p.parent.name != 'zova-sys-bundled')]:
     text = path.read_text()
     text = text.replace("rust-version.workspace = true\n", "")
     text = text.replace("version.workspace = true\n", "")
     text = text.replace("edition.workspace = true\n", "")
     text = text.replace("license.workspace = true\n", "")
     text = text.replace("repository.workspace = true\n", "")
-    text = text.replace("homepage.workspace = true\n", common)
+    text = text.replace("homepage.workspace = true\n", "")
+    text = text.replace("[package]\n", "[package]\n" + common, 1)
     path.write_text(text)
 PY
 
 check_path "$TMP/zova" "$DEST/zova"
 check_path "$TMP/zova-sys" "$TMP/zova-sys-bundled"
+for backend in linux-x64 linux-arm64 darwin-x64 darwin-arm64 windows-x64; do
+    check_path "$TMP/zova-sys-$backend" "$DEST/zova-sys-$backend"
+done
+
+
 
 for generated_file in zova_c.c zig.h zova.h sqlite3.c sqlite3.h sqlite3ext.h; do
     if [ ! -f "$DEST/zova-sys/native/generated/$generated_file" ]; then

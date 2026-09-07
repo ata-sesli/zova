@@ -113,8 +113,8 @@ if ! grep -qx 'native/LICENSE' "$ZOVA_SYS_PACKAGE_LIST"; then
     echo "zova-sys crate package is missing native/LICENSE" >&2
     exit 1
 fi
-if ! grep -qx 'native/generated/zova_c.c' "$ZOVA_SYS_PACKAGE_LIST"; then
-    echo "zova-sys crate package is missing generated C source" >&2
+if grep -q '^native/generated/' "$ZOVA_SYS_PACKAGE_LIST"; then
+    echo "zova-sys dispatcher must not package generated C" >&2
     exit 1
 fi
 if grep -q '^native/src/' "$ZOVA_SYS_PACKAGE_LIST"; then

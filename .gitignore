@@ -6,6 +6,8 @@ bindings/rust/target*/
 # Generated native/package snapshot for zova-sys. The release flow syncs this
 # into crate/source packages, but Git should not track compiler output.
 bindings/rust/zova-sys/native/
+bindings/rust/zova-sys-*/native/
+bindings/rust/zova/tests/fixtures/
 bindings/python/target
 bindings/python/rust/
 bindings/javascript/node_modules/
