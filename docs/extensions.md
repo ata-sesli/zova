@@ -6,6 +6,39 @@ Zova storage, then expose a SQL surface on every opened connection.
 The database stores extension metadata. It does not store executable code,
 library paths, search paths, or anything that Zova auto-loads.
 
+## Availability and binding matrix
+
+The published `1.0.0-rc.3` packages provide bundled lifecycle management,
+application C scalar callbacks, and the legacy native bundle contract subject
+to the build restrictions below. The portable plugin ABI and explicit
+extension-data upgrades described later are implemented in this source tree
+but are not included in those already-published packages.
+
+| Host build | Bundled `trgm` lifecycle | Application C scalar callbacks | Dynamic `.zovaext` loading |
+| --- | --- | --- | --- |
+| Native Zig-built Linux/macOS host | Yes | Yes, through C ABI | Yes, explicit trusted bundles |
+| Native Zig-built Windows host | Yes | Yes, through C ABI | No |
+| Generated-C native packages | Yes | Yes, through C ABI | No |
+| Public `zova-wasm` JavaScript API | No | No | No |
+
+Generated-C builds keep bundle declarations for source compatibility, but
+operations requiring an external library fail. Header availability does not
+enable a loader. Native bundles must match the host OS, architecture and
+deployment target; portable describes the C contract, not a universal binary.
+
+| Caller surface | Bundled lifecycle | App scalar callbacks | External bundles | Explicit data upgrades |
+| --- | --- | --- | --- | --- |
+| Native Zig registry | Yes | Native SQL registration | On loader-capable builds | Source-tree API |
+| C / raw Rust `zova-sys` | Yes | Yes | On loader-capable builds | Source-tree API |
+| Safe Rust / Python / Go / `zova-js` | Yes | No wrapper | No wrapper | No wrapper |
+| `zova-wasm` | No public API | No public API | No | No |
+
+The CLI exposes lifecycle operations and, on loader-capable builds, bundle
+management. Its explicit `extension upgrade` command is a source-tree addition.
+The bundle producer scaffolds legacy Zig code; portable C/C++ authors use
+`include/zova_plugin.h` and their own native compiler. The portable host table
+provides SQL execution, not scalar callback registration.
+
 ## Model
 
 An extension has two parts:
@@ -47,7 +80,12 @@ Deferred for later work:
 - extension signing
 - marketplace or network fetching
 - optional installed extensions
-- high-level Rust, Go, or Python extension authoring APIs
+- high-level Rust, Go, Python, or JavaScript extension authoring APIs
+
+The manifest's `capabilities` field is descriptive metadata, not a permission
+grant or security boundary. Verification can load a library and execute its
+native initializers even before trust is recorded. Neither verification nor
+trusting a hash establishes that native code is safe or sandboxed.
 
 ## Trusted Local `.zovaext` Bundles
 
@@ -62,8 +100,8 @@ my_ext.zovaext/
 ```
 
 The library name is recorded in `extension.json`. The experimental builder uses
-the platform dynamic-library convention: `my_ext.dll` on Windows,
-`libmy_ext.dylib` on Apple platforms, and `libmy_ext.so` elsewhere. Whatever
+the platform dynamic-library convention: `libmy_ext.dylib` on macOS and
+`libmy_ext.so` on Linux. Windows dynamic loading is not supported. Whatever
 name is chosen, the path must remain relative to the bundle and the native
 artifact must be built against a compatible Zova extension ABI.
 
@@ -74,7 +112,7 @@ artifact must be built against a compatible Zova extension ABI.
   "name": "my_ext",
   "version": "0.1.0",
   "storage_prefix": "_zova_ext_my_ext_",
-  "zova_abi_min": "0.21.0",
+  "zova_abi_min": "1.0.0",
   "capabilities": "sql",
   "library": "libmy_ext",
   "entrypoint": "zova_extension_entry"
@@ -86,7 +124,8 @@ must be relative to the bundle, must not contain `..`, and must stay inside the
 bundle.
 
 Dynamic extensions are native trusted code. They must be built for the same
-Zova/Zig extension ABI. Loading a bundle means running code in the current
+Zova/Zig extension ABI when using the legacy entrypoint; the explicit portable
+entrypoint uses plugin ABI v1 instead. Loading a bundle means running code in the current
 process with the same trust level as the application.
 
 Trust a bundle before loading it:
@@ -142,7 +181,7 @@ The registry is fixed for the lifetime of a database handle. To change the set
 of available external bundles, close the handle and open/create another one with
 the desired bundle list.
 
-The staged v1.0.0-rc.3 integration model is the combination of app-defined scalar
+The native integration model is the combination of app-defined scalar
 SQL callbacks and explicitly trusted `.zovaext` bundles. Zova does not expose a
 raw `sqlite3 *` accessor as the extension path; code that needs SQL functions on
 Zova-owned connections should use `zova_database_register_function`, trusted
@@ -157,9 +196,8 @@ zova extension untrust ./my_ext.zovaext
 
 ## Experimental Bundle Builder
 
-The v0.23 release includes an experimental producer-side CLI for
-local Zig extensions. It is meant to remove the manual bundle-shape work while
-the stable extension-authoring contract is still being designed.
+The experimental producer-side CLI builds local legacy Zig extensions. It
+removes manual bundle-shape work; it does not compile portable C/C++ plugins.
 
 Create a minimal Zig extension project:
 
@@ -386,13 +424,13 @@ still require matching process-registered extension code.
 
 ## Binding Lifecycle APIs
 
-The C ABI, Rust, Go, and Python bindings can manage extensions that are already
+The C ABI, Rust, Go, Python, and JavaScript bindings can manage extensions that are already
 registered in the current process. In the default Zova build that means bundled
 extensions such as `trgm`: install, list, info, check, check all, and drop.
 
 Those binding APIs do not make `.zova` files executable. C callers can supply
-trusted `.zovaext` bundles at handle create/open time; high-level Rust, Go, and
-Python dynamic-loading APIs are still deferred.
+trusted `.zovaext` bundles at handle create/open time on loader-capable builds;
+high-level Rust, Go, Python, and JavaScript dynamic-loading APIs are deferred.
 
 When a dynamic bundle is missing or untrusted, diagnostics point back to the
 process boundary: supply the bundle with `--extension <bundle.zovaext>` for that
@@ -409,7 +447,7 @@ they want listeners to react to an indexing workflow.
 
 ## C ABI Scalar SQL Functions
 
-The v0.23 release exposes a controlled C ABI path for registering scalar
+Zova exposes a controlled C ABI path for registering scalar
 SQL functions on a Zova-owned connection:
 
 ```c
@@ -434,8 +472,11 @@ present on Zova-owned handles.
 
 The callback receives borrowed `zova_sql_value` arguments and fills one
 `zova_sql_result`. Zova copies text, blob, and error bytes before SQLite
-observes the result, so result buffers only need to stay valid until the
-callback returns. Argument pointers are valid only during the callback.
+observes the result. That copy happens after the callback returns: do not return
+pointers to callback-local stack arrays or free result storage inside the
+callback. Use literals, callback arguments, or user-data-owned buffers kept
+valid until the invoking statement step returns. Do not retain argument
+pointers beyond this invocation.
 
 See `examples/c_callbacks/` for small C snippets covering deterministic scalar
 registration, text/blob arguments and results, and callback error propagation.
@@ -447,13 +488,13 @@ database close.
 
 Function flags are caller-selected. Zova does not silently add deterministic,
 direct-only, innocuous, or subtype behavior. Aggregate/window functions, SQLite
-subtype support, and unregister support are not exposed in v0.25.
+subtype support, and unregister support are not exposed.
 Callbacks that should not run from schema contexts such as generated columns,
 indexes, triggers, or views should be registered with
 `ZOVA_SQL_FUNCTION_DIRECT_ONLY`.
 
 This iteration exposes the low-level C ABI and `zova-sys` declarations only.
-Safe high-level Rust, Go, and Python callback APIs are not exposed in v0.25.
+Safe high-level Rust, Go, Python, and JavaScript callback APIs are not exposed.
 
 ## Operational Copies
 
@@ -519,7 +560,7 @@ const ext = zova.Extension{
         .name = "my_ext",
         .version = "0.1.0",
         .storage_prefix = "_zova_ext_my_ext_",
-        .zova_abi_min = "0.21.0",
+        .zova_abi_min = "1.0.0",
         .capabilities = "sql",
     },
     .install = install,
@@ -532,9 +573,9 @@ const registry = zova.ExtensionRegistry.init(&.{ext});
 var db = try zova.Database.openWithExtensions("app.zova", registry);
 ```
 
-The v0.25 binding APIs can manage extensions already present in the process
+The binding APIs can manage extensions already present in the process
 registry, such as bundled `trgm`, and the C ABI can open handles with explicitly
-trusted `.zovaext` bundles. Stable high-level Rust, Go, and Python extension
+trusted `.zovaext` bundles on loader-capable builds. High-level Rust, Go, Python, and JavaScript extension
 authoring APIs are still deferred. The stable contract is the trust boundary:
 extension code comes from the process, not from the database file.
 
@@ -547,9 +588,9 @@ See `examples/zig_bridge/` for a minimal bridge that exposes one C-callable
 smoke function while registering SQL on a Zova-owned connection through a Zig
 extension registry.
 
-## Native Artifact Notes
+## Explicit extension-data upgrades
 
-### Explicit extension-data upgrades
+This section describes the unreleased source-tree API, not published rc.3.
 
 The installed `_zova_extensions.version` value records the data contract that
 last completed installation or upgrade. The loaded manifest's `version` is the
@@ -611,7 +652,9 @@ migrate the file first with code matching the installed extension version, then
 perform the explicit extension upgrade on the migrated database. Maintenance
 open is not a bypass for an old or unsupported Zova format.
 
-### Language-neutral plugin ABI v1
+## Language-neutral plugin ABI v1
+
+This section describes the unreleased source-tree API, not published rc.3.
 
 `include/zova_plugin.h` is the standalone C/C++ authoring contract. A portable
 bundle explicitly selects `"entrypoint": "zova_plugin_entry_v1"` in its
@@ -654,6 +697,8 @@ loader path. Windows dynamic loading and generated-C dynamic loading remain
 unsupported; this header does not enable them. Libraries must match the host's
 OS, architecture, and deployment target.
 
+## Native Artifact Notes
+
 Native extension artifacts must be built for the target platform and a
 compatible Zova extension ABI. On macOS, build extension bundles and bridge
 objects with the same deployment-target policy used by the host application and
@@ -672,4 +717,5 @@ SQL callbacks through the C ABI, low-level `zova-sys` declarations, trusted loca
 
 Deferred from this release: aggregate/window SQL callbacks, SQLite subtype
 support, unregister APIs, raw `sqlite3 *` exposure as the normal extension path,
-safe high-level Rust callbacks, Go callbacks, and Python callbacks.
+safe high-level Rust, Go, Python, and JavaScript callbacks. The source-tree
+additions above do not retroactively change the published rc.3 contract.

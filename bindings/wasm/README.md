@@ -162,6 +162,11 @@ transaction callback helper, graph/vector/object helper, native extension,
 bound-store API, migration, or shared access between workers. The native
 `zova-js` package is independent. There is no Node/CommonJS fallback.
 
+There is no public bundled-extension lifecycle or application SQL callback API,
+and no `.zovaext` loader or extension-data upgrade API. SQL execution does not
+expose those native capabilities. See the
+[extension capability matrix](../../docs/extensions.md#availability-and-binding-matrix).
+
 Memory databases use volatile storage; named databases use the bundled SQLite's
 OPFS SAH-pool adapter, not a second engine. The build is single-threaded and
 does not require SharedArrayBuffer. Safety traps become worker failures.

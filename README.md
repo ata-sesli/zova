@@ -805,9 +805,14 @@ cross-language throughput.
 
 ## Extensions
 
-The v0.23 release includes the extension host, controlled app-defined SQL
+Zova includes the extension host, controlled app-defined SQL
 callbacks, trusted local extension bundles, and the first bundled extension,
 `trgm`.
+
+See the [extension capability matrix](docs/extensions.md#availability-and-binding-matrix)
+for platform and binding restrictions. Portable plugin ABI v1 and explicit
+extension-data upgrades are source-tree additions, not APIs in the already
+published `1.0.0-rc.3` packages.
 
 An extension is trusted process code plus private Zova metadata:
 
@@ -815,11 +820,11 @@ An extension is trusted process code plus private Zova metadata:
 - an extension owns only tables with its `_zova_ext_<name>_` prefix
 - extension code is provided by the process, not loaded from the `.zova` file
 - SQL functions or virtual tables are registered on each opened Zova connection
-- install, check, and drop hooks run inside Zova-managed transactions
+- install and drop hooks run inside Zova-managed savepoints; checks must be read-only
 - extension registry and private storage live in the main database in the
-  current v0 model
+  current model
 
-This keeps `.zova` files non-executable. A file may say it requires an
+A file cannot cause Zova to automatically load extension code. It may require an
 extension, but the application or CLI process decides which extension code is
 available and trusted. Opening a database with an installed required extension
 whose code is unavailable fails clearly instead of silently ignoring the
@@ -859,9 +864,11 @@ Zig `0.16` does not portably emit the `std.DynLib` loader path through its C
 backend. Those builds keep the C ABI bundle symbols for source compatibility,
 but calls that need to load an external bundle fail with an extension load or
 unavailable status. Use the native CLI or a Zig-built C ABI archive when an
-application needs external `.zovaext` loading.
+application needs external `.zovaext` loading on Linux/macOS. Windows dynamic
+loading is unsupported even with a native Zig build. Trust and capability
+metadata are not a sandbox; verification may execute library initializers.
 
-The v0.23 release also includes an experimental bundle producer CLI:
+The experimental bundle producer CLI scaffolds and builds legacy Zig bundles:
 
 ```sh
 zova extension scaffold ./sample_ext --name sample_ext --version 0.1.0
@@ -873,8 +880,8 @@ zova extension verify --smoke ./sample_ext.zovaext
 At the low-level C ABI, apps can register scalar SQL functions on Zova-owned
 connections with `zova_database_register_function`. Callback arguments are
 borrowed for the call only, result bytes are copied by Zova, and callbacks must
-not re-enter the same `zova_database` handle. Safe high-level Rust, Go, and
-Python callback APIs are not part of the v0.25 release. See
+not re-enter the same `zova_database` handle. Safe high-level Rust, Go, Python,
+and JavaScript callback APIs are not exposed. See
 `examples/c_callbacks/` for C callback snippets and `examples/zig_bridge/` for
 a minimal native Zig registry bridge.
 
