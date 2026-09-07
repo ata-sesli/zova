@@ -131,7 +131,7 @@ Zova vendors SQLite. You do not need a system SQLite installation.
 | Path | Main Command | Needs Zig | Needs Rust | Needs C Compiler | Notes |
 |---|---|---:|---:|---:|---|
 | JavaScript / TypeScript | `bun add zova-js` / `npm install zova-js` | no | no | no | prebuilt Node-API 8 packages for Node 22/24 and Bun |
-| Rust | `cargo add zova` | no | yes | yes | `zova-sys` builds Zova's native C ABI from bundled generated C |
+| Rust | `cargo add zova` | no | yes | yes | `zova-sys` compiles the matching generated-C platform package with Clang |
 | Python | `uv add zova` / `pip install zova` | no | no | no | stable-ABI wheels are published for Linux/macOS x86_64/arm64 and tested on CPython 3.13/3.14; PyPI source builds are not supported |
 | Go | `go get github.com/ata-sesli/zova/bindings/go@v1.0.0-rc.2` | no, if using a release C ABI archive | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
 | C ABI | release archive or `zig build c-abi` | no, if using a release archive | no | no, if using a release archive | static C ABI library and `zova.h` |
@@ -1054,9 +1054,9 @@ session APIs introduced for v0.25 are exposed through the C ABI and raw
 `zova-sys` declarations. The safe Rust crate does not yet wrap those low-level
 publication APIs.
 
-From crates.io, the Rust crates build through a bundled generated C snapshot, so
-normal Rust users need Rust and a C compiler, not Zig. Zig is only needed when
-developing Zova itself or regenerating the native snapshot.
+From crates.io, Rust builds compile the matching generated-C platform package.
+Install Clang and the platform linker/SDK; Zig is not required. A target-compatible
+native library can be supplied through `ZOVA_LIB_DIR`.
 
 ### Python
 
@@ -1348,9 +1348,9 @@ The source archive does not include compiled CLI binaries, compiled C ABI
 libraries, Rust `target` directories, Go build outputs, Python wheels, Python
 native extensions, or cache directories.
 
-The `zova-sys` crate does not include the full Zig source snapshot. It packages
-the generated C bundle, `zig.h`, `zova.h`, vendored SQLite C sources, and the
-license needed to build the C ABI with a normal C compiler.
+The `zova-sys` crate is a small dispatcher. Five exact-version platform crates
+carry generated C, headers, SQLite, license and provenance hashes. Consumers need
+Clang and a platform linker/SDK; only explicit `ZOVA_SOURCE_DIR` builds need Zig.
 
 Maintainer source-package command:
 

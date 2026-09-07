@@ -6,6 +6,10 @@ use zova::{
 
 fn fixture_path(name: &str) -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let packaged = path.join("tests/fixtures").join(name);
+    if packaged.is_file() {
+        return packaged;
+    }
     path.push("../../../tests/fixtures");
     path.push(name);
     path

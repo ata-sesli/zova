@@ -14,7 +14,8 @@ zova = "0.20.0"
 ```
 
 The crate builds Zova's native C ABI through `zova-sys`, so users need Rust,
-Zig 0.16.0 or newer, and a working C compiler/linker.
+Clang and the platform linker/SDK (clang-cl and MSVC tools on Windows). The native source is compiled for Cargo's
+target; a caller-provided native library can be selected with `ZOVA_LIB_DIR`.
 
 ## What It Covers
 

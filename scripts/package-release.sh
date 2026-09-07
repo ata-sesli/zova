@@ -151,6 +151,7 @@ fi
 
 sh bindings/rust/zova-sys/tools/sync-native-source.sh
 sh bindings/rust/zova-sys/tools/check-native-source.sh
+python3 scripts/generate-rust-platforms.py
 sh bindings/python/tools/sync-rust-source.sh
 sh bindings/python/tools/check-rust-source.sh
 
@@ -187,9 +188,9 @@ rm -f "$TMP/$PKG/bindings/javascript/index.js"
 rm -f "$TMP/$PKG/bindings/javascript/index.d.ts"
 find "$TMP/$PKG/bindings/javascript" -maxdepth 1 -name '*.node' -delete
 
-if find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/bench/*.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/native/bench/*.md" ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/API_STABILITY.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/docs/extensions.md" ! -path "$TMP/$PKG/docs/storage-compatibility.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" ! -path "$TMP/$PKG/bindings/javascript/README.md" ! -path "$TMP/$PKG/bindings/wasm/README.md" | grep -q .; then
+if find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/bench/*.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/native/bench/*.md" ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/API_STABILITY.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/docs/extensions.md" ! -path "$TMP/$PKG/docs/storage-compatibility.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys-*/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" ! -path "$TMP/$PKG/bindings/javascript/README.md" ! -path "$TMP/$PKG/bindings/wasm/README.md" | grep -q .; then
     echo "release package contains unexpected markdown files" >&2
-    find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/bench/*.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/native/bench/*.md" ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/API_STABILITY.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/docs/extensions.md" ! -path "$TMP/$PKG/docs/storage-compatibility.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" ! -path "$TMP/$PKG/bindings/javascript/README.md" ! -path "$TMP/$PKG/bindings/wasm/README.md" >&2
+    find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/bench/*.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/native/bench/*.md" ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/API_STABILITY.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/docs/extensions.md" ! -path "$TMP/$PKG/docs/storage-compatibility.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys-*/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" ! -path "$TMP/$PKG/bindings/javascript/README.md" ! -path "$TMP/$PKG/bindings/wasm/README.md" >&2
     exit 1
 fi
 
@@ -328,19 +329,13 @@ if ! CARGO_TARGET_DIR="$TMP/cargo-target-zova-sys-package-list" cargo package --
     exit 1
 fi
 
-for package_file in \
-    native/LICENSE \
-    native/generated/zova_c.c \
-    native/generated/zig.h \
-    native/generated/zova.h \
-    native/generated/sqlite3.c \
-    native/generated/sqlite3.h \
-    native/generated/sqlite3ext.h
-do
-    if ! grep -qx "$package_file" "$TMP/zova-sys-package-list.txt"; then
-        echo "zova-sys crate package is missing $package_file" >&2
-        exit 1
-    fi
+for backend in linux-x64 linux-arm64 darwin-x64 darwin-arm64 windows-x64; do
+    for file in zova_c.c sqlite3.c zig.h zova.h sqlite3.h sqlite3ext.h metadata.json cargo-target.txt version.txt; do
+        if [ ! -f "$TMP/$PKG/bindings/rust/zova-sys-$backend/native/$file" ]; then
+            echo "missing platform source: $backend/$file" >&2
+            exit 1
+        fi
+    done
 done
 
 if grep -Eq '^(native/build\.zig|native/build\.zig\.zon|native/src/|native/vendor/|native/tests/|native/include/)' "$TMP/zova-sys-package-list.txt"; then

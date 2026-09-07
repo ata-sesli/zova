@@ -1,0 +1,13 @@
+[package]
+name = "zova-sys-darwin-x64"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Target-specific generated C sources for Zova (x86_64-apple-darwin)."
+links = "zova_source_darwin_x64"
+include = ["Cargo.toml", "build.rs", "src/**", "native/**", "README.md", "LICENSE"]
+
+[lib]
+path = "src/lib.rs"

@@ -115,7 +115,7 @@ expect_contains "$ROOT/scripts/build-release-artifacts.sh" "scripts/build-releas
 
 expect_contains "$ROOT/bindings/rust/Cargo.toml" "version = \"${package_version}\""
 expect_contains "$ROOT/bindings/rust/Cargo.toml" "repository = \"https://github.com/ata-sesli/zova\""
-expect_contains "$ROOT/bindings/rust/zova/Cargo.toml" "zova-sys = { version = \"${package_version}\""
+expect_contains "$ROOT/bindings/rust/zova/Cargo.toml" "zova-sys = { version = \"=${package_version}\""
 expect_contains "$ROOT/bindings/rust/zova-sys/tests/abi.rs" "zova_abi_version_major(), ${abi_major}"
 expect_contains "$ROOT/bindings/rust/zova-sys/tests/abi.rs" "zova_abi_version_minor(), ${abi_minor}"
 expect_contains "$ROOT/bindings/rust/zova-sys/tests/abi.rs" "zova_abi_version_patch(), ${abi_patch}"
@@ -140,8 +140,8 @@ expect_contains "$ROOT/bindings/python/Cargo.toml" "zova\", version = \"${packag
 expect_contains "$ROOT/bindings/python/Cargo.toml" 'features = ["extension-module", "abi3-py313"]'
 expect_contains "$ROOT/bindings/python/python/zova/__init__.py" "__version__ = \"${python_version}\""
 expect_contains "$ROOT/bindings/python/tests/test_lifecycle.py" "zova.__version__ == \"${python_version}\""
-expect_contains "$ROOT/bindings/python/rust/zova/Cargo.toml" "version = \"${package_version}\""
-expect_contains "$ROOT/bindings/python/rust/zova/Cargo.toml" "zova-sys = { version = \"${package_version}\""
+expect_contains "$ROOT/bindings/python/rust/zova/Cargo.toml" "version = \"=${package_version}\""
+expect_contains "$ROOT/bindings/python/rust/zova/Cargo.toml" "zova-sys = { version = \"=${package_version}\""
 expect_contains "$ROOT/bindings/python/rust/zova-sys/Cargo.toml" "version = \"${package_version}\""
 expect_contains "$ROOT/bindings/python/rust/zova-sys/tests/abi.rs" "zova_abi_version_major(), ${abi_major}"
 expect_contains "$ROOT/bindings/python/rust/zova-sys/tests/abi.rs" "zova_abi_version_minor(), ${abi_minor}"
@@ -198,5 +198,11 @@ expect_contains "$ROOT/bindings/wasm/package.json" '"name": "zova-wasm"'
 expect_contains "$ROOT/bindings/wasm/bun.lock" '"name": "zova-wasm"'
 expect_contains "$ROOT/.github/workflows/ci.yml" 'uses: ./.github/workflows/wasm.yml'
 expect_contains "$ROOT/.github/workflows/release-artifacts.yml" 'uses: ./.github/workflows/wasm.yml'
+
+for backend in linux-x64 linux-arm64 darwin-x64 darwin-arm64 windows-x64; do
+    expect_contains "$ROOT/bindings/rust/zova-sys/Cargo.toml" "zova-sys-$backend = { version = \"=$package_version\""
+    expect_contains "$ROOT/bindings/rust/zova-sys-$backend/Cargo.toml" "name = \"zova-sys-$backend\""
+    expect_contains "$ROOT/bindings/rust/zova-sys-$backend/Cargo.toml" 'version.workspace = true'
+done
 
 echo "version check ok: ${package_version}"

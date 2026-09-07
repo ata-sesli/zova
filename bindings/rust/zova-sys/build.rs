@@ -1,3 +1,5 @@
+mod build_target;
+
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -38,141 +40,94 @@ fn main() {
 }
 
 fn build_local_zova() -> PathBuf {
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-
     if let Ok(path) = env::var("ZOVA_SOURCE_DIR") {
         return build_zig_source(&PathBuf::from(path));
     }
 
-    let generated = manifest_dir.join("native/generated");
-    if generated.join("zova_c.c").exists() {
-        return build_generated_c(&generated);
-    }
-
-    let source_root = source_root_for_build(&manifest_dir);
-    build_zig_source(&source_root)
+    let target = env::var("TARGET").expect("Cargo TARGET is required");
+    let key = build_target::metadata_key(&target).unwrap_or_else(|| {
+        panic!("unsupported Zova target: {target}; provide ZOVA_LIB_DIR or ZOVA_SOURCE_DIR");
+    });
+    let source = env::var_os(key)
+        .unwrap_or_else(|| panic!("missing platform source metadata {key} for {target}"));
+    build_generated_c(&PathBuf::from(source), &target)
 }
 
-fn build_generated_c(generated_dir: &Path) -> PathBuf {
-    for name in [
+fn build_generated_c(source: &Path, target: &str) -> PathBuf {
+    let recorded_target = std::fs::read_to_string(source.join("cargo-target.txt"))
+        .expect("missing platform target metadata; regenerate the platform source package");
+    assert_eq!(
+        recorded_target.trim(),
+        target,
+        "Zova platform source target mismatch"
+    );
+    let version = std::fs::read_to_string(source.join("version.txt"))
+        .expect("missing platform version metadata");
+    assert_eq!(
+        version.trim(),
+        env!("CARGO_PKG_VERSION"),
+        "Zova platform source version mismatch"
+    );
+    for file in [
         "zova_c.c",
+        "sqlite3.c",
         "zig.h",
         "zova.h",
-        "sqlite3.c",
         "sqlite3.h",
         "sqlite3ext.h",
+        "metadata.json",
+        "cargo-target.txt",
+        "version.txt",
     ] {
-        let path = generated_dir.join(name);
-        if !path.exists() {
-            panic!(
-                "generated Zova C bundle is missing {}; run bindings/rust/zova-sys/tools/sync-native-source.sh",
-                path.display()
-            );
-        }
+        let path = source.join(file);
+        assert!(
+            path.is_file(),
+            "missing generated source: {}",
+            path.display()
+        );
         println!("cargo:rerun-if-changed={}", path.display());
     }
-
     if env::var_os("ZOVA_INCLUDE_DIR").is_none() {
-        println!("cargo:include={}", generated_dir.display());
+        println!("cargo:include={}", source.display());
     }
-
-    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
-    let lib_dir = absolute_dir(&out_dir.join("zova-c-abi/lib"));
-    let obj_dir = absolute_dir(&out_dir.join("zova-c-abi/obj"));
-    let zova_obj = obj_dir.join("zova_c.o");
-    let sqlite_obj = obj_dir.join("sqlite3.o");
-
-    compile_c_object(
-        generated_dir,
-        &generated_dir.join("zova_c.c"),
-        &zova_obj,
-        "c11",
-        &["-O2", "-Wno-incompatible-pointer-types"],
-    );
-    compile_c_object(
-        generated_dir,
-        &generated_dir.join("sqlite3.c"),
-        &sqlite_obj,
-        "c99",
-        &[
-            "-O2",
-            "-fno-sanitize=undefined",
-            "-DSQLITE_THREADSAFE=1",
-            "-DSQLITE_ENABLE_FTS5",
-            "-DSQLITE_ENABLE_DBSTAT_VTAB",
-        ],
-    );
-
-    archive_static_library(&lib_dir, &[zova_obj, sqlite_obj]);
-    assert_static_library_exists(&lib_dir);
-    lib_dir
-}
-
-fn compile_c_object(
-    include_dir: &Path,
-    source: &Path,
-    output: &Path,
-    standard: &str,
-    default_flags: &[&str],
-) {
-    let compiler = env::var("CC").unwrap_or_else(|_| "cc".to_string());
-    let mut command = Command::new(&compiler);
-    command
-        .arg(format!("-std={standard}"))
-        .arg("-I")
-        .arg(include_dir);
-    if env::var("CARGO_CFG_TARGET_FAMILY").as_deref() == Ok("unix") {
-        command.arg("-fPIC");
-    }
-    for flag in default_flags {
-        command.arg(flag);
-    }
-    if let Ok(flags) = env::var("CFLAGS") {
-        for flag in flags.split_whitespace() {
-            command.arg(flag);
+    let mut build = cc::Build::new();
+    build
+        .target(target)
+        .include(source)
+        .file(source.join("zova_c.c"))
+        .file(source.join("sqlite3.c"))
+        .opt_level(2)
+        .warnings(false)
+        .define("SQLITE_THREADSAFE", "1")
+        .define("SQLITE_ENABLE_FTS5", None)
+        .define("SQLITE_ENABLE_DBSTAT_VTAB", None)
+        .cargo_metadata(false);
+    // Zig's C backend uses Clang extensions. cc handles target-specific
+    // CC/CFLAGS/AR overrides and platform archive/linker conventions.
+    if build
+        .try_get_compiler()
+        .map_or(true, |c| !c.is_like_clang())
+    {
+        // Explicit compiler overrides remain authoritative.
+        let specific = format!("CC_{}", target.replace('-', "_"));
+        let literal = format!("CC_{target}");
+        if env::var_os("CC").is_none()
+            && env::var_os(&specific).is_none()
+            && env::var_os(&literal).is_none()
+            && env::var_os("TARGET_CC").is_none()
+        {
+            build.compiler(if target.ends_with("msvc") {
+                "clang-cl"
+            } else {
+                "clang"
+            });
         }
     }
-    command.arg("-c").arg(source).arg("-o").arg(output);
-
-    let status = command.status().unwrap_or_else(|err| {
-        panic!(
-            "failed to run C compiler `{compiler}` for {}: {err}",
-            source.display()
-        )
-    });
-    if !status.success() {
-        panic!(
-            "C compiler `{compiler}` failed while compiling {} with status {status}",
-            source.display()
-        );
-    }
-}
-
-fn archive_static_library(lib_dir: &Path, objects: &[PathBuf]) {
-    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
-        let archive = lib_dir.join("zova_c.lib");
-        let mut command = Command::new("lib");
-        command.arg(format!("/OUT:{}", archive.display()));
-        command.args(objects);
-        let status = command
-            .status()
-            .expect("failed to run `lib` while archiving generated Zova C objects");
-        if !status.success() {
-            panic!("`lib` failed while archiving generated Zova C objects with status {status}");
-        }
-        return;
-    }
-
-    let archive = lib_dir.join("libzova_c.a");
-    let archiver = env::var("AR").unwrap_or_else(|_| "ar".to_string());
-    let mut command = Command::new(&archiver);
-    command.arg("crs").arg(&archive).args(objects);
-    let status = command
-        .status()
-        .unwrap_or_else(|err| panic!("failed to run archiver `{archiver}`: {err}"));
-    if !status.success() {
-        panic!("archiver `{archiver}` failed with status {status}");
-    }
+    build
+        .flag_if_supported("-Wno-incompatible-pointer-types")
+        .flag_if_supported("-fno-sanitize=undefined")
+        .compile("zova_c");
+    PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"))
 }
 
 fn build_zig_source(source_root: &Path) -> PathBuf {
@@ -211,16 +166,15 @@ fn build_zig_source(source_root: &Path) -> PathBuf {
         .arg("build")
         .arg("c-abi")
         .arg("-Doptimize=ReleaseFast");
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
-        && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
-    {
-        let zig_arch = match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
-            Ok("x86_64") => "x86_64",
-            Ok("aarch64") => "aarch64",
-            Ok(arch) => panic!("unsupported Windows MSVC architecture for Zig build: {arch}"),
-            Err(err) => panic!("missing CARGO_CFG_TARGET_ARCH for Windows MSVC build: {err}"),
-        };
-        command.arg(format!("-Dtarget={zig_arch}-windows-msvc"));
+    let target = env::var("TARGET").expect("Cargo TARGET is required");
+    let zig_target = build_target::zig_target(&target).unwrap_or_else(|| {
+        panic!("unsupported Zova automatic-build target: {target}; provide ZOVA_LIB_DIR and ZOVA_INCLUDE_DIR for a custom native build");
+    });
+    command.arg(format!("-Dtarget={zig_target}"));
+    // Match the packaged generated-C feature set, while preserving the explicit
+    // source override's existing build defaults.
+    if env::var_os("ZOVA_SOURCE_DIR").is_none() {
+        command.arg("-Denable-dynamic-extensions=false");
     }
     let status = command
         .arg("--cache-dir")
@@ -248,34 +202,6 @@ fn absolute_dir(path: &Path) -> PathBuf {
         .unwrap_or_else(|err| panic!("failed to create {}: {err}", path.display()));
     path.canonicalize()
         .unwrap_or_else(|err| panic!("failed to canonicalize {}: {err}", path.display()))
-}
-
-fn source_root_for_build(manifest_dir: &Path) -> PathBuf {
-    if let Some(repo_root) = find_repository_root(manifest_dir) {
-        return repo_root;
-    }
-
-    let bundled = manifest_dir.join("native");
-    if bundled.join("build.zig").exists() {
-        return bundled;
-    }
-
-    panic!(
-        "unable to find Zova source from {}; set ZOVA_LIB_DIR or ZOVA_SOURCE_DIR",
-        manifest_dir.display()
-    );
-}
-
-fn find_repository_root(manifest_dir: &Path) -> Option<PathBuf> {
-    let repo_root = manifest_dir.ancestors().nth(3)?;
-    if repo_root.join("build.zig").exists()
-        && repo_root.join("include/zova.h").exists()
-        && repo_root.join("src/c_api.zig").exists()
-    {
-        Some(repo_root.to_path_buf())
-    } else {
-        None
-    }
 }
 
 fn emit_rerun_if_changed_recursive(path: &Path) {

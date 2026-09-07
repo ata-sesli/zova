@@ -74,6 +74,7 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ARTIFACTS_RUN_ID" > "$RUNNER_TEMP/artifact-run.json"
           gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$ARTIFACTS_RUN_ID/jobs?per_page=100" > "$RUNNER_TEMP/artifact-jobs.json"
           node bindings/wasm/tools/verify-artifact-run.mjs "$RUNNER_TEMP/artifact-run.json" "$RUNNER_TEMP/artifact-jobs.json" "$(git rev-parse HEAD)"
+          python3 -c 'import json, os; pages=json.load(open(os.environ["RUNNER_TEMP"]+"/artifact-jobs.json")); jobs=[j for p in pages for j in p["jobs"] if j["name"].startswith("rust-artifact / verify")]; assert len(jobs)==5 and all(j["conclusion"]=="success" for j in jobs), "all five immutable Rust artifact jobs must pass"'
 
       - name: Download release artifacts
         env:
@@ -192,15 +193,42 @@ jobs:
         run: |
           set -eu
           version="${{ inputs.version }}"
-          sh bindings/rust/zova-sys/tools/sync-native-source.sh
-          sh bindings/rust/zova-sys/tools/check-native-source.sh
+          artifact="$PWD/zig-out/release-download/rust-crates"
+          export RUST_ARTIFACT="$artifact" RUST_RELEASE_VERSION="$version"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+          root = pathlib.Path(os.environ["RUST_ARTIFACT"])
+          manifest = json.loads((root / "manifest.json").read_text())
+          assert manifest["version"] == os.environ["RUST_RELEASE_VERSION"]
+          for name, expected in manifest["sha256"].items():
+              archive = root / name
+              assert hashlib.sha256(archive.read_bytes()).hexdigest() == expected
+          PY
 
           crate_published() {
             cargo info "$1@$version" >/dev/null 2>&1
           }
 
+          for backend in linux-x64 linux-arm64 darwin-x64 darwin-arm64 windows-x64; do
+            crate="zova-sys-$backend"
+            if ! crate_published "$crate"; then
+              python3 scripts/check-rust-artifact.py publish "$artifact" "$crate"
+            fi
+          done
+          for backend in linux-x64 linux-arm64 darwin-x64 darwin-arm64 windows-x64; do
+            attempt=1
+            until crate_published "zova-sys-$backend"; do
+              if [ "$attempt" -gt 20 ]; then
+                echo "timed out waiting for zova-sys-$backend $version" >&2
+                exit 1
+              fi
+              sleep 15
+              attempt=$((attempt + 1))
+            done
+          done
+
           if ! crate_published zova-sys; then
-            cargo publish --allow-dirty -p zova-sys --manifest-path bindings/rust/Cargo.toml
+            python3 scripts/check-rust-artifact.py publish "$artifact" zova-sys
           fi
 
           attempt=1
@@ -214,7 +242,7 @@ jobs:
           done
 
           if ! crate_published zova; then
-            cargo publish --allow-dirty -p zova --manifest-path bindings/rust/Cargo.toml
+            python3 scripts/check-rust-artifact.py publish "$artifact" zova
           fi
 
       - name: Publish Python package

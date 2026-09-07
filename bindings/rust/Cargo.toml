@@ -1,5 +1,5 @@
 [workspace]
-members = ["zova-sys", "zova"]
+members = ["zova-sys", "zova", "zova-sys-linux-x64", "zova-sys-linux-arm64", "zova-sys-darwin-x64", "zova-sys-darwin-arm64", "zova-sys-windows-x64"]
 default-members = ["zova-sys", "zova"]
 resolver = "2"
 

@@ -17,6 +17,9 @@ defaults:
     shell: bash
 
 jobs:
+  rust-artifact:
+    uses: ./.github/workflows/rust-artifact.yml
+
   wasm:
     uses: ./.github/workflows/wasm.yml
     with:

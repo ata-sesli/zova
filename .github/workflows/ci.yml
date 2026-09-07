@@ -13,6 +13,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  rust-artifact:
+    uses: ./.github/workflows/rust-artifact.yml
+
   wasm:
     uses: ./.github/workflows/wasm.yml
 
@@ -76,7 +79,6 @@ jobs:
       - run: sh bindings/python/tools/check-rust-source.sh
       - run: cargo test --workspace --manifest-path bindings/rust/Cargo.toml
       - run: cargo check --examples --manifest-path bindings/rust/Cargo.toml
-      - run: cargo package --allow-dirty -p zova-sys --manifest-path bindings/rust/Cargo.toml
       - run: cargo package --allow-dirty --list -p zova-sys --manifest-path bindings/rust/Cargo.toml >/tmp/zova-sys-package-list.txt
       - run: cargo package --list -p zova --manifest-path bindings/rust/Cargo.toml >/tmp/zova-package-list.txt
 

@@ -14,6 +14,10 @@ rsync -a --checksum --delete \
     "$ROOT/bindings/rust/zova-sys/" \
     "$DEST/zova-sys/"
 
+for backend in linux-x64 linux-arm64 darwin-x64 darwin-arm64 windows-x64; do
+    rsync -a --checksum --delete "$ROOT/bindings/rust/zova-sys-$backend/" "$DEST/zova-sys-$backend/"
+done
+
 python3 - "$DEST/zova/Cargo.toml" "$DEST/zova-sys/Cargo.toml" "$VERSION" <<'PY'
 from pathlib import Path
 import sys
@@ -30,14 +34,15 @@ repository = "https://github.com/ata-sesli/zova"
 homepage = "https://github.com/ata-sesli/zova"
 """
 
-for path in (zova_manifest, sys_manifest):
+for path in [zova_manifest, sys_manifest, *sys_manifest.parent.parent.glob('zova-sys-*/Cargo.toml')]:
     text = path.read_text()
     text = text.replace("rust-version.workspace = true\n", "")
     text = text.replace("version.workspace = true\n", "")
     text = text.replace("edition.workspace = true\n", "")
     text = text.replace("license.workspace = true\n", "")
     text = text.replace("repository.workspace = true\n", "")
-    text = text.replace("homepage.workspace = true\n", common)
+    text = text.replace("homepage.workspace = true\n", "")
+    text = text.replace("[package]\n", "[package]\n" + common, 1)
     path.write_text(text)
 PY
 
@@ -46,4 +51,5 @@ rsync -a --checksum --delete "$ROOT/LICENSE" "$DEST/zova-sys/native/LICENSE"
 "$ROOT/scripts/update-generated-c.sh" "$DEST/zova-sys/native/generated"
 
 rm -rf "$DEST/target" "$DEST/zova/target" "$DEST/zova-sys/target"
-find "$DEST" \( -name '.DS_Store' -o -name '*.zova' -o -name '*.zova-wal' -o -name '*.zova-shm' \) -delete
+find "$DEST" \( -name '.DS_Store' -o -name '*.zova' -o -name '*.zova-wal' -o -name '*.zova-shm' \) \
+    ! -path '*/tests/fixtures/*' -delete

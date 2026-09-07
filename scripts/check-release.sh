@@ -81,12 +81,10 @@ CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo check --examples --manifest-path bin
 # before committing local changes, so package dry-runs use the current tree.
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo package --allow-dirty --list -p zova-sys --manifest-path bindings/rust/Cargo.toml >/dev/null
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo package --allow-dirty --list -p zova --manifest-path bindings/rust/Cargo.toml >/dev/null
-CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo publish --allow-dirty --dry-run -p zova-sys --manifest-path bindings/rust/Cargo.toml
-if [ "${ZOVA_CHECK_PUBLISHED_RUST_SAFE_CRATE:-0}" = "1" ]; then
-    CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo publish --allow-dirty --dry-run -p zova --manifest-path bindings/rust/Cargo.toml
-else
-    echo "skipping zova publish dry-run until zova-sys $RUST_WORKSPACE_VERSION is published"
-fi
+python3 scripts/generate-rust-platforms.py
+python3 -m unittest scripts/tests/test_check_rust_artifact.py
+CARGO_TARGET_DIR="$CARGO_TARGET_REPO" python3 scripts/check-rust-artifact.py package "$ROOT" "$TMP/rust-artifact"
+CARGO_TARGET_DIR="$CARGO_TARGET_REPO" python3 scripts/check-rust-artifact.py verify "$TMP/rust-artifact" "$TMP/rust-verified"
 sh scripts/repack-darwin-c-abi.sh
 (cd bindings/go && GOCACHE="$GO_CACHE_REPO" go test ./...)
 (cd bindings/go && GOCACHE="$GO_CACHE_REPO" go vet ./...)
