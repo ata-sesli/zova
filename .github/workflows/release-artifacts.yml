@@ -191,6 +191,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
         working-directory: bindings/javascript
+      - run: python scripts/generate-rust-platforms.py --host
       - run: bun run build:native
         working-directory: bindings/javascript
       - run: bun run build:typescript

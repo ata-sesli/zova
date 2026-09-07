@@ -57,6 +57,7 @@ fn database_kv_crud_preserves_exact_bytes() {
     db.kv_clear_namespace(b"settings").unwrap();
     assert_eq!(db.kv_count(b"settings").unwrap(), 0);
 
+    drop(db);
     std::fs::remove_file(&path).unwrap();
 }
 
@@ -77,6 +78,7 @@ fn database_kv_get_many_preserves_order_and_duplicates() {
     assert_eq!(results[2].as_deref(), Some(&b"1"[..]));
     assert_eq!(results[3].as_deref(), Some(&b"3"[..]));
 
+    drop(db);
     std::fs::remove_file(&path).unwrap();
 }
 
@@ -109,6 +111,7 @@ fn database_kv_put_many_is_atomic_and_delete_many_ignores_missing() {
     db.kv_delete_many(b"ns", &[]).unwrap();
     assert_eq!(db.kv_count(b"ns").unwrap(), 1);
 
+    drop(db);
     std::fs::remove_file(&path).unwrap();
 }
 
@@ -129,6 +132,7 @@ fn database_kv_partitions_by_namespace() {
     assert_eq!(db.kv_count(b"a").unwrap(), 0);
     assert_eq!(db.kv_count(b"b").unwrap(), 1);
 
+    drop(db);
     std::fs::remove_file(&path).unwrap();
 }
 
@@ -167,6 +171,7 @@ fn shared_database_kv_crud_and_many() {
     db.kv_clear_namespace(b"cfg").unwrap();
     assert_eq!(db.kv_count(b"cfg").unwrap(), 0);
 
+    drop(db);
     std::fs::remove_file(&path).unwrap();
 }
 
@@ -209,5 +214,6 @@ fn shared_database_guard_kv_joins_transaction() {
     assert_eq!(db.kv_count(b"ns").unwrap(), 2);
     assert_eq!(db.kv_get(b"ns", b"d").unwrap(), None);
 
+    drop(db);
     std::fs::remove_file(&path).unwrap();
 }

@@ -5,6 +5,8 @@ ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 DEST="$ROOT/bindings/python/rust"
 VERSION="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' "$ROOT/bindings/rust/Cargo.toml" | head -n 1)"
 
+python3 "$ROOT/scripts/generate-rust-platforms.py" --host
+
 mkdir -p "$DEST"
 rm -f "$DEST/Cargo.toml" "$DEST/Cargo.lock"
 
