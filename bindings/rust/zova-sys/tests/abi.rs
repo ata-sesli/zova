@@ -2,6 +2,21 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_void;
 use std::ptr;
 
+#[test]
+fn extension_upgrade_entrypoints_reject_null_requests() {
+    // SAFETY: these ABI entrypoints explicitly accept null for validation.
+    unsafe {
+        assert_eq!(
+            zova_sys::zova_database_open_for_extension_upgrade(ptr::null()),
+            zova_sys::ZOVA_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            zova_sys::zova_database_extension_upgrade(ptr::null()),
+            zova_sys::ZOVA_INVALID_ARGUMENT
+        );
+    }
+}
+
 fn temp_path(name: &str) -> String {
     let mut path = std::env::temp_dir();
     path.push(format!(

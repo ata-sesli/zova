@@ -3,6 +3,16 @@ const builtin = @import("builtin");
 const cli = @import("cli");
 const zova = @import("zova");
 
+test "cli extension upgrade is explicit and requires path and name" {
+    var result = try runCli(&.{ "zova", "extension", "upgrade" });
+    defer result.deinit();
+    try std.testing.expect(result.code != 0);
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "unknown extension action") == null);
+    var help = try runCli(&.{ "zova", "--help" });
+    defer help.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "extension upgrade") != null);
+}
+
 test "cli version and help are successful" {
     var result = try runCli(&.{ "zova", "--version" });
     defer result.deinit();

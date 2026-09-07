@@ -384,7 +384,7 @@ pub fn parseExtensionCommandArgs(args: []const []const u8) ExtensionCommandParse
             _ = first_path orelse return error.MissingPath;
             if (name != null or version != null or out_path != null or smoke) return error.ExtraArgs;
         },
-        .info, .drop, .install => {
+        .info, .drop, .install, .upgrade => {
             _ = first_path orelse return error.MissingPath;
             _ = name orelse return error.MissingName;
             if (version != null or out_path != null or smoke) return error.ExtraArgs;
@@ -425,6 +425,7 @@ pub fn parseExtensionCommandArgs(args: []const []const u8) ExtensionCommandParse
 }
 
 fn parseExtensionAction(value: []const u8) ?ExtensionAction {
+    if (std.mem.eql(u8, value, "upgrade")) return .upgrade;
     if (std.mem.eql(u8, value, "list")) return .list;
     if (std.mem.eql(u8, value, "info")) return .info;
     if (std.mem.eql(u8, value, "check")) return .check;
@@ -442,7 +443,7 @@ fn parseExtensionAction(value: []const u8) ?ExtensionAction {
 
 pub fn extensionUsageMessage(err: ExtensionCommandParseError) []const u8 {
     return switch (err) {
-        error.MissingAction => "extension requires list, info, check, drop, install, trust, untrust, trusted, scaffold, build, pack, or verify",
+        error.MissingAction => "extension requires list, info, check, drop, install, upgrade, trust, untrust, trusted, scaffold, build, pack, or verify",
         error.UnknownAction => "unknown extension action",
         error.DuplicateJson => "duplicate --json",
         error.DuplicateName => "duplicate --name",

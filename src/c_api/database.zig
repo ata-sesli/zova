@@ -70,7 +70,7 @@ pub fn zova_database_create_with_options(request: ?*const zova_database_create_o
 }
 
 pub fn zova_database_create_with_extensions(request: ?*const zova_database_open_extensions_request) callconv(.c) zova_status {
-    return openDatabaseWithExtensions(request, .create);
+    return openDatabaseWithExtensions(request, .create, false);
 }
 
 pub fn zova_database_open(request: ?*const zova_database_open_request) callconv(.c) zova_status {
@@ -82,7 +82,11 @@ pub fn zova_database_open_with_options(request: ?*const zova_database_open_optio
 }
 
 pub fn zova_database_open_with_extensions(request: ?*const zova_database_open_extensions_request) callconv(.c) zova_status {
-    return openDatabaseWithExtensions(request, .open);
+    return openDatabaseWithExtensions(request, .open, false);
+}
+
+pub fn zova_database_open_for_extension_upgrade(request: ?*const zova_database_open_extensions_request) callconv(.c) zova_status {
+    return openDatabaseWithExtensions(request, .open, true);
 }
 
 pub fn zova_database_close(db: ?*zova_database) callconv(.c) zova_status {
@@ -418,7 +422,7 @@ fn openDatabaseWithOptions(request: ?*const zova_database_open_options_request) 
     return .OK;
 }
 
-fn openDatabaseWithExtensions(request: ?*const zova_database_open_extensions_request, mode: OpenMode) zova_status {
+fn openDatabaseWithExtensions(request: ?*const zova_database_open_extensions_request, mode: OpenMode, for_upgrade: bool) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     clearMessage(req.out_error_message);
     const out = req.out_db orelse return failMessage(req.out_error_message, error.InvalidArgument);
@@ -426,6 +430,7 @@ fn openDatabaseWithExtensions(request: ?*const zova_database_open_extensions_req
     const path = req.path orelse return failMessage(req.out_error_message, error.InvalidArgument);
     if ((req.flags & ~ZOVA_OPEN_READ_ONLY) != 0) return failMessage(req.out_error_message, error.InvalidArgument);
     if (mode == .create and (req.flags != 0 or req.busy_timeout_ms != 0)) return failMessage(req.out_error_message, error.InvalidArgument);
+    if (for_upgrade and req.flags != 0) return failMessage(req.out_error_message, error.InvalidArgument);
     if (req.busy_timeout_ms > std.math.maxInt(c_int)) return failMessage(req.out_error_message, error.InvalidArgument);
 
     const bundle_paths = bundlePathSlices(allocator, req.extension_bundle_paths, req.extension_bundle_count) catch |err| {
@@ -433,7 +438,7 @@ fn openDatabaseWithExtensions(request: ?*const zova_database_open_extensions_req
     };
     defer allocator.free(bundle_paths);
 
-    if (bundle_paths.len == 0) {
+    if (bundle_paths.len == 0 and !for_upgrade) {
         return switch (mode) {
             .create => openDatabase(&.{
                 .path = req.path,
@@ -464,13 +469,15 @@ fn openDatabaseWithExtensions(request: ?*const zova_database_open_extensions_req
         return failMessage(req.out_error_message, err);
     };
 
-    var db = switch (mode) {
+    var db = (if (for_upgrade) zova.Database.openForExtensionUpgradeWithExtensions(std.mem.span(path), .{
+        .busy_timeout_ms = req.busy_timeout_ms,
+    }, owned_registry.registry()) else switch (mode) {
         .create => zova.Database.createWithExtensions(std.mem.span(path), owned_registry.registry()),
         .open => zova.Database.openWithOptionsAndExtensions(std.mem.span(path), .{
             .read_only = (req.flags & ZOVA_OPEN_READ_ONLY) != 0,
             .busy_timeout_ms = req.busy_timeout_ms,
         }, owned_registry.registry()),
-    } catch |err| {
+    }) catch |err| {
         owned_registry.deinit();
         dynamic_extensions.deinit();
         return failMessage(req.out_error_message, err);

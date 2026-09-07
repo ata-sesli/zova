@@ -25,6 +25,24 @@ pub const Descriptor = extern struct {
     register_sql: ?Hook = null,
 };
 pub const Phase = enum { install, check, drop, register_sql };
+pub const has_upgrade: u64 = 1;
+pub const UpgradeDescriptor = extern struct {
+    base: Descriptor,
+    from_version: ?[*:0]const u8,
+    upgrade: ?Hook,
+};
+
+pub fn upgradePath(d: *const Descriptor) extension.Error!?extension.Upgrade {
+    if (d.flags == 0) return null;
+    if (d.flags != has_upgrade or d.struct_size < @sizeOf(UpgradeDescriptor)) return error.ExtensionIncompatible;
+    const tail: *const UpgradeDescriptor = @ptrCast(d);
+    return .{
+        .name = try string(d.name, 64),
+        .from_version = try string(tail.from_version, 64),
+        .to_version = try string(d.version, 64),
+        .plugin_hook = tail.upgrade orelse return error.ExtensionInvalid,
+    };
+}
 
 fn string(ptr: ?[*:0]const u8, max: usize) extension.Error![]const u8 {
     const value = ptr orelse return error.ExtensionInvalid;
@@ -36,7 +54,8 @@ pub fn validate(ptr: ?*const Descriptor) extension.Error!extension.Extension {
     const d = ptr orelse return error.ExtensionInvalid;
     // Read only the fixed two-u32 prefix until size/version are accepted.
     if (d.struct_size < @sizeOf(Descriptor) or d.abi_version != 1) return error.ExtensionIncompatible;
-    if (d.flags != 0) return error.ExtensionIncompatible;
+    if (d.flags != 0 and d.flags != has_upgrade) return error.ExtensionIncompatible;
+    if (d.flags == has_upgrade and d.struct_size < @sizeOf(UpgradeDescriptor)) return error.ExtensionIncompatible;
     const manifest: extension.Manifest = .{
         .name = try string(d.name, 64),
         .version = try string(d.version, 64),
@@ -59,6 +78,10 @@ pub fn invoke(d: Descriptor, phase: Phase, db: *sqlite.Database) extension.Error
         .drop => d.drop,
         .register_sql => d.register_sql,
     } orelse return;
+    return invokeHook(hook, db);
+}
+
+pub fn invokeHook(hook: Hook, db: *sqlite.Database) extension.Error!void {
     const host: Host = .{};
     switch (hook(&host, db)) {
         0 => {},

@@ -75,7 +75,7 @@ pub fn build(b: *std.Build) void {
 
     var dynamic_extension_fixture: ?*std.Build.Step.Compile = null;
     const plugin_fixture_options = b.addOptions();
-    for ([_][]const u8{ "c", "cpp" }) |language| {
+    for ([_][]const u8{ "c", "cpp", "upgrade" }) |language| {
         const option_name = b.fmt("plugin_{s}_fixture", .{language});
         if (supports_dynamic_extension_fixture) {
             const fixture = b.addLibrary(.{
@@ -86,7 +86,7 @@ pub fn build(b: *std.Build) void {
             fixture.root_module.addIncludePath(b.path("include"));
             fixture.root_module.addCSourceFile(.{
                 .file = b.path(if (std.mem.eql(u8, language, "cpp")) "tests/plugin_fixture.cpp" else "tests/plugin_fixture.c"),
-                .flags = if (std.mem.eql(u8, language, "cpp")) &.{"-std=c++17"} else &.{"-std=c11"},
+                .flags = if (std.mem.eql(u8, language, "cpp")) &.{"-std=c++17"} else if (std.mem.eql(u8, language, "upgrade")) &.{ "-std=c11", "-DZOVA_UPGRADE_FIXTURE" } else &.{"-std=c11"},
             });
             plugin_fixture_options.addOptionPath(option_name, fixture.getEmittedBin());
         } else {
@@ -369,7 +369,7 @@ pub fn build(b: *std.Build) void {
         "test-extensions",
         "Run extension and trigram tests",
         "src/test_extensions_root.zig",
-        &.{ "extension test suite", "extension_dynamic", "extension_plugin", "trgm_tests" },
+        &.{ "extension test suite", "extension_dynamic", "extension_plugin", "extension_upgrade", "trgm_tests" },
         target,
         optimize,
         zova_build_options,

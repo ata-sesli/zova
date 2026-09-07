@@ -1945,6 +1945,14 @@ zova_status zova_graphs_list(const zova_graph_list_request *request);
  * raw sqlite3 handles as the normal extension path.
  */
 zova_status zova_database_extension_install(const zova_database_extension_request *request);
+/* Open explicitly for extension maintenance without running installed hooks.
+ * Uses the same trusted-bundle request; flags must be zero. Upgrade, close and
+ * reopen normally before application use. No implicit data/file migration. */
+zova_status zova_database_open_for_extension_upgrade(const zova_database_open_extensions_request *request);
+/* One declared forward path; savepoint rollback preserves caller work.
+ * Unavailable code -> EXTENSION_UNAVAILABLE; unsupported/equal/backward version
+ * -> EXTENSION_INCOMPATIBLE. Caller transaction commit remains the caller's job. */
+zova_status zova_database_extension_upgrade(const zova_database_extension_request *request);
 zova_status zova_database_extension_list(const zova_database_extension_list_request *request);
 zova_status zova_database_extension_info(const zova_database_extension_info_request *request);
 zova_status zova_database_extension_check(const zova_database_extension_request *request);

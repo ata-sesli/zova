@@ -88,6 +88,7 @@ pub const Extension = struct {
 pub const Registry = struct {
     extensions: []const Extension = &.{},
     plugins: []const plugin.Descriptor = &.{},
+    upgrades: []const Upgrade = &.{},
 
     fn invoke(self: Registry, item: Extension, db: *sqlite.Database, phase: plugin.Phase) Error!void {
         for (self.plugins) |descriptor| {
@@ -119,6 +120,15 @@ pub const Registry = struct {
     }
 
     pub fn validate(self: Registry) Error!void {
+        for (self.upgrades, 0..) |path, i| {
+            const target = self.find(path.name) orelse return error.ExtensionUnavailable;
+            if (!std.mem.eql(u8, target.manifest.version, path.to_version)) return error.ExtensionIncompatible;
+            try validateUpgradeDirection(path.from_version, path.to_version);
+            if ((path.hook == null) == (path.plugin_hook == null)) return error.ExtensionInvalid;
+            for (self.upgrades[0..i]) |previous| {
+                if (std.mem.eql(u8, previous.name, path.name) and std.mem.eql(u8, previous.from_version, path.from_version)) return error.ExtensionInvalid;
+            }
+        }
         for (self.plugins, 0..) |*descriptor, i| {
             const item = try plugin.validate(descriptor);
             const registered = self.find(item.manifest.name) orelse return error.ExtensionInvalid;
@@ -265,6 +275,70 @@ pub fn install(db: *sqlite.Database, registry: Registry, name: []const u8, valid
     released = true;
 }
 
+/// Explicit forward path. Kept outside Extension to preserve the legacy ABI.
+pub const Upgrade = struct {
+    name: []const u8,
+    from_version: []const u8,
+    to_version: []const u8,
+    hook: ?Hook = null,
+    plugin_hook: ?plugin.Hook = null,
+};
+
+fn validateUpgradeDirection(from: []const u8, to: []const u8) Error!void {
+    const a = parseAbiVersion(from) catch return error.ExtensionIncompatible;
+    const b = parseAbiVersion(to) catch return error.ExtensionIncompatible;
+    if (b.major > a.major or (b.major == a.major and b.minor > a.minor) or
+        (b.major == a.major and b.minor == a.minor and b.patch > a.patch)) return;
+    return error.ExtensionIncompatible;
+}
+
+/// Upgrade only a declared source version. The savepoint owns the metadata and
+/// data changes together, including when nested inside a caller transaction.
+pub fn upgrade(allocator: std.mem.Allocator, db: *sqlite.Database, registry: Registry, name: []const u8, validate_core: ?ValidationHook) Error!void {
+    try registry.validate();
+    try validateName(name);
+    const target = registry.find(name) orelse return error.ExtensionUnavailable;
+    try db.savepoint("extension_upgrade");
+    errdefer {
+        db.rollbackToSavepoint("extension_upgrade") catch {};
+        db.releaseSavepoint("extension_upgrade") catch {};
+    }
+    var installed = try loadInfo(allocator, db, name);
+    defer installed.deinit(allocator);
+    if (!abiMinimumMatchesInstalled(target.manifest.zova_abi_min, installed.zova_abi_min)) {
+        var source_manifest = target.manifest;
+        source_manifest.zova_abi_min = installed.zova_abi_min;
+        validateManifest(source_manifest) catch return error.ExtensionIncompatible;
+    }
+    if (!std.mem.eql(u8, target.manifest.storage_prefix, installed.storage_prefix)) return error.ExtensionIncompatible;
+    try validateUpgradeDirection(installed.version, target.manifest.version);
+    const path = for (registry.upgrades) |candidate| {
+        if (std.mem.eql(u8, candidate.name, name) and std.mem.eql(u8, candidate.from_version, installed.version)) break candidate;
+    } else return error.ExtensionIncompatible;
+    var before = try listSchemaObjects(allocator, db);
+    defer before.deinit(allocator);
+    if (path.hook) |hook| {
+        try hook(db, target.manifest);
+    } else {
+        try plugin.invokeHook(path.plugin_hook.?, db);
+    }
+    try registry.invoke(target, db, .register_sql);
+    try registry.invoke(target, db, .check);
+    try validateNewSchemaObjectsOwnedBy(allocator, db, before.names, target.manifest.storage_prefix);
+    try validateInstalledState(allocator, db);
+    if (validate_core) |hook| hook(db) catch return error.ExtensionInvalid;
+    var stmt = try db.prepare("UPDATE _zova_extensions SET version=?, zova_abi_min=?, capabilities=?, manifest_json=? WHERE name=?");
+    defer stmt.deinit();
+    try stmt.bindText(1, target.manifest.version);
+    try stmt.bindText(2, target.manifest.zova_abi_min);
+    try stmt.bindText(3, target.manifest.capabilities);
+    try stmt.bindText(4, target.manifest.manifest_json);
+    try stmt.bindText(5, name);
+    std.debug.assert(try stmt.step() == .done);
+    try validateInstalledState(allocator, db);
+    try db.releaseSavepoint("extension_upgrade");
+}
+
 pub fn drop(db: *sqlite.Database, registry: Registry, name: []const u8, validate_core: ?ValidationHook) Error!void {
     try registry.validate();
     try validateName(name);
@@ -362,16 +436,7 @@ pub fn listInstalled(allocator: std.mem.Allocator, db: *sqlite.Database) Error!I
     }
 
     while (try stmt.step() == .row) {
-        var item = InstalledInfo{
-            .name = try allocator.dupe(u8, stmt.columnText(0)),
-            .version = try allocator.dupe(u8, stmt.columnText(1)),
-            .storage_prefix = try allocator.dupe(u8, stmt.columnText(2)),
-            .zova_abi_min = try allocator.dupe(u8, stmt.columnText(3)),
-            .capabilities = try allocator.dupe(u8, stmt.columnText(4)),
-            .required = stmt.columnInt64(5) != 0,
-            .installed_at_unix = stmt.columnInt64(6),
-            .manifest_json = try allocator.dupe(u8, stmt.columnText(7)),
-        };
+        var item = try readInstalledRow(allocator, &stmt);
         errdefer item.deinit(allocator);
         try validateInstalledShape(item);
         for (items.items) |previous| {
@@ -529,22 +594,34 @@ pub fn loadInfo(allocator: std.mem.Allocator, db: *sqlite.Database, name: []cons
 
     switch (try stmt.step()) {
         .row => {
-            var item = InstalledInfo{
-                .name = try allocator.dupe(u8, stmt.columnText(0)),
-                .version = try allocator.dupe(u8, stmt.columnText(1)),
-                .storage_prefix = try allocator.dupe(u8, stmt.columnText(2)),
-                .zova_abi_min = try allocator.dupe(u8, stmt.columnText(3)),
-                .capabilities = try allocator.dupe(u8, stmt.columnText(4)),
-                .required = stmt.columnInt64(5) != 0,
-                .installed_at_unix = stmt.columnInt64(6),
-                .manifest_json = try allocator.dupe(u8, stmt.columnText(7)),
-            };
+            var item = try readInstalledRow(allocator, &stmt);
             errdefer item.deinit(allocator);
             try validateInstalledShape(item);
             return item;
         },
         .done => return error.ExtensionNotFound,
     }
+}
+
+fn readInstalledRow(allocator: std.mem.Allocator, stmt: *sqlite.Statement) Error!InstalledInfo {
+    var item: InstalledInfo = .{
+        .name = &.{},
+        .version = &.{},
+        .storage_prefix = &.{},
+        .zova_abi_min = &.{},
+        .capabilities = &.{},
+        .manifest_json = &.{},
+        .required = stmt.columnInt64(5) != 0,
+        .installed_at_unix = stmt.columnInt64(6),
+    };
+    errdefer item.deinit(allocator);
+    item.name = try allocator.dupe(u8, stmt.columnText(0));
+    item.version = try allocator.dupe(u8, stmt.columnText(1));
+    item.storage_prefix = try allocator.dupe(u8, stmt.columnText(2));
+    item.zova_abi_min = try allocator.dupe(u8, stmt.columnText(3));
+    item.capabilities = try allocator.dupe(u8, stmt.columnText(4));
+    item.manifest_json = try allocator.dupe(u8, stmt.columnText(7));
+    return item;
 }
 
 fn insertInstalled(db: *sqlite.Database, manifest: Manifest) Error!void {
@@ -616,7 +693,9 @@ fn listSchemaObjects(allocator: std.mem.Allocator, db: *sqlite.Database) Error!S
     while (try stmt.step() == .row) {
         const name = stmt.columnText(0);
         if (isSqliteInternalObject(name)) continue;
-        try names.append(allocator, try allocator.dupe(u8, name));
+        const owned = try allocator.dupe(u8, name);
+        errdefer allocator.free(owned);
+        try names.append(allocator, owned);
     }
 
     return .{ .names = try names.toOwnedSlice(allocator) };
