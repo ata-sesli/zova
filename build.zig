@@ -74,6 +74,25 @@ pub fn build(b: *std.Build) void {
     cli_module.addOptions("cli_options", cli_options);
 
     var dynamic_extension_fixture: ?*std.Build.Step.Compile = null;
+    const plugin_fixture_options = b.addOptions();
+    for ([_][]const u8{ "c", "cpp" }) |language| {
+        const option_name = b.fmt("plugin_{s}_fixture", .{language});
+        if (supports_dynamic_extension_fixture) {
+            const fixture = b.addLibrary(.{
+                .name = b.fmt("plugin_{s}_fixture", .{language}),
+                .linkage = .dynamic,
+                .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+            });
+            fixture.root_module.addIncludePath(b.path("include"));
+            fixture.root_module.addCSourceFile(.{
+                .file = b.path(if (std.mem.eql(u8, language, "cpp")) "tests/plugin_fixture.cpp" else "tests/plugin_fixture.c"),
+                .flags = if (std.mem.eql(u8, language, "cpp")) &.{"-std=c++17"} else &.{"-std=c11"},
+            });
+            plugin_fixture_options.addOptionPath(option_name, fixture.getEmittedBin());
+        } else {
+            plugin_fixture_options.addOption([]const u8, option_name, "");
+        }
+    }
     if (supports_dynamic_extension_fixture) {
         const fixture = b.addLibrary(.{
             .name = "zova_dyn_test",
@@ -350,12 +369,22 @@ pub fn build(b: *std.Build) void {
         "test-extensions",
         "Run extension and trigram tests",
         "src/test_extensions_root.zig",
-        &.{ "extension test suite", "extension_dynamic", "trgm_tests" },
+        &.{ "extension test suite", "extension_dynamic", "extension_plugin", "trgm_tests" },
         target,
         optimize,
         zova_build_options,
         sqlite_lib,
     );
+    const plugin_test_module = b.createModule(.{
+        .root_source_file = b.path("src/extension_plugin_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    plugin_test_module.addOptions("zova_build_options", zova_build_options);
+    plugin_test_module.addOptions("plugin_fixture_options", plugin_fixture_options);
+    addSqlite(plugin_test_module, b, sqlite_lib);
+    const plugin_tests = b.addTest(.{ .name = "plugin-abi", .root_module = plugin_test_module, .filters = &.{"extension_plugin"} });
+    extension_test_step.dependOn(&b.addRunArtifact(plugin_tests).step);
     const migration_test_step = addZigTestSuite(
         b,
         "test-migration",
