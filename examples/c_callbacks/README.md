@@ -1,12 +1,16 @@
 # C Scalar SQL Callback Examples
 
-Zova v0.22 exposes scalar SQL function registration through the C ABI. These
+Zova exposes scalar SQL function registration through the C ABI. These
 callbacks run on Zova-owned SQLite connections opened through `zova_database`.
 
 Callbacks must not re-enter the same `zova_database *`. Argument buffers are
-borrowed for the callback only. Text, blob, and error result buffers only need
-to stay valid until the callback returns because Zova copies them before SQLite
-observes the result.
+borrowed for the invocation only. Zova copies text, blob, and error result
+buffers after the callback returns. Never return callback-local stack storage
+or free result bytes inside the callback. Use literals, callback arguments, or
+user-data-owned buffers kept valid until the invoking statement step returns.
+These snippets assume `zova.h`, `string.h`, an open `db`, and status checking
+by the enclosing application. See the
+[host contract](../../docs/extensions.md#c-abi-scalar-sql-functions).
 
 ## Deterministic Scalar
 

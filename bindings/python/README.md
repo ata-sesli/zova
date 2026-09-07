@@ -178,11 +178,11 @@ process registry. The default registry includes bundled extensions such as
 directly. App-registered extension authoring and dynamic `.zovaext` loading
 are not exposed as Python APIs yet.
 
-The v0.25 C ABI has scalar SQL callback registration and trusted `.zovaext`
-bundle loading, but Python callback conversion, GIL behavior, and callback
-lifetime rules are deferred to a later binding slice. Use bundled extensions,
-trusted extension bundles through the CLI/C layer, or a host-owned bridge when
-SQL functions must run on Zova-owned connections.
+Python does not wrap application scalar callbacks or explicit extension-data
+upgrades. Generated-C packages cannot dynamically load bundles. A loader-capable
+native CLI/C host can use them, but that does not register their code on a
+Python-owned connection. See the
+[capability matrix](../../docs/extensions.md#availability-and-binding-matrix).
 
 See [../../docs/extensions.md](../../docs/extensions.md) for the current host
 contract and trust model. A fuller records/objects/vectors/graphs example lives

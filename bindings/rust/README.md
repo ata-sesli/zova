@@ -328,9 +328,14 @@ contract.
 Rust exposes lifecycle methods for extensions already present in the current
 process registry. The default registry includes bundled extensions such as
 `trgm`, so Rust applications can install, list, check, and drop `trgm` directly.
-The low-level `zova-sys` crate exposes the v0.25 C ABI for scalar SQL callback
+The low-level `zova-sys` crate exposes the C ABI for scalar SQL callback
 registration and trusted `.zovaext` bundle loading. The safe Rust crate does not
 yet wrap those callback or bundle-loading APIs.
+
+Default generated-C packages do not support dynamic loading; bundle symbols
+alone do not enable it. The source-tree explicit upgrade APIs are raw C/sys
+only, not safe Rust wrappers or published rc.3 APIs. See the
+[capability matrix](../../docs/extensions.md#availability-and-binding-matrix).
 
 See [../../docs/extensions.md](../../docs/extensions.md) for the current host
 contract and trust model. A fuller records/objects/vectors/graphs example lives

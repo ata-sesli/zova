@@ -122,6 +122,12 @@ The experimental bundle-producer CLI and application-authored callback surfaces
 remain outside the stable 1.x authoring contract. Dynamic native extensions run
 in-process and retain their documented trust and platform boundaries.
 
+The source-tree portable plugin descriptor and explicit extension-data upgrade
+APIs are additions after published rc.3, not retroactive release promises.
+They do not add Windows/generated-C dynamic loading or high-level binding
+wrappers. The [extension capability matrix](docs/extensions.md#availability-and-binding-matrix)
+is authoritative for these distinctions.
+
 ## Not public contracts
 
 Private `_zova_*` tables, indexes, query plans, generated private integer keys

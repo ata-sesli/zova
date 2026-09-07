@@ -94,6 +94,11 @@ The synchronous `Database` facade exposes:
 - public graph CRUD, atomic batches, neighbors, degree, and walks
 - bundled extension install/list/info/check/drop
 
+Extension authoring, application SQL callbacks, dynamic bundle loading, and
+explicit extension-data upgrades have no JavaScript wrapper. See the
+[extension capability matrix](../../docs/extensions.md#availability-and-binding-matrix);
+the presence of low-level C declarations does not imply addon support.
+
 The advanced opaque-key, graph-scan, edge-payload, and fresh-build APIs are
 supported low-level C ABI/raw `zova-sys` surfaces. They are an intentional
 binding boundary and are not part of the JavaScript package's 1.x contract.
@@ -153,4 +158,4 @@ The binding preserves Zova's status name, numeric status, and native message.
 - async transaction callbacks
 - direct Bun FFI
 - zero-copy native output
-- browser/WASM builds
+- browser builds of this native addon (the experimental `zova-wasm` is separate)

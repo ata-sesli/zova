@@ -48,13 +48,12 @@ This crate exposes raw C ABI declarations. It does not manage pointer lifetime,
 owned buffers, or error mapping for you. The safe `zova` crate handles those
 details.
 
-`zova-sys` exposes the complete v0.25 low-level C ABI surface, including
+`zova-sys` exposes the low-level C ABI surface, including
 opaque-key graph batch mutation and lookup, keyed neighbors and topology scans,
 edge payload access, prepared fresh graph builds, and the generic fresh-build
 session. These declarations are unsafe raw FFI; the safe `zova` crate does not
 yet wrap the new graph publication APIs.
 
-It also exposes the v0.25 low-level Rust surface for SQL callbacks.
 It exposes the raw C ABI structs and functions for scalar SQL registration and
 trusted `.zovaext` bundle loading. Callbacks are unsafe FFI: argument pointers
 are borrowed for the duration of the call, text/blob/error result bytes are
@@ -63,3 +62,9 @@ same `zova_database` handle.
 
 The safe Rust `zova` crate does not yet wrap app-defined SQL callbacks or
 dynamic extension bundle loading. Go and Python callback APIs are also deferred.
+
+Default generated-C packages disable dynamic bundle loading. These declarations
+only load bundles when linked to a loader-capable native Zig build on
+Linux/macOS, not Windows. The source tree additionally declares explicit
+extension-data upgrade APIs, which are not in already-published rc.3 packages.
+See the [extension capability matrix](../../../docs/extensions.md#availability-and-binding-matrix).

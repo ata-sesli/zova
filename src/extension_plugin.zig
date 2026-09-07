@@ -97,8 +97,10 @@ fn execSql(context: ?*anyopaque, sql: ?[*]const u8, len: u64) callconv(.c) i32 {
     // Bound the host service and reject embedded NUL (sqlite exec uses C strings).
     if (size == 0 or size > 1024 * 1024 or std.mem.indexOfScalar(u8, bytes[0..size], 0) != null) return 3;
     const db: *sqlite.Database = @ptrCast(@alignCast(raw));
-    const terminated = std.heap.page_allocator.dupeZ(u8, bytes[0..size]) catch return 2;
-    defer std.heap.page_allocator.free(terminated);
+    // Match the extension host allocator; page_allocator requires unsupported
+    // memory.grow intrinsics in Zig's generated-C WASM backend.
+    const terminated = std.heap.c_allocator.dupeZ(u8, bytes[0..size]) catch return 2;
+    defer std.heap.c_allocator.free(terminated);
     db.exec(terminated) catch |err| return if (err == error.OutOfMemory) 2 else 1;
     return 0;
 }
