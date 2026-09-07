@@ -54,6 +54,12 @@ if [ -n "${HELIUM_EXECUTABLE:-}" ]; then
   test -x "$HELIUM_EXECUTABLE"
 fi
 
+# Version validation reads the ignored Python Rust snapshot. Prepare and verify
+# both snapshots first so a clean checkout has the same inputs as a local one.
+sh bindings/rust/zova-sys/tools/sync-native-source.sh
+sh bindings/rust/zova-sys/tools/check-native-source.sh
+sh bindings/python/tools/sync-rust-source.sh
+sh bindings/python/tools/check-rust-source.sh
 sh scripts/check-versions.sh
 zig fmt --check build.zig build.zig.zon src tests
 zig build test
@@ -69,10 +75,7 @@ zig build cli-test
 zig build test -Doptimize=ReleaseSafe
 zig build
 zig build run
-# Binding tests must consume native snapshots generated from the current tree,
-# not ignored files left behind by an earlier release version.
-sh bindings/rust/zova-sys/tools/sync-native-source.sh
-sh bindings/rust/zova-sys/tools/check-native-source.sh
+# Binding tests consume the snapshots prepared and verified during preflight.
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo fmt --all --manifest-path bindings/rust/Cargo.toml --check
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo test --workspace --manifest-path bindings/rust/Cargo.toml
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo check --examples --manifest-path bindings/rust/Cargo.toml
@@ -88,8 +91,6 @@ CARGO_TARGET_DIR="$CARGO_TARGET_REPO" python3 scripts/check-rust-artifact.py ver
 sh scripts/repack-darwin-c-abi.sh
 (cd bindings/go && GOCACHE="$GO_CACHE_REPO" go test ./...)
 (cd bindings/go && GOCACHE="$GO_CACHE_REPO" go vet ./...)
-sh bindings/python/tools/sync-rust-source.sh
-sh bindings/python/tools/check-rust-source.sh
 CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" cargo fmt --manifest-path bindings/python/Cargo.toml --check
 CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" cargo test --manifest-path bindings/python/Cargo.toml
 CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" uv run --isolated --with maturin --with pytest --directory bindings/python maturin develop
