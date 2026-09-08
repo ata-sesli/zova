@@ -186,6 +186,20 @@ pub fn build(b: *std.Build) void {
     const install_ingestion = b.addInstallArtifact(ingestion_benchmark, .{});
     b.step("build-object-ingestion", "Build bounded object ingestion benchmark").dependOn(&install_ingestion.step);
 
+    const ingestion_93_benchmark = b.addExecutable(.{
+        .name = "zova_object_ingestion_93_benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/object_ingestion_93.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    ingestion_93_benchmark.root_module.addImport("object_impl", object_benchmark.root_module.import_table.get("object_impl").?);
+    ingestion_93_benchmark.root_module.addIncludePath(b.path("vendor/sqlite3.53.4"));
+    ingestion_93_benchmark.root_module.linkLibrary(sqlite_lib);
+    const install_ingestion_93 = b.addInstallArtifact(ingestion_93_benchmark, .{});
+    b.step("build-object-ingestion-93", "Build bounded issue-93 object ingestion benchmark").dependOn(&install_ingestion_93.step);
+
     const kv_benchmark = b.addExecutable(.{
         .name = "zova_kv_calls_benchmark",
         .root_module = b.createModule(.{

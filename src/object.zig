@@ -1783,7 +1783,14 @@ const ObjectInsertStatements = struct {
     fn insertChunk(self: *ObjectInsertStatements, chunk_hash: ObjectId, chunk: []const u8) Error!void {
         try self.chunk.bindBlob(1, &chunk_hash);
         try self.chunk.bindInt64(2, try usizeToSqliteI64(chunk.len));
-        try self.chunk.bindBlob(3, chunk);
+        // Chunk payload bytes are a sub-slice of the caller's object payload,
+        // which stays alive and unchanged until this statement has stepped and
+        // been reset below. Borrowing avoids copying every chunk into
+        // SQLite-owned memory; clearBindings releases the borrow before the
+        // caller's buffer can be reused. On any error path the statement is
+        // finalized by `deinit` before control returns to the caller.
+        errdefer self.chunk.clearBindings() catch {};
+        try self.chunk.bindBlobBorrowed(3, chunk);
         std.debug.assert((try self.chunk.step()) == .done);
         try self.chunk.reset();
         try self.chunk.clearBindings();

@@ -3001,3 +3001,155 @@ test "failed delete rolls back visible changes and keeps connection usable" {
     try db.deleteObject(id);
     try testingExpectObjectMissing(&db, id);
 }
+
+test "put mutates and reuses caller buffer between chunk inserts" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "put-buffer-reuse.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    // Build a deterministic multi-chunk payload (seed 0x5a6f7661 pattern).
+    var bytes: [fastcdc.max_size * 3]u8 = undefined;
+    for (&bytes, 0..) |*byte, index| {
+        byte.* = @intCast((index *% 0x5a6f7661 +% 0x9e3779b9) % 251);
+    }
+
+    // Fresh put, then mutate the caller buffer in place and re-put the new
+    // content. Reusing the same storage with different bytes exercises that
+    // no borrowed chunk binding from an earlier statement survives into later
+    // calls or keeps referring to the reused buffer.
+    const first_id = try db.putObject(&bytes);
+    for (&bytes, 0..) |*byte, index| {
+        byte.* ^= @intCast((index * 7 + 3) % 253);
+    }
+    const second_id = try db.putObject(&bytes);
+
+    try std.testing.expect(!std.mem.eql(u8, &first_id, &second_id));
+
+    var first_object = try db.getObject(std.testing.allocator, first_id);
+    defer first_object.deinit(std.testing.allocator);
+
+    var second_object = try db.getObject(std.testing.allocator, second_id);
+    defer second_object.deinit(std.testing.allocator);
+
+    try std.testing.expect(!std.mem.eql(u8, first_object.bytes, second_object.bytes));
+
+    try std.testing.expectEqual(@as(i64, 2), try testingCount(&db, "select count(*) from _zova_objects"));
+    try testingIntegrityCheckOk(&db);
+}
+
+test "empty object put keeps zero-length chunk storage intact" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "put-empty-borrowed.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    const id = try db.putObject("");
+    var object = try db.getObject(std.testing.allocator, id);
+    defer object.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), object.bytes.len);
+    try std.testing.expectEqual(@as(u64, 0), try db.objectChunkCount(id));
+}
+
+test "duplicate replay after fresh put still verifies full object hash" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "put-duplicate-replay.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    // Multi-chunk payload; the full-object hash must still verify on read.
+    var bytes: [fastcdc.max_size * 4]u8 = undefined;
+    var generator = std.Random.DefaultPrng.init(0x5a6f7661);
+    generator.random().bytes(&bytes);
+
+    const fresh_id = try db.putObject(&bytes);
+    const replay_id = try db.putObject(&bytes);
+    try std.testing.expectEqualSlices(u8, &fresh_id, &replay_id);
+
+    var object = try db.getObject(std.testing.allocator, fresh_id);
+    defer object.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, &bytes, object.bytes);
+    try std.testing.expectEqualSlices(u8, &objectId(&bytes), &object.id);
+
+    try testingIntegrityCheckOk(&db);
+}
+
+test "trigger failure during chunk insert rolls back borrowed bindings cleanly" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "put-borrowed-rollback.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    var bytes: [fastcdc.max_size * 2]u8 = undefined;
+    var generator = std.Random.DefaultPrng.init(0x5a6f7661);
+    generator.random().bytes(&bytes);
+    const id = objectId(&bytes);
+
+    // Make every chunk insert fail once at least one chunk row exists, then
+    // verify the transaction rolled back and the object can be retried.
+    try db.exec(
+        \\create trigger fail_chunk_insert before insert on _zova_chunks
+        \\when (select count(*) from _zova_chunks) >= 1
+        \\begin
+        \\  select raise(abort, 'forced chunk insert failure');
+        \\end;
+    );
+    try std.testing.expectError(error.Constraint, db.putObject(&bytes));
+
+    try db.exec("drop trigger fail_chunk_insert");
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_objects"));
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_object_chunks"));
+
+    const retried_id = try db.putObject(&bytes);
+    try std.testing.expectEqualSlices(u8, &id, &retried_id);
+
+    var object = try db.getObject(std.testing.allocator, retried_id);
+    defer object.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, &bytes, object.bytes);
+    try testingIntegrityCheckOk(&db);
+}
+
+test "put inside caller transaction with bound store verifies stored bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "put-borrowed-txn-main.zova");
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "put-borrowed-txn-objects.zova");
+    try zova.createObjectStore(store_path);
+
+    var db = try Database.create(main_path);
+    defer db.deinit();
+    try db.bindObjectStore(store_path);
+
+    var bytes: [fastcdc.max_size * 2]u8 = undefined;
+    var generator = std.Random.DefaultPrng.init(0x5a6f7661);
+    generator.random().bytes(&bytes);
+
+    // Bound stores participate in caller-owned transactions.
+    try db.exec("begin immediate");
+    const id = try db.putObject(&bytes);
+    try db.exec("commit");
+
+    var object = try db.getObject(std.testing.allocator, id);
+    defer object.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, &bytes, object.bytes);
+    try testingIntegrityCheckOk(&db);
+}
