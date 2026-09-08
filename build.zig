@@ -221,6 +221,20 @@ pub fn build(b: *std.Build) void {
     const install_vector_norms_94 = b.addInstallArtifact(vector_norms_94_benchmark, .{});
     b.step("build-vector-norms-94", "Build bounded issue-94 vector put-many benchmark").dependOn(&install_vector_norms_94.step);
 
+    const graph_index_ddl_95_benchmark = b.addExecutable(.{
+        .name = "zova_graph_index_ddl_95_benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/graph_index_ddl_95.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    graph_index_ddl_95_benchmark.root_module.addImport("zova", zova_module);
+    graph_index_ddl_95_benchmark.root_module.addIncludePath(b.path("vendor/sqlite3.53.4"));
+    graph_index_ddl_95_benchmark.root_module.linkLibrary(sqlite_lib);
+    const install_graph_index_ddl_95 = b.addInstallArtifact(graph_index_ddl_95_benchmark, .{});
+    b.step("build-graph-index-ddl-95", "Build bounded issue-95 graph batch index benchmark").dependOn(&install_graph_index_ddl_95.step);
+
     const kv_benchmark = b.addExecutable(.{
         .name = "zova_kv_calls_benchmark",
         .root_module = b.createModule(.{

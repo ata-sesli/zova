@@ -2988,6 +2988,32 @@ fn nextGraphCreatedOrder(
 }
 
 fn ensureGraphBatchIndexes(self: *Database) Error!void {
+    // One schema probe replaces seven prepared "create index if not exists"
+    // statements per batch. The probe counts the exact seven expected indexes
+    // in the active schema; only when some are missing are the DDL statements
+    // executed. Raw SQL drops (supported externally) and fresh builds that
+    // drop and rebuild the set are therefore still detected on the next
+    // batch, without memoizing readiness on the facade.
+    var missing_probe = try self.prepareSchema(
+        \\select count(*) from {s}sqlite_master
+        \\where type = 'index' and name in (
+        \\  '_zova_graph_nodes_created_order_idx',
+        \\  '_zova_graph_edges_topology_idx',
+        \\  '_zova_graph_edges_created_order_idx',
+        \\  '_zova_graph_edges_from_node_idx',
+        \\  '_zova_graph_edges_from_node_type_idx',
+        \\  '_zova_graph_edges_to_node_idx',
+        \\  '_zova_graph_edges_to_node_type_idx'
+        \\)
+    );
+    defer missing_probe.deinit();
+    if ((try missing_probe.step()) != .row) return error.GraphInvalid;
+    if (missing_probe.columnInt64(0) == 7) return;
+
+    try ensureGraphBatchIndexesSlow(self);
+}
+
+fn ensureGraphBatchIndexesSlow(self: *Database) Error!void {
     var nodes_created_order = try self.prepareSchema(
         \\create index if not exists {s}_zova_graph_nodes_created_order_idx
         \\on _zova_graph_nodes (graph_key, created_order, node_key)
