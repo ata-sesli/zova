@@ -17,6 +17,7 @@ test {
     _ = @import("c_api_kv_behavior_tests.zig");
     _ = @import("c_api_objects_behavior_tests.zig");
     _ = @import("c_api_fresh_build_behavior_tests.zig");
+    _ = @import("c_api_session_lock_tests.zig");
 }
 
 test "c abi graph operations route through a bound store after reopen" {

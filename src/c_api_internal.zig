@@ -888,7 +888,7 @@ pub const zova_graph_walk_direction = @import("c_api/graphs.zig").zova_graph_wal
 
 pub const zova_graph_walk_direction_profiled = @import("c_api/graphs.zig").zova_graph_walk_direction_profiled;
 
-const databaseHandle = @import("c_api/handles.zig").databaseHandle;
+const databaseHandleRaw = @import("c_api/handles.zig").databaseHandleRaw;
 
 const f32AbiValues = @import("c_api/values.zig").f32AbiValues;
 
@@ -2891,17 +2891,17 @@ test "c abi exposes transaction helpers and vacuum" {
     try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = db, .sql = "insert into notes (body) values ('commit')" }));
     try std.testing.expectEqual(zova_status.OK, zova_database_commit(&.{ .db = db }));
 
-    const object_id = try databaseHandle(db).?.db.putObject("vacuum keeps objects");
-    const deleted_id = try databaseHandle(db).?.db.putObject("vacuum after delete");
-    try databaseHandle(db).?.db.deleteObject(deleted_id);
-    try databaseHandle(db).?.db.createVectorCollection("vectors", .{ .dimensions = 2, .metric = .l2 });
-    try databaseHandle(db).?.db.putVector("vectors", "v1", .{ .f32 = &.{ 1.0, 2.0 } });
+    const object_id = try databaseHandleRaw(db).?.db.putObject("vacuum keeps objects");
+    const deleted_id = try databaseHandleRaw(db).?.db.putObject("vacuum after delete");
+    try databaseHandleRaw(db).?.db.deleteObject(deleted_id);
+    try databaseHandleRaw(db).?.db.createVectorCollection("vectors", .{ .dimensions = 2, .metric = .l2 });
+    try databaseHandleRaw(db).?.db.putVector("vectors", "v1", .{ .f32 = &.{ 1.0, 2.0 } });
 
     try std.testing.expectEqual(zova_status.OK, zova_database_vacuum(&.{ .db = db }));
 
-    try std.testing.expect(try databaseHandle(db).?.db.hasObject(object_id));
-    try std.testing.expect(!try databaseHandle(db).?.db.hasObject(deleted_id));
-    try std.testing.expect(try databaseHandle(db).?.db.hasVector("vectors", "v1"));
+    try std.testing.expect(try databaseHandleRaw(db).?.db.hasObject(object_id));
+    try std.testing.expect(!try databaseHandleRaw(db).?.db.hasObject(deleted_id));
+    try std.testing.expect(try databaseHandleRaw(db).?.db.hasVector("vectors", "v1"));
     var count_stmt: ?*zova_statement = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_prepare(&.{ .db = db, .sql = "select count(*) from notes where body = 'commit'", .out_statement = &count_stmt }));
     defer _ = zova_statement_finalize(count_stmt);
@@ -3504,7 +3504,7 @@ test "c abi fresh builder loads predeclared tables fts graph payloads and vector
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{ .path = path, .out_db = &db, .out_error_message = null }));
     defer _ = zova_database_close(db);
-    const handle = databaseHandle(db).?;
+    const handle = databaseHandleRaw(db).?;
     try handle.db.exec("pragma cache_size=-4096");
 
     try std.testing.expectEqual(zova_status.OK, zova_database_begin(&.{ .db = db }));
@@ -3910,7 +3910,7 @@ test "c abi fresh builder retains full validation for unresolved deferred foreig
     try std.testing.expect(!diagnostics.validation_fast_path);
     try std.testing.expect(diagnostics.foreign_key_check_ran);
     try std.testing.expect(diagnostics.deferred_foreign_keys_pending);
-    const handle = databaseHandle(db).?;
+    const handle = databaseHandleRaw(db).?;
     var children = try handle.db.prepare("select count(*) from children");
     defer children.deinit();
     try std.testing.expectEqual(sqlite.Step.row, try children.step());

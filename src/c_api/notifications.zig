@@ -5,7 +5,7 @@ const std = @import("std");
 const SubscriptionHandle = @import("handles.zig").SubscriptionHandle;
 const allocator = @import("values.zig").allocator;
 const bytesConst = @import("values.zig").bytesConst;
-const databaseHandle = @import("handles.zig").databaseHandle;
+const lockDatabaseHandle = @import("handles.zig").lockDatabaseHandle;
 const failDb = @import("errors.zig").failDb;
 const fillNotification = @import("results.zig").fillNotification;
 const okDb = @import("errors.zig").okDb;
@@ -19,8 +19,7 @@ const zova_subscription_try_receive_request = @import("types.zig").zova_subscrip
 
 pub fn zova_database_notify(request: ?*const zova_database_notify_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const channel = req.channel orelse return failDb(handle, error.InvalidArgument);
     const payload = bytesConst(req.payload, req.payload_len) orelse return failDb(handle, error.InvalidArgument);
@@ -30,8 +29,7 @@ pub fn zova_database_notify(request: ?*const zova_database_notify_request) callc
 
 pub fn zova_database_listen(request: ?*const zova_database_listen_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const channel = req.channel orelse return failDb(handle, error.InvalidArgument);
     const out = req.out_subscription orelse return failDb(handle, error.InvalidArgument);
