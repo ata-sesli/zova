@@ -7,6 +7,14 @@ const vector_impl = @import("vector.zig");
 const zova = @import("zova.zig");
 
 const Database = zova.Database;
+
+test "vector put batch is operation atomic" {
+    try @import("batch_atomicity_test_support.zig").check(.vector_put);
+}
+
+test "vector delete batch is operation atomic" {
+    try @import("batch_atomicity_test_support.zig").check(.vector_delete);
+}
 const Object = zova.Object;
 const ObjectChunk = zova.ObjectChunk;
 const ObjectChunkData = zova.ObjectChunkData;

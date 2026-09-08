@@ -8,6 +8,22 @@ const test_support = @import("zova_test_support.zig");
 
 const testingDbPath = test_support.testingDbPath;
 
+test "ordinary node put batch is operation atomic" {
+    try @import("batch_atomicity_test_support.zig").check(.node_put);
+}
+
+test "ordinary node delete batch is operation atomic" {
+    try @import("batch_atomicity_test_support.zig").check(.node_delete);
+}
+
+test "ordinary edge put batch is operation atomic" {
+    try @import("batch_atomicity_test_support.zig").check(.edge_put);
+}
+
+test "ordinary edge delete batch is operation atomic" {
+    try @import("batch_atomicity_test_support.zig").check(.edge_delete);
+}
+
 fn checkLimitedWalkAllocations(allocator: std.mem.Allocator, db: *zova.Database) !void {
     var walk = try db.graphWalkDirection(allocator, .{
         .graph_name = "keys",
