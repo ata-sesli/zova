@@ -1,6 +1,7 @@
 //! Native vector storage and exact search implementation.
 
 const std = @import("std");
+const builtin = @import("builtin");
 pub const sqlite = @import("sqlite.zig");
 const zova_error = @import("zova_error.zig");
 
@@ -1309,10 +1310,13 @@ pub const Database = struct {
         defer scratch.deinit(std.heap.c_allocator);
 
         for (vectors, 0..) |vector, index| {
-            const encoded = switch (vector.values) {
-                .i8 => |values| std.mem.sliceAsBytes(values),
-                else => try encodeValuesLeInto(&scratch, vector.values),
-            };
+            // On little-endian hosts the stored little-endian bytes equal the
+            // in-memory bytes, so the validated caller values are borrowed
+            // directly; the portable encoder is the big-endian fallback. The
+            // borrowed bytes stay valid through step plus reset/clear below
+            // and are never mutated.
+            const encoded = nativeEndianBytesOrNull(vector.values) orelse
+                try encodeValuesLeInto(&scratch, vector.values);
             // Batch callers supply norms computed during validation; the
             // single-vector caller has no precomputed norm and computes one
             // here. Neither path accumulates a norm twice.
@@ -1592,7 +1596,22 @@ fn encodeValuesLe(allocator: std.mem.Allocator, values: VectorValuesConst) Error
     };
 }
 
-fn encodeValuesLeInto(scratch: *std.ArrayList(u8), values: VectorValuesConst) Error![]const u8 {
+/// Native-endian byte representation of vector values, when the stored
+/// little-endian encoding is byte-identical to the in-memory representation.
+///
+/// f32 and f16 (transported as u16 bit patterns) are byte-identical on
+/// little-endian hosts. i8 is byte-identical everywhere. Returns null on
+/// big-endian hosts; callers fall back to `encodeValuesLeInto`.
+fn nativeEndianBytesOrNull(values: VectorValuesConst) ?[]const u8 {
+    if (builtin.cpu.arch.endian() != .little) return null;
+    return switch (values) {
+        .f32 => |typed| std.mem.sliceAsBytes(typed),
+        .f16 => |typed| std.mem.sliceAsBytes(typed),
+        .i8 => |typed| std.mem.sliceAsBytes(typed),
+    };
+}
+
+pub fn encodeValuesLeInto(scratch: *std.ArrayList(u8), values: VectorValuesConst) Error![]const u8 {
     const byte_len = switch (values) {
         .f32 => |typed| typed.len * @sizeOf(f32),
         .f16 => |typed| typed.len * @sizeOf(u16),

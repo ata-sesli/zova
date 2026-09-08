@@ -1709,3 +1709,165 @@ test "putVectors inside caller transactions rolls back cleanly on failure" {
     try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
     try std.testing.expectApproxEqAbs(@as(f64, 5.0), stmt.columnDouble(0), 0.000001);
 }
+
+test "f32 values are stored byte-for-byte including signed zero and extremes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-f32-bytes.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.createVectorCollection("f32s", .{ .dimensions = 5, .metric = .l2 });
+    const values = [_]f32{
+        0.0,
+        -0.0, // signed zero must survive
+        std.math.floatMin(f32), // smallest normal
+        std.math.floatMax(f32), // finite extreme
+        1.0e-40, // subnormal f32
+    };
+    try db.putVector("f32s", "bits", .{ .f32 = &values });
+
+    var stmt = try db.prepare(
+        \\select "values" from _zova_vectors v
+        \\join _zova_vector_collections c on c.collection_key = v.collection_key
+        \\where c.name = 'f32s' and v.vector_id = 'bits'
+    );
+    defer stmt.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+    const stored = stmt.columnBlob(0);
+    try std.testing.expectEqual(@as(usize, 20), stored.len);
+    for (values, 0..) |value, index| {
+        const stored_bits = std.mem.readInt(u32, stored[index * 4 ..][0..4], .little);
+        try std.testing.expectEqual(@as(u32, @bitCast(value)), stored_bits);
+    }
+
+    // Read parity: values round-trip exactly, including signed zero.
+    var vector = try db.getVector(std.testing.allocator, "f32s", "bits");
+    defer vector.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(f32, &values, vector.values.f32);
+    try std.testing.expect(std.math.signbit(vector.values.f32[0]) == false);
+    try std.testing.expect(std.math.signbit(vector.values.f32[1]) == true);
+}
+
+test "f16 bit patterns are stored byte-for-byte including subnormals and invalid rejection" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-f16-bytes.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.createVectorCollection("halves", .{ .dimensions = 5, .metric = .l2, .element_type = .f16 });
+    const bits = [_]u16{
+        0x0000, // +0.0
+        0x8000, // -0.0
+        0x03ff, // largest subnormal
+        0x0400, // smallest normal
+        0x7bff, // finite max
+    };
+    try db.putVector("halves", "bits", .{ .f16 = &bits });
+
+    var stmt = try db.prepare(
+        \\select "values" from _zova_vectors v
+        \\join _zova_vector_collections c on c.collection_key = v.collection_key
+        \\where c.name = 'halves' and v.vector_id = 'bits'
+    );
+    defer stmt.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+    const stored = stmt.columnBlob(0);
+    try std.testing.expectEqual(@as(usize, 10), stored.len);
+    for (bits, 0..) |value, index| {
+        const stored_bits = std.mem.readInt(u16, stored[index * 2 ..][0..2], .little);
+        try std.testing.expectEqual(value, stored_bits);
+    }
+
+    // NaN/inf f16 bit patterns are rejected before storage.
+    try std.testing.expectError(error.VectorInvalid, db.putVector("halves", "nan", .{ .f16 = &.{ 0x7e00, 0x0000, 0x0000, 0x0000, 0x0000 } }));
+    try std.testing.expectError(error.VectorInvalid, db.putVector("halves", "inf", .{ .f16 = &.{ 0x7c00, 0x0000, 0x0000, 0x0000, 0x0000 } }));
+    try std.testing.expect(!try db.hasVector("halves", "nan"));
+
+    // Search parity after bit-exact round-trip.
+    const results = try db.searchVectors(std.testing.allocator, "halves", .{ .f16 = &bits }, 1);
+    var results_owned = results;
+    defer results_owned.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), results_owned.items.len);
+    try std.testing.expectEqualStrings("bits", results_owned.items[0].id);
+}
+
+test "encodeValuesLeInto produces expected little-endian bytes for all element types" {
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(std.heap.c_allocator);
+
+    const f32_values = [_]f32{ 1.0, -2.5, 0.0 };
+    const f32_expected = [_]u8{
+        0x00, 0x00, 0x80, 0x3f, // 1.0
+        0x00, 0x00, 0x20, 0xc0, // -2.5
+        0x00, 0x00, 0x00, 0x00, // 0.0
+    };
+    const f32_out = try vector_impl.encodeValuesLeInto(&scratch, .{ .f32 = &f32_values });
+    try std.testing.expectEqualSlices(u8, &f32_expected, f32_out);
+
+    const f16_values = [_]u16{ 0x3c00, 0xc040, 0x0000 };
+    const f16_expected = [_]u8{
+        0x00, 0x3c, // 0x3c00
+        0x40, 0xc0, // 0xc040
+        0x00, 0x00, // 0x0000
+    };
+    const f16_out = try vector_impl.encodeValuesLeInto(&scratch, .{ .f16 = &f16_values });
+    try std.testing.expectEqualSlices(u8, &f16_expected, f16_out);
+
+    const i8_values = [_]i8{ -1, 0, 127, -128 };
+    const i8_expected = [_]u8{ 0xff, 0x00, 0x7f, 0x80 };
+    const i8_out = try vector_impl.encodeValuesLeInto(&scratch, .{ .i8 = &i8_values });
+    try std.testing.expectEqualSlices(u8, &i8_expected, i8_out);
+}
+
+test "repeated puts reuse and mutate caller buffer between binds with bit-exact storage" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-borrowed-buffer.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.createVectorCollection("f32s", .{ .dimensions = 2, .metric = .l2 });
+    var buffer = [_]f32{ 1.5, -2.5 };
+
+    const first_id_bits = [_]u32{ @bitCast(@as(f32, 1.5)), @bitCast(@as(f32, -2.5)) };
+    _ = first_id_bits;
+    try db.putVector("f32s", "v1", .{ .f32 = &buffer });
+
+    // Mutate the same buffer in place and re-put under a second id; the first
+    // stored row must keep its original bytes.
+    buffer[0] = 3.5;
+    buffer[1] = -4.5;
+    try db.putVector("f32s", "v2", .{ .f32 = &buffer });
+
+    var stmt = try db.prepare(
+        \\select v.vector_id, v."values" from _zova_vectors v
+        \\join _zova_vector_collections c on c.collection_key = v.collection_key
+        \\where c.name = 'f32s' order by v.vector_id
+    );
+    defer stmt.deinit();
+
+    try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+    try std.testing.expectEqualStrings("v1", stmt.columnText(0));
+    const stored_v1 = stmt.columnBlob(1);
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 1.5))), std.mem.readInt(u32, stored_v1[0..4], .little));
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, -2.5))), std.mem.readInt(u32, stored_v1[4..8], .little));
+
+    try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+    try std.testing.expectEqualStrings("v2", stmt.columnText(0));
+    const stored_v2 = stmt.columnBlob(1);
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 3.5))), std.mem.readInt(u32, stored_v2[0..4], .little));
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, -4.5))), std.mem.readInt(u32, stored_v2[4..8], .little));
+
+    try std.testing.expectEqual(sqlite.Step.done, try stmt.step());
+}
