@@ -408,6 +408,18 @@ pub fn build(b: *std.Build) void {
         sqlite_lib,
     );
 
+    const crash_module = b.createModule(.{
+        .root_source_file = b.path("src/migration_crash_driver.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    crash_module.addOptions("zova_build_options", zova_build_options);
+    addSqlite(crash_module, b, sqlite_lib);
+    const crash_driver = b.addExecutable(.{ .name = "migration-crash-driver", .root_module = crash_module });
+    const crash_tests = b.addSystemCommand(&.{ if (@import("builtin").os.tag == .windows) "python" else "python3", "scripts/test-migration-recovery.py" });
+    crash_tests.addArtifactArg(crash_driver);
+    migration_test_step.dependOn(&crash_tests.step);
+
     inline for (.{
         core_test_step,
         object_test_step,

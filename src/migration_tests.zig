@@ -954,6 +954,7 @@ test "migrateDatabase copies and migrates the full bound-store set" {
     var iterator = dir.iterate();
     while (try iterator.next(io())) |entry| {
         try std.testing.expect(std.mem.indexOf(u8, entry.name, ".migrate-") == null);
+        try std.testing.expect(std.mem.indexOf(u8, entry.name, ".migration-recovery") == null);
     }
 }
 
@@ -1027,6 +1028,7 @@ test "migrateDatabase cleans every created file when migration fails mid-flight"
     var iterator = dir.iterate();
     while (try iterator.next(io())) |entry| {
         try std.testing.expect(std.mem.indexOf(u8, entry.name, ".migrate-") == null);
+        try std.testing.expect(std.mem.indexOf(u8, entry.name, ".migration-recovery") == null);
     }
 }
 
@@ -1044,6 +1046,7 @@ test "migrateDatabase cleans up after a fault at every phase boundary" {
     defer tmp.cleanup();
 
     const points = [_]zova.MigrateFaultPoint{
+        .after_destination_reservation,
         .after_main_copy,
         .after_main_migration,
         .after_store_copy,

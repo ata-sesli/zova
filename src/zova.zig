@@ -594,6 +594,7 @@ pub fn migrateDatabaseWithExtensions(
 /// migration safety model. Production callers always pass `null`. Module-pub
 /// for the test suite but deliberately absent from the package exports.
 pub const MigrateFaultPoint = enum {
+    after_destination_reservation,
     after_main_copy,
     after_main_migration,
     after_store_copy,
@@ -601,6 +602,7 @@ pub const MigrateFaultPoint = enum {
     after_validation,
     after_store_publication,
     before_main_publication,
+    after_main_publication,
 };
 
 pub const MigrateFaultHook = *const fn (point: MigrateFaultPoint) Error!void;
@@ -641,17 +643,14 @@ pub fn migrateDatabaseInternal(
     var committed = false;
     var main_final: ?[:0]u8 = null;
     var main_staging: ?[:0]u8 = null;
-    var main_reserved = false;
+    var publication: ?@import("database/migration_publication.zig").Publication = null;
+    defer if (publication) |*p| p.deinit();
     errdefer if (!committed) {
         if (main_staging) |staging| {
-            deleteDestinationFile(staging);
             allocator.free(staging);
             main_staging = null;
         }
-        if (main_reserved) deleteDestinationFile(main_final.?);
         for (bindings[0..binding_count]) |*binding| {
-            if (binding.staged) deleteDestinationFile(binding.staging_path);
-            if (binding.reserved) deleteDestinationFile(binding.final_path);
             binding.deinit(allocator);
         }
         if (main_final) |final| allocator.free(final);
@@ -675,15 +674,16 @@ pub fn migrateDatabaseInternal(
         try collectMigrationBindings(allocator, source_path, &bindings, &binding_count);
 
         main_final = try allocator.dupeZ(u8, destination_path);
-        try reserveDestinationZovaFile(main_final.?);
-        main_reserved = true;
-        for (bindings[0..binding_count]) |*binding| {
+        try ensureDestinationZovaPathAvailable(main_final.?);
+        publication = try @import("database/migration_publication.zig").Publication.init(allocator, destination_path);
+        try publication.?.reserve(0, main_final.?);
+        for (bindings[0..binding_count], 1..) |*binding, index| {
             const sibling = try migrationSiblingPath(allocator, destination_path, binding.suffix);
             allocator.free(binding.final_path);
             binding.final_path = sibling;
-            try reserveDestinationZovaFile(binding.final_path);
-            binding.reserved = true;
+            try publication.?.reserve(index, binding.final_path);
         }
+        if (fault_hook) |hook| try hook(.after_destination_reservation);
 
         // Preflight the whole set under the lock: exact source schema plus
         // every recorded store's identity, role, epoch, schema, and
@@ -701,11 +701,10 @@ pub fn migrateDatabaseInternal(
             try validateMigrationStoreBinding(binding, source_format_text);
         }
 
-        // Stage, copy-forward, and transform every member. Staging files are
-        // exclusively created before use so a name collision can never open
-        // or delete a caller's file. Copy and migration are separate phases
+        // Stage, copy-forward, and transform every member in the exclusively
+        // owned recovery directory. Copy and migration are separate phases
         // with their own fault boundaries.
-        main_staging = try reserveMigrationStagingPath(allocator, main_final.?);
+        main_staging = try publication.?.stage(0);
         {
             var main_copy_source = try sqlite.Database.openWithFlags(source_path, .read_only);
             defer main_copy_source.deinit();
@@ -718,8 +717,8 @@ pub fn migrateDatabaseInternal(
             try runMigrationsToCurrent(&staged);
             if (fault_hook) |hook| try hook(.after_main_migration);
         }
-        for (bindings[0..binding_count]) |*binding| {
-            const staged_path = try reserveMigrationStagingPath(allocator, binding.final_path);
+        for (bindings[0..binding_count], 1..) |*binding, index| {
+            const staged_path = try publication.?.stage(index);
             allocator.free(binding.staging_path);
             binding.staging_path = staged_path;
             binding.staged = true;
@@ -745,20 +744,21 @@ pub fn migrateDatabaseInternal(
 
     // The source lock was released when staging completed. Publish stores
     // first and the main database last as the commit marker.
-    const cwd = std.Io.Dir.cwd();
-    for (bindings[0..binding_count]) |*binding| {
-        cwd.rename(binding.staging_path, cwd, binding.final_path, defaultIo()) catch return error.CantOpen;
+    for (0..binding_count) |index| {
+        try publication.?.publish(index + 1);
         if (fault_hook) |hook| try hook(.after_store_publication);
     }
 
     if (fault_hook) |hook| try hook(.before_main_publication);
-    cwd.rename(main_staging.?, cwd, main_final.?, defaultIo()) catch return error.CantOpen;
+    try publication.?.publish(0);
+    publication.?.committed = true;
 
     committed = true;
     allocator.free(main_final.?);
     if (main_staging) |staging| allocator.free(staging);
     for (bindings[0..binding_count]) |*binding| binding.deinit(allocator);
     binding_count = 0;
+    if (fault_hook) |hook| try hook(.after_main_publication);
 }
 
 /// One planned bound-store member of a migration set.
@@ -787,17 +787,6 @@ const rebindMigrationSet = @import("database/migration.zig").rebindMigrationSet;
 /// Derive a destination sibling name `<stem>.<suffix>.zova` from a
 /// destination whose name ends in `.zova`.
 const migrationSiblingPath = @import("database/migration.zig").migrationSiblingPath;
-
-/// Derive a unique hidden same-directory staging path for one final path.
-///
-/// Staging names keep the `.zova` extension so the staged set can be verified
-/// through the full open path before publication.
-/// Derive and exclusively create one staging file, retrying with fresh random
-/// names on collision so a pre-existing caller file can never be opened or
-/// deleted by this attempt.
-const reserveMigrationStagingPath = @import("database/migration.zig").reserveMigrationStagingPath;
-
-const migrationStagingPath = @import("database/migration.zig").migrationStagingPath;
 
 fn initNotifications(db: *sqlite.Database) Error!*notify_impl.Hub {
     const allocator = std.heap.c_allocator;
