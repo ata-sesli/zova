@@ -169,9 +169,9 @@ const bound_vector_store_role = @import("database/types.zig").bound_vector_store
 
 const bound_graph_store_role = @import("database/types.zig").bound_graph_store_role;
 
-const graph_keyed_batch_savepoint = @import("database/types.zig").graph_keyed_batch_savepoint;
+const batch_mutation_savepoint = @import("database/types.zig").batch_mutation_savepoint;
 
-const GraphKeyedMutationScope = @import("database/types.zig").GraphKeyedMutationScope;
+const BatchMutationScope = @import("database/types.zig").BatchMutationScope;
 
 const bound_object_store_name = @import("database/types.zig").bound_object_store_name;
 
@@ -1288,28 +1288,28 @@ pub const Database = struct {
         committed = true;
     }
 
-    /// Upsert graph nodes in one transaction unless the caller owns one.
+    /// Upsert graph nodes atomically, using a savepoint in a caller transaction.
     pub fn putGraphNodes(self: *Database, inputs: []const GraphNodeInput) Error!void {
-        const owns_transaction = try self.beginGraphBatchMutation();
+        const scope = try self.beginBatchMutation();
         var committed = false;
-        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) self.rollbackBatchMutation(scope) catch {};
         var graphs = self.graphDatabase();
         try graphs.putGraphNodes(inputs);
         if (self.bound_graph_store != null and inputs.len != 0) try incrementBoundGraphEpoch(&self.sqlite_db);
-        try self.finishBoundGraphMutation(owns_transaction);
+        try self.finishBatchMutation(scope);
         committed = true;
     }
 
     /// Upsert graph nodes atomically and return aligned opaque row keys.
     pub fn putGraphNodesKeyed(self: *Database, inputs: []const GraphNodeInput, out_keys: []i64) Error!void {
         if (out_keys.len != inputs.len) return error.InvalidArgument;
-        const scope = try self.beginGraphKeyedMutation();
+        const scope = try self.beginBatchMutation();
         var finished = false;
-        errdefer if (!finished) self.rollbackGraphKeyedMutation(scope) catch {};
+        errdefer if (!finished) self.rollbackBatchMutation(scope) catch {};
         var graphs = self.graphDatabase();
         try graphs.putGraphNodesKeyed(inputs, out_keys);
         if (self.bound_graph_store != null and inputs.len != 0) try incrementBoundGraphEpoch(&self.sqlite_db);
-        try self.finishGraphKeyedMutation(scope);
+        try self.finishBatchMutation(scope);
         finished = true;
     }
 
@@ -1340,13 +1340,13 @@ pub const Database = struct {
         defer std.heap.c_allocator.free(temporary_node_keys);
         const temporary_edge_keys = try std.heap.c_allocator.alloc(i64, edges.len);
         defer std.heap.c_allocator.free(temporary_edge_keys);
-        const scope = try self.beginGraphKeyedMutation();
+        const scope = try self.beginBatchMutation();
         var finished = false;
-        errdefer if (!finished) self.rollbackGraphKeyedMutation(scope) catch {};
+        errdefer if (!finished) self.rollbackBatchMutation(scope) catch {};
         var graphs = self.graphDatabase();
         try graphs.buildFreshGraphKeyedProfiled(graph_name, nodes, edges, temporary_node_keys, temporary_edge_keys, profile);
         if (self.bound_graph_store != null) try incrementBoundGraphEpoch(&self.sqlite_db);
-        try self.finishGraphKeyedMutation(scope);
+        try self.finishBatchMutation(scope);
         finished = true;
         @memcpy(out_node_keys, temporary_node_keys);
         @memcpy(out_edge_keys, temporary_edge_keys);
@@ -1379,13 +1379,13 @@ pub const Database = struct {
         defer std.heap.c_allocator.free(temporary_node_keys);
         const temporary_edge_keys = try std.heap.c_allocator.alloc(i64, edges.len);
         defer std.heap.c_allocator.free(temporary_edge_keys);
-        const scope = try self.beginGraphKeyedMutation();
+        const scope = try self.beginBatchMutation();
         var finished = false;
-        errdefer if (!finished) self.rollbackGraphKeyedMutation(scope) catch {};
+        errdefer if (!finished) self.rollbackBatchMutation(scope) catch {};
         var graphs = self.graphDatabase();
         try graphs.buildFreshGraphPreparedKeyedProfiled(graph_name, nodes, edges, temporary_node_keys, temporary_edge_keys, profile);
         if (self.bound_graph_store != null) try incrementBoundGraphEpoch(&self.sqlite_db);
-        try self.finishGraphKeyedMutation(scope);
+        try self.finishBatchMutation(scope);
         finished = true;
         @memcpy(out_node_keys, temporary_node_keys);
         @memcpy(out_edge_keys, temporary_edge_keys);
@@ -1415,15 +1415,15 @@ pub const Database = struct {
         committed = true;
     }
 
-    /// Delete graph nodes and all incident edges in one transaction unless the caller owns one.
+    /// Delete graph nodes and incident edges atomically, including in caller transactions.
     pub fn deleteGraphNodes(self: *Database, graph_name: []const u8, node_ids: []const []const u8) Error!void {
-        const owns_transaction = try self.beginGraphBatchMutation();
+        const scope = try self.beginBatchMutation();
         var committed = false;
-        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) self.rollbackBatchMutation(scope) catch {};
         var graphs = self.graphDatabase();
         try graphs.deleteGraphNodes(graph_name, node_ids);
         if (self.bound_graph_store != null and node_ids.len != 0) try incrementBoundGraphEpoch(&self.sqlite_db);
-        try self.finishBoundGraphMutation(owns_transaction);
+        try self.finishBatchMutation(scope);
         committed = true;
     }
 
@@ -1440,16 +1440,16 @@ pub const Database = struct {
         committed = true;
     }
 
-    /// Insert graph edges in one transaction unless the caller owns one.
+    /// Insert graph edges atomically, using a savepoint in a caller transaction.
     pub fn putGraphEdges(self: *Database, inputs: []const GraphEdgeInput) Error!void {
         self.invalidateActiveGraphEdgeTypes();
-        const owns_transaction = try self.beginGraphBatchMutation();
+        const scope = try self.beginBatchMutation();
         var committed = false;
-        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) self.rollbackBatchMutation(scope) catch {};
         var graphs = self.graphDatabase();
         try graphs.putGraphEdges(inputs);
         if (self.bound_graph_store != null and inputs.len != 0) try incrementBoundGraphEpoch(&self.sqlite_db);
-        try self.finishBoundGraphMutation(owns_transaction);
+        try self.finishBatchMutation(scope);
         committed = true;
     }
 
@@ -1457,13 +1457,13 @@ pub const Database = struct {
     pub fn putGraphEdgesKeyed(self: *Database, inputs: []const GraphEdgeInput, out_keys: []i64) Error!void {
         self.invalidateActiveGraphEdgeTypes();
         if (out_keys.len != inputs.len) return error.InvalidArgument;
-        const scope = try self.beginGraphKeyedMutation();
+        const scope = try self.beginBatchMutation();
         var finished = false;
-        errdefer if (!finished) self.rollbackGraphKeyedMutation(scope) catch {};
+        errdefer if (!finished) self.rollbackBatchMutation(scope) catch {};
         var graphs = self.graphDatabase();
         try graphs.putGraphEdgesKeyed(inputs, out_keys);
         if (self.bound_graph_store != null and inputs.len != 0) try incrementBoundGraphEpoch(&self.sqlite_db);
-        try self.finishGraphKeyedMutation(scope);
+        try self.finishBatchMutation(scope);
         finished = true;
     }
 
@@ -1473,13 +1473,13 @@ pub const Database = struct {
     }
 
     pub fn replaceGraphEdgePayloads(self: *Database, graph_name: []const u8, replacements: []const GraphEdgePayloadReplacement) Error!void {
-        const scope = try self.beginGraphKeyedMutation();
+        const scope = try self.beginBatchMutation();
         var finished = false;
-        errdefer if (!finished) self.rollbackGraphKeyedMutation(scope) catch {};
+        errdefer if (!finished) self.rollbackBatchMutation(scope) catch {};
         var graphs = self.graphDatabase();
         try graphs.replaceGraphEdgePayloads(graph_name, replacements);
         if (self.bound_graph_store != null and replacements.len != 0) try incrementBoundGraphEpoch(&self.sqlite_db);
-        try self.finishGraphKeyedMutation(scope);
+        try self.finishBatchMutation(scope);
         finished = true;
     }
 
@@ -1507,16 +1507,16 @@ pub const Database = struct {
         committed = true;
     }
 
-    /// Delete graph edges in one transaction unless the caller owns one.
+    /// Delete graph edges atomically, using a savepoint in a caller transaction.
     /// Missing endpoints and edges are ignored for replay safety.
     pub fn deleteGraphEdges(self: *Database, inputs: []const GraphEdgeInput) Error!void {
-        const owns_transaction = try self.beginGraphBatchMutation();
+        const scope = try self.beginBatchMutation();
         var committed = false;
-        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) self.rollbackBatchMutation(scope) catch {};
         var graphs = self.graphDatabase();
         try graphs.deleteGraphEdges(inputs);
         if (self.bound_graph_store != null and inputs.len != 0) try incrementBoundGraphEpoch(&self.sqlite_db);
-        try self.finishBoundGraphMutation(owns_transaction);
+        try self.finishBatchMutation(scope);
         committed = true;
     }
 
@@ -2147,20 +2147,20 @@ pub const Database = struct {
         committed = true;
     }
 
-    /// Store or replace multiple vector rows in a collection.
+    /// Store or replace vector rows atomically, including in caller transactions.
     pub fn putVectors(
         self: *Database,
         collection_name: []const u8,
         inputs: []const VectorInput,
     ) Error!void {
-        const owns_transaction = try self.beginBoundVectorMutation();
+        const scope = try self.beginBatchMutation();
         var committed = false;
-        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) self.rollbackBatchMutation(scope) catch {};
 
         var vectors = self.vectorDatabase();
         try vectors.putVectors(collection_name, inputs);
         if (self.bound_vector_store != null and inputs.len != 0) try incrementBoundVectorEpoch(&self.sqlite_db);
-        try self.finishBoundVectorMutation(owns_transaction);
+        try self.finishBatchMutation(scope);
         committed = true;
     }
 
@@ -2202,21 +2202,21 @@ pub const Database = struct {
         committed = true;
     }
 
-    /// Delete multiple vector rows atomically unless the caller owns the
-    /// active transaction. Missing and duplicate ids are ignored.
+    /// Delete vector rows atomically, including in caller transactions.
+    /// Missing and duplicate ids are ignored.
     pub fn deleteVectors(
         self: *Database,
         collection_name: []const u8,
         vector_ids: []const []const u8,
     ) Error!void {
-        const owns_transaction = try self.beginBoundVectorMutation();
+        const scope = try self.beginBatchMutation();
         var committed = false;
-        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) self.rollbackBatchMutation(scope) catch {};
 
         var vectors = self.vectorDatabase();
         try vectors.deleteVectors(collection_name, vector_ids);
         if (self.bound_vector_store != null and vector_ids.len != 0) try incrementBoundVectorEpoch(&self.sqlite_db);
-        try self.finishBoundVectorMutation(owns_transaction);
+        try self.finishBatchMutation(scope);
         committed = true;
     }
 
@@ -2641,34 +2641,28 @@ pub const Database = struct {
         return true;
     }
 
-    fn beginGraphBatchMutation(self: *Database) Error!bool {
-        if (hasActiveTransaction(&self.sqlite_db)) return false;
-        try self.sqlite_db.beginImmediate();
-        return true;
-    }
-
-    fn beginGraphKeyedMutation(self: *Database) Error!GraphKeyedMutationScope {
+    fn beginBatchMutation(self: *Database) Error!BatchMutationScope {
         if (hasActiveTransaction(&self.sqlite_db)) {
-            try self.sqlite_db.savepoint(graph_keyed_batch_savepoint);
+            try self.sqlite_db.savepoint(batch_mutation_savepoint);
             return .savepoint;
         }
         try self.sqlite_db.beginImmediate();
         return .transaction;
     }
 
-    fn finishGraphKeyedMutation(self: *Database, scope: GraphKeyedMutationScope) Error!void {
+    fn finishBatchMutation(self: *Database, scope: BatchMutationScope) Error!void {
         switch (scope) {
             .transaction => try self.sqlite_db.commit(),
-            .savepoint => try self.sqlite_db.releaseSavepoint(graph_keyed_batch_savepoint),
+            .savepoint => try self.sqlite_db.releaseSavepoint(batch_mutation_savepoint),
         }
     }
 
-    fn rollbackGraphKeyedMutation(self: *Database, scope: GraphKeyedMutationScope) Error!void {
+    fn rollbackBatchMutation(self: *Database, scope: BatchMutationScope) Error!void {
         switch (scope) {
             .transaction => try self.sqlite_db.rollback(),
             .savepoint => {
-                try self.sqlite_db.rollbackToSavepoint(graph_keyed_batch_savepoint);
-                try self.sqlite_db.releaseSavepoint(graph_keyed_batch_savepoint);
+                try self.sqlite_db.rollbackToSavepoint(batch_mutation_savepoint);
+                try self.sqlite_db.releaseSavepoint(batch_mutation_savepoint);
             },
         }
     }

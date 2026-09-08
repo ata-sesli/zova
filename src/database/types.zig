@@ -71,9 +71,9 @@ pub const bound_vector_store_role = "vector_store";
 
 pub const bound_graph_store_role = "graph_store";
 
-pub const graph_keyed_batch_savepoint = "zova_graph_keyed_batch";
+pub const batch_mutation_savepoint = "zova_batch_mutation";
 
-pub const GraphKeyedMutationScope = enum { transaction, savepoint };
+pub const BatchMutationScope = enum { transaction, savepoint };
 
 const bound_object_store_name = "default";
 
