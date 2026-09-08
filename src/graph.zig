@@ -397,6 +397,9 @@ pub const FreshGraphEdgeInput = struct {
     payload: []const u8 = &.{},
 };
 
+/// Elapsed stage milliseconds and named execution counters; stages need not
+/// partition total wall time. Zero may mean skipped work or timer resolution.
+/// Public profiling semantics are documented in API_STABILITY.md.
 pub const FreshGraphBuildProfile = struct {
     validation_ms: f64 = 0,
     key_generation_ms: f64 = 0,
@@ -632,6 +635,9 @@ pub const GraphWalkDirectionOptions = struct {
 };
 
 /// Internal diagnostics for one graph walk's reusable adjacency scan.
+/// Per-walk stage metrics. Preparation includes setup/constant binding;
+/// execution counters may decrease when work is reused. Zero does not encode
+/// availability. See API_STABILITY.md for the public profiling contract.
 pub const GraphWalkScanProfile = struct {
     root_lookup_ms: f64 = 0,
     adjacency_prepare_ms: f64 = 0,

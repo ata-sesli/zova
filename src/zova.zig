@@ -835,9 +835,13 @@ const applyCreateOptions = @import("database/lifecycle.zig").applyCreateOptions;
 /// Owns one initialized `.zova` database.
 ///
 /// A Zova database is physically SQLite, but it must use the `.zova` extension
-/// and contain valid `_zova_meta` metadata before `open` accepts it. The
-/// wrapped SQLite connection is kept public for now as a low-level escape hatch
-/// consistent with the v0 SQLite wrapper.
+/// and contain valid `_zova_meta` metadata before `open` accepts it.
+/// Use documented methods; accessible fields and this struct's layout are
+/// implementation details, not stable application APIs. Do not mutate caches,
+/// attachment state, notifications, or registry storage directly.
+/// The accessible SQLite connection is an advanced escape hatch: do not close
+/// or replace it, modify private storage, or bypass Zova bookkeeping. See
+/// API_STABILITY.md for the raw-access and maintenance-mode boundaries.
 pub const Database = struct {
     sqlite_db: sqlite.Database,
     notifications: *notify_impl.Hub,
@@ -973,6 +977,7 @@ pub const Database = struct {
     /// not require installed extension code, run extension checks, or register
     /// extension SQL hooks. It is intended for `doctor`, `check --deep`, and
     /// `zova extension list/info` fallback paths.
+    /// Maintenance-only mode; do not assume normal extension initialization.
     pub fn openForExtensionInspection(path: [:0]const u8, options: OpenOptions) Error!Database {
         return openForExtensionInspectionWithExtensions(path, options, ExtensionRegistry.empty());
     }
@@ -987,6 +992,7 @@ pub const Database = struct {
 
     /// Open a database for diagnostic extension metadata inspection with
     /// process-registered extension code available to explicit checks.
+    /// Forces read-only inspection; normal extension hooks are not run.
     pub fn openForExtensionInspectionWithExtensions(path: [:0]const u8, options: OpenOptions, registry: ExtensionRegistry) Error!Database {
         return openInternal(path, .{
             .read_only = true,
@@ -1000,6 +1006,7 @@ pub const Database = struct {
     /// store path is no longer available. Object/vector/graph APIs on the returned
     /// handle use the main file only; normal application code should use `open`
     /// or `openWithOptions`.
+    /// After repair, close and reopen normally to restore bound-store routing.
     pub fn openForObjectStoreManagement(path: [:0]const u8, options: OpenOptions) Error!Database {
         return openForObjectStoreManagementWithExtensions(path, options, bundledExtensionRegistry());
     }
@@ -1087,6 +1094,7 @@ pub const Database = struct {
 
     /// Return the first extension-private SQLite object with no installed
     /// owner, if one exists.
+    /// Maintenance diagnostic, not an application-data enumeration API.
     pub fn unknownExtensionStorage(self: *Database, allocator: std.mem.Allocator) Error!?[]u8 {
         return extension_impl.findUnknownPrivateStorage(allocator, &self.sqlite_db);
     }
@@ -1102,6 +1110,7 @@ pub const Database = struct {
     }
 
     /// Register SQL needed by one installed extension before diagnostic checks.
+    /// Does not convert an inspection handle into a normally opened connection.
     pub fn registerExtensionSqlForDiagnostics(self: *Database, name: []const u8) Error!void {
         try extension_impl.registerSqlForInstalledExtension(&self.sqlite_db, self.extension_registry, name);
     }

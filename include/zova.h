@@ -498,6 +498,12 @@ typedef struct zova_graph_edge_payload_result {
 } zova_graph_edge_payload_result;
 typedef struct zova_graph_edge_payload_results { zova_graph_edge_payload_result *items; size_t len; } zova_graph_edge_payload_results;
 
+/* Public diagnostic ABI: elapsed *_ms values retain their named scopes/units.
+ * Graph subphases overlap graph totals; do not sum every timing field.
+ * A skipped stage contributes zero; timer resolution can also produce zero.
+ * There is no general unavailable/cache-hit marker. Interpret complete samples
+ * only after success. Preserve this layout; new incompatible measurements need
+ * an additive interface. See API_STABILITY.md, Public profiling contracts. */
 typedef struct zova_fresh_build_profile {
     double validation_ms;
     double table_load_ms;
@@ -577,7 +583,13 @@ typedef struct zova_graph_walk_results {
     size_t len;
 } zova_graph_walk_results;
 
-/* Diagnostic stages and counters for one profiled directional graph walk. */
+/* Diagnostic stages and counters for one profiled directional graph walk.
+ * Timings are elapsed milliseconds. Counters count named execution events,
+ * not estimates. adjacency_prepare_ms includes setup/constant binding;
+ * bfs_bookkeeping_allocation_ms includes residual traversal and cleanup.
+ * Zero is not an unavailable/cache-hit marker (skipped work and timer rounding
+ * can both produce zero). Complete samples require success. This public layout
+ * and field meanings remain ABI contracts; see API_STABILITY.md. */
 typedef struct zova_graph_walk_profile {
     double mutex_wait_ms;
     double root_lookup_ms;

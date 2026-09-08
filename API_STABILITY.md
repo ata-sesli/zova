@@ -128,10 +128,82 @@ They do not add Windows/generated-C dynamic loading or high-level binding
 wrappers. The [extension capability matrix](docs/extensions.md#availability-and-binding-matrix)
 is authoritative for these distinctions.
 
+## Zig implementation state and raw SQLite access
+
+The supported Zig application surface consists of documented operations and
+documented input/result types. Accessibility of a field in the exported
+`Database` struct does not make that field a supported application interface.
+Its field layout, cache state, notification hub, bound-store bookkeeping, and
+registry storage are implementation details. Applications must use the methods
+rather than construct, replace, or mutate that state directly. Internal fields
+may change as implementation evolves; this is a documentation boundary, not
+an assertion that Zig enforces field privacy.
+
+The currently accessible `sqlite_db` connection is an advanced escape hatch,
+not a promise to preserve the `Database` representation. Prefer Zova's `exec`,
+`prepare`, transaction helpers, and subsystem methods. Low-level access must
+not modify private storage, close or replace the connection, manage Zova's
+attachments, or bypass its notification/transaction bookkeeping. It does not
+inherit the C handle's serialization guarantees. This boundary does not remove
+the separately exported `sqlite` wrapper or change existing function signatures.
+
+## Maintenance connection modes
+
+Maintenance APIs remain available under their existing names. They are advanced
+operations with narrower usage contracts, not interchangeable alternatives to
+normal `open`/`openWithOptions`:
+
+| Operation | Intended use and restrictions |
+| --- | --- |
+| `openForExtensionInspection` / `openForExtensionInspectionWithExtensions` | Read-only inspection of core schema and installed extension metadata; installed extension code/checks/SQL hooks are not automatically required or run. Do not assume ordinary extension initialization occurred. |
+| `openForExtensionUpgradeWithExtensions` / C `zova_database_open_for_extension_upgrade` | Explicit extension maintenance without normal installed-hook initialization. Upgrade, close, and reopen normally before application use; no implicit upgrade occurs. |
+| `openForObjectStoreManagement` / `openForObjectStoreManagementWithExtensions` | Repair or replace bound-store metadata by opening only the main file. Object/vector/graph operations do not access the configured external stores through this handle. Close and reopen normally after maintenance. |
+| `unknownExtensionStorage` | Diagnose extension-private storage without a registered installed owner; not an application-data enumeration API. |
+| `registerExtensionSqlForDiagnostics` | Explicitly register the SQL facilities needed for extension diagnostics. This does not turn an inspection handle into a normally initialized application connection. |
+
+Use ordinary open methods for application CRUD. These restrictions document
+existing modes; they do not introduce new runtime access controls or rename APIs.
+
+## Public profiling contracts
+
+Public graph-walk and fresh-build profiling interfaces are distinct from
+private benchmark instrumentation. Their existing C symbols, request/result
+layouts, field types, units, and documented meanings remain compatibility
+commitments. Calling them diagnostic does not permit an ABI-breaking change.
+
+- Fields ending in `_ms` report elapsed milliseconds for their named scope,
+  not CPU time or a performance guarantee. Instrumentation affects execution.
+- Row/result/expansion counters count the named events. Bind/prepare/statement
+  counters describe actual execution work, not logical input cardinality; an
+  optimization may reduce them without changing query results.
+- A stage that is not executed contributes zero. A measured stage may also
+  report zero because of timer resolution. Zero alone is not a cache-hit flag.
+- Existing structures have no general availability flag. A new unavailable
+  measurement must not silently be encoded as zero, NaN, or a negative value.
+  If availability or a new stage model cannot be expressed compatibly, add a
+  separately specified interface with explicit availability/versioning.
+- Cached operations still account for work performed within the existing named
+  scope. For example, adjacency preparation currently includes statement setup
+  and constant binding, not only SQL compilation; a cache hit does not imply
+  that this entire scope must be zero.
+- Totals and component scopes are not universally additive. Fresh-build graph
+  subphases sit within graph work, and public graph-walk bookkeeping includes
+  residual traversal time and cleanup rather than an independently timed
+  allocator-only measurement. Do not sum every field to estimate wall time.
+- Interpret complete profiles only after a successful call. Error-path values
+  are not a complete or comparable sample unless explicitly documented otherwise.
+
+Preserve these meanings as implementations change. Do not relabel an existing
+field to describe a different operation, append fields to an unversioned C
+output struct in place, or remove a profiling function. New incompatible
+measurement models require an additive interface or a major-version decision.
+Compare profiled runs with equivalent instrumentation; use unprofiled calls
+for authoritative application performance measurements.
+
 ## Not public contracts
 
 Private `_zova_*` tables, indexes, query plans, generated private integer keys
-other than explicitly returned opaque keys, benchmark counters, TEMP tables,
+other than explicitly returned opaque keys, private benchmark counters, TEMP tables,
 and internal cache sizes are implementation details. Applications must not read
 or modify private storage directly.
 
