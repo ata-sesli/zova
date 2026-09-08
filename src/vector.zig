@@ -1,7 +1,7 @@
 //! Native vector storage and exact search implementation.
 
 const std = @import("std");
-const sqlite = @import("sqlite.zig");
+pub const sqlite = @import("sqlite.zig");
 const zova_error = @import("zova_error.zig");
 
 pub const Error = zova_error.Error;
@@ -467,7 +467,7 @@ pub const Database = struct {
         try validateVectorCollectionName(collection_name);
         const collection = try loadVectorCollection(self, collection_name);
         try validateVectorInput(collection, .{ .id = vector_id, .values = values });
-        try self.writeVectorRows(collection_name, collection, &[_]VectorInput{.{ .id = vector_id, .values = values }});
+        try self.writeVectorRows(collection_name, collection, &[_]VectorInput{.{ .id = vector_id, .values = values }}, null);
     }
 
     /// Store or replace multiple vector rows in a collection.
@@ -484,8 +484,15 @@ pub const Database = struct {
     ) Error!void {
         try validateVectorCollectionName(collection_name);
         const collection = try loadVectorCollection(self, collection_name);
-        for (vectors) |vector| try validateVectorInput(collection, vector);
-        try self.writeVectorRows(collection_name, collection, vectors);
+        // Validate the entire batch once, filling one norm per input so the
+        // row writer never recomputes norms. The array is bounded by the
+        // caller's input count and freed on every exit path.
+        const norms = try std.heap.c_allocator.alloc(f64, vectors.len);
+        defer std.heap.c_allocator.free(norms);
+        for (vectors, 0..) |vector, index| {
+            norms[index] = try validateVectorInputAndNorm(collection, vector);
+        }
+        try self.writeVectorRows(collection_name, collection, vectors, norms);
     }
 
     /// Load one vector row into owned memory.
@@ -1285,6 +1292,7 @@ pub const Database = struct {
         collection_name: []const u8,
         collection: CollectionMetadata,
         vectors: []const VectorInput,
+        norms: ?[]const f64,
     ) Error!void {
         if (vectors.len == 0) return;
         _ = collection_name;
@@ -1300,12 +1308,15 @@ pub const Database = struct {
         var scratch: std.ArrayList(u8) = .empty;
         defer scratch.deinit(std.heap.c_allocator);
 
-        for (vectors) |vector| {
+        for (vectors, 0..) |vector, index| {
             const encoded = switch (vector.values) {
                 .i8 => |values| std.mem.sliceAsBytes(values),
                 else => try encodeValuesLeInto(&scratch, vector.values),
             };
-            const norm_squared = try vectorNormSquared(vector.values);
+            // Batch callers supply norms computed during validation; the
+            // single-vector caller has no precomputed norm and computes one
+            // here. Neither path accumulates a norm twice.
+            const norm_squared = if (norms) |precomputed| precomputed[index] else try vectorNormSquared(vector.values);
 
             try stmt.bindInt64(1, collection.collection_key);
             try stmt.bindText(2, vector.id);
@@ -1375,9 +1386,43 @@ fn validateVectorValues(collection: CollectionMetadata, values: VectorValuesCons
     if (collection.metric == .cosine and norm_squared == 0) return error.VectorInvalid;
 }
 
+/// Validate one input and return its norm squared.
+///
+/// Single source of truth for the changed put path: validation and norm
+/// accumulation share one pass with exactly the existing accumulation
+/// order/precision (i8 uses exact u64 integer squares converted once; f32/f16
+/// accumulate f64 squares through `inputValueAsF64`).
+fn validateVectorValuesAndNorm(collection: CollectionMetadata, values: VectorValuesConst) Error!f64 {
+    if (vectorValuesElementType(values) != collection.element_type) return error.VectorInvalid;
+    if (vectorValuesLen(values) != collection.dimensions) return error.VectorDimensionMismatch;
+    var norm_squared: f64 = 0;
+    switch (values) {
+        .i8 => |typed| {
+            var norm: u64 = 0;
+            for (typed) |value| {
+                const wide: i32 = value;
+                norm += @intCast(wide * wide);
+            }
+            norm_squared = u64ToF64Exact(norm);
+        },
+        else => for (0..vectorValuesLen(values)) |index| {
+            const value_f64 = try inputValueAsF64(values, index);
+            norm_squared += value_f64 * value_f64;
+        },
+    }
+    if (collection.metric == .cosine and norm_squared == 0) return error.VectorInvalid;
+    return norm_squared;
+}
+
 fn validateVectorInput(collection: CollectionMetadata, input: VectorInput) Error!void {
     try validateVectorId(input.id);
     try validateVectorValues(collection, input.values);
+}
+
+/// Validate one batch input and return its norm squared in one pass.
+fn validateVectorInputAndNorm(collection: CollectionMetadata, input: VectorInput) Error!f64 {
+    try validateVectorId(input.id);
+    return validateVectorValuesAndNorm(collection, input.values);
 }
 
 fn validateVectorSearchThreshold(max_distance: f64) Error!void {
