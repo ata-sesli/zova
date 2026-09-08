@@ -4,7 +4,7 @@ const std = @import("std");
 
 const allocator = @import("values.zig").allocator;
 const candidateIdSlices = @import("values.zig").candidateIdSlices;
-const databaseHandle = @import("handles.zig").databaseHandle;
+const lockDatabaseHandle = @import("handles.zig").lockDatabaseHandle;
 const emptyVector = @import("results.zig").emptyVector;
 const emptyVectorCollectionInfo = @import("results.zig").emptyVectorCollectionInfo;
 const emptyVectorCollectionList = @import("results.zig").emptyVectorCollectionList;
@@ -46,8 +46,7 @@ const zova_vector_search_within_request = @import("types.zig").zova_vector_searc
 
 pub fn zova_vector_collection_create(request: ?*const zova_vector_collection_create_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const name = req.name orelse return failDb(handle, error.InvalidArgument);
     const metric = vectorMetricFromAbi(req.options.metric) orelse return failDb(handle, error.InvalidArgument);
@@ -63,8 +62,7 @@ pub fn zova_vector_collection_create(request: ?*const zova_vector_collection_cre
 
 pub fn zova_vector_collection_exists(request: ?*const zova_vector_collection_exists_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const name = req.name orelse return failDb(handle, error.InvalidArgument);
     const out = req.out_exists orelse return failDb(handle, error.InvalidArgument);
@@ -75,8 +73,7 @@ pub fn zova_vector_collection_exists(request: ?*const zova_vector_collection_exi
 
 pub fn zova_vector_put(request: ?*const zova_vector_put_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const vector_id = req.vector_id orelse return failDb(handle, error.InvalidArgument);
@@ -88,8 +85,7 @@ pub fn zova_vector_put(request: ?*const zova_vector_put_request) callconv(.c) zo
 
 pub fn zova_vector_get(request: ?*const zova_vector_get_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const vector_id = req.vector_id orelse return failDb(handle, error.InvalidArgument);
@@ -104,8 +100,7 @@ pub fn zova_vector_get(request: ?*const zova_vector_get_request) callconv(.c) zo
 
 pub fn zova_vector_exists(request: ?*const zova_vector_exists_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const vector_id = req.vector_id orelse return failDb(handle, error.InvalidArgument);
@@ -117,8 +112,7 @@ pub fn zova_vector_exists(request: ?*const zova_vector_exists_request) callconv(
 
 pub fn zova_vector_delete(request: ?*const zova_vector_delete_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const vector_id = req.vector_id orelse return failDb(handle, error.InvalidArgument);
@@ -129,8 +123,7 @@ pub fn zova_vector_delete(request: ?*const zova_vector_delete_request) callconv(
 
 pub fn zova_vector_search(request: ?*const zova_vector_search_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const query = vectorValuesConst(req.query) orelse return failDb(handle, error.InvalidArgument);
@@ -146,8 +139,7 @@ pub fn zova_vector_search(request: ?*const zova_vector_search_request) callconv(
 
 pub fn zova_vector_search_in(request: ?*const zova_vector_search_in_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const query = vectorValuesConst(req.query) orelse return failDb(handle, error.InvalidArgument);
@@ -166,8 +158,7 @@ pub fn zova_vector_search_in(request: ?*const zova_vector_search_in_request) cal
 
 pub fn zova_vector_search_multi_i8(request: ?*const zova_vector_search_multi_i8_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
@@ -195,8 +186,7 @@ pub fn zova_vector_search_multi_i8(request: ?*const zova_vector_search_multi_i8_
 
 pub fn zova_vector_collection_info_get(request: ?*const zova_vector_collection_info_get_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const name = req.name orelse return failDb(handle, error.InvalidArgument);
     const out = req.out_info orelse return failDb(handle, error.InvalidArgument);
@@ -211,8 +201,7 @@ pub fn zova_vector_collection_info_get(request: ?*const zova_vector_collection_i
 
 pub fn zova_vector_collections_list(request: ?*const zova_vector_collections_list_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const out = req.out_list orelse return failDb(handle, error.InvalidArgument);
     out.* = emptyVectorCollectionList();
@@ -226,8 +215,7 @@ pub fn zova_vector_collections_list(request: ?*const zova_vector_collections_lis
 
 pub fn zova_vector_put_many(request: ?*const zova_vector_put_many_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
 
@@ -240,8 +228,7 @@ pub fn zova_vector_put_many(request: ?*const zova_vector_put_many_request) callc
 
 pub fn zova_vector_delete_many(request: ?*const zova_vector_delete_many_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const vector_ids = candidateIdSlices(req.vector_ids, req.vector_count) catch |err| return failDb(handle, err);
@@ -252,8 +239,7 @@ pub fn zova_vector_delete_many(request: ?*const zova_vector_delete_many_request)
 
 pub fn zova_vector_collection_delete(request: ?*const zova_vector_collection_delete_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const name = req.name orelse return failDb(handle, error.InvalidArgument);
 
@@ -263,8 +249,7 @@ pub fn zova_vector_collection_delete(request: ?*const zova_vector_collection_del
 
 pub fn zova_vector_search_within(request: ?*const zova_vector_search_within_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const query = vectorValuesConst(req.query) orelse return failDb(handle, error.InvalidArgument);
@@ -280,8 +265,7 @@ pub fn zova_vector_search_within(request: ?*const zova_vector_search_within_requ
 
 pub fn zova_vector_search_in_within(request: ?*const zova_vector_search_in_within_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const query = vectorValuesConst(req.query) orelse return failDb(handle, error.InvalidArgument);
@@ -300,8 +284,7 @@ pub fn zova_vector_search_in_within(request: ?*const zova_vector_search_in_withi
 
 pub fn zova_vector_search_by_id(request: ?*const zova_vector_search_by_id_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const source_vector_id = req.source_vector_id orelse return failDb(handle, error.InvalidArgument);
@@ -317,8 +300,7 @@ pub fn zova_vector_search_by_id(request: ?*const zova_vector_search_by_id_reques
 
 pub fn zova_vector_search_by_id_in(request: ?*const zova_vector_search_by_id_in_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const source_vector_id = req.source_vector_id orelse return failDb(handle, error.InvalidArgument);
@@ -337,8 +319,7 @@ pub fn zova_vector_search_by_id_in(request: ?*const zova_vector_search_by_id_in_
 
 pub fn zova_vector_search_by_id_within(request: ?*const zova_vector_search_by_id_within_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const source_vector_id = req.source_vector_id orelse return failDb(handle, error.InvalidArgument);
@@ -354,8 +335,7 @@ pub fn zova_vector_search_by_id_within(request: ?*const zova_vector_search_by_id
 
 pub fn zova_vector_search_by_id_in_within(request: ?*const zova_vector_search_by_id_in_within_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const collection_name = req.collection_name orelse return failDb(handle, error.InvalidArgument);
     const source_vector_id = req.source_vector_id orelse return failDb(handle, error.InvalidArgument);
