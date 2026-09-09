@@ -10,6 +10,11 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class PythonPlatformMatrixTests(unittest.TestCase):
+    def test_python_snapshot_tools_do_not_require_rsync(self):
+        for name in ("sync-rust-source.sh", "check-rust-source.sh"):
+            script = (ROOT / "bindings/python/tools" / name).read_text()
+            self.assertNotIn("rsync", script)
+
     def test_windows_x64_is_built_tested_and_published(self):
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
         artifacts = (ROOT / ".github/workflows/release-artifacts.yml").read_text()
