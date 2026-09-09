@@ -17,8 +17,15 @@ run_one() {
     esac
     printf '%s edges=%s mode=%s store=%s run=%s: ' "$variant" "$edges" "$mode" "$store" "$run"
     db=$results/$variant-$edges-$mode-$store-$run.zova
-    timeout 60 "$bin" "$db" "$edges" "$mode" "$store" 2>&1 |
-        sed "s|^|$variant run=$run |"
+    output=$results/$variant-$edges-$mode-$store-$run.txt
+    # A pipeline ending in sed hides benchmark failures under POSIX sh.
+    if timeout 60 "$bin" "$db" "$edges" "$mode" "$store" > "$output" 2>&1; then
+        sed "s|^|$variant run=$run |" "$output"
+    else
+        status=$?
+        cat "$output" >&2
+        return "$status"
+    fi
     rm -f "$db" "$db-store.zova" "$db-wal" "$db-shm"
 }
 

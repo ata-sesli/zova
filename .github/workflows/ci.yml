@@ -32,6 +32,8 @@ jobs:
         with:
           version: 0.16.0
       - run: zig fmt --check build.zig build.zig.zon src tests
+      - run: zig test bench/graph_index_ddl_95.zig
+      - run: python3 -m unittest scripts/tests/test_graph_index_95_runner.py
       - run: zig build test
       - run: zig build check-storage-compat
       - run: zig build e2e

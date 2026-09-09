@@ -52,6 +52,19 @@ def main():
     path = sys.argv[1] if len(sys.argv) > 1 else "trials.log"
     writes, reads = load(path)
 
+    # A partial matrix cannot establish the retention gate. Require the three
+    # measured trials emitted by the runner for every variant and workload.
+    for variant in ("baseline", "candidate"):
+        for store in ("main", "bound"):
+            for edges in ("1", "16", "1024"):
+                for mode in ("steady", "dropped"):
+                    key = (variant, store, edges, mode)
+                    if len(writes.get(key, [])) != 3:
+                        raise SystemExit(f"Incomplete write matrix: {key}; expected 3 trials")
+                    for op in ("neighbors_untyped", "neighbors_typed", "degree", "walk_depth2"):
+                        if len(reads.get(key + (op,), [])) != 3:
+                            raise SystemExit(f"Incomplete read matrix: {key + (op,)}; expected 3 trials")
+
     print("== WRITE: per-batch median (ms) across 3 trials, 3 trials per variant ==")
     print(f"{'store':6} {'edges':6} {'mode':8} {'base_med':>10} {'base_mad':>9} {'cand_med':>10} {'cand_mad':>9} {'delta%':>8} {'ci_base':>8} {'ci_cand':>8} {'probe_cand':>10}")
     write_rows = []

@@ -22,6 +22,7 @@ fn ns(start: std.Io.Timestamp) i64 {
 }
 
 const node_count = 1024;
+const max_samples = 200;
 const index_names = [_][]const u8{
     "_zova_graph_nodes_created_order_idx",
     "_zova_graph_edges_topology_idx",
@@ -50,15 +51,45 @@ const Counters = struct {
 };
 
 fn median(values: []f64) f64 {
+    std.debug.assert(values.len > 0);
     std.mem.sort(f64, values, {}, std.sort.asc(f64));
-    return values[values.len / 2];
+    const middle = values.len / 2;
+    return if (values.len % 2 == 0) (values[middle - 1] + values[middle]) / 2 else values[middle];
 }
 
-fn mad(values: []f64) f64 {
-    const centre = median(values);
-    const deviations = values;
+fn mad(values: []const f64) f64 {
+    std.debug.assert(values.len <= max_samples);
+    var buffer: [max_samples]f64 = undefined;
+    const deviations = buffer[0..values.len];
+    @memcpy(deviations, values);
+    const centre = median(deviations);
     for (deviations) |*value| value.* = @abs(value.* - centre);
     return median(deviations);
+}
+
+fn total(values: []const f64) f64 {
+    var sum: f64 = 0;
+    for (values) |value| sum += value;
+    return sum;
+}
+
+test "MAD preserves timing samples used by other statistics" {
+    var samples = [_]f64{ 1, 2, 3, 4, 10 };
+    const original = samples;
+    try std.testing.expectEqual(@as(f64, 1), mad(&samples));
+    try std.testing.expectEqualSlices(f64, &original, &samples);
+}
+
+test "median averages the central pair for even trial counts" {
+    var samples = [_]f64{ 1, 2, 3, 10 };
+    try std.testing.expectEqual(@as(f64, 2.5), median(&samples));
+}
+
+test "total is the sum of durations including fractional milliseconds" {
+    var samples = [_]f64{ 1.25, 2, 3, 10.5 };
+    _ = median(&samples);
+    _ = mad(&samples);
+    try std.testing.expectEqual(@as(f64, 16.75), total(&samples));
 }
 
 fn percentile(samples: []f64, pct: f64) f64 {
@@ -112,7 +143,7 @@ pub fn main(init: std.process.Init) !void {
     _ = c.sqlite3_trace_v2(db.sqlite_db.handle, c.SQLITE_TRACE_STMT, Counters.callback, &counters);
     defer _ = c.sqlite3_trace_v2(db.sqlite_db.handle, 0, null, null);
 
-    const samples: usize = if (dropped) 20 else 200;
+    const samples: usize = if (dropped) 20 else max_samples;
     const timings = try allocator.alloc(f64, samples);
 
     try db.putGraphEdges(inputs); // warmup
@@ -126,8 +157,8 @@ pub fn main(init: std.process.Init) !void {
     }
 
     std.debug.print("write edges={d} mode={s} store={s} samples={d} median_ms={d:.6} mad_ms={d:.6} total_ms={d:.6} stmts={d} create_index={d} probe={d}\n", .{
-        edges,                                                                                                args[3],        args[4],               samples,        median(timings), mad(timings),
-        @as(f64, @floatFromInt(@as(i64, @intFromFloat(median(timings) * @as(f64, @floatFromInt(samples)))))), counters.stmts, counters.create_index, counters.probe,
+        edges,          args[3],        args[4],               samples,        median(timings), mad(timings),
+        total(timings), counters.stmts, counters.create_index, counters.probe,
     });
 
     const read_samples = try allocator.alloc(f64, 200);
