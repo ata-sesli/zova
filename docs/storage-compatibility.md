@@ -161,10 +161,13 @@ running a migration.
   vector, and graph stores produces destination siblings named
   `<destination-stem>.objects.zova`, `<destination-stem>.vectors.zova`, and
   `<destination-stem>.graphs.zova` in the same directory as the destination.
-- **Staging needs room.** Each member is copied to a hidden staging file in the
-  destination directory, named `.<stem>.migrate-<random hex>.zova`, transformed
-  there, and published by rename. Budget free space roughly equal to the size of
-  the whole source set, in the destination filesystem.
+- **Staging needs room.** Each member is copied into
+  `<destination>.migration-recovery/` and transformed there. Reservation and
+  publication use hard links on the destination filesystem; retained links are
+  ownership witnesses, not additional data copies. The filesystem must support
+  hard links (for example APFS, ext4, or NTFS). Unsupported filesystems fail
+  without publishing a destination. Budget free space roughly equal to the size
+  of the whole source set. The recovery directory is removed after success.
 - **The source is locked while staging runs.** Migration takes a write lock on
   the source before planning the bound set, so no writer can unbind or rebind a
   store mid-flight. Concurrent writers receive `Busy`/`Locked` rather than
@@ -172,10 +175,31 @@ running a migration.
 - **Publication is ordered.** Bound stores are published first and the main
   database last, as the commit marker. A published main database can therefore
   never be missing or half-migrated stores.
-- **Interruption recovery.** A crashed or cancelled migration leaves only
-  unpublished staging files. Delete any leftover `.*.migrate-*.zova` files in the
-  destination directory and re-run the migration. Never hand-publish a staging
-  file.
+- **Interruption recovery.** A terminated process can leave empty destination
+  reservations, published bound stores, and the recovery directory. Stop all
+  migration processes and other users of these destination paths first. Keep
+  the recovery directory and destination together, and run the following from
+  the matching Zova source checkout/package (Python 3, standard library only):
+
+  ```sh
+  python3 scripts/recover-migration.py /path/to/destination.zova
+  ```
+
+  On Windows use `python` if `python3` is unavailable. The script checks the
+  entire set before removal. It compares device/inode identity with retained
+  hard links, rejects symlinks and unexpected contents, and refuses to delete
+  replaced/unrelated destinations. Before main publication it removes only
+  owned output, after which the original migration command can be retried.
+  After main publication it keeps the completed output and removes only
+  witnesses. Never hand-publish a staged file or delete files by wildcard.
+  Do not open the published main until migration/recovery cleanup completes:
+  its retained hard link is an ownership witness, not another database to use.
+  If recovery refuses, preserve the files and investigate; do not force-delete
+  the destinations. An interruption before the ownership marker is written
+  can leave an empty recovery directory; after confirming no migration is
+  running, an empty directory can be removed with `rmdir`. This procedure
+  covers process termination, not a guarantee against filesystem/power failure.
+  It does not identify leftovers from older versions without ownership witnesses.
 - **Extensions.** Both adjacent migration steps leave extension-owned tables
   unchanged. Normal open-time extension compatibility validation applies to the
   migrated destination, exactly as it does when opening any database.

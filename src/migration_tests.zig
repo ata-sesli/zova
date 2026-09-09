@@ -15,6 +15,39 @@ const Database = zova.Database;
 
 const fixture_dir = "tests/fixtures";
 
+test "migration hard-link publication preserves unicode paths and abort ownership" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const Publication = @import("database/migration_publication.zig").Publication;
+    for ([_]bool{ false, true }) |committed| {
+        var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const destination = try test_support.testingDbPath(&path_buffer, &tmp.sub_path, if (committed) "published-ş.zova" else "aborted-ş.zova");
+        {
+            var publication = try Publication.init(std.testing.allocator, destination);
+            defer publication.deinit();
+            try publication.reserve(0, destination);
+            const staged = try publication.stage(0);
+            defer std.testing.allocator.free(staged);
+            try std.Io.Dir.cwd().writeFile(io(), .{ .sub_path = staged, .data = "test payload" });
+            try publication.publish(0);
+            const staged_stat = try std.Io.Dir.cwd().statFile(io(), staged, .{});
+            const final_stat = try std.Io.Dir.cwd().statFile(io(), destination, .{});
+            try std.testing.expectEqual(staged_stat.inode, final_stat.inode);
+            try std.testing.expect(final_stat.nlink >= 2);
+            // Publishing again must not replace the now-published file.
+            try std.testing.expectError(error.DestinationExists, publication.publish(0));
+            publication.committed = committed;
+        }
+        if (committed) {
+            const bytes = try std.Io.Dir.cwd().readFileAlloc(io(), destination, std.testing.allocator, .limited(64));
+            defer std.testing.allocator.free(bytes);
+            try std.testing.expectEqualStrings("test payload", bytes);
+        } else {
+            try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io(), destination, .{}));
+        }
+    }
+}
+
 fn io() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
@@ -954,6 +987,7 @@ test "migrateDatabase copies and migrates the full bound-store set" {
     var iterator = dir.iterate();
     while (try iterator.next(io())) |entry| {
         try std.testing.expect(std.mem.indexOf(u8, entry.name, ".migrate-") == null);
+        try std.testing.expect(std.mem.indexOf(u8, entry.name, ".migration-recovery") == null);
     }
 }
 
@@ -1027,6 +1061,7 @@ test "migrateDatabase cleans every created file when migration fails mid-flight"
     var iterator = dir.iterate();
     while (try iterator.next(io())) |entry| {
         try std.testing.expect(std.mem.indexOf(u8, entry.name, ".migrate-") == null);
+        try std.testing.expect(std.mem.indexOf(u8, entry.name, ".migration-recovery") == null);
     }
 }
 
@@ -1044,6 +1079,7 @@ test "migrateDatabase cleans up after a fault at every phase boundary" {
     defer tmp.cleanup();
 
     const points = [_]zova.MigrateFaultPoint{
+        .after_destination_reservation,
         .after_main_copy,
         .after_main_migration,
         .after_store_copy,
