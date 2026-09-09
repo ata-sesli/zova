@@ -184,7 +184,7 @@ expect_contains "$ROOT/.github/workflows/release-artifacts.yml" 'manylinux: 2_28
 expect_contains "$ROOT/.github/workflows/release-artifacts.yml" 'maturin-version: v1.15.0'
 expect_contains "$ROOT/.github/workflows/release-artifacts.yml" 'quay.io/pypa/manylinux_2_28_aarch64:latest'
 expect_not_contains "$ROOT/.github/workflows/publish-release.yml" 'zova-${python_version}.tar.gz'
-expect_contains "$ROOT/.github/workflows/publish-release.yml" 'expected_wheel_count=4'
+expect_contains "$ROOT/.github/workflows/publish-release.yml" 'expected_wheel_count=5'
 expect_not_contains "$ROOT/scripts/check-release.sh" 'maturin build --sdist'
 expect_not_contains "$ROOT/scripts/distribute-release.sh" 'maturin build --sdist'
 expect_not_contains "$ROOT/scripts/distribute-release.sh" 'release_python_package'
