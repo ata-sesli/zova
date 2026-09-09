@@ -1,7 +1,9 @@
 """Keep the documented and published Python platform matrix aligned."""
 
 from pathlib import Path
+import ast
 import re
+import textwrap
 import tomllib
 import unittest
 
@@ -10,6 +12,32 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class PythonPlatformMatrixTests(unittest.TestCase):
+    def test_wheel_smoke_statements_close_before_database_cleanup(self):
+        workflow = (ROOT / ".github/workflows/release-artifacts.yml").read_text()
+        section = workflow[
+            workflow.index("  python:\n") : workflow.index("  javascript-native:\n")
+        ]
+        snippets = re.findall(r"python - <<'PY'\n(.*?)\n          PY", section, re.S)
+        self.assertEqual(len(snippets), 2, "Cover both Python wheel smoke tests")
+        for index, snippet in enumerate(snippets):
+            with self.subTest(smoke=index):
+                tree = ast.parse(textwrap.dedent(snippet))
+                prepares = [
+                    node for node in ast.walk(tree)
+                    if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "prepare"
+                ]
+                self.assertEqual(len(prepares), 1)
+                scoped_prepares = [
+                    item.context_expr
+                    for node in ast.walk(tree) if isinstance(node, ast.With)
+                    for item in node.items
+                    if item.context_expr in prepares
+                ]
+                self.assertEqual(scoped_prepares, prepares,
+                                 "Statement must use a context manager before temp cleanup")
+
     def test_python_snapshot_tools_do_not_require_rsync(self):
         for name in ("sync-rust-source.sh", "check-rust-source.sh"):
             script = (ROOT / "bindings/python/tools" / name).read_text()
