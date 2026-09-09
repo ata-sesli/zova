@@ -115,6 +115,26 @@ fn schemaIndexExists(db: *sqlite.Database, index_name: []const u8) !bool {
     return stmt.columnInt64(0) == 1;
 }
 
+const index_names = [_][]const u8{
+    "_zova_graph_nodes_created_order_idx",
+    "_zova_graph_edges_topology_idx",
+    "_zova_graph_edges_created_order_idx",
+    "_zova_graph_edges_from_node_idx",
+    "_zova_graph_edges_from_node_type_idx",
+    "_zova_graph_edges_to_node_idx",
+    "_zova_graph_edges_to_node_type_idx",
+};
+
+fn schemaIndexExistsInSchema(db: *sqlite.Database, schema_name: []const u8, index_name: []const u8) !bool {
+    var sql_buffer: [256]u8 = undefined;
+    const sql = try std.fmt.bufPrintZ(&sql_buffer, "select count(*) from {s}.sqlite_master where type = 'index' and name = ?", .{schema_name});
+    var stmt = try db.prepare(sql);
+    defer stmt.deinit();
+    try stmt.bindText(1, index_name);
+    try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+    return stmt.columnInt64(0) == 1;
+}
+
 fn expectIndexColumns(db: *sqlite.Database, index_name: []const u8, expected: []const []const u8) !void {
     var stmt = try db.prepare("select name from pragma_index_info(?) order by seqno");
     defer stmt.deinit();
@@ -1978,4 +1998,109 @@ fn tableExists(db: *sqlite.Database, table_name: []const u8) !bool {
     try stmt.bindText(1, table_name);
     try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
     return stmt.columnInt64(0) == 1;
+}
+
+test "repeated graph batches keep all seven indexes and stay idempotent" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "graph-repeated-batches.zova");
+    var db = try zova.Database.create(db_path);
+    defer db.deinit();
+    try db.createGraph("app");
+    try db.putGraphNodes(&.{
+        .{ .graph_name = "app", .node_id = "a", .kind = "function" },
+        .{ .graph_name = "app", .node_id = "b", .kind = "function" },
+    });
+
+    for (0..3) |_| {
+        try db.putGraphEdges(&.{.{ .graph_name = "app", .from_node_id = "a", .to_node_id = "b", .edge_type = "calls" }});
+        for (index_names) |name| {
+            try std.testing.expect(try schemaIndexExists(&db.sqlite_db, name));
+        }
+    }
+}
+
+test "graph batch recovers when every index is dropped through raw sql" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "graph-all-dropped.zova");
+    var db = try zova.Database.create(db_path);
+    defer db.deinit();
+    try db.createGraph("app");
+    try db.putGraphNodes(&.{.{ .graph_name = "app", .node_id = "a", .kind = "function" }});
+
+    try db.sqlite_db.exec(
+        \\drop index _zova_graph_nodes_created_order_idx;
+        \\drop index _zova_graph_edges_topology_idx;
+        \\drop index _zova_graph_edges_created_order_idx;
+        \\drop index _zova_graph_edges_from_node_idx;
+        \\drop index _zova_graph_edges_from_node_type_idx;
+        \\drop index _zova_graph_edges_to_node_idx;
+        \\drop index _zova_graph_edges_to_node_type_idx;
+    );
+    for (index_names) |name| {
+        try std.testing.expect(!try schemaIndexExists(&db.sqlite_db, name));
+    }
+
+    try db.putGraphEdges(&.{.{ .graph_name = "app", .from_node_id = "a", .to_node_id = "a", .edge_type = "self" }});
+    for (index_names) |name| {
+        try std.testing.expect(try schemaIndexExists(&db.sqlite_db, name));
+    }
+}
+
+test "rollback of a graph batch inside a caller transaction does not lose indexes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "graph-batch-rollback.zova");
+    var db = try zova.Database.create(db_path);
+    defer db.deinit();
+    try db.createGraph("app");
+    try db.putGraphNodes(&.{
+        .{ .graph_name = "app", .node_id = "a", .kind = "function" },
+        .{ .graph_name = "app", .node_id = "b", .kind = "function" },
+    });
+
+    // Drop an index, then roll back the batch: the rollback restores the
+    // pre-batch schema (index still missing), and the next batch recreates it.
+    try db.sqlite_db.exec("drop index _zova_graph_edges_to_node_idx");
+    try db.sqlite_db.exec("begin immediate");
+    try db.putGraphEdges(&.{.{ .graph_name = "app", .from_node_id = "a", .to_node_id = "b", .edge_type = "calls" }});
+    try std.testing.expect(try schemaIndexExists(&db.sqlite_db, "_zova_graph_edges_to_node_idx"));
+    try db.sqlite_db.exec("rollback");
+    try std.testing.expect(!try schemaIndexExists(&db.sqlite_db, "_zova_graph_edges_to_node_idx"));
+
+    try db.putGraphEdges(&.{.{ .graph_name = "app", .from_node_id = "a", .to_node_id = "b", .edge_type = "calls" }});
+    try std.testing.expect(try schemaIndexExists(&db.sqlite_db, "_zova_graph_edges_to_node_idx"));
+}
+
+test "bound graph store rebind recreates indexes in the new store only" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var old_store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var new_store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "graph-rebind-main.zova");
+    const old_store_path = try testingDbPath(&old_store_buffer, tmp.sub_path[0..], "graph-rebind-old.zova");
+    const new_store_path = try testingDbPath(&new_store_buffer, tmp.sub_path[0..], "graph-rebind-new.zova");
+    try zova.createGraphStore(old_store_path);
+    try zova.createGraphStore(new_store_path);
+
+    var db = try zova.Database.create(main_path);
+    defer db.deinit();
+    try db.bindGraphStore(old_store_path);
+    try db.createGraph("app");
+    try db.putGraphNodes(&.{.{ .graph_name = "app", .node_id = "a", .kind = "function" }});
+
+    // Drop indexes in the old store, then rebind to a fresh store and write:
+    // the new store must end with the full index set.
+    try db.sqlite_db.exec("drop index graph_store._zova_graph_edges_to_node_idx");
+    try db.bindGraphStore(new_store_path);
+    try db.createGraph("app");
+    try db.putGraphNodes(&.{.{ .graph_name = "app", .node_id = "a", .kind = "function" }});
+    try std.testing.expect(try schemaIndexExistsInSchema(&db.sqlite_db, "graph_store", "_zova_graph_edges_to_node_idx"));
+    try std.testing.expect(try schemaIndexExistsInSchema(&db.sqlite_db, "main", "_zova_graph_edges_to_node_idx"));
 }
