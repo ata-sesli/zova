@@ -75,6 +75,7 @@ jobs:
       - run: cargo fmt --all --manifest-path bindings/rust/Cargo.toml --check
       - run: python3 -m unittest scripts/tests/test_release_snapshot_order.py
       - run: python3 -m unittest scripts/tests/test_python_platform_matrix.py
+      - run: python3 -m unittest scripts/tests/test_object_ingestion_93_runner.py
       - run: sh bindings/rust/zova-sys/tools/sync-native-source.sh
       - run: sh bindings/rust/zova-sys/tools/check-native-source.sh
       - run: sh bindings/python/tools/sync-rust-source.sh
