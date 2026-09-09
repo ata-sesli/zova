@@ -4,7 +4,6 @@ const std = @import("std");
 const Error = @import("types.zig").Error;
 const paths = @import("paths.zig");
 const io = paths.defaultIo;
-const cwd = std.Io.Dir.cwd();
 
 pub const Publication = struct {
     allocator: std.mem.Allocator,
@@ -24,6 +23,7 @@ pub const Publication = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, destination: []const u8) Error!Publication {
+        const cwd = std.Io.Dir.cwd();
         var self: Publication = .{ .allocator = allocator };
         errdefer self.deinit();
         self.directory = try std.fmt.allocPrintSentinel(allocator, "{s}.migration-recovery", .{destination}, 0);
@@ -38,6 +38,7 @@ pub const Publication = struct {
     }
 
     pub fn reserve(self: *Publication, index: usize, final: [:0]const u8) Error!void {
+        const cwd = std.Io.Dir.cwd();
         try paths.ensureDestinationZovaPathAvailable(final);
         const m = &self.members[index];
         m.final = try self.allocator.dupeZ(u8, final);
@@ -56,6 +57,7 @@ pub const Publication = struct {
     }
 
     pub fn stage(self: *Publication, index: usize) Error![:0]u8 {
+        const cwd = std.Io.Dir.cwd();
         const m = &self.members[index];
         const result = try self.allocator.dupeZ(u8, m.stage.?);
         errdefer self.allocator.free(result);
@@ -66,6 +68,7 @@ pub const Publication = struct {
     }
 
     pub fn publish(self: *Publication, index: usize) Error!void {
+        const cwd = std.Io.Dir.cwd();
         const m = &self.members[index];
         if (!sameFile(m.final.?, m.reservation.?)) return error.DestinationExists;
         cwd.deleteFile(io(), m.final.?) catch return error.CantOpen;
@@ -91,6 +94,7 @@ pub const Publication = struct {
     }
 
     fn cleanup(self: *Publication) void {
+        const cwd = std.Io.Dir.cwd();
         // Keep the main staged inode until every store witness is gone. It is
         // the commit proof if cleanup itself is interrupted.
         var index: usize = self.members.len;
@@ -117,6 +121,7 @@ pub const Publication = struct {
 };
 
 fn sameFile(a: []const u8, b: []const u8) bool {
+    const cwd = std.Io.Dir.cwd();
     // Both paths are in the same destination filesystem; reject symlinks.
     const left = cwd.statFile(io(), a, .{ .follow_symlinks = false }) catch return false;
     const right = cwd.statFile(io(), b, .{ .follow_symlinks = false }) catch return false;
