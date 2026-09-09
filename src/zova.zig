@@ -61,6 +61,8 @@ const sqlite = @import("sqlite.zig");
 
 const statement_cache = @import("statement_cache.zig");
 
+const graph_walk_scratch = @import("graph_walk_scratch.zig");
+
 const trgm_impl = @import("trgm.zig");
 
 const vector_impl = @import("vector.zig");
@@ -843,6 +845,7 @@ pub const Database = struct {
     bound_graph_edge_types: graph_impl.GraphEdgeTypeCache = .{},
     kv_statements: kv_impl.StatementCache = .{},
     read_statements: statement_cache.Cache = .{},
+    graph_walk_scratch: graph_walk_scratch.GraphWalkScratch = graph_walk_scratch.GraphWalkScratch.init(),
     extension_registry: ExtensionRegistry = ExtensionRegistry.empty(),
 
     /// Create a new initialized `.zova` database.
@@ -1063,6 +1066,7 @@ pub const Database = struct {
         self.bound_graph_edge_types.deinit();
         self.kv_statements.deinit();
         self.read_statements.deinit();
+        self.graph_walk_scratch.deinit();
         self.sqlite_db.deinit();
         deinitNotifications(self.notifications);
     }
@@ -2696,6 +2700,7 @@ pub const Database = struct {
             .storage_schema = if (self.bound_graph_store != null) .graph_store else .main,
             .edge_type_cache = if (self.bound_graph_store != null) &self.bound_graph_edge_types else &self.main_graph_edge_types,
             .statement_cache = &self.read_statements,
+            .walk_scratch = &self.graph_walk_scratch,
         };
     }
 

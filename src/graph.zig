@@ -3,6 +3,7 @@
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
 const statement_cache = @import("statement_cache.zig");
+const walk_scratch = @import("graph_walk_scratch.zig");
 const zova_error = @import("zova_error.zig");
 
 pub const Error = zova_error.Error;
@@ -651,6 +652,12 @@ pub const GraphWalkScanProfile = struct {
     result_count: u64 = 0,
 };
 
+/// Connection-owned bounded scratch state used by graph walks. The facade
+/// stores one stable instance; direct graph-layer users may leave it null and
+/// receive a per-call temporary arena.
+pub const GraphWalkScratch = walk_scratch.GraphWalkScratch;
+pub const graph_walk_scratch_capacity_limit = walk_scratch.retained_capacity_limit;
+
 pub const GraphWalkItem = struct {
     node_id: []u8,
     kind: []u8,
@@ -682,6 +689,9 @@ pub const Database = struct {
     /// Connection-owned cache, null when no owner supplied one. See
     /// `statement_cache` for the reuse and invalidation contract.
     statement_cache: ?*statement_cache.Cache = null,
+    /// Stable connection-owned traversal scratch. Direct graph-layer users
+    /// without a facade owner use a temporary arena per call instead.
+    walk_scratch: ?*GraphWalkScratch = null,
 
     /// Check out the shared cached statement for `tag`, preparing `sql` when
     /// no idle statement is available.
@@ -2723,13 +2733,34 @@ pub const Database = struct {
         const walk_start = if (profile != null) graphProfileTimestamp() else std.Io.Timestamp.zero;
         const root_lookup_start = if (profile != null) graphProfileTimestamp() else std.Io.Timestamp.zero;
 
-        var visited: std.AutoHashMap(i64, void) = .init(allocator);
+        // The walk's visited set and frontier are internal bookkeeping. They
+        // must not consume the caller allocator because the returned result
+        // owns independent strings and an independent result slice. Use one
+        // exclusive connection lease when available; nested/reentrant calls
+        // fall back to an independent temporary arena.
+        var temporary_scratch: ?GraphWalkScratch = null;
+        const scratch = if (self.walk_scratch) |shared| blk: {
+            if (shared.acquire()) break :blk shared;
+            temporary_scratch = GraphWalkScratch.init();
+            _ = temporary_scratch.?.acquire();
+            break :blk &temporary_scratch.?;
+        } else blk: {
+            temporary_scratch = GraphWalkScratch.init();
+            _ = temporary_scratch.?.acquire();
+            break :blk &temporary_scratch.?;
+        };
+        defer {
+            scratch.release();
+            if (temporary_scratch) |*owned| owned.deinit();
+        }
+        const scratch_allocator = scratch.allocator();
+
+        var visited: std.AutoHashMap(i64, void) = .init(scratch_allocator);
         defer visited.deinit();
         var frontier: std.ArrayList(GraphWalkEntry) = .empty;
-        var transferred: usize = 0;
         defer {
-            for (frontier.items[transferred..]) |*entry| entry.item.deinit(allocator);
-            frontier.deinit(allocator);
+            for (frontier.items) |*entry| entry.item.deinit(scratch_allocator);
+            frontier.deinit(scratch_allocator);
         }
 
         const resolved_start = try self.getGraphNodeWithKey(allocator, options.graph_name, options.start_node_id);
@@ -2740,7 +2771,7 @@ pub const Database = struct {
         }
         if (profile) |value| value.root_lookup_ms = graphProfileElapsedMs(root_lookup_start);
         try visited.put(resolved_start.node_key, {});
-        try appendGraphWalkEntry(&frontier, allocator, resolved_start.node_key, start.node_id, start.kind, 0, null, null);
+        try appendGraphWalkEntry(&frontier, scratch_allocator, resolved_start.node_key, start.node_id, start.kind, 0, null, null);
 
         const adjacency_prepare_start = if (profile != null) graphProfileTimestamp() else std.Io.Timestamp.zero;
         const edge_type_key = if (options.edge_type) |edge_type| (try self.edgeTypeKeyForRead(resolved_start.graph_key, edge_type)) orelse -1 else null;
@@ -2788,16 +2819,16 @@ pub const Database = struct {
                 if (self.edge_type_cache) |cache| {
                     try self.ensureEdgeTypeCache();
                     if (cache.by_key.get(neighbor_edge_type_key)) |neighbor_edge_type| {
-                        try appendGraphWalkEntry(&frontier, allocator, neighbor_node_key, neighbor_node_id, neighbor_kind, current_depth + 1, current_node_id, neighbor_edge_type);
+                        try appendGraphWalkEntry(&frontier, scratch_allocator, neighbor_node_key, neighbor_node_id, neighbor_kind, current_depth + 1, current_node_id, neighbor_edge_type);
                     } else {
-                        const neighbor_edge_type = try self.dupeEdgeTypeNameForRead(allocator, neighbor_edge_type_key);
-                        defer allocator.free(neighbor_edge_type);
-                        try appendGraphWalkEntry(&frontier, allocator, neighbor_node_key, neighbor_node_id, neighbor_kind, current_depth + 1, current_node_id, neighbor_edge_type);
+                        const neighbor_edge_type = try self.dupeEdgeTypeNameForRead(scratch_allocator, neighbor_edge_type_key);
+                        defer scratch_allocator.free(neighbor_edge_type);
+                        try appendGraphWalkEntry(&frontier, scratch_allocator, neighbor_node_key, neighbor_node_id, neighbor_kind, current_depth + 1, current_node_id, neighbor_edge_type);
                     }
                 } else {
-                    const neighbor_edge_type = try self.dupeEdgeTypeNameForRead(allocator, neighbor_edge_type_key);
-                    defer allocator.free(neighbor_edge_type);
-                    try appendGraphWalkEntry(&frontier, allocator, neighbor_node_key, neighbor_node_id, neighbor_kind, current_depth + 1, current_node_id, neighbor_edge_type);
+                    const neighbor_edge_type = try self.dupeEdgeTypeNameForRead(scratch_allocator, neighbor_edge_type_key);
+                    defer scratch_allocator.free(neighbor_edge_type);
+                    try appendGraphWalkEntry(&frontier, scratch_allocator, neighbor_node_key, neighbor_node_id, neighbor_kind, current_depth + 1, current_node_id, neighbor_edge_type);
                 }
             }
             if (profile) |value| {
@@ -2809,11 +2840,25 @@ pub const Database = struct {
             }
         }
 
-        // Transfer the visited prefix only after allocation succeeds. Entries
-        // queued beyond the result limit remain frontier-owned and are freed.
+        // Copy the visited prefix into caller-owned storage. The deferred
+        // frontier cleanup owns every scratch item, including this prefix.
         const owned_results = try allocator.alloc(GraphWalkItem, frontier_index);
-        for (owned_results, frontier.items[0..frontier_index]) |*result, entry| result.* = entry.item;
-        transferred = frontier_index;
+        var copied_results: usize = 0;
+        errdefer {
+            for (owned_results[0..copied_results]) |*result| result.deinit(allocator);
+            allocator.free(owned_results);
+        }
+        for (owned_results, frontier.items[0..frontier_index]) |*result, entry| {
+            result.* = try graphWalkItemOwned(
+                allocator,
+                entry.item.node_id,
+                entry.item.kind,
+                entry.item.depth,
+                entry.item.predecessor_node_id,
+                entry.item.edge_type,
+            );
+            copied_results += 1;
+        }
         if (profile) |value| {
             value.result_count = @intCast(owned_results.len);
             const accounted_ms = value.root_lookup_ms + value.adjacency_prepare_ms + value.adjacency_execute_ms;
