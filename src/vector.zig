@@ -467,7 +467,7 @@ pub const Database = struct {
         try validateVectorCollectionName(collection_name);
         const collection = try loadVectorCollection(self, collection_name);
         try validateVectorInput(collection, .{ .id = vector_id, .values = values });
-        try self.writeVectorRows(collection_name, collection, &[_]VectorInput{.{ .id = vector_id, .values = values }});
+        try self.writeVectorRows(collection_name, collection, &[_]VectorInput{.{ .id = vector_id, .values = values }}, null);
     }
 
     /// Store or replace multiple vector rows in a collection.
@@ -484,8 +484,13 @@ pub const Database = struct {
     ) Error!void {
         try validateVectorCollectionName(collection_name);
         const collection = try loadVectorCollection(self, collection_name);
-        for (vectors) |vector| try validateVectorInput(collection, vector);
-        try self.writeVectorRows(collection_name, collection, vectors);
+        const norms = try std.heap.c_allocator.alloc(f64, vectors.len);
+        defer std.heap.c_allocator.free(norms);
+        for (vectors, norms) |vector, *norm| {
+            try validateVectorId(vector.id);
+            norm.* = try validateVectorValuesAndNorm(collection, vector.values);
+        }
+        try self.writeVectorRows(collection_name, collection, vectors, norms);
     }
 
     /// Load one vector row into owned memory.
@@ -1285,6 +1290,7 @@ pub const Database = struct {
         collection_name: []const u8,
         collection: CollectionMetadata,
         vectors: []const VectorInput,
+        validated_norms: ?[]const f64,
     ) Error!void {
         if (vectors.len == 0) return;
         _ = collection_name;
@@ -1300,12 +1306,12 @@ pub const Database = struct {
         var scratch: std.ArrayList(u8) = .empty;
         defer scratch.deinit(std.heap.c_allocator);
 
-        for (vectors) |vector| {
+        for (vectors, 0..) |vector, index| {
             const encoded = switch (vector.values) {
                 .i8 => |values| std.mem.sliceAsBytes(values),
                 else => try encodeValuesLeInto(&scratch, vector.values),
             };
-            const norm_squared = try vectorNormSquared(vector.values);
+            const norm_squared = if (validated_norms) |norms| norms[index] else try vectorNormSquared(vector.values);
 
             try stmt.bindInt64(1, collection.collection_key);
             try stmt.bindText(2, vector.id);
@@ -1365,6 +1371,10 @@ fn validateVectorDimensions(dimensions: u32) Error!void {
 }
 
 fn validateVectorValues(collection: CollectionMetadata, values: VectorValuesConst) Error!void {
+    _ = try validateVectorValuesAndNorm(collection, values);
+}
+
+fn validateVectorValuesAndNorm(collection: CollectionMetadata, values: VectorValuesConst) Error!f64 {
     if (vectorValuesElementType(values) != collection.element_type) return error.VectorInvalid;
     if (vectorValuesLen(values) != collection.dimensions) return error.VectorDimensionMismatch;
     var norm_squared: f64 = 0;
@@ -1373,6 +1383,7 @@ fn validateVectorValues(collection: CollectionMetadata, values: VectorValuesCons
         norm_squared += value_f64 * value_f64;
     }
     if (collection.metric == .cosine and norm_squared == 0) return error.VectorInvalid;
+    return norm_squared;
 }
 
 fn validateVectorInput(collection: CollectionMetadata, input: VectorInput) Error!void {

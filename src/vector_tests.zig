@@ -1692,22 +1692,27 @@ test "putVectors inside caller transactions rolls back cleanly on failure" {
     try std.testing.expect(try db.hasVector("chunks", "committed"));
     try std.testing.expect(!try db.hasVector("chunks", "rolled-back"));
 
-    // SQL failure after some rows: batch is not atomic across rows, but the
-    // failing call must not corrupt the collection or leave bad norms.
+    // A failed batch inside a caller transaction must remove its earlier
+    // successful rows without discarding the caller's preceding work.
+    try db.exec("begin");
+    try db.putVector("chunks", "caller", .{ .f32 = &.{ 2.0, 3.0 } });
     try db.exec(
         \\create trigger fail_vector_insert before insert on _zova_vectors
-        \\when (select count(*) from _zova_vectors) >= 1
+        \\when new.vector_id = 'fail'
         \\begin
         \\  select raise(abort, 'forced vector insert failure');
         \\end;
     );
     const failing = [_]VectorInput{
         .{ .id = "third", .values = .{ .f32 = &.{ 5.0, 6.0 } } },
+        .{ .id = "fail", .values = .{ .f32 = &.{ 7.0, 8.0 } } },
     };
     try std.testing.expectError(error.Constraint, db.putVectors("chunks", &failing));
     try db.exec("drop trigger fail_vector_insert");
 
     try std.testing.expect(!try db.hasVector("chunks", "third"));
+    try std.testing.expect(try db.hasVector("chunks", "caller"));
+    try db.exec("commit");
     var stmt = try db.prepare(
         \\select norm_squared from _zova_vectors v
         \\join _zova_vector_collections c on c.collection_key = v.collection_key

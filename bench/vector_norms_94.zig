@@ -2,13 +2,11 @@
 //! Usage: binary NEW_DATABASE_PATH f32|f16|i8 COUNT fresh|replay
 //! Fixture: deterministic 384-dimension vectors (seed 0x5a6f7661).
 //! Fresh: create collection then one putVectors of COUNT vectors.
-//! Replay: repeat the same putVectors COUNT-vectors call 8 times (upserts).
-//! Prints complete put-many time and total norm-evaluation count implied by
-//! the call path (once per input on the changed path).
+//! Replay: populate once before timing one upsert batch.
+//! Uses the public transaction-owning facade, not the internal vector layer.
+//! Full payload read-back is verified outside the timed operation.
 const std = @import("std");
-const vector = @import("vector_impl");
-const sqlite = vector.sqlite;
-const c = sqlite.c;
+const vector = @import("zova");
 
 fn now() std.Io.Timestamp {
     return std.Io.Clock.awake.now(std.Io.Threaded.global_single_threaded.io());
@@ -28,11 +26,10 @@ pub fn main(init: std.process.Init) !void {
     const count = try std.fmt.parseInt(usize, args[3], 10);
     if (count == 0 or count > 4096) return error.InvalidArgument;
     const replay = std.mem.eql(u8, args[4], "replay");
+    if (!replay and !std.mem.eql(u8, args[4], "fresh")) return error.InvalidArgument;
 
-    var raw = try vector.sqlite.Database.open(try allocator.dupeZ(u8, args[1]));
-    defer raw.deinit();
-    try raw.exec(vector.collections_schema_sql ++ ";" ++ vector.vectors_schema_sql ++ ";");
-    var db = vector.Database{ .sqlite_db = &raw };
+    var db = try vector.Database.create(try allocator.dupeZ(u8, args[1]));
+    defer db.deinit();
     try db.createVectorCollection("bench", .{ .dimensions = dimensions, .metric = .cosine, .element_type = element_type });
 
     // Deterministic incompressible values with a nonzero norm.
@@ -61,14 +58,23 @@ pub fn main(init: std.process.Init) !void {
         };
     }
 
-    const passes: usize = if (replay) 8 else 1;
+    if (replay) try db.putVectors("bench", inputs);
     const start = now();
-    for (0..passes) |_| {
-        try db.putVectors("bench", inputs);
-    }
+    try db.putVectors("bench", inputs);
     const total_ms = ms(start);
 
+    for (inputs) |input| {
+        var result = try db.getVector(allocator, "bench", input.id);
+        defer result.deinit(allocator);
+        const equal = switch (input.values) {
+            .f32 => |values| std.mem.eql(f32, values, result.values.f32),
+            .f16 => |values| std.mem.eql(u16, values, result.values.f16),
+            .i8 => |values| std.mem.eql(i8, values, result.values.i8),
+        };
+        if (!equal) return error.VectorMismatch;
+    }
+
     std.debug.print("type={s} count={d} mode={s} total_ms={d:.6} per_pass_ms={d:.6}\n", .{
-        args[2], count, args[4], total_ms, total_ms / @as(f64, @floatFromInt(passes)),
+        args[2], count, args[4], total_ms, total_ms,
     });
 }
