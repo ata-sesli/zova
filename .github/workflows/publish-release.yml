@@ -260,7 +260,7 @@ jobs:
             echo "no Python ABI3 wheels found to publish" >&2
             exit 1
           fi
-          expected_wheel_count=4
+          expected_wheel_count=5
           wheel_count="$#"
           if [ "$wheel_count" -ne "$expected_wheel_count" ]; then
             echo "expected $expected_wheel_count Python ABI3 wheels, found $wheel_count" >&2

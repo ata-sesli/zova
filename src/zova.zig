@@ -59,6 +59,8 @@ const object_impl = @import("object.zig");
 
 const sqlite = @import("sqlite.zig");
 
+const statement_cache = @import("statement_cache.zig");
+
 const trgm_impl = @import("trgm.zig");
 
 const vector_impl = @import("vector.zig");
@@ -851,6 +853,7 @@ pub const Database = struct {
     main_graph_edge_types: graph_impl.GraphEdgeTypeCache = .{},
     bound_graph_edge_types: graph_impl.GraphEdgeTypeCache = .{},
     kv_statements: kv_impl.StatementCache = .{},
+    read_statements: statement_cache.Cache = .{},
     extension_registry: ExtensionRegistry = ExtensionRegistry.empty(),
 
     /// Create a new initialized `.zova` database.
@@ -1070,6 +1073,7 @@ pub const Database = struct {
         self.main_graph_edge_types.deinit();
         self.bound_graph_edge_types.deinit();
         self.kv_statements.deinit();
+        self.read_statements.deinit();
         self.sqlite_db.deinit();
         deinitNotifications(self.notifications);
     }
@@ -1709,6 +1713,9 @@ pub const Database = struct {
         }
         errdefer if (detached_old) self.restoreConfiguredBoundGraphStore() catch {};
 
+        // Attaching or replacing a bound store changes the schemas cached
+        // read SQL refers to, so dispose the cache first.
+        self.read_statements.deinit();
         try attachGraphStore(&self.sqlite_db, stored_path, false);
         errdefer self.sqlite_db.detachDatabase(bound_graph_store_schema_name) catch {};
         const store_id = try validateAttachedGraphStoreAlloc(std.heap.c_allocator, &self.sqlite_db, bound_graph_store_schema_name);
@@ -1740,6 +1747,9 @@ pub const Database = struct {
         try createGraphStore(store_path);
         errdefer deleteDestinationFile(store_path);
 
+        // Attaching or replacing a bound store changes the schemas cached
+        // read SQL refers to, so dispose the cache first.
+        self.read_statements.deinit();
         try attachGraphStore(&self.sqlite_db, store_path, false);
         errdefer self.sqlite_db.detachDatabase(bound_graph_store_schema_name) catch {};
 
@@ -1826,6 +1836,9 @@ pub const Database = struct {
             self.restoreConfiguredBoundObjectStore() catch {};
         };
 
+        // Attaching or replacing a bound store changes the schemas cached
+        // read SQL refers to, so dispose the cache first.
+        self.read_statements.deinit();
         try attachObjectStore(&self.sqlite_db, stored_path, false);
         errdefer self.sqlite_db.detachDatabase(bound_object_store_schema_name) catch {};
 
@@ -1863,6 +1876,9 @@ pub const Database = struct {
         try createObjectStore(store_path);
         errdefer deleteDestinationFile(store_path);
 
+        // Attaching or replacing a bound store changes the schemas cached
+        // read SQL refers to, so dispose the cache first.
+        self.read_statements.deinit();
         try attachObjectStore(&self.sqlite_db, store_path, false);
         errdefer self.sqlite_db.detachDatabase(bound_object_store_schema_name) catch {};
 
@@ -1957,6 +1973,9 @@ pub const Database = struct {
             self.restoreConfiguredBoundVectorStore() catch {};
         };
 
+        // Attaching or replacing a bound store changes the schemas cached
+        // read SQL refers to, so dispose the cache first.
+        self.read_statements.deinit();
         try attachVectorStore(&self.sqlite_db, stored_path, false);
         errdefer self.sqlite_db.detachDatabase(bound_vector_store_schema_name) catch {};
 
@@ -1994,6 +2013,9 @@ pub const Database = struct {
         try createVectorStore(store_path);
         errdefer deleteDestinationFile(store_path);
 
+        // Attaching or replacing a bound store changes the schemas cached
+        // read SQL refers to, so dispose the cache first.
+        self.read_statements.deinit();
         try attachVectorStore(&self.sqlite_db, store_path, false);
         errdefer self.sqlite_db.detachDatabase(bound_vector_store_schema_name) catch {};
 
@@ -2622,6 +2644,7 @@ pub const Database = struct {
             .sqlite_db = &self.sqlite_db,
             .storage_schema = if (bound) .object_store else .main,
             .allow_active_transactions = bound,
+            .statement_cache = &self.read_statements,
         };
     }
 
@@ -2683,6 +2706,7 @@ pub const Database = struct {
             .sqlite_db = &self.sqlite_db,
             .storage_schema = if (self.bound_graph_store != null) .graph_store else .main,
             .edge_type_cache = if (self.bound_graph_store != null) &self.bound_graph_edge_types else &self.main_graph_edge_types,
+            .statement_cache = &self.read_statements,
         };
     }
 
@@ -2734,34 +2758,41 @@ pub const Database = struct {
 
     fn detachBoundObjectStore(self: *Database) Error!void {
         if (self.bound_object_store == null) return;
+        // Cached SQL may refer to the attached schema being removed.
+        self.read_statements.deinit();
         try self.sqlite_db.detachDatabase(bound_object_store_schema_name);
         self.bound_object_store = null;
     }
 
     fn restoreConfiguredBoundObjectStore(self: *Database) Error!void {
         if (self.bound_object_store != null) return;
+        self.read_statements.deinit();
         self.bound_object_store = try openConfiguredBoundObjectStore(&self.sqlite_db, .{});
     }
 
     fn detachBoundVectorStore(self: *Database) Error!void {
         if (self.bound_vector_store == null) return;
+        self.read_statements.deinit();
         try self.sqlite_db.detachDatabase(bound_vector_store_schema_name);
         self.bound_vector_store = null;
     }
 
     fn restoreConfiguredBoundVectorStore(self: *Database) Error!void {
         if (self.bound_vector_store != null) return;
+        self.read_statements.deinit();
         self.bound_vector_store = try openConfiguredBoundVectorStore(&self.sqlite_db, .{});
     }
 
     fn detachBoundGraphStore(self: *Database) Error!void {
         if (self.bound_graph_store == null) return;
+        self.read_statements.deinit();
         try self.sqlite_db.detachDatabase(bound_graph_store_schema_name);
         self.bound_graph_store = null;
     }
 
     fn restoreConfiguredBoundGraphStore(self: *Database) Error!void {
         if (self.bound_graph_store != null) return;
+        self.read_statements.deinit();
         self.bound_graph_store = try openConfiguredBoundGraphStore(&self.sqlite_db, .{});
     }
 };

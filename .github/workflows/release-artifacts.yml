@@ -77,6 +77,10 @@ jobs:
             platform: macos-arm64
             target: aarch64-apple-darwin
             container: "off"
+          - os: windows-latest
+            platform: windows-x86_64
+            target: x86_64-pc-windows-msvc
+            container: "off"
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
@@ -111,7 +115,11 @@ jobs:
           working-directory: bindings/python
           args: --release --locked --compatibility pypi --out ../../zig-out/python-artifacts
       - name: Verify stable-ABI wheel tag
+        shell: bash
         run: find zig-out/python-artifacts -name 'zova-*-cp313-abi3-*.whl' | grep -q .
+      - name: Verify Windows wheel tag
+        if: runner.os == 'Windows'
+        run: python -c "from pathlib import Path; assert list(Path('zig-out/python-artifacts').glob('zova-*-cp313-abi3-win_amd64.whl'))"
       - run: |
           version="${{ inputs.version }}"
           python_version="$version"
@@ -134,6 +142,7 @@ jobs:
                   assert stmt.column_text(0) == "hello"
           print("ok", zova.__version__)
           PY
+        shell: bash
       - run: |
           version="${{ inputs.version }}"
           python_version="$version"
@@ -156,6 +165,7 @@ jobs:
                   assert stmt.column_text(0) == "hello"
           print("ok", zova.__version__)
           PY
+        shell: bash
       - uses: actions/upload-artifact@v4
         with:
           name: zova-${{ inputs.version }}-${{ matrix.platform }}-python

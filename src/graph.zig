@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
+const statement_cache = @import("statement_cache.zig");
 const zova_error = @import("zova_error.zig");
 
 pub const Error = zova_error.Error;
@@ -678,6 +679,22 @@ pub const Database = struct {
     sqlite_db: *sqlite.Database,
     storage_schema: StorageSchema = .main,
     edge_type_cache: ?*GraphEdgeTypeCache = null,
+    /// Connection-owned cache, null when no owner supplied one. See
+    /// `statement_cache` for the reuse and invalidation contract.
+    statement_cache: ?*statement_cache.Cache = null,
+
+    /// Check out the shared cached statement for `tag`, preparing `sql` when
+    /// no idle statement is available.
+    fn acquire(self: *Database, comptime tag: statement_cache.Tag, comptime sql: []const u8) Error!statement_cache.Lease {
+        return statement_cache.acquire(
+            self.statement_cache,
+            self.sqlite_db,
+            tag,
+            self.storage_schema != .main,
+            sql,
+            self.storage_schema.prefix(),
+        );
+    }
 
     fn prepareSchema(self: *Database, comptime sql_template: []const u8) Error!sqlite.Statement {
         var sql_buffer: [4096]u8 = undefined;
@@ -1234,8 +1251,9 @@ pub const Database = struct {
     }
 
     fn graphKey(self: *Database, name: []const u8) Error!i64 {
-        var stmt = try self.prepareSchema("select graph_key from {s}_zova_graphs where name = ?");
-        defer stmt.deinit();
+        var lease = try self.acquire(.graph_key, "select graph_key from {s}_zova_graphs where name = ?");
+        defer lease.release();
+        const stmt = &lease.statement;
         try stmt.bindText(1, name);
         return switch (try stmt.step()) {
             .done => error.GraphNotFound,
@@ -1511,19 +1529,20 @@ pub const Database = struct {
         try validateGraphName(graph_name);
         try validateNodeId(node_id);
 
-        var stmt = try self.prepareSchema(
+        var lease = try self.acquire(.graph_get_node,
             \\select g.name, n.node_id, n.kind, n.target_type, n.target_namespace, n.target_ref, g.graph_key, n.node_key
             \\from {s}_zova_graph_nodes n
             \\join {s}_zova_graphs g on g.graph_key = n.graph_key
             \\where g.name = ? and n.node_id = ?
         );
-        defer stmt.deinit();
+        defer lease.release();
+        const stmt = &lease.statement;
         try stmt.bindText(1, graph_name);
         try stmt.bindText(2, node_id);
 
         return switch (try stmt.step()) {
             .done => error.GraphNodeNotFound,
-            .row => .{ .node = try nodeFromRow(allocator, &stmt), .graph_key = stmt.columnInt64(6), .node_key = stmt.columnInt64(7) },
+            .row => .{ .node = try nodeFromRow(allocator, stmt), .graph_key = stmt.columnInt64(6), .node_key = stmt.columnInt64(7) },
         };
     }
 
@@ -1531,13 +1550,14 @@ pub const Database = struct {
         try validateGraphName(graph_name);
         try validateNodeId(node_id);
 
-        var stmt = try self.prepareSchema(
+        var lease = try self.acquire(.graph_has_node,
             \\select count(*)
             \\from {s}_zova_graph_nodes n
             \\join {s}_zova_graphs g on g.graph_key = n.graph_key
             \\where g.name = ? and n.node_id = ?
         );
-        defer stmt.deinit();
+        defer lease.release();
+        const stmt = &lease.statement;
         try stmt.bindText(1, graph_name);
         try stmt.bindText(2, node_id);
         std.debug.assert((try stmt.step()) == .row);
@@ -1833,7 +1853,7 @@ pub const Database = struct {
         try validateEdgeType(edge_type);
         try validateNodeId(to_node_id);
 
-        var stmt = try self.prepareSchema(
+        var lease = try self.acquire(.graph_has_edge,
             \\select count(*)
             \\from {s}_zova_graph_edges e
             \\join {s}_zova_graph_edge_types et on et.edge_type_key=e.edge_type_key
@@ -1845,7 +1865,8 @@ pub const Database = struct {
             \\  where g.name=?1
             \\) and et.name=?3
         );
-        defer stmt.deinit();
+        defer lease.release();
+        const stmt = &lease.statement;
         try stmt.bindText(1, graph_name);
         try stmt.bindText(2, from_node_id);
         try stmt.bindText(3, edge_type);
@@ -2139,9 +2160,9 @@ pub const Database = struct {
         const graph_key = try self.graphKeyForRead(options.graph_name);
         const edge_type_key = if (options.edge_type) |edge_type| (try self.edgeTypeKeyForRead(graph_key, edge_type)) orelse -1 else null;
         const sqlite_limit = try sqliteLimit(options.limit);
-        var stmt = switch (options.direction) {
+        var lease = switch (options.direction) {
             .outgoing => if (options.edge_type == null)
-                try self.prepareSchema(
+                try self.acquire(.graph_neighbors_out,
                     \\select n.node_id,n.kind,e.edge_type_key
                     \\from {s}_zova_graph_edges e
                     \\join {s}_zova_graph_nodes n on n.node_key=e.to_node_key
@@ -2150,7 +2171,7 @@ pub const Database = struct {
                     \\limit ?3
                 )
             else
-                try self.prepareSchema(
+                try self.acquire(.graph_neighbors_out_typed,
                     \\select n.node_id,n.kind,e.edge_type_key
                     \\from {s}_zova_graph_edges e
                     \\join {s}_zova_graph_nodes n on n.node_key=e.to_node_key
@@ -2159,7 +2180,7 @@ pub const Database = struct {
                     \\limit ?4
                 ),
             .incoming => if (options.edge_type == null)
-                try self.prepareSchema(
+                try self.acquire(.graph_neighbors_in,
                     \\select n.node_id,n.kind,e.edge_type_key
                     \\from {s}_zova_graph_edges e
                     \\join {s}_zova_graph_nodes n on n.node_key=e.from_node_key
@@ -2168,7 +2189,7 @@ pub const Database = struct {
                     \\limit ?3
                 )
             else
-                try self.prepareSchema(
+                try self.acquire(.graph_neighbors_in_typed,
                     \\select n.node_id,n.kind,e.edge_type_key
                     \\from {s}_zova_graph_edges e
                     \\join {s}_zova_graph_nodes n on n.node_key=e.from_node_key
@@ -2177,7 +2198,8 @@ pub const Database = struct {
                     \\limit ?4
                 ),
         };
-        defer stmt.deinit();
+        defer lease.release();
+        const stmt = &lease.statement;
 
         try stmt.bindInt64(1, graph_key);
         try stmt.bindText(2, options.node_id);
@@ -2451,29 +2473,30 @@ pub const Database = struct {
         if (options.edge_type) |edge_type| try validateEdgeType(edge_type);
         const graph_key = try self.graphKeyForRead(options.graph_name);
         const edge_type_key = if (options.edge_type) |edge_type| (try self.edgeTypeKeyForRead(graph_key, edge_type)) orelse -1 else null;
-        var stmt = switch (options.direction) {
+        var lease = switch (options.direction) {
             .outgoing => if (options.edge_type != null)
-                try self.prepareSchema(
+                try self.acquire(.graph_degree_out_typed,
                     \\select count(*) from {s}_zova_graph_edges e
                     \\where e.graph_key=?1 and e.from_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2) and e.edge_type_key=?3
                 )
             else
-                try self.prepareSchema(
+                try self.acquire(.graph_degree_out,
                     \\select count(*) from {s}_zova_graph_edges e
                     \\where e.graph_key=?1 and e.from_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2)
                 ),
             .incoming => if (options.edge_type != null)
-                try self.prepareSchema(
+                try self.acquire(.graph_degree_in_typed,
                     \\select count(*) from {s}_zova_graph_edges e
                     \\where e.graph_key=?1 and e.to_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2) and e.edge_type_key=?3
                 )
             else
-                try self.prepareSchema(
+                try self.acquire(.graph_degree_in,
                     \\select count(*) from {s}_zova_graph_edges e
                     \\where e.graph_key=?1 and e.to_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2)
                 ),
         };
-        defer stmt.deinit();
+        defer lease.release();
+        const stmt = &lease.statement;
         try stmt.bindInt64(1, graph_key);
         try stmt.bindText(2, options.node_id);
         if (edge_type_key) |key| try stmt.bindInt64(3, key);

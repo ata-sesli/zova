@@ -5,7 +5,7 @@ const graph = @import("../graph.zig");
 
 const allocator = @import("values.zig").allocator;
 const candidateIdSlices = @import("values.zig").candidateIdSlices;
-const databaseHandle = @import("handles.zig").databaseHandle;
+const lockDatabaseHandle = @import("handles.zig").lockDatabaseHandle;
 const emptyGraphEdge = @import("results.zig").emptyGraphEdge;
 const emptyGraphInfo = @import("results.zig").emptyGraphInfo;
 const emptyGraphKeyedNeighborResults = @import("results.zig").emptyGraphKeyedNeighborResults;
@@ -73,8 +73,7 @@ const zova_status = @import("types.zig").zova_status;
 
 pub fn zova_graph_create(request: ?*const zova_graph_create_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const name = req.name orelse return failDb(handle, error.InvalidArgument);
     handle.db.createGraph(std.mem.span(name)) catch |err| return failDb(handle, err);
@@ -83,8 +82,7 @@ pub fn zova_graph_create(request: ?*const zova_graph_create_request) callconv(.c
 
 pub fn zova_graph_exists(request: ?*const zova_graph_exists_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const name = req.name orelse return failDb(handle, error.InvalidArgument);
     const out = req.out_exists orelse return failDb(handle, error.InvalidArgument);
@@ -95,8 +93,7 @@ pub fn zova_graph_exists(request: ?*const zova_graph_exists_request) callconv(.c
 
 pub fn zova_graph_info_get(request: ?*const zova_graph_info_get_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const name = req.name orelse return failDb(handle, error.InvalidArgument);
     const out = req.out_info orelse return failDb(handle, error.InvalidArgument);
@@ -109,8 +106,7 @@ pub fn zova_graph_info_get(request: ?*const zova_graph_info_get_request) callcon
 
 pub fn zova_graphs_list(request: ?*const zova_graph_list_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const out = req.out_list orelse return failDb(handle, error.InvalidArgument);
     out.* = emptyGraphList();
@@ -122,8 +118,7 @@ pub fn zova_graphs_list(request: ?*const zova_graph_list_request) callconv(.c) z
 
 pub fn zova_graph_delete(request: ?*const zova_graph_delete_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const name = req.name orelse return failDb(handle, error.InvalidArgument);
     handle.db.deleteGraph(std.mem.span(name)) catch |err| return failDb(handle, err);
@@ -132,8 +127,7 @@ pub fn zova_graph_delete(request: ?*const zova_graph_delete_request) callconv(.c
 
 pub fn zova_graph_node_put(request: ?*const zova_graph_node_put_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
     const node_id = req.node_id orelse return failDb(handle, error.InvalidArgument);
@@ -152,8 +146,7 @@ pub fn zova_graph_node_put(request: ?*const zova_graph_node_put_request) callcon
 
 pub fn zova_graph_node_put_many(request: ?*const zova_graph_node_put_many_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const nodes = graphNodeInputSlices(req.nodes, req.nodes_len) catch |err| return failDb(handle, err);
     defer if (nodes.len != 0) allocator.free(nodes);
@@ -165,8 +158,7 @@ pub fn zova_graph_node_put_many_keyed(request: ?*const zova_graph_node_put_many_
     const req = request orelse return .INVALID_ARGUMENT;
     if (req.out_node_keys_capacity < req.nodes_len) return .INVALID_ARGUMENT;
     if (req.nodes_len != 0 and (req.nodes == null or req.out_node_keys == null)) return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const nodes = graphNodeInputSlices(req.nodes, req.nodes_len) catch |err| return failDb(handle, err);
     defer if (nodes.len != 0) allocator.free(nodes);
@@ -182,10 +174,9 @@ fn graphBuildFreshKeyed(request: ?*const zova_graph_build_fresh_keyed_request, c
     if (req.out_node_keys_capacity < req.nodes_len or req.out_edge_keys_capacity < req.edges_len) return .INVALID_ARGUMENT;
     if (req.nodes_len != 0 and (req.nodes == null or req.out_node_keys == null)) return .INVALID_ARGUMENT;
     if (req.edges_len != 0 and (req.edges == null or req.out_edge_keys == null)) return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    const graph_name = req.graph_name orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
+    const graph_name = req.graph_name orelse return .INVALID_ARGUMENT;
     const nodes = freshGraphNodeInputSlices(req.nodes, req.nodes_len) catch |err| return failDb(handle, err);
     defer if (nodes.len != 0) allocator.free(nodes);
     const edges = freshGraphEdgeInputSlices(req.edges, req.edges_len) catch |err| return failDb(handle, err);
@@ -217,10 +208,9 @@ pub fn zova_graph_build_fresh_prepared_keyed_with_payloads(request: ?*const zova
     if (req.out_node_keys_capacity < req.nodes_len or req.out_edge_keys_capacity < req.edges_len) return .INVALID_ARGUMENT;
     if (req.nodes_len != 0 and (req.nodes == null or req.out_node_keys == null)) return .INVALID_ARGUMENT;
     if (req.edges_len != 0 and (req.edges == null or req.out_edge_keys == null)) return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    const graph_name = req.graph_name orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
+    const graph_name = req.graph_name orelse return .INVALID_ARGUMENT;
     const nodes = freshGraphNodeInputSlices(req.nodes, req.nodes_len) catch |err| return failDb(handle, err);
     defer if (nodes.len != 0) allocator.free(nodes);
     const edges = freshGraphEdgePayloadInputSlices(req.edges, req.edges_len) catch |err| return failDb(handle, err);
@@ -237,8 +227,7 @@ pub fn zova_graph_build_fresh_prepared_keyed_with_payloads(request: ?*const zova
 
 pub fn zova_graph_node_get(request: ?*const zova_graph_node_get_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
     const node_id = req.node_id orelse return failDb(handle, error.InvalidArgument);
@@ -252,8 +241,7 @@ pub fn zova_graph_node_get(request: ?*const zova_graph_node_get_request) callcon
 
 pub fn zova_graph_node_exists(request: ?*const zova_graph_node_exists_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
     const node_id = req.node_id orelse return failDb(handle, error.InvalidArgument);
@@ -265,8 +253,7 @@ pub fn zova_graph_node_exists(request: ?*const zova_graph_node_exists_request) c
 
 pub fn zova_graph_node_delete(request: ?*const zova_graph_node_delete_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
     const node_id = req.node_id orelse return failDb(handle, error.InvalidArgument);
@@ -276,8 +263,7 @@ pub fn zova_graph_node_delete(request: ?*const zova_graph_node_delete_request) c
 
 pub fn zova_graph_node_delete_many(request: ?*const zova_graph_node_delete_many_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
     const node_ids = candidateIdSlices(req.node_ids, req.node_count) catch |err| return failDb(handle, err);
@@ -288,8 +274,7 @@ pub fn zova_graph_node_delete_many(request: ?*const zova_graph_node_delete_many_
 
 pub fn zova_graph_edge_put(request: ?*const zova_graph_edge_put_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
     const from_node_id = req.from_node_id orelse return failDb(handle, error.InvalidArgument);
@@ -306,8 +291,7 @@ pub fn zova_graph_edge_put(request: ?*const zova_graph_edge_put_request) callcon
 
 pub fn zova_graph_edge_put_many(request: ?*const zova_graph_edge_put_many_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const edges = graphEdgeInputSlices(req.edges, req.edges_len) catch |err| return failDb(handle, err);
     defer if (edges.len != 0) allocator.free(edges);
@@ -319,8 +303,7 @@ pub fn zova_graph_edge_put_many_keyed(request: ?*const zova_graph_edge_put_many_
     const req = request orelse return .INVALID_ARGUMENT;
     if (req.out_edge_keys_capacity < req.edges_len) return .INVALID_ARGUMENT;
     if (req.edges_len != 0 and (req.edges == null or req.out_edge_keys == null)) return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const edges = graphEdgeInputSlices(req.edges, req.edges_len) catch |err| return failDb(handle, err);
     defer if (edges.len != 0) allocator.free(edges);
@@ -333,8 +316,7 @@ pub fn zova_graph_edge_put_many_keyed(request: ?*const zova_graph_edge_put_many_
 
 pub fn zova_graph_edge_delete_many(request: ?*const zova_graph_edge_delete_many_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const edges = graphEdgeInputSlices(req.edges, req.edges_len) catch |err| return failDb(handle, err);
     defer if (edges.len != 0) allocator.free(edges);
@@ -344,8 +326,7 @@ pub fn zova_graph_edge_delete_many(request: ?*const zova_graph_edge_delete_many_
 
 pub fn zova_graph_edge_get(request: ?*const zova_graph_edge_get_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
     const from_node_id = req.from_node_id orelse return failDb(handle, error.InvalidArgument);
@@ -361,8 +342,7 @@ pub fn zova_graph_edge_get(request: ?*const zova_graph_edge_get_request) callcon
 
 pub fn zova_graph_edge_exists(request: ?*const zova_graph_edge_exists_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
     const from_node_id = req.from_node_id orelse return failDb(handle, error.InvalidArgument);
@@ -376,8 +356,7 @@ pub fn zova_graph_edge_exists(request: ?*const zova_graph_edge_exists_request) c
 
 pub fn zova_graph_edge_delete(request: ?*const zova_graph_edge_delete_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
     const from_node_id = req.from_node_id orelse return failDb(handle, error.InvalidArgument);
@@ -394,8 +373,7 @@ pub fn zova_graph_edge_delete(request: ?*const zova_graph_edge_delete_request) c
 
 pub fn zova_graph_neighbors(request: ?*const zova_graph_neighbors_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
     const node_id = req.node_id orelse return failDb(handle, error.InvalidArgument);
@@ -418,8 +396,7 @@ pub fn zova_graph_neighbors_keyed(request: ?*const zova_graph_neighbors_keyed_re
     const req = request orelse return .INVALID_ARGUMENT;
     const out = req.out_results orelse return .INVALID_ARGUMENT;
     out.* = emptyGraphKeyedNeighborResults();
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
     const node_id = req.node_id orelse return failDb(handle, error.InvalidArgument);
@@ -444,8 +421,7 @@ pub fn zova_graph_nodes_get_many_keyed(request: ?*const zova_graph_nodes_get_man
     if (req.key_count != 0 and req.node_keys == null) return .INVALID_ARGUMENT;
     const keys: []const i64 = if (req.key_count == 0) &.{} else req.node_keys.?[0..req.key_count];
     for (keys) |key| if (key <= 0) return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     var results = handle.db.graphNodesGetManyKeyed(allocator, std.mem.span(graph_name), keys) catch |err| return failDb(handle, err);
     defer results.deinit(allocator);
@@ -461,8 +437,7 @@ pub fn zova_graph_edges_get_many_keyed(request: ?*const zova_graph_edges_get_man
     if (req.key_count != 0 and req.edge_keys == null) return .INVALID_ARGUMENT;
     const keys: []const i64 = if (req.key_count == 0) &.{} else req.edge_keys.?[0..req.key_count];
     for (keys) |key| if (key <= 0) return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     var results = handle.db.graphEdgesGetManyKeyed(allocator, std.mem.span(graph_name), keys) catch |err| return failDb(handle, err);
     defer results.deinit(allocator);
@@ -478,8 +453,7 @@ pub fn zova_graph_edge_payload_get_many(request: ?*const zova_graph_edge_payload
     if (req.key_count != 0 and req.edge_keys == null) return .INVALID_ARGUMENT;
     const keys: []const i64 = if (req.key_count == 0) &.{} else req.edge_keys.?[0..req.key_count];
     for (keys) |key| if (key <= 0) return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     var results = handle.db.graphEdgePayloadsGetMany(allocator, std.mem.span(graph_name), keys) catch |err| return failDb(handle, err);
     defer results.deinit(allocator);
@@ -491,19 +465,17 @@ pub fn zova_graph_edge_payload_replace_many(request: ?*const zova_graph_edge_pay
     const req = request orelse return .INVALID_ARGUMENT;
     const graph_name = req.graph_name orelse return .INVALID_ARGUMENT;
     if (req.replacement_count != 0 and req.replacements == null) return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    defer handle.mutex.unlock();
     const replacements = graphEdgePayloadReplacementSlices(req.replacements, req.replacement_count) catch |err| return failDb(handle, err);
     defer if (replacements.len != 0) allocator.free(replacements);
-    handle.mutex.lock();
-    defer handle.mutex.unlock();
     handle.db.replaceGraphEdgePayloads(std.mem.span(graph_name), replacements) catch |err| return failDb(handle, err);
     return okDb(handle);
 }
 
 pub fn zova_graph_degree(request: ?*const zova_graph_degree_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
     const node_id = req.node_id orelse return failDb(handle, error.InvalidArgument);
@@ -524,8 +496,7 @@ pub fn zova_graph_degree_many_keyed(request: ?*const zova_graph_degree_many_keye
     if (req.node_count != 0 and (req.node_keys == null or req.out_degrees == null)) return .INVALID_ARGUMENT;
     const graph_name = req.graph_name orelse return .INVALID_ARGUMENT;
     const direction = graphDirectionFromAbi(req.direction) orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const node_keys: []const i64 = if (req.node_count == 0) &.{} else req.node_keys.?[0..req.node_count];
     const degrees = allocator.alloc(u64, req.node_count) catch |err| return failDb(handle, err);
@@ -545,8 +516,7 @@ pub fn zova_graph_scan(request: ?*const zova_graph_scan_request) callconv(.c) zo
     const req = request orelse return .INVALID_ARGUMENT;
     const out = req.out_results orelse return .INVALID_ARGUMENT;
     out.* = emptyGraphScanResults();
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
     var results = handle.db.graphScan(allocator, .{
@@ -563,8 +533,7 @@ pub fn zova_graph_scan(request: ?*const zova_graph_scan_request) callconv(.c) zo
 
 pub fn zova_graph_walk(request: ?*const zova_graph_walk_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
     const start_node_id = req.start_node_id orelse return failDb(handle, error.InvalidArgument);
@@ -584,8 +553,7 @@ pub fn zova_graph_walk(request: ?*const zova_graph_walk_request) callconv(.c) zo
 
 pub fn zova_graph_walk_direction(request: ?*const zova_graph_walk_direction_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const graph_name = req.graph_name orelse return failDb(handle, error.InvalidArgument);
     const start_node_id = req.start_node_id orelse return failDb(handle, error.InvalidArgument);
@@ -612,10 +580,9 @@ pub fn zova_graph_walk_direction_profiled(request: ?*const zova_graph_walk_direc
     out.* = emptyGraphWalkResults();
     out_profile.* = .{};
 
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     const total_start = cAbiProfileTimestamp();
     const mutex_start = cAbiProfileTimestamp();
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     out_profile.mutex_wait_ms = cAbiProfileElapsedMs(mutex_start);
     defer handle.mutex.unlock();
 
