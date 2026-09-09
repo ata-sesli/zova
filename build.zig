@@ -234,6 +234,20 @@ pub fn build(b: *std.Build) void {
     const install_graph_index_ddl_95 = b.addInstallArtifact(graph_index_ddl_95_benchmark, .{});
     b.step("build-graph-index-ddl-95", "Build bounded issue-95 graph batch index benchmark").dependOn(&install_graph_index_ddl_95.step);
 
+    const resolution_scope_100_benchmark = b.addExecutable(.{
+        .name = "zova_resolution_scope_100_benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/resolution_scope_100.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    resolution_scope_100_benchmark.root_module.addImport("zova", zova_module);
+    resolution_scope_100_benchmark.root_module.addIncludePath(b.path("vendor/sqlite3.53.4"));
+    resolution_scope_100_benchmark.root_module.linkLibrary(sqlite_lib);
+    const install_resolution_scope_100 = b.addInstallArtifact(resolution_scope_100_benchmark, .{});
+    b.step("build-resolution-scope-100", "Build bounded issue-100 scope audit benchmark").dependOn(&install_resolution_scope_100.step);
+
     const graph_walk_scratch_99_benchmark = b.addExecutable(.{
         .name = "zova_graph_walk_scratch_99_benchmark",
         .root_module = b.createModule(.{
@@ -452,6 +466,17 @@ pub fn build(b: *std.Build) void {
         zova_build_options,
         sqlite_lib,
     );
+    const resolution_scope_100_test_step = addZigTestSuite(
+        b,
+        "test-resolution-scope-100",
+        "Run issue-100 scope audit tests",
+        "src/test_resolution_scope_100_root.zig",
+        &.{ "resolution_scope_100_tests", "resolution_scope_100.test." },
+        target,
+        optimize,
+        zova_build_options,
+        sqlite_lib,
+    );
     const graph_walk_scratch_test_step = addZigTestSuite(
         b,
         "test-graph-walk-scratch",
@@ -515,6 +540,7 @@ pub fn build(b: *std.Build) void {
         kv_test_step,
         statement_cache_test_step,
         graph_walk_scratch_test_step,
+        resolution_scope_100_test_step,
         extension_test_step,
         migration_test_step,
         c_api_test_step,

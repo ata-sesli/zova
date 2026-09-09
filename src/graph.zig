@@ -759,7 +759,7 @@ pub const Database = struct {
         if (self.edge_type_cache) |cache| {
             try self.ensureEdgeTypeCache();
             if (cache.by_type.get(.{ .graph_key = graph_key, .name = name })) |key| return key;
-            var stmt = try self.prepareSchema("select edge_type_key,name from {s}_zova_graph_edge_types where graph_key=? and name=?");
+            var stmt = try self.prepareSchema("select edge_type_key,name from {s}_zova_graph_edge_types where /* zova_trace:edge_type_resolve */ graph_key=? and name=?");
             defer stmt.deinit();
             try stmt.bindInt64(1, graph_key);
             try stmt.bindText(2, name);
@@ -777,7 +777,7 @@ pub const Database = struct {
             };
             return key;
         }
-        var stmt = try self.prepareSchema("select edge_type_key from {s}_zova_graph_edge_types where graph_key=? and name=?");
+        var stmt = try self.prepareSchema("select edge_type_key from {s}_zova_graph_edge_types where /* zova_trace:edge_type_resolve */ graph_key=? and name=?");
         defer stmt.deinit();
         try stmt.bindInt64(1, graph_key);
         try stmt.bindText(2, name);
@@ -1261,7 +1261,7 @@ pub const Database = struct {
     }
 
     fn graphKey(self: *Database, name: []const u8) Error!i64 {
-        var lease = try self.acquire(.graph_key, "select graph_key from {s}_zova_graphs where name = ?");
+        var lease = try self.acquire(.graph_key, "select /* zova_trace:graph_key */ graph_key from {s}_zova_graphs where name = ?");
         defer lease.release();
         const stmt = &lease.statement;
         try stmt.bindText(1, name);
@@ -1540,7 +1540,7 @@ pub const Database = struct {
         try validateNodeId(node_id);
 
         var lease = try self.acquire(.graph_get_node,
-            \\select g.name, n.node_id, n.kind, n.target_type, n.target_namespace, n.target_ref, g.graph_key, n.node_key
+            \\select /* zova_trace:graph_node_resolve */ g.name, n.node_id, n.kind, n.target_type, n.target_namespace, n.target_ref, g.graph_key, n.node_key
             \\from {s}_zova_graph_nodes n
             \\join {s}_zova_graphs g on g.graph_key = n.graph_key
             \\where g.name = ? and n.node_id = ?
@@ -1561,7 +1561,7 @@ pub const Database = struct {
         try validateNodeId(node_id);
 
         var lease = try self.acquire(.graph_has_node,
-            \\select count(*)
+            \\select /* zova_trace:graph_node_resolve */ count(*)
             \\from {s}_zova_graph_nodes n
             \\join {s}_zova_graphs g on g.graph_key = n.graph_key
             \\where g.name = ? and n.node_id = ?
@@ -1864,7 +1864,7 @@ pub const Database = struct {
         try validateNodeId(to_node_id);
 
         var lease = try self.acquire(.graph_has_edge,
-            \\select count(*)
+            \\select /* zova_trace:graph_edge_resolve */ count(*)
             \\from {s}_zova_graph_edges e
             \\join {s}_zova_graph_edge_types et on et.edge_type_key=e.edge_type_key
             \\where (e.graph_key,e.from_node_key,e.to_node_key)=(
@@ -2173,37 +2173,37 @@ pub const Database = struct {
         var lease = switch (options.direction) {
             .outgoing => if (options.edge_type == null)
                 try self.acquire(.graph_neighbors_out,
-                    \\select n.node_id,n.kind,e.edge_type_key
+                    \\select /* zova_trace:graph_adjacency */ n.node_id,n.kind,e.edge_type_key
                     \\from {s}_zova_graph_edges e
                     \\join {s}_zova_graph_nodes n on n.node_key=e.to_node_key
-                    \\where e.graph_key=?1 and e.from_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2)
+                    \\where e.graph_key=?1 and e.from_node_key=(select /* zova_trace:graph_node_resolve */ node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2)
                     \\order by e.created_order, e.to_node_key
                     \\limit ?3
                 )
             else
                 try self.acquire(.graph_neighbors_out_typed,
-                    \\select n.node_id,n.kind,e.edge_type_key
+                    \\select /* zova_trace:graph_adjacency */ n.node_id,n.kind,e.edge_type_key
                     \\from {s}_zova_graph_edges e
                     \\join {s}_zova_graph_nodes n on n.node_key=e.to_node_key
-                    \\where e.graph_key=?1 and e.from_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2) and e.edge_type_key=?3
+                    \\where e.graph_key=?1 and e.from_node_key=(select /* zova_trace:graph_node_resolve */ node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2) and e.edge_type_key=?3
                     \\order by e.created_order, e.to_node_key
                     \\limit ?4
                 ),
             .incoming => if (options.edge_type == null)
                 try self.acquire(.graph_neighbors_in,
-                    \\select n.node_id,n.kind,e.edge_type_key
+                    \\select /* zova_trace:graph_adjacency */ n.node_id,n.kind,e.edge_type_key
                     \\from {s}_zova_graph_edges e
                     \\join {s}_zova_graph_nodes n on n.node_key=e.from_node_key
-                    \\where e.graph_key=?1 and e.to_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2)
+                    \\where e.graph_key=?1 and e.to_node_key=(select /* zova_trace:graph_node_resolve */ node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2)
                     \\order by e.created_order, e.from_node_key
                     \\limit ?3
                 )
             else
                 try self.acquire(.graph_neighbors_in_typed,
-                    \\select n.node_id,n.kind,e.edge_type_key
+                    \\select /* zova_trace:graph_adjacency */ n.node_id,n.kind,e.edge_type_key
                     \\from {s}_zova_graph_edges e
                     \\join {s}_zova_graph_nodes n on n.node_key=e.from_node_key
-                    \\where e.graph_key=?1 and e.to_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2) and e.edge_type_key=?3
+                    \\where e.graph_key=?1 and e.to_node_key=(select /* zova_trace:graph_node_resolve */ node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2) and e.edge_type_key=?3
                     \\order by e.created_order, e.from_node_key
                     \\limit ?4
                 ),
@@ -2254,28 +2254,28 @@ pub const Database = struct {
                 try self.prepareSchema(
                     \\select e.edge_key,n.node_key,n.node_id,n.kind,e.edge_type_key
                     \\from {s}_zova_graph_edges e join {s}_zova_graph_nodes n on n.node_key=e.to_node_key
-                    \\where e.graph_key=?1 and e.from_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2)
+                    \\where e.graph_key=?1 and e.from_node_key=(select /* zova_trace:graph_node_resolve */ node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2)
                     \\order by e.created_order,n.node_id collate binary,n.node_key limit ?3
                 )
             else
                 try self.prepareSchema(
                     \\select e.edge_key,n.node_key,n.node_id,n.kind,e.edge_type_key
                     \\from {s}_zova_graph_edges e join {s}_zova_graph_nodes n on n.node_key=e.to_node_key
-                    \\where e.graph_key=?1 and e.from_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2) and e.edge_type_key=?3
+                    \\where e.graph_key=?1 and e.from_node_key=(select /* zova_trace:graph_node_resolve */ node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2) and e.edge_type_key=?3
                     \\order by e.created_order,n.node_id collate binary,n.node_key limit ?4
                 ),
             .incoming => if (options.edge_type == null)
                 try self.prepareSchema(
                     \\select e.edge_key,n.node_key,n.node_id,n.kind,e.edge_type_key
                     \\from {s}_zova_graph_edges e join {s}_zova_graph_nodes n on n.node_key=e.from_node_key
-                    \\where e.graph_key=?1 and e.to_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2)
+                    \\where e.graph_key=?1 and e.to_node_key=(select /* zova_trace:graph_node_resolve */ node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2)
                     \\order by e.created_order,n.node_id collate binary,n.node_key limit ?3
                 )
             else
                 try self.prepareSchema(
                     \\select e.edge_key,n.node_key,n.node_id,n.kind,e.edge_type_key
                     \\from {s}_zova_graph_edges e join {s}_zova_graph_nodes n on n.node_key=e.from_node_key
-                    \\where e.graph_key=?1 and e.to_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2) and e.edge_type_key=?3
+                    \\where e.graph_key=?1 and e.to_node_key=(select /* zova_trace:graph_node_resolve */ node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2) and e.edge_type_key=?3
                     \\order by e.created_order,n.node_id collate binary,n.node_key limit ?4
                 ),
         };
@@ -2486,23 +2486,23 @@ pub const Database = struct {
         var lease = switch (options.direction) {
             .outgoing => if (options.edge_type != null)
                 try self.acquire(.graph_degree_out_typed,
-                    \\select count(*) from {s}_zova_graph_edges e
-                    \\where e.graph_key=?1 and e.from_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2) and e.edge_type_key=?3
+                    \\select /* zova_trace:graph_adjacency */ count(*) from {s}_zova_graph_edges e
+                    \\where e.graph_key=?1 and e.from_node_key=(select /* zova_trace:graph_node_resolve */ node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2) and e.edge_type_key=?3
                 )
             else
                 try self.acquire(.graph_degree_out,
-                    \\select count(*) from {s}_zova_graph_edges e
-                    \\where e.graph_key=?1 and e.from_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2)
+                    \\select /* zova_trace:graph_adjacency */ count(*) from {s}_zova_graph_edges e
+                    \\where e.graph_key=?1 and e.from_node_key=(select /* zova_trace:graph_node_resolve */ node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2)
                 ),
             .incoming => if (options.edge_type != null)
                 try self.acquire(.graph_degree_in_typed,
-                    \\select count(*) from {s}_zova_graph_edges e
-                    \\where e.graph_key=?1 and e.to_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2) and e.edge_type_key=?3
+                    \\select /* zova_trace:graph_adjacency */ count(*) from {s}_zova_graph_edges e
+                    \\where e.graph_key=?1 and e.to_node_key=(select /* zova_trace:graph_node_resolve */ node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2) and e.edge_type_key=?3
                 )
             else
                 try self.acquire(.graph_degree_in,
-                    \\select count(*) from {s}_zova_graph_edges e
-                    \\where e.graph_key=?1 and e.to_node_key=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2)
+                    \\select /* zova_trace:graph_adjacency */ count(*) from {s}_zova_graph_edges e
+                    \\where e.graph_key=?1 and e.to_node_key=(select /* zova_trace:graph_node_resolve */ node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2)
                 ),
         };
         defer lease.release();
@@ -2877,7 +2877,7 @@ pub const Database = struct {
                     \\join {s}_zova_graph_nodes n on n.node_key = e.to_node_key
                     \\where e.graph_key=?1 and e.from_node_key=?2
                     \\order by e.created_order, e.to_node_key
-                    \\limit ?
+                    \\limit ? /* zova_trace:walk_adjacency */
                 )
             else
                 try self.prepareSchema(
@@ -2886,7 +2886,7 @@ pub const Database = struct {
                     \\join {s}_zova_graph_nodes n on n.node_key = e.to_node_key
                     \\where e.graph_key=?1 and e.from_node_key=?2 and e.edge_type_key=?3
                     \\order by e.created_order, e.to_node_key
-                    \\limit ?
+                    \\limit ? /* zova_trace:walk_adjacency */
                 ),
             .incoming => if (!filtered)
                 try self.prepareSchema(
@@ -2895,7 +2895,7 @@ pub const Database = struct {
                     \\join {s}_zova_graph_nodes n on n.node_key = e.from_node_key
                     \\where e.graph_key=?1 and e.to_node_key=?2
                     \\order by e.created_order, e.from_node_key
-                    \\limit ?
+                    \\limit ? /* zova_trace:walk_adjacency */
                 )
             else
                 try self.prepareSchema(
@@ -2904,7 +2904,7 @@ pub const Database = struct {
                     \\join {s}_zova_graph_nodes n on n.node_key = e.from_node_key
                     \\where e.graph_key=?1 and e.to_node_key=?2 and e.edge_type_key=?3
                     \\order by e.created_order, e.from_node_key
-                    \\limit ?
+                    \\limit ? /* zova_trace:walk_adjacency */
                 ),
         };
     }
