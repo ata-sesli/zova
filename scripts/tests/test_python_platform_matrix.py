@@ -29,6 +29,9 @@ class PythonPlatformMatrixTests(unittest.TestCase):
         self.assertIsNotNone(match)
         self.assertEqual(match.group(1), "5")
 
+        version_check = (ROOT / "scripts/check-versions.sh").read_text()
+        self.assertIn("expected_wheel_count=5", version_check)
+
     def test_python_metadata_and_docs_name_supported_operating_systems(self):
         metadata = tomllib.loads((ROOT / "bindings/python/pyproject.toml").read_text())
         classifiers = metadata["project"]["classifiers"]
