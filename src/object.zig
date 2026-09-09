@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 const fastcdc = @import("object_fastcdc.zig");
 const fixed_chunks = @import("object_fixed_chunks.zig");
 pub const sqlite = @import("sqlite.zig");
+const statement_cache = @import("statement_cache.zig");
 const zova_error = @import("zova_error.zig");
 
 pub const Error = zova_error.Error;
@@ -701,6 +702,9 @@ pub const Database = struct {
     sqlite_db: *sqlite.Database,
     storage_schema: StorageSchema = .main,
     allow_active_transactions: bool = false,
+    /// Connection-owned cache, null when no owner supplied one. See
+    /// `statement_cache` for the reuse and invalidation contract.
+    statement_cache: ?*statement_cache.Cache = null,
 
     /// Construct an object-layer handle over an explicitly prepared schema.
     ///
@@ -722,6 +726,19 @@ pub const Database = struct {
         return try self.sqlite_db.prepare(sql);
     }
 
+    /// Check out the shared cached statement for `tag`, preparing `sql` when
+    /// no idle statement is available.
+    fn acquire(self: *Database, comptime tag: statement_cache.Tag, comptime sql: []const u8) Error!statement_cache.Lease {
+        return statement_cache.acquire(
+            self.statement_cache,
+            self.sqlite_db,
+            tag,
+            self.storage_schema != .main,
+            sql,
+            self.storage_schema.prefix(),
+        );
+    }
+
     /// Create an incremental object writer for this database connection.
     ///
     /// The writer streams bytes through FastCDC-v1, stores verified loose
@@ -737,7 +754,7 @@ pub const Database = struct {
     /// Open a sequential reader over one object and pin its SQLite snapshot.
     /// The reader keeps one manifest statement active until EOF or `deinit`.
     pub fn objectReader(self: *Database, id: ObjectId) Error!ObjectReader {
-        const metadata = try loadObjectMetadata(self.sqlite_db, self.storage_schema, id);
+        const metadata = try loadObjectMetadata(self.statement_cache, self.sqlite_db, self.storage_schema, id);
         const size_bytes = try sqliteI64ToU64(metadata.size_bytes);
         const chunk_count = try sqliteI64ToU64(metadata.chunk_count);
         var manifest = try self.prepareSchema(
@@ -802,11 +819,11 @@ pub const Database = struct {
         var committed = false;
         errdefer if (!committed and owns_transaction) self.sqlite_db.rollback() catch {};
 
-        if (try objectRowExists(self.sqlite_db, self.storage_schema, id)) {
+        if (try objectRowExists(self.statement_cache, self.sqlite_db, self.storage_schema, id)) {
             // Loading metadata validates the stored representation identifier;
             // the existing object remains authoritative and is never repacked
             // to satisfy the newly requested policy.
-            _ = try loadObjectMetadata(self.sqlite_db, self.storage_schema, id);
+            _ = try loadObjectMetadata(self.statement_cache, self.sqlite_db, self.storage_schema, id);
             if (owns_transaction) try self.sqlite_db.commit();
             committed = true;
             return id;
@@ -849,7 +866,7 @@ pub const Database = struct {
     /// `error.ObjectNotFound`. Broken private object rows return
     /// `error.ObjectCorrupt` rather than being repaired.
     pub fn getObject(self: *Database, allocator: std.mem.Allocator, id: ObjectId) Error!Object {
-        const metadata = try loadObjectMetadata(self.sqlite_db, self.storage_schema, id);
+        const metadata = try loadObjectMetadata(self.statement_cache, self.sqlite_db, self.storage_schema, id);
         const size = try sqliteI64ToUsize(metadata.size_bytes);
         const chunk_count = try sqliteI64ToUsize(metadata.chunk_count);
         var bytes = try allocator.alloc(u8, size);
@@ -919,7 +936,7 @@ pub const Database = struct {
     /// return `error.ObjectRangeInvalid`; offsets at the end return `0`.
     /// Full-object reads additionally verify the final full-object SHA-256.
     pub fn readObjectRange(self: *Database, id: ObjectId, offset: u64, buffer: []u8) Error!usize {
-        const metadata = try loadObjectMetadata(self.sqlite_db, self.storage_schema, id);
+        const metadata = try loadObjectMetadata(self.statement_cache, self.sqlite_db, self.storage_schema, id);
         const size = try sqliteI64ToU64(metadata.size_bytes);
         const chunk_count = try sqliteI64ToU64(metadata.chunk_count);
 
@@ -946,16 +963,16 @@ pub const Database = struct {
         if (full_read) try validateObjectManifestShape(self.sqlite_db, self.storage_schema, id, size, chunk_count, metadata.policy);
 
         var chunks = if (metadata.policy == .fixed_1m)
-            try self.prepareSchema(
+            try self.acquire(.object_range_fixed,
                 \\select oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.rowid
                 \\from {s}_zova_object_chunks oc
                 \\left join {s}_zova_chunks c on c.chunk_hash = oc.chunk_hash
                 \\where oc.object_id = ?
                 \\  and oc.chunk_index between ? and ?
                 \\order by oc.chunk_index asc
-            , .{ self.storage_schema.prefix(), self.storage_schema.prefix() })
+            )
         else
-            try self.prepareSchema(
+            try self.acquire(.object_range_fastcdc,
                 \\select oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.rowid
                 \\from {s}_zova_object_chunks oc
                 \\left join {s}_zova_chunks c on c.chunk_hash = oc.chunk_hash
@@ -963,34 +980,35 @@ pub const Database = struct {
                 \\  and oc.offset + oc.size_bytes > ?
                 \\  and oc.offset < ?
                 \\order by oc.chunk_index asc
-            , .{ self.storage_schema.prefix(), self.storage_schema.prefix() });
-        defer chunks.deinit();
+            );
+        defer chunks.release();
+        const chunk_stmt = &chunks.statement;
 
-        try chunks.bindBlob(1, &id);
+        try chunk_stmt.bindBlob(1, &id);
         if (metadata.policy == .fixed_1m) {
             const first_index = offset / fixed_chunks.chunk_size;
             const last_index = (read_end - 1) / fixed_chunks.chunk_size;
-            try chunks.bindInt64(2, try u64ToSqliteI64(first_index));
-            try chunks.bindInt64(3, try u64ToSqliteI64(last_index));
+            try chunk_stmt.bindInt64(2, try u64ToSqliteI64(first_index));
+            try chunk_stmt.bindInt64(3, try u64ToSqliteI64(last_index));
         } else {
-            try chunks.bindInt64(2, try u64ToSqliteI64(offset));
-            try chunks.bindInt64(3, try u64ToSqliteI64(read_end));
+            try chunk_stmt.bindInt64(2, try u64ToSqliteI64(offset));
+            try chunk_stmt.bindInt64(3, try u64ToSqliteI64(read_end));
         }
 
         var scratch: [64 * 1024]u8 = undefined;
         var copied: usize = 0;
-        while ((try chunks.step()) == .row) {
-            const raw_index = chunks.columnInt64(0);
+        while ((try chunk_stmt.step()) == .row) {
+            const raw_index = chunk_stmt.columnInt64(0);
             if (raw_index < 0) return error.ObjectCorrupt;
             const chunk_index: u64 = @intCast(raw_index);
 
-            const raw_hash = chunks.columnBlob(1);
+            const raw_hash = chunk_stmt.columnBlob(1);
             if (raw_hash.len != @sizeOf(ObjectChunkId)) return error.ObjectCorrupt;
             var expected_hash: ObjectChunkId = undefined;
             @memcpy(&expected_hash, raw_hash);
 
-            const chunk_offset = try sqliteI64ToU64(chunks.columnInt64(2));
-            const chunk_size = try sqliteI64ToU64(chunks.columnInt64(3));
+            const chunk_offset = try sqliteI64ToU64(chunk_stmt.columnInt64(2));
+            const chunk_size = try sqliteI64ToU64(chunk_stmt.columnInt64(3));
             if (chunk_size == 0 or chunk_size > metadata.policy.maxSize()) return error.ObjectCorrupt;
             if (metadata.policy == .fixed_1m) {
                 if (chunk_index > std.math.maxInt(u64) / fixed_chunks.chunk_size) return error.ObjectCorrupt;
@@ -999,8 +1017,8 @@ pub const Database = struct {
             }
             if (chunk_offset > size or chunk_size > size - chunk_offset) return error.ObjectCorrupt;
 
-            if (chunks.columnType(4) == .null) return error.ObjectCorrupt;
-            const rowid = chunks.columnInt64(4);
+            if (chunk_stmt.columnType(4) == .null) return error.ObjectCorrupt;
+            const rowid = chunk_stmt.columnInt64(4);
             if (rowid <= 0) return error.ObjectCorrupt;
             const chunk_copied = blk: {
                 var blob = try sqlite.Blob.open(
@@ -1066,7 +1084,7 @@ pub const Database = struct {
         allocator: std.mem.Allocator,
         id: ObjectId,
     ) Error!ObjectManifest {
-        const metadata = try loadObjectMetadata(self.sqlite_db, self.storage_schema, id);
+        const metadata = try loadObjectMetadata(self.statement_cache, self.sqlite_db, self.storage_schema, id);
         const size = try sqliteI64ToU64(metadata.size_bytes);
         const chunk_count = try sqliteI64ToU64(metadata.chunk_count);
 
@@ -1261,7 +1279,7 @@ pub const Database = struct {
         var committed = false;
         errdefer if (!committed and owns_transaction) self.sqlite_db.rollback() catch {};
 
-        if (try objectRowExists(self.sqlite_db, self.storage_schema, id)) {
+        if (try objectRowExists(self.statement_cache, self.sqlite_db, self.storage_schema, id)) {
             var existing = self.getObject(std.heap.page_allocator, id) catch |err| switch (err) {
                 error.ObjectNotFound, error.ObjectCorrupt => return error.ObjectCorrupt,
                 else => return err,
@@ -1422,18 +1440,18 @@ pub const Database = struct {
 
     /// Return whether an object id exists without loading object bytes.
     pub fn hasObject(self: *Database, id: ObjectId) Error!bool {
-        return try objectRowExists(self.sqlite_db, self.storage_schema, id);
+        return try objectRowExists(self.statement_cache, self.sqlite_db, self.storage_schema, id);
     }
 
     /// Return the original full object byte length.
     pub fn objectSize(self: *Database, id: ObjectId) Error!u64 {
-        const metadata = try loadObjectMetadata(self.sqlite_db, self.storage_schema, id);
+        const metadata = try loadObjectMetadata(self.statement_cache, self.sqlite_db, self.storage_schema, id);
         return try sqliteI64ToU64(metadata.size_bytes);
     }
 
     /// Return the number of FastCDC chunks in the object manifest.
     pub fn objectChunkCount(self: *Database, id: ObjectId) Error!u64 {
-        const metadata = try loadObjectMetadata(self.sqlite_db, self.storage_schema, id);
+        const metadata = try loadObjectMetadata(self.statement_cache, self.sqlite_db, self.storage_schema, id);
         return try sqliteI64ToU64(metadata.chunk_count);
     }
 
@@ -1449,7 +1467,7 @@ pub const Database = struct {
         var committed = false;
         errdefer if (!committed and owns_transaction) self.sqlite_db.rollback() catch {};
 
-        if (!try objectRowExists(self.sqlite_db, self.storage_schema, id)) return error.ObjectNotFound;
+        if (!try objectRowExists(self.statement_cache, self.sqlite_db, self.storage_schema, id)) return error.ObjectNotFound;
 
         const candidate_chunks = try collectDeleteCandidateChunks(std.heap.page_allocator, self.sqlite_db, self.storage_schema, id);
         defer std.heap.page_allocator.free(candidate_chunks);
@@ -1537,14 +1555,15 @@ fn objectChunkIndexLessThan(_: void, left: ObjectChunk, right: ObjectChunk) bool
     return left.index < right.index;
 }
 
-fn objectRowExists(db: *sqlite.Database, storage_schema: StorageSchema, id: ObjectId) Error!bool {
-    var stmt = try prepareSchema(
-        db,
-        storage_schema,
-        "select 1 from {s}_zova_objects where object_id = ? limit 1",
-        .{storage_schema.prefix()},
-    );
-    defer stmt.deinit();
+fn objectRowExists(
+    cache: ?*statement_cache.Cache,
+    db: *sqlite.Database,
+    storage_schema: StorageSchema,
+    id: ObjectId,
+) Error!bool {
+    var lease = try statement_cache.acquire(cache, db, .object_exists, storage_schema != .main, "select 1 from {s}_zova_objects where object_id = ? limit 1", storage_schema.prefix());
+    defer lease.release();
+    const stmt = &lease.statement;
 
     try stmt.bindBlob(1, &id);
     return switch (try stmt.step()) {
@@ -1704,13 +1723,19 @@ fn deleteUnreferencedCandidateChunks(
     }
 }
 
-fn loadObjectMetadata(db: *sqlite.Database, storage_schema: StorageSchema, id: ObjectId) Error!ObjectMetadata {
-    var stmt = try prepareSchema(db, storage_schema,
+fn loadObjectMetadata(
+    cache: ?*statement_cache.Cache,
+    db: *sqlite.Database,
+    storage_schema: StorageSchema,
+    id: ObjectId,
+) Error!ObjectMetadata {
+    var lease = try statement_cache.acquire(cache, db, .object_metadata, storage_schema != .main,
         \\select size_bytes, chunk_count, chunker
         \\from {s}_zova_objects
         \\where object_id = ?
-    , .{storage_schema.prefix()});
-    defer stmt.deinit();
+    , storage_schema.prefix());
+    defer lease.release();
+    const stmt = &lease.statement;
 
     try stmt.bindBlob(1, &id);
 

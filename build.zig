@@ -235,6 +235,20 @@ pub fn build(b: *std.Build) void {
     const install_graph_index_ddl_95 = b.addInstallArtifact(graph_index_ddl_95_benchmark, .{});
     b.step("build-graph-index-ddl-95", "Build bounded issue-95 graph batch index benchmark").dependOn(&install_graph_index_ddl_95.step);
 
+    const statement_reuse_98_benchmark = b.addExecutable(.{
+        .name = "zova_statement_reuse_98_benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/statement_reuse_98.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    statement_reuse_98_benchmark.root_module.addImport("zova", zova_module);
+    statement_reuse_98_benchmark.root_module.addIncludePath(b.path("vendor/sqlite3.53.4"));
+    statement_reuse_98_benchmark.root_module.linkLibrary(sqlite_lib);
+    const install_statement_reuse_98 = b.addInstallArtifact(statement_reuse_98_benchmark, .{});
+    b.step("build-statement-reuse-98", "Build bounded issue-98 statement reuse benchmark").dependOn(&install_statement_reuse_98.step);
+
     const kv_benchmark = b.addExecutable(.{
         .name = "zova_kv_calls_benchmark",
         .root_module = b.createModule(.{
@@ -413,6 +427,17 @@ pub fn build(b: *std.Build) void {
         zova_build_options,
         sqlite_lib,
     );
+    const statement_cache_test_step = addZigTestSuite(
+        b,
+        "test-statement-cache",
+        "Run bounded read-statement cache tests",
+        "src/test_statement_cache_root.zig",
+        &.{ "statement_cache_tests", "statement_cache.test." },
+        target,
+        optimize,
+        zova_build_options,
+        sqlite_lib,
+    );
     const extension_test_step = addZigTestSuite(
         b,
         "test-extensions",
@@ -463,6 +488,7 @@ pub fn build(b: *std.Build) void {
         vector_test_step,
         graph_test_step,
         kv_test_step,
+        statement_cache_test_step,
         extension_test_step,
         migration_test_step,
         c_api_test_step,
