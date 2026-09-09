@@ -8,11 +8,11 @@ library paths, search paths, or anything that Zova auto-loads.
 
 ## Availability and binding matrix
 
-The published `1.0.0-rc.3` packages provide bundled lifecycle management,
+The `1.0.0` release provides bundled lifecycle management,
 application C scalar callbacks, and the legacy native bundle contract subject
 to the build restrictions below. The portable plugin ABI and explicit
-extension-data upgrades described later are implemented in this source tree
-but are not included in those already-published packages.
+extension-data upgrades described later are also included; application-authored
+extensions remain outside the stable 1.x authoring contract.
 
 | Host build | Bundled `trgm` lifecycle | Application C scalar callbacks | Dynamic `.zovaext` loading |
 | --- | --- | --- | --- |
@@ -28,13 +28,13 @@ deployment target; portable describes the C contract, not a universal binary.
 
 | Caller surface | Bundled lifecycle | App scalar callbacks | External bundles | Explicit data upgrades |
 | --- | --- | --- | --- | --- |
-| Native Zig registry | Yes | Native SQL registration | On loader-capable builds | Source-tree API |
-| C / raw Rust `zova-sys` | Yes | Yes | On loader-capable builds | Source-tree API |
+| Native Zig registry | Yes | Native SQL registration | On loader-capable builds | Yes |
+| C / raw Rust `zova-sys` | Yes | Yes | On loader-capable builds | Yes |
 | Safe Rust / Python / Go / `zova-js` | Yes | No wrapper | No wrapper | No wrapper |
 | `zova-wasm` | No public API | No public API | No | No |
 
 The CLI exposes lifecycle operations and, on loader-capable builds, bundle
-management. Its explicit `extension upgrade` command is a source-tree addition.
+management, including the explicit `extension upgrade` command.
 The bundle producer scaffolds legacy Zig code; portable C/C++ authors use
 `include/zova_plugin.h` and their own native compiler. The portable host table
 provides SQL execution, not scalar callback registration.
@@ -51,7 +51,7 @@ must use `_zova_ext_<name>_...` names. For example, an extension named `trgm`
 owns `_zova_ext_trgm_docs`, `_zova_ext_trgm_postings`, and indexes with the
 same prefix.
 
-In the current v1.0.0-rc.3 model, all installed extensions are required. Opening a
+In the current v1.0.0 model, all installed extensions are required. Opening a
 database with installed extension metadata but without matching process code
 fails during normal open. Diagnostic commands can still inspect the metadata so
 they can explain what is missing.
@@ -69,7 +69,7 @@ A `.zova` file may say which extensions it needs, but the application or CLI
 process decides which extension code is available. Zova never loads code just
 because a database asks for it.
 
-Zova supports three process-owned extension sources in v1.0.0-rc.3:
+Zova supports three process-owned extension sources in v1.0.0:
 
 - bundled extensions shipped with Zova, such as `trgm`
 - app-registered native Zig extensions supplied by the application process
@@ -336,7 +336,7 @@ invalid installed rows are rejected.
 
 `zova_abi_min` must be a canonical `major.minor.patch` version. Zova rejects a
 manifest when its ABI major differs from the host or its minimum version is
-newer than the host. The `1.0.0-rc.3` host reports numeric ABI `1.0.0`; extension
+newer than the host. The `1.0.0` host reports numeric ABI `1.0.0`; extension
 authors should rebuild and retest whenever their required ABI changes.
 
 ## Lifecycle
@@ -524,7 +524,7 @@ skips that extension's private storage and reports bounded skipped counts. The
 destination is not marked as having that extension installed unless the hook
 explicitly rebuilt enough storage and asks Zova to write installed metadata.
 
-In v1.0.0-rc.3, the bundled `trgm` extension has a valid-subset salvage hook. When
+In v1.0.0, the bundled `trgm` extension has a valid-subset salvage hook. When
 the source has required trgm private schema and metadata, the hook copies valid
 indexes, documents, and postings, rebuilds derived term rows, and asks Zova to
 mark `trgm` installed in the destination only after the rebuilt storage passes
@@ -590,7 +590,7 @@ extension registry.
 
 ## Explicit extension-data upgrades
 
-This section describes the unreleased source-tree API, not published rc.3.
+This section describes the API included in 1.0.0, subject to the host and binding restrictions above.
 
 The installed `_zova_extensions.version` value records the data contract that
 last completed installation or upgrade. The loaded manifest's `version` is the
@@ -654,7 +654,7 @@ open is not a bypass for an old or unsupported Zova format.
 
 ## Language-neutral plugin ABI v1
 
-This section describes the unreleased source-tree API, not published rc.3.
+This section describes the API included in 1.0.0, subject to the host and binding restrictions above.
 
 `include/zova_plugin.h` is the standalone C/C++ authoring contract. A portable
 bundle explicitly selects `"entrypoint": "zova_plugin_entry_v1"` in its
@@ -709,13 +709,13 @@ The current release workflow keeps produced Zova artifacts on the existing
 platform matrix. External extension builders should treat deployment target,
 architecture, and ABI compatibility as part of their own release contract.
 
-## v1.0.0-rc.3 Stability Limits
+## v1.0.0 Stability Limits
 
-v1.0.0-rc.3 establishes the 1.x extension-platform boundary: controlled scalar
+v1.0.0 establishes the 1.x extension-platform boundary: controlled scalar
 SQL callbacks through the C ABI, low-level `zova-sys` declarations, trusted local
 `.zovaext` bundle loading, and Zig registry injection for native hosts.
 
 Deferred from this release: aggregate/window SQL callbacks, SQLite subtype
 support, unregister APIs, raw `sqlite3 *` exposure as the normal extension path,
-safe high-level Rust, Go, Python, and JavaScript callbacks. The source-tree
-additions above do not retroactively change the published rc.3 contract.
+safe high-level Rust, Go, Python, and JavaScript callbacks. These limitations
+remain in 1.0.0.

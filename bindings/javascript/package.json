@@ -1,6 +1,6 @@
 {
   "name": "zova-js",
-  "version": "1.0.0-rc.3",
+  "version": "1.0.0",
   "description": "JavaScript and TypeScript bindings for Zova.",
   "license": "MIT",
   "repository": {
@@ -32,11 +32,11 @@
     "access": "public"
   },
   "optionalDependencies": {
-    "zova-db-darwin-arm64": "1.0.0-rc.3",
-    "zova-db-darwin-x64": "1.0.0-rc.3",
-    "zova-db-linux-arm64-gnu": "1.0.0-rc.3",
-    "zova-db-linux-x64-gnu": "1.0.0-rc.3",
-    "zova-db-windows-x64": "1.0.0-rc.3"
+    "zova-db-darwin-arm64": "1.0.0",
+    "zova-db-darwin-x64": "1.0.0",
+    "zova-db-linux-arm64-gnu": "1.0.0",
+    "zova-db-linux-x64-gnu": "1.0.0",
+    "zova-db-windows-x64": "1.0.0"
   },
   "scripts": {
     "build": "bun run build:native && bun run build:typescript",

@@ -9,8 +9,8 @@ import {
 
 describe("native binding metadata", () => {
   test("matches the current Zova release contract", () => {
-    expect(packageVersion).toBe("1.0.0-rc.3");
-    expect(abiVersion).toBe("1.0.0-rc.3");
+    expect(packageVersion).toBe("1.0.0");
+    expect(abiVersion).toBe("1.0.0");
     expect(formatVersion).toBe("11");
     expect(sqliteVersion).toBe("3.53.4");
   });

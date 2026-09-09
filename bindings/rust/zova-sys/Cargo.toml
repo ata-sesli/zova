@@ -32,16 +32,16 @@ path = "src/lib.rs"
 cc = "1.2"
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))'.dependencies]
-zova-sys-linux-x64 = { version = "=1.0.0-rc.3", path = "../zova-sys-linux-x64" }
+zova-sys-linux-x64 = { version = "=1.0.0", path = "../zova-sys-linux-x64" }
 
 [target.'cfg(all(target_os = "linux", target_arch = "aarch64", target_env = "gnu"))'.dependencies]
-zova-sys-linux-arm64 = { version = "=1.0.0-rc.3", path = "../zova-sys-linux-arm64" }
+zova-sys-linux-arm64 = { version = "=1.0.0", path = "../zova-sys-linux-arm64" }
 
 [target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
-zova-sys-darwin-x64 = { version = "=1.0.0-rc.3", path = "../zova-sys-darwin-x64" }
+zova-sys-darwin-x64 = { version = "=1.0.0", path = "../zova-sys-darwin-x64" }
 
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
-zova-sys-darwin-arm64 = { version = "=1.0.0-rc.3", path = "../zova-sys-darwin-arm64" }
+zova-sys-darwin-arm64 = { version = "=1.0.0", path = "../zova-sys-darwin-arm64" }
 
 [target.'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'.dependencies]
-zova-sys-windows-x64 = { version = "=1.0.0-rc.3", path = "../zova-sys-windows-x64" }
+zova-sys-windows-x64 = { version = "=1.0.0", path = "../zova-sys-windows-x64" }

@@ -148,14 +148,14 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "zova"
-version = "1.0.0-rc.3"
+version = "1.0.0"
 dependencies = [
  "zova-sys",
 ]
 
 [[package]]
 name = "zova-python"
-version = "1.0.0-rc.3"
+version = "1.0.0"
 dependencies = [
  "pyo3",
  "zova",
@@ -163,7 +163,7 @@ dependencies = [
 
 [[package]]
 name = "zova-sys"
-version = "1.0.0-rc.3"
+version = "1.0.0"
 dependencies = [
  "cc",
  "zova-sys-darwin-arm64",
@@ -175,20 +175,20 @@ dependencies = [
 
 [[package]]
 name = "zova-sys-darwin-arm64"
-version = "1.0.0-rc.3"
+version = "1.0.0"
 
 [[package]]
 name = "zova-sys-darwin-x64"
-version = "1.0.0-rc.3"
+version = "1.0.0"
 
 [[package]]
 name = "zova-sys-linux-arm64"
-version = "1.0.0-rc.3"
+version = "1.0.0"
 
 [[package]]
 name = "zova-sys-linux-x64"
-version = "1.0.0-rc.3"
+version = "1.0.0"
 
 [[package]]
 name = "zova-sys-windows-x64"
-version = "1.0.0-rc.3"
+version = "1.0.0"

@@ -87,7 +87,7 @@ uv run --isolated --with pytest python -m pytest
 The native build uses maturin, Cargo, and the Rust `zova` crate. Users do not
 need to locate a shared C library manually.
 
-The Python API is part of the candidate 1.x contract described in
+The Python API is part of the stable 1.x contract described in
 `../../API_STABILITY.md`.
 
 ## What It Covers

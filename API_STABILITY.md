@@ -1,9 +1,8 @@
 # Zova 1.x API stability
 
-This document defines the candidate public contract for Zova 1.x. The
-`1.0.0-rc.3` release continues the contract introduced in `1.0.0-rc.1`. Release
-candidate fixes may still correct inconsistencies before `1.0.0`, but the RC
-line is closed to open-ended feature expansion.
+This document defines the stable public contract for Zova 1.x. The
+`1.0.0` release establishes the compatibility commitments below, following
+the release-candidate validation period.
 
 The separate `zova-wasm` browser package introduced in rc.3 is experimental
 and excluded from this native compatibility commitment. Its SQL/KV subset,
@@ -12,7 +11,7 @@ native parity. JavaScript/TypeScript below refers to the native `zova-js` packag
 
 ## Supported public surfaces
 
-The following capabilities are part of the candidate 1.x contract wherever a
+The following capabilities are part of the stable 1.x contract wherever a
 binding exposes them:
 
 - database create, open, read-only open, in-memory create, close, backup,
@@ -115,15 +114,15 @@ authoritative for these stricter rules.
 
 The bundled-extension lifecycle, manifest validation, ABI minimum enforcement,
 and extension records are supported. Extension minimum ABI values use numeric
-`major.minor.patch`; the running RC reports numeric ABI components `1.0.0` and
-the full release identity `1.0.0-rc.3` separately.
+`major.minor.patch`; the release reports numeric ABI components `1.0.0` and
+the full release identity `1.0.0` separately.
 
 The experimental bundle-producer CLI and application-authored callback surfaces
 remain outside the stable 1.x authoring contract. Dynamic native extensions run
 in-process and retain their documented trust and platform boundaries.
 
-The source-tree portable plugin descriptor and explicit extension-data upgrade
-APIs are additions after published rc.3, not retroactive release promises.
+The portable plugin descriptor and explicit extension-data upgrade APIs are
+included in 1.0.0; extension authoring remains experimental as described above.
 They do not add Windows/generated-C dynamic loading or high-level binding
 wrappers. The [extension capability matrix](docs/extensions.md#availability-and-binding-matrix)
 is authoritative for these distinctions.

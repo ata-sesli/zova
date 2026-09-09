@@ -49,14 +49,14 @@ Use the safe crate for normal Rust applications:
 
 ```toml
 [dependencies]
-zova = "1.0.0-rc.3"
+zova = "1.0.0"
 ```
 
 Use the raw FFI crate only when you want to call the C ABI directly:
 
 ```toml
 [dependencies]
-zova-sys = "1.0.0-rc.3"
+zova-sys = "1.0.0"
 ```
 
 Both crates contain native code. The default build path compiles Zova's static C
@@ -66,9 +66,9 @@ users still need:
 - Rust,
 - Clang and a platform linker/SDK (clang-cl and MSVC tools on Windows).
 
-Zova 1.0.0-rc.3 is the candidate for the stable 1.x contract. RC fixes may
-still refine compatibility before 1.0.0, but new feature exploration is no
-longer part of this release line. The current `.zova` `format_version` is `11`.
+Zova 1.0.0 establishes the stable native 1.x contract described in
+[API_STABILITY.md](../../API_STABILITY.md).
+The current `.zova` `format_version` is `11`.
 Zova does not migrate older format databases in place. Format-9 and
 format-10 databases can be probed and migrated forward with the crate-level
 `probe_format(path)` and `migrate_database(source, destination, options)`
@@ -333,8 +333,8 @@ registration and trusted `.zovaext` bundle loading. The safe Rust crate does not
 yet wrap those callback or bundle-loading APIs.
 
 Default generated-C packages do not support dynamic loading; bundle symbols
-alone do not enable it. The source-tree explicit upgrade APIs are raw C/sys
-only, not safe Rust wrappers or published rc.3 APIs. See the
+alone do not enable it. The explicit upgrade APIs are raw C/sys
+only, not safe Rust wrappers. See the
 [capability matrix](../../docs/extensions.md#availability-and-binding-matrix).
 
 See [../../docs/extensions.md](../../docs/extensions.md) for the current host
