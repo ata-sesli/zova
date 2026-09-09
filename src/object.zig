@@ -758,7 +758,7 @@ pub const Database = struct {
         const size_bytes = try sqliteI64ToU64(metadata.size_bytes);
         const chunk_count = try sqliteI64ToU64(metadata.chunk_count);
         var manifest = try self.prepareSchema(
-            \\select oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.rowid
+            \\select /* zova_trace:object_reader_manifest */ oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.rowid
             \\from {s}_zova_object_chunks oc
             \\left join {s}_zova_chunks c on c.chunk_hash = oc.chunk_hash
             \\where oc.object_id = ?
@@ -964,7 +964,7 @@ pub const Database = struct {
 
         var chunks = if (metadata.policy == .fixed_1m)
             try self.acquire(.object_range_fixed,
-                \\select oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.rowid
+                \\select /* zova_trace:object_range */ oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.rowid
                 \\from {s}_zova_object_chunks oc
                 \\left join {s}_zova_chunks c on c.chunk_hash = oc.chunk_hash
                 \\where oc.object_id = ?
@@ -973,7 +973,7 @@ pub const Database = struct {
             )
         else
             try self.acquire(.object_range_fastcdc,
-                \\select oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.rowid
+                \\select /* zova_trace:object_range */ oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.rowid
                 \\from {s}_zova_object_chunks oc
                 \\left join {s}_zova_chunks c on c.chunk_hash = oc.chunk_hash
                 \\where oc.object_id = ?
@@ -1561,7 +1561,7 @@ fn objectRowExists(
     storage_schema: StorageSchema,
     id: ObjectId,
 ) Error!bool {
-    var lease = try statement_cache.acquire(cache, db, .object_exists, storage_schema != .main, "select 1 from {s}_zova_objects where object_id = ? limit 1", storage_schema.prefix());
+    var lease = try statement_cache.acquire(cache, db, .object_exists, storage_schema != .main, "select /* zova_trace:object_exists */ 1 from {s}_zova_objects where object_id = ? limit 1", storage_schema.prefix());
     defer lease.release();
     const stmt = &lease.statement;
 
@@ -1730,7 +1730,7 @@ fn loadObjectMetadata(
     id: ObjectId,
 ) Error!ObjectMetadata {
     var lease = try statement_cache.acquire(cache, db, .object_metadata, storage_schema != .main,
-        \\select size_bytes, chunk_count, chunker
+        \\select /* zova_trace:object_metadata */ size_bytes, chunk_count, chunker
         \\from {s}_zova_objects
         \\where object_id = ?
     , storage_schema.prefix());

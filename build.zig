@@ -147,6 +147,20 @@ pub fn build(b: *std.Build) void {
     const storage_benchmark_step = b.step("bench-storage", "Run deterministic graph/vector storage benchmark");
     storage_benchmark_step.dependOn(&storage_benchmark_cmd.step);
 
+    const resolution_scope_100_benchmark = b.addExecutable(.{
+        .name = "zova_resolution_scope_100_benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/resolution_scope_100.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    resolution_scope_100_benchmark.root_module.addImport("zova", zova_module);
+    resolution_scope_100_benchmark.root_module.addIncludePath(b.path("vendor/sqlite3.53.4"));
+    resolution_scope_100_benchmark.root_module.linkLibrary(sqlite_lib);
+    const install_resolution_scope_100 = b.addInstallArtifact(resolution_scope_100_benchmark, .{});
+    b.step("build-resolution-scope-100", "Build bounded issue-100 scope audit benchmark").dependOn(&install_resolution_scope_100.step);
+
     const object_benchmark = b.addExecutable(.{
         .name = "zova_object_storage_benchmark",
         .root_module = b.createModule(.{
@@ -378,6 +392,17 @@ pub fn build(b: *std.Build) void {
     storage_compat_check_step.dependOn(&storage_compat_check_cmd.step);
 
     const test_step = b.step("test", "Run all tests");
+    const resolution_scope_100_test_step = addZigTestSuite(
+        b,
+        "test-resolution-scope-100",
+        "Run issue-100 scope audit tests",
+        "src/test_resolution_scope_100_root.zig",
+        &.{ "resolution_scope_100_tests", "resolution_scope_100.test." },
+        target,
+        optimize,
+        zova_build_options,
+        sqlite_lib,
+    );
     const core_test_step = addZigTestSuite(
         b,
         "test-core",
@@ -512,6 +537,7 @@ pub fn build(b: *std.Build) void {
     migration_test_step.dependOn(&crash_tests.step);
 
     inline for (.{
+        resolution_scope_100_test_step,
         core_test_step,
         object_test_step,
         vector_test_step,
