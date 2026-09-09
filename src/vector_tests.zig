@@ -1527,3 +1527,193 @@ test "search vectors by id and thresholds validate inputs and corruption" {
     const selected_bad = [_][]const u8{"bad"};
     try std.testing.expectError(error.VectorCorrupt, db.searchVectorsByIdIn(std.testing.allocator, "docs", "source", &selected_bad, 10));
 }
+
+test "putVectors stores exact norms for f32 f16 and i8 batches across metrics" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-batch-norms.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.createVectorCollection("f32-l2", .{ .dimensions = 3, .metric = .l2 });
+    try db.createVectorCollection("f32-dot", .{ .dimensions = 3, .metric = .dot });
+    try db.createVectorCollection("f32-cosine", .{ .dimensions = 3, .metric = .cosine });
+    try db.createVectorCollection("f16-l2", .{ .dimensions = 2, .metric = .l2, .element_type = .f16 });
+    try db.createVectorCollection("i8-l2", .{ .dimensions = 3, .metric = .l2, .element_type = .i8 });
+    try db.createVectorCollection("i8-cosine", .{ .dimensions = 3, .metric = .cosine, .element_type = .i8 });
+
+    // Negative components and zero components must not change the stored norm.
+    try db.putVectors("f32-l2", &.{
+        .{ .id = "neg-zero", .values = .{ .f32 = &.{ -3.0, 0.0, 4.0 } } },
+        .{ .id = "plain", .values = .{ .f32 = &.{ 1.0, 2.0, 2.0 } } },
+    });
+    try db.putVectors("f32-dot", &.{.{ .id = "neg", .values = .{ .f32 = &.{ -1.0, -2.0, -2.0 } } }});
+    try db.putVectors("f32-cosine", &.{.{ .id = "unit", .values = .{ .f32 = &.{ 1.0, 0.0, 0.0 } } }});
+    try db.putVectors("f16-l2", &.{.{ .id = "half", .values = .{ .f16 = &.{ 0x3c00, 0x4000 } } }});
+    try db.putVectors("i8-l2", &.{.{ .id = "signed", .values = .{ .i8 = &.{ -2, 3, 6 } } }});
+    try db.putVectors("i8-cosine", &.{.{ .id = "signed-cosine", .values = .{ .i8 = &.{ 2, -3, 6 } } }});
+
+    var stmt = try db.prepare(
+        \\select c.name, v.vector_id, v.norm_squared
+        \\from _zova_vectors v
+        \\join _zova_vector_collections c on c.collection_key = v.collection_key
+        \\order by c.name, v.vector_id
+    );
+    defer stmt.deinit();
+
+    const expected = [_]struct { name: []const u8, id: []const u8, norm: f64 }{
+        .{ .name = "f16-l2", .id = "half", .norm = 5.0 },
+        .{ .name = "f32-cosine", .id = "unit", .norm = 1.0 },
+        .{ .name = "f32-dot", .id = "neg", .norm = 9.0 },
+        .{ .name = "f32-l2", .id = "neg-zero", .norm = 25.0 },
+        .{ .name = "f32-l2", .id = "plain", .norm = 9.0 },
+        .{ .name = "i8-cosine", .id = "signed-cosine", .norm = 49.0 },
+        .{ .name = "i8-l2", .id = "signed", .norm = 49.0 },
+    };
+    for (expected) |row| {
+        try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+        try std.testing.expectEqualStrings(row.name, stmt.columnText(0));
+        try std.testing.expectEqualStrings(row.id, stmt.columnText(1));
+        try std.testing.expectApproxEqAbs(row.norm, stmt.columnDouble(2), 0.000001);
+    }
+    try std.testing.expectEqual(sqlite.Step.done, try stmt.step());
+}
+
+test "putVectors rejects zero-norm cosine batches and nonfinite values before writes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-batch-invalid.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.createVectorCollection("cos", .{ .dimensions = 2, .metric = .cosine });
+    try db.createVectorCollection("l2", .{ .dimensions = 2, .metric = .l2 });
+
+    const zero_norm = [_]VectorInput{
+        .{ .id = "good", .values = .{ .f32 = &.{ 1.0, 1.0 } } },
+        .{ .id = "zero", .values = .{ .f32 = &.{ 0.0, 0.0 } } },
+    };
+    try std.testing.expectError(error.VectorInvalid, db.putVectors("cos", &zero_norm));
+    try std.testing.expect(!try db.hasVector("cos", "good"));
+
+    const nonfinite = [_]VectorInput{
+        .{ .id = "good", .values = .{ .f32 = &.{ 1.0, 1.0 } } },
+        .{ .id = "inf", .values = .{ .f32 = &.{ std.math.inf(f32), 1.0 } } },
+    };
+    try std.testing.expectError(error.VectorInvalid, db.putVectors("l2", &nonfinite));
+    try std.testing.expect(!try db.hasVector("l2", "good"));
+
+    // Duplicate ids inside the batch: the last entry wins, norms included.
+    const duplicates = [_]VectorInput{
+        .{ .id = "dup", .values = .{ .f32 = &.{ 3.0, 4.0 } } },
+        .{ .id = "dup", .values = .{ .f32 = &.{ 1.0, 0.0 } } },
+    };
+    try db.putVectors("l2", &duplicates);
+    var stmt = try db.prepare(
+        \\select norm_squared from _zova_vectors v
+        \\join _zova_vector_collections c on c.collection_key = v.collection_key
+        \\where c.name = 'l2' and v.vector_id = 'dup'
+    );
+    defer stmt.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), stmt.columnDouble(0), 0.000001);
+}
+
+test "putVectors keeps stored norms and search parity after upsert replay" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-batch-replay.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.createVectorCollection("bytes", .{ .dimensions = 3, .metric = .cosine, .element_type = .i8 });
+
+    const first = [_]VectorInput{
+        .{ .id = "doc", .values = .{ .i8 = &.{ 2, -3, 6 } } },
+        .{ .id = "other", .values = .{ .i8 = &.{ 1, 1, 1 } } },
+    };
+    try db.putVectors("bytes", &first);
+    // Upsert replay replaces the norm together with the payload.
+    const second = [_]VectorInput{
+        .{ .id = "doc", .values = .{ .i8 = &.{ 6, 2, -3 } } },
+    };
+    try db.putVectors("bytes", &second);
+
+    var stmt = try db.prepare(
+        \\select norm_squared from _zova_vectors v
+        \\join _zova_vector_collections c on c.collection_key = v.collection_key
+        \\where c.name = 'bytes' and v.vector_id = 'doc'
+    );
+    defer stmt.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+    try std.testing.expectApproxEqAbs(@as(f64, 49.0), stmt.columnDouble(0), 0.000001);
+
+    // Search parity: the nearest neighbor of doc is itself with distance 0.
+    var results = try db.searchVectors(std.testing.allocator, "bytes", .{ .i8 = &.{ 6, 2, -3 } }, 2);
+    defer results.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), results.items.len);
+    try std.testing.expectEqualStrings("doc", results.items[0].id);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), results.items[0].distance, 0.000001);
+}
+
+test "putVectors inside caller transactions rolls back cleanly on failure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "vector-batch-txn.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    try db.createVectorCollection("chunks", .{ .dimensions = 2, .metric = .l2 });
+
+    try db.exec("begin");
+    try db.putVectors("chunks", &.{
+        .{ .id = "committed", .values = .{ .f32 = &.{ 1.0, 2.0 } } },
+    });
+    try db.exec("commit");
+
+    try db.exec("begin");
+    try db.putVectors("chunks", &.{
+        .{ .id = "rolled-back", .values = .{ .f32 = &.{ 3.0, 4.0 } } },
+    });
+    try db.exec("rollback");
+
+    try std.testing.expect(try db.hasVector("chunks", "committed"));
+    try std.testing.expect(!try db.hasVector("chunks", "rolled-back"));
+
+    // SQL failure after some rows: batch is not atomic across rows, but the
+    // failing call must not corrupt the collection or leave bad norms.
+    try db.exec(
+        \\create trigger fail_vector_insert before insert on _zova_vectors
+        \\when (select count(*) from _zova_vectors) >= 1
+        \\begin
+        \\  select raise(abort, 'forced vector insert failure');
+        \\end;
+    );
+    const failing = [_]VectorInput{
+        .{ .id = "third", .values = .{ .f32 = &.{ 5.0, 6.0 } } },
+    };
+    try std.testing.expectError(error.Constraint, db.putVectors("chunks", &failing));
+    try db.exec("drop trigger fail_vector_insert");
+
+    try std.testing.expect(!try db.hasVector("chunks", "third"));
+    var stmt = try db.prepare(
+        \\select norm_squared from _zova_vectors v
+        \\join _zova_vector_collections c on c.collection_key = v.collection_key
+        \\where c.name = 'chunks' and v.vector_id = 'committed'
+    );
+    defer stmt.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+    try std.testing.expectApproxEqAbs(@as(f64, 5.0), stmt.columnDouble(0), 0.000001);
+}

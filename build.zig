@@ -155,11 +155,12 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    object_benchmark.root_module.addImport("object_impl", b.createModule(.{
+    const object_benchmark_module = b.createModule(.{
         .root_source_file = b.path("src/object.zig"),
         .target = target,
         .optimize = optimize,
-    }));
+    });
+    object_benchmark.root_module.addImport("object_impl", object_benchmark_module);
     object_benchmark.root_module.addImport("version_impl", b.createModule(.{
         .root_source_file = b.path("src/version.zig"),
         .target = target,
@@ -185,6 +186,26 @@ pub fn build(b: *std.Build) void {
     ingestion_benchmark.root_module.linkLibrary(sqlite_lib);
     const install_ingestion = b.addInstallArtifact(ingestion_benchmark, .{});
     b.step("build-object-ingestion", "Build bounded object ingestion benchmark").dependOn(&install_ingestion.step);
+
+    const vector_norms_94_benchmark = b.addExecutable(.{
+        .name = "zova_vector_norms_94_benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/vector_norms_94.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const vector_impl_module = b.createModule(.{
+        .root_source_file = b.path("src/vector.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    vector_impl_module.addOptions("zova_build_options", zova_build_options);
+    vector_norms_94_benchmark.root_module.addImport("vector_impl", vector_impl_module);
+    vector_norms_94_benchmark.root_module.addIncludePath(b.path("vendor/sqlite3.53.4"));
+    vector_norms_94_benchmark.root_module.linkLibrary(sqlite_lib);
+    const install_vector_norms_94 = b.addInstallArtifact(vector_norms_94_benchmark, .{});
+    b.step("build-vector-norms-94", "Build bounded issue-94 vector put-many benchmark").dependOn(&install_vector_norms_94.step);
 
     const kv_benchmark = b.addExecutable(.{
         .name = "zova_kv_calls_benchmark",
