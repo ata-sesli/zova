@@ -235,6 +235,20 @@ pub fn build(b: *std.Build) void {
     const install_graph_index_ddl_95 = b.addInstallArtifact(graph_index_ddl_95_benchmark, .{});
     b.step("build-graph-index-ddl-95", "Build bounded issue-95 graph batch index benchmark").dependOn(&install_graph_index_ddl_95.step);
 
+    const graph_walk_scratch_99_benchmark = b.addExecutable(.{
+        .name = "zova_graph_walk_scratch_99_benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/graph_walk_scratch_99.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    graph_walk_scratch_99_benchmark.root_module.addImport("zova", zova_module);
+    graph_walk_scratch_99_benchmark.root_module.addIncludePath(b.path("vendor/sqlite3.53.4"));
+    graph_walk_scratch_99_benchmark.root_module.linkLibrary(sqlite_lib);
+    const install_graph_walk_scratch_99 = b.addInstallArtifact(graph_walk_scratch_99_benchmark, .{});
+    b.step("build-graph-walk-scratch-99", "Build bounded issue-99 graph walk scratch benchmark").dependOn(&install_graph_walk_scratch_99.step);
+
     const statement_reuse_98_benchmark = b.addExecutable(.{
         .name = "zova_statement_reuse_98_benchmark",
         .root_module = b.createModule(.{
@@ -438,6 +452,17 @@ pub fn build(b: *std.Build) void {
         zova_build_options,
         sqlite_lib,
     );
+    const graph_walk_scratch_test_step = addZigTestSuite(
+        b,
+        "test-graph-walk-scratch",
+        "Run bounded graph walk scratch tests",
+        "src/test_graph_walk_scratch_root.zig",
+        &.{ "graph_walk_scratch_tests", "graph_walk_scratch.test." },
+        target,
+        optimize,
+        zova_build_options,
+        sqlite_lib,
+    );
     const extension_test_step = addZigTestSuite(
         b,
         "test-extensions",
@@ -489,6 +514,7 @@ pub fn build(b: *std.Build) void {
         graph_test_step,
         kv_test_step,
         statement_cache_test_step,
+        graph_walk_scratch_test_step,
         extension_test_step,
         migration_test_step,
         c_api_test_step,
