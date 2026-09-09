@@ -60,8 +60,8 @@ wheels do not require Rust, Cargo, Zig, or a local C compiler. Zova does not
 publish a Python source distribution, so an unsupported platform or
 interpreter fails without attempting a native build.
 
-The release workflow builds the documented Linux/macOS x86_64/arm64 wheel
-matrix.
+The release workflow builds Linux/macOS x86_64/arm64 and Windows x86_64
+stable-ABI wheels.
 
 The current development build uses `.zova` format 11 and does not migrate older
 format databases in place. Format-9 and format-10 databases can be probed and
