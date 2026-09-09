@@ -132,7 +132,7 @@ Zova vendors SQLite. You do not need a system SQLite installation.
 |---|---|---:|---:|---:|---|
 | JavaScript / TypeScript | `bun add zova-js` / `npm install zova-js` | no | no | no | prebuilt Node-API 8 packages for Node 22/24 and Bun |
 | Rust | `cargo add zova` | no | yes | yes | `zova-sys` compiles the matching generated-C platform package with Clang |
-| Python | `uv add zova` / `pip install zova` | no | no | no | stable-ABI wheels are published for Linux/macOS x86_64/arm64 and tested on CPython 3.13/3.14; PyPI source builds are not supported |
+| Python | `uv add zova` / `pip install zova` | no | no | no | stable-ABI wheels are published for Linux/macOS x86_64/arm64 and Windows x86_64, and tested on CPython 3.13/3.14; PyPI source builds are not supported |
 | Go | `go get github.com/ata-sesli/zova/bindings/go@v1.0.0-rc.3` | no, if using a release C ABI archive | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
 | C ABI | release archive or `zig build c-abi` | no, if using a release archive | no | no, if using a release archive | static C ABI library and `zova.h` |
 | Zig | package source | yes | no | yes | native API |
@@ -1085,7 +1085,7 @@ backup, compact, restore, objects, `ObjectWriter`, vectors, graphs,
 SQL-native vector and graph helpers, and bundled extension lifecycle APIs.
 
 PyPI releases include CPython 3.13 stable-ABI wheels for Linux/macOS
-x86_64/arm64. Linux wheels target glibc 2.28 or newer. The same wheels are
+x86_64/arm64 and Windows x86_64. Linux wheels target glibc 2.28 or newer. The same wheels are
 tested on CPython 3.13 and 3.14 and do not require Zig, Rust, Cargo, or a local
 C compiler. Zova does not publish a Python source distribution; unsupported
 platform and interpreter combinations fail without attempting a native source
@@ -1295,7 +1295,7 @@ Zova `1.0.0-rc.3` does not include:
 - automatic bound-store path repair
 - C ABI, Rust, Go, or Python store-management APIs
 - remote sync, S3 compatibility, NATS integration, or Redis-like behavior
-- Python wheels outside the current Linux/macOS x86_64/arm64 CPython 3.13/3.14
+- Python wheels outside the current Linux/macOS x86_64/arm64 and Windows x86_64 CPython 3.13/3.14
   matrix, including free-threaded CPython builds
 
 Diagnostics and salvage are CLI-first in this release. Bindings should not parse

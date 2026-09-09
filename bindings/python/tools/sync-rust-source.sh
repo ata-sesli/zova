@@ -5,19 +5,25 @@ ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 DEST="$ROOT/bindings/python/rust"
 VERSION="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' "$ROOT/bindings/rust/Cargo.toml" | head -n 1)"
 
+copy_tree() {
+    source="$1"
+    destination="$2"
+    rm -rf "$destination"
+    mkdir -p "$destination"
+    cp -R "$source/." "$destination/"
+}
+
 python3 "$ROOT/scripts/generate-rust-platforms.py" --host
 
 mkdir -p "$DEST"
 rm -f "$DEST/Cargo.toml" "$DEST/Cargo.lock"
 
-rsync -a --checksum --delete "$ROOT/bindings/rust/zova/" "$DEST/zova/"
-rsync -a --checksum --delete \
-    --exclude native \
-    "$ROOT/bindings/rust/zova-sys/" \
-    "$DEST/zova-sys/"
+copy_tree "$ROOT/bindings/rust/zova" "$DEST/zova"
+copy_tree "$ROOT/bindings/rust/zova-sys" "$DEST/zova-sys"
+rm -rf "$DEST/zova-sys/native"
 
 for backend in linux-x64 linux-arm64 darwin-x64 darwin-arm64 windows-x64; do
-    rsync -a --checksum --delete "$ROOT/bindings/rust/zova-sys-$backend/" "$DEST/zova-sys-$backend/"
+    copy_tree "$ROOT/bindings/rust/zova-sys-$backend" "$DEST/zova-sys-$backend"
 done
 
 python3 - "$DEST/zova/Cargo.toml" "$DEST/zova-sys/Cargo.toml" "$VERSION" <<'PY'
@@ -49,7 +55,7 @@ for path in [zova_manifest, sys_manifest, *sys_manifest.parent.parent.glob('zova
 PY
 
 mkdir -p "$DEST/zova-sys/native"
-rsync -a --checksum --delete "$ROOT/LICENSE" "$DEST/zova-sys/native/LICENSE"
+cp "$ROOT/LICENSE" "$DEST/zova-sys/native/LICENSE"
 "$ROOT/scripts/update-generated-c.sh" "$DEST/zova-sys/native/generated"
 
 rm -rf "$DEST/target" "$DEST/zova/target" "$DEST/zova-sys/target"
