@@ -49,10 +49,7 @@ pub const Publication = struct {
         m.owns_reservation = true;
         // The witness exists before the final name. A kill cannot leave an
         // unidentifiable reservation. Link creation never replaces a file.
-        cwd.hardLink(m.reservation.?, cwd, final, io(), .{}) catch |err| switch (err) {
-            error.PathAlreadyExists => return error.DestinationExists,
-            else => return error.CantOpen,
-        };
+        try hardLink(m.reservation.?, final);
         m.owns_final = true;
     }
 
@@ -75,10 +72,7 @@ pub const Publication = struct {
         m.owns_final = false;
         // Keep the staged inode as the ownership witness through publication.
         // A collision after unlink is rejected instead of overwritten.
-        cwd.hardLink(m.stage.?, cwd, m.final.?, io(), .{}) catch |err| switch (err) {
-            error.PathAlreadyExists => return error.DestinationExists,
-            else => return error.CantOpen,
-        };
+        try hardLink(m.stage.?, m.final.?);
         m.owns_final = true;
     }
 
@@ -126,4 +120,35 @@ fn sameFile(a: []const u8, b: []const u8) bool {
     const left = cwd.statFile(io(), a, .{ .follow_symlinks = false }) catch return false;
     const right = cwd.statFile(io(), b, .{ .follow_symlinks = false }) catch return false;
     return left.kind == .file and right.kind == .file and left.nlink >= 2 and left.inode == right.inode;
+}
+
+fn hardLink(existing: []const u8, destination: []const u8) Error!void {
+    if (@import("builtin").os.tag == .windows) {
+        // Zig 0.16's Threaded.dirHardLink returns OperationUnsupported on
+        // Windows. CreateHardLinkW provides the same no-replace semantics.
+        const windows = std.os.windows;
+        const native = struct {
+            extern "kernel32" fn CreateHardLinkW(
+                new_name: [*:0]const u16,
+                existing_name: [*:0]const u16,
+                security_attributes: ?*anyopaque,
+            ) callconv(.winapi) windows.BOOL;
+        };
+        const old_w = std.unicode.wtf8ToWtf16LeAllocZ(std.heap.c_allocator, existing) catch return error.CantOpen;
+        defer std.heap.c_allocator.free(old_w);
+        const new_w = std.unicode.wtf8ToWtf16LeAllocZ(std.heap.c_allocator, destination) catch return error.CantOpen;
+        defer std.heap.c_allocator.free(new_w);
+        if (!native.CreateHardLinkW(new_w.ptr, old_w.ptr, null).toBool()) {
+            return switch (windows.GetLastError()) {
+                .FILE_EXISTS, .ALREADY_EXISTS => error.DestinationExists,
+                else => error.CantOpen,
+            };
+        }
+    } else {
+        const cwd = std.Io.Dir.cwd();
+        cwd.hardLink(existing, cwd, destination, io(), .{}) catch |err| switch (err) {
+            error.PathAlreadyExists => return error.DestinationExists,
+            else => return error.CantOpen,
+        };
+    }
 }
