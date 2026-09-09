@@ -13,7 +13,7 @@ const FreshBuildHandle = @import("handles.zig").FreshBuildHandle;
 const allocator = @import("values.zig").allocator;
 const databaseHandleRaw = @import("handles.zig").databaseHandleRaw;
 const failDb = @import("errors.zig").failDb;
-const freshBuildHandle = @import("handles.zig").freshBuildHandle;
+const lockFreshBuildHandle = @import("handles.zig").lockFreshBuildHandle;
 const freshGraphEdgePayloadInputSlices = @import("values.zig").freshGraphEdgePayloadInputSlices;
 const freshGraphNodeInputSlices = @import("values.zig").freshGraphNodeInputSlices;
 const okDb = @import("errors.zig").okDb;
@@ -38,6 +38,8 @@ pub fn setFreshBuildCachePolicyForBenchmark(policy: FreshBuildCachePolicy) void 
 pub fn freshBuildCacheDiagnostics(build_ptr: ?*zova_fresh_build) ?FreshBuildCacheDiagnostics {
     const ptr = build_ptr orelse return null;
     const build: *FreshBuildHandle = @ptrCast(@alignCast(ptr));
+    build.database.mutex.lock();
+    defer build.database.mutex.unlock();
     return build.cache_diagnostics;
 }
 
@@ -300,9 +302,8 @@ pub fn zova_fresh_build_begin(request: ?*const zova_fresh_build_begin_request) c
 
 pub fn zova_fresh_build_table_rows(request: ?*const zova_fresh_build_rows_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const build = freshBuildHandle(req.build) orelse return .INVALID_ARGUMENT;
+    const build = lockFreshBuildHandle(req.build) orelse return .INVALID_ARGUMENT;
     const database = build.database;
-    database.mutex.lock();
     defer database.mutex.unlock();
     const start = freshBuildTimestamp();
     freshBuildLoadRows(build, req, false) catch |err| {
@@ -315,9 +316,8 @@ pub fn zova_fresh_build_table_rows(request: ?*const zova_fresh_build_rows_reques
 
 pub fn zova_fresh_build_fts_rows(request: ?*const zova_fresh_build_rows_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const build = freshBuildHandle(req.build) orelse return .INVALID_ARGUMENT;
+    const build = lockFreshBuildHandle(req.build) orelse return .INVALID_ARGUMENT;
     const database = build.database;
-    database.mutex.lock();
     defer database.mutex.unlock();
     const start = freshBuildTimestamp();
     freshBuildLoadRows(build, req, true) catch |err| {
@@ -330,9 +330,8 @@ pub fn zova_fresh_build_fts_rows(request: ?*const zova_fresh_build_rows_request)
 
 pub fn zova_fresh_build_graph(request: ?*const zova_fresh_build_graph_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const build = freshBuildHandle(req.build) orelse return .INVALID_ARGUMENT;
+    const build = lockFreshBuildHandle(req.build) orelse return .INVALID_ARGUMENT;
     const database = build.database;
-    database.mutex.lock();
     defer database.mutex.unlock();
     if ((req.out_node_keys == null and req.out_node_keys_capacity != 0) or
         (req.out_node_keys != null and req.out_node_keys_capacity < req.nodes_len) or
@@ -388,9 +387,8 @@ pub fn zova_fresh_build_graph(request: ?*const zova_fresh_build_graph_request) c
 
 pub fn zova_fresh_build_vectors(request: ?*const zova_fresh_build_vectors_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const build = freshBuildHandle(req.build) orelse return .INVALID_ARGUMENT;
+    const build = lockFreshBuildHandle(req.build) orelse return .INVALID_ARGUMENT;
     const database = build.database;
-    database.mutex.lock();
     defer database.mutex.unlock();
     const collection_name = req.collection_name orelse {
         freshBuildRollback(build);
@@ -416,9 +414,8 @@ pub fn zova_fresh_build_vectors(request: ?*const zova_fresh_build_vectors_reques
 
 pub fn zova_fresh_build_finish(request: ?*const zova_fresh_build_finish_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const build = freshBuildHandle(req.build) orelse return .INVALID_ARGUMENT;
+    const build = lockFreshBuildHandle(req.build) orelse return .INVALID_ARGUMENT;
     const database = build.database;
-    database.mutex.lock();
     defer database.mutex.unlock();
     if (req.out_node_keys_capacity < build.node_keys.len or req.out_edge_keys_capacity < build.edge_keys.len or
         (build.node_keys.len != 0 and req.out_node_keys == null) or (build.edge_keys.len != 0 and req.out_edge_keys == null))
@@ -480,9 +477,8 @@ pub fn zova_fresh_build_finish(request: ?*const zova_fresh_build_finish_request)
 }
 
 pub fn zova_fresh_build_abort(build_ptr: ?*zova_fresh_build) callconv(.c) zova_status {
-    const build = freshBuildHandle(build_ptr) orelse return .INVALID_ARGUMENT;
+    const build = lockFreshBuildHandle(build_ptr) orelse return .INVALID_ARGUMENT;
     const database = build.database;
-    database.mutex.lock();
     defer database.mutex.unlock();
     freshBuildRollback(build);
     return okDb(database);

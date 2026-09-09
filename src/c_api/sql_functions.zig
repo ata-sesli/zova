@@ -9,7 +9,7 @@ const ZOVA_SQL_FUNCTION_DETERMINISTIC = @import("types.zig").ZOVA_SQL_FUNCTION_D
 const ZOVA_SQL_FUNCTION_DIRECT_ONLY = @import("types.zig").ZOVA_SQL_FUNCTION_DIRECT_ONLY;
 const ZOVA_SQL_FUNCTION_INNOCUOUS = @import("types.zig").ZOVA_SQL_FUNCTION_INNOCUOUS;
 const allocator = @import("values.zig").allocator;
-const databaseHandle = @import("handles.zig").databaseHandle;
+const lockDatabaseHandle = @import("handles.zig").lockDatabaseHandle;
 const failDb = @import("errors.zig").failDb;
 const failDbSqliteResult = @import("errors.zig").failDbSqliteResult;
 const okDb = @import("errors.zig").okDb;
@@ -22,8 +22,7 @@ const zova_status = @import("types.zig").zova_status;
 
 pub fn zova_database_register_function(request: ?*const zova_sql_function_register_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
 
     const name_z = req.name orelse return failDb(handle, error.InvalidArgument);
