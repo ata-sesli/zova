@@ -74,6 +74,7 @@ jobs:
           toolchain: stable
       - run: cargo fmt --all --manifest-path bindings/rust/Cargo.toml --check
       - run: python3 -m unittest scripts/tests/test_release_snapshot_order.py
+      - run: python3 -m unittest scripts/tests/test_python_platform_matrix.py
       - run: sh bindings/rust/zova-sys/tools/sync-native-source.sh
       - run: sh bindings/rust/zova-sys/tools/check-native-source.sh
       - run: sh bindings/python/tools/sync-rust-source.sh
@@ -111,7 +112,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
         python-version: ["3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
@@ -131,7 +132,7 @@ jobs:
       - run: cargo test --manifest-path bindings/python/Cargo.toml
       - run: uv run --isolated --with maturin --with pytest --directory bindings/python maturin develop
       - run: uv run --isolated --with pytest --directory bindings/python python -m pytest
-      - run: uv run --isolated --with maturin --directory bindings/python maturin build --out /tmp/zova-python-wheels
+      - run: uv run --isolated --with maturin --directory bindings/python maturin build --out "${{ runner.temp }}/zova-python-wheels"
 
   javascript:
     name: JavaScript Node ${{ matrix.node-version }} (${{ matrix.target }})

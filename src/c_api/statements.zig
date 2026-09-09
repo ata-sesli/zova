@@ -6,7 +6,7 @@ const StatementHandle = @import("handles.zig").StatementHandle;
 const allocator = @import("values.zig").allocator;
 const bytesConst = @import("values.zig").bytesConst;
 const columnTypeToAbi = @import("values.zig").columnTypeToAbi;
-const databaseHandle = @import("handles.zig").databaseHandle;
+const lockDatabaseHandle = @import("handles.zig").lockDatabaseHandle;
 const failDb = @import("errors.zig").failDb;
 const okDb = @import("errors.zig").okDb;
 const statementHandle = @import("handles.zig").statementHandle;
@@ -33,8 +33,7 @@ const zova_text_free = @import("results.zig").zova_text_free;
 
 pub fn zova_database_prepare(request: ?*const zova_database_prepare_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const sql = req.sql orelse return failDb(handle, error.InvalidArgument);
     const out = req.out_statement orelse return failDb(handle, error.InvalidArgument);

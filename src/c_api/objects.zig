@@ -8,7 +8,7 @@ const WriterHandle = @import("handles.zig").WriterHandle;
 const allocator = @import("values.zig").allocator;
 const bytesConst = @import("values.zig").bytesConst;
 const bytesMut = @import("values.zig").bytesMut;
-const databaseHandle = @import("handles.zig").databaseHandle;
+const lockDatabaseHandle = @import("handles.zig").lockDatabaseHandle;
 const emptyBuffer = @import("results.zig").emptyBuffer;
 const emptyManifest = @import("results.zig").emptyManifest;
 const failDb = @import("errors.zig").failDb;
@@ -70,8 +70,7 @@ pub fn zova_object_chunk_id_from_bytes(
 
 pub fn zova_object_put(request: ?*const zova_object_put_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const out = req.out_id orelse return failDb(handle, error.InvalidArgument);
     const bytes = bytesConst(req.data, req.len) orelse return failDb(handle, error.InvalidArgument);
@@ -84,8 +83,7 @@ pub fn zova_object_put_with_options(
     request: ?*const zova_object_put_with_options_request,
 ) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const out = req.out_id orelse return failDb(handle, error.InvalidArgument);
     out.* = .{ .bytes = [_]u8{0} ** 32 };
@@ -98,8 +96,7 @@ pub fn zova_object_put_with_options(
 
 pub fn zova_object_get(request: ?*const zova_object_get_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const out = req.out_buffer orelse return failDb(handle, error.InvalidArgument);
     out.* = emptyBuffer();
@@ -112,8 +109,7 @@ pub fn zova_object_get(request: ?*const zova_object_get_request) callconv(.c) zo
 
 pub fn zova_object_read_range(request: ?*const zova_object_read_range_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const out = req.out_copied orelse return failDb(handle, error.InvalidArgument);
     out.* = 0;
@@ -125,8 +121,7 @@ pub fn zova_object_read_range(request: ?*const zova_object_read_range_request) c
 
 pub fn zova_object_delete(request: ?*const zova_object_delete_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     handle.db.deleteObject(toObjectId(req.id)) catch |err| return failDb(handle, err);
     return okDb(handle);
@@ -134,8 +129,7 @@ pub fn zova_object_delete(request: ?*const zova_object_delete_request) callconv(
 
 pub fn zova_object_exists(request: ?*const zova_object_exists_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const out = req.out_exists orelse return failDb(handle, error.InvalidArgument);
     const exists = handle.db.hasObject(toObjectId(req.id)) catch |err| return failDb(handle, err);
@@ -145,8 +139,7 @@ pub fn zova_object_exists(request: ?*const zova_object_exists_request) callconv(
 
 pub fn zova_object_size(request: ?*const zova_object_size_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const out = req.out_size orelse return failDb(handle, error.InvalidArgument);
     out.* = handle.db.objectSize(toObjectId(req.id)) catch |err| return failDb(handle, err);
@@ -155,8 +148,7 @@ pub fn zova_object_size(request: ?*const zova_object_size_request) callconv(.c) 
 
 pub fn zova_object_chunk_count(request: ?*const zova_object_chunk_count_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const out = req.out_count orelse return failDb(handle, error.InvalidArgument);
     out.* = handle.db.objectChunkCount(toObjectId(req.id)) catch |err| return failDb(handle, err);
@@ -165,8 +157,7 @@ pub fn zova_object_chunk_count(request: ?*const zova_object_chunk_count_request)
 
 pub fn zova_object_manifest_get(request: ?*const zova_object_manifest_get_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const out = req.out_manifest orelse return failDb(handle, error.InvalidArgument);
     out.* = emptyManifest();
@@ -203,8 +194,7 @@ pub fn zova_object_manifest_get(request: ?*const zova_object_manifest_get_reques
 
 pub fn zova_object_chunk_get(request: ?*const zova_object_chunk_get_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const out = req.out_buffer orelse return failDb(handle, error.InvalidArgument);
     out.* = emptyBuffer();
@@ -217,8 +207,7 @@ pub fn zova_object_chunk_get(request: ?*const zova_object_chunk_get_request) cal
 
 pub fn zova_object_chunk_put(request: ?*const zova_object_chunk_put_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const bytes = bytesConst(req.data, req.len) orelse return failDb(handle, error.InvalidArgument);
     handle.db.putObjectChunk(toChunkId(req.expected_hash), bytes) catch |err| return failDb(handle, err);
@@ -229,8 +218,7 @@ pub fn zova_object_chunk_put_with_options(
     request: ?*const zova_object_chunk_put_with_options_request,
 ) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const options = objectOptionsFromAbi(req.options) orelse return failDb(handle, error.InvalidArgument);
     const bytes = bytesConst(req.data, req.len) orelse return failDb(handle, error.InvalidArgument);
@@ -240,8 +228,7 @@ pub fn zova_object_chunk_put_with_options(
 
 pub fn zova_object_chunk_delete(request: ?*const zova_object_chunk_delete_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const out = req.out_deleted orelse return failDb(handle, error.InvalidArgument);
     const deleted = handle.db.deleteObjectChunk(toChunkId(req.hash)) catch |err| return failDb(handle, err);
@@ -253,8 +240,7 @@ pub fn zova_object_assemble_from_chunks(
     request: ?*const zova_object_assemble_from_chunks_request,
 ) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const input_chunks = manifestChunks(req.chunks, req.chunk_count) orelse return failDb(handle, error.InvalidArgument);
     const chunks = allocator.alloc(zova.ObjectChunk, input_chunks.len) catch |err| return failDb(handle, err);
@@ -275,8 +261,7 @@ pub fn zova_object_assemble_from_chunks_with_options(
     request: ?*const zova_object_assemble_from_chunks_with_options_request,
 ) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const options = objectOptionsFromAbi(req.options) orelse return failDb(handle, error.InvalidArgument);
     const input_chunks = manifestChunks(req.chunks, req.chunk_count) orelse return failDb(handle, error.InvalidArgument);
@@ -296,8 +281,7 @@ pub fn zova_object_assemble_from_chunks_with_options(
 
 pub fn zova_object_writer_create(request: ?*const zova_object_writer_create_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const out = req.out_writer orelse return failDb(handle, error.InvalidArgument);
     out.* = null;
@@ -317,8 +301,7 @@ pub fn zova_object_writer_create_with_options(
     request: ?*const zova_object_writer_create_with_options_request,
 ) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const out = req.out_writer orelse return failDb(handle, error.InvalidArgument);
     out.* = null;
@@ -380,8 +363,7 @@ pub fn zova_object_reader_create(
     request: ?*const zova_object_reader_create_request,
 ) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const out = req.out_reader orelse return failDb(handle, error.InvalidArgument);
     out.* = null;

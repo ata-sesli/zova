@@ -5,6 +5,14 @@ ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 DEST="$ROOT/bindings/python/rust"
 VERSION="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' "$ROOT/bindings/rust/Cargo.toml" | head -n 1)"
 
+copy_tree() {
+    source="$1"
+    destination="$2"
+    rm -rf "$destination"
+    mkdir -p "$destination"
+    cp -R "$source/." "$destination/"
+}
+
 if [ ! -f "$DEST/zova/Cargo.toml" ]; then
     echo "missing Python bundled Rust source; run bindings/python/tools/sync-rust-source.sh" >&2
     exit 1
@@ -32,19 +40,14 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-mkdir -p "$TMP/zova" "$TMP/zova-sys" "$TMP/zova-sys-bundled"
-rsync -a --delete "$ROOT/bindings/rust/zova/" "$TMP/zova/"
-rsync -a --delete \
-    --exclude native \
-    "$ROOT/bindings/rust/zova-sys/" \
-    "$TMP/zova-sys/"
-rsync -a --delete \
-    --exclude native \
-    "$DEST/zova-sys/" \
-    "$TMP/zova-sys-bundled/"
+copy_tree "$ROOT/bindings/rust/zova" "$TMP/zova"
+copy_tree "$ROOT/bindings/rust/zova-sys" "$TMP/zova-sys"
+rm -rf "$TMP/zova-sys/native"
+copy_tree "$DEST/zova-sys" "$TMP/zova-sys-bundled"
+rm -rf "$TMP/zova-sys-bundled/native"
 
 for backend in linux-x64 linux-arm64 darwin-x64 darwin-arm64 windows-x64; do
-    rsync -a --checksum "$ROOT/bindings/rust/zova-sys-$backend" "$TMP/"
+    copy_tree "$ROOT/bindings/rust/zova-sys-$backend" "$TMP/zova-sys-$backend"
 done
 
 python3 - "$TMP/zova/Cargo.toml" "$TMP/zova-sys/Cargo.toml" "$VERSION" <<'PY'

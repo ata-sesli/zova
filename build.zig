@@ -186,6 +186,40 @@ pub fn build(b: *std.Build) void {
     const install_ingestion = b.addInstallArtifact(ingestion_benchmark, .{});
     b.step("build-object-ingestion", "Build bounded object ingestion benchmark").dependOn(&install_ingestion.step);
 
+    const ingestion_93_benchmark = b.addExecutable(.{
+        .name = "zova_object_ingestion_93_benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/object_ingestion_93.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    ingestion_93_benchmark.root_module.addImport("object_impl", object_benchmark.root_module.import_table.get("object_impl").?);
+    ingestion_93_benchmark.root_module.addIncludePath(b.path("vendor/sqlite3.53.4"));
+    ingestion_93_benchmark.root_module.linkLibrary(sqlite_lib);
+    const install_ingestion_93 = b.addInstallArtifact(ingestion_93_benchmark, .{});
+    b.step("build-object-ingestion-93", "Build bounded issue-93 object ingestion benchmark").dependOn(&install_ingestion_93.step);
+
+    const vector_norms_94_benchmark = b.addExecutable(.{
+        .name = "zova_vector_norms_94_benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/vector_norms_94.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const vector_impl_module = b.createModule(.{
+        .root_source_file = b.path("src/vector.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    vector_impl_module.addOptions("zova_build_options", zova_build_options);
+    vector_norms_94_benchmark.root_module.addImport("vector_impl", vector_impl_module);
+    vector_norms_94_benchmark.root_module.addIncludePath(b.path("vendor/sqlite3.53.4"));
+    vector_norms_94_benchmark.root_module.linkLibrary(sqlite_lib);
+    const install_vector_norms_94 = b.addInstallArtifact(vector_norms_94_benchmark, .{});
+    b.step("build-vector-norms-94", "Build bounded issue-94 vector put-many benchmark").dependOn(&install_vector_norms_94.step);
+
     const graph_index_ddl_95_benchmark = b.addExecutable(.{
         .name = "zova_graph_index_ddl_95_benchmark",
         .root_module = b.createModule(.{
@@ -199,6 +233,20 @@ pub fn build(b: *std.Build) void {
     graph_index_ddl_95_benchmark.root_module.linkLibrary(sqlite_lib);
     const install_graph_index_ddl_95 = b.addInstallArtifact(graph_index_ddl_95_benchmark, .{});
     b.step("build-graph-index-ddl-95", "Build bounded issue-95 graph batch index benchmark").dependOn(&install_graph_index_ddl_95.step);
+
+    const statement_reuse_98_benchmark = b.addExecutable(.{
+        .name = "zova_statement_reuse_98_benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/statement_reuse_98.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    statement_reuse_98_benchmark.root_module.addImport("zova", zova_module);
+    statement_reuse_98_benchmark.root_module.addIncludePath(b.path("vendor/sqlite3.53.4"));
+    statement_reuse_98_benchmark.root_module.linkLibrary(sqlite_lib);
+    const install_statement_reuse_98 = b.addInstallArtifact(statement_reuse_98_benchmark, .{});
+    b.step("build-statement-reuse-98", "Build bounded issue-98 statement reuse benchmark").dependOn(&install_statement_reuse_98.step);
 
     const kv_benchmark = b.addExecutable(.{
         .name = "zova_kv_calls_benchmark",
@@ -378,6 +426,17 @@ pub fn build(b: *std.Build) void {
         zova_build_options,
         sqlite_lib,
     );
+    const statement_cache_test_step = addZigTestSuite(
+        b,
+        "test-statement-cache",
+        "Run bounded read-statement cache tests",
+        "src/test_statement_cache_root.zig",
+        &.{ "statement_cache_tests", "statement_cache.test." },
+        target,
+        optimize,
+        zova_build_options,
+        sqlite_lib,
+    );
     const extension_test_step = addZigTestSuite(
         b,
         "test-extensions",
@@ -428,6 +487,7 @@ pub fn build(b: *std.Build) void {
         vector_test_step,
         graph_test_step,
         kv_test_step,
+        statement_cache_test_step,
         extension_test_step,
         migration_test_step,
         c_api_test_step,

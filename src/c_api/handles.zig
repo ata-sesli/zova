@@ -23,8 +23,12 @@ const AbiMutex = if (@import("builtin").os.tag == .emscripten) struct {
     pub fn unlock(_: *@This()) void {}
 } else struct {
     state: std.Io.Mutex = .init,
+    // Per-mutex scheduling hook for deterministic concurrency tests only.
+    before_lock: if (@import("builtin").is_test) ?*const fn (?*anyopaque) void else void = if (@import("builtin").is_test) null else {},
+    before_lock_context: if (@import("builtin").is_test) ?*anyopaque else void = if (@import("builtin").is_test) null else {},
 
     pub fn lock(self: *AbiMutex) void {
+        if (@import("builtin").is_test) if (self.before_lock) |hook| hook(self.before_lock_context);
         std.Io.Threaded.mutexLock(&self.state);
     }
 
@@ -160,10 +164,15 @@ pub const SubscriptionHandle = struct {
 // Keep these numeric values synchronized with `include/zova.h`. Existing values
 // should be treated as ABI surface once a release containing them is published.
 
-pub fn databaseHandle(db: ?*zova_database) ?*DatabaseHandle {
-    const ptr = db orelse return null;
-    const handle: *DatabaseHandle = @ptrCast(@alignCast(ptr));
-    if (handle.fresh_build_active) return null;
+/// Return a locked ordinary-operation handle. The caller must unlock on every
+/// exit. Check exclusion under the execution lock, never before acquiring it.
+pub fn lockDatabaseHandle(db: ?*zova_database) ?*DatabaseHandle {
+    const handle = databaseHandleRaw(db) orelse return null;
+    handle.mutex.lock();
+    if (handle.fresh_build_active) {
+        handle.mutex.unlock();
+        return null;
+    }
     return handle;
 }
 
@@ -172,10 +181,16 @@ pub fn databaseHandleRaw(db: ?*zova_database) ?*DatabaseHandle {
     return @ptrCast(@alignCast(ptr));
 }
 
-pub fn freshBuildHandle(build: ?*zova_fresh_build) ?*FreshBuildHandle {
+/// Return an active session with its parent mutex held; caller must unlock.
+/// Terminal pointer destruction still requires caller coordination.
+pub fn lockFreshBuildHandle(build: ?*zova_fresh_build) ?*FreshBuildHandle {
     const ptr = build orelse return null;
     const handle: *FreshBuildHandle = @ptrCast(@alignCast(ptr));
-    if (!handle.active) return null;
+    handle.database.mutex.lock();
+    if (!handle.active) {
+        handle.database.mutex.unlock();
+        return null;
+    }
     return handle;
 }
 
