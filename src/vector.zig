@@ -1960,6 +1960,34 @@ fn unsignedMagnitudeToF64(sign: u64, magnitude: u64) f64 {
     return @bitCast(sign | (exponent64 << 52) | mantissa);
 }
 
+test "encodeValuesLeInto produces expected little-endian bytes for all element types" {
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(std.heap.c_allocator);
+
+    const f32_values = [_]f32{ 1.0, -2.5, 0.0 };
+    const f32_expected = [_]u8{
+        0x00, 0x00, 0x80, 0x3f, // 1.0
+        0x00, 0x00, 0x20, 0xc0, // -2.5
+        0x00, 0x00, 0x00, 0x00, // 0.0
+    };
+    const f32_out = try encodeValuesLeInto(&scratch, .{ .f32 = &f32_values });
+    try std.testing.expectEqualSlices(u8, &f32_expected, f32_out);
+
+    const f16_values = [_]u16{ 0x3c00, 0xc040, 0x0000 };
+    const f16_expected = [_]u8{
+        0x00, 0x3c, // 0x3c00
+        0x40, 0xc0, // 0xc040
+        0x00, 0x00, // 0x0000
+    };
+    const f16_out = try encodeValuesLeInto(&scratch, .{ .f16 = &f16_values });
+    try std.testing.expectEqualSlices(u8, &f16_expected, f16_out);
+
+    const i8_values = [_]i8{ -1, 0, 127, -128 };
+    const i8_expected = [_]u8{ 0xff, 0x00, 0x7f, 0x80 };
+    const i8_out = try encodeValuesLeInto(&scratch, .{ .i8 = &i8_values });
+    try std.testing.expectEqualSlices(u8, &i8_expected, i8_out);
+}
+
 test "f32ToF64 matches Zig float widening" {
     const values = [_]f32{
         0.0,
