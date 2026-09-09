@@ -140,3 +140,32 @@ test "walk scratch main and bound stores have independent lifecycle" {
     try std.testing.expect(!db.graph_walk_scratch.in_use);
     try std.testing.expect(db.graph_walk_scratch.retainedCapacity() <= scratch_impl.retained_capacity_limit);
 }
+
+fn walkWithAllocationFailures(allocator: std.mem.Allocator, db: *zova.Database, limit: usize) !void {
+    defer std.debug.assert(!db.graph_walk_scratch.in_use);
+    var result = try db.graphWalkDirection(allocator, walkOptions(.outgoing, null, limit));
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(limit, result.items.len);
+    // Reset/reuse the arena while the original caller-owned result is alive.
+    var next = try db.graphWalkDirection(std.testing.allocator, walkOptions(.incoming, "link", 4));
+    defer next.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("n0", result.items[0].node_id);
+    if (limit > 1) {
+        try std.testing.expectEqualStrings("n1", result.items[1].node_id);
+        try std.testing.expectEqualStrings("n0", result.items[1].predecessor_node_id.?);
+        try std.testing.expectEqualStrings("link", result.items[1].edge_type.?);
+    }
+}
+
+test "walk result copying cleans every allocation failure and reuses scratch" {
+    var db = try zova.Database.createMemory();
+    defer db.deinit();
+    try fixture(&db);
+    // Cover both a visited prefix with queued leftovers and the whole frontier.
+    for ([_]usize{ 2, 4 }) |limit| {
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, walkWithAllocationFailures, .{ &db, limit });
+        var retry = try db.graphWalkDirection(std.testing.allocator, walkOptions(.outgoing, null, limit));
+        defer retry.deinit(std.testing.allocator);
+        try std.testing.expectEqual(limit, retry.items.len);
+    }
+}

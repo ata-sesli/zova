@@ -2840,8 +2840,8 @@ pub const Database = struct {
             }
         }
 
-        // Transfer the visited prefix only after allocation succeeds. Entries
-        // queued beyond the result limit remain frontier-owned and are freed.
+        // Copy the visited prefix into caller-owned storage. The deferred
+        // frontier cleanup owns every scratch item, including this prefix.
         const owned_results = try allocator.alloc(GraphWalkItem, frontier_index);
         var copied_results: usize = 0;
         errdefer {
@@ -2859,7 +2859,6 @@ pub const Database = struct {
             );
             copied_results += 1;
         }
-        for (frontier.items[0..frontier_index]) |*entry| entry.item.deinit(scratch_allocator);
         if (profile) |value| {
             value.result_count = @intCast(owned_results.len);
             const accounted_ms = value.root_lookup_ms + value.adjacency_prepare_ms + value.adjacency_execute_ms;

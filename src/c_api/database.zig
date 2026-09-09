@@ -13,7 +13,7 @@ const allocator = @import("values.zig").allocator;
 const bundlePathSlices = @import("extensions.zig").bundlePathSlices;
 const clearLastError = @import("errors.zig").clearLastError;
 const clearMessage = @import("errors.zig").clearMessage;
-const databaseHandle = @import("handles.zig").databaseHandle;
+const lockDatabaseHandle = @import("handles.zig").lockDatabaseHandle;
 const databaseHandleRaw = @import("handles.zig").databaseHandleRaw;
 const deinitSqlFunctionRegistrations = @import("sql_functions.zig").deinitSqlFunctionRegistrations;
 const failDb = @import("errors.zig").failDb;
@@ -114,8 +114,7 @@ pub fn zova_database_close(db: ?*zova_database) callconv(.c) zova_status {
 
 pub fn zova_database_exec(request: ?*const zova_database_exec_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const sql = req.sql orelse return failDb(handle, error.InvalidArgument);
     handle.db.exec(std.mem.span(sql)) catch |err| return failDb(handle, err);
@@ -124,8 +123,7 @@ pub fn zova_database_exec(request: ?*const zova_database_exec_request) callconv(
 
 pub fn zova_database_begin(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     handle.db.begin() catch |err| return failDb(handle, err);
     return okDb(handle);
@@ -133,8 +131,7 @@ pub fn zova_database_begin(request: ?*const zova_database_simple_request) callco
 
 pub fn zova_database_begin_immediate(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     handle.db.beginImmediate() catch |err| return failDb(handle, err);
     return okDb(handle);
@@ -142,8 +139,7 @@ pub fn zova_database_begin_immediate(request: ?*const zova_database_simple_reque
 
 pub fn zova_database_commit(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     handle.db.commit() catch |err| return failDb(handle, err);
     return okDb(handle);
@@ -151,8 +147,7 @@ pub fn zova_database_commit(request: ?*const zova_database_simple_request) callc
 
 pub fn zova_database_rollback(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     handle.db.rollback() catch |err| return failDb(handle, err);
     return okDb(handle);
@@ -172,8 +167,7 @@ pub fn zova_database_release_savepoint(request: ?*const zova_database_savepoint_
 
 pub fn zova_database_vacuum(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     handle.db.vacuum() catch |err| return failDb(handle, err);
     return okDb(handle);
@@ -181,8 +175,7 @@ pub fn zova_database_vacuum(request: ?*const zova_database_simple_request) callc
 
 pub fn zova_database_backup(request: ?*const zova_database_backup_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const destination_path = req.destination_path orelse return failDb(handle, error.InvalidArgument);
     if ((req.flags & ~ZOVA_BACKUP_NO_VERIFY) != 0) return failDb(handle, error.InvalidArgument);
@@ -195,8 +188,7 @@ pub fn zova_database_backup(request: ?*const zova_database_backup_request) callc
 
 pub fn zova_database_compact(request: ?*const zova_database_compact_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const destination_path = req.destination_path orelse return failDb(handle, error.InvalidArgument);
     if ((req.flags & ~ZOVA_COMPACT_NO_VERIFY) != 0) return failDb(handle, error.InvalidArgument);
@@ -209,8 +201,7 @@ pub fn zova_database_compact(request: ?*const zova_database_compact_request) cal
 
 pub fn zova_database_set_busy_timeout(request: ?*const zova_database_busy_timeout_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     if (req.milliseconds > std.math.maxInt(c_int)) return failDb(handle, error.InvalidArgument);
     handle.db.setBusyTimeout(req.milliseconds) catch |err| return failDb(handle, err);
@@ -219,8 +210,7 @@ pub fn zova_database_set_busy_timeout(request: ?*const zova_database_busy_timeou
 
 pub fn zova_database_last_insert_rowid(request: ?*const zova_database_last_insert_rowid_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const out = req.out_rowid orelse return failDb(handle, error.InvalidArgument);
     out.* = handle.db.lastInsertRowid();
@@ -229,8 +219,7 @@ pub fn zova_database_last_insert_rowid(request: ?*const zova_database_last_inser
 
 pub fn zova_database_changes(request: ?*const zova_database_changes_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const out = req.out_changes orelse return failDb(handle, error.InvalidArgument);
     out.* = handle.db.changes();
@@ -239,8 +228,7 @@ pub fn zova_database_changes(request: ?*const zova_database_changes_request) cal
 
 pub fn zova_database_total_changes(request: ?*const zova_database_total_changes_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const out = req.out_total_changes orelse return failDb(handle, error.InvalidArgument);
     out.* = handle.db.totalChanges();
@@ -255,8 +243,7 @@ const SavepointOperation = enum {
 
 fn databaseSavepoint(request: ?*const zova_database_savepoint_request, operation: SavepointOperation) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const name = req.name orelse return failDb(handle, error.InvalidArgument);
     const result = switch (operation) {

@@ -276,7 +276,6 @@ pub fn build(b: *std.Build) void {
     const install_statement_reuse_98 = b.addInstallArtifact(statement_reuse_98_benchmark, .{});
     b.step("build-statement-reuse-98", "Build bounded issue-98 statement reuse benchmark").dependOn(&install_statement_reuse_98.step);
 
-
     const kv_benchmark = b.addExecutable(.{
         .name = "zova_kv_calls_benchmark",
         .root_module = b.createModule(.{

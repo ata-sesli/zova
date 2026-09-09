@@ -5,7 +5,7 @@ const zova = @import("../zova.zig");
 
 const allocator = @import("values.zig").allocator;
 const clearMessage = @import("errors.zig").clearMessage;
-const databaseHandle = @import("handles.zig").databaseHandle;
+const lockDatabaseHandle = @import("handles.zig").lockDatabaseHandle;
 const emptyExtensionInfo = @import("results.zig").emptyExtensionInfo;
 const emptyExtensionList = @import("results.zig").emptyExtensionList;
 const failDb = @import("errors.zig").failDb;
@@ -55,8 +55,7 @@ pub fn zova_extension_bundle_untrust(request: ?*const zova_extension_bundle_untr
 
 pub fn zova_database_extension_install(request: ?*const zova_database_extension_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const name = req.name orelse return failDb(handle, error.InvalidArgument);
     handle.db.installExtension(std.mem.span(name)) catch |err| return failDb(handle, err);
@@ -65,8 +64,7 @@ pub fn zova_database_extension_install(request: ?*const zova_database_extension_
 
 pub fn zova_database_extension_upgrade(request: ?*const zova_database_extension_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const name = req.name orelse return failDb(handle, error.InvalidArgument);
     handle.db.upgradeExtension(std.mem.span(name)) catch |err| return failDb(handle, err);
@@ -75,8 +73,7 @@ pub fn zova_database_extension_upgrade(request: ?*const zova_database_extension_
 
 pub fn zova_database_extension_list(request: ?*const zova_database_extension_list_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const out = req.out_list orelse return failDb(handle, error.InvalidArgument);
     out.* = emptyExtensionList();
@@ -88,8 +85,7 @@ pub fn zova_database_extension_list(request: ?*const zova_database_extension_lis
 
 pub fn zova_database_extension_info(request: ?*const zova_database_extension_info_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const name = req.name orelse return failDb(handle, error.InvalidArgument);
     const out = req.out_info orelse return failDb(handle, error.InvalidArgument);
@@ -102,8 +98,7 @@ pub fn zova_database_extension_info(request: ?*const zova_database_extension_inf
 
 pub fn zova_database_extension_check(request: ?*const zova_database_extension_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const name = req.name orelse return failDb(handle, error.InvalidArgument);
     handle.db.checkExtension(std.mem.span(name)) catch |err| return failDb(handle, err);
@@ -112,8 +107,7 @@ pub fn zova_database_extension_check(request: ?*const zova_database_extension_re
 
 pub fn zova_database_extension_check_all(request: ?*const zova_database_simple_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     var list = handle.db.listExtensions(allocator) catch |err| return failDb(handle, err);
     defer list.deinit(allocator);
@@ -125,8 +119,7 @@ pub fn zova_database_extension_check_all(request: ?*const zova_database_simple_r
 
 pub fn zova_database_extension_drop(request: ?*const zova_database_extension_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const name = req.name orelse return failDb(handle, error.InvalidArgument);
     handle.db.dropExtension(std.mem.span(name)) catch |err| return failDb(handle, err);

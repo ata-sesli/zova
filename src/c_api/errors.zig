@@ -6,7 +6,7 @@ const zova_version = @import("../version.zig");
 
 const DatabaseHandle = @import("handles.zig").DatabaseHandle;
 const allocator = @import("values.zig").allocator;
-const databaseHandle = @import("handles.zig").databaseHandle;
+const lockDatabaseHandle = @import("handles.zig").lockDatabaseHandle;
 const zova_database = @import("types.zig").zova_database;
 const zova_message = @import("types.zig").zova_message;
 const zova_message_free = @import("results.zig").zova_message_free;
@@ -39,8 +39,7 @@ pub fn zova_status_name(status: c_int) callconv(.c) [*:0]const u8 {
 // harmless for callers that follow the container API instead of freeing fields.
 
 pub fn zova_database_last_error_message(db: ?*zova_database) callconv(.c) [*:0]const u8 {
-    const handle = databaseHandle(db) orelse return "invalid database handle";
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(db) orelse return "invalid database handle";
     defer handle.mutex.unlock();
     if (handle.last_error) |message| return message.ptr;
     return "";

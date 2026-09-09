@@ -2,7 +2,7 @@
 
 const allocator = @import("values.zig").allocator;
 const bytesConst = @import("values.zig").bytesConst;
-const databaseHandle = @import("handles.zig").databaseHandle;
+const lockDatabaseHandle = @import("handles.zig").lockDatabaseHandle;
 const failDb = @import("errors.zig").failDb;
 const kvKeySlices = @import("values.zig").kvKeySlices;
 const kvPutEntrySlices = @import("values.zig").kvPutEntrySlices;
@@ -20,8 +20,7 @@ const zova_status = @import("types.zig").zova_status;
 
 pub fn zova_kv_get(request: ?*const zova_kv_get_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const out = req.out_result orelse return failDb(handle, error.InvalidArgument);
     out.* = .{ .found = 0, .value = .{ .data = null, .len = 0 } };
@@ -38,8 +37,7 @@ pub fn zova_kv_get(request: ?*const zova_kv_get_request) callconv(.c) zova_statu
 
 pub fn zova_kv_get_many(request: ?*const zova_kv_get_many_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const out = req.out_results orelse return failDb(handle, error.InvalidArgument);
     out.* = .{ .items = null, .len = 0 };
@@ -66,8 +64,7 @@ pub fn zova_kv_get_many(request: ?*const zova_kv_get_many_request) callconv(.c) 
 
 pub fn zova_kv_put(request: ?*const zova_kv_put_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const namespace = bytesConst(req.ns.data, req.ns.len) orelse return failDb(handle, error.InvalidArgument);
     const key = bytesConst(req.key.data, req.key.len) orelse return failDb(handle, error.InvalidArgument);
@@ -78,8 +75,7 @@ pub fn zova_kv_put(request: ?*const zova_kv_put_request) callconv(.c) zova_statu
 
 pub fn zova_kv_put_many(request: ?*const zova_kv_put_many_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const namespace = bytesConst(req.ns.data, req.ns.len) orelse return failDb(handle, error.InvalidArgument);
     const entries = kvPutEntrySlices(req.entries, req.entries_len) catch |err| return failDb(handle, err);
@@ -90,8 +86,7 @@ pub fn zova_kv_put_many(request: ?*const zova_kv_put_many_request) callconv(.c) 
 
 pub fn zova_kv_delete(request: ?*const zova_kv_delete_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const namespace = bytesConst(req.ns.data, req.ns.len) orelse return failDb(handle, error.InvalidArgument);
     const key = bytesConst(req.key.data, req.key.len) orelse return failDb(handle, error.InvalidArgument);
@@ -101,8 +96,7 @@ pub fn zova_kv_delete(request: ?*const zova_kv_delete_request) callconv(.c) zova
 
 pub fn zova_kv_delete_many(request: ?*const zova_kv_delete_many_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const namespace = bytesConst(req.ns.data, req.ns.len) orelse return failDb(handle, error.InvalidArgument);
     const keys = kvKeySlices(req.keys, req.keys_len) catch |err| return failDb(handle, err);
@@ -113,8 +107,7 @@ pub fn zova_kv_delete_many(request: ?*const zova_kv_delete_many_request) callcon
 
 pub fn zova_kv_count(request: ?*const zova_kv_count_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const out = req.out_count orelse return failDb(handle, error.InvalidArgument);
     const namespace = bytesConst(req.ns.data, req.ns.len) orelse return failDb(handle, error.InvalidArgument);
@@ -124,8 +117,7 @@ pub fn zova_kv_count(request: ?*const zova_kv_count_request) callconv(.c) zova_s
 
 pub fn zova_kv_clear_namespace(request: ?*const zova_kv_clear_namespace_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
-    const handle = databaseHandle(req.db) orelse return .INVALID_ARGUMENT;
-    handle.mutex.lock();
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const namespace = bytesConst(req.ns.data, req.ns.len) orelse return failDb(handle, error.InvalidArgument);
     handle.db.kvClearNamespace(namespace) catch |err| return failDb(handle, err);
