@@ -108,6 +108,39 @@ fn readWithPhases(db: *zova.Database, allocator: std.mem.Allocator, keys: []cons
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
+    if (args.len == 5 and std.mem.eql(u8, args[2], "payload-read")) {
+        const size = try std.fmt.parseInt(usize, args[3], 10);
+        if (size == 0 or size > count) return error.InvalidArgument;
+        const path = try allocator.dupeZ(u8, args[1]);
+        var db = try zova.Database.open(path);
+        defer db.deinit();
+        try db.exec("pragma cache_size=-32768");
+        const keys = try allocator.alloc(i64, size);
+        for (keys, 0..) |*key, i| {
+            key.* = @intCast(1 + (if (std.mem.eql(u8, args[4], "contiguous")) i else (i * 7919) % count));
+            if (std.mem.eql(u8, args[4], "mixed") and i % 5 == 0) key.* += count * 2;
+        }
+        var times: [10]f64 = undefined;
+        for (0..13) |iteration| {
+            const start = now();
+            {
+                var rows = try db.graphEdgePayloadsGetMany(std.heap.c_allocator, "bench", keys);
+                defer rows.deinit(std.heap.c_allocator);
+                if (rows.items.len != size) return error.ParityMismatch;
+                for (rows.items, keys) |row, key| {
+                    if (row.edge_key != key or row.found != (key <= count)) return error.ParityMismatch;
+                    if (row.found) {
+                        if (row.payload.?.len != 128) return error.ParityMismatch;
+                        for (row.payload.?) |byte| if (byte != 0) return error.ParityMismatch;
+                    }
+                }
+            }
+            const elapsed = @as(f64, @floatFromInt(start.durationTo(now()).toNanoseconds())) / 1e6;
+            if (iteration >= 3) times[iteration - 3] = elapsed;
+        }
+        for (times, 0..) |t, i| std.debug.print("payload,{s},{d},{s},{d},{d:.6}\n", .{ args[2], size, args[4], i, t });
+        return;
+    }
     if (args.len == 6 and std.mem.eql(u8, args[2], "degree")) {
         const path = try allocator.dupeZ(u8, args[1]);
         const size = try std.fmt.parseInt(usize, args[4], 10);

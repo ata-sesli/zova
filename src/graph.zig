@@ -2402,16 +2402,14 @@ pub const Database = struct {
         errdefer for (items) |*item| item.deinit(allocator);
         if (keys.len == 0) return .{ .items = items };
 
-        try self.stageOpaqueKeys("_zova_graph_edge_payload_keys", keys);
-        defer self.clearOpaqueKeys("_zova_graph_edge_payload_keys");
         var stmt = try self.prepareSchema(
-            \\select batch.ordinal,e.edge_key,e.payload
-            \\from temp._zova_graph_edge_payload_keys batch
-            \\left join {s}_zova_graph_edges e on e.graph_key=?1 and e.edge_key=batch.row_key
-            \\order by batch.ordinal
+            \\select batch.rowid-1,e.edge_key,e.payload
+            \\from carray(?2) batch
+            \\left join {s}_zova_graph_edges e on e.graph_key=?1 and e.edge_key=batch.value
         );
         defer stmt.deinit();
         try stmt.bindInt64(1, graph_key);
+        try sqlite_array.bindInt64Borrowed(&stmt, 2, keys);
         var seen: usize = 0;
         while ((try stmt.step()) == .row) : (seen += 1) {
             const ordinal = stmt.columnInt64(0);
