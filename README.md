@@ -30,7 +30,10 @@ Zova storage format, states which formats migrate forward, and documents the
 migration workflow, offline locking, bound-store naming, temporary disk
 requirements, interruption recovery, and extension compatibility.
 
-Zova's bundled SQLite enables FTS5 and the read-only `dbstat` virtual table.
+Zova's bundled SQLite enables FTS5, R-Tree, Geopoly, carray, built-in math
+functions, and the read-only `dbstat` virtual table. These compile options are
+shared by native and WASM builds. `carray` takes native pointer bindings through
+SQLite's C interface; enabling it does not add a high-level Zova array API.
 `dbstat` is available for storage diagnostics; it is not a portable guarantee
 for databases opened through an unrelated system SQLite build.
 

@@ -18,6 +18,21 @@ func tempZovaPath(t *testing.T, name string) string {
 	return filepath.Join(t.TempDir(), name+".zova")
 }
 
+func TestSQLiteCapabilities(t *testing.T) {
+	db, err := Create(tempZovaPath(t, "capabilities"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	sql, err := os.ReadFile("../../tests/sqlite_capabilities.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(string(sql)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestABIVersionAndStatusNames(t *testing.T) {
 	major, minor, patch := ABIVersionNumbers()
 	if major != 1 || minor != 0 || patch != 0 {
