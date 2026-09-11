@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
+const sqlite_array = @import("sqlite_array.zig");
 const statement_cache = @import("statement_cache.zig");
 const walk_scratch = @import("graph_walk_scratch.zig");
 const zova_error = @import("zova_error.zig");
@@ -2318,16 +2319,15 @@ pub const Database = struct {
         errdefer for (items) |*item| item.deinit(allocator);
         if (keys.len == 0) return .{ .items = items };
 
-        try self.stageOpaqueKeys("_zova_graph_nodes_get_many_keys", keys);
-        defer self.clearOpaqueKeys("_zova_graph_nodes_get_many_keys");
+        // Scatter by the array ordinal below; SQL ordering would add a sorter.
         var stmt = try self.prepareSchema(
-            \\select batch.ordinal,n.node_key,n.node_id,n.kind,n.created_order
-            \\from temp._zova_graph_nodes_get_many_keys batch
-            \\left join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=batch.row_key
-            \\order by batch.ordinal
+            \\select batch.rowid-1,n.node_key,n.node_id,n.kind,n.created_order
+            \\from carray(?2) batch
+            \\left join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=batch.value
         );
         defer stmt.deinit();
         try stmt.bindInt64(1, graph_key);
+        try sqlite_array.bindInt64Borrowed(&stmt, 2, keys);
         var seen: usize = 0;
         while ((try stmt.step()) == .row) : (seen += 1) {
             const ordinal = stmt.columnInt64(0);
@@ -2362,16 +2362,15 @@ pub const Database = struct {
 
         try self.ensureEdgeTypeCache();
 
-        try self.stageOpaqueKeys("_zova_graph_edges_get_many_keys", keys);
-        defer self.clearOpaqueKeys("_zova_graph_edges_get_many_keys");
+        // Scatter by the array ordinal below; SQL ordering would add a sorter.
         var stmt = try self.prepareSchema(
-            \\select batch.ordinal,e.edge_key,e.from_node_key,e.edge_type_key,e.to_node_key,e.created_order
-            \\from temp._zova_graph_edges_get_many_keys batch
-            \\left join {s}_zova_graph_edges e on e.graph_key=?1 and e.edge_key=batch.row_key
-            \\order by batch.ordinal
+            \\select batch.rowid-1,e.edge_key,e.from_node_key,e.edge_type_key,e.to_node_key,e.created_order
+            \\from carray(?2) batch
+            \\left join {s}_zova_graph_edges e on e.graph_key=?1 and e.edge_key=batch.value
         );
         defer stmt.deinit();
         try stmt.bindInt64(1, graph_key);
+        try sqlite_array.bindInt64Borrowed(&stmt, 2, keys);
         var seen: usize = 0;
         while ((try stmt.step()) == .row) : (seen += 1) {
             const ordinal = stmt.columnInt64(0);
@@ -2533,61 +2532,42 @@ pub const Database = struct {
         for (node_keys) |node_key| if (node_key <= 0) return error.InvalidArgument;
         if (node_keys.len == 0) return;
 
-        try self.sqlite_db.exec(
-            \\create temp table if not exists temp._zova_graph_degree_many_keys (
-            \\ ordinal integer primary key,
-            \\ node_key integer not null
-            \\) without rowid;
-            \\delete from temp._zova_graph_degree_many_keys;
-        );
-        defer self.sqlite_db.exec("delete from temp._zova_graph_degree_many_keys") catch {};
-        var stage = try self.sqlite_db.prepare("insert into temp._zova_graph_degree_many_keys(ordinal,node_key) values(?,?)");
-        defer stage.deinit();
-        for (node_keys, 0..) |node_key, ordinal| {
-            try stage.bindInt64(1, @intCast(ordinal));
-            try stage.bindInt64(2, node_key);
-            std.debug.assert((try stage.step()) == .done);
-            try stage.reset();
-            try stage.clearBindings();
-        }
-
+        // Count within each ordinal's indexed adjacency range instead of sorting
+        // expanded edges for GROUP BY. The borrowed array outlives the statement.
         var query = switch (direction) {
             .outgoing => if (edge_type == null)
                 try self.prepareSchema(
-                    \\select batch.ordinal,count(e.edge_key)
-                    \\from temp._zova_graph_degree_many_keys batch
-                    \\join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=batch.node_key
-                    \\left join {s}_zova_graph_edges e on e.graph_key=n.graph_key and e.from_node_key=n.node_key
-                    \\group by batch.ordinal order by batch.ordinal
+                    \\select batch.rowid-1,(select count(e.edge_key) from {s}_zova_graph_edges e
+                    \\where e.graph_key=n.graph_key and e.from_node_key=n.node_key)
+                    \\from carray(?3) batch
+                    \\join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=batch.value
                 )
             else
                 try self.prepareSchema(
-                    \\select batch.ordinal,count(e.edge_key)
-                    \\from temp._zova_graph_degree_many_keys batch
-                    \\join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=batch.node_key
-                    \\left join {s}_zova_graph_edges e on e.graph_key=n.graph_key and e.from_node_key=n.node_key and e.edge_type_key=?2
-                    \\group by batch.ordinal order by batch.ordinal
+                    \\select batch.rowid-1,(select count(e.edge_key) from {s}_zova_graph_edges e
+                    \\where e.graph_key=n.graph_key and e.from_node_key=n.node_key and e.edge_type_key=?2)
+                    \\from carray(?3) batch
+                    \\join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=batch.value
                 ),
             .incoming => if (edge_type == null)
                 try self.prepareSchema(
-                    \\select batch.ordinal,count(e.edge_key)
-                    \\from temp._zova_graph_degree_many_keys batch
-                    \\join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=batch.node_key
-                    \\left join {s}_zova_graph_edges e on e.graph_key=n.graph_key and e.to_node_key=n.node_key
-                    \\group by batch.ordinal order by batch.ordinal
+                    \\select batch.rowid-1,(select count(e.edge_key) from {s}_zova_graph_edges e
+                    \\where e.graph_key=n.graph_key and e.to_node_key=n.node_key)
+                    \\from carray(?3) batch
+                    \\join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=batch.value
                 )
             else
                 try self.prepareSchema(
-                    \\select batch.ordinal,count(e.edge_key)
-                    \\from temp._zova_graph_degree_many_keys batch
-                    \\join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=batch.node_key
-                    \\left join {s}_zova_graph_edges e on e.graph_key=n.graph_key and e.to_node_key=n.node_key and e.edge_type_key=?2
-                    \\group by batch.ordinal order by batch.ordinal
+                    \\select batch.rowid-1,(select count(e.edge_key) from {s}_zova_graph_edges e
+                    \\where e.graph_key=n.graph_key and e.to_node_key=n.node_key and e.edge_type_key=?2)
+                    \\from carray(?3) batch
+                    \\join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=batch.value
                 ),
         };
         defer query.deinit();
         try query.bindInt64(1, graph_key);
         if (edge_type_key) |key| try query.bindInt64(2, key);
+        try sqlite_array.bindInt64Borrowed(&query, 3, node_keys);
         var resolved: usize = 0;
         while ((try query.step()) == .row) {
             const ordinal = query.columnInt64(0);
