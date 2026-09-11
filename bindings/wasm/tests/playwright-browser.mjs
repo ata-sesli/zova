@@ -61,6 +61,15 @@ try {
   if (!result.ok) throw new Error(JSON.stringify(result));
   clearTimeout(deadline);
 
+  // Exercise native carray pointer binding as well as the SQL-only modules
+  // inside the actual packaged WebAssembly instance.
+  const capabilities = await page.evaluate(async () => {
+    const {default: init} = await import('/package/zova.mjs');
+    const module = await init();
+    return Number(module._zova_wasm_smoke());
+  });
+  if (capabilities !== 0) throw new Error(`SQLite WASM capability probe: ${capabilities}`);
+
   // Test actual worker initialization failure from the installed artifact.
   const failedPage = await context.newPage();
   await failedPage.route("**/dist/worker.mjs", route => route.abort());

@@ -101,6 +101,10 @@ fn build_generated_c(source: &Path, target: &str) -> PathBuf {
         .define("SQLITE_THREADSAFE", "1")
         .define("SQLITE_ENABLE_FTS5", None)
         .define("SQLITE_ENABLE_DBSTAT_VTAB", None)
+        .define("SQLITE_ENABLE_RTREE", None)
+        .define("SQLITE_ENABLE_GEOPOLY", None)
+        .define("SQLITE_ENABLE_CARRAY", None)
+        .define("SQLITE_ENABLE_MATH_FUNCTIONS", None)
         .cargo_metadata(false);
     // Zig's C backend uses Clang extensions. cc handles target-specific
     // CC/CFLAGS/AR overrides and platform archive/linker conventions.
