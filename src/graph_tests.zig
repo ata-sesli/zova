@@ -644,6 +644,11 @@ test "prepared fresh graph edge payloads round trip replace and roll back atomic
     try std.testing.expectEqualStrings("first", payloads.items[1].payload.?);
     try std.testing.expectEqualSlices(u8, payloads.items[0].payload.?, payloads.items[2].payload.?);
     try std.testing.expect(!payloads.items[3].found);
+    var staging = try db.sqlite_db.prepare("select count(*) from sqlite_temp_schema where name='_zova_graph_edge_payload_keys'");
+    defer staging.deinit();
+    try std.testing.expect(try staging.step() == .row);
+    try std.testing.expectEqual(@as(i64, 0), staging.columnInt64(0));
+    try staging.reset();
 
     try db.replaceGraphEdgePayloads("app", &.{
         .{ .edge_key = edge_keys[0], .payload = "replaced" },
@@ -981,6 +986,11 @@ test "native graph database routes persistent queries to attached graph store" {
     var external_edges = try graphs.graphEdgesGetManyKeyed(std.testing.allocator, "external", &external_edge_keys);
     defer external_edges.deinit(std.testing.allocator);
     try std.testing.expect(external_edges.items[0].found);
+    try graphs.replaceGraphEdgePayloads("external", &.{.{ .edge_key = external_edge_keys[0], .payload = "bound" }});
+    var external_payloads = try graphs.graphEdgePayloadsGetMany(std.testing.allocator, "external", &.{ external_edge_keys[0], external_edge_keys[0] });
+    defer external_payloads.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("bound", external_payloads.items[0].payload.?);
+    try std.testing.expectEqualStrings("bound", external_payloads.items[1].payload.?);
     var external_degrees: [2]u64 = undefined;
     try graphs.graphDegreeManyKeyed("external", &external_node_keys, .outgoing, "links", &external_degrees);
     try std.testing.expectEqualSlices(u64, &.{ 1, 0 }, &external_degrees);
@@ -1478,6 +1488,10 @@ test "graph scan pages retain a caller transaction WAL snapshot" {
     try writer.putGraphNodesKeyed(&.{.{ .graph_name = "app", .node_id = "c", .kind = "node" }}, &new_node_key);
     var new_edge_key: [1]i64 = undefined;
     try writer.putGraphEdgesKeyed(&.{.{ .graph_name = "app", .from_node_id = "root", .edge_type = "links", .to_node_id = "c" }}, &new_edge_key);
+    try writer.replaceGraphEdgePayloads("app", &.{.{ .edge_key = first.edges[0].edge_key, .payload = "later" }});
+    var stable_payload = try reader.graphEdgePayloadsGetMany(std.testing.allocator, "app", &.{first.edges[0].edge_key});
+    defer stable_payload.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), stable_payload.items[0].payload.?.len);
 
     var stable = try reader.graphScan(std.testing.allocator, .{
         .graph_name = "app",
@@ -1503,6 +1517,9 @@ test "graph scan pages retain a caller transaction WAL snapshot" {
     try reader.commit();
     try reader.graphDegreeManyKeyed("app", &.{first.nodes[0].node_key}, .outgoing, "links", &snapshot_degree);
     try std.testing.expectEqual(@as(u64, 3), snapshot_degree[0]);
+    var later_payload = try reader.graphEdgePayloadsGetMany(std.testing.allocator, "app", &.{first.edges[0].edge_key});
+    defer later_payload.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("later", later_payload.items[0].payload.?);
 
     var visible_nodes = try reader.graphNodesGetManyKeyed(std.testing.allocator, "app", &new_node_key);
     defer visible_nodes.deinit(std.testing.allocator);
