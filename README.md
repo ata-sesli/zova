@@ -1321,6 +1321,45 @@ Run the full release smoke:
 scripts/check-release.sh
 ```
 
+### Private SQLite diagnostics
+
+Ordinary Debug and release builds exclude scan status, bytecode/statement virtual
+tables, EXPLAIN comments, API armor and SQLite invariant assertions. Opt in for
+local investigation:
+
+```sh
+zig build test-sqlite-diagnostics -Dsqlite-diagnostics=true
+zig build c-abi -Dsqlite-diagnostics=true
+# Dedicated invariant configuration, also run by CI:
+zig build test c-abi-test check-storage-compat -Dsqlite-invariants=true -Doptimize=ReleaseSafe
+# Verify production exclusion:
+zig build test-sqlite-diagnostics -Doptimize=ReleaseSafe
+```
+
+`sqlite-invariants` implies diagnostics and adds `SQLITE_DEBUG`; diagnostics alone
+does not. Neither option changes the storage format or adds a public Zova API.
+The same configuration applies to the canonical SQLite library and embedded C ABI.
+Release packaging and generated-C/binding builds do not enable these options.
+
+Scan collection starts disabled on every diagnostic connection. In a native
+diagnostic harness, call
+`sqlite3_db_config(db, SQLITE_DBCONFIG_STMT_SCANSTATUS, 1, NULL)` **before preparing**
+the statement to measure, run it, and inspect `sqlite3_stmt_scanstatus_v2` counters.
+Finalize that statement and restore the setting to `0` on success and error paths.
+Previously prepared statements are not retroactively instrumented. See
+`tests/sqlite_diagnostics.c` for indexed/full-scan and reset examples.
+
+Explicit local SQL such as `SELECT * FROM bytecode('SELECT ...')`,
+`tables_used('SELECT ...')`, and `sqlite_stmt` can inspect VM operations, table
+access and busy statements. These queries may contain SQL text, literals and
+private schema names: request them deliberately and redact results before sharing.
+Nothing is logged automatically. DBPAGE/DBPTR and unrestricted extension loading
+are not enabled by diagnostics.
+
+**Do not compare diagnostic timings with production benchmarks or publish these
+artifacts.** Scan-status support itself has overhead even with collection disabled;
+use production builds for all performance gates and before/after comparisons.
+
 ## Release Package Policy
 
 Zova publishes several release artifact types:
