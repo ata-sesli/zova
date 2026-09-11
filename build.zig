@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const sqlite_c_flags = &.{
+const sqlite_production_c_flags = &.{
     "-std=c99",
     // Keep the static C ABI library consumable by external linkers such as
     // cgo without requiring Zig/Clang sanitizer runtimes.
@@ -20,6 +20,21 @@ const sqlite_c_flags = &.{
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const sqlite_invariants = b.option(bool, "sqlite-invariants", "Enable SQLite invariant assertions (not for benchmarks)") orelse false;
+    const sqlite_diagnostics = (b.option(bool, "sqlite-diagnostics", "Enable private SQLite query diagnostics (not for benchmarks)") orelse false) or sqlite_invariants;
+    const diagnostic_flags: []const []const u8 = if (sqlite_diagnostics) &.{
+        "-DSQLITE_ENABLE_STMT_SCANSTATUS",
+        "-DSQLITE_ENABLE_BYTECODE_VTAB",
+        "-DSQLITE_ENABLE_STMTVTAB",
+        "-DSQLITE_ENABLE_EXPLAIN_COMMENTS",
+        "-DSQLITE_ENABLE_API_ARMOR",
+        "-DSQLITE_EXTRA_AUTOEXT=sqliteDiagnosticsConfigure",
+    } else &.{};
+    const sqlite_c_flags = std.mem.concat(b.allocator, []const u8, &.{
+        sqlite_production_c_flags,
+        diagnostic_flags,
+        if (sqlite_invariants) &.{"-DSQLITE_DEBUG"} else &.{},
+    }) catch @panic("out of memory");
     const package_version = packageVersion(b);
     const enable_dynamic_extensions = b.option(bool, "enable-dynamic-extensions", "Enable dynamic .zovaext loading") orelse true;
     const supports_dynamic_extension_fixture = enable_dynamic_extensions and target.result.os.tag != .windows;
@@ -36,6 +51,7 @@ pub fn build(b: *std.Build) void {
         .file = b.path("vendor/sqlite3.53.4/sqlite3.c"),
         .flags = sqlite_c_flags,
     });
+    if (sqlite_diagnostics) addSqliteDiagnostics(sqlite_module, b);
     const sqlite_lib = b.addLibrary(.{
         .name = "zova_sqlite",
         .linkage = .static,
@@ -405,6 +421,18 @@ pub fn build(b: *std.Build) void {
     const capabilities_run = b.addRunArtifact(capabilities);
     b.step("test-sqlite-capabilities", "Verify bundled SQLite modules").dependOn(&capabilities_run.step);
     test_step.dependOn(&capabilities_run.step);
+    const diagnostics = b.addExecutable(.{
+        .name = "sqlite-diagnostics",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+    });
+    addSqlite(diagnostics.root_module, b, sqlite_lib);
+    diagnostics.root_module.addCSourceFile(.{
+        .file = b.path("tests/sqlite_diagnostics.c"),
+        .flags = if (sqlite_invariants) &.{ "-std=c99", "-DZOVA_SQLITE_DIAGNOSTICS", "-DZOVA_SQLITE_INVARIANTS" } else if (sqlite_diagnostics) &.{ "-std=c99", "-DZOVA_SQLITE_DIAGNOSTICS" } else &.{"-std=c99"},
+    });
+    const diagnostics_run = b.addRunArtifact(diagnostics);
+    b.step("test-sqlite-diagnostics", "Verify SQLite diagnostics or their production exclusion").dependOn(&diagnostics_run.step);
+    test_step.dependOn(&diagnostics_run.step);
     const resolution_scope_100_test_step = addZigTestSuite(
         b,
         "test-resolution-scope-100",
@@ -609,7 +637,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     c_abi_lib.root_module.addOptions("zova_build_options", zova_build_options);
-    addEmbeddedSqlite(c_abi_lib.root_module, b);
+    addEmbeddedSqlite(c_abi_lib.root_module, b, sqlite_c_flags);
+    if (sqlite_diagnostics) addSqliteDiagnostics(c_abi_lib.root_module, b);
 
     const install_c_abi_lib = b.addInstallArtifact(c_abi_lib, .{});
 
@@ -748,7 +777,12 @@ fn addSqlite(
     module.linkLibrary(sqlite_lib);
 }
 
-fn addEmbeddedSqlite(module: *std.Build.Module, b: *std.Build) void {
+fn addSqliteDiagnostics(module: *std.Build.Module, b: *std.Build) void {
+    module.addIncludePath(b.path("vendor/sqlite3.53.4"));
+    module.addCSourceFile(.{ .file = b.path("src/sqlite_diagnostics.c"), .flags = &.{"-std=c99"} });
+}
+
+fn addEmbeddedSqlite(module: *std.Build.Module, b: *std.Build, sqlite_c_flags: []const []const u8) void {
     module.addIncludePath(b.path("vendor/sqlite3.53.4"));
     module.addCSourceFile(.{
         .file = b.path("vendor/sqlite3.53.4/sqlite3.c"),
