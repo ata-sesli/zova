@@ -11,6 +11,10 @@ const sqlite_c_flags = &.{
     // Zova-specific search API.
     "-DSQLITE_ENABLE_FTS5",
     "-DSQLITE_ENABLE_DBSTAT_VTAB",
+    "-DSQLITE_ENABLE_RTREE",
+    "-DSQLITE_ENABLE_GEOPOLY",
+    "-DSQLITE_ENABLE_CARRAY",
+    "-DSQLITE_ENABLE_MATH_FUNCTIONS",
 };
 
 pub fn build(b: *std.Build) void {
@@ -392,6 +396,15 @@ pub fn build(b: *std.Build) void {
     storage_compat_check_step.dependOn(&storage_compat_check_cmd.step);
 
     const test_step = b.step("test", "Run all tests");
+    const capabilities = b.addExecutable(.{
+        .name = "sqlite-capabilities",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+    });
+    addSqlite(capabilities.root_module, b, sqlite_lib);
+    capabilities.root_module.addCSourceFile(.{ .file = b.path("tests/sqlite_capabilities.c"), .flags = &.{"-std=c99"} });
+    const capabilities_run = b.addRunArtifact(capabilities);
+    b.step("test-sqlite-capabilities", "Verify bundled SQLite modules").dependOn(&capabilities_run.step);
+    test_step.dependOn(&capabilities_run.step);
     const resolution_scope_100_test_step = addZigTestSuite(
         b,
         "test-resolution-scope-100",
@@ -609,6 +622,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     c_smoke_module.addIncludePath(b.path("include"));
+    c_smoke_module.addIncludePath(b.path("vendor/sqlite3.53.4"));
     c_smoke_module.addCSourceFile(.{
         .file = b.path("tests/c_abi_smoke.c"),
         .flags = &.{"-std=c99"},

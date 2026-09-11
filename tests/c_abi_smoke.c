@@ -1,5 +1,6 @@
 #include "zova.h"
 #include "sqlite3.h"
+#include "sqlite_capabilities.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -1955,6 +1956,7 @@ static void run_probe_migrate_smoke(void) {
 }
 
 int main(int argc, char **argv) {
+    if (zova_sqlite_capabilities()) return 1;
     expect_status(zova_graph_build_fresh_keyed(NULL), ZOVA_INVALID_ARGUMENT, "fresh graph null request");
     expect_status(zova_graph_build_fresh_prepared_keyed(NULL), ZOVA_INVALID_ARGUMENT, "prepared fresh graph null request");
     expect_status(zova_graph_build_fresh_prepared_keyed_with_payloads(NULL), ZOVA_INVALID_ARGUMENT, "prepared payload graph null request");

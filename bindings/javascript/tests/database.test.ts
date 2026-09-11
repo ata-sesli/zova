@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -25,6 +25,14 @@ afterEach(() => {
 });
 
 describe("Database and Statement", () => {
+  test("bundled SQLite capabilities", () => {
+    const database = Database.create(temporaryDatabasePath());
+    try {
+      database.exec(readFileSync(new URL("../../../tests/sqlite_capabilities.sql", import.meta.url), "utf8"));
+    } finally {
+      database.close();
+    }
+  });
   test("round-trips every SQLite value type with bigint integers", () => {
     const database = Database.create(temporaryDatabasePath());
     database.exec(`

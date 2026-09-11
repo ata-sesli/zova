@@ -1,8 +1,10 @@
 #include "zova.h"
 #include "sqlite3.h"
+#include "../../../tests/sqlite_capabilities.h"
 
 /* Private #38 go/no-go fixture, not a browser API. */
 int64_t zova_wasm_smoke(void) {
+    if (zova_sqlite_capabilities()) return 11;
     zova_database *db = NULL;
     zova_statement *statement = NULL;
     zova_message message = {0};

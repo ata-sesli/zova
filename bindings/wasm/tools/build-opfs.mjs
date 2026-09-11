@@ -52,6 +52,7 @@ run(["zig", "build-lib", "-ofmt=c", "-O", "ReleaseSafe", "-target", "wasm32-emsc
   "-Mzova_build_options=" + join(root,"bindings/wasm/native/build_options.zig")]);
 run([emcc, "-O2", "-I" + zigLib, "-I" + join(root, "include"), "-I" + sqlite,
   "-Wno-incompatible-pointer-types", "-DSQLITE_THREADSAFE=0", "-DSQLITE_ENABLE_FTS5", "-DSQLITE_ENABLE_DBSTAT_VTAB",
+  "-DSQLITE_ENABLE_RTREE", "-DSQLITE_ENABLE_GEOPOLY", "-DSQLITE_ENABLE_CARRAY", "-DSQLITE_ENABLE_MATH_FUNCTIONS",
   "-DSQLITE_DEFAULT_PAGE_SIZE=4096",
   "-DZOVA_WASM_OPFS",
   join(output, "zova_c.c"), join(wasm, "api/sqlite3-wasm.c"), join(root, spike ? "bindings/wasm/tests/opfs-smoke.c" : "bindings/wasm/native/bridge.c"),
