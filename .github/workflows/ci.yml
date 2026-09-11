@@ -58,6 +58,18 @@ jobs:
       - shell: bash
         run: sh scripts/measure-sqlite-modules.sh "$RUNNER_TEMP/sqlite-size"
 
+  sqlite-invariants:
+    name: SQLite invariants (diagnostic only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      # Includes transaction, corruption, fault injection, migration and C ABI
+      # coverage. Never publish or performance-benchmark these artifacts.
+      - run: zig build test c-abi-test check-storage-compat -Dsqlite-invariants=true -Doptimize=ReleaseSafe
+
   generated-c:
     name: Generated C (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
