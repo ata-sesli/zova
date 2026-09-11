@@ -981,6 +981,11 @@ test "native graph database routes persistent queries to attached graph store" {
     var external_edges = try graphs.graphEdgesGetManyKeyed(std.testing.allocator, "external", &external_edge_keys);
     defer external_edges.deinit(std.testing.allocator);
     try std.testing.expect(external_edges.items[0].found);
+    var external_degrees: [2]u64 = undefined;
+    try graphs.graphDegreeManyKeyed("external", &external_node_keys, .outgoing, "links", &external_degrees);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 0 }, &external_degrees);
+    try graphs.graphDegreeManyKeyed("external", &external_node_keys, .incoming, null, &external_degrees);
+    try std.testing.expectEqualSlices(u64, &.{ 0, 1 }, &external_degrees);
 
     var counts = try raw.prepare(
         \\select
@@ -1332,6 +1337,19 @@ test "keyed graph reads preserve order degree alignment and exclusive scan curso
     try db.graphDegreeManyKeyed("app", &.{ node_keys[0], node_keys[2], node_keys[0] }, .outgoing, "calls", &degrees);
     try std.testing.expectEqualSlices(u64, &.{ 2, 0, 2 }, &degrees);
 
+    for ([_]?[]const u8{ null, "calls" }) |filter| {
+        try db.graphDegreeManyKeyed("app", &.{ node_keys[2], node_keys[0], node_keys[2] }, .incoming, filter, &degrees);
+        try std.testing.expectEqualSlices(u64, &.{ 1, 0, 1 }, &degrees);
+        try db.graphDegreeManyKeyed("app", &.{ node_keys[0], node_keys[2], node_keys[0] }, .outgoing, filter, &degrees);
+        try std.testing.expectEqualSlices(u64, &.{ 2, 0, 2 }, &degrees);
+    }
+    try db.graphDegreeManyKeyed("app", &node_keys, .incoming, "absent", &degrees);
+    try std.testing.expectEqualSlices(u64, &.{ 0, 0, 0 }, &degrees);
+    var staged = try db.sqlite_db.prepare("select count(*) from sqlite_temp_schema where name='_zova_graph_degree_many_keys'");
+    defer staged.deinit();
+    try std.testing.expect(try staged.step() == .row);
+    try std.testing.expectEqual(@as(i64, 0), staged.columnInt64(0));
+
     var first = try db.graphScan(std.testing.allocator, .{
         .graph_name = "app",
         .node_limit = 2,
@@ -1479,7 +1497,12 @@ test "graph scan pages retain a caller transaction WAL snapshot" {
     var stable_edges = try reader.graphEdgesGetManyKeyed(std.testing.allocator, "app", &new_edge_key);
     defer stable_edges.deinit(std.testing.allocator);
     try std.testing.expect(!stable_edges.items[0].found);
+    var snapshot_degree: [1]u64 = undefined;
+    try reader.graphDegreeManyKeyed("app", &.{first.nodes[0].node_key}, .outgoing, "links", &snapshot_degree);
+    try std.testing.expectEqual(@as(u64, 2), snapshot_degree[0]);
     try reader.commit();
+    try reader.graphDegreeManyKeyed("app", &.{first.nodes[0].node_key}, .outgoing, "links", &snapshot_degree);
+    try std.testing.expectEqual(@as(u64, 3), snapshot_degree[0]);
 
     var visible_nodes = try reader.graphNodesGetManyKeyed(std.testing.allocator, "app", &new_node_key);
     defer visible_nodes.deinit(std.testing.allocator);
@@ -1977,6 +2000,57 @@ test "opaque keyed batch reads preserve order duplicates and graph scope" {
     defer empty.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), empty.items.len);
     try std.testing.expectError(error.InvalidArgument, db.graphEdgesGetManyKeyed(std.testing.allocator, "app", &.{0}));
+    try std.testing.expectError(error.InvalidArgument, db.graphNodesGetManyKeyed(std.testing.allocator, "app", &.{-1}));
+    var empty_edges = try db.graphEdgesGetManyKeyed(std.testing.allocator, "app", &.{});
+    defer empty_edges.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), empty_edges.items.len);
+    try std.testing.expectError(error.GraphNotFound, db.graphNodesGetManyKeyed(std.testing.allocator, "missing", &.{}));
+    const AllocationCheck = struct {
+        fn check(allocator: std.mem.Allocator, database: *zova.Database, node: i64, edge: i64) !void {
+            var ns = try database.graphNodesGetManyKeyed(allocator, "app", &.{ node, node, std.math.maxInt(i64) });
+            defer ns.deinit(allocator);
+            var es = try database.graphEdgesGetManyKeyed(allocator, "app", &.{ edge, edge, std.math.maxInt(i64) });
+            defer es.deinit(allocator);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, AllocationCheck.check, .{ &db, node_keys[0], edge_keys[0] });
+    try std.testing.expect(sqlite.c.sqlite3_get_autocommit(db.sqlite_db.handle) != 0);
+    try db.begin();
+    var fail = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 2 });
+    try std.testing.expectError(error.OutOfMemory, db.graphNodesGetManyKeyed(fail.allocator(), "app", &requested_nodes));
+    try std.testing.expect(sqlite.c.sqlite3_get_autocommit(db.sqlite_db.handle) == 0);
+    try db.rollback();
+    var staging = try db.sqlite_db.prepare("select count(*) from sqlite_temp_schema where name in ('_zova_graph_nodes_get_many_keys','_zova_graph_edges_get_many_keys')");
+    defer staging.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try staging.step());
+    try std.testing.expectEqual(@as(i64, 0), staging.columnInt64(0));
+}
+
+test "borrowed keyed read arrays retain duplicates through reset and rebind" {
+    const arrays = @import("sqlite_array.zig");
+    var db = try sqlite.Database.open(":memory:");
+    defer db.deinit();
+    var stmt = try db.prepare("select rowid,value from carray(?1) order by rowid");
+    defer stmt.deinit();
+    const first = [_]i64{ 7, 2, 7, std.math.maxInt(i64) };
+    try arrays.bindInt64Borrowed(&stmt, 1, &first);
+    for (0..2) |_| {
+        for (first, 0..) |value, ordinal| {
+            try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+            try std.testing.expectEqual(@as(i64, @intCast(ordinal + 1)), stmt.columnInt64(0));
+            try std.testing.expectEqual(value, stmt.columnInt64(1));
+        }
+        try std.testing.expectEqual(sqlite.Step.done, try stmt.step());
+        try stmt.reset();
+    }
+    try arrays.bindInt64Borrowed(&stmt, 1, &.{11});
+    try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+    try std.testing.expectEqual(@as(i64, 11), stmt.columnInt64(1));
+    try stmt.reset();
+    try arrays.bindInt64Borrowed(&stmt, 1, &.{});
+    try std.testing.expectEqual(sqlite.Step.done, try stmt.step());
+    try stmt.reset();
+    try std.testing.expectError(error.SqliteError, arrays.bindInt64Borrowed(&stmt, 0, &first));
 }
 
 test "root exports graph API" {

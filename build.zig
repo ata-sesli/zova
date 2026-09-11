@@ -332,6 +332,18 @@ pub fn build(b: *std.Build) void {
     const install_walk_benchmark = b.addInstallArtifact(walk_benchmark, .{});
     b.step("build-walk-keys", "Build bounded traversal benchmark").dependOn(&install_walk_benchmark.step);
 
+    const keyed_reads_benchmark = b.addExecutable(.{
+        .name = "zova_keyed_reads_benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/keyed_reads.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    keyed_reads_benchmark.root_module.addImport("zova", zova_module);
+    const install_keyed_reads = b.addInstallArtifact(keyed_reads_benchmark, .{});
+    b.step("build-keyed-reads", "Build bounded keyed-read experiment").dependOn(&install_keyed_reads.step);
+
     const graph_keyed_benchmark = b.addExecutable(.{
         .name = "zova_graph_keyed_benchmark",
         .root_module = b.createModule(.{
