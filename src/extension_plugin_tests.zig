@@ -1,9 +1,20 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const plugin = @import("extension_plugin.zig");
 const extension = @import("extension.zig");
 const sqlite = @import("sqlite.zig");
 const dynamic = @import("extension_dynamic.zig");
 const options = @import("plugin_fixture_options");
+
+/// Bundle libraries use the platform dynamic-library naming convention so the
+/// same bundle shape loads through `std.DynLib` and the Windows module loader.
+fn fixtureLibraryName(allocator: std.mem.Allocator, base: []const u8) ![]u8 {
+    return switch (builtin.os.tag) {
+        .windows => try std.fmt.allocPrint(allocator, "{s}.dll", .{base}),
+        .macos, .ios, .tvos, .watchos, .visionos => try std.fmt.allocPrint(allocator, "lib{s}.dylib", .{base}),
+        else => try std.fmt.allocPrint(allocator, "lib{s}.so", .{base}),
+    };
+}
 
 test "extension_plugin C application upgrade entrypoints validate null requests" {
     const api = @import("c_api_internal.zig");
@@ -23,13 +34,15 @@ test "extension_plugin trusted C upgrade through application ABI preserves rows"
     defer for (paths[0..initialized]) |path| allocator.free(path);
     for ([_][]const u8{ options.plugin_c_fixture, options.plugin_upgrade_fixture }, 0..) |source, i| {
         const directory = if (i == 0) "old.zovaext" else "new.zovaext";
+        const library_name = try fixtureLibraryName(allocator, "plugin");
+        defer allocator.free(library_name);
         try tmp.dir.createDir(io, directory, .default_dir);
         var dir = try tmp.dir.openDir(io, directory, .{});
         defer dir.close(io);
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, source, allocator, .limited(16 * 1024 * 1024));
         defer allocator.free(bytes);
-        try dir.writeFile(io, .{ .sub_path = "plugin", .data = bytes });
-        const manifest = try std.fmt.allocPrint(allocator, "{{\"name\":\"c_test\",\"version\":\"{s}\",\"storage_prefix\":\"_zova_ext_c_test_\",\"zova_abi_min\":\"1.0.0\",\"capabilities\":\"\",\"library\":\"plugin\",\"entrypoint\":\"zova_plugin_entry_v1\"}}", .{if (i == 0) "1.0.0" else "2.0.0"});
+        try dir.writeFile(io, .{ .sub_path = library_name, .data = bytes });
+        const manifest = try std.fmt.allocPrint(allocator, "{{\"name\":\"c_test\",\"version\":\"{s}\",\"storage_prefix\":\"_zova_ext_c_test_\",\"zova_abi_min\":\"1.0.0\",\"capabilities\":\"\",\"library\":\"{s}\",\"entrypoint\":\"zova_plugin_entry_v1\"}}", .{ if (i == 0) "1.0.0" else "2.0.0", library_name });
         defer allocator.free(manifest);
         try dir.writeFile(io, .{ .sub_path = "extension.json", .data = manifest });
         paths[i] = try std.fmt.allocPrintSentinel(allocator, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, directory }, 0);
@@ -89,13 +102,17 @@ test "extension_plugin C and C++ bundles load and dispatch through copied regist
     for ([_][]const u8{ options.plugin_c_fixture, options.plugin_cpp_fixture }) |path| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
+        const library_name = try fixtureLibraryName(allocator, "plugin");
+        defer allocator.free(library_name);
         try tmp.dir.createDir(io, "test.zovaext", .default_dir);
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(16 * 1024 * 1024));
         defer allocator.free(bytes);
-        try tmp.dir.writeFile(io, .{ .sub_path = "test.zovaext/plugin", .data = bytes });
-        try tmp.dir.writeFile(io, .{ .sub_path = "test.zovaext/extension.json", .data =
-            \\{"name":"c_test","version":"1.0.0","storage_prefix":"_zova_ext_c_test_","zova_abi_min":"1.0.0","capabilities":"","library":"plugin","entrypoint":"zova_plugin_entry_v1"}
-        });
+        const library_sub_path = try std.fmt.allocPrint(allocator, "test.zovaext/{s}", .{library_name});
+        defer allocator.free(library_sub_path);
+        try tmp.dir.writeFile(io, .{ .sub_path = library_sub_path, .data = bytes });
+        const manifest = try std.fmt.allocPrint(allocator, "{{\"name\":\"c_test\",\"version\":\"1.0.0\",\"storage_prefix\":\"_zova_ext_c_test_\",\"zova_abi_min\":\"1.0.0\",\"capabilities\":\"\",\"library\":\"{s}\",\"entrypoint\":\"zova_plugin_entry_v1\"}}\n", .{library_name});
+        defer allocator.free(manifest);
+        try tmp.dir.writeFile(io, .{ .sub_path = "test.zovaext/extension.json", .data = manifest });
         const bundle_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/test.zovaext", .{tmp.sub_path});
         defer allocator.free(bundle_path);
         var bundle = try dynamic.LoadedBundle.load(allocator, bundle_path);

@@ -10,8 +10,67 @@ const build_options = @import("zova_build_options");
 const extension = @import("extension.zig");
 const plugin = @import("extension_plugin.zig");
 
-pub const supports_dynamic_loading = build_options.enable_dynamic_extensions and builtin.os.tag != .windows;
-const DynamicLibrary = if (supports_dynamic_loading) std.DynLib else struct {};
+pub const supports_dynamic_loading = build_options.enable_dynamic_extensions;
+
+/// Zig 0.16 removed Windows support from `std.DynLib`, so trusted Windows
+/// bundles load through the restricted `LoadLibraryExW`/`GetProcAddress`/
+/// `FreeLibrary` API instead. The bundle library path is always a fully
+/// qualified path, and `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR` keeps sibling
+/// dependencies resolvable from the bundle directory while the process current
+/// directory is never searched.
+pub const windows_load_library_search_dll_load_dir: u32 = 0x00000100;
+pub const windows_load_library_search_default_dirs: u32 = 0x00001000;
+pub const windows_dynamic_library_load_flags: u32 =
+    windows_load_library_search_dll_load_dir | windows_load_library_search_default_dirs;
+
+const WindowsDynamicLibrary = if (builtin.os.tag == .windows) struct {
+    handle: std.os.windows.HMODULE,
+
+    const native = struct {
+        extern "kernel32" fn LoadLibraryExW(
+            file_name: [*:0]const u16,
+            file: ?*anyopaque,
+            flags: u32,
+        ) callconv(.winapi) ?std.os.windows.HMODULE;
+        extern "kernel32" fn GetProcAddress(
+            module: std.os.windows.HMODULE,
+            name: [*:0]const u8,
+        ) callconv(.winapi) ?*anyopaque;
+        extern "kernel32" fn FreeLibrary(module: std.os.windows.HMODULE) callconv(.winapi) std.os.windows.BOOL;
+    };
+
+    pub const OpenError = error{ OutOfMemory, LoadFailed };
+
+    /// `path` must be an absolute, fully qualified path. Relative paths would
+    /// make the restricted search flags behave unpredictably.
+    pub fn open(path: []const u8) OpenError!WindowsDynamicLibrary {
+        const wide = std.unicode.wtf8ToWtf16LeAllocZ(std.heap.page_allocator, path) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidWtf8 => return error.LoadFailed,
+        };
+        defer std.heap.page_allocator.free(wide);
+        const handle = native.LoadLibraryExW(wide.ptr, null, windows_dynamic_library_load_flags) orelse
+            return error.LoadFailed;
+        return .{ .handle = handle };
+    }
+
+    pub fn close(self: *WindowsDynamicLibrary) void {
+        _ = native.FreeLibrary(self.handle);
+        self.* = undefined;
+    }
+
+    pub fn lookup(self: *WindowsDynamicLibrary, comptime T: type, name: [:0]const u8) ?T {
+        const symbol = native.GetProcAddress(self.handle, name.ptr) orelse return null;
+        return @as(T, @ptrCast(@alignCast(symbol)));
+    }
+} else struct {};
+
+const DynamicLibrary = if (!supports_dynamic_loading)
+    struct {}
+else if (builtin.os.tag == .windows)
+    WindowsDynamicLibrary
+else
+    std.DynLib;
 
 pub const default_entrypoint = "zova_extension_entry";
 pub const bundle_manifest_file = "extension.json";
@@ -189,7 +248,7 @@ pub const DynamicExtensionSet = struct {
         bundle_paths: []const []const u8,
         options: TrustStoreOptions,
     ) Error!DynamicExtensionSet {
-        var libraries: std.ArrayList(std.DynLib) = .empty;
+        var libraries: std.ArrayList(DynamicLibrary) = .empty;
         errdefer {
             for (libraries.items) |*library| library.close();
             libraries.deinit(allocator);
@@ -207,7 +266,7 @@ pub const DynamicExtensionSet = struct {
             defer info.deinit(allocator);
             try ensureTrusted(allocator, info, options);
 
-            var library = std.DynLib.open(info.library_path) catch return error.ExtensionLoadFailed;
+            var library = DynamicLibrary.open(info.library_path) catch return error.ExtensionLoadFailed;
             errdefer library.close();
 
             const loaded = try loadDescriptor(allocator, &library, info);
@@ -274,7 +333,7 @@ pub const LoadedBundle = struct {
         var info = try loadBundleInfo(allocator, bundle_path);
         defer info.deinit(allocator);
 
-        var library = std.DynLib.open(info.library_path) catch return error.ExtensionLoadFailed;
+        var library = DynamicLibrary.open(info.library_path) catch return error.ExtensionLoadFailed;
         errdefer library.close();
 
         const loaded = try loadDescriptor(allocator, &library, info);
@@ -309,7 +368,7 @@ pub fn verifyBundleEntrypoint(allocator: std.mem.Allocator, bundle_path: []const
     defer bundle.deinit();
 }
 
-fn loadDescriptor(allocator: std.mem.Allocator, library: *std.DynLib, info: BundleInfo) Error!struct { extension: extension.Extension, plugin: ?plugin.Descriptor = null, upgrade: ?extension.Upgrade = null } {
+fn loadDescriptor(allocator: std.mem.Allocator, library: *DynamicLibrary, info: BundleInfo) Error!struct { extension: extension.Extension, plugin: ?plugin.Descriptor = null, upgrade: ?extension.Upgrade = null } {
     // The manifest explicitly selects the new signature. No symbol probing or
     // fallback may reinterpret an old Zig descriptor as a C structure.
     if (std.mem.eql(u8, info.manifest.entrypoint, plugin.entrypoint)) {
@@ -534,6 +593,8 @@ fn trustStorePath(allocator: std.mem.Allocator, options: TrustStoreOptions) Erro
     if (getenv("ZOVA_TRUST_STORE")) |path| return normalizePath(allocator, path);
     if (getenv("XDG_CONFIG_HOME")) |config| return std.fs.path.join(allocator, &.{ config, "zova", "trusted_extensions.json" });
     if (getenv("HOME")) |home| return std.fs.path.join(allocator, &.{ home, ".config", "zova", "trusted_extensions.json" });
+    if (getenv("LOCALAPPDATA")) |config| return std.fs.path.join(allocator, &.{ config, "zova", "trusted_extensions.json" });
+    if (getenv("APPDATA")) |config| return std.fs.path.join(allocator, &.{ config, "zova", "trusted_extensions.json" });
     return error.ExtensionInvalid;
 }
 
@@ -803,6 +864,10 @@ fn validateRelativeLibraryPath(path: []const u8) Error!void {
     if (path.len == 0 or path.len > 512) return error.ExtensionInvalid;
     if (std.fs.path.isAbsolute(path)) return error.ExtensionInvalid;
     if (std.mem.indexOfScalar(u8, path, 0) != null) return error.ExtensionInvalid;
+    // Bundles are flat directories and manifests only use '/'. Reject native
+    // Windows separators so a manifest cannot smuggle a traversal or an
+    // alternate path interpretation past the containment check.
+    if (std.mem.indexOfScalar(u8, path, '\\') != null) return error.ExtensionInvalid;
     var parts = std.mem.tokenizeScalar(u8, path, '/');
     while (parts.next()) |part| {
         if (part.len == 0) return error.ExtensionInvalid;
@@ -1023,4 +1088,39 @@ test "dynamic extension trust store detects changed bundle contents" {
     var changed = try loadBundleInfo(allocator, bundle_path);
     defer changed.deinit(allocator);
     try std.testing.expectError(error.ExtensionUntrusted, ensureTrusted(allocator, changed, .{ .path = trust_path }));
+}
+
+test "dynamic extension bundle validation rejects native Windows separators" {
+    try std.testing.expectError(error.ExtensionInvalid, validateRelativeLibraryPath("..\\evil.dll"));
+    try std.testing.expectError(error.ExtensionInvalid, validateRelativeLibraryPath("nested\\lib.dll"));
+    try std.testing.expectError(error.ExtensionInvalid, validateRelativeLibraryPath("C:\\evil.dll"));
+    try validateRelativeLibraryPath("libdyn_test.dll");
+}
+
+test "windows dynamic library uses restricted dependency search flags" {
+    // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR keeps sibling bundle dependencies
+    // resolvable; LOAD_LIBRARY_SEARCH_DEFAULT_DIRS keeps the safe default
+    // roots. The unrestricted legacy search path is never requested.
+    try std.testing.expectEqual(@as(u32, 0x00000100), windows_load_library_search_dll_load_dir);
+    try std.testing.expectEqual(@as(u32, 0x00001000), windows_load_library_search_default_dirs);
+    try std.testing.expectEqual(@as(u32, 0x00001100), windows_dynamic_library_load_flags);
+}
+
+test "windows dynamic library loads a system module and resolves symbols" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    try std.testing.expectError(error.LoadFailed, WindowsDynamicLibrary.open("Z:\\zova-missing\\missing.dll"));
+
+    const system_root = getenv("SystemRoot") orelse return error.SkipZigTest;
+    const path = try std.fs.path.join(allocator, &.{ system_root, "System32", "kernel32.dll" });
+    defer allocator.free(path);
+
+    var library = try WindowsDynamicLibrary.open(path);
+    defer library.close();
+
+    const GetLastErrorFn = *const fn () callconv(.winapi) std.os.windows.DWORD;
+    const get_last_error = library.lookup(GetLastErrorFn, "GetLastError") orelse return error.TestUnexpectedResult;
+    _ = get_last_error();
+    try std.testing.expect(library.lookup(*anyopaque, "zova_missing_symbol") == null);
 }

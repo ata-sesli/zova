@@ -173,6 +173,7 @@ test "cli bundled trgm extension installs checks lists and drops" {
 
 test "cli trusted dynamic extension loads only when explicitly requested" {
     if (comptime !zova.extension_dynamic.supports_dynamic_loading) return error.SkipZigTest;
+    if (comptime cli.dynamic_extension_library_path.len == 0) return error.SkipZigTest;
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -528,6 +529,7 @@ test "cli extension verify smoke contains hook errors in child process" {
 
 test "cli extension verify rejects broken bundle artifacts" {
     if (comptime !zova.extension_dynamic.supports_dynamic_loading) return error.SkipZigTest;
+    if (comptime cli.dynamic_extension_library_path.len == 0) return error.SkipZigTest;
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -603,6 +605,7 @@ test "cli extension verify rejects broken bundle artifacts" {
 
 test "cli extension pack rejects broken source artifacts and removes bundle output" {
     if (comptime !zova.extension_dynamic.supports_dynamic_loading) return error.SkipZigTest;
+    if (comptime cli.dynamic_extension_library_path.len == 0) return error.SkipZigTest;
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

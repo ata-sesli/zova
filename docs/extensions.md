@@ -17,7 +17,7 @@ extensions remain outside the stable 1.x authoring contract.
 | Host build | Bundled `trgm` lifecycle | Application C scalar callbacks | Dynamic `.zovaext` loading |
 | --- | --- | --- | --- |
 | Native Zig-built Linux/macOS host | Yes | Yes, through C ABI | Yes, explicit trusted bundles |
-| Native Zig-built Windows host | Yes | Yes, through C ABI | No |
+| Native Zig-built Windows host | Yes | Yes, through C ABI | Yes, explicit trusted bundles |
 | Generated-C native packages | Yes | Yes, through C ABI | No |
 | Public `zova-wasm` JavaScript API | No | No | No |
 
@@ -100,10 +100,11 @@ my_ext.zovaext/
 ```
 
 The library name is recorded in `extension.json`. The experimental builder uses
-the platform dynamic-library convention: `libmy_ext.dylib` on macOS and
-`libmy_ext.so` on Linux. Windows dynamic loading is not supported. Whatever
-name is chosen, the path must remain relative to the bundle and the native
-artifact must be built against a compatible Zova extension ABI.
+the platform dynamic-library convention: `libmy_ext.dylib` on macOS,
+`libmy_ext.so` on Linux, and `my_ext.dll` on Windows. Whatever name is chosen,
+the path must remain relative to the bundle, contain no native directory
+separators, and the native artifact must be built against a compatible Zova
+extension ABI.
 
 `extension.json` contains:
 
@@ -692,9 +693,9 @@ See `tests/plugin_fixture.c` and `.cpp` for minimal compilable examples.
 
 This remains trusted in-process native code, not a sandbox. Loading a library
 can itself execute native initializers before descriptor validation. C/C++
-fixtures run under `zig build test-extensions` on the existing native Unix
-loader path. Windows dynamic loading and generated-C dynamic loading remain
-unsupported; this header does not enable them. Libraries must match the host's
+fixtures run under `zig build test-extensions` on the existing native loader
+path, including the Windows module loader. Generated-C dynamic loading remains
+unsupported; this header does not enable it. Libraries must match the host's
 OS, architecture, and deployment target.
 
 ## Native Artifact Notes
