@@ -43,6 +43,18 @@ jobs:
       - run: zig build cli-test
       - run: zig build test -Doptimize=ReleaseSafe
 
+  windows-extensions:
+    name: Windows dynamic extensions
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      # Builds real plugin DLL fixtures, then loads, trusts, installs, and runs
+      # their SQL surface through the restricted Windows module loader.
+      - run: zig build test-extensions
+
   sqlite-size:
     name: SQLite module size (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

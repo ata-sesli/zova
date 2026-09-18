@@ -250,7 +250,9 @@ fn extensionBuildCommand(allocator: std.mem.Allocator, parsed: ExtensionCommandA
     try env.put("ZIG_GLOBAL_CACHE_DIR", global_cache_path);
     try env.put("HOME", global_cache_path);
     try env.put("TMPDIR", cache_path);
-    try env.put("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
+    if (builtin.os.tag != .windows) {
+        try env.put("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
+    }
     const result = try std.process.run(process_allocator, io, .{
         .argv = &argv,
         .environ_map = &env,
@@ -389,6 +391,7 @@ fn runExtensionSmokeChild(stderr: *std.Io.Writer, smoke_trust_path: []const u8, 
     var env = std.process.Environ.Map.init(process_allocator);
     defer env.deinit();
     try copyEnv(&env, "PATH");
+    try copyEnv(&env, "SystemRoot");
     try copyEnv(&env, "HOME");
     try copyEnv(&env, "TMPDIR");
     try copyEnv(&env, "TMP");
@@ -396,6 +399,11 @@ fn runExtensionSmokeChild(stderr: *std.Io.Writer, smoke_trust_path: []const u8, 
     try copyEnv(&env, "DYLD_LIBRARY_PATH");
     try copyEnv(&env, "LD_LIBRARY_PATH");
     try copyEnv(&env, "ZIG_GLOBAL_CACHE_DIR");
+    if (builtin.os.tag != .windows) {
+        // Keep Unix toolchain lookup deterministic without disturbing the
+        // Windows system DLL search path that the smoke child needs.
+        try env.put("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
+    }
     try env.put("ZOVA_TRUST_STORE", smoke_trust_path);
 
     const result = std.process.run(process_allocator, threaded.io(), .{

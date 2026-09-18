@@ -863,13 +863,15 @@ tell you to provide `--extension <bundle.zovaext>` or trust the bundle first.
 
 Dynamic `.zovaext` loading is a native Zig/CLI/C ABI capability. The generated-C
 snapshot used by package builds intentionally disables dynamic loading because
-Zig `0.16` does not portably emit the `std.DynLib` loader path through its C
-backend. Those builds keep the C ABI bundle symbols for source compatibility,
-but calls that need to load an external bundle fail with an extension load or
-unavailable status. Use the native CLI or a Zig-built C ABI archive when an
-application needs external `.zovaext` loading on Linux/macOS. Windows dynamic
-loading is unsupported even with a native Zig build. Trust and capability
-metadata are not a sandbox; verification may execute library initializers.
+Zig `0.16` does not portably emit the dynamic loader path through its C backend.
+Those builds keep the C ABI bundle symbols for source compatibility, but calls
+that need to load an external bundle fail with an extension load or unavailable
+status. Use the native CLI or a Zig-built C ABI archive when an application
+needs external `.zovaext` loading on Linux/macOS/Windows. Windows bundles load
+through `LoadLibraryExW` with restricted dependency search rooted at the bundle
+directory, so sibling DLL dependencies resolve while the process current
+directory is never searched. Trust and capability metadata are not a sandbox;
+verification may execute library initializers.
 
 The experimental bundle producer CLI scaffolds and builds legacy Zig bundles:
 

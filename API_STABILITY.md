@@ -123,7 +123,7 @@ in-process and retain their documented trust and platform boundaries.
 
 The portable plugin descriptor and explicit extension-data upgrade APIs are
 included in 1.0.0; extension authoring remains experimental as described above.
-They do not add Windows/generated-C dynamic loading or high-level binding
+They do not add generated-C dynamic loading or high-level binding
 wrappers. The [extension capability matrix](docs/extensions.md#availability-and-binding-matrix)
 is authoritative for these distinctions.
 

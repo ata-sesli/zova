@@ -37,7 +37,11 @@ pub fn build(b: *std.Build) void {
     }) catch @panic("out of memory");
     const package_version = packageVersion(b);
     const enable_dynamic_extensions = b.option(bool, "enable-dynamic-extensions", "Enable dynamic .zovaext loading") orelse true;
-    const supports_dynamic_extension_fixture = enable_dynamic_extensions and target.result.os.tag != .windows;
+    // Portable C/C++ plugin fixtures load on every native dynamic-loading
+    // platform, including Windows. The Zig-native fixture resolves host SQLite
+    // symbols at load time, which is only meaningful on ELF/Mach-O hosts.
+    const supports_dynamic_extension_fixture = enable_dynamic_extensions;
+    const supports_native_dynamic_extension_fixture = supports_dynamic_extension_fixture and target.result.os.tag != .windows;
 
     const zova_build_options = b.addOptions();
     zova_build_options.addOption(bool, "enable_dynamic_extensions", enable_dynamic_extensions);
@@ -113,7 +117,7 @@ pub fn build(b: *std.Build) void {
             plugin_fixture_options.addOption([]const u8, option_name, "");
         }
     }
-    if (supports_dynamic_extension_fixture) {
+    if (supports_native_dynamic_extension_fixture) {
         const fixture = b.addLibrary(.{
             .name = "zova_dyn_test",
             .linkage = .dynamic,
@@ -696,7 +700,7 @@ pub fn build(b: *std.Build) void {
         .name = "zova_c_abi_smoke",
         .root_module = c_smoke_module,
     });
-    if (supports_dynamic_extension_fixture) c_smoke.rdynamic = true;
+    if (supports_native_dynamic_extension_fixture) c_smoke.rdynamic = true;
     const c_abi_smoke_db_path = b.pathJoin(&.{ b.cache_root.path orelse ".zig-cache", "c-abi-smoke.zova" });
     const c_smoke_cmd = b.addRunArtifact(c_smoke);
     c_smoke_cmd.addArg(c_abi_smoke_db_path);
