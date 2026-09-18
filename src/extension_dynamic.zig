@@ -9,6 +9,11 @@ const builtin = @import("builtin");
 const build_options = @import("zova_build_options");
 const extension = @import("extension.zig");
 const plugin = @import("extension_plugin.zig");
+const sqlite = @import("sqlite.zig");
+
+/// Fixture library paths emitted by the build system. Empty when the host
+/// cannot build portable plugin fixtures. Tests skip when unavailable.
+const fixture_options = @import("plugin_fixture_options");
 
 pub const supports_dynamic_loading = build_options.enable_dynamic_extensions;
 
@@ -37,6 +42,11 @@ const WindowsDynamicLibrary = if (builtin.os.tag == .windows) struct {
             name: [*:0]const u8,
         ) callconv(.winapi) ?*anyopaque;
         extern "kernel32" fn FreeLibrary(module: std.os.windows.HMODULE) callconv(.winapi) std.os.windows.BOOL;
+        extern "kernel32" fn GetModuleFileNameW(
+            module: ?std.os.windows.HMODULE,
+            filename: [*]u16,
+            size: std.os.windows.DWORD,
+        ) callconv(.winapi) std.os.windows.DWORD;
     };
 
     pub const OpenError = error{ OutOfMemory, LoadFailed };
@@ -62,6 +72,22 @@ const WindowsDynamicLibrary = if (builtin.os.tag == .windows) struct {
     pub fn lookup(self: *WindowsDynamicLibrary, comptime T: type, name: [:0]const u8) ?T {
         const symbol = native.GetProcAddress(self.handle, name.ptr) orelse return null;
         return @as(T, @ptrCast(@alignCast(symbol)));
+    }
+
+    /// Test helper: the fully qualified path this handle resolved to. This is
+    /// what LoadLibraryExW actually loaded, so it identifies which same-named
+    /// DLL won the restricted dependency search.
+    pub fn resolvedPath(self: *WindowsDynamicLibrary, allocator: std.mem.Allocator) ![]u8 {
+        const max_len = std.os.windows.MAX_PATH + 1;
+        var buffer: [max_len]u16 = undefined;
+        const written = native.GetModuleFileNameW(self.handle, &buffer, buffer.len);
+        if (written == 0) return error.LoadFailed;
+        const wide = buffer[0..written];
+        // WTF-8 never needs more than 4 bytes per UTF-16 unit.
+        const wtf8 = try allocator.alloc(u8, wide.len * 4);
+        errdefer allocator.free(wtf8);
+        const wtf8_len = std.unicode.wtf16LeToWtf8(wtf8, wide);
+        return allocator.realloc(wtf8, wtf8_len);
     }
 } else struct {};
 
@@ -938,12 +964,8 @@ fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8, limit: usize) E
 }
 
 fn unixTimestamp() i64 {
-    if (comptime builtin.os.tag == .windows) return 0;
-    var ts: std.posix.timespec = undefined;
-    return switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
-        .SUCCESS => @intCast(ts.sec),
-        else => 0,
-    };
+    const ts = std.Io.Clock.now(.real, defaultIo());
+    return @intCast(@divTrunc(ts.nanoseconds, std.time.ns_per_s));
 }
 
 fn sha256Hex(bytes: []const u8) [64]u8 {
@@ -1106,6 +1128,16 @@ test "windows dynamic library uses restricted dependency search flags" {
     try std.testing.expectEqual(@as(u32, 0x00001100), windows_dynamic_library_load_flags);
 }
 
+test "windows trust records carry a real wall-clock timestamp" {
+    if (comptime !supports_dynamic_loading) return error.SkipZigTest;
+    // The pre-Windows-support loader returned 0 unconditionally on Windows,
+    // which would surface as the Unix epoch in `zova extensions verify`.
+    const lower_bound = unixTimestamp();
+    try std.testing.expect(lower_bound > 1_752_000_000);
+    const upper_bound = unixTimestamp();
+    try std.testing.expect(lower_bound <= upper_bound);
+}
+
 test "windows dynamic library loads a system module and resolves symbols" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -1123,4 +1155,99 @@ test "windows dynamic library loads a system module and resolves symbols" {
     const get_last_error = library.lookup(GetLastErrorFn, "GetLastError") orelse return error.TestUnexpectedResult;
     _ = get_last_error();
     try std.testing.expect(library.lookup(*anyopaque, "zova_missing_symbol") == null);
+    const resolved = try library.resolvedPath(allocator);
+    defer allocator.free(resolved);
+    try std.testing.expect(std.mem.eql(u8, std.fs.path.basename(resolved), "kernel32.dll"));
+}
+
+test "windows bundle dependency resolves from the bundle directory, never the current directory" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    if (fixture_options.plugin_c_fixture.len == 0 or fixture_options.plugin_dependency_fixture.len == 0)
+        return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // The dependency DLL must keep its unqualified import name. A conflicting
+    // same-named DLL in the process current directory must lose to the bundle
+    // sibling because LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR wins.
+    const dependency_name = "plugin_dependency_fixture.dll";
+
+    const dependency_bytes = try std.Io.Dir.cwd().readFileAlloc(io, fixture_options.plugin_dependency_fixture, allocator, .limited(16 * 1024 * 1024));
+    defer allocator.free(dependency_bytes);
+    const plugin_bytes = try std.Io.Dir.cwd().readFileAlloc(io, fixture_options.plugin_c_fixture, allocator, .limited(16 * 1024 * 1024));
+    defer allocator.free(plugin_bytes);
+
+    // Bundle: extension.json + plugin.dll + sibling dependency DLL.
+    const library_name = if (builtin.os.tag == .macos)
+        try std.fmt.allocPrint(allocator, "libplugin.dylib", .{})
+    else if (builtin.os.tag == .windows)
+        try std.fmt.allocPrint(allocator, "plugin.dll", .{})
+    else
+        try std.fmt.allocPrint(allocator, "libplugin.so", .{});
+    defer allocator.free(library_name);
+    try tmp.dir.createDir(io, "bundle.zovaext", .default_dir);
+    const library_sub_path = try std.fmt.allocPrint(allocator, "bundle.zovaext/{s}", .{library_name});
+    defer allocator.free(library_sub_path);
+    try tmp.dir.writeFile(io, .{ .sub_path = library_sub_path, .data = plugin_bytes });
+    const dependency_sub_path = try std.fmt.allocPrint(allocator, "bundle.zovaext/{s}", .{dependency_name});
+    defer allocator.free(dependency_sub_path);
+    try tmp.dir.writeFile(io, .{ .sub_path = dependency_sub_path, .data = dependency_bytes });
+    const manifest = try std.fmt.allocPrint(allocator,
+        \\{{"name":"c_test","version":"1.0.0","storage_prefix":"_zova_ext_c_test_","zova_abi_min":"1.0.0","capabilities":"","library":"{s}","entrypoint":"zova_plugin_entry_v1"}}
+    , .{library_name});
+    defer allocator.free(manifest);
+    try tmp.dir.writeFile(io, .{ .sub_path = "bundle.zovaext/extension.json", .data = manifest });
+
+    // Attacker-controlled same-named DLL in the process current directory. It
+    // lacks the marker export the plugin imports, so if the loader resolved the
+    // dependency from here instead of the bundle, plugin.dll would fail to load.
+    const cwd_dependency_sub_path = try std.fmt.allocPrint(allocator, "{s}", .{dependency_name});
+    defer allocator.free(cwd_dependency_sub_path);
+    try tmp.dir.writeFile(io, .{ .sub_path = cwd_dependency_sub_path, .data = plugin_bytes });
+
+    // Make the tmp directory (which holds both the bundle and the rogue DLL)
+    // the process current directory. The restricted search must still resolve
+    // the dependency from the bundle directory.
+    const tmp_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer allocator.free(tmp_path);
+    const previous_cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(previous_cwd);
+    try std.process.setCurrentPath(io, tmp_path);
+    defer std.process.setCurrentPath(io, previous_cwd) catch {};
+
+    const bundle_path = "bundle.zovaext";
+    const trust_path = "trusted_extensions.json";
+
+    try std.testing.expectError(error.ExtensionUntrusted, DynamicExtensionSet.loadTrustedBundles(allocator, &.{bundle_path}, .{ .path = trust_path }));
+    var record = try trustBundle(allocator, bundle_path, .{ .path = trust_path });
+    defer record.deinit(allocator);
+
+    // The dependency DLL that LoadLibraryExW actually loaded is the bundle
+    // sibling, not the same-named DLL in the process current directory: the
+    // resolved path is inside the bundle directory, which only happens when
+    // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR beat the current directory.
+    var loaded = try DynamicLibrary.open(record.bundle_path);
+    const resolved = try loaded.resolvedPath(allocator);
+    loaded.close();
+    defer allocator.free(resolved);
+    try std.testing.expect(std.mem.eql(u8, std.fs.path.basename(resolved), dependency_name));
+    try std.testing.expect(std.mem.indexOf(u8, resolved, "bundle.zovaext") != null);
+
+    // The full trusted flow must work too: install dispatches through the
+    // sibling dependency marker, proving the bundle dependency was used.
+    var set = try DynamicExtensionSet.loadTrustedBundles(allocator, &.{bundle_path}, .{ .path = trust_path });
+    defer set.deinit();
+    var owned = try OwnedRegistry.init(allocator, &.{set.registry()});
+    defer owned.deinit();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.deinit();
+    try db.exec(extension.extensions_schema_sql);
+    try extension.install(&db, owned.registry(), "c_test", null);
+    try db.exec("INSERT INTO _zova_ext_c_test_data VALUES(1)");
+    try extension.check(&db, set.registry(), "c_test");
+    try extension.drop(&db, set.registry(), "c_test", null);
 }

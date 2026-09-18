@@ -11,6 +11,14 @@
 #define ZOVA_PLUGIN_EXPORT __attribute__((visibility("default")))
 #endif
 
+/* The Windows dynamic-extension tests compile a dependency DLL that exposes
+ * this function; the fixture plugin calls it from install/drop. Windows only,
+ * because the sibling-DLL dependency resolution being tested is Windows-only.
+ */
+#if defined(_WIN32)
+ZOVA_PLUGIN_EXPORT int32_t ZOVA_PLUGIN_CALL zova_plugin_dependency_marker_v1(void);
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
