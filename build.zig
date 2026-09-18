@@ -117,6 +117,56 @@ pub fn build(b: *std.Build) void {
             plugin_fixture_options.addOption([]const u8, option_name, "");
         }
     }
+    if (supports_dynamic_extension_fixture and target.result.os.tag == .windows) {
+        // A dependency DLL with an unqualified import name plus a dedicated
+        // plugin fixture that imports it. Tests exercise that LoadLibraryExW
+        // resolves the dependency from the bundle directory (never from the
+        // process current directory) with the restricted search flags. Only
+        // this fixture is dependency-aware; ordinary fixtures stay unchanged.
+        const dependency = b.addLibrary(.{
+            .name = "plugin_dependency_fixture",
+            .linkage = .dynamic,
+            .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+        });
+        dependency.root_module.addIncludePath(b.path("include"));
+        dependency.root_module.addCSourceFile(.{
+            .file = b.path("tests/plugin_dependency_fixture.c"),
+            .flags = &.{"-std=c11"},
+        });
+
+        // A same-named DLL whose marker fails, for the process-current-directory
+        // conflict case: if the restricted search ever picked it, the plugin
+        // hooks would refuse to run and the test would fail.
+        const rogue_dependency = b.addLibrary(.{
+            .name = "plugin_rogue_dependency_fixture",
+            .linkage = .dynamic,
+            .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+        });
+        rogue_dependency.root_module.addIncludePath(b.path("include"));
+        rogue_dependency.root_module.addCSourceFile(.{
+            .file = b.path("tests/plugin_dependency_fixture.c"),
+            .flags = &.{ "-std=c11", "-DZOVA_ROGUE_DEPENDENCY_FIXTURE" },
+        });
+
+        const fixture = b.addLibrary(.{
+            .name = "plugin_with_dependency_fixture",
+            .linkage = .dynamic,
+            .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+        });
+        fixture.root_module.addIncludePath(b.path("include"));
+        fixture.root_module.addCSourceFile(.{
+            .file = b.path("tests/plugin_with_dependency_fixture.c"),
+            .flags = &.{"-std=c11"},
+        });
+        fixture.root_module.linkLibrary(dependency);
+        plugin_fixture_options.addOptionPath("plugin_dependency_fixture", dependency.getEmittedBin());
+        plugin_fixture_options.addOptionPath("plugin_rogue_dependency_fixture", rogue_dependency.getEmittedBin());
+        plugin_fixture_options.addOptionPath("plugin_with_dependency_fixture", fixture.getEmittedBin());
+    } else {
+        plugin_fixture_options.addOption([]const u8, "plugin_dependency_fixture", "");
+        plugin_fixture_options.addOption([]const u8, "plugin_rogue_dependency_fixture", "");
+        plugin_fixture_options.addOption([]const u8, "plugin_with_dependency_fixture", "");
+    }
     if (supports_native_dynamic_extension_fixture) {
         const fixture = b.addLibrary(.{
             .name = "zova_dyn_test",
@@ -458,6 +508,7 @@ pub fn build(b: *std.Build) void {
         target,
         optimize,
         zova_build_options,
+        plugin_fixture_options,
         sqlite_lib,
     );
     const core_test_step = addZigTestSuite(
@@ -469,6 +520,7 @@ pub fn build(b: *std.Build) void {
         target,
         optimize,
         zova_build_options,
+        plugin_fixture_options,
         sqlite_lib,
     );
     const object_test_step = addZigTestSuite(
@@ -480,6 +532,7 @@ pub fn build(b: *std.Build) void {
         target,
         optimize,
         zova_build_options,
+        plugin_fixture_options,
         sqlite_lib,
     );
     const vector_test_step = addZigTestSuite(
@@ -491,6 +544,7 @@ pub fn build(b: *std.Build) void {
         target,
         optimize,
         zova_build_options,
+        plugin_fixture_options,
         sqlite_lib,
     );
     const graph_test_step = addZigTestSuite(
@@ -502,6 +556,7 @@ pub fn build(b: *std.Build) void {
         target,
         optimize,
         zova_build_options,
+        plugin_fixture_options,
         sqlite_lib,
     );
     const kv_test_step = addZigTestSuite(
@@ -513,6 +568,7 @@ pub fn build(b: *std.Build) void {
         target,
         optimize,
         zova_build_options,
+        plugin_fixture_options,
         sqlite_lib,
     );
     const statement_cache_test_step = addZigTestSuite(
@@ -524,6 +580,7 @@ pub fn build(b: *std.Build) void {
         target,
         optimize,
         zova_build_options,
+        plugin_fixture_options,
         sqlite_lib,
     );
     const graph_walk_scratch_test_step = addZigTestSuite(
@@ -535,6 +592,7 @@ pub fn build(b: *std.Build) void {
         target,
         optimize,
         zova_build_options,
+        plugin_fixture_options,
         sqlite_lib,
     );
     const extension_test_step = addZigTestSuite(
@@ -546,6 +604,7 @@ pub fn build(b: *std.Build) void {
         target,
         optimize,
         zova_build_options,
+        plugin_fixture_options,
         sqlite_lib,
     );
     const plugin_test_module = b.createModule(.{
@@ -567,6 +626,7 @@ pub fn build(b: *std.Build) void {
         target,
         optimize,
         zova_build_options,
+        plugin_fixture_options,
         sqlite_lib,
     );
     const c_api_test_step = addZigTestSuite(
@@ -578,6 +638,7 @@ pub fn build(b: *std.Build) void {
         target,
         optimize,
         zova_build_options,
+        plugin_fixture_options,
         sqlite_lib,
     );
 
@@ -764,6 +825,7 @@ fn addZigTestSuite(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     zova_build_options: *std.Build.Step.Options,
+    plugin_fixture_options: *std.Build.Step.Options,
     sqlite_lib: *std.Build.Step.Compile,
 ) *std.Build.Step {
     const suite_step = b.step(name, description);
@@ -773,6 +835,7 @@ fn addZigTestSuite(
         .optimize = optimize,
     });
     root_module.addOptions("zova_build_options", zova_build_options);
+    root_module.addOptions("plugin_fixture_options", plugin_fixture_options);
     addSqlite(root_module, b, sqlite_lib);
     const tests = b.addTest(.{
         .name = name,
