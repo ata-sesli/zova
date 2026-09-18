@@ -47,6 +47,9 @@ const WindowsDynamicLibrary = if (builtin.os.tag == .windows) struct {
             filename: [*]u16,
             size: std.os.windows.DWORD,
         ) callconv(.winapi) std.os.windows.DWORD;
+        extern "kernel32" fn GetModuleHandleW(
+            module_name: ?[*:0]const u16,
+        ) callconv(.winapi) ?std.os.windows.HMODULE;
     };
 
     pub const OpenError = error{ OutOfMemory, LoadFailed };
@@ -78,9 +81,22 @@ const WindowsDynamicLibrary = if (builtin.os.tag == .windows) struct {
     /// what LoadLibraryExW actually loaded, so it identifies which same-named
     /// DLL won the restricted dependency search.
     pub fn resolvedPath(self: *WindowsDynamicLibrary, allocator: std.mem.Allocator) ![]u8 {
+        return moduleFilePath(self.handle, allocator);
+    }
+
+    /// Test helper: the fully qualified path of the loaded module with the
+    /// given wide file name, or null when no such module is mapped. Resolving
+    /// the dependency module by import name shows which same-named DLL the
+    /// restricted search actually selected.
+    pub fn loadedModulePath(name: [*:0]const u16, allocator: std.mem.Allocator) !?[]u8 {
+        const module = native.GetModuleHandleW(name) orelse return null;
+        return try moduleFilePath(module, allocator);
+    }
+
+    fn moduleFilePath(module: std.os.windows.HMODULE, allocator: std.mem.Allocator) ![]u8 {
         const max_len = std.os.windows.MAX_PATH + 1;
         var buffer: [max_len]u16 = undefined;
-        const written = native.GetModuleFileNameW(self.handle, &buffer, buffer.len);
+        const written = native.GetModuleFileNameW(module, &buffer, buffer.len);
         if (written == 0) return error.LoadFailed;
         const wide = buffer[0..written];
         // WTF-8 never needs more than 4 bytes per UTF-16 unit.
@@ -1162,23 +1178,28 @@ test "windows dynamic library loads a system module and resolves symbols" {
 
 test "windows bundle dependency resolves from the bundle directory, never the current directory" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (fixture_options.plugin_with_dependency_fixture.len == 0 or
+        fixture_options.plugin_dependency_fixture.len == 0 or
+        fixture_options.plugin_rogue_dependency_fixture.len == 0)
+        return error.SkipZigTest;
+
     const io = std.Io.Threaded.global_single_threaded.io();
     const allocator = std.testing.allocator;
-
-    if (fixture_options.plugin_c_fixture.len == 0 or fixture_options.plugin_dependency_fixture.len == 0)
-        return error.SkipZigTest;
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    // The dependency DLL must keep its unqualified import name. A conflicting
+    // The dependency DLL keeps its unqualified import name and the plugin is
+    // the dedicated dependency-aware fixture linked against it. A conflicting
     // same-named DLL in the process current directory must lose to the bundle
     // sibling because LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR wins.
     const dependency_name = "plugin_dependency_fixture.dll";
 
     const dependency_bytes = try std.Io.Dir.cwd().readFileAlloc(io, fixture_options.plugin_dependency_fixture, allocator, .limited(16 * 1024 * 1024));
     defer allocator.free(dependency_bytes);
-    const plugin_bytes = try std.Io.Dir.cwd().readFileAlloc(io, fixture_options.plugin_c_fixture, allocator, .limited(16 * 1024 * 1024));
+    const rogue_dependency_bytes = try std.Io.Dir.cwd().readFileAlloc(io, fixture_options.plugin_rogue_dependency_fixture, allocator, .limited(16 * 1024 * 1024));
+    defer allocator.free(rogue_dependency_bytes);
+    const plugin_bytes = try std.Io.Dir.cwd().readFileAlloc(io, fixture_options.plugin_with_dependency_fixture, allocator, .limited(16 * 1024 * 1024));
     defer allocator.free(plugin_bytes);
 
     // Bundle: extension.json + plugin.dll + sibling dependency DLL.
@@ -1203,11 +1224,11 @@ test "windows bundle dependency resolves from the bundle directory, never the cu
     try tmp.dir.writeFile(io, .{ .sub_path = "bundle.zovaext/extension.json", .data = manifest });
 
     // Attacker-controlled same-named DLL in the process current directory. It
-    // lacks the marker export the plugin imports, so if the loader resolved the
-    // dependency from here instead of the bundle, plugin.dll would fail to load.
+    // exports a failing marker, so if the loader resolved the dependency from
+    // here instead of the bundle, the plugin hooks would refuse to run.
     const cwd_dependency_sub_path = try std.fmt.allocPrint(allocator, "{s}", .{dependency_name});
     defer allocator.free(cwd_dependency_sub_path);
-    try tmp.dir.writeFile(io, .{ .sub_path = cwd_dependency_sub_path, .data = plugin_bytes });
+    try tmp.dir.writeFile(io, .{ .sub_path = cwd_dependency_sub_path, .data = rogue_dependency_bytes });
 
     // Make the tmp directory (which holds both the bundle and the rogue DLL)
     // the process current directory. The restricted search must still resolve
@@ -1226,16 +1247,28 @@ test "windows bundle dependency resolves from the bundle directory, never the cu
     var record = try trustBundle(allocator, bundle_path, .{ .path = trust_path });
     defer record.deinit(allocator);
 
-    // The dependency DLL that LoadLibraryExW actually loaded is the bundle
-    // sibling, not the same-named DLL in the process current directory: the
-    // resolved path is inside the bundle directory, which only happens when
-    // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR beat the current directory.
-    var loaded = try DynamicLibrary.open(record.bundle_path);
-    const resolved = try loaded.resolvedPath(allocator);
-    loaded.close();
+    // Load the bundle's plugin library itself, not the bundle directory: the
+    // dependency import resolution only happens when a real module with an
+    // import table is loaded.
+    const plugin_library_path = try std.fs.path.join(allocator, &.{ record.bundle_path, library_name });
+    defer allocator.free(plugin_library_path);
+    var loaded = try DynamicLibrary.open(plugin_library_path);
+
+    // The dependency module mapped under its unqualified import name must be
+    // the bundle sibling, not the same-named DLL in the process current
+    // directory. That only holds when LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR beat
+    // the current directory during import resolution.
+    const dependency_name_wide = try std.unicode.wtf8ToWtf16LeAllocZ(allocator, dependency_name);
+    defer allocator.free(dependency_name_wide);
+    const resolved = (try DynamicLibrary.loadedModulePath(dependency_name_wide.ptr, allocator)) orelse return error.TestUnexpectedResult;
     defer allocator.free(resolved);
     try std.testing.expect(std.mem.eql(u8, std.fs.path.basename(resolved), dependency_name));
     try std.testing.expect(std.mem.indexOf(u8, resolved, "bundle.zovaext") != null);
+
+    // The plugin entrypoint must be reachable through the restricted loader.
+    const Entry = *const fn (u32) callconv(.c) ?*const anyopaque;
+    try std.testing.expect(loaded.lookup(Entry, "zova_plugin_entry_v1") != null);
+    loaded.close();
 
     // The full trusted flow must work too: install dispatches through the
     // sibling dependency marker, proving the bundle dependency was used.

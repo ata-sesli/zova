@@ -7,35 +7,17 @@ static_assert(offsetof(zova_plugin_descriptor_v1, flags) == 8, "descriptor prefi
 _Static_assert(offsetof(zova_plugin_descriptor_v1, flags) == 8, "descriptor prefix");
 #endif
 
-#ifdef ZOVA_DEPENDENCY_FIXTURE
-int32_t ZOVA_PLUGIN_CALL zova_plugin_dependency_marker_v1(void) {
-    return ZOVA_PLUGIN_OK;
-}
-#else
-#if defined(_WIN32)
-int32_t ZOVA_PLUGIN_CALL zova_plugin_dependency_marker_v1(void);
-#endif
-
 static int32_t ZOVA_PLUGIN_CALL install(const zova_plugin_host_v1 *host, void *db) {
     const char sql[] = "CREATE TABLE _zova_ext_c_test_data(id INTEGER)";
     if (host->abi_version != ZOVA_PLUGIN_ABI_V1 || host->struct_size < sizeof(*host))
         return ZOVA_PLUGIN_ERROR;
-#if defined(_WIN32)
-    if (zova_plugin_dependency_marker_v1() != ZOVA_PLUGIN_OK)
-        return ZOVA_PLUGIN_ERROR;
-#endif
     return host->exec_sql(db, sql, sizeof(sql) - 1);
 }
 
 static int32_t ZOVA_PLUGIN_CALL drop(const zova_plugin_host_v1 *host, void *db) {
     const char sql[] = "DROP TABLE _zova_ext_c_test_data";
-#if defined(_WIN32)
-    if (zova_plugin_dependency_marker_v1() != ZOVA_PLUGIN_OK)
-        return ZOVA_PLUGIN_ERROR;
-#endif
     return host->exec_sql(db, sql, sizeof(sql) - 1);
 }
-#endif
 
 
 #ifdef ZOVA_UPGRADE_FIXTURE
