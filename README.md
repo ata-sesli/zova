@@ -856,7 +856,8 @@ zova extension untrust my_ext
 ```
 
 Trusted bundles are native code. Zova records hashes of the bundle manifest and
-library; if either changes, the bundle must be trusted again. Zova never loads
+library plus a bundle-wide content hash covering every other bundle file;
+if any of them changes, the bundle must be trusted again. Zova never loads
 extension code just because a `.zova` file contains extension metadata.
 If a command needs a dynamic extension that is missing or untrusted, diagnostics
 tell you to provide `--extension <bundle.zovaext>` or trust the bundle first.
