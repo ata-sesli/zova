@@ -492,8 +492,9 @@ pub fn loadBundleInfo(allocator: std.mem.Allocator, bundle_path: []const u8) Err
     };
 }
 
-/// One file inside a bundle: its bundle-relative path and its contents.
-const BundleFile = struct { relative_path: []u8, bytes: []u8 };
+/// One file inside a bundle. Contents are streamed only after these paths are
+/// sorted so digest memory use does not scale with total bundle bytes.
+const BundleFile = struct { relative_path: []u8 };
 
 /// Deepest directory nesting hashed inside a bundle. Far above anything a
 /// legitimate manifest uses; exists so a cyclic directory graph (bind mounts)
@@ -537,12 +538,7 @@ fn collectBundleFiles(
             allocator.free(relative_path);
             continue;
         }
-        const bytes = dir.readFileAlloc(io, current.name, allocator, .limited(bundle_file_limit)) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.ExtensionInvalid,
-        };
-        errdefer allocator.free(bytes);
-        try files.append(allocator, .{ .relative_path = relative_path, .bytes = bytes });
+        try files.append(allocator, .{ .relative_path = relative_path });
     }
 }
 
@@ -559,7 +555,6 @@ fn computeBundleSha256(allocator: std.mem.Allocator, bundle_path: []const u8) Er
     defer {
         for (files.items) |item| {
             allocator.free(item.relative_path);
-            allocator.free(item.bytes);
         }
         files.deinit(allocator);
     }
@@ -574,13 +569,30 @@ fn computeBundleSha256(allocator: std.mem.Allocator, bundle_path: []const u8) Er
 
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     var length_buffer: [8]u8 = undefined;
+    var read_buffer: [64 * 1024]u8 = undefined;
     for (files.items) |item| {
         std.mem.writeInt(u64, &length_buffer, item.relative_path.len, .little);
         hasher.update(&length_buffer);
         hasher.update(item.relative_path);
-        std.mem.writeInt(u32, length_buffer[0..4], @intCast(item.bytes.len), .little);
+
+        var file = dir.openFile(io, item.relative_path, .{}) catch return error.ExtensionInvalid;
+        defer file.close(io);
+        const stat = file.stat(io) catch return error.ExtensionInvalid;
+        if (stat.size > bundle_file_limit or stat.size > std.math.maxInt(u32)) return error.ExtensionInvalid;
+        std.mem.writeInt(u32, length_buffer[0..4], @intCast(stat.size), .little);
         hasher.update(length_buffer[0..4]);
-        hasher.update(item.bytes);
+
+        var offset: u64 = 0;
+        while (offset < stat.size) {
+            const requested: usize = @intCast(@min(stat.size - offset, read_buffer.len));
+            const read = file.readPositional(io, &.{read_buffer[0..requested]}, offset) catch return error.ExtensionInvalid;
+            if (read == 0) return error.ExtensionInvalid;
+            hasher.update(read_buffer[0..read]);
+            offset += read;
+        }
+        var trailing: [1]u8 = undefined;
+        const trailing_len = file.readPositional(io, &.{&trailing}, offset) catch return error.ExtensionInvalid;
+        if (trailing_len != 0) return error.ExtensionInvalid;
     }
 
     var digest: [32]u8 = undefined;
@@ -1330,6 +1342,33 @@ test "dynamic extension trust covers sibling dependency changes" {
     var restored = try loadBundleInfo(allocator, bundle_path);
     defer restored.deinit(allocator);
     try ensureTrusted(allocator, restored, .{ .path = trust_path });
+}
+
+test "dynamic extension bundle digest does not retain file contents" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = defaultIo();
+
+    try tmp.dir.createDir(io, "streamed.zovaext", .default_dir);
+    const file_bytes = [_]u8{0x5a} ** (8 * 1024);
+    var name_buffer: [64]u8 = undefined;
+    for (0..16) |index| {
+        const sub_path = try std.fmt.bufPrint(&name_buffer, "streamed.zovaext/file-{d}.bin", .{index});
+        try tmp.dir.writeFile(io, .{ .sub_path = sub_path, .data = &file_bytes });
+    }
+
+    var bundle_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const bundle_path = try std.fmt.bufPrint(&bundle_buffer, ".zig-cache/tmp/{s}/streamed.zovaext", .{tmp.sub_path});
+    const expected = try computeBundleSha256(allocator, bundle_path);
+
+    // The bundle contains 128 KiB, but computing its digest should retain only
+    // the sorted relative paths. This buffer covers that metadata while being
+    // intentionally too small to hold all file contents at once.
+    var memory: [32 * 1024]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&memory);
+    const actual = try computeBundleSha256(fixed.allocator(), bundle_path);
+    try std.testing.expectEqualSlices(u8, expected[0..], actual[0..]);
 }
 
 test "dynamic extension legacy trust record without bundle digest stays untrusted" {
