@@ -139,11 +139,15 @@ zova extension trusted
 Trust records live at `$ZOVA_TRUST_STORE` when set, otherwise
 `$XDG_CONFIG_HOME/zova/trusted_extensions.json`, otherwise
 `$HOME/.config/zova/trusted_extensions.json`. A trust record stores the
-canonical bundle path, extension identity, manifest hash, library hash, and
-trust timestamp.
+canonical bundle path, extension identity, manifest hash, library hash, a
+bundle-wide content hash covering every other file in the bundle (dependencies
+included), and the trust timestamp.
 
-If `extension.json` or the native library changes, loading fails until the
-bundle is trusted again.
+If `extension.json`, the native library, or any other bundle file changes,
+loading fails until the bundle is trusted again. On Windows, sibling
+dependency DLLs are executable bundle files and are therefore covered by this
+check: a dependency replaced after trust is rejected before any of its code
+can run.
 
 Load trusted bundles explicitly for one CLI process:
 
@@ -161,8 +165,8 @@ C callers use the same trust boundary through the C ABI:
 
 - `zova_extension_bundle_verify` checks a local bundle and entrypoint without
   writing trust.
-- `zova_extension_bundle_trust` records the current manifest/library hashes in
-  the selected trust store.
+- `zova_extension_bundle_trust` records the current manifest/library hashes and
+  the bundle-wide content digest in the selected trust store.
 - `zova_extension_bundle_untrust` removes a trust record by identifier.
 - `zova_database_create_with_extensions` and
   `zova_database_open_with_extensions` open a handle with explicitly supplied

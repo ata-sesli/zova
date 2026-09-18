@@ -929,6 +929,8 @@ fn writeTrustedExtensionObject(writer: *std.Io.Writer, record: zova.DynamicExten
     try writeJsonString(writer, record.manifest_sha256[0..]);
     try writer.writeAll(", \"library_sha256\": ");
     try writeJsonString(writer, record.library_sha256[0..]);
+    try writer.writeAll(", \"bundle_sha256\": ");
+    try writeJsonString(writer, record.bundle_sha256[0..]);
     try writer.print(", \"trusted_at_unix\": {d}}}", .{record.trusted_at_unix});
 }
 

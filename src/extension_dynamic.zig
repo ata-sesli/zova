@@ -170,6 +170,11 @@ pub const BundleInfo = struct {
     manifest: BundleManifest,
     manifest_sha256: [64]u8,
     library_sha256: [64]u8,
+    /// Bundle-wide digest over every file in the bundle (relative path plus
+    /// contents), excluding only the manifest, which `manifest_sha256` covers
+    /// separately. Covers all executable sibling dependencies that
+    /// `library_sha256` cannot see.
+    bundle_sha256: [64]u8,
 
     pub fn deinit(self: *BundleInfo, allocator: std.mem.Allocator) void {
         allocator.free(self.bundle_path);
@@ -185,6 +190,10 @@ pub const TrustRecord = struct {
     bundle_path: []u8,
     manifest_sha256: [64]u8,
     library_sha256: [64]u8,
+    /// Digest of the full bundle contents recorded at trust time. Any later
+    /// change to any bundle file — including sibling dependency libraries —
+    /// invalidates trust.
+    bundle_sha256: [64]u8,
     trusted_at_unix: i64,
 
     pub fn deinit(self: *TrustRecord, allocator: std.mem.Allocator) void {
@@ -196,6 +205,16 @@ pub const TrustRecord = struct {
 };
 
 const max_json_token_len = 64 * 1024;
+
+/// Per-file read cap while hashing a bundle. Matches the primary-library cap
+/// in `loadBundleInfo`.
+const bundle_file_limit = 256 * 1024 * 1024;
+
+/// Digest placeholder for trust records written before bundle-wide
+/// verification. A real digest is hex digits of hashed content; this all-zero
+/// sentinel is explicitly rejected during verification so legacy bundles stay
+/// untrusted until they are trusted again.
+const legacy_bundle_sha256 = [1]u8{'0'} ** 64;
 
 pub const TrustedList = struct {
     records: []TrustRecord,
@@ -461,6 +480,7 @@ pub fn loadBundleInfo(allocator: std.mem.Allocator, bundle_path: []const u8) Err
     if (!isPathInsideDirectory(normalized_bundle_path, library_path)) return error.ExtensionInvalid;
     const library_bytes = try readFileAlloc(allocator, library_path, 256 * 1024 * 1024);
     defer allocator.free(library_bytes);
+    const bundle_sha256 = try computeBundleSha256(allocator, normalized_bundle_path);
 
     return .{
         .bundle_path = normalized_bundle_path,
@@ -468,7 +488,104 @@ pub fn loadBundleInfo(allocator: std.mem.Allocator, bundle_path: []const u8) Err
         .manifest = manifest,
         .manifest_sha256 = sha256Hex(manifest_bytes),
         .library_sha256 = sha256Hex(library_bytes),
+        .bundle_sha256 = bundle_sha256,
     };
+}
+
+/// One file inside a bundle: its bundle-relative path and its contents.
+const BundleFile = struct { relative_path: []u8, bytes: []u8 };
+
+/// Deepest directory nesting hashed inside a bundle. Far above anything a
+/// legitimate manifest uses; exists so a cyclic directory graph (bind mounts)
+/// cannot make the walk diverge.
+const max_bundle_depth = 16;
+
+fn collectBundleFiles(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
+    prefix: []const u8,
+    depth: usize,
+    files: *std.ArrayList(BundleFile),
+) Error!void {
+    if (depth > max_bundle_depth) return error.ExtensionInvalid;
+    var iterator = dir.iterate();
+    while (true) {
+        const entry = iterator.next(io) catch return error.ExtensionInvalid;
+        const current = entry orelse break;
+        switch (current.kind) {
+            .file => {},
+            .directory => {
+                const child_prefix = try std.fmt.allocPrint(allocator, "{s}{s}/", .{ prefix, current.name });
+                defer allocator.free(child_prefix);
+                var child = dir.openDir(io, current.name, .{ .iterate = true }) catch return error.ExtensionInvalid;
+                defer child.close(io);
+                try collectBundleFiles(allocator, io, child, child_prefix, depth + 1, files);
+                continue;
+            },
+            // Bundles are collections of regular files. Links would make the
+            // digest depend on contents outside the bundle directory.
+            else => return error.ExtensionInvalid,
+        }
+        if (current.name.len == 0 or current.name.len > 255) return error.ExtensionInvalid;
+        if (std.mem.indexOfScalar(u8, current.name, 0) != null) return error.ExtensionInvalid;
+        const relative_path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, current.name });
+        errdefer allocator.free(relative_path);
+        if (std.mem.eql(u8, relative_path, bundle_manifest_file)) {
+            // The manifest is covered by manifest_sha256; it is excluded here
+            // so the bundle digest stays independent of manifest formatting.
+            allocator.free(relative_path);
+            continue;
+        }
+        const bytes = dir.readFileAlloc(io, current.name, allocator, .limited(bundle_file_limit)) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.ExtensionInvalid,
+        };
+        errdefer allocator.free(bytes);
+        try files.append(allocator, .{ .relative_path = relative_path, .bytes = bytes });
+    }
+}
+
+/// Deterministic digest over every file in the bundle: relative path and file
+/// bytes per entry, sorted by path so traversal order never changes the value.
+/// Covers every executable sibling dependency that `library_sha256` cannot
+/// see; the manifest is excluded because `manifest_sha256` already covers it.
+fn computeBundleSha256(allocator: std.mem.Allocator, bundle_path: []const u8) Error![64]u8 {
+    const io = defaultIo();
+    var dir = std.Io.Dir.cwd().openDir(io, bundle_path, .{ .iterate = true }) catch return error.ExtensionInvalid;
+    defer dir.close(io);
+
+    var files: std.ArrayList(BundleFile) = .empty;
+    defer {
+        for (files.items) |item| {
+            allocator.free(item.relative_path);
+            allocator.free(item.bytes);
+        }
+        files.deinit(allocator);
+    }
+    try collectBundleFiles(allocator, io, dir, "", 0, &files);
+    if (files.items.len == 0) return error.ExtensionInvalid;
+
+    std.mem.sort(BundleFile, files.items, {}, struct {
+        fn lessThan(_: void, lhs: BundleFile, rhs: BundleFile) bool {
+            return std.mem.order(u8, lhs.relative_path, rhs.relative_path) == .lt;
+        }
+    }.lessThan);
+
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var length_buffer: [8]u8 = undefined;
+    for (files.items) |item| {
+        std.mem.writeInt(u64, &length_buffer, item.relative_path.len, .little);
+        hasher.update(&length_buffer);
+        hasher.update(item.relative_path);
+        std.mem.writeInt(u32, length_buffer[0..4], @intCast(item.bytes.len), .little);
+        hasher.update(length_buffer[0..4]);
+        hasher.update(item.bytes);
+    }
+
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return hex64(digest);
 }
 
 pub fn trustBundle(allocator: std.mem.Allocator, bundle_path: []const u8, options: TrustStoreOptions) Error!TrustRecord {
@@ -593,6 +710,13 @@ fn ensureTrusted(allocator: std.mem.Allocator, info: BundleInfo, options: TrustS
         if (!std.mem.eql(u8, record.storage_prefix, info.manifest.storage_prefix)) return error.ExtensionUntrusted;
         if (!std.mem.eql(u8, record.manifest_sha256[0..], info.manifest_sha256[0..])) return error.ExtensionUntrusted;
         if (!std.mem.eql(u8, record.library_sha256[0..], info.library_sha256[0..])) return error.ExtensionUntrusted;
+        // Records from before bundle-wide verification carry a sentinel digest
+        // instead of a real one: the sibling contents were never verified, so
+        // the bundle must be trusted again before anything in it executes.
+        if (std.mem.eql(u8, &record.bundle_sha256, &legacy_bundle_sha256)) return error.ExtensionUntrusted;
+        // Bundle-wide digest: catches every non-manifest file, including
+        // sibling dependency libraries, that changed after trust was recorded.
+        if (!std.mem.eql(u8, record.bundle_sha256[0..], info.bundle_sha256[0..])) return error.ExtensionUntrusted;
         return;
     }
 
@@ -623,6 +747,8 @@ fn writeTrusted(allocator: std.mem.Allocator, list: TrustedList, options: TrustS
         try writeJsonString(writer, record.manifest_sha256[0..]);
         try writer.writeAll(",\n      \"library_sha256\": ");
         try writeJsonString(writer, record.library_sha256[0..]);
+        try writer.writeAll(",\n      \"bundle_sha256\": ");
+        try writeJsonString(writer, record.bundle_sha256[0..]);
         try writer.print(",\n      \"trusted_at_unix\": {d}\n    }}", .{record.trusted_at_unix});
     }
     try writer.writeAll("\n  ]\n}\n");
@@ -719,6 +845,7 @@ const TrustRecordFields = struct {
     bundle_path: ?[]u8 = null,
     manifest_sha256: ?[64]u8 = null,
     library_sha256: ?[64]u8 = null,
+    bundle_sha256: ?[64]u8 = null,
     trusted_at_unix: ?i64 = null,
 
     fn deinit(self: *TrustRecordFields, allocator: std.mem.Allocator) void {
@@ -754,6 +881,9 @@ fn parseTrustRecord(allocator: std.mem.Allocator, scanner: *std.json.Scanner) Er
         } else if (std.mem.eql(u8, key, "library_sha256")) {
             if (fields.library_sha256 != null) return error.ExtensionInvalid;
             fields.library_sha256 = try expectJsonHex64(scanner, allocator);
+        } else if (std.mem.eql(u8, key, "bundle_sha256")) {
+            if (fields.bundle_sha256 != null) return error.ExtensionInvalid;
+            fields.bundle_sha256 = try expectJsonHex64(scanner, allocator);
         } else if (std.mem.eql(u8, key, "trusted_at_unix")) {
             if (fields.trusted_at_unix != null) return error.ExtensionInvalid;
             fields.trusted_at_unix = try expectJsonI64(scanner, allocator);
@@ -762,6 +892,11 @@ fn parseTrustRecord(allocator: std.mem.Allocator, scanner: *std.json.Scanner) Er
         }
     }
 
+    // Records written before bundle-wide verification have no digest. They
+    // parse (so the store can be rewritten, e.g. to re-trust the bundle), but
+    // the sentinel value never matches a computed digest, so such a bundle
+    // stays untrusted until it is trusted again. ASCII hex digits keep the
+    // value serializable inside the JSON trust store.
     const result: TrustRecord = .{
         .name = fields.name orelse return error.ExtensionInvalid,
         .version = fields.version orelse return error.ExtensionInvalid,
@@ -769,6 +904,7 @@ fn parseTrustRecord(allocator: std.mem.Allocator, scanner: *std.json.Scanner) Er
         .bundle_path = fields.bundle_path orelse return error.ExtensionInvalid,
         .manifest_sha256 = fields.manifest_sha256 orelse return error.ExtensionInvalid,
         .library_sha256 = fields.library_sha256 orelse return error.ExtensionInvalid,
+        .bundle_sha256 = fields.bundle_sha256 orelse legacy_bundle_sha256,
         .trusted_at_unix = fields.trusted_at_unix orelse return error.ExtensionInvalid,
     };
     fields = .{};
@@ -877,6 +1013,7 @@ fn trustRecordFromBundleInfo(allocator: std.mem.Allocator, info: BundleInfo) Err
         .bundle_path = try allocator.dupe(u8, info.bundle_path),
         .manifest_sha256 = info.manifest_sha256,
         .library_sha256 = info.library_sha256,
+        .bundle_sha256 = info.bundle_sha256,
         .trusted_at_unix = unixTimestamp(),
     };
 }
@@ -889,6 +1026,7 @@ fn cloneTrustRecord(allocator: std.mem.Allocator, record: TrustRecord) Error!Tru
         .bundle_path = try allocator.dupe(u8, record.bundle_path),
         .manifest_sha256 = record.manifest_sha256,
         .library_sha256 = record.library_sha256,
+        .bundle_sha256 = record.bundle_sha256,
         .trusted_at_unix = record.trusted_at_unix,
     };
 }
@@ -987,7 +1125,10 @@ fn unixTimestamp() i64 {
 fn sha256Hex(bytes: []const u8) [64]u8 {
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    return hex64(digest);
+}
 
+fn hex64(digest: [32]u8) [64]u8 {
     const digits = "0123456789abcdef";
     var out: [64]u8 = undefined;
     for (digest, 0..) |byte, index| {
@@ -1128,6 +1269,180 @@ test "dynamic extension trust store detects changed bundle contents" {
     try std.testing.expectError(error.ExtensionUntrusted, ensureTrusted(allocator, changed, .{ .path = trust_path }));
 }
 
+test "dynamic extension trust covers sibling dependency changes" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = defaultIo();
+
+    // Bundle with an executable sibling dependency next to the primary
+    // library. Only the primary library is named by the manifest.
+    try tmp.dir.createDir(io, "dep.zovaext", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "dep.zovaext/libdyn_test.dll", .data = "library one" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "dep.zovaext/libdependency.dll", .data = "dependency one" });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "dep.zovaext/extension.json",
+        .data =
+        \\{
+        \\  "name": "dyn_test",
+        \\  "version": "0.1.0",
+        \\  "storage_prefix": "_zova_ext_dyn_test_",
+        \\  "zova_abi_min": "1.0.0",
+        \\  "capabilities": "sql",
+        \\  "library": "libdyn_test.dll"
+        \\}
+        ,
+    });
+
+    var bundle_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const bundle_path = try std.fmt.bufPrint(&bundle_buffer, ".zig-cache/tmp/{s}/dep.zovaext", .{tmp.sub_path});
+    var trust_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const trust_path = try std.fmt.bufPrint(&trust_buffer, ".zig-cache/tmp/{s}/trusted_extensions.json", .{tmp.sub_path});
+
+    var record = try trustBundle(allocator, bundle_path, .{ .path = trust_path });
+    defer record.deinit(allocator);
+    // The recorded digest covers the sibling dependency, not just the
+    // manifest and the primary library.
+    try std.testing.expect(!std.mem.allEqual(u8, &record.bundle_sha256, 0));
+
+    // The bundle digest is deterministic: recomputing it for the same
+    // contents must reproduce the value recorded at trust time.
+    var info = try loadBundleInfo(allocator, bundle_path);
+    defer info.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, record.bundle_sha256[0..], info.bundle_sha256[0..]);
+    try ensureTrusted(allocator, info, .{ .path = trust_path });
+
+    // Swap the sibling dependency after trust. The manifest and primary
+    // library hashes are untouched, so only the bundle-wide digest catches
+    // the replacement.
+    try tmp.dir.writeFile(io, .{ .sub_path = "dep.zovaext/libdependency.dll", .data = "rogue" });
+    var tampered = try loadBundleInfo(allocator, bundle_path);
+    defer tampered.deinit(allocator);
+    try std.testing.expect(!std.mem.eql(u8, tampered.bundle_sha256[0..], record.bundle_sha256[0..]));
+    try std.testing.expectError(error.ExtensionUntrusted, ensureTrusted(allocator, tampered, .{ .path = trust_path }));
+
+    // The tampered bundle is also rejected through the full load path, so no
+    // code from the replacement dependency can execute.
+    try std.testing.expectError(error.ExtensionUntrusted, DynamicExtensionSet.loadTrustedBundles(allocator, &.{bundle_path}, .{ .path = trust_path }));
+
+    // Restoring the original sibling bytes re-validates the bundle.
+    try tmp.dir.writeFile(io, .{ .sub_path = "dep.zovaext/libdependency.dll", .data = "dependency one" });
+    var restored = try loadBundleInfo(allocator, bundle_path);
+    defer restored.deinit(allocator);
+    try ensureTrusted(allocator, restored, .{ .path = trust_path });
+}
+
+test "dynamic extension legacy trust record without bundle digest stays untrusted" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = defaultIo();
+
+    try tmp.dir.createDir(io, "legacy.zovaext", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "legacy.zovaext/libdyn_test.dylib", .data = "library one" });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "legacy.zovaext/extension.json",
+        .data =
+        \\{
+        \\  "name": "dyn_test",
+        \\  "version": "0.1.0",
+        \\  "storage_prefix": "_zova_ext_dyn_test_",
+        \\  "zova_abi_min": "1.0.0",
+        \\  "capabilities": "sql",
+        \\  "library": "libdyn_test.dylib"
+        \\}
+        ,
+    });
+
+    var bundle_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const bundle_path = try std.fmt.bufPrint(&bundle_buffer, ".zig-cache/tmp/{s}/legacy.zovaext", .{tmp.sub_path});
+    var trust_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const trust_path = try std.fmt.bufPrint(&trust_buffer, ".zig-cache/tmp/{s}/trusted_extensions.json", .{tmp.sub_path});
+
+    // A pre-bundle-digest trust store: manifest and library hashes only.
+    // The digest values below are arbitrary placeholders in the legacy shape.
+    const legacy_store =
+        \\{
+        \\  "version": 1,
+        \\  "extensions": [
+        \\    {
+        \\      "name": "dyn_test",
+        \\      "version": "0.1.0",
+        \\      "storage_prefix": "_zova_ext_dyn_test_",
+        \\      "bundle_path": "REPLACED",
+        \\      "manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        \\      "library_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        \\      "trusted_at_unix": 1752000000
+        \\    }
+        \\  ]
+        \\}
+    ;
+    try tmp.dir.writeFile(io, .{ .sub_path = "trusted_extensions.json", .data = legacy_store });
+
+    // Rewrite the record with this bundle's real path and hashes, keeping the
+    // legacy (bundle-digest-free) shape, so only the digest differs.
+    var list = try loadTrusted(allocator, .{ .path = trust_path });
+    defer list.deinit(allocator);
+    var info = try loadBundleInfo(allocator, bundle_path);
+    defer info.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), list.records.len);
+    allocator.free(list.records[0].bundle_path);
+    list.records[0].bundle_path = try allocator.dupe(u8, info.bundle_path);
+    list.records[0].manifest_sha256 = info.manifest_sha256;
+    list.records[0].library_sha256 = info.library_sha256;
+    try writeTrusted(allocator, list, .{ .path = trust_path });
+
+    // An unchanged legacy bundle is still untrusted: no recorded bundle-wide
+    // digest means the sibling contents were never verified.
+    try std.testing.expectError(error.ExtensionUntrusted, ensureTrusted(allocator, info, .{ .path = trust_path }));
+    try std.testing.expectError(error.ExtensionUntrusted, DynamicExtensionSet.loadTrustedBundles(allocator, &.{bundle_path}, .{ .path = trust_path }));
+
+    // Re-trusting succeeds and rewrites the record into the new shape.
+    var record = try trustBundle(allocator, bundle_path, .{ .path = trust_path });
+    defer record.deinit(allocator);
+    try std.testing.expect(!std.mem.allEqual(u8, &record.bundle_sha256, 0));
+    try ensureTrusted(allocator, info, .{ .path = trust_path });
+}
+
+test "dynamic extension bundle digest rejects unexpected directory entries" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = defaultIo();
+
+    try tmp.dir.createDir(io, "link.zovaext", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "link.zovaext/libdyn_test.dll", .data = "library one" });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "link.zovaext/extension.json",
+        .data =
+        \\{
+        \\  "name": "dyn_test",
+        \\  "version": "0.1.0",
+        \\  "storage_prefix": "_zova_ext_dyn_test_",
+        \\  "zova_abi_min": "1.0.0",
+        \\  "capabilities": "sql",
+        \\  "library": "libdyn_test.dll"
+        \\}
+        ,
+    });
+
+    var bundle_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const bundle_path = try std.fmt.bufPrint(&bundle_buffer, ".zig-cache/tmp/{s}/link.zovaext", .{tmp.sub_path});
+
+    // A symlink inside the bundle makes the digest depend on contents
+    // outside the bundle directory, so it poisons the bundle.
+    try tmp.dir.symLink(io, "libdyn_test.dll", "link.zovaext/link", .{});
+    try std.testing.expectError(error.ExtensionInvalid, loadBundleInfo(allocator, bundle_path));
+    tmp.dir.deleteFile(io, "link.zovaext/link") catch {};
+
+    // A nested directory would hide files from a flat digest; bundles are
+    // digestable only as a strict tree, so nested directories are part of the
+    // digest and a symlinked one is rejected like a symlinked file.
+    try tmp.dir.createDir(io, "link.zovaext/nested", .default_dir);
+    try tmp.dir.symLink(io, "libdyn_test.dll", "link.zovaext/nested/link", .{});
+    try std.testing.expectError(error.ExtensionInvalid, loadBundleInfo(allocator, bundle_path));
+}
+
 test "dynamic extension bundle validation rejects native Windows separators" {
     try std.testing.expectError(error.ExtensionInvalid, validateRelativeLibraryPath("..\\evil.dll"));
     try std.testing.expectError(error.ExtensionInvalid, validateRelativeLibraryPath("nested\\lib.dll"));
@@ -1173,7 +1488,9 @@ test "windows dynamic library loads a system module and resolves symbols" {
     try std.testing.expect(library.lookup(*anyopaque, "zova_missing_symbol") == null);
     const resolved = try library.resolvedPath(allocator);
     defer allocator.free(resolved);
-    try std.testing.expect(std.mem.eql(u8, std.fs.path.basename(resolved), "kernel32.dll"));
+    // GetModuleFileNameW reports the on-disk casing, which is commonly
+    // "KERNEL32.DLL" on Windows: compare case-insensitively.
+    try std.testing.expect(std.ascii.eqlIgnoreCase(std.fs.path.basename(resolved), "kernel32.dll"));
 }
 
 test "windows bundle dependency resolves from the bundle directory, never the current directory" {
@@ -1283,4 +1600,68 @@ test "windows bundle dependency resolves from the bundle directory, never the cu
     try db.exec("INSERT INTO _zova_ext_c_test_data VALUES(1)");
     try extension.check(&db, set.registry(), "c_test");
     try extension.drop(&db, set.registry(), "c_test", null);
+}
+
+test "windows trusted bundle rejects a sibling dependency replaced after trust" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (fixture_options.plugin_with_dependency_fixture.len == 0 or
+        fixture_options.plugin_dependency_fixture.len == 0 or
+        fixture_options.plugin_rogue_dependency_fixture.len == 0)
+        return error.SkipZigTest;
+
+    const io = defaultIo();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const dependency_name = "plugin_dependency_fixture.dll";
+
+    const dependency_bytes = try std.Io.Dir.cwd().readFileAlloc(io, fixture_options.plugin_dependency_fixture, allocator, .limited(16 * 1024 * 1024));
+    defer allocator.free(dependency_bytes);
+    const rogue_dependency_bytes = try std.Io.Dir.cwd().readFileAlloc(io, fixture_options.plugin_rogue_dependency_fixture, allocator, .limited(16 * 1024 * 1024));
+    defer allocator.free(rogue_dependency_bytes);
+    const plugin_bytes = try std.Io.Dir.cwd().readFileAlloc(io, fixture_options.plugin_with_dependency_fixture, allocator, .limited(16 * 1024 * 1024));
+    defer allocator.free(plugin_bytes);
+
+    // 1. Bundle with the valid sibling dependency, trusted as-is.
+    try tmp.dir.createDir(io, "bundle.zovaext", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "bundle.zovaext/plugin.dll", .data = plugin_bytes });
+    try tmp.dir.writeFile(io, .{ .sub_path = "bundle.zovaext/plugin_dependency_fixture.dll", .data = dependency_bytes });
+    const manifest = try std.fmt.allocPrint(allocator,
+        \\{{"name":"c_test","version":"1.0.0","storage_prefix":"_zova_ext_c_test_","zova_abi_min":"1.0.0","capabilities":"","library":"plugin.dll","entrypoint":"zova_plugin_entry_v1"}}
+    , .{});
+    defer allocator.free(manifest);
+    try tmp.dir.writeFile(io, .{ .sub_path = "bundle.zovaext/extension.json", .data = manifest });
+
+    const bundle_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/bundle.zovaext", .{tmp.sub_path});
+    defer allocator.free(bundle_path);
+    const trust_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/trusted_extensions.json", .{tmp.sub_path});
+    defer allocator.free(trust_path);
+
+    var record = try trustBundle(allocator, bundle_path, .{ .path = trust_path });
+    defer record.deinit(allocator);
+
+    // Baseline: whether the dependency module happens to be mapped already by
+    // an earlier test in this process, so the post-rejection check below is
+    // meaningful regardless of test order.
+    const dependency_name_wide = try std.unicode.wtf8ToWtf16LeAllocZ(allocator, dependency_name);
+    defer allocator.free(dependency_name_wide);
+    const baseline = try DynamicLibrary.loadedModulePath(dependency_name_wide.ptr, allocator);
+    defer if (baseline) |path| allocator.free(path);
+
+    // 2. Replace the sibling dependency with the rogue DLL after trust. The
+    // recorded manifest and library hashes still match; only the bundle-wide
+    // digest can see the replacement.
+    try tmp.dir.writeFile(io, .{ .sub_path = "bundle.zovaext/plugin_dependency_fixture.dll", .data = rogue_dependency_bytes });
+
+    // 3.+4. Loading the trusted bundle must be rejected before any code from
+    // the modified dependency executes.
+    try std.testing.expectError(error.ExtensionUntrusted, DynamicExtensionSet.loadTrustedBundles(allocator, &.{bundle_path}, .{ .path = trust_path }));
+
+    // The rejection happened during trust verification: no dependency module
+    // was mapped by the rejected attempt.
+    const after_rejection = try DynamicLibrary.loadedModulePath(dependency_name_wide.ptr, allocator);
+    defer if (after_rejection) |path| allocator.free(path);
+    try std.testing.expectEqual(baseline == null, after_rejection == null);
 }
