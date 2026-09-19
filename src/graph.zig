@@ -843,10 +843,18 @@ pub const Database = struct {
         }
         for (0..row_count) |row| {
             if (row != 0) try sql.append(std.heap.c_allocator, ',');
-            switch (kind) {
-                .nodes => try sql.appendSlice(std.heap.c_allocator, "(?,1,?,?,?,?,?,?)"),
-                .edges => try sql.appendSlice(std.heap.c_allocator, "(?,1,?,?,?,?,?)"),
-            }
+            var row_buffer: [96]u8 = undefined;
+            const row_sql = switch (kind) {
+                .nodes => nodes: {
+                    const base = row * 6;
+                    break :nodes std.fmt.bufPrint(&row_buffer, "(?{d},1,?{d},?{d},?{d},?{d},?{d},?{d})", .{ base + 1, base + 2, base + 3, base + 4, base + 5, base + 6, base + 1 }) catch unreachable;
+                },
+                .edges => edges: {
+                    const base = row * 5;
+                    break :edges std.fmt.bufPrint(&row_buffer, "(?{d},1,?{d},?{d},?{d},?{d},?{d})", .{ base + 1, base + 2, base + 3, base + 4, base + 1, base + 5 }) catch unreachable;
+                },
+            };
+            try sql.appendSlice(std.heap.c_allocator, row_sql);
         }
         try sql.append(std.heap.c_allocator, 0);
         return self.sqlite_db.prepare(sql.items[0 .. sql.items.len - 1 :0]);
@@ -855,14 +863,13 @@ pub const Database = struct {
     fn bindFreshGraphNodeBatch(stmt: *sqlite.Statement, nodes: []const FreshGraphNodeInput, first_index: usize) Error!void {
         for (nodes, 0..) |node, batch_index| {
             const node_key: i64 = @intCast(first_index + batch_index + 1);
-            const base: c_int = @intCast(batch_index * 7);
+            const base: c_int = @intCast(batch_index * 6);
             try stmt.bindInt64(base + 1, node_key);
-            try stmt.bindText(base + 2, node.node_id);
-            try stmt.bindText(base + 3, node.kind);
-            try stmt.bindText(base + 4, targetTypeText(node.target_type));
-            if (node.target_namespace) |value| try stmt.bindText(base + 5, value) else try stmt.bindNull(base + 5);
-            if (node.target_ref) |value| try stmt.bindText(base + 6, value) else try stmt.bindNull(base + 6);
-            try stmt.bindInt64(base + 7, node_key);
+            try stmt.bindTextBorrowed(base + 2, node.node_id);
+            try stmt.bindTextBorrowed(base + 3, node.kind);
+            try stmt.bindTextBorrowed(base + 4, targetTypeText(node.target_type));
+            if (node.target_namespace) |value| try stmt.bindTextBorrowed(base + 5, value) else try stmt.bindNull(base + 5);
+            if (node.target_ref) |value| try stmt.bindTextBorrowed(base + 6, value) else try stmt.bindNull(base + 6);
         }
     }
 
@@ -875,13 +882,12 @@ pub const Database = struct {
     ) Error!void {
         for (edges, edge_type_slots, 0..) |edge, type_slot, batch_index| {
             const edge_key: i64 = @intCast(first_index + batch_index + 1);
-            const base: c_int = @intCast(batch_index * 6);
+            const base: c_int = @intCast(batch_index * 5);
             try stmt.bindInt64(base + 1, edge_key);
             try stmt.bindInt64(base + 2, @intCast(edge.from_node_ordinal + 1));
             try stmt.bindInt64(base + 3, @intCast(type_slot + 1));
             try stmt.bindInt64(base + 4, @intCast(edge.to_node_ordinal + 1));
-            try stmt.bindInt64(base + 5, edge_key);
-            try stmt.bindBlobBorrowed(base + 6, edge.payload);
+            try stmt.bindBlobBorrowed(base + 5, edge.payload);
             payload_bytes.* = std.math.add(u64, payload_bytes.*, edge.payload.len) catch return error.InvalidArgument;
         }
     }
@@ -2909,6 +2915,24 @@ fn bindWalkAdjacencyNode(stmt: *sqlite.Statement, current_node_key: i64) Error!v
 
 fn resetWalkAdjacency(stmt: *sqlite.Statement) Error!void {
     try stmt.reset();
+}
+
+test "prepared fresh graph batches reuse key parameters" {
+    var raw = try sqlite.Database.open(":memory:");
+    defer raw.deinit();
+    try raw.exec(graphs_schema_sql);
+    try raw.exec(graph_nodes_schema_sql);
+    try raw.exec(graph_edge_types_schema_sql);
+    try raw.exec(graph_edges_schema_sql);
+
+    var db: Database = .{ .sqlite_db = &raw };
+    var nodes = try db.prepareFreshGraphBatchInsert(.nodes, fresh_graph_batch_rows);
+    defer nodes.deinit();
+    try std.testing.expectEqual(@as(c_int, fresh_graph_batch_rows * 6), sqlite.c.sqlite3_bind_parameter_count(nodes.handle));
+
+    var edges = try db.prepareFreshGraphBatchInsert(.edges, fresh_graph_batch_rows);
+    defer edges.deinit();
+    try std.testing.expectEqual(@as(c_int, fresh_graph_batch_rows * 5), sqlite.c.sqlite3_bind_parameter_count(edges.handle));
 }
 
 test "walk adjacency reset retains invariant bindings" {
