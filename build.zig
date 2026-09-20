@@ -426,6 +426,18 @@ pub fn build(b: *std.Build) void {
     const graph_fresh_benchmark_step = b.step("bench-graph-fresh", "Compare incremental and fresh graph publication at Deno scale");
     graph_fresh_benchmark_step.dependOn(&graph_fresh_benchmark_cmd.step);
 
+    const graph_borrowed_bindings_benchmark = b.addExecutable(.{
+        .name = "zova_graph_borrowed_bindings_benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/graph_borrowed_bindings.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    graph_borrowed_bindings_benchmark.root_module.addImport("zova", zova_module);
+    const install_graph_borrowed_bindings = b.addInstallArtifact(graph_borrowed_bindings_benchmark, .{});
+    b.step("build-graph-borrowed-bindings", "Build borrowed graph-binding benchmark").dependOn(&install_graph_borrowed_bindings.step);
+
     const notifications_benchmark = b.addExecutable(.{
         .name = "zova_notifications_benchmark",
         .root_module = b.createModule(.{
