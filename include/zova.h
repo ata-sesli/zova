@@ -5,9 +5,9 @@
 #include <stdint.h>
 
 /*
- * Zova C ABI, v1.0.0.
+ * Zova C ABI, v1.1.0.
  *
- * This release-candidate header exposes a C-compatible API over Zova's Zig
+ * This header exposes a C-compatible API over Zova's Zig
  * implementation. The ABI is intentionally conservative: opaque handles,
  * request structs, fixed-size ids, explicit status codes, and caller-visible
  * ownership rules.

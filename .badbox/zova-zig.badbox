@@ -1,0 +1,123 @@
+#badbox 1
+
+# Copying text inside a loop is the pattern that matters for Zova's bulk paths.
+# A small number can be intentional; several sites in the same callable should
+# trigger a borrowed-lifetime or invariant-prebinding review.
+rule zig/copying-text-binds-inside-loop for zig {
+  summary "Callable repeatedly copies SQLite text from inside loops"
+  param limit = 2
+  find code(statement, index, value) `statement.bindText(index, value)`
+  where match inside any {
+    node for_statement
+    node while_statement
+  }
+  group by nearest callable
+  when count > limit
+  report {
+    severity warning
+    message "Loop-heavy callable exceeds Zova's copying-text-binding review threshold"
+    evidence "copying bindText call sites inside loops"
+  }
+}
+
+# Preparing from inside a row-processing loop is almost always more useful to
+# review than counting unrelated prepares spread across one large callable.
+rule zig/statement-prepare-inside-loop for zig {
+  summary "SQLite statement preparation occurs inside a loop"
+  find code(database, sql) `database.prepare(sql)`
+  where match inside any {
+    node for_statement
+    node while_statement
+  }
+  group by nearest callable
+  when count > 0
+  report {
+    severity warning
+    message "Loop prepares SQLite statements; review statement reuse or caching"
+    evidence "statement prepare call sites inside loops"
+  }
+}
+
+# Allocations and copies inside loops are advisory hot-path evidence. The
+# thresholds avoid reporting isolated ownership transfers while preserving a
+# tripwire for repeated per-row allocation patterns.
+rule zig/allocations-inside-loop for zig {
+  summary "Allocator allocation occurs inside a loop"
+  find code(allocator, item_type, length) `allocator.alloc(item_type, length)`
+  where match inside any {
+    node for_statement
+    node while_statement
+  }
+  group by nearest callable
+  when count > 0
+  report {
+    severity info
+    message "Loop allocates repeatedly; review preallocation or arena reuse"
+    evidence "allocator.alloc call sites inside loops"
+  }
+}
+
+rule zig/duplications-inside-loop for zig {
+  summary "Callable contains several allocator duplications inside loops"
+  param limit = 2
+  find code(allocator, item_type, value) `allocator.dupe(item_type, value)`
+  where match inside any {
+    node for_statement
+    node while_statement
+  }
+  group by nearest callable
+  when count > limit
+  report {
+    severity info
+    message "Loop-heavy callable exceeds Zova's duplication-site review threshold"
+    evidence "allocator.dupe call sites inside loops"
+  }
+}
+
+# Production code should go through Zova's SQLite wrapper. The sqlite.c prefix
+# deliberately distinguishes bypasses from the wrapper's own c.sqlite3_* calls.
+rule zig/raw-sqlite-operation-bypass for zig {
+  summary "Production code bypasses Zova's SQLite statement wrapper"
+  find code(callee, args...) `callee(args)`
+  where text(callee) matches "^sqlite\\.c\\.sqlite3_(bind|prepare|step|reset|exec)"
+  group by nearest callable
+  when count > 0
+  report {
+    severity warning
+    message "Raw SQLite operation bypasses the reviewed wrapper boundary"
+    evidence "direct sqlite.c operation call sites"
+  }
+}
+
+# sqlite3_reset retains bindings. Repeated reset-then-clear sequences in the
+# same lexical block are a concrete prompt to review invariant prebinding. The
+# literal stmt receiver intentionally prevents cross-object ordering matches.
+rule zig/repeated-reset-then-clear-bindings for zig {
+  summary "Statement reset is repeatedly followed by clearing all bindings"
+  find code() `stmt.clearBindings()`
+  where match follows any {
+    code() `stmt.reset()`
+  }
+  group by nearest callable
+  when count > 1
+  report {
+    severity info
+    message "Callable repeatedly clears bindings after reset; review retained invariant bindings"
+    evidence "same-block reset-then-clear sequences"
+  }
+}
+
+# Multiple supposedly impossible failures in one callable make assumptions hard
+# to audit and can turn a future size/input change into a process abort.
+rule zig/excessive-catch-unreachable for zig {
+  summary "Callable contains multiple catch-unreachable sites"
+  param limit = 1
+  find code(expression) `expression catch unreachable`
+  group by nearest callable
+  when count > limit
+  report {
+    severity warning
+    message "Callable contains multiple unchecked failure assumptions"
+    evidence "catch unreachable sites"
+  }
+}

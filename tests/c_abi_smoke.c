@@ -163,6 +163,29 @@ static void path_join(char *out, size_t out_len, const char *dir, const char *na
     }
 }
 
+static void write_dyn_test_manifest(const char *manifest_path, const char *version, const char *label) {
+    char manifest[512];
+    int written = snprintf(
+        manifest,
+        sizeof(manifest),
+        "{\n"
+        "  \"name\": \"dyn_test\",\n"
+        "  \"version\": \"%s\",\n"
+        "  \"storage_prefix\": \"_zova_ext_dyn_test_\",\n"
+        "  \"zova_abi_min\": \"%s\",\n"
+        "  \"capabilities\": \"sql,dynamic-test\",\n"
+        "  \"library\": \"libdyn_test\"\n"
+        "}\n",
+        version,
+        zova_abi_version_string()
+    );
+    if (written < 0 || (size_t)written >= sizeof(manifest)) {
+        fprintf(stderr, "%s: manifest too long\n", label);
+        exit(1);
+    }
+    write_text_file(manifest_path, manifest, label);
+}
+
 static void make_dyn_test_bundle(const char *library_path, const char *bundle_path) {
     char library_dest[1024];
     char manifest_path[1024];
@@ -176,18 +199,7 @@ static void make_dyn_test_bundle(const char *library_path, const char *bundle_pa
         exit(1);
     }
     copy_file(library_path, library_dest, "copy dyn library");
-    write_text_file(
-        manifest_path,
-        "{\n"
-        "  \"name\": \"dyn_test\",\n"
-        "  \"version\": \"0.1.0\",\n"
-        "  \"storage_prefix\": \"_zova_ext_dyn_test_\",\n"
-        "  \"zova_abi_min\": \"1.0.0\",\n"
-        "  \"capabilities\": \"sql,dynamic-test\",\n"
-        "  \"library\": \"libdyn_test\"\n"
-        "}\n",
-        "write dyn manifest"
-    );
+    write_dyn_test_manifest(manifest_path, "0.1.0", "write dyn manifest");
 }
 
 typedef struct sql_callback_state {
@@ -1665,18 +1677,7 @@ static void run_dynamic_extension_bundle_smoke(
 
     char manifest_path[1024];
     path_join(manifest_path, sizeof(manifest_path), bundle_path, "extension.json");
-    write_text_file(
-        manifest_path,
-        "{\n"
-        "  \"name\": \"dyn_test\",\n"
-        "  \"version\": \"0.1.1\",\n"
-        "  \"storage_prefix\": \"_zova_ext_dyn_test_\",\n"
-        "  \"zova_abi_min\": \"1.0.0\",\n"
-        "  \"capabilities\": \"sql,dynamic-test\",\n"
-        "  \"library\": \"libdyn_test\"\n"
-        "}\n",
-        "modify dynamic manifest"
-    );
+    write_dyn_test_manifest(manifest_path, "0.1.1", "modify dynamic manifest");
     zova_status mismatch = zova_database_open_with_extensions(&(zova_database_open_extensions_request){
         .path = ext_db_path,
         .flags = 0,

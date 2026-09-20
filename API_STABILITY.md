@@ -2,7 +2,8 @@
 
 This document defines the stable public contract for Zova 1.x. The
 `1.0.0` release establishes the compatibility commitments below, following
-the release-candidate validation period.
+the release-candidate validation period. The current `1.1.0` release extends
+the implementation without weakening those commitments.
 
 The separate `zova-wasm` browser package introduced in rc.3 is experimental
 and excluded from this native compatibility commitment. Its SQL/KV subset,
@@ -114,8 +115,8 @@ authoritative for these stricter rules.
 
 The bundled-extension lifecycle, manifest validation, ABI minimum enforcement,
 and extension records are supported. Extension minimum ABI values use numeric
-`major.minor.patch`; the release reports numeric ABI components `1.0.0` and
-the full release identity `1.0.0` separately.
+`major.minor.patch`; the release reports numeric ABI components `1.1.0` and
+the full release identity `1.1.0` separately.
 
 The experimental bundle-producer CLI and application-authored callback surfaces
 remain outside the stable 1.x authoring contract. Dynamic native extensions run

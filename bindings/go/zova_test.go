@@ -35,10 +35,10 @@ func TestSQLiteCapabilities(t *testing.T) {
 
 func TestABIVersionAndStatusNames(t *testing.T) {
 	major, minor, patch := ABIVersionNumbers()
-	if major != 1 || minor != 0 || patch != 0 {
+	if major != 1 || minor != 1 || patch != 0 {
 		t.Fatalf("unexpected ABI version: %d.%d.%d", major, minor, patch)
 	}
-	if got := ABIVersion(); got != "1.0.0" {
+	if got := ABIVersion(); got != "1.1.0" {
 		t.Fatalf("unexpected ABI version string: %q", got)
 	}
 	if got := StatusName(StatusOK); got != "ZOVA_OK" {

@@ -10,9 +10,9 @@ traversal, transaction-aware app events, bound object/vector/graph stores,
 diagnostics, salvage, backup, compact copy, restore, and a trusted extension
 host foundation.
 
-Current package version: `1.0.0`.
+Current package version: `1.1.0`.
 
-Zova `1.0.0` establishes the stable native 1.x contract. The current
+Zova `1.0.0` established the stable native 1.x contract. The current
 `.zova` file `format_version` is `11`, and the
 earliest migratable format is `9`. Open never migrates silently: format-9 and
 format-10 databases are reported as migration-required and left byte-identical,
@@ -86,7 +86,7 @@ or:
 
 ```toml
 [dependencies]
-zova = "1.0.0"
+zova = "1.1.0"
 ```
 
 Python:
@@ -104,7 +104,7 @@ python -m pip install zova
 Go:
 
 ```sh
-go get github.com/ata-sesli/zova/bindings/go@v1.0.0
+go get github.com/ata-sesli/zova/bindings/go@v1.1.0
 ```
 
 The Go binding uses cgo over Zova's C ABI. Build or provide the C ABI library
@@ -113,7 +113,7 @@ before using it from another project.
 C ABI:
 
 ```sh
-# Download a matching zova-v1.0.0-<platform>-c-abi archive
+# Download a matching zova-v1.1.0-<platform>-c-abi archive
 # from the GitHub Release, or build it locally:
 zig build c-abi
 ```
@@ -121,7 +121,7 @@ zig build c-abi
 CLI:
 
 ```sh
-# Download a matching zova-v1.0.0-<platform>-cli archive
+# Download a matching zova-v1.1.0-<platform>-cli archive
 # from the GitHub Release, or build it locally:
 zig build
 zig-out/bin/zova --help
@@ -136,7 +136,7 @@ Zova vendors SQLite. You do not need a system SQLite installation.
 | JavaScript / TypeScript | `bun add zova-js` / `npm install zova-js` | no | no | no | prebuilt Node-API 8 packages for Node 22/24 and Bun |
 | Rust | `cargo add zova` | no | yes | yes | `zova-sys` compiles the matching generated-C platform package with Clang |
 | Python | `uv add zova` / `pip install zova` | no | no | no | stable-ABI wheels are published for Linux/macOS x86_64/arm64 and Windows x86_64, and tested on CPython 3.13/3.14; PyPI source builds are not supported |
-| Go | `go get github.com/ata-sesli/zova/bindings/go@v1.0.0` | no, if using a release C ABI archive | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
+| Go | `go get github.com/ata-sesli/zova/bindings/go@v1.1.0` | no, if using a release C ABI archive | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
 | C ABI | release archive or `zig build c-abi` | no, if using a release archive | no | no, if using a release archive | static C ABI library and `zova.h` |
 | Zig | package source | yes | no | yes | native API |
 | CLI | release archive or `zig build` | no, if using a release archive | no | no, if using a release archive | source-built or prebuilt command line tool |
@@ -390,7 +390,7 @@ sequential reader whose memory stays bounded independently of object size.
 
 ### Optional Bound Object, Vector, And Graph Stores
 
-Single-file `.zova` remains the default. In v1.0.0, applications can opt into
+Single-file `.zova` remains the default. Since v1.0.0, applications can opt into
 one bound object store, one bound vector store, and one bound graph store when
 large object bytes, vector rows, or graph topology should live beside the main
 records database:
@@ -521,7 +521,7 @@ Zova supports collection create/info/list/delete, vector CRUD, batch upsert,
 exact search, candidate-filtered search, search-by-id, and inclusive distance
 thresholds.
 
-Search is exact and flat-scan in `1.0.0`. It is good for local datasets,
+Search is exact and flat-scan in `1.1.0`. It is good for local datasets,
 offline ranking, deterministic tests, and SQL-filter-first workflows. It is not
 yet an ANN engine for million-scale low-latency search.
 
@@ -814,7 +814,7 @@ callbacks, trusted local extension bundles, and the first bundled extension,
 
 See the [extension capability matrix](docs/extensions.md#availability-and-binding-matrix)
 for platform and binding restrictions. Portable plugin ABI v1 and explicit
-extension-data upgrades are included in 1.0.0, with extension authoring still
+extension-data upgrades were included in 1.0.0, with extension authoring still
 outside the stable native contract.
 
 An extension is trusted process code plus private Zova metadata:
@@ -966,7 +966,7 @@ zova salvage damaged.zova recovered.zova
 ```
 
 Salvage never mutates the source file and never overwrites the destination. A
-good backup is still preferred when one exists. In v1.0.0, salvage is
+good backup is still preferred when one exists. Since v1.0.0, salvage is
 graph-aware and extension-aware: it copies valid graph topology, skips invalid
 graph nodes or edges, and lets trusted extension hooks recover their own private
 storage.
@@ -980,7 +980,7 @@ Extension-aware salvage is hook-based. Core Zova never copies `_zova_ext_*`
 tables by guessing their meaning. If trusted extension code provides a salvage
 hook, Zova lets that extension copy, rebuild, or skip its own storage. If the
 extension code is unavailable or the extension has no salvage hook, extension
-storage is skipped and reported. In v1.0.0, bundled `trgm` salvage recovers a
+storage is skipped and reported. Since v1.0.0, bundled `trgm` salvage recovers a
 valid subset of trgm private storage, rebuilds derived term rows from copied
 postings, and still never prints indexed text or private schema SQL.
 
@@ -1044,14 +1044,14 @@ Rust users normally use the safe crate:
 
 ```toml
 [dependencies]
-zova = "1.0.0"
+zova = "1.1.0"
 ```
 
 The lower-level raw FFI crate is available as:
 
 ```toml
 [dependencies]
-zova-sys = "1.0.0"
+zova-sys = "1.1.0"
 ```
 
 `zova` exposes `Database` for single-owner code and `SharedDatabase` for an
@@ -1108,7 +1108,7 @@ edge-payload, topology-scan, and fresh-build session APIs remain C ABI/raw
 Install:
 
 ```sh
-go get github.com/ata-sesli/zova/bindings/go@v1.0.0
+go get github.com/ata-sesli/zova/bindings/go@v1.1.0
 ```
 
 Import:
@@ -1276,7 +1276,7 @@ automatically.
 
 ## Current Boundaries
 
-Zova `1.0.0` does not include:
+Zova `1.1.0` does not include:
 
 - binding-level app-registered extension authoring APIs
 - binding-level dynamic `.zovaext` loading APIs
@@ -1375,7 +1375,7 @@ Zova publishes several release artifact types:
 - A GitHub Release source archive.
 - Rust crates on crates.io: `zova-sys` and `zova`.
 - Python stable-ABI wheels on PyPI.
-- A Go module tag: `bindings/go/v1.0.0`.
+- A Go module tag: `bindings/go/v1.1.0`.
 - JavaScript/TypeScript Node-API packages on npm as `zova-js`, with native
   packages for the supported platform matrix.
 
@@ -1407,13 +1407,13 @@ Clang and a platform linker/SDK; only explicit `ZOVA_SOURCE_DIR` builds need Zig
 Maintainer source-package command:
 
 ```sh
-scripts/package-release.sh 1.0.0
+scripts/package-release.sh 1.1.0
 ```
 
 Maintainer local distribution command for crates.io:
 
 ```sh
-scripts/distribute-release.sh 1.0.0
+scripts/distribute-release.sh 1.1.0
 ```
 
 Python is wheel-only and is published through the **Publish Release** workflow,
