@@ -1,3 +1,5 @@
+<a href="https://trendshift.io/repositories/62586?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-62586" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/62586/daily?language=Zig" alt="ata-sesli%2Fzova | Trendshift" width="250" height="55"/></a>
+
 # Zova
 
 SQLite-backed embedded database for records, objects, vectors, and graph-aware
