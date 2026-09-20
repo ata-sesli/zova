@@ -1036,14 +1036,14 @@ pub const Database = struct {
         const metadata_start = graphProfileTimestamp();
         var graph_insert = try self.prepareSchema("insert into {s}_zova_graphs(graph_key,name,created_order) values(1,?,1)");
         defer graph_insert.deinit();
-        try graph_insert.bindText(1, graph_name);
+        try graph_insert.bindTextBorrowed(1, graph_name);
         if ((try graph_insert.step()) != .done or self.sqlite_db.changes() != 1) return error.GraphInvalid;
 
         var type_insert = try self.prepareSchema("insert into {s}_zova_graph_edge_types(edge_type_key,graph_key,name) values(?,1,?)");
         defer type_insert.deinit();
         for (type_names.items, 0..) |name, type_index| {
             try type_insert.bindInt64(1, @intCast(type_index + 1));
-            try type_insert.bindText(2, name);
+            try type_insert.bindTextBorrowed(2, name);
             if ((try type_insert.step()) != .done or self.sqlite_db.changes() != 1) return error.GraphInvalid;
             try type_insert.reset();
             try type_insert.clearBindings();
@@ -1059,11 +1059,11 @@ pub const Database = struct {
             const node = nodes[input_index];
             const node_key: i64 = @intCast(slot + 1);
             try node_insert.bindInt64(1, node_key);
-            try node_insert.bindText(2, node.node_id);
-            try node_insert.bindText(3, node.kind);
-            try node_insert.bindText(4, targetTypeText(node.target_type));
-            if (node.target_namespace) |value| try node_insert.bindText(5, value) else try node_insert.bindNull(5);
-            if (node.target_ref) |value| try node_insert.bindText(6, value) else try node_insert.bindNull(6);
+            try node_insert.bindTextBorrowed(2, node.node_id);
+            try node_insert.bindTextBorrowed(3, node.kind);
+            try node_insert.bindTextBorrowed(4, targetTypeText(node.target_type));
+            if (node.target_namespace) |value| try node_insert.bindTextBorrowed(5, value) else try node_insert.bindNull(5);
+            if (node.target_ref) |value| try node_insert.bindTextBorrowed(6, value) else try node_insert.bindNull(6);
             try node_insert.bindInt64(7, node_key);
             if ((try node_insert.step()) != .done or self.sqlite_db.changes() != 1) return error.GraphInvalid;
             try node_insert.reset();
@@ -2101,8 +2101,8 @@ pub const Database = struct {
         defer insert_endpoint.deinit();
         if (distinct_endpoints) |endpoints| {
             for (endpoints) |endpoint| {
-                try insert_endpoint.bindText(1, endpoint.graph_name);
-                try insert_endpoint.bindText(2, endpoint.node_id);
+                try insert_endpoint.bindTextBorrowed(1, endpoint.graph_name);
+                try insert_endpoint.bindTextBorrowed(2, endpoint.node_id);
                 std.debug.assert((try insert_endpoint.step()) == .done);
                 try insert_endpoint.reset();
                 try insert_endpoint.clearBindings();
@@ -2110,8 +2110,8 @@ pub const Database = struct {
         } else for (inputs) |input| {
             const endpoints = [_][]const u8{ input.from_node_id, input.to_node_id };
             for (endpoints) |node_id| {
-                try insert_endpoint.bindText(1, input.graph_name);
-                try insert_endpoint.bindText(2, node_id);
+                try insert_endpoint.bindTextBorrowed(1, input.graph_name);
+                try insert_endpoint.bindTextBorrowed(2, node_id);
                 std.debug.assert((try insert_endpoint.step()) == .done);
                 try insert_endpoint.reset();
                 try insert_endpoint.clearBindings();
