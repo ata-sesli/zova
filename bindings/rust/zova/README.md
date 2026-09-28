@@ -33,6 +33,13 @@ target; a caller-provided native library can be selected with `ZOVA_LIB_DIR`.
 Store create/bind/unbind/split management is CLI/native-Zig-only in v0.20; this
 crate keeps the existing object and vector APIs source-compatible.
 
+`transaction`, `transaction_immediate`, and `with_savepoint` roll their scope
+back when the closure returns an error and also when it panics. The panic then
+propagates unchanged, so use `std::panic::catch_unwind` to recover from it. The
+rollback happens before the connection lock is released. This does not apply to
+`panic = "abort"` profiles or process termination. If a rollback fails, that
+`SharedDatabase` handle is retired and its later calls fail; open a new one.
+
 ## Example
 
 ```rust

@@ -41,6 +41,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::path::Path;
 use std::ptr::{self, NonNull};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Cloneable, thread-safe Rust wrapper for one serialized Zova database handle.
@@ -100,6 +101,72 @@ pub struct SharedGuardStatement<'db> {
 pub(crate) struct SharedDatabaseInner {
     raw: NonNull<zova_sys::zova_database>,
     mutex: Mutex<()>,
+    /// Set when a transaction or savepoint could not be unwound during
+    /// panic cleanup. The native transaction state is then unknown, so the
+    /// handle is never used for further work.
+    cleanup_failed: AtomicBool,
+}
+
+/// Unwind-safe cleanup for one caller-owned transaction or savepoint scope.
+///
+/// The scope is armed once it opens and disarmed only after the scope reaches a
+/// terminal state. If a panic unwinds the caller before that happens, dropping
+/// this guard rolls the scope back while the exclusive connection lock is still
+/// held, so pending writes and writer locks never survive the unwind. Dropping
+/// an armed guard never panics and never re-locks the connection.
+struct ScopeCleanup<'db> {
+    inner: &'db SharedDatabaseInner,
+    name: Option<&'db str>,
+    armed: bool,
+}
+
+impl<'db> ScopeCleanup<'db> {
+    fn transaction(inner: &'db SharedDatabaseInner) -> Self {
+        Self {
+            inner,
+            name: None,
+            armed: true,
+        }
+    }
+
+    fn savepoint(inner: &'db SharedDatabaseInner, name: &'db str) -> Self {
+        Self {
+            inner,
+            name: Some(name),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ScopeCleanup<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+
+        let result = match self.name {
+            None => self.inner.rollback_locked(),
+            Some(name) => {
+                // A savepoint rollback can itself fail; releasing afterwards is
+                // best effort because the scope is already being abandoned.
+                let rolled_back = self
+                    .inner
+                    .savepoint_locked(name, zova_sys::zova_database_rollback_to_savepoint);
+                let released = self
+                    .inner
+                    .savepoint_locked(name, zova_sys::zova_database_release_savepoint);
+                rolled_back.and(released)
+            }
+        };
+        if result.is_err() {
+            self.inner.record_cleanup_failure();
+        }
+    }
 }
 
 // Safety: the C ABI serializes one `zova_database` handle internally. The Rust
@@ -221,7 +288,7 @@ impl SharedDatabase {
 
     pub fn exec(&self, sql: &str) -> Result<()> {
         let sql = cstring(sql, "sql")?;
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let request = zova_sys::zova_database_exec_request {
             db: self.inner.raw_ptr(),
             sql: sql.as_ptr(),
@@ -232,7 +299,7 @@ impl SharedDatabase {
 
     pub fn prepare(&self, sql: &str) -> Result<SharedStatement> {
         let sql = cstring(sql, "sql")?;
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut statement = ptr::null_mut();
         let request = zova_sys::zova_database_prepare_request {
             db: self.inner.raw_ptr(),
@@ -278,21 +345,29 @@ impl SharedDatabase {
         self.savepoint_call(name, zova_sys::zova_database_release_savepoint)
     }
 
+    /// Run `f` inside one named savepoint.
+    ///
+    /// A returned `Err` rolls back to the savepoint. A panic unwinding the
+    /// closure does the same before the connection lock is released, and then
+    /// propagates unchanged.
     pub fn with_savepoint<T>(
         &self,
         name: &str,
         f: impl FnOnce(&mut SharedDatabaseGuard<'_>) -> Result<T>,
     ) -> Result<T> {
+        // A retired handle is rejected before the savepoint name is validated,
+        // so callers see the retirement error rather than a name error.
+        self.inner.ensure_usable()?;
         self.with_exclusive(|guard| guard.with_savepoint(name, f))
     }
 
     pub fn notify(&self, channel: &str, payload: &str) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         notify_raw(self.inner.raw_ptr(), channel, payload)
     }
 
     pub fn listen(&self, channel: &str) -> Result<SharedSubscription> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let raw = listen_raw(self.inner.raw_ptr(), channel)?;
         Ok(SharedSubscription {
             raw: Some(raw),
@@ -307,7 +382,7 @@ impl SharedDatabase {
 
     pub fn backup_to(&self, destination: impl AsRef<Path>, options: BackupOptions) -> Result<()> {
         let destination = path_to_cstring(destination.as_ref())?;
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let request = zova_sys::zova_database_backup_request {
             db: self.inner.raw_ptr(),
             destination_path: destination.as_ptr(),
@@ -319,7 +394,7 @@ impl SharedDatabase {
 
     pub fn compact_to(&self, destination: impl AsRef<Path>, options: CompactOptions) -> Result<()> {
         let destination = path_to_cstring(destination.as_ref())?;
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let request = zova_sys::zova_database_compact_request {
             db: self.inner.raw_ptr(),
             destination_path: destination.as_ptr(),
@@ -330,7 +405,7 @@ impl SharedDatabase {
     }
 
     pub fn set_busy_timeout(&self, milliseconds: u32) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let request = zova_sys::zova_database_busy_timeout_request {
             db: self.inner.raw_ptr(),
             milliseconds,
@@ -340,25 +415,29 @@ impl SharedDatabase {
     }
 
     pub fn last_insert_rowid(&self) -> Result<i64> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         self.inner.last_insert_rowid_locked()
     }
 
     pub fn changes(&self) -> Result<i64> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         self.inner.changes_locked()
     }
 
     pub fn total_changes(&self) -> Result<i64> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         self.inner.total_changes_locked()
     }
 
+    /// Run `f` with exclusive access to the shared connection.
+    ///
+    /// The Rust mutex is held for the whole closure, so any scope `f` opens is
+    /// unwound before other callers can observe the connection.
     pub fn with_exclusive<T>(
         &self,
         f: impl FnOnce(&mut SharedDatabaseGuard<'_>) -> Result<T>,
     ) -> Result<T> {
-        let guard = self.inner.lock();
+        let guard = self.inner.enter()?;
         let mut database = SharedDatabaseGuard {
             inner: &self.inner,
             _guard: guard,
@@ -366,6 +445,12 @@ impl SharedDatabase {
         f(&mut database)
     }
 
+    /// Run `f` inside one deferred (`BEGIN`) transaction.
+    ///
+    /// A returned `Err` rolls the transaction back. A panic unwinding the
+    /// closure also rolls the transaction back before the connection lock is
+    /// released, and the panic then propagates unchanged. This makes no
+    /// guarantee for `panic = "abort"` profiles or process termination.
     pub fn transaction<T>(
         &self,
         f: impl FnOnce(&mut SharedDatabaseGuard<'_>) -> Result<T>,
@@ -373,6 +458,10 @@ impl SharedDatabase {
         self.transaction_with(zova_sys::zova_database_begin, f)
     }
 
+    /// Run `f` inside one immediate (`BEGIN IMMEDIATE`) transaction.
+    ///
+    /// Cleanup behavior on `Err` and on an unwinding panic matches
+    /// [`SharedDatabase::transaction`].
     pub fn transaction_immediate<T>(
         &self,
         f: impl FnOnce(&mut SharedDatabaseGuard<'_>) -> Result<T>,
@@ -381,7 +470,7 @@ impl SharedDatabase {
     }
 
     pub fn put_object(&self, bytes: &[u8]) -> Result<ObjectId> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut out = zova_sys::zova_object_id { bytes: [0; 32] };
         let request = zova_sys::zova_object_put_request {
             db: self.inner.raw_ptr(),
@@ -399,7 +488,7 @@ impl SharedDatabase {
         bytes: &[u8],
         options: ObjectPutOptions,
     ) -> Result<ObjectId> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut out = zova_sys::zova_object_id { bytes: [0; 32] };
         let request = zova_sys::zova_object_put_with_options_request {
             db: self.inner.raw_ptr(),
@@ -414,7 +503,7 @@ impl SharedDatabase {
     }
 
     pub fn get_object(&self, id: ObjectId) -> Result<Vec<u8>> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut buffer = empty_buffer();
         let request = zova_sys::zova_object_get_request {
             db: self.inner.raw_ptr(),
@@ -428,7 +517,7 @@ impl SharedDatabase {
 
     /// Get one key-value entry. Returns `Ok(None)` when the key is absent.
     pub fn kv_get(&self, namespace: &[u8], key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let db = self.inner.raw_ptr();
         let status = |status| self.inner.status_locked(status);
         kv_get_raw(db, status, namespace, key)
@@ -437,7 +526,7 @@ impl SharedDatabase {
     /// Get several key-value entries, preserving input order and duplicates.
     /// Missing keys map to `None`.
     pub fn kv_get_many(&self, namespace: &[u8], keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let db = self.inner.raw_ptr();
         let status = |status| self.inner.status_locked(status);
         kv_get_many_raw(db, status, namespace, keys)
@@ -445,7 +534,7 @@ impl SharedDatabase {
 
     /// Insert or replace one key-value entry.
     pub fn kv_put(&self, namespace: &[u8], key: &[u8], value: &[u8]) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let db = self.inner.raw_ptr();
         let status = |status| self.inner.status_locked(status);
         kv_put_raw(db, status, namespace, key, value)
@@ -453,7 +542,7 @@ impl SharedDatabase {
 
     /// Insert or replace several key-value entries in one atomic operation.
     pub fn kv_put_many(&self, namespace: &[u8], entries: &[KvEntry<'_>]) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let db = self.inner.raw_ptr();
         let status = |status| self.inner.status_locked(status);
         kv_put_many_raw(db, status, namespace, entries)
@@ -461,7 +550,7 @@ impl SharedDatabase {
 
     /// Delete one key-value entry. Deleting a missing key is not an error.
     pub fn kv_delete(&self, namespace: &[u8], key: &[u8]) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let db = self.inner.raw_ptr();
         let status = |status| self.inner.status_locked(status);
         kv_delete_raw(db, status, namespace, key)
@@ -470,7 +559,7 @@ impl SharedDatabase {
     /// Delete several key-value entries in one atomic operation. Missing keys
     /// are ignored.
     pub fn kv_delete_many(&self, namespace: &[u8], keys: &[&[u8]]) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let db = self.inner.raw_ptr();
         let status = |status| self.inner.status_locked(status);
         kv_delete_many_raw(db, status, namespace, keys)
@@ -478,7 +567,7 @@ impl SharedDatabase {
 
     /// Count entries in a namespace.
     pub fn kv_count(&self, namespace: &[u8]) -> Result<u64> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let db = self.inner.raw_ptr();
         let status = |status| self.inner.status_locked(status);
         kv_count_raw(db, status, namespace)
@@ -486,14 +575,14 @@ impl SharedDatabase {
 
     /// Delete every entry in a namespace. An empty namespace is not an error.
     pub fn kv_clear_namespace(&self, namespace: &[u8]) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let db = self.inner.raw_ptr();
         let status = |status| self.inner.status_locked(status);
         kv_clear_namespace_raw(db, status, namespace)
     }
 
     pub fn read_object_range(&self, id: ObjectId, offset: u64, buffer: &mut [u8]) -> Result<usize> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut copied = 0;
         let request = zova_sys::zova_object_read_range_request {
             db: self.inner.raw_ptr(),
@@ -509,7 +598,7 @@ impl SharedDatabase {
     }
 
     pub fn has_object(&self, id: ObjectId) -> Result<bool> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut exists = 0;
         let request = zova_sys::zova_object_exists_request {
             db: self.inner.raw_ptr(),
@@ -522,7 +611,7 @@ impl SharedDatabase {
     }
 
     pub fn object_size(&self, id: ObjectId) -> Result<u64> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut size = 0;
         let request = zova_sys::zova_object_size_request {
             db: self.inner.raw_ptr(),
@@ -535,7 +624,7 @@ impl SharedDatabase {
     }
 
     pub fn object_chunk_count(&self, id: ObjectId) -> Result<u64> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut count = 0;
         let request = zova_sys::zova_object_chunk_count_request {
             db: self.inner.raw_ptr(),
@@ -548,7 +637,7 @@ impl SharedDatabase {
     }
 
     pub fn delete_object(&self, id: ObjectId) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let request = zova_sys::zova_object_delete_request {
             db: self.inner.raw_ptr(),
             id: id.to_c(),
@@ -558,7 +647,7 @@ impl SharedDatabase {
     }
 
     pub fn object_manifest(&self, id: ObjectId) -> Result<ObjectManifest> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut manifest = empty_manifest();
         let request = zova_sys::zova_object_manifest_get_request {
             db: self.inner.raw_ptr(),
@@ -571,7 +660,7 @@ impl SharedDatabase {
     }
 
     pub fn get_object_chunk(&self, hash: ObjectChunkId) -> Result<Vec<u8>> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut buffer = empty_buffer();
         let request = zova_sys::zova_object_chunk_get_request {
             db: self.inner.raw_ptr(),
@@ -592,7 +681,7 @@ impl SharedDatabase {
     }
 
     pub fn put_object_chunk(&self, expected_hash: ObjectChunkId, bytes: &[u8]) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let request = zova_sys::zova_object_chunk_put_request {
             db: self.inner.raw_ptr(),
             expected_hash: expected_hash.to_c(),
@@ -609,7 +698,7 @@ impl SharedDatabase {
         bytes: &[u8],
         options: ObjectPutOptions,
     ) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let request = zova_sys::zova_object_chunk_put_with_options_request {
             db: self.inner.raw_ptr(),
             expected_hash: expected_hash.to_c(),
@@ -622,7 +711,7 @@ impl SharedDatabase {
     }
 
     pub fn delete_object_chunk(&self, hash: ObjectChunkId) -> Result<bool> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut deleted = 0;
         let request = zova_sys::zova_object_chunk_delete_request {
             db: self.inner.raw_ptr(),
@@ -641,7 +730,7 @@ impl SharedDatabase {
         chunks: &[ObjectManifestChunk],
     ) -> Result<()> {
         let c_chunks: Vec<_> = chunks.iter().map(ObjectManifestChunk::to_c).collect();
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let request = zova_sys::zova_object_assemble_from_chunks_request {
             db: self.inner.raw_ptr(),
             id: id.to_c(),
@@ -661,7 +750,7 @@ impl SharedDatabase {
         options: ObjectPutOptions,
     ) -> Result<()> {
         let c_chunks: Vec<_> = chunks.iter().map(ObjectManifestChunk::to_c).collect();
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let request = zova_sys::zova_object_assemble_from_chunks_with_options_request {
             db: self.inner.raw_ptr(),
             id: id.to_c(),
@@ -676,7 +765,7 @@ impl SharedDatabase {
     }
 
     pub fn object_writer(&self) -> Result<SharedObjectWriter> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut writer = ptr::null_mut();
         let request = zova_sys::zova_object_writer_create_request {
             db: self.inner.raw_ptr(),
@@ -697,7 +786,7 @@ impl SharedDatabase {
         &self,
         options: ObjectPutOptions,
     ) -> Result<SharedObjectWriter> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut writer = ptr::null_mut();
         let request = zova_sys::zova_object_writer_create_with_options_request {
             db: self.inner.raw_ptr(),
@@ -716,7 +805,7 @@ impl SharedDatabase {
     }
 
     pub fn object_reader(&self, id: ObjectId) -> Result<SharedObjectReader> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut reader = ptr::null_mut();
         let request = zova_sys::zova_object_reader_create_request {
             db: self.inner.raw_ptr(),
@@ -740,7 +829,7 @@ impl SharedDatabase {
         options: VectorCollectionOptions,
     ) -> Result<()> {
         let name = cstring(name, "vector collection name")?;
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let request = zova_sys::zova_vector_collection_create_request {
             db: self.inner.raw_ptr(),
             name: name.as_ptr(),
@@ -756,7 +845,7 @@ impl SharedDatabase {
 
     pub fn has_vector_collection(&self, name: &str) -> Result<bool> {
         let name = cstring(name, "vector collection name")?;
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut exists = 0;
         let request = zova_sys::zova_vector_collection_exists_request {
             db: self.inner.raw_ptr(),
@@ -770,7 +859,7 @@ impl SharedDatabase {
 
     pub fn vector_collection_info(&self, name: &str) -> Result<VectorCollectionInfo> {
         let name = cstring(name, "vector collection name")?;
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut info = empty_collection_info();
         let request = zova_sys::zova_vector_collection_info_get_request {
             db: self.inner.raw_ptr(),
@@ -783,7 +872,7 @@ impl SharedDatabase {
     }
 
     pub fn list_vector_collections(&self) -> Result<Vec<VectorCollectionInfo>> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut list = zova_sys::zova_vector_collection_list {
             items: ptr::null_mut(),
             len: 0,
@@ -799,7 +888,7 @@ impl SharedDatabase {
 
     pub fn delete_vector_collection(&self, name: &str) -> Result<()> {
         let name = cstring(name, "vector collection name")?;
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let request = zova_sys::zova_vector_collection_delete_request {
             db: self.inner.raw_ptr(),
             name: name.as_ptr(),
@@ -816,7 +905,7 @@ impl SharedDatabase {
     ) -> Result<()> {
         let collection_name = cstring(collection_name, "vector collection name")?;
         let vector_id = cstring(vector_id, "vector id")?;
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let request = zova_sys::zova_vector_put_request {
             db: self.inner.raw_ptr(),
             collection_name: collection_name.as_ptr(),
@@ -830,7 +919,7 @@ impl SharedDatabase {
     pub fn put_vectors(&self, collection_name: &str, vectors: &[VectorInput<'_>]) -> Result<()> {
         let collection_name = cstring(collection_name, "vector collection name")?;
         let (ids, inputs) = vector_inputs(vectors)?;
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let request = zova_sys::zova_vector_put_many_request {
             db: self.inner.raw_ptr(),
             collection_name: collection_name.as_ptr(),
@@ -851,7 +940,7 @@ impl SharedDatabase {
     pub fn get_vector(&self, collection_name: &str, vector_id: &str) -> Result<Vector> {
         let collection_name = cstring(collection_name, "vector collection name")?;
         let vector_id = cstring(vector_id, "vector id")?;
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut vector = empty_vector();
         let request = zova_sys::zova_vector_get_request {
             db: self.inner.raw_ptr(),
@@ -867,7 +956,7 @@ impl SharedDatabase {
     pub fn has_vector(&self, collection_name: &str, vector_id: &str) -> Result<bool> {
         let collection_name = cstring(collection_name, "vector collection name")?;
         let vector_id = cstring(vector_id, "vector id")?;
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut exists = 0;
         let request = zova_sys::zova_vector_exists_request {
             db: self.inner.raw_ptr(),
@@ -883,7 +972,7 @@ impl SharedDatabase {
     pub fn delete_vector(&self, collection_name: &str, vector_id: &str) -> Result<()> {
         let collection_name = cstring(collection_name, "vector collection name")?;
         let vector_id = cstring(vector_id, "vector id")?;
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let request = zova_sys::zova_vector_delete_request {
             db: self.inner.raw_ptr(),
             collection_name: collection_name.as_ptr(),
@@ -894,7 +983,7 @@ impl SharedDatabase {
     }
 
     pub fn delete_vectors(&self, collection_name: &str, vector_ids: &[&str]) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         delete_vectors_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -910,7 +999,7 @@ impl SharedDatabase {
         limit: usize,
     ) -> Result<Vec<VectorSearchResult>> {
         let collection_name = cstring(collection_name, "vector collection name")?;
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut results = empty_search_results();
         let request = zova_sys::zova_vector_search_request {
             db: self.inner.raw_ptr(),
@@ -933,7 +1022,7 @@ impl SharedDatabase {
     ) -> Result<Vec<VectorSearchResult>> {
         let collection_name = cstring(collection_name, "vector collection name")?;
         let (candidates, candidate_ptrs) = candidate_ptrs(candidate_ids)?;
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut results = empty_search_results();
         let request = zova_sys::zova_vector_search_in_request {
             db: self.inner.raw_ptr(),
@@ -964,7 +1053,7 @@ impl SharedDatabase {
         limit: usize,
     ) -> Result<Vec<VectorSearchResult>> {
         let collection_name = cstring(collection_name, "vector collection name")?;
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut results = empty_search_results();
         let request = zova_sys::zova_vector_search_within_request {
             db: self.inner.raw_ptr(),
@@ -989,7 +1078,7 @@ impl SharedDatabase {
     ) -> Result<Vec<VectorSearchResult>> {
         let collection_name = cstring(collection_name, "vector collection name")?;
         let (candidates, candidate_ptrs) = candidate_ptrs(candidate_ids)?;
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut results = empty_search_results();
         let request = zova_sys::zova_vector_search_in_within_request {
             db: self.inner.raw_ptr(),
@@ -1021,7 +1110,7 @@ impl SharedDatabase {
     ) -> Result<Vec<VectorSearchResult>> {
         let collection_name = cstring(collection_name, "vector collection name")?;
         let source_vector_id = cstring(source_vector_id, "source vector id")?;
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut results = empty_search_results();
         let request = zova_sys::zova_vector_search_by_id_request {
             db: self.inner.raw_ptr(),
@@ -1045,7 +1134,7 @@ impl SharedDatabase {
         let collection_name = cstring(collection_name, "vector collection name")?;
         let source_vector_id = cstring(source_vector_id, "source vector id")?;
         let (candidates, candidate_ptrs) = candidate_ptrs(candidate_ids)?;
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut results = empty_search_results();
         let request = zova_sys::zova_vector_search_by_id_in_request {
             db: self.inner.raw_ptr(),
@@ -1077,7 +1166,7 @@ impl SharedDatabase {
     ) -> Result<Vec<VectorSearchResult>> {
         let collection_name = cstring(collection_name, "vector collection name")?;
         let source_vector_id = cstring(source_vector_id, "source vector id")?;
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut results = empty_search_results();
         let request = zova_sys::zova_vector_search_by_id_within_request {
             db: self.inner.raw_ptr(),
@@ -1103,7 +1192,7 @@ impl SharedDatabase {
         let collection_name = cstring(collection_name, "vector collection name")?;
         let source_vector_id = cstring(source_vector_id, "source vector id")?;
         let (candidates, candidate_ptrs) = candidate_ptrs(candidate_ids)?;
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let mut results = empty_search_results();
         let request = zova_sys::zova_vector_search_by_id_in_within_request {
             db: self.inner.raw_ptr(),
@@ -1128,7 +1217,7 @@ impl SharedDatabase {
     }
 
     pub fn create_graph(&self, name: &str) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         create_graph_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1137,7 +1226,7 @@ impl SharedDatabase {
     }
 
     pub fn has_graph(&self, name: &str) -> Result<bool> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         has_graph_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1146,7 +1235,7 @@ impl SharedDatabase {
     }
 
     pub fn graph_info(&self, name: &str) -> Result<GraphInfo> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         graph_info_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1155,14 +1244,14 @@ impl SharedDatabase {
     }
 
     pub fn list_graphs(&self) -> Result<Vec<GraphInfo>> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         list_graphs_raw(self.inner.raw_ptr(), |status| {
             self.inner.status_locked(status)
         })
     }
 
     pub fn delete_graph(&self, name: &str) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         delete_graph_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1171,7 +1260,7 @@ impl SharedDatabase {
     }
 
     pub fn put_graph_node(&self, input: GraphNodeInput<'_>) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         put_graph_node_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1180,7 +1269,7 @@ impl SharedDatabase {
     }
 
     pub fn put_graph_nodes(&self, inputs: &[GraphNodeInput<'_>]) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         put_graph_nodes_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1189,7 +1278,7 @@ impl SharedDatabase {
     }
 
     pub fn get_graph_node(&self, graph_name: &str, node_id: &str) -> Result<GraphNode> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         get_graph_node_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1199,7 +1288,7 @@ impl SharedDatabase {
     }
 
     pub fn has_graph_node(&self, graph_name: &str, node_id: &str) -> Result<bool> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         has_graph_node_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1209,7 +1298,7 @@ impl SharedDatabase {
     }
 
     pub fn delete_graph_node(&self, graph_name: &str, node_id: &str) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         delete_graph_node_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1219,7 +1308,7 @@ impl SharedDatabase {
     }
 
     pub fn delete_graph_nodes(&self, graph_name: &str, node_ids: &[&str]) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         delete_graph_nodes_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1229,7 +1318,7 @@ impl SharedDatabase {
     }
 
     pub fn put_graph_edge(&self, input: GraphEdgeInput<'_>) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         put_graph_edge_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1238,7 +1327,7 @@ impl SharedDatabase {
     }
 
     pub fn put_graph_edges(&self, inputs: &[GraphEdgeInput<'_>]) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         put_graph_edges_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1253,7 +1342,7 @@ impl SharedDatabase {
         edge_type: &str,
         to_node_id: &str,
     ) -> Result<GraphEdge> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         get_graph_edge_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1271,7 +1360,7 @@ impl SharedDatabase {
         edge_type: &str,
         to_node_id: &str,
     ) -> Result<bool> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         has_graph_edge_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1283,7 +1372,7 @@ impl SharedDatabase {
     }
 
     pub fn delete_graph_edge(&self, input: GraphEdgeInput<'_>) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         delete_graph_edge_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1292,7 +1381,7 @@ impl SharedDatabase {
     }
 
     pub fn delete_graph_edges(&self, inputs: &[GraphEdgeInput<'_>]) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         delete_graph_edges_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1301,7 +1390,7 @@ impl SharedDatabase {
     }
 
     pub fn graph_degree(&self, options: GraphDegreeOptions<'_>) -> Result<u64> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         graph_degree_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1313,7 +1402,7 @@ impl SharedDatabase {
         &self,
         options: GraphNeighborsOptions<'_>,
     ) -> Result<Vec<GraphNeighbor>> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         graph_neighbors_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1322,7 +1411,7 @@ impl SharedDatabase {
     }
 
     pub fn graph_walk(&self, options: GraphWalkOptions<'_>) -> Result<Vec<GraphWalkItem>> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         graph_walk_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1331,7 +1420,7 @@ impl SharedDatabase {
     }
 
     pub fn install_extension(&self, name: &str) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         install_extension_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1340,14 +1429,14 @@ impl SharedDatabase {
     }
 
     pub fn list_extensions(&self) -> Result<Vec<ExtensionInfo>> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         list_extensions_raw(self.inner.raw_ptr(), |status| {
             self.inner.status_locked(status)
         })
     }
 
     pub fn extension_info(&self, name: &str) -> Result<ExtensionInfo> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         extension_info_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1356,7 +1445,7 @@ impl SharedDatabase {
     }
 
     pub fn check_extension(&self, name: &str) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         check_extension_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1365,14 +1454,14 @@ impl SharedDatabase {
     }
 
     pub fn check_extensions(&self) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         check_extensions_raw(self.inner.raw_ptr(), |status| {
             self.inner.status_locked(status)
         })
     }
 
     pub fn drop_extension(&self, name: &str) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         drop_extension_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1409,6 +1498,7 @@ impl SharedDatabase {
             inner: Arc::new(SharedDatabaseInner {
                 raw,
                 mutex: Mutex::new(()),
+                cleanup_failed: AtomicBool::new(false),
             }),
         })
     }
@@ -1419,7 +1509,7 @@ impl SharedDatabase {
             *const zova_sys::zova_database_simple_request,
         ) -> zova_sys::zova_status,
     ) -> Result<()> {
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let request = zova_sys::zova_database_simple_request {
             db: self.inner.raw_ptr(),
         };
@@ -1434,7 +1524,7 @@ impl SharedDatabase {
         ) -> zova_sys::zova_status,
     ) -> Result<()> {
         let name = cstring(name, "savepoint name")?;
-        let _guard = self.inner.lock();
+        let _guard = self.inner.enter()?;
         let request = zova_sys::zova_database_savepoint_request {
             db: self.inner.raw_ptr(),
             name: name.as_ptr(),
@@ -1451,17 +1541,25 @@ impl SharedDatabase {
     ) -> Result<T> {
         self.with_exclusive(|guard| {
             guard.simple_locked(begin)?;
+
+            // Armed for the whole scope so a panic in `f` still rolls the
+            // transaction back before the connection lock is released.
+            let mut cleanup = ScopeCleanup::transaction(guard.inner);
             match f(guard) {
-                Ok(value) => {
-                    if let Err(error) = guard.commit_locked() {
-                        let _ = guard.rollback_locked();
-                        Err(error)
-                    } else {
+                Ok(value) => match guard.commit_locked() {
+                    Ok(()) => {
+                        cleanup.disarm();
                         Ok(value)
                     }
-                }
+                    Err(error) => {
+                        // A failed commit leaves the scope armed so the cleanup
+                        // guard still discards the uncommitted writes.
+                        drop(cleanup);
+                        Err(error)
+                    }
+                },
                 Err(error) => {
-                    let _ = guard.rollback_locked();
+                    drop(cleanup);
                     Err(error)
                 }
             }
@@ -1589,20 +1687,29 @@ impl SharedDatabaseGuard<'_> {
         self.savepoint_locked(name, zova_sys::zova_database_release_savepoint)
     }
 
+    /// Run `f` inside one named savepoint on the caller's transaction stack.
+    ///
+    /// A returned `Err` rolls back to the savepoint. A panic unwinding the
+    /// closure does the same while the exclusive connection lock is still held,
+    /// and then propagates unchanged.
     pub fn with_savepoint<T>(
         &mut self,
         name: &str,
         f: impl FnOnce(&mut SharedDatabaseGuard<'_>) -> Result<T>,
     ) -> Result<T> {
         self.savepoint(name)?;
+
+        // Armed for the whole scope so a panic in `f` rolls back to the
+        // savepoint instead of leaving its writes pending in the caller scope.
+        let mut cleanup = ScopeCleanup::savepoint(self.inner, name);
         match f(self) {
             Ok(value) => {
                 self.release_savepoint(name)?;
+                cleanup.disarm();
                 Ok(value)
             }
             Err(error) => {
-                self.rollback_to_savepoint(name)?;
-                self.release_savepoint(name)?;
+                drop(cleanup);
                 Err(error)
             }
         }
@@ -1841,10 +1948,7 @@ impl SharedDatabaseGuard<'_> {
             *const zova_sys::zova_database_simple_request,
         ) -> zova_sys::zova_status,
     ) -> Result<()> {
-        let request = zova_sys::zova_database_simple_request {
-            db: self.inner.raw_ptr(),
-        };
-        self.inner.status_locked(unsafe { function(&request) })
+        self.inner.simple_locked(function)
     }
 
     fn savepoint_locked(
@@ -1854,20 +1958,11 @@ impl SharedDatabaseGuard<'_> {
             *const zova_sys::zova_database_savepoint_request,
         ) -> zova_sys::zova_status,
     ) -> Result<()> {
-        let name = cstring(name, "savepoint name")?;
-        let request = zova_sys::zova_database_savepoint_request {
-            db: self.inner.raw_ptr(),
-            name: name.as_ptr(),
-        };
-        self.inner.status_locked(unsafe { function(&request) })
+        self.inner.savepoint_locked(name, function)
     }
 
     fn commit_locked(&self) -> Result<()> {
-        self.simple_locked(zova_sys::zova_database_commit)
-    }
-
-    fn rollback_locked(&self) -> Result<()> {
-        self.simple_locked(zova_sys::zova_database_rollback)
+        self.inner.commit_locked()
     }
 }
 
@@ -1952,7 +2047,7 @@ impl SharedStatement {
         f: impl FnOnce(NonNull<zova_sys::zova_statement>, &SharedDatabaseInner) -> Result<T>,
     ) -> Result<T> {
         let raw = self.raw()?;
-        let _guard = self.database.lock();
+        let _guard = self.database.enter()?;
         f(raw, &self.database)
     }
 
@@ -1992,7 +2087,7 @@ impl SharedObjectWriter {
     pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
         let raw = self.raw()?;
         let database = self.database.clone();
-        let _guard = database.lock();
+        let _guard = database.enter()?;
         let request = zova_sys::zova_object_writer_write_request {
             writer: raw.as_ptr(),
             data: bytes.as_ptr(),
@@ -2004,7 +2099,7 @@ impl SharedObjectWriter {
     pub fn finish(mut self) -> Result<ObjectId> {
         let raw = self.raw()?;
         let database = self.database.clone();
-        let _guard = database.lock();
+        let _guard = database.enter()?;
         let mut out = zova_sys::zova_object_id { bytes: [0; 32] };
         let request = zova_sys::zova_object_writer_finish_request {
             writer: raw.as_ptr(),
@@ -2018,7 +2113,7 @@ impl SharedObjectWriter {
     pub fn cancel(mut self) -> Result<()> {
         let raw = self.raw()?;
         let database = self.database.clone();
-        let _guard = database.lock();
+        let _guard = database.enter()?;
         let request = zova_sys::zova_object_writer_cancel_request {
             writer: raw.as_ptr(),
         };
@@ -2054,7 +2149,7 @@ impl SharedObjectReader {
     pub fn read(&mut self, buffer: &mut [u8]) -> Result<usize> {
         let raw = self.raw()?;
         let database = self.database.clone();
-        let _guard = database.lock();
+        let _guard = database.enter()?;
         let mut read = 0;
         let request = zova_sys::zova_object_reader_read_request {
             reader: raw.as_ptr(),
@@ -2071,7 +2166,7 @@ impl SharedObjectReader {
             return Ok(());
         }
         let database = self.database.clone();
-        let _guard = database.lock();
+        let _guard = database.enter()?;
         self.destroy_locked(true)
     }
 
@@ -2125,6 +2220,69 @@ impl SharedDatabaseInner {
         self.mutex
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Reject work on a handle whose transaction or savepoint state is unknown.
+    ///
+    /// A failed unwind cleanup leaves the native transaction state unverified,
+    /// so the handle is retired instead of being silently reused.
+    fn ensure_usable(&self) -> Result<()> {
+        if self.cleanup_failed.load(Ordering::Acquire) {
+            return Err(Error::from_status(
+                zova_sys::ZOVA_MISUSE,
+                Some(
+                    "shared database is unusable: a previous transaction rollback failed"
+                        .to_owned(),
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Acquire the exclusive connection lock for one operation, refusing to run
+    /// on a handle retired by a failed unwind cleanup.
+    fn enter(&self) -> Result<MutexGuard<'_, ()>> {
+        self.ensure_usable()?;
+        Ok(self.lock())
+    }
+
+    /// Record an unwind cleanup failure. This runs while the connection lock is
+    /// still held and must not itself fail.
+    fn record_cleanup_failure(&self) {
+        self.cleanup_failed.store(true, Ordering::Release);
+    }
+
+    fn simple_locked(
+        &self,
+        function: unsafe extern "C" fn(
+            *const zova_sys::zova_database_simple_request,
+        ) -> zova_sys::zova_status,
+    ) -> Result<()> {
+        let request = zova_sys::zova_database_simple_request { db: self.raw_ptr() };
+        self.status_locked(unsafe { function(&request) })
+    }
+
+    fn savepoint_locked(
+        &self,
+        name: &str,
+        function: unsafe extern "C" fn(
+            *const zova_sys::zova_database_savepoint_request,
+        ) -> zova_sys::zova_status,
+    ) -> Result<()> {
+        let name = cstring(name, "savepoint name")?;
+        let request = zova_sys::zova_database_savepoint_request {
+            db: self.raw_ptr(),
+            name: name.as_ptr(),
+        };
+        self.status_locked(unsafe { function(&request) })
+    }
+
+    fn commit_locked(&self) -> Result<()> {
+        self.simple_locked(zova_sys::zova_database_commit)
+    }
+
+    fn rollback_locked(&self) -> Result<()> {
+        self.simple_locked(zova_sys::zova_database_rollback)
     }
 
     fn status_locked(&self, status: i32) -> Result<()> {
@@ -2187,7 +2345,7 @@ impl SharedSubscription {
         let raw = self
             .raw
             .ok_or_else(|| Error::from_status(zova_sys::ZOVA_MISUSE, None))?;
-        let _guard = self.database.lock();
+        let _guard = self.database.enter()?;
         let mut notification = empty_notification();
         let mut has_notification = 0;
         let request = zova_sys::zova_subscription_try_receive_request {
@@ -2205,7 +2363,7 @@ impl SharedSubscription {
 
     pub fn close(&mut self) -> Result<()> {
         if let Some(raw) = self.raw {
-            let _guard = self.database.lock();
+            let _guard = self.database.enter()?;
             self.database
                 .status_locked(unsafe { zova_sys::zova_subscription_close(raw.as_ptr()) })?;
             self.raw = None;
