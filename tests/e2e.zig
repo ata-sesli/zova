@@ -477,7 +477,10 @@ test "e2e two connections keep sqlite locking and later recover" {
     try first.exec("begin immediate");
     try first.exec("insert into notes (body) values ('held')");
     try first.putVector("notes", "held", .{ .f32 = &.{ 1.0, 1.0 } });
-    try std.testing.expectError(error.ObjectTransactionActive, first.putObject("same connection"));
+    // A synchronous object put joins the caller's transaction on this
+    // connection, while the streaming writer still rejects it.
+    const held_object = try first.putObject("same connection");
+    try std.testing.expect(try first.hasObject(held_object));
     try std.testing.expectError(error.ObjectTransactionActive, first.objectWriter(std.testing.allocator));
     try std.testing.expectError(error.Busy, second.putObject("second connection"));
     {
@@ -488,6 +491,9 @@ test "e2e two connections keep sqlite locking and later recover" {
     }
     try std.testing.expectError(error.Busy, second.putVector("notes", "blocked", .{ .f32 = &.{ 2.0, 2.0 } }));
     try first.exec("rollback");
+
+    // The caller's rollback discarded the object put made inside its scope.
+    try std.testing.expect(!try first.hasObject(held_object));
 
     const id = try second.putObject("after lock");
     try std.testing.expect(try second.hasObject(id));

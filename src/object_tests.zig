@@ -1104,7 +1104,7 @@ test "delete object works on converted zova database" {
     try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from notes"));
 }
 
-test "delete object rejects active user transactions" {
+test "delete object joins caller transactions and rolls back only its own work" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -1114,17 +1114,26 @@ test "delete object rejects active user transactions" {
     var db = try Database.create(db_path);
     defer db.deinit();
 
+    try db.exec("create table refs (id integer primary key)");
+
     const deferred_id = try db.putObject("deferred delete");
-    try db.sqlite_db.begin();
-    try std.testing.expectError(error.ObjectTransactionActive, db.deleteObject(deferred_id));
-    try db.sqlite_db.rollback();
+    try db.exec("begin");
+    try db.exec("insert into refs default values");
+    try db.deleteObject(deferred_id);
+    try std.testing.expect(!try db.hasObject(deferred_id));
+    try db.exec("rollback");
+    // The caller rollback removed the delete together with the caller's row.
     try std.testing.expect(try db.hasObject(deferred_id));
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from refs"));
 
     const immediate_id = try db.putObject("immediate delete");
-    try db.sqlite_db.beginImmediate();
-    try std.testing.expectError(error.ObjectTransactionActive, db.deleteObject(immediate_id));
-    try db.sqlite_db.rollback();
-    try std.testing.expect(try db.hasObject(immediate_id));
+    try db.exec("begin immediate");
+    try db.exec("insert into refs default values");
+    try db.deleteObject(immediate_id);
+    try db.exec("commit");
+    // The caller commit made the delete and the referencing row durable together.
+    try std.testing.expect(!try db.hasObject(immediate_id));
+    try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from refs"));
 }
 
 test "delete object follows sqlite write lock behavior across connections" {
@@ -1248,7 +1257,22 @@ test "object api works on converted sqlite database" {
     try std.testing.expectEqual(@as(i64, 1), try testingCount(&db, "select count(*) from notes"));
 }
 
-test "put object rejects active user transactions" {
+fn testingInsertObjectReference(db: *Database, id: ObjectId) !void {
+    var insert = try db.prepare("insert into refs (object_id) values (?)");
+    defer insert.deinit();
+    try insert.bindBlob(1, &id);
+    try std.testing.expectEqual(sqlite.Step.done, try insert.step());
+}
+
+fn testingExpectObjectReferenceCount(db: *Database, id: ObjectId, expected: i64) !void {
+    var select = try db.prepare("select count(*) from refs where object_id = ?");
+    defer select.deinit();
+    try select.bindBlob(1, &id);
+    try std.testing.expectEqual(sqlite.Step.row, try select.step());
+    try std.testing.expectEqual(expected, select.columnInt64(0));
+}
+
+test "put object commits atomically with a caller sql reference" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -1257,14 +1281,153 @@ test "put object rejects active user transactions" {
 
     var db = try Database.create(db_path);
     defer db.deinit();
+    try db.exec("create table refs (id integer primary key, object_id blob not null)");
 
-    try db.sqlite_db.begin();
-    try std.testing.expectError(error.ObjectTransactionActive, db.putObject("deferred"));
-    try db.sqlite_db.rollback();
+    // A deferred and an immediate caller transaction both commit the object
+    // and the SQL row that references it in one step.
+    const Cases = struct { open: [:0]const u8, label: []const u8 };
+    for ([_]Cases{
+        .{ .open = "begin", .label = "deferred" },
+        .{ .open = "begin immediate", .label = "immediate" },
+    }) |case| {
+        try db.exec(case.open);
+        const object = try db.putObject(case.label);
+        try testingInsertObjectReference(&db, object);
+        try db.exec("commit");
+        try std.testing.expect(try db.hasObject(object));
+        try testingExpectObjectReferenceCount(&db, object, 1);
+    }
 
-    try db.sqlite_db.beginImmediate();
-    try std.testing.expectError(error.ObjectTransactionActive, db.putObject("immediate"));
-    try db.sqlite_db.rollback();
+    // A caller rollback removes the object and the reference row together.
+    const survivor = try db.putObject("survives the rolled back attempt");
+    try db.exec("begin immediate");
+    const inside = try db.putObject("rolled back with its reference");
+    try testingInsertObjectReference(&db, inside);
+    try std.testing.expect(try db.hasObject(inside));
+    try testingExpectObjectReferenceCount(&db, inside, 1);
+    try db.exec("rollback");
+    try std.testing.expect(!try db.hasObject(inside));
+    try testingExpectObjectReferenceCount(&db, inside, 0);
+    try std.testing.expect(try db.hasObject(survivor));
+
+    // Autocommit keeps its own atomic write outside any caller scope.
+    try std.testing.expect(try db.hasObject(try db.putObject("autocommit")));
+}
+
+test "object put rolls back its own partial work inside a caller transaction" {
+    for ([_]object_impl.ObjectStorageProfile{ .deduplication, .streaming }) |profile| {
+        var raw = try sqlite.Database.open(":memory:");
+        defer raw.deinit();
+        var db = try preparePrototypeDatabase(&raw);
+
+        var bytes: [fixed_chunks.chunk_size + 1]u8 = undefined;
+        for (&bytes, 0..) |*byte, index| byte.* = @intCast((index * 19 + index / 3 + 5) % 251);
+
+        // Content that shares chunks with the failing put, so deduplicated
+        // rows already exist before the failing operation runs.
+        const shared_prefix = bytes[0..fixed_chunks.chunk_size];
+        const keeper_id = try db.putObjectWithOptions(shared_prefix, .{ .profile = profile });
+        const chunks_before = try testingCount(&raw, "select count(*) from _zova_chunks");
+        try std.testing.expect(chunks_before > 0);
+
+        const objects_before = try testingCount(&raw, "select count(*) from _zova_objects");
+        const manifest_before = try testingCount(&raw, "select count(*) from _zova_object_chunks");
+
+        // Fail after the object row and the first manifest row are written.
+        try raw.exec(
+            "create trigger fail_second_chunk before insert on _zova_object_chunks " ++
+                "when new.chunk_index = 1 begin select raise(abort, 'injected'); end",
+        );
+
+        try raw.begin();
+        try raw.exec("create table refs (body text not null)");
+        try raw.exec("insert into refs(body) values ('earlier caller work')");
+        try std.testing.expectError(
+            error.Constraint,
+            db.putObjectWithOptions(&bytes, .{ .profile = profile }),
+        );
+        // The failed object operation left no object, manifest, or chunk rows.
+        try std.testing.expectEqual(objects_before, try testingCount(&raw, "select count(*) from _zova_objects"));
+        try std.testing.expectEqual(manifest_before, try testingCount(&raw, "select count(*) from _zova_object_chunks"));
+        try std.testing.expectEqual(chunks_before, try testingCount(&raw, "select count(*) from _zova_chunks"));
+        // Earlier caller work is untouched and the caller transaction is still open.
+        try std.testing.expectEqual(@as(i64, 1), try testingCount(&raw, "select count(*) from refs"));
+        try std.testing.expect(try db.hasObject(keeper_id));
+        try raw.commit();
+
+        // The deduplicated object and its chunks survived the failed attempt.
+        try std.testing.expect(try db.hasObject(keeper_id));
+        try std.testing.expectEqual(chunks_before, try testingCount(&raw, "select count(*) from _zova_chunks"));
+        try std.testing.expectEqual(manifest_before, try testingCount(&raw, "select count(*) from _zova_object_chunks"));
+        try testingExpectObjectBytes(&db, keeper_id, shared_prefix);
+
+        try raw.exec("drop trigger fail_second_chunk");
+        const id = try db.putObjectWithOptions(&bytes, .{ .profile = profile });
+        try testingExpectObjectBytes(&db, id, &bytes);
+        try std.testing.expect(try db.hasObject(keeper_id));
+    }
+}
+
+test "object put in a caller savepoint rolls back with that savepoint" {
+    var raw = try sqlite.Database.open(":memory:");
+    defer raw.deinit();
+    var db = try preparePrototypeDatabase(&raw);
+
+    const kept_id = try db.putObject("savepoint kept");
+    const chunks_before = try testingCount(&raw, "select count(*) from _zova_chunks");
+
+    try raw.begin();
+    try raw.savepoint("outer");
+    try raw.savepoint("inner");
+    const inner_id = try db.putObject("savepoint inner");
+    try raw.rollbackToSavepoint("inner");
+    try raw.releaseSavepoint("inner");
+    try std.testing.expect(!try db.hasObject(inner_id));
+    try std.testing.expect(try db.hasObject(kept_id));
+    try raw.rollbackToSavepoint("outer");
+    try raw.releaseSavepoint("outer");
+    try raw.rollback();
+
+    try std.testing.expect(!try db.hasObject(inner_id));
+    try std.testing.expect(try db.hasObject(kept_id));
+    try std.testing.expectEqual(chunks_before, try testingCount(&raw, "select count(*) from _zova_chunks"));
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&raw, "select count(*) from _zova_object_chunks where not exists (select 1 from _zova_objects)"));
+}
+
+test "empty object put participates in caller transactions" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "empty-object-transaction.zova");
+
+    var db = try Database.create(db_path);
+    defer db.deinit();
+
+    // An empty object keeps its content id, size, and zero chunk count in
+    // autocommit and when it is stored again.
+    const empty = try db.putObject("");
+    try std.testing.expectEqual(@as(u64, 0), try db.objectSize(empty));
+    try std.testing.expectEqual(@as(u64, 0), try db.objectChunkCount(empty));
+    const empty_again = try db.putObject("");
+    try std.testing.expectEqualSlices(u8, &empty, &empty_again);
+
+    // An empty put made inside a caller transaction is deduplicated against the
+    // committed one and commits with that transaction.
+    try db.exec("begin immediate");
+    const stored = try db.putObject("");
+    try db.exec("commit");
+    try std.testing.expectEqualSlices(u8, &empty, &stored);
+    try std.testing.expectEqual(@as(u64, 0), try db.objectSize(stored));
+    try std.testing.expectEqual(@as(u64, 0), try db.objectChunkCount(stored));
+
+    // A caller rollback also removes a put made in that transaction.
+    try db.exec("begin immediate");
+    const discarded = try db.putObject("discarded in a rolled back transaction");
+    try std.testing.expect(try db.hasObject(discarded));
+    try db.exec("rollback");
+    try std.testing.expect(!try db.hasObject(discarded));
+    try std.testing.expect(try db.hasObject(empty));
 }
 
 test "synchronous object puts release input on success and chunk SQL failure" {
@@ -1788,8 +1951,13 @@ test "assemble object owns transactions rolls back failures and works after conv
         defer std.testing.allocator.free(manifest);
 
         try db.sqlite_db.begin();
-        try std.testing.expectError(error.ObjectTransactionActive, db.assembleObjectFromChunks(id, bytes.len, manifest));
+        // Assembly joins the caller transaction; the caller's rollback is what
+        // discards it, and the loose chunks written beforehand survive it.
+        try db.assembleObjectFromChunks(id, bytes.len, manifest);
+        try std.testing.expect(try db.hasObject(id));
         try db.sqlite_db.rollback();
+        try std.testing.expect(!try db.hasObject(id));
+        try std.testing.expect(try db.hasObjectChunk(manifest[0].hash));
 
         try db.exec(
             \\create trigger force_manifest_insert_failure

@@ -299,8 +299,12 @@ func TestResetClearBindingsTransactionsVacuumAndMultipleHandles(t *testing.T) {
 	must(t, db.Exec("insert into items(body) values ('outer')"))
 	must(t, db.Savepoint("sp_vectors"))
 	must(t, db.Exec("insert into items(body) values ('rolled back')"))
-	if _, err := db.PutObject([]byte("blocked inside savepoint")); !errorStatusIs(err, StatusObjectTransactionActive) {
-		t.Fatalf("object write inside savepoint = %v, want StatusObjectTransactionActive", err)
+	// A synchronous object put joins the savepoint; the streaming writer is
+	// what still rejects an active caller transaction.
+	spObject, err := db.PutObject([]byte("rolled back with the savepoint"))
+	must(t, err)
+	if exists, err := db.HasObject(spObject); err != nil || !exists {
+		t.Fatalf("object inside savepoint exists = %v, %v", exists, err)
 	}
 	must(t, db.CreateVectorCollection("temporary_vectors", VectorCollectionOptions{
 		Dimensions:  2,
@@ -312,6 +316,9 @@ func TestResetClearBindingsTransactionsVacuumAndMultipleHandles(t *testing.T) {
 	must(t, db.ReleaseSavepoint("sp_vectors"))
 	if exists, err := db.HasVectorCollection("temporary_vectors"); err != nil || exists {
 		t.Fatalf("temporary vector collection exists = %v, %v", exists, err)
+	}
+	if exists, err := db.HasObject(spObject); err != nil || exists {
+		t.Fatalf("object rolled back with savepoint exists = %v, %v", exists, err)
 	}
 
 	must(t, db.Savepoint("sp_release"))

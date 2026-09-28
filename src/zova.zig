@@ -2365,6 +2365,11 @@ pub const Database = struct {
     }
 
     /// Store raw bytes as a content-addressed Zova object.
+    ///
+    /// The put is operation-atomic and joins an active caller transaction
+    /// through an internal savepoint without committing it, so a SQL row
+    /// referencing the returned id can be written in the same caller
+    /// transaction.
     pub fn putObject(self: *Database, bytes: []const u8) Error!ObjectId {
         if (self.bound_object_store == null) {
             var objects = self.objectDatabase();
@@ -2636,6 +2641,10 @@ pub const Database = struct {
         return .{
             .sqlite_db = &self.sqlite_db,
             .storage_schema = if (bound) .object_store else .main,
+            // Synchronous object mutations always join an active caller
+            // transaction through an internal savepoint. The streaming writer
+            // keeps its main-store rejection and is allowed inside caller
+            // transactions only for an attached bound object store.
             .allow_active_transactions = bound,
             .statement_cache = &self.read_statements,
         };
