@@ -1857,6 +1857,14 @@ zova_status zova_statement_column_blob(const zova_statement_column_blob_request 
  */
 zova_status zova_object_id_from_bytes(const uint8_t *data, size_t len, zova_object_id *out_id);
 zova_status zova_object_chunk_id_from_bytes(const uint8_t *data, size_t len, zova_object_chunk_id *out_id);
+
+/* Synchronous object mutations are operation-atomic and join an active
+ * caller transaction through an internal savepoint. They never commit or roll
+ * back the caller's transaction, and a failure undoes only their own chunks,
+ * manifests, and metadata. This covers object_put, object_put_with_options,
+ * object_chunk_put, object_chunk_put_with_options, object_delete, and
+ * object_assemble_from_chunks.
+ */
 zova_status zova_object_put(const zova_object_put_request *request);
 zova_status zova_object_put_with_options(const zova_object_put_with_options_request *request);
 zova_status zova_object_get(const zova_object_get_request *request);
@@ -1873,7 +1881,12 @@ zova_status zova_object_chunk_delete(const zova_object_chunk_delete_request *req
 zova_status zova_object_assemble_from_chunks(const zova_object_assemble_from_chunks_request *request);
 zova_status zova_object_assemble_from_chunks_with_options(const zova_object_assemble_from_chunks_with_options_request *request);
 
-/* ObjectWriter streams bytes into verified chunks and finishes as one object. */
+/* ObjectWriter streams bytes into verified chunks and finishes as one object.
+ * Unlike the synchronous object mutations above, a main-store writer rejects an
+ * active caller transaction with ZOVA_OBJECT_TRANSACTION_ACTIVE: it holds no
+ * transaction across write calls, so its loose chunks would otherwise sit
+ * outside the caller's atomic scope. A bound object store still allows it.
+ */
 zova_status zova_object_writer_create(const zova_object_writer_create_request *request);
 zova_status zova_object_writer_create_with_options(const zova_object_writer_create_with_options_request *request);
 zova_status zova_object_writer_write(const zova_object_writer_write_request *request);

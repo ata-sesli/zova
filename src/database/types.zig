@@ -75,6 +75,13 @@ pub const batch_mutation_savepoint = "zova_batch_mutation";
 
 pub const BatchMutationScope = enum { transaction, savepoint };
 
+/// Savepoint used by synchronous object mutations that join a caller
+/// transaction. It is distinct from `batch_mutation_savepoint` so an object
+/// mutation can nest inside a batch mutation scope.
+pub const object_mutation_savepoint = "zova_object_mutation";
+
+pub const ObjectMutationScope = enum { transaction, savepoint };
+
 const bound_object_store_name = "default";
 
 const bound_vector_store_name = "default";

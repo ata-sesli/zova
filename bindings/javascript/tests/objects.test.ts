@@ -145,23 +145,67 @@ describe("objects", () => {
     db.close();
   });
 
-  test("main-store object mutation preserves active-transaction rejection", () => {
+  test("main-store object mutation commits and rolls back with a caller transaction", () => {
     const db = database();
     const bytes = deterministicBytes(100_000);
     const id = objectId(bytes);
+    db.exec("CREATE TABLE notes(body TEXT, object_id BLOB)");
+
+    // The object and the row referencing it commit together.
+    db.transaction((transaction) => {
+      transaction.putObject(bytes);
+      const insert = transaction.prepare("INSERT INTO notes(body, object_id) VALUES (?, ?)");
+      insert.bindText(1, "committed");
+      insert.bindBlob(2, id);
+      expect(insert.step()).toBe("done");
+      insert.close();
+    });
+    expect(db.hasObject(id)).toBe(true);
+    const committed = db.prepare("SELECT count(*) FROM notes");
+    expect(committed.step()).toBe("row");
+    expect(committed.columnInteger(0)).toBe(1n);
+    committed.close();
+
+    // A caller rollback removes the object and the referencing row together.
+    const discarded = deterministicBytes(99_001);
+    const discardedId = objectId(discarded);
+    expect(() =>
+      db.transaction((transaction) => {
+        transaction.exec("INSERT INTO notes(body) VALUES ('rolled back')");
+        transaction.putObject(discarded);
+        throw new Error("abort the caller transaction");
+      }),
+    ).toThrow("abort the caller transaction");
+    expect(db.hasObject(discardedId)).toBe(false);
+    const count = db.prepare("SELECT count(*) FROM notes WHERE body = 'rolled back'");
+    expect(count.step()).toBe("row");
+    expect(count.columnInteger(0)).toBe(0n);
+    count.close();
+
+    db.close();
+  });
+
+  test("main-store object writer still rejects an active transaction", () => {
+    const db = database();
+    const bytes = deterministicBytes(100_000);
     db.exec("CREATE TABLE notes(body TEXT)");
 
     expect(() =>
       db.transaction((transaction) => {
-        transaction.exec("INSERT INTO notes VALUES ('rolled back')");
-        transaction.putObject(bytes);
+        transaction.exec("INSERT INTO notes VALUES ('held')");
+        transaction.objectWriter();
       }),
     ).toThrow(ZovaError);
-    expect(db.hasObject(id)).toBe(false);
     const count = db.prepare("SELECT count(*) FROM notes");
     expect(count.step()).toBe("row");
     expect(count.columnInteger(0)).toBe(0n);
     count.close();
+
+    // A synchronous put inside the same shape of transaction still commits.
+    db.transaction((transaction) => {
+      transaction.putObject(bytes);
+    });
+    expect(db.hasObject(objectId(bytes))).toBe(true);
 
     db.close();
   });
