@@ -462,11 +462,14 @@ path-repair prompts.
 bound object/vector/graph data back into the new destination so the produced
 file is self-contained.
 
-Object writes, deletes, chunk writes, assembly, and `ObjectWriter.finish` can
-participate in the same Zova transaction/savepoint as main-file SQL when an
-object store is bound. Vector collection and vector row mutations follow the
-same transaction/savepoint stack when a vector store is bound. Graph mutations
-likewise route transparently and advance the graph epoch once
+Synchronous object writes, deletes, chunk writes, and assembly are
+operation-atomic and join a caller-owned transaction through an internal
+savepoint, in the main file and in a bound object store. A failed object
+operation undoes only its own chunks, manifests, and metadata, so an SQL row
+referencing the object can be written in the same caller transaction and a
+caller rollback removes both. Vector collection and vector row mutations follow
+the same transaction/savepoint stack when a vector store is bound. Graph
+mutations likewise route transparently and advance the graph epoch once
 per successful mutation or batch when a graph store is bound.
 Store management is still explicit: `bind`, `unbind`, and replacement binds are
 rejected while the main database has an active transaction or savepoint.
@@ -480,6 +483,13 @@ This is local, manual storage placement. It is not distributed storage, cloud
 sync, automatic path repair, or a multi-file transaction guarantee. Zova
 supports at most three optional stores total: one object store, one vector
 store, and one graph store. Multiple named stores are deferred.
+
+The streaming `ObjectWriter` is the one object API that still rejects a
+caller-owned transaction for the main file, because it holds no transaction
+across `write` calls and its loose chunks would otherwise sit outside the
+caller's atomic scope. Stream the object first, then reference the resulting
+`ObjectId` from SQL. A bound object store keeps allowing the writer inside
+caller transactions.
 
 Use `ObjectWriter` when bytes arrive over time:
 

@@ -154,18 +154,28 @@ limit 10;
 SQL transactions and savepoints are available through Zova's database APIs.
 Use them for user table changes and metadata updates.
 
-Object mutation APIs own their own transaction policy. In current Zova releases,
-object writes, object deletes, and `ObjectWriter.finish` can reject active
-transaction/savepoint stacks. Keep long-running object writes outside explicit
-SQL transaction scopes, then store the resulting `object_id` in user SQL.
+Synchronous object mutations are operation-atomic and join a caller-owned
+transaction. A `putObject`, `putObjectChunk`, `assembleObjectFromChunks`, or
+`deleteObject` call owns a `begin immediate` transaction when no transaction is
+active, and otherwise takes an internal savepoint. A failure undoes only that
+operation's chunks, manifests, and metadata, and the caller transaction is
+neither committed nor rolled back for it.
 
-A practical flow is:
+That means a SQL reference row and its object can be written in one caller
+transaction, and a caller rollback removes both:
 
-1. Write object bytes through Zova and get an `ObjectId`.
-2. Begin a SQL transaction.
+1. Begin a SQL transaction.
+2. Write object bytes through Zova and get an `ObjectId`.
 3. Insert or update the user row that references the object id.
-4. Commit the SQL transaction.
+4. Commit or roll back the SQL transaction.
 5. Run `zova check --deep` in tests or operational validation.
+
+The streaming `ObjectWriter` is the exception. It holds no transaction across
+`write` calls, so `objectWriter`, `write`, `finish`, and `cancel` still return
+`ZOVA_OBJECT_TRANSACTION_ACTIVE` for a main-store object writer used inside an
+active caller transaction. Stream the object first, then store the resulting
+`object_id` in user SQL. A bound object store keeps allowing the writer inside
+caller transactions.
 
 ## Safety Checks
 

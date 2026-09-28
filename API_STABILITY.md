@@ -89,6 +89,20 @@ deliberate and does not make the high-level packages incomplete.
 SQLite remains the transaction and locking engine. Zova helpers preserve normal
 SQLite commit, rollback, savepoint, busy, and locking behavior.
 
+Synchronous object mutations are operation-atomic and join a caller-owned
+transaction. `putObject`, `putObjectWithOptions`, chunk writes, object
+assembly, and `deleteObject` own a `begin immediate` transaction when no
+transaction is active, and otherwise take an internal savepoint. A failure
+undoes only that operation's own chunks, manifests, and metadata; the caller
+transaction is never committed or rolled back on its behalf, and earlier caller
+work in the same transaction survives.
+
+The streaming `ObjectWriter` is the documented exception. It holds no
+transaction across `write` calls, so a main-store object writer used inside an
+active caller transaction still fails with `ZOVA_OBJECT_TRANSACTION_ACTIVE`.
+Its contract and lifetime are unchanged, and a bound object store still allows
+the writer inside caller transactions.
+
 Notifications are explicit, same-process, in-memory events attached to one open
 database handle. They are delivered only after the owning transaction commits.
 Rollback discards pending events; savepoint rollback discards inner events;

@@ -8,6 +8,9 @@ pub const sqlite = @import("sqlite.zig");
 const statement_cache = @import("statement_cache.zig");
 const zova_error = @import("zova_error.zig");
 
+const object_mutation_savepoint = @import("database/types.zig").object_mutation_savepoint;
+const ObjectMutationScope = @import("database/types.zig").ObjectMutationScope;
+
 pub const Error = zova_error.Error;
 pub const ObjectReaderError = Error || error{ObjectReaderClosed};
 
@@ -701,6 +704,10 @@ pub const ObjectWriter = struct {
 pub const Database = struct {
     sqlite_db: *sqlite.Database,
     storage_schema: StorageSchema = .main,
+    /// Whether the streaming `ObjectWriter` may run inside a caller-owned
+    /// transaction. Synchronous object mutations always join a caller
+    /// transaction through an internal savepoint; only the writer keeps this
+    /// restriction, because it holds no transaction across `write` calls.
     allow_active_transactions: bool = false,
     /// Connection-owned cache, null when no owner supplied one. See
     /// `statement_cache` for the reuse and invalidation contract.
@@ -743,9 +750,12 @@ pub const Database = struct {
     ///
     /// The writer streams bytes through FastCDC-v1, stores verified loose
     /// chunks as they are emitted, and assembles the final content-addressed
-    /// object on `ObjectWriter.finish`. By default writer operations reject
-    /// active caller-owned transactions; the Zova facade enables ambient
-    /// transaction participation only for attached bound object stores.
+    /// object on `ObjectWriter.finish`. Unlike the synchronous object
+    /// mutations, writer operations reject active caller-owned transactions on
+    /// the main store: the writer holds no transaction across `write` calls, so
+    /// joining one would leave its loose chunks outside the caller's atomic
+    /// scope. The Zova facade allows the writer inside caller transactions only
+    /// for attached bound object stores.
     pub fn objectWriter(self: *Database, allocator: std.mem.Allocator) Error!ObjectWriter {
         try rejectActiveTransaction(self.sqlite_db, self.allow_active_transactions);
         return ObjectWriter.init(self.sqlite_db, self.storage_schema, self.allow_active_transactions, allocator, .fastcdc);
@@ -797,11 +807,12 @@ pub const Database = struct {
 
     /// Store raw bytes as a content-addressed Zova object.
     ///
-    /// The returned id is the SHA-256 digest of the full byte slice. By
-    /// default this owns its own transaction and returns
-    /// `error.ObjectTransactionActive` inside a user transaction. The Zova
-    /// facade enables ambient transaction participation for attached bound
-    /// object stores.
+    /// The returned id is the SHA-256 digest of the full byte slice. The write
+    /// is operation-atomic: it owns a `begin immediate` transaction when no
+    /// caller transaction is active, and otherwise joins the caller transaction
+    /// through an internal savepoint without committing it. The Zova facade
+    /// enables the same savepoint participation for attached bound object
+    /// stores.
     pub fn putObject(self: *Database, bytes: []const u8) Error!ObjectId {
         return self.putObjectWithOptions(bytes, .{ .profile = .deduplication });
     }
@@ -815,16 +826,16 @@ pub const Database = struct {
         const id = objectId(bytes);
         const size_bytes = try usizeToSqliteI64(bytes.len);
 
-        const owns_transaction = try beginOwnedWrite(self.sqlite_db, self.allow_active_transactions);
+        const scope = try beginObjectMutation(self.sqlite_db);
         var committed = false;
-        errdefer if (!committed and owns_transaction) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) rollbackObjectMutation(self.sqlite_db, scope);
 
         if (try objectRowExists(self.statement_cache, self.sqlite_db, self.storage_schema, id)) {
             // Loading metadata validates the stored representation identifier;
             // the existing object remains authoritative and is never repacked
             // to satisfy the newly requested policy.
             _ = try loadObjectMetadata(self.statement_cache, self.sqlite_db, self.storage_schema, id);
-            if (owns_transaction) try self.sqlite_db.commit();
+            try finishObjectMutation(self.sqlite_db, scope);
             committed = true;
             return id;
         }
@@ -855,7 +866,7 @@ pub const Database = struct {
             chunk_index += 1;
         }
 
-        if (owns_transaction) try self.sqlite_db.commit();
+        try finishObjectMutation(self.sqlite_db, scope);
         committed = true;
         return id;
     }
@@ -1236,11 +1247,11 @@ pub const Database = struct {
     /// SHA-256, and requires the final digest to equal `id` before writing the
     /// object row and manifest rows.
     ///
-    /// Assembly owns a `begin immediate` transaction by default and returns
-    /// `error.ObjectTransactionActive` inside caller-owned transactions unless
-    /// the database wrapper explicitly allows ambient transactions. Existing
-    /// valid objects return `error.ObjectAlreadyExists`; invalid caller
-    /// manifests return `error.ObjectManifestInvalid`.
+    /// Assembly owns a `begin immediate` transaction when no caller
+    /// transaction is active and otherwise joins the caller transaction through
+    /// an internal savepoint without committing it. Existing valid objects
+    /// return `error.ObjectAlreadyExists`; invalid caller manifests return
+    /// `error.ObjectManifestInvalid`.
     pub fn assembleObjectFromChunks(
         self: *Database,
         id: ObjectId,
@@ -1275,9 +1286,9 @@ pub const Database = struct {
         chunks: []const ObjectChunk,
         policy: ChunkingPolicy,
     ) Error!void {
-        const owns_transaction = try beginOwnedWrite(self.sqlite_db, self.allow_active_transactions);
+        const scope = try beginObjectMutation(self.sqlite_db);
         var committed = false;
-        errdefer if (!committed and owns_transaction) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) rollbackObjectMutation(self.sqlite_db, scope);
 
         if (try objectRowExists(self.statement_cache, self.sqlite_db, self.storage_schema, id)) {
             var existing = self.getObject(std.heap.page_allocator, id) catch |err| switch (err) {
@@ -1313,7 +1324,7 @@ pub const Database = struct {
             );
         }
 
-        if (owns_transaction) try self.sqlite_db.commit();
+        try finishObjectMutation(self.sqlite_db, scope);
         committed = true;
     }
 
@@ -1457,15 +1468,15 @@ pub const Database = struct {
 
     /// Delete one Zova object and garbage-collect its unreferenced chunks.
     ///
-    /// Delete owns a `begin immediate` transaction by default and returns
-    /// `error.ObjectTransactionActive` inside caller-owned transactions unless
-    /// the database wrapper explicitly allows ambient transactions. Missing or
+    /// Delete owns a `begin immediate` transaction when no caller transaction is
+    /// active and otherwise joins the caller transaction through an internal
+    /// savepoint, so a failure discards only this delete. Missing or
     /// already-deleted ids return `error.ObjectNotFound`. User SQL rows that
     /// store this object id are not inspected or modified.
     pub fn deleteObject(self: *Database, id: ObjectId) Error!void {
-        const owns_transaction = try beginOwnedWrite(self.sqlite_db, self.allow_active_transactions);
+        const scope = try beginObjectMutation(self.sqlite_db);
         var committed = false;
-        errdefer if (!committed and owns_transaction) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) rollbackObjectMutation(self.sqlite_db, scope);
 
         if (!try objectRowExists(self.statement_cache, self.sqlite_db, self.storage_schema, id)) return error.ObjectNotFound;
 
@@ -1476,7 +1487,7 @@ pub const Database = struct {
         try deleteObjectRow(self.sqlite_db, self.storage_schema, id);
         try deleteUnreferencedCandidateChunks(self.sqlite_db, self.storage_schema, candidate_chunks);
 
-        if (owns_transaction) try self.sqlite_db.commit();
+        try finishObjectMutation(self.sqlite_db, scope);
         committed = true;
     }
 };
@@ -1496,14 +1507,40 @@ fn rejectActiveTransaction(db: *sqlite.Database, allow_active_transactions: bool
     if (!allow_active_transactions and hasActiveTransaction(db)) return error.ObjectTransactionActive;
 }
 
-fn beginOwnedWrite(db: *sqlite.Database, allow_active_transactions: bool) Error!bool {
+/// Open the transaction scope for one synchronous object mutation.
+///
+/// Without a caller transaction the mutation owns a `begin immediate`
+/// transaction. Inside a caller transaction it takes an internal savepoint, so
+/// a failure undoes only this operation's chunks, manifests, and metadata while
+/// the caller's earlier work survives. The caller transaction itself is never
+/// committed or rolled back here.
+fn beginObjectMutation(db: *sqlite.Database) Error!ObjectMutationScope {
     if (hasActiveTransaction(db)) {
-        if (allow_active_transactions) return false;
-        return error.ObjectTransactionActive;
+        try db.savepoint(object_mutation_savepoint);
+        return .savepoint;
     }
 
     try db.beginImmediate();
-    return true;
+    return .transaction;
+}
+
+fn finishObjectMutation(db: *sqlite.Database, scope: ObjectMutationScope) Error!void {
+    switch (scope) {
+        .transaction => try db.commit(),
+        .savepoint => try db.releaseSavepoint(object_mutation_savepoint),
+    }
+}
+
+/// Undo one failed object mutation. Savepoint cleanup is best effort because
+/// the caller's transaction is still open and owns the remaining cleanup.
+fn rollbackObjectMutation(db: *sqlite.Database, scope: ObjectMutationScope) void {
+    switch (scope) {
+        .transaction => db.rollback() catch {},
+        .savepoint => {
+            db.rollbackToSavepoint(object_mutation_savepoint) catch {};
+            db.releaseSavepoint(object_mutation_savepoint) catch {};
+        },
+    }
 }
 
 fn prepareSchema(

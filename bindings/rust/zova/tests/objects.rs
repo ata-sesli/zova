@@ -294,6 +294,95 @@ fn object_ids_can_live_in_user_sql_rows() {
 }
 
 #[test]
+fn object_puts_commit_atomically_with_caller_sql_transactions() {
+    let path = temp_path("atomic-object-puts");
+    let mut db = Database::create(&path).unwrap();
+    db.exec("create table attachments(id integer primary key, object_id blob not null)")
+        .unwrap();
+
+    fn insert_reference(db: &mut Database, id: ObjectId) {
+        let mut insert = db
+            .prepare("insert into attachments(object_id) values (?1)")
+            .unwrap();
+        insert.bind_blob(1, id.as_ref()).unwrap();
+        assert_eq!(insert.step().unwrap(), Step::Done);
+    }
+
+    fn reference_count(db: &mut Database, id: ObjectId) -> i64 {
+        let mut select = db
+            .prepare("select count(*) from attachments where object_id = ?1")
+            .unwrap();
+        select.bind_blob(1, id.as_ref()).unwrap();
+        assert_eq!(select.step().unwrap(), Step::Row);
+        let count = select.column_i64(0).unwrap();
+        drop(select);
+        count
+    }
+
+    // A SQL row and a synchronous object put commit together, for both storage
+    // profiles and for an empty object.
+    for (bytes, profile) in [
+        (
+            b"fastcdc object".as_slice(),
+            ObjectStorageProfile::Deduplication,
+        ),
+        (
+            b"fixed chunk object".as_slice(),
+            ObjectStorageProfile::Streaming,
+        ),
+        (b"".as_slice(), ObjectStorageProfile::Deduplication),
+    ] {
+        let options = ObjectPutOptions { profile };
+        db.begin_immediate().unwrap();
+        let id = db.put_object_with_options(bytes, options).unwrap();
+        insert_reference(&mut db, id);
+        db.commit().unwrap();
+
+        assert_eq!(id, object_id(bytes).unwrap());
+        assert!(db.has_object(id).unwrap());
+        assert_eq!(reference_count(&mut db, id), 1);
+    }
+
+    // A caller rollback removes the object and its SQL reference together.
+    let survivor = db.put_object(b"survives the rolled back attempt").unwrap();
+    db.begin_immediate().unwrap();
+    let inside = db.put_object(b"rolled back with its reference").unwrap();
+    insert_reference(&mut db, inside);
+    assert!(db.has_object(inside).unwrap());
+    assert_eq!(reference_count(&mut db, inside), 1);
+    db.rollback().unwrap();
+    assert!(!db.has_object(inside).unwrap());
+    assert_eq!(reference_count(&mut db, inside), 0);
+    assert!(db.has_object(survivor).unwrap());
+
+    // An object put inside a caller savepoint is undone with that savepoint.
+    let kept = db
+        .put_object(b"kept across the savepoint rollback")
+        .unwrap();
+    db.begin_immediate().unwrap();
+    db.savepoint("sp_object").unwrap();
+    let discarded = db
+        .put_object(b"discarded by the savepoint rollback")
+        .unwrap();
+    assert!(db.has_object(discarded).unwrap());
+    db.rollback_to_savepoint("sp_object").unwrap();
+    db.release_savepoint("sp_object").unwrap();
+    db.commit().unwrap();
+    assert!(!db.has_object(discarded).unwrap());
+    assert!(db.has_object(kept).unwrap());
+
+    // A deduplicated object stored again inside a caller transaction keeps the
+    // stored representation authoritative.
+    let dedup = db.put_object(b"kept duplicate").unwrap();
+    db.begin_immediate().unwrap();
+    let again = db.put_object(b"kept duplicate").unwrap();
+    db.commit().unwrap();
+    assert_eq!(again, dedup);
+    assert_eq!(db.get_object(dedup).unwrap(), b"kept duplicate");
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn option_bearing_object_apis_and_sequential_reader_preserve_dedup_behavior() {
     let path = temp_path("profile-reader");
     let mut db = Database::create(&path).unwrap();

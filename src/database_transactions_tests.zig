@@ -87,8 +87,12 @@ test "savepoints roll back zova records objects and vectors" {
     var range_buffer: [8]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 8), try db.readObjectRange(readable_object, 0, &range_buffer));
     try std.testing.expectEqualSlices(u8, "readable", &range_buffer);
-    try std.testing.expectError(error.ObjectTransactionActive, db.putObject("savepoint object"));
-    try std.testing.expectError(error.ObjectTransactionActive, db.deleteObject(readable_object));
+    // Synchronous object mutations join the savepoint; only the streaming
+    // writer, which holds no transaction across writes, still rejects it.
+    const savepoint_object = try db.putObject("savepoint object");
+    try std.testing.expect(try db.hasObject(savepoint_object));
+    try db.deleteObject(readable_object);
+    try std.testing.expect(!try db.hasObject(readable_object));
     try std.testing.expectError(error.ObjectTransactionActive, pending_writer.finish());
     try db.createVectorCollection("save_vectors", .{ .dimensions = 2, .metric = .l2 });
     try db.putVector("save_vectors", "v1", .{ .f32 = &.{ 1.0, 2.0 } });
@@ -96,6 +100,8 @@ test "savepoints roll back zova records objects and vectors" {
     try db.releaseSavepoint("sp_vectors");
 
     try std.testing.expect(!try db.hasVectorCollection("save_vectors"));
+    try std.testing.expect(!try db.hasObject(savepoint_object));
+    try std.testing.expect(try db.hasObject(readable_object));
 
     try db.savepoint("sp_release");
     try db.exec("insert into notes (body) values ('kept')");

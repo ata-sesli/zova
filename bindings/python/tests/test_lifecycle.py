@@ -294,9 +294,10 @@ def test_savepoints_rollback_release_and_validate_names(tmp_path):
 
         db.savepoint("sp_vectors")
         db.exec("insert into tx(value) values ('rolled back')")
-        with pytest.raises(zova.ZovaError) as exc:
-            db.put_object(b"blocked inside savepoint")
-        assert exc.value.status_name == "ZOVA_OBJECT_TRANSACTION_ACTIVE"
+        # A synchronous object put joins the savepoint; the streaming writer is
+        # what still rejects an active caller transaction.
+        object_id = db.put_object(b"rolled back with the savepoint")
+        assert db.has_object(object_id)
         db.create_vector_collection(
             "temporary_vectors",
             zova.VectorCollectionOptions(2, zova.VectorMetric.L2, zova.VectorElementType.F32),
@@ -305,6 +306,7 @@ def test_savepoints_rollback_release_and_validate_names(tmp_path):
         db.rollback_to_savepoint("sp_vectors")
         db.release_savepoint("sp_vectors")
         assert not db.has_vector_collection("temporary_vectors")
+        assert not db.has_object(object_id)
 
         db.savepoint("sp_release")
         db.exec("insert into tx(value) values ('kept')")
