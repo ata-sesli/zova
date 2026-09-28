@@ -503,6 +503,117 @@ fn shared_transaction_rolls_back_when_commit_fails() {
 }
 
 #[test]
+fn shared_transactions_roll_back_when_the_closure_panics() {
+    let path = temp_path("panic-rollback");
+    let db = SharedDatabase::create(&path).unwrap();
+    db.exec("create table tx(id integer primary key, value text)")
+        .unwrap();
+
+    // `transaction` and `transaction_immediate` share one cleanup path, so both
+    // are exercised through the same deferred/immediate pair below.
+    let deferred = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        db.transaction(|guard| {
+            guard.exec("insert into tx(value) values ('deferred panic')")?;
+            panic!("closure panic");
+            #[allow(unreachable_code)]
+            Ok(())
+        })
+    }));
+    let immediate = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        db.transaction_immediate(|guard| {
+            guard.exec("insert into tx(value) values ('immediate panic')")?;
+            panic!("closure panic");
+            #[allow(unreachable_code)]
+            Ok(())
+        })
+    }));
+    assert!(deferred.is_err());
+    assert!(immediate.is_err());
+
+    let mut count = db.prepare("select count(*) from tx").unwrap();
+    assert_eq!(count.step().unwrap(), Step::Row);
+    assert_eq!(count.column_i64(0).unwrap(), 0);
+    drop(count);
+
+    // The connection lock is released by the cleanup, not left held by the
+    // panic, so later work on the same handle still succeeds.
+    db.transaction_immediate(|guard| guard.exec("insert into tx(value) values ('after panic')"))
+        .unwrap();
+
+    let mut count = db.prepare("select count(*) from tx").unwrap();
+    assert_eq!(count.step().unwrap(), Step::Row);
+    assert_eq!(count.column_i64(0).unwrap(), 1);
+    drop(count);
+
+    // A writer lock left behind by the panic would block this exclusive write.
+    db.transaction_immediate(|guard| guard.exec("insert into tx(value) values ('after reuse')"))
+        .unwrap();
+
+    let mut count = db.prepare("select count(*) from tx").unwrap();
+    assert_eq!(count.step().unwrap(), Step::Row);
+    assert_eq!(count.column_i64(0).unwrap(), 2);
+    drop(count);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn shared_savepoints_roll_back_when_the_closure_panics() {
+    let path = temp_path("panic-savepoint");
+    let db = SharedDatabase::create(&path).unwrap();
+    db.exec("create table tx(id integer primary key, value text)")
+        .unwrap();
+
+    let outer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        db.transaction_immediate(|guard| {
+            guard.exec("insert into tx(value) values ('outer kept')")?;
+            guard
+                .with_savepoint("sp_panic", |guard| {
+                    guard.exec("insert into tx(value) values ('savepoint panic')")?;
+                    panic!("savepoint closure panic");
+                    #[allow(unreachable_code)]
+                    Ok(())
+                })
+                .map(|_: ()| ())
+        })
+    }));
+    assert!(outer.is_err());
+
+    let shared = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        db.with_savepoint("sp_shared_panic", |guard| {
+            guard.exec("insert into tx(value) values ('shared savepoint panic')")?;
+            panic!("shared savepoint closure panic");
+            #[allow(unreachable_code)]
+            Ok(())
+        })
+    }));
+    assert!(shared.is_err());
+
+    let mut count = db
+        .prepare("select count(*) from tx where value = 'outer kept'")
+        .unwrap();
+    assert_eq!(count.step().unwrap(), Step::Row);
+    assert_eq!(count.column_i64(0).unwrap(), 0);
+    drop(count);
+
+    let mut count = db.prepare("select count(*) from tx").unwrap();
+    assert_eq!(count.step().unwrap(), Step::Row);
+    assert_eq!(count.column_i64(0).unwrap(), 0);
+    drop(count);
+
+    // A savepoint abandoned by a panic must not break later scope reuse.
+    db.transaction_immediate(|guard| {
+        guard.exec("insert into tx(value) values ('after savepoint panic')")
+    })
+    .unwrap();
+
+    let mut count = db.prepare("select count(*) from tx").unwrap();
+    assert_eq!(count.step().unwrap(), Step::Row);
+    assert_eq!(count.column_i64(0).unwrap(), 1);
+    drop(count);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn shared_errors_copy_diagnostics_before_later_thread_calls() {
     let path = temp_path("diagnostics");
     let db = SharedDatabase::create(&path).unwrap();

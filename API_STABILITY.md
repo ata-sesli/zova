@@ -99,6 +99,22 @@ Raw SQL transaction scopes are rejected for notification publication when Zova
 cannot track their lifetime. Each subscription has the documented bounded queue
 and overflow report behavior.
 
+## Scoped helper cleanup
+
+A scoped transaction or savepoint helper unwinds its scope on every exit path.
+Returning an error rolls back. A panic unwinding the closure also rolls back
+before the helper releases its connection lock, and then propagates unchanged.
+Cleanup never panics and never re-acquires the lock to discard the scope.
+
+Cleanup applies to unwinding panics only. `panic = "abort"` profiles and process
+termination are outside this contract; the native connection is then reclaimed by
+SQLite's own crash recovery.
+
+If a rollback itself fails, the connection's transaction state is unknown and
+that handle is retired: subsequent calls on it fail with a documented error
+instead of silently continuing on possibly-open work. Drop the handle and open a
+new one.
+
 ## Thread safety
 
 One C database handle may be called from multiple threads, but calls on that
