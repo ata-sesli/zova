@@ -1,4 +1,4 @@
-use std::thread;
+use std::{sync::mpsc, thread, time::Duration};
 use zova::{
     object_id, GraphDegreeOptions, GraphEdgeInput, GraphNeighborDirection, GraphNeighborsOptions,
     GraphNodeInput, GraphTargetType, GraphWalkOptions, ObjectPutOptions, ObjectStorageProfile,
@@ -610,6 +610,70 @@ fn shared_savepoints_roll_back_when_the_closure_panics() {
     assert_eq!(count.step().unwrap(), Step::Row);
     assert_eq!(count.column_i64(0).unwrap(), 1);
     drop(count);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn failed_nested_cleanup_retires_the_current_guard() {
+    let path = temp_path("nested-cleanup-failure");
+    let db = SharedDatabase::create(&path).unwrap();
+    db.exec("create table tx(value text)").unwrap();
+    db.exec("create trigger abort_tx before insert on tx when new.value = 'abort' begin select raise(rollback, 'abort transaction'); end").unwrap();
+
+    let error = db.transaction_immediate(|guard| {
+        let nested = guard.with_savepoint("sp_abort", |guard| {
+            guard.exec("insert into tx values ('abort')")
+        });
+        assert!(nested.is_err());
+        let rejected = guard
+            .exec("insert into tx values ('must not persist')")
+            .unwrap_err();
+        assert_eq!(rejected.status(), Some(Status::Misuse));
+        Ok(())
+    });
+    assert_eq!(error.unwrap_err().status(), Some(Status::Misuse));
+
+    let fresh = SharedDatabase::open(&path).unwrap();
+    let mut query = fresh.prepare("select count(*) from tx").unwrap();
+    assert_eq!(query.step().unwrap(), Step::Row);
+    assert_eq!(query.column_i64(0).unwrap(), 0);
+    drop(query);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn waiting_thread_cannot_use_connection_after_failed_cleanup() {
+    let path = temp_path("waiting-after-cleanup-failure");
+    let db = SharedDatabase::create(&path).unwrap();
+    db.exec("create table tx(value text)").unwrap();
+    db.exec("create trigger abort_tx before insert on tx when new.value = 'abort' begin select raise(rollback, 'abort transaction'); end").unwrap();
+
+    let (started_tx, started_rx) = mpsc::channel();
+    let mut waiter = None;
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _: zova::Result<()> = db.transaction_immediate(|guard| {
+            let waiting_db = db.clone();
+            waiter = Some(thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                waiting_db.exec("insert into tx values ('must not persist')")
+            }));
+            started_rx.recv().unwrap();
+            thread::sleep(Duration::from_millis(30));
+            let _ = guard.exec("insert into tx values ('abort')");
+            panic!("force cleanup of a savepoint destroyed by rollback");
+            #[allow(unreachable_code)]
+            Ok(())
+        });
+    }));
+    assert!(unwind.is_err());
+    let rejected = waiter.unwrap().join().unwrap().unwrap_err();
+    assert_eq!(rejected.status(), Some(Status::Misuse));
+
+    let fresh = SharedDatabase::open(&path).unwrap();
+    let mut query = fresh.prepare("select count(*) from tx").unwrap();
+    assert_eq!(query.step().unwrap(), Step::Row);
+    assert_eq!(query.column_i64(0).unwrap(), 0);
+    drop(query);
     let _ = std::fs::remove_file(path);
 }
 

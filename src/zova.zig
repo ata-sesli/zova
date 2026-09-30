@@ -175,6 +175,8 @@ const bound_graph_store_role = @import("database/types.zig").bound_graph_store_r
 
 const batch_mutation_savepoint = @import("database/types.zig").batch_mutation_savepoint;
 
+const bound_object_mutation_savepoint = @import("database/types.zig").bound_object_mutation_savepoint;
+
 const BatchMutationScope = @import("database/types.zig").BatchMutationScope;
 
 const bound_object_store_name = @import("database/types.zig").bound_object_store_name;
@@ -2378,14 +2380,14 @@ pub const Database = struct {
 
         const id = objectId(bytes);
         const existed = try self.hasObject(id);
-        const owns_transaction = try self.beginBoundObjectMutation();
+        const scope = try self.beginBoundObjectMutation();
         var committed = false;
-        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) self.rollbackBoundObjectMutation(scope) catch {};
 
         var objects = self.objectDatabase();
         const result = try objects.putObject(bytes);
         if (!existed) try incrementBoundObjectEpoch(&self.sqlite_db);
-        try self.finishBoundObjectMutation(owns_transaction);
+        try self.finishBoundObjectMutation(scope);
         committed = true;
         return result;
     }
@@ -2399,14 +2401,14 @@ pub const Database = struct {
 
         const id = objectId(bytes);
         const existed = try self.hasObject(id);
-        const owns_transaction = try self.beginBoundObjectMutation();
+        const scope = try self.beginBoundObjectMutation();
         var committed = false;
-        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) self.rollbackBoundObjectMutation(scope) catch {};
 
         var objects = self.objectDatabase();
         const result = try objects.putObjectWithOptions(bytes, options);
         if (!existed) try incrementBoundObjectEpoch(&self.sqlite_db);
-        try self.finishBoundObjectMutation(owns_transaction);
+        try self.finishBoundObjectMutation(scope);
         committed = true;
         return result;
     }
@@ -2438,14 +2440,14 @@ pub const Database = struct {
     /// Store one verified loose object chunk.
     pub fn putObjectChunk(self: *Database, expected_hash: ObjectChunkId, bytes: []const u8) Error!void {
         const existed = if (self.bound_object_store != null) try self.hasObjectChunk(expected_hash) else false;
-        const owns_transaction = try self.beginBoundObjectMutation();
+        const scope = try self.beginBoundObjectMutation();
         var committed = false;
-        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) self.rollbackBoundObjectMutation(scope) catch {};
 
         var objects = self.objectDatabase();
         try objects.putObjectChunk(expected_hash, bytes);
         if (self.bound_object_store != null and !existed) try incrementBoundObjectEpoch(&self.sqlite_db);
-        try self.finishBoundObjectMutation(owns_transaction);
+        try self.finishBoundObjectMutation(scope);
         committed = true;
     }
 
@@ -2457,14 +2459,14 @@ pub const Database = struct {
         options: ObjectPutOptions,
     ) Error!void {
         const existed = if (self.bound_object_store != null) try self.hasObjectChunk(expected_hash) else false;
-        const owns_transaction = try self.beginBoundObjectMutation();
+        const scope = try self.beginBoundObjectMutation();
         var committed = false;
-        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) self.rollbackBoundObjectMutation(scope) catch {};
 
         var objects = self.objectDatabase();
         try objects.putObjectChunkWithOptions(expected_hash, bytes, options);
         if (self.bound_object_store != null and !existed) try incrementBoundObjectEpoch(&self.sqlite_db);
-        try self.finishBoundObjectMutation(owns_transaction);
+        try self.finishBoundObjectMutation(scope);
         committed = true;
     }
 
@@ -2475,14 +2477,14 @@ pub const Database = struct {
         size_bytes: u64,
         chunks: []const ObjectChunk,
     ) Error!void {
-        const owns_transaction = try self.beginBoundObjectMutation();
+        const scope = try self.beginBoundObjectMutation();
         var committed = false;
-        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) self.rollbackBoundObjectMutation(scope) catch {};
 
         var objects = self.objectDatabase();
         try objects.assembleObjectFromChunks(id, size_bytes, chunks);
         if (self.bound_object_store != null) try incrementBoundObjectEpoch(&self.sqlite_db);
-        try self.finishBoundObjectMutation(owns_transaction);
+        try self.finishBoundObjectMutation(scope);
         committed = true;
     }
 
@@ -2494,27 +2496,27 @@ pub const Database = struct {
         chunks: []const ObjectChunk,
         options: ObjectPutOptions,
     ) Error!void {
-        const owns_transaction = try self.beginBoundObjectMutation();
+        const scope = try self.beginBoundObjectMutation();
         var committed = false;
-        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) self.rollbackBoundObjectMutation(scope) catch {};
 
         var objects = self.objectDatabase();
         try objects.assembleObjectFromChunksWithOptions(id, size_bytes, chunks, options);
         if (self.bound_object_store != null) try incrementBoundObjectEpoch(&self.sqlite_db);
-        try self.finishBoundObjectMutation(owns_transaction);
+        try self.finishBoundObjectMutation(scope);
         committed = true;
     }
 
     /// Delete one unreferenced loose chunk if possible.
     pub fn deleteObjectChunk(self: *Database, hash: ObjectChunkId) Error!bool {
-        const owns_transaction = try self.beginBoundObjectMutation();
+        const scope = try self.beginBoundObjectMutation();
         var committed = false;
-        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) self.rollbackBoundObjectMutation(scope) catch {};
 
         var objects = self.objectDatabase();
         const deleted = try objects.deleteObjectChunk(hash);
         if (self.bound_object_store != null and deleted) try incrementBoundObjectEpoch(&self.sqlite_db);
-        try self.finishBoundObjectMutation(owns_transaction);
+        try self.finishBoundObjectMutation(scope);
         committed = true;
         return deleted;
     }
@@ -2549,14 +2551,14 @@ pub const Database = struct {
 
     /// Delete one Zova object and garbage-collect its unreferenced chunks.
     pub fn deleteObject(self: *Database, id: ObjectId) Error!void {
-        const owns_transaction = try self.beginBoundObjectMutation();
+        const scope = try self.beginBoundObjectMutation();
         var committed = false;
-        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) self.rollbackBoundObjectMutation(scope) catch {};
 
         var objects = self.objectDatabase();
         try objects.deleteObject(id);
         if (self.bound_object_store != null) try incrementBoundObjectEpoch(&self.sqlite_db);
-        try self.finishBoundObjectMutation(owns_transaction);
+        try self.finishBoundObjectMutation(scope);
         committed = true;
     }
 
@@ -2626,14 +2628,31 @@ pub const Database = struct {
         return .{ .sqlite_db = &self.sqlite_db, .statement_cache = &self.kv_statements };
     }
 
-    fn beginBoundObjectMutation(self: *Database) Error!bool {
-        if (self.bound_object_store == null or hasActiveTransaction(&self.sqlite_db)) return false;
+    fn beginBoundObjectMutation(self: *Database) Error!?BatchMutationScope {
+        if (self.bound_object_store == null) return null;
+        if (hasActiveTransaction(&self.sqlite_db)) {
+            try self.sqlite_db.savepoint(bound_object_mutation_savepoint);
+            return .savepoint;
+        }
         try self.sqlite_db.beginImmediate();
-        return true;
+        return .transaction;
     }
 
-    fn finishBoundObjectMutation(self: *Database, owns_transaction: bool) Error!void {
-        if (owns_transaction) try self.sqlite_db.commit();
+    fn finishBoundObjectMutation(self: *Database, scope: ?BatchMutationScope) Error!void {
+        switch (scope orelse return) {
+            .transaction => try self.sqlite_db.commit(),
+            .savepoint => try self.sqlite_db.releaseSavepoint(bound_object_mutation_savepoint),
+        }
+    }
+
+    fn rollbackBoundObjectMutation(self: *Database, scope: ?BatchMutationScope) Error!void {
+        switch (scope orelse return) {
+            .transaction => try self.sqlite_db.rollback(),
+            .savepoint => {
+                try self.sqlite_db.rollbackToSavepoint(bound_object_mutation_savepoint);
+                try self.sqlite_db.releaseSavepoint(bound_object_mutation_savepoint);
+            },
+        }
     }
 
     fn objectDatabase(self: *Database) object_impl.Database {
