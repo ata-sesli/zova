@@ -73,6 +73,8 @@ pub const bound_graph_store_role = "graph_store";
 
 pub const batch_mutation_savepoint = "zova_batch_mutation";
 
+pub const bound_object_mutation_savepoint = "zova_bound_object_mutation";
+
 pub const BatchMutationScope = enum { transaction, savepoint };
 
 /// Savepoint used by synchronous object mutations that join a caller
