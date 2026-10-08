@@ -132,7 +132,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel]
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
@@ -141,8 +141,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22"
-      - run: zig build c-abi
+      - run: zig build c-abi -Doptimize=ReleaseSafe
       - run: sh scripts/repack-darwin-c-abi.sh
+      - run: sh scripts/check-native-c-abi.sh zig-out
       - run: go test ./...
         working-directory: bindings/go
       - run: go vet ./...

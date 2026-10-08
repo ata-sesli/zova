@@ -137,6 +137,12 @@ write_manifest "$CABI_DIR" "zova-c-abi" "$VERSION" "$ARTIFACT_ID"
 CABI_ARCHIVE="$OUT_DIR/zova-v$VERSION-$ARTIFACT_ID-c-abi.tar.gz"
 tar -czf "$CABI_ARCHIVE" -C "$TMP" "$(basename "$CABI_DIR")"
 
+case "$(uname -s)" in
+    Linux|Darwin)
+        sh "$ROOT/scripts/check-native-c-abi.sh" "$CABI_ARCHIVE"
+        ;;
+esac
+
 echo "building generated-C source artifact"
 GENERATED_DIR="$TMP/zova-v$VERSION-$ARTIFACT_ID-generated-c"
 mkdir -p "$GENERATED_DIR"
