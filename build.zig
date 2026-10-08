@@ -725,6 +725,11 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    // System C linkers do not inject Zig's runtime into these native archives.
+    // Retain the real stack-probing implementation inside the distribution.
+    c_abi_lib.bundle_compiler_rt = target.result.os.tag == .linux or target.result.os.tag == .macos;
+    c_abi_lib.installHeader(b.path("include/zova.h"), "zova.h");
+    c_abi_lib.installHeader(b.path("include/zova_plugin.h"), "zova_plugin.h");
     c_abi_lib.root_module.addOptions("zova_build_options", zova_build_options);
     addEmbeddedSqlite(c_abi_lib.root_module, b, sqlite_c_flags);
     if (sqlite_diagnostics) addSqliteDiagnostics(c_abi_lib.root_module, b);

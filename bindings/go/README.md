@@ -102,10 +102,14 @@ go test ./...
 The prebuilt C ABI archives are built by Zova's release workflow from the Zig
 source. The Go module stays small and does not bundle generated C.
 
+Linux and macOS C ABI builds bundle the required Zig compiler-runtime helpers
+so the archive can be linked by the system C toolchain. Release verification
+builds in `ReleaseSafe` and checks the packaged archive with C/C++ and Go/cgo consumers.
+
 From the repository root, build the C ABI first:
 
 ```sh
-zig build c-abi
+zig build c-abi -Doptimize=ReleaseSafe
 ```
 
 Then run Go tests:
@@ -129,12 +133,10 @@ CGO_LDFLAGS="-L/path/to/zova/zig-out/lib -lzova_c" \
 go test ./...
 ```
 
-If you build the C ABI into a separate prefix, copy the header next to it:
+The C ABI build also installs its public headers into the selected prefix:
 
 ```sh
-zig build c-abi -p /path/to/zova-prefix
-mkdir -p /path/to/zova-prefix/include
-cp include/zova.h /path/to/zova-prefix/include/
+zig build c-abi -Doptimize=ReleaseSafe -p /path/to/zova-prefix
 
 CGO_CFLAGS="-I/path/to/zova-prefix/include" \
 CGO_LDFLAGS="-L/path/to/zova-prefix/lib -lzova_c" \

@@ -47,7 +47,14 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+      - uses: actions/setup-go@v5
+        if: runner.os != 'Windows'
+        with:
+          go-version: "1.22"
       - run: scripts/build-release-artifacts.sh "${{ inputs.version }}" "${{ matrix.artifact-id }}" "zig-out/release-artifacts"
+      - name: Verify packaged C ABI with Go/cgo
+        if: runner.os != 'Windows'
+        run: sh scripts/check-native-c-abi.sh "zig-out/release-artifacts/zova-v${{ inputs.version }}-${{ matrix.artifact-id }}-c-abi.tar.gz" --go
       - uses: actions/upload-artifact@v4
         with:
           name: zova-${{ inputs.version }}-${{ matrix.artifact-id }}-native
