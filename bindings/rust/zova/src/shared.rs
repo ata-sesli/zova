@@ -1569,6 +1569,7 @@ impl SharedDatabase {
 
 impl SharedDatabaseGuard<'_> {
     pub fn exec(&mut self, sql: &str) -> Result<()> {
+        self.inner.ensure_usable()?;
         let sql = cstring(sql, "sql")?;
         let request = zova_sys::zova_database_exec_request {
             db: self.inner.raw_ptr(),
@@ -1580,6 +1581,7 @@ impl SharedDatabaseGuard<'_> {
 
     /// Get one key-value entry. Returns `Ok(None)` when the key is absent.
     pub fn kv_get(&mut self, namespace: &[u8], key: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.inner.ensure_usable()?;
         let db = self.inner.raw_ptr();
         let status = |status| self.inner.status_locked(status);
         kv_get_raw(db, status, namespace, key)
@@ -1592,6 +1594,7 @@ impl SharedDatabaseGuard<'_> {
         namespace: &[u8],
         keys: &[&[u8]],
     ) -> Result<Vec<Option<Vec<u8>>>> {
+        self.inner.ensure_usable()?;
         let db = self.inner.raw_ptr();
         let status = |status| self.inner.status_locked(status);
         kv_get_many_raw(db, status, namespace, keys)
@@ -1599,6 +1602,7 @@ impl SharedDatabaseGuard<'_> {
 
     /// Insert or replace one key-value entry.
     pub fn kv_put(&mut self, namespace: &[u8], key: &[u8], value: &[u8]) -> Result<()> {
+        self.inner.ensure_usable()?;
         let db = self.inner.raw_ptr();
         let status = |status| self.inner.status_locked(status);
         kv_put_raw(db, status, namespace, key, value)
@@ -1606,6 +1610,7 @@ impl SharedDatabaseGuard<'_> {
 
     /// Insert or replace several key-value entries in one atomic operation.
     pub fn kv_put_many(&mut self, namespace: &[u8], entries: &[KvEntry<'_>]) -> Result<()> {
+        self.inner.ensure_usable()?;
         let db = self.inner.raw_ptr();
         let status = |status| self.inner.status_locked(status);
         kv_put_many_raw(db, status, namespace, entries)
@@ -1613,6 +1618,7 @@ impl SharedDatabaseGuard<'_> {
 
     /// Delete one key-value entry. Deleting a missing key is not an error.
     pub fn kv_delete(&mut self, namespace: &[u8], key: &[u8]) -> Result<()> {
+        self.inner.ensure_usable()?;
         let db = self.inner.raw_ptr();
         let status = |status| self.inner.status_locked(status);
         kv_delete_raw(db, status, namespace, key)
@@ -1621,6 +1627,7 @@ impl SharedDatabaseGuard<'_> {
     /// Delete several key-value entries in one atomic operation. Missing keys
     /// are ignored.
     pub fn kv_delete_many(&mut self, namespace: &[u8], keys: &[&[u8]]) -> Result<()> {
+        self.inner.ensure_usable()?;
         let db = self.inner.raw_ptr();
         let status = |status| self.inner.status_locked(status);
         kv_delete_many_raw(db, status, namespace, keys)
@@ -1628,6 +1635,7 @@ impl SharedDatabaseGuard<'_> {
 
     /// Count entries in a namespace.
     pub fn kv_count(&mut self, namespace: &[u8]) -> Result<u64> {
+        self.inner.ensure_usable()?;
         let db = self.inner.raw_ptr();
         let status = |status| self.inner.status_locked(status);
         kv_count_raw(db, status, namespace)
@@ -1635,16 +1643,19 @@ impl SharedDatabaseGuard<'_> {
 
     /// Delete every entry in a namespace. An empty namespace is not an error.
     pub fn kv_clear_namespace(&mut self, namespace: &[u8]) -> Result<()> {
+        self.inner.ensure_usable()?;
         let db = self.inner.raw_ptr();
         let status = |status| self.inner.status_locked(status);
         kv_clear_namespace_raw(db, status, namespace)
     }
 
     pub fn notify(&mut self, channel: &str, payload: &str) -> Result<()> {
+        self.inner.ensure_usable()?;
         notify_raw(self.inner.raw_ptr(), channel, payload)
     }
 
     pub fn prepare(&mut self, sql: &str) -> Result<SharedGuardStatement<'_>> {
+        self.inner.ensure_usable()?;
         let sql = cstring(sql, "sql")?;
         let mut statement = ptr::null_mut();
         let request = zova_sys::zova_database_prepare_request {
@@ -1664,26 +1675,32 @@ impl SharedDatabaseGuard<'_> {
     }
 
     pub fn last_insert_rowid(&mut self) -> Result<i64> {
+        self.inner.ensure_usable()?;
         self.inner.last_insert_rowid_locked()
     }
 
     pub fn changes(&mut self) -> Result<i64> {
+        self.inner.ensure_usable()?;
         self.inner.changes_locked()
     }
 
     pub fn total_changes(&mut self) -> Result<i64> {
+        self.inner.ensure_usable()?;
         self.inner.total_changes_locked()
     }
 
     pub fn savepoint(&mut self, name: &str) -> Result<()> {
+        self.inner.ensure_usable()?;
         self.savepoint_locked(name, zova_sys::zova_database_savepoint)
     }
 
     pub fn rollback_to_savepoint(&mut self, name: &str) -> Result<()> {
+        self.inner.ensure_usable()?;
         self.savepoint_locked(name, zova_sys::zova_database_rollback_to_savepoint)
     }
 
     pub fn release_savepoint(&mut self, name: &str) -> Result<()> {
+        self.inner.ensure_usable()?;
         self.savepoint_locked(name, zova_sys::zova_database_release_savepoint)
     }
 
@@ -1697,6 +1714,7 @@ impl SharedDatabaseGuard<'_> {
         name: &str,
         f: impl FnOnce(&mut SharedDatabaseGuard<'_>) -> Result<T>,
     ) -> Result<T> {
+        self.inner.ensure_usable()?;
         self.savepoint(name)?;
 
         // Armed for the whole scope so a panic in `f` rolls back to the
@@ -1716,6 +1734,7 @@ impl SharedDatabaseGuard<'_> {
     }
 
     pub fn create_graph(&mut self, name: &str) -> Result<()> {
+        self.inner.ensure_usable()?;
         create_graph_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1724,6 +1743,7 @@ impl SharedDatabaseGuard<'_> {
     }
 
     pub fn has_graph(&mut self, name: &str) -> Result<bool> {
+        self.inner.ensure_usable()?;
         has_graph_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1732,6 +1752,7 @@ impl SharedDatabaseGuard<'_> {
     }
 
     pub fn graph_info(&mut self, name: &str) -> Result<GraphInfo> {
+        self.inner.ensure_usable()?;
         graph_info_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1740,12 +1761,14 @@ impl SharedDatabaseGuard<'_> {
     }
 
     pub fn list_graphs(&mut self) -> Result<Vec<GraphInfo>> {
+        self.inner.ensure_usable()?;
         list_graphs_raw(self.inner.raw_ptr(), |status| {
             self.inner.status_locked(status)
         })
     }
 
     pub fn delete_graph(&mut self, name: &str) -> Result<()> {
+        self.inner.ensure_usable()?;
         delete_graph_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1754,6 +1777,7 @@ impl SharedDatabaseGuard<'_> {
     }
 
     pub fn put_graph_node(&mut self, input: GraphNodeInput<'_>) -> Result<()> {
+        self.inner.ensure_usable()?;
         put_graph_node_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1762,6 +1786,7 @@ impl SharedDatabaseGuard<'_> {
     }
 
     pub fn put_graph_nodes(&mut self, inputs: &[GraphNodeInput<'_>]) -> Result<()> {
+        self.inner.ensure_usable()?;
         put_graph_nodes_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1770,6 +1795,7 @@ impl SharedDatabaseGuard<'_> {
     }
 
     pub fn get_graph_node(&mut self, graph_name: &str, node_id: &str) -> Result<GraphNode> {
+        self.inner.ensure_usable()?;
         get_graph_node_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1779,6 +1805,7 @@ impl SharedDatabaseGuard<'_> {
     }
 
     pub fn has_graph_node(&mut self, graph_name: &str, node_id: &str) -> Result<bool> {
+        self.inner.ensure_usable()?;
         has_graph_node_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1788,6 +1815,7 @@ impl SharedDatabaseGuard<'_> {
     }
 
     pub fn delete_graph_node(&mut self, graph_name: &str, node_id: &str) -> Result<()> {
+        self.inner.ensure_usable()?;
         delete_graph_node_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1797,6 +1825,7 @@ impl SharedDatabaseGuard<'_> {
     }
 
     pub fn delete_graph_nodes(&mut self, graph_name: &str, node_ids: &[&str]) -> Result<()> {
+        self.inner.ensure_usable()?;
         delete_graph_nodes_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1806,6 +1835,7 @@ impl SharedDatabaseGuard<'_> {
     }
 
     pub fn put_graph_edge(&mut self, input: GraphEdgeInput<'_>) -> Result<()> {
+        self.inner.ensure_usable()?;
         put_graph_edge_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1814,6 +1844,7 @@ impl SharedDatabaseGuard<'_> {
     }
 
     pub fn put_graph_edges(&mut self, inputs: &[GraphEdgeInput<'_>]) -> Result<()> {
+        self.inner.ensure_usable()?;
         put_graph_edges_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1828,6 +1859,7 @@ impl SharedDatabaseGuard<'_> {
         edge_type: &str,
         to_node_id: &str,
     ) -> Result<GraphEdge> {
+        self.inner.ensure_usable()?;
         get_graph_edge_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1845,6 +1877,7 @@ impl SharedDatabaseGuard<'_> {
         edge_type: &str,
         to_node_id: &str,
     ) -> Result<bool> {
+        self.inner.ensure_usable()?;
         has_graph_edge_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1856,6 +1889,7 @@ impl SharedDatabaseGuard<'_> {
     }
 
     pub fn delete_graph_edge(&mut self, input: GraphEdgeInput<'_>) -> Result<()> {
+        self.inner.ensure_usable()?;
         delete_graph_edge_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1864,6 +1898,7 @@ impl SharedDatabaseGuard<'_> {
     }
 
     pub fn delete_graph_edges(&mut self, inputs: &[GraphEdgeInput<'_>]) -> Result<()> {
+        self.inner.ensure_usable()?;
         delete_graph_edges_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1872,6 +1907,7 @@ impl SharedDatabaseGuard<'_> {
     }
 
     pub fn graph_degree(&mut self, options: GraphDegreeOptions<'_>) -> Result<u64> {
+        self.inner.ensure_usable()?;
         graph_degree_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1883,6 +1919,7 @@ impl SharedDatabaseGuard<'_> {
         &mut self,
         options: GraphNeighborsOptions<'_>,
     ) -> Result<Vec<GraphNeighbor>> {
+        self.inner.ensure_usable()?;
         graph_neighbors_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1891,6 +1928,7 @@ impl SharedDatabaseGuard<'_> {
     }
 
     pub fn graph_walk(&mut self, options: GraphWalkOptions<'_>) -> Result<Vec<GraphWalkItem>> {
+        self.inner.ensure_usable()?;
         graph_walk_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1899,6 +1937,7 @@ impl SharedDatabaseGuard<'_> {
     }
 
     pub fn install_extension(&mut self, name: &str) -> Result<()> {
+        self.inner.ensure_usable()?;
         install_extension_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1907,12 +1946,14 @@ impl SharedDatabaseGuard<'_> {
     }
 
     pub fn list_extensions(&mut self) -> Result<Vec<ExtensionInfo>> {
+        self.inner.ensure_usable()?;
         list_extensions_raw(self.inner.raw_ptr(), |status| {
             self.inner.status_locked(status)
         })
     }
 
     pub fn extension_info(&mut self, name: &str) -> Result<ExtensionInfo> {
+        self.inner.ensure_usable()?;
         extension_info_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1921,6 +1962,7 @@ impl SharedDatabaseGuard<'_> {
     }
 
     pub fn check_extension(&mut self, name: &str) -> Result<()> {
+        self.inner.ensure_usable()?;
         check_extension_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -1929,12 +1971,14 @@ impl SharedDatabaseGuard<'_> {
     }
 
     pub fn check_extensions(&mut self) -> Result<()> {
+        self.inner.ensure_usable()?;
         check_extensions_raw(self.inner.raw_ptr(), |status| {
             self.inner.status_locked(status)
         })
     }
 
     pub fn drop_extension(&mut self, name: &str) -> Result<()> {
+        self.inner.ensure_usable()?;
         drop_extension_raw(
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
@@ -2073,6 +2117,7 @@ impl SharedGuardStatement<'_> {
         &mut self,
         f: impl FnOnce(NonNull<zova_sys::zova_statement>, &SharedDatabaseInner) -> Result<T>,
     ) -> Result<T> {
+        self.inner.ensure_usable()?;
         let raw = self.raw()?;
         f(raw, self.inner)
     }
@@ -2242,8 +2287,9 @@ impl SharedDatabaseInner {
     /// Acquire the exclusive connection lock for one operation, refusing to run
     /// on a handle retired by a failed unwind cleanup.
     fn enter(&self) -> Result<MutexGuard<'_, ()>> {
+        let guard = self.lock();
         self.ensure_usable()?;
-        Ok(self.lock())
+        Ok(guard)
     }
 
     /// Record an unwind cleanup failure. This runs while the connection lock is
@@ -2278,6 +2324,7 @@ impl SharedDatabaseInner {
     }
 
     fn commit_locked(&self) -> Result<()> {
+        self.ensure_usable()?;
         self.simple_locked(zova_sys::zova_database_commit)
     }
 
