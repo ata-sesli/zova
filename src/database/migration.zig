@@ -267,15 +267,15 @@ pub fn collectMigrationBindings(
         if ((try stmt.step()) == .row) {
             const epoch_value = stmt.columnInt64(3);
             if (epoch_value < 0) return error.BoundStoreInvalid;
-            const store_path = try allocator.dupeZ(u8, stmt.columnText(0));
+            const store_path = try allocator.dupeSentinel(u8, stmt.columnText(0), 0);
             errdefer allocator.free(store_path);
             const store_id = try allocator.dupe(u8, stmt.columnText(1));
             errdefer allocator.free(store_id);
             const bound_set_id = try allocator.dupe(u8, stmt.columnText(2));
             errdefer allocator.free(bound_set_id);
-            const final_path = try allocator.dupeZ(u8, "");
+            const final_path = try allocator.dupeSentinel(u8, "", 0);
             errdefer allocator.free(final_path);
-            const staging_path = try allocator.dupeZ(u8, "");
+            const staging_path = try allocator.dupeSentinel(u8, "", 0);
             errdefer allocator.free(staging_path);
             out[count.*] = .{
                 .role = entry.role,

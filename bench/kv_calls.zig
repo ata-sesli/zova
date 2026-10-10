@@ -78,7 +78,7 @@ pub fn main(init: std.process.Init) !void {
         try db.sqlite_db.commit();
     }
     report("empty_transaction", start, repeats);
-    var disk = try zova.Database.create(try init.arena.allocator().dupeZ(u8, args[1]));
+    var disk = try zova.Database.create(try init.arena.allocator().dupeSentinel(u8, args[1], 0));
     defer disk.deinit();
     try disk.kvPut("ns", "key", "small-value");
     start = now();

@@ -61,7 +61,7 @@ fn io() std.Io {
 }
 
 fn fixturePath(buffer: []u8, name: []const u8) ![:0]const u8 {
-    return std.fmt.bufPrintZ(buffer, "{s}/{s}", .{ fixture_dir, name });
+    return std.fmt.bufPrintSentinel(buffer, "{s}/{s}", .{ fixture_dir, name }, 0);
 }
 
 fn fileSha256(path: []const u8) ![32]u8 {
@@ -129,13 +129,13 @@ fn copyFixture(tmp_sub_path: []const u8, index: usize, name: []const u8) ![:0]co
     const source_path = try fixturePath(&source_buffer, name);
 
     var copy_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const copy_path = try std.fmt.bufPrintZ(&copy_buffer, ".zig-cache/tmp/{s}/migration-red-{d}-{s}", .{ tmp_sub_path, index, name });
+    const copy_path = try std.fmt.bufPrintSentinel(&copy_buffer, ".zig-cache/tmp/{s}/migration-red-{d}-{s}", .{ tmp_sub_path, index, name }, 0);
 
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io(), source_path, std.testing.allocator, .limited(64 * 1024 * 1024));
     defer std.testing.allocator.free(bytes);
 
     try std.Io.Dir.cwd().writeFile(io(), .{ .sub_path = copy_path, .data = bytes });
-    return try std.testing.allocator.dupeZ(u8, copy_path);
+    return try std.testing.allocator.dupeSentinel(u8, copy_path, 0);
 }
 
 /// Assert that an open attempt fails with `expected_error` and never mutates
@@ -189,8 +189,8 @@ fn writeSyntheticFormatDatabase(
     magic_row: []const u8,
 ) ![:0]const u8 {
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/{s}", .{ tmp_sub_path, file_name });
-    const owned_path = try std.testing.allocator.dupeZ(u8, db_path);
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/{s}", .{ tmp_sub_path, file_name }, 0);
+    const owned_path = try std.testing.allocator.dupeSentinel(u8, db_path, 0);
 
     {
         var raw = try sqlite.Database.open(db_path);
@@ -260,7 +260,7 @@ test "open rejects missing metadata without mutation" {
     // Missing _zova_meta table entirely.
     {
         var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/no-meta-table.zova", .{tmp.sub_path});
+        const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/no-meta-table.zova", .{tmp.sub_path}, 0);
 
         {
             var raw = try sqlite.Database.open(db_path);
@@ -293,7 +293,7 @@ test "open rejects non-zova inputs without mutation" {
     // Text file wearing a .zova extension.
     {
         var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const file_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/not-a-database.zova", .{tmp.sub_path});
+        const file_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/not-a-database.zova", .{tmp.sub_path}, 0);
         try std.Io.Dir.cwd().writeFile(io(), .{ .sub_path = file_path, .data = "definitely not a sqlite database\n" });
 
         const before = try fileSha256(file_path);
@@ -305,7 +305,7 @@ test "open rejects non-zova inputs without mutation" {
     // Plain SQLite database without Zova identity.
     {
         var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/plain-sqlite.zova", .{tmp.sub_path});
+        const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/plain-sqlite.zova", .{tmp.sub_path}, 0);
 
         {
             var raw = try sqlite.Database.open(db_path);
@@ -357,7 +357,7 @@ test "probe and open agree on classification for synthetic databases" {
     // A genuinely created database probes as current and opens.
     {
         var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/probe-current.zova", .{tmp.sub_path});
+        const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/probe-current.zova", .{tmp.sub_path}, 0);
         {
             var db = try Database.create(db_path);
             db.deinit();
@@ -417,7 +417,7 @@ test "probe rejects non-zova inputs without mutation" {
 
     // Text file wearing a .zova extension.
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const file_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/not-a-database-probe.zova", .{tmp.sub_path});
+    const file_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/not-a-database-probe.zova", .{tmp.sub_path}, 0);
     try std.Io.Dir.cwd().writeFile(io(), .{ .sub_path = file_path, .data = "definitely not a sqlite database\n" });
 
     const before = try fileSha256(file_path);
@@ -427,6 +427,6 @@ test "probe rejects non-zova inputs without mutation" {
 
     // Missing database file.
     var missing_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const missing_path = try std.fmt.bufPrintZ(&missing_buffer, ".zig-cache/tmp/{s}/does-not-exist.zova", .{tmp.sub_path});
+    const missing_path = try std.fmt.bufPrintSentinel(&missing_buffer, ".zig-cache/tmp/{s}/does-not-exist.zova", .{tmp.sub_path}, 0);
     try std.testing.expectError(error.NotZovaDatabase, zova.probeDatabaseFormat(missing_path));
 }

@@ -25,9 +25,9 @@ test "c abi graph operations route through a bound store after reopen" {
     defer tmp.cleanup();
 
     var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const main_path = try std.fmt.bufPrintZ(&main_buffer, ".zig-cache/tmp/{s}/c-abi-bound-graph-main.zova", .{tmp.sub_path[0..]});
+    const main_path = try std.fmt.bufPrintSentinel(&main_buffer, ".zig-cache/tmp/{s}/c-abi-bound-graph-main.zova", .{tmp.sub_path[0..]}, 0);
     var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const store_path = try std.fmt.bufPrintZ(&store_buffer, ".zig-cache/tmp/{s}/c-abi-bound-graph-store.zova", .{tmp.sub_path[0..]});
+    const store_path = try std.fmt.bufPrintSentinel(&store_buffer, ".zig-cache/tmp/{s}/c-abi-bound-graph-store.zova", .{tmp.sub_path[0..]}, 0);
 
     try zova.createGraphStore(store_path);
     {
@@ -74,7 +74,7 @@ test "c abi graph operations route through a bound store after reopen" {
         .db = handle,
         .graph_name = "deps",
         .node_id = "a",
-        .direction = @intFromEnum(internal.zova_graph_neighbor_direction.OUTGOING),
+        .direction = @backingInt(internal.zova_graph_neighbor_direction.OUTGOING),
         .edge_type = "imports",
         .limit = 10,
         .out_results = &neighbors,
@@ -86,7 +86,7 @@ test "c abi graph operations route through a bound store after reopen" {
         .db = handle,
         .graph_name = "deps",
         .node_id = "a",
-        .direction = @intFromEnum(internal.zova_graph_neighbor_direction.INCOMING),
+        .direction = @backingInt(internal.zova_graph_neighbor_direction.INCOMING),
         .edge_type = "imports",
         .limit = 10,
         .out_results = &neighbors,
@@ -101,7 +101,7 @@ test "c abi graph operations route through a bound store after reopen" {
         .db = handle,
         .graph_name = "deps",
         .start_node_id = "b",
-        .direction = @intFromEnum(internal.zova_graph_neighbor_direction.INCOMING),
+        .direction = @backingInt(internal.zova_graph_neighbor_direction.INCOMING),
         .edge_type = "imports",
         .max_depth = 2,
         .limit = 10,
@@ -116,7 +116,7 @@ test "c abi graph operations route through a bound store after reopen" {
         .graph_name = "deps",
         .node_id = "d",
         .kind = "file",
-        .target_type = @intFromEnum(internal.zova_graph_target_type.NONE),
+        .target_type = @backingInt(internal.zova_graph_target_type.NONE),
         .target_namespace = null,
         .target_ref = null,
     }));

@@ -2936,7 +2936,7 @@ pub fn increaseFreshBuildCache(db: *sqlite.Database) Error!?i64 {
 pub fn restoreFreshBuildCache(db: *sqlite.Database, previous: ?i64) Error!void {
     const value = previous orelse return;
     var buffer: [64]u8 = undefined;
-    const pragma = std.fmt.bufPrintZ(&buffer, "pragma cache_size={d}", .{value}) catch return error.SqliteError;
+    const pragma = std.fmt.bufPrintSentinel(&buffer, "pragma cache_size={d}", .{value}, 0) catch return error.SqliteError;
     try db.exec(pragma);
 }
 

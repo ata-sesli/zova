@@ -1,10 +1,82 @@
 #include "zova_plugin.h"
 #include <stddef.h>
+#include <string.h>
 
 #ifdef __cplusplus
 static_assert(offsetof(zova_plugin_descriptor_v1, flags) == 8, "descriptor prefix");
 #else
 _Static_assert(offsetof(zova_plugin_descriptor_v1, flags) == 8, "descriptor prefix");
+#endif
+
+#ifdef ZOVA_SERVICES_FIXTURE
+#ifdef __cplusplus
+#define ZOVA_LAYOUT_ASSERT static_assert
+#else
+#define ZOVA_LAYOUT_ASSERT _Static_assert
+#endif
+ZOVA_LAYOUT_ASSERT(offsetof(zova_plugin_service_host_v1, base) == 0, "host prefix");
+ZOVA_LAYOUT_ASSERT(offsetof(zova_plugin_value_v1, integer) == 8, "value prefix");
+ZOVA_LAYOUT_ASSERT(offsetof(zova_plugin_query_request_v1, sql) == 8, "request prefix");
+ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_host_v1) == 16, "host layout");
+ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_service_host_v1) == 24, "service host layout");
+ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_descriptor_v1) == 88, "descriptor layout");
+ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_upgrade_descriptor_v1) == 104, "upgrade layout");
+ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_value_v1) == 40, "value layout");
+ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_query_request_v1) == 72, "query layout");
+
+static int32_t ZOVA_PLUGIN_CALL receive(void *raw, const zova_plugin_value_v1 *v, uint64_t count) {
+    int *valid = (int *)raw;
+    *valid = count == 5 && v[0].kind == ZOVA_PLUGIN_VALUE_INTEGER && v[0].integer == 42 &&
+        v[1].kind == ZOVA_PLUGIN_VALUE_FLOAT && v[1].real == 1.25 &&
+        v[2].kind == ZOVA_PLUGIN_VALUE_TEXT && v[2].bytes_len == 3 &&
+        memcmp(v[2].bytes, "a\0b", 3) == 0 && v[3].kind == ZOVA_PLUGIN_VALUE_BLOB &&
+        v[3].bytes_len == 0 && v[4].kind == ZOVA_PLUGIN_VALUE_NULL;
+    return ZOVA_PLUGIN_OK;
+}
+
+static int32_t ZOVA_PLUGIN_CALL check_services(const zova_plugin_host_v1 *host, void *db) {
+    const zova_plugin_service_host_v1 *extended;
+    const zova_plugin_query_service_v1 *query;
+    const zova_plugin_diagnostics_service_v1 *diagnostics;
+    const void *service = NULL;
+    zova_plugin_value_v1 parameters[5] = {0};
+    zova_plugin_query_request_v1 request = {0};
+    uint8_t diagnostic[1024];
+    uint64_t written = 0;
+    int valid = 0;
+    if (host->struct_size < sizeof(zova_plugin_service_host_v1)) return ZOVA_PLUGIN_UNSUPPORTED;
+    extended = (const zova_plugin_service_host_v1 *)host;
+    if (extended->get_service(db, 999, 1, 0, &service) != ZOVA_PLUGIN_UNSUPPORTED || service != NULL)
+        return ZOVA_PLUGIN_ERROR;
+    if (extended->get_service(db, ZOVA_PLUGIN_SERVICE_QUERY, 1, sizeof(*query), &service) != 0)
+        return ZOVA_PLUGIN_ERROR;
+    query = (const zova_plugin_query_service_v1 *)service;
+    parameters[0].kind = ZOVA_PLUGIN_VALUE_INTEGER;
+    parameters[0].integer = 42;
+    parameters[1].kind = ZOVA_PLUGIN_VALUE_FLOAT;
+    parameters[1].real = 1.25;
+    parameters[2].kind = ZOVA_PLUGIN_VALUE_TEXT;
+    parameters[2].bytes = (const uint8_t *)"a\0b";
+    parameters[2].bytes_len = 3;
+    parameters[3].kind = ZOVA_PLUGIN_VALUE_BLOB;
+    request.struct_size = sizeof(request);
+    request.sql = "SELECT ?, ?, ?, ?, ?";
+    request.sql_len = strlen(request.sql);
+    request.parameters = parameters;
+    request.parameter_count = 5;
+    request.row_limit = 1;
+    request.byte_limit = 1024;
+    request.row = receive;
+    request.user_data = &valid;
+    if (query->query(db, &request) != 0 || !valid) return ZOVA_PLUGIN_ERROR;
+    if (extended->get_service(db, ZOVA_PLUGIN_SERVICE_DIAGNOSTICS, 1, sizeof(*diagnostics), &service) != 0)
+        return ZOVA_PLUGIN_ERROR;
+    diagnostics = (const zova_plugin_diagnostics_service_v1 *)service;
+    if (host->exec_sql(db, "not SQL", 7) != ZOVA_PLUGIN_ERROR) return ZOVA_PLUGIN_ERROR;
+    if (diagnostics->copy_sqlite_error(db, diagnostic, sizeof(diagnostic), &written) != 0 || written == 0)
+        return ZOVA_PLUGIN_ERROR;
+    return ZOVA_PLUGIN_OK;
+}
 #endif
 
 static int32_t ZOVA_PLUGIN_CALL install(const zova_plugin_host_v1 *host, void *db) {
@@ -36,9 +108,20 @@ static const zova_plugin_upgrade_descriptor_v1 upgraded_descriptor = {
 };
 #else
 static const zova_plugin_descriptor_v1 descriptor = {
-    sizeof(zova_plugin_descriptor_v1), ZOVA_PLUGIN_ABI_V1, 0,
+    sizeof(zova_plugin_descriptor_v1), ZOVA_PLUGIN_ABI_V1,
+#ifdef ZOVA_SERVICES_FIXTURE
+    ZOVA_PLUGIN_REQUIRES_QUERY_V1 | ZOVA_PLUGIN_REQUIRES_DIAGNOSTICS_V1,
+#else
+    0,
+#endif
     "c_test", "1.0.0", "_zova_ext_c_test_", "1.0.0", "",
-    install, NULL, drop, NULL
+    install,
+#ifdef ZOVA_SERVICES_FIXTURE
+    check_services,
+#else
+    NULL,
+#endif
+    drop, NULL
 };
 #endif
 

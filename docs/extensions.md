@@ -703,6 +703,60 @@ path, including the Windows module loader. Generated-C dynamic loading remains
 unsupported; this header does not enable it. Libraries must match the host's
 OS, architecture, and deployment target.
 
+## Negotiated host services (in development for 1.2.0)
+
+The portable host now preserves `zova_plugin_host_v1` as its first member and
+appends a service lookup in `zova_plugin_service_host_v1`. Check the host's
+`struct_size` before accessing that lookup. Request the exact service version
+and minimum structure size; unknown services, versions or larger requirements
+return `ZOVA_PLUGIN_UNSUPPORTED` with a null output. Required services must also
+be declared in descriptor flags, so older hosts reject the plugin before hooks
+run. The upgrade flag can be combined with required-service flags. Installed
+data/version matching and the legacy Zig descriptor remain unchanged.
+
+Two services are currently implemented:
+
+- **Query v1:** one parameterized read-only `SELECT`/`WITH` query with synchronous
+  typed row callbacks. Rows preserve SQLite value types, including empty BLOB
+  versus NULL and embedded NUL in text. Inputs remain valid until the call
+  returns; result bytes remain valid only during the row callback. Copy any
+  retained result using the plugin's allocator. No host-owned result allocation
+  or destructor crosses the ABI.
+- **Diagnostics v1:** copy SQLite's current error message into a caller buffer
+  of at most 1024 bytes. It is length-delimited, not NUL-terminated. Truncation
+  returns `LIMIT`; later database work may replace the message.
+
+Queries accept up to 256 parameters and 128 columns. SQL, total parameter bytes
+and total delivered bytes each have a 1 MiB ceiling; row limits are at most
+4096. A delivered row's byte cost includes its value descriptors and text/blob
+bytes. Both result limits are mandatory. Exceeding a budget or cancellation can
+follow earlier row callbacks: discard partial results on failure. Statements are
+finalized on success, SQL error, limit, callback failure or allocation failure.
+These limits bound delivery, not arbitrary SQL runtime or SQLite working memory.
+PRAGMAs, multiple statements, transaction commands and mutations are rejected by
+the query service before execution. Side-effecting SQL functions are forbidden
+by the author contract; native plugins remain trusted, not sandboxed.
+
+Host/context/service tables are borrowed within the current hook and its thread.
+Row callbacks may return `OK`, `OUT_OF_MEMORY` or `CANCELED`; other statuses are
+invalid arguments. Connection services reject reentry from a row callback.
+Plugins must not retain these contexts, throw C++ exceptions across the boundary
+or call the public database API recursively. Service statuses are distinct from
+the application's `zova_status`; a nonzero lifecycle-hook status still fails the
+existing lifecycle operation.
+
+Zig authors use `zova.extension_plugin` (implemented in the standalone
+`src/extension_plugin_api.zig`) and `Client` over these same C layouts. That
+module has no SQLite/engine dependency. `examples/plugin_query.zig` is compiled
+as a real portable library alongside the C and C++ fixtures and loaded through
+the existing trusted loader in `zig build test-extensions`.
+
+This is the common-service foundation, not the complete algorithm-extension
+architecture. Typed graph/vector access, parameterized private-storage writes,
+SQL operation registration, incremental maintenance and generated-C bundle
+loading remain separate implementation work. Do not use private core tables as
+an algorithm-authoring interface. Bundled `trgm` and application APIs are unchanged.
+
 ## Native Artifact Notes
 
 Native extension artifacts must be built for the target platform and a

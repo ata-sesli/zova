@@ -13,7 +13,7 @@ fn opfsPathExists(path: []const u8) Error!bool {
     const c = @import("../sqlite.zig").c;
     const vfs = c.sqlite3_vfs_find("opfs-sahpool");
     if (vfs == null or c.sqlite3_vfs_find(null) != vfs) return error.CantOpen;
-    const name = try std.heap.c_allocator.dupeZ(u8, path);
+    const name = try std.heap.c_allocator.dupeSentinel(u8, path, 0);
     defer std.heap.c_allocator.free(name);
     var exists: c_int = 0;
     if (vfs.*.xAccess.?(vfs, name.ptr, c.SQLITE_ACCESS_EXISTS, &exists) != c.SQLITE_OK)

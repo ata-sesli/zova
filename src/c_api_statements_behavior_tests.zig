@@ -46,7 +46,7 @@ test "c abi exposes sql record helper functions" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-record-helpers.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-record-helpers.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     var create_request = zova_database_open_request{
@@ -103,7 +103,7 @@ test "c abi exposes prepared statement sql lifecycle" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-statements.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-statements.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     var create_request = zova_database_open_request{
@@ -275,7 +275,7 @@ test "c abi serializes concurrent statement metadata calls on one statement" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-threaded-statement.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-threaded-statement.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
@@ -310,7 +310,7 @@ test "c abi can query bundled trgm SQL surface through prepared statements" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-trgm.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-trgm.zova", .{tmp.sub_path[0..]}, 0);
 
     {
         var native = try zova.Database.create(db_path);

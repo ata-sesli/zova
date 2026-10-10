@@ -185,7 +185,7 @@ fn validateOneBoundStore(
     mismatch_epoch_kind: []const u8,
     expected_epoch: u64,
 ) !void {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
 
     var store = sqlite.Database.openWithFlags(path_z, .read_only) catch |err| {

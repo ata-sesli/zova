@@ -128,7 +128,7 @@ pub fn formatCommand(
         const fmt: OutputFormat = if (argsContain(args, "--json")) .json else .text;
         return usageErrorFormat(stderr, "format", fmt, formatUsageMessage(err));
     };
-    const path_z = allocator.dupeZ(u8, parsed.path) catch return ExitCode.unexpected;
+    const path_z = allocator.dupeSentinel(u8, parsed.path, 0) catch return ExitCode.unexpected;
     defer allocator.free(path_z);
     const info_or_err = zova.probeDatabaseFormat(path_z);
     if (info_or_err) |info| {
@@ -257,9 +257,9 @@ pub fn migrateCommand(
         const fmt = parsed.format;
         return usageErrorFormat(stderr, "migrate", fmt, "source and destination must differ");
     }
-    const source_z = allocator.dupeZ(u8, parsed.source_path) catch return ExitCode.unexpected;
+    const source_z = allocator.dupeSentinel(u8, parsed.source_path, 0) catch return ExitCode.unexpected;
     defer allocator.free(source_z);
-    const dest_z = allocator.dupeZ(u8, parsed.destination_path) catch return ExitCode.unexpected;
+    const dest_z = allocator.dupeSentinel(u8, parsed.destination_path, 0) catch return ExitCode.unexpected;
     defer allocator.free(dest_z);
 
     const probe_before = zova.probeDatabaseFormat(source_z) catch |err| {
@@ -298,9 +298,9 @@ pub fn backupCommand(
         return usageErrorFormat(stderr, "backup", format, operationalUsageMessage("backup", err));
     };
 
-    const source = try allocator.dupeZ(u8, parsed.source_path);
+    const source = try allocator.dupeSentinel(u8, parsed.source_path, 0);
     defer allocator.free(source);
-    const destination = try allocator.dupeZ(u8, parsed.destination_path);
+    const destination = try allocator.dupeSentinel(u8, parsed.destination_path, 0);
     defer allocator.free(destination);
 
     var db = openDatabase(ctx, source) catch |err| return openErrorFormat(stderr, "backup", parsed.format, err);
@@ -323,9 +323,9 @@ pub fn compactCommand(
         return usageErrorFormat(stderr, "compact", format, operationalUsageMessage("compact", err));
     };
 
-    const source = try allocator.dupeZ(u8, parsed.source_path);
+    const source = try allocator.dupeSentinel(u8, parsed.source_path, 0);
     defer allocator.free(source);
-    const destination = try allocator.dupeZ(u8, parsed.destination_path);
+    const destination = try allocator.dupeSentinel(u8, parsed.destination_path, 0);
     defer allocator.free(destination);
 
     var db = openDatabase(ctx, source) catch |err| return openErrorFormat(stderr, "compact", parsed.format, err);
@@ -348,9 +348,9 @@ pub fn restoreCommand(
         return usageErrorFormat(stderr, "restore", format, operationalUsageMessage("restore", err));
     };
 
-    const source = try allocator.dupeZ(u8, parsed.source_path);
+    const source = try allocator.dupeSentinel(u8, parsed.source_path, 0);
     defer allocator.free(source);
-    const destination = try allocator.dupeZ(u8, parsed.destination_path);
+    const destination = try allocator.dupeSentinel(u8, parsed.destination_path, 0);
     defer allocator.free(destination);
 
     zova.restoreBackupWithExtensions(source, destination, .{ .verify = parsed.verify }, ctx.registry) catch |err| return operationalErrorFormat(stderr, "restore", parsed.format, err);

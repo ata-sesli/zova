@@ -4,6 +4,9 @@
 
 use std::os::raw::{c_char, c_int, c_void};
 
+/// Raw portable plugin ABI. Lifetimes and limits are defined by zova_plugin.h.
+pub mod plugin;
+
 pub type zova_status = c_int;
 pub type zova_step_result = c_int;
 pub type zova_column_type = c_int;

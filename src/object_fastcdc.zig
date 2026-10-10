@@ -213,7 +213,7 @@ test "fastcdc-v1 chunks empty input into zero chunks" {
 }
 
 test "fastcdc-v1 chunks small input as one chunk" {
-    const input = [_]u8{'a'} ** (min_size - 1);
+    const input = @as([(min_size - 1)]u8, @splat('a'));
 
     const chunks = try chunkBoundaries(std.testing.allocator, &input);
     defer std.testing.allocator.free(chunks);
@@ -223,7 +223,7 @@ test "fastcdc-v1 chunks small input as one chunk" {
 }
 
 test "fastcdc-v1 chunks exactly minimum size as one chunk" {
-    const input = [_]u8{'b'} ** min_size;
+    const input = @as([min_size]u8, @splat('b'));
 
     const chunks = try chunkBoundaries(std.testing.allocator, &input);
     defer std.testing.allocator.free(chunks);
@@ -233,7 +233,7 @@ test "fastcdc-v1 chunks exactly minimum size as one chunk" {
 }
 
 test "fastcdc-v1 caps chunks at maximum size" {
-    const input = [_]u8{'c'} ** (max_size + 4096);
+    const input = @as([(max_size + 4096)]u8, @splat('c'));
 
     const chunks = try chunkBoundaries(std.testing.allocator, &input);
     defer std.testing.allocator.free(chunks);
@@ -245,7 +245,7 @@ test "fastcdc-v1 caps chunks at maximum size" {
 }
 
 test "fastcdc-v1 non-final chunks respect minimum size" {
-    const input = [_]u8{'d'} ** (max_size * 2 + 1024);
+    const input = @as([(max_size * 2 + 1024)]u8, @splat('d'));
 
     const chunks = try chunkBoundaries(std.testing.allocator, &input);
     defer std.testing.allocator.free(chunks);
@@ -308,7 +308,7 @@ test "fastcdc-v1 fixture locks exact boundaries" {
 }
 
 test "fastcdc-v1 repeated content produces duplicate chunk hashes" {
-    const input = [_]u8{0} ** (max_size * 4);
+    const input = @as([(max_size * 4)]u8, @splat(0));
 
     const chunks = try chunkBoundaries(std.testing.allocator, &input);
     defer std.testing.allocator.free(chunks);
@@ -317,7 +317,7 @@ test "fastcdc-v1 repeated content produces duplicate chunk hashes" {
 }
 
 test "fastcdc-v1 insertion near front preserves a later chunk hash" {
-    const base = [_]u8{0} ** (max_size * 4);
+    const base = @as([(max_size * 4)]u8, @splat(0));
 
     var edited: [base.len + 257]u8 = undefined;
     for (edited[0..257], 0..) |*byte, index| {
@@ -432,9 +432,9 @@ test "streaming fastcdc-v1 fixture locks exact boundaries" {
 }
 
 test "streaming fastcdc-v1 handles small exact minimum and large inputs" {
-    const small = [_]u8{'s'} ** (min_size - 1);
-    const exact_min = [_]u8{'m'} ** min_size;
-    const large = [_]u8{'l'} ** (max_size + 4096);
+    const small = @as([(min_size - 1)]u8, @splat('s'));
+    const exact_min = @as([min_size]u8, @splat('m'));
+    const large = @as([(max_size + 4096)]u8, @splat('l'));
 
     const small_chunks = try streamingChunkBoundaries(std.testing.allocator, &small, &.{1});
     defer std.testing.allocator.free(small_chunks);
@@ -456,7 +456,7 @@ test "streaming fastcdc-v1 handles small exact minimum and large inputs" {
 }
 
 test "streaming fastcdc-v1 preserves repeated-content duplicate chunk hashes" {
-    const input = [_]u8{0} ** (max_size * 4);
+    const input = @as([(max_size * 4)]u8, @splat(0));
 
     const streamed = try streamingChunkBoundaries(std.testing.allocator, &input, &.{ 512, 11, 32768 });
     defer std.testing.allocator.free(streamed);
@@ -465,7 +465,7 @@ test "streaming fastcdc-v1 preserves repeated-content duplicate chunk hashes" {
 }
 
 test "streaming fastcdc-v1 insertion near front preserves a later chunk hash" {
-    const base = [_]u8{0} ** (max_size * 4);
+    const base = @as([(max_size * 4)]u8, @splat(0));
 
     var edited: [base.len + 257]u8 = undefined;
     for (edited[0..257], 0..) |*byte, index| {
@@ -496,7 +496,7 @@ test "streaming fastcdc-v1 does not allocate per byte" {
 }
 
 test "streaming fastcdc-v1 keeps rolling buffer bounded for large writes" {
-    const input = [_]u8{'z'} ** (max_size * 3 + 1);
+    const input = @as([(max_size * 3 + 1)]u8, @splat('z'));
 
     var chunker: StreamChunker = .empty;
     defer chunker.deinit(std.testing.allocator);
@@ -529,7 +529,7 @@ test "streaming fastcdc-v1 keeps rolling buffer bounded for large writes" {
 }
 
 test "streaming fastcdc-v1 next is stable until consume" {
-    const input = [_]u8{'q'} ** (max_size + 1);
+    const input = @as([(max_size + 1)]u8, @splat('q'));
 
     var chunker: StreamChunker = .empty;
     defer chunker.deinit(std.testing.allocator);

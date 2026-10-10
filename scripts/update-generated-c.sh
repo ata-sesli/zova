@@ -69,6 +69,9 @@ mkdir -p "$TMP" "$OUT"
 BUILD_OPTIONS="$TMP/zova_build_options.zig"
 printf '%s\n' 'pub const enable_dynamic_extensions = false;' >"$BUILD_OPTIONS"
 
+zig translate-c -target "$ZIG_TARGET" -O ReleaseSafe -lc \
+    -I "$SQLITE_DIR" "$SQLITE_DIR/sqlite3.h" >"$TMP/sqlite_c.zig"
+
 zig build-lib \
     -target "$ZIG_TARGET" \
     -ofmt=c \
@@ -79,11 +82,14 @@ zig build-lib \
     --cache-dir "$TMP/zig-cache" \
     --global-cache-dir "$TMP/global-zig-cache" \
     --dep zova_build_options \
+    --dep sqlite_c \
     -Mroot="$ROOT/src/c_api.zig" \
-    -Mzova_build_options="$BUILD_OPTIONS"
+    -Mzova_build_options="$BUILD_OPTIONS" \
+    -Msqlite_c="$TMP/sqlite_c.zig"
 
 cp "$ZIG_LIB_DIR/zig.h" "$OUT/zig.h"
 cp "$ROOT/include/zova.h" "$OUT/zova.h"
+cp "$ROOT/include/zova_plugin.h" "$OUT/zova_plugin.h"
 cp "$SQLITE_DIR/sqlite3.c" "$OUT/sqlite3.c"
 cp "$SQLITE_DIR/sqlite3.h" "$OUT/sqlite3.h"
 cp "$SQLITE_DIR/sqlite3ext.h" "$OUT/sqlite3ext.h"

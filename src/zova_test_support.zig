@@ -7,7 +7,7 @@ const sqlite = @import("sqlite.zig");
 const vector = @import("vector.zig");
 
 pub fn testingDbPath(buffer: []u8, sub_path: []const u8, filename: []const u8) ![:0]u8 {
-    return std.fmt.bufPrintZ(buffer, ".zig-cache/tmp/{s}/{s}", .{ sub_path, filename });
+    return std.fmt.bufPrintSentinel(buffer, ".zig-cache/tmp/{s}/{s}", .{ sub_path, filename }, 0);
 }
 
 pub fn testingWriteMetadata(db: *sqlite.Database, magic: []const u8, version_value: []const u8) !void {

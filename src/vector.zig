@@ -334,7 +334,7 @@ pub const Database = struct {
 
     fn prepareSchema(self: *Database, comptime sql_format: []const u8, args: anytype) Error!sqlite.Statement {
         var sql_buffer: [4096]u8 = undefined;
-        const sql = std.fmt.bufPrintZ(&sql_buffer, sql_format, args) catch return error.SqliteError;
+        const sql = std.fmt.bufPrintSentinel(&sql_buffer, sql_format, args, 0) catch return error.SqliteError;
         return try self.sqlite_db.prepare(sql);
     }
 

@@ -86,7 +86,7 @@ pub fn zova_object_put_with_options(
     const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const out = req.out_id orelse return failDb(handle, error.InvalidArgument);
-    out.* = .{ .bytes = [_]u8{0} ** 32 };
+    out.* = .{ .bytes = @as([32]u8, @splat(0)) };
     const options = objectOptionsFromAbi(req.options) orelse return failDb(handle, error.InvalidArgument);
     const bytes = bytesConst(req.data, req.len) orelse return failDb(handle, error.InvalidArgument);
     const id = handle.db.putObjectWithOptions(bytes, options) catch |err| return failDb(handle, err);
@@ -176,7 +176,7 @@ pub fn zova_object_manifest_get(request: ?*const zova_object_manifest_get_reques
         };
     }
 
-    const chunker = allocator.dupeZ(u8, manifest.chunker) catch |err| {
+    const chunker = allocator.dupeSentinel(u8, manifest.chunker, 0) catch |err| {
         allocator.free(chunks);
         return failDb(handle, err);
     };

@@ -31,7 +31,7 @@ test "c abi object profile options and sequential reader preserve compatibility"
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-object-options.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-object-options.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
@@ -42,12 +42,12 @@ test "c abi object profile options and sequential reader preserve compatibility"
     defer _ = zova_database_close(db);
 
     const bytes = "option-bearing object payload";
-    var id = zova_object_id{ .bytes = [_]u8{0} ** 32 };
+    var id = zova_object_id{ .bytes = @as([32]u8, @splat(0)) };
     try std.testing.expectEqual(zova_status.OK, zova_object_put_with_options(&.{
         .db = db,
         .data = bytes,
         .len = bytes.len,
-        .options = .{ .profile = @intFromEnum(zova_object_storage_profile.DEDUPLICATION) },
+        .options = .{ .profile = @backingInt(zova_object_storage_profile.DEDUPLICATION) },
         .out_id = &id,
     }));
 
@@ -83,20 +83,20 @@ test "c abi object profile options and sequential reader preserve compatibility"
     try std.testing.expectEqual(zova_status.OK, zova_object_reader_destroy(&.{ .reader = &reader }));
 
     const loose = "option-bearing loose chunk";
-    var loose_hash = zova_object_chunk_id{ .bytes = [_]u8{0} ** 32 };
+    var loose_hash = zova_object_chunk_id{ .bytes = @as([32]u8, @splat(0)) };
     try std.testing.expectEqual(zova_status.OK, zova_object_chunk_id_from_bytes(loose, loose.len, &loose_hash));
     try std.testing.expectEqual(zova_status.OK, zova_object_chunk_put_with_options(&.{
         .db = db,
         .expected_hash = loose_hash,
         .data = loose,
         .len = loose.len,
-        .options = .{ .profile = @intFromEnum(zova_object_storage_profile.DEDUPLICATION) },
+        .options = .{ .profile = @backingInt(zova_object_storage_profile.DEDUPLICATION) },
     }));
 
     var writer: ?*zova_object_writer = null;
     try std.testing.expectEqual(zova_status.OK, zova_object_writer_create_with_options(&.{
         .db = db,
-        .options = .{ .profile = @intFromEnum(zova_object_storage_profile.DEDUPLICATION) },
+        .options = .{ .profile = @backingInt(zova_object_storage_profile.DEDUPLICATION) },
         .out_writer = &writer,
     }));
     try std.testing.expectEqual(zova_status.OK, zova_object_writer_write(&.{
@@ -104,7 +104,7 @@ test "c abi object profile options and sequential reader preserve compatibility"
         .data = bytes,
         .len = bytes.len,
     }));
-    var writer_id = zova_object_id{ .bytes = [_]u8{0} ** 32 };
+    var writer_id = zova_object_id{ .bytes = @as([32]u8, @splat(0)) };
     try std.testing.expectEqual(zova_status.OK, zova_object_writer_finish(&.{
         .writer = writer,
         .out_id = &writer_id,
@@ -112,7 +112,7 @@ test "c abi object profile options and sequential reader preserve compatibility"
     try std.testing.expectEqual(id, writer_id);
     try std.testing.expectEqual(zova_status.OK, zova_object_writer_destroy(writer));
 
-    var invalid_id = zova_object_id{ .bytes = [_]u8{0} ** 32 };
+    var invalid_id = zova_object_id{ .bytes = @as([32]u8, @splat(0)) };
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_object_put_with_options(&.{
         .db = db,
         .data = bytes,
@@ -120,7 +120,7 @@ test "c abi object profile options and sequential reader preserve compatibility"
         .options = .{ .profile = 99 },
         .out_id = &invalid_id,
     }));
-    try std.testing.expectEqual(@as(zova_object_id, .{ .bytes = [_]u8{0} ** 32 }), invalid_id);
+    try std.testing.expectEqual(@as(zova_object_id, .{ .bytes = @as([32]u8, @splat(0)) }), invalid_id);
 }
 
 test "c abi serializes concurrent object writer writes on one writer" {
@@ -147,7 +147,7 @@ test "c abi serializes concurrent object writer writes on one writer" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-threaded-writer.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-threaded-writer.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
@@ -175,7 +175,7 @@ test "c abi serializes concurrent object writer writes on one writer" {
     for (threads) |thread| thread.join();
     for (contexts) |context| try std.testing.expectEqual(zova_status.OK, context.status);
 
-    var object_id = zova_object_id{ .bytes = [_]u8{0} ** 32 };
+    var object_id = zova_object_id{ .bytes = @as([32]u8, @splat(0)) };
     try std.testing.expectEqual(zova_status.OK, zova_object_writer_finish(&.{
         .writer = writer,
         .out_id = &object_id,

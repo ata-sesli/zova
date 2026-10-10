@@ -38,7 +38,7 @@ test "object and graph read paths reuse one bounded set of idle statements" {
     var db = try Database.createMemory();
     defer db.deinit();
 
-    const bytes = [_]u8{0x5a} ** (64 * 1024);
+    const bytes = @as([(64 * 1024)]u8, @splat(0x5a));
     const id = try putObjectRangeReadFixture(&db, std.testing.allocator, &bytes);
     try db.createGraph("cache");
     try db.putGraphNode(.{ .graph_name = "cache", .node_id = "a", .kind = "node" });
@@ -157,7 +157,7 @@ test "main and bound store read statements stay distinct and are disposed before
 
     var db = try Database.create(main_path);
     defer db.deinit();
-    const bytes = [_]u8{0x11} ** 8192;
+    const bytes = @as([8192]u8, @splat(0x11));
     var buffer: [512]u8 = undefined;
 
     // Main object storage must be empty before a store can be bound.
@@ -193,7 +193,7 @@ test "read statement cache retains at most the bounded number of idle statements
     }
     try db.putGraphEdge(.{ .graph_name = "cache", .from_node_id = "n0", .to_node_id = "n1", .edge_type = "link" });
 
-    const bytes = [_]u8{0x77} ** 4096;
+    const bytes = @as([4096]u8, @splat(0x77));
     const id = try db.putObjectWithOptions(&bytes, .{ .profile = .streaming });
 
     // Touch every cached variant, then confirm the ceiling still holds.

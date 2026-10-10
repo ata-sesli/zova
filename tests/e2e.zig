@@ -510,7 +510,7 @@ test "e2e two connections keep sqlite locking and later recover" {
 }
 
 fn testingDbPath(buffer: []u8, sub_path: []const u8, filename: []const u8) ![:0]u8 {
-    return std.fmt.bufPrintZ(buffer, ".zig-cache/tmp/{s}/{s}", .{ sub_path, filename });
+    return std.fmt.bufPrintSentinel(buffer, ".zig-cache/tmp/{s}/{s}", .{ sub_path, filename }, 0);
 }
 
 fn expectCliObjectChunkInspection(path: [:0]const u8, db: *zova.Database, object_id: zova.ObjectId) !void {
@@ -845,7 +845,7 @@ fn parseJson(bytes: []const u8) !std.json.Parsed(std.json.Value) {
 
 fn copyFixtureInto(destination_path: [:0]const u8, fixture_name: []const u8) !void {
     var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const source_path = try std.fmt.bufPrintZ(&source_buffer, "tests/fixtures/{s}", .{fixture_name});
+    const source_path = try std.fmt.bufPrintSentinel(&source_buffer, "tests/fixtures/{s}", .{fixture_name}, 0);
     const io = std.Io.Threaded.global_single_threaded.io();
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, source_path, std.testing.allocator, .limited(64 * 1024 * 1024));
     defer std.testing.allocator.free(bytes);

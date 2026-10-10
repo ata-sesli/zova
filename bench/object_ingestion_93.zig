@@ -27,7 +27,7 @@ pub fn main(init: std.process.Init) !void {
         state = state *% 6364136223846793005 +% 1442695040888963407;
         byte.* = @truncate(state >> 32);
     }
-    var raw = try objects.sqlite.Database.open(try allocator.dupeZ(u8, args[1]));
+    var raw = try objects.sqlite.Database.open(try allocator.dupeSentinel(u8, args[1], 0));
     defer raw.deinit();
     try raw.exec(objects.objects_schema_sql ++ ";" ++ objects.chunks_schema_sql ++ ";" ++ objects.object_chunks_schema_sql ++ ";");
     var db = objects.Database.initForPrototype(&raw, .main);

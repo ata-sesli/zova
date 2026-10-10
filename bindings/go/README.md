@@ -158,7 +158,7 @@ and translates them into cgo flags:
 ZOVA_INCLUDE_DIR=/path/to/include ZOVA_LIB_DIR=/path/to/lib sh test.sh
 ```
 
-You need Zig `0.16.0` or newer, cgo enabled, and a working C compiler.
+You need Zig `0.17.0` or newer, cgo enabled, and a working C compiler.
 
 ## Publishing
 

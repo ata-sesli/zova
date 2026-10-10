@@ -136,7 +136,7 @@ test "fixed-1m-v1 empty input has zero chunks" {
 }
 
 test "fixed-1m-v1 streaming buffer never exceeds one chunk" {
-    const input = [_]u8{0x33} ** (chunk_size * 2 + 17);
+    const input = @as([(chunk_size * 2 + 17)]u8, @splat(0x33));
     var chunker: StreamChunker = .empty;
     defer chunker.deinit(std.testing.allocator);
 

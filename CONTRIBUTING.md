@@ -26,7 +26,7 @@ Zova vendors SQLite. You do not need a system SQLite install.
 
 Expected tools:
 
-- Zig `0.16.0` or newer
+- Zig `0.17.0` or newer
 - Rust `1.79` or newer
 - Go `1.22` or newer
 - Python `3.10` or newer

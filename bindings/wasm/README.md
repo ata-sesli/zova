@@ -173,7 +173,7 @@ does not require SharedArrayBuffer. Safety traps become worker failures.
 
 ## Build and test
 
-Use Zig 0.16.0, Bun, and the pinned Emscripten version in
+Use Zig 0.17.0, Bun, and the pinned Emscripten version in
 `emscripten-version.txt` (6.0.9). Install development dependencies with
 `bun install` in `bindings/wasm`. From the repository root:
 

@@ -46,6 +46,12 @@ pub fn build(b: *std.Build) void {
     const zova_build_options = b.addOptions();
     zova_build_options.addOption(bool, "enable_dynamic_extensions", enable_dynamic_extensions);
 
+    _ = b.addTranslateC(.{
+        .root_source_file = b.path("vendor/sqlite3.53.4/sqlite3.h"),
+        .target = target,
+        .optimize = optimize,
+    }).addModule("sqlite_c");
+
     const sqlite_module = b.createModule(.{
         .target = target,
         .optimize = optimize,
@@ -76,6 +82,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     zova_dynamic_module.addOptions("zova_build_options", zova_build_options);
+    zova_dynamic_module.addImport("sqlite_c", b.modules.get("sqlite_c").?);
     zova_dynamic_module.addIncludePath(b.path("vendor/sqlite3.53.4"));
 
     const cli_module = b.createModule(.{
@@ -87,19 +94,22 @@ pub fn build(b: *std.Build) void {
     const cli_options = b.addOptions();
     const zova_exe_filename = std.zig.binNameAlloc(b.allocator, .{
         .root_name = "zova",
-        .target = &target.result,
+        .cpu_arch = target.result.cpu.arch,
+        .os_tag = target.result.os.tag,
+        .ofmt = target.result.ofmt,
+        .abi = target.result.abi,
         .output_mode = .Exe,
     }) catch @panic("out of memory");
-    const zova_exe_path = b.getInstallPath(.bin, zova_exe_filename);
+    const zova_exe_path: std.Build.LazyPath = .{ .relative = .{ .base = .install_bin, .sub_path = zova_exe_filename } };
     cli_options.addOption([]const u8, "package_version", package_version);
-    cli_options.addOptionPath("source_root", b.path("."));
+    cli_options.addOptionPathUntracked("source_root", b.path("."));
     cli_options.addOption([]const u8, "zig_exe", b.graph.zig_exe);
-    cli_options.addOption([]const u8, "zova_exe_path", zova_exe_path);
+    cli_options.addOptionPathUntracked("zova_exe_path", zova_exe_path);
     cli_module.addOptions("cli_options", cli_options);
 
     var dynamic_extension_fixture: ?*std.Build.Step.Compile = null;
     const plugin_fixture_options = b.addOptions();
-    for ([_][]const u8{ "c", "cpp", "upgrade" }) |language| {
+    for ([_][]const u8{ "c", "cpp", "upgrade", "services_c", "services_cpp" }) |language| {
         const option_name = b.fmt("plugin_{s}_fixture", .{language});
         if (supports_dynamic_extension_fixture) {
             const fixture = b.addLibrary(.{
@@ -109,13 +119,22 @@ pub fn build(b: *std.Build) void {
             });
             fixture.root_module.addIncludePath(b.path("include"));
             fixture.root_module.addCSourceFile(.{
-                .file = b.path(if (std.mem.eql(u8, language, "cpp")) "tests/plugin_fixture.cpp" else "tests/plugin_fixture.c"),
-                .flags = if (std.mem.eql(u8, language, "cpp")) &.{"-std=c++17"} else if (std.mem.eql(u8, language, "upgrade")) &.{ "-std=c11", "-DZOVA_UPGRADE_FIXTURE" } else &.{"-std=c11"},
+                .file = b.path(if (std.mem.endsWith(u8, language, "cpp")) "tests/plugin_fixture.cpp" else "tests/plugin_fixture.c"),
+                .flags = if (std.mem.eql(u8, language, "services_cpp")) &.{ "-std=c++17", "-DZOVA_SERVICES_FIXTURE" } else if (std.mem.eql(u8, language, "services_c")) &.{ "-std=c11", "-DZOVA_SERVICES_FIXTURE" } else if (std.mem.eql(u8, language, "cpp")) &.{"-std=c++17"} else if (std.mem.eql(u8, language, "upgrade")) &.{ "-std=c11", "-DZOVA_UPGRADE_FIXTURE" } else &.{"-std=c11"},
             });
             plugin_fixture_options.addOptionPath(option_name, fixture.getEmittedBin());
         } else {
             plugin_fixture_options.addOption([]const u8, option_name, "");
         }
+    }
+    if (supports_dynamic_extension_fixture) {
+        const author_module = b.createModule(.{ .root_source_file = b.path("src/extension_plugin_api.zig"), .target = target, .optimize = optimize });
+        const fixture_module = b.createModule(.{ .root_source_file = b.path("examples/plugin_query.zig"), .target = target, .optimize = optimize, .link_libc = true });
+        fixture_module.addImport("zova_plugin", author_module);
+        const fixture = b.addLibrary(.{ .name = "plugin_zig_fixture", .linkage = .dynamic, .root_module = fixture_module });
+        plugin_fixture_options.addOptionPath("plugin_zig_fixture", fixture.getEmittedBin());
+    } else {
+        plugin_fixture_options.addOption([]const u8, "plugin_zig_fixture", "");
     }
     if (supports_dynamic_extension_fixture and target.result.os.tag == .windows) {
         // A dependency DLL with an unqualified import name plus a dedicated
@@ -216,8 +235,9 @@ pub fn build(b: *std.Build) void {
     });
     storage_benchmark.root_module.addImport("zova", zova_module);
     const storage_benchmark_cmd = b.addRunArtifact(storage_benchmark);
-    storage_benchmark_cmd.addArg(b.pathJoin(&.{ b.cache_root.path orelse ".zig-cache", "storage-format-benchmark.zova" }));
-    if (b.args) |args| storage_benchmark_cmd.addArgs(args);
+    _ = storage_benchmark_cmd.addOutputFileArg("storage-format-benchmark.zova");
+    storage_benchmark_cmd.has_side_effects = true;
+    storage_benchmark_cmd.addPassthruArgs();
     const storage_benchmark_step = b.step("bench-storage", "Run deterministic graph/vector storage benchmark");
     storage_benchmark_step.dependOn(&storage_benchmark_cmd.step);
 
@@ -249,6 +269,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     object_benchmark.root_module.addImport("object_impl", object_benchmark_module);
+    object_benchmark_module.addImport("sqlite_c", b.modules.get("sqlite_c").?);
     object_benchmark.root_module.addImport("version_impl", b.createModule(.{
         .root_source_file = b.path("src/version.zig"),
         .target = target,
@@ -257,7 +278,7 @@ pub fn build(b: *std.Build) void {
     object_benchmark.root_module.addIncludePath(b.path("vendor/sqlite3.53.4"));
     object_benchmark.root_module.linkLibrary(sqlite_lib);
     const object_benchmark_cmd = b.addRunArtifact(object_benchmark);
-    if (b.args) |args| object_benchmark_cmd.addArgs(args);
+    object_benchmark_cmd.addPassthruArgs();
     const object_benchmark_step = b.step("bench-objects", "Run FastCDC object storage benchmark");
     object_benchmark_step.dependOn(&object_benchmark_cmd.step);
 
@@ -395,6 +416,11 @@ pub fn build(b: *std.Build) void {
         }),
     });
     keyed_reads_benchmark.root_module.addImport("zova", zova_module);
+    keyed_reads_benchmark.root_module.addImport("resource_c", b.addTranslateC(.{
+        .root_source_file = b.path("bench/resource_headers.h"),
+        .target = target,
+        .optimize = optimize,
+    }).createModule());
     const install_keyed_reads = b.addInstallArtifact(keyed_reads_benchmark, .{});
     b.step("build-keyed-reads", "Build bounded keyed-read experiment").dependOn(&install_keyed_reads.step);
 
@@ -408,7 +434,7 @@ pub fn build(b: *std.Build) void {
     });
     graph_keyed_benchmark.root_module.addImport("zova", zova_module);
     const graph_keyed_benchmark_cmd = b.addRunArtifact(graph_keyed_benchmark);
-    if (b.args) |args| graph_keyed_benchmark_cmd.addArgs(args);
+    graph_keyed_benchmark_cmd.addPassthruArgs();
     const graph_keyed_benchmark_step = b.step("bench-graph-keyed", "Compare current and opaque-key graph batches");
     graph_keyed_benchmark_step.dependOn(&graph_keyed_benchmark_cmd.step);
 
@@ -422,7 +448,7 @@ pub fn build(b: *std.Build) void {
     });
     graph_fresh_benchmark.root_module.addImport("zova", zova_module);
     const graph_fresh_benchmark_cmd = b.addRunArtifact(graph_fresh_benchmark);
-    if (b.args) |args| graph_fresh_benchmark_cmd.addArgs(args);
+    graph_fresh_benchmark_cmd.addPassthruArgs();
     const graph_fresh_benchmark_step = b.step("bench-graph-fresh", "Compare incremental and fresh graph publication at Deno scale");
     graph_fresh_benchmark_step.dependOn(&graph_fresh_benchmark_cmd.step);
 
@@ -450,7 +476,7 @@ pub fn build(b: *std.Build) void {
     const install_notifications_benchmark = b.addInstallArtifact(notifications_benchmark, .{});
     b.step("build-notifications", "Build notification benchmark without running it").dependOn(&install_notifications_benchmark.step);
     const notifications_benchmark_cmd = b.addRunArtifact(notifications_benchmark);
-    if (b.args) |args| notifications_benchmark_cmd.addArgs(args);
+    notifications_benchmark_cmd.addPassthruArgs();
     const notifications_benchmark_step = b.step("bench-notifications", "Run deterministic transaction-aware notification throughput benchmark");
     notifications_benchmark_step.dependOn(&notifications_benchmark_cmd.step);
 
@@ -471,7 +497,7 @@ pub fn build(b: *std.Build) void {
     });
     fresh_ablation_benchmark.root_module.addImport("zova_c", ablation_api_module);
     const fresh_ablation_cmd = b.addRunArtifact(fresh_ablation_benchmark);
-    if (b.args) |args| fresh_ablation_cmd.addArgs(args);
+    fresh_ablation_cmd.addPassthruArgs();
     const fresh_ablation_step = b.step("bench-fresh-ablation", "Run cumulative graph, metadata, FTS, and vector fresh-build ablations");
     fresh_ablation_step.dependOn(&fresh_ablation_cmd.step);
 
@@ -770,7 +796,7 @@ pub fn build(b: *std.Build) void {
         .root_module = c_notifications_benchmark_module,
     });
     const c_notifications_benchmark_cmd = b.addRunArtifact(c_notifications_benchmark);
-    if (b.args) |args| c_notifications_benchmark_cmd.addArgs(args);
+    c_notifications_benchmark_cmd.addPassthruArgs();
     const c_notifications_benchmark_step = b.step("bench-notifications-c", "Run C ABI transaction-aware notification throughput benchmark");
     c_notifications_benchmark_step.dependOn(&c_notifications_benchmark_cmd.step);
 
@@ -779,27 +805,25 @@ pub fn build(b: *std.Build) void {
         .root_module = c_smoke_module,
     });
     if (supports_native_dynamic_extension_fixture) c_smoke.rdynamic = true;
-    const c_abi_smoke_db_path = b.pathJoin(&.{ b.cache_root.path orelse ".zig-cache", "c-abi-smoke.zova" });
     const c_smoke_cmd = b.addRunArtifact(c_smoke);
-    c_smoke_cmd.addArg(c_abi_smoke_db_path);
+    const c_abi_smoke_db_path = c_smoke_cmd.addOutputFileArg("c-abi-smoke.zova");
+    c_smoke_cmd.has_side_effects = true;
     if (dynamic_extension_fixture) |fixture| {
-        const c_abi_bundle_path = b.pathJoin(&.{ b.cache_root.path orelse ".zig-cache", "c-abi-dyn-test.zovaext" });
-        const c_abi_trust_path = b.pathJoin(&.{ b.cache_root.path orelse ".zig-cache", "c-abi-trusted-extensions.json" });
         c_smoke_cmd.addArtifactArg(fixture);
-        c_smoke_cmd.addArg(c_abi_bundle_path);
-        c_smoke_cmd.addArg(c_abi_trust_path);
+        _ = c_smoke_cmd.addOutputDirectoryArg("c-abi-dyn-test.zovaext");
+        _ = c_smoke_cmd.addOutputFileArg("c-abi-trusted-extensions.json");
     }
 
     const cli_info_c_abi_db_cmd = b.addRunArtifact(exe);
     cli_info_c_abi_db_cmd.step.dependOn(&c_smoke_cmd.step);
     cli_info_c_abi_db_cmd.addArg("info");
-    cli_info_c_abi_db_cmd.addArg(c_abi_smoke_db_path);
+    cli_info_c_abi_db_cmd.addFileArg(c_abi_smoke_db_path);
 
     const cli_check_c_abi_db_cmd = b.addRunArtifact(exe);
     cli_check_c_abi_db_cmd.step.dependOn(&c_smoke_cmd.step);
     cli_check_c_abi_db_cmd.addArg("check");
     cli_check_c_abi_db_cmd.addArg("--deep");
-    cli_check_c_abi_db_cmd.addArg(c_abi_smoke_db_path);
+    cli_check_c_abi_db_cmd.addFileArg(c_abi_smoke_db_path);
 
     const cxx_header_module = b.createModule(.{
         .target = target,
@@ -870,6 +894,7 @@ fn addSqlite(
     sqlite_lib: *std.Build.Step.Compile,
 ) void {
     module.addIncludePath(b.path("vendor/sqlite3.53.4"));
+    if (module.root_source_file != null) module.addImport("sqlite_c", b.modules.get("sqlite_c").?);
     module.linkLibrary(sqlite_lib);
 }
 
@@ -879,6 +904,7 @@ fn addSqliteDiagnostics(module: *std.Build.Module, b: *std.Build) void {
 }
 
 fn addEmbeddedSqlite(module: *std.Build.Module, b: *std.Build, sqlite_c_flags: []const []const u8) void {
+    module.addImport("sqlite_c", b.modules.get("sqlite_c").?);
     module.addIncludePath(b.path("vendor/sqlite3.53.4"));
     module.addCSourceFile(.{
         .file = b.path("vendor/sqlite3.53.4/sqlite3.c"),
@@ -887,16 +913,6 @@ fn addEmbeddedSqlite(module: *std.Build.Module, b: *std.Build, sqlite_c_flags: [
     module.link_libc = true;
 }
 
-fn packageVersion(b: *std.Build) []const u8 {
-    const version_source = b.build_root.handle.readFileAlloc(
-        b.graph.io,
-        "src/version.zig",
-        b.allocator,
-        .limited(64 * 1024),
-    ) catch @panic("unable to read src/version.zig");
-    const marker = "pub const package_version = \"";
-    const start = std.mem.indexOf(u8, version_source, marker) orelse @panic("src/version.zig is missing package_version");
-    const value_start = start + marker.len;
-    const value_end = std.mem.indexOfScalarPos(u8, version_source, value_start, '"') orelse @panic("src/version.zig has malformed package_version");
-    return version_source[value_start..value_end];
+fn packageVersion(_: *std.Build) []const u8 {
+    return @import("src/version.zig").package_version;
 }

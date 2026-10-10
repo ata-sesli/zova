@@ -163,17 +163,17 @@ fn runStage(
     try requireOk(api.zova_database_create(&.{ .path = path.ptr, .out_db = &db, .out_error_message = null }));
     defer _ = api.zova_database_close(db);
     try requireOk(api.zova_database_begin(&.{ .db = db }));
-    if (@intFromEnum(stage) >= @intFromEnum(Stage.metadata)) try requireOk(api.zova_database_exec(&.{
+    if (@backingInt(stage) >= @backingInt(Stage.metadata)) try requireOk(api.zova_database_exec(&.{
         .db = db,
         .sql = "create table records(id integer primary key,node_key integer not null,body text not null); create index records_node_idx on records(node_key); create index records_body_idx on records(body)",
     }));
-    if (@intFromEnum(stage) >= @intFromEnum(Stage.fts)) try requireOk(api.zova_database_exec(&.{ .db = db, .sql = "create virtual table records_fts using fts5(body)" }));
-    if (@intFromEnum(stage) >= @intFromEnum(Stage.node_vectors)) try requireOk(api.zova_vector_collection_create(&.{
+    if (@backingInt(stage) >= @backingInt(Stage.fts)) try requireOk(api.zova_database_exec(&.{ .db = db, .sql = "create virtual table records_fts using fts5(body)" }));
+    if (@backingInt(stage) >= @backingInt(Stage.node_vectors)) try requireOk(api.zova_vector_collection_create(&.{
         .db = db,
         .name = "node_vectors",
         .options = .{ .dimensions = vector_dimensions, .metric = 0, .element_type = 2 },
     }));
-    if (@intFromEnum(stage) >= @intFromEnum(Stage.token_vectors)) try requireOk(api.zova_vector_collection_create(&.{
+    if (@backingInt(stage) >= @backingInt(Stage.token_vectors)) try requireOk(api.zova_vector_collection_create(&.{
         .db = db,
         .name = "token_vectors",
         .options = .{ .dimensions = vector_dimensions, .metric = 0, .element_type = 2 },
@@ -204,22 +204,22 @@ fn runStage(
     var fts_ms: f64 = 0;
     var node_vector_ms: f64 = 0;
     var token_vector_ms: f64 = 0;
-    if (@intFromEnum(stage) >= @intFromEnum(Stage.metadata)) {
+    if (@backingInt(stage) >= @backingInt(Stage.metadata)) {
         const start = now();
         try loadMetadata(allocator, build, node_keys);
         metadata_ms = elapsedMs(start);
     }
-    if (@intFromEnum(stage) >= @intFromEnum(Stage.fts)) {
+    if (@backingInt(stage) >= @backingInt(Stage.fts)) {
         const start = now();
         try loadFts(allocator, build, node_keys);
         fts_ms = elapsedMs(start);
     }
-    if (@intFromEnum(stage) >= @intFromEnum(Stage.node_vectors)) {
+    if (@backingInt(stage) >= @backingInt(Stage.node_vectors)) {
         const start = now();
         try loadVectors(allocator, build, "node_vectors", "node", size.node_vector_count);
         node_vector_ms = elapsedMs(start);
     }
-    if (@intFromEnum(stage) >= @intFromEnum(Stage.token_vectors)) {
+    if (@backingInt(stage) >= @backingInt(Stage.token_vectors)) {
         const start = now();
         try loadVectors(allocator, build, "token_vectors", "token", size.token_vector_count);
         token_vector_ms = elapsedMs(start);
@@ -281,7 +281,7 @@ pub fn main(init: std.process.Init) !void {
         try runStage(allocator, size, fixture, .token_vectors, policy, ordinal);
     } else {
         inline for (std.meta.fields(Stage), 0..) |field, stage_ordinal| {
-            try runStage(allocator, size, fixture, @enumFromInt(field.value), policy, stage_ordinal);
+            try runStage(allocator, size, fixture, @fromBackingInt(@intCast(field.value)), policy, stage_ordinal);
         }
     }
 }

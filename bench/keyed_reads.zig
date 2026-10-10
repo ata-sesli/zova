@@ -6,9 +6,7 @@ const std = @import("std");
 const zova = @import("zova");
 const c = zova.sqlite.c;
 const count = 100_000;
-const os = @cImport({
-    @cInclude("sys/resource.h");
-});
+const os = @import("resource_c");
 
 const Phases = struct { api_ms: f64 = 0, verify_ms: f64 = 0, free_ms: f64 = 0 };
 const TailSample = struct {
@@ -58,7 +56,7 @@ fn trace(mask: c_uint, context: ?*anyopaque, statement: ?*anyopaque, _: ?*anyopa
         if (std.mem.startsWith(u8, sql, "insert into temp._zova_graph_")) counters.stages += 1;
         if (std.mem.startsWith(u8, sql, "select batch.")) {
             if (counters.query) |previous| std.heap.c_allocator.free(previous);
-            counters.query = std.heap.c_allocator.dupeZ(u8, sql) catch null;
+            counters.query = std.heap.c_allocator.dupeSentinel(u8, sql, 0) catch null;
         }
     } else if (mask == c.SQLITE_TRACE_PROFILE) {
         counters.sorts += @intCast(c.sqlite3_stmt_status(stmt, c.SQLITE_STMTSTATUS_SORT, 1));
@@ -111,7 +109,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 5 and std.mem.eql(u8, args[2], "payload-read")) {
         const size = try std.fmt.parseInt(usize, args[3], 10);
         if (size == 0 or size > count) return error.InvalidArgument;
-        const path = try allocator.dupeZ(u8, args[1]);
+        const path = try allocator.dupeSentinel(u8, args[1], 0);
         var db = try zova.Database.open(path);
         defer db.deinit();
         try db.exec("pragma cache_size=-32768");
@@ -142,7 +140,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     if (args.len == 6 and std.mem.eql(u8, args[2], "degree")) {
-        const path = try allocator.dupeZ(u8, args[1]);
+        const path = try allocator.dupeSentinel(u8, args[1], 0);
         const size = try std.fmt.parseInt(usize, args[4], 10);
         if (size == 0 or size > count) return error.InvalidArgument;
         const direction: zova.GraphNeighborDirection = if (std.mem.eql(u8, args[3], "incoming")) .incoming else if (std.mem.eql(u8, args[3], "outgoing")) .outgoing else return error.InvalidArgument;
@@ -182,7 +180,7 @@ pub fn main(init: std.process.Init) !void {
             (selected_size != 1 and selected_size != 100 and selected_size != 10_000 and selected_size != 100_000) or
             (!std.mem.eql(u8, args[5], "hits") and !std.mem.eql(u8, args[5], "mixed"))) return error.InvalidArgument;
     }
-    const path = try allocator.dupeZ(u8, args[1]);
+    const path = try allocator.dupeSentinel(u8, args[1], 0);
     if (std.mem.eql(u8, args[2], "init")) {
         var db = try zova.Database.create(path);
         defer db.deinit();

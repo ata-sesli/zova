@@ -88,7 +88,7 @@ needed. Supported release targets are Linux GNU x86_64/arm64, macOS x86_64/arm64
 and Windows MSVC x86_64. Unsupported automatic targets fail explicitly.
 
 `ZOVA_LIB_DIR` selects a caller-provided native library. `ZOVA_SOURCE_DIR`
-selects an explicit Zig source tree and requires Zig 0.16.0. `ZOVA_INCLUDE_DIR`
+selects an explicit Zig source tree and requires Zig 0.17.0. `ZOVA_INCLUDE_DIR`
 overrides header metadata. See [zova-sys build requirements](zova-sys/README.md#native-build).
 
 Maintainers generate all five source packages with

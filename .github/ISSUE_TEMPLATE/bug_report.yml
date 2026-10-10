@@ -70,7 +70,7 @@ body:
       description: OS, architecture, Zig/Rust/Go/Python versions when relevant.
       placeholder: |
         macOS 15 arm64
-        Zig 0.16.0
+        Zig 0.17.0
         Rust stable
         Go 1.22
         Python 3.13 or 3.14

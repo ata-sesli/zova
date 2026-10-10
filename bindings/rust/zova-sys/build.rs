@@ -183,8 +183,7 @@ fn build_zig_source(source_root: &Path) -> PathBuf {
     let status = command
         .arg("--cache-dir")
         .arg(&cache_dir)
-        .arg("--global-cache-dir")
-        .arg(&global_cache_dir)
+        .env("ZIG_GLOBAL_CACHE_DIR", &global_cache_dir)
         .arg("-p")
         .arg(&prefix)
         .current_dir(&source_root)

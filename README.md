@@ -147,13 +147,18 @@ Minimum tool versions used by the project:
 
 | Tool | Minimum / Current |
 |---|---|
-| Zig | `0.16.0` or newer |
+| Zig | `0.17.0` or newer |
 | Rust | `1.79` or newer |
 | Go | `1.22` or newer |
 | Python | `3.13` or newer; 3.13 and 3.14 are tested |
 | Node.js | `22.13` or newer in the Node 22 line, or Node 24 |
 | Bun | current blocking CI release |
 | SQLite | vendored `3.53.4` |
+
+Source builds and CI use Zig 0.17.0. Rebuild legacy Zig-native extension bundles
+with the matching compiler; their binary contract is compiler-dependent. The
+portable C plugin ABI and Zova database format are unchanged by this toolchain
+update.
 
 ## Quick Start
 

@@ -216,11 +216,11 @@ fn neighborsBestIndex(vtab: ?*c.sqlite3_vtab, info: ?*c.sqlite3_index_info) call
 
     var bits: NeighborConstraintBits = .{};
     var argv_index: c_int = 1;
-    bits.graph_name = assignConstraint(idx, @intFromEnum(NeighborColumn.graph_name), &argv_index);
-    bits.source_node_id = assignConstraint(idx, @intFromEnum(NeighborColumn.source_node_id), &argv_index);
-    bits.direction = assignConstraint(idx, @intFromEnum(NeighborColumn.direction), &argv_index);
-    bits.edge_type_filter = assignConstraint(idx, @intFromEnum(NeighborColumn.edge_type_filter), &argv_index);
-    bits.limit = assignConstraint(idx, @intFromEnum(NeighborColumn.limit), &argv_index);
+    bits.graph_name = assignConstraint(idx, @backingInt(NeighborColumn.graph_name), &argv_index);
+    bits.source_node_id = assignConstraint(idx, @backingInt(NeighborColumn.source_node_id), &argv_index);
+    bits.direction = assignConstraint(idx, @backingInt(NeighborColumn.direction), &argv_index);
+    bits.edge_type_filter = assignConstraint(idx, @backingInt(NeighborColumn.edge_type_filter), &argv_index);
+    bits.limit = assignConstraint(idx, @backingInt(NeighborColumn.limit), &argv_index);
 
     if (!bits.graph_name or !bits.source_node_id) return c.SQLITE_CONSTRAINT;
 
@@ -229,7 +229,7 @@ fn neighborsBestIndex(vtab: ?*c.sqlite3_vtab, info: ?*c.sqlite3_index_info) call
     idx.estimatedRows = if (bits.limit) 10 else default_sql_limit;
     if (idx.nOrderBy == 1) {
         const order_by = idx.aOrderBy[0];
-        if (order_by.iColumn == @intFromEnum(NeighborColumn.rank) and order_by.desc == 0) {
+        if (order_by.iColumn == @backingInt(NeighborColumn.rank) and order_by.desc == 0) {
             idx.orderByConsumed = 1;
         }
     }
@@ -364,7 +364,7 @@ fn neighborsColumn(cursor: ?*c.sqlite3_vtab_cursor, ctx: ?*c.sqlite3_context, co
     }
 
     const row = neighbor_cursor.rows.?[neighbor_cursor.index];
-    switch (@as(NeighborColumn, @enumFromInt(column_index))) {
+    switch (@as(NeighborColumn, @fromBackingInt(@intCast(column_index)))) {
         .rank => c.sqlite3_result_int64(context, @intCast(neighbor_cursor.index + 1)),
         .node_id => resultText(context, row.node_id),
         .kind => resultText(context, row.kind),
@@ -428,11 +428,11 @@ fn walkBestIndex(vtab: ?*c.sqlite3_vtab, info: ?*c.sqlite3_index_info) callconv(
 
     var bits: WalkConstraintBits = .{};
     var argv_index: c_int = 1;
-    bits.graph_name = assignConstraint(idx, @intFromEnum(WalkColumn.graph_name), &argv_index);
-    bits.start_node_id = assignConstraint(idx, @intFromEnum(WalkColumn.start_node_id), &argv_index);
-    bits.edge_type_filter = assignConstraint(idx, @intFromEnum(WalkColumn.edge_type_filter), &argv_index);
-    bits.max_depth = assignConstraint(idx, @intFromEnum(WalkColumn.max_depth), &argv_index);
-    bits.limit = assignConstraint(idx, @intFromEnum(WalkColumn.limit), &argv_index);
+    bits.graph_name = assignConstraint(idx, @backingInt(WalkColumn.graph_name), &argv_index);
+    bits.start_node_id = assignConstraint(idx, @backingInt(WalkColumn.start_node_id), &argv_index);
+    bits.edge_type_filter = assignConstraint(idx, @backingInt(WalkColumn.edge_type_filter), &argv_index);
+    bits.max_depth = assignConstraint(idx, @backingInt(WalkColumn.max_depth), &argv_index);
+    bits.limit = assignConstraint(idx, @backingInt(WalkColumn.limit), &argv_index);
 
     if (!bits.graph_name or !bits.start_node_id or !bits.max_depth) return c.SQLITE_CONSTRAINT;
 
@@ -441,7 +441,7 @@ fn walkBestIndex(vtab: ?*c.sqlite3_vtab, info: ?*c.sqlite3_index_info) callconv(
     idx.estimatedRows = if (bits.limit) 10 else default_sql_limit;
     if (idx.nOrderBy == 1) {
         const order_by = idx.aOrderBy[0];
-        if (order_by.iColumn == @intFromEnum(WalkColumn.rank) and order_by.desc == 0) {
+        if (order_by.iColumn == @backingInt(WalkColumn.rank) and order_by.desc == 0) {
             idx.orderByConsumed = 1;
         }
     }
@@ -572,7 +572,7 @@ fn walkColumn(cursor: ?*c.sqlite3_vtab_cursor, ctx: ?*c.sqlite3_context, column_
     }
 
     const row = walk_cursor.rows.?[walk_cursor.index];
-    switch (@as(WalkColumn, @enumFromInt(column_index))) {
+    switch (@as(WalkColumn, @fromBackingInt(@intCast(column_index)))) {
         .rank => c.sqlite3_result_int64(context, @intCast(walk_cursor.index + 1)),
         .node_id => resultText(context, row.node_id),
         .kind => resultText(context, row.kind),

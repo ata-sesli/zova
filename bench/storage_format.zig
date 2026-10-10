@@ -166,7 +166,7 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(allocator);
     if (args.len < 2 or args.len > 3) return error.InvalidArgument;
     const drop_typed_graph_indexes = args.len == 3 and std.mem.eql(u8, args[2], "--drop-typed-graph-indexes");
-    const db_path = try allocator.dupeZ(u8, args[1]);
+    const db_path = try allocator.dupeSentinel(u8, args[1], 0);
     std.Io.Dir.cwd().deleteFile(init.io, db_path) catch {};
 
     std.debug.print("seed=0x{x} zig={s} sqlite={s} format={s}\n", .{ seed, @import("builtin").zig_version_string, zova.version.sqlite_version, zova.version.format_version });

@@ -14,7 +14,7 @@ test "c abi fresh builder rejects sessions without foreign-key enforcement" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/fresh-builder-foreign-keys-off.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/fresh-builder-foreign-keys-off.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
@@ -35,7 +35,7 @@ test "c abi fresh builder requires clean foreign-key evidence before loading" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/fresh-builder-preexisting-foreign-key.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/fresh-builder-preexisting-foreign-key.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{

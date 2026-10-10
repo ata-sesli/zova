@@ -214,7 +214,7 @@ const bundle_file_limit = 256 * 1024 * 1024;
 /// verification. A real digest is hex digits of hashed content; this all-zero
 /// sentinel is explicitly rejected during verification so legacy bundles stay
 /// untrusted until they are trusted again.
-const legacy_bundle_sha256 = [1]u8{'0'} ** 64;
+const legacy_bundle_sha256 = @as([64]u8, @splat('0'));
 
 pub const TrustedList = struct {
     records: []TrustRecord,
@@ -440,7 +440,7 @@ fn loadDescriptor(allocator: std.mem.Allocator, library: *DynamicLibrary, info: 
         try ensureLoadedExtensionMatches(info, loaded);
         return .{ .extension = loaded, .plugin = descriptor.?.*, .upgrade = try plugin.upgradePath(descriptor.?) };
     }
-    const entry_name = try allocator.dupeZ(u8, info.manifest.entrypoint);
+    const entry_name = try allocator.dupeSentinel(u8, info.manifest.entrypoint, 0);
     defer allocator.free(entry_name);
     const Entry = *const fn () callconv(.c) *const extension.Extension;
     const entry = library.lookup(Entry, entry_name) orelse return error.ExtensionLoadFailed;
@@ -1351,7 +1351,7 @@ test "dynamic extension bundle digest does not retain file contents" {
     const io = defaultIo();
 
     try tmp.dir.createDir(io, "streamed.zovaext", .default_dir);
-    const file_bytes = [_]u8{0x5a} ** (8 * 1024);
+    const file_bytes = @as([(8 * 1024)]u8, @splat(0x5a));
     var name_buffer: [64]u8 = undefined;
     for (0..16) |index| {
         const sub_path = try std.fmt.bufPrint(&name_buffer, "streamed.zovaext/file-{d}.bin", .{index});

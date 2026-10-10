@@ -28,9 +28,7 @@ const std = @import("std");
 /// Zova keeps this public on purpose: the wrapper below covers the common
 /// v0 lifecycle, statement, and transaction paths, but callers can still drop
 /// down to SQLite directly when they need an API Zova does not wrap yet.
-pub const c = @cImport({
-    @cInclude("sqlite3.h");
-});
+pub const c = @import("sqlite_c");
 
 /// Error set for the small public SQLite wrapper.
 ///
@@ -49,6 +47,21 @@ pub const Error = error{
     ReadOnly,
     Corrupt,
 };
+
+fn sqlAfterTrivia(sql: []const u8) []const u8 {
+    var rest = sql;
+    while (rest.len != 0) {
+        rest = std.mem.trimStart(u8, rest, " \t\n\r\x0b\x0c");
+        if (std.mem.startsWith(u8, rest, "--")) {
+            const newline = std.mem.indexOfScalar(u8, rest, '\n') orelse return "";
+            rest = rest[newline + 1 ..];
+        } else if (std.mem.startsWith(u8, rest, "/*")) {
+            const end = std.mem.indexOf(u8, rest[2..], "*/") orelse return "";
+            rest = rest[end + 4 ..];
+        } else break;
+    }
+    return rest;
+}
 
 /// Return the runtime SQLite library version used by this build.
 pub fn version() []const u8 {
@@ -180,7 +193,7 @@ pub const Database = struct {
         comptime validateInternalSchemaName(schema_name);
 
         var sql_buffer: [128]u8 = undefined;
-        const sql = std.fmt.bufPrintZ(&sql_buffer, "attach database ? as {s}", .{schema_name}) catch unreachable;
+        const sql = std.fmt.bufPrintSentinel(&sql_buffer, "attach database ? as {s}", .{schema_name}, 0) catch unreachable;
 
         var stmt = try self.prepare(sql);
         defer stmt.deinit();
@@ -194,7 +207,7 @@ pub const Database = struct {
         comptime validateInternalSchemaName(schema_name);
 
         var sql_buffer: [64]u8 = undefined;
-        const sql = std.fmt.bufPrintZ(&sql_buffer, "detach database {s}", .{schema_name}) catch unreachable;
+        const sql = std.fmt.bufPrintSentinel(&sql_buffer, "detach database {s}", .{schema_name}, 0) catch unreachable;
         try self.exec(sql);
     }
 
@@ -262,7 +275,7 @@ pub const Database = struct {
     fn execSavepoint(self: *Database, comptime prefix: []const u8, name: []const u8) Error!void {
         try validateSavepointName(name);
         var sql_buffer: [96]u8 = undefined;
-        const sql = std.fmt.bufPrintZ(&sql_buffer, prefix ++ " {s}", .{name}) catch unreachable;
+        const sql = std.fmt.bufPrintSentinel(&sql_buffer, prefix ++ " {s}", .{name}, 0) catch unreachable;
         try self.exec(sql);
     }
 
@@ -288,6 +301,37 @@ pub const Database = struct {
             .db = self,
             .handle = raw_stmt.?,
         };
+    }
+
+    /// Prepare exactly one statement. Empty/comment-only input and additional
+    /// statements are rejected without stepping anything. Trailing comments
+    /// and whitespace are allowed. The caller still owns execution policy.
+    pub fn prepareSingle(self: *Database, sql: [:0]const u8) Error!Statement {
+        if (std.mem.indexOfScalar(u8, sql, 0) != null) return error.InvalidArgument;
+        var raw_stmt: ?*c.sqlite3_stmt = null;
+        var tail: [*c]const u8 = null;
+        const rc = c.sqlite3_prepare_v2(self.handle, sql.ptr, -1, &raw_stmt, &tail);
+        if (rc != c.SQLITE_OK) return mapResultCode(rc);
+        const handle = raw_stmt orelse return error.InvalidArgument;
+        errdefer _ = c.sqlite3_finalize(handle);
+        // Never prepare rejected trailing SQL: some PRAGMAs have effects even
+        // during preparation. Only whitespace/comments may follow the statement.
+        if (tail != null and sqlAfterTrivia(std.mem.span(tail)).len != 0) return error.InvalidArgument;
+        return .{ .db = self, .handle = handle };
+    }
+
+    /// Strict single SELECT/WITH query, rejecting preparation-time PRAGMAs
+    /// before SQLite sees them. WITH mutations are rejected before execution.
+    /// Side-effecting user functions remain the caller's responsibility.
+    pub fn prepareReadQuery(self: *Database, sql: [:0]const u8) Error!Statement {
+        const text = sqlAfterTrivia(sql);
+        var end: usize = 0;
+        while (end < text.len and std.ascii.isAlphabetic(text[end])) : (end += 1) {}
+        if (!std.ascii.eqlIgnoreCase(text[0..end], "SELECT") and !std.ascii.eqlIgnoreCase(text[0..end], "WITH")) return error.InvalidArgument;
+        var stmt = try self.prepareSingle(sql);
+        errdefer stmt.deinit();
+        if (!stmt.isReadOnly() or stmt.columnCount() == 0) return error.InvalidArgument;
+        return stmt;
     }
 
     /// Number of rows modified by the most recent INSERT, UPDATE, or DELETE.
@@ -483,6 +527,17 @@ pub const Statement = struct {
     /// execution errors from `step`, not from deferred cleanup.
     pub fn deinit(self: *Statement) void {
         _ = c.sqlite3_finalize(self.handle);
+    }
+
+    /// SQLite's statement classification, not a sandbox against side-effecting
+    /// user functions or all PRAGMAs. Inspect before stepping the statement.
+    pub fn isReadOnly(self: *Statement) bool {
+        return c.sqlite3_stmt_readonly(self.handle) != 0;
+    }
+
+    /// Detect SQLite allocation failure after converting a column value.
+    pub fn checkColumnError(self: *Statement) Error!void {
+        if (c.sqlite3_errcode(self.db.handle) == c.SQLITE_NOMEM) return error.NoMemory;
     }
 
     /// Bind a signed 64-bit integer to a 1-based SQL parameter index.
@@ -721,7 +776,7 @@ fn mapResultCode(rc: c_int) Error {
 }
 
 fn testingDbPath(buffer: []u8, sub_path: []const u8, filename: []const u8) ![:0]u8 {
-    return std.fmt.bufPrintZ(buffer, ".zig-cache/tmp/{s}/{s}", .{ sub_path, filename });
+    return std.fmt.bufPrintSentinel(buffer, ".zig-cache/tmp/{s}/{s}", .{ sub_path, filename }, 0);
 }
 
 test "result code mapping covers locked misuse and generic errors" {
@@ -961,10 +1016,11 @@ test "database open maps missing parent directory to CantOpen" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(
+    const db_path = try std.fmt.bufPrintSentinel(
         &path_buffer,
         ".zig-cache/tmp/{s}/missing-parent/missing.db",
         .{tmp.sub_path[0..]},
+        0,
     );
 
     try std.testing.expectError(error.CantOpen, Database.open(db_path));

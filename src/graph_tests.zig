@@ -127,7 +127,7 @@ const index_names = [_][]const u8{
 
 fn schemaIndexExistsInSchema(db: *sqlite.Database, schema_name: []const u8, index_name: []const u8) !bool {
     var sql_buffer: [256]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(&sql_buffer, "select count(*) from {s}.sqlite_master where type = 'index' and name = ?", .{schema_name});
+    const sql = try std.fmt.bufPrintSentinel(&sql_buffer, "select count(*) from {s}.sqlite_master where type = 'index' and name = ?", .{schema_name}, 0);
     var stmt = try db.prepare(sql);
     defer stmt.deinit();
     try stmt.bindText(1, index_name);

@@ -274,50 +274,50 @@ pub fn vectorInputSlices(
 
 pub fn vectorMetricFromAbi(metric: c_int) ?zova.VectorMetric {
     return switch (metric) {
-        @intFromEnum(zova_vector_metric.COSINE) => .cosine,
-        @intFromEnum(zova_vector_metric.L2) => .l2,
-        @intFromEnum(zova_vector_metric.DOT) => .dot,
+        @backingInt(zova_vector_metric.COSINE) => .cosine,
+        @backingInt(zova_vector_metric.L2) => .l2,
+        @backingInt(zova_vector_metric.DOT) => .dot,
         else => null,
     };
 }
 
 pub fn multiI8SearchModeFromAbi(mode: c_int) ?zova.MultiI8CosineSearchMode {
     return switch (mode) {
-        @intFromEnum(zova_vector_multi_i8_search_mode.GLOBAL_MIN_COSINE) => .global_min_cosine,
-        @intFromEnum(zova_vector_multi_i8_search_mode.CBM_PREFILTER_MIN_COSINE) => .cbm_prefilter_min_cosine,
+        @backingInt(zova_vector_multi_i8_search_mode.GLOBAL_MIN_COSINE) => .global_min_cosine,
+        @backingInt(zova_vector_multi_i8_search_mode.CBM_PREFILTER_MIN_COSINE) => .cbm_prefilter_min_cosine,
         else => null,
     };
 }
 
 pub fn multiI8AggregationFromAbi(aggregation: c_int) ?void {
     return switch (aggregation) {
-        @intFromEnum(zova_vector_multi_i8_aggregation.MIN_COSINE) => {},
+        @backingInt(zova_vector_multi_i8_aggregation.MIN_COSINE) => {},
         else => null,
     };
 }
 
 pub fn vectorMetricToAbi(metric: zova.VectorMetric) c_int {
     return switch (metric) {
-        .cosine => @intFromEnum(zova_vector_metric.COSINE),
-        .l2 => @intFromEnum(zova_vector_metric.L2),
-        .dot => @intFromEnum(zova_vector_metric.DOT),
+        .cosine => @backingInt(zova_vector_metric.COSINE),
+        .l2 => @backingInt(zova_vector_metric.L2),
+        .dot => @backingInt(zova_vector_metric.DOT),
     };
 }
 
 pub fn vectorElementTypeFromAbi(element_type: c_int) ?zova.VectorElementType {
     return switch (element_type) {
-        @intFromEnum(zova_vector_element_type.F32) => .f32,
-        @intFromEnum(zova_vector_element_type.F16) => .f16,
-        @intFromEnum(zova_vector_element_type.I8) => .i8,
+        @backingInt(zova_vector_element_type.F32) => .f32,
+        @backingInt(zova_vector_element_type.F16) => .f16,
+        @backingInt(zova_vector_element_type.I8) => .i8,
         else => null,
     };
 }
 
 pub fn vectorElementTypeToAbi(element_type: zova.VectorElementType) c_int {
     return switch (element_type) {
-        .f32 => @intFromEnum(zova_vector_element_type.F32),
-        .f16 => @intFromEnum(zova_vector_element_type.F16),
-        .i8 => @intFromEnum(zova_vector_element_type.I8),
+        .f32 => @backingInt(zova_vector_element_type.F32),
+        .f16 => @backingInt(zova_vector_element_type.F16),
+        .i8 => @backingInt(zova_vector_element_type.I8),
     };
 }
 
@@ -332,7 +332,7 @@ pub fn vectorValuesConst(values: zova_vector_values) ?zova.VectorValuesConst {
 
 pub fn f32AbiValues(values: []const f32) zova_vector_values {
     return .{
-        .element_type = @intFromEnum(zova_vector_element_type.F32),
+        .element_type = @backingInt(zova_vector_element_type.F32),
         .f32_values = if (values.len == 0) null else values.ptr,
         .f16_values = null,
         .i8_values = null,
@@ -342,7 +342,7 @@ pub fn f32AbiValues(values: []const f32) zova_vector_values {
 
 pub fn i8AbiValues(values: []const i8) zova_vector_values {
     return .{
-        .element_type = @intFromEnum(zova_vector_element_type.I8),
+        .element_type = @backingInt(zova_vector_element_type.I8),
         .f32_values = null,
         .f16_values = null,
         .i8_values = if (values.len == 0) null else values.ptr,
@@ -352,37 +352,37 @@ pub fn i8AbiValues(values: []const i8) zova_vector_values {
 
 pub fn graphTargetTypeFromAbi(target_type: c_int) ?zova.GraphTargetType {
     return switch (target_type) {
-        @intFromEnum(zova_graph_target_type.NONE) => .none,
-        @intFromEnum(zova_graph_target_type.RECORD) => .record,
-        @intFromEnum(zova_graph_target_type.OBJECT) => .object,
-        @intFromEnum(zova_graph_target_type.OBJECT_CHUNK) => .object_chunk,
-        @intFromEnum(zova_graph_target_type.VECTOR) => .vector,
-        @intFromEnum(zova_graph_target_type.ENTITY) => .entity,
-        @intFromEnum(zova_graph_target_type.FACT) => .fact,
-        @intFromEnum(zova_graph_target_type.CONCEPT) => .concept,
-        @intFromEnum(zova_graph_target_type.EXTERNAL) => .external,
+        @backingInt(zova_graph_target_type.NONE) => .none,
+        @backingInt(zova_graph_target_type.RECORD) => .record,
+        @backingInt(zova_graph_target_type.OBJECT) => .object,
+        @backingInt(zova_graph_target_type.OBJECT_CHUNK) => .object_chunk,
+        @backingInt(zova_graph_target_type.VECTOR) => .vector,
+        @backingInt(zova_graph_target_type.ENTITY) => .entity,
+        @backingInt(zova_graph_target_type.FACT) => .fact,
+        @backingInt(zova_graph_target_type.CONCEPT) => .concept,
+        @backingInt(zova_graph_target_type.EXTERNAL) => .external,
         else => null,
     };
 }
 
 pub fn graphTargetTypeToAbi(target_type: zova.GraphTargetType) c_int {
     return switch (target_type) {
-        .none => @intFromEnum(zova_graph_target_type.NONE),
-        .record => @intFromEnum(zova_graph_target_type.RECORD),
-        .object => @intFromEnum(zova_graph_target_type.OBJECT),
-        .object_chunk => @intFromEnum(zova_graph_target_type.OBJECT_CHUNK),
-        .vector => @intFromEnum(zova_graph_target_type.VECTOR),
-        .entity => @intFromEnum(zova_graph_target_type.ENTITY),
-        .fact => @intFromEnum(zova_graph_target_type.FACT),
-        .concept => @intFromEnum(zova_graph_target_type.CONCEPT),
-        .external => @intFromEnum(zova_graph_target_type.EXTERNAL),
+        .none => @backingInt(zova_graph_target_type.NONE),
+        .record => @backingInt(zova_graph_target_type.RECORD),
+        .object => @backingInt(zova_graph_target_type.OBJECT),
+        .object_chunk => @backingInt(zova_graph_target_type.OBJECT_CHUNK),
+        .vector => @backingInt(zova_graph_target_type.VECTOR),
+        .entity => @backingInt(zova_graph_target_type.ENTITY),
+        .fact => @backingInt(zova_graph_target_type.FACT),
+        .concept => @backingInt(zova_graph_target_type.CONCEPT),
+        .external => @backingInt(zova_graph_target_type.EXTERNAL),
     };
 }
 
 pub fn graphDirectionFromAbi(direction: c_int) ?zova.GraphNeighborDirection {
     return switch (direction) {
-        @intFromEnum(zova_graph_neighbor_direction.OUTGOING) => .outgoing,
-        @intFromEnum(zova_graph_neighbor_direction.INCOMING) => .incoming,
+        @backingInt(zova_graph_neighbor_direction.OUTGOING) => .outgoing,
+        @backingInt(zova_graph_neighbor_direction.INCOMING) => .incoming,
         else => null,
     };
 }
@@ -398,8 +398,8 @@ pub fn toObjectId(id: zova_object_id) zova.ObjectId {
 
 pub fn objectOptionsFromAbi(options: zova_object_put_options) ?zova.ObjectPutOptions {
     return switch (options.profile) {
-        @intFromEnum(zova_object_storage_profile.DEDUPLICATION) => .{ .profile = .deduplication },
-        @intFromEnum(zova_object_storage_profile.STREAMING) => .{ .profile = .streaming },
+        @backingInt(zova_object_storage_profile.DEDUPLICATION) => .{ .profile = .deduplication },
+        @backingInt(zova_object_storage_profile.STREAMING) => .{ .profile = .streaming },
         else => null,
     };
 }

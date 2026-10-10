@@ -58,7 +58,7 @@ pub fn salvageCommand(
         return usageErrorFormat(stderr, "salvage", parsed.format, "destination path must end in .zova");
     }
 
-    const source = try allocator.dupeZ(u8, parsed.source_path);
+    const source = try allocator.dupeSentinel(u8, parsed.source_path, 0);
     defer allocator.free(source);
 
     var db = open_salvage_db: {
@@ -118,7 +118,7 @@ pub fn salvageCommand(
     };
 
     if (!parsed.dry_run) {
-        const destination = try allocator.dupeZ(u8, parsed.destination_path.?);
+        const destination = try allocator.dupeSentinel(u8, parsed.destination_path.?, 0);
         defer allocator.free(destination);
         var result = executeSalvage(allocator, &db, destination, plan, ctx.registry) catch |err| {
             plan.deinit(allocator);
@@ -677,7 +677,7 @@ fn copyUserSql(allocator: std.mem.Allocator, source: *zova.Database, destination
     while ((try tables.step()) == .row) {
         const table_name = try allocator.dupe(u8, tables.columnText(0));
         defer allocator.free(table_name);
-        const schema_sql = try allocator.dupeZ(u8, tables.columnText(1));
+        const schema_sql = try allocator.dupeSentinel(u8, tables.columnText(1), 0);
         defer allocator.free(schema_sql);
         const source_row_count = countRowsInUserTable(allocator, source, table_name) catch 0;
 
@@ -721,7 +721,7 @@ fn copyUserSchemaObjects(allocator: std.mem.Allocator, source: *zova.Database, d
 
     var result = UserSqlCopyResult{};
     while ((try objects.step()) == .row) {
-        const schema_sql = try allocator.dupeZ(u8, objects.columnText(0));
+        const schema_sql = try allocator.dupeSentinel(u8, objects.columnText(0), 0);
         defer allocator.free(schema_sql);
         destination.exec(schema_sql) catch {
             result.skipped_schema_objects += 1;

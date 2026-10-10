@@ -10,7 +10,7 @@ The normal `zova-wasm` package remains memory-only. Only the test build sets
   `bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc`.
 - Upstream archive: https://github.com/sqlite/sqlite/archive/refs/tags/version-3.53.4.tar.gz
 - Archive SHA-256: `16bc1b2027ba2653e3d262e740376be23f67cad77865db814493267494326c3c`.
-- Emscripten 6.0.9, Zig 0.16.0, Playwright from the package lockfile.
+- Emscripten 6.0.9, Zig 0.17.0, Playwright from the package lockfile.
 
 The upstream `sqlite3-wasm.c` includes **Zova's vendored sqlite3.c**. It replaces
 the standalone amalgamation compilation in this fixture: there is exactly one

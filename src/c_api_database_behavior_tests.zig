@@ -47,16 +47,16 @@ test "c abi status names and versions are stable" {
     try std.testing.expectEqual(zova_version.abi_version_minor, zova_abi_version_minor());
     try std.testing.expectEqual(zova_version.abi_version_patch, zova_abi_version_patch());
     try std.testing.expectEqualStrings(zova_version.abi_version_string, std.mem.span(zova_abi_version_string()));
-    try std.testing.expectEqualStrings("ZOVA_OK", std.mem.span(zova_status_name(@intFromEnum(zova_status.OK))));
-    try std.testing.expectEqualStrings("ZOVA_OBJECT_NOT_FOUND", std.mem.span(zova_status_name(@intFromEnum(zova_status.OBJECT_NOT_FOUND))));
-    try std.testing.expectEqualStrings("ZOVA_BOUND_STORE_INVALID", std.mem.span(zova_status_name(@intFromEnum(zova_status.BOUND_STORE_INVALID))));
-    try std.testing.expectEqualStrings("ZOVA_VECTOR_INVALID", std.mem.span(zova_status_name(@intFromEnum(zova_status.VECTOR_INVALID))));
-    try std.testing.expectEqualStrings("ZOVA_GRAPH_INVALID", std.mem.span(zova_status_name(@intFromEnum(zova_status.GRAPH_INVALID))));
-    try std.testing.expectEqualStrings("ZOVA_EXTENSION_UNAVAILABLE", std.mem.span(zova_status_name(@intFromEnum(zova_status.EXTENSION_UNAVAILABLE))));
-    try std.testing.expectEqualStrings("ZOVA_MIGRATION_REQUIRED", std.mem.span(zova_status_name(@intFromEnum(zova_status.MIGRATION_REQUIRED))));
-    try std.testing.expectEqualStrings("ZOVA_UNSUPPORTED_FUTURE_FORMAT", std.mem.span(zova_status_name(@intFromEnum(zova_status.UNSUPPORTED_FUTURE_FORMAT))));
-    try std.testing.expectEqualStrings("ZOVA_UNSUPPORTED_LEGACY_FORMAT", std.mem.span(zova_status_name(@intFromEnum(zova_status.UNSUPPORTED_LEGACY_FORMAT))));
-    try std.testing.expectEqualStrings("ZOVA_NO_MIGRATION_PATH", std.mem.span(zova_status_name(@intFromEnum(zova_status.NO_MIGRATION_PATH))));
+    try std.testing.expectEqualStrings("ZOVA_OK", std.mem.span(zova_status_name(@backingInt(zova_status.OK))));
+    try std.testing.expectEqualStrings("ZOVA_OBJECT_NOT_FOUND", std.mem.span(zova_status_name(@backingInt(zova_status.OBJECT_NOT_FOUND))));
+    try std.testing.expectEqualStrings("ZOVA_BOUND_STORE_INVALID", std.mem.span(zova_status_name(@backingInt(zova_status.BOUND_STORE_INVALID))));
+    try std.testing.expectEqualStrings("ZOVA_VECTOR_INVALID", std.mem.span(zova_status_name(@backingInt(zova_status.VECTOR_INVALID))));
+    try std.testing.expectEqualStrings("ZOVA_GRAPH_INVALID", std.mem.span(zova_status_name(@backingInt(zova_status.GRAPH_INVALID))));
+    try std.testing.expectEqualStrings("ZOVA_EXTENSION_UNAVAILABLE", std.mem.span(zova_status_name(@backingInt(zova_status.EXTENSION_UNAVAILABLE))));
+    try std.testing.expectEqualStrings("ZOVA_MIGRATION_REQUIRED", std.mem.span(zova_status_name(@backingInt(zova_status.MIGRATION_REQUIRED))));
+    try std.testing.expectEqualStrings("ZOVA_UNSUPPORTED_FUTURE_FORMAT", std.mem.span(zova_status_name(@backingInt(zova_status.UNSUPPORTED_FUTURE_FORMAT))));
+    try std.testing.expectEqualStrings("ZOVA_UNSUPPORTED_LEGACY_FORMAT", std.mem.span(zova_status_name(@backingInt(zova_status.UNSUPPORTED_LEGACY_FORMAT))));
+    try std.testing.expectEqualStrings("ZOVA_NO_MIGRATION_PATH", std.mem.span(zova_status_name(@backingInt(zova_status.NO_MIGRATION_PATH))));
     try std.testing.expectEqualStrings("ZOVA_UNKNOWN_STATUS", std.mem.span(zova_status_name(-1)));
 }
 
@@ -65,7 +65,7 @@ test "c abi probe and migrate validate pointers paths flags and zero output" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const dummy_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/probe-dummy.zova", .{tmp.sub_path[0..]});
+    const dummy_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/probe-dummy.zova", .{tmp.sub_path[0..]}, 0);
 
     // Probe: null out_info
     {
@@ -103,7 +103,7 @@ test "c abi probe and migrate validate pointers paths flags and zero output" {
         out.format_version = 0xdeadbeef;
         out.compatibility = 0x7fffffff;
         var bad_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const bad_path = try std.fmt.bufPrintZ(&bad_buffer, ".zig-cache/tmp/{s}/bad.txt", .{tmp.sub_path[0..]});
+        const bad_path = try std.fmt.bufPrintSentinel(&bad_buffer, ".zig-cache/tmp/{s}/bad.txt", .{tmp.sub_path[0..]}, 0);
         try std.testing.expectEqual(zova_status.NOT_ZOVA_PATH, zova_database_probe_format(&.{
             .path = bad_path,
             .out_info = &out,
@@ -152,7 +152,7 @@ test "c abi validates external extension bundle requests" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-external-extension-validation.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-external-extension-validation.zova", .{tmp.sub_path[0..]}, 0);
     var message = zova_message{ .data = null, .len = 0 };
     defer zova_message_free(&message);
 
@@ -264,7 +264,7 @@ test "c abi exposes savepoint helpers" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-savepoint.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-savepoint.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
@@ -312,7 +312,7 @@ test "c abi rejects database close while statement or writer children are live" 
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-live-children.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-live-children.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     var create_request = zova_database_open_request{
@@ -364,10 +364,11 @@ test "c abi serializes concurrent sql calls on one database handle" {
         fn run(ctx: *@This()) void {
             var sql_buffer: [160]u8 = undefined;
             for (0..inserts_per_worker) |insert_index| {
-                const sql = std.fmt.bufPrintZ(
+                const sql = std.fmt.bufPrintSentinel(
                     &sql_buffer,
                     "insert into records (worker, item) values ({d}, {d})",
                     .{ ctx.worker_index, insert_index },
+                    0,
                 ) catch {
                     ctx.status = .OUT_OF_MEMORY;
                     return;
@@ -385,7 +386,7 @@ test "c abi serializes concurrent sql calls on one database handle" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-threaded-sql.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-threaded-sql.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
@@ -430,7 +431,7 @@ test "c abi multi-handle write contention returns busy or locked with short time
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-multi-handle-busy.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-multi-handle-busy.zova", .{tmp.sub_path[0..]}, 0);
 
     var first: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
@@ -472,7 +473,7 @@ test "c abi last error remains useful after concurrent serialized failures" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-threaded-errors.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-threaded-errors.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{

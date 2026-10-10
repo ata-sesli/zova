@@ -4264,7 +4264,7 @@ test "cli migrate argument and destination errors are bounded" {
 
     // missing parent directory
     var missing_parent_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const missing_parent_path = try std.fmt.bufPrintZ(&missing_parent_buffer, ".zig-cache/tmp/{s}/no_such_dir/dest.zova", .{tmp.sub_path});
+    const missing_parent_path = try std.fmt.bufPrintSentinel(&missing_parent_buffer, ".zig-cache/tmp/{s}/no_such_dir/dest.zova", .{tmp.sub_path}, 0);
     var missing_parent = try runCli(&.{ "zova", "migrate", source_path, missing_parent_path });
     defer missing_parent.deinit();
     try std.testing.expectEqual(@as(u8, 3), missing_parent.code);
@@ -4342,18 +4342,18 @@ test "cli migrate reports derived bound stores accurately" {
     const set_dir = try std.fmt.bufPrint(&set_dir_buffer, ".zig-cache/tmp/{s}/migrate-bound", .{tmp.sub_path});
 
     var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const main_path = try std.fmt.bufPrintZ(&main_buffer, "{s}/main.zova", .{set_dir});
+    const main_path = try std.fmt.bufPrintSentinel(&main_buffer, "{s}/main.zova", .{set_dir}, 0);
     var objects_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const objects_path = try std.fmt.bufPrintZ(&objects_buffer, "{s}/main.objects.zova", .{set_dir});
+    const objects_path = try std.fmt.bufPrintSentinel(&objects_buffer, "{s}/main.objects.zova", .{set_dir}, 0);
     var vectors_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const vectors_path = try std.fmt.bufPrintZ(&vectors_buffer, "{s}/main.vectors.zova", .{set_dir});
+    const vectors_path = try std.fmt.bufPrintSentinel(&vectors_buffer, "{s}/main.vectors.zova", .{set_dir}, 0);
     var graphs_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const graphs_path = try std.fmt.bufPrintZ(&graphs_buffer, "{s}/main.graphs.zova", .{set_dir});
+    const graphs_path = try std.fmt.bufPrintSentinel(&graphs_buffer, "{s}/main.graphs.zova", .{set_dir}, 0);
 
     try setupMigrateBoundSet(&tmp, set_dir, main_path, objects_path, vectors_path, graphs_path);
 
     var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const dest_path = try std.fmt.bufPrintZ(&dest_buffer, "{s}/dest.zova", .{set_dir});
+    const dest_path = try std.fmt.bufPrintSentinel(&dest_buffer, "{s}/dest.zova", .{set_dir}, 0);
 
     var result = try runCli(&.{ "zova", "migrate", "--json", main_path, dest_path });
     defer result.deinit();
@@ -4702,16 +4702,16 @@ fn createUnavailableExtensionFixture(db_path: [:0]const u8) !void {
 }
 
 fn testingDbPath(buffer: []u8, sub_path: []const u8, name: []const u8) ![:0]u8 {
-    return try std.fmt.bufPrintZ(buffer, ".zig-cache/tmp/{s}/{s}", .{ sub_path, name });
+    return try std.fmt.bufPrintSentinel(buffer, ".zig-cache/tmp/{s}/{s}", .{ sub_path, name }, 0);
 }
 
 extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 
 fn setTestEnv(name: []const u8, value: []const u8) !void {
     const allocator = std.testing.allocator;
-    const name_z = try allocator.dupeZ(u8, name);
+    const name_z = try allocator.dupeSentinel(u8, name, 0);
     defer allocator.free(name_z);
-    const value_z = try allocator.dupeZ(u8, value);
+    const value_z = try allocator.dupeSentinel(u8, value, 0);
     defer allocator.free(value_z);
     if (setenv(name_z.ptr, value_z.ptr, 1) != 0) return error.SetEnvFailed;
 }

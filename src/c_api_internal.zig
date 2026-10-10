@@ -917,7 +917,7 @@ test "c abi validates null pointers" {
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_register_function(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_set_busy_timeout(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_object_id_from_bytes(null, 1, null));
-    var id = zova_object_id{ .bytes = [_]u8{0} ** 32 };
+    var id = zova_object_id{ .bytes = @as([32]u8, @splat(0)) };
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_object_id_from_bytes(null, 1, &id));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_collection_create(null));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_put(null));
@@ -1032,7 +1032,7 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
     // Current format probe
     {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = try std.fmt.bufPrintZ(&buf, ".zig-cache/tmp/{s}/c-probe-current.zova", .{tmp.sub_path[0..]});
+        const path = try std.fmt.bufPrintSentinel(&buf, ".zig-cache/tmp/{s}/c-probe-current.zova", .{tmp.sub_path[0..]}, 0);
         {
             var db = try zova.Database.create(path);
             defer db.deinit();
@@ -1043,12 +1043,12 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
         defer zova_message_free(&msg);
         try std.testing.expectEqual(zova_status.OK, zova_database_probe_format(&.{ .path = path, .out_info = &out, .out_error_message = &msg }));
         try std.testing.expectEqual(@as(u32, 11), out.format_version);
-        try std.testing.expectEqual(@intFromEnum(zova_format_compatibility.CURRENT), out.compatibility);
+        try std.testing.expectEqual(@backingInt(zova_format_compatibility.CURRENT), out.compatibility);
     }
     // Migratable fixture
     {
         var src_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const src = try std.fmt.bufPrintZ(&src_buf, ".zig-cache/tmp/{s}/c-probe-migratable.zova", .{tmp.sub_path[0..]});
+        const src = try std.fmt.bufPrintSentinel(&src_buf, ".zig-cache/tmp/{s}/c-probe-migratable.zova", .{tmp.sub_path[0..]}, 0);
         try copyFixture("tests/fixtures/format-9.zova", src);
         var out: zova_database_format_info = undefined;
         out = .{};
@@ -1056,7 +1056,7 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
         defer zova_message_free(&msg);
         try std.testing.expectEqual(zova_status.OK, zova_database_probe_format(&.{ .path = src, .out_info = &out, .out_error_message = &msg }));
         try std.testing.expectEqual(@as(u32, 9), out.format_version);
-        try std.testing.expectEqual(@intFromEnum(zova_format_compatibility.MIGRATABLE), out.compatibility);
+        try std.testing.expectEqual(@backingInt(zova_format_compatibility.MIGRATABLE), out.compatibility);
     }
     // Future and legacy synthetic
     for ([_]struct { ver: []const u8, expected: zova_format_compatibility }{
@@ -1064,7 +1064,7 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
         .{ .ver = "8", .expected = .UNSUPPORTED_LEGACY },
     }) |case| {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = try std.fmt.bufPrintZ(&buf, ".zig-cache/tmp/{s}/c-probe-{s}.zova", .{ tmp.sub_path[0..], case.ver });
+        const path = try std.fmt.bufPrintSentinel(&buf, ".zig-cache/tmp/{s}/c-probe-{s}.zova", .{ tmp.sub_path[0..], case.ver }, 0);
         {
             var db = try zova.Database.create(path);
             defer db.deinit();
@@ -1082,17 +1082,17 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
         var msg = zova_message{ .data = null, .len = 0 };
         defer zova_message_free(&msg);
         try std.testing.expectEqual(zova_status.OK, zova_database_probe_format(&.{ .path = path, .out_info = &out, .out_error_message = &msg }));
-        try std.testing.expectEqual(@intFromEnum(case.expected), out.compatibility);
+        try std.testing.expectEqual(@backingInt(case.expected), out.compatibility);
         try std.testing.expectEqual(try std.fmt.parseInt(u32, case.ver, 10), out.format_version);
     }
     // Successful migrate with source immutability and bound-store reporting
     {
         var src_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const src = try std.fmt.bufPrintZ(&src_buf, ".zig-cache/tmp/{s}/c-migrate-src.zova", .{tmp.sub_path[0..]});
+        const src = try std.fmt.bufPrintSentinel(&src_buf, ".zig-cache/tmp/{s}/c-migrate-src.zova", .{tmp.sub_path[0..]}, 0);
         try copyFixture("tests/fixtures/format-9.zova", src);
         const before = try fileHash(src);
         var dst_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const dst = try std.fmt.bufPrintZ(&dst_buf, ".zig-cache/tmp/{s}/c-migrate-dst.zova", .{tmp.sub_path[0..]});
+        const dst = try std.fmt.bufPrintSentinel(&dst_buf, ".zig-cache/tmp/{s}/c-migrate-dst.zova", .{tmp.sub_path[0..]}, 0);
         var msg = zova_message{ .data = null, .len = 0 };
         defer zova_message_free(&msg);
         try std.testing.expectEqual(zova_status.OK, zova_database_migrate(&.{ .source_path = src, .destination_path = dst, .flags = 0, .out_error_message = &msg }));
@@ -1104,7 +1104,7 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
         defer zova_message_free(&probe_msg);
         try std.testing.expectEqual(zova_status.OK, zova_database_probe_format(&.{ .path = dst, .out_info = &out, .out_error_message = &probe_msg }));
         try std.testing.expectEqual(@as(u32, 11), out.format_version);
-        try std.testing.expectEqual(@intFromEnum(zova_format_compatibility.CURRENT), out.compatibility);
+        try std.testing.expectEqual(@backingInt(zova_format_compatibility.CURRENT), out.compatibility);
         // destination is openable and no private names leaked via C output (checked via probe/migrate out_info)
         var db = try zova.Database.open(dst);
         defer db.deinit();
@@ -1113,10 +1113,10 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
     // Destination exists
     {
         var src_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const src = try std.fmt.bufPrintZ(&src_buf, ".zig-cache/tmp/{s}/c-migrate-dest-exists-src.zova", .{tmp.sub_path[0..]});
+        const src = try std.fmt.bufPrintSentinel(&src_buf, ".zig-cache/tmp/{s}/c-migrate-dest-exists-src.zova", .{tmp.sub_path[0..]}, 0);
         try copyFixture("tests/fixtures/format-9.zova", src);
         var dst_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const dst = try std.fmt.bufPrintZ(&dst_buf, ".zig-cache/tmp/{s}/c-migrate-dest-exists-dst.zova", .{tmp.sub_path[0..]});
+        const dst = try std.fmt.bufPrintSentinel(&dst_buf, ".zig-cache/tmp/{s}/c-migrate-dest-exists-dst.zova", .{tmp.sub_path[0..]}, 0);
         {
             var db = try zova.Database.create(dst);
             defer db.deinit();
@@ -1131,7 +1131,7 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
         .{ .ver = "8", .expected = .UNSUPPORTED_LEGACY_FORMAT },
     }) |case| {
         var src_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const src = try std.fmt.bufPrintZ(&src_buf, ".zig-cache/tmp/{s}/c-migrate-unsupported-{s}.zova", .{ tmp.sub_path[0..], case.ver });
+        const src = try std.fmt.bufPrintSentinel(&src_buf, ".zig-cache/tmp/{s}/c-migrate-unsupported-{s}.zova", .{ tmp.sub_path[0..], case.ver }, 0);
         {
             var db = try zova.Database.create(src);
             defer db.deinit();
@@ -1145,7 +1145,7 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
             _ = try stmt.step();
         }
         var dst_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const dst = try std.fmt.bufPrintZ(&dst_buf, ".zig-cache/tmp/{s}/c-migrate-unsupported-{s}-dst.zova", .{ tmp.sub_path[0..], case.ver });
+        const dst = try std.fmt.bufPrintSentinel(&dst_buf, ".zig-cache/tmp/{s}/c-migrate-unsupported-{s}-dst.zova", .{ tmp.sub_path[0..], case.ver }, 0);
         var msg = zova_message{ .data = null, .len = 0 };
         defer zova_message_free(&msg);
         const status = zova_database_migrate(&.{ .source_path = src, .destination_path = dst, .flags = 0, .out_error_message = &msg });
@@ -1156,13 +1156,13 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
     // NoMigrationPath (migrate current)
     {
         var src_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const src = try std.fmt.bufPrintZ(&src_buf, ".zig-cache/tmp/{s}/c-migrate-current.zova", .{tmp.sub_path[0..]});
+        const src = try std.fmt.bufPrintSentinel(&src_buf, ".zig-cache/tmp/{s}/c-migrate-current.zova", .{tmp.sub_path[0..]}, 0);
         {
             var db = try zova.Database.create(src);
             defer db.deinit();
         }
         var dst_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const dst = try std.fmt.bufPrintZ(&dst_buf, ".zig-cache/tmp/{s}/c-migrate-current-dst.zova", .{tmp.sub_path[0..]});
+        const dst = try std.fmt.bufPrintSentinel(&dst_buf, ".zig-cache/tmp/{s}/c-migrate-current-dst.zova", .{tmp.sub_path[0..]}, 0);
         var msg = zova_message{ .data = null, .len = 0 };
         defer zova_message_free(&msg);
         try std.testing.expectEqual(zova_status.NO_MIGRATION_PATH, zova_database_migrate(&.{ .source_path = src, .destination_path = dst, .flags = 0, .out_error_message = &msg }));
@@ -1171,13 +1171,13 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
     // Busy source
     {
         var src_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const src = try std.fmt.bufPrintZ(&src_buf, ".zig-cache/tmp/{s}/c-migrate-busy.zova", .{tmp.sub_path[0..]});
+        const src = try std.fmt.bufPrintSentinel(&src_buf, ".zig-cache/tmp/{s}/c-migrate-busy.zova", .{tmp.sub_path[0..]}, 0);
         try copyFixture("tests/fixtures/format-9.zova", src);
         var lock = try sqlite.Database.open(src);
         defer lock.deinit();
         try lock.exec("begin immediate");
         var dst_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const dst = try std.fmt.bufPrintZ(&dst_buf, ".zig-cache/tmp/{s}/c-migrate-busy-dst.zova", .{tmp.sub_path[0..]});
+        const dst = try std.fmt.bufPrintSentinel(&dst_buf, ".zig-cache/tmp/{s}/c-migrate-busy-dst.zova", .{tmp.sub_path[0..]}, 0);
         var msg = zova_message{ .data = null, .len = 0 };
         defer zova_message_free(&msg);
         const status = zova_database_migrate(&.{ .source_path = src, .destination_path = dst, .flags = 0, .out_error_message = &msg });
@@ -1187,7 +1187,7 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
     // Verification failure (corrupt _zova_chunks)
     {
         var src_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const src = try std.fmt.bufPrintZ(&src_buf, ".zig-cache/tmp/{s}/c-migrate-verify-fail.zova", .{tmp.sub_path[0..]});
+        const src = try std.fmt.bufPrintSentinel(&src_buf, ".zig-cache/tmp/{s}/c-migrate-verify-fail.zova", .{tmp.sub_path[0..]}, 0);
         try copyFixture("tests/fixtures/format-9.zova", src);
         {
             var raw = try sqlite.Database.open(src);
@@ -1196,7 +1196,7 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
         }
         const before = try fileHash(src);
         var dst_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const dst = try std.fmt.bufPrintZ(&dst_buf, ".zig-cache/tmp/{s}/c-migrate-verify-dst.zova", .{tmp.sub_path[0..]});
+        const dst = try std.fmt.bufPrintSentinel(&dst_buf, ".zig-cache/tmp/{s}/c-migrate-verify-dst.zova", .{tmp.sub_path[0..]}, 0);
         var msg = zova_message{ .data = null, .len = 0 };
         defer zova_message_free(&msg);
         const status = zova_database_migrate(&.{ .source_path = src, .destination_path = dst, .flags = 0, .out_error_message = &msg });
@@ -1208,7 +1208,7 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
         try std.testing.expectEqualSlices(u8, &before, &after);
         // with NO_VERIFY it would succeed
         var dst2_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const dst2 = try std.fmt.bufPrintZ(&dst2_buf, ".zig-cache/tmp/{s}/c-migrate-verify-dst2.zova", .{tmp.sub_path[0..]});
+        const dst2 = try std.fmt.bufPrintSentinel(&dst2_buf, ".zig-cache/tmp/{s}/c-migrate-verify-dst2.zova", .{tmp.sub_path[0..]}, 0);
         var msg2 = zova_message{ .data = null, .len = 0 };
         defer zova_message_free(&msg2);
         try std.testing.expectEqual(zova_status.OK, zova_database_migrate(&.{ .source_path = src, .destination_path = dst2, .flags = ZOVA_MIGRATE_NO_VERIFY, .out_error_message = &msg2 }));
@@ -1252,45 +1252,45 @@ fn sqlFunctionMixed(user_data: ?*anyopaque, call: ?*const zova_sql_function_call
     state.saw_float = args[2].value_type == .FLOAT and args[2].double_value == 2.5;
     state.saw_text = args[3].value_type == .TEXT and args[3].data_len == 3 and std.mem.eql(u8, bytesFromAny(args[3].data, args[3].data_len), "abc");
     state.saw_blob = args[4].value_type == .BLOB and args[4].data_len == 3 and std.mem.eql(u8, bytesFromAny(args[4].data, args[4].data_len), &.{ 0x0a, 0x0b, 0x0c });
-    out.?.* = .{ .result_type = @intFromEnum(zova_sql_result_type.INTEGER), .int64_value = 42 };
+    out.?.* = .{ .result_type = @backingInt(zova_sql_result_type.INTEGER), .int64_value = 42 };
 }
 
 fn sqlFunctionText(_: ?*anyopaque, _: ?*const zova_sql_function_call, out: ?*zova_sql_result) callconv(.c) void {
-    out.?.* = .{ .result_type = @intFromEnum(zova_sql_result_type.TEXT), .data = "hello".ptr, .data_len = 5 };
+    out.?.* = .{ .result_type = @backingInt(zova_sql_result_type.TEXT), .data = "hello".ptr, .data_len = 5 };
 }
 
 const sql_function_blob_bytes = [_]u8{ 1, 2, 3, 4 };
 
 fn sqlFunctionBlob(_: ?*anyopaque, _: ?*const zova_sql_function_call, out: ?*zova_sql_result) callconv(.c) void {
-    out.?.* = .{ .result_type = @intFromEnum(zova_sql_result_type.BLOB), .data = &sql_function_blob_bytes, .data_len = sql_function_blob_bytes.len };
+    out.?.* = .{ .result_type = @backingInt(zova_sql_result_type.BLOB), .data = &sql_function_blob_bytes, .data_len = sql_function_blob_bytes.len };
 }
 
 fn sqlFunctionError(_: ?*anyopaque, _: ?*const zova_sql_function_call, out: ?*zova_sql_result) callconv(.c) void {
-    out.?.* = .{ .result_type = @intFromEnum(zova_sql_result_type.ERROR), .error_message = "callback failed".ptr, .error_message_len = "callback failed".len };
+    out.?.* = .{ .result_type = @backingInt(zova_sql_result_type.ERROR), .error_message = "callback failed".ptr, .error_message_len = "callback failed".len };
 }
 
 fn sqlFunctionContains(_: ?*anyopaque, call: ?*const zova_sql_function_call, out: ?*zova_sql_result) callconv(.c) void {
     const args = call.?.argv.?[0..call.?.argc];
     if (args.len != 2 or args[0].value_type != .TEXT or args[1].value_type != .TEXT) {
-        out.?.* = .{ .result_type = @intFromEnum(zova_sql_result_type.ERROR), .error_message = "regexp expects two text args".ptr, .error_message_len = "regexp expects two text args".len };
+        out.?.* = .{ .result_type = @backingInt(zova_sql_result_type.ERROR), .error_message = "regexp expects two text args".ptr, .error_message_len = "regexp expects two text args".len };
         return;
     }
     const needle = bytesFromAny(args[0].data, args[0].data_len);
     const haystack = bytesFromAny(args[1].data, args[1].data_len);
     const matched = std.mem.indexOf(u8, haystack, needle) != null;
-    out.?.* = .{ .result_type = @intFromEnum(zova_sql_result_type.INTEGER), .int64_value = @intFromBool(matched) };
+    out.?.* = .{ .result_type = @backingInt(zova_sql_result_type.INTEGER), .int64_value = @intFromBool(matched) };
 }
 
 fn sqlFunctionContainsIgnoreCase(_: ?*anyopaque, call: ?*const zova_sql_function_call, out: ?*zova_sql_result) callconv(.c) void {
     const args = call.?.argv.?[0..call.?.argc];
     if (args.len != 2 or args[0].value_type != .TEXT or args[1].value_type != .TEXT) {
-        out.?.* = .{ .result_type = @intFromEnum(zova_sql_result_type.ERROR), .error_message = "iregexp expects two text args".ptr, .error_message_len = "iregexp expects two text args".len };
+        out.?.* = .{ .result_type = @backingInt(zova_sql_result_type.ERROR), .error_message = "iregexp expects two text args".ptr, .error_message_len = "iregexp expects two text args".len };
         return;
     }
     const needle = bytesFromAny(args[0].data, args[0].data_len);
     const haystack = bytesFromAny(args[1].data, args[1].data_len);
     const matched = asciiContainsIgnoreCase(haystack, needle);
-    out.?.* = .{ .result_type = @intFromEnum(zova_sql_result_type.INTEGER), .int64_value = @intFromBool(matched) };
+    out.?.* = .{ .result_type = @backingInt(zova_sql_result_type.INTEGER), .int64_value = @intFromBool(matched) };
 }
 
 fn asciiContainsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
@@ -1319,7 +1319,7 @@ test "c abi validates scalar sql function registration requests" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-sql-function-validation.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-sql-function-validation.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
@@ -1428,7 +1428,7 @@ test "c abi registers scalar sql functions on zova owned connections" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-sql-functions.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-sql-functions.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
@@ -1521,7 +1521,7 @@ test "c abi app regexp callbacks coexist with fts5 on zova owned connection" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-fts-regexp.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-fts-regexp.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
@@ -1582,7 +1582,7 @@ test "c abi app callbacks coexist with bundled extension vector graph and notifi
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-coexistence.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-coexistence.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
@@ -1614,7 +1614,7 @@ test "c abi app callbacks coexist with bundled extension vector graph and notifi
     try std.testing.expectEqual(zova_status.OK, zova_vector_collection_create(&.{
         .db = db,
         .name = "co_vectors",
-        .options = .{ .dimensions = 2, .metric = @intFromEnum(zova_vector_metric.L2), .element_type = @intFromEnum(zova_vector_element_type.I8) },
+        .options = .{ .dimensions = 2, .metric = @backingInt(zova_vector_metric.L2), .element_type = @backingInt(zova_vector_element_type.I8) },
     }));
     const near = [_]i8{ 1, 0 };
     const far = [_]i8{ 5, 0 };
@@ -1637,7 +1637,7 @@ test "c abi app callbacks coexist with bundled extension vector graph and notifi
         .graph_name = "co_graph",
         .node_id = "near",
         .kind = "vector",
-        .target_type = @intFromEnum(zova_graph_target_type.VECTOR),
+        .target_type = @backingInt(zova_graph_target_type.VECTOR),
         .target_namespace = "co_vectors",
         .target_ref = "near",
     }));
@@ -1646,7 +1646,7 @@ test "c abi app callbacks coexist with bundled extension vector graph and notifi
         .graph_name = "co_graph",
         .node_id = "far",
         .kind = "vector",
-        .target_type = @intFromEnum(zova_graph_target_type.VECTOR),
+        .target_type = @backingInt(zova_graph_target_type.VECTOR),
         .target_namespace = "co_vectors",
         .target_ref = "far",
     }));
@@ -1749,7 +1749,7 @@ test "c abi maps incompatible storage formats to unsupported zova version" {
 
     for (cases) |case| {
         var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path[0..], case.file_name });
+        const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path[0..], case.file_name }, 0);
 
         {
             var raw = try sqlite.Database.open(db_path);
@@ -1774,7 +1774,7 @@ test "c abi maps incompatible storage formats to unsupported zova version" {
 
     // The genuine released format-9 fixture through the public ABI.
     var fixture_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const fixture_path = try std.fmt.bufPrintZ(&fixture_buffer, "tests/fixtures/format-9.zova", .{});
+    const fixture_path = try std.fmt.bufPrintSentinel(&fixture_buffer, "tests/fixtures/format-9.zova", .{}, 0);
     var fixture_db: ?*zova_database = null;
     const fixture_status = zova_database_open(&.{
         .path = fixture_path,
@@ -1790,7 +1790,7 @@ test "c abi open options validate flags and support read-only handles" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-readonly.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-readonly.zova", .{tmp.sub_path[0..]}, 0);
 
     var writable: ?*zova_database = null;
     var create_request = zova_database_open_request{
@@ -1801,7 +1801,7 @@ test "c abi open options validate flags and support read-only handles" {
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&create_request));
     try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = writable, .sql = "create table notes (body text not null)" }));
     try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = writable, .sql = "insert into notes (body) values ('kept')" }));
-    var object_id = zova_object_id{ .bytes = [_]u8{0} ** 32 };
+    var object_id = zova_object_id{ .bytes = @as([32]u8, @splat(0)) };
     try std.testing.expectEqual(zova_status.OK, zova_object_put(&.{
         .db = writable,
         .data = "readonly object",
@@ -1811,7 +1811,7 @@ test "c abi open options validate flags and support read-only handles" {
     try std.testing.expectEqual(zova_status.OK, zova_vector_collection_create(&.{
         .db = writable,
         .name = "chunks",
-        .options = .{ .dimensions = 2, .metric = @intFromEnum(zova_vector_metric.L2), .element_type = @intFromEnum(zova_vector_element_type.F32) },
+        .options = .{ .dimensions = 2, .metric = @backingInt(zova_vector_metric.L2), .element_type = @backingInt(zova_vector_element_type.F32) },
     }));
     const values = [_]f32{ 1.0, 2.0 };
     try std.testing.expectEqual(zova_status.OK, zova_vector_put(&.{
@@ -1892,7 +1892,7 @@ test "c abi open options validate flags and support read-only handles" {
     try std.testing.expectEqual(zova_status.OK, zova_statement_finalize(distance_stmt));
 
     try std.testing.expectEqual(zova_status.READ_ONLY, zova_database_exec(&.{ .db = readonly, .sql = "insert into notes (body) values ('blocked')" }));
-    var blocked_object_id = zova_object_id{ .bytes = [_]u8{0} ** 32 };
+    var blocked_object_id = zova_object_id{ .bytes = @as([32]u8, @splat(0)) };
     const blocked_object_status = zova_object_put(&.{
         .db = readonly,
         .data = "blocked object",
@@ -1917,7 +1917,7 @@ test "c abi exposes graph lifecycle nodes edges and traversal" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-graph.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-graph.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
@@ -1927,7 +1927,7 @@ test "c abi exposes graph lifecycle nodes edges and traversal" {
     }));
     defer _ = zova_database_close(db);
 
-    try std.testing.expectEqualStrings("ZOVA_GRAPH_NOT_FOUND", std.mem.span(zova_status_name(@intFromEnum(zova_status.GRAPH_NOT_FOUND))));
+    try std.testing.expectEqualStrings("ZOVA_GRAPH_NOT_FOUND", std.mem.span(zova_status_name(@backingInt(zova_status.GRAPH_NOT_FOUND))));
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_graph_create(&.{ .db = db, .name = null }));
     try std.testing.expectEqual(zova_status.GRAPH_INVALID, zova_graph_create(&.{ .db = db, .name = "_zova_private" }));
 
@@ -1944,7 +1944,7 @@ test "c abi exposes graph lifecycle nodes edges and traversal" {
         .graph_name = "app",
         .node_id = "message:1",
         .kind = "message",
-        .target_type = @intFromEnum(zova_graph_target_type.RECORD),
+        .target_type = @backingInt(zova_graph_target_type.RECORD),
         .target_namespace = null,
         .target_ref = "messages:1",
     }));
@@ -1953,7 +1953,7 @@ test "c abi exposes graph lifecycle nodes edges and traversal" {
         .graph_name = "app",
         .node_id = "message:2",
         .kind = "message",
-        .target_type = @intFromEnum(zova_graph_target_type.RECORD),
+        .target_type = @backingInt(zova_graph_target_type.RECORD),
         .target_namespace = null,
         .target_ref = "messages:2",
     }));
@@ -1962,7 +1962,7 @@ test "c abi exposes graph lifecycle nodes edges and traversal" {
         .graph_name = "app",
         .node_id = "attachment:1",
         .kind = "attachment",
-        .target_type = @intFromEnum(zova_graph_target_type.EXTERNAL),
+        .target_type = @backingInt(zova_graph_target_type.EXTERNAL),
         .target_namespace = "attachments",
         .target_ref = "",
     }));
@@ -1971,7 +1971,7 @@ test "c abi exposes graph lifecycle nodes edges and traversal" {
         .graph_name = "app",
         .node_id = "_zova_bad",
         .kind = "message",
-        .target_type = @intFromEnum(zova_graph_target_type.NONE),
+        .target_type = @backingInt(zova_graph_target_type.NONE),
         .target_namespace = null,
         .target_ref = null,
     }));
@@ -2004,7 +2004,7 @@ test "c abi exposes graph lifecycle nodes edges and traversal" {
         .node_id_len = 0,
         .kind = null,
         .kind_len = 0,
-        .target_type = @intFromEnum(zova_graph_target_type.NONE),
+        .target_type = @backingInt(zova_graph_target_type.NONE),
         .target_namespace = null,
         .target_namespace_len = 0,
         .target_ref = null,
@@ -2045,7 +2045,7 @@ test "c abi exposes graph lifecycle nodes edges and traversal" {
         .db = db,
         .graph_name = "app",
         .node_id = "message:1",
-        .direction = @intFromEnum(zova_graph_neighbor_direction.OUTGOING),
+        .direction = @backingInt(zova_graph_neighbor_direction.OUTGOING),
         .edge_type = null,
         .limit = 10,
         .out_results = &neighbors,
@@ -2056,7 +2056,7 @@ test "c abi exposes graph lifecycle nodes edges and traversal" {
         .db = db,
         .graph_name = "app",
         .node_id = "message:2",
-        .direction = @intFromEnum(zova_graph_neighbor_direction.INCOMING),
+        .direction = @backingInt(zova_graph_neighbor_direction.INCOMING),
         .edge_type = "replies_to",
         .limit = 0,
         .out_results = &neighbors,
@@ -2068,7 +2068,7 @@ test "c abi exposes graph lifecycle nodes edges and traversal" {
         .db = db,
         .graph_name = "app",
         .node_id = "message:1",
-        .direction = @intFromEnum(zova_graph_neighbor_direction.OUTGOING),
+        .direction = @backingInt(zova_graph_neighbor_direction.OUTGOING),
         .edge_type = null,
         .limit = too_large_limit,
         .out_results = &neighbors,
@@ -2094,7 +2094,7 @@ test "c abi exposes graph lifecycle nodes edges and traversal" {
         .db = db,
         .graph_name = "app",
         .start_node_id = "message:1",
-        .direction = @intFromEnum(zova_graph_neighbor_direction.OUTGOING),
+        .direction = @backingInt(zova_graph_neighbor_direction.OUTGOING),
         .edge_type = "replies_to",
         .max_depth = 1,
         .limit = 10,
@@ -2108,7 +2108,7 @@ test "c abi exposes graph lifecycle nodes edges and traversal" {
         .db = db,
         .graph_name = "app",
         .start_node_id = "message:2",
-        .direction = @intFromEnum(zova_graph_neighbor_direction.INCOMING),
+        .direction = @backingInt(zova_graph_neighbor_direction.INCOMING),
         .edge_type = "replies_to",
         .max_depth = 1,
         .limit = 10,
@@ -2124,7 +2124,7 @@ test "c abi exposes graph lifecycle nodes edges and traversal" {
         .db = db,
         .graph_name = "app",
         .start_node_id = "message:1",
-        .direction = @intFromEnum(zova_graph_neighbor_direction.OUTGOING),
+        .direction = @backingInt(zova_graph_neighbor_direction.OUTGOING),
         .edge_type = "replies_to",
         .max_depth = 1,
         .limit = 10,
@@ -2135,7 +2135,7 @@ test "c abi exposes graph lifecycle nodes edges and traversal" {
         .db = db,
         .graph_name = "app",
         .start_node_id = "message:1",
-        .direction = @intFromEnum(zova_graph_neighbor_direction.OUTGOING),
+        .direction = @backingInt(zova_graph_neighbor_direction.OUTGOING),
         .edge_type = "replies_to",
         .max_depth = 1,
         .limit = 10,
@@ -2146,7 +2146,7 @@ test "c abi exposes graph lifecycle nodes edges and traversal" {
         .db = db,
         .graph_name = "app",
         .start_node_id = "message:1",
-        .direction = @intFromEnum(zova_graph_neighbor_direction.OUTGOING),
+        .direction = @backingInt(zova_graph_neighbor_direction.OUTGOING),
         .edge_type = "replies_to",
         .max_depth = 1,
         .limit = 10,
@@ -2177,7 +2177,7 @@ test "c abi exposes graph lifecycle nodes edges and traversal" {
         .db = db,
         .graph_name = "app",
         .start_node_id = "message:2",
-        .direction = @intFromEnum(zova_graph_neighbor_direction.INCOMING),
+        .direction = @backingInt(zova_graph_neighbor_direction.INCOMING),
         .edge_type = "replies_to",
         .max_depth = 1,
         .limit = 10,
@@ -2203,7 +2203,7 @@ test "c abi exposes graph lifecycle nodes edges and traversal" {
         .db = db,
         .graph_name = null,
         .start_node_id = "message:2",
-        .direction = @intFromEnum(zova_graph_neighbor_direction.INCOMING),
+        .direction = @backingInt(zova_graph_neighbor_direction.INCOMING),
         .edge_type = null,
         .max_depth = 1,
         .limit = 10,
@@ -2224,7 +2224,7 @@ test "c abi exposes graph lifecycle nodes edges and traversal" {
         .db = db,
         .graph_name = "app",
         .start_node_id = "message:2",
-        .direction = @intFromEnum(zova_graph_neighbor_direction.INCOMING),
+        .direction = @backingInt(zova_graph_neighbor_direction.INCOMING),
         .edge_type = "replies_to",
         .max_depth = 1,
         .limit = 10,
@@ -2237,7 +2237,7 @@ test "c abi exposes graph lifecycle nodes edges and traversal" {
         .graph_name = "app",
         .node_id = "message:rollback",
         .kind = "message",
-        .target_type = @intFromEnum(zova_graph_target_type.NONE),
+        .target_type = @backingInt(zova_graph_target_type.NONE),
         .target_namespace = null,
         .target_ref = null,
     }));
@@ -2265,7 +2265,7 @@ test "c abi validates vector request shapes" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-vector-validation.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-vector-validation.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     var create_request = zova_database_open_request{
@@ -2279,14 +2279,14 @@ test "c abi validates vector request shapes" {
     const invalid_metric_request = zova_vector_collection_create_request{
         .db = db,
         .name = "bad",
-        .options = .{ .dimensions = 2, .metric = 99, .element_type = @intFromEnum(zova_vector_element_type.F32) },
+        .options = .{ .dimensions = 2, .metric = 99, .element_type = @backingInt(zova_vector_element_type.F32) },
     };
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_collection_create(&invalid_metric_request));
 
     const create_collection_request = zova_vector_collection_create_request{
         .db = db,
         .name = "chunks",
-        .options = .{ .dimensions = 2, .metric = @intFromEnum(zova_vector_metric.L2), .element_type = @intFromEnum(zova_vector_element_type.F32) },
+        .options = .{ .dimensions = 2, .metric = @backingInt(zova_vector_metric.L2), .element_type = @backingInt(zova_vector_element_type.F32) },
     };
     try std.testing.expectEqual(zova_status.OK, zova_vector_collection_create(&create_collection_request));
 
@@ -2294,7 +2294,7 @@ test "c abi validates vector request shapes" {
         .db = db,
         .collection_name = "chunks",
         .vector_id = "id",
-        .values = .{ .element_type = @intFromEnum(zova_vector_element_type.F32), .f32_values = null, .f16_values = null, .i8_values = null, .values_len = 2 },
+        .values = .{ .element_type = @backingInt(zova_vector_element_type.F32), .f32_values = null, .f16_values = null, .i8_values = null, .values_len = 2 },
     };
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_put(&bad_values_request));
 
@@ -2302,7 +2302,7 @@ test "c abi validates vector request shapes" {
     const bad_search_request = zova_vector_search_request{
         .db = db,
         .collection_name = "chunks",
-        .query = .{ .element_type = @intFromEnum(zova_vector_element_type.F32), .f32_values = null, .f16_values = null, .i8_values = null, .values_len = 2 },
+        .query = .{ .element_type = @backingInt(zova_vector_element_type.F32), .f32_values = null, .f16_values = null, .i8_values = null, .values_len = 2 },
         .limit = 10,
         .out_results = &search_results,
     };
@@ -2341,7 +2341,7 @@ test "c abi validates vector request shapes" {
 
     const bad_input_values = [_]zova_vector_input{.{
         .id = "id",
-        .values = .{ .element_type = @intFromEnum(zova_vector_element_type.F32), .f32_values = null, .f16_values = null, .i8_values = null, .values_len = 2 },
+        .values = .{ .element_type = @backingInt(zova_vector_element_type.F32), .f32_values = null, .f16_values = null, .i8_values = null, .values_len = 2 },
     }};
     const bad_input_values_request = zova_vector_put_many_request{
         .db = db,
@@ -2369,14 +2369,14 @@ test "c abi vector delete many validates atomically and does not retain inputs" 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-vector-delete-many.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-vector-delete-many.zova", .{tmp.sub_path[0..]}, 0);
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{ .path = db_path, .out_db = &db, .out_error_message = null }));
     defer _ = zova_database_close(db);
     try std.testing.expectEqual(zova_status.OK, zova_vector_collection_create(&.{
         .db = db,
         .name = "chunks",
-        .options = .{ .dimensions = 2, .metric = @intFromEnum(zova_vector_metric.L2), .element_type = @intFromEnum(zova_vector_element_type.F32) },
+        .options = .{ .dimensions = 2, .metric = @backingInt(zova_vector_metric.L2), .element_type = @backingInt(zova_vector_element_type.F32) },
     }));
     const values = [_]f32{ 1, 2 };
     try std.testing.expectEqual(zova_status.OK, zova_vector_put(&.{ .db = db, .collection_name = "chunks", .vector_id = "a", .values = f32AbiValues(&values) }));
@@ -2410,7 +2410,7 @@ test "c abi exposes vector collection management batch writes and expanded searc
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-vector-parity.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-vector-parity.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     var create_request = zova_database_open_request{
@@ -2424,12 +2424,12 @@ test "c abi exposes vector collection management batch writes and expanded searc
     const create_chunks = zova_vector_collection_create_request{
         .db = db,
         .name = "chunks",
-        .options = .{ .dimensions = 2, .metric = @intFromEnum(zova_vector_metric.L2), .element_type = @intFromEnum(zova_vector_element_type.F32) },
+        .options = .{ .dimensions = 2, .metric = @backingInt(zova_vector_metric.L2), .element_type = @backingInt(zova_vector_element_type.F32) },
     };
     const create_docs = zova_vector_collection_create_request{
         .db = db,
         .name = "docs",
-        .options = .{ .dimensions = 2, .metric = @intFromEnum(zova_vector_metric.DOT), .element_type = @intFromEnum(zova_vector_element_type.F32) },
+        .options = .{ .dimensions = 2, .metric = @backingInt(zova_vector_metric.DOT), .element_type = @backingInt(zova_vector_element_type.F32) },
     };
     try std.testing.expectEqual(zova_status.OK, zova_vector_collection_create(&create_docs));
     try std.testing.expectEqual(zova_status.OK, zova_vector_collection_create(&create_chunks));
@@ -2440,11 +2440,11 @@ test "c abi exposes vector collection management batch writes and expanded searc
     const tie_values = [_]f32{ 2.0, 0.0 };
     const far_values = [_]f32{ 10.0, 0.0 };
     const inputs = [_]zova_vector_input{
-        .{ .id = "source", .values = .{ .element_type = @intFromEnum(zova_vector_element_type.F32), .f32_values = &source_values, .f16_values = null, .i8_values = null, .values_len = source_values.len } },
-        .{ .id = "near", .values = .{ .element_type = @intFromEnum(zova_vector_element_type.F32), .f32_values = &near_values, .f16_values = null, .i8_values = null, .values_len = near_values.len } },
-        .{ .id = "tie", .values = .{ .element_type = @intFromEnum(zova_vector_element_type.F32), .f32_values = &tie_values, .f16_values = null, .i8_values = null, .values_len = tie_values.len } },
-        .{ .id = "far", .values = .{ .element_type = @intFromEnum(zova_vector_element_type.F32), .f32_values = &far_values, .f16_values = null, .i8_values = null, .values_len = far_values.len } },
-        .{ .id = "near", .values = .{ .element_type = @intFromEnum(zova_vector_element_type.F32), .f32_values = &near_updated, .f16_values = null, .i8_values = null, .values_len = near_updated.len } },
+        .{ .id = "source", .values = .{ .element_type = @backingInt(zova_vector_element_type.F32), .f32_values = &source_values, .f16_values = null, .i8_values = null, .values_len = source_values.len } },
+        .{ .id = "near", .values = .{ .element_type = @backingInt(zova_vector_element_type.F32), .f32_values = &near_values, .f16_values = null, .i8_values = null, .values_len = near_values.len } },
+        .{ .id = "tie", .values = .{ .element_type = @backingInt(zova_vector_element_type.F32), .f32_values = &tie_values, .f16_values = null, .i8_values = null, .values_len = tie_values.len } },
+        .{ .id = "far", .values = .{ .element_type = @backingInt(zova_vector_element_type.F32), .f32_values = &far_values, .f16_values = null, .i8_values = null, .values_len = far_values.len } },
+        .{ .id = "near", .values = .{ .element_type = @backingInt(zova_vector_element_type.F32), .f32_values = &near_updated, .f16_values = null, .i8_values = null, .values_len = near_updated.len } },
     };
     const put_many = zova_vector_put_many_request{
         .db = db,
@@ -2463,7 +2463,7 @@ test "c abi exposes vector collection management batch writes and expanded searc
     };
     try std.testing.expectEqual(zova_status.OK, zova_vector_get(&get_near));
     try std.testing.expectEqualStrings("near", fetched.id.?[0..fetched.id_len]);
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(zova_vector_element_type.F32)), fetched.element_type);
+    try std.testing.expectEqual(@as(c_int, @backingInt(zova_vector_element_type.F32)), fetched.element_type);
     try std.testing.expectEqualSlices(f32, &near_updated, fetched.f32_values.?[0..fetched.values_len]);
     zova_vector_free(&fetched);
 
@@ -2483,8 +2483,8 @@ test "c abi exposes vector collection management batch writes and expanded searc
     try std.testing.expectEqual(zova_status.OK, zova_vector_collection_info_get(&info_request));
     try std.testing.expectEqualStrings("chunks", info.name.?[0..info.name_len]);
     try std.testing.expectEqual(@as(u32, 2), info.dimensions);
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(zova_vector_metric.L2)), info.metric);
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(zova_vector_element_type.F32)), info.element_type);
+    try std.testing.expectEqual(@as(c_int, @backingInt(zova_vector_metric.L2)), info.metric);
+    try std.testing.expectEqual(@as(c_int, @backingInt(zova_vector_element_type.F32)), info.element_type);
     try std.testing.expectEqual(@as(u64, 4), info.vector_count);
     zova_vector_collection_info_free(&info);
 
@@ -2497,7 +2497,7 @@ test "c abi exposes vector collection management batch writes and expanded searc
     defer zova_vector_collection_list_free(&list);
     try std.testing.expectEqual(@as(usize, 2), list.len);
     try std.testing.expectEqualStrings("chunks", list.items.?[0].name.?[0..list.items.?[0].name_len]);
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(zova_vector_element_type.F32)), list.items.?[0].element_type);
+    try std.testing.expectEqual(@as(c_int, @backingInt(zova_vector_element_type.F32)), list.items.?[0].element_type);
     try std.testing.expectEqualStrings("docs", list.items.?[1].name.?[0..list.items.?[1].name_len]);
 
     var results = zova_vector_search_results{ .items = null, .len = 0 };
@@ -2505,7 +2505,7 @@ test "c abi exposes vector collection management batch writes and expanded searc
     const within_request = zova_vector_search_within_request{
         .db = db,
         .collection_name = "chunks",
-        .query = .{ .element_type = @intFromEnum(zova_vector_element_type.F32), .f32_values = &query, .f16_values = null, .i8_values = null, .values_len = query.len },
+        .query = .{ .element_type = @backingInt(zova_vector_element_type.F32), .f32_values = &query, .f16_values = null, .i8_values = null, .values_len = query.len },
         .max_distance = 2.0,
         .limit = 10,
         .out_results = &results,
@@ -2561,7 +2561,7 @@ test "c abi exposes vector collection management batch writes and expanded searc
     const search_in_within_request = zova_vector_search_in_within_request{
         .db = db,
         .collection_name = "chunks",
-        .query = .{ .element_type = @intFromEnum(zova_vector_element_type.F32), .f32_values = &query, .f16_values = null, .i8_values = null, .values_len = query.len },
+        .query = .{ .element_type = @backingInt(zova_vector_element_type.F32), .f32_values = &query, .f16_values = null, .i8_values = null, .values_len = query.len },
         .candidate_ids = &candidates,
         .candidate_count = candidates.len,
         .max_distance = 2.0,
@@ -2587,7 +2587,7 @@ test "c abi exposes vector collection management batch writes and expanded searc
     const dot_values = [_]f32{ 2.0, 0.0 };
     const dot_inputs = [_]zova_vector_input{.{
         .id = "dot-a",
-        .values = .{ .element_type = @intFromEnum(zova_vector_element_type.F32), .f32_values = &dot_values, .f16_values = null, .i8_values = null, .values_len = dot_values.len },
+        .values = .{ .element_type = @backingInt(zova_vector_element_type.F32), .f32_values = &dot_values, .f16_values = null, .i8_values = null, .values_len = dot_values.len },
     }};
     const dot_many = zova_vector_put_many_request{
         .db = db,
@@ -2600,7 +2600,7 @@ test "c abi exposes vector collection management batch writes and expanded searc
     const dot_within = zova_vector_search_within_request{
         .db = db,
         .collection_name = "docs",
-        .query = .{ .element_type = @intFromEnum(zova_vector_element_type.F32), .f32_values = &dot_query, .f16_values = null, .i8_values = null, .values_len = dot_query.len },
+        .query = .{ .element_type = @backingInt(zova_vector_element_type.F32), .f32_values = &dot_query, .f16_values = null, .i8_values = null, .values_len = dot_query.len },
         .max_distance = -1.0,
         .limit = 10,
         .out_results = &results,
@@ -2623,7 +2623,7 @@ test "c abi exposes raw typed i8 and f16 vectors" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-typed-vectors.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-typed-vectors.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
@@ -2636,18 +2636,18 @@ test "c abi exposes raw typed i8 and f16 vectors" {
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_vector_collection_create(&.{
         .db = db,
         .name = "bad",
-        .options = .{ .dimensions = 2, .metric = @intFromEnum(zova_vector_metric.L2), .element_type = 99 },
+        .options = .{ .dimensions = 2, .metric = @backingInt(zova_vector_metric.L2), .element_type = 99 },
     }));
 
     try std.testing.expectEqual(zova_status.OK, zova_vector_collection_create(&.{
         .db = db,
         .name = "bytes",
-        .options = .{ .dimensions = 2, .metric = @intFromEnum(zova_vector_metric.L2), .element_type = @intFromEnum(zova_vector_element_type.I8) },
+        .options = .{ .dimensions = 2, .metric = @backingInt(zova_vector_metric.L2), .element_type = @backingInt(zova_vector_element_type.I8) },
     }));
     try std.testing.expectEqual(zova_status.OK, zova_vector_collection_create(&.{
         .db = db,
         .name = "halves",
-        .options = .{ .dimensions = 2, .metric = @intFromEnum(zova_vector_metric.L2), .element_type = @intFromEnum(zova_vector_element_type.F16) },
+        .options = .{ .dimensions = 2, .metric = @backingInt(zova_vector_metric.L2), .element_type = @backingInt(zova_vector_element_type.F16) },
     }));
 
     const near_i8 = [_]i8{ 1, 0 };
@@ -2657,20 +2657,20 @@ test "c abi exposes raw typed i8 and f16 vectors" {
         .db = db,
         .collection_name = "bytes",
         .vector_id = "near",
-        .values = .{ .element_type = @intFromEnum(zova_vector_element_type.I8), .f32_values = null, .f16_values = null, .i8_values = &near_i8, .values_len = near_i8.len },
+        .values = .{ .element_type = @backingInt(zova_vector_element_type.I8), .f32_values = null, .f16_values = null, .i8_values = &near_i8, .values_len = near_i8.len },
     }));
     try std.testing.expectEqual(zova_status.OK, zova_vector_put(&.{
         .db = db,
         .collection_name = "bytes",
         .vector_id = "far",
-        .values = .{ .element_type = @intFromEnum(zova_vector_element_type.I8), .f32_values = null, .f16_values = null, .i8_values = &far_i8, .values_len = far_i8.len },
+        .values = .{ .element_type = @backingInt(zova_vector_element_type.I8), .f32_values = null, .f16_values = null, .i8_values = &far_i8, .values_len = far_i8.len },
     }));
 
     const near_f16 = [_]u16{ 0x3c00, 0x0000 };
     const far_f16 = [_]u16{ 0x4400, 0x0000 };
     const f16_inputs = [_]zova_vector_input{
-        .{ .id = "near", .values = .{ .element_type = @intFromEnum(zova_vector_element_type.F16), .f32_values = null, .f16_values = &near_f16, .i8_values = null, .values_len = near_f16.len } },
-        .{ .id = "far", .values = .{ .element_type = @intFromEnum(zova_vector_element_type.F16), .f32_values = null, .f16_values = &far_f16, .i8_values = null, .values_len = far_f16.len } },
+        .{ .id = "near", .values = .{ .element_type = @backingInt(zova_vector_element_type.F16), .f32_values = null, .f16_values = &near_f16, .i8_values = null, .values_len = near_f16.len } },
+        .{ .id = "far", .values = .{ .element_type = @backingInt(zova_vector_element_type.F16), .f32_values = null, .f16_values = &far_f16, .i8_values = null, .values_len = far_f16.len } },
     };
     try std.testing.expectEqual(zova_status.OK, zova_vector_put_many(&.{
         .db = db,
@@ -2686,7 +2686,7 @@ test "c abi exposes raw typed i8 and f16 vectors" {
         .vector_id = "near",
         .out_vector = &fetched,
     }));
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(zova_vector_element_type.I8)), fetched.element_type);
+    try std.testing.expectEqual(@as(c_int, @backingInt(zova_vector_element_type.I8)), fetched.element_type);
     try std.testing.expectEqualStrings("near", fetched.id.?[0..fetched.id_len]);
     try std.testing.expectEqualSlices(i8, &near_i8, fetched.i8_values.?[0..fetched.values_len]);
     zova_vector_free(&fetched);
@@ -2695,7 +2695,7 @@ test "c abi exposes raw typed i8 and f16 vectors" {
     try std.testing.expectEqual(zova_status.OK, zova_vector_search(&.{
         .db = db,
         .collection_name = "bytes",
-        .query = .{ .element_type = @intFromEnum(zova_vector_element_type.I8), .f32_values = null, .f16_values = null, .i8_values = &query_i8, .values_len = query_i8.len },
+        .query = .{ .element_type = @backingInt(zova_vector_element_type.I8), .f32_values = null, .f16_values = null, .i8_values = &query_i8, .values_len = query_i8.len },
         .limit = 2,
         .out_results = &results,
     }));
@@ -2707,7 +2707,7 @@ test "c abi exposes raw typed i8 and f16 vectors" {
     try std.testing.expectEqual(zova_status.OK, zova_vector_search_in(&.{
         .db = db,
         .collection_name = "bytes",
-        .query = .{ .element_type = @intFromEnum(zova_vector_element_type.I8), .f32_values = null, .f16_values = null, .i8_values = &query_i8, .values_len = query_i8.len },
+        .query = .{ .element_type = @backingInt(zova_vector_element_type.I8), .f32_values = null, .f16_values = null, .i8_values = &query_i8, .values_len = query_i8.len },
         .candidate_ids = &typed_candidates,
         .candidate_count = typed_candidates.len,
         .limit = 2,
@@ -2723,13 +2723,13 @@ test "c abi exposes raw typed i8 and f16 vectors" {
         .vector_id = "near",
         .out_vector = &fetched,
     }));
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(zova_vector_element_type.F16)), fetched.element_type);
+    try std.testing.expectEqual(@as(c_int, @backingInt(zova_vector_element_type.F16)), fetched.element_type);
     try std.testing.expectEqualSlices(u16, &near_f16, fetched.f16_values.?[0..fetched.values_len]);
     zova_vector_free(&fetched);
 
     var info = emptyVectorCollectionInfo();
     try std.testing.expectEqual(zova_status.OK, zova_vector_collection_info_get(&.{ .db = db, .name = "halves", .out_info = &info }));
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(zova_vector_element_type.F16)), info.element_type);
+    try std.testing.expectEqual(@as(c_int, @backingInt(zova_vector_element_type.F16)), info.element_type);
     zova_vector_collection_info_free(&info);
 }
 
@@ -2738,7 +2738,7 @@ test "c abi searches multi-query raw i8 cosine vectors" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-multi-i8.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-multi-i8.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{ .path = db_path, .out_db = &db, .out_error_message = null }));
@@ -2747,7 +2747,7 @@ test "c abi searches multi-query raw i8 cosine vectors" {
     try std.testing.expectEqual(zova_status.OK, zova_vector_collection_create(&.{
         .db = db,
         .name = "bytes",
-        .options = .{ .dimensions = 2, .metric = @intFromEnum(zova_vector_metric.COSINE), .element_type = @intFromEnum(zova_vector_element_type.I8) },
+        .options = .{ .dimensions = 2, .metric = @backingInt(zova_vector_metric.COSINE), .element_type = @backingInt(zova_vector_element_type.I8) },
     }));
     const balanced = [_]i8{ 10, 10 };
     const east = [_]i8{ 10, 0 };
@@ -2760,7 +2760,7 @@ test "c abi searches multi-query raw i8 cosine vectors" {
             .db = db,
             .collection_name = "bytes",
             .vector_id = input.id,
-            .values = .{ .element_type = @intFromEnum(zova_vector_element_type.I8), .f32_values = null, .f16_values = null, .i8_values = input.values.ptr, .values_len = input.values.len },
+            .values = .{ .element_type = @backingInt(zova_vector_element_type.I8), .f32_values = null, .f16_values = null, .i8_values = input.values.ptr, .values_len = input.values.len },
         }));
     }
 
@@ -2775,8 +2775,8 @@ test "c abi searches multi-query raw i8 cosine vectors" {
         .dimensions = 2,
         .candidate_ids = null,
         .candidate_count = 0,
-        .mode = @intFromEnum(zova_vector_multi_i8_search_mode.GLOBAL_MIN_COSINE),
-        .aggregation = @intFromEnum(zova_vector_multi_i8_aggregation.MIN_COSINE),
+        .mode = @backingInt(zova_vector_multi_i8_search_mode.GLOBAL_MIN_COSINE),
+        .aggregation = @backingInt(zova_vector_multi_i8_aggregation.MIN_COSINE),
         .prefilter_query_index = 0,
         .prefilter_limit = 0,
         .limit = 1,
@@ -2796,8 +2796,8 @@ test "c abi searches multi-query raw i8 cosine vectors" {
         .dimensions = 2,
         .candidate_ids = &only_east,
         .candidate_count = only_east.len,
-        .mode = @intFromEnum(zova_vector_multi_i8_search_mode.GLOBAL_MIN_COSINE),
-        .aggregation = @intFromEnum(zova_vector_multi_i8_aggregation.MIN_COSINE),
+        .mode = @backingInt(zova_vector_multi_i8_search_mode.GLOBAL_MIN_COSINE),
+        .aggregation = @backingInt(zova_vector_multi_i8_aggregation.MIN_COSINE),
         .prefilter_query_index = 0,
         .prefilter_limit = 0,
         .limit = 1,
@@ -2815,8 +2815,8 @@ test "c abi searches multi-query raw i8 cosine vectors" {
         .dimensions = 2,
         .candidate_ids = null,
         .candidate_count = 0,
-        .mode = @intFromEnum(zova_vector_multi_i8_search_mode.CBM_PREFILTER_MIN_COSINE),
-        .aggregation = @intFromEnum(zova_vector_multi_i8_aggregation.MIN_COSINE),
+        .mode = @backingInt(zova_vector_multi_i8_search_mode.CBM_PREFILTER_MIN_COSINE),
+        .aggregation = @backingInt(zova_vector_multi_i8_aggregation.MIN_COSINE),
         .prefilter_query_index = 0,
         .prefilter_limit = 1,
         .limit = 1,
@@ -2834,8 +2834,8 @@ test "c abi searches multi-query raw i8 cosine vectors" {
         .dimensions = 2,
         .candidate_ids = null,
         .candidate_count = 0,
-        .mode = @intFromEnum(zova_vector_multi_i8_search_mode.GLOBAL_MIN_COSINE),
-        .aggregation = @intFromEnum(zova_vector_multi_i8_aggregation.MIN_COSINE),
+        .mode = @backingInt(zova_vector_multi_i8_search_mode.GLOBAL_MIN_COSINE),
+        .aggregation = @backingInt(zova_vector_multi_i8_aggregation.MIN_COSINE),
         .prefilter_query_index = 0,
         .prefilter_limit = 0,
         .limit = 1,
@@ -2852,8 +2852,8 @@ test "c abi searches multi-query raw i8 cosine vectors" {
         .dimensions = 2,
         .candidate_ids = null,
         .candidate_count = 0,
-        .mode = @intFromEnum(zova_vector_multi_i8_search_mode.GLOBAL_MIN_COSINE),
-        .aggregation = @intFromEnum(zova_vector_multi_i8_aggregation.MIN_COSINE),
+        .mode = @backingInt(zova_vector_multi_i8_search_mode.GLOBAL_MIN_COSINE),
+        .aggregation = @backingInt(zova_vector_multi_i8_aggregation.MIN_COSINE),
         .prefilter_query_index = 0,
         .prefilter_limit = 0,
         .limit = 1,
@@ -2871,7 +2871,7 @@ test "c abi exposes transaction helpers and vacuum" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-vacuum.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-vacuum.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     var create_request = zova_database_open_request{
@@ -2961,19 +2961,19 @@ test "c abi backs up compacts and restores zova databases" {
     defer tmp.cleanup();
 
     var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const source_path = try std.fmt.bufPrintZ(&source_buffer, ".zig-cache/tmp/{s}/c-api-ops-source.zova", .{tmp.sub_path[0..]});
+    const source_path = try std.fmt.bufPrintSentinel(&source_buffer, ".zig-cache/tmp/{s}/c-api-ops-source.zova", .{tmp.sub_path[0..]}, 0);
 
     var backup_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const backup_path = try std.fmt.bufPrintZ(&backup_buffer, ".zig-cache/tmp/{s}/c-api-ops-backup.zova", .{tmp.sub_path[0..]});
+    const backup_path = try std.fmt.bufPrintSentinel(&backup_buffer, ".zig-cache/tmp/{s}/c-api-ops-backup.zova", .{tmp.sub_path[0..]}, 0);
 
     var compact_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const compact_path = try std.fmt.bufPrintZ(&compact_buffer, ".zig-cache/tmp/{s}/c-api-ops-compact.zova", .{tmp.sub_path[0..]});
+    const compact_path = try std.fmt.bufPrintSentinel(&compact_buffer, ".zig-cache/tmp/{s}/c-api-ops-compact.zova", .{tmp.sub_path[0..]}, 0);
 
     var restored_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const restored_path = try std.fmt.bufPrintZ(&restored_buffer, ".zig-cache/tmp/{s}/c-api-ops-restored.zova", .{tmp.sub_path[0..]});
+    const restored_path = try std.fmt.bufPrintSentinel(&restored_buffer, ".zig-cache/tmp/{s}/c-api-ops-restored.zova", .{tmp.sub_path[0..]}, 0);
 
     var existing_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const existing_path = try std.fmt.bufPrintZ(&existing_buffer, ".zig-cache/tmp/{s}/c-api-ops-existing.zova", .{tmp.sub_path[0..]});
+    const existing_path = try std.fmt.bufPrintSentinel(&existing_buffer, ".zig-cache/tmp/{s}/c-api-ops-existing.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     var create_request = zova_database_open_request{
@@ -2989,7 +2989,7 @@ test "c abi backs up compacts and restores zova databases" {
         .sql = "create table records (body text not null); insert into records (body) values ('kept')",
     }));
 
-    var object_id = zova_object_id{ .bytes = [_]u8{0} ** 32 };
+    var object_id = zova_object_id{ .bytes = @as([32]u8, @splat(0)) };
     try std.testing.expectEqual(zova_status.OK, zova_object_put(&.{
         .db = db,
         .data = "c abi backup object",
@@ -3000,7 +3000,7 @@ test "c abi backs up compacts and restores zova databases" {
     try std.testing.expectEqual(zova_status.OK, zova_vector_collection_create(&.{
         .db = db,
         .name = "records",
-        .options = .{ .dimensions = 2, .metric = @intFromEnum(zova_vector_metric.L2), .element_type = @intFromEnum(zova_vector_element_type.F32) },
+        .options = .{ .dimensions = 2, .metric = @backingInt(zova_vector_metric.L2), .element_type = @backingInt(zova_vector_element_type.F32) },
     }));
     const values = [_]f32{ 1.0, 2.0 };
     try std.testing.expectEqual(zova_status.OK, zova_vector_put(&.{
@@ -3065,7 +3065,7 @@ test "c abi serializes mixed object vector and database calls on one handle" {
     const Worker = struct {
         db: ?*zova_database,
         worker_index: usize,
-        object_id: zova_object_id = .{ .bytes = [_]u8{0} ** 32 },
+        object_id: zova_object_id = .{ .bytes = @as([32]u8, @splat(0)) },
         status: zova_status = .OK,
 
         fn run(ctx: *@This()) void {
@@ -3083,7 +3083,7 @@ test "c abi serializes mixed object vector and database calls on one handle" {
                 });
             } else {
                 var id_buffer: [32]u8 = undefined;
-                const vector_id = std.fmt.bufPrintZ(&id_buffer, "v-{d}", .{ctx.worker_index}) catch {
+                const vector_id = std.fmt.bufPrintSentinel(&id_buffer, "v-{d}", .{ctx.worker_index}, 0) catch {
                     ctx.status = .OUT_OF_MEMORY;
                     return;
                 };
@@ -3102,7 +3102,7 @@ test "c abi serializes mixed object vector and database calls on one handle" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-threaded-mixed.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-threaded-mixed.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
@@ -3116,7 +3116,7 @@ test "c abi serializes mixed object vector and database calls on one handle" {
     try std.testing.expectEqual(zova_status.OK, zova_vector_collection_create(&.{
         .db = db,
         .name = "mixed",
-        .options = .{ .dimensions = 2, .metric = @intFromEnum(zova_vector_metric.L2), .element_type = @intFromEnum(zova_vector_element_type.F32) },
+        .options = .{ .dimensions = 2, .metric = @backingInt(zova_vector_metric.L2), .element_type = @backingInt(zova_vector_element_type.F32) },
     }));
 
     var contexts: [12]Worker = undefined;
@@ -3159,7 +3159,7 @@ test "c abi multi-handle reads and vector search follow sqlite locking" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-multi-handle-read.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-multi-handle-read.zova", .{tmp.sub_path[0..]}, 0);
 
     var writer: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
@@ -3174,7 +3174,7 @@ test "c abi multi-handle reads and vector search follow sqlite locking" {
     try std.testing.expectEqual(zova_status.OK, zova_vector_collection_create(&.{
         .db = writer,
         .name = "vectors",
-        .options = .{ .dimensions = 2, .metric = @intFromEnum(zova_vector_metric.L2), .element_type = @intFromEnum(zova_vector_element_type.F32) },
+        .options = .{ .dimensions = 2, .metric = @backingInt(zova_vector_metric.L2), .element_type = @backingInt(zova_vector_element_type.F32) },
     }));
     const values = [_]f32{ 1.0, 2.0 };
     try std.testing.expectEqual(zova_status.OK, zova_vector_put(&.{
@@ -3226,7 +3226,7 @@ test "c abi notifications are transaction aware and SQL callable" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-notify.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-notify.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
@@ -3500,7 +3500,7 @@ test "c abi fresh builder loads predeclared tables fts graph payloads and vector
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/fresh-builder.zova", .{tmp.sub_path[0..]});
+    const path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/fresh-builder.zova", .{tmp.sub_path[0..]}, 0);
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{ .path = path, .out_db = &db, .out_error_message = null }));
     defer _ = zova_database_close(db);
@@ -3610,7 +3610,7 @@ test "c abi fresh builder loads predeclared tables fts graph payloads and vector
     }));
     const vector_values = [_]i8{ 3, 4 };
     var vector_id_buffer: [32]u8 = undefined;
-    const vector_id = try std.fmt.bufPrintZ(&vector_id_buffer, "edge:{d}", .{provisional_edge_keys[0]});
+    const vector_id = try std.fmt.bufPrintSentinel(&vector_id_buffer, "edge:{d}", .{provisional_edge_keys[0]}, 0);
     const vectors = [_]zova_vector_input{.{
         .id = vector_id,
         .values = .{ .element_type = 2, .f32_values = null, .f16_values = null, .i8_values = &vector_values, .values_len = vector_values.len },
@@ -3825,7 +3825,7 @@ test "c abi fresh builder reuses enforced foreign-key validation evidence" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/fresh-builder-validation-evidence.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/fresh-builder-validation-evidence.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
@@ -3859,7 +3859,7 @@ test "c abi fresh builder retains full validation for unresolved deferred foreig
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/fresh-builder-deferred-foreign-key.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/fresh-builder-deferred-foreign-key.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
@@ -3922,7 +3922,7 @@ test "c abi manages bundled extension lifecycle" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-extension-lifecycle.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-extension-lifecycle.zova", .{tmp.sub_path[0..]}, 0);
 
     try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_database_extension_install(null));
 
