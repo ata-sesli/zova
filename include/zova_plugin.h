@@ -34,6 +34,10 @@ extern "C" {
 #define ZOVA_PLUGIN_SERVICE_STORAGE UINT32_C(4)
 #define ZOVA_PLUGIN_REQUIRES_OPERATIONS_V1 UINT64_C(32)
 #define ZOVA_PLUGIN_SERVICE_OPERATIONS UINT32_C(5)
+#define ZOVA_PLUGIN_REQUIRES_VECTOR_MAINTENANCE_V1 UINT64_C(64)
+#define ZOVA_PLUGIN_SERVICE_VECTOR_MAINTENANCE UINT32_C(6)
+#define ZOVA_PLUGIN_HISTORY_UNAVAILABLE INT32_C(7)
+#define ZOVA_PLUGIN_SOURCE_CHANGED INT32_C(8)
 
 /* Independent of the database format and Zova's application C ABI.
  * All calls use the platform C calling convention; C++ exceptions must not
@@ -145,6 +149,73 @@ typedef struct zova_plugin_bytes_v1 {
     const uint8_t *data;
     uint64_t len;
 } zova_plugin_bytes_v1;
+
+typedef struct zova_plugin_vector_view_v1 {
+    uint8_t incarnation[16];
+    uint8_t token[16];
+    int64_t revision;
+} zova_plugin_vector_view_v1;
+typedef struct zova_plugin_vector_changes_request_v1 {
+    uint32_t struct_size;
+    uint32_t reserved;
+    zova_plugin_bytes_v1 name;
+    zova_plugin_vector_view_v1 since;
+    int64_t after_revision;
+    uint64_t row_limit;
+    uint64_t byte_limit;
+    zova_plugin_row_v1 row;
+    void *user_data;
+} zova_plugin_vector_changes_request_v1;
+typedef struct zova_plugin_vector_changes_page_v1 {
+    zova_plugin_vector_view_v1 view;
+    uint64_t rows;
+    int64_t next_revision;
+    uint32_t has_more;
+    uint32_t reserved;
+} zova_plugin_vector_changes_page_v1;
+
+/* Read-only source-local maintenance; available in authorized hooks/operations.
+ * view identifies the caller-visible collection incarnation AND revision branch.
+ * Never validate a cache by public name or revision alone. Deletion/recreation
+ * creates a new incarnation. Savepoint/outer rollback also undoes history;
+ * a different write reusing a rolled-back revision receives a different token.
+ *
+ * read_changes checks since against that same snapshot, then emits rows:
+ * revision(INTEGER), public vector_id(TEXT), found(INTEGER), values(BLOB/NULL).
+ * Each changed ID resolves to its FINAL authoritative value in this snapshot,
+ * not its historical payload. Repeated IDs may appear; apply final values or
+ * remove missing IDs. Include visible additions in search, not only deletion
+ * filtering of stale ANN results. No full vector payload is stored in history.
+ *
+ * after_revision=0 starts at since.revision; otherwise it is exclusive and
+ * must be within [since.revision,view.revision]. Page within one hook/operation
+ * or caller transaction; outside it restart from the original coverage view.
+ * row/byte bounds and callback lifetimes match the data service. Discard partial
+ * delivery on error; outputs are zeroed on ALL errors. Reentry is rejected.
+ *
+ * At most 4351 changes per collection are retained (4096, retired every 256).
+ * HISTORY_UNAVAILABLE means since is older than retained coverage: reconstruct
+ * against this snapshot or fail clearly. SOURCE_CHANGED means the source was
+ * recreated or since belongs to a rolled-back/divergent/future branch. Never
+ * silently treat either as an empty delta. Retained WAL readers keep their
+ * own historical pages despite retirement by a newer writer.
+ *
+ * The journal commits with vectors in the same file, including bound stores.
+ * Plugin storage in main is NOT crash-atomic with bound WAL source files.
+ * Validate persisted generation coverage against this service before reuse;
+ * mismatch/missing history requires reconstruction or an explicit error.
+ * Keep immutable base generations and call-local deltas; do not mutate a
+ * shared newest cache for older readers or serialize/copy HNSW per source row.
+ */
+typedef struct zova_plugin_vector_maintenance_service_v1 {
+    uint32_t struct_size;
+    uint32_t version;
+    int32_t (ZOVA_PLUGIN_CALL *view)(void *connection, zova_plugin_bytes_v1 name,
+        zova_plugin_vector_view_v1 *out_view);
+    int32_t (ZOVA_PLUGIN_CALL *read_changes)(void *connection,
+        const zova_plugin_vector_changes_request_v1 *request,
+        zova_plugin_vector_changes_page_v1 *out_page);
+} zova_plugin_vector_maintenance_service_v1;
 
 #define ZOVA_PLUGIN_OPERATION_SCALAR UINT32_C(1)
 #define ZOVA_PLUGIN_OPERATION_TABLE UINT32_C(2)
@@ -360,7 +431,8 @@ typedef int32_t (ZOVA_PLUGIN_CALL *zova_plugin_hook_v1)(
  * identity before calling hooks. All hook pointers are optional (NULL=no-op).
  * capabilities may be NULL (empty); other strings are required. flags must be
  * a combination of HAS_UPGRADE_V1, REQUIRES_QUERY_V1 and
- * REQUIRES_DIAGNOSTICS_V1, REQUIRES_DATA_V1 and REQUIRES_STORAGE_V1; unknown bits
+ * REQUIRES_DIAGNOSTICS_V1, REQUIRES_DATA_V1, REQUIRES_STORAGE_V1,
+ * REQUIRES_OPERATIONS_V1 and REQUIRES_VECTOR_MAINTENANCE_V1; unknown bits
  * fail negotiation. struct_size must be at
  * least sizeof(zova_plugin_descriptor_v1); hosts
  * ignore trailing fields. A new incompatible layout uses a new ABI/entrypoint.

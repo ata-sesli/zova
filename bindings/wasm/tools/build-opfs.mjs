@@ -6,6 +6,9 @@ const spike = process.argv[5] === "--spike";
 if (process.argv.length !== (spike ? 6 : 5)) throw new Error("usage: build-opfs.mjs <sqlite-source> <output> <cache-directory> [--spike]");
 const [source, output, core] = process.argv.slice(2,5).map(x => resolve(x));
 const root = resolve(import.meta.dir, "../../..");
+const formatVersion = readFileSync(join(root, "src/version.zig"), "utf8")
+  .match(/^pub const format_version = "([1-9][0-9]*)";$/m)?.[1];
+if (!formatVersion) throw new Error("Could not read the canonical Zova storage format");
 mkdirSync(output, { recursive: true });
 const wasm = join(source, "ext/wasm");
 const run = (args) => {
@@ -34,6 +37,13 @@ for (const [index, input] of inputs.entries()) {
     const cleanup = "await thePool.removeVfs().catch(()=>{});";
     if (text.split(cleanup).length !== 2) throw new Error("Upstream failure cleanup changed; review required");
     text = text.replace(cleanup, "try { thePool.releaseAccessHandles(); } catch {} /* Preserve files on failed initialization. */");
+    // The dedicated worker owns this pool exclusively. Report its actual lock
+    // state so a new worker can recognize an abandoned rollback journal.
+    const reservedLock = "      wasm.poke32(pOut, 1);";
+    if (text.split(reservedLock).length !== 2) throw new Error("Upstream reserved-lock check changed; review required");
+    text = text.replace(reservedLock,
+      "      const file = pool.getOFileForS3File(pFile);\n" +
+      "      wasm.poke32(pOut, file.lockType >= capi.SQLITE_LOCK_RESERVED ? 1 : 0);");
   }
   glue += text + "\n";
 }
@@ -59,6 +69,7 @@ run([emcc, "-O2", "-I" + zigLib, "-I" + join(root, "include"), "-I" + sqlite,
   "-DSQLITE_ENABLE_RTREE", "-DSQLITE_ENABLE_GEOPOLY", "-DSQLITE_ENABLE_CARRAY", "-DSQLITE_ENABLE_MATH_FUNCTIONS",
   "-DSQLITE_DEFAULT_PAGE_SIZE=4096",
   "-DZOVA_WASM_OPFS",
+  "-DZOVA_WASM_FORMAT_VERSION=" + formatVersion,
   join(output, "zova_c.c"), join(wasm, "api/sqlite3-wasm.c"), join(root, spike ? "bindings/wasm/tests/opfs-smoke.c" : "bindings/wasm/native/bridge.c"),
   join(root,"bindings/wasm/native/smoke.c"),
   "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sENVIRONMENT=worker", "-sALLOW_MEMORY_GROWTH=1",

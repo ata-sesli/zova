@@ -56,7 +56,7 @@ fn probe_format_classifies_formats() {
         db.exec("create table t(id integer)").unwrap();
     }
     let info = probe_format(&current_path).unwrap();
-    assert_eq!(info.format_version, 11);
+    assert_eq!(info.format_version, 12);
     assert_eq!(info.compatibility, FormatCompatibility::Current);
     assert_eq!(info.compatibility.name(), "current");
 
@@ -79,7 +79,7 @@ fn probe_format_rejects_non_zova_paths() {
 }
 
 /// Migration copies the fixture forward, preserves public data, reopens as
-/// format 11, and leaves the source byte-identical.
+/// format 12, and leaves the source byte-identical.
 #[test]
 fn migrate_fixture_forward_and_reopen() {
     let fixture = fixture_path("format-9.zova");
@@ -91,7 +91,7 @@ fn migrate_fixture_forward_and_reopen() {
     migrate_database(&source, &destination, MigrateOptions::default()).unwrap();
 
     let info = probe_format(&destination).unwrap();
-    assert_eq!(info.format_version, 11);
+    assert_eq!(info.format_version, 12);
     assert_eq!(info.compatibility, FormatCompatibility::Current);
     assert_eq!(
         read_bytes(&source),
@@ -138,7 +138,7 @@ fn migrate_with_no_verify_flag() {
     assert_eq!(
         info,
         FormatInfo {
-            format_version: 11,
+            format_version: 12,
             compatibility: FormatCompatibility::Current,
         }
     );

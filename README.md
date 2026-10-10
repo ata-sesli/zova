@@ -15,15 +15,15 @@ host foundation.
 Current package version: `1.1.0`.
 
 Zova `1.0.0` established the stable native 1.x contract. The current
-`.zova` file `format_version` is `11`, and the
+development `.zova` file `format_version` is `12`, and the
 earliest migratable format is `9`. Open never migrates silently: format-9 and
-format-10 databases are reported as migration-required and left byte-identical,
+format-10 and format-11 databases are reported as migration-required and left byte-identical,
 and downgrades are unsupported. Older databases migrate forward with the
 explicit, copy-forward probe and migration surfaces (`zova format` and
 `zova migrate` on the CLI, `zova_database_probe_format` and
 `zova_database_migrate` on the C ABI, and aligned APIs in the Rust, Python, Go,
 and JavaScript bindings). Migration writes only to a new, separately validated
-format-11 destination and never mutates the source.
+format-12 destination and never mutates the source.
 
 [API stability](API_STABILITY.md) defines the stable 1.x public
 contract. [Storage compatibility](docs/storage-compatibility.md) is the normative 1.x
@@ -44,8 +44,9 @@ Zova also provides experimental browser SQL and binary KV through
 Browser APIs remain experimental and do not promise full native compatibility.
 Rust packages now select target-specific generated-C companion crates without
 requiring consumer-side Zig or native-source downloads. Python wheels retain
-CPython 3.13 stable-ABI coverage for Python 3.13 and 3.14. Storage remains format
-11; format-11 release-candidate databases need no migration. See the
+CPython 3.13 stable-ABI coverage for Python 3.13 and 3.14. Development storage is
+format 12 with explicit 11→12 migration for transactional vector-change tracking.
+Released 1.1.0 used format 11; package/ABI bumps are separate release work. See the
 [browser package guide](bindings/wasm/README.md) for lifecycle and storage limits.
 
 ## Contents
@@ -1255,7 +1256,7 @@ with `zova migrate`:
 
 ```sh
 zova format app.zova
-zova migrate app.zova app-format-11.zova
+zova migrate app.zova app-format-12.zova
 ```
 
 The same workflow is available through `zova_database_probe_format` and

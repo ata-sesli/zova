@@ -42,6 +42,11 @@ const format_10_store_fixtures = [_][]const u8{
     "empty-vector-store-format-10.zova",
     "empty-graph-store-format-10.zova",
 };
+const format_11_fixtures = [_][]const u8{
+    "empty-main-format-11.zova",         "format-11.zova",                    "bound-main-format-11.zova",
+    "bound-main-format-11.objects.zova", "bound-main-format-11.vectors.zova", "bound-main-format-11.graphs.zova",
+    "empty-vector-store-format-11.zova",
+};
 
 const legacy_fixtures = [_][]const u8{
     "empty-format-7.zova",
@@ -54,7 +59,7 @@ const legacy_fixtures = [_][]const u8{
 
 /// Every retained fixture, and therefore every entry the pinned manifest must
 /// contain.
-const all_declared_fixtures = format_9_main_fixtures ++ format_9_store_fixtures ++ format_10_main_fixtures ++ format_10_store_fixtures ++ legacy_fixtures;
+const all_declared_fixtures = format_9_main_fixtures ++ format_9_store_fixtures ++ format_10_main_fixtures ++ format_10_store_fixtures ++ format_11_fixtures ++ legacy_fixtures;
 
 fn io() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
@@ -219,7 +224,7 @@ test "open classifies future format versions as unsupported future without mutat
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const future_versions = [_][]const u8{ "12", "13", "999" };
+    const future_versions = [_][]const u8{ "13", "14", "999" };
     for (future_versions, 0..) |version_value, index| {
         var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
         const file_name = try std.fmt.bufPrint(&path_buffer, "future-{d}.zova", .{index});
@@ -382,7 +387,7 @@ test "probe and open agree on classification for synthetic databases" {
         .{ .version_value = "9", .compatibility = .migratable, .open_error = error.MigrationRequired },
         .{ .version_value = "8", .compatibility = .unsupported_legacy, .open_error = error.UnsupportedLegacyFormat },
         .{ .version_value = "2", .compatibility = .unsupported_legacy, .open_error = error.UnsupportedLegacyFormat },
-        .{ .version_value = "12", .compatibility = .unsupported_future, .open_error = error.UnsupportedFutureFormat },
+        .{ .version_value = "13", .compatibility = .unsupported_future, .open_error = error.UnsupportedFutureFormat },
     };
 
     for (cases, 0..) |case, index| {

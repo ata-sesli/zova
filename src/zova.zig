@@ -6,8 +6,8 @@
 //! metadata before treating it as a Zova-owned database.
 //!
 //! Zova 1.x preserves the explicit migration path documented in
-//! `docs/storage-compatibility.md`. The current storage format is version `11`:
-//! `_zova_meta.format_version = '11'` plus
+//! `docs/storage-compatibility.md`. The current storage format is version `12`:
+//! `_zova_meta.format_version = '12'` plus
 //! the required private object, vector, graph, key-value, and extension
 //! registry schemas.
 //! `Database.open` is intentionally non-mutating: it validates the file and
@@ -851,7 +851,7 @@ pub const Database = struct {
     /// Create a new initialized `.zova` database.
     ///
     /// This never overwrites an existing file. The file is initialized with the
-    /// private `_zova_meta` table, format version `11`, and the required
+    /// private `_zova_meta` table, format version `12`, and the required
     /// object, vector, graph, key-value, and extension registry schemas.
     pub fn create(path: [:0]const u8) Error!Database {
         return createWithOptionsAndExtensions(path, .{}, bundledExtensionRegistry());
@@ -1024,6 +1024,7 @@ pub const Database = struct {
         try enableForeignKeys(&raw);
         if (options.busy_timeout_ms != 0) try raw.setBusyTimeout(options.busy_timeout_ms);
         try validateZovaSchema(&raw);
+        try @import("vector_maintenance.zig").register(&raw);
         const bound_object_store = if (load_bound_stores)
             try openConfiguredBoundObjectStore(&raw, options)
         else
@@ -1629,6 +1630,7 @@ pub const Database = struct {
         var raw = try sqlite.Database.open(":memory:");
         errdefer raw.deinit();
         try backupMainDatabase(&self.sqlite_db, &raw);
+        try @import("vector_maintenance.zig").register(&raw);
         try self.inlineBoundStoresIntoDatabase(&raw);
         try enableForeignKeys(&raw);
         try vector_sql.register(&raw);
@@ -2108,14 +2110,14 @@ pub const Database = struct {
         name: []const u8,
         options: VectorCollectionOptions,
     ) Error!void {
-        const owns_transaction = try self.beginBoundVectorMutation();
+        const scope = try self.beginBoundVectorMutation();
         var committed = false;
-        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) self.rollbackBoundVectorMutation(scope) catch {};
 
         var vectors = self.vectorDatabase();
         try vectors.createVectorCollection(name, options);
         if (self.bound_vector_store != null) try incrementBoundVectorEpoch(&self.sqlite_db);
-        try self.finishBoundVectorMutation(owns_transaction);
+        try self.finishBoundVectorMutation(scope);
         committed = true;
     }
 
@@ -2151,14 +2153,14 @@ pub const Database = struct {
         vector_id: []const u8,
         values: VectorValuesConst,
     ) Error!void {
-        const owns_transaction = try self.beginBoundVectorMutation();
+        const scope = try self.beginBoundVectorMutation();
         var committed = false;
-        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) self.rollbackBoundVectorMutation(scope) catch {};
 
         var vectors = self.vectorDatabase();
         try vectors.putVector(collection_name, vector_id, values);
         if (self.bound_vector_store != null) try incrementBoundVectorEpoch(&self.sqlite_db);
-        try self.finishBoundVectorMutation(owns_transaction);
+        try self.finishBoundVectorMutation(scope);
         committed = true;
     }
 
@@ -2168,6 +2170,7 @@ pub const Database = struct {
         collection_name: []const u8,
         inputs: []const VectorInput,
     ) Error!void {
+        try @import("extension_operations.zig").requireSourceIdle(&self.sqlite_db);
         const scope = try self.beginBatchMutation();
         var committed = false;
         errdefer if (!committed) self.rollbackBatchMutation(scope) catch {};
@@ -2206,14 +2209,14 @@ pub const Database = struct {
         collection_name: []const u8,
         vector_id: []const u8,
     ) Error!void {
-        const owns_transaction = try self.beginBoundVectorMutation();
+        const scope = try self.beginBoundVectorMutation();
         var committed = false;
-        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) self.rollbackBoundVectorMutation(scope) catch {};
 
         var vectors = self.vectorDatabase();
         try vectors.deleteVector(collection_name, vector_id);
         if (self.bound_vector_store != null) try incrementBoundVectorEpoch(&self.sqlite_db);
-        try self.finishBoundVectorMutation(owns_transaction);
+        try self.finishBoundVectorMutation(scope);
         committed = true;
     }
 
@@ -2224,6 +2227,7 @@ pub const Database = struct {
         collection_name: []const u8,
         vector_ids: []const []const u8,
     ) Error!void {
+        try @import("extension_operations.zig").requireSourceIdle(&self.sqlite_db);
         const scope = try self.beginBatchMutation();
         var committed = false;
         errdefer if (!committed) self.rollbackBatchMutation(scope) catch {};
@@ -2237,14 +2241,14 @@ pub const Database = struct {
 
     /// Delete a vector collection and all private vector rows in it.
     pub fn deleteVectorCollection(self: *Database, name: []const u8) Error!void {
-        const owns_transaction = try self.beginBoundVectorMutation();
+        const scope = try self.beginBoundVectorMutation();
         var committed = false;
-        errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
+        errdefer if (!committed) self.rollbackBoundVectorMutation(scope) catch {};
 
         var vectors = self.vectorDatabase();
         try vectors.deleteVectorCollection(name);
         if (self.bound_vector_store != null) try incrementBoundVectorEpoch(&self.sqlite_db);
-        try self.finishBoundVectorMutation(owns_transaction);
+        try self.finishBoundVectorMutation(scope);
         committed = true;
     }
 
@@ -2641,14 +2645,18 @@ pub const Database = struct {
         };
     }
 
-    fn beginBoundVectorMutation(self: *Database) Error!bool {
-        if (self.bound_vector_store == null or hasActiveTransaction(&self.sqlite_db)) return false;
-        try self.sqlite_db.beginImmediate();
-        return true;
+    fn beginBoundVectorMutation(self: *Database) Error!?BatchMutationScope {
+        try @import("extension_operations.zig").requireSourceIdle(&self.sqlite_db);
+        if (self.bound_vector_store == null) return null;
+        return try self.beginBatchMutation();
     }
 
-    fn finishBoundVectorMutation(self: *Database, owns_transaction: bool) Error!void {
-        if (owns_transaction) try self.sqlite_db.commit();
+    fn finishBoundVectorMutation(self: *Database, scope: ?BatchMutationScope) Error!void {
+        if (scope) |s| try self.finishBatchMutation(s);
+    }
+
+    fn rollbackBoundVectorMutation(self: *Database, scope: ?BatchMutationScope) Error!void {
+        if (scope) |s| try self.rollbackBatchMutation(s);
     }
 
     fn beginBoundGraphMutation(self: *Database) Error!bool {
@@ -2730,6 +2738,7 @@ pub const Database = struct {
     /// bound object, vector, or graph store configuration.
     fn inlineBoundStoresIntoDatabase(self: *Database, destination: *sqlite.Database) Error!void {
         if (self.bound_object_store == null and self.bound_vector_store == null and self.bound_graph_store == null) return;
+        try @import("vector_maintenance.zig").register(destination);
 
         if (self.bound_object_store != null) {
             try clearMainObjectStorage(destination);
@@ -3599,7 +3608,7 @@ test "created zova database stores metadata" {
 }
 
 test "current format reserves graph store metadata" {
-    try std.testing.expectEqualStrings("11", format_version);
+    try std.testing.expectEqualStrings("12", format_version);
     try std.testing.expect(std.mem.indexOf(u8, bound_stores_schema_sql, "'graph_store'") != null);
     try std.testing.expect(std.mem.indexOf(u8, bound_stores_schema_sql, "graph_epoch integer") != null);
 
@@ -3628,7 +3637,7 @@ test "create graph store writes metadata and rejects main database open" {
         defer raw.deinit();
 
         try testingExpectScalarText(&raw, "select value from _zova_meta where key = 'magic'", "zova");
-        try testingExpectScalarText(&raw, "select value from _zova_meta where key = 'format_version'", "11");
+        try testingExpectScalarText(&raw, "select value from _zova_meta where key = 'format_version'", format_version);
         try testingExpectScalarText(&raw, "select value from _zova_meta where key = 'store_role'", "graph_store");
         try testingExpectScalarText(&raw, "select value from _zova_meta where key = 'graph_epoch'", "0");
 
@@ -4946,7 +4955,7 @@ test "open rejects future format version" {
         try raw.exec(
             \\create table _zova_meta (key text primary key, value text not null);
             \\insert into _zova_meta (key, value) values ('magic', 'zova');
-            \\insert into _zova_meta (key, value) values ('format_version', '12');
+            \\insert into _zova_meta (key, value) values ('format_version', '13');
         );
     }
 
@@ -4955,13 +4964,14 @@ test "open rejects future format version" {
 
 test "format version classification distinguishes current migratable legacy future and malformed" {
     try std.testing.expectEqual(FormatCompatibility.current, classifyFormatVersion(format_version).?);
-    try std.testing.expectEqual(FormatCompatibility.current, classifyFormatVersion("11").?);
+    try std.testing.expectEqual(FormatCompatibility.current, classifyFormatVersion("12").?);
+    try std.testing.expectEqual(FormatCompatibility.migratable, classifyFormatVersion("11").?);
     try std.testing.expectEqual(FormatCompatibility.migratable, classifyFormatVersion("10").?);
     try std.testing.expectEqual(FormatCompatibility.migratable, classifyFormatVersion("9").?);
     try std.testing.expectEqual(FormatCompatibility.unsupported_legacy, classifyFormatVersion("8").?);
     try std.testing.expectEqual(FormatCompatibility.unsupported_legacy, classifyFormatVersion("7").?);
     try std.testing.expectEqual(FormatCompatibility.unsupported_legacy, classifyFormatVersion("2").?);
-    try std.testing.expectEqual(FormatCompatibility.unsupported_future, classifyFormatVersion("12").?);
+    try std.testing.expectEqual(FormatCompatibility.unsupported_future, classifyFormatVersion("13").?);
     try std.testing.expectEqual(FormatCompatibility.unsupported_future, classifyFormatVersion("999").?);
 
     const malformed = [_][]const u8{
