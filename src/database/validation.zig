@@ -95,7 +95,7 @@ pub fn validateVectorStoreDatabaseExpected(db: *sqlite.Database, expected_format
     const store_id = try objectStoreIdAlloc(std.heap.c_allocator, db);
     defer std.heap.c_allocator.free(store_id);
     try validateExtensionSchema(db);
-    try validateVectorSchema(db);
+    try validateVectorSchemaExpected(db, expected_format);
 }
 
 fn validateVectorStoreDatabase(db: *sqlite.Database) Error!void {
@@ -191,6 +191,7 @@ fn validateAttachedVectorSchema(db: *sqlite.Database, comptime schema_name: []co
         "norm_squared",
     };
     try validateAttachedRequiredTable(db, schema_name, vector_impl.vectors_table, &vector_columns, vector_impl.vectors_schema_sql);
+    try validateVectorMaintenance(db, schema_name ++ ".");
 }
 
 fn validateAttachedGraphSchema(db: *sqlite.Database, comptime schema_name: []const u8) Error!void {
@@ -309,7 +310,7 @@ pub fn validateObjectSchemaExpected(db: *sqlite.Database, expected_format: []con
             object_impl.format10_object_chunks_schema_sql,
         );
     }
-    if (expected_version == 11) return validateObjectSchema(db);
+    if (expected_version == 11 or expected_version == 12) return validateObjectSchema(db);
     return error.NotZovaDatabase;
 }
 
@@ -345,6 +346,10 @@ fn validateObjectSchemaSql(
 }
 
 pub fn validateVectorSchema(db: *sqlite.Database) Error!void {
+    return validateVectorSchemaExpected(db, format_version);
+}
+
+pub fn validateVectorSchemaExpected(db: *sqlite.Database, expected_format: []const u8) Error!void {
     if (try tableExists(db, "_zova_vector_norms")) return error.NotZovaDatabase;
     const vector_collection_columns = [_][]const u8{
         "collection_key",
@@ -363,6 +368,27 @@ pub fn validateVectorSchema(db: *sqlite.Database) Error!void {
         "norm_squared",
     };
     try validateRequiredTable(db, "_zova_vectors", &vector_columns, vector_impl.vectors_schema_sql);
+    if ((parseFormatVersion(expected_format) orelse return error.NotZovaDatabase) >= 12) try validateVectorMaintenance(db, "main.");
+}
+
+fn validateVectorMaintenance(db: *sqlite.Database, prefix: []const u8) Error!void {
+    const maintenance = @import("../vector_maintenance.zig");
+    var buffer: [512]u8 = undefined;
+    const sql = std.fmt.bufPrintSentinel(&buffer, "select sql from {s}sqlite_schema where name=?1 and type=?2", .{prefix}, 0) catch return error.NotZovaDatabase;
+    var stmt = try db.prepare(sql);
+    defer stmt.deinit();
+    inline for (.{ .{ "_zova_vector_sources", maintenance.sources_sql }, .{ "_zova_vector_changes", maintenance.changes_sql } }) |table| {
+        try stmt.bindTextBorrowed(1, table[0]);
+        try stmt.bindTextBorrowed(2, "table");
+        if (try stmt.step() != .row or !schemaSqlEqual(stmt.columnText(0), table[1])) return error.NotZovaDatabase;
+        try stmt.reset();
+    }
+    inline for (maintenance.triggers) |trigger| {
+        try stmt.bindTextBorrowed(1, trigger.name);
+        try stmt.bindTextBorrowed(2, "trigger");
+        if (try stmt.step() != .row or !schemaSqlEqual(stmt.columnText(0), trigger.sql)) return error.NotZovaDatabase;
+        try stmt.reset();
+    }
 }
 
 pub fn validateGraphSchema(db: *sqlite.Database) Error!void {

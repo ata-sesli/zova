@@ -1792,8 +1792,8 @@ static void run_probe_migrate_smoke(void) {
         expect_status(zova_database_close(db), ZOVA_OK, "close current for probe");
         zova_database_format_info out = {0};
         expect_status(zova_database_probe_format(&(zova_database_probe_format_request){.path = path, .out_info = &out, .out_error_message = &msg}), ZOVA_OK, "probe current");
-        if (out.format_version != 11 || out.compatibility != ZOVA_FORMAT_CURRENT) {
-            fprintf(stderr, "probe current: expected 11/CURRENT got %u/%d\n", out.format_version, out.compatibility);
+        if (out.format_version != 12 || out.compatibility != ZOVA_FORMAT_CURRENT) {
+            fprintf(stderr, "probe current: expected 12/CURRENT got %u/%d\n", out.format_version, out.compatibility);
             exit(1);
         }
         zova_message_free(&msg);
@@ -1855,7 +1855,7 @@ static void run_probe_migrate_smoke(void) {
         zova_database *db = NULL; zova_message msg = {0};
         expect_status(zova_database_create(&(zova_database_open_request){.path = src, .out_db = &db, .out_error_message = &msg}), ZOVA_OK, "create future base");
         zova_message_free(&msg);
-        expect_status(zova_database_exec(&(zova_database_exec_request){.db = db, .sql = "update _zova_meta set value = '12' where key = 'format_version'"}), ZOVA_OK, "patch future");
+        expect_status(zova_database_exec(&(zova_database_exec_request){.db = db, .sql = "update _zova_meta set value = '13' where key = 'format_version'"}), ZOVA_OK, "patch future");
         expect_status(zova_database_close(db), ZOVA_OK, "close future base");
         zova_message err = {0};
         expect_status(zova_database_migrate(&(zova_database_migrate_request){.source_path = src, .destination_path = dst, .flags = 0, .out_error_message = &err}), ZOVA_UNSUPPORTED_FUTURE_FORMAT, "migrate future");
@@ -1900,7 +1900,7 @@ static void run_probe_migrate_smoke(void) {
         // dest exists and probe is current
         zova_database_format_info out = {0}; zova_message pmsg = {0};
         expect_status(zova_database_probe_format(&(zova_database_probe_format_request){.path = dst, .out_info = &out, .out_error_message = &pmsg}), ZOVA_OK, "probe migrated dest");
-        if (out.format_version != 11 || out.compatibility != ZOVA_FORMAT_CURRENT) { fprintf(stderr, "migrate dest probe wrong\n"); exit(1); }
+        if (out.format_version != 12 || out.compatibility != ZOVA_FORMAT_CURRENT) { fprintf(stderr, "migrate dest probe wrong\n"); exit(1); }
         zova_message_free(&pmsg);
         // second migrate with same dest should be DESTINATION_EXISTS
         zova_message err2 = {0};

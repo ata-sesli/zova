@@ -21,6 +21,41 @@ pub const requires_data: u64 = 8;
 pub const requires_storage: u64 = 16;
 pub const service_operations: u32 = 5;
 pub const requires_operations: u64 = 32;
+pub const service_vector_maintenance: u32 = 6;
+pub const requires_vector_maintenance: u64 = 64;
+pub const status_history_unavailable: i32 = 7;
+pub const status_source_changed: i32 = 8;
+
+/// Snapshot-visible identity and coverage; revisions alone are not cache keys.
+pub const VectorView = extern struct {
+    incarnation: [16]u8 = @splat(0),
+    token: [16]u8 = @splat(0),
+    revision: i64 = 0,
+};
+pub const VectorChangesRequest = extern struct {
+    struct_size: u32 = @sizeOf(VectorChangesRequest),
+    reserved: u32 = 0,
+    name: Bytes,
+    since: VectorView,
+    after_revision: i64 = 0,
+    row_limit: u64,
+    byte_limit: u64,
+    row: ?RowCallback,
+    user_data: ?*anyopaque = null,
+};
+pub const VectorChangesPage = extern struct {
+    view: VectorView = .{},
+    rows: u64 = 0,
+    next_revision: i64 = 0,
+    has_more: u32 = 0,
+    reserved: u32 = 0,
+};
+pub const VectorMaintenanceService = extern struct {
+    struct_size: u32 = @sizeOf(VectorMaintenanceService),
+    version: u32 = 1,
+    view: ?*const fn (?*anyopaque, Bytes, ?*VectorView) callconv(.c) i32 = null,
+    read_changes: ?*const fn (?*anyopaque, ?*const VectorChangesRequest, ?*VectorChangesPage) callconv(.c) i32 = null,
+};
 pub const operation_scalar: u32 = 1;
 pub const operation_table: u32 = 2;
 pub const operation_exact: u64 = 1;
@@ -169,7 +204,7 @@ pub const DiagnosticsService = extern struct {
 pub const Client = struct {
     host: *const Host,
     connection: ?*anyopaque,
-    pub const Error = error{ HostError, OutOfMemory, InvalidArgument, Unsupported, Limit, Canceled };
+    pub const Error = error{ HostError, OutOfMemory, InvalidArgument, Unsupported, Limit, Canceled, HistoryUnavailable, SourceChanged };
 
     pub fn exec(self: Client, sql: []const u8) Error!void {
         if (self.host.struct_size < @sizeOf(Host) or self.host.abi_version != 1) return error.Unsupported;
@@ -197,6 +232,18 @@ pub const Client = struct {
     pub fn registerOperation(self: Client, operation: *const Operation) Error!void {
         const service = try self.getService(OperationService, service_operations);
         try result((service.register_operation orelse return error.Unsupported)(self.connection, operation));
+    }
+
+    pub fn vectorView(self: Client, name: []const u8, output: *VectorView) Error!void {
+        output.* = .{};
+        const service = try self.getService(VectorMaintenanceService, service_vector_maintenance);
+        try result((service.view orelse return error.Unsupported)(self.connection, .from(name), output));
+    }
+
+    pub fn vectorChanges(self: Client, request: *const VectorChangesRequest, output: *VectorChangesPage) Error!void {
+        output.* = .{};
+        const service = try self.getService(VectorMaintenanceService, service_vector_maintenance);
+        try result((service.read_changes orelse return error.Unsupported)(self.connection, request, output));
     }
 
     pub fn copySqliteError(self: Client, buffer: []u8) Error!usize {
@@ -230,6 +277,8 @@ pub const Client = struct {
             4 => error.Unsupported,
             5 => error.Limit,
             6 => error.Canceled,
+            7 => error.HistoryUnavailable,
+            8 => error.SourceChanged,
             else => error.HostError,
         };
     }

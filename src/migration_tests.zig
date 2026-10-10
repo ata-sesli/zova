@@ -1,7 +1,7 @@
 //! Storage-format migration registry and per-file step tests.
 //!
 //! Covers the sequential adjacent migration registry and the exact
-//! format 9 -> 10 and format 10 -> 11 transformations over genuine fixtures:
+//! format 9 -> 10 -> 11 -> 12 transformations over genuine fixtures:
 //! successful transforms reopen as valid current-format databases, refusals
 //! leave sources byte-identical, and schema failures roll back completely so
 //! the recorded format version never advances.
@@ -110,9 +110,56 @@ test "migration registry only registers adjacent steps with exact version pairs"
     try std.testing.expect(zova.findMigrationStep(8, 10) == null);
     try std.testing.expect(zova.findMigrationStep(8, 9) == null);
     try std.testing.expect(zova.findMigrationStep(9, 11) == null);
-    try std.testing.expect(zova.findMigrationStep(11, 12) == null);
+    try std.testing.expect(zova.findMigrationStep(11, 12) != null);
     try std.testing.expect(zova.findMigrationStep(9, 9) == null);
     try std.testing.expect(zova.findMigrationStep(7, 8) == null);
+}
+
+test "genuine format11 migration preserves vector rows keys and database identity" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try copyFixture(&tmp.sub_path, 136, "format-11.zova");
+    defer std.testing.allocator.free(path);
+    var raw = try sqlite.Database.open(path);
+    defer raw.deinit();
+    const before = try scalarCount(&raw, "select sum(vector_key*17+collection_key*31+length(\"values\")) from _zova_vectors");
+    var identity_stmt = try raw.prepare("select value from _zova_meta where key='database_id'");
+    _ = try identity_stmt.step();
+    const identity = try std.testing.allocator.dupe(u8, identity_stmt.columnText(0));
+    defer std.testing.allocator.free(identity);
+    identity_stmt.deinit();
+    try std.testing.expectError(error.MigrationRequired, Database.open(path));
+    try std.testing.expectEqual(@as(u32, 12), try zova.runMigrationStep(&raw));
+    try std.testing.expectEqual(before, try scalarCount(&raw, "select sum(vector_key*17+collection_key*31+length(\"values\")) from _zova_vectors"));
+    try expectScalarTextRaw(&raw, "select value from _zova_meta where key='database_id'", identity);
+    try std.testing.expectEqual(@as(i64, 0), try scalarCount(&raw, "select count(*) from _zova_vector_changes"));
+    try std.testing.expectEqual(try scalarCount(&raw, "select count(*) from _zova_vector_collections"), try scalarCount(&raw, "select count(*) from _zova_vector_sources where revision=0 and token=incarnation"));
+    var opened = try Database.open(path);
+    defer opened.deinit();
+}
+
+test "format11 journal migration rolls back schema and identities on a mid-step SQL fault" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try copyFixture(&tmp.sub_path, 137, "format-11.zova");
+    defer std.testing.allocator.free(path);
+    const before = try fileSha256(path);
+    {
+        var raw = try sqlite.Database.open(path);
+        defer raw.deinit();
+        const deny = struct {
+            fn call(_: ?*anyopaque, action: c_int, first: [*c]const u8, _: [*c]const u8, _: [*c]const u8, _: [*c]const u8) callconv(.c) c_int {
+                if (action == sqlite.c.SQLITE_CREATE_TRIGGER and first != null and std.mem.eql(u8, std.mem.span(first), "_zova_vector_change_insert")) return sqlite.c.SQLITE_DENY;
+                return sqlite.c.SQLITE_OK;
+            }
+        }.call;
+        try raw.setAuthorizer(deny, null);
+        try std.testing.expectError(error.SqliteError, zova.runMigrationStep(&raw));
+        try raw.setAuthorizer(null, null);
+        try expectScalarTextRaw(&raw, "select value from _zova_meta where key='format_version'", "11");
+        try std.testing.expectEqual(@as(i64, 0), try scalarCount(&raw, "select count(*) from sqlite_schema where name in ('_zova_vector_sources','_zova_vector_changes')"));
+    }
+    try std.testing.expectEqualSlices(u8, &before, &(try fileSha256(path)));
 }
 
 test "genuine format-10 fixture hashes are immutable" {
@@ -160,6 +207,7 @@ test "genuine format-10 object schema migrates atomically to fixed-1MiB format 1
             &raw,
             "select count(*) from sqlite_master where name like '%_format10'",
         ));
+        try @import("database/migration.zig").runMigrationsToCurrent(&raw);
     }
 
     var db = try Database.open(copy_path);
@@ -250,7 +298,7 @@ test "genuine format-10 bound-store set migrates copy-forward to format 11" {
         const store_path = try std.fmt.bufPrintSentinel(&store_buffer, "{s}/migrated-format10.{s}.zova", .{ set_dir, suffix }, 0);
         var raw = try sqlite.Database.openWithFlags(store_path, .read_only);
         defer raw.deinit();
-        try expectScalarTextRaw(&raw, "select value from _zova_meta where key = 'format_version'", "11");
+        try expectScalarTextRaw(&raw, "select value from _zova_meta where key = 'format_version'", @import("version.zig").format_version);
     }
 }
 
@@ -293,6 +341,7 @@ test "migration transforms genuine format-9 fixtures through adjacent steps into
             var raw = try sqlite.Database.open(copy_path);
             defer raw.deinit();
             try std.testing.expectEqual(@as(u32, 11), try zova.runMigrationStep(&raw));
+            try @import("database/migration.zig").runMigrationsToCurrent(&raw);
         }
 
         // The migrated file reopens through the full open path.
@@ -339,6 +388,7 @@ test "migration transforms genuine format-9 fixtures through adjacent steps into
             _ = try zova.runMigrationStep(&raw);
             _ = try zova.runMigrationStep(&raw);
             try expectScalarTextRaw(&raw, "select value from _zova_meta where key = 'format_version'", "11");
+            try @import("database/migration.zig").runMigrationsToCurrent(&raw);
         }
     }
 
@@ -397,6 +447,7 @@ test "migrated populated format-9 database preserves object vector graph and ext
         defer raw.deinit();
         _ = try zova.runMigrationStep(&raw);
         _ = try zova.runMigrationStep(&raw);
+        try @import("database/migration.zig").runMigrationsToCurrent(&raw);
     }
 
     var db = try Database.open(copy_path);
@@ -503,7 +554,7 @@ test "migration refuses current pre-migratable and future formats without mutati
             try raw.exec(
                 \\create table _zova_meta (key text primary key, value text not null);
                 \\insert into _zova_meta (key, value) values ('magic', 'zova');
-                \\insert into _zova_meta (key, value) values ('format_version', '11');
+                \\insert into _zova_meta (key, value) values ('format_version', '13');
             );
         }
 
@@ -874,7 +925,7 @@ fn expectMigratedSetParity(allocator: std.mem.Allocator, destination_path: []con
         const sibling = try std.fmt.bufPrintSentinel(&sibling_buffer, "{s}.{s}.zova", .{ stem, suffix }, 0);
         var store_db = try sqlite.Database.openWithFlags(sibling, .read_only);
         defer store_db.deinit();
-        try expectScalarTextRaw(&store_db, "select value from _zova_meta where key = 'format_version'", "11");
+        try expectScalarTextRaw(&store_db, "select value from _zova_meta where key = 'format_version'", @import("version.zig").format_version);
         try expectScalarTextRaw(&store_db, "select count(*) from sqlite_master where type = 'table' and name = '_zova_kv'", "1");
     }
 }

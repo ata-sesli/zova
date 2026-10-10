@@ -350,6 +350,7 @@ pub const Database = struct {
         name: []const u8,
         options: VectorCollectionOptions,
     ) Error!void {
+        try @import("extension_operations.zig").requireSourceIdle(self.sqlite_db);
         try validateVectorCollectionName(name);
         try validateVectorDimensions(options.dimensions);
 
@@ -464,6 +465,7 @@ pub const Database = struct {
         vector_id: []const u8,
         values: VectorValuesConst,
     ) Error!void {
+        try @import("extension_operations.zig").requireSourceIdle(self.sqlite_db);
         try validateVectorCollectionName(collection_name);
         const collection = try loadVectorCollection(self, collection_name);
         try validateVectorInput(collection, .{ .id = vector_id, .values = values });
@@ -482,6 +484,7 @@ pub const Database = struct {
         collection_name: []const u8,
         vectors: []const VectorInput,
     ) Error!void {
+        try @import("extension_operations.zig").requireSourceIdle(self.sqlite_db);
         try validateVectorCollectionName(collection_name);
         const collection = try loadVectorCollection(self, collection_name);
         const norms = try std.heap.c_allocator.alloc(f64, vectors.len);
@@ -573,6 +576,7 @@ pub const Database = struct {
         collection_name: []const u8,
         vector_id: []const u8,
     ) Error!void {
+        try @import("extension_operations.zig").requireSourceIdle(self.sqlite_db);
         try validateVectorCollectionName(collection_name);
         try validateVectorId(vector_id);
         const collection = try loadVectorCollection(self, collection_name);
@@ -598,6 +602,7 @@ pub const Database = struct {
         collection_name: []const u8,
         vector_ids: []const []const u8,
     ) Error!void {
+        try @import("extension_operations.zig").requireSourceIdle(self.sqlite_db);
         try validateVectorCollectionName(collection_name);
         const collection = try loadVectorCollection(self, collection_name);
         for (vector_ids) |vector_id| try validateVectorId(vector_id);
@@ -636,6 +641,7 @@ pub const Database = struct {
     /// ordinary SQLite deletes and can participate in a caller-owned
     /// transaction.
     pub fn deleteVectorCollection(self: *Database, name: []const u8) Error!void {
+        try @import("extension_operations.zig").requireSourceIdle(self.sqlite_db);
         try validateVectorCollectionName(name);
         _ = try loadVectorCollection(self, name);
 

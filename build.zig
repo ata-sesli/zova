@@ -501,6 +501,16 @@ pub fn build(b: *std.Build) void {
     const fresh_ablation_step = b.step("bench-fresh-ablation", "Run cumulative graph, metadata, FTS, and vector fresh-build ablations");
     fresh_ablation_step.dependOn(&fresh_ablation_cmd.step);
 
+    const maintenance_benchmark = b.addExecutable(.{
+        .name = "zova_vector_maintenance_benchmark",
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/vector_maintenance_benchmark.zig"), .target = target, .optimize = optimize }),
+    });
+    maintenance_benchmark.root_module.addOptions("zova_build_options", zova_build_options);
+    addSqlite(maintenance_benchmark.root_module, b, sqlite_lib);
+    const maintenance_cmd = b.addRunArtifact(maintenance_benchmark);
+    maintenance_cmd.addPassthruArgs();
+    b.step("bench-vector-maintenance", "Run bounded transactional vector-journal and reconciliation measurements").dependOn(&maintenance_cmd.step);
+
     const storage_compat_check = b.addExecutable(.{
         .name = "zova_storage_compat_check",
         .root_module = b.createModule(.{
@@ -578,7 +588,7 @@ pub fn build(b: *std.Build) void {
         "test-vectors",
         "Run vector storage and SQL tests",
         "src/test_vectors_root.zig",
-        &.{ "vector_tests", "vector_sql_tests", "vector.test." },
+        &.{ "vector_tests", "vector_sql_tests", "vector_maintenance_tests", "vector.test." },
         target,
         optimize,
         zova_build_options,

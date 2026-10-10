@@ -126,6 +126,14 @@ pub fn copyVectorStorage(
     destination: *sqlite.Database,
     destination_schema: vector_impl.StorageSchema,
 ) Error!void {
+    // Keep row copying and its history/identity copy on one source snapshot.
+    try source.savepoint("zova_copy_vector_source");
+    var released = false;
+    defer if (!released) {
+        source.rollbackToSavepoint("zova_copy_vector_source") catch {};
+        source.releaseSavepoint("zova_copy_vector_source") catch {};
+    };
+    if (source.handle != destination.handle) try @import("../vector_maintenance.zig").register(destination);
     var source_vectors = vector_impl.Database{
         .sqlite_db = source,
         .storage_schema = source_schema,
@@ -176,6 +184,44 @@ pub fn copyVectorStorage(
 
             try destination_vectors.putVector(collection.name, vector.id, vector.values.asConst());
         }
+        // A whole-collection copy (backup/restore/split) preserves its source
+        // incarnation and retained coverage. A merge is a new destination view.
+        if (!destination_has_collection) try copyVectorHistory(source, source_schema, destination, destination_schema, collection.name);
+    }
+    try source.releaseSavepoint("zova_copy_vector_source");
+    released = true;
+}
+
+fn copyVectorHistory(source: *sqlite.Database, source_schema: vector_impl.StorageSchema, destination: *sqlite.Database, destination_schema: vector_impl.StorageSchema, name: []const u8) Error!void {
+    var state = try prepareSchemaSql(source, "select s.incarnation,s.revision,s.token,s.floor,s.floor_token from {s}_zova_vector_sources s join {s}_zova_vector_collections c using(collection_key) where c.name=?1", .{ source_schema.prefix(), source_schema.prefix() });
+    defer state.deinit();
+    try state.bindTextBorrowed(1, name);
+    if (try state.step() != .row) return error.VectorCorrupt;
+    var update = try prepareSchemaSql(destination, "update {s}_zova_vector_sources set incarnation=?1,revision=?2,token=?3,floor=?4,floor_token=?5 where collection_key=(select collection_key from {s}_zova_vector_collections where name=?6)", .{ destination_schema.prefix(), destination_schema.prefix() });
+    defer update.deinit();
+    try update.bindBlobBorrowed(1, state.columnBlob(0));
+    try update.bindInt64(2, state.columnInt64(1));
+    try update.bindBlobBorrowed(3, state.columnBlob(2));
+    try update.bindInt64(4, state.columnInt64(3));
+    try update.bindBlobBorrowed(5, state.columnBlob(4));
+    try update.bindTextBorrowed(6, name);
+    _ = try update.step();
+    var clear = try prepareSchemaSql(destination, "delete from {s}_zova_vector_changes where collection_key=(select collection_key from {s}_zova_vector_collections where name=?1)", .{ destination_schema.prefix(), destination_schema.prefix() });
+    defer clear.deinit();
+    try clear.bindTextBorrowed(1, name);
+    _ = try clear.step();
+    var rows = try prepareSchemaSql(source, "select revision,token,vector_id from {s}_zova_vector_changes where collection_key=(select collection_key from {s}_zova_vector_collections where name=?1) order by revision", .{ source_schema.prefix(), source_schema.prefix() });
+    defer rows.deinit();
+    try rows.bindTextBorrowed(1, name);
+    var insert = try prepareSchemaSql(destination, "insert into {s}_zova_vector_changes(collection_key,revision,token,vector_id) select collection_key,?2,?3,?4 from {s}_zova_vector_collections where name=?1", .{ destination_schema.prefix(), destination_schema.prefix() });
+    defer insert.deinit();
+    try insert.bindTextBorrowed(1, name);
+    while (try rows.step() == .row) {
+        try insert.bindInt64(2, rows.columnInt64(0));
+        try insert.bindBlobBorrowed(3, rows.columnBlob(1));
+        try insert.bindTextBorrowed(4, rows.columnText(2));
+        _ = try insert.step();
+        try insert.reset();
     }
 }
 
@@ -331,6 +377,8 @@ pub fn clearMainObjectStorage(db: *sqlite.Database) Error!void {
 pub fn clearMainVectorStorage(db: *sqlite.Database) Error!void {
     try db.exec(
         \\delete from _zova_vectors;
+        \\delete from _zova_vector_changes;
+        \\delete from _zova_vector_sources;
         \\delete from _zova_vector_collections;
     );
 }

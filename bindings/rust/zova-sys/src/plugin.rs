@@ -22,6 +22,63 @@ pub const ZOVA_PLUGIN_SERVICE_DATA: u32 = 3;
 pub const ZOVA_PLUGIN_SERVICE_STORAGE: u32 = 4;
 pub const ZOVA_PLUGIN_REQUIRES_OPERATIONS_V1: u64 = 32;
 pub const ZOVA_PLUGIN_SERVICE_OPERATIONS: u32 = 5;
+pub const ZOVA_PLUGIN_SERVICE_VECTOR_MAINTENANCE: u32 = 6;
+pub const ZOVA_PLUGIN_REQUIRES_VECTOR_MAINTENANCE_V1: u64 = 64;
+pub const ZOVA_PLUGIN_HISTORY_UNAVAILABLE: i32 = 7;
+pub const ZOVA_PLUGIN_SOURCE_CHANGED: i32 = 8;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct zova_plugin_vector_view_v1 {
+    pub incarnation: [u8; 16],
+    pub token: [u8; 16],
+    pub revision: i64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct zova_plugin_vector_changes_request_v1 {
+    pub struct_size: u32,
+    pub reserved: u32,
+    pub name: zova_plugin_bytes_v1,
+    pub since: zova_plugin_vector_view_v1,
+    pub after_revision: i64,
+    pub row_limit: u64,
+    pub byte_limit: u64,
+    pub row: zova_plugin_row_v1,
+    pub user_data: *mut c_void,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct zova_plugin_vector_changes_page_v1 {
+    pub view: zova_plugin_vector_view_v1,
+    pub rows: u64,
+    pub next_revision: i64,
+    pub has_more: u32,
+    pub reserved: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct zova_plugin_vector_maintenance_service_v1 {
+    pub struct_size: u32,
+    pub version: u32,
+    pub view: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            zova_plugin_bytes_v1,
+            *mut zova_plugin_vector_view_v1,
+        ) -> i32,
+    >,
+    pub read_changes: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            *const zova_plugin_vector_changes_request_v1,
+            *mut zova_plugin_vector_changes_page_v1,
+        ) -> i32,
+    >,
+}
 pub const ZOVA_PLUGIN_OPERATION_SCALAR: u32 = 1;
 pub const ZOVA_PLUGIN_OPERATION_TABLE: u32 = 2;
 pub const ZOVA_PLUGIN_OPERATION_EXACT: u64 = 1;

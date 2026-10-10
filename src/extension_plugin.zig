@@ -32,12 +32,13 @@ pub const Client = api.Client;
 pub const Descriptor = api.Descriptor;
 pub const UpgradeDescriptor = api.UpgradeDescriptor;
 pub const Phase = enum { install, check, drop, register_sql };
-const supported_flags = has_upgrade | requires_query | requires_diagnostics | api.requires_data | api.requires_storage | api.requires_operations;
+const supported_flags = has_upgrade | requires_query | requires_diagnostics | api.requires_data | api.requires_storage | api.requires_operations | api.requires_vector_maintenance;
 const query_service: QueryService = .{ .query = query };
 const data_service: api.DataService = .{ .read = readData };
 const storage_service: api.StorageService = .{ .execute = storage };
 const diagnostics_service: DiagnosticsService = .{ .copy_sqlite_error = copySqliteError };
 const operation_service: api.OperationService = .{ .register_operation = registerOperation };
+const vector_maintenance_service: api.VectorMaintenanceService = .{ .view = vectorView, .read_changes = vectorChanges };
 const storage_function_names = [_][]const u8{ "count", "sum", "avg", "min", "max", "total", "coalesce", "ifnull", "nullif", "length", "octet_length", "typeof", "abs", "lower", "upper", "hex", "unhex", "substr", "substring", "round" };
 const Context = struct {
     db: *sqlite.Database,
@@ -171,7 +172,7 @@ pub fn callOperation(db: *sqlite.Database, prefix: []const u8, mutating: bool, r
     var context: Context = .{ .db = db, .storage_prefix = prefix, .operation = true, .read_only_operation = !mutating };
     const host = serviceHost();
     const rc = runner(&host.base, &context, state);
-    if (rc != 0) return if (rc >= 1 and rc <= 6) rc else 1;
+    if (rc != 0) return if (rc >= 1 and rc <= 8) rc else 1;
     // Finalize pins before a mutating release can commit its owned savepoint.
     for (&pins) |*pin| {
         if (pin.*) |*stmt| stmt.deinit();
@@ -221,8 +222,37 @@ fn getService(context: ?*anyopaque, id: u32, version: u32, min_size: u32, output
             if (!state.registration_allowed or min_size > @sizeOf(api.OperationService)) return status_unsupported;
             out.* = &operation_service;
         },
+        api.service_vector_maintenance => {
+            if (min_size > @sizeOf(api.VectorMaintenanceService)) return status_unsupported;
+            out.* = &vector_maintenance_service;
+        },
         else => return status_unsupported,
     }
+    return 0;
+}
+
+fn vectorView(raw: ?*anyopaque, name: api.Bytes, output: ?*api.VectorView) callconv(.c) i32 {
+    const out = output orelse return 3;
+    out.* = .{};
+    const state: *Context = @ptrCast(@alignCast(raw orelse return 3));
+    if (state.service_active) return 3;
+    state.service_active = true;
+    defer state.service_active = false;
+    const prefix = data_access.schema(state.db, "vector_store") catch |err| return serviceStatus(err);
+    const text = data_access.bytes(name) catch |err| return serviceStatus(err);
+    out.* = @import("vector_maintenance.zig").view(state.db, prefix, text) catch |err| return serviceStatus(err);
+    return 0;
+}
+
+fn vectorChanges(raw: ?*anyopaque, request: ?*const api.VectorChangesRequest, output: ?*api.VectorChangesPage) callconv(.c) i32 {
+    const out = output orelse return 3;
+    out.* = .{};
+    const state: *Context = @ptrCast(@alignCast(raw orelse return 3));
+    if (state.service_active) return 3;
+    state.service_active = true;
+    defer state.service_active = false;
+    const prefix = data_access.schema(state.db, "vector_store") catch |err| return serviceStatus(err);
+    out.* = @import("vector_maintenance.zig").read(state.db, prefix, request orelse return 3) catch |err| return serviceStatus(err);
     return 0;
 }
 
@@ -243,6 +273,8 @@ fn serviceStatus(err: anyerror) i32 {
         error.InvalidArgument => 3,
         error.PluginLimit => status_limit,
         error.PluginCanceled, error.Interrupt => status_canceled,
+        error.HistoryUnavailable => api.status_history_unavailable,
+        error.SourceChanged => api.status_source_changed,
         else => 1,
     };
 }

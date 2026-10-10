@@ -29,5 +29,10 @@ fn portable_plugin_layouts_match_the_c_header() {
         assert_eq!(size_of::<zova_plugin_operation_v1>(), 104);
         assert_eq!(offset_of!(zova_plugin_operation_v1, scalar), 72);
         assert_eq!(size_of::<zova_plugin_operation_service_v1>(), 16);
+        assert_eq!(size_of::<zova_plugin_vector_view_v1>(), 40);
+        assert_eq!(size_of::<zova_plugin_vector_changes_request_v1>(), 104);
+        assert_eq!(offset_of!(zova_plugin_vector_changes_request_v1, row), 88);
+        assert_eq!(size_of::<zova_plugin_vector_changes_page_v1>(), 64);
+        assert_eq!(size_of::<zova_plugin_vector_maintenance_service_v1>(), 24);
     }
 }

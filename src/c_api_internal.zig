@@ -1042,7 +1042,7 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
         var msg = zova_message{ .data = null, .len = 0 };
         defer zova_message_free(&msg);
         try std.testing.expectEqual(zova_status.OK, zova_database_probe_format(&.{ .path = path, .out_info = &out, .out_error_message = &msg }));
-        try std.testing.expectEqual(@as(u32, 11), out.format_version);
+        try std.testing.expectEqual(@as(u32, 12), out.format_version);
         try std.testing.expectEqual(@backingInt(zova_format_compatibility.CURRENT), out.compatibility);
     }
     // Migratable fixture
@@ -1060,7 +1060,7 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
     }
     // Future and legacy synthetic
     for ([_]struct { ver: []const u8, expected: zova_format_compatibility }{
-        .{ .ver = "12", .expected = .UNSUPPORTED_FUTURE },
+        .{ .ver = "13", .expected = .UNSUPPORTED_FUTURE },
         .{ .ver = "8", .expected = .UNSUPPORTED_LEGACY },
     }) |case| {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -1103,12 +1103,12 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
         var probe_msg = zova_message{ .data = null, .len = 0 };
         defer zova_message_free(&probe_msg);
         try std.testing.expectEqual(zova_status.OK, zova_database_probe_format(&.{ .path = dst, .out_info = &out, .out_error_message = &probe_msg }));
-        try std.testing.expectEqual(@as(u32, 11), out.format_version);
+        try std.testing.expectEqual(@as(u32, 12), out.format_version);
         try std.testing.expectEqual(@backingInt(zova_format_compatibility.CURRENT), out.compatibility);
         // destination is openable and no private names leaked via C output (checked via probe/migrate out_info)
         var db = try zova.Database.open(dst);
         defer db.deinit();
-        try std.testing.expectEqual(@as(u32, 11), try std.fmt.parseInt(u32, zova_version.format_version, 10));
+        try std.testing.expectEqual(@as(u32, 12), try std.fmt.parseInt(u32, zova_version.format_version, 10));
     }
     // Destination exists
     {
@@ -1127,7 +1127,7 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
     }
     // Unsupported future/legacy via C
     for ([_]struct { ver: []const u8, expected: zova_status }{
-        .{ .ver = "12", .expected = .UNSUPPORTED_FUTURE_FORMAT },
+        .{ .ver = "13", .expected = .UNSUPPORTED_FUTURE_FORMAT },
         .{ .ver = "8", .expected = .UNSUPPORTED_LEGACY_FORMAT },
     }) |case| {
         var src_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -1744,7 +1744,7 @@ test "c abi maps incompatible storage formats to unsupported zova version" {
     const cases = [_]struct { file_name: []const u8, version_value: []const u8, expected: zova_status }{
         .{ .file_name = "c-abi-format-9.zova", .version_value = "9", .expected = .MIGRATION_REQUIRED },
         .{ .file_name = "c-abi-format-8.zova", .version_value = "8", .expected = .UNSUPPORTED_LEGACY_FORMAT },
-        .{ .file_name = "c-abi-format-12.zova", .version_value = "12", .expected = .UNSUPPORTED_FUTURE_FORMAT },
+        .{ .file_name = "c-abi-format-13.zova", .version_value = "13", .expected = .UNSUPPORTED_FUTURE_FORMAT },
     };
 
     for (cases) |case| {
