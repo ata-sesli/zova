@@ -38,6 +38,9 @@ extern "C" {
  * cross the boundary. Plugins free their own allocations before returning.
  * Hooks must not issue transaction/savepoint commands or reenter Zova APIs.
  * Nonzero hook results fail the operation; unknown statuses are generic errors.
+ * Translate recoverable Zig errors into statuses. Rust panics and C++ exceptions
+ * must not unwind across C. A Zig panic, native crash or process abort is not
+ * recoverable by the host and cannot be made transaction-safe by this ABI.
  */
 typedef struct zova_plugin_host_v1 {
     uint32_t struct_size;
@@ -85,7 +88,12 @@ typedef int32_t (ZOVA_PLUGIN_CALL *zova_plugin_row_v1)(void *user_data,
  * NUL; SQL cannot. Empty text/blob can have NULL bytes and zero bytes_len.
  * Result values and bytes are borrowed only during each row callback. Copy what
  * must survive it. Return OK, OUT_OF_MEMORY or CANCELED; other callback statuses
- * become INVALID_ARGUMENT. Failure can follow already delivered rows: plugins
+ * become INVALID_ARGUMENT. row and user_data are plugin-owned and borrowed only
+ * until query returns; callbacks never run after that return. There is no state
+ * ownership transfer or destroy callback: the plugin releases its callback state
+ * on every return path, including failures. The library must stay loaded through
+ * the call. Hook-local state must not be confused with future persistent state.
+ * Failure can follow already delivered rows: plugins
  * must discard partial results. All statements are finalized before return.
  * This bounds delivery, not SQL CPU time or SQLite's internal working memory.
  * Query functions must not perform side effects. Native plugins remain trusted,

@@ -106,6 +106,8 @@ fn getService(context: ?*anyopaque, id: u32, version: u32, min_size: u32, output
     const out = output orelse return 3;
     out.* = null;
     if (context == null) return 3;
+    const state: *Context = @ptrCast(@alignCast(context.?));
+    if (state.service_active) return 3;
     if (version != 1) return status_unsupported;
     switch (id) {
         service_query => {

@@ -745,6 +745,14 @@ or call the public database API recursively. Service statuses are distinct from
 the application's `zova_status`; a nonzero lifecycle-hook status still fails the
 existing lifecycle operation.
 
+The row callback and its `user_data` stay plugin-owned. The host borrows them
+only until the query returns, never invokes callbacks afterward, and does not
+call a destructor for them. Release callback state on every return path,
+including cancellation and errors; keep the library loaded until the call ends.
+Recoverable Zig errors must be translated into statuses. Rust panics and C++
+exceptions must not unwind through C; a Zig panic, native crash or process abort
+is not recoverable or transaction-safe through this interface.
+
 Zig authors use `zova.extension_plugin` (implemented in the standalone
 `src/extension_plugin_api.zig`) and `Client` over these same C layouts. That
 module has no SQLite/engine dependency. `examples/plugin_query.zig` is compiled
