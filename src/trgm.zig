@@ -1001,10 +1001,10 @@ fn searchBestIndex(vtab: ?*c.sqlite3_vtab, info: ?*c.sqlite3_index_info) callcon
     const idx = info orelse return c.SQLITE_ERROR;
     var bits: SearchConstraintBits = .{};
     var argv_index: c_int = 1;
-    bits.index_name = assignConstraint(idx, @intFromEnum(SearchColumn.index_name), &argv_index);
-    bits.query = assignConstraint(idx, @intFromEnum(SearchColumn.query), &argv_index);
-    bits.limit = assignConstraint(idx, @intFromEnum(SearchColumn.limit), &argv_index);
-    bits.threshold = assignConstraint(idx, @intFromEnum(SearchColumn.threshold), &argv_index);
+    bits.index_name = assignConstraint(idx, @backingInt(SearchColumn.index_name), &argv_index);
+    bits.query = assignConstraint(idx, @backingInt(SearchColumn.query), &argv_index);
+    bits.limit = assignConstraint(idx, @backingInt(SearchColumn.limit), &argv_index);
+    bits.threshold = assignConstraint(idx, @backingInt(SearchColumn.threshold), &argv_index);
     if (!bits.index_name or !bits.query) return c.SQLITE_CONSTRAINT;
 
     idx.idxNum = @intCast(@as(u8, @bitCast(bits)));
@@ -1012,7 +1012,7 @@ fn searchBestIndex(vtab: ?*c.sqlite3_vtab, info: ?*c.sqlite3_index_info) callcon
     idx.estimatedRows = if (bits.limit) 10 else default_search_limit;
     if (idx.nOrderBy == 1) {
         const order_by = idx.aOrderBy[0];
-        if (order_by.iColumn == @intFromEnum(SearchColumn.rank) and order_by.desc == 0) {
+        if (order_by.iColumn == @backingInt(SearchColumn.rank) and order_by.desc == 0) {
             idx.orderByConsumed = 1;
         }
     }
@@ -1124,7 +1124,7 @@ fn searchColumn(cursor: ?*c.sqlite3_vtab_cursor, ctx: ?*c.sqlite3_context, colum
     }
 
     const row = search_cursor.rows.?[search_cursor.index];
-    switch (@as(SearchColumn, @enumFromInt(column_index))) {
+    switch (@as(SearchColumn, @fromBackingInt(@intCast(column_index)))) {
         .rank => c.sqlite3_result_int64(context, @intCast(search_cursor.index + 1)),
         .document_id => resultText(context, row.document_id),
         .target_type => resultText(context, row.target_type),
@@ -1331,10 +1331,10 @@ fn validateObjectTarget(db: *sqlite.Database, hex_ref: []const u8, table_name: [
     if (try blobExists(db, table_name, if (std.mem.eql(u8, table_name, "_zova_objects")) "object_id" else "chunk_hash", &id)) return;
     if (try attachedSchemaExists(db, "object_store")) {
         var sql_buffer: [128]u8 = undefined;
-        const sql = std.fmt.bufPrintZ(&sql_buffer, "select count(*) from object_store.{s} where {s} = ?", .{
+        const sql = std.fmt.bufPrintSentinel(&sql_buffer, "select count(*) from object_store.{s} where {s} = ?", .{
             table_name,
             if (std.mem.eql(u8, table_name, "_zova_objects")) "object_id" else "chunk_hash",
-        }) catch return error.SqliteError;
+        }, 0) catch return error.SqliteError;
         var stmt = try db.prepare(sql);
         defer stmt.deinit();
         try stmt.bindBlob(1, &id);
@@ -1381,7 +1381,7 @@ fn graphNodeExists(db: *sqlite.Database, comptime prefix: []const u8, graph_name
 
 fn blobExists(db: *sqlite.Database, table_name: []const u8, column_name: []const u8, id: *const [32]u8) Error!bool {
     var sql_buffer: [128]u8 = undefined;
-    const sql = std.fmt.bufPrintZ(&sql_buffer, "select count(*) from {s} where {s} = ?", .{ table_name, column_name }) catch return error.SqliteError;
+    const sql = std.fmt.bufPrintSentinel(&sql_buffer, "select count(*) from {s} where {s} = ?", .{ table_name, column_name }, 0) catch return error.SqliteError;
     var stmt = try db.prepare(sql);
     defer stmt.deinit();
     try stmt.bindBlob(1, id);

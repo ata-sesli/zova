@@ -109,11 +109,11 @@ pub fn main(init: std.process.Init) !void {
     const bound = std.mem.eql(u8, args[4], "bound");
     if (!bound and !std.mem.eql(u8, args[4], "main")) return error.InvalidArgument;
 
-    var db = try zova.Database.create(try allocator.dupeZ(u8, args[1]));
+    var db = try zova.Database.create(try allocator.dupeSentinel(u8, args[1], 0));
     defer db.deinit();
     const schema = if (bound) "graph_store" else "main";
     if (bound) {
-        const store_path = try allocator.dupeZ(u8, try std.fmt.allocPrint(allocator, "{s}-store.zova", .{args[1]}));
+        const store_path = try allocator.dupeSentinel(u8, try std.fmt.allocPrint(allocator, "{s}-store.zova", .{args[1]}), 0);
         try zova.createGraphStore(store_path);
         try db.bindGraphStore(store_path);
     }
@@ -179,7 +179,7 @@ pub fn main(init: std.process.Init) !void {
 
 fn dropIndexes(allocator: std.mem.Allocator, db: *zova.Database, schema: []const u8) !void {
     for (index_names) |name| {
-        const sql = try allocator.dupeZ(u8, try std.fmt.allocPrint(allocator, "drop index {s}.{s}", .{ schema, name }));
+        const sql = try allocator.dupeSentinel(u8, try std.fmt.allocPrint(allocator, "drop index {s}.{s}", .{ schema, name }), 0);
         try db.sqlite_db.exec(sql);
     }
 }

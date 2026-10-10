@@ -677,7 +677,7 @@ pub fn migrateDatabaseInternal(
         // Plan from the locked stable state.
         try collectMigrationBindings(allocator, source_path, &bindings, &binding_count);
 
-        main_final = try allocator.dupeZ(u8, destination_path);
+        main_final = try allocator.dupeSentinel(u8, destination_path, 0);
         try ensureDestinationZovaPathAvailable(main_final.?);
         publication = try @import("database/migration_publication.zig").Publication.init(allocator, destination_path);
         try publication.?.reserve(0, main_final.?);
@@ -1692,7 +1692,7 @@ pub const Database = struct {
         try ensureBoundStoreTable(&self.sqlite_db);
         if (sqlite.c.sqlite3_db_readonly(self.sqlite_db.handle, "main") == 1) return error.ReadOnly;
 
-        const stored_path = try std.heap.c_allocator.dupeZ(u8, path);
+        const stored_path = try std.heap.c_allocator.dupeSentinel(u8, path, 0);
         defer std.heap.c_allocator.free(stored_path);
         const had_binding = try hasBoundGraphStoreRow(&self.sqlite_db);
         if (!had_binding and try mainGraphStorageHasRows(&self.sqlite_db)) return error.BoundStoreExists;
@@ -1811,7 +1811,7 @@ pub const Database = struct {
         try ensureBoundStoreTable(&self.sqlite_db);
         if (sqlite.c.sqlite3_db_readonly(self.sqlite_db.handle, "main") == 1) return error.ReadOnly;
 
-        const stored_path = try std.heap.c_allocator.dupeZ(u8, path);
+        const stored_path = try std.heap.c_allocator.dupeSentinel(u8, path, 0);
         defer std.heap.c_allocator.free(stored_path);
 
         const had_binding = try hasBoundObjectStoreRow(&self.sqlite_db);
@@ -1948,7 +1948,7 @@ pub const Database = struct {
         try ensureBoundStoreTable(&self.sqlite_db);
         if (sqlite.c.sqlite3_db_readonly(self.sqlite_db.handle, "main") == 1) return error.ReadOnly;
 
-        const stored_path = try std.heap.c_allocator.dupeZ(u8, path);
+        const stored_path = try std.heap.c_allocator.dupeSentinel(u8, path, 0);
         defer std.heap.c_allocator.free(stored_path);
 
         const had_binding = try hasBoundVectorStoreRow(&self.sqlite_db);
@@ -3605,8 +3605,8 @@ test "current format reserves graph store metadata" {
 
     const result: SplitGraphStoreResult = .{
         .store_path = "graph.zova",
-        .store_id = [_]u8{'0'} ** 64,
-        .bound_set_id = [_]u8{'1'} ** 64,
+        .store_id = @as([64]u8, @splat('0')),
+        .bound_set_id = @as([64]u8, @splat('1')),
         .copied = .{},
         .cleared = .{},
         .verified = true,
@@ -4896,7 +4896,7 @@ test "older main graph and vector fixtures are rejected without mutation" {
 
     inline for (fixtures, 0..) |fixture, index| {
         var copy_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const copy_path = try std.fmt.bufPrintZ(&copy_buffer, ".zig-cache/tmp/{s}/old-format-copy-{d}.zova", .{ tmp.sub_path[0..], index });
+        const copy_path = try std.fmt.bufPrintSentinel(&copy_buffer, ".zig-cache/tmp/{s}/old-format-copy-{d}.zova", .{ tmp.sub_path[0..], index }, 0);
         try testingCopySqliteFile(fixture.path, copy_path);
         const before = try testingFileSha256(copy_path);
 
@@ -4904,21 +4904,21 @@ test "older main graph and vector fixtures are rejected without mutation" {
             .main => try std.testing.expectError(fixture.open_error, Database.open(copy_path)),
             .graph => {
                 var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
-                const main_path = try std.fmt.bufPrintZ(&main_buffer, ".zig-cache/tmp/{s}/format-11-main-graph-{d}.zova", .{ tmp.sub_path[0..], index });
+                const main_path = try std.fmt.bufPrintSentinel(&main_buffer, ".zig-cache/tmp/{s}/format-11-main-graph-{d}.zova", .{ tmp.sub_path[0..], index }, 0);
                 var db = try Database.create(main_path);
                 defer db.deinit();
                 try std.testing.expectError(error.UnsupportedZovaVersion, db.bindGraphStore(copy_path));
             },
             .object => {
                 var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
-                const main_path = try std.fmt.bufPrintZ(&main_buffer, ".zig-cache/tmp/{s}/format-11-main-object-{d}.zova", .{ tmp.sub_path[0..], index });
+                const main_path = try std.fmt.bufPrintSentinel(&main_buffer, ".zig-cache/tmp/{s}/format-11-main-object-{d}.zova", .{ tmp.sub_path[0..], index }, 0);
                 var db = try Database.create(main_path);
                 defer db.deinit();
                 try std.testing.expectError(error.UnsupportedZovaVersion, db.bindObjectStore(copy_path));
             },
             .vector => {
                 var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
-                const main_path = try std.fmt.bufPrintZ(&main_buffer, ".zig-cache/tmp/{s}/format-11-main-vector-{d}.zova", .{ tmp.sub_path[0..], index });
+                const main_path = try std.fmt.bufPrintSentinel(&main_buffer, ".zig-cache/tmp/{s}/format-11-main-vector-{d}.zova", .{ tmp.sub_path[0..], index }, 0);
                 var db = try Database.create(main_path);
                 defer db.deinit();
                 try std.testing.expectError(error.UnsupportedZovaVersion, db.bindVectorStore(copy_path));

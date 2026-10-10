@@ -63,7 +63,7 @@ pub fn checkCommand(
     }
 
     const raw_path = path_arg orelse return usageErrorFormat(stderr, "check", format, "check requires <file.zova>");
-    const path = try allocator.dupeZ(u8, raw_path);
+    const path = try allocator.dupeSentinel(u8, raw_path, 0);
     defer allocator.free(path);
 
     var db = open_db: {
@@ -117,7 +117,7 @@ pub fn doctorCommand(
     stderr: *std.Io.Writer,
 ) !u8 {
     const parsed = parseBoundedCommandArgs(args, false) catch |err| return usageErrorFormat(stderr, "doctor", boundedCommandErrorFormat(args), boundedCommandUsageMessage("doctor", err));
-    const path = try allocator.dupeZ(u8, parsed.path);
+    const path = try allocator.dupeSentinel(u8, parsed.path, 0);
     defer allocator.free(path);
 
     var db = open_db: {

@@ -44,12 +44,16 @@ const exports = readFileSync(join(output, "exports.txt"), "utf8").split(/\s+/).f
 writeFileSync(join(output, "exports.json"), JSON.stringify(exports));
 const env = Bun.spawnSync(["zig", "env"], { stdout: "pipe" });
 const zigLib = env.stdout.toString().match(/\.lib_dir = "([^"]+)"/)[1];
+const translated = Bun.spawnSync(["zig", "translate-c", "-target", "wasm32-emscripten", "-O", "ReleaseSafe", "-lc",
+  "-I" + sqlite, join(sqlite, "sqlite3.h")], { stdout: Bun.file(join(core, "sqlite_c.zig")), stderr: "inherit" });
+if (translated.exitCode !== 0) throw new Error("SQLite header translation failed");
 run(["zig", "build-lib", "-ofmt=c", "-O", "ReleaseSafe", "-target", "wasm32-emscripten", "-fsingle-threaded",
   "-I" + sqlite, "-lc", "-femit-bin=" + join(output,"zova_c.c"),
   "--cache-dir", join(core,"zig-cache"), "--global-cache-dir", join(core,"zig-global-cache"),
   "--dep", "zova", "-Mroot=" + join(root,spike ? "bindings/wasm/tests/opfs-root.zig" : "bindings/wasm/native/opfs-root.zig"),
-  "-I" + sqlite, "--dep", "zova_build_options", "-Mzova=" + join(root,"src/c_api.zig"),
-  "-Mzova_build_options=" + join(root,"bindings/wasm/native/build_options.zig")]);
+  "-I" + sqlite, "--dep", "zova_build_options", "--dep", "sqlite_c", "-Mzova=" + join(root,"src/c_api.zig"),
+  "-Mzova_build_options=" + join(root,"bindings/wasm/native/build_options.zig"),
+  "-Msqlite_c=" + join(core,"sqlite_c.zig")]);
 run([emcc, "-O2", "-I" + zigLib, "-I" + join(root, "include"), "-I" + sqlite,
   "-Wno-incompatible-pointer-types", "-DSQLITE_THREADSAFE=0", "-DSQLITE_ENABLE_FTS5", "-DSQLITE_ENABLE_DBSTAT_VTAB",
   "-DSQLITE_ENABLE_RTREE", "-DSQLITE_ENABLE_GEOPOLY", "-DSQLITE_ENABLE_CARRAY", "-DSQLITE_ENABLE_MATH_FUNCTIONS",

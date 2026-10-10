@@ -98,7 +98,7 @@ pub fn infoCommand(
     }
 
     const raw_path = path_arg orelse return usageErrorFormat(stderr, "info", format, "info requires <file.zova>");
-    const path = try allocator.dupeZ(u8, raw_path);
+    const path = try allocator.dupeSentinel(u8, raw_path, 0);
     defer allocator.free(path);
 
     var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "info", format, err);
@@ -148,7 +148,7 @@ pub fn statsCommand(
     }
 
     const raw_path = path_arg orelse return usageErrorFormat(stderr, "stats", format, "stats requires <file.zova>");
-    const path = try allocator.dupeZ(u8, raw_path);
+    const path = try allocator.dupeSentinel(u8, raw_path, 0);
     defer allocator.free(path);
 
     var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "stats", format, err);
@@ -172,7 +172,7 @@ pub fn objectsCommand(
     stderr: *std.Io.Writer,
 ) !u8 {
     const parsed = parseBoundedCommandArgs(args, false) catch |err| return usageErrorFormat(stderr, "objects", boundedCommandErrorFormat(args), boundedCommandUsageMessage("objects", err));
-    const path = try allocator.dupeZ(u8, parsed.path);
+    const path = try allocator.dupeSentinel(u8, parsed.path, 0);
     defer allocator.free(path);
 
     var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "objects", parsed.format, err);
@@ -198,7 +198,7 @@ pub fn objectCommand(
     const parsed = parseBoundedCommandArgs(args, true) catch |err| return usageErrorFormat(stderr, "object", boundedCommandErrorFormat(args), boundedCommandUsageMessage("object", err));
     const id_text = parsed.id orelse return usageErrorFormat(stderr, "object", parsed.format, "object requires <file.zova> <object-id>");
     const id = parseHex32(id_text) catch return usageErrorFormat(stderr, "object", parsed.format, "object id must be 64 hex characters");
-    const path = try allocator.dupeZ(u8, parsed.path);
+    const path = try allocator.dupeSentinel(u8, parsed.path, 0);
     defer allocator.free(path);
 
     var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "object", parsed.format, err);
@@ -222,7 +222,7 @@ pub fn chunksCommand(
     stderr: *std.Io.Writer,
 ) !u8 {
     const parsed = parseBoundedCommandArgs(args, false) catch |err| return usageErrorFormat(stderr, "chunks", boundedCommandErrorFormat(args), boundedCommandUsageMessage("chunks", err));
-    const path = try allocator.dupeZ(u8, parsed.path);
+    const path = try allocator.dupeSentinel(u8, parsed.path, 0);
     defer allocator.free(path);
 
     var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "chunks", parsed.format, err);
@@ -248,7 +248,7 @@ pub fn chunkCommand(
     const parsed = parseBoundedCommandArgs(args, true) catch |err| return usageErrorFormat(stderr, "chunk", boundedCommandErrorFormat(args), boundedCommandUsageMessage("chunk", err));
     const id_text = parsed.id orelse return usageErrorFormat(stderr, "chunk", parsed.format, "chunk requires <file.zova> <chunk-id>");
     const id = parseHex32(id_text) catch return usageErrorFormat(stderr, "chunk", parsed.format, "chunk id must be 64 hex characters");
-    const path = try allocator.dupeZ(u8, parsed.path);
+    const path = try allocator.dupeSentinel(u8, parsed.path, 0);
     defer allocator.free(path);
 
     var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "chunk", parsed.format, err);
@@ -272,7 +272,7 @@ pub fn vectorsCommand(
     stderr: *std.Io.Writer,
 ) !u8 {
     const parsed = parseBoundedCommandArgs(args, false) catch |err| return usageErrorFormat(stderr, "vectors", boundedCommandErrorFormat(args), boundedCommandUsageMessage("vectors", err));
-    const path = try allocator.dupeZ(u8, parsed.path);
+    const path = try allocator.dupeSentinel(u8, parsed.path, 0);
     defer allocator.free(path);
 
     var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "vectors", parsed.format, err);
@@ -301,7 +301,7 @@ pub fn vectorCollectionCommand(
         return usageErrorFormat(stderr, "vector-collection", parsed.format, "vector collection name is invalid");
     }
 
-    const path = try allocator.dupeZ(u8, parsed.path);
+    const path = try allocator.dupeSentinel(u8, parsed.path, 0);
     defer allocator.free(path);
 
     var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "vector-collection", parsed.format, err);
@@ -325,7 +325,7 @@ pub fn graphsCommand(
     stderr: *std.Io.Writer,
 ) !u8 {
     const parsed = parseBoundedCommandArgs(args, false) catch |err| return usageErrorFormat(stderr, "graphs", boundedCommandErrorFormat(args), boundedCommandUsageMessage("graphs", err));
-    const path = try allocator.dupeZ(u8, parsed.path);
+    const path = try allocator.dupeSentinel(u8, parsed.path, 0);
     defer allocator.free(path);
 
     var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "graphs", parsed.format, err);
@@ -353,7 +353,7 @@ pub fn graphCommand(
 ) !u8 {
     const parsed = parseBoundedCommandArgs(args, true) catch |err| return usageErrorFormat(stderr, "graph", boundedCommandErrorFormat(args), boundedCommandUsageMessage("graph", err));
     const graph_name = parsed.id orelse return usageErrorFormat(stderr, "graph", parsed.format, "graph requires <file.zova> <graph>");
-    const path = try allocator.dupeZ(u8, parsed.path);
+    const path = try allocator.dupeSentinel(u8, parsed.path, 0);
     defer allocator.free(path);
 
     var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "graph", parsed.format, err);
@@ -377,7 +377,7 @@ pub fn graphNodeCommand(
     stderr: *std.Io.Writer,
 ) !u8 {
     const parsed = parseGraphNodeCommandArgs(args) catch |err| return usageErrorFormat(stderr, "graph-node", graphCommandErrorFormat(args), graphCommandUsageMessage("graph-node", err));
-    const path = try allocator.dupeZ(u8, parsed.path);
+    const path = try allocator.dupeSentinel(u8, parsed.path, 0);
     defer allocator.free(path);
 
     var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "graph-node", parsed.format, err);
@@ -401,7 +401,7 @@ pub fn graphNeighborsCommand(
     stderr: *std.Io.Writer,
 ) !u8 {
     const parsed = parseGraphNeighborsCommandArgs(args) catch |err| return usageErrorFormat(stderr, "graph-neighbors", graphCommandErrorFormat(args), graphCommandUsageMessage("graph-neighbors", err));
-    const path = try allocator.dupeZ(u8, parsed.path);
+    const path = try allocator.dupeSentinel(u8, parsed.path, 0);
     defer allocator.free(path);
 
     var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "graph-neighbors", parsed.format, err);
@@ -436,7 +436,7 @@ pub fn graphWalkCommand(
     stderr: *std.Io.Writer,
 ) !u8 {
     const parsed = parseGraphWalkCommandArgs(args) catch |err| return usageErrorFormat(stderr, "graph-walk", graphCommandErrorFormat(args), graphCommandUsageMessage("graph-walk", err));
-    const path = try allocator.dupeZ(u8, parsed.path);
+    const path = try allocator.dupeSentinel(u8, parsed.path, 0);
     defer allocator.free(path);
 
     var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "graph-walk", parsed.format, err);
@@ -471,7 +471,7 @@ pub fn tablesCommand(
     stderr: *std.Io.Writer,
 ) !u8 {
     const parsed = parseBoundedCommandArgs(args, false) catch |err| return usageErrorFormat(stderr, "tables", boundedCommandErrorFormat(args), boundedCommandUsageMessage("tables", err));
-    const path = try allocator.dupeZ(u8, parsed.path);
+    const path = try allocator.dupeSentinel(u8, parsed.path, 0);
     defer allocator.free(path);
 
     var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "tables", parsed.format, err);

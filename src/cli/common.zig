@@ -148,7 +148,7 @@ pub fn fileSize(path: [:0]const u8) u64 {
 pub fn fileSizeWithSuffix(allocator: std.mem.Allocator, path: [:0]const u8, suffix: []const u8) !u64 {
     const joined_raw = try std.mem.concat(allocator, u8, &.{ path, suffix });
     defer allocator.free(joined_raw);
-    const joined = try allocator.dupeZ(u8, joined_raw);
+    const joined = try allocator.dupeSentinel(u8, joined_raw, 0);
     defer allocator.free(joined);
     return fileSize(joined);
 }

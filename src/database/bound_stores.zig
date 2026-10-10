@@ -34,7 +34,7 @@ pub fn openConfiguredBoundObjectStore(db: *sqlite.Database, options: OpenOptions
     var info = (try loadBoundObjectStoreInfo(std.heap.c_allocator, db)) orelse return null;
     defer info.deinit(std.heap.c_allocator);
 
-    const path_z = try std.heap.c_allocator.dupeZ(u8, info.path);
+    const path_z = try std.heap.c_allocator.dupeSentinel(u8, info.path, 0);
     defer std.heap.c_allocator.free(path_z);
 
     try attachObjectStore(db, path_z, options.read_only);
@@ -60,7 +60,7 @@ pub fn openConfiguredBoundVectorStore(db: *sqlite.Database, options: OpenOptions
     var info = (try loadBoundVectorStoreInfo(std.heap.c_allocator, db)) orelse return null;
     defer info.deinit(std.heap.c_allocator);
 
-    const path_z = try std.heap.c_allocator.dupeZ(u8, info.path);
+    const path_z = try std.heap.c_allocator.dupeSentinel(u8, info.path, 0);
     defer std.heap.c_allocator.free(path_z);
 
     try attachVectorStore(db, path_z, options.read_only);
@@ -86,7 +86,7 @@ pub fn openConfiguredBoundGraphStore(db: *sqlite.Database, options: OpenOptions)
     var info = (try loadBoundGraphStoreInfo(std.heap.c_allocator, db)) orelse return null;
     defer info.deinit(std.heap.c_allocator);
 
-    const path_z = try std.heap.c_allocator.dupeZ(u8, info.path);
+    const path_z = try std.heap.c_allocator.dupeSentinel(u8, info.path, 0);
     defer std.heap.c_allocator.free(path_z);
 
     try attachGraphStore(db, path_z, options.read_only);

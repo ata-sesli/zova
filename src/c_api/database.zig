@@ -290,10 +290,10 @@ pub fn zova_database_probe_format(request: ?*const zova_database_probe_format_re
     const path = req.path orelse return failMessage(req.out_error_message, error.InvalidArgument);
     const info = zova.probeDatabaseFormat(std.mem.span(path)) catch |err| return failMessage(req.out_error_message, err);
     const compat: c_int = switch (info.compatibility) {
-        .current => @intFromEnum(zova_format_compatibility.CURRENT),
-        .migratable => @intFromEnum(zova_format_compatibility.MIGRATABLE),
-        .unsupported_legacy => @intFromEnum(zova_format_compatibility.UNSUPPORTED_LEGACY),
-        .unsupported_future => @intFromEnum(zova_format_compatibility.UNSUPPORTED_FUTURE),
+        .current => @backingInt(zova_format_compatibility.CURRENT),
+        .migratable => @backingInt(zova_format_compatibility.MIGRATABLE),
+        .unsupported_legacy => @backingInt(zova_format_compatibility.UNSUPPORTED_LEGACY),
+        .unsupported_future => @backingInt(zova_format_compatibility.UNSUPPORTED_FUTURE),
     };
     out.* = .{
         .format_version = info.format_version,

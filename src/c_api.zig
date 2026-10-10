@@ -1038,10 +1038,10 @@ comptime {
             @export(&@field(@This(), name), .{ .name = name });
         }
     } else {
-        for (@typeInfo(@This()).@"struct".decls) |decl| {
-            if (!@import("std").mem.startsWith(u8, decl.name, "zova_")) continue;
-            const value = @field(@This(), decl.name);
-            if (@typeInfo(@TypeOf(value)) == .@"fn") @export(&value, .{ .name = decl.name });
+        for (@typeInfo(@This()).@"struct".decl_names) |name| {
+            if (!@import("std").mem.startsWith(u8, name, "zova_")) continue;
+            const value = @field(@This(), name);
+            if (@typeInfo(@TypeOf(value)) == .@"fn") @export(&value, .{ .name = name });
         }
     }
 }

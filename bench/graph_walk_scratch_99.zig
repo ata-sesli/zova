@@ -108,7 +108,7 @@ fn edgeCount(db: *zova.Database, bound: bool) !i64 {
         "select count(*) from graph_store._zova_graph_edges"
     else
         "select count(*) from _zova_graph_edges";
-    var stmt = try db.sqlite_db.prepare(try std.fmt.bufPrintZ(&buffer, "{s}", .{sql}));
+    var stmt = try db.sqlite_db.prepare(try std.fmt.bufPrintSentinel(&buffer, "{s}", .{sql}, 0));
     defer stmt.deinit();
     try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
     return stmt.columnInt64(0);
@@ -128,10 +128,10 @@ pub fn main(init: std.process.Init) !void {
     if (args.len != 3) return error.InvalidArgument;
     const bound = std.mem.eql(u8, args[2], "bound");
     if (!bound and !std.mem.eql(u8, args[2], "main")) return error.InvalidArgument;
-    var db = try zova.Database.create(try arena.dupeZ(u8, args[1]));
+    var db = try zova.Database.create(try arena.dupeSentinel(u8, args[1], 0));
     defer db.deinit();
     if (bound) {
-        const store_path = try arena.dupeZ(u8, try std.fmt.allocPrint(arena, "{s}-store.zova", .{args[1]}));
+        const store_path = try arena.dupeSentinel(u8, try std.fmt.allocPrint(arena, "{s}-store.zova", .{args[1]}), 0);
         try zova.createGraphStore(store_path);
         try db.bindGraphStore(store_path);
     }

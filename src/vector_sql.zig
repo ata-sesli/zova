@@ -358,7 +358,7 @@ fn searchBestIndex(vtab: ?*c.sqlite3_vtab, info: ?*c.sqlite3_index_info) callcon
 
     if (idx.nOrderBy == 1) {
         const order_by = idx.aOrderBy[0];
-        if (order_by.iColumn == @intFromEnum(Column.rank) and order_by.desc == 0) {
+        if (order_by.iColumn == @backingInt(Column.rank) and order_by.desc == 0) {
             idx.orderByConsumed = 1;
         }
     }
@@ -371,7 +371,7 @@ fn assignConstraint(idx: *c.sqlite3_index_info, column: Column, argv_index: *c_i
     const usages = idx.aConstraintUsage[0..@intCast(idx.nConstraint)];
     for (constraints, usages) |constraint, *usage| {
         if (constraint.usable == 0 or constraint.op != c.SQLITE_INDEX_CONSTRAINT_EQ) continue;
-        if (constraint.iColumn != @intFromEnum(column)) continue;
+        if (constraint.iColumn != @backingInt(column)) continue;
 
         usage.argvIndex = argv_index.*;
         usage.omit = 1;
@@ -506,7 +506,7 @@ fn searchColumn(cursor: ?*c.sqlite3_vtab_cursor, ctx: ?*c.sqlite3_context, colum
     }
 
     const row = search_cursor.rows.?[search_cursor.index];
-    switch (@as(Column, @enumFromInt(column_index))) {
+    switch (@as(Column, @fromBackingInt(@intCast(column_index)))) {
         .rank => c.sqlite3_result_int64(context, @intCast(search_cursor.index + 1)),
         .vector_id => {
             if (row.id) |id| {
@@ -536,7 +536,7 @@ fn vectorSchemaPrefix(db: *sqlite.Database) []const u8 {
 
 fn prepareSchema(db: *sqlite.Database, comptime sql_format: []const u8, args: anytype) Error!sqlite.Statement {
     var sql_buffer: [4096]u8 = undefined;
-    const sql = std.fmt.bufPrintZ(&sql_buffer, sql_format, args) catch return error.SqliteError;
+    const sql = std.fmt.bufPrintSentinel(&sql_buffer, sql_format, args, 0) catch return error.SqliteError;
     return try db.prepare(sql);
 }
 

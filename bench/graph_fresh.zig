@@ -85,7 +85,7 @@ fn runSample(allocator: std.mem.Allocator, fixture: Fixture, variant: Variant, o
     defer db.deinit();
     if (cache_kib != 0) {
         var pragma_buffer: [64]u8 = undefined;
-        const pragma = try std.fmt.bufPrintZ(&pragma_buffer, "pragma cache_size=-{d}", .{cache_kib});
+        const pragma = try std.fmt.bufPrintSentinel(&pragma_buffer, "pragma cache_size=-{d}", .{cache_kib}, 0);
         try db.exec(pragma);
     }
     if (memory_temp) try db.exec("pragma temp_store=memory");

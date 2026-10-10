@@ -114,7 +114,7 @@ test "single KV put cleans cached bindings after a bind error" {
     defer db.deinit();
     try db.kvPut("n", "k", "original");
     const old_limit = sqlite.c.sqlite3_limit(db.sqlite_db.handle, sqlite.c.SQLITE_LIMIT_LENGTH, 64);
-    const large = [_]u8{1} ** 128;
+    const large = @as([128]u8, @splat(1));
     try std.testing.expectError(error.SqliteError, db.kvPut("n", "k", &large));
     _ = sqlite.c.sqlite3_limit(db.sqlite_db.handle, sqlite.c.SQLITE_LIMIT_LENGTH, old_limit);
     try db.sqlite_db.exec("vacuum");

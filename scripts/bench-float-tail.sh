@@ -9,7 +9,7 @@ printf 'Artifacts: %s\n' "$out"
 for variant in baseline candidate; do
     printf 'Building %s\n' "$variant"
     if [ "$variant" = baseline ]; then source="$baseline_source"; else source=$(pwd); fi
-    (cd "$source" && zig build c-abi -Doptimize=ReleaseFast --cache-dir "$root/local" --global-cache-dir "$root/../zig-global" --prefix "$out/$variant")
+    (cd "$source" && ZIG_GLOBAL_CACHE_DIR="$root/../zig-global" zig build c-abi -Doptimize=ReleaseFast --cache-dir "$root/local" --prefix "$out/$variant")
     clang -dynamiclib -Wl,-all_load "$out/$variant/lib/libzova_c.a" -o "$out/$variant.dylib"
 done
 clang -std=c11 -O2 -Wall -Wextra -Werror -I include bench/float_tail.c -o "$out/float-tail"

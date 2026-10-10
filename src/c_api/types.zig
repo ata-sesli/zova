@@ -114,7 +114,7 @@ pub const zova_sql_value = extern struct {
 pub const zova_sql_result = extern struct {
     // Raw C integer so invalid callback result types can be reported as SQLite
     // callback errors instead of becoming Zig enum-safety traps.
-    result_type: c_int = @intFromEnum(zova_sql_result_type.NULL),
+    result_type: c_int = @backingInt(zova_sql_result_type.NULL),
     int64_value: i64 = 0,
     double_value: f64 = 0,
     data: ?*const anyopaque = null,
@@ -190,7 +190,7 @@ pub const zova_object_storage_profile = enum(c_int) {
 };
 
 pub const zova_object_put_options = extern struct {
-    profile: c_int = @intFromEnum(zova_object_storage_profile.DEDUPLICATION),
+    profile: c_int = @backingInt(zova_object_storage_profile.DEDUPLICATION),
 };
 
 pub const zova_vector_metric = enum(c_int) {

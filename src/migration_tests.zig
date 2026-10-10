@@ -72,16 +72,16 @@ fn lowerHexAlloc(bytes: []const u8) ![]u8 {
 
 fn copyFixture(tmp_sub_path: []const u8, index: usize, name: []const u8) ![:0]const u8 {
     var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const source_path = try std.fmt.bufPrintZ(&source_buffer, "{s}/{s}", .{ fixture_dir, name });
+    const source_path = try std.fmt.bufPrintSentinel(&source_buffer, "{s}/{s}", .{ fixture_dir, name }, 0);
 
     var copy_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const copy_path = try std.fmt.bufPrintZ(&copy_buffer, ".zig-cache/tmp/{s}/migration-{d}-{s}", .{ tmp_sub_path, index, name });
+    const copy_path = try std.fmt.bufPrintSentinel(&copy_buffer, ".zig-cache/tmp/{s}/migration-{d}-{s}", .{ tmp_sub_path, index, name }, 0);
 
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io(), source_path, std.testing.allocator, .limited(64 * 1024 * 1024));
     defer std.testing.allocator.free(bytes);
 
     try std.Io.Dir.cwd().writeFile(io(), .{ .sub_path = copy_path, .data = bytes });
-    return try std.testing.allocator.dupeZ(u8, copy_path);
+    return try std.testing.allocator.dupeSentinel(u8, copy_path, 0);
 }
 
 fn scalarCount(db: *sqlite.Database, sql: [:0]const u8) !i64 {
@@ -194,12 +194,12 @@ test "genuine format-10 bound-store set migrates copy-forward to format 11" {
     };
     inline for (members) |name| {
         var member_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const member_path = try std.fmt.bufPrintZ(&member_buffer, "{s}/{s}", .{ set_dir, name });
+        const member_path = try std.fmt.bufPrintSentinel(&member_buffer, "{s}/{s}", .{ set_dir, name }, 0);
         try copyFixtureInto(member_path, name);
     }
 
     var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const source_main = try std.fmt.bufPrintZ(&source_buffer, "{s}/bound-main-format-10.zova", .{set_dir});
+    const source_main = try std.fmt.bufPrintSentinel(&source_buffer, "{s}/bound-main-format-10.zova", .{set_dir}, 0);
     {
         var raw = try sqlite.Database.open(source_main);
         defer raw.deinit();
@@ -211,7 +211,7 @@ test "genuine format-10 bound-store set migrates copy-forward to format 11" {
             var update = try raw.prepare("update _zova_bound_stores set path = ?1 where role = ?2");
             defer update.deinit();
             var sibling_buffer: [std.fs.max_path_bytes]u8 = undefined;
-            const sibling = try std.fmt.bufPrintZ(&sibling_buffer, "{s}/bound-main-format-10.{s}.zova", .{ set_dir, entry.suffix });
+            const sibling = try std.fmt.bufPrintSentinel(&sibling_buffer, "{s}/bound-main-format-10.{s}.zova", .{ set_dir, entry.suffix }, 0);
             try update.bindText(1, sibling);
             try update.bindText(2, entry.role);
             _ = try update.step();
@@ -221,17 +221,17 @@ test "genuine format-10 bound-store set migrates copy-forward to format 11" {
     var source_hashes: [members.len][32]u8 = undefined;
     inline for (members, 0..) |name, index| {
         var member_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const member_path = try std.fmt.bufPrintZ(&member_buffer, "{s}/{s}", .{ set_dir, name });
+        const member_path = try std.fmt.bufPrintSentinel(&member_buffer, "{s}/{s}", .{ set_dir, name }, 0);
         source_hashes[index] = try fileSha256(member_path);
     }
 
     var destination_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const destination_main = try std.fmt.bufPrintZ(&destination_buffer, "{s}/migrated-format10.zova", .{set_dir});
+    const destination_main = try std.fmt.bufPrintSentinel(&destination_buffer, "{s}/migrated-format10.zova", .{set_dir}, 0);
     try zova.migrateDatabase(source_main, destination_main, .{});
 
     inline for (members, 0..) |name, index| {
         var member_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const member_path = try std.fmt.bufPrintZ(&member_buffer, "{s}/{s}", .{ set_dir, name });
+        const member_path = try std.fmt.bufPrintSentinel(&member_buffer, "{s}/{s}", .{ set_dir, name }, 0);
         const after_hash = try fileSha256(member_path);
         try std.testing.expectEqualSlices(u8, &source_hashes[index], &after_hash);
     }
@@ -247,7 +247,7 @@ test "genuine format-10 bound-store set migrates copy-forward to format 11" {
 
     inline for (.{ "objects", "vectors", "graphs" }) |suffix| {
         var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const store_path = try std.fmt.bufPrintZ(&store_buffer, "{s}/migrated-format10.{s}.zova", .{ set_dir, suffix });
+        const store_path = try std.fmt.bufPrintSentinel(&store_buffer, "{s}/migrated-format10.{s}.zova", .{ set_dir, suffix }, 0);
         var raw = try sqlite.Database.openWithFlags(store_path, .read_only);
         defer raw.deinit();
         try expectScalarTextRaw(&raw, "select value from _zova_meta where key = 'format_version'", "11");
@@ -324,10 +324,10 @@ test "migration transforms genuine format-9 fixtures through adjacent steps into
 
     inline for (bound_members) |name| {
         var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const source_path = try std.fmt.bufPrintZ(&source_buffer, "{s}/{s}", .{ fixture_dir, name });
+        const source_path = try std.fmt.bufPrintSentinel(&source_buffer, "{s}/{s}", .{ fixture_dir, name }, 0);
 
         var staged_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const staged_path = try std.fmt.bufPrintZ(&staged_buffer, ".zig-cache/tmp/{s}/bound-set/{s}", .{ tmp.sub_path[0..], name });
+        const staged_path = try std.fmt.bufPrintSentinel(&staged_buffer, ".zig-cache/tmp/{s}/bound-set/{s}", .{ tmp.sub_path[0..], name }, 0);
 
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io(), source_path, std.testing.allocator, .limited(64 * 1024 * 1024));
         defer std.testing.allocator.free(bytes);
@@ -343,7 +343,7 @@ test "migration transforms genuine format-9 fixtures through adjacent steps into
     }
 
     var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const staged_main = try std.fmt.bufPrintZ(&main_buffer, ".zig-cache/tmp/{s}/bound-set/bound-main-format-9.zova", .{tmp.sub_path[0..]});
+    const staged_main = try std.fmt.bufPrintSentinel(&main_buffer, ".zig-cache/tmp/{s}/bound-set/bound-main-format-9.zova", .{tmp.sub_path[0..]}, 0);
 
     // The committed bound set records bare relative sibling names, which only
     // resolve from the exporter's working directory. Relocating a bound set is
@@ -357,10 +357,11 @@ test "migration transforms genuine format-9 fixtures through adjacent steps into
             var update = try raw.prepare("update _zova_bound_stores set path = ?1 where role = ?2");
             defer update.deinit();
             var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
-            const sibling = try std.fmt.bufPrintZ(
+            const sibling = try std.fmt.bufPrintSentinel(
                 &store_buffer,
                 ".zig-cache/tmp/{s}/bound-set/bound-main-format-9.{s}.zova",
                 .{ tmp.sub_path[0..], roleSuffix(role) },
+                0,
             );
             try update.bindText(1, sibling);
             try update.bindText(2, role);
@@ -453,7 +454,7 @@ test "migration refuses current pre-migratable and future formats without mutati
     // refusal happens before any transaction begins.
     {
         var fresh_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const fresh_path = try std.fmt.bufPrintZ(&fresh_buffer, ".zig-cache/tmp/{s}/refuse-current.zova", .{tmp.sub_path[0..]});
+        const fresh_path = try std.fmt.bufPrintSentinel(&fresh_buffer, ".zig-cache/tmp/{s}/refuse-current.zova", .{tmp.sub_path[0..]}, 0);
         {
             var created = try Database.create(fresh_path);
             created.deinit();
@@ -495,7 +496,7 @@ test "migration refuses current pre-migratable and future formats without mutati
     // Future formats are never migratable.
     {
         var future_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const future_path = try std.fmt.bufPrintZ(&future_buffer, ".zig-cache/tmp/{s}/refuse-future.zova", .{tmp.sub_path[0..]});
+        const future_path = try std.fmt.bufPrintSentinel(&future_buffer, ".zig-cache/tmp/{s}/refuse-future.zova", .{tmp.sub_path[0..]}, 0);
         {
             var raw = try sqlite.Database.open(future_path);
             defer raw.deinit();
@@ -558,7 +559,7 @@ fn writeForgedDatabase(
     version_row: ?[]const u8,
 ) ![:0]const u8 {
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/{s}", .{ tmp_sub_path, file_name });
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/{s}", .{ tmp_sub_path, file_name }, 0);
 
     var raw = try sqlite.Database.open(db_path);
     defer raw.deinit();
@@ -577,7 +578,7 @@ fn writeForgedDatabase(
         _ = try insert.step();
     }
 
-    return try std.testing.allocator.dupeZ(u8, db_path);
+    return try std.testing.allocator.dupeSentinel(u8, db_path, 0);
 }
 
 fn expectSourceRejectedWithoutKv(
@@ -798,7 +799,7 @@ test "migration rejects stores with missing or invalid store identity" {
             defer raw.deinit();
             var update = try raw.prepare("update _zova_meta set value = ?1 where key = 'store_id'");
             defer update.deinit();
-            try update.bindText(1, "zzzz" ** 16);
+            try update.bindText(1, &@as([64]u8, @splat('z')));
             _ = try update.step();
         }
 
@@ -814,7 +815,7 @@ test "migration rejects stores with missing or invalid store identity" {
 fn expectMigratedSetParity(allocator: std.mem.Allocator, destination_path: []const u8, with_stores: bool) !void {
     // The published main reopens through the full open path and every public
     // meaning of the source survives the round trip.
-    const owned_destination = try allocator.dupeZ(u8, destination_path);
+    const owned_destination = try allocator.dupeSentinel(u8, destination_path, 0);
     defer allocator.free(owned_destination);
     var db = try zova.Database.open(owned_destination);
     defer db.deinit();
@@ -870,7 +871,7 @@ fn expectMigratedSetParity(allocator: std.mem.Allocator, destination_path: []con
     const stem = destination_path[0 .. destination_path.len - ".zova".len];
     inline for (.{ "objects", "vectors", "graphs" }) |suffix| {
         var sibling_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const sibling = try std.fmt.bufPrintZ(&sibling_buffer, "{s}.{s}.zova", .{ stem, suffix });
+        const sibling = try std.fmt.bufPrintSentinel(&sibling_buffer, "{s}.{s}.zova", .{ stem, suffix }, 0);
         var store_db = try sqlite.Database.openWithFlags(sibling, .read_only);
         defer store_db.deinit();
         try expectScalarTextRaw(&store_db, "select value from _zova_meta where key = 'format_version'", "11");
@@ -887,12 +888,12 @@ test "migrateDatabase copies and migrates a single-file format-9 database" {
     defer tmp.cleanup();
 
     var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const source_path = try std.fmt.bufPrintZ(&source_buffer, ".zig-cache/tmp/{s}/migrate-single-source.zova", .{tmp.sub_path[0..]});
+    const source_path = try std.fmt.bufPrintSentinel(&source_buffer, ".zig-cache/tmp/{s}/migrate-single-source.zova", .{tmp.sub_path[0..]}, 0);
     try copyFixtureInto(source_path, "format-9.zova");
     const source_before = try fileSha256(source_path);
 
     var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const dest_path = try std.fmt.bufPrintZ(&dest_buffer, ".zig-cache/tmp/{s}/migrated-set.zova", .{tmp.sub_path[0..]});
+    const dest_path = try std.fmt.bufPrintSentinel(&dest_buffer, ".zig-cache/tmp/{s}/migrated-set.zova", .{tmp.sub_path[0..]}, 0);
 
     try zova.migrateDatabase(source_path, dest_path, .{});
     const source_after = try fileSha256(source_path);
@@ -930,12 +931,12 @@ test "migrateDatabase copies and migrates the full bound-store set" {
     };
     inline for (members) |name| {
         var member_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const member_path = try std.fmt.bufPrintZ(&member_buffer, "{s}/{s}", .{ set_dir, name });
+        const member_path = try std.fmt.bufPrintSentinel(&member_buffer, "{s}/{s}", .{ set_dir, name }, 0);
         try copyFixtureInto(member_path, name);
     }
 
     var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const source_main = try std.fmt.bufPrintZ(&source_buffer, "{s}/bound-main-format-9.zova", .{set_dir});
+    const source_main = try std.fmt.bufPrintSentinel(&source_buffer, "{s}/bound-main-format-9.zova", .{set_dir}, 0);
 
     // Relocate the recorded sibling bindings to this test directory, exactly
     // like the #13 bound-set test: relative names only resolve from their
@@ -952,7 +953,7 @@ test "migrateDatabase copies and migrates the full bound-store set" {
             var update = try raw.prepare("update _zova_bound_stores set path = ?1 where role = ?2");
             defer update.deinit();
             var sibling_buffer: [std.fs.max_path_bytes]u8 = undefined;
-            const sibling = try std.fmt.bufPrintZ(&sibling_buffer, "{s}/bound-main-format-9.{s}.zova", .{ set_dir, entry.suffix });
+            const sibling = try std.fmt.bufPrintSentinel(&sibling_buffer, "{s}/bound-main-format-9.{s}.zova", .{ set_dir, entry.suffix }, 0);
             try update.bindText(1, sibling);
             try update.bindText(2, entry.role);
             _ = try update.step();
@@ -962,19 +963,19 @@ test "migrateDatabase copies and migrates the full bound-store set" {
     var hashes_before: [members.len][32]u8 = undefined;
     inline for (members, 0..) |name, index| {
         var member_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const member_path = try std.fmt.bufPrintZ(&member_buffer, "{s}/{s}", .{ set_dir, name });
+        const member_path = try std.fmt.bufPrintSentinel(&member_buffer, "{s}/{s}", .{ set_dir, name }, 0);
         hashes_before[index] = try fileSha256(member_path);
     }
 
     var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const dest_main = try std.fmt.bufPrintZ(&dest_buffer, "{s}/migrated-set.zova", .{set_dir});
+    const dest_main = try std.fmt.bufPrintSentinel(&dest_buffer, "{s}/migrated-set.zova", .{set_dir}, 0);
 
     try zova.migrateDatabase(source_main, dest_main, .{});
 
     // Every source file is byte-identical after a successful migration.
     inline for (members, 0..) |name, index| {
         var member_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const member_path = try std.fmt.bufPrintZ(&member_buffer, "{s}/{s}", .{ set_dir, name });
+        const member_path = try std.fmt.bufPrintSentinel(&member_buffer, "{s}/{s}", .{ set_dir, name }, 0);
         const member_after = try fileSha256(member_path);
         try std.testing.expectEqualSlices(u8, &hashes_before[index], &member_after);
     }
@@ -996,11 +997,11 @@ test "migrateDatabase rejects existing destinations before any mutation" {
     defer tmp.cleanup();
 
     var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const source_path = try std.fmt.bufPrintZ(&source_buffer, ".zig-cache/tmp/{s}/conflict-source.zova", .{tmp.sub_path[0..]});
+    const source_path = try std.fmt.bufPrintSentinel(&source_buffer, ".zig-cache/tmp/{s}/conflict-source.zova", .{tmp.sub_path[0..]}, 0);
     try copyFixtureInto(source_path, "format-9.zova");
 
     var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const dest_path = try std.fmt.bufPrintZ(&dest_buffer, ".zig-cache/tmp/{s}/taken.zova", .{tmp.sub_path[0..]});
+    const dest_path = try std.fmt.bufPrintSentinel(&dest_buffer, ".zig-cache/tmp/{s}/taken.zova", .{tmp.sub_path[0..]}, 0);
     try std.Io.Dir.cwd().writeFile(io(), .{ .sub_path = dest_path, .data = "occupied" });
     const dest_before = try fileSha256(dest_path);
 
@@ -1018,7 +1019,7 @@ test "migrateDatabase cleans every created file when migration fails mid-flight"
     defer tmp.cleanup();
 
     var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const source_path = try std.fmt.bufPrintZ(&source_buffer, ".zig-cache/tmp/{s}/fail-source.zova", .{tmp.sub_path[0..]});
+    const source_path = try std.fmt.bufPrintSentinel(&source_buffer, ".zig-cache/tmp/{s}/fail-source.zova", .{tmp.sub_path[0..]}, 0);
     try copyFixtureInto(source_path, "format-9.zova");
 
     // Inject a mid-step fault: the staged main's version update touches
@@ -1037,7 +1038,7 @@ test "migrateDatabase cleans every created file when migration fails mid-flight"
     const source_before = try fileSha256(source_path);
 
     var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const dest_path = try std.fmt.bufPrintZ(&dest_buffer, ".zig-cache/tmp/{s}/never-published.zova", .{tmp.sub_path[0..]});
+    const dest_path = try std.fmt.bufPrintSentinel(&dest_buffer, ".zig-cache/tmp/{s}/never-published.zova", .{tmp.sub_path[0..]}, 0);
 
     try std.testing.expectError(error.Constraint, zova.migrateDatabase(source_path, dest_path, .{}));
 
@@ -1067,7 +1068,7 @@ test "migrateDatabase cleans every created file when migration fails mid-flight"
 
 fn copyFixtureInto(destination_path: [:0]const u8, fixture_name: []const u8) !void {
     var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const source_path = try std.fmt.bufPrintZ(&source_buffer, "{s}/{s}", .{ fixture_dir, fixture_name });
+    const source_path = try std.fmt.bufPrintSentinel(&source_buffer, "{s}/{s}", .{ fixture_dir, fixture_name }, 0);
 
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io(), source_path, std.testing.allocator, .limited(64 * 1024 * 1024));
     defer std.testing.allocator.free(bytes);
@@ -1134,12 +1135,12 @@ test "migrateDatabase cleans up after a fault at every phase boundary" {
             };
             inline for (members) |name| {
                 var member_buffer: [std.fs.max_path_bytes]u8 = undefined;
-                const member_path = try std.fmt.bufPrintZ(&member_buffer, "{s}/{s}", .{ set_dir, name });
+                const member_path = try std.fmt.bufPrintSentinel(&member_buffer, "{s}/{s}", .{ set_dir, name }, 0);
                 try copyFixtureInto(member_path, name);
             }
 
             var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
-            const source_main = try std.fmt.bufPrintZ(&source_buffer, "{s}/bound-main-format-9.zova", .{set_dir});
+            const source_main = try std.fmt.bufPrintSentinel(&source_buffer, "{s}/bound-main-format-9.zova", .{set_dir}, 0);
 
             // Relocate bindings into this directory (caller concern before migration).
             {
@@ -1153,7 +1154,7 @@ test "migrateDatabase cleans up after a fault at every phase boundary" {
                     var update = try raw.prepare("update _zova_bound_stores set path = ?1 where role = ?2");
                     defer update.deinit();
                     var sibling_buffer: [std.fs.max_path_bytes]u8 = undefined;
-                    const sibling = try std.fmt.bufPrintZ(&sibling_buffer, "{s}/bound-main-format-9.{s}.zova", .{ set_dir, entry.suffix });
+                    const sibling = try std.fmt.bufPrintSentinel(&sibling_buffer, "{s}/bound-main-format-9.{s}.zova", .{ set_dir, entry.suffix }, 0);
                     try update.bindText(1, sibling);
                     try update.bindText(2, entry.role);
                     _ = try update.step();
@@ -1163,12 +1164,12 @@ test "migrateDatabase cleans up after a fault at every phase boundary" {
             var hashes: [members.len][32]u8 = undefined;
             inline for (members, 0..) |name, index| {
                 var member_buffer: [std.fs.max_path_bytes]u8 = undefined;
-                const member_path = try std.fmt.bufPrintZ(&member_buffer, "{s}/{s}", .{ set_dir, name });
+                const member_path = try std.fmt.bufPrintSentinel(&member_buffer, "{s}/{s}", .{ set_dir, name }, 0);
                 hashes[index] = try fileSha256(member_path);
             }
 
             var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
-            const dest_main = try std.fmt.bufPrintZ(&dest_buffer, "{s}/migrated-set.zova", .{set_dir});
+            const dest_main = try std.fmt.bufPrintSentinel(&dest_buffer, "{s}/migrated-set.zova", .{set_dir}, 0);
 
             FaultHook.reset(occurrence);
             FaultHook.target = point;
@@ -1183,7 +1184,7 @@ test "migrateDatabase cleans up after a fault at every phase boundary" {
             // Every source file is byte-identical after the failed attempt.
             inline for (members, 0..) |name, index| {
                 var member_buffer: [std.fs.max_path_bytes]u8 = undefined;
-                const member_path = try std.fmt.bufPrintZ(&member_buffer, "{s}/{s}", .{ set_dir, name });
+                const member_path = try std.fmt.bufPrintSentinel(&member_buffer, "{s}/{s}", .{ set_dir, name }, 0);
                 const member_after = try fileSha256(member_path);
                 try std.testing.expectEqualSlices(u8, &hashes[index], &member_after);
             }
@@ -1223,12 +1224,12 @@ test "migration rejects bound stores whose role mismatches the binding with veri
     };
     inline for (members) |name| {
         var member_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const member_path = try std.fmt.bufPrintZ(&member_buffer, "{s}/{s}", .{ set_dir, name });
+        const member_path = try std.fmt.bufPrintSentinel(&member_buffer, "{s}/{s}", .{ set_dir, name }, 0);
         try copyFixtureInto(member_path, name);
     }
 
     var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const source_main = try std.fmt.bufPrintZ(&source_buffer, "{s}/bound-main-format-9.zova", .{set_dir});
+    const source_main = try std.fmt.bufPrintSentinel(&source_buffer, "{s}/bound-main-format-9.zova", .{set_dir}, 0);
 
     // Relocate bindings into this directory.
     {
@@ -1242,7 +1243,7 @@ test "migration rejects bound stores whose role mismatches the binding with veri
             var update = try raw.prepare("update _zova_bound_stores set path = ?1 where role = ?2");
             defer update.deinit();
             var sibling_buffer: [std.fs.max_path_bytes]u8 = undefined;
-            const sibling = try std.fmt.bufPrintZ(&sibling_buffer, "{s}/bound-main-format-9.{s}.zova", .{ set_dir, entry.suffix });
+            const sibling = try std.fmt.bufPrintSentinel(&sibling_buffer, "{s}/bound-main-format-9.{s}.zova", .{ set_dir, entry.suffix }, 0);
             try update.bindText(1, sibling);
             try update.bindText(2, entry.role);
             _ = try update.step();
@@ -1255,7 +1256,7 @@ test "migration rejects bound stores whose role mismatches the binding with veri
     // still be caught in preflight under the lock.
     {
         var tamper_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const tamper_path = try std.fmt.bufPrintZ(&tamper_buffer, "{s}/bound-main-format-9.objects.zova", .{set_dir});
+        const tamper_path = try std.fmt.bufPrintSentinel(&tamper_buffer, "{s}/bound-main-format-9.objects.zova", .{set_dir}, 0);
         var raw = try sqlite.Database.open(tamper_path);
         defer raw.deinit();
         try raw.exec("update _zova_meta set value = 'vector_store' where key = 'store_role'");
@@ -1264,12 +1265,12 @@ test "migration rejects bound stores whose role mismatches the binding with veri
     var hash_buffer: [members.len][32]u8 = undefined;
     inline for (members, 0..) |name, index| {
         var member_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const member_path = try std.fmt.bufPrintZ(&member_buffer, "{s}/{s}", .{ set_dir, name });
+        const member_path = try std.fmt.bufPrintSentinel(&member_buffer, "{s}/{s}", .{ set_dir, name }, 0);
         hash_buffer[index] = try fileSha256(member_path);
     }
 
     var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const dest_main = try std.fmt.bufPrintZ(&dest_buffer, "{s}/migrated-set.zova", .{set_dir});
+    const dest_main = try std.fmt.bufPrintSentinel(&dest_buffer, "{s}/migrated-set.zova", .{set_dir}, 0);
 
     try std.testing.expectError(
         error.BoundStoreInvalid,
@@ -1279,7 +1280,7 @@ test "migration rejects bound stores whose role mismatches the binding with veri
     // Source hashes unchanged, nothing published, no staging leftovers.
     inline for (members, 0..) |name, index| {
         var member_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const member_path = try std.fmt.bufPrintZ(&member_buffer, "{s}/{s}", .{ set_dir, name });
+        const member_path = try std.fmt.bufPrintSentinel(&member_buffer, "{s}/{s}", .{ set_dir, name }, 0);
         const after = try fileSha256(member_path);
         try std.testing.expectEqualSlices(u8, &hash_buffer[index], &after);
     }
@@ -1315,12 +1316,12 @@ test "collectMigrationBindings does not leak on allocation failure" {
     };
     inline for (members) |name| {
         var member_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const member_path = try std.fmt.bufPrintZ(&member_buffer, "{s}/{s}", .{ set_dir, name });
+        const member_path = try std.fmt.bufPrintSentinel(&member_buffer, "{s}/{s}", .{ set_dir, name }, 0);
         try copyFixtureInto(member_path, name);
     }
 
     var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const source_main = try std.fmt.bufPrintZ(&source_buffer, "{s}/bound-main-format-9.zova", .{set_dir});
+    const source_main = try std.fmt.bufPrintSentinel(&source_buffer, "{s}/bound-main-format-9.zova", .{set_dir}, 0);
 
     // Relocate bindings as done for normal bound-set migration tests.
     {
@@ -1334,7 +1335,7 @@ test "collectMigrationBindings does not leak on allocation failure" {
             var update = try raw.prepare("update _zova_bound_stores set path = ?1 where role = ?2");
             defer update.deinit();
             var sibling_buffer: [std.fs.max_path_bytes]u8 = undefined;
-            const sibling = try std.fmt.bufPrintZ(&sibling_buffer, "{s}/bound-main-format-9.{s}.zova", .{ set_dir, entry.suffix });
+            const sibling = try std.fmt.bufPrintSentinel(&sibling_buffer, "{s}/bound-main-format-9.{s}.zova", .{ set_dir, entry.suffix }, 0);
             try update.bindText(1, sibling);
             try update.bindText(2, entry.role);
             _ = try update.step();

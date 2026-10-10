@@ -72,10 +72,10 @@ pub fn main(init: std.process.Init) !void {
     const is_bound = std.mem.eql(u8, args[3], "bound");
     if (!is_bound and !std.mem.eql(u8, args[3], "main")) return error.InvalidArgument;
 
-    var db = try zova.Database.create(try arena.dupeZ(u8, args[1]));
+    var db = try zova.Database.create(try arena.dupeSentinel(u8, args[1], 0));
     defer db.deinit();
     if (is_bound) {
-        const store_path = try arena.dupeZ(u8, try std.fmt.allocPrint(arena, "{s}-store.zova", .{args[1]}));
+        const store_path = try arena.dupeSentinel(u8, try std.fmt.allocPrint(arena, "{s}-store.zova", .{args[1]}), 0);
         if (is_graph) try zova.createGraphStore(store_path) else try zova.createObjectStore(store_path);
         if (is_graph) try db.bindGraphStore(store_path) else try db.bindObjectStore(store_path);
     }

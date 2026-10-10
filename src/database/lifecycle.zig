@@ -109,7 +109,7 @@ pub fn applyCreateOptions(db: *sqlite.Database, options: CreateOptions) Error!vo
     if (options.page_size == 0) return;
 
     var sql_buffer: [64]u8 = undefined;
-    const sql = std.fmt.bufPrintZ(&sql_buffer, "pragma page_size={d}", .{options.page_size}) catch
+    const sql = std.fmt.bufPrintSentinel(&sql_buffer, "pragma page_size={d}", .{options.page_size}, 0) catch
         return error.InvalidArgument;
     try db.exec(sql);
 

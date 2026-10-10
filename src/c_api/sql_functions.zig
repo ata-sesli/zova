@@ -42,7 +42,7 @@ pub fn zova_database_register_function(request: ?*const zova_sql_function_regist
         .destroy = req.destroy,
     };
 
-    const name_copy = allocator.dupeZ(u8, name) catch |err| {
+    const name_copy = allocator.dupeSentinel(u8, name, 0) catch |err| {
         destroySqlScalarContext(@ptrCast(context));
         return failDb(handle, err);
     };
@@ -195,12 +195,12 @@ fn blobSqlValue(value: *sqlite.c.sqlite3_value) zova_sql_value {
 
 fn applySqlResult(sqlite_context: *sqlite.c.sqlite3_context, result: zova_sql_result) void {
     switch (result.result_type) {
-        @intFromEnum(zova_sql_result_type.NULL) => sqlite.c.sqlite3_result_null(sqlite_context),
-        @intFromEnum(zova_sql_result_type.INTEGER) => sqlite.c.sqlite3_result_int64(sqlite_context, result.int64_value),
-        @intFromEnum(zova_sql_result_type.FLOAT) => sqlite.c.sqlite3_result_double(sqlite_context, result.double_value),
-        @intFromEnum(zova_sql_result_type.TEXT) => applySqlTextResult(sqlite_context, result.data, result.data_len),
-        @intFromEnum(zova_sql_result_type.BLOB) => applySqlBlobResult(sqlite_context, result.data, result.data_len),
-        @intFromEnum(zova_sql_result_type.ERROR) => applySqlErrorResult(sqlite_context, result.error_message, result.error_message_len),
+        @backingInt(zova_sql_result_type.NULL) => sqlite.c.sqlite3_result_null(sqlite_context),
+        @backingInt(zova_sql_result_type.INTEGER) => sqlite.c.sqlite3_result_int64(sqlite_context, result.int64_value),
+        @backingInt(zova_sql_result_type.FLOAT) => sqlite.c.sqlite3_result_double(sqlite_context, result.double_value),
+        @backingInt(zova_sql_result_type.TEXT) => applySqlTextResult(sqlite_context, result.data, result.data_len),
+        @backingInt(zova_sql_result_type.BLOB) => applySqlBlobResult(sqlite_context, result.data, result.data_len),
+        @backingInt(zova_sql_result_type.ERROR) => applySqlErrorResult(sqlite_context, result.error_message, result.error_message_len),
         else => sqlite.c.sqlite3_result_error(sqlite_context, "invalid zova sql callback result type", -1),
     }
 }

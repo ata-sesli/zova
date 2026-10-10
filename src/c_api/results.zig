@@ -288,7 +288,7 @@ pub fn emptyNotification() zova_notification {
 
 pub fn emptyManifest() zova_object_manifest {
     return .{
-        .object_id = .{ .bytes = [_]u8{0} ** 32 },
+        .object_id = .{ .bytes = @as([32]u8, @splat(0)) },
         .size_bytes = 0,
         .chunk_count = 0,
         .chunker = null,
@@ -301,7 +301,7 @@ pub fn emptyVector() zova_vector {
     return .{
         .id = null,
         .id_len = 0,
-        .element_type = @intFromEnum(zova_vector_element_type.F32),
+        .element_type = @backingInt(zova_vector_element_type.F32),
         .f32_values = null,
         .f16_values = null,
         .i8_values = null,
@@ -319,7 +319,7 @@ pub fn emptyVectorCollectionInfo() zova_vector_collection_info {
         .name_len = 0,
         .dimensions = 0,
         .metric = 0,
-        .element_type = @intFromEnum(zova_vector_element_type.F32),
+        .element_type = @backingInt(zova_vector_element_type.F32),
         .vector_count = 0,
     };
 }
@@ -367,7 +367,7 @@ pub fn emptyGraphNode() zova_graph_node {
         .node_id_len = 0,
         .kind = null,
         .kind_len = 0,
-        .target_type = @intFromEnum(zova_graph_target_type.NONE),
+        .target_type = @backingInt(zova_graph_target_type.NONE),
         .target_namespace = null,
         .target_namespace_len = 0,
         .has_target_namespace = 0,
@@ -487,7 +487,7 @@ pub fn fillSearchResults(out: *zova_vector_search_results, items: []const zova.V
 
     for (abi_items) |*item| item.* = .{ .id = null, .id_len = 0, .distance = 0 };
     for (items, abi_items) |item, *abi_item| {
-        const id = try allocator.dupeZ(u8, item.id);
+        const id = try allocator.dupeSentinel(u8, item.id, 0);
         abi_item.* = .{
             .id = id.ptr,
             .id_len = id.len,
@@ -500,7 +500,7 @@ pub fn fillSearchResults(out: *zova_vector_search_results, items: []const zova.V
 
 pub fn fillVector(out: *zova_vector, vector: *zova.Vector) error{OutOfMemory}!void {
     out.* = emptyVector();
-    const id = try allocator.dupeZ(u8, vector.id);
+    const id = try allocator.dupeSentinel(u8, vector.id, 0);
     errdefer allocator.free(id);
 
     out.id = id.ptr;
@@ -529,7 +529,7 @@ pub fn fillVector(out: *zova_vector, vector: *zova.Vector) error{OutOfMemory}!vo
 
 pub fn fillGraphInfo(out: *zova_graph_info, info: zova.GraphInfo) error{OutOfMemory}!void {
     out.* = emptyGraphInfo();
-    const name = try allocator.dupeZ(u8, info.name);
+    const name = try allocator.dupeSentinel(u8, info.name, 0);
     out.* = .{
         .name = name.ptr,
         .name_len = name.len,
@@ -555,17 +555,17 @@ pub fn fillGraphList(out: *zova_graph_list, items: []const zova.GraphInfo) error
 
 pub fn fillExtensionInfo(out: *zova_extension_info, info: zova.ExtensionInfo) error{OutOfMemory}!void {
     out.* = emptyExtensionInfo();
-    const name = try allocator.dupeZ(u8, info.name);
+    const name = try allocator.dupeSentinel(u8, info.name, 0);
     errdefer allocator.free(name);
-    const version = try allocator.dupeZ(u8, info.version);
+    const version = try allocator.dupeSentinel(u8, info.version, 0);
     errdefer allocator.free(version);
-    const storage_prefix = try allocator.dupeZ(u8, info.storage_prefix);
+    const storage_prefix = try allocator.dupeSentinel(u8, info.storage_prefix, 0);
     errdefer allocator.free(storage_prefix);
-    const zova_abi_min = try allocator.dupeZ(u8, info.zova_abi_min);
+    const zova_abi_min = try allocator.dupeSentinel(u8, info.zova_abi_min, 0);
     errdefer allocator.free(zova_abi_min);
-    const capabilities = try allocator.dupeZ(u8, info.capabilities);
+    const capabilities = try allocator.dupeSentinel(u8, info.capabilities, 0);
     errdefer allocator.free(capabilities);
-    const manifest_json = try allocator.dupeZ(u8, info.manifest_json);
+    const manifest_json = try allocator.dupeSentinel(u8, info.manifest_json, 0);
     errdefer allocator.free(manifest_json);
 
     out.* = .{
@@ -603,15 +603,15 @@ pub fn fillExtensionList(out: *zova_extension_list, items: []const zova.Extensio
 
 pub fn fillGraphNode(out: *zova_graph_node, node: zova.GraphNode) error{OutOfMemory}!void {
     out.* = emptyGraphNode();
-    const graph_name = try allocator.dupeZ(u8, node.graph_name);
+    const graph_name = try allocator.dupeSentinel(u8, node.graph_name, 0);
     errdefer allocator.free(graph_name);
-    const node_id = try allocator.dupeZ(u8, node.node_id);
+    const node_id = try allocator.dupeSentinel(u8, node.node_id, 0);
     errdefer allocator.free(node_id);
-    const kind = try allocator.dupeZ(u8, node.kind);
+    const kind = try allocator.dupeSentinel(u8, node.kind, 0);
     errdefer allocator.free(kind);
-    const target_namespace = if (node.target_namespace) |value| try allocator.dupeZ(u8, value) else null;
+    const target_namespace = if (node.target_namespace) |value| try allocator.dupeSentinel(u8, value, 0) else null;
     errdefer if (target_namespace) |value| allocator.free(value);
-    const target_ref = if (node.target_ref) |value| try allocator.dupeZ(u8, value) else null;
+    const target_ref = if (node.target_ref) |value| try allocator.dupeSentinel(u8, value, 0) else null;
     errdefer if (target_ref) |value| allocator.free(value);
 
     out.* = .{
@@ -633,13 +633,13 @@ pub fn fillGraphNode(out: *zova_graph_node, node: zova.GraphNode) error{OutOfMem
 
 pub fn fillGraphEdge(out: *zova_graph_edge, edge: zova.GraphEdge) error{OutOfMemory}!void {
     out.* = emptyGraphEdge();
-    const graph_name = try allocator.dupeZ(u8, edge.graph_name);
+    const graph_name = try allocator.dupeSentinel(u8, edge.graph_name, 0);
     errdefer allocator.free(graph_name);
-    const from_node_id = try allocator.dupeZ(u8, edge.from_node_id);
+    const from_node_id = try allocator.dupeSentinel(u8, edge.from_node_id, 0);
     errdefer allocator.free(from_node_id);
-    const edge_type = try allocator.dupeZ(u8, edge.edge_type);
+    const edge_type = try allocator.dupeSentinel(u8, edge.edge_type, 0);
     errdefer allocator.free(edge_type);
-    const to_node_id = try allocator.dupeZ(u8, edge.to_node_id);
+    const to_node_id = try allocator.dupeSentinel(u8, edge.to_node_id, 0);
     errdefer allocator.free(to_node_id);
 
     out.* = .{
@@ -666,11 +666,11 @@ pub fn fillGraphNeighborResults(out: *zova_graph_neighbor_results, items: []cons
 
     for (abi_items) |*item| item.* = .{ .node_id = null, .node_id_len = 0, .kind = null, .kind_len = 0, .edge_type = null, .edge_type_len = 0 };
     for (items, abi_items) |item, *abi_item| {
-        const node_id = try allocator.dupeZ(u8, item.node_id);
+        const node_id = try allocator.dupeSentinel(u8, item.node_id, 0);
         errdefer allocator.free(node_id);
-        const kind = try allocator.dupeZ(u8, item.kind);
+        const kind = try allocator.dupeSentinel(u8, item.kind, 0);
         errdefer allocator.free(kind);
-        const edge_type = try allocator.dupeZ(u8, item.edge_type);
+        const edge_type = try allocator.dupeSentinel(u8, item.edge_type, 0);
         abi_item.* = .{
             .node_id = node_id.ptr,
             .node_id_len = node_id.len,
@@ -707,11 +707,11 @@ pub fn fillGraphKeyedNeighborResults(
         .edge_type_len = 0,
     };
     for (items, abi_items) |item, *abi_item| {
-        const node_id = try allocator.dupeZ(u8, item.node_id);
+        const node_id = try allocator.dupeSentinel(u8, item.node_id, 0);
         errdefer allocator.free(node_id);
-        const kind = try allocator.dupeZ(u8, item.kind);
+        const kind = try allocator.dupeSentinel(u8, item.kind, 0);
         errdefer allocator.free(kind);
-        const edge_type = try allocator.dupeZ(u8, item.edge_type);
+        const edge_type = try allocator.dupeSentinel(u8, item.edge_type, 0);
         abi_item.* = .{
             .edge_key = item.edge_key,
             .neighbor_node_key = item.neighbor_node_key,
@@ -738,9 +738,9 @@ pub fn fillGraphKeyedNodeResults(out: *zova_graph_keyed_node_results, items: []c
     for (items, abi_items) |item, *abi_item| {
         abi_item.node_key = item.node_key;
         if (!item.found) continue;
-        const node_id = try allocator.dupeZ(u8, item.node_id.?);
+        const node_id = try allocator.dupeSentinel(u8, item.node_id.?, 0);
         errdefer allocator.free(node_id);
-        const kind = try allocator.dupeZ(u8, item.kind.?);
+        const kind = try allocator.dupeSentinel(u8, item.kind.?, 0);
         abi_item.* = .{ .found = 1, .node_key = item.node_key, .node_id = node_id.ptr, .node_id_len = node_id.len, .kind = kind.ptr, .kind_len = kind.len, .created_order = item.created_order };
     }
     out.* = .{ .items = abi_items.ptr, .len = abi_items.len };
@@ -758,7 +758,7 @@ pub fn fillGraphKeyedEdgeResults(out: *zova_graph_keyed_edge_results, items: []c
     for (items, abi_items) |item, *abi_item| {
         abi_item.edge_key = item.edge_key;
         if (!item.found) continue;
-        const edge_type = try allocator.dupeZ(u8, item.edge_type.?);
+        const edge_type = try allocator.dupeSentinel(u8, item.edge_type.?, 0);
         abi_item.* = .{ .found = 1, .edge_key = item.edge_key, .source_node_key = item.source_node_key, .edge_type = edge_type.ptr, .edge_type_len = edge_type.len, .target_node_key = item.target_node_key, .created_order = item.created_order };
     }
     out.* = .{ .items = abi_items.ptr, .len = abi_items.len };
@@ -799,9 +799,9 @@ pub fn fillGraphScanResults(out: *zova_graph_scan_results, result: zova.GraphSca
         .created_order = 0,
     };
     for (result.nodes, nodes) |source, *node| {
-        const node_id = try allocator.dupeZ(u8, source.node_id);
+        const node_id = try allocator.dupeSentinel(u8, source.node_id, 0);
         errdefer allocator.free(node_id);
-        const kind = try allocator.dupeZ(u8, source.kind);
+        const kind = try allocator.dupeSentinel(u8, source.kind, 0);
         node.* = .{
             .node_key = source.node_key,
             .node_id = node_id.ptr,
@@ -826,7 +826,7 @@ pub fn fillGraphScanResults(out: *zova_graph_scan_results, result: zova.GraphSca
         .created_order = 0,
     };
     for (result.edges, edges) |source, *edge| {
-        const edge_type = try allocator.dupeZ(u8, source.edge_type);
+        const edge_type = try allocator.dupeSentinel(u8, source.edge_type, 0);
         edge.* = .{
             .edge_key = source.edge_key,
             .source_node_key = source.source_node_key,
@@ -874,13 +874,13 @@ pub fn fillGraphWalkResults(out: *zova_graph_walk_results, items: []const zova.G
     }
 
     for (items, abi_items) |item, *abi_item| {
-        const node_id = try allocator.dupeZ(u8, item.node_id);
+        const node_id = try allocator.dupeSentinel(u8, item.node_id, 0);
         errdefer allocator.free(node_id);
-        const kind = try allocator.dupeZ(u8, item.kind);
+        const kind = try allocator.dupeSentinel(u8, item.kind, 0);
         errdefer allocator.free(kind);
-        const predecessor = if (item.predecessor_node_id) |value| try allocator.dupeZ(u8, value) else null;
+        const predecessor = if (item.predecessor_node_id) |value| try allocator.dupeSentinel(u8, value, 0) else null;
         errdefer if (predecessor) |value| allocator.free(value);
-        const edge_type = if (item.edge_type) |value| try allocator.dupeZ(u8, value) else null;
+        const edge_type = if (item.edge_type) |value| try allocator.dupeSentinel(u8, value, 0) else null;
 
         abi_item.* = .{
             .node_id = node_id.ptr,
@@ -902,7 +902,7 @@ pub fn fillGraphWalkResults(out: *zova_graph_walk_results, items: []const zova.G
 
 pub fn fillVectorCollectionInfo(out: *zova_vector_collection_info, info: zova.VectorCollectionInfo) error{OutOfMemory}!void {
     out.* = emptyVectorCollectionInfo();
-    const name = try allocator.dupeZ(u8, info.name);
+    const name = try allocator.dupeSentinel(u8, info.name, 0);
     out.* = .{
         .name = name.ptr,
         .name_len = name.len,

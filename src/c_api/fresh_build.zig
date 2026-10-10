@@ -94,9 +94,9 @@ fn freshBuildPrepareTable(build: *FreshBuildHandle, table_name: []const u8) !voi
         defer indexes.deinit();
         try indexes.bindText(1, table_name);
         while ((try indexes.step()) == .row) {
-            const name = try allocator.dupeZ(u8, indexes.columnText(0));
+            const name = try allocator.dupeSentinel(u8, indexes.columnText(0), 0);
             errdefer allocator.free(name);
-            const sql = try allocator.dupeZ(u8, indexes.columnText(1));
+            const sql = try allocator.dupeSentinel(u8, indexes.columnText(1), 0);
             try captured.append(allocator, .{ .name = name, .sql = sql });
         }
     }

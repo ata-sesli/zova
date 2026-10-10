@@ -29,7 +29,7 @@ const AbiMutex = if (@import("builtin").os.tag == .emscripten) struct {
 
     pub fn lock(self: *AbiMutex) void {
         if (@import("builtin").is_test) if (self.before_lock) |hook| hook(self.before_lock_context);
-        std.Io.Threaded.mutexLock(&self.state);
+        std.Io.Threaded.mutexLockUncancelable(&self.state);
     }
 
     pub fn unlock(self: *AbiMutex) void {

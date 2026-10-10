@@ -77,7 +77,7 @@ pub fn extensionCommand(
         else => {},
     }
 
-    const path_z = try allocator.dupeZ(u8, parsed.path.?);
+    const path_z = try allocator.dupeSentinel(u8, parsed.path.?, 0);
     defer allocator.free(path_z);
 
     var db = open_db: {
@@ -216,6 +216,12 @@ fn extensionBuildCommand(allocator: std.mem.Allocator, parsed: ExtensionCommandA
     defer allocator.free(zova_arg);
     const zova_build_options_arg = try std.fmt.allocPrint(allocator, "-Mzova_build_options={s}", .{zova_build_options_path});
     defer allocator.free(zova_build_options_arg);
+    const sqlite_header_path = try std.fs.path.join(allocator, &.{ sqlite_include_path, "sqlite3.h" });
+    defer allocator.free(sqlite_header_path);
+    const sqlite_bindings_path = try std.fs.path.join(allocator, &.{ cache_path, "sqlite_c.zig" });
+    defer allocator.free(sqlite_bindings_path);
+    const sqlite_bindings_arg = try std.fmt.allocPrint(allocator, "-Msqlite_c={s}", .{sqlite_bindings_path});
+    defer allocator.free(sqlite_bindings_arg);
     const argv = [_][]const u8{
         zig_exe,
         "build-lib",
@@ -237,8 +243,11 @@ fn extensionBuildCommand(allocator: std.mem.Allocator, parsed: ExtensionCommandA
         sqlite_include_path,
         "--dep",
         "zova_build_options",
+        "--dep",
+        "sqlite_c",
         zova_arg,
         zova_build_options_arg,
+        sqlite_bindings_arg,
     };
 
     const process_allocator = std.heap.page_allocator;
@@ -252,6 +261,34 @@ fn extensionBuildCommand(allocator: std.mem.Allocator, parsed: ExtensionCommandA
     try env.put("TMPDIR", cache_path);
     if (builtin.os.tag != .windows) {
         try env.put("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
+    }
+    const translation_error_path = try std.fs.path.join(allocator, &.{ cache_path, "sqlite_c.stderr" });
+    defer allocator.free(translation_error_path);
+    // The translator writes substantial output. Keep its stdout blocking;
+    // Zig 0.17 can spin when inherited stdout is a nonblocking pipe.
+    const translated_term = block: {
+        const output_file = try std.Io.Dir.cwd().createFile(io, sqlite_bindings_path, .{});
+        defer output_file.close(io);
+        const error_file = try std.Io.Dir.cwd().createFile(io, translation_error_path, .{});
+        defer error_file.close(io);
+        var child = try std.process.spawn(io, .{
+            .argv = &.{ zig_exe, "translate-c", "-lc", "-I", sqlite_include_path, sqlite_header_path },
+            .environ_map = &env,
+            .stdin = .ignore,
+            .stdout = .{ .file = output_file },
+            .stderr = .{ .file = error_file },
+        });
+        defer child.kill(io);
+        break :block try child.wait(io);
+    };
+    switch (translated_term) {
+        .exited => |code| if (code != 0) {
+            const diagnostic = try std.Io.Dir.cwd().readFileAlloc(io, translation_error_path, allocator, .limited(1024 * 1024));
+            defer allocator.free(diagnostic);
+            if (diagnostic.len != 0) try stderr.writeAll(diagnostic);
+            return error.ExtensionInvalid;
+        },
+        else => return error.ExtensionInvalid,
     }
     const result = try std.process.run(process_allocator, io, .{
         .argv = &argv,
@@ -487,7 +524,7 @@ fn extensionSmokeTempFilePath(allocator: std.mem.Allocator, kind: []const u8, na
     defer allocator.free(filename);
     const path = try std.fs.path.join(allocator, &.{ extensionSmokeTempRoot(), filename });
     defer allocator.free(path);
-    return try allocator.dupeZ(u8, path);
+    return try allocator.dupeSentinel(u8, path, 0);
 }
 
 fn deleteExtensionSmokeDatabaseFiles(allocator: std.mem.Allocator, path: []const u8) void {

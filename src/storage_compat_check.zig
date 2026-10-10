@@ -106,7 +106,7 @@ const Check = struct {
 };
 
 fn pathJoin(allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) ![:0]u8 {
-    return allocator.dupeZ(u8, try std.fmt.allocPrint(allocator, fmt, args));
+    return allocator.dupeSentinel(u8, try std.fmt.allocPrint(allocator, fmt, args), 0);
 }
 
 fn fixturePath(allocator: std.mem.Allocator, name: []const u8) ![:0]u8 {

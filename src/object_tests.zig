@@ -115,7 +115,7 @@ test "fixed profile writer retains its profile and same bytes remain idempotent"
     defer raw.deinit();
     var db = try preparePrototypeDatabase(&raw);
 
-    const bytes = [_]u8{0x5a} ** (fixed_chunks.chunk_size * 2 + 17);
+    const bytes = @as([(fixed_chunks.chunk_size * 2 + 17)]u8, @splat(0x5a));
     var writer = try db.objectWriterWithOptions(std.testing.allocator, .{ .profile = .streaming });
     try writer.write(bytes[0..333]);
     try writer.write(bytes[333..]);
@@ -138,8 +138,8 @@ test "fixed profile transfer chunks accept 1 MiB and assemble atomically" {
     defer raw.deinit();
     var db = try preparePrototypeDatabase(&raw);
 
-    const first = [_]u8{0x1a} ** fixed_chunks.chunk_size;
-    const tail = [_]u8{0x2b} ** 37;
+    const first = @as([fixed_chunks.chunk_size]u8, @splat(0x1a));
+    const tail = @as([37]u8, @splat(0x2b));
     const first_hash = objectChunkId(&first);
     const tail_hash = objectChunkId(&tail);
     try db.putObjectChunkWithOptions(first_hash, &first, .{ .profile = .streaming });
@@ -198,7 +198,7 @@ test "fixed profile writer replay cancel and failure cleanup preserve atomicity"
     try std.testing.expectEqualSlices(u8, &first_id, &replay_id);
 
     const chunks_before_cancel = try testingCount(&raw, "select count(*) from _zova_chunks");
-    const cancel_bytes = [_]u8{0xa5} ** (fixed_chunks.chunk_size + 11);
+    const cancel_bytes = @as([(fixed_chunks.chunk_size + 11)]u8, @splat(0xa5));
     var cancelled = try db.objectWriterWithOptions(std.testing.allocator, .{ .profile = .streaming });
     try cancelled.write(&cancel_bytes);
     try cancelled.cancel();
@@ -263,7 +263,7 @@ test "fixed profile validates malformed manifests and allocation failures safely
     defer raw.deinit();
     var db = try preparePrototypeDatabase(&raw);
 
-    const bytes = [_]u8{0x33} ** (1024 * 1024 + 1);
+    const bytes = @as([(1024 * 1024 + 1)]u8, @splat(0x33));
     const id = try db.putObjectWithOptions(&bytes, .{ .profile = .streaming });
 
     try raw.exec("pragma ignore_check_constraints = on");
@@ -285,7 +285,7 @@ test "fixed partial ranges skip validation of untouched manifest rows" {
     defer raw.deinit();
     var db = try preparePrototypeDatabase(&raw);
 
-    const bytes = [_]u8{0x4a} ** (fixed_chunks.chunk_size * 2 + 17);
+    const bytes = @as([(fixed_chunks.chunk_size * 2 + 17)]u8, @splat(0x4a));
     const id = try db.putObjectWithOptions(&bytes, .{ .profile = .streaming });
 
     try raw.exec("pragma ignore_check_constraints = on");
@@ -303,7 +303,7 @@ test "fixed partial ranges verify touched chunk bytes" {
     defer raw.deinit();
     var db = try preparePrototypeDatabase(&raw);
 
-    const bytes = [_]u8{0x2c} ** (fixed_chunks.chunk_size * 2 + 17);
+    const bytes = @as([(fixed_chunks.chunk_size * 2 + 17)]u8, @splat(0x2c));
     const id = try db.putObjectWithOptions(&bytes, .{ .profile = .streaming });
 
     try raw.exec("pragma ignore_check_constraints = on");
@@ -546,7 +546,7 @@ test "object writer deduplicates repeated content and existing objects" {
     var db = try Database.create(db_path);
     defer db.deinit();
 
-    const repeated = [_]u8{0} ** (fastcdc.max_size * 4);
+    const repeated = @as([(fastcdc.max_size * 4)]u8, @splat(0));
     const first_id = try testingStreamObject(&db, &repeated, &.{ 1024, 7, 9000 });
     const second_id = try testingStreamObject(&db, &repeated, &.{repeated.len});
 
@@ -569,7 +569,7 @@ test "object writer cancel and deinit cleanup unfinished chunks" {
     var db = try Database.create(db_path);
     defer db.deinit();
 
-    const bytes = [_]u8{0x42} ** (fastcdc.max_size + fastcdc.avg_size);
+    const bytes = @as([(fastcdc.max_size + fastcdc.avg_size)]u8, @splat(0x42));
     const id = objectId(&bytes);
 
     var writer = try db.objectWriter(std.testing.allocator);
@@ -611,7 +611,7 @@ test "object writer cancel preserves pre-existing loose chunks" {
     var db = try Database.create(db_path);
     defer db.deinit();
 
-    const chunk = [_]u8{0x73} ** fastcdc.max_size;
+    const chunk = @as([fastcdc.max_size]u8, @splat(0x73));
     const hash = objectChunkId(&chunk);
     try db.putObjectChunk(hash, &chunk);
 
@@ -820,7 +820,7 @@ test "put repeated content deduplicates identical chunks" {
     var db = try Database.create(db_path);
     defer db.deinit();
 
-    const bytes = [_]u8{0} ** (fastcdc.max_size * 4);
+    const bytes = @as([(fastcdc.max_size * 4)]u8, @splat(0));
     const id = try db.putObject(&bytes);
 
     const chunk_rows = try testingCount(&db, "select count(*) from _zova_chunks");
@@ -839,7 +839,7 @@ test "put similar objects shares at least one chunk" {
     var db = try Database.create(db_path);
     defer db.deinit();
 
-    const base = [_]u8{0} ** (fastcdc.max_size * 4);
+    const base = @as([(fastcdc.max_size * 4)]u8, @splat(0));
     var edited: [base.len + 257]u8 = undefined;
     for (edited[0..257], 0..) |*byte, index| {
         byte.* = @intCast((index * 23 + 5) % 241);
@@ -1430,7 +1430,7 @@ test "object chunks can be read and reassembled through public API" {
 
     try std.testing.expectEqualSlices(u8, &bytes, rebuilt);
 
-    const missing = [_]u8{0x91} ** 32;
+    const missing = @as([32]u8, @splat(0x91));
     try std.testing.expect(!try db.hasObjectChunk(missing));
     try std.testing.expectError(error.ObjectChunkNotFound, db.getObjectChunk(std.testing.allocator, missing));
 }
@@ -2153,7 +2153,7 @@ test "duplicate chunks are addressable once by distinct chunk hash" {
     var db = try Database.create(db_path);
     defer db.deinit();
 
-    const bytes = [_]u8{0} ** (fastcdc.max_size * 4);
+    const bytes = @as([(fastcdc.max_size * 4)]u8, @splat(0));
     const id = try db.putObject(&bytes);
     const chunk_rows = try testingCount(&db, "select count(*) from _zova_chunks");
     const manifest_rows = try testingObjectManifestCount(&db, id);
@@ -2532,7 +2532,7 @@ test "object table constraints reject invalid object ids and chunkers" {
     defer db.deinit();
 
     {
-        var short_id = [_]u8{0xaa} ** 31;
+        var short_id = @as([31]u8, @splat(0xaa));
         var invalid_id = try db.prepare(
             \\insert into _zova_objects (object_id, size_bytes, chunk_count, chunker)
             \\values (?, 0, 0, 'fastcdc-v1')
@@ -2544,7 +2544,7 @@ test "object table constraints reject invalid object ids and chunkers" {
     }
 
     {
-        var object_id = [_]u8{0xbb} ** 32;
+        var object_id = @as([32]u8, @splat(0xbb));
         var invalid_chunker = try db.prepare(
             \\insert into _zova_objects (object_id, size_bytes, chunk_count, chunker)
             \\values (?, 0, 0, ?)
@@ -2588,7 +2588,7 @@ test "chunk table constraints reject invalid chunk rows" {
     defer db.deinit();
 
     {
-        var short_hash = [_]u8{0xcc} ** 31;
+        var short_hash = @as([31]u8, @splat(0xcc));
         var invalid_hash = try db.prepare(
             \\insert into _zova_chunks (chunk_hash, size_bytes, data)
             \\values (?, 0, ?)
@@ -2601,7 +2601,7 @@ test "chunk table constraints reject invalid chunk rows" {
     }
 
     {
-        var chunk_hash = [_]u8{0xdd} ** 32;
+        var chunk_hash = @as([32]u8, @splat(0xdd));
         var invalid_size = try db.prepare(
             \\insert into _zova_chunks (chunk_hash, size_bytes, data)
             \\values (?, 5, ?)
@@ -2614,8 +2614,8 @@ test "chunk table constraints reject invalid chunk rows" {
     }
 
     {
-        var chunk_hash = [_]u8{0xee} ** 32;
-        var too_large_data = [_]u8{0x11} ** (fixed_chunks.max_size + 1);
+        var chunk_hash = @as([32]u8, @splat(0xee));
+        var too_large_data = @as([(fixed_chunks.max_size + 1)]u8, @splat(0x11));
         var too_large = try db.prepare(
             \\insert into _zova_chunks (chunk_hash, size_bytes, data)
             \\values (?, 1048577, ?)
@@ -2659,7 +2659,7 @@ test "chunk table rejects zero-length chunks" {
     var db = try Database.create(db_path);
     defer db.deinit();
 
-    var chunk_hash = [_]u8{0x12} ** 32;
+    var chunk_hash = @as([32]u8, @splat(0x12));
     var zero_chunk = try db.prepare(
         \\insert into _zova_chunks (chunk_hash, size_bytes, data)
         \\values (?, 0, ?)
@@ -2681,10 +2681,10 @@ test "object manifest rejects zero-length entries and short ids" {
     var db = try Database.create(db_path);
     defer db.deinit();
 
-    var object_id = [_]u8{0x21} ** 32;
-    var chunk_hash = [_]u8{0x22} ** 32;
-    var short_object_id = [_]u8{0x23} ** 31;
-    var short_chunk_hash = [_]u8{0x24} ** 31;
+    var object_id = @as([32]u8, @splat(0x21));
+    var chunk_hash = @as([32]u8, @splat(0x22));
+    var short_object_id = @as([31]u8, @splat(0x23));
+    var short_chunk_hash = @as([31]u8, @splat(0x24));
 
     {
         var zero_manifest = try db.prepare(
@@ -2767,8 +2767,8 @@ test "object schema accepts minimal valid object chunk and manifest rows" {
     var db = try Database.create(db_path);
     defer db.deinit();
 
-    var object_id = [_]u8{0x01} ** 32;
-    var chunk_hash = [_]u8{0x02} ** 32;
+    var object_id = @as([32]u8, @splat(0x01));
+    var chunk_hash = @as([32]u8, @splat(0x02));
 
     {
         var chunk = try db.prepare(
@@ -2892,7 +2892,7 @@ test "delete preserves chunks shared by another object and later removes them" {
     var db = try Database.create(db_path);
     defer db.deinit();
 
-    const base = [_]u8{0} ** (fastcdc.max_size * 4);
+    const base = @as([(fastcdc.max_size * 4)]u8, @splat(0));
     var edited: [base.len + 257]u8 = undefined;
     for (edited[0..257], 0..) |*byte, index| {
         byte.* = @intCast((index * 29 + 7) % 251);
@@ -2933,7 +2933,7 @@ test "delete repeated content object handles duplicate candidate chunk hashes" {
     var db = try Database.create(db_path);
     defer db.deinit();
 
-    const bytes = [_]u8{0} ** (fastcdc.max_size * 4);
+    const bytes = @as([(fastcdc.max_size * 4)]u8, @splat(0));
     const id = try db.putObject(&bytes);
     try std.testing.expect((try testingObjectManifestCount(&db, id)) > try testingCount(&db, "select count(*) from _zova_chunks"));
 

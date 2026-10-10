@@ -104,7 +104,7 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(allocator);
     if (args.len != 5) return error.InvalidArgument;
     const mode = std.meta.stringToEnum(Mode, args[1]) orelse return error.InvalidArgument;
-    const path = try allocator.dupeZ(u8, args[2]);
+    const path = try allocator.dupeSentinel(u8, args[2], 0);
     const node_count = try std.fmt.parseInt(usize, args[3], 10);
     const edge_count = try std.fmt.parseInt(usize, args[4], 10);
     const fixture = try makeFixture(allocator, node_count, edge_count);

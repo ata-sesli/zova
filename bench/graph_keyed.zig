@@ -417,7 +417,7 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
     if (args.len < 3 or args.len > 4) return error.InvalidArgument;
-    const source_path = try allocator.dupeZ(u8, args[1]);
+    const source_path = try allocator.dupeSentinel(u8, args[1], 0);
     const label = args[2];
     const fixture = try loadFixture(allocator, source_path);
     std.debug.print("fixture={s} nodes={d} edges={d}\n", .{ label, fixture.nodes.len, fixture.edges.len });

@@ -70,6 +70,8 @@ pub const DynamicExtensionOwnedRegistry = zova.DynamicExtensionOwnedRegistry;
 pub const bundledExtensionRegistry = zova.bundledExtensionRegistry;
 pub const salvageInstalledExtensions = zova.salvageInstalledExtensions;
 pub const extension_dynamic = zova.extension_dynamic;
+/// Language-neutral plugin ABI and Zig author helpers over its C layouts.
+pub const extension_plugin = @import("extension_plugin_api.zig");
 pub const OpenOptions = zova.OpenOptions;
 pub const BackupOptions = zova.BackupOptions;
 pub const BoundObjectStoreInfo = zova.BoundObjectStoreInfo;

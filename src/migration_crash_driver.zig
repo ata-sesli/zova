@@ -17,5 +17,5 @@ pub fn main(init: std.process.Init) !void {
     if (args.len != 5) return error.InvalidArgument;
     target = args[3];
     marker = args[4];
-    try zova.migrateDatabaseInternal(a, try a.dupeZ(u8, args[1]), try a.dupeZ(u8, args[2]), .{}, zova.bundledExtensionRegistry(), pause);
+    try zova.migrateDatabaseInternal(a, try a.dupeSentinel(u8, args[1], 0), try a.dupeSentinel(u8, args[2], 0), .{}, zova.bundledExtensionRegistry(), pause);
 }

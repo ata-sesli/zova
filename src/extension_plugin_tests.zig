@@ -99,7 +99,7 @@ test "extension_plugin C and C++ bundles load and dispatch through copied regist
     if (comptime !dynamic.supports_dynamic_loading) return error.SkipZigTest;
     const io = std.Io.Threaded.global_single_threaded.io();
     const allocator = std.testing.allocator;
-    for ([_][]const u8{ options.plugin_c_fixture, options.plugin_cpp_fixture }) |path| {
+    for ([_][]const u8{ options.plugin_c_fixture, options.plugin_cpp_fixture, options.plugin_services_c_fixture, options.plugin_services_cpp_fixture, options.plugin_zig_fixture }) |path| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         const library_name = try fixtureLibraryName(allocator, "plugin");
@@ -181,7 +181,7 @@ fn badSql(host: *const plugin.Host, db: ?*anyopaque) callconv(.c) i32 {
 test "extension_plugin host errors and status mapping" {
     var db = try sqlite.Database.open(":memory:");
     defer db.deinit();
-    const host: plugin.Host = .{};
+    const host = plugin.legacyHost();
     try std.testing.expectEqual(@as(i32, 3), host.exec_sql.?(null, "SELECT 1", 8));
     try std.testing.expectEqual(@as(i32, 3), host.exec_sql.?(&db, null, 8));
     try std.testing.expectEqual(@as(i32, 3), host.exec_sql.?(&db, "", 0));
@@ -213,6 +213,7 @@ test "extension_plugin upgrade tail requires flag size and a forward path" {
     d.base.flags = plugin.has_upgrade;
     try std.testing.expectError(error.ExtensionIncompatible, plugin.validate(&d.base));
     d.base.struct_size = @sizeOf(plugin.UpgradeDescriptor);
+    d.base.flags |= plugin.requires_query | plugin.requires_diagnostics;
     _ = try plugin.validate(&d.base);
     const path = (try plugin.upgradePath(&d.base)).?;
     try std.testing.expectEqualStrings("1.0.0", path.from_version);
@@ -243,4 +244,257 @@ test "extension_plugin optional hooks and error rollback preserve caller work" {
     try db.exec("insert into caller_work values (1)");
     try std.testing.expectError(error.SqliteError, db.exec("select * from _zova_ext_c_test_partial"));
     try db.exec("rollback");
+}
+
+test "extension_plugin negotiated services preserve the v1 host prefix" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.deinit();
+    const host = plugin.serviceHost();
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(plugin.ServiceHost, "base"));
+    try std.testing.expectEqual(@as(u32, @sizeOf(plugin.ServiceHost)), host.base.struct_size);
+    var service: ?*const anyopaque = @ptrFromInt(1);
+    try std.testing.expectEqual(plugin.status_unsupported, host.get_service.?(&db, 999, 1, 0, &service));
+    try std.testing.expect(service == null);
+    try std.testing.expectEqual(plugin.status_unsupported, host.get_service.?(&db, plugin.service_query, 2, 0, &service));
+    try std.testing.expectEqual(plugin.status_unsupported, host.get_service.?(&db, plugin.service_query, 1, @sizeOf(plugin.QueryService) + 1, &service));
+    try std.testing.expectEqual(@as(i32, 3), host.get_service.?(null, plugin.service_query, 1, 0, &service));
+    try std.testing.expectEqual(@as(i32, 0), host.get_service.?(&db, plugin.service_query, 1, @sizeOf(plugin.QueryService), &service));
+    try std.testing.expect(service != null);
+    var d = descriptor();
+    d.flags = plugin.requires_query;
+    _ = try plugin.validate(&d);
+    try std.testing.expect((try plugin.upgradePath(&d)) == null);
+    d.flags |= @as(u64, 1) << 63;
+    try std.testing.expectError(error.ExtensionIncompatible, plugin.validate(&d));
+}
+
+const QueryRows = struct {
+    count: usize = 0,
+    valid: bool = true,
+};
+
+fn receiveValues(raw: ?*anyopaque, values: ?[*]const plugin.Value, count: u64) callconv(.c) i32 {
+    const rows: *QueryRows = @ptrCast(@alignCast(raw.?));
+    rows.count += 1;
+    const row = values.?[0..@intCast(count)];
+    rows.valid = rows.valid and count == 5 and row[0].kind == plugin.value_integer and row[0].integer == 42 and
+        row[1].kind == plugin.value_float and row[1].real == 1.25 and row[2].kind == plugin.value_text and
+        std.mem.eql(u8, row[2].bytes.?[0..@intCast(row[2].bytes_len)], "a\x00b") and
+        row[3].kind == plugin.value_blob and row[3].bytes_len == 0 and row[4].kind == plugin.value_null;
+    return 0;
+}
+
+fn receiveCount(raw: ?*anyopaque, _: ?[*]const plugin.Value, _: u64) callconv(.c) i32 {
+    const rows: *QueryRows = @ptrCast(@alignCast(raw.?));
+    rows.count += 1;
+    return 0;
+}
+
+test "extension_plugin bounded query binds values and never retains inputs or statements" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.deinit();
+    const parameters = [_]plugin.Value{
+        .{ .kind = plugin.value_integer, .integer = 42 },
+        .{ .kind = plugin.value_float, .real = 1.25 },
+        .{ .kind = plugin.value_text, .bytes = "a\x00b", .bytes_len = 3 },
+        .{ .kind = plugin.value_blob },
+        .{},
+    };
+    var rows: QueryRows = .{};
+    const sql = "SELECT ?, ?, ?, ?, ?";
+    const request: plugin.QueryRequest = .{
+        .sql = sql,
+        .sql_len = sql.len,
+        .parameters = &parameters,
+        .parameter_count = parameters.len,
+        .row_limit = 1,
+        .byte_limit = 1024,
+        .row = receiveValues,
+        .user_data = &rows,
+    };
+    try plugin.executeQuery(std.testing.allocator, &db, &request);
+    try std.testing.expectEqual(@as(usize, 1), rows.count);
+    try std.testing.expect(rows.valid);
+    try db.exec("VACUUM");
+}
+
+test "extension_plugin query rejects writes and incomplete requests before delivering rows" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.deinit();
+    try db.exec("CREATE TABLE data(id INTEGER)");
+    var rows: QueryRows = .{};
+    const sql = "INSERT INTO data VALUES(1) RETURNING id";
+    var request: plugin.QueryRequest = .{ .sql = sql, .sql_len = sql.len, .row_limit = 4, .byte_limit = 1024, .row = receiveCount, .user_data = &rows };
+    try std.testing.expectError(error.InvalidArgument, plugin.executeQuery(std.testing.allocator, &db, &request));
+    const select = "SELECT count(*) FROM data";
+    var stmt = try db.prepare(select);
+    defer stmt.deinit();
+    try std.testing.expect(try stmt.step() == .row);
+    try std.testing.expectEqual(@as(i64, 0), stmt.columnInt64(0));
+    for ([_][]const u8{ "", "-- comment", "BEGIN", "SELECT 1; SELECT 2" }) |invalid| {
+        request.sql = invalid.ptr;
+        request.sql_len = invalid.len;
+        try std.testing.expectError(error.InvalidArgument, plugin.executeQuery(std.testing.allocator, &db, &request));
+    }
+    request.sql = "SELECT ?";
+    request.sql_len = 8;
+    try std.testing.expectError(error.InvalidArgument, plugin.executeQuery(std.testing.allocator, &db, &request));
+    try std.testing.expectEqual(@as(usize, 0), rows.count);
+}
+
+test "extension_plugin query budgets and cancellation finalize statements" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.deinit();
+    var rows: QueryRows = .{};
+    const sql = "SELECT 1 UNION ALL SELECT 2";
+    var request: plugin.QueryRequest = .{ .sql = sql, .sql_len = sql.len, .row_limit = 1, .byte_limit = 1024, .row = receiveCount, .user_data = &rows };
+    try std.testing.expectError(error.PluginLimit, plugin.executeQuery(std.testing.allocator, &db, &request));
+    try std.testing.expectEqual(@as(usize, 1), rows.count);
+    rows.count = 0;
+    request.row_limit = 2;
+    request.byte_limit = 1;
+    try std.testing.expectError(error.PluginLimit, plugin.executeQuery(std.testing.allocator, &db, &request));
+    try std.testing.expectEqual(@as(usize, 0), rows.count);
+    try db.exec("VACUUM");
+}
+
+fn queryAllocationFailure(allocator: std.mem.Allocator) !void {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.deinit();
+    var rows: QueryRows = .{};
+    const sql = "SELECT 1";
+    try plugin.executeQuery(allocator, &db, &.{ .sql = sql, .sql_len = sql.len, .row_limit = 1, .byte_limit = 1024, .row = receiveCount, .user_data = &rows });
+    try db.exec("VACUUM");
+}
+
+test "extension_plugin query allocation failure cleanup" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, queryAllocationFailure, .{});
+}
+
+test "extension_plugin query uses a strict single-statement SQLite wrapper" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.deinit();
+    for ([_][:0]const u8{ "", "-- comment", "SELECT 1; SELECT 2", "SELECT 1; invalid" }) |sql| {
+        try std.testing.expectError(error.InvalidArgument, db.prepareSingle(sql));
+    }
+    var stmt = try db.prepareSingle("SELECT 1; -- trailing comment\n /* comment */");
+    defer stmt.deinit();
+    try std.testing.expect(stmt.isReadOnly());
+    try std.testing.expect(try stmt.step() == .row);
+}
+
+test "extension_plugin rejected trailing pragma cannot change connection settings during prepare" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.deinit();
+    try db.exec("PRAGMA foreign_keys=OFF");
+    try std.testing.expectError(error.InvalidArgument, db.prepareSingle("SELECT 1; PRAGMA foreign_keys=ON"));
+    var flag = try db.prepare("PRAGMA foreign_keys");
+    defer flag.deinit();
+    try std.testing.expect(try flag.step() == .row);
+    try std.testing.expectEqual(@as(i64, 0), flag.columnInt64(0));
+}
+
+fn cancelRow(_: ?*anyopaque, _: ?[*]const plugin.Value, _: u64) callconv(.c) i32 {
+    return plugin.status_canceled;
+}
+
+test "extension_plugin query cancellation and malformed values are safely cleaned up" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.deinit();
+    const sql = "SELECT ?";
+    var parameters = [_]plugin.Value{.{ .kind = plugin.value_integer, .integer = 1 }};
+    var request: plugin.QueryRequest = .{ .sql = sql, .sql_len = sql.len, .parameters = &parameters, .parameter_count = 1, .row_limit = 1, .byte_limit = 1024, .row = cancelRow };
+    try std.testing.expectError(error.PluginCanceled, plugin.executeQuery(std.testing.allocator, &db, &request));
+    parameters[0].reserved = 1;
+    try std.testing.expectError(error.InvalidArgument, plugin.executeQuery(std.testing.allocator, &db, &request));
+    parameters[0] = .{ .kind = plugin.value_text, .bytes_len = 1 };
+    try std.testing.expectError(error.InvalidArgument, plugin.executeQuery(std.testing.allocator, &db, &request));
+    parameters[0] = .{ .kind = plugin.value_text, .bytes = "\xff", .bytes_len = 1 };
+    try std.testing.expectError(error.InvalidArgument, plugin.executeQuery(std.testing.allocator, &db, &request));
+    request.parameters = null;
+    try std.testing.expectError(error.InvalidArgument, plugin.executeQuery(std.testing.allocator, &db, &request));
+    try db.exec("VACUUM");
+}
+
+fn diagnosticsHook(host: *const plugin.Host, context: ?*anyopaque) callconv(.c) i32 {
+    const extended: *const plugin.ServiceHost = @ptrCast(host);
+    var raw: ?*const anyopaque = null;
+    if (extended.get_service.?(context, plugin.service_diagnostics, 1, @sizeOf(plugin.DiagnosticsService), &raw) != 0) return 1;
+    const service: *const plugin.DiagnosticsService = @ptrCast(@alignCast(raw.?));
+    if (host.exec_sql.?(context, "not SQL", 7) != 1) return 1;
+    var buffer: [1024]u8 = undefined;
+    var written: u64 = 999;
+    if (service.copy_sqlite_error.?(null, &buffer, buffer.len, &written) != 3 or written != 0) return 1;
+    if (service.copy_sqlite_error.?(context, &buffer, 1, &written) != plugin.status_limit or written != 1) return 1;
+    if (service.copy_sqlite_error.?(context, &buffer, buffer.len, &written) != 0 or written == 0) return 1;
+    if (std.mem.indexOf(u8, buffer[0..@intCast(written)], "syntax") == null) return 1;
+    if (service.copy_sqlite_error.?(context, null, 1, &written) != 3 or written != 0) return 1;
+    const client: plugin.Client = .{ .host = host, .connection = context };
+    const count = client.copySqliteError(&buffer) catch return 1;
+    return if (count != 0) 0 else 1;
+}
+test "extension_plugin diagnostics copy bounded bytes without ownership transfer" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.deinit();
+    try plugin.invokeHook(diagnosticsHook, &db);
+}
+
+test "extension_plugin query rejects prepare-time PRAGMAs before changing connection state" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.deinit();
+    try db.exec("PRAGMA foreign_keys=OFF");
+    const sql = "/* comment */ PRAGMA foreign_keys=ON";
+    const request: plugin.QueryRequest = .{ .sql = sql, .sql_len = sql.len, .row_limit = 1, .byte_limit = 1024, .row = cancelRow };
+    try std.testing.expectError(error.InvalidArgument, plugin.executeQuery(std.testing.allocator, &db, &request));
+    var flag = try db.prepare("PRAGMA foreign_keys");
+    defer flag.deinit();
+    try std.testing.expect(try flag.step() == .row);
+    try std.testing.expectEqual(@as(i64, 0), flag.columnInt64(0));
+}
+
+test "extension_plugin Zig author helper negotiates safely with old hosts" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.deinit();
+    const legacy: plugin.Host = .{};
+    const client: plugin.Client = .{ .host = &legacy, .connection = &db };
+    try std.testing.expectError(error.Unsupported, client.query(&.{ .sql = "SELECT 1", .sql_len = 8, .row_limit = 1, .byte_limit = 1024, .row = cancelRow }));
+}
+
+const Reentry = struct { host: *const plugin.Host, context: ?*anyopaque, rejected: bool = false };
+fn reentryRow(raw: ?*anyopaque, _: ?[*]const plugin.Value, _: u64) callconv(.c) i32 {
+    const state: *Reentry = @ptrCast(@alignCast(raw.?));
+    const sql = "CREATE TABLE forbidden(id INTEGER)";
+    state.rejected = state.host.exec_sql.?(state.context, sql, sql.len) == 3;
+    return 0;
+}
+fn reentryHook(host: *const plugin.Host, context: ?*anyopaque) callconv(.c) i32 {
+    const client: plugin.Client = .{ .host = host, .connection = context };
+    var state: Reentry = .{ .host = host, .context = context };
+    client.query(&.{ .sql = "SELECT 1", .sql_len = 8, .row_limit = 1, .byte_limit = 1024, .row = reentryRow, .user_data = &state }) catch return 1;
+    return if (state.rejected) 0 else 1;
+}
+test "extension_plugin row callbacks cannot reenter the connection" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.deinit();
+    try plugin.invokeHook(reentryHook, &db);
+    try std.testing.expectError(error.SqliteError, db.exec("SELECT * FROM forbidden"));
+}
+
+test "extension_plugin query validates request bounds before touching input memory" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.deinit();
+    var request: plugin.QueryRequest = .{ .sql = null, .sql_len = 0, .row_limit = 1, .byte_limit = 1024, .row = cancelRow };
+    try std.testing.expectError(error.InvalidArgument, plugin.executeQuery(std.testing.allocator, &db, &request));
+    request.sql = @ptrFromInt(1);
+    request.sql_len = 1024 * 1024 + 1;
+    try std.testing.expectError(error.InvalidArgument, plugin.executeQuery(std.testing.allocator, &db, &request));
+    request.sql_len = 1;
+    request.row_limit = 4097;
+    try std.testing.expectError(error.InvalidArgument, plugin.executeQuery(std.testing.allocator, &db, &request));
+    request.row_limit = 1;
+    request.byte_limit = 1024 * 1024 + 1;
+    try std.testing.expectError(error.InvalidArgument, plugin.executeQuery(std.testing.allocator, &db, &request));
+    request.byte_limit = 1024;
+    request.struct_size = 8;
+    try std.testing.expectError(error.InvalidArgument, plugin.executeQuery(std.testing.allocator, &db, &request));
 }

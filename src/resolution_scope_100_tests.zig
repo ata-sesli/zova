@@ -201,7 +201,7 @@ test "walk resolves the root at most once and expands adjacency per frontier nod
 test "hasObject resolves existence at most once per call" {
     var db = try zova.Database.createMemory();
     defer db.deinit();
-    const bytes = [_]u8{0x4d} ** 8192;
+    const bytes = @as([8192]u8, @splat(0x4d));
     const id = try db.putObjectWithOptions(&bytes, .{ .profile = .streaming });
 
     _ = try db.hasObject(id);
@@ -220,7 +220,7 @@ test "hasObject resolves existence at most once per call" {
 test "readObjectRange loads metadata once and returns correct bytes on main and bound stores" {
     var db = try zova.Database.createMemory();
     defer db.deinit();
-    const bytes = [_]u8{0x4d} ** 8192;
+    const bytes = @as([8192]u8, @splat(0x4d));
     const id = try db.putObjectWithOptions(&bytes, .{ .profile = .streaming });
 
     var warm: [4096]u8 = undefined;
@@ -265,7 +265,7 @@ test "readObjectRange loads metadata once and returns correct bytes on main and 
 test "object reader loads metadata and its manifest once before the read scope" {
     var db = try zova.Database.createMemory();
     defer db.deinit();
-    const bytes = [_]u8{0x4d} ** 8192;
+    const bytes = @as([8192]u8, @splat(0x4d));
     const id = try db.putObjectWithOptions(&bytes, .{ .profile = .streaming });
     var warm = try db.objectReader(id);
     var warm_buffer: [1024]u8 = undefined;

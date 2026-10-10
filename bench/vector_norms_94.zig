@@ -28,7 +28,7 @@ pub fn main(init: std.process.Init) !void {
     const replay = std.mem.eql(u8, args[4], "replay");
     if (!replay and !std.mem.eql(u8, args[4], "fresh")) return error.InvalidArgument;
 
-    var db = try vector.Database.create(try allocator.dupeZ(u8, args[1]));
+    var db = try vector.Database.create(try allocator.dupeSentinel(u8, args[1], 0));
     defer db.deinit();
     try db.createVectorCollection("bench", .{ .dimensions = dimensions, .metric = .cosine, .element_type = element_type });
 

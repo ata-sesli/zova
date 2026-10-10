@@ -113,10 +113,11 @@ test "create maps missing parent directory to CantOpen" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(
+    const db_path = try std.fmt.bufPrintSentinel(
         &path_buffer,
         ".zig-cache/tmp/{s}/missing-parent/missing.zova",
         .{tmp.sub_path[0..]},
+        0,
     );
 
     try std.testing.expectError(error.CantOpen, Database.create(db_path));
@@ -127,10 +128,11 @@ test "open maps inaccessible parent directory to CantOpen" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(
+    const db_path = try std.fmt.bufPrintSentinel(
         &path_buffer,
         ".zig-cache/tmp/{s}/missing-parent/missing.zova",
         .{tmp.sub_path[0..]},
+        0,
     );
 
     try std.testing.expectError(error.CantOpen, Database.open(db_path));
@@ -284,7 +286,7 @@ test "operational copy APIs reject invalid and existing destinations" {
     const existing_restore_path = try testingDbPath(&existing_restore_buffer, tmp.sub_path[0..], "operations-existing-restore.zova");
 
     var missing_parent_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const missing_parent_path = try std.fmt.bufPrintZ(&missing_parent_buffer, ".zig-cache/tmp/{s}/missing-parent/operations.zova", .{tmp.sub_path[0..]});
+    const missing_parent_path = try std.fmt.bufPrintSentinel(&missing_parent_buffer, ".zig-cache/tmp/{s}/missing-parent/operations.zova", .{tmp.sub_path[0..]}, 0);
 
     {
         var db = try Database.create(source_path);

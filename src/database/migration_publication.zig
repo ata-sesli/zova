@@ -41,7 +41,7 @@ pub const Publication = struct {
         const cwd = std.Io.Dir.cwd();
         try paths.ensureDestinationZovaPathAvailable(final);
         const m = &self.members[index];
-        m.final = try self.allocator.dupeZ(u8, final);
+        m.final = try self.allocator.dupeSentinel(u8, final, 0);
         m.reservation = try std.fmt.allocPrintSentinel(self.allocator, "{s}/reserved-{s}", .{ self.directory.?, std.fs.path.basename(final) }, 0);
         m.stage = try std.fmt.allocPrintSentinel(self.allocator, "{s}/{s}", .{ self.directory.?, std.fs.path.basename(final) }, 0);
         var file = cwd.createFile(io(), m.reservation.?, .{ .exclusive = true }) catch return error.CantOpen;
@@ -56,7 +56,7 @@ pub const Publication = struct {
     pub fn stage(self: *Publication, index: usize) Error![:0]u8 {
         const cwd = std.Io.Dir.cwd();
         const m = &self.members[index];
-        const result = try self.allocator.dupeZ(u8, m.stage.?);
+        const result = try self.allocator.dupeSentinel(u8, m.stage.?, 0);
         errdefer self.allocator.free(result);
         var file = cwd.createFile(io(), m.stage.?, .{ .exclusive = true }) catch return error.CantOpen;
         file.close(io());

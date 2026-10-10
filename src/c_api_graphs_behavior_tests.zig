@@ -37,15 +37,15 @@ test "c abi batches graph mutations and reads degree" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-graph-batches.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-graph-batches.zova", .{tmp.sub_path[0..]}, 0);
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{ .path = db_path, .out_db = &db, .out_error_message = null }));
     defer _ = zova_database_close(db);
     try std.testing.expectEqual(zova_status.OK, zova_graph_create(&.{ .db = db, .name = "app" }));
 
     const nodes = [_]zova_graph_node_input{
-        .{ .graph_name = "app", .node_id = "a", .kind = "function", .target_type = @intFromEnum(zova_graph_target_type.NONE), .target_namespace = null, .target_ref = null },
-        .{ .graph_name = "app", .node_id = "b", .kind = "function", .target_type = @intFromEnum(zova_graph_target_type.NONE), .target_namespace = null, .target_ref = null },
+        .{ .graph_name = "app", .node_id = "a", .kind = "function", .target_type = @backingInt(zova_graph_target_type.NONE), .target_namespace = null, .target_ref = null },
+        .{ .graph_name = "app", .node_id = "b", .kind = "function", .target_type = @backingInt(zova_graph_target_type.NONE), .target_namespace = null, .target_ref = null },
     };
     try std.testing.expectEqual(zova_status.OK, zova_graph_node_put_many(&.{ .db = db, .nodes = &nodes, .nodes_len = nodes.len }));
 
@@ -60,7 +60,7 @@ test "c abi batches graph mutations and reads degree" {
         .db = db,
         .graph_name = "app",
         .node_id = "a",
-        .direction = @intFromEnum(zova_graph_neighbor_direction.OUTGOING),
+        .direction = @backingInt(zova_graph_neighbor_direction.OUTGOING),
         .edge_type = "calls",
         .out_degree = &degree,
     }));
@@ -72,7 +72,7 @@ test "c abi batches graph mutations and reads degree" {
         .db = db,
         .graph_name = "app",
         .node_id = "a",
-        .direction = @intFromEnum(zova_graph_neighbor_direction.OUTGOING),
+        .direction = @backingInt(zova_graph_neighbor_direction.OUTGOING),
         .edge_type = null,
         .out_degree = &degree,
     }));
@@ -83,14 +83,14 @@ test "c abi graph edge delete many is validated atomic and idempotent" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-graph-edge-delete-many.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-graph-edge-delete-many.zova", .{tmp.sub_path[0..]}, 0);
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{ .path = db_path, .out_db = &db, .out_error_message = null }));
     defer _ = zova_database_close(db);
     try std.testing.expectEqual(zova_status.OK, zova_graph_create(&.{ .db = db, .name = "app" }));
     const nodes = [_]zova_graph_node_input{
-        .{ .graph_name = "app", .node_id = "a", .kind = "function", .target_type = @intFromEnum(zova_graph_target_type.NONE), .target_namespace = null, .target_ref = null },
-        .{ .graph_name = "app", .node_id = "b", .kind = "function", .target_type = @intFromEnum(zova_graph_target_type.NONE), .target_namespace = null, .target_ref = null },
+        .{ .graph_name = "app", .node_id = "a", .kind = "function", .target_type = @backingInt(zova_graph_target_type.NONE), .target_namespace = null, .target_ref = null },
+        .{ .graph_name = "app", .node_id = "b", .kind = "function", .target_type = @backingInt(zova_graph_target_type.NONE), .target_namespace = null, .target_ref = null },
     };
     try std.testing.expectEqual(zova_status.OK, zova_graph_node_put_many(&.{ .db = db, .nodes = &nodes, .nodes_len = nodes.len }));
     const inserted = [_]zova_graph_edge_input{
@@ -147,7 +147,7 @@ test "c abi opaque keyed batch reads align and zero error outputs" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/keyed-read.zova", .{tmp.sub_path[0..]});
+    const path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/keyed-read.zova", .{tmp.sub_path[0..]}, 0);
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{ .path = path, .out_db = &db, .out_error_message = null }));
     defer _ = zova_database_close(db);
@@ -192,7 +192,7 @@ test "c abi fresh graph build returns aligned keys and rejects partial output" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/fresh-build.zova", .{tmp.sub_path[0..]});
+    const path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/fresh-build.zova", .{tmp.sub_path[0..]}, 0);
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{ .path = path, .out_db = &db, .out_error_message = null }));
     defer _ = zova_database_close(db);
@@ -254,7 +254,7 @@ test "c abi prepared fresh graph build returns deterministic aligned keys" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/prepared-fresh-build.zova", .{tmp.sub_path[0..]});
+    const path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/prepared-fresh-build.zova", .{tmp.sub_path[0..]}, 0);
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{ .path = path, .out_db = &db, .out_error_message = null }));
     defer _ = zova_database_close(db);

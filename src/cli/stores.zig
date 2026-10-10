@@ -36,9 +36,9 @@ pub fn splitCommand(
         return usageErrorFormat(stderr, "split", format, splitUsageMessage(err));
     };
 
-    const main_z = try allocator.dupeZ(u8, parsed.main_path);
+    const main_z = try allocator.dupeSentinel(u8, parsed.main_path, 0);
     defer allocator.free(main_z);
-    const store_z = try allocator.dupeZ(u8, parsed.store_path);
+    const store_z = try allocator.dupeSentinel(u8, parsed.store_path, 0);
     defer allocator.free(store_z);
 
     var db = openManagementDatabase(ctx, main_z) catch |err| return openErrorFormat(stderr, "split", parsed.format, err);
@@ -85,7 +85,7 @@ pub fn objectStoreCommand(
     switch (parsed.action) {
         .create => {
             const store_path = parsed.store_path.?;
-            const store_z = try allocator.dupeZ(u8, store_path);
+            const store_z = try allocator.dupeSentinel(u8, store_path, 0);
             defer allocator.free(store_z);
 
             zova.createObjectStore(store_z) catch |err| return objectStoreErrorFormat(stderr, command_name, parsed.format, err);
@@ -95,9 +95,9 @@ pub fn objectStoreCommand(
         .bind => {
             const main_path = parsed.main_path.?;
             const store_path = parsed.store_path.?;
-            const main_z = try allocator.dupeZ(u8, main_path);
+            const main_z = try allocator.dupeSentinel(u8, main_path, 0);
             defer allocator.free(main_z);
-            const store_z = try allocator.dupeZ(u8, store_path);
+            const store_z = try allocator.dupeSentinel(u8, store_path, 0);
             defer allocator.free(store_z);
 
             var db = openManagementDatabase(ctx, main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
@@ -114,7 +114,7 @@ pub fn objectStoreCommand(
         },
         .info => {
             const main_path = parsed.main_path.?;
-            const main_z = try allocator.dupeZ(u8, main_path);
+            const main_z = try allocator.dupeSentinel(u8, main_path, 0);
             defer allocator.free(main_z);
 
             var db = openManagementDatabase(ctx, main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
@@ -131,7 +131,7 @@ pub fn objectStoreCommand(
         },
         .unbind => {
             const main_path = parsed.main_path.?;
-            const main_z = try allocator.dupeZ(u8, main_path);
+            const main_z = try allocator.dupeSentinel(u8, main_path, 0);
             defer allocator.free(main_z);
 
             var db = openManagementDatabase(ctx, main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
@@ -160,7 +160,7 @@ pub fn vectorStoreCommand(
     switch (parsed.action) {
         .create => {
             const store_path = parsed.store_path.?;
-            const store_z = try allocator.dupeZ(u8, store_path);
+            const store_z = try allocator.dupeSentinel(u8, store_path, 0);
             defer allocator.free(store_z);
 
             zova.createVectorStore(store_z) catch |err| return objectStoreErrorFormat(stderr, command_name, parsed.format, err);
@@ -170,9 +170,9 @@ pub fn vectorStoreCommand(
         .bind => {
             const main_path = parsed.main_path.?;
             const store_path = parsed.store_path.?;
-            const main_z = try allocator.dupeZ(u8, main_path);
+            const main_z = try allocator.dupeSentinel(u8, main_path, 0);
             defer allocator.free(main_z);
-            const store_z = try allocator.dupeZ(u8, store_path);
+            const store_z = try allocator.dupeSentinel(u8, store_path, 0);
             defer allocator.free(store_z);
 
             var db = openManagementDatabase(ctx, main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
@@ -189,7 +189,7 @@ pub fn vectorStoreCommand(
         },
         .info => {
             const main_path = parsed.main_path.?;
-            const main_z = try allocator.dupeZ(u8, main_path);
+            const main_z = try allocator.dupeSentinel(u8, main_path, 0);
             defer allocator.free(main_z);
 
             var db = openManagementDatabase(ctx, main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
@@ -206,7 +206,7 @@ pub fn vectorStoreCommand(
         },
         .unbind => {
             const main_path = parsed.main_path.?;
-            const main_z = try allocator.dupeZ(u8, main_path);
+            const main_z = try allocator.dupeSentinel(u8, main_path, 0);
             defer allocator.free(main_z);
 
             var db = openManagementDatabase(ctx, main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
@@ -235,7 +235,7 @@ pub fn graphStoreCommand(
     switch (parsed.action) {
         .create => {
             const store_path = parsed.store_path.?;
-            const store_z = try allocator.dupeZ(u8, store_path);
+            const store_z = try allocator.dupeSentinel(u8, store_path, 0);
             defer allocator.free(store_z);
             zova.createGraphStore(store_z) catch |err| return objectStoreErrorFormat(stderr, command_name, parsed.format, err);
             try writeObjectStoreSuccess(stdout, parsed.format, command_name, null, store_path, null, true, true);
@@ -244,9 +244,9 @@ pub fn graphStoreCommand(
         .bind => {
             const main_path = parsed.main_path.?;
             const store_path = parsed.store_path.?;
-            const main_z = try allocator.dupeZ(u8, main_path);
+            const main_z = try allocator.dupeSentinel(u8, main_path, 0);
             defer allocator.free(main_z);
-            const store_z = try allocator.dupeZ(u8, store_path);
+            const store_z = try allocator.dupeSentinel(u8, store_path, 0);
             defer allocator.free(store_z);
             var db = openManagementDatabase(ctx, main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
             defer db.deinit();
@@ -261,7 +261,7 @@ pub fn graphStoreCommand(
         },
         .info => {
             const main_path = parsed.main_path.?;
-            const main_z = try allocator.dupeZ(u8, main_path);
+            const main_z = try allocator.dupeSentinel(u8, main_path, 0);
             defer allocator.free(main_z);
             var db = openManagementDatabase(ctx, main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
             defer db.deinit();
@@ -276,7 +276,7 @@ pub fn graphStoreCommand(
         },
         .unbind => {
             const main_path = parsed.main_path.?;
-            const main_z = try allocator.dupeZ(u8, main_path);
+            const main_z = try allocator.dupeSentinel(u8, main_path, 0);
             defer allocator.free(main_z);
             var db = openManagementDatabase(ctx, main_z) catch |err| return openErrorFormat(stderr, command_name, parsed.format, err);
             defer db.deinit();
