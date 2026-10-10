@@ -12,14 +12,105 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
+  changes:
+    name: Select CI coverage
+    runs-on: ubuntu-latest
+    outputs:
+      scope: ${{ steps.scope.outputs.scope }}
+      native: ${{ steps.scope.outputs.native }}
+      rust: ${{ steps.scope.outputs.rust }}
+      go: ${{ steps.scope.outputs.go }}
+      python: ${{ steps.scope.outputs.python }}
+      javascript: ${{ steps.scope.outputs.javascript }}
+      wasm: ${{ steps.scope.outputs.wasm }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: >-
+          python3 scripts/ci_scope.py classify --base "$BASE_SHA" --head "$HEAD_SHA"
+          --event "$EVENT_NAME" --ref "$REF_NAME" --output "$GITHUB_OUTPUT"
+
+  static-check:
+    name: Static checks
+    needs: [changes, javascript-build]
+    # A deliberately skipped JavaScript matrix must not skip docs/static CI.
+    if: ${{ always() && !cancelled() && needs.changes.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - run: zig fmt --check build.zig build.zig.zon src tests
+      - run: cargo fmt --all --manifest-path bindings/rust/Cargo.toml --check
+      - run: cargo fmt --manifest-path bindings/javascript/Cargo.toml --check
+      # Python's local Rust dependencies are generated snapshots, not tracked.
+      - run: sh bindings/python/tools/sync-rust-source.sh
+      - run: cargo fmt --manifest-path bindings/python/Cargo.toml --check
+      - run: sh scripts/check-versions.sh
+      - run: >-
+          python3 -m unittest scripts/tests/test_ci_scope.py
+          scripts/tests/test_graph_index_95_runner.py
+          scripts/tests/test_release_snapshot_order.py
+          scripts/tests/test_python_platform_matrix.py
+          scripts/tests/test_object_ingestion_93_runner.py
+      - uses: actions/setup-node@v4
+        if: needs.changes.outputs.javascript == 'true'
+        with:
+          node-version: "22"
+      - uses: oven-sh/setup-bun@v2
+        if: needs.changes.outputs.javascript == 'true'
+      - uses: actions/download-artifact@v4
+        if: needs.changes.outputs.javascript == 'true'
+        with:
+          name: ci-javascript-native-linux-x86_64
+          path: bindings/javascript
+      - run: bun install --frozen-lockfile
+        if: needs.changes.outputs.javascript == 'true'
+        working-directory: bindings/javascript
+      - run: bun run build:typescript
+        if: needs.changes.outputs.javascript == 'true'
+        working-directory: bindings/javascript
+      - run: bun run typecheck
+        if: needs.changes.outputs.javascript == 'true'
+        working-directory: bindings/javascript
+      - uses: actions/upload-artifact@v4
+        if: needs.changes.outputs.javascript == 'true'
+        with:
+          name: ci-javascript-typescript
+          path: |
+            bindings/javascript/dist
+            bindings/javascript/examples/dist
+          if-no-files-found: error
+          retention-days: 3
+
   rust-artifact:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     uses: ./.github/workflows/rust-artifact.yml
 
   wasm:
+    needs: changes
+    if: needs.changes.outputs.wasm == 'true'
     uses: ./.github/workflows/wasm.yml
 
   zig:
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
     name: Zig (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -31,19 +122,18 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
-      - run: zig fmt --check build.zig build.zig.zon src tests
       - run: zig test bench/graph_index_ddl_95.zig
-      - run: python3 -m unittest scripts/tests/test_graph_index_95_runner.py
       - run: zig build test
       - run: zig build check-storage-compat
       - run: zig build e2e
       - run: zig build c-abi
       - run: zig build c-abi-test
       - run: zig build bench-notifications-c
-      - run: zig build cli-test
       - run: zig build test -Doptimize=ReleaseSafe
 
   windows-extensions:
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
     name: Windows dynamic extensions
     runs-on: windows-latest
     steps:
@@ -56,6 +146,8 @@ jobs:
       - run: zig build test-extensions
 
   sqlite-size:
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
     name: SQLite module size (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -71,6 +163,8 @@ jobs:
         run: sh scripts/measure-sqlite-modules.sh "$RUNNER_TEMP/sqlite-size"
 
   sqlite-invariants:
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
     name: SQLite invariants (diagnostic only)
     runs-on: ubuntu-latest
     steps:
@@ -83,6 +177,8 @@ jobs:
       - run: zig build test c-abi-test check-storage-compat -Dsqlite-invariants=true -Doptimize=ReleaseSafe
 
   generated-c:
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
     name: Generated C (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -99,6 +195,8 @@ jobs:
           ZOVA_GENERATED_C_REQUIRE_GCC: ${{ runner.os == 'Linux' && '1' || '0' }}
 
   rust:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     name: Rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -113,10 +211,6 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
-      - run: cargo fmt --all --manifest-path bindings/rust/Cargo.toml --check
-      - run: python3 -m unittest scripts/tests/test_release_snapshot_order.py
-      - run: python3 -m unittest scripts/tests/test_python_platform_matrix.py
-      - run: python3 -m unittest scripts/tests/test_object_ingestion_93_runner.py
       - run: sh bindings/rust/zova-sys/tools/sync-native-source.sh
       - run: sh bindings/rust/zova-sys/tools/check-native-source.sh
       - run: sh bindings/python/tools/sync-rust-source.sh
@@ -127,6 +221,8 @@ jobs:
       - run: cargo package --allow-dirty --list -p zova --manifest-path bindings/rust/Cargo.toml >/tmp/zova-package-list.txt
 
   go:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
     name: Go (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -150,6 +246,8 @@ jobs:
         working-directory: bindings/go
 
   python:
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     name: Python ${{ matrix.python-version }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -171,14 +269,64 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: sh bindings/python/tools/sync-rust-source.sh
       - run: sh bindings/python/tools/check-rust-source.sh
-      - run: cargo fmt --manifest-path bindings/python/Cargo.toml --check
       - run: cargo test --manifest-path bindings/python/Cargo.toml
       - run: uv run --isolated --with maturin --with pytest --directory bindings/python maturin develop
       - run: uv run --isolated --with pytest --directory bindings/python python -m pytest
       - run: uv run --isolated --with maturin --directory bindings/python maturin build --out "${{ runner.temp }}/zova-python-wheels"
 
+  javascript-build:
+    name: JavaScript native build (${{ matrix.target }})
+    needs: changes
+    if: needs.changes.outputs.javascript == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            os: ubuntu-latest
+          - target: linux-arm64
+            os: ubuntu-24.04-arm
+          - target: macos-x86_64
+            os: macos-15-intel
+          - target: macos-arm64
+            os: macos-latest
+          - target: windows-x86_64
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@nextest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+        working-directory: bindings/javascript
+      - run: python scripts/generate-rust-platforms.py --host
+      - run: cargo nextest run --manifest-path bindings/javascript/Cargo.toml
+      # napi8 is supported by both tested Node versions: build once per OS/arch.
+      - run: bun run build:native:debug
+        working-directory: bindings/javascript
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-javascript-native-${{ matrix.target }}
+          path: |
+            bindings/javascript/*.node
+            bindings/javascript/index.js
+            bindings/javascript/index.d.ts
+          if-no-files-found: error
+          retention-days: 3
+
   javascript:
     name: JavaScript Node ${{ matrix.node-version }} (${{ matrix.target }})
+    needs: [changes, javascript-build, static-check]
+    if: needs.changes.outputs.javascript == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -203,13 +351,6 @@ jobs:
             os: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.17.0
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-      - uses: taiki-e/install-action@nextest
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
@@ -218,15 +359,14 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
         working-directory: bindings/javascript
-      - run: cargo fmt --manifest-path bindings/javascript/Cargo.toml --check
-      - run: python scripts/generate-rust-platforms.py --host
-      - run: cargo nextest run --manifest-path bindings/javascript/Cargo.toml
-      - run: bun run build:native:debug
-        working-directory: bindings/javascript
-      - run: bun run build:typescript
-        working-directory: bindings/javascript
-      - run: bun run typecheck
-        working-directory: bindings/javascript
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-javascript-native-${{ matrix.target }}
+          path: bindings/javascript
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-javascript-typescript
+          path: bindings/javascript
       - run: bun run test
         working-directory: bindings/javascript
       - run: node bindings/javascript/tests/runtime-smoke.mjs
@@ -234,3 +374,29 @@ jobs:
       - run: bun bindings/javascript/tests/runtime-smoke.mjs
       - run: npm pack --dry-run --ignore-scripts
         working-directory: bindings/javascript
+
+  ci-gate:
+    name: CI Gate
+    if: always()
+    needs:
+      - changes
+      - static-check
+      - rust-artifact
+      - wasm
+      - zig
+      - windows-extensions
+      - sqlite-size
+      - sqlite-invariants
+      - generated-c
+      - rust
+      - go
+      - python
+      - javascript-build
+      - javascript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          CI_SCOPE: ${{ needs.changes.outputs.scope }}
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci_scope.py gate --scope "$CI_SCOPE" --needs "$CI_NEEDS"

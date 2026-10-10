@@ -77,6 +77,25 @@ Add or update tests with behavior changes.
 - Python changes need pytest coverage under `bindings/python/tests`.
 - CLI behavior needs `tests/cli.zig`.
 
+### CI coverage
+
+CI runs formatting, version checks, and workflow-policy tests once. JavaScript
+native addons are built once per platform; Node 22 and 24 test the same addon,
+and TypeScript compilation runs once against the generated declarations.
+
+Pull requests and `work/**` pushes select runtime jobs from the complete changed
+file list. Documentation-only changes run static checks; binding-only changes
+run that binding's matrix and packaging checks. Rust changes also test its
+Python/JavaScript consumers and the WASM snapshot gate. Core, headers, build
+tooling, package manifests, generated native inputs, and unclassified changes
+run full CI. Missing diff history also selects full CI. Main and release-branch
+pushes always run full CI; release artifact verification remains unchanged.
+
+Use **CI Gate** as the required branch-protection check. It waits for every job
+and rejects failures, cancellations, and skips not authorized by the selection
+policy. The policy and gate are tested by
+`python3 -m unittest scripts/tests/test_ci_scope.py`.
+
 Public API and CLI changes should also update the README or the relevant
 binding README.
 
