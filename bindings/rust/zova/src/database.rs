@@ -16,6 +16,10 @@ pub struct Database {
     pub(crate) inner: Rc<DatabaseInner>,
 }
 
+#[cfg(test)]
+#[path = "plugin_operation_tests.rs"]
+mod plugin_operation_tests;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OpenOptions {
     pub read_only: bool,

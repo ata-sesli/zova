@@ -1,6 +1,7 @@
 #include "zova_plugin.h"
 #include <stddef.h>
 #include <string.h>
+#include <stdlib.h>
 
 #ifdef __cplusplus
 static_assert(offsetof(zova_plugin_descriptor_v1, flags) == 8, "descriptor prefix");
@@ -26,6 +27,76 @@ ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_query_request_v1) == 72, "query layout");
 ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_data_request_v1) == 160, "data layout");
 ZOVA_LAYOUT_ASSERT(offsetof(zova_plugin_data_request_v1, row_limit) == 128, "data budget");
 ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_data_page_v1) == 32, "page layout");
+ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_operation_column_v1) == 24, "column layout");
+ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_operation_call_v1) == 40, "call layout");
+ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_operation_v1) == 104, "operation layout");
+ZOVA_LAYOUT_ASSERT(offsetof(zova_plugin_operation_v1, scalar) == 72, "scalar offset");
+
+static int32_t ZOVA_PLUGIN_CALL echo_operation(const zova_plugin_host_v1 *host,
+        void *connection, void *state, const zova_plugin_operation_call_v1 *call) {
+    (void)host; (void)connection; (void)state;
+    return call->row(call->user_data, call->arguments, 1);
+}
+typedef struct series_cursor { int64_t position; int64_t count; } series_cursor;
+static int32_t ZOVA_PLUGIN_CALL series_open(const zova_plugin_host_v1 *host,
+        void *connection, void *state, const zova_plugin_value_v1 *arguments,
+        uint64_t count, void **out) {
+    series_cursor *cursor;
+    (void)host; (void)connection; (void)state; (void)count;
+    *out = NULL;
+    cursor = (series_cursor *)calloc(1, sizeof(*cursor));
+    if (!cursor) return ZOVA_PLUGIN_OUT_OF_MEMORY;
+    cursor->count = arguments[0].integer;
+    *out = cursor;
+    return ZOVA_PLUGIN_OK;
+}
+static int32_t ZOVA_PLUGIN_CALL series_next(const zova_plugin_host_v1 *host,
+        void *connection, void *raw, zova_plugin_row_v1 row, void *context,
+        uint32_t *has_row) {
+    series_cursor *cursor = (series_cursor *)raw;
+    zova_plugin_value_v1 value = {0};
+    (void)host; (void)connection;
+    *has_row = 0;
+    if (cursor->position >= cursor->count) return ZOVA_PLUGIN_OK;
+    value.kind = ZOVA_PLUGIN_VALUE_INTEGER;
+    value.integer = cursor->position++;
+    *has_row = 1;
+    return row(context, &value, 1);
+}
+static void ZOVA_PLUGIN_CALL series_close(void *cursor) { free(cursor); }
+static int32_t ZOVA_PLUGIN_CALL register_operations(const zova_plugin_host_v1 *host, void *db) {
+    const zova_plugin_service_host_v1 *extended = (const zova_plugin_service_host_v1 *)host;
+    const void *raw = NULL;
+    const zova_plugin_operation_service_v1 *service;
+    const zova_plugin_operation_column_v1 argument = {{(const uint8_t *)"input", 5}, ZOVA_PLUGIN_VALUE_INTEGER, 0};
+    const zova_plugin_operation_column_v1 column = {{(const uint8_t *)"value", 5}, ZOVA_PLUGIN_VALUE_INTEGER, 0};
+    zova_plugin_operation_v1 operation = {0};
+    if (extended->get_service(db, ZOVA_PLUGIN_SERVICE_OPERATIONS, 1, sizeof(*service), &raw) != 0)
+        return ZOVA_PLUGIN_ERROR;
+    service = (const zova_plugin_operation_service_v1 *)raw;
+    if (service->register_operation(db, NULL) != ZOVA_PLUGIN_INVALID_ARGUMENT) return ZOVA_PLUGIN_ERROR;
+    operation.struct_size = sizeof(operation);
+    operation.kind = ZOVA_PLUGIN_OPERATION_SCALAR;
+    operation.flags = ZOVA_PLUGIN_OPERATION_EXACT;
+    operation.name.data = (const uint8_t *)"echo";
+    operation.name.len = 4;
+    operation.arguments = &argument;
+    operation.argument_count = 1;
+    operation.columns = &column;
+    operation.column_count = 1;
+    operation.scalar = echo_operation;
+    if (service->register_operation(db, &operation) != 0) return ZOVA_PLUGIN_ERROR;
+    if (service->register_operation(db, &operation) != ZOVA_PLUGIN_INVALID_ARGUMENT) return ZOVA_PLUGIN_ERROR;
+    operation.kind = ZOVA_PLUGIN_OPERATION_TABLE;
+    operation.flags |= ZOVA_PLUGIN_OPERATION_ORDERED;
+    operation.name.data = (const uint8_t *)"series";
+    operation.name.len = 6;
+    operation.scalar = NULL;
+    operation.open = series_open;
+    operation.next = series_next;
+    operation.close = series_close;
+    return service->register_operation(db, &operation);
+}
 
 typedef struct query_state {
     int valid;
@@ -145,7 +216,8 @@ static const zova_plugin_descriptor_v1 descriptor = {
     sizeof(zova_plugin_descriptor_v1), ZOVA_PLUGIN_ABI_V1,
 #ifdef ZOVA_SERVICES_FIXTURE
     ZOVA_PLUGIN_REQUIRES_QUERY_V1 | ZOVA_PLUGIN_REQUIRES_DIAGNOSTICS_V1 |
-        ZOVA_PLUGIN_REQUIRES_DATA_V1 | ZOVA_PLUGIN_REQUIRES_STORAGE_V1,
+        ZOVA_PLUGIN_REQUIRES_DATA_V1 | ZOVA_PLUGIN_REQUIRES_STORAGE_V1 |
+        ZOVA_PLUGIN_REQUIRES_OPERATIONS_V1,
 #else
     0,
 #endif
@@ -156,7 +228,12 @@ static const zova_plugin_descriptor_v1 descriptor = {
 #else
     NULL,
 #endif
-    drop, NULL
+    drop,
+#ifdef ZOVA_SERVICES_FIXTURE
+    register_operations
+#else
+    NULL
+#endif
 };
 #endif
 

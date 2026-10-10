@@ -253,6 +253,9 @@ pub fn install(db: *sqlite.Database, registry: Registry, name: []const u8, valid
     const extension = registry.find(name) orelse return error.ExtensionNotFound;
     try validateManifest(extension.manifest);
     if (try isInstalled(db, name)) return error.ExtensionExists;
+    const sql_scope = try plugin.operations.begin(db, name);
+    var sql_success = false;
+    defer sql_scope.finish(sql_success);
 
     var before_objects = try listSchemaObjects(std.heap.c_allocator, db);
     defer before_objects.deinit(std.heap.c_allocator);
@@ -273,6 +276,7 @@ pub fn install(db: *sqlite.Database, registry: Registry, name: []const u8, valid
 
     try db.releaseSavepoint("extension_lifecycle");
     released = true;
+    sql_success = true;
 }
 
 /// Explicit forward path. Kept outside Extension to preserve the legacy ABI.
@@ -298,6 +302,9 @@ pub fn upgrade(allocator: std.mem.Allocator, db: *sqlite.Database, registry: Reg
     try registry.validate();
     try validateName(name);
     const target = registry.find(name) orelse return error.ExtensionUnavailable;
+    const sql_scope = try plugin.operations.begin(db, name);
+    var sql_success = false;
+    defer sql_scope.finish(sql_success);
     try db.savepoint("extension_upgrade");
     errdefer {
         db.rollbackToSavepoint("extension_upgrade") catch {};
@@ -337,6 +344,7 @@ pub fn upgrade(allocator: std.mem.Allocator, db: *sqlite.Database, registry: Reg
     std.debug.assert(try stmt.step() == .done);
     try validateInstalledState(allocator, db);
     try db.releaseSavepoint("extension_upgrade");
+    sql_success = true;
 }
 
 pub fn drop(db: *sqlite.Database, registry: Registry, name: []const u8, validate_core: ?ValidationHook) Error!void {
@@ -349,6 +357,8 @@ pub fn drop(db: *sqlite.Database, registry: Registry, name: []const u8, validate
     }
     const extension = registry.find(name) orelse return error.ExtensionUnavailable;
     try ensureManifestMatchesInstalled(extension.manifest, installed);
+    const sql_scope = try plugin.operations.begin(db, name);
+    defer sql_scope.finish(false);
 
     try db.savepoint("extension_lifecycle");
     var released = false;

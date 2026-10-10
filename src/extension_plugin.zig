@@ -4,6 +4,7 @@ const sqlite = @import("sqlite.zig");
 const extension = @import("extension.zig");
 const api = @import("extension_plugin_api.zig");
 const data_access = @import("extension_data.zig");
+pub const operations = @import("extension_operations.zig");
 pub const status_unsupported = api.status_unsupported;
 pub const status_limit = api.status_limit;
 pub const status_canceled = api.status_canceled;
@@ -31,17 +32,22 @@ pub const Client = api.Client;
 pub const Descriptor = api.Descriptor;
 pub const UpgradeDescriptor = api.UpgradeDescriptor;
 pub const Phase = enum { install, check, drop, register_sql };
-const supported_flags = has_upgrade | requires_query | requires_diagnostics | api.requires_data | api.requires_storage;
+const supported_flags = has_upgrade | requires_query | requires_diagnostics | api.requires_data | api.requires_storage | api.requires_operations;
 const query_service: QueryService = .{ .query = query };
 const data_service: api.DataService = .{ .read = readData };
 const storage_service: api.StorageService = .{ .execute = storage };
 const diagnostics_service: DiagnosticsService = .{ .copy_sqlite_error = copySqliteError };
+const operation_service: api.OperationService = .{ .register_operation = registerOperation };
 const storage_function_names = [_][]const u8{ "count", "sum", "avg", "min", "max", "total", "coalesce", "ifnull", "nullif", "length", "octet_length", "typeof", "abs", "lower", "upper", "hex", "unhex", "substr", "substring", "round" };
 const Context = struct {
     db: *sqlite.Database,
     storage_prefix: []const u8 = "",
     service_active: bool = false,
     storage_functions: ?u32 = null,
+    registration_allowed: bool = false,
+    registration_version: []const u8 = "",
+    operation: bool = false,
+    read_only_operation: bool = false,
 };
 
 pub fn legacyHost() Host {
@@ -98,6 +104,14 @@ pub fn invoke(d: Descriptor, phase: Phase, db: *sqlite.Database) extension.Error
         .drop => d.drop,
         .register_sql => d.register_sql,
     } orelse return;
+    if (phase == .register_sql) {
+        const scope = try operations.begin(db, std.mem.span(d.name.?));
+        var success = false;
+        defer scope.finish(success);
+        try invokeContextHook(hook, db, std.mem.span(d.storage_prefix.?), std.mem.span(d.version.?));
+        success = true;
+        return;
+    }
     return invokeOwnedHook(hook, db, std.mem.span(d.storage_prefix.?));
 }
 
@@ -106,6 +120,9 @@ pub fn invokeHook(hook: Hook, db: *sqlite.Database) extension.Error!void {
 }
 
 pub fn invokeOwnedHook(hook: Hook, db: *sqlite.Database, storage_prefix: []const u8) extension.Error!void {
+    return invokeContextHook(hook, db, storage_prefix, "");
+}
+fn invokeContextHook(hook: Hook, db: *sqlite.Database, storage_prefix: []const u8, registration_version: []const u8) extension.Error!void {
     const host = serviceHost();
     // Scope both related source pages and private writes. On failure preserve
     // earlier caller work, including when lifecycle already owns a savepoint.
@@ -122,7 +139,7 @@ pub fn invokeOwnedHook(hook: Hook, db: *sqlite.Database, storage_prefix: []const
         defer pin.deinit();
         _ = try pin.step();
     }
-    var context: Context = .{ .db = db, .storage_prefix = storage_prefix };
+    var context: Context = .{ .db = db, .storage_prefix = storage_prefix, .registration_allowed = registration_version.len != 0, .registration_version = registration_version };
     switch (hook(&host.base, &context)) {
         0 => {},
         2 => return error.OutOfMemory,
@@ -130,6 +147,50 @@ pub fn invokeOwnedHook(hook: Hook, db: *sqlite.Database, storage_prefix: []const
     }
     try db.releaseSavepoint("zova_plugin_hook");
     released = true;
+}
+
+pub const OperationRunner = *const fn (*const Host, ?*anyopaque, ?*anyopaque) callconv(.c) i32;
+/// Authorized callback scope, already inside the connection's SQL execution.
+/// Never reacquire public handle locks. Scalar writes roll back on all failures.
+pub fn callOperation(db: *sqlite.Database, prefix: []const u8, mutating: bool, runner: OperationRunner, state: ?*anyopaque) i32 {
+    if (mutating) db.savepoint("zova_plugin_operation") catch |err| return serviceStatus(err);
+    var success = false;
+    defer if (mutating and !success) {
+        db.rollbackToSavepoint("zova_plugin_operation") catch {};
+        db.releaseSavepoint("zova_plugin_operation") catch {};
+    };
+    var pins: [3]?sqlite.Statement = @splat(null);
+    defer for (&pins) |*pin| if (pin.*) |*stmt| stmt.deinit();
+    for ([_][]const u8{ "main.", data_access.schema(db, "graph_store") catch |err| return serviceStatus(err), data_access.schema(db, "vector_store") catch |err| return serviceStatus(err) }, 0..) |schema_prefix, i| {
+        var buffer: [128]u8 = undefined;
+        const sql = std.fmt.bufPrintSentinel(&buffer, "select 1 from {s}sqlite_schema limit 1", .{schema_prefix}, 0) catch return 3;
+        pins[i] = db.prepare(sql) catch |err| return serviceStatus(err);
+        _ = pins[i].?.step() catch |err| return serviceStatus(err);
+    }
+    if (mutating and sqlite.c.sqlite3_db_readonly(db.handle, "main") != 0) return 1;
+    var context: Context = .{ .db = db, .storage_prefix = prefix, .operation = true, .read_only_operation = !mutating };
+    const host = serviceHost();
+    const rc = runner(&host.base, &context, state);
+    if (rc != 0) return if (rc >= 1 and rc <= 6) rc else 1;
+    // Finalize pins before a mutating release can commit its owned savepoint.
+    for (&pins) |*pin| {
+        if (pin.*) |*stmt| stmt.deinit();
+        pin.* = null;
+    }
+    if (mutating) db.releaseSavepoint("zova_plugin_operation") catch |err| return serviceStatus(err);
+    success = true;
+    return 0;
+}
+
+fn registerOperation(raw: ?*anyopaque, descriptor: ?*const api.Operation) callconv(.c) i32 {
+    const state: *Context = @ptrCast(@alignCast(raw orelse return 3));
+    if (state.service_active or !state.registration_allowed or state.storage_prefix.len < "_zova_ext__".len) return 3;
+    state.service_active = true;
+    defer state.service_active = false;
+    const owner = state.storage_prefix["_zova_ext_".len .. state.storage_prefix.len - 1];
+    operations.register(state.db, owner, state.storage_prefix, state.registration_version, descriptor orelse return 3) catch |err| return serviceStatus(err);
+    state.storage_functions = null;
+    return 0;
 }
 
 fn getService(context: ?*anyopaque, id: u32, version: u32, min_size: u32, output: ?*?*const anyopaque) callconv(.c) i32 {
@@ -155,6 +216,10 @@ fn getService(context: ?*anyopaque, id: u32, version: u32, min_size: u32, output
         api.service_storage => {
             if (state.storage_prefix.len == 0 or min_size > @sizeOf(api.StorageService)) return status_unsupported;
             out.* = &storage_service;
+        },
+        api.service_operations => {
+            if (!state.registration_allowed or min_size > @sizeOf(api.OperationService)) return status_unsupported;
+            out.* = &operation_service;
         },
         else => return status_unsupported,
     }
@@ -268,7 +333,7 @@ fn storage(context: ?*anyopaque, request: ?*const QueryRequest) callconv(.c) i32
         // it before our own savepoint commands. Never authorize by SQL spelling.
         state.db.setAuthorizer(storageAuthorizer, state) catch |err| return serviceStatus(err);
         defer state.db.setAuthorizer(null, null) catch {};
-        executeSql(std.heap.c_allocator, state.db, r, true) catch |err| {
+        executeSql(std.heap.c_allocator, state.db, r, !state.read_only_operation) catch |err| {
             if (sqlite.c.sqlite3_errcode(state.db.handle) == sqlite.c.SQLITE_AUTH) return 3;
             return serviceStatus(err);
         };
@@ -354,7 +419,7 @@ fn copySqliteError(context: ?*anyopaque, buffer: ?[*]u8, capacity: u64, written:
 
 fn execContextSql(context: ?*anyopaque, sql: ?[*]const u8, len: u64) callconv(.c) i32 {
     const state: *Context = @ptrCast(@alignCast(context orelse return 3));
-    if (state.service_active) return 3;
+    if (state.service_active or state.operation) return 3;
     state.service_active = true;
     defer state.service_active = false;
     return execSql(state.db, sql, len);

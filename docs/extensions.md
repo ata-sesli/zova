@@ -822,6 +822,73 @@ incarnation/change tracking and generated-C bundle loading remain separate work.
 These services support source materialization and transactional derived storage;
 they do not independently guarantee a persistent index's freshness.
 
+## SQL operation registration
+
+Portable plugins negotiate `ZOVA_PLUGIN_SERVICE_OPERATIONS` version 1 during
+their `register_sql` hook. Declare `ZOVA_PLUGIN_REQUIRES_OPERATIONS_V1` when
+required. The base descriptor, application ABI and storage format do not change.
+The standalone Zig author helper is `Client.registerOperation`; C/Rust authors
+use the matching layouts in `zova_plugin.h` / raw `zova-sys::plugin`.
+
+An operation's local name becomes `zova_<extension-name>_<local-name>`:
+
+```sql
+SELECT zova_example_score(?1);
+SELECT node_id, score FROM zova_example_rank(?1) ORDER BY score DESC, node_id;
+```
+
+These are ordinary prepared statements: no new native invocation surface or
+binding-specific result API is required. Scalar operations emit exactly one
+typed value. Table operations supply named result columns plus required hidden
+argument columns. The host pulls one row through `open` / `next` / `close` and
+copies borrowed bytes before advancing. SQL `LIMIT`, reset, finalization,
+cancellation and errors close the cursor. This does not require materializing a
+complete result in host memory. Plugin working memory remains plugin-owned.
+
+Every operation declares **exact** or **approximate** semantics; installing one
+does not change any core search/traversal behavior. Authors document the metric,
+accuracy/configuration and emitted order. `ORDERED` means deterministic plugin
+emission, not a replacement for an application's SQL `ORDER BY`. For explicit
+paging, put the cursor and page limit in the operation's typed arguments.
+
+Arguments have no implicit numeric/text conversions. NULL requires `nullable`.
+The interface bounds arguments to 32, result columns to 64, and input/each row
+to 1 MiB (including Value records). It does not bound the algorithm's total CPU
+or private working memory. See the header for precise pointer/count and status
+contracts. Callbacks use authorized query/data/private-storage services on the
+already-owned connection; they never reacquire public handle mutexes or expose
+SQLite handles. Source reads keep the SQL cursor's snapshot, including bound
+stores; this is not a simultaneous snapshot across separate WAL files.
+
+Operations are read-only unless a scalar declares `MUTATING`. Mutating scalars
+are called through a standalone SELECT and may write only their private tables
+through the storage service; each invocation has an atomic savepoint. They fail
+on read-only connections and inside an already-active DML statement. Multiple
+successful calls are not one batch: use a caller transaction when they must be
+committed together. Table operations remain read-only. Legacy `exec_sql`,
+registration during invocation, recursion and persistent view/trigger calls are
+not supported. Query functions must obey the existing no-side-effects contract;
+trusted native code is not sandboxed.
+
+Registration copies names/types and takes state ownership only on success.
+Failed install/registration/upgrade destroys new state without replacing old
+callbacks. SQL names are connection-local and cannot overwrite another function,
+module, table or view. Re-registration must preserve the signature and semantic
+flags. Reopen reruns the installed extension's `register_sql` hook. Callback code
+must remain loaded until all statements and the connection close.
+
+Successful prior registrations are retained until connection close (up to 64
+revisions per operation), allowing a caller transaction to roll back an upgrade
+or drop without dangling callbacks. Invocation resolves the installed code
+version; a dropped/unavailable version fails before entering plugin code. All
+retained states receive exactly one destroy call at connection close. This is
+connection lifetime management, not persistent-index freshness or automatic
+maintenance; those remain separate work.
+
+High-level trusted-bundle selection and portable loading in generated-C packages
+remain the separate distribution work item. SQL operation results themselves
+use the existing statement interface.
+
 ## Native Artifact Notes
 
 Native extension artifacts must be built for the target platform and a

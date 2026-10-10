@@ -30,10 +30,30 @@ fn drop(host: *const plugin.Host, connection: ?*anyopaque) callconv(.c) i32 {
     return 0;
 }
 
+fn echo(_: *const plugin.Host, _: ?*anyopaque, _: ?*anyopaque, call: *const plugin.OperationCall) callconv(.c) i32 {
+    return call.row.?(call.user_data, call.arguments, 1);
+}
+fn registerSql(host: *const plugin.Host, connection: ?*anyopaque) callconv(.c) i32 {
+    const arguments = [_]plugin.OperationColumn{.{ .name = .from("input"), .kind = plugin.value_integer }};
+    const columns = [_]plugin.OperationColumn{.{ .name = .from("value"), .kind = plugin.value_integer }};
+    const operation: plugin.Operation = .{
+        .kind = plugin.operation_scalar,
+        .flags = plugin.operation_exact,
+        .name = .from("echo"),
+        .arguments = &arguments,
+        .argument_count = 1,
+        .columns = &columns,
+        .column_count = 1,
+        .scalar = echo,
+    };
+    (plugin.Client{ .host = host, .connection = connection }).registerOperation(&operation) catch return 1;
+    return 0;
+}
+
 const descriptor: plugin.Descriptor = .{
     .struct_size = @sizeOf(plugin.Descriptor),
     .abi_version = 1,
-    .flags = plugin.requires_storage,
+    .flags = plugin.requires_storage | plugin.requires_operations,
     .name = "c_test",
     .version = "1.0.0",
     .storage_prefix = "_zova_ext_c_test_",
@@ -41,6 +61,7 @@ const descriptor: plugin.Descriptor = .{
     .install = install,
     .check = check,
     .drop = drop,
+    .register_sql = registerSql,
 };
 
 pub export fn zova_plugin_entry_v1(version: u32) callconv(.c) ?*const plugin.Descriptor {

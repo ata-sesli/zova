@@ -19,6 +19,53 @@ pub const service_data: u32 = 3;
 pub const service_storage: u32 = 4;
 pub const requires_data: u64 = 8;
 pub const requires_storage: u64 = 16;
+pub const service_operations: u32 = 5;
+pub const requires_operations: u64 = 32;
+pub const operation_scalar: u32 = 1;
+pub const operation_table: u32 = 2;
+pub const operation_exact: u64 = 1;
+pub const operation_approximate: u64 = 2;
+pub const operation_mutating: u64 = 4;
+pub const operation_ordered: u64 = 8;
+
+pub const OperationColumn = extern struct {
+    name: Bytes,
+    kind: u32,
+    nullable: u32 = 0,
+};
+pub const OperationCall = extern struct {
+    struct_size: u32 = @sizeOf(OperationCall),
+    reserved: u32 = 0,
+    arguments: ?[*]const Value = null,
+    argument_count: u64 = 0,
+    row: ?RowCallback,
+    user_data: ?*anyopaque = null,
+};
+pub const ScalarOperation = *const fn (*const Host, ?*anyopaque, ?*anyopaque, *const OperationCall) callconv(.c) i32;
+pub const OperationOpen = *const fn (*const Host, ?*anyopaque, ?*anyopaque, ?[*]const Value, u64, ?*?*anyopaque) callconv(.c) i32;
+pub const OperationNext = *const fn (*const Host, ?*anyopaque, ?*anyopaque, RowCallback, ?*anyopaque, ?*u32) callconv(.c) i32;
+pub const OperationClose = *const fn (?*anyopaque) callconv(.c) void;
+pub const Operation = extern struct {
+    struct_size: u32 = @sizeOf(Operation),
+    kind: u32,
+    flags: u64,
+    name: Bytes,
+    arguments: ?[*]const OperationColumn = null,
+    argument_count: u32 = 0,
+    column_count: u32,
+    columns: ?[*]const OperationColumn,
+    user_data: ?*anyopaque = null,
+    destroy: ?OperationClose = null,
+    scalar: ?ScalarOperation = null,
+    open: ?OperationOpen = null,
+    next: ?OperationNext = null,
+    close: ?OperationClose = null,
+};
+pub const OperationService = extern struct {
+    struct_size: u32 = @sizeOf(OperationService),
+    version: u32 = 1,
+    register_operation: ?*const fn (?*anyopaque, ?*const Operation) callconv(.c) i32 = null,
+};
 
 pub const Bytes = extern struct {
     data: ?[*]const u8 = null,
@@ -118,7 +165,7 @@ pub const DiagnosticsService = extern struct {
     copy_sqlite_error: ?*const fn (?*anyopaque, ?[*]u8, u64, ?*u64) callconv(.c) i32 = null,
 };
 /// Zig author convenience over the exact C layouts and calling convention.
-/// This value borrows the current hook and must not escape it.
+/// This value borrows the current hook/operation call and must not escape it.
 pub const Client = struct {
     host: *const Host,
     connection: ?*anyopaque,
@@ -145,6 +192,11 @@ pub const Client = struct {
     pub fn storage(self: Client, request: *const QueryRequest) Error!void {
         const service = try self.getService(StorageService, service_storage);
         try result((service.execute orelse return error.Unsupported)(self.connection, request));
+    }
+
+    pub fn registerOperation(self: Client, operation: *const Operation) Error!void {
+        const service = try self.getService(OperationService, service_operations);
+        try result((service.register_operation orelse return error.Unsupported)(self.connection, operation));
     }
 
     pub fn copySqliteError(self: Client, buffer: []u8) Error!usize {
