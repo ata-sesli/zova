@@ -31,6 +31,10 @@ ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_operation_column_v1) == 24, "column layout
 ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_operation_call_v1) == 40, "call layout");
 ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_operation_v1) == 104, "operation layout");
 ZOVA_LAYOUT_ASSERT(offsetof(zova_plugin_operation_v1, scalar) == 72, "scalar offset");
+ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_vector_view_v1) == 40, "vector view layout");
+ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_vector_changes_request_v1) == 104, "vector changes layout");
+ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_vector_changes_page_v1) == 64, "vector changes page layout");
+ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_vector_maintenance_service_v1) == 24, "vector maintenance layout");
 
 static int32_t ZOVA_PLUGIN_CALL echo_operation(const zova_plugin_host_v1 *host,
         void *connection, void *state, const zova_plugin_operation_call_v1 *call) {
@@ -173,6 +177,21 @@ static int32_t ZOVA_PLUGIN_CALL check_services(const zova_plugin_host_v1 *host, 
         if (data->read(db, &invalid, &page) != ZOVA_PLUGIN_INVALID_ARGUMENT ||
             page.rows != 0 || page.has_more != 0 || page.next.key != 0)
             return ZOVA_PLUGIN_ERROR;
+        {
+            const zova_plugin_vector_maintenance_service_v1 *maintenance;
+            zova_plugin_vector_view_v1 view;
+            zova_plugin_vector_changes_page_v1 changes;
+            zova_plugin_bytes_v1 empty = {NULL, 0};
+            memset(&view, 0xff, sizeof(view));
+            memset(&changes, 0xff, sizeof(changes));
+            if (extended->get_service(db, ZOVA_PLUGIN_SERVICE_VECTOR_MAINTENANCE, 1, sizeof(*maintenance), &service) != 0)
+                return ZOVA_PLUGIN_ERROR;
+            maintenance = (const zova_plugin_vector_maintenance_service_v1 *)service;
+            if (maintenance->view(db, empty, &view) != ZOVA_PLUGIN_INVALID_ARGUMENT || view.revision != 0 || view.token[0] != 0)
+                return ZOVA_PLUGIN_ERROR;
+            if (maintenance->read_changes(db, NULL, &changes) != ZOVA_PLUGIN_INVALID_ARGUMENT || changes.rows != 0 || changes.view.revision != 0)
+                return ZOVA_PLUGIN_ERROR;
+        }
     }
     if (extended->get_service(db, ZOVA_PLUGIN_SERVICE_DIAGNOSTICS, 1, sizeof(*diagnostics), &service) != 0)
         return ZOVA_PLUGIN_ERROR;

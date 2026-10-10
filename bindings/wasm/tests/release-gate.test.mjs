@@ -82,10 +82,11 @@ test("central version bump updates WASM without changing storage format", () => 
       mkdirSync(dirname(join(fixture, relative)), { recursive: true });
       cpSync(join(root, relative), join(fixture, relative));
     }
+    const formatLine = readFileSync(join(fixture, "src/version.zig"), "utf8").match(/^pub const format_version = .*;$/m)[0];
     const run = Bun.spawnSync(["sh", join(fixture, "scripts/bump-version.sh"), "9.8.7-rc.1"]);
     expect(run.exitCode).toBe(0);
     expect(JSON.parse(readFileSync(join(fixture, "bindings/wasm/package.json"), "utf8")).version).toBe("9.8.7-rc.1");
     expect(readFileSync(join(fixture, "bindings/wasm/README.md"), "utf8")).toContain("9.8.7-rc.1");
-    expect(readFileSync(join(fixture, "src/version.zig"), "utf8")).toContain('format_version = "11"');
+    expect(readFileSync(join(fixture, "src/version.zig"), "utf8")).toContain(formatLine);
   } finally { rmSync(fixture, { recursive: true, force: true }); }
 });

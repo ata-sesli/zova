@@ -37,6 +37,9 @@ const MigrationSet = struct {
 /// covered by the set that owns them, and standalone store files are covered by
 /// the probe matrix: only a main database can be migrated on its own.
 const migration_sets = [_]MigrationSet{
+    .{ .format = 11, .members = &.{"empty-main-format-11.zova"} },
+    .{ .format = 11, .members = &.{"format-11.zova"} },
+    .{ .format = 11, .members = &.{ "bound-main-format-11.zova", "bound-main-format-11.objects.zova", "bound-main-format-11.vectors.zova", "bound-main-format-11.graphs.zova" } },
     .{ .format = 9, .members = &.{"empty-main-format-9.zova"} },
     .{ .format = 9, .members = &.{"format-9.zova"} },
     .{

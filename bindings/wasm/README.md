@@ -4,7 +4,7 @@ Experimental Zova SQL and binary KV for browsers, in memory or named OPFS storag
 core and bundled SQLite run inside a dedicated worker as one WebAssembly module.
 
 This experimental package follows the repository release (`1.1.0`,
-format 11). Browser API stability
+format 12). Browser API stability
 and full native compatibility are not promised. Memory databases lose their
 data when closed or when their worker/page terminates.
 

@@ -174,6 +174,7 @@ fn initializeObjectSchema(db: *sqlite.Database) sqlite.Error!void {
 fn initializeVectorSchema(db: *sqlite.Database) sqlite.Error!void {
     try db.exec(vector_impl.collections_schema_sql ++ ";");
     try db.exec(vector_impl.vectors_schema_sql ++ ";");
+    try @import("../vector_maintenance.zig").initialize(db);
 }
 
 fn initializeGraphSchema(db: *sqlite.Database) sqlite.Error!void {

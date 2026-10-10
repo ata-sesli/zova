@@ -67,6 +67,14 @@ fn registry(db: *sqlite.Database) Error!*Registry {
     db.extension_sql_cleanup = destroyRegistry;
     return r;
 }
+/// Do not invalidate a live plugin source cursor on the same connection.
+/// No registry allocation occurs on databases without plugin operations.
+pub fn requireSourceIdle(db: *sqlite.Database) error{Busy}!void {
+    if (db.extension_sql_state) |raw| {
+        const r: *Registry = @ptrCast(@alignCast(raw));
+        if (r.active != 0) return error.Busy;
+    }
+}
 fn destroyRegistry(raw: ?*anyopaque) void {
     const r: *Registry = @ptrCast(@alignCast(raw.?));
     for (r.slots.items) |slot| {
@@ -349,9 +357,16 @@ fn scalar(raw: ?*c.sqlite3_context, argc: c_int, argv: [*c]?*c.sqlite3_value) ca
     var call: ScalarCall = .{ .ctx = ctx, .d = stored.descriptor, .args = args[0..@intCast(argc)] };
     const status = plugin.callOperation(&db, slot.prefix, stored.descriptor.flags & api.operation_mutating != 0, ScalarCall.run, &call);
     if (status != 0) {
-        c.sqlite3_result_error(ctx, "plugin operation failed", -1);
+        c.sqlite3_result_error(ctx, statusMessage(status), -1);
         c.sqlite3_result_error_code(ctx, statusCode(status));
     }
+}
+fn statusMessage(status: i32) [*:0]const u8 {
+    return switch (status) {
+        7 => "plugin vector history unavailable; reconstruct against the current snapshot",
+        8 => "plugin vector source changed; discard the incompatible generation",
+        else => "plugin operation failed",
+    };
 }
 fn statusCode(status: i32) c_int {
     return switch (status) {
@@ -555,6 +570,11 @@ fn tableClose(raw: ?*c.sqlite3_vtab_cursor) callconv(.c) c_int {
     return c.SQLITE_OK;
 }
 fn tableError(cursor: *TableCursor, status: i32) c_int {
+    if (status == 7 or status == 8) {
+        const table = cursor.base.pVtab;
+        c.sqlite3_free(table.*.zErrMsg);
+        table.*.zErrMsg = c.sqlite3_mprintf("%s", statusMessage(status));
+    }
     cursor.clear();
     return statusCode(status);
 }

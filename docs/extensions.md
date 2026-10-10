@@ -1,5 +1,9 @@
 # Zova Extensions
 
+Development: [transactional vector maintenance](#transactional-vector-maintenance-development-format-12)
+describes the negotiated source-history service and the explicit format-12
+migration. It does not include the separate USearch reference integration.
+
 Zova extensions are trusted process code that can install and manage private
 Zova storage, then expose a SQL surface on every opened connection.
 
@@ -911,3 +915,83 @@ Deferred from this release: aggregate/window SQL callbacks, SQLite subtype
 support, unregister APIs, raw `sqlite3 *` exposure as the normal extension path,
 safe high-level Rust, Go, Python, and JavaScript callbacks. These limitations
 remain in 1.1.0.
+
+## Transactional vector maintenance (development format 12)
+
+Development format 12 introduces source-local vector tracking for #136.
+USearch's algorithm and persistent generation representation remain #141.
+This work does not bump package or application ABI versions.
+
+## Authoring interface
+
+Require `ZOVA_PLUGIN_REQUIRES_VECTOR_MAINTENANCE_V1` and negotiate service 6,
+version 1 (`zova_plugin_vector_maintenance_service_v1`). Zig authors use
+`Client.vectorView` and `Client.vectorChanges`; raw Rust layouts live in
+`zova_sys::plugin`. Only public collection names, IDs, values and opaque view
+tokens cross the interface, never SQLite handles or private storage identifiers.
+
+A view contains a collection incarnation, revision and branch token in the
+caller's visible SQLite snapshot. A revision alone is not a cache key: rollback
+can undo revision 20 and another write can create a different revision 20.
+Their tokens differ. Deleting/recreating a collection changes its incarnation,
+even if its public name and private row number are reused.
+
+Build a base generation by scanning values and capturing coverage in one
+hook/operation or caller transaction. Persist coverage together with the
+plugin's generation/configuration. A token is source coverage evidence, not
+proof that the algorithm built its index correctly. Capturing a view alone is
+not an index build.
+
+Changes stream as `revision, vector_id, found, current_values`. Values are final
+values in this snapshot, not historical payload copies. IDs can repeat; apply
+their final values or remove missing IDs. Visible additions/replacements must
+become searchable; filtering stale candidates alone omits new vectors.
+Start `after_revision=0`; page with `next_revision`, retaining original `since`
+coverage and the same snapshot. Requests allow 4096 rows and 1 MiB delivered
+bytes. Copy borrowed rows when needed and discard partial delivery on error.
+
+## Snapshots, caches and recovery
+
+Use immutable base generations and call-local or snapshot-associated deltas,
+not one mutable newest index for all readers. Cache validity includes incarnation,
+configuration/data version and source view. Source writes and history roll back
+together through savepoints and caller transactions. Never promote provisional
+cache state to committed authority. Read-only queries can reconcile in memory.
+Native vector writes are rejected while a plugin source cursor is live on the
+same connection; reset/finalize releases it. Other connections remain free to
+commit, while older WAL readers retain their historical source/history pages.
+
+Each collection retains 4096 changes, retired in 256-change blocks: at most
+4351 records. History stores IDs and small tokens, not full vector payloads.
+This bounds logical history, not WAL growth while long-lived readers pin older
+pages. Applications still control read-transaction lifetimes and checkpoint
+pressure; maintenance never invalidates an older caller snapshot to reclaim space.
+Collection deletion removes its history. `HISTORY_UNAVAILABLE` (7) means coverage
+predates retention; reconstruct against this snapshot or fail clearly.
+`SOURCE_CHANGED` (8) means recreation, divergent/rolled-back coverage or a future
+view; discard the incompatible generation. Neither is an empty successful delta.
+SQL, allocation/callback, corruption and budget failures leave outputs zeroed.
+
+Persistent triggers track native puts, replacements, deletes, batches, fresh
+loads and cascades. Tracking failures abort the authoritative statement; batch
+savepoints also undo earlier rows of the failed batch. No per-row algorithm
+callback, whole-HNSW copying or full-index persistence is introduced.
+
+The journal lives with vectors, including in bound vector stores. Whole-collection
+backup/restore/split preserves identity and retained history; merges establish
+new destination views. Plugin generations remain in main. Main and a bound WAL
+source are **not** cross-file crash-atomic. Always validate persisted generation
+coverage against the visible source-local journal before reuse. Compatible older
+generations can reconcile forward; missing/incompatible coverage requires
+reconstruction or a clear error. A main commit marker alone cannot prove freshness.
+Durability settings are unchanged.
+
+## Format transition
+
+Open never upgrades format 11. Explicit copy-forward 11→12 adds tracking beside
+existing vectors, assigns initial tracking identities and starts revision zero.
+Existing database/store IDs, public IDs, native row keys, values, graph ordering,
+payloads and extension data remain unchanged. Formats 9/10 retain their adjacent
+steps. Object/graph payload schemas are unchanged. Version metadata advances last
+inside each per-file migration transaction; interrupted set publication uses
+the existing migration recovery protocol, not a cross-file WAL atomicity claim.

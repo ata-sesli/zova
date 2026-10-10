@@ -6,6 +6,111 @@ const sqlite = @import("sqlite.zig");
 const dynamic = @import("extension_dynamic.zig");
 const options = @import("plugin_fixture_options");
 
+var maintenance_baseline: data_api.VectorView = .{};
+var maintenance_page: data_api.VectorChangesPage = .{};
+fn noChangeRows(_: ?*anyopaque, _: ?[*]const data_api.Value, _: u64) callconv(.c) i32 {
+    return 0;
+}
+fn checkMaintenance(host: *const plugin.Host, raw: ?*anyopaque) callconv(.c) i32 {
+    const client = data_api.Client{ .host = host, .connection = raw };
+    client.vectorView("v", &maintenance_baseline) catch return 1;
+    client.vectorChanges(&.{ .name = .from("v"), .since = maintenance_baseline, .row_limit = 16, .byte_limit = 4096, .row = noChangeRows }, &maintenance_page) catch return 1;
+    return 0;
+}
+test "extension_plugin negotiates vector maintenance with zeroed outputs" {
+    var db = try @import("zova.zig").Database.createMemory();
+    defer db.deinit();
+    try db.createVectorCollection("v", .{ .dimensions = 2, .metric = .l2 });
+    var d = descriptor();
+    d.flags |= data_api.requires_vector_maintenance;
+    d.check = checkMaintenance;
+    _ = try plugin.validate(&d);
+    try plugin.invoke(d, .check, &db.sqlite_db);
+    try std.testing.expectEqual(@as(i64, 0), maintenance_baseline.revision);
+    try std.testing.expectEqual(@as(u64, 0), maintenance_page.rows);
+    var out: data_api.VectorView = maintenance_baseline;
+    const legacy = data_api.Host{};
+    try std.testing.expectError(error.Unsupported, (data_api.Client{ .host = &legacy, .connection = null }).vectorView("v", &out));
+    try std.testing.expectEqual(data_api.VectorView{}, out);
+}
+
+const MaintenanceBase = struct { view: data_api.VectorView };
+const MaintenanceProjection = struct {
+    arena: std.heap.ArenaAllocator,
+    ids: std.StringHashMapUnmanaged(bool) = .empty,
+    fn row(raw: ?*anyopaque, values: ?[*]const data_api.Value, count: u64) callconv(.c) i32 {
+        const self: *MaintenanceProjection = @ptrCast(@alignCast(raw.?));
+        if (count != 4) return 3;
+        const id = values.?[1].bytes.?[0..@intCast(values.?[1].bytes_len)];
+        const key = self.arena.allocator().dupe(u8, id) catch return 2;
+        self.ids.put(self.arena.allocator(), key, values.?[2].integer != 0) catch return 2;
+        return 0;
+    }
+};
+fn maintainedCount(host: *const plugin.Host, raw: ?*anyopaque, state: ?*anyopaque, call: *const data_api.OperationCall) callconv(.c) i32 {
+    const base: *const MaintenanceBase = @ptrCast(@alignCast(state.?));
+    const client = data_api.Client{ .host = host, .connection = raw };
+    var projection: MaintenanceProjection = .{ .arena = std.heap.ArenaAllocator.init(std.heap.c_allocator) };
+    defer projection.arena.deinit();
+    var request: data_api.VectorChangesRequest = .{ .name = .from("v"), .since = base.view, .row_limit = 16, .byte_limit = 4096, .row = MaintenanceProjection.row, .user_data = &projection };
+    while (true) {
+        var page: data_api.VectorChangesPage = .{};
+        client.vectorChanges(&request, &page) catch |err| return if (err == error.HistoryUnavailable) 7 else if (err == error.SourceChanged) 8 else 1;
+        if (page.has_more == 0) break;
+        request.after_revision = page.next_revision;
+    }
+    var count: i64 = 0;
+    var items = projection.ids.valueIterator();
+    while (items.next()) |found| if (found.*) {
+        count += 1;
+    };
+    const value: data_api.Value = .{ .kind = data_api.value_integer, .integer = count };
+    return call.row.?(call.user_data, @ptrCast(&value), 1);
+}
+fn destroyMaintenanceBase(raw: ?*anyopaque) callconv(.c) void {
+    std.heap.c_allocator.destroy(@as(*MaintenanceBase, @ptrCast(@alignCast(raw.?))));
+}
+fn registerMaintenanceCount(host: *const plugin.Host, raw: ?*anyopaque) callconv(.c) i32 {
+    const client = data_api.Client{ .host = host, .connection = raw };
+    const state = std.heap.c_allocator.create(MaintenanceBase) catch return 2;
+    client.vectorView("v", &state.view) catch {
+        std.heap.c_allocator.destroy(state);
+        return 1;
+    };
+    const operation: data_api.Operation = .{ .kind = data_api.operation_scalar, .flags = data_api.operation_exact, .name = .from("maintained_count"), .columns = &scalar_columns, .column_count = 1, .user_data = state, .destroy = destroyMaintenanceBase, .scalar = maintainedCount };
+    client.registerOperation(&operation) catch {
+        std.heap.c_allocator.destroy(state);
+        return 1;
+    };
+    return 0;
+}
+test "extension_plugin automatic reconciliation sees inserts replacements deletes and rollback through SQL" {
+    var db = try @import("zova.zig").Database.createMemory();
+    defer db.deinit();
+    try db.createVectorCollection("v", .{ .dimensions = 2, .metric = .l2 });
+    var d = descriptor();
+    d.flags |= data_api.requires_vector_maintenance;
+    d.register_sql = registerMaintenanceCount;
+    const ext = try plugin.validate(&d);
+    try extension.install(&db.sqlite_db, .{ .extensions = &.{ext}, .plugins = &.{d} }, "c_test", null);
+    try std.testing.expectEqual(@as(i64, 0), try scalarValue(&db.sqlite_db, "select zova_c_test_maintained_count()"));
+    try db.putVector("v", "a", .{ .f32 = &.{ 1, 2 } });
+    try std.testing.expectEqual(@as(i64, 1), try scalarValue(&db.sqlite_db, "select zova_c_test_maintained_count()"));
+    try db.begin();
+    try db.putVectors("v", &.{ .{ .id = "a", .values = .{ .f32 = &.{ 3, 4 } } }, .{ .id = "b", .values = .{ .f32 = &.{ 4, 5 } } } });
+    try std.testing.expectEqual(@as(i64, 2), try scalarValue(&db.sqlite_db, "select zova_c_test_maintained_count()"));
+    try db.savepoint("user");
+    try db.deleteVector("v", "a");
+    try std.testing.expectEqual(@as(i64, 1), try scalarValue(&db.sqlite_db, "select zova_c_test_maintained_count()"));
+    try db.rollbackToSavepoint("user");
+    try db.releaseSavepoint("user");
+    try std.testing.expectEqual(@as(i64, 2), try scalarValue(&db.sqlite_db, "select zova_c_test_maintained_count()"));
+    try db.rollback();
+    try std.testing.expectEqual(@as(i64, 1), try scalarValue(&db.sqlite_db, "select zova_c_test_maintained_count()"));
+    try db.deleteVector("v", "a");
+    try std.testing.expectEqual(@as(i64, 0), try scalarValue(&db.sqlite_db, "select zova_c_test_maintained_count()"));
+}
+
 const scalar_columns = [_]data_api.OperationColumn{.{ .name = .from("value"), .kind = data_api.value_integer }};
 const scalar_args = [_]data_api.OperationColumn{.{ .name = .from("input"), .kind = data_api.value_integer }};
 fn plusOne(_: *const plugin.Host, _: ?*anyopaque, _: ?*anyopaque, call: *const data_api.OperationCall) callconv(.c) i32 {
@@ -217,6 +322,24 @@ test "extension_plugin SQL streaming holds main and bound WAL snapshots" {
         }
         try std.testing.expectEqual(@as(i64, 3), try scalarValue(&db.sqlite_db, "select count(*) from zova_c_test_nodes()"));
     }
+}
+
+test "extension_plugin live source cursors reject interleaved vector writes" {
+    var db = try @import("zova.zig").Database.createMemory();
+    defer db.deinit();
+    try db.createGraph("topo");
+    try db.putGraphNodes(&.{ .{ .graph_name = "topo", .node_id = "a", .kind = "node" }, .{ .graph_name = "topo", .node_id = "b", .kind = "node" } });
+    try db.createVectorCollection("v", .{ .dimensions = 2, .metric = .l2 });
+    var d = descriptor();
+    d.register_sql = registerNodes;
+    const ext = try plugin.validate(&d);
+    try extension.install(&db.sqlite_db, .{ .extensions = &.{ext}, .plugins = &.{d} }, "c_test", null);
+    var stmt = try db.prepare("select value from zova_c_test_nodes()");
+    defer stmt.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+    try std.testing.expectError(error.Busy, db.putVector("v", "a", .{ .f32 = &.{ 1, 2 } }));
+    try stmt.reset();
+    try db.putVector("v", "a", .{ .f32 = &.{ 1, 2 } });
 }
 
 test "extension_plugin SQL scalar registration has typed arguments and connection lifetime" {

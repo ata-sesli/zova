@@ -58,7 +58,14 @@ pub fn probeDatabaseFormat(path: [:0]const u8) Error!DatabaseFormatInfo {
 pub const migration_steps = [_]MigrationStep{
     .{ .from_version = 9, .to_version = 10, .apply = migrateFormat9To10 },
     .{ .from_version = 10, .to_version = 11, .apply = migrateFormat10To11 },
+    .{ .from_version = 11, .to_version = 12, .apply = migrateFormat11To12 },
 };
+
+fn migrateFormat11To12(db: *sqlite.Database) Error!void {
+    // Object/graph stores have no vector source. Main and vector-store files
+    // initialize history in the very same file as their authoritative vectors.
+    if (try tableExists(db, "_zova_vector_collections")) try @import("../vector_maintenance.zig").initialize(db);
+}
 
 pub fn findMigrationStep(from_version: u32, to_version: u32) ?*const MigrationStep {
     for (&migration_steps) |*step| {
@@ -141,7 +148,7 @@ pub fn validateMigrationSourceSchema(db: *sqlite.Database, expected_format: []co
     try expectMetadataValue(db, "format_version", expected_format, .format_version);
     try validateExtensionSchema(db);
     try validateObjectSchemaExpected(db, expected_format);
-    try validateVectorSchema(db);
+    try @import("validation.zig").validateVectorSchemaExpected(db, expected_format);
     try validateGraphSchema(db);
     if (expected_version >= 10) try validateKvSchema(db);
     try validateOptionalBoundStoreSchema(db);
