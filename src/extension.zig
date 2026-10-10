@@ -320,7 +320,7 @@ pub fn upgrade(allocator: std.mem.Allocator, db: *sqlite.Database, registry: Reg
     if (path.hook) |hook| {
         try hook(db, target.manifest);
     } else {
-        try plugin.invokeHook(path.plugin_hook.?, db);
+        try plugin.invokeOwnedHook(path.plugin_hook.?, db, target.manifest.storage_prefix);
     }
     try registry.invoke(target, db, .register_sql);
     try registry.invoke(target, db, .check);

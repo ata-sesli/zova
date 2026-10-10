@@ -759,11 +759,68 @@ module has no SQLite/engine dependency. `examples/plugin_query.zig` is compiled
 as a real portable library alongside the C and C++ fixtures and loaded through
 the existing trusted loader in `zig build test-extensions`.
 
-This is the common-service foundation, not the complete algorithm-extension
-architecture. Typed graph/vector access, parameterized private-storage writes,
-SQL operation registration, incremental maintenance and generated-C bundle
-loading remain separate implementation work. Do not use private core tables as
-an algorithm-authoring interface. Bundled `trgm` and application APIs are unchanged.
+### Authoritative data and private-storage services
+
+`ZOVA_PLUGIN_SERVICE_DATA` provides bounded graph node/edge scans, keyed batches,
+incoming/outgoing adjacency, vector collection metadata, public-ID vector
+batches, and vector scans. `Client.read` is the Zig helper. The request operation
+selects a documented row layout in `include/zova_plugin.h`; every row uses the
+same `zova_plugin_value_v1` callback representation as queries. Graph keys remain
+opaque. No graph membership key, table name, attachment alias or raw connection
+is exposed. Vector values remain exact little-endian f32/f16 bytes or signed i8;
+they are not quantized or widened for the plugin.
+
+Each call accepts at most 4096 input/output rows and a 1 MiB delivery budget,
+including value descriptors and variable bytes. Graph cursors are exclusive
+`(created_order,key)` pairs; vector pages advance by the copied last public ID
+under BINARY ordering. One lookahead row sets `has_more`. Batch ordinals preserve
+input order, duplicates and missing results. Empty batches still validate the
+graph/collection. On failure the page output stays empty; discard callbacks
+already received. Return `CANCELED` or `OUT_OF_MEMORY` from a callback to stop.
+
+Related calls in one hook use a host-owned savepoint with pinned main and bound
+source snapshots. It joins a caller transaction, sees its earlier writes and
+never commits it. A failed hook rolls back only hook work. Source mutations and
+service reentry during callbacks are forbidden. Views are pinned per attached
+database; this does not promise simultaneous cross-file WAL visibility.
+
+The adapter performs set-wise indexed reads, not one prepared query per input
+key. Integer keys remain borrowed. Vector-ID batches allocate only 16-byte
+iovec descriptors per ID on 64-bit targets (at most 64 KiB plus arena overhead),
+not copied strings. Length-delimited IDs, including NUL, retain their identity.
+Row conversion uses fixed stack buffers, borrows SQLite bytes and allocates no
+result page. Vector validation visits each delivered element without allocating
+an owned/widened vector. Consumers must separately budget and measure decoding
+and algorithm working memory; no ANN/PageRank speed claim follows from this
+transport. Bounds limit delivery/conversion, not arbitrary SQL/native CPU or
+SQLite's internal workspace.
+
+`ZOVA_PLUGIN_SERVICE_STORAGE` / `Client.storage` accepts a single parameterized
+SELECT/WITH/INSERT/UPDATE/DELETE, including RETURNING, against the plugin's
+private main tables. Declare tables/indexes through install/upgrade first.
+Use `main.<private_table>` qualification, especially for count(*)/EXISTS: SQLite
+otherwise provides no resolved schema for these reads, and the host rejects
+ambiguous access rather than guessing. The authorizer rejects core/other-owner
+tables, attached/TEMP storage, triggers/views, DDL, PRAGMAs, transaction commands
+and user-defined functions. Permitted pure functions are count, sum, avg, min,
+max, total, coalesce, ifnull, nullif, length, octet_length, typeof, abs, lower,
+upper, hex, unhex, substr, substring and round. An application override of one
+of these names is rejected too; no application callback runs through the private
+storage service. Every call owns a savepoint;
+constraint faults, cancellation, allocation or result-budget failures roll back
+the complete call while preserving earlier work. Read-only connections may read
+but cannot write. QueryRequest budgets/borrowed lifetimes apply; supply a row
+callback even to a command with no result rows.
+
+Declare required services with `REQUIRES_DATA_V1` / `REQUIRES_STORAGE_V1` so older
+hosts reject before hooks run. Optional services can still be probed. Existing
+`exec_sql`, query services, installed extensions, `trgm`, schemas and formats
+remain compatible. Native plugins are trusted process code, not sandboxed.
+
+SQL operation registration, automatic incremental maintenance, durable source
+incarnation/change tracking and generated-C bundle loading remain separate work.
+These services support source materialization and transactional derived storage;
+they do not independently guarantee a persistent index's freshness.
 
 ## Native Artifact Notes
 

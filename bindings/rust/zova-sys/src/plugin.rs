@@ -16,6 +16,20 @@ pub const ZOVA_PLUGIN_REQUIRES_QUERY_V1: u64 = 2;
 pub const ZOVA_PLUGIN_REQUIRES_DIAGNOSTICS_V1: u64 = 4;
 pub const ZOVA_PLUGIN_SERVICE_QUERY: u32 = 1;
 pub const ZOVA_PLUGIN_SERVICE_DIAGNOSTICS: u32 = 2;
+pub const ZOVA_PLUGIN_REQUIRES_DATA_V1: u64 = 8;
+pub const ZOVA_PLUGIN_REQUIRES_STORAGE_V1: u64 = 16;
+pub const ZOVA_PLUGIN_SERVICE_DATA: u32 = 3;
+pub const ZOVA_PLUGIN_SERVICE_STORAGE: u32 = 4;
+pub const ZOVA_PLUGIN_GRAPH_NODES_SCAN: u32 = 1;
+pub const ZOVA_PLUGIN_GRAPH_EDGES_SCAN: u32 = 2;
+pub const ZOVA_PLUGIN_GRAPH_NODES_GET: u32 = 3;
+pub const ZOVA_PLUGIN_GRAPH_EDGES_GET: u32 = 4;
+pub const ZOVA_PLUGIN_GRAPH_NEIGHBORS: u32 = 5;
+pub const ZOVA_PLUGIN_VECTOR_METADATA: u32 = 6;
+pub const ZOVA_PLUGIN_VECTORS_SCAN: u32 = 7;
+pub const ZOVA_PLUGIN_VECTORS_GET: u32 = 8;
+pub const ZOVA_PLUGIN_OUTGOING: u32 = 0;
+pub const ZOVA_PLUGIN_INCOMING: u32 = 1;
 pub const ZOVA_PLUGIN_VALUE_NULL: u32 = 0;
 pub const ZOVA_PLUGIN_VALUE_INTEGER: u32 = 1;
 pub const ZOVA_PLUGIN_VALUE_FLOAT: u32 = 2;
@@ -112,3 +126,71 @@ pub struct zova_plugin_diagnostics_service_v1 {
 }
 
 pub type zova_plugin_entry_v1 = unsafe extern "C" fn(u32) -> *const zova_plugin_descriptor_v1;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct zova_plugin_bytes_v1 {
+    pub data: *const u8,
+    pub len: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct zova_plugin_cursor_v1 {
+    pub created_order: i64,
+    pub key: i64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct zova_plugin_data_page_v1 {
+    pub rows: u64,
+    pub has_more: u32,
+    pub reserved: u32,
+    pub next: zova_plugin_cursor_v1,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct zova_plugin_data_request_v1 {
+    pub struct_size: u32,
+    pub operation: u32,
+    pub name: zova_plugin_bytes_v1,
+    pub keys: *const i64,
+    pub key_count: u64,
+    pub ids: *const zova_plugin_bytes_v1,
+    pub id_count: u64,
+    pub after: zova_plugin_cursor_v1,
+    pub after_id: zova_plugin_bytes_v1,
+    pub node_id: zova_plugin_bytes_v1,
+    pub edge_type: zova_plugin_bytes_v1,
+    pub direction: u32,
+    pub reserved: u32,
+    pub row_limit: u64,
+    pub byte_limit: u64,
+    pub row: zova_plugin_row_v1,
+    pub user_data: *mut c_void,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct zova_plugin_data_service_v1 {
+    pub struct_size: u32,
+    pub version: u32,
+    pub read: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            *const zova_plugin_data_request_v1,
+            *mut zova_plugin_data_page_v1,
+        ) -> i32,
+    >,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct zova_plugin_storage_service_v1 {
+    pub struct_size: u32,
+    pub version: u32,
+    pub execute:
+        Option<unsafe extern "C" fn(*mut c_void, *const zova_plugin_query_request_v1) -> i32>,
+}

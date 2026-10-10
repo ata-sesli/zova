@@ -23,6 +23,9 @@ ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_descriptor_v1) == 88, "descriptor layout")
 ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_upgrade_descriptor_v1) == 104, "upgrade layout");
 ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_value_v1) == 40, "value layout");
 ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_query_request_v1) == 72, "query layout");
+ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_data_request_v1) == 160, "data layout");
+ZOVA_LAYOUT_ASSERT(offsetof(zova_plugin_data_request_v1, row_limit) == 128, "data budget");
+ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_data_page_v1) == 32, "page layout");
 
 typedef struct query_state {
     int valid;
@@ -83,6 +86,23 @@ static int32_t ZOVA_PLUGIN_CALL check_services(const zova_plugin_host_v1 *host, 
     request.row = receive;
     request.user_data = &state;
     if (query->query(db, &request) != 0 || !state.valid) return ZOVA_PLUGIN_ERROR;
+    {
+        const zova_plugin_storage_service_v1 *storage;
+        const zova_plugin_data_service_v1 *data;
+        zova_plugin_data_request_v1 invalid = {0};
+        zova_plugin_data_page_v1 page = {9, 1, 0, {1, 1}};
+        if (extended->get_service(db, ZOVA_PLUGIN_SERVICE_STORAGE, 1, sizeof(*storage), &service) != 0)
+            return ZOVA_PLUGIN_ERROR;
+        storage = (const zova_plugin_storage_service_v1 *)service;
+        if (storage->execute(db, &request) != 0 || !state.valid) return ZOVA_PLUGIN_ERROR;
+        if (extended->get_service(db, ZOVA_PLUGIN_SERVICE_DATA, 1, sizeof(*data), &service) != 0)
+            return ZOVA_PLUGIN_ERROR;
+        data = (const zova_plugin_data_service_v1 *)service;
+        invalid.struct_size = sizeof(invalid);
+        if (data->read(db, &invalid, &page) != ZOVA_PLUGIN_INVALID_ARGUMENT ||
+            page.rows != 0 || page.has_more != 0 || page.next.key != 0)
+            return ZOVA_PLUGIN_ERROR;
+    }
     if (extended->get_service(db, ZOVA_PLUGIN_SERVICE_DIAGNOSTICS, 1, sizeof(*diagnostics), &service) != 0)
         return ZOVA_PLUGIN_ERROR;
     diagnostics = (const zova_plugin_diagnostics_service_v1 *)service;
@@ -124,7 +144,8 @@ static const zova_plugin_upgrade_descriptor_v1 upgraded_descriptor = {
 static const zova_plugin_descriptor_v1 descriptor = {
     sizeof(zova_plugin_descriptor_v1), ZOVA_PLUGIN_ABI_V1,
 #ifdef ZOVA_SERVICES_FIXTURE
-    ZOVA_PLUGIN_REQUIRES_QUERY_V1 | ZOVA_PLUGIN_REQUIRES_DIAGNOSTICS_V1,
+    ZOVA_PLUGIN_REQUIRES_QUERY_V1 | ZOVA_PLUGIN_REQUIRES_DIAGNOSTICS_V1 |
+        ZOVA_PLUGIN_REQUIRES_DATA_V1 | ZOVA_PLUGIN_REQUIRES_STORAGE_V1,
 #else
     0,
 #endif

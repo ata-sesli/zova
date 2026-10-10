@@ -15,6 +15,65 @@ pub const service_query: u32 = 1;
 pub const service_diagnostics: u32 = 2;
 pub const requires_query: u64 = 2;
 pub const requires_diagnostics: u64 = 4;
+pub const service_data: u32 = 3;
+pub const service_storage: u32 = 4;
+pub const requires_data: u64 = 8;
+pub const requires_storage: u64 = 16;
+
+pub const Bytes = extern struct {
+    data: ?[*]const u8 = null,
+    len: u64 = 0,
+    pub fn from(value: []const u8) Bytes {
+        return .{ .data = value.ptr, .len = value.len };
+    }
+};
+pub const DataOperation = enum(u32) {
+    graph_nodes_scan = 1,
+    graph_edges_scan = 2,
+    graph_nodes_get = 3,
+    graph_edges_get = 4,
+    graph_neighbors = 5,
+    vector_metadata = 6,
+    vectors_scan = 7,
+    vectors_get = 8,
+};
+pub const Cursor = extern struct { created_order: i64 = 0, key: i64 = 0 };
+pub const DataPage = extern struct {
+    rows: u64 = 0,
+    has_more: u32 = 0,
+    reserved: u32 = 0,
+    next: Cursor = .{},
+};
+/// Synchronous borrowed input and callback rows; see zova_plugin.h for layouts.
+pub const DataRequest = extern struct {
+    struct_size: u32 = @sizeOf(DataRequest),
+    operation: u32,
+    name: Bytes,
+    keys: ?[*]const i64 = null,
+    key_count: u64 = 0,
+    ids: ?[*]const Bytes = null,
+    id_count: u64 = 0,
+    after: Cursor = .{},
+    after_id: Bytes = .{},
+    node_id: Bytes = .{},
+    edge_type: Bytes = .{},
+    direction: u32 = 0,
+    reserved: u32 = 0,
+    row_limit: u64,
+    byte_limit: u64,
+    row: ?RowCallback,
+    user_data: ?*anyopaque = null,
+};
+pub const DataService = extern struct {
+    struct_size: u32 = @sizeOf(DataService),
+    version: u32 = 1,
+    read: ?*const fn (?*anyopaque, ?*const DataRequest, ?*DataPage) callconv(.c) i32 = null,
+};
+pub const StorageService = extern struct {
+    struct_size: u32 = @sizeOf(StorageService),
+    version: u32 = 1,
+    execute: ?*const fn (?*anyopaque, ?*const QueryRequest) callconv(.c) i32 = null,
+};
 
 /// Append-only extension of Host. Legacy hooks keep the exact v1 prefix.
 pub const ServiceHost = extern struct {
@@ -75,6 +134,17 @@ pub const Client = struct {
         const service = try self.getService(QueryService, service_query);
         const call = service.query orelse return error.Unsupported;
         try result(call(self.connection, request));
+    }
+
+    pub fn read(self: Client, request: *const DataRequest, page: *DataPage) Error!void {
+        page.* = .{};
+        const service = try self.getService(DataService, service_data);
+        try result((service.read orelse return error.Unsupported)(self.connection, request, page));
+    }
+
+    pub fn storage(self: Client, request: *const QueryRequest) Error!void {
+        const service = try self.getService(StorageService, service_storage);
+        try result((service.execute orelse return error.Unsupported)(self.connection, request));
     }
 
     pub fn copySqliteError(self: Client, buffer: []u8) Error!usize {

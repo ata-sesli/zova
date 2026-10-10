@@ -1352,14 +1352,14 @@ fn multiI8CosineDistance(
     return aggregate_distance;
 }
 
-fn validateVectorCollectionName(name: []const u8) Error!void {
+pub fn validateVectorCollectionName(name: []const u8) Error!void {
     if (name.len == 0) return error.VectorInvalid;
     if (name.len > max_vector_collection_name_bytes) return error.VectorInvalid;
     if (!std.unicode.utf8ValidateSlice(name)) return error.VectorInvalid;
     if (isReservedZovaName(name)) return error.VectorInvalid;
 }
 
-fn validateVectorId(id: []const u8) Error!void {
+pub fn validateVectorId(id: []const u8) Error!void {
     if (id.len == 0) return error.VectorInvalid;
     if (id.len > max_vector_collection_name_bytes) return error.VectorInvalid;
     if (!std.unicode.utf8ValidateSlice(id)) return error.VectorInvalid;
@@ -1409,6 +1409,17 @@ fn validateStoredVectorValues(collection: CollectionMetadata, values: VectorValu
         norm_squared += value_f64 * value_f64;
     }
     if (collection.metric == .cosine and norm_squared == 0) return error.VectorCorrupt;
+}
+
+/// Internal streaming validation without allocating/widening an owned vector.
+pub fn validateEncodedValues(element_type: VectorElementType, metric: VectorMetric, dimensions: u32, encoded: []const u8) Error!void {
+    if (dimensions == 0 or dimensions > max_vector_dimensions or encoded.len != vectorByteLen(element_type, dimensions)) return error.VectorCorrupt;
+    var norm: f64 = 0;
+    for (0..dimensions) |index| {
+        const value = try encodedValueAsF64(element_type, encoded, index);
+        norm += value * value;
+    }
+    if (metric == .cosine and norm == 0) return error.VectorCorrupt;
 }
 
 fn vectorNormSquared(values: VectorValuesConst) Error!f64 {
