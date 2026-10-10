@@ -24,5 +24,10 @@ fn portable_plugin_layouts_match_the_c_header() {
         assert_eq!(offset_of!(zova_plugin_data_request_v1, row_limit), 128);
         assert_eq!(size_of::<zova_plugin_data_service_v1>(), 16);
         assert_eq!(size_of::<zova_plugin_storage_service_v1>(), 16);
+        assert_eq!(size_of::<zova_plugin_operation_column_v1>(), 24);
+        assert_eq!(size_of::<zova_plugin_operation_call_v1>(), 40);
+        assert_eq!(size_of::<zova_plugin_operation_v1>(), 104);
+        assert_eq!(offset_of!(zova_plugin_operation_v1, scalar), 72);
+        assert_eq!(size_of::<zova_plugin_operation_service_v1>(), 16);
     }
 }

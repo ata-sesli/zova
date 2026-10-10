@@ -6,6 +6,391 @@ const sqlite = @import("sqlite.zig");
 const dynamic = @import("extension_dynamic.zig");
 const options = @import("plugin_fixture_options");
 
+const scalar_columns = [_]data_api.OperationColumn{.{ .name = .from("value"), .kind = data_api.value_integer }};
+const scalar_args = [_]data_api.OperationColumn{.{ .name = .from("input"), .kind = data_api.value_integer }};
+fn plusOne(_: *const plugin.Host, _: ?*anyopaque, _: ?*anyopaque, call: *const data_api.OperationCall) callconv(.c) i32 {
+    const value = data_api.Value{ .kind = data_api.value_integer, .integer = call.arguments.?[0].integer + 1 };
+    return call.row.?(call.user_data, @ptrCast(&value), 1);
+}
+fn registerOperations(base: *const plugin.Host, raw: ?*anyopaque) callconv(.c) i32 {
+    const client = data_api.Client{ .host = base, .connection = raw };
+    const operation: data_api.Operation = .{
+        .kind = data_api.operation_scalar,
+        .flags = data_api.operation_exact,
+        .name = .from("plus_one"),
+        .arguments = &scalar_args,
+        .argument_count = 1,
+        .columns = &scalar_columns,
+        .column_count = 1,
+        .scalar = plusOne,
+    };
+    client.registerOperation(&operation) catch return 1;
+    return 0;
+}
+
+const RangeCursor = struct { index: i64 = 0, limit: i64 };
+var range_closes: usize = 0;
+var range_steps: usize = 0;
+fn rangeOpen(_: *const plugin.Host, _: ?*anyopaque, _: ?*anyopaque, args: ?[*]const data_api.Value, _: u64, out: ?*?*anyopaque) callconv(.c) i32 {
+    const cursor = std.heap.c_allocator.create(RangeCursor) catch return 2;
+    cursor.* = .{ .limit = args.?[0].integer };
+    out.?.* = cursor;
+    if (cursor.limit == -1) return 2;
+    return 0;
+}
+fn rangeNext(_: *const plugin.Host, _: ?*anyopaque, raw: ?*anyopaque, row: data_api.RowCallback, context: ?*anyopaque, has_row: ?*u32) callconv(.c) i32 {
+    const cursor: *RangeCursor = @ptrCast(@alignCast(raw.?));
+    range_steps += 1;
+    has_row.?.* = 0;
+    if (cursor.limit == -2) return 6;
+    if (cursor.index >= cursor.limit) return 0;
+    const value: data_api.Value = .{ .kind = data_api.value_integer, .integer = cursor.index };
+    cursor.index += 1;
+    has_row.?.* = 1;
+    return row(context, @ptrCast(&value), 1);
+}
+fn rangeClose(raw: ?*anyopaque) callconv(.c) void {
+    const cursor: *RangeCursor = @ptrCast(@alignCast(raw.?));
+    std.heap.c_allocator.destroy(cursor);
+    range_closes += 1;
+}
+fn registerRange(base: *const plugin.Host, raw: ?*anyopaque) callconv(.c) i32 {
+    const client = data_api.Client{ .host = base, .connection = raw };
+    const operation: data_api.Operation = .{
+        .kind = data_api.operation_table,
+        .flags = data_api.operation_exact | data_api.operation_ordered,
+        .name = .from("range"),
+        .arguments = &scalar_args,
+        .argument_count = 1,
+        .columns = &scalar_columns,
+        .column_count = 1,
+        .open = rangeOpen,
+        .next = rangeNext,
+        .close = rangeClose,
+    };
+    client.registerOperation(&operation) catch return 1;
+    return 0;
+}
+test "extension_plugin table operations stream and close at SQL LIMIT and reset" {
+    var db = try @import("zova.zig").Database.createMemory();
+    defer db.deinit();
+    var d = descriptor();
+    d.register_sql = registerRange;
+    const ext = try plugin.validate(&d);
+    const registry: extension.Registry = .{ .extensions = &.{ext}, .plugins = &.{d} };
+    try extension.install(&db.sqlite_db, registry, "c_test", null);
+    range_steps = 0;
+    range_closes = 0;
+    var stmt = try db.prepare("select value from zova_c_test_range(?1) limit 2");
+    defer stmt.deinit();
+    try stmt.bindInt64(1, 100000);
+    for (0..2) |i| {
+        try std.testing.expect(try stmt.step() == .row);
+        try std.testing.expectEqual(@as(i64, @intCast(i)), stmt.columnInt64(0));
+    }
+    try std.testing.expect(try stmt.step() == .done);
+    try std.testing.expectEqual(@as(usize, 2), range_steps);
+    try std.testing.expectEqual(@as(usize, 1), range_closes);
+    try stmt.reset();
+    try stmt.bindInt64(1, 0);
+    try std.testing.expect(try stmt.step() == .done);
+    try std.testing.expectEqual(@as(usize, 2), range_closes);
+    try std.testing.expectError(error.SqliteError, scalarValue(&db.sqlite_db, "select value from zova_c_test_range('2')"));
+    try std.testing.expectError(error.SqliteError, db.prepare("select value from zova_c_test_range()"));
+    try std.testing.expectEqual(@as(i64, 9), try scalarValue(&db.sqlite_db, "select count(*) from zova_c_test_range(3) a cross join zova_c_test_range(3) b"));
+}
+
+const huge_operation_result: [1024 * 1024]u8 = @splat(65);
+const blob_operation_columns = [_]data_api.OperationColumn{.{ .name = .from("value"), .kind = data_api.value_blob }};
+fn hugeScalar(_: *const plugin.Host, _: ?*anyopaque, _: ?*anyopaque, call: *const data_api.OperationCall) callconv(.c) i32 {
+    const value: data_api.Value = .{ .kind = data_api.value_blob, .bytes = &huge_operation_result, .bytes_len = huge_operation_result.len };
+    return call.row.?(call.user_data, @ptrCast(&value), 1);
+}
+fn registerHuge(base: *const plugin.Host, raw: ?*anyopaque) callconv(.c) i32 {
+    const d: data_api.Operation = .{ .kind = data_api.operation_scalar, .flags = data_api.operation_exact, .name = .from("huge"), .columns = &blob_operation_columns, .column_count = 1, .scalar = hugeScalar };
+    (data_api.Client{ .host = base, .connection = raw }).registerOperation(&d) catch return 1;
+    return 0;
+}
+test "extension_plugin scalar row budget includes Value records" {
+    var db = try @import("zova.zig").Database.createMemory();
+    defer db.deinit();
+    var d = descriptor();
+    d.register_sql = registerHuge;
+    const ext = try plugin.validate(&d);
+    try extension.install(&db.sqlite_db, .{ .extensions = &.{ext}, .plugins = &.{d} }, "c_test", null);
+    try std.testing.expectError(error.SqliteError, scalarValue(&db.sqlite_db, "select zova_c_test_huge()"));
+}
+
+test "extension_plugin partial table opens cancellation and active cursors clean up safely" {
+    var db = try @import("zova.zig").Database.createMemory();
+    defer db.deinit();
+    var d = descriptor();
+    d.register_sql = registerRange;
+    const ext = try plugin.validate(&d);
+    const registry: extension.Registry = .{ .extensions = &.{ext}, .plugins = &.{d} };
+    try extension.install(&db.sqlite_db, registry, "c_test", null);
+    range_closes = 0;
+    try std.testing.expectError(error.NoMemory, scalarValue(&db.sqlite_db, "select value from zova_c_test_range(-1)"));
+    try std.testing.expectEqual(@as(usize, 1), range_closes);
+    try std.testing.expectError(error.Interrupt, scalarValue(&db.sqlite_db, "select value from zova_c_test_range(-2)"));
+    try std.testing.expectEqual(@as(usize, 2), range_closes);
+    var stmt = try db.prepare("select value from zova_c_test_range(5)");
+    try std.testing.expect(try stmt.step() == .row);
+    try std.testing.expectError(error.Busy, extension.drop(&db.sqlite_db, registry, "c_test", null));
+    try std.testing.expectError(error.Busy, extension.registerSqlForInstalled(&db.sqlite_db, registry));
+    stmt.deinit();
+    try std.testing.expectEqual(@as(usize, 3), range_closes);
+    try extension.drop(&db.sqlite_db, registry, "c_test", null);
+    try std.testing.expectError(error.SqliteError, db.prepare("select value from zova_c_test_range(5)"));
+}
+
+const NodeOperationCursor = struct { after: data_api.Cursor = .{} };
+const NodeOperationDelivery = struct {
+    row: data_api.RowCallback,
+    context: ?*anyopaque,
+    fn deliver(raw: ?*anyopaque, values: ?[*]const data_api.Value, _: u64) callconv(.c) i32 {
+        const self: *NodeOperationDelivery = @ptrCast(@alignCast(raw.?));
+        return self.row(self.context, values, 1);
+    }
+};
+fn nodesOpen(_: *const plugin.Host, _: ?*anyopaque, _: ?*anyopaque, _: ?[*]const data_api.Value, _: u64, out: ?*?*anyopaque) callconv(.c) i32 {
+    const cursor = std.heap.c_allocator.create(NodeOperationCursor) catch return 2;
+    cursor.* = .{};
+    out.?.* = cursor;
+    return 0;
+}
+fn nodesNext(host: *const plugin.Host, raw: ?*anyopaque, state: ?*anyopaque, row: data_api.RowCallback, context: ?*anyopaque, has_row: ?*u32) callconv(.c) i32 {
+    const cursor: *NodeOperationCursor = @ptrCast(@alignCast(state.?));
+    const client = data_api.Client{ .host = host, .connection = raw };
+    var delivery: NodeOperationDelivery = .{ .row = row, .context = context };
+    var page: data_api.DataPage = .{};
+    client.read(&.{ .operation = 1, .name = .from("topo"), .after = cursor.after, .row_limit = 1, .byte_limit = 4096, .row = NodeOperationDelivery.deliver, .user_data = &delivery }, &page) catch return 1;
+    cursor.after = page.next;
+    has_row.?.* = @intCast(page.rows);
+    return 0;
+}
+fn nodesClose(raw: ?*anyopaque) callconv(.c) void {
+    const cursor: *NodeOperationCursor = @ptrCast(@alignCast(raw.?));
+    std.heap.c_allocator.destroy(cursor);
+}
+fn registerNodes(host: *const plugin.Host, raw: ?*anyopaque) callconv(.c) i32 {
+    const operation: data_api.Operation = .{ .kind = data_api.operation_table, .flags = data_api.operation_exact | data_api.operation_ordered, .name = .from("nodes"), .columns = &scalar_columns, .column_count = 1, .open = nodesOpen, .next = nodesNext, .close = nodesClose };
+    (data_api.Client{ .host = host, .connection = raw }).registerOperation(&operation) catch return 1;
+    return 0;
+}
+test "extension_plugin SQL streaming holds main and bound WAL snapshots" {
+    const zova = @import("zova.zig");
+    for ([_]bool{ false, true }) |bound| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const a = std.testing.allocator;
+        const main = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}/main.zova", .{tmp.sub_path}, 0);
+        defer a.free(main);
+        const store = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}/graph.zova", .{tmp.sub_path}, 0);
+        defer a.free(store);
+        var db = try zova.Database.create(main);
+        defer db.deinit();
+        if (bound) {
+            try zova.createGraphStore(store);
+            try db.bindGraphStore(store);
+        }
+        try db.exec("pragma journal_mode=wal");
+        if (bound) try db.exec("pragma graph_store.journal_mode=wal");
+        try db.createGraph("topo");
+        try db.putGraphNodes(&.{ .{ .graph_name = "topo", .node_id = "a", .kind = "node" }, .{ .graph_name = "topo", .node_id = "b", .kind = "node" } });
+        // Open writer before recording the test extension; it needs no plugin.
+        var writer = try zova.Database.open(main);
+        defer writer.deinit();
+        var d = descriptor();
+        d.register_sql = registerNodes;
+        const ext = try plugin.validate(&d);
+        try extension.install(&db.sqlite_db, .{ .extensions = &.{ext}, .plugins = &.{d} }, "c_test", null);
+        {
+            var stmt = try db.prepare("select value from zova_c_test_nodes()");
+            defer stmt.deinit();
+            try std.testing.expect(try stmt.step() == .row);
+            try std.testing.expectEqual(@as(i64, 1), stmt.columnInt64(0));
+            try writer.putGraphNode(.{ .graph_name = "topo", .node_id = "c", .kind = "node" });
+            try std.testing.expect(try stmt.step() == .row);
+            try std.testing.expectEqual(@as(i64, 2), stmt.columnInt64(0));
+            try std.testing.expect(try stmt.step() == .done);
+        }
+        try std.testing.expectEqual(@as(i64, 3), try scalarValue(&db.sqlite_db, "select count(*) from zova_c_test_nodes()"));
+    }
+}
+
+test "extension_plugin SQL scalar registration has typed arguments and connection lifetime" {
+    var db = try @import("zova.zig").Database.createMemory();
+    defer db.deinit();
+    var d = descriptor();
+    d.register_sql = registerOperations;
+    const ext = try plugin.validate(&d);
+    const registry: extension.Registry = .{ .extensions = &.{ext}, .plugins = &.{d} };
+    try extension.install(&db.sqlite_db, registry, "c_test", null);
+    var stmt = try db.prepare("select zova_c_test_plus_one(?1)");
+    defer stmt.deinit();
+    try stmt.bindInt64(1, 41);
+    try std.testing.expect(try stmt.step() == .row);
+    try std.testing.expectEqual(@as(i64, 42), stmt.columnInt64(0));
+    try stmt.reset();
+    try stmt.bindText(1, "wrong type");
+    try std.testing.expectError(error.SqliteError, stmt.step());
+}
+
+var operation_destroys: usize = 0;
+const OwnedOperationState = struct { increment: i64 };
+fn destroyOperation(raw: ?*anyopaque) callconv(.c) void {
+    const state: *OwnedOperationState = @ptrCast(@alignCast(raw.?));
+    std.heap.c_allocator.destroy(state);
+    operation_destroys += 1;
+}
+fn ownedScalar(_: *const plugin.Host, _: ?*anyopaque, raw: ?*anyopaque, call: *const data_api.OperationCall) callconv(.c) i32 {
+    const state: *OwnedOperationState = @ptrCast(@alignCast(raw.?));
+    const value: data_api.Value = .{ .kind = data_api.value_integer, .integer = call.arguments.?[0].integer + state.increment };
+    return call.row.?(call.user_data, @ptrCast(&value), 1);
+}
+fn registerOwnedValue(base: *const plugin.Host, raw: ?*anyopaque, increment: i64) i32 {
+    const state = std.heap.c_allocator.create(OwnedOperationState) catch return 2;
+    state.* = .{ .increment = increment };
+    const operation: data_api.Operation = .{
+        .kind = data_api.operation_scalar,
+        .flags = data_api.operation_exact,
+        .name = .from("owned"),
+        .arguments = &scalar_args,
+        .argument_count = 1,
+        .columns = &scalar_columns,
+        .column_count = 1,
+        .scalar = ownedScalar,
+        .user_data = state,
+        .destroy = destroyOperation,
+    };
+    (data_api.Client{ .host = base, .connection = raw }).registerOperation(&operation) catch {
+        destroyOperation(state);
+        return 1;
+    };
+    return 0;
+}
+fn registerOwned(base: *const plugin.Host, raw: ?*anyopaque) callconv(.c) i32 {
+    return registerOwnedValue(base, raw, 1);
+}
+fn registerOwnedUpgrade(base: *const plugin.Host, raw: ?*anyopaque) callconv(.c) i32 {
+    return registerOwnedValue(base, raw, 2);
+}
+fn rejectCore(_: *sqlite.Database) !void {
+    return error.InvalidArgument;
+}
+fn noUpgrade(_: *sqlite.Database, _: extension.Manifest) extension.Error!void {}
+fn scalarValue(db: *sqlite.Database, sql: [:0]const u8) !i64 {
+    var stmt = try db.prepare(sql);
+    defer stmt.deinit();
+    try std.testing.expect(try stmt.step() == .row);
+    return stmt.columnInt64(0);
+}
+test "extension_plugin failed lifecycle discards callbacks and successful upgrade supports caller rollback" {
+    operation_destroys = 0;
+    {
+        var db = try @import("zova.zig").Database.createMemory();
+        defer db.deinit();
+        var d = descriptor();
+        d.register_sql = registerOwned;
+        d.version = "1.0.0";
+        const ext = try plugin.validate(&d);
+        const old: extension.Registry = .{ .extensions = &.{ext}, .plugins = &.{d} };
+        try std.testing.expectError(error.ExtensionInvalid, extension.install(&db.sqlite_db, old, "c_test", rejectCore));
+        try std.testing.expectEqual(@as(usize, 1), operation_destroys);
+        try std.testing.expectError(error.SqliteError, scalarValue(&db.sqlite_db, "select zova_c_test_owned(41)"));
+        try extension.install(&db.sqlite_db, old, "c_test", null);
+        try std.testing.expectEqual(@as(i64, 42), try scalarValue(&db.sqlite_db, "select zova_c_test_owned(41)"));
+        var upgraded = d;
+        upgraded.version = "2.0.0";
+        upgraded.register_sql = registerOwnedUpgrade;
+        const target = try plugin.validate(&upgraded);
+        const next: extension.Registry = .{ .extensions = &.{target}, .plugins = &.{upgraded}, .upgrades = &.{.{ .name = "c_test", .from_version = "1.0.0", .to_version = "2.0.0", .hook = noUpgrade }} };
+        try std.testing.expectError(error.ExtensionInvalid, extension.upgrade(std.testing.allocator, &db.sqlite_db, next, "c_test", rejectCore));
+        try std.testing.expectEqual(@as(usize, 2), operation_destroys);
+        try std.testing.expectEqual(@as(i64, 42), try scalarValue(&db.sqlite_db, "select zova_c_test_owned(41)"));
+        try db.begin();
+        try extension.upgrade(std.testing.allocator, &db.sqlite_db, next, "c_test", null);
+        try std.testing.expectEqual(@as(i64, 43), try scalarValue(&db.sqlite_db, "select zova_c_test_owned(41)"));
+        try db.rollback();
+        try std.testing.expectEqual(@as(i64, 42), try scalarValue(&db.sqlite_db, "select zova_c_test_owned(41)"));
+        try db.begin();
+        try extension.drop(&db.sqlite_db, old, "c_test", null);
+        try std.testing.expectError(error.SqliteError, scalarValue(&db.sqlite_db, "select zova_c_test_owned(41)"));
+        try db.rollback();
+        try std.testing.expectEqual(@as(i64, 42), try scalarValue(&db.sqlite_db, "select zova_c_test_owned(41)"));
+    }
+    try std.testing.expectEqual(@as(usize, 4), operation_destroys);
+}
+
+fn writeScalar(base: *const plugin.Host, raw: ?*anyopaque, _: ?*anyopaque, call: *const data_api.OperationCall) callconv(.c) i32 {
+    const client = data_api.Client{ .host = base, .connection = raw };
+    const sql = "insert into main._zova_ext_c_test_rows values (?1)";
+    client.storage(&.{ .sql = sql, .sql_len = sql.len, .parameters = call.arguments, .parameter_count = 1, .row_limit = 1, .byte_limit = 1024, .row = cancelRows }) catch return 1;
+    if (call.arguments.?[0].integer < 0) return 6;
+    return call.row.?(call.user_data, call.arguments, 1);
+}
+fn registerWrites(base: *const plugin.Host, raw: ?*anyopaque) callconv(.c) i32 {
+    const client = data_api.Client{ .host = base, .connection = raw };
+    var operation: data_api.Operation = .{ .kind = data_api.operation_scalar, .flags = data_api.operation_exact | data_api.operation_mutating, .name = .from("write"), .arguments = &scalar_args, .argument_count = 1, .columns = &scalar_columns, .column_count = 1, .scalar = writeScalar };
+    client.registerOperation(&operation) catch return 1;
+    operation.name = .from("readonly_write");
+    operation.flags = data_api.operation_exact;
+    client.registerOperation(&operation) catch return 1;
+    return 0;
+}
+
+const text_operation_columns = [_]data_api.OperationColumn{.{ .name = .from("value"), .kind = data_api.value_text }};
+fn writeTextScalar(base: *const plugin.Host, raw: ?*anyopaque, _: ?*anyopaque, call: *const data_api.OperationCall) callconv(.c) i32 {
+    const sql = "insert into main._zova_ext_c_test_rows values (?1)";
+    (data_api.Client{ .host = base, .connection = raw }).storage(&.{ .sql = sql, .sql_len = sql.len, .parameters = call.arguments, .parameter_count = 1, .row_limit = 1, .byte_limit = 1024, .row = cancelRows }) catch return 1;
+    const text = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const value: data_api.Value = .{ .kind = data_api.value_text, .bytes = text.ptr, .bytes_len = text.len };
+    return call.row.?(call.user_data, @ptrCast(&value), 1);
+}
+fn registerWriteText(base: *const plugin.Host, raw: ?*anyopaque) callconv(.c) i32 {
+    const d: data_api.Operation = .{ .kind = data_api.operation_scalar, .flags = data_api.operation_exact | data_api.operation_mutating, .name = .from("write_text"), .arguments = &scalar_args, .argument_count = 1, .columns = &text_operation_columns, .column_count = 1, .scalar = writeTextScalar };
+    (data_api.Client{ .host = base, .connection = raw }).registerOperation(&d) catch return 1;
+    return 0;
+}
+test "extension_plugin SQLite result limits roll back a scalar write" {
+    var db = try @import("zova.zig").Database.createMemory();
+    defer db.deinit();
+    try db.exec("create table _zova_ext_c_test_rows(id integer)");
+    var d = descriptor();
+    d.register_sql = registerWriteText;
+    const ext = try plugin.validate(&d);
+    try extension.install(&db.sqlite_db, .{ .extensions = &.{ext}, .plugins = &.{d} }, "c_test", null);
+    const old = sqlite.c.sqlite3_limit(db.sqlite_db.handle, sqlite.c.SQLITE_LIMIT_LENGTH, 50);
+    defer _ = sqlite.c.sqlite3_limit(db.sqlite_db.handle, sqlite.c.SQLITE_LIMIT_LENGTH, old);
+    try std.testing.expectError(error.SqliteError, scalarValue(&db.sqlite_db, "select zova_c_test_write_text(1)"));
+    try std.testing.expectEqual(@as(i64, 0), try scalarValue(&db.sqlite_db, "select count(*) from _zova_ext_c_test_rows"));
+}
+test "extension_plugin scalar writes are atomic and read-only operations cannot mutate" {
+    var db = try @import("zova.zig").Database.createMemory();
+    defer db.deinit();
+    try db.exec("create table _zova_ext_c_test_rows(id integer)");
+    var d = descriptor();
+    d.register_sql = registerWrites;
+    const ext = try plugin.validate(&d);
+    const registry: extension.Registry = .{ .extensions = &.{ext}, .plugins = &.{d} };
+    // The private table is owned once installation records the manifest.
+    try extension.install(&db.sqlite_db, registry, "c_test", null);
+    try std.testing.expectEqual(@as(i64, 1), try scalarValue(&db.sqlite_db, "select zova_c_test_write(1)"));
+    try std.testing.expectError(error.Interrupt, scalarValue(&db.sqlite_db, "select zova_c_test_write(-1)"));
+    try std.testing.expectEqual(@as(i64, 1), try scalarValue(&db.sqlite_db, "select count(*) from _zova_ext_c_test_rows"));
+    try std.testing.expectError(error.SqliteError, scalarValue(&db.sqlite_db, "select zova_c_test_readonly_write(2)"));
+    try std.testing.expectEqual(@as(i64, 1), try scalarValue(&db.sqlite_db, "select count(*) from _zova_ext_c_test_rows"));
+    try db.begin();
+    try db.exec("insert into _zova_ext_c_test_rows values(9)");
+    try std.testing.expectError(error.Interrupt, scalarValue(&db.sqlite_db, "select zova_c_test_write(-2)"));
+    try std.testing.expectEqual(@as(i64, 2), try scalarValue(&db.sqlite_db, "select count(*) from _zova_ext_c_test_rows"));
+    try db.rollback();
+    try db.exec("pragma query_only=on");
+    try std.testing.expectError(error.SqliteError, scalarValue(&db.sqlite_db, "select zova_c_test_write(3)"));
+    try std.testing.expectEqual(@as(i64, 1), try scalarValue(&db.sqlite_db, "select count(*) from _zova_ext_c_test_rows"));
+}
+
 fn dataServiceHook(base: *const plugin.Host, context: ?*anyopaque) callconv(.c) i32 {
     const host: *const plugin.ServiceHost = @ptrCast(base);
     var service: ?*const anyopaque = null;
@@ -705,6 +1090,15 @@ test "extension_plugin C and C++ bundles load and dispatch through copied regist
         defer db.deinit();
         try db.exec(extension.extensions_schema_sql);
         try extension.install(&db, owned.registry(), "c_test", null);
+        if (std.mem.eql(u8, path, options.plugin_services_c_fixture) or std.mem.eql(u8, path, options.plugin_services_cpp_fixture)) {
+            try std.testing.expectEqual(@as(i64, 42), try scalarValue(&db, "SELECT zova_c_test_echo(42)"));
+            try std.testing.expectEqual(@as(i64, 10), try scalarValue(&db, "SELECT sum(value) FROM zova_c_test_series(5)"));
+            try extension.registerSqlForInstalled(&db, owned.registry());
+            try std.testing.expectEqual(@as(i64, 42), try scalarValue(&db, "SELECT zova_c_test_echo(42)"));
+        }
+        if (std.mem.eql(u8, path, options.plugin_zig_fixture)) {
+            try std.testing.expectEqual(@as(i64, 42), try scalarValue(&db, "SELECT zova_c_test_echo(42)"));
+        }
         try db.exec("INSERT INTO _zova_ext_c_test_data VALUES(1)");
         try extension.check(&db, bundle.registry(), "c_test");
         try extension.drop(&db, bundle.registry(), "c_test", null);

@@ -126,6 +126,10 @@ pub const OpenFlags = enum {
 /// while Zova centralizes handle ownership and result-code mapping.
 pub const Database = struct {
     handle: *c.sqlite3,
+    // Engine-owned connection-local SQL facilities. Not a SQLite handle or
+    // plugin author surface; cleanup runs after SQLite releases callbacks.
+    extension_sql_state: ?*anyopaque = null,
+    extension_sql_cleanup: ?*const fn (?*anyopaque) void = null,
 
     /// Open a SQLite database at `path`.
     ///
@@ -176,6 +180,9 @@ pub const Database = struct {
     pub fn deinit(self: *Database) void {
         const rc = c.sqlite3_close(self.handle);
         std.debug.assert(rc == c.SQLITE_OK);
+        if (self.extension_sql_cleanup) |cleanup| cleanup(self.extension_sql_state);
+        self.extension_sql_state = null;
+        self.extension_sql_cleanup = null;
     }
 
     /// Execute SQL that does not need bound parameters or returned rows.

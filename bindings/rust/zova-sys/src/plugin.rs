@@ -1,5 +1,5 @@
 //! Raw layouts for include/zova_plugin.h. These are unsafe authoring primitives,
-//! not safe callbacks or a loader. Never retain a hook's host/connection or row
+//! not safe callbacks or a loader. Never retain a call's host/connection or row
 //! buffers, reenter its connection, unwind across C, or cross allocator owners.
 use std::os::raw::{c_char, c_void};
 
@@ -20,6 +20,14 @@ pub const ZOVA_PLUGIN_REQUIRES_DATA_V1: u64 = 8;
 pub const ZOVA_PLUGIN_REQUIRES_STORAGE_V1: u64 = 16;
 pub const ZOVA_PLUGIN_SERVICE_DATA: u32 = 3;
 pub const ZOVA_PLUGIN_SERVICE_STORAGE: u32 = 4;
+pub const ZOVA_PLUGIN_REQUIRES_OPERATIONS_V1: u64 = 32;
+pub const ZOVA_PLUGIN_SERVICE_OPERATIONS: u32 = 5;
+pub const ZOVA_PLUGIN_OPERATION_SCALAR: u32 = 1;
+pub const ZOVA_PLUGIN_OPERATION_TABLE: u32 = 2;
+pub const ZOVA_PLUGIN_OPERATION_EXACT: u64 = 1;
+pub const ZOVA_PLUGIN_OPERATION_APPROXIMATE: u64 = 2;
+pub const ZOVA_PLUGIN_OPERATION_MUTATING: u64 = 4;
+pub const ZOVA_PLUGIN_OPERATION_ORDERED: u64 = 8;
 pub const ZOVA_PLUGIN_GRAPH_NODES_SCAN: u32 = 1;
 pub const ZOVA_PLUGIN_GRAPH_EDGES_SCAN: u32 = 2;
 pub const ZOVA_PLUGIN_GRAPH_NODES_GET: u32 = 3;
@@ -132,6 +140,83 @@ pub type zova_plugin_entry_v1 = unsafe extern "C" fn(u32) -> *const zova_plugin_
 pub struct zova_plugin_bytes_v1 {
     pub data: *const u8,
     pub len: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct zova_plugin_operation_column_v1 {
+    pub name: zova_plugin_bytes_v1,
+    pub kind: u32,
+    pub nullable: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct zova_plugin_operation_call_v1 {
+    pub struct_size: u32,
+    pub reserved: u32,
+    pub arguments: *const zova_plugin_value_v1,
+    pub argument_count: u64,
+    pub row: zova_plugin_row_v1,
+    pub user_data: *mut c_void,
+}
+
+pub type zova_plugin_operation_close_v1 = Option<unsafe extern "C" fn(*mut c_void)>;
+pub type zova_plugin_scalar_v1 = Option<
+    unsafe extern "C" fn(
+        *const zova_plugin_host_v1,
+        *mut c_void,
+        *mut c_void,
+        *const zova_plugin_operation_call_v1,
+    ) -> i32,
+>;
+pub type zova_plugin_operation_open_v1 = Option<
+    unsafe extern "C" fn(
+        *const zova_plugin_host_v1,
+        *mut c_void,
+        *mut c_void,
+        *const zova_plugin_value_v1,
+        u64,
+        *mut *mut c_void,
+    ) -> i32,
+>;
+pub type zova_plugin_operation_next_v1 = Option<
+    unsafe extern "C" fn(
+        *const zova_plugin_host_v1,
+        *mut c_void,
+        *mut c_void,
+        zova_plugin_row_v1,
+        *mut c_void,
+        *mut u32,
+    ) -> i32,
+>;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct zova_plugin_operation_v1 {
+    pub struct_size: u32,
+    pub kind: u32,
+    pub flags: u64,
+    pub name: zova_plugin_bytes_v1,
+    pub arguments: *const zova_plugin_operation_column_v1,
+    pub argument_count: u32,
+    pub column_count: u32,
+    pub columns: *const zova_plugin_operation_column_v1,
+    pub user_data: *mut c_void,
+    pub destroy: zova_plugin_operation_close_v1,
+    pub scalar: zova_plugin_scalar_v1,
+    pub open: zova_plugin_operation_open_v1,
+    pub next: zova_plugin_operation_next_v1,
+    pub close: zova_plugin_operation_close_v1,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct zova_plugin_operation_service_v1 {
+    pub struct_size: u32,
+    pub version: u32,
+    pub register_operation:
+        Option<unsafe extern "C" fn(*mut c_void, *const zova_plugin_operation_v1) -> i32>,
 }
 
 #[repr(C)]

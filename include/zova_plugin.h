@@ -32,14 +32,18 @@ extern "C" {
 #define ZOVA_PLUGIN_REQUIRES_STORAGE_V1 UINT64_C(16)
 #define ZOVA_PLUGIN_SERVICE_DATA UINT32_C(3)
 #define ZOVA_PLUGIN_SERVICE_STORAGE UINT32_C(4)
+#define ZOVA_PLUGIN_REQUIRES_OPERATIONS_V1 UINT64_C(32)
+#define ZOVA_PLUGIN_SERVICE_OPERATIONS UINT32_C(5)
 
 /* Independent of the database format and Zova's application C ABI.
  * All calls use the platform C calling convention; C++ exceptions must not
  * cross this boundary. No structure packing overrides are permitted.
- * The host and connection handles are borrowed only for the current hook.
+ * The host and connection handles are borrowed only for the current hook or
+ * operation callback.
  * Never retain them or call them from another thread. The host copies SQL;
  * input bytes need remain valid only until exec_sql returns. No allocations
- * cross the boundary. Plugins free their own allocations before returning.
+ * cross the boundary except operation-state ownership explicitly described
+ * below. Hook-local allocations are released before returning.
  * Hooks must not issue transaction/savepoint commands or reenter Zova APIs.
  * Nonzero hook results fail the operation; unknown statuses are generic errors.
  * Translate recoverable Zig errors into statuses. Rust panics and C++ exceptions
@@ -58,7 +62,8 @@ typedef struct zova_plugin_host_v1 {
  * get_service clears *out_service on error; unsupported IDs, versions or minimum
  * sizes return UNSUPPORTED. Service tables are immutable and host-owned. The
  * connection is opaque, never a public SQLite handle. Use services only during
- * the current hook, on its thread; row callbacks must not reenter host services.
+ * the current hook/operation, on its thread; row callbacks must not reenter host
+ * services.
  */
 typedef struct zova_plugin_service_host_v1 {
     zova_plugin_host_v1 base;
@@ -140,6 +145,103 @@ typedef struct zova_plugin_bytes_v1 {
     const uint8_t *data;
     uint64_t len;
 } zova_plugin_bytes_v1;
+
+#define ZOVA_PLUGIN_OPERATION_SCALAR UINT32_C(1)
+#define ZOVA_PLUGIN_OPERATION_TABLE UINT32_C(2)
+#define ZOVA_PLUGIN_OPERATION_EXACT UINT64_C(1)
+#define ZOVA_PLUGIN_OPERATION_APPROXIMATE UINT64_C(2)
+#define ZOVA_PLUGIN_OPERATION_MUTATING UINT64_C(4)
+#define ZOVA_PLUGIN_OPERATION_ORDERED UINT64_C(8)
+
+typedef struct zova_plugin_operation_column_v1 {
+    zova_plugin_bytes_v1 name;
+    uint32_t kind; /* INTEGER/FLOAT/TEXT/BLOB; no implicit argument conversion. */
+    uint32_t nullable; /* 0 or 1; NULL accepted only when 1. */
+} zova_plugin_operation_column_v1;
+typedef struct zova_plugin_operation_call_v1 {
+    uint32_t struct_size;
+    uint32_t reserved;
+    const zova_plugin_value_v1 *arguments;
+    uint64_t argument_count;
+    zova_plugin_row_v1 row;
+    void *user_data;
+} zova_plugin_operation_call_v1;
+typedef void (ZOVA_PLUGIN_CALL *zova_plugin_operation_close_v1)(void *state);
+typedef int32_t (ZOVA_PLUGIN_CALL *zova_plugin_scalar_v1)(
+    const zova_plugin_host_v1 *host, void *connection, void *state,
+    const zova_plugin_operation_call_v1 *call);
+typedef int32_t (ZOVA_PLUGIN_CALL *zova_plugin_operation_open_v1)(
+    const zova_plugin_host_v1 *host, void *connection, void *state,
+    const zova_plugin_value_v1 *arguments, uint64_t argument_count, void **out_cursor);
+typedef int32_t (ZOVA_PLUGIN_CALL *zova_plugin_operation_next_v1)(
+    const zova_plugin_host_v1 *host, void *connection, void *cursor,
+    zova_plugin_row_v1 row, void *row_context, uint32_t *out_has_row);
+
+/* Available only in register_sql. Names: 1..63 lowercase ASCII identifier bytes;
+ * SQL name = zova_<extension-name>_<name>. Quote SQL names if the extension name
+ * contains punctuation. Ownership covers functions AND modules; no overloads,
+ * replacement of other facilities or signature changes on a live connection.
+ * Registration copies names/types. On OK the host owns user_data and calls
+ * destroy exactly once; on error ownership stays with the plugin. Destroy/close
+ * must not access host services, reenter Zova, or throw/unwind. Library code must
+ * remain loaded until the connection and all its statements are closed.
+ * Failed lifecycle validation destroys new state; old callbacks remain usable.
+ * Old successful registrations are retained through connection close to support
+ * caller rollback of upgrades/drops (at most 64 retained revisions per operation).
+ * Reopen reruns register_sql; registrations are not persisted in the file.
+ *
+ * Exactly one of EXACT/APPROXIMATE is required. The plugin documents accuracy,
+ * metric, configuration and ordering; no existing core operation is replaced.
+ * <=32 arguments, 1..64 result columns; scalar requires exactly one column and
+ * one emitted row. Total argument bytes and each row <=1 MiB including Values.
+ * Row bytes borrow only during row(); the host copies what survives it. Always
+ * propagate a non-OK row() status. Unknown callback status => generic ERROR.
+ * SQL errors map ERROR/INVALID_ARGUMENT/UNSUPPORTED to SQLITE_ERROR, OOM to
+ * SQLITE_NOMEM, LIMIT to SQLITE_TOOBIG and CANCELED to SQLITE_INTERRUPT.
+ *
+ * Table operations are read-only eponymous-only tables with argument columns
+ * hidden, e.g. SELECT score FROM zova_rank_pagerank('graph'). All arguments are
+ * required. open receives arguments that stay valid until close, and must set
+ * *out_cursor even on a partially allocated error path. next sets *out_has_row
+ * to 0 (EOF, no row call) or 1 (exactly one row call). The host calls close once
+ * after any successful open, or a failed open returning non-NULL cursor. LIMIT,
+ * reset, finalization, errors and cancellation release the cursor. Pull rows
+ * remain in emitted order; ORDERED declares deterministic emission, not an SQL
+ * ORDER BY guarantee. For paging expose explicit cursor/limit arguments. Source
+ * reads share the SQL cursor's pinned snapshots, including bound stores.
+ *
+ * Read-only scalar/table callbacks may use data/query and read-only private SQL.
+ * MUTATING is scalar-only, invoked with SELECT (not inside an active DML
+ * statement), and permits private DML using the storage service;
+ * its invocation is savepoint-atomic, also inside a caller transaction. Separate
+ * successful calls in one SQL statement are not one application batch. Read-only
+ * connections reject mutation. Legacy exec_sql and operation registration are
+ * unavailable during calls. Recursive plugin operation invocation is rejected.
+ * Operations are DIRECTONLY: no use from persistent views/triggers. Delivery is
+ * bounded; plugin working memory and CPU are trusted, not sandboxed.
+ */
+typedef struct zova_plugin_operation_v1 {
+    uint32_t struct_size;
+    uint32_t kind;
+    uint64_t flags;
+    zova_plugin_bytes_v1 name;
+    const zova_plugin_operation_column_v1 *arguments;
+    uint32_t argument_count;
+    uint32_t column_count;
+    const zova_plugin_operation_column_v1 *columns;
+    void *user_data;
+    zova_plugin_operation_close_v1 destroy;
+    zova_plugin_scalar_v1 scalar;
+    zova_plugin_operation_open_v1 open;
+    zova_plugin_operation_next_v1 next;
+    zova_plugin_operation_close_v1 close;
+} zova_plugin_operation_v1;
+typedef struct zova_plugin_operation_service_v1 {
+    uint32_t struct_size;
+    uint32_t version;
+    int32_t (ZOVA_PLUGIN_CALL *register_operation)(void *connection,
+        const zova_plugin_operation_v1 *operation);
+} zova_plugin_operation_service_v1;
 typedef struct zova_plugin_cursor_v1 {
     int64_t created_order;
     int64_t key;
