@@ -4,6 +4,12 @@ The packed-artifact browser gate runs `durability-browser.mjs` through the
 existing `check-browser-package.sh` harness. Local runs use installed Helium;
 Linux CI uses Playwright Chromium. Native gates are unchanged.
 
+The OPFS adapter reports the file's actual reserved-lock state, so a newly
+created worker can detect an abandoned rollback journal. Normal Zova opening
+permits SQLite to recover it before schema validation; a preliminary read-only
+open would reject the recovery. Public Web Lock ownership remains exclusive.
+Clean format/schema rejection still preserves stored bytes, including format 11.
+
 ## Covered boundaries
 
 - Committed SQL and KV survive page reload without an explicit close or save.

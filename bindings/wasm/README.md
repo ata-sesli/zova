@@ -71,8 +71,11 @@ try {
 
 Names are case-sensitive: 1–64 ASCII letters, digits, underscores or hyphens,
 starting with a letter or digit. They are logical names, not filesystem paths.
-SQL and KV methods are unchanged. Existing files are validated before writable
-opening; incompatible or invalid databases reject without automatic migration.
+SQL and KV methods are unchanged. Existing files are validated during normal
+Zova opening; clean incompatible or invalid databases reject without mutation
+or automatic migration. Opening may first recover an abandoned SQLite rollback
+journal to restore committed state after worker termination. This is transaction
+recovery, not a storage-format migration.
 Missing OPFS support rejects rather than silently opening a memory database.
 
 Persistent opening requires a secure context (HTTPS or localhost), dedicated
