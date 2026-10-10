@@ -541,11 +541,13 @@ fn tableOpen(raw: ?*c.sqlite3_vtab, out: [*c][*c]c.sqlite3_vtab_cursor) callconv
     const table: *Table = @fieldParentPtr("base", raw.?);
     const cursor = allocator.create(TableCursor) catch return c.SQLITE_NOMEM;
     cursor.* = .{ .base = .{ .pVtab = &table.base }, .slot = table.slot, .db = .{ .handle = table.slot.registry.handle }, .args_arena = std.heap.ArenaAllocator.init(allocator), .row_arena = std.heap.ArenaAllocator.init(allocator) };
+    // SQLite returns this base pointer to callbacks. The allocation retains
+    // TableCursor alignment even on targets where the C base is less aligned.
     out.* = &cursor.base;
     return c.SQLITE_OK;
 }
 fn tableClose(raw: ?*c.sqlite3_vtab_cursor) callconv(.c) c_int {
-    const cursor: *TableCursor = @fieldParentPtr("base", raw.?);
+    const cursor: *TableCursor = @alignCast(@fieldParentPtr("base", raw.?));
     cursor.clear();
     cursor.args_arena.deinit();
     cursor.row_arena.deinit();
@@ -557,7 +559,7 @@ fn tableError(cursor: *TableCursor, status: i32) c_int {
     return statusCode(status);
 }
 fn tableFilter(raw: ?*c.sqlite3_vtab_cursor, _: c_int, _: [*c]const u8, argc: c_int, argv: [*c]?*c.sqlite3_value) callconv(.c) c_int {
-    const cursor: *TableCursor = @fieldParentPtr("base", raw.?);
+    const cursor: *TableCursor = @alignCast(@fieldParentPtr("base", raw.?));
     cursor.clear();
     const slot = cursor.slot;
     const stored = slot.selected() orelse return c.SQLITE_ERROR;
@@ -590,7 +592,7 @@ fn tableFilter(raw: ?*c.sqlite3_vtab_cursor, _: c_int, _: [*c]const u8, argc: c_
     return tableNext(raw);
 }
 fn tableNext(raw: ?*c.sqlite3_vtab_cursor) callconv(.c) c_int {
-    const cursor: *TableCursor = @fieldParentPtr("base", raw.?);
+    const cursor: *TableCursor = @alignCast(@fieldParentPtr("base", raw.?));
     if (cursor.slot.registry.invoking or !cursor.active) return c.SQLITE_ERROR;
     _ = cursor.row_arena.reset(.free_all);
     cursor.rows = 0;
@@ -608,11 +610,11 @@ fn tableNext(raw: ?*c.sqlite3_vtab_cursor) callconv(.c) c_int {
     return c.SQLITE_OK;
 }
 fn tableEof(raw: ?*c.sqlite3_vtab_cursor) callconv(.c) c_int {
-    const cursor: *TableCursor = @fieldParentPtr("base", raw.?);
+    const cursor: *TableCursor = @alignCast(@fieldParentPtr("base", raw.?));
     return @intFromBool(cursor.eof);
 }
 fn tableColumn(raw: ?*c.sqlite3_vtab_cursor, context: ?*c.sqlite3_context, column: c_int) callconv(.c) c_int {
-    const cursor: *TableCursor = @fieldParentPtr("base", raw.?);
+    const cursor: *TableCursor = @alignCast(@fieldParentPtr("base", raw.?));
     const d = cursor.stored.?.descriptor;
     if (column < 0) return c.SQLITE_ERROR;
     if (column < d.column_count) {
@@ -625,7 +627,7 @@ fn tableColumn(raw: ?*c.sqlite3_vtab_cursor, context: ?*c.sqlite3_context, colum
     return c.SQLITE_OK;
 }
 fn tableRowid(raw: ?*c.sqlite3_vtab_cursor, output: [*c]c.sqlite3_int64) callconv(.c) c_int {
-    const cursor: *TableCursor = @fieldParentPtr("base", raw.?);
+    const cursor: *TableCursor = @alignCast(@fieldParentPtr("base", raw.?));
     output.* = cursor.index;
     return c.SQLITE_OK;
 }
