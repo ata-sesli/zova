@@ -110,8 +110,41 @@ Final results:
   checks 7/7 and TypeScript build passed. Python/JavaScript full suites were not
   rerun in this task. Go emitted a local macOS deployment-target linker warning.
 - Rust/Python snapshot synchronization and parity checks passed.
-- Experimental WASM C ABI root compiled; no browser runtime/durability rerun.
+- Initial verification compiled the experimental WASM C ABI root. The subsequent
+  PR #148 CI follow-up also built and tested the installed browser package, as
+  detailed below.
 - Formatters, package/ABI version check and git diff --check passed.
 
 Native platform execution here is macOS arm64; other platforms remain CI work.
 No CBM files, vendored SQLite sources or release workflows were changed.
+
+## PR #148 WASM follow-up
+
+CI's native smoke returned stage 7 because it still expected format 11. The build
+now reads the canonical format from src/version.zig and supplies it to the smoke
+fixture, avoiding another duplicated format constant. Local reproduction failed
+at the same stage before the fix.
+
+The complete browser gate then exposed an OPFS recovery problem under the new
+layout: after worker termination with a spilled transaction, the adapter always
+reported a reserved writer lock. SQLite skipped hot-journal recovery and an
+integrity check reported invalid page references. The unchanged format-11 base
+passed the same original browser fixture; this does not establish a general
+durability guarantee for that old adapter behavior.
+
+The adapter now uses its tracked lock state (within the existing exclusive worker
+ownership), and normal Zova opening permits SQLite's rollback-journal recovery.
+Testing the lock fix alone confirmed the old preliminary read-only open blocked
+recovery with ReadOnly; removing that redundant probe made the complete gate pass.
+Clean incompatible-file rejection remains byte-preserving. Tests now explicitly
+cover format-11 rejection and include the failing phase/integrity diagnostics.
+
+Final follow-up verification: 14 WASM unit tests passed; the actual packed and
+installed tarball passed native capability/memory lifecycle, SQL/KV, OPFS reopen,
+incompatible-file hashes, ownership, worker failures, spilled transaction
+termination, write-triggered termination, and injected quota/write/flush failures
+in local Helium. Power loss/browser-process crash and other platforms remain
+outside this evidence. No durability PRAGMAs were weakened.
+
+Logs: issue136/wasm-red.log, wasm-integrity-stage.log, wasm-baseline.log,
+wasm-lock-check.log and wasm-green-final.log under the external verification root.

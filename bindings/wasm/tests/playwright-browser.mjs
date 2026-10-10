@@ -104,7 +104,7 @@ try {
       worker.onerror = event => { worker.terminate(); reject(new Error(event.message)); };
       worker.postMessage(name);
     });
-    for (const sql of ["UPDATE _zova_meta SET value='10' WHERE key='format_version'", "UPDATE _zova_meta SET value='999' WHERE key='format_version'", "DROP TABLE _zova_meta"]) {
+    for (const sql of ["UPDATE _zova_meta SET value='10' WHERE key='format_version'", "UPDATE _zova_meta SET value='11' WHERE key='format_version'", "UPDATE _zova_meta SET value='999' WHERE key='format_version'", "DROP TABLE _zova_meta"]) {
       const name = 'reject-' + crypto.randomUUID();
       const db = await globalThis.zova.Database.openPersistent(name);
       await db.exec(sql);

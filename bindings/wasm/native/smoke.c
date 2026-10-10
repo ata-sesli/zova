@@ -34,7 +34,7 @@ int64_t zova_wasm_smoke(void) {
     if (zova_statement_column_int64(&column) != ZOVA_OK || value != 42) goto done;
     column.index = 1;
     result = 7;
-    if (zova_statement_column_int64(&column) != ZOVA_OK || value != 11) goto done;
+    if (zova_statement_column_int64(&column) != ZOVA_OK || value != ZOVA_WASM_FORMAT_VERSION) goto done;
     result = 8;
     if (zova_statement_step(&step_request) != ZOVA_OK || step != ZOVA_STEP_DONE) goto done;
     result = 0;

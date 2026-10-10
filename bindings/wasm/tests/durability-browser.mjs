@@ -28,11 +28,12 @@ export async function testDurability(context, base) {
       }
     }
   }, afterTermination);
-  const verify = () => page.evaluate(async () => {
-    if ((await db.query('PRAGMA integrity_check')).rows[0][0] !== 'ok') throw new Error('Integrity failed');
+  const verify = stage => page.evaluate(async stage => {
+    const integrity = await db.query('PRAGMA integrity_check');
+    if (integrity.rows[0][0] !== 'ok') throw new Error(`Integrity failed after ${stage}: ${integrity.rows.map(row => String(row[0])).join('; ')}`);
     if ((await db.query('SELECT count(*) FROM records')).rows[0][0] !== 1n) throw new Error('Partial transaction persisted');
     if ((await db.kv.get(new Uint8Array([1]), new Uint8Array([2])))[0] !== 3) throw new Error('Committed KV lost');
-  });
+  }, stage);
   try {
     await load();
     await open();
@@ -44,12 +45,12 @@ export async function testDurability(context, base) {
       await db.kv.put(new Uint8Array([1]), new Uint8Array([2]), new Uint8Array([3]));
       await db.exec('BEGIN; INSERT INTO records VALUES(2, X\'02\'); ROLLBACK');
     });
-    await verify();
+    await verify('committed writes');
     // Reload without close/save: completed commits must already be durable.
     await page.reload();
     await page.waitForFunction(() => Boolean(globalThis.zova));
     await open(true);
-    await verify();
+    await verify('committed reload');
     await page.evaluate(async () => {
       await db.exec('PRAGMA cache_size=8; BEGIN; WITH RECURSIVE n(x) AS (VALUES(2) UNION ALL SELECT x+1 FROM n WHERE x<1000) INSERT INTO records SELECT x, zeroblob(1024) FROM n; CREATE INDEX pending_index ON records(value)');
     });
@@ -57,7 +58,7 @@ export async function testDurability(context, base) {
     await page.reload();
     await page.waitForFunction(() => Boolean(globalThis.zova));
     await open(true);
-    await verify();
+    await verify('spilled transaction termination');
     await page.evaluate(async () => {
       if ((await db.query("SELECT count(*) FROM sqlite_schema WHERE name='pending_index'")).rows[0][0] !== 0n) throw new Error('Uncommitted index persisted');
       await db.close();
@@ -82,7 +83,7 @@ export async function testDurability(context, base) {
     await page.reload();
     await page.waitForFunction(() => Boolean(globalThis.zova));
     await open(true);
-    await verify();
+    await verify('write-triggered worker termination');
     await page.evaluate(() => db.close());
     for (const [method, errorName] of [['write', 'QuotaExceededError'], ['write', 'UnknownError'], ['flush', 'UnknownError']]) {
       const ready = page.waitForEvent('worker');
@@ -102,7 +103,7 @@ export async function testDurability(context, base) {
       if (!rejected) throw new Error(`${method}/${errorName} silently succeeded`);
       await page.evaluate(async () => { try { await db.exec('ROLLBACK'); } catch {} await db.close(); });
       await open();
-      await verify();
+      await verify(`${method}/${errorName} injection`);
       await page.evaluate(() => db.close());
     }
     console.log('Durability: reload, rollback, active-transaction and write-triggered worker termination, injected quota/write/flush faults passed');
