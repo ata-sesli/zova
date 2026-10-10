@@ -334,6 +334,25 @@ pub const Database = struct {
         return stmt;
     }
 
+    /// Single data statement, never preparation-time PRAGMAs or DDL. Storage
+    /// ownership must additionally be enforced by a scoped authorizer.
+    pub fn prepareDml(self: *Database, sql: [:0]const u8) Error!Statement {
+        const text = sqlAfterTrivia(sql);
+        var end: usize = 0;
+        while (end < text.len and std.ascii.isAlphabetic(text[end])) : (end += 1) {}
+        for ([_][]const u8{ "SELECT", "WITH", "INSERT", "UPDATE", "DELETE" }) |keyword| {
+            if (std.ascii.eqlIgnoreCase(text[0..end], keyword)) return self.prepareSingle(sql);
+        }
+        return error.InvalidArgument;
+    }
+
+    /// Connection-scoped authorization. The caller exclusively owns this
+    /// connection and must clear the callback after all statements finalize.
+    pub fn setAuthorizer(self: *Database, callback: ?*const fn (?*anyopaque, c_int, [*c]const u8, [*c]const u8, [*c]const u8, [*c]const u8) callconv(.c) c_int, context: ?*anyopaque) Error!void {
+        const rc = c.sqlite3_set_authorizer(self.handle, callback, context);
+        if (rc != c.SQLITE_OK) return mapResultCode(rc);
+    }
+
     /// Number of rows modified by the most recent INSERT, UPDATE, or DELETE.
     pub fn changes(self: *Database) i64 {
         return @intCast(c.sqlite3_changes64(self.handle));

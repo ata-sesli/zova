@@ -6,6 +6,581 @@ const sqlite = @import("sqlite.zig");
 const dynamic = @import("extension_dynamic.zig");
 const options = @import("plugin_fixture_options");
 
+fn dataServiceHook(base: *const plugin.Host, context: ?*anyopaque) callconv(.c) i32 {
+    const host: *const plugin.ServiceHost = @ptrCast(base);
+    var service: ?*const anyopaque = null;
+    return host.get_service.?(context, 3, 1, 16, &service);
+}
+
+test "extension_plugin negotiates bounded authoritative data access" {
+    var db = try @import("zova.zig").Database.createMemory();
+    defer db.deinit();
+    var d = descriptor();
+    d.check = dataServiceHook;
+    try plugin.invoke(d, .check, &db.sqlite_db);
+}
+
+test "extension_plugin Zig data helper clears output on an older host" {
+    const host = plugin.legacyHost();
+    const client = data_api.Client{ .host = &host, .connection = null };
+    var page: data_api.DataPage = .{ .rows = 9, .has_more = 1 };
+    const request: data_api.DataRequest = .{ .operation = 1, .name = .from("g"), .row_limit = 1, .byte_limit = 1024, .row = cancelRows };
+    try std.testing.expectError(error.Unsupported, client.read(&request, &page));
+    try std.testing.expectEqualDeep(data_api.DataPage{}, page);
+}
+
+const data_api = @import("extension_plugin_api.zig");
+const DataRows = struct {
+    count: usize = 0,
+    first: [16]i64 = @splat(0),
+    second: [16]i64 = @splat(0),
+    texts: [16][256]u8 = undefined,
+    lengths: [16]usize = @splat(0),
+    text_column: usize = 1,
+    fn receive(raw: ?*anyopaque, values: ?[*]const plugin.Value, count: u64) callconv(.c) i32 {
+        const self: *DataRows = @ptrCast(@alignCast(raw.?));
+        if (self.count == self.first.len or count <= self.text_column) return 3;
+        const row = values.?[0..@intCast(count)];
+        self.first[self.count] = row[0].integer;
+        self.second[self.count] = if (row.len > 1) row[1].integer else 0;
+        const value = row[self.text_column];
+        if (value.bytes_len > 256) return 3;
+        self.lengths[self.count] = @intCast(value.bytes_len);
+        if (value.bytes_len != 0) @memcpy(self.texts[self.count][0..@intCast(value.bytes_len)], value.bytes.?[0..@intCast(value.bytes_len)]);
+        self.count += 1;
+        return 0;
+    }
+};
+
+fn exerciseData(base: *const plugin.Host, raw: ?*anyopaque) !void {
+    const client = data_api.Client{ .host = base, .connection = raw };
+    var rows: DataRows = .{};
+    var request: data_api.DataRequest = .{ .operation = 1, .name = .from("topo"), .row_limit = 1, .byte_limit = 4096, .row = DataRows.receive, .user_data = &rows };
+    var page: data_api.DataPage = .{};
+    try client.read(&request, &page);
+    try std.testing.expectEqual(@as(u32, 1), page.has_more);
+    try std.testing.expectEqualStrings("z", rows.texts[0][0..rows.lengths[0]]);
+    request.after = page.next;
+    rows = .{};
+    try client.read(&request, &page);
+    try std.testing.expectEqual(@as(u32, 0), page.has_more);
+    try std.testing.expectEqualStrings("a", rows.texts[0][0..rows.lengths[0]]);
+    const keys = [_]i64{ 2, 999, 2, 3 };
+    request.operation = 3;
+    request.keys = &keys;
+    request.key_count = keys.len;
+    request.row_limit = keys.len;
+    rows = .{ .text_column = 3 };
+    try client.read(&request, &page);
+    try std.testing.expectEqualSlices(i64, &.{ 0, 1, 2, 3 }, rows.first[0..4]);
+    try std.testing.expectEqualSlices(i64, &.{ 1, 0, 1, 0 }, rows.second[0..4]);
+    request.operation = 2;
+    request.after = .{};
+    rows = .{ .text_column = 2 };
+    try client.read(&request, &page);
+    try std.testing.expectEqual(@as(usize, 1), rows.count);
+    try std.testing.expectEqualStrings("link", rows.texts[0][0..rows.lengths[0]]);
+    request.operation = 5;
+    request.node_id = .from("z");
+    rows = .{ .text_column = 2 };
+    try client.read(&request, &page);
+    try std.testing.expectEqualStrings("a", rows.texts[0][0..rows.lengths[0]]);
+    request.operation = 6;
+    request.name = .from("vec");
+    rows = .{ .text_column = 1 };
+    try client.read(&request, &page);
+    try std.testing.expectEqual(@as(i64, 2), rows.first[0]);
+    try std.testing.expectEqualStrings("f32", rows.texts[0][0..rows.lengths[0]]);
+    request.operation = 7;
+    rows = .{ .text_column = 0 };
+    try client.read(&request, &page);
+    try std.testing.expectEqualStrings("v", rows.texts[0][0..rows.lengths[0]]);
+    const ids = [_]data_api.Bytes{ .from("v"), .from("missing"), .from("v") };
+    request.operation = 8;
+    request.ids = &ids;
+    request.id_count = ids.len;
+    rows = .{ .text_column = 2 };
+    try client.read(&request, &page);
+    try std.testing.expectEqualSlices(i64, &.{ 1, 0, 1 }, rows.second[0..3]);
+    const nul_ids = [_]data_api.Bytes{ .from("v\x00x"), .from("v\x00x") };
+    request.ids = &nul_ids;
+    request.id_count = nul_ids.len;
+    rows = .{ .text_column = 2 };
+    try client.read(&request, &page);
+    try std.testing.expectEqualSlices(i64, &.{ 1, 1 }, rows.second[0..2]);
+}
+
+fn dataHook(base: *const plugin.Host, raw: ?*anyopaque) callconv(.c) i32 {
+    exerciseData(base, raw) catch return 1;
+    return 0;
+}
+
+test "extension_plugin graph vector pages and batches preserve identities" {
+    var db = try @import("zova.zig").Database.createMemory();
+    defer db.deinit();
+    try populateData(&db);
+    var d = descriptor();
+    d.check = dataHook;
+    try plugin.invoke(d, .check, &db.sqlite_db);
+}
+
+fn populateData(db: *@import("zova.zig").Database) !void {
+    try db.createGraph("topo");
+    try db.createGraph("other");
+    try db.putGraphNodes(&.{
+        .{ .graph_name = "topo", .node_id = "z", .kind = "node" },
+        .{ .graph_name = "topo", .node_id = "a", .kind = "node" },
+        .{ .graph_name = "other", .node_id = "a", .kind = "node" },
+    });
+    try db.putGraphEdges(&.{.{ .graph_name = "topo", .from_node_id = "z", .to_node_id = "a", .edge_type = "link" }});
+    try db.createVectorCollection("vec", .{ .dimensions = 2, .metric = .l2 });
+    try db.putVector("vec", "v", .{ .f32 = &.{ 1, 2 } });
+    try db.putVector("vec", "v\x00x", .{ .f32 = &.{ 3, 4 } });
+}
+
+fn cancelRows(_: ?*anyopaque, _: ?[*]const plugin.Value, _: u64) callconv(.c) i32 {
+    return 6;
+}
+fn oomRows(_: ?*anyopaque, _: ?[*]const plugin.Value, _: u64) callconv(.c) i32 {
+    return 2;
+}
+fn limitsHook(base: *const plugin.Host, context: ?*anyopaque) callconv(.c) i32 {
+    limitsExercise(base, context) catch return 1;
+    return 0;
+}
+fn limitsExercise(base: *const plugin.Host, context: ?*anyopaque) !void {
+    const client = data_api.Client{ .host = base, .connection = context };
+    var rows: DataRows = .{};
+    var req: data_api.DataRequest = .{ .operation = 1, .name = .from("topo"), .row_limit = 2, .byte_limit = 1, .row = DataRows.receive, .user_data = &rows };
+    var page: data_api.DataPage = .{ .rows = 99, .has_more = 1 };
+    try std.testing.expectError(error.Limit, client.read(&req, &page));
+    try std.testing.expectEqualDeep(data_api.DataPage{}, page);
+    try std.testing.expectEqual(@as(usize, 0), rows.count);
+    req.byte_limit = 4096;
+    req.row = cancelRows;
+    try std.testing.expectError(error.Canceled, client.read(&req, &page));
+    try std.testing.expectEqualDeep(data_api.DataPage{}, page);
+    req.row = oomRows;
+    try std.testing.expectError(error.OutOfMemory, client.read(&req, &page));
+    req.row = DataRows.receive;
+    req.row_limit = 0;
+    try std.testing.expectError(error.InvalidArgument, client.read(&req, &page));
+    req.row_limit = 4097;
+    try std.testing.expectError(error.InvalidArgument, client.read(&req, &page));
+    req.row_limit = 2;
+    req.struct_size = 8;
+    try std.testing.expectError(error.InvalidArgument, client.read(&req, &page));
+    req.struct_size = @sizeOf(data_api.DataRequest);
+    req.after = .{ .key = 1 };
+    try std.testing.expectError(error.InvalidArgument, client.read(&req, &page));
+    req.after = .{};
+    req.operation = 3;
+    req.key_count = 1;
+    try std.testing.expectError(error.InvalidArgument, client.read(&req, &page));
+    const invalid_keys = [_]i64{0};
+    req.keys = &invalid_keys;
+    try std.testing.expectError(error.InvalidArgument, client.read(&req, &page));
+    req.keys = null;
+    req.key_count = 0;
+    try client.read(&req, &page);
+    try std.testing.expectEqual(@as(u64, 0), page.rows);
+    req.name = .from("missing");
+    try std.testing.expectError(error.HostError, client.read(&req, &page));
+    req.name = .from("topo");
+    const edge_keys = [_]i64{ 1, 999, 1 };
+    req.operation = 4;
+    req.keys = &edge_keys;
+    req.key_count = edge_keys.len;
+    req.row_limit = 3;
+    rows = .{ .text_column = 4 };
+    try client.read(&req, &page);
+    try std.testing.expectEqualSlices(i64, &.{ 0, 1, 2 }, rows.first[0..3]);
+    try std.testing.expectEqualSlices(i64, &.{ 1, 0, 1 }, rows.second[0..3]);
+    req.operation = 5;
+    req.node_id = .from("a");
+    req.direction = 1;
+    req.edge_type = .from("link");
+    rows = .{ .text_column = 2 };
+    try client.read(&req, &page);
+    try std.testing.expectEqualStrings("z", rows.texts[0][0..rows.lengths[0]]);
+    req.edge_type = .from("absent");
+    rows = .{};
+    try client.read(&req, &page);
+    try std.testing.expectEqual(@as(u64, 0), page.rows);
+}
+test "extension_plugin data bounds cancellation empty and edge batch results" {
+    var db = try @import("zova.zig").Database.createMemory();
+    defer db.deinit();
+    try populateData(&db);
+    var d = descriptor();
+    d.check = limitsHook;
+    try plugin.invoke(d, .check, &db.sqlite_db);
+}
+
+fn allocateData(allocator: std.mem.Allocator, db: *sqlite.Database) !void {
+    const ids = [_]data_api.Bytes{ .from("v"), .from("v"), .from("missing") };
+    var rows: DataRows = .{ .text_column = 2 };
+    const page = try @import("extension_data.zig").read(allocator, db, &.{ .operation = 8, .name = .from("vec"), .ids = &ids, .id_count = ids.len, .row_limit = 3, .byte_limit = 4096, .row = DataRows.receive, .user_data = &rows });
+    try std.testing.expectEqual(@as(u64, 3), page.rows);
+}
+test "extension_plugin data allocation failures finalize all borrowed bindings" {
+    var db = try @import("zova.zig").Database.createMemory();
+    defer db.deinit();
+    try populateData(&db);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocateData, .{&db.sqlite_db});
+    try db.exec("vacuum");
+}
+
+fn storageAtomicExercise(base: *const plugin.Host, raw: ?*anyopaque) !void {
+    const client = data_api.Client{ .host = base, .connection = raw };
+    var rows: DataRows = .{ .text_column = 0 };
+    var sql: []const u8 = "insert into _zova_ext_c_test_data values(42)";
+    var req: plugin.QueryRequest = .{ .sql = sql.ptr, .sql_len = sql.len, .row_limit = 4, .byte_limit = 4096, .row = DataRows.receive, .user_data = &rows };
+    try client.storage(&req);
+    sql = "insert or fail into _zova_ext_c_test_data values(43),(42)";
+    req.sql = sql.ptr;
+    req.sql_len = sql.len;
+    try std.testing.expectError(error.HostError, client.storage(&req));
+    sql = "insert into _zova_ext_c_test_data values(44),(45) returning id";
+    req.sql = sql.ptr;
+    req.sql_len = sql.len;
+    req.row = cancelRows;
+    try std.testing.expectError(error.Canceled, client.storage(&req));
+    sql = "select count(*) from main._zova_ext_c_test_data";
+    req.sql = sql.ptr;
+    req.sql_len = sql.len;
+    req.row = DataRows.receive;
+    try client.storage(&req);
+    try std.testing.expectEqual(@as(i64, 1), rows.first[0]);
+}
+fn storageAtomicHook(base: *const plugin.Host, raw: ?*anyopaque) callconv(.c) i32 {
+    storageAtomicExercise(base, raw) catch |err| {
+        std.debug.print("storage atomic exercise failed: {t}\n", .{err});
+        return 1;
+    };
+    return 0;
+}
+
+fn corruptDataHook(base: *const plugin.Host, raw: ?*anyopaque) callconv(.c) i32 {
+    corruptDataExercise(base, raw) catch return 1;
+    return 0;
+}
+fn corruptDataExercise(base: *const plugin.Host, raw: ?*anyopaque) !void {
+    const client = data_api.Client{ .host = base, .connection = raw };
+    var rows: DataRows = .{};
+    const keys = [_]i64{1};
+    var req: data_api.DataRequest = .{ .operation = 3, .name = .from("topo"), .keys = &keys, .key_count = 1, .row_limit = 4, .byte_limit = 4096, .row = DataRows.receive, .user_data = &rows };
+    var page: data_api.DataPage = .{};
+    try std.testing.expectError(error.HostError, client.read(&req, &page));
+    try std.testing.expectEqualDeep(data_api.DataPage{}, page);
+    req.operation = 7;
+    req.name = .from("vec");
+    rows = .{ .text_column = 0 };
+    try std.testing.expectError(error.HostError, client.read(&req, &page));
+    try std.testing.expectEqualDeep(data_api.DataPage{}, page);
+}
+test "extension_plugin rejects corrupt topology ordering and nonfinite vector bytes" {
+    var db = try @import("zova.zig").Database.createMemory();
+    defer db.deinit();
+    try populateData(&db);
+    try db.exec("update _zova_graph_nodes set created_order=-1 where node_key=1; update _zova_vectors set \"values\"=x'0000807f00000000'");
+    var d = descriptor();
+    d.check = corruptDataHook;
+    try plugin.invoke(d, .check, &db.sqlite_db);
+}
+fn failedStorageHook(base: *const plugin.Host, raw: ?*anyopaque) callconv(.c) i32 {
+    if (storageAtomicHook(base, raw) != 0) return 1;
+    return 99;
+}
+test "extension_plugin SQL faults cancel hook failure and caller rollback are atomic" {
+    var db = try @import("zova.zig").Database.createMemory();
+    defer db.deinit();
+    try db.exec("create table _zova_ext_c_test_data(id integer unique); create table caller_work(id integer)");
+    var d = descriptor();
+    d.check = failedStorageHook;
+    try db.begin();
+    try db.exec("insert into caller_work values(7)");
+    try std.testing.expectError(error.ExtensionInvalid, plugin.invoke(d, .check, &db.sqlite_db));
+    var check = try db.prepare("select (select count(*) from _zova_ext_c_test_data),(select count(*) from caller_work)");
+    try std.testing.expect(try check.step() == .row);
+    try std.testing.expectEqual(@as(i64, 0), check.columnInt64(0));
+    try std.testing.expectEqual(@as(i64, 1), check.columnInt64(1));
+    check.deinit();
+    d.check = storageAtomicHook;
+    try plugin.invoke(d, .check, &db.sqlite_db);
+    try db.rollback();
+    check = try db.prepare("select count(*) from _zova_ext_c_test_data");
+    defer check.deinit();
+    try std.testing.expect(try check.step() == .row);
+    try std.testing.expectEqual(@as(i64, 0), check.columnInt64(0));
+}
+
+test "extension_plugin source access follows bound stores and read only reopen" {
+    const zova = @import("zova.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const allocator = std.testing.allocator;
+    const main = try std.fmt.allocPrintSentinel(allocator, ".zig-cache/tmp/{s}/main.zova", .{tmp.sub_path}, 0);
+    defer allocator.free(main);
+    const graphs = try std.fmt.allocPrintSentinel(allocator, ".zig-cache/tmp/{s}/graphs.zova", .{tmp.sub_path}, 0);
+    defer allocator.free(graphs);
+    const vectors = try std.fmt.allocPrintSentinel(allocator, ".zig-cache/tmp/{s}/vectors.zova", .{tmp.sub_path}, 0);
+    defer allocator.free(vectors);
+    try zova.createGraphStore(graphs);
+    try zova.createVectorStore(vectors);
+    var d = descriptor();
+    d.check = dataHook;
+    {
+        var db = try zova.Database.create(main);
+        defer db.deinit();
+        try db.bindGraphStore(graphs);
+        try db.bindVectorStore(vectors);
+        try populateData(&db);
+        try db.begin();
+        try plugin.invoke(d, .check, &db.sqlite_db);
+        try db.rollback();
+    }
+    var db = try zova.Database.openWithOptions(main, .{ .read_only = true });
+    defer db.deinit();
+    try plugin.invoke(d, .check, &db.sqlite_db);
+}
+
+fn readOnlyStorageHook(base: *const plugin.Host, raw: ?*anyopaque) callconv(.c) i32 {
+    readOnlyStorageExercise(base, raw) catch return 1;
+    return 0;
+}
+fn readOnlyStorageExercise(base: *const plugin.Host, raw: ?*anyopaque) !void {
+    const client = data_api.Client{ .host = base, .connection = raw };
+    var rows: DataRows = .{ .text_column = 0 };
+    var sql: []const u8 = "select count(*) from main._zova_ext_c_test_data";
+    var req: plugin.QueryRequest = .{ .sql = sql.ptr, .sql_len = sql.len, .row_limit = 1, .byte_limit = 1024, .row = DataRows.receive, .user_data = &rows };
+    try client.storage(&req);
+    try std.testing.expectEqual(@as(i64, 1), rows.first[0]);
+    sql = "delete from main._zova_ext_c_test_data";
+    req.sql = sql.ptr;
+    req.sql_len = sql.len;
+    try std.testing.expectError(error.HostError, client.storage(&req));
+}
+test "extension_plugin private reads work read only and writes fail without mutation" {
+    const zova = @import("zova.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrintSentinel(std.testing.allocator, ".zig-cache/tmp/{s}/readonly.zova", .{tmp.sub_path}, 0);
+    defer std.testing.allocator.free(path);
+    var d = descriptor();
+    d.version = "1.0.0";
+    d.install = installReadOnlyFixture;
+    const item = try plugin.validate(&d);
+    const registry: extension.Registry = .{ .extensions = &.{item}, .plugins = &.{d} };
+    {
+        var db = try zova.Database.createWithExtensions(path, registry);
+        defer db.deinit();
+        try db.installExtension("c_test");
+    }
+    d.check = readOnlyStorageHook;
+    var db = try zova.Database.openWithOptionsAndExtensions(path, .{ .read_only = true }, registry);
+    defer db.deinit();
+    try plugin.invoke(d, .check, &db.sqlite_db);
+}
+
+fn installReadOnlyFixture(base: *const plugin.Host, raw: ?*anyopaque) callconv(.c) i32 {
+    const client = data_api.Client{ .host = base, .connection = raw };
+    client.exec("create table _zova_ext_c_test_data(id integer); insert into _zova_ext_c_test_data values(1)") catch return 1;
+    return 0;
+}
+
+const VectorRows = struct {
+    expected: []const u8,
+    seen: usize = 0,
+    fn receive(raw: ?*anyopaque, values: ?[*]const plugin.Value, count: u64) callconv(.c) i32 {
+        const self: *VectorRows = @ptrCast(@alignCast(raw.?));
+        if (count != 2 or values.?[1].kind != plugin.value_blob) return 3;
+        const value = values.?[1];
+        if (!std.mem.eql(u8, self.expected, value.bytes.?[0..@intCast(value.bytes_len)])) return 3;
+        self.seen += 1;
+        return 0;
+    }
+};
+fn rawVectorHook(base: *const plugin.Host, raw: ?*anyopaque) callconv(.c) i32 {
+    rawVectorExercise(base, raw) catch return 1;
+    return 0;
+}
+fn rawVectorExercise(base: *const plugin.Host, raw: ?*anyopaque) !void {
+    const client = data_api.Client{ .host = base, .connection = raw };
+    for ([_]struct { name: []const u8, encoded: []const u8 }{
+        .{ .name = "half", .encoded = &.{ 0, 0x3c, 0, 0xc0 } },
+        .{ .name = "signed", .encoded = &.{ 0xff, 2 } },
+    }) |case| {
+        var rows: VectorRows = .{ .expected = case.encoded };
+        var page: data_api.DataPage = .{};
+        try client.read(&.{ .operation = 7, .name = .from(case.name), .row_limit = 1, .byte_limit = 1024, .row = VectorRows.receive, .user_data = &rows }, &page);
+        try std.testing.expectEqual(@as(usize, 1), rows.seen);
+    }
+}
+test "extension_plugin delivers exact f16 and signed i8 without widening" {
+    var db = try @import("zova.zig").Database.createMemory();
+    defer db.deinit();
+    try db.createVectorCollection("half", .{ .dimensions = 2, .metric = .l2, .element_type = .f16 });
+    try db.putVector("half", "v", .{ .f16 = &.{ 0x3c00, 0xc000 } });
+    try db.createVectorCollection("signed", .{ .dimensions = 2, .metric = .dot, .element_type = .i8 });
+    try db.putVector("signed", "v", .{ .i8 = &.{ -1, 2 } });
+    var d = descriptor();
+    d.check = rawVectorHook;
+    try plugin.invoke(d, .check, &db.sqlite_db);
+}
+
+var snapshot_writer: ?*@import("zova.zig").Database = null;
+fn snapshotHook(base: *const plugin.Host, raw: ?*anyopaque) callconv(.c) i32 {
+    snapshotExercise(base, raw) catch return 1;
+    return 0;
+}
+fn snapshotExercise(base: *const plugin.Host, raw: ?*anyopaque) !void {
+    const client = data_api.Client{ .host = base, .connection = raw };
+    var rows: DataRows = .{};
+    var req: data_api.DataRequest = .{ .operation = 1, .name = .from("topo"), .row_limit = 1, .byte_limit = 4096, .row = DataRows.receive, .user_data = &rows };
+    var page: data_api.DataPage = .{};
+    try client.read(&req, &page);
+    try snapshot_writer.?.putGraphNode(.{ .graph_name = "topo", .node_id = "later", .kind = "node" });
+    rows = .{};
+    req.after = page.next;
+    try client.read(&req, &page);
+    try std.testing.expectEqual(@as(u64, 0), page.rows);
+}
+
+test "extension_plugin autocommit pages hold one WAL snapshot" {
+    const zova = @import("zova.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrintSentinel(std.testing.allocator, ".zig-cache/tmp/{s}/snapshot.zova", .{tmp.sub_path}, 0);
+    defer std.testing.allocator.free(path);
+    var db = try zova.Database.create(path);
+    defer db.deinit();
+    try db.exec("pragma journal_mode=wal");
+    try db.createGraph("topo");
+    try db.putGraphNode(.{ .graph_name = "topo", .node_id = "first", .kind = "node" });
+    var writer = try zova.Database.open(path);
+    defer writer.deinit();
+    snapshot_writer = &writer;
+    defer snapshot_writer = null;
+    var d = descriptor();
+    d.check = snapshotHook;
+    try plugin.invoke(d, .check, &db.sqlite_db);
+    try std.testing.expect(try db.hasGraphNode("topo", "later"));
+}
+
+fn vectorSnapshotHook(base: *const plugin.Host, raw: ?*anyopaque) callconv(.c) i32 {
+    vectorSnapshotExercise(base, raw) catch return 1;
+    return 0;
+}
+fn vectorSnapshotExercise(base: *const plugin.Host, raw: ?*anyopaque) !void {
+    const client = data_api.Client{ .host = base, .connection = raw };
+    var rows: DataRows = .{ .text_column = 0 };
+    var req: data_api.DataRequest = .{ .operation = 7, .name = .from("vec"), .row_limit = 1, .byte_limit = 1024, .row = DataRows.receive, .user_data = &rows };
+    var page: data_api.DataPage = .{};
+    try client.read(&req, &page);
+    try std.testing.expectEqualStrings("a", rows.texts[0][0..rows.lengths[0]]);
+    try snapshot_writer.?.putVector("vec", "later", .{ .f32 = &.{ 3, 4 } });
+    req.after_id = .from("a");
+    rows = .{ .text_column = 0 };
+    try client.read(&req, &page);
+    try std.testing.expectEqual(@as(u64, 0), page.rows);
+}
+test "extension_plugin main and bound vectors retain caller and autocommit WAL views" {
+    const zova = @import("zova.zig");
+    for ([_]bool{ false, true }) |bound| {
+        for ([_]bool{ false, true }) |caller| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            const allocator = std.testing.allocator;
+            const main = try std.fmt.allocPrintSentinel(allocator, ".zig-cache/tmp/{s}/snapshot.zova", .{tmp.sub_path}, 0);
+            defer allocator.free(main);
+            const store = try std.fmt.allocPrintSentinel(allocator, ".zig-cache/tmp/{s}/vectors.zova", .{tmp.sub_path}, 0);
+            defer allocator.free(store);
+            var db = try zova.Database.create(main);
+            defer db.deinit();
+            try db.exec("pragma journal_mode=wal");
+            if (bound) {
+                try zova.createVectorStore(store);
+                try db.bindVectorStore(store);
+                try db.exec("pragma vector_store.journal_mode=wal");
+            }
+            try db.createVectorCollection("vec", .{ .dimensions = 2, .metric = .l2 });
+            try db.putVector("vec", "a", .{ .f32 = &.{ 1, 2 } });
+            var writer = try zova.Database.open(main);
+            defer writer.deinit();
+            snapshot_writer = &writer;
+            defer snapshot_writer = null;
+            var d = descriptor();
+            d.check = vectorSnapshotHook;
+            if (caller) try db.begin();
+            try plugin.invoke(d, .check, &db.sqlite_db);
+            if (caller) {
+                // The first hook released its savepoint, not the outer view.
+                try plugin.invoke(d, .check, &db.sqlite_db);
+                try db.rollback();
+            }
+            var latest = try db.getVector(allocator, "vec", "later");
+            defer latest.deinit(allocator);
+            try std.testing.expectEqualSlices(f32, &.{ 3, 4 }, latest.values.f32);
+        }
+    }
+}
+
+fn storageExercise(base: *const plugin.Host, raw: ?*anyopaque) !void {
+    const client = data_api.Client{ .host = base, .connection = raw };
+    var rows: DataRows = .{ .text_column = 0 };
+    const sql = "insert into _zova_ext_c_test_data values(?) returning id";
+    const params = [_]plugin.Value{.{ .kind = plugin.value_integer, .integer = 42 }};
+    var req: plugin.QueryRequest = .{ .sql = sql, .sql_len = sql.len, .parameters = &params, .parameter_count = 1, .row_limit = 1, .byte_limit = 4096, .row = DataRows.receive, .user_data = &rows };
+    try client.storage(&req);
+    try std.testing.expectEqual(@as(i64, 42), rows.first[0]);
+    for ([_][]const u8{ "select * from _zova_meta", "delete from _zova_graph_nodes", "select * from _zova_ext_other_data", "pragma writable_schema=on", "begin", "attach ':memory:' as evil", "select load_extension('x')", "select * from sqlite_schema" }) |forbidden| {
+        req.sql = forbidden.ptr;
+        req.sql_len = forbidden.len;
+        req.parameters = null;
+        req.parameter_count = 0;
+        client.storage(&req) catch |err| {
+            if (err != error.InvalidArgument) std.debug.print("forbidden SQL returned {t}: {s}\n", .{ err, forbidden });
+            try std.testing.expectEqual(error.InvalidArgument, err);
+            continue;
+        };
+        return error.TestExpectedError;
+    }
+}
+fn storageHook(base: *const plugin.Host, raw: ?*anyopaque) callconv(.c) i32 {
+    storageExercise(base, raw) catch return 1;
+    return 0;
+}
+test "extension_plugin parameterized private storage is owner scoped" {
+    var db = try @import("zova.zig").Database.createMemory();
+    defer db.deinit();
+    try db.exec("create table _zova_ext_c_test_data(id integer); create table _zova_ext_other_data(id integer)");
+    var d = descriptor();
+    d.check = storageHook;
+    try plugin.invoke(d, .check, &db.sqlite_db);
+}
+
+fn shadowLower(context: ?*sqlite.c.sqlite3_context, _: c_int, _: [*c]?*sqlite.c.sqlite3_value) callconv(.c) void {
+    sqlite.c.sqlite3_result_int(context, 123);
+}
+fn shadowStorageHook(base: *const plugin.Host, raw: ?*anyopaque) callconv(.c) i32 {
+    const client = data_api.Client{ .host = base, .connection = raw };
+    const sql = "select lower('x')";
+    var rows: DataRows = .{ .text_column = 0 };
+    client.storage(&.{ .sql = sql, .sql_len = sql.len, .row_limit = 1, .byte_limit = 1024, .row = DataRows.receive, .user_data = &rows }) catch |err| {
+        return if (err == error.InvalidArgument and rows.count == 0) 0 else 1;
+    };
+    return 1;
+}
+test "extension_plugin storage rejects user functions shadowing allowed builtins" {
+    var db = try @import("zova.zig").Database.createMemory();
+    defer db.deinit();
+    try std.testing.expectEqual(sqlite.c.SQLITE_OK, sqlite.c.sqlite3_create_function_v2(db.sqlite_db.handle, "lower", 1, sqlite.c.SQLITE_UTF8, null, shadowLower, null, null, null));
+    var d = descriptor();
+    d.check = shadowStorageHook;
+    try plugin.invoke(d, .check, &db.sqlite_db);
+}
+
 /// Bundle libraries use the platform dynamic-library naming convention so the
 /// same bundle shape loads through `std.DynLib` and the Windows module loader.
 fn fixtureLibraryName(allocator: std.mem.Allocator, base: []const u8) ![]u8 {

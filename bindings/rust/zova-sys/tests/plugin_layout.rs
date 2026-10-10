@@ -17,5 +17,12 @@ fn portable_plugin_layouts_match_the_c_header() {
         assert_eq!(size_of::<zova_plugin_query_request_v1>(), 72);
         assert_eq!(size_of::<zova_plugin_query_service_v1>(), 16);
         assert_eq!(size_of::<zova_plugin_diagnostics_service_v1>(), 16);
+        assert_eq!(size_of::<zova_plugin_bytes_v1>(), 16);
+        assert_eq!(size_of::<zova_plugin_cursor_v1>(), 16);
+        assert_eq!(size_of::<zova_plugin_data_page_v1>(), 32);
+        assert_eq!(size_of::<zova_plugin_data_request_v1>(), 160);
+        assert_eq!(offset_of!(zova_plugin_data_request_v1, row_limit), 128);
+        assert_eq!(size_of::<zova_plugin_data_service_v1>(), 16);
+        assert_eq!(size_of::<zova_plugin_storage_service_v1>(), 16);
     }
 }
