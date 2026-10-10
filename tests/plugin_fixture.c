@@ -24,13 +24,25 @@ ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_upgrade_descriptor_v1) == 104, "upgrade la
 ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_value_v1) == 40, "value layout");
 ZOVA_LAYOUT_ASSERT(sizeof(zova_plugin_query_request_v1) == 72, "query layout");
 
+typedef struct query_state {
+    int valid;
+    const zova_plugin_service_host_v1 *host;
+    void *connection;
+} query_state;
+
 static int32_t ZOVA_PLUGIN_CALL receive(void *raw, const zova_plugin_value_v1 *v, uint64_t count) {
-    int *valid = (int *)raw;
-    *valid = count == 5 && v[0].kind == ZOVA_PLUGIN_VALUE_INTEGER && v[0].integer == 42 &&
+    query_state *state = (query_state *)raw;
+    const void *service = state->host;
+    state->valid = count == 5 && v[0].kind == ZOVA_PLUGIN_VALUE_INTEGER && v[0].integer == 42 &&
         v[1].kind == ZOVA_PLUGIN_VALUE_FLOAT && v[1].real == 1.25 &&
         v[2].kind == ZOVA_PLUGIN_VALUE_TEXT && v[2].bytes_len == 3 &&
         memcmp(v[2].bytes, "a\0b", 3) == 0 && v[3].kind == ZOVA_PLUGIN_VALUE_BLOB &&
         v[3].bytes_len == 0 && v[4].kind == ZOVA_PLUGIN_VALUE_NULL;
+    /* Deliberately violate the callback rule: the host must reject reentry and
+     * clear the output, also when called across a real C/C++ plugin boundary. */
+    if (state->host->get_service(state->connection, ZOVA_PLUGIN_SERVICE_QUERY, 1,
+            sizeof(zova_plugin_query_service_v1), &service) != ZOVA_PLUGIN_INVALID_ARGUMENT || service != NULL)
+        state->valid = 0;
     return ZOVA_PLUGIN_OK;
 }
 
@@ -43,9 +55,11 @@ static int32_t ZOVA_PLUGIN_CALL check_services(const zova_plugin_host_v1 *host, 
     zova_plugin_query_request_v1 request = {0};
     uint8_t diagnostic[1024];
     uint64_t written = 0;
-    int valid = 0;
+    query_state state = {0};
     if (host->struct_size < sizeof(zova_plugin_service_host_v1)) return ZOVA_PLUGIN_UNSUPPORTED;
     extended = (const zova_plugin_service_host_v1 *)host;
+    state.host = extended;
+    state.connection = db;
     if (extended->get_service(db, 999, 1, 0, &service) != ZOVA_PLUGIN_UNSUPPORTED || service != NULL)
         return ZOVA_PLUGIN_ERROR;
     if (extended->get_service(db, ZOVA_PLUGIN_SERVICE_QUERY, 1, sizeof(*query), &service) != 0)
@@ -67,8 +81,8 @@ static int32_t ZOVA_PLUGIN_CALL check_services(const zova_plugin_host_v1 *host, 
     request.row_limit = 1;
     request.byte_limit = 1024;
     request.row = receive;
-    request.user_data = &valid;
-    if (query->query(db, &request) != 0 || !valid) return ZOVA_PLUGIN_ERROR;
+    request.user_data = &state;
+    if (query->query(db, &request) != 0 || !state.valid) return ZOVA_PLUGIN_ERROR;
     if (extended->get_service(db, ZOVA_PLUGIN_SERVICE_DIAGNOSTICS, 1, sizeof(*diagnostics), &service) != 0)
         return ZOVA_PLUGIN_ERROR;
     diagnostics = (const zova_plugin_diagnostics_service_v1 *)service;

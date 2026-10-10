@@ -246,20 +246,28 @@ test "extension_plugin optional hooks and error rollback preserve caller work" {
     try db.exec("rollback");
 }
 
+fn checkNegotiation(base: *const plugin.Host, context: ?*anyopaque) !void {
+    const host: *const plugin.ServiceHost = @ptrCast(base);
+    var service: ?*const anyopaque = @ptrFromInt(1);
+    try std.testing.expectEqual(plugin.status_unsupported, host.get_service.?(context, 999, 1, 0, &service));
+    try std.testing.expect(service == null);
+    try std.testing.expectEqual(plugin.status_unsupported, host.get_service.?(context, plugin.service_query, 2, 0, &service));
+    try std.testing.expectEqual(plugin.status_unsupported, host.get_service.?(context, plugin.service_query, 1, @sizeOf(plugin.QueryService) + 1, &service));
+    try std.testing.expectEqual(@as(i32, 3), host.get_service.?(null, plugin.service_query, 1, 0, &service));
+    try std.testing.expectEqual(@as(i32, 0), host.get_service.?(context, plugin.service_query, 1, @sizeOf(plugin.QueryService), &service));
+    try std.testing.expect(service != null);
+}
+fn negotiationHook(host: *const plugin.Host, context: ?*anyopaque) callconv(.c) i32 {
+    checkNegotiation(host, context) catch return 1;
+    return 0;
+}
 test "extension_plugin negotiated services preserve the v1 host prefix" {
     var db = try sqlite.Database.open(":memory:");
     defer db.deinit();
     const host = plugin.serviceHost();
     try std.testing.expectEqual(@as(usize, 0), @offsetOf(plugin.ServiceHost, "base"));
     try std.testing.expectEqual(@as(u32, @sizeOf(plugin.ServiceHost)), host.base.struct_size);
-    var service: ?*const anyopaque = @ptrFromInt(1);
-    try std.testing.expectEqual(plugin.status_unsupported, host.get_service.?(&db, 999, 1, 0, &service));
-    try std.testing.expect(service == null);
-    try std.testing.expectEqual(plugin.status_unsupported, host.get_service.?(&db, plugin.service_query, 2, 0, &service));
-    try std.testing.expectEqual(plugin.status_unsupported, host.get_service.?(&db, plugin.service_query, 1, @sizeOf(plugin.QueryService) + 1, &service));
-    try std.testing.expectEqual(@as(i32, 3), host.get_service.?(null, plugin.service_query, 1, 0, &service));
-    try std.testing.expectEqual(@as(i32, 0), host.get_service.?(&db, plugin.service_query, 1, @sizeOf(plugin.QueryService), &service));
-    try std.testing.expect(service != null);
+    try plugin.invokeHook(negotiationHook, &db);
     var d = descriptor();
     d.flags = plugin.requires_query;
     _ = try plugin.validate(&d);
@@ -460,17 +468,87 @@ test "extension_plugin Zig author helper negotiates safely with old hosts" {
     try std.testing.expectError(error.Unsupported, client.query(&.{ .sql = "SELECT 1", .sql_len = 8, .row_limit = 1, .byte_limit = 1024, .row = cancelRow }));
 }
 
+// This substitutes only the external C host boundary, exercising Client's
+// validation of replies from another compatible host implementation.
+const TestHost = struct {
+    status: i32 = 0,
+    reply: enum { valid, missing, short, newer, no_callback } = .valid,
+    const valid: plugin.QueryService = .{ .query = runQuery };
+    const short: plugin.QueryService = .{ .struct_size = 8, .query = runQuery };
+    const newer: plugin.QueryService = .{ .version = 2, .query = runQuery };
+    const no_callback: plugin.QueryService = .{};
+    const host: plugin.ServiceHost = .{ .get_service = lookup };
+
+    fn lookup(context: ?*anyopaque, _: u32, _: u32, _: u32, output: ?*?*const anyopaque) callconv(.c) i32 {
+        const self: *TestHost = @ptrCast(@alignCast(context.?));
+        output.?.* = switch (self.reply) {
+            .valid => &valid,
+            .missing => null,
+            .short => &short,
+            .newer => &newer,
+            .no_callback => &no_callback,
+        };
+        return 0;
+    }
+    fn runQuery(context: ?*anyopaque, _: ?*const plugin.QueryRequest) callconv(.c) i32 {
+        const self: *TestHost = @ptrCast(@alignCast(context.?));
+        return self.status;
+    }
+    fn client(self: *TestHost) plugin.Client {
+        return .{ .host = &host.base, .connection = self };
+    }
+};
+
+test "extension_plugin Zig client maps all service statuses and rejects unknown statuses" {
+    var host: TestHost = .{};
+    const request: plugin.QueryRequest = .{ .sql = "SELECT 1", .sql_len = 8, .row_limit = 1, .byte_limit = 1024, .row = cancelRow };
+    try host.client().query(&request);
+    const cases = [_]struct { status: i32, expected: plugin.Client.Error }{
+        .{ .status = 1, .expected = error.HostError },
+        .{ .status = 2, .expected = error.OutOfMemory },
+        .{ .status = 3, .expected = error.InvalidArgument },
+        .{ .status = 4, .expected = error.Unsupported },
+        .{ .status = 5, .expected = error.Limit },
+        .{ .status = 6, .expected = error.Canceled },
+        .{ .status = -1, .expected = error.HostError },
+        .{ .status = 999, .expected = error.HostError },
+    };
+    for (cases) |case| {
+        host.status = case.status;
+        try std.testing.expectError(case.expected, host.client().query(&request));
+    }
+}
+
+test "extension_plugin Zig client rejects incomplete negotiated service replies" {
+    var host: TestHost = .{ .reply = .missing };
+    const request: plugin.QueryRequest = .{ .sql = "SELECT 1", .sql_len = 8, .row_limit = 1, .byte_limit = 1024, .row = cancelRow };
+    try std.testing.expectError(error.HostError, host.client().query(&request));
+    host.reply = .short;
+    try std.testing.expectError(error.Unsupported, host.client().query(&request));
+    host.reply = .newer;
+    try std.testing.expectError(error.Unsupported, host.client().query(&request));
+    host.reply = .no_callback;
+    try std.testing.expectError(error.Unsupported, host.client().query(&request));
+}
+
 const Reentry = struct { host: *const plugin.Host, context: ?*anyopaque, rejected: bool = false };
 fn reentryRow(raw: ?*anyopaque, _: ?[*]const plugin.Value, _: u64) callconv(.c) i32 {
     const state: *Reentry = @ptrCast(@alignCast(raw.?));
     const sql = "CREATE TABLE forbidden(id INTEGER)";
     state.rejected = state.host.exec_sql.?(state.context, sql, sql.len) == 3;
+    const extended: *const plugin.ServiceHost = @ptrCast(state.host);
+    var service: ?*const anyopaque = @ptrFromInt(1);
+    state.rejected = state.rejected and extended.get_service.?(state.context, plugin.service_query, 1, @sizeOf(plugin.QueryService), &service) == 3 and service == null;
     return 0;
 }
 fn reentryHook(host: *const plugin.Host, context: ?*anyopaque) callconv(.c) i32 {
     const client: plugin.Client = .{ .host = host, .connection = context };
     var state: Reentry = .{ .host = host, .context = context };
     client.query(&.{ .sql = "SELECT 1", .sql_len = 8, .row_limit = 1, .byte_limit = 1024, .row = reentryRow, .user_data = &state }) catch return 1;
+    // The temporary guard must be cleared after the query, including lookup.
+    const extended: *const plugin.ServiceHost = @ptrCast(host);
+    var service: ?*const anyopaque = null;
+    if (extended.get_service.?(context, plugin.service_query, 1, @sizeOf(plugin.QueryService), &service) != 0 or service == null) return 1;
     return if (state.rejected) 0 else 1;
 }
 test "extension_plugin row callbacks cannot reenter the connection" {
