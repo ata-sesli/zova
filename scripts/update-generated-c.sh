@@ -32,6 +32,8 @@ case "$CARGO_TARGET" in
     x86_64-apple-darwin) ZIG_TARGET=x86_64-macos ;;
     aarch64-apple-darwin) ZIG_TARGET=aarch64-macos ;;
     x86_64-pc-windows-msvc) ZIG_TARGET=x86_64-windows-msvc ;;
+    # Go/cgo's Windows compiler is MinGW; native Rust packages remain MSVC.
+    x86_64-pc-windows-gnu) ZIG_TARGET=x86_64-windows-gnu ;;
     *) echo "unsupported generated-C target: $CARGO_TARGET" >&2; exit 1 ;;
 esac
 

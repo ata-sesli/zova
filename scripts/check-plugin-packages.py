@@ -17,6 +17,7 @@ import sys
 ROOT = Path(__file__).resolve().parent.parent
 SYSTEM = platform.system()
 SUFFIX = {"Darwin": ".dylib", "Linux": ".so", "Windows": ".dll"}[SYSTEM]
+SQLITE_DEFINES = ["SQLITE_THREADSAFE=1", "SQLITE_ENABLE_FTS5", "SQLITE_ENABLE_DBSTAT_VTAB", "SQLITE_ENABLE_RTREE", "SQLITE_ENABLE_GEOPOLY", "SQLITE_ENABLE_CARRAY", "SQLITE_ENABLE_MATH_FUNCTIONS"]
 
 
 def run(args, *, cwd=ROOT, env=None):
@@ -65,8 +66,7 @@ def main():
     if SYSTEM == "Windows":
         cc += ["-target", "x86_64-windows-msvc"]
     run([*cc, "-std=c11", "-O2", "-Wno-incompatible-pointer-types", "-I", generated, "-c", generated / "zova_c.c", "-o", out / "zova.o"], env=env)
-    defines = ["SQLITE_THREADSAFE=1", "SQLITE_ENABLE_FTS5", "SQLITE_ENABLE_DBSTAT_VTAB", "SQLITE_ENABLE_RTREE", "SQLITE_ENABLE_GEOPOLY", "SQLITE_ENABLE_CARRAY", "SQLITE_ENABLE_MATH_FUNCTIONS"]
-    run([*cc, "-std=c99", "-O2", *["-D" + d for d in defines], "-I", generated, "-c", generated / "sqlite3.c", "-o", out / "sqlite.o"], env=env)
+    run([*cc, "-std=c99", "-O2", *["-D" + d for d in SQLITE_DEFINES], "-I", generated, "-c", generated / "sqlite3.c", "-o", out / "sqlite.o"], env=env)
     host = out / ("plugin-smoke.exe" if SYSTEM == "Windows" else "plugin-smoke")
     links = ["-lntdll"] if SYSTEM == "Windows" else ["-lpthread", "-lm"] + (["-ldl"] if SYSTEM == "Linux" else [])
     run([*cc, "-std=c11", "-I", generated, ROOT / "tests/plugin_package_smoke.c", out / "zova.o", out / "sqlite.o", *links, "-o", host], env=env)
@@ -128,14 +128,26 @@ def main():
 
 def check_consumers(out, env, cases):
     generated = out / "generated"
-    print("3/5: Go against the same generated-C archive", flush=True)
+    zova_object, sqlite_object = out / "zova.o", out / "sqlite.o"
+    print("3/5: Go against a compiler-matched generated-C archive", flush=True)
+    if SYSTEM == "Windows":
+        # cgo uses MinGW GCC, not the MSVC compiler used by Rust/Python/Node.
+        # Do not feed it MSVC objects, linker aliases or stack-probe names.
+        generated = out / "go-generated"
+        run(["sh", "scripts/update-generated-c.sh", generated, "x86_64-pc-windows-gnu"], env=env)
+        cc = ["zig", "cc", "-target", "x86_64-windows-gnu"]
+        zova_object, sqlite_object = generated / "zova.o", generated / "sqlite.o"
+        run([*cc, "-std=c11", "-O2", "-Wno-incompatible-pointer-types", "-I", generated, "-c", generated / "zova_c.c", "-o", zova_object], env=env)
+        run([*cc, "-std=c99", "-O2", *["-D" + d for d in SQLITE_DEFINES], "-I", generated, "-c", generated / "sqlite3.c", "-o", sqlite_object], env=env)
     libdir = out / "lib"
     libdir.mkdir(exist_ok=True)
-    archive = libdir / ("zova_c.lib" if SYSTEM == "Windows" else "libzova_c.a")
-    run(["zig", "ar", "rcs", archive, out / "zova.o", out / "sqlite.o"], env=env)
+    archive = libdir / "libzova_c.a"
+    run(["zig", "ar", "rcs", archive, zova_object, sqlite_object], env=env)
     # cgo passes these flags to its generated Go directives too; embedded quote
     # characters around only the path produce invalid cgo_ldflag directives.
     go_env = {**env, "CGO_ENABLED": "1", "CGO_CFLAGS": f'-I{generated.as_posix()}', "CGO_LDFLAGS": f'-L{libdir.as_posix()}'}
+    if SYSTEM == "Windows":
+        go_env["CGO_LDFLAGS"] += " -lntdll"
     for bundle, trust in cases:
         run(["go", "test", "-count=1", "-run", "TestPluginSelection|TestPortablePluginPackage", "./..."], cwd=ROOT / "bindings/go", env={**go_env, "ZOVA_TEST_PLUGIN_BUNDLE": str(bundle), "ZOVA_TEST_PLUGIN_TRUST_STORE": str(trust)})
     print("4/5: Build/install Python wheel and run consumer tests", flush=True)
