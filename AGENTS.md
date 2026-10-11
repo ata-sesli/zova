@@ -155,8 +155,13 @@ ABI, SQLite, and storage-format identities live in `src/version.zig`.
 
 ## Git and release safety
 
+- A CI-fix request for an existing PR authorizes the scoped fix, relevant
+  verification, commit, and push to that PR's branch without a separate
+  publication prompt. It does not authorize merging, force-pushing, tagging, or
+  release publication.
 - Preserve existing dirty and staged work. Never reset, unstage, rewrite
   history, commit, push, merge, tag, publish, or trigger release workflows
-  unless the user explicitly requests that action.
+  unless the user explicitly requests that action or the CI-fix authorization
+  above applies.
 - When release publication is requested, require the exact release commit's CI
   and artifact workflow to succeed before running the publish workflow.

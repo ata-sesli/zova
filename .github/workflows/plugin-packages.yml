@@ -41,5 +41,7 @@ jobs:
         if: runner.os == 'Windows'
       - run: brew install libomp
         if: runner.os == 'macOS'
+      - name: NetworKit test host compiler runtime checks
+        run: python -m unittest scripts/tests/test_networkit_pagerank_compiler.py
       - name: NetworKit PageRank reference and native binding consumers
         run: python scripts/check-networkit-pagerank.py "${{ runner.temp }}/networkit-pagerank" --packages "${{ runner.temp }}/plugin-packages"
