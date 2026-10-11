@@ -88,6 +88,8 @@ zig build-lib \
     -Msqlite_c="$TMP/sqlite_c.zig"
 
 cp "$ZIG_LIB_DIR/zig.h" "$OUT/zig.h"
+chmod u+w "$OUT/zig.h"
+python3 "$ROOT/scripts/fix-generated-c-header.py" "$OUT/zig.h"
 cp "$ROOT/include/zova.h" "$OUT/zova.h"
 cp "$ROOT/include/zova_plugin.h" "$OUT/zova_plugin.h"
 cp "$SQLITE_DIR/sqlite3.c" "$OUT/sqlite3.c"

@@ -96,6 +96,7 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
+      - run: python3 -m unittest scripts/tests/test_generated_c_header.py
       - run: scripts/check-generated-c.sh
         env:
           ZOVA_GENERATED_C_REQUIRE_GCC: ${{ runner.os == 'Linux' && '1' || '0' }}
