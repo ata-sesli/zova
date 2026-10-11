@@ -108,7 +108,7 @@ pub fn build(b: *std.Build) void {
     cli_module.addOptions("cli_options", cli_options);
 
     var dynamic_extension_fixture: ?*std.Build.Step.Compile = null;
-    const package_fixtures = b.step("plugin-package-fixtures", "Install real portable C/C++ package-check fixtures");
+    const package_fixtures = b.step("plugin-package-fixtures", "Install portable C/C++ fixtures and C/Zig author examples");
     const plugin_fixture_options = b.addOptions();
     for ([_][]const u8{ "c", "cpp", "upgrade", "services_c", "services_cpp", "compatibility_c", "compatibility_cpp", "compatibility_upgrade", "recovery_c", "recovery_cpp" }) |language| {
         const option_name = b.fmt("plugin_{s}_fixture", .{language});
@@ -173,6 +173,15 @@ pub fn build(b: *std.Build) void {
         fixture_module.addImport("zova_plugin", author_module);
         const fixture = b.addLibrary(.{ .name = "plugin_zig_fixture", .linkage = .dynamic, .root_module = fixture_module });
         plugin_fixture_options.addOptionPath("plugin_zig_fixture", fixture.getEmittedBin());
+        package_fixtures.dependOn(&b.addInstallArtifact(fixture, .{}).step);
+        const c_author = b.addLibrary(.{
+            .name = "plugin_author_c",
+            .linkage = .dynamic,
+            .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+        });
+        c_author.root_module.addIncludePath(b.path("include"));
+        c_author.root_module.addCSourceFile(.{ .file = b.path("examples/plugin_query.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        package_fixtures.dependOn(&b.addInstallArtifact(c_author, .{}).step);
     } else {
         plugin_fixture_options.addOption([]const u8, "plugin_zig_fixture", "");
     }

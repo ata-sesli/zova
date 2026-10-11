@@ -2,7 +2,8 @@
 
 Development: [transactional vector maintenance](#transactional-vector-maintenance-development-format-12)
 describes the negotiated source-history service and the explicit format-12
-migration. It does not include the separate USearch reference integration.
+migration. The [authoring guide](extension-authoring.md) covers the common C ABI,
+buildable examples, compatibility boundaries and artifact release gates.
 
 Zova extensions are trusted process code that can install and manage private
 Zova storage, then expose a SQL surface on every opened connection.
@@ -12,6 +13,11 @@ demonstrates a stateless external algorithm using only bounded graph scans and
 SQL row operations. It is separately built and explicitly trusted, not bundled
 into Zova. It preserves node identities and snapshots, handles dangling nodes,
 and exposes finite-iteration/convergence and phase-timing results.
+
+The [USearch HNSW reference](../examples/usearch-hnsw/README.md) demonstrates a
+persistent approximate index with automatic snapshot-correct reconciliation,
+explicit build/refresh, rollback and recovery. Neither reference changes core
+algorithms or is bundled into Zova.
 
 The database stores extension metadata. It does not store executable code,
 library paths, search paths, or anything that Zova auto-loads.
@@ -25,7 +31,9 @@ The `1.0.0` release introduced bundled lifecycle management,
 application C scalar callbacks, and the legacy native bundle contract subject
 to the build restrictions below; `1.1.0` retains that contract. The portable plugin ABI and explicit
 extension-data upgrades described later are also included; application-authored
-extensions remain outside the stable 1.x authoring contract.
+extensions in those published releases remain outside the stable authoring
+contract. The [1.2.0 target boundary](extension-authoring.md#support-and-compatibility)
+is narrower than promising stability for every implementation in this repository.
 
 | Host build | Bundled `trgm` lifecycle | Application C scalar callbacks | Dynamic `.zovaext` loading |
 | --- | --- | --- | --- |
@@ -47,9 +55,10 @@ deployment target; portable describes the C contract, not a universal binary.
 
 The CLI exposes lifecycle operations and, on loader-capable builds, bundle
 management, including the explicit `extension upgrade` command.
-The bundle producer scaffolds legacy Zig code; portable C/C++ authors use
-`include/zova_plugin.h` and their own native compiler. The portable host table
-provides SQL execution, not scalar callback registration.
+The bundle producer scaffolds legacy Zig code. Portable authors use
+`include/zova_plugin.h` or the same layouts through `zova.extension_plugin`.
+The negotiated operations service registers typed scalar/table SQL operations;
+it is distinct from the application's raw C scalar-callback interface.
 
 ## Model
 
@@ -776,7 +785,7 @@ be declared in descriptor flags, so older hosts reject the plugin before hooks
 run. The upgrade flag can be combined with required-service flags. Installed
 data/version matching and the legacy Zig descriptor remain unchanged.
 
-Two services are currently implemented:
+The first two services are:
 
 - **Query v1:** one parameterized read-only `SELECT`/`WITH` query with synchronous
   typed row callbacks. Rows preserve SQLite value types, including empty BLOB
@@ -879,10 +888,9 @@ hosts reject before hooks run. Optional services can still be probed. Existing
 `exec_sql`, query services, installed extensions, `trgm`, schemas and formats
 remain compatible. Native plugins are trusted process code, not sandboxed.
 
-SQL operation registration, automatic incremental maintenance, durable source
-incarnation/change tracking and generated-C bundle loading remain separate work.
-These services support source materialization and transactional derived storage;
-they do not independently guarantee a persistent index's freshness.
+The additional operation and vector-maintenance services are described below.
+Data/storage access alone does not guarantee a persistent index's freshness;
+authors must validate source coverage in the caller's snapshot.
 
 ## SQL operation registration
 

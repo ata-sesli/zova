@@ -70,4 +70,10 @@ if [ "$CHECK_GO" = "--go" ]; then
     )
 fi
 
+if [ -n "${ZOVA_TEST_PLUGIN_PACKAGES:-}" ]; then
+    echo "loading C/C++/Zig bundles through the packaged ReleaseSafe archive"
+    python3 "$ROOT/scripts/check-plugin-packages.py" "$ZOVA_TEST_PLUGIN_PACKAGES" \
+        "--native-only" "--native-prefix" "$PREFIX"
+fi
+
 echo "native C ABI system-linker check: ok"

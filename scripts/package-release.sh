@@ -162,6 +162,7 @@ cp build.zig build.zig.zon LICENSE README.md API_STABILITY.md "$TMP/$PKG/"
 cp -R bench "$TMP/$PKG/"
 cp -R bindings "$TMP/$PKG/"
 cp -R docs "$TMP/$PKG/"
+cp -R examples "$TMP/$PKG/"
 cp -R include "$TMP/$PKG/"
 cp -R scripts "$TMP/$PKG/"
 cp -R src "$TMP/$PKG/"
@@ -188,9 +189,9 @@ rm -f "$TMP/$PKG/bindings/javascript/index.js"
 rm -f "$TMP/$PKG/bindings/javascript/index.d.ts"
 find "$TMP/$PKG/bindings/javascript" -maxdepth 1 -name '*.node' -delete
 
-if find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/bench/*.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/native/bench/*.md" ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/API_STABILITY.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/docs/extensions.md" ! -path "$TMP/$PKG/docs/storage-compatibility.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys-*/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" ! -path "$TMP/$PKG/bindings/javascript/README.md" ! -path "$TMP/$PKG/bindings/wasm/README.md" ! -path "$TMP/$PKG/bindings/wasm/tests/OPFS.md" ! -path "$TMP/$PKG/bindings/wasm/tests/DURABILITY.md" | grep -q .; then
+if find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/bench/*.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/native/bench/*.md" ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/API_STABILITY.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/docs/extensions.md" ! -path "$TMP/$PKG/docs/extension-authoring.md" ! -path "$TMP/$PKG/examples/*.md" ! -path "$TMP/$PKG/docs/storage-compatibility.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys-*/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" ! -path "$TMP/$PKG/bindings/javascript/README.md" ! -path "$TMP/$PKG/bindings/wasm/README.md" ! -path "$TMP/$PKG/bindings/wasm/tests/OPFS.md" ! -path "$TMP/$PKG/bindings/wasm/tests/DURABILITY.md" | grep -q .; then
     echo "release package contains unexpected markdown files" >&2
-    find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/bench/*.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/native/bench/*.md" ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/API_STABILITY.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/docs/extensions.md" ! -path "$TMP/$PKG/docs/storage-compatibility.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys-*/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" ! -path "$TMP/$PKG/bindings/javascript/README.md" ! -path "$TMP/$PKG/bindings/wasm/README.md" ! -path "$TMP/$PKG/bindings/wasm/tests/OPFS.md" ! -path "$TMP/$PKG/bindings/wasm/tests/DURABILITY.md" >&2
+    find "$TMP/$PKG" -name '*.md' ! -path "$TMP/$PKG/bench/*.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/native/bench/*.md" ! -path "$TMP/$PKG/README.md" ! -path "$TMP/$PKG/API_STABILITY.md" ! -path "$TMP/$PKG/docs/sqlite-to-zova.md" ! -path "$TMP/$PKG/docs/extensions.md" ! -path "$TMP/$PKG/docs/extension-authoring.md" ! -path "$TMP/$PKG/examples/*.md" ! -path "$TMP/$PKG/docs/storage-compatibility.md" ! -path "$TMP/$PKG/bindings/rust/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys/README.md" ! -path "$TMP/$PKG/bindings/rust/zova-sys-*/README.md" ! -path "$TMP/$PKG/bindings/rust/zova/README.md" ! -path "$TMP/$PKG/bindings/go/README.md" ! -path "$TMP/$PKG/bindings/python/README.md" ! -path "$TMP/$PKG/bindings/javascript/README.md" ! -path "$TMP/$PKG/bindings/wasm/README.md" ! -path "$TMP/$PKG/bindings/wasm/tests/OPFS.md" ! -path "$TMP/$PKG/bindings/wasm/tests/DURABILITY.md" >&2
     exit 1
 fi
 
@@ -216,6 +217,11 @@ fi
 
 if [ ! -f "$TMP/$PKG/docs/extensions.md" ]; then
     echo "release package is missing docs/extensions.md" >&2
+    exit 1
+fi
+
+if [ ! -f "$TMP/$PKG/docs/extension-authoring.md" ] || [ ! -f "$TMP/$PKG/examples/plugin_query.c" ] || [ ! -f "$TMP/$PKG/examples/plugin_query.zig" ]; then
+    echo "release package is missing extension authoring material" >&2
     exit 1
 fi
 

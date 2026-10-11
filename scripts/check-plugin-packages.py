@@ -1,6 +1,6 @@
 """Bounded native-package plugin check. No publication or default trust changes.
 
-Builds two small plugin bundles and a generated-C host once. --prepare-only
+Builds C/C++ fixtures, C/Zig author examples and a generated-C host once. --prepare-only
 stops after the C ABI/trust/dependency checks and exports fixture paths for CI.
 The full run also checks Rust, Go, an installed Python wheel and npm tarball.
 """
@@ -9,9 +9,11 @@ import json
 import os
 from pathlib import Path
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -38,8 +40,16 @@ def main():
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--resume-consumers", action="store_true",
                         help="reuse a successfully prepared run for Go/wheel/npm checks")
+    parser.add_argument("--native-only", action="store_true",
+                        help="load prepared bundles against an actual native release prefix")
+    parser.add_argument("--native-prefix", type=Path)
     args = parser.parse_args()
+    if args.native_only != bool(args.native_prefix):
+        parser.error("--native-only and --native-prefix must be supplied together")
     out = args.output.resolve()
+    if args.native_only:
+        check_native_archive(out, args.native_prefix.resolve())
+        return
     if not args.resume_consumers:
         out.mkdir(parents=True, exist_ok=False)  # Never overwrite another run.
     env = os.environ.copy()
@@ -58,7 +68,7 @@ def main():
         cases = [(Path(p), Path(t)) for p, t in json.loads((out / "cases.json").read_text())]
         check_consumers(out, env, cases)
         return
-    print("1/5: Build real C/C++ bundles (two jobs)", flush=True)
+    print("1/5: Build real C/C++ bundles and C/Zig author examples (two jobs)", flush=True)
     run(["zig", "build", "plugin-package-fixtures", "-Doptimize=ReleaseSafe", "-j2", "--summary", "all", "--cache-dir", env["ZIG_LOCAL_CACHE_DIR"], "--prefix", out / "fixtures"], env=env)
     generated = out / "generated"
     run(["sh", "scripts/update-generated-c.sh", generated], env=env)
@@ -110,6 +120,18 @@ def main():
     # Fresh process: an already mapped dependency cannot conceal a missing file.
     run([host, missing, out / "missing.zova", out / "missing-trust.json", "verify-missing"], env=env)
     assert not (out / "missing.zova").exists()
+    authors = []
+    for label, name in (("author-c", "plugin_author_c"), ("author-zig", "plugin_zig_fixture")):
+        bundle = out / (label + ".zovaext")
+        bundle.mkdir()
+        library = one_library(out / "fixtures", name)
+        shutil.copy2(library, bundle / library.name)
+        author_manifest = {**manifest, "library": library.name}
+        (bundle / "extension.json").write_text(json.dumps(author_manifest), encoding="utf-8")
+        trust = out / (label + "-trust.json")
+        run([host, bundle, out / (label + ".zova"), trust, "author"], env=env)
+        authors.append((bundle, trust))
+    (out / "author-cases.json").write_text(json.dumps([[str(p), str(t)] for p, t in authors]), encoding="utf-8")
     (out / "cases.json").write_text(json.dumps([[str(p), str(t)] for p, t in cases]), encoding="utf-8")
     if "GITHUB_ENV" in env:
         with open(env["GITHUB_ENV"], "a", encoding="utf-8") as stream:
@@ -124,6 +146,23 @@ def main():
         case_env = {**env, "ZOVA_TEST_PLUGIN_BUNDLE": str(bundle), "ZOVA_TEST_PLUGIN_TRUST_STORE": str(trust)}
         run(["cargo", "nextest", "run", "-p", "zova", "--test", "plugin_loading", "--run-ignored", "all", "--manifest-path", "bindings/rust/Cargo.toml"], env=case_env)
     check_consumers(out, env, cases)
+
+
+def check_native_archive(out, prefix):
+    """Use the system linker and the supplied archive, never generated objects."""
+    if SYSTEM not in ("Linux", "Darwin"):
+        raise RuntimeError("native system-linker archive checks require Linux or macOS")
+    native = Path(tempfile.mkdtemp(prefix="native-archive-", dir=out))
+    host = native / "plugin-smoke"
+    compiler = shlex.split(os.environ.get("CC", "cc"))
+    links = ["-lpthread", "-lm"] + (["-ldl"] if SYSTEM == "Linux" else [])
+    run([*compiler, "-std=c11", "-I", prefix / "include",
+         ROOT / "tests/plugin_package_smoke.c", prefix / "lib/libzova_c.a",
+         *links, "-o", host])
+    for filename, mode in (("cases.json", []), ("author-cases.json", ["author"])):
+        for index, (bundle, _) in enumerate(json.loads((out / filename).read_text())):
+            label = f"{Path(filename).stem}-{index}"
+            run([host, bundle, native / (label + ".zova"), native / (label + "-trust.json"), *mode])
 
 
 def check_consumers(out, env, cases):

@@ -1,6 +1,7 @@
 #include "zova.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static zova_message message = {0};
 static void expect(zova_status actual, zova_status expected, const char *operation) {
@@ -27,11 +28,13 @@ int main(int argc, char **argv) {
     zova_database_prepare_request prepare;
     zova_database_open_request plain;
     const char *paths[1];
+    int author;
     if (argc != 4 && argc != 5) return 2;
+    author = argc == 5 && strcmp(argv[4], "author") == 0;
     paths[0] = argv[1];
     bundle = (zova_extension_bundle_request){argv[1], argv[3], &message};
     open = (zova_database_open_extensions_request){argv[2], 0, 0, paths, 1, argv[3], &db, &message};
-    if (argc == 5) {
+    if (argc == 5 && !author) {
         if (argv[4][0] == 'i') {
             expect(zova_extension_bundle_verify(&bundle), ZOVA_EXTENSION_INCOMPATIBLE, "incompatible descriptor");
         } else if (argv[4][0] == 'v') {
@@ -49,7 +52,11 @@ int main(int argc, char **argv) {
     expect(zova_database_create_with_extensions(&open), ZOVA_OK, "trusted create");
     install = (zova_database_extension_request){db, "c_test"};
     expect(zova_database_extension_install(&install), ZOVA_OK, "install");
-    prepare = (zova_database_prepare_request){db, "SELECT zova_c_test_cached()", &statement};
+    if (author) {
+        expect(zova_database_exec(&(zova_database_exec_request){db,
+            "INSERT INTO _zova_ext_c_test_data VALUES(1)"}), ZOVA_OK, "author data");
+    }
+    prepare = (zova_database_prepare_request){db, author ? "SELECT zova_c_test_echo(42)" : "SELECT zova_c_test_cached()", &statement};
     expect(zova_database_prepare(&prepare), ZOVA_OK, "prepare plugin operation");
     expect(zova_statement_step(&(zova_statement_step_request){statement, &step}), ZOVA_OK, "execute plugin operation");
     expect(zova_statement_column_int64(&(zova_statement_column_int64_request){statement, 0, &value}), ZOVA_OK, "read plugin result");

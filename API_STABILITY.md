@@ -134,15 +134,22 @@ and extension records are supported. Extension minimum ABI values use numeric
 `major.minor.patch`; the release reports numeric ABI components `1.1.0` and
 the full release identity `1.1.0` separately.
 
-The experimental bundle-producer CLI and application-authored callback surfaces
-remain outside the stable 1.x authoring contract. Dynamic native extensions run
-in-process and retain their documented trust and platform boundaries.
+In published 1.0.0/1.1.0, the experimental bundle-producer CLI and
+application-authored callback surfaces are outside the stable authoring contract.
+Dynamic native extensions run in-process and retain their documented trust and
+platform boundaries.
 
 The portable plugin descriptor and explicit extension-data upgrade APIs are
-included in 1.0.0; extension authoring remains experimental as described above.
-They do not add generated-C dynamic loading or high-level binding
-wrappers. The [extension capability matrix](docs/extensions.md#availability-and-binding-matrix)
-is authoritative for these distinctions.
+included in 1.0.0; authoring in those releases remains experimental as above.
+Those historical 1.0.0/1.1.0 guarantees do not include generated-C dynamic loading
+or high-level bundle-selection wrappers. The development 1.2.0 authoring contract
+targets the versioned common C descriptor, negotiated host services, typed SQL
+operations and documented lifecycle/ownership rules. Zig helpers use the same
+C layouts, not a separate plugin ABI. Legacy Zig bundle production, algorithm
+reference implementations and high-level callback-authoring wrappers are not
+promoted to stable APIs merely by inclusion in the repository.
+The [authoring support matrix](docs/extension-authoring.md#support-and-compatibility)
+separates current development support from already-published release guarantees.
 
 ## Zig implementation state and raw SQLite access
 
