@@ -25,7 +25,9 @@ bindings/javascript/index.d.ts
 *.crate
 .DS_STORE
 notes
-docs/
+!docs/
+docs/*
+!docs/extension-authoring.md
 __pycache__
 .pytest_cache
 bindings/python/python/zova/*.so

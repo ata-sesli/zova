@@ -41,6 +41,7 @@ trap cleanup EXIT INT TERM
 
 require_command zig
 require_command cargo
+cargo nextest --version >/dev/null
 require_command go
 require_command uv
 require_command bun
@@ -77,7 +78,9 @@ zig build
 zig build run
 # Binding tests consume the snapshots prepared and verified during preflight.
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo fmt --all --manifest-path bindings/rust/Cargo.toml --check
-CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo test --workspace --manifest-path bindings/rust/Cargo.toml
+CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo nextest run --workspace --manifest-path bindings/rust/Cargo.toml
+# Nextest does not execute doctests; preserve that part of the previous gate.
+CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo test --doc --workspace --manifest-path bindings/rust/Cargo.toml
 CARGO_TARGET_DIR="$CARGO_TARGET_REPO" cargo check --examples --manifest-path bindings/rust/Cargo.toml
 # zova-sys intentionally packages a generated native source snapshot that stays
 # git-ignored in the repository. Sync and check it first. Release smoke may run
@@ -92,7 +95,7 @@ sh scripts/repack-darwin-c-abi.sh
 (cd bindings/go && GOCACHE="$GO_CACHE_REPO" go test ./...)
 (cd bindings/go && GOCACHE="$GO_CACHE_REPO" go vet ./...)
 CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" cargo fmt --manifest-path bindings/python/Cargo.toml --check
-CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" cargo test --manifest-path bindings/python/Cargo.toml
+CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" cargo nextest run --manifest-path bindings/python/Cargo.toml
 CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" uv run --isolated --with maturin --with pytest --directory bindings/python maturin develop
 uv run --isolated --with pytest --directory bindings/python python -m pytest
 mkdir -p "$PY_WHEEL_REPO"
@@ -115,6 +118,12 @@ node bindings/javascript/tests/runtime-smoke.mjs
 node bindings/javascript/tests/runtime-smoke.cjs
 bun bindings/javascript/tests/runtime-smoke.mjs
 (cd bindings/javascript && npm_config_cache="$NPM_CACHE_REPO" npm pack --dry-run --ignore-scripts >/dev/null)
+# Real installed artifacts, protected bundle dependencies, and both external
+# reference algorithms. Two build jobs; benchmarks remain explicitly opt-in.
+CARGO_TARGET_DIR="$CARGO_TARGET_REPO" python3 scripts/check-extension-release.py "$TMP/extensions"
+sh scripts/build-release-artifacts.sh "$MANIFEST_VERSION" "release-smoke" "$TMP/native-artifacts"
+ZOVA_TEST_PLUGIN_PACKAGES="$TMP/extensions/packages" \
+    sh scripts/check-native-c-abi.sh "$TMP/native-artifacts/zova-v$MANIFEST_VERSION-release-smoke-c-abi.tar.gz" --go
 rm -rf bindings/javascript/target bindings/javascript/dist bindings/javascript/npm
 find bindings/javascript -maxdepth 1 -name '*.node' -delete
 
