@@ -84,6 +84,38 @@ fn compatibleSalvage(context: ext.SalvageContext, manifest: ext.Manifest) ext.Er
     return .{ .copied_extensions = 1, .copied_private_objects = 1, .installed_in_destination = true };
 }
 
+fn skipSalvage(context: ext.SalvageContext, _: ext.Manifest) ext.Error!ext.SalvageResult {
+    if (context.mode == .plan) {
+        try context.source.exec("INSERT INTO _zova_ext_upgrade_data VALUES('provisional')");
+    } else {
+        try context.destination.?.exec("CREATE TABLE _zova_ext_upgrade_partial(value INTEGER)");
+    }
+    return .{ .skipped_extensions = 1, .skipped_private_objects = 1 };
+}
+
+test "extension_upgrade salvage planning and skipped recovery do not mutate source or destination" {
+    var source = try sqlite.Database.open(":memory:");
+    defer source.deinit();
+    var destination = try sqlite.Database.open(":memory:");
+    defer destination.deinit();
+    try source.exec(ext.extensions_schema_sql);
+    try destination.exec(ext.extensions_schema_sql);
+    var item = old();
+    item.salvage = skipSalvage;
+    const registry_with_hook = ext.Registry.init(&.{item});
+    try ext.install(&source, registry_with_hook, "upgrade", null);
+    _ = try ext.salvageInstalled(std.testing.allocator, &source, null, registry_with_hook, .plan);
+    var read = try source.prepare("SELECT count(*) FROM _zova_ext_upgrade_data");
+    defer read.deinit();
+    try std.testing.expect(try read.step() == .row);
+    try std.testing.expectEqual(@as(i64, 1), read.columnInt64(0));
+    try read.reset();
+    try destination.exec("BEGIN; CREATE TABLE earlier(value INTEGER)");
+    _ = try ext.salvageInstalled(std.testing.allocator, &source, &destination, registry_with_hook, .copy);
+    try std.testing.expectError(error.SqliteError, destination.exec("SELECT * FROM _zova_ext_upgrade_partial"));
+    try destination.exec("INSERT INTO earlier VALUES(42); COMMIT");
+}
+
 test "extension_upgrade compatible salvage preserves source data version and code manifest" {
     var source = try sqlite.Database.open(":memory:");
     defer source.deinit();

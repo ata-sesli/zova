@@ -19,6 +19,10 @@ fn portable_plugin_layouts_match_the_c_header() {
             104
         );
         assert_eq!(ZOVA_PLUGIN_HAS_DATA_COMPATIBILITY_V1, 128);
+        assert_eq!(size_of::<zova_plugin_recovery_descriptor_v1>(), 136);
+        assert_eq!(size_of::<zova_plugin_salvage_request_v1>(), 24);
+        assert_eq!(size_of::<zova_plugin_salvage_result_v1>(), 40);
+        assert_eq!(ZOVA_PLUGIN_HAS_RECOVERY_V1, 256);
         assert_eq!(size_of::<zova_plugin_value_v1>(), 40);
         assert_eq!(size_of::<zova_plugin_query_request_v1>(), 72);
         assert_eq!(size_of::<zova_plugin_query_service_v1>(), 16);

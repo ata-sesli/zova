@@ -13,6 +13,7 @@ const Stored = struct {
     arena: std.heap.ArenaAllocator,
     descriptor: api.Operation,
     version: []const u8,
+    generation: i64,
     fn deinit(self: *Stored) void {
         if (self.descriptor.destroy) |destroy| destroy(self.descriptor.user_data);
         self.arena.deinit();
@@ -34,19 +35,20 @@ const Slot = struct {
     flags: u64,
     fn selected(self: *Slot) ?*Stored {
         var db: sqlite.Database = .{ .handle = self.registry.handle };
-        var stmt = db.prepare("select version from _zova_extensions where name=?1 and storage_prefix=?2") catch return null;
+        var stmt = db.prepare("select e.version,g.generation from _zova_extensions e left join temp._zova_plugin_generations g on g.owner=e.name where e.name=?1 and e.storage_prefix=?2") catch return null;
         defer stmt.deinit();
         stmt.bindTextBorrowed(1, self.owner) catch return null;
         stmt.bindTextBorrowed(2, self.prefix) catch return null;
         if ((stmt.step() catch return null) != .row) return null;
         if (self.registry.scope_owner != null and self.pending != null) return self.pending;
         const version = stmt.columnText(0);
-        if (self.current) |current| if (std.mem.eql(u8, current.version, version)) return current;
+        const generation = stmt.columnInt64(1);
+        if (self.current) |current| if (current.generation == generation and std.mem.eql(u8, current.version, version)) return current;
         var i = self.retired.items.len;
         while (i != 0) {
             i -= 1;
             const old = self.retired.items[i];
-            if (std.mem.eql(u8, old.version, version)) return old;
+            if (old.generation == generation and std.mem.eql(u8, old.version, version)) return old;
         }
         return null;
     }
@@ -57,6 +59,7 @@ const Registry = struct {
     scope_owner: ?[]const u8 = null,
     active: usize = 0,
     invoking: bool = false,
+    generation: i64 = 0,
 };
 
 fn registry(db: *sqlite.Database) Error!*Registry {
@@ -95,6 +98,20 @@ fn destroyRegistry(raw: ?*anyopaque) void {
 pub const Scope = struct {
     r: *Registry,
     owns: bool,
+    /// SQLite rolls this connection-local marker back with caller savepoints,
+    /// including rebuilds/registrations that keep the same persistent version.
+    pub fn prepare(self: Scope, db: *sqlite.Database) Error!void {
+        const owner = self.r.scope_owner orelse return error.InvalidArgument;
+        for (self.r.slots.items) |slot| {
+            if (!std.mem.eql(u8, slot.owner, owner)) continue;
+            var stmt = try db.prepare("insert into temp._zova_plugin_generations values(?1,?2) on conflict(owner) do update set generation=excluded.generation");
+            defer stmt.deinit();
+            try stmt.bindTextBorrowed(1, owner);
+            try stmt.bindInt64(2, self.r.generation);
+            std.debug.assert(try stmt.step() == .done);
+            return;
+        }
+    }
     pub fn finish(self: Scope, success: bool) void {
         if (!self.owns) return;
         for (self.r.slots.items) |slot| {
@@ -118,6 +135,9 @@ pub fn begin(db: *sqlite.Database, owner: []const u8) Error!Scope {
         if (!std.mem.eql(u8, existing, owner)) return error.InvalidArgument;
         return .{ .r = r, .owns = false };
     }
+    try db.exec("create temp table if not exists _zova_plugin_generations(owner text primary key, generation integer not null)");
+    if (r.generation == std.math.maxInt(i64)) return error.InvalidArgument;
+    r.generation += 1;
     r.scope_owner = owner;
     return .{ .r = r, .owns = true };
 }
@@ -198,7 +218,7 @@ pub fn register(db: *sqlite.Database, owner: []const u8, prefix: []const u8, ver
     copy.columns = (try cloneColumns(arena.allocator(), columns)).ptr;
     copy.name = .from(try arena.allocator().dupe(u8, local_name));
     const owned_version = try arena.allocator().dupe(u8, version);
-    stored.* = .{ .arena = arena, .descriptor = copy, .version = owned_version };
+    stored.* = .{ .arena = arena, .descriptor = copy, .version = owned_version, .generation = r.generation };
     if (existing) |slot| {
         slot.pending = stored;
     } else {

@@ -1085,6 +1085,11 @@ pub const Database = struct {
         try extension_impl.upgrade(std.heap.c_allocator, &self.sqlite_db, self.extension_registry, name, validateExtensionLifecycleCore);
     }
 
+    /// Explicit plugin repair at the installed data version; no implicit upgrade.
+    pub fn rebuildExtension(self: *Database, name: []const u8) Error!void {
+        try extension_impl.rebuild(std.heap.c_allocator, &self.sqlite_db, self.extension_registry, name, validateExtensionLifecycleCore);
+    }
+
     /// Return installed extension metadata sorted by extension name.
     pub fn listExtensions(self: *Database, allocator: std.mem.Allocator) Error!ExtensionList {
         return extension_impl.listInstalled(allocator, &self.sqlite_db);

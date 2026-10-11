@@ -848,17 +848,17 @@ test "extension_plugin SQL faults cancel hook failure and caller rollback are at
     defer db.deinit();
     try db.exec("create table _zova_ext_c_test_data(id integer unique); create table caller_work(id integer)");
     var d = descriptor();
-    d.check = failedStorageHook;
+    d.install = failedStorageHook;
     try db.begin();
     try db.exec("insert into caller_work values(7)");
-    try std.testing.expectError(error.ExtensionInvalid, plugin.invoke(d, .check, &db.sqlite_db));
+    try std.testing.expectError(error.ExtensionInvalid, plugin.invoke(d, .install, &db.sqlite_db));
     var check = try db.prepare("select (select count(*) from _zova_ext_c_test_data),(select count(*) from caller_work)");
     try std.testing.expect(try check.step() == .row);
     try std.testing.expectEqual(@as(i64, 0), check.columnInt64(0));
     try std.testing.expectEqual(@as(i64, 1), check.columnInt64(1));
     check.deinit();
-    d.check = storageAtomicHook;
-    try plugin.invoke(d, .check, &db.sqlite_db);
+    d.install = storageAtomicHook;
+    try plugin.invoke(d, .install, &db.sqlite_db);
     try db.rollback();
     check = try db.prepare("select count(*) from _zova_ext_c_test_data");
     defer check.deinit();
@@ -910,7 +910,7 @@ fn readOnlyStorageExercise(base: *const plugin.Host, raw: ?*anyopaque) !void {
     sql = "delete from main._zova_ext_c_test_data";
     req.sql = sql.ptr;
     req.sql_len = sql.len;
-    try std.testing.expectError(error.HostError, client.storage(&req));
+    try std.testing.expectError(error.InvalidArgument, client.storage(&req));
 }
 test "extension_plugin private reads work read only and writes fail without mutation" {
     const zova = @import("zova.zig");
@@ -1107,8 +1107,8 @@ test "extension_plugin parameterized private storage is owner scoped" {
     defer db.deinit();
     try db.exec("create table _zova_ext_c_test_data(id integer); create table _zova_ext_other_data(id integer)");
     var d = descriptor();
-    d.check = storageHook;
-    try plugin.invoke(d, .check, &db.sqlite_db);
+    d.install = storageHook;
+    try plugin.invoke(d, .install, &db.sqlite_db);
 }
 
 fn shadowLower(context: ?*sqlite.c.sqlite3_context, _: c_int, _: [*c]?*sqlite.c.sqlite3_value) callconv(.c) void {
@@ -1158,6 +1158,8 @@ test "extension_plugin trusted C upgrade through application ABI preserves rows"
         .{ .source = options.plugin_compatibility_upgrade_fixture, .code = "3.2.0", .needs_upgrade = true },
         .{ .source = options.plugin_compatibility_c_fixture, .code = "3.1.0", .needs_upgrade = false },
         .{ .source = options.plugin_compatibility_cpp_fixture, .code = "3.1.0", .needs_upgrade = false },
+        .{ .source = options.plugin_recovery_c_fixture, .code = "1.0.0", .needs_upgrade = false },
+        .{ .source = options.plugin_recovery_cpp_fixture, .code = "1.0.0", .needs_upgrade = false },
     }) |target_bundle| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -1220,6 +1222,20 @@ test "extension_plugin trusted C upgrade through application ABI preserves rows"
         }
         try std.testing.expectEqual(api.zova_status.OK, api.zova_database_open_with_extensions(&req));
         defer _ = api.zova_database_close(handle);
+        if (std.mem.eql(u8, target_bundle.source, options.plugin_recovery_c_fixture) or std.mem.eql(u8, target_bundle.source, options.plugin_recovery_cpp_fixture)) {
+            try std.testing.expectEqual(api.zova_status.OK, api.zova_database_extension_rebuild(&.{ .db = handle, .name = "c_test" }));
+            var statement: ?*api.zova_statement = null;
+            try std.testing.expectEqual(api.zova_status.OK, api.zova_database_prepare(&.{ .db = handle, .sql = "SELECT zova_c_test_cached()", .out_statement = &statement }));
+            try std.testing.expectEqual(api.zova_status.MISUSE, api.zova_database_close(handle));
+            try std.testing.expectEqual(api.zova_status.OK, api.zova_statement_finalize(statement));
+            var read_only_handle: ?*api.zova_database = null;
+            var read_only_request = req;
+            read_only_request.flags = 1;
+            read_only_request.out_db = &read_only_handle;
+            try std.testing.expectEqual(api.zova_status.OK, api.zova_database_open_with_extensions(&read_only_request));
+            try std.testing.expect(api.zova_database_extension_rebuild(&.{ .db = read_only_handle, .name = "c_test" }) != .OK);
+            try std.testing.expectEqual(api.zova_status.OK, api.zova_database_close(read_only_handle));
+        }
         var raw = try sqlite.Database.open(db_path);
         defer raw.deinit();
         var info = try extension.loadInfo(allocator, &raw, "c_test");
@@ -1237,7 +1253,7 @@ test "extension_plugin C and C++ bundles load and dispatch through copied regist
     if (comptime !dynamic.supports_dynamic_loading) return error.SkipZigTest;
     const io = std.Io.Threaded.global_single_threaded.io();
     const allocator = std.testing.allocator;
-    for ([_][]const u8{ options.plugin_c_fixture, options.plugin_cpp_fixture, options.plugin_services_c_fixture, options.plugin_services_cpp_fixture, options.plugin_zig_fixture, options.plugin_compatibility_c_fixture, options.plugin_compatibility_cpp_fixture }) |path| {
+    for ([_][]const u8{ options.plugin_c_fixture, options.plugin_cpp_fixture, options.plugin_services_c_fixture, options.plugin_services_cpp_fixture, options.plugin_zig_fixture, options.plugin_compatibility_c_fixture, options.plugin_compatibility_cpp_fixture, options.plugin_recovery_c_fixture, options.plugin_recovery_cpp_fixture }) |path| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         const library_name = try fixtureLibraryName(allocator, "plugin");
@@ -1279,6 +1295,15 @@ test "extension_plugin C and C++ bundles load and dispatch through copied regist
             try std.testing.expectEqual(@as(i64, 42), try scalarValue(&db, "SELECT zova_c_test_echo(42)"));
         }
         try db.exec("INSERT INTO _zova_ext_c_test_data VALUES(1)");
+        if (std.mem.eql(u8, path, options.plugin_recovery_c_fixture) or std.mem.eql(u8, path, options.plugin_recovery_cpp_fixture)) {
+            const plan = try extension.salvageInstalled(allocator, &db, null, bundle.registry(), .plan);
+            try std.testing.expectEqual(@as(u64, 1), plan.copied_extensions);
+            var destination = try sqlite.Database.open(":memory:");
+            defer destination.deinit();
+            try destination.exec(extension.extensions_schema_sql);
+            _ = try extension.salvageInstalled(allocator, &db, &destination, bundle.registry(), .copy);
+            try std.testing.expectEqual(@as(i64, 1), try scalarValue(&destination, "SELECT id FROM _zova_ext_c_test_data"));
+        }
         try extension.check(&db, bundle.registry(), "c_test");
         try extension.drop(&db, bundle.registry(), "c_test", null);
         try std.testing.expectError(error.SqliteError, db.exec("SELECT * FROM _zova_ext_c_test_data"));
@@ -1326,6 +1351,243 @@ fn badSql(host: *const plugin.Host, db: ?*anyopaque) callconv(.c) i32 {
     return host.exec_sql.?(db, sql.ptr, sql.len);
 }
 
+fn lifecycleWrite(host: *const plugin.Host, raw: ?*anyopaque) callconv(.c) i32 {
+    const sql = "INSERT INTO _zova_ext_c_test_data VALUES(7)";
+    return host.exec_sql.?(raw, sql.ptr, sql.len);
+}
+fn lifecycleCommit(host: *const plugin.Host, raw: ?*anyopaque) callconv(.c) i32 {
+    return host.exec_sql.?(raw, "COMMIT", 6);
+}
+
+fn recoveryInstall(host: *const plugin.Host, raw: ?*anyopaque) callconv(.c) i32 {
+    const sql = "CREATE TABLE _zova_ext_c_test_data(value INTEGER); INSERT INTO _zova_ext_c_test_data VALUES(42)";
+    return host.exec_sql.?(raw, sql.ptr, sql.len);
+}
+fn recoveryRebuild(host: *const plugin.Host, raw: ?*anyopaque, version: data_api.Bytes) callconv(.c) i32 {
+    if (!std.mem.eql(u8, version.data.?[0..@intCast(version.len)], "1.0.0")) return 3;
+    const sql = "DELETE FROM _zova_ext_c_test_data; INSERT INTO _zova_ext_c_test_data VALUES(42)";
+    return host.exec_sql.?(raw, sql.ptr, sql.len);
+}
+fn recoveryFail(host: *const plugin.Host, raw: ?*anyopaque, version: data_api.Bytes) callconv(.c) i32 {
+    if (recoveryRebuild(host, raw, version) != 0) return 1;
+    return 2;
+}
+fn recoveryMetadataWrite(host: *const plugin.Host, raw: ?*anyopaque, _: data_api.Bytes) callconv(.c) i32 {
+    const sql = "UPDATE _zova_extensions SET version='9.0.0' WHERE name='c_test'";
+    return host.exec_sql.?(raw, sql.ptr, sql.len);
+}
+fn recoveryForeignIndex(host: *const plugin.Host, raw: ?*anyopaque, _: data_api.Bytes) callconv(.c) i32 {
+    const sql = "CREATE INDEX _zova_ext_c_test_foreign ON _zova_extensions(version)";
+    return host.exec_sql.?(raw, sql.ptr, sql.len);
+}
+fn recoveryTempTable(host: *const plugin.Host, raw: ?*anyopaque, _: data_api.Bytes) callconv(.c) i32 {
+    const sql = "CREATE TEMP TABLE _zova_ext_c_test_temporary(value INTEGER)";
+    return host.exec_sql.?(raw, sql.ptr, sql.len);
+}
+fn recoverySalvage(source_host: *const plugin.Host, source: ?*anyopaque, destination_host: ?*const plugin.Host, destination: ?*anyopaque, req: *const plugin.SalvageRequest, out: *plugin.SalvageResult) callconv(.c) i32 {
+    const client = data_api.Client{ .host = source_host, .connection = source };
+    var rows: DataRows = .{ .text_column = 0 };
+    const sql = "SELECT value FROM _zova_ext_c_test_data";
+    client.query(&.{ .sql = sql, .sql_len = sql.len, .row_limit = 2, .byte_limit = 1024, .row = DataRows.receive, .user_data = &rows }) catch return 1;
+    if (rows.count != 1 or rows.first[0] != 42) return 1;
+    if (req.mode == plugin.salvage_copy) {
+        if (destination_host == null) return 3;
+        if (recoveryInstall(destination_host.?, destination) != 0) return 1;
+        out.installed_in_destination = 1;
+    } else if (destination_host != null or destination != null) return 3;
+    out.copied_extensions = 1;
+    out.copied_private_objects = 1;
+    return 0;
+}
+test "extension_plugin recovery tail rebuilds and salvages atomically without implicit upgrades" {
+    var d: plugin.RecoveryDescriptor = .{
+        .base = .{ .base = .{ .base = descriptor(), .from_version = null, .upgrade = null }, .data_version = null, .accepted_data_versions = null },
+        .rebuild = recoveryRebuild,
+        .salvage = recoverySalvage,
+    };
+    d.base.base.base.version = "1.0.0";
+    d.base.base.base.flags = plugin.has_recovery;
+    try std.testing.expectError(error.ExtensionIncompatible, plugin.validate(&d.base.base.base));
+    d.base.base.base.struct_size = @sizeOf(plugin.RecoveryDescriptor);
+    d.base.base.base.install = recoveryInstall;
+    const item = try plugin.validate(&d.base.base.base);
+    const recovery = (try plugin.recoveryPath(&d.base.base.base)).?;
+    const registry: extension.Registry = .{ .extensions = &.{item}, .plugins = &.{d.base.base.base}, .recoveries = &.{recovery} };
+    var source = try @import("zova.zig").Database.createMemoryWithExtensions(registry);
+    defer source.deinit();
+    try source.installExtension("c_test");
+    var forbidden_recovery = recovery;
+    forbidden_recovery.rebuild = recoveryMetadataWrite;
+    const forbidden: extension.Registry = .{ .extensions = &.{item}, .plugins = &.{d.base.base.base}, .recoveries = &.{forbidden_recovery} };
+    try std.testing.expectError(error.ExtensionInvalid, extension.rebuild(std.testing.allocator, &source.sqlite_db, forbidden, "c_test", null));
+    for ([_]data_api.RebuildHook{ recoveryForeignIndex, recoveryTempTable }) |hook| {
+        forbidden_recovery.rebuild = hook;
+        const foreign: extension.Registry = .{ .extensions = &.{item}, .plugins = &.{d.base.base.base}, .recoveries = &.{forbidden_recovery} };
+        try std.testing.expectError(error.ExtensionInvalid, extension.rebuild(std.testing.allocator, &source.sqlite_db, foreign, "c_test", null));
+    }
+    var info = try source.extensionInfo(std.testing.allocator, "c_test");
+    defer info.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("1.0.0", info.version);
+    try source.exec("DELETE FROM _zova_ext_c_test_data; BEGIN; CREATE TABLE earlier(value INTEGER)");
+    var fail = recovery;
+    fail.rebuild = recoveryFail;
+    const failing: extension.Registry = .{ .extensions = &.{item}, .plugins = &.{d.base.base.base}, .recoveries = &.{fail} };
+    try std.testing.expectError(error.OutOfMemory, extension.rebuild(std.testing.allocator, &source.sqlite_db, failing, "c_test", null));
+    try std.testing.expectEqual(@as(i64, 0), try scalarValue(&source.sqlite_db, "SELECT count(*) FROM _zova_ext_c_test_data"));
+    try source.rebuildExtension("c_test");
+    try std.testing.expectEqual(@as(i64, 42), try scalarValue(&source.sqlite_db, "SELECT value FROM _zova_ext_c_test_data"));
+    try source.rollback();
+    try std.testing.expectEqual(@as(i64, 0), try scalarValue(&source.sqlite_db, "SELECT count(*) FROM _zova_ext_c_test_data"));
+    try source.rebuildExtension("c_test");
+    const plan = try extension.salvageInstalled(std.testing.allocator, &source.sqlite_db, null, registry, .plan);
+    try std.testing.expectEqual(@as(u64, 1), plan.copied_extensions);
+    var rejected = d.base.base.base;
+    rejected.check = outOfMemory;
+    const rejected_item = try plugin.validateBase(&rejected);
+    const rejected_registry: extension.Registry = .{ .extensions = &.{rejected_item}, .plugins = &.{rejected}, .recoveries = &.{recovery} };
+    var rejected_destination = try @import("zova.zig").Database.createMemory();
+    defer rejected_destination.deinit();
+    try rejected_destination.exec("BEGIN; CREATE TABLE earlier(value INTEGER)");
+    try std.testing.expectError(error.OutOfMemory, extension.salvageInstalled(std.testing.allocator, &source.sqlite_db, &rejected_destination.sqlite_db, rejected_registry, .copy));
+    try std.testing.expectError(error.SqliteError, rejected_destination.exec("SELECT * FROM _zova_ext_c_test_data"));
+    try rejected_destination.exec("INSERT INTO earlier VALUES(1); COMMIT");
+    var destination = try @import("zova.zig").Database.createMemoryWithExtensions(registry);
+    defer destination.deinit();
+    try destination.begin();
+    const copied = try extension.salvageInstalled(std.testing.allocator, &source.sqlite_db, &destination.sqlite_db, registry, .copy);
+    try std.testing.expect(copied.installed_in_destination);
+    try destination.checkExtension("c_test");
+    try std.testing.expectEqual(@as(i64, 42), try scalarValue(&destination.sqlite_db, "SELECT value FROM _zova_ext_c_test_data"));
+    try destination.rollback();
+    try std.testing.expectError(error.ExtensionNotFound, destination.extensionInfo(std.testing.allocator, "c_test"));
+}
+
+test "extension_plugin same-version rebuild callback generation follows caller rollback" {
+    operation_destroys = 0;
+    var d: plugin.RecoveryDescriptor = .{ .base = .{ .base = .{ .base = descriptor(), .from_version = null, .upgrade = null }, .data_version = null, .accepted_data_versions = null }, .rebuild = recoveryRebuild, .salvage = null };
+    d.base.base.base.struct_size = @sizeOf(plugin.RecoveryDescriptor);
+    d.base.base.base.flags = plugin.has_recovery;
+    d.base.base.base.version = "1.0.0";
+    d.base.base.base.install = recoveryInstall;
+    d.base.base.base.register_sql = registerOwned;
+    const item = try plugin.validate(&d.base.base.base);
+    const recovery = (try plugin.recoveryPath(&d.base.base.base)).?;
+    const initial: extension.Registry = .{ .extensions = &.{item}, .plugins = &.{d.base.base.base}, .recoveries = &.{recovery} };
+    var db = try @import("zova.zig").Database.createMemoryWithExtensions(initial);
+    defer db.deinit();
+    try db.installExtension("c_test");
+    try std.testing.expectEqual(@as(i64, 42), try scalarValue(&db.sqlite_db, "SELECT zova_c_test_owned(41)"));
+    var next = d.base.base.base;
+    next.register_sql = registerOwnedUpgrade;
+    const changed: extension.Registry = .{ .extensions = &.{item}, .plugins = &.{next}, .recoveries = &.{recovery} };
+    try db.exec("CREATE TEMP TRIGGER block_generation BEFORE UPDATE ON _zova_plugin_generations BEGIN SELECT RAISE(ABORT,'injected'); END");
+    try std.testing.expectError(error.Constraint, extension.rebuild(std.testing.allocator, &db.sqlite_db, changed, "c_test", null));
+    try std.testing.expectEqual(@as(i64, 42), try scalarValue(&db.sqlite_db, "SELECT zova_c_test_owned(41)"));
+    try db.exec("DROP TRIGGER block_generation");
+    try db.begin();
+    try extension.rebuild(std.testing.allocator, &db.sqlite_db, changed, "c_test", null);
+    try std.testing.expectEqual(@as(i64, 43), try scalarValue(&db.sqlite_db, "SELECT zova_c_test_owned(41)"));
+    try db.rollback();
+    try std.testing.expectEqual(@as(i64, 42), try scalarValue(&db.sqlite_db, "SELECT zova_c_test_owned(41)"));
+}
+
+fn allocationRecovery(allocator: std.mem.Allocator) !void {
+    const item = extension.Extension{ .manifest = .{ .name = "c_test", .version = "1.0.0", .storage_prefix = "_zova_ext_c_test_", .zova_abi_min = "1.0.0" }, .install = extensionNoop, .check = extensionNoop, .drop = extensionNoop };
+    const registry: extension.Registry = .{ .extensions = &.{item}, .recoveries = &.{.{ .name = "c_test", .rebuild = recoveryRebuild, .salvage = recoverySalvage }} };
+    var source = try @import("zova.zig").Database.createMemoryWithExtensions(registry);
+    defer source.deinit();
+    // Use host-owned fixture SQL: lifecycle operations themselves use the
+    // allocator under test, not a mock database or callback result.
+    try source.exec("CREATE TABLE _zova_ext_c_test_data(value INTEGER); INSERT INTO _zova_ext_c_test_data VALUES(7); INSERT INTO _zova_extensions VALUES('c_test','1.0.0','_zova_ext_c_test_','1.0.0','',1,0,'')");
+    try source.begin();
+    extension.rebuild(allocator, &source.sqlite_db, registry, "c_test", null) catch |err| {
+        try std.testing.expectEqual(@as(i64, 7), try scalarValue(&source.sqlite_db, "SELECT value FROM _zova_ext_c_test_data"));
+        return err;
+    };
+    var destination = try @import("zova.zig").Database.createMemory();
+    defer destination.deinit();
+    try destination.begin();
+    try destination.exec("CREATE TABLE earlier(value INTEGER); INSERT INTO earlier VALUES(1)");
+    _ = extension.salvageInstalled(allocator, &source.sqlite_db, &destination.sqlite_db, registry, .copy) catch |err| {
+        try std.testing.expectEqual(@as(i64, 1), try scalarValue(&destination.sqlite_db, "SELECT value FROM earlier"));
+        try std.testing.expectError(error.ExtensionNotFound, destination.extensionInfo(std.testing.allocator, "c_test"));
+        return err;
+    };
+    try destination.rollback();
+    try source.rollback();
+}
+fn extensionNoop(_: *sqlite.Database, _: extension.Manifest) extension.Error!void {}
+test "extension_plugin rebuild and salvage allocator failures release owned memory" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationRecovery, .{});
+}
+
+fn rebuildWithData(host: *const plugin.Host, raw: ?*anyopaque, version: data_api.Bytes) callconv(.c) i32 {
+    const client = data_api.Client{ .host = host, .connection = raw };
+    var view: data_api.VectorView = .{};
+    client.vectorView("vec", &view) catch return 1;
+    var page: data_api.DataPage = .{};
+    client.read(&.{ .operation = 1, .name = .from("topo"), .row_limit = 16, .byte_limit = 4096, .row = noChangeRows }, &page) catch return 1;
+    if (view.revision == 0 or page.rows != 2) return 1;
+    return recoveryRebuild(host, raw, version);
+}
+test "extension_plugin recovery preserves bound data backup restore and read-only initialization" {
+    const zova = @import("zova.zig");
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var paths: [5][:0]u8 = undefined;
+    var initialized: usize = 0;
+    defer for (paths[0..initialized]) |path| allocator.free(path);
+    for ([_][]const u8{ "main", "graphs", "vectors", "backup", "restored" }, 0..) |name, i| {
+        paths[i] = try std.fmt.allocPrintSentinel(allocator, ".zig-cache/tmp/{s}/{s}.zova", .{ tmp.sub_path, name }, 0);
+        initialized += 1;
+    }
+    var d: plugin.RecoveryDescriptor = .{ .base = .{ .base = .{ .base = descriptor(), .from_version = null, .upgrade = null }, .data_version = null, .accepted_data_versions = null }, .rebuild = rebuildWithData, .salvage = recoverySalvage };
+    d.base.base.base.struct_size = @sizeOf(plugin.RecoveryDescriptor);
+    d.base.base.base.flags = plugin.has_recovery | data_api.requires_data;
+    d.base.base.base.version = "1.0.0";
+    d.base.base.base.install = recoveryInstall;
+    d.base.base.base.register_sql = registerOwned;
+    const item = try plugin.validate(&d.base.base.base);
+    const recovery = (try plugin.recoveryPath(&d.base.base.base)).?;
+    const registry: extension.Registry = .{ .extensions = &.{item}, .plugins = &.{d.base.base.base}, .recoveries = &.{recovery} };
+    try zova.createGraphStore(paths[1]);
+    try zova.createVectorStore(paths[2]);
+    {
+        var db = try zova.Database.createWithExtensions(paths[0], registry);
+        defer db.deinit();
+        try db.bindGraphStore(paths[1]);
+        try db.bindVectorStore(paths[2]);
+        try populateData(&db);
+        try db.installExtension("c_test");
+        try db.rebuildExtension("c_test");
+        try db.backupTo(paths[3], .{});
+    }
+    try zova.restoreBackupWithExtensions(paths[3], paths[4], .{}, registry);
+    var db = try zova.Database.openWithOptionsAndExtensions(paths[4], .{ .read_only = true }, registry);
+    defer db.deinit();
+    try db.checkExtension("c_test");
+    try std.testing.expectEqual(@as(i64, 42), try scalarValue(&db.sqlite_db, "SELECT zova_c_test_owned(41)"));
+    try plugin.invoke(d.base.base.base, .check, &db.sqlite_db);
+    try std.testing.expectError(error.ExtensionInvalid, db.rebuildExtension("c_test"));
+    try std.testing.expectEqual(@as(i64, 42), try scalarValue(&db.sqlite_db, "SELECT value FROM _zova_ext_c_test_data"));
+}
+test "extension_plugin check and initialization cannot persist writes or escape transactions" {
+    var db = try @import("zova.zig").Database.createMemory();
+    defer db.deinit();
+    try db.exec("CREATE TABLE _zova_ext_c_test_data(value INTEGER); BEGIN; CREATE TABLE earlier(value INTEGER)");
+    var d = descriptor();
+    d.check = lifecycleWrite;
+    try std.testing.expectError(error.ExtensionInvalid, plugin.invoke(d, .check, &db.sqlite_db));
+    try std.testing.expectEqual(@as(i64, 0), try scalarValue(&db.sqlite_db, "SELECT count(*) FROM _zova_ext_c_test_data"));
+    d.register_sql = lifecycleWrite;
+    try std.testing.expectError(error.ExtensionInvalid, plugin.invoke(d, .register_sql, &db.sqlite_db));
+    d.install = lifecycleCommit;
+    try std.testing.expectError(error.ExtensionInvalid, plugin.invoke(d, .install, &db.sqlite_db));
+    try db.exec("INSERT INTO earlier VALUES(42); ROLLBACK");
+    try std.testing.expectError(error.SqliteError, db.exec("SELECT * FROM earlier"));
+}
+
 test "extension_plugin host errors and status mapping" {
     var db = try sqlite.Database.open(":memory:");
     defer db.deinit();
@@ -1348,10 +1610,13 @@ fn allocateRegistry(allocator: std.mem.Allocator) !void {
     d.flags |= plugin.has_data_compatibility;
     d.struct_size = @sizeOf(plugin.CompatibilityDescriptor);
     const ext = try plugin.validateBase(&d);
-    var owned = try dynamic.OwnedRegistry.init(allocator, &.{.{ .extensions = &.{ext}, .plugins = &.{d}, .compatibilities = &.{.{ .name = "c_test", .data_version = "1.0.0", .accepted_data_versions = "1.0.0" }} }});
+    d.flags |= plugin.has_recovery;
+    d.struct_size = @sizeOf(plugin.RecoveryDescriptor);
+    var owned = try dynamic.OwnedRegistry.init(allocator, &.{.{ .extensions = &.{ext}, .plugins = &.{d}, .compatibilities = &.{.{ .name = "c_test", .data_version = "1.0.0", .accepted_data_versions = "1.0.0" }}, .recoveries = &.{.{ .name = "c_test", .rebuild = recoveryRebuild }} }});
     defer owned.deinit();
     try std.testing.expectEqual(@as(usize, 1), owned.registry().plugins.len);
     try std.testing.expectEqual(@as(usize, 1), owned.registry().compatibilities.len);
+    try std.testing.expectEqual(@as(usize, 1), owned.registry().recoveries.len);
 }
 
 test "extension_plugin registry allocation failure cleanup" {

@@ -853,6 +853,10 @@ pub fn zova_database_extension_upgrade(request: ?*const zova_database_extension_
     return internal.zova_database_extension_upgrade(request);
 }
 
+pub fn zova_database_extension_rebuild(request: ?*const zova_database_extension_request) callconv(.c) zova_status {
+    return internal.zova_database_extension_rebuild(request);
+}
+
 pub fn zova_database_open_for_extension_upgrade(request: ?*const zova_database_open_extensions_request) callconv(.c) zova_status {
     return internal.zova_database_open_for_extension_upgrade(request);
 }

@@ -13,6 +13,9 @@ pub const ZOVA_PLUGIN_LIMIT: i32 = 5;
 pub const ZOVA_PLUGIN_CANCELED: i32 = 6;
 pub const ZOVA_PLUGIN_HAS_UPGRADE_V1: u64 = 1;
 pub const ZOVA_PLUGIN_HAS_DATA_COMPATIBILITY_V1: u64 = 128;
+pub const ZOVA_PLUGIN_HAS_RECOVERY_V1: u64 = 256;
+pub const ZOVA_PLUGIN_SALVAGE_PLAN: u32 = 1;
+pub const ZOVA_PLUGIN_SALVAGE_COPY: u32 = 2;
 pub const ZOVA_PLUGIN_REQUIRES_QUERY_V1: u64 = 2;
 pub const ZOVA_PLUGIN_REQUIRES_DIAGNOSTICS_V1: u64 = 4;
 pub const ZOVA_PLUGIN_SERVICE_QUERY: u32 = 1;
@@ -156,6 +159,44 @@ pub struct zova_plugin_compatibility_descriptor_v1 {
     pub base: zova_plugin_upgrade_descriptor_v1,
     pub data_version: *const c_char,
     pub accepted_data_versions: *const c_char,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct zova_plugin_salvage_request_v1 {
+    pub struct_size: u32,
+    pub mode: u32,
+    pub data_version: zova_plugin_bytes_v1,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct zova_plugin_salvage_result_v1 {
+    pub copied_extensions: u64,
+    pub copied_private_objects: u64,
+    pub skipped_extensions: u64,
+    pub skipped_private_objects: u64,
+    pub installed_in_destination: u32,
+    pub reserved: u32,
+}
+pub type zova_plugin_rebuild_v1 = Option<
+    unsafe extern "C" fn(*const zova_plugin_host_v1, *mut c_void, zova_plugin_bytes_v1) -> i32,
+>;
+pub type zova_plugin_salvage_v1 = Option<
+    unsafe extern "C" fn(
+        *const zova_plugin_host_v1,
+        *mut c_void,
+        *const zova_plugin_host_v1,
+        *mut c_void,
+        *const zova_plugin_salvage_request_v1,
+        *mut zova_plugin_salvage_result_v1,
+    ) -> i32,
+>;
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct zova_plugin_recovery_descriptor_v1 {
+    pub base: zova_plugin_compatibility_descriptor_v1,
+    pub rebuild: zova_plugin_rebuild_v1,
+    pub salvage: zova_plugin_salvage_v1,
 }
 
 #[repr(C)]

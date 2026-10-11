@@ -94,6 +94,7 @@ pub const ObjectStoreAction = enum {
 
 pub const ExtensionAction = enum {
     upgrade,
+    rebuild,
     list,
     info,
     check,

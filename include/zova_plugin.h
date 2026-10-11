@@ -25,6 +25,9 @@ extern "C" {
 #define ZOVA_PLUGIN_CANCELED INT32_C(6)
 #define ZOVA_PLUGIN_HAS_UPGRADE_V1 UINT64_C(1)
 #define ZOVA_PLUGIN_HAS_DATA_COMPATIBILITY_V1 UINT64_C(128)
+#define ZOVA_PLUGIN_HAS_RECOVERY_V1 UINT64_C(256)
+#define ZOVA_PLUGIN_SALVAGE_PLAN UINT32_C(1)
+#define ZOVA_PLUGIN_SALVAGE_COPY UINT32_C(2)
 #define ZOVA_PLUGIN_REQUIRES_QUERY_V1 UINT64_C(2)
 #define ZOVA_PLUGIN_REQUIRES_DIAGNOSTICS_V1 UINT64_C(4)
 #define ZOVA_PLUGIN_SERVICE_QUERY UINT32_C(1)
@@ -434,7 +437,7 @@ typedef int32_t (ZOVA_PLUGIN_CALL *zova_plugin_hook_v1)(
  * a combination of HAS_UPGRADE_V1, REQUIRES_QUERY_V1 and
  * REQUIRES_DIAGNOSTICS_V1, REQUIRES_DATA_V1, REQUIRES_STORAGE_V1,
  * REQUIRES_OPERATIONS_V1, REQUIRES_VECTOR_MAINTENANCE_V1 and
- * HAS_DATA_COMPATIBILITY_V1; unknown bits
+ * HAS_DATA_COMPATIBILITY_V1 and HAS_RECOVERY_V1; unknown bits
  * fail negotiation. struct_size must be at
  * least sizeof(zova_plugin_descriptor_v1); hosts
  * ignore unflagged trailing fields. A new incompatible layout uses a new ABI/entrypoint.
@@ -488,6 +491,44 @@ typedef struct zova_plugin_compatibility_descriptor_v1 {
     const char *data_version;
     const char *accepted_data_versions;
 } zova_plugin_compatibility_descriptor_v1;
+
+/* Recovery is explicitly requested, never run on ordinary open. Source is
+ * read-only; destination is NULL for plan. Hosts/contexts, request and output
+ * are borrowed for this call only. Use bounded services; retain no row bytes.
+ * A copy hook must report installed_in_destination=1 only for valid recovered
+ * private storage. Host owns metadata and savepoints. Failure discards the
+ * output and rolls back destination changes, preserving earlier caller work.
+ */
+typedef struct zova_plugin_salvage_request_v1 {
+    uint32_t struct_size;
+    uint32_t mode;
+    zova_plugin_bytes_v1 data_version;
+} zova_plugin_salvage_request_v1;
+typedef struct zova_plugin_salvage_result_v1 {
+    uint64_t copied_extensions;
+    uint64_t copied_private_objects;
+    uint64_t skipped_extensions;
+    uint64_t skipped_private_objects;
+    uint32_t installed_in_destination;
+    uint32_t reserved;
+} zova_plugin_salvage_result_v1;
+typedef int32_t (ZOVA_PLUGIN_CALL *zova_plugin_rebuild_v1)(
+    const zova_plugin_host_v1 *, void *, zova_plugin_bytes_v1 data_version);
+typedef int32_t (ZOVA_PLUGIN_CALL *zova_plugin_salvage_v1)(
+    const zova_plugin_host_v1 *source_host, void *source,
+    const zova_plugin_host_v1 *destination_host, void *destination,
+    const zova_plugin_salvage_request_v1 *, zova_plugin_salvage_result_v1 *);
+/* Flagged tail with fixed compatibility/upgrade prefixes. At least one hook
+ * is required. Unflagged prefix fields must be NULL. Rebuild repairs the
+ * installed data version, not the preferred target; it must not change the
+ * data contract. The host then registers/checks/validates before publication.
+ * Older hosts reject HAS_RECOVERY_V1. All callbacks live until library unload.
+ */
+typedef struct zova_plugin_recovery_descriptor_v1 {
+    zova_plugin_compatibility_descriptor_v1 base;
+    zova_plugin_rebuild_v1 rebuild;
+    zova_plugin_salvage_v1 salvage;
+} zova_plugin_recovery_descriptor_v1;
 
 ZOVA_PLUGIN_EXPORT const zova_plugin_descriptor_v1 *ZOVA_PLUGIN_CALL
 zova_plugin_entry_v1(uint32_t host_abi_version);

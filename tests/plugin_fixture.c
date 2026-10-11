@@ -216,7 +216,99 @@ static int32_t ZOVA_PLUGIN_CALL drop(const zova_plugin_host_v1 *host, void *db) 
 }
 
 
-#ifdef ZOVA_UPGRADE_FIXTURE
+#ifdef ZOVA_RECOVERY_FIXTURE
+static int32_t ZOVA_PLUGIN_CALL cached_value(const zova_plugin_host_v1 *host,
+        void *connection, void *state, const zova_plugin_operation_call_v1 *call) {
+    zova_plugin_value_v1 value = {0};
+    (void)host; (void)connection;
+    value.kind = ZOVA_PLUGIN_VALUE_INTEGER;
+    value.integer = *(int64_t *)state;
+    return call->row(call->user_data, &value, 1);
+}
+static void ZOVA_PLUGIN_CALL cached_destroy(void *state) { free(state); }
+static int32_t ZOVA_PLUGIN_CALL register_cached(const zova_plugin_host_v1 *host, void *db) {
+    const zova_plugin_service_host_v1 *services = (const zova_plugin_service_host_v1 *)host;
+    const void *raw = NULL;
+    const zova_plugin_operation_service_v1 *operations;
+    const zova_plugin_operation_column_v1 column = {{(const uint8_t *)"value", 5}, ZOVA_PLUGIN_VALUE_INTEGER, 0};
+    zova_plugin_operation_v1 op = {0};
+    int64_t *state;
+    int32_t rc = services->get_service(db, ZOVA_PLUGIN_SERVICE_OPERATIONS, 1,
+        sizeof(zova_plugin_operation_service_v1), &raw);
+    if (rc != 0) return rc;
+    operations = (const zova_plugin_operation_service_v1 *)raw;
+    state = (int64_t *)malloc(sizeof(*state));
+    if (!state) return ZOVA_PLUGIN_OUT_OF_MEMORY;
+    *state = 42;
+    op.struct_size = sizeof(op); op.kind = ZOVA_PLUGIN_OPERATION_SCALAR;
+    op.flags = ZOVA_PLUGIN_OPERATION_EXACT; op.name.data = (const uint8_t *)"cached"; op.name.len = 6;
+    op.column_count = 1; op.columns = &column; op.scalar = cached_value;
+    op.user_data = state; op.destroy = cached_destroy;
+    rc = operations->register_operation(db, &op);
+    if (rc != 0) free(state);
+    return rc;
+}
+static int32_t ZOVA_PLUGIN_CALL rebuild(const zova_plugin_host_v1 *host, void *db,
+        zova_plugin_bytes_v1 version) {
+    const char sql[] = "DELETE FROM _zova_ext_c_test_data; INSERT INTO _zova_ext_c_test_data VALUES(42)";
+    if (version.len != 5 || memcmp(version.data, "1.0.0", 5) != 0) return 3;
+    return host->exec_sql(db, sql, sizeof(sql) - 1);
+}
+typedef struct recovery_copy { const zova_plugin_host_v1 *host; void *db; } recovery_copy;
+static int32_t ZOVA_PLUGIN_CALL recovery_ignore(void *raw, const zova_plugin_value_v1 *values, uint64_t count) {
+    (void)raw; (void)values; (void)count; return 0;
+}
+static int32_t ZOVA_PLUGIN_CALL recovery_row(void *raw, const zova_plugin_value_v1 *values, uint64_t count) {
+    recovery_copy *copy = (recovery_copy *)raw;
+    const zova_plugin_service_host_v1 *host;
+    const zova_plugin_storage_service_v1 *storage;
+    const void *service = NULL;
+    const char sql[] = "INSERT INTO _zova_ext_c_test_data VALUES(?)";
+    zova_plugin_query_request_v1 req = {0};
+    int32_t rc;
+    if (count != 1 || values[0].kind != ZOVA_PLUGIN_VALUE_INTEGER) return 3;
+    if (!copy->host) return 0;
+    host = (const zova_plugin_service_host_v1 *)copy->host;
+    rc = host->get_service(copy->db, ZOVA_PLUGIN_SERVICE_STORAGE, 1, sizeof(*storage), &service);
+    if (rc != 0) return rc;
+    storage = (const zova_plugin_storage_service_v1 *)service;
+    req.struct_size = sizeof(req); req.sql = sql; req.sql_len = sizeof(sql) - 1;
+    req.parameters = values; req.parameter_count = 1; req.row_limit = 1; req.byte_limit = 1024;
+    req.row = recovery_ignore;
+    return storage->execute(copy->db, &req);
+}
+static int32_t ZOVA_PLUGIN_CALL salvage(const zova_plugin_host_v1 *source_host,
+        void *source, const zova_plugin_host_v1 *dest_host, void *dest,
+        const zova_plugin_salvage_request_v1 *request, zova_plugin_salvage_result_v1 *out) {
+    const char sql[] = "SELECT id FROM _zova_ext_c_test_data ORDER BY id";
+    const zova_plugin_service_host_v1 *host = (const zova_plugin_service_host_v1 *)source_host;
+    const zova_plugin_query_service_v1 *query;
+    const void *service = NULL;
+    zova_plugin_query_request_v1 req = {0};
+    recovery_copy copy = {dest_host, dest};
+    int32_t rc;
+    if (request->struct_size < sizeof(*request)) return 3;
+    if (request->mode != ZOVA_PLUGIN_SALVAGE_PLAN && request->mode != ZOVA_PLUGIN_SALVAGE_COPY) return 3;
+    if (request->mode == ZOVA_PLUGIN_SALVAGE_PLAN && dest_host != NULL) return 3;
+    if (request->mode == ZOVA_PLUGIN_SALVAGE_COPY && (!dest_host || install(dest_host, dest) != 0)) return 1;
+    rc = host->get_service(source, ZOVA_PLUGIN_SERVICE_QUERY, 1, sizeof(*query), &service);
+    if (rc != 0) return rc;
+    query = (const zova_plugin_query_service_v1 *)service;
+    req.struct_size = sizeof(req); req.sql = sql; req.sql_len = sizeof(sql) - 1;
+    req.row_limit = 4096; req.byte_limit = 4096; req.row = recovery_row; req.user_data = &copy;
+    rc = query->query(source, &req);
+    if (rc != 0) return rc;
+    out->copied_extensions = 1; out->copied_private_objects = 1;
+    out->installed_in_destination = request->mode == ZOVA_PLUGIN_SALVAGE_COPY;
+    return 0;
+}
+static const zova_plugin_recovery_descriptor_v1 recovery_descriptor = {
+    {{{sizeof(zova_plugin_recovery_descriptor_v1), ZOVA_PLUGIN_ABI_V1,
+       ZOVA_PLUGIN_HAS_RECOVERY_V1 | ZOVA_PLUGIN_REQUIRES_OPERATIONS_V1 | ZOVA_PLUGIN_REQUIRES_QUERY_V1 | ZOVA_PLUGIN_REQUIRES_STORAGE_V1,
+       "c_test", "1.0.0", "_zova_ext_c_test_", "1.0.0", "", install, NULL, drop, register_cached},
+       NULL, NULL}, NULL, NULL}, rebuild, salvage
+};
+#elif defined(ZOVA_UPGRADE_FIXTURE)
 static int32_t ZOVA_PLUGIN_CALL upgrade(const zova_plugin_host_v1 *host, void *db) {
     const char sql[] = "ALTER TABLE _zova_ext_c_test_data ADD COLUMN upgraded INTEGER DEFAULT 9";
     return host->exec_sql(db, sql, sizeof(sql) - 1);
@@ -277,7 +369,9 @@ static const zova_plugin_descriptor_v1 descriptor = {
 #endif
 
 const zova_plugin_descriptor_v1 *ZOVA_PLUGIN_CALL zova_plugin_entry_v1(uint32_t version) {
-#ifdef ZOVA_COMPATIBILITY_FIXTURE
+#ifdef ZOVA_RECOVERY_FIXTURE
+    return version == ZOVA_PLUGIN_ABI_V1 ? &recovery_descriptor.base.base.base : NULL;
+#elif defined(ZOVA_COMPATIBILITY_FIXTURE)
     return version == ZOVA_PLUGIN_ABI_V1 ? &compatible_descriptor.base.base : NULL;
 #elif defined(ZOVA_UPGRADE_FIXTURE)
     return version == ZOVA_PLUGIN_ABI_V1 ? &upgraded_descriptor.base : NULL;

@@ -33,8 +33,14 @@ pub const Client = api.Client;
 pub const Descriptor = api.Descriptor;
 pub const UpgradeDescriptor = api.UpgradeDescriptor;
 pub const CompatibilityDescriptor = api.CompatibilityDescriptor;
+pub const RecoveryDescriptor = api.RecoveryDescriptor;
+pub const SalvageRequest = api.SalvageRequest;
+pub const SalvageResult = api.SalvageResult;
+pub const has_recovery = api.has_recovery;
+pub const salvage_plan = api.salvage_plan;
+pub const salvage_copy = api.salvage_copy;
 pub const Phase = enum { install, check, drop, register_sql };
-const supported_flags = has_upgrade | has_data_compatibility | requires_query | requires_diagnostics | api.requires_data | api.requires_storage | api.requires_operations | api.requires_vector_maintenance;
+const supported_flags = has_upgrade | has_data_compatibility | has_recovery | requires_query | requires_diagnostics | api.requires_data | api.requires_storage | api.requires_operations | api.requires_vector_maintenance;
 const query_service: QueryService = .{ .query = query };
 const data_service: api.DataService = .{ .read = readData };
 const storage_service: api.StorageService = .{ .execute = storage };
@@ -51,6 +57,7 @@ const Context = struct {
     registration_version: []const u8 = "",
     operation: bool = false,
     read_only_operation: bool = false,
+    recovery: bool = false,
 };
 
 pub fn legacyHost() Host {
@@ -90,6 +97,16 @@ pub fn compatibilityPath(d: *const Descriptor) extension.Error!?extension.Compat
     return item;
 }
 
+pub fn recoveryPath(d: *const Descriptor) extension.Error!?extension.Recovery {
+    _ = try validateBase(d);
+    if (d.flags & has_recovery == 0) return null;
+    const tail: *const RecoveryDescriptor = @ptrCast(d);
+    if (d.flags & has_data_compatibility == 0 and (tail.base.data_version != null or tail.base.accepted_data_versions != null)) return error.ExtensionInvalid;
+    if (d.flags & has_upgrade == 0 and (tail.base.base.from_version != null or tail.base.base.upgrade != null)) return error.ExtensionInvalid;
+    if (tail.rebuild == null and tail.salvage == null) return error.ExtensionInvalid;
+    return .{ .name = try string(d.name, 64), .rebuild = tail.rebuild, .salvage = tail.salvage };
+}
+
 fn string(ptr: ?[*:0]const u8, max: usize) extension.Error![]const u8 {
     const value = ptr orelse return error.ExtensionInvalid;
     for (0..max + 1) |i| if (value[i] == 0) return value[0..i];
@@ -99,6 +116,7 @@ fn string(ptr: ?[*:0]const u8, max: usize) extension.Error![]const u8 {
 pub fn validate(ptr: ?*const Descriptor) extension.Error!extension.Extension {
     const item = try validateBase(ptr);
     _ = try compatibilityPath(ptr.?);
+    _ = try recoveryPath(ptr.?);
     return item;
 }
 
@@ -110,6 +128,7 @@ pub fn validateBase(ptr: ?*const Descriptor) extension.Error!extension.Extension
     if (d.flags & ~supported_flags != 0) return error.ExtensionIncompatible;
     if (d.flags & has_upgrade != 0 and d.struct_size < @sizeOf(UpgradeDescriptor)) return error.ExtensionIncompatible;
     if (d.flags & has_data_compatibility != 0 and d.struct_size < @sizeOf(CompatibilityDescriptor)) return error.ExtensionIncompatible;
+    if (d.flags & has_recovery != 0 and d.struct_size < @sizeOf(RecoveryDescriptor)) return error.ExtensionIncompatible;
     const manifest: extension.Manifest = .{
         .name = try string(d.name, 64),
         .version = try string(d.version, 64),
@@ -140,11 +159,12 @@ pub fn invokeVersion(d: Descriptor, phase: Phase, db: *sqlite.Database, data_ver
         const scope = try operations.begin(db, std.mem.span(d.name.?));
         var success = false;
         defer scope.finish(success);
-        try invokeContextHook(hook, db, std.mem.span(d.storage_prefix.?), data_version);
+        try invokeContextHook(hook, db, std.mem.span(d.storage_prefix.?), data_version, true);
+        try scope.prepare(db);
         success = true;
         return;
     }
-    return invokeOwnedHook(hook, db, std.mem.span(d.storage_prefix.?));
+    return invokeContextHook(hook, db, std.mem.span(d.storage_prefix.?), "", phase == .check);
 }
 
 pub fn invokeHook(hook: Hook, db: *sqlite.Database) extension.Error!void {
@@ -152,9 +172,19 @@ pub fn invokeHook(hook: Hook, db: *sqlite.Database) extension.Error!void {
 }
 
 pub fn invokeOwnedHook(hook: Hook, db: *sqlite.Database, storage_prefix: []const u8) extension.Error!void {
-    return invokeContextHook(hook, db, storage_prefix, "");
+    return invokeContextHook(hook, db, storage_prefix, "", false);
 }
-fn invokeContextHook(hook: Hook, db: *sqlite.Database, storage_prefix: []const u8, registration_version: []const u8) extension.Error!void {
+fn invokeContextHook(hook: Hook, db: *sqlite.Database, storage_prefix: []const u8, registration_version: []const u8, read_only: bool) extension.Error!void {
+    return invokeLifecycle(.{ .hook = hook }, db, storage_prefix, registration_version, read_only);
+}
+const LifecycleCall = union(enum) {
+    hook: Hook,
+    rebuild: struct { hook: api.RebuildHook, data_version: api.Bytes },
+};
+pub fn invokeRebuild(hook: api.RebuildHook, db: *sqlite.Database, prefix: []const u8, version: []const u8) extension.Error!void {
+    return invokeLifecycle(.{ .rebuild = .{ .hook = hook, .data_version = .from(version) } }, db, prefix, "", false);
+}
+fn invokeLifecycle(call: LifecycleCall, db: *sqlite.Database, storage_prefix: []const u8, registration_version: []const u8, read_only: bool) extension.Error!void {
     const host = serviceHost();
     // Scope both related source pages and private writes. On failure preserve
     // earlier caller work, including when lifecycle already owns a savepoint.
@@ -171,14 +201,46 @@ fn invokeContextHook(hook: Hook, db: *sqlite.Database, storage_prefix: []const u
         defer pin.deinit();
         _ = try pin.step();
     }
-    var context: Context = .{ .db = db, .storage_prefix = storage_prefix, .registration_allowed = registration_version.len != 0, .registration_version = registration_version };
-    switch (hook(&host.base, &context)) {
+    var context: Context = .{ .db = db, .storage_prefix = storage_prefix, .registration_allowed = registration_version.len != 0, .registration_version = registration_version, .read_only_operation = read_only, .recovery = call == .rebuild };
+    const status = switch (call) {
+        .hook => |hook| hook(&host.base, &context),
+        .rebuild => |rebuild| rebuild.hook(&host.base, &context, rebuild.data_version),
+    };
+    switch (status) {
         0 => {},
         2 => return error.OutOfMemory,
         else => return error.ExtensionInvalid,
     }
     try db.releaseSavepoint("zova_plugin_hook");
     released = true;
+}
+
+pub fn invokeSalvage(hook: api.SalvageHook, context: extension.SalvageContext, prefix: []const u8, version: []const u8) extension.Error!extension.SalvageResult {
+    const host = serviceHost();
+    try context.source.savepoint("zova_plugin_salvage_source");
+    defer {
+        context.source.rollbackToSavepoint("zova_plugin_salvage_source") catch {};
+        context.source.releaseSavepoint("zova_plugin_salvage_source") catch {};
+    }
+    for ([_][]const u8{ "main.", try data_access.schema(context.source, "graph_store"), try data_access.schema(context.source, "vector_store") }) |schema_prefix| {
+        var buffer: [128]u8 = undefined;
+        const sql = std.fmt.bufPrintSentinel(&buffer, "select 1 from {s}sqlite_schema limit 1", .{schema_prefix}, 0) catch return error.ExtensionInvalid;
+        var pin = try context.source.prepare(sql);
+        defer pin.deinit();
+        _ = try pin.step();
+    }
+    var source: Context = .{ .db = context.source, .storage_prefix = prefix, .read_only_operation = true };
+    var destination: Context = .{ .db = context.destination orelse context.source, .storage_prefix = prefix, .recovery = true };
+    const request: SalvageRequest = .{ .mode = if (context.mode == .plan) salvage_plan else salvage_copy, .data_version = .from(version) };
+    var out: SalvageResult = .{};
+    const status = hook(&host.base, &source, if (context.destination != null) &host.base else null, if (context.destination != null) &destination else null, &request, &out);
+    switch (status) {
+        0 => {},
+        2 => return error.OutOfMemory,
+        else => return error.ExtensionInvalid,
+    }
+    if (out.reserved != 0 or out.installed_in_destination > 1 or out.copied_extensions > 1 or out.skipped_extensions > 1 or (context.mode == .plan and out.installed_in_destination != 0)) return error.ExtensionInvalid;
+    return .{ .copied_extensions = out.copied_extensions, .copied_private_objects = out.copied_private_objects, .skipped_extensions = out.skipped_extensions, .skipped_private_objects = out.skipped_private_objects, .installed_in_destination = out.installed_in_destination != 0 };
 }
 
 pub const OperationRunner = *const fn (*const Host, ?*anyopaque, ?*anyopaque) callconv(.c) i32;
@@ -320,10 +382,10 @@ const max_query_parameters = 256;
 /// tests. All parameters are borrowed until finalization; row bytes only until
 /// the callback returns. No statement or allocation crosses the ABI.
 pub fn executeQuery(allocator: std.mem.Allocator, db: *sqlite.Database, request: *const QueryRequest) QueryError!void {
-    return executeSql(allocator, db, request, false);
+    return executeSql(allocator, db, request, false, false);
 }
 
-fn executeSql(allocator: std.mem.Allocator, db: *sqlite.Database, request: *const QueryRequest, allow_write: bool) QueryError!void {
+fn executeSql(allocator: std.mem.Allocator, db: *sqlite.Database, request: *const QueryRequest, allow_write: bool, owner_storage: bool) QueryError!void {
     if (request.struct_size < @sizeOf(QueryRequest) or request.flags != 0) return error.InvalidArgument;
     if (request.sql_len == 0 or request.sql_len > max_sql_bytes or request.sql == null or request.row == null) return error.InvalidArgument;
     if (request.row_limit == 0 or request.row_limit > max_query_rows or request.byte_limit == 0 or request.byte_limit > max_sql_bytes) return error.InvalidArgument;
@@ -343,7 +405,7 @@ fn executeSql(allocator: std.mem.Allocator, db: *sqlite.Database, request: *cons
     }
     const terminated = try allocator.dupeSentinel(u8, sql, 0);
     defer allocator.free(terminated);
-    var stmt = if (allow_write)
+    var stmt = if (owner_storage)
         db.prepareDml(terminated) catch |err| return if (err == error.SqliteError) error.InvalidArgument else err
     else
         try db.prepareReadQuery(terminated);
@@ -396,7 +458,7 @@ fn storage(context: ?*anyopaque, request: ?*const QueryRequest) callconv(.c) i32
         // it before our own savepoint commands. Never authorize by SQL spelling.
         state.db.setAuthorizer(storageAuthorizer, state) catch |err| return serviceStatus(err);
         defer state.db.setAuthorizer(null, null) catch {};
-        executeSql(std.heap.c_allocator, state.db, r, !state.read_only_operation) catch |err| {
+        executeSql(std.heap.c_allocator, state.db, r, !state.read_only_operation, true) catch |err| {
             if (sqlite.c.sqlite3_errcode(state.db.handle) == sqlite.c.SQLITE_AUTH) return 3;
             return serviceStatus(err);
         };
@@ -457,6 +519,8 @@ fn query(context: ?*anyopaque, request: ?*const QueryRequest) callconv(.c) i32 {
     if (state.service_active) return 3;
     state.service_active = true;
     defer state.service_active = false;
+    if (state.read_only_operation) state.db.setAuthorizer(lifecycleAuthorizer, state) catch |err| return serviceStatus(err);
+    defer if (state.read_only_operation) state.db.setAuthorizer(null, null) catch {};
     executeQuery(std.heap.c_allocator, state.db, request orelse return 3) catch |err| return switch (err) {
         error.OutOfMemory, error.NoMemory => 2,
         error.InvalidArgument => 3,
@@ -485,7 +549,34 @@ fn execContextSql(context: ?*anyopaque, sql: ?[*]const u8, len: u64) callconv(.c
     if (state.service_active or state.operation) return 3;
     state.service_active = true;
     defer state.service_active = false;
+    state.db.setAuthorizer(lifecycleAuthorizer, state) catch |err| return serviceStatus(err);
+    defer state.db.setAuthorizer(null, null) catch {};
     return execSql(state.db, sql, len);
+}
+
+fn lifecycleAuthorizer(raw: ?*anyopaque, action: c_int, first: [*c]const u8, second: [*c]const u8, schema_name: [*c]const u8, _: [*c]const u8) callconv(.c) c_int {
+    const state: *Context = @ptrCast(@alignCast(raw.?));
+    const c = sqlite.c;
+    // SQL transaction boundaries belong to the host, never to a lifecycle hook.
+    if (action == c.SQLITE_TRANSACTION or action == c.SQLITE_SAVEPOINT or action == c.SQLITE_ATTACH or action == c.SQLITE_DETACH or action == c.SQLITE_PRAGMA) return c.SQLITE_DENY;
+    if (state.read_only_operation) return switch (action) {
+        c.SQLITE_SELECT, c.SQLITE_READ, c.SQLITE_FUNCTION, c.SQLITE_RECURSIVE => c.SQLITE_OK,
+        else => c.SQLITE_DENY,
+    };
+    if (state.recovery) switch (action) {
+        c.SQLITE_INSERT, c.SQLITE_UPDATE, c.SQLITE_DELETE, c.SQLITE_CREATE_TABLE, c.SQLITE_DROP_TABLE, c.SQLITE_CREATE_INDEX, c.SQLITE_DROP_INDEX, c.SQLITE_CREATE_VIEW, c.SQLITE_DROP_VIEW, c.SQLITE_CREATE_TRIGGER, c.SQLITE_DROP_TRIGGER, c.SQLITE_CREATE_VTABLE, c.SQLITE_DROP_VTABLE => {
+            if (schema_name == null or !std.mem.eql(u8, std.mem.span(schema_name), "main") or first == null) return c.SQLITE_DENY;
+            if (action == c.SQLITE_CREATE_INDEX or action == c.SQLITE_DROP_INDEX or action == c.SQLITE_CREATE_TRIGGER or action == c.SQLITE_DROP_TRIGGER) {
+                if (second == null or !std.mem.startsWith(u8, std.mem.span(second), state.storage_prefix)) return c.SQLITE_DENY;
+            }
+            const name = std.mem.span(first);
+            // SQLite's own schema writes accompany permitted owner DDL.
+            return if (std.mem.startsWith(u8, name, state.storage_prefix) or std.mem.eql(u8, name, "sqlite_master") or std.mem.eql(u8, name, "sqlite_schema")) c.SQLITE_OK else c.SQLITE_DENY;
+        },
+        c.SQLITE_ALTER_TABLE, c.SQLITE_CREATE_TEMP_TABLE, c.SQLITE_DROP_TEMP_TABLE, c.SQLITE_CREATE_TEMP_INDEX, c.SQLITE_DROP_TEMP_INDEX, c.SQLITE_CREATE_TEMP_TRIGGER, c.SQLITE_DROP_TEMP_TRIGGER, c.SQLITE_CREATE_TEMP_VIEW, c.SQLITE_DROP_TEMP_VIEW => return c.SQLITE_DENY,
+        else => {},
+    };
+    return c.SQLITE_OK;
 }
 
 fn execSql(context: ?*anyopaque, sql: ?[*]const u8, len: u64) callconv(.c) i32 {
