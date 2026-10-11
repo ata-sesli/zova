@@ -7,6 +7,12 @@ migration. It does not include the separate USearch reference integration.
 Zova extensions are trusted process code that can install and manage private
 Zova storage, then expose a SQL surface on every opened connection.
 
+The development [NetworKit PageRank reference](../examples/networkit-pagerank/README.md)
+demonstrates a stateless external algorithm using only bounded graph scans and
+SQL row operations. It is separately built and explicitly trusted, not bundled
+into Zova. It preserves node identities and snapshots, handles dangling nodes,
+and exposes finite-iteration/convergence and phase-timing results.
+
 The database stores extension metadata. It does not store executable code,
 library paths, search paths, or anything that Zova auto-loads.
 

@@ -37,3 +37,9 @@ jobs:
       # Rust, Go/cgo, installed Python wheel and installed npm tarball.
       - run: python -m unittest scripts/tests/test_plugin_package_compiler.py
       - run: python scripts/check-plugin-packages.py "${{ runner.temp }}/plugin-packages"
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - run: brew install libomp
+        if: runner.os == 'macOS'
+      - name: NetworKit PageRank reference and native binding consumers
+        run: python scripts/check-networkit-pagerank.py "${{ runner.temp }}/networkit-pagerank" --packages "${{ runner.temp }}/plugin-packages"
