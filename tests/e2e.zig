@@ -729,7 +729,8 @@ test "cli doctor reports sql introduced corruption in realistic file" {
     }
 
     {
-        var raw = try zova.sqlite.Database.open(path);
+        // Register the source-tracking functions before injecting SQL corruption.
+        var raw = try zova.Database.open(path);
         defer raw.deinit();
         try raw.exec(
             \\update _zova_chunks
