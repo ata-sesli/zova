@@ -298,8 +298,16 @@ pub const Descriptor = extern struct {
     register_sql: ?Hook = null,
 };
 pub const has_upgrade: u64 = 1;
+pub const has_data_compatibility: u64 = 128;
 pub const UpgradeDescriptor = extern struct {
     base: Descriptor,
     from_version: ?[*:0]const u8,
     upgrade: ?Hook,
+};
+/// Fixed upgrade prefix permits either or both optional flags without changing
+/// legacy descriptor offsets. Unused upgrade fields must be null.
+pub const CompatibilityDescriptor = extern struct {
+    base: UpgradeDescriptor,
+    data_version: ?[*:0]const u8,
+    accepted_data_versions: ?[*:0]const u8,
 };

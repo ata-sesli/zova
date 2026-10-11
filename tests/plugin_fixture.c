@@ -225,10 +225,29 @@ static int32_t ZOVA_PLUGIN_CALL check(const zova_plugin_host_v1 *host, void *db)
     const char sql[] = "SELECT upgraded FROM _zova_ext_c_test_data";
     return host->exec_sql(db, sql, sizeof(sql) - 1);
 }
+#ifdef ZOVA_COMPATIBILITY_FIXTURE
+static const zova_plugin_compatibility_descriptor_v1 compatible_descriptor = {
+    {{ sizeof(zova_plugin_compatibility_descriptor_v1), ZOVA_PLUGIN_ABI_V1,
+       ZOVA_PLUGIN_HAS_UPGRADE_V1 | ZOVA_PLUGIN_HAS_DATA_COMPATIBILITY_V1,
+       "c_test", "3.2.0", "_zova_ext_c_test_", "1.0.0", "", install, check, drop, NULL },
+     "1.0.0", upgrade},
+    "2.0.0", "2.0.0"
+};
+#else
 static const zova_plugin_upgrade_descriptor_v1 upgraded_descriptor = {
     { sizeof(zova_plugin_upgrade_descriptor_v1), ZOVA_PLUGIN_ABI_V1, ZOVA_PLUGIN_HAS_UPGRADE_V1,
       "c_test", "2.0.0", "_zova_ext_c_test_", "1.0.0", "", install, check, drop, NULL },
     "1.0.0", upgrade
+};
+#endif
+#else
+#ifdef ZOVA_COMPATIBILITY_FIXTURE
+static const zova_plugin_compatibility_descriptor_v1 compatible_descriptor = {
+    {{ sizeof(zova_plugin_compatibility_descriptor_v1), ZOVA_PLUGIN_ABI_V1,
+       ZOVA_PLUGIN_HAS_DATA_COMPATIBILITY_V1,
+       "c_test", "3.1.0", "_zova_ext_c_test_", "1.0.0", "", install, NULL, drop, NULL },
+     NULL, NULL},
+    "1.0.0", "1.0.0"
 };
 #else
 static const zova_plugin_descriptor_v1 descriptor = {
@@ -255,9 +274,12 @@ static const zova_plugin_descriptor_v1 descriptor = {
 #endif
 };
 #endif
+#endif
 
 const zova_plugin_descriptor_v1 *ZOVA_PLUGIN_CALL zova_plugin_entry_v1(uint32_t version) {
-#ifdef ZOVA_UPGRADE_FIXTURE
+#ifdef ZOVA_COMPATIBILITY_FIXTURE
+    return version == ZOVA_PLUGIN_ABI_V1 ? &compatible_descriptor.base.base : NULL;
+#elif defined(ZOVA_UPGRADE_FIXTURE)
     return version == ZOVA_PLUGIN_ABI_V1 ? &upgraded_descriptor.base : NULL;
 #else
     return version == ZOVA_PLUGIN_ABI_V1 ? &descriptor : NULL;

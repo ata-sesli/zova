@@ -24,6 +24,7 @@ extern "C" {
 #define ZOVA_PLUGIN_LIMIT INT32_C(5)
 #define ZOVA_PLUGIN_CANCELED INT32_C(6)
 #define ZOVA_PLUGIN_HAS_UPGRADE_V1 UINT64_C(1)
+#define ZOVA_PLUGIN_HAS_DATA_COMPATIBILITY_V1 UINT64_C(128)
 #define ZOVA_PLUGIN_REQUIRES_QUERY_V1 UINT64_C(2)
 #define ZOVA_PLUGIN_REQUIRES_DIAGNOSTICS_V1 UINT64_C(4)
 #define ZOVA_PLUGIN_SERVICE_QUERY UINT32_C(1)
@@ -432,10 +433,11 @@ typedef int32_t (ZOVA_PLUGIN_CALL *zova_plugin_hook_v1)(
  * capabilities may be NULL (empty); other strings are required. flags must be
  * a combination of HAS_UPGRADE_V1, REQUIRES_QUERY_V1 and
  * REQUIRES_DIAGNOSTICS_V1, REQUIRES_DATA_V1, REQUIRES_STORAGE_V1,
- * REQUIRES_OPERATIONS_V1 and REQUIRES_VECTOR_MAINTENANCE_V1; unknown bits
+ * REQUIRES_OPERATIONS_V1, REQUIRES_VECTOR_MAINTENANCE_V1 and
+ * HAS_DATA_COMPATIBILITY_V1; unknown bits
  * fail negotiation. struct_size must be at
  * least sizeof(zova_plugin_descriptor_v1); hosts
- * ignore trailing fields. A new incompatible layout uses a new ABI/entrypoint.
+ * ignore unflagged trailing fields. A new incompatible layout uses a new ABI/entrypoint.
  */
 typedef struct zova_plugin_descriptor_v1 {
     uint32_t struct_size;
@@ -467,6 +469,25 @@ typedef struct zova_plugin_upgrade_descriptor_v1 {
     const char *from_version;
     zova_plugin_hook_v1 upgrade;
 } zova_plugin_upgrade_descriptor_v1;
+
+/* Opt-in code/data separation. The nested base.base.version remains the code
+ * release identity, checked against the bundle manifest. Installed-info.version
+ * identifies stored data. data_version is the installation/upgrade target;
+ * accepted_data_versions is an exact comma-separated list of canonical
+ * major.minor.patch versions (no whitespace/ranges, at most 2048 bytes).
+ * The target must be listed. Compatible opens do not write metadata or upgrade.
+ * Set base.base.struct_size to sizeof(this structure) and include
+ * HAS_DATA_COMPATIBILITY_V1. Without HAS_UPGRADE_V1, base.from_version and
+ * base.upgrade must be NULL. With it, the path is from_version -> data_version,
+ * not -> code version. Equal data versions and downgrades are rejected.
+ * Legacy descriptors retain exact code/data matching. Old hosts reject this
+ * flag. All strings remain immutable and valid until the library is unloaded.
+ */
+typedef struct zova_plugin_compatibility_descriptor_v1 {
+    zova_plugin_upgrade_descriptor_v1 base;
+    const char *data_version;
+    const char *accepted_data_versions;
+} zova_plugin_compatibility_descriptor_v1;
 
 ZOVA_PLUGIN_EXPORT const zova_plugin_descriptor_v1 *ZOVA_PLUGIN_CALL
 zova_plugin_entry_v1(uint32_t host_abi_version);

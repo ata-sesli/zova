@@ -230,6 +230,7 @@ pub const OwnedRegistry = struct {
     extensions: []extension.Extension,
     plugins: []plugin.Descriptor,
     upgrades: []extension.Upgrade,
+    compatibilities: []extension.Compatibility,
 
     pub fn init(allocator: std.mem.Allocator, registries: []const extension.Registry) Error!OwnedRegistry {
         var total: usize = 0;
@@ -237,6 +238,15 @@ pub const OwnedRegistry = struct {
 
         const items = try allocator.alloc(extension.Extension, total);
         errdefer allocator.free(items);
+        var compatibility_total: usize = 0;
+        for (registries) |item| compatibility_total += item.compatibilities.len;
+        const compatibilities = try allocator.alloc(extension.Compatibility, compatibility_total);
+        errdefer allocator.free(compatibilities);
+        var compatibility_index: usize = 0;
+        for (registries) |item| {
+            @memcpy(compatibilities[compatibility_index..][0..item.compatibilities.len], item.compatibilities);
+            compatibility_index += item.compatibilities.len;
+        }
         var plugin_total: usize = 0;
         var upgrade_total: usize = 0;
         for (registries) |item| upgrade_total += item.upgrades.len;
@@ -262,19 +272,20 @@ pub const OwnedRegistry = struct {
             index += item.extensions.len;
         }
 
-        const owned: OwnedRegistry = .{ .allocator = allocator, .extensions = items, .plugins = plugins, .upgrades = upgrades };
+        const owned: OwnedRegistry = .{ .allocator = allocator, .extensions = items, .plugins = plugins, .upgrades = upgrades, .compatibilities = compatibilities };
         try owned.registry().validate();
         return owned;
     }
 
     pub fn registry(self: OwnedRegistry) extension.Registry {
-        return .{ .extensions = self.extensions, .plugins = self.plugins, .upgrades = self.upgrades };
+        return .{ .extensions = self.extensions, .plugins = self.plugins, .upgrades = self.upgrades, .compatibilities = self.compatibilities };
     }
 
     pub fn deinit(self: *OwnedRegistry) void {
         self.allocator.free(self.extensions);
         self.allocator.free(self.plugins);
         self.allocator.free(self.upgrades);
+        self.allocator.free(self.compatibilities);
     }
 };
 
@@ -284,6 +295,7 @@ pub const DynamicExtensionSet = struct {
     extensions: []extension.Extension,
     plugins: []plugin.Descriptor,
     upgrades: []extension.Upgrade,
+    compatibilities: []extension.Compatibility,
 
     pub fn loadTrustedBundles(
         allocator: std.mem.Allocator,
@@ -298,6 +310,7 @@ pub const DynamicExtensionSet = struct {
                 .extensions = try allocator.alloc(extension.Extension, 0),
                 .plugins = try allocator.alloc(plugin.Descriptor, 0),
                 .upgrades = try allocator.alloc(extension.Upgrade, 0),
+                .compatibilities = try allocator.alloc(extension.Compatibility, 0),
             };
         }
 
@@ -321,6 +334,8 @@ pub const DynamicExtensionSet = struct {
         defer plugins.deinit(allocator);
         var upgrades: std.ArrayList(extension.Upgrade) = .empty;
         defer upgrades.deinit(allocator);
+        var compatibilities: std.ArrayList(extension.Compatibility) = .empty;
+        defer compatibilities.deinit(allocator);
 
         for (bundle_paths) |bundle_path| {
             var info = try loadBundleInfo(allocator, bundle_path);
@@ -334,6 +349,7 @@ pub const DynamicExtensionSet = struct {
             try extensions.append(allocator, loaded.extension);
             if (loaded.plugin) |descriptor| try plugins.append(allocator, descriptor);
             if (loaded.upgrade) |path| try upgrades.append(allocator, path);
+            if (loaded.compatibility) |item| try compatibilities.append(allocator, item);
             // Transfer the handle last: avoid closing it twice on allocation failure.
             try libraries.append(allocator, library);
         }
@@ -349,6 +365,8 @@ pub const DynamicExtensionSet = struct {
         errdefer allocator.free(owned_plugins);
         const owned_upgrades = try upgrades.toOwnedSlice(allocator);
         errdefer allocator.free(owned_upgrades);
+        const owned_compatibilities = try compatibilities.toOwnedSlice(allocator);
+        errdefer allocator.free(owned_compatibilities);
 
         const set: DynamicExtensionSet = .{
             .allocator = allocator,
@@ -356,13 +374,14 @@ pub const DynamicExtensionSet = struct {
             .extensions = owned_extensions,
             .plugins = owned_plugins,
             .upgrades = owned_upgrades,
+            .compatibilities = owned_compatibilities,
         };
         try set.registry().validate();
         return set;
     }
 
     pub fn registry(self: DynamicExtensionSet) extension.Registry {
-        return .{ .extensions = self.extensions, .plugins = self.plugins, .upgrades = self.upgrades };
+        return .{ .extensions = self.extensions, .plugins = self.plugins, .upgrades = self.upgrades, .compatibilities = self.compatibilities };
     }
 
     pub fn deinit(self: *DynamicExtensionSet) void {
@@ -373,6 +392,7 @@ pub const DynamicExtensionSet = struct {
         self.allocator.free(self.extensions);
         self.allocator.free(self.plugins);
         self.allocator.free(self.upgrades);
+        self.allocator.free(self.compatibilities);
     }
 };
 
@@ -383,6 +403,8 @@ pub const LoadedBundle = struct {
     plugin_count: usize = 0,
     upgrades: [1]extension.Upgrade = undefined,
     upgrade_count: usize = 0,
+    compatibilities: [1]extension.Compatibility = undefined,
+    compatibility_count: usize = 0,
 
     pub fn load(allocator: std.mem.Allocator, bundle_path: []const u8) Error!LoadedBundle {
         if (comptime !supports_dynamic_loading) return error.ExtensionLoadFailed;
@@ -411,12 +433,16 @@ pub const LoadedBundle = struct {
             bundle.upgrades[0] = path;
             bundle.upgrade_count = 1;
         }
+        if (loaded.compatibility) |item| {
+            bundle.compatibilities[0] = item;
+            bundle.compatibility_count = 1;
+        }
         try bundle.registry().validate();
         return bundle;
     }
 
     pub fn registry(self: *const LoadedBundle) extension.Registry {
-        return .{ .extensions = self.extensions[0..], .plugins = self.plugins[0..self.plugin_count], .upgrades = self.upgrades[0..self.upgrade_count] };
+        return .{ .extensions = self.extensions[0..], .plugins = self.plugins[0..self.plugin_count], .upgrades = self.upgrades[0..self.upgrade_count], .compatibilities = self.compatibilities[0..self.compatibility_count] };
     }
 
     pub fn deinit(self: *LoadedBundle) void {
@@ -429,7 +455,7 @@ pub fn verifyBundleEntrypoint(allocator: std.mem.Allocator, bundle_path: []const
     defer bundle.deinit();
 }
 
-fn loadDescriptor(allocator: std.mem.Allocator, library: *DynamicLibrary, info: BundleInfo) Error!struct { extension: extension.Extension, plugin: ?plugin.Descriptor = null, upgrade: ?extension.Upgrade = null } {
+fn loadDescriptor(allocator: std.mem.Allocator, library: *DynamicLibrary, info: BundleInfo) Error!struct { extension: extension.Extension, plugin: ?plugin.Descriptor = null, upgrade: ?extension.Upgrade = null, compatibility: ?extension.Compatibility = null } {
     // The manifest explicitly selects the new signature. No symbol probing or
     // fallback may reinterpret an old Zig descriptor as a C structure.
     if (std.mem.eql(u8, info.manifest.entrypoint, plugin.entrypoint)) {
@@ -438,7 +464,7 @@ fn loadDescriptor(allocator: std.mem.Allocator, library: *DynamicLibrary, info: 
         const descriptor = entry(1);
         const loaded = try plugin.validate(descriptor);
         try ensureLoadedExtensionMatches(info, loaded);
-        return .{ .extension = loaded, .plugin = descriptor.?.*, .upgrade = try plugin.upgradePath(descriptor.?) };
+        return .{ .extension = loaded, .plugin = descriptor.?.*, .upgrade = try plugin.upgradePath(descriptor.?), .compatibility = try plugin.compatibilityPath(descriptor.?) };
     }
     const entry_name = try allocator.dupeSentinel(u8, info.manifest.entrypoint, 0);
     defer allocator.free(entry_name);
