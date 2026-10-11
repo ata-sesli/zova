@@ -19,6 +19,9 @@ The directory must not exist. Builds use two jobs. The optional measurement is
 only 2,048 nodes and 8,192 edges: one warmup, three recorded calls, one compute
 thread. This command builds, packages and tests the reference, including a bound
 graph store. Windows additionally requires `--packages` as described below.
+The Windows C++ test host links the checked generated-C objects with compiler
+builtins from the same installed Zig toolchain; MSVC's linker does not supply
+these helpers. This runtime is linked into the test executable, not the plugin.
 
 The resulting bundle is `external-output/installed/networkit.zovaext`. It must
 be explicitly trusted and selected with Zova's normal create/open extension

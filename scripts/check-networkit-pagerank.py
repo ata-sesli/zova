@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import sqlite3
 import subprocess
 import sys
@@ -19,6 +20,19 @@ ROOT = Path(__file__).resolve().parent.parent
 def run(command, env, cwd=ROOT):
     print("+ " + " ".join(map(str, command)), flush=True)
     subprocess.run(list(map(str, command)), env=env, cwd=cwd, check=True)
+
+
+def build_windows_compiler_runtime(out, env):
+    # zig cc supplies builtins when linking; MSVC's link.exe does not.
+    zig_env = subprocess.check_output(["zig", "env"], env=env, text=True)
+    lib_dir = re.search(r'\.lib_dir\s*=\s*("(?:[^"\\]|\\.)*")', zig_env)
+    if not lib_dir:
+        raise RuntimeError("could not determine Zig lib_dir")
+    source = Path(json.loads(lib_dir.group(1))) / "compiler_rt.zig"
+    runtime = out / "compiler_rt.lib"
+    run(["zig", "build-lib", source, "-target", "x86_64-windows-msvc",
+         "-O", "ReleaseFast", f"-femit-bin={runtime}"], env)
+    return runtime
 
 
 def main():
@@ -46,14 +60,21 @@ def main():
     run(["zig", "build", "install", "c-abi", "-Doptimize=ReleaseSafe", "-j2", "--summary", "all",
          "--cache-dir", env["ZIG_LOCAL_CACHE_DIR"], "--prefix", host], env)
     library = host / "lib/libzova_c.a"
+    runtime = None
     if packages:
         library = out / ("zova_c.lib" if system == "Windows" else "libzova_c.a")
         run(["zig", "ar", "rcs", library, packages / "zova.o", packages / "sqlite.o"], env)
+        if system == "Windows":
+            # Keep the checked generated-C objects and add the matching runtime
+            # as a separate library, rather than nesting an archive inside one.
+            runtime = build_windows_compiler_runtime(out, env)
     print("2/4: Build pinned NetworKit PageRank subset with two jobs", flush=True)
     build = out / "build"
     configure = ["cmake", "-S", ROOT / "examples/networkit-pagerank", "-B", build,
                  "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", f"-DZOVA_C_ABI_LIBRARY={library}",
                  f"-DFETCHCONTENT_BASE_DIR={out / 'dependencies'}"]
+    if runtime:
+        configure.append(f"-DZOVA_COMPILER_RT_LIBRARY={runtime}")
     if system == "Darwin":
         omp = Path(subprocess.check_output(["brew", "--prefix", "libomp"], text=True).strip())
         configure += [f"-DOpenMP_CXX_FLAGS=-Xpreprocessor -fopenmp -I{omp / 'include'}",
