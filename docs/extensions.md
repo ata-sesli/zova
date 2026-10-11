@@ -979,7 +979,9 @@ remain in 1.1.0.
 ## Transactional vector maintenance (development format 12)
 
 Development format 12 introduces source-local vector tracking for #136.
-USearch's algorithm and persistent generation representation remain #141.
+The [USearch reference](../examples/usearch-hnsw/README.md) implements #141's
+persistent HNSW bases, automatic snapshot-local reconciliation, and atomic batch
+refresh through these documented services. Core exact search remains unchanged.
 This work does not bump package or application ABI versions.
 
 ## Authoring interface

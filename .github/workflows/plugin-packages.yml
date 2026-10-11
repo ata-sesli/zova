@@ -45,3 +45,5 @@ jobs:
         run: python -m unittest scripts/tests/test_networkit_pagerank_compiler.py
       - name: NetworKit PageRank reference and native binding consumers
         run: python scripts/check-networkit-pagerank.py "${{ runner.temp }}/networkit-pagerank" --packages "${{ runner.temp }}/plugin-packages"
+      - name: USearch persistent incremental HNSW and native binding consumers
+        run: python scripts/check-usearch-hnsw.py "${{ runner.temp }}/usearch-hnsw" --packages "${{ runner.temp }}/plugin-packages"
