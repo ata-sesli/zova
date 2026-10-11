@@ -604,12 +604,12 @@ This section describes the API included in 1.0.0, subject to the host and bindin
 
 The installed `_zova_extensions.version` value records the data contract that
 last completed installation or upgrade. The loaded manifest's `version` is the
-code release and its target data contract. These are deliberately coupled: even
+code release and, for legacy descriptors, its target data contract. These are deliberately coupled: even
 a code-only version change needs an explicit no-op upgrade hook. This avoids
 guessing whether a new binary understands old storage. No new metadata columns
 or Zova file-format change are required.
 
-Normal open still requires an exact installed/loaded version match. It never
+Legacy normal open requires an exact installed/loaded version match. It never
 upgrades, drops, or reinstalls extension data. To upgrade, build and explicitly
 trust the target bundle, then run:
 
@@ -653,6 +653,56 @@ trusted-bundle open request, with zero flags) and
 The maintenance open validates the current core/file format but intentionally
 does not run installed extension hooks. It is not a normal application open.
 Existing high-level bindings are unchanged.
+
+### Opt-in code/data compatibility
+
+The current development host supports `ZOVA_PLUGIN_HAS_DATA_COMPATIBILITY_V1`
+without changing format 12 or installed metadata. Legacy descriptors and bundled
+`trgm` keep the exact-version behavior above. A code-only update may instead
+declare explicitly that it understands the installed data, with no upgrade hook
+and no metadata writes on open.
+
+Return a `zova_plugin_compatibility_descriptor_v1` from the same v1 entrypoint:
+
+```c
+static const zova_plugin_compatibility_descriptor_v1 plugin = {
+    {{sizeof(zova_plugin_compatibility_descriptor_v1), ZOVA_PLUGIN_ABI_V1,
+      ZOVA_PLUGIN_HAS_DATA_COMPATIBILITY_V1,
+      "example", "3.1.0", "_zova_ext_example_", "1.0.0", "",
+      install, check, drop, register_sql}, NULL, NULL},
+    "1.0.0", "1.0.0,2.0.0"
+};
+```
+
+Here `base.base.version` and the trusted bundle manifest identify code **3.1.0**.
+`data_version` is the installation/upgrade target **1.0.0**. The comma-separated
+list accepts data **1.0.0** and **2.0.0** exactly. All data versions must be
+canonical `major.minor.patch` strings; whitespace, ranges, empty entries, or a
+missing target are invalid. The list is limited to 2048 bytes. Descriptor strings
+remain immutable and library-owned until unload. The unused upgrade fields must
+be null; old hosts reject the new flag rather than misinterpret the descriptor.
+
+With `ZOVA_PLUGIN_HAS_UPGRADE_V1` also set, the embedded `from_version` and
+`upgrade` declare one forward **data** path to `data_version`, not to the code
+version. A source version need not be accepted for normal use if the upgrade
+hook can transform it. Equal versions and data downgrades remain unsupported.
+An older code binary may open newer data only when its explicit list accepts it;
+that does not downgrade or rewrite the data. ABI requirements are independently
+validated against the host; acceptance cannot override an incompatible ABI.
+
+Native Zig authors use `Registry.compatibilities` entries with `name`,
+`data_version`, and `accepted_data_versions`, while `Manifest.version` remains
+the code identity. `Registry.upgrades` paths then refer to data versions. The
+legacy native `Extension` descriptor is not enlarged. Registration uses the
+visible data version to select callback generations after transaction rollback.
+
+No migration is needed: existing installed version text is preserved and must
+be explicitly listed to be accepted. Normal opens never infer compatibility or
+invoke upgrades. A mismatch remains `ExtensionIncompatible` /
+`ZOVA_EXTENSION_INCOMPATIBLE`. Inspect installed extension info for the stored
+version, the trusted bundle for code/ABI identity, and its descriptor for the
+accepted/target data versions. Backup/restore carries installed data metadata,
+not executable code; supply an explicitly compatible registry when restoring.
 
 Backups/restores preserve the installed version and upgraded data; verification
 needs the matching code. Salvage never invokes an upgrade hook: it uses an

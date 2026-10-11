@@ -109,7 +109,7 @@ pub fn build(b: *std.Build) void {
 
     var dynamic_extension_fixture: ?*std.Build.Step.Compile = null;
     const plugin_fixture_options = b.addOptions();
-    for ([_][]const u8{ "c", "cpp", "upgrade", "services_c", "services_cpp" }) |language| {
+    for ([_][]const u8{ "c", "cpp", "upgrade", "services_c", "services_cpp", "compatibility_c", "compatibility_cpp", "compatibility_upgrade" }) |language| {
         const option_name = b.fmt("plugin_{s}_fixture", .{language});
         if (supports_dynamic_extension_fixture) {
             const fixture = b.addLibrary(.{
@@ -120,7 +120,7 @@ pub fn build(b: *std.Build) void {
             fixture.root_module.addIncludePath(b.path("include"));
             fixture.root_module.addCSourceFile(.{
                 .file = b.path(if (std.mem.endsWith(u8, language, "cpp")) "tests/plugin_fixture.cpp" else "tests/plugin_fixture.c"),
-                .flags = if (std.mem.eql(u8, language, "services_cpp")) &.{ "-std=c++17", "-DZOVA_SERVICES_FIXTURE" } else if (std.mem.eql(u8, language, "services_c")) &.{ "-std=c11", "-DZOVA_SERVICES_FIXTURE" } else if (std.mem.eql(u8, language, "cpp")) &.{"-std=c++17"} else if (std.mem.eql(u8, language, "upgrade")) &.{ "-std=c11", "-DZOVA_UPGRADE_FIXTURE" } else &.{"-std=c11"},
+                .flags = if (std.mem.eql(u8, language, "compatibility_cpp")) &.{ "-std=c++17", "-DZOVA_COMPATIBILITY_FIXTURE" } else if (std.mem.eql(u8, language, "compatibility_c")) &.{ "-std=c11", "-DZOVA_COMPATIBILITY_FIXTURE" } else if (std.mem.eql(u8, language, "compatibility_upgrade")) &.{ "-std=c11", "-DZOVA_COMPATIBILITY_FIXTURE", "-DZOVA_UPGRADE_FIXTURE" } else if (std.mem.eql(u8, language, "services_cpp")) &.{ "-std=c++17", "-DZOVA_SERVICES_FIXTURE" } else if (std.mem.eql(u8, language, "services_c")) &.{ "-std=c11", "-DZOVA_SERVICES_FIXTURE" } else if (std.mem.eql(u8, language, "cpp")) &.{"-std=c++17"} else if (std.mem.eql(u8, language, "upgrade")) &.{ "-std=c11", "-DZOVA_UPGRADE_FIXTURE" } else &.{"-std=c11"},
             });
             plugin_fixture_options.addOptionPath(option_name, fixture.getEmittedBin());
         } else {

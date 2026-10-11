@@ -18,6 +18,7 @@ pub const value_float = api.value_float;
 pub const value_text = api.value_text;
 pub const value_blob = api.value_blob;
 pub const has_upgrade = api.has_upgrade;
+pub const has_data_compatibility = api.has_data_compatibility;
 
 pub const entrypoint = api.entrypoint;
 pub const Hook = api.Hook;
@@ -31,8 +32,9 @@ pub const DiagnosticsService = api.DiagnosticsService;
 pub const Client = api.Client;
 pub const Descriptor = api.Descriptor;
 pub const UpgradeDescriptor = api.UpgradeDescriptor;
+pub const CompatibilityDescriptor = api.CompatibilityDescriptor;
 pub const Phase = enum { install, check, drop, register_sql };
-const supported_flags = has_upgrade | requires_query | requires_diagnostics | api.requires_data | api.requires_storage | api.requires_operations | api.requires_vector_maintenance;
+const supported_flags = has_upgrade | has_data_compatibility | requires_query | requires_diagnostics | api.requires_data | api.requires_storage | api.requires_operations | api.requires_vector_maintenance;
 const query_service: QueryService = .{ .query = query };
 const data_service: api.DataService = .{ .read = readData };
 const storage_service: api.StorageService = .{ .execute = storage };
@@ -59,6 +61,7 @@ pub fn serviceHost() ServiceHost {
 }
 
 pub fn upgradePath(d: *const Descriptor) extension.Error!?extension.Upgrade {
+    if (d.struct_size < @sizeOf(Descriptor) or d.abi_version != 1) return error.ExtensionIncompatible;
     if (d.flags & ~supported_flags != 0) return error.ExtensionIncompatible;
     if (d.flags & has_upgrade == 0) return null;
     if (d.struct_size < @sizeOf(UpgradeDescriptor)) return error.ExtensionIncompatible;
@@ -66,9 +69,25 @@ pub fn upgradePath(d: *const Descriptor) extension.Error!?extension.Upgrade {
     return .{
         .name = try string(d.name, 64),
         .from_version = try string(tail.from_version, 64),
-        .to_version = try string(d.version, 64),
+        .to_version = if (try compatibilityPath(d)) |item| item.data_version else try string(d.version, 64),
         .plugin_hook = tail.upgrade orelse return error.ExtensionInvalid,
     };
+}
+
+pub fn compatibilityPath(d: *const Descriptor) extension.Error!?extension.Compatibility {
+    if (d.struct_size < @sizeOf(Descriptor) or d.abi_version != 1) return error.ExtensionIncompatible;
+    if (d.flags & ~supported_flags != 0) return error.ExtensionIncompatible;
+    if (d.flags & has_data_compatibility == 0) return null;
+    if (d.struct_size < @sizeOf(CompatibilityDescriptor)) return error.ExtensionIncompatible;
+    const tail: *const CompatibilityDescriptor = @ptrCast(d);
+    if (d.flags & has_upgrade == 0 and (tail.base.from_version != null or tail.base.upgrade != null)) return error.ExtensionInvalid;
+    const item: extension.Compatibility = .{
+        .name = try string(d.name, 64),
+        .data_version = try string(tail.data_version, 64),
+        .accepted_data_versions = try string(tail.accepted_data_versions, 2048),
+    };
+    try item.validate();
+    return item;
 }
 
 fn string(ptr: ?[*:0]const u8, max: usize) extension.Error![]const u8 {
@@ -78,11 +97,19 @@ fn string(ptr: ?[*:0]const u8, max: usize) extension.Error![]const u8 {
 }
 
 pub fn validate(ptr: ?*const Descriptor) extension.Error!extension.Extension {
+    const item = try validateBase(ptr);
+    _ = try compatibilityPath(ptr.?);
+    return item;
+}
+
+/// Validate an already-copied base without dereferencing its optional tails.
+pub fn validateBase(ptr: ?*const Descriptor) extension.Error!extension.Extension {
     const d = ptr orelse return error.ExtensionInvalid;
     // Read only the fixed two-u32 prefix until size/version are accepted.
     if (d.struct_size < @sizeOf(Descriptor) or d.abi_version != 1) return error.ExtensionIncompatible;
     if (d.flags & ~supported_flags != 0) return error.ExtensionIncompatible;
     if (d.flags & has_upgrade != 0 and d.struct_size < @sizeOf(UpgradeDescriptor)) return error.ExtensionIncompatible;
+    if (d.flags & has_data_compatibility != 0 and d.struct_size < @sizeOf(CompatibilityDescriptor)) return error.ExtensionIncompatible;
     const manifest: extension.Manifest = .{
         .name = try string(d.name, 64),
         .version = try string(d.version, 64),
@@ -99,6 +126,10 @@ fn unavailable(_: *sqlite.Database, _: extension.Manifest) extension.Error!void 
 }
 
 pub fn invoke(d: Descriptor, phase: Phase, db: *sqlite.Database) extension.Error!void {
+    return invokeVersion(d, phase, db, std.mem.span(d.version.?));
+}
+
+pub fn invokeVersion(d: Descriptor, phase: Phase, db: *sqlite.Database, data_version: []const u8) extension.Error!void {
     const hook = switch (phase) {
         .install => d.install,
         .check => d.check,
@@ -109,7 +140,7 @@ pub fn invoke(d: Descriptor, phase: Phase, db: *sqlite.Database) extension.Error
         const scope = try operations.begin(db, std.mem.span(d.name.?));
         var success = false;
         defer scope.finish(success);
-        try invokeContextHook(hook, db, std.mem.span(d.storage_prefix.?), std.mem.span(d.version.?));
+        try invokeContextHook(hook, db, std.mem.span(d.storage_prefix.?), data_version);
         success = true;
         return;
     }

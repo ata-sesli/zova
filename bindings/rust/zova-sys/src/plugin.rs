@@ -12,6 +12,7 @@ pub const ZOVA_PLUGIN_UNSUPPORTED: i32 = 4;
 pub const ZOVA_PLUGIN_LIMIT: i32 = 5;
 pub const ZOVA_PLUGIN_CANCELED: i32 = 6;
 pub const ZOVA_PLUGIN_HAS_UPGRADE_V1: u64 = 1;
+pub const ZOVA_PLUGIN_HAS_DATA_COMPATIBILITY_V1: u64 = 128;
 pub const ZOVA_PLUGIN_REQUIRES_QUERY_V1: u64 = 2;
 pub const ZOVA_PLUGIN_REQUIRES_DIAGNOSTICS_V1: u64 = 4;
 pub const ZOVA_PLUGIN_SERVICE_QUERY: u32 = 1;
@@ -145,6 +146,16 @@ pub struct zova_plugin_upgrade_descriptor_v1 {
     pub base: zova_plugin_descriptor_v1,
     pub from_version: *const c_char,
     pub upgrade: zova_plugin_hook_v1,
+}
+
+/// Opt-in code/data compatibility. Strings are immutable until library unload.
+/// The upgrade prefix is present even when HAS_UPGRADE_V1 is not set.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct zova_plugin_compatibility_descriptor_v1 {
+    pub base: zova_plugin_upgrade_descriptor_v1,
+    pub data_version: *const c_char,
+    pub accepted_data_versions: *const c_char,
 }
 
 #[repr(C)]

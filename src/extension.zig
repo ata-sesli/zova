@@ -85,15 +85,51 @@ pub const Extension = struct {
     salvage: ?SalvageHook = null,
 };
 
+/// Separate from Extension so the legacy native descriptor layout is unchanged.
+pub const Compatibility = struct {
+    name: []const u8,
+    data_version: []const u8,
+    accepted_data_versions: []const u8,
+
+    pub fn accepts(self: Compatibility, version: []const u8) bool {
+        var versions = std.mem.splitScalar(u8, self.accepted_data_versions, ',');
+        while (versions.next()) |candidate| if (std.mem.eql(u8, candidate, version)) return true;
+        return false;
+    }
+
+    pub fn validate(self: Compatibility) Error!void {
+        try validateName(self.name);
+        _ = try parseAbiVersion(self.data_version);
+        if (self.accepted_data_versions.len == 0 or self.accepted_data_versions.len > 2048) return error.ExtensionInvalid;
+        var versions = std.mem.splitScalar(u8, self.accepted_data_versions, ',');
+        while (versions.next()) |candidate| _ = try parseAbiVersion(candidate);
+        if (!self.accepts(self.data_version)) return error.ExtensionInvalid;
+    }
+};
+
 pub const Registry = struct {
     extensions: []const Extension = &.{},
     plugins: []const plugin.Descriptor = &.{},
     upgrades: []const Upgrade = &.{},
+    compatibilities: []const Compatibility = &.{},
+
+    pub fn compatibility(self: Registry, name: []const u8) ?Compatibility {
+        for (self.compatibilities) |item| if (std.mem.eql(u8, item.name, name)) return item;
+        return null;
+    }
+
+    pub fn dataVersion(self: Registry, manifest: Manifest) []const u8 {
+        return if (self.compatibility(manifest.name)) |item| item.data_version else manifest.version;
+    }
 
     fn invoke(self: Registry, item: Extension, db: *sqlite.Database, phase: plugin.Phase) Error!void {
+        return self.invokeVersion(item, db, phase, self.dataVersion(item.manifest));
+    }
+
+    fn invokeVersion(self: Registry, item: Extension, db: *sqlite.Database, phase: plugin.Phase, data_version: []const u8) Error!void {
         for (self.plugins) |descriptor| {
             if (std.mem.eql(u8, item.manifest.name, std.mem.span(descriptor.name.?))) {
-                return plugin.invoke(descriptor, phase, db);
+                return plugin.invokeVersion(descriptor, phase, db, data_version);
             }
         }
         switch (phase) {
@@ -120,9 +156,14 @@ pub const Registry = struct {
     }
 
     pub fn validate(self: Registry) Error!void {
+        for (self.compatibilities, 0..) |item, i| {
+            try item.validate();
+            _ = self.find(item.name) orelse return error.ExtensionUnavailable;
+            for (self.compatibilities[0..i]) |previous| if (std.mem.eql(u8, previous.name, item.name)) return error.ExtensionInvalid;
+        }
         for (self.upgrades, 0..) |path, i| {
             const target = self.find(path.name) orelse return error.ExtensionUnavailable;
-            if (!std.mem.eql(u8, target.manifest.version, path.to_version)) return error.ExtensionIncompatible;
+            if (!std.mem.eql(u8, self.dataVersion(target.manifest), path.to_version)) return error.ExtensionIncompatible;
             try validateUpgradeDirection(path.from_version, path.to_version);
             if ((path.hook == null) == (path.plugin_hook == null)) return error.ExtensionInvalid;
             for (self.upgrades[0..i]) |previous| {
@@ -130,9 +171,11 @@ pub const Registry = struct {
             }
         }
         for (self.plugins, 0..) |*descriptor, i| {
-            const item = try plugin.validate(descriptor);
+            const item = try plugin.validateBase(descriptor);
             const registered = self.find(item.manifest.name) orelse return error.ExtensionInvalid;
             if (!std.mem.eql(u8, registered.manifest.storage_prefix, item.manifest.storage_prefix)) return error.ExtensionInvalid;
+            if (!std.mem.eql(u8, registered.manifest.version, item.manifest.version) or !std.mem.eql(u8, registered.manifest.zova_abi_min, item.manifest.zova_abi_min)) return error.ExtensionInvalid;
+            if ((descriptor.flags & plugin.has_data_compatibility != 0) != (self.compatibility(item.manifest.name) != null)) return error.ExtensionInvalid;
             for (self.plugins[0..i]) |previous| {
                 if (std.mem.eql(u8, std.mem.span(previous.name.?), item.manifest.name)) return error.ExtensionInvalid;
             }
@@ -268,7 +311,9 @@ pub fn install(db: *sqlite.Database, registry: Registry, name: []const u8, valid
     };
 
     try registry.invoke(extension, db, .install);
-    try insertInstalled(db, extension.manifest);
+    var installed_manifest = extension.manifest;
+    installed_manifest.version = registry.dataVersion(extension.manifest);
+    try insertInstalled(db, installed_manifest);
     try registry.invoke(extension, db, .register_sql);
     try validateNewSchemaObjectsOwnedBy(std.heap.c_allocator, db, before_objects.names, extension.manifest.storage_prefix);
     try validateInstalledState(std.heap.c_allocator, db);
@@ -318,7 +363,7 @@ pub fn upgrade(allocator: std.mem.Allocator, db: *sqlite.Database, registry: Reg
         validateManifest(source_manifest) catch return error.ExtensionIncompatible;
     }
     if (!std.mem.eql(u8, target.manifest.storage_prefix, installed.storage_prefix)) return error.ExtensionIncompatible;
-    try validateUpgradeDirection(installed.version, target.manifest.version);
+    try validateUpgradeDirection(installed.version, registry.dataVersion(target.manifest));
     const path = for (registry.upgrades) |candidate| {
         if (std.mem.eql(u8, candidate.name, name) and std.mem.eql(u8, candidate.from_version, installed.version)) break candidate;
     } else return error.ExtensionIncompatible;
@@ -336,7 +381,7 @@ pub fn upgrade(allocator: std.mem.Allocator, db: *sqlite.Database, registry: Reg
     if (validate_core) |hook| hook(db) catch return error.ExtensionInvalid;
     var stmt = try db.prepare("UPDATE _zova_extensions SET version=?, zova_abi_min=?, capabilities=?, manifest_json=? WHERE name=?");
     defer stmt.deinit();
-    try stmt.bindText(1, target.manifest.version);
+    try stmt.bindText(1, registry.dataVersion(target.manifest));
     try stmt.bindText(2, target.manifest.zova_abi_min);
     try stmt.bindText(3, target.manifest.capabilities);
     try stmt.bindText(4, target.manifest.manifest_json);
@@ -356,7 +401,7 @@ pub fn drop(db: *sqlite.Database, registry: Registry, name: []const u8, validate
         mutable.deinit(std.heap.c_allocator);
     }
     const extension = registry.find(name) orelse return error.ExtensionUnavailable;
-    try ensureManifestMatchesInstalled(extension.manifest, installed);
+    try ensureManifestMatchesInstalled(registry, extension.manifest, installed);
     const sql_scope = try plugin.operations.begin(db, name);
     defer sql_scope.finish(false);
 
@@ -389,7 +434,7 @@ pub fn check(db: *sqlite.Database, registry: Registry, name: []const u8) Error!v
         mutable.deinit(std.heap.c_allocator);
     }
     const extension = registry.find(name) orelse return error.ExtensionUnavailable;
-    try ensureManifestMatchesInstalled(extension.manifest, installed);
+    try ensureManifestMatchesInstalled(registry, extension.manifest, installed);
     try registry.invoke(extension, db, .check);
 }
 
@@ -402,8 +447,8 @@ pub fn registerSqlForInstalledExtension(db: *sqlite.Database, registry: Registry
         mutable.deinit(std.heap.c_allocator);
     }
     const extension = registry.find(name) orelse return error.ExtensionUnavailable;
-    try ensureManifestMatchesInstalled(extension.manifest, installed);
-    try registry.invoke(extension, db, .register_sql);
+    try ensureManifestMatchesInstalled(registry, extension.manifest, installed);
+    try registry.invokeVersion(extension, db, .register_sql, installed.version);
 }
 
 pub fn checkAll(db: *sqlite.Database, registry: Registry) Error!void {
@@ -413,7 +458,7 @@ pub fn checkAll(db: *sqlite.Database, registry: Registry) Error!void {
     defer list.deinit(std.heap.c_allocator);
     for (list.items) |item| {
         const extension = registry.find(item.name) orelse return error.ExtensionUnavailable;
-        try ensureManifestMatchesInstalled(extension.manifest, item);
+        try ensureManifestMatchesInstalled(registry, extension.manifest, item);
         try registry.invoke(extension, db, .check);
     }
 }
@@ -425,8 +470,8 @@ pub fn registerSqlForInstalled(db: *sqlite.Database, registry: Registry) Error!v
     defer list.deinit(std.heap.c_allocator);
     for (list.items) |item| {
         const extension = registry.find(item.name) orelse return error.ExtensionUnavailable;
-        try ensureManifestMatchesInstalled(extension.manifest, item);
-        try registry.invoke(extension, db, .register_sql);
+        try ensureManifestMatchesInstalled(registry, extension.manifest, item);
+        try registry.invokeVersion(extension, db, .register_sql, item.version);
     }
 }
 
@@ -527,7 +572,7 @@ pub fn salvageInstalled(
             total.skipped_private_objects += private_objects;
             continue;
         };
-        ensureManifestMatchesInstalled(extension.manifest, item) catch {
+        ensureManifestMatchesInstalled(registry, extension.manifest, item) catch {
             total.skipped_extensions += 1;
             total.skipped_private_objects += private_objects;
             continue;
@@ -545,7 +590,7 @@ pub fn salvageInstalled(
                 .destination = null,
                 .mode = .plan,
             }, extension.manifest),
-            .copy => try runCopySalvageHook(allocator, source, destination orelse return error.ExtensionInvalid, extension, hook),
+            .copy => try runCopySalvageHook(allocator, source, destination orelse return error.ExtensionInvalid, extension, hook, item.version),
         };
         total.add(result);
     }
@@ -558,6 +603,7 @@ fn runCopySalvageHook(
     destination: *sqlite.Database,
     extension: Extension,
     hook: SalvageHook,
+    data_version: []const u8,
 ) Error!SalvageResult {
     var before_objects = try listSchemaObjects(allocator, destination);
     defer before_objects.deinit(allocator);
@@ -579,7 +625,9 @@ fn runCopySalvageHook(
     try validateNewSchemaObjectsOwnedBy(allocator, destination, before_objects.names, extension.manifest.storage_prefix);
     if (result.installed_in_destination) {
         if (!try isInstalled(destination, extension.manifest.name)) {
-            try insertInstalled(destination, extension.manifest);
+            var installed_manifest = extension.manifest;
+            installed_manifest.version = data_version;
+            try insertInstalled(destination, installed_manifest);
         }
         try validateInstalledState(allocator, destination);
     } else if (result.copied_private_objects != 0) {
@@ -739,12 +787,21 @@ fn isSqliteInternalObject(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "sqlite_");
 }
 
-fn ensureManifestMatchesInstalled(manifest: Manifest, installed: InstalledInfo) Error!void {
+fn ensureManifestMatchesInstalled(registry: Registry, manifest: Manifest, installed: InstalledInfo) Error!void {
     try validateManifest(manifest);
     if (!std.mem.eql(u8, manifest.name, installed.name)) return error.ExtensionInvalid;
-    if (!std.mem.eql(u8, manifest.version, installed.version)) return error.ExtensionIncompatible;
+    if (registry.compatibility(manifest.name)) |item| {
+        if (!item.accepts(installed.version)) return error.ExtensionIncompatible;
+        if (!abiMinimumMatchesInstalled(manifest.zova_abi_min, installed.zova_abi_min)) {
+            var source_manifest = manifest;
+            source_manifest.zova_abi_min = installed.zova_abi_min;
+            validateManifest(source_manifest) catch return error.ExtensionIncompatible;
+        }
+    } else {
+        if (!std.mem.eql(u8, manifest.version, installed.version)) return error.ExtensionIncompatible;
+        if (!abiMinimumMatchesInstalled(manifest.zova_abi_min, installed.zova_abi_min)) return error.ExtensionIncompatible;
+    }
     if (!std.mem.eql(u8, manifest.storage_prefix, installed.storage_prefix)) return error.ExtensionInvalid;
-    if (!abiMinimumMatchesInstalled(manifest.zova_abi_min, installed.zova_abi_min)) return error.ExtensionIncompatible;
 }
 
 fn abiMinimumMatchesInstalled(current: []const u8, installed: []const u8) bool {

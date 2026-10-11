@@ -446,6 +446,49 @@ test "extension_plugin failed lifecycle discards callbacks and successful upgrad
     try std.testing.expectEqual(@as(usize, 4), operation_destroys);
 }
 
+test "extension_plugin compatibility registrations use data versions across code changes and rollback" {
+    operation_destroys = 0;
+    var db = try @import("zova.zig").Database.createMemory();
+    defer db.deinit();
+    var d: plugin.CompatibilityDescriptor = .{ .base = .{ .base = descriptor(), .from_version = null, .upgrade = null }, .data_version = "1.0.0", .accepted_data_versions = "1.0.0" };
+    d.base.base.struct_size = @sizeOf(plugin.CompatibilityDescriptor);
+    d.base.base.flags = plugin.has_data_compatibility;
+    d.base.base.version = "3.1.0";
+    d.base.base.register_sql = registerOwned;
+    const item = try plugin.validate(&d.base.base);
+    const compatibility = (try plugin.compatibilityPath(&d.base.base)).?;
+    const initial: extension.Registry = .{ .extensions = &.{item}, .plugins = &.{d.base.base}, .compatibilities = &.{compatibility} };
+    try extension.install(&db.sqlite_db, initial, "c_test", null);
+    try std.testing.expectEqual(@as(i64, 42), try scalarValue(&db.sqlite_db, "select zova_c_test_owned(41)"));
+
+    var next = d;
+    next.base.base.version = "3.2.0";
+    next.base.base.register_sql = registerOwnedUpgrade;
+    next.base.base.flags |= plugin.has_upgrade;
+    next.base.from_version = "1.0.0";
+    next.base.upgrade = outOfMemory;
+    next.data_version = "2.0.0";
+    next.accepted_data_versions = "2.0.0";
+    const next_item = try plugin.validate(&next.base.base);
+    const next_compatibility = (try plugin.compatibilityPath(&next.base.base)).?;
+    // The native no-op path isolates callback/metadata behavior, not algorithm changes.
+    const upgraded: extension.Registry = .{ .extensions = &.{next_item}, .plugins = &.{next.base.base}, .compatibilities = &.{next_compatibility}, .upgrades = &.{.{ .name = "c_test", .from_version = "1.0.0", .to_version = "2.0.0", .hook = noUpgrade }} };
+    try std.testing.expectError(error.ExtensionInvalid, extension.upgrade(std.testing.allocator, &db.sqlite_db, upgraded, "c_test", rejectCore));
+    try std.testing.expectEqual(@as(i64, 42), try scalarValue(&db.sqlite_db, "select zova_c_test_owned(41)"));
+    try db.begin();
+    try extension.upgrade(std.testing.allocator, &db.sqlite_db, upgraded, "c_test", null);
+    try std.testing.expectEqual(@as(i64, 43), try scalarValue(&db.sqlite_db, "select zova_c_test_owned(41)"));
+    try db.rollback();
+    try std.testing.expectEqual(@as(i64, 42), try scalarValue(&db.sqlite_db, "select zova_c_test_owned(41)"));
+    // A code-only re-registration accepting the older data must tag that visible
+    // version, not the preferred installation target or the new code version.
+    next.accepted_data_versions = "1.0.0,2.0.0";
+    const accepted = (try plugin.compatibilityPath(&next.base.base)).?;
+    const code_only: extension.Registry = .{ .extensions = &.{next_item}, .plugins = &.{next.base.base}, .compatibilities = &.{accepted} };
+    try extension.registerSqlForInstalled(&db.sqlite_db, code_only);
+    try std.testing.expectEqual(@as(i64, 43), try scalarValue(&db.sqlite_db, "select zova_c_test_owned(41)"));
+}
+
 fn writeScalar(base: *const plugin.Host, raw: ?*anyopaque, _: ?*anyopaque, call: *const data_api.OperationCall) callconv(.c) i32 {
     const client = data_api.Client{ .host = base, .connection = raw };
     const sql = "insert into main._zova_ext_c_test_rows values (?1)";
@@ -1110,79 +1153,91 @@ test "extension_plugin trusted C upgrade through application ABI preserves rows"
     const api = @import("c_api_internal.zig");
     const io = std.Io.Threaded.global_single_threaded.io();
     const allocator = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var paths: [2][:0]u8 = undefined;
-    var initialized: usize = 0;
-    defer for (paths[0..initialized]) |path| allocator.free(path);
-    for ([_][]const u8{ options.plugin_c_fixture, options.plugin_upgrade_fixture }, 0..) |source, i| {
-        const directory = if (i == 0) "old.zovaext" else "new.zovaext";
-        const library_name = try fixtureLibraryName(allocator, "plugin");
-        defer allocator.free(library_name);
-        try tmp.dir.createDir(io, directory, .default_dir);
-        var dir = try tmp.dir.openDir(io, directory, .{});
-        defer dir.close(io);
-        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, source, allocator, .limited(16 * 1024 * 1024));
-        defer allocator.free(bytes);
-        try dir.writeFile(io, .{ .sub_path = library_name, .data = bytes });
-        const manifest = try std.fmt.allocPrint(allocator, "{{\"name\":\"c_test\",\"version\":\"{s}\",\"storage_prefix\":\"_zova_ext_c_test_\",\"zova_abi_min\":\"1.0.0\",\"capabilities\":\"\",\"library\":\"{s}\",\"entrypoint\":\"zova_plugin_entry_v1\"}}", .{ if (i == 0) "1.0.0" else "2.0.0", library_name });
-        defer allocator.free(manifest);
-        try dir.writeFile(io, .{ .sub_path = "extension.json", .data = manifest });
-        paths[i] = try std.fmt.allocPrintSentinel(allocator, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, directory }, 0);
-        initialized += 1;
+    for ([_]struct { source: []const u8, code: []const u8, needs_upgrade: bool }{
+        .{ .source = options.plugin_upgrade_fixture, .code = "2.0.0", .needs_upgrade = true },
+        .{ .source = options.plugin_compatibility_upgrade_fixture, .code = "3.2.0", .needs_upgrade = true },
+        .{ .source = options.plugin_compatibility_c_fixture, .code = "3.1.0", .needs_upgrade = false },
+        .{ .source = options.plugin_compatibility_cpp_fixture, .code = "3.1.0", .needs_upgrade = false },
+    }) |target_bundle| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var paths: [2][:0]u8 = undefined;
+        var initialized: usize = 0;
+        defer for (paths[0..initialized]) |path| allocator.free(path);
+        for ([_][]const u8{ options.plugin_c_fixture, target_bundle.source }, 0..) |source, i| {
+            const directory = if (i == 0) "old.zovaext" else "new.zovaext";
+            const library_name = try fixtureLibraryName(allocator, "plugin");
+            defer allocator.free(library_name);
+            try tmp.dir.createDir(io, directory, .default_dir);
+            var dir = try tmp.dir.openDir(io, directory, .{});
+            defer dir.close(io);
+            const bytes = try std.Io.Dir.cwd().readFileAlloc(io, source, allocator, .limited(16 * 1024 * 1024));
+            defer allocator.free(bytes);
+            try dir.writeFile(io, .{ .sub_path = library_name, .data = bytes });
+            const manifest = try std.fmt.allocPrint(allocator, "{{\"name\":\"c_test\",\"version\":\"{s}\",\"storage_prefix\":\"_zova_ext_c_test_\",\"zova_abi_min\":\"1.0.0\",\"capabilities\":\"\",\"library\":\"{s}\",\"entrypoint\":\"zova_plugin_entry_v1\"}}", .{ if (i == 0) "1.0.0" else target_bundle.code, library_name });
+            defer allocator.free(manifest);
+            try dir.writeFile(io, .{ .sub_path = "extension.json", .data = manifest });
+            paths[i] = try std.fmt.allocPrintSentinel(allocator, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, directory }, 0);
+            initialized += 1;
+        }
+        const trust_path = try std.fmt.allocPrintSentinel(allocator, ".zig-cache/tmp/{s}/trusted.json", .{tmp.sub_path}, 0);
+        defer allocator.free(trust_path);
+        const db_path = try std.fmt.allocPrintSentinel(allocator, ".zig-cache/tmp/{s}/app.zova", .{tmp.sub_path}, 0);
+        defer allocator.free(db_path);
+        // Old fixture is a real persisted database, not a drop/reinstall simulation.
+        {
+            var bundle = try dynamic.LoadedBundle.load(allocator, paths[0]);
+            defer bundle.deinit();
+            var db = try @import("zova.zig").Database.createWithExtensions(db_path, bundle.registry());
+            defer db.deinit();
+            try db.installExtension("c_test");
+            try db.exec("INSERT INTO _zova_ext_c_test_data VALUES(42)");
+        }
+        var trusted = try dynamic.trustBundle(allocator, paths[1], .{ .path = trust_path });
+        defer trusted.deinit(allocator);
+        const bundle_paths = [_]?[*:0]const u8{paths[1].ptr};
+        var handle: ?*api.zova_database = null;
+        var req: api.zova_database_open_extensions_request = .{
+            .path = db_path.ptr,
+            .extension_bundle_paths = &bundle_paths,
+            .extension_bundle_count = 1,
+            .trust_store_path = trust_path.ptr,
+            .out_db = &handle,
+            .out_error_message = null,
+            .flags = 0,
+            .busy_timeout_ms = 0,
+        };
+        if (target_bundle.needs_upgrade) {
+            try std.testing.expectEqual(api.zova_status.EXTENSION_INCOMPATIBLE, api.zova_database_open_with_extensions(&req));
+            try std.testing.expect(handle == null);
+            req.flags = 1;
+            try std.testing.expectEqual(api.zova_status.INVALID_ARGUMENT, api.zova_database_open_for_extension_upgrade(&req));
+            req.flags = 0;
+            try std.testing.expectEqual(api.zova_status.OK, api.zova_database_open_for_extension_upgrade(&req));
+            try std.testing.expectEqual(api.zova_status.OK, api.zova_database_extension_upgrade(&.{ .db = handle, .name = "c_test" }));
+            try std.testing.expectEqual(api.zova_status.OK, api.zova_database_close(handle));
+            handle = null;
+        }
+        try std.testing.expectEqual(api.zova_status.OK, api.zova_database_open_with_extensions(&req));
+        defer _ = api.zova_database_close(handle);
+        var raw = try sqlite.Database.open(db_path);
+        defer raw.deinit();
+        var info = try extension.loadInfo(allocator, &raw, "c_test");
+        defer info.deinit(allocator);
+        try std.testing.expectEqualStrings(if (target_bundle.needs_upgrade) "2.0.0" else "1.0.0", info.version);
+        var stmt = try raw.prepare(if (target_bundle.needs_upgrade) "SELECT id, upgraded FROM _zova_ext_c_test_data" else "SELECT id, 9 FROM _zova_ext_c_test_data");
+        defer stmt.deinit();
+        try std.testing.expect(try stmt.step() == .row);
+        try std.testing.expectEqual(@as(i64, 42), stmt.columnInt64(0));
+        try std.testing.expectEqual(@as(i64, 9), stmt.columnInt64(1));
     }
-    const trust_path = try std.fmt.allocPrintSentinel(allocator, ".zig-cache/tmp/{s}/trusted.json", .{tmp.sub_path}, 0);
-    defer allocator.free(trust_path);
-    const db_path = try std.fmt.allocPrintSentinel(allocator, ".zig-cache/tmp/{s}/app.zova", .{tmp.sub_path}, 0);
-    defer allocator.free(db_path);
-    // Old fixture is a real persisted database, not a drop/reinstall simulation.
-    {
-        var bundle = try dynamic.LoadedBundle.load(allocator, paths[0]);
-        defer bundle.deinit();
-        var db = try @import("zova.zig").Database.createWithExtensions(db_path, bundle.registry());
-        defer db.deinit();
-        try db.installExtension("c_test");
-        try db.exec("INSERT INTO _zova_ext_c_test_data VALUES(42)");
-    }
-    var trusted = try dynamic.trustBundle(allocator, paths[1], .{ .path = trust_path });
-    defer trusted.deinit(allocator);
-    const bundle_paths = [_]?[*:0]const u8{paths[1].ptr};
-    var handle: ?*api.zova_database = null;
-    var req: api.zova_database_open_extensions_request = .{
-        .path = db_path.ptr,
-        .extension_bundle_paths = &bundle_paths,
-        .extension_bundle_count = 1,
-        .trust_store_path = trust_path.ptr,
-        .out_db = &handle,
-        .out_error_message = null,
-        .flags = 0,
-        .busy_timeout_ms = 0,
-    };
-    try std.testing.expectEqual(api.zova_status.EXTENSION_INCOMPATIBLE, api.zova_database_open_with_extensions(&req));
-    try std.testing.expect(handle == null);
-    req.flags = 1;
-    try std.testing.expectEqual(api.zova_status.INVALID_ARGUMENT, api.zova_database_open_for_extension_upgrade(&req));
-    req.flags = 0;
-    try std.testing.expectEqual(api.zova_status.OK, api.zova_database_open_for_extension_upgrade(&req));
-    try std.testing.expectEqual(api.zova_status.OK, api.zova_database_extension_upgrade(&.{ .db = handle, .name = "c_test" }));
-    try std.testing.expectEqual(api.zova_status.OK, api.zova_database_close(handle));
-    handle = null;
-    try std.testing.expectEqual(api.zova_status.OK, api.zova_database_open_with_extensions(&req));
-    defer _ = api.zova_database_close(handle);
-    var raw = try sqlite.Database.open(db_path);
-    defer raw.deinit();
-    var stmt = try raw.prepare("SELECT id, upgraded FROM _zova_ext_c_test_data");
-    defer stmt.deinit();
-    try std.testing.expect(try stmt.step() == .row);
-    try std.testing.expectEqual(@as(i64, 42), stmt.columnInt64(0));
-    try std.testing.expectEqual(@as(i64, 9), stmt.columnInt64(1));
 }
 
 test "extension_plugin C and C++ bundles load and dispatch through copied registries" {
     if (comptime !dynamic.supports_dynamic_loading) return error.SkipZigTest;
     const io = std.Io.Threaded.global_single_threaded.io();
     const allocator = std.testing.allocator;
-    for ([_][]const u8{ options.plugin_c_fixture, options.plugin_cpp_fixture, options.plugin_services_c_fixture, options.plugin_services_cpp_fixture, options.plugin_zig_fixture }) |path| {
+    for ([_][]const u8{ options.plugin_c_fixture, options.plugin_cpp_fixture, options.plugin_services_c_fixture, options.plugin_services_cpp_fixture, options.plugin_zig_fixture, options.plugin_compatibility_c_fixture, options.plugin_compatibility_cpp_fixture }) |path| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         const library_name = try fixtureLibraryName(allocator, "plugin");
@@ -1193,7 +1248,8 @@ test "extension_plugin C and C++ bundles load and dispatch through copied regist
         const library_sub_path = try std.fmt.allocPrint(allocator, "test.zovaext/{s}", .{library_name});
         defer allocator.free(library_sub_path);
         try tmp.dir.writeFile(io, .{ .sub_path = library_sub_path, .data = bytes });
-        const manifest = try std.fmt.allocPrint(allocator, "{{\"name\":\"c_test\",\"version\":\"1.0.0\",\"storage_prefix\":\"_zova_ext_c_test_\",\"zova_abi_min\":\"1.0.0\",\"capabilities\":\"\",\"library\":\"{s}\",\"entrypoint\":\"zova_plugin_entry_v1\"}}\n", .{library_name});
+        const compatible = std.mem.eql(u8, path, options.plugin_compatibility_c_fixture) or std.mem.eql(u8, path, options.plugin_compatibility_cpp_fixture);
+        const manifest = try std.fmt.allocPrint(allocator, "{{\"name\":\"c_test\",\"version\":\"{s}\",\"storage_prefix\":\"_zova_ext_c_test_\",\"zova_abi_min\":\"1.0.0\",\"capabilities\":\"\",\"library\":\"{s}\",\"entrypoint\":\"zova_plugin_entry_v1\"}}\n", .{ if (compatible) "3.1.0" else "1.0.0", library_name });
         defer allocator.free(manifest);
         try tmp.dir.writeFile(io, .{ .sub_path = "test.zovaext/extension.json", .data = manifest });
         const bundle_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/test.zovaext", .{tmp.sub_path});
@@ -1288,11 +1344,14 @@ test "extension_plugin host errors and status mapping" {
 }
 
 fn allocateRegistry(allocator: std.mem.Allocator) !void {
-    const d = descriptor();
-    const ext = try plugin.validate(&d);
-    var owned = try dynamic.OwnedRegistry.init(allocator, &.{.{ .extensions = &.{ext}, .plugins = &.{d} }});
+    var d = descriptor();
+    d.flags |= plugin.has_data_compatibility;
+    d.struct_size = @sizeOf(plugin.CompatibilityDescriptor);
+    const ext = try plugin.validateBase(&d);
+    var owned = try dynamic.OwnedRegistry.init(allocator, &.{.{ .extensions = &.{ext}, .plugins = &.{d}, .compatibilities = &.{.{ .name = "c_test", .data_version = "1.0.0", .accepted_data_versions = "1.0.0" }} }});
     defer owned.deinit();
     try std.testing.expectEqual(@as(usize, 1), owned.registry().plugins.len);
+    try std.testing.expectEqual(@as(usize, 1), owned.registry().compatibilities.len);
 }
 
 test "extension_plugin registry allocation failure cleanup" {
@@ -1311,6 +1370,28 @@ test "extension_plugin upgrade tail requires flag size and a forward path" {
     try std.testing.expectEqualStrings("1.0.0", path.from_version);
     d.upgrade = null;
     try std.testing.expectError(error.ExtensionInvalid, plugin.upgradePath(&d.base));
+}
+
+test "extension_plugin compatibility tail is explicit size checked and independent of code" {
+    var d: plugin.CompatibilityDescriptor = .{ .base = .{ .base = descriptor(), .from_version = null, .upgrade = null }, .data_version = "1.0.0", .accepted_data_versions = "1.0.0,2.0.0" };
+    d.base.base.version = "3.1.0";
+    d.base.base.flags = plugin.has_data_compatibility;
+    try std.testing.expectError(error.ExtensionIncompatible, plugin.validate(&d.base.base));
+    d.base.base.struct_size = @sizeOf(plugin.CompatibilityDescriptor);
+    const item = try plugin.validate(&d.base.base);
+    const compatibility = (try plugin.compatibilityPath(&d.base.base)).?;
+    try std.testing.expectEqualStrings("3.1.0", item.manifest.version);
+    try std.testing.expectEqualStrings("1.0.0", compatibility.data_version);
+    try std.testing.expect((try plugin.upgradePath(&d.base.base)) == null);
+    d.base.base.flags |= plugin.has_upgrade;
+    d.base.from_version = "0.9.0";
+    d.base.upgrade = outOfMemory;
+    const path = (try plugin.upgradePath(&d.base.base)).?;
+    try std.testing.expectEqualStrings("1.0.0", path.to_version);
+    d.accepted_data_versions = "2.0.0";
+    try std.testing.expectError(error.ExtensionInvalid, plugin.validate(&d.base.base));
+    d.accepted_data_versions = null;
+    try std.testing.expectError(error.ExtensionInvalid, plugin.compatibilityPath(&d.base.base));
 }
 
 fn failInstall(host: *const plugin.Host, db: ?*anyopaque) callconv(.c) i32 {
