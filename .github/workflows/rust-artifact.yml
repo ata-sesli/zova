@@ -15,6 +15,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - run: python3 -m unittest scripts/tests/test_check_rust_artifact.py
       - run: python3 -m unittest scripts/tests/test_windows_generated_c.py
+      - run: python3 -m unittest scripts/tests/test_plugin_artifact_gate.py
       - run: python3 scripts/generate-rust-platforms.py
       - run: python3 scripts/check-rust-artifact.py package . "${{ runner.temp }}/rust-crates"
       - uses: actions/upload-artifact@v4
@@ -46,3 +47,19 @@ jobs:
         with:
           version: 0.17.0
       - run: python "${{ runner.temp }}/rust-crates/check-rust-artifact.py" overrides "${{ runner.temp }}/rust-crates" "${{ runner.temp }}/rust-verified" "${{ github.workspace }}"
+      - run: python scripts/check-plugin-packages.py "${{ runner.temp }}/rust-plugin-fixtures" --prepare-only
+      - name: Run real plugin against extracted immutable safe Rust crate
+        shell: python
+        run: |
+          import json, os, pathlib, subprocess
+          artifact = pathlib.Path(r"${{ runner.temp }}/rust-crates")
+          work = pathlib.Path(r"${{ runner.temp }}/rust-verified")
+          version = json.loads((artifact / "manifest.json").read_text())["version"]
+          safe = work / "bindings/rust" / f"zova-{version}" / "Cargo.toml"
+          env = os.environ.copy()
+          for name in ("ZOVA_LIB_DIR", "ZOVA_INCLUDE_DIR", "ZOVA_SOURCE_DIR", "DOCS_RS"):
+              env.pop(name, None)
+          subprocess.run(["cargo", "nextest", "run", "--manifest-path", str(safe),
+                          "--config", str(work / "platform-patches.toml"),
+                          "--test", "plugin_loading", "--run-ignored", "all"],
+                         env=env, check=True)

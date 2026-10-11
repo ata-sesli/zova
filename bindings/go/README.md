@@ -281,9 +281,19 @@ contract.
 Go exposes lifecycle methods for extensions already present in the current
 process registry. The default registry includes bundled extensions such as
 `trgm`, so Go applications can install, list, check, and drop `trgm` directly.
-This Go binding does not wrap application scalar callbacks, dynamic `.zovaext`
-loading, or explicit extension-data upgrades. A custom C/Zig host must own any
-such integration; generated-C builds and Windows cannot load bundles. See the
+Development native and generated-C builds expose trusted bundle selection:
+
+```go
+extensions := zova.ExtensionOptions{BundlePaths: []string{"./search.zovaext"}}
+db, err := zova.CreateWithExtensions("app.zova", extensions)
+// Reopen: zova.OpenWithExtensions(path, zova.OpenOptions{}, extensions).
+```
+
+Set `TrustStorePath` for a non-default store. First trust the bundle using
+`zova extension trust ./search.zovaext`; opening never grants trust. Code and
+dependencies must match the host. `DB.Close` releases children before libraries.
+This development support is not present in published 1.1.0 artifacts. Application
+scalar callbacks and explicit data upgrades remain unwrapped. See the
 [capability matrix](../../docs/extensions.md#availability-and-binding-matrix).
 
 See [../../docs/extensions.md](../../docs/extensions.md) for the current host

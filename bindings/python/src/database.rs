@@ -24,6 +24,20 @@ pub(crate) struct PyDatabase {
     inner: Option<zova_rust::Database>,
 }
 
+fn extension_options(
+    bundles: Option<Vec<String>>,
+    trust_store_path: Option<String>,
+) -> zova_rust::ExtensionOptions {
+    zova_rust::ExtensionOptions {
+        bundle_paths: bundles
+            .unwrap_or_default()
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+        trust_store_path: trust_store_path.map(Into::into),
+    }
+}
+
 #[pyclass(name = "SavepointContext", unsendable)]
 pub(crate) struct PySavepointContext {
     database: Py<PyDatabase>,
@@ -34,9 +48,18 @@ pub(crate) struct PySavepointContext {
 #[pymethods]
 impl PyDatabase {
     #[staticmethod]
-    pub(crate) fn create(path: &str) -> PyResult<Self> {
+    #[pyo3(signature = (path, *, extension_bundles = None, trust_store_path = None))]
+    pub(crate) fn create(
+        path: &str,
+        extension_bundles: Option<Vec<String>>,
+        trust_store_path: Option<String>,
+    ) -> PyResult<Self> {
+        let extensions = extension_options(extension_bundles, trust_store_path);
         Ok(Self {
-            inner: Some(zova_rust::Database::create(path).map_err(zova_error)?),
+            inner: Some(
+                zova_rust::Database::create_with_extensions(path, &extensions)
+                    .map_err(zova_error)?,
+            ),
         })
     }
 
@@ -52,16 +75,24 @@ impl PyDatabase {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (path, *, read_only = false, busy_timeout_ms = 0))]
-    pub(crate) fn open(path: &str, read_only: bool, busy_timeout_ms: u32) -> PyResult<Self> {
+    #[pyo3(signature = (path, *, read_only = false, busy_timeout_ms = 0, extension_bundles = None, trust_store_path = None))]
+    pub(crate) fn open(
+        path: &str,
+        read_only: bool,
+        busy_timeout_ms: u32,
+        extension_bundles: Option<Vec<String>>,
+        trust_store_path: Option<String>,
+    ) -> PyResult<Self> {
+        let extensions = extension_options(extension_bundles, trust_store_path);
         Ok(Self {
             inner: Some(
-                zova_rust::Database::open_with_options(
+                zova_rust::Database::open_with_extensions(
                     path,
                     zova_rust::OpenOptions {
                         read_only,
                         busy_timeout_ms,
                     },
+                    &extensions,
                 )
                 .map_err(zova_error)?,
             ),

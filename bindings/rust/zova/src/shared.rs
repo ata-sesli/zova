@@ -34,7 +34,7 @@ use crate::vector::{
     Vector, VectorCollectionInfo, VectorCollectionOptions, VectorInput, VectorSearchResult,
     VectorValues,
 };
-use crate::OpenOptions;
+use crate::{ExtensionOptions, OpenOptions};
 use std::cell::Cell;
 use std::ffi::CStr;
 use std::fmt;
@@ -195,6 +195,34 @@ unsafe impl Send for SharedSubscription {}
 impl SharedDatabase {
     pub fn create(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_or_create(path, true)
+    }
+
+    /// Create with explicitly selected, previously trusted native bundles.
+    pub fn create_with_extensions(
+        path: impl AsRef<Path>,
+        extensions: &ExtensionOptions,
+    ) -> Result<Self> {
+        Self::from_raw(crate::database::open_with_extensions_raw(
+            path.as_ref(),
+            true,
+            OpenOptions::default(),
+            extensions,
+        )?)
+    }
+
+    /// Open with selected native bundles. All cloned and child handles retain
+    /// the native registry and libraries through the shared connection.
+    pub fn open_with_extensions(
+        path: impl AsRef<Path>,
+        options: OpenOptions,
+        extensions: &ExtensionOptions,
+    ) -> Result<Self> {
+        Self::from_raw(crate::database::open_with_extensions_raw(
+            path.as_ref(),
+            false,
+            options,
+            extensions,
+        )?)
     }
 
     /// Create a new fully initialized volatile in-memory database.

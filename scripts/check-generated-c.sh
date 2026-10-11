@@ -79,6 +79,8 @@ clang -std=c99 \
     -o "$TMP/sqlite3.o"
 
 echo "linking generated-C C ABI smoke binary"
+DYNAMIC_LIBS=""
+if [ "$(uname -s)" = "Linux" ]; then DYNAMIC_LIBS="-ldl"; fi
 clang -std=c99 \
     -I "$BUNDLE" \
     tests/c_abi_smoke.c \
@@ -86,6 +88,7 @@ clang -std=c99 \
     "$TMP/sqlite3.o" \
     -pthread \
     -lm \
+    $DYNAMIC_LIBS \
     -o "$TMP/zova_c_abi_smoke"
 
 echo "running generated-C C ABI smoke"

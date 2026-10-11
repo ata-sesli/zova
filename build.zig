@@ -108,6 +108,7 @@ pub fn build(b: *std.Build) void {
     cli_module.addOptions("cli_options", cli_options);
 
     var dynamic_extension_fixture: ?*std.Build.Step.Compile = null;
+    const package_fixtures = b.step("plugin-package-fixtures", "Install real portable C/C++ package-check fixtures");
     const plugin_fixture_options = b.addOptions();
     for ([_][]const u8{ "c", "cpp", "upgrade", "services_c", "services_cpp", "compatibility_c", "compatibility_cpp", "compatibility_upgrade", "recovery_c", "recovery_cpp" }) |language| {
         const option_name = b.fmt("plugin_{s}_fixture", .{language});
@@ -123,9 +124,48 @@ pub fn build(b: *std.Build) void {
                 .flags = if (std.mem.eql(u8, language, "recovery_cpp")) &.{ "-std=c++17", "-DZOVA_RECOVERY_FIXTURE" } else if (std.mem.eql(u8, language, "recovery_c")) &.{ "-std=c11", "-DZOVA_RECOVERY_FIXTURE" } else if (std.mem.eql(u8, language, "compatibility_cpp")) &.{ "-std=c++17", "-DZOVA_COMPATIBILITY_FIXTURE" } else if (std.mem.eql(u8, language, "compatibility_c")) &.{ "-std=c11", "-DZOVA_COMPATIBILITY_FIXTURE" } else if (std.mem.eql(u8, language, "compatibility_upgrade")) &.{ "-std=c11", "-DZOVA_COMPATIBILITY_FIXTURE", "-DZOVA_UPGRADE_FIXTURE" } else if (std.mem.eql(u8, language, "services_cpp")) &.{ "-std=c++17", "-DZOVA_SERVICES_FIXTURE" } else if (std.mem.eql(u8, language, "services_c")) &.{ "-std=c11", "-DZOVA_SERVICES_FIXTURE" } else if (std.mem.eql(u8, language, "cpp")) &.{"-std=c++17"} else if (std.mem.eql(u8, language, "upgrade")) &.{ "-std=c11", "-DZOVA_UPGRADE_FIXTURE" } else &.{"-std=c11"},
             });
             plugin_fixture_options.addOptionPath(option_name, fixture.getEmittedBin());
+            if (std.mem.eql(u8, language, "recovery_c")) package_fixtures.dependOn(&b.addInstallArtifact(fixture, .{}).step);
         } else {
             plugin_fixture_options.addOption([]const u8, option_name, "");
         }
+    }
+    if (supports_dynamic_extension_fixture) {
+        const dependency = b.addLibrary(.{
+            .name = "plugin_package_dependency",
+            .linkage = .dynamic,
+            .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .link_libcpp = true }),
+        });
+        dependency.root_module.addIncludePath(b.path("include"));
+        dependency.root_module.addCSourceFile(.{ .file = b.path("tests/plugin_package_dependency.cpp"), .flags = &.{"-std=c++17"} });
+        if (target.result.os.tag == .macos) dependency.install_name = "@rpath/libplugin_package_dependency.dylib";
+        const fixture = b.addLibrary(.{
+            .name = "plugin_package_cpp",
+            .linkage = .dynamic,
+            .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+        });
+        fixture.root_module.addIncludePath(b.path("include"));
+        fixture.root_module.addCSourceFile(.{ .file = b.path("tests/plugin_fixture.cpp"), .flags = &.{ "-std=c++17", "-DZOVA_RECOVERY_FIXTURE", "-DZOVA_PACKAGE_DEPENDENCY" } });
+        if (target.result.os.tag == .windows) {
+            fixture.root_module.linkLibrary(dependency);
+        } else {
+            // linkLibrary adds a build-tree rpath on these platforms. Link the
+            // shared object directly so only the bundle-relative path is used.
+            fixture.root_module.addObjectFile(dependency.getEmittedBin());
+        }
+        // Installed fixtures must resolve only their packaged dependency, not
+        // Zig's build-cache path (which would conceal missing-package failures).
+        fixture.each_lib_rpath = false;
+        if (target.result.os.tag == .macos) fixture.root_module.addRPathSpecial("@loader_path") else if (target.result.os.tag == .linux) fixture.root_module.addRPathSpecial("$ORIGIN");
+        package_fixtures.dependOn(&b.addInstallArtifact(dependency, .{}).step);
+        package_fixtures.dependOn(&b.addInstallArtifact(fixture, .{}).step);
+        const incompatible = b.addLibrary(.{
+            .name = "plugin_package_incompatible",
+            .linkage = .dynamic,
+            .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+        });
+        incompatible.root_module.addIncludePath(b.path("include"));
+        incompatible.root_module.addCSourceFile(.{ .file = b.path("tests/plugin_fixture.c"), .flags = &.{ "-std=c11", "-DZOVA_RECOVERY_FIXTURE", "-DZOVA_PACKAGE_INCOMPATIBLE" } });
+        package_fixtures.dependOn(&b.addInstallArtifact(incompatible, .{}).step);
     }
     if (supports_dynamic_extension_fixture) {
         const author_module = b.createModule(.{ .root_source_file = b.path("src/extension_plugin_api.zig"), .target = target, .optimize = optimize });

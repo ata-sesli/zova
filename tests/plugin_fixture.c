@@ -240,6 +240,10 @@ static int32_t ZOVA_PLUGIN_CALL register_cached(const zova_plugin_host_v1 *host,
     state = (int64_t *)malloc(sizeof(*state));
     if (!state) return ZOVA_PLUGIN_OUT_OF_MEMORY;
     *state = 42;
+#ifdef ZOVA_PACKAGE_DEPENDENCY
+    *state = zova_package_dependency_value();
+    if (*state != 42) { free(state); return ZOVA_PLUGIN_OUT_OF_MEMORY; }
+#endif
     op.struct_size = sizeof(op); op.kind = ZOVA_PLUGIN_OPERATION_SCALAR;
     op.flags = ZOVA_PLUGIN_OPERATION_EXACT; op.name.data = (const uint8_t *)"cached"; op.name.len = 6;
     op.column_count = 1; op.columns = &column; op.scalar = cached_value;
@@ -304,6 +308,9 @@ static int32_t ZOVA_PLUGIN_CALL salvage(const zova_plugin_host_v1 *source_host,
 }
 static const zova_plugin_recovery_descriptor_v1 recovery_descriptor = {
     {{{sizeof(zova_plugin_recovery_descriptor_v1), ZOVA_PLUGIN_ABI_V1,
+#ifdef ZOVA_PACKAGE_INCOMPATIBLE
+       UINT64_C(0x8000000000000000) |
+#endif
        ZOVA_PLUGIN_HAS_RECOVERY_V1 | ZOVA_PLUGIN_REQUIRES_OPERATIONS_V1 | ZOVA_PLUGIN_REQUIRES_QUERY_V1 | ZOVA_PLUGIN_REQUIRES_STORAGE_V1,
        "c_test", "1.0.0", "_zova_ext_c_test_", "1.0.0", "", install, NULL, drop, register_cached},
        NULL, NULL}, NULL, NULL}, rebuild, salvage

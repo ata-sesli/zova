@@ -1,11 +1,10 @@
-//! Native-loader smoke: no new safe binding surface. The runner supplies a
-//! trusted C fixture bundle and links the canonical native archive (not the
-//! currently loader-disabled generated-C distribution).
+//! Raw-loader smoke over the safe statement surface. The runner supplies a
+//! trusted services fixture; native and generated-C hosts use the same loader.
 use super::*;
 use crate::Step;
 
 #[test]
-#[ignore = "requires ZOVA_SQL_PLUGIN_BUNDLE and a loader-enabled native archive"]
+#[ignore = "requires ZOVA_SQL_PLUGIN_BUNDLE services fixture"]
 fn plugin_operations_use_existing_safe_statements_after_reopen() {
     let bundle = CString::new(std::env::var("ZOVA_SQL_PLUGIN_BUNDLE").unwrap()).unwrap();
     let dir = std::env::temp_dir().join(format!("zova-plugin-sql-{}", std::process::id()));

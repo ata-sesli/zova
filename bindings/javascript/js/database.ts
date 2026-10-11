@@ -22,7 +22,10 @@ import {
 } from "./object.js";
 import { Statement } from "./statement.js";
 import { Subscription } from "./subscription.js";
-import type { ExtensionInfo, FormatInfo, KvEntry, OpenOptions } from "./types.js";
+import { nativeExtensionOptions } from "./types.js";
+import type {
+  ExtensionInfo, ExtensionOptions, FormatInfo, KvEntry, OpenOptions,
+} from "./types.js";
 import type {
   Vector,
   VectorCollectionInfo,
@@ -49,8 +52,10 @@ export class Database {
     this.#native = database;
   }
 
-  static create(path: string): Database {
-    return new Database(callNative(() => native.NativeDatabase.create(path)));
+  static create(path: string, extensions?: ExtensionOptions): Database {
+    return new Database(
+      callNative(() => native.NativeDatabase.create(path, nativeExtensionOptions(extensions))),
+    );
   }
 
   static createMemory(): Database {
@@ -69,6 +74,7 @@ export class Database {
         native.NativeDatabase.open(path, {
           readOnly: options.readOnly,
           busyTimeoutMs: options.busyTimeoutMs,
+          extensions: nativeExtensionOptions(options.extensions),
         }),
       ),
     );

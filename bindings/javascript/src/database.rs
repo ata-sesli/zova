@@ -81,6 +81,22 @@ impl DatabaseState {
 pub struct NativeOpenOptions {
     pub read_only: Option<bool>,
     pub busy_timeout_ms: Option<u32>,
+    pub extensions: Option<NativeExtensionOptions>,
+}
+
+#[napi(object)]
+pub struct NativeExtensionOptions {
+    pub bundle_paths: Vec<String>,
+    pub trust_store_path: Option<String>,
+}
+
+impl NativeExtensionOptions {
+    fn into_options(self) -> zova::ExtensionOptions {
+        zova::ExtensionOptions {
+            bundle_paths: self.bundle_paths.into_iter().map(Into::into).collect(),
+            trust_store_path: self.trust_store_path.map(Into::into),
+        }
+    }
 }
 
 #[napi(object)]
@@ -181,8 +197,12 @@ pub struct NativeDatabase {
 #[napi]
 impl NativeDatabase {
     #[napi(factory)]
-    pub fn create(path: String) -> Result<Self> {
-        let database = zova::SharedDatabase::create(path).map_err(zova_error)?;
+    pub fn create(path: String, extensions: Option<NativeExtensionOptions>) -> Result<Self> {
+        let extensions = extensions
+            .map(NativeExtensionOptions::into_options)
+            .unwrap_or_default();
+        let database =
+            zova::SharedDatabase::create_with_extensions(path, &extensions).map_err(zova_error)?;
         Ok(Self {
             state: Arc::new(DatabaseState::new(database)),
         })
@@ -201,13 +221,19 @@ impl NativeDatabase {
         let options = options.unwrap_or(NativeOpenOptions {
             read_only: None,
             busy_timeout_ms: None,
+            extensions: None,
         });
-        let database = zova::SharedDatabase::open_with_options(
+        let extensions = options
+            .extensions
+            .map(NativeExtensionOptions::into_options)
+            .unwrap_or_default();
+        let database = zova::SharedDatabase::open_with_extensions(
             path,
             zova::OpenOptions {
                 read_only: options.read_only.unwrap_or(false),
                 busy_timeout_ms: options.busy_timeout_ms.unwrap_or(0),
             },
+            &extensions,
         )
         .map_err(zova_error)?;
         Ok(Self {

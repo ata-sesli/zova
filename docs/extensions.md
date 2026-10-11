@@ -12,6 +12,9 @@ library paths, search paths, or anything that Zova auto-loads.
 
 ## Availability and binding matrix
 
+The matrix describes current development sources for 1.2.0. Published 1.1.0
+packages retain their previous generated-C and binding loading restrictions.
+
 The `1.0.0` release introduced bundled lifecycle management,
 application C scalar callbacks, and the legacy native bundle contract subject
 to the build restrictions below; `1.1.0` retains that contract. The portable plugin ABI and explicit
@@ -22,19 +25,18 @@ extensions remain outside the stable 1.x authoring contract.
 | --- | --- | --- | --- |
 | Native Zig-built Linux/macOS host | Yes | Yes, through C ABI | Yes, explicit trusted bundles |
 | Native Zig-built Windows host | Yes | Yes, through C ABI | Yes, explicit trusted bundles |
-| Generated-C native packages | Yes | Yes, through C ABI | No |
+| Generated-C native packages | Yes | Yes, through C ABI | Yes, explicit trusted native bundles |
 | Public `zova-wasm` JavaScript API | No | No | No |
 
-Generated-C builds keep bundle declarations for source compatibility, but
-operations requiring an external library fail. Header availability does not
-enable a loader. Native bundles must match the host OS, architecture and
+Native and generated-C distributions use the same trusted loader and per-handle
+registry lifetime. Native bundles must match the host OS, architecture and
 deployment target; portable describes the C contract, not a universal binary.
 
 | Caller surface | Bundled lifecycle | App scalar callbacks | External bundles | Explicit data upgrades |
 | --- | --- | --- | --- | --- |
 | Native Zig registry | Yes | Native SQL registration | On loader-capable builds | Yes |
 | C / raw Rust `zova-sys` | Yes | Yes | On loader-capable builds | Yes |
-| Safe Rust / Python / Go / `zova-js` | Yes | No wrapper | No wrapper | No wrapper |
+| Safe Rust / Python / Go / `zova-js` | Yes | No wrapper | Explicit selection at create/open | No wrapper |
 | `zova-wasm` | No public API | No public API | No | No |
 
 The CLI exposes lifecycle operations and, on loader-capable builds, bundle
@@ -753,8 +755,8 @@ See `tests/plugin_fixture.c` and `.cpp` for minimal compilable examples.
 This remains trusted in-process native code, not a sandbox. Loading a library
 can itself execute native initializers before descriptor validation. C/C++
 fixtures run under `zig build test-extensions` on the existing native loader
-path, including the Windows module loader. Generated-C dynamic loading remains
-unsupported; this header does not enable it. Libraries must match the host's
+path, including the Windows module loader. Development generated-C packages
+enable that same loader. Libraries must match the host's
 OS, architecture, and deployment target.
 
 ## Negotiated host services (in development for 1.2.0)
@@ -941,8 +943,8 @@ retained states receive exactly one destroy call at connection close. This is
 connection lifetime management, not persistent-index freshness or automatic
 maintenance: algorithm caches must still validate their source snapshot tokens.
 
-High-level trusted-bundle selection and portable loading in generated-C packages
-remain the separate distribution work item. SQL operation results themselves
+High-level trusted-bundle selection and generated-C loading are available in
+development packages as described above. SQL operation results themselves
 use the existing statement interface.
 
 ## Native Artifact Notes

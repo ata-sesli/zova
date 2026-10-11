@@ -50,6 +50,7 @@ export type {
 export type {
   ColumnType,
   ExtensionInfo,
+  ExtensionOptions,
   FormatCompatibilityName,
   FormatInfo,
   KvEntry,

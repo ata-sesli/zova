@@ -15,6 +15,9 @@ jobs:
   rust-artifact:
     uses: ./.github/workflows/rust-artifact.yml
 
+  plugin-packages:
+    uses: ./.github/workflows/plugin-packages.yml
+
   wasm:
     uses: ./.github/workflows/wasm.yml
 

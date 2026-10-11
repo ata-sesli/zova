@@ -8,7 +8,7 @@ use crate::statement::{OwnedStatement, Statement};
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::marker::PhantomData;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
 
@@ -24,6 +24,16 @@ mod plugin_operation_tests;
 pub struct OpenOptions {
     pub read_only: bool,
     pub busy_timeout_ms: u32,
+}
+
+/// Explicit native-code selection. Bundles must already be trusted; opening
+/// never grants trust or loads executable paths from database metadata.
+/// Each bundle must match the host OS/architecture and runtime dependencies.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExtensionOptions {
+    pub bundle_paths: Vec<PathBuf>,
+    /// None selects the existing default trust store.
+    pub trust_store_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +124,60 @@ pub struct FormatInfo {
     pub compatibility: FormatCompatibility,
 }
 
+/// Synchronous C request shared by both safe handle types. The C handle owns
+/// its registry/libraries after success, never these temporary C strings.
+pub(crate) fn open_with_extensions_raw(
+    path: &Path,
+    create: bool,
+    options: OpenOptions,
+    extensions: &ExtensionOptions,
+) -> Result<*mut zova_sys::zova_database> {
+    let path = path_to_cstring(path)?;
+    let bundles = extensions
+        .bundle_paths
+        .iter()
+        .map(|p| path_to_cstring(p))
+        .collect::<Result<Vec<_>>>()?;
+    let pointers = bundles.iter().map(|p| p.as_ptr()).collect::<Vec<_>>();
+    let trust = extensions
+        .trust_store_path
+        .as_deref()
+        .map(path_to_cstring)
+        .transpose()?;
+    let mut db = ptr::null_mut();
+    let mut message = empty_message();
+    let request = zova_sys::zova_database_open_extensions_request {
+        path: path.as_ptr(),
+        flags: if options.read_only {
+            zova_sys::ZOVA_OPEN_READ_ONLY
+        } else {
+            0
+        },
+        busy_timeout_ms: options.busy_timeout_ms,
+        extension_bundle_paths: if pointers.is_empty() {
+            ptr::null()
+        } else {
+            pointers.as_ptr()
+        },
+        extension_bundle_count: pointers.len(),
+        trust_store_path: trust.as_ref().map_or(ptr::null(), |p| p.as_ptr()),
+        out_db: &mut db,
+        out_error_message: &mut message,
+    };
+    // SAFETY: all inputs and outputs stay live throughout the synchronous call.
+    let status = unsafe {
+        if create {
+            zova_sys::zova_database_create_with_extensions(&request)
+        } else {
+            zova_sys::zova_database_open_with_extensions(&request)
+        }
+    };
+    if status != zova_sys::ZOVA_OK {
+        return Err(Error::from_status(status, take_message(&mut message)));
+    }
+    Ok(db)
+}
+
 pub(crate) struct DatabaseInner {
     raw: NonNull<zova_sys::zova_database>,
     _not_send_sync: PhantomData<Rc<()>>,
@@ -122,6 +186,41 @@ pub(crate) struct DatabaseInner {
 impl Database {
     pub fn create(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_or_create(path, true)
+    }
+
+    /// Create with explicitly selected, previously trusted native bundles.
+    pub fn create_with_extensions(
+        path: impl AsRef<Path>,
+        extensions: &ExtensionOptions,
+    ) -> Result<Self> {
+        Self::with_extensions(path.as_ref(), true, OpenOptions::default(), extensions)
+    }
+
+    /// Open with explicitly selected native bundles. Child handles retain the
+    /// connection and its libraries; no caller input is retained by native code.
+    pub fn open_with_extensions(
+        path: impl AsRef<Path>,
+        options: OpenOptions,
+        extensions: &ExtensionOptions,
+    ) -> Result<Self> {
+        Self::with_extensions(path.as_ref(), false, options, extensions)
+    }
+
+    fn with_extensions(
+        path: &Path,
+        create: bool,
+        options: OpenOptions,
+        extensions: &ExtensionOptions,
+    ) -> Result<Self> {
+        let db = open_with_extensions_raw(path, create, options, extensions)?;
+        let raw = NonNull::new(db)
+            .ok_or_else(|| Error::from_status(zova_sys::ZOVA_INVALID_ARGUMENT, None))?;
+        Ok(Self {
+            inner: Rc::new(DatabaseInner {
+                raw,
+                _not_send_sync: PhantomData,
+            }),
+        })
     }
 
     /// Create a new fully initialized volatile in-memory database.
