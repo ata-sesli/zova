@@ -532,6 +532,46 @@ test "extension_plugin SQLite result limits roll back a scalar write" {
     try std.testing.expectError(error.SqliteError, scalarValue(&db.sqlite_db, "select zova_c_test_write_text(1)"));
     try std.testing.expectEqual(@as(i64, 0), try scalarValue(&db.sqlite_db, "select count(*) from _zova_ext_c_test_rows"));
 }
+test "extension_plugin operation registration preserves query-only bound-store protection" {
+    const zova = @import("zova.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const allocator = std.testing.allocator;
+    const main = try std.fmt.allocPrintSentinel(allocator, ".zig-cache/tmp/{s}/main.zova", .{tmp.sub_path}, 0);
+    defer allocator.free(main);
+    const graphs = try std.fmt.allocPrintSentinel(allocator, ".zig-cache/tmp/{s}/graphs.zova", .{tmp.sub_path}, 0);
+    defer allocator.free(graphs);
+    try zova.createGraphStore(graphs);
+    var d = descriptor();
+    d.register_sql = registerOperations;
+    const ext = try plugin.validate(&d);
+    const registry: extension.Registry = .{ .extensions = &.{ext}, .plugins = &.{d} };
+    {
+        var db = try zova.Database.createWithExtensions(main, registry);
+        defer db.deinit();
+        try db.bindGraphStore(graphs);
+        try db.createGraph("source");
+        try db.exec("create table graph_store.protected_rows(value integer)");
+        try db.installExtension("c_test");
+    }
+    var db = try zova.Database.openWithOptionsAndExtensions(main, .{ .read_only = true }, registry);
+    defer db.deinit();
+    try std.testing.expectEqual(@as(i64, 42), try scalarValue(&db.sqlite_db, "select zova_c_test_plus_one(41)"));
+    try std.testing.expectEqual(@as(i64, 1), try scalarValue(&db.sqlite_db, "pragma query_only"));
+    try std.testing.expectError(error.ReadOnly, db.exec("create table forbidden(value integer)"));
+    try std.testing.expectError(error.ReadOnly, db.exec("create table graph_store.forbidden(value integer)"));
+    try std.testing.expectError(error.ReadOnly, db.exec("create temp table forbidden(value integer)"));
+    // query_only can also be set by the caller on a writable connection. A
+    // TEMP trigger must not redirect its host marker into persistent writes.
+    var writable = try zova.Database.openWithOptionsAndExtensions(main, .{}, registry);
+    defer writable.deinit();
+    try writable.exec("create temp trigger redirect_marker before update on _zova_plugin_generations begin insert into protected_rows values(7); end; pragma query_only=on");
+    try std.testing.expectError(error.SqliteError, extension.registerSqlForInstalled(&writable.sqlite_db, registry));
+    try std.testing.expectEqual(@as(i64, 0), try scalarValue(&writable.sqlite_db, "select count(*) from graph_store.protected_rows"));
+    try std.testing.expectEqual(@as(i64, 1), try scalarValue(&writable.sqlite_db, "pragma query_only"));
+    try std.testing.expectEqual(@as(i64, 42), try scalarValue(&writable.sqlite_db, "select zova_c_test_plus_one(41)"));
+}
+
 test "extension_plugin scalar writes are atomic and read-only operations cannot mutate" {
     var db = try @import("zova.zig").Database.createMemory();
     defer db.deinit();

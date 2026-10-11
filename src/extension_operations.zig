@@ -9,6 +9,50 @@ const c = sqlite.c;
 const allocator = std.heap.c_allocator;
 const Error = sqlite.Error || error{OutOfMemory};
 
+// Bound-store read-only opens use query_only, which also rejects TEMP writes.
+// Generation markers are host-owned connection state, not source data. Lift
+// that restriction only around the two fixed TEMP statements below, never
+// around plugin callbacks. Pre-prepare restoration before changing the flag.
+const TemporaryWriteScope = struct {
+    db: ?*sqlite.Database = null,
+    restore: ?sqlite.Statement = null,
+    fn begin(db: *sqlite.Database) Error!TemporaryWriteScope {
+        const enabled = blk: {
+            var query = try db.prepare("pragma query_only");
+            defer query.deinit();
+            std.debug.assert(try query.step() == .row);
+            break :blk query.columnInt64(0) != 0;
+        };
+        if (!enabled) return .{};
+        const restore = try db.prepare("pragma query_only=on");
+        var result: TemporaryWriteScope = .{ .db = db, .restore = restore };
+        errdefer result.end();
+        try db.setAuthorizer(temporaryAuthorizer, null);
+        try db.setQueryOnly(false);
+        return result;
+    }
+    fn end(self: *TemporaryWriteScope) void {
+        if (self.restore) |*restore| {
+            defer restore.deinit();
+            // Do not return a connection with its read-only protection lost.
+            if ((restore.step() catch @panic("cannot restore query-only protection")) != .done)
+                @panic("cannot restore query-only protection");
+            self.db.?.setAuthorizer(null, null) catch @panic("cannot clear temporary registration authorizer");
+        }
+    }
+};
+
+fn temporaryAuthorizer(_: ?*anyopaque, action: c_int, first: [*c]const u8, _: [*c]const u8, schema: [*c]const u8, origin: [*c]const u8) callconv(.c) c_int {
+    // Even caller-created TEMP triggers cannot redirect the fixed marker SQL.
+    if (origin != null) return c.SQLITE_DENY;
+    return switch (action) {
+        c.SQLITE_SELECT, c.SQLITE_READ => c.SQLITE_OK,
+        c.SQLITE_INSERT, c.SQLITE_UPDATE, c.SQLITE_DELETE, c.SQLITE_CREATE_TEMP_TABLE, c.SQLITE_CREATE_TEMP_INDEX => if (schema != null and std.mem.eql(u8, std.mem.span(schema), "temp")) c.SQLITE_OK else c.SQLITE_DENY,
+        c.SQLITE_PRAGMA => if (first != null and std.mem.eql(u8, std.mem.span(first), "query_only")) c.SQLITE_OK else c.SQLITE_DENY,
+        else => c.SQLITE_DENY,
+    };
+}
+
 const Stored = struct {
     arena: std.heap.ArenaAllocator,
     descriptor: api.Operation,
@@ -104,6 +148,8 @@ pub const Scope = struct {
         const owner = self.r.scope_owner orelse return error.InvalidArgument;
         for (self.r.slots.items) |slot| {
             if (!std.mem.eql(u8, slot.owner, owner)) continue;
+            var temporary = try TemporaryWriteScope.begin(db);
+            defer temporary.end();
             var stmt = try db.prepare("insert into temp._zova_plugin_generations values(?1,?2) on conflict(owner) do update set generation=excluded.generation");
             defer stmt.deinit();
             try stmt.bindTextBorrowed(1, owner);
@@ -135,7 +181,11 @@ pub fn begin(db: *sqlite.Database, owner: []const u8) Error!Scope {
         if (!std.mem.eql(u8, existing, owner)) return error.InvalidArgument;
         return .{ .r = r, .owns = false };
     }
-    try db.exec("create temp table if not exists _zova_plugin_generations(owner text primary key, generation integer not null)");
+    {
+        var temporary = try TemporaryWriteScope.begin(db);
+        defer temporary.end();
+        try db.exec("create temp table if not exists _zova_plugin_generations(owner text primary key, generation integer not null)");
+    }
     if (r.generation == std.math.maxInt(i64)) return error.InvalidArgument;
     r.generation += 1;
     r.scope_owner = owner;
