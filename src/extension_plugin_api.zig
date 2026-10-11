@@ -311,3 +311,27 @@ pub const CompatibilityDescriptor = extern struct {
     data_version: ?[*:0]const u8,
     accepted_data_versions: ?[*:0]const u8,
 };
+
+pub const has_recovery: u64 = 256;
+pub const salvage_plan: u32 = 1;
+pub const salvage_copy: u32 = 2;
+pub const SalvageRequest = extern struct {
+    struct_size: u32 = @sizeOf(SalvageRequest),
+    mode: u32,
+    data_version: Bytes,
+};
+pub const SalvageResult = extern struct {
+    copied_extensions: u64 = 0,
+    copied_private_objects: u64 = 0,
+    skipped_extensions: u64 = 0,
+    skipped_private_objects: u64 = 0,
+    installed_in_destination: u32 = 0,
+    reserved: u32 = 0,
+};
+pub const RebuildHook = *const fn (*const Host, ?*anyopaque, Bytes) callconv(.c) i32;
+pub const SalvageHook = *const fn (*const Host, ?*anyopaque, ?*const Host, ?*anyopaque, *const SalvageRequest, *SalvageResult) callconv(.c) i32;
+pub const RecoveryDescriptor = extern struct {
+    base: CompatibilityDescriptor,
+    rebuild: ?RebuildHook,
+    salvage: ?SalvageHook,
+};

@@ -1965,6 +1965,12 @@ zova_status zova_database_open_for_extension_upgrade(const zova_database_open_ex
  * Unavailable code -> EXTENSION_UNAVAILABLE; unsupported/equal/backward version
  * -> EXTENSION_INCOMPATIBLE. Caller transaction commit remains the caller's job. */
 zova_status zova_database_extension_upgrade(const zova_database_extension_request *request);
+/* Explicit repair at the installed data version. Join an existing transaction
+ * through an operation-atomic savepoint; no upgrade or metadata rewrite.
+ * Missing recovery hook -> EXTENSION_UNAVAILABLE. Read-only writes fail.
+ * For a damaged index use the explicit extension-maintenance open above, then
+ * rebuild, commit, close and reopen normally. */
+zova_status zova_database_extension_rebuild(const zova_database_extension_request *request);
 zova_status zova_database_extension_list(const zova_database_extension_list_request *request);
 zova_status zova_database_extension_info(const zova_database_extension_info_request *request);
 zova_status zova_database_extension_check(const zova_database_extension_request *request);

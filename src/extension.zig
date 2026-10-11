@@ -112,6 +112,12 @@ pub const Registry = struct {
     plugins: []const plugin.Descriptor = &.{},
     upgrades: []const Upgrade = &.{},
     compatibilities: []const Compatibility = &.{},
+    recoveries: []const Recovery = &.{},
+
+    pub fn recovery(self: Registry, name: []const u8) ?Recovery {
+        for (self.recoveries) |item| if (std.mem.eql(u8, item.name, name)) return item;
+        return null;
+    }
 
     pub fn compatibility(self: Registry, name: []const u8) ?Compatibility {
         for (self.compatibilities) |item| if (std.mem.eql(u8, item.name, name)) return item;
@@ -156,6 +162,11 @@ pub const Registry = struct {
     }
 
     pub fn validate(self: Registry) Error!void {
+        for (self.recoveries, 0..) |item, i| {
+            _ = self.find(item.name) orelse return error.ExtensionUnavailable;
+            if (item.rebuild == null and item.salvage == null) return error.ExtensionInvalid;
+            for (self.recoveries[0..i]) |previous| if (std.mem.eql(u8, previous.name, item.name)) return error.ExtensionInvalid;
+        }
         for (self.compatibilities, 0..) |item, i| {
             try item.validate();
             _ = self.find(item.name) orelse return error.ExtensionUnavailable;
@@ -176,6 +187,7 @@ pub const Registry = struct {
             if (!std.mem.eql(u8, registered.manifest.storage_prefix, item.manifest.storage_prefix)) return error.ExtensionInvalid;
             if (!std.mem.eql(u8, registered.manifest.version, item.manifest.version) or !std.mem.eql(u8, registered.manifest.zova_abi_min, item.manifest.zova_abi_min)) return error.ExtensionInvalid;
             if ((descriptor.flags & plugin.has_data_compatibility != 0) != (self.compatibility(item.manifest.name) != null)) return error.ExtensionInvalid;
+            if ((descriptor.flags & plugin.has_recovery != 0) != (self.recovery(item.manifest.name) != null)) return error.ExtensionInvalid;
             for (self.plugins[0..i]) |previous| {
                 if (std.mem.eql(u8, std.mem.span(previous.name.?), item.manifest.name)) return error.ExtensionInvalid;
             }
@@ -319,6 +331,7 @@ pub fn install(db: *sqlite.Database, registry: Registry, name: []const u8, valid
     try validateInstalledState(std.heap.c_allocator, db);
     if (validate_core) |hook| hook(db) catch return error.ExtensionInvalid;
 
+    try sql_scope.prepare(db);
     try db.releaseSavepoint("extension_lifecycle");
     released = true;
     sql_success = true;
@@ -332,6 +345,41 @@ pub const Upgrade = struct {
     hook: ?Hook = null,
     plugin_hook: ?plugin.Hook = null,
 };
+
+pub const Recovery = struct {
+    name: []const u8,
+    rebuild: ?@import("extension_plugin_api.zig").RebuildHook = null,
+    salvage: ?@import("extension_plugin_api.zig").SalvageHook = null,
+};
+
+/// Explicit repair at the existing data version, never a data upgrade.
+pub fn rebuild(allocator: std.mem.Allocator, db: *sqlite.Database, registry: Registry, name: []const u8, validate_core: ?ValidationHook) Error!void {
+    try registry.validate();
+    const sql_scope = try plugin.operations.begin(db, name);
+    var success = false;
+    defer sql_scope.finish(success);
+    try db.savepoint("extension_rebuild");
+    errdefer {
+        db.rollbackToSavepoint("extension_rebuild") catch {};
+        db.releaseSavepoint("extension_rebuild") catch {};
+    }
+    var installed = try loadInfo(allocator, db, name);
+    defer installed.deinit(allocator);
+    const target = registry.find(name) orelse return error.ExtensionUnavailable;
+    try ensureManifestMatchesInstalled(registry, target.manifest, installed);
+    const hook = (registry.recovery(name) orelse return error.ExtensionUnavailable).rebuild orelse return error.ExtensionUnavailable;
+    var before = try listSchemaObjects(allocator, db);
+    defer before.deinit(allocator);
+    try plugin.invokeRebuild(hook, db, target.manifest.storage_prefix, installed.version);
+    try registry.invokeVersion(target, db, .register_sql, installed.version);
+    try registry.invoke(target, db, .check);
+    try validateNewSchemaObjectsOwnedBy(allocator, db, before.names, target.manifest.storage_prefix);
+    try validateInstalledState(allocator, db);
+    if (validate_core) |check_core| check_core(db) catch return error.ExtensionInvalid;
+    try sql_scope.prepare(db);
+    try db.releaseSavepoint("extension_rebuild");
+    success = true;
+}
 
 fn validateUpgradeDirection(from: []const u8, to: []const u8) Error!void {
     const a = parseAbiVersion(from) catch return error.ExtensionIncompatible;
@@ -388,6 +436,7 @@ pub fn upgrade(allocator: std.mem.Allocator, db: *sqlite.Database, registry: Reg
     try stmt.bindText(5, name);
     std.debug.assert(try stmt.step() == .done);
     try validateInstalledState(allocator, db);
+    try sql_scope.prepare(db);
     try db.releaseSavepoint("extension_upgrade");
     sql_success = true;
 }
@@ -561,6 +610,14 @@ pub fn salvageInstalled(
     mode: SalvageMode,
 ) Error!SalvageResult {
     try registry.validate();
+    if (destination) |dest| if (dest.handle == source.handle) return error.ExtensionInvalid;
+    // Pin source metadata and rows together. Even a native plan hook's accidental
+    // source writes are provisional and discarded, preserving earlier work.
+    try source.savepoint("extension_salvage_source");
+    defer {
+        source.rollbackToSavepoint("extension_salvage_source") catch {};
+        source.releaseSavepoint("extension_salvage_source") catch {};
+    }
     var list = try listInstalled(allocator, source);
     defer list.deinit(allocator);
 
@@ -577,50 +634,60 @@ pub fn salvageInstalled(
             total.skipped_private_objects += private_objects;
             continue;
         };
-        const hook = extension.salvage orelse {
+        const portable = if (registry.recovery(item.name)) |recovery| recovery.salvage else null;
+        if (extension.salvage == null and portable == null) {
             total.skipped_extensions += 1;
             total.skipped_private_objects += private_objects;
             continue;
-        };
+        }
 
         const result = switch (mode) {
-            .plan => try hook(.{
+            .plan => try invokeSalvageHook(extension, portable, .{
                 .allocator = allocator,
                 .source = source,
                 .destination = null,
                 .mode = .plan,
-            }, extension.manifest),
-            .copy => try runCopySalvageHook(allocator, source, destination orelse return error.ExtensionInvalid, extension, hook, item.version),
+            }, item.version),
+            .copy => try runCopySalvageHook(allocator, source, destination orelse return error.ExtensionInvalid, registry, extension, portable, item.version),
         };
         total.add(result);
     }
     return total;
 }
 
+fn invokeSalvageHook(item: Extension, portable: ?@import("extension_plugin_api.zig").SalvageHook, context: SalvageContext, version: []const u8) Error!SalvageResult {
+    if (portable) |hook| return plugin.invokeSalvage(hook, context, item.manifest.storage_prefix, version);
+    return item.salvage.?(context, item.manifest);
+}
+
 fn runCopySalvageHook(
     allocator: std.mem.Allocator,
     source: *sqlite.Database,
     destination: *sqlite.Database,
+    registry: Registry,
     extension: Extension,
-    hook: SalvageHook,
+    portable: ?@import("extension_plugin_api.zig").SalvageHook,
     data_version: []const u8,
 ) Error!SalvageResult {
+    const sql_scope = if (portable != null) try plugin.operations.begin(destination, extension.manifest.name) else null;
+    var sql_success = false;
+    defer if (sql_scope) |scope| scope.finish(sql_success);
     var before_objects = try listSchemaObjects(allocator, destination);
     defer before_objects.deinit(allocator);
 
     try destination.savepoint("extension_salvage");
     var released = false;
-    errdefer if (!released) {
+    defer if (!released) {
         destination.rollbackToSavepoint("extension_salvage") catch {};
         destination.releaseSavepoint("extension_salvage") catch {};
     };
 
-    const result = try hook(.{
+    const result = try invokeSalvageHook(extension, portable, .{
         .allocator = allocator,
         .source = source,
         .destination = destination,
         .mode = .copy,
-    }, extension.manifest);
+    }, data_version);
 
     try validateNewSchemaObjectsOwnedBy(allocator, destination, before_objects.names, extension.manifest.storage_prefix);
     if (result.installed_in_destination) {
@@ -630,12 +697,21 @@ fn runCopySalvageHook(
             try insertInstalled(destination, installed_manifest);
         }
         try validateInstalledState(allocator, destination);
-    } else if (result.copied_private_objects != 0) {
+        if (portable != null) {
+            try registry.invokeVersion(extension, destination, .register_sql, data_version);
+            try registry.invoke(extension, destination, .check);
+            try sql_scope.?.prepare(destination);
+        }
+    } else if (result.copied_private_objects != 0 or result.copied_extensions != 0) {
         return error.ExtensionInvalid;
+    } else {
+        // A skipped recovery must not leave provisional/orphan private data.
+        return result;
     }
 
     try destination.releaseSavepoint("extension_salvage");
     released = true;
+    sql_success = true;
     return result;
 }
 

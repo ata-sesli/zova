@@ -55,7 +55,8 @@ static_assert(sizeof(zova_object_put_options) == sizeof(int), "object options us
 
 int main() {
     if (zova_database_open_for_extension_upgrade(nullptr) != ZOVA_INVALID_ARGUMENT ||
-        zova_database_extension_upgrade(nullptr) != ZOVA_INVALID_ARGUMENT) return 1;
+        zova_database_extension_upgrade(nullptr) != ZOVA_INVALID_ARGUMENT ||
+        zova_database_extension_rebuild(nullptr) != ZOVA_INVALID_ARGUMENT) return 1;
     zova_database *db = nullptr;
     zova_statement *statement = nullptr;
     zova_subscription *subscription = nullptr;

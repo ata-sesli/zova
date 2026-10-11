@@ -231,6 +231,7 @@ pub const OwnedRegistry = struct {
     plugins: []plugin.Descriptor,
     upgrades: []extension.Upgrade,
     compatibilities: []extension.Compatibility,
+    recoveries: []extension.Recovery,
 
     pub fn init(allocator: std.mem.Allocator, registries: []const extension.Registry) Error!OwnedRegistry {
         var total: usize = 0;
@@ -238,6 +239,15 @@ pub const OwnedRegistry = struct {
 
         const items = try allocator.alloc(extension.Extension, total);
         errdefer allocator.free(items);
+        var recovery_total: usize = 0;
+        for (registries) |item| recovery_total += item.recoveries.len;
+        const recoveries = try allocator.alloc(extension.Recovery, recovery_total);
+        errdefer allocator.free(recoveries);
+        var recovery_index: usize = 0;
+        for (registries) |item| {
+            @memcpy(recoveries[recovery_index..][0..item.recoveries.len], item.recoveries);
+            recovery_index += item.recoveries.len;
+        }
         var compatibility_total: usize = 0;
         for (registries) |item| compatibility_total += item.compatibilities.len;
         const compatibilities = try allocator.alloc(extension.Compatibility, compatibility_total);
@@ -272,13 +282,13 @@ pub const OwnedRegistry = struct {
             index += item.extensions.len;
         }
 
-        const owned: OwnedRegistry = .{ .allocator = allocator, .extensions = items, .plugins = plugins, .upgrades = upgrades, .compatibilities = compatibilities };
+        const owned: OwnedRegistry = .{ .allocator = allocator, .extensions = items, .plugins = plugins, .upgrades = upgrades, .compatibilities = compatibilities, .recoveries = recoveries };
         try owned.registry().validate();
         return owned;
     }
 
     pub fn registry(self: OwnedRegistry) extension.Registry {
-        return .{ .extensions = self.extensions, .plugins = self.plugins, .upgrades = self.upgrades, .compatibilities = self.compatibilities };
+        return .{ .extensions = self.extensions, .plugins = self.plugins, .upgrades = self.upgrades, .compatibilities = self.compatibilities, .recoveries = self.recoveries };
     }
 
     pub fn deinit(self: *OwnedRegistry) void {
@@ -286,6 +296,7 @@ pub const OwnedRegistry = struct {
         self.allocator.free(self.plugins);
         self.allocator.free(self.upgrades);
         self.allocator.free(self.compatibilities);
+        self.allocator.free(self.recoveries);
     }
 };
 
@@ -296,6 +307,7 @@ pub const DynamicExtensionSet = struct {
     plugins: []plugin.Descriptor,
     upgrades: []extension.Upgrade,
     compatibilities: []extension.Compatibility,
+    recoveries: []extension.Recovery,
 
     pub fn loadTrustedBundles(
         allocator: std.mem.Allocator,
@@ -311,6 +323,7 @@ pub const DynamicExtensionSet = struct {
                 .plugins = try allocator.alloc(plugin.Descriptor, 0),
                 .upgrades = try allocator.alloc(extension.Upgrade, 0),
                 .compatibilities = try allocator.alloc(extension.Compatibility, 0),
+                .recoveries = try allocator.alloc(extension.Recovery, 0),
             };
         }
 
@@ -336,6 +349,8 @@ pub const DynamicExtensionSet = struct {
         defer upgrades.deinit(allocator);
         var compatibilities: std.ArrayList(extension.Compatibility) = .empty;
         defer compatibilities.deinit(allocator);
+        var recoveries: std.ArrayList(extension.Recovery) = .empty;
+        defer recoveries.deinit(allocator);
 
         for (bundle_paths) |bundle_path| {
             var info = try loadBundleInfo(allocator, bundle_path);
@@ -350,6 +365,7 @@ pub const DynamicExtensionSet = struct {
             if (loaded.plugin) |descriptor| try plugins.append(allocator, descriptor);
             if (loaded.upgrade) |path| try upgrades.append(allocator, path);
             if (loaded.compatibility) |item| try compatibilities.append(allocator, item);
+            if (loaded.recovery) |item| try recoveries.append(allocator, item);
             // Transfer the handle last: avoid closing it twice on allocation failure.
             try libraries.append(allocator, library);
         }
@@ -367,6 +383,8 @@ pub const DynamicExtensionSet = struct {
         errdefer allocator.free(owned_upgrades);
         const owned_compatibilities = try compatibilities.toOwnedSlice(allocator);
         errdefer allocator.free(owned_compatibilities);
+        const owned_recoveries = try recoveries.toOwnedSlice(allocator);
+        errdefer allocator.free(owned_recoveries);
 
         const set: DynamicExtensionSet = .{
             .allocator = allocator,
@@ -375,13 +393,14 @@ pub const DynamicExtensionSet = struct {
             .plugins = owned_plugins,
             .upgrades = owned_upgrades,
             .compatibilities = owned_compatibilities,
+            .recoveries = owned_recoveries,
         };
         try set.registry().validate();
         return set;
     }
 
     pub fn registry(self: DynamicExtensionSet) extension.Registry {
-        return .{ .extensions = self.extensions, .plugins = self.plugins, .upgrades = self.upgrades, .compatibilities = self.compatibilities };
+        return .{ .extensions = self.extensions, .plugins = self.plugins, .upgrades = self.upgrades, .compatibilities = self.compatibilities, .recoveries = self.recoveries };
     }
 
     pub fn deinit(self: *DynamicExtensionSet) void {
@@ -393,6 +412,7 @@ pub const DynamicExtensionSet = struct {
         self.allocator.free(self.plugins);
         self.allocator.free(self.upgrades);
         self.allocator.free(self.compatibilities);
+        self.allocator.free(self.recoveries);
     }
 };
 
@@ -405,6 +425,8 @@ pub const LoadedBundle = struct {
     upgrade_count: usize = 0,
     compatibilities: [1]extension.Compatibility = undefined,
     compatibility_count: usize = 0,
+    recoveries: [1]extension.Recovery = undefined,
+    recovery_count: usize = 0,
 
     pub fn load(allocator: std.mem.Allocator, bundle_path: []const u8) Error!LoadedBundle {
         if (comptime !supports_dynamic_loading) return error.ExtensionLoadFailed;
@@ -437,12 +459,16 @@ pub const LoadedBundle = struct {
             bundle.compatibilities[0] = item;
             bundle.compatibility_count = 1;
         }
+        if (loaded.recovery) |item| {
+            bundle.recoveries[0] = item;
+            bundle.recovery_count = 1;
+        }
         try bundle.registry().validate();
         return bundle;
     }
 
     pub fn registry(self: *const LoadedBundle) extension.Registry {
-        return .{ .extensions = self.extensions[0..], .plugins = self.plugins[0..self.plugin_count], .upgrades = self.upgrades[0..self.upgrade_count], .compatibilities = self.compatibilities[0..self.compatibility_count] };
+        return .{ .extensions = self.extensions[0..], .plugins = self.plugins[0..self.plugin_count], .upgrades = self.upgrades[0..self.upgrade_count], .compatibilities = self.compatibilities[0..self.compatibility_count], .recoveries = self.recoveries[0..self.recovery_count] };
     }
 
     pub fn deinit(self: *LoadedBundle) void {
@@ -455,7 +481,7 @@ pub fn verifyBundleEntrypoint(allocator: std.mem.Allocator, bundle_path: []const
     defer bundle.deinit();
 }
 
-fn loadDescriptor(allocator: std.mem.Allocator, library: *DynamicLibrary, info: BundleInfo) Error!struct { extension: extension.Extension, plugin: ?plugin.Descriptor = null, upgrade: ?extension.Upgrade = null, compatibility: ?extension.Compatibility = null } {
+fn loadDescriptor(allocator: std.mem.Allocator, library: *DynamicLibrary, info: BundleInfo) Error!struct { extension: extension.Extension, plugin: ?plugin.Descriptor = null, upgrade: ?extension.Upgrade = null, compatibility: ?extension.Compatibility = null, recovery: ?extension.Recovery = null } {
     // The manifest explicitly selects the new signature. No symbol probing or
     // fallback may reinterpret an old Zig descriptor as a C structure.
     if (std.mem.eql(u8, info.manifest.entrypoint, plugin.entrypoint)) {
@@ -464,7 +490,7 @@ fn loadDescriptor(allocator: std.mem.Allocator, library: *DynamicLibrary, info: 
         const descriptor = entry(1);
         const loaded = try plugin.validate(descriptor);
         try ensureLoadedExtensionMatches(info, loaded);
-        return .{ .extension = loaded, .plugin = descriptor.?.*, .upgrade = try plugin.upgradePath(descriptor.?), .compatibility = try plugin.compatibilityPath(descriptor.?) };
+        return .{ .extension = loaded, .plugin = descriptor.?.*, .upgrade = try plugin.upgradePath(descriptor.?), .compatibility = try plugin.compatibilityPath(descriptor.?), .recovery = try plugin.recoveryPath(descriptor.?) };
     }
     const entry_name = try allocator.dupeSentinel(u8, info.manifest.entrypoint, 0);
     defer allocator.free(entry_name);

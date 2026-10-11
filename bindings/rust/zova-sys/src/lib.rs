@@ -1993,6 +1993,9 @@ extern "C" {
     pub fn zova_database_extension_upgrade(
         request: *const zova_database_extension_request,
     ) -> zova_status;
+    pub fn zova_database_extension_rebuild(
+        request: *const zova_database_extension_request,
+    ) -> zova_status;
     pub fn zova_database_open_for_extension_upgrade(
         request: *const zova_database_open_extensions_request,
     ) -> zova_status;

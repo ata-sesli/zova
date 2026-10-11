@@ -71,6 +71,15 @@ pub fn zova_database_extension_upgrade(request: ?*const zova_database_extension_
     return okDb(handle);
 }
 
+pub fn zova_database_extension_rebuild(request: ?*const zova_database_extension_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    defer handle.mutex.unlock();
+    const name = req.name orelse return failDb(handle, error.InvalidArgument);
+    handle.db.rebuildExtension(std.mem.span(name)) catch |err| return failDb(handle, err);
+    return okDb(handle);
+}
+
 pub fn zova_database_extension_list(request: ?*const zova_database_extension_list_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;

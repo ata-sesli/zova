@@ -933,11 +933,13 @@ must remain loaded until all statements and the connection close.
 
 Successful prior registrations are retained until connection close (up to 64
 revisions per operation), allowing a caller transaction to roll back an upgrade
-or drop without dangling callbacks. Invocation resolves the installed code
-version; a dropped/unavailable version fails before entering plugin code. All
+or drop without dangling callbacks. Invocation resolves the visible data
+version and a transaction-controlled connection-local registration generation;
+same-version rebuilds and code-only registrations therefore roll back too.
+A dropped/unavailable generation fails before entering plugin code. All
 retained states receive exactly one destroy call at connection close. This is
 connection lifetime management, not persistent-index freshness or automatic
-maintenance; those remain separate work.
+maintenance: algorithm caches must still validate their source snapshot tokens.
 
 High-level trusted-bundle selection and portable loading in generated-C packages
 remain the separate distribution work item. SQL operation results themselves
@@ -1035,6 +1037,93 @@ coverage against the visible source-local journal before reuse. Compatible older
 generations can reconcile forward; missing/incompatible coverage requires
 reconstruction or a clear error. A main commit marker alone cannot prove freshness.
 Durability settings are unchanged.
+
+## Lifecycle, cleanup and explicit recovery
+
+The development host completes the following native contract without changing
+package/application ABI 1.1.0, plugin ABI v1, or persistent format 12.
+
+- Install, upgrade, rebuild and drop use operation-owned savepoints. Failure
+  rolls back their SQL without discarding earlier caller work. Success inside
+  a caller transaction is provisional until the caller commits.
+- `register_sql` initializes connection-local callbacks/state. It and `check`
+  may read but must not persist writes. Portable host services reject those
+  writes even on writable handles. Physical read-only opens still support
+  registration, local state allocation and valid-index queries.
+- Portable lifecycle SQL cannot commit/roll back, change savepoints, attach
+  databases or alter connection PRAGMAs. Those boundaries belong to the host.
+  Legacy native Zig hooks receive direct database access and must obey this
+  contract themselves. Native plugins are trusted code, not sandboxed code.
+- SQL rollback precedes disposal of failed pending callback state. The host
+  then publishes successful registrations. A private TEMP generation marker
+  rolls back with SQL, selecting the previous callbacks after same-version
+  rebuild, code-only registration, upgrade, or drop/reinstall rollback. It is
+  connection-local, excluded from backup, and not a persistent schema change.
+- Active cursors and statements must finish before close. Cursor `close` and
+  state `destroy` callbacks release resources before library unloading. An
+  application C handle rejects close while child handles remain live.
+
+Zova does not roll back arbitrary plugin working memory or filesystem/network
+effects. Plugins must stage mutable cache changes or invalidate them on failure,
+and key reusable caches by the caller-visible source identity/token, not just a
+data version or the newest index. External irreversible effects are never
+SQLite-atomic. Registration generations protect callback lifetime/selection;
+source-view tokens protect algorithm/index freshness.
+
+### Damaged or incomplete indexes
+
+The plugin's `check` hook decides whether its private representation is valid.
+Core does not interpret index bytes or guess whether dropping a table is safe.
+Normal open fails if a required plugin is missing, incompatible or unhealthy.
+Diagnostic inspection retains its explicit no-initialization behavior.
+
+An author may supply an explicit `rebuild` callback through a
+`zova_plugin_recovery_descriptor_v1` with `HAS_RECOVERY_V1`. The fixed upgrade
+and compatibility prefixes remain present; unused fields are null. At least
+one of `rebuild` or `salvage` is required. Older hosts reject the new flag.
+The rebuild callback receives the **installed data version**, not the preferred
+installation target. It may reconstruct its own private main-schema tables and
+indexes, but not rewrite extension metadata or authoritative core data.
+Registration, the plugin health check and core/schema validation run before
+publication. Failure also discards new callback state. A data-layout change must
+still use an explicit forward upgrade, not rebuild.
+
+```sh
+zova --extension ./plugin.zovaext extension rebuild app.zova plugin_name
+```
+
+Zig exposes `Database.rebuildExtension`; C/raw Rust expose
+`zova_database_extension_rebuild` using the existing named extension request.
+For an unhealthy database, use the explicit maintenance open
+`zova_database_open_for_extension_upgrade`, then rebuild, commit if applicable,
+close and reopen normally. A missing recovery hook returns
+`ExtensionUnavailable`. Normal open never invokes rebuild automatically.
+
+### Portable salvage
+
+The optional salvage callback receives separate, borrowed source and
+destination hosts/contexts, a request containing the stored data version and
+`PLAN`/`COPY`, and a zero-initialized result. Plan has no destination. Source
+reads use bounded services inside a pinned transaction, including bound stores;
+source writes are rejected by portable services and discarded by the enclosing
+source savepoint. Host/context/request/row pointers cannot be retained.
+
+The plugin may recover a valid subset or report a skip; it owns that decision.
+For copy it writes only its destination namespace. The host preserves the
+source data version, initializes/checks the recovered portable plugin and
+validates ownership before committing the per-extension savepoint. Errors,
+invalid results and rejected checks leave no metadata, partial tables or new
+callbacks. A skipped copy is rolled back too. Earlier caller work survives.
+
+Copy recovery is explicit and per extension; a successful earlier extension is
+not made globally atomic with a later extension or external files. Main plus
+bound WAL stores do not become cross-file crash-atomic. Missing code or salvage
+hooks remain reported skips, never guessed copies. Bundled `trgm` retains its
+native valid-subset salvage and installed-data compatibility.
+
+Backup/restore copies persistent metadata/private data, not code, local TEMP
+markers or caches. Supply trusted compatible code on reopen. Every plugin must
+account for source identity changes and validate its saved coverage after restore.
 
 ## Format transition
 
