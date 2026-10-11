@@ -56,6 +56,29 @@ assert_eq!(insert.step()?, Step::Done);
 
 See the workspace README and examples for object and vector workflows.
 
+## Trusted native plugins (development)
+
+The 1.2.0 development sources add explicit bundle selection to native and
+generated-C builds. Published 1.1.0 packages do not include this support.
+
+```rust
+let extensions = zova::ExtensionOptions {
+    bundle_paths: vec!["./search.zovaext".into()],
+    trust_store_path: None,
+};
+let mut db = zova::Database::create_with_extensions("app.zova", &extensions)?;
+db.install_extension("search")?;
+# Ok::<(), zova::Error>(())
+```
+
+First trust the bundle with `zova extension trust ./search.zovaext`. Opening
+never grants trust or selects code from database metadata. Reopen with
+`Database::open_with_extensions(path, OpenOptions, &extensions)`; SharedDatabase
+provides both constructors too. Child handles retain the connection and libraries.
+Bundles and runtime dependencies must match the host OS/CPU/deployment target.
+Browser WASM does not load native libraries. See the repository extension guide
+for the authoring ABI and trust/lifetime contract.
+
 ## App Events
 
 `Database::listen` and `Database::notify` provide queue-only, same-process app

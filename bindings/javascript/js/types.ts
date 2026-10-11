@@ -8,6 +8,21 @@ export type ColumnType = "integer" | "float" | "text" | "blob" | "null";
 export interface OpenOptions {
   readonly readOnly?: boolean;
   readonly busyTimeoutMs?: number;
+  readonly extensions?: ExtensionOptions;
+}
+
+/** Explicit native bundle selection, not a trust grant. Code must match the host. */
+export interface ExtensionOptions {
+  readonly bundlePaths: readonly string[];
+  readonly trustStorePath?: string;
+}
+
+/** Copy only the array container for the synchronous native request. */
+export function nativeExtensionOptions(options?: ExtensionOptions):
+  { bundlePaths: string[]; trustStorePath?: string } | undefined {
+  return options
+    ? { bundlePaths: [...options.bundlePaths], trustStorePath: options.trustStorePath }
+    : undefined;
 }
 
 export interface ExtensionInfo {

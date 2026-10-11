@@ -7,7 +7,8 @@ import type {
   GraphWalkItem,
   GraphWalkOptions,
 } from "./graph.js";
-import type { FormatInfo, OpenOptions } from "./types.js";
+import type { ExtensionOptions, FormatInfo, OpenOptions } from "./types.js";
+import { nativeExtensionOptions } from "./types.js";
 import type { KvEntry } from "./types.js";
 import { Subscription } from "./subscription.js";
 import type {
@@ -28,8 +29,10 @@ export class AsyncDatabase {
     this.#native = database;
   }
 
-  static create(path: string): AsyncDatabase {
-    return new AsyncDatabase(native.NativeDatabase.create(path));
+  static create(path: string, extensions?: ExtensionOptions): AsyncDatabase {
+    return new AsyncDatabase(
+      native.NativeDatabase.create(path, nativeExtensionOptions(extensions)),
+    );
   }
 
   static createMemory(): AsyncDatabase {
@@ -41,6 +44,7 @@ export class AsyncDatabase {
       native.NativeDatabase.open(path, {
         readOnly: options.readOnly,
         busyTimeoutMs: options.busyTimeoutMs,
+        extensions: nativeExtensionOptions(options.extensions),
       }),
     );
   }

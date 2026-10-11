@@ -329,11 +329,24 @@ Rust exposes lifecycle methods for extensions already present in the current
 process registry. The default registry includes bundled extensions such as
 `trgm`, so Rust applications can install, list, check, and drop `trgm` directly.
 The low-level `zova-sys` crate exposes the C ABI for scalar SQL callback
-registration and trusted `.zovaext` bundle loading. The safe Rust crate does not
-yet wrap those callback or bundle-loading APIs.
+registration and trusted `.zovaext` bundle loading. Development safe Rust and
+generated-C packages support explicit selection at create/open:
 
-Default generated-C packages do not support dynamic loading; bundle symbols
-alone do not enable it. The explicit upgrade APIs are raw C/sys
+```rust
+let extensions = zova::ExtensionOptions {
+    bundle_paths: vec!["./search.zovaext".into()],
+    trust_store_path: None,
+};
+let mut db = zova::Database::create_with_extensions("app.zova", &extensions)?;
+db.install_extension("search")?;
+// Reopen with Database::open_with_extensions(path, OpenOptions, &extensions).
+```
+
+`SharedDatabase` provides the same constructors. First trust the bundle using
+`zova extension trust ./search.zovaext`; opening never grants trust. Code must
+match the host and include its runtime dependencies. Libraries remain alive
+through child handles. Published 1.1.0 packages do not include this development
+support. Application callbacks and explicit data upgrades remain raw C/sys
 only, not safe Rust wrappers. See the
 [capability matrix](../../docs/extensions.md#availability-and-binding-matrix).
 

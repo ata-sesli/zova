@@ -175,13 +175,23 @@ binding contract.
 Python exposes lifecycle methods for extensions already present in the current
 process registry. The default registry includes bundled extensions such as
 `trgm`, so Python applications can install, list, check, and drop `trgm`
-directly. App-registered extension authoring and dynamic `.zovaext` loading
-are not exposed as Python APIs yet.
+directly. Development wheels also accept explicit trusted native bundles:
 
-Python does not wrap application scalar callbacks or explicit extension-data
-upgrades. Generated-C packages cannot dynamically load bundles. A loader-capable
-native CLI/C host can use them, but that does not register their code on a
-Python-owned connection. See the
+```python
+db = zova.Database.create("app.zova", extension_bundles=["./search.zovaext"])
+db.install_extension("search")
+db.close()
+db = zova.Database.open("app.zova", read_only=True,
+                        extension_bundles=["./search.zovaext"])
+```
+
+Both constructors accept `trust_store_path`; omit it for Zova's default store.
+First run `zova extension trust ./search.zovaext`. Opening never grants trust
+or loads paths from the database. Native code and dependencies must match the
+host. Owned statements retain their connection and libraries after `db.close()`.
+Published 1.1.0 wheels do not include this development support. Python does not
+wrap extension authoring, application scalar callbacks or explicit data
+upgrades. See the
 [capability matrix](../../docs/extensions.md#availability-and-binding-matrix).
 
 See [../../docs/extensions.md](../../docs/extensions.md) for the current host

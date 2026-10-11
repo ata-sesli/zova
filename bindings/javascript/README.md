@@ -94,8 +94,25 @@ The synchronous `Database` facade exposes:
 - public graph CRUD, atomic batches, neighbors, degree, and walks
 - bundled extension install/list/info/check/drop
 
-Extension authoring, application SQL callbacks, dynamic bundle loading, and
-explicit extension-data upgrades have no JavaScript wrapper. See the
+Development builds support trusted native bundles through both handle types:
+
+```typescript
+const extensions = { bundlePaths: ["./search.zovaext"] };
+const db = Database.create("app.zova", extensions);
+db.installExtension("search");
+db.close();
+const reopened = Database.open("app.zova", { readOnly: true, extensions });
+```
+
+`AsyncDatabase.create/open` accept the same options. Set `trustStorePath` in the
+extension options for a non-default store. First trust the bundle using
+`zova extension trust ./search.zovaext`; opening never grants trust or loads
+paths from database metadata. Native code/dependencies must match the host;
+close releases callback state before unloading libraries. Published 1.1.0 npm
+packages do not include this development support.
+
+Extension authoring, application SQL callbacks, and explicit data upgrades
+remain unwrapped. See the
 [extension capability matrix](../../docs/extensions.md#availability-and-binding-matrix);
 the presence of low-level C declarations does not imply addon support.
 
@@ -154,7 +171,7 @@ The binding preserves Zova's status name, numeric status, and native message.
 ## Deferred capabilities
 
 - JavaScript-authored SQLite callbacks
-- extension authoring or dynamic `.zovaext` loading
+- extension authoring
 - async transaction callbacks
 - direct Bun FFI
 - zero-copy native output

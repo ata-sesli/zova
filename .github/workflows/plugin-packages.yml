@@ -1,0 +1,38 @@
+name: Native plugin packages
+
+on:
+  workflow_call:
+
+jobs:
+  package-plugins:
+    name: Portable plugins (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@nextest
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+        working-directory: bindings/javascript
+      # Real C/C++ bundles, protected sibling dependency, generated C, raw/safe
+      # Rust, Go/cgo, installed Python wheel and installed npm tarball.
+      - run: python scripts/check-plugin-packages.py "${{ runner.temp }}/plugin-packages"

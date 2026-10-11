@@ -21,8 +21,8 @@ mod vector;
 
 pub use database::{
     migrate_database, probe_format, restore_backup, restore_backup_to_memory, BackupOptions,
-    CompactOptions, Database, FormatCompatibility, FormatInfo, MigrateOptions, OpenOptions,
-    RestoreOptions,
+    CompactOptions, Database, ExtensionOptions, FormatCompatibility, FormatInfo, MigrateOptions,
+    OpenOptions, RestoreOptions,
 };
 pub use error::{Error, Result, Status};
 pub use extension::ExtensionInfo;

@@ -67,7 +67,7 @@ rm -rf "$TMP" "$OUT"
 mkdir -p "$TMP" "$OUT"
 
 BUILD_OPTIONS="$TMP/zova_build_options.zig"
-printf '%s\n' 'pub const enable_dynamic_extensions = false;' >"$BUILD_OPTIONS"
+printf '%s\n' 'pub const enable_dynamic_extensions = true;' >"$BUILD_OPTIONS"
 
 zig translate-c -target "$ZIG_TARGET" -O ReleaseSafe -lc \
     -I "$SQLITE_DIR" "$SQLITE_DIR/sqlite3.h" >"$TMP/sqlite_c.zig"

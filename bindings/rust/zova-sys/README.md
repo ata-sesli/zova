@@ -60,11 +60,16 @@ are borrowed for the duration of the call, text/blob/error result bytes are
 copied by Zova before SQLite observes them, and callbacks must not re-enter the
 same `zova_database` handle.
 
-The safe Rust `zova` crate does not yet wrap app-defined SQL callbacks or
-dynamic extension bundle loading. Go and Python callback APIs are also deferred.
+The safe Rust `zova` development crate exposes explicit trusted bundle selection
+at create/open; app-defined SQL callbacks remain raw C/sys. Go and Python
+callback APIs are also deferred.
 
-Default generated-C packages disable dynamic bundle loading. These declarations
-only load bundles when linked to a loader-capable native Zig build on
-Linux/macOS, not Windows. The source tree additionally declares explicit
-extension-data upgrade APIs, which are not in already-published rc.3 packages.
+Development generated-C packages enable the same trusted native loader as Zig
+hosts on Linux, macOS and Windows. This is not present in published 1.1.0
+packages. Select compatible bundles through `zova_database_create_with_extensions`
+or `zova_database_open_with_extensions`; opening never grants trust or loads
+paths from database metadata. Libraries remain owned by the C handle until all
+callbacks and child resources are released. C++ runtime/dependency packaging
+belongs to the author. Browser WASM remains separate. The source tree also
+declares explicit extension-data upgrade APIs; safe wrappers are separate work.
 See the [extension capability matrix](../../../docs/extensions.md#availability-and-binding-matrix).
