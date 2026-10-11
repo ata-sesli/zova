@@ -16,6 +16,7 @@ jobs:
       - run: python3 -m unittest scripts/tests/test_check_rust_artifact.py
       - run: python3 -m unittest scripts/tests/test_windows_generated_c.py
       - run: python3 -m unittest scripts/tests/test_plugin_artifact_gate.py
+      - run: python3 -m unittest scripts/tests/test_plugin_package_compiler.py
       - run: python3 scripts/generate-rust-platforms.py
       - run: python3 scripts/check-rust-artifact.py package . "${{ runner.temp }}/rust-crates"
       - uses: actions/upload-artifact@v4

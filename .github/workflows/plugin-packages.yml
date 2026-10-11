@@ -35,4 +35,5 @@ jobs:
         working-directory: bindings/javascript
       # Real C/C++ bundles, protected sibling dependency, generated C, raw/safe
       # Rust, Go/cgo, installed Python wheel and installed npm tarball.
+      - run: python -m unittest scripts/tests/test_plugin_package_compiler.py
       - run: python scripts/check-plugin-packages.py "${{ runner.temp }}/plugin-packages"

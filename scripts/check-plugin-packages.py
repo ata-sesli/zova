@@ -62,6 +62,8 @@ def main():
     generated = out / "generated"
     run(["sh", "scripts/update-generated-c.sh", generated], env=env)
     cc = ["zig", "cc"]
+    if SYSTEM == "Windows":
+        cc += ["-target", "x86_64-windows-msvc"]
     run([*cc, "-std=c11", "-O2", "-Wno-incompatible-pointer-types", "-I", generated, "-c", generated / "zova_c.c", "-o", out / "zova.o"], env=env)
     defines = ["SQLITE_THREADSAFE=1", "SQLITE_ENABLE_FTS5", "SQLITE_ENABLE_DBSTAT_VTAB", "SQLITE_ENABLE_RTREE", "SQLITE_ENABLE_GEOPOLY", "SQLITE_ENABLE_CARRAY", "SQLITE_ENABLE_MATH_FUNCTIONS"]
     run([*cc, "-std=c99", "-O2", *["-D" + d for d in defines], "-I", generated, "-c", generated / "sqlite3.c", "-o", out / "sqlite.o"], env=env)
