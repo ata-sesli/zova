@@ -2665,6 +2665,7 @@ pub const Database = struct {
     }
 
     fn beginBoundGraphMutation(self: *Database) Error!bool {
+        try @import("extension_operations.zig").requireSourceIdle(&self.sqlite_db);
         if (self.bound_graph_store == null or hasActiveTransaction(&self.sqlite_db)) return false;
         try self.sqlite_db.beginImmediate();
         return true;

@@ -1027,7 +1027,7 @@ not one mutable newest index for all readers. Cache validity includes incarnatio
 configuration/data version and source view. Source writes and history roll back
 together through savepoints and caller transactions. Never promote provisional
 cache state to committed authority. Read-only queries can reconcile in memory.
-Native vector writes are rejected while a plugin source cursor is live on the
+Native vector and graph writes are rejected with `Busy` while a plugin source cursor is live on the
 same connection; reset/finalize releases it. Other connections remain free to
 commit, while older WAL readers retain their historical source/history pages.
 
