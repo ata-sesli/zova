@@ -242,7 +242,7 @@ test "c abi object put commits atomically with a caller sql transaction" {
             .db = db,
             .data = case.name.ptr,
             .len = case.name.len,
-            .options = .{ .profile = @intFromEnum(case.profile) },
+            .options = .{ .profile = @backingInt(case.profile) },
             .out_id = &id,
         }));
         try std.testing.expectEqual(zova_status.OK, zova_database_commit(&simple));
