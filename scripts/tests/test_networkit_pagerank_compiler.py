@@ -46,6 +46,7 @@ class NetworKitCompilerTests(unittest.TestCase):
             self.assertIsNotNone(runtime, "MSVC cannot supply __floattidf and __divti3")
             self.assertEqual(runtime[runtime.index("-target") + 1], "x86_64-windows-msvc")
             self.assertTrue(runtime[2].endswith("compiler_rt.zig"))
+            self.assertIn("-fno-builtin", runtime, "runtime memcpy must not call itself")
             self.assertIn("C:\\Zig\\lib", runtime[2])
             root = Path(directory).resolve()
             library = str(root / "run" / "compiler_rt.lib")
