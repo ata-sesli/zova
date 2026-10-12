@@ -155,10 +155,12 @@ int main(int argc, char **argv) {
         hits = search(db,"empty",{0,0}); require(hits.size() == 1 && hits[0].id == "same","idempotent batch deletion");
         exec(db,"SELECT zova_usearch_refresh('empty')");
         // Wide rows: 256 of them exceed the host's 1 MiB page budget, so paging must shrink.
+        // Each case is rolled back so it does not stay in the portable-consumer database.
         struct Wide { const char *name; int dims, type, count; };
         for (const Wide &wide : {Wide{"wide_f32",1536,ZOVA_VECTOR_ELEMENT_TYPE_F32,300}, Wide{"wide_f16",3072,ZOVA_VECTOR_ELEMENT_TYPE_F16,260},
                                  Wide{"wide_i8",4096,ZOVA_VECTOR_ELEMENT_TYPE_I8,260}, Wide{"widest_f32",4096,ZOVA_VECTOR_ELEMENT_TYPE_F32,130}}) {
             std::printf("Checking %s\n", wide.name); std::fflush(stdout);
+            exec(db,"BEGIN");
             zova_vector_collection_create_request create{db,wide.name,{uint32_t(wide.dims),ZOVA_VECTOR_METRIC_L2,wide.type}}; ok(zova_vector_collection_create(&create));
             // Vector `slot` is the grid point (slot % 100, slot / 100), exact in every element type.
             auto put_wide = [&](const std::string &id, int slot) {
@@ -181,20 +183,19 @@ int main(int argc, char **argv) {
                 require(s.step(), "wide search row"); Hit hit{s.text(0),s.real(1),s.integer(2),s.integer(3)}; require(!s.step(), "one wide hit"); return hit;
             };
             auto id = [](const char *prefix, int slot) { char text[32]; std::snprintf(text,sizeof text,"%s%05d",prefix,slot); return std::string(text); };
-            exec(db,"BEGIN"); for (int i = 0; i < wide.count; ++i) put_wide(id("v",i),i); exec(db,"COMMIT");
+            for (int i = 0; i < wide.count; ++i) put_wide(id("v",i),i);
             build(db,wide.name);
             for (int i : {0, wide.count / 2, wide.count - 1}) { auto hit = nearest(i);
                 require(hit.id == id("v",i) && hit.distance == 0 && hit.delta == 0 && hit.rebuilt == 0, "wide build reads every page"); }
             // More than one change page: move every vector to a fresh grid point under a new ID.
-            exec(db,"BEGIN");
             for (int i = 0; i < wide.count; ++i) { zova_vector_delete_request gone{db,wide.name,id("v",i).c_str()}; ok(zova_vector_delete(&gone));
                 put_wide(id("w",i),wide.count + i); }
-            exec(db,"COMMIT");
             for (int i : {0, wide.count / 2, wide.count - 1}) { auto hit = nearest(wide.count + i);
                 require(hit.id == id("w",i) && hit.distance == 0 && hit.delta == 2 * wide.count && hit.rebuilt == 0, "wide incremental reconciliation"); }
             require(nearest(0).id != id("v",0), "wide deletions reconcile");
             exec(db,(std::string("SELECT zova_usearch_refresh('") + wide.name + "')").c_str());
             { auto hit = nearest(wide.count); require(hit.id == id("w",0) && hit.distance == 0 && hit.delta == 0 && hit.rebuilt == 0, "wide refresh persists reconciled generation"); }
+            exec(db,"ROLLBACK");
         }
         if (argc == 5 && std::string(argv[4]) == "bench") {
             zova_vector_collection_create_request bench{db, "bench", {32, ZOVA_VECTOR_METRIC_L2, ZOVA_VECTOR_ELEMENT_TYPE_F32}};
