@@ -2733,6 +2733,7 @@ pub const Database = struct {
         return .{
             .sqlite_db = &self.sqlite_db,
             .storage_schema = if (self.bound_vector_store != null) .vector_store else .main,
+            .statement_cache = &self.read_statements,
         };
     }
 

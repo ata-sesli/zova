@@ -1,8 +1,8 @@
-//! Bounded, connection-owned cache of idle read statements.
+//! Bounded, connection-owned cache of idle statements.
 //!
-//! Some object and graph read paths prepared the same SQL on every call. This
-//! module lets those paths check out a previously prepared statement instead,
-//! under the limits agreed for issue #98:
+//! Some object and graph read paths, and the single-row vector writes, prepared
+//! the same SQL on every call. This module lets those paths check out a
+//! previously prepared statement instead, under the limits agreed for issue #98:
 //!
 //! - The cache lives on the stable connection owner (`zova.Database`), never
 //!   on a temporary subsystem facade, because facades are rebuilt per call.
@@ -47,6 +47,8 @@ pub const Tag = enum(u8) {
     graph_has_node,
     graph_get_node,
     object_exists,
+    vector_upsert,
+    vector_delete,
 };
 
 const Key = packed struct(u16) {
