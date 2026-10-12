@@ -73,6 +73,38 @@ test "sequential object reader routes through a bound object store" {
     try std.testing.expectEqual(@as(usize, 0), try reader.read(&output));
 }
 
+test "failed bound object epoch update rolls back the entire caller operation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "epoch-failure-main.zova");
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "epoch-failure-store.zova");
+    try createObjectStore(store_path);
+
+    var db = try Database.create(main_path);
+    defer db.deinit();
+    try db.bindObjectStore(store_path);
+    try db.exec("create table caller_work (value text not null)");
+    try db.exec(
+        "create temp trigger reject_object_epoch before update of object_epoch " ++
+            "on main._zova_bound_stores begin select raise(abort, 'epoch update failed'); end",
+    );
+
+    try db.begin();
+    try db.exec("insert into caller_work values ('earlier work')");
+    const payload = "bound object whose epoch update fails";
+    try std.testing.expectError(error.Constraint, db.putObject(payload));
+    try std.testing.expect(!(try db.hasObject(@import("object.zig").objectId(payload))));
+
+    var count = try db.sqlite_db.prepare("select count(*) from caller_work");
+    defer count.deinit();
+    try std.testing.expect((try count.step()) == .row);
+    try std.testing.expectEqual(@as(i64, 1), count.columnInt64(0));
+    try db.rollback();
+}
+
 test "failed replacement bind preserves the current attached object store" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
