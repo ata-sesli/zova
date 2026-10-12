@@ -30,8 +30,10 @@ def build_windows_compiler_runtime(out, env):
         raise RuntimeError("could not determine Zig lib_dir")
     source = Path(json.loads(lib_dir.group(1))) / "compiler_rt.zig"
     runtime = out / "compiler_rt.lib"
+    # Without -fno-builtin LLVM turns the runtime's own memcpy loop into a
+    # memcpy call, which recurses once per 16 bytes and overflows on large copies.
     run(["zig", "build-lib", source, "-target", "x86_64-windows-msvc",
-         "-O", "ReleaseFast", f"-femit-bin={runtime}"], env)
+         "-O", "ReleaseFast", "-fno-builtin", f"-femit-bin={runtime}"], env)
     return runtime
 
 
