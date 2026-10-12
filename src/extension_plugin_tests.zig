@@ -342,6 +342,80 @@ test "extension_plugin live source cursors reject interleaved vector writes" {
     try db.putVector("v", "a", .{ .f32 = &.{ 1, 2 } });
 }
 
+test "extension_plugin live source cursors reject interleaved graph writes" {
+    const zova = @import("zova.zig");
+    for ([_]bool{ false, true }) |bound| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const a = std.testing.allocator;
+        const main = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}/main.zova", .{tmp.sub_path}, 0);
+        defer a.free(main);
+        const store = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}/graph.zova", .{tmp.sub_path}, 0);
+        defer a.free(store);
+        var db = try zova.Database.create(main);
+        defer db.deinit();
+        if (bound) {
+            try zova.createGraphStore(store);
+            try db.bindGraphStore(store);
+        }
+        try db.createGraph("topo");
+        try db.putGraphNodes(&.{ .{ .graph_name = "topo", .node_id = "a", .kind = "node" }, .{ .graph_name = "topo", .node_id = "b", .kind = "node" } });
+        try db.putGraphEdge(.{ .graph_name = "topo", .from_node_id = "a", .edge_type = "to", .to_node_id = "b" });
+        var d = descriptor();
+        d.register_sql = registerNodes;
+        const ext = try plugin.validate(&d);
+        try extension.install(&db.sqlite_db, .{ .extensions = &.{ext}, .plugins = &.{d} }, "c_test", null);
+        try db.exec("create table caller_work(x integer)");
+
+        const node: zova.GraphNodeInput = .{ .graph_name = "topo", .node_id = "c", .kind = "node" };
+        const edge: zova.GraphEdgeInput = .{ .graph_name = "topo", .from_node_id = "b", .edge_type = "to", .to_node_id = "a" };
+        const existing: zova.GraphEdgeInput = .{ .graph_name = "topo", .from_node_id = "a", .edge_type = "to", .to_node_id = "b" };
+        var keys: [1]i64 = undefined;
+
+        // Rejection must precede mutation and keep earlier caller-transaction work.
+        try db.exec("begin");
+        try db.exec("insert into caller_work values (1)");
+        {
+            var stmt = try db.prepare("select value from zova_c_test_nodes()");
+            defer stmt.deinit();
+            try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+            try std.testing.expectEqual(@as(i64, 1), stmt.columnInt64(0));
+            try std.testing.expectError(error.Busy, db.putGraphNode(node));
+            try std.testing.expectError(error.Busy, db.putGraphNodes(&.{node}));
+            try std.testing.expectError(error.Busy, db.putGraphNodesKeyed(&.{node}, &keys));
+            try std.testing.expectError(error.Busy, db.deleteGraphNode("topo", "b"));
+            try std.testing.expectError(error.Busy, db.deleteGraphNodes("topo", &.{"b"}));
+            try std.testing.expectError(error.Busy, db.putGraphEdge(edge));
+            try std.testing.expectError(error.Busy, db.putGraphEdges(&.{edge}));
+            try std.testing.expectError(error.Busy, db.putGraphEdgesKeyed(&.{edge}, &keys));
+            try std.testing.expectError(error.Busy, db.deleteGraphEdge(existing));
+            try std.testing.expectError(error.Busy, db.deleteGraphEdges(&.{existing}));
+            try std.testing.expectError(error.Busy, db.createGraph("other"));
+            try std.testing.expectError(error.Busy, db.deleteGraph("topo"));
+            // The stream still sees exactly the source it started with.
+            try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+            try std.testing.expectEqual(@as(i64, 2), stmt.columnInt64(0));
+            try std.testing.expectEqual(sqlite.Step.done, try stmt.step());
+            // EOF releases the source cursor.
+            try db.putGraphNode(node);
+            try stmt.reset();
+            try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+            try std.testing.expectError(error.Busy, db.putGraphEdge(edge));
+            try stmt.reset();
+            try db.putGraphEdge(edge);
+        }
+        try db.exec("commit");
+        try std.testing.expectEqual(@as(i64, 1), try scalarValue(&db.sqlite_db, "select count(*) from caller_work"));
+        try std.testing.expectEqual(@as(i64, 3), try scalarValue(&db.sqlite_db, "select count(*) from zova_c_test_nodes()"));
+        try std.testing.expect(try db.hasGraphEdge("topo", "a", "to", "b"));
+        try std.testing.expect(try db.hasGraphEdge("topo", "b", "to", "a"));
+        try std.testing.expect(!try db.hasGraph("other"));
+        // Finalized statements leave ordinary graph behavior unchanged.
+        try db.deleteGraphNodes("topo", &.{"c"});
+        try db.deleteGraph("topo");
+    }
+}
+
 test "extension_plugin SQL scalar registration has typed arguments and connection lifetime" {
     var db = try @import("zova.zig").Database.createMemory();
     defer db.deinit();
