@@ -259,3 +259,67 @@ test "fresh graph builds work while read statements are cached" {
     try std.testing.expectEqual(@as(usize, 1), neighbors.items.len);
     try db.vacuum();
 }
+
+test "single-row vector writes reuse one idle statement per store" {
+    var db = try Database.createMemory();
+    defer db.deinit();
+    try db.createVectorCollection("points", .{ .dimensions = 2, .metric = .l2, .element_type = .f32 });
+
+    for (0..4) |index| {
+        const value: f32 = @floatFromInt(index);
+        try db.putVector("points", "same", .{ .f32 = &.{ value, 1 } });
+        try db.putVector("points", "gone", .{ .f32 = &.{ 1, value } });
+        try db.deleteVector("points", "gone");
+    }
+    try std.testing.expectEqual(@as(usize, 1), db.read_statements.countFor(.vector_upsert, false));
+    try std.testing.expectEqual(@as(usize, 1), db.read_statements.countFor(.vector_delete, false));
+    try std.testing.expect(db.read_statements.reuses >= 10);
+    try std.testing.expectEqual(db.read_statements.retained(), countLiveStatements(&db));
+
+    // A rolled-back write and a schema change must not poison the retained statements.
+    try db.exec("begin");
+    try db.putVector("points", "same", .{ .f32 = &.{ 9, 9 } });
+    try db.exec("rollback");
+    try db.exec("create table cache_schema_change (x)");
+    try db.putVector("points", "after", .{ .f32 = &.{ 7, 8 } });
+    try std.testing.expectError(error.VectorNotFound, db.deleteVector("points", "gone"));
+
+    var same = try db.getVector(std.testing.allocator, "points", "same");
+    defer same.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(f32, &.{ 3, 1 }, same.values.f32);
+    var after = try db.getVector(std.testing.allocator, "points", "after");
+    defer after.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(f32, &.{ 7, 8 }, after.values.f32);
+    try std.testing.expect(!try db.hasVector("points", "gone"));
+    try std.testing.expectEqual(db.read_statements.retained(), countLiveStatements(&db));
+    try db.vacuum();
+}
+
+test "bound vector store write statements are disposed before unbind" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "stmt-vector-main.zova");
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "stmt-vector-store.zova");
+    try zova.createVectorStore(store_path);
+
+    var db = try Database.create(main_path);
+    defer db.deinit();
+    try db.bindVectorStore(store_path);
+    try db.createVectorCollection("points", .{ .dimensions = 2, .metric = .l2, .element_type = .f32 });
+    try db.putVector("points", "a", .{ .f32 = &.{ 1, 2 } });
+    try db.putVector("points", "a", .{ .f32 = &.{ 3, 4 } });
+    try std.testing.expectEqual(@as(usize, 0), db.read_statements.countFor(.vector_upsert, false));
+    try std.testing.expectEqual(@as(usize, 1), db.read_statements.countFor(.vector_upsert, true));
+
+    try db.unbindVectorStore();
+    try std.testing.expectEqual(@as(usize, 0), db.read_statements.retained());
+    try db.createVectorCollection("points", .{ .dimensions = 2, .metric = .l2, .element_type = .f32 });
+    try db.putVector("points", "a", .{ .f32 = &.{ 5, 6 } });
+    try std.testing.expectEqual(@as(usize, 1), db.read_statements.countFor(.vector_upsert, false));
+    try std.testing.expectEqual(@as(usize, 0), db.read_statements.countFor(.vector_upsert, true));
+    var a = try db.getVector(std.testing.allocator, "points", "a");
+    defer a.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(f32, &.{ 5, 6 }, a.values.f32);
+}

@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
+const statement_cache = @import("statement_cache.zig");
 const zova_error = @import("zova_error.zig");
 
 pub const Error = zova_error.Error;
@@ -331,6 +332,11 @@ pub const vectors_schema_sql =
 pub const Database = struct {
     sqlite_db: *sqlite.Database,
     storage_schema: StorageSchema = .main,
+    statement_cache: ?*statement_cache.Cache = null,
+
+    fn acquire(self: *Database, comptime tag: statement_cache.Tag, comptime sql: []const u8) Error!statement_cache.Lease {
+        return statement_cache.acquire(self.statement_cache, self.sqlite_db, tag, self.storage_schema != .main, sql, self.storage_schema.prefix());
+    }
 
     fn prepareSchema(self: *Database, comptime sql_format: []const u8, args: anytype) Error!sqlite.Statement {
         var sql_buffer: [4096]u8 = undefined;
@@ -581,8 +587,9 @@ pub const Database = struct {
         try validateVectorId(vector_id);
         const collection = try loadVectorCollection(self, collection_name);
 
-        var stmt = try self.prepareSchema("delete from {s}_zova_vectors where collection_key = ? and vector_id = ?", .{self.storage_schema.prefix()});
-        defer stmt.deinit();
+        var lease = try self.acquire(.vector_delete, "delete from {s}_zova_vectors where collection_key = ? and vector_id = ?");
+        defer lease.release();
+        const stmt = &lease.statement;
 
         try stmt.bindInt64(1, collection.collection_key);
         try stmt.bindText(2, vector_id);
@@ -1301,14 +1308,15 @@ pub const Database = struct {
         if (vectors.len == 0) return;
         _ = collection_name;
 
-        var stmt = try self.prepareSchema(
+        var lease = try self.acquire(.vector_upsert,
             \\insert into {s}_zova_vectors (collection_key, vector_id, "values", norm_squared)
             \\values (?, ?, ?, ?)
             \\on conflict(collection_key, vector_id) do update set
             \\  "values" = excluded."values",
             \\  norm_squared = excluded.norm_squared
-        , .{self.storage_schema.prefix()});
-        defer stmt.deinit();
+        );
+        defer lease.release();
+        const stmt = &lease.statement;
         var scratch: std.ArrayList(u8) = .empty;
         defer scratch.deinit(std.heap.c_allocator);
 
