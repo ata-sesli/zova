@@ -172,7 +172,7 @@ int main(int argc, char **argv) {
             zova_vector_collection_create_request create{db,"delta",{uint32_t(dims),ZOVA_VECTOR_METRIC_L2,ZOVA_VECTOR_ELEMENT_TYPE_I8}}; ok(zova_vector_collection_create(&create));
             for (int i = 0; i < count; ++i) put_point(id("v",i),i);
             build(db,"delta");
-            for (int i = 0; i < count; ++i) { zova_vector_delete_request gone{db,"delta",id("v",i).c_str()}; ok(zova_vector_delete(&gone));
+            for (int i = 0; i < count; ++i) { const std::string old = id("v",i); zova_vector_delete_request gone{db,"delta",old.c_str()}; ok(zova_vector_delete(&gone));
                 put_point(id("w",i),count + i); }
             for (int i : {0, count / 2, count - 1}) { auto hit = nearest(count + i);
                 require(hit.id == id("w",i) && hit.distance == 0 && hit.delta == 2 * count && hit.rebuilt == 0, "deletions do not exhaust the delta bound"); }
