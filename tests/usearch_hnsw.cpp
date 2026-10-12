@@ -195,6 +195,32 @@ int main(int argc, char **argv) {
             require(nearest(0).id != id("v",0), "wide deletions reconcile");
             exec(db,(std::string("SELECT zova_usearch_refresh('") + wide.name + "')").c_str());
             { auto hit = nearest(wide.count); require(hit.id == id("w",0) && hit.distance == 0 && hit.delta == 0 && hit.rebuilt == 0, "wide refresh persists reconciled generation"); }
+        // Deletions must not count as full-width vectors against the 32 MiB delta bound:
+        // 2,200 changed IDs x 3,900 dimensions x 4 bytes exceeds it, the 1,100 live rows do not.
+        // Rolled back so the wide fixture does not stay in the portable-consumer database.
+        {
+            std::puts("Checking wide delta with deletions"); std::fflush(stdout);
+            const int dims = 3900, count = 1100;
+            auto point = [&](int slot) { std::vector<int8_t> v(dims); v[0] = int8_t(slot % 100); v[1] = int8_t(slot / 100); return v; };
+            auto id = [](const char *prefix, int slot) { char text[32]; std::snprintf(text,sizeof text,"%s%05d",prefix,slot); return std::string(text); };
+            auto put_point = [&](const std::string &name, int slot) { auto v = point(slot);
+                zova_vector_put_request q{db,"delta",name.c_str(),{ZOVA_VECTOR_ELEMENT_TYPE_I8,nullptr,nullptr,v.data(),size_t(dims)}}; ok(zova_vector_put(&q)); };
+            auto nearest = [&](int slot) { auto v = point(slot);
+                Statement s(db,"SELECT vector_id,distance,delta_count,rebuilt FROM zova_usearch_search('delta',?,1,128)");
+                zova_statement_bind_blob_request query{s.value,1,reinterpret_cast<const uint8_t *>(v.data()),v.size()}; ok(zova_statement_bind_blob(&query));
+                require(s.step(), "delta search row"); return Hit{s.text(0),s.real(1),s.integer(2),s.integer(3)}; };
+            exec(db,"BEGIN");
+            zova_vector_collection_create_request create{db,"delta",{uint32_t(dims),ZOVA_VECTOR_METRIC_L2,ZOVA_VECTOR_ELEMENT_TYPE_I8}}; ok(zova_vector_collection_create(&create));
+            for (int i = 0; i < count; ++i) put_point(id("v",i),i);
+            build(db,"delta");
+            for (int i = 0; i < count; ++i) { zova_vector_delete_request gone{db,"delta",id("v",i).c_str()}; ok(zova_vector_delete(&gone));
+                put_point(id("w",i),count + i); }
+            for (int i : {0, count / 2, count - 1}) { auto hit = nearest(count + i);
+                require(hit.id == id("w",i) && hit.distance == 0 && hit.delta == 2 * count && hit.rebuilt == 0, "deletions do not exhaust the delta bound"); }
+            require(nearest(0).id != id("v",0), "wide delta deletions reconcile");
+            // Refresh may compact by reconstruction here; it must succeed either way.
+            exec(db,"SELECT zova_usearch_refresh('delta')");
+            { auto hit = nearest(count); require(hit.id == id("w",0) && hit.distance == 0 && hit.delta == 0 && hit.rebuilt == 0, "wide delta refresh persists"); }
             exec(db,"ROLLBACK");
         }
         if (argc == 5 && std::string(argv[4]) == "bench") {

@@ -274,11 +274,14 @@ std::shared_ptr<Base> load(Host &host, const std::string &name, Stored record) {
 }
 using Delta = std::unordered_map<std::string, std::vector<float>>; // Empty means deleted.
 Delta changes(Host &host, const std::string &name, const Base &base) {
-    Delta delta; Receiver r{[&](auto v, auto n) {
+    // Only stored values count against the bound: deletions hold no vector, and
+    // the live entries are current source rows already bounded by metadata().
+    Delta delta; size_t live = 0; Receiver r{[&](auto v, auto n) {
         require(n == 4 && v[0].kind == 1 && v[2].kind == 1 && (v[2].integer == 0 || v[2].integer == 1));
         auto id = string(v[1]); require(!id.empty());
-        delta[id] = v[2].integer ? decode(v[3], base.config) : std::vector<float>{};
-        require(delta.size() * base.config.dims * 4 <= max_matrix, ZOVA_PLUGIN_LIMIT);
+        auto &entry = delta[id]; live -= !entry.empty();
+        entry = v[2].integer ? decode(v[3], base.config) : std::vector<float>{}; live += !entry.empty();
+        require(live * base.config.dims * 4 <= max_matrix, ZOVA_PLUGIN_LIMIT);
     }};
     zova_plugin_vector_changes_request_v1 q{}; q.struct_size = sizeof(q); q.name = bytes(name); q.since = base.coverage;
     q.row_limit = rows_per_page(base.config, 4); q.byte_limit = page_bytes; q.row = receive; q.user_data = &r;
