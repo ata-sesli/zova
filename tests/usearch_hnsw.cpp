@@ -188,7 +188,7 @@ int main(int argc, char **argv) {
             for (int i : {0, wide.count / 2, wide.count - 1}) { auto hit = nearest(i);
                 require(hit.id == id("v",i) && hit.distance == 0 && hit.delta == 0 && hit.rebuilt == 0, "wide build reads every page"); }
             // More than one change page: move every vector to a fresh grid point under a new ID.
-            for (int i = 0; i < wide.count; ++i) { zova_vector_delete_request gone{db,wide.name,id("v",i).c_str()}; ok(zova_vector_delete(&gone));
+            for (int i = 0; i < wide.count; ++i) { const std::string old = id("v",i); zova_vector_delete_request gone{db,wide.name,old.c_str()}; ok(zova_vector_delete(&gone));
                 put_wide(id("w",i),wide.count + i); }
             for (int i : {0, wide.count / 2, wide.count - 1}) { auto hit = nearest(wide.count + i);
                 require(hit.id == id("w",i) && hit.distance == 0 && hit.delta == 2 * wide.count && hit.rebuilt == 0, "wide incremental reconciliation"); }
