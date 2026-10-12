@@ -195,6 +195,8 @@ int main(int argc, char **argv) {
             require(nearest(0).id != id("v",0), "wide deletions reconcile");
             exec(db,(std::string("SELECT zova_usearch_refresh('") + wide.name + "')").c_str());
             { auto hit = nearest(wide.count); require(hit.id == id("w",0) && hit.distance == 0 && hit.delta == 0 && hit.rebuilt == 0, "wide refresh persists reconciled generation"); }
+            exec(db,"ROLLBACK");
+        }
         // Deletions must not count as full-width vectors against the 32 MiB delta bound:
         // 2,200 changed IDs x 3,900 dimensions x 4 bytes exceeds it, the 1,100 live rows do not.
         // Rolled back so the wide fixture does not stay in the portable-consumer database.
