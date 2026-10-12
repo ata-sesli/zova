@@ -103,7 +103,8 @@ matrix and 64 MiB serialized generation per collection, at most 256 persisted
 collections, one ANN thread. Connectivity is 2..64; expansion_add must be at
 least connectivity and at most 1,024. Search limit is 1..4,096; expansion_search
 is at least limit and at most 100,000. NaN/Inf and zero-norm cosine inputs fail.
-Delta conversion is separately bounded to 32 MiB. These bound plugin-owned
+Delta conversion is separately bounded to 32 MiB of changed vector values;
+deletions hold no values and do not count. These bound plugin-owned
 representations, not whole-process RSS; copying, serialization and SQLite caches
 also consume memory. Large retained deltas increase search cost; refresh/build
 is the explicit way to amortize them. No latency/recall guarantee for arbitrary
