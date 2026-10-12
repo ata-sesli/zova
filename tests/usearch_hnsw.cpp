@@ -154,6 +154,49 @@ int main(int argc, char **argv) {
         zova_vector_delete_many_request batch_delete{db,"empty",deleted,3}; ok(zova_vector_delete_many(&batch_delete));
         hits = search(db,"empty",{0,0}); require(hits.size() == 1 && hits[0].id == "same","idempotent batch deletion");
         exec(db,"SELECT zova_usearch_refresh('empty')");
+        // Wide rows: 256 of them exceed the host's 1 MiB page budget, so paging must shrink.
+        // Each case is rolled back so it does not stay in the portable-consumer database.
+        struct Wide { const char *name; int dims, type, count; };
+        for (const Wide &wide : {Wide{"wide_f32",1536,ZOVA_VECTOR_ELEMENT_TYPE_F32,300}, Wide{"wide_f16",3072,ZOVA_VECTOR_ELEMENT_TYPE_F16,260},
+                                 Wide{"wide_i8",4096,ZOVA_VECTOR_ELEMENT_TYPE_I8,260}, Wide{"widest_f32",4096,ZOVA_VECTOR_ELEMENT_TYPE_F32,130}}) {
+            std::printf("Checking %s\n", wide.name); std::fflush(stdout);
+            exec(db,"BEGIN");
+            zova_vector_collection_create_request create{db,wide.name,{uint32_t(wide.dims),ZOVA_VECTOR_METRIC_L2,wide.type}}; ok(zova_vector_collection_create(&create));
+            // Vector `slot` is the grid point (slot % 100, slot / 100), exact in every element type.
+            auto put_wide = [&](const std::string &id, int slot) {
+                std::vector<float> f32(wide.dims); std::vector<uint16_t> f16(wide.dims); std::vector<int8_t> i8(wide.dims);
+                for (int axis = 0; axis < 2; ++axis) { int value = axis ? slot / 100 : slot % 100; if (!value) continue;
+                    f32[axis] = float(value); i8[axis] = int8_t(value);
+                    int exponent = std::ilogb(float(value)); f16[axis] = uint16_t((exponent + 15) << 10 | ((value << (10 - exponent)) & 1023)); }
+                zova_vector_put_request q{db,wide.name,id.c_str(),{wide.type,wide.type == 0 ? f32.data() : nullptr,
+                    wide.type == 1 ? f16.data() : nullptr,wide.type == 2 ? i8.data() : nullptr,size_t(wide.dims)}}; ok(zova_vector_put(&q));
+            };
+            auto nearest = [&](int slot) {
+                std::vector<float> f32(wide.dims); std::vector<uint16_t> f16(wide.dims); std::vector<int8_t> i8(wide.dims);
+                for (int axis = 0; axis < 2; ++axis) { int value = axis ? slot / 100 : slot % 100; if (!value) continue;
+                    f32[axis] = float(value); i8[axis] = int8_t(value);
+                    int exponent = std::ilogb(float(value)); f16[axis] = uint16_t((exponent + 15) << 10 | ((value << (10 - exponent)) & 1023)); }
+                const uint8_t *p = wide.type == 0 ? reinterpret_cast<uint8_t *>(f32.data()) : wide.type == 1 ? reinterpret_cast<uint8_t *>(f16.data()) : reinterpret_cast<uint8_t *>(i8.data());
+                Statement s(db,"SELECT vector_id,distance,delta_count,rebuilt FROM zova_usearch_search(?,?,1,128)");
+                zova_statement_bind_text_request nm{s.value,1,reinterpret_cast<const uint8_t *>(wide.name),std::strlen(wide.name)}; ok(zova_statement_bind_text(&nm));
+                zova_statement_bind_blob_request query{s.value,2,p,size_t(wide.dims) * (wide.type == 0 ? 4 : wide.type == 1 ? 2 : 1)}; ok(zova_statement_bind_blob(&query));
+                require(s.step(), "wide search row"); Hit hit{s.text(0),s.real(1),s.integer(2),s.integer(3)}; require(!s.step(), "one wide hit"); return hit;
+            };
+            auto id = [](const char *prefix, int slot) { char text[32]; std::snprintf(text,sizeof text,"%s%05d",prefix,slot); return std::string(text); };
+            for (int i = 0; i < wide.count; ++i) put_wide(id("v",i),i);
+            build(db,wide.name);
+            for (int i : {0, wide.count / 2, wide.count - 1}) { auto hit = nearest(i);
+                require(hit.id == id("v",i) && hit.distance == 0 && hit.delta == 0 && hit.rebuilt == 0, "wide build reads every page"); }
+            // More than one change page: move every vector to a fresh grid point under a new ID.
+            for (int i = 0; i < wide.count; ++i) { zova_vector_delete_request gone{db,wide.name,id("v",i).c_str()}; ok(zova_vector_delete(&gone));
+                put_wide(id("w",i),wide.count + i); }
+            for (int i : {0, wide.count / 2, wide.count - 1}) { auto hit = nearest(wide.count + i);
+                require(hit.id == id("w",i) && hit.distance == 0 && hit.delta == 2 * wide.count && hit.rebuilt == 0, "wide incremental reconciliation"); }
+            require(nearest(0).id != id("v",0), "wide deletions reconcile");
+            exec(db,(std::string("SELECT zova_usearch_refresh('") + wide.name + "')").c_str());
+            { auto hit = nearest(wide.count); require(hit.id == id("w",0) && hit.distance == 0 && hit.delta == 0 && hit.rebuilt == 0, "wide refresh persists reconciled generation"); }
+            exec(db,"ROLLBACK");
+        }
         if (argc == 5 && std::string(argv[4]) == "bench") {
             zova_vector_collection_create_request bench{db, "bench", {32, ZOVA_VECTOR_METRIC_L2, ZOVA_VECTOR_ELEMENT_TYPE_F32}};
             ok(zova_vector_collection_create(&bench)); uint32_t random = 0x5a6f7661;
