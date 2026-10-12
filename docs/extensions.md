@@ -1027,9 +1027,10 @@ not one mutable newest index for all readers. Cache validity includes incarnatio
 configuration/data version and source view. Source writes and history roll back
 together through savepoints and caller transactions. Never promote provisional
 cache state to committed authority. Read-only queries can reconcile in memory.
-Native vector and graph writes are rejected with `Busy` while a plugin source cursor is live on the
-same connection; reset/finalize releases it. Other connections remain free to
-commit, while older WAL readers retain their historical source/history pages.
+Native vector and graph writes are rejected with `Busy` while a plugin source
+cursor is live on the same connection; reset/finalize releases it. Other
+connections remain free to commit, while older WAL readers retain their
+historical source/history pages.
 
 Each collection retains 4096 changes, retired in 256-change blocks: at most
 4351 records. History stores IDs and small tokens, not full vector payloads.
