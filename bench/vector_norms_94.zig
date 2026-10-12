@@ -1,8 +1,11 @@
-//! One bounded put-many sample for issue #94.
-//! Usage: binary NEW_DATABASE_PATH f32|f16|i8 COUNT fresh|replay
+//! One bounded vector-write sample for issues #94 and #159.
+//! Usage: binary NEW_DATABASE_PATH f32|f16|i8 COUNT fresh|replay|single|delete [bound]
 //! Fixture: deterministic 384-dimension vectors (seed 0x5a6f7661).
 //! Fresh: create collection then one putVectors of COUNT vectors.
 //! Replay: populate once before timing one upsert batch.
+//! Single: COUNT putVector calls inside one caller transaction, commit included.
+//! Delete: populate once before timing one deleteVectors batch.
+//! Bound: the collection lives in NEW_DATABASE_PATH.vectors.zova, bound before use.
 //! Uses the public transaction-owning facade, not the internal vector layer.
 //! Full payload read-back is verified outside the timed operation.
 const std = @import("std");
@@ -21,15 +24,22 @@ const dimensions = 384;
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
-    if (args.len != 5) return error.InvalidArgument;
+    if (args.len != 5 and args.len != 6) return error.InvalidArgument;
     const element_type = std.meta.stringToEnum(vector.VectorElementType, args[2]) orelse return error.InvalidArgument;
     const count = try std.fmt.parseInt(usize, args[3], 10);
     if (count == 0 or count > 4096) return error.InvalidArgument;
-    const replay = std.mem.eql(u8, args[4], "replay");
-    if (!replay and !std.mem.eql(u8, args[4], "fresh")) return error.InvalidArgument;
+    const Mode = enum { fresh, replay, single, delete };
+    const mode = std.meta.stringToEnum(Mode, args[4]) orelse return error.InvalidArgument;
+    const bound = args.len == 6;
+    if (bound and !std.mem.eql(u8, args[5], "bound")) return error.InvalidArgument;
 
     var db = try vector.Database.create(try allocator.dupeSentinel(u8, args[1], 0));
     defer db.deinit();
+    if (bound) {
+        const store = try std.fmt.allocPrintSentinel(allocator, "{s}.vectors.zova", .{args[1]}, 0);
+        try vector.createVectorStore(store);
+        try db.bindVectorStore(store);
+    }
     try db.createVectorCollection("bench", .{ .dimensions = dimensions, .metric = .cosine, .element_type = element_type });
 
     // Deterministic incompressible values with a nonzero norm.
@@ -58,12 +68,27 @@ pub fn main(init: std.process.Init) !void {
         };
     }
 
-    if (replay) try db.putVectors("bench", inputs);
+    const ids = try allocator.alloc([]const u8, count);
+    for (inputs, ids) |input, *id| id.* = input.id;
+
+    if (mode == .replay or mode == .delete) try db.putVectors("bench", inputs);
     const start = now();
-    try db.putVectors("bench", inputs);
+    switch (mode) {
+        .fresh, .replay => try db.putVectors("bench", inputs),
+        .single => {
+            try db.beginImmediate();
+            for (inputs) |input| try db.putVector("bench", input.id, input.values);
+            try db.commit();
+        },
+        .delete => try db.deleteVectors("bench", ids),
+    }
     const total_ms = ms(start);
 
     for (inputs) |input| {
+        if (mode == .delete) {
+            if (try db.hasVector("bench", input.id)) return error.VectorMismatch;
+            continue;
+        }
         var result = try db.getVector(allocator, "bench", input.id);
         defer result.deinit(allocator);
         const equal = switch (input.values) {
@@ -74,7 +99,7 @@ pub fn main(init: std.process.Init) !void {
         if (!equal) return error.VectorMismatch;
     }
 
-    std.debug.print("type={s} count={d} mode={s} total_ms={d:.6} per_pass_ms={d:.6}\n", .{
-        args[2], count, args[4], total_ms, total_ms,
+    std.debug.print("type={s} count={d} mode={s} store={s} total_ms={d:.6} per_pass_ms={d:.6}\n", .{
+        args[2], count, args[4], if (bound) "bound" else "main", total_ms, total_ms,
     });
 }

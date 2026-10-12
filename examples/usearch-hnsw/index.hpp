@@ -17,6 +17,7 @@ using Clock = std::chrono::steady_clock;
 constexpr size_t max_vectors = 100000, max_dimensions = 4096;
 constexpr size_t max_matrix = 32 * 1024 * 1024, max_blob = 64 * 1024 * 1024;
 constexpr size_t chunk_size = 256 * 1024;
+constexpr size_t page_rows = 256, page_bytes = 1024 * 1024, max_id_bytes = 255;
 struct Failure { int32_t status; };
 void check(int32_t status) { if (status) throw Failure{status}; }
 void require(bool condition, int32_t status = ZOVA_PLUGIN_ERROR) { if (!condition) throw Failure{status}; }
@@ -112,6 +113,13 @@ std::vector<float> decode(const zova_plugin_value_v1 &v, const Config &c) {
     }
     require(c.metric != "cosine" || norm > 0, ZOVA_PLUGIN_INVALID_ARGUMENT); return out;
 }
+// The host fails a page that exceeds its byte budget instead of shortening
+// it, so request only as many rows as fit at this collection's widest row.
+uint64_t rows_per_page(const Config &c, size_t values) {
+    size_t width = c.type == "f32" ? 4 : c.type == "f16" ? 2 : 1;
+    size_t row = values * sizeof(zova_plugin_value_v1) + max_id_bytes + c.dims * width;
+    return std::clamp<size_t>(page_bytes / row, 1, page_rows);
+}
 ann::metric_kind_t metric(const Config &c) {
     return c.metric == "l2" ? ann::metric_kind_t::l2sq_k : c.metric == "dot" ? ann::metric_kind_t::ip_k : ann::metric_kind_t::cos_k;
 }
@@ -136,7 +144,7 @@ std::shared_ptr<Base> build(Host &host, const std::string &name, Config c, Times
         result_ok(added, ZOVA_PLUGIN_OUT_OF_MEMORY); t.index += elapsed(begin); base->ids.push_back(std::move(id));
     }};
     zova_plugin_data_request_v1 q{}; q.struct_size = sizeof(q); q.operation = ZOVA_PLUGIN_VECTORS_SCAN; q.name = bytes(name);
-    q.row_limit = 256; q.byte_limit = 1024 * 1024; q.row = receive; q.user_data = &r;
+    q.row_limit = rows_per_page(base->config, 2); q.byte_limit = page_bytes; q.row = receive; q.user_data = &r;
     do {
         zova_plugin_data_page_v1 page{}; auto status = host.data->read(host.connection, &q, &page); check(r.error); check(status);
         if (!page.has_more) break;
@@ -266,14 +274,17 @@ std::shared_ptr<Base> load(Host &host, const std::string &name, Stored record) {
 }
 using Delta = std::unordered_map<std::string, std::vector<float>>; // Empty means deleted.
 Delta changes(Host &host, const std::string &name, const Base &base) {
-    Delta delta; Receiver r{[&](auto v, auto n) {
+    // Only stored values count against the bound: deletions hold no vector, and
+    // the live entries are current source rows already bounded by metadata().
+    Delta delta; size_t live = 0; Receiver r{[&](auto v, auto n) {
         require(n == 4 && v[0].kind == 1 && v[2].kind == 1 && (v[2].integer == 0 || v[2].integer == 1));
         auto id = string(v[1]); require(!id.empty());
-        delta[id] = v[2].integer ? decode(v[3], base.config) : std::vector<float>{};
-        require(delta.size() * base.config.dims * 4 <= max_matrix, ZOVA_PLUGIN_LIMIT);
+        auto &entry = delta[id]; live -= !entry.empty();
+        entry = v[2].integer ? decode(v[3], base.config) : std::vector<float>{}; live += !entry.empty();
+        require(live * base.config.dims * 4 <= max_matrix, ZOVA_PLUGIN_LIMIT);
     }};
     zova_plugin_vector_changes_request_v1 q{}; q.struct_size = sizeof(q); q.name = bytes(name); q.since = base.coverage;
-    q.row_limit = 256; q.byte_limit = 1024 * 1024; q.row = receive; q.user_data = &r;
+    q.row_limit = rows_per_page(base.config, 4); q.byte_limit = page_bytes; q.row = receive; q.user_data = &r;
     do {
         zova_plugin_vector_changes_page_v1 page{};
         auto status = host.maintenance->read_changes(host.connection, &q, &page); check(r.error); check(status);

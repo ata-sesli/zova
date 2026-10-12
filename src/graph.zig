@@ -921,6 +921,7 @@ pub const Database = struct {
     }
 
     pub fn createGraph(self: *Database, name: []const u8) Error!void {
+        try @import("extension_operations.zig").requireSourceIdle(self.sqlite_db);
         try validateGraphName(name);
 
         var stmt = try self.prepareSchema(
@@ -958,6 +959,7 @@ pub const Database = struct {
         out_edge_keys: []i64,
         profile: ?*FreshGraphBuildProfile,
     ) Error!void {
+        try @import("extension_operations.zig").requireSourceIdle(self.sqlite_db);
         if (profile) |value| value.* = .{};
         const previous_cache_size = try increaseFreshBuildCache(self.sqlite_db);
         defer restoreFreshBuildCache(self.sqlite_db, previous_cache_size) catch {};
@@ -1118,6 +1120,7 @@ pub const Database = struct {
         out_edge_keys: []i64,
         profile: ?*FreshGraphBuildProfile,
     ) Error!void {
+        try @import("extension_operations.zig").requireSourceIdle(self.sqlite_db);
         if (profile) |value| value.* = .{};
         const previous_cache_size = try increaseFreshBuildCache(self.sqlite_db);
         defer restoreFreshBuildCache(self.sqlite_db, previous_cache_size) catch {};
@@ -1249,6 +1252,7 @@ pub const Database = struct {
     }
 
     pub fn deleteGraph(self: *Database, name: []const u8) Error!void {
+        try @import("extension_operations.zig").requireSourceIdle(self.sqlite_db);
         try validateGraphName(name);
         var delete_graph = try self.prepareSchema("delete from {s}_zova_graphs where name = ?");
         defer delete_graph.deinit();
@@ -1358,6 +1362,7 @@ pub const Database = struct {
     }
 
     pub fn putGraphNode(self: *Database, input: GraphNodeInput) Error!void {
+        try @import("extension_operations.zig").requireSourceIdle(self.sqlite_db);
         try validateGraphName(input.graph_name);
         try validateNodeId(input.node_id);
         try validateNodeKind(input.kind);
@@ -1400,6 +1405,7 @@ pub const Database = struct {
     /// Every graph must already exist. Repeated node ids are applied in input
     /// order, so the final occurrence supplies the stored node fields.
     pub fn putGraphNodes(self: *Database, inputs: []const GraphNodeInput) Error!void {
+        try @import("extension_operations.zig").requireSourceIdle(self.sqlite_db);
         var graph_keys: std.StringHashMap(i64) = .init(std.heap.c_allocator);
         defer graph_keys.deinit();
         for (inputs) |input| {
@@ -1449,6 +1455,7 @@ pub const Database = struct {
 
     /// Upsert graph nodes and return one opaque database-local key per input.
     pub fn putGraphNodesKeyed(self: *Database, inputs: []const GraphNodeInput, out_keys: []i64) Error!void {
+        try @import("extension_operations.zig").requireSourceIdle(self.sqlite_db);
         if (out_keys.len != inputs.len) return error.InvalidArgument;
         var graph_keys: std.StringHashMap(i64) = .init(std.heap.c_allocator);
         defer graph_keys.deinit();
@@ -1582,6 +1589,7 @@ pub const Database = struct {
     }
 
     pub fn deleteGraphNode(self: *Database, graph_name: []const u8, node_id: []const u8) Error!void {
+        try @import("extension_operations.zig").requireSourceIdle(self.sqlite_db);
         try validateGraphName(graph_name);
         try validateNodeId(node_id);
         var delete_node = try self.prepareSchema(
@@ -1601,6 +1609,7 @@ pub const Database = struct {
     /// Missing node ids are ignored so repeated incremental deletions are
     /// idempotent. A missing graph remains an error.
     pub fn deleteGraphNodes(self: *Database, graph_name: []const u8, node_ids: []const []const u8) Error!void {
+        try @import("extension_operations.zig").requireSourceIdle(self.sqlite_db);
         try validateGraphName(graph_name);
         for (node_ids) |node_id| try validateNodeId(node_id);
         if (!try self.hasGraph(graph_name)) return error.GraphNotFound;
@@ -1643,6 +1652,7 @@ pub const Database = struct {
     /// Both endpoints must already exist for every input. Exact duplicate edges
     /// are idempotent and retain their original insertion order.
     pub fn putGraphEdges(self: *Database, inputs: []const GraphEdgeInput) Error!void {
+        try @import("extension_operations.zig").requireSourceIdle(self.sqlite_db);
         if (inputs.len == 0) return;
 
         var graph_names = std.StringHashMap(void).init(std.heap.c_allocator);
@@ -1727,6 +1737,7 @@ pub const Database = struct {
 
     /// Insert graph edges and return one opaque database-local key per input.
     pub fn putGraphEdgesKeyed(self: *Database, inputs: []const GraphEdgeInput, out_keys: []i64) Error!void {
+        try @import("extension_operations.zig").requireSourceIdle(self.sqlite_db);
         if (out_keys.len != inputs.len) return error.InvalidArgument;
         if (inputs.len == 0) return;
 
@@ -1927,6 +1938,7 @@ pub const Database = struct {
     }
 
     pub fn deleteGraphEdge(self: *Database, input: GraphEdgeInput) Error!void {
+        try @import("extension_operations.zig").requireSourceIdle(self.sqlite_db);
         try validateGraphName(input.graph_name);
         try validateNodeId(input.from_node_id);
         try validateEdgeType(input.edge_type);
@@ -1953,6 +1965,7 @@ pub const Database = struct {
 
     /// Delete exact graph edges as one validated idempotent batch.
     pub fn deleteGraphEdges(self: *Database, inputs: []const GraphEdgeInput) Error!void {
+        try @import("extension_operations.zig").requireSourceIdle(self.sqlite_db);
         for (inputs) |input| {
             try validateGraphName(input.graph_name);
             try validateNodeId(input.from_node_id);
@@ -2431,6 +2444,7 @@ pub const Database = struct {
     }
 
     pub fn replaceGraphEdgePayloads(self: *Database, graph_name: []const u8, replacements: []const GraphEdgePayloadReplacement) Error!void {
+        try @import("extension_operations.zig").requireSourceIdle(self.sqlite_db);
         try validateGraphName(graph_name);
         for (replacements) |replacement| if (replacement.edge_key <= 0) return error.InvalidArgument;
         const graph_key = try self.graphKeyForRead(graph_name);

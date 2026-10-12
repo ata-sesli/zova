@@ -343,8 +343,15 @@ fn savepoints_rollback_release_and_validate_names() {
     db.savepoint("sp_one").unwrap();
     db.exec("insert into tx(value) values ('rolled back')")
         .unwrap();
-    let object_error = db.put_object(b"blocked inside savepoint").unwrap_err();
-    assert_eq!(object_error.status(), Some(Status::ObjectTransactionActive));
+    // A synchronous object put joins the savepoint; the streaming writer is
+    // what still rejects an active caller transaction.
+    let object = db.put_object(b"rolled back with the savepoint").unwrap();
+    assert!(db.has_object(object).unwrap());
+    let writer_error = match db.object_writer() {
+        Ok(_) => panic!("the streaming writer must reject an active transaction"),
+        Err(error) => error,
+    };
+    assert_eq!(writer_error.status(), Some(Status::ObjectTransactionActive));
     db.create_vector_collection(
         "temporary_vectors",
         VectorCollectionOptions {
@@ -360,6 +367,7 @@ fn savepoints_rollback_release_and_validate_names() {
     db.release_savepoint("sp_one").unwrap();
 
     assert!(!db.has_vector_collection("temporary_vectors").unwrap());
+    assert!(!db.has_object(object).unwrap());
 
     db.savepoint("sp_two").unwrap();
     db.exec("insert into tx(value) values ('kept')").unwrap();
