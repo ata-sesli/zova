@@ -203,7 +203,7 @@ test "c abi object put commits atomically with a caller sql transaction" {
     defer tmp.cleanup();
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buffer, ".zig-cache/tmp/{s}/c-api-object-transaction.zova", .{tmp.sub_path[0..]});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-object-transaction.zova", .{tmp.sub_path[0..]}, 0);
 
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
@@ -237,7 +237,7 @@ test "c abi object put commits atomically with a caller sql transaction" {
     }) |case| {
         // The object and the caller's SQL reference commit together.
         try std.testing.expectEqual(zova_status.OK, zova_database_begin(&simple));
-        var id = zova_object_id{ .bytes = [_]u8{0} ** 32 };
+        var id = zova_object_id{ .bytes = @as([32]u8, @splat(0)) };
         try std.testing.expectEqual(zova_status.OK, zova_object_put_with_options(&.{
             .db = db,
             .data = case.name.ptr,
@@ -251,7 +251,7 @@ test "c abi object put commits atomically with a caller sql transaction" {
 
     // A caller rollback removes the object written in that transaction.
     try std.testing.expectEqual(zova_status.OK, zova_database_begin_immediate(&simple));
-    var rolled_back = zova_object_id{ .bytes = [_]u8{0} ** 32 };
+    var rolled_back = zova_object_id{ .bytes = @as([32]u8, @splat(0)) };
     try std.testing.expectEqual(zova_status.OK, zova_object_put(&.{
         .db = db,
         .data = "rolled back object",
@@ -279,7 +279,7 @@ test "c abi object put commits atomically with a caller sql transaction" {
         .db = db,
         .sql = "insert into caller_work (id) values (1)",
     }));
-    var failed = zova_object_id{ .bytes = [_]u8{0} ** 32 };
+    var failed = zova_object_id{ .bytes = @as([32]u8, @splat(0)) };
     try std.testing.expectEqual(zova_status.CONSTRAINT, zova_object_put(&.{
         .db = db,
         .data = "partially written object",
