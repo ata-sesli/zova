@@ -79,7 +79,8 @@ and is retried with fewer keys.
 
 Batched adjacency (`ZOVA_PLUGIN_GRAPH_NEIGHBORS_KEYED`) also needs a 1.3.0 host.
 It takes node keys instead of one node id, with one direction and an optional
-edge type for the whole batch, and returns `ordinal, input_key, edge_key,
+edge-type filter for the whole batch (`edge_type` for one type, or `ids` holding
+up to 16 type names for a set), and returns `ordinal, input_key, edge_key,
 neighbor_key, edge_type, order` rows grouped by input key. A key that is unknown
 or has no matching edge produces no rows. When the page is full, resume with the
 keys from the last row's ordinal onward and `after` set to the returned cursor;

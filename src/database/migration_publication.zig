@@ -102,7 +102,10 @@ pub const Publication = struct {
             // On cleanup failure retain the remaining witnesses, especially
             // the main commit proof, for offline recovery.
             if (m.owns_reservation) cwd.deleteFile(io(), m.reservation.?) catch return;
-            if (m.owns_stage) cwd.deleteFile(io(), m.stage.?) catch return;
+            if (m.owns_stage) {
+                if (!removeSidecars(m.stage.?, self.committed)) return;
+                cwd.deleteFile(io(), m.stage.?) catch return;
+            }
         }
         if (self.owns_directory) {
             if (self.marker) |p| cwd.deleteFile(io(), p) catch |err| switch (err) {
@@ -113,6 +116,22 @@ pub const Publication = struct {
         }
     }
 };
+
+/// A WAL-mode member leaves `-wal`/`-shm` beside its staged file when its last
+/// connection was read-only. A published member must not have pending frames:
+/// those would be missing from the final name, so they are kept as evidence.
+fn removeSidecars(stage: []const u8, published: bool) bool {
+    const cwd = std.Io.Dir.cwd();
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const wal = std.fmt.bufPrint(&buffer, "{s}-wal", .{stage}) catch return false;
+    if (cwd.statFile(io(), wal, .{ .follow_symlinks = false })) |stat| {
+        if (published and stat.size != 0) return false;
+        cwd.deleteFile(io(), wal) catch return false;
+    } else |err| if (err != error.FileNotFound) return false;
+    const shm = std.fmt.bufPrint(&buffer, "{s}-shm", .{stage}) catch return false;
+    cwd.deleteFile(io(), shm) catch |err| if (err != error.FileNotFound) return false;
+    return true;
+}
 
 fn sameFile(a: []const u8, b: []const u8) bool {
     const cwd = std.Io.Dir.cwd();

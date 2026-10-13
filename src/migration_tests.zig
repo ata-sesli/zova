@@ -964,6 +964,30 @@ test "migrateDatabase copies and migrates a single-file format-9 database" {
     try std.testing.expectEqualSlices(u8, &dest_hash, &dest_after);
 }
 
+test "migrateDatabase removes the recovery directory for a WAL-mode source" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try std.fmt.bufPrintSentinel(&source_buffer, ".zig-cache/tmp/{s}/wal-source.zova", .{tmp.sub_path[0..]}, 0);
+    try copyFixtureInto(source_path, "format-11.zova");
+    {
+        var raw = try sqlite.Database.open(source_path);
+        defer raw.deinit();
+        try raw.exec("pragma journal_mode=wal");
+    }
+
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try std.fmt.bufPrintSentinel(&dest_buffer, ".zig-cache/tmp/{s}/wal-migrated.zova", .{tmp.sub_path[0..]}, 0);
+    try zova.migrateDatabase(source_path, dest_path, .{});
+
+    var db = try Database.open(dest_path);
+    db.deinit();
+    var recovery_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const recovery_path = try std.fmt.bufPrint(&recovery_buffer, "{s}.migration-recovery", .{dest_path});
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io(), recovery_path, .{}));
+}
+
 test "migrateDatabase copies and migrates the full bound-store set" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
