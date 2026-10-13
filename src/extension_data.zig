@@ -59,15 +59,15 @@ pub fn read(allocator: std.mem.Allocator, db: *sqlite.Database, r: *const api.Da
     const after_id = try text(r.after_id, false);
     const node_id = try text(r.node_id, op == .graph_neighbors);
     const edge_type = try text(r.edge_type, false);
-    const is_graph = r.operation <= @backingInt(api.DataOperation.graph_neighbors) or op == .graph_edge_payloads_get;
+    const is_graph = r.operation <= @backingInt(api.DataOperation.graph_neighbors) or op == .graph_edge_payloads_get or op == .graph_neighbors_keyed;
     if (is_graph) graph.validateGraphName(name) catch return error.InvalidArgument;
     if (!is_graph) {
         vector.validateVectorCollectionName(name) catch return error.InvalidArgument;
         if (after_id.len > 255) return error.InvalidArgument;
         for (ids) |id| vector.validateVectorId(try bytes(id)) catch return error.InvalidArgument;
     }
-    if (op == .graph_neighbors) {
-        graph.validateNodeId(node_id) catch return error.InvalidArgument;
+    if (op == .graph_neighbors) graph.validateNodeId(node_id) catch return error.InvalidArgument;
+    if (op == .graph_neighbors or op == .graph_neighbors_keyed) {
         if (edge_type.len != 0) graph.validateEdgeType(edge_type) catch return error.InvalidArgument;
     }
     const prefix = if (is_graph) try schema(db, "graph_store") else try schema(db, "vector_store");
@@ -93,6 +93,7 @@ pub fn read(allocator: std.mem.Allocator, db: *sqlite.Database, r: *const api.Da
         vector_type = std.meta.stringToEnum(vector.VectorElementType, element) orelse return error.Corrupt;
         vector_metric = std.meta.stringToEnum(vector.VectorMetric, source.columnText(3)) orelse return error.Corrupt;
     }
+    if (op == .graph_neighbors_keyed) return readNeighborsKeyed(db, &buffer, prefix, source_key, r, keys, edge_type);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     var stmt = switch (op) {
@@ -102,6 +103,7 @@ pub fn read(allocator: std.mem.Allocator, db: *sqlite.Database, r: *const api.Da
         .graph_edges_get => try prepare(db, &buffer, "select b.rowid-1,e.edge_key is not null,b.value,e.from_node_key,t.name,e.to_node_key,e.created_order from carray(?2) b left join {s}_zova_graph_edges e on e.graph_key=?1 and e.edge_key=b.value left join {s}_zova_graph_edge_types t on t.edge_type_key=e.edge_type_key", .{ prefix, prefix }),
         .graph_neighbors => try prepareNeighbors(db, &buffer, prefix, r.direction, edge_type.len != 0),
         .graph_edge_payloads_get => try prepare(db, &buffer, "select b.rowid-1,e.edge_key is not null,b.value,e.payload from carray(?2) b left join {s}_zova_graph_edges e on e.graph_key=?1 and e.edge_key=b.value", .{prefix}),
+        .graph_neighbors_keyed => unreachable,
         .vector_metadata => try prepare(db, &buffer, "select dimensions,element_type,metric,(select count(*) from {s}_zova_vectors where collection_key=?1) from {s}_zova_vector_collections where collection_key=?1", .{ prefix, prefix }),
         .vectors_scan => try prepare(db, &buffer, "select vector_id,\"values\" from {s}_zova_vectors where collection_key=?1 and vector_id collate binary>?2 order by vector_id collate binary limit ?3", .{prefix}),
         .vectors_get => try prepare(db, &buffer, "select b.rowid-1,v.vector_id is not null,cast(b.value as text),v.\"values\" from carray(?2) b left join {s}_zova_vectors v on v.collection_key=?1 and v.vector_id=cast(b.value as text)", .{prefix}),
@@ -127,6 +129,7 @@ pub fn read(allocator: std.mem.Allocator, db: *sqlite.Database, r: *const api.Da
             try exists.bindTextBorrowed(2, node_id);
             if (try exists.step() != .row) return error.SourceNotFound;
         },
+        .graph_neighbors_keyed => unreachable,
         .vector_metadata => {},
         .vectors_scan => {
             try stmt.bindTextBorrowed(2, after_id);
@@ -180,6 +183,49 @@ fn prepareNeighbors(db: *sqlite.Database, buffer: []u8, prefix: []const u8, dire
     else
         "?3=''";
     return prepare(db, buffer, "select e.edge_key,n.node_key,n.node_id,n.kind,t.name,e.created_order from {s}_zova_graph_edges e join {s}_zova_graph_nodes n on n.graph_key=e.graph_key and n.node_key=e.{s} left join {s}_zova_graph_edge_types t on t.graph_key=e.graph_key and t.edge_type_key=e.edge_type_key where e.graph_key=?1 and e.{s}=(select node_key from {s}_zova_graph_nodes where graph_key=?1 and node_id=?2) and {s} and (e.created_order,e.edge_key)>(?4,?5) order by e.created_order,n.node_id collate binary,n.node_key limit ?6", .{ prefix, prefix, if (direction == 0) "to_node_key" else "from_node_key", prefix, if (direction == 0) "from_node_key" else "to_node_key", prefix, filter_sql });
+}
+
+/// One reusable single-node statement stepped per input key: rows arrive in
+/// adjacency-index order, so a high-degree node is never sorted or materialized.
+fn readNeighborsKeyed(db: *sqlite.Database, buffer: []u8, prefix: []const u8, graph_key: i64, r: *const api.DataRequest, keys: []const i64, edge_type: []const u8) Error!api.DataPage {
+    var filter_buffer: [256]u8 = undefined;
+    const filter_sql = if (edge_type.len != 0)
+        std.fmt.bufPrint(&filter_buffer, "e.edge_type_key=(select edge_type_key from {s}_zova_graph_edge_types where graph_key=?1 and name=?3)", .{prefix}) catch return error.InvalidArgument
+    else
+        "?3=''";
+    const node_column = if (r.direction == 0) "from_node_key" else "to_node_key";
+    const neighbor_column = if (r.direction == 0) "to_node_key" else "from_node_key";
+    var stmt = try prepare(db, buffer, "select e.edge_key,e.{s},t.name,e.created_order from {s}_zova_graph_edges e left join {s}_zova_graph_edge_types t on t.graph_key=e.graph_key and t.edge_type_key=e.edge_type_key where e.graph_key=?1 and e.{s}=?2 and {s} and (e.created_order,e.edge_key)>(?4,?5) order by e.created_order,e.{s},e.edge_key limit ?6", .{ neighbor_column, prefix, prefix, node_column, filter_sql, neighbor_column });
+    defer stmt.deinit();
+    var page: api.DataPage = .{};
+    var delivered: u64 = 0;
+    for (keys, 0..) |key, ordinal| {
+        try stmt.reset();
+        try stmt.bindInt64(1, graph_key);
+        try stmt.bindInt64(2, key);
+        try stmt.bindTextBorrowed(3, edge_type);
+        // The resume cursor belongs to the first key only.
+        try stmt.bindInt64(4, if (ordinal == 0) r.after.created_order else 0);
+        try stmt.bindInt64(5, if (ordinal == 0) r.after.key else 0);
+        try stmt.bindInt64(6, @intCast(r.row_limit - page.rows + 1));
+        while (try stmt.step() == .row) {
+            if (page.rows == r.row_limit) {
+                page.has_more = 1;
+                return page;
+            }
+            var edge: [4]api.Value = undefined;
+            const row_bytes = try readRow(&stmt, &edge) + 2 * @sizeOf(api.Value);
+            if (row_bytes > r.byte_limit - delivered) return error.PluginLimit;
+            if (edge[0].integer <= 0 or edge[1].integer <= 0 or edge[3].integer <= 0 or edge[2].kind != api.value_text) return error.Corrupt;
+            graph.validateEdgeType(edge[2].bytes.?[0..@intCast(edge[2].bytes_len)]) catch return error.Corrupt;
+            const values = [_]api.Value{ .{ .kind = api.value_integer, .integer = @intCast(ordinal) }, .{ .kind = api.value_integer, .integer = key }, edge[0], edge[1], edge[2], edge[3] };
+            try callback(r.row.?, r.user_data, &values);
+            delivered += row_bytes;
+            page.rows += 1;
+            page.next = .{ .created_order = edge[3].integer, .key = edge[0].integer };
+        }
+    }
+    return page;
 }
 
 fn validateGraphRow(op: api.DataOperation, values: []const api.Value) Error!void {

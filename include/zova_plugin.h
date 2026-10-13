@@ -336,8 +336,10 @@ typedef struct zova_plugin_data_page_v1 {
 #define ZOVA_PLUGIN_VECTOR_METADATA UINT32_C(6)
 #define ZOVA_PLUGIN_VECTORS_SCAN UINT32_C(7)
 #define ZOVA_PLUGIN_VECTORS_GET UINT32_C(8)
-/* Requires a Zova 1.3.0 or newer host; declare zova_abi_min accordingly. */
+/* Operations 9 and 10 require a Zova 1.3.0 or newer host; declare zova_abi_min
+ * accordingly. */
 #define ZOVA_PLUGIN_GRAPH_EDGE_PAYLOADS_GET UINT32_C(9)
+#define ZOVA_PLUGIN_GRAPH_NEIGHBORS_KEYED UINT32_C(10)
 #define ZOVA_PLUGIN_OUTGOING UINT32_C(0)
 #define ZOVA_PLUGIN_INCOMING UINT32_C(1)
 
@@ -361,6 +363,12 @@ typedef struct zova_plugin_data_page_v1 {
  * bytes are the application's opaque edge payload, possibly empty; they count
  * toward byte_limit, so an over-budget batch fails with LIMIT and is retried
  * with fewer keys. A single payload above 1 MiB cannot be read here.
+ * NEIGHBORS_KEYED: ordinal, input_key, edge_key, neighbor_key, edge_type(TEXT),
+ * order. keys are node keys; direction and the optional edge_type apply to all
+ * of them. Rows are grouped by input ordinal, in adjacency order within each
+ * key. A key that is unknown, belongs to another graph, or has no matching
+ * edge produces no rows. When has_more is set, resume with the keys from the
+ * last row's ordinal onward and after=next; after applies to keys[0] only.
  * VECTOR_METADATA: dimensions, element_type(TEXT: f32/f16/i8), metric(TEXT:
  * cosine/l2/dot), vector_count. No private vector key is exposed.
  * VECTORS_SCAN: vector_id(TEXT), values(BLOB).

@@ -66,7 +66,7 @@ READMEs for external CMake builds and pinned dependency/license packaging.
 | --- | --- | --- |
 | Query | Parameterized read-only SQL with typed row callbacks; may read application tables in `main` | No side-effecting functions; discard partial delivery on error |
 | Diagnostics | Copy current SQLite error into a bounded caller buffer | Copy promptly; it is not a retained error object |
-| Data | Graph scans, keyed reads, adjacency, edge payload reads, vector metadata/reads/scans | Treat keys as opaque; copy borrowed bytes if retained |
+| Data | Graph scans, keyed reads, adjacency (per node id or batched by node key), edge payload reads, vector metadata/reads/scans | Treat keys as opaque; copy borrowed bytes if retained |
 | Storage | Parameterized reads/writes to declared plugin-owned main tables | Qualify `main.<private_table>`; no core/other-owner access |
 | Operations | Register typed scalar or streaming table operations | State exact/approximate semantics, metrics, ordering and limits |
 | Vector maintenance | Snapshot-visible incarnation/revision/token and bounded history | Validate coverage; reconstruct or fail on missing/divergent history |
@@ -76,6 +76,14 @@ newer host, so a plugin that uses them declares `zova_abi_min` `1.3.0`. A batch
 returns one row per input key with the application's opaque payload bytes; the
 bytes count toward the byte budget, so an over-budget batch fails with `LIMIT`
 and is retried with fewer keys.
+
+Batched adjacency (`ZOVA_PLUGIN_GRAPH_NEIGHBORS_KEYED`) also needs a 1.3.0 host.
+It takes node keys instead of one node id, with one direction and an optional
+edge type for the whole batch, and returns `ordinal, input_key, edge_key,
+neighbor_key, edge_type, order` rows grouped by input key. A key that is unknown
+or has no matching edge produces no rows. When the page is full, resume with the
+keys from the last row's ordinal onward and `after` set to the returned cursor;
+the cursor applies to the first key only.
 
 A read-only hook or operation may `SELECT` from the application's own tables in
 `main` through the query service, for example to join host topology with

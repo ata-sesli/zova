@@ -885,6 +885,28 @@ fn applicationTableHook(base: *const plugin.Host, context: ?*anyopaque) callconv
     client.query(&.{ .sql = write, .sql_len = write.len, .row_limit = 1, .byte_limit = 1024, .row = DataRows.receive, .user_data = &rows }) catch return 0;
     return 1;
 }
+fn noteBody(base: *const plugin.Host, raw: ?*anyopaque, _: ?*anyopaque, call: *const data_api.OperationCall) callconv(.c) i32 {
+    if (applicationTableHook(base, raw) != 0) return 1;
+    return call.row.?(call.user_data, call.arguments, 1);
+}
+fn registerNoteBody(base: *const plugin.Host, raw: ?*anyopaque) callconv(.c) i32 {
+    const client = data_api.Client{ .host = base, .connection = raw };
+    client.registerOperation(&.{ .kind = data_api.operation_scalar, .flags = data_api.operation_exact, .name = .from("note"), .arguments = &scalar_args, .argument_count = 1, .columns = &scalar_columns, .column_count = 1, .scalar = noteBody }) catch return 1;
+    return 0;
+}
+test "extension_plugin read-only operations may query application tables" {
+    var db = try @import("zova.zig").Database.createMemory();
+    defer db.deinit();
+    try db.exec("CREATE TABLE app_notes(id INTEGER PRIMARY KEY, body TEXT); INSERT INTO app_notes VALUES(7,'seven')");
+    var d = descriptor();
+    d.register_sql = registerNoteBody;
+    const ext = try plugin.validate(&d);
+    try extension.install(&db.sqlite_db, .{ .extensions = &.{ext}, .plugins = &.{d} }, "c_test", null);
+    // The operation reads the row and its attempted write is refused.
+    try std.testing.expectEqual(@as(i64, 7), try scalarValue(&db.sqlite_db, "select zova_c_test_note(7)"));
+    try std.testing.expectEqual(@as(i64, 1), try scalarValue(&db.sqlite_db, "SELECT count(*) FROM app_notes"));
+}
+
 test "extension_plugin read-only hooks may query application tables" {
     var db = try @import("zova.zig").Database.createMemory();
     defer db.deinit();
@@ -962,7 +984,7 @@ fn payloadExercise(base: *const plugin.Host, context: ?*anyopaque) !void {
     req.name = .from("missing");
     try std.testing.expectError(error.HostError, client.read(&req, &page));
     req.name = .from("topo");
-    req.operation = 10;
+    req.operation = 11;
     try std.testing.expectError(error.InvalidArgument, client.read(&req, &page));
 }
 test "extension_plugin edge payload batches preserve ordinals misses and budgets" {
@@ -982,6 +1004,134 @@ test "extension_plugin edge payload batches preserve ordinals misses and budgets
     try db.replaceGraphEdgePayloads("topo", &.{.{ .edge_key = payload_edge_keys[0], .payload = "p\x00y" }});
     var d = descriptor();
     d.check = payloadHook;
+    try plugin.invoke(d, .check, &db.sqlite_db);
+}
+
+const NeighborRows = struct {
+    count: usize = 0,
+    ordinals: [8]i64 = @splat(0),
+    inputs: [8]i64 = @splat(0),
+    edges: [8]i64 = @splat(0),
+    neighbors: [8]i64 = @splat(0),
+    types: [8]u8 = @splat(0),
+    fn receive(raw: ?*anyopaque, values: ?[*]const plugin.Value, count: u64) callconv(.c) i32 {
+        const self: *NeighborRows = @ptrCast(@alignCast(raw.?));
+        if (self.count == self.ordinals.len or count != 6) return 3;
+        const row = values.?[0..6];
+        if (row[4].kind != plugin.value_text or row[4].bytes_len != 1 or row[5].integer <= 0) return 3;
+        self.ordinals[self.count] = row[0].integer;
+        self.inputs[self.count] = row[1].integer;
+        self.edges[self.count] = row[2].integer;
+        self.neighbors[self.count] = row[3].integer;
+        self.types[self.count] = row[4].bytes.?[0];
+        self.count += 1;
+        return 0;
+    }
+};
+// Nodes a, b, c of "hop" and node a of "other".
+var neighbor_node_keys: [4]i64 = @splat(0);
+fn neighborsHook(base: *const plugin.Host, context: ?*anyopaque) callconv(.c) i32 {
+    neighborsExercise(base, context) catch return 1;
+    return 0;
+}
+fn neighborsExercise(base: *const plugin.Host, context: ?*anyopaque) !void {
+    const client = data_api.Client{ .host = base, .connection = context };
+    const a = neighbor_node_keys[0];
+    const b = neighbor_node_keys[1];
+    const c = neighbor_node_keys[2];
+    // Duplicates repeat; an unknown key and a key of another graph yield nothing.
+    const keys = [_]i64{ a, 999, b, neighbor_node_keys[3], a };
+    var rows: NeighborRows = .{};
+    var req: data_api.DataRequest = .{ .operation = 10, .name = .from("hop"), .keys = &keys, .key_count = keys.len, .row_limit = 8, .byte_limit = 4096, .row = NeighborRows.receive, .user_data = &rows };
+    var page: data_api.DataPage = .{};
+    try client.read(&req, &page);
+    try std.testing.expectEqual(@as(u64, 5), page.rows);
+    try std.testing.expectEqual(@as(u32, 0), page.has_more);
+    try std.testing.expectEqualSlices(i64, &.{ 0, 0, 2, 4, 4 }, rows.ordinals[0..5]);
+    try std.testing.expectEqualSlices(i64, &.{ a, a, b, a, a }, rows.inputs[0..5]);
+    try std.testing.expectEqualSlices(i64, &.{ b, c, c, b, c }, rows.neighbors[0..5]);
+    try std.testing.expectEqualStrings("xyxxy", rows.types[0..5]);
+    try std.testing.expectEqual(rows.edges[0], rows.edges[3]);
+
+    rows = .{};
+    req.edge_type = .from("x");
+    try client.read(&req, &page);
+    try std.testing.expectEqualSlices(i64, &.{ b, c, b }, rows.neighbors[0..rows.count]);
+    rows = .{};
+    req.edge_type = .from("absent");
+    try client.read(&req, &page);
+    try std.testing.expectEqual(@as(u64, 0), page.rows);
+    req.edge_type = .{};
+
+    rows = .{};
+    req.direction = 1;
+    req.keys = &.{ c, a };
+    req.key_count = 2;
+    try client.read(&req, &page);
+    try std.testing.expectEqualSlices(i64, &.{ 0, 0 }, rows.ordinals[0..rows.count]);
+    try std.testing.expectEqualSlices(i64, &.{ a, b }, rows.neighbors[0..rows.count]);
+    req.direction = 0;
+
+    // A full page stops inside or between keys; the cursor applies to keys[0].
+    rows = .{};
+    const pair = [_]i64{ a, b };
+    req.keys = &pair;
+    req.row_limit = 2;
+    try client.read(&req, &page);
+    try std.testing.expectEqual(@as(u64, 2), page.rows);
+    try std.testing.expectEqual(@as(u32, 1), page.has_more);
+    try std.testing.expectEqual(rows.edges[1], page.next.key);
+    try std.testing.expectEqual(@as(i64, 0), rows.ordinals[1]);
+    req.keys = pair[@intCast(rows.ordinals[1])..].ptr;
+    req.after = page.next;
+    rows = .{};
+    try client.read(&req, &page);
+    try std.testing.expectEqual(@as(u64, 1), page.rows);
+    try std.testing.expectEqual(@as(u32, 0), page.has_more);
+    try std.testing.expectEqualSlices(i64, &.{1}, rows.ordinals[0..1]);
+    try std.testing.expectEqualSlices(i64, &.{c}, rows.neighbors[0..1]);
+    req.after = .{};
+
+    // An exactly full final page reports no further rows.
+    req.keys = &.{a};
+    req.key_count = 1;
+    try client.read(&req, &page);
+    try std.testing.expectEqual(@as(u64, 2), page.rows);
+    try std.testing.expectEqual(@as(u32, 0), page.has_more);
+
+    req.byte_limit = 6 * @sizeOf(plugin.Value);
+    page = .{ .rows = 99, .has_more = 1 };
+    try std.testing.expectError(error.Limit, client.read(&req, &page));
+    try std.testing.expectEqualDeep(data_api.DataPage{}, page);
+    req.byte_limit = 4096;
+    req.name = .from("missing");
+    try std.testing.expectError(error.HostError, client.read(&req, &page));
+}
+test "extension_plugin keyed adjacency batches group rows by input key and resume" {
+    var db = try @import("zova.zig").Database.createMemory();
+    defer db.deinit();
+    try db.createGraph("hop");
+    try db.createGraph("other");
+    try db.putGraphNodes(&.{
+        .{ .graph_name = "hop", .node_id = "a", .kind = "node" },
+        .{ .graph_name = "hop", .node_id = "b", .kind = "node" },
+        .{ .graph_name = "hop", .node_id = "c", .kind = "node" },
+        .{ .graph_name = "other", .node_id = "a", .kind = "node" },
+    });
+    try db.putGraphEdges(&.{
+        .{ .graph_name = "hop", .from_node_id = "a", .to_node_id = "b", .edge_type = "x" },
+        .{ .graph_name = "hop", .from_node_id = "a", .to_node_id = "c", .edge_type = "y" },
+        .{ .graph_name = "hop", .from_node_id = "b", .to_node_id = "c", .edge_type = "x" },
+        .{ .graph_name = "other", .from_node_id = "a", .to_node_id = "a", .edge_type = "x" },
+    });
+    var stmt = try db.prepare("select n.node_key from _zova_graph_nodes n join _zova_graphs g on g.graph_key=n.graph_key order by g.name,n.node_id");
+    defer stmt.deinit();
+    for (&neighbor_node_keys) |*key| {
+        try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+        key.* = stmt.columnInt64(0);
+    }
+    var d = descriptor();
+    d.check = neighborsHook;
     try plugin.invoke(d, .check, &db.sqlite_db);
 }
 
