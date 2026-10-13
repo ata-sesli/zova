@@ -33,12 +33,12 @@ versions, source revision and file hashes. The release pipeline packages all
 seven crates once, tests the same immutable set on five native runners, then
 publishes platform crates before this dispatcher and the safe crate.
 
-The current development build uses `.zova` format 11, and the earliest
-migratable format is 9. Open never migrates silently: format-9 and format-10
-databases are reported as migration-required and left byte-identical. Migrate
+The current release uses `.zova` format 12, and the earliest
+migratable format is 9. Open never migrates silently: format-9, format-10 and
+format-11 databases are reported as migration-required and left byte-identical. Migrate
 them explicitly with `zova_database_probe_format` and `zova_database_migrate`,
 or with `zova format` and `zova migrate` on the CLI. Migration publishes a
-separately validated format-11 destination. Keep a backup before migrating, and
+separately validated format-12 destination. Keep a backup before migrating, and
 see `docs/storage-compatibility.md` in the Zova repository for the full
 compatibility contract.
 
@@ -60,11 +60,11 @@ are borrowed for the duration of the call, text/blob/error result bytes are
 copied by Zova before SQLite observes them, and callbacks must not re-enter the
 same `zova_database` handle.
 
-The safe Rust `zova` development crate exposes explicit trusted bundle selection
+From 1.2.0, the safe Rust `zova` crate exposes explicit trusted bundle selection
 at create/open; app-defined SQL callbacks remain raw C/sys. Go and Python
 callback APIs are also deferred.
 
-Development generated-C packages enable the same trusted native loader as Zig
+From 1.2.0, generated-C packages enable the same trusted native loader as Zig
 hosts on Linux, macOS and Windows. This is not present in published 1.1.0
 packages. Select compatible bundles through `zova_database_create_with_extensions`
 or `zova_database_open_with_extensions`; opening never grants trust or loads

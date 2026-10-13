@@ -49,14 +49,14 @@ Use the safe crate for normal Rust applications:
 
 ```toml
 [dependencies]
-zova = "1.1.0"
+zova = "1.2.0"
 ```
 
 Use the raw FFI crate only when you want to call the C ABI directly:
 
 ```toml
 [dependencies]
-zova-sys = "1.1.0"
+zova-sys = "1.2.0"
 ```
 
 Both crates contain native code. The default build path compiles Zova's static C
@@ -68,7 +68,7 @@ users still need:
 
 Zova 1.0.0 established the stable native 1.x contract described in
 [API_STABILITY.md](../../API_STABILITY.md).
-The current development `.zova` `format_version` is `12`.
+The current `.zova` `format_version` is `12`.
 Zova does not migrate older format databases in place. Format-9 and
 format-10 and format-11 databases can be probed and migrated forward with the crate-level
 `probe_format(path)` and `migrate_database(source, destination, options)`
@@ -329,7 +329,7 @@ Rust exposes lifecycle methods for extensions already present in the current
 process registry. The default registry includes bundled extensions such as
 `trgm`, so Rust applications can install, list, check, and drop `trgm` directly.
 The low-level `zova-sys` crate exposes the C ABI for scalar SQL callback
-registration and trusted `.zovaext` bundle loading. Development safe Rust and
+registration and trusted `.zovaext` bundle loading. From 1.2.0, safe Rust and
 generated-C packages support explicit selection at create/open:
 
 ```rust
@@ -345,7 +345,7 @@ db.install_extension("search")?;
 `SharedDatabase` provides the same constructors. First trust the bundle using
 `zova extension trust ./search.zovaext`; opening never grants trust. Code must
 match the host and include its runtime dependencies. Libraries remain alive
-through child handles. Published 1.1.0 packages do not include this development
+through child handles. Published 1.1.0 packages do not include this
 support. Application callbacks and explicit data upgrades remain raw C/sys
 only, not safe Rust wrappers. See the
 [capability matrix](../../docs/extensions.md#availability-and-binding-matrix).

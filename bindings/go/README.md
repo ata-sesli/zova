@@ -59,7 +59,7 @@ flowchart LR
 After the Go module tag is pushed, applications can add the binding with:
 
 ```sh
-go get github.com/ata-sesli/zova/bindings/go@v1.1.0
+go get github.com/ata-sesli/zova/bindings/go@v1.2.0
 ```
 
 Import it as:
@@ -72,7 +72,7 @@ The Go package is source-only and uses cgo. It does not download or build the
 native Zova C ABI automatically during `go get`; your build environment must
 provide `zova.h` and `libzova_c.a`.
 
-The current development build uses `.zova` format 12 and does not migrate older
+The current release uses `.zova` format 12 and does not migrate older
 format databases in place. Format-9, format-10 and format-11 databases can be probed and
 migrated forward with the package-level `ProbeFormat(path)` and
 `MigrateDatabase(source, destination, options...)` functions: migration is
@@ -167,14 +167,14 @@ Because this module lives in the `bindings/go` subdirectory, the release tag
 must include that subdirectory prefix:
 
 ```sh
-git tag -a bindings/go/v1.1.0 -m "Zova Go bindings v1.1.0"
-git push origin bindings/go/v1.1.0
+git tag -a bindings/go/v1.2.0 -m "Zova Go bindings v1.2.0"
+git push origin bindings/go/v1.2.0
 ```
 
 After pushing the tag, ask the public Go module proxy to resolve it:
 
 ```sh
-GOPROXY=proxy.golang.org go list -m github.com/ata-sesli/zova/bindings/go@v1.1.0
+GOPROXY=proxy.golang.org go list -m github.com/ata-sesli/zova/bindings/go@v1.2.0
 ```
 
 The module path is:
@@ -281,7 +281,7 @@ contract.
 Go exposes lifecycle methods for extensions already present in the current
 process registry. The default registry includes bundled extensions such as
 `trgm`, so Go applications can install, list, check, and drop `trgm` directly.
-Development native and generated-C builds expose trusted bundle selection:
+Native and generated-C builds from 1.2.0 expose trusted bundle selection:
 
 ```go
 extensions := zova.ExtensionOptions{BundlePaths: []string{"./search.zovaext"}}
@@ -292,7 +292,7 @@ db, err := zova.CreateWithExtensions("app.zova", extensions)
 Set `TrustStorePath` for a non-default store. First trust the bundle using
 `zova extension trust ./search.zovaext`; opening never grants trust. Code and
 dependencies must match the host. `DB.Close` releases children before libraries.
-This development support is not present in published 1.1.0 artifacts. Application
+This support is not present in published 1.1.0 artifacts. Application
 scalar callbacks and explicit data upgrades remain unwrapped. See the
 [capability matrix](../../docs/extensions.md#availability-and-binding-matrix).
 

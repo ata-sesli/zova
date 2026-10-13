@@ -2,7 +2,7 @@
 
 This document defines the stable public contract for Zova 1.x. The
 `1.0.0` release establishes the compatibility commitments below, following
-the release-candidate validation period. The current `1.1.0` release extends
+the release-candidate validation period. The current `1.2.0` release extends
 the implementation without weakening those commitments.
 
 The separate `zova-wasm` browser package introduced in rc.3 is experimental
@@ -145,8 +145,8 @@ authoritative for these stricter rules.
 
 The bundled-extension lifecycle, manifest validation, ABI minimum enforcement,
 and extension records are supported. Extension minimum ABI values use numeric
-`major.minor.patch`; the release reports numeric ABI components `1.1.0` and
-the full release identity `1.1.0` separately.
+`major.minor.patch`; the release reports numeric ABI components `1.2.0` and
+the full release identity `1.2.0` separately.
 
 In published 1.0.0/1.1.0, the experimental bundle-producer CLI and
 application-authored callback surfaces are outside the stable authoring contract.
@@ -156,14 +156,14 @@ platform boundaries.
 The portable plugin descriptor and explicit extension-data upgrade APIs are
 included in 1.0.0; authoring in those releases remains experimental as above.
 Those historical 1.0.0/1.1.0 guarantees do not include generated-C dynamic loading
-or high-level bundle-selection wrappers. The development 1.2.0 authoring contract
+or high-level bundle-selection wrappers. The 1.2.0 authoring contract
 targets the versioned common C descriptor, negotiated host services, typed SQL
 operations and documented lifecycle/ownership rules. Zig helpers use the same
 C layouts, not a separate plugin ABI. Legacy Zig bundle production, algorithm
 reference implementations and high-level callback-authoring wrappers are not
 promoted to stable APIs merely by inclusion in the repository.
 The [authoring support matrix](docs/extension-authoring.md#support-and-compatibility)
-separates current development support from already-published release guarantees.
+separates 1.2.0 support from earlier release guarantees.
 
 ## Zig implementation state and raw SQLite access
 

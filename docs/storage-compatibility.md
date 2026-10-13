@@ -16,10 +16,10 @@ in another.
 
 | Version | Meaning | Declared in | Current |
 | --- | --- | --- | --- |
-| Package version | Zova release identity across every distribution channel | `src/version.zig` `package_version` | `1.1.0` |
-| C ABI version | Compatibility of the exported C ABI and generated C | `src/version.zig` `abi_version_*` | `1.1.0` (`1.1.0` numeric components) |
+| Package version | Zova release identity across every distribution channel | `src/version.zig` `package_version` | `1.2.0` |
+| C ABI version | Compatibility of the exported C ABI and generated C | `src/version.zig` `abi_version_*` | `1.2.0` (`1.2.0` numeric components) |
 | SQLite version | The vendored SQLite amalgamation, and separately SQLite's own file format | `src/version.zig` `sqlite_version` | `3.53.4` |
-| Zova storage format | The layout of a `.zova` database, recorded in `_zova_meta.format_version` | `src/version.zig` `format_version` | `12` (development) |
+| Zova storage format | The layout of a `.zova` database, recorded in `_zova_meta.format_version` | `src/version.zig` `format_version` | `12` |
 
 A SQLite upgrade does not change the Zova storage format and never requires a
 Zova migration. A package or ABI release does not by itself change the storage

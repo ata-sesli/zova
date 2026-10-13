@@ -94,7 +94,7 @@ The synchronous `Database` facade exposes:
 - public graph CRUD, atomic batches, neighbors, degree, and walks
 - bundled extension install/list/info/check/drop
 
-Development builds support trusted native bundles through both handle types:
+From 1.2.0, builds support trusted native bundles through both handle types:
 
 ```typescript
 const extensions = { bundlePaths: ["./search.zovaext"] };
@@ -109,7 +109,7 @@ extension options for a non-default store. First trust the bundle using
 `zova extension trust ./search.zovaext`; opening never grants trust or loads
 paths from database metadata. Native code/dependencies must match the host;
 close releases callback state before unloading libraries. Published 1.1.0 npm
-packages do not include this development support.
+packages do not include this support.
 
 Extension authoring, application SQL callbacks, and explicit data upgrades
 remain unwrapped. See the

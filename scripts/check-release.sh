@@ -95,7 +95,8 @@ sh scripts/repack-darwin-c-abi.sh
 (cd bindings/go && GOCACHE="$GO_CACHE_REPO" go test ./...)
 (cd bindings/go && GOCACHE="$GO_CACHE_REPO" go vet ./...)
 CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" cargo fmt --manifest-path bindings/python/Cargo.toml --check
-CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" cargo nextest run --manifest-path bindings/python/Cargo.toml
+# The PyO3 crate has no Rust tests; its behavior is covered by pytest below.
+CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" cargo nextest run --no-tests=pass --manifest-path bindings/python/Cargo.toml
 CARGO_TARGET_DIR="$PY_CARGO_TARGET_REPO" uv run --isolated --with maturin --with pytest --directory bindings/python maturin develop
 uv run --isolated --with pytest --directory bindings/python python -m pytest
 mkdir -p "$PY_WHEEL_REPO"

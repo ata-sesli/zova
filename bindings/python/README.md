@@ -63,7 +63,7 @@ interpreter fails without attempting a native build.
 The release workflow builds Linux/macOS x86_64/arm64 and Windows x86_64
 stable-ABI wheels.
 
-The current development build uses `.zova` format 12 and does not migrate older
+The current release uses `.zova` format 12 and does not migrate older
 format databases in place. Format-9, format-10 and format-11 databases can be probed and
 migrated forward with the module-level `probe_format(path)` and
 `migrate_database(source, destination, *, verify=True)` functions: migration is
@@ -175,7 +175,7 @@ binding contract.
 Python exposes lifecycle methods for extensions already present in the current
 process registry. The default registry includes bundled extensions such as
 `trgm`, so Python applications can install, list, check, and drop `trgm`
-directly. Development wheels also accept explicit trusted native bundles:
+directly. From 1.2.0, wheels also accept explicit trusted native bundles:
 
 ```python
 db = zova.Database.create("app.zova", extension_bundles=["./search.zovaext"])
@@ -189,7 +189,7 @@ Both constructors accept `trust_store_path`; omit it for Zova's default store.
 First run `zova extension trust ./search.zovaext`. Opening never grants trust
 or loads paths from the database. Native code and dependencies must match the
 host. Owned statements retain their connection and libraries after `db.close()`.
-Published 1.1.0 wheels do not include this development support. Python does not
+Published 1.1.0 wheels do not include this support. Python does not
 wrap extension authoring, application scalar callbacks or explicit data
 upgrades. See the
 [capability matrix](../../docs/extensions.md#availability-and-binding-matrix).

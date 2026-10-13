@@ -12,10 +12,10 @@ traversal, transaction-aware app events, bound object/vector/graph stores,
 diagnostics, salvage, backup, compact copy, restore, and a trusted extension
 host foundation.
 
-Current package version: `1.1.0`.
+Current package version: `1.2.0`.
 
 Zova `1.0.0` established the stable native 1.x contract. The current
-development `.zova` file `format_version` is `12`, and the
+`.zova` file `format_version` is `12`, and the
 earliest migratable format is `9`. Open never migrates silently: format-9 and
 format-10 and format-11 databases are reported as migration-required and left byte-identical,
 and downgrades are unsupported. Older databases migrate forward with the
@@ -45,9 +45,9 @@ databases and named OPFS persistence.
 Browser APIs remain experimental and do not promise full native compatibility.
 Rust packages now select target-specific generated-C companion crates without
 requiring consumer-side Zig or native-source downloads. Python wheels retain
-CPython 3.13 stable-ABI coverage for Python 3.13 and 3.14. Development storage is
+CPython 3.13 stable-ABI coverage for Python 3.13 and 3.14. Storage is
 format 12 with explicit 11→12 migration for transactional vector-change tracking.
-Released 1.1.0 used format 11; package/ABI bumps are separate release work. See the
+Released 1.1.0 used format 11. See the
 [browser package guide](bindings/wasm/README.md) for lifecycle and storage limits.
 
 ## Contents
@@ -90,7 +90,7 @@ or:
 
 ```toml
 [dependencies]
-zova = "1.1.0"
+zova = "1.2.0"
 ```
 
 Python:
@@ -108,7 +108,7 @@ python -m pip install zova
 Go:
 
 ```sh
-go get github.com/ata-sesli/zova/bindings/go@v1.1.0
+go get github.com/ata-sesli/zova/bindings/go@v1.2.0
 ```
 
 The Go binding uses cgo over Zova's C ABI. Build or provide the C ABI library
@@ -117,7 +117,7 @@ before using it from another project.
 C ABI:
 
 ```sh
-# Download a matching zova-v1.1.0-<platform>-c-abi archive
+# Download a matching zova-v1.2.0-<platform>-c-abi archive
 # from the GitHub Release, or build it locally:
 zig build c-abi
 ```
@@ -125,7 +125,7 @@ zig build c-abi
 CLI:
 
 ```sh
-# Download a matching zova-v1.1.0-<platform>-cli archive
+# Download a matching zova-v1.2.0-<platform>-cli archive
 # from the GitHub Release, or build it locally:
 zig build
 zig-out/bin/zova --help
@@ -140,7 +140,7 @@ Zova vendors SQLite. You do not need a system SQLite installation.
 | JavaScript / TypeScript | `bun add zova-js` / `npm install zova-js` | no | no | no | prebuilt Node-API 8 packages for Node 22/24 and Bun |
 | Rust | `cargo add zova` | no | yes | yes | `zova-sys` compiles the matching generated-C platform package with Clang |
 | Python | `uv add zova` / `pip install zova` | no | no | no | stable-ABI wheels are published for Linux/macOS x86_64/arm64 and Windows x86_64, and tested on CPython 3.13/3.14; PyPI source builds are not supported |
-| Go | `go get github.com/ata-sesli/zova/bindings/go@v1.1.0` | no, if using a release C ABI archive | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
+| Go | `go get github.com/ata-sesli/zova/bindings/go@v1.2.0` | no, if using a release C ABI archive | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
 | C ABI | release archive or `zig build c-abi` | no, if using a release archive | no | no, if using a release archive | static C ABI library and `zova.h` |
 | Zig | package source | yes | no | yes | native API |
 | CLI | release archive or `zig build` | no, if using a release archive | no | no, if using a release archive | source-built or prebuilt command line tool |
@@ -540,7 +540,7 @@ Zova supports collection create/info/list/delete, vector CRUD, batch upsert,
 exact search, candidate-filtered search, search-by-id, and inclusive distance
 thresholds.
 
-Search is exact and flat-scan in `1.1.0`. It is good for local datasets,
+Search is exact and flat-scan in `1.2.0`. It is good for local datasets,
 offline ranking, deterministic tests, and SQL-filter-first workflows. It is not
 yet an ANN engine for million-scale low-latency search.
 
@@ -881,7 +881,7 @@ extension code just because a `.zova` file contains extension metadata.
 If a command needs a dynamic extension that is missing or untrusted, diagnostics
 tell you to provide `--extension <bundle.zovaext>` or trust the bundle first.
 
-In development for 1.2.0, trusted `.zovaext` loading works through native and
+In 1.2.0, trusted `.zovaext` loading works through native and
 generated-C hosts, with explicit bundle selection in Rust, Python, Go and
 JavaScript. Published 1.1.0 packages retain their earlier loading restrictions.
 See the [authoring guide](docs/extension-authoring.md) for the common C plugin
@@ -1062,14 +1062,14 @@ Rust users normally use the safe crate:
 
 ```toml
 [dependencies]
-zova = "1.1.0"
+zova = "1.2.0"
 ```
 
 The lower-level raw FFI crate is available as:
 
 ```toml
 [dependencies]
-zova-sys = "1.1.0"
+zova-sys = "1.2.0"
 ```
 
 `zova` exposes `Database` for single-owner code and `SharedDatabase` for an
@@ -1126,7 +1126,7 @@ edge-payload, topology-scan, and fresh-build session APIs remain C ABI/raw
 Install:
 
 ```sh
-go get github.com/ata-sesli/zova/bindings/go@v1.1.0
+go get github.com/ata-sesli/zova/bindings/go@v1.2.0
 ```
 
 Import:
@@ -1294,7 +1294,7 @@ automatically.
 
 ## Current Boundaries
 
-Published Zova `1.1.0` does not include:
+Published Zova `1.2.0` does not include:
 
 - binding-level app-registered extension authoring APIs
 - binding-level dynamic `.zovaext` loading APIs
@@ -1393,7 +1393,7 @@ Zova publishes several release artifact types:
 - A GitHub Release source archive.
 - Rust crates on crates.io: `zova-sys` and `zova`.
 - Python stable-ABI wheels on PyPI.
-- A Go module tag: `bindings/go/v1.1.0`.
+- A Go module tag: `bindings/go/v1.2.0`.
 - JavaScript/TypeScript Node-API packages on npm as `zova-js`, with native
   packages for the supported platform matrix.
 
@@ -1425,13 +1425,13 @@ Clang and a platform linker/SDK; only explicit `ZOVA_SOURCE_DIR` builds need Zig
 Maintainer source-package command:
 
 ```sh
-scripts/package-release.sh 1.1.0
+scripts/package-release.sh 1.2.0
 ```
 
 Maintainer local distribution command for crates.io:
 
 ```sh
-scripts/distribute-release.sh 1.1.0
+scripts/distribute-release.sh 1.2.0
 ```
 
 Python is wheel-only and is published through the **Publish Release** workflow,
