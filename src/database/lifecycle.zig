@@ -153,12 +153,12 @@ fn initializeMetadata(db: *sqlite.Database) sqlite.Error!void {
     var insert_format = try db.prepare("insert into _zova_meta (key, value) values ('format_version', ?)");
     defer insert_format.deinit();
     try insert_format.bindText(1, format_version);
-    std.debug.assert((try insert_format.step()) == .done);
+    try insert_format.expectDone();
 
     var insert_id = try db.prepare("insert into _zova_meta (key, value) values ('database_id', ?)");
     defer insert_id.deinit();
     try insert_id.bindText(1, &database_id);
-    std.debug.assert((try insert_id.step()) == .done);
+    try insert_id.expectDone();
 }
 
 fn initializeExtensionSchema(db: *sqlite.Database) sqlite.Error!void {
@@ -202,16 +202,16 @@ fn markAsObjectStore(db: *sqlite.Database) Error!void {
     var insert_role = try db.prepare("insert into _zova_meta (key, value) values ('store_role', ?)");
     defer insert_role.deinit();
     try insert_role.bindText(1, bound_object_store_role);
-    std.debug.assert((try insert_role.step()) == .done);
+    try insert_role.expectDone();
 
     var insert_id = try db.prepare("insert into _zova_meta (key, value) values ('store_id', ?)");
     defer insert_id.deinit();
     try insert_id.bindText(1, &store_id);
-    std.debug.assert((try insert_id.step()) == .done);
+    try insert_id.expectDone();
 
     var insert_epoch = try db.prepare("insert into _zova_meta (key, value) values ('object_epoch', '0')");
     defer insert_epoch.deinit();
-    std.debug.assert((try insert_epoch.step()) == .done);
+    try insert_epoch.expectDone();
 }
 
 fn markAsVectorStore(db: *sqlite.Database) Error!void {
@@ -221,16 +221,16 @@ fn markAsVectorStore(db: *sqlite.Database) Error!void {
     var insert_role = try db.prepare("insert into _zova_meta (key, value) values ('store_role', ?)");
     defer insert_role.deinit();
     try insert_role.bindText(1, bound_vector_store_role);
-    std.debug.assert((try insert_role.step()) == .done);
+    try insert_role.expectDone();
 
     var insert_id = try db.prepare("insert into _zova_meta (key, value) values ('store_id', ?)");
     defer insert_id.deinit();
     try insert_id.bindText(1, &store_id);
-    std.debug.assert((try insert_id.step()) == .done);
+    try insert_id.expectDone();
 
     var insert_epoch = try db.prepare("insert into _zova_meta (key, value) values ('vector_epoch', '0')");
     defer insert_epoch.deinit();
-    std.debug.assert((try insert_epoch.step()) == .done);
+    try insert_epoch.expectDone();
 }
 
 fn markAsGraphStore(db: *sqlite.Database) Error!void {
@@ -248,16 +248,16 @@ fn markAsGraphStore(db: *sqlite.Database) Error!void {
     var insert_role = try db.prepare("insert into _zova_meta (key, value) values ('store_role', ?)");
     defer insert_role.deinit();
     try insert_role.bindText(1, bound_graph_store_role);
-    std.debug.assert((try insert_role.step()) == .done);
+    try insert_role.expectDone();
 
     var insert_id = try db.prepare("insert into _zova_meta (key, value) values ('store_id', ?)");
     defer insert_id.deinit();
     try insert_id.bindText(1, &store_id);
-    std.debug.assert((try insert_id.step()) == .done);
+    try insert_id.expectDone();
 
     var insert_epoch = try db.prepare("insert into _zova_meta (key, value) values ('graph_epoch', '0')");
     defer insert_epoch.deinit();
-    std.debug.assert((try insert_epoch.step()) == .done);
+    try insert_epoch.expectDone();
 }
 
 pub fn ensureBoundStoreTable(db: *sqlite.Database) Error!void {

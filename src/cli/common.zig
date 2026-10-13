@@ -60,13 +60,6 @@ pub fn isZovaPath(path: []const u8) bool {
     return std.mem.endsWith(u8, path, ".zova");
 }
 
-pub fn expectDone(stmt: *sqlite.Statement) !void {
-    switch (try stmt.step()) {
-        .done => {},
-        .row => return error.SqliteError,
-    }
-}
-
 pub fn isValidCliVectorName(name: []const u8) bool {
     if (name.len == 0 or name.len > 255) return false;
     if (!std.unicode.utf8ValidateSlice(name)) return false;

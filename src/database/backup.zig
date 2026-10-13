@@ -54,7 +54,7 @@ pub fn copyObjectStorage(
         try insert_chunk.bindBlob(1, raw_hash);
         try insert_chunk.bindInt64(2, chunks.columnInt64(1));
         try insert_chunk.bindBlob(3, chunks.columnBlob(2));
-        std.debug.assert((try insert_chunk.step()) == .done);
+        try insert_chunk.expectDone();
         try insert_chunk.reset();
         try insert_chunk.clearBindings();
     }
@@ -90,7 +90,7 @@ pub fn copyObjectStorage(
         try insert_object.bindInt64(2, objects.columnInt64(1));
         try insert_object.bindInt64(3, objects.columnInt64(2));
         try insert_object.bindText(4, objects.columnText(3));
-        std.debug.assert((try insert_object.step()) == .done);
+        try insert_object.expectDone();
         try insert_object.reset();
         try insert_object.clearBindings();
     }
@@ -114,7 +114,7 @@ pub fn copyObjectStorage(
         try insert_manifest.bindBlob(3, manifest_rows.columnBlob(2));
         try insert_manifest.bindInt64(4, manifest_rows.columnInt64(3));
         try insert_manifest.bindInt64(5, manifest_rows.columnInt64(4));
-        std.debug.assert((try insert_manifest.step()) == .done);
+        try insert_manifest.expectDone();
         try insert_manifest.reset();
         try insert_manifest.clearBindings();
     }
@@ -251,7 +251,7 @@ pub fn copyGraphStorage(
     while ((try graphs.step()) == .row) {
         try insert_graph.bindText(1, graphs.columnText(0));
         try insert_graph.bindInt64(2, graphs.columnInt64(1));
-        std.debug.assert((try insert_graph.step()) == .done);
+        try insert_graph.expectDone();
         try insert_graph.reset();
         try insert_graph.clearBindings();
 
@@ -282,7 +282,7 @@ pub fn copyGraphStorage(
         if (nodes.columnType(4) == .null) try insert_node.bindNull(5) else try insert_node.bindText(5, nodes.columnText(4));
         if (nodes.columnType(5) == .null) try insert_node.bindNull(6) else try insert_node.bindText(6, nodes.columnText(5));
         try insert_node.bindInt64(7, nodes.columnInt64(6));
-        std.debug.assert((try insert_node.step()) == .done);
+        try insert_node.expectDone();
         try insert_node.reset();
         try insert_node.clearBindings();
 
@@ -328,7 +328,7 @@ pub fn copyGraphStorage(
     while ((try edges.step()) == .row) {
         try insert_type.bindText(1, edges.columnText(0));
         try insert_type.bindText(2, edges.columnText(2));
-        std.debug.assert((try insert_type.step()) == .done);
+        try insert_type.expectDone();
         try insert_type.reset();
         try insert_type.clearBindings();
 
@@ -338,7 +338,7 @@ pub fn copyGraphStorage(
         try insert_edge.bindText(4, edges.columnText(1));
         try insert_edge.bindText(5, edges.columnText(3));
         try insert_edge.bindText(6, edges.columnText(0));
-        std.debug.assert((try insert_edge.step()) == .done);
+        try insert_edge.expectDone();
         try insert_edge.reset();
         try insert_edge.clearBindings();
 

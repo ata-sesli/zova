@@ -175,7 +175,7 @@ fn install(db: *sqlite.Database, manifest: extension_impl.Manifest) extension_im
     var stmt = try db.prepare("insert into _zova_ext_trgm_meta (key, value) values ('schema_version', '1'), ('extension_version', ?)");
     defer stmt.deinit();
     try stmt.bindText(1, manifest.version);
-    std.debug.assert((try stmt.step()) == .done);
+    try stmt.expectDone();
 }
 
 fn check(db: *sqlite.Database, manifest: extension_impl.Manifest) extension_impl.Error!void {
@@ -755,7 +755,7 @@ fn putDocument(db: *sqlite.Database, input: PutInput) Error!void {
     try doc.bindInt64(6, std.math.cast(i64, normalized.items.len) orelse return error.TrgmInvalid);
     try doc.bindBlob(7, &hash);
     try doc.bindInt64(8, std.math.cast(i64, terms.len) orelse return error.TrgmInvalid);
-    std.debug.assert((try doc.step()) == .done);
+    try doc.expectDone();
 
     var posting = try db.prepare(
         \\insert into _zova_ext_trgm_postings (index_name, term, document_id, count)
@@ -767,7 +767,7 @@ fn putDocument(db: *sqlite.Database, input: PutInput) Error!void {
         try posting.bindBlob(2, &term_count.term);
         try posting.bindText(3, input.document_id);
         try posting.bindInt64(4, term_count.count);
-        std.debug.assert((try posting.step()) == .done);
+        try posting.expectDone();
         try posting.reset();
         try posting.clearBindings();
     }
@@ -789,20 +789,20 @@ fn deleteDocumentRows(db: *sqlite.Database, index_name: []const u8, document_id:
     defer postings.deinit();
     try postings.bindText(1, index_name);
     try postings.bindText(2, document_id);
-    std.debug.assert((try postings.step()) == .done);
+    try postings.expectDone();
 
     var documents = try db.prepare("delete from _zova_ext_trgm_documents where index_name = ? and document_id = ?");
     defer documents.deinit();
     try documents.bindText(1, index_name);
     try documents.bindText(2, document_id);
-    std.debug.assert((try documents.step()) == .done);
+    try documents.expectDone();
 }
 
 fn deleteByIndex(db: *sqlite.Database, comptime sql: [:0]const u8, index_name: []const u8) Error!void {
     var stmt = try db.prepare(sql);
     defer stmt.deinit();
     try stmt.bindText(1, index_name);
-    std.debug.assert((try stmt.step()) == .done);
+    try stmt.expectDone();
 }
 
 fn rebuildTerms(db: *sqlite.Database, index_name: []const u8) Error!void {
@@ -816,7 +816,7 @@ fn rebuildTerms(db: *sqlite.Database, index_name: []const u8) Error!void {
     );
     defer stmt.deinit();
     try stmt.bindText(1, index_name);
-    std.debug.assert((try stmt.step()) == .done);
+    try stmt.expectDone();
 }
 
 fn computeSimilarityValues(a_value: *c.sqlite3_value, b_value: *c.sqlite3_value) Error!f64 {

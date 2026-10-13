@@ -206,7 +206,7 @@ pub const Database = struct {
         defer stmt.deinit();
 
         try stmt.bindText(1, path);
-        std.debug.assert((try stmt.step()) == .done);
+        try stmt.expectDone();
     }
 
     /// Detach a database previously attached with `attachDatabase`.
@@ -675,6 +675,16 @@ pub const Statement = struct {
             c.SQLITE_DONE => .done,
             else => mapResultCode(rc),
         };
+    }
+
+    /// Step a statement that must not produce a row.
+    ///
+    /// Returns `error.SqliteError` when a row is available instead.
+    pub fn expectDone(self: *Statement) Error!void {
+        switch (try self.step()) {
+            .done => {},
+            .row => return error.SqliteError,
+        }
     }
 
     /// Reset the statement so it can be executed again.

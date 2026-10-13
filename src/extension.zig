@@ -434,7 +434,7 @@ pub fn upgrade(allocator: std.mem.Allocator, db: *sqlite.Database, registry: Reg
     try stmt.bindText(3, target.manifest.capabilities);
     try stmt.bindText(4, target.manifest.manifest_json);
     try stmt.bindText(5, name);
-    std.debug.assert(try stmt.step() == .done);
+    try stmt.expectDone();
     try validateInstalledState(allocator, db);
     try sql_scope.prepare(db);
     try db.releaseSavepoint("extension_upgrade");
@@ -465,7 +465,7 @@ pub fn drop(db: *sqlite.Database, registry: Registry, name: []const u8, validate
     var delete_row = try db.prepare("delete from _zova_extensions where name = ?");
     defer delete_row.deinit();
     try delete_row.bindText(1, name);
-    std.debug.assert((try delete_row.step()) == .done);
+    try delete_row.expectDone();
 
     try validateInstalledState(std.heap.c_allocator, db);
     if (validate_core) |hook| hook(db) catch return error.ExtensionInvalid;
@@ -772,7 +772,7 @@ fn insertInstalled(db: *sqlite.Database, manifest: Manifest) Error!void {
     try stmt.bindText(5, manifest.capabilities);
     try stmt.bindInt64(6, if (manifest.required) 1 else 0);
     try stmt.bindText(7, manifest.manifest_json);
-    std.debug.assert((try stmt.step()) == .done);
+    try stmt.expectDone();
 }
 
 fn isInstalled(db: *sqlite.Database, name: []const u8) Error!bool {

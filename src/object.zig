@@ -1345,7 +1345,7 @@ pub const Database = struct {
         defer stmt.deinit();
 
         try stmt.bindBlob(1, &hash);
-        std.debug.assert((try stmt.step()) == .done);
+        try stmt.expectDone();
         return self.sqlite_db.changes() > 0;
     }
 
@@ -1705,7 +1705,7 @@ fn deleteObjectManifestRows(db: *sqlite.Database, storage_schema: StorageSchema,
     defer stmt.deinit();
 
     try stmt.bindBlob(1, &id);
-    std.debug.assert((try stmt.step()) == .done);
+    try stmt.expectDone();
 }
 
 fn deleteObjectRow(db: *sqlite.Database, storage_schema: StorageSchema, id: ObjectId) Error!void {
@@ -1717,7 +1717,7 @@ fn deleteObjectRow(db: *sqlite.Database, storage_schema: StorageSchema, id: Obje
     defer stmt.deinit();
 
     try stmt.bindBlob(1, &id);
-    std.debug.assert((try stmt.step()) == .done);
+    try stmt.expectDone();
 }
 
 fn deleteUnreferencedCandidateChunks(
@@ -1738,7 +1738,7 @@ fn deleteUnreferencedCandidateChunks(
 
     for (candidate_chunks) |chunk_hash| {
         try delete_chunk.bindBlob(1, &chunk_hash);
-        std.debug.assert((try delete_chunk.step()) == .done);
+        try delete_chunk.expectDone();
         try delete_chunk.reset();
         try delete_chunk.clearBindings();
     }
@@ -1795,7 +1795,7 @@ fn insertObjectRow(
     try stmt.bindInt64(2, size_bytes);
     try stmt.bindInt64(3, chunk_count);
     try stmt.bindText(4, policy.version());
-    std.debug.assert((try stmt.step()) == .done);
+    try stmt.expectDone();
 }
 
 /// Reusable insert statements for one object publication.  Keeping these
@@ -1830,7 +1830,7 @@ const ObjectInsertStatements = struct {
         try self.chunk.bindBlob(1, &chunk_hash);
         try self.chunk.bindInt64(2, try usizeToSqliteI64(chunk.len));
         try self.chunk.bindBlob(3, chunk);
-        std.debug.assert((try self.chunk.step()) == .done);
+        try self.chunk.expectDone();
         try self.chunk.reset();
         try self.chunk.clearBindings();
     }
@@ -1848,7 +1848,7 @@ const ObjectInsertStatements = struct {
         try self.manifest.bindBlob(3, &chunk_hash);
         try self.manifest.bindInt64(4, offset);
         try self.manifest.bindInt64(5, size_bytes);
-        std.debug.assert((try self.manifest.step()) == .done);
+        try self.manifest.expectDone();
         try self.manifest.reset();
         try self.manifest.clearBindings();
     }
@@ -1870,7 +1870,7 @@ fn insertChunkRow(
     try stmt.bindBlob(1, &chunk_hash);
     try stmt.bindInt64(2, try usizeToSqliteI64(chunk.len));
     try stmt.bindBlob(3, chunk);
-    std.debug.assert((try stmt.step()) == .done);
+    try stmt.expectDone();
 }
 
 fn usizeToSqliteI64(value: usize) Error!i64 {
