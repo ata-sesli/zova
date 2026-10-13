@@ -1002,8 +1002,8 @@ test {
     _ = @import("c_api_internal_tests.zig");
 }
 
-// Native builds retain the complete C ABI. The browser spike exports only the
-// lifecycle/query subset so unsupported filesystem/process paths stay unreachable.
+// Native builds retain the complete C ABI. The browser build exports only the
+// subset its bridge uses so unsupported filesystem/process paths stay unreachable.
 comptime {
     @setEvalBranchQuota(10000);
     if (@import("builtin").os.tag == .emscripten) {
@@ -1038,6 +1038,57 @@ comptime {
             "zova_kv_put",
             "zova_kv_delete",
             "zova_kv_get_result_free",
+            "zova_statement_reset",
+            "zova_statement_clear_bindings",
+            "zova_database_begin_immediate",
+            "zova_database_commit",
+            "zova_database_rollback",
+            "zova_object_put",
+            "zova_object_get",
+            "zova_object_read_range",
+            "zova_object_exists",
+            "zova_object_size",
+            "zova_object_delete",
+            "zova_vector_collection_create",
+            "zova_vector_collection_exists",
+            "zova_vector_collection_info_get",
+            "zova_vector_collection_info_free",
+            "zova_vector_collections_list",
+            "zova_vector_collection_list_free",
+            "zova_vector_collection_delete",
+            "zova_vector_put_many",
+            "zova_vector_get",
+            "zova_vector_free",
+            "zova_vector_exists",
+            "zova_vector_delete",
+            "zova_vector_delete_many",
+            "zova_vector_search",
+            "zova_vector_search_by_id",
+            "zova_vector_search_results_free",
+            "zova_graph_create",
+            "zova_graph_exists",
+            "zova_graph_info_get",
+            "zova_graph_info_free",
+            "zova_graphs_list",
+            "zova_graph_list_free",
+            "zova_graph_delete",
+            "zova_graph_node_put_many",
+            "zova_graph_node_get",
+            "zova_graph_node_free",
+            "zova_graph_node_exists",
+            "zova_graph_node_delete",
+            "zova_graph_node_delete_many",
+            "zova_graph_edge_put_many",
+            "zova_graph_edge_delete_many",
+            "zova_graph_edge_get",
+            "zova_graph_edge_free",
+            "zova_graph_edge_exists",
+            "zova_graph_edge_delete",
+            "zova_graph_neighbors",
+            "zova_graph_neighbor_results_free",
+            "zova_graph_degree",
+            "zova_graph_walk_direction",
+            "zova_graph_walk_results_free",
         };
         for (allowed) |name| {
             @export(&@field(@This(), name), .{ .name = name });

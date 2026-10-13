@@ -1,6 +1,7 @@
 # zova-wasm
 
-Experimental Zova SQL and binary KV for browsers, in memory or named OPFS storage. The real Zova
+Experimental Zova for browsers, in memory or named OPFS storage: SQL, binary KV,
+transactions, prepared statements, objects, exact vectors and graphs. The real Zova
 core and bundled SQLite run inside a dedicated worker as one WebAssembly module.
 
 This experimental package follows the repository release (`1.1.0`,
@@ -86,7 +87,8 @@ owner is evicted. Different names can be open concurrently. Close releases stora
 handles before ownership; failed initialization and worker/tab termination also
 release ownership. Retry opening after the owner has closed or terminated.
 Storage belongs to the origin and browser profile. Clearing site data or browser
-eviction can remove it. There is no export/backup API yet. Broader crash, quota,
+eviction can remove it. `export()` and `importPersistent()` copy whole databases
+in and out of that storage; nothing is exported automatically. Broader crash, quota,
 and multi-tab recovery guarantees remain experimental.
 
 ### Errors and recovery
@@ -103,8 +105,8 @@ than fall back to memory; quota failures may surface through SQLite's storage
 error mapping, not as a JavaScript `QuotaExceededError`. Do not assume a failed
 write succeeded or blindly replay a larger application operation. For an explicit
 SQL transaction, attempt rollback, close, and handle recovery at the application
-boundary. SQL and KV writes in the example are separate commits, not one combined
-transaction.
+boundary. SQL and KV writes in the example are separate commits; use
+`transaction()` to commit them together.
 
 ### Browser storage is not a backup
 
@@ -158,12 +160,99 @@ Close follows earlier work, is idempotent, and marks `closed` immediately.
 Operations after close reject. Worker failures reject outstanding work and
 mark the database closed. Errors include `status` and `statusCode`.
 
+## Transactions
+
+```ts
+const moved = await db.transaction(async tx => {
+  await tx.query('UPDATE accounts SET balance = balance - ? WHERE id = ?', [10n, 1n]);
+  await tx.kv.put(namespace, key, value);
+  return 'moved';
+});
+```
+
+`transaction()` begins an immediate transaction, runs the callback with a
+handle scoped to it, and commits when the callback resolves or rolls back when
+it throws, rethrowing the callback's error. SQL, KV, object, vector and graph
+writes made through `tx` commit or roll back together. Calls made on `db`
+while a transaction runs wait until it ends, so awaiting `db` (rather than `tx`)
+inside the callback never completes. Transactions cannot be nested, `tx` rejects
+once its transaction has ended, and `tx.close()` rejects.
+
+## Prepared statements
+
+```ts
+const insert = await db.prepare('INSERT INTO tasks VALUES (?, ?)');
+await insert.query([2n, 'Reuse the plan']);
+await insert.finalize();
+
+const select = await db.prepare('SELECT id, title FROM tasks WHERE id >= ?');
+for await (const row of select.iterate([1n], 100)) console.log(row);
+await select.finalize();
+```
+
+`prepare()` compiles one statement and reports `parameterCount` and `columns`.
+`query()` rebinds, runs to completion and returns every row. `iterate()` fetches
+rows in batches (256 by default) and resets the statement when the loop ends
+or is abandoned. A statement has one cursor: do not start a second `query()` or
+`iterate()` on the same statement before the first finishes. Rows not yet
+fetched reflect later writes on the same database as SQLite defines. Statements
+prepared inside a transaction remain usable after it. `finalize()` is idempotent;
+closing the database finalizes its statements.
+
+## Objects, vectors and graphs
+
+```ts
+const id = await db.putObject(bytes);            // 32-byte SHA-256 identity
+const tail = await db.readObjectRange(id, 1024n, 4096);
+
+await db.createVectorCollection('docs', { dimensions: 3, metric: 'cosine', elementType: 'f32' });
+await db.putVectors('docs', [{ id: 'a', values: new Float32Array([1, 0, 0]) }]);
+const hits = await db.searchVectors('docs', new Float32Array([1, 0, 0]), 5);
+
+await db.createGraph('links');
+await db.putGraphNodes([
+  { graphName: 'links', nodeId: 'a', kind: 'page', targetType: 'none' },
+  { graphName: 'links', nodeId: 'b', kind: 'page', targetType: 'none' },
+]);
+await db.putGraphEdge({ graphName: 'links', fromNodeId: 'a', edgeType: 'cites', toNodeId: 'b' });
+const reached = await db.graphWalk({ graphName: 'links', startNodeId: 'a', maxDepth: 2, limit: 100 });
+```
+
+Method names and result shapes follow the native `zova-js` package. Objects:
+`putObject`, `getObject`, `readObjectRange`, `hasObject`, `objectSize`,
+`deleteObject`. Vectors: collection create/has/info/list/delete, `putVector(s)`,
+`getVector`, `hasVector`, `deleteVector(s)`, `searchVectors` and
+`searchVectorsById`. Metrics are `cosine`, `l2` and `dot`; element types are
+`f32` (`Float32Array`), `f16` (raw half-float bits in a `Uint16Array`) and `i8`
+(`Int8Array`). Search is exact. Graphs: create/has/info/list/delete, node and
+edge put/get/has/delete with batch forms, `graphNeighbors`, `graphDegree` and
+`graphWalk`. Counts and sizes are bigint. Whole objects and result lists are
+copied through the worker in one message, so keep individual objects and
+result limits modest.
+
+## Export and import
+
+```ts
+const bytes = await db.export();                         // open persistent database
+const copy = await Database.importPersistent('restored', bytes);
+```
+
+`export()` returns the committed bytes of a persistent database as one
+`Uint8Array`. It rejects while a transaction is open on the connection and for
+memory databases. `importPersistent()` creates a new named database from such
+bytes and opens it with normal validation. It rejects with
+`ZOVA_DESTINATION_EXISTS` when the name already holds a database (it never
+overwrites one) and with the usual opening errors for bytes that are not a
+compatible Zova database, leaving nothing stored under that name. Both hold the
+whole database in memory.
+
 ## Current boundaries
 
-There is no import/export, public prepared-statement handle,
-transaction callback helper, graph/vector/object helper, native extension,
-bound-store API, migration, or shared access between workers. The native
-`zova-js` package is independent. There is no Node/CommonJS fallback.
+Not available here: keyed, payload, scan and fresh-build graph APIs; filtered
+vector search; object chunk, writer, reader and manifest APIs; export of memory
+databases; streaming export/import; deleting or listing persistent databases;
+native extensions; bound stores; migration; shared access between workers. The
+native `zova-js` package is independent. There is no Node/CommonJS fallback.
 
 There is no public bundled-extension lifecycle or application SQL callback API,
 and no `.zovaext` loader or extension-data upgrade API. SQL execution does not

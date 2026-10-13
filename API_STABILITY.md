@@ -6,7 +6,7 @@ the release-candidate validation period. The current `1.1.0` release extends
 the implementation without weakening those commitments.
 
 The separate `zova-wasm` browser package introduced in rc.3 is experimental
-and excluded from this native compatibility commitment. Its SQL/KV subset,
+and excluded from this native compatibility commitment. Its API subset,
 worker lifecycle, and OPFS APIs do not promise stable browser APIs or full
 native parity. JavaScript/TypeScript below refers to the native `zova-js` package.
 
