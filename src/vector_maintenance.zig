@@ -45,14 +45,21 @@ fn changeBody(comptime row: []const u8) []const u8 {
         \\update _zova_vector_sources set revision=revision+1,token=_zova_vector_nonce() where collection_key={0s}.collection_key;
         \\insert into _zova_vector_changes(collection_key,revision,token,vector_id)
         \\select collection_key,revision,token,{0s}.vector_id from _zova_vector_sources where collection_key={0s}.collection_key;
-        \\update _zova_vector_sources set floor=revision-4096,
-        \\floor_token=(select token from _zova_vector_changes where collection_key={0s}.collection_key and revision=_zova_vector_sources.revision-4096)
-        \\where collection_key={0s}.collection_key and revision>4096 and revision%256=0;
-        \\delete from _zova_vector_changes where collection_key={0s}.collection_key and revision<=(select floor from _zova_vector_sources where collection_key={0s}.collection_key);
     , .{row});
 }
+// Retirement runs only at a retirement point of an ordinary revision bump, so
+// the per-row change program stays free of the floor update and prune. The
+// incarnation guard keeps it from firing when a copy replaces a source's
+// history, whose revision can also land exactly one above the previous value.
+const retire_sql =
+    \\create trigger _zova_vector_retire after update of revision on _zova_vector_sources when new.revision=old.revision+1 and new.revision>4096 and new.revision%256=0 and new.incarnation=old.incarnation begin
+    \\update _zova_vector_sources set floor=new.revision-4096,floor_token=(select token from _zova_vector_changes where collection_key=new.collection_key and revision=new.revision-4096) where collection_key=new.collection_key;
+    \\delete from _zova_vector_changes where collection_key=new.collection_key and revision<=new.revision-4096;
+    \\end
+;
 pub const triggers = .{
     .{ .name = "_zova_vector_source_insert", .sql = source_insert_sql },
+    .{ .name = "_zova_vector_retire", .sql = retire_sql },
     .{ .name = "_zova_vector_change_insert", .sql = "create trigger _zova_vector_change_insert after insert on _zova_vectors begin\n" ++ changeBody("new") ++ "\nend" },
     .{ .name = "_zova_vector_change_update", .sql = "create trigger _zova_vector_change_update after update on _zova_vectors begin\n" ++ changeBody("new") ++ "\nend" },
     .{ .name = "_zova_vector_change_move", .sql = "create trigger _zova_vector_change_move after update on _zova_vectors when old.collection_key<>new.collection_key or old.vector_id<>new.vector_id begin\n" ++ changeBody("old") ++ "\nend" },

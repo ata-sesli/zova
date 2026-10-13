@@ -277,3 +277,37 @@ test "bound vector epoch failures roll back a single source operation inside cal
     try std.testing.expectEqual(before, try maintenance.view(&db.sqlite_db, "vector_store.", "v"));
     try db.rollback();
 }
+
+fn floorToken(db: *sqlite.Database, comptime prefix: []const u8) ![16]u8 {
+    var stmt = try db.prepare("select floor_token,floor,revision from " ++ prefix ++ "_zova_vector_sources");
+    defer stmt.deinit();
+    try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+    try std.testing.expectEqual(@as(i64, 256), stmt.columnInt64(1));
+    try std.testing.expectEqual(@as(i64, 4352), stmt.columnInt64(2));
+    var token: [16]u8 = undefined;
+    @memcpy(&token, stmt.columnBlob(0));
+    return token;
+}
+
+test "vector split keeps the source floor token when the copied revision lands on a retirement point" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const a = std.testing.allocator;
+    const main = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}/floor-main.zova", .{tmp.sub_path}, 0);
+    defer a.free(main);
+    const store = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}/floor-vectors.zova", .{tmp.sub_path}, 0);
+    defer a.free(store);
+    var db = try zova.Database.create(main);
+    defer db.deinit();
+    try db.createVectorCollection("v", .{ .dimensions = 2, .metric = .l2 });
+    // 4,351 live vectors plus one replacement: the copy rebuilds revision
+    // 4,351 and history replacement then installs source revision 4,352.
+    try db.begin();
+    var id: [16]u8 = undefined;
+    for (0..4351) |row| try db.putVector("v", try std.fmt.bufPrint(&id, "v{d}", .{row}), .{ .f32 = &.{ 1, 2 } });
+    try db.putVector("v", "v0", .{ .f32 = &.{ 3, 4 } });
+    try db.commit();
+    const before = try floorToken(&db.sqlite_db, "main.");
+    _ = try db.splitVectorStore(store);
+    try std.testing.expectEqualSlices(u8, &before, &(try floorToken(&db.sqlite_db, "vector_store.")));
+}
