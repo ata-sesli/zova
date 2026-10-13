@@ -2541,34 +2541,36 @@ pub const Database = struct {
 
         // Count within each ordinal's indexed adjacency range instead of sorting
         // expanded edges for GROUP BY. The borrowed array outlives the statement.
+        // CROSS JOIN keeps the array as the outer loop; left to the planner, the
+        // node table goes outside and every node rescans the whole array.
         var query = switch (direction) {
             .outgoing => if (edge_type == null)
                 try self.prepareSchema(
                     \\select batch.rowid-1,(select count(e.edge_key) from {s}_zova_graph_edges e
                     \\where e.graph_key=n.graph_key and e.from_node_key=n.node_key)
                     \\from carray(?3) batch
-                    \\join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=batch.value
+                    \\cross join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=batch.value
                 )
             else
                 try self.prepareSchema(
                     \\select batch.rowid-1,(select count(e.edge_key) from {s}_zova_graph_edges e
                     \\where e.graph_key=n.graph_key and e.from_node_key=n.node_key and e.edge_type_key=?2)
                     \\from carray(?3) batch
-                    \\join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=batch.value
+                    \\cross join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=batch.value
                 ),
             .incoming => if (edge_type == null)
                 try self.prepareSchema(
                     \\select batch.rowid-1,(select count(e.edge_key) from {s}_zova_graph_edges e
                     \\where e.graph_key=n.graph_key and e.to_node_key=n.node_key)
                     \\from carray(?3) batch
-                    \\join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=batch.value
+                    \\cross join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=batch.value
                 )
             else
                 try self.prepareSchema(
                     \\select batch.rowid-1,(select count(e.edge_key) from {s}_zova_graph_edges e
                     \\where e.graph_key=n.graph_key and e.to_node_key=n.node_key and e.edge_type_key=?2)
                     \\from carray(?3) batch
-                    \\join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=batch.value
+                    \\cross join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=batch.value
                 ),
         };
         defer query.deinit();

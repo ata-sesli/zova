@@ -2195,3 +2195,56 @@ test "bound graph store rebind recreates indexes in the new store only" {
     try std.testing.expect(try schemaIndexExistsInSchema(&db.sqlite_db, "graph_store", "_zova_graph_edges_to_node_idx"));
     try std.testing.expect(try schemaIndexExistsInSchema(&db.sqlite_db, "main", "_zova_graph_edges_to_node_idx"));
 }
+
+const DegreeStatementCapture = struct {
+    sql: [1024]u8 = undefined,
+    len: usize = 0,
+};
+
+fn degreeStatementCallback(mask: c_uint, context: ?*anyopaque, statement: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
+    if (mask != sqlite.c.SQLITE_TRACE_STMT or context == null or statement == null) return 0;
+    const stmt: *sqlite.c.sqlite3_stmt = @ptrCast(@alignCast(statement.?));
+    const sql = std.mem.span(sqlite.c.sqlite3_sql(stmt) orelse return 0);
+    const capture: *DegreeStatementCapture = @ptrCast(@alignCast(context.?));
+    if (std.mem.indexOf(u8, sql, "carray(?3)") == null or sql.len > capture.sql.len) return 0;
+    @memcpy(capture.sql[0..sql.len], sql);
+    capture.len = sql.len;
+    return 0;
+}
+
+test "keyed degree batches drive the node lookup from the key array" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "graph-keyed-degree-plan.zova");
+    var db = try zova.Database.create(db_path);
+    defer db.deinit();
+    try db.createGraph("app");
+    var node_keys: [2]i64 = undefined;
+    try db.putGraphNodesKeyed(&.{
+        .{ .graph_name = "app", .node_id = "a", .kind = "k" },
+        .{ .graph_name = "app", .node_id = "b", .kind = "k" },
+    }, &node_keys);
+    try db.putGraphEdge(.{ .graph_name = "app", .from_node_id = "a", .edge_type = "calls", .to_node_id = "b" });
+
+    var capture: DegreeStatementCapture = .{};
+    _ = sqlite.c.sqlite3_trace_v2(db.sqlite_db.handle, sqlite.c.SQLITE_TRACE_STMT, degreeStatementCallback, &capture);
+    defer _ = sqlite.c.sqlite3_trace_v2(db.sqlite_db.handle, 0, null, null);
+
+    // With the node table as the outer loop every node rescans the whole key
+    // array, which is quadratic in the batch size.
+    var degrees: [2]u64 = undefined;
+    for ([_]zova.GraphNeighborDirection{ .outgoing, .incoming }) |direction| {
+        for ([_]?[]const u8{ null, "calls" }) |edge_type| {
+            capture.len = 0;
+            try db.graphDegreeManyKeyed("app", &node_keys, direction, edge_type, &degrees);
+            try std.testing.expect(capture.len != 0);
+            var sql_buffer: [1100]u8 = undefined;
+            const sql = try std.fmt.bufPrintSentinel(&sql_buffer, "explain query plan {s}", .{capture.sql[0..capture.len]}, 0);
+            var plan = try db.sqlite_db.prepare(sql);
+            defer plan.deinit();
+            try std.testing.expect(try plan.step() == .row);
+            try std.testing.expect(std.mem.startsWith(u8, plan.columnText(3), "SCAN batch"));
+        }
+    }
+}
