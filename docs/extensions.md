@@ -6,7 +6,7 @@ migration. The [authoring guide](extension-authoring.md) covers the common C ABI
 buildable examples, compatibility boundaries and artifact release gates.
 
 New in 1.3.0: [plugins linked into the host process](#plugins-linked-into-the-host-process)
-and edge payload reads in the plugin data service.
+and edge payload reads and batched keyed adjacency in the plugin data service.
 
 Zova extensions are trusted process code that can install and manage private
 Zova storage, then expose a SQL surface on every opened connection.
