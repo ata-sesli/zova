@@ -64,7 +64,7 @@ pub const StoreKind = enum {
         return text;
     }
 
-    fn validateAttachedAlloc(comptime self: StoreKind, allocator: std.mem.Allocator, db: *sqlite.Database) Error![]u8 {
+    pub fn validateAttachedAlloc(comptime self: StoreKind, allocator: std.mem.Allocator, db: *sqlite.Database) Error![]u8 {
         return switch (self) {
             .object => validateAttachedObjectStoreAlloc(allocator, db, bound_object_store_schema_name),
             .vector => validateAttachedVectorStoreAlloc(allocator, db, bound_vector_store_schema_name),

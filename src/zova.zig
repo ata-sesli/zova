@@ -1688,101 +1688,14 @@ pub const Database = struct {
 
     pub fn bindGraphStore(self: *Database, path: [:0]const u8) Error!void {
         self.bound_graph_edge_types.clear();
-        try self.rejectBoundStoreManagementInsideMainTransaction();
-        try ensureMainDatabaseRole(&self.sqlite_db);
-        try ensureBoundStoreTable(&self.sqlite_db);
-        if (sqlite.c.sqlite3_db_readonly(self.sqlite_db.handle, "main") == 1) return error.ReadOnly;
-
-        const stored_path = try std.heap.c_allocator.dupeSentinel(u8, path, 0);
-        defer std.heap.c_allocator.free(stored_path);
-        const had_binding = try hasBoundStoreRow(&self.sqlite_db, .graph);
-        if (!had_binding and try mainGraphStorageHasRows(&self.sqlite_db)) return error.BoundStoreExists;
-
-        const had_attached_store = self.bound_graph_store != null;
-        var detached_old = false;
-        if (had_binding and had_attached_store) {
-            try self.sqlite_db.detachDatabase(bound_graph_store_schema_name);
-            self.bound_graph_store = null;
-            detached_old = true;
-        }
-        errdefer if (detached_old) self.restoreConfiguredBoundGraphStore() catch {};
-
-        // Attaching or replacing a bound store changes the schemas cached
-        // read SQL refers to, so dispose the cache first.
-        self.idle_statements.deinit();
-        try attachStore(&self.sqlite_db, .graph, stored_path, false);
-        errdefer self.sqlite_db.detachDatabase(bound_graph_store_schema_name) catch {};
-        const store_id = try validateAttachedGraphStoreAlloc(std.heap.c_allocator, &self.sqlite_db, bound_graph_store_schema_name);
-        defer std.heap.c_allocator.free(store_id);
-
-        var bound_set_id: [64]u8 = undefined;
-        randomHex64(&bound_set_id);
-        try setAttachedMetadataValue(&self.sqlite_db, bound_graph_store_schema_name, "bound_set_id", &bound_set_id);
-        try setAttachedMetadataValue(&self.sqlite_db, bound_graph_store_schema_name, "graph_epoch", "0");
-        if (had_binding)
-            try updateBoundStoreRow(&self.sqlite_db, .graph, stored_path, store_id, &bound_set_id)
-        else
-            try insertBoundStoreRow(&self.sqlite_db, .graph, stored_path, store_id, &bound_set_id);
-        self.bound_graph_store = .{};
+        return self.bindStore(.graph, path);
     }
 
     /// Move existing single-file graph storage into a new bound graph store.
     pub fn splitGraphStore(self: *Database, store_path: [:0]const u8) Error!SplitGraphStoreResult {
         self.main_graph_edge_types.clear();
         self.bound_graph_edge_types.clear();
-        try self.rejectBoundStoreManagementInsideMainTransaction();
-        try ensureMainDatabaseRole(&self.sqlite_db);
-        try ensureBoundStoreTable(&self.sqlite_db);
-        if (sqlite.c.sqlite3_db_readonly(self.sqlite_db.handle, "main") == 1) return error.ReadOnly;
-        if (try hasBoundStoreRow(&self.sqlite_db, .graph)) return error.BoundStoreExists;
-
-        const copied_counts = try graphStorageCounts(&self.sqlite_db, .main);
-
-        try createGraphStore(store_path);
-        errdefer deleteDestinationFile(store_path);
-
-        // Attaching or replacing a bound store changes the schemas cached
-        // read SQL refers to, so dispose the cache first.
-        self.idle_statements.deinit();
-        try attachStore(&self.sqlite_db, .graph, store_path, false);
-        errdefer self.sqlite_db.detachDatabase(bound_graph_store_schema_name) catch {};
-
-        try self.sqlite_db.beginImmediate();
-        var committed = false;
-        errdefer if (!committed) self.sqlite_db.rollback() catch {};
-
-        const store_id_alloc = try validateAttachedGraphStoreAlloc(std.heap.c_allocator, &self.sqlite_db, bound_graph_store_schema_name);
-        defer std.heap.c_allocator.free(store_id_alloc);
-        const store_id = try copyStoreId(store_id_alloc);
-
-        var bound_set_id: [64]u8 = undefined;
-        randomHex64(&bound_set_id);
-        try setAttachedMetadataValue(&self.sqlite_db, bound_graph_store_schema_name, "bound_set_id", &bound_set_id);
-        try setAttachedMetadataValue(&self.sqlite_db, bound_graph_store_schema_name, "graph_epoch", "0");
-        try insertBoundStoreRow(&self.sqlite_db, .graph, store_path, store_id_alloc, &bound_set_id);
-
-        self.bound_graph_store = .{};
-        errdefer self.bound_graph_store = null;
-
-        try copyGraphStorage(&self.sqlite_db, .main, &self.sqlite_db, .graph_store);
-        try clearMainGraphStorage(&self.sqlite_db);
-        const remaining_main_counts = try graphStorageCounts(&self.sqlite_db, .main);
-        if (remaining_main_counts.graphs != 0 or remaining_main_counts.nodes != 0 or remaining_main_counts.edges != 0) {
-            return error.GraphInvalid;
-        }
-
-        try verifyCurrentDatabase(self);
-        try self.sqlite_db.commit();
-        committed = true;
-
-        return .{
-            .store_path = store_path,
-            .store_id = store_id,
-            .bound_set_id = bound_set_id,
-            .copied = copied_counts,
-            .cleared = copied_counts,
-            .verified = true,
-        };
+        return self.splitStore(.graph, store_path);
     }
 
     pub fn boundGraphStore(self: *Database, allocator: std.mem.Allocator) Error!?BoundGraphStoreInfo {
@@ -1791,14 +1704,7 @@ pub const Database = struct {
 
     pub fn unbindGraphStore(self: *Database) Error!void {
         self.bound_graph_edge_types.clear();
-        try self.rejectBoundStoreManagementInsideMainTransaction();
-        if (!try hasBoundStoreRow(&self.sqlite_db, .graph)) return error.BoundStoreNotFound;
-        const had_attached_store = self.bound_graph_store != null;
-        try self.detachBoundGraphStore();
-        var deleted = false;
-        errdefer if (had_attached_store and !deleted) self.restoreConfiguredBoundGraphStore() catch {};
-        try deleteBoundStoreRows(&self.sqlite_db, .graph);
-        deleted = true;
+        return self.unbindStore(.graph);
     }
 
     /// Set this main database's optional external object-store binding.
@@ -1807,50 +1713,7 @@ pub const Database = struct {
     /// called. If a binding already exists, this safely replaces it after the
     /// new store has been attached and validated.
     pub fn bindObjectStore(self: *Database, path: [:0]const u8) Error!void {
-        try self.rejectBoundStoreManagementInsideMainTransaction();
-        try ensureMainDatabaseRole(&self.sqlite_db);
-        try ensureBoundStoreTable(&self.sqlite_db);
-        if (sqlite.c.sqlite3_db_readonly(self.sqlite_db.handle, "main") == 1) return error.ReadOnly;
-
-        const stored_path = try std.heap.c_allocator.dupeSentinel(u8, path, 0);
-        defer std.heap.c_allocator.free(stored_path);
-
-        const had_binding = try hasBoundStoreRow(&self.sqlite_db, .object);
-        if (!had_binding and try mainObjectStorageHasRows(&self.sqlite_db)) return error.BoundStoreExists;
-
-        const had_attached_store = self.bound_object_store != null;
-        var detached_old = false;
-        if (had_binding and had_attached_store) {
-            try self.sqlite_db.detachDatabase(bound_object_store_schema_name);
-            self.bound_object_store = null;
-            detached_old = true;
-        }
-
-        errdefer if (detached_old) {
-            self.restoreConfiguredBoundObjectStore() catch {};
-        };
-
-        // Attaching or replacing a bound store changes the schemas cached
-        // read SQL refers to, so dispose the cache first.
-        self.idle_statements.deinit();
-        try attachStore(&self.sqlite_db, .object, stored_path, false);
-        errdefer self.sqlite_db.detachDatabase(bound_object_store_schema_name) catch {};
-
-        const store_id = try validateAttachedObjectStoreAlloc(std.heap.c_allocator, &self.sqlite_db, bound_object_store_schema_name);
-        defer std.heap.c_allocator.free(store_id);
-
-        var bound_set_id: [64]u8 = undefined;
-        randomHex64(&bound_set_id);
-        try setAttachedMetadataValue(&self.sqlite_db, bound_object_store_schema_name, "bound_set_id", &bound_set_id);
-        try setAttachedMetadataValue(&self.sqlite_db, bound_object_store_schema_name, "object_epoch", "0");
-
-        if (had_binding) {
-            try updateBoundStoreRow(&self.sqlite_db, .object, stored_path, store_id, &bound_set_id);
-        } else {
-            try insertBoundStoreRow(&self.sqlite_db, .object, stored_path, store_id, &bound_set_id);
-        }
-
-        self.bound_object_store = .{};
+        return self.bindStore(.object, path);
     }
 
     /// Move existing single-file object storage into a new bound object store.
@@ -1859,55 +1722,7 @@ pub const Database = struct {
     /// already exist, and the main database must not already have an object
     /// store binding.
     pub fn splitObjectStore(self: *Database, store_path: [:0]const u8) Error!SplitObjectStoreResult {
-        try self.rejectBoundStoreManagementInsideMainTransaction();
-        try ensureMainDatabaseRole(&self.sqlite_db);
-        try ensureBoundStoreTable(&self.sqlite_db);
-        if (sqlite.c.sqlite3_db_readonly(self.sqlite_db.handle, "main") == 1) return error.ReadOnly;
-        if (try hasBoundStoreRow(&self.sqlite_db, .object)) return error.BoundStoreExists;
-
-        const copied_counts = try objectStorageCounts(&self.sqlite_db, .main);
-
-        try createObjectStore(store_path);
-        errdefer deleteDestinationFile(store_path);
-
-        // Attaching or replacing a bound store changes the schemas cached
-        // read SQL refers to, so dispose the cache first.
-        self.idle_statements.deinit();
-        try attachStore(&self.sqlite_db, .object, store_path, false);
-        errdefer self.sqlite_db.detachDatabase(bound_object_store_schema_name) catch {};
-
-        try self.sqlite_db.beginImmediate();
-        var committed = false;
-        errdefer if (!committed) self.sqlite_db.rollback() catch {};
-
-        const store_id_alloc = try validateAttachedObjectStoreAlloc(std.heap.c_allocator, &self.sqlite_db, bound_object_store_schema_name);
-        defer std.heap.c_allocator.free(store_id_alloc);
-        const store_id = try copyStoreId(store_id_alloc);
-
-        var bound_set_id: [64]u8 = undefined;
-        randomHex64(&bound_set_id);
-        try setAttachedMetadataValue(&self.sqlite_db, bound_object_store_schema_name, "bound_set_id", &bound_set_id);
-        try setAttachedMetadataValue(&self.sqlite_db, bound_object_store_schema_name, "object_epoch", "0");
-        try insertBoundStoreRow(&self.sqlite_db, .object, store_path, store_id_alloc, &bound_set_id);
-
-        self.bound_object_store = .{};
-        errdefer self.bound_object_store = null;
-
-        try copyObjectStorage(&self.sqlite_db, .main, &self.sqlite_db, .object_store);
-        try clearMainObjectStorage(&self.sqlite_db);
-
-        try verifyCurrentDatabase(self);
-        try self.sqlite_db.commit();
-        committed = true;
-
-        return .{
-            .store_path = store_path,
-            .store_id = store_id,
-            .bound_set_id = bound_set_id,
-            .copied = copied_counts,
-            .cleared = copied_counts,
-            .verified = true,
-        };
+        return self.splitStore(.object, store_path);
     }
 
     /// Return information about the optional bound object store, if present.
@@ -1919,23 +1734,7 @@ pub const Database = struct {
     ///
     /// This never deletes or mutates the object store file itself.
     pub fn unbindObjectStore(self: *Database) Error!void {
-        try self.rejectBoundStoreManagementInsideMainTransaction();
-        if (!try hasBoundStoreRow(&self.sqlite_db, .object)) return error.BoundStoreNotFound;
-
-        const had_attached_store = self.bound_object_store != null;
-        try self.detachBoundObjectStore();
-        var deleted = false;
-        errdefer if (had_attached_store and !deleted) {
-            self.restoreConfiguredBoundObjectStore() catch {};
-        };
-
-        var stmt = try self.sqlite_db.prepare(
-            \\delete from _zova_bound_stores
-            \\where role = 'object_store' and name = 'default'
-        );
-        defer stmt.deinit();
-        try stmt.expectDone();
-        deleted = true;
+        return self.unbindStore(.object);
     }
 
     /// Set this main database's optional external vector-store binding.
@@ -1944,50 +1743,7 @@ pub const Database = struct {
     /// called. If a binding already exists, this safely replaces it after the
     /// new store has been attached and validated.
     pub fn bindVectorStore(self: *Database, path: [:0]const u8) Error!void {
-        try self.rejectBoundStoreManagementInsideMainTransaction();
-        try ensureMainDatabaseRole(&self.sqlite_db);
-        try ensureBoundStoreTable(&self.sqlite_db);
-        if (sqlite.c.sqlite3_db_readonly(self.sqlite_db.handle, "main") == 1) return error.ReadOnly;
-
-        const stored_path = try std.heap.c_allocator.dupeSentinel(u8, path, 0);
-        defer std.heap.c_allocator.free(stored_path);
-
-        const had_binding = try hasBoundStoreRow(&self.sqlite_db, .vector);
-        if (!had_binding and try mainVectorStorageHasRows(&self.sqlite_db)) return error.BoundStoreExists;
-
-        const had_attached_store = self.bound_vector_store != null;
-        var detached_old = false;
-        if (had_binding and had_attached_store) {
-            try self.sqlite_db.detachDatabase(bound_vector_store_schema_name);
-            self.bound_vector_store = null;
-            detached_old = true;
-        }
-
-        errdefer if (detached_old) {
-            self.restoreConfiguredBoundVectorStore() catch {};
-        };
-
-        // Attaching or replacing a bound store changes the schemas cached
-        // read SQL refers to, so dispose the cache first.
-        self.idle_statements.deinit();
-        try attachStore(&self.sqlite_db, .vector, stored_path, false);
-        errdefer self.sqlite_db.detachDatabase(bound_vector_store_schema_name) catch {};
-
-        const store_id = try validateAttachedVectorStoreAlloc(std.heap.c_allocator, &self.sqlite_db, bound_vector_store_schema_name);
-        defer std.heap.c_allocator.free(store_id);
-
-        var bound_set_id: [64]u8 = undefined;
-        randomHex64(&bound_set_id);
-        try setAttachedMetadataValue(&self.sqlite_db, bound_vector_store_schema_name, "bound_set_id", &bound_set_id);
-        try setAttachedMetadataValue(&self.sqlite_db, bound_vector_store_schema_name, "vector_epoch", "0");
-
-        if (had_binding) {
-            try updateBoundStoreRow(&self.sqlite_db, .vector, stored_path, store_id, &bound_set_id);
-        } else {
-            try insertBoundStoreRow(&self.sqlite_db, .vector, stored_path, store_id, &bound_set_id);
-        }
-
-        self.bound_vector_store = .{};
+        return self.bindStore(.vector, path);
     }
 
     /// Move existing single-file vector storage into a new bound vector store.
@@ -1996,55 +1752,7 @@ pub const Database = struct {
     /// already exist, and the main database must not already have a vector
     /// store binding.
     pub fn splitVectorStore(self: *Database, store_path: [:0]const u8) Error!SplitVectorStoreResult {
-        try self.rejectBoundStoreManagementInsideMainTransaction();
-        try ensureMainDatabaseRole(&self.sqlite_db);
-        try ensureBoundStoreTable(&self.sqlite_db);
-        if (sqlite.c.sqlite3_db_readonly(self.sqlite_db.handle, "main") == 1) return error.ReadOnly;
-        if (try hasBoundStoreRow(&self.sqlite_db, .vector)) return error.BoundStoreExists;
-
-        const copied_counts = try vectorStorageCounts(&self.sqlite_db, .main);
-
-        try createVectorStore(store_path);
-        errdefer deleteDestinationFile(store_path);
-
-        // Attaching or replacing a bound store changes the schemas cached
-        // read SQL refers to, so dispose the cache first.
-        self.idle_statements.deinit();
-        try attachStore(&self.sqlite_db, .vector, store_path, false);
-        errdefer self.sqlite_db.detachDatabase(bound_vector_store_schema_name) catch {};
-
-        try self.sqlite_db.beginImmediate();
-        var committed = false;
-        errdefer if (!committed) self.sqlite_db.rollback() catch {};
-
-        const store_id_alloc = try validateAttachedVectorStoreAlloc(std.heap.c_allocator, &self.sqlite_db, bound_vector_store_schema_name);
-        defer std.heap.c_allocator.free(store_id_alloc);
-        const store_id = try copyStoreId(store_id_alloc);
-
-        var bound_set_id: [64]u8 = undefined;
-        randomHex64(&bound_set_id);
-        try setAttachedMetadataValue(&self.sqlite_db, bound_vector_store_schema_name, "bound_set_id", &bound_set_id);
-        try setAttachedMetadataValue(&self.sqlite_db, bound_vector_store_schema_name, "vector_epoch", "0");
-        try insertBoundStoreRow(&self.sqlite_db, .vector, store_path, store_id_alloc, &bound_set_id);
-
-        self.bound_vector_store = .{};
-        errdefer self.bound_vector_store = null;
-
-        try copyVectorStorage(&self.sqlite_db, .main, &self.sqlite_db, .vector_store);
-        try clearMainVectorStorage(&self.sqlite_db);
-
-        try verifyCurrentDatabase(self);
-        try self.sqlite_db.commit();
-        committed = true;
-
-        return .{
-            .store_path = store_path,
-            .store_id = store_id,
-            .bound_set_id = bound_set_id,
-            .copied = copied_counts,
-            .cleared = copied_counts,
-            .verified = true,
-        };
+        return self.splitStore(.vector, store_path);
     }
 
     /// Return information about the optional bound vector store, if present.
@@ -2056,23 +1764,7 @@ pub const Database = struct {
     ///
     /// This never deletes or mutates the vector store file itself.
     pub fn unbindVectorStore(self: *Database) Error!void {
-        try self.rejectBoundStoreManagementInsideMainTransaction();
-        if (!try hasBoundStoreRow(&self.sqlite_db, .vector)) return error.BoundStoreNotFound;
-
-        const had_attached_store = self.bound_vector_store != null;
-        try self.detachBoundVectorStore();
-        var deleted = false;
-        errdefer if (had_attached_store and !deleted) {
-            self.restoreConfiguredBoundVectorStore() catch {};
-        };
-
-        var stmt = try self.sqlite_db.prepare(
-            \\delete from _zova_bound_stores
-            \\where role = 'vector_store' and name = 'default'
-        );
-        defer stmt.deinit();
-        try stmt.expectDone();
-        deleted = true;
+        return self.unbindStore(.vector);
     }
 
     /// Create an incremental object writer for this database connection.
@@ -2772,46 +2464,188 @@ pub const Database = struct {
         }
     }
 
-    fn detachBoundObjectStore(self: *Database) Error!void {
-        if (self.bound_object_store == null) return;
+    /// Bind, or safely replace, the external store of `kind`.
+    fn bindStore(self: *Database, comptime kind: StoreKind, path: [:0]const u8) Error!void {
+        const schema_name = comptime kind.schemaName();
+        const bound = &@field(self, boundStoreField(kind));
+
+        try self.rejectBoundStoreManagementInsideMainTransaction();
+        try ensureMainDatabaseRole(&self.sqlite_db);
+        try ensureBoundStoreTable(&self.sqlite_db);
+        if (sqlite.c.sqlite3_db_readonly(self.sqlite_db.handle, "main") == 1) return error.ReadOnly;
+
+        const stored_path = try std.heap.c_allocator.dupeSentinel(u8, path, 0);
+        defer std.heap.c_allocator.free(stored_path);
+
+        const had_binding = try hasBoundStoreRow(&self.sqlite_db, kind);
+        if (!had_binding and try StoreStorage(kind).mainHasRows(&self.sqlite_db)) return error.BoundStoreExists;
+
+        var detached_old = false;
+        if (had_binding and bound.* != null) {
+            try self.sqlite_db.detachDatabase(schema_name);
+            bound.* = null;
+            detached_old = true;
+        }
+        errdefer if (detached_old) self.restoreConfiguredBoundStore(kind) catch {};
+
+        // Attaching or replacing a bound store changes the schemas cached
+        // SQL refers to, so dispose the cache first.
+        self.idle_statements.deinit();
+        try attachStore(&self.sqlite_db, kind, stored_path, false);
+        errdefer self.sqlite_db.detachDatabase(schema_name) catch {};
+
+        const store_id = try kind.validateAttachedAlloc(std.heap.c_allocator, &self.sqlite_db);
+        defer std.heap.c_allocator.free(store_id);
+
+        var bound_set_id: [64]u8 = undefined;
+        randomHex64(&bound_set_id);
+        try setAttachedMetadataValue(&self.sqlite_db, schema_name, "bound_set_id", &bound_set_id);
+        try setAttachedMetadataValue(&self.sqlite_db, schema_name, comptime kind.epochKey(), "0");
+
+        if (had_binding) {
+            try updateBoundStoreRow(&self.sqlite_db, kind, stored_path, store_id, &bound_set_id);
+        } else {
+            try insertBoundStoreRow(&self.sqlite_db, kind, stored_path, store_id, &bound_set_id);
+        }
+
+        bound.* = .{};
+    }
+
+    /// Move the single-file storage of `kind` into a new bound store.
+    fn splitStore(self: *Database, comptime kind: StoreKind, store_path: [:0]const u8) Error!StoreStorage(kind).SplitResult {
+        const storage = StoreStorage(kind);
+        const schema_name = comptime kind.schemaName();
+        const bound = &@field(self, boundStoreField(kind));
+
+        try self.rejectBoundStoreManagementInsideMainTransaction();
+        try ensureMainDatabaseRole(&self.sqlite_db);
+        try ensureBoundStoreTable(&self.sqlite_db);
+        if (sqlite.c.sqlite3_db_readonly(self.sqlite_db.handle, "main") == 1) return error.ReadOnly;
+        if (try hasBoundStoreRow(&self.sqlite_db, kind)) return error.BoundStoreExists;
+
+        const copied_counts = try storage.counts(&self.sqlite_db, .main);
+
+        try storage.create(store_path);
+        errdefer deleteDestinationFile(store_path);
+
+        // Attaching or replacing a bound store changes the schemas cached
+        // SQL refers to, so dispose the cache first.
+        self.idle_statements.deinit();
+        try attachStore(&self.sqlite_db, kind, store_path, false);
+        errdefer self.sqlite_db.detachDatabase(schema_name) catch {};
+
+        try self.sqlite_db.beginImmediate();
+        var committed = false;
+        errdefer if (!committed) self.sqlite_db.rollback() catch {};
+
+        const store_id_alloc = try kind.validateAttachedAlloc(std.heap.c_allocator, &self.sqlite_db);
+        defer std.heap.c_allocator.free(store_id_alloc);
+        const store_id = try copyStoreId(store_id_alloc);
+
+        var bound_set_id: [64]u8 = undefined;
+        randomHex64(&bound_set_id);
+        try setAttachedMetadataValue(&self.sqlite_db, schema_name, "bound_set_id", &bound_set_id);
+        try setAttachedMetadataValue(&self.sqlite_db, schema_name, comptime kind.epochKey(), "0");
+        try insertBoundStoreRow(&self.sqlite_db, kind, store_path, store_id_alloc, &bound_set_id);
+
+        bound.* = .{};
+        errdefer bound.* = null;
+
+        try storage.copyMainToStore(&self.sqlite_db);
+        try storage.clearMain(&self.sqlite_db);
+        try storage.expectMainCleared(&self.sqlite_db);
+
+        try verifyCurrentDatabase(self);
+        try self.sqlite_db.commit();
+        committed = true;
+
+        return .{
+            .store_path = store_path,
+            .store_id = store_id,
+            .bound_set_id = bound_set_id,
+            .copied = copied_counts,
+            .cleared = copied_counts,
+            .verified = true,
+        };
+    }
+
+    /// Remove the binding of `kind`. Never deletes or mutates the store file.
+    fn unbindStore(self: *Database, comptime kind: StoreKind) Error!void {
+        try self.rejectBoundStoreManagementInsideMainTransaction();
+        if (!try hasBoundStoreRow(&self.sqlite_db, kind)) return error.BoundStoreNotFound;
+
+        const had_attached_store = @field(self, boundStoreField(kind)) != null;
+        try self.detachBoundStore(kind);
+        var deleted = false;
+        errdefer if (had_attached_store and !deleted) self.restoreConfiguredBoundStore(kind) catch {};
+
+        try deleteBoundStoreRows(&self.sqlite_db, kind);
+        deleted = true;
+    }
+
+    fn detachBoundStore(self: *Database, comptime kind: StoreKind) Error!void {
+        const bound = &@field(self, boundStoreField(kind));
+        if (bound.* == null) return;
         // Cached SQL may refer to the attached schema being removed.
         self.idle_statements.deinit();
-        try self.sqlite_db.detachDatabase(bound_object_store_schema_name);
-        self.bound_object_store = null;
+        try self.sqlite_db.detachDatabase(comptime kind.schemaName());
+        bound.* = null;
     }
 
-    fn restoreConfiguredBoundObjectStore(self: *Database) Error!void {
-        if (self.bound_object_store != null) return;
+    fn restoreConfiguredBoundStore(self: *Database, comptime kind: StoreKind) Error!void {
+        const bound = &@field(self, boundStoreField(kind));
+        if (bound.* != null) return;
         self.idle_statements.deinit();
-        self.bound_object_store = try openConfiguredBoundObjectStore(&self.sqlite_db, .{});
-    }
-
-    fn detachBoundVectorStore(self: *Database) Error!void {
-        if (self.bound_vector_store == null) return;
-        self.idle_statements.deinit();
-        try self.sqlite_db.detachDatabase(bound_vector_store_schema_name);
-        self.bound_vector_store = null;
-    }
-
-    fn restoreConfiguredBoundVectorStore(self: *Database) Error!void {
-        if (self.bound_vector_store != null) return;
-        self.idle_statements.deinit();
-        self.bound_vector_store = try openConfiguredBoundVectorStore(&self.sqlite_db, .{});
-    }
-
-    fn detachBoundGraphStore(self: *Database) Error!void {
-        if (self.bound_graph_store == null) return;
-        self.idle_statements.deinit();
-        try self.sqlite_db.detachDatabase(bound_graph_store_schema_name);
-        self.bound_graph_store = null;
-    }
-
-    fn restoreConfiguredBoundGraphStore(self: *Database) Error!void {
-        if (self.bound_graph_store != null) return;
-        self.idle_statements.deinit();
-        self.bound_graph_store = try openConfiguredBoundGraphStore(&self.sqlite_db, .{});
+        bound.* = if (try openConfiguredBoundStore(&self.sqlite_db, kind, .{})) .{} else null;
     }
 };
+
+/// Name of the `Database` field that records whether a bound store of `kind` is attached.
+fn boundStoreField(comptime kind: StoreKind) []const u8 {
+    return "bound_" ++ @tagName(kind) ++ "_store";
+}
+
+/// The storage operations that differ per bound-store kind.
+fn StoreStorage(comptime kind: StoreKind) type {
+    return switch (kind) {
+        .object => struct {
+            const SplitResult = SplitObjectStoreResult;
+            const create = createObjectStore;
+            const counts = objectStorageCounts;
+            const mainHasRows = mainObjectStorageHasRows;
+            const clearMain = clearMainObjectStorage;
+            fn copyMainToStore(db: *sqlite.Database) Error!void {
+                try copyObjectStorage(db, .main, db, .object_store);
+            }
+            fn expectMainCleared(_: *sqlite.Database) Error!void {}
+        },
+        .vector => struct {
+            const SplitResult = SplitVectorStoreResult;
+            const create = createVectorStore;
+            const counts = vectorStorageCounts;
+            const mainHasRows = mainVectorStorageHasRows;
+            const clearMain = clearMainVectorStorage;
+            fn copyMainToStore(db: *sqlite.Database) Error!void {
+                try copyVectorStorage(db, .main, db, .vector_store);
+            }
+            fn expectMainCleared(_: *sqlite.Database) Error!void {}
+        },
+        .graph => struct {
+            const SplitResult = SplitGraphStoreResult;
+            const create = createGraphStore;
+            const counts = graphStorageCounts;
+            const mainHasRows = mainGraphStorageHasRows;
+            const clearMain = clearMainGraphStorage;
+            fn copyMainToStore(db: *sqlite.Database) Error!void {
+                try copyGraphStorage(db, .main, db, .graph_store);
+            }
+            fn expectMainCleared(db: *sqlite.Database) Error!void {
+                const remaining = try graphStorageCounts(db, .main);
+                if (remaining.graphs != 0 or remaining.nodes != 0 or remaining.edges != 0) return error.GraphInvalid;
+            }
+        },
+    };
+}
 
 const isZovaPath = @import("database/paths.zig").isZovaPath;
 
@@ -2870,6 +2704,10 @@ const openConfiguredBoundVectorStore = @import("database/bound_stores.zig").open
 const openConfiguredBoundGraphStore = @import("database/bound_stores.zig").openConfiguredBoundGraphStore;
 
 const attachStore = @import("database/bound_stores.zig").attachStore;
+
+const StoreKind = @import("database/bound_stores.zig").StoreKind;
+
+const openConfiguredBoundStore = @import("database/bound_stores.zig").openConfiguredBoundStore;
 
 const prepareSchemaSql = @import("database/metadata.zig").prepareSchemaSql;
 
