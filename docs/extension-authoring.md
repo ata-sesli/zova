@@ -1,7 +1,7 @@
 # Extension authoring and release acceptance
 
-This guide describes **1.2.0**.
-The package and application ABI are 1.2.0; storage format is 12.
+This guide describes **1.3.0**.
+The package and application ABI are 1.3.0; storage format is 12.
 Published 1.1.0 artifacts do not acquire these capabilities retroactively.
 The detailed contracts and CLI commands are in [Extensions](extensions.md),
 and exact C layouts, statuses and limits are in `include/zova_plugin.h`.
@@ -143,7 +143,7 @@ and cancellation points; inclusion does not imply general performance guarantees
 
 ## Support and compatibility
 
-The **1.2.0 target** supports the documented common C ABI v1: descriptor/service
+The **1.3.0 target** supports the documented common C ABI v1: descriptor/service
 negotiation, typed SQL operations, ownership/lifecycle, private data compatibility
 and snapshot-aware maintenance. Additive service negotiation does not allow
 changing an existing layout or callback contract. Use a new version for an
@@ -151,7 +151,7 @@ incompatible interface. Raw Rust declarations and idiomatic Zig helpers share
 the same boundary. A plugin's own SQL/configuration/data compatibility remains
 that author's responsibility, not Zova's core API promise.
 
-| Surface | Capability | 1.2.0 boundary |
+| Surface | Capability | 1.3.0 boundary |
 | --- | --- | --- |
 | C/C++/Rust/Zig author using C ABI v1 | All six negotiated services | Documented common ABI; no raw engine access |
 | Native CLI and C ABI | Explicit trusted bundles and lifecycle/upgrades | Supported native loader contract |

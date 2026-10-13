@@ -256,7 +256,7 @@ int32_t ZOVA_PLUGIN_CALL register_sql(const zova_plugin_host_v1 *host, void *con
 static const zova_plugin_descriptor_v1 descriptor = {
     sizeof(zova_plugin_descriptor_v1), ZOVA_PLUGIN_ABI_V1,
     ZOVA_PLUGIN_REQUIRES_DATA_V1 | ZOVA_PLUGIN_REQUIRES_OPERATIONS_V1,
-    "networkit", "1.0.0", "_zova_ext_networkit_", "1.2.0", "", nullptr, nullptr, nullptr, register_sql
+    "networkit", "1.0.0", "_zova_ext_networkit_", "1.3.0", "", nullptr, nullptr, nullptr, register_sql
 };
 extern "C" ZOVA_PLUGIN_EXPORT const zova_plugin_descriptor_v1 *ZOVA_PLUGIN_CALL
 zova_plugin_entry_v1(uint32_t version) {

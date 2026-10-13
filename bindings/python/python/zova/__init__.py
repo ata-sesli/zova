@@ -40,7 +40,7 @@ from ._native import (
     restore_backup_to_memory,
 )
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 
 class Step(IntEnum):

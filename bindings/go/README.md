@@ -59,7 +59,7 @@ flowchart LR
 After the Go module tag is pushed, applications can add the binding with:
 
 ```sh
-go get github.com/ata-sesli/zova/bindings/go@v1.2.0
+go get github.com/ata-sesli/zova/bindings/go@v1.3.0
 ```
 
 Import it as:
@@ -167,14 +167,14 @@ Because this module lives in the `bindings/go` subdirectory, the release tag
 must include that subdirectory prefix:
 
 ```sh
-git tag -a bindings/go/v1.2.0 -m "Zova Go bindings v1.2.0"
-git push origin bindings/go/v1.2.0
+git tag -a bindings/go/v1.3.0 -m "Zova Go bindings v1.3.0"
+git push origin bindings/go/v1.3.0
 ```
 
 After pushing the tag, ask the public Go module proxy to resolve it:
 
 ```sh
-GOPROXY=proxy.golang.org go list -m github.com/ata-sesli/zova/bindings/go@v1.2.0
+GOPROXY=proxy.golang.org go list -m github.com/ata-sesli/zova/bindings/go@v1.3.0
 ```
 
 The module path is:

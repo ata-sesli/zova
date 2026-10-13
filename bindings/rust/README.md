@@ -49,14 +49,14 @@ Use the safe crate for normal Rust applications:
 
 ```toml
 [dependencies]
-zova = "1.2.0"
+zova = "1.3.0"
 ```
 
 Use the raw FFI crate only when you want to call the C ABI directly:
 
 ```toml
 [dependencies]
-zova-sys = "1.2.0"
+zova-sys = "1.3.0"
 ```
 
 Both crates contain native code. The default build path compiles Zova's static C
