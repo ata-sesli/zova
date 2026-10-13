@@ -273,7 +273,7 @@ test "single-row vector writes reuse one idle statement per store" {
     }
     try std.testing.expectEqual(@as(usize, 1), db.read_statements.countFor(.vector_upsert, false));
     try std.testing.expectEqual(@as(usize, 1), db.read_statements.countFor(.vector_delete, false));
-    try std.testing.expect(db.read_statements.reuses >= 10);
+    try std.testing.expectEqual(@as(u64, 10), db.read_statements.reuses);
     try std.testing.expectEqual(db.read_statements.retained(), countLiveStatements(&db));
 
     // A rolled-back write and a schema change must not poison the retained statements.
