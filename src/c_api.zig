@@ -999,6 +999,7 @@ pub fn zova_graph_walk_direction_profiled(request: ?*const zova_graph_walk_direc
 
 test {
     _ = @import("c_api_tests.zig");
+    _ = @import("c_api_internal_tests.zig");
 }
 
 // Native builds retain the complete C ABI. The browser spike exports only the
