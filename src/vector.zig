@@ -4,6 +4,7 @@ const std = @import("std");
 const sqlite = @import("sqlite.zig");
 const statement_cache = @import("statement_cache.zig");
 const zova_error = @import("zova_error.zig");
+const prepareSchemaSql = @import("database/metadata.zig").prepareSchemaSql;
 
 pub const Error = zova_error.Error;
 
@@ -335,9 +336,7 @@ pub const Database = struct {
     }
 
     fn prepareSchema(self: *Database, comptime sql_format: []const u8, args: anytype) Error!sqlite.Statement {
-        var sql_buffer: [4096]u8 = undefined;
-        const sql = std.fmt.bufPrintSentinel(&sql_buffer, sql_format, args, 0) catch return error.SqliteError;
-        return try self.sqlite_db.prepare(sql);
+        return prepareSchemaSql(self.sqlite_db, sql_format, args);
     }
 
     /// Create a native vector collection.

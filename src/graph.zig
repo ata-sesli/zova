@@ -709,23 +709,12 @@ pub const Database = struct {
 
     fn prepareSchema(self: *Database, comptime sql_template: []const u8) Error!sqlite.Statement {
         var sql_buffer: [4096]u8 = undefined;
-        const prefix = self.storage_schema.prefix();
-        const sql_len = std.mem.replacementSize(u8, sql_template, "{s}", prefix);
-        if (sql_len >= sql_buffer.len) return error.SqliteError;
-        _ = std.mem.replace(u8, sql_template, "{s}", prefix, sql_buffer[0..sql_len]);
-        sql_buffer[sql_len] = 0;
-        const db = self.sqlite_db;
-        return try db.prepare(sql_buffer[0..sql_len :0]);
+        return try self.sqlite_db.prepare(try statement_cache.formatSchema(sql_template, self.storage_schema.prefix(), &sql_buffer));
     }
 
     fn execSchema(self: *Database, comptime sql_template: []const u8) Error!void {
         var sql_buffer: [4096]u8 = undefined;
-        const prefix = self.storage_schema.prefix();
-        const sql_len = std.mem.replacementSize(u8, sql_template, "{s}", prefix);
-        if (sql_len >= sql_buffer.len) return error.SqliteError;
-        _ = std.mem.replace(u8, sql_template, "{s}", prefix, sql_buffer[0..sql_len]);
-        sql_buffer[sql_len] = 0;
-        try self.sqlite_db.exec(sql_buffer[0..sql_len :0]);
+        try self.sqlite_db.exec(try statement_cache.formatSchema(sql_template, self.storage_schema.prefix(), &sql_buffer));
     }
 
     fn ensureEdgeTypeCache(self: *Database) Error!void {

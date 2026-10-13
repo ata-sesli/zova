@@ -8,6 +8,7 @@
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
 const vector_storage = @import("vector.zig");
+const prepareSchema = @import("database/metadata.zig").prepareSchemaSql;
 
 const c = sqlite.c;
 const allocator = std.heap.c_allocator;
@@ -532,12 +533,6 @@ fn vectorSchemaPrefix(db: *sqlite.Database) []const u8 {
     var stmt = db.prepare("select 1 from vector_store.sqlite_master limit 1") catch return "";
     defer stmt.deinit();
     return "vector_store.";
-}
-
-fn prepareSchema(db: *sqlite.Database, comptime sql_format: []const u8, args: anytype) Error!sqlite.Statement {
-    var sql_buffer: [4096]u8 = undefined;
-    const sql = std.fmt.bufPrintSentinel(&sql_buffer, sql_format, args, 0) catch return error.SqliteError;
-    return try db.prepare(sql);
 }
 
 fn loadCollection(db: *sqlite.Database, name: []const u8) Error!Collection {
