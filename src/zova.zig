@@ -239,7 +239,7 @@ pub const ObjectWriter = struct {
         errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
 
         const id = try self.inner.finish();
-        try incrementBoundObjectEpoch(self.sqlite_db);
+        try incrementBoundEpoch(self.sqlite_db, .object);
 
         if (owns_transaction) try self.sqlite_db.commit();
         committed = true;
@@ -1237,7 +1237,7 @@ pub const Database = struct {
         errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
         var graphs = self.graphDatabase();
         try graphs.createGraph(name);
-        if (self.bound_graph_store != null) try incrementBoundGraphEpoch(&self.sqlite_db);
+        if (self.bound_graph_store != null) try incrementBoundEpoch(&self.sqlite_db, .graph);
         try self.finishBoundGraphMutation(owns_transaction);
         committed = true;
     }
@@ -1250,7 +1250,7 @@ pub const Database = struct {
         errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
         var graphs = self.graphDatabase();
         try graphs.deleteGraph(name);
-        if (self.bound_graph_store != null) try incrementBoundGraphEpoch(&self.sqlite_db);
+        if (self.bound_graph_store != null) try incrementBoundEpoch(&self.sqlite_db, .graph);
         try self.finishBoundGraphMutation(owns_transaction);
         committed = true;
     }
@@ -1280,7 +1280,7 @@ pub const Database = struct {
         errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
         var graphs = self.graphDatabase();
         try graphs.putGraphNode(input);
-        if (self.bound_graph_store != null) try incrementBoundGraphEpoch(&self.sqlite_db);
+        if (self.bound_graph_store != null) try incrementBoundEpoch(&self.sqlite_db, .graph);
         try self.finishBoundGraphMutation(owns_transaction);
         committed = true;
     }
@@ -1292,7 +1292,7 @@ pub const Database = struct {
         errdefer if (!committed) self.rollbackBatchMutation(scope) catch {};
         var graphs = self.graphDatabase();
         try graphs.putGraphNodes(inputs);
-        if (self.bound_graph_store != null and inputs.len != 0) try incrementBoundGraphEpoch(&self.sqlite_db);
+        if (self.bound_graph_store != null and inputs.len != 0) try incrementBoundEpoch(&self.sqlite_db, .graph);
         try self.finishBatchMutation(scope);
         committed = true;
     }
@@ -1305,7 +1305,7 @@ pub const Database = struct {
         errdefer if (!finished) self.rollbackBatchMutation(scope) catch {};
         var graphs = self.graphDatabase();
         try graphs.putGraphNodesKeyed(inputs, out_keys);
-        if (self.bound_graph_store != null and inputs.len != 0) try incrementBoundGraphEpoch(&self.sqlite_db);
+        if (self.bound_graph_store != null and inputs.len != 0) try incrementBoundEpoch(&self.sqlite_db, .graph);
         try self.finishBatchMutation(scope);
         finished = true;
     }
@@ -1342,7 +1342,7 @@ pub const Database = struct {
         errdefer if (!finished) self.rollbackBatchMutation(scope) catch {};
         var graphs = self.graphDatabase();
         try graphs.buildFreshGraphKeyedProfiled(graph_name, nodes, edges, temporary_node_keys, temporary_edge_keys, profile);
-        if (self.bound_graph_store != null) try incrementBoundGraphEpoch(&self.sqlite_db);
+        if (self.bound_graph_store != null) try incrementBoundEpoch(&self.sqlite_db, .graph);
         try self.finishBatchMutation(scope);
         finished = true;
         @memcpy(out_node_keys, temporary_node_keys);
@@ -1381,7 +1381,7 @@ pub const Database = struct {
         errdefer if (!finished) self.rollbackBatchMutation(scope) catch {};
         var graphs = self.graphDatabase();
         try graphs.buildFreshGraphPreparedKeyedProfiled(graph_name, nodes, edges, temporary_node_keys, temporary_edge_keys, profile);
-        if (self.bound_graph_store != null) try incrementBoundGraphEpoch(&self.sqlite_db);
+        if (self.bound_graph_store != null) try incrementBoundEpoch(&self.sqlite_db, .graph);
         try self.finishBatchMutation(scope);
         finished = true;
         @memcpy(out_node_keys, temporary_node_keys);
@@ -1407,7 +1407,7 @@ pub const Database = struct {
         errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
         var graphs = self.graphDatabase();
         try graphs.deleteGraphNode(graph_name, node_id);
-        if (self.bound_graph_store != null) try incrementBoundGraphEpoch(&self.sqlite_db);
+        if (self.bound_graph_store != null) try incrementBoundEpoch(&self.sqlite_db, .graph);
         try self.finishBoundGraphMutation(owns_transaction);
         committed = true;
     }
@@ -1419,7 +1419,7 @@ pub const Database = struct {
         errdefer if (!committed) self.rollbackBatchMutation(scope) catch {};
         var graphs = self.graphDatabase();
         try graphs.deleteGraphNodes(graph_name, node_ids);
-        if (self.bound_graph_store != null and node_ids.len != 0) try incrementBoundGraphEpoch(&self.sqlite_db);
+        if (self.bound_graph_store != null and node_ids.len != 0) try incrementBoundEpoch(&self.sqlite_db, .graph);
         try self.finishBatchMutation(scope);
         committed = true;
     }
@@ -1432,7 +1432,7 @@ pub const Database = struct {
         errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
         var graphs = self.graphDatabase();
         try graphs.putGraphEdge(input);
-        if (self.bound_graph_store != null) try incrementBoundGraphEpoch(&self.sqlite_db);
+        if (self.bound_graph_store != null) try incrementBoundEpoch(&self.sqlite_db, .graph);
         try self.finishBoundGraphMutation(owns_transaction);
         committed = true;
     }
@@ -1445,7 +1445,7 @@ pub const Database = struct {
         errdefer if (!committed) self.rollbackBatchMutation(scope) catch {};
         var graphs = self.graphDatabase();
         try graphs.putGraphEdges(inputs);
-        if (self.bound_graph_store != null and inputs.len != 0) try incrementBoundGraphEpoch(&self.sqlite_db);
+        if (self.bound_graph_store != null and inputs.len != 0) try incrementBoundEpoch(&self.sqlite_db, .graph);
         try self.finishBatchMutation(scope);
         committed = true;
     }
@@ -1459,7 +1459,7 @@ pub const Database = struct {
         errdefer if (!finished) self.rollbackBatchMutation(scope) catch {};
         var graphs = self.graphDatabase();
         try graphs.putGraphEdgesKeyed(inputs, out_keys);
-        if (self.bound_graph_store != null and inputs.len != 0) try incrementBoundGraphEpoch(&self.sqlite_db);
+        if (self.bound_graph_store != null and inputs.len != 0) try incrementBoundEpoch(&self.sqlite_db, .graph);
         try self.finishBatchMutation(scope);
         finished = true;
     }
@@ -1475,7 +1475,7 @@ pub const Database = struct {
         errdefer if (!finished) self.rollbackBatchMutation(scope) catch {};
         var graphs = self.graphDatabase();
         try graphs.replaceGraphEdgePayloads(graph_name, replacements);
-        if (self.bound_graph_store != null and replacements.len != 0) try incrementBoundGraphEpoch(&self.sqlite_db);
+        if (self.bound_graph_store != null and replacements.len != 0) try incrementBoundEpoch(&self.sqlite_db, .graph);
         try self.finishBatchMutation(scope);
         finished = true;
     }
@@ -1499,7 +1499,7 @@ pub const Database = struct {
         errdefer if (owns_transaction and !committed) self.sqlite_db.rollback() catch {};
         var graphs = self.graphDatabase();
         try graphs.deleteGraphEdge(input);
-        if (self.bound_graph_store != null) try incrementBoundGraphEpoch(&self.sqlite_db);
+        if (self.bound_graph_store != null) try incrementBoundEpoch(&self.sqlite_db, .graph);
         try self.finishBoundGraphMutation(owns_transaction);
         committed = true;
     }
@@ -1512,7 +1512,7 @@ pub const Database = struct {
         errdefer if (!committed) self.rollbackBatchMutation(scope) catch {};
         var graphs = self.graphDatabase();
         try graphs.deleteGraphEdges(inputs);
-        if (self.bound_graph_store != null and inputs.len != 0) try incrementBoundGraphEpoch(&self.sqlite_db);
+        if (self.bound_graph_store != null and inputs.len != 0) try incrementBoundEpoch(&self.sqlite_db, .graph);
         try self.finishBatchMutation(scope);
         committed = true;
     }
@@ -1695,7 +1695,7 @@ pub const Database = struct {
 
         const stored_path = try std.heap.c_allocator.dupeSentinel(u8, path, 0);
         defer std.heap.c_allocator.free(stored_path);
-        const had_binding = try hasBoundGraphStoreRow(&self.sqlite_db);
+        const had_binding = try hasBoundStoreRow(&self.sqlite_db, .graph);
         if (!had_binding and try mainGraphStorageHasRows(&self.sqlite_db)) return error.BoundStoreExists;
 
         const had_attached_store = self.bound_graph_store != null;
@@ -1710,7 +1710,7 @@ pub const Database = struct {
         // Attaching or replacing a bound store changes the schemas cached
         // read SQL refers to, so dispose the cache first.
         self.idle_statements.deinit();
-        try attachGraphStore(&self.sqlite_db, stored_path, false);
+        try attachStore(&self.sqlite_db, .graph, stored_path, false);
         errdefer self.sqlite_db.detachDatabase(bound_graph_store_schema_name) catch {};
         const store_id = try validateAttachedGraphStoreAlloc(std.heap.c_allocator, &self.sqlite_db, bound_graph_store_schema_name);
         defer std.heap.c_allocator.free(store_id);
@@ -1720,9 +1720,9 @@ pub const Database = struct {
         try setAttachedMetadataValue(&self.sqlite_db, bound_graph_store_schema_name, "bound_set_id", &bound_set_id);
         try setAttachedMetadataValue(&self.sqlite_db, bound_graph_store_schema_name, "graph_epoch", "0");
         if (had_binding)
-            try updateBoundGraphStoreRow(&self.sqlite_db, stored_path, store_id, &bound_set_id)
+            try updateBoundStoreRow(&self.sqlite_db, .graph, stored_path, store_id, &bound_set_id)
         else
-            try insertBoundGraphStoreRow(&self.sqlite_db, stored_path, store_id, &bound_set_id);
+            try insertBoundStoreRow(&self.sqlite_db, .graph, stored_path, store_id, &bound_set_id);
         self.bound_graph_store = .{};
     }
 
@@ -1734,7 +1734,7 @@ pub const Database = struct {
         try ensureMainDatabaseRole(&self.sqlite_db);
         try ensureBoundStoreTable(&self.sqlite_db);
         if (sqlite.c.sqlite3_db_readonly(self.sqlite_db.handle, "main") == 1) return error.ReadOnly;
-        if (try hasBoundGraphStoreRow(&self.sqlite_db)) return error.BoundStoreExists;
+        if (try hasBoundStoreRow(&self.sqlite_db, .graph)) return error.BoundStoreExists;
 
         const copied_counts = try graphStorageCounts(&self.sqlite_db, .main);
 
@@ -1744,7 +1744,7 @@ pub const Database = struct {
         // Attaching or replacing a bound store changes the schemas cached
         // read SQL refers to, so dispose the cache first.
         self.idle_statements.deinit();
-        try attachGraphStore(&self.sqlite_db, store_path, false);
+        try attachStore(&self.sqlite_db, .graph, store_path, false);
         errdefer self.sqlite_db.detachDatabase(bound_graph_store_schema_name) catch {};
 
         try self.sqlite_db.beginImmediate();
@@ -1759,7 +1759,7 @@ pub const Database = struct {
         randomHex64(&bound_set_id);
         try setAttachedMetadataValue(&self.sqlite_db, bound_graph_store_schema_name, "bound_set_id", &bound_set_id);
         try setAttachedMetadataValue(&self.sqlite_db, bound_graph_store_schema_name, "graph_epoch", "0");
-        try insertBoundGraphStoreRow(&self.sqlite_db, store_path, store_id_alloc, &bound_set_id);
+        try insertBoundStoreRow(&self.sqlite_db, .graph, store_path, store_id_alloc, &bound_set_id);
 
         self.bound_graph_store = .{};
         errdefer self.bound_graph_store = null;
@@ -1792,12 +1792,12 @@ pub const Database = struct {
     pub fn unbindGraphStore(self: *Database) Error!void {
         self.bound_graph_edge_types.clear();
         try self.rejectBoundStoreManagementInsideMainTransaction();
-        if (!try hasBoundGraphStoreRow(&self.sqlite_db)) return error.BoundStoreNotFound;
+        if (!try hasBoundStoreRow(&self.sqlite_db, .graph)) return error.BoundStoreNotFound;
         const had_attached_store = self.bound_graph_store != null;
         try self.detachBoundGraphStore();
         var deleted = false;
         errdefer if (had_attached_store and !deleted) self.restoreConfiguredBoundGraphStore() catch {};
-        try deleteBoundGraphStoreRows(&self.sqlite_db);
+        try deleteBoundStoreRows(&self.sqlite_db, .graph);
         deleted = true;
     }
 
@@ -1815,7 +1815,7 @@ pub const Database = struct {
         const stored_path = try std.heap.c_allocator.dupeSentinel(u8, path, 0);
         defer std.heap.c_allocator.free(stored_path);
 
-        const had_binding = try hasBoundObjectStoreRow(&self.sqlite_db);
+        const had_binding = try hasBoundStoreRow(&self.sqlite_db, .object);
         if (!had_binding and try mainObjectStorageHasRows(&self.sqlite_db)) return error.BoundStoreExists;
 
         const had_attached_store = self.bound_object_store != null;
@@ -1833,7 +1833,7 @@ pub const Database = struct {
         // Attaching or replacing a bound store changes the schemas cached
         // read SQL refers to, so dispose the cache first.
         self.idle_statements.deinit();
-        try attachObjectStore(&self.sqlite_db, stored_path, false);
+        try attachStore(&self.sqlite_db, .object, stored_path, false);
         errdefer self.sqlite_db.detachDatabase(bound_object_store_schema_name) catch {};
 
         const store_id = try validateAttachedObjectStoreAlloc(std.heap.c_allocator, &self.sqlite_db, bound_object_store_schema_name);
@@ -1845,9 +1845,9 @@ pub const Database = struct {
         try setAttachedMetadataValue(&self.sqlite_db, bound_object_store_schema_name, "object_epoch", "0");
 
         if (had_binding) {
-            try updateBoundObjectStoreRow(&self.sqlite_db, stored_path, store_id, &bound_set_id);
+            try updateBoundStoreRow(&self.sqlite_db, .object, stored_path, store_id, &bound_set_id);
         } else {
-            try insertBoundObjectStoreRow(&self.sqlite_db, stored_path, store_id, &bound_set_id);
+            try insertBoundStoreRow(&self.sqlite_db, .object, stored_path, store_id, &bound_set_id);
         }
 
         self.bound_object_store = .{};
@@ -1863,7 +1863,7 @@ pub const Database = struct {
         try ensureMainDatabaseRole(&self.sqlite_db);
         try ensureBoundStoreTable(&self.sqlite_db);
         if (sqlite.c.sqlite3_db_readonly(self.sqlite_db.handle, "main") == 1) return error.ReadOnly;
-        if (try hasBoundObjectStoreRow(&self.sqlite_db)) return error.BoundStoreExists;
+        if (try hasBoundStoreRow(&self.sqlite_db, .object)) return error.BoundStoreExists;
 
         const copied_counts = try objectStorageCounts(&self.sqlite_db, .main);
 
@@ -1873,7 +1873,7 @@ pub const Database = struct {
         // Attaching or replacing a bound store changes the schemas cached
         // read SQL refers to, so dispose the cache first.
         self.idle_statements.deinit();
-        try attachObjectStore(&self.sqlite_db, store_path, false);
+        try attachStore(&self.sqlite_db, .object, store_path, false);
         errdefer self.sqlite_db.detachDatabase(bound_object_store_schema_name) catch {};
 
         try self.sqlite_db.beginImmediate();
@@ -1888,7 +1888,7 @@ pub const Database = struct {
         randomHex64(&bound_set_id);
         try setAttachedMetadataValue(&self.sqlite_db, bound_object_store_schema_name, "bound_set_id", &bound_set_id);
         try setAttachedMetadataValue(&self.sqlite_db, bound_object_store_schema_name, "object_epoch", "0");
-        try insertBoundObjectStoreRow(&self.sqlite_db, store_path, store_id_alloc, &bound_set_id);
+        try insertBoundStoreRow(&self.sqlite_db, .object, store_path, store_id_alloc, &bound_set_id);
 
         self.bound_object_store = .{};
         errdefer self.bound_object_store = null;
@@ -1920,7 +1920,7 @@ pub const Database = struct {
     /// This never deletes or mutates the object store file itself.
     pub fn unbindObjectStore(self: *Database) Error!void {
         try self.rejectBoundStoreManagementInsideMainTransaction();
-        if (!try hasBoundObjectStoreRow(&self.sqlite_db)) return error.BoundStoreNotFound;
+        if (!try hasBoundStoreRow(&self.sqlite_db, .object)) return error.BoundStoreNotFound;
 
         const had_attached_store = self.bound_object_store != null;
         try self.detachBoundObjectStore();
@@ -1952,7 +1952,7 @@ pub const Database = struct {
         const stored_path = try std.heap.c_allocator.dupeSentinel(u8, path, 0);
         defer std.heap.c_allocator.free(stored_path);
 
-        const had_binding = try hasBoundVectorStoreRow(&self.sqlite_db);
+        const had_binding = try hasBoundStoreRow(&self.sqlite_db, .vector);
         if (!had_binding and try mainVectorStorageHasRows(&self.sqlite_db)) return error.BoundStoreExists;
 
         const had_attached_store = self.bound_vector_store != null;
@@ -1970,7 +1970,7 @@ pub const Database = struct {
         // Attaching or replacing a bound store changes the schemas cached
         // read SQL refers to, so dispose the cache first.
         self.idle_statements.deinit();
-        try attachVectorStore(&self.sqlite_db, stored_path, false);
+        try attachStore(&self.sqlite_db, .vector, stored_path, false);
         errdefer self.sqlite_db.detachDatabase(bound_vector_store_schema_name) catch {};
 
         const store_id = try validateAttachedVectorStoreAlloc(std.heap.c_allocator, &self.sqlite_db, bound_vector_store_schema_name);
@@ -1982,9 +1982,9 @@ pub const Database = struct {
         try setAttachedMetadataValue(&self.sqlite_db, bound_vector_store_schema_name, "vector_epoch", "0");
 
         if (had_binding) {
-            try updateBoundVectorStoreRow(&self.sqlite_db, stored_path, store_id, &bound_set_id);
+            try updateBoundStoreRow(&self.sqlite_db, .vector, stored_path, store_id, &bound_set_id);
         } else {
-            try insertBoundVectorStoreRow(&self.sqlite_db, stored_path, store_id, &bound_set_id);
+            try insertBoundStoreRow(&self.sqlite_db, .vector, stored_path, store_id, &bound_set_id);
         }
 
         self.bound_vector_store = .{};
@@ -2000,7 +2000,7 @@ pub const Database = struct {
         try ensureMainDatabaseRole(&self.sqlite_db);
         try ensureBoundStoreTable(&self.sqlite_db);
         if (sqlite.c.sqlite3_db_readonly(self.sqlite_db.handle, "main") == 1) return error.ReadOnly;
-        if (try hasBoundVectorStoreRow(&self.sqlite_db)) return error.BoundStoreExists;
+        if (try hasBoundStoreRow(&self.sqlite_db, .vector)) return error.BoundStoreExists;
 
         const copied_counts = try vectorStorageCounts(&self.sqlite_db, .main);
 
@@ -2010,7 +2010,7 @@ pub const Database = struct {
         // Attaching or replacing a bound store changes the schemas cached
         // read SQL refers to, so dispose the cache first.
         self.idle_statements.deinit();
-        try attachVectorStore(&self.sqlite_db, store_path, false);
+        try attachStore(&self.sqlite_db, .vector, store_path, false);
         errdefer self.sqlite_db.detachDatabase(bound_vector_store_schema_name) catch {};
 
         try self.sqlite_db.beginImmediate();
@@ -2025,7 +2025,7 @@ pub const Database = struct {
         randomHex64(&bound_set_id);
         try setAttachedMetadataValue(&self.sqlite_db, bound_vector_store_schema_name, "bound_set_id", &bound_set_id);
         try setAttachedMetadataValue(&self.sqlite_db, bound_vector_store_schema_name, "vector_epoch", "0");
-        try insertBoundVectorStoreRow(&self.sqlite_db, store_path, store_id_alloc, &bound_set_id);
+        try insertBoundStoreRow(&self.sqlite_db, .vector, store_path, store_id_alloc, &bound_set_id);
 
         self.bound_vector_store = .{};
         errdefer self.bound_vector_store = null;
@@ -2057,7 +2057,7 @@ pub const Database = struct {
     /// This never deletes or mutates the vector store file itself.
     pub fn unbindVectorStore(self: *Database) Error!void {
         try self.rejectBoundStoreManagementInsideMainTransaction();
-        if (!try hasBoundVectorStoreRow(&self.sqlite_db)) return error.BoundStoreNotFound;
+        if (!try hasBoundStoreRow(&self.sqlite_db, .vector)) return error.BoundStoreNotFound;
 
         const had_attached_store = self.bound_vector_store != null;
         try self.detachBoundVectorStore();
@@ -2115,7 +2115,7 @@ pub const Database = struct {
 
         var vectors = self.vectorDatabase();
         try vectors.createVectorCollection(name, options);
-        if (self.bound_vector_store != null) try incrementBoundVectorEpoch(&self.sqlite_db);
+        if (self.bound_vector_store != null) try incrementBoundEpoch(&self.sqlite_db, .vector);
         try self.finishBoundVectorMutation(scope);
         committed = true;
     }
@@ -2158,7 +2158,7 @@ pub const Database = struct {
 
         var vectors = self.vectorDatabase();
         try vectors.putVector(collection_name, vector_id, values);
-        if (self.bound_vector_store != null) try incrementBoundVectorEpoch(&self.sqlite_db);
+        if (self.bound_vector_store != null) try incrementBoundEpoch(&self.sqlite_db, .vector);
         try self.finishBoundVectorMutation(scope);
         committed = true;
     }
@@ -2176,7 +2176,7 @@ pub const Database = struct {
 
         var vectors = self.vectorDatabase();
         try vectors.putVectors(collection_name, inputs);
-        if (self.bound_vector_store != null and inputs.len != 0) try incrementBoundVectorEpoch(&self.sqlite_db);
+        if (self.bound_vector_store != null and inputs.len != 0) try incrementBoundEpoch(&self.sqlite_db, .vector);
         try self.finishBatchMutation(scope);
         committed = true;
     }
@@ -2214,7 +2214,7 @@ pub const Database = struct {
 
         var vectors = self.vectorDatabase();
         try vectors.deleteVector(collection_name, vector_id);
-        if (self.bound_vector_store != null) try incrementBoundVectorEpoch(&self.sqlite_db);
+        if (self.bound_vector_store != null) try incrementBoundEpoch(&self.sqlite_db, .vector);
         try self.finishBoundVectorMutation(scope);
         committed = true;
     }
@@ -2233,7 +2233,7 @@ pub const Database = struct {
 
         var vectors = self.vectorDatabase();
         try vectors.deleteVectors(collection_name, vector_ids);
-        if (self.bound_vector_store != null and vector_ids.len != 0) try incrementBoundVectorEpoch(&self.sqlite_db);
+        if (self.bound_vector_store != null and vector_ids.len != 0) try incrementBoundEpoch(&self.sqlite_db, .vector);
         try self.finishBatchMutation(scope);
         committed = true;
     }
@@ -2246,7 +2246,7 @@ pub const Database = struct {
 
         var vectors = self.vectorDatabase();
         try vectors.deleteVectorCollection(name);
-        if (self.bound_vector_store != null) try incrementBoundVectorEpoch(&self.sqlite_db);
+        if (self.bound_vector_store != null) try incrementBoundEpoch(&self.sqlite_db, .vector);
         try self.finishBoundVectorMutation(scope);
         committed = true;
     }
@@ -2387,7 +2387,7 @@ pub const Database = struct {
 
         var objects = self.objectDatabase();
         const result = try objects.putObject(bytes);
-        if (!existed) try incrementBoundObjectEpoch(&self.sqlite_db);
+        if (!existed) try incrementBoundEpoch(&self.sqlite_db, .object);
         try self.finishBoundObjectMutation(scope);
         committed = true;
         return result;
@@ -2408,7 +2408,7 @@ pub const Database = struct {
 
         var objects = self.objectDatabase();
         const result = try objects.putObjectWithOptions(bytes, options);
-        if (!existed) try incrementBoundObjectEpoch(&self.sqlite_db);
+        if (!existed) try incrementBoundEpoch(&self.sqlite_db, .object);
         try self.finishBoundObjectMutation(scope);
         committed = true;
         return result;
@@ -2447,7 +2447,7 @@ pub const Database = struct {
 
         var objects = self.objectDatabase();
         try objects.putObjectChunk(expected_hash, bytes);
-        if (self.bound_object_store != null and !existed) try incrementBoundObjectEpoch(&self.sqlite_db);
+        if (self.bound_object_store != null and !existed) try incrementBoundEpoch(&self.sqlite_db, .object);
         try self.finishBoundObjectMutation(scope);
         committed = true;
     }
@@ -2466,7 +2466,7 @@ pub const Database = struct {
 
         var objects = self.objectDatabase();
         try objects.putObjectChunkWithOptions(expected_hash, bytes, options);
-        if (self.bound_object_store != null and !existed) try incrementBoundObjectEpoch(&self.sqlite_db);
+        if (self.bound_object_store != null and !existed) try incrementBoundEpoch(&self.sqlite_db, .object);
         try self.finishBoundObjectMutation(scope);
         committed = true;
     }
@@ -2484,7 +2484,7 @@ pub const Database = struct {
 
         var objects = self.objectDatabase();
         try objects.assembleObjectFromChunks(id, size_bytes, chunks);
-        if (self.bound_object_store != null) try incrementBoundObjectEpoch(&self.sqlite_db);
+        if (self.bound_object_store != null) try incrementBoundEpoch(&self.sqlite_db, .object);
         try self.finishBoundObjectMutation(scope);
         committed = true;
     }
@@ -2503,7 +2503,7 @@ pub const Database = struct {
 
         var objects = self.objectDatabase();
         try objects.assembleObjectFromChunksWithOptions(id, size_bytes, chunks, options);
-        if (self.bound_object_store != null) try incrementBoundObjectEpoch(&self.sqlite_db);
+        if (self.bound_object_store != null) try incrementBoundEpoch(&self.sqlite_db, .object);
         try self.finishBoundObjectMutation(scope);
         committed = true;
     }
@@ -2516,7 +2516,7 @@ pub const Database = struct {
 
         var objects = self.objectDatabase();
         const deleted = try objects.deleteObjectChunk(hash);
-        if (self.bound_object_store != null and deleted) try incrementBoundObjectEpoch(&self.sqlite_db);
+        if (self.bound_object_store != null and deleted) try incrementBoundEpoch(&self.sqlite_db, .object);
         try self.finishBoundObjectMutation(scope);
         committed = true;
         return deleted;
@@ -2558,7 +2558,7 @@ pub const Database = struct {
 
         var objects = self.objectDatabase();
         try objects.deleteObject(id);
-        if (self.bound_object_store != null) try incrementBoundObjectEpoch(&self.sqlite_db);
+        if (self.bound_object_store != null) try incrementBoundEpoch(&self.sqlite_db, .object);
         try self.finishBoundObjectMutation(scope);
         committed = true;
     }
@@ -2756,19 +2756,19 @@ pub const Database = struct {
         if (self.bound_object_store != null) {
             try clearMainObjectStorage(destination);
             try copyObjectStorage(&self.sqlite_db, .object_store, destination, .main);
-            try deleteBoundObjectStoreRows(destination);
+            try deleteBoundStoreRows(destination, .object);
         }
 
         if (self.bound_vector_store != null) {
             try clearMainVectorStorage(destination);
             try copyVectorStorage(&self.sqlite_db, .vector_store, destination, .main);
-            try deleteBoundVectorStoreRows(destination);
+            try deleteBoundStoreRows(destination, .vector);
         }
 
         if (self.bound_graph_store != null) {
             try clearMainGraphStorage(destination);
             try copyGraphStorage(&self.sqlite_db, .graph_store, destination, .main);
-            try deleteBoundGraphStoreRows(destination);
+            try deleteBoundStoreRows(destination, .graph);
         }
     }
 
@@ -2869,11 +2869,7 @@ const openConfiguredBoundVectorStore = @import("database/bound_stores.zig").open
 
 const openConfiguredBoundGraphStore = @import("database/bound_stores.zig").openConfiguredBoundGraphStore;
 
-const attachObjectStore = @import("database/bound_stores.zig").attachObjectStore;
-
-const attachVectorStore = @import("database/bound_stores.zig").attachVectorStore;
-
-const attachGraphStore = @import("database/bound_stores.zig").attachGraphStore;
+const attachStore = @import("database/bound_stores.zig").attachStore;
 
 const prepareSchemaSql = @import("database/metadata.zig").prepareSchemaSql;
 
@@ -2907,11 +2903,7 @@ const countStorageRows = @import("database/backup.zig").countStorageRows;
 
 const prepareObjectSchemaSql = @import("database/backup.zig").prepareObjectSchemaSql;
 
-const deleteBoundObjectStoreRows = @import("database/bound_stores.zig").deleteBoundObjectStoreRows;
-
-const deleteBoundVectorStoreRows = @import("database/bound_stores.zig").deleteBoundVectorStoreRows;
-
-const deleteBoundGraphStoreRows = @import("database/bound_stores.zig").deleteBoundGraphStoreRows;
+const deleteBoundStoreRows = @import("database/bound_stores.zig").deleteBoundStoreRows;
 
 const validateObjectStoreDatabaseExpected = @import("database/validation.zig").validateObjectStoreDatabaseExpected;
 
@@ -2957,11 +2949,7 @@ const setMetadataValue = @import("database/metadata.zig").setMetadataValue;
 
 const setAttachedMetadataValue = @import("database/metadata.zig").setAttachedMetadataValue;
 
-const hasBoundObjectStoreRow = @import("database/bound_stores.zig").hasBoundObjectStoreRow;
-
-const hasBoundVectorStoreRow = @import("database/bound_stores.zig").hasBoundVectorStoreRow;
-
-const hasBoundGraphStoreRow = @import("database/bound_stores.zig").hasBoundGraphStoreRow;
+const hasBoundStoreRow = @import("database/bound_stores.zig").hasBoundStoreRow;
 
 const loadBoundObjectStoreInfo = @import("database/bound_stores.zig").loadBoundObjectStoreInfo;
 
@@ -2969,23 +2957,11 @@ const loadBoundVectorStoreInfo = @import("database/bound_stores.zig").loadBoundV
 
 const loadBoundGraphStoreInfo = @import("database/bound_stores.zig").loadBoundGraphStoreInfo;
 
-const insertBoundObjectStoreRow = @import("database/bound_stores.zig").insertBoundObjectStoreRow;
+const insertBoundStoreRow = @import("database/bound_stores.zig").insertBoundStoreRow;
 
-const updateBoundObjectStoreRow = @import("database/bound_stores.zig").updateBoundObjectStoreRow;
+const updateBoundStoreRow = @import("database/bound_stores.zig").updateBoundStoreRow;
 
-const insertBoundVectorStoreRow = @import("database/bound_stores.zig").insertBoundVectorStoreRow;
-
-const updateBoundVectorStoreRow = @import("database/bound_stores.zig").updateBoundVectorStoreRow;
-
-const insertBoundGraphStoreRow = @import("database/bound_stores.zig").insertBoundGraphStoreRow;
-
-const updateBoundGraphStoreRow = @import("database/bound_stores.zig").updateBoundGraphStoreRow;
-
-const incrementBoundObjectEpoch = @import("database/bound_stores.zig").incrementBoundObjectEpoch;
-
-const incrementBoundVectorEpoch = @import("database/bound_stores.zig").incrementBoundVectorEpoch;
-
-const incrementBoundGraphEpoch = @import("database/bound_stores.zig").incrementBoundGraphEpoch;
+const incrementBoundEpoch = @import("database/bound_stores.zig").incrementBoundEpoch;
 
 const objectStoreIdAlloc = @import("database/metadata.zig").objectStoreIdAlloc;
 

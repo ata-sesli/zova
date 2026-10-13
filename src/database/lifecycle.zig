@@ -16,9 +16,7 @@ const bound_stores_schema_sql = @import("types.zig").bound_stores_schema_sql;
 const bound_stores_table = @import("types.zig").bound_stores_table;
 const bound_vector_store_role = @import("types.zig").bound_vector_store_role;
 const defaultIo = @import("paths.zig").defaultIo;
-const deleteBoundGraphStoreRows = @import("bound_stores.zig").deleteBoundGraphStoreRows;
-const deleteBoundObjectStoreRows = @import("bound_stores.zig").deleteBoundObjectStoreRows;
-const deleteBoundVectorStoreRows = @import("bound_stores.zig").deleteBoundVectorStoreRows;
+const deleteBoundStoreRows = @import("bound_stores.zig").deleteBoundStoreRows;
 const format_version = @import("types.zig").format_version;
 const isZovaPath = @import("paths.zig").isZovaPath;
 const lowerHexInto = @import("metadata.zig").lowerHexInto;
@@ -234,9 +232,9 @@ fn markAsVectorStore(db: *sqlite.Database) Error!void {
 }
 
 fn markAsGraphStore(db: *sqlite.Database) Error!void {
-    try deleteBoundObjectStoreRows(db);
-    try deleteBoundVectorStoreRows(db);
-    try deleteBoundGraphStoreRows(db);
+    try deleteBoundStoreRows(db, .object);
+    try deleteBoundStoreRows(db, .vector);
+    try deleteBoundStoreRows(db, .graph);
     try db.exec(
         \\delete from _zova_meta
         \\where key in ('store_role', 'store_id', 'bound_set_id', 'object_epoch', 'vector_epoch', 'graph_epoch');
