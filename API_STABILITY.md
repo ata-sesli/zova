@@ -193,7 +193,7 @@ normal `open`/`openWithOptions`:
 | Operation | Intended use and restrictions |
 | --- | --- |
 | `openForExtensionInspection` / `openForExtensionInspectionWithExtensions` | Read-only inspection of core schema and installed extension metadata; installed extension code/checks/SQL hooks are not automatically required or run. Do not assume ordinary extension initialization occurred. |
-| `openForExtensionUpgradeWithExtensions` / C `zova_database_open_for_extension_upgrade` | Explicit extension maintenance without normal installed-hook initialization. Upgrade, close, and reopen normally before application use; no implicit upgrade occurs. |
+| `openForExtensionUpgradeWithExtensions` / C `zova_database_open_for_extension_upgrade` and `zova_database_open_for_extension_upgrade_with_plugins` | Explicit extension maintenance without normal installed-hook initialization. Upgrade, close, and reopen normally before application use; no implicit upgrade occurs. |
 | `openForObjectStoreManagement` / `openForObjectStoreManagementWithExtensions` | Repair or replace bound-store metadata by opening only the main file. Object/vector/graph operations do not access the configured external stores through this handle. Close and reopen normally after maintenance. |
 | `unknownExtensionStorage` | Diagnose extension-private storage without a registered installed owner; not an application-data enumeration API. |
 | `registerExtensionSqlForDiagnostics` | Explicitly register the SQL facilities needed for extension diagnostics. This does not turn an inspection handle into a normally initialized application connection. |

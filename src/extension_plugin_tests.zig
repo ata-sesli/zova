@@ -873,6 +873,118 @@ fn limitsExercise(base: *const plugin.Host, context: ?*anyopaque) !void {
     try client.read(&req, &page);
     try std.testing.expectEqual(@as(u64, 0), page.rows);
 }
+fn applicationTableHook(base: *const plugin.Host, context: ?*anyopaque) callconv(.c) i32 {
+    const client = data_api.Client{ .host = base, .connection = context };
+    var rows: DataRows = .{ .text_column = 1 };
+    const sql = "SELECT id,body FROM main.app_notes WHERE id=?1";
+    const parameters = [_]plugin.Value{.{ .kind = plugin.value_integer, .integer = 7 }};
+    client.query(&.{ .sql = sql, .sql_len = sql.len, .parameters = &parameters, .parameter_count = 1, .row_limit = 2, .byte_limit = 1024, .row = DataRows.receive, .user_data = &rows }) catch return 1;
+    if (rows.count != 1 or rows.first[0] != 7 or !std.mem.eql(u8, rows.texts[0][0..rows.lengths[0]], "seven")) return 1;
+    // The query service stays read-only: application tables cannot be written.
+    const write = "INSERT INTO main.app_notes VALUES(8,'eight')";
+    client.query(&.{ .sql = write, .sql_len = write.len, .row_limit = 1, .byte_limit = 1024, .row = DataRows.receive, .user_data = &rows }) catch return 0;
+    return 1;
+}
+test "extension_plugin read-only hooks may query application tables" {
+    var db = try @import("zova.zig").Database.createMemory();
+    defer db.deinit();
+    try db.exec("CREATE TABLE app_notes(id INTEGER PRIMARY KEY, body TEXT); INSERT INTO app_notes VALUES(7,'seven')");
+    var d = descriptor();
+    d.check = applicationTableHook;
+    try plugin.invoke(d, .check, &db.sqlite_db);
+    try std.testing.expectEqual(@as(i64, 1), try scalarValue(&db.sqlite_db, "SELECT count(*) FROM app_notes"));
+}
+
+const PayloadRows = struct {
+    count: usize = 0,
+    ordinals: [8]i64 = @splat(0),
+    found: [8]i64 = @splat(0),
+    keys: [8]i64 = @splat(0),
+    kinds: [8]u32 = @splat(0),
+    payloads: [8][8]u8 = undefined,
+    lengths: [8]usize = @splat(0),
+    fn receive(raw: ?*anyopaque, values: ?[*]const plugin.Value, count: u64) callconv(.c) i32 {
+        const self: *PayloadRows = @ptrCast(@alignCast(raw.?));
+        if (self.count == self.keys.len or count != 4) return 3;
+        const row = values.?[0..4];
+        self.ordinals[self.count] = row[0].integer;
+        self.found[self.count] = row[1].integer;
+        self.keys[self.count] = row[2].integer;
+        self.kinds[self.count] = row[3].kind;
+        if (row[3].bytes_len > 8) return 3;
+        self.lengths[self.count] = @intCast(row[3].bytes_len);
+        if (row[3].bytes_len != 0) @memcpy(self.payloads[self.count][0..@intCast(row[3].bytes_len)], row[3].bytes.?[0..@intCast(row[3].bytes_len)]);
+        self.count += 1;
+        return 0;
+    }
+};
+// topo edge with a payload, topo edge without one, and an edge of another graph.
+var payload_edge_keys: [3]i64 = @splat(0);
+fn payloadHook(base: *const plugin.Host, context: ?*anyopaque) callconv(.c) i32 {
+    payloadExercise(base, context) catch return 1;
+    return 0;
+}
+fn payloadExercise(base: *const plugin.Host, context: ?*anyopaque) !void {
+    const client = data_api.Client{ .host = base, .connection = context };
+    const keys = [_]i64{ payload_edge_keys[0], 999, payload_edge_keys[1], payload_edge_keys[0], payload_edge_keys[2] };
+    var rows: PayloadRows = .{};
+    var req: data_api.DataRequest = .{ .operation = 9, .name = .from("topo"), .keys = &keys, .key_count = keys.len, .row_limit = keys.len, .byte_limit = 4096, .row = PayloadRows.receive, .user_data = &rows };
+    var page: data_api.DataPage = .{};
+    try client.read(&req, &page);
+    try std.testing.expectEqual(@as(u64, keys.len), page.rows);
+    try std.testing.expectEqual(@as(u32, 0), page.has_more);
+    try std.testing.expectEqualSlices(i64, &.{ 0, 1, 2, 3, 4 }, rows.ordinals[0..5]);
+    try std.testing.expectEqualSlices(i64, &.{ 1, 0, 1, 1, 0 }, rows.found[0..5]);
+    try std.testing.expectEqualSlices(i64, &keys, rows.keys[0..5]);
+    // An empty payload is a zero-length BLOB; a miss is NULL.
+    try std.testing.expectEqualSlices(u32, &.{ plugin.value_blob, plugin.value_null, plugin.value_blob, plugin.value_blob, plugin.value_null }, rows.kinds[0..5]);
+    try std.testing.expectEqualStrings("p\x00y", rows.payloads[0][0..rows.lengths[0]]);
+    try std.testing.expectEqual(@as(usize, 0), rows.lengths[2]);
+    try std.testing.expectEqualStrings("p\x00y", rows.payloads[3][0..rows.lengths[3]]);
+
+    // Payload bytes count toward the byte budget and fail the whole call.
+    rows = .{};
+    req.byte_limit = 4 * @sizeOf(plugin.Value) + 2;
+    page = .{ .rows = 99, .has_more = 1 };
+    try std.testing.expectError(error.Limit, client.read(&req, &page));
+    try std.testing.expectEqualDeep(data_api.DataPage{}, page);
+    req.byte_limit = 4096;
+
+    req.key_count = 0;
+    req.keys = null;
+    try client.read(&req, &page);
+    try std.testing.expectEqual(@as(u64, 0), page.rows);
+    req.keys = &keys;
+    req.key_count = keys.len;
+    req.row_limit = keys.len - 1;
+    try std.testing.expectError(error.InvalidArgument, client.read(&req, &page));
+    req.row_limit = keys.len;
+    req.name = .from("missing");
+    try std.testing.expectError(error.HostError, client.read(&req, &page));
+    req.name = .from("topo");
+    req.operation = 10;
+    try std.testing.expectError(error.InvalidArgument, client.read(&req, &page));
+}
+test "extension_plugin edge payload batches preserve ordinals misses and budgets" {
+    var db = try @import("zova.zig").Database.createMemory();
+    defer db.deinit();
+    try populateData(&db);
+    try db.putGraphEdges(&.{
+        .{ .graph_name = "topo", .from_node_id = "a", .to_node_id = "z", .edge_type = "back" },
+        .{ .graph_name = "other", .from_node_id = "a", .to_node_id = "a", .edge_type = "self" },
+    });
+    var stmt = try db.prepare("select e.edge_key from _zova_graph_edges e join _zova_graphs g on g.graph_key=e.graph_key order by g.name desc,e.edge_key");
+    defer stmt.deinit();
+    for (&payload_edge_keys) |*key| {
+        try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+        key.* = stmt.columnInt64(0);
+    }
+    try db.replaceGraphEdgePayloads("topo", &.{.{ .edge_key = payload_edge_keys[0], .payload = "p\x00y" }});
+    var d = descriptor();
+    d.check = payloadHook;
+    try plugin.invoke(d, .check, &db.sqlite_db);
+}
+
 test "extension_plugin data bounds cancellation empty and edge batch results" {
     var db = try @import("zova.zig").Database.createMemory();
     defer db.deinit();

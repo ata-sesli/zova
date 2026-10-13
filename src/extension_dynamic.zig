@@ -314,30 +314,26 @@ pub const DynamicExtensionSet = struct {
         bundle_paths: []const []const u8,
         options: TrustStoreOptions,
     ) Error!DynamicExtensionSet {
-        if (comptime !supports_dynamic_loading) {
-            if (bundle_paths.len != 0) return error.ExtensionLoadFailed;
-            return .{
-                .allocator = allocator,
-                .libraries = try allocator.alloc(DynamicLibrary, 0),
-                .extensions = try allocator.alloc(extension.Extension, 0),
-                .plugins = try allocator.alloc(plugin.Descriptor, 0),
-                .upgrades = try allocator.alloc(extension.Upgrade, 0),
-                .compatibilities = try allocator.alloc(extension.Compatibility, 0),
-                .recoveries = try allocator.alloc(extension.Recovery, 0),
-            };
-        }
-
-        return loadTrustedBundlesDynamic(allocator, bundle_paths, options);
+        return loadWithPlugins(allocator, bundle_paths, options, &.{});
     }
 
-    fn loadTrustedBundlesDynamic(
+    /// `loadTrustedBundles` plus C-v1 plugin descriptors already linked into
+    /// the process. Linked code needs no trust record. Each descriptor and
+    /// everything it references must outlive the returned set and every
+    /// database opened with its registry.
+    pub fn loadWithPlugins(
         allocator: std.mem.Allocator,
         bundle_paths: []const []const u8,
         options: TrustStoreOptions,
+        linked_plugins: []const ?*const plugin.Descriptor,
     ) Error!DynamicExtensionSet {
+        if (comptime !supports_dynamic_loading) {
+            if (bundle_paths.len != 0) return error.ExtensionLoadFailed;
+        }
+
         var libraries: std.ArrayList(DynamicLibrary) = .empty;
         errdefer {
-            for (libraries.items) |*library| library.close();
+            if (comptime supports_dynamic_loading) for (libraries.items) |*library| library.close();
             libraries.deinit(allocator);
         }
 
@@ -352,7 +348,7 @@ pub const DynamicExtensionSet = struct {
         var recoveries: std.ArrayList(extension.Recovery) = .empty;
         defer recoveries.deinit(allocator);
 
-        for (bundle_paths) |bundle_path| {
+        if (comptime supports_dynamic_loading) for (bundle_paths) |bundle_path| {
             var info = try loadBundleInfo(allocator, bundle_path);
             defer info.deinit(allocator);
             try ensureTrusted(allocator, info, options);
@@ -368,13 +364,21 @@ pub const DynamicExtensionSet = struct {
             if (loaded.recovery) |item| try recoveries.append(allocator, item);
             // Transfer the handle last: avoid closing it twice on allocation failure.
             try libraries.append(allocator, library);
+        };
+
+        for (linked_plugins) |descriptor| {
+            try extensions.append(allocator, try plugin.validate(descriptor));
+            try plugins.append(allocator, descriptor.?.*);
+            if (try plugin.upgradePath(descriptor.?)) |path| try upgrades.append(allocator, path);
+            if (try plugin.compatibilityPath(descriptor.?)) |item| try compatibilities.append(allocator, item);
+            if (try plugin.recoveryPath(descriptor.?)) |item| try recoveries.append(allocator, item);
         }
 
         const owned_extensions = try extensions.toOwnedSlice(allocator);
         errdefer allocator.free(owned_extensions);
         const owned_libraries = try libraries.toOwnedSlice(allocator);
         errdefer {
-            for (owned_libraries) |*library| library.close();
+            if (comptime supports_dynamic_loading) for (owned_libraries) |*library| library.close();
             allocator.free(owned_libraries);
         }
         const owned_plugins = try plugins.toOwnedSlice(allocator);

@@ -538,6 +538,19 @@ pub const zova_database_migrate_request = extern struct {
     out_error_message: ?*zova_message = null,
 };
 
+/// `zova_database_migrate_request` plus host-supplied extension code.
+pub const zova_database_migrate_extensions_request = extern struct {
+    source_path: ?[*:0]const u8 = null,
+    destination_path: ?[*:0]const u8 = null,
+    flags: u32 = 0,
+    extension_bundle_paths: ?[*]const ?[*:0]const u8 = null,
+    extension_bundle_count: usize = 0,
+    trust_store_path: ?[*:0]const u8 = null,
+    plugins: ?[*]const ?*const zova_plugin_descriptor_v1 = null,
+    plugin_count: usize = 0,
+    out_error_message: ?*zova_message = null,
+};
+
 pub const zova_database_open_request = extern struct {
     path: ?[*:0]const u8,
     out_db: ?*?*zova_database,
@@ -578,6 +591,23 @@ pub const zova_database_open_extensions_request = extern struct {
     extension_bundle_paths: ?[*]const ?[*:0]const u8,
     extension_bundle_count: usize,
     trust_store_path: ?[*:0]const u8,
+    out_db: ?*?*zova_database,
+    out_error_message: ?*zova_message,
+};
+
+pub const zova_plugin_descriptor_v1 = @import("../extension_plugin_api.zig").Descriptor;
+
+/// `zova_database_open_extensions_request` plus plugin descriptors already
+/// linked into the host process.
+pub const zova_database_open_plugins_request = extern struct {
+    path: ?[*:0]const u8,
+    flags: u32,
+    busy_timeout_ms: u32,
+    extension_bundle_paths: ?[*]const ?[*:0]const u8,
+    extension_bundle_count: usize,
+    trust_store_path: ?[*:0]const u8,
+    plugins: ?[*]const ?*const zova_plugin_descriptor_v1,
+    plugin_count: usize,
     out_db: ?*?*zova_database,
     out_error_message: ?*zova_message,
 };

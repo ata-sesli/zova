@@ -1718,6 +1718,10 @@ static void run_probe_migrate_smoke(void) {
     // Null request validation
     expect_status(zova_database_probe_format(NULL), ZOVA_INVALID_ARGUMENT, "probe null request");
     expect_status(zova_database_migrate(NULL), ZOVA_INVALID_ARGUMENT, "migrate null request");
+    expect_status(zova_database_migrate_with_extensions(NULL), ZOVA_INVALID_ARGUMENT, "migrate with extensions null request");
+    expect_status(zova_database_create_with_plugins(NULL), ZOVA_INVALID_ARGUMENT, "create with plugins null request");
+    expect_status(zova_database_open_with_plugins(NULL), ZOVA_INVALID_ARGUMENT, "open with plugins null request");
+    expect_status(zova_database_open_for_extension_upgrade_with_plugins(NULL), ZOVA_INVALID_ARGUMENT, "upgrade open with plugins null request");
 
     // Probe: null out_info must be INVALID_ARGUMENT and not crash; out_info zeroed check
     {

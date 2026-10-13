@@ -336,6 +336,8 @@ typedef struct zova_plugin_data_page_v1 {
 #define ZOVA_PLUGIN_VECTOR_METADATA UINT32_C(6)
 #define ZOVA_PLUGIN_VECTORS_SCAN UINT32_C(7)
 #define ZOVA_PLUGIN_VECTORS_GET UINT32_C(8)
+/* Requires a Zova 1.3.0 or newer host; declare zova_abi_min accordingly. */
+#define ZOVA_PLUGIN_GRAPH_EDGE_PAYLOADS_GET UINT32_C(9)
 #define ZOVA_PLUGIN_OUTGOING UINT32_C(0)
 #define ZOVA_PLUGIN_INCOMING UINT32_C(1)
 
@@ -355,6 +357,10 @@ typedef struct zova_plugin_data_page_v1 {
  * NODES_GET: ordinal, found, input_key, node_id(TEXT), kind(TEXT), order.
  * EDGES_GET: ordinal, found, input_key, source_key, edge_type(TEXT), target_key, order.
  * NEIGHBORS: edge_key, neighbor_key, node_id(TEXT), kind(TEXT), edge_type(TEXT), order.
+ * EDGE_PAYLOADS_GET: ordinal, found, input_key, payload(BLOB or NULL). Payload
+ * bytes are the application's opaque edge payload, possibly empty; they count
+ * toward byte_limit, so an over-budget batch fails with LIMIT and is retried
+ * with fewer keys. A single payload above 1 MiB cannot be read here.
  * VECTOR_METADATA: dimensions, element_type(TEXT: f32/f16/i8), metric(TEXT:
  * cosine/l2/dot), vector_count. No private vector key is exposed.
  * VECTORS_SCAN: vector_id(TEXT), values(BLOB).

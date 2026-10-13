@@ -714,6 +714,44 @@ trusted-bundle open request, with zero flags) and
 `zova_database_extension_upgrade` (the existing named extension request).
 The maintenance open validates the current core/file format but intentionally
 does not run installed extension hooks. It is not a normal application open.
+
+### Plugins linked into the host process
+
+A C host that links a plugin into its own executable does not need a `.zovaext`
+bundle or a trust record for it. `zova_database_create_with_plugins`,
+`zova_database_open_with_plugins` and
+`zova_database_open_for_extension_upgrade_with_plugins` take a
+`zova_database_open_plugins_request`: the trusted-bundle open request plus an
+array of `zova_plugin_descriptor_v1` pointers. Linked plugins are composed with
+the bundled registry and any listed bundles exactly as bundle plugins are, and
+the same lifecycle calls (`zova_database_extension_install`, upgrade, rebuild,
+drop) then apply by name.
+
+```c
+#include "zova.h"
+#include "zova_plugin.h"
+
+extern const zova_plugin_descriptor_v1 my_plugin; /* defined by the host */
+
+const zova_plugin_descriptor_v1 *plugins[] = { &my_plugin };
+zova_database *db = NULL;
+zova_database_open_plugins_request request = {
+    .path = "app.zova",
+    .plugins = plugins,
+    .plugin_count = 1,
+    .out_db = &db,
+};
+zova_status status = zova_database_open_with_plugins(&request);
+```
+
+Every descriptor, and everything it points to, must stay valid until the handle
+is closed. The host vouches for code it links: no hash is recorded and the trust
+store is consulted only for bundle paths in the same request. An installed
+extension is required at every later open, so a database that has a linked
+plugin installed must always be opened with that plugin supplied.
+`zova_database_migrate_with_extensions` takes the same bundle paths and
+descriptors for format migration; see
+[storage compatibility](storage-compatibility.md).
 Existing high-level bindings are unchanged.
 
 ### Opt-in code/data compatibility
