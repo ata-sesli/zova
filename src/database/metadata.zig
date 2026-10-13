@@ -6,7 +6,7 @@ const sqlite = @import("../sqlite.zig");
 const Error = @import("types.zig").Error;
 const format_version = @import("types.zig").format_version;
 
-pub fn prepareSchemaSql(db: *sqlite.Database, comptime sql_format: []const u8, args: anytype) Error!sqlite.Statement {
+pub fn prepareSchemaSql(db: *sqlite.Database, comptime sql_format: []const u8, args: anytype) sqlite.Error!sqlite.Statement {
     var sql_buffer: [4096]u8 = undefined;
     const sql = std.fmt.bufPrintSentinel(&sql_buffer, sql_format, args, 0) catch return error.SqliteError;
     return try db.prepare(sql);

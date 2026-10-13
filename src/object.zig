@@ -7,6 +7,7 @@ const fixed_chunks = @import("object_fixed_chunks.zig");
 pub const sqlite = @import("sqlite.zig");
 const statement_cache = @import("statement_cache.zig");
 const zova_error = @import("zova_error.zig");
+const prepareSchemaSql = @import("database/metadata.zig").prepareSchemaSql;
 
 const object_mutation_savepoint = @import("database/types.zig").object_mutation_savepoint;
 const ObjectMutationScope = @import("database/types.zig").ObjectMutationScope;
@@ -728,9 +729,7 @@ pub const Database = struct {
     }
 
     fn prepareSchema(self: *Database, comptime sql_format: []const u8, args: anytype) Error!sqlite.Statement {
-        var sql_buffer: [4096]u8 = undefined;
-        const sql = std.fmt.bufPrintSentinel(&sql_buffer, sql_format, args, 0) catch return error.SqliteError;
-        return try self.sqlite_db.prepare(sql);
+        return prepareSchemaSql(self.sqlite_db, sql_format, args);
     }
 
     /// Check out the shared cached statement for `tag`, preparing `sql` when
@@ -1543,18 +1542,6 @@ fn rollbackObjectMutation(db: *sqlite.Database, scope: ObjectMutationScope) void
     }
 }
 
-fn prepareSchema(
-    db: *sqlite.Database,
-    storage_schema: StorageSchema,
-    comptime sql_format: []const u8,
-    args: anytype,
-) Error!sqlite.Statement {
-    var sql_buffer: [4096]u8 = undefined;
-    const sql = std.fmt.bufPrintSentinel(&sql_buffer, sql_format, args, 0) catch return error.SqliteError;
-    _ = storage_schema;
-    return try db.prepare(sql);
-}
-
 fn countObjectChunks(policy: ChunkingPolicy, bytes: []const u8) usize {
     var count: usize = 0;
     var offset: usize = 0;
@@ -1610,9 +1597,8 @@ fn objectRowExists(
 }
 
 fn countObjectManifestRows(db: *sqlite.Database, storage_schema: StorageSchema, id: ObjectId) Error!u64 {
-    var stmt = try prepareSchema(
+    var stmt = try prepareSchemaSql(
         db,
-        storage_schema,
         "select count(*) from {s}_zova_object_chunks where object_id = ?",
         .{storage_schema.prefix()},
     );
@@ -1638,7 +1624,7 @@ fn validateObjectManifestShape(
     if (chunk_count > size) return error.ObjectCorrupt;
     if (try countObjectManifestRows(db, storage_schema, id) != chunk_count) return error.ObjectCorrupt;
 
-    var manifest = try prepareSchema(db, storage_schema,
+    var manifest = try prepareSchemaSql(db,
         \\select oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.size_bytes
         \\from {s}_zova_object_chunks oc
         \\left join {s}_zova_chunks c on c.chunk_hash = oc.chunk_hash
@@ -1690,7 +1676,7 @@ fn collectDeleteCandidateChunks(
     var chunks: std.ArrayList(ObjectId) = .empty;
     errdefer chunks.deinit(allocator);
 
-    var stmt = try prepareSchema(db, storage_schema,
+    var stmt = try prepareSchemaSql(db,
         \\select distinct chunk_hash
         \\from {s}_zova_object_chunks
         \\where object_id = ?
@@ -1711,9 +1697,8 @@ fn collectDeleteCandidateChunks(
 }
 
 fn deleteObjectManifestRows(db: *sqlite.Database, storage_schema: StorageSchema, id: ObjectId) Error!void {
-    var stmt = try prepareSchema(
+    var stmt = try prepareSchemaSql(
         db,
-        storage_schema,
         "delete from {s}_zova_object_chunks where object_id = ?",
         .{storage_schema.prefix()},
     );
@@ -1724,9 +1709,8 @@ fn deleteObjectManifestRows(db: *sqlite.Database, storage_schema: StorageSchema,
 }
 
 fn deleteObjectRow(db: *sqlite.Database, storage_schema: StorageSchema, id: ObjectId) Error!void {
-    var stmt = try prepareSchema(
+    var stmt = try prepareSchemaSql(
         db,
-        storage_schema,
         "delete from {s}_zova_objects where object_id = ?",
         .{storage_schema.prefix()},
     );
@@ -1741,7 +1725,7 @@ fn deleteUnreferencedCandidateChunks(
     storage_schema: StorageSchema,
     candidate_chunks: []const ObjectId,
 ) Error!void {
-    var delete_chunk = try prepareSchema(db, storage_schema,
+    var delete_chunk = try prepareSchemaSql(db,
         \\delete from {s}_zova_chunks
         \\where chunk_hash = ?
         \\  and not exists (
@@ -1800,7 +1784,7 @@ fn insertObjectRow(
     chunk_count: i64,
     policy: ChunkingPolicy,
 ) Error!void {
-    var stmt = try prepareSchema(db, storage_schema,
+    var stmt = try prepareSchemaSql(db,
         \\insert into {s}_zova_objects (object_id, size_bytes, chunk_count, chunker)
         \\values (?, ?, ?, ?)
         \\on conflict(object_id) do nothing
@@ -1822,14 +1806,14 @@ const ObjectInsertStatements = struct {
     manifest: sqlite.Statement,
 
     fn init(db: *sqlite.Database, storage_schema: StorageSchema) Error!ObjectInsertStatements {
-        var chunk = try prepareSchema(db, storage_schema,
+        var chunk = try prepareSchemaSql(db,
             \\insert into {s}_zova_chunks (chunk_hash, size_bytes, data)
             \\values (?, ?, ?)
             \\on conflict(chunk_hash) do nothing
         , .{storage_schema.prefix()});
         errdefer chunk.deinit();
 
-        const manifest = try prepareSchema(db, storage_schema,
+        const manifest = try prepareSchemaSql(db,
             \\insert into {s}_zova_object_chunks (object_id, chunk_index, chunk_hash, offset, size_bytes)
             \\values (?, ?, ?, ?, ?)
         , .{storage_schema.prefix()});
@@ -1876,7 +1860,7 @@ fn insertChunkRow(
     chunk_hash: ObjectId,
     chunk: []const u8,
 ) Error!void {
-    var stmt = try prepareSchema(db, storage_schema,
+    var stmt = try prepareSchemaSql(db,
         \\insert into {s}_zova_chunks (chunk_hash, size_bytes, data)
         \\values (?, ?, ?)
         \\on conflict(chunk_hash) do nothing
