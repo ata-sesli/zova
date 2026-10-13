@@ -1063,6 +1063,33 @@ fn neighborsExercise(base: *const plugin.Host, context: ?*anyopaque) !void {
     try std.testing.expectEqual(@as(u64, 0), page.rows);
     req.edge_type = .{};
 
+    // A type set keeps adjacency order across types and ignores unknown names.
+    rows = .{};
+    const types = [_]data_api.Bytes{ .from("y"), .from("absent"), .from("x") };
+    req.ids = &types;
+    req.id_count = types.len;
+    try client.read(&req, &page);
+    try std.testing.expectEqualSlices(i64, &.{ b, c, c, b, c }, rows.neighbors[0..rows.count]);
+    try std.testing.expectEqualStrings("xyxxy", rows.types[0..rows.count]);
+    rows = .{};
+    req.id_count = 1;
+    try client.read(&req, &page);
+    try std.testing.expectEqualSlices(i64, &.{ c, c }, rows.neighbors[0..rows.count]);
+    req.ids = types[1..].ptr;
+    try client.read(&req, &page);
+    try std.testing.expectEqual(@as(u64, 0), page.rows);
+    req.edge_type = .from("x");
+    try std.testing.expectError(error.InvalidArgument, client.read(&req, &page));
+    req.edge_type = .{};
+    const many: [17]data_api.Bytes = @splat(.from("x"));
+    req.ids = &many;
+    req.id_count = many.len;
+    req.row_limit = many.len;
+    try std.testing.expectError(error.InvalidArgument, client.read(&req, &page));
+    req.row_limit = 8;
+    req.ids = null;
+    req.id_count = 0;
+
     rows = .{};
     req.direction = 1;
     req.keys = &.{ c, a };

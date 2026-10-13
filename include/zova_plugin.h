@@ -364,9 +364,10 @@ typedef struct zova_plugin_data_page_v1 {
  * toward byte_limit, so an over-budget batch fails with LIMIT and is retried
  * with fewer keys. A single payload above 1 MiB cannot be read here.
  * NEIGHBORS_KEYED: ordinal, input_key, edge_key, neighbor_key, edge_type(TEXT),
- * order. keys are node keys; direction and the optional edge_type apply to all
- * of them. Rows are grouped by input ordinal, in adjacency order within each
- * key. A key that is unknown, belongs to another graph, or has no matching
+ * order. keys are node keys; direction and the optional edge-type filter apply
+ * to all of them. The filter is either edge_type or, for a set, ids holding 1..16
+ * edge-type names (not both); names the graph does not have match nothing. Rows
+ * are grouped by input ordinal, in adjacency order within each key. A key that is unknown, belongs to another graph, or has no matching
  * edge produces no rows. When has_more is set, resume with the keys from the
  * last row's ordinal onward and after=next; after applies to keys[0] only.
  * VECTOR_METADATA: dimensions, element_type(TEXT: f32/f16/i8), metric(TEXT:

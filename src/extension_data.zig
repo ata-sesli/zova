@@ -9,6 +9,7 @@ const api = @import("extension_plugin_api.zig");
 pub const Error = sqlite.Error || error{ OutOfMemory, PluginLimit, PluginCanceled, SourceNotFound, Corrupt };
 pub const max_rows = 4096;
 pub const max_bytes = 1024 * 1024;
+const max_edge_types = 16;
 
 pub fn bytes(value: api.Bytes) Error![]const u8 {
     if (value.len > max_bytes or (value.len != 0 and value.data == null)) return error.InvalidArgument;
@@ -70,6 +71,11 @@ pub fn read(allocator: std.mem.Allocator, db: *sqlite.Database, r: *const api.Da
     if (op == .graph_neighbors or op == .graph_neighbors_keyed) {
         if (edge_type.len != 0) graph.validateEdgeType(edge_type) catch return error.InvalidArgument;
     }
+    if (op == .graph_neighbors_keyed) {
+        // ids carries an optional edge-type set; edge_type is the one-type form.
+        if (ids.len > max_edge_types or (ids.len != 0 and edge_type.len != 0)) return error.InvalidArgument;
+        for (ids) |id| graph.validateEdgeType(try bytes(id)) catch return error.InvalidArgument;
+    }
     const prefix = if (is_graph) try schema(db, "graph_store") else try schema(db, "vector_store");
     var buffer: [4096]u8 = undefined;
     var source = if (is_graph)
@@ -93,7 +99,7 @@ pub fn read(allocator: std.mem.Allocator, db: *sqlite.Database, r: *const api.Da
         vector_type = std.meta.stringToEnum(vector.VectorElementType, element) orelse return error.Corrupt;
         vector_metric = std.meta.stringToEnum(vector.VectorMetric, source.columnText(3)) orelse return error.Corrupt;
     }
-    if (op == .graph_neighbors_keyed) return readNeighborsKeyed(db, &buffer, prefix, source_key, r, keys, edge_type);
+    if (op == .graph_neighbors_keyed) return readNeighborsKeyed(db, &buffer, prefix, source_key, r, keys, edge_type, ids);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     var stmt = switch (op) {
@@ -187,9 +193,29 @@ fn prepareNeighbors(db: *sqlite.Database, buffer: []u8, prefix: []const u8, dire
 
 /// One reusable single-node statement stepped per input key: rows arrive in
 /// adjacency-index order, so a high-degree node is never sorted or materialized.
-fn readNeighborsKeyed(db: *sqlite.Database, buffer: []u8, prefix: []const u8, graph_key: i64, r: *const api.DataRequest, keys: []const i64, edge_type: []const u8) Error!api.DataPage {
+fn readNeighborsKeyed(db: *sqlite.Database, buffer: []u8, prefix: []const u8, graph_key: i64, r: *const api.DataRequest, keys: []const i64, edge_type: []const u8, edge_types: []const api.Bytes) Error!api.DataPage {
+    var type_keys: [max_edge_types]i64 = undefined;
+    var type_count: usize = 0;
+    if (edge_types.len != 0) {
+        var lookup = try prepare(db, buffer, "select edge_type_key from {s}_zova_graph_edge_types where graph_key=?1 and name=?2", .{prefix});
+        defer lookup.deinit();
+        for (edge_types) |name| {
+            try lookup.reset();
+            try lookup.bindInt64(1, graph_key);
+            try lookup.bindTextBorrowed(2, try bytes(name));
+            if (try lookup.step() != .row) continue;
+            type_keys[type_count] = lookup.columnInt64(0);
+            type_count += 1;
+        }
+        if (type_count == 0) return .{};
+    }
     var filter_buffer: [256]u8 = undefined;
-    const filter_sql = if (edge_type.len != 0)
+    // One type searches the typed adjacency index exactly. A set filters the
+    // untyped index instead (unary plus), which keeps rows in adjacency order
+    // without sorting a node's matching edges on every page.
+    const filter_sql = if (type_count != 0)
+        "+e.edge_type_key in (select value from carray(?3))"
+    else if (edge_type.len != 0)
         std.fmt.bufPrint(&filter_buffer, "e.edge_type_key=(select edge_type_key from {s}_zova_graph_edge_types where graph_key=?1 and name=?3)", .{prefix}) catch return error.InvalidArgument
     else
         "?3=''";
@@ -203,7 +229,7 @@ fn readNeighborsKeyed(db: *sqlite.Database, buffer: []u8, prefix: []const u8, gr
         try stmt.reset();
         try stmt.bindInt64(1, graph_key);
         try stmt.bindInt64(2, key);
-        try stmt.bindTextBorrowed(3, edge_type);
+        if (type_count != 0) try array.bindInt64Borrowed(&stmt, 3, type_keys[0..type_count]) else try stmt.bindTextBorrowed(3, edge_type);
         // The resume cursor belongs to the first key only.
         try stmt.bindInt64(4, if (ordinal == 0) r.after.created_order else 0);
         try stmt.bindInt64(5, if (ordinal == 0) r.after.key else 0);
