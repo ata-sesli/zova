@@ -57,10 +57,10 @@ test "object and graph read paths reuse one bounded set of idle statements" {
         try std.testing.expect(try db.hasGraphEdge("cache", "a", "link", "b"));
     }
 
-    try std.testing.expect(db.read_statements.reuses > 0);
-    try std.testing.expect(db.read_statements.prepares > 0);
-    try std.testing.expect(db.read_statements.retained() <= statement_cache.capacity);
-    try std.testing.expectEqual(db.read_statements.retained(), countLiveStatements(&db));
+    try std.testing.expect(db.idle_statements.reuses > 0);
+    try std.testing.expect(db.idle_statements.prepares > 0);
+    try std.testing.expect(db.idle_statements.retained() <= statement_cache.capacity);
+    try std.testing.expectEqual(db.idle_statements.retained(), countLiveStatements(&db));
     try db.vacuum();
 }
 
@@ -164,21 +164,21 @@ test "main and bound store read statements stay distinct and are disposed before
     try db.bindObjectStore(store_path);
     const bound_id = try db.putObjectWithOptions(&bytes, .{ .profile = .streaming });
     try std.testing.expectEqual(@as(usize, 512), try db.readObjectRange(bound_id, 0, &buffer));
-    try std.testing.expectEqual(@as(usize, 0), db.read_statements.countFor(.object_metadata, false));
-    try std.testing.expectEqual(@as(usize, 1), db.read_statements.countFor(.object_metadata, true));
+    try std.testing.expectEqual(@as(usize, 0), db.idle_statements.countFor(.object_metadata, false));
+    try std.testing.expectEqual(@as(usize, 1), db.idle_statements.countFor(.object_metadata, true));
 
     // Replacing the store must not leave statements pointing at the old schema.
     try db.bindObjectStore(other_path);
-    try std.testing.expectEqual(@as(usize, 0), db.read_statements.retained());
+    try std.testing.expectEqual(@as(usize, 0), db.idle_statements.retained());
     const rebound_id = try db.putObjectWithOptions(&bytes, .{ .profile = .streaming });
     try std.testing.expectEqual(@as(usize, 512), try db.readObjectRange(rebound_id, 0, &buffer));
 
     try db.unbindObjectStore();
-    try std.testing.expectEqual(@as(usize, 0), db.read_statements.retained());
+    try std.testing.expectEqual(@as(usize, 0), db.idle_statements.retained());
     const main_id = try db.putObjectWithOptions(&bytes, .{ .profile = .streaming });
     try std.testing.expectEqual(@as(usize, 512), try db.readObjectRange(main_id, 0, &buffer));
-    try std.testing.expectEqual(@as(usize, 1), db.read_statements.countFor(.object_metadata, false));
-    try std.testing.expectEqual(@as(usize, 0), db.read_statements.countFor(.object_metadata, true));
+    try std.testing.expectEqual(@as(usize, 1), db.idle_statements.countFor(.object_metadata, false));
+    try std.testing.expectEqual(@as(usize, 0), db.idle_statements.countFor(.object_metadata, true));
     try db.vacuum();
 }
 
@@ -224,8 +224,8 @@ test "read statement cache retains at most the bounded number of idle statements
         _ = try db.hasGraphEdge("cache", "n0", "link", "n1");
     }
 
-    try std.testing.expect(db.read_statements.retained() <= statement_cache.capacity);
-    try std.testing.expectEqual(db.read_statements.retained(), countLiveStatements(&db));
+    try std.testing.expect(db.idle_statements.retained() <= statement_cache.capacity);
+    try std.testing.expectEqual(db.idle_statements.retained(), countLiveStatements(&db));
     try db.vacuum();
 }
 
@@ -271,10 +271,10 @@ test "single-row vector writes reuse one idle statement per store" {
         try db.putVector("points", "gone", .{ .f32 = &.{ 1, value } });
         try db.deleteVector("points", "gone");
     }
-    try std.testing.expectEqual(@as(usize, 1), db.read_statements.countFor(.vector_upsert, false));
-    try std.testing.expectEqual(@as(usize, 1), db.read_statements.countFor(.vector_delete, false));
-    try std.testing.expectEqual(@as(u64, 10), db.read_statements.reuses);
-    try std.testing.expectEqual(db.read_statements.retained(), countLiveStatements(&db));
+    try std.testing.expectEqual(@as(usize, 1), db.idle_statements.countFor(.vector_upsert, false));
+    try std.testing.expectEqual(@as(usize, 1), db.idle_statements.countFor(.vector_delete, false));
+    try std.testing.expectEqual(@as(u64, 10), db.idle_statements.reuses);
+    try std.testing.expectEqual(db.idle_statements.retained(), countLiveStatements(&db));
 
     // A rolled-back write and a schema change must not poison the retained statements.
     try db.exec("begin");
@@ -291,7 +291,7 @@ test "single-row vector writes reuse one idle statement per store" {
     defer after.deinit(std.testing.allocator);
     try std.testing.expectEqualSlices(f32, &.{ 7, 8 }, after.values.f32);
     try std.testing.expect(!try db.hasVector("points", "gone"));
-    try std.testing.expectEqual(db.read_statements.retained(), countLiveStatements(&db));
+    try std.testing.expectEqual(db.idle_statements.retained(), countLiveStatements(&db));
     try db.vacuum();
 }
 
@@ -310,15 +310,15 @@ test "bound vector store write statements are disposed before unbind" {
     try db.createVectorCollection("points", .{ .dimensions = 2, .metric = .l2, .element_type = .f32 });
     try db.putVector("points", "a", .{ .f32 = &.{ 1, 2 } });
     try db.putVector("points", "a", .{ .f32 = &.{ 3, 4 } });
-    try std.testing.expectEqual(@as(usize, 0), db.read_statements.countFor(.vector_upsert, false));
-    try std.testing.expectEqual(@as(usize, 1), db.read_statements.countFor(.vector_upsert, true));
+    try std.testing.expectEqual(@as(usize, 0), db.idle_statements.countFor(.vector_upsert, false));
+    try std.testing.expectEqual(@as(usize, 1), db.idle_statements.countFor(.vector_upsert, true));
 
     try db.unbindVectorStore();
-    try std.testing.expectEqual(@as(usize, 0), db.read_statements.retained());
+    try std.testing.expectEqual(@as(usize, 0), db.idle_statements.retained());
     try db.createVectorCollection("points", .{ .dimensions = 2, .metric = .l2, .element_type = .f32 });
     try db.putVector("points", "a", .{ .f32 = &.{ 5, 6 } });
-    try std.testing.expectEqual(@as(usize, 1), db.read_statements.countFor(.vector_upsert, false));
-    try std.testing.expectEqual(@as(usize, 0), db.read_statements.countFor(.vector_upsert, true));
+    try std.testing.expectEqual(@as(usize, 1), db.idle_statements.countFor(.vector_upsert, false));
+    try std.testing.expectEqual(@as(usize, 0), db.idle_statements.countFor(.vector_upsert, true));
     var a = try db.getVector(std.testing.allocator, "points", "a");
     defer a.deinit(std.testing.allocator);
     try std.testing.expectEqualSlices(f32, &.{ 5, 6 }, a.values.f32);
