@@ -5,6 +5,9 @@ describes the negotiated source-history service and the explicit format-12
 migration. The [authoring guide](extension-authoring.md) covers the common C ABI,
 buildable examples, compatibility boundaries and artifact release gates.
 
+New in 1.3.0: [plugins linked into the host process](#plugins-linked-into-the-host-process)
+and edge payload reads in the plugin data service.
+
 Zova extensions are trusted process code that can install and manage private
 Zova storage, then expose a SQL surface on every opened connection.
 
@@ -24,15 +27,15 @@ library paths, search paths, or anything that Zova auto-loads.
 
 ## Availability and binding matrix
 
-The matrix describes 1.2.0. Published 1.1.0
+The matrix describes 1.3.0. Published 1.1.0
 packages retain their previous generated-C and binding loading restrictions.
 
 The `1.0.0` release introduced bundled lifecycle management,
 application C scalar callbacks, and the legacy native bundle contract subject
-to the build restrictions below; `1.2.0` retains that contract. The portable plugin ABI and explicit
+to the build restrictions below; `1.3.0` retains that contract. The portable plugin ABI and explicit
 extension-data upgrades described later are also included; application-authored
 extensions in those published releases remain outside the stable authoring
-contract. The [1.2.0 target boundary](extension-authoring.md#support-and-compatibility)
+contract. The [1.3.0 target boundary](extension-authoring.md#support-and-compatibility)
 is narrower than promising stability for every implementation in this repository.
 
 | Host build | Bundled `trgm` lifecycle | Application C scalar callbacks | Dynamic `.zovaext` loading |
@@ -72,7 +75,7 @@ must use `_zova_ext_<name>_...` names. For example, an extension named `trgm`
 owns `_zova_ext_trgm_docs`, `_zova_ext_trgm_postings`, and indexes with the
 same prefix.
 
-In the current v1.2.0 model, all installed extensions are required. Opening a
+In the current v1.3.0 model, all installed extensions are required. Opening a
 database with installed extension metadata but without matching process code
 fails during normal open. Diagnostic commands can still inspect the metadata so
 they can explain what is missing.
@@ -90,7 +93,7 @@ A `.zova` file may say which extensions it needs, but the application or CLI
 process decides which extension code is available. Zova never loads code just
 because a database asks for it.
 
-Zova supports three process-owned extension sources in v1.2.0:
+Zova supports three process-owned extension sources in v1.3.0:
 
 - bundled extensions shipped with Zova, such as `trgm`
 - app-registered native Zig extensions supplied by the application process
@@ -134,7 +137,7 @@ extension ABI.
   "name": "my_ext",
   "version": "0.1.0",
   "storage_prefix": "_zova_ext_my_ext_",
-  "zova_abi_min": "1.2.0",
+  "zova_abi_min": "1.3.0",
   "capabilities": "sql",
   "library": "libmy_ext",
   "entrypoint": "zova_extension_entry"
@@ -407,7 +410,7 @@ invalid installed rows are rejected.
 
 `zova_abi_min` must be a canonical `major.minor.patch` version. Zova rejects a
 manifest when its ABI major differs from the host or its minimum version is
-newer than the host. The `1.2.0` host reports numeric ABI `1.2.0`; extension
+newer than the host. The `1.3.0` host reports numeric ABI `1.3.0`; extension
 authors should rebuild and retest whenever their required ABI changes.
 
 ## Lifecycle
@@ -595,7 +598,7 @@ skips that extension's private storage and reports bounded skipped counts. The
 destination is not marked as having that extension installed unless the hook
 explicitly rebuilt enough storage and asks Zova to write installed metadata.
 
-In v1.2.0, the bundled `trgm` extension retains the valid-subset salvage hook
+In v1.3.0, the bundled `trgm` extension retains the valid-subset salvage hook
 introduced in v1.0.0. When
 the source has required trgm private schema and metadata, the hook copies valid
 indexes, documents, and postings, rebuilds derived term rows, and asks Zova to
@@ -632,7 +635,7 @@ const ext = zova.Extension{
         .name = "my_ext",
         .version = "0.1.0",
         .storage_prefix = "_zova_ext_my_ext_",
-        .zova_abi_min = "1.2.0",
+        .zova_abi_min = "1.3.0",
         .capabilities = "sql",
     },
     .install = install,
@@ -756,7 +759,7 @@ Existing high-level bindings are unchanged.
 
 ### Opt-in code/data compatibility
 
-The 1.2.0 host supports `ZOVA_PLUGIN_HAS_DATA_COMPATIBILITY_V1`
+The 1.3.0 host supports `ZOVA_PLUGIN_HAS_DATA_COMPATIBILITY_V1`
 without changing format 12 or installed metadata. Legacy descriptors and bundled
 `trgm` keep the exact-version behavior above. A code-only update may instead
 declare explicitly that it understands the installed data, with no upgrade hook
@@ -1041,7 +1044,7 @@ connection lifetime management, not persistent-index freshness or automatic
 maintenance: algorithm caches must still validate their source snapshot tokens.
 
 High-level trusted-bundle selection and generated-C loading are available in
-1.2.0 packages as described above. SQL operation results themselves
+1.2.0 and later packages as described above. SQL operation results themselves
 use the existing statement interface.
 
 ## Native Artifact Notes
@@ -1065,7 +1068,7 @@ SQL callbacks through the C ABI, low-level `zova-sys` declarations, trusted loca
 Deferred from this release: aggregate/window SQL callbacks, SQLite subtype
 support, unregister APIs, raw `sqlite3 *` exposure as the normal extension path,
 safe high-level Rust, Go, Python, and JavaScript callbacks. These limitations
-remain in 1.2.0.
+remain in 1.3.0.
 
 ## Transactional vector maintenance (format 12)
 
@@ -1142,7 +1145,7 @@ Durability settings are unchanged.
 
 ## Lifecycle, cleanup and explicit recovery
 
-The 1.2.0 host completes the following native contract without changing
+The 1.2.0 host completed the following native contract without changing
 package/application ABI 1.2.0, plugin ABI v1, or persistent format 12.
 
 - Install, upgrade, rebuild and drop use operation-owned savepoints. Failure

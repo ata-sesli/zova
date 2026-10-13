@@ -200,7 +200,7 @@ test "cli trusted dynamic extension loads only when explicitly requested" {
         \\  "name": "dyn_test",
         \\  "version": "0.1.0",
         \\  "storage_prefix": "_zova_ext_dyn_test_",
-        \\  "zova_abi_min": "1.2.0",
+        \\  "zova_abi_min": "1.3.0",
         \\  "capabilities": "sql,dynamic-test",
         \\  "library": "libdyn_test"
         \\}
@@ -556,7 +556,7 @@ test "cli extension verify rejects broken bundle artifacts" {
         \\  "name": "dyn_test",
         \\  "version": "0.1.0",
         \\  "storage_prefix": "_zova_ext_dyn_test_",
-        \\  "zova_abi_min": "1.2.0",
+        \\  "zova_abi_min": "1.3.0",
         \\  "capabilities": "sql,dynamic-test",
         \\  "library": "libmissing"
         \\}
@@ -571,7 +571,7 @@ test "cli extension verify rejects broken bundle artifacts" {
         \\  "name": "dyn_test",
         \\  "version": "0.1.0",
         \\  "storage_prefix": "_zova_ext_dyn_test_",
-        \\  "zova_abi_min": "1.2.0",
+        \\  "zova_abi_min": "1.3.0",
         \\  "capabilities": "sql,dynamic-test",
         \\  "library": "libdyn_test"
         \\}
@@ -587,7 +587,7 @@ test "cli extension verify rejects broken bundle artifacts" {
         \\  "name": "dyn_test",
         \\  "version": "0.1.0",
         \\  "storage_prefix": "_zova_ext_dyn_test_",
-        \\  "zova_abi_min": "1.2.0",
+        \\  "zova_abi_min": "1.3.0",
         \\  "capabilities": "sql,dynamic-test",
         \\  "library": "libdyn_test",
         \\  "entrypoint": "zova_missing_entry"
@@ -4706,7 +4706,7 @@ fn createUnavailableExtensionFixture(db_path: [:0]const u8) !void {
     try raw.exec(
         \\insert into _zova_extensions
         \\  (name, version, storage_prefix, zova_abi_min, capabilities, required, installed_at_unix, manifest_json)
-        \\values ('test', '0.1.0', '_zova_ext_test_', '1.2.0', 'sql', 1, 0, '')
+        \\values ('test', '0.1.0', '_zova_ext_test_', '1.3.0', 'sql', 1, 0, '')
     );
     try raw.exec("create table _zova_ext_test_meta (key text primary key, value text not null)");
 }
@@ -4969,7 +4969,7 @@ fn markerExtensionSourceFor(extension_name: []const u8, marker_path: []const u8)
         \\    .name = "{s}",
         \\    .version = "0.1.0",
         \\    .storage_prefix = "_zova_ext_{s}_",
-        \\    .zova_abi_min = "1.2.0",
+        \\    .zova_abi_min = "1.3.0",
         \\    .capabilities = "experimental-builder",
         \\    .required = true,
         \\}};
@@ -5061,7 +5061,7 @@ fn simpleArtifactExtensionSource() []const u8 {
     \\    .name = "bridge_artifact",
     \\    .version = "0.1.0",
     \\    .storage_prefix = "_zova_ext_bridge_artifact_",
-    \\    .zova_abi_min = "1.2.0",
+    \\    .zova_abi_min = "1.3.0",
     \\    .capabilities = "artifact-test",
     \\    .required = true,
     \\};
@@ -5099,7 +5099,7 @@ fn failingCheckExtensionSource() []const u8 {
     \\    .name = "smoke_bad_ext",
     \\    .version = "0.1.0",
     \\    .storage_prefix = "_zova_ext_smoke_bad_ext_",
-    \\    .zova_abi_min = "1.2.0",
+    \\    .zova_abi_min = "1.3.0",
     \\    .capabilities = "experimental-builder",
     \\    .required = true,
     \\};
