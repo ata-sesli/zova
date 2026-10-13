@@ -118,7 +118,7 @@ fn setMetadataValue(db: *sqlite.Database, key: []const u8, value: []const u8) Er
 
     try stmt.bindText(1, key);
     try stmt.bindText(2, value);
-    std.debug.assert((try stmt.step()) == .done);
+    try stmt.expectDone();
 }
 
 pub fn setAttachedMetadataValue(
@@ -135,7 +135,7 @@ pub fn setAttachedMetadataValue(
 
     try stmt.bindText(1, key);
     try stmt.bindText(2, value);
-    std.debug.assert((try stmt.step()) == .done);
+    try stmt.expectDone();
 }
 
 pub fn objectStoreIdAlloc(allocator: std.mem.Allocator, db: *sqlite.Database) Error![]u8 {
@@ -181,13 +181,6 @@ pub fn lowerHexInto(dest: *[64]u8, bytes: *const [32]u8) void {
 pub fn sqliteI64ToU64(value: i64) Error!u64 {
     if (value < 0) return error.BoundStoreInvalid;
     return @intCast(value);
-}
-
-pub fn expectDone(stmt: *sqlite.Statement) Error!void {
-    switch (try stmt.step()) {
-        .done => {},
-        .row => return error.SqliteError,
-    }
 }
 
 pub fn mapSqliteResultCode(rc: c_int) Error {

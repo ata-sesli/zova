@@ -1246,7 +1246,7 @@ pub const Database = struct {
         var delete_graph = try self.prepareSchema("delete from {s}_zova_graphs where name = ?");
         defer delete_graph.deinit();
         try delete_graph.bindText(1, name);
-        std.debug.assert((try delete_graph.step()) == .done);
+        try delete_graph.expectDone();
         if (self.sqlite_db.changes() == 0) return error.GraphNotFound;
     }
 
@@ -1386,7 +1386,7 @@ pub const Database = struct {
             try stmt.bindNull(6);
         }
         try stmt.bindInt64(7, graph_key);
-        std.debug.assert((try stmt.step()) == .done);
+        try stmt.expectDone();
     }
 
     /// Upsert graph nodes as one all-or-nothing batch.
@@ -1436,7 +1436,7 @@ pub const Database = struct {
             const graph_key = graph_keys.get(input.graph_name) orelse return error.GraphNotFound;
             const created_order = try nextGraphCreatedOrder(&next_order_stmt, &next_orders, graph_key);
             try bindGraphNodeInput(&stmt, graph_key, input, created_order);
-            std.debug.assert((try stmt.step()) == .done);
+            try stmt.expectDone();
             try stmt.reset();
             try stmt.clearBindings();
         }
@@ -1589,7 +1589,7 @@ pub const Database = struct {
         defer delete_node.deinit();
         try delete_node.bindText(1, graph_name);
         try delete_node.bindText(2, node_id);
-        std.debug.assert((try delete_node.step()) == .done);
+        try delete_node.expectDone();
         if (self.sqlite_db.changes() == 0) return error.GraphNodeNotFound;
     }
 
@@ -1617,7 +1617,7 @@ pub const Database = struct {
         defer insert_id.deinit();
         for (node_ids) |node_id| {
             try insert_id.bindText(1, node_id);
-            std.debug.assert((try insert_id.step()) == .done);
+            try insert_id.expectDone();
             try insert_id.reset();
             try insert_id.clearBindings();
         }
@@ -1629,7 +1629,7 @@ pub const Database = struct {
         );
         defer delete_nodes.deinit();
         try delete_nodes.bindText(1, graph_name);
-        std.debug.assert((try delete_nodes.step()) == .done);
+        try delete_nodes.expectDone();
     }
 
     pub fn putGraphEdge(self: *Database, input: GraphEdgeInput) Error!void {
@@ -1718,7 +1718,7 @@ pub const Database = struct {
             try stmt.bindInt64(3, edge_type_key);
             try stmt.bindInt64(4, to_endpoint.node_key);
             try stmt.bindInt64(5, created_order);
-            std.debug.assert((try stmt.step()) == .done);
+            try stmt.expectDone();
             try stmt.reset();
             try stmt.clearBindings();
         }
@@ -1949,7 +1949,7 @@ pub const Database = struct {
         try stmt.bindText(5, input.edge_type);
         try stmt.bindText(6, input.graph_name);
         try stmt.bindText(7, input.to_node_id);
-        std.debug.assert((try stmt.step()) == .done);
+        try stmt.expectDone();
     }
 
     /// Delete exact graph edges as one validated idempotent batch.
@@ -1990,7 +1990,7 @@ pub const Database = struct {
             try stmt.bindInt64(3, graph_key);
             try stmt.bindText(4, input.edge_type);
             try stmt.bindInt64(5, to_node_key);
-            std.debug.assert((try stmt.step()) == .done);
+            try stmt.expectDone();
             try stmt.reset();
             try stmt.clearBindings();
         }
@@ -2034,7 +2034,7 @@ pub const Database = struct {
             try insert_endpoint.bindInt64(1, @intCast(slot));
             try insert_endpoint.bindText(2, endpoint.graph_name);
             try insert_endpoint.bindText(3, endpoint.node_id);
-            std.debug.assert((try insert_endpoint.step()) == .done);
+            try insert_endpoint.expectDone();
             try insert_endpoint.reset();
             try insert_endpoint.clearBindings();
         }
@@ -2105,7 +2105,7 @@ pub const Database = struct {
             for (endpoints) |endpoint| {
                 try insert_endpoint.bindTextBorrowed(1, endpoint.graph_name);
                 try insert_endpoint.bindTextBorrowed(2, endpoint.node_id);
-                std.debug.assert((try insert_endpoint.step()) == .done);
+                try insert_endpoint.expectDone();
                 try insert_endpoint.reset();
                 try insert_endpoint.clearBindings();
             }
@@ -2114,7 +2114,7 @@ pub const Database = struct {
             for (endpoints) |node_id| {
                 try insert_endpoint.bindTextBorrowed(1, input.graph_name);
                 try insert_endpoint.bindTextBorrowed(2, node_id);
-                std.debug.assert((try insert_endpoint.step()) == .done);
+                try insert_endpoint.expectDone();
                 try insert_endpoint.reset();
                 try insert_endpoint.clearBindings();
             }
@@ -2129,7 +2129,7 @@ pub const Database = struct {
             \\join {s}_zova_graph_nodes n on n.graph_key = g.graph_key and n.node_id = batch.node_id
         );
         defer resolve.deinit();
-        std.debug.assert((try resolve.step()) == .done);
+        try resolve.expectDone();
 
         if (require_all) {
             var counts = try self.prepareSchema(
@@ -2472,7 +2472,7 @@ pub const Database = struct {
         for (keys, 0..) |key, ordinal| {
             try stmt.bindInt64(1, @intCast(ordinal));
             try stmt.bindInt64(2, key);
-            std.debug.assert((try stmt.step()) == .done);
+            try stmt.expectDone();
             try stmt.reset();
             try stmt.clearBindings();
         }
@@ -3066,49 +3066,49 @@ fn ensureGraphBatchIndexes(self: *Database) Error!void {
         \\on _zova_graph_nodes (graph_key, created_order, node_key)
     );
     defer nodes_created_order.deinit();
-    std.debug.assert((try nodes_created_order.step()) == .done);
+    try nodes_created_order.expectDone();
 
     var edges_topology = try self.prepareSchema(
         \\create unique index if not exists {s}_zova_graph_edges_topology_idx
         \\on _zova_graph_edges (from_node_key, edge_type_key, to_node_key)
     );
     defer edges_topology.deinit();
-    std.debug.assert((try edges_topology.step()) == .done);
+    try edges_topology.expectDone();
 
     var edges_created_order = try self.prepareSchema(
         \\create index if not exists {s}_zova_graph_edges_created_order_idx
         \\on _zova_graph_edges (graph_key, created_order, edge_key)
     );
     defer edges_created_order.deinit();
-    std.debug.assert((try edges_created_order.step()) == .done);
+    try edges_created_order.expectDone();
 
     var edges_from_node = try self.prepareSchema(
         \\create index if not exists {s}_zova_graph_edges_from_node_idx
         \\on _zova_graph_edges (graph_key, from_node_key, created_order, to_node_key)
     );
     defer edges_from_node.deinit();
-    std.debug.assert((try edges_from_node.step()) == .done);
+    try edges_from_node.expectDone();
 
     var edges_from_node_type = try self.prepareSchema(
         \\create index if not exists {s}_zova_graph_edges_from_node_type_idx
         \\on _zova_graph_edges (graph_key, from_node_key, edge_type_key, created_order, to_node_key)
     );
     defer edges_from_node_type.deinit();
-    std.debug.assert((try edges_from_node_type.step()) == .done);
+    try edges_from_node_type.expectDone();
 
     var edges_to_node = try self.prepareSchema(
         \\create index if not exists {s}_zova_graph_edges_to_node_idx
         \\on _zova_graph_edges (graph_key, to_node_key, created_order, from_node_key)
     );
     defer edges_to_node.deinit();
-    std.debug.assert((try edges_to_node.step()) == .done);
+    try edges_to_node.expectDone();
 
     var edges_to_node_type = try self.prepareSchema(
         \\create index if not exists {s}_zova_graph_edges_to_node_type_idx
         \\on _zova_graph_edges (graph_key, to_node_key, edge_type_key, created_order, from_node_key)
     );
     defer edges_to_node_type.deinit();
-    std.debug.assert((try edges_to_node_type.step()) == .done);
+    try edges_to_node_type.expectDone();
 }
 
 fn graphInfoFromRow(allocator: std.mem.Allocator, stmt: *sqlite.Statement) Error!GraphInfo {

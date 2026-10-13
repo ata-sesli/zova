@@ -1659,7 +1659,7 @@ pub const Database = struct {
         defer vacuum_stmt.deinit();
 
         try vacuum_stmt.bindText(1, destination_path);
-        try expectDone(&vacuum_stmt);
+        try vacuum_stmt.expectDone();
 
         try self.inlineBoundStoresIntoDestination(destination_path);
         if (options.verify) try verifyOperationalCopy(destination_path, self.extension_registry);
@@ -1940,7 +1940,7 @@ pub const Database = struct {
             \\where role = 'object_store' and name = 'default'
         );
         defer stmt.deinit();
-        std.debug.assert((try stmt.step()) == .done);
+        try stmt.expectDone();
         deleted = true;
     }
 
@@ -2077,7 +2077,7 @@ pub const Database = struct {
             \\where role = 'vector_store' and name = 'default'
         );
         defer stmt.deinit();
-        std.debug.assert((try stmt.step()) == .done);
+        try stmt.expectDone();
         deleted = true;
     }
 
@@ -3015,8 +3015,6 @@ const isReservedZovaName = @import("database/bound_stores.zig").isReservedZovaNa
 
 const backupMainDatabase = @import("database/backup.zig").backupMainDatabase;
 
-const expectDone = @import("database/metadata.zig").expectDone;
-
 pub fn verifyOperationalCopy(path: [:0]const u8, registry: ExtensionRegistry) Error!void {
     var db = try Database.openWithOptionsAndExtensions(path, .{ .read_only = true }, registry);
     defer db.deinit();
@@ -3800,7 +3798,7 @@ test "open validates configured graph store identity role and format" {
         var stmt = try raw.prepare("update _zova_bound_stores set store_id = ?, bound_set_id = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' where role = 'graph_store'");
         defer stmt.deinit();
         try stmt.bindText(1, &expected_store_id);
-        try expectDone(&stmt);
+        try stmt.expectDone();
     }
     try std.testing.expectError(error.BoundStoreInvalid, Database.open(main_path));
     {
@@ -3809,7 +3807,7 @@ test "open validates configured graph store identity role and format" {
         var stmt = try raw.prepare("update _zova_bound_stores set bound_set_id = ? where role = 'graph_store'");
         defer stmt.deinit();
         try stmt.bindText(1, &expected_bound_set_id);
-        try expectDone(&stmt);
+        try stmt.expectDone();
     }
     {
         var raw = try sqlite.Database.open(store_path);
@@ -4570,7 +4568,7 @@ fn testExtensionInstall(db: *sqlite.Database, manifest: ExtensionManifest) exten
     var stmt = try db.prepare("insert into _zova_ext_test_meta (key, value) values ('installed', ?)");
     defer stmt.deinit();
     try stmt.bindText(1, manifest.version);
-    std.debug.assert((try stmt.step()) == .done);
+    try stmt.expectDone();
 }
 
 fn testExtensionCheck(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
@@ -4617,7 +4615,7 @@ fn salvageExtensionInstall(db: *sqlite.Database, manifest: ExtensionManifest) ex
     var stmt = try db.prepare("insert into _zova_ext_salvage_meta (key, value) values ('installed', ?)");
     defer stmt.deinit();
     try stmt.bindText(1, manifest.version);
-    std.debug.assert((try stmt.step()) == .done);
+    try stmt.expectDone();
 }
 
 fn salvageExtensionCheck(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {
@@ -4646,7 +4644,7 @@ fn salvageExtensionSalvage(context: extension_impl.SalvageContext, manifest: Ext
     var stmt = try destination.prepare("insert into _zova_ext_salvage_meta (key, value) values ('installed', ?)");
     defer stmt.deinit();
     try stmt.bindText(1, manifest.version);
-    std.debug.assert((try stmt.step()) == .done);
+    try stmt.expectDone();
     return .{ .copied_extensions = 1, .copied_private_objects = 1, .installed_in_destination = true };
 }
 
@@ -4745,7 +4743,7 @@ fn secondSqlExtensionInstall(db: *sqlite.Database, manifest: ExtensionManifest) 
     var stmt = try db.prepare("insert into _zova_ext_test_two_meta (key, value) values ('installed', ?)");
     defer stmt.deinit();
     try stmt.bindText(1, manifest.version);
-    std.debug.assert((try stmt.step()) == .done);
+    try stmt.expectDone();
 }
 
 fn secondSqlExtensionCheck(db: *sqlite.Database, manifest: ExtensionManifest) extension_impl.Error!void {

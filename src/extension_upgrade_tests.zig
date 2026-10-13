@@ -77,7 +77,7 @@ fn compatibleSalvage(context: ext.SalvageContext, manifest: ext.Manifest) ext.Er
     defer write.deinit();
     while (try read.step() == .row) {
         try write.bindText(1, read.columnText(0));
-        std.debug.assert(try write.step() == .done);
+        try write.expectDone();
         try write.reset();
         try write.clearBindings();
     }

@@ -588,7 +588,7 @@ pub const Database = struct {
 
         try stmt.bindInt64(1, collection.collection_key);
         try stmt.bindText(2, vector_id);
-        std.debug.assert((try stmt.step()) == .done);
+        try stmt.expectDone();
 
         if (self.sqlite_db.changes() == 0) return error.VectorNotFound;
     }
@@ -622,7 +622,7 @@ pub const Database = struct {
         defer insert_id.deinit();
         for (vector_ids) |vector_id| {
             try insert_id.bindText(1, vector_id);
-            std.debug.assert((try insert_id.step()) == .done);
+            try insert_id.expectDone();
             try insert_id.reset();
         }
 
@@ -633,7 +633,7 @@ pub const Database = struct {
         , .{self.storage_schema.prefix()});
         defer delete.deinit();
         try delete.bindInt64(1, collection.collection_key);
-        std.debug.assert((try delete.step()) == .done);
+        try delete.expectDone();
     }
 
     /// Delete a vector collection and all private vector rows in it.
@@ -650,7 +650,7 @@ pub const Database = struct {
         var delete_collection = try self.prepareSchema("delete from {s}_zova_vector_collections where name = ?", .{self.storage_schema.prefix()});
         defer delete_collection.deinit();
         try delete_collection.bindText(1, name);
-        std.debug.assert((try delete_collection.step()) == .done);
+        try delete_collection.expectDone();
         if (self.sqlite_db.changes() == 0) return error.VectorCollectionNotFound;
     }
 
@@ -1326,7 +1326,7 @@ pub const Database = struct {
             try stmt.bindText(2, vector.id);
             try stmt.bindBlobBorrowed(3, encoded);
             try stmt.bindDouble(4, norm_squared);
-            std.debug.assert((try stmt.step()) == .done);
+            try stmt.expectDone();
             try stmt.reset();
             try stmt.clearBindings();
         }

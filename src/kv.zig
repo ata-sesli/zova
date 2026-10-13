@@ -192,7 +192,7 @@ pub const Database = struct {
             try stmt.bindBlob(1, namespace);
             try stmt.bindBlob(2, key);
             try stmt.bindBlob(3, value);
-            std.debug.assert((try stmt.step()) == .done);
+            try stmt.expectDone();
         }
 
         try finishMutation(self, scope);
@@ -225,7 +225,7 @@ pub const Database = struct {
         for (entries) |entry| {
             try stmt.bindBlob(2, entry.key);
             try stmt.bindBlob(3, entry.value);
-            std.debug.assert((try stmt.step()) == .done);
+            try stmt.expectDone();
             try stmt.reset();
         }
 
@@ -246,7 +246,7 @@ pub const Database = struct {
 
         try stmt.bindBlob(1, namespace);
         try stmt.bindBlob(2, key);
-        std.debug.assert((try stmt.step()) == .done);
+        try stmt.expectDone();
 
         try finishMutation(self, scope);
         committed = true;
@@ -273,7 +273,7 @@ pub const Database = struct {
         try stmt.bindBlob(1, namespace);
         for (keys) |key| {
             try stmt.bindBlob(2, key);
-            std.debug.assert((try stmt.step()) == .done);
+            try stmt.expectDone();
             try stmt.reset();
         }
 
@@ -305,7 +305,7 @@ pub const Database = struct {
         defer stmt.deinit();
 
         try stmt.bindBlob(1, namespace);
-        std.debug.assert((try stmt.step()) == .done);
+        try stmt.expectDone();
 
         try finishMutation(self, scope);
         committed = true;

@@ -20,7 +20,6 @@ const cli_json_version = @import("common.zig").cli_json_version;
 const diagnosticErrorReport = @import("diagnostics.zig").diagnosticErrorReport;
 const diagnosticIssueAreaText = @import("render.zig").diagnosticIssueAreaText;
 const emptyDatabaseSummary = @import("inspect.zig").emptyDatabaseSummary;
-const expectDone = @import("common.zig").expectDone;
 const graphTargetTypeFromText = @import("common.zig").graphTargetTypeFromText;
 const isExtensionHealthError = @import("common.zig").isExtensionHealthError;
 const isValidGraphAsciiName = @import("diagnostics.zig").isValidGraphAsciiName;
@@ -818,7 +817,7 @@ fn copyUserTableRows(
             };
         }
         if (!row_failed) {
-            expectDone(&insert_row) catch {
+            insert_row.expectDone() catch {
                 row_failed = true;
             };
         }

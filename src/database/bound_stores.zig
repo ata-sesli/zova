@@ -18,7 +18,6 @@ const bound_object_store_schema_name = @import("types.zig").bound_object_store_s
 const bound_stores_table = @import("types.zig").bound_stores_table;
 const bound_vector_store_schema_name = @import("types.zig").bound_vector_store_schema_name;
 const ensurePathExists = @import("paths.zig").ensurePathExists;
-const expectDone = @import("metadata.zig").expectDone;
 const isValidStoreId = @import("metadata.zig").isValidStoreId;
 const isZovaPath = @import("paths.zig").isZovaPath;
 const setAttachedMetadataValue = @import("metadata.zig").setAttachedMetadataValue;
@@ -138,7 +137,7 @@ pub fn deleteBoundObjectStoreRows(db: *sqlite.Database) Error!void {
         \\where role = 'object_store' and name = 'default'
     );
     defer stmt.deinit();
-    std.debug.assert((try stmt.step()) == .done);
+    try stmt.expectDone();
 }
 
 pub fn deleteBoundVectorStoreRows(db: *sqlite.Database) Error!void {
@@ -149,7 +148,7 @@ pub fn deleteBoundVectorStoreRows(db: *sqlite.Database) Error!void {
         \\where role = 'vector_store' and name = 'default'
     );
     defer stmt.deinit();
-    std.debug.assert((try stmt.step()) == .done);
+    try stmt.expectDone();
 }
 
 pub fn deleteBoundGraphStoreRows(db: *sqlite.Database) Error!void {
@@ -160,7 +159,7 @@ pub fn deleteBoundGraphStoreRows(db: *sqlite.Database) Error!void {
         \\where role = 'graph_store' and name = 'default'
     );
     defer stmt.deinit();
-    std.debug.assert((try stmt.step()) == .done);
+    try stmt.expectDone();
 }
 
 pub fn hasBoundObjectStoreRow(db: *sqlite.Database) Error!bool {
@@ -330,7 +329,7 @@ pub fn insertBoundObjectStoreRow(db: *sqlite.Database, path: []const u8, store_i
     try stmt.bindText(1, path);
     try stmt.bindText(2, store_id);
     try stmt.bindText(3, bound_set_id);
-    std.debug.assert((try stmt.step()) == .done);
+    try stmt.expectDone();
 }
 
 pub fn updateBoundObjectStoreRow(db: *sqlite.Database, path: []const u8, store_id: []const u8, bound_set_id: []const u8) Error!void {
@@ -344,7 +343,7 @@ pub fn updateBoundObjectStoreRow(db: *sqlite.Database, path: []const u8, store_i
     try stmt.bindText(1, path);
     try stmt.bindText(2, store_id);
     try stmt.bindText(3, bound_set_id);
-    std.debug.assert((try stmt.step()) == .done);
+    try stmt.expectDone();
 }
 
 pub fn insertBoundVectorStoreRow(db: *sqlite.Database, path: []const u8, store_id: []const u8, bound_set_id: []const u8) Error!void {
@@ -357,7 +356,7 @@ pub fn insertBoundVectorStoreRow(db: *sqlite.Database, path: []const u8, store_i
     try stmt.bindText(1, path);
     try stmt.bindText(2, store_id);
     try stmt.bindText(3, bound_set_id);
-    std.debug.assert((try stmt.step()) == .done);
+    try stmt.expectDone();
 }
 
 pub fn updateBoundVectorStoreRow(db: *sqlite.Database, path: []const u8, store_id: []const u8, bound_set_id: []const u8) Error!void {
@@ -371,7 +370,7 @@ pub fn updateBoundVectorStoreRow(db: *sqlite.Database, path: []const u8, store_i
     try stmt.bindText(1, path);
     try stmt.bindText(2, store_id);
     try stmt.bindText(3, bound_set_id);
-    std.debug.assert((try stmt.step()) == .done);
+    try stmt.expectDone();
 }
 
 pub fn insertBoundGraphStoreRow(db: *sqlite.Database, path: []const u8, store_id: []const u8, bound_set_id: []const u8) Error!void {
@@ -383,7 +382,7 @@ pub fn insertBoundGraphStoreRow(db: *sqlite.Database, path: []const u8, store_id
     try stmt.bindText(1, path);
     try stmt.bindText(2, store_id);
     try stmt.bindText(3, bound_set_id);
-    try expectDone(&stmt);
+    try stmt.expectDone();
 }
 
 pub fn updateBoundGraphStoreRow(db: *sqlite.Database, path: []const u8, store_id: []const u8, bound_set_id: []const u8) Error!void {
@@ -396,7 +395,7 @@ pub fn updateBoundGraphStoreRow(db: *sqlite.Database, path: []const u8, store_id
     try stmt.bindText(1, path);
     try stmt.bindText(2, store_id);
     try stmt.bindText(3, bound_set_id);
-    try expectDone(&stmt);
+    try stmt.expectDone();
 }
 
 pub fn incrementBoundObjectEpoch(db: *sqlite.Database) Error!void {
@@ -406,7 +405,7 @@ pub fn incrementBoundObjectEpoch(db: *sqlite.Database) Error!void {
         \\where role = 'object_store' and name = 'default'
     );
     defer update_main.deinit();
-    std.debug.assert((try update_main.step()) == .done);
+    try update_main.expectDone();
 
     var read_epoch = try db.prepare(
         \\select object_epoch
@@ -432,7 +431,7 @@ pub fn incrementBoundVectorEpoch(db: *sqlite.Database) Error!void {
         \\where role = 'vector_store' and name = 'default'
     );
     defer update_main.deinit();
-    std.debug.assert((try update_main.step()) == .done);
+    try update_main.expectDone();
 
     var read_epoch = try db.prepare(
         \\select vector_epoch
@@ -457,7 +456,7 @@ pub fn incrementBoundGraphEpoch(db: *sqlite.Database) Error!void {
         \\where role = 'graph_store' and name = 'default'
     );
     defer update_main.deinit();
-    try expectDone(&update_main);
+    try update_main.expectDone();
 
     var read_epoch = try db.prepare(
         \\select graph_epoch from _zova_bound_stores

@@ -154,7 +154,7 @@ pub const Scope = struct {
             defer stmt.deinit();
             try stmt.bindTextBorrowed(1, owner);
             try stmt.bindInt64(2, self.r.generation);
-            std.debug.assert(try stmt.step() == .done);
+            try stmt.expectDone();
             return;
         }
     }
