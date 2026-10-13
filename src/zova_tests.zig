@@ -1,6 +1,6 @@
 const std = @import("std");
 const zova = @import("zova.zig");
-const attachGraphStore = @import("database/bound_stores.zig").attachGraphStore;
+const attachStore = @import("database/bound_stores.zig").attachStore;
 const backupMainDatabase = @import("database/backup.zig").backupMainDatabase;
 const bound_graph_store_role = @import("database/types.zig").bound_graph_store_role;
 const bound_graph_store_schema_name = @import("database/types.zig").bound_graph_store_schema_name;
@@ -729,7 +729,7 @@ test "configured graph store attaches routes graph APIs and reopens" {
         defer db.deinit();
 
         try ensureBoundStoreTable(&db.sqlite_db);
-        try attachGraphStore(&db.sqlite_db, store_path, false);
+        try attachStore(&db.sqlite_db, .graph, store_path, false);
         defer db.sqlite_db.detachDatabase(bound_graph_store_schema_name) catch {};
 
         const store_id = try validateAttachedGraphStoreAlloc(std.testing.allocator, &db.sqlite_db, bound_graph_store_schema_name);

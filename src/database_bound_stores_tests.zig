@@ -177,3 +177,49 @@ test "object store files are not accepted as main databases" {
     try createObjectStore(store_path);
     try std.testing.expectError(error.BoundStoreInvalid, Database.open(store_path));
 }
+
+test "each binding row sets only its own epoch column on bind rebind and mutation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffers: [4][std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&buffers[0], tmp.sub_path[0..], "epoch-columns-main.zova");
+    const object_path = try testingDbPath(&buffers[1], tmp.sub_path[0..], "epoch-columns-object.zova");
+    const vector_path = try testingDbPath(&buffers[2], tmp.sub_path[0..], "epoch-columns-vector.zova");
+    const graph_path = try testingDbPath(&buffers[3], tmp.sub_path[0..], "epoch-columns-graph.zova");
+    try createObjectStore(object_path);
+    try @import("zova.zig").createVectorStore(vector_path);
+    try createGraphStore(graph_path);
+
+    var db = try Database.create(main_path);
+    defer db.deinit();
+    const expected = [_][]const u8{ "graph_store|null|null|integer", "object_store|integer|null|null", "vector_store|null|integer|null" };
+
+    // First pass inserts each row, second pass replaces it through the update path.
+    for (0..2) |_| {
+        try db.bindObjectStore(object_path);
+        try db.bindVectorStore(vector_path);
+        try db.bindGraphStore(graph_path);
+
+        var stmt = try db.prepare(
+            \\select role || '|' || typeof(object_epoch) || '|' || typeof(vector_epoch) || '|' || typeof(graph_epoch)
+            \\from _zova_bound_stores order by role
+        );
+        defer stmt.deinit();
+        for (expected) |row| {
+            try std.testing.expectEqual(.row, try stmt.step());
+            try std.testing.expectEqualStrings(row, stmt.columnText(0));
+        }
+        try std.testing.expectEqual(.done, try stmt.step());
+    }
+
+    _ = try db.putObject("epoch");
+    var object_info = (try db.boundObjectStore(std.testing.allocator)).?;
+    defer object_info.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 1), object_info.object_epoch);
+    var vector_info = (try db.boundVectorStore(std.testing.allocator)).?;
+    defer vector_info.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 0), vector_info.vector_epoch);
+    var graph_info = (try db.boundGraphStore(std.testing.allocator)).?;
+    defer graph_info.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 0), graph_info.graph_epoch);
+}

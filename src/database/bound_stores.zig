@@ -27,450 +27,223 @@ const validateAttachedGraphStoreAlloc = @import("validation.zig").validateAttach
 const validateAttachedObjectStoreAlloc = @import("validation.zig").validateAttachedObjectStoreAlloc;
 const validateAttachedVectorStoreAlloc = @import("validation.zig").validateAttachedVectorStoreAlloc;
 
-pub fn openConfiguredBoundObjectStore(db: *sqlite.Database, options: OpenOptions) Error!?BoundObjectStore {
-    if (!try tableExists(db, bound_stores_table)) return null;
+/// The three kinds of bound store. Every per-kind difference in this module
+/// is derived from this value, so each operation is written once.
+pub const StoreKind = enum {
+    object,
+    vector,
+    graph,
 
-    var info = (try loadBoundObjectStoreInfo(std.heap.c_allocator, db)) orelse return null;
-    defer info.deinit(std.heap.c_allocator);
+    /// Attached schema name, which is also the `role` stored in the binding row.
+    pub fn schemaName(comptime self: StoreKind) []const u8 {
+        return switch (self) {
+            .object => bound_object_store_schema_name,
+            .vector => bound_vector_store_schema_name,
+            .graph => bound_graph_store_schema_name,
+        };
+    }
 
-    const path_z = try std.heap.c_allocator.dupeSentinel(u8, info.path, 0);
+    /// Epoch column in the binding row and metadata key in the attached store.
+    pub fn epochKey(comptime self: StoreKind) []const u8 {
+        return @tagName(self) ++ "_epoch";
+    }
+
+    fn rowFilter(comptime self: StoreKind) []const u8 {
+        return " where role = '" ++ self.schemaName() ++ "' and name = 'default'";
+    }
+
+    /// `object_epoch = <own>, vector_epoch = <other>, graph_epoch = <other>`
+    /// style value list: `own` for this kind's epoch column, `null` for the rest.
+    fn epochValues(comptime self: StoreKind, comptime assign: bool) []const u8 {
+        comptime var text: []const u8 = "";
+        inline for (std.meta.tags(StoreKind), 0..) |kind, index| {
+            text = text ++ (if (index == 0) "" else ", ") ++
+                (if (assign) kind.epochKey() ++ " = " else "") ++
+                (if (kind == self) "0" else "null");
+        }
+        return text;
+    }
+
+    fn validateAttachedAlloc(comptime self: StoreKind, allocator: std.mem.Allocator, db: *sqlite.Database) Error![]u8 {
+        return switch (self) {
+            .object => validateAttachedObjectStoreAlloc(allocator, db, bound_object_store_schema_name),
+            .vector => validateAttachedVectorStoreAlloc(allocator, db, bound_vector_store_schema_name),
+            .graph => validateAttachedGraphStoreAlloc(allocator, db, bound_graph_store_schema_name),
+        };
+    }
+};
+
+/// The binding row shared by every store kind.
+pub const BoundStoreRow = struct {
+    path: []u8,
+    store_id: []u8,
+    bound_set_id: []u8,
+    epoch: u64,
+
+    pub fn deinit(self: *BoundStoreRow, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        allocator.free(self.store_id);
+        allocator.free(self.bound_set_id);
+    }
+};
+
+/// Attach and validate the store configured for `kind`. Returns false when
+/// the main database has no binding of that kind.
+pub fn openConfiguredBoundStore(db: *sqlite.Database, comptime kind: StoreKind, options: OpenOptions) Error!bool {
+    var row = (try loadBoundStoreRow(std.heap.c_allocator, db, kind)) orelse return false;
+    defer row.deinit(std.heap.c_allocator);
+
+    const path_z = try std.heap.c_allocator.dupeSentinel(u8, row.path, 0);
     defer std.heap.c_allocator.free(path_z);
 
-    try attachObjectStore(db, path_z, options.read_only);
-    errdefer db.detachDatabase(bound_object_store_schema_name) catch {};
+    try attachStore(db, kind, path_z, options.read_only);
+    errdefer db.detachDatabase(kind.schemaName()) catch {};
 
-    const actual_store_id = try validateAttachedObjectStoreAlloc(std.heap.c_allocator, db, bound_object_store_schema_name);
+    const actual_store_id = try kind.validateAttachedAlloc(std.heap.c_allocator, db);
     defer std.heap.c_allocator.free(actual_store_id);
-    if (!std.mem.eql(u8, actual_store_id, info.store_id)) return error.BoundStoreInvalid;
+    if (!std.mem.eql(u8, actual_store_id, row.store_id)) return error.BoundStoreInvalid;
 
-    const actual_bound_set_id = (try attachedMetadataValueAlloc(std.heap.c_allocator, db, bound_object_store_schema_name, "bound_set_id")) orelse return error.BoundStoreInvalid;
+    const actual_bound_set_id = (try attachedMetadataValueAlloc(std.heap.c_allocator, db, kind.schemaName(), "bound_set_id")) orelse return error.BoundStoreInvalid;
     defer std.heap.c_allocator.free(actual_bound_set_id);
-    if (!std.mem.eql(u8, actual_bound_set_id, info.bound_set_id)) return error.BoundStoreInvalid;
+    if (!std.mem.eql(u8, actual_bound_set_id, row.bound_set_id)) return error.BoundStoreInvalid;
 
-    const actual_epoch = try attachedMetadataU64(db, bound_object_store_schema_name, "object_epoch");
-    if (actual_epoch != info.object_epoch) return error.BoundStoreInvalid;
+    const actual_epoch = try attachedMetadataU64(db, kind.schemaName(), kind.epochKey());
+    if (actual_epoch != row.epoch) return error.BoundStoreInvalid;
+    return true;
+}
 
-    return .{};
+pub fn attachStore(db: *sqlite.Database, comptime kind: StoreKind, path: []const u8, read_only: bool) Error!void {
+    if (!isZovaPath(path)) return error.NotZovaPath;
+    try ensurePathExists(path);
+    try db.attachDatabase(path, kind.schemaName());
+    errdefer db.detachDatabase(kind.schemaName()) catch {};
+    if (read_only) try db.setQueryOnly(true);
+}
+
+pub fn deleteBoundStoreRows(db: *sqlite.Database, comptime kind: StoreKind) Error!void {
+    if (!try tableExists(db, bound_stores_table)) return;
+
+    var stmt = try db.prepare(comptime "delete from _zova_bound_stores" ++ kind.rowFilter());
+    defer stmt.deinit();
+    try stmt.expectDone();
+}
+
+pub fn hasBoundStoreRow(db: *sqlite.Database, comptime kind: StoreKind) Error!bool {
+    if (!try tableExists(db, bound_stores_table)) return false;
+
+    var stmt = try db.prepare(comptime "select 1 from _zova_bound_stores" ++ kind.rowFilter() ++ " limit 1");
+    defer stmt.deinit();
+
+    return switch (try stmt.step()) {
+        .row => true,
+        .done => false,
+    };
+}
+
+pub fn loadBoundStoreRow(allocator: std.mem.Allocator, db: *sqlite.Database, comptime kind: StoreKind) Error!?BoundStoreRow {
+    if (!try tableExists(db, bound_stores_table)) return null;
+
+    var stmt = try db.prepare(comptime "select path, store_id, bound_set_id, " ++ kind.epochKey() ++
+        " from _zova_bound_stores" ++ kind.rowFilter());
+    defer stmt.deinit();
+
+    switch (try stmt.step()) {
+        .done => return null,
+        .row => {
+            const path = try allocator.dupe(u8, stmt.columnText(0));
+            errdefer allocator.free(path);
+
+            const store_id = try allocator.dupe(u8, stmt.columnText(1));
+            errdefer allocator.free(store_id);
+            if (!isValidStoreId(store_id)) return error.BoundStoreInvalid;
+
+            const bound_set_id = try allocator.dupe(u8, stmt.columnText(2));
+            errdefer allocator.free(bound_set_id);
+            if (!isValidStoreId(bound_set_id)) return error.BoundStoreInvalid;
+
+            const epoch = try sqliteI64ToU64(stmt.columnInt64(3));
+
+            switch (try stmt.step()) {
+                .done => {},
+                .row => return error.BoundStoreInvalid,
+            }
+
+            return .{ .path = path, .store_id = store_id, .bound_set_id = bound_set_id, .epoch = epoch };
+        },
+    }
+}
+
+pub fn insertBoundStoreRow(db: *sqlite.Database, comptime kind: StoreKind, path: []const u8, store_id: []const u8, bound_set_id: []const u8) Error!void {
+    var stmt = try db.prepare(comptime "insert into _zova_bound_stores (role, name, path, store_id, bound_set_id, object_epoch, vector_epoch, graph_epoch, created_at_unix)" ++
+        " values ('" ++ kind.schemaName() ++ "', 'default', ?, ?, ?, " ++ kind.epochValues(false) ++ ", unixepoch())");
+    defer stmt.deinit();
+
+    try stmt.bindText(1, path);
+    try stmt.bindText(2, store_id);
+    try stmt.bindText(3, bound_set_id);
+    try stmt.expectDone();
+}
+
+pub fn updateBoundStoreRow(db: *sqlite.Database, comptime kind: StoreKind, path: []const u8, store_id: []const u8, bound_set_id: []const u8) Error!void {
+    var stmt = try db.prepare(comptime "update _zova_bound_stores set path = ?, store_id = ?, bound_set_id = ?, " ++
+        kind.epochValues(true) ++ kind.rowFilter());
+    defer stmt.deinit();
+
+    try stmt.bindText(1, path);
+    try stmt.bindText(2, store_id);
+    try stmt.bindText(3, bound_set_id);
+    try stmt.expectDone();
+}
+
+/// Advance the epoch in the main binding row and mirror it into the attached store.
+pub fn incrementBoundEpoch(db: *sqlite.Database, comptime kind: StoreKind) Error!void {
+    const key = comptime kind.epochKey();
+
+    var update_main = try db.prepare(comptime "update _zova_bound_stores set " ++ key ++ " = " ++ key ++ " + 1" ++ kind.rowFilter());
+    defer update_main.deinit();
+    try update_main.expectDone();
+
+    var read_epoch = try db.prepare(comptime "select " ++ key ++ " from _zova_bound_stores" ++ kind.rowFilter());
+    defer read_epoch.deinit();
+    const epoch = switch (try read_epoch.step()) {
+        .done => return error.BoundStoreInvalid,
+        .row => read_epoch.columnInt64(0),
+    };
+    if (epoch < 0) return error.BoundStoreInvalid;
+
+    var epoch_buffer: [32]u8 = undefined;
+    const epoch_text = std.fmt.bufPrint(&epoch_buffer, "{d}", .{epoch}) catch return error.BoundStoreInvalid;
+    try setAttachedMetadataValue(db, kind.schemaName(), key, epoch_text);
+}
+
+// Per-kind entry points. The public `Bound*StoreInfo` types name their epoch
+// field after the store, so the loaders translate the shared row.
+
+pub fn openConfiguredBoundObjectStore(db: *sqlite.Database, options: OpenOptions) Error!?BoundObjectStore {
+    return if (try openConfiguredBoundStore(db, .object, options)) .{} else null;
 }
 
 pub fn openConfiguredBoundVectorStore(db: *sqlite.Database, options: OpenOptions) Error!?BoundVectorStore {
-    if (!try tableExists(db, bound_stores_table)) return null;
-
-    var info = (try loadBoundVectorStoreInfo(std.heap.c_allocator, db)) orelse return null;
-    defer info.deinit(std.heap.c_allocator);
-
-    const path_z = try std.heap.c_allocator.dupeSentinel(u8, info.path, 0);
-    defer std.heap.c_allocator.free(path_z);
-
-    try attachVectorStore(db, path_z, options.read_only);
-    errdefer db.detachDatabase(bound_vector_store_schema_name) catch {};
-
-    const actual_store_id = try validateAttachedVectorStoreAlloc(std.heap.c_allocator, db, bound_vector_store_schema_name);
-    defer std.heap.c_allocator.free(actual_store_id);
-    if (!std.mem.eql(u8, actual_store_id, info.store_id)) return error.BoundStoreInvalid;
-
-    const actual_bound_set_id = (try attachedMetadataValueAlloc(std.heap.c_allocator, db, bound_vector_store_schema_name, "bound_set_id")) orelse return error.BoundStoreInvalid;
-    defer std.heap.c_allocator.free(actual_bound_set_id);
-    if (!std.mem.eql(u8, actual_bound_set_id, info.bound_set_id)) return error.BoundStoreInvalid;
-
-    const actual_epoch = try attachedMetadataU64(db, bound_vector_store_schema_name, "vector_epoch");
-    if (actual_epoch != info.vector_epoch) return error.BoundStoreInvalid;
-
-    return .{};
+    return if (try openConfiguredBoundStore(db, .vector, options)) .{} else null;
 }
 
 pub fn openConfiguredBoundGraphStore(db: *sqlite.Database, options: OpenOptions) Error!?BoundGraphStore {
-    if (!try tableExists(db, bound_stores_table)) return null;
-
-    var info = (try loadBoundGraphStoreInfo(std.heap.c_allocator, db)) orelse return null;
-    defer info.deinit(std.heap.c_allocator);
-
-    const path_z = try std.heap.c_allocator.dupeSentinel(u8, info.path, 0);
-    defer std.heap.c_allocator.free(path_z);
-
-    try attachGraphStore(db, path_z, options.read_only);
-    errdefer db.detachDatabase(bound_graph_store_schema_name) catch {};
-
-    const actual_store_id = try validateAttachedGraphStoreAlloc(std.heap.c_allocator, db, bound_graph_store_schema_name);
-    defer std.heap.c_allocator.free(actual_store_id);
-    if (!std.mem.eql(u8, actual_store_id, info.store_id)) return error.BoundStoreInvalid;
-
-    const actual_bound_set_id = (try attachedMetadataValueAlloc(std.heap.c_allocator, db, bound_graph_store_schema_name, "bound_set_id")) orelse return error.BoundStoreInvalid;
-    defer std.heap.c_allocator.free(actual_bound_set_id);
-    if (!isValidStoreId(actual_bound_set_id) or !std.mem.eql(u8, actual_bound_set_id, info.bound_set_id)) return error.BoundStoreInvalid;
-
-    const actual_epoch = try attachedMetadataU64(db, bound_graph_store_schema_name, "graph_epoch");
-    if (actual_epoch != info.graph_epoch) return error.BoundStoreInvalid;
-
-    return .{};
-}
-
-pub fn attachObjectStore(db: *sqlite.Database, path: []const u8, read_only: bool) Error!void {
-    if (!isZovaPath(path)) return error.NotZovaPath;
-    try ensurePathExists(path);
-    try db.attachDatabase(path, bound_object_store_schema_name);
-    errdefer db.detachDatabase(bound_object_store_schema_name) catch {};
-    if (read_only) try db.setQueryOnly(true);
-}
-
-pub fn attachVectorStore(db: *sqlite.Database, path: []const u8, read_only: bool) Error!void {
-    if (!isZovaPath(path)) return error.NotZovaPath;
-    try ensurePathExists(path);
-    try db.attachDatabase(path, bound_vector_store_schema_name);
-    errdefer db.detachDatabase(bound_vector_store_schema_name) catch {};
-    if (read_only) try db.setQueryOnly(true);
-}
-
-pub fn attachGraphStore(db: *sqlite.Database, path: []const u8, read_only: bool) Error!void {
-    if (!isZovaPath(path)) return error.NotZovaPath;
-    try ensurePathExists(path);
-    try db.attachDatabase(path, bound_graph_store_schema_name);
-    errdefer db.detachDatabase(bound_graph_store_schema_name) catch {};
-    if (read_only) try db.setQueryOnly(true);
-}
-
-pub fn deleteBoundObjectStoreRows(db: *sqlite.Database) Error!void {
-    if (!try tableExists(db, bound_stores_table)) return;
-
-    var stmt = try db.prepare(
-        \\delete from _zova_bound_stores
-        \\where role = 'object_store' and name = 'default'
-    );
-    defer stmt.deinit();
-    try stmt.expectDone();
-}
-
-pub fn deleteBoundVectorStoreRows(db: *sqlite.Database) Error!void {
-    if (!try tableExists(db, bound_stores_table)) return;
-
-    var stmt = try db.prepare(
-        \\delete from _zova_bound_stores
-        \\where role = 'vector_store' and name = 'default'
-    );
-    defer stmt.deinit();
-    try stmt.expectDone();
-}
-
-pub fn deleteBoundGraphStoreRows(db: *sqlite.Database) Error!void {
-    if (!try tableExists(db, bound_stores_table)) return;
-
-    var stmt = try db.prepare(
-        \\delete from _zova_bound_stores
-        \\where role = 'graph_store' and name = 'default'
-    );
-    defer stmt.deinit();
-    try stmt.expectDone();
-}
-
-pub fn hasBoundObjectStoreRow(db: *sqlite.Database) Error!bool {
-    if (!try tableExists(db, bound_stores_table)) return false;
-
-    var stmt = try db.prepare(
-        \\select 1
-        \\from _zova_bound_stores
-        \\where role = 'object_store' and name = 'default'
-        \\limit 1
-    );
-    defer stmt.deinit();
-
-    return switch (try stmt.step()) {
-        .row => true,
-        .done => false,
-    };
-}
-
-pub fn hasBoundVectorStoreRow(db: *sqlite.Database) Error!bool {
-    if (!try tableExists(db, bound_stores_table)) return false;
-
-    var stmt = try db.prepare(
-        \\select 1
-        \\from _zova_bound_stores
-        \\where role = 'vector_store' and name = 'default'
-        \\limit 1
-    );
-    defer stmt.deinit();
-
-    return switch (try stmt.step()) {
-        .row => true,
-        .done => false,
-    };
-}
-
-pub fn hasBoundGraphStoreRow(db: *sqlite.Database) Error!bool {
-    if (!try tableExists(db, bound_stores_table)) return false;
-
-    var stmt = try db.prepare(
-        \\select 1
-        \\from _zova_bound_stores
-        \\where role = 'graph_store' and name = 'default'
-        \\limit 1
-    );
-    defer stmt.deinit();
-
-    return switch (try stmt.step()) {
-        .row => true,
-        .done => false,
-    };
+    return if (try openConfiguredBoundStore(db, .graph, options)) .{} else null;
 }
 
 pub fn loadBoundObjectStoreInfo(allocator: std.mem.Allocator, db: *sqlite.Database) Error!?BoundObjectStoreInfo {
-    if (!try tableExists(db, bound_stores_table)) return null;
-
-    var stmt = try db.prepare(
-        \\select path, store_id, bound_set_id, object_epoch
-        \\from _zova_bound_stores
-        \\where role = 'object_store' and name = 'default'
-    );
-    defer stmt.deinit();
-
-    switch (try stmt.step()) {
-        .done => return null,
-        .row => {
-            const path = try allocator.dupe(u8, stmt.columnText(0));
-            errdefer allocator.free(path);
-
-            const store_id = try allocator.dupe(u8, stmt.columnText(1));
-            errdefer allocator.free(store_id);
-            if (!isValidStoreId(store_id)) return error.BoundStoreInvalid;
-
-            const bound_set_id = try allocator.dupe(u8, stmt.columnText(2));
-            errdefer allocator.free(bound_set_id);
-            if (!isValidStoreId(bound_set_id)) return error.BoundStoreInvalid;
-
-            const object_epoch = try sqliteI64ToU64(stmt.columnInt64(3));
-
-            switch (try stmt.step()) {
-                .done => {},
-                .row => return error.BoundStoreInvalid,
-            }
-
-            return .{ .path = path, .store_id = store_id, .bound_set_id = bound_set_id, .object_epoch = object_epoch };
-        },
-    }
+    const row = (try loadBoundStoreRow(allocator, db, .object)) orelse return null;
+    return .{ .path = row.path, .store_id = row.store_id, .bound_set_id = row.bound_set_id, .object_epoch = row.epoch };
 }
 
 pub fn loadBoundVectorStoreInfo(allocator: std.mem.Allocator, db: *sqlite.Database) Error!?BoundVectorStoreInfo {
-    if (!try tableExists(db, bound_stores_table)) return null;
-
-    var stmt = try db.prepare(
-        \\select path, store_id, bound_set_id, vector_epoch
-        \\from _zova_bound_stores
-        \\where role = 'vector_store' and name = 'default'
-    );
-    defer stmt.deinit();
-
-    switch (try stmt.step()) {
-        .done => return null,
-        .row => {
-            const path = try allocator.dupe(u8, stmt.columnText(0));
-            errdefer allocator.free(path);
-
-            const store_id = try allocator.dupe(u8, stmt.columnText(1));
-            errdefer allocator.free(store_id);
-            if (!isValidStoreId(store_id)) return error.BoundStoreInvalid;
-
-            const bound_set_id = try allocator.dupe(u8, stmt.columnText(2));
-            errdefer allocator.free(bound_set_id);
-            if (!isValidStoreId(bound_set_id)) return error.BoundStoreInvalid;
-
-            const vector_epoch = try sqliteI64ToU64(stmt.columnInt64(3));
-
-            switch (try stmt.step()) {
-                .done => {},
-                .row => return error.BoundStoreInvalid,
-            }
-
-            return .{ .path = path, .store_id = store_id, .bound_set_id = bound_set_id, .vector_epoch = vector_epoch };
-        },
-    }
+    const row = (try loadBoundStoreRow(allocator, db, .vector)) orelse return null;
+    return .{ .path = row.path, .store_id = row.store_id, .bound_set_id = row.bound_set_id, .vector_epoch = row.epoch };
 }
 
 pub fn loadBoundGraphStoreInfo(allocator: std.mem.Allocator, db: *sqlite.Database) Error!?BoundGraphStoreInfo {
-    if (!try tableExists(db, bound_stores_table)) return null;
-
-    var stmt = try db.prepare(
-        \\select path, store_id, bound_set_id, graph_epoch
-        \\from _zova_bound_stores
-        \\where role = 'graph_store' and name = 'default'
-    );
-    defer stmt.deinit();
-
-    switch (try stmt.step()) {
-        .done => return null,
-        .row => {
-            const path = try allocator.dupe(u8, stmt.columnText(0));
-            errdefer allocator.free(path);
-
-            const store_id = try allocator.dupe(u8, stmt.columnText(1));
-            errdefer allocator.free(store_id);
-            if (!isValidStoreId(store_id)) return error.BoundStoreInvalid;
-
-            const bound_set_id = try allocator.dupe(u8, stmt.columnText(2));
-            errdefer allocator.free(bound_set_id);
-            if (!isValidStoreId(bound_set_id)) return error.BoundStoreInvalid;
-
-            const graph_epoch = try sqliteI64ToU64(stmt.columnInt64(3));
-            switch (try stmt.step()) {
-                .done => {},
-                .row => return error.BoundStoreInvalid,
-            }
-            return .{ .path = path, .store_id = store_id, .bound_set_id = bound_set_id, .graph_epoch = graph_epoch };
-        },
-    }
-}
-
-pub fn insertBoundObjectStoreRow(db: *sqlite.Database, path: []const u8, store_id: []const u8, bound_set_id: []const u8) Error!void {
-    var stmt = try db.prepare(
-        \\insert into _zova_bound_stores (role, name, path, store_id, bound_set_id, object_epoch, vector_epoch, graph_epoch, created_at_unix)
-        \\values ('object_store', 'default', ?, ?, ?, 0, null, null, unixepoch())
-    );
-    defer stmt.deinit();
-
-    try stmt.bindText(1, path);
-    try stmt.bindText(2, store_id);
-    try stmt.bindText(3, bound_set_id);
-    try stmt.expectDone();
-}
-
-pub fn updateBoundObjectStoreRow(db: *sqlite.Database, path: []const u8, store_id: []const u8, bound_set_id: []const u8) Error!void {
-    var stmt = try db.prepare(
-        \\update _zova_bound_stores
-        \\set path = ?, store_id = ?, bound_set_id = ?, object_epoch = 0, vector_epoch = null, graph_epoch = null
-        \\where role = 'object_store' and name = 'default'
-    );
-    defer stmt.deinit();
-
-    try stmt.bindText(1, path);
-    try stmt.bindText(2, store_id);
-    try stmt.bindText(3, bound_set_id);
-    try stmt.expectDone();
-}
-
-pub fn insertBoundVectorStoreRow(db: *sqlite.Database, path: []const u8, store_id: []const u8, bound_set_id: []const u8) Error!void {
-    var stmt = try db.prepare(
-        \\insert into _zova_bound_stores (role, name, path, store_id, bound_set_id, object_epoch, vector_epoch, graph_epoch, created_at_unix)
-        \\values ('vector_store', 'default', ?, ?, ?, null, 0, null, unixepoch())
-    );
-    defer stmt.deinit();
-
-    try stmt.bindText(1, path);
-    try stmt.bindText(2, store_id);
-    try stmt.bindText(3, bound_set_id);
-    try stmt.expectDone();
-}
-
-pub fn updateBoundVectorStoreRow(db: *sqlite.Database, path: []const u8, store_id: []const u8, bound_set_id: []const u8) Error!void {
-    var stmt = try db.prepare(
-        \\update _zova_bound_stores
-        \\set path = ?, store_id = ?, bound_set_id = ?, object_epoch = null, vector_epoch = 0, graph_epoch = null
-        \\where role = 'vector_store' and name = 'default'
-    );
-    defer stmt.deinit();
-
-    try stmt.bindText(1, path);
-    try stmt.bindText(2, store_id);
-    try stmt.bindText(3, bound_set_id);
-    try stmt.expectDone();
-}
-
-pub fn insertBoundGraphStoreRow(db: *sqlite.Database, path: []const u8, store_id: []const u8, bound_set_id: []const u8) Error!void {
-    var stmt = try db.prepare(
-        \\insert into _zova_bound_stores (role, name, path, store_id, bound_set_id, object_epoch, vector_epoch, graph_epoch, created_at_unix)
-        \\values ('graph_store', 'default', ?, ?, ?, null, null, 0, unixepoch())
-    );
-    defer stmt.deinit();
-    try stmt.bindText(1, path);
-    try stmt.bindText(2, store_id);
-    try stmt.bindText(3, bound_set_id);
-    try stmt.expectDone();
-}
-
-pub fn updateBoundGraphStoreRow(db: *sqlite.Database, path: []const u8, store_id: []const u8, bound_set_id: []const u8) Error!void {
-    var stmt = try db.prepare(
-        \\update _zova_bound_stores
-        \\set path = ?, store_id = ?, bound_set_id = ?, object_epoch = null, vector_epoch = null, graph_epoch = 0
-        \\where role = 'graph_store' and name = 'default'
-    );
-    defer stmt.deinit();
-    try stmt.bindText(1, path);
-    try stmt.bindText(2, store_id);
-    try stmt.bindText(3, bound_set_id);
-    try stmt.expectDone();
-}
-
-pub fn incrementBoundObjectEpoch(db: *sqlite.Database) Error!void {
-    var update_main = try db.prepare(
-        \\update _zova_bound_stores
-        \\set object_epoch = object_epoch + 1
-        \\where role = 'object_store' and name = 'default'
-    );
-    defer update_main.deinit();
-    try update_main.expectDone();
-
-    var read_epoch = try db.prepare(
-        \\select object_epoch
-        \\from _zova_bound_stores
-        \\where role = 'object_store' and name = 'default'
-    );
-    defer read_epoch.deinit();
-    const epoch = switch (try read_epoch.step()) {
-        .done => return error.BoundStoreInvalid,
-        .row => read_epoch.columnInt64(0),
-    };
-    if (epoch < 0) return error.BoundStoreInvalid;
-
-    var epoch_buffer: [32]u8 = undefined;
-    const epoch_text = std.fmt.bufPrint(&epoch_buffer, "{d}", .{epoch}) catch return error.BoundStoreInvalid;
-    try setAttachedMetadataValue(db, bound_object_store_schema_name, "object_epoch", epoch_text);
-}
-
-pub fn incrementBoundVectorEpoch(db: *sqlite.Database) Error!void {
-    var update_main = try db.prepare(
-        \\update _zova_bound_stores
-        \\set vector_epoch = vector_epoch + 1
-        \\where role = 'vector_store' and name = 'default'
-    );
-    defer update_main.deinit();
-    try update_main.expectDone();
-
-    var read_epoch = try db.prepare(
-        \\select vector_epoch
-        \\from _zova_bound_stores
-        \\where role = 'vector_store' and name = 'default'
-    );
-    defer read_epoch.deinit();
-    const epoch = switch (try read_epoch.step()) {
-        .done => return error.BoundStoreInvalid,
-        .row => read_epoch.columnInt64(0),
-    };
-    if (epoch < 0) return error.BoundStoreInvalid;
-
-    var epoch_buffer: [32]u8 = undefined;
-    const epoch_text = std.fmt.bufPrint(&epoch_buffer, "{d}", .{epoch}) catch return error.BoundStoreInvalid;
-    try setAttachedMetadataValue(db, bound_vector_store_schema_name, "vector_epoch", epoch_text);
-}
-
-pub fn incrementBoundGraphEpoch(db: *sqlite.Database) Error!void {
-    var update_main = try db.prepare(
-        \\update _zova_bound_stores set graph_epoch = graph_epoch + 1
-        \\where role = 'graph_store' and name = 'default'
-    );
-    defer update_main.deinit();
-    try update_main.expectDone();
-
-    var read_epoch = try db.prepare(
-        \\select graph_epoch from _zova_bound_stores
-        \\where role = 'graph_store' and name = 'default'
-    );
-    defer read_epoch.deinit();
-    const epoch = switch (try read_epoch.step()) {
-        .done => return error.BoundStoreInvalid,
-        .row => read_epoch.columnInt64(0),
-    };
-    if (epoch < 0) return error.BoundStoreInvalid;
-    var buffer: [32]u8 = undefined;
-    const text = std.fmt.bufPrint(&buffer, "{d}", .{epoch}) catch return error.BoundStoreInvalid;
-    try setAttachedMetadataValue(db, bound_graph_store_schema_name, "graph_epoch", text);
+    const row = (try loadBoundStoreRow(allocator, db, .graph)) orelse return null;
+    return .{ .path = row.path, .store_id = row.store_id, .bound_set_id = row.bound_set_id, .graph_epoch = row.epoch };
 }
 
 pub fn copyStoreId(value: []const u8) Error![64]u8 {
