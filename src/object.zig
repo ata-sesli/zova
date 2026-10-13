@@ -1889,29 +1889,6 @@ fn insertChunkRow(
     std.debug.assert((try stmt.step()) == .done);
 }
 
-fn insertManifestRow(
-    db: *sqlite.Database,
-    storage_schema: StorageSchema,
-    id: ObjectId,
-    chunk_index: i64,
-    chunk_hash: ObjectId,
-    offset: i64,
-    size_bytes: i64,
-) Error!void {
-    var stmt = try prepareSchema(db, storage_schema,
-        \\insert into {s}_zova_object_chunks (object_id, chunk_index, chunk_hash, offset, size_bytes)
-        \\values (?, ?, ?, ?, ?)
-    , .{storage_schema.prefix()});
-    defer stmt.deinit();
-
-    try stmt.bindBlob(1, &id);
-    try stmt.bindInt64(2, chunk_index);
-    try stmt.bindBlob(3, &chunk_hash);
-    try stmt.bindInt64(4, offset);
-    try stmt.bindInt64(5, size_bytes);
-    std.debug.assert((try stmt.step()) == .done);
-}
-
 fn usizeToSqliteI64(value: usize) Error!i64 {
     if (value > std.math.maxInt(i64)) return error.ObjectTooLarge;
     return @intCast(value);

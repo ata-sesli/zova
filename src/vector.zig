@@ -295,10 +295,6 @@ const PreparedVectorQuery = struct {
         };
     }
 
-    fn usesStoredNorms(self: PreparedVectorQuery) bool {
-        return self.metric == .cosine and self.element_type == .i8;
-    }
-
     fn i8CosineQuery(self: PreparedVectorQuery) ?[]const i8 {
         if (self.metric != .cosine) return null;
         return switch (self.values) {
@@ -1407,11 +1403,6 @@ fn validateVectorInput(collection: CollectionMetadata, input: VectorInput) Error
 
 fn validateVectorSearchThreshold(max_distance: f64) Error!void {
     if (std.math.isNan(max_distance) or std.math.isInf(max_distance)) return error.VectorInvalid;
-}
-
-fn validateStoredVectorDimensions(expected_dimensions: u32, stored_dimensions: i64) Error!void {
-    if (stored_dimensions < 0) return error.VectorCorrupt;
-    if (@as(u64, @intCast(stored_dimensions)) != expected_dimensions) return error.VectorCorrupt;
 }
 
 fn validateStoredVectorValues(collection: CollectionMetadata, values: VectorValuesConst) Error!void {

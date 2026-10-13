@@ -849,11 +849,6 @@ fn validateStoredValues(collection: Collection, values: VectorValuesConst) Error
     if (collection.metric == .cosine and norm_squared == 0) return error.VectorCorrupt;
 }
 
-fn validateStoredDimensions(expected: u32, stored: i64) Error!void {
-    if (stored < 0) return error.VectorCorrupt;
-    if (@as(u64, @intCast(stored)) != expected) return error.VectorCorrupt;
-}
-
 fn validateName(name: []const u8) Error!void {
     if (name.len == 0 or name.len > max_vector_collection_name_bytes) return error.VectorInvalid;
     if (!std.unicode.utf8ValidateSlice(name)) return error.VectorInvalid;

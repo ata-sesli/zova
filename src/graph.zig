@@ -3180,50 +3180,6 @@ fn graphEdgeFromRow(allocator: std.mem.Allocator, stmt: *sqlite.Statement) Error
     };
 }
 
-fn graphNeighborFromRow(allocator: std.mem.Allocator, stmt: *sqlite.Statement) Error!GraphNeighbor {
-    const node_id = try allocator.dupe(u8, stmt.columnText(0));
-    errdefer allocator.free(node_id);
-    const kind = try allocator.dupe(u8, stmt.columnText(1));
-    errdefer allocator.free(kind);
-    const edge_type = try allocator.dupe(u8, stmt.columnText(2));
-    errdefer allocator.free(edge_type);
-
-    return .{
-        .node_id = node_id,
-        .kind = kind,
-        .edge_type = edge_type,
-    };
-}
-
-fn appendGraphNeighborFromRow(items: *std.ArrayList(GraphNeighbor), allocator: std.mem.Allocator, stmt: *sqlite.Statement) Error!void {
-    var item = try graphNeighborFromRow(allocator, stmt);
-    errdefer item.deinit(allocator);
-    try items.append(allocator, item);
-}
-
-fn appendGraphKeyedNeighborFromRow(
-    items: *std.ArrayList(GraphKeyedNeighbor),
-    allocator: std.mem.Allocator,
-    stmt: *sqlite.Statement,
-) Error!void {
-    const edge_key = stmt.columnInt64(0);
-    const neighbor_node_key = stmt.columnInt64(1);
-    if (edge_key <= 0 or neighbor_node_key <= 0) return error.GraphInvalid;
-    const node_id = try allocator.dupe(u8, stmt.columnText(2));
-    errdefer allocator.free(node_id);
-    const kind = try allocator.dupe(u8, stmt.columnText(3));
-    errdefer allocator.free(kind);
-    const edge_type = try allocator.dupe(u8, stmt.columnText(4));
-    errdefer allocator.free(edge_type);
-    try items.append(allocator, .{
-        .edge_key = edge_key,
-        .neighbor_node_key = neighbor_node_key,
-        .node_id = node_id,
-        .kind = kind,
-        .edge_type = edge_type,
-    });
-}
-
 fn appendGraphScanNode(
     items: *std.ArrayList(GraphScanNode),
     allocator: std.mem.Allocator,
@@ -3240,27 +3196,6 @@ fn appendGraphScanNode(
         .node_key = node_key,
         .node_id = node_id,
         .kind = kind,
-        .created_order = created_order,
-    });
-}
-
-fn appendGraphScanEdge(
-    items: *std.ArrayList(GraphScanEdge),
-    allocator: std.mem.Allocator,
-    stmt: *sqlite.Statement,
-) Error!void {
-    const edge_key = stmt.columnInt64(0);
-    const source_node_key = stmt.columnInt64(1);
-    const target_node_key = stmt.columnInt64(3);
-    const created_order = stmt.columnInt64(4);
-    if (edge_key <= 0 or source_node_key <= 0 or target_node_key <= 0 or created_order <= 0) return error.GraphInvalid;
-    const edge_type = try allocator.dupe(u8, stmt.columnText(2));
-    errdefer allocator.free(edge_type);
-    try items.append(allocator, .{
-        .edge_key = edge_key,
-        .source_node_key = source_node_key,
-        .edge_type = edge_type,
-        .target_node_key = target_node_key,
         .created_order = created_order,
     });
 }

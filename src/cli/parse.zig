@@ -59,12 +59,6 @@ pub fn parseGlobalArgs(allocator: std.mem.Allocator, args: []const []const u8) !
     };
 }
 
-fn globalUsageMessage(err: GlobalParseError) []const u8 {
-    return switch (err) {
-        error.MissingExtensionPath => "--extension requires <bundle.zovaext>",
-    };
-}
-
 pub fn parseOperationalCommandArgs(
     args: []const []const u8,
     command: []const u8,
