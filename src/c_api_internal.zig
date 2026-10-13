@@ -230,6 +230,9 @@ pub const zova_database_create_options_request = @import("c_api/types.zig").zova
 pub const zova_database_open_options_request = @import("c_api/types.zig").zova_database_open_options_request;
 
 pub const zova_database_open_extensions_request = @import("c_api/types.zig").zova_database_open_extensions_request;
+pub const zova_database_open_plugins_request = @import("c_api/types.zig").zova_database_open_plugins_request;
+pub const zova_database_migrate_extensions_request = @import("c_api/types.zig").zova_database_migrate_extensions_request;
+pub const zova_plugin_descriptor_v1 = @import("c_api/types.zig").zova_plugin_descriptor_v1;
 
 pub const zova_extension_bundle_request = @import("c_api/types.zig").zova_extension_bundle_request;
 
@@ -798,6 +801,10 @@ pub const zova_database_extension_install = @import("c_api/extensions.zig").zova
 pub const zova_database_extension_upgrade = @import("c_api/extensions.zig").zova_database_extension_upgrade;
 pub const zova_database_extension_rebuild = @import("c_api/extensions.zig").zova_database_extension_rebuild;
 pub const zova_database_open_for_extension_upgrade = @import("c_api/database.zig").zova_database_open_for_extension_upgrade;
+pub const zova_database_create_with_plugins = @import("c_api/database.zig").zova_database_create_with_plugins;
+pub const zova_database_open_with_plugins = @import("c_api/database.zig").zova_database_open_with_plugins;
+pub const zova_database_open_for_extension_upgrade_with_plugins = @import("c_api/database.zig").zova_database_open_for_extension_upgrade_with_plugins;
+pub const zova_database_migrate_with_extensions = @import("c_api/database.zig").zova_database_migrate_with_extensions;
 
 pub const zova_database_extension_list = @import("c_api/extensions.zig").zova_database_extension_list;
 

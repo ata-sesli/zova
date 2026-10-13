@@ -643,6 +643,29 @@ typedef struct zova_database_migrate_request {
     zova_message *out_error_message;
 } zova_database_migrate_request;
 
+/* Declared in zova_plugin.h; hosts that link plugins include that header. */
+struct zova_plugin_descriptor_v1;
+
+/*
+ * zova_database_migrate with host-supplied extension code. Migration verifies
+ * the destination with every installed extension, so a database that has a
+ * non-bundled extension installed needs that extension's code here: trusted
+ * .zovaext bundle paths, plugin descriptors linked into the process, or both.
+ * Both counts may be zero, which equals zova_database_migrate. Descriptors are
+ * borrowed for the duration of the call.
+ */
+typedef struct zova_database_migrate_extensions_request {
+    const char *source_path;
+    const char *destination_path;
+    uint32_t flags;
+    const char *const *extension_bundle_paths;
+    size_t extension_bundle_count;
+    const char *trust_store_path;
+    const struct zova_plugin_descriptor_v1 *const *plugins;
+    size_t plugin_count;
+    zova_message *out_error_message;
+} zova_database_migrate_extensions_request;
+
 /* Open/create requests use C strings and may return an owned error message. */
 typedef struct zova_database_open_request {
     const char *path;
@@ -712,6 +735,28 @@ typedef struct zova_database_open_extensions_request {
     zova_database **out_db;
     zova_message *out_error_message;
 } zova_database_open_extensions_request;
+
+/*
+ * zova_database_open_extensions_request plus C-v1 plugin descriptors already
+ * linked into the host process. Linked plugins need no .zovaext bundle and no
+ * trust record: the host vouches for code it links. They are composed with the
+ * bundled registry and any listed bundles exactly as bundle plugins are. Every
+ * descriptor, and everything it points to, must stay valid until the returned
+ * handle is closed. NULL entries are INVALID_ARGUMENT. With both counts zero
+ * the calls behave like their _with_extensions counterparts.
+ */
+typedef struct zova_database_open_plugins_request {
+    const char *path;
+    uint32_t flags;
+    uint32_t busy_timeout_ms;
+    const char *const *extension_bundle_paths;
+    size_t extension_bundle_count;
+    const char *trust_store_path;
+    const struct zova_plugin_descriptor_v1 *const *plugins;
+    size_t plugin_count;
+    zova_database **out_db;
+    zova_message *out_error_message;
+} zova_database_open_plugins_request;
 
 /*
  * Local extension bundle management. verify loads the entrypoint without
@@ -1821,6 +1866,7 @@ zova_status zova_database_restore(const zova_database_restore_request *request);
 zova_status zova_database_restore_to_memory(const zova_database_restore_to_memory_request *request);
 zova_status zova_database_probe_format(const zova_database_probe_format_request *request);
 zova_status zova_database_migrate(const zova_database_migrate_request *request);
+zova_status zova_database_migrate_with_extensions(const zova_database_migrate_extensions_request *request);
 
 /*
  * Prepared statements.
@@ -1974,6 +2020,10 @@ zova_status zova_database_extension_install(const zova_database_extension_reques
  * Uses the same trusted-bundle request; flags must be zero. Upgrade, close and
  * reopen normally before application use. No implicit data/file migration. */
 zova_status zova_database_open_for_extension_upgrade(const zova_database_open_extensions_request *request);
+/* The create, open and upgrade-open calls above, accepting linked plugins. */
+zova_status zova_database_create_with_plugins(const zova_database_open_plugins_request *request);
+zova_status zova_database_open_with_plugins(const zova_database_open_plugins_request *request);
+zova_status zova_database_open_for_extension_upgrade_with_plugins(const zova_database_open_plugins_request *request);
 /* One declared forward path; savepoint rollback preserves caller work.
  * Unavailable code -> EXTENSION_UNAVAILABLE; unsupported/equal/backward version
  * -> EXTENSION_INCOMPATIBLE. Caller transaction commit remains the caller's job. */

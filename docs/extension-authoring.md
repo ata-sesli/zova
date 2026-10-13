@@ -64,12 +64,24 @@ READMEs for external CMake builds and pinned dependency/license packaging.
 
 | Service v1 | Purpose | Author responsibility |
 | --- | --- | --- |
-| Query | Parameterized read-only SQL with typed row callbacks | No side-effecting functions; discard partial delivery on error |
+| Query | Parameterized read-only SQL with typed row callbacks; may read application tables in `main` | No side-effecting functions; discard partial delivery on error |
 | Diagnostics | Copy current SQLite error into a bounded caller buffer | Copy promptly; it is not a retained error object |
-| Data | Graph scans, keyed reads, adjacency, vector metadata/reads/scans | Treat keys as opaque; copy borrowed bytes if retained |
+| Data | Graph scans, keyed reads, adjacency, edge payload reads, vector metadata/reads/scans | Treat keys as opaque; copy borrowed bytes if retained |
 | Storage | Parameterized reads/writes to declared plugin-owned main tables | Qualify `main.<private_table>`; no core/other-owner access |
 | Operations | Register typed scalar or streaming table operations | State exact/approximate semantics, metrics, ordering and limits |
 | Vector maintenance | Snapshot-visible incarnation/revision/token and bounded history | Validate coverage; reconstruct or fail on missing/divergent history |
+
+Edge payload reads (`ZOVA_PLUGIN_GRAPH_EDGE_PAYLOADS_GET`) need a Zova 1.3.0 or
+newer host, so a plugin that uses them declares `zova_abi_min` `1.3.0`. A batch
+returns one row per input key with the application's opaque payload bytes; the
+bytes count toward the byte budget, so an over-budget batch fails with `LIMIT`
+and is retried with fewer keys.
+
+A read-only hook or operation may `SELECT` from the application's own tables in
+`main` through the query service, for example to join host topology with
+properties the application stores beside it. Those tables belong to the
+application: their names and columns are an agreement between the plugin and
+its host application, not something Zova validates or migrates.
 
 Expose algorithms through ordinary SQL statements. Local operation `rank` in
 extension `example` becomes `zova_example_rank`. Scalar callbacks deliver one

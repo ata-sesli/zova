@@ -31,9 +31,12 @@ const zova_database_create_memory_request = @import("types.zig").zova_database_c
 const zova_database_create_options_request = @import("types.zig").zova_database_create_options_request;
 const zova_database_exec_request = @import("types.zig").zova_database_exec_request;
 const zova_database_last_insert_rowid_request = @import("types.zig").zova_database_last_insert_rowid_request;
+const zova_database_migrate_extensions_request = @import("types.zig").zova_database_migrate_extensions_request;
 const zova_database_migrate_request = @import("types.zig").zova_database_migrate_request;
 const zova_database_open_extensions_request = @import("types.zig").zova_database_open_extensions_request;
 const zova_database_open_options_request = @import("types.zig").zova_database_open_options_request;
+const zova_database_open_plugins_request = @import("types.zig").zova_database_open_plugins_request;
+const zova_plugin_descriptor_v1 = @import("types.zig").zova_plugin_descriptor_v1;
 const zova_database_open_request = @import("types.zig").zova_database_open_request;
 const zova_database_probe_format_request = @import("types.zig").zova_database_probe_format_request;
 const zova_database_restore_request = @import("types.zig").zova_database_restore_request;
@@ -71,6 +74,18 @@ pub fn zova_database_create_with_options(request: ?*const zova_database_create_o
 
 pub fn zova_database_create_with_extensions(request: ?*const zova_database_open_extensions_request) callconv(.c) zova_status {
     return openDatabaseWithExtensions(request, .create, false);
+}
+
+pub fn zova_database_create_with_plugins(request: ?*const zova_database_open_plugins_request) callconv(.c) zova_status {
+    return openDatabaseWithPlugins(request orelse return .INVALID_ARGUMENT, .create, false);
+}
+
+pub fn zova_database_open_with_plugins(request: ?*const zova_database_open_plugins_request) callconv(.c) zova_status {
+    return openDatabaseWithPlugins(request orelse return .INVALID_ARGUMENT, .open, false);
+}
+
+pub fn zova_database_open_for_extension_upgrade_with_plugins(request: ?*const zova_database_open_plugins_request) callconv(.c) zova_status {
+    return openDatabaseWithPlugins(request orelse return .INVALID_ARGUMENT, .open, true);
 }
 
 pub fn zova_database_open(request: ?*const zova_database_open_request) callconv(.c) zova_status {
@@ -319,6 +334,49 @@ pub fn zova_database_migrate(request: ?*const zova_database_migrate_request) cal
     return .OK;
 }
 
+pub fn zova_database_migrate_with_extensions(request: ?*const zova_database_migrate_extensions_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    clearMessage(req.out_error_message);
+    const source_path = req.source_path orelse return failMessage(req.out_error_message, error.InvalidArgument);
+    const destination_path = req.destination_path orelse return failMessage(req.out_error_message, error.InvalidArgument);
+    if ((req.flags & ~ZOVA_MIGRATE_NO_VERIFY) != 0) return failMessage(req.out_error_message, error.InvalidArgument);
+    const bundle_paths = bundlePathSlices(allocator, req.extension_bundle_paths, req.extension_bundle_count) catch |err| {
+        return failMessage(req.out_error_message, err);
+    };
+    defer allocator.free(bundle_paths);
+    const plugins = pluginSlice(req.plugins, req.plugin_count) catch |err| return failMessage(req.out_error_message, err);
+
+    var dynamic_extensions = zova.DynamicExtensionSet.loadWithPlugins(
+        allocator,
+        bundle_paths,
+        trustStoreOptions(req.trust_store_path),
+        plugins,
+    ) catch |err| return failMessage(req.out_error_message, err);
+    defer dynamic_extensions.deinit();
+    var owned_registry = zova.DynamicExtensionOwnedRegistry.init(allocator, &.{
+        zova.bundledExtensionRegistry(),
+        dynamic_extensions.registry(),
+    }) catch |err| return failMessage(req.out_error_message, err);
+    defer owned_registry.deinit();
+
+    zova.migrateDatabaseWithExtensions(
+        std.mem.span(source_path),
+        std.mem.span(destination_path),
+        .{ .verify = (req.flags & ZOVA_MIGRATE_NO_VERIFY) == 0 },
+        owned_registry.registry(),
+    ) catch |err| {
+        return failMessage(req.out_error_message, err);
+    };
+    return .OK;
+}
+
+fn pluginSlice(plugins: ?[*]const ?*const zova_plugin_descriptor_v1, count: usize) error{InvalidArgument}![]const ?*const zova_plugin_descriptor_v1 {
+    if (count == 0) return &.{};
+    const items = (plugins orelse return error.InvalidArgument)[0..count];
+    for (items) |item| if (item == null) return error.InvalidArgument;
+    return items;
+}
+
 pub fn zova_database_restore_to_memory(request: ?*const zova_database_restore_to_memory_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     clearMessage(req.out_error_message);
@@ -411,6 +469,21 @@ fn openDatabaseWithOptions(request: ?*const zova_database_open_options_request) 
 
 fn openDatabaseWithExtensions(request: ?*const zova_database_open_extensions_request, mode: OpenMode, for_upgrade: bool) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
+    return openDatabaseWithPlugins(&.{
+        .path = req.path,
+        .flags = req.flags,
+        .busy_timeout_ms = req.busy_timeout_ms,
+        .extension_bundle_paths = req.extension_bundle_paths,
+        .extension_bundle_count = req.extension_bundle_count,
+        .trust_store_path = req.trust_store_path,
+        .plugins = null,
+        .plugin_count = 0,
+        .out_db = req.out_db,
+        .out_error_message = req.out_error_message,
+    }, mode, for_upgrade);
+}
+
+fn openDatabaseWithPlugins(req: *const zova_database_open_plugins_request, mode: OpenMode, for_upgrade: bool) zova_status {
     clearMessage(req.out_error_message);
     const out = req.out_db orelse return failMessage(req.out_error_message, error.InvalidArgument);
     out.* = null;
@@ -424,8 +497,9 @@ fn openDatabaseWithExtensions(request: ?*const zova_database_open_extensions_req
         return failMessage(req.out_error_message, err);
     };
     defer allocator.free(bundle_paths);
+    const plugins = pluginSlice(req.plugins, req.plugin_count) catch |err| return failMessage(req.out_error_message, err);
 
-    if (bundle_paths.len == 0 and !for_upgrade) {
+    if (bundle_paths.len == 0 and plugins.len == 0 and !for_upgrade) {
         return switch (mode) {
             .create => openDatabase(&.{
                 .path = req.path,
@@ -442,10 +516,11 @@ fn openDatabaseWithExtensions(request: ?*const zova_database_open_extensions_req
         };
     }
 
-    var dynamic_extensions = zova.DynamicExtensionSet.loadTrustedBundles(
+    var dynamic_extensions = zova.DynamicExtensionSet.loadWithPlugins(
         allocator,
         bundle_paths,
         trustStoreOptions(req.trust_store_path),
+        plugins,
     ) catch |err| return failMessage(req.out_error_message, err);
 
     var owned_registry = zova.DynamicExtensionOwnedRegistry.init(allocator, &.{

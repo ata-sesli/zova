@@ -55,6 +55,10 @@ static_assert(sizeof(zova_object_put_options) == sizeof(int), "object options us
 
 int main() {
     if (zova_database_open_for_extension_upgrade(nullptr) != ZOVA_INVALID_ARGUMENT ||
+        zova_database_create_with_plugins(nullptr) != ZOVA_INVALID_ARGUMENT ||
+        zova_database_open_with_plugins(nullptr) != ZOVA_INVALID_ARGUMENT ||
+        zova_database_open_for_extension_upgrade_with_plugins(nullptr) != ZOVA_INVALID_ARGUMENT ||
+        zova_database_migrate_with_extensions(nullptr) != ZOVA_INVALID_ARGUMENT ||
         zova_database_extension_upgrade(nullptr) != ZOVA_INVALID_ARGUMENT ||
         zova_database_extension_rebuild(nullptr) != ZOVA_INVALID_ARGUMENT) return 1;
     zova_database *db = nullptr;
@@ -178,6 +182,11 @@ int main() {
     migrate_request.flags = ZOVA_MIGRATE_NO_VERIFY;
     const auto probe_fn = &zova_database_probe_format;
     const auto migrate_fn = &zova_database_migrate;
+    zova_database_open_plugins_request plugins_request = {};
+    plugins_request.plugin_count = 0;
+    zova_database_migrate_extensions_request migrate_extensions_request = {};
+    migrate_extensions_request.plugins = plugins_request.plugins;
+    (void)migrate_extensions_request;
     (void)probe_fn;
     (void)migrate_fn;
     zova_vector_collection_info_get_request info_request = {};

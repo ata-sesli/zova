@@ -102,6 +102,25 @@ status = zova_database_migrate(&migrate);
 A source with no registered path to the current format returns
 `ZOVA_NO_MIGRATION_PATH` (`38`).
 
+Migration verifies the destination with every installed extension. If the
+source has a non-bundled extension installed, `zova_database_migrate` cannot
+load its code and returns `ZOVA_EXTENSION_UNAVAILABLE` without publishing a
+destination. Use `zova_database_migrate_with_extensions` (Zova 1.3.0 and newer),
+which takes the same source, destination and flags plus trusted `.zovaext`
+bundle paths and plugin descriptors linked into the host process:
+
+```c
+const char *bundles[] = { "networkit.zovaext" };
+zova_database_migrate_extensions_request migrate = {
+    .source_path = "app.zova",
+    .destination_path = "app-format-12.zova",
+    .extension_bundle_paths = bundles,
+    .extension_bundle_count = 1,
+    .out_error_message = &message,
+};
+status = zova_database_migrate_with_extensions(&migrate);
+```
+
 ### Rust
 
 ```rust

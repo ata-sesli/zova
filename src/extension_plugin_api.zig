@@ -118,6 +118,7 @@ pub const DataOperation = enum(u32) {
     vector_metadata = 6,
     vectors_scan = 7,
     vectors_get = 8,
+    graph_edge_payloads_get = 9,
 };
 pub const Cursor = extern struct { created_order: i64 = 0, key: i64 = 0 };
 pub const DataPage = extern struct {

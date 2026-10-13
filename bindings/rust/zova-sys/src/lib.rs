@@ -728,6 +728,20 @@ pub struct zova_database_open_extensions_request {
 }
 
 #[repr(C)]
+pub struct zova_database_open_plugins_request {
+    pub path: *const c_char,
+    pub flags: u32,
+    pub busy_timeout_ms: u32,
+    pub extension_bundle_paths: *const *const c_char,
+    pub extension_bundle_count: usize,
+    pub trust_store_path: *const c_char,
+    pub plugins: *const *const plugin::zova_plugin_descriptor_v1,
+    pub plugin_count: usize,
+    pub out_db: *mut *mut zova_database,
+    pub out_error_message: *mut zova_message,
+}
+
+#[repr(C)]
 pub struct zova_extension_bundle_request {
     pub bundle_path: *const c_char,
     pub trust_store_path: *const c_char,
@@ -789,6 +803,19 @@ pub struct zova_database_migrate_request {
     pub source_path: *const c_char,
     pub destination_path: *const c_char,
     pub flags: u32,
+    pub out_error_message: *mut zova_message,
+}
+
+#[repr(C)]
+pub struct zova_database_migrate_extensions_request {
+    pub source_path: *const c_char,
+    pub destination_path: *const c_char,
+    pub flags: u32,
+    pub extension_bundle_paths: *const *const c_char,
+    pub extension_bundle_count: usize,
+    pub trust_store_path: *const c_char,
+    pub plugins: *const *const plugin::zova_plugin_descriptor_v1,
+    pub plugin_count: usize,
     pub out_error_message: *mut zova_message,
 }
 
@@ -1807,6 +1834,9 @@ extern "C" {
         request: *const zova_database_probe_format_request,
     ) -> zova_status;
     pub fn zova_database_migrate(request: *const zova_database_migrate_request) -> zova_status;
+    pub fn zova_database_migrate_with_extensions(
+        request: *const zova_database_migrate_extensions_request,
+    ) -> zova_status;
 
     pub fn zova_statement_finalize(statement: *mut zova_statement) -> zova_status;
     pub fn zova_statement_step(request: *const zova_statement_step_request) -> zova_status;
@@ -1998,6 +2028,15 @@ extern "C" {
     ) -> zova_status;
     pub fn zova_database_open_for_extension_upgrade(
         request: *const zova_database_open_extensions_request,
+    ) -> zova_status;
+    pub fn zova_database_create_with_plugins(
+        request: *const zova_database_open_plugins_request,
+    ) -> zova_status;
+    pub fn zova_database_open_with_plugins(
+        request: *const zova_database_open_plugins_request,
+    ) -> zova_status;
+    pub fn zova_database_open_for_extension_upgrade_with_plugins(
+        request: *const zova_database_open_plugins_request,
     ) -> zova_status;
     pub fn zova_database_extension_list(
         request: *const zova_database_extension_list_request,

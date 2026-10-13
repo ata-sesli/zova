@@ -3309,3 +3309,119 @@ test "c abi manages bundled extension lifecycle" {
     zova_extension_info_free(null);
     zova_extension_list_free(null);
 }
+
+const linked_plugin: c_api_internal.zova_plugin_descriptor_v1 = .{
+    .struct_size = @sizeOf(c_api_internal.zova_plugin_descriptor_v1),
+    .abi_version = 1,
+    .name = "linked_test",
+    .version = "1.0.0",
+    .storage_prefix = "_zova_ext_linked_test_",
+    .zova_abi_min = "1.0.0",
+};
+
+test "c api opens with plugin descriptors linked into the process" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/linked.zova", .{tmp.sub_path[0..]}, 0);
+    const plugins = [_]?*const c_api_internal.zova_plugin_descriptor_v1{&linked_plugin};
+    var handle: ?*zova_database = null;
+    var req: c_api_internal.zova_database_open_plugins_request = .{
+        .path = path.ptr,
+        .flags = 0,
+        .busy_timeout_ms = 0,
+        .extension_bundle_paths = null,
+        .extension_bundle_count = 0,
+        .trust_store_path = null,
+        .plugins = &plugins,
+        .plugin_count = plugins.len,
+        .out_db = &handle,
+        .out_error_message = null,
+    };
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, c_api_internal.zova_database_create_with_plugins(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, c_api_internal.zova_database_open_with_plugins(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, c_api_internal.zova_database_open_for_extension_upgrade_with_plugins(null));
+    const missing = [_]?*const c_api_internal.zova_plugin_descriptor_v1{null};
+    req.plugins = &missing;
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, c_api_internal.zova_database_create_with_plugins(&req));
+    req.plugins = null;
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, c_api_internal.zova_database_create_with_plugins(&req));
+    try std.testing.expect(handle == null);
+    req.plugins = &plugins;
+
+    try std.testing.expectEqual(zova_status.OK, c_api_internal.zova_database_create_with_plugins(&req));
+    try std.testing.expectEqual(zova_status.OK, zova_database_extension_install(&.{ .db = handle, .name = "linked_test" }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_close(handle));
+    handle = null;
+
+    // An installed extension is required at open, so the bundled registry alone refuses.
+    try std.testing.expectEqual(zova_status.EXTENSION_UNAVAILABLE, zova_database_open(&.{ .path = path.ptr, .out_db = &handle, .out_error_message = null }));
+    try std.testing.expect(handle == null);
+
+    try std.testing.expectEqual(zova_status.OK, c_api_internal.zova_database_open_with_plugins(&req));
+    var info = emptyExtensionInfo();
+    defer zova_extension_info_free(&info);
+    try std.testing.expectEqual(zova_status.OK, zova_database_extension_info(&.{ .db = handle, .name = "linked_test", .out_info = &info }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_close(handle));
+    handle = null;
+
+    try std.testing.expectEqual(zova_status.OK, c_api_internal.zova_database_open_for_extension_upgrade_with_plugins(&req));
+    try std.testing.expectEqual(zova_status.OK, zova_database_close(handle));
+    handle = null;
+
+    // Without plugins or bundles the call is the ordinary open.
+    req.plugin_count = 0;
+    try std.testing.expectEqual(zova_status.EXTENSION_UNAVAILABLE, c_api_internal.zova_database_open_with_plugins(&req));
+}
+
+test "c api migrates a database with a non-bundled extension only when its code is supplied" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var src_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const src = try std.fmt.bufPrintSentinel(&src_buf, ".zig-cache/tmp/{s}/linked-src.zova", .{tmp.sub_path[0..]}, 0);
+    const io = std.Io.Threaded.global_single_threaded.io();
+    {
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, "tests/fixtures/format-11.zova", std.testing.allocator, .limited(64 * 1024 * 1024));
+        defer std.testing.allocator.free(bytes);
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = src, .data = bytes });
+    }
+    const plugins = [_]?*const c_api_internal.zova_plugin_descriptor_v1{&linked_plugin};
+    {
+        // Install into the genuine format-11 file the way a 1.1.0 host would have.
+        var set = try zova.DynamicExtensionSet.loadWithPlugins(std.testing.allocator, &.{}, .{}, &plugins);
+        defer set.deinit();
+        var raw = try sqlite.Database.open(src);
+        defer raw.deinit();
+        try @import("extension.zig").install(&raw, set.registry(), "linked_test", null);
+    }
+    var plain_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const plain = try std.fmt.bufPrintSentinel(&plain_buf, ".zig-cache/tmp/{s}/linked-plain.zova", .{tmp.sub_path[0..]}, 0);
+    try std.testing.expectEqual(zova_status.EXTENSION_UNAVAILABLE, zova_database_migrate(&.{ .source_path = src, .destination_path = plain, .flags = 0, .out_error_message = null }));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, plain, .{}));
+
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, c_api_internal.zova_database_migrate_with_extensions(null));
+    var dst_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dst = try std.fmt.bufPrintSentinel(&dst_buf, ".zig-cache/tmp/{s}/linked-dst.zova", .{tmp.sub_path[0..]}, 0);
+    var req: c_api_internal.zova_database_migrate_extensions_request = .{ .source_path = src, .destination_path = dst, .plugin_count = 1 };
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, c_api_internal.zova_database_migrate_with_extensions(&req));
+    req.plugins = &plugins;
+    try std.testing.expectEqual(zova_status.OK, c_api_internal.zova_database_migrate_with_extensions(&req));
+
+    var handle: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, c_api_internal.zova_database_open_with_plugins(&.{
+        .path = dst.ptr,
+        .flags = 0,
+        .busy_timeout_ms = 0,
+        .extension_bundle_paths = null,
+        .extension_bundle_count = 0,
+        .trust_store_path = null,
+        .plugins = &plugins,
+        .plugin_count = plugins.len,
+        .out_db = &handle,
+        .out_error_message = null,
+    }));
+    var info = emptyExtensionInfo();
+    defer zova_extension_info_free(&info);
+    try std.testing.expectEqual(zova_status.OK, zova_database_extension_info(&.{ .db = handle, .name = "linked_test", .out_info = &info }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_close(handle));
+}

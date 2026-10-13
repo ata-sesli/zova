@@ -59,7 +59,7 @@ pub fn read(allocator: std.mem.Allocator, db: *sqlite.Database, r: *const api.Da
     const after_id = try text(r.after_id, false);
     const node_id = try text(r.node_id, op == .graph_neighbors);
     const edge_type = try text(r.edge_type, false);
-    const is_graph = r.operation <= @backingInt(api.DataOperation.graph_neighbors);
+    const is_graph = r.operation <= @backingInt(api.DataOperation.graph_neighbors) or op == .graph_edge_payloads_get;
     if (is_graph) graph.validateGraphName(name) catch return error.InvalidArgument;
     if (!is_graph) {
         vector.validateVectorCollectionName(name) catch return error.InvalidArgument;
@@ -101,6 +101,7 @@ pub fn read(allocator: std.mem.Allocator, db: *sqlite.Database, r: *const api.Da
         .graph_nodes_get => try prepare(db, &buffer, "select b.rowid-1,n.node_key is not null,b.value,n.node_id,n.kind,n.created_order from carray(?2) b left join {s}_zova_graph_nodes n on n.graph_key=?1 and n.node_key=b.value", .{prefix}),
         .graph_edges_get => try prepare(db, &buffer, "select b.rowid-1,e.edge_key is not null,b.value,e.from_node_key,t.name,e.to_node_key,e.created_order from carray(?2) b left join {s}_zova_graph_edges e on e.graph_key=?1 and e.edge_key=b.value left join {s}_zova_graph_edge_types t on t.edge_type_key=e.edge_type_key", .{ prefix, prefix }),
         .graph_neighbors => try prepareNeighbors(db, &buffer, prefix, r.direction, edge_type.len != 0),
+        .graph_edge_payloads_get => try prepare(db, &buffer, "select b.rowid-1,e.edge_key is not null,b.value,e.payload from carray(?2) b left join {s}_zova_graph_edges e on e.graph_key=?1 and e.edge_key=b.value", .{prefix}),
         .vector_metadata => try prepare(db, &buffer, "select dimensions,element_type,metric,(select count(*) from {s}_zova_vectors where collection_key=?1) from {s}_zova_vector_collections where collection_key=?1", .{ prefix, prefix }),
         .vectors_scan => try prepare(db, &buffer, "select vector_id,\"values\" from {s}_zova_vectors where collection_key=?1 and vector_id collate binary>?2 order by vector_id collate binary limit ?3", .{prefix}),
         .vectors_get => try prepare(db, &buffer, "select b.rowid-1,v.vector_id is not null,cast(b.value as text),v.\"values\" from carray(?2) b left join {s}_zova_vectors v on v.collection_key=?1 and v.vector_id=cast(b.value as text)", .{prefix}),
@@ -113,7 +114,7 @@ pub fn read(allocator: std.mem.Allocator, db: *sqlite.Database, r: *const api.Da
             try stmt.bindInt64(3, r.after.key);
             try stmt.bindInt64(4, @intCast(r.row_limit + 1));
         },
-        .graph_nodes_get, .graph_edges_get => try array.bindInt64Borrowed(&stmt, 2, keys),
+        .graph_nodes_get, .graph_edges_get, .graph_edge_payloads_get => try array.bindInt64Borrowed(&stmt, 2, keys),
         .graph_neighbors => {
             try stmt.bindTextBorrowed(2, node_id);
             try stmt.bindTextBorrowed(3, edge_type);
@@ -182,6 +183,10 @@ fn prepareNeighbors(db: *sqlite.Database, buffer: []u8, prefix: []const u8, dire
 }
 
 fn validateGraphRow(op: api.DataOperation, values: []const api.Value) Error!void {
+    if (op == .graph_edge_payloads_get) {
+        if (values[1].integer != 0 and (values[2].integer <= 0 or values[3].kind != api.value_blob)) return error.Corrupt;
+        return;
+    }
     const batch = op == .graph_nodes_get or op == .graph_edges_get;
     if (batch and values[1].integer == 0) return;
     if (values[if (batch) 2 else 0].integer <= 0 or values[values.len - 1].integer <= 0) return error.Corrupt;

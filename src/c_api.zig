@@ -87,6 +87,8 @@ pub const zova_database_restore_to_memory_request = internal.zova_database_resto
 pub const zova_database_create_options_request = internal.zova_database_create_options_request;
 pub const zova_database_open_options_request = internal.zova_database_open_options_request;
 pub const zova_database_open_extensions_request = internal.zova_database_open_extensions_request;
+pub const zova_database_open_plugins_request = internal.zova_database_open_plugins_request;
+pub const zova_database_migrate_extensions_request = internal.zova_database_migrate_extensions_request;
 pub const zova_extension_bundle_request = internal.zova_extension_bundle_request;
 pub const zova_extension_bundle_untrust_request = internal.zova_extension_bundle_untrust_request;
 pub const zova_convert_sqlite_to_zova_request = internal.zova_convert_sqlite_to_zova_request;
@@ -593,6 +595,10 @@ pub fn zova_database_migrate(request: ?*const zova_database_migrate_request) cal
     return internal.zova_database_migrate(request);
 }
 
+pub fn zova_database_migrate_with_extensions(request: ?*const zova_database_migrate_extensions_request) callconv(.c) zova_status {
+    return internal.zova_database_migrate_with_extensions(request);
+}
+
 pub fn zova_object_id_from_bytes(data: ?[*]const u8, len: usize, out_id: ?*zova_object_id) callconv(.c) zova_status {
     return internal.zova_object_id_from_bytes(data, len, out_id);
 }
@@ -859,6 +865,18 @@ pub fn zova_database_extension_rebuild(request: ?*const zova_database_extension_
 
 pub fn zova_database_open_for_extension_upgrade(request: ?*const zova_database_open_extensions_request) callconv(.c) zova_status {
     return internal.zova_database_open_for_extension_upgrade(request);
+}
+
+pub fn zova_database_create_with_plugins(request: ?*const zova_database_open_plugins_request) callconv(.c) zova_status {
+    return internal.zova_database_create_with_plugins(request);
+}
+
+pub fn zova_database_open_with_plugins(request: ?*const zova_database_open_plugins_request) callconv(.c) zova_status {
+    return internal.zova_database_open_with_plugins(request);
+}
+
+pub fn zova_database_open_for_extension_upgrade_with_plugins(request: ?*const zova_database_open_plugins_request) callconv(.c) zova_status {
+    return internal.zova_database_open_for_extension_upgrade_with_plugins(request);
 }
 
 pub fn zova_database_extension_list(request: ?*const zova_database_extension_list_request) callconv(.c) zova_status {
