@@ -51,7 +51,7 @@ elseif(UNIX)
 endif()
 install(TARGETS zova_networkit LIBRARY DESTINATION networkit.zovaext RUNTIME DESTINATION networkit.zovaext)
 file(GENERATE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/extension.json CONTENT
-    "{\"name\":\"networkit\",\"version\":\"1.0.0\",\"storage_prefix\":\"_zova_ext_networkit_\",\"zova_abi_min\":\"1.1.0\",\"capabilities\":\"\",\"library\":\"$<TARGET_FILE_NAME:zova_networkit>\",\"entrypoint\":\"zova_plugin_entry_v1\"}\n")
+    "{\"name\":\"networkit\",\"version\":\"1.0.0\",\"storage_prefix\":\"_zova_ext_networkit_\",\"zova_abi_min\":\"1.2.0\",\"capabilities\":\"\",\"library\":\"$<TARGET_FILE_NAME:zova_networkit>\",\"entrypoint\":\"zova_plugin_entry_v1\"}\n")
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/extension.json DESTINATION networkit.zovaext)
 install(FILES ${networkit_SOURCE_DIR}/License.txt DESTINATION networkit.zovaext RENAME LICENSE-NetworKit)
 install(FILES ${tlx_SOURCE_DIR}/LICENSE DESTINATION networkit.zovaext RENAME LICENSE-TLX)

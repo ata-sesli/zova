@@ -33,7 +33,7 @@ target_include_directories(zova_usearch PRIVATE ../../include ${CMAKE_CURRENT_BI
 target_compile_definitions(zova_usearch PRIVATE USEARCH_USE_NUMKONG=0 USEARCH_USE_OPENMP=0)
 install(TARGETS zova_usearch LIBRARY DESTINATION usearch.zovaext RUNTIME DESTINATION usearch.zovaext)
 file(GENERATE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/extension.json CONTENT
-    "{\"name\":\"usearch\",\"version\":\"1.0.0\",\"storage_prefix\":\"_zova_ext_usearch_\",\"zova_abi_min\":\"1.1.0\",\"capabilities\":\"\",\"library\":\"$<TARGET_FILE_NAME:zova_usearch>\",\"entrypoint\":\"zova_plugin_entry_v1\"}\n")
+    "{\"name\":\"usearch\",\"version\":\"1.0.0\",\"storage_prefix\":\"_zova_ext_usearch_\",\"zova_abi_min\":\"1.2.0\",\"capabilities\":\"\",\"library\":\"$<TARGET_FILE_NAME:zova_usearch>\",\"entrypoint\":\"zova_plugin_entry_v1\"}\n")
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/extension.json DESTINATION usearch.zovaext)
 install(FILES ${usearch_SOURCE_DIR}/LICENSE DESTINATION usearch.zovaext RENAME LICENSE-USearch)
 install(FILES ../../LICENSE DESTINATION usearch.zovaext RENAME LICENSE-Zova)

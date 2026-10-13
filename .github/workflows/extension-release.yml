@@ -1,0 +1,116 @@
+name: Extension Release
+
+# Reference extensions are released on their own line, independent of Zova
+# package releases: tag `extensions/<name>/v<extension version>`.
+on:
+  workflow_dispatch:
+    inputs:
+      extension:
+        description: "Reference extension to build"
+        required: true
+        type: choice
+        options: [networkit, usearch]
+      publish:
+        description: "Create the GitHub release (otherwise build and test only)"
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  group: extension-release-${{ inputs.extension }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: ${{ inputs.extension }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@nextest
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+        working-directory: bindings/javascript
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - run: brew install libomp
+        if: runner.os == 'macOS'
+      # The published bundle is the one this gate built and exercised.
+      - name: Build and test real extension artifacts
+        run: python scripts/check-extension-release.py "${{ runner.temp }}/extensions"
+      - name: Archive the bundle
+        run: python scripts/package-extension.py "${{ inputs.extension }}" "${{ runner.temp }}/extensions" "${{ runner.temp }}/dist"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: extension-${{ inputs.extension }}-${{ matrix.os }}
+          path: ${{ runner.temp }}/dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish ${{ inputs.extension }}
+    if: inputs.publish
+    needs: build
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: extension-${{ inputs.extension }}-*
+          path: dist
+          merge-multiple: true
+      - name: Create the extension release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAME: ${{ inputs.extension }}
+        run: |
+          set -eu
+          (cd dist && sha256sum -c ./*.sha256)
+          test "$(ls dist/*.tar.gz | wc -l)" -eq 5
+          archive="$(ls dist/*-linux-x86_64.tar.gz)"
+          manifest="$(tar -xzOf "$archive" "$NAME.zovaext/extension.json")"
+          version="$(printf '%s' "$manifest" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+          abi_min="$(printf '%s' "$manifest" | python3 -c 'import json,sys; print(json.load(sys.stdin)["zova_abi_min"])')"
+          tag="extensions/$NAME/v$version"
+          # Published bundles are immutable: change the extension version to release again.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release already exists: $tag" >&2
+            exit 1
+          fi
+          {
+            echo "Prebuilt \`$NAME\` reference extension $version for Zova $abi_min or newer."
+            echo
+            echo "Built from commit $GITHUB_SHA. Released independently of Zova packages; experimental."
+            echo "See [installing prebuilt reference extensions](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/docs/extensions.md#prebuilt-reference-extensions)"
+            echo "for download, runtime requirements and the trust step."
+          } > notes.md
+          gh release create "$tag" dist/*.tar.gz dist/*.sha256 \
+            --target "$GITHUB_SHA" \
+            --title "Zova extension $NAME $version" \
+            --notes-file notes.md \
+            --latest=false

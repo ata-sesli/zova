@@ -2,10 +2,14 @@
 
 Approximate vector search over Zova-owned collections, using only the documented
 C plugin ABI. The plugin owns a derived persistent HNSW index, not the vectors.
-Core exact search is unchanged. This is a reference for the 1.2 extension work;
-the repository's package/ABI version remains 1.1.0 and storage format remains 12.
+Core exact search is unchanged. This is a reference extension for Zova 1.2.0
+(storage format 12); it requires a 1.2.0 or newer host.
 
 ## Build and load
+
+Prebuilt bundles are published independently of Zova releases; see
+[prebuilt reference extensions](../../docs/extensions.md#prebuilt-reference-extensions).
+To build from source instead:
 
 Requires CMake 3.20+, a C++20 compiler and a native Zova build with portable plugin
 services. USearch is fetched at an immutable commit with an archive SHA-256;

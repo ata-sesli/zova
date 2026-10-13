@@ -196,7 +196,7 @@ static const zova_plugin_recovery_descriptor_v1 descriptor = {{ {{
     sizeof(zova_plugin_recovery_descriptor_v1), ZOVA_PLUGIN_ABI_V1,
     ZOVA_PLUGIN_REQUIRES_DATA_V1 | ZOVA_PLUGIN_REQUIRES_STORAGE_V1 | ZOVA_PLUGIN_REQUIRES_OPERATIONS_V1 |
     ZOVA_PLUGIN_REQUIRES_VECTOR_MAINTENANCE_V1 | ZOVA_PLUGIN_HAS_DATA_COMPATIBILITY_V1 | ZOVA_PLUGIN_HAS_RECOVERY_V1,
-    "usearch", "1.0.0", "_zova_ext_usearch_", "1.1.0", "", install, verify, drop, register_sql
+    "usearch", "1.0.0", "_zova_ext_usearch_", "1.2.0", "", install, verify, drop, register_sql
 }, nullptr, nullptr}, "1.0.0", "1.0.0"}, rebuild, nullptr};
 } // namespace
 extern "C" ZOVA_PLUGIN_EXPORT const zova_plugin_descriptor_v1 *ZOVA_PLUGIN_CALL

@@ -220,6 +220,51 @@ zova extension untrust my_ext
 zova extension untrust ./my_ext.zovaext
 ```
 
+## Prebuilt reference extensions
+
+The NetworKit PageRank and USearch HNSW references are not bundled with Zova.
+Prebuilt bundles are published as their own GitHub releases, independent of
+Zova package releases, under tags of the form `extensions/<name>/v<version>`
+(for example `extensions/usearch/v1.0.0`). The version is the extension's own;
+each release states the minimum Zova version it loads on. Both extensions
+remain experimental references.
+
+Each release carries one archive per platform, named
+`zova-extension-<name>-v<version>-<platform>.tar.gz`, for `linux-x86_64`,
+`linux-arm64`, `macos-x86_64`, `macos-arm64` and `windows-x86_64`, each with a
+`.sha256` file. Download the archive matching your host, verify it, extract it
+and trust the bundle:
+
+```sh
+shasum -a 256 -c zova-extension-usearch-v1.0.0-macos-arm64.tar.gz.sha256
+tar -xzf zova-extension-usearch-v1.0.0-macos-arm64.tar.gz
+zova extension trust ./usearch.zovaext
+zova --extension ./usearch.zovaext extension install app.zova usearch
+```
+
+Keep the extracted directory in place: trust is recorded for that path and for
+its exact contents. Applications select the same directory through their
+binding's create/open extension options.
+
+Runtime requirements:
+
+| Extension | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| `usearch` | none beyond the C++ standard library | none | Visual C++ runtime |
+| `networkit` | GCC OpenMP runtime (`libgomp.so.1`) | Homebrew `libomp` (`brew install libomp`) | Visual C++ runtime with OpenMP (`vcomp140.dll`) |
+
+On macOS the `networkit` bundle loads `libomp` from Homebrew's default
+location and fails to load without it. The OpenMP runtime is deliberately not
+copied into the bundle, because a second copy can abort an application that
+already uses OpenMP. Bundles are not code-signed or notarized; on macOS a
+downloaded archive may need its quarantine attribute cleared before loading.
+A native bundle is trusted process code, not a sandbox.
+
+Maintainers publish with the manual `Extension Release` workflow, which builds
+and exercises the bundle on every platform before creating the release.
+Published bundles are immutable: releasing again requires a new extension
+version.
+
 ## Experimental Bundle Builder
 
 The experimental producer-side CLI builds local legacy Zig extensions. It

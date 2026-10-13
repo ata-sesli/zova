@@ -144,6 +144,16 @@ done
 replace_line "$ROOT/examples/zig_bridge/bridge.zig" '\.zova_abi_min = "[^"]*"' ".zova_abi_min = \"$core_version\""
 replace_line "$ROOT/tests/cli.zig" '\.zova_abi_min = "[^"]*"' ".zova_abi_min = \"$core_version\""
 
+# The reference extensions require the release they are built against.
+for file in \
+    "$ROOT/examples/networkit-pagerank/CMakeLists.txt" \
+    "$ROOT/examples/networkit-pagerank/pagerank.cpp" \
+    "$ROOT/examples/usearch-hnsw/CMakeLists.txt" \
+    "$ROOT/examples/usearch-hnsw/usearch.cpp"
+do
+    replace_literal "$file" "${old_version%%-*}" "$core_version"
+done
+
 old_python_version="$old_version"
 case "$old_version" in
     *-rc.*) old_python_version="${old_version%%-rc.*}rc${old_version##*-rc.}" ;;

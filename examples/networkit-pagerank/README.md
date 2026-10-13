@@ -1,10 +1,15 @@
 # NetworKit PageRank reference plugin
 
 On-demand PageRank over a Zova graph, implemented by NetworKit's C++ algorithm
-through the versioned C plugin ABI. This is a development reference for 1.2.0,
+through the versioned C plugin ABI. This is a reference extension for 1.2.0 (it requires a 1.2.0 or newer host),
 not a bundled extension or a published NetworKit package.
 
 ## Build and try
+
+Prebuilt bundles are published independently of Zova releases; see
+[prebuilt reference extensions](../../docs/extensions.md#prebuilt-reference-extensions). On macOS the
+prebuilt bundle needs Homebrew `libomp` (`brew install libomp`).
+To build from source instead:
 
 Requires a C++20 compiler, CMake 3.20+, Ninja and OpenMP. The test runner also
 needs Zova's pinned Zig toolchain and Python. macOS uses Homebrew `libomp`;
