@@ -73,6 +73,6 @@ run([emcc, "-O2", "-I" + zigLib, "-I" + join(root, "include"), "-I" + sqlite,
   join(output, "zova_c.c"), join(wasm, "api/sqlite3-wasm.c"), join(root, spike ? "bindings/wasm/tests/opfs-smoke.c" : "bindings/wasm/native/bridge.c"),
   join(root,"bindings/wasm/native/smoke.c"),
   "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sENVIRONMENT=worker", "-sALLOW_MEMORY_GROWTH=1",
-  "-sALLOW_TABLE_GROWTH=1", "-sEXPORTED_FUNCTIONS=" + JSON.stringify([...exports,"_zova_wasm_smoke"]),
+  "-sALLOW_TABLE_GROWTH=1", "-sSTACK_SIZE=1048576", "-sEXPORTED_FUNCTIONS=" + JSON.stringify([...exports,"_zova_wasm_smoke"]),
   "-sEXPORTED_RUNTIME_METHODS=" + JSON.stringify(["HEAPU8","UTF8ToString"]),
   "--post-js", join(output, "post.js"), "-o", join(output, "zova.mjs")]);

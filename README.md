@@ -39,8 +39,9 @@ SQLite's C interface; enabling it does not add a high-level Zova array API.
 `dbstat` is available for storage diagnostics; it is not a portable guarantee
 for databases opened through an unrelated system SQLite build.
 
-Zova also provides experimental browser SQL and binary KV through
-`zova-wasm`, with worker-owned memory databases and named OPFS persistence.
+Zova also provides an experimental browser subset (SQL, binary KV, objects,
+exact vectors and graphs) through `zova-wasm`, with worker-owned memory
+databases and named OPFS persistence.
 Browser APIs remain experimental and do not promise full native compatibility.
 Rust packages now select target-specific generated-C companion crates without
 requiring consumer-side Zig or native-source downloads. Python wheels retain

@@ -12,6 +12,10 @@ const prepareSchemaSql = @import("database/metadata.zig").prepareSchemaSql;
 const object_mutation_savepoint = @import("database/types.zig").object_mutation_savepoint;
 const ObjectMutationScope = @import("database/types.zig").ObjectMutationScope;
 
+// Short-lived scratch memory. Zig's generated-C WASM backend cannot compile the
+// memory.grow intrinsics behind page_allocator, so the browser build uses libc.
+const scratch_allocator = if (builtin.os.tag == .emscripten) std.heap.c_allocator else std.heap.page_allocator;
+
 pub const Error = zova_error.Error;
 pub const ObjectReaderError = Error || error{ObjectReaderClosed};
 
@@ -1021,7 +1025,7 @@ pub const Database = struct {
             const chunk_size = try sqliteI64ToU64(chunk_stmt.columnInt64(3));
             if (chunk_size == 0 or chunk_size > metadata.policy.maxSize()) return error.ObjectCorrupt;
             if (metadata.policy == .fixed_1m) {
-                if (chunk_index > std.math.maxInt(u64) / fixed_chunks.chunk_size) return error.ObjectCorrupt;
+                if (chunk_index > std.math.maxInt(u64) / @as(u64, fixed_chunks.chunk_size)) return error.ObjectCorrupt;
                 if (chunk_offset != chunk_index * fixed_chunks.chunk_size) return error.ObjectCorrupt;
                 if (chunk_index + 1 < chunk_count and chunk_size != fixed_chunks.chunk_size) return error.ObjectCorrupt;
             }
@@ -1227,14 +1231,14 @@ pub const Database = struct {
         const actual_hash = objectChunkId(bytes);
         if (!std.mem.eql(u8, &actual_hash, &expected_hash)) return error.ObjectChunkHashMismatch;
 
-        var existing = self.getObjectChunkWithPolicy(std.heap.page_allocator, expected_hash, policy) catch |err| switch (err) {
+        var existing = self.getObjectChunkWithPolicy(scratch_allocator, expected_hash, policy) catch |err| switch (err) {
             error.ObjectChunkNotFound => {
                 try insertChunkRow(self.sqlite_db, self.storage_schema, expected_hash, bytes);
                 return;
             },
             else => return err,
         };
-        existing.deinit(std.heap.page_allocator);
+        existing.deinit(scratch_allocator);
     }
 
     /// Assemble a complete object from existing verified chunks.
@@ -1290,16 +1294,16 @@ pub const Database = struct {
         errdefer if (!committed) rollbackObjectMutation(self.sqlite_db, scope);
 
         if (try objectRowExists(self.statement_cache, self.sqlite_db, self.storage_schema, id)) {
-            var existing = self.getObject(std.heap.page_allocator, id) catch |err| switch (err) {
+            var existing = self.getObject(scratch_allocator, id) catch |err| switch (err) {
                 error.ObjectNotFound, error.ObjectCorrupt => return error.ObjectCorrupt,
                 else => return err,
             };
-            existing.deinit(std.heap.page_allocator);
+            existing.deinit(scratch_allocator);
             return error.ObjectAlreadyExists;
         }
 
-        const sorted_chunks = try self.validateAssemblyChunks(std.heap.page_allocator, id, size_bytes, chunks, policy);
-        defer std.heap.page_allocator.free(sorted_chunks);
+        const sorted_chunks = try self.validateAssemblyChunks(scratch_allocator, id, size_bytes, chunks, policy);
+        defer scratch_allocator.free(sorted_chunks);
 
         try insertObjectRow(
             self.sqlite_db,
@@ -1479,8 +1483,8 @@ pub const Database = struct {
 
         if (!try objectRowExists(self.statement_cache, self.sqlite_db, self.storage_schema, id)) return error.ObjectNotFound;
 
-        const candidate_chunks = try collectDeleteCandidateChunks(std.heap.page_allocator, self.sqlite_db, self.storage_schema, id);
-        defer std.heap.page_allocator.free(candidate_chunks);
+        const candidate_chunks = try collectDeleteCandidateChunks(scratch_allocator, self.sqlite_db, self.storage_schema, id);
+        defer scratch_allocator.free(candidate_chunks);
 
         try deleteObjectManifestRows(self.sqlite_db, self.storage_schema, id);
         try deleteObjectRow(self.sqlite_db, self.storage_schema, id);
