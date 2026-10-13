@@ -175,8 +175,6 @@ const bound_graph_store_role = @import("database/types.zig").bound_graph_store_r
 
 const batch_mutation_savepoint = @import("database/types.zig").batch_mutation_savepoint;
 
-const bound_object_mutation_savepoint = @import("database/types.zig").bound_object_mutation_savepoint;
-
 const BatchMutationScope = @import("database/types.zig").BatchMutationScope;
 
 const bound_object_store_name = @import("database/types.zig").bound_object_store_name;
@@ -2639,29 +2637,15 @@ pub const Database = struct {
 
     fn beginBoundObjectMutation(self: *Database) Error!?BatchMutationScope {
         if (self.bound_object_store == null) return null;
-        if (hasActiveTransaction(&self.sqlite_db)) {
-            try self.sqlite_db.savepoint(bound_object_mutation_savepoint);
-            return .savepoint;
-        }
-        try self.sqlite_db.beginImmediate();
-        return .transaction;
+        return try self.beginBatchMutation();
     }
 
     fn finishBoundObjectMutation(self: *Database, scope: ?BatchMutationScope) Error!void {
-        switch (scope orelse return) {
-            .transaction => try self.sqlite_db.commit(),
-            .savepoint => try self.sqlite_db.releaseSavepoint(bound_object_mutation_savepoint),
-        }
+        if (scope) |s| try self.finishBatchMutation(s);
     }
 
     fn rollbackBoundObjectMutation(self: *Database, scope: ?BatchMutationScope) Error!void {
-        switch (scope orelse return) {
-            .transaction => try self.sqlite_db.rollback(),
-            .savepoint => {
-                try self.sqlite_db.rollbackToSavepoint(bound_object_mutation_savepoint);
-                try self.sqlite_db.releaseSavepoint(bound_object_mutation_savepoint);
-            },
-        }
+        if (scope) |s| try self.rollbackBatchMutation(s);
     }
 
     fn objectDatabase(self: *Database) object_impl.Database {
