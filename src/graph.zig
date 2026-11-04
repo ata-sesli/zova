@@ -16,6 +16,10 @@ pub const graph_edges_table = "_zova_graph_edges";
 pub const default_graph_name = "default";
 const fresh_graph_cache_kib: i64 = 128 * 1024;
 const fresh_graph_batch_rows: usize = 256;
+// Small keyed batches look each identity up through the unique indexes.
+// Larger batches keep the single full-graph read, where per-row lookups would
+// cost more than scanning the graph once.
+const keyed_put_point_lookup_limit: usize = 256;
 
 pub const StorageSchema = enum {
     main,
@@ -1475,25 +1479,13 @@ pub const Database = struct {
         const resolved_keys = try std.heap.c_allocator.alloc(?i64, distinct_key_count);
         defer std.heap.c_allocator.free(resolved_keys);
         @memset(resolved_keys, null);
-        var preload = try self.prepareSchema(
-            \\/* zova_graph_node_key_preload */
-            \\select node_id,node_key from {s}_zova_graph_nodes where graph_key=?
-        );
-        defer preload.deinit();
-        var graph_key_iterator = graph_keys.valueIterator();
-        while (graph_key_iterator.next()) |graph_key| {
-            try preload.bindInt64(1, graph_key.*);
-            while ((try preload.step()) == .row) {
-                const slot = key_slots.get(.{ .graph_key = graph_key.*, .node_id = preload.columnText(0) }) orelse continue;
-                const node_key = preload.columnInt64(1);
-                if (node_key <= 0) return error.GraphInvalid;
-                resolved_keys[slot] = node_key;
-            }
-            try preload.reset();
-            try preload.clearBindings();
+        try ensureGraphBatchIndexes(self);
+        if (distinct_key_count <= keyed_put_point_lookup_limit) {
+            try lookupGraphNodeKeys(self, &key_slots, resolved_keys);
+        } else {
+            try preloadGraphNodeKeys(self, &graph_keys, &key_slots, resolved_keys);
         }
 
-        try ensureGraphBatchIndexes(self);
         var stmt = try self.prepareSchema(
             \\insert into {s}_zova_graph_nodes
             \\  (graph_key, node_id, kind, target_type, target_namespace, target_ref, created_order)
@@ -1798,28 +1790,10 @@ pub const Database = struct {
         const resolved_keys = try std.heap.c_allocator.alloc(?i64, distinct_key_count);
         defer std.heap.c_allocator.free(resolved_keys);
         @memset(resolved_keys, null);
-        var preload = try self.prepareSchema(
-            \\/* zova_graph_edge_key_preload */
-            \\select e.from_node_key,e.edge_type_key,e.to_node_key,e.edge_key
-            \\from {s}_zova_graph_edges e where e.graph_key=?
-        );
-        defer preload.deinit();
-        var affected_graph_key_iterator = affected_graph_keys.keyIterator();
-        while (affected_graph_key_iterator.next()) |graph_key| {
-            try preload.bindInt64(1, graph_key.*);
-            while ((try preload.step()) == .row) {
-                const slot = key_slots.get(.{
-                    .graph_key = graph_key.*,
-                    .from_node_key = preload.columnInt64(0),
-                    .edge_type_key = preload.columnInt64(1),
-                    .to_node_key = preload.columnInt64(2),
-                }) orelse continue;
-                const edge_key = preload.columnInt64(3);
-                if (edge_key <= 0) return error.GraphInvalid;
-                resolved_keys[slot] = edge_key;
-            }
-            try preload.reset();
-            try preload.clearBindings();
+        if (distinct_key_count <= keyed_put_point_lookup_limit) {
+            try lookupGraphEdgeKeys(self, &key_slots, resolved_keys);
+        } else {
+            try preloadGraphEdgeKeys(self, &affected_graph_keys, &key_slots, resolved_keys);
         }
 
         var insert = try self.prepareSchema(
@@ -3060,6 +3034,115 @@ fn nextGraphCreatedOrder(
     const created_order = entry.value_ptr.*;
     entry.value_ptr.* = std.math.add(i64, created_order, 1) catch return error.GraphInvalid;
     return created_order;
+}
+
+fn lookupGraphNodeKeys(
+    self: *Database,
+    key_slots: *GraphNodeKeySlotMap,
+    resolved_keys: []?i64,
+) Error!void {
+    var lookup = try self.prepareSchema(
+        \\/* zova_graph_node_key_lookup */
+        \\select node_key from {s}_zova_graph_nodes where graph_key=? and node_id=?
+    );
+    defer lookup.deinit();
+    var iterator = key_slots.iterator();
+    while (iterator.next()) |entry| {
+        const tuple = entry.key_ptr.*;
+        try lookup.bindInt64(1, tuple.graph_key);
+        try lookup.bindTextBorrowed(2, tuple.node_id);
+        if ((try lookup.step()) == .row) {
+            const node_key = lookup.columnInt64(0);
+            if (node_key <= 0) return error.GraphInvalid;
+            resolved_keys[entry.value_ptr.*] = node_key;
+        }
+        try lookup.reset();
+        try lookup.clearBindings();
+    }
+}
+
+fn preloadGraphNodeKeys(
+    self: *Database,
+    graph_keys: *std.StringHashMap(i64),
+    key_slots: *GraphNodeKeySlotMap,
+    resolved_keys: []?i64,
+) Error!void {
+    var preload = try self.prepareSchema(
+        \\/* zova_graph_node_key_preload */
+        \\select node_id,node_key from {s}_zova_graph_nodes where graph_key=?
+    );
+    defer preload.deinit();
+    var graph_key_iterator = graph_keys.valueIterator();
+    while (graph_key_iterator.next()) |graph_key| {
+        try preload.bindInt64(1, graph_key.*);
+        while ((try preload.step()) == .row) {
+            const slot = key_slots.get(.{ .graph_key = graph_key.*, .node_id = preload.columnText(0) }) orelse continue;
+            const node_key = preload.columnInt64(1);
+            if (node_key <= 0) return error.GraphInvalid;
+            resolved_keys[slot] = node_key;
+        }
+        try preload.reset();
+        try preload.clearBindings();
+    }
+}
+
+fn lookupGraphEdgeKeys(
+    self: *Database,
+    key_slots: *GraphEdgeKeySlotMap,
+    resolved_keys: []?i64,
+) Error!void {
+    var lookup = try self.prepareSchema(
+        \\/* zova_graph_edge_key_lookup */
+        \\select edge_key from {s}_zova_graph_edges
+        \\where graph_key=? and from_node_key=? and edge_type_key=? and to_node_key=?
+    );
+    defer lookup.deinit();
+    var iterator = key_slots.iterator();
+    while (iterator.next()) |entry| {
+        const tuple = entry.key_ptr.*;
+        try lookup.bindInt64(1, tuple.graph_key);
+        try lookup.bindInt64(2, tuple.from_node_key);
+        try lookup.bindInt64(3, tuple.edge_type_key);
+        try lookup.bindInt64(4, tuple.to_node_key);
+        if ((try lookup.step()) == .row) {
+            const edge_key = lookup.columnInt64(0);
+            if (edge_key <= 0) return error.GraphInvalid;
+            resolved_keys[entry.value_ptr.*] = edge_key;
+        }
+        try lookup.reset();
+        try lookup.clearBindings();
+    }
+}
+
+fn preloadGraphEdgeKeys(
+    self: *Database,
+    affected_graph_keys: *std.AutoHashMap(i64, void),
+    key_slots: *GraphEdgeKeySlotMap,
+    resolved_keys: []?i64,
+) Error!void {
+    var preload = try self.prepareSchema(
+        \\/* zova_graph_edge_key_preload */
+        \\select e.from_node_key,e.edge_type_key,e.to_node_key,e.edge_key
+        \\from {s}_zova_graph_edges e where e.graph_key=?
+    );
+    defer preload.deinit();
+    var affected_graph_key_iterator = affected_graph_keys.keyIterator();
+    while (affected_graph_key_iterator.next()) |graph_key| {
+        try preload.bindInt64(1, graph_key.*);
+        while ((try preload.step()) == .row) {
+            const slot = key_slots.get(.{
+                .graph_key = graph_key.*,
+                .from_node_key = preload.columnInt64(0),
+                .edge_type_key = preload.columnInt64(1),
+                .to_node_key = preload.columnInt64(2),
+            }) orelse continue;
+            const edge_key = preload.columnInt64(3);
+            if (edge_key <= 0) return error.GraphInvalid;
+            resolved_keys[slot] = edge_key;
+        }
+        try preload.reset();
+        try preload.clearBindings();
+    }
 }
 
 fn ensureGraphBatchIndexes(self: *Database) Error!void {
