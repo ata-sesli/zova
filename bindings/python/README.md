@@ -63,11 +63,11 @@ interpreter fails without attempting a native build.
 The release workflow builds Linux/macOS x86_64/arm64 and Windows x86_64
 stable-ABI wheels.
 
-The current release uses `.zova` format 12 and does not migrate older
-format databases in place. Format-9, format-10 and format-11 databases can be probed and
+The current development `.zova` format is 13, and Zova does not migrate older
+format databases in place. Format-9, format-10, format-11 and format-12 databases can be probed and
 migrated forward with the module-level `probe_format(path)` and
 `migrate_database(source, destination, *, verify=True)` functions: migration is
-explicit, copy-forward, publishes a separately validated format-12 destination,
+explicit, copy-forward, publishes a separately validated format-13 destination,
 and never mutates the source. Like `Database.open`, `migrate_database` accepts
 `extension_bundles` and `trust_store_path` for databases with a non-bundled
 extension installed.

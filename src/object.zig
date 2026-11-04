@@ -224,6 +224,12 @@ pub const object_chunks_schema_sql =
     \\  foreign key (chunk_hash) references _zova_chunks(chunk_hash)
     \\)
 ;
+/// Format 13: serves chunk-reference checks (`not exists` in chunk deletes
+/// and the `_zova_chunks` foreign-key child check) by `chunk_hash`.
+pub const object_chunks_chunk_hash_index = "_zova_object_chunks_chunk_hash_idx";
+pub const object_chunks_chunk_hash_index_sql =
+    \\create index _zova_object_chunks_chunk_hash_idx on _zova_object_chunks(chunk_hash)
+;
 
 /// SHA-256 digest of full object bytes.
 ///

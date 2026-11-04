@@ -34,7 +34,7 @@ def test_probe_format_classifies_formats(tmp_path):
     with zova.Database.create(str(current)) as db:
         db.exec("create table t(id integer)")
     info = zova.probe_format(str(current))
-    assert info.format_version == 12
+    assert info.format_version == 13
     assert info.compatibility is zova.FormatCompatibility.CURRENT
     assert info.compatibility.name_value == "current"
 
@@ -57,7 +57,7 @@ def test_migrate_fixture_forward_and_reopen(tmp_path):
     zova.migrate_database(str(source), str(destination))
 
     info = zova.probe_format(str(destination))
-    assert info.format_version == 12
+    assert info.format_version == 13
     assert info.compatibility is zova.FormatCompatibility.CURRENT
     assert source.read_bytes() == before
 
@@ -80,7 +80,7 @@ def test_migrate_no_verify_flag(tmp_path):
 
     zova.migrate_database(str(source), str(destination), verify=False)
     info = zova.probe_format(str(destination))
-    assert info.format_version == 12
+    assert info.format_version == 13
     assert info.compatibility is zova.FormatCompatibility.CURRENT
 
 
@@ -138,7 +138,7 @@ def test_migrate_with_empty_extension_options_matches_plain_migrate(tmp_path):
     )
 
     info = zova.probe_format(str(destination))
-    assert info.format_version == 12
+    assert info.format_version == 13
     assert info.compatibility is zova.FormatCompatibility.CURRENT
     assert source.read_bytes() == before
 

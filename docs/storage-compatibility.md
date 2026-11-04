@@ -19,7 +19,7 @@ in another.
 | Package version | Zova release identity across every distribution channel | `src/version.zig` `package_version` | `1.3.0` |
 | C ABI version | Compatibility of the exported C ABI and generated C | `src/version.zig` `abi_version_*` | `1.3.0` (`1.3.0` numeric components) |
 | SQLite version | The vendored SQLite amalgamation, and separately SQLite's own file format | `src/version.zig` `sqlite_version` | `3.53.4` |
-| Zova storage format | The layout of a `.zova` database, recorded in `_zova_meta.format_version` | `src/version.zig` `format_version` | `12` |
+| Zova storage format | The layout of a `.zova` database, recorded in `_zova_meta.format_version` | `src/version.zig` `format_version` | `13` (development) |
 
 A SQLite upgrade does not change the Zova storage format and never requires a
 Zova migration. A package or ABI release does not by itself change the storage
@@ -57,7 +57,7 @@ Probing is separate from opening and is always safe: `zova format` and
 `probeDatabaseFormat` open a read-only raw SQLite connection, read only the
 identity metadata required for classification, and never write.
 
-## Migrating formats 9, 10 and 11 to format 12
+## Migrating formats 9 through 12 to format 13
 
 A migration runs offline, writes only to a new destination, and leaves the source
 untouched. Probe first, then migrate.
@@ -66,8 +66,8 @@ untouched. Probe first, then migrate.
 
 ```sh
 zova format app.zova
-zova migrate --dry-run app.zova app-format-12.zova
-zova migrate app.zova app-format-12.zova
+zova migrate --dry-run app.zova app-format-13.zova
+zova migrate app.zova app-format-13.zova
 ```
 
 `zova format` prints the source format, the current format, the earliest
@@ -188,7 +188,7 @@ zova_status status = zova_database_probe_format(&probe);
 
 zova_database_migrate_request migrate = {
     .source_path = "app.zova",
-    .destination_path = "app-format-12.zova",
+    .destination_path = "app-format-13.zova",
     .flags = 0, /* ZOVA_MIGRATE_NO_VERIFY skips destination verification */
     .out_error_message = &message,
 };
@@ -209,7 +209,7 @@ bundle paths and plugin descriptors linked into the host process:
 const char *bundles[] = { "networkit.zovaext" };
 zova_database_migrate_extensions_request migrate = {
     .source_path = "app.zova",
-    .destination_path = "app-format-12.zova",
+    .destination_path = "app-format-13.zova",
     .extension_bundle_paths = bundles,
     .extension_bundle_count = 1,
     .out_error_message = &message,
@@ -224,7 +224,7 @@ use zova::{migrate_database, probe_format, MigrateOptions};
 
 let info = probe_format("app.zova")?;
 assert_eq!(info.compatibility, zova::FormatCompatibility::Migratable);
-migrate_database("app.zova", "app-format-12.zova", MigrateOptions::default())?;
+migrate_database("app.zova", "app-format-13.zova", MigrateOptions::default())?;
 ```
 
 ### Python
@@ -234,7 +234,7 @@ import zova
 
 info = zova.probe_format("app.zova")
 assert info.compatibility is zova.FormatCompatibility.MIGRATABLE
-zova.migrate_database("app.zova", "app-format-12.zova")  # verify=True by default
+zova.migrate_database("app.zova", "app-format-13.zova")  # verify=True by default
 ```
 
 ### Go
@@ -244,7 +244,7 @@ info, err := zova.ProbeFormat("app.zova")
 if info.Compatibility != zova.FormatMigratable {
     return fmt.Errorf("unexpected compatibility: %v", info.Compatibility)
 }
-if err := zova.MigrateDatabase("app.zova", "app-format-12.zova"); err != nil {
+if err := zova.MigrateDatabase("app.zova", "app-format-13.zova"); err != nil {
     return err
 }
 ```
@@ -259,7 +259,7 @@ import { migrateDatabase, probeFormat } from "zova-js";
 
 const info = probeFormat("app.zova");
 if (info.compatibility !== "migratable") throw new Error("cannot migrate");
-migrateDatabase("app.zova", "app-format-12.zova"); // verify defaults to true
+migrateDatabase("app.zova", "app-format-13.zova"); // verify defaults to true
 ```
 
 `asyncProbeFormat` and `asyncMigrateDatabase` are the promise-returning variants.
@@ -332,9 +332,48 @@ running a migration.
   running, an empty directory can be removed with `rmdir`. This procedure
   covers process termination, not a guarantee against filesystem/power failure.
   It does not identify leftovers from older versions without ownership witnesses.
-- **Extensions.** Both adjacent migration steps leave extension-owned tables
+- **Extensions.** Every adjacent migration step leaves extension-owned tables
   unchanged. Normal open-time extension compatibility validation applies to the
   migrated destination, exactly as it does when opening any database.
+
+## Free-page reclamation (format 13)
+
+Format 13 adds the private index `_zova_object_chunks_chunk_hash_idx` on
+`_zova_object_chunks(chunk_hash)` to every main database and object store.
+Chunk deletion checks whether any manifest row still references a chunk, and
+SQLite's foreign-key check on `_zova_chunks` asks the same question; without
+the index both scan every manifest row. Open validates the index's exact
+definition, so a format-13 file that lacks it, or a format-11 or format-12 file
+that has it, is rejected as not a valid Zova database.
+
+SQLite's `auto_vacuum` mode is fixed when a file's first table is created and is
+not part of the storage format: both `none` and `incremental` are valid in
+format 13. Zova does not vacuum automatically; files in incremental mode keep
+deleted pages on the freelist until an explicit reclaim releases them.
+
+| Operation | Resulting `auto_vacuum` |
+| --- | --- |
+| `Database.create` (file or `:memory:`), `createObjectStore`, `createVectorStore`, `createGraphStore`, and `split*` stores | `incremental` |
+| `compactTo` / `zova compact` (each member) | `incremental` |
+| `migrateDatabase` / `zova migrate` | unchanged from the source |
+| `backupTo` / `zova backup`, `restoreFrom` / `zova restore` | unchanged from the source |
+| `convertSqliteToZova` | unchanged from the user file |
+
+A file whose mode is `none`, including every database migrated from an earlier
+format, becomes incremental by running `zova compact` and using the compacted
+copy.
+
+`zova reclaim [--json] [--max-pages <n>] <file.zova>` releases free pages in
+place from the main database and every bound store whose mode is
+`incremental`. Each step is its own short write transaction of at most 1024
+pages, so readers and other writers are blocked only between steps; with
+`--max-pages`, the command stops after releasing that many pages in total. The
+report lists, per member, `auto_vacuum`, `page_size`, `pages_released`,
+`bytes_released` and `free_pages_left`, and points `none` members at
+`zova compact`. In Zig, `Database.reclaimSpace(.{ .max_pages, .step_pages })`
+returns the same per-member counts in a `ReclaimResult`; it fails with
+`ObjectTransactionActive` inside an open transaction. Reclaim does not change
+any logical data.
 
 ## What a migration preserves
 
@@ -343,8 +382,9 @@ copied unchanged, and Zova preserves public identities, values, ordering,
 payloads, opaque keys, extension records, store IDs, bound-set IDs, and epochs.
 The intended private differences are the key-value schema introduced by format
 10, the canonical object schemas required by format 11, source-local vector
-identity/history tables and tracking triggers introduced by format 12, and the format metadata
-itself, which is updated last inside each atomic adjacent step. Public objects,
+identity/history tables and tracking triggers introduced by format 12, the
+`_zova_object_chunks(chunk_hash)` index introduced by format 13, and the format
+metadata itself, which is updated last inside each atomic adjacent step. Public objects,
 chunks, manifests, and their ordering remain unchanged.
 
 ## Retained fixtures and the release check
@@ -353,7 +393,8 @@ chunks, manifests, and their ordering remain unchanged.
 `tests/fixtures/fixtures.sha256` pins every one of them. The format-9 fixtures are
 genuine exports of the released Zova 0.26.1 build, regenerated by
 `scripts/export-format-9-fixtures.sh`; they are never hand-edited and never
-produced by editing metadata in a newer database.
+produced by editing metadata in a newer database. The format-12 fixtures were
+produced by the CLI built from the unmodified `v1.3.0` tag.
 
 `zig build check-storage-compat` is a release gate. It runs in
 `scripts/check-release.sh` and in CI, and it verifies that:
@@ -410,7 +451,7 @@ path. The source hash is identical before and after, and the only structural
 difference is the private key-value schema format 10 introduces.
 
 This recorded adjacent step is evidence, not a gate. Current migrations continue
-through format 10 and format 11 to format 12. The gates are the correctness, atomicity,
+through formats 10, 11 and 12 to format 13. The gates are the correctness, atomicity,
 source-preservation, and binding-parity assertions in
 `zig build check-storage-compat`, which recompute hashes, sizes, and counts on
 every run against every retained fixture.

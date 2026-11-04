@@ -6,8 +6,8 @@
 //! metadata before treating it as a Zova-owned database.
 //!
 //! Zova 1.x preserves the explicit migration path documented in
-//! `docs/storage-compatibility.md`. The current storage format is version `12`:
-//! `_zova_meta.format_version = '12'` plus
+//! `docs/storage-compatibility.md`. The current storage format is version `13`:
+//! `_zova_meta.format_version = '13'` plus
 //! the required private object, vector, graph, key-value, and extension
 //! registry schemas.
 //! `Database.open` is intentionally non-mutating: it validates the file and
@@ -446,6 +446,12 @@ pub const BackupOptions = @import("database/types.zig").BackupOptions;
 /// Options for `Database.compactTo`.
 pub const CompactOptions = @import("database/types.zig").CompactOptions;
 
+/// Options and results for `Database.reclaimSpace`.
+pub const ReclaimOptions = @import("database/types.zig").ReclaimOptions;
+pub const ReclaimResult = @import("database/types.zig").ReclaimResult;
+pub const ReclaimedMember = @import("database/types.zig").ReclaimedMember;
+pub const AutoVacuumMode = @import("database/types.zig").AutoVacuumMode;
+
 /// Options for `restoreBackup`.
 pub const RestoreOptions = @import("database/types.zig").RestoreOptions;
 
@@ -840,6 +846,7 @@ pub fn salvageInstalledExtensions(
 const validateCreateOptions = @import("database/lifecycle.zig").validateCreateOptions;
 
 const applyCreateOptions = @import("database/lifecycle.zig").applyCreateOptions;
+const enableIncrementalAutoVacuum = @import("database/lifecycle.zig").enableIncrementalAutoVacuum;
 
 /// Owns one initialized `.zova` database.
 ///
@@ -916,6 +923,7 @@ pub const Database = struct {
         errdefer raw.deinit();
 
         try applyCreateOptions(&raw, options);
+        try enableIncrementalAutoVacuum(&raw);
         try enableForeignKeys(&raw);
         try initializeZovaSchema(&raw);
         try vector_sql.register(&raw);
@@ -1666,7 +1674,8 @@ pub const Database = struct {
     /// `VACUUM INTO`.
     ///
     /// This is the explicit space-reclaiming copy path. The source database is
-    /// not replaced, and the destination must not already exist.
+    /// not replaced, and the destination must not already exist. The copy uses
+    /// `auto_vacuum = incremental`, so `reclaimSpace` works on it.
     pub fn compactTo(self: *Database, destination_path: [:0]const u8, options: CompactOptions) Error!void {
         try ensureDestinationZovaPathAvailable(destination_path);
         errdefer deleteDestinationFile(destination_path);
@@ -1675,6 +1684,11 @@ pub const Database = struct {
         const pages = try schemaPageCount(&self.sqlite_db, "main");
         try ProgressCallback.emit(options.progress, .{ .phase = .copy, .member = .main, .done = 0, .total = pages });
 
+        // Format 13 copies are incremental whatever the source's mode, so
+        // compaction is the conversion path for older files. SQLite keeps this
+        // setting for every later `VACUUM` on this connection, which matches
+        // the format-13 creation policy.
+        try self.sqlite_db.exec("pragma main.auto_vacuum = incremental");
         var vacuum_stmt = try self.prepare("vacuum into ?");
         defer vacuum_stmt.deinit();
 
@@ -1684,6 +1698,42 @@ pub const Database = struct {
 
         try self.inlineBoundStoresIntoDestination(destination_path, options.progress);
         if (options.verify) try verifyOperationalCopyReporting(destination_path, self.extension_registry, options.progress);
+    }
+
+    /// Release free pages back to the filesystem in bounded steps.
+    ///
+    /// Visits the main database, then each attached bound store. Each step
+    /// runs `pragma incremental_vacuum` in its own write transaction of at most
+    /// `options.step_pages` pages, so other writers can run between steps and
+    /// an interruption keeps the steps already committed. Only members created
+    /// with `auto_vacuum = incremental` (every file Zova creates or compacts
+    /// from format 13 on) release pages; other members are reported with
+    /// `pages_released = 0`, and `compactTo` is the way to convert them. In WAL
+    /// mode the file shrinks at the next checkpoint. Fails with
+    /// `error.ObjectTransactionActive` inside a caller transaction, because the
+    /// call owns its step boundaries.
+    pub fn reclaimSpace(self: *Database, options: ReclaimOptions) Error!ReclaimResult {
+        if (options.step_pages == 0) return error.InvalidArgument;
+        if (sqlite.c.sqlite3_get_autocommit(self.sqlite_db.handle) == 0) return error.ObjectTransactionActive;
+
+        const reclaim = @import("database/reclaim.zig");
+        var budget = reclaim.Budget.init(options.max_pages);
+        var result: ReclaimResult = .{};
+        result.entries[result.count] = try reclaim.reclaimSchema(&self.sqlite_db, "main", .main, options.step_pages, &budget);
+        result.count += 1;
+        if (self.bound_object_store != null) {
+            result.entries[result.count] = try reclaim.reclaimSchema(&self.sqlite_db, bound_object_store_schema_name, .object_store, options.step_pages, &budget);
+            result.count += 1;
+        }
+        if (self.bound_vector_store != null) {
+            result.entries[result.count] = try reclaim.reclaimSchema(&self.sqlite_db, bound_vector_store_schema_name, .vector_store, options.step_pages, &budget);
+            result.count += 1;
+        }
+        if (self.bound_graph_store != null) {
+            result.entries[result.count] = try reclaim.reclaimSchema(&self.sqlite_db, bound_graph_store_schema_name, .graph_store, options.step_pages, &budget);
+            result.count += 1;
+        }
+        return result;
     }
 
     /// Set SQLite's busy timeout in milliseconds for this connection.
@@ -3098,6 +3148,7 @@ comptime {
         _ = @import("zova_tests.zig");
         _ = @import("database_lifecycle_tests.zig");
         _ = @import("database_verification_tests.zig");
+        _ = @import("database_space_tests.zig");
         _ = @import("database_transactions_tests.zig");
         _ = @import("database_bound_stores_tests.zig");
         _ = @import("database_notifications_tests.zig");

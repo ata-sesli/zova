@@ -45,6 +45,7 @@ pub fn createObjectStore(path: [:0]const u8) Error!void {
     var raw = try sqlite.Database.open(path);
     defer raw.deinit();
 
+    try enableIncrementalAutoVacuum(&raw);
     try initializeZovaSchema(&raw);
     try markAsObjectStore(&raw);
 }
@@ -70,6 +71,7 @@ pub fn createVectorStore(path: [:0]const u8) Error!void {
     var raw = try sqlite.Database.open(path);
     defer raw.deinit();
 
+    try enableIncrementalAutoVacuum(&raw);
     try initializeZovaSchema(&raw);
     try markAsVectorStore(&raw);
 }
@@ -90,6 +92,7 @@ pub fn createGraphStore(path: [:0]const u8) Error!void {
     var raw = try sqlite.Database.open(path);
     defer raw.deinit();
 
+    try enableIncrementalAutoVacuum(&raw);
     try initializeZovaSchema(&raw);
     try markAsGraphStore(&raw);
 }
@@ -118,6 +121,13 @@ pub fn applyCreateOptions(db: *sqlite.Database, options: CreateOptions) Error!vo
     {
         return error.SqliteError;
     }
+}
+
+/// Format 13: every file Zova creates releases freed pages only through an
+/// explicit `reclaimSpace`. This must run before the first table is created;
+/// on a file that already has tables SQLite leaves the mode unchanged.
+pub fn enableIncrementalAutoVacuum(db: *sqlite.Database) sqlite.Error!void {
+    try db.exec("pragma auto_vacuum = incremental");
 }
 
 pub fn initializeZovaSchema(db: *sqlite.Database) sqlite.Error!void {
@@ -167,6 +177,7 @@ fn initializeObjectSchema(db: *sqlite.Database) sqlite.Error!void {
     try db.exec(object_impl.objects_schema_sql ++ ";");
     try db.exec(object_impl.chunks_schema_sql ++ ";");
     try db.exec(object_impl.object_chunks_schema_sql ++ ";");
+    try db.exec(object_impl.object_chunks_chunk_hash_index_sql ++ ";");
 }
 
 fn initializeVectorSchema(db: *sqlite.Database) sqlite.Error!void {
