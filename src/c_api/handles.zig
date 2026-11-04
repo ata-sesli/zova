@@ -9,6 +9,7 @@ const zova_database = @import("types.zig").zova_database;
 const zova_fresh_build = @import("types.zig").zova_fresh_build;
 const zova_fresh_build_profile = @import("types.zig").zova_fresh_build_profile;
 const zova_object_reader = @import("types.zig").zova_object_reader;
+const zova_object_seekable_reader = @import("types.zig").zova_object_seekable_reader;
 const zova_object_writer = @import("types.zig").zova_object_writer;
 const zova_sql_destroy_callback = @import("types.zig").zova_sql_destroy_callback;
 const zova_sql_function_call = @import("types.zig").zova_sql_function_call;
@@ -146,6 +147,14 @@ pub const ReaderHandle = struct {
     reader: zova.ObjectReader,
 };
 
+pub const SeekableReaderHandle = struct {
+    // Seekable readers pin no snapshot, but they borrow the parent database
+    // connection and count as live readers until destroyed. Calls serialize
+    // through the parent mutex.
+    db: *DatabaseHandle,
+    reader: zova.ObjectSeekableReader,
+};
+
 pub const StatementHandle = struct {
     // Statements borrow their parent database handle and must be finalized
     // before closing the database. Statement methods serialize through the
@@ -200,6 +209,11 @@ pub fn writerHandle(writer: ?*zova_object_writer) ?*WriterHandle {
 }
 
 pub fn readerHandle(reader: ?*zova_object_reader) ?*ReaderHandle {
+    const ptr = reader orelse return null;
+    return @ptrCast(@alignCast(ptr));
+}
+
+pub fn seekableReaderHandle(reader: ?*zova_object_seekable_reader) ?*SeekableReaderHandle {
     const ptr = reader orelse return null;
     return @ptrCast(@alignCast(ptr));
 }

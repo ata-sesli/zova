@@ -58,6 +58,8 @@ pub const zova_object_writer = @import("c_api/types.zig").zova_object_writer;
 
 pub const zova_object_reader = @import("c_api/types.zig").zova_object_reader;
 
+pub const zova_object_seekable_reader = @import("c_api/types.zig").zova_object_seekable_reader;
+
 pub const zova_statement = @import("c_api/types.zig").zova_statement;
 
 pub const zova_subscription = @import("c_api/types.zig").zova_subscription;
@@ -371,6 +373,14 @@ pub const zova_object_reader_create_request = @import("c_api/types.zig").zova_ob
 pub const zova_object_reader_read_request = @import("c_api/types.zig").zova_object_reader_read_request;
 
 pub const zova_object_reader_destroy_request = @import("c_api/types.zig").zova_object_reader_destroy_request;
+
+pub const zova_object_seekable_reader_create_request = @import("c_api/types.zig").zova_object_seekable_reader_create_request;
+
+pub const zova_object_seekable_reader_read_request = @import("c_api/types.zig").zova_object_seekable_reader_read_request;
+
+pub const zova_object_seekable_reader_seek_request = @import("c_api/types.zig").zova_object_seekable_reader_seek_request;
+
+pub const zova_object_seekable_reader_destroy_request = @import("c_api/types.zig").zova_object_seekable_reader_destroy_request;
 
 /// Borrowed byte slice for key-value operations. Zova copies caller input
 /// during the call and retains no caller memory.
@@ -776,6 +786,14 @@ pub const zova_object_reader_create = @import("c_api/objects.zig").zova_object_r
 pub const zova_object_reader_read = @import("c_api/objects.zig").zova_object_reader_read;
 
 pub const zova_object_reader_destroy = @import("c_api/objects.zig").zova_object_reader_destroy;
+
+pub const zova_object_seekable_reader_create = @import("c_api/objects.zig").zova_object_seekable_reader_create;
+
+pub const zova_object_seekable_reader_read = @import("c_api/objects.zig").zova_object_seekable_reader_read;
+
+pub const zova_object_seekable_reader_seek = @import("c_api/objects.zig").zova_object_seekable_reader_seek;
+
+pub const zova_object_seekable_reader_destroy = @import("c_api/objects.zig").zova_object_seekable_reader_destroy;
 
 pub const zova_vector_collection_create = @import("c_api/vectors.zig").zova_vector_collection_create;
 

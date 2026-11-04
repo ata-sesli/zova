@@ -221,6 +221,8 @@ pub const ObjectReader = struct {
     }
 };
 
+pub const ObjectSeekableReader = object_impl.ObjectSeekableReader;
+
 pub const ObjectWriter = struct {
     inner: object_impl.ObjectWriter,
     sqlite_db: *sqlite.Database,
@@ -1818,6 +1820,13 @@ pub const Database = struct {
     pub fn objectReader(self: *Database, id: ObjectId) Error!ObjectReader {
         var objects = self.objectDatabase();
         return .{ .inner = try objects.objectReader(id) };
+    }
+
+    /// Open a seekable, verified reader over one stored object. It pins no
+    /// snapshot between calls and must not outlive this database.
+    pub fn objectSeekableReader(self: *Database, allocator: std.mem.Allocator, id: ObjectId) Error!ObjectSeekableReader {
+        var objects = self.objectDatabase();
+        return objects.objectSeekableReader(allocator, id);
     }
 
     /// Create a native vector collection.

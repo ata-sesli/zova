@@ -3098,6 +3098,44 @@ int main(int argc, char **argv) {
     expect_status(zova_object_reader_destroy(&(zova_object_reader_destroy_request){.reader = &reader}), ZOVA_OK, "reader destroy");
     expect_status(zova_object_reader_destroy(&(zova_object_reader_destroy_request){.reader = &reader}), ZOVA_OK, "reader destroy twice");
 
+    zova_object_seekable_reader *seekable = NULL;
+    uint64_t seekable_size = 0;
+    expect_status(zova_object_seekable_reader_create(&(zova_object_seekable_reader_create_request){
+                      .db = db,
+                      .id = object_id,
+                      .out_reader = &seekable,
+                      .out_size = &seekable_size,
+                  }),
+                  ZOVA_OK,
+                  "seekable reader create");
+    if (seekable_size != sizeof(object_bytes) - 1) {
+        fprintf(stderr, "seekable reader create: wrong size\n");
+        return 1;
+    }
+    expect_status(zova_object_seekable_reader_seek(&(zova_object_seekable_reader_seek_request){
+                      .reader = seekable,
+                      .offset = 5,
+                  }),
+                  ZOVA_OK,
+                  "seekable reader seek");
+    uint8_t seekable_bytes[4] = {0};
+    size_t seekable_copied = 99;
+    expect_status(zova_object_seekable_reader_read(&(zova_object_seekable_reader_read_request){
+                      .reader = seekable,
+                      .buffer = seekable_bytes,
+                      .buffer_len = sizeof(seekable_bytes),
+                      .out_read = &seekable_copied,
+                  }),
+                  ZOVA_OK,
+                  "seekable reader read");
+    if (seekable_copied != sizeof(seekable_bytes)) {
+        fprintf(stderr, "seekable reader read: wrong copied length\n");
+        return 1;
+    }
+    expect_bytes(seekable_bytes, object_bytes + 5, seekable_copied, "seekable reader read");
+    expect_status(zova_object_seekable_reader_destroy(&(zova_object_seekable_reader_destroy_request){.reader = &seekable}), ZOVA_OK, "seekable reader destroy");
+    expect_status(zova_object_seekable_reader_destroy(&(zova_object_seekable_reader_destroy_request){.reader = &seekable}), ZOVA_OK, "seekable reader destroy twice");
+
     zova_object_id option_id = {{0}};
     expect_status(zova_object_put_with_options(&(zova_object_put_with_options_request){
                       .db = db,

@@ -24,6 +24,11 @@ const zova_object_reader = @import("c_api_internal.zig").zova_object_reader;
 const zova_object_reader_create = @import("c_api_internal.zig").zova_object_reader_create;
 const zova_object_reader_destroy = @import("c_api_internal.zig").zova_object_reader_destroy;
 const zova_object_reader_read = @import("c_api_internal.zig").zova_object_reader_read;
+const zova_object_seekable_reader = @import("c_api_internal.zig").zova_object_seekable_reader;
+const zova_object_seekable_reader_create = @import("c_api_internal.zig").zova_object_seekable_reader_create;
+const zova_object_seekable_reader_destroy = @import("c_api_internal.zig").zova_object_seekable_reader_destroy;
+const zova_object_seekable_reader_read = @import("c_api_internal.zig").zova_object_seekable_reader_read;
+const zova_object_seekable_reader_seek = @import("c_api_internal.zig").zova_object_seekable_reader_seek;
 const zova_object_size = @import("c_api_internal.zig").zova_object_size;
 const zova_object_storage_profile = @import("c_api_internal.zig").zova_object_storage_profile;
 const zova_object_writer = @import("c_api_internal.zig").zova_object_writer;
@@ -299,4 +304,80 @@ test "c abi object put commits atomically with a caller sql transaction" {
         .db = db,
         .sql = "drop trigger reject_manifest",
     }));
+}
+
+test "c abi seekable reader reads from any offset and blocks database close" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/c-api-seekable-reader.zova", .{tmp.sub_path[0..]}, 0);
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{
+        .path = db_path,
+        .out_db = &db,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(db);
+
+    const bytes = try std.testing.allocator.alloc(u8, 3 * 1024 * 1024 + 77);
+    defer std.testing.allocator.free(bytes);
+    var prng = std.Random.DefaultPrng.init(0x193c);
+    prng.random().bytes(bytes);
+    var id = zova_object_id{ .bytes = @as([32]u8, @splat(0)) };
+    try std.testing.expectEqual(zova_status.OK, zova_object_put_with_options(&.{
+        .db = db,
+        .data = bytes.ptr,
+        .len = bytes.len,
+        .options = .{ .profile = @backingInt(zova_object_storage_profile.STREAMING) },
+        .out_id = &id,
+    }));
+
+    var reader: ?*zova_object_seekable_reader = null;
+    var size: u64 = 0;
+    try std.testing.expectEqual(zova_status.OK, zova_object_seekable_reader_create(&.{
+        .db = db,
+        .id = id,
+        .out_reader = &reader,
+        .out_size = &size,
+    }));
+    try std.testing.expect(reader != null);
+    try std.testing.expectEqual(@as(u64, bytes.len), size);
+
+    var output: [32 * 1024]u8 = undefined;
+    for ([_]u64{ 2 * 1024 * 1024 - 5, 0, bytes.len - 10 }) |offset| {
+        try std.testing.expectEqual(zova_status.OK, zova_object_seekable_reader_seek(&.{ .reader = reader, .offset = offset }));
+        var copied: usize = 0;
+        try std.testing.expectEqual(zova_status.OK, zova_object_seekable_reader_read(&.{
+            .reader = reader,
+            .buffer = &output,
+            .buffer_len = output.len,
+            .out_read = &copied,
+        }));
+        const expected_len = @min(output.len, bytes.len - @as(usize, @intCast(offset)));
+        try std.testing.expectEqual(expected_len, copied);
+        try std.testing.expectEqualSlices(u8, bytes[@intCast(offset)..][0..expected_len], output[0..copied]);
+    }
+    var at_end: usize = 1;
+    try std.testing.expectEqual(zova_status.OK, zova_object_seekable_reader_read(&.{
+        .reader = reader,
+        .buffer = &output,
+        .buffer_len = output.len,
+        .out_read = &at_end,
+    }));
+    try std.testing.expectEqual(@as(usize, 0), at_end);
+
+    try std.testing.expectEqual(zova_status.MISUSE, zova_database_close(db));
+    try std.testing.expectEqual(zova_status.OK, zova_object_seekable_reader_destroy(&.{ .reader = &reader }));
+    try std.testing.expectEqual(zova_status.OK, zova_object_seekable_reader_destroy(&.{ .reader = &reader }));
+
+    var missing: ?*zova_object_seekable_reader = null;
+    try std.testing.expectEqual(zova_status.OBJECT_NOT_FOUND, zova_object_seekable_reader_create(&.{
+        .db = db,
+        .id = .{ .bytes = @as([32]u8, @splat(7)) },
+        .out_reader = &missing,
+        .out_size = null,
+    }));
+    try std.testing.expect(missing == null);
 }
