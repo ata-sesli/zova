@@ -496,3 +496,65 @@ fn object_id_types_are_copy_hashable_and_from_arrays() {
     ids.insert(id);
     assert!(ids.contains(&id));
 }
+
+#[test]
+fn seekable_object_reader_implements_read_and_seek() {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let path = temp_path("seekable-reader");
+    let mut db = Database::create(&path).unwrap();
+    let payload: Vec<u8> = (0..(3 << 20) + 4321)
+        .map(|index: usize| ((index * 31 + index / 7 + 17) % 251) as u8)
+        .collect();
+
+    for profile in [
+        ObjectStorageProfile::Deduplication,
+        ObjectStorageProfile::Streaming,
+    ] {
+        let id = db
+            .put_object_with_options(&payload, ObjectPutOptions { profile })
+            .unwrap();
+        let mut reader = db.object_seekable_reader(id).unwrap();
+        assert_eq!(reader.size(), payload.len() as u64);
+
+        let mut all = Vec::new();
+        reader.read_to_end(&mut all).unwrap();
+        assert_eq!(all, payload);
+
+        let len = payload.len() as u64;
+        for (seek, expected) in [
+            (SeekFrom::Start((1 << 20) - 3), (1 << 20) - 3),
+            (SeekFrom::End(-10), len - 10),
+            (SeekFrom::Current(-5), len - 13),
+        ] {
+            assert_eq!(reader.seek(seek).unwrap(), expected);
+            let mut buffer = [0_u8; 2];
+            reader.read_exact(&mut buffer).unwrap();
+            let start = expected as usize;
+            assert_eq!(&buffer, &payload[start..start + 2]);
+        }
+
+        reader.seek(SeekFrom::Start(len + 5)).unwrap();
+        assert_eq!(reader.read(&mut [0_u8; 4]).unwrap(), 0);
+        assert!(reader.seek(SeekFrom::Current(-(len as i64) - 100)).is_err());
+
+        reader.close().unwrap();
+        reader.close().unwrap();
+        let error = reader.read(&mut [0_u8; 1]).unwrap_err();
+        let native = error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<zova::Error>())
+            .unwrap();
+        assert_eq!(native.status(), Some(Status::ObjectReaderClosed));
+        drop(reader);
+        db.delete_object(id).unwrap();
+    }
+
+    let missing = db.object_seekable_reader(object_id(b"missing").unwrap());
+    assert_eq!(
+        missing.err().unwrap().status(),
+        Some(Status::ObjectNotFound)
+    );
+
+    let _ = std::fs::remove_file(path);
+}

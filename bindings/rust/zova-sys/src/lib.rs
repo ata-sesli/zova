@@ -161,6 +161,11 @@ pub struct zova_object_reader {
 }
 
 #[repr(C)]
+pub struct zova_object_seekable_reader {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
 pub struct zova_subscription {
     _private: [u8; 0],
 }
@@ -1243,6 +1248,37 @@ pub struct zova_object_reader_destroy_request {
 }
 
 #[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_object_seekable_reader_create_request {
+    pub db: *mut zova_database,
+    pub id: zova_object_id,
+    pub out_reader: *mut *mut zova_object_seekable_reader,
+    pub out_size: *mut u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_object_seekable_reader_read_request {
+    pub reader: *mut zova_object_seekable_reader,
+    pub buffer: *mut u8,
+    pub buffer_len: usize,
+    pub out_read: *mut usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_object_seekable_reader_seek_request {
+    pub reader: *mut zova_object_seekable_reader,
+    pub offset: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_object_seekable_reader_destroy_request {
+    pub reader: *mut *mut zova_object_seekable_reader,
+}
+
+#[repr(C)]
 pub struct zova_vector_collection_create_request {
     pub db: *mut zova_database,
     pub name: *const c_char,
@@ -2010,6 +2046,18 @@ extern "C" {
     pub fn zova_object_reader_read(request: *const zova_object_reader_read_request) -> zova_status;
     pub fn zova_object_reader_destroy(
         request: *const zova_object_reader_destroy_request,
+    ) -> zova_status;
+    pub fn zova_object_seekable_reader_create(
+        request: *const zova_object_seekable_reader_create_request,
+    ) -> zova_status;
+    pub fn zova_object_seekable_reader_read(
+        request: *const zova_object_seekable_reader_read_request,
+    ) -> zova_status;
+    pub fn zova_object_seekable_reader_seek(
+        request: *const zova_object_seekable_reader_seek_request,
+    ) -> zova_status;
+    pub fn zova_object_seekable_reader_destroy(
+        request: *const zova_object_seekable_reader_destroy_request,
     ) -> zova_status;
 
     pub fn zova_vector_collection_create(

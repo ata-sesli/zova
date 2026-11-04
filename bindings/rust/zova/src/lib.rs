@@ -35,6 +35,7 @@ pub use graph::{
 };
 pub use kv::KvEntry;
 pub use notification::{Notification, Subscription};
+pub use object::ObjectSeekableReader;
 pub use object::{
     object_chunk_id, object_id, ObjectChunkId, ObjectId, ObjectManifest, ObjectManifestChunk,
     ObjectPutOptions, ObjectReader, ObjectStorageProfile, ObjectWriter, OwnedObjectReader,

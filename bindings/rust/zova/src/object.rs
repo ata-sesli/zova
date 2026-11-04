@@ -97,6 +97,26 @@ pub struct ObjectReader<'db> {
     _not_send_sync: PhantomData<Rc<()>>,
 }
 
+/// Seekable, verified reader for one stored object, for HTTP range serving.
+///
+/// It implements [`std::io::Read`] and [`std::io::Seek`]; native failures are
+/// wrapped in [`std::io::Error`] and carry the [`Error`] as their source.
+/// Reads return zero at or past the end, and seeking past the end is allowed.
+/// Each chunk is
+/// checked against its manifest SHA-256 once, into a per-reader buffer, before
+/// any of its bytes are returned; the whole-object hash is not checked. The
+/// reader pins no SQLite snapshot between calls, so other connections can
+/// commit while it stays open. A read that needs a new chunk of an object
+/// deleted since opening fails with `ObjectNotFound`.
+pub struct ObjectSeekableReader<'db> {
+    raw: Option<NonNull<zova_sys::zova_object_seekable_reader>>,
+    db: *mut zova_sys::zova_database,
+    size: u64,
+    position: u64,
+    _database: PhantomData<&'db mut Database>,
+    _not_send_sync: PhantomData<Rc<()>>,
+}
+
 /// Owned sequential reader for language bindings and other callers that need
 /// the reader to keep the database handle alive independently.
 pub struct OwnedObjectReader {
@@ -526,6 +546,32 @@ impl Database {
         })
     }
 
+    /// Open a seekable, verified reader over one stored object.
+    ///
+    /// The reader borrows the database exclusively for its lifetime, so the
+    /// database cannot be closed while the native reader is live.
+    pub fn object_seekable_reader(&mut self, id: ObjectId) -> Result<ObjectSeekableReader<'_>> {
+        let mut reader = ptr::null_mut();
+        let mut size = 0;
+        let request = zova_sys::zova_object_seekable_reader_create_request {
+            db: self.raw_ptr(),
+            id: id.to_c(),
+            out_reader: &mut reader,
+            out_size: &mut size,
+        };
+        self.status(unsafe { zova_sys::zova_object_seekable_reader_create(&request) })?;
+        let raw = NonNull::new(reader)
+            .ok_or_else(|| Error::from_status(zova_sys::ZOVA_INVALID_ARGUMENT, None))?;
+        Ok(ObjectSeekableReader {
+            raw: Some(raw),
+            db: self.raw_ptr(),
+            size,
+            position: 0,
+            _database: PhantomData,
+            _not_send_sync: PhantomData,
+        })
+    }
+
     /// Open an owned sequential reader that keeps the database handle alive.
     pub fn object_reader_owned(&mut self, id: ObjectId) -> Result<OwnedObjectReader> {
         let mut reader = ptr::null_mut();
@@ -663,6 +709,109 @@ impl ObjectReader<'_> {
 }
 
 impl Drop for ObjectReader<'_> {
+    fn drop(&mut self) {
+        let _ = self.destroy(false);
+    }
+}
+
+impl ObjectSeekableReader<'_> {
+    /// Total object size in bytes.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Current read position in bytes.
+    pub fn position(&self) -> u64 {
+        self.position
+    }
+
+    fn read_native(&mut self, buffer: &mut [u8]) -> Result<usize> {
+        let raw = self.raw()?;
+        let mut read = 0;
+        let request = zova_sys::zova_object_seekable_reader_read_request {
+            reader: raw.as_ptr(),
+            buffer: buffer.as_mut_ptr(),
+            buffer_len: buffer.len(),
+            out_read: &mut read,
+        };
+        db_status(self.db, unsafe {
+            zova_sys::zova_object_seekable_reader_read(&request)
+        })?;
+        self.position += read as u64;
+        Ok(read)
+    }
+
+    fn seek_native(&mut self, offset: u64) -> Result<()> {
+        let raw = self.raw()?;
+        let request = zova_sys::zova_object_seekable_reader_seek_request {
+            reader: raw.as_ptr(),
+            offset,
+        };
+        db_status(self.db, unsafe {
+            zova_sys::zova_object_seekable_reader_seek(&request)
+        })?;
+        self.position = offset;
+        Ok(())
+    }
+
+    /// Explicitly close the reader. Drop also closes it, and repeated calls
+    /// are successful no-ops.
+    pub fn close(&mut self) -> Result<()> {
+        self.destroy(true)
+    }
+
+    fn raw(&self) -> Result<NonNull<zova_sys::zova_object_seekable_reader>> {
+        self.raw
+            .ok_or_else(|| Error::from_status(zova_sys::ZOVA_OBJECT_READER_CLOSED, None))
+    }
+
+    fn destroy(&mut self, report_error: bool) -> Result<()> {
+        let Some(raw) = self.raw else {
+            return Ok(());
+        };
+
+        let mut raw_ptr = raw.as_ptr();
+        let request = zova_sys::zova_object_seekable_reader_destroy_request {
+            reader: &mut raw_ptr,
+        };
+        let status = unsafe { zova_sys::zova_object_seekable_reader_destroy(&request) };
+        if status == zova_sys::ZOVA_OK {
+            self.raw = None;
+            return Ok(());
+        }
+        if report_error {
+            db_status(self.db, status)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl std::io::Read for ObjectSeekableReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.read_native(buffer).map_err(std::io::Error::other)
+    }
+}
+
+impl std::io::Seek for ObjectSeekableReader<'_> {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        let target = match position {
+            std::io::SeekFrom::Start(offset) => Some(offset),
+            std::io::SeekFrom::End(delta) => self.size.checked_add_signed(delta),
+            std::io::SeekFrom::Current(delta) => self.position.checked_add_signed(delta),
+        };
+        let target = target.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "seek before the start of the object",
+            )
+        })?;
+        self.seek_native(target).map_err(std::io::Error::other)?;
+        Ok(target)
+    }
+}
+
+impl Drop for ObjectSeekableReader<'_> {
     fn drop(&mut self) {
         let _ = self.destroy(false);
     }

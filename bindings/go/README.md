@@ -414,6 +414,20 @@ Use `PutObject` for in-memory bytes, `ObjectWriter` for streamed writes,
 `ReadObjectRange` for previews, and `ObjectManifest` / `GetObjectChunk` /
 `PutObjectChunk` / `AssembleObjectFromChunks` for receive-side chunk flows.
 
+To serve large objects over HTTP with Range support, open an
+`ObjectSeekableReader`. It implements `io.ReadSeeker` and `io.Closer`, verifies
+each chunk once before returning its bytes, and holds no read transaction
+between calls:
+
+```go
+reader, err := db.ObjectSeekableReader(objectID)
+if err != nil {
+    log.Fatal(err)
+}
+defer reader.Close()
+http.ServeContent(w, r, "video.mp4", time.Time{}, reader)
+```
+
 ## Vectors
 
 Vectors are native Zova rows grouped into named collections. Application
