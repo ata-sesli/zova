@@ -116,10 +116,9 @@ streaming object adds one page.
 | 1,000,000 | streaming | 0.241 s | 0.242 s | +0.4% |
 
 - The one clear cost is the streaming put into an empty file: +0.1 s for 64
-  MiB (≈ 660 → 410 MB/s). With 100,000 or more background rows the difference
-  disappears. Not investigated further; the likely cause is pointer-map
-  maintenance while a nearly empty file grows from a few pages, but that is a
-  hypothesis.
+  MiB. With 100,000 or more background rows the difference disappears. The
+  investigation below finds the cause: macOS write-behind, not extra work in
+  incremental mode.
 - Delete is faster in incremental mode (streaming 0.009 s vs 0.017 s); FastCDC
   deletes are unchanged.
 - **Reclaim:** releasing all ≈17,900 free pages (≈70 MiB) after the delete in
@@ -130,6 +129,83 @@ streaming object adds one page.
   freelist (`zova reclaim` reports 0 released).
 - Not measured, compared with the plan: 256 MiB payloads, and `step_pages`
   16,384 (the CLI always uses 1,024).
+
+### Investigation: the empty-file streaming put
+
+The extra time is the commit's database `fsync`, not CPU or extra I/O. The
+write-behind of a stream of appends stops after one rewrite of an
+already-written page behind the write head, so the data is still dirty at
+commit. In a new incremental file that page is page 2, the first pointer-map
+page. In every file with existing b-tree pages, `none` mode rewrites such pages
+too and pays the same flush. The `none` empty-file cell was the outlier.
+
+Evidence (64 MiB streaming put, indexed schema; tools in the session scratch
+directory, not retained: an `fsync`/`pwrite` interposer loaded with
+`DYLD_INSERT_LIBRARIES`, and a replayer of logged write offsets):
+
+1. **Repeat, 10 runs per cell, median `put_seconds`:**
+
+   | Disk | Background rows | Profile | `none` | `incremental` | Change |
+   | --- | ---: | --- | ---: | ---: | ---: |
+   | internal (APFS) | 0 | streaming | 0.170 s | 0.178 s | +5% |
+   | internal (APFS) | 0 | FastCDC | 0.304 s | 0.326 s | +7% |
+   | internal (APFS) | 100,000 | streaming | 0.183 s | 0.177 s | −3% |
+   | internal (APFS) | 100,000 | FastCDC | 0.290 s | 0.293 s | +1% |
+   | external USB SSD | 0 | streaming | 0.163 s | 0.285 s | +75% |
+   | external USB SSD | 0 | FastCDC | 0.382 s | 0.413 s | +8% |
+   | external USB SSD | 100,000 | streaming | 0.285 s | 0.290 s | +2% |
+   | external USB SSD | 100,000 | FastCDC | 0.415 s | 0.404 s | −3% |
+
+   The external `none` cell with 100,000 rows (0.285 s) equals the
+   incremental empty-file cell: the `none` empty-file put is the fast
+   exception.
+2. **CPU is equal.** user 0.16–0.17 s in both modes; sys 0.09–0.10 vs
+   0.11–0.12 s.
+3. **The gap is sync-bound.** With `pragma synchronous = off` the two modes are
+   equal (0.150 vs 0.151 s), and with `journal_mode = memory` incremental is
+   not slower. A 256 MiB page cache (no spill) does not remove it.
+4. **Same syncs and bytes.** During the put both modes do 2 journal `fsync`s and
+   1 database `fsync`. They write 16,409 vs 16,430 distinct pages, each once:
+   the extra 21 are pointer-map pages. Journal bytes are a few KiB in both.
+5. **The commit `fsync` is what differs:** 3.3–3.5 ms (`none`) vs 28–91 ms
+   (incremental) internal, and 20 ms vs 132–149 ms external. The write phase
+   is not slower: in the replays below it takes 63–83 ms (incremental) vs
+   75–108 ms (`none`). With 100,000 background rows the
+   commit `fsync` is 129–132 ms in `none` and 130–145 ms in incremental.
+6. **Replaying the logged write sequences outside SQLite reproduces it.** The
+   `none` sequence gives a 15–20 ms fsync on the external disk and the
+   incremental sequence 116–149 ms.
+   - Adding to the `none` sequence one rewrite of page 2 at the first spill
+     raises it to 137–150 ms.
+   - Removing that single page-2 rewrite from the incremental sequence lowers it
+     to 16–20 ms.
+   - A synthetic stream of appends shows the same effect with one rewrite of an
+     already-written page at any distance of 768 pages or more (120–150 ms),
+     but not with later fills of skipped pages (holes).
+7. **Setup order is not involved.** The pragma runs before the first table, so
+   it only sets the header flag. There is no `VACUUM` or rewrite on create; the
+   new file has 9 pages instead of 8 (the pointer-map page).
+
+Conclusion: incremental mode does not add I/O. It loses the overlap between
+writing and flushing that an append-only first fill of a new `none` file gets
+on macOS. The write volume and sync count are the same, and the effect
+disappears once the file has content, in both modes. The size of the effect
+depends on the device: +5% on the internal SSD, +75% on the external one. Linux
+writeback was not measured.
+
+No cheap fix in Zova: the pointer-map page is SQLite's, and which pages spill
+when is the pager's decision. Alternatives for the maintainer:
+
+| Option | Effect on this cost | Cost |
+| --- | --- | --- |
+| Keep `incremental` for every new file (current PR) | about 0.1 s once, on the first large put into an empty file on slow storage | none beyond that |
+| `none` for new main databases, `incremental` only for object, vector and graph stores | removed for main files only; a new object store's first fill keeps it | an object kept in the main file cannot be reclaimed in place without `zova compact` |
+| `none` everywhere | removed | drops #197's in-place reclaim; `zova compact` stays the only path |
+
+Recommendation: keep `incremental` for every new file. The effect is a one-time
+loss of write-behind overlap on the first fill of a new file, not a steady-state
+throughput cost. With existing content, the measured put cost is within
+−3% to +8% in every cell.
 
 Resources: the whole matrix ran in 26 minutes on one core; the largest scratch
 file was about 250 MB and each was deleted after its run.
