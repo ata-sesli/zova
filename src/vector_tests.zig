@@ -3,6 +3,7 @@ const fastcdc = @import("object_fastcdc.zig");
 const object_impl = @import("object.zig");
 const sqlite = @import("sqlite.zig");
 const test_support = @import("zova_test_support.zig");
+const query_plan = @import("query_plan_test_support.zig");
 const vector_impl = @import("vector.zig");
 const zova = @import("zova.zig");
 
@@ -567,6 +568,42 @@ test "vector delete many validates atomically joins transactions and is replay s
 
     try db.deleteVectors("chunks", &.{});
     try std.testing.expectError(error.VectorCollectionNotFound, db.deleteVectors("missing", &.{}));
+}
+
+test "vector batch delete keeps bounded indexed lookups" {
+    var db = try Database.createMemory();
+    defer db.deinit();
+    try db.createVectorCollection("chunks", .{ .dimensions = 2, .metric = .l2 });
+
+    const count = 2048;
+    const allocator = std.testing.allocator;
+    const id_storage = try allocator.alloc(u8, count * 16);
+    defer allocator.free(id_storage);
+    const id_lengths = try allocator.alloc(usize, count);
+    defer allocator.free(id_lengths);
+    const inputs = try allocator.alloc(zova.VectorInput, count);
+    defer allocator.free(inputs);
+    const values = [_]f32{ 1, 2 };
+    for (0..count) |index| {
+        const buffer = id_storage[index * 16 ..][0..16];
+        const id = try std.fmt.bufPrint(buffer, "v{d}", .{index});
+        id_lengths[index] = id.len;
+        inputs[index] = .{ .id = id, .values = .{ .f32 = &values } };
+    }
+    try db.putVectors("chunks", inputs);
+
+    var capture: query_plan.Capture = .{};
+    capture.install(&db.sqlite_db);
+    defer capture.remove(&db.sqlite_db);
+
+    // DELETE drives from the target table and probes the staged id index for
+    // each candidate; the staged batch still bounds the work.
+    capture.reset("delete from main._zova_vectors");
+    try db.deleteVectors("chunks", &.{ "v0", "v1024" });
+    try capture.expectPlan(&db.sqlite_db, .{
+        .bounded = &.{.{ .alias = "main._zova_vectors", .partition = "collection_key" }},
+        .in_operator = "_zova_vector_delete_ids",
+    });
 }
 
 test "vector upsert delete and sql references remain application owned" {

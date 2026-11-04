@@ -2196,55 +2196,97 @@ test "bound graph store rebind recreates indexes in the new store only" {
     try std.testing.expect(try schemaIndexExistsInSchema(&db.sqlite_db, "main", "_zova_graph_edges_to_node_idx"));
 }
 
-const DegreeStatementCapture = struct {
-    sql: [1024]u8 = undefined,
-    len: usize = 0,
-};
+const query_plan = @import("query_plan_test_support.zig");
 
-fn degreeStatementCallback(mask: c_uint, context: ?*anyopaque, statement: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
-    if (mask != sqlite.c.SQLITE_TRACE_STMT or context == null or statement == null) return 0;
-    const stmt: *sqlite.c.sqlite3_stmt = @ptrCast(@alignCast(statement.?));
-    const sql = std.mem.span(sqlite.c.sqlite3_sql(stmt) orelse return 0);
-    const capture: *DegreeStatementCapture = @ptrCast(@alignCast(context.?));
-    if (std.mem.indexOf(u8, sql, "carray(?3)") == null or sql.len > capture.sql.len) return 0;
-    @memcpy(capture.sql[0..sql.len], sql);
-    capture.len = sql.len;
-    return 0;
-}
+test "batch-driven graph statements keep bounded indexed lookups" {
+    var fixture = try query_plan.createGraphFixture(std.testing.allocator, 2048);
+    defer fixture.deinit(std.testing.allocator);
+    const db = &fixture.db;
 
-test "keyed degree batches drive the node lookup from the key array" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "graph-keyed-degree-plan.zova");
-    var db = try zova.Database.create(db_path);
-    defer db.deinit();
-    try db.createGraph("app");
-    var node_keys: [2]i64 = undefined;
-    try db.putGraphNodesKeyed(&.{
-        .{ .graph_name = "app", .node_id = "a", .kind = "k" },
-        .{ .graph_name = "app", .node_id = "b", .kind = "k" },
-    }, &node_keys);
-    try db.putGraphEdge(.{ .graph_name = "app", .from_node_id = "a", .edge_type = "calls", .to_node_id = "b" });
+    var capture: query_plan.Capture = .{};
+    capture.install(&db.sqlite_db);
+    defer capture.remove(&db.sqlite_db);
 
-    var capture: DegreeStatementCapture = .{};
-    _ = sqlite.c.sqlite3_trace_v2(db.sqlite_db.handle, sqlite.c.SQLITE_TRACE_STMT, degreeStatementCallback, &capture);
-    defer _ = sqlite.c.sqlite3_trace_v2(db.sqlite_db.handle, 0, null, null);
+    const requested_nodes = fixture.node_keys[0..4];
+    const requested_edges = fixture.edge_keys[0..4];
+    const bounded_nodes: query_plan.BoundedAccess = .{ .alias = "n", .partition = "graph_key" };
+    const bounded_edges: query_plan.BoundedAccess = .{ .alias = "e", .partition = "graph_key" };
+
+    capture.reset("select batch.rowid-1,n.node_key");
+    var nodes = try db.graphNodesGetManyKeyed(std.testing.allocator, "plan", requested_nodes);
+    defer nodes.deinit(std.testing.allocator);
+    try capture.expectPlan(&db.sqlite_db, .{ .outer = "batch", .bounded = &.{bounded_nodes} });
+
+    capture.reset("select batch.rowid-1,e.edge_key,e.from_node_key");
+    var edges = try db.graphEdgesGetManyKeyed(std.testing.allocator, "plan", requested_edges);
+    defer edges.deinit(std.testing.allocator);
+    try capture.expectPlan(&db.sqlite_db, .{ .outer = "batch", .bounded = &.{bounded_edges} });
+
+    capture.reset("select batch.rowid-1,e.edge_key,e.payload");
+    var payloads = try db.graphEdgePayloadsGetMany(std.testing.allocator, "plan", requested_edges);
+    defer payloads.deinit(std.testing.allocator);
+    try capture.expectPlan(&db.sqlite_db, .{ .outer = "batch", .bounded = &.{bounded_edges} });
 
     // With the node table as the outer loop every node rescans the whole key
     // array, which is quadratic in the batch size.
-    var degrees: [2]u64 = undefined;
+    var degrees: [4]u64 = undefined;
     for ([_]zova.GraphNeighborDirection{ .outgoing, .incoming }) |direction| {
         for ([_]?[]const u8{ null, "calls" }) |edge_type| {
-            capture.len = 0;
-            try db.graphDegreeManyKeyed("app", &node_keys, direction, edge_type, &degrees);
-            try std.testing.expect(capture.len != 0);
-            var sql_buffer: [1100]u8 = undefined;
-            const sql = try std.fmt.bufPrintSentinel(&sql_buffer, "explain query plan {s}", .{capture.sql[0..capture.len]}, 0);
-            var plan = try db.sqlite_db.prepare(sql);
-            defer plan.deinit();
-            try std.testing.expect(try plan.step() == .row);
-            try std.testing.expect(std.mem.startsWith(u8, plan.columnText(3), "SCAN batch"));
+            capture.reset("carray(?3)");
+            try db.graphDegreeManyKeyed("plan", requested_nodes, direction, edge_type, &degrees);
+            try capture.expectPlan(&db.sqlite_db, .{ .outer = "batch", .bounded = &.{bounded_nodes} });
         }
     }
+
+    const keyed_edges = [_]zova.GraphEdgeInput{
+        .{ .graph_name = "plan", .from_node_id = "n0", .edge_type = "batch", .to_node_id = "n1" },
+        .{ .graph_name = "plan", .from_node_id = "n2", .edge_type = "batch", .to_node_id = "n3" },
+    };
+    var keyed_edge_keys: [2]i64 = undefined;
+    capture.reset("temp._zova_graph_put_batch_endpoints batch");
+    try db.putGraphEdgesKeyed(&keyed_edges, &keyed_edge_keys);
+    try capture.expectPlan(&db.sqlite_db, .{ .outer = "batch", .bounded = &.{bounded_nodes} });
+
+    // Keyed puts read the whole graph to find existing opaque keys. That is a
+    // deliberate whole-partition read (#179), asserted here so a future scope
+    // change is visible.
+    capture.reset("zova_graph_edge_key_preload");
+    try db.putGraphEdgesKeyed(&keyed_edges, &keyed_edge_keys);
+    try capture.expectPlan(&db.sqlite_db, .{ .partition_only = &.{bounded_edges} });
+
+    capture.reset("zova_graph_node_key_preload");
+    var node_put_keys: [2]i64 = undefined;
+    try db.putGraphNodesKeyed(&.{
+        .{ .graph_name = "plan", .node_id = "n0", .kind = "kind" },
+        .{ .graph_name = "plan", .node_id = "n2048", .kind = "kind" },
+    }, &node_put_keys);
+    try capture.expectPlan(&db.sqlite_db, .{
+        .partition_only = &.{.{ .alias = "main._zova_graph_nodes", .partition = "graph_key" }},
+    });
+
+    const plain_edges = [_]zova.GraphEdgeInput{
+        .{ .graph_name = "plan", .from_node_id = "n0", .edge_type = "plain", .to_node_id = "n1" },
+        .{ .graph_name = "plan", .from_node_id = "n2", .edge_type = "plain", .to_node_id = "n3" },
+    };
+    try db.putGraphEdges(&plain_edges);
+    capture.reset("insert into temp._zova_graph_batch_resolved");
+    try db.deleteGraphEdges(&plain_edges);
+    try capture.expectPlan(&db.sqlite_db, .{ .outer = "batch", .bounded = &.{bounded_nodes} });
+
+    const replacements = [_]zova.GraphEdgePayloadReplacement{
+        .{ .edge_key = fixture.edge_keys[0], .payload = "updated-0" },
+        .{ .edge_key = fixture.edge_keys[1], .payload = "updated-1" },
+    };
+    capture.reset("_zova_graph_edge_payload_replace_keys batch");
+    try db.replaceGraphEdgePayloads("plan", &replacements);
+    try capture.expectPlan(&db.sqlite_db, .{ .outer = "batch", .bounded = &.{bounded_edges} });
+
+    // DELETE drives from the target table and probes the staged id index for
+    // each candidate; the staged batch still bounds the work.
+    capture.reset("delete from main._zova_graph_nodes");
+    try db.deleteGraphNodes("plan", &.{ "n100", "n101" });
+    try capture.expectPlan(&db.sqlite_db, .{
+        .bounded = &.{.{ .alias = "main._zova_graph_nodes", .partition = "graph_key" }},
+        .in_operator = "_zova_graph_batch_delete_ids",
+    });
 }
