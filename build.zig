@@ -625,7 +625,7 @@ pub fn build(b: *std.Build) void {
         "test-objects",
         "Run object storage tests",
         "src/test_objects_root.zig",
-        &.{ "object_tests", "object.test." },
+        &.{ "object_tests", "object.test.", "object_sha256" },
         target,
         optimize,
         zova_build_options,
