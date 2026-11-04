@@ -190,6 +190,8 @@ const GraphTraceCounter = struct {
     slot_resolver_seen: bool = false,
     node_key_preload_statements: usize = 0,
     edge_key_preload_statements: usize = 0,
+    node_key_lookup_statements: usize = 0,
+    edge_key_lookup_statements: usize = 0,
     keyed_returning_statements: usize = 0,
 };
 
@@ -207,6 +209,10 @@ fn graphTraceCallback(mask: c_uint, context: ?*anyopaque, statement: ?*anyopaque
         counter.node_key_preload_statements += 1;
     } else if (std.mem.indexOf(u8, sql, "zova_graph_edge_key_preload") != null) {
         counter.edge_key_preload_statements += 1;
+    } else if (std.mem.indexOf(u8, sql, "zova_graph_node_key_lookup") != null) {
+        counter.node_key_lookup_statements += 1;
+    } else if (std.mem.indexOf(u8, sql, "zova_graph_edge_key_lookup") != null) {
+        counter.edge_key_lookup_statements += 1;
     } else if (std.mem.indexOf(u8, sql, "zova_graph_endpoint_stage") != null or
         std.mem.indexOf(u8, sql, "insert or ignore into temp._zova_graph_batch_endpoints") != null)
     {
@@ -1269,7 +1275,7 @@ test "keyed graph batches return stable aligned node and edge keys" {
     try std.testing.expect(!try db.hasGraphNode("app", "rolled-back"));
 }
 
-test "keyed graph batches preload keys and retain the fast non-returning inserts" {
+test "keyed graph batches look up keys without whole-graph preloads and retain the fast non-returning inserts" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
@@ -1299,13 +1305,72 @@ test "keyed graph batches preload keys and retain the fast non-returning inserts
         .{ .graph_name = "app", .from_node_id = "a", .edge_type = "calls", .to_node_id = "b" },
     }, &replay_edge_keys);
 
-    try std.testing.expectEqual(@as(usize, 1), counter.node_key_preload_statements);
-    try std.testing.expectEqual(@as(usize, 2), counter.edge_key_preload_statements);
+    try std.testing.expectEqual(@as(usize, 0), counter.node_key_preload_statements);
+    try std.testing.expectEqual(@as(usize, 0), counter.edge_key_preload_statements);
+    try std.testing.expectEqual(@as(usize, 2), counter.node_key_lookup_statements);
+    try std.testing.expectEqual(@as(usize, 2), counter.edge_key_lookup_statements);
     try std.testing.expectEqual(@as(usize, 0), counter.keyed_returning_statements);
     try std.testing.expectEqual(@as(usize, 1), counter.graph_edge_insert_steps);
     try std.testing.expectEqual(node_keys[1], node_keys[2]);
     try std.testing.expectEqual(edge_keys[0], edge_keys[1]);
     try std.testing.expectEqualSlices(i64, &edge_keys, &replay_edge_keys);
+}
+
+test "keyed graph batches preload only above the point lookup threshold" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "graph-keyed-threshold.zova");
+    var db = try zova.Database.create(db_path);
+    defer db.deinit();
+    try db.createGraph("app");
+
+    // 256 distinct keys is the largest batch that still uses point lookups.
+    var node_ids: [257][]const u8 = undefined;
+    var node_inputs: [257]zova.GraphNodeInput = undefined;
+    var id_buffers: [257][16]u8 = undefined;
+    for (0..257) |index| {
+        node_ids[index] = try std.fmt.bufPrint(&id_buffers[index], "n{d}", .{index});
+        node_inputs[index] = .{ .graph_name = "app", .node_id = node_ids[index], .kind = "node" };
+    }
+
+    var counter: GraphTraceCounter = .{};
+    _ = sqlite.c.sqlite3_trace_v2(db.sqlite_db.handle, sqlite.c.SQLITE_TRACE_STMT, graphTraceCallback, &counter);
+    defer _ = sqlite.c.sqlite3_trace_v2(db.sqlite_db.handle, 0, null, null);
+
+    var small_node_keys: [256]i64 = undefined;
+    try db.putGraphNodesKeyed(node_inputs[0..256], &small_node_keys);
+    try std.testing.expectEqual(@as(usize, 256), counter.node_key_lookup_statements);
+    try std.testing.expectEqual(@as(usize, 0), counter.node_key_preload_statements);
+
+    var all_node_keys: [257]i64 = undefined;
+    try db.putGraphNodesKeyed(&node_inputs, &all_node_keys);
+    try std.testing.expectEqual(@as(usize, 256), counter.node_key_lookup_statements);
+    try std.testing.expectEqual(@as(usize, 1), counter.node_key_preload_statements);
+    try std.testing.expectEqualSlices(i64, &small_node_keys, all_node_keys[0..256]);
+    try std.testing.expect(all_node_keys[256] > 0);
+
+    var edge_inputs: [257]zova.GraphEdgeInput = undefined;
+    for (0..257) |index| {
+        edge_inputs[index] = .{
+            .graph_name = "app",
+            .from_node_id = node_ids[index],
+            .edge_type = "calls",
+            .to_node_id = node_ids[(index + 1) % 257],
+        };
+    }
+
+    var small_edge_keys: [256]i64 = undefined;
+    try db.putGraphEdgesKeyed(edge_inputs[0..256], &small_edge_keys);
+    try std.testing.expectEqual(@as(usize, 256), counter.edge_key_lookup_statements);
+    try std.testing.expectEqual(@as(usize, 0), counter.edge_key_preload_statements);
+
+    var all_edge_keys: [257]i64 = undefined;
+    try db.putGraphEdgesKeyed(&edge_inputs, &all_edge_keys);
+    try std.testing.expectEqual(@as(usize, 256), counter.edge_key_lookup_statements);
+    try std.testing.expectEqual(@as(usize, 1), counter.edge_key_preload_statements);
+    try std.testing.expectEqualSlices(i64, &small_edge_keys, all_edge_keys[0..256]);
+    try std.testing.expect(all_edge_keys[256] > 0);
 }
 
 test "keyed graph reads preserve order degree alignment and exclusive scan cursors" {
