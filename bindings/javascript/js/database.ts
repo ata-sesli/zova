@@ -646,12 +646,20 @@ export function probeFormat(path: string): FormatInfo {
   });
 }
 
+/**
+ * Migrate a `.zova` file forward to this release's storage format. A database
+ * with a non-bundled extension installed needs that extension's trusted
+ * bundle in `extensions`, exactly as `Database.open` does.
+ */
 export function migrateDatabase(
   source: string,
   destination: string,
   verify = true,
+  extensions?: ExtensionOptions,
 ): void {
-  callNative(() => native.migrateDatabase(source, destination, verify));
+  callNative(() =>
+    native.migrateDatabase(source, destination, verify, nativeExtensionOptions(extensions)),
+  );
 }
 
 export function convertSqliteToZova(

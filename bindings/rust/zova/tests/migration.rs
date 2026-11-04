@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use zova::{
-    migrate_database, probe_format, Database, Error, FormatCompatibility, FormatInfo,
-    MigrateOptions, Status,
+    migrate_database, migrate_database_with_extensions, probe_format, Database, Error,
+    ExtensionOptions, FormatCompatibility, FormatInfo, MigrateOptions, Status,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -189,4 +189,81 @@ fn migrate_current_format_reports_no_migration_path() {
     );
 
     let _ = std::fs::remove_file(current);
+}
+
+/// Empty extension options migrate exactly like `migrate_database`.
+#[test]
+fn migrate_with_empty_extension_options_matches_plain_migrate() {
+    let fixture = fixture_path("format-9.zova");
+    let source = temp_path("migrate-ext-empty-source");
+    let destination = temp_path("migrate-ext-empty-destination");
+    std::fs::copy(&fixture, &source).unwrap();
+    let source_before = read_bytes(&source);
+
+    migrate_database_with_extensions(
+        &source,
+        &destination,
+        MigrateOptions::default(),
+        &ExtensionOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        probe_format(&destination).unwrap(),
+        FormatInfo {
+            format_version: 12,
+            compatibility: FormatCompatibility::Current,
+        }
+    );
+    assert_eq!(
+        read_bytes(&source),
+        source_before,
+        "migration mutated the source"
+    );
+
+    let _ = std::fs::remove_file(source);
+    let _ = std::fs::remove_file(destination);
+}
+
+/// Selected bundles go through the same loading and trust checks as open:
+/// a bundle that cannot be loaded fails the migration and publishes nothing,
+/// even though the source itself needs no extension code.
+#[test]
+fn migrate_with_unloadable_bundle_fails_without_output() {
+    let fixture = fixture_path("format-9.zova");
+    let source = temp_path("migrate-ext-missing-source");
+    let destination = temp_path("migrate-ext-missing-destination");
+    std::fs::copy(&fixture, &source).unwrap();
+    let missing_bundle = temp_path("migrate-ext-missing-bundle").with_extension("zovaext");
+    let trust_store = temp_path("migrate-ext-missing-trust").with_extension("json");
+
+    let error = migrate_database_with_extensions(
+        &source,
+        &destination,
+        MigrateOptions::default(),
+        &ExtensionOptions {
+            bundle_paths: vec![missing_bundle],
+            trust_store_path: Some(trust_store.clone()),
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(error, Error::Zova { .. }), "{error:?}");
+    assert!(!destination.exists(), "failed migration published output");
+    assert!(!trust_store.exists(), "migration created a trust store");
+
+    // NUL bytes are rejected before any native call.
+    let error = migrate_database_with_extensions(
+        &source,
+        &destination,
+        MigrateOptions::default(),
+        &ExtensionOptions {
+            bundle_paths: vec![PathBuf::from("invalid\0.zovaext")],
+            trust_store_path: None,
+        },
+    )
+    .unwrap_err();
+    assert!(!matches!(error, Error::Zova { .. }), "{error:?}");
+    assert!(!destination.exists());
+
+    let _ = std::fs::remove_file(source);
 }

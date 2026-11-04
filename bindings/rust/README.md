@@ -74,6 +74,9 @@ format-10 and format-11 databases can be probed and migrated forward with the cr
 `probe_format(path)` and `migrate_database(source, destination, options)`
 functions: migration is explicit, copy-forward, publishes a separately
 validated format-12 destination, and never mutates the source.
+`migrate_database_with_extensions(source, destination, options, &extensions)`
+takes the same `ExtensionOptions` as `Database::open_with_extensions` for
+databases with a non-bundled extension installed.
 
 Opaque-key graph, payload, topology-scan, prepared-build, and generic
 fresh-build session APIs are supported low-level C ABI/raw `zova-sys` surfaces.
