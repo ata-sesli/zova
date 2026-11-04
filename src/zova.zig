@@ -2942,13 +2942,16 @@ const verifyQuickCheckAttached = @import("database/backup.zig").verifyQuickCheck
 
 const expectQuickCheckOk = @import("database/backup.zig").expectQuickCheckOk;
 
+/// Verify every stored object by streaming it through `ObjectReader` into a
+/// fixed buffer, so memory stays bounded by the reader's scratch plus this
+/// buffer whatever the object size. The reader checks the manifest shape,
+/// every chunk's size and SHA-256, and the whole-object SHA-256 against the id.
 fn verifyStoredObjects(db: *Database, progress: *VerifyProgress) Error!void {
-    const allocator = std.heap.page_allocator;
-
     const prefix = if (db.bound_object_store != null) "object_store." else "";
     var objects = try prepareSchemaSql(&db.sqlite_db, "select object_id from {s}_zova_objects order by object_id", .{prefix});
     defer objects.deinit();
 
+    var buffer: [64 * 1024]u8 = undefined;
     while ((try objects.step()) == .row) {
         const blob = objects.columnBlob(0);
         if (blob.len != @sizeOf(ObjectId)) return error.ObjectCorrupt;
@@ -2956,8 +2959,17 @@ fn verifyStoredObjects(db: *Database, progress: *VerifyProgress) Error!void {
         var id: ObjectId = undefined;
         @memcpy(id[0..], blob);
 
-        var object = try db.getObject(allocator, id);
-        object.deinit(allocator);
+        var reader = try db.objectReader(id);
+        defer reader.deinit();
+        while (true) {
+            // A failed read closes the reader and returns its real error, so
+            // the loop never reads a closed reader.
+            const read = reader.read(&buffer) catch |err| switch (err) {
+                error.ObjectReaderClosed => return error.Misuse,
+                else => |e| return e,
+            };
+            if (read == 0) break;
+        }
         try progress.item();
     }
 }
