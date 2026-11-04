@@ -168,6 +168,23 @@ migrateDatabase("app.zova", "app-format-12.zova"); // verify defaults to true
 
 `asyncProbeFormat` and `asyncMigrateDatabase` are the promise-returning variants.
 
+### Extensions in the bindings
+
+Releases after 1.3.0 also let the bindings migrate a database with a
+non-bundled extension installed. Each migrate call takes the same trusted
+bundle paths and trust store as that binding's open call and routes them to
+`zova_database_migrate_with_extensions`. Empty options behave exactly like a
+plain migration, and a bundle that fails loading or trust checks fails the
+migration without publishing anything. Plugin descriptors linked into the host
+process remain a C ABI feature.
+
+| Binding | Call |
+| --- | --- |
+| Rust | `migrate_database_with_extensions(source, destination, MigrateOptions, &ExtensionOptions)` |
+| Go | `MigrateDatabaseWithExtensions(source, destination, MigrateOptions, ExtensionOptions)` |
+| Python | `migrate_database(source, destination, *, verify=True, extension_bundles=None, trust_store_path=None)` |
+| JavaScript | `migrateDatabase(source, destination, verify, extensions)` and `AsyncDatabase.migrateDatabase(source, destination, verify, extensions)` |
+
 ## Operational rules
 
 These rules follow from the implementation and are worth planning around before

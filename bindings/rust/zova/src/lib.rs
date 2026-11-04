@@ -20,9 +20,9 @@ mod statement;
 mod vector;
 
 pub use database::{
-    migrate_database, probe_format, restore_backup, restore_backup_to_memory, BackupOptions,
-    CompactOptions, Database, ExtensionOptions, FormatCompatibility, FormatInfo, MigrateOptions,
-    OpenOptions, RestoreOptions,
+    migrate_database, migrate_database_with_extensions, probe_format, restore_backup,
+    restore_backup_to_memory, BackupOptions, CompactOptions, Database, ExtensionOptions,
+    FormatCompatibility, FormatInfo, MigrateOptions, OpenOptions, RestoreOptions,
 };
 pub use error::{Error, Result, Status};
 pub use extension::ExtensionInfo;

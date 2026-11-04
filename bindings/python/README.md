@@ -68,7 +68,9 @@ format databases in place. Format-9, format-10 and format-11 databases can be pr
 migrated forward with the module-level `probe_format(path)` and
 `migrate_database(source, destination, *, verify=True)` functions: migration is
 explicit, copy-forward, publishes a separately validated format-12 destination,
-and never mutates the source.
+and never mutates the source. Like `Database.open`, `migrate_database` accepts
+`extension_bundles` and `trust_store_path` for databases with a non-bundled
+extension installed.
 
 Opaque-key graph, edge-payload, topology-scan, prepared-build, and generic
 fresh-build session APIs are supported low-level C/raw `zova-sys` surfaces.

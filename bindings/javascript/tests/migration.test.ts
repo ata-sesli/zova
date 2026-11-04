@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -146,5 +146,33 @@ describe("Storage-format migration", () => {
     const syncInfo = probeFormat(destination);
     expect(syncInfo.formatVersion).toBe(migratedInfo.formatVersion);
     expect(syncInfo.compatibility).toBe(migratedInfo.compatibility);
+  });
+
+  test("migrateDatabase with empty extension options matches plain migration", async () => {
+    const source = format9FixtureCopy("migrate-ext-empty-source.zova");
+    const before = readFileSync(source);
+    const destination = join(temporaryDirectory(), "migrate-ext-empty-destination.zova");
+    migrateDatabase(source, destination, true, { bundlePaths: [] });
+    expect(probeFormat(destination)).toEqual({ formatVersion: 12, compatibility: "current" });
+
+    const asyncDestination = join(temporaryDirectory(), "migrate-ext-empty-async.zova");
+    await AsyncDatabase.migrateDatabase(source, asyncDestination, true, { bundlePaths: [] });
+    expect(probeFormat(asyncDestination)).toEqual({ formatVersion: 12, compatibility: "current" });
+    expect(sameBytes(readFileSync(source), before)).toBe(true);
+  });
+
+  test("migrateDatabase with an unloadable bundle fails without output", async () => {
+    const source = format9FixtureCopy("migrate-ext-missing-source.zova");
+    const directory = temporaryDirectory();
+    const extensions = {
+      bundlePaths: [join(directory, "missing.zovaext")],
+      trustStorePath: join(directory, "trust.json"),
+    };
+    const destination = join(directory, "migrate-ext-missing.zova");
+    expect(() => migrateDatabase(source, destination, true, extensions)).toThrow(ZovaError);
+    await expect(
+      AsyncDatabase.migrateDatabase(source, destination, true, extensions),
+    ).rejects.toBeInstanceOf(ZovaError);
+    expect(readdirSync(directory)).toEqual([]);
   });
 });

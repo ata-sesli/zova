@@ -91,6 +91,10 @@ pub struct NativeExtensionOptions {
 }
 
 impl NativeExtensionOptions {
+    pub(crate) fn options_or_default(options: Option<Self>) -> zova::ExtensionOptions {
+        options.map(Self::into_options).unwrap_or_default()
+    }
+
     fn into_options(self) -> zova::ExtensionOptions {
         zova::ExtensionOptions {
             bundle_paths: self.bundle_paths.into_iter().map(Into::into).collect(),
@@ -144,13 +148,19 @@ pub fn probe_format(path: String) -> Result<NativeFormatInfo> {
 /// Migrate a `.zova` file forward to this release's storage format.
 #[napi]
 #[cfg_attr(test, allow(dead_code))]
-pub fn migrate_database(source: String, destination: String, verify: Option<bool>) -> Result<()> {
-    zova::migrate_database(
+pub fn migrate_database(
+    source: String,
+    destination: String,
+    verify: Option<bool>,
+    extensions: Option<NativeExtensionOptions>,
+) -> Result<()> {
+    zova::migrate_database_with_extensions(
         source,
         destination,
         zova::MigrateOptions {
             verify: verify.unwrap_or(true),
         },
+        &NativeExtensionOptions::options_or_default(extensions),
     )
     .map_err(zova_error)
 }

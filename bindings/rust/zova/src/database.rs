@@ -5,7 +5,7 @@ use crate::kv::{
 };
 use crate::notification::{listen_raw, notify_raw, Subscription};
 use crate::statement::{OwnedStatement, Statement};
-use std::ffi::{CStr, CString};
+use std::ffi::{c_char, CStr, CString};
 use std::fmt;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
@@ -124,6 +124,51 @@ pub struct FormatInfo {
     pub compatibility: FormatCompatibility,
 }
 
+/// C strings for one synchronous extension-selecting request. The pointers
+/// returned by the accessors stay valid while this value is alive.
+struct ExtensionCArgs {
+    _bundles: Vec<CString>,
+    pointers: Vec<*const c_char>,
+    trust: Option<CString>,
+}
+
+impl ExtensionCArgs {
+    fn new(extensions: &ExtensionOptions) -> Result<Self> {
+        let bundles = extensions
+            .bundle_paths
+            .iter()
+            .map(|p| path_to_cstring(p))
+            .collect::<Result<Vec<_>>>()?;
+        let pointers = bundles.iter().map(|p| p.as_ptr()).collect::<Vec<_>>();
+        let trust = extensions
+            .trust_store_path
+            .as_deref()
+            .map(path_to_cstring)
+            .transpose()?;
+        Ok(Self {
+            _bundles: bundles,
+            pointers,
+            trust,
+        })
+    }
+
+    fn bundle_paths(&self) -> *const *const c_char {
+        if self.pointers.is_empty() {
+            ptr::null()
+        } else {
+            self.pointers.as_ptr()
+        }
+    }
+
+    fn bundle_count(&self) -> usize {
+        self.pointers.len()
+    }
+
+    fn trust_store_path(&self) -> *const c_char {
+        self.trust.as_ref().map_or(ptr::null(), |p| p.as_ptr())
+    }
+}
+
 /// Synchronous C request shared by both safe handle types. The C handle owns
 /// its registry/libraries after success, never these temporary C strings.
 pub(crate) fn open_with_extensions_raw(
@@ -133,17 +178,7 @@ pub(crate) fn open_with_extensions_raw(
     extensions: &ExtensionOptions,
 ) -> Result<*mut zova_sys::zova_database> {
     let path = path_to_cstring(path)?;
-    let bundles = extensions
-        .bundle_paths
-        .iter()
-        .map(|p| path_to_cstring(p))
-        .collect::<Result<Vec<_>>>()?;
-    let pointers = bundles.iter().map(|p| p.as_ptr()).collect::<Vec<_>>();
-    let trust = extensions
-        .trust_store_path
-        .as_deref()
-        .map(path_to_cstring)
-        .transpose()?;
+    let extension_args = ExtensionCArgs::new(extensions)?;
     let mut db = ptr::null_mut();
     let mut message = empty_message();
     let request = zova_sys::zova_database_open_extensions_request {
@@ -154,13 +189,9 @@ pub(crate) fn open_with_extensions_raw(
             0
         },
         busy_timeout_ms: options.busy_timeout_ms,
-        extension_bundle_paths: if pointers.is_empty() {
-            ptr::null()
-        } else {
-            pointers.as_ptr()
-        },
-        extension_bundle_count: pointers.len(),
-        trust_store_path: trust.as_ref().map_or(ptr::null(), |p| p.as_ptr()),
+        extension_bundle_paths: extension_args.bundle_paths(),
+        extension_bundle_count: extension_args.bundle_count(),
+        trust_store_path: extension_args.trust_store_path(),
         out_db: &mut db,
         out_error_message: &mut message,
     };
@@ -748,6 +779,42 @@ pub fn migrate_database(
         out_error_message: &mut message,
     };
     let status = unsafe { zova_sys::zova_database_migrate(&request) };
+    if status == zova_sys::ZOVA_OK {
+        return Ok(());
+    }
+    Err(Error::from_status(status, take_message(&mut message)))
+}
+
+/// `migrate_database` with explicitly selected native bundles.
+///
+/// Migration verifies the destination with every installed extension, so a
+/// database with a non-bundled extension installed needs that extension's
+/// bundle here. Bundles go through the same trust checks as
+/// [`Database::open_with_extensions`]; empty options behave exactly like
+/// [`migrate_database`], and any failure publishes nothing.
+pub fn migrate_database_with_extensions(
+    source: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+    options: MigrateOptions,
+    extensions: &ExtensionOptions,
+) -> Result<()> {
+    let source = path_to_cstring(source.as_ref())?;
+    let destination = path_to_cstring(destination.as_ref())?;
+    let extension_args = ExtensionCArgs::new(extensions)?;
+    let mut message = empty_message();
+    let request = zova_sys::zova_database_migrate_extensions_request {
+        source_path: source.as_ptr(),
+        destination_path: destination.as_ptr(),
+        flags: migrate_flags(options.verify),
+        extension_bundle_paths: extension_args.bundle_paths(),
+        extension_bundle_count: extension_args.bundle_count(),
+        trust_store_path: extension_args.trust_store_path(),
+        plugins: ptr::null(),
+        plugin_count: 0,
+        out_error_message: &mut message,
+    };
+    // SAFETY: all inputs and outputs stay live throughout the synchronous call.
+    let status = unsafe { zova_sys::zova_database_migrate_with_extensions(&request) };
     if status == zova_sys::ZOVA_OK {
         return Ok(());
     }

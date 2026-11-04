@@ -6,7 +6,9 @@ use napi::bindgen_prelude::{
 use napi::{Env, Result, Task};
 use napi_derive::napi;
 
-use crate::database::{DatabaseState, NativeDatabase, NativeFormatInfo, NativeKvEntry};
+use crate::database::{
+    DatabaseState, NativeDatabase, NativeExtensionOptions, NativeFormatInfo, NativeKvEntry,
+};
 use crate::error::zova_error;
 use crate::graph::{
     target_type, NativeGraphEdgeInput, NativeGraphNodeInput, NativeGraphWalkItem,
@@ -590,6 +592,7 @@ pub struct MigrateTask {
     source: String,
     destination: String,
     verify: bool,
+    extensions: zova::ExtensionOptions,
 }
 
 impl Task for MigrateTask {
@@ -597,12 +600,13 @@ impl Task for MigrateTask {
     type JsValue = ();
 
     fn compute(&mut self) -> Result<Self::Output> {
-        zova::migrate_database(
+        zova::migrate_database_with_extensions(
             &self.source,
             &self.destination,
             zova::MigrateOptions {
                 verify: self.verify,
             },
+            &self.extensions,
         )
         .map_err(zova_error)
     }
@@ -624,11 +628,13 @@ pub fn async_migrate_database(
     source: String,
     destination: String,
     verify: Option<bool>,
+    extensions: Option<NativeExtensionOptions>,
 ) -> AsyncTask<MigrateTask> {
     AsyncTask::new(MigrateTask {
         source,
         destination,
         verify: verify.unwrap_or(true),
+        extensions: NativeExtensionOptions::options_or_default(extensions),
     })
 }
 
