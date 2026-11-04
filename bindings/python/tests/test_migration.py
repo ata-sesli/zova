@@ -126,3 +126,35 @@ def test_migrate_current_format_reports_no_migration_path(tmp_path):
         zova.migrate_database(str(current), str(destination))
     assert exc.value.status_name == "ZOVA_NO_MIGRATION_PATH"
     assert not destination.exists()
+
+
+def test_migrate_with_empty_extension_options_matches_plain_migrate(tmp_path):
+    source = copy_fixture(tmp_path)
+    destination = tmp_path / "migrate-ext-empty.zova"
+    before = source.read_bytes()
+
+    zova.migrate_database(
+        str(source), str(destination), extension_bundles=[], trust_store_path=None
+    )
+
+    info = zova.probe_format(str(destination))
+    assert info.format_version == 12
+    assert info.compatibility is zova.FormatCompatibility.CURRENT
+    assert source.read_bytes() == before
+
+
+def test_migrate_with_unloadable_bundle_fails_without_output(tmp_path):
+    source = copy_fixture(tmp_path)
+    destination = tmp_path / "migrate-ext-missing.zova"
+    trust_store = tmp_path / "trust.json"
+
+    with pytest.raises(zova.ZovaError):
+        zova.migrate_database(
+            str(source),
+            str(destination),
+            extension_bundles=[str(tmp_path / "missing.zovaext")],
+            trust_store_path=str(trust_store),
+        )
+    assert not destination.exists()
+    assert not trust_store.exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["migrate-source.zova"]

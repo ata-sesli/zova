@@ -86,9 +86,10 @@ export class AsyncDatabase {
     source: string,
     destination: string,
     verify = true,
+    extensions?: ExtensionOptions,
   ): Promise<void> {
     return native
-      .asyncMigrateDatabase(source, destination, verify)
+      .asyncMigrateDatabase(source, destination, verify, nativeExtensionOptions(extensions))
       .catch((error: unknown) => {
         throw normalizeNativeError(error);
       });

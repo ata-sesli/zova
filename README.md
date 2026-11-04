@@ -655,6 +655,11 @@ zova restore app.backup.zova app.restored.zova
 - `compact` uses SQLite `VACUUM INTO` to create a space-reclaiming copy.
 - `restore` copies a backup into a new destination file.
 
+`backup`, `compact` and `migrate` show progress on a terminal; `--progress`
+forces it elsewhere, and `--json --progress` writes line-delimited JSON progress
+events to stderr. See
+[Progress](docs/storage-compatibility.md#progress).
+
 Destinations must be new `.zova` paths. Zova does not overwrite destination
 files in these operations.
 
@@ -1023,6 +1028,7 @@ zova graph-walk --max-depth 2 --limit 50 app.zova app message:123
 zova tables app.zova
 zova check --deep app.zova
 zova format --json app.zova
+zova migrate --dry-run old-9.zova new-10.zova
 zova migrate --json old-9.zova new-10.zova
 zova doctor --json app.zova
 zova object-store info app.zova

@@ -392,16 +392,71 @@ pub const ExtensionOpenMode = enum {
     inspect,
 };
 
+/// Phase of a migration, backup, or compaction reported to a
+/// `ProgressCallback`. The phase fixes the unit of `done` and `total`.
+pub const ProgressPhase = enum {
+    /// Copying one member file. Units: SQLite pages of the source member.
+    copy,
+    /// Migrating one staged member to the current format. Units: format
+    /// migration steps.
+    migrate,
+    /// Checking the copied set. Units: stored objects, chunks, vectors, and
+    /// KV entries, counted together.
+    verify,
+    /// Publishing the migrated set, bound stores first and the main database
+    /// last. Units: member files.
+    publish,
+};
+
+/// Member file a progress event belongs to: the main database or one of its
+/// bound stores.
+pub const ProgressMember = enum {
+    main,
+    object_store,
+    vector_store,
+    graph_store,
+};
+
+/// One progress event. Events for one phase and member keep `total` fixed,
+/// never decrease `done`, and end with `done == total`.
+pub const Progress = struct {
+    phase: ProgressPhase,
+    /// Null when the phase covers the whole set (`verify`, `publish`).
+    member: ?ProgressMember,
+    done: u64,
+    total: u64,
+};
+
+/// Optional progress observer for long-running copy operations.
+///
+/// `report` runs synchronously on the calling thread, possibly once per
+/// copied page batch or verified item, so it should be cheap. Returning an
+/// error (conventionally `error.Interrupt`) cancels the operation through
+/// the same failure and cleanup path as any other error at that point.
+pub const ProgressCallback = struct {
+    context: ?*anyopaque = null,
+    report: *const fn (context: ?*anyopaque, progress: Progress) zova_error.Error!void,
+
+    pub fn emit(callback: ?ProgressCallback, progress: Progress) zova_error.Error!void {
+        if (callback) |cb| try cb.report(cb.context, progress);
+    }
+};
+
 /// Options for `Database.backupTo`.
 pub const BackupOptions = struct {
     /// Open and validate the destination after copying.
     verify: bool = true,
+    /// Receives copy and verify progress.
+    progress: ?ProgressCallback = null,
 };
 
 /// Options for `Database.compactTo`.
 pub const CompactOptions = struct {
     /// Open and validate the destination after compacting.
     verify: bool = true,
+    /// Receives copy and verify progress. `VACUUM INTO` runs as one step, so
+    /// the main copy reports only its start and end.
+    progress: ?ProgressCallback = null,
 };
 
 /// Options for `restoreBackup`.
@@ -414,4 +469,8 @@ pub const RestoreOptions = struct {
 pub const MigrateOptions = struct {
     /// Open and validate the migrated destination set after copying.
     verify: bool = true,
+    /// Receives copy, migrate, verify, and publish progress. The event after
+    /// the destination main database is published follows the commit, so an
+    /// error returned from it is ignored.
+    progress: ?ProgressCallback = null,
 };

@@ -42,10 +42,10 @@ test "cli version and help are successful" {
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "vector-collection [--json] [--limit <n>] <file.zova> <name>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "tables [--json] [--limit <n>] <file.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "format [--json] <database.zova>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "migrate [--json] [--no-verify] <source.zova> <destination.zova>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "migrate [--json] [--no-verify] [--dry-run] [--progress] <source.zova> <destination.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "check [--deep] <file.zova>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "backup [--json] [--no-verify] <source.zova> <destination.zova>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "compact [--json] [--no-verify] <source.zova> <destination.zova>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "backup [--json] [--no-verify] [--progress] <source.zova> <destination.zova>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "compact [--json] [--no-verify] [--progress] <source.zova> <destination.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "restore [--json] [--no-verify] <backup.zova> <destination.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "split (--objects | --vectors | --graphs) [--json] <main.zova> <store.zova>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help.stdout, "doctor [--json] [--limit <n>] <file.zova>") != null);
@@ -4216,6 +4216,175 @@ test "cli migrate migrates format-9 to current preserves source and verifies" {
     try std.testing.expect(std.mem.indexOf(u8, text.stdout, "_zova_") == null);
 }
 
+test "cli migrate --dry-run plans a bound set and creates nothing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var set_dir_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const set_dir = try std.fmt.bufPrint(&set_dir_buffer, ".zig-cache/tmp/{s}/dry-run", .{tmp.sub_path});
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try std.fmt.bufPrintSentinel(&main_buffer, "{s}/main.zova", .{set_dir}, 0);
+    var objects_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const objects_path = try std.fmt.bufPrintSentinel(&objects_buffer, "{s}/main.objects.zova", .{set_dir}, 0);
+    var vectors_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const vectors_path = try std.fmt.bufPrintSentinel(&vectors_buffer, "{s}/main.vectors.zova", .{set_dir}, 0);
+    var graphs_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const graphs_path = try std.fmt.bufPrintSentinel(&graphs_buffer, "{s}/main.graphs.zova", .{set_dir}, 0);
+    try setupMigrateBoundSet(&tmp, set_dir, main_path, objects_path, vectors_path, graphs_path);
+    const main_hash = try fileSha256(main_path);
+
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try std.fmt.bufPrintSentinel(&dest_buffer, "{s}/dest.zova", .{set_dir}, 0);
+    var vectors_dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const vectors_dest = try std.fmt.bufPrintSentinel(&vectors_dest_buffer, "{s}/dest.vectors.zova", .{set_dir}, 0);
+
+    var json = try runCli(&.{ "zova", "migrate", "--dry-run", "--json", main_path, dest_path });
+    defer json.deinit();
+    try std.testing.expectEqual(@as(u8, 0), json.code);
+    var parsed = try parseJson(json.stdout);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try expectJsonInt(root, "cli_json_version", 1);
+    try expectJsonString(root, "command", "migrate");
+    try expectJsonString(root, "status", "ok");
+    try expectJsonBool(root, "dry_run", true);
+    try expectJsonInt(root, "source_format", 9);
+    try expectJsonInt(root, "destination_format", 12);
+    try expectJsonString(root, "compatibility", "migratable");
+    try expectJsonBool(root, "verify", true);
+    try expectJsonString(root, "preflight", "passed");
+    try std.testing.expectEqual(std.json.Value.null, std.meta.activeTag(root.get("failure") orelse return error.MissingJsonField));
+    try expectJsonArrayLen(root, "members", 4);
+    const members = root.get("members").?.array.items;
+    try expectJsonString(members[0].object, "role", "main");
+    try expectJsonString(members[0].object, "destination_path", dest_path);
+    try expectJsonBool(members[0].object, "destination_exists", false);
+    try expectJsonString(members[2].object, "role", "vectors");
+    try expectJsonString(members[2].object, "source_path", vectors_path);
+    try expectJsonString(members[2].object, "destination_path", vectors_dest);
+    var total: i64 = 0;
+    for (members) |member| {
+        const page_size = member.object.get("page_size").?.integer;
+        const page_count = member.object.get("page_count").?.integer;
+        const freelist_count = member.object.get("freelist_count").?.integer;
+        try expectJsonInt(member.object, "copy_bytes", page_size * page_count);
+        try expectJsonInt(member.object, "free_bytes", page_size * freelist_count);
+        total += page_size * page_count;
+    }
+    try expectJsonInt(root, "copy_bytes", total);
+    try std.testing.expectEqual(std.json.Value.integer, std.meta.activeTag(root.get("destination_free_bytes") orelse return error.MissingJsonField));
+    try expectJsonBool(root, "recovery_directory_exists", false);
+    try expectJsonArray(root, "extensions");
+
+    var text = try runCli(&.{ "zova", "migrate", "--dry-run", main_path, dest_path });
+    defer text.deinit();
+    try std.testing.expectEqual(@as(u8, 0), text.code);
+    try expectContains(text.stdout, "migrate --dry-run: ok");
+    try expectContains(text.stdout, "source_format: 9");
+    try expectContains(text.stdout, "preflight: passed");
+    try expectContains(text.stdout, vectors_dest);
+    try std.testing.expect(std.mem.indexOf(u8, text.stdout, "_zova_") == null);
+
+    // Nothing was created and the source is unchanged.
+    try expectPathMissing(dest_path);
+    try expectPathMissing(vectors_dest);
+    const after_hash = try fileSha256(main_path);
+    try std.testing.expectEqualSlices(u8, &main_hash, &after_hash);
+
+    // An existing sibling destination fails the dry run like the migration.
+    try copyFixtureFile("tests/fixtures/format-9.zova", vectors_dest);
+    var existing = try runCli(&.{ "zova", "migrate", "--dry-run", "--json", main_path, dest_path });
+    defer existing.deinit();
+    try std.testing.expectEqual(@as(u8, 3), existing.code);
+    var existing_json = try parseJson(existing.stdout);
+    defer existing_json.deinit();
+    try expectJsonString(existing_json.value.object, "status", "would_fail");
+    try expectJsonString(existing_json.value.object, "failure", "DestinationExists");
+    try expectJsonBool(existing_json.value.object.get("members").?.array.items[2].object, "destination_exists", true);
+    var real = try runCli(&.{ "zova", "migrate", "--json", main_path, dest_path });
+    defer real.deinit();
+    try std.testing.expectEqual(@as(u8, 3), real.code);
+    try expectPathMissing(dest_path);
+
+    var existing_text = try runCli(&.{ "zova", "migrate", "--dry-run", main_path, dest_path });
+    defer existing_text.deinit();
+    try std.testing.expectEqual(@as(u8, 3), existing_text.code);
+    try expectContains(existing_text.stdout, "migrate --dry-run: would fail: DestinationExists");
+}
+
+test "cli migrate --dry-run reports unsupported sources and extension needs" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var current_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const current_path = try testingDbPath(&current_buffer, tmp.sub_path[0..], "dry-current.zova");
+    try createHealthyDatabase(current_path);
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "dry-dest.zova");
+    var current = try runCli(&.{ "zova", "migrate", "--dry-run", "--json", current_path, dest_path });
+    defer current.deinit();
+    try std.testing.expectEqual(@as(u8, 3), current.code);
+    var current_json = try parseJson(current.stdout);
+    defer current_json.deinit();
+    try expectJsonString(current_json.value.object, "failure", "NoMigrationPath");
+    try expectJsonString(current_json.value.object, "preflight", "skipped");
+    try expectJsonString(current_json.value.object, "compatibility", "current");
+    try expectPathMissing(dest_path);
+
+    // A source that does not exist is an open error, like the migration.
+    var missing_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const missing_path = try testingDbPath(&missing_buffer, tmp.sub_path[0..], "dry-missing.zova");
+    var missing = try runCli(&.{ "zova", "migrate", "--dry-run", "--json", missing_path, dest_path });
+    defer missing.deinit();
+    try std.testing.expectEqual(@as(u8, 3), missing.code);
+    var missing_json = try parseJson(missing.stderr);
+    defer missing_json.deinit();
+    try expectJsonString(missing_json.value.object, "status", "error");
+
+    // A format-9 source with an extension Zova does not bundle needs one.
+    var ext_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const ext_path = try testingDbPath(&ext_buffer, tmp.sub_path[0..], "dry-ext.zova");
+    try copyFixtureFile("tests/fixtures/format-9.zova", ext_path);
+    {
+        var raw = try zova.sqlite.Database.open(ext_path);
+        defer raw.deinit();
+        try raw.exec(
+            \\insert into _zova_extensions
+            \\  (name, version, storage_prefix, zova_abi_min, capabilities, required, installed_at_unix, manifest_json)
+            \\values ('dryrun', '0.1.0', '_zova_ext_dryrun_', '1.3.0', 'sql', 1, 0, '')
+        );
+        try raw.exec("create table _zova_ext_dryrun_meta (key text primary key, value text not null)");
+    }
+    var ext = try runCli(&.{ "zova", "migrate", "--dry-run", "--json", ext_path, dest_path });
+    defer ext.deinit();
+    try std.testing.expectEqual(@as(u8, 3), ext.code);
+    var ext_json = try parseJson(ext.stdout);
+    defer ext_json.deinit();
+    try expectJsonString(ext_json.value.object, "failure", "ExtensionUnavailable");
+    var found = false;
+    for (ext_json.value.object.get("extensions").?.array.items) |item| {
+        const name = item.object.get("name").?.string;
+        if (!std.mem.eql(u8, name, "dryrun")) continue;
+        found = true;
+        try expectJsonBool(item.object, "bundled", false);
+        try expectJsonBool(item.object, "available", false);
+        try expectJsonString(item.object, "error", "ExtensionUnavailable");
+    }
+    try std.testing.expect(found);
+
+    // Without verification no extension code is loaded, so the plan passes.
+    var noverify = try runCli(&.{ "zova", "migrate", "--dry-run", "--no-verify", ext_path, dest_path });
+    defer noverify.deinit();
+    try std.testing.expectEqual(@as(u8, 0), noverify.code);
+    try expectContains(noverify.stdout, "dryrun");
+    try expectContains(noverify.stdout, "needs bundle");
+    try expectPathMissing(dest_path);
+
+    var duplicate = try runCli(&.{ "zova", "migrate", "--dry-run", "--dry-run", ext_path, dest_path });
+    defer duplicate.deinit();
+    try std.testing.expectEqual(@as(u8, 2), duplicate.code);
+}
+
 test "cli migrate argument and destination errors are bounded" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -4341,6 +4510,120 @@ test "cli migrate handles unsupported formats and no-verify" {
     var check = try runCli(&.{ "zova", "check", "--deep", noverify_dest });
     defer check.deinit();
     try std.testing.expectEqual(@as(u8, 0), check.code);
+}
+
+/// Parse every stderr line as a progress event and return how many there were.
+/// Checks the event shape, that `done` never exceeds `total`, and that the
+/// last event of `last_phase` is complete.
+fn expectProgressEvents(stderr: []const u8, command: []const u8, phases: []const []const u8, last_phase: []const u8) !usize {
+    var count: usize = 0;
+    var seen: [4]bool = @splat(false);
+    var last_done: i64 = -1;
+    var last_total: i64 = -1;
+    var lines = std.mem.splitScalar(u8, stderr, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        var event = try parseJson(line);
+        defer event.deinit();
+        const object = event.value.object;
+        try expectJsonInt(object, "cli_json_version", 1);
+        try expectJsonString(object, "event", "progress");
+        try expectJsonString(object, "command", command);
+        const phase = object.get("phase").?.string;
+        const done = object.get("done").?.integer;
+        const total = object.get("total").?.integer;
+        try std.testing.expect(done <= total);
+        try std.testing.expect(object.get("member") != null);
+        for (phases, 0..) |want, index| {
+            if (std.mem.eql(u8, want, phase)) seen[index] = true;
+        }
+        if (std.mem.eql(u8, phase, last_phase)) {
+            last_done = done;
+            last_total = total;
+        }
+        count += 1;
+    }
+    for (phases, 0..) |_, index| try std.testing.expect(seen[index]);
+    try std.testing.expectEqual(last_total, last_done);
+    return count;
+}
+
+test "cli migrate --json --progress writes progress events to stderr" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "progress-source.zova");
+    try copyFixtureFile("tests/fixtures/format-9.zova", source_path);
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_path = try testingDbPath(&dest_buffer, tmp.sub_path[0..], "progress-dest.zova");
+    var quiet_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const quiet_path = try testingDbPath(&quiet_buffer, tmp.sub_path[0..], "progress-quiet.zova");
+
+    var result = try runCli(&.{ "zova", "migrate", "--json", "--progress", source_path, dest_path });
+    defer result.deinit();
+    try std.testing.expectEqual(@as(u8, 0), result.code);
+    // The final result object is unchanged and alone on stdout.
+    var final = try parseJson(result.stdout);
+    defer final.deinit();
+    try expectJsonString(final.value.object, "status", "ok");
+    try std.testing.expect(final.value.object.get("event") == null);
+    _ = try expectProgressEvents(result.stderr, "migrate", &.{ "copy", "migrate", "verify", "publish" }, "publish");
+
+    // Without --progress, a non-terminal stderr stays empty.
+    var quiet = try runCli(&.{ "zova", "migrate", "--json", source_path, quiet_path });
+    defer quiet.deinit();
+    try std.testing.expectEqual(@as(u8, 0), quiet.code);
+    try std.testing.expectEqual(@as(usize, 0), quiet.stderr.len);
+}
+
+test "cli backup and compact report progress on request" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "progress-ops.zova");
+    try createHealthyDatabase(source_path);
+    var backup_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const backup_path = try testingDbPath(&backup_buffer, tmp.sub_path[0..], "progress-backup.zova");
+    var compact_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const compact_path = try testingDbPath(&compact_buffer, tmp.sub_path[0..], "progress-compact.zova");
+    var quiet_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const quiet_path = try testingDbPath(&quiet_buffer, tmp.sub_path[0..], "progress-quiet.zova");
+    var restored_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const restored_path = try testingDbPath(&restored_buffer, tmp.sub_path[0..], "progress-restored.zova");
+
+    // Text lines on a non-terminal stderr; stdout keeps the usual result.
+    var backup = try runCli(&.{ "zova", "backup", "--progress", source_path, backup_path });
+    defer backup.deinit();
+    try std.testing.expectEqual(@as(u8, 0), backup.code);
+    try expectContains(backup.stdout, "backup: ok");
+    try expectContains(backup.stderr, "backup: copy main 100% (");
+    try expectContains(backup.stderr, " pages)\n");
+    try expectContains(backup.stderr, "backup: verify 100% (");
+    try std.testing.expect(std.mem.indexOf(u8, backup.stderr, "\r") == null);
+
+    var compact = try runCli(&.{ "zova", "compact", "--json", "--progress", source_path, compact_path });
+    defer compact.deinit();
+    try std.testing.expectEqual(@as(u8, 0), compact.code);
+    var compact_json = try parseJson(compact.stdout);
+    defer compact_json.deinit();
+    try expectJsonString(compact_json.value.object, "command", "compact");
+    _ = try expectProgressEvents(compact.stderr, "compact", &.{ "copy", "verify" }, "verify");
+
+    var quiet = try runCli(&.{ "zova", "backup", source_path, quiet_path });
+    defer quiet.deinit();
+    try std.testing.expectEqual(@as(u8, 0), quiet.code);
+    try std.testing.expectEqual(@as(usize, 0), quiet.stderr.len);
+
+    // Restore has no progress reporting.
+    var restore = try runCli(&.{ "zova", "restore", "--progress", backup_path, restored_path });
+    defer restore.deinit();
+    try std.testing.expectEqual(@as(u8, 2), restore.code);
+    try expectPathMissing(restored_path);
+
+    var duplicate = try runCli(&.{ "zova", "backup", "--progress", "--progress", source_path, restored_path });
+    defer duplicate.deinit();
+    try std.testing.expectEqual(@as(u8, 2), duplicate.code);
+    try expectContains(duplicate.stderr, "duplicate --progress");
 }
 
 test "cli migrate reports derived bound stores accurately" {

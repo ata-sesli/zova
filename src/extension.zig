@@ -506,8 +506,7 @@ pub fn checkAll(db: *sqlite.Database, registry: Registry) Error!void {
     var list = try listInstalled(std.heap.c_allocator, db);
     defer list.deinit(std.heap.c_allocator);
     for (list.items) |item| {
-        const extension = registry.find(item.name) orelse return error.ExtensionUnavailable;
-        try ensureManifestMatchesInstalled(registry, extension.manifest, item);
+        const extension = try ensureAvailable(registry, item);
         try registry.invoke(extension, db, .check);
     }
 }
@@ -518,10 +517,17 @@ pub fn registerSqlForInstalled(db: *sqlite.Database, registry: Registry) Error!v
     var list = try listInstalled(std.heap.c_allocator, db);
     defer list.deinit(std.heap.c_allocator);
     for (list.items) |item| {
-        const extension = registry.find(item.name) orelse return error.ExtensionUnavailable;
-        try ensureManifestMatchesInstalled(registry, extension.manifest, item);
+        const extension = try ensureAvailable(registry, item);
         try registry.invokeVersion(extension, db, .register_sql, item.version);
     }
+}
+
+/// The registry's code for one installed extension, accepted exactly as open
+/// accepts it: present by name and compatible with the installed manifest.
+pub fn ensureAvailable(registry: Registry, installed: InstalledInfo) Error!Extension {
+    const extension = registry.find(installed.name) orelse return error.ExtensionUnavailable;
+    try ensureManifestMatchesInstalled(registry, extension.manifest, installed);
+    return extension;
 }
 
 pub fn listInstalled(allocator: std.mem.Allocator, db: *sqlite.Database) Error!InstalledList {

@@ -44,11 +44,26 @@ const vectorStoreCommand = @import("cli/stores.zig").vectorStoreCommand;
 const vectorsCommand = @import("cli/inspect.zig").vectorsCommand;
 const writeUsage = @import("cli/render.zig").writeUsage;
 
+pub const RunOptions = struct {
+    /// stderr is an ANSI-capable terminal; enables the live progress line.
+    stderr_terminal: bool = false,
+};
+
 pub fn run(
     allocator: std.mem.Allocator,
     args: []const []const u8,
     stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
+) !u8 {
+    return runWithOptions(allocator, args, stdout, stderr, .{});
+}
+
+pub fn runWithOptions(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+    options: RunOptions,
 ) !u8 {
     var parsed_global = parseGlobalArgs(allocator, args) catch |err| switch (err) {
         error.MissingExtensionPath => return usageError(stderr, "--extension requires <bundle.zovaext>"),
@@ -69,7 +84,7 @@ pub fn run(
     }) catch |err| return dynamicExtensionLoadErrorFormat(stderr, if (argsContain(args, "--json")) .json else .text, err);
     defer owned_registry.deinit();
 
-    const ctx: CommandContext = .{ .registry = owned_registry.registry() };
+    const ctx: CommandContext = .{ .registry = owned_registry.registry(), .stderr_terminal = options.stderr_terminal };
     const parsed_args = parsed_global.args;
 
     if (parsed_args.len <= 1) {

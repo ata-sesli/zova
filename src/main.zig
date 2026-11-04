@@ -15,7 +15,8 @@ pub fn main(init: std.process.Init) !u8 {
     const stderr = &stderr_writer.interface;
     defer stderr.flush() catch {};
 
-    return cli.run(allocator, args, stdout, stderr) catch |err| {
+    const stderr_terminal = std.Io.File.stderr().supportsAnsiEscapeCodes(init.io) catch false;
+    return cli.runWithOptions(allocator, args, stdout, stderr, .{ .stderr_terminal = stderr_terminal }) catch |err| {
         try stderr.print("unexpected error: {s}\n", .{@errorName(err)});
         return 1;
     };

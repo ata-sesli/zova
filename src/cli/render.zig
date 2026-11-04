@@ -38,8 +38,8 @@ pub fn writeUsage(writer: *std.Io.Writer) !void {
         \\  zova doctor [--json] [--limit <n>] <file.zova>
         \\  zova salvage --dry-run [--json] [--limit <n>] <source.zova>
         \\  zova salvage [--json] [--limit <n>] <source.zova> <destination.zova>
-        \\  zova backup [--json] [--no-verify] <source.zova> <destination.zova>
-        \\  zova compact [--json] [--no-verify] <source.zova> <destination.zova>
+        \\  zova backup [--json] [--no-verify] [--progress] <source.zova> <destination.zova>
+        \\  zova compact [--json] [--no-verify] [--progress] <source.zova> <destination.zova>
         \\  zova restore [--json] [--no-verify] <backup.zova> <destination.zova>
         \\  zova split (--objects | --vectors | --graphs) [--json] <main.zova> <store.zova>
         \\  zova object-store create [--json] <objects.zova>
@@ -55,7 +55,7 @@ pub fn writeUsage(writer: *std.Io.Writer) !void {
         \\  zova graph-store info [--json] <main.zova>
         \\  zova graph-store unbind [--json] <main.zova>
         \\  zova format [--json] <database.zova>
-        \\  zova migrate [--json] [--no-verify] <source.zova> <destination.zova>
+        \\  zova migrate [--json] [--no-verify] [--dry-run] [--progress] <source.zova> <destination.zova>
         \\  zova extension list [--json] <file.zova>
         \\  zova extension info [--json] <file.zova> <name>
         \\  zova extension check [--json] <file.zova> [name]

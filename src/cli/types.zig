@@ -11,6 +11,8 @@ pub const OutputFormat = enum {
 
 pub const CommandContext = struct {
     registry: zova.ExtensionRegistry,
+    /// stderr is an ANSI-capable terminal: show the rewriting progress line.
+    stderr_terminal: bool = false,
 };
 
 pub const ParsedGlobalArgs = struct {
@@ -68,6 +70,7 @@ pub const SalvageCommandArgs = struct {
 pub const OperationalCommandArgs = struct {
     format: OutputFormat,
     verify: bool,
+    progress: bool = false,
     source_path: []const u8,
     destination_path: []const u8,
 };

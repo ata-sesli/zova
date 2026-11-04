@@ -927,12 +927,26 @@ pub(crate) fn probe_format(path: &str) -> PyResult<PyFormatInfo> {
 /// Migration is explicit, copy-forward, and source-preserving: the source file
 /// is never mutated, the destination must not already exist, and any failure
 /// removes attempted output. When `verify` is true (the default), the migrated
-/// destination is verified after the copy.
+/// destination is verified after the copy. A database with a non-bundled
+/// extension installed needs that extension's trusted bundle in
+/// `extension_bundles`, exactly as `Database.open` does.
 #[pyfunction]
-#[pyo3(signature = (source, destination, *, verify = true))]
-pub(crate) fn migrate_database(source: &str, destination: &str, verify: bool) -> PyResult<()> {
-    zova_rust::migrate_database(source, destination, zova_rust::MigrateOptions { verify })
-        .map_err(zova_error)
+#[pyo3(signature = (source, destination, *, verify = true, extension_bundles = None, trust_store_path = None))]
+pub(crate) fn migrate_database(
+    source: &str,
+    destination: &str,
+    verify: bool,
+    extension_bundles: Option<Vec<String>>,
+    trust_store_path: Option<String>,
+) -> PyResult<()> {
+    let extensions = extension_options(extension_bundles, trust_store_path);
+    zova_rust::migrate_database_with_extensions(
+        source,
+        destination,
+        zova_rust::MigrateOptions { verify },
+        &extensions,
+    )
+    .map_err(zova_error)
 }
 
 /// Restore a valid `.zova` backup file into a new volatile in-memory database.

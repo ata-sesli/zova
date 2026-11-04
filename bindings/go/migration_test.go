@@ -190,3 +190,49 @@ func TestMigrateCurrentFormatReportsNoMigrationPath(t *testing.T) {
 		t.Fatalf("current-format migration published output")
 	}
 }
+
+// Empty extension options migrate exactly like MigrateDatabase.
+func TestMigrateWithEmptyExtensionOptionsMatchesPlainMigrate(t *testing.T) {
+	source := copyMigrationFixture(t, "format-9.zova")
+	before := readAllBytes(t, source)
+	destination := tempZovaPath(t, "migrate-ext-empty")
+
+	if err := MigrateDatabaseWithExtensions(source, destination, MigrateOptions{}, ExtensionOptions{}); err != nil {
+		t.Fatalf("MigrateDatabaseWithExtensions(empty) = %v", err)
+	}
+	info, err := ProbeFormat(destination)
+	if err != nil {
+		t.Fatalf("ProbeFormat = %v", err)
+	}
+	if info.FormatVersion != 12 || info.Compatibility != FormatCurrent {
+		t.Fatalf("ProbeFormat = %+v, want format 12 current", info)
+	}
+	if !sameBytes(readAllBytes(t, source), before) {
+		t.Fatal("migration mutated the source")
+	}
+}
+
+// Selected bundles go through the same loading and trust checks as open: a
+// bundle that cannot be loaded fails the migration and publishes nothing.
+func TestMigrateWithUnloadableBundleFailsWithoutOutput(t *testing.T) {
+	source := copyMigrationFixture(t, "format-9.zova")
+	directory := t.TempDir()
+	destination := filepath.Join(directory, "migrate-ext-missing.zova")
+	extensions := ExtensionOptions{
+		BundlePaths:    []string{filepath.Join(directory, "missing.zovaext")},
+		TrustStorePath: filepath.Join(directory, "trust.json"),
+	}
+	if err := MigrateDatabaseWithExtensions(source, destination, MigrateOptions{}, extensions); err == nil {
+		t.Fatal("migrated with an unloadable bundle")
+	}
+	if err := MigrateDatabaseWithExtensions(source, destination, MigrateOptions{}, ExtensionOptions{BundlePaths: []string{"bad\x00.zovaext"}}); err == nil {
+		t.Fatal("accepted invalid bundle path")
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatalf("ReadDir = %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("failed migration left %d entries", len(entries))
+	}
+}

@@ -66,14 +66,87 @@ untouched. Probe first, then migrate.
 
 ```sh
 zova format app.zova
+zova migrate --dry-run app.zova app-format-12.zova
 zova migrate app.zova app-format-12.zova
 ```
 
 `zova format` prints the source format, the current format, the earliest
 migratable format, the compatibility class, and the recommended action. Add
-`--json` for machine-readable output. `zova migrate` accepts `--json` and
-`--no-verify`; verification is on by default and reopens the migrated destination
-set through the full open path.
+`--json` for machine-readable output. `zova migrate` accepts `--json`,
+`--no-verify`, `--dry-run` and `--progress`; verification is on by default and
+reopens the migrated destination set through the full open path.
+
+#### Progress
+
+On a terminal, `zova migrate`, `zova backup` and `zova compact` show one
+progress line on stderr. `--progress` writes the same lines when stderr is not a
+terminal. With `--json --progress`, stderr carries one JSON object per line:
+
+```json
+{"cli_json_version":1,"event":"progress","command":"migrate","phase":"copy","member":"main","done":1024,"total":4113}
+```
+
+The final result object on stdout is unchanged and has no `event` field.
+Output is throttled to whole-percent changes. Progress is reported by phase:
+
+| Phase | Member | Unit |
+| --- | --- | --- |
+| `copy` | `main`, `object_store`, `vector_store`, `graph_store` | SQLite pages of the source member |
+| `migrate` | as for `copy` | format migration steps |
+| `verify` | `null` (whole set) | stored objects, chunks, vectors and KV entries |
+| `publish` | `null` (whole set) | member files, bound stores first |
+
+Migration and backup copy each member in batches of 1024 pages. `compact` runs
+`VACUUM INTO` as a single statement, so its main copy reports only its start
+and end; so do the bound stores that backup and compact inline. Verification
+counts every item the same, so one large object advances it by one.
+
+In Zig, set `progress` on `MigrateOptions`, `BackupOptions` or `CompactOptions`
+to a `ProgressCallback`. Returning an error from the callback (conventionally
+`error.Interrupt`) cancels the operation through the same cleanup as any other
+failure at that point: a cancelled migration leaves the source set unchanged
+and creates no destination files, and a cancelled backup or compaction removes
+its destination. The last migration event follows the commit of the
+destination set, so an error returned from it is ignored. The C ABI and the
+language bindings do not expose progress yet.
+
+#### Dry run
+
+`zova migrate --dry-run <source> <destination>` creates and modifies nothing.
+It runs the same classification, destination and source/bound-store preflight
+checks as a real migration, using the same code, and reports:
+
+- every file the migration would write (the main database and each bound store
+  as `<destination stem>.<objects|vectors|graphs>.zova`), whether each
+  destination or the `<destination>.migration-recovery` directory already
+  exists;
+- each member's SQLite `page_size`, `page_count` and `freelist_count`, the bytes
+  the copy writes (`page_count × page_size`), and the free space on the
+  destination filesystem (`unknown` on platforms other than macOS and 64-bit
+  Linux);
+- every installed extension, whether Zova bundles it or it needs a `.zovaext`
+  bundle passed with `--extension`, and whether the supplied bundles satisfy
+  it.
+
+The dry run exits `0` when the migration would pass these checks. Otherwise it
+exits with the code the migration would return for the same failure (`3` for
+format, destination, bound-store and extension failures), naming the first failing
+check as `failure` (an error name such as `DestinationExists`,
+`BoundStoreInvalid` or `ExtensionUnavailable`, or `InsufficientSpace` when the
+copied pages exceed the free space). With `--json` the report is one object on
+stdout with `"dry_run": true` and `"status"` set to `"ok"` or `"would_fail"`.
+
+Migration copies every page, free pages included, so free pages are carried
+into the destination as is. When the report shows a large `free_bytes`,
+`zova compact` before migrating produces a smaller copy. Format steps can add a
+little more on top of `copy_bytes`, so treat it as a lower bound. The dry run
+does not lock the source, copy data, or run post-migration verification; a
+migration can still fail on a write error or on verification of the migrated
+data.
+
+In Zig, `zova.planMigration(allocator, source, destination, options, registry)`
+returns the same plan as a `MigrationPlan`, with `failure` set to the error
+`migrateDatabaseWithExtensions` would return from those checks.
 
 ### C ABI
 
@@ -167,6 +240,23 @@ migrateDatabase("app.zova", "app-format-12.zova"); // verify defaults to true
 ```
 
 `asyncProbeFormat` and `asyncMigrateDatabase` are the promise-returning variants.
+
+### Extensions in the bindings
+
+Releases after 1.3.0 also let the bindings migrate a database with a
+non-bundled extension installed. Each migrate call takes the same trusted
+bundle paths and trust store as that binding's open call and routes them to
+`zova_database_migrate_with_extensions`. Empty options behave exactly like a
+plain migration, and a bundle that fails loading or trust checks fails the
+migration without publishing anything. Plugin descriptors linked into the host
+process remain a C ABI feature.
+
+| Binding | Call |
+| --- | --- |
+| Rust | `migrate_database_with_extensions(source, destination, MigrateOptions, &ExtensionOptions)` |
+| Go | `MigrateDatabaseWithExtensions(source, destination, MigrateOptions, ExtensionOptions)` |
+| Python | `migrate_database(source, destination, *, verify=True, extension_bundles=None, trust_store_path=None)` |
+| JavaScript | `migrateDatabase(source, destination, verify, extensions)` and `AsyncDatabase.migrateDatabase(source, destination, verify, extensions)` |
 
 ## Operational rules
 

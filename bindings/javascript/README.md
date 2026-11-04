@@ -88,7 +88,9 @@ The synchronous `Database` facade exposes:
 - SQLite execution, prepared statements, bindings, stepping, and columns
 - transactions, savepoints, backup, compact, restore, vacuum, and conversion
 - storage-format probing and explicit copy-forward migration (`probeFormat`,
-  `migrateDatabase`, and their async `AsyncDatabase` counterparts)
+  `migrateDatabase`, and their async `AsyncDatabase` counterparts), with the
+  same optional `ExtensionOptions` as `Database.open` for databases with a
+  non-bundled extension installed
 - objects, manifests, chunks, range reads, assembly, and `ObjectWriter`
 - f32/f16/i8 vector collection lifecycle, batch writes/deletes, and exact search
 - public graph CRUD, atomic batches, neighbors, degree, and walks
