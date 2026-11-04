@@ -374,6 +374,21 @@ pub fn build(b: *std.Build) void {
     const install_object_writer_196 = b.addInstallArtifact(object_writer_196_benchmark, .{});
     b.step("build-object-writer-196", "Build bounded issue-196 object writer ingest benchmark").dependOn(&install_object_writer_196.step);
 
+    const object_seekable_reader_193_benchmark = b.addExecutable(.{
+        .name = "zova_object_seekable_reader_193_benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/object_seekable_reader_193.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    object_seekable_reader_193_benchmark.root_module.addImport("object_impl", object_benchmark.root_module.import_table.get("object_impl").?);
+    object_seekable_reader_193_benchmark.root_module.addIncludePath(b.path("vendor/sqlite3.53.4"));
+    object_seekable_reader_193_benchmark.root_module.linkLibrary(sqlite_lib);
+    const install_object_seekable_reader_193 = b.addInstallArtifact(object_seekable_reader_193_benchmark, .{});
+    b.step("build-object-seekable-reader-193", "Build bounded issue-193 seekable object reader benchmark").dependOn(&install_object_seekable_reader_193.step);
+
     const vector_norms_94_benchmark = b.addExecutable(.{
         .name = "zova_vector_norms_94_benchmark",
         .root_module = b.createModule(.{
