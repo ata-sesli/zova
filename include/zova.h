@@ -1932,6 +1932,10 @@ zova_status zova_object_assemble_from_chunks_with_options(const zova_object_asse
  * active caller transaction with ZOVA_OBJECT_TRANSACTION_ACTIVE: it holds no
  * transaction across write calls, so its loose chunks would otherwise sit
  * outside the caller's atomic scope. A bound object store still allows it.
+ * The writer buffers chunks in memory and stores them in one transaction once
+ * about 64 MiB are pending, and at finish, so the write size does not decide
+ * the commit count. A failed commit drops the pending chunks and finish then
+ * reports them missing; cancel and destroy never store pending chunks.
  */
 zova_status zova_object_writer_create(const zova_object_writer_create_request *request);
 zova_status zova_object_writer_create_with_options(const zova_object_writer_create_with_options_request *request);

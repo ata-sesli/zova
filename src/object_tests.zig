@@ -219,15 +219,17 @@ test "writer rolls back a failed write batch and never publishes its chunks" {
     try raw.exec("pragma foreign_keys = on");
     var db = try preparePrototypeDatabase(&raw);
 
-    var bytes: [fastcdc.max_size * 8]u8 = undefined;
-    for (&bytes, 0..) |*byte, index| byte.* = @truncate((index *% 2246822519) >> 9);
+    // Cross the commit threshold so the forced failure happens inside `write`.
+    const bytes = try std.testing.allocator.alloc(u8, object_impl.writer_commit_threshold_bytes + fastcdc.max_size * 8);
+    defer std.testing.allocator.free(bytes);
+    for (bytes, 0..) |*byte, index| byte.* = @truncate((index *% 2246822519) >> 9);
 
     try raw.exec("create trigger force_writer_chunk_failure " ++
         "before insert on _zova_chunks when (select count(*) from _zova_chunks) >= 3 " ++
         "begin select raise(abort, 'forced writer chunk failure'); end;");
 
     var writer = try db.objectWriter(std.testing.allocator);
-    try std.testing.expectError(error.Constraint, writer.write(&bytes));
+    try std.testing.expectError(error.Constraint, writer.write(bytes));
     try std.testing.expectEqual(@as(i64, 0), try testingCount(&raw, "select count(*) from _zova_chunks"));
 
     try raw.exec("drop trigger force_writer_chunk_failure");
@@ -238,11 +240,52 @@ test "writer rolls back a failed write batch and never publishes its chunks" {
 
     var retry = try db.objectWriter(std.testing.allocator);
     defer retry.deinit();
-    const id = try testingWriteThenFinish(&retry, &bytes);
-    try std.testing.expectEqualSlices(u8, &objectId(&bytes), &id);
+    const id = try testingWriteThenFinish(&retry, bytes);
+    try std.testing.expectEqualSlices(u8, &objectId(bytes), &id);
     var object = try db.getObject(std.testing.allocator, id);
     defer object.deinit(std.testing.allocator);
-    try std.testing.expectEqualSlices(u8, &bytes, object.bytes);
+    try std.testing.expectEqualSlices(u8, bytes, object.bytes);
+}
+
+test "writer commits buffered chunks by size rather than per write call" {
+    var raw = try sqlite.Database.open(":memory:");
+    defer raw.deinit();
+    try raw.exec("pragma foreign_keys = on");
+    var db = try preparePrototypeDatabase(&raw);
+
+    const threshold = object_impl.writer_commit_threshold_bytes;
+    const bytes = try std.testing.allocator.alloc(u8, threshold * 2 + 12_345);
+    defer std.testing.allocator.free(bytes);
+    var prng = std.Random.DefaultPrng.init(0x196);
+    prng.random().bytes(bytes);
+
+    for ([_]object_impl.ObjectStorageProfile{ .deduplication, .streaming }) |profile| {
+        var writer = try db.objectWriterWithOptions(std.testing.allocator, .{ .profile = profile });
+        defer writer.deinit();
+
+        // Many small writes below the threshold only buffer chunks.
+        var offset: usize = 0;
+        while (offset < threshold / 2) : (offset += 37_919) {
+            try writer.write(bytes[offset..@min(offset + 37_919, threshold / 2)]);
+        }
+        try std.testing.expectEqual(@as(i64, 0), try testingCount(&raw, "select count(*) from _zova_chunks"));
+
+        // Crossing the threshold commits the buffered chunks during `write`.
+        try writer.write(bytes[threshold / 2 ..]);
+        const committed = try testingCount(&raw, "select count(*) from _zova_chunks");
+        try std.testing.expect(committed > 0);
+
+        const id = try writer.finish();
+        try std.testing.expectEqualSlices(u8, &objectId(bytes), &id);
+        try std.testing.expect(try db.objectChunkCount(id) >= @as(u64, @intCast(committed)));
+        var object = try db.getObject(std.testing.allocator, id);
+        defer object.deinit(std.testing.allocator);
+        try std.testing.expectEqualSlices(u8, bytes, object.bytes);
+
+        try raw.exec("delete from _zova_object_chunks");
+        try raw.exec("delete from _zova_objects");
+        try raw.exec("delete from _zova_chunks");
+    }
 }
 
 test "writer rejects a corrupt pre-existing chunk it would reuse" {
