@@ -426,6 +426,20 @@ impl PyDatabase {
         })
     }
 
+    pub(crate) fn object_seekable_reader(
+        &mut self,
+        id: &Bound<'_, PyAny>,
+    ) -> PyResult<crate::object::PyObjectSeekableReader> {
+        let id = object_id_from_py(id)?;
+        Ok(crate::object::PyObjectSeekableReader {
+            inner: Some(
+                self.db_mut()?
+                    .object_seekable_reader_owned(id)
+                    .map_err(zova_error)?,
+            ),
+        })
+    }
+
     pub(crate) fn create_vector_collection(
         &mut self,
         name: &str,

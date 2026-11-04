@@ -300,6 +300,17 @@ follow Zova's object transaction policy in single-file mode. When an object
 store is bound, object writes participate in the same Zova transaction/savepoint
 scope through SQLite `ATTACH`.
 
+To serve large objects with seeking, such as HTTP range requests, open an
+`ObjectSeekableReader`. It is a file-like object (`read`, `readinto`, `seek`,
+`tell`, `close`, context manager). It verifies each chunk once before
+returning its bytes and holds no read transaction between calls:
+
+```python
+with db.object_seekable_reader(object_id) as reader:
+    reader.seek(1024 * 1024)
+    part = reader.read(64 * 1024)
+```
+
 Loose chunks and assembly are also exposed for receive-side workflows:
 applications track transfer state in their own SQL tables, call
 `put_object_chunk()` for verified chunks, then call
