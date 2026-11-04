@@ -2234,7 +2234,7 @@ test "batch-driven graph statements keep bounded indexed lookups" {
         for ([_]?[]const u8{ null, "calls" }) |edge_type| {
             capture.reset("carray(?3)");
             try db.graphDegreeManyKeyed("plan", requested_nodes, direction, edge_type, &degrees);
-            try capture.expectPlan(&db.sqlite_db, .{ .outer = "batch", .bounded = &.{bounded_nodes} });
+            try capture.expectPlan(&db.sqlite_db, .{ .outer = "batch", .bounded = &.{ bounded_nodes, bounded_edges } });
         }
     }
 
@@ -2286,7 +2286,10 @@ test "batch-driven graph statements keep bounded indexed lookups" {
     capture.reset("delete from main._zova_graph_nodes");
     try db.deleteGraphNodes("plan", &.{ "n100", "n101" });
     try capture.expectPlan(&db.sqlite_db, .{
-        .bounded = &.{.{ .alias = "main._zova_graph_nodes", .partition = "graph_key" }},
+        .bounded = &.{
+            .{ .alias = "main._zova_graph_nodes", .partition = "graph_key" },
+            .{ .alias = "_zova_graph_edges", .partition = "graph_key" },
+        },
         .in_operator = "_zova_graph_batch_delete_ids",
     });
 }
