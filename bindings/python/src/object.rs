@@ -1,9 +1,12 @@
 use crate::error::{closed_error, zova_error};
 use pyo3::basic::CompareOp;
+use pyo3::buffer::PyBuffer;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::io::{Read, Seek, SeekFrom};
 
 #[pyclass(name = "ObjectId", frozen, skip_from_py_object)]
 #[derive(Clone, Copy)]
@@ -45,6 +48,12 @@ pub(crate) struct PyObjectPutOptions {
 #[pyclass(name = "ObjectReader", unsendable)]
 pub(crate) struct PyObjectReader {
     pub(crate) inner: Option<zova_rust::OwnedObjectReader>,
+}
+
+/// Seekable, verified, file-like reader over one stored object.
+#[pyclass(name = "ObjectSeekableReader", unsendable)]
+pub(crate) struct PyObjectSeekableReader {
+    pub(crate) inner: Option<zova_rust::OwnedObjectSeekableReader>,
 }
 
 #[pyclass(name = "ObjectWriter", unsendable)]
@@ -472,4 +481,124 @@ fn hex_lower(bytes: &[u8; 32]) -> String {
         let _ = write!(&mut out, "{byte:02x}");
     }
     out
+}
+
+/// Map a reader I/O error back to its native Zova error when it carries one.
+fn seekable_error(error: std::io::Error) -> PyErr {
+    match error
+        .into_inner()
+        .map(|inner| inner.downcast::<zova_rust::Error>())
+    {
+        Some(Ok(native)) => zova_error(*native),
+        Some(Err(other)) => PyValueError::new_err(other.to_string()),
+        None => PyValueError::new_err("object reader I/O error"),
+    }
+}
+
+impl PyObjectSeekableReader {
+    fn reader(&mut self) -> PyResult<&mut zova_rust::OwnedObjectSeekableReader> {
+        self.inner
+            .as_mut()
+            .ok_or_else(|| closed_error("object reader"))
+    }
+}
+
+#[pymethods]
+impl PyObjectSeekableReader {
+    /// Read up to `size` bytes, or to the end when `size` is negative.
+    #[pyo3(signature = (size = -1))]
+    pub(crate) fn read<'py>(
+        &mut self,
+        py: Python<'py>,
+        size: i64,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let reader = self.reader()?;
+        let mut buffer = Vec::new();
+        if size < 0 {
+            reader.read_to_end(&mut buffer).map_err(seekable_error)?;
+        } else {
+            buffer.resize(size as usize, 0);
+            let read = reader.read(&mut buffer).map_err(seekable_error)?;
+            buffer.truncate(read);
+        }
+        Ok(PyBytes::new(py, &buffer))
+    }
+
+    /// Read into a writable bytes-like object and return the byte count.
+    pub(crate) fn readinto(&mut self, py: Python<'_>, buffer: PyBuffer<u8>) -> PyResult<usize> {
+        let cells = buffer
+            .as_mut_slice(py)
+            .ok_or_else(|| PyValueError::new_err("readinto needs a writable contiguous buffer"))?;
+        let mut bytes = vec![0; cells.len()];
+        let read = self.reader()?.read(&mut bytes).map_err(seekable_error)?;
+        for (cell, byte) in cells.iter().zip(&bytes[..read]) {
+            cell.set(*byte);
+        }
+        Ok(read)
+    }
+
+    /// Move the read offset like `io.IOBase.seek` and return the new offset.
+    #[pyo3(signature = (offset, whence = 0))]
+    pub(crate) fn seek(&mut self, offset: i64, whence: i32) -> PyResult<u64> {
+        let position = match whence {
+            0 => SeekFrom::Start(
+                u64::try_from(offset)
+                    .map_err(|_| PyValueError::new_err("negative seek position"))?,
+            ),
+            1 => SeekFrom::Current(offset),
+            2 => SeekFrom::End(offset),
+            _ => return Err(PyValueError::new_err(format!("invalid whence ({whence})"))),
+        };
+        self.reader()?.seek(position).map_err(seekable_error)
+    }
+
+    pub(crate) fn tell(&mut self) -> PyResult<u64> {
+        Ok(self.reader()?.position())
+    }
+
+    /// Object size in bytes.
+    #[getter]
+    pub(crate) fn size(&mut self) -> PyResult<u64> {
+        Ok(self.reader()?.size())
+    }
+
+    #[getter]
+    pub(crate) fn closed(&self) -> bool {
+        self.inner.is_none()
+    }
+
+    pub(crate) fn readable(&self) -> bool {
+        true
+    }
+
+    pub(crate) fn seekable(&self) -> bool {
+        true
+    }
+
+    pub(crate) fn close(&mut self) -> PyResult<()> {
+        let Some(mut reader) = self.inner.take() else {
+            return Ok(());
+        };
+        match reader.close() {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.inner = Some(reader);
+                Err(zova_error(error))
+            }
+        }
+    }
+
+    pub(crate) fn __enter__(slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
+        slf
+    }
+
+    pub(crate) fn __exit__(
+        &mut self,
+        _exc_type: Option<&Bound<'_, PyAny>>,
+        _exc_value: Option<&Bound<'_, PyAny>>,
+        _traceback: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<bool> {
+        self.close()?;
+        Ok(false)
+    }
 }
