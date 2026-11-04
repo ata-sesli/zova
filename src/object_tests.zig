@@ -133,6 +133,40 @@ test "fixed profile writer retains its profile and same bytes remain idempotent"
     try std.testing.expectEqual(fixed_chunks.chunk_size, manifest.chunks[1].size_bytes);
 }
 
+test "writer finish references its chunks and drops them when another policy owns the object" {
+    var raw = try sqlite.Database.open(":memory:");
+    defer raw.deinit();
+    try raw.exec("pragma foreign_keys = on");
+    var db = try preparePrototypeDatabase(&raw);
+
+    var bytes: [fixed_chunks.chunk_size + fastcdc.max_size + 29]u8 = undefined;
+    for (&bytes, 0..) |*byte, index| byte.* = @truncate((index *% 2654435761) >> 7);
+
+    const unreferenced_chunks_sql =
+        "select count(*) from _zova_chunks c where not exists " ++
+        "(select 1 from _zova_object_chunks oc where oc.chunk_hash = c.chunk_hash)";
+
+    var writer = try db.objectWriter(std.testing.allocator);
+    defer writer.deinit();
+    try writer.write(&bytes);
+    const id = try writer.finish();
+    const fastcdc_chunks = try testingCount(&raw, "select count(*) from _zova_chunks");
+    try std.testing.expect(fastcdc_chunks > 1);
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&raw, unreferenced_chunks_sql));
+
+    var replay = try db.objectWriterWithOptions(std.testing.allocator, .{ .profile = .streaming });
+    defer replay.deinit();
+    try replay.write(&bytes);
+    const replay_id = try replay.finish();
+    try std.testing.expectEqualSlices(u8, &id, &replay_id);
+
+    var manifest = try db.objectManifest(std.testing.allocator, id);
+    defer manifest.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(fastcdc.version, manifest.chunker);
+    try std.testing.expectEqual(fastcdc_chunks, try testingCount(&raw, "select count(*) from _zova_chunks"));
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&raw, unreferenced_chunks_sql));
+}
+
 test "fixed profile transfer chunks accept 1 MiB and assemble atomically" {
     var raw = try sqlite.Database.open(":memory:");
     defer raw.deinit();

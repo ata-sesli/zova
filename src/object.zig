@@ -580,14 +580,17 @@ pub const ObjectWriter = struct {
         var id: ObjectId = undefined;
         final_hasher.final(&id);
 
+        // After a successful assembly the new manifest references every chunk
+        // this writer stored, so loose-chunk cleanup is only needed when an
+        // existing object (possibly chunked under another policy) wins.
         db.assembleObjectFromChunksWithPolicy(id, self.size_bytes, self.chunks.items, self.policy) catch |err| switch (err) {
             error.ObjectAlreadyExists => {
                 try self.ensureExistingObjectIsValid(id);
+                try self.deleteUnreferencedSeenChunks();
             },
             else => return err,
         };
 
-        try self.deleteUnreferencedSeenChunks();
         self.closed = true;
         return id;
     }
