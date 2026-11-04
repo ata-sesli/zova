@@ -29,6 +29,7 @@ const (
 	StatusCorrupt                  Status = C.ZOVA_CORRUPT
 	StatusMisuse                   Status = C.ZOVA_MISUSE
 	StatusSQLiteError              Status = C.ZOVA_SQLITE_ERROR
+	StatusInterrupted              Status = C.ZOVA_INTERRUPTED
 	StatusNotZovaPath              Status = C.ZOVA_NOT_ZOVA_PATH
 	StatusNotZovaDatabase          Status = C.ZOVA_NOT_ZOVA_DATABASE
 	StatusUnsupportedZovaVersion   Status = C.ZOVA_UNSUPPORTED_ZOVA_VERSION

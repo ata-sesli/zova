@@ -16,6 +16,19 @@ static void expect_status(zova_status actual, zova_status expected, const char *
     }
 }
 
+typedef struct progress_counter {
+    size_t count;
+    size_t cancel_at;
+    uint32_t last_phase;
+} progress_counter;
+
+static int32_t count_progress(void *user_data, const zova_progress *progress) {
+    progress_counter *counter = (progress_counter *)user_data;
+    counter->last_phase = progress->phase;
+    counter->count += 1;
+    return counter->count == counter->cancel_at ? 1 : 0;
+}
+
 static void expect_bytes(const uint8_t *actual, const uint8_t *expected, size_t len, const char *label) {
     if (memcmp(actual, expected, len) != 0) {
         fprintf(stderr, "%s: byte mismatch\n", label);
@@ -1719,6 +1732,7 @@ static void run_probe_migrate_smoke(void) {
     expect_status(zova_database_probe_format(NULL), ZOVA_INVALID_ARGUMENT, "probe null request");
     expect_status(zova_database_migrate(NULL), ZOVA_INVALID_ARGUMENT, "migrate null request");
     expect_status(zova_database_migrate_with_extensions(NULL), ZOVA_INVALID_ARGUMENT, "migrate with extensions null request");
+    expect_status(zova_database_migrate_with_progress(NULL), ZOVA_INVALID_ARGUMENT, "migrate with progress null request");
     expect_status(zova_database_create_with_plugins(NULL), ZOVA_INVALID_ARGUMENT, "create with plugins null request");
     expect_status(zova_database_open_with_plugins(NULL), ZOVA_INVALID_ARGUMENT, "open with plugins null request");
     expect_status(zova_database_open_for_extension_upgrade_with_plugins(NULL), ZOVA_INVALID_ARGUMENT, "upgrade open with plugins null request");
@@ -1987,6 +2001,9 @@ int main(int argc, char **argv) {
     char backup_path[1024];
     char compact_path[1024];
     char restored_path[1024];
+    char progress_path[1024];
+    snprintf(progress_path, sizeof(progress_path), "%s.progress.zova", db_path);
+    remove(progress_path);
     snprintf(backup_path, sizeof(backup_path), "%s.backup.zova", db_path);
     snprintf(compact_path, sizeof(compact_path), "%s.compact.zova", db_path);
     snprintf(restored_path, sizeof(restored_path), "%s.restored.zova", db_path);
@@ -3386,6 +3403,37 @@ int main(int argc, char **argv) {
                   }),
                   ZOVA_OK,
                   "compact database");
+    progress_counter cancel_counter = {.cancel_at = 1};
+    expect_status(zova_database_backup_with_progress(&(zova_database_backup_progress_request){
+                      .db = db,
+                      .destination_path = progress_path,
+                      .progress = count_progress,
+                      .progress_user_data = &cancel_counter,
+                  }),
+                  ZOVA_INTERRUPTED,
+                  "cancel backup from progress callback");
+    if (fopen(progress_path, "rb") != NULL) {
+        fprintf(stderr, "cancel backup from progress callback: destination left behind\n");
+        return 1;
+    }
+    if (strcmp(zova_status_name(ZOVA_INTERRUPTED), "ZOVA_INTERRUPTED") != 0) {
+        fprintf(stderr, "status name: unexpected ZOVA_INTERRUPTED name\n");
+        return 1;
+    }
+    progress_counter backup_counter = {0};
+    expect_status(zova_database_backup_with_progress(&(zova_database_backup_progress_request){
+                      .db = db,
+                      .destination_path = progress_path,
+                      .progress = count_progress,
+                      .progress_user_data = &backup_counter,
+                  }),
+                  ZOVA_OK,
+                  "backup with progress");
+    if (backup_counter.count < 2 || backup_counter.last_phase != ZOVA_PROGRESS_VERIFY) {
+        fprintf(stderr, "backup with progress: expected copy and verify events\n");
+        return 1;
+    }
+    remove(progress_path);
     expect_status(zova_database_restore(&(zova_database_restore_request){
                       .source_path = backup_path,
                       .destination_path = restored_path,

@@ -107,8 +107,31 @@ to a `ProgressCallback`. Returning an error from the callback (conventionally
 failure at that point: a cancelled migration leaves the source set unchanged
 and creates no destination files, and a cancelled backup or compaction removes
 its destination. The last migration event follows the commit of the
-destination set, so an error returned from it is ignored. The C ABI and the
-language bindings do not expose progress yet.
+destination set, so an error returned from it is ignored.
+
+The C ABI adds `zova_database_backup_with_progress`,
+`zova_database_compact_with_progress` and `zova_database_migrate_with_progress`.
+Their request structs carry a `zova_progress_fn` callback and its `user_data`;
+the migrate request also carries the extension fields of
+`zova_database_migrate_with_extensions`. A non-zero return from the callback
+cancels the operation, which then fails with `ZOVA_INTERRUPTED`. The C layer
+forwards the first event of each phase and member, whole-percent changes and
+the event that completes the group, so verification does not call back once
+per item. A null callback behaves like the existing functions, which are
+unchanged.
+
+The bindings wrap the same functions:
+
+| Binding | Backup and compact | Migrate | Cancel |
+| --- | --- | --- | --- |
+| Rust | `backup_to_with_progress`, `compact_to_with_progress` on `Database` and `SharedDatabase` | `migrate_database_with_progress` | return `ControlFlow::Break(())`; a panic cancels and resumes after the call |
+| Go | `BackupToWithProgress`, `CompactToWithProgress` | `MigrateDatabaseWithProgress` | return an error, which the returned error wraps; a panic resumes after the call |
+| Python | `progress=` on `backup_to`, `compact_to` | `progress=` on `migrate_database` | raise; the exception is re-raised after the call |
+| JavaScript | `{ progress, signal }` on `AsyncDatabase.backupTo`, `compactTo` | `{ progress, signal }` on `AsyncDatabase.migrateDatabase` | abort the `AbortSignal`, or throw from the callback |
+
+In JavaScript the callback runs on the event loop after the native work has
+reported the event, so cancellation takes effect at the next event; every event
+is delivered before the promise settles.
 
 #### Dry run
 

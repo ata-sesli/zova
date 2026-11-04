@@ -24,6 +24,7 @@ pub const zova_status = enum(c_int) {
     CORRUPT = 15,
     MISUSE = 16,
     SQLITE_ERROR = 17,
+    INTERRUPTED = 18,
     NOT_ZOVA_PATH = 30,
     NOT_ZOVA_DATABASE = 31,
     UNSUPPORTED_ZOVA_VERSION = 32,
@@ -551,6 +552,42 @@ pub const zova_database_migrate_extensions_request = extern struct {
     out_error_message: ?*zova_message = null,
 };
 
+pub const ZOVA_PROGRESS_COPY: u32 = 0;
+pub const ZOVA_PROGRESS_MIGRATE: u32 = 1;
+pub const ZOVA_PROGRESS_VERIFY: u32 = 2;
+pub const ZOVA_PROGRESS_PUBLISH: u32 = 3;
+
+pub const ZOVA_PROGRESS_MEMBER_NONE: u32 = 0;
+pub const ZOVA_PROGRESS_MEMBER_MAIN: u32 = 1;
+pub const ZOVA_PROGRESS_MEMBER_OBJECT_STORE: u32 = 2;
+pub const ZOVA_PROGRESS_MEMBER_VECTOR_STORE: u32 = 3;
+pub const ZOVA_PROGRESS_MEMBER_GRAPH_STORE: u32 = 4;
+
+pub const zova_progress = extern struct {
+    phase: u32,
+    member: u32,
+    done: u64,
+    total: u64,
+};
+
+/// Returns non-zero to cancel the operation.
+pub const zova_progress_fn = *const fn (?*anyopaque, ?*const zova_progress) callconv(.c) i32;
+
+/// `zova_database_migrate_extensions_request` plus a progress callback.
+pub const zova_database_migrate_progress_request = extern struct {
+    source_path: ?[*:0]const u8 = null,
+    destination_path: ?[*:0]const u8 = null,
+    flags: u32 = 0,
+    extension_bundle_paths: ?[*]const ?[*:0]const u8 = null,
+    extension_bundle_count: usize = 0,
+    trust_store_path: ?[*:0]const u8 = null,
+    plugins: ?[*]const ?*const zova_plugin_descriptor_v1 = null,
+    plugin_count: usize = 0,
+    progress: ?zova_progress_fn = null,
+    progress_user_data: ?*anyopaque = null,
+    out_error_message: ?*zova_message = null,
+};
+
 pub const zova_database_open_request = extern struct {
     path: ?[*:0]const u8,
     out_db: ?*?*zova_database,
@@ -641,6 +678,22 @@ pub const zova_database_compact_request = extern struct {
     db: ?*zova_database,
     destination_path: ?[*:0]const u8,
     flags: u32,
+};
+
+pub const zova_database_backup_progress_request = extern struct {
+    db: ?*zova_database = null,
+    destination_path: ?[*:0]const u8 = null,
+    flags: u32 = 0,
+    progress: ?zova_progress_fn = null,
+    progress_user_data: ?*anyopaque = null,
+};
+
+pub const zova_database_compact_progress_request = extern struct {
+    db: ?*zova_database = null,
+    destination_path: ?[*:0]const u8 = null,
+    flags: u32 = 0,
+    progress: ?zova_progress_fn = null,
+    progress_user_data: ?*anyopaque = null,
 };
 
 pub const zova_database_restore_request = extern struct {

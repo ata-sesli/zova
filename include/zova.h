@@ -102,6 +102,7 @@ typedef enum zova_status {
     ZOVA_CORRUPT = 15,
     ZOVA_MISUSE = 16,
     ZOVA_SQLITE_ERROR = 17,
+    ZOVA_INTERRUPTED = 18,
     ZOVA_NOT_ZOVA_PATH = 30,
     ZOVA_NOT_ZOVA_DATABASE = 31,
     ZOVA_UNSUPPORTED_ZOVA_VERSION = 32,
@@ -666,6 +667,68 @@ typedef struct zova_database_migrate_extensions_request {
     zova_message *out_error_message;
 } zova_database_migrate_extensions_request;
 
+/*
+ * Progress reporting for backup, compact and migrate.
+ *
+ * phase fixes the unit of done and total: COPY counts SQLite pages of the
+ * source member, MIGRATE counts format steps, VERIFY counts stored objects,
+ * chunks, vectors and KV entries together, and PUBLISH counts member files.
+ * member is ZOVA_PROGRESS_MEMBER_NONE for VERIFY and PUBLISH, which cover the
+ * whole set. Events for one phase and member keep total fixed, never decrease
+ * done, and end with done == total. Calls are throttled to whole-percent
+ * changes, plus the first and last event of each phase and member.
+ *
+ * The callback runs synchronously on the calling thread and must not call
+ * Zova functions on the same database handle. The progress pointer is
+ * borrowed for the call. A non-zero return cancels the operation through the
+ * same cleanup as any failure at that point and the call returns
+ * ZOVA_INTERRUPTED: a cancelled backup or compact removes its destination, and
+ * a cancelled migration leaves the source set unchanged and creates no
+ * destination files. The last migration event follows the commit of the
+ * destination set, so its return value is ignored.
+ */
+typedef enum zova_progress_phase {
+    ZOVA_PROGRESS_COPY = 0,
+    ZOVA_PROGRESS_MIGRATE = 1,
+    ZOVA_PROGRESS_VERIFY = 2,
+    ZOVA_PROGRESS_PUBLISH = 3
+} zova_progress_phase;
+
+typedef enum zova_progress_member {
+    ZOVA_PROGRESS_MEMBER_NONE = 0,
+    ZOVA_PROGRESS_MEMBER_MAIN = 1,
+    ZOVA_PROGRESS_MEMBER_OBJECT_STORE = 2,
+    ZOVA_PROGRESS_MEMBER_VECTOR_STORE = 3,
+    ZOVA_PROGRESS_MEMBER_GRAPH_STORE = 4
+} zova_progress_member;
+
+typedef struct zova_progress {
+    uint32_t phase;
+    uint32_t member;
+    uint64_t done;
+    uint64_t total;
+} zova_progress;
+
+typedef int32_t (*zova_progress_fn)(void *user_data, const zova_progress *progress);
+
+/*
+ * zova_database_migrate_with_extensions plus progress. progress may be NULL,
+ * which equals zova_database_migrate_with_extensions.
+ */
+typedef struct zova_database_migrate_progress_request {
+    const char *source_path;
+    const char *destination_path;
+    uint32_t flags;
+    const char *const *extension_bundle_paths;
+    size_t extension_bundle_count;
+    const char *trust_store_path;
+    const struct zova_plugin_descriptor_v1 *const *plugins;
+    size_t plugin_count;
+    zova_progress_fn progress;
+    void *progress_user_data;
+    zova_message *out_error_message;
+} zova_database_migrate_progress_request;
+
 /* Open/create requests use C strings and may return an owned error message. */
 typedef struct zova_database_open_request {
     const char *path;
@@ -799,6 +862,26 @@ typedef struct zova_database_compact_request {
     const char *destination_path;
     uint32_t flags;
 } zova_database_compact_request;
+
+/*
+ * zova_database_backup and zova_database_compact plus progress (see
+ * zova_progress_fn). progress may be NULL, which equals the plain call.
+ */
+typedef struct zova_database_backup_progress_request {
+    zova_database *db;
+    const char *destination_path;
+    uint32_t flags;
+    zova_progress_fn progress;
+    void *progress_user_data;
+} zova_database_backup_progress_request;
+
+typedef struct zova_database_compact_progress_request {
+    zova_database *db;
+    const char *destination_path;
+    uint32_t flags;
+    zova_progress_fn progress;
+    void *progress_user_data;
+} zova_database_compact_progress_request;
 
 typedef struct zova_database_restore_request {
     const char *source_path;
@@ -1851,6 +1934,8 @@ zova_status zova_database_release_savepoint(const zova_database_savepoint_reques
 zova_status zova_database_vacuum(const zova_database_simple_request *request);
 zova_status zova_database_backup(const zova_database_backup_request *request);
 zova_status zova_database_compact(const zova_database_compact_request *request);
+zova_status zova_database_backup_with_progress(const zova_database_backup_progress_request *request);
+zova_status zova_database_compact_with_progress(const zova_database_compact_progress_request *request);
 zova_status zova_database_set_busy_timeout(const zova_database_busy_timeout_request *request);
 zova_status zova_database_last_insert_rowid(const zova_database_last_insert_rowid_request *request);
 zova_status zova_database_changes(const zova_database_changes_request *request);
@@ -1867,6 +1952,7 @@ zova_status zova_database_restore_to_memory(const zova_database_restore_to_memor
 zova_status zova_database_probe_format(const zova_database_probe_format_request *request);
 zova_status zova_database_migrate(const zova_database_migrate_request *request);
 zova_status zova_database_migrate_with_extensions(const zova_database_migrate_extensions_request *request);
+zova_status zova_database_migrate_with_progress(const zova_database_migrate_progress_request *request);
 
 /*
  * Prepared statements.

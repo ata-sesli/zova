@@ -29,6 +29,7 @@ pub const ZOVA_READ_ONLY: zova_status = 14;
 pub const ZOVA_CORRUPT: zova_status = 15;
 pub const ZOVA_MISUSE: zova_status = 16;
 pub const ZOVA_SQLITE_ERROR: zova_status = 17;
+pub const ZOVA_INTERRUPTED: zova_status = 18;
 pub const ZOVA_NOT_ZOVA_PATH: zova_status = 30;
 pub const ZOVA_NOT_ZOVA_DATABASE: zova_status = 31;
 pub const ZOVA_UNSUPPORTED_ZOVA_VERSION: zova_status = 32;
@@ -121,6 +122,16 @@ pub const ZOVA_BACKUP_NO_VERIFY: u32 = 1 << 0;
 pub const ZOVA_COMPACT_NO_VERIFY: u32 = 1 << 0;
 pub const ZOVA_RESTORE_NO_VERIFY: u32 = 1 << 0;
 pub const ZOVA_MIGRATE_NO_VERIFY: u32 = 1 << 0;
+
+pub const ZOVA_PROGRESS_COPY: u32 = 0;
+pub const ZOVA_PROGRESS_MIGRATE: u32 = 1;
+pub const ZOVA_PROGRESS_VERIFY: u32 = 2;
+pub const ZOVA_PROGRESS_PUBLISH: u32 = 3;
+pub const ZOVA_PROGRESS_MEMBER_NONE: u32 = 0;
+pub const ZOVA_PROGRESS_MEMBER_MAIN: u32 = 1;
+pub const ZOVA_PROGRESS_MEMBER_OBJECT_STORE: u32 = 2;
+pub const ZOVA_PROGRESS_MEMBER_VECTOR_STORE: u32 = 3;
+pub const ZOVA_PROGRESS_MEMBER_GRAPH_STORE: u32 = 4;
 
 pub const ZOVA_FORMAT_CURRENT: c_int = 0;
 pub const ZOVA_FORMAT_MIGRATABLE: c_int = 1;
@@ -778,6 +789,37 @@ pub struct zova_database_compact_request {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct zova_progress {
+    pub phase: u32,
+    pub member: u32,
+    pub done: u64,
+    pub total: u64,
+}
+
+/// Returns non-zero to cancel the operation.
+pub type zova_progress_fn =
+    Option<unsafe extern "C" fn(user_data: *mut c_void, progress: *const zova_progress) -> i32>;
+
+#[repr(C)]
+pub struct zova_database_backup_progress_request {
+    pub db: *mut zova_database,
+    pub destination_path: *const c_char,
+    pub flags: u32,
+    pub progress: zova_progress_fn,
+    pub progress_user_data: *mut c_void,
+}
+
+#[repr(C)]
+pub struct zova_database_compact_progress_request {
+    pub db: *mut zova_database,
+    pub destination_path: *const c_char,
+    pub flags: u32,
+    pub progress: zova_progress_fn,
+    pub progress_user_data: *mut c_void,
+}
+
+#[repr(C)]
 pub struct zova_database_restore_request {
     pub source_path: *const c_char,
     pub destination_path: *const c_char,
@@ -816,6 +858,21 @@ pub struct zova_database_migrate_extensions_request {
     pub trust_store_path: *const c_char,
     pub plugins: *const *const plugin::zova_plugin_descriptor_v1,
     pub plugin_count: usize,
+    pub out_error_message: *mut zova_message,
+}
+
+#[repr(C)]
+pub struct zova_database_migrate_progress_request {
+    pub source_path: *const c_char,
+    pub destination_path: *const c_char,
+    pub flags: u32,
+    pub extension_bundle_paths: *const *const c_char,
+    pub extension_bundle_count: usize,
+    pub trust_store_path: *const c_char,
+    pub plugins: *const *const plugin::zova_plugin_descriptor_v1,
+    pub plugin_count: usize,
+    pub progress: zova_progress_fn,
+    pub progress_user_data: *mut c_void,
     pub out_error_message: *mut zova_message,
 }
 
@@ -1805,6 +1862,12 @@ extern "C" {
     pub fn zova_database_vacuum(request: *const zova_database_simple_request) -> zova_status;
     pub fn zova_database_backup(request: *const zova_database_backup_request) -> zova_status;
     pub fn zova_database_compact(request: *const zova_database_compact_request) -> zova_status;
+    pub fn zova_database_backup_with_progress(
+        request: *const zova_database_backup_progress_request,
+    ) -> zova_status;
+    pub fn zova_database_compact_with_progress(
+        request: *const zova_database_compact_progress_request,
+    ) -> zova_status;
     pub fn zova_database_set_busy_timeout(
         request: *const zova_database_busy_timeout_request,
     ) -> zova_status;
@@ -1836,6 +1899,9 @@ extern "C" {
     pub fn zova_database_migrate(request: *const zova_database_migrate_request) -> zova_status;
     pub fn zova_database_migrate_with_extensions(
         request: *const zova_database_migrate_extensions_request,
+    ) -> zova_status;
+    pub fn zova_database_migrate_with_progress(
+        request: *const zova_database_migrate_progress_request,
     ) -> zova_status;
 
     pub fn zova_statement_finalize(statement: *mut zova_statement) -> zova_status;

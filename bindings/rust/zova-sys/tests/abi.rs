@@ -27,6 +27,18 @@ fn extension_upgrade_entrypoints_reject_null_requests() {
             zova_sys::ZOVA_INVALID_ARGUMENT
         );
         assert_eq!(
+            zova_sys::zova_database_migrate_with_progress(ptr::null()),
+            zova_sys::ZOVA_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            zova_sys::zova_database_backup_with_progress(ptr::null()),
+            zova_sys::ZOVA_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            zova_sys::zova_database_compact_with_progress(ptr::null()),
+            zova_sys::ZOVA_INVALID_ARGUMENT
+        );
+        assert_eq!(
             zova_sys::zova_database_extension_upgrade(ptr::null()),
             zova_sys::ZOVA_INVALID_ARGUMENT
         );

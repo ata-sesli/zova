@@ -27,6 +27,7 @@ use crate::object::{
     empty_buffer, empty_manifest, from_c_object_id, take_buffer, take_manifest, ObjectChunkId,
     ObjectId, ObjectManifest, ObjectManifestChunk, ObjectPutOptions,
 };
+use crate::progress::{Progress, ProgressBridge};
 use crate::statement::{ColumnType, Step};
 use crate::vector::{
     candidate_ptrs, delete_vectors_raw, empty_collection_info, empty_search_results, empty_vector,
@@ -39,6 +40,7 @@ use std::cell::Cell;
 use std::ffi::CStr;
 use std::fmt;
 use std::marker::PhantomData;
+use std::ops::ControlFlow;
 use std::path::Path;
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -430,6 +432,56 @@ impl SharedDatabase {
         };
         self.inner
             .status_locked(unsafe { zova_sys::zova_database_compact(&request) })
+    }
+
+    /// [`SharedDatabase::backup_to`] that reports [`Progress`]; see
+    /// [`crate::Database::backup_to_with_progress`]. The closure runs on the
+    /// calling thread while this handle is locked, so it must not use the
+    /// same `SharedDatabase`.
+    pub fn backup_to_with_progress(
+        &self,
+        destination: impl AsRef<Path>,
+        options: BackupOptions,
+        mut progress: impl FnMut(Progress) -> ControlFlow<()>,
+    ) -> Result<()> {
+        let destination = path_to_cstring(destination.as_ref())?;
+        let _guard = self.inner.enter()?;
+        let mut bridge = ProgressBridge::new(&mut progress);
+        let request = zova_sys::zova_database_backup_progress_request {
+            db: self.inner.raw_ptr(),
+            destination_path: destination.as_ptr(),
+            flags: backup_flags(options.verify),
+            progress: bridge.callback(),
+            progress_user_data: bridge.user_data(),
+        };
+        // SAFETY: the request, path, and bridge outlive the synchronous call.
+        let status = unsafe { zova_sys::zova_database_backup_with_progress(&request) };
+        let result = self.inner.status_locked(status);
+        bridge.finish(result)
+    }
+
+    /// [`SharedDatabase::compact_to`] that reports [`Progress`]; see
+    /// [`SharedDatabase::backup_to_with_progress`].
+    pub fn compact_to_with_progress(
+        &self,
+        destination: impl AsRef<Path>,
+        options: CompactOptions,
+        mut progress: impl FnMut(Progress) -> ControlFlow<()>,
+    ) -> Result<()> {
+        let destination = path_to_cstring(destination.as_ref())?;
+        let _guard = self.inner.enter()?;
+        let mut bridge = ProgressBridge::new(&mut progress);
+        let request = zova_sys::zova_database_compact_progress_request {
+            db: self.inner.raw_ptr(),
+            destination_path: destination.as_ptr(),
+            flags: compact_flags(options.verify),
+            progress: bridge.callback(),
+            progress_user_data: bridge.user_data(),
+        };
+        // SAFETY: the request, path, and bridge outlive the synchronous call.
+        let status = unsafe { zova_sys::zova_database_compact_with_progress(&request) };
+        let result = self.inner.status_locked(status);
+        bridge.finish(result)
     }
 
     pub fn set_busy_timeout(&self, milliseconds: u32) -> Result<()> {
