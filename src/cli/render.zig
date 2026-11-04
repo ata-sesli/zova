@@ -55,7 +55,7 @@ pub fn writeUsage(writer: *std.Io.Writer) !void {
         \\  zova graph-store info [--json] <main.zova>
         \\  zova graph-store unbind [--json] <main.zova>
         \\  zova format [--json] <database.zova>
-        \\  zova migrate [--json] [--no-verify] <source.zova> <destination.zova>
+        \\  zova migrate [--json] [--no-verify] [--dry-run] <source.zova> <destination.zova>
         \\  zova extension list [--json] <file.zova>
         \\  zova extension info [--json] <file.zova> <name>
         \\  zova extension check [--json] <file.zova> [name]

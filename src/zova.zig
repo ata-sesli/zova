@@ -588,6 +588,36 @@ pub fn migrateDatabaseWithExtensions(
     return migrateDatabaseInternal(std.heap.c_allocator, source_path, destination_path, options, registry, null);
 }
 
+/// Plan a migration without creating or modifying anything: the planned file
+/// set and whether each destination exists, per-member SQLite page sizes, the
+/// installed extensions and whether `registry` provides them, and the same
+/// classification, destination and source/bound-store preflight checks
+/// `migrateDatabaseWithExtensions` runs. `MigrationPlan.failure` holds the
+/// first error that migration would return from those checks, or null.
+///
+/// Path and source-existence errors are returned directly. The source is not
+/// locked, so a concurrent writer can still change the outcome; disk space,
+/// the copy itself and post-migration verification are not exercised.
+pub fn planMigration(
+    allocator: std.mem.Allocator,
+    source_path: [:0]const u8,
+    destination_path: [:0]const u8,
+    options: MigrateOptions,
+    registry: ExtensionRegistry,
+) Error!MigrationPlan {
+    return planMigrationSet(allocator, source_path, destination_path, options.verify, registry, bundledExtensionRegistry());
+}
+
+pub const MigrationPlan = @import("database/migration.zig").MigrationPlan;
+pub const MigrationPlanMember = @import("database/migration.zig").MigrationPlanMember;
+pub const MigrationMemberSizes = @import("database/migration.zig").MigrationMemberSizes;
+pub const MigrationPlanExtension = @import("database/migration.zig").MigrationPlanExtension;
+pub const MigrationPreflight = @import("database/migration.zig").MigrationPreflight;
+const planMigrationSet = @import("database/migration.zig").planMigrationSet;
+const classifyMigrationSource = @import("database/migration.zig").classifyMigrationSource;
+const requireMigratable = @import("database/migration.zig").requireMigratable;
+const preflightMigrationSet = @import("database/migration.zig").preflightMigrationSet;
+
 /// Test-only fault points covering every phase boundary required by the
 /// migration safety model. Production callers always pass `null`. Module-pub
 /// for the test suite but deliberately absent from the package exports.
@@ -619,19 +649,9 @@ pub fn migrateDatabaseInternal(
 
     // Fast classification before touching destinations so unsupported sources
     // are rejected without creating anything.
-    var source_format_version: u32 = undefined;
-    {
-        var probe = try sqlite.Database.openWithFlags(source_path, .read_only);
-        defer probe.deinit();
-        const early = try readFormatClassification(&probe);
-        source_format_version = early.format_version;
-        switch (early.compatibility) {
-            .migratable => {},
-            .current => return error.NoMigrationPath,
-            .unsupported_legacy => return error.UnsupportedLegacyFormat,
-            .unsupported_future => return error.UnsupportedFutureFormat,
-        }
-    }
+    const early = try classifyMigrationSource(source_path);
+    try requireMigratable(early.compatibility);
+    const source_format_version = early.format_version;
 
     // Everything allocated from here on is owned by the single guarded
     // cleanup below and flows through the caller-supplied allocator so
@@ -686,18 +706,7 @@ pub fn migrateDatabaseInternal(
         // Preflight the whole set under the lock: exact source schema plus
         // every recorded store's identity, role, epoch, schema, and
         // cross-checked IDs.
-        var snapshot = try sqlite.Database.openWithFlags(source_path, .read_only);
-        defer snapshot.deinit();
-        var source_format_buffer: [16]u8 = undefined;
-        const source_format_text = std.fmt.bufPrint(
-            &source_format_buffer,
-            "{d}",
-            .{source_format_version},
-        ) catch unreachable;
-        try validateMigrationSourceSchema(&snapshot, source_format_text);
-        for (bindings[0..binding_count]) |*binding| {
-            try validateMigrationStoreBinding(binding, source_format_text);
-        }
+        try preflightMigrationSet(source_path, source_format_version, bindings[0..binding_count]);
 
         // Stage, copy-forward, and transform every member in the exclusively
         // owned recovery directory. Copy and migration are separate phases

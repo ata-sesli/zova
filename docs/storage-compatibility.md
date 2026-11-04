@@ -66,14 +66,53 @@ untouched. Probe first, then migrate.
 
 ```sh
 zova format app.zova
+zova migrate --dry-run app.zova app-format-12.zova
 zova migrate app.zova app-format-12.zova
 ```
 
 `zova format` prints the source format, the current format, the earliest
 migratable format, the compatibility class, and the recommended action. Add
-`--json` for machine-readable output. `zova migrate` accepts `--json` and
-`--no-verify`; verification is on by default and reopens the migrated destination
-set through the full open path.
+`--json` for machine-readable output. `zova migrate` accepts `--json`,
+`--no-verify` and `--dry-run`; verification is on by default and reopens the
+migrated destination set through the full open path.
+
+#### Dry run
+
+`zova migrate --dry-run <source> <destination>` creates and modifies nothing.
+It runs the same classification, destination and source/bound-store preflight
+checks as a real migration, using the same code, and reports:
+
+- every file the migration would write (the main database and each bound store
+  as `<destination stem>.<objects|vectors|graphs>.zova`), whether each
+  destination or the `<destination>.migration-recovery` directory already
+  exists;
+- each member's SQLite `page_size`, `page_count` and `freelist_count`, the bytes
+  the copy writes (`page_count × page_size`), and the free space on the
+  destination filesystem (`unknown` on platforms other than macOS and 64-bit
+  Linux);
+- every installed extension, whether Zova bundles it or it needs a `.zovaext`
+  bundle passed with `--extension`, and whether the supplied bundles satisfy
+  it.
+
+The dry run exits `0` when the migration would pass these checks. Otherwise it
+exits with the code the migration would return for the same failure (`3` for
+format, destination, bound-store and extension failures), naming the first failing
+check as `failure` (an error name such as `DestinationExists`,
+`BoundStoreInvalid` or `ExtensionUnavailable`, or `InsufficientSpace` when the
+copied pages exceed the free space). With `--json` the report is one object on
+stdout with `"dry_run": true` and `"status"` set to `"ok"` or `"would_fail"`.
+
+Migration copies every page, free pages included, so free pages are carried
+into the destination as is. When the report shows a large `free_bytes`,
+`zova compact` before migrating produces a smaller copy. Format steps can add a
+little more on top of `copy_bytes`, so treat it as a lower bound. The dry run
+does not lock the source, copy data, or run post-migration verification; a
+migration can still fail on a write error or on verification of the migrated
+data.
+
+In Zig, `zova.planMigration(allocator, source, destination, options, registry)`
+returns the same plan as a `MigrationPlan`, with `failure` set to the error
+`migrateDatabaseWithExtensions` would return from those checks.
 
 ### C ABI
 
