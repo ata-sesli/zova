@@ -13,7 +13,9 @@ const ensureSourcePathExists = @import("paths.zig").ensureSourcePathExists;
 const extension_impl = @import("../extension.zig");
 const Error = @import("types.zig").Error;
 const MigrationStep = @import("types.zig").MigrationStep;
-const backupMainDatabase = @import("backup.zig").backupMainDatabase;
+const backupMainDatabaseReporting = @import("backup.zig").backupMainDatabaseReporting;
+const ProgressCallback = @import("types.zig").ProgressCallback;
+const ProgressMember = @import("types.zig").ProgressMember;
 const bound_graph_store_role = @import("types.zig").bound_graph_store_role;
 const bound_object_store_role = @import("types.zig").bound_object_store_role;
 const bound_stores_table = @import("types.zig").bound_stores_table;
@@ -207,12 +209,24 @@ pub fn runMigrationStep(db: *sqlite.Database) Error!u32 {
 }
 
 pub fn runMigrationsToCurrent(db: *sqlite.Database) Error!void {
+    return runMigrationsToCurrentReporting(db, null, .main);
+}
+
+/// Run every migration step, reporting `migrate` progress for `member` before
+/// the first step and after each committed step.
+pub fn runMigrationsToCurrentReporting(db: *sqlite.Database, progress: ?ProgressCallback, member: ProgressMember) Error!void {
     const current = parseFormatVersion(format_version) orelse unreachable;
+    const start = try readFormatClassification(db);
+    const total: u64 = if (start.format_version < current) current - start.format_version else 0;
+    var done: u64 = 0;
+    try ProgressCallback.emit(progress, .{ .phase = .migrate, .member = member, .done = done, .total = total });
     while (true) {
         const info = try readFormatClassification(db);
         if (info.format_version == current and info.compatibility == .current) return;
         if (info.compatibility != .migratable) return error.NoMigrationPath;
         _ = try runMigrationStep(db);
+        done = @min(done + 1, total);
+        try ProgressCallback.emit(progress, .{ .phase = .migrate, .member = member, .done = done, .total = total });
     }
 }
 
@@ -340,10 +354,15 @@ pub fn validateMigrationStoreBinding(
 
 /// Copy one source member forward into a fresh staging file. Migration of the
 /// staged copy is a separate step so each phase has its own fault boundary.
-pub fn copyForwardMember(source: *sqlite.Database, staging_path: [:0]const u8) Error!void {
+pub fn copyForwardMember(
+    source: *sqlite.Database,
+    staging_path: [:0]const u8,
+    progress: ?ProgressCallback,
+    member: ProgressMember,
+) Error!void {
     var staged = try sqlite.Database.open(staging_path);
     defer staged.deinit();
-    try backupMainDatabase(source, &staged);
+    try backupMainDatabaseReporting(source, &staged, progress, member);
 }
 
 const MigrateRebindTarget = enum { staging, final };

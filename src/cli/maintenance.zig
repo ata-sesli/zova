@@ -21,6 +21,7 @@ const operationalUsageMessage = @import("parse.zig").operationalUsageMessage;
 const parseFormatCommandArgs = @import("parse.zig").parseFormatCommandArgs;
 const parseMigrateCommandArgs = @import("parse.zig").parseMigrateCommandArgs;
 const parseOperationalCommandArgs = @import("parse.zig").parseOperationalCommandArgs;
+const progress_output = @import("progress.zig");
 const usageErrorFormat = @import("render.zig").usageErrorFormat;
 const writeJsonErrorWithKind = @import("render.zig").writeJsonErrorWithKind;
 const writeJsonString = @import("render.zig").writeJsonString;
@@ -270,9 +271,12 @@ pub fn migrateCommand(
     };
     const source_format = probe_before.format_version;
 
-    zova.migrateDatabaseWithExtensions(source_z, dest_z, .{ .verify = parsed.verify }, ctx.registry) catch |err| {
+    var reporter = progress_output.Reporter.init(stderr, "migrate", progress_output.mode(parsed.format, parsed.progress, ctx.stderr_terminal));
+    zova.migrateDatabaseWithExtensions(source_z, dest_z, .{ .verify = parsed.verify, .progress = reporter.callback() }, ctx.registry) catch |err| {
+        reporter.finish();
         return migrateErrorFormat(stderr, parsed.format, err);
     };
+    reporter.finish();
 
     const dest_format = std.fmt.parseInt(u32, zova.version.format_version, 10) catch 0;
 
@@ -472,7 +476,12 @@ pub fn backupCommand(
     var db = openDatabase(ctx, source) catch |err| return openErrorFormat(stderr, "backup", parsed.format, err);
     defer db.deinit();
 
-    db.backupTo(destination, .{ .verify = parsed.verify }) catch |err| return operationalErrorFormat(stderr, "backup", parsed.format, err);
+    var reporter = progress_output.Reporter.init(stderr, "backup", progress_output.mode(parsed.format, parsed.progress, ctx.stderr_terminal));
+    db.backupTo(destination, .{ .verify = parsed.verify, .progress = reporter.callback() }) catch |err| {
+        reporter.finish();
+        return operationalErrorFormat(stderr, "backup", parsed.format, err);
+    };
+    reporter.finish();
     try writeOperationalSuccess(stdout, "backup", parsed, parsed.source_path, parsed.destination_path);
     return ExitCode.ok;
 }
@@ -497,7 +506,12 @@ pub fn compactCommand(
     var db = openDatabase(ctx, source) catch |err| return openErrorFormat(stderr, "compact", parsed.format, err);
     defer db.deinit();
 
-    db.compactTo(destination, .{ .verify = parsed.verify }) catch |err| return operationalErrorFormat(stderr, "compact", parsed.format, err);
+    var reporter = progress_output.Reporter.init(stderr, "compact", progress_output.mode(parsed.format, parsed.progress, ctx.stderr_terminal));
+    db.compactTo(destination, .{ .verify = parsed.verify, .progress = reporter.callback() }) catch |err| {
+        reporter.finish();
+        return operationalErrorFormat(stderr, "compact", parsed.format, err);
+    };
+    reporter.finish();
     try writeOperationalSuccess(stdout, "compact", parsed, parsed.source_path, parsed.destination_path);
     return ExitCode.ok;
 }

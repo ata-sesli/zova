@@ -733,7 +733,7 @@ pub fn build(b: *std.Build) void {
         "test-migration",
         "Run storage-format migration tests",
         "src/test_migration_root.zig",
-        &.{ "migration_red_tests", "migration_tests", "migration_parity_tests", "migration_plan_tests" },
+        &.{ "migration_red_tests", "migration_tests", "migration_parity_tests", "migration_plan_tests", "progress_tests" },
         target,
         optimize,
         zova_build_options,

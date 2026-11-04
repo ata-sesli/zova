@@ -67,8 +67,11 @@ pub fn parseOperationalCommandArgs(
     var format: OutputFormat = .text;
     var verify = true;
     var saw_no_verify = false;
+    var progress = false;
     var source_path: ?[]const u8 = null;
     var destination_path: ?[]const u8 = null;
+    // Restore has no progress reporting.
+    const accepts_progress = !std.mem.eql(u8, command, "restore");
 
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--json")) {
@@ -78,6 +81,9 @@ pub fn parseOperationalCommandArgs(
             if (saw_no_verify) return error.DuplicateNoVerify;
             saw_no_verify = true;
             verify = false;
+        } else if (accepts_progress and std.mem.eql(u8, arg, "--progress")) {
+            if (progress) return error.DuplicateProgress;
+            progress = true;
         } else if (std.mem.startsWith(u8, arg, "-")) {
             return error.UnknownFlag;
         } else if (source_path == null) {
@@ -91,7 +97,6 @@ pub fn parseOperationalCommandArgs(
 
     const source = source_path orelse {
         _ = stderr;
-        _ = command;
         return error.MissingSource;
     };
     const destination = destination_path orelse return error.MissingDestination;
@@ -99,6 +104,7 @@ pub fn parseOperationalCommandArgs(
     return .{
         .format = format,
         .verify = verify,
+        .progress = progress,
         .source_path = source,
         .destination_path = destination,
     };
@@ -108,13 +114,14 @@ pub fn operationalUsageMessage(command: []const u8, err: anyerror) []const u8 {
     return switch (err) {
         error.DuplicateJson => "duplicate --json",
         error.DuplicateNoVerify => "duplicate --no-verify",
+        error.DuplicateProgress => "duplicate --progress",
         error.UnknownFlag => "unknown flag",
         error.MissingSource => "missing source path",
         error.MissingDestination => "missing destination path",
         error.ExtraArgs => if (std.mem.eql(u8, command, "restore"))
             "restore accepts only [--json] [--no-verify] <backup.zova> <destination.zova>"
         else
-            "command accepts only [--json] [--no-verify] <source.zova> <destination.zova>",
+            "command accepts only [--json] [--no-verify] [--progress] <source.zova> <destination.zova>",
         else => "invalid command arguments",
     };
 }
@@ -135,6 +142,7 @@ pub const MigrateCommandArgs = struct {
     format: OutputFormat,
     verify: bool,
     dry_run: bool = false,
+    progress: bool = false,
     source_path: []const u8,
     destination_path: []const u8,
 };
@@ -150,6 +158,7 @@ const MigrateCommandParseError = error{
     DuplicateJson,
     DuplicateNoVerify,
     DuplicateDryRun,
+    DuplicateProgress,
     UnknownFlag,
     MissingSource,
     MissingDestination,
@@ -189,6 +198,7 @@ pub fn parseMigrateCommandArgs(args: []const []const u8) MigrateCommandParseErro
     var verify = true;
     var saw_no_verify = false;
     var dry_run = false;
+    var progress = false;
     var source_path: ?[]const u8 = null;
     var destination_path: ?[]const u8 = null;
     for (args) |arg| {
@@ -202,6 +212,9 @@ pub fn parseMigrateCommandArgs(args: []const []const u8) MigrateCommandParseErro
         } else if (std.mem.eql(u8, arg, "--dry-run")) {
             if (dry_run) return error.DuplicateDryRun;
             dry_run = true;
+        } else if (std.mem.eql(u8, arg, "--progress")) {
+            if (progress) return error.DuplicateProgress;
+            progress = true;
         } else if (std.mem.startsWith(u8, arg, "-")) {
             return error.UnknownFlag;
         } else if (source_path == null) {
@@ -218,6 +231,7 @@ pub fn parseMigrateCommandArgs(args: []const []const u8) MigrateCommandParseErro
         .format = format,
         .verify = verify,
         .dry_run = dry_run,
+        .progress = progress,
         .source_path = source,
         .destination_path = destination,
     };
@@ -228,10 +242,11 @@ pub fn migrateUsageMessage(err: MigrateCommandParseError) []const u8 {
         error.DuplicateJson => "duplicate --json",
         error.DuplicateNoVerify => "duplicate --no-verify",
         error.DuplicateDryRun => "duplicate --dry-run",
+        error.DuplicateProgress => "duplicate --progress",
         error.UnknownFlag => "unknown flag",
         error.MissingSource => "migrate requires <source.zova>",
         error.MissingDestination => "migrate requires <destination.zova>",
-        error.ExtraArgs => "migrate accepts only [--json] [--no-verify] [--dry-run] <source.zova> <destination.zova>",
+        error.ExtraArgs => "migrate accepts only [--json] [--no-verify] [--dry-run] [--progress] <source.zova> <destination.zova>",
     };
 }
 

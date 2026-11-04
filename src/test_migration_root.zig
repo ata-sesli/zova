@@ -13,3 +13,7 @@ test "migration_parity_tests suite" {
 test "migration_plan_tests suite" {
     _ = @import("migration_plan_tests.zig");
 }
+
+test "progress_tests suite" {
+    _ = @import("progress_tests.zig");
+}
