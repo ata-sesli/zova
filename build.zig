@@ -487,6 +487,20 @@ pub fn build(b: *std.Build) void {
     const graph_keyed_benchmark_step = b.step("bench-graph-keyed", "Compare current and opaque-key graph batches");
     graph_keyed_benchmark_step.dependOn(&graph_keyed_benchmark_cmd.step);
 
+    const graph_keyed_lookup_benchmark = b.addExecutable(.{
+        .name = "zova_graph_keyed_lookup_benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/graph_keyed_lookup.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    graph_keyed_lookup_benchmark.root_module.addImport("zova", zova_module);
+    const graph_keyed_lookup_benchmark_cmd = b.addRunArtifact(graph_keyed_lookup_benchmark);
+    graph_keyed_lookup_benchmark_cmd.addPassthruArgs();
+    const graph_keyed_lookup_benchmark_step = b.step("bench-graph-keyed-lookup", "Benchmark small keyed graph puts into a large graph");
+    graph_keyed_lookup_benchmark_step.dependOn(&graph_keyed_lookup_benchmark_cmd.step);
+
     const graph_fresh_benchmark = b.addExecutable(.{
         .name = "zova_graph_fresh_benchmark",
         .root_module = b.createModule(.{
