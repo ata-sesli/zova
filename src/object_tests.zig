@@ -2254,6 +2254,55 @@ test "object range reads copy caller requested bytes" {
     try std.testing.expectEqualSlices(u8, bytes[1234 .. 1234 + repeated.len], &repeated);
 }
 
+test "fastcdc range reads seek to every chunk boundary and reject shifted manifest offsets" {
+    var raw = try sqlite.Database.open(":memory:");
+    defer raw.deinit();
+    var db = try preparePrototypeDatabase(&raw);
+
+    const bytes = try std.testing.allocator.alloc(u8, 512 * 1024 + 7);
+    defer std.testing.allocator.free(bytes);
+    var prng = std.Random.DefaultPrng.init(0x186);
+    prng.random().bytes(bytes);
+    const id = try db.putObject(bytes);
+
+    var manifest = try db.objectManifest(std.testing.allocator, id);
+    defer manifest.deinit(std.testing.allocator);
+    try std.testing.expect(manifest.chunks.len > 16);
+
+    var buffer: [3 * fastcdc.max_size]u8 = undefined;
+    const lengths = [_]usize{ 1, 2, 4096, buffer.len };
+    for (manifest.chunks) |chunk| {
+        const boundary: usize = @intCast(chunk.offset);
+        const starts = [_]usize{ boundary -| 1, boundary, boundary + 1 };
+        for (starts) |start| {
+            for (lengths) |len| {
+                const expected = bytes[start..@min(bytes.len, start + len)];
+                const read = try db.readObjectRange(id, start, buffer[0..len]);
+                try std.testing.expectEqualSlices(u8, expected, buffer[0..read]);
+            }
+        }
+    }
+    const last_byte = try db.readObjectRange(id, bytes.len - 1, buffer[0..4]);
+    try std.testing.expectEqual(@as(usize, 1), last_byte);
+    try std.testing.expectEqual(bytes[bytes.len - 1], buffer[0]);
+
+    const middle = manifest.chunks[manifest.chunks.len / 2];
+    const middle_start: usize = @intCast(middle.offset);
+    const middle_size: usize = @intCast(middle.size_bytes);
+    var shift = try raw.prepare("update _zova_object_chunks set offset = offset + 1 where chunk_index = ?");
+    defer shift.deinit();
+    try shift.bindInt64(1, @intCast(middle.index));
+    try std.testing.expectEqual(sqlite.Step.done, try shift.step());
+
+    // Reads that cross the shifted boundary see two rows that do not touch.
+    // (A read wholly inside one chunk trusts that row's offset, as before.)
+    try std.testing.expectError(error.ObjectCorrupt, db.readObjectRange(id, middle_start - 8, buffer[0..16]));
+    try std.testing.expectError(error.ObjectCorrupt, db.readObjectRange(id, middle_start + middle_size - 8, buffer[0..16]));
+    const full = try std.testing.allocator.alloc(u8, bytes.len);
+    defer std.testing.allocator.free(full);
+    try std.testing.expectError(error.ObjectCorrupt, db.readObjectRange(id, 0, full));
+}
+
 test "multi-chunk range reads release each blob before opening the next" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

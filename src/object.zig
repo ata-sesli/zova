@@ -1057,8 +1057,7 @@ pub const Database = struct {
                 \\from {s}_zova_object_chunks oc
                 \\left join {s}_zova_chunks c on c.chunk_hash = oc.chunk_hash
                 \\where oc.object_id = ?
-                \\  and oc.offset + oc.size_bytes > ?
-                \\  and oc.offset < ?
+                \\  and oc.chunk_index >= ?
                 \\order by oc.chunk_index asc
             );
         defer chunks.release();
@@ -1071,13 +1070,18 @@ pub const Database = struct {
             try chunk_stmt.bindInt64(2, try u64ToSqliteI64(first_index));
             try chunk_stmt.bindInt64(3, try u64ToSqliteI64(last_index));
         } else {
-            try chunk_stmt.bindInt64(2, try u64ToSqliteI64(offset));
-            try chunk_stmt.bindInt64(3, try u64ToSqliteI64(read_end));
+            const first_index = if (offset == 0) 0 else try self.seekFastcdcChunk(id, offset, chunk_count);
+            try chunk_stmt.bindInt64(2, try u64ToSqliteI64(first_index));
         }
 
         var scratch: [64 * 1024]u8 = undefined;
         var copied: usize = 0;
-        while ((try chunk_stmt.step()) == .row) {
+        const read_len: usize = @intCast(read_len_u64);
+        // FastCDC rows are selected from the seek result onward, so their
+        // positions are checked here: the first row must contain `offset` and
+        // each later row must start where the previous one ended.
+        var next_fastcdc: ?struct { index: u64, offset: u64 } = null;
+        while (copied < read_len and (try chunk_stmt.step()) == .row) {
             const raw_index = chunk_stmt.columnInt64(0);
             if (raw_index < 0) return error.ObjectCorrupt;
             const chunk_index: u64 = @intCast(raw_index);
@@ -1096,6 +1100,14 @@ pub const Database = struct {
                 if (chunk_index + 1 < chunk_count and chunk_size != fixed_chunks.chunk_size) return error.ObjectCorrupt;
             }
             if (chunk_offset > size or chunk_size > size - chunk_offset) return error.ObjectCorrupt;
+            if (metadata.policy == .fastcdc) {
+                if (next_fastcdc) |next| {
+                    if (chunk_index != next.index or chunk_offset != next.offset) return error.ObjectCorrupt;
+                } else if (chunk_offset > offset or offset - chunk_offset >= chunk_size) {
+                    return error.ObjectCorrupt;
+                }
+                next_fastcdc = .{ .index = chunk_index + 1, .offset = chunk_offset + chunk_size };
+            }
 
             if (chunk_stmt.columnType(4) == .null) return error.ObjectCorrupt;
             const rowid = chunk_stmt.columnInt64(4);
@@ -1156,12 +1168,47 @@ pub const Database = struct {
             copied += chunk_copied;
         }
 
-        if (copied != @as(usize, @intCast(read_len_u64))) return error.ObjectCorrupt;
+        if (copied != read_len) return error.ObjectCorrupt;
         if (full_read and !std.mem.eql(u8, &objectId(buffer[0..copied]), &id)) {
             return error.ObjectCorrupt;
         }
 
         return copied;
+    }
+
+    /// Return the index of the FastCDC chunk that contains byte `offset`.
+    ///
+    /// Manifest offsets increase with `chunk_index` (each chunk starts where
+    /// the previous one ended), so a binary search over primary-key point
+    /// lookups finds the chunk in about log2(chunk_count) steps instead of
+    /// scanning the object's manifest. A manifest that breaks the invariant
+    /// can steer the search to a wrong row; `readObjectRange` then rejects
+    /// that row's position.
+    fn seekFastcdcChunk(self: *Database, id: ObjectId, offset: u64, chunk_count: u64) Error!u64 {
+        std.debug.assert(chunk_count > 0);
+        var lease = try self.acquire(.object_chunk_seek,
+            \\select /* zova_trace:object_chunk_seek */ offset
+            \\from {s}_zova_object_chunks
+            \\where object_id = ? and chunk_index = ?
+        );
+        defer lease.release();
+        const stmt = &lease.statement;
+        try stmt.bindBlob(1, &id);
+
+        // Invariant: the answer lies in [low, high].
+        var low: u64 = 0;
+        var high: u64 = chunk_count - 1;
+        while (low < high) {
+            const mid = low + (high - low + 1) / 2;
+            try stmt.bindInt64(2, try u64ToSqliteI64(mid));
+            const mid_offset = switch (try stmt.step()) {
+                .done => return error.ObjectCorrupt,
+                .row => try sqliteI64ToU64(stmt.columnInt64(0)),
+            };
+            try stmt.reset();
+            if (mid_offset <= offset) low = mid else high = mid - 1;
+        }
+        return low;
     }
 
     /// Return the public manifest for one object.

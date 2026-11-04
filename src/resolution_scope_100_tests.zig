@@ -24,6 +24,7 @@ const Trace = struct {
     object_metadata: usize = 0,
     object_exists: usize = 0,
     object_range: usize = 0,
+    object_chunk_seek: usize = 0,
     object_reader_manifest: usize = 0,
 
     fn reset(self: *@This()) void {
@@ -43,6 +44,7 @@ const Trace = struct {
         if (std.mem.indexOf(u8, sql, "zova_trace:object_metadata") != null) self.object_metadata += 1;
         if (std.mem.indexOf(u8, sql, "zova_trace:object_exists") != null) self.object_exists += 1;
         if (std.mem.indexOf(u8, sql, "zova_trace:object_range") != null) self.object_range += 1;
+        if (std.mem.indexOf(u8, sql, "zova_trace:object_chunk_seek") != null) self.object_chunk_seek += 1;
         if (std.mem.indexOf(u8, sql, "zova_trace:object_reader_manifest") != null) self.object_reader_manifest += 1;
         return 0;
     }
@@ -260,6 +262,34 @@ test "readObjectRange loads metadata once and returns correct bytes on main and 
     try std.testing.expectEqualSlices(u8, bytes[4096..], bound_buffer[0..bound_read]);
     try std.testing.expectEqual(@as(usize, 1), trace_bound.object_metadata);
     try std.testing.expectEqual(@as(usize, 1), trace_bound.object_range);
+}
+
+test "fastcdc range reads seek in logarithmic point lookups" {
+    var db = try zova.Database.createMemory();
+    defer db.deinit();
+    const bytes = try std.testing.allocator.alloc(u8, 2 * 1024 * 1024);
+    defer std.testing.allocator.free(bytes);
+    var prng = std.Random.DefaultPrng.init(0x186);
+    prng.random().bytes(bytes);
+    const id = try db.putObject(bytes);
+    const chunk_count = try db.objectChunkCount(id);
+    try std.testing.expect(chunk_count > 128);
+    const max_seeks = std.math.log2_int_ceil(u64, chunk_count);
+
+    var buffer: [65536]u8 = undefined;
+    const offsets = [_]usize{ 1, bytes.len / 2, bytes.len - buffer.len };
+    _ = try db.readObjectRange(id, offsets[0], &buffer);
+    for (offsets) |offset| {
+        var trace: Trace = .{};
+        beginTrace(&db, &trace);
+        const read = try db.readObjectRange(id, offset, &buffer);
+        endTrace(&db);
+        try std.testing.expectEqualSlices(u8, bytes[offset .. offset + buffer.len], buffer[0..read]);
+        try std.testing.expectEqual(@as(usize, 1), trace.object_metadata);
+        try std.testing.expectEqual(@as(usize, 1), trace.object_range);
+        try std.testing.expect(trace.object_chunk_seek >= 1);
+        try std.testing.expect(trace.object_chunk_seek <= max_seeks);
+    }
 }
 
 test "object reader loads metadata and its manifest once before the read scope" {
