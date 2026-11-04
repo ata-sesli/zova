@@ -77,6 +77,17 @@ pub struct SharedObjectReader {
     _not_sync: PhantomData<Cell<()>>,
 }
 
+/// Seekable, verified object reader tied to a [`SharedDatabase`]. It behaves
+/// like [`crate::ObjectSeekableReader`] and implements [`std::io::Read`] and
+/// [`std::io::Seek`].
+pub struct SharedObjectSeekableReader {
+    raw: Option<NonNull<zova_sys::zova_object_seekable_reader>>,
+    database: Arc<SharedDatabaseInner>,
+    size: u64,
+    position: u64,
+    _not_sync: PhantomData<Cell<()>>,
+}
+
 /// Owned notification subscription tied to a [`SharedDatabase`].
 pub struct SharedSubscription {
     raw: Option<NonNull<zova_sys::zova_subscription>>,
@@ -189,6 +200,10 @@ unsafe impl Send for SharedObjectWriter {}
 // Safety: methods require `&mut self`, the raw reader is used only while the
 // parent database lock is held, and the parent Arc keeps the native handle alive.
 unsafe impl Send for SharedObjectReader {}
+
+// Safety: methods require `&mut self`, the raw reader is used only while the
+// parent database lock is held, and the parent Arc keeps the native handle alive.
+unsafe impl Send for SharedObjectSeekableReader {}
 
 // Safety: methods require `&mut self`, and the parent Arc keeps the native
 // database handle alive while receive/close serialize through the Rust mutex.
@@ -899,6 +914,29 @@ impl SharedDatabase {
         Ok(SharedObjectReader {
             raw: Some(raw),
             database: self.inner.clone(),
+            _not_sync: PhantomData,
+        })
+    }
+
+    pub fn object_seekable_reader(&self, id: ObjectId) -> Result<SharedObjectSeekableReader> {
+        let _guard = self.inner.enter()?;
+        let mut reader = ptr::null_mut();
+        let mut size = 0;
+        let request = zova_sys::zova_object_seekable_reader_create_request {
+            db: self.inner.raw_ptr(),
+            id: id.to_c(),
+            out_reader: &mut reader,
+            out_size: &mut size,
+        };
+        self.inner
+            .status_locked(unsafe { zova_sys::zova_object_seekable_reader_create(&request) })?;
+        let raw = NonNull::new(reader)
+            .ok_or_else(|| Error::from_status(zova_sys::ZOVA_INVALID_ARGUMENT, None))?;
+        Ok(SharedObjectSeekableReader {
+            raw: Some(raw),
+            database: self.inner.clone(),
+            size,
+            position: 0,
             _not_sync: PhantomData,
         })
     }
@@ -2333,6 +2371,118 @@ impl SharedObjectReader {
 impl Drop for SharedObjectReader {
     fn drop(&mut self) {
         self.destroy();
+    }
+}
+
+impl SharedObjectSeekableReader {
+    /// Total object size in bytes.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Current read position in bytes.
+    pub fn position(&self) -> u64 {
+        self.position
+    }
+
+    fn read_native(&mut self, buffer: &mut [u8]) -> Result<usize> {
+        let raw = self.raw()?;
+        let database = self.database.clone();
+        let _guard = database.enter()?;
+        let mut read = 0;
+        let request = zova_sys::zova_object_seekable_reader_read_request {
+            reader: raw.as_ptr(),
+            buffer: buffer.as_mut_ptr(),
+            buffer_len: buffer.len(),
+            out_read: &mut read,
+        };
+        database.status_locked(unsafe { zova_sys::zova_object_seekable_reader_read(&request) })?;
+        self.position += read as u64;
+        Ok(read)
+    }
+
+    fn seek_native(&mut self, offset: u64) -> Result<()> {
+        let raw = self.raw()?;
+        let database = self.database.clone();
+        let _guard = database.enter()?;
+        let request = zova_sys::zova_object_seekable_reader_seek_request {
+            reader: raw.as_ptr(),
+            offset,
+        };
+        database.status_locked(unsafe { zova_sys::zova_object_seekable_reader_seek(&request) })?;
+        self.position = offset;
+        Ok(())
+    }
+
+    /// Explicitly close the reader. Drop also closes it, and repeated calls
+    /// are successful no-ops.
+    pub fn close(&mut self) -> Result<()> {
+        if self.raw.is_none() {
+            return Ok(());
+        }
+        let database = self.database.clone();
+        let _guard = database.enter()?;
+        self.destroy_locked(true)
+    }
+
+    fn raw(&self) -> Result<NonNull<zova_sys::zova_object_seekable_reader>> {
+        self.raw
+            .ok_or_else(|| Error::from_status(zova_sys::ZOVA_OBJECT_READER_CLOSED, None))
+    }
+
+    fn destroy_locked(&mut self, report_error: bool) -> Result<()> {
+        let Some(raw) = self.raw else {
+            return Ok(());
+        };
+        let mut raw_ptr = raw.as_ptr();
+        let request = zova_sys::zova_object_seekable_reader_destroy_request {
+            reader: &mut raw_ptr,
+        };
+        let status = unsafe { zova_sys::zova_object_seekable_reader_destroy(&request) };
+        if status == zova_sys::ZOVA_OK {
+            self.raw = None;
+            return Ok(());
+        }
+        if report_error {
+            self.database.status_locked(status)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl std::io::Read for SharedObjectSeekableReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.read_native(buffer).map_err(std::io::Error::other)
+    }
+}
+
+impl std::io::Seek for SharedObjectSeekableReader {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        let target = match position {
+            std::io::SeekFrom::Start(offset) => Some(offset),
+            std::io::SeekFrom::End(delta) => self.size.checked_add_signed(delta),
+            std::io::SeekFrom::Current(delta) => self.position.checked_add_signed(delta),
+        };
+        let target = target.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "seek before the start of the object",
+            )
+        })?;
+        self.seek_native(target).map_err(std::io::Error::other)?;
+        Ok(target)
+    }
+}
+
+impl Drop for SharedObjectSeekableReader {
+    fn drop(&mut self) {
+        if self.raw.is_none() {
+            return;
+        }
+        let database = self.database.clone();
+        let _guard = database.lock();
+        let _ = self.destroy_locked(false);
     }
 }
 
