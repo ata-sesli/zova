@@ -985,10 +985,10 @@ pub const Database = struct {
             if (offset > bytes.len or chunk_size > bytes.len - offset) return error.ObjectCorrupt;
             if (manifest.columnType(4) == .null) return error.ObjectCorrupt;
 
+            // Chunk bytes are not hashed one by one: the whole-object hash
+            // below covers every returned byte.
             const chunk_data = manifest.columnBlob(4);
             if (chunk_data.len != chunk_size) return error.ObjectCorrupt;
-            const actual_chunk_hash = objectId(chunk_data);
-            if (!std.mem.eql(u8, &actual_chunk_hash, chunk_hash)) return error.ObjectCorrupt;
 
             @memcpy(bytes[offset .. offset + chunk_size], chunk_data);
             expected_offset += chunk_size;
@@ -1008,11 +1008,13 @@ pub const Database = struct {
     /// Read a byte range from a logical object into a caller-provided buffer.
     ///
     /// This is the v0.6 object serving path: it avoids object-sized
-    /// allocation, reads only the chunks that overlap the requested range, and
-    /// verifies every touched chunk by SHA-256 before copying bytes. `offset`
-    /// is a 0-based byte offset in the full object. Offsets past the end
-    /// return `error.ObjectRangeInvalid`; offsets at the end return `0`.
-    /// Full-object reads additionally verify the final full-object SHA-256.
+    /// allocation and reads only the chunks that overlap the requested range.
+    /// Partial reads verify every touched chunk by SHA-256 before copying its
+    /// bytes. A read of the whole object verifies the full-object SHA-256
+    /// instead, which covers every returned byte; on `error.ObjectCorrupt`
+    /// the buffer contents are unspecified. `offset` is a 0-based byte offset
+    /// in the full object. Offsets past the end return
+    /// `error.ObjectRangeInvalid`; offsets at the end return `0`.
     pub fn readObjectRange(self: *Database, id: ObjectId, offset: u64, buffer: []u8) Error!usize {
         const metadata = try loadObjectMetadata(self.statement_cache, self.sqlite_db, self.storage_schema, id);
         const size = try sqliteI64ToU64(metadata.size_bytes);
@@ -1112,6 +1114,16 @@ pub const Database = struct {
                     testRangeBlobClosed();
                 }
                 if (try blob.bytes() != chunk_size) return error.ObjectCorrupt;
+
+                if (full_read) {
+                    // The manifest shape was validated above, so every chunk
+                    // lies inside the buffer; the whole-object hash below
+                    // verifies the bytes.
+                    const dest_start: usize = @intCast(chunk_offset);
+                    const dest_len: usize = @intCast(chunk_size);
+                    try blob.read(buffer[dest_start .. dest_start + dest_len], 0);
+                    break :blk dest_len;
+                }
 
                 var hasher = std.crypto.hash.sha2.Sha256.init(.{});
                 var chunk_read: u64 = 0;
