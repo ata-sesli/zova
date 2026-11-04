@@ -167,6 +167,47 @@ test "writer finish references its chunks and drops them when another policy own
     try std.testing.expectEqual(@as(i64, 0), try testingCount(&raw, unreferenced_chunks_sql));
 }
 
+test "full object reads reject corrupt chunk bytes and swapped manifest chunks" {
+    var raw = try sqlite.Database.open(":memory:");
+    defer raw.deinit();
+    var db = try preparePrototypeDatabase(&raw);
+
+    const bytes = try std.testing.allocator.alloc(u8, fixed_chunks.chunk_size * 2 + 5);
+    defer std.testing.allocator.free(bytes);
+    var prng = std.Random.DefaultPrng.init(0x185);
+    prng.random().bytes(bytes);
+    const id = try db.putObjectWithOptions(bytes, .{ .profile = .streaming });
+
+    const buffer = try std.testing.allocator.alloc(u8, bytes.len);
+    defer std.testing.allocator.free(buffer);
+    try std.testing.expectEqual(bytes.len, try db.readObjectRange(id, 0, buffer));
+    try std.testing.expectEqualSlices(u8, bytes, buffer);
+
+    // Point chunk 1 at chunk 0's valid row. Each chunk still matches its
+    // manifest hash; only the whole-object check can reject the read.
+    try raw.exec("update _zova_object_chunks set chunk_hash = " ++
+        "(select chunk_hash from _zova_object_chunks where chunk_index = 0) where chunk_index = 1");
+    try std.testing.expectError(error.ObjectCorrupt, db.getObject(std.testing.allocator, id));
+    try std.testing.expectError(error.ObjectCorrupt, db.readObjectRange(id, 0, buffer));
+    try raw.exec("delete from _zova_object_chunks");
+    try raw.exec("delete from _zova_objects");
+    try raw.exec("delete from _zova_chunks");
+
+    const fastcdc_id = try db.putObject(bytes);
+    try raw.exec("update _zova_chunks set data = zeroblob(size_bytes) where chunk_hash = " ++
+        "(select chunk_hash from _zova_object_chunks where chunk_index = 1)");
+    try std.testing.expectError(error.ObjectCorrupt, db.getObject(std.testing.allocator, fastcdc_id));
+    try std.testing.expectError(error.ObjectCorrupt, db.readObjectRange(fastcdc_id, 0, buffer));
+
+    var manifest = try db.objectManifest(std.testing.allocator, fastcdc_id);
+    defer manifest.deinit(std.testing.allocator);
+    const corrupt = manifest.chunks[1];
+    try std.testing.expectError(error.ObjectCorrupt, db.readObjectRange(fastcdc_id, corrupt.offset, buffer[0..16]));
+    const intact = manifest.chunks[0];
+    try std.testing.expectEqual(@as(usize, 16), try db.readObjectRange(fastcdc_id, intact.offset, buffer[0..16]));
+    try std.testing.expectEqualSlices(u8, bytes[@intCast(intact.offset)..][0..16], buffer[0..16]);
+}
+
 fn testingWriteThenFinish(writer: *object_impl.ObjectWriter, bytes: []const u8) !ObjectId {
     try writer.write(bytes);
     return writer.finish();
