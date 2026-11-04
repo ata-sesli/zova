@@ -905,8 +905,12 @@ pub const Database = struct {
             \\where oc.object_id = ?
             \\order by oc.chunk_index asc
         , .{ self.storage_schema.prefix(), self.storage_schema.prefix() });
-        errdefer manifest.deinit();
-        try manifest.bindBlob(1, &id);
+        // Once the reader owns the statement, only `reader.deinit` may
+        // finalize it.
+        manifest.bindBlob(1, &id) catch |err| {
+            manifest.deinit();
+            return err;
+        };
 
         var reader = ObjectReader{
             .sqlite_db = self.sqlite_db,

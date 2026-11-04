@@ -522,6 +522,32 @@ test "sequential object reader handles empty objects and early close" {
     try std.testing.expectError(error.ObjectReaderClosed, reader.read(&output));
 }
 
+test "sequential object reader rejects a corrupt first manifest row on open" {
+    var raw = try sqlite.Database.open(":memory:");
+    defer raw.deinit();
+    var db = try preparePrototypeDatabase(&raw);
+
+    var bytes: [fixed_chunks.chunk_size + 17]u8 = undefined;
+    for (&bytes, 0..) |*byte, index| byte.* = @intCast((index * 13 + 5) % 251);
+    const id = try db.putObjectWithOptions(&bytes, .{ .profile = .streaming });
+
+    const corruptions = [_][:0]const u8{
+        "update _zova_object_chunks set offset = 5 where chunk_index = 0",
+        "update _zova_object_chunks set size_bytes = 17 where chunk_index = 0",
+        "update _zova_object_chunks set chunk_index = 7 where chunk_index = 0",
+    };
+    for (corruptions) |corruption| {
+        try raw.exec("savepoint corrupt_manifest");
+        try raw.exec(corruption);
+        try std.testing.expectError(error.ObjectCorrupt, db.objectReader(id));
+        try raw.exec("rollback to corrupt_manifest");
+        try raw.exec("release corrupt_manifest");
+    }
+
+    var reader = try db.objectReader(id);
+    reader.deinit();
+}
+
 test "sequential object reader holds a stable WAL snapshot" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
