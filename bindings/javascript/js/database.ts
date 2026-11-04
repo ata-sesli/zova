@@ -15,6 +15,7 @@ import type {
 } from "./graph.js";
 import {
   ObjectReader,
+  ObjectSeekableReader,
   ObjectWriter,
   type ObjectManifest,
   type ObjectManifestChunkInput,
@@ -407,6 +408,12 @@ export class Database {
 
   objectReader(id: Uint8Array): ObjectReader {
     return new ObjectReader(callNative(() => this.#native.objectReader(id)));
+  }
+
+  objectSeekableReader(id: Uint8Array): ObjectSeekableReader {
+    return new ObjectSeekableReader(
+      callNative(() => this.#native.objectSeekableReader(id)),
+    );
   }
 
   createVectorCollection(

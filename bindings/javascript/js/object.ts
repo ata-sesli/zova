@@ -1,6 +1,6 @@
 import native = require("../index.js");
 
-import { callNative, invalidArgument } from "./errors.js";
+import { callNative, invalidArgument, normalizeNativeError } from "./errors.js";
 
 export interface ObjectManifestChunk {
   readonly index: bigint;
@@ -81,6 +81,110 @@ export class ObjectWriter {
 
   close(): void {
     callNative(() => this.#native.close());
+  }
+}
+
+/** Origin for `ObjectSeekableReader.seek`, as in `fs` and `io.Seeker`. */
+export type SeekWhence = "start" | "current" | "end";
+
+/**
+ * Seekable, verified reader for one stored object, for HTTP range serving.
+ *
+ * Each chunk is checked against its manifest SHA-256 once, into a per-reader
+ * buffer, before any of its bytes are returned; the whole-object hash is not
+ * checked. The reader holds no read transaction between calls, so other
+ * connections can commit while it stays open. A read that needs a new chunk
+ * of an object deleted since opening fails with `ZOVA_OBJECT_NOT_FOUND`.
+ * Reads return an empty array at or past the end. Asynchronous reads and
+ * seeks run in call order.
+ */
+export class ObjectSeekableReader {
+  readonly #native: native.NativeObjectSeekableReader;
+  #tail: Promise<void> = Promise.resolve();
+
+  constructor(reader: native.NativeObjectSeekableReader) {
+    this.#native = reader;
+  }
+
+  get closed(): boolean {
+    return this.#native.closed;
+  }
+
+  /** Object size in bytes. */
+  get size(): bigint {
+    return this.#native.size;
+  }
+
+  /** Offset of the next read. */
+  get position(): bigint {
+    return callNative(() => this.#native.position);
+  }
+
+  read(size: number): Uint8Array {
+    checkReadSize(size);
+    return callNative(() => this.#native.read(size));
+  }
+
+  /** Move the read offset and return the new absolute offset. */
+  seek(offset: bigint | number, whence: SeekWhence = "start"): bigint {
+    const target = this.#target(offset, whence);
+    return callNative(() => this.#native.seek(target));
+  }
+
+  readAsync(size: number): Promise<Uint8Array> {
+    checkReadSize(size);
+    return this.#enqueue(() => this.#native.asyncRead(size));
+  }
+
+  seekAsync(offset: bigint | number, whence: SeekWhence = "start"): Promise<bigint> {
+    return this.#enqueue(async () => this.seek(offset, whence));
+  }
+
+  close(): void {
+    callNative(() => this.#native.close());
+  }
+
+  #target(offset: bigint | number, whence: SeekWhence): bigint {
+    if (typeof offset === "number" && !Number.isSafeInteger(offset)) {
+      throw invalidArgument("object reader offset must be a safe integer or bigint");
+    }
+    const delta = BigInt(offset);
+    let base: bigint;
+    switch (whence) {
+      case "start":
+        base = 0n;
+        break;
+      case "current":
+        base = this.position;
+        break;
+      case "end":
+        base = this.size;
+        break;
+      default:
+        throw invalidArgument(`unsupported seek origin: ${String(whence)}`);
+    }
+    const target = base + delta;
+    if (target < 0n) {
+      throw invalidArgument("object reader offset must not be negative");
+    }
+    return target;
+  }
+
+  #enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.#tail.then(operation).catch((error) => {
+      throw normalizeNativeError(error);
+    });
+    this.#tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+}
+
+function checkReadSize(size: number): void {
+  if (!Number.isInteger(size) || size < 0 || size > 0xffff_ffff) {
+    throw invalidArgument("object reader size must be a non-negative 32-bit integer");
   }
 }
 

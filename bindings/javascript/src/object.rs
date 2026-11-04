@@ -1,7 +1,8 @@
-use std::sync::Arc;
+use std::io::{Read, Seek, SeekFrom};
+use std::sync::{Arc, Mutex};
 
-use napi::bindgen_prelude::{BigInt, Uint8Array};
-use napi::Result;
+use napi::bindgen_prelude::{AsyncTask, BigInt, Uint8Array};
+use napi::{Env, Result, Task};
 use napi_derive::napi;
 
 use crate::database::{DatabaseState, NativeDatabase};
@@ -344,6 +345,22 @@ impl NativeDatabase {
     }
 
     #[napi]
+    pub fn object_seekable_reader(&self, id: Uint8Array) -> Result<NativeObjectSeekableReader> {
+        open_seekable_reader(&self.state, object_id_from_array(&id)?)
+    }
+
+    #[napi(ts_return_type = "Promise<NativeObjectSeekableReader>")]
+    pub fn async_object_seekable_reader(
+        &self,
+        id: Uint8Array,
+    ) -> Result<AsyncTask<OpenSeekableReaderTask>> {
+        Ok(AsyncTask::new(OpenSeekableReaderTask {
+            state: self.state.clone(),
+            id: object_id_from_array(&id)?,
+        }))
+    }
+
+    #[napi]
     pub fn object_reader(&self, id: Uint8Array) -> Result<NativeObjectReader> {
         let database = self.state.register_child()?;
         match database.object_reader(object_id_from_array(&id)?) {
@@ -488,5 +505,190 @@ impl NativeObjectWriter {
 impl Drop for NativeObjectWriter {
     fn drop(&mut self) {
         self.drop_writer();
+    }
+}
+
+/// Open a seekable reader as a registered child of the database.
+pub(crate) fn open_seekable_reader(
+    state: &Arc<DatabaseState>,
+    id: zova::ObjectId,
+) -> Result<NativeObjectSeekableReader> {
+    let database = state.register_child()?;
+    match database.object_seekable_reader(id) {
+        Ok(reader) => Ok(NativeObjectSeekableReader {
+            size: reader.size(),
+            reader: Arc::new(Mutex::new(Some(reader))),
+            database: state.clone(),
+        }),
+        Err(error) => {
+            state.child_closed();
+            Err(zova_error(error))
+        }
+    }
+}
+
+/// Map a reader I/O error back to its native Zova error when it carries one.
+fn seekable_error(error: std::io::Error) -> napi::Error {
+    match error
+        .into_inner()
+        .map(|inner| inner.downcast::<zova::Error>())
+    {
+        Some(Ok(native)) => zova_error(*native),
+        Some(Err(other)) => invalid_argument_error(other.to_string()),
+        None => invalid_argument_error("object reader I/O error"),
+    }
+}
+
+type SeekableReaderSlot = Arc<Mutex<Option<zova::SharedObjectSeekableReader>>>;
+
+fn read_seekable(slot: &SeekableReaderSlot, size: u32) -> Result<Vec<u8>> {
+    let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let reader = guard
+        .as_mut()
+        .ok_or_else(|| misuse_error("object reader is closed"))?;
+    let mut bytes = vec![0; size as usize];
+    let read = reader.read(&mut bytes).map_err(seekable_error)?;
+    bytes.truncate(read);
+    Ok(bytes)
+}
+
+/// Seekable, verified object reader. The mutex lets synchronous calls and
+/// worker-thread reads serialize access to the same native reader.
+#[napi(js_name = "NativeObjectSeekableReader")]
+pub struct NativeObjectSeekableReader {
+    reader: SeekableReaderSlot,
+    database: Arc<DatabaseState>,
+    size: u64,
+}
+
+impl NativeObjectSeekableReader {
+    fn close_inner(&self) -> Result<()> {
+        let mut guard = self
+            .reader
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(reader) = guard.as_mut() else {
+            return Ok(());
+        };
+        reader.close().map_err(zova_error)?;
+        *guard = None;
+        self.database.child_closed();
+        Ok(())
+    }
+}
+
+#[napi]
+impl NativeObjectSeekableReader {
+    #[napi(getter)]
+    pub fn closed(&self) -> bool {
+        self.reader
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_none()
+    }
+
+    #[napi(getter)]
+    pub fn size(&self) -> BigInt {
+        BigInt::from(self.size)
+    }
+
+    #[napi(getter)]
+    pub fn position(&self) -> Result<BigInt> {
+        let guard = self
+            .reader
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let reader = guard
+            .as_ref()
+            .ok_or_else(|| misuse_error("object reader is closed"))?;
+        Ok(BigInt::from(reader.position()))
+    }
+
+    #[napi]
+    pub fn read(&self, size: u32) -> Result<Uint8Array> {
+        Ok(Uint8Array::new(read_seekable(&self.reader, size)?))
+    }
+
+    #[napi(ts_return_type = "Promise<Uint8Array>")]
+    pub fn async_read(&self, size: u32) -> AsyncTask<SeekableReadTask> {
+        AsyncTask::new(SeekableReadTask {
+            reader: self.reader.clone(),
+            size,
+        })
+    }
+
+    /// Move to an absolute offset. Offsets past the end read zero bytes.
+    #[napi]
+    pub fn seek(&self, offset: BigInt) -> Result<BigInt> {
+        let (signed, offset, lossless) = offset.get_u64();
+        if signed || !lossless {
+            return Err(invalid_argument_error(
+                "object reader offset must be a non-negative 64-bit integer",
+            ));
+        }
+        let mut guard = self
+            .reader
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let reader = guard
+            .as_mut()
+            .ok_or_else(|| misuse_error("object reader is closed"))?;
+        let position = reader
+            .seek(SeekFrom::Start(offset))
+            .map_err(seekable_error)?;
+        Ok(BigInt::from(position))
+    }
+
+    #[napi]
+    pub fn close(&self) -> Result<()> {
+        self.close_inner()
+    }
+}
+
+impl Drop for NativeObjectSeekableReader {
+    fn drop(&mut self) {
+        let mut guard = self
+            .reader
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if guard.take().is_some() {
+            self.database.child_closed();
+        }
+    }
+}
+
+pub struct SeekableReadTask {
+    reader: SeekableReaderSlot,
+    size: u32,
+}
+
+impl Task for SeekableReadTask {
+    type Output = Vec<u8>;
+    type JsValue = Uint8Array;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        read_seekable(&self.reader, self.size)
+    }
+
+    fn resolve(&mut self, _: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(Uint8Array::new(output))
+    }
+}
+
+pub struct OpenSeekableReaderTask {
+    state: Arc<DatabaseState>,
+    id: zova::ObjectId,
+}
+
+impl Task for OpenSeekableReaderTask {
+    type Output = NativeObjectSeekableReader;
+    type JsValue = NativeObjectSeekableReader;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        open_seekable_reader(&self.state, self.id)
+    }
+
+    fn resolve(&mut self, _: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
     }
 }

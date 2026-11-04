@@ -30,6 +30,7 @@ export type {
 } from "./graph.js";
 export {
   ObjectReader,
+  ObjectSeekableReader,
   ObjectWriter,
   objectChunkId,
   objectId,
@@ -52,6 +53,7 @@ export type {
   ObjectManifestChunkInput,
   ObjectPutOptions,
   ObjectStorageProfile,
+  SeekWhence,
 } from "./object.js";
 export type {
   ColumnType,
