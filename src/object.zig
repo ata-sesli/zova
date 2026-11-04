@@ -4,6 +4,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const fastcdc = @import("object_fastcdc.zig");
 const fixed_chunks = @import("object_fixed_chunks.zig");
+const Sha256 = @import("object_sha256.zig").Sha256;
 pub const sqlite = @import("sqlite.zig");
 const statement_cache = @import("statement_cache.zig");
 const zova_error = @import("zova_error.zig");
@@ -239,7 +240,7 @@ pub const ObjectChunkId = [32]u8;
 /// Compute the content identity for a Zova object.
 pub fn objectId(bytes: []const u8) ObjectId {
     var digest: ObjectId = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    Sha256.hash(bytes, &digest, .{});
     return digest;
 }
 
@@ -250,7 +251,7 @@ pub fn objectId(bytes: []const u8) ObjectId {
 /// object assembly exists.
 pub fn objectChunkId(bytes: []const u8) ObjectChunkId {
     var digest: ObjectChunkId = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    Sha256.hash(bytes, &digest, .{});
     return digest;
 }
 
@@ -331,8 +332,8 @@ pub const ObjectReader = struct {
     current_chunk_read: u64 = 0,
     next_chunk_index: u64 = 0,
     next_chunk_offset: u64 = 0,
-    chunk_hasher: std.crypto.hash.sha2.Sha256 = std.crypto.hash.sha2.Sha256.init(.{}),
-    object_hasher: std.crypto.hash.sha2.Sha256 = std.crypto.hash.sha2.Sha256.init(.{}),
+    chunk_hasher: Sha256 = Sha256.init(.{}),
+    object_hasher: Sha256 = Sha256.init(.{}),
     scratch: [64 * 1024]u8 = undefined,
     finished: bool = false,
     closed: bool = false,
@@ -422,7 +423,7 @@ pub const ObjectReader = struct {
                 self.current_chunk_offset = offset;
                 self.current_chunk_size = size;
                 self.current_chunk_read = 0;
-                self.chunk_hasher = std.crypto.hash.sha2.Sha256.init(.{});
+                self.chunk_hasher = Sha256.init(.{});
                 self.next_chunk_index += 1;
                 self.next_chunk_offset += size;
                 self.blob = next_blob;
@@ -477,7 +478,7 @@ pub const ObjectWriter = struct {
     allocator: std.mem.Allocator,
     policy: ChunkingPolicy = .fastcdc,
     chunker: PolicyStreamChunker = .{ .fastcdc = .empty },
-    hasher: std.crypto.hash.sha2.Sha256 = std.crypto.hash.sha2.Sha256.init(.{}),
+    hasher: Sha256 = Sha256.init(.{}),
     size_bytes: u64 = 0,
     chunks: std.ArrayList(ObjectChunk) = .empty,
     seen_chunks: std.ArrayList(ObjectChunkId) = .empty,
@@ -507,7 +508,7 @@ pub const ObjectWriter = struct {
             .allocator = allocator,
             .policy = policy,
             .chunker = PolicyStreamChunker.init(policy),
-            .hasher = std.crypto.hash.sha2.Sha256.init(.{}),
+            .hasher = Sha256.init(.{}),
         };
     }
 
@@ -737,7 +738,7 @@ pub const ObjectWriter = struct {
 
         const existing_policy = policyFromVersion(manifest.chunker) orelse return error.ObjectCorrupt;
 
-        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        var hasher = Sha256.init(.{});
         var total_size: u64 = 0;
         for (manifest.chunks) |chunk| {
             var chunk_data = db.getObjectChunkWithPolicy(self.allocator, chunk.hash, existing_policy) catch |err| switch (err) {
@@ -1137,7 +1138,7 @@ pub const Database = struct {
                     break :blk dest_len;
                 }
 
-                var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+                var hasher = Sha256.init(.{});
                 var chunk_read: u64 = 0;
                 var chunk_copied: usize = 0;
                 while (chunk_read < chunk_size) {
@@ -1582,7 +1583,7 @@ pub const Database = struct {
         errdefer allocator.free(sorted_chunks);
         std.mem.sort(ObjectChunk, sorted_chunks, {}, objectChunkIndexLessThan);
 
-        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        var hasher = Sha256.init(.{});
         var expected_index: u64 = 0;
         var expected_offset: u64 = 0;
 
