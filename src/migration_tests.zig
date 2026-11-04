@@ -111,6 +111,7 @@ test "migration registry only registers adjacent steps with exact version pairs"
     try std.testing.expect(zova.findMigrationStep(8, 9) == null);
     try std.testing.expect(zova.findMigrationStep(9, 11) == null);
     try std.testing.expect(zova.findMigrationStep(11, 12) != null);
+    try std.testing.expect(zova.findMigrationStep(12, 13) != null);
     try std.testing.expect(zova.findMigrationStep(9, 9) == null);
     try std.testing.expect(zova.findMigrationStep(7, 8) == null);
 }
@@ -134,6 +135,7 @@ test "genuine format11 migration preserves vector rows keys and database identit
     try expectScalarTextRaw(&raw, "select value from _zova_meta where key='database_id'", identity);
     try std.testing.expectEqual(@as(i64, 0), try scalarCount(&raw, "select count(*) from _zova_vector_changes"));
     try std.testing.expectEqual(try scalarCount(&raw, "select count(*) from _zova_vector_collections"), try scalarCount(&raw, "select count(*) from _zova_vector_sources where revision=0 and token=incarnation"));
+    try std.testing.expectEqual(@as(u32, 13), try zova.runMigrationStep(&raw));
     var opened = try Database.open(path);
     defer opened.deinit();
 }
@@ -160,6 +162,137 @@ test "format11 journal migration rolls back schema and identities on a mid-step 
         try std.testing.expectEqual(@as(i64, 0), try scalarCount(&raw, "select count(*) from sqlite_schema where name in ('_zova_vector_sources','_zova_vector_changes')"));
     }
     try std.testing.expectEqualSlices(u8, &before, &(try fileSha256(path)));
+}
+
+fn expectChunkIndexRaw(db: *sqlite.Database, expected: bool) !void {
+    const count = try scalarCount(db, "select count(*) from sqlite_schema where type='index' and name='_zova_object_chunks_chunk_hash_idx' and tbl_name='_zova_object_chunks'");
+    try std.testing.expectEqual(@as(i64, if (expected) 1 else 0), count);
+}
+
+test "genuine format12 migration adds the chunk-reference index and keeps auto_vacuum" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try copyFixture(&tmp.sub_path, 138, "format-12.zova");
+    defer std.testing.allocator.free(path);
+    var raw = try sqlite.Database.open(path);
+    defer raw.deinit();
+    const manifest_rows = try scalarCount(&raw, "select count(*) from _zova_object_chunks");
+    try std.testing.expectEqual(@as(i64, 0), try scalarCount(&raw, "pragma auto_vacuum"));
+    try expectChunkIndexRaw(&raw, false);
+    try std.testing.expectError(error.MigrationRequired, Database.open(path));
+
+    try std.testing.expectEqual(@as(u32, 13), try zova.runMigrationStep(&raw));
+    try expectChunkIndexRaw(&raw, true);
+    try std.testing.expectEqual(manifest_rows, try scalarCount(&raw, "select count(*) from _zova_object_chunks"));
+    try std.testing.expectEqual(@as(i64, 0), try scalarCount(&raw, "pragma auto_vacuum"));
+    var opened = try Database.open(path);
+    defer opened.deinit();
+}
+
+test "format12 migration rolls back when the index cannot be created" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try copyFixture(&tmp.sub_path, 139, "format-12.zova");
+    defer std.testing.allocator.free(path);
+    const before = try fileSha256(path);
+    {
+        var raw = try sqlite.Database.open(path);
+        defer raw.deinit();
+        const deny = struct {
+            fn call(_: ?*anyopaque, action: c_int, first: [*c]const u8, _: [*c]const u8, _: [*c]const u8, _: [*c]const u8) callconv(.c) c_int {
+                if (action == sqlite.c.SQLITE_CREATE_INDEX and first != null and std.mem.eql(u8, std.mem.span(first), "_zova_object_chunks_chunk_hash_idx")) return sqlite.c.SQLITE_DENY;
+                return sqlite.c.SQLITE_OK;
+            }
+        }.call;
+        try raw.setAuthorizer(deny, null);
+        try std.testing.expectError(error.SqliteError, zova.runMigrationStep(&raw));
+        try raw.setAuthorizer(null, null);
+        try expectScalarTextRaw(&raw, "select value from _zova_meta where key='format_version'", "12");
+        try expectChunkIndexRaw(&raw, false);
+    }
+    try std.testing.expectEqualSlices(u8, &before, &(try fileSha256(path)));
+}
+
+test "format12 source that already carries the chunk-reference index fails preflight" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try copyFixture(&tmp.sub_path, 140, "empty-main-format-12.zova");
+    defer std.testing.allocator.free(path);
+    var raw = try sqlite.Database.open(path);
+    defer raw.deinit();
+    try raw.exec(@import("object.zig").object_chunks_chunk_hash_index_sql);
+    try std.testing.expectError(error.NotZovaDatabase, zova.runMigrationStep(&raw));
+    try expectScalarTextRaw(&raw, "select value from _zova_meta where key='format_version'", "12");
+}
+
+test "migrateDatabase adds the index to every member of a format-12 bound set" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var dir_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const set_dir = try std.fmt.bufPrint(&dir_buffer, ".zig-cache/tmp/{s}/migrate-bound-12", .{tmp.sub_path[0..]});
+    try std.Io.Dir.cwd().createDirPath(io(), set_dir);
+
+    const members = [_][]const u8{
+        "bound-main-format-12.zova",
+        "bound-main-format-12.objects.zova",
+        "bound-main-format-12.vectors.zova",
+        "bound-main-format-12.graphs.zova",
+    };
+    var hashes_before: [members.len][32]u8 = undefined;
+    inline for (members) |name| {
+        var member_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const member_path = try std.fmt.bufPrintSentinel(&member_buffer, "{s}/{s}", .{ set_dir, name }, 0);
+        try copyFixtureInto(member_path, name);
+    }
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_main = try std.fmt.bufPrintSentinel(&source_buffer, "{s}/bound-main-format-12.zova", .{set_dir}, 0);
+    {
+        // Relocate the bare sibling names to this directory, as the format-9
+        // bound-set test does.
+        var raw = try sqlite.Database.open(source_main);
+        defer raw.deinit();
+        inline for (.{
+            .{ .role = "object_store", .suffix = "objects" },
+            .{ .role = "vector_store", .suffix = "vectors" },
+            .{ .role = "graph_store", .suffix = "graphs" },
+        }) |entry| {
+            var update = try raw.prepare("update _zova_bound_stores set path = ?1 where role = ?2");
+            defer update.deinit();
+            var sibling_buffer: [std.fs.max_path_bytes]u8 = undefined;
+            const sibling = try std.fmt.bufPrintSentinel(&sibling_buffer, "{s}/bound-main-format-12.{s}.zova", .{ set_dir, entry.suffix }, 0);
+            try update.bindText(1, sibling);
+            try update.bindText(2, entry.role);
+            _ = try update.step();
+        }
+    }
+    inline for (members, 0..) |name, index| {
+        var member_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const member_path = try std.fmt.bufPrintSentinel(&member_buffer, "{s}/{s}", .{ set_dir, name }, 0);
+        hashes_before[index] = try fileSha256(member_path);
+    }
+
+    var dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_main = try std.fmt.bufPrintSentinel(&dest_buffer, "{s}/migrated-set.zova", .{set_dir}, 0);
+    try zova.migrateDatabase(source_main, dest_main, .{});
+
+    inline for (members, 0..) |name, index| {
+        var member_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const member_path = try std.fmt.bufPrintSentinel(&member_buffer, "{s}/{s}", .{ set_dir, name }, 0);
+        try std.testing.expectEqualSlices(u8, &hashes_before[index], &(try fileSha256(member_path)));
+    }
+
+    inline for (.{ "migrated-set.zova", "migrated-set.objects.zova", "migrated-set.vectors.zova", "migrated-set.graphs.zova" }) |name| {
+        var member_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const member_path = try std.fmt.bufPrintSentinel(&member_buffer, "{s}/{s}", .{ set_dir, name }, 0);
+        var raw = try sqlite.Database.open(member_path);
+        defer raw.deinit();
+        try expectChunkIndexRaw(&raw, true);
+        try std.testing.expectEqual(@as(i64, 0), try scalarCount(&raw, "pragma auto_vacuum"));
+        try expectScalarTextRaw(&raw, "select value from _zova_meta where key='format_version'", "13");
+    }
+    try expectMigratedSetParity(std.testing.allocator, dest_main, true);
 }
 
 test "genuine format-10 fixture hashes are immutable" {
@@ -554,7 +687,7 @@ test "migration refuses current pre-migratable and future formats without mutati
             try raw.exec(
                 \\create table _zova_meta (key text primary key, value text not null);
                 \\insert into _zova_meta (key, value) values ('magic', 'zova');
-                \\insert into _zova_meta (key, value) values ('format_version', '13');
+                \\insert into _zova_meta (key, value) values ('format_version', '14');
             );
         }
 

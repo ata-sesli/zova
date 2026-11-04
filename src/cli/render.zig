@@ -40,6 +40,7 @@ pub fn writeUsage(writer: *std.Io.Writer) !void {
         \\  zova salvage [--json] [--limit <n>] <source.zova> <destination.zova>
         \\  zova backup [--json] [--no-verify] [--progress] <source.zova> <destination.zova>
         \\  zova compact [--json] [--no-verify] [--progress] <source.zova> <destination.zova>
+        \\  zova reclaim [--json] [--max-pages <n>] <file.zova>
         \\  zova restore [--json] [--no-verify] <backup.zova> <destination.zova>
         \\  zova split (--objects | --vectors | --graphs) [--json] <main.zova> <store.zova>
         \\  zova object-store create [--json] <objects.zova>
@@ -93,6 +94,7 @@ pub fn writeUsage(writer: *std.Io.Writer) !void {
         \\  salvage plan or copy best-effort recovery without mutating the source
         \\  backup create a verified snapshot copy without overwriting destination
         \\  compact create a verified space-reclaiming copy with VACUUM INTO
+        \\  reclaim release free pages of incremental auto-vacuum files in place
         \\  restore restore a backup into a new destination file
         \\  split  move existing single-file object, vector, or graph storage into a new bound store
         \\  object-store manage one optional bound object store

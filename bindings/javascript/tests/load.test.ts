@@ -11,7 +11,7 @@ describe("native binding metadata", () => {
   test("matches the current Zova release contract", () => {
     expect(packageVersion).toBe("1.3.0");
     expect(abiVersion).toBe("1.3.0");
-    expect(formatVersion).toBe("12");
+    expect(formatVersion).toBe("13");
     expect(sqliteVersion).toBe("3.53.4");
   });
 });

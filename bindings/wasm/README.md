@@ -4,8 +4,8 @@ Experimental Zova for browsers, in memory or named OPFS storage: SQL, binary KV,
 transactions, prepared statements, objects, exact vectors and graphs. The real Zova
 core and bundled SQLite run inside a dedicated worker as one WebAssembly module.
 
-This experimental package follows the repository release (`1.3.0`,
-format 12). Browser API stability
+This experimental package follows the repository release (`1.3.0`;
+development format 13). Browser API stability
 and full native compatibility are not promised. Memory databases lose their
 data when closed or when their worker/page terminates.
 

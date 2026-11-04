@@ -21,6 +21,8 @@ const operationalUsageMessage = @import("parse.zig").operationalUsageMessage;
 const parseFormatCommandArgs = @import("parse.zig").parseFormatCommandArgs;
 const parseMigrateCommandArgs = @import("parse.zig").parseMigrateCommandArgs;
 const parseOperationalCommandArgs = @import("parse.zig").parseOperationalCommandArgs;
+const parseReclaimCommandArgs = @import("parse.zig").parseReclaimCommandArgs;
+const reclaimUsageMessage = @import("parse.zig").reclaimUsageMessage;
 const progress_output = @import("progress.zig");
 const usageErrorFormat = @import("render.zig").usageErrorFormat;
 const writeJsonErrorWithKind = @import("render.zig").writeJsonErrorWithKind;
@@ -514,6 +516,73 @@ pub fn compactCommand(
     reporter.finish();
     try writeOperationalSuccess(stdout, "compact", parsed, parsed.source_path, parsed.destination_path);
     return ExitCode.ok;
+}
+
+pub fn reclaimCommand(
+    ctx: CommandContext,
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !u8 {
+    const parsed = parseReclaimCommandArgs(args) catch |err| {
+        const format: OutputFormat = if (argsContain(args, "--json")) .json else .text;
+        return usageErrorFormat(stderr, "reclaim", format, reclaimUsageMessage(err));
+    };
+
+    const path = try allocator.dupeSentinel(u8, parsed.path, 0);
+    defer allocator.free(path);
+
+    var db = openDatabase(ctx, path) catch |err| return openErrorFormat(stderr, "reclaim", parsed.format, err);
+    defer db.deinit();
+
+    const result = db.reclaimSpace(.{ .max_pages = parsed.max_pages }) catch |err| return operationalErrorFormat(stderr, "reclaim", parsed.format, err);
+    try writeReclaimSuccess(stdout, parsed.format, parsed.path, result.members());
+    return ExitCode.ok;
+}
+
+fn writeReclaimSuccess(
+    stdout: *std.Io.Writer,
+    format: OutputFormat,
+    path: []const u8,
+    members: []const zova.ReclaimedMember,
+) !void {
+    switch (format) {
+        .text => {
+            try stdout.writeAll("reclaim: ok\n");
+            try stdout.print("path: {s}\n", .{path});
+            for (members) |member| {
+                try stdout.print("member: {s}\n", .{@tagName(member.member)});
+                try stdout.print("  auto_vacuum: {s}\n", .{@tagName(member.auto_vacuum)});
+                try stdout.print("  page_size: {d}\n", .{member.page_size});
+                try stdout.print("  pages_released: {d}\n", .{member.pages_released});
+                try stdout.print("  bytes_released: {d}\n", .{member.pages_released * member.page_size});
+                try stdout.print("  free_pages_left: {d}\n", .{member.free_pages_left});
+                if (member.auto_vacuum == .none and member.free_pages_left != 0) {
+                    try stdout.writeAll("  note: auto_vacuum is none; 'zova compact' writes an incremental copy that can reclaim\n");
+                } else if (member.auto_vacuum == .none) {
+                    try stdout.writeAll("  note: auto_vacuum is none; use 'zova compact' to convert this file\n");
+                }
+            }
+        },
+        .json => {
+            try stdout.writeAll("{\n");
+            try stdout.print("  \"cli_json_version\": {d},\n", .{cli_json_version});
+            try stdout.writeAll("  \"status\": \"ok\",\n");
+            try stdout.writeAll("  \"command\": \"reclaim\",\n");
+            try stdout.writeAll("  \"path\": ");
+            try writeJsonString(stdout, path);
+            try stdout.writeAll(",\n  \"members\": [");
+            for (members, 0..) |member, index| {
+                if (index != 0) try stdout.writeAll(",");
+                try stdout.print(
+                    "\n    {{\"member\": \"{s}\", \"auto_vacuum\": \"{s}\", \"page_size\": {d}, \"pages_released\": {d}, \"bytes_released\": {d}, \"free_pages_left\": {d}}}",
+                    .{ @tagName(member.member), @tagName(member.auto_vacuum), member.page_size, member.pages_released, member.pages_released * member.page_size, member.free_pages_left },
+                );
+            }
+            try stdout.writeAll("\n  ]\n}\n");
+        },
+    }
 }
 
 pub fn restoreCommand(

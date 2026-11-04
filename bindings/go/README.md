@@ -72,11 +72,11 @@ The Go package is source-only and uses cgo. It does not download or build the
 native Zova C ABI automatically during `go get`; your build environment must
 provide `zova.h` and `libzova_c.a`.
 
-The current release uses `.zova` format 12 and does not migrate older
-format databases in place. Format-9, format-10 and format-11 databases can be probed and
+The current development `.zova` format is 13, and Zova does not migrate older
+format databases in place. Format-9, format-10, format-11 and format-12 databases can be probed and
 migrated forward with the package-level `ProbeFormat(path)` and
 `MigrateDatabase(source, destination, options...)` functions: migration is
-explicit, copy-forward, publishes a separately validated format-12 destination,
+explicit, copy-forward, publishes a separately validated format-13 destination,
 and never mutates the source. `MigrateDatabaseWithExtensions(source,
 destination, options, extensions)` takes the same `ExtensionOptions` as
 `OpenWithExtensions` for databases with a non-bundled extension installed.

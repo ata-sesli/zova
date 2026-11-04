@@ -34,7 +34,6 @@ const validateExtensionSchema = @import("validation.zig").validateExtensionSchem
 const validateGraphSchema = @import("validation.zig").validateGraphSchema;
 const validateGraphStoreDatabaseExpected = @import("validation.zig").validateGraphStoreDatabaseExpected;
 const validateKvSchema = @import("validation.zig").validateKvSchema;
-const validateObjectSchema = @import("validation.zig").validateObjectSchema;
 const validateObjectSchemaExpected = @import("validation.zig").validateObjectSchemaExpected;
 const validateObjectStoreDatabaseExpected = @import("validation.zig").validateObjectStoreDatabaseExpected;
 const validateOptionalBoundStoreSchema = @import("validation.zig").validateOptionalBoundStoreSchema;
@@ -66,7 +65,15 @@ pub const migration_steps = [_]MigrationStep{
     .{ .from_version = 9, .to_version = 10, .apply = migrateFormat9To10 },
     .{ .from_version = 10, .to_version = 11, .apply = migrateFormat10To11 },
     .{ .from_version = 11, .to_version = 12, .apply = migrateFormat11To12 },
+    .{ .from_version = 12, .to_version = 13, .apply = migrateFormat12To13 },
 };
+
+fn migrateFormat12To13(db: *sqlite.Database) Error!void {
+    // Every Zova file role carries the object tables. The step only adds the
+    // chunk-reference index; the file keeps its `auto_vacuum` mode, and
+    // `compactTo` is the conversion path to incremental mode.
+    if (try tableExists(db, object_impl.object_chunks_table)) try db.exec(object_impl.object_chunks_chunk_hash_index_sql);
+}
 
 fn migrateFormat11To12(db: *sqlite.Database) Error!void {
     // Object/graph stores have no vector source. Main and vector-store files
@@ -116,7 +123,7 @@ fn migrateFormat10To11(db: *sqlite.Database) Error!void {
         \\drop table _zova_chunks_format10;
     );
 
-    try validateObjectSchema(db);
+    try @import("validation.zig").validateObjectSchemaExpected(db, "11");
 }
 
 /// Role-aware validation of one Zova file at an exact expected storage

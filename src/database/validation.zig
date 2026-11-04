@@ -170,6 +170,7 @@ fn validateAttachedObjectSchema(db: *sqlite.Database, comptime schema_name: []co
         "size_bytes",
     };
     try validateAttachedRequiredTable(db, schema_name, object_impl.object_chunks_table, &object_chunk_columns, object_impl.object_chunks_schema_sql);
+    try validateObjectChunkIndex(db, schema_name ++ ".");
 }
 
 fn validateAttachedVectorSchema(db: *sqlite.Database, comptime schema_name: []const u8) Error!void {
@@ -292,12 +293,7 @@ pub fn validateExtensionSchema(db: *sqlite.Database) Error!void {
 }
 
 pub fn validateObjectSchema(db: *sqlite.Database) Error!void {
-    return validateObjectSchemaSql(
-        db,
-        object_impl.objects_schema_sql,
-        object_impl.chunks_schema_sql,
-        object_impl.object_chunks_schema_sql,
-    );
+    return validateObjectSchemaExpected(db, format_version);
 }
 
 pub fn validateObjectSchemaExpected(db: *sqlite.Database, expected_format: []const u8) Error!void {
@@ -310,8 +306,42 @@ pub fn validateObjectSchemaExpected(db: *sqlite.Database, expected_format: []con
             object_impl.format10_object_chunks_schema_sql,
         );
     }
-    if (expected_version == 11 or expected_version == 12) return validateObjectSchema(db);
+    if (expected_version == 11 or expected_version == 12) {
+        try validateObjectSchemaSql(db, object_impl.objects_schema_sql, object_impl.chunks_schema_sql, object_impl.object_chunks_schema_sql);
+        // The chunk-reference index arrives in format 13; an older file that
+        // already carries it has drifted from its declared format.
+        if (try objectChunkIndexExists(db, "main.")) return error.NotZovaDatabase;
+        return;
+    }
+    if (expected_version == 13) {
+        try validateObjectSchemaSql(db, object_impl.objects_schema_sql, object_impl.chunks_schema_sql, object_impl.object_chunks_schema_sql);
+        return validateObjectChunkIndex(db, "main.");
+    }
     return error.NotZovaDatabase;
+}
+
+/// Exact check of the format-13 `_zova_object_chunks(chunk_hash)` index.
+fn validateObjectChunkIndex(db: *sqlite.Database, prefix: []const u8) Error!void {
+    var stmt = try prepareObjectChunkIndexLookup(db, prefix);
+    defer stmt.deinit();
+    if (try stmt.step() != .row) return error.NotZovaDatabase;
+    if (!std.mem.eql(u8, stmt.columnText(0), object_impl.object_chunks_table)) return error.NotZovaDatabase;
+    if (!schemaSqlEqual(stmt.columnText(1), object_impl.object_chunks_chunk_hash_index_sql)) return error.NotZovaDatabase;
+}
+
+fn objectChunkIndexExists(db: *sqlite.Database, prefix: []const u8) Error!bool {
+    var stmt = try prepareObjectChunkIndexLookup(db, prefix);
+    defer stmt.deinit();
+    return try stmt.step() == .row;
+}
+
+fn prepareObjectChunkIndexLookup(db: *sqlite.Database, prefix: []const u8) Error!sqlite.Statement {
+    var buffer: [128]u8 = undefined;
+    const sql = std.fmt.bufPrintSentinel(&buffer, "select tbl_name, sql from {s}sqlite_schema where type = 'index' and name = ?1", .{prefix}, 0) catch return error.NotZovaDatabase;
+    var stmt = try db.prepare(sql);
+    errdefer stmt.deinit();
+    try stmt.bindTextBorrowed(1, object_impl.object_chunks_chunk_hash_index);
+    return stmt;
 }
 
 fn validateObjectSchemaSql(

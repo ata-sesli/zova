@@ -184,6 +184,62 @@ pub fn parseFormatCommandArgs(args: []const []const u8) FormatCommandParseError!
     return .{ .format = format, .path = p };
 }
 
+pub const ReclaimCommandArgs = struct {
+    format: OutputFormat,
+    /// 0 releases every free page.
+    max_pages: u64,
+    path: []const u8,
+};
+
+const ReclaimCommandParseError = error{
+    DuplicateJson,
+    DuplicateMaxPages,
+    MissingMaxPages,
+    InvalidMaxPages,
+    UnknownFlag,
+    MissingPath,
+    ExtraArgs,
+};
+
+pub fn parseReclaimCommandArgs(args: []const []const u8) ReclaimCommandParseError!ReclaimCommandArgs {
+    var format: OutputFormat = .text;
+    var max_pages: ?u64 = null;
+    var path: ?[]const u8 = null;
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--json")) {
+            if (format == .json) return error.DuplicateJson;
+            format = .json;
+        } else if (std.mem.eql(u8, arg, "--max-pages")) {
+            if (max_pages != null) return error.DuplicateMaxPages;
+            index += 1;
+            if (index == args.len) return error.MissingMaxPages;
+            max_pages = std.fmt.parseInt(u64, args[index], 10) catch return error.InvalidMaxPages;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            return error.UnknownFlag;
+        } else if (path == null) {
+            path = arg;
+        } else {
+            return error.ExtraArgs;
+        }
+    }
+    const p = path orelse return error.MissingPath;
+    return .{ .format = format, .max_pages = max_pages orelse 0, .path = p };
+}
+
+pub fn reclaimUsageMessage(err: ReclaimCommandParseError) []const u8 {
+    return switch (err) {
+        error.DuplicateJson => "duplicate --json",
+        error.DuplicateMaxPages => "duplicate --max-pages",
+        error.MissingMaxPages => "--max-pages requires <n>",
+        error.InvalidMaxPages => "--max-pages requires a non-negative integer",
+        error.UnknownFlag => "unknown flag",
+        error.MissingPath => "reclaim requires <file.zova>",
+        error.ExtraArgs => "reclaim accepts only [--json] [--max-pages <n>] <file.zova>",
+    };
+}
+
 pub fn formatUsageMessage(err: FormatCommandParseError) []const u8 {
     return switch (err) {
         error.DuplicateJson => "duplicate --json",

@@ -17,6 +17,7 @@ const checkCommand = @import("cli/doctor.zig").checkCommand;
 const chunkCommand = @import("cli/inspect.zig").chunkCommand;
 const chunksCommand = @import("cli/inspect.zig").chunksCommand;
 const compactCommand = @import("cli/maintenance.zig").compactCommand;
+const reclaimCommand = @import("cli/maintenance.zig").reclaimCommand;
 const doctorCommand = @import("cli/doctor.zig").doctorCommand;
 const dynamicExtensionLoadErrorFormat = @import("cli/extensions.zig").dynamicExtensionLoadErrorFormat;
 const extensionCommand = @import("cli/extensions.zig").extensionCommand;
@@ -159,6 +160,9 @@ pub fn runWithOptions(
     }
     if (std.mem.eql(u8, command, "compact")) {
         return compactCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
+    }
+    if (std.mem.eql(u8, command, "reclaim")) {
+        return reclaimCommand(ctx, allocator, parsed_args[2..], stdout, stderr);
     }
     if (std.mem.eql(u8, command, "restore")) {
         return restoreCommand(ctx, allocator, parsed_args[2..], stdout, stderr);

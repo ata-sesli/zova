@@ -459,6 +459,46 @@ pub const CompactOptions = struct {
     progress: ?ProgressCallback = null,
 };
 
+/// Options for `Database.reclaimSpace`.
+pub const ReclaimOptions = struct {
+    /// Most pages released by this call across every member; 0 releases all
+    /// free pages.
+    max_pages: u64 = 0,
+    /// Pages released per write transaction, so other writers can run in
+    /// between. Must be at least 1.
+    step_pages: u32 = 1024,
+};
+
+/// SQLite `auto_vacuum` mode of one member file.
+pub const AutoVacuumMode = enum {
+    none,
+    full,
+    incremental,
+};
+
+/// What `Database.reclaimSpace` did for one member file.
+pub const ReclaimedMember = struct {
+    member: ProgressMember,
+    auto_vacuum: AutoVacuumMode,
+    page_size: u32,
+    /// Free pages released back to the filesystem by this call.
+    pages_released: u64,
+    /// Free pages still inside the file. Only `zova compact` releases them
+    /// when `auto_vacuum` is `none`.
+    free_pages_left: u64,
+};
+
+/// Members visited by `Database.reclaimSpace`: the main database first, then
+/// each bound store (object, vector, graph) that is attached.
+pub const ReclaimResult = struct {
+    entries: [4]ReclaimedMember = undefined,
+    count: usize = 0,
+
+    pub fn members(self: *const ReclaimResult) []const ReclaimedMember {
+        return self.entries[0..self.count];
+    }
+};
+
 /// Options for `restoreBackup`.
 pub const RestoreOptions = struct {
     /// Open and validate the restored destination after copying.

@@ -15,15 +15,15 @@ host foundation.
 Current package version: `1.3.0`.
 
 Zova `1.0.0` established the stable native 1.x contract. The current
-`.zova` file `format_version` is `12`, and the
-earliest migratable format is `9`. Open never migrates silently: format-9 and
-format-10 and format-11 databases are reported as migration-required and left byte-identical,
+development `.zova` file `format_version` is `13`, and the
+earliest migratable format is `9`. Open never migrates silently: format-9,
+format-10, format-11 and format-12 databases are reported as migration-required and left byte-identical,
 and downgrades are unsupported. Older databases migrate forward with the
 explicit, copy-forward probe and migration surfaces (`zova format` and
 `zova migrate` on the CLI, `zova_database_probe_format` and
 `zova_database_migrate` on the C ABI, and aligned APIs in the Rust, Python, Go,
 and JavaScript bindings). Migration writes only to a new, separately validated
-format-12 destination and never mutates the source.
+format-13 destination and never mutates the source.
 
 [API stability](API_STABILITY.md) defines the stable 1.x public
 contract. [Storage compatibility](docs/storage-compatibility.md) is the normative 1.x
@@ -45,9 +45,11 @@ databases and named OPFS persistence.
 Browser APIs remain experimental and do not promise full native compatibility.
 Rust packages now select target-specific generated-C companion crates without
 requiring consumer-side Zig or native-source downloads. Python wheels retain
-CPython 3.13 stable-ABI coverage for Python 3.13 and 3.14. Storage is
-format 12 with explicit 11→12 migration for transactional vector-change tracking.
-Released 1.1.0 used format 11. See the
+CPython 3.13 stable-ABI coverage for Python 3.13 and 3.14. Development
+storage is format 13 with explicit 12→13 migration, which adds a chunk-reference
+index for fast object deletes; new files use incremental auto-vacuum and
+`zova reclaim` releases free pages in place. Released 1.3.0 used format 12.
+See the
 [browser package guide](bindings/wasm/README.md) for lifecycle and storage limits.
 
 ## Contents
@@ -648,11 +650,17 @@ Zova includes file-level safety operations:
 ```sh
 zova backup app.zova app.backup.zova
 zova compact app.zova app.compact.zova
+zova reclaim app.zova
 zova restore app.backup.zova app.restored.zova
 ```
 
 - `backup` uses SQLite's online backup API.
-- `compact` uses SQLite `VACUUM INTO` to create a space-reclaiming copy.
+- `compact` uses SQLite `VACUUM INTO` to create a space-reclaiming copy in
+  incremental auto-vacuum mode.
+- `reclaim` releases free pages in place, in bounded steps, from files in
+  incremental auto-vacuum mode; `--max-pages <n>` caps one run. Files in `none`
+  mode (including migrated ones) need `compact` first. See
+  [Free-page reclamation](docs/storage-compatibility.md#free-page-reclamation-format-13).
 - `restore` copies a backup into a new destination file.
 
 `backup`, `compact` and `migrate` show progress on a terminal; `--progress`
@@ -1262,9 +1270,9 @@ the bundled SQLite version, and the Zova storage format recorded in
 
 For the 1.x series, every release can migrate databases created by every earlier
 1.x release. Format 9, used by released Zova 0.26.1, is the only pre-1.0 format
-guaranteed a migration into 1.0. The current format is 11, reached through the
-sequential 9 → 10 → 11 registry; format-10 databases migrate through the final
-10 → 11 step. Older formats are rejected rather than migrated. Open never
+guaranteed a migration into 1.0. The current development format is 13, reached
+through the sequential 9 → 10 → 11 → 12 → 13 registry; format-10, format-11 and
+format-12 databases migrate through the remaining steps. Older formats are rejected rather than migrated. Open never
 migrates silently, and downgrades are unsupported.
 
 Migration is explicit and copy-forward. Probe with `zova format`, then migrate
@@ -1272,7 +1280,7 @@ with `zova migrate`:
 
 ```sh
 zova format app.zova
-zova migrate app.zova app-format-12.zova
+zova migrate app.zova app-format-13.zova
 ```
 
 The same workflow is available through `zova_database_probe_format` and
@@ -1294,9 +1302,10 @@ Zova does not hide SQLite. SQL remains SQLite SQL, locking remains SQLite
 locking, and PRAGMAs remain application policy.
 
 Zova enables `PRAGMA foreign_keys = ON` on its owned connections so format-11
-private graph and vector cascades remain enforced. It does not run `VACUUM`
-automatically, enable `auto_vacuum`, or change journal and synchronous settings
-automatically.
+private graph and vector cascades remain enforced. Files Zova creates use
+`PRAGMA auto_vacuum = INCREMENTAL` (format 13), so `zova reclaim` can release
+free pages in place; Zova never vacuums automatically and does not change
+journal and synchronous settings.
 
 ## Current Boundaries
 
