@@ -401,6 +401,18 @@ pub fn build(b: *std.Build) void {
     const install_vector_norms_94 = b.addInstallArtifact(vector_norms_94_benchmark, .{});
     b.step("build-vector-norms-94", "Build bounded issue-94 vector put-many benchmark").dependOn(&install_vector_norms_94.step);
 
+    const verify_memory_194_benchmark = b.addExecutable(.{
+        .name = "zova_verify_memory_194_benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/verify_memory_194.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    verify_memory_194_benchmark.root_module.addImport("zova", zova_module);
+    const install_verify_memory_194 = b.addInstallArtifact(verify_memory_194_benchmark, .{});
+    b.step("build-verify-memory-194", "Build bounded issue-194 copy-verification peak-memory probe").dependOn(&install_verify_memory_194.step);
+
     const graph_index_ddl_95_benchmark = b.addExecutable(.{
         .name = "zova_graph_index_ddl_95_benchmark",
         .root_module = b.createModule(.{
