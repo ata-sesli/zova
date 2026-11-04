@@ -4,6 +4,8 @@ const plugin = @import("extension_plugin.zig");
 const extension = @import("extension.zig");
 const sqlite = @import("sqlite.zig");
 const dynamic = @import("extension_dynamic.zig");
+const query_plan = @import("query_plan_test_support.zig");
+const data_read = @import("extension_data.zig");
 const options = @import("plugin_fixture_options");
 
 var maintenance_baseline: data_api.VectorView = .{};
@@ -787,6 +789,124 @@ test "extension_plugin graph vector pages and batches preserve identities" {
     var d = descriptor();
     d.check = dataHook;
     try plugin.invoke(d, .check, &db.sqlite_db);
+}
+
+test "extension_plugin batch-driven data statements keep bounded indexed lookups" {
+    var fixture = try query_plan.createGraphFixture(std.testing.allocator, 2048);
+    defer fixture.deinit(std.testing.allocator);
+    const db = &fixture.db;
+
+    const allocator = std.testing.allocator;
+    const vector_count = 2048;
+    try db.createVectorCollection("vec", .{ .dimensions = 2, .metric = .l2 });
+    const id_storage = try allocator.alloc(u8, vector_count * 16);
+    defer allocator.free(id_storage);
+    const id_lengths = try allocator.alloc(usize, vector_count);
+    defer allocator.free(id_lengths);
+    const vectors = try allocator.alloc(@import("zova.zig").VectorInput, vector_count);
+    defer allocator.free(vectors);
+    const values = [_]f32{ 1, 2 };
+    for (0..vector_count) |index| {
+        const buffer = id_storage[index * 16 ..][0..16];
+        const id = try std.fmt.bufPrint(buffer, "v{d}", .{index});
+        id_lengths[index] = id.len;
+        vectors[index] = .{ .id = id, .values = .{ .f32 = &values } };
+    }
+    try db.putVectors("vec", vectors);
+
+    var capture: query_plan.Capture = .{};
+    capture.install(&db.sqlite_db);
+    defer capture.remove(&db.sqlite_db);
+
+    const node_keys = fixture.node_keys[0..4];
+    const edge_keys = fixture.edge_keys[0..4];
+    const bounded_nodes: query_plan.BoundedAccess = .{ .alias = "n", .partition = "graph_key" };
+    const bounded_edges: query_plan.BoundedAccess = .{ .alias = "e", .partition = "graph_key" };
+
+    var rows: DataRows = .{};
+    capture.reset("select b.rowid-1,n.node_key is not null");
+    _ = try data_read.read(allocator, &db.sqlite_db, &.{
+        .operation = @backingInt(data_api.DataOperation.graph_nodes_get),
+        .name = .from("plan"),
+        .keys = node_keys.ptr,
+        .key_count = node_keys.len,
+        .row_limit = node_keys.len,
+        .byte_limit = 4096,
+        .row = DataRows.receive,
+        .user_data = &rows,
+    });
+    try capture.expectPlan(&db.sqlite_db, .{ .outer = "b", .bounded = &.{bounded_nodes} });
+
+    rows = .{};
+    capture.reset("select b.rowid-1,e.edge_key is not null,b.value,e.from_node_key");
+    _ = try data_read.read(allocator, &db.sqlite_db, &.{
+        .operation = @backingInt(data_api.DataOperation.graph_edges_get),
+        .name = .from("plan"),
+        .keys = edge_keys.ptr,
+        .key_count = edge_keys.len,
+        .row_limit = edge_keys.len,
+        .byte_limit = 4096,
+        .row = DataRows.receive,
+        .user_data = &rows,
+    });
+    try capture.expectPlan(&db.sqlite_db, .{ .outer = "b", .bounded = &.{bounded_edges} });
+
+    rows = .{};
+    capture.reset("select b.rowid-1,e.edge_key is not null,b.value,e.payload");
+    _ = try data_read.read(allocator, &db.sqlite_db, &.{
+        .operation = @backingInt(data_api.DataOperation.graph_edge_payloads_get),
+        .name = .from("plan"),
+        .keys = edge_keys.ptr,
+        .key_count = edge_keys.len,
+        .row_limit = edge_keys.len,
+        .byte_limit = 4096,
+        .row = DataRows.receive,
+        .user_data = &rows,
+    });
+    try capture.expectPlan(&db.sqlite_db, .{ .outer = "b", .bounded = &.{bounded_edges} });
+
+    const ids = [_]data_api.Bytes{ .from("v0"), .from("v1"), .from("v1024"), .from("missing") };
+    rows = .{};
+    capture.reset("select b.rowid-1,v.vector_id is not null");
+    _ = try data_read.read(allocator, &db.sqlite_db, &.{
+        .operation = @backingInt(data_api.DataOperation.vectors_get),
+        .name = .from("vec"),
+        .ids = &ids,
+        .id_count = ids.len,
+        .row_limit = ids.len,
+        .byte_limit = 4096,
+        .row = DataRows.receive,
+        .user_data = &rows,
+    });
+    try capture.expectPlan(&db.sqlite_db, .{
+        .outer = "b",
+        .bounded = &.{.{ .alias = "v", .partition = "collection_key" }},
+    });
+
+    // A set of edge types filters the untyped adjacency index, keeping rows in
+    // adjacency order without sorting each node's matching edges.
+    const edge_types = [_]data_api.Bytes{ .from("calls"), .from("imports") };
+    rows = .{};
+    capture.reset("select e.edge_key,e.to_node_key,t.name,e.created_order");
+    _ = try data_read.read(allocator, &db.sqlite_db, &.{
+        .operation = @backingInt(data_api.DataOperation.graph_neighbors_keyed),
+        .name = .from("plan"),
+        .keys = node_keys.ptr,
+        .key_count = node_keys.len,
+        .ids = &edge_types,
+        .id_count = edge_types.len,
+        .row_limit = 8,
+        .byte_limit = 4096,
+        .row = DataRows.receive,
+        .user_data = &rows,
+    });
+    try capture.expectPlan(&db.sqlite_db, .{
+        .indexed = .{
+            .alias = "e",
+            .index = "_zova_graph_edges_from_node_idx",
+            .key = "from_node_key",
+        },
+    });
 }
 
 fn populateData(db: *@import("zova.zig").Database) !void {
