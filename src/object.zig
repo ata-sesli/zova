@@ -461,16 +461,24 @@ pub const StorageSchema = enum {
     }
 };
 
+/// Buffered chunk bytes at which `ObjectWriter` commits its pending chunks.
+/// Test builds use a small threshold so tests can cross it cheaply.
+pub const writer_commit_threshold_bytes: usize = if (builtin.is_test) 1024 * 1024 else 64 * 1024 * 1024;
+
 /// Incremental writer for one content-addressed Zova object.
 ///
-/// `ObjectWriter` accepts arbitrary byte slices, emits FastCDC-v1 chunks as
-/// they become available, stores those chunks as loose chunks, and assembles
-/// the final object on `finish`. It does not keep the full object in memory.
-/// Chunks emitted by one `write` (or by `finish`) are stored in one
-/// transaction, or one savepoint inside a caller transaction, but no SQLite
-/// transaction stays open across calls. A failed call rolls back the chunks it
-/// stored, so a later `finish` reports them missing instead of publishing.
-/// The writer must be deinitialized; unfinished writers auto-cancel.
+/// `ObjectWriter` accepts arbitrary byte slices, cuts chunks under the selected
+/// profile as they become available, stores those chunks as loose chunks, and
+/// assembles the final object on `finish`. It does not keep the full object in
+/// memory: emitted chunks are buffered until `writer_commit_threshold_bytes`
+/// of them are pending, so the caller's `write` size does not decide the
+/// commit count. Each commit stores all pending chunks in one transaction, or
+/// one savepoint inside a caller transaction, during the `write` that crosses
+/// the threshold or during `finish`; no SQLite transaction stays open across
+/// calls. A failed commit rolls back and drops every pending chunk, so a later
+/// `finish` reports them missing instead of publishing. The writer must be
+/// deinitialized; unfinished writers auto-cancel and never store pending
+/// chunks.
 pub const ObjectWriter = struct {
     sqlite_db: *sqlite.Database,
     storage_schema: StorageSchema = .main,
@@ -482,7 +490,20 @@ pub const ObjectWriter = struct {
     size_bytes: u64 = 0,
     chunks: std.ArrayList(ObjectChunk) = .empty,
     seen_chunks: std.ArrayList(ObjectChunkId) = .empty,
+    /// Hashed chunks not yet stored, in stream order, and their total size.
+    /// Their bytes live in `slabs`, which are kept across commits so later
+    /// batches reuse memory instead of faulting fresh pages in.
+    pending: std.ArrayList(PendingChunk) = .empty,
+    pending_bytes: usize = 0,
+    slabs: std.ArrayList([]u8) = .empty,
+    slab_index: usize = 0,
+    slab_used: usize = 0,
     closed: bool = false,
+
+    const PendingChunk = struct {
+        hash: ObjectChunkId,
+        bytes: []const u8,
+    };
 
     /// Retained metadata allocation sizes for the internal object benchmark.
     /// This is intentionally not re-exported through the package facade.
@@ -548,16 +569,13 @@ pub const ObjectWriter = struct {
         try rejectActiveTransaction(self.sqlite_db, self.allow_active_transactions);
         if (bytes.len == 0) return;
 
-        var batch = self.beginChunkBatch();
-        errdefer self.abortChunkBatch(&batch);
-
         var offset: usize = 0;
         while (offset < bytes.len) {
-            try self.drainReadyChunks(&batch);
+            try self.bufferReadyChunks();
 
             const accepted = try self.chunker.write(self.allocator, bytes[offset..]);
             if (accepted == 0) {
-                try self.drainReadyChunks(&batch);
+                try self.bufferReadyChunks();
                 continue;
             }
 
@@ -566,8 +584,7 @@ pub const ObjectWriter = struct {
             offset += accepted;
         }
 
-        try self.drainReadyChunks(&batch);
-        try self.commitChunkBatch(&batch);
+        try self.bufferReadyChunks();
     }
 
     /// Finish the stream and return the object's content id.
@@ -581,14 +598,10 @@ pub const ObjectWriter = struct {
         try rejectActiveTransaction(self.sqlite_db, self.allow_active_transactions);
 
         self.chunker.finish();
-        {
-            // The final chunks commit before assembly, so a failed assembly
-            // can be retried without re-sending bytes.
-            var batch = self.beginChunkBatch();
-            errdefer self.abortChunkBatch(&batch);
-            try self.drainReadyChunks(&batch);
-            try self.commitChunkBatch(&batch);
-        }
+        // The final chunks commit before assembly, so a failed assembly can be
+        // retried without re-sending bytes.
+        try self.bufferReadyChunks();
+        try self.commitPendingChunks();
         var db = self.database();
 
         var final_hasher = self.hasher;
@@ -618,6 +631,7 @@ pub const ObjectWriter = struct {
         if (self.closed) return error.ObjectWriterClosed;
         try rejectActiveTransaction(self.sqlite_db, self.allow_active_transactions);
 
+        self.dropPendingChunks();
         try self.deleteUnreferencedSeenChunks();
         self.closed = true;
     }
@@ -630,14 +644,17 @@ pub const ObjectWriter = struct {
         if (!self.closed) {
             self.cancel() catch {};
         }
+        self.dropPendingChunks();
+        self.pending.deinit(self.allocator);
+        for (self.slabs.items) |slab| self.allocator.free(slab);
+        self.slabs.deinit(self.allocator);
         self.chunker.deinit(self.allocator);
         self.chunks.deinit(self.allocator);
         self.seen_chunks.deinit(self.allocator);
     }
 
-    /// Chunk inserts for one `write` or `finish` call. The transaction scope
-    /// and insert statement are opened by the first stored chunk, so calls
-    /// that only buffer bytes never touch SQLite.
+    /// Chunk inserts for one commit of pending chunks. The transaction scope
+    /// and insert statement are opened by the first stored chunk.
     const ChunkBatch = struct {
         scope: ?ObjectMutationScope = null,
         insert: ?sqlite.Statement = null,
@@ -680,18 +697,71 @@ pub const ObjectWriter = struct {
         }
     }
 
-    fn drainReadyChunks(self: *ObjectWriter, batch: *ChunkBatch) Error!void {
+    /// Hash and copy every ready chunk out of the chunker, committing the
+    /// pending chunks whenever they reach the commit threshold.
+    fn bufferReadyChunks(self: *ObjectWriter) Error!void {
         while (self.chunker.next()) |chunk| {
-            try self.storeChunk(batch, chunk);
+            std.debug.assert(chunk.bytes.len > 0);
+            std.debug.assert(chunk.bytes.len <= self.policy.maxSize());
+
+            try self.pending.ensureUnusedCapacity(self.allocator, 1);
+            try self.chunks.ensureUnusedCapacity(self.allocator, 1);
+            const hash = objectChunkId(chunk.bytes);
+            const bytes = try self.copyIntoSlab(chunk.bytes);
+            self.pending.appendAssumeCapacity(.{ .hash = hash, .bytes = bytes });
+            self.pending_bytes += bytes.len;
+            self.chunks.appendAssumeCapacity(.{
+                .index = @intCast(self.chunks.items.len),
+                .hash = hash,
+                .offset = @intCast(chunk.offset),
+                .size_bytes = @intCast(chunk.bytes.len),
+            });
             self.chunker.consume(self.allocator, chunk.bytes.len);
+
+            if (self.pending_bytes >= writer_commit_threshold_bytes) try self.commitPendingChunks();
         }
     }
 
-    fn storeChunk(self: *ObjectWriter, batch: *ChunkBatch, chunk: PolicyStreamChunk) Error!void {
-        std.debug.assert(chunk.bytes.len > 0);
-        std.debug.assert(chunk.bytes.len <= self.policy.maxSize());
+    /// Store every pending chunk in one transaction scope. Pending chunks are
+    /// dropped whether or not the commit succeeds; after a failure their
+    /// descriptors stay in `chunks`, so `finish` reports them missing.
+    fn commitPendingChunks(self: *ObjectWriter) Error!void {
+        defer self.dropPendingChunks();
+        var batch = self.beginChunkBatch();
+        errdefer self.abortChunkBatch(&batch);
+        for (self.pending.items) |chunk| try self.storeChunk(&batch, chunk);
+        try self.commitChunkBatch(&batch);
+    }
 
-        const hash = objectChunkId(chunk.bytes);
+    /// Copy one chunk into the current slab, moving to the next slab (and
+    /// allocating it the first time) when the chunk does not fit. A slab holds
+    /// four maximum-size chunks, so no allocation exceeds that.
+    fn copyIntoSlab(self: *ObjectWriter, bytes: []const u8) Error![]const u8 {
+        const slab_size = self.policy.maxSize() * 4;
+        std.debug.assert(bytes.len <= slab_size);
+        if (self.slab_index < self.slabs.items.len and slab_size - self.slab_used < bytes.len) {
+            self.slab_index += 1;
+            self.slab_used = 0;
+        }
+        if (self.slab_index == self.slabs.items.len) {
+            try self.slabs.ensureUnusedCapacity(self.allocator, 1);
+            self.slabs.appendAssumeCapacity(try self.allocator.alloc(u8, slab_size));
+        }
+        const dest = self.slabs.items[self.slab_index][self.slab_used..][0..bytes.len];
+        @memcpy(dest, bytes);
+        self.slab_used += bytes.len;
+        return dest;
+    }
+
+    fn dropPendingChunks(self: *ObjectWriter) void {
+        self.pending.clearRetainingCapacity();
+        self.pending_bytes = 0;
+        self.slab_index = 0;
+        self.slab_used = 0;
+    }
+
+    fn storeChunk(self: *ObjectWriter, batch: *ChunkBatch, chunk: PendingChunk) Error!void {
+        const hash = chunk.hash;
         const insert = try self.chunkBatchInsert(batch);
         try insert.bindBlob(1, &hash);
         try insert.bindInt64(2, try usizeToSqliteI64(chunk.bytes.len));
@@ -712,13 +782,6 @@ pub const ObjectWriter = struct {
             var existing = try db.getObjectChunkWithPolicy(self.allocator, hash, self.policy);
             existing.deinit(self.allocator);
         }
-
-        try self.chunks.append(self.allocator, .{
-            .index = @intCast(self.chunks.items.len),
-            .hash = hash,
-            .offset = @intCast(chunk.offset),
-            .size_bytes = @intCast(chunk.bytes.len),
-        });
     }
 
     fn deleteUnreferencedSeenChunks(self: *ObjectWriter) Error!void {
