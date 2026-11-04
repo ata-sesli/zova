@@ -77,6 +77,7 @@ extern "C" {
 typedef struct zova_database zova_database;
 typedef struct zova_object_writer zova_object_writer;
 typedef struct zova_object_reader zova_object_reader;
+typedef struct zova_object_seekable_reader zova_object_seekable_reader;
 typedef struct zova_statement zova_statement;
 typedef struct zova_subscription zova_subscription;
 typedef struct zova_fresh_build zova_fresh_build;
@@ -1217,6 +1218,32 @@ typedef struct zova_object_reader_destroy_request {
     zova_object_reader **reader;
 } zova_object_reader_destroy_request;
 
+/* out_size is optional; when non-null it receives the object size. */
+typedef struct zova_object_seekable_reader_create_request {
+    zova_database *db;
+    zova_object_id id;
+    zova_object_seekable_reader **out_reader;
+    uint64_t *out_size;
+} zova_object_seekable_reader_create_request;
+
+typedef struct zova_object_seekable_reader_read_request {
+    zova_object_seekable_reader *reader;
+    uint8_t *buffer;
+    size_t buffer_len;
+    size_t *out_read;
+} zova_object_seekable_reader_read_request;
+
+/* offset is absolute; offsets at or past the end are allowed and read 0 bytes. */
+typedef struct zova_object_seekable_reader_seek_request {
+    zova_object_seekable_reader *reader;
+    uint64_t offset;
+} zova_object_seekable_reader_seek_request;
+
+/* Passing a null *reader makes destruction idempotent. */
+typedef struct zova_object_seekable_reader_destroy_request {
+    zova_object_seekable_reader **reader;
+} zova_object_seekable_reader_destroy_request;
+
 /* Borrowed byte slice for key-value operations. Zova copies caller input
  * during the call and retains no caller memory. */
 typedef struct zova_kv_bytes {
@@ -2032,6 +2059,23 @@ zova_status zova_object_writer_destroy(zova_object_writer *writer);
 zova_status zova_object_reader_create(const zova_object_reader_create_request *request);
 zova_status zova_object_reader_read(const zova_object_reader_read_request *request);
 zova_status zova_object_reader_destroy(const zova_object_reader_destroy_request *request);
+
+/* The seekable reader serves verified reads at any offset, for HTTP range
+ * streaming. It loads the chunk that holds the position whole, checks it
+ * against its manifest SHA-256 before returning any of its bytes, and serves
+ * later reads inside that chunk from a per-reader buffer. Like a partial
+ * zova_object_read_range, it verifies chunks, not the whole-object hash. It
+ * pins no snapshot between calls: each chunk load is a short read transaction,
+ * so writers on other connections are not blocked while it stays open. A read
+ * returns 0 bytes at or past the end, and ZOVA_OBJECT_NOT_FOUND once the
+ * object was deleted and a new chunk is needed. A failed read leaves the
+ * position unchanged. Like other child handles it must be destroyed before
+ * the database is closed.
+ */
+zova_status zova_object_seekable_reader_create(const zova_object_seekable_reader_create_request *request);
+zova_status zova_object_seekable_reader_read(const zova_object_seekable_reader_read_request *request);
+zova_status zova_object_seekable_reader_seek(const zova_object_seekable_reader_seek_request *request);
+zova_status zova_object_seekable_reader_destroy(const zova_object_seekable_reader_destroy_request *request);
 
 /*
  * Native transactional key-value operations.

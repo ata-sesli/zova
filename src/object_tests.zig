@@ -580,6 +580,149 @@ test "sequential object reader holds a stable WAL snapshot" {
     try std.testing.expectError(error.ObjectCorrupt, first.readObjectRange(id, 0, &current));
 }
 
+test "seekable object reader serves sequential and seeked reads for both profiles" {
+    var raw = try sqlite.Database.open(":memory:");
+    defer raw.deinit();
+    var db = try preparePrototypeDatabase(&raw);
+
+    const bytes = try std.testing.allocator.alloc(u8, fixed_chunks.chunk_size * 3 + 4321);
+    defer std.testing.allocator.free(bytes);
+    var prng = std.Random.DefaultPrng.init(0x193);
+    prng.random().bytes(bytes);
+
+    for ([_]object_impl.ObjectStorageProfile{ .deduplication, .streaming }) |profile| {
+        const id = try db.putObjectWithOptions(bytes, .{ .profile = profile });
+        var reader = try db.objectSeekableReader(std.testing.allocator, id);
+        defer reader.deinit();
+        try std.testing.expectEqual(@as(u64, bytes.len), reader.size());
+
+        // Sequential 32 KiB reads, as net/http copies a response.
+        var output: [32 * 1024]u8 = undefined;
+        var offset: usize = 0;
+        while (true) {
+            const count = try reader.read(&output);
+            if (count == 0) break;
+            try std.testing.expectEqualSlices(u8, bytes[offset .. offset + count], output[0..count]);
+            offset += count;
+        }
+        try std.testing.expectEqual(bytes.len, offset);
+        try std.testing.expectEqual(@as(usize, 0), try reader.read(&output));
+
+        // Seeks land anywhere, including chunk boundaries and the last byte,
+        // and a read may span chunks.
+        const seeks = [_]u64{ 0, fixed_chunks.chunk_size - 7, fixed_chunks.chunk_size, 123_457, bytes.len - 1, 5 };
+        for (seeks) |position| {
+            reader.seekTo(position);
+            try std.testing.expectEqual(position, reader.position);
+            const expected = bytes[@intCast(position)..][0..@min(output.len, bytes.len - @as(usize, @intCast(position)))];
+            var filled: usize = 0;
+            while (filled < expected.len) {
+                const count = try reader.read(output[filled..expected.len]);
+                try std.testing.expect(count > 0);
+                filled += count;
+            }
+            try std.testing.expectEqualSlices(u8, expected, output[0..filled]);
+        }
+
+        // Positions at or past the end read zero bytes.
+        reader.seekTo(bytes.len);
+        try std.testing.expectEqual(@as(usize, 0), try reader.read(&output));
+        reader.seekTo(bytes.len + 100);
+        try std.testing.expectEqual(@as(usize, 0), try reader.read(&output));
+
+        try db.deleteObject(id);
+    }
+
+    const empty_id = try db.putObject("");
+    var empty = try db.objectSeekableReader(std.testing.allocator, empty_id);
+    defer empty.deinit();
+    var one: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(u64, 0), empty.size());
+    try std.testing.expectEqual(@as(usize, 0), try empty.read(&one));
+
+    try std.testing.expectError(error.ObjectNotFound, db.objectSeekableReader(std.testing.allocator, objectId("missing")));
+}
+
+test "seekable object reader verifies each chunk once before returning its bytes" {
+    var raw = try sqlite.Database.open(":memory:");
+    defer raw.deinit();
+    var db = try preparePrototypeDatabase(&raw);
+
+    const bytes = try std.testing.allocator.alloc(u8, fixed_chunks.chunk_size * 2 + 99);
+    defer std.testing.allocator.free(bytes);
+    var prng = std.Random.DefaultPrng.init(0x1931);
+    prng.random().bytes(bytes);
+    const id = try db.putObjectWithOptions(bytes, .{ .profile = .streaming });
+
+    var reader = try db.objectSeekableReader(std.testing.allocator, id);
+    defer reader.deinit();
+    var output: [4096]u8 = undefined;
+    try std.testing.expectEqual(output.len, try reader.read(&output));
+    try std.testing.expectEqualSlices(u8, bytes[0..output.len], &output);
+
+    // Corrupt chunk 0 in storage. It was verified into the reader's buffer,
+    // so reads inside it keep succeeding without touching storage again.
+    try raw.exec("update _zova_chunks set data = zeroblob(size_bytes) where chunk_hash = " ++
+        "(select chunk_hash from _zova_object_chunks where chunk_index = 0)");
+    reader.seekTo(fixed_chunks.chunk_size - output.len);
+    try std.testing.expectEqual(output.len, try reader.read(&output));
+    try std.testing.expectEqualSlices(u8, bytes[fixed_chunks.chunk_size - output.len ..][0..output.len], &output);
+
+    // A read spanning into a corrupt chunk returns only the verified bytes;
+    // the next call reports the corruption and leaves the position put.
+    try raw.exec("update _zova_chunks set data = zeroblob(size_bytes) where chunk_hash = " ++
+        "(select chunk_hash from _zova_object_chunks where chunk_index = 1)");
+    reader.seekTo(fixed_chunks.chunk_size - 10);
+    try std.testing.expectEqual(@as(usize, 10), try reader.read(&output));
+    try std.testing.expectEqualSlices(u8, bytes[fixed_chunks.chunk_size - 10 ..][0..10], output[0..10]);
+    try std.testing.expectError(error.ObjectCorrupt, reader.read(&output));
+    try std.testing.expectEqual(@as(u64, fixed_chunks.chunk_size), reader.position);
+
+    // The failed load dropped the buffered chunk, so chunk 0 is verified
+    // again from storage and its corruption is now reported.
+    reader.seekTo(0);
+    try std.testing.expectError(error.ObjectCorrupt, reader.read(&output));
+}
+
+test "seekable object reader pins no snapshot between calls" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "seekable-reader-snapshot.zova");
+    var first_raw = try sqlite.Database.open(db_path);
+    defer first_raw.deinit();
+    try first_raw.exec("pragma foreign_keys = on");
+    try first_raw.exec(objects_schema_sql ++ ";" ++ chunks_schema_sql ++ ";" ++ object_chunks_schema_sql ++ ";");
+    var first = object_impl.Database.initForPrototype(&first_raw, .main);
+
+    const bytes = try std.testing.allocator.alloc(u8, fixed_chunks.chunk_size * 2 + 5);
+    defer std.testing.allocator.free(bytes);
+    var prng = std.Random.DefaultPrng.init(0x1932);
+    prng.random().bytes(bytes);
+    const id = try first.putObjectWithOptions(bytes, .{ .profile = .streaming });
+
+    var reader = try first.objectSeekableReader(std.testing.allocator, id);
+    defer reader.deinit();
+    var output: [1024]u8 = undefined;
+    try std.testing.expectEqual(output.len, try reader.read(&output));
+
+    // In rollback-journal mode, another connection can only commit while no
+    // read transaction is open. Deleting the object removes its manifest.
+    var second_raw = try sqlite.Database.open(db_path);
+    defer second_raw.deinit();
+    try second_raw.exec("pragma foreign_keys = on");
+    var second = object_impl.Database.initForPrototype(&second_raw, .main);
+    try second.deleteObject(id);
+
+    // Bytes of the already verified chunk remain readable; the next chunk
+    // reports the deletion.
+    try std.testing.expectEqual(output.len, try reader.read(&output));
+    try std.testing.expectEqualSlices(u8, bytes[output.len..][0..output.len], &output);
+    reader.seekTo(fixed_chunks.chunk_size + 1);
+    try std.testing.expectError(error.ObjectNotFound, reader.read(&output));
+}
+
 test "object ids are sha256 of full object bytes" {
     const empty_expected = ObjectId{
         0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14,

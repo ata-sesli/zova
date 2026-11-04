@@ -4,6 +4,7 @@ const std = @import("std");
 const zova = @import("../zova.zig");
 
 const ReaderHandle = @import("handles.zig").ReaderHandle;
+const SeekableReaderHandle = @import("handles.zig").SeekableReaderHandle;
 const WriterHandle = @import("handles.zig").WriterHandle;
 const allocator = @import("values.zig").allocator;
 const bytesConst = @import("values.zig").bytesConst;
@@ -18,6 +19,7 @@ const manifestChunks = @import("values.zig").manifestChunks;
 const objectOptionsFromAbi = @import("values.zig").objectOptionsFromAbi;
 const okDb = @import("errors.zig").okDb;
 const readerHandle = @import("handles.zig").readerHandle;
+const seekableReaderHandle = @import("handles.zig").seekableReaderHandle;
 const toChunkId = @import("values.zig").toChunkId;
 const toObjectId = @import("values.zig").toObjectId;
 const writerHandle = @import("handles.zig").writerHandle;
@@ -41,6 +43,10 @@ const zova_object_read_range_request = @import("types.zig").zova_object_read_ran
 const zova_object_reader_create_request = @import("types.zig").zova_object_reader_create_request;
 const zova_object_reader_destroy_request = @import("types.zig").zova_object_reader_destroy_request;
 const zova_object_reader_read_request = @import("types.zig").zova_object_reader_read_request;
+const zova_object_seekable_reader_create_request = @import("types.zig").zova_object_seekable_reader_create_request;
+const zova_object_seekable_reader_destroy_request = @import("types.zig").zova_object_seekable_reader_destroy_request;
+const zova_object_seekable_reader_read_request = @import("types.zig").zova_object_seekable_reader_read_request;
+const zova_object_seekable_reader_seek_request = @import("types.zig").zova_object_seekable_reader_seek_request;
 const zova_object_size_request = @import("types.zig").zova_object_size_request;
 const zova_object_writer = @import("types.zig").zova_object_writer;
 const zova_object_writer_cancel_request = @import("types.zig").zova_object_writer_cancel_request;
@@ -402,6 +408,71 @@ pub fn zova_object_reader_destroy(
     const slot = req.reader orelse return .INVALID_ARGUMENT;
     const raw = slot.* orelse return .OK;
     const handle = readerHandle(raw) orelse return .INVALID_ARGUMENT;
+    const db_handle = handle.db;
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    slot.* = null;
+    handle.reader.deinit();
+    std.debug.assert(db_handle.live_readers > 0);
+    db_handle.live_readers -= 1;
+    allocator.destroy(handle);
+    return okDb(db_handle);
+}
+
+pub fn zova_object_seekable_reader_create(
+    request: ?*const zova_object_seekable_reader_create_request,
+) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    defer handle.mutex.unlock();
+    const out = req.out_reader orelse return failDb(handle, error.InvalidArgument);
+    out.* = null;
+    if (req.out_size) |out_size| out_size.* = 0;
+
+    var reader = handle.db.objectSeekableReader(allocator, toObjectId(req.id)) catch |err| return failDb(handle, err);
+    const reader_handle = allocator.create(SeekableReaderHandle) catch |err| {
+        reader.deinit();
+        return failDb(handle, err);
+    };
+    reader_handle.* = .{ .db = handle, .reader = reader };
+    handle.live_readers += 1;
+    if (req.out_size) |out_size| out_size.* = reader.size();
+    out.* = @ptrCast(reader_handle);
+    return okDb(handle);
+}
+
+pub fn zova_object_seekable_reader_read(
+    request: ?*const zova_object_seekable_reader_read_request,
+) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = seekableReaderHandle(req.reader) orelse return .INVALID_ARGUMENT;
+    handle.db.mutex.lock();
+    defer handle.db.mutex.unlock();
+    const out = req.out_read orelse return failDb(handle.db, error.InvalidArgument);
+    out.* = 0;
+    const buffer = bytesMut(req.buffer, req.buffer_len) orelse return failDb(handle.db, error.InvalidArgument);
+    out.* = handle.reader.read(buffer) catch |err| return failDb(handle.db, err);
+    return okDb(handle.db);
+}
+
+pub fn zova_object_seekable_reader_seek(
+    request: ?*const zova_object_seekable_reader_seek_request,
+) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = seekableReaderHandle(req.reader) orelse return .INVALID_ARGUMENT;
+    handle.db.mutex.lock();
+    defer handle.db.mutex.unlock();
+    handle.reader.seekTo(req.offset);
+    return okDb(handle.db);
+}
+
+pub fn zova_object_seekable_reader_destroy(
+    request: ?*const zova_object_seekable_reader_destroy_request,
+) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const slot = req.reader orelse return .INVALID_ARGUMENT;
+    const raw = slot.* orelse return .OK;
+    const handle = seekableReaderHandle(raw) orelse return .INVALID_ARGUMENT;
     const db_handle = handle.db;
     db_handle.mutex.lock();
     defer db_handle.mutex.unlock();

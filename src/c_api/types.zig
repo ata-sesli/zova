@@ -6,6 +6,8 @@ pub const zova_object_writer = opaque {};
 
 pub const zova_object_reader = opaque {};
 
+pub const zova_object_seekable_reader = opaque {};
+
 pub const zova_statement = opaque {};
 
 pub const zova_subscription = opaque {};
@@ -1004,6 +1006,29 @@ pub const zova_object_reader_read_request = extern struct {
 
 pub const zova_object_reader_destroy_request = extern struct {
     reader: ?*?*zova_object_reader,
+};
+
+pub const zova_object_seekable_reader_create_request = extern struct {
+    db: ?*zova_database,
+    id: zova_object_id,
+    out_reader: ?*?*zova_object_seekable_reader,
+    out_size: ?*u64,
+};
+
+pub const zova_object_seekable_reader_read_request = extern struct {
+    reader: ?*zova_object_seekable_reader,
+    buffer: ?[*]u8,
+    buffer_len: usize,
+    out_read: ?*usize,
+};
+
+pub const zova_object_seekable_reader_seek_request = extern struct {
+    reader: ?*zova_object_seekable_reader,
+    offset: u64,
+};
+
+pub const zova_object_seekable_reader_destroy_request = extern struct {
+    reader: ?*?*zova_object_seekable_reader,
 };
 
 /// Borrowed byte slice for key-value operations. Zova copies caller input

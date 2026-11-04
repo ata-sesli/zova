@@ -16,6 +16,7 @@ pub const zova_database = internal.zova_database;
 pub const zova_fresh_build = internal.zova_fresh_build;
 pub const zova_object_writer = internal.zova_object_writer;
 pub const zova_object_reader = internal.zova_object_reader;
+pub const zova_object_seekable_reader = internal.zova_object_seekable_reader;
 pub const zova_statement = internal.zova_statement;
 pub const zova_subscription = internal.zova_subscription;
 pub const zova_status = internal.zova_status;
@@ -159,6 +160,10 @@ pub const zova_object_writer_cancel_request = internal.zova_object_writer_cancel
 pub const zova_object_reader_create_request = internal.zova_object_reader_create_request;
 pub const zova_object_reader_read_request = internal.zova_object_reader_read_request;
 pub const zova_object_reader_destroy_request = internal.zova_object_reader_destroy_request;
+pub const zova_object_seekable_reader_create_request = internal.zova_object_seekable_reader_create_request;
+pub const zova_object_seekable_reader_read_request = internal.zova_object_seekable_reader_read_request;
+pub const zova_object_seekable_reader_seek_request = internal.zova_object_seekable_reader_seek_request;
+pub const zova_object_seekable_reader_destroy_request = internal.zova_object_seekable_reader_destroy_request;
 pub const zova_kv_bytes = internal.zova_kv_bytes;
 pub const zova_kv_get_result = internal.zova_kv_get_result;
 pub const zova_kv_get_many_results = internal.zova_kv_get_many_results;
@@ -779,6 +784,30 @@ pub fn zova_object_reader_destroy(
     request: ?*const zova_object_reader_destroy_request,
 ) callconv(.c) zova_status {
     return internal.zova_object_reader_destroy(request);
+}
+
+pub fn zova_object_seekable_reader_create(
+    request: ?*const zova_object_seekable_reader_create_request,
+) callconv(.c) zova_status {
+    return internal.zova_object_seekable_reader_create(request);
+}
+
+pub fn zova_object_seekable_reader_read(
+    request: ?*const zova_object_seekable_reader_read_request,
+) callconv(.c) zova_status {
+    return internal.zova_object_seekable_reader_read(request);
+}
+
+pub fn zova_object_seekable_reader_seek(
+    request: ?*const zova_object_seekable_reader_seek_request,
+) callconv(.c) zova_status {
+    return internal.zova_object_seekable_reader_seek(request);
+}
+
+pub fn zova_object_seekable_reader_destroy(
+    request: ?*const zova_object_seekable_reader_destroy_request,
+) callconv(.c) zova_status {
+    return internal.zova_object_seekable_reader_destroy(request);
 }
 
 pub fn zova_vector_collection_create(request: ?*const zova_vector_collection_create_request) callconv(.c) zova_status {

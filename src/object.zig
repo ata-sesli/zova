@@ -442,6 +442,190 @@ pub const ObjectReader = struct {
     }
 };
 
+/// Manifest rows and chunk rowids for an inclusive chunk-index range. Shared by
+/// `readObjectRange` and `ObjectSeekableReader` under one statement-cache tag.
+const object_range_by_index_sql =
+    \\select /* zova_trace:object_range */ oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.rowid
+    \\from {s}_zova_object_chunks oc
+    \\left join {s}_zova_chunks c on c.chunk_hash = oc.chunk_hash
+    \\where oc.object_id = ?
+    \\  and oc.chunk_index between ? and ?
+    \\order by oc.chunk_index asc
+;
+
+/// Seekable, verified reader for one stored object, for range serving.
+///
+/// The reader loads the chunk that holds the current position whole into one
+/// reader-owned buffer of the profile's maximum chunk size and checks it
+/// against its manifest SHA-256 before returning any of its bytes. Later reads
+/// inside that chunk are served from the buffer, so each chunk is hashed once
+/// per visit rather than once per call. Like a partial `readObjectRange`, it
+/// verifies chunks, not the whole-object hash.
+///
+/// No SQLite snapshot stays pinned between calls: each chunk load runs in its
+/// own short read transaction, or inside the caller's transaction when one is
+/// active. If the object is deleted while the reader is open, the next read
+/// that needs a new chunk returns `error.ObjectNotFound`. A failed read leaves
+/// the position unchanged and the reader usable. Call `deinit` to free the
+/// buffer; the reader must not outlive its database connection.
+pub const ObjectSeekableReader = struct {
+    db: Database,
+    allocator: std.mem.Allocator,
+    id: ObjectId,
+    size_bytes: u64,
+    /// Logical byte offset of the next read.
+    position: u64 = 0,
+    buffer: []u8 = &.{},
+    /// The verified chunk held in `buffer`; `chunk_len == 0` means none.
+    chunk_offset: u64 = 0,
+    chunk_len: usize = 0,
+    /// Index, end offset and policy of the last loaded chunk, so a
+    /// sequential read can load the next index without searching the manifest.
+    chunk_index: u64 = 0,
+    chunk_end: u64 = 0,
+    chunk_policy: ?ChunkingPolicy = null,
+
+    /// Total object size in bytes.
+    pub fn size(self: *const ObjectSeekableReader) u64 {
+        return self.size_bytes;
+    }
+
+    /// Move the read position to an absolute byte offset. Offsets at or past
+    /// the end are allowed and read zero bytes.
+    pub fn seekTo(self: *ObjectSeekableReader, offset: u64) void {
+        self.position = offset;
+    }
+
+    /// Read up to `buffer.len` bytes from the current position and advance it.
+    /// Returns zero at or past the end. A read may span chunks; if a later
+    /// chunk fails to load, the bytes already copied are returned and the
+    /// next call reports the error.
+    pub fn read(self: *ObjectSeekableReader, buffer: []u8) Error!usize {
+        var written: usize = 0;
+        while (written < buffer.len and self.position < self.size_bytes) {
+            if (!self.holdsPosition()) {
+                self.loadChunk() catch |err| {
+                    if (written > 0) return written;
+                    return err;
+                };
+            }
+            const start: usize = @intCast(self.position - self.chunk_offset);
+            const count = @min(self.chunk_len - start, buffer.len - written);
+            @memcpy(buffer[written .. written + count], self.buffer[start .. start + count]);
+            written += count;
+            self.position += count;
+        }
+        return written;
+    }
+
+    /// Free the chunk buffer.
+    pub fn deinit(self: *ObjectSeekableReader) void {
+        self.allocator.free(self.buffer);
+        self.buffer = &.{};
+        self.chunk_len = 0;
+    }
+
+    fn holdsPosition(self: *const ObjectSeekableReader) bool {
+        return self.chunk_len != 0 and self.position >= self.chunk_offset and
+            self.position - self.chunk_offset < self.chunk_len;
+    }
+
+    fn loadChunk(self: *ObjectSeekableReader) Error!void {
+        self.chunk_len = 0;
+        const sqlite_db = self.db.sqlite_db;
+        const owns_transaction = !hasActiveTransaction(sqlite_db);
+        if (owns_transaction) try sqlite_db.begin();
+        errdefer if (owns_transaction) sqlite_db.rollback() catch {};
+
+        const chunk = try self.loadChunkInTransaction();
+        if (owns_transaction) try sqlite_db.commit();
+        self.chunk_offset = chunk.offset;
+        self.chunk_len = chunk.len;
+        self.chunk_index = chunk.index;
+        self.chunk_end = chunk.offset + chunk.len;
+        self.chunk_policy = chunk.policy;
+    }
+
+    fn loadChunkInTransaction(self: *ObjectSeekableReader) Error!struct { offset: u64, len: usize, index: u64, policy: ChunkingPolicy } {
+        // Objects are immutable, but one may be deleted, or deleted and stored
+        // again under another profile, between loads; read its current shape.
+        const metadata = try loadObjectMetadata(self.db.statement_cache, self.db.sqlite_db, self.db.storage_schema, self.id);
+        const policy = metadata.policy;
+        const size_bytes = try sqliteI64ToU64(metadata.size_bytes);
+        const chunk_count = try sqliteI64ToU64(metadata.chunk_count);
+        if (size_bytes != self.size_bytes) return error.ObjectCorrupt;
+        const max_chunk_count = switch (policy) {
+            .fastcdc => size_bytes,
+            .fixed_1m => fixed_chunks.countForSize(size_bytes),
+        };
+        if (chunk_count == 0 or chunk_count > max_chunk_count) return error.ObjectCorrupt;
+
+        // Chunking is deterministic, so under the same policy the chunk after
+        // the previous one starts where it ended.
+        const follows_previous = self.chunk_policy == policy and self.position == self.chunk_end;
+        const index = switch (policy) {
+            .fixed_1m => self.position / fixed_chunks.chunk_size,
+            .fastcdc => if (follows_previous)
+                self.chunk_index + 1
+            else
+                try self.db.seekFastcdcChunk(self.id, self.position, chunk_count),
+        };
+        if (index >= chunk_count) return error.ObjectCorrupt;
+
+        var lease = try self.db.acquire(.object_range_fixed, object_range_by_index_sql);
+        defer lease.release();
+        const stmt = &lease.statement;
+        try stmt.bindBlob(1, &self.id);
+        try stmt.bindInt64(2, try u64ToSqliteI64(index));
+        try stmt.bindInt64(3, try u64ToSqliteI64(index));
+        if (try stmt.step() != .row) return error.ObjectCorrupt;
+
+        if (stmt.columnInt64(0) != try u64ToSqliteI64(index)) return error.ObjectCorrupt;
+        const raw_hash = stmt.columnBlob(1);
+        if (raw_hash.len != @sizeOf(ObjectChunkId)) return error.ObjectCorrupt;
+        var expected_hash: ObjectChunkId = undefined;
+        @memcpy(&expected_hash, raw_hash);
+
+        const chunk_offset = try sqliteI64ToU64(stmt.columnInt64(2));
+        const chunk_size = try sqliteI64ToU64(stmt.columnInt64(3));
+        if (chunk_size == 0 or chunk_size > policy.maxSize()) return error.ObjectCorrupt;
+        if (policy == .fixed_1m) {
+            if (chunk_offset != index * fixed_chunks.chunk_size) return error.ObjectCorrupt;
+            if (index + 1 < chunk_count and chunk_size != fixed_chunks.chunk_size) return error.ObjectCorrupt;
+        }
+        if (chunk_offset > size_bytes or chunk_size > size_bytes - chunk_offset) return error.ObjectCorrupt;
+        if (self.position < chunk_offset or self.position - chunk_offset >= chunk_size) return error.ObjectCorrupt;
+
+        if (stmt.columnType(4) == .null) return error.ObjectCorrupt;
+        const rowid = stmt.columnInt64(4);
+        if (rowid <= 0) return error.ObjectCorrupt;
+
+        if (self.buffer.len < policy.maxSize()) {
+            const buffer = try self.allocator.alloc(u8, policy.maxSize());
+            self.allocator.free(self.buffer);
+            self.buffer = buffer;
+        }
+        const len: usize = @intCast(chunk_size);
+        {
+            var blob = try sqlite.Blob.open(
+                self.db.sqlite_db,
+                self.db.storage_schema.sqliteName(),
+                "_zova_chunks",
+                "data",
+                rowid,
+            );
+            defer blob.deinit();
+            if (try blob.bytes() != chunk_size) return error.ObjectCorrupt;
+            try blob.read(self.buffer[0..len], 0);
+        }
+
+        var actual_hash: ObjectChunkId = undefined;
+        Sha256.hash(self.buffer[0..len], &actual_hash, .{});
+        if (!std.mem.eql(u8, &actual_hash, &expected_hash)) return error.ObjectCorrupt;
+        return .{ .offset = chunk_offset, .len = len, .index = index, .policy = policy };
+    }
+};
+
 pub const StorageSchema = enum {
     main,
     object_store,
@@ -892,6 +1076,18 @@ pub const Database = struct {
         return ObjectWriter.init(self.sqlite_db, self.storage_schema, self.allow_active_transactions, allocator, .fastcdc);
     }
 
+    /// Open a seekable, verified reader over one object. See
+    /// `ObjectSeekableReader`; the reader pins no snapshot between calls.
+    pub fn objectSeekableReader(self: *Database, allocator: std.mem.Allocator, id: ObjectId) Error!ObjectSeekableReader {
+        const metadata = try loadObjectMetadata(self.statement_cache, self.sqlite_db, self.storage_schema, id);
+        return .{
+            .db = self.*,
+            .allocator = allocator,
+            .id = id,
+            .size_bytes = try sqliteI64ToU64(metadata.size_bytes),
+        };
+    }
+
     /// Open a sequential reader over one object and pin its SQLite snapshot.
     /// The reader keeps one manifest statement active until EOF or `deinit`.
     pub fn objectReader(self: *Database, id: ObjectId) Error!ObjectReader {
@@ -1111,14 +1307,7 @@ pub const Database = struct {
         if (full_read) try validateObjectManifestShape(self.sqlite_db, self.storage_schema, id, size, chunk_count, metadata.policy);
 
         var chunks = if (metadata.policy == .fixed_1m)
-            try self.acquire(.object_range_fixed,
-                \\select /* zova_trace:object_range */ oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.rowid
-                \\from {s}_zova_object_chunks oc
-                \\left join {s}_zova_chunks c on c.chunk_hash = oc.chunk_hash
-                \\where oc.object_id = ?
-                \\  and oc.chunk_index between ? and ?
-                \\order by oc.chunk_index asc
-            )
+            try self.acquire(.object_range_fixed, object_range_by_index_sql)
         else
             try self.acquire(.object_range_fastcdc,
                 \\select /* zova_trace:object_range */ oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.rowid
