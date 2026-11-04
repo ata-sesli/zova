@@ -2312,21 +2312,27 @@ test "batch-driven graph statements keep bounded indexed lookups" {
     try db.putGraphEdgesKeyed(&keyed_edges, &keyed_edge_keys);
     try capture.expectPlan(&db.sqlite_db, .{ .outer = "batch", .bounded = &.{bounded_nodes} });
 
-    // Keyed puts read the whole graph to find existing opaque keys. That is a
-    // deliberate whole-partition read (#179), asserted here so a future scope
-    // change is visible.
-    capture.reset("zova_graph_edge_key_preload");
+    // Small keyed puts find existing opaque keys with one indexed point lookup
+    // per distinct identity (#179). Batches above the point-lookup limit keep
+    // the whole-partition preload; the keyed-put tests cover that switch.
+    // Node keys are unique across graphs, so the unique edge topology index
+    // has no graph_key column.
+    capture.reset("zova_graph_edge_key_lookup");
     try db.putGraphEdgesKeyed(&keyed_edges, &keyed_edge_keys);
-    try capture.expectPlan(&db.sqlite_db, .{ .partition_only = &.{bounded_edges} });
+    try capture.expectPlan(&db.sqlite_db, .{ .indexed = .{
+        .alias = "main._zova_graph_edges",
+        .index = "_zova_graph_edges_topology_idx",
+        .key = "to_node_key",
+    } });
 
-    capture.reset("zova_graph_node_key_preload");
+    capture.reset("zova_graph_node_key_lookup");
     var node_put_keys: [2]i64 = undefined;
     try db.putGraphNodesKeyed(&.{
         .{ .graph_name = "plan", .node_id = "n0", .kind = "kind" },
         .{ .graph_name = "plan", .node_id = "n2048", .kind = "kind" },
     }, &node_put_keys);
     try capture.expectPlan(&db.sqlite_db, .{
-        .partition_only = &.{.{ .alias = "main._zova_graph_nodes", .partition = "graph_key" }},
+        .bounded = &.{.{ .alias = "main._zova_graph_nodes", .partition = "graph_key" }},
     });
 
     const plain_edges = [_]zova.GraphEdgeInput{
