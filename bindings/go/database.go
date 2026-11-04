@@ -23,6 +23,9 @@ type DB struct {
 	writers    map[*ObjectWriter]struct{}
 	readers    map[*ObjectReader]struct{}
 	subs       map[*Subscription]struct{}
+
+	// seekableReaders is created lazily by DB.ObjectSeekableReader.
+	seekableReaders map[*ObjectSeekableReader]struct{}
 }
 
 // OpenOptions controls optional behavior for opening an existing .zova file.
@@ -400,6 +403,14 @@ func (db *DB) Close() error {
 			reader.closed = true
 		}
 		delete(db.readers, reader)
+	}
+	for reader := range db.seekableReaders {
+		if !reader.closed && reader.ptr != nil {
+			_ = reader.destroyLocked(db)
+			reader.ptr = nil
+			reader.closed = true
+		}
+		delete(db.seekableReaders, reader)
 	}
 	for sub := range db.subs {
 		if !sub.closed && sub.ptr != nil {

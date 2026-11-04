@@ -8,6 +8,8 @@ import "C"
 
 import (
 	"crypto/sha256"
+	"errors"
+	"io"
 	"runtime"
 	"unsafe"
 )
@@ -54,6 +56,23 @@ type ObjectPutOptions struct {
 type ObjectWriter struct {
 	db     *DB
 	ptr    *C.zova_object_writer
+	closed bool
+}
+
+// ObjectSeekableReader reads one stored object at any offset. It implements
+// io.ReadSeeker and io.Closer, so it can back http.ServeContent.
+//
+// Each chunk is checked against its manifest SHA-256 once, into a per-reader
+// buffer, before any of its bytes are returned; the whole-object hash is not
+// checked. The reader pins no SQLite snapshot between calls, so other
+// connections can commit while it stays open. A read that needs a new chunk
+// of an object deleted since opening fails with StatusObjectNotFound. The
+// reader is registered with its DB, and DB.Close closes it.
+type ObjectSeekableReader struct {
+	db     *DB
+	ptr    *C.zova_object_seekable_reader
+	size   int64
+	pos    int64
 	closed bool
 }
 
@@ -699,4 +718,154 @@ func cManifestChunks(chunks []ObjectChunk) (*C.zova_object_manifest_chunk, func(
 		}
 	}
 	return (*C.zova_object_manifest_chunk)(ptr), func() { C.free(ptr) }
+}
+
+// ObjectSeekableReader opens a seekable, verified reader over one stored object.
+func (db *DB) ObjectSeekableReader(id ObjectID) (*ObjectSeekableReader, error) {
+	outRaw := (**C.zova_object_seekable_reader)(C.calloc(1, C.size_t(unsafe.Sizeof(uintptr(0)))))
+	if outRaw == nil {
+		return nil, newError(StatusOutOfMemory, "could not allocate object reader output")
+	}
+	defer C.free(unsafe.Pointer(outRaw))
+	outSize := (*C.uint64_t)(C.calloc(1, C.size_t(unsafe.Sizeof(C.uint64_t(0)))))
+	if outSize == nil {
+		return nil, newError(StatusOutOfMemory, "could not allocate object reader output")
+	}
+	defer C.free(unsafe.Pointer(outSize))
+
+	var reader *ObjectSeekableReader
+	err := db.withLock(func() error {
+		request := C.zova_object_seekable_reader_create_request{
+			db:         db.ptr,
+			id:         id.toC(),
+			out_reader: outRaw,
+			out_size:   outSize,
+		}
+		if err := statusFromDB(db, C.zova_object_seekable_reader_create(&request)); err != nil {
+			return err
+		}
+		raw := *outRaw
+		if raw == nil {
+			return newError(StatusInvalidArgument, "Zova returned a nil object reader handle")
+		}
+		reader = &ObjectSeekableReader{db: db, ptr: raw, size: int64(*outSize)}
+		if db.seekableReaders == nil {
+			db.seekableReaders = make(map[*ObjectSeekableReader]struct{})
+		}
+		db.seekableReaders[reader] = struct{}{}
+		return nil
+	})
+	return reader, err
+}
+
+// Size returns the object size in bytes.
+func (r *ObjectSeekableReader) Size() int64 {
+	return r.size
+}
+
+// Read reads up to len(p) bytes at the current offset and advances it. It
+// returns io.EOF at or past the end of the object.
+func (r *ObjectSeekableReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+	data := pinnedBytes(&pinner, p)
+	outRead := (*C.size_t)(C.calloc(1, C.size_t(unsafe.Sizeof(C.size_t(0)))))
+	if outRead == nil {
+		return 0, newError(StatusOutOfMemory, "could not allocate object reader output")
+	}
+	defer C.free(unsafe.Pointer(outRead))
+	err := r.withLock(func(db *DB) error {
+		request := C.zova_object_seekable_reader_read_request{
+			reader:     r.ptr,
+			buffer:     data,
+			buffer_len: C.size_t(len(p)),
+			out_read:   outRead,
+		}
+		return statusFromDB(db, C.zova_object_seekable_reader_read(&request))
+	})
+	if err != nil {
+		return 0, err
+	}
+	read := int(*outRead)
+	r.pos += int64(read)
+	if read == 0 {
+		return 0, io.EOF
+	}
+	return read, nil
+}
+
+// Seek sets the offset for the next Read, following io.Seeker. Offsets past
+// the end are allowed and read io.EOF; negative offsets are an error.
+func (r *ObjectSeekableReader) Seek(offset int64, whence int) (int64, error) {
+	var target int64
+	switch whence {
+	case io.SeekStart:
+		target = offset
+	case io.SeekCurrent:
+		target = r.pos + offset
+	case io.SeekEnd:
+		target = r.size + offset
+	default:
+		return 0, errors.New("zova: invalid seek whence")
+	}
+	if target < 0 {
+		return 0, errors.New("zova: negative seek position")
+	}
+	err := r.withLock(func(db *DB) error {
+		request := C.zova_object_seekable_reader_seek_request{
+			reader: r.ptr,
+			offset: C.uint64_t(target),
+		}
+		return statusFromDB(db, C.zova_object_seekable_reader_seek(&request))
+	})
+	if err != nil {
+		return 0, err
+	}
+	r.pos = target
+	return target, nil
+}
+
+// Close destroys the reader. Repeated calls are successful no-ops.
+func (r *ObjectSeekableReader) Close() error {
+	if r == nil || r.db == nil || r.closed || r.ptr == nil {
+		return nil
+	}
+	return r.withLock(func(db *DB) error {
+		return r.destroyLocked(db)
+	})
+}
+
+func (r *ObjectSeekableReader) withLock(fn func(*DB) error) error {
+	if r == nil || r.db == nil {
+		return newError(StatusObjectReaderClosed, "object reader is closed")
+	}
+	r.db.mu.Lock()
+	defer r.db.mu.Unlock()
+	if r.db.closed || r.db.ptr == nil {
+		return closedError("database")
+	}
+	if r.closed || r.ptr == nil {
+		return newError(StatusObjectReaderClosed, "object reader is closed")
+	}
+	return fn(r.db)
+}
+
+func (r *ObjectSeekableReader) destroyLocked(db *DB) error {
+	raw := (**C.zova_object_seekable_reader)(C.malloc(C.size_t(unsafe.Sizeof(uintptr(0)))))
+	if raw == nil {
+		return newError(StatusOutOfMemory, "could not allocate object reader destroy request")
+	}
+	defer C.free(unsafe.Pointer(raw))
+	*raw = r.ptr
+	request := C.zova_object_seekable_reader_destroy_request{reader: raw}
+	if err := statusFromDB(db, C.zova_object_seekable_reader_destroy(&request)); err != nil {
+		return err
+	}
+	r.ptr = nil
+	r.closed = true
+	delete(db.seekableReaders, r)
+	return nil
 }
