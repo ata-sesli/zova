@@ -91,7 +91,9 @@ The synchronous `Database` facade exposes:
   `migrateDatabase`, and their async `AsyncDatabase` counterparts), with the
   same optional `ExtensionOptions` as `Database.open` for databases with a
   non-bundled extension installed
-- objects, manifests, chunks, range reads, assembly, and `ObjectWriter`
+- objects, manifests, chunks, range reads, assembly, `ObjectWriter`, and
+  `ObjectSeekableReader` for seekable, chunk-verified reads such as HTTP range
+  serving (`read`/`seek` and `readAsync`/`seekAsync`)
 - f32/f16/i8 vector collection lifecycle, batch writes/deletes, and exact search
 - public graph CRUD, atomic batches, neighbors, degree, and walks
 - bundled extension install/list/info/check/drop
@@ -140,6 +142,9 @@ await db.close();
 
 Queued work also includes backup/compact/restore, vector batches and searches,
 and graph batches and walks. Inputs are copied before worker execution.
+`AsyncDatabase.objectSeekableReader(id)` opens a seekable reader whose
+`readAsync` runs on the worker pool; its async reads and seeks run in call
+order.
 
 Async transaction callbacks and prepared statement handles are intentionally
 not exposed.
@@ -147,7 +152,8 @@ not exposed.
 ## Ownership
 
 Every native child has explicit cleanup. Call `Statement.close()`,
-`ObjectWriter.close()`/`cancel()`, and `Database.close()` yourself. Node-API
+`ObjectWriter.close()`/`cancel()`, `ObjectSeekableReader.close()`, and
+`Database.close()` yourself. Node-API
 finalizers are fallback cleanup.
 
 Input typed arrays are borrowed only during synchronous calls or copied before

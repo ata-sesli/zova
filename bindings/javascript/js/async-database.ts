@@ -12,6 +12,7 @@ import { nativeExtensionOptions } from "./types.js";
 import type { KvEntry } from "./types.js";
 import type { ProgressOptions } from "./progress.js";
 import { withProgress } from "./progress.js";
+import { ObjectSeekableReader } from "./object.js";
 import { Subscription } from "./subscription.js";
 import type {
   VectorInput,
@@ -173,6 +174,13 @@ export class AsyncDatabase {
 
   getObject(id: Uint8Array): Promise<Uint8Array> {
     return this.#enqueue(() => this.#native.asyncGetObject(id));
+  }
+
+  async objectSeekableReader(id: Uint8Array): Promise<ObjectSeekableReader> {
+    const reader = await this.#enqueue(() =>
+      this.#native.asyncObjectSeekableReader(id),
+    );
+    return new ObjectSeekableReader(reader);
   }
 
   kvGet(namespace: Uint8Array, key: Uint8Array): Promise<Uint8Array | null> {
