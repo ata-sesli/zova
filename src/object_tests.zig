@@ -167,6 +167,58 @@ test "writer finish references its chunks and drops them when another policy own
     try std.testing.expectEqual(@as(i64, 0), try testingCount(&raw, unreferenced_chunks_sql));
 }
 
+fn testingWriteThenFinish(writer: *object_impl.ObjectWriter, bytes: []const u8) !ObjectId {
+    try writer.write(bytes);
+    return writer.finish();
+}
+
+test "writer rolls back a failed write batch and never publishes its chunks" {
+    var raw = try sqlite.Database.open(":memory:");
+    defer raw.deinit();
+    try raw.exec("pragma foreign_keys = on");
+    var db = try preparePrototypeDatabase(&raw);
+
+    var bytes: [fastcdc.max_size * 8]u8 = undefined;
+    for (&bytes, 0..) |*byte, index| byte.* = @truncate((index *% 2246822519) >> 9);
+
+    try raw.exec("create trigger force_writer_chunk_failure " ++
+        "before insert on _zova_chunks when (select count(*) from _zova_chunks) >= 3 " ++
+        "begin select raise(abort, 'forced writer chunk failure'); end;");
+
+    var writer = try db.objectWriter(std.testing.allocator);
+    try std.testing.expectError(error.Constraint, writer.write(&bytes));
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&raw, "select count(*) from _zova_chunks"));
+
+    try raw.exec("drop trigger force_writer_chunk_failure");
+    try std.testing.expectError(error.ObjectChunkNotFound, writer.finish());
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&raw, "select count(*) from _zova_objects"));
+    writer.deinit();
+    try std.testing.expectEqual(@as(i64, 0), try testingCount(&raw, "select count(*) from _zova_chunks"));
+
+    var retry = try db.objectWriter(std.testing.allocator);
+    defer retry.deinit();
+    const id = try testingWriteThenFinish(&retry, &bytes);
+    try std.testing.expectEqualSlices(u8, &objectId(&bytes), &id);
+    var object = try db.getObject(std.testing.allocator, id);
+    defer object.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, &bytes, object.bytes);
+}
+
+test "writer rejects a corrupt pre-existing chunk it would reuse" {
+    var raw = try sqlite.Database.open(":memory:");
+    defer raw.deinit();
+    var db = try preparePrototypeDatabase(&raw);
+
+    const chunk = @as([fastcdc.max_size]u8, @splat(0x73));
+    try db.putObjectChunk(objectChunkId(&chunk), &chunk);
+    try raw.exec("update _zova_chunks set data = zeroblob(size_bytes)");
+
+    var writer = try db.objectWriter(std.testing.allocator);
+    defer writer.deinit();
+    try std.testing.expectError(error.ObjectCorrupt, testingWriteThenFinish(&writer, &chunk));
+    try std.testing.expect(!try db.hasObject(objectId(&chunk)));
+}
+
 test "fixed profile transfer chunks accept 1 MiB and assemble atomically" {
     var raw = try sqlite.Database.open(":memory:");
     defer raw.deinit();

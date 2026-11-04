@@ -463,9 +463,12 @@ pub const StorageSchema = enum {
 /// Incremental writer for one content-addressed Zova object.
 ///
 /// `ObjectWriter` accepts arbitrary byte slices, emits FastCDC-v1 chunks as
-/// they become available, stores those chunks as verified loose chunks, and
-/// assembles the final object on `finish`. It does not keep the full object in
-/// memory and it does not hold a SQLite transaction open across `write` calls.
+/// they become available, stores those chunks as loose chunks, and assembles
+/// the final object on `finish`. It does not keep the full object in memory.
+/// Chunks emitted by one `write` (or by `finish`) are stored in one
+/// transaction, or one savepoint inside a caller transaction, but no SQLite
+/// transaction stays open across calls. A failed call rolls back the chunks it
+/// stored, so a later `finish` reports them missing instead of publishing.
 /// The writer must be deinitialized; unfinished writers auto-cancel.
 pub const ObjectWriter = struct {
     sqlite_db: *sqlite.Database,
@@ -544,13 +547,16 @@ pub const ObjectWriter = struct {
         try rejectActiveTransaction(self.sqlite_db, self.allow_active_transactions);
         if (bytes.len == 0) return;
 
+        var batch = self.beginChunkBatch();
+        errdefer self.abortChunkBatch(&batch);
+
         var offset: usize = 0;
         while (offset < bytes.len) {
-            try self.drainReadyChunks();
+            try self.drainReadyChunks(&batch);
 
             const accepted = try self.chunker.write(self.allocator, bytes[offset..]);
             if (accepted == 0) {
-                try self.drainReadyChunks();
+                try self.drainReadyChunks(&batch);
                 continue;
             }
 
@@ -559,7 +565,8 @@ pub const ObjectWriter = struct {
             offset += accepted;
         }
 
-        try self.drainReadyChunks();
+        try self.drainReadyChunks(&batch);
+        try self.commitChunkBatch(&batch);
     }
 
     /// Finish the stream and return the object's content id.
@@ -573,7 +580,14 @@ pub const ObjectWriter = struct {
         try rejectActiveTransaction(self.sqlite_db, self.allow_active_transactions);
 
         self.chunker.finish();
-        try self.drainReadyChunks();
+        {
+            // The final chunks commit before assembly, so a failed assembly
+            // can be retried without re-sending bytes.
+            var batch = self.beginChunkBatch();
+            errdefer self.abortChunkBatch(&batch);
+            try self.drainReadyChunks(&batch);
+            try self.commitChunkBatch(&batch);
+        }
         var db = self.database();
 
         var final_hasher = self.hasher;
@@ -583,7 +597,7 @@ pub const ObjectWriter = struct {
         // After a successful assembly the new manifest references every chunk
         // this writer stored, so loose-chunk cleanup is only needed when an
         // existing object (possibly chunked under another policy) wins.
-        db.assembleObjectFromChunksWithPolicy(id, self.size_bytes, self.chunks.items, self.policy) catch |err| switch (err) {
+        db.assembleWriterObject(id, self.size_bytes, self.chunks.items, self.policy) catch |err| switch (err) {
             error.ObjectAlreadyExists => {
                 try self.ensureExistingObjectIsValid(id);
                 try self.deleteUnreferencedSeenChunks();
@@ -620,43 +634,90 @@ pub const ObjectWriter = struct {
         self.seen_chunks.deinit(self.allocator);
     }
 
-    fn drainReadyChunks(self: *ObjectWriter) Error!void {
+    /// Chunk inserts for one `write` or `finish` call. The transaction scope
+    /// and insert statement are opened by the first stored chunk, so calls
+    /// that only buffer bytes never touch SQLite.
+    const ChunkBatch = struct {
+        scope: ?ObjectMutationScope = null,
+        insert: ?sqlite.Statement = null,
+        seen_chunks_len: usize,
+    };
+
+    fn beginChunkBatch(self: *ObjectWriter) ChunkBatch {
+        return .{ .seen_chunks_len = self.seen_chunks.items.len };
+    }
+
+    fn chunkBatchInsert(self: *ObjectWriter, batch: *ChunkBatch) Error!*sqlite.Statement {
+        if (batch.insert) |*stmt| return stmt;
+        if (batch.scope == null) batch.scope = try beginObjectMutation(self.sqlite_db);
+        batch.insert = try prepareSchemaSql(self.sqlite_db,
+            \\insert into {s}_zova_chunks (chunk_hash, size_bytes, data)
+            \\values (?, ?, ?)
+            \\on conflict(chunk_hash) do nothing
+        , .{self.storage_schema.prefix()});
+        return &batch.insert.?;
+    }
+
+    fn commitChunkBatch(self: *ObjectWriter, batch: *ChunkBatch) Error!void {
+        if (batch.insert) |*stmt| stmt.deinit();
+        batch.insert = null;
+        if (batch.scope) |scope| {
+            try finishObjectMutation(self.sqlite_db, scope);
+            batch.scope = null;
+        }
+    }
+
+    /// Roll back a failed batch. Chunks it inserted are gone, so the writer
+    /// no longer owns them for cleanup.
+    fn abortChunkBatch(self: *ObjectWriter, batch: *ChunkBatch) void {
+        if (batch.insert) |*stmt| stmt.deinit();
+        batch.insert = null;
+        if (batch.scope) |scope| {
+            rollbackObjectMutation(self.sqlite_db, scope);
+            batch.scope = null;
+            self.seen_chunks.shrinkRetainingCapacity(batch.seen_chunks_len);
+        }
+    }
+
+    fn drainReadyChunks(self: *ObjectWriter, batch: *ChunkBatch) Error!void {
         while (self.chunker.next()) |chunk| {
-            try self.storeChunk(chunk);
+            try self.storeChunk(batch, chunk);
             self.chunker.consume(self.allocator, chunk.bytes.len);
         }
     }
 
-    fn storeChunk(self: *ObjectWriter, chunk: PolicyStreamChunk) Error!void {
+    fn storeChunk(self: *ObjectWriter, batch: *ChunkBatch, chunk: PolicyStreamChunk) Error!void {
         std.debug.assert(chunk.bytes.len > 0);
         std.debug.assert(chunk.bytes.len <= self.policy.maxSize());
 
         const hash = objectChunkId(chunk.bytes);
-        var db = self.database();
-        const already_stored = already_stored: {
-            var existing = db.getObjectChunkWithPolicy(self.allocator, hash, self.policy) catch |err| switch (err) {
-                error.ObjectChunkNotFound => break :already_stored false,
-                else => return err,
-            };
-            existing.deinit(self.allocator);
-            break :already_stored true;
-        };
+        const insert = try self.chunkBatchInsert(batch);
+        try insert.bindBlob(1, &hash);
+        try insert.bindInt64(2, try usizeToSqliteI64(chunk.bytes.len));
+        try insert.bindBlob(3, chunk.bytes);
+        try insert.expectDone();
+        try insert.reset();
+        try insert.clearBindings();
 
-        try db.putObjectChunkWithPolicy(hash, chunk.bytes, self.policy);
-        if (!already_stored) try self.rememberSeenChunk(hash);
+        if (self.sqlite_db.changes() > 0) {
+            // Only chunks this writer inserted are its to clean up. A chunk
+            // repeated later in the stream conflicts with this row, so each
+            // hash is recorded once.
+            try self.seen_chunks.append(self.allocator, hash);
+        } else {
+            // The object will reference a chunk stored earlier; verify it
+            // before trusting it at `finish`.
+            var db = self.database();
+            var existing = try db.getObjectChunkWithPolicy(self.allocator, hash, self.policy);
+            existing.deinit(self.allocator);
+        }
+
         try self.chunks.append(self.allocator, .{
             .index = @intCast(self.chunks.items.len),
             .hash = hash,
             .offset = @intCast(chunk.offset),
             .size_bytes = @intCast(chunk.bytes.len),
         });
-    }
-
-    fn rememberSeenChunk(self: *ObjectWriter, hash: ObjectChunkId) Error!void {
-        for (self.seen_chunks.items) |seen_hash| {
-            if (std.mem.eql(u8, &seen_hash, &hash)) return;
-        }
-        try self.seen_chunks.append(self.allocator, hash);
     }
 
     fn deleteUnreferencedSeenChunks(self: *ObjectWriter) Error!void {
@@ -1321,6 +1382,90 @@ pub const Database = struct {
         defer inserts.deinit();
 
         for (sorted_chunks) |chunk| {
+            try inserts.insertManifest(
+                id,
+                try u64ToSqliteI64(chunk.index),
+                chunk.hash,
+                try u64ToSqliteI64(chunk.offset),
+                try u64ToSqliteI64(chunk.size_bytes),
+            );
+        }
+
+        try finishObjectMutation(self.sqlite_db, scope);
+        committed = true;
+    }
+
+    /// Publish an object streamed through `ObjectWriter`.
+    ///
+    /// The writer derived `id` and every chunk hash from the bytes it was
+    /// given, and verified each pre-existing chunk it reused, so unlike
+    /// `assembleObjectFromChunks` this does not read the chunk bytes back. It
+    /// still requires a contiguous manifest and checks that every chunk row is
+    /// present with the expected size, which catches a chunk removed between
+    /// `write` and `finish`. An existing object returns
+    /// `error.ObjectAlreadyExists` without being verified here; the writer
+    /// verifies it.
+    fn assembleWriterObject(
+        self: *Database,
+        id: ObjectId,
+        size_bytes: u64,
+        chunks: []const ObjectChunk,
+        policy: ChunkingPolicy,
+    ) Error!void {
+        const scope = try beginObjectMutation(self.sqlite_db);
+        var committed = false;
+        errdefer if (!committed) rollbackObjectMutation(self.sqlite_db, scope);
+
+        if (try objectRowExists(self.statement_cache, self.sqlite_db, self.storage_schema, id)) {
+            return error.ObjectAlreadyExists;
+        }
+
+        var expected_offset: u64 = 0;
+        for (chunks, 0..) |chunk, index| {
+            if (chunk.index != index or chunk.offset != expected_offset) return error.ObjectManifestInvalid;
+            if (chunk.size_bytes == 0 or chunk.size_bytes > policy.maxSize()) return error.ObjectManifestInvalid;
+            expected_offset += chunk.size_bytes;
+        }
+        if (expected_offset != size_bytes) return error.ObjectManifestInvalid;
+        if (!validateManifestPolicyShape(size_bytes, chunks, policy)) return error.ObjectManifestInvalid;
+
+        {
+            var stored = try self.prepareSchema(
+                \\select size_bytes, length(data)
+                \\from {s}_zova_chunks
+                \\where chunk_hash = ?
+            , .{self.storage_schema.prefix()});
+            defer stored.deinit();
+
+            for (chunks) |chunk| {
+                try stored.bindBlob(1, &chunk.hash);
+                switch (try stored.step()) {
+                    .done => return error.ObjectChunkNotFound,
+                    .row => {
+                        const expected_size = try u64ToSqliteI64(chunk.size_bytes);
+                        if (stored.columnInt64(0) != expected_size or stored.columnInt64(1) != expected_size) {
+                            return error.ObjectCorrupt;
+                        }
+                    },
+                }
+                try stored.reset();
+                try stored.clearBindings();
+            }
+        }
+
+        try insertObjectRow(
+            self.sqlite_db,
+            self.storage_schema,
+            id,
+            try u64ToSqliteI64(size_bytes),
+            try usizeToSqliteI64(chunks.len),
+            policy,
+        );
+
+        var inserts = try ObjectInsertStatements.init(self.sqlite_db, self.storage_schema);
+        defer inserts.deinit();
+
+        for (chunks) |chunk| {
             try inserts.insertManifest(
                 id,
                 try u64ToSqliteI64(chunk.index),
