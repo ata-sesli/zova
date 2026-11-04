@@ -14,6 +14,7 @@ use crate::graph::{
     target_type, NativeGraphEdgeInput, NativeGraphNodeInput, NativeGraphWalkItem,
     NativeGraphWalkOptions,
 };
+use crate::progress::{NativeCancelToken, ProgressFunction, TaskProgress};
 use crate::subscription::NativeSubscription;
 use crate::vector::{native_search_results, NativeVectorInput, NativeVectorSearchResult};
 
@@ -127,6 +128,7 @@ pub struct FileTask {
     destination: String,
     verify: bool,
     kind: FileTaskKind,
+    progress: TaskProgress,
 }
 
 impl Task for FileTask {
@@ -135,24 +137,37 @@ impl Task for FileTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         let database = &self.state.as_ref().expect("task state").database;
-        match self.kind {
-            FileTaskKind::Backup => database
-                .backup_to(
-                    &self.destination,
-                    zova::BackupOptions {
-                        verify: self.verify,
-                    },
-                )
-                .map_err(zova_error),
-            FileTaskKind::Compact => database
-                .compact_to(
-                    &self.destination,
-                    zova::CompactOptions {
-                        verify: self.verify,
-                    },
-                )
-                .map_err(zova_error),
-        }
+        let progress = &self.progress;
+        let result = match (&self.kind, progress.is_active()) {
+            (FileTaskKind::Backup, false) => database.backup_to(
+                &self.destination,
+                zova::BackupOptions {
+                    verify: self.verify,
+                },
+            ),
+            (FileTaskKind::Backup, true) => database.backup_to_with_progress(
+                &self.destination,
+                zova::BackupOptions {
+                    verify: self.verify,
+                },
+                |event| progress.report(event),
+            ),
+            (FileTaskKind::Compact, false) => database.compact_to(
+                &self.destination,
+                zova::CompactOptions {
+                    verify: self.verify,
+                },
+            ),
+            (FileTaskKind::Compact, true) => database.compact_to_with_progress(
+                &self.destination,
+                zova::CompactOptions {
+                    verify: self.verify,
+                },
+                |event| progress.report(event),
+            ),
+        };
+        progress.finish();
+        result.map_err(zova_error)
     }
 
     fn resolve(&mut self, _: Env, _: Self::Output) -> Result<Self::JsValue> {
@@ -593,6 +608,7 @@ pub struct MigrateTask {
     destination: String,
     verify: bool,
     extensions: zova::ExtensionOptions,
+    progress: TaskProgress,
 }
 
 impl Task for MigrateTask {
@@ -600,15 +616,28 @@ impl Task for MigrateTask {
     type JsValue = ();
 
     fn compute(&mut self) -> Result<Self::Output> {
-        zova::migrate_database_with_extensions(
-            &self.source,
-            &self.destination,
-            zova::MigrateOptions {
-                verify: self.verify,
-            },
-            &self.extensions,
-        )
-        .map_err(zova_error)
+        let options = zova::MigrateOptions {
+            verify: self.verify,
+        };
+        let progress = &self.progress;
+        let result = if progress.is_active() {
+            zova::migrate_database_with_progress(
+                &self.source,
+                &self.destination,
+                options,
+                &self.extensions,
+                |event| progress.report(event),
+            )
+        } else {
+            zova::migrate_database_with_extensions(
+                &self.source,
+                &self.destination,
+                options,
+                &self.extensions,
+            )
+        };
+        progress.finish();
+        result.map_err(zova_error)
     }
 
     fn resolve(&mut self, _: Env, _: Self::Output) -> Result<Self::JsValue> {
@@ -629,12 +658,17 @@ pub fn async_migrate_database(
     destination: String,
     verify: Option<bool>,
     extensions: Option<NativeExtensionOptions>,
+    #[napi(ts_arg_type = "(progress: NativeProgress | null) => void")] progress: Option<
+        ProgressFunction,
+    >,
+    cancel: Option<&NativeCancelToken>,
 ) -> AsyncTask<MigrateTask> {
     AsyncTask::new(MigrateTask {
         source,
         destination,
         verify: verify.unwrap_or(true),
         extensions: NativeExtensionOptions::options_or_default(extensions),
+        progress: TaskProgress::new(progress, cancel),
     })
 }
 
@@ -679,12 +713,17 @@ impl NativeDatabase {
         &self,
         destination: String,
         verify: Option<bool>,
+        #[napi(ts_arg_type = "(progress: NativeProgress | null) => void")] progress: Option<
+            ProgressFunction,
+        >,
+        cancel: Option<&NativeCancelToken>,
     ) -> Result<AsyncTask<FileTask>> {
         Ok(AsyncTask::new(FileTask {
             state: Some(DatabaseTaskState::new(self)?),
             destination,
             verify: verify.unwrap_or(true),
             kind: FileTaskKind::Backup,
+            progress: TaskProgress::new(progress, cancel),
         }))
     }
 
@@ -693,12 +732,17 @@ impl NativeDatabase {
         &self,
         destination: String,
         verify: Option<bool>,
+        #[napi(ts_arg_type = "(progress: NativeProgress | null) => void")] progress: Option<
+            ProgressFunction,
+        >,
+        cancel: Option<&NativeCancelToken>,
     ) -> Result<AsyncTask<FileTask>> {
         Ok(AsyncTask::new(FileTask {
             state: Some(DatabaseTaskState::new(self)?),
             destination,
             verify: verify.unwrap_or(true),
             kind: FileTaskKind::Compact,
+            progress: TaskProgress::new(progress, cancel),
         }))
     }
 

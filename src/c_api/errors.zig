@@ -79,6 +79,11 @@ pub fn failMessage(message: ?*zova_message, err: anyerror) zova_status {
     return statusFromError(err);
 }
 
+pub fn failMessageStatusString(message: ?*zova_message, status: zova_status, text: []const u8) zova_status {
+    setMessage(message, text);
+    return status;
+}
+
 // Prefer SQLite's detailed connection error when it has one; fall back to the
 // Zig error name for Zova-native failures or argument validation.
 
@@ -204,6 +209,7 @@ fn statusName(status: c_int) [*:0]const u8 {
         @backingInt(zova_status.CORRUPT) => "ZOVA_CORRUPT",
         @backingInt(zova_status.MISUSE) => "ZOVA_MISUSE",
         @backingInt(zova_status.SQLITE_ERROR) => "ZOVA_SQLITE_ERROR",
+        @backingInt(zova_status.INTERRUPTED) => "ZOVA_INTERRUPTED",
         @backingInt(zova_status.NOT_ZOVA_PATH) => "ZOVA_NOT_ZOVA_PATH",
         @backingInt(zova_status.NOT_ZOVA_DATABASE) => "ZOVA_NOT_ZOVA_DATABASE",
         @backingInt(zova_status.UNSUPPORTED_ZOVA_VERSION) => "ZOVA_UNSUPPORTED_ZOVA_VERSION",

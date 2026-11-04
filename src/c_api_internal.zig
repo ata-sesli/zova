@@ -211,6 +211,30 @@ pub const ZOVA_RESTORE_NO_VERIFY = @import("c_api/types.zig").ZOVA_RESTORE_NO_VE
 
 pub const ZOVA_MIGRATE_NO_VERIFY = @import("c_api/types.zig").ZOVA_MIGRATE_NO_VERIFY;
 
+pub const ZOVA_PROGRESS_COPY = @import("c_api/types.zig").ZOVA_PROGRESS_COPY;
+
+pub const ZOVA_PROGRESS_MIGRATE = @import("c_api/types.zig").ZOVA_PROGRESS_MIGRATE;
+
+pub const ZOVA_PROGRESS_VERIFY = @import("c_api/types.zig").ZOVA_PROGRESS_VERIFY;
+
+pub const ZOVA_PROGRESS_PUBLISH = @import("c_api/types.zig").ZOVA_PROGRESS_PUBLISH;
+
+pub const ZOVA_PROGRESS_MEMBER_NONE = @import("c_api/types.zig").ZOVA_PROGRESS_MEMBER_NONE;
+
+pub const ZOVA_PROGRESS_MEMBER_MAIN = @import("c_api/types.zig").ZOVA_PROGRESS_MEMBER_MAIN;
+
+pub const ZOVA_PROGRESS_MEMBER_OBJECT_STORE = @import("c_api/types.zig").ZOVA_PROGRESS_MEMBER_OBJECT_STORE;
+
+pub const ZOVA_PROGRESS_MEMBER_VECTOR_STORE = @import("c_api/types.zig").ZOVA_PROGRESS_MEMBER_VECTOR_STORE;
+
+pub const ZOVA_PROGRESS_MEMBER_GRAPH_STORE = @import("c_api/types.zig").ZOVA_PROGRESS_MEMBER_GRAPH_STORE;
+
+pub const zova_progress = @import("c_api/types.zig").zova_progress;
+
+pub const zova_progress_fn = @import("c_api/types.zig").zova_progress_fn;
+
+pub const zova_database_migrate_progress_request = @import("c_api/types.zig").zova_database_migrate_progress_request;
+
 pub const zova_format_compatibility = @import("c_api/types.zig").zova_format_compatibility;
 
 pub const zova_database_format_info = @import("c_api/types.zig").zova_database_format_info;
@@ -243,6 +267,8 @@ pub const zova_convert_sqlite_to_zova_request = @import("c_api/types.zig").zova_
 pub const zova_database_backup_request = @import("c_api/types.zig").zova_database_backup_request;
 
 pub const zova_database_compact_request = @import("c_api/types.zig").zova_database_compact_request;
+pub const zova_database_backup_progress_request = @import("c_api/types.zig").zova_database_backup_progress_request;
+pub const zova_database_compact_progress_request = @import("c_api/types.zig").zova_database_compact_progress_request;
 
 pub const zova_database_restore_request = @import("c_api/types.zig").zova_database_restore_request;
 
@@ -612,8 +638,10 @@ pub const zova_database_release_savepoint = @import("c_api/database.zig").zova_d
 pub const zova_database_vacuum = @import("c_api/database.zig").zova_database_vacuum;
 
 pub const zova_database_backup = @import("c_api/database.zig").zova_database_backup;
+pub const zova_database_backup_with_progress = @import("c_api/database.zig").zova_database_backup_with_progress;
 
 pub const zova_database_compact = @import("c_api/database.zig").zova_database_compact;
+pub const zova_database_compact_with_progress = @import("c_api/database.zig").zova_database_compact_with_progress;
 
 pub const zova_database_set_busy_timeout = @import("c_api/database.zig").zova_database_set_busy_timeout;
 
@@ -805,6 +833,7 @@ pub const zova_database_create_with_plugins = @import("c_api/database.zig").zova
 pub const zova_database_open_with_plugins = @import("c_api/database.zig").zova_database_open_with_plugins;
 pub const zova_database_open_for_extension_upgrade_with_plugins = @import("c_api/database.zig").zova_database_open_for_extension_upgrade_with_plugins;
 pub const zova_database_migrate_with_extensions = @import("c_api/database.zig").zova_database_migrate_with_extensions;
+pub const zova_database_migrate_with_progress = @import("c_api/database.zig").zova_database_migrate_with_progress;
 
 pub const zova_database_extension_list = @import("c_api/extensions.zig").zova_database_extension_list;
 

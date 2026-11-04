@@ -59,6 +59,9 @@ int main() {
         zova_database_open_with_plugins(nullptr) != ZOVA_INVALID_ARGUMENT ||
         zova_database_open_for_extension_upgrade_with_plugins(nullptr) != ZOVA_INVALID_ARGUMENT ||
         zova_database_migrate_with_extensions(nullptr) != ZOVA_INVALID_ARGUMENT ||
+        zova_database_migrate_with_progress(nullptr) != ZOVA_INVALID_ARGUMENT ||
+        zova_database_backup_with_progress(nullptr) != ZOVA_INVALID_ARGUMENT ||
+        zova_database_compact_with_progress(nullptr) != ZOVA_INVALID_ARGUMENT ||
         zova_database_extension_upgrade(nullptr) != ZOVA_INVALID_ARGUMENT ||
         zova_database_extension_rebuild(nullptr) != ZOVA_INVALID_ARGUMENT) return 1;
     zova_database *db = nullptr;
@@ -187,6 +190,18 @@ int main() {
     zova_database_migrate_extensions_request migrate_extensions_request = {};
     migrate_extensions_request.plugins = plugins_request.plugins;
     (void)migrate_extensions_request;
+    zova_progress_fn progress_fn = [](void *, const zova_progress *progress) -> int32_t {
+        return progress->phase == ZOVA_PROGRESS_PUBLISH && progress->member == ZOVA_PROGRESS_MEMBER_NONE ? 0 : 1;
+    };
+    zova_database_migrate_progress_request migrate_progress_request = {};
+    migrate_progress_request.progress = progress_fn;
+    zova_database_backup_progress_request backup_progress_request = {};
+    backup_progress_request.progress = progress_fn;
+    zova_database_compact_progress_request compact_progress_request = {};
+    compact_progress_request.progress_user_data = nullptr;
+    (void)migrate_progress_request;
+    (void)backup_progress_request;
+    (void)compact_progress_request;
     (void)probe_fn;
     (void)migrate_fn;
     zova_vector_collection_info_get_request info_request = {};

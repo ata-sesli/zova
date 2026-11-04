@@ -3425,3 +3425,179 @@ test "c api migrates a database with a non-bundled extension only when its code 
     try std.testing.expectEqual(zova_status.OK, zova_database_extension_info(&.{ .db = handle, .name = "linked_test", .out_info = &info }));
     try std.testing.expectEqual(zova_status.OK, zova_database_close(handle));
 }
+
+/// Records C progress events and optionally cancels at one event index.
+const ProgressRecorder = struct {
+    events: [512]c_api_internal.zova_progress = undefined,
+    count: usize = 0,
+    cancel_at: ?usize = null,
+
+    fn callback(user_data: ?*anyopaque, progress: ?*const c_api_internal.zova_progress) callconv(.c) i32 {
+        const self: *ProgressRecorder = @ptrCast(@alignCast(user_data.?));
+        const index = self.count;
+        if (index < self.events.len) self.events[index] = progress.?.*;
+        self.count += 1;
+        if (self.cancel_at) |cancel| if (cancel == index) return 1;
+        return 0;
+    }
+
+    fn slice(self: *const ProgressRecorder) []const c_api_internal.zova_progress {
+        return self.events[0..@min(self.count, self.events.len)];
+    }
+
+    fn countPhase(self: *const ProgressRecorder, phase: u32) usize {
+        var n: usize = 0;
+        for (self.slice()) |event| n += @intFromBool(event.phase == phase);
+        return n;
+    }
+
+    /// Each phase/member group keeps its total, never decreases, and ends at total.
+    fn expectWellFormed(self: *const ProgressRecorder) !void {
+        const events = self.slice();
+        try std.testing.expect(events.len > 0);
+        for (events, 0..) |event, index| {
+            try std.testing.expect(event.phase <= c_api_internal.ZOVA_PROGRESS_PUBLISH);
+            try std.testing.expect(event.member <= c_api_internal.ZOVA_PROGRESS_MEMBER_GRAPH_STORE);
+            try std.testing.expect(event.done <= event.total);
+            const next_same_group = index + 1 < events.len and events[index + 1].phase == event.phase and events[index + 1].member == event.member;
+            if (next_same_group) {
+                try std.testing.expectEqual(event.total, events[index + 1].total);
+                try std.testing.expect(events[index + 1].done >= event.done);
+            } else {
+                try std.testing.expectEqual(event.total, event.done);
+            }
+        }
+    }
+};
+
+test "c api backup and compact report throttled progress and cancel with ZOVA_INTERRUPTED" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try std.fmt.bufPrintSentinel(&source_buffer, ".zig-cache/tmp/{s}/progress-src.zova", .{tmp.sub_path[0..]}, 0);
+    var backup_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const backup_path = try std.fmt.bufPrintSentinel(&backup_buffer, ".zig-cache/tmp/{s}/progress-backup.zova", .{tmp.sub_path[0..]}, 0);
+    var compact_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const compact_path = try std.fmt.bufPrintSentinel(&compact_buffer, ".zig-cache/tmp/{s}/progress-compact.zova", .{tmp.sub_path[0..]}, 0);
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{ .path = source_path, .out_db = &db, .out_error_message = null }));
+    defer _ = zova_database_close(db);
+    {
+        // 1000 KV entries make verify report far more items than the 101
+        // whole-percent steps the bridge may forward.
+        const raw = &databaseHandleRaw(db).?.db;
+        var entries: [1000]@import("kv.zig").PutEntry = undefined;
+        var keys: [1000][8]u8 = undefined;
+        for (&entries, &keys, 0..) |*entry, *key, index| {
+            std.mem.writeInt(u64, key, index, .big);
+            entry.* = .{ .key = key, .value = "progress" };
+        }
+        try raw.kvPutMany("progress", &entries);
+    }
+
+    // Cancelling the first backup event leaves no destination and a usable handle.
+    var cancelled: ProgressRecorder = .{ .cancel_at = 0 };
+    try std.testing.expectEqual(zova_status.INTERRUPTED, c_api_internal.zova_database_backup_with_progress(&.{
+        .db = db,
+        .destination_path = backup_path,
+        .progress = ProgressRecorder.callback,
+        .progress_user_data = &cancelled,
+    }));
+    try std.testing.expectEqual(@as(usize, 1), cancelled.count);
+    try std.testing.expect(std.mem.indexOf(u8, std.mem.span(zova_database_last_error_message(db)), "cancelled") != null);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, backup_path, .{}));
+
+    var recorder: ProgressRecorder = .{};
+    try std.testing.expectEqual(zova_status.OK, c_api_internal.zova_database_backup_with_progress(&.{
+        .db = db,
+        .destination_path = backup_path,
+        .progress = ProgressRecorder.callback,
+        .progress_user_data = &recorder,
+    }));
+    try recorder.expectWellFormed();
+    try std.testing.expectEqual(c_api_internal.ZOVA_PROGRESS_COPY, recorder.slice()[0].phase);
+    try std.testing.expectEqual(c_api_internal.ZOVA_PROGRESS_MEMBER_MAIN, recorder.slice()[0].member);
+    const verify_events = recorder.countPhase(c_api_internal.ZOVA_PROGRESS_VERIFY);
+    try std.testing.expect(verify_events > 1);
+    try std.testing.expect(verify_events <= 102);
+    for (recorder.slice()) |event| if (event.phase == c_api_internal.ZOVA_PROGRESS_VERIFY) {
+        try std.testing.expectEqual(c_api_internal.ZOVA_PROGRESS_MEMBER_NONE, event.member);
+        try std.testing.expect(event.total >= 1000);
+    };
+
+    // Cancelling during verify removes the compacted copy.
+    var cancel_verify: ProgressRecorder = .{ .cancel_at = 3 };
+    try std.testing.expectEqual(zova_status.INTERRUPTED, c_api_internal.zova_database_compact_with_progress(&.{
+        .db = db,
+        .destination_path = compact_path,
+        .progress = ProgressRecorder.callback,
+        .progress_user_data = &cancel_verify,
+    }));
+    try std.testing.expectEqual(c_api_internal.ZOVA_PROGRESS_VERIFY, cancel_verify.slice()[3].phase);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, compact_path, .{}));
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = db, .sql = "select 1" }));
+
+    // A null callback behaves like the plain call.
+    try std.testing.expectEqual(zova_status.OK, c_api_internal.zova_database_compact_with_progress(&.{
+        .db = db,
+        .destination_path = compact_path,
+    }));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, c_api_internal.zova_database_backup_with_progress(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, c_api_internal.zova_database_compact_with_progress(&.{
+        .db = db,
+        .destination_path = compact_path,
+        .flags = 0xffff_ffff,
+    }));
+}
+
+test "c api migrate reports progress and a cancelled migration leaves the source unchanged" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var src_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const src = try std.fmt.bufPrintSentinel(&src_buf, ".zig-cache/tmp/{s}/progress-migrate-src.zova", .{tmp.sub_path[0..]}, 0);
+    const fixture = try std.Io.Dir.cwd().readFileAlloc(io, "tests/fixtures/format-9.zova", std.testing.allocator, .limited(64 * 1024 * 1024));
+    defer std.testing.allocator.free(fixture);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = src, .data = fixture });
+    var dst_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dst = try std.fmt.bufPrintSentinel(&dst_buf, ".zig-cache/tmp/{s}/progress-migrate-dst.zova", .{tmp.sub_path[0..]}, 0);
+
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, c_api_internal.zova_database_migrate_with_progress(null));
+
+    var msg = zova_message{ .data = null, .len = 0 };
+    defer zova_message_free(&msg);
+    var cancelled: ProgressRecorder = .{ .cancel_at = 1 };
+    try std.testing.expectEqual(zova_status.INTERRUPTED, c_api_internal.zova_database_migrate_with_progress(&.{
+        .source_path = src,
+        .destination_path = dst,
+        .progress = ProgressRecorder.callback,
+        .progress_user_data = &cancelled,
+        .out_error_message = &msg,
+    }));
+    try std.testing.expect(std.mem.indexOf(u8, msg.data.?[0..msg.len], "cancelled") != null);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, dst, .{}));
+    {
+        const after = try std.Io.Dir.cwd().readFileAlloc(io, src, std.testing.allocator, .limited(64 * 1024 * 1024));
+        defer std.testing.allocator.free(after);
+        try std.testing.expectEqualSlices(u8, fixture, after);
+    }
+
+    var recorder: ProgressRecorder = .{};
+    try std.testing.expectEqual(zova_status.OK, c_api_internal.zova_database_migrate_with_progress(&.{
+        .source_path = src,
+        .destination_path = dst,
+        .progress = ProgressRecorder.callback,
+        .progress_user_data = &recorder,
+        .out_error_message = &msg,
+    }));
+    try recorder.expectWellFormed();
+    try std.testing.expect(recorder.countPhase(c_api_internal.ZOVA_PROGRESS_COPY) > 0);
+    try std.testing.expect(recorder.countPhase(c_api_internal.ZOVA_PROGRESS_MIGRATE) > 0);
+    try std.testing.expect(recorder.countPhase(c_api_internal.ZOVA_PROGRESS_VERIFY) > 0);
+    const last = recorder.slice()[recorder.slice().len - 1];
+    try std.testing.expectEqual(c_api_internal.ZOVA_PROGRESS_PUBLISH, last.phase);
+    try std.testing.expectEqual(c_api_internal.ZOVA_PROGRESS_MEMBER_NONE, last.member);
+    try std.testing.expectEqual(last.total, last.done);
+}

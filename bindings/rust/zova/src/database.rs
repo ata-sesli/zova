@@ -4,10 +4,12 @@ use crate::kv::{
     kv_get_raw, kv_put_many_raw, kv_put_raw, KvEntry,
 };
 use crate::notification::{listen_raw, notify_raw, Subscription};
+use crate::progress::{Progress, ProgressBridge};
 use crate::statement::{OwnedStatement, Statement};
 use std::ffi::{c_char, CStr, CString};
 use std::fmt;
 use std::marker::PhantomData;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
@@ -358,6 +360,55 @@ impl Database {
             flags: compact_flags(options.verify),
         };
         self.status(unsafe { zova_sys::zova_database_compact(&request) })
+    }
+
+    /// [`Database::backup_to`] that reports [`Progress`] to `progress`.
+    ///
+    /// The closure runs on the calling thread while the call holds the
+    /// handle. Returning [`ControlFlow::Break`] cancels the backup: it fails
+    /// with [`crate::Status::Interrupted`] and leaves no destination.
+    pub fn backup_to_with_progress(
+        &mut self,
+        destination: impl AsRef<Path>,
+        options: BackupOptions,
+        mut progress: impl FnMut(Progress) -> ControlFlow<()>,
+    ) -> Result<()> {
+        let destination = path_to_cstring(destination.as_ref())?;
+        let mut bridge = ProgressBridge::new(&mut progress);
+        let request = zova_sys::zova_database_backup_progress_request {
+            db: self.raw_ptr(),
+            destination_path: destination.as_ptr(),
+            flags: backup_flags(options.verify),
+            progress: bridge.callback(),
+            progress_user_data: bridge.user_data(),
+        };
+        // SAFETY: the request, path, and bridge outlive the synchronous call.
+        let status = unsafe { zova_sys::zova_database_backup_with_progress(&request) };
+        let result = self.status(status);
+        bridge.finish(result)
+    }
+
+    /// [`Database::compact_to`] that reports [`Progress`] to `progress`;
+    /// cancellation works as in [`Database::backup_to_with_progress`].
+    pub fn compact_to_with_progress(
+        &mut self,
+        destination: impl AsRef<Path>,
+        options: CompactOptions,
+        mut progress: impl FnMut(Progress) -> ControlFlow<()>,
+    ) -> Result<()> {
+        let destination = path_to_cstring(destination.as_ref())?;
+        let mut bridge = ProgressBridge::new(&mut progress);
+        let request = zova_sys::zova_database_compact_progress_request {
+            db: self.raw_ptr(),
+            destination_path: destination.as_ptr(),
+            flags: compact_flags(options.verify),
+            progress: bridge.callback(),
+            progress_user_data: bridge.user_data(),
+        };
+        // SAFETY: the request, path, and bridge outlive the synchronous call.
+        let status = unsafe { zova_sys::zova_database_compact_with_progress(&request) };
+        let result = self.status(status);
+        bridge.finish(result)
     }
 
     pub fn exec(&mut self, sql: &str) -> Result<()> {
@@ -819,6 +870,50 @@ pub fn migrate_database_with_extensions(
         return Ok(());
     }
     Err(Error::from_status(status, take_message(&mut message)))
+}
+
+/// [`migrate_database_with_extensions`] that reports [`Progress`] to
+/// `progress`.
+///
+/// The closure runs on the calling thread. Returning [`ControlFlow::Break`]
+/// cancels the migration: it fails with [`crate::Status::Interrupted`], leaves
+/// the source set unchanged, and creates no destination files. The last
+/// [`crate::ProgressPhase::Publish`] event follows the commit, so its return
+/// value is ignored.
+pub fn migrate_database_with_progress(
+    source: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+    options: MigrateOptions,
+    extensions: &ExtensionOptions,
+    mut progress: impl FnMut(Progress) -> ControlFlow<()>,
+) -> Result<()> {
+    let source = path_to_cstring(source.as_ref())?;
+    let destination = path_to_cstring(destination.as_ref())?;
+    let extension_args = ExtensionCArgs::new(extensions)?;
+    let mut message = empty_message();
+    let mut bridge = ProgressBridge::new(&mut progress);
+    let request = zova_sys::zova_database_migrate_progress_request {
+        source_path: source.as_ptr(),
+        destination_path: destination.as_ptr(),
+        flags: migrate_flags(options.verify),
+        extension_bundle_paths: extension_args.bundle_paths(),
+        extension_bundle_count: extension_args.bundle_count(),
+        trust_store_path: extension_args.trust_store_path(),
+        plugins: ptr::null(),
+        plugin_count: 0,
+        progress: bridge.callback(),
+        progress_user_data: bridge.user_data(),
+        out_error_message: &mut message,
+    };
+    // SAFETY: all inputs, outputs, and the bridge stay live throughout the
+    // synchronous call.
+    let status = unsafe { zova_sys::zova_database_migrate_with_progress(&request) };
+    let result = if status == zova_sys::ZOVA_OK {
+        Ok(())
+    } else {
+        Err(Error::from_status(status, take_message(&mut message)))
+    };
+    bridge.finish(result)
 }
 
 pub(crate) fn restore_flags(verify: bool) -> u32 {

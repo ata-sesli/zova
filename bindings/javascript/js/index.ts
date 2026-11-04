@@ -36,6 +36,12 @@ export {
   objectIdFromHex,
   objectIdToHex,
 } from "./object.js";
+export type {
+  Progress,
+  ProgressMember,
+  ProgressOptions,
+  ProgressPhase,
+} from "./progress.js";
 export { Statement } from "./statement.js";
 export { Subscription } from "./subscription.js";
 export type { Notification } from "./subscription.js";

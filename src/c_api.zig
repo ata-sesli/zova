@@ -74,6 +74,18 @@ pub const ZOVA_BACKUP_NO_VERIFY = internal.ZOVA_BACKUP_NO_VERIFY;
 pub const ZOVA_COMPACT_NO_VERIFY = internal.ZOVA_COMPACT_NO_VERIFY;
 pub const ZOVA_RESTORE_NO_VERIFY = internal.ZOVA_RESTORE_NO_VERIFY;
 pub const ZOVA_MIGRATE_NO_VERIFY = internal.ZOVA_MIGRATE_NO_VERIFY;
+pub const ZOVA_PROGRESS_COPY = internal.ZOVA_PROGRESS_COPY;
+pub const ZOVA_PROGRESS_MIGRATE = internal.ZOVA_PROGRESS_MIGRATE;
+pub const ZOVA_PROGRESS_VERIFY = internal.ZOVA_PROGRESS_VERIFY;
+pub const ZOVA_PROGRESS_PUBLISH = internal.ZOVA_PROGRESS_PUBLISH;
+pub const ZOVA_PROGRESS_MEMBER_NONE = internal.ZOVA_PROGRESS_MEMBER_NONE;
+pub const ZOVA_PROGRESS_MEMBER_MAIN = internal.ZOVA_PROGRESS_MEMBER_MAIN;
+pub const ZOVA_PROGRESS_MEMBER_OBJECT_STORE = internal.ZOVA_PROGRESS_MEMBER_OBJECT_STORE;
+pub const ZOVA_PROGRESS_MEMBER_VECTOR_STORE = internal.ZOVA_PROGRESS_MEMBER_VECTOR_STORE;
+pub const ZOVA_PROGRESS_MEMBER_GRAPH_STORE = internal.ZOVA_PROGRESS_MEMBER_GRAPH_STORE;
+pub const zova_progress = internal.zova_progress;
+pub const zova_progress_fn = internal.zova_progress_fn;
+pub const zova_database_migrate_progress_request = internal.zova_database_migrate_progress_request;
 pub const zova_format_compatibility = internal.zova_format_compatibility;
 pub const zova_database_format_info = internal.zova_database_format_info;
 pub const zova_database_probe_format_request = internal.zova_database_probe_format_request;
@@ -94,6 +106,8 @@ pub const zova_extension_bundle_untrust_request = internal.zova_extension_bundle
 pub const zova_convert_sqlite_to_zova_request = internal.zova_convert_sqlite_to_zova_request;
 pub const zova_database_backup_request = internal.zova_database_backup_request;
 pub const zova_database_compact_request = internal.zova_database_compact_request;
+pub const zova_database_backup_progress_request = internal.zova_database_backup_progress_request;
+pub const zova_database_compact_progress_request = internal.zova_database_compact_progress_request;
 pub const zova_database_restore_request = internal.zova_database_restore_request;
 pub const zova_database_exec_request = internal.zova_database_exec_request;
 pub const zova_sql_function_register_request = internal.zova_sql_function_register_request;
@@ -467,6 +481,14 @@ pub fn zova_database_compact(request: ?*const zova_database_compact_request) cal
     return internal.zova_database_compact(request);
 }
 
+pub fn zova_database_backup_with_progress(request: ?*const zova_database_backup_progress_request) callconv(.c) zova_status {
+    return internal.zova_database_backup_with_progress(request);
+}
+
+pub fn zova_database_compact_with_progress(request: ?*const zova_database_compact_progress_request) callconv(.c) zova_status {
+    return internal.zova_database_compact_with_progress(request);
+}
+
 pub fn zova_database_set_busy_timeout(request: ?*const zova_database_busy_timeout_request) callconv(.c) zova_status {
     return internal.zova_database_set_busy_timeout(request);
 }
@@ -597,6 +619,10 @@ pub fn zova_database_migrate(request: ?*const zova_database_migrate_request) cal
 
 pub fn zova_database_migrate_with_extensions(request: ?*const zova_database_migrate_extensions_request) callconv(.c) zova_status {
     return internal.zova_database_migrate_with_extensions(request);
+}
+
+pub fn zova_database_migrate_with_progress(request: ?*const zova_database_migrate_progress_request) callconv(.c) zova_status {
+    return internal.zova_database_migrate_with_progress(request);
 }
 
 pub fn zova_object_id_from_bytes(data: ?[*]const u8, len: usize, out_id: ?*zova_object_id) callconv(.c) zova_status {

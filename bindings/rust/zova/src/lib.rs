@@ -15,14 +15,16 @@ mod graph;
 mod kv;
 mod notification;
 mod object;
+mod progress;
 mod shared;
 mod statement;
 mod vector;
 
 pub use database::{
-    migrate_database, migrate_database_with_extensions, probe_format, restore_backup,
-    restore_backup_to_memory, BackupOptions, CompactOptions, Database, ExtensionOptions,
-    FormatCompatibility, FormatInfo, MigrateOptions, OpenOptions, RestoreOptions,
+    migrate_database, migrate_database_with_extensions, migrate_database_with_progress,
+    probe_format, restore_backup, restore_backup_to_memory, BackupOptions, CompactOptions,
+    Database, ExtensionOptions, FormatCompatibility, FormatInfo, MigrateOptions, OpenOptions,
+    RestoreOptions,
 };
 pub use error::{Error, Result, Status};
 pub use extension::ExtensionInfo;
@@ -38,6 +40,7 @@ pub use object::{
     ObjectPutOptions, ObjectReader, ObjectStorageProfile, ObjectWriter, OwnedObjectReader,
     OwnedObjectWriter,
 };
+pub use progress::{Progress, ProgressMember, ProgressPhase};
 pub use shared::{
     SharedDatabase, SharedDatabaseGuard, SharedObjectReader, SharedObjectWriter, SharedStatement,
     SharedSubscription,

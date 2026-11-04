@@ -10,6 +10,7 @@ use crate::object::{
     chunk_id_from_py, manifest_chunks_from_py, object_id_from_py, put_options_from_py, PyObjectId,
     PyObjectManifest, PyObjectReader, PyObjectWriter,
 };
+use crate::progress::ProgressHandler;
 use crate::statement::PyStatement;
 use crate::vector::{
     candidate_refs, collection_options_from_py, py_collection_info, py_search_results, py_vector,
@@ -192,18 +193,48 @@ impl PyDatabase {
         self.db_mut()?.vacuum().map_err(zova_error)
     }
 
-    #[pyo3(signature = (destination, *, verify = true))]
-    pub(crate) fn backup_to(&mut self, destination: &str, verify: bool) -> PyResult<()> {
-        self.db_mut()?
-            .backup_to(destination, zova_rust::BackupOptions { verify })
-            .map_err(zova_error)
+    /// `progress`, when given, is called with a `Progress` event on this
+    /// thread. An exception it raises cancels the backup, which leaves no
+    /// destination, and propagates. It must not use this database.
+    #[pyo3(signature = (destination, *, verify = true, progress = None))]
+    pub(crate) fn backup_to(
+        &mut self,
+        destination: &str,
+        verify: bool,
+        progress: Option<Py<PyAny>>,
+    ) -> PyResult<()> {
+        let options = zova_rust::BackupOptions { verify };
+        let db = self.db_mut()?;
+        match progress {
+            None => db.backup_to(destination, options).map_err(zova_error),
+            Some(callback) => {
+                let mut handler = ProgressHandler::new(callback);
+                let result =
+                    db.backup_to_with_progress(destination, options, |event| handler.call(event));
+                handler.finish(result)
+            }
+        }
     }
 
-    #[pyo3(signature = (destination, *, verify = true))]
-    pub(crate) fn compact_to(&mut self, destination: &str, verify: bool) -> PyResult<()> {
-        self.db_mut()?
-            .compact_to(destination, zova_rust::CompactOptions { verify })
-            .map_err(zova_error)
+    /// `progress` works as in `backup_to`.
+    #[pyo3(signature = (destination, *, verify = true, progress = None))]
+    pub(crate) fn compact_to(
+        &mut self,
+        destination: &str,
+        verify: bool,
+        progress: Option<Py<PyAny>>,
+    ) -> PyResult<()> {
+        let options = zova_rust::CompactOptions { verify };
+        let db = self.db_mut()?;
+        match progress {
+            None => db.compact_to(destination, options).map_err(zova_error),
+            Some(callback) => {
+                let mut handler = ProgressHandler::new(callback);
+                let result =
+                    db.compact_to_with_progress(destination, options, |event| handler.call(event));
+                handler.finish(result)
+            }
+        }
     }
 
     pub(crate) fn set_busy_timeout(&mut self, milliseconds: u32) -> PyResult<()> {
@@ -930,23 +961,39 @@ pub(crate) fn probe_format(path: &str) -> PyResult<PyFormatInfo> {
 /// destination is verified after the copy. A database with a non-bundled
 /// extension installed needs that extension's trusted bundle in
 /// `extension_bundles`, exactly as `Database.open` does.
+///
+/// `progress`, when given, is called with a `Progress` event on this thread.
+/// An exception it raises cancels the migration, which leaves the source
+/// unchanged and creates no destination, and propagates.
 #[pyfunction]
-#[pyo3(signature = (source, destination, *, verify = true, extension_bundles = None, trust_store_path = None))]
+#[pyo3(signature = (source, destination, *, verify = true, extension_bundles = None, trust_store_path = None, progress = None))]
 pub(crate) fn migrate_database(
     source: &str,
     destination: &str,
     verify: bool,
     extension_bundles: Option<Vec<String>>,
     trust_store_path: Option<String>,
+    progress: Option<Py<PyAny>>,
 ) -> PyResult<()> {
     let extensions = extension_options(extension_bundles, trust_store_path);
-    zova_rust::migrate_database_with_extensions(
-        source,
-        destination,
-        zova_rust::MigrateOptions { verify },
-        &extensions,
-    )
-    .map_err(zova_error)
+    let options = zova_rust::MigrateOptions { verify };
+    match progress {
+        None => {
+            zova_rust::migrate_database_with_extensions(source, destination, options, &extensions)
+                .map_err(zova_error)
+        }
+        Some(callback) => {
+            let mut handler = ProgressHandler::new(callback);
+            let result = zova_rust::migrate_database_with_progress(
+                source,
+                destination,
+                options,
+                &extensions,
+                |event| handler.call(event),
+            );
+            handler.finish(result)
+        }
+    }
 }
 
 /// Restore a valid `.zova` backup file into a new volatile in-memory database.

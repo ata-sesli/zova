@@ -7,6 +7,7 @@ mod database;
 mod error;
 mod graph;
 mod object;
+mod progress;
 mod statement;
 mod subscription;
 mod vector;

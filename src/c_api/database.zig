@@ -8,6 +8,15 @@ const ZOVA_BACKUP_NO_VERIFY = @import("types.zig").ZOVA_BACKUP_NO_VERIFY;
 const ZOVA_COMPACT_NO_VERIFY = @import("types.zig").ZOVA_COMPACT_NO_VERIFY;
 const ZOVA_MIGRATE_NO_VERIFY = @import("types.zig").ZOVA_MIGRATE_NO_VERIFY;
 const ZOVA_OPEN_READ_ONLY = @import("types.zig").ZOVA_OPEN_READ_ONLY;
+const ZOVA_PROGRESS_COPY = @import("types.zig").ZOVA_PROGRESS_COPY;
+const ZOVA_PROGRESS_MIGRATE = @import("types.zig").ZOVA_PROGRESS_MIGRATE;
+const ZOVA_PROGRESS_VERIFY = @import("types.zig").ZOVA_PROGRESS_VERIFY;
+const ZOVA_PROGRESS_PUBLISH = @import("types.zig").ZOVA_PROGRESS_PUBLISH;
+const ZOVA_PROGRESS_MEMBER_NONE = @import("types.zig").ZOVA_PROGRESS_MEMBER_NONE;
+const ZOVA_PROGRESS_MEMBER_MAIN = @import("types.zig").ZOVA_PROGRESS_MEMBER_MAIN;
+const ZOVA_PROGRESS_MEMBER_OBJECT_STORE = @import("types.zig").ZOVA_PROGRESS_MEMBER_OBJECT_STORE;
+const ZOVA_PROGRESS_MEMBER_VECTOR_STORE = @import("types.zig").ZOVA_PROGRESS_MEMBER_VECTOR_STORE;
+const ZOVA_PROGRESS_MEMBER_GRAPH_STORE = @import("types.zig").ZOVA_PROGRESS_MEMBER_GRAPH_STORE;
 const ZOVA_RESTORE_NO_VERIFY = @import("types.zig").ZOVA_RESTORE_NO_VERIFY;
 const allocator = @import("values.zig").allocator;
 const bundlePathSlices = @import("extensions.zig").bundlePathSlices;
@@ -19,19 +28,25 @@ const deinitSqlFunctionRegistrations = @import("sql_functions.zig").deinitSqlFun
 const failDb = @import("errors.zig").failDb;
 const failDbStatusString = @import("errors.zig").failDbStatusString;
 const failMessage = @import("errors.zig").failMessage;
+const failMessageStatusString = @import("errors.zig").failMessageStatusString;
 const okDb = @import("errors.zig").okDb;
 const trustStoreOptions = @import("extensions.zig").trustStoreOptions;
 const zova_convert_sqlite_to_zova_request = @import("types.zig").zova_convert_sqlite_to_zova_request;
 const zova_database = @import("types.zig").zova_database;
+const zova_database_backup_progress_request = @import("types.zig").zova_database_backup_progress_request;
 const zova_database_backup_request = @import("types.zig").zova_database_backup_request;
 const zova_database_busy_timeout_request = @import("types.zig").zova_database_busy_timeout_request;
 const zova_database_changes_request = @import("types.zig").zova_database_changes_request;
+const zova_database_compact_progress_request = @import("types.zig").zova_database_compact_progress_request;
 const zova_database_compact_request = @import("types.zig").zova_database_compact_request;
 const zova_database_create_memory_request = @import("types.zig").zova_database_create_memory_request;
 const zova_database_create_options_request = @import("types.zig").zova_database_create_options_request;
 const zova_database_exec_request = @import("types.zig").zova_database_exec_request;
 const zova_database_last_insert_rowid_request = @import("types.zig").zova_database_last_insert_rowid_request;
 const zova_database_migrate_extensions_request = @import("types.zig").zova_database_migrate_extensions_request;
+const zova_database_migrate_progress_request = @import("types.zig").zova_database_migrate_progress_request;
+const zova_progress = @import("types.zig").zova_progress;
+const zova_progress_fn = @import("types.zig").zova_progress_fn;
 const zova_database_migrate_request = @import("types.zig").zova_database_migrate_request;
 const zova_database_open_extensions_request = @import("types.zig").zova_database_open_extensions_request;
 const zova_database_open_options_request = @import("types.zig").zova_database_open_options_request;
@@ -190,29 +205,111 @@ pub fn zova_database_vacuum(request: ?*const zova_database_simple_request) callc
 
 pub fn zova_database_backup(request: ?*const zova_database_backup_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
+    return zova_database_backup_with_progress(&.{
+        .db = req.db,
+        .destination_path = req.destination_path,
+        .flags = req.flags,
+    });
+}
+
+pub fn zova_database_backup_with_progress(request: ?*const zova_database_backup_progress_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
     const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const destination_path = req.destination_path orelse return failDb(handle, error.InvalidArgument);
     if ((req.flags & ~ZOVA_BACKUP_NO_VERIFY) != 0) return failDb(handle, error.InvalidArgument);
 
+    var bridge: ProgressBridge = .{ .callback = req.progress, .user_data = req.progress_user_data };
     handle.db.backupTo(std.mem.span(destination_path), .{
         .verify = (req.flags & ZOVA_BACKUP_NO_VERIFY) == 0,
-    }) catch |err| return failDb(handle, err);
+        .progress = bridge.zovaCallback(),
+    }) catch |err| {
+        if (bridge.cancelled) return failDbStatusString(handle, .INTERRUPTED, interrupted_message);
+        return failDb(handle, err);
+    };
     return okDb(handle);
 }
 
 pub fn zova_database_compact(request: ?*const zova_database_compact_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    return zova_database_compact_with_progress(&.{
+        .db = req.db,
+        .destination_path = req.destination_path,
+        .flags = req.flags,
+    });
+}
+
+pub fn zova_database_compact_with_progress(request: ?*const zova_database_compact_progress_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
     const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
     defer handle.mutex.unlock();
     const destination_path = req.destination_path orelse return failDb(handle, error.InvalidArgument);
     if ((req.flags & ~ZOVA_COMPACT_NO_VERIFY) != 0) return failDb(handle, error.InvalidArgument);
 
+    var bridge: ProgressBridge = .{ .callback = req.progress, .user_data = req.progress_user_data };
     handle.db.compactTo(std.mem.span(destination_path), .{
         .verify = (req.flags & ZOVA_COMPACT_NO_VERIFY) == 0,
-    }) catch |err| return failDb(handle, err);
+        .progress = bridge.zovaCallback(),
+    }) catch |err| {
+        if (bridge.cancelled) return failDbStatusString(handle, .INTERRUPTED, interrupted_message);
+        return failDb(handle, err);
+    };
     return okDb(handle);
 }
+
+const interrupted_message = "operation cancelled by progress callback";
+
+/// Adapts a C progress callback to `zova.ProgressCallback`.
+///
+/// The core reports verify once per item, so the bridge forwards only the
+/// first event of each phase and member, whole-percent changes, and the event
+/// that completes the group. A non-zero return cancels with `error.Interrupt`
+/// and records that the caller asked for it, which keeps cancellation distinct
+/// from an `error.Interrupt` raised by SQLite itself.
+const ProgressBridge = struct {
+    callback: ?zova_progress_fn,
+    user_data: ?*anyopaque,
+    cancelled: bool = false,
+    last_phase: ?zova.ProgressPhase = null,
+    last_member: ?zova.ProgressMember = null,
+    last_percent: u64 = 0,
+
+    fn zovaCallback(self: *ProgressBridge) ?zova.ProgressCallback {
+        if (self.callback == null) return null;
+        return .{ .context = self, .report = report };
+    }
+
+    fn report(context: ?*anyopaque, progress: zova.Progress) zova.Error!void {
+        const self: *ProgressBridge = @ptrCast(@alignCast(context.?));
+        const percent = if (progress.total == 0) 100 else progress.done * 100 / progress.total;
+        const same_group = self.last_phase == progress.phase and self.last_member == progress.member;
+        if (same_group and percent == self.last_percent and progress.done != progress.total) return;
+        self.last_phase = progress.phase;
+        self.last_member = progress.member;
+        self.last_percent = percent;
+
+        const event: zova_progress = .{
+            .phase = switch (progress.phase) {
+                .copy => ZOVA_PROGRESS_COPY,
+                .migrate => ZOVA_PROGRESS_MIGRATE,
+                .verify => ZOVA_PROGRESS_VERIFY,
+                .publish => ZOVA_PROGRESS_PUBLISH,
+            },
+            .member = if (progress.member) |member| switch (member) {
+                .main => ZOVA_PROGRESS_MEMBER_MAIN,
+                .object_store => ZOVA_PROGRESS_MEMBER_OBJECT_STORE,
+                .vector_store => ZOVA_PROGRESS_MEMBER_VECTOR_STORE,
+                .graph_store => ZOVA_PROGRESS_MEMBER_GRAPH_STORE,
+            } else ZOVA_PROGRESS_MEMBER_NONE,
+            .done = progress.done,
+            .total = progress.total,
+        };
+        if (self.callback.?(self.user_data, &event) != 0) {
+            self.cancelled = true;
+            return error.Interrupt;
+        }
+    }
+};
 
 pub fn zova_database_set_busy_timeout(request: ?*const zova_database_busy_timeout_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
@@ -336,6 +433,21 @@ pub fn zova_database_migrate(request: ?*const zova_database_migrate_request) cal
 
 pub fn zova_database_migrate_with_extensions(request: ?*const zova_database_migrate_extensions_request) callconv(.c) zova_status {
     const req = request orelse return .INVALID_ARGUMENT;
+    return zova_database_migrate_with_progress(&.{
+        .source_path = req.source_path,
+        .destination_path = req.destination_path,
+        .flags = req.flags,
+        .extension_bundle_paths = req.extension_bundle_paths,
+        .extension_bundle_count = req.extension_bundle_count,
+        .trust_store_path = req.trust_store_path,
+        .plugins = req.plugins,
+        .plugin_count = req.plugin_count,
+        .out_error_message = req.out_error_message,
+    });
+}
+
+pub fn zova_database_migrate_with_progress(request: ?*const zova_database_migrate_progress_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
     clearMessage(req.out_error_message);
     const source_path = req.source_path orelse return failMessage(req.out_error_message, error.InvalidArgument);
     const destination_path = req.destination_path orelse return failMessage(req.out_error_message, error.InvalidArgument);
@@ -359,12 +471,17 @@ pub fn zova_database_migrate_with_extensions(request: ?*const zova_database_migr
     }) catch |err| return failMessage(req.out_error_message, err);
     defer owned_registry.deinit();
 
+    var bridge: ProgressBridge = .{ .callback = req.progress, .user_data = req.progress_user_data };
     zova.migrateDatabaseWithExtensions(
         std.mem.span(source_path),
         std.mem.span(destination_path),
-        .{ .verify = (req.flags & ZOVA_MIGRATE_NO_VERIFY) == 0 },
+        .{
+            .verify = (req.flags & ZOVA_MIGRATE_NO_VERIFY) == 0,
+            .progress = bridge.zovaCallback(),
+        },
         owned_registry.registry(),
     ) catch |err| {
+        if (bridge.cancelled) return failMessageStatusString(req.out_error_message, .INTERRUPTED, interrupted_message);
         return failMessage(req.out_error_message, err);
     };
     return .OK;

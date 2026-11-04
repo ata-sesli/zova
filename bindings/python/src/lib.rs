@@ -4,6 +4,7 @@ mod extension;
 mod graph;
 mod notification;
 mod object;
+mod progress;
 mod statement;
 mod vector;
 
@@ -22,6 +23,7 @@ use object::{
     object_chunk_id, object_id, PyObjectChunkId, PyObjectId, PyObjectManifest,
     PyObjectManifestChunk, PyObjectPutOptions, PyObjectReader, PyObjectWriter,
 };
+use progress::PyProgress;
 use pyo3::prelude::*;
 use statement::PyStatement;
 use vector::{
@@ -52,6 +54,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVectorSearchResult>()?;
     m.add_class::<PyExtensionInfo>()?;
     m.add_class::<PyFormatInfo>()?;
+    m.add_class::<PyProgress>()?;
     m.add_class::<PyGraphInfo>()?;
     m.add_class::<PyGraphNodeInput>()?;
     m.add_class::<PyGraphNode>()?;

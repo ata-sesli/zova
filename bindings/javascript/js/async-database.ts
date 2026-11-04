@@ -10,6 +10,8 @@ import type {
 import type { ExtensionOptions, FormatInfo, OpenOptions } from "./types.js";
 import { nativeExtensionOptions } from "./types.js";
 import type { KvEntry } from "./types.js";
+import type { ProgressOptions } from "./progress.js";
+import { withProgress } from "./progress.js";
 import { Subscription } from "./subscription.js";
 import type {
   VectorInput,
@@ -82,17 +84,30 @@ export class AsyncDatabase {
       });
   }
 
+  /**
+   * Migrate a `.zova` file forward on a worker thread. `options` reports
+   * progress and accepts an `AbortSignal`; a cancelled migration leaves the
+   * source unchanged and creates no destination.
+   */
   static migrateDatabase(
     source: string,
     destination: string,
     verify = true,
     extensions?: ExtensionOptions,
+    options?: ProgressOptions,
   ): Promise<void> {
-    return native
-      .asyncMigrateDatabase(source, destination, verify, nativeExtensionOptions(extensions))
-      .catch((error: unknown) => {
-        throw normalizeNativeError(error);
-      });
+    return withProgress(options, (progress, cancel) =>
+      native.asyncMigrateDatabase(
+        source,
+        destination,
+        verify,
+        nativeExtensionOptions(extensions),
+        progress,
+        cancel,
+      ),
+    ).catch((error: unknown) => {
+      throw normalizeNativeError(error);
+    });
   }
 
   get closed(): boolean {
@@ -123,15 +138,32 @@ export class AsyncDatabase {
     return this.#enqueue(() => this.#native.asyncExec(sql));
   }
 
-  backupTo(destination: string, verify = true): Promise<void> {
+  /**
+   * `options` reports progress and accepts an `AbortSignal`; a cancelled
+   * backup leaves no destination.
+   */
+  backupTo(
+    destination: string,
+    verify = true,
+    options?: ProgressOptions,
+  ): Promise<void> {
     return this.#enqueue(() =>
-      this.#native.asyncBackupTo(destination, verify),
+      withProgress(options, (progress, cancel) =>
+        this.#native.asyncBackupTo(destination, verify, progress, cancel),
+      ),
     );
   }
 
-  compactTo(destination: string, verify = true): Promise<void> {
+  /** `options` works as in `backupTo`. */
+  compactTo(
+    destination: string,
+    verify = true,
+    options?: ProgressOptions,
+  ): Promise<void> {
     return this.#enqueue(() =>
-      this.#native.asyncCompactTo(destination, verify),
+      withProgress(options, (progress, cancel) =>
+        this.#native.asyncCompactTo(destination, verify, progress, cancel),
+      ),
     );
   }
 
