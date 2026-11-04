@@ -2879,11 +2879,14 @@ fn verifyStoredObjects(db: *Database) Error!void {
     }
 }
 
+/// Verify every stored chunk row, including loose chunks no object references.
+/// Chunks within the FastCDC limit use `getObjectChunk`; larger chunks can only
+/// be fixed-1m streaming chunks and get the same checks against that limit.
 fn verifyStoredChunks(db: *Database) Error!void {
     const allocator = std.heap.page_allocator;
 
     const prefix = if (db.bound_object_store != null) "object_store." else "";
-    var chunks = try prepareSchemaSql(&db.sqlite_db, "select chunk_hash from {s}_zova_chunks order by chunk_hash", .{prefix});
+    var chunks = try prepareSchemaSql(&db.sqlite_db, "select chunk_hash, size_bytes from {s}_zova_chunks order by chunk_hash", .{prefix});
     defer chunks.deinit();
 
     while ((try chunks.step()) == .row) {
@@ -2893,10 +2896,30 @@ fn verifyStoredChunks(db: *Database) Error!void {
         var hash: ObjectChunkId = undefined;
         @memcpy(hash[0..], blob);
 
+        const size = chunks.columnInt64(1);
+        if (size > @as(i64, @intCast(fastcdc_max_chunk_size))) {
+            try verifyFixedChunk(db, prefix, hash);
+            continue;
+        }
         var chunk = try db.getObjectChunk(allocator, hash);
         defer chunk.deinit(allocator);
     }
 }
+
+fn verifyFixedChunk(db: *Database, prefix: []const u8, hash: ObjectChunkId) Error!void {
+    var stmt = try prepareSchemaSql(&db.sqlite_db, "select size_bytes, data from {s}_zova_chunks where chunk_hash = ?", .{prefix});
+    defer stmt.deinit();
+    try stmt.bindBlob(1, &hash);
+    if ((try stmt.step()) != .row) return error.ObjectChunkNotFound;
+    const size = stmt.columnInt64(0);
+    if (size <= 0 or size > @as(i64, @intCast(fixed_max_chunk_size))) return error.ObjectCorrupt;
+    const data = stmt.columnBlob(1);
+    if (data.len != @as(usize, @intCast(size))) return error.ObjectCorrupt;
+    if (!std.mem.eql(u8, &objectId(data), &hash)) return error.ObjectCorrupt;
+}
+
+const fastcdc_max_chunk_size = @import("object_fastcdc.zig").max_size;
+const fixed_max_chunk_size = @import("object_fixed_chunks.zig").max_size;
 
 fn verifyStoredVectors(db: *Database) Error!void {
     const allocator = std.heap.page_allocator;
@@ -2976,6 +2999,7 @@ comptime {
     if (@import("builtin").is_test) {
         _ = @import("zova_tests.zig");
         _ = @import("database_lifecycle_tests.zig");
+        _ = @import("database_verification_tests.zig");
         _ = @import("database_transactions_tests.zig");
         _ = @import("database_bound_stores_tests.zig");
         _ = @import("database_notifications_tests.zig");
