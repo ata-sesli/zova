@@ -8,6 +8,7 @@ import "C"
 
 import (
 	"crypto/sha256"
+	"runtime"
 	"unsafe"
 )
 
@@ -135,11 +136,9 @@ func (db *DB) GetObject(id ObjectID) ([]byte, error) {
 
 // ReadObjectRange copies object bytes into buffer starting at offset.
 func (db *DB) ReadObjectRange(id ObjectID, offset uint64, buffer []byte) (int, error) {
-	var data *C.uint8_t
-	if len(buffer) != 0 {
-		data = (*C.uint8_t)(C.malloc(C.size_t(len(buffer))))
-		defer C.free(unsafe.Pointer(data))
-	}
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+	data := pinnedBytes(&pinner, buffer)
 	outCopied := (*C.size_t)(C.calloc(1, C.size_t(unsafe.Sizeof(C.size_t(0)))))
 	defer C.free(unsafe.Pointer(outCopied))
 
@@ -157,11 +156,7 @@ func (db *DB) ReadObjectRange(id ObjectID, offset uint64, buffer []byte) (int, e
 	if err != nil {
 		return 0, err
 	}
-	copied := int(*outCopied)
-	if copied != 0 {
-		copy(buffer, unsafe.Slice((*byte)(unsafe.Pointer(data)), copied))
-	}
-	return copied, nil
+	return int(*outCopied), nil
 }
 
 // HasObject reports whether id exists.
@@ -435,8 +430,9 @@ func (db *DB) ObjectReader(id ObjectID) (*ObjectReader, error) {
 
 // Write appends bytes to the streaming writer.
 func (w *ObjectWriter) Write(bytes []byte) error {
-	data, cleanup := cBytes(bytes)
-	defer cleanup()
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+	data := pinnedBytes(&pinner, bytes)
 	return w.withLock(func(db *DB) error {
 		request := C.zova_object_writer_write_request{
 			writer: w.ptr,
@@ -526,14 +522,9 @@ func (r *ObjectReader) Read(buffer []byte) (int, error) {
 	if r.closed || r.ptr == nil {
 		return 0, newError(StatusObjectReaderClosed, "object reader is closed")
 	}
-	var data *C.uint8_t
-	if len(buffer) != 0 {
-		data = (*C.uint8_t)(C.malloc(C.size_t(len(buffer))))
-		if data == nil {
-			return 0, newError(StatusOutOfMemory, "could not allocate object reader buffer")
-		}
-		defer C.free(unsafe.Pointer(data))
-	}
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+	data := pinnedBytes(&pinner, buffer)
 	outRead := (*C.size_t)(C.calloc(1, C.size_t(unsafe.Sizeof(C.size_t(0)))))
 	if outRead == nil {
 		return 0, newError(StatusOutOfMemory, "could not allocate object reader output")
@@ -554,11 +545,7 @@ func (r *ObjectReader) Read(buffer []byte) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	read := int(*outRead)
-	if read != 0 {
-		copy(buffer, unsafe.Slice((*byte)(unsafe.Pointer(data)), read))
-	}
-	return read, nil
+	return int(*outRead), nil
 }
 
 // Close destroys the reader. Repeated calls are successful no-ops.
@@ -634,6 +621,17 @@ func chunkIDFromC(id C.zova_object_chunk_id) ObjectChunkID {
 		out[i] = byte(id.bytes[i])
 	}
 	return out
+}
+
+// pinnedBytes lets C use a Go byte slice in place for one call. The pointer is
+// stored in a request struct in Go memory, so cgo requires it to be pinned.
+func pinnedBytes(pinner *runtime.Pinner, bytes []byte) *C.uint8_t {
+	if len(bytes) == 0 {
+		return nil
+	}
+	data := unsafe.SliceData(bytes)
+	pinner.Pin(data)
+	return (*C.uint8_t)(unsafe.Pointer(data))
 }
 
 func cBytes(bytes []byte) (*C.uint8_t, func()) {
