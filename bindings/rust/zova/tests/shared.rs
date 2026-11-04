@@ -765,3 +765,51 @@ fn shared_batch_vectors_and_candidate_search_match_database_api() {
     assert!(db.has_vector("docs", "a").unwrap());
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn shared_seekable_reader_reads_seeks_across_threads_and_reports_deletion() {
+    use std::io::{Read, Seek, SeekFrom};
+    assert_send::<zova::SharedObjectSeekableReader>();
+
+    let path = temp_path("seekable-reader");
+    let db = SharedDatabase::create(&path).unwrap();
+    let bytes = fixture_bytes((2 << 20) + 77);
+    let id = db
+        .put_object_with_options(
+            &bytes,
+            ObjectPutOptions {
+                profile: ObjectStorageProfile::Streaming,
+            },
+        )
+        .unwrap();
+    let mut reader = db.object_seekable_reader(id).unwrap();
+    assert_eq!(reader.size(), bytes.len() as u64);
+
+    let expected = bytes.clone();
+    let mut reader = thread::spawn(move || {
+        reader.seek(SeekFrom::Start((1 << 20) - 2)).unwrap();
+        let mut buffer = [0_u8; 4];
+        reader.read_exact(&mut buffer).unwrap();
+        assert_eq!(&buffer, &expected[(1 << 20) - 2..(1 << 20) + 2]);
+        reader
+    })
+    .join()
+    .unwrap();
+    assert_eq!(reader.position(), (1 << 20) + 2);
+
+    // The next chunk is loaded after the object is gone.
+    db.delete_object(id).unwrap();
+    reader.seek(SeekFrom::Start(2 << 20)).unwrap();
+    let error = reader.read(&mut [0_u8; 4]).unwrap_err();
+    let native = error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<zova::Error>())
+        .unwrap();
+    assert_eq!(native.status(), Some(Status::ObjectNotFound));
+
+    reader.close().unwrap();
+    reader.close().unwrap();
+    drop(reader);
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}

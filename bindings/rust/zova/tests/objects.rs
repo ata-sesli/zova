@@ -558,3 +558,30 @@ fn seekable_object_reader_implements_read_and_seek() {
 
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn owned_seekable_reader_keeps_database_handle_alive() {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let path = temp_path("owned-seekable-reader");
+    let mut db = Database::create(&path).unwrap();
+    let bytes = b"owned seekable reader payload";
+    let id = db.put_object(bytes).unwrap();
+    let mut reader = db.object_seekable_reader_owned(id).unwrap();
+    drop(db);
+
+    assert_eq!(reader.size(), bytes.len() as u64);
+    assert_eq!(
+        reader.seek(SeekFrom::End(-7)).unwrap(),
+        bytes.len() as u64 - 7
+    );
+    let mut tail = Vec::new();
+    reader.read_to_end(&mut tail).unwrap();
+    assert_eq!(tail, b"payload");
+    assert_eq!(reader.position(), bytes.len() as u64);
+    reader.close().unwrap();
+    reader.close().unwrap();
+    assert!(reader.read(&mut [0_u8; 1]).is_err());
+
+    let _ = std::fs::remove_file(path);
+}

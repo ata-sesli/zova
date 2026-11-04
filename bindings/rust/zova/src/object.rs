@@ -117,6 +117,17 @@ pub struct ObjectSeekableReader<'db> {
     _not_send_sync: PhantomData<Rc<()>>,
 }
 
+/// Owned seekable reader for language bindings that need the reader to keep
+/// the database handle alive independently. It behaves like
+/// [`ObjectSeekableReader`] and implements [`std::io::Read`] and
+/// [`std::io::Seek`].
+pub struct OwnedObjectSeekableReader {
+    // Declared first so the native reader is destroyed before the database
+    // reference is released.
+    reader: ObjectSeekableReader<'static>,
+    _database: Rc<DatabaseInner>,
+}
+
 /// Owned sequential reader for language bindings and other callers that need
 /// the reader to keep the database handle alive independently.
 pub struct OwnedObjectReader {
@@ -551,6 +562,21 @@ impl Database {
     /// The reader borrows the database exclusively for its lifetime, so the
     /// database cannot be closed while the native reader is live.
     pub fn object_seekable_reader(&mut self, id: ObjectId) -> Result<ObjectSeekableReader<'_>> {
+        self.open_seekable_reader(id)
+    }
+
+    /// Open an owned seekable reader that keeps the database handle alive.
+    pub fn object_seekable_reader_owned(
+        &mut self,
+        id: ObjectId,
+    ) -> Result<OwnedObjectSeekableReader> {
+        Ok(OwnedObjectSeekableReader {
+            reader: self.open_seekable_reader(id)?,
+            _database: self.inner.clone(),
+        })
+    }
+
+    fn open_seekable_reader<'a>(&mut self, id: ObjectId) -> Result<ObjectSeekableReader<'a>> {
         let mut reader = ptr::null_mut();
         let mut size = 0;
         let request = zova_sys::zova_object_seekable_reader_create_request {
@@ -814,6 +840,36 @@ impl std::io::Seek for ObjectSeekableReader<'_> {
 impl Drop for ObjectSeekableReader<'_> {
     fn drop(&mut self) {
         let _ = self.destroy(false);
+    }
+}
+
+impl OwnedObjectSeekableReader {
+    /// Total object size in bytes.
+    pub fn size(&self) -> u64 {
+        self.reader.size()
+    }
+
+    /// Current read position in bytes.
+    pub fn position(&self) -> u64 {
+        self.reader.position()
+    }
+
+    /// Explicitly close the reader. Drop also closes it, and repeated calls
+    /// are successful no-ops.
+    pub fn close(&mut self) -> Result<()> {
+        self.reader.close()
+    }
+}
+
+impl std::io::Read for OwnedObjectSeekableReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.reader.read(buffer)
+    }
+}
+
+impl std::io::Seek for OwnedObjectSeekableReader {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.reader.seek(position)
     }
 }
 
