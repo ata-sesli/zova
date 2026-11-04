@@ -1023,6 +1023,7 @@ zova graph-walk --max-depth 2 --limit 50 app.zova app message:123
 zova tables app.zova
 zova check --deep app.zova
 zova format --json app.zova
+zova migrate --dry-run old-9.zova new-10.zova
 zova migrate --json old-9.zova new-10.zova
 zova doctor --json app.zova
 zova object-store info app.zova

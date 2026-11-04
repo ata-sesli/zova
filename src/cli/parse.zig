@@ -134,6 +134,7 @@ pub const FormatCommandArgs = struct {
 pub const MigrateCommandArgs = struct {
     format: OutputFormat,
     verify: bool,
+    dry_run: bool = false,
     source_path: []const u8,
     destination_path: []const u8,
 };
@@ -148,6 +149,7 @@ const FormatCommandParseError = error{
 const MigrateCommandParseError = error{
     DuplicateJson,
     DuplicateNoVerify,
+    DuplicateDryRun,
     UnknownFlag,
     MissingSource,
     MissingDestination,
@@ -186,6 +188,7 @@ pub fn parseMigrateCommandArgs(args: []const []const u8) MigrateCommandParseErro
     var format: OutputFormat = .text;
     var verify = true;
     var saw_no_verify = false;
+    var dry_run = false;
     var source_path: ?[]const u8 = null;
     var destination_path: ?[]const u8 = null;
     for (args) |arg| {
@@ -196,6 +199,9 @@ pub fn parseMigrateCommandArgs(args: []const []const u8) MigrateCommandParseErro
             if (saw_no_verify) return error.DuplicateNoVerify;
             saw_no_verify = true;
             verify = false;
+        } else if (std.mem.eql(u8, arg, "--dry-run")) {
+            if (dry_run) return error.DuplicateDryRun;
+            dry_run = true;
         } else if (std.mem.startsWith(u8, arg, "-")) {
             return error.UnknownFlag;
         } else if (source_path == null) {
@@ -211,6 +217,7 @@ pub fn parseMigrateCommandArgs(args: []const []const u8) MigrateCommandParseErro
     return .{
         .format = format,
         .verify = verify,
+        .dry_run = dry_run,
         .source_path = source,
         .destination_path = destination,
     };
@@ -220,10 +227,11 @@ pub fn migrateUsageMessage(err: MigrateCommandParseError) []const u8 {
     return switch (err) {
         error.DuplicateJson => "duplicate --json",
         error.DuplicateNoVerify => "duplicate --no-verify",
+        error.DuplicateDryRun => "duplicate --dry-run",
         error.UnknownFlag => "unknown flag",
         error.MissingSource => "migrate requires <source.zova>",
         error.MissingDestination => "migrate requires <destination.zova>",
-        error.ExtraArgs => "migrate accepts only [--json] [--no-verify] <source.zova> <destination.zova>",
+        error.ExtraArgs => "migrate accepts only [--json] [--no-verify] [--dry-run] <source.zova> <destination.zova>",
     };
 }
 

@@ -5,6 +5,12 @@ const Error = @import("types.zig").Error;
 const paths = @import("paths.zig");
 const io = paths.defaultIo;
 
+/// The exclusively owned recovery directory a migration to `destination`
+/// creates next to it.
+pub fn recoveryDirectoryPath(allocator: std.mem.Allocator, destination: []const u8) Error![:0]u8 {
+    return std.fmt.allocPrintSentinel(allocator, "{s}.migration-recovery", .{destination}, 0) catch error.OutOfMemory;
+}
+
 pub const Publication = struct {
     allocator: std.mem.Allocator,
     directory: ?[:0]u8 = null,
@@ -26,7 +32,7 @@ pub const Publication = struct {
         const cwd = std.Io.Dir.cwd();
         var self: Publication = .{ .allocator = allocator };
         errdefer self.deinit();
-        self.directory = try std.fmt.allocPrintSentinel(allocator, "{s}.migration-recovery", .{destination}, 0);
+        self.directory = try recoveryDirectoryPath(allocator, destination);
         self.marker = try std.fmt.allocPrintSentinel(allocator, "{s}/owner", .{self.directory.?}, 0);
         cwd.createDir(io(), self.directory.?, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => return error.DestinationExists,

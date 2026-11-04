@@ -97,6 +97,12 @@ pub const restoreBackupWithExtensions = zova.restoreBackupWithExtensions;
 pub const migrateDatabase = zova.migrateDatabase;
 pub const migrateDatabaseWithExtensions = zova.migrateDatabaseWithExtensions;
 pub const MigrateOptions = zova.MigrateOptions;
+pub const planMigration = zova.planMigration;
+pub const MigrationPlan = zova.MigrationPlan;
+pub const MigrationPlanMember = zova.MigrationPlanMember;
+pub const MigrationMemberSizes = zova.MigrationMemberSizes;
+pub const MigrationPlanExtension = zova.MigrationPlanExtension;
+pub const MigrationPreflight = zova.MigrationPreflight;
 pub const minimum_migratable_format = zova.minimum_migratable_format;
 
 test "package exports sqlite namespace" {
