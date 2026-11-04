@@ -73,8 +73,42 @@ zova migrate app.zova app-format-12.zova
 `zova format` prints the source format, the current format, the earliest
 migratable format, the compatibility class, and the recommended action. Add
 `--json` for machine-readable output. `zova migrate` accepts `--json`,
-`--no-verify` and `--dry-run`; verification is on by default and reopens the
-migrated destination set through the full open path.
+`--no-verify`, `--dry-run` and `--progress`; verification is on by default and
+reopens the migrated destination set through the full open path.
+
+#### Progress
+
+On a terminal, `zova migrate`, `zova backup` and `zova compact` show one
+progress line on stderr. `--progress` writes the same lines when stderr is not a
+terminal. With `--json --progress`, stderr carries one JSON object per line:
+
+```json
+{"cli_json_version":1,"event":"progress","command":"migrate","phase":"copy","member":"main","done":1024,"total":4113}
+```
+
+The final result object on stdout is unchanged and has no `event` field.
+Output is throttled to whole-percent changes. Progress is reported by phase:
+
+| Phase | Member | Unit |
+| --- | --- | --- |
+| `copy` | `main`, `object_store`, `vector_store`, `graph_store` | SQLite pages of the source member |
+| `migrate` | as for `copy` | format migration steps |
+| `verify` | `null` (whole set) | stored objects, chunks, vectors and KV entries |
+| `publish` | `null` (whole set) | member files, bound stores first |
+
+Migration and backup copy each member in batches of 1024 pages. `compact` runs
+`VACUUM INTO` as a single statement, so its main copy reports only its start
+and end; so do the bound stores that backup and compact inline. Verification
+counts every item the same, so one large object advances it by one.
+
+In Zig, set `progress` on `MigrateOptions`, `BackupOptions` or `CompactOptions`
+to a `ProgressCallback`. Returning an error from the callback (conventionally
+`error.Interrupt`) cancels the operation through the same cleanup as any other
+failure at that point: a cancelled migration leaves the source set unchanged
+and creates no destination files, and a cancelled backup or compaction removes
+its destination. The last migration event follows the commit of the
+destination set, so an error returned from it is ignored. The C ABI and the
+language bindings do not expose progress yet.
 
 #### Dry run
 

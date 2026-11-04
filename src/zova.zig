@@ -157,7 +157,7 @@ const validateMigrationSourceSchema = @import("database/migration.zig").validate
 /// or validation failure.
 pub const runMigrationStep = @import("database/migration.zig").runMigrationStep;
 
-const runMigrationsToCurrent = @import("database/migration.zig").runMigrationsToCurrent;
+const runMigrationsToCurrentReporting = @import("database/migration.zig").runMigrationsToCurrentReporting;
 
 const validateForeignKeys = @import("database/migration.zig").validateForeignKeys;
 
@@ -450,6 +450,12 @@ pub const RestoreOptions = @import("database/types.zig").RestoreOptions;
 /// Options for `migrateDatabase`.
 pub const MigrateOptions = @import("database/types.zig").MigrateOptions;
 
+/// Progress reporting for migration, backup, and compaction.
+pub const Progress = @import("database/types.zig").Progress;
+pub const ProgressPhase = @import("database/types.zig").ProgressPhase;
+pub const ProgressMember = @import("database/types.zig").ProgressMember;
+pub const ProgressCallback = @import("database/types.zig").ProgressCallback;
+
 /// Create a standalone object-store `.zova` file.
 ///
 /// This is opt-in storage for a main database that later calls
@@ -559,7 +565,7 @@ pub fn restoreBackupToMemoryWithExtensions(source_path: [:0]const u8, options: R
     var memory = try source.restoreIntoMemory(registry);
     if (options.verify) {
         errdefer memory.deinit();
-        try verifyCurrentDatabase(&memory);
+        try verifyCurrentDatabase(&memory, null);
     }
     return memory;
 }
@@ -715,13 +721,13 @@ pub fn migrateDatabaseInternal(
         {
             var main_copy_source = try sqlite.Database.openWithFlags(source_path, .read_only);
             defer main_copy_source.deinit();
-            try copyForwardMember(&main_copy_source, main_staging.?);
+            try copyForwardMember(&main_copy_source, main_staging.?, options.progress, .main);
             if (fault_hook) |hook| try hook(.after_main_copy);
         }
         {
             var staged = try sqlite.Database.open(main_staging.?);
             defer staged.deinit();
-            try runMigrationsToCurrent(&staged);
+            try runMigrationsToCurrentReporting(&staged, options.progress, .main);
             if (fault_hook) |hook| try hook(.after_main_migration);
         }
         for (bindings[0..binding_count], 1..) |*binding, index| {
@@ -729,13 +735,14 @@ pub fn migrateDatabaseInternal(
             allocator.free(binding.staging_path);
             binding.staging_path = staged_path;
             binding.staged = true;
+            const member = std.meta.stringToEnum(ProgressMember, binding.role) orelse return error.BoundStoreInvalid;
             var store_source = try sqlite.Database.openWithFlags(binding.store_path, .read_only);
             defer store_source.deinit();
-            try copyForwardMember(&store_source, binding.staging_path);
+            try copyForwardMember(&store_source, binding.staging_path, options.progress, member);
             if (fault_hook) |hook| try hook(.after_store_copy);
             var staged = try sqlite.Database.open(binding.staging_path);
             defer staged.deinit();
-            try runMigrationsToCurrent(&staged);
+            try runMigrationsToCurrentReporting(&staged, options.progress, member);
             if (fault_hook) |hook| try hook(.after_store_migration);
         }
     }
@@ -744,21 +751,25 @@ pub fn migrateDatabaseInternal(
     // rewrite only the destination binding paths for publication.
     try rebindMigrationSet(main_staging.?, bindings[0..binding_count], .staging);
     if (options.verify) {
-        try verifyOperationalCopy(main_staging.?, registry);
+        try verifyOperationalCopyReporting(main_staging.?, registry, options.progress);
         if (fault_hook) |hook| try hook(.after_validation);
     }
     try rebindMigrationSet(main_staging.?, bindings[0..binding_count], .final);
 
     // The source lock was released when staging completed. Publish stores
     // first and the main database last as the commit marker.
+    const publish_total: u64 = binding_count + 1;
     for (0..binding_count) |index| {
         try publication.?.publish(index + 1);
         if (fault_hook) |hook| try hook(.after_store_publication);
+        try ProgressCallback.emit(options.progress, .{ .phase = .publish, .member = null, .done = index + 1, .total = publish_total });
     }
 
     if (fault_hook) |hook| try hook(.before_main_publication);
     try publication.?.publish(0);
     publication.?.committed = true;
+    // The set is committed: this event cannot cancel it.
+    ProgressCallback.emit(options.progress, .{ .phase = .publish, .member = null, .done = publish_total, .total = publish_total }) catch {};
 
     committed = true;
     allocator.free(main_final.?);
@@ -1621,11 +1632,11 @@ pub const Database = struct {
         {
             var dest = try sqlite.Database.open(destination_path);
             defer dest.deinit();
-            try backupMainDatabase(&self.sqlite_db, &dest);
+            try backupMainDatabaseReporting(&self.sqlite_db, &dest, options.progress, .main);
         }
 
-        try self.inlineBoundStoresIntoDestination(destination_path);
-        if (options.verify) try verifyOperationalCopy(destination_path, self.extension_registry);
+        try self.inlineBoundStoresIntoDestination(destination_path, options.progress);
+        if (options.verify) try verifyOperationalCopyReporting(destination_path, self.extension_registry, options.progress);
     }
 
     /// Copy this database's main schema and data into a new in-memory database
@@ -1639,7 +1650,7 @@ pub const Database = struct {
         errdefer raw.deinit();
         try backupMainDatabase(&self.sqlite_db, &raw);
         try @import("vector_maintenance.zig").register(&raw);
-        try self.inlineBoundStoresIntoDatabase(&raw);
+        try self.inlineBoundStoresIntoDatabase(&raw, null);
         try enableForeignKeys(&raw);
         try vector_sql.register(&raw);
         try graph_sql.register(&raw);
@@ -1658,14 +1669,19 @@ pub const Database = struct {
         try ensureDestinationZovaPathAvailable(destination_path);
         errdefer deleteDestinationFile(destination_path);
 
+        // `VACUUM INTO` cannot report pages as it copies: report its start and end.
+        const pages = try schemaPageCount(&self.sqlite_db, "main");
+        try ProgressCallback.emit(options.progress, .{ .phase = .copy, .member = .main, .done = 0, .total = pages });
+
         var vacuum_stmt = try self.prepare("vacuum into ?");
         defer vacuum_stmt.deinit();
 
         try vacuum_stmt.bindText(1, destination_path);
         try vacuum_stmt.expectDone();
+        try ProgressCallback.emit(options.progress, .{ .phase = .copy, .member = .main, .done = pages, .total = pages });
 
-        try self.inlineBoundStoresIntoDestination(destination_path);
-        if (options.verify) try verifyOperationalCopy(destination_path, self.extension_registry);
+        try self.inlineBoundStoresIntoDestination(destination_path, options.progress);
+        if (options.verify) try verifyOperationalCopyReporting(destination_path, self.extension_registry, options.progress);
     }
 
     /// Set SQLite's busy timeout in milliseconds for this connection.
@@ -2436,12 +2452,12 @@ pub const Database = struct {
         }
     }
 
-    fn inlineBoundStoresIntoDestination(self: *Database, destination_path: [:0]const u8) Error!void {
+    fn inlineBoundStoresIntoDestination(self: *Database, destination_path: [:0]const u8, progress: ?ProgressCallback) Error!void {
         if (self.bound_object_store == null and self.bound_vector_store == null and self.bound_graph_store == null) return;
 
         var destination = try sqlite.Database.open(destination_path);
         defer destination.deinit();
-        try self.inlineBoundStoresIntoDatabase(&destination);
+        try self.inlineBoundStoresIntoDatabase(&destination, progress);
     }
 
     /// Copy the contents of every attached bound store into the destination's
@@ -2450,26 +2466,38 @@ pub const Database = struct {
     /// This is the in-memory counterpart of `inlineBoundStoresIntoDestination`:
     /// it makes the destination self-contained regardless of the source's
     /// bound object, vector, or graph store configuration.
-    fn inlineBoundStoresIntoDatabase(self: *Database, destination: *sqlite.Database) Error!void {
+    ///
+    /// Each store is copied with SQL, so `copy` progress for its member
+    /// reports only the start and end, in the store's pages.
+    fn inlineBoundStoresIntoDatabase(self: *Database, destination: *sqlite.Database, progress: ?ProgressCallback) Error!void {
         if (self.bound_object_store == null and self.bound_vector_store == null and self.bound_graph_store == null) return;
         try @import("vector_maintenance.zig").register(destination);
 
         if (self.bound_object_store != null) {
+            const pages = try schemaPageCount(&self.sqlite_db, bound_object_store_schema_name);
+            try ProgressCallback.emit(progress, .{ .phase = .copy, .member = .object_store, .done = 0, .total = pages });
             try clearMainObjectStorage(destination);
             try copyObjectStorage(&self.sqlite_db, .object_store, destination, .main);
             try deleteBoundStoreRows(destination, .object);
+            try ProgressCallback.emit(progress, .{ .phase = .copy, .member = .object_store, .done = pages, .total = pages });
         }
 
         if (self.bound_vector_store != null) {
+            const pages = try schemaPageCount(&self.sqlite_db, bound_vector_store_schema_name);
+            try ProgressCallback.emit(progress, .{ .phase = .copy, .member = .vector_store, .done = 0, .total = pages });
             try clearMainVectorStorage(destination);
             try copyVectorStorage(&self.sqlite_db, .vector_store, destination, .main);
             try deleteBoundStoreRows(destination, .vector);
+            try ProgressCallback.emit(progress, .{ .phase = .copy, .member = .vector_store, .done = pages, .total = pages });
         }
 
         if (self.bound_graph_store != null) {
+            const pages = try schemaPageCount(&self.sqlite_db, bound_graph_store_schema_name);
+            try ProgressCallback.emit(progress, .{ .phase = .copy, .member = .graph_store, .done = 0, .total = pages });
             try clearMainGraphStorage(destination);
             try copyGraphStorage(&self.sqlite_db, .graph_store, destination, .main);
             try deleteBoundStoreRows(destination, .graph);
+            try ProgressCallback.emit(progress, .{ .phase = .copy, .member = .graph_store, .done = pages, .total = pages });
         }
     }
 
@@ -2564,7 +2592,7 @@ pub const Database = struct {
         try storage.clearMain(&self.sqlite_db);
         try storage.expectMainCleared(&self.sqlite_db);
 
-        try verifyCurrentDatabase(self);
+        try verifyCurrentDatabase(self, null);
         try self.sqlite_db.commit();
         committed = true;
 
@@ -2831,20 +2859,65 @@ const rejectReservedZovaNames = @import("database/bound_stores.zig").rejectReser
 const isReservedZovaName = @import("database/bound_stores.zig").isReservedZovaName;
 
 const backupMainDatabase = @import("database/backup.zig").backupMainDatabase;
+const backupMainDatabaseReporting = @import("database/backup.zig").backupMainDatabaseReporting;
+
+/// Page count of one attached schema (`main` or a bound-store schema name).
+fn schemaPageCount(db: *sqlite.Database, comptime schema_name: []const u8) Error!u64 {
+    var stmt = try db.prepare("pragma " ++ schema_name ++ ".page_count");
+    defer stmt.deinit();
+    if ((try stmt.step()) != .row) return error.Corrupt;
+    return try sqliteI64ToU64(stmt.columnInt64(0));
+}
 
 pub fn verifyOperationalCopy(path: [:0]const u8, registry: ExtensionRegistry) Error!void {
+    return verifyOperationalCopyReporting(path, registry, null);
+}
+
+fn verifyOperationalCopyReporting(path: [:0]const u8, registry: ExtensionRegistry, progress: ?ProgressCallback) Error!void {
     var db = try Database.openWithOptionsAndExtensions(path, .{ .read_only = true }, registry);
     defer db.deinit();
 
-    try verifyCurrentDatabase(&db);
+    try verifyCurrentDatabase(&db, progress);
 }
 
-fn verifyCurrentDatabase(db: *Database) Error!void {
+/// Counts `verify` progress across every checked object, chunk, vector, and
+/// KV entry. The total is counted before checking starts.
+const VerifyProgress = struct {
+    callback: ?ProgressCallback,
+    done: u64 = 0,
+    total: u64 = 0,
+
+    fn item(self: *VerifyProgress) Error!void {
+        self.done += 1;
+        try ProgressCallback.emit(self.callback, .{ .phase = .verify, .member = null, .done = self.done, .total = self.total });
+    }
+};
+
+fn verifyCurrentDatabase(db: *Database, progress: ?ProgressCallback) Error!void {
+    var counter = VerifyProgress{ .callback = progress };
+    if (progress) |callback| {
+        counter.total = try countVerifyItems(db);
+        try callback.report(callback.context, .{ .phase = .verify, .member = null, .done = 0, .total = counter.total });
+    }
     try verifyQuickCheck(db);
-    try verifyStoredObjects(db);
-    try verifyStoredChunks(db);
-    try verifyStoredVectors(db);
-    try verifyStoredKv(db);
+    try verifyStoredObjects(db, &counter);
+    try verifyStoredChunks(db, &counter);
+    try verifyStoredVectors(db, &counter);
+    try verifyStoredKv(db, &counter);
+}
+
+fn countVerifyItems(db: *Database) Error!u64 {
+    const object_prefix = if (db.bound_object_store != null) "object_store." else "";
+    const vector_prefix = if (db.bound_vector_store != null) "vector_store." else "";
+    var stmt = try prepareSchemaSql(&db.sqlite_db,
+        \\select (select count(*) from {s}_zova_objects)
+        \\  + (select count(*) from {s}_zova_chunks)
+        \\  + (select count(*) from {s}_zova_vectors v join {s}_zova_vector_collections c on c.collection_key = v.collection_key)
+        \\  + (select count(*) from _zova_kv)
+    , .{ object_prefix, object_prefix, vector_prefix, vector_prefix });
+    defer stmt.deinit();
+    if ((try stmt.step()) != .row) return error.Corrupt;
+    return try sqliteI64ToU64(stmt.columnInt64(0));
 }
 
 fn verifyQuickCheck(db: *Database) Error!void {
@@ -2860,7 +2933,7 @@ const verifyQuickCheckAttached = @import("database/backup.zig").verifyQuickCheck
 
 const expectQuickCheckOk = @import("database/backup.zig").expectQuickCheckOk;
 
-fn verifyStoredObjects(db: *Database) Error!void {
+fn verifyStoredObjects(db: *Database, progress: *VerifyProgress) Error!void {
     const allocator = std.heap.page_allocator;
 
     const prefix = if (db.bound_object_store != null) "object_store." else "";
@@ -2875,14 +2948,15 @@ fn verifyStoredObjects(db: *Database) Error!void {
         @memcpy(id[0..], blob);
 
         var object = try db.getObject(allocator, id);
-        defer object.deinit(allocator);
+        object.deinit(allocator);
+        try progress.item();
     }
 }
 
 /// Verify every stored chunk row, including loose chunks no object references.
 /// Chunks within the FastCDC limit use `getObjectChunk`; larger chunks can only
 /// be fixed-1m streaming chunks and get the same checks against that limit.
-fn verifyStoredChunks(db: *Database) Error!void {
+fn verifyStoredChunks(db: *Database, progress: *VerifyProgress) Error!void {
     const allocator = std.heap.page_allocator;
 
     const prefix = if (db.bound_object_store != null) "object_store." else "";
@@ -2899,10 +2973,11 @@ fn verifyStoredChunks(db: *Database) Error!void {
         const size = chunks.columnInt64(1);
         if (size > @as(i64, @intCast(fastcdc_max_chunk_size))) {
             try verifyFixedChunk(db, prefix, hash);
-            continue;
+        } else {
+            var chunk = try db.getObjectChunk(allocator, hash);
+            chunk.deinit(allocator);
         }
-        var chunk = try db.getObjectChunk(allocator, hash);
-        defer chunk.deinit(allocator);
+        try progress.item();
     }
 }
 
@@ -2921,7 +2996,7 @@ fn verifyFixedChunk(db: *Database, prefix: []const u8, hash: ObjectChunkId) Erro
 const fastcdc_max_chunk_size = @import("object_fastcdc.zig").max_size;
 const fixed_max_chunk_size = @import("object_fixed_chunks.zig").max_size;
 
-fn verifyStoredVectors(db: *Database) Error!void {
+fn verifyStoredVectors(db: *Database, progress: *VerifyProgress) Error!void {
     const allocator = std.heap.page_allocator;
 
     const prefix = if (db.bound_vector_store != null) "vector_store." else "";
@@ -2941,11 +3016,12 @@ fn verifyStoredVectors(db: *Database) Error!void {
         defer allocator.free(vector_id);
 
         var vector = try db.getVector(allocator, collection_name, vector_id);
-        defer vector.deinit(allocator);
+        vector.deinit(allocator);
+        try progress.item();
     }
 }
 
-fn verifyStoredKv(db: *Database) Error!void {
+fn verifyStoredKv(db: *Database, progress: *VerifyProgress) Error!void {
     var stmt = try prepareSchemaSql(&db.sqlite_db,
         \\select namespace, key, value from _zova_kv order by namespace, key
     , .{});
@@ -2958,6 +3034,7 @@ fn verifyStoredKv(db: *Database) Error!void {
         _ = namespace;
         _ = key;
         _ = value;
+        try progress.item();
     }
 }
 

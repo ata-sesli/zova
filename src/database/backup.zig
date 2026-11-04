@@ -9,6 +9,8 @@ const vector_impl = @import("../vector.zig");
 const Error = @import("types.zig").Error;
 const ObjectChunkId = @import("types.zig").ObjectChunkId;
 const ObjectId = @import("types.zig").ObjectId;
+const ProgressCallback = @import("types.zig").ProgressCallback;
+const ProgressMember = @import("types.zig").ProgressMember;
 const SplitGraphStoreCounts = @import("types.zig").SplitGraphStoreCounts;
 const SplitObjectStoreCounts = @import("types.zig").SplitObjectStoreCounts;
 const SplitVectorStoreCounts = @import("types.zig").SplitVectorStoreCounts;
@@ -450,14 +452,53 @@ fn prepareObjectSchemaSql(
 }
 
 pub fn backupMainDatabase(source: *sqlite.Database, dest: *sqlite.Database) Error!void {
+    return backupMainDatabaseReporting(source, dest, null, .main);
+}
+
+/// Pages copied per `sqlite3_backup_step` call.
+pub const backup_step_pages = 1024;
+
+/// Copy the source main database in bounded page batches, reporting
+/// `copy` progress for `member` after each batch.
+///
+/// When the source connection is in autocommit mode, a read transaction is
+/// held across the steps so the copy is one snapshot and writers on other
+/// connections cannot force the backup to restart.
+pub fn backupMainDatabaseReporting(
+    source: *sqlite.Database,
+    dest: *sqlite.Database,
+    progress: ?ProgressCallback,
+    member: ProgressMember,
+) Error!void {
+    const hold_snapshot = sqlite.c.sqlite3_get_autocommit(source.handle) != 0;
+    if (hold_snapshot) {
+        try source.exec("begin");
+        errdefer source.rollback() catch {};
+        // Start the read transaction now; a deferred `begin` alone takes no lock.
+        try source.exec("pragma main.schema_version");
+    }
+    defer if (hold_snapshot) source.rollback() catch {};
+
     const backup = sqlite.c.sqlite3_backup_init(dest.handle, "main", source.handle, "main") orelse {
         return mapSqliteResultCode(sqlite.c.sqlite3_errcode(dest.handle));
     };
 
-    const step_rc = sqlite.c.sqlite3_backup_step(backup, -1);
-    const finish_rc = sqlite.c.sqlite3_backup_finish(backup);
+    while (true) {
+        const step_rc = sqlite.c.sqlite3_backup_step(backup, backup_step_pages);
+        if (step_rc != sqlite.c.SQLITE_OK and step_rc != sqlite.c.SQLITE_DONE) {
+            _ = sqlite.c.sqlite3_backup_finish(backup);
+            return mapSqliteResultCode(step_rc);
+        }
+        const total: u64 = @intCast(sqlite.c.sqlite3_backup_pagecount(backup));
+        const remaining: u64 = @intCast(sqlite.c.sqlite3_backup_remaining(backup));
+        ProgressCallback.emit(progress, .{ .phase = .copy, .member = member, .done = total - remaining, .total = total }) catch |err| {
+            _ = sqlite.c.sqlite3_backup_finish(backup);
+            return err;
+        };
+        if (step_rc == sqlite.c.SQLITE_DONE) break;
+    }
 
-    if (step_rc != sqlite.c.SQLITE_DONE) return mapSqliteResultCode(step_rc);
+    const finish_rc = sqlite.c.sqlite3_backup_finish(backup);
     if (finish_rc != sqlite.c.SQLITE_OK) return mapSqliteResultCode(finish_rc);
 }
 
