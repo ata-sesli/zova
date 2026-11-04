@@ -34,6 +34,7 @@ pub const Tag = enum(u8) {
     object_metadata,
     object_range_fastcdc,
     object_range_fixed,
+    object_chunk_seek,
     graph_key,
     graph_neighbors_out,
     graph_neighbors_out_typed,
