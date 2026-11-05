@@ -7,7 +7,8 @@ use napi::{Env, Result, Task};
 use napi_derive::napi;
 
 use crate::database::{
-    DatabaseState, NativeDatabase, NativeExtensionOptions, NativeFormatInfo, NativeKvEntry,
+    reclaim_options, DatabaseState, NativeDatabase, NativeExtensionOptions, NativeFormatInfo,
+    NativeKvEntry, NativeReclaimedMember,
 };
 use crate::error::zova_error;
 use crate::graph::{
@@ -110,6 +111,37 @@ impl Task for ExecTask {
 
     fn resolve(&mut self, _: Env, _: Self::Output) -> Result<Self::JsValue> {
         Ok(())
+    }
+
+    fn finally(mut self, _: Env) -> Result<()> {
+        self.state.take().expect("task state").finish();
+        Ok(())
+    }
+}
+
+pub struct ReclaimTask {
+    state: Option<DatabaseTaskState>,
+    options: zova::ReclaimOptions,
+}
+
+impl Task for ReclaimTask {
+    type Output = Vec<zova::ReclaimedMember>;
+    type JsValue = Vec<NativeReclaimedMember>;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.state
+            .as_ref()
+            .expect("task state")
+            .database
+            .reclaim_space(self.options)
+            .map_err(zova_error)
+    }
+
+    fn resolve(&mut self, _: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output
+            .into_iter()
+            .map(NativeReclaimedMember::from)
+            .collect())
     }
 
     fn finally(mut self, _: Env) -> Result<()> {
@@ -743,6 +775,18 @@ impl NativeDatabase {
             verify: verify.unwrap_or(true),
             kind: FileTaskKind::Compact,
             progress: TaskProgress::new(progress, cancel),
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<Array<NativeReclaimedMember>>")]
+    pub fn async_reclaim_space(
+        &self,
+        max_pages: Option<f64>,
+        step_pages: Option<u32>,
+    ) -> Result<AsyncTask<ReclaimTask>> {
+        Ok(AsyncTask::new(ReclaimTask {
+            options: reclaim_options(max_pages, step_pages)?,
+            state: Some(DatabaseTaskState::new(self)?),
         }))
     }
 

@@ -271,6 +271,13 @@ pub const zova_database_backup_request = @import("c_api/types.zig").zova_databas
 pub const zova_database_compact_request = @import("c_api/types.zig").zova_database_compact_request;
 pub const zova_database_backup_progress_request = @import("c_api/types.zig").zova_database_backup_progress_request;
 pub const zova_database_compact_progress_request = @import("c_api/types.zig").zova_database_compact_progress_request;
+pub const ZOVA_AUTO_VACUUM_NONE = @import("c_api/types.zig").ZOVA_AUTO_VACUUM_NONE;
+pub const ZOVA_AUTO_VACUUM_FULL = @import("c_api/types.zig").ZOVA_AUTO_VACUUM_FULL;
+pub const ZOVA_AUTO_VACUUM_INCREMENTAL = @import("c_api/types.zig").ZOVA_AUTO_VACUUM_INCREMENTAL;
+pub const ZOVA_RECLAIM_MAX_MEMBERS = @import("c_api/types.zig").ZOVA_RECLAIM_MAX_MEMBERS;
+pub const zova_reclaimed_member = @import("c_api/types.zig").zova_reclaimed_member;
+pub const zova_reclaim_result = @import("c_api/types.zig").zova_reclaim_result;
+pub const zova_database_reclaim_request = @import("c_api/types.zig").zova_database_reclaim_request;
 
 pub const zova_database_restore_request = @import("c_api/types.zig").zova_database_restore_request;
 
@@ -652,6 +659,7 @@ pub const zova_database_backup_with_progress = @import("c_api/database.zig").zov
 
 pub const zova_database_compact = @import("c_api/database.zig").zova_database_compact;
 pub const zova_database_compact_with_progress = @import("c_api/database.zig").zova_database_compact_with_progress;
+pub const zova_database_reclaim = @import("c_api/database.zig").zova_database_reclaim;
 
 pub const zova_database_set_busy_timeout = @import("c_api/database.zig").zova_database_set_busy_timeout;
 

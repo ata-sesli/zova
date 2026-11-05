@@ -3601,3 +3601,40 @@ test "c api migrate reports progress and a cancelled migration leaves the source
     try std.testing.expectEqual(c_api_internal.ZOVA_PROGRESS_MEMBER_NONE, last.member);
     try std.testing.expectEqual(last.total, last.done);
 }
+
+test "c api reclaim releases free pages in bounded steps and reports each member" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/reclaim.zova", .{tmp.sub_path[0..]}, 0);
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{ .path = db_path, .out_db = &db, .out_error_message = null }));
+    defer _ = zova_database_close(db);
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = db, .sql = "create table scratch(data blob); with recursive n(i) as (select 1 union all select i + 1 from n where i < 300) insert into scratch select zeroblob(4000) from n; drop table scratch" }));
+
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, c_api_internal.zova_database_reclaim(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, c_api_internal.zova_database_reclaim(&.{ .db = db }));
+
+    // A bounded call releases exactly max_pages; step_pages = 0 selects the default step.
+    var bounded: c_api_internal.zova_reclaim_result = .{};
+    try std.testing.expectEqual(zova_status.OK, c_api_internal.zova_database_reclaim(&.{ .db = db, .max_pages = 100, .out_result = &bounded }));
+    try std.testing.expectEqual(@as(usize, 1), bounded.member_count);
+    const first = bounded.members[0];
+    try std.testing.expectEqual(c_api_internal.ZOVA_PROGRESS_MEMBER_MAIN, first.member);
+    try std.testing.expectEqual(c_api_internal.ZOVA_AUTO_VACUUM_INCREMENTAL, first.auto_vacuum);
+    try std.testing.expectEqual(@as(u32, 4096), first.page_size);
+    try std.testing.expectEqual(@as(u64, 100), first.pages_released);
+    try std.testing.expect(first.free_pages_left > 0);
+
+    var rest: c_api_internal.zova_reclaim_result = .{};
+    try std.testing.expectEqual(zova_status.OK, c_api_internal.zova_database_reclaim(&.{ .db = db, .step_pages = 64, .out_result = &rest }));
+    try std.testing.expectEqual(first.free_pages_left, rest.members[0].pages_released);
+    try std.testing.expectEqual(@as(u64, 0), rest.members[0].free_pages_left);
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_begin(&.{ .db = db }));
+    var during: c_api_internal.zova_reclaim_result = .{ .member_count = 9 };
+    try std.testing.expectEqual(zova_status.OBJECT_TRANSACTION_ACTIVE, c_api_internal.zova_database_reclaim(&.{ .db = db, .out_result = &during }));
+    try std.testing.expectEqual(@as(usize, 0), during.member_count);
+    try std.testing.expectEqual(zova_status.OK, zova_database_rollback(&.{ .db = db }));
+}

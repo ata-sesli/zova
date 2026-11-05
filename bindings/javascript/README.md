@@ -87,6 +87,9 @@ The synchronous `Database` facade exposes:
 
 - SQLite execution, prepared statements, bindings, stepping, and columns
 - transactions, savepoints, backup, compact, restore, vacuum, and conversion
+- `reclaimSpace({ maxPages, stepPages })`, which releases free pages in place
+  from files in incremental auto-vacuum mode (the format-13 default) and
+  returns one `ReclaimedMember` per member file
 - storage-format probing and explicit copy-forward migration (`probeFormat`,
   `migrateDatabase`, and their async `AsyncDatabase` counterparts), with the
   same optional `ExtensionOptions` as `Database.open` for databases with a
@@ -140,8 +143,9 @@ const bytes = await db.getObject(id);
 await db.close();
 ```
 
-Queued work also includes backup/compact/restore, vector batches and searches,
-and graph batches and walks. Inputs are copied before worker execution.
+Queued work also includes backup/compact/restore, `reclaimSpace`, vector
+batches and searches, and graph batches and walks. Inputs are copied before
+worker execution.
 `AsyncDatabase.objectSeekableReader(id)` opens a seekable reader whose
 `readAsync` runs on the worker pool; its async reads and seeks run in call
 order.

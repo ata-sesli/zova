@@ -372,8 +372,10 @@ report lists, per member, `auto_vacuum`, `page_size`, `pages_released`,
 `bytes_released` and `free_pages_left`, and points `none` members at
 `zova compact`. In Zig, `Database.reclaimSpace(.{ .max_pages, .step_pages })`
 returns the same per-member counts in a `ReclaimResult`; it fails with
-`ObjectTransactionActive` inside an open transaction. Reclaim does not change
-any logical data.
+`ObjectTransactionActive` inside an open transaction. The C ABI exposes it as
+`zova_database_reclaim`, and the bindings as `reclaim_space` (Rust and Python),
+`ReclaimSpace` (Go), and `reclaimSpace` (JavaScript `Database` and
+`AsyncDatabase`). Reclaim does not change any logical data.
 
 ## What a migration preserves
 

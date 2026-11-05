@@ -1,8 +1,8 @@
 //! Safe Rust bindings for Zova's C ABI.
 //!
 //! This Rust binding currently covers database lifecycle, records through
-//! prepared SQL statements, transactions, explicit vacuum, backup/compact/
-//! restore, objects, chunks, manifests, range reads, assembly, `ObjectWriter`,
+//! prepared SQL statements, transactions, explicit vacuum, free-page reclaim,
+//! backup/compact/restore, objects, chunks, manifests, range reads, assembly, `ObjectWriter`,
 //! vector collections, vector CRUD, exact vector search, and SQL-native vector
 //! queries through prepared statements, graphs, and graph traversal. Use
 //! `SharedDatabase` when one serialized handle should be shared across Rust
@@ -22,9 +22,9 @@ mod vector;
 
 pub use database::{
     migrate_database, migrate_database_with_extensions, migrate_database_with_progress,
-    probe_format, restore_backup, restore_backup_to_memory, BackupOptions, CompactOptions,
-    Database, ExtensionOptions, FormatCompatibility, FormatInfo, MigrateOptions, OpenOptions,
-    RestoreOptions,
+    probe_format, restore_backup, restore_backup_to_memory, AutoVacuum, BackupOptions,
+    CompactOptions, Database, ExtensionOptions, FormatCompatibility, FormatInfo, MigrateOptions,
+    OpenOptions, ReclaimOptions, ReclaimedMember, RestoreOptions,
 };
 pub use error::{Error, Result, Status};
 pub use extension::ExtensionInfo;

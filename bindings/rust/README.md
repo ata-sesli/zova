@@ -319,6 +319,19 @@ default, each operation verifies the destination after copying. Pass
 `BackupOptions { verify: false }`, `CompactOptions { verify: false }`, or
 `RestoreOptions { verify: false }` only when you will verify separately.
 
+`reclaim_space` releases free pages in place, in short write transactions, from
+files in incremental auto-vacuum mode, the default for files created by
+format 13. It returns one `ReclaimedMember` per member file; a member in
+`AutoVacuum::None` mode releases nothing and needs `compact_to` instead.
+`ReclaimOptions { max_pages, .. }` caps one call.
+
+```rust
+use zova::ReclaimOptions;
+
+let members = db.reclaim_space(ReclaimOptions::default())?;
+println!("{} pages released", members[0].pages_released);
+```
+
 Diagnostic recovery commands such as `zova doctor`, `zova salvage --dry-run`,
 and `zova salvage <source> <destination>` are CLI-first. In v0.25, CLI salvage
 copies valid core data and uses extension salvage hooks for extension-owned

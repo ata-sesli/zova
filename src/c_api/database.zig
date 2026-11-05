@@ -39,6 +39,10 @@ const zova_database_busy_timeout_request = @import("types.zig").zova_database_bu
 const zova_database_changes_request = @import("types.zig").zova_database_changes_request;
 const zova_database_compact_progress_request = @import("types.zig").zova_database_compact_progress_request;
 const zova_database_compact_request = @import("types.zig").zova_database_compact_request;
+const zova_database_reclaim_request = @import("types.zig").zova_database_reclaim_request;
+const ZOVA_AUTO_VACUUM_FULL = @import("types.zig").ZOVA_AUTO_VACUUM_FULL;
+const ZOVA_AUTO_VACUUM_INCREMENTAL = @import("types.zig").ZOVA_AUTO_VACUUM_INCREMENTAL;
+const ZOVA_AUTO_VACUUM_NONE = @import("types.zig").ZOVA_AUTO_VACUUM_NONE;
 const zova_database_create_memory_request = @import("types.zig").zova_database_create_memory_request;
 const zova_database_create_options_request = @import("types.zig").zova_database_create_options_request;
 const zova_database_exec_request = @import("types.zig").zova_database_exec_request;
@@ -254,6 +258,39 @@ pub fn zova_database_compact_with_progress(request: ?*const zova_database_compac
         if (bridge.cancelled) return failDbStatusString(handle, .INTERRUPTED, interrupted_message);
         return failDb(handle, err);
     };
+    return okDb(handle);
+}
+
+pub fn zova_database_reclaim(request: ?*const zova_database_reclaim_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    defer handle.mutex.unlock();
+    const out = req.out_result orelse return failDb(handle, error.InvalidArgument);
+    out.* = .{};
+    const default_options: zova.ReclaimOptions = .{};
+    const result = handle.db.reclaimSpace(.{
+        .max_pages = req.max_pages,
+        .step_pages = if (req.step_pages == 0) default_options.step_pages else req.step_pages,
+    }) catch |err| return failDb(handle, err);
+    for (result.members(), out.members[0..result.count]) |member, *entry| {
+        entry.* = .{
+            .member = switch (member.member) {
+                .main => ZOVA_PROGRESS_MEMBER_MAIN,
+                .object_store => ZOVA_PROGRESS_MEMBER_OBJECT_STORE,
+                .vector_store => ZOVA_PROGRESS_MEMBER_VECTOR_STORE,
+                .graph_store => ZOVA_PROGRESS_MEMBER_GRAPH_STORE,
+            },
+            .auto_vacuum = switch (member.auto_vacuum) {
+                .none => ZOVA_AUTO_VACUUM_NONE,
+                .full => ZOVA_AUTO_VACUUM_FULL,
+                .incremental => ZOVA_AUTO_VACUUM_INCREMENTAL,
+            },
+            .page_size = member.page_size,
+            .pages_released = member.pages_released,
+            .free_pages_left = member.free_pages_left,
+        };
+    }
+    out.member_count = result.count;
     return okDb(handle);
 }
 

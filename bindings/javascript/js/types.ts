@@ -1,3 +1,5 @@
+import type { ProgressMember } from "./progress.js";
+
 export enum Step {
   Row = "row",
   Done = "done",
@@ -45,6 +47,47 @@ export type FormatCompatibilityName =
 export interface FormatInfo {
   readonly formatVersion: number;
   readonly compatibility: FormatCompatibilityName;
+}
+
+/** SQLite `auto_vacuum` mode of one member file. */
+export type AutoVacuumMode = "none" | "full" | "incremental";
+
+/**
+ * Options for `reclaimSpace`. `maxPages` bounds the pages released by the
+ * call across every member (default 0: every free page); `stepPages` is the
+ * number of pages released per write transaction (default 1024).
+ */
+export interface ReclaimOptions {
+  readonly maxPages?: number;
+  readonly stepPages?: number;
+}
+
+/**
+ * What `reclaimSpace` did for one member file. When `autoVacuum` is `"none"`
+ * the member releases nothing and only `compactTo` drops its free pages.
+ */
+export interface ReclaimedMember {
+  readonly member: ProgressMember;
+  readonly autoVacuum: AutoVacuumMode;
+  readonly pageSize: number;
+  readonly pagesReleased: number;
+  readonly freePagesLeft: number;
+}
+
+export function reclaimedMember(raw: {
+  member: string;
+  autoVacuum: string;
+  pageSize: number;
+  pagesReleased: number;
+  freePagesLeft: number;
+}): ReclaimedMember {
+  return {
+    member: raw.member as ProgressMember,
+    autoVacuum: raw.autoVacuum as AutoVacuumMode,
+    pageSize: raw.pageSize,
+    pagesReleased: raw.pagesReleased,
+    freePagesLeft: raw.freePagesLeft,
+  };
 }
 
 export interface KvEntry {

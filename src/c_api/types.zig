@@ -698,6 +698,32 @@ pub const zova_database_compact_progress_request = extern struct {
     progress_user_data: ?*anyopaque = null,
 };
 
+pub const ZOVA_AUTO_VACUUM_NONE: u32 = 0;
+pub const ZOVA_AUTO_VACUUM_FULL: u32 = 1;
+pub const ZOVA_AUTO_VACUUM_INCREMENTAL: u32 = 2;
+
+pub const ZOVA_RECLAIM_MAX_MEMBERS = 4;
+
+pub const zova_reclaimed_member = extern struct {
+    member: u32 = 0,
+    auto_vacuum: u32 = 0,
+    page_size: u32 = 0,
+    pages_released: u64 = 0,
+    free_pages_left: u64 = 0,
+};
+
+pub const zova_reclaim_result = extern struct {
+    member_count: usize = 0,
+    members: [ZOVA_RECLAIM_MAX_MEMBERS]zova_reclaimed_member = @splat(.{}),
+};
+
+pub const zova_database_reclaim_request = extern struct {
+    db: ?*zova_database = null,
+    max_pages: u64 = 0,
+    step_pages: u32 = 0,
+    out_result: ?*zova_reclaim_result = null,
+};
+
 pub const zova_database_restore_request = extern struct {
     source_path: ?[*:0]const u8,
     destination_path: ?[*:0]const u8,

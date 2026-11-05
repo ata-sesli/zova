@@ -271,6 +271,20 @@ The zero-value options verify destinations after copying. Use
 `BackupOptions{NoVerify: true}`, `CompactOptions{NoVerify: true}`, or
 `RestoreOptions{NoVerify: true}` only when you will verify separately.
 
+`ReclaimSpace` releases free pages in place, in short write transactions, from
+files in incremental auto-vacuum mode, the default for files created by
+format 13. It returns one `ReclaimedMember` per member file; a member in
+`AutoVacuumNone` mode releases nothing and needs `CompactTo` instead.
+`ReclaimOptions{MaxPages: n}` caps one call.
+
+```go
+members, err := db.ReclaimSpace()
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(members[0].PagesReleased, members[0].FreePagesLeft)
+```
+
 Diagnostic recovery commands such as `zova doctor`, `zova salvage --dry-run`,
 and `zova salvage <source> <destination>` are CLI-first. In v0.25, CLI salvage
 copies valid core data and uses extension salvage hooks for extension-owned

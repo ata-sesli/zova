@@ -46,10 +46,10 @@
  *
  * Scope:
  * - This ABI exposes database lifecycle, SQL exec, prepared statements,
- *   explicit transactions, explicit vacuum, conversion, backup, compact copy,
- *   restore-to-new-file, in-memory databases, objects, chunks, manifests,
- *   range reads, assembly, ObjectWriter, native vectors, and native graph
- *   relationships.
+ *   explicit transactions, explicit vacuum, in-place free-page reclaim,
+ *   conversion, backup, compact copy, restore-to-new-file, in-memory
+ *   databases, objects, chunks, manifests, range reads, assembly,
+ *   ObjectWriter, native vectors, and native graph relationships.
  * - Vector metadata remains application-owned in user SQL tables. Vector search
  *   returns vector ids and distances only.
  * - zova_database connections register read-only SQL vector helpers:
@@ -883,6 +883,49 @@ typedef struct zova_database_compact_progress_request {
     zova_progress_fn progress;
     void *progress_user_data;
 } zova_database_compact_progress_request;
+
+/*
+ * zova_database_reclaim releases free pages of incremental auto-vacuum member
+ * files in place, in short write transactions of at most step_pages pages
+ * each (0 selects 1024), so other writers can run between steps. max_pages
+ * bounds the pages released by the whole call across members; 0 releases
+ * every free page. Members are reported in a fixed order: the main database,
+ * then each attached object, vector and graph store, with member set to a
+ * zova_progress_member value. A member whose auto_vacuum is
+ * ZOVA_AUTO_VACUUM_NONE releases nothing; zova_database_compact writes a copy
+ * without its free pages. The call fails with ZOVA_OBJECT_TRANSACTION_ACTIVE
+ * inside an explicit transaction; open object readers are allowed.
+ * out_result is required and is reset before any work.
+ */
+typedef enum zova_auto_vacuum_mode {
+    ZOVA_AUTO_VACUUM_NONE = 0,
+    ZOVA_AUTO_VACUUM_FULL = 1,
+    ZOVA_AUTO_VACUUM_INCREMENTAL = 2
+} zova_auto_vacuum_mode;
+
+enum {
+    ZOVA_RECLAIM_MAX_MEMBERS = 4
+};
+
+typedef struct zova_reclaimed_member {
+    uint32_t member;
+    uint32_t auto_vacuum;
+    uint32_t page_size;
+    uint64_t pages_released;
+    uint64_t free_pages_left;
+} zova_reclaimed_member;
+
+typedef struct zova_reclaim_result {
+    size_t member_count;
+    zova_reclaimed_member members[ZOVA_RECLAIM_MAX_MEMBERS];
+} zova_reclaim_result;
+
+typedef struct zova_database_reclaim_request {
+    zova_database *db;
+    uint64_t max_pages;
+    uint32_t step_pages;
+    zova_reclaim_result *out_result;
+} zova_database_reclaim_request;
 
 typedef struct zova_database_restore_request {
     const char *source_path;
@@ -1963,6 +2006,7 @@ zova_status zova_database_backup(const zova_database_backup_request *request);
 zova_status zova_database_compact(const zova_database_compact_request *request);
 zova_status zova_database_backup_with_progress(const zova_database_backup_progress_request *request);
 zova_status zova_database_compact_with_progress(const zova_database_compact_progress_request *request);
+zova_status zova_database_reclaim(const zova_database_reclaim_request *request);
 zova_status zova_database_set_busy_timeout(const zova_database_busy_timeout_request *request);
 zova_status zova_database_last_insert_rowid(const zova_database_last_insert_rowid_request *request);
 zova_status zova_database_changes(const zova_database_changes_request *request);
