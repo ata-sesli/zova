@@ -237,6 +237,29 @@ impl PyDatabase {
         }
     }
 
+    /// Release free pages of incremental auto-vacuum member files in place,
+    /// each step in its own short write transaction of at most `step_pages`
+    /// pages. `max_pages` bounds the pages released by the call; 0 releases
+    /// every free page. Returns one `ReclaimedMember` per member file: the
+    /// main database, then each attached object, vector, and graph store.
+    /// Raises `ZovaError` with `ZOVA_OBJECT_TRANSACTION_ACTIVE` inside an
+    /// explicit transaction.
+    #[pyo3(signature = (*, max_pages = 0, step_pages = 1024))]
+    pub(crate) fn reclaim_space(
+        &mut self,
+        max_pages: u64,
+        step_pages: u32,
+    ) -> PyResult<Vec<PyReclaimedMember>> {
+        let members = self
+            .db_mut()?
+            .reclaim_space(zova_rust::ReclaimOptions {
+                max_pages,
+                step_pages,
+            })
+            .map_err(zova_error)?;
+        Ok(members.into_iter().map(PyReclaimedMember::from).collect())
+    }
+
     pub(crate) fn set_busy_timeout(&mut self, milliseconds: u32) -> PyResult<()> {
         self.db_mut()?
             .set_busy_timeout(milliseconds)
@@ -937,6 +960,58 @@ pub(crate) fn convert_sqlite_to_zova(source: &str, destination: &str) -> PyResul
 pub(crate) fn restore_backup(source: &str, destination: &str, verify: bool) -> PyResult<()> {
     zova_rust::restore_backup(source, destination, zova_rust::RestoreOptions { verify })
         .map_err(zova_error)
+}
+
+/// What `Database.reclaim_space` did for one member file.
+///
+/// `member` is "main", "object_store", "vector_store", or "graph_store";
+/// `auto_vacuum` is "none", "full", or "incremental". When it is "none", the
+/// member releases nothing and only `compact_to` drops its free pages.
+#[pyclass(name = "ReclaimedMember", frozen, skip_from_py_object)]
+pub(crate) struct PyReclaimedMember {
+    #[pyo3(get)]
+    member: &'static str,
+    #[pyo3(get)]
+    auto_vacuum: &'static str,
+    #[pyo3(get)]
+    page_size: u32,
+    #[pyo3(get)]
+    pages_released: u64,
+    #[pyo3(get)]
+    free_pages_left: u64,
+}
+
+#[pymethods]
+impl PyReclaimedMember {
+    fn __repr__(&self) -> String {
+        format!(
+            "ReclaimedMember(member='{}', auto_vacuum='{}', page_size={}, \
+             pages_released={}, free_pages_left={})",
+            self.member,
+            self.auto_vacuum,
+            self.page_size,
+            self.pages_released,
+            self.free_pages_left
+        )
+    }
+}
+
+impl From<zova_rust::ReclaimedMember> for PyReclaimedMember {
+    fn from(member: zova_rust::ReclaimedMember) -> Self {
+        Self {
+            member: match member.member {
+                zova_rust::ProgressMember::Main => "main",
+                zova_rust::ProgressMember::ObjectStore => "object_store",
+                zova_rust::ProgressMember::VectorStore => "vector_store",
+                zova_rust::ProgressMember::GraphStore => "graph_store",
+                _ => "unknown",
+            },
+            auto_vacuum: member.auto_vacuum.name(),
+            page_size: member.page_size,
+            pages_released: member.pages_released,
+            free_pages_left: member.free_pages_left,
+        }
+    }
 }
 
 /// Storage-format facts about a `.zova` file, reported without opening or

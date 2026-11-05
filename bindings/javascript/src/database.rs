@@ -4,7 +4,7 @@ use napi::bindgen_prelude::{BigInt, Uint8Array};
 use napi::Result;
 use napi_derive::napi;
 
-use crate::error::{misuse_error, zova_error};
+use crate::error::{invalid_argument_error, misuse_error, zova_error};
 use crate::statement::NativeStatement;
 use crate::subscription::NativeSubscription;
 
@@ -126,6 +126,59 @@ fn extension_info(info: zova::ExtensionInfo) -> NativeExtensionInfo {
         installed_at_unix: BigInt::from(info.installed_at_unix),
         manifest_json: info.manifest_json,
     }
+}
+
+/// What `reclaimSpace` did for one member file.
+#[napi(object)]
+pub struct NativeReclaimedMember {
+    pub member: String,
+    pub auto_vacuum: String,
+    pub page_size: u32,
+    pub pages_released: f64,
+    pub free_pages_left: f64,
+}
+
+impl From<zova::ReclaimedMember> for NativeReclaimedMember {
+    fn from(member: zova::ReclaimedMember) -> Self {
+        let name = match member.member {
+            zova::ProgressMember::Main => "main",
+            zova::ProgressMember::ObjectStore => "object_store",
+            zova::ProgressMember::VectorStore => "vector_store",
+            zova::ProgressMember::GraphStore => "graph_store",
+            _ => "unknown",
+        };
+        Self {
+            member: name.to_owned(),
+            auto_vacuum: member.auto_vacuum.name().to_owned(),
+            page_size: member.page_size,
+            pages_released: member.pages_released as f64,
+            free_pages_left: member.free_pages_left as f64,
+        }
+    }
+}
+
+/// `reclaimSpace` options from JavaScript numbers. `max_pages` must be a
+/// non-negative safe integer; omitted values select the Zova defaults.
+pub(crate) fn reclaim_options(
+    max_pages: Option<f64>,
+    step_pages: Option<u32>,
+) -> Result<zova::ReclaimOptions> {
+    let defaults = zova::ReclaimOptions::default();
+    let max_pages = match max_pages {
+        None => defaults.max_pages,
+        Some(value) if value >= 0.0 && value.fract() == 0.0 && value <= 9_007_199_254_740_991.0 => {
+            value as u64
+        }
+        Some(_) => {
+            return Err(invalid_argument_error(
+                "maxPages must be a non-negative safe integer",
+            ))
+        }
+    };
+    Ok(zova::ReclaimOptions {
+        max_pages,
+        step_pages: step_pages.unwrap_or(defaults.step_pages),
+    })
 }
 
 #[napi(object)]
@@ -411,6 +464,24 @@ impl NativeDatabase {
                 },
             )
             .map_err(zova_error)
+    }
+
+    #[napi]
+    pub fn reclaim_space(
+        &self,
+        max_pages: Option<f64>,
+        step_pages: Option<u32>,
+    ) -> Result<Vec<NativeReclaimedMember>> {
+        let options = reclaim_options(max_pages, step_pages)?;
+        let members = self
+            .state
+            .database()?
+            .reclaim_space(options)
+            .map_err(zova_error)?;
+        Ok(members
+            .into_iter()
+            .map(NativeReclaimedMember::from)
+            .collect())
     }
 
     #[napi]

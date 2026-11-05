@@ -3485,6 +3485,19 @@ int main(int argc, char **argv) {
     verify_operational_copy(compact_path, object_id, "compact copy");
     verify_operational_copy(restored_path, object_id, "restored copy");
 
+    zova_reclaim_result reclaim_result = {.member_count = 99};
+    expect_status(zova_database_reclaim(&(zova_database_reclaim_request){.db = db, .out_result = &reclaim_result}),
+                  ZOVA_OK,
+                  "reclaim free pages");
+    if (reclaim_result.member_count != 1 || reclaim_result.members[0].member != ZOVA_PROGRESS_MEMBER_MAIN ||
+        reclaim_result.members[0].auto_vacuum != ZOVA_AUTO_VACUUM_INCREMENTAL ||
+        reclaim_result.members[0].free_pages_left != 0) {
+        fprintf(stderr, "reclaim free pages: unexpected result\n");
+        return 1;
+    }
+    expect_status(zova_database_reclaim(&(zova_database_reclaim_request){.db = db}),
+                  ZOVA_INVALID_ARGUMENT,
+                  "reclaim without out_result");
     expect_status(zova_database_vacuum(&(zova_database_simple_request){.db = db}), ZOVA_OK, "explicit vacuum");
     expect_status(zova_database_close(db), ZOVA_OK, "close database");
     if (!sql_state.destroyed) {

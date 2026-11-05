@@ -23,9 +23,10 @@ import {
 } from "./object.js";
 import { Statement } from "./statement.js";
 import { Subscription } from "./subscription.js";
-import { nativeExtensionOptions } from "./types.js";
+import { nativeExtensionOptions, reclaimedMember } from "./types.js";
 import type {
-  ExtensionInfo, ExtensionOptions, FormatInfo, KvEntry, OpenOptions,
+  ExtensionInfo, ExtensionOptions, FormatInfo, KvEntry, OpenOptions, ReclaimedMember,
+  ReclaimOptions,
 } from "./types.js";
 import type {
   Vector,
@@ -237,6 +238,19 @@ export class Database {
 
   compactTo(destination: string, verify = true): void {
     callNative(() => this.#native.compactTo(destination, verify));
+  }
+
+  /**
+   * Release free pages of incremental auto-vacuum member files in place, each
+   * step in its own short write transaction. Members are reported in a fixed
+   * order: the main database, then each attached object, vector, and graph
+   * store. Throws `ZOVA_OBJECT_TRANSACTION_ACTIVE` inside an explicit
+   * transaction.
+   */
+  reclaimSpace(options: ReclaimOptions = {}): ReclaimedMember[] {
+    return callNative(() =>
+      this.#native.reclaimSpace(options.maxPages, options.stepPages),
+    ).map(reclaimedMember);
   }
 
   lastInsertRowid(): bigint {

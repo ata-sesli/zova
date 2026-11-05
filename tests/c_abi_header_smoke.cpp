@@ -49,6 +49,21 @@ static_assert(offsetof(zova_database_migrate_request, source_path) == 0, "migrat
 static_assert(offsetof(zova_database_migrate_request, destination_path) == 8, "migrate request layout is stable");
 static_assert(offsetof(zova_database_migrate_request, flags) == 16, "migrate request layout is stable");
 static_assert(offsetof(zova_database_migrate_request, out_error_message) == 24, "migrate request layout is stable");
+static_assert(ZOVA_AUTO_VACUUM_NONE == 0, "auto-vacuum values are stable");
+static_assert(ZOVA_AUTO_VACUUM_FULL == 1, "auto-vacuum values are stable");
+static_assert(ZOVA_AUTO_VACUUM_INCREMENTAL == 2, "auto-vacuum values are stable");
+static_assert(ZOVA_RECLAIM_MAX_MEMBERS == 4, "reclaim member capacity is stable");
+static_assert(sizeof(zova_reclaimed_member) == 32, "reclaimed member is fixed layout");
+static_assert(offsetof(zova_reclaimed_member, member) == 0, "reclaimed member layout is stable");
+static_assert(offsetof(zova_reclaimed_member, auto_vacuum) == 4, "reclaimed member layout is stable");
+static_assert(offsetof(zova_reclaimed_member, page_size) == 8, "reclaimed member layout is stable");
+static_assert(offsetof(zova_reclaimed_member, pages_released) == 16, "reclaimed member layout is stable");
+static_assert(offsetof(zova_reclaimed_member, free_pages_left) == 24, "reclaimed member layout is stable");
+static_assert(offsetof(zova_reclaim_result, members) == sizeof(size_t), "reclaim result layout is stable");
+static_assert(sizeof(zova_reclaim_result) == sizeof(size_t) + 4 * sizeof(zova_reclaimed_member), "reclaim result is fixed layout");
+static_assert(offsetof(zova_database_reclaim_request, max_pages) == 8, "reclaim request layout is stable");
+static_assert(offsetof(zova_database_reclaim_request, step_pages) == 16, "reclaim request layout is stable");
+static_assert(offsetof(zova_database_reclaim_request, out_result) == 24, "reclaim request layout is stable");
 static_assert(ZOVA_OBJECT_PROFILE_DEDUPLICATION == 0, "object profile values are stable");
 static_assert(ZOVA_OBJECT_PROFILE_STREAMING == 1, "object profile values are stable");
 static_assert(sizeof(zova_object_put_options) == sizeof(int), "object options use a C int");
@@ -62,6 +77,7 @@ int main() {
         zova_database_migrate_with_progress(nullptr) != ZOVA_INVALID_ARGUMENT ||
         zova_database_backup_with_progress(nullptr) != ZOVA_INVALID_ARGUMENT ||
         zova_database_compact_with_progress(nullptr) != ZOVA_INVALID_ARGUMENT ||
+        zova_database_reclaim(nullptr) != ZOVA_INVALID_ARGUMENT ||
         zova_database_extension_upgrade(nullptr) != ZOVA_INVALID_ARGUMENT ||
         zova_database_extension_rebuild(nullptr) != ZOVA_INVALID_ARGUMENT) return 1;
     zova_database *db = nullptr;

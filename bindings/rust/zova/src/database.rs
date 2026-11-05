@@ -4,7 +4,7 @@ use crate::kv::{
     kv_get_raw, kv_put_many_raw, kv_put_raw, KvEntry,
 };
 use crate::notification::{listen_raw, notify_raw, Subscription};
-use crate::progress::{Progress, ProgressBridge};
+use crate::progress::{Progress, ProgressBridge, ProgressMember};
 use crate::statement::{OwnedStatement, Statement};
 use std::ffi::{c_char, CStr, CString};
 use std::fmt;
@@ -124,6 +124,101 @@ impl FormatCompatibility {
 pub struct FormatInfo {
     pub format_version: u32,
     pub compatibility: FormatCompatibility,
+}
+
+/// Options for [`Database::reclaim_space`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReclaimOptions {
+    /// Most pages released by the call across every member; 0 releases every
+    /// free page.
+    pub max_pages: u64,
+    /// Pages released per write transaction, so other writers can run in
+    /// between. 0 selects the default of 1024.
+    pub step_pages: u32,
+}
+
+impl Default for ReclaimOptions {
+    fn default() -> Self {
+        Self {
+            max_pages: 0,
+            step_pages: 1024,
+        }
+    }
+}
+
+/// SQLite `auto_vacuum` mode of one member file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AutoVacuum {
+    None,
+    Full,
+    Incremental,
+}
+
+impl AutoVacuum {
+    /// Stable machine-readable name shared by every Zova binding.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Full => "full",
+            Self::Incremental => "incremental",
+        }
+    }
+}
+
+/// What [`Database::reclaim_space`] did for one member file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReclaimedMember {
+    pub member: ProgressMember,
+    pub auto_vacuum: AutoVacuum,
+    pub page_size: u32,
+    /// Free pages released back to the filesystem by this call.
+    pub pages_released: u64,
+    /// Free pages still inside the file. When `auto_vacuum` is
+    /// [`AutoVacuum::None`], only a compact copy drops them.
+    pub free_pages_left: u64,
+}
+
+pub(crate) fn reclaim_request(
+    db: *mut zova_sys::zova_database,
+    options: ReclaimOptions,
+    out: &mut zova_sys::zova_reclaim_result,
+) -> zova_sys::zova_database_reclaim_request {
+    zova_sys::zova_database_reclaim_request {
+        db,
+        max_pages: options.max_pages,
+        step_pages: options.step_pages,
+        out_result: out,
+    }
+}
+
+pub(crate) fn reclaimed_members(raw: &zova_sys::zova_reclaim_result) -> Vec<ReclaimedMember> {
+    let count = raw.member_count.min(raw.members.len());
+    raw.members[..count]
+        .iter()
+        .filter_map(|entry| {
+            let member = match entry.member {
+                zova_sys::ZOVA_PROGRESS_MEMBER_MAIN => ProgressMember::Main,
+                zova_sys::ZOVA_PROGRESS_MEMBER_OBJECT_STORE => ProgressMember::ObjectStore,
+                zova_sys::ZOVA_PROGRESS_MEMBER_VECTOR_STORE => ProgressMember::VectorStore,
+                zova_sys::ZOVA_PROGRESS_MEMBER_GRAPH_STORE => ProgressMember::GraphStore,
+                _ => return None,
+            };
+            let auto_vacuum = match entry.auto_vacuum {
+                zova_sys::ZOVA_AUTO_VACUUM_NONE => AutoVacuum::None,
+                zova_sys::ZOVA_AUTO_VACUUM_FULL => AutoVacuum::Full,
+                zova_sys::ZOVA_AUTO_VACUUM_INCREMENTAL => AutoVacuum::Incremental,
+                _ => return None,
+            };
+            Some(ReclaimedMember {
+                member,
+                auto_vacuum,
+                page_size: entry.page_size,
+                pages_released: entry.pages_released,
+                free_pages_left: entry.free_pages_left,
+            })
+        })
+        .collect()
 }
 
 /// C strings for one synchronous extension-selecting request. The pointers
@@ -409,6 +504,22 @@ impl Database {
         let status = unsafe { zova_sys::zova_database_compact_with_progress(&request) };
         let result = self.status(status);
         bridge.finish(result)
+    }
+
+    /// Release free pages of incremental auto-vacuum member files in place.
+    ///
+    /// Each step is its own short write transaction. Members are reported in
+    /// a fixed order: the main database, then each attached object, vector,
+    /// and graph store. A member whose `auto_vacuum` is [`AutoVacuum::None`]
+    /// releases nothing; [`Database::compact_to`] writes a copy without its
+    /// free pages. Fails with [`crate::Status::ObjectTransactionActive`]
+    /// inside an explicit transaction; open object readers are allowed.
+    pub fn reclaim_space(&mut self, options: ReclaimOptions) -> Result<Vec<ReclaimedMember>> {
+        let mut out = zova_sys::zova_reclaim_result::default();
+        let request = reclaim_request(self.raw_ptr(), options, &mut out);
+        // SAFETY: the request and result outlive the synchronous call.
+        self.status(unsafe { zova_sys::zova_database_reclaim(&request) })?;
+        Ok(reclaimed_members(&out))
     }
 
     pub fn exec(&mut self, sql: &str) -> Result<()> {

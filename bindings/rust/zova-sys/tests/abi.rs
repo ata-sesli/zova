@@ -39,6 +39,10 @@ fn extension_upgrade_entrypoints_reject_null_requests() {
             zova_sys::ZOVA_INVALID_ARGUMENT
         );
         assert_eq!(
+            zova_sys::zova_database_reclaim(ptr::null()),
+            zova_sys::ZOVA_INVALID_ARGUMENT
+        );
+        assert_eq!(
             zova_sys::zova_database_extension_upgrade(ptr::null()),
             zova_sys::ZOVA_INVALID_ARGUMENT
         );
@@ -103,6 +107,16 @@ fn abi_version_and_status_names_are_available() {
         assert_eq!(
             std::mem::size_of::<zova_sys::zova_object_put_options>(),
             std::mem::size_of::<std::os::raw::c_int>()
+        );
+        assert_eq!(zova_sys::ZOVA_AUTO_VACUUM_INCREMENTAL, 2);
+        assert_eq!(std::mem::size_of::<zova_sys::zova_reclaimed_member>(), 32);
+        assert_eq!(
+            std::mem::size_of::<zova_sys::zova_reclaim_result>(),
+            std::mem::size_of::<usize>() + 4 * 32
+        );
+        assert_eq!(
+            std::mem::size_of::<zova_sys::zova_database_reclaim_request>(),
+            32
         );
         assert_eq!(
             CStr::from_ptr(zova_sys::zova_status_name(zova_sys::ZOVA_GRAPH_INVALID))

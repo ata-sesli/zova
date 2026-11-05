@@ -165,6 +165,18 @@ By default, each operation verifies the destination after copying. Pass
 `verify=False` only when you will verify separately, for example with
 `zova check --deep`.
 
+`reclaim_space()` releases free pages in place, in short write transactions,
+from files in incremental auto-vacuum mode, the default for files created by
+format 13. It returns one `zova.ReclaimedMember` per member file; a member whose
+`auto_vacuum` is `"none"` releases nothing and needs `compact_to()` instead.
+`max_pages=n` caps one call.
+
+```python
+with zova.Database.open("app.zova") as db:
+    for member in db.reclaim_space():
+        print(member.member, member.pages_released, member.free_pages_left)
+```
+
 Diagnostic recovery commands such as `zova doctor`, `zova salvage --dry-run`,
 and `zova salvage <source> <destination>` are CLI-first. In v0.25, CLI salvage
 copies valid core data and uses extension salvage hooks for extension-owned

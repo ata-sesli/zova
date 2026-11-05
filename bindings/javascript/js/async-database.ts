@@ -7,8 +7,14 @@ import type {
   GraphWalkItem,
   GraphWalkOptions,
 } from "./graph.js";
-import type { ExtensionOptions, FormatInfo, OpenOptions } from "./types.js";
-import { nativeExtensionOptions } from "./types.js";
+import type {
+  ExtensionOptions,
+  FormatInfo,
+  OpenOptions,
+  ReclaimedMember,
+  ReclaimOptions,
+} from "./types.js";
+import { nativeExtensionOptions, reclaimedMember } from "./types.js";
 import type { KvEntry } from "./types.js";
 import type { ProgressOptions } from "./progress.js";
 import { withProgress } from "./progress.js";
@@ -156,6 +162,15 @@ export class AsyncDatabase {
   }
 
   /** `options` works as in `backupTo`. */
+  /** `Database.reclaimSpace` on the worker thread pool. */
+  reclaimSpace(options: ReclaimOptions = {}): Promise<ReclaimedMember[]> {
+    return this.#enqueue(async () =>
+      (await this.#native.asyncReclaimSpace(options.maxPages, options.stepPages)).map(
+        reclaimedMember,
+      ),
+    );
+  }
+
   compactTo(
     destination: string,
     verify = true,

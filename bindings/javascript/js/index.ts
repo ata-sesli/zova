@@ -58,11 +58,14 @@ export type {
 export type {
   ColumnType,
   ExtensionInfo,
+  AutoVacuumMode,
   ExtensionOptions,
   FormatCompatibilityName,
   FormatInfo,
   KvEntry,
   OpenOptions,
+  ReclaimedMember,
+  ReclaimOptions,
 } from "./types.js";
 export type {
   Vector,

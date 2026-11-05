@@ -16,8 +16,8 @@ The following capabilities are part of the stable 1.x contract wherever a
 binding exposes them:
 
 - database create, open, read-only open, in-memory create, close, backup,
-  compact, restore, SQL execution, prepared statements, transactions, and
-  savepoints;
+  compact, in-place free-page reclaim, restore, SQL execution, prepared
+  statements, transactions, and savepoints;
 - explicit format probing and copy-forward migration;
 - transactional byte-key/byte-value storage and atomic batches;
 - content-addressed objects, manifests, chunks, range reads, assembly,

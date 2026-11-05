@@ -1,6 +1,7 @@
 use crate::database::{
-    backup_flags, compact_flags, cstring, empty_message, path_to_cstring, restore_flags,
-    take_message, BackupOptions, CompactOptions, RestoreOptions,
+    backup_flags, compact_flags, cstring, empty_message, path_to_cstring, reclaim_request,
+    reclaimed_members, restore_flags, take_message, BackupOptions, CompactOptions, ReclaimOptions,
+    ReclaimedMember, RestoreOptions,
 };
 use crate::error::{Error, Result, Status};
 use crate::extension::{
@@ -447,6 +448,17 @@ impl SharedDatabase {
         };
         self.inner
             .status_locked(unsafe { zova_sys::zova_database_compact(&request) })
+    }
+
+    /// [`crate::Database::reclaim_space`] for a shared handle.
+    pub fn reclaim_space(&self, options: ReclaimOptions) -> Result<Vec<ReclaimedMember>> {
+        let _guard = self.inner.enter()?;
+        let mut out = zova_sys::zova_reclaim_result::default();
+        let request = reclaim_request(self.inner.raw_ptr(), options, &mut out);
+        // SAFETY: the request and result outlive the synchronous call.
+        self.inner
+            .status_locked(unsafe { zova_sys::zova_database_reclaim(&request) })?;
+        Ok(reclaimed_members(&out))
     }
 
     /// [`SharedDatabase::backup_to`] that reports [`Progress`]; see

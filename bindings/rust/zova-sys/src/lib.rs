@@ -133,6 +133,12 @@ pub const ZOVA_PROGRESS_MEMBER_OBJECT_STORE: u32 = 2;
 pub const ZOVA_PROGRESS_MEMBER_VECTOR_STORE: u32 = 3;
 pub const ZOVA_PROGRESS_MEMBER_GRAPH_STORE: u32 = 4;
 
+pub const ZOVA_AUTO_VACUUM_NONE: u32 = 0;
+pub const ZOVA_AUTO_VACUUM_FULL: u32 = 1;
+pub const ZOVA_AUTO_VACUUM_INCREMENTAL: u32 = 2;
+
+pub const ZOVA_RECLAIM_MAX_MEMBERS: usize = 4;
+
 pub const ZOVA_FORMAT_CURRENT: c_int = 0;
 pub const ZOVA_FORMAT_MIGRATABLE: c_int = 1;
 pub const ZOVA_FORMAT_UNSUPPORTED_LEGACY: c_int = 2;
@@ -822,6 +828,31 @@ pub struct zova_database_compact_progress_request {
     pub flags: u32,
     pub progress: zova_progress_fn,
     pub progress_user_data: *mut c_void,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct zova_reclaimed_member {
+    pub member: u32,
+    pub auto_vacuum: u32,
+    pub page_size: u32,
+    pub pages_released: u64,
+    pub free_pages_left: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct zova_reclaim_result {
+    pub member_count: usize,
+    pub members: [zova_reclaimed_member; ZOVA_RECLAIM_MAX_MEMBERS],
+}
+
+#[repr(C)]
+pub struct zova_database_reclaim_request {
+    pub db: *mut zova_database,
+    pub max_pages: u64,
+    pub step_pages: u32,
+    pub out_result: *mut zova_reclaim_result,
 }
 
 #[repr(C)]
@@ -1904,6 +1935,7 @@ extern "C" {
     pub fn zova_database_compact_with_progress(
         request: *const zova_database_compact_progress_request,
     ) -> zova_status;
+    pub fn zova_database_reclaim(request: *const zova_database_reclaim_request) -> zova_status;
     pub fn zova_database_set_busy_timeout(
         request: *const zova_database_busy_timeout_request,
     ) -> zova_status;

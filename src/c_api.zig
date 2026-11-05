@@ -109,6 +109,13 @@ pub const zova_database_backup_request = internal.zova_database_backup_request;
 pub const zova_database_compact_request = internal.zova_database_compact_request;
 pub const zova_database_backup_progress_request = internal.zova_database_backup_progress_request;
 pub const zova_database_compact_progress_request = internal.zova_database_compact_progress_request;
+pub const ZOVA_AUTO_VACUUM_NONE = internal.ZOVA_AUTO_VACUUM_NONE;
+pub const ZOVA_AUTO_VACUUM_FULL = internal.ZOVA_AUTO_VACUUM_FULL;
+pub const ZOVA_AUTO_VACUUM_INCREMENTAL = internal.ZOVA_AUTO_VACUUM_INCREMENTAL;
+pub const ZOVA_RECLAIM_MAX_MEMBERS = internal.ZOVA_RECLAIM_MAX_MEMBERS;
+pub const zova_reclaimed_member = internal.zova_reclaimed_member;
+pub const zova_reclaim_result = internal.zova_reclaim_result;
+pub const zova_database_reclaim_request = internal.zova_database_reclaim_request;
 pub const zova_database_restore_request = internal.zova_database_restore_request;
 pub const zova_database_exec_request = internal.zova_database_exec_request;
 pub const zova_sql_function_register_request = internal.zova_sql_function_register_request;
@@ -492,6 +499,10 @@ pub fn zova_database_backup_with_progress(request: ?*const zova_database_backup_
 
 pub fn zova_database_compact_with_progress(request: ?*const zova_database_compact_progress_request) callconv(.c) zova_status {
     return internal.zova_database_compact_with_progress(request);
+}
+
+pub fn zova_database_reclaim(request: ?*const zova_database_reclaim_request) callconv(.c) zova_status {
+    return internal.zova_database_reclaim(request);
 }
 
 pub fn zova_database_set_busy_timeout(request: ?*const zova_database_busy_timeout_request) callconv(.c) zova_status {
