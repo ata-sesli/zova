@@ -59,7 +59,7 @@ flowchart LR
 After the Go module tag is pushed, applications can add the binding with:
 
 ```sh
-go get github.com/ata-sesli/zova/bindings/go@v1.3.0
+go get github.com/ata-sesli/zova/bindings/go@v1.4.0
 ```
 
 Import it as:
@@ -72,7 +72,7 @@ The Go package is source-only and uses cgo. It does not download or build the
 native Zova C ABI automatically during `go get`; your build environment must
 provide `zova.h` and `libzova_c.a`.
 
-The current development `.zova` format is 13, and Zova does not migrate older
+The current release uses `.zova` format 13, and Zova does not migrate older
 format databases in place. Format-9, format-10, format-11 and format-12 databases can be probed and
 migrated forward with the package-level `ProbeFormat(path)` and
 `MigrateDatabase(source, destination, options...)` functions: migration is
@@ -169,14 +169,14 @@ Because this module lives in the `bindings/go` subdirectory, the release tag
 must include that subdirectory prefix:
 
 ```sh
-git tag -a bindings/go/v1.3.0 -m "Zova Go bindings v1.3.0"
-git push origin bindings/go/v1.3.0
+git tag -a bindings/go/v1.4.0 -m "Zova Go bindings v1.4.0"
+git push origin bindings/go/v1.4.0
 ```
 
 After pushing the tag, ask the public Go module proxy to resolve it:
 
 ```sh
-GOPROXY=proxy.golang.org go list -m github.com/ata-sesli/zova/bindings/go@v1.3.0
+GOPROXY=proxy.golang.org go list -m github.com/ata-sesli/zova/bindings/go@v1.4.0
 ```
 
 The module path is:

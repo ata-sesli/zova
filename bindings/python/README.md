@@ -63,7 +63,7 @@ interpreter fails without attempting a native build.
 The release workflow builds Linux/macOS x86_64/arm64 and Windows x86_64
 stable-ABI wheels.
 
-The current development `.zova` format is 13, and Zova does not migrate older
+The current release uses `.zova` format 13, and Zova does not migrate older
 format databases in place. Format-9, format-10, format-11 and format-12 databases can be probed and
 migrated forward with the module-level `probe_format(path)` and
 `migrate_database(source, destination, *, verify=True)` functions: migration is

@@ -16,10 +16,10 @@ in another.
 
 | Version | Meaning | Declared in | Current |
 | --- | --- | --- | --- |
-| Package version | Zova release identity across every distribution channel | `src/version.zig` `package_version` | `1.3.0` |
-| C ABI version | Compatibility of the exported C ABI and generated C | `src/version.zig` `abi_version_*` | `1.3.0` (`1.3.0` numeric components) |
+| Package version | Zova release identity across every distribution channel | `src/version.zig` `package_version` | `1.4.0` |
+| C ABI version | Compatibility of the exported C ABI and generated C | `src/version.zig` `abi_version_*` | `1.4.0` (`1.4.0` numeric components) |
 | SQLite version | The vendored SQLite amalgamation, and separately SQLite's own file format | `src/version.zig` `sqlite_version` | `3.53.4` |
-| Zova storage format | The layout of a `.zova` database, recorded in `_zova_meta.format_version` | `src/version.zig` `format_version` | `13` (development) |
+| Zova storage format | The layout of a `.zova` database, recorded in `_zova_meta.format_version` | `src/version.zig` `format_version` | `13` |
 
 A SQLite upgrade does not change the Zova storage format and never requires a
 Zova migration. A package or ABI release does not by itself change the storage
@@ -266,7 +266,7 @@ migrateDatabase("app.zova", "app-format-13.zova"); // verify defaults to true
 
 ### Extensions in the bindings
 
-Releases after 1.3.0 also let the bindings migrate a database with a
+From 1.4.0, the bindings can also migrate a database with a
 non-bundled extension installed. Each migrate call takes the same trusted
 bundle paths and trust store as that binding's open call and routes them to
 `zova_database_migrate_with_extensions`. Empty options behave exactly like a
