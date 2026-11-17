@@ -1231,6 +1231,14 @@ comptime {
             "zova_database_backup_with_progress",
             "zova_database_compact_with_progress",
             "zova_database_restore_to_memory",
+            "zova_database_extension_install",
+            "zova_database_extension_drop",
+            "zova_database_extension_list",
+            "zova_database_extension_info",
+            "zova_database_extension_check",
+            "zova_database_extension_check_all",
+            "zova_extension_info_free",
+            "zova_extension_list_free",
         };
         for (allowed) |name| {
             @export(&@field(@This(), name), .{ .name = name });

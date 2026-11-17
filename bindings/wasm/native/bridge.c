@@ -43,9 +43,33 @@ static void export_end(void);
 static int import_end(int commit);
 #endif
 
+/* A module built with its own plugins (ZOVA_WASM_PLUGIN_SOURCES) defines this
+ * to return its statically linked plugin descriptors; the package has none. */
+__attribute__((weak)) const struct zova_plugin_descriptor_v1 *const *zova_wasm_linked_plugins(size_t *count) {
+    *count = 0;
+    return NULL;
+}
+
 #ifdef ZOVA_WASM_OPFS
 extern zova_status zova_opfs_create(const zova_database_open_request *);
 extern zova_status zova_opfs_open(const zova_database_open_request *);
+extern zova_status zova_opfs_create_plugins(const zova_database_open_plugins_request *);
+extern zova_status zova_opfs_open_plugins(const zova_database_open_plugins_request *);
+
+/* Opens or creates `path` with the linked plugins, if the module has any. */
+static int open_with_plugins(const char *path, int create, int *used) {
+    size_t count = 0;
+    const struct zova_plugin_descriptor_v1 *const *plugins = zova_wasm_linked_plugins(&count);
+    *used = count != 0;
+    if (!count) return ZOVA_OK;
+    zova_database_open_plugins_request request = {0};
+    request.path = path;
+    request.plugins = plugins;
+    request.plugin_count = count;
+    request.out_db = &db;
+    request.out_error_message = &message;
+    return create ? zova_opfs_create_plugins(&request) : zova_opfs_open_plugins(&request);
+}
 
 EXPORTED int zw_open_file(int exists) {
     if (db) return ZOVA_INVALID_ARGUMENT;
@@ -53,6 +77,9 @@ EXPORTED int zw_open_file(int exists) {
     /* Normal open validates without migration, but permits SQLite to recover
      * an abandoned rollback journal. A preliminary read-only open blocks that
      * recovery. Clean incompatible files are still rejected without mutation. */
+    int used = 0;
+    int status = open_with_plugins("/db.zova", !exists, &used);
+    if (used) return status;
     zova_database_open_request request = {"/db.zova", &db, &message};
     return exists ? zova_opfs_open(&request) : zova_opfs_create(&request);
 }
@@ -109,6 +136,7 @@ EXPORTED int zw_migrate_stage(int verify) {
     request.flags = verify ? 0 : ZOVA_MIGRATE_NO_VERIFY;
     request.progress = report_progress;
     request.out_error_message = &message;
+    request.plugins = zova_wasm_linked_plugins(&request.plugin_count);
     return zova_database_migrate_with_progress(&request);
 }
 
@@ -178,6 +206,11 @@ EXPORTED const char *zw_status_name(int status) { return zova_status_name(status
 EXPORTED int zw_create(void) {
     if (db) return ZOVA_INVALID_ARGUMENT;
     zova_message_free(&message);
+#ifdef ZOVA_WASM_OPFS
+    int used = 0;
+    int status = open_with_plugins(":memory:", 1, &used);
+    if (used) return status;
+#endif
     zova_database_create_memory_request request = {&db, &message};
     return zova_database_create_memory(&request);
 }
@@ -1433,7 +1466,8 @@ static int call_object_stream(int op, reader *r) {
 #ifdef ZOVA_WASM_OPFS
 /* Browser-private exports of the core (src/c_api.zig), not C ABI. */
 extern void *zova_wasm_sqlite_handle(zova_database *database);
-extern zova_status zova_wasm_verify_copy(const char *path, zova_message *out_error_message);
+extern zova_status zova_wasm_verify_copy(const char *path, const struct zova_plugin_descriptor_v1 *const *plugins,
+    size_t plugin_count, zova_message *out_error_message);
 
 /* Whole-database export in bounded reads: the stored file, read through the
  * connection's own file handle while the caller holds the database, or a
@@ -1521,6 +1555,17 @@ static int import_write(const uint8_t *data, size_t len) {
     if (rc != SQLITE_OK) return sqlite_failure(NULL, rc);
     import_offset += (sqlite3_int64)len;
     return ZOVA_OK;
+}
+
+static void wr_extension(const zova_extension_info *info) {
+    wr_blob(info->name, info->name_len);
+    wr_blob(info->version, info->version_len);
+    wr_blob(info->storage_prefix, info->storage_prefix_len);
+    wr_blob(info->zova_abi_min, info->zova_abi_min_len);
+    wr_blob(info->capabilities, info->capabilities_len);
+    wr_u32(info->required);
+    wr_u64((uint64_t)info->installed_at_unix);
+    wr_blob(info->manifest_json, info->manifest_json_len);
 }
 
 /* Vacuum, reclaim, verified copies and their publication into another pool. */
@@ -1622,7 +1667,42 @@ static int call_maintenance(int op, reader *r) {
         case 101: {
             PARSED;
             zova_message_free(&message);
-            return zova_wasm_verify_copy("/db.zova", &message);
+            size_t count = 0;
+            const struct zova_plugin_descriptor_v1 *const *plugins = zova_wasm_linked_plugins(&count);
+            return zova_wasm_verify_copy("/db.zova", plugins, count, &message);
+        }
+        case 102: case 103: case 106: {
+            /* Install, drop or check one extension. */
+            zova_database_extension_request request = {db, rd_str(r)};
+            PARSED;
+            return op == 102 ? zova_database_extension_install(&request) :
+                op == 103 ? zova_database_extension_drop(&request) : zova_database_extension_check(&request);
+        }
+        case 104: {
+            zova_extension_list list = {0};
+            zova_database_extension_list_request request = {db, &list};
+            PARSED;
+            int status = zova_database_extension_list(&request);
+            if (status == ZOVA_OK) {
+                wr_u32((uint32_t)list.len);
+                for (size_t index = 0; index < list.len; index++) wr_extension(&list.items[index]);
+            }
+            zova_extension_list_free(&list);
+            return status;
+        }
+        case 105: {
+            zova_extension_info info = {0};
+            zova_database_extension_info_request request = {db, rd_str(r), &info};
+            PARSED;
+            int status = zova_database_extension_info(&request);
+            if (status == ZOVA_OK) wr_extension(&info);
+            zova_extension_info_free(&info);
+            return status;
+        }
+        case 107: {
+            PARSED;
+            zova_database_simple_request request = {db};
+            return zova_database_extension_check_all(&request);
         }
         default: return ZOVA_INVALID_ARGUMENT;
     }

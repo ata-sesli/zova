@@ -231,3 +231,15 @@ test("import, list and delete validate before posting and stream imports chunk b
   await expect(memory.exportStream(0)).rejects.toBeInstanceOf(ZovaWasmError);
   await memory.close();
 });
+test("extension calls validate names before posting", async () => {
+  installWorker();
+  const db = await Database.createMemory();
+  const start = TestWorker.last.messages.length;
+  await expect(db.installExtension("a\0b")).rejects.toBeInstanceOf(ZovaWasmError);
+  await expect(db.extensionInfo(5 as never)).rejects.toBeInstanceOf(ZovaWasmError);
+  expect(TestWorker.last.messages.length).toBe(start);
+  await db.installExtension("trgm");
+  await db.checkExtensions();
+  expect(TestWorker.last.messages.slice(start).map(x => x.operation)).toEqual(["extension_install", "extensions_check_all"]);
+  await db.close();
+});

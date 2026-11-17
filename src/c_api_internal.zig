@@ -79,10 +79,21 @@ pub fn wasmSqliteHandle(db: ?*zova_database) callconv(.c) ?*anyopaque {
 /// Browser bridge only, never part of the C ABI: the core's copy verification
 /// (`zova.verifyOperationalCopy`) of a stored file, as native backup, compact
 /// and restore run it. Used to verify a streamed import before opening it.
-pub fn wasmVerifyCopy(path: ?[*:0]const u8, out_error_message: ?*zova_message) callconv(.c) zova_status {
+/// `plugins` are the browser module's statically linked plugin descriptors.
+pub fn wasmVerifyCopy(
+    path: ?[*:0]const u8,
+    plugins: ?[*]const ?*const zova_plugin_descriptor_v1,
+    plugin_count: usize,
+    out_error_message: ?*zova_message,
+) callconv(.c) zova_status {
     const errors = @import("c_api/errors.zig");
     const source = path orelse return errors.failMessage(out_error_message, error.InvalidArgument);
-    zova.verifyOperationalCopy(std.mem.span(source), zova.bundledExtensionRegistry()) catch |err| return errors.failMessage(out_error_message, err);
+    const linked: []const ?*const zova_plugin_descriptor_v1 = if (plugin_count == 0) &.{} else (plugins orelse return errors.failMessage(out_error_message, error.InvalidArgument))[0..plugin_count];
+    var dynamic = zova.DynamicExtensionSet.loadWithPlugins(std.heap.c_allocator, &.{}, .{ .path = null }, linked) catch |err| return errors.failMessage(out_error_message, err);
+    defer dynamic.deinit();
+    var registry = zova.DynamicExtensionOwnedRegistry.init(std.heap.c_allocator, &.{ zova.bundledExtensionRegistry(), dynamic.registry() }) catch |err| return errors.failMessage(out_error_message, err);
+    defer registry.deinit();
+    zova.verifyOperationalCopy(std.mem.span(source), registry.registry()) catch |err| return errors.failMessage(out_error_message, err);
     return .OK;
 }
 

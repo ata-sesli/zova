@@ -94,6 +94,17 @@ export interface ProgressOptions {
   readonly progress?: (progress: Progress) => void;
   readonly signal?: AbortSignal;
 }
+/** An installed extension, as native `zova-js` reports it. */
+export interface ExtensionInfo {
+  readonly name: string;
+  readonly version: string;
+  readonly storagePrefix: string;
+  readonly zovaAbiMin: string;
+  readonly capabilities: string;
+  readonly required: boolean;
+  readonly installedAtUnix: bigint;
+  readonly manifestJson: string;
+}
 /** One stored persistent database. `bytes` is its storage use, unknown while another worker has it open. */
 export interface PersistentDatabaseInfo {
   readonly name: string;
@@ -909,6 +920,26 @@ export class Database {
       "prepare", () => { validateSql(sql); return { sql }; });
     return new Statement((operation, prepare) => this.#request(operation, prepare, true), info, constructionToken);
   }
+
+  /**
+   * Extension lifecycle for the extensions this module knows: the bundled
+   * `trgm`, and plugins linked into a custom build. There is no run-time
+   * loading; `.zovaext` bundles, bundle paths and trust stores do not apply.
+   */
+  installExtension(name: string): Promise<void> {
+    return this.#request("extension_install", () => ({ name: text(name, "Extension name") }));
+  }
+  dropExtension(name: string): Promise<void> {
+    return this.#request("extension_drop", () => ({ name: text(name, "Extension name") }));
+  }
+  listExtensions(): Promise<ExtensionInfo[]> { return this.#request("extensions_list", () => ({})); }
+  extensionInfo(name: string): Promise<ExtensionInfo> {
+    return this.#request("extension_info", () => ({ name: text(name, "Extension name") }));
+  }
+  checkExtension(name: string): Promise<void> {
+    return this.#request("extension_check", () => ({ name: text(name, "Extension name") }));
+  }
+  checkExtensions(): Promise<void> { return this.#request("extensions_check_all", () => ({})); }
 
   /** Releases free pages of incremental auto-vacuum files in bounded steps, as native. */
   reclaimSpace(options: ReclaimOptions = {}): Promise<ReclaimedMember[]> {

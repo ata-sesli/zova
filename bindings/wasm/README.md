@@ -422,6 +422,41 @@ has started, the migration completes. `verify: false` skips verification of the
 staged copy. Databases with bound stores cannot exist in browser storage and
 reject with `ZOVA_BOUND_STORE_INVALID`. Downgrades are not supported.
 
+## Extensions
+
+```ts
+await db.installExtension('trgm');
+const hits = await db.query(
+  `SELECT document_id, score FROM zova_trgm_search
+   WHERE index_name = ? AND query = ? AND threshold = 0.2 AND "limit" = 10 ORDER BY rank`,
+  ['messages', 'attachement failed']);
+console.log(await db.listExtensions());  // native ExtensionInfo records
+await db.checkExtensions();
+await db.dropExtension('trgm');
+```
+
+`installExtension`, `dropExtension`, `listExtensions`, `extensionInfo`,
+`checkExtension` and `checkExtensions` manage the extensions the module was
+built with: the bundled `trgm`, and nothing else in the published package.
+Installed extensions register their SQL on every open, as natively. A stored
+database with an extension the module lacks rejects on open with
+`ZOVA_EXTENSION_UNAVAILABLE`, as native Zova does without that extension's code.
+
+There is no run-time loading in browsers: `.zovaext` bundles and the native
+`ExtensionOptions.bundlePaths` and `trustStorePath` options do not apply.
+Applications that build their own module can link plugins statically through
+the native linked-plugin descriptors. Pass C sources, separated by `:`, in
+`ZOVA_WASM_PLUGIN_SOURCES` to `tools/build-package.sh`; one of them defines
+
+```c
+const struct zova_plugin_descriptor_v1 *const *zova_wasm_linked_plugins(size_t *count);
+```
+
+returning the plugin descriptors (see `tests/linked-plugin.c`). The module then
+opens, creates, migrates and verifies imports with those plugins, as native
+`zova_database_open_with_plugins` does. `tests/linked-plugin-browser.mjs`
+checks such a build; the package gate does not build one.
+
 ## Native API parity
 
 SQL, transaction, KV and notification methods of native `zova-js` and their
@@ -451,16 +486,17 @@ browser form. Every browser method returns a promise.
 | `reclaimSpace`, `vacuum` | same |
 | `backupTo(path)`, `compactTo(path)` (async with progress) | `backupTo(name)`, `compactTo(name)` to a persistent name, with progress |
 | `restoreBackup(path, path)`, `restoreBackupToMemory(path)` | same with persistent names |
+| `installExtension`, `dropExtension`, `listExtensions`, `extensionInfo`, `checkExtension`, `checkExtensions` | same, for bundled and statically linked extensions |
+| `ExtensionOptions` (`bundlePaths`, `trustStorePath`) at open | not applicable; link plugins at build time |
 
 ## Current boundaries
 
 Not available here: keyed, payload, scan and fresh-build graph APIs;
-native extensions; bound stores; shared access between workers. The
+run-time extension loading; bound stores; shared access between workers. The
 native `zova-js` package is independent. There is no Node/CommonJS fallback.
 
-There is no public bundled-extension lifecycle or application SQL callback API,
-and no `.zovaext` loader or extension-data upgrade API. SQL execution does not
-expose those native capabilities. See the
+There is no application SQL callback API, `.zovaext` loader or extension-data
+upgrade API. See the
 [extension capability matrix](../../docs/extensions.md#availability-and-binding-matrix).
 
 Memory databases use volatile storage; named databases use the bundled SQLite's

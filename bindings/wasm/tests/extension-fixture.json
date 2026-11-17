@@ -1,0 +1,16 @@
+{"generatedBy": "zova C ABI 1.4.0",
+ "trgmSql": [
+  ["select quote(zova_trgm_similarity('attachment upload failed', 'attachement failed'))", ["0.53333333333333333"]],
+  ["select quote(zova_trgm_similarity('', ''))", ["1.0"]],
+  ["select quote(zova_trgm_create_index('messages'))", ["1"]],
+  ["select quote(zova_trgm_put('messages', 'm1', 'record', 'messages', '1', 'attachment upload failed'))", ["1"]],
+  ["select quote(zova_trgm_put('messages', 'm2', 'record', 'messages', '2', 'payment declined'))", ["1"]],
+  ["select quote(zova_trgm_put('messages', 'm3', 'external', NULL, NULL, 'upload retry scheduled'))", ["1"]],
+  ["select quote(zova_trgm_put('messages', 'm4', 'record', 'messages', '4', 'attachment saved'))", ["1"]],
+  ["select quote(zova_trgm_delete('messages', 'm4'))", ["1"]],
+  ["select quote(document_id) || ',' || quote(target_type) || ',' || quote(target_namespace) || ',' || quote(target_ref) || ',' || quote(score) from zova_trgm_search where index_name = 'messages' and query = 'attachement failed' and threshold = 0.1 and \"limit\" = 10 order by rank", ["'m1','record','messages','1',0.53333333333333333", "'m2','record','messages','2',0.15151515151515152", "'m3','external',NULL,NULL,0.1"]],
+  ["select quote(document_id) || ',' || quote(score) from zova_trgm_search where index_name = 'messages' and query = 'uplod' and threshold = 0.05 and \"limit\" = 10 order by rank", ["'m3',0.19230769230769232", "'m1',0.13793103448275862"]],
+  ["select quote(zova_trgm_drop_index('messages'))", ["1"]]],
+ "installed": [{"name": "trgm", "version": "0.1.0", "storagePrefix": "_zova_ext_trgm_", "zovaAbiMin": "1.0.0", "capabilities": "sql,trgm", "required": true, "manifestJson": "{\"extension\":\"trgm\",\"version\":\"0.1.0\"}"}],
+ "check": "ZOVA_OK", "checkAll": "ZOVA_OK", "installAgain": "ZOVA_EXTENSION_EXISTS", "installUnknown": "ZOVA_EXTENSION_NOT_FOUND", "checkAfterDrop": "ZOVA_EXTENSION_NOT_FOUND", "dropAgain": "ZOVA_EXTENSION_NOT_FOUND",
+ "missingPlugin": {"extension": "c_test", "status": "ZOVA_EXTENSION_UNAVAILABLE", "message": "ExtensionUnavailable"}}

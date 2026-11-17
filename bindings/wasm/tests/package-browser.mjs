@@ -484,6 +484,44 @@ try {
     await db.close();
   }
 
+  // Bundled extensions match native results; a missing plugin fails as native (#221).
+  {
+    const h = await import("/helpers.mjs");
+    const fixture = await (await fetch("/extension-fixture.json")).json();
+    db = await Database.createMemory();
+    await db.installExtension("trgm");
+    for (const [sql, rows] of fixture.trgmSql) {
+      const actual = (await db.query(sql)).rows.map(row => row[0]);
+      assert(JSON.stringify(actual) === JSON.stringify(rows), `trgm: ${sql} returned ${JSON.stringify(actual)}, native ${JSON.stringify(rows)}`);
+    }
+    const strip = ({ installedAtUnix, ...rest }) => { assert(typeof installedAtUnix === "bigint" && installedAtUnix > 0n, "installedAtUnix"); return rest; };
+    const listed = (await db.listExtensions()).map(strip);
+    assert(JSON.stringify(listed) === JSON.stringify(fixture.installed), `extension list ${JSON.stringify(listed)}`);
+    assert(JSON.stringify(strip(await db.extensionInfo("trgm"))) === JSON.stringify(fixture.installed[0]), "extension info");
+    const statusOf = async promise => { try { await promise; return "ZOVA_OK"; } catch (error) { return error.status; } };
+    assert(await statusOf(db.checkExtension("trgm")) === fixture.check && await statusOf(db.checkExtensions()) === fixture.checkAll, "extension checks");
+    assert(await statusOf(db.installExtension("trgm")) === fixture.installAgain && await statusOf(db.installExtension("nonexistent")) === fixture.installUnknown, "install errors");
+    await db.dropExtension("trgm");
+    assert(await statusOf(db.checkExtension("trgm")) === fixture.checkAfterDrop && await statusOf(db.dropExtension("trgm")) === fixture.dropAgain, "drop");
+    assert((await db.listExtensions()).length === 0, "dropped extension listed");
+    await db.close();
+    // Installed in a stored database, trgm is registered again on open.
+    const trgmName = "trgm-" + crypto.randomUUID();
+    db = await Database.openPersistent(trgmName);
+    await db.installExtension("trgm");
+    await db.close();
+    db = await Database.openPersistent(trgmName);
+    assert((await db.query("SELECT zova_trgm_similarity('abc', 'abd')")).rows[0][0] > 0 && (await db.listExtensions())[0].name === "trgm", "trgm after reopen");
+    await db.close();
+    // A database whose extension code this module lacks.
+    const missingName = "missing-ext-" + crypto.randomUUID();
+    await h.seed(missingName, await h.fetchBytes("/extension-missing.zova"));
+    let missing;
+    try { await Database.openPersistent(missingName); } catch (error) { missing = error; }
+    assert(missing instanceof ZovaWasmError && missing.status === fixture.missingPlugin.status && missing.message === fixture.missingPlugin.message,
+      `missing plugin: ${missing?.status} ${missing?.message}, native ${fixture.missingPlugin.status} ${fixture.missingPlugin.message}`);
+  }
+
   await fetch("/result", { method: "POST", body: JSON.stringify({ ok: true, packedPackage: true,
     initializationMs: initialized - started, firstQueryMs: queried - initialized }) });
 } catch (error) {
