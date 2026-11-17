@@ -6,6 +6,7 @@ import { testDurability } from "./durability-browser.mjs";
 import { testMigration } from "./migration-browser.mjs";
 import { testObjectStreaming } from "./object-stream-browser.mjs";
 import { testMaintenance } from "./maintenance-browser.mjs";
+import { testTransfer } from "./transfer-browser.mjs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 
@@ -195,6 +196,7 @@ try {
   await testDurability(context, base);
   await testMigration(context, base, migrationFormats);
   await testMaintenance(context, base);
+  const transfer = await testTransfer(context, base, Number(process.env.ZOVA_WASM_TRANSFER_MIB ?? 128));
   const objectStreaming = await testObjectStreaming(context, base, Number(process.env.ZOVA_WASM_STREAM_MIB ?? 512));
   const examplePage = await context.newPage();
   await examplePage.goto(`${base}/failure`);
@@ -206,7 +208,7 @@ try {
   console.log(JSON.stringify({ ...result, initializationFailure: true, runtimeFailure: true,
     persistentReopen: true, rejectedOpenPreservesBytes: true, missingOpfs: true,
     poolInitializationFailurePreservesData: true, exclusiveOwnership: true,
-    durabilityAndInjectedStorageFaults: true, migration: true, maintenance: true, objectStreaming, wasmBytes }));
+    durabilityAndInjectedStorageFaults: true, migration: true, maintenance: true, transfer, objectStreaming, wasmBytes }));
 } finally {
   clearTimeout(deadline);
   await browser?.close();

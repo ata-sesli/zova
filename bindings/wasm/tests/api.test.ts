@@ -217,3 +217,17 @@ test("backup and compact stage, then publish, and stop at phase boundaries", asy
   expect(thrown).toBeUndefined(); // the test worker reports no progress, so nothing cancels
   await db.close();
 });
+test("import, list and delete validate before posting and stream imports chunk by chunk", async () => {
+  installWorker();
+  await expect(Database.deletePersistent("../x")).rejects.toBeInstanceOf(ZovaWasmError);
+  await expect(Database.importPersistent("ok", 5 as never)).rejects.toBeInstanceOf(ZovaWasmError);
+  const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array([1, 2])); controller.enqueue(new Uint8Array([3])); controller.close(); } });
+  const db = await Database.importPersistent("streamed", stream);
+  expect(TestWorker.last.messages.map(x => x.operation)).toEqual(["initialize", "import_write", "import_write", "import_finish"]);
+  expect(TestWorker.last.messages[0]).toMatchObject({ args: { name: "streamed", importing: true } });
+  await db.close();
+  const memory = await Database.createMemory();
+  await memory.transaction(async tx => { await expect(tx.exportStream()).rejects.toMatchObject({ status: "ZOVA_MISUSE" }); });
+  await expect(memory.exportStream(0)).rejects.toBeInstanceOf(ZovaWasmError);
+  await memory.close();
+});

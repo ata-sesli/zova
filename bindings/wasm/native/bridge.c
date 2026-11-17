@@ -38,6 +38,10 @@ static const uint8_t *bytes;
 static size_t length;
 static void clear_output(void);
 static void streams_close(void);
+#ifdef ZOVA_WASM_OPFS
+static void export_end(void);
+static int import_end(int commit);
+#endif
 
 #ifdef ZOVA_WASM_OPFS
 extern zova_status zova_opfs_create(const zova_database_open_request *);
@@ -228,6 +232,10 @@ EXPORTED int zw_close(void) {
     subscriptions = NULL;
     subscription_count = 0;
     streams_close();
+#ifdef ZOVA_WASM_OPFS
+    export_end();
+    import_end(0);
+#endif
     statement = NULL;
     current = -1;
     free(out);
@@ -1423,6 +1431,98 @@ static int call_object_stream(int op, reader *r) {
 }
 
 #ifdef ZOVA_WASM_OPFS
+/* Browser-private exports of the core (src/c_api.zig), not C ABI. */
+extern void *zova_wasm_sqlite_handle(zova_database *database);
+extern zova_status zova_wasm_verify_copy(const char *path, zova_message *out_error_message);
+
+/* Whole-database export in bounded reads: the stored file, read through the
+ * connection's own file handle while the caller holds the database, or a
+ * serialized copy of a memory database. */
+static sqlite3_file *export_file;
+static unsigned char *export_memory;
+static sqlite3_int64 export_size;
+
+static void export_end(void) {
+    sqlite3_free(export_memory);
+    export_memory = NULL;
+    export_file = NULL;
+    export_size = 0;
+}
+static int export_begin(reader *r) {
+    PARSED;
+    export_end();
+    sqlite3 *raw = zova_wasm_sqlite_handle(db);
+    if (!raw) return ZOVA_MISUSE;
+    if (sqlite3_txn_state(raw, NULL) != SQLITE_TXN_NONE) {
+        snprintf(bridge_error, sizeof(bridge_error), "Export rejects while a transaction is open");
+        return ZOVA_MISUSE;
+    }
+    sqlite3_file *file = NULL;
+    if (sqlite3_file_control(raw, "main", SQLITE_FCNTL_FILE_POINTER, &file) == SQLITE_OK && file && file->pMethods) {
+        if (file->pMethods->xFileSize(file, &export_size) != SQLITE_OK) return sqlite_failure(NULL, SQLITE_IOERR);
+        export_file = file;
+    } else {
+        export_memory = sqlite3_serialize(raw, "main", &export_size, 0);
+        if (!export_memory) return ZOVA_OUT_OF_MEMORY;
+    }
+    integer = export_size;
+    return ZOVA_OK;
+}
+static int export_read(uint64_t offset, uint32_t size) {
+    if (!export_file && !export_memory) return ZOVA_MISUSE;
+    if (offset >= (uint64_t)export_size) size = 0;
+    else if ((uint64_t)size > (uint64_t)export_size - offset) size = (uint32_t)((uint64_t)export_size - offset);
+    uint8_t *target = wr_reserve(size);
+    if (!target) return ZOVA_OUT_OF_MEMORY;
+    if (export_memory) memcpy(target, export_memory + offset, size);
+    else if (size && export_file->pMethods->xRead(export_file, target, (int)size, (sqlite3_int64)offset) != SQLITE_OK) {
+        return sqlite_failure(NULL, SQLITE_IOERR);
+    }
+    bytes = target;
+    length = size;
+    return ZOVA_OK;
+}
+
+/* Streamed import: chunks are written in order straight into /db.zova of the
+ * default VFS, which must not exist; the caller verifies and opens it. */
+static sqlite3_file *import_file;
+static sqlite3_int64 import_offset;
+
+static int import_end(int commit) {
+    if (!import_file) return commit ? ZOVA_MISUSE : ZOVA_OK;
+    int rc = commit ? import_file->pMethods->xSync(import_file, SQLITE_SYNC_FULL) : SQLITE_OK;
+    import_file->pMethods->xClose(import_file);
+    sqlite3_free(import_file);
+    import_file = NULL;
+    import_offset = 0;
+    return rc == SQLITE_OK ? ZOVA_OK : sqlite_failure(NULL, rc);
+}
+static int import_begin(void) {
+    if (import_file || db) return ZOVA_MISUSE;
+    sqlite3_vfs *vfs = sqlite3_vfs_find(NULL);
+    if (!vfs) return ZOVA_CANT_OPEN;
+    import_file = sqlite3_malloc(vfs->szOsFile);
+    if (!import_file) return ZOVA_OUT_OF_MEMORY;
+    memset(import_file, 0, (size_t)vfs->szOsFile);
+    int flags = 0;
+    int rc = vfs->xOpen(vfs, "/db.zova", import_file, SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_MAIN_DB, &flags);
+    if (rc != SQLITE_OK) {
+        sqlite3_free(import_file);
+        import_file = NULL;
+        return sqlite_failure(NULL, rc);
+    }
+    import_offset = 0;
+    return ZOVA_OK;
+}
+static int import_write(const uint8_t *data, size_t len) {
+    if (!import_file) return ZOVA_MISUSE;
+    if (len > INT32_MAX) return ZOVA_INVALID_ARGUMENT;
+    int rc = len ? import_file->pMethods->xWrite(import_file, data, (int)len, import_offset) : SQLITE_OK;
+    if (rc != SQLITE_OK) return sqlite_failure(NULL, rc);
+    import_offset += (sqlite3_int64)len;
+    return ZOVA_OK;
+}
+
 /* Vacuum, reclaim, verified copies and their publication into another pool. */
 static int call_maintenance(int op, reader *r) {
     switch (op) {
@@ -1499,6 +1599,30 @@ static int call_maintenance(int op, reader *r) {
             zova_message_free(&message);
             zova_database_restore_to_memory_request request = {source_path, verify ? 0 : ZOVA_RESTORE_NO_VERIFY, &db, &message};
             return zova_database_restore_to_memory(&request);
+        }
+        case 95: return export_begin(r);
+        case 96: {
+            uint64_t offset = rd_u64(r);
+            uint32_t size = rd_u32(r);
+            PARSED;
+            return export_read(offset, size);
+        }
+        case 97: PARSED; export_end(); return ZOVA_OK;
+        case 98: PARSED; return import_begin();
+        case 99: {
+            zova_kv_bytes data = rd_bytes(r);
+            PARSED;
+            return import_write(data.data, data.len);
+        }
+        case 100: {
+            uint32_t commit = rd_u32(r);
+            PARSED;
+            return import_end(commit);
+        }
+        case 101: {
+            PARSED;
+            zova_message_free(&message);
+            return zova_wasm_verify_copy("/db.zova", &message);
         }
         default: return ZOVA_INVALID_ARGUMENT;
     }

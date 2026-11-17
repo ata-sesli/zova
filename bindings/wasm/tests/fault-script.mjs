@@ -2,11 +2,12 @@
 // ("publish-0" before replacing, "publish-1" after the commit) or at the nth
 // storage write after replacement starts ("write-n"). With `stop` the page
 // terminates the worker there; without it the worker stays stopped and keeps
-// its lock. `count` reports the replacement's write count.
+// its lock. `count` reports the replacement's write count. `always` counts
+// every storage write from the start.
 export const faultScript = config => `
   const testConfig = ${JSON.stringify(config)};
   const testPost = self.postMessage.bind(self);
-  let testPublishing = false;
+  let testPublishing = Boolean(testConfig.always);
   let testWrites = 0;
   const testStop = () => { if (testConfig.stop) testPost({ testStop: true }); for (;;) {} };
   if (testConfig.estimate) navigator.storage.estimate = async () => testConfig.estimate;
