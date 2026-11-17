@@ -100,7 +100,8 @@ do not spin or try to steal them. `ZOVA_CANT_OPEN` can indicate missing storage 
 locking support. Invalid names produce `ZOVA_INVALID_ARGUMENT`.
 
 Format/schema errors are not a request to recreate or delete the database.
-There is no automatic migration here. Storage write/flush failures reject rather
+Opening never migrates; `ZOVA_MIGRATION_REQUIRED` means an older stored format
+that `Database.migratePersistent()` can upgrade (see below). Storage write/flush failures reject rather
 than fall back to memory; quota failures may surface through SQLite's storage
 error mapping, not as a JavaScript `QuotaExceededError`. Do not assume a failed
 write succeeded or blindly replay a larger application operation. For an explicit
@@ -246,12 +247,53 @@ overwrites one) and with the usual opening errors for bytes that are not a
 compatible Zova database, leaving nothing stored under that name. Both hold the
 whole database in memory.
 
+## Migrating stored databases
+
+A newer package can use a newer storage format. Opening a database stored by
+an older package then rejects with `ZOVA_MIGRATION_REQUIRED` and changes
+nothing. Migrate it explicitly, then open it:
+
+```ts
+const info = await Database.probePersistent('my-app'); // { formatVersion, compatibility }
+if (info.compatibility === 'migratable') {
+  await Database.migratePersistent('my-app', {
+    progress: ({ phase, member, done, total }) => console.log(phase, member, done, total),
+    signal: AbortSignal.timeout(60_000),
+  });
+}
+const db = await Database.openPersistent('my-app');
+```
+
+`probePersistent()` reads the format without opening or changing the
+database. `compatibility` is `current`, `migratable`, `unsupported_legacy` or
+`unsupported_future`, as native `probeFormat`. Both calls take the database's
+lock: they reject with `ZOVA_BUSY` while another tab or worker has it open, and
+other tabs get `ZOVA_BUSY` while a migration runs.
+
+`migratePersistent()` runs native Zova migration on a staged copy in the same
+origin storage: it copies, migrates and verifies the copy, then replaces the
+stored database with it in one journaled SQLite write. A worker or tab that
+stops at any point leaves either the original or the migrated database; the
+next open, probe or migration rolls back an interrupted replacement and
+removes the staged copy, and migrating again resumes. A database that is
+already current resolves without changes. Migration needs free origin storage
+for about twice the database size; it checks `navigator.storage.estimate()`
+first and rejects with `ZOVA_CANT_OPEN` naming the shortfall.
+
+Progress events use the native phases (`copy`, `migrate`, `verify`,
+`publish`). Aborting `signal`, or throwing from `progress`, before the
+replacement starts stops the worker and rejects with `ZOVA_INTERRUPTED` (or the
+thrown error), leaving the stored database unchanged; once the `publish` phase
+has started, the migration completes. `verify: false` skips verification of the
+staged copy. Databases with bound stores cannot exist in browser storage and
+reject with `ZOVA_BOUND_STORE_INVALID`. Downgrades are not supported.
+
 ## Current boundaries
 
 Not available here: keyed, payload, scan and fresh-build graph APIs; filtered
 vector search; object chunk, writer, reader and manifest APIs; export of memory
 databases; streaming export/import; deleting or listing persistent databases;
-native extensions; bound stores; migration; shared access between workers. The
+native extensions; bound stores; shared access between workers. The
 native `zova-js` package is independent. There is no Node/CommonJS fallback.
 
 There is no public bundled-extension lifecycle or application SQL callback API,

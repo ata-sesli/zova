@@ -2,7 +2,9 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const invalid = message => Object.assign(new Error(message), { status: "ZOVA_INVALID_ARGUMENT", statusCode: 1 });
 
-function acquireOwnership(name) {
+// `waitMs` waits that long for a lock that a terminated worker is still
+// releasing; ownership is otherwise never queued.
+function acquireOwnership(name, waitMs = 0) {
   if (!globalThis.navigator?.locks?.request) {
     throw Object.assign(new Error("Web Locks are required for persistent databases"), { status: "ZOVA_CANT_OPEN", statusCode: 13 });
   }
@@ -11,8 +13,8 @@ function acquireOwnership(name) {
     const held = new Promise(release => { unlock = release; });
     // Hold the callback open for the entire storage lifetime. Never queue or
     // steal a lock. Worker termination also releases this browser-owned lock.
-    const released = navigator.locks.request("zova:opfs:" + name,
-      { mode: "exclusive", ifAvailable: true }, lock => {
+    const options = waitMs > 0 ? { mode: "exclusive", signal: AbortSignal.timeout(waitMs) } : { mode: "exclusive", ifAvailable: true };
+    const released = navigator.locks.request("zova:opfs:" + name, options, lock => {
         if (!lock) {
           reject(Object.assign(new Error("Database is in use: " + name), { status: "ZOVA_BUSY", statusCode: 10 }));
           return;
@@ -20,9 +22,15 @@ function acquireOwnership(name) {
         resolve(async () => { unlock(); await released; });
         return held;
       });
-    released.catch(reject);
+    released.catch(error => reject(error?.name === "TimeoutError"
+      ? Object.assign(new Error("Database is in use: " + name), { status: "ZOVA_BUSY", statusCode: 10 }) : error));
   });
 }
+
+const phases = ["copy", "migrate", "verify", "publish"];
+const members = [null, "main", "object_store", "vector_store", "graph_store"];
+const compatibilities = ["current", "migratable", "unsupported_legacy", "unsupported_future"];
+const migrationStaging = ["/migrate.zova-journal", "/migrate.zova"];
 
 const metrics = ["cosine", "l2", "dot"];
 const elementTypes = ["f32", "f16", "i8"];
@@ -153,6 +161,7 @@ export function serveWorker(createModule, port = globalThis) {
   let module;
   let state = "new";
   let lastId = 0;
+  let currentId = 0;
   let queue = Promise.resolve();
   let pool;
   let releaseOwnership;
@@ -293,16 +302,81 @@ export function serveWorker(createModule, port = globalThis) {
         return item;
       }),
   };
+  const probe = () => {
+    check(module._zw_probe());
+    return { formatVersion: Number(module._zw_integer()), compatibility: compatibilities[module._zw_number()], bytes: module._zw_float() };
+  };
+  const progress = (phase, done, total) => port.postMessage({ id: currentId, progress: { phase, member: null, done, total } });
+  const removeStaging = () => migrationStaging.forEach(name => pool.unlink(name));
+  // Requests in a worker that owns a persistent name without opening it.
+  const maintain = async (operation, args) => {
+    switch (operation) {
+      case "probe": {
+        const { formatVersion, compatibility } = probe();
+        return { formatVersion, compatibility };
+      }
+      // Staging leaves the database unchanged. The caller sends
+      // `migrate_publish` only if the migration was not cancelled meanwhile.
+      case "migrate_stage": {
+        const info = probe();
+        if (info.compatibility === "current") {
+          removeStaging();
+          return { staged: false };
+        }
+        if (info.compatibility !== "migratable") {
+          const future = info.compatibility === "unsupported_future";
+          throw Object.assign(new Error(`Format ${info.formatVersion} cannot be migrated`),
+            { status: future ? "ZOVA_UNSUPPORTED_FUTURE_FORMAT" : "ZOVA_UNSUPPORTED_LEGACY_FORMAT", statusCode: future ? 36 : 37 });
+        }
+        // The staged copy and the publication journal can each need the
+        // whole database. Check before copying, not at a mid-copy quota error.
+        const estimate = await Promise.resolve(navigator.storage.estimate?.()).catch(() => undefined);
+        if (estimate?.quota !== undefined && estimate.usage !== undefined && estimate.quota - estimate.usage < 2 * info.bytes) {
+          throw Object.assign(new Error(`Migration needs ${2 * info.bytes} free bytes of origin storage; ${estimate.quota - estimate.usage} are available`),
+            { status: "ZOVA_CANT_OPEN", statusCode: 13 });
+        }
+        removeStaging();
+        check(module._zw_migrate_stage(args.verify === false ? 0 : 1));
+        return { staged: true };
+      }
+      case "migrate_publish": {
+        if (!pool.getFileNames().includes("/migrate.zova")) throw invalid("No staged migration");
+        progress("publish", 0, 1);
+        check(module._zw_migrate_publish());
+        progress("publish", 1, 1);
+        removeStaging();
+        return;
+      }
+      // After a cancelled or interrupted migration: restore committed state,
+      // remove staging and report whether the publication had committed.
+      case "migrate_settle": {
+        const { compatibility } = probe();
+        removeStaging();
+        return { migrated: compatibility === "current" };
+      }
+      case "close":
+        pool.pauseVfs();
+        await releaseOwnership?.();
+        state = "closed";
+        return;
+      default: throw invalid("Unknown maintenance operation");
+    }
+  };
   const dispatch = async (operation, args) => {
     if (operation === "initialize") {
       if (state !== "new") throw invalid("Worker already initialized");
       state = "initializing";
       if (args.data !== undefined && (args.name === undefined || !(args.data instanceof Uint8Array))) throw invalid("Import requires a name and Uint8Array bytes");
       if (args.name !== undefined && (typeof args.name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(args.name))) throw invalid("Invalid persistent database name");
+      if (args.maintenance && (args.name === undefined || args.data !== undefined)) throw invalid("Maintenance requires a name only");
       let created = false;
       try {
-        if (args.name !== undefined) releaseOwnership = await acquireOwnership(args.name);
+        if (args.name !== undefined) releaseOwnership = await acquireOwnership(args.name, args.maintenance ? Number(args.waitMs ?? 0) : 0);
         module = await createModule();
+        module.zovaProgress = (phase, member, done, total) => {
+          port.postMessage({ id: currentId, progress: { phase: phases[phase], member: members[member], done, total } });
+          return 0;
+        };
         if (args.name === undefined) {
           check(module._zw_create());
         } else {
@@ -313,6 +387,10 @@ export function serveWorker(createModule, port = globalThis) {
           pool = await sqlite.installOpfsSAHPoolVfs({directory:".zova-" + args.name,initialCapacity:6});
           const vfs = sqlite.capi.sqlite3_vfs_find("opfs-sahpool");
           if (!vfs || sqlite.capi.sqlite3_vfs_register(vfs,1)) throw new Error("Cannot select OPFS VFS");
+          if (args.maintenance) {
+            state = "maintenance";
+            return;
+          }
           created = !pool.getFileNames().includes("/db.zova");
           if (args.data !== undefined) {
             // Import never replaces stored data; the validated open below
@@ -340,6 +418,7 @@ export function serveWorker(createModule, port = globalThis) {
       return;
     }
     if (operation === "close" && state === "closed") return;
+    if (state === "maintenance") return maintain(operation, args);
     if (state !== "open") throw invalid("Database is not open");
     switch (operation) {
       case "exec": return withBytes(sqlText(args.sql), pointer => check(module._zw_exec(pointer)));
@@ -418,6 +497,7 @@ export function serveWorker(createModule, port = globalThis) {
       try {
         if (!Number.isSafeInteger(request?.id) || request.id <= lastId) throw invalid("Request IDs must increase");
         lastId = request.id;
+        currentId = request.id;
         const value = await dispatch(request.operation, request.args ?? {});
         port.postMessage({ id: request.id, ok: true, value });
       } catch (error) {

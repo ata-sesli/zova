@@ -666,6 +666,9 @@ pub fn migrateDatabaseInternal(
     const early = try classifyMigrationSource(source_path);
     try requireMigratable(early.compatibility);
     const source_format_version = early.format_version;
+    if (@import("database/paths.zig").wasm_opfs) {
+        return migrateOpfsStaging(allocator, source_path, destination_path, source_format_version, options, registry);
+    }
 
     // Everything allocated from here on is owned by the single guarded
     // cleanup below and flows through the caller-supplied allocator so
@@ -785,6 +788,46 @@ pub fn migrateDatabaseInternal(
     for (bindings[0..binding_count]) |*binding| binding.deinit(allocator);
     binding_count = 0;
     if (fault_hook) |hook| try hook(.after_main_publication);
+}
+
+/// Browser OPFS migration stage: the pool cannot rename or link files, so
+/// filesystem publication cannot run there. Copy, migrate and verify a
+/// single-file source into `destination_path` in the same pool and emit no
+/// publish events; the browser runtime publishes the verified copy over the
+/// source in one journaled SQLite transaction. Bound-store sets are rejected.
+fn migrateOpfsStaging(
+    allocator: std.mem.Allocator,
+    source_path: [:0]const u8,
+    destination_path: [:0]const u8,
+    source_format_version: u32,
+    options: MigrateOptions,
+    registry: ExtensionRegistry,
+) Error!void {
+    try reserveDestinationZovaFile(destination_path);
+    errdefer deleteDestinationFile(destination_path);
+    {
+        var lock = try sqlite.Database.open(source_path);
+        defer lock.deinit();
+        try lock.beginImmediate();
+        defer lock.rollback() catch {};
+
+        var bindings: [3]MigrateBindingPlan = undefined;
+        var binding_count: usize = 0;
+        try collectMigrationBindings(allocator, source_path, &bindings, &binding_count);
+        for (bindings[0..binding_count]) |*binding| binding.deinit(allocator);
+        if (binding_count != 0) return error.BoundStoreInvalid;
+        try preflightMigrationSet(source_path, source_format_version, bindings[0..0]);
+
+        var copy_source = try sqlite.Database.openWithFlags(source_path, .read_only);
+        defer copy_source.deinit();
+        try copyForwardMember(&copy_source, destination_path, options.progress, .main);
+    }
+    {
+        var staged = try sqlite.Database.open(destination_path);
+        defer staged.deinit();
+        try runMigrationsToCurrentReporting(&staged, options.progress, .main);
+    }
+    if (options.verify) try verifyOperationalCopyReporting(destination_path, registry, options.progress);
 }
 
 /// One planned bound-store member of a migration set.
@@ -3028,7 +3071,7 @@ fn verifyStoredObjects(db: *Database, progress: *VerifyProgress) Error!void {
 /// Chunks within the FastCDC limit use `getObjectChunk`; larger chunks can only
 /// be fixed-1m streaming chunks and get the same checks against that limit.
 fn verifyStoredChunks(db: *Database, progress: *VerifyProgress) Error!void {
-    const allocator = std.heap.page_allocator;
+    const allocator = verify_allocator;
 
     const prefix = if (db.bound_object_store != null) "object_store." else "";
     var chunks = try prepareSchemaSql(&db.sqlite_db, "select chunk_hash, size_bytes from {s}_zova_chunks order by chunk_hash", .{prefix});
@@ -3064,11 +3107,14 @@ fn verifyFixedChunk(db: *Database, prefix: []const u8, hash: ObjectChunkId) Erro
     if (!std.mem.eql(u8, &objectId(data), &hash)) return error.ObjectCorrupt;
 }
 
+// The C backend cannot lower the memory.grow intrinsics behind page_allocator
+// for the browser build, so verification there uses libc, as object.zig does.
+const verify_allocator = if (@import("builtin").os.tag == .emscripten) std.heap.c_allocator else std.heap.page_allocator;
 const fastcdc_max_chunk_size = @import("object_fastcdc.zig").max_size;
 const fixed_max_chunk_size = @import("object_fixed_chunks.zig").max_size;
 
 fn verifyStoredVectors(db: *Database, progress: *VerifyProgress) Error!void {
-    const allocator = std.heap.page_allocator;
+    const allocator = verify_allocator;
 
     const prefix = if (db.bound_vector_store != null) "vector_store." else "";
     var vectors = try prepareSchemaSql(&db.sqlite_db,

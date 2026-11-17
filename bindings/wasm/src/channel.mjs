@@ -14,6 +14,7 @@ export class WorkerChannel {
       const reply = event.data;
       const pending = this.#pending.get(reply?.id);
       if (!pending) return;
+      if (reply.progress) { pending.progress?.(reply.progress); return; }
       if (reply.fatal) { this.#fail(this.#error(reply.error)); return; }
       this.#pending.delete(reply.id);
       if (reply.ok) pending.resolve(reply.value);
@@ -36,11 +37,17 @@ export class WorkerChannel {
     this.#pending.clear();
   }
 
-  request(operation, args = {}) {
+  /**
+   * `progress` receives the request's progress messages, all before it settles.
+   * @param {string} operation
+   * @param {object} [args]
+   * @param {(progress: any) => void} [progress]
+   */
+  request(operation, args = {}, progress) {
     if (this.#closed || this.#closing) return Promise.reject(new Error("Database is closed"));
     const id = this.#next++;
     return new Promise((resolve, reject) => {
-      this.#pending.set(id, { resolve, reject });
+      this.#pending.set(id, { resolve, reject, progress });
       try {
         // No transfer list: callers keep their buffers and queued values are copied.
         this.#worker.postMessage({ id, operation, args });

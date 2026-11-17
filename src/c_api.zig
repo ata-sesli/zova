@@ -1173,6 +1173,8 @@ comptime {
             "zova_graph_degree",
             "zova_graph_walk_direction",
             "zova_graph_walk_results_free",
+            "zova_database_probe_format",
+            "zova_database_migrate_with_progress",
         };
         for (allowed) |name| {
             @export(&@field(@This(), name), .{ .name = name });

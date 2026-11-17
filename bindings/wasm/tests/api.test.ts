@@ -8,9 +8,13 @@ class TestWorker extends EventTarget {
   constructor(public url: URL, public options: WorkerOptions) { super(); TestWorker.last = this; }
   postMessage(message: { id: number; operation: string }) {
     this.messages.push(structuredClone(message));
-    queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", {
-      data: { id: message.id, ok: true, value: message.operation === "prepare" ? { handle: 7, parameterCount: 1, columns: ["v"] } : undefined },
-    })));
+    const progress = message.operation === "migrate_stage" ? { phase: "copy", member: "main", done: 1, total: 1 } : undefined;
+    const value = message.operation === "prepare" ? { handle: 7, parameterCount: 1, columns: ["v"] }
+      : message.operation === "migrate_stage" ? { staged: true } : undefined;
+    queueMicrotask(() => {
+      if (progress) this.dispatchEvent(new MessageEvent("message", { data: { id: message.id, progress } }));
+      this.dispatchEvent(new MessageEvent("message", { data: { id: message.id, ok: true, value } }));
+    });
   }
   terminate() {}
 }
@@ -129,4 +133,23 @@ test("object, vector, graph and import arguments are validated before posting", 
   }
   expect(TestWorker.last.messages.length).toBe(count);
   await db.close();
+});
+test("probe and migrate validate before creating a worker", async () => {
+  installWorker();
+  const before = TestWorker.last;
+  for (const name of ["", "../db", "a.b", null]) {
+    await expect(Database.probePersistent(name as string)).rejects.toBeInstanceOf(ZovaWasmError);
+    await expect(Database.migratePersistent(name as string)).rejects.toBeInstanceOf(ZovaWasmError);
+  }
+  await expect(Database.migratePersistent("notes", { progress: "no" as never })).rejects.toBeInstanceOf(ZovaWasmError);
+  await expect(Database.migratePersistent("notes", { signal: AbortSignal.abort() })).rejects.toMatchObject({ status: "ZOVA_INTERRUPTED" });
+  expect(TestWorker.last).toBe(before);
+});
+test("migration stages, then publishes, in a maintenance worker", async () => {
+  installWorker();
+  const events: unknown[] = [];
+  await Database.migratePersistent("notes", { progress: event => events.push(event) });
+  expect(TestWorker.last.messages.map(x => x.operation)).toEqual(["initialize", "migrate_stage", "migrate_publish", "close"]);
+  expect(TestWorker.last.messages[0]).toMatchObject({ args: { name: "notes", maintenance: true } });
+  expect(events).toEqual([{ phase: "copy", member: "main", done: 1, total: 1 }]);
 });

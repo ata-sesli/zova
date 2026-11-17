@@ -58,6 +58,42 @@ export interface GraphWalkOptions {
 }
 export interface GraphWalkItem { nodeId: string; kind: string; depth: number; predecessorNodeId?: string; edgeType?: string; }
 
+/** The stage of a migration; fixes the unit of `done` and `total`. */
+export type ProgressPhase = "copy" | "migrate" | "verify" | "publish";
+/** The member file a copy or migrate event refers to. */
+export type ProgressMember = "main" | "object_store" | "vector_store" | "graph_store";
+/**
+ * One progress event, as in native Zova. `copy` counts SQLite pages, `migrate`
+ * format steps, `verify` stored items, and `publish` files. Events for one
+ * phase and member keep `total` fixed, never decrease `done`, and end with
+ * `done === total`. `member` is `null` for `verify` and `publish`.
+ */
+export interface Progress {
+  readonly phase: ProgressPhase;
+  readonly member: ProgressMember | null;
+  readonly done: number;
+  readonly total: number;
+}
+/**
+ * `progress` receives events from the worker, all before the operation
+ * settles. Aborting `signal`, or an exception thrown by `progress`, cancels the
+ * operation; a cancelled operation rejects with `ZOVA_INTERRUPTED`, or with the
+ * thrown exception.
+ */
+export interface ProgressOptions {
+  readonly progress?: (progress: Progress) => void;
+  readonly signal?: AbortSignal;
+}
+export interface MigrateOptions extends ProgressOptions {
+  /** Verify the migrated copy before publishing it. Defaults to true. */
+  readonly verify?: boolean;
+}
+export type FormatCompatibilityName = "current" | "migratable" | "unsupported_legacy" | "unsupported_future";
+export interface FormatInfo {
+  readonly formatVersion: number;
+  readonly compatibility: FormatCompatibilityName;
+}
+
 export class ZovaWasmError extends Error {
   constructor(message: string, readonly status: string, readonly statusCode: number) {
     super(message);
@@ -93,6 +129,11 @@ function validateParameters(parameters: readonly SqlValue[]): void {
   }
 }
 
+function persistentName(name: string): void {
+  if (typeof name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(name)) {
+    invalid("Database name must be 1–64 ASCII letters, digits, underscores or hyphens, starting with a letter or digit");
+  }
+}
 function text<T extends string | undefined>(value: T, label: string): T {
   if (typeof value !== "string" || value.includes("\0")) invalid(label + " must be a string without NUL bytes");
   return value;
@@ -221,10 +262,95 @@ export class Database {
   }
 
   static async openPersistent(name: string): Promise<Database> {
-    if (typeof name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(name)) {
-      invalid("Database name must be 1–64 ASCII letters, digits, underscores or hyphens, starting with a letter or digit");
-    }
+    persistentName(name);
     return Database.#open({ name });
+  }
+
+  /**
+   * Reads the storage format of a persistent database without opening or
+   * changing it. Takes the database's lock, so an open owner causes `ZOVA_BUSY`.
+   */
+  static async probePersistent(name: string): Promise<FormatInfo> {
+    persistentName(name);
+    try {
+      return await Database.#maintain(name, 0, channel => channel.request("probe"));
+    } catch (error) { throw failure(error); }
+  }
+
+  /**
+   * Migrates a persistent database written in an older storage format to the
+   * current one, in place. `openPersistent()` never migrates by itself.
+   *
+   * The migration holds the database's lock, so other tabs get `ZOVA_BUSY`. It
+   * copies, migrates and verifies a staged copy in the same storage, then
+   * replaces the database in one journaled write: a stopped worker leaves the
+   * original or the migrated database, and the next open or migration finishes
+   * recovery. Needs free origin storage for two copies of the database. A
+   * database that is already current resolves without changes.
+   *
+   * Cancelling before the replacement starts rejects with `ZOVA_INTERRUPTED`
+   * and leaves the database unchanged. Once it has started, it completes.
+   */
+  static async migratePersistent(name: string, options: MigrateOptions = {}): Promise<void> {
+    persistentName(name);
+    const { progress: callback, signal } = options ?? {};
+    if (callback !== undefined && typeof callback !== "function") invalid("progress must be a function");
+    const interrupted = () => new ZovaWasmError("Migration was cancelled", "ZOVA_INTERRUPTED", 18);
+    if (signal?.aborted) throw interrupted();
+    let thrown: { error: unknown } | undefined;
+    // Set synchronously before the replacement is requested; later cancels are ignored.
+    let publishing = false;
+    let cancelled = false;
+    let stop!: () => void;
+    const stopped = new Promise<"stopped">(resolve => { stop = () => resolve("stopped"); });
+    const cancel = () => { if (!publishing) { cancelled = true; stop(); } };
+    signal?.addEventListener("abort", cancel, { once: true });
+    const report = (event: Progress) => {
+      if (thrown || !callback) return;
+      try { callback(event); } catch (error) { thrown = { error }; cancel(); }
+    };
+    let channel: WorkerChannel | undefined;
+    try {
+      channel = Database.#spawn();
+      const migrating = channel;
+      const run = (async () => {
+        await migrating.request("initialize", { name, maintenance: true });
+        const staged = await migrating.request("migrate_stage", { verify: options?.verify !== false }, report) as { staged: boolean };
+        if (!staged.staged || cancelled) return;
+        publishing = true;
+        await migrating.request("migrate_publish", {}, report);
+      })();
+      if (await Promise.race([run.then(() => "done" as const), stopped]) === "stopped" || cancelled) {
+        run.catch(() => undefined);
+        channel.terminate();
+        // Stopped before the replacement was requested. Under the lock, remove
+        // the staged copy and confirm the database is unchanged.
+        const settled = await Database.#maintain<{ migrated: boolean }>(name, 5000, c => c.request("migrate_settle"));
+        if (!settled.migrated) throw thrown ? thrown.error : interrupted();
+      }
+      if (thrown) throw thrown.error;
+    } catch (error) {
+      if (thrown && error === thrown.error) throw error;
+      throw failure(error);
+    } finally {
+      signal?.removeEventListener("abort", cancel);
+      if (channel && !channel.closed) await channel.close().catch(() => undefined);
+    }
+  }
+
+  static #spawn(): WorkerChannel {
+    return new WorkerChannel(new Worker(new URL("./worker.mjs", import.meta.url), { type: "module" }));
+  }
+
+  // Runs `use` in a worker that owns `name` without opening the database.
+  static async #maintain<T>(name: string, waitMs: number, use: (channel: WorkerChannel) => Promise<T>): Promise<T> {
+    const channel = Database.#spawn();
+    try {
+      await channel.request("initialize", { name, maintenance: true, waitMs });
+      return await use(channel);
+    } finally {
+      await channel.close().catch(() => undefined);
+    }
   }
 
   /**
@@ -233,9 +359,7 @@ export class Database {
    * validation are removed again.
    */
   static async importPersistent(name: string, data: Uint8Array): Promise<Database> {
-    if (typeof name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(name)) {
-      invalid("Database name must be 1–64 ASCII letters, digits, underscores or hyphens, starting with a letter or digit");
-    }
+    persistentName(name);
     if (!(data instanceof Uint8Array)) invalid("Imported database must be a Uint8Array");
     return Database.#open({ name, data: new Uint8Array(data) });
   }
@@ -243,7 +367,7 @@ export class Database {
   static async #open(args: { name?: string; data?: Uint8Array }): Promise<Database> {
     let channel: WorkerChannel | undefined;
     try {
-      channel = new WorkerChannel(new Worker(new URL("./worker.mjs", import.meta.url), { type: "module" }));
+      channel = Database.#spawn();
       await channel.request("initialize", args);
       return new Database({ channel, tail: Promise.resolve(), active: 0 }, constructionToken);
     } catch (error) {
