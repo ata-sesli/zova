@@ -94,6 +94,12 @@ export interface ProgressOptions {
   readonly progress?: (progress: Progress) => void;
   readonly signal?: AbortSignal;
 }
+/** One stored persistent database. `bytes` is its storage use, unknown while another worker has it open. */
+export interface PersistentDatabaseInfo {
+  readonly name: string;
+  readonly bytes?: number;
+  readonly inUse: boolean;
+}
 /** Options for `backupTo`, `compactTo` and `restoreBackup`. */
 export interface CopyOptions extends ProgressOptions {
   /** Verify the copy with the core's copy verification. Defaults to true. */
@@ -703,14 +709,59 @@ export class Database {
   }
 
   /**
-   * Stores exported database bytes under a new persistent name and opens it.
-   * An existing name is never replaced, and bytes that fail normal Zova
-   * validation are removed again.
+   * Stores exported database bytes, or a stream of them, under a new
+   * persistent name and opens it. An existing name is never replaced. The
+   * stored file must pass normal Zova opening and the core's copy
+   * verification, or it is removed again. A stream is written as it arrives,
+   * so neither side holds the whole database; until it completes the name is
+   * marked incomplete, and a stopped import is never listed or opened.
    */
-  static async importPersistent(name: string, data: Uint8Array): Promise<Database> {
+  static async importPersistent(name: string, data: Uint8Array | ReadableStream<Uint8Array>): Promise<Database> {
     persistentName(name);
-    if (!(data instanceof Uint8Array)) invalid("Imported database must be a Uint8Array");
+    if (typeof ReadableStream !== "undefined" && data instanceof ReadableStream) return Database.#importStream(name, data);
+    if (!(data instanceof Uint8Array)) invalid("Imported database must be a Uint8Array or a ReadableStream");
     return Database.#open({ name, data: new Uint8Array(data) });
+  }
+  static async #importStream(name: string, stream: ReadableStream<Uint8Array>): Promise<Database> {
+    const reader = stream.getReader();
+    const channel = Database.#spawn();
+    try {
+      await channel.request("initialize", { name, importing: true });
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!(value instanceof Uint8Array)) invalid("Imported chunks must be Uint8Array values");
+        const chunk = value.slice();
+        await channel.request("import_write", { data: chunk }, undefined, [chunk.buffer]);
+      }
+      await channel.request("import_finish");
+      return new Database({ channel, tail: Promise.resolve(), active: 0 }, constructionToken);
+    } catch (error) {
+      reader.cancel(error).catch(() => undefined);
+      await channel.request("import_abort").catch(() => undefined);
+      channel.terminate();
+      throw failure(error);
+    }
+  }
+
+  /** Stored persistent databases of this origin, by name. */
+  static async listPersistent(): Promise<PersistentDatabaseInfo[]> {
+    const channel = Database.#spawn();
+    try { return await channel.request("list_persistent"); }
+    catch (error) { throw failure(error); }
+    finally { channel.terminate(); }
+  }
+  /**
+   * Deletes a stored persistent database. Takes its lock first, so a database
+   * open in another tab or worker rejects with `ZOVA_BUSY` and nothing is
+   * removed. Resolves whether the name held storage.
+   */
+  static async deletePersistent(name: string): Promise<boolean> {
+    persistentName(name);
+    const channel = Database.#spawn();
+    try { return await channel.request("delete_persistent", { name }); }
+    catch (error) { throw failure(error); }
+    finally { channel.terminate(); }
   }
 
   static async #open(args: { name?: string; data?: Uint8Array; existing?: boolean; restoreFrom?: string; verify?: boolean }): Promise<Database> {
@@ -916,7 +967,60 @@ export class Database {
     }
   }
 
-  /** Bytes of the committed persistent database. Rejects while a transaction is open. */
+  /**
+   * Streams the committed database in reads of up to `chunkSize` bytes (1 MiB
+   * by default): the stored file, or a serialized copy of a memory database.
+   * Other calls on this database wait until the stream ends or is cancelled.
+   * Rejects while a transaction is open. Import the bytes with
+   * `importPersistent()`, which verifies them.
+   */
+  async exportStream(chunkSize = 1 << 20): Promise<ReadableStream<Uint8Array>> {
+    if (this.#scope) throw new ZovaWasmError("Export the database, not its transaction handle", "ZOVA_MISUSE", 16);
+    if (this.closed) throw new ZovaWasmError("Database is closed", "ZOVA_MISUSE", 16);
+    size(chunkSize, "Chunk size");
+    if (chunkSize === 0) invalid("Chunk size must be positive");
+    // Hold the database like a transaction: other callers wait for the stream.
+    const shared = this.#shared;
+    const previous = shared.tail;
+    let release!: () => void;
+    shared.tail = new Promise<void>(resolve => { release = resolve; });
+    shared.active++;
+    const scope: Scope = { done: false };
+    const held = new Database(shared, constructionToken, scope);
+    let finished = false;
+    const finish = async (end: boolean) => {
+      if (finished) return;
+      finished = true;
+      try { if (end) await held.#request("export_end", () => ({})).catch(() => undefined); }
+      finally { scope.done = true; shared.active--; release(); }
+    };
+    let total: bigint;
+    try {
+      await previous;
+      total = await held.#request<bigint>("export_begin", () => ({}));
+    } catch (error) {
+      await finish(false);
+      throw failure(error);
+    }
+    let offset = 0n;
+    return new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          if (offset >= total) { await finish(true); controller.close(); return; }
+          const bytes = await held.#request<Uint8Array>("export_read", () => ({ offset, size: chunkSize }));
+          if (bytes.length === 0) throw new ZovaWasmError("Database file ended early", "ZOVA_CORRUPT", 15);
+          offset += BigInt(bytes.length);
+          controller.enqueue(bytes);
+        } catch (error) {
+          await finish(true);
+          controller.error(failure(error));
+        }
+      },
+      cancel: () => finish(true),
+    }, { highWaterMark: 1 });
+  }
+
+  /** The committed database as one `Uint8Array`, also for memory databases. Rejects while a transaction is open. */
   export(): Promise<Uint8Array> {
     return this.#request("export", () => ({}));
   }

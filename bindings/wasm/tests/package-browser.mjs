@@ -221,7 +221,11 @@ try {
   assert((await db.graphInfo("g")).nodeCount === 1n, "node batch delete");
   await db.deleteGraph("g");
   assert(!await db.hasGraph("g"), "graph deleted");
-  await status(db.export(), "ZOVA_INVALID_ARGUMENT");
+  // Memory databases export too, and import as persistent databases.
+  const memoryBytes = await db.export();
+  const fromMemory = await Database.importPersistent("from-memory-" + crypto.randomUUID(), memoryBytes);
+  assert(await fromMemory.hasVectorCollection("docs") && (await fromMemory.query("SELECT count(*) FROM t")).rows[0][0] === 7n, "memory export imports");
+  await fromMemory.close();
   await db.close();
   await status(select.query([1n]), "ZOVA_MISUSE");
 

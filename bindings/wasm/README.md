@@ -87,8 +87,8 @@ owner is evicted. Different names can be open concurrently. Close releases stora
 handles before ownership; failed initialization and worker/tab termination also
 release ownership. Retry opening after the owner has closed or terminated.
 Storage belongs to the origin and browser profile. Clearing site data or browser
-eviction can remove it. `export()` and `importPersistent()` copy whole databases
-in and out of that storage; nothing is exported automatically. Broader crash, quota,
+eviction can remove it. `export()`, `exportStream()` and `importPersistent()` copy
+databases in and out of that storage; nothing is exported automatically. Broader crash, quota,
 and multi-tab recovery guarantees remain experimental.
 
 ### Errors and recovery
@@ -307,21 +307,43 @@ chunks). `objectIdToHex` and `objectIdFromHex` are plain functions.
 the same IDs as native; the first call starts a shared memory-database worker
 that stays for the page's lifetime.
 
-## Export and import
+## Export, import and managing stored databases
 
 ```ts
-const bytes = await db.export();                         // open persistent database
+const bytes = await db.export();                        // persistent or memory database
 const copy = await Database.importPersistent('restored', bytes);
+
+const response = await fetch('/backups/latest.zova');   // or a File, or exportStream()
+const imported = await Database.importPersistent('downloaded', response.body);
+await (await db.exportStream()).pipeTo(uploadStream);   // bounded memory
+
+console.log(await Database.listPersistent());           // [{ name, bytes, inUse }]
+await Database.deletePersistent('restored');
 ```
 
-`export()` returns the committed bytes of a persistent database as one
-`Uint8Array`. It rejects while a transaction is open on the connection and for
-memory databases. `importPersistent()` creates a new named database from such
-bytes and opens it with normal validation. It rejects with
-`ZOVA_DESTINATION_EXISTS` when the name already holds a database (it never
-overwrites one) and with the usual opening errors for bytes that are not a
-compatible Zova database, leaving nothing stored under that name. Both hold the
-whole database in memory.
+`export()` returns the committed database as one `Uint8Array`: the stored file
+of a persistent database, or a serialized copy of a memory database.
+`exportStream(chunkSize)` returns the same bytes as a `ReadableStream` read 1 MiB
+at a time; other calls on the database wait until the stream ends or is
+cancelled. Both reject while a transaction is open.
+
+`importPersistent(name, data)` accepts those bytes as a `Uint8Array` or a
+`ReadableStream<Uint8Array>`, which is written as it arrives, so neither side
+holds the whole database. It creates a new name and never replaces a stored
+database (`ZOVA_DESTINATION_EXISTS`). The file must pass normal Zova opening and
+the core's copy verification, as native backup and restore run it; otherwise it
+is removed and the import rejects with the opening or verification error. Until
+an import completes, a root-level `.zova-<name>.pending` marker flags the name
+as incomplete: an import stopped by a closed tab or worker is not listed, and
+the next open of the name removes it. Split databases with bound stores do not
+exist in browser storage and cannot be imported.
+
+`listPersistent()` lists stored names with their storage use in bytes. A
+database open in another tab or worker is listed with `inUse: true` and no size.
+`deletePersistent(name)` takes the name's lock first, so a database open
+elsewhere rejects with `ZOVA_BUSY` and nothing is removed; it resolves whether
+the name held storage. `probePersistent(name)` reports a stored format without
+opening it (see migration below).
 
 ## Backup, compact, reclaim and restore
 
@@ -432,8 +454,7 @@ browser form. Every browser method returns a promise.
 
 ## Current boundaries
 
-Not available here: keyed, payload, scan and fresh-build graph APIs; export of memory
-databases; streaming export/import; deleting or listing persistent databases;
+Not available here: keyed, payload, scan and fresh-build graph APIs;
 native extensions; bound stores; shared access between workers. The
 native `zova-js` package is independent. There is no Node/CommonJS fallback.
 

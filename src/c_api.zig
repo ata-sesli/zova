@@ -1235,6 +1235,8 @@ comptime {
         for (allowed) |name| {
             @export(&@field(@This(), name), .{ .name = name });
         }
+        @export(&internal.wasmSqliteHandle, .{ .name = "zova_wasm_sqlite_handle" });
+        @export(&internal.wasmVerifyCopy, .{ .name = "zova_wasm_verify_copy" });
     } else {
         for (@typeInfo(@This()).@"struct".decl_names) |name| {
             if (!@import("std").mem.startsWith(u8, name, "zova_")) continue;

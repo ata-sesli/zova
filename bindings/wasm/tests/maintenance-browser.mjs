@@ -107,7 +107,7 @@ export async function testMaintenance(context, base) {
     assert(result.cancel.thrown.rangeError && result.cancel.thrown.missing, "throwing progress");
     assert(result.afterCancel === "ok", "copy after cancellations");
     assert(result.restored && result.restoreMissing === "ZOVA_NOT_ZOVA_DATABASE", `restore ${result.restored} ${result.restoreMissing}`);
-    assert(result.memory.rows === 101n && result.memory.exportStatus === "ZOVA_INVALID_ARGUMENT" && result.memory.copyStatus === "ZOVA_INVALID_ARGUMENT" && result.memoryMissing === "ZOVA_NOT_ZOVA_DATABASE", `restore to memory ${JSON.stringify(result.memory, (_, value) => typeof value === "bigint" ? String(value) : value)} ${result.memoryMissing}`);
+    assert(result.memory.rows === 101n && result.memory.exportStatus === "ok" && result.memory.copyStatus === "ZOVA_INVALID_ARGUMENT" && result.memoryMissing === "ZOVA_NOT_ZOVA_DATABASE", `restore to memory ${JSON.stringify(result.memory, (_, value) => typeof value === "bigint" ? String(value) : value)} ${result.memoryMissing}`);
 
     // A worker stopped while publishing leaves no partial target.
     const stops = {};

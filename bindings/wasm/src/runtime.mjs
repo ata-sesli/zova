@@ -398,6 +398,73 @@ export function serveWorker(createModule, port = globalThis) {
   };
   const progress = (phase, done, total) => port.postMessage({ id: currentId, progress: { phase, member: null, done, total } });
   const removeStaging = () => migrationStaging.forEach(name => pool.unlink(name));
+  // Names with a stored database, without opening them. A name owned by
+  // another worker is listed as in use with no size; an incomplete creation
+  // (pending marker) is never listed.
+  const listPersistent = async () => {
+    if (!globalThis.navigator?.storage?.getDirectory) throw Object.assign(new Error("OPFS is unavailable"), { status: "ZOVA_CANT_OPEN", statusCode: 13 });
+    const root = await opfsRoot();
+    const names = [];
+    const pending = new Set();
+    for await (const [entry, handle] of root.entries()) {
+      const marker = /^\.zova-([A-Za-z0-9][A-Za-z0-9_-]{0,63})\.pending$/.exec(entry);
+      const pool = /^\.zova-([A-Za-z0-9][A-Za-z0-9_-]{0,63})$/.exec(entry);
+      if (marker && handle.kind === "file") pending.add(marker[1]);
+      else if (pool && handle.kind === "directory") names.push(pool[1]);
+    }
+    const sizeOf = async directory => {
+      let bytes = 0;
+      for await (const [, handle] of directory.entries()) bytes += handle.kind === "file" ? (await handle.getFile()).size : await sizeOf(handle);
+      return bytes;
+    };
+    const listed = [];
+    for (const listedName of names.sort()) {
+      if (pending.has(listedName)) continue;
+      let release;
+      try { release = await acquireOwnership(listedName); }
+      catch (error) {
+        if (error?.status !== "ZOVA_BUSY") throw error;
+        listed.push({ name: listedName, inUse: true });
+        continue;
+      }
+      try {
+        module ??= await createModule();
+        sqlite ??= await module.zovaOpfsBootstrap();
+        const listedPool = await sqlite.installOpfsSAHPoolVfs({ name: "zova-list-" + ++copies, directory: ".zova-" + listedName, initialCapacity: 6 });
+        const stored = listedPool.getFileNames().includes("/db.zova");
+        listedPool.pauseVfs();
+        if (stored) listed.push({ name: listedName, bytes: await sizeOf(await root.getDirectoryHandle(".zova-" + listedName)), inUse: false });
+      } finally { await release(); }
+    }
+    return listed;
+  };
+  // Removes a name's storage under its lock; resolves whether anything was stored.
+  const deletePersistent = async deleted => {
+    if (typeof deleted !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(deleted)) throw invalid("Invalid persistent database name");
+    if (!globalThis.navigator?.storage?.getDirectory) throw Object.assign(new Error("OPFS is unavailable"), { status: "ZOVA_CANT_OPEN", statusCode: 13 });
+    const release = await acquireOwnership(deleted);
+    try {
+      let existed = true;
+      await (await opfsRoot()).removeEntry(".zova-" + deleted, { recursive: true }).catch(error => {
+        if (error?.name !== "NotFoundError") throw error;
+        existed = false;
+      });
+      await clearPending(deleted);
+      return existed;
+    } finally { await release(); }
+  };
+  // Ends a streamed import that will not complete and releases its name.
+  const abortImport = async () => {
+    try { call(100, request().u32(0)); } catch { /* the file is removed below */ }
+    module._zw_close();
+    ["/db.zova-journal", "/db.zova"].forEach(file => pool.unlink(file));
+    await clearPending(name);
+    pool.pauseVfs();
+    await releaseOwnership?.();
+    state = "closed";
+  };
+  // The core's copy verification of the imported file, as native restore runs it.
+  const verifyImport = () => call(101);
   // Removes the staged copy and anything the copy created under the target name.
   const discardCopy = async () => {
     if (pool) copyStaging.forEach(file => pool.unlink(file));
@@ -464,6 +531,8 @@ export function serveWorker(createModule, port = globalThis) {
     }
   };
   const dispatch = async (operation, args) => {
+    if (state === "new" && operation === "list_persistent") return listPersistent();
+    if (state === "new" && operation === "delete_persistent") return deletePersistent(args.name);
     if (operation === "initialize") {
       if (state !== "new") throw invalid("Worker already initialized");
       state = "initializing";
@@ -475,6 +544,7 @@ export function serveWorker(createModule, port = globalThis) {
       const restoreFrom = args.restoreFrom;
       if (restoreFrom !== undefined) args = { name: restoreFrom, existing: true, verify: args.verify };
       let created = false;
+      let marked = false;
       try {
         if (args.name !== undefined) releaseOwnership = await acquireOwnership(args.name, args.maintenance ? Number(args.waitMs ?? 0) : 0);
         module = await createModule();
@@ -511,15 +581,29 @@ export function serveWorker(createModule, port = globalThis) {
             state = "open";
             return;
           }
-          if (args.data !== undefined) {
+          if (args.data !== undefined || args.importing) {
             // Import never replaces stored data; the validated open below
             // decides whether the bytes are an acceptable Zova database.
             if (!created) throw Object.assign(new Error("Database already exists: " + args.name), { status: "ZOVA_DESTINATION_EXISTS", statusCode: 33 });
+            await setPending(args.name);
+            marked = true;
+          }
+          if (args.importing) {
+            call(98);
+            state = "importing";
+            return;
+          }
+          if (args.data !== undefined) {
             try { pool.importDb("/db.zova", args.data); }
             catch (error) { throw Object.assign(new Error(String(error.message ?? error)), { status: "ZOVA_NOT_ZOVA_DATABASE", statusCode: 31 }); }
           }
           check(module._zw_open_file(created && args.data === undefined ? 0 : 1));
           withBytes(sqlText("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;"), pointer => check(module._zw_exec(pointer)));
+          if (marked) {
+            verifyImport();
+            await clearPending(args.name);
+            marked = false;
+          }
         }
       } catch (error) {
         if (module) module._zw_close();
@@ -530,6 +614,7 @@ export function serveWorker(createModule, port = globalThis) {
           }
           pool.pauseVfs();
         }
+        if (marked) await clearPending(args.name);
         await releaseOwnership?.();
         throw error;
       }
@@ -538,6 +623,25 @@ export function serveWorker(createModule, port = globalThis) {
     }
     if (operation === "close" && state === "closed") return;
     if (state === "maintenance") return maintain(operation, args);
+    if (state === "importing") {
+      switch (operation) {
+        case "import_write":
+          if (!(args.data instanceof Uint8Array)) throw invalid("Imported chunks must be Uint8Array values");
+          return void call(99, request().bytes(args.data));
+        case "import_finish":
+          try {
+            call(100, request().u32(1));
+            check(module._zw_open_file(1));
+            withBytes(sqlText("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;"), pointer => check(module._zw_exec(pointer)));
+            verifyImport();
+            await clearPending(name);
+          } catch (error) { await abortImport(); throw error; }
+          state = "open";
+          return;
+        case "import_abort": case "close": return abortImport();
+        default: throw invalid("Database is still being imported");
+      }
+    }
     if (state !== "open") throw invalid("Database is not open");
     switch (operation) {
       case "exec": return withBytes(sqlText(args.sql), pointer => check(module._zw_exec(pointer)));
@@ -616,13 +720,19 @@ export function serveWorker(createModule, port = globalThis) {
       case "statement_clear_bindings": return void statementCall(68, args);
       case "commit": return check(module._zw_transaction(1));
       case "rollback": return check(module._zw_transaction(2));
-      case "export":
-        if (!pool) throw invalid("Only persistent databases can be exported");
-        // Fails while a transaction is open, and holds the write lock so the
-        // copied file is one committed state.
-        check(module._zw_transaction(0));
-        try { return pool.exportFile("/db.zova"); }
-        finally { check(module._zw_transaction(2)); }
+      // The committed file, or a serialized memory database. Rejects while a
+      // transaction is open; callers hold the database between the reads.
+      case "export": {
+        call(95);
+        try {
+          const total = BigInt.asUintN(64, module._zw_integer());
+          if (total >= BigInt(absent)) throw invalid("Database is too large for export(); use exportStream()");
+          return call(96, request().u64(0n).u32(Number(total))).all;
+        } finally { call(97); }
+      }
+      case "export_begin": call(95); return BigInt.asUintN(64, module._zw_integer());
+      case "export_read": return call(96, request().u64(args.offset).u32(count(args.size, "Read size"))).all;
+      case "export_end": return void call(97);
       case "prepare": {
         const handle = prepare(args.sql);
         try {

@@ -68,6 +68,24 @@ pub const zova_fresh_build = @import("c_api/types.zig").zova_fresh_build;
 
 pub const FreshBuildCachePolicy = @import("c_api/handles.zig").FreshBuildCachePolicy;
 
+/// Browser bridge only, never part of the C ABI: the SQLite connection behind
+/// a database handle, for whole-file export of memory databases. `c_api.zig`
+/// exports it from the Emscripten build alone.
+pub fn wasmSqliteHandle(db: ?*zova_database) callconv(.c) ?*anyopaque {
+    const handle = @import("c_api/handles.zig").databaseHandleRaw(db) orelse return null;
+    return @ptrCast(handle.db.sqlite_db.handle);
+}
+
+/// Browser bridge only, never part of the C ABI: the core's copy verification
+/// (`zova.verifyOperationalCopy`) of a stored file, as native backup, compact
+/// and restore run it. Used to verify a streamed import before opening it.
+pub fn wasmVerifyCopy(path: ?[*:0]const u8, out_error_message: ?*zova_message) callconv(.c) zova_status {
+    const errors = @import("c_api/errors.zig");
+    const source = path orelse return errors.failMessage(out_error_message, error.InvalidArgument);
+    zova.verifyOperationalCopy(std.mem.span(source), zova.bundledExtensionRegistry()) catch |err| return errors.failMessage(out_error_message, err);
+    return .OK;
+}
+
 pub const FreshBuildCacheDiagnostics = @import("c_api/handles.zig").FreshBuildCacheDiagnostics;
 
 /// Internal benchmark control. This is intentionally not exported through the C ABI.
