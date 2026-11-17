@@ -20,6 +20,9 @@ static zova_statement **statements;
 static int statement_count;
 static int current = -1;
 static zova_statement *statement;
+/* Notification subscriptions by handle. */
+static zova_subscription **subscriptions;
+static int subscription_count;
 /* Encoded reply of zw_call, owned until the next operation. */
 static uint8_t *out;
 static size_t out_len;
@@ -202,6 +205,7 @@ EXPORTED int zw_transaction(int operation) {
         case 0: return zova_database_begin_immediate(&request);
         case 1: return zova_database_commit(&request);
         case 2: return zova_database_rollback(&request);
+        case 3: return zova_database_begin(&request);
         default: return ZOVA_INVALID_ARGUMENT;
     }
 }
@@ -216,6 +220,12 @@ EXPORTED int zw_close(void) {
     free(statements);
     statements = NULL;
     statement_count = 0;
+    for (int index = 0; index < subscription_count; index++) {
+        if (subscriptions[index]) zova_subscription_close(subscriptions[index]);
+    }
+    free(subscriptions);
+    subscriptions = NULL;
+    subscription_count = 0;
     statement = NULL;
     current = -1;
     free(out);
@@ -907,11 +917,172 @@ static int call_graph(int op, reader *r) {
     }
 }
 
+static zova_kv_bytes rd_bytes(reader *r) {
+    uint32_t len = rd_u32(r);
+    zova_kv_bytes value = {rd_take(r, len), len};
+    return value;
+}
+static int simple_status(int status, int64_t value) {
+    integer = value;
+    return status;
+}
+
+/* Transactions, connection state, KV batches, notifications and statement
+ * controls. Statement calls act on the statement selected by zw_select. */
+static int call_database(int op, reader *r) {
+    switch (op) {
+        case 50: {
+            zova_kv_bytes ns = rd_bytes(r);
+            uint32_t count = rd_u32(r);
+            zova_kv_bytes *keys = rd_array(r, count, sizeof(*keys));
+            for (uint32_t index = 0; keys && index < count; index++) keys[index] = rd_bytes(r);
+            int status = ZOVA_INVALID_ARGUMENT;
+            if (keys && !r->bad && !r->left) {
+                zova_kv_get_many_results results = {0};
+                zova_kv_get_many_request request = {db, ns, keys, count, &results};
+                status = zova_kv_get_many(&request);
+                if (status == ZOVA_OK) {
+                    wr_u32((uint32_t)results.len);
+                    for (size_t index = 0; index < results.len; index++) {
+                        wr_u32(results.items[index].found);
+                        if (results.items[index].found) wr_blob(results.items[index].value.data, results.items[index].value.len);
+                    }
+                }
+                zova_kv_get_many_results_free(&results);
+            }
+            free(keys);
+            return status;
+        }
+        case 51: {
+            zova_kv_bytes ns = rd_bytes(r);
+            uint32_t count = rd_u32(r);
+            zova_kv_put_entry *entries = rd_array(r, count, sizeof(*entries));
+            for (uint32_t index = 0; entries && index < count; index++) {
+                entries[index].key = rd_bytes(r);
+                entries[index].value = rd_bytes(r);
+            }
+            int status = ZOVA_INVALID_ARGUMENT;
+            if (entries && !r->bad && !r->left) {
+                zova_kv_put_many_request request = {db, ns, entries, count};
+                status = zova_kv_put_many(&request);
+            }
+            free(entries);
+            return status;
+        }
+        case 52: {
+            zova_kv_bytes ns = rd_bytes(r);
+            uint32_t count = rd_u32(r);
+            zova_kv_bytes *keys = rd_array(r, count, sizeof(*keys));
+            for (uint32_t index = 0; keys && index < count; index++) keys[index] = rd_bytes(r);
+            int status = ZOVA_INVALID_ARGUMENT;
+            if (keys && !r->bad && !r->left) {
+                zova_kv_delete_many_request request = {db, ns, keys, count};
+                status = zova_kv_delete_many(&request);
+            }
+            free(keys);
+            return status;
+        }
+        case 53: {
+            uint64_t count = 0;
+            zova_kv_count_request request = {db, rd_bytes(r), &count};
+            PARSED;
+            return simple_status(zova_kv_count(&request), (int64_t)count);
+        }
+        case 54: {
+            zova_kv_clear_namespace_request request = {db, rd_bytes(r)};
+            PARSED;
+            return zova_kv_clear_namespace(&request);
+        }
+        case 55: case 56: case 57: {
+            zova_database_savepoint_request request = {db, rd_str(r)};
+            PARSED;
+            return op == 55 ? zova_database_savepoint(&request) :
+                op == 56 ? zova_database_release_savepoint(&request) : zova_database_rollback_to_savepoint(&request);
+        }
+        case 58: case 59: case 60: {
+            int64_t value = 0;
+            PARSED;
+            if (op == 58) {
+                zova_database_changes_request request = {db, &value};
+                return simple_status(zova_database_changes(&request), value);
+            }
+            if (op == 59) {
+                zova_database_total_changes_request request = {db, &value};
+                return simple_status(zova_database_total_changes(&request), value);
+            }
+            zova_database_last_insert_rowid_request request = {db, &value};
+            return simple_status(zova_database_last_insert_rowid(&request), value);
+        }
+        case 61: {
+            zova_database_busy_timeout_request request = {db, rd_u32(r)};
+            PARSED;
+            return zova_database_set_busy_timeout(&request);
+        }
+        case 62: {
+            const char *channel = rd_str(r);
+            zova_kv_bytes payload = rd_bytes(r);
+            PARSED;
+            zova_database_notify_request request = {db, channel, payload.data, payload.len};
+            return zova_database_notify(&request);
+        }
+        case 63: {
+            const char *channel = rd_str(r);
+            PARSED;
+            int handle = 0;
+            while (handle < subscription_count && subscriptions[handle]) handle++;
+            if (handle == subscription_count) {
+                zova_subscription **grown = realloc(subscriptions, sizeof(*subscriptions) * (size_t)(subscription_count + 8));
+                if (!grown) return ZOVA_OUT_OF_MEMORY;
+                memset(grown + subscription_count, 0, sizeof(*grown) * 8);
+                subscriptions = grown;
+                subscription_count += 8;
+            }
+            zova_database_listen_request request = {db, channel, &subscriptions[handle]};
+            number = handle;
+            return zova_database_listen(&request);
+        }
+        case 64: case 65: {
+            uint32_t handle = rd_u32(r);
+            PARSED;
+            if (handle >= (uint32_t)subscription_count || !subscriptions[handle]) return ZOVA_INVALID_ARGUMENT;
+            if (op == 65) {
+                int status = zova_subscription_close(subscriptions[handle]);
+                subscriptions[handle] = NULL;
+                return status;
+            }
+            zova_notification notification = {0};
+            uint8_t has = 0;
+            zova_subscription_try_receive_request request = {subscriptions[handle], &notification, &has};
+            int status = zova_subscription_try_receive(&request);
+            if (status == ZOVA_OK) {
+                wr_u32(has);
+                if (has) {
+                    wr_blob(notification.channel, notification.channel_len);
+                    wr_blob(notification.payload, notification.payload_len);
+                    wr_u64(notification.sequence);
+                    wr_u64(notification.dropped_before);
+                }
+            }
+            zova_notification_free(&notification);
+            return status;
+        }
+        case 66: {
+            const char *name = rd_str(r);
+            PARSED;
+            zova_statement_parameter_index_request request = {statement, name, &number};
+            return zova_statement_parameter_index(&request);
+        }
+        case 67: PARSED; return statement ? zova_statement_reset(statement) : ZOVA_INVALID_ARGUMENT;
+        case 68: PARSED; return statement ? zova_statement_clear_bindings(statement) : ZOVA_INVALID_ARGUMENT;
+        default: return ZOVA_INVALID_ARGUMENT;
+    }
+}
+
 /* Operation numbers are shared with src/runtime.mjs. */
 EXPORTED int zw_call(int op, const uint8_t *input, size_t input_len) {
     clear_output();
     reader r = {input, input_len, 0};
-    int status = op < 10 ? call_object(op, &r) : op < 30 ? call_vector(op, &r) : call_graph(op, &r);
+    int status = op < 10 ? call_object(op, &r) : op < 30 ? call_vector(op, &r) : op < 50 ? call_graph(op, &r) : call_database(op, &r);
     if (out_bad) status = ZOVA_OUT_OF_MEMORY;
     if (status == ZOVA_OK && !bytes) {
         bytes = out;

@@ -149,6 +149,10 @@ function objectId(id: Uint8Array): Uint8Array {
   if (!(id instanceof Uint8Array) || id.length !== 32) invalid("Object IDs are 32-byte Uint8Array values");
   return new Uint8Array(id);
 }
+function kvBytes(value: Uint8Array): Uint8Array {
+  validateBytes(value);
+  return new Uint8Array(value);
+}
 function vectorValues(values: VectorValues): VectorValues {
   if (!(values instanceof Float32Array || values instanceof Uint16Array || values instanceof Int8Array)) {
     invalid("Vector values must be a Float32Array, Uint16Array or Int8Array");
@@ -238,6 +242,141 @@ export class Statement {
   finalize(): Promise<void> {
     this.#finalizing ??= this.#request<void>("statement_finalize", () => ({ handle: this.#handle }));
     return this.#finalizing;
+  }
+
+  // Step-by-step use, as native `Statement`. Each call is one worker message;
+  // prefer `iterate()`, which fetches rows in batches.
+  #row?: SqlValue[];
+
+  /** Runs to the next row. Column accessors then read that row without a worker round trip. */
+  async step(): Promise<Step> {
+    const result = await this.#send<{ done: boolean; row?: SqlValue[] }>("statement_step");
+    this.#row = result.row;
+    return result.done ? "done" : "row";
+  }
+  /** Resets the cursor and keeps the bindings. */
+  reset(): Promise<void> {
+    this.#row = undefined;
+    return this.#send("statement_reset_only");
+  }
+  clearBindings(): Promise<void> {
+    return this.#send("statement_clear_bindings");
+  }
+  /** 1-based index of a named parameter such as `:name`, or null. */
+  parameterIndex(name: string): Promise<number | null> {
+    return this.#send("statement_parameter_index", () => ({ name: text(name, "Parameter name") }));
+  }
+  bindNull(index: number): Promise<void> { return this.#bind(index, null); }
+  bindInteger(index: number, value: bigint): Promise<void> {
+    if (typeof value !== "bigint") return Promise.reject(new ZovaWasmError("Integer values are bigint", "ZOVA_INVALID_ARGUMENT", 1));
+    return this.#bind(index, value);
+  }
+  bindFloat(index: number, value: number): Promise<void> {
+    if (typeof value !== "number") return Promise.reject(new ZovaWasmError("Float values are numbers", "ZOVA_INVALID_ARGUMENT", 1));
+    return this.#bind(index, value);
+  }
+  bindText(index: number, value: string): Promise<void> {
+    if (typeof value !== "string") return Promise.reject(new ZovaWasmError("Text values are strings", "ZOVA_INVALID_ARGUMENT", 1));
+    return this.#bind(index, value);
+  }
+  bindBlob(index: number, value: Uint8Array): Promise<void> {
+    if (!(value instanceof Uint8Array)) return Promise.reject(new ZovaWasmError("Blob values are Uint8Array", "ZOVA_INVALID_ARGUMENT", 1));
+    return this.#bind(index, value);
+  }
+  #bind(index: number, value: SqlValue): Promise<void> {
+    return this.#send("statement_bind_one", () => {
+      if (!Number.isInteger(index) || index < 1) invalid("Parameter index must be a positive integer");
+      return { index, value: copyParameters([value])[0] };
+    });
+  }
+
+  columnCount(): number { return this.columns.length; }
+  columnName(index: number): string {
+    if (!Number.isInteger(index) || index < 0 || index >= this.columns.length) invalid("Column index out of range");
+    return this.columns[index];
+  }
+  columnType(index: number): ColumnType {
+    const value = this.#value(index);
+    return value === null ? "null" : typeof value === "bigint" ? "integer" : typeof value === "number" ? "float"
+      : typeof value === "string" ? "text" : "blob";
+  }
+  /** Integer and float columns convert as SQLite does; null reads as 0n. */
+  columnInteger(index: number): bigint {
+    const value = this.#value(index);
+    if (value === null) return 0n;
+    if (typeof value === "bigint") return value;
+    if (typeof value === "number") return BigInt(Math.trunc(value));
+    return this.#mismatch(index, "columnInteger");
+  }
+  columnFloat(index: number): number {
+    const value = this.#value(index);
+    if (value === null) return 0;
+    if (typeof value === "number") return value;
+    if (typeof value === "bigint") return Number(value);
+    return this.#mismatch(index, "columnFloat");
+  }
+  columnText(index: number): string | null {
+    const value = this.#value(index);
+    if (value === null || typeof value === "string") return value;
+    return this.#mismatch(index, "columnText");
+  }
+  columnBlob(index: number): Uint8Array | null {
+    const value = this.#value(index);
+    if (value === null || value instanceof Uint8Array) return value;
+    return this.#mismatch(index, "columnBlob");
+  }
+  #value(index: number): SqlValue {
+    if (!this.#row) throw new ZovaWasmError("No current row: step() must return \"row\" first", "ZOVA_MISUSE", 16);
+    if (!Number.isInteger(index) || index < 0 || index >= this.#row.length) invalid("Column index out of range");
+    return this.#row[index];
+  }
+  // The row was converted once in the worker; text/number conversions would
+  // not match SQLite's formatting, so they are refused instead of guessed.
+  #mismatch(index: number, accessor: string): never {
+    throw new ZovaWasmError(`${accessor}: column ${index} holds ${this.columnType(index)}`, "ZOVA_MISUSE", 16);
+  }
+}
+
+export type Step = "row" | "done";
+export type ColumnType = "integer" | "float" | "text" | "blob" | "null";
+
+export interface Notification {
+  readonly channel: string;
+  readonly payload: string;
+  readonly sequence: bigint;
+  readonly droppedBefore: bigint;
+}
+export interface KvEntry {
+  readonly key: Uint8Array;
+  readonly value: Uint8Array;
+}
+
+/**
+ * Notifications from one channel of the same database. Delivery follows
+ * native same-process semantics: a notification sent inside a transaction or
+ * savepoint is received only after commit and never after rollback.
+ * Notifications do not cross workers or tabs.
+ */
+export class Subscription {
+  #request: Request;
+  #handle: number;
+  #closing?: Promise<void>;
+
+  /** @internal Use Database.listen(). */
+  constructor(request: Request, handle: number, token: symbol) {
+    if (token !== constructionToken) invalid("Use Database.listen()");
+    this.#request = request;
+    this.#handle = handle;
+  }
+  get closed(): boolean { return this.#closing !== undefined; }
+  /** The next queued notification, or null when none is waiting. */
+  tryReceive(): Promise<Notification | null> {
+    if (this.closed) return Promise.reject(new ZovaWasmError("Subscription is closed", "ZOVA_MISUSE", 16));
+    return this.#request("subscription_receive", () => ({ handle: this.#handle }));
+  }
+  close(): Promise<void> {
+    this.#closing ??= this.#request<void>("subscription_close", () => ({ handle: this.#handle }));
+    return this.#closing;
   }
 }
 function copyParameters(parameters: readonly SqlValue[]): SqlValue[] {
@@ -438,6 +577,69 @@ export class Database {
     }
   }
 
+  // Explicit transaction control on the database's one connection. Calls on
+  // this database run in order, so the caller that begins a transaction owns
+  // it until commit or rollback. Inside `transaction()`, use savepoints.
+  begin(): Promise<void> { return this.#control("begin_deferred"); }
+  beginImmediate(): Promise<void> { return this.#control("begin"); }
+  commit(): Promise<void> { return this.#control("commit"); }
+  rollback(): Promise<void> { return this.#control("rollback"); }
+  #control(operation: string): Promise<void> {
+    if (this.#scope) return Promise.reject(new ZovaWasmError("Use savepoints inside transaction()", "ZOVA_MISUSE", 16));
+    return this.#request(operation, () => ({}));
+  }
+
+  /**
+   * Opens a savepoint. With a callback, releases it when the callback
+   * resolves, or rolls back to it and releases it when the callback throws.
+   */
+  savepoint(name: string): Promise<void>;
+  savepoint<T>(name: string, callback: (database: Database) => T | Promise<T>): Promise<T>;
+  async savepoint<T>(name: string, callback?: (database: Database) => T | Promise<T>): Promise<T | void> {
+    if (callback !== undefined && typeof callback !== "function") invalid("Savepoint callback must be a function");
+    await this.#request("savepoint", () => ({ name: text(name, "Savepoint name") }));
+    if (callback === undefined) return;
+    let value: T;
+    try {
+      value = await callback(this);
+    } catch (error) {
+      await this.rollbackToSavepoint(name).catch(() => undefined);
+      await this.releaseSavepoint(name).catch(() => undefined);
+      throw error;
+    }
+    await this.releaseSavepoint(name);
+    return value;
+  }
+  releaseSavepoint(name: string): Promise<void> {
+    return this.#request("release_savepoint", () => ({ name: text(name, "Savepoint name") }));
+  }
+  rollbackToSavepoint(name: string): Promise<void> {
+    return this.#request("rollback_to_savepoint", () => ({ name: text(name, "Savepoint name") }));
+  }
+
+  changes(): Promise<bigint> { return this.#request("changes", () => ({})); }
+  totalChanges(): Promise<bigint> { return this.#request("total_changes", () => ({})); }
+  lastInsertRowid(): Promise<bigint> { return this.#request("last_insert_rowid", () => ({})); }
+  /**
+   * Sets SQLite's busy timeout. A browser database has one exclusive owner
+   * and one connection, so there is normally nothing to wait for.
+   */
+  setBusyTimeout(milliseconds: number): Promise<void> {
+    return this.#request("set_busy_timeout", () => ({ milliseconds: size(milliseconds, "Busy timeout") }));
+  }
+
+  /** Queues a notification for this database's subscriptions on `channel`. */
+  notify(channel: string, payload: string): Promise<void> {
+    return this.#request("notify", () => {
+      if (typeof payload !== "string") invalid("Notification payload must be a string");
+      return { channel: text(channel, "Channel"), payload };
+    });
+  }
+  async listen(channel: string): Promise<Subscription> {
+    const handle = await this.#request<number>("listen", () => ({ channel: text(channel, "Channel") }));
+    return new Subscription((operation, prepare) => this.#request(operation, prepare, true), handle, constructionToken);
+  }
+
   async prepare(sql: string): Promise<Statement> {
     const info = await this.#request<{ handle: number; parameterCount: number; columns: string[] }>(
       "prepare", () => { validateSql(sql); return { sql }; });
@@ -477,6 +679,19 @@ export class Database {
         validateBytes(namespace, key);
         return { namespace: new Uint8Array(namespace), key: new Uint8Array(key) };
       }),
+    // Batches are atomic: all entries apply or none do, also inside a transaction.
+    getMany: (namespace: Uint8Array, keys: readonly Uint8Array[]): Promise<(Uint8Array | null)[]> =>
+      this.#request("kv_get_many", () => ({ namespace: kvBytes(namespace), keys: list(keys, kvBytes) })),
+    putMany: (namespace: Uint8Array, entries: readonly KvEntry[]): Promise<void> =>
+      this.#request("kv_put_many", () => ({
+        namespace: kvBytes(namespace), entries: list(entries, entry => ({ key: kvBytes(entry?.key), value: kvBytes(entry.value) })),
+      })),
+    deleteMany: (namespace: Uint8Array, keys: readonly Uint8Array[]): Promise<void> =>
+      this.#request("kv_delete_many", () => ({ namespace: kvBytes(namespace), keys: list(keys, kvBytes) })),
+    count: (namespace: Uint8Array): Promise<bigint> =>
+      this.#request("kv_count", () => ({ namespace: kvBytes(namespace) })),
+    clearNamespace: (namespace: Uint8Array): Promise<void> =>
+      this.#request("kv_clear_namespace", () => ({ namespace: kvBytes(namespace) })),
   });
 
   putObject(data: Uint8Array): Promise<Uint8Array> {

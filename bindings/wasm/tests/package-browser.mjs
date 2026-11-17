@@ -258,6 +258,104 @@ try {
     assert((await db.query("SELECT count(*) FROM sqlite_schema WHERE name = 'saved'")).rows[0][0] === 0n, "rejected import stores nothing");
     await db.close();
   }
+
+  // Native SQL, transaction, KV and notification parity (#216).
+  db = await Database.createMemory();
+  await db.exec("CREATE TABLE p(id INTEGER PRIMARY KEY, v)");
+  const totalBefore = await db.totalChanges();
+  await db.begin();
+  await db.query("INSERT INTO p(v) VALUES (?)", ["rolled"]);
+  await db.rollback();
+  await db.beginImmediate();
+  await db.query("INSERT INTO p(v) VALUES (?), (?)", ["a", "b"]);
+  assert(await db.changes() === 2n && await db.lastInsertRowid() === 2n, "changes and rowid");
+  await db.commit();
+  assert((await db.query("SELECT count(*) FROM p")).rows[0][0] === 2n && await db.totalChanges() - totalBefore === 3n, "explicit transactions");
+  await db.setBusyTimeout(100);
+  await status(db.transaction(tx => tx.commit()), "ZOVA_MISUSE");
+  await status(db.commit(), "ZOVA_SQLITE_ERROR");
+  // Savepoints nest and roll back inside transaction().
+  await db.transaction(async tx => {
+    await tx.query("INSERT INTO p(v) VALUES ('outer')");
+    await tx.savepoint("s1", async sp => {
+      await sp.query("INSERT INTO p(v) VALUES ('kept')");
+      let undone;
+      try { await sp.savepoint("s2", async inner => { await inner.query("INSERT INTO p(v) VALUES ('dropped')"); throw new RangeError("undo"); }); }
+      catch (error) { undone = error; }
+      assert(undone instanceof RangeError, "savepoint callback error is rethrown");
+    });
+    await tx.savepoint("s3");
+    await tx.query("INSERT INTO p(v) VALUES ('undone')");
+    await tx.rollbackToSavepoint("s3");
+    await tx.releaseSavepoint("s3");
+  });
+  const values = (await db.query("SELECT v FROM p ORDER BY id")).rows.map(row => row[0]).join();
+  assert(values === "a,b,outer,kept", `nested savepoints: ${values}`);
+  // Statements step one row at a time.
+  const stepper = await db.prepare("SELECT ?1 AS i, :f AS f, :t AS t, ?4 AS b, NULL AS n");
+  assert(await stepper.parameterIndex(":f") === 2 && await stepper.parameterIndex(":missing") === null, "parameter index");
+  await stepper.bindInteger(1, 7n); await stepper.bindFloat(2, 1.5); await stepper.bindText(3, "x"); await stepper.bindBlob(4, new Uint8Array([9]));
+  assert(await stepper.step() === "row", "step row");
+  assert(stepper.columnCount() === 5 && stepper.columnName(2) === "t" && stepper.columnType(0) === "integer" && stepper.columnType(4) === "null", "column metadata");
+  assert(stepper.columnInteger(0) === 7n && stepper.columnFloat(1) === 1.5 && stepper.columnText(2) === "x" && stepper.columnBlob(3)[0] === 9 && stepper.columnText(4) === null, "column values");
+  assert(stepper.columnFloat(0) === 7 && stepper.columnInteger(1) === 1n && stepper.columnInteger(4) === 0n, "numeric conversions");
+  let mismatch;
+  try { stepper.columnInteger(2); } catch (error) { mismatch = error; }
+  assert(mismatch instanceof ZovaWasmError && mismatch.status === "ZOVA_MISUSE", "text read as integer is refused");
+  assert(await stepper.step() === "done", "step done");
+  await stepper.reset();
+  assert(await stepper.step() === "row" && stepper.columnInteger(0) === 7n, "reset keeps bindings");
+  await stepper.reset(); await stepper.clearBindings();
+  assert(await stepper.step() === "row" && stepper.columnType(0) === "null", "cleared bindings");
+  await status(stepper.bindInteger(0, 1n), "ZOVA_INVALID_ARGUMENT");
+  await stepper.finalize();
+  // KV batches are atomic inside and outside transaction().
+  const batchNs = new Uint8Array([5]);
+  const k = n => new Uint8Array([n]);
+  await db.kv.putMany(batchNs, [{ key: k(1), value: k(11) }, { key: k(2), value: k(12) }, { key: k(3), value: new Uint8Array() }]);
+  const many = await db.kv.getMany(batchNs, [k(1), k(9), k(3)]);
+  assert(many[0][0] === 11 && many[1] === null && many[2].length === 0 && await db.kv.count(batchNs) === 3n, "KV batches");
+  await db.exec("CREATE TRIGGER kv_fault BEFORE INSERT ON _zova_kv WHEN NEW.key = X'FF' BEGIN SELECT RAISE(ABORT, 'injected'); END");
+  await status(db.kv.putMany(batchNs, [{ key: k(4), value: k(14) }, { key: k(255), value: k(1) }]), "ZOVA_CONSTRAINT");
+  assert(await db.kv.get(batchNs, k(4)) === null, "failed batch writes nothing");
+  await db.transaction(async tx => {
+    await tx.kv.put(batchNs, k(5), k(15));
+    await status(tx.kv.putMany(batchNs, [{ key: k(6), value: k(16) }, { key: k(255), value: k(1) }]), "ZOVA_CONSTRAINT");
+    await tx.kv.deleteMany(batchNs, [k(1), k(77)]);
+  });
+  assert((await db.kv.get(batchNs, k(5)))[0] === 15 && await db.kv.get(batchNs, k(6)) === null && await db.kv.get(batchNs, k(1)) === null, "batch inside transaction rolls back only itself");
+  await db.exec("DROP TRIGGER kv_fault");
+  await db.kv.clearNamespace(batchNs);
+  assert(await db.kv.count(batchNs) === 0n, "clear namespace");
+  // Notifications arrive after commit, never after rollback.
+  const subscription = await db.listen("jobs");
+  await db.notify("jobs", "now");
+  const received = await subscription.tryReceive();
+  assert(received.channel === "jobs" && received.payload === "now" && typeof received.sequence === "bigint" && received.droppedBefore === 0n, "immediate notification");
+  assert(await subscription.tryReceive() === null, "queue drained");
+  // Inside transaction(), use subscriptions created through `tx`.
+  const inner = await db.transaction(async tx => {
+    const listener = await tx.listen("jobs");
+    await tx.notify("jobs", "committed");
+    assert(await listener.tryReceive() === null, "not delivered before commit");
+    return listener;
+  });
+  assert((await subscription.tryReceive()).payload === "committed" && (await inner.tryReceive()).payload === "committed", "delivered after commit");
+  await inner.close();
+  await db.transaction(async tx => { await tx.notify("jobs", "rolled"); throw new RangeError("undo"); }).catch(() => undefined);
+  await db.transaction(async tx => {
+    await tx.savepoint("n");
+    await tx.notify("jobs", "savepoint-rolled");
+    await tx.rollbackToSavepoint("n");
+    await tx.releaseSavepoint("n");
+  });
+  await db.begin(); await db.notify("jobs", "explicit-rolled"); await db.rollback();
+  assert(await subscription.tryReceive() === null, "rolled back notifications are dropped");
+  await subscription.close();
+  assert(subscription.closed, "subscription closed");
+  await status(subscription.tryReceive(), "ZOVA_MISUSE");
+  await db.close();
+
   await fetch("/result", { method: "POST", body: JSON.stringify({ ok: true, packedPackage: true,
     initializationMs: initialized - started, firstQueryMs: queried - initialized }) });
 } catch (error) {

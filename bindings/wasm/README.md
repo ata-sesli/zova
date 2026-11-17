@@ -154,7 +154,9 @@ even when names repeat. Text and blobs are copied out of native memory.
 
 KV namespaces, keys, and values are Uint8Array values. Missing get returns null;
 an empty stored value returns an empty Uint8Array. Delete reports whether the
-key existed. Caller buffers remain attached and are copied when requests send.
+key existed. `kv.getMany`, `kv.putMany` (entries `{ key, value }`),
+`kv.deleteMany`, `kv.count` (bigint) and `kv.clearNamespace` match native
+`kvGetMany` and friends; batches are atomic inside and outside transactions. Caller buffers remain attached and are copied when requests send.
 
 Each database owns one worker. Concurrent calls execute in request order.
 Close follows earlier work, is idempotent, and marks `closed` immediately.
@@ -179,6 +181,32 @@ while a transaction runs wait until it ends, so awaiting `db` (rather than `tx`)
 inside the callback never completes. Transactions cannot be nested, `tx` rejects
 once its transaction has ended, and `tx.close()` rejects.
 
+Explicit control is also available: `begin()`, `beginImmediate()`, `commit()`
+and `rollback()` act on the database's one connection, and calls run in order,
+so the caller that begins a transaction owns it until it ends. They reject on a
+`tx` handle; use savepoints there. `savepoint(name)`, `releaseSavepoint(name)`
+and `rollbackToSavepoint(name)` nest inside either form, and
+`savepoint(name, async sp => ...)` releases on success or rolls back and
+releases on error. `changes()`, `totalChanges()` and `lastInsertRowid()` return
+bigint. `setBusyTimeout(ms)` is accepted for parity; with one exclusive owner and
+one connection there is normally nothing to wait for.
+
+## Notifications
+
+```ts
+const jobs = await db.listen('jobs');
+await db.notify('jobs', 'rebuild');
+const next = await jobs.tryReceive(); // { channel, payload, sequence, droppedBefore } or null
+await jobs.close();
+```
+
+Notifications follow native same-process semantics within this database's
+worker: a notification sent inside a transaction or savepoint is received only
+after commit, and never after rollback. `tryReceive()` polls; there is no
+push delivery. A subscription created on `db` waits like other `db` calls while
+a `transaction()` callback runs; create one through `tx` to read inside it.
+Notifications do not cross workers or tabs.
+
 ## Prepared statements
 
 ```ts
@@ -199,6 +227,17 @@ or is abandoned. A statement has one cursor: do not start a second `query()` or
 fetched reflect later writes on the same database as SQLite defines. Statements
 prepared inside a transaction remain usable after it. `finalize()` is idempotent;
 closing the database finalizes its statements.
+
+Statements can also be stepped as in native `Statement`: `bindNull`,
+`bindInteger` (bigint), `bindFloat`, `bindText`, `bindBlob`, `parameterIndex`,
+`clearBindings`, `step()` (resolving `"row"` or `"done"`) and `reset()`, which
+keeps bindings. `step()` brings the whole row across in one message, and
+`columnCount`, `columnName`, `columnType`, `columnInteger`, `columnFloat`,
+`columnText` and `columnBlob` then read it synchronously. Integer and float
+columns convert into each other and null reads as `0n`, `0` or `null`; reading
+text as a number or a number as text rejects with `ZOVA_MISUSE`, because the
+row is already converted and SQLite's own conversion is not reproduced. Each
+step is one worker message, so prefer `iterate()` for many rows.
 
 ## Objects, vectors and graphs
 
@@ -287,6 +326,28 @@ thrown error), leaving the stored database unchanged; once the `publish` phase
 has started, the migration completes. `verify: false` skips verification of the
 staged copy. Databases with bound stores cannot exist in browser storage and
 reject with `ZOVA_BOUND_STORE_INVALID`. Downgrades are not supported.
+
+## Native API parity
+
+SQL, transaction, KV and notification methods of native `zova-js` and their
+browser form. Every browser method returns a promise.
+
+| Native `zova-js` | `zova-wasm` |
+| --- | --- |
+| `exec`, `query`, `prepare` | same |
+| `begin`, `beginImmediate`, `commit`, `rollback` | same; reject on a `transaction()` handle |
+| `transaction(callback)` | same, immediate, async callback |
+| `transactionImmediate(callback)` | `transaction(callback)` is already immediate |
+| `savepoint`, `releaseSavepoint`, `rollbackToSavepoint` | same, async callback form |
+| `changes`, `totalChanges`, `lastInsertRowid`, `setBusyTimeout` | same |
+| `Statement.parameterCount()` | `parameterCount` property, set by `prepare()` |
+| `Statement.parameterIndex`, `bind*`, `step`, `reset`, `clearBindings` | same |
+| `Statement.column*` | same, synchronous over the stepped row; see above |
+| `Statement.close()` | `finalize()` |
+| `kvGet`, `kvPut`, `kvDelete` | `kv.get`, `kv.put`, `kv.delete` |
+| `kvGetMany`, `kvPutMany`, `kvDeleteMany`, `kvCount`, `kvClearNamespace` | `kv.getMany`, `kv.putMany`, `kv.deleteMany`, `kv.count`, `kv.clearNamespace` |
+| `notify`, `listen`, `Subscription.tryReceive`, `close` | same; within one worker only |
+| `Subscription.tryReceiveAsync` | `tryReceive()` is already asynchronous |
 
 ## Current boundaries
 

@@ -245,6 +245,8 @@ export function serveWorker(createModule, port = globalThis) {
   const flag = (op, input) => { call(op, input); return Boolean(module._zw_number()); };
   const unsigned = (op, input) => { call(op, input); return BigInt.asUintN(64, module._zw_integer()); };
   const edgeScope = a => request().str(a.graphName).str(a.nodeId).u32(code(directions, a.direction, "graph direction")).str(a.edgeType);
+  const signed = (op, input) => { call(op, input); return module._zw_integer(); };
+  const writeKey = (w, key) => w.bytes(key);
   // Operation numbers are shared with native/bridge.c.
   const calls = {
     object_put: a => call(1, request().bytes(a.data)).raw(32),
@@ -301,7 +303,28 @@ export function serveWorker(createModule, port = globalThis) {
         if (edgeType !== undefined) item.edgeType = edgeType;
         return item;
       }),
+    kv_get_many: a => call(50, request().bytes(a.namespace).each(a.keys, writeKey)).list(r => r.u32() ? r.raw(r.u32()) : null),
+    kv_put_many: a => void call(51, request().bytes(a.namespace).each(a.entries, (w, entry) => w.bytes(entry?.key).bytes(entry.value))),
+    kv_delete_many: a => void call(52, request().bytes(a.namespace).each(a.keys, writeKey)),
+    kv_count: a => unsigned(53, request().bytes(a.namespace)),
+    kv_clear_namespace: a => void call(54, request().bytes(a.namespace)),
+    savepoint: a => void call(55, request().str(a.name)),
+    release_savepoint: a => void call(56, request().str(a.name)),
+    rollback_to_savepoint: a => void call(57, request().str(a.name)),
+    changes: () => signed(58),
+    total_changes: () => signed(59),
+    last_insert_rowid: () => signed(60),
+    set_busy_timeout: a => void call(61, request().u32(count(a.milliseconds, "Busy timeout"))),
+    notify: a => void call(62, request().str(a.channel).bytes(encoder.encode(a.payload))),
+    listen: a => { call(63, request().str(a.channel)); return module._zw_number(); },
+    subscription_receive: a => {
+      const r = call(64, request().u32(count(a.handle, "Subscription")));
+      return r.u32() ? { channel: r.str(), payload: decoder.decode(r.raw(r.u32())), sequence: r.u64(), droppedBefore: r.u64() } : null;
+    },
+    subscription_close: a => void call(65, request().u32(count(a.handle, "Subscription"))),
   };
+  // Step-by-step statement use; each acts on the statement `handle`.
+  const statementCall = (op, a, input) => { check(module._zw_select(a.handle)); return call(op, input); };
   const probe = () => {
     check(module._zw_probe());
     return { formatVersion: Number(module._zw_integer()), compatibility: compatibilities[module._zw_number()], bytes: module._zw_float() };
@@ -434,6 +457,25 @@ export function serveWorker(createModule, port = globalThis) {
         })));
       }
       case "begin": return check(module._zw_transaction(0));
+      case "begin_deferred": return check(module._zw_transaction(3));
+      case "statement_step": {
+        check(module._zw_select(args.handle));
+        check(module._zw_count(0));
+        const page = readRows(module._zw_number(), 1);
+        return page.done ? { done: true } : { done: false, row: page.rows[0] };
+      }
+      case "statement_bind_one": {
+        check(module._zw_select(args.handle));
+        if (!Number.isInteger(args.index) || args.index < 1) throw invalid("Parameter index must be a positive integer");
+        const [type, integer, real, bytes] = sqlValue(args.value);
+        return withBytes(bytes, (pointer, length) => check(module._zw_bind(args.index, type, integer, real, pointer, length)));
+      }
+      case "statement_parameter_index": {
+        statementCall(66, args, request().str(args.name));
+        return module._zw_number() || null;
+      }
+      case "statement_reset_only": return void statementCall(67, args);
+      case "statement_clear_bindings": return void statementCall(68, args);
       case "commit": return check(module._zw_transaction(1));
       case "rollback": return check(module._zw_transaction(2));
       case "export":
