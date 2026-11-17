@@ -187,3 +187,17 @@ test("object ID hex helpers and object arguments validate locally", async () => 
   expect(TestWorker.last.messages.length).toBe(count);
   await db.close();
 });
+test("filtered vector search selects its operation and validates options", async () => {
+  installWorker();
+  const db = await Database.createMemory();
+  const start = TestWorker.last.messages.length;
+  await db.searchVectors("c", new Float32Array(2), 3);
+  await db.searchVectors("c", new Float32Array(2), { limit: 3, candidateIds: ["a"], maxDistance: 0.5 });
+  await db.searchVectorsById("c", "a", { limit: 3 });
+  expect(TestWorker.last.messages.slice(start).map(x => x.operation)).toEqual(["vector_search", "vector_search_filtered", "vector_search_by_id_filtered"]);
+  expect(TestWorker.last.messages.at(-2)).toMatchObject({ args: { limit: 3, candidateIds: ["a"], maxDistance: 0.5 } });
+  for (const options of [{ limit: -1 }, { limit: 1, candidateIds: "a" }, { limit: 1, candidateIds: [1] }, { limit: 1, maxDistance: "1" }, null]) {
+    await expect(db.searchVectors("c", new Float32Array(2), options as never)).rejects.toBeInstanceOf(ZovaWasmError);
+  }
+  await db.close();
+});

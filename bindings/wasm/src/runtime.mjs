@@ -71,6 +71,10 @@ function request() {
   };
   const self = {
     u32(value) { const at = reserve(4); view.setUint32(at, value, true); return self; },
+    f64(value) {
+      if (typeof value !== "number") throw invalid("Expected a number");
+      const at = reserve(8); view.setFloat64(at, value, true); return self;
+    },
     u64(value) {
       if (typeof value !== "bigint" || value < 0n || value >= (1n << 64n)) throw invalid("Expected an unsigned 64-bit bigint");
       const at = reserve(8); view.setBigUint64(at, value, true); return self;
@@ -135,6 +139,12 @@ const readSearch = r => ({ id: r.str(), distance: r.f64() });
 const writeNode = (w, node) => w.str(node.graphName).str(node.nodeId).str(node.kind)
   .u32(code(targetTypes, node.targetType, "graph target type")).str(node.targetNamespace).str(node.targetRef);
 const writeEdge = (w, edge) => w.str(edge.graphName).str(edge.fromNodeId).str(edge.edgeType).str(edge.toNodeId);
+// Optional candidates and distance select the native search variant.
+const searchOptions = (w, a) => {
+  w.u32(count(a.limit, "Limit"));
+  if (a.candidateIds === undefined) w.u32(0); else w.u32(1).each(a.candidateIds, writeText);
+  return a.maxDistance === undefined ? w.u32(0) : w.u32(1).f64(a.maxDistance);
+};
 const writeText = (w, text) => { if (typeof text !== "string") throw invalid("Identifiers must be strings"); w.str(text); };
 const profiles = ["deduplication", "streaming"];
 // Absent selects the calls without options and their default profile.
@@ -270,6 +280,8 @@ export function serveWorker(createModule, port = globalThis) {
     vector_delete: a => void call(18, request().str(a.collection).str(a.id)),
     vector_delete_many: a => void call(19, request().str(a.collection).each(a.ids, writeText)),
     vector_search: a => call(20, request().str(a.collection).values(a.query).u32(count(a.limit, "Limit"))).list(readSearch),
+    vector_search_filtered: a => call(22, searchOptions(request().str(a.collection).values(a.query), a)).list(readSearch),
+    vector_search_by_id_filtered: a => call(23, searchOptions(request().str(a.collection).str(a.id), a)).list(readSearch),
     vector_search_by_id: a => call(21, request().str(a.collection).str(a.id).u32(count(a.limit, "Limit"))).list(readSearch),
     graph_create: a => void call(30, request().str(a.name)),
     graph_exists: a => flag(31, request().str(a.name)),

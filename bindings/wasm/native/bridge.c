@@ -713,6 +713,61 @@ static int call_vector(int op, reader *r) {
             zova_vector_search_results_free(&results);
             return status;
         }
+        case 22: case 23: {
+            /* Filtered search, by query (22) or stored vector (23), choosing
+             * the native variant from the candidate and distance options. */
+            zova_vector_values query = {0};
+            const char *source = NULL;
+            if (op == 22) query = rd_values(r);
+            else source = rd_str(r);
+            size_t limit = rd_u32(r);
+            uint32_t has_candidates = rd_u32(r);
+            uint32_t count = has_candidates ? rd_u32(r) : 0;
+            const char **ids = has_candidates ? rd_array(r, count, sizeof(*ids)) : NULL;
+            for (uint32_t index = 0; ids && index < count; index++) {
+                ids[index] = rd_str(r);
+                if (!ids[index]) r->bad = 1;
+            }
+            uint32_t has_max = rd_u32(r);
+            double max = 0;
+            if (has_max) {
+                const uint8_t *data = rd_take(r, 8);
+                if (data) memcpy(&max, data, 8);
+            }
+            int status = ZOVA_INVALID_ARGUMENT;
+            zova_vector_search_results results = {0};
+            if (!r->bad && !r->left && (!has_candidates || ids)) {
+                if (op == 22 && !has_candidates && !has_max) {
+                    zova_vector_search_request request = {db, name, query, limit, &results};
+                    status = zova_vector_search(&request);
+                } else if (op == 22 && !has_max) {
+                    zova_vector_search_in_request request = {db, name, query, ids, count, limit, &results};
+                    status = zova_vector_search_in(&request);
+                } else if (op == 22 && !has_candidates) {
+                    zova_vector_search_within_request request = {db, name, query, max, limit, &results};
+                    status = zova_vector_search_within(&request);
+                } else if (op == 22) {
+                    zova_vector_search_in_within_request request = {db, name, query, ids, count, max, limit, &results};
+                    status = zova_vector_search_in_within(&request);
+                } else if (!has_candidates && !has_max) {
+                    zova_vector_search_by_id_request request = {db, name, source, limit, &results};
+                    status = zova_vector_search_by_id(&request);
+                } else if (!has_max) {
+                    zova_vector_search_by_id_in_request request = {db, name, source, ids, count, limit, &results};
+                    status = zova_vector_search_by_id_in(&request);
+                } else if (!has_candidates) {
+                    zova_vector_search_by_id_within_request request = {db, name, source, max, limit, &results};
+                    status = zova_vector_search_by_id_within(&request);
+                } else {
+                    zova_vector_search_by_id_in_within_request request = {db, name, source, ids, count, max, limit, &results};
+                    status = zova_vector_search_by_id_in_within(&request);
+                }
+            }
+            if (status == ZOVA_OK) wr_search(&results);
+            zova_vector_search_results_free(&results);
+            free(ids);
+            return status;
+        }
         default: return ZOVA_INVALID_ARGUMENT;
     }
 }
