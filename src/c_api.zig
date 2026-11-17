@@ -1226,6 +1226,11 @@ comptime {
             "zova_vector_search_by_id_in",
             "zova_vector_search_by_id_within",
             "zova_vector_search_by_id_in_within",
+            "zova_database_vacuum",
+            "zova_database_reclaim",
+            "zova_database_backup_with_progress",
+            "zova_database_compact_with_progress",
+            "zova_database_restore_to_memory",
         };
         for (allowed) |name| {
             @export(&@field(@This(), name), .{ .name = name });

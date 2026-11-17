@@ -323,6 +323,42 @@ overwrites one) and with the usual opening errors for bytes that are not a
 compatible Zova database, leaving nothing stored under that name. Both hold the
 whole database in memory.
 
+## Backup, compact, reclaim and restore
+
+```ts
+await db.reclaimSpace();                          // release free pages in place
+await db.backupTo('my-app-backup', { progress: event => console.log(event) });
+await db.compactTo('my-app-compact', { signal: AbortSignal.timeout(60_000) });
+await Database.restoreBackup('my-app-backup', 'my-app-restored');
+const scratch = await Database.restoreBackupToMemory('my-app-backup');
+```
+
+`reclaimSpace({ maxPages, stepPages })` releases free pages of incremental
+auto-vacuum files (every database this package creates) in bounded write
+transactions and returns native `ReclaimedMember` records; the stored file
+shrinks accordingly. It rejects with `ZOVA_OBJECT_TRANSACTION_ACTIVE` inside a
+transaction. `vacuum()` rebuilds the file with SQLite `VACUUM`.
+
+`backupTo(name)` and `compactTo(name)` copy an open persistent database to a
+new persistent name in the same origin. The target gets the same ownership
+check as opening it (`ZOVA_BUSY`) and must not exist
+(`ZOVA_DESTINATION_EXISTS`). The copy is staged in the source's storage and
+verified with the core's copy verification (`verify: false` skips it), then
+published to the target in one journaled write. A worker or tab stopped at any
+point leaves no target: a root-level `.zova-<name>.pending` marker identifies
+an incomplete creation, and the next owner of that name removes it. Progress
+events use the native phases `copy`, `verify` and `publish`. Aborting `signal`,
+or throwing from `progress`, takes effect when the running phase ends (the
+database's own worker cannot be stopped mid-call) and rejects with
+`ZOVA_INTERRUPTED`, or the thrown error, without creating the target; once
+`publish` has started the copy completes. Memory databases reject with
+`ZOVA_INVALID_ARGUMENT`; export them instead.
+
+`Database.restoreBackup(source, target)` copies a stored current-format
+database to a new name the same way. `Database.restoreBackupToMemory(source)`
+returns a memory database and releases the source once it is read. Both reject
+with `ZOVA_NOT_ZOVA_DATABASE` when the source name holds no database.
+
 ## Migrating stored databases
 
 A newer package can use a newer storage format. Opening a database stored by
@@ -390,6 +426,9 @@ browser form. Every browser method returns a promise.
 | `objectSeekableReader` (`read`, `seek`, `position`, `size`) | same, asynchronous, plus `readAt(offset, length)` |
 | chunk, manifest and assemble calls; `objectId`, `objectChunkId` | same; the ID functions are asynchronous |
 | `searchVectors`, `searchVectorsById` with `VectorSearchOptions` | same; a bare `limit` is also accepted |
+| `reclaimSpace`, `vacuum` | same |
+| `backupTo(path)`, `compactTo(path)` (async with progress) | `backupTo(name)`, `compactTo(name)` to a persistent name, with progress |
+| `restoreBackup(path, path)`, `restoreBackupToMemory(path)` | same with persistent names |
 
 ## Current boundaries
 
