@@ -153,3 +153,18 @@ test("migration stages, then publishes, in a maintenance worker", async () => {
   expect(TestWorker.last.messages[0]).toMatchObject({ args: { name: "notes", maintenance: true } });
   expect(events).toEqual([{ phase: "copy", member: "main", done: 1, total: 1 }]);
 });
+test("explicit transactions, savepoints, KV batches and notifications post their operations", async () => {
+  installWorker();
+  const db = await Database.createMemory();
+  const start = TestWorker.last.messages.length;
+  await db.begin();
+  await db.savepoint("s", async sp => { await sp.kv.putMany(new Uint8Array([1]), [{ key: new Uint8Array([2]), value: new Uint8Array() }]); });
+  await db.commit();
+  await db.transaction(async tx => { await expect(tx.begin()).rejects.toMatchObject({ status: "ZOVA_MISUSE" }); });
+  await expect(db.kv.putMany(new Uint8Array([1]), [{ key: "k" as never, value: new Uint8Array() }])).rejects.toBeInstanceOf(ZovaWasmError);
+  await expect(db.notify("c", 1 as never)).rejects.toBeInstanceOf(ZovaWasmError);
+  await expect(db.savepoint("s\0")).rejects.toBeInstanceOf(ZovaWasmError);
+  expect(TestWorker.last.messages.slice(start).map(x => x.operation))
+    .toEqual(["begin_deferred", "savepoint", "kv_put_many", "release_savepoint", "commit", "begin", "commit"]);
+  await db.close();
+});
