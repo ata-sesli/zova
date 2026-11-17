@@ -652,8 +652,15 @@ pub const StorageSchema = enum {
 };
 
 /// Buffered chunk bytes at which `ObjectWriter` commits its pending chunks.
-/// Test builds use a small threshold so tests can cross it cheaply.
-pub const writer_commit_threshold_bytes: usize = if (builtin.is_test) 1024 * 1024 else 64 * 1024 * 1024;
+/// Test builds use a small threshold so tests can cross it cheaply. A browser
+/// worker's WebAssembly memory never shrinks, so the buffer would stay as
+/// permanent footprint there; the browser build commits smaller batches.
+pub const writer_commit_threshold_bytes: usize = if (builtin.is_test)
+    1024 * 1024
+else if (builtin.os.tag == .emscripten)
+    4 * 1024 * 1024
+else
+    64 * 1024 * 1024;
 
 /// Incremental writer for one content-addressed Zova object.
 ///

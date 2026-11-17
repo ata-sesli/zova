@@ -101,3 +101,24 @@ export function snapshot(name) {
     worker.postMessage(name);
   });
 }
+
+// Deterministic test bytes (xorshift32), shared with the native fixture generator.
+export function patternBytes(length, seed) {
+  const bytes = new Uint8Array(length);
+  let state = seed >>> 0 || 1;
+  for (let index = 0; index < length; index++) {
+    state ^= state << 13; state >>>= 0;
+    state ^= state >>> 17;
+    state ^= state << 5; state >>>= 0;
+    bytes[index] = state & 255;
+  }
+  return bytes;
+}
+export const objectFixtureCases = [
+  { name: "empty", length: 0, seed: 1 },
+  { name: "one", length: 1, seed: 2 },
+  { name: "small", length: 70000, seed: 3 },
+  { name: "multi", length: 3500000, seed: 4 },
+];
+export const objectFixtureProfiles = [undefined, "deduplication", "streaming"];
+export const objectWriterPiece = 65521;

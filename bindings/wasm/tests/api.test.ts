@@ -168,3 +168,22 @@ test("explicit transactions, savepoints, KV batches and notifications post their
     .toEqual(["begin_deferred", "savepoint", "kv_put_many", "release_savepoint", "commit", "begin", "commit"]);
   await db.close();
 });
+test("object ID hex helpers and object arguments validate locally", async () => {
+  const { objectIdToHex, objectIdFromHex } = await import("../src/index.ts");
+  const id = Uint8Array.from({ length: 32 }, (_, index) => index * 7);
+  expect(objectIdFromHex(objectIdToHex(id))).toEqual(id);
+  expect(() => objectIdFromHex("zz")).toThrow(ZovaWasmError);
+  expect(() => objectIdToHex(new Uint8Array(31))).toThrow(ZovaWasmError);
+  installWorker();
+  const db = await Database.createMemory();
+  const count = TestWorker.last.messages.length;
+  for (const promise of [
+    db.putObjectWithOptions(new Uint8Array(1), { profile: "zip" as never }),
+    db.objectWriterWithOptions({ profile: "zip" as never }),
+    db.assembleObjectFromChunks(new Uint8Array(32), 1n, [{ index: 0, hash: new Uint8Array(32), offset: 0n, sizeBytes: 1n } as never]),
+    db.objectReader(new Uint8Array(32), 0),
+    db.getObjectChunk(new Uint8Array(3)),
+  ]) await expect(promise).rejects.toBeInstanceOf(ZovaWasmError);
+  expect(TestWorker.last.messages.length).toBe(count);
+  await db.close();
+});

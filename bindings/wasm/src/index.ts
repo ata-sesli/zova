@@ -145,9 +145,20 @@ function size(value: number, label: string): number {
   if (!Number.isInteger(value) || value < 0 || value >= 0xffffffff) invalid(label + " must be a non-negative integer");
   return value;
 }
-function objectId(id: Uint8Array): Uint8Array {
+function checkedId(id: Uint8Array): Uint8Array {
   if (!(id instanceof Uint8Array) || id.length !== 32) invalid("Object IDs are 32-byte Uint8Array values");
   return new Uint8Array(id);
+}
+function objectProfile(options: ObjectPutOptions): ObjectStorageProfile {
+  const profile = options?.profile;
+  if (profile !== "deduplication" && profile !== "streaming") invalid("Object storage profile must be deduplication or streaming");
+  return profile;
+}
+function manifestChunk(chunk: ObjectManifestChunkInput): ObjectManifestChunkInput {
+  for (const field of ["index", "offset", "sizeBytes"] as const) {
+    if (typeof chunk?.[field] !== "bigint") invalid("Manifest chunk index, offset and sizeBytes are bigint");
+  }
+  return { index: chunk.index, hash: checkedId(chunk.hash), offset: chunk.offset, sizeBytes: chunk.sizeBytes };
 }
 function kvBytes(value: Uint8Array): Uint8Array {
   validateBytes(value);
@@ -184,7 +195,7 @@ function edgeScope(options: GraphDegreeOptions): GraphDegreeOptions {
 }
 
 const constructionToken = Symbol("Database");
-type Request = <T>(operation: string, prepare: () => object) => Promise<T>;
+type Request = <T>(operation: string, prepare: () => object, transfer?: (args: object) => Transferable[]) => Promise<T>;
 interface Shared { channel: WorkerChannel; tail: Promise<void>; active: number; }
 interface Scope { done: boolean; }
 
@@ -336,6 +347,142 @@ export class Statement {
     throw new ZovaWasmError(`${accessor}: column ${index} holds ${this.columnType(index)}`, "ZOVA_MISUSE", 16);
   }
 }
+
+export type ObjectStorageProfile = "deduplication" | "streaming";
+export interface ObjectPutOptions { readonly profile: ObjectStorageProfile; }
+export interface ObjectManifestChunk {
+  readonly index: bigint;
+  readonly hash: Uint8Array;
+  readonly offset: bigint;
+  readonly sizeBytes: bigint;
+}
+export type ObjectManifestChunkInput = ObjectManifestChunk;
+export interface ObjectManifest {
+  readonly objectId: Uint8Array;
+  readonly sizeBytes: bigint;
+  readonly chunkCount: bigint;
+  readonly chunker: string;
+  readonly chunks: readonly ObjectManifestChunk[];
+}
+/** Origin for `ObjectSeekableReader.seek`, as in native `zova-js`. */
+export type SeekWhence = "start" | "current" | "end";
+
+/** A `WritableStream` that stores the written bytes as one object; see `Database.objectWriter()`. */
+export class ObjectWriter extends WritableStream<Uint8Array> {
+  /** The stored object's ID once the stream closes; rejects if it is aborted or fails. */
+  readonly id: Promise<Uint8Array>;
+
+  /** @internal Use Database.objectWriter(). */
+  constructor(request: Request, handle: number, token: symbol) {
+    if (token !== constructionToken) invalid("Use Database.objectWriter()");
+    let settle!: { resolve: (id: Uint8Array) => void; reject: (error: unknown) => void };
+    const id = new Promise<Uint8Array>((resolve, reject) => { settle = { resolve, reject }; });
+    id.catch(() => undefined);
+    let done = false;
+    const cancel = async (reason: unknown) => {
+      if (done) return;
+      done = true;
+      settle.reject(reason);
+      await request("object_writer_cancel", () => ({ handle })).catch(() => undefined);
+    };
+    super({
+      async write(chunk) {
+        if (!(chunk instanceof Uint8Array)) {
+          const error = new ZovaWasmError("Object writers accept Uint8Array chunks", "ZOVA_INVALID_ARGUMENT", 1);
+          await cancel(error);
+          throw error;
+        }
+        try {
+          await request("object_writer_write", () => ({ handle, data: chunk.slice() }), args => [(args as { data: Uint8Array }).data.buffer]);
+        } catch (error) {
+          const typed = failure(error);
+          await cancel(typed);
+          throw typed;
+        }
+      },
+      async close() {
+        done = true;
+        try { settle.resolve(await request<Uint8Array>("object_writer_finish", () => ({ handle }))); }
+        catch (error) { const typed = failure(error); settle.reject(typed); throw typed; }
+      },
+      abort: reason => cancel(reason ?? new ZovaWasmError("Object writer was aborted", "ZOVA_INTERRUPTED", 18)),
+    });
+    this.id = id;
+  }
+}
+
+/**
+ * Seekable, verified reader for one stored object. Each chunk is checked
+ * against its manifest SHA-256 before its bytes are returned. Calls run in
+ * order; reads at or past the end return an empty array.
+ */
+export class ObjectSeekableReader {
+  #request: Request;
+  #handle: number;
+  #position = 0n;
+  #closing?: Promise<void>;
+  /** Object size in bytes. */
+  readonly size: bigint;
+
+  /** @internal Use Database.objectSeekableReader(). */
+  constructor(request: Request, handle: number, objectSize: bigint, token: symbol) {
+    if (token !== constructionToken) invalid("Use Database.objectSeekableReader()");
+    this.#request = request;
+    this.#handle = handle;
+    this.size = objectSize;
+  }
+  get closed(): boolean { return this.#closing !== undefined; }
+  /** Offset of the next `read()`. */
+  get position(): bigint { return this.#position; }
+  /** Reads up to `size` bytes at the current position and advances it. */
+  async read(size: number): Promise<Uint8Array> {
+    const bytes = await this.readAt(this.#position, size);
+    return bytes;
+  }
+  /** Moves the read offset and returns the new absolute offset. */
+  async seek(offset: bigint | number, whence: SeekWhence = "start"): Promise<bigint> {
+    if (typeof offset === "number" && !Number.isSafeInteger(offset)) invalid("Offset must be a safe integer or bigint");
+    if (typeof offset !== "number" && typeof offset !== "bigint") invalid("Offset must be a safe integer or bigint");
+    const base = whence === "start" ? 0n : whence === "current" ? this.#position : whence === "end" ? this.size : invalid("Unknown seek origin");
+    const target = base + BigInt(offset);
+    if (target < 0n) invalid("Offset must not be negative");
+    this.#position = target;
+    return target;
+  }
+  /** Reads up to `length` bytes at `offset` in one worker call, then continues from there. */
+  async readAt(offset: bigint, length: number): Promise<Uint8Array> {
+    if (this.closed) throw new ZovaWasmError("Reader is closed", "ZOVA_OBJECT_READER_CLOSED", 63);
+    if (typeof offset !== "bigint" || offset < 0n || offset >= (1n << 64n)) invalid("Offset must be an unsigned 64-bit bigint");
+    const bytes = await this.#request<Uint8Array>("object_seekable_read_at", () => ({ handle: this.#handle, offset, size: size(length, "Length") }));
+    this.#position = offset + BigInt(bytes.length);
+    return bytes;
+  }
+  close(): Promise<void> {
+    this.#closing ??= this.#request<void>("object_stream_close", () => ({ handle: this.#handle }));
+    return this.#closing;
+  }
+}
+
+export function objectIdToHex(id: Uint8Array): string {
+  return Array.from(checkedId(id), byte => byte.toString(16).padStart(2, "0")).join("");
+}
+export function objectIdFromHex(value: string): Uint8Array {
+  if (typeof value !== "string" || !/^[0-9a-fA-F]{64}$/.test(value)) invalid("Object ID hex must be 64 hexadecimal characters");
+  return Uint8Array.from({ length: 32 }, (_, index) => Number.parseInt(value.slice(index * 2, index * 2 + 2), 16));
+}
+let helper: Promise<Database> | undefined;
+// The ID functions need the core's SHA-256; the first call starts one shared
+// memory database worker that stays for the page's lifetime.
+function hashWith(operation: string, data: Uint8Array): Promise<Uint8Array> {
+  try { validateBytes(data); } catch (error) { return Promise.reject(error); }
+  const copy = new Uint8Array(data);
+  helper ??= Database.createMemory();
+  return helper.then(db => db.objectIdOf(operation, copy));
+}
+/** The ID a whole object with these bytes is stored under. */
+export function objectId(data: Uint8Array): Promise<Uint8Array> { return hashWith("object_id", data); }
+/** The hash a chunk with these bytes is stored under. */
+export function objectChunkId(data: Uint8Array): Promise<Uint8Array> { return hashWith("object_chunk_id", data); }
 
 export type Step = "row" | "done";
 export type ColumnType = "integer" | "float" | "text" | "blob" | "null";
@@ -519,7 +666,9 @@ export class Database {
 
   // `outlive` lets a statement prepared inside a transaction keep working
   // after it, as an ordinary queued request.
-  async #request<T>(operation: string, prepare: () => object, outlive = false): Promise<T> {
+  // `transfer` names buffers inside the prepared arguments that this package
+  // owns and may move to the worker instead of copying.
+  async #request<T>(operation: string, prepare: () => object, outlive = false, transfer?: (args: object) => Transferable[]): Promise<T> {
     try {
       if (this.closed) throw new ZovaWasmError("Database is closed", "ZOVA_MISUSE", 16);
       const inTransaction = this.#scope !== undefined && !this.#scope.done;
@@ -529,7 +678,7 @@ export class Database {
       // Outside a transaction the request posts synchronously; while one is
       // running, other callers wait for it so their work cannot interleave.
       if (!inTransaction && this.#shared.active > 0) await this.#shared.tail;
-      return await this.#shared.channel.request(operation, args) as T;
+      return await this.#shared.channel.request(operation, args, undefined, transfer?.(args) ?? []) as T;
     } catch (error) { throw failure(error); }
   }
 
@@ -698,22 +847,115 @@ export class Database {
     return this.#request("object_put", () => { validateBytes(data); return { data: new Uint8Array(data) }; });
   }
   getObject(id: Uint8Array): Promise<Uint8Array> {
-    return this.#request("object_get", () => ({ id: objectId(id) }));
+    return this.#request("object_get", () => ({ id: checkedId(id) }));
   }
   readObjectRange(id: Uint8Array, offset: bigint, length: number): Promise<Uint8Array> {
     return this.#request("object_read_range", () => {
       if (typeof offset !== "bigint" || offset < 0n || offset >= (1n << 64n)) invalid("Offset must be an unsigned 64-bit bigint");
-      return { id: objectId(id), offset, size: size(length, "Length") };
+      return { id: checkedId(id), offset, size: size(length, "Length") };
     });
   }
   hasObject(id: Uint8Array): Promise<boolean> {
-    return this.#request("object_exists", () => ({ id: objectId(id) }));
+    return this.#request("object_exists", () => ({ id: checkedId(id) }));
   }
   objectSize(id: Uint8Array): Promise<bigint> {
-    return this.#request("object_size", () => ({ id: objectId(id) }));
+    return this.#request("object_size", () => ({ id: checkedId(id) }));
   }
   deleteObject(id: Uint8Array): Promise<void> {
-    return this.#request("object_delete", () => ({ id: objectId(id) }));
+    return this.#request("object_delete", () => ({ id: checkedId(id) }));
+  }
+  /** @internal Used by checkedId() and objectChunkId(). */
+  objectIdOf(operation: string, data: Uint8Array): Promise<Uint8Array> {
+    if (operation !== "object_id" && operation !== "object_chunk_id") invalid("Unknown identity");
+    return this.#request(operation, () => ({ data }), false, args => [(args as { data: Uint8Array }).data.buffer]);
+  }
+  putObjectWithOptions(data: Uint8Array, options: ObjectPutOptions): Promise<Uint8Array> {
+    return this.#request("object_put_with_options", () => { validateBytes(data); return { data: new Uint8Array(data), profile: objectProfile(options) }; });
+  }
+  objectChunkCount(id: Uint8Array): Promise<bigint> {
+    return this.#request("object_chunk_count", () => ({ id: checkedId(id) }));
+  }
+  objectManifest(id: Uint8Array): Promise<ObjectManifest> {
+    return this.#request("object_manifest", () => ({ id: checkedId(id) }));
+  }
+  getObjectChunk(hash: Uint8Array): Promise<Uint8Array> {
+    return this.#request("object_chunk_get", () => ({ hash: checkedId(hash) }));
+  }
+  hasObjectChunk(hash: Uint8Array): Promise<boolean> {
+    return this.#request("object_chunk_exists", () => ({ hash: checkedId(hash) }));
+  }
+  /** Stores one loose chunk after checking that `hash` is the SHA-256 of `data`. */
+  putObjectChunk(hash: Uint8Array, data: Uint8Array): Promise<void> {
+    return this.#request("object_chunk_put", () => { validateBytes(data); return { hash: checkedId(hash), data: new Uint8Array(data) }; });
+  }
+  putObjectChunkWithOptions(hash: Uint8Array, data: Uint8Array, options: ObjectPutOptions): Promise<void> {
+    return this.#request("object_chunk_put", () => {
+      validateBytes(data);
+      return { hash: checkedId(hash), data: new Uint8Array(data), profile: objectProfile(options) };
+    });
+  }
+  /** Resolves false when the chunk did not exist. */
+  deleteObjectChunk(hash: Uint8Array): Promise<boolean> {
+    return this.#request("object_chunk_delete", () => ({ hash: checkedId(hash) }));
+  }
+  /** Records an object from stored chunks; the manifest and `id` are verified. */
+  assembleObjectFromChunks(id: Uint8Array, sizeBytes: bigint, chunks: readonly ObjectManifestChunkInput[]): Promise<void> {
+    return this.#request("object_assemble", () => ({ id: checkedId(id), sizeBytes, chunks: list(chunks, manifestChunk) }));
+  }
+  assembleObjectFromChunksWithOptions(id: Uint8Array, sizeBytes: bigint, chunks: readonly ObjectManifestChunkInput[],
+    options: ObjectPutOptions): Promise<void> {
+    return this.#request("object_assemble", () => ({
+      id: checkedId(id), sizeBytes, chunks: list(chunks, manifestChunk), profile: objectProfile(options),
+    }));
+  }
+
+  /**
+   * Streams bytes into a new object. Each written chunk is copied once and
+   * moved to the worker, so memory stays bounded by the chunk size, not the
+   * object size. Close the stream to store the object and resolve `writer.id`;
+   * aborting it, or any failed write, cancels the object and stores nothing.
+   */
+  objectWriter(): Promise<ObjectWriter> { return this.#writer(undefined); }
+  objectWriterWithOptions(options: ObjectPutOptions): Promise<ObjectWriter> {
+    try { return this.#writer(objectProfile(options)); } catch (error) { return Promise.reject(failure(error)); }
+  }
+  async #writer(profile: ObjectStorageProfile | undefined): Promise<ObjectWriter> {
+    const handle = await this.#request<number>("object_writer_create", () => ({ profile }));
+    return new ObjectWriter((operation, prepare, transfer) => this.#request(operation, prepare, true, transfer), handle, constructionToken);
+  }
+
+  /**
+   * Streams a stored object's verified bytes in reads of up to `chunkSize`
+   * bytes (1 MiB by default), each moved from the worker without copying.
+   * Cancel the stream to release the reader early.
+   */
+  async objectReader(id: Uint8Array, chunkSize = 1 << 20): Promise<ReadableStream<Uint8Array>> {
+    size(chunkSize, "Chunk size");
+    if (chunkSize === 0) invalid("Chunk size must be positive");
+    const request: Request = (operation, prepare) => this.#request(operation, prepare, true);
+    const handle = await this.#request<number>("object_reader_create", () => ({ id: checkedId(id) }));
+    let open = true;
+    const close = () => { if (!open) return Promise.resolve(); open = false; return request<void>("object_stream_close", () => ({ handle })); };
+    return new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const bytes = await request<Uint8Array>("object_reader_read", () => ({ handle, size: chunkSize }));
+          if (bytes.length > 0) { controller.enqueue(bytes); return; }
+          await close();
+          controller.close();
+        } catch (error) {
+          await close().catch(() => undefined);
+          controller.error(failure(error));
+        }
+      },
+      cancel: () => close(),
+    }, { highWaterMark: 1 });
+  }
+
+  /** Verified random access to one object, for example to serve HTTP ranges. */
+  async objectSeekableReader(id: Uint8Array): Promise<ObjectSeekableReader> {
+    const opened = await this.#request<{ handle: number; size: bigint }>("object_seekable_create", () => ({ id: checkedId(id) }));
+    return new ObjectSeekableReader((operation, prepare) => this.#request(operation, prepare, true), opened.handle, opened.size, constructionToken);
   }
 
   createVectorCollection(name: string, options: VectorCollectionOptions): Promise<void> {

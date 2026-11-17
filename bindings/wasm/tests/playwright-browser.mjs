@@ -4,6 +4,7 @@ import { stat } from "node:fs/promises";
 import { testOwnership } from "./ownership-browser.mjs";
 import { testDurability } from "./durability-browser.mjs";
 import { testMigration } from "./migration-browser.mjs";
+import { testObjectStreaming } from "./object-stream-browser.mjs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 
@@ -33,6 +34,7 @@ const server = Bun.serve({
       resolveReport(await request.json()); return new Response("ok");
     }
     if (path === "/") return new Response('<script type="module" src="/test.mjs"></script>', { headers: { "Content-Type": "text/html" } });
+    if (path === "/object-fixture.json") return new Response(Bun.file(new URL("./object-fixture.json", import.meta.url)));
     if (path === "/helpers.mjs") return new Response(Bun.file(new URL("./browser-helpers.mjs", import.meta.url)), { headers: { "Content-Type": "text/javascript" } });
     if (path === "/previous") return new Response('<script type="module">import * as zova from "/previous/dist/index.js"; globalThis.previous = zova;</script>', { headers: { "Content-Type": "text/html" } });
     if (/^\/previous\/(?:dist\/[a-z-]+\.(?:js|mjs)|zova\.(?:mjs|wasm))$/.test(path)) return new Response(Bun.file(join(resolve(previousPackage), path.slice(10))));
@@ -190,6 +192,7 @@ try {
   const wasmBytes = (await stat(join(installedPackage, "zova.wasm"))).size;
   await testDurability(context, base);
   await testMigration(context, base, migrationFormats);
+  const objectStreaming = await testObjectStreaming(context, base, Number(process.env.ZOVA_WASM_STREAM_MIB ?? 512));
   const examplePage = await context.newPage();
   await examplePage.goto(`${base}/failure`);
   const printed = [];
@@ -200,7 +203,7 @@ try {
   console.log(JSON.stringify({ ...result, initializationFailure: true, runtimeFailure: true,
     persistentReopen: true, rejectedOpenPreservesBytes: true, missingOpfs: true,
     poolInitializationFailurePreservesData: true, exclusiveOwnership: true,
-    durabilityAndInjectedStorageFaults: true, migration: true, wasmBytes }));
+    durabilityAndInjectedStorageFaults: true, migration: true, objectStreaming, wasmBytes }));
 } finally {
   clearTimeout(deadline);
   await browser?.close();

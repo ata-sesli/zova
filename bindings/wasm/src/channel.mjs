@@ -42,15 +42,16 @@ export class WorkerChannel {
    * @param {string} operation
    * @param {object} [args]
    * @param {(progress: any) => void} [progress]
+   * @param {Transferable[]} [transfer] buffers the caller gives up
    */
-  request(operation, args = {}, progress) {
+  request(operation, args = {}, progress, transfer = []) {
     if (this.#closed || this.#closing) return Promise.reject(new Error("Database is closed"));
     const id = this.#next++;
     return new Promise((resolve, reject) => {
       this.#pending.set(id, { resolve, reject, progress });
       try {
-        // No transfer list: callers keep their buffers and queued values are copied.
-        this.#worker.postMessage({ id, operation, args });
+        // Callers keep their buffers unless they pass ones they own in `transfer`.
+        this.#worker.postMessage({ id, operation, args }, transfer);
       } catch (error) {
         this.#pending.delete(id);
         reject(error);

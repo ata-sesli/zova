@@ -356,6 +356,94 @@ try {
   await status(subscription.tryReceive(), "ZOVA_MISUSE");
   await db.close();
 
+  // Streaming object, chunk and manifest APIs match native zova-js (#217).
+  {
+    const zova = await import("/package/dist/index.js");
+    const h = await import("/helpers.mjs");
+    const fixture = await (await fetch("/object-fixture.json")).json();
+    const hex = zova.objectIdToHex;
+    const manifestJson = m => ({ objectId: hex(m.objectId), sizeBytes: String(m.sizeBytes), chunkCount: String(m.chunkCount), chunker: m.chunker,
+      chunks: m.chunks.map(c => [String(c.index), hex(c.hash), String(c.offset), String(c.sizeBytes)]) });
+    for (const expected of fixture.results) {
+      // Like the native generator: content addressing keeps the first manifest.
+      await db?.close();
+      db = await Database.createMemory();
+      const testCase = h.objectFixtureCases.find(item => item.name === expected.case);
+      const data = h.patternBytes(testCase.length, testCase.seed);
+      const options = expected.profile === null ? undefined : { profile: expected.profile };
+      const label = `${expected.case}/${expected.profile}`;
+      assert(hex(await zova.objectId(data)) === expected.objectId && hex(await zova.objectChunkId(data)) === expected.chunkId, `${label}: identity helpers`);
+      const put = options ? await db.putObjectWithOptions(data, options) : await db.putObject(data);
+      assert(JSON.stringify(manifestJson(await db.objectManifest(put))) === JSON.stringify(expected.put), `${label}: put manifest differs from native`);
+      const writer = options ? await db.objectWriterWithOptions(options) : await db.objectWriter();
+      const source = new ReadableStream({ start(controller) {
+        for (let offset = 0; offset < data.length; offset += h.objectWriterPiece) controller.enqueue(data.subarray(offset, offset + h.objectWriterPiece));
+        controller.close();
+      } });
+      await source.pipeTo(writer);
+      const written = await writer.id;
+      assert(JSON.stringify(manifestJson(await db.objectManifest(written))) === JSON.stringify(expected.writer), `${label}: writer manifest differs from native`);
+      assert(await db.objectChunkCount(written) === BigInt(expected.writer.chunkCount), `${label}: chunk count`);
+      const read = [];
+      for await (const piece of await db.objectReader(written, 100000)) read.push(piece);
+      const joined = new Uint8Array(read.reduce((total, piece) => total + piece.length, 0));
+      read.reduce((offset, piece) => { joined.set(piece, offset); return offset + piece.length; }, 0);
+      assert(same(joined, data) && read.every(piece => piece.length <= 100000), `${label}: reader stream bytes`);
+    }
+    // Chunks stored one by one assemble into the native object.
+    const multi = fixture.results.find(item => item.case === "multi" && item.profile === "deduplication").put;
+    const multiCase = h.objectFixtureCases.find(item => item.name === "multi");
+    const multiData = h.patternBytes(multiCase.length, multiCase.seed);
+    await db.close();
+    db = await Database.createMemory();
+    const chunkInputs = multi.chunks.map(([index, hash, offset, size]) => ({ index: BigInt(index), hash: zova.objectIdFromHex(hash), offset: BigInt(offset), sizeBytes: BigInt(size) }));
+    for (const chunk of chunkInputs) {
+      await db.putObjectChunk(chunk.hash, multiData.subarray(Number(chunk.offset), Number(chunk.offset + chunk.sizeBytes)));
+    }
+    await status(db.putObjectChunk(chunkInputs[0].hash, new Uint8Array([1])), "ZOVA_OBJECT_CHUNK_HASH_MISMATCH");
+    assert(await db.hasObjectChunk(chunkInputs[1].hash) && same(await db.getObjectChunk(chunkInputs[1].hash), multiData.subarray(Number(chunkInputs[1].offset), Number(chunkInputs[1].offset + chunkInputs[1].sizeBytes))), "loose chunk read");
+    const assembledId = zova.objectIdFromHex(multi.objectId);
+    await db.assembleObjectFromChunks(assembledId, BigInt(multi.sizeBytes), chunkInputs);
+    assert(same(await db.getObject(assembledId), multiData) && JSON.stringify(manifestJson(await db.objectManifest(assembledId))) === JSON.stringify(multi), "assembled object matches native");
+    const looseData = new TextEncoder().encode("loose chunk");
+    const looseHash = await zova.objectChunkId(looseData);
+    await db.putObjectChunkWithOptions(looseHash, looseData, { profile: "streaming" });
+    assert(await db.deleteObjectChunk(looseHash) === true && await db.deleteObjectChunk(looseHash) === false && !await db.hasObjectChunk(looseHash), "loose chunk delete");
+    // The seekable reader returns what readObjectRange returns.
+    const seekable = await db.objectSeekableReader(assembledId);
+    assert(seekable.size === BigInt(multiData.length), "seekable size");
+    let seed = 99;
+    const random = limit => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % limit; };
+    for (let trial = 0; trial < 200; trial++) {
+      const offset = BigInt(random(multiData.length + 10));
+      const length = random(300000);
+      assert(same(await seekable.readAt(offset, length), await db.readObjectRange(assembledId, offset, length)), `seekable read at ${offset}+${length}`);
+    }
+    assert(await seekable.seek(-10, "end") === BigInt(multiData.length - 10) && same(await seekable.read(100), multiData.subarray(-10)), "seek from end");
+    assert((await seekable.read(5)).length === 0 && seekable.position === BigInt(multiData.length), "read at end");
+    await seekable.close();
+    await status(seekable.readAt(0n, 1), "ZOVA_OBJECT_READER_CLOSED");
+    // A cancelled writer leaves no object and no chunks.
+    const counts = async () => (await db.query("SELECT (SELECT count(*) FROM _zova_objects), (SELECT count(*) FROM _zova_chunks)")).rows[0].join();
+    const before = await counts();
+    const cancelled = await db.objectWriter();
+    const handle = cancelled.getWriter();
+    await handle.write(h.patternBytes(500000, 7));
+    await handle.write(h.patternBytes(500000, 8));
+    await handle.abort(new RangeError("stop"));
+    let cancelError;
+    try { await cancelled.id; } catch (error) { cancelError = error; }
+    assert(cancelError instanceof RangeError && await counts() === before, "cancelled writer stores nothing");
+    const failed = await db.objectWriter();
+    const failedHandle = failed.getWriter();
+    await failedHandle.write(new Uint8Array(10));
+    let wrongChunk;
+    try { await failedHandle.write("text"); } catch (error) { wrongChunk = error; }
+    assert(wrongChunk instanceof ZovaWasmError && await counts() === before, "failed writer stores nothing");
+    await status(db.objectReader(new Uint8Array(32)), "ZOVA_OBJECT_NOT_FOUND");
+    await db.close();
+  }
+
   await fetch("/result", { method: "POST", body: JSON.stringify({ ok: true, packedPackage: true,
     initializationMs: initialized - started, firstQueryMs: queried - initialized }) });
 } catch (error) {
