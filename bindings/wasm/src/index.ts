@@ -94,6 +94,28 @@ export interface ProgressOptions {
   readonly progress?: (progress: Progress) => void;
   readonly signal?: AbortSignal;
 }
+/** Options for `backupTo`, `compactTo` and `restoreBackup`. */
+export interface CopyOptions extends ProgressOptions {
+  /** Verify the copy with the core's copy verification. Defaults to true. */
+  readonly verify?: boolean;
+}
+/**
+ * `maxPages` bounds the pages released by one call (default 0: every free
+ * page); `stepPages` is the pages released per write transaction (default 1024).
+ */
+export interface ReclaimOptions {
+  readonly maxPages?: number;
+  readonly stepPages?: number;
+}
+export type AutoVacuumMode = "none" | "full" | "incremental";
+/** What `reclaimSpace` did for one member file, as in native `zova-js`. */
+export interface ReclaimedMember {
+  readonly member: ProgressMember;
+  readonly autoVacuum: AutoVacuumMode;
+  readonly pageSize: number;
+  readonly pagesReleased: number;
+  readonly freePagesLeft: number;
+}
 export interface MigrateOptions extends ProgressOptions {
   /** Verify the migrated copy before publishing it. Defaults to true. */
   readonly verify?: boolean;
@@ -644,6 +666,27 @@ export class Database {
     }
   }
 
+  /**
+   * Copies the stored database `sourceName` to the new persistent name
+   * `targetName` with the same guarantees as `backupTo`. The source must exist
+   * and be a current-format database; it is opened, read and closed.
+   */
+  static async restoreBackup(sourceName: string, targetName: string, options: CopyOptions = {}): Promise<void> {
+    persistentName(sourceName);
+    persistentName(targetName);
+    const source = await Database.#open({ name: sourceName, existing: true });
+    try { await source.backupTo(targetName, options); } finally { await source.close().catch(() => undefined); }
+  }
+
+  /**
+   * Restores the stored database `sourceName` into a new memory database. The
+   * source is owned only while it is read.
+   */
+  static async restoreBackupToMemory(sourceName: string, options: { readonly verify?: boolean } = {}): Promise<Database> {
+    persistentName(sourceName);
+    return Database.#open({ restoreFrom: sourceName, verify: options?.verify !== false });
+  }
+
   static #spawn(): WorkerChannel {
     return new WorkerChannel(new Worker(new URL("./worker.mjs", import.meta.url), { type: "module" }));
   }
@@ -670,7 +713,7 @@ export class Database {
     return Database.#open({ name, data: new Uint8Array(data) });
   }
 
-  static async #open(args: { name?: string; data?: Uint8Array }): Promise<Database> {
+  static async #open(args: { name?: string; data?: Uint8Array; existing?: boolean; restoreFrom?: string; verify?: boolean }): Promise<Database> {
     let channel: WorkerChannel | undefined;
     try {
       channel = Database.#spawn();
@@ -688,7 +731,8 @@ export class Database {
   // after it, as an ordinary queued request.
   // `transfer` names buffers inside the prepared arguments that this package
   // owns and may move to the worker instead of copying.
-  async #request<T>(operation: string, prepare: () => object, outlive = false, transfer?: (args: object) => Transferable[]): Promise<T> {
+  async #request<T>(operation: string, prepare: () => object, outlive = false, transfer?: (args: object) => Transferable[],
+    progress?: (event: Progress) => void): Promise<T> {
     try {
       if (this.closed) throw new ZovaWasmError("Database is closed", "ZOVA_MISUSE", 16);
       const inTransaction = this.#scope !== undefined && !this.#scope.done;
@@ -698,7 +742,7 @@ export class Database {
       // Outside a transaction the request posts synchronously; while one is
       // running, other callers wait for it so their work cannot interleave.
       if (!inTransaction && this.#shared.active > 0) await this.#shared.tail;
-      return await this.#shared.channel.request(operation, args, undefined, transfer?.(args) ?? []) as T;
+      return await this.#shared.channel.request(operation, args, progress, transfer?.(args) ?? []) as T;
     } catch (error) { throw failure(error); }
   }
 
@@ -813,6 +857,63 @@ export class Database {
     const info = await this.#request<{ handle: number; parameterCount: number; columns: string[] }>(
       "prepare", () => { validateSql(sql); return { sql }; });
     return new Statement((operation, prepare) => this.#request(operation, prepare, true), info, constructionToken);
+  }
+
+  /** Releases free pages of incremental auto-vacuum files in bounded steps, as native. */
+  reclaimSpace(options: ReclaimOptions = {}): Promise<ReclaimedMember[]> {
+    return this.#request("reclaim", () => ({
+      maxPages: options?.maxPages === undefined ? 0 : size(options.maxPages, "maxPages"),
+      stepPages: options?.stepPages === undefined ? 0 : size(options.stepPages, "stepPages"),
+    }));
+  }
+  /** Rebuilds the database file with SQLite `VACUUM`. */
+  vacuum(): Promise<void> { return this.#request("vacuum", () => ({})); }
+
+  /**
+   * Copies this persistent database to the new persistent name `targetName`
+   * with SQLite's online backup, verified by the core like native `backupTo`.
+   * The target gets the same ownership check as opening it (`ZOVA_BUSY`) and
+   * must not exist (`ZOVA_DESTINATION_EXISTS`). The copy is staged and
+   * verified in this database's storage, then published to the target in
+   * one journaled write; a stopped worker leaves no target, and the next open
+   * of the name removes any incomplete one. Cancelling with `signal` or a
+   * throwing `progress` takes effect at the next phase boundary, before
+   * publication, and rejects with `ZOVA_INTERRUPTED` without a target. Once
+   * the `publish` phase starts, the copy completes.
+   */
+  backupTo(targetName: string, options: CopyOptions = {}): Promise<void> { return this.#copyTo(false, targetName, options); }
+  /** As `backupTo`, through SQLite `VACUUM INTO`, which drops free pages. */
+  compactTo(targetName: string, options: CopyOptions = {}): Promise<void> { return this.#copyTo(true, targetName, options); }
+  async #copyTo(compact: boolean, target: string, options: CopyOptions): Promise<void> {
+    persistentName(target);
+    const { progress: callback, signal } = options ?? {};
+    if (callback !== undefined && typeof callback !== "function") invalid("progress must be a function");
+    const interrupted = () => new ZovaWasmError("Copy was cancelled", "ZOVA_INTERRUPTED", 18);
+    if (signal?.aborted) throw interrupted();
+    // Set by `report` between awaits; read through a call so it is not narrowed.
+    const stop: { thrown?: { error: unknown } } = {};
+    const thrown = () => stop.thrown;
+    const report = (event: Progress) => {
+      if (stop.thrown || !callback) return;
+      try { callback(event); } catch (error) { stop.thrown = { error }; }
+    };
+    const send = (operation: string, args: object = {}) => this.#request(operation, () => args, false, undefined, report);
+    try {
+      await send("copy_begin", { target });
+      try {
+        await send("copy_stage", { compact, verify: options?.verify !== false });
+        if (thrown()) throw thrown()!.error;
+        if (signal?.aborted) throw interrupted();
+        await send("copy_publish");
+      } catch (error) {
+        await this.#request("copy_discard", () => ({})).catch(() => undefined);
+        throw error;
+      }
+      if (thrown()) throw thrown()!.error;
+    } catch (error) {
+      if (thrown() && error === thrown()!.error) throw error;
+      throw failure(error);
+    }
   }
 
   /** Bytes of the committed persistent database. Rejects while a transaction is open. */

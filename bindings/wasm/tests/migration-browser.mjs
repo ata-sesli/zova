@@ -1,33 +1,7 @@
 // In-place migration of persistent browser databases (#215), checked against
 // native CLI migration of the same retained fixtures.
 
-// Prepended to the packed worker. `at` stops the worker at a publication step
-// ("publish-0" before replacing, "publish-1" after the commit) or at the nth
-// storage write after replacement starts ("write-n"). With `stop` the page
-// terminates the worker there; without it the worker stays stopped and keeps
-// its lock. `count` reports the replacement's write count.
-const faultScript = config => `
-  const testConfig = ${JSON.stringify(config)};
-  const testPost = self.postMessage.bind(self);
-  let testPublishing = false;
-  let testWrites = 0;
-  const testStop = () => { if (testConfig.stop) testPost({ testStop: true }); for (;;) {} };
-  if (testConfig.estimate) navigator.storage.estimate = async () => testConfig.estimate;
-  self.postMessage = (message, ...rest) => {
-    testPost(message, ...rest);
-    const event = message?.progress;
-    if (event?.phase !== "publish") return;
-    if (event.done === 0) testPublishing = true;
-    if (event.done === 1 && testConfig.count) testPost({ testWrites });
-    if (testConfig.at === "publish-" + event.done) testStop();
-  };
-  const testWrite = FileSystemSyncAccessHandle.prototype.write;
-  FileSystemSyncAccessHandle.prototype.write = function (...args) {
-    const result = testWrite.apply(this, args);
-    if (testPublishing && testConfig.at === "write-" + ++testWrites) testStop();
-    return result;
-  };
-`;
+import { faultedPage } from "./fault-script.mjs";
 
 export async function testMigration(context, base, formats) {
   const assert = (condition, message) => { if (!condition) throw new Error(message); };
@@ -40,29 +14,7 @@ export async function testMigration(context, base, formats) {
     await page.evaluate(async () => { globalThis.h = await import("/helpers.mjs"); });
     return page;
   };
-  const faulted = async config => {
-    const page = await context.newPage();
-    pages.push(page);
-    await page.addInitScript(() => {
-      const NativeWorker = Worker;
-      globalThis.Worker = class extends NativeWorker {
-        constructor(...args) {
-          super(...args);
-          this.addEventListener("message", ({ data }) => {
-            if (data?.testStop) { this.terminate(); globalThis.testStopped = true; }
-            if (data?.testWrites !== undefined) globalThis.testWrites = data.testWrites;
-          });
-        }
-      };
-    });
-    await page.route("**/dist/worker.mjs", async route => {
-      const response = await route.fetch();
-      await route.fulfill({ response, body: faultScript(config) + await response.text() });
-    });
-    await page.goto(`${base}/failure`);
-    await page.waitForFunction(() => Boolean(globalThis.zova));
-    return page;
-  };
+  const faulted = async config => { const page = await faultedPage(context, base, config); pages.push(page); return page; };
   try {
     const page = await open();
     const seed = (name, format = 12) => page.evaluate(async ({ name, format }) =>

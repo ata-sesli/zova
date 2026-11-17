@@ -27,6 +27,22 @@ function acquireOwnership(name, waitMs = 0) {
   });
 }
 
+// A database being created under a new name (import, backup, compact or
+// restore) is marked by a root-level file until it is complete. The next owner
+// of that name removes an incomplete creation before using the name.
+const opfsRoot = () => navigator.storage.getDirectory();
+const pendingName = name => ".zova-" + name + ".pending";
+async function clearInterruptedCreation(name) {
+  const root = await opfsRoot();
+  try { await root.getFileHandle(pendingName(name)); } catch { return; }
+  await root.removeEntry(".zova-" + name, { recursive: true }).catch(error => { if (error?.name !== "NotFoundError") throw error; });
+  await root.removeEntry(pendingName(name));
+}
+const setPending = async name => { await (await opfsRoot()).getFileHandle(pendingName(name), { create: true }); };
+const clearPending = async name => { await (await opfsRoot()).removeEntry(pendingName(name)).catch(() => undefined); };
+const autoVacuumModes = ["none", "full", "incremental"];
+const copyStaging = ["/copy.zova-journal", "/copy.zova"];
+
 const phases = ["copy", "migrate", "verify", "publish"];
 const members = [null, "main", "object_store", "vector_store", "graph_store"];
 const compatibilities = ["current", "migratable", "unsupported_legacy", "unsupported_future"];
@@ -174,6 +190,12 @@ export function serveWorker(createModule, port = globalThis) {
   let module;
   let state = "new";
   let lastId = 0;
+  let sqlite;
+  let name;
+  // The copy being written into another name's pool, from copy_begin until
+  // it is published or discarded.
+  let copy;
+  let copies = 0;
   let currentId = 0;
   let queue = Promise.resolve();
   let pool;
@@ -376,6 +398,17 @@ export function serveWorker(createModule, port = globalThis) {
   };
   const progress = (phase, done, total) => port.postMessage({ id: currentId, progress: { phase, member: null, done, total } });
   const removeStaging = () => migrationStaging.forEach(name => pool.unlink(name));
+  // Removes the staged copy and anything the copy created under the target name.
+  const discardCopy = async () => {
+    if (pool) copyStaging.forEach(file => pool.unlink(file));
+    if (!copy) return;
+    const current = copy;
+    copy = undefined;
+    if (current.created) ["/db.zova-journal", "/db.zova"].forEach(file => current.pool.unlink(file));
+    if (current.pending) await clearPending(current.name);
+    current.pool?.pauseVfs();
+    await current.release();
+  };
   // Requests in a worker that owns a persistent name without opening it.
   const maintain = async (operation, args) => {
     switch (operation) {
@@ -437,6 +470,10 @@ export function serveWorker(createModule, port = globalThis) {
       if (args.data !== undefined && (args.name === undefined || !(args.data instanceof Uint8Array))) throw invalid("Import requires a name and Uint8Array bytes");
       if (args.name !== undefined && (typeof args.name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(args.name))) throw invalid("Invalid persistent database name");
       if (args.maintenance && (args.name === undefined || args.data !== undefined)) throw invalid("Maintenance requires a name only");
+      if (args.restoreFrom !== undefined && args.name !== undefined) throw invalid("Restore to memory takes only a source name");
+      // A memory database restored from a stored one: owned only while copying.
+      const restoreFrom = args.restoreFrom;
+      if (restoreFrom !== undefined) args = { name: restoreFrom, existing: true, verify: args.verify };
       let created = false;
       try {
         if (args.name !== undefined) releaseOwnership = await acquireOwnership(args.name, args.maintenance ? Number(args.waitMs ?? 0) : 0);
@@ -451,8 +488,10 @@ export function serveWorker(createModule, port = globalThis) {
           if (!globalThis.navigator?.storage?.getDirectory || typeof FileSystemFileHandle === "undefined" || !FileSystemFileHandle.prototype.createSyncAccessHandle) {
             throw Object.assign(new Error("OPFS synchronous storage is unavailable"), {status:"ZOVA_CANT_OPEN",statusCode:13});
           }
-          const sqlite = await module.zovaOpfsBootstrap();
+          await clearInterruptedCreation(args.name);
+          sqlite = await module.zovaOpfsBootstrap();
           pool = await sqlite.installOpfsSAHPoolVfs({directory:".zova-" + args.name,initialCapacity:6});
+          name = args.name;
           const vfs = sqlite.capi.sqlite3_vfs_find("opfs-sahpool");
           if (!vfs || sqlite.capi.sqlite3_vfs_register(vfs,1)) throw new Error("Cannot select OPFS VFS");
           if (args.maintenance) {
@@ -460,6 +499,18 @@ export function serveWorker(createModule, port = globalThis) {
             return;
           }
           created = !pool.getFileNames().includes("/db.zova");
+          if (args.existing && created) throw Object.assign(new Error("No stored database: " + args.name), { status: "ZOVA_NOT_ZOVA_DATABASE", statusCode: 31 });
+          if (restoreFrom !== undefined) {
+            call(94, request().str("/db.zova").u32(args.verify === false ? 0 : 1));
+            pool.pauseVfs();
+            pool = undefined;
+            name = undefined;
+            const release = releaseOwnership;
+            releaseOwnership = undefined;
+            await release();
+            state = "open";
+            return;
+          }
           if (args.data !== undefined) {
             // Import never replaces stored data; the validated open below
             // decides whether the bytes are an acceptable Zova database.
@@ -503,6 +554,48 @@ export function serveWorker(createModule, port = globalThis) {
       }
       case "begin": return check(module._zw_transaction(0));
       case "begin_deferred": return check(module._zw_transaction(3));
+      case "vacuum": return void call(90);
+      case "reclaim":
+        return call(91, request().u64(BigInt(count(args.maxPages ?? 0, "maxPages"))).u32(count(args.stepPages ?? 0, "stepPages")))
+          .list(r => ({ member: members[r.u32()], autoVacuum: autoVacuumModes[r.u32()], pageSize: r.u32(), pagesReleased: Number(r.u64()), freePagesLeft: Number(r.u64()) }));
+      // A verified copy to another persistent name, in requests the caller can
+      // stop between: begin (own and check the target), stage (copy and verify
+      // in this pool), publish (copy into the target pool) or discard.
+      case "copy_begin": {
+        if (!pool) throw invalid("Only persistent databases can be copied to a name; export() a memory database");
+        if (copy) throw invalid("A copy is already in progress");
+        if (typeof args.target !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(args.target)) throw invalid("Invalid persistent database name");
+        const exists = () => Object.assign(new Error("Database already exists: " + args.target), { status: "ZOVA_DESTINATION_EXISTS", statusCode: 33 });
+        if (args.target === name) throw exists();
+        copy = { name: args.target, release: await acquireOwnership(args.target), pending: false, created: false };
+        try {
+          await clearInterruptedCreation(copy.name);
+          copy.vfs = "zova-copy-" + ++copies;
+          copy.pool = await sqlite.installOpfsSAHPoolVfs({ name: copy.vfs, directory: ".zova-" + copy.name, initialCapacity: 6 });
+          if (copy.pool.getFileNames().includes("/db.zova")) throw exists();
+          await setPending(copy.name);
+          copy.pending = true;
+        } catch (error) { await discardCopy(); throw error; }
+        return;
+      }
+      case "copy_stage":
+        if (!copy) throw invalid("No copy in progress");
+        copyStaging.forEach(file => pool.unlink(file));
+        return void call(92, request().str("/copy.zova").u32(args.compact ? 1 : 0).u32(args.verify === false ? 0 : 1));
+      case "copy_publish": {
+        if (!copy || !pool.getFileNames().includes("/copy.zova")) throw invalid("No staged copy");
+        progress("publish", 0, 1);
+        copy.created = true;
+        call(93, request().str("/copy.zova").str(copy.vfs));
+        copyStaging.forEach(file => pool.unlink(file));
+        await clearPending(copy.name);
+        copy.pending = false;
+        copy.created = false;
+        await discardCopy();
+        progress("publish", 1, 1);
+        return;
+      }
+      case "copy_discard": return discardCopy();
       case "statement_step": {
         check(module._zw_select(args.handle));
         check(module._zw_count(0));
@@ -567,6 +660,7 @@ export function serveWorker(createModule, port = globalThis) {
         check(module._zw_select(args.handle));
         return check(module._zw_finalize());
       case "close":
+        await discardCopy();
         check(module._zw_close());
         pool?.pauseVfs();
         await releaseOwnership?.();

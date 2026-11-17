@@ -201,3 +201,19 @@ test("filtered vector search selects its operation and validates options", async
   }
   await db.close();
 });
+test("backup and compact stage, then publish, and stop at phase boundaries", async () => {
+  installWorker();
+  const db = await Database.createMemory();
+  const start = TestWorker.last.messages.length;
+  await expect(db.backupTo("../x")).rejects.toBeInstanceOf(ZovaWasmError);
+  await expect(db.backupTo("x", { signal: AbortSignal.abort() })).rejects.toMatchObject({ status: "ZOVA_INTERRUPTED" });
+  await expect(db.reclaimSpace({ maxPages: -1 })).rejects.toBeInstanceOf(ZovaWasmError);
+  expect(TestWorker.last.messages.length).toBe(start);
+  await db.compactTo("copy", { verify: false });
+  expect(TestWorker.last.messages.slice(start).map(x => x.operation)).toEqual(["copy_begin", "copy_stage", "copy_publish"]);
+  expect(TestWorker.last.messages.at(-2)).toMatchObject({ args: { compact: true, verify: false } });
+  let thrown: unknown;
+  await db.backupTo("copy2", { progress: () => { throw new RangeError("stop"); } }).catch(error => { thrown = error; });
+  expect(thrown).toBeUndefined(); // the test worker reports no progress, so nothing cancels
+  await db.close();
+});

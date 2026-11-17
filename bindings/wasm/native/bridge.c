@@ -1422,12 +1422,100 @@ static int call_object_stream(int op, reader *r) {
     }
 }
 
+#ifdef ZOVA_WASM_OPFS
+/* Vacuum, reclaim, verified copies and their publication into another pool. */
+static int call_maintenance(int op, reader *r) {
+    switch (op) {
+        case 90: {
+            PARSED;
+            zova_database_simple_request request = {db};
+            return zova_database_vacuum(&request);
+        }
+        case 91: {
+            zova_reclaim_result result = {0};
+            uint64_t max_pages = rd_u64(r);
+            uint32_t step_pages = rd_u32(r);
+            PARSED;
+            zova_database_reclaim_request request = {db, max_pages, step_pages, &result};
+            int status = zova_database_reclaim(&request);
+            if (status == ZOVA_OK) {
+                wr_u32((uint32_t)result.member_count);
+                for (size_t index = 0; index < result.member_count; index++) {
+                    const zova_reclaimed_member *member = &result.members[index];
+                    wr_u32(member->member);
+                    wr_u32(member->auto_vacuum);
+                    wr_u32(member->page_size);
+                    wr_u64(member->pages_released);
+                    wr_u64(member->free_pages_left);
+                }
+            }
+            return status;
+        }
+        case 92: {
+            /* Verified backup (0) or compact (1) copy into a new path of the open pool. */
+            const char *path = rd_str(r);
+            uint32_t compact = rd_u32(r);
+            uint32_t verify = rd_u32(r);
+            PARSED;
+            if (compact) {
+                zova_database_compact_progress_request request = {db, path, verify ? 0 : ZOVA_COMPACT_NO_VERIFY, report_progress, NULL};
+                return zova_database_compact_with_progress(&request);
+            }
+            zova_database_backup_progress_request request = {db, path, verify ? 0 : ZOVA_BACKUP_NO_VERIFY, report_progress, NULL};
+            return zova_database_backup_with_progress(&request);
+        }
+        case 93: {
+            /* Copies a closed database file of the default VFS to /db.zova of
+             * the named VFS in one SQLite write transaction. */
+            const char *source_path = rd_str(r);
+            const char *vfs = rd_str(r);
+            PARSED;
+            sqlite3 *source = NULL;
+            sqlite3 *target = NULL;
+            int rc = sqlite3_open_v2(source_path, &source, SQLITE_OPEN_READONLY, NULL);
+            if (rc != SQLITE_OK) rc = sqlite_failure(source, rc);
+            else if ((rc = sqlite3_open_v2("/db.zova", &target, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, vfs)) != SQLITE_OK ||
+                (rc = sqlite3_exec(target, "pragma journal_mode=delete; pragma synchronous=full", NULL, NULL, NULL)) != SQLITE_OK) {
+                rc = sqlite_failure(target, rc);
+            } else {
+                sqlite3_backup *backup = sqlite3_backup_init(target, "main", source, "main");
+                if (!backup) rc = sqlite_failure(target, sqlite3_errcode(target));
+                else {
+                    rc = sqlite3_backup_step(backup, -1);
+                    int finished = sqlite3_backup_finish(backup);
+                    rc = rc == SQLITE_DONE ? finished : rc;
+                    rc = rc == SQLITE_OK ? ZOVA_OK : sqlite_failure(target, rc);
+                }
+            }
+            sqlite3_close(source);
+            sqlite3_close(target);
+            return rc;
+        }
+        case 94: {
+            const char *source_path = rd_str(r);
+            uint32_t verify = rd_u32(r);
+            PARSED;
+            if (db) return ZOVA_INVALID_ARGUMENT;
+            zova_message_free(&message);
+            zova_database_restore_to_memory_request request = {source_path, verify ? 0 : ZOVA_RESTORE_NO_VERIFY, &db, &message};
+            return zova_database_restore_to_memory(&request);
+        }
+        default: return ZOVA_INVALID_ARGUMENT;
+    }
+}
+#endif
+
 /* Operation numbers are shared with src/runtime.mjs. */
 EXPORTED int zw_call(int op, const uint8_t *input, size_t input_len) {
     clear_output();
     reader r = {input, input_len, 0};
     int status = op < 10 ? call_object(op, &r) : op < 30 ? call_vector(op, &r) : op < 50 ? call_graph(op, &r) :
-        op < 70 ? call_database(op, &r) : call_object_stream(op, &r);
+        op < 70 ? call_database(op, &r) : op < 90 ? call_object_stream(op, &r) :
+#ifdef ZOVA_WASM_OPFS
+        call_maintenance(op, &r);
+#else
+        ZOVA_INVALID_ARGUMENT;
+#endif
     if (out_bad) status = ZOVA_OUT_OF_MEMORY;
     if (status == ZOVA_OK && !bytes) {
         bytes = out;
