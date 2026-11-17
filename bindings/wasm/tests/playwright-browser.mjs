@@ -3,11 +3,26 @@ import { resolve, join } from "node:path";
 import { stat } from "node:fs/promises";
 import { testOwnership } from "./ownership-browser.mjs";
 import { testDurability } from "./durability-browser.mjs";
+import { testMigration } from "./migration-browser.mjs";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
 
 const [installedPackage, helium = process.env.HELIUM_EXECUTABLE] = process.argv.slice(2);
 if (!installedPackage) throw new Error("usage: bun playwright-browser.mjs <installed-zova-wasm-directory> [helium-executable]");
 if (!helium && process.env.CI !== "true") throw new Error("Local tests require HELIUM_EXECUTABLE pointing to installed Helium");
 if (helium && !(await stat(helium)).isFile()) throw new Error("HELIUM_EXECUTABLE must name an installed Helium executable");
+// Migration is checked against the native CLI's result for the same fixtures,
+// and against a database written by the published previous-format package.
+const nativeCli = process.env.ZOVA_NATIVE_CLI;
+const previousPackage = process.env.ZOVA_WASM_PREVIOUS_PACKAGE;
+if (!nativeCli || !previousPackage) throw new Error("Set ZOVA_NATIVE_CLI and ZOVA_WASM_PREVIOUS_PACKAGE (see tools/check-browser-package.sh)");
+const fixtures = new URL("../../../tests/fixtures/", import.meta.url).pathname;
+const migrationFormats = [9, 10, 11, 12];
+const nativeMigrated = await mkdtemp(join(process.env.TMPDIR ?? tmpdir(), "zova-native-migrated-"));
+for (const format of migrationFormats) {
+  const migrated = Bun.spawnSync([nativeCli, "migrate", join(fixtures, `format-${format}.zova`), join(nativeMigrated, `format-${format}.zova`)], { stderr: "inherit" });
+  if (migrated.exitCode !== 0) throw new Error(`Native migration of format ${format} failed`);
+}
 let resolveReport;
 const report = new Promise(resolve => { resolveReport = resolve; });
 const server = Bun.serve({
@@ -18,6 +33,23 @@ const server = Bun.serve({
       resolveReport(await request.json()); return new Response("ok");
     }
     if (path === "/") return new Response('<script type="module" src="/test.mjs"></script>', { headers: { "Content-Type": "text/html" } });
+    if (path === "/helpers.mjs") return new Response(Bun.file(new URL("./browser-helpers.mjs", import.meta.url)), { headers: { "Content-Type": "text/javascript" } });
+    if (path === "/previous") return new Response('<script type="module">import * as zova from "/previous/dist/index.js"; globalThis.previous = zova;</script>', { headers: { "Content-Type": "text/html" } });
+    if (/^\/previous\/(?:dist\/[a-z-]+\.(?:js|mjs)|zova\.(?:mjs|wasm))$/.test(path)) return new Response(Bun.file(join(resolve(previousPackage), path.slice(10))));
+    if (/^\/fixtures\/(?:bound-main-)?format-\d+\.zova$/.test(path)) return new Response(Bun.file(join(fixtures, path.slice(10))));
+    if (/^\/native\/format-\d+\.zova$/.test(path)) return new Response(Bun.file(join(nativeMigrated, path.slice(8))));
+    if (path === "/seed.mjs") return new Response(`
+      import init from '/package/zova.mjs';
+      onmessage = async ({data}) => {
+        let pool;
+        try {
+          const sqlite = await (await init()).zovaOpfsBootstrap();
+          pool = await sqlite.installOpfsSAHPoolVfs({directory:'.zova-' + data.name,initialCapacity:6});
+          pool.importDb('/db.zova', data.bytes);
+          pool.pauseVfs();
+          postMessage({});
+        } catch(error) { pool?.pauseVfs(); postMessage({error:String(error)}); }
+      };`, {headers:{"Content-Type":"text/javascript"}});
     if (path === "/failure") return new Response('<script type="module">import * as zova from "/package/dist/index.js"; globalThis.zova = zova;</script>', { headers: { "Content-Type": "text/html" } });
     if (path === "/test.mjs") return new Response(Bun.file(new URL("./package-browser.mjs", import.meta.url)));
     if (path === "/readme-example.mjs") {
@@ -157,6 +189,7 @@ try {
   }, preservedName);
   const wasmBytes = (await stat(join(installedPackage, "zova.wasm"))).size;
   await testDurability(context, base);
+  await testMigration(context, base, migrationFormats);
   const examplePage = await context.newPage();
   await examplePage.goto(`${base}/failure`);
   const printed = [];
@@ -167,7 +200,7 @@ try {
   console.log(JSON.stringify({ ...result, initializationFailure: true, runtimeFailure: true,
     persistentReopen: true, rejectedOpenPreservesBytes: true, missingOpfs: true,
     poolInitializationFailurePreservesData: true, exclusiveOwnership: true,
-    durabilityAndInjectedStorageFaults: true, wasmBytes }));
+    durabilityAndInjectedStorageFaults: true, migration: true, wasmBytes }));
 } finally {
   clearTimeout(deadline);
   await browser?.close();

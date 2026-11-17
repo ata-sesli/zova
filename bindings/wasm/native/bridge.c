@@ -2,6 +2,10 @@
 #include "zova.h"
 #include <stdlib.h>
 #include <string.h>
+#ifdef ZOVA_WASM_OPFS
+#include "sqlite3.h"
+#include <stdio.h>
+#endif
 #ifdef __EMSCRIPTEN__
 #include <emscripten/emscripten.h>
 #define EXPORTED EMSCRIPTEN_KEEPALIVE
@@ -29,6 +33,7 @@ static int64_t integer;
 static double real;
 static const uint8_t *bytes;
 static size_t length;
+static void clear_output(void);
 
 #ifdef ZOVA_WASM_OPFS
 extern zova_status zova_opfs_create(const zova_database_open_request *);
@@ -42,6 +47,89 @@ EXPORTED int zw_open_file(int exists) {
      * recovery. Clean incompatible files are still rejected without mutation. */
     zova_database_open_request request = {"/db.zova", &db, &message};
     return exists ? zova_opfs_open(&request) : zova_opfs_create(&request);
+}
+
+/* Maintenance calls run in a worker that holds the database's lock but has
+ * no open database. Progress goes to the worker runtime, which forwards it. */
+EM_JS(int, zw_progress_js, (int phase, int member, double done, double total), {
+    return Module["zovaProgress"] ? Module["zovaProgress"](phase, member, done, total) : 0;
+});
+static int32_t report_progress(void *context, const zova_progress *progress) {
+    (void)context;
+    return zw_progress_js((int)progress->phase, (int)progress->member, (double)progress->done, (double)progress->total);
+}
+static char bridge_error[160];
+static int sqlite_failure(sqlite3 *raw, int rc) {
+    snprintf(bridge_error, sizeof(bridge_error), "%s", raw ? sqlite3_errmsg(raw) : sqlite3_errstr(rc));
+    return rc == SQLITE_BUSY ? ZOVA_BUSY : rc == SQLITE_CANTOPEN ? ZOVA_CANT_OPEN : ZOVA_SQLITE_ERROR;
+}
+
+/* Opening read-write rolls back a journal abandoned by a terminated writer,
+ * so later read-only probes see committed state. Reports the file size
+ * through zw_float. A missing file is left for the probe to report. */
+static void recover_main(void) {
+    sqlite3 *raw = NULL;
+    if (sqlite3_open_v2("/db.zova", &raw, SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK) {
+        sqlite3_stmt *stmt = NULL;
+        if (sqlite3_prepare_v2(raw, "select page_count * page_size from pragma_page_count, pragma_page_size", -1, &stmt, NULL) == SQLITE_OK &&
+            sqlite3_step(stmt) == SQLITE_ROW) real = (double)sqlite3_column_int64(stmt, 0);
+        sqlite3_finalize(stmt);
+    }
+    sqlite3_close(raw);
+}
+
+/* Format of /db.zova: compatibility through zw_number, version through zw_integer. */
+EXPORTED int zw_probe(void) {
+    clear_output();
+    zova_message_free(&message);
+    recover_main();
+    zova_database_format_info info = {0};
+    zova_database_probe_format_request request = {"/db.zova", &info, &message};
+    int status = zova_database_probe_format(&request);
+    number = info.compatibility;
+    integer = info.format_version;
+    return status;
+}
+
+/* Copy, migrate and verify /db.zova into /migrate.zova, which must not exist. */
+EXPORTED int zw_migrate_stage(int verify) {
+    clear_output();
+    zova_message_free(&message);
+    zova_database_migrate_progress_request request = {0};
+    request.source_path = "/db.zova";
+    request.destination_path = "/migrate.zova";
+    request.flags = verify ? 0 : ZOVA_MIGRATE_NO_VERIFY;
+    request.progress = report_progress;
+    request.out_error_message = &message;
+    return zova_database_migrate_with_progress(&request);
+}
+
+/* Replace /db.zova with the verified /migrate.zova in one SQLite write
+ * transaction. The source's rollback journal makes the replacement atomic:
+ * a worker stopped before the commit leaves a hot journal that the next
+ * read-write open rolls back, restoring the original database. */
+EXPORTED int zw_migrate_publish(void) {
+    clear_output();
+    sqlite3 *source = NULL;
+    sqlite3 *target = NULL;
+    int rc = sqlite3_open_v2("/migrate.zova", &source, SQLITE_OPEN_READONLY, NULL);
+    if (rc != SQLITE_OK) rc = sqlite_failure(source, rc);
+    else if ((rc = sqlite3_open_v2("/db.zova", &target, SQLITE_OPEN_READWRITE, NULL)) != SQLITE_OK ||
+        (rc = sqlite3_exec(target, "pragma journal_mode=delete; pragma synchronous=full", NULL, NULL, NULL)) != SQLITE_OK) {
+        rc = sqlite_failure(target, rc);
+    } else {
+        sqlite3_backup *backup = sqlite3_backup_init(target, "main", source, "main");
+        if (!backup) rc = sqlite_failure(target, sqlite3_errcode(target));
+        else {
+            rc = sqlite3_backup_step(backup, -1);
+            int finished = sqlite3_backup_finish(backup);
+            rc = rc == SQLITE_DONE ? finished : rc;
+            rc = rc == SQLITE_OK ? ZOVA_OK : sqlite_failure(target, rc);
+        }
+    }
+    sqlite3_close(source);
+    sqlite3_close(target);
+    return rc;
 }
 #endif
 
@@ -60,6 +148,9 @@ static void clear_output(void) {
     number = 0;
     integer = 0;
     real = 0;
+#ifdef ZOVA_WASM_OPFS
+    bridge_error[0] = 0;
+#endif
 }
 
 EXPORTED int zw_number(void) { return number; }
@@ -69,6 +160,9 @@ EXPORTED double zw_float(void) { return real; }
 EXPORTED const uint8_t *zw_bytes(void) { return bytes; }
 EXPORTED size_t zw_length(void) { return length; }
 EXPORTED const char *zw_error(void) {
+#ifdef ZOVA_WASM_OPFS
+    if (bridge_error[0]) return bridge_error;
+#endif
     return db ? zova_database_last_error_message(db) : message.data;
 }
 EXPORTED const char *zw_status_name(int status) { return zova_status_name(status); }

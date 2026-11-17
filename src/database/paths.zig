@@ -21,6 +21,15 @@ fn opfsPathExists(path: []const u8) Error!bool {
     return exists != 0;
 }
 
+fn opfsDeleteFile(path: []const u8) void {
+    const c = @import("../sqlite.zig").c;
+    const vfs = c.sqlite3_vfs_find("opfs-sahpool");
+    if (vfs == null or c.sqlite3_vfs_find(null) != vfs) return;
+    const name = std.heap.c_allocator.dupeSentinel(u8, path, 0) catch return;
+    defer std.heap.c_allocator.free(name);
+    _ = vfs.*.xDelete.?(vfs, name.ptr, 1);
+}
+
 pub fn isZovaPath(path: []const u8) bool {
     return std.mem.endsWith(u8, path, ".zova");
 }
@@ -38,6 +47,10 @@ pub fn defaultIo() std.Io {
 
 pub fn ensureDestinationZovaPathAvailable(path: [:0]const u8) Error!void {
     if (!isZovaPath(path)) return error.NotZovaPath;
+    if (wasm_opfs) {
+        if (try opfsPathExists(path)) return error.DestinationExists;
+        return;
+    }
 
     const io = defaultIo();
     if (std.fs.path.isAbsolute(path)) {
@@ -90,6 +103,7 @@ pub fn reserveDestinationZovaFile(path: [:0]const u8) Error!void {
 }
 
 pub fn deleteDestinationFile(path: [:0]const u8) void {
+    if (wasm_opfs) return opfsDeleteFile(path);
     std.Io.Dir.cwd().deleteFile(defaultIo(), path) catch {};
 }
 
@@ -127,6 +141,10 @@ fn missingPathError(io: std.Io, path: []const u8) Error {
 }
 
 pub fn ensureSourcePathExists(path: []const u8) Error!void {
+    if (wasm_opfs) {
+        if (!try opfsPathExists(path)) return error.CantOpen;
+        return;
+    }
     const io = defaultIo();
     if (std.fs.path.isAbsolute(path)) {
         std.Io.Dir.accessAbsolute(io, path, .{}) catch return error.CantOpen;

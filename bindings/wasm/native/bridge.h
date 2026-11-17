@@ -7,6 +7,9 @@
 int zw_create(void);
 #ifdef ZOVA_WASM_OPFS
 int zw_open_file(int exists);
+int zw_probe(void);
+int zw_migrate_stage(int verify);
+int zw_migrate_publish(void);
 #endif
 int zw_close(void);
 void zw_release(void);
