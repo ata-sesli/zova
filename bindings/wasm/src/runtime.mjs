@@ -151,6 +151,8 @@ function reply(bytes) {
 }
 const readCollection = r => ({ name: r.str(), dimensions: r.u32(), metric: metrics[r.u32()], elementType: elementTypes[r.u32()], vectorCount: r.u64() });
 const readGraph = r => ({ name: r.str(), nodeCount: r.u64(), edgeCount: r.u64() });
+const readExtension = r => ({ name: r.str(), version: r.str(), storagePrefix: r.str(), zovaAbiMin: r.str(), capabilities: r.str(),
+  required: r.u32() !== 0, installedAtUnix: BigInt.asIntN(64, r.u64()), manifestJson: r.str() });
 const readSearch = r => ({ id: r.str(), distance: r.f64() });
 const writeNode = (w, node) => w.str(node.graphName).str(node.nodeId).str(node.kind)
   .u32(code(targetTypes, node.targetType, "graph target type")).str(node.targetNamespace).str(node.targetRef);
@@ -387,6 +389,12 @@ export function serveWorker(createModule, port = globalThis) {
       return call(77, request().u32(a.handle).u32(count(a.size, "Read size"))).all;
     },
     object_stream_close: a => void call(79, request().u32(count(a.handle, "Stream"))),
+    extension_install: a => void call(102, request().str(a.name)),
+    extension_drop: a => void call(103, request().str(a.name)),
+    extensions_list: () => call(104).list(readExtension),
+    extension_info: a => readExtension(call(105, request().str(a.name))),
+    extension_check: a => void call(106, request().str(a.name)),
+    extensions_check_all: () => void call(107),
     object_id: a => call(88, request().bytes(a.data)).raw(32),
     object_chunk_id: a => call(89, request().bytes(a.data)).raw(32),
   };

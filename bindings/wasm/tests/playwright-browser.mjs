@@ -36,6 +36,7 @@ const server = Bun.serve({
       resolveReport(await request.json()); return new Response("ok");
     }
     if (path === "/") return new Response('<script type="module" src="/test.mjs"></script>', { headers: { "Content-Type": "text/html" } });
+    if (path === "/extension-fixture.json" || path === "/extension-missing.zova") return new Response(Bun.file(new URL("." + path, import.meta.url)));
     if (path === "/vector-fixture.json") return new Response(Bun.file(new URL("./vector-fixture.json", import.meta.url)));
     if (path === "/object-fixture.json") return new Response(Bun.file(new URL("./object-fixture.json", import.meta.url)));
     if (path === "/helpers.mjs") return new Response(Bun.file(new URL("./browser-helpers.mjs", import.meta.url)), { headers: { "Content-Type": "text/javascript" } });

@@ -47,7 +47,7 @@ is narrower than promising stability for every implementation in this repository
 | Native Zig-built Linux/macOS host | Yes | Yes, through C ABI | Yes, explicit trusted bundles |
 | Native Zig-built Windows host | Yes | Yes, through C ABI | Yes, explicit trusted bundles |
 | Generated-C native packages | Yes | Yes, through C ABI | Yes, explicit trusted native bundles |
-| Public `zova-wasm` JavaScript API | No | No | No |
+| Public `zova-wasm` JavaScript API | Yes | No | No; plugins can be linked into a custom module at build time |
 
 Native and generated-C distributions use the same trusted loader and per-handle
 registry lifetime. Native bundles must match the host OS, architecture and
@@ -58,7 +58,7 @@ deployment target; portable describes the C contract, not a universal binary.
 | Native Zig registry | Yes | Native SQL registration | On loader-capable builds | Yes |
 | C / raw Rust `zova-sys` | Yes | Yes | On loader-capable builds | Yes |
 | Safe Rust / Python / Go / `zova-js` | Yes | No wrapper | Explicit selection at create/open | No wrapper |
-| `zova-wasm` | No public API | No public API | No | No |
+| `zova-wasm` | Yes | No public API | No; statically linked plugins in custom builds | No |
 
 The CLI exposes lifecycle operations and, on loader-capable builds, bundle
 management, including the explicit `extension upgrade` command.
