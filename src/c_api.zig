@@ -1220,6 +1220,12 @@ comptime {
             "zova_object_seekable_reader_destroy",
             "zova_object_id_from_bytes",
             "zova_object_chunk_id_from_bytes",
+            "zova_vector_search_in",
+            "zova_vector_search_within",
+            "zova_vector_search_in_within",
+            "zova_vector_search_by_id_in",
+            "zova_vector_search_by_id_within",
+            "zova_vector_search_by_id_in_within",
         };
         for (allowed) |name| {
             @export(&@field(@This(), name), .{ .name = name });

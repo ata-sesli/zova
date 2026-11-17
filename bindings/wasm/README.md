@@ -247,7 +247,8 @@ const tail = await db.readObjectRange(id, 1024n, 4096);
 
 await db.createVectorCollection('docs', { dimensions: 3, metric: 'cosine', elementType: 'f32' });
 await db.putVectors('docs', [{ id: 'a', values: new Float32Array([1, 0, 0]) }]);
-const hits = await db.searchVectors('docs', new Float32Array([1, 0, 0]), 5);
+const hits = await db.searchVectors('docs', new Float32Array([1, 0, 0]), { limit: 5 });
+const near = await db.searchVectorsById('docs', 'a', { limit: 5, candidateIds: ['b', 'c'], maxDistance: 0.5 });
 
 await db.createGraph('links');
 await db.putGraphNodes([
@@ -264,7 +265,10 @@ Method names and result shapes follow the native `zova-js` package. Objects:
 `getVector`, `hasVector`, `deleteVector(s)`, `searchVectors` and
 `searchVectorsById`. Metrics are `cosine`, `l2` and `dot`; element types are
 `f32` (`Float32Array`), `f16` (raw half-float bits in a `Uint16Array`) and `i8`
-(`Int8Array`). Search is exact. Graphs: create/has/info/list/delete, node and
+(`Int8Array`). Search is exact. `searchVectors` and `searchVectorsById` take
+native `VectorSearchOptions` (`limit`, optional `candidateIds` and
+`maxDistance`) and choose the same core variant as native; a bare `limit`
+number is still accepted. Graphs: create/has/info/list/delete, node and
 edge put/get/has/delete with batch forms, `graphNeighbors`, `graphDegree` and
 `graphWalk`. Counts and sizes are bigint. `getObject` and result lists cross
 the worker in one message; stream large objects instead.
@@ -385,11 +389,11 @@ browser form. Every browser method returns a promise.
 | `objectReader` (`read(size)`) | a `ReadableStream` of reads up to `chunkSize` |
 | `objectSeekableReader` (`read`, `seek`, `position`, `size`) | same, asynchronous, plus `readAt(offset, length)` |
 | chunk, manifest and assemble calls; `objectId`, `objectChunkId` | same; the ID functions are asynchronous |
+| `searchVectors`, `searchVectorsById` with `VectorSearchOptions` | same; a bare `limit` is also accepted |
 
 ## Current boundaries
 
-Not available here: keyed, payload, scan and fresh-build graph APIs; filtered
-vector search; export of memory
+Not available here: keyed, payload, scan and fresh-build graph APIs; export of memory
 databases; streaming export/import; deleting or listing persistent databases;
 native extensions; bound stores; shared access between workers. The
 native `zova-js` package is independent. There is no Node/CommonJS fallback.

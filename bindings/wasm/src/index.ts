@@ -22,6 +22,16 @@ export interface VectorCollectionInfo extends VectorCollectionOptions {
 export interface VectorInput { readonly id: string; readonly values: VectorValues; }
 export interface Vector { readonly id: string; readonly values: VectorValues; }
 export interface VectorSearchResult { readonly id: string; readonly distance: number; }
+/**
+ * As native `zova-js`: `candidateIds` restricts the search to those vector IDs
+ * (unknown IDs are ignored; an empty list matches nothing), and `maxDistance`
+ * drops results farther than it.
+ */
+export interface VectorSearchOptions {
+  readonly limit: number;
+  readonly candidateIds?: readonly string[];
+  readonly maxDistance?: number;
+}
 
 export type GraphTargetType =
   "none" | "record" | "object" | "object-chunk" | "vector" | "entity" | "fact" | "concept" | "external";
@@ -159,6 +169,16 @@ function manifestChunk(chunk: ObjectManifestChunkInput): ObjectManifestChunkInpu
     if (typeof chunk?.[field] !== "bigint") invalid("Manifest chunk index, offset and sizeBytes are bigint");
   }
   return { index: chunk.index, hash: checkedId(chunk.hash), offset: chunk.offset, sizeBytes: chunk.sizeBytes };
+}
+function searchOptions(options: VectorSearchOptions): VectorSearchOptions {
+  if (typeof options !== "object" || options === null) invalid("Search options must be an object or a limit");
+  const { candidateIds, maxDistance } = options;
+  if (maxDistance !== undefined && typeof maxDistance !== "number") invalid("maxDistance must be a number");
+  return {
+    limit: size(options.limit, "Limit"),
+    candidateIds: candidateIds === undefined ? undefined : list(candidateIds, id => text(id, "Candidate ID")),
+    maxDistance,
+  };
 }
 function kvBytes(value: Uint8Array): Uint8Array {
   validateBytes(value);
@@ -1003,15 +1023,29 @@ export class Database {
       collection: text(collectionName, "Collection name"), ids: list(vectorIds, id => text(id, "Vector ID")),
     }));
   }
-  /** Exact nearest-neighbor search, closest first. */
-  searchVectors(collectionName: string, query: VectorValues, limit: number): Promise<VectorSearchResult[]> {
-    return this.#request("vector_search", () => ({
-      collection: text(collectionName, "Collection name"), query: vectorValues(query), limit: size(limit, "Limit"),
+  /**
+   * Exact nearest-neighbor search, closest first. Pass `VectorSearchOptions`
+   * to filter as native `zova-js` does; a bare `limit` remains accepted.
+   */
+  searchVectors(collectionName: string, query: VectorValues, options: VectorSearchOptions | number): Promise<VectorSearchResult[]> {
+    if (typeof options === "number") {
+      return this.#request("vector_search", () => ({
+        collection: text(collectionName, "Collection name"), query: vectorValues(query), limit: size(options, "Limit"),
+      }));
+    }
+    return this.#request("vector_search_filtered", () => ({
+      collection: text(collectionName, "Collection name"), query: vectorValues(query), ...searchOptions(options),
     }));
   }
-  searchVectorsById(collectionName: string, vectorId: string, limit: number): Promise<VectorSearchResult[]> {
-    return this.#request("vector_search_by_id", () => ({
-      collection: text(collectionName, "Collection name"), id: text(vectorId, "Vector ID"), limit: size(limit, "Limit"),
+  /** Search by a stored vector, which is excluded from its own results. */
+  searchVectorsById(collectionName: string, vectorId: string, options: VectorSearchOptions | number): Promise<VectorSearchResult[]> {
+    if (typeof options === "number") {
+      return this.#request("vector_search_by_id", () => ({
+        collection: text(collectionName, "Collection name"), id: text(vectorId, "Vector ID"), limit: size(options, "Limit"),
+      }));
+    }
+    return this.#request("vector_search_by_id_filtered", () => ({
+      collection: text(collectionName, "Collection name"), id: text(vectorId, "Vector ID"), ...searchOptions(options),
     }));
   }
 

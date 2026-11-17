@@ -444,6 +444,42 @@ try {
     await db.close();
   }
 
+  // Filtered vector search matches native zova-js (#218).
+  {
+    const fixture = JSON.parse(await (await fetch("/vector-fixture.json")).text(), (_, value) => value === "NaN" ? Number.NaN : value);
+    const typed = (type, items) => type === "f32" ? new Float32Array(items) : type === "f16" ? new Uint16Array(items) : new Int8Array(items);
+    let compared = 0;
+    for (const collection of fixture.collections) {
+      db = await Database.createMemory();
+      const { name, metric, elementType, dimensions } = collection;
+      await db.createVectorCollection(name, { dimensions, metric, elementType });
+      await db.putVectors(name, collection.vectors.map(vector => ({ id: vector.id, values: typed(elementType, vector.values) })));
+      for (const testCase of collection.cases) {
+        let actual;
+        try {
+          const results = testCase.by === "query"
+            ? await db.searchVectors(name, typed(elementType, collection.query), testCase.options)
+            : await db.searchVectorsById(name, testCase.by, testCase.options);
+          actual = { results: results.map(item => [item.id, item.distance]) };
+        } catch (error) { actual = { error: error.status }; }
+        const label = `${name} ${testCase.by} ${JSON.stringify(testCase.options)}`;
+        assert(actual.error === testCase.expected.error, `${label}: status ${actual.error} vs native ${testCase.expected.error}`);
+        if (actual.error === undefined) {
+          const expected = testCase.expected.results;
+          assert(actual.results.map(item => item[0]).join() === expected.map(item => item[0]).join(), `${label}: ids ${actual.results.map(item => item[0])} vs native ${expected.map(item => item[0])}`);
+          assert(actual.results.every((item, index) => Math.abs(item[1] - expected[index][1]) <= 1e-9 * Math.max(1, Math.abs(expected[index][1]))), `${label}: distances differ`);
+        }
+        compared++;
+      }
+      await db.close();
+    }
+    assert(compared === 9 * 23, `compared ${compared} native searches`);
+    db = await Database.createMemory();
+    await status(db.searchVectors("c", new Float32Array(1), { limit: 1, candidateIds: "v1" }), "ZOVA_INVALID_ARGUMENT");
+    await status(db.searchVectors("c", new Float32Array(1), { limit: 1, maxDistance: "1" }), "ZOVA_INVALID_ARGUMENT");
+    await db.close();
+  }
+
   await fetch("/result", { method: "POST", body: JSON.stringify({ ok: true, packedPackage: true,
     initializationMs: initialized - started, firstQueryMs: queried - initialized }) });
 } catch (error) {
