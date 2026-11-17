@@ -136,6 +136,9 @@ const writeNode = (w, node) => w.str(node.graphName).str(node.nodeId).str(node.k
   .u32(code(targetTypes, node.targetType, "graph target type")).str(node.targetNamespace).str(node.targetRef);
 const writeEdge = (w, edge) => w.str(edge.graphName).str(edge.fromNodeId).str(edge.edgeType).str(edge.toNodeId);
 const writeText = (w, text) => { if (typeof text !== "string") throw invalid("Identifiers must be strings"); w.str(text); };
+const profiles = ["deduplication", "streaming"];
+// Absent selects the calls without options and their default profile.
+const profile = name => name === undefined ? absent : code(profiles, name, "object storage profile");
 function objectId(id) {
   if (!(id instanceof Uint8Array) || id.length !== 32) throw invalid("Object IDs are 32-byte Uint8Array values");
   return id;
@@ -322,6 +325,36 @@ export function serveWorker(createModule, port = globalThis) {
       return r.u32() ? { channel: r.str(), payload: decoder.decode(r.raw(r.u32())), sequence: r.u64(), droppedBefore: r.u64() } : null;
     },
     subscription_close: a => void call(65, request().u32(count(a.handle, "Subscription"))),
+    object_put_with_options: a => call(87, request().bytes(a.data).u32(profile(a.profile))).raw(32),
+    object_chunk_count: a => unsigned(84, request().raw(objectId(a.id))),
+    object_manifest: a => {
+      const r = call(85, request().raw(objectId(a.id)));
+      return { objectId: r.raw(32), sizeBytes: r.u64(), chunkCount: r.u64(), chunker: r.str(),
+        chunks: r.list(r => ({ index: r.u64(), hash: r.raw(32), offset: r.u64(), sizeBytes: r.u64() })) };
+    },
+    object_chunk_put: a => void call(80, request().raw(objectId(a.hash)).bytes(a.data).u32(profile(a.profile))),
+    object_chunk_get: a => call(81, request().raw(objectId(a.hash))).all,
+    object_chunk_exists: a => flag(82, request().raw(objectId(a.hash))),
+    object_chunk_delete: a => flag(83, request().raw(objectId(a.hash))),
+    object_assemble: a => void call(86, request().raw(objectId(a.id)).u64(a.sizeBytes).u32(profile(a.profile))
+      .each(a.chunks, (w, chunk) => w.u64(chunk?.index).raw(objectId(chunk.hash)).u64(chunk.offset).u64(chunk.sizeBytes))),
+    object_writer_create: a => { call(70, request().u32(profile(a.profile))); return module._zw_number(); },
+    object_writer_write: a => void call(71, request().u32(count(a.handle, "Writer")).bytes(a.data)),
+    object_writer_finish: a => call(72, request().u32(count(a.handle, "Writer"))).raw(32),
+    object_writer_cancel: a => void call(73, request().u32(count(a.handle, "Writer"))),
+    object_reader_create: a => { call(74, request().raw(objectId(a.id))); return module._zw_number(); },
+    object_reader_read: a => call(75, request().u32(count(a.handle, "Reader")).u32(count(a.size, "Read size"))).all,
+    object_seekable_create: a => {
+      call(76, request().raw(objectId(a.id)));
+      return { handle: module._zw_number(), size: BigInt.asUintN(64, module._zw_integer()) };
+    },
+    object_seekable_read_at: a => {
+      call(78, request().u32(count(a.handle, "Reader")).u64(a.offset));
+      return call(77, request().u32(a.handle).u32(count(a.size, "Read size"))).all;
+    },
+    object_stream_close: a => void call(79, request().u32(count(a.handle, "Stream"))),
+    object_id: a => call(88, request().bytes(a.data)).raw(32),
+    object_chunk_id: a => call(89, request().bytes(a.data)).raw(32),
   };
   // Step-by-step statement use; each acts on the statement `handle`.
   const statementCall = (op, a, input) => { check(module._zw_select(a.handle)); return call(op, input); };
@@ -541,7 +574,9 @@ export function serveWorker(createModule, port = globalThis) {
         lastId = request.id;
         currentId = request.id;
         const value = await dispatch(request.operation, request.args ?? {});
-        port.postMessage({ id: request.id, ok: true, value });
+        // Byte results are fresh copies out of WASM memory: move, do not clone.
+        const whole = value instanceof Uint8Array && value.byteOffset === 0 && value.byteLength === value.buffer.byteLength;
+        port.postMessage({ id: request.id, ok: true, value }, whole ? [value.buffer] : []);
       } catch (error) {
         fatal = state === "initializing" || error instanceof WebAssembly.RuntimeError;
         if (fatal) state = "failed";

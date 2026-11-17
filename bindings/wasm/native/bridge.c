@@ -37,6 +37,7 @@ static double real;
 static const uint8_t *bytes;
 static size_t length;
 static void clear_output(void);
+static void streams_close(void);
 
 #ifdef ZOVA_WASM_OPFS
 extern zova_status zova_opfs_create(const zova_database_open_request *);
@@ -226,6 +227,7 @@ EXPORTED int zw_close(void) {
     free(subscriptions);
     subscriptions = NULL;
     subscription_count = 0;
+    streams_close();
     statement = NULL;
     current = -1;
     free(out);
@@ -1078,11 +1080,299 @@ static int call_database(int op, reader *r) {
     }
 }
 
+/* Object writers and readers by handle. */
+enum { STREAM_WRITER = 1, STREAM_READER = 2, STREAM_SEEKABLE = 3 };
+typedef struct stream_slot {
+    int kind;
+    void *handle;
+} stream_slot;
+static stream_slot *streams;
+static int stream_count;
+
+static int stream_add(int kind, void *handle) {
+    int index = 0;
+    while (index < stream_count && streams[index].kind) index++;
+    if (index == stream_count) {
+        stream_slot *grown = realloc(streams, sizeof(*streams) * (size_t)(stream_count + 8));
+        if (!grown) return -1;
+        memset(grown + stream_count, 0, sizeof(*grown) * 8);
+        streams = grown;
+        stream_count += 8;
+    }
+    streams[index].kind = kind;
+    streams[index].handle = handle;
+    return index;
+}
+static void *stream_get(uint32_t index, int kind) {
+    return index < (uint32_t)stream_count && streams[index].kind == kind ? streams[index].handle : NULL;
+}
+static void stream_destroy(uint32_t index) {
+    if (index >= (uint32_t)stream_count || !streams[index].kind) return;
+    void *handle = streams[index].handle;
+    if (streams[index].kind == STREAM_WRITER) zova_object_writer_destroy(handle);
+    else if (streams[index].kind == STREAM_READER) {
+        zova_object_reader *reader = handle;
+        zova_object_reader_destroy_request request = {&reader};
+        zova_object_reader_destroy(&request);
+    } else {
+        zova_object_seekable_reader *reader = handle;
+        zova_object_seekable_reader_destroy_request request = {&reader};
+        zova_object_seekable_reader_destroy(&request);
+    }
+    streams[index].kind = 0;
+    streams[index].handle = NULL;
+}
+static void streams_close(void) {
+    for (int index = 0; index < stream_count; index++) stream_destroy((uint32_t)index);
+    free(streams);
+    streams = NULL;
+    stream_count = 0;
+}
+/* UINT32_MAX selects the default profile, as the calls without options. */
+static int rd_profile(reader *r, zova_object_put_options *options) {
+    uint32_t profile = rd_u32(r);
+    options->profile = (int)profile;
+    return profile != UINT32_MAX;
+}
+static zova_object_chunk_id rd_chunk_id(reader *r) {
+    zova_object_chunk_id id = {{0}};
+    const uint8_t *data = rd_take(r, sizeof(id.bytes));
+    if (data) memcpy(id.bytes, data, sizeof(id.bytes));
+    return id;
+}
+/* Reads up to `size` bytes into the reply; `seekable` selects the reader type. */
+static int read_stream(void *handle, int seekable, uint32_t size) {
+    uint8_t *target = wr_reserve(size);
+    if (!target) return ZOVA_OUT_OF_MEMORY;
+    size_t read = 0;
+    int status;
+    if (seekable) {
+        zova_object_seekable_reader_read_request request = {handle, target, size, &read};
+        status = zova_object_seekable_reader_read(&request);
+    } else {
+        zova_object_reader_read_request request = {handle, target, size, &read};
+        status = zova_object_reader_read(&request);
+    }
+    bytes = target;
+    length = read;
+    return status;
+}
+
+static int call_object_stream(int op, reader *r) {
+    switch (op) {
+        case 70: {
+            zova_object_put_options options = {0};
+            int explicit_profile = rd_profile(r, &options);
+            PARSED;
+            zova_object_writer *writer = NULL;
+            int status;
+            if (explicit_profile) {
+                zova_object_writer_create_with_options_request request = {db, options, &writer};
+                status = zova_object_writer_create_with_options(&request);
+            } else {
+                zova_object_writer_create_request request = {db, &writer};
+                status = zova_object_writer_create(&request);
+            }
+            if (status != ZOVA_OK) return status;
+            number = stream_add(STREAM_WRITER, writer);
+            if (number < 0) {
+                zova_object_writer_destroy(writer);
+                return ZOVA_OUT_OF_MEMORY;
+            }
+            return ZOVA_OK;
+        }
+        case 71: {
+            zova_object_writer *writer = stream_get(rd_u32(r), STREAM_WRITER);
+            zova_kv_bytes data = rd_bytes(r);
+            PARSED;
+            if (!writer) return ZOVA_OBJECT_WRITER_CLOSED;
+            zova_object_writer_write_request request = {writer, data.data, data.len};
+            return zova_object_writer_write(&request);
+        }
+        case 72: case 73: {
+            uint32_t handle = rd_u32(r);
+            PARSED;
+            zova_object_writer *writer = stream_get(handle, STREAM_WRITER);
+            if (!writer) return ZOVA_OBJECT_WRITER_CLOSED;
+            int status;
+            if (op == 72) {
+                zova_object_id id;
+                zova_object_writer_finish_request request = {writer, &id};
+                status = zova_object_writer_finish(&request);
+                if (status == ZOVA_OK) wr(id.bytes, sizeof(id.bytes));
+            } else {
+                zova_object_writer_cancel_request request = {writer};
+                status = zova_object_writer_cancel(&request);
+            }
+            stream_destroy(handle);
+            return status;
+        }
+        case 74: case 76: {
+            zova_object_id id = rd_object_id(r);
+            PARSED;
+            int status;
+            void *handle = NULL;
+            uint64_t size = 0;
+            if (op == 74) {
+                zova_object_reader_create_request request = {db, id, (zova_object_reader **)&handle};
+                status = zova_object_reader_create(&request);
+            } else {
+                zova_object_seekable_reader_create_request request = {db, id, (zova_object_seekable_reader **)&handle, &size};
+                status = zova_object_seekable_reader_create(&request);
+            }
+            if (status != ZOVA_OK) return status;
+            number = stream_add(op == 74 ? STREAM_READER : STREAM_SEEKABLE, handle);
+            integer = (int64_t)size;
+            if (number >= 0) return ZOVA_OK;
+            if (op == 74) {
+                zova_object_reader_destroy_request destroy = {(zova_object_reader **)&handle};
+                zova_object_reader_destroy(&destroy);
+            } else {
+                zova_object_seekable_reader_destroy_request destroy = {(zova_object_seekable_reader **)&handle};
+                zova_object_seekable_reader_destroy(&destroy);
+            }
+            return ZOVA_OUT_OF_MEMORY;
+        }
+        case 75: case 77: {
+            void *handle = stream_get(rd_u32(r), op == 75 ? STREAM_READER : STREAM_SEEKABLE);
+            uint32_t size = rd_u32(r);
+            PARSED;
+            if (!handle) return ZOVA_OBJECT_READER_CLOSED;
+            return read_stream(handle, op == 77, size);
+        }
+        case 78: {
+            zova_object_seekable_reader *reader = stream_get(rd_u32(r), STREAM_SEEKABLE);
+            uint64_t offset = rd_u64(r);
+            PARSED;
+            if (!reader) return ZOVA_OBJECT_READER_CLOSED;
+            zova_object_seekable_reader_seek_request request = {reader, offset};
+            return zova_object_seekable_reader_seek(&request);
+        }
+        case 79: {
+            uint32_t handle = rd_u32(r);
+            PARSED;
+            stream_destroy(handle);
+            return ZOVA_OK;
+        }
+        case 80: {
+            zova_object_chunk_id hash = rd_chunk_id(r);
+            zova_kv_bytes data = rd_bytes(r);
+            zova_object_put_options options = {0};
+            int explicit_profile = rd_profile(r, &options);
+            PARSED;
+            if (explicit_profile) {
+                zova_object_chunk_put_with_options_request request = {db, hash, data.data, data.len, options};
+                return zova_object_chunk_put_with_options(&request);
+            }
+            zova_object_chunk_put_request request = {db, hash, data.data, data.len};
+            return zova_object_chunk_put(&request);
+        }
+        case 81: case 82: {
+            zova_object_chunk_get_request request = {db, rd_chunk_id(r), &buffer};
+            PARSED;
+            int status = zova_object_chunk_get(&request);
+            if (op == 82) {
+                zova_buffer_free(&buffer);
+                if (status == ZOVA_OBJECT_CHUNK_NOT_FOUND) return ZOVA_OK;
+                number = status == ZOVA_OK;
+                return status;
+            }
+            bytes = buffer.data;
+            length = buffer.len;
+            return status;
+        }
+        case 83: {
+            uint8_t deleted = 0;
+            zova_object_chunk_delete_request request = {db, rd_chunk_id(r), &deleted};
+            PARSED;
+            int status = zova_object_chunk_delete(&request);
+            number = deleted;
+            return status;
+        }
+        case 84: {
+            uint64_t count = 0;
+            zova_object_chunk_count_request request = {db, rd_object_id(r), &count};
+            PARSED;
+            return simple_status(zova_object_chunk_count(&request), (int64_t)count);
+        }
+        case 85: {
+            zova_object_manifest manifest = {0};
+            zova_object_manifest_get_request request = {db, rd_object_id(r), &manifest};
+            PARSED;
+            int status = zova_object_manifest_get(&request);
+            if (status == ZOVA_OK) {
+                wr(manifest.object_id.bytes, sizeof(manifest.object_id.bytes));
+                wr_u64(manifest.size_bytes);
+                wr_u64(manifest.chunk_count);
+                wr_blob(manifest.chunker, strlen(manifest.chunker));
+                wr_u32((uint32_t)manifest.chunks_len);
+                for (size_t index = 0; index < manifest.chunks_len; index++) {
+                    const zova_object_manifest_chunk *chunk = &manifest.chunks[index];
+                    wr_u64(chunk->index);
+                    wr(chunk->hash.bytes, sizeof(chunk->hash.bytes));
+                    wr_u64(chunk->offset);
+                    wr_u64(chunk->size_bytes);
+                }
+            }
+            zova_object_manifest_free(&manifest);
+            return status;
+        }
+        case 86: {
+            zova_object_id id = rd_object_id(r);
+            uint64_t size = rd_u64(r);
+            zova_object_put_options options = {0};
+            int explicit_profile = rd_profile(r, &options);
+            uint32_t count = rd_u32(r);
+            zova_object_manifest_chunk *chunks = rd_array(r, count, sizeof(*chunks));
+            for (uint32_t index = 0; chunks && index < count; index++) {
+                chunks[index].index = rd_u64(r);
+                chunks[index].hash = rd_chunk_id(r);
+                chunks[index].offset = rd_u64(r);
+                chunks[index].size_bytes = rd_u64(r);
+            }
+            int status = ZOVA_INVALID_ARGUMENT;
+            if (chunks && !r->bad && !r->left) {
+                if (explicit_profile) {
+                    zova_object_assemble_from_chunks_with_options_request request = {db, id, size, chunks, count, options};
+                    status = zova_object_assemble_from_chunks_with_options(&request);
+                } else {
+                    zova_object_assemble_from_chunks_request request = {db, id, size, chunks, count};
+                    status = zova_object_assemble_from_chunks(&request);
+                }
+            }
+            free(chunks);
+            return status;
+        }
+        case 87: {
+            zova_kv_bytes data = rd_bytes(r);
+            zova_object_put_options options = {0};
+            rd_profile(r, &options);
+            PARSED;
+            zova_object_id id;
+            zova_object_put_with_options_request request = {db, data.data, data.len, options, &id};
+            int status = zova_object_put_with_options(&request);
+            if (status == ZOVA_OK) wr(id.bytes, sizeof(id.bytes));
+            return status;
+        }
+        case 88: case 89: {
+            zova_kv_bytes data = rd_bytes(r);
+            PARSED;
+            zova_object_id id;
+            int status = op == 88 ? zova_object_id_from_bytes(data.data, data.len, &id)
+                : zova_object_chunk_id_from_bytes(data.data, data.len, (zova_object_chunk_id *)&id);
+            if (status == ZOVA_OK) wr(id.bytes, sizeof(id.bytes));
+            return status;
+        }
+        default: return ZOVA_INVALID_ARGUMENT;
+    }
+}
+
 /* Operation numbers are shared with src/runtime.mjs. */
 EXPORTED int zw_call(int op, const uint8_t *input, size_t input_len) {
     clear_output();
     reader r = {input, input_len, 0};
-    int status = op < 10 ? call_object(op, &r) : op < 30 ? call_vector(op, &r) : op < 50 ? call_graph(op, &r) : call_database(op, &r);
+    int status = op < 10 ? call_object(op, &r) : op < 30 ? call_vector(op, &r) : op < 50 ? call_graph(op, &r) :
+        op < 70 ? call_database(op, &r) : call_object_stream(op, &r);
     if (out_bad) status = ZOVA_OUT_OF_MEMORY;
     if (status == ZOVA_OK && !bytes) {
         bytes = out;

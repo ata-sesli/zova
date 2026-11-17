@@ -266,9 +266,42 @@ Method names and result shapes follow the native `zova-js` package. Objects:
 `f32` (`Float32Array`), `f16` (raw half-float bits in a `Uint16Array`) and `i8`
 (`Int8Array`). Search is exact. Graphs: create/has/info/list/delete, node and
 edge put/get/has/delete with batch forms, `graphNeighbors`, `graphDegree` and
-`graphWalk`. Counts and sizes are bigint. Whole objects and result lists are
-copied through the worker in one message, so keep individual objects and
-result limits modest.
+`graphWalk`. Counts and sizes are bigint. `getObject` and result lists cross
+the worker in one message; stream large objects instead.
+
+### Streaming objects, chunks and manifests
+
+```ts
+const writer = await db.objectWriter();          // or objectWriterWithOptions({ profile: 'streaming' })
+await file.stream().pipeTo(writer);              // any ReadableStream<Uint8Array>
+const id = await writer.id;
+
+for await (const piece of await db.objectReader(id)) send(piece);   // 1 MiB reads by default
+
+const reader = await db.objectSeekableReader(id); // verified random access
+const range = await reader.readAt(1024n, 65536);  // or seek() and read()
+await reader.close();
+```
+
+`objectWriter()` returns a `WritableStream`: each written chunk is copied once
+and moved to the worker, so neither side holds the whole object. Closing the
+stream stores the object and resolves `writer.id`; aborting it, or a failed
+write, cancels the object and stores nothing. The core writer commits chunks in
+batches of 4 MiB in the browser build (64 MiB natively), and keeps one manifest
+entry per chunk until it finishes. `objectReader(id, chunkSize)` returns a
+`ReadableStream` of verified bytes; cancel it to release the reader early.
+`objectSeekableReader(id)` checks each chunk against its manifest hash before
+returning bytes, which suits range serving from a Service Worker; reads at or
+past the end return an empty array. Readers hold no transaction between calls.
+
+`putObjectWithOptions`, `objectChunkCount`, `objectManifest`, `getObjectChunk`,
+`hasObjectChunk`, `putObjectChunk(WithOptions)`, `deleteObjectChunk` and
+`assembleObjectFromChunks(WithOptions)` take the same arguments as native
+`zova-js`; profiles are `deduplication` (FastCDC) and `streaming` (fixed 1 MiB
+chunks). `objectIdToHex` and `objectIdFromHex` are plain functions.
+`objectId(data)` and `objectChunkId(data)` use the core's SHA-256 and resolve
+the same IDs as native; the first call starts a shared memory-database worker
+that stays for the page's lifetime.
 
 ## Export and import
 
@@ -348,11 +381,15 @@ browser form. Every browser method returns a promise.
 | `kvGetMany`, `kvPutMany`, `kvDeleteMany`, `kvCount`, `kvClearNamespace` | `kv.getMany`, `kv.putMany`, `kv.deleteMany`, `kv.count`, `kv.clearNamespace` |
 | `notify`, `listen`, `Subscription.tryReceive`, `close` | same; within one worker only |
 | `Subscription.tryReceiveAsync` | `tryReceive()` is already asynchronous |
+| `objectWriter`, `objectWriterWithOptions` (`write`, `finish`, `cancel`) | same names; a `WritableStream` with `id` (close, abort) |
+| `objectReader` (`read(size)`) | a `ReadableStream` of reads up to `chunkSize` |
+| `objectSeekableReader` (`read`, `seek`, `position`, `size`) | same, asynchronous, plus `readAt(offset, length)` |
+| chunk, manifest and assemble calls; `objectId`, `objectChunkId` | same; the ID functions are asynchronous |
 
 ## Current boundaries
 
 Not available here: keyed, payload, scan and fresh-build graph APIs; filtered
-vector search; object chunk, writer, reader and manifest APIs; export of memory
+vector search; export of memory
 databases; streaming export/import; deleting or listing persistent databases;
 native extensions; bound stores; shared access between workers. The
 native `zova-js` package is independent. There is no Node/CommonJS fallback.
