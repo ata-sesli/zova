@@ -19,6 +19,7 @@ import type { KvEntry, KvScanOptions, KvScanPage } from "./types.js";
 import type { ProgressOptions } from "./progress.js";
 import { withProgress } from "./progress.js";
 import { ObjectSeekableReader } from "./object.js";
+import type { ObjectCompression } from "./object.js";
 import { Subscription } from "./subscription.js";
 import type {
   VectorInput,
@@ -180,6 +181,13 @@ export class AsyncDatabase {
       withProgress(options, (progress, cancel) =>
         this.#native.asyncCompactTo(destination, verify, progress, cancel),
       ),
+    );
+  }
+
+  /** Select chunk compression for objects written through this handle. */
+  setObjectCompression(compression: ObjectCompression): Promise<void> {
+    return this.#enqueue(() =>
+      this.#native.asyncSetObjectCompression(compression),
     );
   }
 

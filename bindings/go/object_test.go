@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -455,4 +456,74 @@ func deterministicBytes(size int) []byte {
 func hasStatus(err error, status Status) bool {
 	var zerr *Error
 	return errors.As(err, &zerr) && zerr.Status == status
+}
+
+func compressibleObjectBytes(length int) []byte {
+	var out bytes.Buffer
+	for line := 0; out.Len() < length; line++ {
+		out.WriteString(strconv.Itoa(line))
+		out.WriteString(": compressible object line\n")
+	}
+	return out.Bytes()[:length]
+}
+
+func encodedChunkCount(t *testing.T, db *DB) int64 {
+	t.Helper()
+	query, err := db.Prepare("select count(*) from _zova_chunks where encoding = 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer query.Close()
+	if step, err := query.Step(); err != nil || step != StepRow {
+		t.Fatalf("count encoded chunks = %v, %v", step, err)
+	}
+	count, err := query.ColumnInt64(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+func TestObjectCompressionIsOptInAndKeepsIDsAndBytes(t *testing.T) {
+	db, err := Create(tempZovaPath(t, "compressed-objects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	payload := compressibleObjectBytes(1_500_000)
+	want := ObjectIDFor(payload)
+
+	if err := db.SetObjectCompression(ObjectCompression(9)); err == nil {
+		t.Fatal("SetObjectCompression accepted an unknown value")
+	}
+	plain, err := db.PutObject(payload)
+	if err != nil || plain != want {
+		t.Fatalf("PutObject = %x, %v", plain, err)
+	}
+	if count := encodedChunkCount(t, db); count != 0 {
+		t.Fatalf("uncompressed handle stored %d encoded chunks", count)
+	}
+	must(t, db.DeleteObject(plain))
+
+	must(t, db.SetObjectCompression(ObjectCompressionLZ4))
+	for _, profile := range []ObjectStorageProfile{ObjectStorageProfileDeduplication, ObjectStorageProfileStreaming} {
+		id, err := db.PutObjectWithOptions(payload, ObjectPutOptions{Profile: profile})
+		if err != nil || id != want {
+			t.Fatalf("PutObjectWithOptions(%d) = %x, %v", profile, id, err)
+		}
+		if count := encodedChunkCount(t, db); count == 0 {
+			t.Fatalf("profile %d stored no encoded chunks", profile)
+		}
+		got, err := db.GetObject(id)
+		if err != nil || !bytes.Equal(got, payload) {
+			t.Fatalf("GetObject(profile %d) mismatch: %v", profile, err)
+		}
+		window := make([]byte, 70_000)
+		n, err := db.ReadObjectRange(id, 1_000_000, window)
+		if err != nil || n != len(window) || !bytes.Equal(window, payload[1_000_000:1_070_000]) {
+			t.Fatalf("ReadObjectRange(profile %d) = %d, %v", profile, n, err)
+		}
+		must(t, db.DeleteObject(id))
+	}
+	must(t, db.SetObjectCompression(ObjectCompressionNone))
 }

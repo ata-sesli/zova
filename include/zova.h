@@ -319,6 +319,29 @@ typedef struct zova_object_put_options {
     int profile;
 } zova_object_put_options;
 
+/*
+ * Compression for object chunks a database handle writes. Request structs
+ * carry it as a raw C int, like zova_object_storage_profile.
+ */
+typedef enum zova_object_compression {
+    ZOVA_OBJECT_COMPRESSION_NONE = 0,
+    ZOVA_OBJECT_COMPRESSION_LZ4 = 1,
+} zova_object_compression;
+
+/*
+ * Selects the compression for object chunks this handle writes from now on:
+ * object_put*, object writers opened afterwards, and object_chunk_put*. With
+ * ZOVA_OBJECT_COMPRESSION_LZ4 a chunk is stored as an LZ4 block only when that
+ * is smaller. Object and chunk ids, manifests, sizes and deduplication do not
+ * change, and reads decode every stored encoding whatever this setting is.
+ * The setting belongs to the handle and is not persisted; the default is
+ * ZOVA_OBJECT_COMPRESSION_NONE. Unknown values return ZOVA_INVALID_ARGUMENT.
+ */
+typedef struct zova_object_set_compression_request {
+    zova_database *db;
+    int compression;
+} zova_object_set_compression_request;
+
 typedef struct zova_vector_collection_options {
     uint32_t dimensions;
     /*
@@ -2137,6 +2160,7 @@ zova_status zova_object_chunk_id_from_bytes(const uint8_t *data, size_t len, zov
  */
 zova_status zova_object_put(const zova_object_put_request *request);
 zova_status zova_object_put_with_options(const zova_object_put_with_options_request *request);
+zova_status zova_object_set_compression(const zova_object_set_compression_request *request);
 zova_status zova_object_get(const zova_object_get_request *request);
 zova_status zova_object_read_range(const zova_object_read_range_request *request);
 zova_status zova_object_delete(const zova_object_delete_request *request);

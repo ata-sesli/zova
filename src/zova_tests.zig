@@ -516,7 +516,7 @@ test "created zova database stores metadata" {
 }
 
 test "current format reserves graph store metadata" {
-    try std.testing.expectEqualStrings("13", format_version);
+    try std.testing.expectEqualStrings("14", format_version);
     try std.testing.expect(std.mem.indexOf(u8, bound_stores_schema_sql, "'graph_store'") != null);
     try std.testing.expect(std.mem.indexOf(u8, bound_stores_schema_sql, "graph_epoch integer") != null);
 
@@ -1863,7 +1863,7 @@ test "open rejects future format version" {
         try raw.exec(
             \\create table _zova_meta (key text primary key, value text not null);
             \\insert into _zova_meta (key, value) values ('magic', 'zova');
-            \\insert into _zova_meta (key, value) values ('format_version', '14');
+            \\insert into _zova_meta (key, value) values ('format_version', '15');
         );
     }
 
@@ -1872,7 +1872,8 @@ test "open rejects future format version" {
 
 test "format version classification distinguishes current migratable legacy future and malformed" {
     try std.testing.expectEqual(FormatCompatibility.current, classifyFormatVersion(format_version).?);
-    try std.testing.expectEqual(FormatCompatibility.current, classifyFormatVersion("13").?);
+    try std.testing.expectEqual(FormatCompatibility.current, classifyFormatVersion("14").?);
+    try std.testing.expectEqual(FormatCompatibility.migratable, classifyFormatVersion("13").?);
     try std.testing.expectEqual(FormatCompatibility.migratable, classifyFormatVersion("12").?);
     try std.testing.expectEqual(FormatCompatibility.migratable, classifyFormatVersion("11").?);
     try std.testing.expectEqual(FormatCompatibility.migratable, classifyFormatVersion("10").?);
@@ -1880,7 +1881,7 @@ test "format version classification distinguishes current migratable legacy futu
     try std.testing.expectEqual(FormatCompatibility.unsupported_legacy, classifyFormatVersion("8").?);
     try std.testing.expectEqual(FormatCompatibility.unsupported_legacy, classifyFormatVersion("7").?);
     try std.testing.expectEqual(FormatCompatibility.unsupported_legacy, classifyFormatVersion("2").?);
-    try std.testing.expectEqual(FormatCompatibility.unsupported_future, classifyFormatVersion("14").?);
+    try std.testing.expectEqual(FormatCompatibility.unsupported_future, classifyFormatVersion("15").?);
     try std.testing.expectEqual(FormatCompatibility.unsupported_future, classifyFormatVersion("999").?);
 
     const malformed = [_][]const u8{

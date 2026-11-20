@@ -20,7 +20,7 @@ const nativeCli = process.env.ZOVA_NATIVE_CLI;
 const previousPackage = process.env.ZOVA_WASM_PREVIOUS_PACKAGE;
 if (!nativeCli || !previousPackage) throw new Error("Set ZOVA_NATIVE_CLI and ZOVA_WASM_PREVIOUS_PACKAGE (see tools/check-browser-package.sh)");
 const fixtures = new URL("../../../tests/fixtures/", import.meta.url).pathname;
-const migrationFormats = [9, 10, 11, 12];
+const migrationFormats = [9, 10, 11, 12, 13];
 const nativeMigrated = await mkdtemp(join(process.env.TMPDIR ?? tmpdir(), "zova-native-migrated-"));
 for (const format of migrationFormats) {
   const migrated = Bun.spawnSync([nativeCli, "migrate", join(fixtures, `format-${format}.zova`), join(nativeMigrated, `format-${format}.zova`)], { stderr: "inherit" });

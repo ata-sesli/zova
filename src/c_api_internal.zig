@@ -153,6 +153,8 @@ pub const zova_object_manifest = @import("c_api/types.zig").zova_object_manifest
 pub const zova_object_storage_profile = @import("c_api/types.zig").zova_object_storage_profile;
 
 pub const zova_object_put_options = @import("c_api/types.zig").zova_object_put_options;
+pub const zova_object_compression = @import("c_api/types.zig").zova_object_compression;
+pub const zova_object_set_compression_request = @import("c_api/types.zig").zova_object_set_compression_request;
 
 pub const zova_vector_metric = @import("c_api/types.zig").zova_vector_metric;
 
@@ -777,6 +779,7 @@ pub const zova_object_chunk_id_from_bytes = @import("c_api/objects.zig").zova_ob
 pub const zova_object_put = @import("c_api/objects.zig").zova_object_put;
 
 pub const zova_object_put_with_options = @import("c_api/objects.zig").zova_object_put_with_options;
+pub const zova_object_set_compression = @import("c_api/objects.zig").zova_object_set_compression;
 
 pub const zova_object_get = @import("c_api/objects.zig").zova_object_get;
 

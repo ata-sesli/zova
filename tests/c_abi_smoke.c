@@ -1810,8 +1810,8 @@ static void run_probe_migrate_smoke(void) {
         expect_status(zova_database_close(db), ZOVA_OK, "close current for probe");
         zova_database_format_info out = {0};
         expect_status(zova_database_probe_format(&(zova_database_probe_format_request){.path = path, .out_info = &out, .out_error_message = &msg}), ZOVA_OK, "probe current");
-        if (out.format_version != 13 || out.compatibility != ZOVA_FORMAT_CURRENT) {
-            fprintf(stderr, "probe current: expected 13/CURRENT got %u/%d\n", out.format_version, out.compatibility);
+        if (out.format_version != 14 || out.compatibility != ZOVA_FORMAT_CURRENT) {
+            fprintf(stderr, "probe current: expected 14/CURRENT got %u/%d\n", out.format_version, out.compatibility);
             exit(1);
         }
         zova_message_free(&msg);
@@ -1873,7 +1873,7 @@ static void run_probe_migrate_smoke(void) {
         zova_database *db = NULL; zova_message msg = {0};
         expect_status(zova_database_create(&(zova_database_open_request){.path = src, .out_db = &db, .out_error_message = &msg}), ZOVA_OK, "create future base");
         zova_message_free(&msg);
-        expect_status(zova_database_exec(&(zova_database_exec_request){.db = db, .sql = "update _zova_meta set value = '14' where key = 'format_version'"}), ZOVA_OK, "patch future");
+        expect_status(zova_database_exec(&(zova_database_exec_request){.db = db, .sql = "update _zova_meta set value = '15' where key = 'format_version'"}), ZOVA_OK, "patch future");
         expect_status(zova_database_close(db), ZOVA_OK, "close future base");
         zova_message err = {0};
         expect_status(zova_database_migrate(&(zova_database_migrate_request){.source_path = src, .destination_path = dst, .flags = 0, .out_error_message = &err}), ZOVA_UNSUPPORTED_FUTURE_FORMAT, "migrate future");
@@ -1918,7 +1918,7 @@ static void run_probe_migrate_smoke(void) {
         // dest exists and probe is current
         zova_database_format_info out = {0}; zova_message pmsg = {0};
         expect_status(zova_database_probe_format(&(zova_database_probe_format_request){.path = dst, .out_info = &out, .out_error_message = &pmsg}), ZOVA_OK, "probe migrated dest");
-        if (out.format_version != 13 || out.compatibility != ZOVA_FORMAT_CURRENT) { fprintf(stderr, "migrate dest probe wrong\n"); exit(1); }
+        if (out.format_version != 14 || out.compatibility != ZOVA_FORMAT_CURRENT) { fprintf(stderr, "migrate dest probe wrong\n"); exit(1); }
         zova_message_free(&pmsg);
         // second migrate with same dest should be DESTINATION_EXISTS
         zova_message err2 = {0};
@@ -2996,6 +2996,27 @@ int main(int argc, char **argv) {
     };
     expect_status(zova_object_put(&put_req), ZOVA_OK, "put object");
     expect_id_equal(object_id, expected_id, "put object id");
+
+    expect_status(zova_object_set_compression(&(zova_object_set_compression_request){
+                      .db = db,
+                      .compression = 7,
+                  }),
+                  ZOVA_INVALID_ARGUMENT,
+                  "reject unknown object compression");
+    expect_status(zova_object_set_compression(&(zova_object_set_compression_request){
+                      .db = db,
+                      .compression = ZOVA_OBJECT_COMPRESSION_LZ4,
+                  }),
+                  ZOVA_OK,
+                  "enable lz4 object compression");
+    expect_status(zova_object_put(&put_req), ZOVA_OK, "put object with compression");
+    expect_id_equal(object_id, expected_id, "compressed put keeps object id");
+    expect_status(zova_object_set_compression(&(zova_object_set_compression_request){
+                      .db = db,
+                      .compression = ZOVA_OBJECT_COMPRESSION_NONE,
+                  }),
+                  ZOVA_OK,
+                  "disable object compression");
 
     zova_statement *insert_ref = NULL;
     expect_status(zova_database_prepare(&(zova_database_prepare_request){

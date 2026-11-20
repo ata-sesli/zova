@@ -1118,6 +1118,18 @@ impl NativeDatabase {
     }
 
     #[napi(ts_return_type = "Promise<void>")]
+    pub fn async_set_object_compression(
+        &self,
+        compression: String,
+    ) -> Result<AsyncTask<SetObjectCompressionTask>> {
+        let compression = crate::object::object_compression(&compression)?;
+        Ok(AsyncTask::new(SetObjectCompressionTask {
+            state: Some(DatabaseTaskState::new(self)?),
+            compression,
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<void>")]
     pub fn async_notify(&self, channel: String, payload: String) -> Result<AsyncTask<NotifyTask>> {
         Ok(AsyncTask::new(NotifyTask {
             state: Some(DatabaseTaskState::new(self)?),
@@ -1149,6 +1161,32 @@ impl Task for ListenTask {
 
     fn resolve(&mut self, _: Env, output: Self::Output) -> Result<Self::JsValue> {
         Ok(output)
+    }
+}
+
+pub struct SetObjectCompressionTask {
+    state: Option<DatabaseTaskState>,
+    compression: zova::ObjectCompression,
+}
+
+impl Task for SetObjectCompressionTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let database = &self.state.as_ref().expect("task state").database;
+        database
+            .set_object_compression(self.compression)
+            .map_err(zova_error)
+    }
+
+    fn resolve(&mut self, _: Env, _: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
+    }
+
+    fn finally(mut self, _: Env) -> Result<()> {
+        self.state.take().expect("task state").finish();
+        Ok(())
     }
 }
 

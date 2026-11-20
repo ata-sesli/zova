@@ -27,7 +27,7 @@ use crate::notification::{
 };
 use crate::object::{
     empty_buffer, empty_manifest, from_c_object_id, take_buffer, take_manifest, ObjectChunkId,
-    ObjectId, ObjectManifest, ObjectManifestChunk, ObjectPutOptions,
+    ObjectCompression, ObjectId, ObjectManifest, ObjectManifestChunk, ObjectPutOptions,
 };
 use crate::progress::{Progress, ProgressBridge};
 use crate::statement::{ColumnType, Step};
@@ -575,6 +575,18 @@ impl SharedDatabase {
         f: impl FnOnce(&mut SharedDatabaseGuard<'_>) -> Result<T>,
     ) -> Result<T> {
         self.transaction_with(zova_sys::zova_database_begin_immediate, f)
+    }
+
+    /// Select the compression for object chunks written through this
+    /// shared handle. See [`crate::Database::set_object_compression`].
+    pub fn set_object_compression(&self, compression: ObjectCompression) -> Result<()> {
+        let _guard = self.inner.enter()?;
+        let request = zova_sys::zova_object_set_compression_request {
+            db: self.inner.raw_ptr(),
+            compression: compression.to_raw(),
+        };
+        self.inner
+            .status_locked(unsafe { zova_sys::zova_object_set_compression(&request) })
     }
 
     pub fn put_object(&self, bytes: &[u8]) -> Result<ObjectId> {

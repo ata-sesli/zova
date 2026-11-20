@@ -288,7 +288,7 @@ fn validateObjects(allocator: std.mem.Allocator, db: *zova.Database, report: *Di
     defer allocator.free(sql);
     const chunk_sql = try std.fmt.allocPrintSentinel(
         allocator,
-        "select size_bytes, data from {s}_zova_chunks where chunk_hash = ?",
+        "select size_bytes from {s}_zova_chunks where chunk_hash = ?",
         .{prefix},
         0,
     );
@@ -322,11 +322,18 @@ fn validateObjects(allocator: std.mem.Allocator, db: *zova.Database, report: *Di
                 .done => "ObjectChunkNotFound",
                 .row => blk: {
                     const stored_size = chunk_stmt.columnInt64(0);
-                    const data = chunk_stmt.columnBlob(1);
-                    if (stored_size <= 0 or @as(u64, @intCast(stored_size)) != chunk.size_bytes or @as(u64, @intCast(data.len)) != chunk.size_bytes) {
+                    if (stored_size <= 0 or @as(u64, @intCast(stored_size)) != chunk.size_bytes) {
                         break :blk "ObjectCorrupt";
                     }
-                    if (!std.mem.eql(u8, &zova.objectChunkId(data), &chunk.hash)) break :blk "ObjectCorrupt";
+                    // A range read of exactly this chunk decodes the stored
+                    // bytes and checks them against the chunk hash.
+                    const plain = try allocator.alloc(u8, @intCast(stored_size));
+                    defer allocator.free(plain);
+                    const read = db.readObjectRange(id, chunk.offset, plain) catch |err| switch (err) {
+                        error.ObjectCorrupt => break :blk "ObjectCorrupt",
+                        else => return err,
+                    };
+                    if (read != plain.len) break :blk "ObjectCorrupt";
                     break :blk null;
                 },
             };

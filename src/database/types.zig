@@ -130,6 +130,7 @@ pub const Object = object_impl.Object;
 pub const ObjectStorageProfile = object_impl.ObjectStorageProfile;
 
 pub const ObjectPutOptions = object_impl.ObjectPutOptions;
+pub const ObjectCompression = object_impl.ObjectCompression;
 
 pub const ObjectReaderError = object_impl.ObjectReaderError;
 

@@ -72,11 +72,11 @@ The Go package is source-only and uses cgo. It does not download or build the
 native Zova C ABI automatically during `go get`; your build environment must
 provide `zova.h` and `libzova_c.a`.
 
-The current release uses `.zova` format 13, and Zova does not migrate older
-format databases in place. Format-9, format-10, format-11 and format-12 databases can be probed and
+The current development `.zova` format is 14, and Zova does not migrate older
+format databases in place. Format-9, format-10, format-11, format-12 and format-13 databases can be probed and
 migrated forward with the package-level `ProbeFormat(path)` and
 `MigrateDatabase(source, destination, options...)` functions: migration is
-explicit, copy-forward, publishes a separately validated format-13 destination,
+explicit, copy-forward, publishes a separately validated format-14 destination,
 and never mutates the source. `MigrateDatabaseWithExtensions(source,
 destination, options, extensions)` takes the same `ExtensionOptions` as
 `OpenWithExtensions` for databases with a non-bundled extension installed.
@@ -427,6 +427,12 @@ insert.Step()
 Use `PutObject` for in-memory bytes, `ObjectWriter` for streamed writes,
 `ReadObjectRange` for previews, and `ObjectManifest` / `GetObjectChunk` /
 `PutObjectChunk` / `AssembleObjectFromChunks` for receive-side chunk flows.
+
+`db.SetObjectCompression(zova.ObjectCompressionLZ4)` makes that handle store
+each new chunk as an LZ4 block when that is smaller than the chunk. The setting
+is per handle, defaults to `ObjectCompressionNone`, and is not stored in the
+file. Object IDs, chunk hashes and manifests are unchanged, and every read
+decodes compressed chunks.
 
 To serve large objects over HTTP with Range support, open an
 `ObjectSeekableReader`. It implements `io.ReadSeeker` and `io.Closer`, verifies

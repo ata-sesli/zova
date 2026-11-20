@@ -477,6 +477,7 @@ browser form. Every browser method returns a promise.
 | `kvGet`, `kvPut`, `kvDelete` | `kv.get`, `kv.put`, `kv.delete` |
 | `kvGetMany`, `kvPutMany`, `kvDeleteMany`, `kvCount`, `kvClearNamespace` | `kv.getMany`, `kv.putMany`, `kv.deleteMany`, `kv.count`, `kv.clearNamespace` |
 | `kvScan`, `kvPutIfAbsent`, `kvCompareAndPut`, `kvCompareAndDelete` | not available yet |
+| `setObjectCompression` | not available yet; browser databases store chunks raw and read compressed chunks |
 | `notify`, `listen`, `Subscription.tryReceive`, `close` | same; within one worker only |
 | `Subscription.tryReceiveAsync` | `tryReceive()` is already asynchronous |
 | `objectWriter`, `objectWriterWithOptions` (`write`, `finish`, `cancel`) | same names; a `WritableStream` with `id` (close, abort) |

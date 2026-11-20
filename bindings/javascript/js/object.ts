@@ -26,6 +26,12 @@ export interface ObjectManifestChunkInput {
 
 export type ObjectStorageProfile = "deduplication" | "streaming";
 
+/**
+ * Chunk compression for objects written through one handle (format 14).
+ * Not persisted; chunks are stored compressed only when that is smaller.
+ */
+export type ObjectCompression = "none" | "lz4";
+
 export interface ObjectPutOptions {
   readonly profile: ObjectStorageProfile;
 }

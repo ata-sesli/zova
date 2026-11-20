@@ -204,6 +204,7 @@ pub const Object = @import("database/types.zig").Object;
 pub const ObjectStorageProfile = @import("database/types.zig").ObjectStorageProfile;
 
 pub const ObjectPutOptions = @import("database/types.zig").ObjectPutOptions;
+pub const ObjectCompression = @import("database/types.zig").ObjectCompression;
 
 pub const ObjectReaderError = @import("database/types.zig").ObjectReaderError;
 
@@ -541,9 +542,11 @@ pub fn openForLogicalInspection(path: [:0]const u8) Error!Database {
     // Installed-extension SQL is registered so bundled behavior (for example
     // trigram functions) can be exercised against migratable sources.
     try extension_impl.registerSqlForInstalled(&raw, bundledExtensionRegistry());
+    const raw_chunk_table = try tableExists(&raw, object_impl.chunks_table) and
+        !try tableColumnExists(&raw, object_impl.chunks_table, "encoding");
     const notifications = try initNotifications(&raw);
     errdefer deinitNotifications(notifications);
-    return .{ .sqlite_db = raw, .notifications = notifications };
+    return .{ .sqlite_db = raw, .notifications = notifications, .raw_chunk_table = raw_chunk_table };
 }
 
 /// Restore a backup `.zova` file with process-registered extension code.
@@ -914,6 +917,12 @@ pub const Database = struct {
     bound_graph_edge_types: graph_impl.GraphEdgeTypeCache = .{},
     kv_statements: kv_impl.StatementCache = .{},
     idle_statements: statement_cache.Cache = .{},
+    /// Compression for object chunks written through this handle. Not
+    /// persisted: a reopened handle starts with `.none`.
+    object_compression: ObjectCompression = .none,
+    /// Set only on logical-inspection handles over a pre-format-14 source,
+    /// whose chunk table has no `encoding` column.
+    raw_chunk_table: bool = false,
     graph_walk_scratch: graph_walk_scratch.GraphWalkScratch = graph_walk_scratch.GraphWalkScratch.init(),
     extension_registry: ExtensionRegistry = ExtensionRegistry.empty(),
 
@@ -1890,6 +1899,22 @@ pub const Database = struct {
         return self.unbindStore(.vector);
     }
 
+    /// Select the compression for object chunks this handle writes from now
+    /// on: `putObject`, object writers created afterwards, and
+    /// `putObjectChunk`. With `.lz4`, a chunk is stored as an LZ4 block only
+    /// when that is smaller. Object and chunk ids, manifests, sizes and
+    /// deduplication do not change, and reads decode every stored encoding
+    /// whatever this setting is. The setting belongs to this handle and is
+    /// not persisted; the default is `.none`.
+    pub fn setObjectCompression(self: *Database, compression: ObjectCompression) void {
+        self.object_compression = compression;
+    }
+
+    /// Return the compression selected by `setObjectCompression`.
+    pub fn objectCompression(self: *const Database) ObjectCompression {
+        return self.object_compression;
+    }
+
     /// Create an incremental object writer for this database connection.
     pub fn objectWriter(self: *Database, allocator: std.mem.Allocator) Error!ObjectWriter {
         var objects = self.objectDatabase();
@@ -2503,6 +2528,8 @@ pub const Database = struct {
             // transactions only for an attached bound object store.
             .allow_active_transactions = bound,
             .statement_cache = &self.idle_statements,
+            .compression = self.object_compression,
+            .raw_chunk_table = self.raw_chunk_table,
         };
     }
 
@@ -3127,15 +3154,16 @@ fn verifyStoredChunks(db: *Database, progress: *VerifyProgress) Error!void {
 }
 
 fn verifyFixedChunk(db: *Database, prefix: []const u8, hash: ObjectChunkId) Error!void {
-    var stmt = try prepareSchemaSql(&db.sqlite_db, "select size_bytes, data from {s}_zova_chunks where chunk_hash = ?", .{prefix});
+    var stmt = try prepareSchemaSql(&db.sqlite_db, "select size_bytes, data, encoding from {s}_zova_chunks where chunk_hash = ?", .{prefix});
     defer stmt.deinit();
     try stmt.bindBlob(1, &hash);
     if ((try stmt.step()) != .row) return error.ObjectChunkNotFound;
     const size = stmt.columnInt64(0);
     if (size <= 0 or size > @as(i64, @intCast(fixed_max_chunk_size))) return error.ObjectCorrupt;
-    const data = stmt.columnBlob(1);
-    if (data.len != @as(usize, @intCast(size))) return error.ObjectCorrupt;
-    if (!std.mem.eql(u8, &objectId(data), &hash)) return error.ObjectCorrupt;
+    const plain = try verify_allocator.alloc(u8, @intCast(size));
+    defer verify_allocator.free(plain);
+    try object_impl.decodeChunk(try object_impl.ChunkEncoding.fromColumn(stmt.columnInt64(2)), stmt.columnBlob(1), plain);
+    if (!std.mem.eql(u8, &objectId(plain), &hash)) return error.ObjectCorrupt;
 }
 
 // The C backend cannot lower the memory.grow intrinsics behind page_allocator

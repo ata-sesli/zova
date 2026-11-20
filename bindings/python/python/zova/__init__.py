@@ -93,6 +93,13 @@ class ObjectStorageProfile(IntEnum):
     STREAMING = 1
 
 
+class ObjectCompression(IntEnum):
+    """Chunk compression for objects written through one handle (format 14)."""
+
+    NONE = 0
+    LZ4 = 1
+
+
 DEFAULT_GRAPH_NAME = "default"
 
 
@@ -165,6 +172,7 @@ __all__ = [
     "GraphWalkOptions",
     "Notification",
     "ObjectChunkId",
+    "ObjectCompression",
     "ObjectId",
     "ObjectManifest",
     "ObjectManifestChunk",

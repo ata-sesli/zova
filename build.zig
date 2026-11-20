@@ -374,6 +374,21 @@ pub fn build(b: *std.Build) void {
     const install_object_writer_196 = b.addInstallArtifact(object_writer_196_benchmark, .{});
     b.step("build-object-writer-196", "Build bounded issue-196 object writer ingest benchmark").dependOn(&install_object_writer_196.step);
 
+    const object_compression_227_benchmark = b.addExecutable(.{
+        .name = "zova_object_compression_227_benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/object_compression_227.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    object_compression_227_benchmark.root_module.addImport("object_impl", object_benchmark.root_module.import_table.get("object_impl").?);
+    object_compression_227_benchmark.root_module.addIncludePath(b.path("vendor/sqlite3.53.4"));
+    object_compression_227_benchmark.root_module.linkLibrary(sqlite_lib);
+    const install_object_compression_227 = b.addInstallArtifact(object_compression_227_benchmark, .{});
+    b.step("build-object-compression-227", "Build bounded issue-227 object compression ingest and read benchmark").dependOn(&install_object_compression_227.step);
+
     const object_delete_195_benchmark = b.addExecutable(.{
         .name = "zova_object_delete_195_benchmark",
         .root_module = b.createModule(.{
@@ -696,7 +711,7 @@ pub fn build(b: *std.Build) void {
         "test-objects",
         "Run object storage tests",
         "src/test_objects_root.zig",
-        &.{ "object_tests", "object.test.", "object_sha256" },
+        &.{ "object_tests", "object.test.", "object_sha256", "object_lz4" },
         target,
         optimize,
         zova_build_options,

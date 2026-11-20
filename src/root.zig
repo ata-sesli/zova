@@ -21,6 +21,7 @@ pub const ObjectReader = zova.ObjectReader;
 pub const ObjectSeekableReader = zova.ObjectSeekableReader;
 pub const ObjectStorageProfile = zova.ObjectStorageProfile;
 pub const ObjectPutOptions = zova.ObjectPutOptions;
+pub const ObjectCompression = zova.ObjectCompression;
 pub const ObjectReaderError = zova.ObjectReaderError;
 pub const Vector = zova.Vector;
 pub const VectorCollectionInfo = zova.VectorCollectionInfo;
@@ -184,6 +185,7 @@ test "package exports zova database namespace" {
     try std.testing.expect(@hasDecl(@This(), "ObjectSeekableReader"));
     try std.testing.expect(@hasDecl(@This(), "ObjectStorageProfile"));
     try std.testing.expect(@hasDecl(@This(), "ObjectPutOptions"));
+    try std.testing.expect(@hasDecl(@This(), "ObjectCompression"));
     try std.testing.expect(@hasDecl(@This(), "ObjectReaderError"));
     try std.testing.expect(@hasDecl(@This(), "objectChunkId"));
     try std.testing.expect(@hasDecl(@This(), "objectId"));

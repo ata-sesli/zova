@@ -97,6 +97,9 @@ The synchronous `Database` facade exposes:
 - objects, manifests, chunks, range reads, assembly, `ObjectWriter`, and
   `ObjectSeekableReader` for seekable, chunk-verified reads such as HTTP range
   serving (`read`/`seek` and `readAsync`/`seekAsync`)
+- opt-in per-handle LZ4 chunk compression with
+  `setObjectCompression("lz4" | "none")` on `Database` and `AsyncDatabase`;
+  object IDs and manifests are unchanged and reads decode compressed chunks
 - f32/f16/i8 vector collection lifecycle, batch writes/deletes, and exact search
 - public graph CRUD, atomic batches, neighbors, degree, and walks
 - bundled extension install/list/info/check/drop

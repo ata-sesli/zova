@@ -47,6 +47,18 @@ const (
 	ObjectStorageProfileStreaming ObjectStorageProfile = C.ZOVA_OBJECT_PROFILE_STREAMING
 )
 
+// ObjectCompression selects how object chunks written through one handle are
+// stored. It is not persisted; chunks are stored compressed only when that is
+// smaller, and reads decode every stored encoding. Requires format 14.
+type ObjectCompression int
+
+const (
+	// ObjectCompressionNone stores chunks uncompressed (the default).
+	ObjectCompressionNone ObjectCompression = C.ZOVA_OBJECT_COMPRESSION_NONE
+	// ObjectCompressionLZ4 stores chunks as LZ4 blocks when that is smaller.
+	ObjectCompressionLZ4 ObjectCompression = C.ZOVA_OBJECT_COMPRESSION_LZ4
+)
+
 // ObjectPutOptions configures a profile-aware object operation.
 type ObjectPutOptions struct {
 	Profile ObjectStorageProfile
@@ -133,6 +145,19 @@ func (db *DB) PutObjectWithOptions(bytes []byte, options ObjectPutOptions) (Obje
 		return statusFromDB(db, C.zova_object_put_with_options(&request))
 	})
 	return objectIDFromC(*out), err
+}
+
+// SetObjectCompression selects chunk compression for objects written through
+// this handle: PutObject, PutObjectWithOptions, object writers and
+// PutObjectChunk. Object and chunk IDs always hash the uncompressed bytes.
+func (db *DB) SetObjectCompression(compression ObjectCompression) error {
+	return db.withLock(func() error {
+		request := C.zova_object_set_compression_request{
+			db:          db.ptr,
+			compression: C.int(compression),
+		}
+		return statusFromDB(db, C.zova_object_set_compression(&request))
+	})
 }
 
 // GetObject returns full object bytes.
