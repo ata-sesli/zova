@@ -189,7 +189,7 @@ export async function testMigration(context, base, formats) {
       assert(result.status === "ZOVA_INTERRUPTED" && result.format === 12 && result.unchanged, `${label}: ${JSON.stringify(result)}`);
     }
     assert(cancelled["throwing-progress"].thrown && cancelled["throwing-progress"].unchanged, `throwing progress: ${JSON.stringify(cancelled["throwing-progress"])}`);
-    assert(cancelled["abort-publish"].status === undefined && cancelled["abort-publish"].format === 13, `abort after publication started: ${JSON.stringify(cancelled["abort-publish"])}`);
+    assert(cancelled["abort-publish"].status === undefined && cancelled["abort-publish"].format === 14, `abort after publication started: ${JSON.stringify(cancelled["abort-publish"])}`);
 
     // Too little origin storage fails before copying; bound sets are out of scope.
     const spaceName = "space-" + Date.now();
