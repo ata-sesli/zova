@@ -447,6 +447,18 @@ pub const zova_kv_count_request = @import("c_api/types.zig").zova_kv_count_reque
 
 pub const zova_kv_clear_namespace_request = @import("c_api/types.zig").zova_kv_clear_namespace_request;
 
+pub const zova_kv_entry = @import("c_api/types.zig").zova_kv_entry;
+
+pub const zova_kv_scan_results = @import("c_api/types.zig").zova_kv_scan_results;
+
+pub const zova_kv_scan_request = @import("c_api/types.zig").zova_kv_scan_request;
+
+pub const zova_kv_put_if_absent_request = @import("c_api/types.zig").zova_kv_put_if_absent_request;
+
+pub const zova_kv_compare_and_put_request = @import("c_api/types.zig").zova_kv_compare_and_put_request;
+
+pub const zova_kv_compare_and_delete_request = @import("c_api/types.zig").zova_kv_compare_and_delete_request;
+
 pub const zova_vector_collection_create_request = @import("c_api/types.zig").zova_vector_collection_create_request;
 
 pub const zova_vector_collection_exists_request = @import("c_api/types.zig").zova_vector_collection_exists_request;
@@ -598,6 +610,8 @@ pub const zova_buffer_free = @import("c_api/results.zig").zova_buffer_free;
 pub const zova_kv_get_result_free = @import("c_api/results.zig").zova_kv_get_result_free;
 
 pub const zova_kv_get_many_results_free = @import("c_api/results.zig").zova_kv_get_many_results_free;
+
+pub const zova_kv_scan_results_free = @import("c_api/results.zig").zova_kv_scan_results_free;
 
 pub const zova_message_free = @import("c_api/results.zig").zova_message_free;
 
@@ -791,6 +805,14 @@ pub const zova_kv_delete_many = @import("c_api/kv.zig").zova_kv_delete_many;
 pub const zova_kv_count = @import("c_api/kv.zig").zova_kv_count;
 
 pub const zova_kv_clear_namespace = @import("c_api/kv.zig").zova_kv_clear_namespace;
+
+pub const zova_kv_scan = @import("c_api/kv.zig").zova_kv_scan;
+
+pub const zova_kv_put_if_absent = @import("c_api/kv.zig").zova_kv_put_if_absent;
+
+pub const zova_kv_compare_and_put = @import("c_api/kv.zig").zova_kv_compare_and_put;
+
+pub const zova_kv_compare_and_delete = @import("c_api/kv.zig").zova_kv_compare_and_delete;
 
 pub const zova_object_manifest_get = @import("c_api/objects.zig").zova_object_manifest_get;
 

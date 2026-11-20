@@ -7,8 +7,9 @@ use napi::{Env, Result, Task};
 use napi_derive::napi;
 
 use crate::database::{
-    reclaim_options, DatabaseState, NativeDatabase, NativeExtensionOptions, NativeFormatInfo,
-    NativeKvEntry, NativeReclaimedMember,
+    native_kv_scan_page, reclaim_options, DatabaseState, NativeDatabase, NativeExtensionOptions,
+    NativeFormatInfo, NativeKvEntry, NativeKvScanOptions, NativeKvScanPage, NativeReclaimedMember,
+    OwnedKvScanOptions,
 };
 use crate::error::zova_error;
 use crate::graph::{
@@ -494,6 +495,10 @@ enum KvTaskKind {
     DeleteMany(Vec<u8>, Vec<Vec<u8>>),
     Count(Vec<u8>),
     ClearNamespace(Vec<u8>),
+    Scan(Vec<u8>, OwnedKvScanOptions),
+    PutIfAbsent(Vec<u8>, Vec<u8>, Vec<u8>),
+    CompareAndPut(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>),
+    CompareAndDelete(Vec<u8>, Vec<u8>, Vec<u8>),
 }
 
 pub enum KvTaskOutput {
@@ -501,6 +506,8 @@ pub enum KvTaskOutput {
     Get(Option<Vec<u8>>),
     Many(Vec<Option<Vec<u8>>>),
     Count(u64),
+    Scan(zova::KvScanPage),
+    Applied(bool),
 }
 
 pub struct KvTask {
@@ -562,6 +569,22 @@ impl Task for KvTask {
                 .kv_clear_namespace(namespace)
                 .map(|()| KvTaskOutput::Void)
                 .map_err(zova_error),
+            KvTaskKind::Scan(namespace, options) => options
+                .scan(database, namespace)
+                .map(KvTaskOutput::Scan)
+                .map_err(zova_error),
+            KvTaskKind::PutIfAbsent(namespace, key, value) => database
+                .kv_put_if_absent(namespace, key, value)
+                .map(KvTaskOutput::Applied)
+                .map_err(zova_error),
+            KvTaskKind::CompareAndPut(namespace, key, expected, value) => database
+                .kv_compare_and_put(namespace, key, expected, value)
+                .map(KvTaskOutput::Applied)
+                .map_err(zova_error),
+            KvTaskKind::CompareAndDelete(namespace, key, expected) => database
+                .kv_compare_and_delete(namespace, key, expected)
+                .map(KvTaskOutput::Applied)
+                .map_err(zova_error),
         }
     }
 
@@ -572,12 +595,16 @@ impl Task for KvTask {
                 value: None,
                 values: None,
                 count: None,
+                page: None,
+                applied: None,
             },
             KvTaskOutput::Get(value) => KvTaskValue {
                 kind: "get".into(),
                 value: value.map(|value| Uint8Array::new(value)),
                 values: None,
                 count: None,
+                page: None,
+                applied: None,
             },
             KvTaskOutput::Many(values) => KvTaskValue {
                 kind: "many".into(),
@@ -589,12 +616,32 @@ impl Task for KvTask {
                         .collect(),
                 ),
                 count: None,
+                page: None,
+                applied: None,
             },
             KvTaskOutput::Count(count) => KvTaskValue {
                 kind: "count".into(),
                 value: None,
                 values: None,
                 count: Some(BigInt::from(count)),
+                page: None,
+                applied: None,
+            },
+            KvTaskOutput::Scan(page) => KvTaskValue {
+                kind: "scan".into(),
+                value: None,
+                values: None,
+                count: None,
+                page: Some(native_kv_scan_page(page)),
+                applied: None,
+            },
+            KvTaskOutput::Applied(applied) => KvTaskValue {
+                kind: "applied".into(),
+                value: None,
+                values: None,
+                count: None,
+                page: None,
+                applied: Some(applied),
             },
         })
     }
@@ -611,6 +658,8 @@ pub struct KvTaskValue {
     pub value: Option<Uint8Array>,
     pub values: Option<Vec<Option<Uint8Array>>>,
     pub count: Option<BigInt>,
+    pub page: Option<NativeKvScanPage>,
+    pub applied: Option<bool>,
 }
 
 #[cfg_attr(test, allow(dead_code))]
@@ -999,6 +1048,64 @@ impl NativeDatabase {
         Ok(AsyncTask::new(KvTask {
             state: Some(DatabaseTaskState::new(self)?),
             kind: KvTaskKind::ClearNamespace(namespace.to_vec()),
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<KvTaskValue>")]
+    pub fn async_kv_scan(
+        &self,
+        namespace: Uint8Array,
+        options: NativeKvScanOptions,
+    ) -> Result<AsyncTask<KvTask>> {
+        let options = OwnedKvScanOptions::new(options)?;
+        Ok(AsyncTask::new(KvTask {
+            state: Some(DatabaseTaskState::new(self)?),
+            kind: KvTaskKind::Scan(namespace.to_vec(), options),
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<KvTaskValue>")]
+    pub fn async_kv_put_if_absent(
+        &self,
+        namespace: Uint8Array,
+        key: Uint8Array,
+        value: Uint8Array,
+    ) -> Result<AsyncTask<KvTask>> {
+        Ok(AsyncTask::new(KvTask {
+            state: Some(DatabaseTaskState::new(self)?),
+            kind: KvTaskKind::PutIfAbsent(namespace.to_vec(), key.to_vec(), value.to_vec()),
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<KvTaskValue>")]
+    pub fn async_kv_compare_and_put(
+        &self,
+        namespace: Uint8Array,
+        key: Uint8Array,
+        expected: Uint8Array,
+        value: Uint8Array,
+    ) -> Result<AsyncTask<KvTask>> {
+        Ok(AsyncTask::new(KvTask {
+            state: Some(DatabaseTaskState::new(self)?),
+            kind: KvTaskKind::CompareAndPut(
+                namespace.to_vec(),
+                key.to_vec(),
+                expected.to_vec(),
+                value.to_vec(),
+            ),
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<KvTaskValue>")]
+    pub fn async_kv_compare_and_delete(
+        &self,
+        namespace: Uint8Array,
+        key: Uint8Array,
+        expected: Uint8Array,
+    ) -> Result<AsyncTask<KvTask>> {
+        Ok(AsyncTask::new(KvTask {
+            state: Some(DatabaseTaskState::new(self)?),
+            kind: KvTaskKind::CompareAndDelete(namespace.to_vec(), key.to_vec(), expected.to_vec()),
         }))
     }
 

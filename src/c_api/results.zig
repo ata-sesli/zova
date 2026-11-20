@@ -32,6 +32,7 @@ const zova_graph_walk_result = @import("types.zig").zova_graph_walk_result;
 const zova_graph_walk_results = @import("types.zig").zova_graph_walk_results;
 const zova_kv_get_many_results = @import("types.zig").zova_kv_get_many_results;
 const zova_kv_get_result = @import("types.zig").zova_kv_get_result;
+const zova_kv_scan_results = @import("types.zig").zova_kv_scan_results;
 const zova_message = @import("types.zig").zova_message;
 const zova_notification = @import("types.zig").zova_notification;
 const zova_object_manifest = @import("types.zig").zova_object_manifest;
@@ -70,6 +71,18 @@ pub fn zova_kv_get_many_results_free(results: ?*zova_kv_get_many_results) callco
         allocator.free(items[0..out.len]);
     }
     out.* = .{ .items = null, .len = 0 };
+}
+
+pub fn zova_kv_scan_results_free(results: ?*zova_kv_scan_results) callconv(.c) void {
+    const out = results orelse return;
+    if (out.items) |items| {
+        for (items[0..out.len]) |*item| {
+            if (item.key.data) |data| allocator.free(data[0..item.key.len]);
+            if (item.value.data) |data| allocator.free(data[0..item.value.len]);
+        }
+        allocator.free(items[0..out.len]);
+    }
+    out.* = .{ .items = null, .len = 0, .has_more = 0 };
 }
 
 pub fn zova_message_free(message: ?*zova_message) callconv(.c) void {

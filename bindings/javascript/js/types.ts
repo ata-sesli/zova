@@ -94,3 +94,30 @@ export interface KvEntry {
   readonly key: Uint8Array;
   readonly value: Uint8Array;
 }
+
+/**
+ * Selects one page of a key-value namespace. Keys compare as raw bytes: a
+ * shorter key sorts before every longer key it prefixes. Every given bound
+ * applies. Continue a scan by passing the last returned key as `after`.
+ */
+export interface KvScanOptions {
+  /** Only keys that begin with these bytes. */
+  readonly prefix?: Uint8Array;
+  /** Inclusive lower bound. */
+  readonly start?: Uint8Array;
+  /** Exclusive upper bound. */
+  readonly end?: Uint8Array;
+  /** Continue strictly after this key. */
+  readonly after?: Uint8Array;
+  /** Most entries returned; must be a positive integer. */
+  readonly limit: number;
+  /** Return keys only; every value is then empty. */
+  readonly keysOnly?: boolean;
+}
+
+/** One scan page in ascending key byte order. */
+export interface KvScanPage {
+  readonly entries: KvEntry[];
+  /** True when at least one further entry matches the same options. */
+  readonly hasMore: boolean;
+}

@@ -15,7 +15,7 @@ import type {
   ReclaimOptions,
 } from "./types.js";
 import { nativeExtensionOptions, reclaimedMember } from "./types.js";
-import type { KvEntry } from "./types.js";
+import type { KvEntry, KvScanOptions, KvScanPage } from "./types.js";
 import type { ProgressOptions } from "./progress.js";
 import { withProgress } from "./progress.js";
 import { ObjectSeekableReader } from "./object.js";
@@ -314,6 +314,63 @@ export class AsyncDatabase {
           "unexpected kv clear namespace result kind",
         );
       }
+    });
+  }
+
+  /** Return one page of a namespace in ascending key byte order. */
+  kvScan(namespace: Uint8Array, options: KvScanOptions): Promise<KvScanPage> {
+    return this.#enqueue(async () => {
+      const result = await this.#native.asyncKvScan(namespace, { ...options });
+      if (result.kind !== "scan" || result.page === undefined) {
+        throw new ZovaError(
+          "ZOVA_MISUSE",
+          16,
+          "unexpected kv scan result kind",
+        );
+      }
+      return result.page;
+    });
+  }
+
+  /** Insert one entry only when its key is absent. Resolves whether it was written. */
+  kvPutIfAbsent(namespace: Uint8Array, key: Uint8Array, value: Uint8Array): Promise<boolean> {
+    return this.#applied(() => this.#native.asyncKvPutIfAbsent(namespace, key, value));
+  }
+
+  /**
+   * Replace one value only when the current value equals `expected` byte for
+   * byte. A missing key never matches. Resolves whether it was written.
+   */
+  kvCompareAndPut(
+    namespace: Uint8Array,
+    key: Uint8Array,
+    expected: Uint8Array,
+    value: Uint8Array,
+  ): Promise<boolean> {
+    return this.#applied(() =>
+      this.#native.asyncKvCompareAndPut(namespace, key, expected, value),
+    );
+  }
+
+  /**
+   * Delete one entry only when its current value equals `expected` byte for
+   * byte. A missing key never matches. Resolves whether it was deleted.
+   */
+  kvCompareAndDelete(namespace: Uint8Array, key: Uint8Array, expected: Uint8Array): Promise<boolean> {
+    return this.#applied(() => this.#native.asyncKvCompareAndDelete(namespace, key, expected));
+  }
+
+  #applied(run: () => Promise<{ kind: string; applied?: boolean }>): Promise<boolean> {
+    return this.#enqueue(async () => {
+      const result = await run();
+      if (result.kind !== "applied" || result.applied === undefined) {
+        throw new ZovaError(
+          "ZOVA_MISUSE",
+          16,
+          "unexpected kv conditional write result kind",
+        );
+      }
+      return result.applied;
     });
   }
 

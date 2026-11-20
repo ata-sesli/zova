@@ -19,6 +19,13 @@ const zova_kv_put = @import("c_api_internal.zig").zova_kv_put;
 const zova_kv_put_entry = @import("c_api_internal.zig").zova_kv_put_entry;
 const zova_kv_put_many = @import("c_api_internal.zig").zova_kv_put_many;
 const zova_status = @import("c_api_internal.zig").zova_status;
+const zova_database_create_memory = @import("c_api_internal.zig").zova_database_create_memory;
+const zova_kv_scan = @import("c_api_internal.zig").zova_kv_scan;
+const zova_kv_scan_results = @import("c_api_internal.zig").zova_kv_scan_results;
+const zova_kv_scan_results_free = @import("c_api_internal.zig").zova_kv_scan_results_free;
+const zova_kv_put_if_absent = @import("c_api_internal.zig").zova_kv_put_if_absent;
+const zova_kv_compare_and_put = @import("c_api_internal.zig").zova_kv_compare_and_put;
+const zova_kv_compare_and_delete = @import("c_api_internal.zig").zova_kv_compare_and_delete;
 
 test "c abi exposes transactional key-value operations" {
     var tmp = std.testing.tmpDir(.{});
@@ -158,4 +165,92 @@ test "c abi exposes transactional key-value operations" {
         .key = .{ .data = "theme", .len = 5 },
         .value = .{ .data = "dark", .len = 4 },
     }));
+}
+
+fn kvBytes(bytes: []const u8) zova_kv_bytes {
+    return .{ .data = bytes.ptr, .len = bytes.len };
+}
+
+test "c abi scans key-value pages and applies conditional writes" {
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create_memory(&.{ .out_db = &db, .out_error_message = null }));
+    defer _ = zova_database_close(db);
+
+    var applied: u8 = 7;
+    for ([_][]const u8{ "b", "a", "c", "a\x00" }) |key| {
+        try std.testing.expectEqual(zova_status.OK, zova_kv_put_if_absent(&.{ .db = db, .ns = kvBytes("ns"), .key = kvBytes(key), .value = kvBytes(key), .out_applied = &applied }));
+        try std.testing.expectEqual(@as(u8, 1), applied);
+    }
+    try std.testing.expectEqual(zova_status.OK, zova_kv_put_if_absent(&.{ .db = db, .ns = kvBytes("ns"), .key = kvBytes("a"), .value = kvBytes("x"), .out_applied = &applied }));
+    try std.testing.expectEqual(@as(u8, 0), applied);
+
+    var results: zova_kv_scan_results = undefined;
+    try std.testing.expectEqual(zova_status.OK, zova_kv_scan(&.{
+        .db = db,
+        .ns = kvBytes("ns"),
+        .prefix = kvBytes(""),
+        .start = kvBytes(""),
+        .has_start = 0,
+        .end = kvBytes(""),
+        .has_end = 0,
+        .after = kvBytes("a"),
+        .has_after = 1,
+        .limit = 2,
+        .keys_only = 0,
+        .out_results = &results,
+    }));
+    try std.testing.expectEqual(@as(usize, 2), results.len);
+    try std.testing.expectEqual(@as(u8, 1), results.has_more);
+    const items = results.items.?[0..results.len];
+    try std.testing.expectEqualSlices(u8, "a\x00", items[0].key.data.?[0..items[0].key.len]);
+    try std.testing.expectEqualSlices(u8, "a\x00", items[0].value.data.?[0..items[0].value.len]);
+    try std.testing.expectEqualSlices(u8, "b", items[1].key.data.?[0..items[1].key.len]);
+    zova_kv_scan_results_free(&results);
+    try std.testing.expectEqual(@as(usize, 0), results.len);
+    zova_kv_scan_results_free(&results);
+
+    try std.testing.expectEqual(zova_status.OK, zova_kv_scan(&.{
+        .db = db,
+        .ns = kvBytes("ns"),
+        .prefix = kvBytes("a"),
+        .start = kvBytes(""),
+        .has_start = 0,
+        .end = kvBytes("a\x00"),
+        .has_end = 1,
+        .after = kvBytes(""),
+        .has_after = 0,
+        .limit = 10,
+        .keys_only = 1,
+        .out_results = &results,
+    }));
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqual(@as(u8, 0), results.has_more);
+    try std.testing.expectEqual(@as(usize, 0), results.items.?[0].value.len);
+    zova_kv_scan_results_free(&results);
+
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_kv_scan(&.{
+        .db = db,
+        .ns = kvBytes("ns"),
+        .prefix = kvBytes(""),
+        .start = kvBytes(""),
+        .has_start = 0,
+        .end = kvBytes(""),
+        .has_end = 0,
+        .after = kvBytes(""),
+        .has_after = 0,
+        .limit = 0,
+        .keys_only = 0,
+        .out_results = &results,
+    }));
+    try std.testing.expectEqual(@as(usize, 0), results.len);
+
+    try std.testing.expectEqual(zova_status.OK, zova_kv_compare_and_put(&.{ .db = db, .ns = kvBytes("ns"), .key = kvBytes("a"), .expected = kvBytes("x"), .value = kvBytes("y"), .out_applied = &applied }));
+    try std.testing.expectEqual(@as(u8, 0), applied);
+    try std.testing.expectEqual(zova_status.OK, zova_kv_compare_and_put(&.{ .db = db, .ns = kvBytes("ns"), .key = kvBytes("a"), .expected = kvBytes("a"), .value = kvBytes("y"), .out_applied = &applied }));
+    try std.testing.expectEqual(@as(u8, 1), applied);
+    try std.testing.expectEqual(zova_status.OK, zova_kv_compare_and_delete(&.{ .db = db, .ns = kvBytes("ns"), .key = kvBytes("a"), .expected = kvBytes("a"), .out_applied = &applied }));
+    try std.testing.expectEqual(@as(u8, 0), applied);
+    try std.testing.expectEqual(zova_status.OK, zova_kv_compare_and_delete(&.{ .db = db, .ns = kvBytes("ns"), .key = kvBytes("a"), .expected = kvBytes("y"), .out_applied = &applied }));
+    try std.testing.expectEqual(@as(u8, 1), applied);
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_kv_compare_and_delete(&.{ .db = db, .ns = kvBytes("ns"), .key = kvBytes("a"), .expected = kvBytes("y"), .out_applied = null }));
 }

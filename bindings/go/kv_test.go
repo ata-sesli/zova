@@ -2,6 +2,7 @@ package zova
 
 import (
 	"bytes"
+	"reflect"
 	"testing"
 )
 
@@ -263,5 +264,98 @@ func assertKvResult(t *testing.T, result *[]byte, want string) {
 	}
 	if !bytes.Equal(*result, []byte(want)) {
 		t.Fatalf("KvGetMany result = %q, want %q", *result, want)
+	}
+}
+
+func TestKvScanPagesInKeyByteOrder(t *testing.T) {
+	db, err := Create(tempZovaPath(t, "kv-scan"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, key := range []string{"b", "", "a\xff", "a", "ab", "a\x00", "c"} {
+		if err := db.KvPut([]byte("ns"), []byte(key), []byte(key)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.KvPut([]byte("other"), []byte("a"), []byte("elsewhere")); err != nil {
+		t.Fatal(err)
+	}
+	keys := func(page KvScanPage) []string {
+		out := make([]string, len(page.Entries))
+		for i, entry := range page.Entries {
+			out[i] = string(entry.Key)
+		}
+		return out
+	}
+
+	all, err := db.KvScan([]byte("ns"), KvScanOptions{Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := keys(all), []string{"", "a", "a\x00", "ab", "a\xff", "b", "c"}; !reflect.DeepEqual(got, want) || all.HasMore {
+		t.Fatalf("all = %q more=%v, want %q", got, all.HasMore, want)
+	}
+	first, err := db.KvScan([]byte("ns"), KvScanOptions{Prefix: []byte("a"), Limit: 2, KeysOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := keys(first); !reflect.DeepEqual(got, []string{"a", "a\x00"}) || !first.HasMore || len(first.Entries[0].Value) != 0 {
+		t.Fatalf("first page = %q more=%v", got, first.HasMore)
+	}
+	next, err := db.KvScan([]byte("ns"), KvScanOptions{Prefix: []byte("a"), After: first.Entries[1].Key, Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := keys(next); !reflect.DeepEqual(got, []string{"ab", "a\xff"}) || next.HasMore || string(next.Entries[0].Value) != "ab" {
+		t.Fatalf("next page = %q more=%v", got, next.HasMore)
+	}
+	// An empty non-nil After is the empty key, so the scan skips it.
+	afterEmpty, err := db.KvScan([]byte("ns"), KvScanOptions{After: []byte{}, Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := keys(afterEmpty); !reflect.DeepEqual(got, []string{"a"}) {
+		t.Fatalf("after empty key = %q", got)
+	}
+	bounded, err := db.KvScan([]byte("ns"), KvScanOptions{Start: []byte("a\x00"), End: []byte("b"), Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bounded.Entries) != 3 {
+		t.Fatalf("bounded = %q", keys(bounded))
+	}
+	if _, err := db.KvScan([]byte("ns"), KvScanOptions{}); !errorStatusIs(err, StatusInvalidArgument) {
+		t.Fatalf("zero limit error = %v", err)
+	}
+}
+
+func TestKvConditionalWritesReportWhetherTheyApplied(t *testing.T) {
+	db, err := Create(tempZovaPath(t, "kv-cas"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ns, key := []byte("ns"), []byte("k")
+	check := func(name string, applied bool, err error, want bool) {
+		t.Helper()
+		if err != nil || applied != want {
+			t.Fatalf("%s = %v, %v; want %v", name, applied, err, want)
+		}
+	}
+	applied, err := db.KvPutIfAbsent(ns, key, []byte("v1"))
+	check("first put if absent", applied, err, true)
+	applied, err = db.KvPutIfAbsent(ns, key, []byte("other"))
+	check("second put if absent", applied, err, false)
+	applied, err = db.KvCompareAndPut(ns, key, []byte("stale"), []byte("v2"))
+	check("stale compare and put", applied, err, false)
+	applied, err = db.KvCompareAndPut(ns, key, []byte("v1"), []byte("v2"))
+	check("compare and put", applied, err, true)
+	applied, err = db.KvCompareAndDelete(ns, key, []byte("v1"))
+	check("stale compare and delete", applied, err, false)
+	applied, err = db.KvCompareAndDelete(ns, key, []byte("v2"))
+	check("compare and delete", applied, err, true)
+	if value, err := db.KvGet(ns, key); err != nil || value != nil {
+		t.Fatalf("after delete = %q, %v", value, err)
 	}
 }

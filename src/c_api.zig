@@ -183,6 +183,12 @@ pub const zova_kv_delete_request = internal.zova_kv_delete_request;
 pub const zova_kv_delete_many_request = internal.zova_kv_delete_many_request;
 pub const zova_kv_count_request = internal.zova_kv_count_request;
 pub const zova_kv_clear_namespace_request = internal.zova_kv_clear_namespace_request;
+pub const zova_kv_entry = internal.zova_kv_entry;
+pub const zova_kv_scan_results = internal.zova_kv_scan_results;
+pub const zova_kv_scan_request = internal.zova_kv_scan_request;
+pub const zova_kv_put_if_absent_request = internal.zova_kv_put_if_absent_request;
+pub const zova_kv_compare_and_put_request = internal.zova_kv_compare_and_put_request;
+pub const zova_kv_compare_and_delete_request = internal.zova_kv_compare_and_delete_request;
 pub const zova_vector_collection_create_request = internal.zova_vector_collection_create_request;
 pub const zova_vector_collection_exists_request = internal.zova_vector_collection_exists_request;
 pub const zova_vector_put_request = internal.zova_vector_put_request;
@@ -289,6 +295,10 @@ pub fn zova_kv_get_result_free(result: ?*zova_kv_get_result) callconv(.c) void {
 
 pub fn zova_kv_get_many_results_free(results: ?*zova_kv_get_many_results) callconv(.c) void {
     return internal.zova_kv_get_many_results_free(results);
+}
+
+pub fn zova_kv_scan_results_free(results: ?*zova_kv_scan_results) callconv(.c) void {
+    return internal.zova_kv_scan_results_free(results);
 }
 
 pub fn zova_message_free(message: ?*zova_message) callconv(.c) void {
@@ -717,6 +727,22 @@ pub fn zova_kv_count(request: ?*const zova_kv_count_request) callconv(.c) zova_s
 
 pub fn zova_kv_clear_namespace(request: ?*const zova_kv_clear_namespace_request) callconv(.c) zova_status {
     return internal.zova_kv_clear_namespace(request);
+}
+
+pub fn zova_kv_scan(request: ?*const zova_kv_scan_request) callconv(.c) zova_status {
+    return internal.zova_kv_scan(request);
+}
+
+pub fn zova_kv_put_if_absent(request: ?*const zova_kv_put_if_absent_request) callconv(.c) zova_status {
+    return internal.zova_kv_put_if_absent(request);
+}
+
+pub fn zova_kv_compare_and_put(request: ?*const zova_kv_compare_and_put_request) callconv(.c) zova_status {
+    return internal.zova_kv_compare_and_put(request);
+}
+
+pub fn zova_kv_compare_and_delete(request: ?*const zova_kv_compare_and_delete_request) callconv(.c) zova_status {
+    return internal.zova_kv_compare_and_delete(request);
 }
 
 pub fn zova_object_manifest_get(request: ?*const zova_object_manifest_get_request) callconv(.c) zova_status {

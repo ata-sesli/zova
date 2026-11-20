@@ -1,3 +1,5 @@
+import pytest
+
 import zova
 
 
@@ -71,3 +73,40 @@ def test_kv_partitions_by_namespace(tmp_path):
         db.kv_clear_namespace(b"a")
         assert db.kv_count(b"a") == 0
         assert db.kv_count(b"b") == 1
+
+
+def test_kv_scan_pages_in_key_byte_order(tmp_path):
+    db = zova.Database.create(str(tmp_path / "scan.zova"))
+    for key in [b"b", b"", b"a\xff", b"a", b"ab", b"a\x00", b"c"]:
+        db.kv_put(b"ns", key, key)
+    db.kv_put(b"other", b"a", b"elsewhere")
+
+    entries, has_more = db.kv_scan(b"ns", limit=100)
+    assert [key for key, _ in entries] == [b"", b"a", b"a\x00", b"ab", b"a\xff", b"b", b"c"]
+    assert all(key == value for key, value in entries)
+    assert has_more is False
+
+    entries, has_more = db.kv_scan(b"ns", prefix=b"a", limit=2, keys_only=True)
+    assert entries == [(b"a", b""), (b"a\x00", b"")]
+    assert has_more is True
+    entries, has_more = db.kv_scan(b"ns", prefix=b"a", after=entries[-1][0], limit=2)
+    assert entries == [(b"ab", b"ab"), (b"a\xff", b"a\xff")]
+    assert has_more is False
+
+    entries, _ = db.kv_scan(b"ns", start=b"a\x00", end=b"b", limit=10)
+    assert len(entries) == 3
+    with pytest.raises(zova.ZovaError):
+        db.kv_scan(b"ns", limit=0)
+    db.close()
+
+
+def test_kv_conditional_writes_report_whether_they_applied(tmp_path):
+    db = zova.Database.create(str(tmp_path / "cas.zova"))
+    assert db.kv_put_if_absent(b"ns", b"k", b"v1") is True
+    assert db.kv_put_if_absent(b"ns", b"k", b"other") is False
+    assert db.kv_compare_and_put(b"ns", b"k", b"stale", b"v2") is False
+    assert db.kv_compare_and_put(b"ns", b"k", b"v1", b"v2") is True
+    assert db.kv_compare_and_delete(b"ns", b"k", b"v1") is False
+    assert db.kv_compare_and_delete(b"ns", b"k", b"v2") is True
+    assert db.kv_get(b"ns", b"k") is None
+    db.close()

@@ -1135,6 +1135,59 @@ pub const zova_kv_clear_namespace_request = extern struct {
     ns: zova_kv_bytes,
 };
 
+/// Owned scanned key-value entry. `value` is empty for keys-only scans.
+pub const zova_kv_entry = extern struct {
+    key: zova_buffer,
+    value: zova_buffer,
+};
+
+/// Owned scan page. Free with `zova_kv_scan_results_free`.
+pub const zova_kv_scan_results = extern struct {
+    items: ?[*]zova_kv_entry,
+    len: usize,
+    has_more: u8,
+};
+
+pub const zova_kv_scan_request = extern struct {
+    db: ?*zova_database,
+    ns: zova_kv_bytes,
+    prefix: zova_kv_bytes,
+    start: zova_kv_bytes,
+    has_start: u8,
+    end: zova_kv_bytes,
+    has_end: u8,
+    after: zova_kv_bytes,
+    has_after: u8,
+    limit: usize,
+    keys_only: u8,
+    out_results: ?*zova_kv_scan_results,
+};
+
+pub const zova_kv_put_if_absent_request = extern struct {
+    db: ?*zova_database,
+    ns: zova_kv_bytes,
+    key: zova_kv_bytes,
+    value: zova_kv_bytes,
+    out_applied: ?*u8,
+};
+
+pub const zova_kv_compare_and_put_request = extern struct {
+    db: ?*zova_database,
+    ns: zova_kv_bytes,
+    key: zova_kv_bytes,
+    expected: zova_kv_bytes,
+    value: zova_kv_bytes,
+    out_applied: ?*u8,
+};
+
+pub const zova_kv_compare_and_delete_request = extern struct {
+    db: ?*zova_database,
+    ns: zova_kv_bytes,
+    key: zova_kv_bytes,
+    expected: zova_kv_bytes,
+    out_applied: ?*u8,
+};
+
 pub const zova_vector_collection_create_request = extern struct {
     db: ?*zova_database,
     name: ?[*:0]const u8,

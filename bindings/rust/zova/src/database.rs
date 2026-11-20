@@ -1,7 +1,8 @@
 use crate::error::{Error, Result};
 use crate::kv::{
-    kv_clear_namespace_raw, kv_count_raw, kv_delete_many_raw, kv_delete_raw, kv_get_many_raw,
-    kv_get_raw, kv_put_many_raw, kv_put_raw, KvEntry,
+    kv_clear_namespace_raw, kv_compare_and_delete_raw, kv_compare_and_put_raw, kv_count_raw,
+    kv_delete_many_raw, kv_delete_raw, kv_get_many_raw, kv_get_raw, kv_put_if_absent_raw,
+    kv_put_many_raw, kv_put_raw, kv_scan_raw, KvEntry, KvScanOptions, KvScanPage,
 };
 use crate::notification::{listen_raw, notify_raw, Subscription};
 use crate::progress::{Progress, ProgressBridge, ProgressMember};
@@ -619,6 +620,47 @@ impl Database {
         let db = self.raw_ptr();
         let status = |status| self.status(status);
         kv_clear_namespace_raw(db, status, namespace)
+    }
+
+    /// Return one page of a namespace in ascending key byte order.
+    pub fn kv_scan(&mut self, namespace: &[u8], options: &KvScanOptions<'_>) -> Result<KvScanPage> {
+        let db = self.raw_ptr();
+        let status = |status| self.status(status);
+        kv_scan_raw(db, status, namespace, options)
+    }
+
+    /// Insert one entry only when its key is absent. Returns whether it was written.
+    pub fn kv_put_if_absent(&mut self, namespace: &[u8], key: &[u8], value: &[u8]) -> Result<bool> {
+        let db = self.raw_ptr();
+        let status = |status| self.status(status);
+        kv_put_if_absent_raw(db, status, namespace, key, value)
+    }
+
+    /// Replace one value only when the current value equals `expected` byte
+    /// for byte. A missing key never matches. Returns whether it was written.
+    pub fn kv_compare_and_put(
+        &mut self,
+        namespace: &[u8],
+        key: &[u8],
+        expected: &[u8],
+        value: &[u8],
+    ) -> Result<bool> {
+        let db = self.raw_ptr();
+        let status = |status| self.status(status);
+        kv_compare_and_put_raw(db, status, namespace, key, expected, value)
+    }
+
+    /// Delete one entry only when its current value equals `expected` byte
+    /// for byte. A missing key never matches. Returns whether it was deleted.
+    pub fn kv_compare_and_delete(
+        &mut self,
+        namespace: &[u8],
+        key: &[u8],
+        expected: &[u8],
+    ) -> Result<bool> {
+        let db = self.raw_ptr();
+        let status = |status| self.status(status);
+        kv_compare_and_delete_raw(db, status, namespace, key, expected)
     }
 
     pub fn begin(&mut self) -> Result<()> {

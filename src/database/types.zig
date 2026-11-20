@@ -134,6 +134,9 @@ pub const ObjectPutOptions = object_impl.ObjectPutOptions;
 pub const ObjectReaderError = object_impl.ObjectReaderError;
 
 pub const KvPutEntry = kv_impl.PutEntry;
+pub const KvScanOptions = kv_impl.ScanOptions;
+pub const KvEntry = kv_impl.Entry;
+pub const KvScanResult = kv_impl.ScanResult;
 
 pub const Error = zova_error.Error;
 
