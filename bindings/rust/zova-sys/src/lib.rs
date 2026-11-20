@@ -299,6 +299,69 @@ pub struct zova_kv_clear_namespace_request {
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
+pub struct zova_kv_entry {
+    pub key: zova_buffer,
+    pub value: zova_buffer,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_kv_scan_results {
+    pub items: *mut zova_kv_entry,
+    pub len: usize,
+    pub has_more: u8,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_kv_scan_request {
+    pub db: *mut zova_database,
+    pub ns: zova_kv_bytes,
+    pub prefix: zova_kv_bytes,
+    pub start: zova_kv_bytes,
+    pub has_start: u8,
+    pub end: zova_kv_bytes,
+    pub has_end: u8,
+    pub after: zova_kv_bytes,
+    pub has_after: u8,
+    pub limit: usize,
+    pub keys_only: u8,
+    pub out_results: *mut zova_kv_scan_results,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_kv_put_if_absent_request {
+    pub db: *mut zova_database,
+    pub ns: zova_kv_bytes,
+    pub key: zova_kv_bytes,
+    pub value: zova_kv_bytes,
+    pub out_applied: *mut u8,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_kv_compare_and_put_request {
+    pub db: *mut zova_database,
+    pub ns: zova_kv_bytes,
+    pub key: zova_kv_bytes,
+    pub expected: zova_kv_bytes,
+    pub value: zova_kv_bytes,
+    pub out_applied: *mut u8,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_kv_compare_and_delete_request {
+    pub db: *mut zova_database,
+    pub ns: zova_kv_bytes,
+    pub key: zova_kv_bytes,
+    pub expected: zova_kv_bytes,
+    pub out_applied: *mut u8,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
 pub struct zova_message {
     pub data: *mut c_char,
     pub len: usize,
@@ -2268,4 +2331,11 @@ extern "C" {
     pub fn zova_kv_clear_namespace(request: *const zova_kv_clear_namespace_request) -> zova_status;
     pub fn zova_kv_get_result_free(result: *mut zova_kv_get_result);
     pub fn zova_kv_get_many_results_free(results: *mut zova_kv_get_many_results);
+    pub fn zova_kv_scan(request: *const zova_kv_scan_request) -> zova_status;
+    pub fn zova_kv_scan_results_free(results: *mut zova_kv_scan_results);
+    pub fn zova_kv_put_if_absent(request: *const zova_kv_put_if_absent_request) -> zova_status;
+    pub fn zova_kv_compare_and_put(request: *const zova_kv_compare_and_put_request) -> zova_status;
+    pub fn zova_kv_compare_and_delete(
+        request: *const zova_kv_compare_and_delete_request,
+    ) -> zova_status;
 }

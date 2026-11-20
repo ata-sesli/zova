@@ -597,6 +597,64 @@ impl NativeDatabase {
     }
 
     #[napi]
+    pub fn kv_scan(
+        &self,
+        namespace: Uint8Array,
+        options: NativeKvScanOptions,
+    ) -> Result<NativeKvScanPage> {
+        let options = OwnedKvScanOptions::new(options)?;
+        let page = options
+            .scan(&self.state.database()?, namespace.as_ref())
+            .map_err(zova_error)?;
+        Ok(native_kv_scan_page(page))
+    }
+
+    #[napi]
+    pub fn kv_put_if_absent(
+        &self,
+        namespace: Uint8Array,
+        key: Uint8Array,
+        value: Uint8Array,
+    ) -> Result<bool> {
+        self.state
+            .database()?
+            .kv_put_if_absent(namespace.as_ref(), key.as_ref(), value.as_ref())
+            .map_err(zova_error)
+    }
+
+    #[napi]
+    pub fn kv_compare_and_put(
+        &self,
+        namespace: Uint8Array,
+        key: Uint8Array,
+        expected: Uint8Array,
+        value: Uint8Array,
+    ) -> Result<bool> {
+        self.state
+            .database()?
+            .kv_compare_and_put(
+                namespace.as_ref(),
+                key.as_ref(),
+                expected.as_ref(),
+                value.as_ref(),
+            )
+            .map_err(zova_error)
+    }
+
+    #[napi]
+    pub fn kv_compare_and_delete(
+        &self,
+        namespace: Uint8Array,
+        key: Uint8Array,
+        expected: Uint8Array,
+    ) -> Result<bool> {
+        self.state
+            .database()?
+            .kv_compare_and_delete(namespace.as_ref(), key.as_ref(), expected.as_ref())
+            .map_err(zova_error)
+    }
+
+    #[napi]
     pub fn listen(&self, channel: String) -> Result<NativeSubscription> {
         let database = self.state.register_child()?;
         match database.listen(&channel) {
@@ -621,4 +679,84 @@ impl NativeDatabase {
 pub struct NativeKvEntry {
     pub key: Uint8Array,
     pub value: Uint8Array,
+}
+
+#[napi(object)]
+pub struct NativeKvScanOptions {
+    pub prefix: Option<Uint8Array>,
+    pub start: Option<Uint8Array>,
+    pub end: Option<Uint8Array>,
+    pub after: Option<Uint8Array>,
+    pub limit: f64,
+    pub keys_only: Option<bool>,
+}
+
+#[napi(object)]
+pub struct NativeKvScanPage {
+    pub entries: Vec<NativeKvEntry>,
+    pub has_more: bool,
+}
+
+/// Scan options copied out of JavaScript memory, so they can cross threads.
+pub(crate) struct OwnedKvScanOptions {
+    prefix: Vec<u8>,
+    start: Option<Vec<u8>>,
+    end: Option<Vec<u8>>,
+    after: Option<Vec<u8>>,
+    limit: usize,
+    keys_only: bool,
+}
+
+impl OwnedKvScanOptions {
+    pub(crate) fn new(options: NativeKvScanOptions) -> Result<Self> {
+        let limit = options.limit;
+        if !limit.is_finite() || limit < 0.0 || limit.fract() != 0.0 || limit > usize::MAX as f64 {
+            return Err(invalid_argument_error(
+                "kv scan limit must be a non-negative integer",
+            ));
+        }
+        Ok(Self {
+            prefix: options
+                .prefix
+                .map(|bytes| bytes.to_vec())
+                .unwrap_or_default(),
+            start: options.start.map(|bytes| bytes.to_vec()),
+            end: options.end.map(|bytes| bytes.to_vec()),
+            after: options.after.map(|bytes| bytes.to_vec()),
+            limit: limit as usize,
+            keys_only: options.keys_only.unwrap_or(false),
+        })
+    }
+
+    pub(crate) fn scan(
+        &self,
+        database: &zova::SharedDatabase,
+        namespace: &[u8],
+    ) -> zova::Result<zova::KvScanPage> {
+        database.kv_scan(
+            namespace,
+            &zova::KvScanOptions {
+                prefix: &self.prefix,
+                start: self.start.as_deref(),
+                end: self.end.as_deref(),
+                after: self.after.as_deref(),
+                limit: self.limit,
+                keys_only: self.keys_only,
+            },
+        )
+    }
+}
+
+pub(crate) fn native_kv_scan_page(page: zova::KvScanPage) -> NativeKvScanPage {
+    NativeKvScanPage {
+        entries: page
+            .entries
+            .into_iter()
+            .map(|entry| NativeKvEntry {
+                key: Uint8Array::new(entry.key),
+                value: Uint8Array::new(entry.value),
+            })
+            .collect(),
+        has_more: page.has_more,
+    }
 }

@@ -63,6 +63,8 @@ export type {
   FormatCompatibilityName,
   FormatInfo,
   KvEntry,
+  KvScanOptions,
+  KvScanPage,
   OpenOptions,
   ReclaimedMember,
   ReclaimOptions,

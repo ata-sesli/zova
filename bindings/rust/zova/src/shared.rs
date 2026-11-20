@@ -18,8 +18,9 @@ use crate::graph::{
     GraphWalkOptions,
 };
 use crate::kv::{
-    kv_clear_namespace_raw, kv_count_raw, kv_delete_many_raw, kv_delete_raw, kv_get_many_raw,
-    kv_get_raw, kv_put_many_raw, kv_put_raw, KvEntry,
+    kv_clear_namespace_raw, kv_compare_and_delete_raw, kv_compare_and_put_raw, kv_count_raw,
+    kv_delete_many_raw, kv_delete_raw, kv_get_many_raw, kv_get_raw, kv_put_if_absent_raw,
+    kv_put_many_raw, kv_put_raw, kv_scan_raw, KvEntry, KvScanOptions, KvScanPage,
 };
 use crate::notification::{
     empty_notification, listen_raw, notify_raw, take_notification, Notification,
@@ -686,6 +687,51 @@ impl SharedDatabase {
         let db = self.inner.raw_ptr();
         let status = |status| self.inner.status_locked(status);
         kv_clear_namespace_raw(db, status, namespace)
+    }
+
+    /// Return one page of a namespace in ascending key byte order.
+    pub fn kv_scan(&self, namespace: &[u8], options: &KvScanOptions<'_>) -> Result<KvScanPage> {
+        let _guard = self.inner.enter()?;
+        let db = self.inner.raw_ptr();
+        let status = |status| self.inner.status_locked(status);
+        kv_scan_raw(db, status, namespace, options)
+    }
+
+    /// Insert one entry only when its key is absent. Returns whether it was written.
+    pub fn kv_put_if_absent(&self, namespace: &[u8], key: &[u8], value: &[u8]) -> Result<bool> {
+        let _guard = self.inner.enter()?;
+        let db = self.inner.raw_ptr();
+        let status = |status| self.inner.status_locked(status);
+        kv_put_if_absent_raw(db, status, namespace, key, value)
+    }
+
+    /// Replace one value only when the current value equals `expected` byte
+    /// for byte. A missing key never matches. Returns whether it was written.
+    pub fn kv_compare_and_put(
+        &self,
+        namespace: &[u8],
+        key: &[u8],
+        expected: &[u8],
+        value: &[u8],
+    ) -> Result<bool> {
+        let _guard = self.inner.enter()?;
+        let db = self.inner.raw_ptr();
+        let status = |status| self.inner.status_locked(status);
+        kv_compare_and_put_raw(db, status, namespace, key, expected, value)
+    }
+
+    /// Delete one entry only when its current value equals `expected` byte
+    /// for byte. A missing key never matches. Returns whether it was deleted.
+    pub fn kv_compare_and_delete(
+        &self,
+        namespace: &[u8],
+        key: &[u8],
+        expected: &[u8],
+    ) -> Result<bool> {
+        let _guard = self.inner.enter()?;
+        let db = self.inner.raw_ptr();
+        let status = |status| self.inner.status_locked(status);
+        kv_compare_and_delete_raw(db, status, namespace, key, expected)
     }
 
     pub fn read_object_range(&self, id: ObjectId, offset: u64, buffer: &mut [u8]) -> Result<usize> {

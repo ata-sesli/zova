@@ -14,6 +14,56 @@ impl<'a> KvEntry<'a> {
     }
 }
 
+/// Selects one page of a key-value namespace for `kv_scan`.
+///
+/// Keys compare as raw bytes: a shorter key sorts before every longer key it
+/// prefixes. Every given bound applies. Continue a scan by setting `after` to
+/// the last key of the previous page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KvScanOptions<'a> {
+    /// Only keys that begin with these bytes. Empty matches every key.
+    pub prefix: &'a [u8],
+    /// Inclusive lower bound.
+    pub start: Option<&'a [u8]>,
+    /// Exclusive upper bound.
+    pub end: Option<&'a [u8]>,
+    /// Continue strictly after this key.
+    pub after: Option<&'a [u8]>,
+    /// Most entries returned; must be greater than zero.
+    pub limit: usize,
+    /// Return keys only; every value is then empty.
+    pub keys_only: bool,
+}
+
+impl<'a> KvScanOptions<'a> {
+    /// A scan of the whole namespace returning at most `limit` entries.
+    pub fn new(limit: usize) -> Self {
+        Self {
+            prefix: &[],
+            start: None,
+            end: None,
+            after: None,
+            limit,
+            keys_only: false,
+        }
+    }
+}
+
+/// One owned scanned key-value entry. `value` is empty for keys-only scans.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KvScanEntry {
+    pub key: Vec<u8>,
+    pub value: Vec<u8>,
+}
+
+/// One scan page in ascending key byte order. `has_more` is true when at
+/// least one further entry matches the same options.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KvScanPage {
+    pub entries: Vec<KvScanEntry>,
+    pub has_more: bool,
+}
+
 fn raw_bytes(data: &[u8]) -> zova_sys::zova_kv_bytes {
     zova_sys::zova_kv_bytes {
         data: data.as_ptr(),
@@ -177,6 +227,108 @@ pub(crate) fn kv_clear_namespace_raw(
         ns: raw_bytes(namespace),
     };
     status(unsafe { zova_sys::zova_kv_clear_namespace(&request) })
+}
+
+pub(crate) fn kv_scan_raw(
+    db: *mut zova_sys::zova_database,
+    status: impl FnOnce(i32) -> Result<()>,
+    namespace: &[u8],
+    options: &KvScanOptions<'_>,
+) -> Result<KvScanPage> {
+    let optional = |bytes: Option<&[u8]>| (raw_bytes(bytes.unwrap_or(&[])), bytes.is_some() as u8);
+    let (start, has_start) = optional(options.start);
+    let (end, has_end) = optional(options.end);
+    let (after, has_after) = optional(options.after);
+    let mut results = zova_sys::zova_kv_scan_results {
+        items: ptr::null_mut(),
+        len: 0,
+        has_more: 0,
+    };
+    let request = zova_sys::zova_kv_scan_request {
+        db,
+        ns: raw_bytes(namespace),
+        prefix: raw_bytes(options.prefix),
+        start,
+        has_start,
+        end,
+        has_end,
+        after,
+        has_after,
+        limit: options.limit,
+        keys_only: options.keys_only as u8,
+        out_results: &mut results,
+    };
+    status(unsafe { zova_sys::zova_kv_scan(&request) })?;
+    let mut entries = Vec::with_capacity(results.len);
+    for index in 0..results.len {
+        let item = unsafe { &*results.items.add(index) };
+        entries.push(KvScanEntry {
+            key: read_owned_buffer(item.key),
+            value: read_owned_buffer(item.value),
+        });
+    }
+    let has_more = results.has_more != 0;
+    unsafe { zova_sys::zova_kv_scan_results_free(&mut results) };
+    Ok(KvScanPage { entries, has_more })
+}
+
+pub(crate) fn kv_put_if_absent_raw(
+    db: *mut zova_sys::zova_database,
+    status: impl FnOnce(i32) -> Result<()>,
+    namespace: &[u8],
+    key: &[u8],
+    value: &[u8],
+) -> Result<bool> {
+    let mut applied = 0;
+    let request = zova_sys::zova_kv_put_if_absent_request {
+        db,
+        ns: raw_bytes(namespace),
+        key: raw_bytes(key),
+        value: raw_bytes(value),
+        out_applied: &mut applied,
+    };
+    status(unsafe { zova_sys::zova_kv_put_if_absent(&request) })?;
+    Ok(applied != 0)
+}
+
+pub(crate) fn kv_compare_and_put_raw(
+    db: *mut zova_sys::zova_database,
+    status: impl FnOnce(i32) -> Result<()>,
+    namespace: &[u8],
+    key: &[u8],
+    expected: &[u8],
+    value: &[u8],
+) -> Result<bool> {
+    let mut applied = 0;
+    let request = zova_sys::zova_kv_compare_and_put_request {
+        db,
+        ns: raw_bytes(namespace),
+        key: raw_bytes(key),
+        expected: raw_bytes(expected),
+        value: raw_bytes(value),
+        out_applied: &mut applied,
+    };
+    status(unsafe { zova_sys::zova_kv_compare_and_put(&request) })?;
+    Ok(applied != 0)
+}
+
+pub(crate) fn kv_compare_and_delete_raw(
+    db: *mut zova_sys::zova_database,
+    status: impl FnOnce(i32) -> Result<()>,
+    namespace: &[u8],
+    key: &[u8],
+    expected: &[u8],
+) -> Result<bool> {
+    let mut applied = 0;
+    let request = zova_sys::zova_kv_compare_and_delete_request {
+        db,
+        ns: raw_bytes(namespace),
+        key: raw_bytes(key),
+        expected: raw_bytes(expected),
+        out_applied: &mut applied,
+    };
+    status(unsafe { zova_sys::zova_kv_compare_and_delete(&request) })?;
+    Ok(applied != 0)
 }
 
 fn read_owned_buffer(buffer: zova_sys::zova_buffer) -> Vec<u8> {

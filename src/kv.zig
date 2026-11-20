@@ -35,6 +35,46 @@ pub const PutEntry = struct {
     value: []const u8,
 };
 
+/// Selects one page of a namespace for `scan`. All bounds compare raw key
+/// bytes: a shorter key sorts before every longer key it is a prefix of.
+pub const ScanOptions = struct {
+    /// Only keys that begin with these bytes. Empty matches every key.
+    prefix: []const u8 = "",
+    /// Inclusive lower bound, or null for no lower bound.
+    start: ?[]const u8 = null,
+    /// Exclusive upper bound, or null for no upper bound.
+    end: ?[]const u8 = null,
+    /// Continue strictly after this key: pass the last key of the previous page.
+    after: ?[]const u8 = null,
+    /// Most entries returned; must be greater than zero.
+    limit: usize,
+    /// Return keys only; every `Entry.value` is then empty and unread.
+    keys_only: bool = false,
+};
+
+/// One caller-owned scanned entry.
+pub const Entry = struct {
+    key: []u8,
+    value: []u8,
+
+    pub fn deinit(self: *const Entry, allocator: std.mem.Allocator) void {
+        allocator.free(self.key);
+        allocator.free(self.value);
+    }
+};
+
+/// One caller-owned scan page in ascending key byte order. `has_more` is
+/// true when at least one further entry matches the same options.
+pub const ScanResult = struct {
+    entries: []Entry,
+    has_more: bool,
+
+    pub fn deinit(self: *const ScanResult, allocator: std.mem.Allocator) void {
+        for (self.entries) |*entry| entry.deinit(allocator);
+        allocator.free(self.entries);
+    }
+};
+
 /// How an atomic key-value batch scopes its writes.
 ///
 /// An operation that owns the transaction uses a real SQLite transaction. An
@@ -310,7 +350,130 @@ pub const Database = struct {
         try finishMutation(self, scope);
         committed = true;
     }
+
+    /// Return one page of a namespace in ascending key byte order.
+    ///
+    /// The page holds at most `options.limit` entries matching every given
+    /// bound. Each call prepares, reads and finalizes its own statement and
+    /// holds nothing between pages; continue by passing the last returned key
+    /// as `after`. Writes between pages are visible to later pages.
+    pub fn scan(self: *Database, allocator: std.mem.Allocator, namespace: []const u8, options: ScanOptions) Error!ScanResult {
+        if (options.limit == 0) return error.InvalidArgument;
+        const query_limit = std.math.cast(i64, std.math.add(usize, options.limit, 1) catch return error.InvalidArgument) orelse
+            return error.InvalidArgument;
+
+        // Reduce every bound to one inclusive lower and one exclusive upper key,
+        // so the statement is a single range read on the primary key.
+        var lower: []const u8 = options.start orelse "";
+        if (std.mem.order(u8, options.prefix, lower) == .gt) lower = options.prefix;
+        var after_successor: []u8 = &.{};
+        defer allocator.free(after_successor);
+        if (options.after) |after| {
+            // The smallest key greater than `after` is `after` followed by 0x00.
+            after_successor = try allocator.alloc(u8, after.len + 1);
+            @memcpy(after_successor[0..after.len], after);
+            after_successor[after.len] = 0;
+            if (std.mem.order(u8, after_successor, lower) == .gt) lower = after_successor;
+        }
+        const prefix_end = try prefixUpperBound(allocator, options.prefix);
+        defer if (prefix_end) |bound| allocator.free(bound);
+        var upper = options.end;
+        if (prefix_end) |bound| {
+            if (upper == null or std.mem.order(u8, bound, upper.?) == .lt) upper = bound;
+        }
+        if (upper) |bound| {
+            if (std.mem.order(u8, lower, bound) != .lt) {
+                return .{ .entries = try allocator.alloc(Entry, 0), .has_more = false };
+            }
+        }
+
+        var stmt = try self.sqlite_db.prepare(switch (@as(u2, @intFromBool(options.keys_only)) << 1 | @intFromBool(upper != null)) {
+            0b00 => "select key, value from _zova_kv where namespace = ?1 and key >= ?2 order by key limit ?4",
+            0b01 => "select key, value from _zova_kv where namespace = ?1 and key >= ?2 and key < ?3 order by key limit ?4",
+            0b10 => "select key from _zova_kv where namespace = ?1 and key >= ?2 order by key limit ?4",
+            0b11 => "select key from _zova_kv where namespace = ?1 and key >= ?2 and key < ?3 order by key limit ?4",
+        });
+        defer stmt.deinit();
+        try stmt.bindBlobBorrowed(1, namespace);
+        try stmt.bindBlobBorrowed(2, lower);
+        if (upper) |bound| try stmt.bindBlobBorrowed(3, bound);
+        try stmt.bindInt64(4, query_limit);
+
+        var entries: std.ArrayList(Entry) = .empty;
+        errdefer {
+            for (entries.items) |*entry| entry.deinit(allocator);
+            entries.deinit(allocator);
+        }
+        var has_more = false;
+        while ((try stmt.step()) == .row) {
+            if (entries.items.len == options.limit) {
+                has_more = true;
+                break;
+            }
+            const key = try allocator.dupe(u8, stmt.columnBlob(0));
+            errdefer allocator.free(key);
+            const value = if (options.keys_only) try allocator.alloc(u8, 0) else try allocator.dupe(u8, stmt.columnBlob(1));
+            errdefer allocator.free(value);
+            try entries.append(allocator, .{ .key = key, .value = value });
+        }
+        return .{ .entries = try entries.toOwnedSlice(allocator), .has_more = has_more };
+    }
+
+    /// Insert one entry only when its key is absent. Returns whether it was written.
+    pub fn putIfAbsent(self: *Database, namespace: []const u8, key: []const u8, value: []const u8) Error!bool {
+        return self.conditionalWrite(
+            "insert into _zova_kv (namespace, key, value) values (?1, ?2, ?3) on conflict(namespace, key) do nothing",
+            &.{ namespace, key, value },
+        );
+    }
+
+    /// Replace one value only when the current value equals `expected`
+    /// byte for byte. A missing key never matches. Returns whether it was written.
+    pub fn compareAndPut(self: *Database, namespace: []const u8, key: []const u8, expected: []const u8, value: []const u8) Error!bool {
+        return self.conditionalWrite(
+            "update _zova_kv set value = ?4 where namespace = ?1 and key = ?2 and value = ?3",
+            &.{ namespace, key, expected, value },
+        );
+    }
+
+    /// Delete one entry only when its current value equals `expected` byte
+    /// for byte. A missing key never matches. Returns whether it was deleted.
+    pub fn compareAndDelete(self: *Database, namespace: []const u8, key: []const u8, expected: []const u8) Error!bool {
+        return self.conditionalWrite(
+            "delete from _zova_kv where namespace = ?1 and key = ?2 and value = ?3",
+            &.{ namespace, key, expected },
+        );
+    }
+
+    /// One conditional statement, atomic like every other KV mutation; its
+    /// condition and write are evaluated by SQLite as a single step.
+    fn conditionalWrite(self: *Database, comptime sql: [:0]const u8, arguments: []const []const u8) Error!bool {
+        const scope = try beginMutation(self);
+        var committed = false;
+        errdefer if (!committed) rollbackMutation(self, scope) catch {};
+
+        var stmt = try self.sqlite_db.prepare(sql);
+        defer stmt.deinit();
+        for (arguments, 1..) |argument, index| try stmt.bindBlob(@intCast(index), argument);
+        try stmt.expectDone();
+        const applied = self.sqlite_db.changes() == 1;
+
+        try finishMutation(self, scope);
+        committed = true;
+        return applied;
+    }
 };
+
+/// The smallest key greater than every key starting with `prefix`, or null
+/// when no such key exists (an empty prefix or one made only of 0xff bytes).
+fn prefixUpperBound(allocator: std.mem.Allocator, prefix: []const u8) Error!?[]u8 {
+    var end = prefix.len;
+    while (end > 0 and prefix[end - 1] == 0xff) end -= 1;
+    if (end == 0) return null;
+    const bound = try allocator.dupe(u8, prefix[0..end]);
+    bound[end - 1] += 1;
+    return bound;
+}
 
 fn validateBatchEntries(entries: []const PutEntry) Error!void {
     for (entries) |entry| {

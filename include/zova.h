@@ -1365,6 +1365,73 @@ typedef struct zova_kv_clear_namespace_request {
     zova_kv_bytes ns;
 } zova_kv_clear_namespace_request;
 
+/* Owned scanned entry. value is empty for keys-only scans. */
+typedef struct zova_kv_entry {
+    zova_buffer key;
+    zova_buffer value;
+} zova_kv_entry;
+
+/* Owned scan page in ascending key byte order. has_more is 1 when at least
+ * one further entry matches the same request. Free with
+ * zova_kv_scan_results_free. */
+typedef struct zova_kv_scan_results {
+    zova_kv_entry *items;
+    size_t len;
+    uint8_t has_more;
+} zova_kv_scan_results;
+
+/*
+ * One page of a namespace. Keys compare as raw bytes; a shorter key sorts
+ * before every longer key it prefixes. prefix (empty matches every key),
+ * start (inclusive, when has_start), end (exclusive, when has_end) and after
+ * (strictly greater, when has_after) all apply together. Continue a scan by
+ * passing the last returned key as after. limit must be greater than zero.
+ * Each call holds no statement afterwards; writes between pages are visible
+ * to later pages.
+ */
+typedef struct zova_kv_scan_request {
+    zova_database *db;
+    zova_kv_bytes ns;
+    zova_kv_bytes prefix;
+    zova_kv_bytes start;
+    uint8_t has_start;
+    zova_kv_bytes end;
+    uint8_t has_end;
+    zova_kv_bytes after;
+    uint8_t has_after;
+    size_t limit;
+    uint8_t keys_only;
+    zova_kv_scan_results *out_results;
+} zova_kv_scan_request;
+
+/* Conditional writes set *out_applied to 1 when they wrote and 0 otherwise.
+ * expected must equal the current value byte for byte; a missing key never
+ * matches it. */
+typedef struct zova_kv_put_if_absent_request {
+    zova_database *db;
+    zova_kv_bytes ns;
+    zova_kv_bytes key;
+    zova_kv_bytes value;
+    uint8_t *out_applied;
+} zova_kv_put_if_absent_request;
+
+typedef struct zova_kv_compare_and_put_request {
+    zova_database *db;
+    zova_kv_bytes ns;
+    zova_kv_bytes key;
+    zova_kv_bytes expected;
+    zova_kv_bytes value;
+    uint8_t *out_applied;
+} zova_kv_compare_and_put_request;
+
+typedef struct zova_kv_compare_and_delete_request {
+    zova_database *db;
+    zova_kv_bytes ns;
+    zova_kv_bytes key;
+    zova_kv_bytes expected;
+    uint8_t *out_applied;
+} zova_kv_compare_and_delete_request;
+
 typedef struct zova_vector_collection_create_request {
     zova_database *db;
     const char *name;
@@ -2129,7 +2196,7 @@ zova_status zova_object_seekable_reader_destroy(const zova_object_seekable_reade
  * join an active Zova transaction or own one atomic transaction. Callers
  * never retain Zova memory and Zova never retains caller input memory.
  * Returned values are Zova-owned; free with zova_kv_get_result_free /
- * zova_kv_get_many_results_free.
+ * zova_kv_get_many_results_free / zova_kv_scan_results_free.
  */
 zova_status zova_kv_get(const zova_kv_get_request *request);
 zova_status zova_kv_get_many(const zova_kv_get_many_request *request);
@@ -2141,6 +2208,11 @@ zova_status zova_kv_count(const zova_kv_count_request *request);
 zova_status zova_kv_clear_namespace(const zova_kv_clear_namespace_request *request);
 void zova_kv_get_result_free(zova_kv_get_result *result);
 void zova_kv_get_many_results_free(zova_kv_get_many_results *results);
+zova_status zova_kv_scan(const zova_kv_scan_request *request);
+void zova_kv_scan_results_free(zova_kv_scan_results *results);
+zova_status zova_kv_put_if_absent(const zova_kv_put_if_absent_request *request);
+zova_status zova_kv_compare_and_put(const zova_kv_compare_and_put_request *request);
+zova_status zova_kv_compare_and_delete(const zova_kv_compare_and_delete_request *request);
 
 /*
  * Native vector operations.

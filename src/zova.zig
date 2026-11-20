@@ -208,6 +208,9 @@ pub const ObjectPutOptions = @import("database/types.zig").ObjectPutOptions;
 pub const ObjectReaderError = @import("database/types.zig").ObjectReaderError;
 
 pub const KvPutEntry = @import("database/types.zig").KvPutEntry;
+pub const KvScanOptions = @import("database/types.zig").KvScanOptions;
+pub const KvEntry = @import("database/types.zig").KvEntry;
+pub const KvScanResult = @import("database/types.zig").KvScanResult;
 
 pub const ObjectReader = struct {
     inner: object_impl.ObjectReader,
@@ -2442,6 +2445,34 @@ pub const Database = struct {
     pub fn kvClearNamespace(self: *Database, namespace: []const u8) Error!void {
         var kv = self.kvDatabase();
         return kv.clearNamespace(namespace);
+    }
+
+    /// Return one page of a transactional key-value namespace in ascending
+    /// key byte order. See `KvScanOptions` for bounds and continuation.
+    pub fn kvScan(self: *Database, allocator: std.mem.Allocator, namespace: []const u8, options: kv_impl.ScanOptions) Error!kv_impl.ScanResult {
+        var kv = self.kvDatabase();
+        return kv.scan(allocator, namespace, options);
+    }
+
+    /// Insert one transactional key-value entry only when its key is absent.
+    /// Returns whether the entry was written.
+    pub fn kvPutIfAbsent(self: *Database, namespace: []const u8, key: []const u8, value: []const u8) Error!bool {
+        var kv = self.kvDatabase();
+        return kv.putIfAbsent(namespace, key, value);
+    }
+
+    /// Replace one transactional key-value entry only when its current value
+    /// equals `expected` byte for byte. Returns whether the entry was written.
+    pub fn kvCompareAndPut(self: *Database, namespace: []const u8, key: []const u8, expected: []const u8, value: []const u8) Error!bool {
+        var kv = self.kvDatabase();
+        return kv.compareAndPut(namespace, key, expected, value);
+    }
+
+    /// Delete one transactional key-value entry only when its current value
+    /// equals `expected` byte for byte. Returns whether the entry was deleted.
+    pub fn kvCompareAndDelete(self: *Database, namespace: []const u8, key: []const u8, expected: []const u8) Error!bool {
+        var kv = self.kvDatabase();
+        return kv.compareAndDelete(namespace, key, expected);
     }
 
     fn kvDatabase(self: *Database) kv_impl.Database {

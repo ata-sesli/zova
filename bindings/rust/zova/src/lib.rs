@@ -33,7 +33,7 @@ pub use graph::{
     GraphNeighborDirection, GraphNeighborsOptions, GraphNode, GraphNodeInput, GraphTargetType,
     GraphWalkItem, GraphWalkOptions, DEFAULT_GRAPH_NAME,
 };
-pub use kv::KvEntry;
+pub use kv::{KvEntry, KvScanEntry, KvScanOptions, KvScanPage};
 pub use notification::{Notification, Subscription};
 pub use object::{
     object_chunk_id, object_id, ObjectChunkId, ObjectId, ObjectManifest, ObjectManifestChunk,

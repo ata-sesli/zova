@@ -745,3 +745,167 @@ fn testingExpectTableCount(db: *sqlite.Database, table_name: []const u8, expecte
     try std.testing.expectEqual(sqlite.Step.row, try count.step());
     try std.testing.expectEqual(expected, count.columnInt64(0));
 }
+
+fn expectScanKeys(result: kv_impl.ScanResult, expected: []const []const u8, has_more: bool) !void {
+    try std.testing.expectEqual(expected.len, result.entries.len);
+    for (expected, result.entries) |key, entry| try std.testing.expectEqualSlices(u8, key, entry.key);
+    try std.testing.expectEqual(has_more, result.has_more);
+}
+
+fn scanKeys(db: *Database, namespace: []const u8, options: kv_impl.ScanOptions, expected: []const []const u8, has_more: bool) !void {
+    const result = try db.kvScan(std.testing.allocator, namespace, options);
+    defer result.deinit(std.testing.allocator);
+    try expectScanKeys(result, expected, has_more);
+}
+
+test "kv scan returns entries in key byte order with prefix and bounds" {
+    var db = try Database.createMemory();
+    defer db.deinit();
+    const keys = [_][]const u8{ "b", "", "a\xff", "a", "ab", "a\x00", "a\xff\xff", "b\x00", "c" };
+    for (keys) |key| try db.kvPut("ns", key, key);
+    try db.kvPut("other", "a", "elsewhere");
+    try db.kvPut("ns\x00", "a", "elsewhere");
+
+    // Byte order: a key sorts before every longer key it prefixes.
+    const result = try db.kvScan(std.testing.allocator, "ns", .{ .limit = 100 });
+    defer result.deinit(std.testing.allocator);
+    try expectScanKeys(result, &.{ "", "a", "a\x00", "ab", "a\xff", "a\xff\xff", "b", "b\x00", "c" }, false);
+    for (result.entries) |entry| try std.testing.expectEqualSlices(u8, entry.key, entry.value);
+
+    try scanKeys(&db, "ns", .{ .prefix = "a", .limit = 100 }, &.{ "a", "a\x00", "ab", "a\xff", "a\xff\xff" }, false);
+    try scanKeys(&db, "ns", .{ .prefix = "a\xff", .limit = 100 }, &.{ "a\xff", "a\xff\xff" }, false);
+    try scanKeys(&db, "ns", .{ .prefix = "\xff", .limit = 100 }, &.{}, false);
+    try scanKeys(&db, "ns", .{ .start = "a\x00", .end = "b", .limit = 100 }, &.{ "a\x00", "ab", "a\xff", "a\xff\xff" }, false);
+    try scanKeys(&db, "ns", .{ .start = "b", .limit = 100 }, &.{ "b", "b\x00", "c" }, false);
+    try scanKeys(&db, "ns", .{ .end = "a\x00", .limit = 100 }, &.{ "", "a" }, false);
+    try scanKeys(&db, "ns", .{ .prefix = "a", .start = "ab", .end = "a\xff\xff", .limit = 100 }, &.{ "ab", "a\xff" }, false);
+    try scanKeys(&db, "ns", .{ .start = "b", .end = "b", .limit = 100 }, &.{}, false);
+    try scanKeys(&db, "ns", .{ .start = "c", .end = "a", .limit = 100 }, &.{}, false);
+    try scanKeys(&db, "missing", .{ .limit = 100 }, &.{}, false);
+    try std.testing.expectError(error.InvalidArgument, db.kvScan(std.testing.allocator, "ns", .{ .limit = 0 }));
+    try std.testing.expectError(error.InvalidArgument, db.kvScan(std.testing.allocator, "ns", .{ .limit = std.math.maxInt(usize) }));
+}
+
+test "kv scan pages continue after the last key and keys_only reads no values" {
+    var db = try Database.createMemory();
+    defer db.deinit();
+    var key_buffer: [2]u8 = undefined;
+    for (0..25) |index| {
+        key_buffer = .{ 'k', @intCast(index) };
+        try db.kvPut("ns", &key_buffer, "value");
+    }
+
+    var seen: usize = 0;
+    var after: ?[]u8 = null;
+    defer if (after) |key| std.testing.allocator.free(key);
+    while (true) {
+        const page = try db.kvScan(std.testing.allocator, "ns", .{ .prefix = "k", .after = after, .limit = 10, .keys_only = true });
+        defer page.deinit(std.testing.allocator);
+        for (page.entries) |entry| {
+            try std.testing.expectEqualSlices(u8, &.{ 'k', @intCast(seen) }, entry.key);
+            try std.testing.expectEqual(@as(usize, 0), entry.value.len);
+            seen += 1;
+        }
+        try std.testing.expectEqual(seen < 25, page.has_more);
+        if (!page.has_more) break;
+        if (after) |key| std.testing.allocator.free(key);
+        after = try std.testing.allocator.dupe(u8, page.entries[page.entries.len - 1].key);
+    }
+    try std.testing.expectEqual(@as(usize, 25), seen);
+
+    // A page that ends exactly at the last entry reports no more entries.
+    try scanKeys(&db, "ns", .{ .start = &.{ 'k', 20 }, .limit = 5 }, &.{ &.{ 'k', 20 }, &.{ 'k', 21 }, &.{ 'k', 22 }, &.{ 'k', 23 }, &.{ 'k', 24 } }, false);
+    // `after` an absent key continues from the next present one.
+    try scanKeys(&db, "ns", .{ .after = "k\x02\x00", .limit = 1 }, &.{&.{ 'k', 3 }}, true);
+    try scanKeys(&db, "ns", .{ .after = "k\x18", .limit = 1 }, &.{}, false);
+}
+
+test "kv scan is a primary-key range read and retains no statement" {
+    var db = try Database.createMemory();
+    defer db.deinit();
+    for ([_][]const u8{
+        "select key, value from _zova_kv where namespace = ?1 and key >= ?2 and key < ?3 order by key limit ?4",
+        "select key from _zova_kv where namespace = ?1 and key >= ?2 order by key limit ?4",
+    }) |sql| {
+        const explain = try std.fmt.allocPrintSentinel(std.testing.allocator, "explain query plan {s}", .{sql}, 0);
+        defer std.testing.allocator.free(explain);
+        var stmt = try db.sqlite_db.prepare(explain);
+        defer stmt.deinit();
+        var plan: std.ArrayList(u8) = .empty;
+        defer plan.deinit(std.testing.allocator);
+        while ((try stmt.step()) == .row) {
+            try plan.appendSlice(std.testing.allocator, stmt.columnText(3));
+            try plan.append(std.testing.allocator, '\n');
+        }
+        try std.testing.expect(std.mem.indexOf(u8, plan.items, "SEARCH _zova_kv USING PRIMARY KEY (namespace=? AND key>?") != null);
+        try std.testing.expect(std.mem.indexOf(u8, plan.items, "TEMP B-TREE") == null);
+    }
+
+    try db.kvPut("ns", "a", "1");
+    const page = try db.kvScan(std.testing.allocator, "ns", .{ .limit = 1 });
+    page.deinit(std.testing.allocator);
+    var stmt = sqlite.c.sqlite3_next_stmt(db.sqlite_db.handle, null);
+    while (stmt) |handle| : (stmt = sqlite.c.sqlite3_next_stmt(db.sqlite_db.handle, handle)) {
+        try std.testing.expect(std.mem.indexOf(u8, std.mem.span(sqlite.c.sqlite3_sql(handle)), "order by key") == null);
+    }
+}
+
+test "kv conditional writes report whether they applied" {
+    var db = try Database.createMemory();
+    defer db.deinit();
+
+    try std.testing.expect(try db.kvPutIfAbsent("ns", "k", "first"));
+    try std.testing.expect(!try db.kvPutIfAbsent("ns", "k", "second"));
+    try std.testing.expect(try db.kvPutIfAbsent("other", "k", "isolated"));
+    var value = try db.kvGet(std.testing.allocator, "ns", "k");
+    try std.testing.expectEqualStrings("first", value.value);
+    value.deinit(std.testing.allocator);
+
+    try std.testing.expect(!try db.kvCompareAndPut("ns", "k", "stale", "lost"));
+    try std.testing.expect(!try db.kvCompareAndPut("ns", "missing", "", "lost"));
+    try std.testing.expect(!try db.kvCompareAndPut("ns", "k", "firs", "lost"));
+    try std.testing.expect(try db.kvCompareAndPut("ns", "k", "first", ""));
+    // An empty value is a zero-length blob that compares equal to an empty expected value.
+    try std.testing.expect(try db.kvCompareAndPut("ns", "k", "", "third"));
+    value = try db.kvGet(std.testing.allocator, "ns", "k");
+    try std.testing.expectEqualStrings("third", value.value);
+    value.deinit(std.testing.allocator);
+
+    try std.testing.expect(!try db.kvCompareAndDelete("ns", "k", "first"));
+    try std.testing.expect(!try db.kvCompareAndDelete("ns", "missing", ""));
+    try std.testing.expect(try db.kvCompareAndDelete("ns", "k", "third"));
+    try std.testing.expect(!try db.kvCompareAndDelete("ns", "k", "third"));
+    try std.testing.expectEqual(@as(u64, 0), try db.kvCount("ns"));
+    try std.testing.expectEqual(@as(u64, 1), try db.kvCount("other"));
+    try std.testing.expect(!try db.kvCompareAndPut("ns", "k", "third", "revived"));
+    try std.testing.expect(try db.kvPutIfAbsent("ns", "k", ""));
+}
+
+test "kv conditional writes join a caller transaction and roll back only themselves" {
+    var db = try Database.createMemory();
+    defer db.deinit();
+    try db.kvPut("ns", "k", "v1");
+
+    try db.begin();
+    try db.kvPut("ns", "caller", "kept");
+    try std.testing.expect(try db.kvCompareAndPut("ns", "k", "v1", "v2"));
+    try db.exec(
+        \\create trigger kv_cas_fail before update on _zova_kv
+        \\when new.value = cast('boom' as blob)
+        \\begin select raise(abort,'injected kv cas failure'); end
+    );
+    try std.testing.expectError(error.Constraint, db.kvCompareAndPut("ns", "k", "v2", "boom"));
+    try std.testing.expect(try db.kvPutIfAbsent("ns", "new", "n"));
+    try db.commit();
+
+    var value = try db.kvGet(std.testing.allocator, "ns", "k");
+    try std.testing.expectEqualStrings("v2", value.value);
+    value.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 3), try db.kvCount("ns"));
+
+    try db.begin();
+    try std.testing.expect(try db.kvCompareAndDelete("ns", "k", "v2"));
+    try std.testing.expect(!try db.kvPutIfAbsent("ns", "caller", "replaced"));
+    try db.rollback();
+    try std.testing.expectEqual(@as(u64, 3), try db.kvCount("ns"));
+}

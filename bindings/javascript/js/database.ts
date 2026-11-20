@@ -25,7 +25,7 @@ import { Statement } from "./statement.js";
 import { Subscription } from "./subscription.js";
 import { nativeExtensionOptions, reclaimedMember } from "./types.js";
 import type {
-  ExtensionInfo, ExtensionOptions, FormatInfo, KvEntry, OpenOptions, ReclaimedMember,
+  ExtensionInfo, ExtensionOptions, FormatInfo, KvEntry, KvScanOptions, KvScanPage, OpenOptions, ReclaimedMember,
   ReclaimOptions,
 } from "./types.js";
 import type {
@@ -311,6 +311,37 @@ export class Database {
 
   kvClearNamespace(namespace: Uint8Array): void {
     callNative(() => this.#native.kvClearNamespace(namespace));
+  }
+
+  /** Return one page of a namespace in ascending key byte order. */
+  kvScan(namespace: Uint8Array, options: KvScanOptions): KvScanPage {
+    return callNative(() => this.#native.kvScan(namespace, { ...options }));
+  }
+
+  /** Insert one entry only when its key is absent. Returns whether it was written. */
+  kvPutIfAbsent(namespace: Uint8Array, key: Uint8Array, value: Uint8Array): boolean {
+    return callNative(() => this.#native.kvPutIfAbsent(namespace, key, value));
+  }
+
+  /**
+   * Replace one value only when the current value equals `expected` byte for
+   * byte. A missing key never matches. Returns whether it was written.
+   */
+  kvCompareAndPut(
+    namespace: Uint8Array,
+    key: Uint8Array,
+    expected: Uint8Array,
+    value: Uint8Array,
+  ): boolean {
+    return callNative(() => this.#native.kvCompareAndPut(namespace, key, expected, value));
+  }
+
+  /**
+   * Delete one entry only when its current value equals `expected` byte for
+   * byte. A missing key never matches. Returns whether it was deleted.
+   */
+  kvCompareAndDelete(namespace: Uint8Array, key: Uint8Array, expected: Uint8Array): boolean {
+    return callNative(() => this.#native.kvCompareAndDelete(namespace, key, expected));
   }
 
   listen(channel: string): Subscription {

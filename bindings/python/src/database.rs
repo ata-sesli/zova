@@ -899,6 +899,87 @@ impl PyDatabase {
             .map_err(zova_error)
     }
 
+    /// Return one page of a namespace in ascending key byte order as
+    /// `(entries, has_more)`, where entries is a list of `(key, value)` pairs.
+    ///
+    /// Keys compare as raw bytes: a shorter key sorts before every longer key
+    /// it prefixes. `start` is inclusive, `end` exclusive, and `after` skips
+    /// through the given key; pass the last returned key as `after` to
+    /// continue. Every value is `b""` when `keys_only` is true.
+    #[pyo3(signature = (namespace, *, limit, prefix = Vec::new(), start = None, end = None, after = None, keys_only = false))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn kv_scan<'py>(
+        &mut self,
+        py: Python<'py>,
+        namespace: Vec<u8>,
+        limit: usize,
+        prefix: Vec<u8>,
+        start: Option<Vec<u8>>,
+        end: Option<Vec<u8>>,
+        after: Option<Vec<u8>>,
+        keys_only: bool,
+    ) -> PyResult<(Vec<(Bound<'py, PyBytes>, Bound<'py, PyBytes>)>, bool)> {
+        let page = self
+            .db_mut()?
+            .kv_scan(
+                &namespace,
+                &zova_rust::KvScanOptions {
+                    prefix: &prefix,
+                    start: start.as_deref(),
+                    end: end.as_deref(),
+                    after: after.as_deref(),
+                    limit,
+                    keys_only,
+                },
+            )
+            .map_err(zova_error)?;
+        let entries = page
+            .entries
+            .iter()
+            .map(|entry| (PyBytes::new(py, &entry.key), PyBytes::new(py, &entry.value)))
+            .collect();
+        Ok((entries, page.has_more))
+    }
+
+    /// Insert one entry only when its key is absent. Returns whether it was written.
+    pub(crate) fn kv_put_if_absent(
+        &mut self,
+        namespace: Vec<u8>,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> PyResult<bool> {
+        self.db_mut()?
+            .kv_put_if_absent(&namespace, &key, &value)
+            .map_err(zova_error)
+    }
+
+    /// Replace one value only when the current value equals `expected` byte
+    /// for byte. A missing key never matches. Returns whether it was written.
+    pub(crate) fn kv_compare_and_put(
+        &mut self,
+        namespace: Vec<u8>,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+        value: Vec<u8>,
+    ) -> PyResult<bool> {
+        self.db_mut()?
+            .kv_compare_and_put(&namespace, &key, &expected, &value)
+            .map_err(zova_error)
+    }
+
+    /// Delete one entry only when its current value equals `expected` byte
+    /// for byte. A missing key never matches. Returns whether it was deleted.
+    pub(crate) fn kv_compare_and_delete(
+        &mut self,
+        namespace: Vec<u8>,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> PyResult<bool> {
+        self.db_mut()?
+            .kv_compare_and_delete(&namespace, &key, &expected)
+            .map_err(zova_error)
+    }
+
     pub(crate) fn __exit__(
         &mut self,
         _exc_type: Option<&Bound<'_, PyAny>>,

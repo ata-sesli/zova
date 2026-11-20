@@ -1,4 +1,4 @@
-use zova::{Database, KvEntry, SharedDatabase};
+use zova::{Database, KvEntry, KvScanEntry, KvScanOptions, SharedDatabase};
 
 fn temp_path(name: &str) -> String {
     let mut path = std::env::temp_dir();
@@ -216,4 +216,114 @@ fn shared_database_guard_kv_joins_transaction() {
 
     drop(db);
     std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn database_kv_scan_pages_in_key_byte_order() {
+    let mut db = Database::create_memory().unwrap();
+    for key in [&b"b"[..], b"", b"a\xff", b"a", b"ab", b"a\x00", b"c"] {
+        db.kv_put(b"ns", key, key).unwrap();
+    }
+    db.kv_put(b"other", b"a", b"elsewhere").unwrap();
+
+    let all = db.kv_scan(b"ns", &KvScanOptions::new(100)).unwrap();
+    let keys: Vec<&[u8]> = all.entries.iter().map(|entry| &entry.key[..]).collect();
+    assert_eq!(
+        keys,
+        [&b""[..], b"a", b"a\x00", b"ab", b"a\xff", b"b", b"c"]
+    );
+    assert!(all.entries.iter().all(|entry| entry.key == entry.value));
+    assert!(!all.has_more);
+
+    let prefixed = db
+        .kv_scan(
+            b"ns",
+            &KvScanOptions {
+                prefix: b"a",
+                keys_only: true,
+                ..KvScanOptions::new(2)
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        prefixed.entries,
+        [
+            KvScanEntry {
+                key: b"a".to_vec(),
+                value: Vec::new()
+            },
+            KvScanEntry {
+                key: b"a\x00".to_vec(),
+                value: Vec::new()
+            },
+        ]
+    );
+    assert!(prefixed.has_more);
+    let next = db
+        .kv_scan(
+            b"ns",
+            &KvScanOptions {
+                prefix: b"a",
+                after: Some(b"a\x00"),
+                ..KvScanOptions::new(2)
+            },
+        )
+        .unwrap();
+    let keys: Vec<&[u8]> = next.entries.iter().map(|entry| &entry.key[..]).collect();
+    assert_eq!(keys, [&b"ab"[..], b"a\xff"]);
+    assert!(!next.has_more);
+
+    let bounded = db
+        .kv_scan(
+            b"ns",
+            &KvScanOptions {
+                start: Some(b"a\x00"),
+                end: Some(b"b"),
+                ..KvScanOptions::new(10)
+            },
+        )
+        .unwrap();
+    assert_eq!(bounded.entries.len(), 3);
+    let error = db.kv_scan(b"ns", &KvScanOptions::new(0)).unwrap_err();
+    assert_eq!(error.status(), Some(zova::Status::InvalidArgument));
+}
+
+#[test]
+fn database_kv_conditional_writes_report_whether_they_applied() {
+    let mut db = Database::create_memory().unwrap();
+    assert!(db.kv_put_if_absent(b"ns", b"k", b"v1").unwrap());
+    assert!(!db.kv_put_if_absent(b"ns", b"k", b"other").unwrap());
+    assert!(!db.kv_compare_and_put(b"ns", b"k", b"stale", b"v2").unwrap());
+    assert!(!db
+        .kv_compare_and_put(b"ns", b"missing", b"", b"v2")
+        .unwrap());
+    assert!(db.kv_compare_and_put(b"ns", b"k", b"v1", b"").unwrap());
+    assert!(db.kv_compare_and_put(b"ns", b"k", b"", b"v2").unwrap());
+    assert!(!db.kv_compare_and_delete(b"ns", b"k", b"v1").unwrap());
+    assert!(db.kv_compare_and_delete(b"ns", b"k", b"v2").unwrap());
+    assert_eq!(db.kv_get(b"ns", b"k").unwrap(), None);
+
+    db.begin().unwrap();
+    assert!(db.kv_put_if_absent(b"ns", b"k", b"v3").unwrap());
+    db.rollback().unwrap();
+    assert_eq!(db.kv_count(b"ns").unwrap(), 0);
+}
+
+#[test]
+fn shared_database_kv_scan_and_conditional_writes() {
+    let db = SharedDatabase::create(&temp_path("shared-scan")).unwrap();
+    assert!(db.kv_put_if_absent(b"ns", b"a", b"1").unwrap());
+    assert!(db.kv_put_if_absent(b"ns", b"b", b"2").unwrap());
+    assert!(db.kv_compare_and_put(b"ns", b"a", b"1", b"one").unwrap());
+    let page = db.kv_scan(b"ns", &KvScanOptions::new(1)).unwrap();
+    assert_eq!(
+        page.entries,
+        [KvScanEntry {
+            key: b"a".to_vec(),
+            value: b"one".to_vec()
+        }]
+    );
+    assert!(page.has_more);
+    assert!(db.kv_compare_and_delete(b"ns", b"b", b"2").unwrap());
+    assert_eq!(db.kv_count(b"ns").unwrap(), 1);
 }

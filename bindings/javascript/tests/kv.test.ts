@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { AsyncDatabase, Database, type KvEntry } from "../js/index.js";
+import { AsyncDatabase, Database, ZovaError, type KvEntry } from "../js/index.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -164,6 +164,69 @@ describe("AsyncDatabase key-value storage", () => {
     await database.kvClearNamespace(bytes("cfg"));
     expect(await database.kvCount(bytes("cfg"))).toBe(0n);
 
+    await database.close();
+  });
+});
+describe("key-value scans and conditional writes", () => {
+  const keyText = (entries: readonly KvEntry[]) =>
+    entries.map((entry) => Array.from(entry.key));
+
+  test("scan pages in key byte order", () => {
+    const database = Database.create(temporaryDatabasePath());
+    for (const key of [[0x62], [], [0x61, 0xff], [0x61], [0x61, 0x62], [0x61, 0x00], [0x63]]) {
+      database.kvPut(bytes("ns"), bytes(key), bytes(key));
+    }
+    database.kvPut(bytes("other"), bytes("a"), bytes("elsewhere"));
+
+    const all = database.kvScan(bytes("ns"), { limit: 100 });
+    expect(keyText(all.entries)).toEqual([[], [0x61], [0x61, 0x00], [0x61, 0x62], [0x61, 0xff], [0x62], [0x63]]);
+    expect(all.entries.every((entry) => entry.value.length === entry.key.length)).toBe(true);
+    expect(all.hasMore).toBe(false);
+
+    const first = database.kvScan(bytes("ns"), { prefix: bytes("a"), limit: 2, keysOnly: true });
+    expect(keyText(first.entries)).toEqual([[0x61], [0x61, 0x00]]);
+    expect(first.entries[0]!.value.length).toBe(0);
+    expect(first.hasMore).toBe(true);
+    const next = database.kvScan(bytes("ns"), {
+      prefix: bytes("a"),
+      after: first.entries[1]!.key,
+      limit: 2,
+    });
+    expect(keyText(next.entries)).toEqual([[0x61, 0x62], [0x61, 0xff]]);
+    expect(next.hasMore).toBe(false);
+
+    const bounded = database.kvScan(bytes("ns"), { start: bytes([0x61, 0x00]), end: bytes("b"), limit: 10 });
+    expect(bounded.entries.length).toBe(3);
+    expect(() => database.kvScan(bytes("ns"), { limit: 0 })).toThrow(ZovaError);
+    expect(() => database.kvScan(bytes("ns"), { limit: 1.5 })).toThrow(ZovaError);
+    database.close();
+  });
+
+  test("conditional writes report whether they applied", () => {
+    const database = Database.create(temporaryDatabasePath());
+    expect(database.kvPutIfAbsent(bytes("ns"), bytes("k"), bytes("v1"))).toBe(true);
+    expect(database.kvPutIfAbsent(bytes("ns"), bytes("k"), bytes("other"))).toBe(false);
+    expect(database.kvCompareAndPut(bytes("ns"), bytes("k"), bytes("stale"), bytes("v2"))).toBe(false);
+    expect(database.kvCompareAndPut(bytes("ns"), bytes("k"), bytes("v1"), bytes("v2"))).toBe(true);
+    expect(database.kvCompareAndDelete(bytes("ns"), bytes("k"), bytes("v1"))).toBe(false);
+    expect(database.kvCompareAndDelete(bytes("ns"), bytes("k"), bytes("v2"))).toBe(true);
+    expect(database.kvGet(bytes("ns"), bytes("k"))).toBeNull();
+    database.close();
+  });
+
+  test("async scan and conditional writes", async () => {
+    const database = AsyncDatabase.create(temporaryDatabasePath());
+    expect(await database.kvPutIfAbsent(bytes("ns"), bytes("a"), bytes("1"))).toBe(true);
+    expect(await database.kvPutIfAbsent(bytes("ns"), bytes("a"), bytes("x"))).toBe(false);
+    expect(await database.kvPutIfAbsent(bytes("ns"), bytes("b"), bytes("2"))).toBe(true);
+    expect(await database.kvCompareAndPut(bytes("ns"), bytes("a"), bytes("1"), bytes("one"))).toBe(true);
+    const page = await database.kvScan(bytes("ns"), { limit: 1 });
+    expect(keyText(page.entries)).toEqual([[0x61]]);
+    expect(page.entries[0]!.value).toEqual(bytes("one"));
+    expect(page.hasMore).toBe(true);
+    expect(await database.kvCompareAndDelete(bytes("ns"), bytes("b"), bytes("2"))).toBe(true);
+    expect(await database.kvCount(bytes("ns"))).toBe(1n);
+    await expect(database.kvScan(bytes("ns"), { limit: 0 })).rejects.toThrow(ZovaError);
     await database.close();
   });
 });

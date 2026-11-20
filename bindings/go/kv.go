@@ -31,9 +31,9 @@ func (db *DB) KvGet(namespace, key []byte) ([]byte, error) {
 	}()
 	err := db.withLock(func() error {
 		request := C.zova_kv_get_request{
-			db:        db.ptr,
-			ns:        C.zova_kv_bytes{data: ns, len: C.size_t(len(namespace))},
-			key:       C.zova_kv_bytes{data: keyData, len: C.size_t(len(key))},
+			db:         db.ptr,
+			ns:         C.zova_kv_bytes{data: ns, len: C.size_t(len(namespace))},
+			key:        C.zova_kv_bytes{data: keyData, len: C.size_t(len(key))},
 			out_result: result,
 		}
 		return statusFromDB(db, C.zova_kv_get(&request))
@@ -63,10 +63,10 @@ func (db *DB) KvGetMany(namespace []byte, keys [][]byte) ([]*[]byte, error) {
 	}()
 	err := db.withLock(func() error {
 		request := C.zova_kv_get_many_request{
-			db:         db.ptr,
-			ns:         C.zova_kv_bytes{data: ns, len: C.size_t(len(namespace))},
-			keys:       cKeys,
-			keys_len:   C.size_t(len(keys)),
+			db:          db.ptr,
+			ns:          C.zova_kv_bytes{data: ns, len: C.size_t(len(namespace))},
+			keys:        cKeys,
+			keys_len:    C.size_t(len(keys)),
 			out_results: results,
 		}
 		return statusFromDB(db, C.zova_kv_get_many(&request))
@@ -198,6 +198,180 @@ func (db *DB) KvClearNamespace(namespace []byte) error {
 		}
 		return statusFromDB(db, C.zova_kv_clear_namespace(&request))
 	})
+}
+
+// KvScanOptions selects one page of a namespace for KvScan. Keys compare as
+// raw bytes: a shorter key sorts before every longer key it prefixes. Every
+// given bound applies. For Start, End and After, nil means no bound, while an
+// empty non-nil slice is the empty key.
+type KvScanOptions struct {
+	// Prefix limits the page to keys that begin with these bytes.
+	Prefix []byte
+	// Start is an inclusive lower bound.
+	Start []byte
+	// End is an exclusive upper bound.
+	End []byte
+	// After continues strictly after this key: pass the last key of the
+	// previous page.
+	After []byte
+	// Limit is the most entries returned; it must be greater than zero.
+	Limit int
+	// KeysOnly returns keys only; every Value is then empty.
+	KeysOnly bool
+}
+
+// KvScanPage is one scan page in ascending key byte order. HasMore is true
+// when at least one further entry matches the same options.
+type KvScanPage struct {
+	Entries []KvEntry
+	HasMore bool
+}
+
+// KvScan returns one page of namespace in ascending key byte order. Each call
+// holds no statement afterwards; writes between pages are visible to later
+// pages.
+func (db *DB) KvScan(namespace []byte, options KvScanOptions) (KvScanPage, error) {
+	if options.Limit <= 0 {
+		return KvScanPage{}, newError(StatusInvalidArgument, "kv scan limit must be greater than zero")
+	}
+	ns, cleanupNS := cBytes(namespace)
+	defer cleanupNS()
+	prefix, cleanupPrefix := cBytes(options.Prefix)
+	defer cleanupPrefix()
+	start, hasStart, cleanupStart := cOptionalKvBytes(options.Start)
+	defer cleanupStart()
+	end, hasEnd, cleanupEnd := cOptionalKvBytes(options.End)
+	defer cleanupEnd()
+	after, hasAfter, cleanupAfter := cOptionalKvBytes(options.After)
+	defer cleanupAfter()
+	keysOnly := C.uint8_t(0)
+	if options.KeysOnly {
+		keysOnly = 1
+	}
+
+	results := (*C.zova_kv_scan_results)(C.calloc(1, C.size_t(unsafe.Sizeof(C.zova_kv_scan_results{}))))
+	defer func() {
+		C.zova_kv_scan_results_free(results)
+		C.free(unsafe.Pointer(results))
+	}()
+	err := db.withLock(func() error {
+		request := C.zova_kv_scan_request{
+			db:          db.ptr,
+			ns:          C.zova_kv_bytes{data: ns, len: C.size_t(len(namespace))},
+			prefix:      C.zova_kv_bytes{data: prefix, len: C.size_t(len(options.Prefix))},
+			start:       start,
+			has_start:   hasStart,
+			end:         end,
+			has_end:     hasEnd,
+			after:       after,
+			has_after:   hasAfter,
+			limit:       C.size_t(options.Limit),
+			keys_only:   keysOnly,
+			out_results: results,
+		}
+		return statusFromDB(db, C.zova_kv_scan(&request))
+	})
+	if err != nil {
+		return KvScanPage{}, err
+	}
+
+	page := KvScanPage{Entries: make([]KvEntry, int(results.len)), HasMore: results.has_more != 0}
+	items := unsafe.Slice(results.items, int(results.len))
+	for i := range items {
+		page.Entries[i] = KvEntry{Key: copyBuffer(&items[i].key), Value: copyBuffer(&items[i].value)}
+	}
+	return page, nil
+}
+
+// KvPutIfAbsent inserts key in namespace only when it is absent and reports
+// whether it was written.
+func (db *DB) KvPutIfAbsent(namespace, key, value []byte) (bool, error) {
+	ns, cleanupNS := cBytes(namespace)
+	defer cleanupNS()
+	keyData, cleanupKey := cBytes(key)
+	defer cleanupKey()
+	valueData, cleanupValue := cBytes(value)
+	defer cleanupValue()
+
+	return kvApplied(db, func(out *C.uint8_t) C.zova_status {
+		request := C.zova_kv_put_if_absent_request{
+			db:          db.ptr,
+			ns:          C.zova_kv_bytes{data: ns, len: C.size_t(len(namespace))},
+			key:         C.zova_kv_bytes{data: keyData, len: C.size_t(len(key))},
+			value:       C.zova_kv_bytes{data: valueData, len: C.size_t(len(value))},
+			out_applied: out,
+		}
+		return C.zova_kv_put_if_absent(&request)
+	})
+}
+
+// KvCompareAndPut replaces the value of key in namespace only when the current
+// value equals expected byte for byte, and reports whether it was written. A
+// missing key never matches.
+func (db *DB) KvCompareAndPut(namespace, key, expected, value []byte) (bool, error) {
+	ns, cleanupNS := cBytes(namespace)
+	defer cleanupNS()
+	keyData, cleanupKey := cBytes(key)
+	defer cleanupKey()
+	expectedData, cleanupExpected := cBytes(expected)
+	defer cleanupExpected()
+	valueData, cleanupValue := cBytes(value)
+	defer cleanupValue()
+
+	return kvApplied(db, func(out *C.uint8_t) C.zova_status {
+		request := C.zova_kv_compare_and_put_request{
+			db:          db.ptr,
+			ns:          C.zova_kv_bytes{data: ns, len: C.size_t(len(namespace))},
+			key:         C.zova_kv_bytes{data: keyData, len: C.size_t(len(key))},
+			expected:    C.zova_kv_bytes{data: expectedData, len: C.size_t(len(expected))},
+			value:       C.zova_kv_bytes{data: valueData, len: C.size_t(len(value))},
+			out_applied: out,
+		}
+		return C.zova_kv_compare_and_put(&request)
+	})
+}
+
+// KvCompareAndDelete deletes key in namespace only when its current value
+// equals expected byte for byte, and reports whether it was deleted. A missing
+// key never matches.
+func (db *DB) KvCompareAndDelete(namespace, key, expected []byte) (bool, error) {
+	ns, cleanupNS := cBytes(namespace)
+	defer cleanupNS()
+	keyData, cleanupKey := cBytes(key)
+	defer cleanupKey()
+	expectedData, cleanupExpected := cBytes(expected)
+	defer cleanupExpected()
+
+	return kvApplied(db, func(out *C.uint8_t) C.zova_status {
+		request := C.zova_kv_compare_and_delete_request{
+			db:          db.ptr,
+			ns:          C.zova_kv_bytes{data: ns, len: C.size_t(len(namespace))},
+			key:         C.zova_kv_bytes{data: keyData, len: C.size_t(len(key))},
+			expected:    C.zova_kv_bytes{data: expectedData, len: C.size_t(len(expected))},
+			out_applied: out,
+		}
+		return C.zova_kv_compare_and_delete(&request)
+	})
+}
+
+func kvApplied(db *DB, call func(out *C.uint8_t) C.zova_status) (bool, error) {
+	out := (*C.uint8_t)(C.calloc(1, 1))
+	defer C.free(unsafe.Pointer(out))
+	err := db.withLock(func() error {
+		return statusFromDB(db, call(out))
+	})
+	if err != nil {
+		return false, err
+	}
+	return *out != 0, nil
+}
+
+func cOptionalKvBytes(bytes []byte) (C.zova_kv_bytes, C.uint8_t, func()) {
+	if bytes == nil {
+		return C.zova_kv_bytes{}, 0, func() {}
+	}
+	data, cleanup := cBytes(bytes)
+	return C.zova_kv_bytes{data: data, len: C.size_t(len(bytes))}, 1, cleanup
 }
 
 func cKvKeys(keys [][]byte) (*C.zova_kv_bytes, func()) {
