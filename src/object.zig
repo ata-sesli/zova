@@ -4,6 +4,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const fastcdc = @import("object_fastcdc.zig");
 const fixed_chunks = @import("object_fixed_chunks.zig");
+const lz4 = @import("object_lz4.zig");
 const Sha256 = @import("object_sha256.zig").Sha256;
 pub const sqlite = @import("sqlite.zig");
 const statement_cache = @import("statement_cache.zig");
@@ -74,6 +75,106 @@ pub const ObjectStorageProfile = enum {
 pub const ObjectPutOptions = struct {
     profile: ObjectStorageProfile = .deduplication,
 };
+
+/// Compression applied to chunks this handle writes. Reads decode every
+/// stored encoding regardless of this setting.
+pub const ObjectCompression = enum {
+    /// Store chunk bytes as they are (the default).
+    none,
+    /// Store a chunk as an LZ4 block when that is smaller than the chunk.
+    lz4,
+};
+
+/// Physical encoding of one `_zova_chunks.data` value (format 14). The row's
+/// `chunk_hash` and `size_bytes` always describe the plaintext chunk.
+pub const ChunkEncoding = enum(u8) {
+    raw = 0,
+    lz4 = 1,
+
+    pub fn fromColumn(value: i64) Error!ChunkEncoding {
+        return switch (value) {
+            0 => .raw,
+            1 => .lz4,
+            else => error.ObjectCorrupt,
+        };
+    }
+
+    fn column(self: ChunkEncoding) i64 {
+        return @backingInt(self);
+    }
+};
+
+/// Decode a stored chunk into `dst`, whose length is the plaintext size. The
+/// caller still verifies the plaintext hash.
+pub fn decodeChunk(encoding: ChunkEncoding, stored: []const u8, dst: []u8) Error!void {
+    switch (encoding) {
+        .raw => {
+            if (stored.len != dst.len) return error.ObjectCorrupt;
+            @memcpy(dst, stored);
+        },
+        .lz4 => {
+            if (stored.len == 0 or stored.len >= dst.len) return error.ObjectCorrupt;
+            lz4.decompress(dst, stored) catch return error.ObjectCorrupt;
+        },
+    }
+}
+
+/// Stored form of one chunk: the plaintext, or a smaller encoding of it.
+const StoredChunk = struct {
+    encoding: ChunkEncoding,
+    data: []const u8,
+};
+
+/// Encode `plain` for storage. An encoding is kept only when it is smaller
+/// than the plaintext; `scratch` must hold at least `plain.len - 1` bytes when
+/// compression is enabled.
+fn encodeChunk(compression: ObjectCompression, plain: []const u8, scratch: []u8) StoredChunk {
+    switch (compression) {
+        .none => {},
+        .lz4 => if (plain.len > 1) {
+            if (lz4.compress(scratch[0 .. plain.len - 1], plain)) |len| return .{ .encoding = .lz4, .data = scratch[0..len] };
+        },
+    }
+    return .{ .encoding = .raw, .data = plain };
+}
+
+/// Rewrite a chunk-read query for a chunk table created before format 14,
+/// which has no `encoding` column and stores every chunk raw.
+fn rawChunkTableSql(comptime sql: []const u8) []const u8 {
+    comptime {
+        @setEvalBranchQuota(20_000);
+        const needle = "c.encoding";
+        const replacement = "0";
+        if (std.mem.indexOf(u8, sql, needle) == null) @compileError("chunk-read query does not select c.encoding");
+        var buffer: [std.mem.replacementSize(u8, sql, needle, replacement)]u8 = undefined;
+        _ = std.mem.replace(u8, sql, needle, replacement, &buffer);
+        const final = buffer;
+        return &final;
+    }
+}
+
+/// Read an LZ4-encoded chunk blob by rowid and decode it into `dst`. Raw
+/// chunks are read in place by the callers instead.
+fn readEncodedChunkBlob(
+    sqlite_db: *sqlite.Database,
+    storage_schema: StorageSchema,
+    rowid: i64,
+    scratch: []u8,
+    dst: []u8,
+) Error!void {
+    var blob = try sqlite.Blob.open(sqlite_db, storage_schema.sqliteName(), "_zova_chunks", "data", rowid);
+    defer blob.deinit();
+    const stored_len = try blob.bytes();
+    if (stored_len == 0 or stored_len >= dst.len) return error.ObjectCorrupt;
+    if (stored_len <= scratch.len) {
+        try blob.read(scratch[0..stored_len], 0);
+        return decodeChunk(.lz4, scratch[0..stored_len], dst);
+    }
+    const stored = try scratch_allocator.alloc(u8, stored_len);
+    defer scratch_allocator.free(stored);
+    try blob.read(stored, 0);
+    return decodeChunk(.lz4, stored, dst);
+}
 
 const ChunkingPolicy = enum {
     fastcdc,
@@ -205,11 +306,23 @@ pub const objects_schema_sql =
     \\  chunker text not null check (chunker in ('fastcdc-v1', 'fixed-1m-v1'))
     \\)
 ;
-pub const chunks_schema_sql =
+/// Formats 11 to 13: every chunk is stored raw.
+pub const format13_chunks_schema_sql =
     \\create table _zova_chunks (
     \\  chunk_hash blob not null primary key check (length(chunk_hash) = 32),
     \\  size_bytes integer not null check (size_bytes > 0 and size_bytes <= 1048576),
     \\  data blob not null check (length(data) = size_bytes)
+    \\)
+;
+/// Format 14: `encoding` records how `data` is stored (`ChunkEncoding`).
+/// `size_bytes` stays the plaintext size; an encoded value must be smaller.
+/// `migrateFormat13To14` produces this exact text from the format-13 table.
+pub const chunks_schema_sql =
+    \\create table _zova_chunks (
+    \\  chunk_hash blob not null primary key check (length(chunk_hash) = 32),
+    \\  size_bytes integer not null check (size_bytes > 0 and size_bytes <= 1048576),
+    \\  data blob not null check ((encoding = 0 and length(data) = size_bytes) or (encoding = 1 and length(data) < size_bytes)),
+    \\  encoding integer not null default 0 check (encoding in (0, 1))
     \\)
 ;
 pub const object_chunks_schema_sql =
@@ -341,6 +454,9 @@ pub const ObjectReader = struct {
     chunk_hasher: Sha256 = Sha256.init(.{}),
     object_hasher: Sha256 = Sha256.init(.{}),
     scratch: [64 * 1024]u8 = undefined,
+    /// Plaintext of the current encoded chunk, allocated on the first one.
+    decoded: []u8 = &.{},
+    decoded_active: bool = false,
     finished: bool = false,
     closed: bool = false,
 
@@ -361,6 +477,9 @@ pub const ObjectReader = struct {
         if (self.closed) return;
         if (self.blob) |*blob| blob.deinit();
         self.blob = null;
+        scratch_allocator.free(self.decoded);
+        self.decoded = &.{};
+        self.decoded_active = false;
         self.manifest.deinit();
         self.closed = true;
     }
@@ -368,15 +487,20 @@ pub const ObjectReader = struct {
     fn readInner(self: *ObjectReader, buffer: []u8) Error!usize {
         var written: usize = 0;
         while (written < buffer.len and !self.finished) {
-            var blob = self.blob orelse return error.ObjectCorrupt;
             const remaining = self.current_chunk_size - self.current_chunk_read;
             const requested = @min(@min(remaining, @as(u64, self.scratch.len)), @as(u64, buffer.len - written));
             const requested_usize: usize = @intCast(requested);
 
-            try blob.read(self.scratch[0..requested_usize], self.current_chunk_read);
-            self.chunk_hasher.update(self.scratch[0..requested_usize]);
-            self.object_hasher.update(self.scratch[0..requested_usize]);
-            @memcpy(buffer[written .. written + requested_usize], self.scratch[0..requested_usize]);
+            const piece: []const u8 = if (self.blob) |*blob| piece: {
+                try blob.read(self.scratch[0..requested_usize], self.current_chunk_read);
+                break :piece self.scratch[0..requested_usize];
+            } else if (self.decoded_active)
+                self.decoded[@intCast(self.current_chunk_read)..][0..requested_usize]
+            else
+                return error.ObjectCorrupt;
+            self.chunk_hasher.update(piece);
+            self.object_hasher.update(piece);
+            @memcpy(buffer[written .. written + requested_usize], piece);
             written += requested_usize;
             self.current_chunk_read += requested;
 
@@ -386,8 +510,9 @@ pub const ObjectReader = struct {
                 chunk_hasher.final(&chunk_digest);
                 if (!std.mem.eql(u8, &chunk_digest, &self.expected_chunk_hash)) return error.ObjectCorrupt;
 
-                self.blob.?.deinit();
+                if (self.blob) |*blob| blob.deinit();
                 self.blob = null;
+                self.decoded_active = false;
                 try self.loadNextChunk();
             }
         }
@@ -415,15 +540,32 @@ pub const ObjectReader = struct {
 
                 const rowid = self.manifest.columnInt64(4);
                 if (rowid <= 0) return error.ObjectCorrupt;
-                var next_blob = try sqlite.Blob.open(
-                    self.sqlite_db,
-                    self.storage_schema.sqliteName(),
-                    "_zova_chunks",
-                    "data",
-                    rowid,
-                );
-                errdefer next_blob.deinit();
-                if (try next_blob.bytes() != size) return error.ObjectCorrupt;
+                const size_usize: usize = @intCast(size);
+                var next_blob: ?sqlite.Blob = null;
+                switch (try ChunkEncoding.fromColumn(self.manifest.columnInt64(5))) {
+                    .raw => {
+                        var blob = try sqlite.Blob.open(
+                            self.sqlite_db,
+                            self.storage_schema.sqliteName(),
+                            "_zova_chunks",
+                            "data",
+                            rowid,
+                        );
+                        errdefer blob.deinit();
+                        if (try blob.bytes() != size) return error.ObjectCorrupt;
+                        next_blob = blob;
+                    },
+                    .lz4 => {
+                        // An encoded chunk is decoded whole, then served from
+                        // `decoded` and hashed as it is consumed, like a raw one.
+                        if (self.decoded.len < size_usize) {
+                            scratch_allocator.free(self.decoded);
+                            self.decoded = &.{};
+                            self.decoded = try scratch_allocator.alloc(u8, self.policy.maxSize());
+                        }
+                        try readEncodedChunkBlob(self.sqlite_db, self.storage_schema, rowid, &self.scratch, self.decoded[0..size_usize]);
+                    },
+                }
 
                 self.current_chunk_index = self.next_chunk_index;
                 self.current_chunk_offset = offset;
@@ -433,6 +575,7 @@ pub const ObjectReader = struct {
                 self.next_chunk_index += 1;
                 self.next_chunk_offset += size;
                 self.blob = next_blob;
+                self.decoded_active = next_blob == null;
             },
             .done => {
                 if (self.next_chunk_index != self.chunk_count or self.next_chunk_offset != self.size_bytes) return error.ObjectCorrupt;
@@ -451,7 +594,7 @@ pub const ObjectReader = struct {
 /// Manifest rows and chunk rowids for an inclusive chunk-index range. Shared by
 /// `readObjectRange` and `ObjectSeekableReader` under one statement-cache tag.
 const object_range_by_index_sql =
-    \\select /* zova_trace:object_range */ oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.rowid
+    \\select /* zova_trace:object_range */ oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.rowid, c.encoding
     \\from {s}_zova_object_chunks oc
     \\left join {s}_zova_chunks c on c.chunk_hash = oc.chunk_hash
     \\where oc.object_id = ?
@@ -482,6 +625,8 @@ pub const ObjectSeekableReader = struct {
     /// Logical byte offset of the next read.
     position: u64 = 0,
     buffer: []u8 = &.{},
+    /// Stored bytes of an encoded chunk, allocated on the first one.
+    encoded: []u8 = &.{},
     /// The verified chunk held in `buffer`; `chunk_len == 0` means none.
     chunk_offset: u64 = 0,
     chunk_len: usize = 0,
@@ -528,6 +673,8 @@ pub const ObjectSeekableReader = struct {
     pub fn deinit(self: *ObjectSeekableReader) void {
         self.allocator.free(self.buffer);
         self.buffer = &.{};
+        self.allocator.free(self.encoded);
+        self.encoded = &.{};
         self.chunk_len = 0;
     }
 
@@ -578,7 +725,7 @@ pub const ObjectSeekableReader = struct {
         };
         if (index >= chunk_count) return error.ObjectCorrupt;
 
-        var lease = try self.db.acquire(.object_range_fixed, object_range_by_index_sql);
+        var lease = try self.db.acquireChunkRead(.object_range_fixed, object_range_by_index_sql);
         defer lease.release();
         const stmt = &lease.statement;
         try stmt.bindBlob(1, &self.id);
@@ -612,17 +759,27 @@ pub const ObjectSeekableReader = struct {
             self.buffer = buffer;
         }
         const len: usize = @intCast(chunk_size);
-        {
-            var blob = try sqlite.Blob.open(
-                self.db.sqlite_db,
-                self.db.storage_schema.sqliteName(),
-                "_zova_chunks",
-                "data",
-                rowid,
-            );
-            defer blob.deinit();
-            if (try blob.bytes() != chunk_size) return error.ObjectCorrupt;
-            try blob.read(self.buffer[0..len], 0);
+        switch (try ChunkEncoding.fromColumn(stmt.columnInt64(5))) {
+            .raw => {
+                var blob = try sqlite.Blob.open(
+                    self.db.sqlite_db,
+                    self.db.storage_schema.sqliteName(),
+                    "_zova_chunks",
+                    "data",
+                    rowid,
+                );
+                defer blob.deinit();
+                if (try blob.bytes() != chunk_size) return error.ObjectCorrupt;
+                try blob.read(self.buffer[0..len], 0);
+            },
+            .lz4 => {
+                if (self.encoded.len < policy.maxSize()) {
+                    const encoded = try self.allocator.alloc(u8, policy.maxSize());
+                    self.allocator.free(self.encoded);
+                    self.encoded = encoded;
+                }
+                try readEncodedChunkBlob(self.db.sqlite_db, self.db.storage_schema, rowid, self.encoded, self.buffer[0..len]);
+            },
         }
 
         var actual_hash: ObjectChunkId = undefined;
@@ -682,6 +839,9 @@ pub const ObjectWriter = struct {
     allow_active_transactions: bool = false,
     allocator: std.mem.Allocator,
     policy: ChunkingPolicy = .fastcdc,
+    compression: ObjectCompression = .none,
+    /// Encoded-chunk scratch, allocated on the first compressed chunk.
+    encode_buffer: []u8 = &.{},
     chunker: PolicyStreamChunker = .{ .fastcdc = .empty },
     hasher: Sha256 = Sha256.init(.{}),
     size_bytes: u64 = 0,
@@ -718,6 +878,7 @@ pub const ObjectWriter = struct {
         allow_active_transactions: bool,
         allocator: std.mem.Allocator,
         policy: ChunkingPolicy,
+        compression: ObjectCompression,
     ) ObjectWriter {
         return .{
             .sqlite_db = sqlite_db,
@@ -725,6 +886,7 @@ pub const ObjectWriter = struct {
             .allow_active_transactions = allow_active_transactions,
             .allocator = allocator,
             .policy = policy,
+            .compression = compression,
             .chunker = PolicyStreamChunker.init(policy),
             .hasher = Sha256.init(.{}),
         };
@@ -845,6 +1007,8 @@ pub const ObjectWriter = struct {
         self.pending.deinit(self.allocator);
         for (self.slabs.items) |slab| self.allocator.free(slab);
         self.slabs.deinit(self.allocator);
+        self.allocator.free(self.encode_buffer);
+        self.encode_buffer = &.{};
         self.chunker.deinit(self.allocator);
         self.chunks.deinit(self.allocator);
         self.seen_chunks.deinit(self.allocator);
@@ -866,8 +1030,8 @@ pub const ObjectWriter = struct {
         if (batch.insert) |*stmt| return stmt;
         if (batch.scope == null) batch.scope = try beginObjectMutation(self.sqlite_db);
         batch.insert = try prepareSchemaSql(self.sqlite_db,
-            \\insert into {s}_zova_chunks (chunk_hash, size_bytes, data)
-            \\values (?, ?, ?)
+            \\insert into {s}_zova_chunks (chunk_hash, size_bytes, data, encoding)
+            \\values (?, ?, ?, ?)
             \\on conflict(chunk_hash) do nothing
         , .{self.storage_schema.prefix()});
         return &batch.insert.?;
@@ -959,10 +1123,15 @@ pub const ObjectWriter = struct {
 
     fn storeChunk(self: *ObjectWriter, batch: *ChunkBatch, chunk: PendingChunk) Error!void {
         const hash = chunk.hash;
+        if (self.compression != .none and self.encode_buffer.len == 0) {
+            self.encode_buffer = try self.allocator.alloc(u8, self.policy.maxSize());
+        }
+        const stored = encodeChunk(self.compression, chunk.bytes, self.encode_buffer);
         const insert = try self.chunkBatchInsert(batch);
         try insert.bindBlob(1, &hash);
         try insert.bindInt64(2, try usizeToSqliteI64(chunk.bytes.len));
-        try insert.bindBlob(3, chunk.bytes);
+        try insert.bindBlob(3, stored.data);
+        try insert.bindInt64(4, stored.encoding.column());
         try insert.expectDone();
         try insert.reset();
         try insert.clearBindings();
@@ -1042,6 +1211,12 @@ pub const Database = struct {
     /// Connection-owned cache, null when no owner supplied one. See
     /// `statement_cache` for the reuse and invalidation contract.
     statement_cache: ?*statement_cache.Cache = null,
+    /// Compression for chunks written through this handle.
+    compression: ObjectCompression = .none,
+    /// True when `_zova_chunks` predates format 14 and has no `encoding`
+    /// column. Set only for read-only logical inspection of migratable
+    /// sources; every chunk in such a table is raw.
+    raw_chunk_table: bool = false,
 
     /// Construct an object-layer handle over an explicitly prepared schema.
     ///
@@ -1059,6 +1234,20 @@ pub const Database = struct {
 
     fn prepareSchema(self: *Database, comptime sql_format: []const u8, args: anytype) Error!sqlite.Statement {
         return prepareSchemaSql(self.sqlite_db, sql_format, args);
+    }
+
+    /// Prepare a query that selects `c.encoding`, adapting it to a
+    /// pre-format-14 chunk table when needed.
+    fn prepareChunkRead(self: *Database, comptime sql_format: []const u8, args: anytype) Error!sqlite.Statement {
+        if (self.raw_chunk_table) return prepareSchemaSql(self.sqlite_db, rawChunkTableSql(sql_format), args);
+        return prepareSchemaSql(self.sqlite_db, sql_format, args);
+    }
+
+    /// Cached counterpart of `prepareChunkRead`. Adapted statements bypass
+    /// the cache so they never share a tag with the format-14 text.
+    fn acquireChunkRead(self: *Database, comptime tag: statement_cache.Tag, comptime sql: []const u8) Error!statement_cache.Lease {
+        if (self.raw_chunk_table) return statement_cache.acquire(null, self.sqlite_db, tag, self.storage_schema != .main, rawChunkTableSql(sql), self.storage_schema.prefix());
+        return self.acquire(tag, sql);
     }
 
     /// Check out the shared cached statement for `tag`, preparing `sql` when
@@ -1086,7 +1275,7 @@ pub const Database = struct {
     /// for attached bound object stores.
     pub fn objectWriter(self: *Database, allocator: std.mem.Allocator) Error!ObjectWriter {
         try rejectActiveTransaction(self.sqlite_db, self.allow_active_transactions);
-        return ObjectWriter.init(self.sqlite_db, self.storage_schema, self.allow_active_transactions, allocator, .fastcdc);
+        return ObjectWriter.init(self.sqlite_db, self.storage_schema, self.allow_active_transactions, allocator, .fastcdc, self.compression);
     }
 
     /// Open a seekable, verified reader over one object. See
@@ -1107,8 +1296,8 @@ pub const Database = struct {
         const metadata = try loadObjectMetadata(self.statement_cache, self.sqlite_db, self.storage_schema, id);
         const size_bytes = try sqliteI64ToU64(metadata.size_bytes);
         const chunk_count = try sqliteI64ToU64(metadata.chunk_count);
-        var manifest = try self.prepareSchema(
-            \\select /* zova_trace:object_reader_manifest */ oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.rowid
+        var manifest = try self.prepareChunkRead(
+            \\select /* zova_trace:object_reader_manifest */ oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.rowid, c.encoding
             \\from {s}_zova_object_chunks oc
             \\left join {s}_zova_chunks c on c.chunk_hash = oc.chunk_hash
             \\where oc.object_id = ?
@@ -1146,6 +1335,7 @@ pub const Database = struct {
             self.allow_active_transactions,
             allocator,
             ChunkingPolicy.fromProfile(options.profile),
+            self.compression,
         );
     }
 
@@ -1189,7 +1379,7 @@ pub const Database = struct {
         const chunk_count = try usizeToSqliteI64(countObjectChunks(policy, bytes));
         try insertObjectRow(self.sqlite_db, self.storage_schema, id, size_bytes, chunk_count, policy);
 
-        var inserts = try ObjectInsertStatements.init(self.sqlite_db, self.storage_schema);
+        var inserts = try ObjectInsertStatements.init(self.sqlite_db, self.storage_schema, self.compression);
         defer inserts.deinit();
 
         var offset: usize = 0;
@@ -1233,8 +1423,8 @@ pub const Database = struct {
             return .{ .id = id, .bytes = bytes };
         }
 
-        var manifest = try self.prepareSchema(
-            \\select oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.data
+        var manifest = try self.prepareChunkRead(
+            \\select oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.data, c.encoding
             \\from {s}_zova_object_chunks oc
             \\left join {s}_zova_chunks c on c.chunk_hash = oc.chunk_hash
             \\where oc.object_id = ?
@@ -1264,10 +1454,8 @@ pub const Database = struct {
 
             // Chunk bytes are not hashed one by one: the whole-object hash
             // below covers every returned byte.
-            const chunk_data = manifest.columnBlob(4);
-            if (chunk_data.len != chunk_size) return error.ObjectCorrupt;
-
-            @memcpy(bytes[offset .. offset + chunk_size], chunk_data);
+            const encoding = try ChunkEncoding.fromColumn(manifest.columnInt64(5));
+            try decodeChunk(encoding, manifest.columnBlob(4), bytes[offset .. offset + chunk_size]);
             expected_offset += chunk_size;
             expected_index += 1;
         }
@@ -1320,10 +1508,10 @@ pub const Database = struct {
         if (full_read) try validateObjectManifestShape(self.sqlite_db, self.storage_schema, id, size, chunk_count, metadata.policy);
 
         var chunks = if (metadata.policy == .fixed_1m)
-            try self.acquire(.object_range_fixed, object_range_by_index_sql)
+            try self.acquireChunkRead(.object_range_fixed, object_range_by_index_sql)
         else
-            try self.acquire(.object_range_fastcdc,
-                \\select /* zova_trace:object_range */ oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.rowid
+            try self.acquireChunkRead(.object_range_fastcdc,
+                \\select /* zova_trace:object_range */ oc.chunk_index, oc.chunk_hash, oc.offset, oc.size_bytes, c.rowid, c.encoding
                 \\from {s}_zova_object_chunks oc
                 \\left join {s}_zova_chunks c on c.chunk_hash = oc.chunk_hash
                 \\where oc.object_id = ?
@@ -1382,6 +1570,10 @@ pub const Database = struct {
             if (chunk_stmt.columnType(4) == .null) return error.ObjectCorrupt;
             const rowid = chunk_stmt.columnInt64(4);
             if (rowid <= 0) return error.ObjectCorrupt;
+            if (try ChunkEncoding.fromColumn(chunk_stmt.columnInt64(5)) != .raw) {
+                copied += try self.copyEncodedRangeChunk(rowid, &scratch, expected_hash, chunk_offset, chunk_size, offset, buffer[0..read_len], full_read);
+                continue;
+            }
             const chunk_copied = blk: {
                 var blob = try sqlite.Blob.open(
                     self.sqlite_db,
@@ -1444,6 +1636,43 @@ pub const Database = struct {
         }
 
         return copied;
+    }
+
+    /// Decode one encoded chunk for `readObjectRange` and copy its part of
+    /// `[offset, offset + out.len)` into `out`. A full read decodes straight
+    /// into place and leaves verification to the whole-object hash; a partial
+    /// read decodes the whole chunk and checks its hash before copying.
+    fn copyEncodedRangeChunk(
+        self: *Database,
+        rowid: i64,
+        scratch: []u8,
+        expected_hash: ObjectChunkId,
+        chunk_offset: u64,
+        chunk_size: u64,
+        offset: u64,
+        out: []u8,
+        full_read: bool,
+    ) Error!usize {
+        const len: usize = @intCast(chunk_size);
+        if (full_read) {
+            const start: usize = @intCast(chunk_offset);
+            try readEncodedChunkBlob(self.sqlite_db, self.storage_schema, rowid, scratch, out[start..][0..len]);
+            return len;
+        }
+
+        const plain = try scratch_allocator.alloc(u8, len);
+        defer scratch_allocator.free(plain);
+        try readEncodedChunkBlob(self.sqlite_db, self.storage_schema, rowid, scratch, plain);
+        if (!std.mem.eql(u8, &objectChunkId(plain), &expected_hash)) return error.ObjectCorrupt;
+
+        const copy_start = @max(offset, chunk_offset);
+        const copy_end = @min(offset + out.len, chunk_offset + chunk_size);
+        if (copy_start >= copy_end) return 0;
+        const copy_len: usize = @intCast(copy_end - copy_start);
+        const src_start: usize = @intCast(copy_start - chunk_offset);
+        const dest_start: usize = @intCast(copy_start - offset);
+        @memcpy(out[dest_start..][0..copy_len], plain[src_start..][0..copy_len]);
+        return copy_len;
     }
 
     /// Return the index of the FastCDC chunk that contains byte `offset`.
@@ -1626,7 +1855,7 @@ pub const Database = struct {
 
         var existing = self.getObjectChunkWithPolicy(scratch_allocator, expected_hash, policy) catch |err| switch (err) {
             error.ObjectChunkNotFound => {
-                try insertChunkRow(self.sqlite_db, self.storage_schema, expected_hash, bytes);
+                try insertChunkRow(self.sqlite_db, self.storage_schema, expected_hash, bytes, self.compression);
                 return;
             },
             else => return err,
@@ -1707,7 +1936,7 @@ pub const Database = struct {
             policy,
         );
 
-        var inserts = try ObjectInsertStatements.init(self.sqlite_db, self.storage_schema);
+        var inserts = try ObjectInsertStatements.init(self.sqlite_db, self.storage_schema, self.compression);
         defer inserts.deinit();
 
         for (sorted_chunks) |chunk| {
@@ -1760,7 +1989,7 @@ pub const Database = struct {
 
         {
             var stored = try self.prepareSchema(
-                \\select size_bytes, length(data)
+                \\select size_bytes, length(data), encoding
                 \\from {s}_zova_chunks
                 \\where chunk_hash = ?
             , .{self.storage_schema.prefix()});
@@ -1772,9 +2001,12 @@ pub const Database = struct {
                     .done => return error.ObjectChunkNotFound,
                     .row => {
                         const expected_size = try u64ToSqliteI64(chunk.size_bytes);
-                        if (stored.columnInt64(0) != expected_size or stored.columnInt64(1) != expected_size) {
-                            return error.ObjectCorrupt;
-                        }
+                        const stored_len = stored.columnInt64(1);
+                        const length_ok = switch (try ChunkEncoding.fromColumn(stored.columnInt64(2))) {
+                            .raw => stored_len == expected_size,
+                            .lz4 => stored_len > 0 and stored_len < expected_size,
+                        };
+                        if (stored.columnInt64(0) != expected_size or !length_ok) return error.ObjectCorrupt;
                     },
                 }
                 try stored.reset();
@@ -1791,7 +2023,7 @@ pub const Database = struct {
             policy,
         );
 
-        var inserts = try ObjectInsertStatements.init(self.sqlite_db, self.storage_schema);
+        var inserts = try ObjectInsertStatements.init(self.sqlite_db, self.storage_schema, self.compression);
         defer inserts.deinit();
 
         for (chunks) |chunk| {
@@ -1904,10 +2136,10 @@ pub const Database = struct {
         hash: ObjectChunkId,
         policy: ChunkingPolicy,
     ) Error!ObjectChunkData {
-        var stmt = try self.prepareSchema(
-            \\select size_bytes, data
-            \\from {s}_zova_chunks
-            \\where chunk_hash = ?
+        var stmt = try self.prepareChunkRead(
+            \\select c.size_bytes, c.data, c.encoding
+            \\from {s}_zova_chunks c
+            \\where c.chunk_hash = ?
         , .{self.storage_schema.prefix()});
         defer stmt.deinit();
 
@@ -1918,12 +2150,11 @@ pub const Database = struct {
                 const size = try sqliteI64ToUsize(stmt.columnInt64(0));
                 if (size == 0 or size > policy.maxSize()) return error.ObjectCorrupt;
 
-                const data = stmt.columnBlob(1);
-                if (data.len != size) return error.ObjectCorrupt;
-                if (!std.mem.eql(u8, &objectId(data), &hash)) return error.ObjectCorrupt;
-
-                const bytes = try allocator.dupe(u8, data);
+                const encoding = try ChunkEncoding.fromColumn(stmt.columnInt64(2));
+                const bytes = try allocator.alloc(u8, size);
                 errdefer allocator.free(bytes);
+                try decodeChunk(encoding, stmt.columnBlob(1), bytes);
+                if (!std.mem.eql(u8, &objectId(bytes), &hash)) return error.ObjectCorrupt;
                 return .{ .hash = hash, .bytes = bytes };
             },
         }
@@ -2285,11 +2516,14 @@ fn insertObjectRow(
 const ObjectInsertStatements = struct {
     chunk: sqlite.Statement,
     manifest: sqlite.Statement,
+    compression: ObjectCompression = .none,
+    /// Encoded-chunk scratch, allocated on the first compressed chunk.
+    encode_buffer: []u8 = &.{},
 
-    fn init(db: *sqlite.Database, storage_schema: StorageSchema) Error!ObjectInsertStatements {
+    fn init(db: *sqlite.Database, storage_schema: StorageSchema, compression: ObjectCompression) Error!ObjectInsertStatements {
         var chunk = try prepareSchemaSql(db,
-            \\insert into {s}_zova_chunks (chunk_hash, size_bytes, data)
-            \\values (?, ?, ?)
+            \\insert into {s}_zova_chunks (chunk_hash, size_bytes, data, encoding)
+            \\values (?, ?, ?, ?)
             \\on conflict(chunk_hash) do nothing
         , .{storage_schema.prefix()});
         errdefer chunk.deinit();
@@ -2299,18 +2533,26 @@ const ObjectInsertStatements = struct {
             \\values (?, ?, ?, ?, ?)
         , .{storage_schema.prefix()});
 
-        return .{ .chunk = chunk, .manifest = manifest };
+        return .{ .chunk = chunk, .manifest = manifest, .compression = compression };
     }
 
     fn deinit(self: *ObjectInsertStatements) void {
         self.chunk.deinit();
         self.manifest.deinit();
+        scratch_allocator.free(self.encode_buffer);
     }
 
     fn insertChunk(self: *ObjectInsertStatements, chunk_hash: ObjectId, chunk: []const u8) Error!void {
+        if (self.compression != .none and self.encode_buffer.len < chunk.len) {
+            scratch_allocator.free(self.encode_buffer);
+            self.encode_buffer = &.{};
+            self.encode_buffer = try scratch_allocator.alloc(u8, @max(chunk.len, fastcdc.max_size));
+        }
+        const stored = encodeChunk(self.compression, chunk, self.encode_buffer);
         try self.chunk.bindBlob(1, &chunk_hash);
         try self.chunk.bindInt64(2, try usizeToSqliteI64(chunk.len));
-        try self.chunk.bindBlob(3, chunk);
+        try self.chunk.bindBlob(3, stored.data);
+        try self.chunk.bindInt64(4, stored.encoding.column());
         try self.chunk.expectDone();
         try self.chunk.reset();
         try self.chunk.clearBindings();
@@ -2340,17 +2582,23 @@ fn insertChunkRow(
     storage_schema: StorageSchema,
     chunk_hash: ObjectId,
     chunk: []const u8,
+    compression: ObjectCompression,
 ) Error!void {
+    const encode_buffer: []u8 = if (compression == .none) &.{} else try scratch_allocator.alloc(u8, chunk.len);
+    defer scratch_allocator.free(encode_buffer);
+    const stored = encodeChunk(compression, chunk, encode_buffer);
+
     var stmt = try prepareSchemaSql(db,
-        \\insert into {s}_zova_chunks (chunk_hash, size_bytes, data)
-        \\values (?, ?, ?)
+        \\insert into {s}_zova_chunks (chunk_hash, size_bytes, data, encoding)
+        \\values (?, ?, ?, ?)
         \\on conflict(chunk_hash) do nothing
     , .{storage_schema.prefix()});
     defer stmt.deinit();
 
     try stmt.bindBlob(1, &chunk_hash);
     try stmt.bindInt64(2, try usizeToSqliteI64(chunk.len));
-    try stmt.bindBlob(3, chunk);
+    try stmt.bindBlob(3, stored.data);
+    try stmt.bindInt64(4, stored.encoding.column());
     try stmt.expectDone();
 }
 

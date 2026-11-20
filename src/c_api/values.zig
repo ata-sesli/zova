@@ -21,6 +21,7 @@ const zova_object_id = @import("types.zig").zova_object_id;
 const zova_object_manifest_chunk = @import("types.zig").zova_object_manifest_chunk;
 const zova_object_put_options = @import("types.zig").zova_object_put_options;
 const zova_object_storage_profile = @import("types.zig").zova_object_storage_profile;
+const zova_object_compression = @import("types.zig").zova_object_compression;
 const zova_vector_element_type = @import("types.zig").zova_vector_element_type;
 const zova_vector_input = @import("types.zig").zova_vector_input;
 const zova_vector_metric = @import("types.zig").zova_vector_metric;
@@ -394,6 +395,14 @@ pub fn optionalCStringSpan(value: ?[*:0]const u8) ?[]const u8 {
 
 pub fn toObjectId(id: zova_object_id) zova.ObjectId {
     return id.bytes;
+}
+
+pub fn objectCompressionFromAbi(raw: c_int) ?zova.ObjectCompression {
+    return switch (raw) {
+        @backingInt(zova_object_compression.NONE) => .none,
+        @backingInt(zova_object_compression.LZ4) => .lz4,
+        else => null,
+    };
 }
 
 pub fn objectOptionsFromAbi(options: zova_object_put_options) ?zova.ObjectPutOptions {

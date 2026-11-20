@@ -131,6 +131,8 @@ const zova_object_exists = @import("c_api/objects.zig").zova_object_exists;
 const zova_object_id = @import("c_api/types.zig").zova_object_id;
 const zova_object_id_from_bytes = @import("c_api/objects.zig").zova_object_id_from_bytes;
 const zova_object_put = @import("c_api/objects.zig").zova_object_put;
+const zova_object_compression = @import("c_api/types.zig").zova_object_compression;
+const zova_object_set_compression = @import("c_api/objects.zig").zova_object_set_compression;
 const ZOVA_OPEN_READ_ONLY = @import("c_api/types.zig").ZOVA_OPEN_READ_ONLY;
 const zova_sql_function_call = @import("c_api/types.zig").zova_sql_function_call;
 const ZOVA_SQL_FUNCTION_DETERMINISTIC = @import("c_api/types.zig").ZOVA_SQL_FUNCTION_DETERMINISTIC;
@@ -349,7 +351,7 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
         var msg = zova_message{ .data = null, .len = 0 };
         defer zova_message_free(&msg);
         try std.testing.expectEqual(zova_status.OK, zova_database_probe_format(&.{ .path = path, .out_info = &out, .out_error_message = &msg }));
-        try std.testing.expectEqual(@as(u32, 13), out.format_version);
+        try std.testing.expectEqual(@as(u32, 14), out.format_version);
         try std.testing.expectEqual(@backingInt(zova_format_compatibility.CURRENT), out.compatibility);
     }
     // Migratable fixture
@@ -367,7 +369,7 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
     }
     // Future and legacy synthetic
     for ([_]struct { ver: []const u8, expected: zova_format_compatibility }{
-        .{ .ver = "14", .expected = .UNSUPPORTED_FUTURE },
+        .{ .ver = "15", .expected = .UNSUPPORTED_FUTURE },
         .{ .ver = "8", .expected = .UNSUPPORTED_LEGACY },
     }) |case| {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -410,12 +412,12 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
         var probe_msg = zova_message{ .data = null, .len = 0 };
         defer zova_message_free(&probe_msg);
         try std.testing.expectEqual(zova_status.OK, zova_database_probe_format(&.{ .path = dst, .out_info = &out, .out_error_message = &probe_msg }));
-        try std.testing.expectEqual(@as(u32, 13), out.format_version);
+        try std.testing.expectEqual(@as(u32, 14), out.format_version);
         try std.testing.expectEqual(@backingInt(zova_format_compatibility.CURRENT), out.compatibility);
         // destination is openable and no private names leaked via C output (checked via probe/migrate out_info)
         var db = try zova.Database.open(dst);
         defer db.deinit();
-        try std.testing.expectEqual(@as(u32, 13), try std.fmt.parseInt(u32, zova_version.format_version, 10));
+        try std.testing.expectEqual(@as(u32, 14), try std.fmt.parseInt(u32, zova_version.format_version, 10));
     }
     // Destination exists
     {
@@ -434,7 +436,7 @@ test "c abi probe and migrate cover compatibility success failure and immutabili
     }
     // Unsupported future/legacy via C
     for ([_]struct { ver: []const u8, expected: zova_status }{
-        .{ .ver = "14", .expected = .UNSUPPORTED_FUTURE_FORMAT },
+        .{ .ver = "15", .expected = .UNSUPPORTED_FUTURE_FORMAT },
         .{ .ver = "8", .expected = .UNSUPPORTED_LEGACY_FORMAT },
     }) |case| {
         var src_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -1051,7 +1053,7 @@ test "c abi maps incompatible storage formats to unsupported zova version" {
     const cases = [_]struct { file_name: []const u8, version_value: []const u8, expected: zova_status }{
         .{ .file_name = "c-abi-format-9.zova", .version_value = "9", .expected = .MIGRATION_REQUIRED },
         .{ .file_name = "c-abi-format-8.zova", .version_value = "8", .expected = .UNSUPPORTED_LEGACY_FORMAT },
-        .{ .file_name = "c-abi-format-14.zova", .version_value = "14", .expected = .UNSUPPORTED_FUTURE_FORMAT },
+        .{ .file_name = "c-abi-format-15.zova", .version_value = "15", .expected = .UNSUPPORTED_FUTURE_FORMAT },
     };
 
     for (cases) |case| {
@@ -3637,4 +3639,39 @@ test "c api reclaim releases free pages in bounded steps and reports each member
     try std.testing.expectEqual(zova_status.OBJECT_TRANSACTION_ACTIVE, c_api_internal.zova_database_reclaim(&.{ .db = db, .out_result = &during }));
     try std.testing.expectEqual(@as(usize, 0), during.member_count);
     try std.testing.expectEqual(zova_status.OK, zova_database_rollback(&.{ .db = db }));
+}
+
+test "c abi object compression is a per-handle setting validated at the boundary" {
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create_memory(&.{
+        .out_db = &db,
+        .out_error_message = null,
+    }));
+    defer _ = zova_database_close(db);
+
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_object_set_compression(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_object_set_compression(&.{ .db = null, .compression = @backingInt(zova_object_compression.LZ4) }));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_object_set_compression(&.{ .db = db, .compression = 2 }));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, zova_object_set_compression(&.{ .db = db, .compression = -1 }));
+    const handle = databaseHandleRaw(db).?;
+    try std.testing.expectEqual(zova.ObjectCompression.none, handle.db.objectCompression());
+
+    try std.testing.expectEqual(zova_status.OK, zova_object_set_compression(&.{ .db = db, .compression = @backingInt(zova_object_compression.LZ4) }));
+    try std.testing.expectEqual(zova.ObjectCompression.lz4, handle.db.objectCompression());
+    const text = "compressible compressible compressible compressible compressible compressible";
+    var object_id = zova_object_id{ .bytes = @as([32]u8, @splat(0)) };
+    try std.testing.expectEqual(zova_status.OK, zova_object_put(&.{ .db = db, .data = text, .len = text.len, .out_id = &object_id }));
+    try std.testing.expectEqualSlices(u8, &zova.objectId(text), &object_id.bytes);
+    var object = try handle.db.getObject(std.testing.allocator, object_id.bytes);
+    defer object.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, text, object.bytes);
+    {
+        var stmt = try handle.db.prepare("select count(*) from _zova_chunks where encoding = 1");
+        defer stmt.deinit();
+        _ = try stmt.step();
+        try std.testing.expectEqual(@as(i64, 1), stmt.columnInt64(0));
+    }
+
+    try std.testing.expectEqual(zova_status.OK, zova_object_set_compression(&.{ .db = db, .compression = @backingInt(zova_object_compression.NONE) }));
+    try std.testing.expectEqual(zova.ObjectCompression.none, handle.db.objectCompression());
 }

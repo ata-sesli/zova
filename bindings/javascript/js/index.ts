@@ -50,6 +50,7 @@ export { Step } from "./types.js";
 export type {
   ObjectManifest,
   ObjectManifestChunk,
+  ObjectCompression,
   ObjectManifestChunkInput,
   ObjectPutOptions,
   ObjectStorageProfile,

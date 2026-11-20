@@ -19,7 +19,7 @@ in another.
 | Package version | Zova release identity across every distribution channel | `src/version.zig` `package_version` | `1.4.0` |
 | C ABI version | Compatibility of the exported C ABI and generated C | `src/version.zig` `abi_version_*` | `1.4.0` (`1.4.0` numeric components) |
 | SQLite version | The vendored SQLite amalgamation, and separately SQLite's own file format | `src/version.zig` `sqlite_version` | `3.53.4` |
-| Zova storage format | The layout of a `.zova` database, recorded in `_zova_meta.format_version` | `src/version.zig` `format_version` | `13` |
+| Zova storage format | The layout of a `.zova` database, recorded in `_zova_meta.format_version` | `src/version.zig` `format_version` | `14` |
 
 A SQLite upgrade does not change the Zova storage format and never requires a
 Zova migration. A package or ABI release does not by itself change the storage
@@ -57,7 +57,7 @@ Probing is separate from opening and is always safe: `zova format` and
 `probeDatabaseFormat` open a read-only raw SQLite connection, read only the
 identity metadata required for classification, and never write.
 
-## Migrating formats 9 through 12 to format 13
+## Migrating formats 9 through 13 to format 14
 
 A migration runs offline, writes only to a new destination, and leaves the source
 untouched. Probe first, then migrate.
@@ -66,8 +66,8 @@ untouched. Probe first, then migrate.
 
 ```sh
 zova format app.zova
-zova migrate --dry-run app.zova app-format-13.zova
-zova migrate app.zova app-format-13.zova
+zova migrate --dry-run app.zova app-format-14.zova
+zova migrate app.zova app-format-14.zova
 ```
 
 `zova format` prints the source format, the current format, the earliest
@@ -188,7 +188,7 @@ zova_status status = zova_database_probe_format(&probe);
 
 zova_database_migrate_request migrate = {
     .source_path = "app.zova",
-    .destination_path = "app-format-13.zova",
+    .destination_path = "app-format-14.zova",
     .flags = 0, /* ZOVA_MIGRATE_NO_VERIFY skips destination verification */
     .out_error_message = &message,
 };
@@ -209,7 +209,7 @@ bundle paths and plugin descriptors linked into the host process:
 const char *bundles[] = { "networkit.zovaext" };
 zova_database_migrate_extensions_request migrate = {
     .source_path = "app.zova",
-    .destination_path = "app-format-13.zova",
+    .destination_path = "app-format-14.zova",
     .extension_bundle_paths = bundles,
     .extension_bundle_count = 1,
     .out_error_message = &message,
@@ -224,7 +224,7 @@ use zova::{migrate_database, probe_format, MigrateOptions};
 
 let info = probe_format("app.zova")?;
 assert_eq!(info.compatibility, zova::FormatCompatibility::Migratable);
-migrate_database("app.zova", "app-format-13.zova", MigrateOptions::default())?;
+migrate_database("app.zova", "app-format-14.zova", MigrateOptions::default())?;
 ```
 
 ### Python
@@ -234,7 +234,7 @@ import zova
 
 info = zova.probe_format("app.zova")
 assert info.compatibility is zova.FormatCompatibility.MIGRATABLE
-zova.migrate_database("app.zova", "app-format-13.zova")  # verify=True by default
+zova.migrate_database("app.zova", "app-format-14.zova")  # verify=True by default
 ```
 
 ### Go
@@ -244,7 +244,7 @@ info, err := zova.ProbeFormat("app.zova")
 if info.Compatibility != zova.FormatMigratable {
     return fmt.Errorf("unexpected compatibility: %v", info.Compatibility)
 }
-if err := zova.MigrateDatabase("app.zova", "app-format-13.zova"); err != nil {
+if err := zova.MigrateDatabase("app.zova", "app-format-14.zova"); err != nil {
     return err
 }
 ```
@@ -259,7 +259,7 @@ import { migrateDatabase, probeFormat } from "zova-js";
 
 const info = probeFormat("app.zova");
 if (info.compatibility !== "migratable") throw new Error("cannot migrate");
-migrateDatabase("app.zova", "app-format-13.zova"); // verify defaults to true
+migrateDatabase("app.zova", "app-format-14.zova"); // verify defaults to true
 ```
 
 `asyncProbeFormat` and `asyncMigrateDatabase` are the promise-returning variants.
@@ -347,8 +347,8 @@ definition, so a format-13 file that lacks it, or a format-11 or format-12 file
 that has it, is rejected as not a valid Zova database.
 
 SQLite's `auto_vacuum` mode is fixed when a file's first table is created and is
-not part of the storage format: both `none` and `incremental` are valid in
-format 13. Zova does not vacuum automatically; files in incremental mode keep
+not part of the storage format: both `none` and `incremental` are valid from
+format 13 onward. Zova does not vacuum automatically; files in incremental mode keep
 deleted pages on the freelist until an explicit reclaim releases them.
 
 | Operation | Resulting `auto_vacuum` |
@@ -377,6 +377,37 @@ returns the same per-member counts in a `ReclaimResult`; it fails with
 `ReclaimSpace` (Go), and `reclaimSpace` (JavaScript `Database` and
 `AsyncDatabase`). Reclaim does not change any logical data.
 
+## Per-chunk compression (format 14)
+
+Format 14 adds an `encoding` column to `_zova_chunks` in every main database
+and object store. It records how each chunk's `data` is stored:
+
+| `encoding` | Stored `data` |
+| --- | --- |
+| `0` | the raw chunk bytes; `length(data) = size_bytes` |
+| `1` | one LZ4 block that decodes to the chunk bytes; `length(data) < size_bytes` |
+
+`chunk_hash` remains the SHA-256 of the uncompressed chunk bytes and
+`size_bytes` their length, so object IDs, chunk hashes, manifests and
+deduplication do not depend on whether a chunk is compressed. Every read path
+decodes a chunk before checking its hash, and a block that fails to decode or
+decodes to bytes with a different hash is reported as object corruption.
+
+Compression is off by default. It is a per-handle setting that is not stored
+in the database: after `Database.setObjectCompression(.lz4)` (C:
+`zova_object_set_compression`), each new chunk that handle writes is stored
+LZ4-encoded only when the block is smaller than the chunk; otherwise it is
+stored raw. Chunks that already exist are never re-encoded, and a handle with
+compression off still reads compressed chunks.
+
+The 13 → 14 step adds the column with default `0` and replaces the stored
+`_zova_chunks` definition with the format-14 text, using SQLite's
+`writable_schema` procedure for constraint changes that every existing row
+already satisfies. It does not rewrite chunk rows, so every migrated chunk
+stays raw. Open validates the exact `_zova_chunks` definition, so a format-14
+file without the column, or a format-13 file with it, is rejected as not a
+valid Zova database.
+
 ## What a migration preserves
 
 A migration preserves the logical database. User SQLite schema and rows are
@@ -385,7 +416,9 @@ payloads, opaque keys, extension records, store IDs, bound-set IDs, and epochs.
 The intended private differences are the key-value schema introduced by format
 10, the canonical object schemas required by format 11, source-local vector
 identity/history tables and tracking triggers introduced by format 12, the
-`_zova_object_chunks(chunk_hash)` index introduced by format 13, and the format
+`_zova_object_chunks(chunk_hash)` index introduced by format 13, the
+`_zova_chunks.encoding` column introduced by format 14 (every migrated chunk is
+raw, `encoding = 0`), and the format
 metadata itself, which is updated last inside each atomic adjacent step. Public objects,
 chunks, manifests, and their ordering remain unchanged.
 
@@ -396,7 +429,8 @@ chunks, manifests, and their ordering remain unchanged.
 genuine exports of the released Zova 0.26.1 build, regenerated by
 `scripts/export-format-9-fixtures.sh`; they are never hand-edited and never
 produced by editing metadata in a newer database. The format-12 fixtures were
-produced by the CLI built from the unmodified `v1.3.0` tag.
+produced by the CLI built from the unmodified `v1.3.0` tag, and the format-13
+fixtures by the CLI built from the unmodified `v1.4.0` tag.
 
 `zig build check-storage-compat` is a release gate. It runs in
 `scripts/check-release.sh` and in CI, and it verifies that:
@@ -453,7 +487,7 @@ path. The source hash is identical before and after, and the only structural
 difference is the private key-value schema format 10 introduces.
 
 This recorded adjacent step is evidence, not a gate. Current migrations continue
-through formats 10, 11 and 12 to format 13. The gates are the correctness, atomicity,
+through formats 10, 11, 12 and 13 to format 14. The gates are the correctness, atomicity,
 source-preservation, and binding-parity assertions in
 `zig build check-storage-compat`, which recompute hashes, sizes, and counts on
 every run against every retained fixture.

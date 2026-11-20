@@ -26,6 +26,16 @@ fn put_options(options: &NativeObjectPutOptions) -> Result<zova::ObjectPutOption
     Ok(zova::ObjectPutOptions { profile })
 }
 
+pub(crate) fn object_compression(value: &str) -> Result<zova::ObjectCompression> {
+    match value {
+        "none" => Ok(zova::ObjectCompression::None),
+        "lz4" => Ok(zova::ObjectCompression::Lz4),
+        value => Err(invalid_argument_error(format!(
+            "unsupported object compression: {value}"
+        ))),
+    }
+}
+
 fn object_id_from_array(value: &Uint8Array) -> Result<zova::ObjectId> {
     zova::ObjectId::try_from(value.as_ref()).map_err(zova_error)
 }
@@ -114,6 +124,14 @@ pub fn object_chunk_id(data: Uint8Array) -> Result<Uint8Array> {
 
 #[napi]
 impl NativeDatabase {
+    #[napi]
+    pub fn set_object_compression(&self, compression: String) -> Result<()> {
+        self.state
+            .database()?
+            .set_object_compression(object_compression(&compression)?)
+            .map_err(zova_error)
+    }
+
     #[napi]
     pub fn put_object(&self, data: Uint8Array) -> Result<Uint8Array> {
         self.state

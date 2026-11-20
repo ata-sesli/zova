@@ -307,13 +307,17 @@ pub fn validateObjectSchemaExpected(db: *sqlite.Database, expected_format: []con
         );
     }
     if (expected_version == 11 or expected_version == 12) {
-        try validateObjectSchemaSql(db, object_impl.objects_schema_sql, object_impl.chunks_schema_sql, object_impl.object_chunks_schema_sql);
+        try validateObjectSchemaSql(db, object_impl.objects_schema_sql, object_impl.format13_chunks_schema_sql, object_impl.object_chunks_schema_sql);
         // The chunk-reference index arrives in format 13; an older file that
         // already carries it has drifted from its declared format.
         if (try objectChunkIndexExists(db, "main.")) return error.NotZovaDatabase;
         return;
     }
     if (expected_version == 13) {
+        try validateObjectSchemaSql(db, object_impl.objects_schema_sql, object_impl.format13_chunks_schema_sql, object_impl.object_chunks_schema_sql);
+        return validateObjectChunkIndex(db, "main.");
+    }
+    if (expected_version == 14) {
         try validateObjectSchemaSql(db, object_impl.objects_schema_sql, object_impl.chunks_schema_sql, object_impl.object_chunks_schema_sql);
         return validateObjectChunkIndex(db, "main.");
     }

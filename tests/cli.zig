@@ -2085,7 +2085,7 @@ test "cli info reports bounded database summary" {
     defer result.deinit();
     try std.testing.expectEqual(@as(u8, 0), result.code);
     try expectContains(result.stdout, "Zova database");
-    try expectContains(result.stdout, "format_version: 13");
+    try expectContains(result.stdout, "format_version: 14");
     try expectContains(result.stdout, "objects:");
     try expectContains(result.stdout, "chunks:");
     try expectContains(result.stdout, "loose_chunks:");
@@ -2360,7 +2360,7 @@ test "cli info json reports bounded database summary" {
     try expectJsonInt(root, "cli_json_version", 1);
     try expectJsonString(root, "package_version", cli.package_version);
     try expectJsonString(root, "sqlite_version", zova.sqlite.version());
-    try expectJsonString(root, "format_version", "13");
+    try expectJsonString(root, "format_version", "14");
     try expectJsonObjectHasInt(root, "files", "database_bytes");
     try expectJsonObjectHasInt(root, "sqlite", "page_count");
     try expectJsonObjectHasInt(root, "objects", "count");
@@ -3034,6 +3034,64 @@ test "cli doctor reports corruption with bounded json issues" {
     try expectContains(zero_text.stderr, "issue_count:");
     try expectContains(zero_text.stderr, "no issue examples shown");
     try std.testing.expect(std.mem.indexOf(u8, zero_text.stderr, "issues:\n  none") == null);
+}
+
+test "cli doctor and salvage read lz4-compressed chunks" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buffers: [2][std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffers[0], tmp.sub_path[0..], "doctor-lz4.zova");
+    const salvaged_path = try testingDbPath(&path_buffers[1], tmp.sub_path[0..], "doctor-lz4-salvaged.zova");
+
+    const phrase = "compressed chunk line for doctor and salvage\n";
+    var text: [phrase.len * 4096]u8 = undefined;
+    for (0..4096) |index| @memcpy(text[index * phrase.len ..][0..phrase.len], phrase);
+    var id: zova.ObjectId = undefined;
+    {
+        var db = try zova.Database.create(db_path);
+        defer db.deinit();
+        db.setObjectCompression(.lz4);
+        id = try db.putObject(&text);
+        var stmt = try db.prepare("select count(*) from _zova_chunks where encoding = 1");
+        defer stmt.deinit();
+        _ = try stmt.step();
+        try std.testing.expect(stmt.columnInt64(0) > 0);
+    }
+
+    var healthy = try runCli(&.{ "zova", "doctor", db_path });
+    defer healthy.deinit();
+    try std.testing.expectEqual(@as(u8, 0), healthy.code);
+    try expectContains(healthy.stdout, "status: ok");
+
+    var salvage = try runCli(&.{ "zova", "salvage", "--json", db_path, salvaged_path });
+    defer salvage.deinit();
+    try std.testing.expectEqual(@as(u8, 0), salvage.code);
+    {
+        var salvaged = try zova.Database.open(salvaged_path);
+        defer salvaged.deinit();
+        var object = try salvaged.getObject(std.testing.allocator, id);
+        defer object.deinit(std.testing.allocator);
+        try std.testing.expectEqualSlices(u8, &text, object.bytes);
+    }
+
+    {
+        // A block that does not decode (match offset 0).
+        var raw = try zova.Database.open(db_path);
+        defer raw.deinit();
+        try raw.exec(
+            \\update _zova_chunks
+            \\set data = x'1f00' || zeroblob(5)
+            \\where rowid = (select min(rowid) from _zova_chunks where encoding = 1);
+        );
+    }
+    var corrupt = try runCli(&.{ "zova", "doctor", "--json", db_path });
+    defer corrupt.deinit();
+    try std.testing.expectEqual(@as(u8, 4), corrupt.code);
+    var parsed = try parseJson(corrupt.stderr);
+    defer parsed.deinit();
+    try expectJsonString(parsed.value.object, "status", "needs_attention");
+    try expectJsonObjectHasInt(parsed.value.object, "issue_counts", "chunk");
 }
 
 test "cli salvage dry-run reports healthy recoverability in text and json" {
@@ -4142,7 +4200,7 @@ test "cli format reports text and json for all compatibility states" {
     defer tmp.cleanup();
     const io = defaultIo();
 
-    // current (fresh format 13)
+    // current (fresh format 14)
     var current_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const current_path = try testingDbPath(&current_buffer, tmp.sub_path[0..], "format-current.zova");
     try createHealthyDatabase(current_path);
@@ -4152,10 +4210,10 @@ test "cli format reports text and json for all compatibility states" {
     const migratable_path = try testingDbPath(&migratable_buffer, tmp.sub_path[0..], "format-migratable.zova");
     try copyFixtureFile("tests/fixtures/format-9.zova", migratable_path);
 
-    // unsupported_future (14) and unsupported_legacy (8) via synthetic
+    // unsupported_future (15) and unsupported_legacy (8) via synthetic
     var future_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const future_path = try testingDbPath(&future_buffer, tmp.sub_path[0..], "format-future.zova");
-    try createSyntheticFormatDatabase(future_path, "14");
+    try createSyntheticFormatDatabase(future_path, "15");
 
     var legacy_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const legacy_path = try testingDbPath(&legacy_buffer, tmp.sub_path[0..], "format-legacy.zova");
@@ -4172,9 +4230,9 @@ test "cli format reports text and json for all compatibility states" {
         expected_source_format: ?i64,
         expected_action: []const u8,
     }{
-        .{ .path = current_path, .expected_compat = "current", .expected_source_format = 13, .expected_action = "none" },
+        .{ .path = current_path, .expected_compat = "current", .expected_source_format = 14, .expected_action = "none" },
         .{ .path = migratable_path, .expected_compat = "migratable", .expected_source_format = 9, .expected_action = "run 'zova migrate <source> <destination>'" },
-        .{ .path = future_path, .expected_compat = "unsupported_future", .expected_source_format = 14, .expected_action = "upgrade Zova" },
+        .{ .path = future_path, .expected_compat = "unsupported_future", .expected_source_format = 15, .expected_action = "upgrade Zova" },
         .{ .path = legacy_path, .expected_compat = "unsupported_legacy", .expected_source_format = 8, .expected_action = "unsupported" },
         .{ .path = invalid_path, .expected_compat = "invalid", .expected_source_format = null, .expected_action = "unsupported" },
     };
@@ -4197,7 +4255,7 @@ test "cli format reports text and json for all compatibility states" {
             const val = root.get("source_format") orelse return error.MissingJsonField;
             try std.testing.expectEqual(std.json.Value.null, std.meta.activeTag(val));
         }
-        try expectJsonInt(root, "current_format", 13);
+        try expectJsonInt(root, "current_format", 14);
         try expectJsonInt(root, "minimum_migratable_format", 9);
         try expectJsonString(root, "compatibility", case.expected_compat);
         try expectJsonString(root, "recommended_action", case.expected_action);
@@ -4209,7 +4267,7 @@ test "cli format reports text and json for all compatibility states" {
         defer text.deinit();
         try std.testing.expectEqual(@as(u8, 0), text.code);
         try expectContains(text.stdout, "source:");
-        try expectContains(text.stdout, "current_format: 13");
+        try expectContains(text.stdout, "current_format: 14");
         try expectContains(text.stdout, "minimum_migratable_format: 9");
         try expectContains(text.stdout, case.expected_compat);
         try expectContains(text.stdout, case.expected_action);
@@ -4276,7 +4334,7 @@ test "cli migrate migrates format-9 to current preserves source and verifies" {
     try expectJsonString(root, "source_path", source_path);
     try expectJsonString(root, "destination_path", dest_path);
     try expectJsonInt(root, "source_format", 9);
-    try expectJsonInt(root, "destination_format", 13);
+    try expectJsonInt(root, "destination_format", 14);
     try expectJsonBool(root, "verified", true);
     const bound = root.get("bound_stores") orelse return error.MissingJsonField;
     try std.testing.expectEqual(std.json.Value.object, std.meta.activeTag(bound));
@@ -4297,7 +4355,7 @@ test "cli migrate migrates format-9 to current preserves source and verifies" {
     var format_json = try parseJson(format.stdout);
     defer format_json.deinit();
     try expectJsonString(format_json.value.object, "compatibility", "current");
-    try expectJsonInt(format_json.value.object, "source_format", 13);
+    try expectJsonInt(format_json.value.object, "source_format", 14);
 
     var check = try runCli(&.{ "zova", "check", "--json", "--deep", dest_path });
     defer check.deinit();
@@ -4314,7 +4372,7 @@ test "cli migrate migrates format-9 to current preserves source and verifies" {
     try std.testing.expectEqual(@as(u8, 0), text.code);
     try expectContains(text.stdout, "migrate: ok");
     try expectContains(text.stdout, "source_format: 9");
-    try expectContains(text.stdout, "destination_format: 13");
+    try expectContains(text.stdout, "destination_format: 14");
     try expectContains(text.stdout, "verified: true");
     try std.testing.expect(std.mem.indexOf(u8, text.stdout, "_zova_") == null);
 }
@@ -4352,7 +4410,7 @@ test "cli migrate --dry-run plans a bound set and creates nothing" {
     try expectJsonString(root, "status", "ok");
     try expectJsonBool(root, "dry_run", true);
     try expectJsonInt(root, "source_format", 9);
-    try expectJsonInt(root, "destination_format", 13);
+    try expectJsonInt(root, "destination_format", 14);
     try expectJsonString(root, "compatibility", "migratable");
     try expectJsonBool(root, "verify", true);
     try expectJsonString(root, "preflight", "passed");
@@ -4571,7 +4629,7 @@ test "cli migrate handles unsupported formats and no-verify" {
     try std.testing.expect(current_json.value.object.get("error") != null);
     try expectPathMissing(current_dest);
 
-    // legacy (8) and future (14)
+    // legacy (8) and future (15)
     var legacy_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const legacy_path = try testingDbPath(&legacy_buffer, tmp.sub_path[0..], "migrate-legacy.zova");
     try createSyntheticFormatDatabase(legacy_path, "8");
@@ -4587,7 +4645,7 @@ test "cli migrate handles unsupported formats and no-verify" {
 
     var future_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const future_path = try testingDbPath(&future_buffer, tmp.sub_path[0..], "migrate-future.zova");
-    try createSyntheticFormatDatabase(future_path, "14");
+    try createSyntheticFormatDatabase(future_path, "15");
     var future_dest_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const future_dest = try testingDbPath(&future_dest_buffer, tmp.sub_path[0..], "migrate-future-dest.zova");
     var future = try runCli(&.{ "zova", "migrate", "--json", future_path, future_dest });
@@ -4608,7 +4666,7 @@ test "cli migrate handles unsupported formats and no-verify" {
     defer noverify_json.deinit();
     try expectJsonBool(noverify_json.value.object, "verified", false);
     try expectJsonInt(noverify_json.value.object, "source_format", 9);
-    try expectJsonInt(noverify_json.value.object, "destination_format", 13);
+    try expectJsonInt(noverify_json.value.object, "destination_format", 14);
     // no-verify destination still passes deep check (separate)
     var check = try runCli(&.{ "zova", "check", "--deep", noverify_dest });
     defer check.deinit();
@@ -4758,7 +4816,7 @@ test "cli migrate reports derived bound stores accurately" {
     defer parsed.deinit();
     const root = parsed.value.object;
     try expectJsonInt(root, "source_format", 9);
-    try expectJsonInt(root, "destination_format", 13);
+    try expectJsonInt(root, "destination_format", 14);
     const bound = root.get("bound_stores") orelse return error.MissingJsonField;
     try std.testing.expectEqual(std.json.Value.object, std.meta.activeTag(bound));
 

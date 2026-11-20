@@ -196,6 +196,18 @@ pub const zova_object_put_options = extern struct {
     profile: c_int = @backingInt(zova_object_storage_profile.DEDUPLICATION),
 };
 
+/// Compression for object chunks a database handle writes. Request structs
+/// carry it as a raw C integer, like `zova_object_storage_profile`.
+pub const zova_object_compression = enum(c_int) {
+    NONE = 0,
+    LZ4 = 1,
+};
+
+pub const zova_object_set_compression_request = extern struct {
+    db: ?*zova_database,
+    compression: c_int,
+};
+
 pub const zova_vector_metric = enum(c_int) {
     COSINE = 0,
     L2 = 1,

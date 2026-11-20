@@ -46,7 +46,8 @@ const prototype_chunks_schema_sql =
     \\create table _zova_chunks (
     \\  chunk_hash blob not null primary key check (length(chunk_hash) = 32),
     \\  size_bytes integer not null check (size_bytes > 0 and size_bytes <= 1048576),
-    \\  data blob not null check (length(data) = size_bytes)
+    \\  data blob not null check ((encoding = 0 and length(data) = size_bytes) or (encoding = 1 and length(data) < size_bytes)),
+    \\  encoding integer not null default 0 check (encoding in (0, 1))
     \\)
 ;
 const prototype_object_chunks_schema_sql =
@@ -3708,4 +3709,263 @@ test "put inside caller transaction with bound store verifies stored bytes" {
     defer object.deinit(std.testing.allocator);
     try std.testing.expectEqualSlices(u8, &bytes, object.bytes);
     try testingIntegrityCheckOk(&db);
+}
+
+/// Text-like bytes that LZ4 shrinks: numbered lines over a small vocabulary.
+fn testingCompressibleBytes(allocator: std.mem.Allocator, len: usize) ![]u8 {
+    const bytes = try allocator.alloc(u8, len);
+    errdefer allocator.free(bytes);
+    const words = [_][]const u8{ "alpha ", "beta ", "gamma ", "delta ", "epsilon ", "zeta ", "eta\n" };
+    var prng = std.Random.DefaultPrng.init(0x14);
+    var offset: usize = 0;
+    var line: u64 = 0;
+    while (offset < len) : (line += 1) {
+        var prefix: [24]u8 = undefined;
+        const head = std.fmt.bufPrint(&prefix, "{d}: ", .{line}) catch unreachable;
+        for ([_][]const u8{ head, words[prng.random().uintLessThan(usize, words.len)], words[prng.random().uintLessThan(usize, words.len)] }) |piece| {
+            const n = @min(piece.len, len - offset);
+            @memcpy(bytes[offset..][0..n], piece[0..n]);
+            offset += n;
+        }
+    }
+    return bytes;
+}
+
+fn testingChunkEncodingCount(db: *Database, id: ObjectId, encoding: i64) !i64 {
+    var stmt = try db.prepare(
+        \\select count(*) from _zova_object_chunks oc
+        \\join _zova_chunks c on c.chunk_hash = oc.chunk_hash
+        \\where oc.object_id = ?1 and c.encoding = ?2
+    );
+    defer stmt.deinit();
+    try stmt.bindBlob(1, &id);
+    try stmt.bindInt64(2, encoding);
+    _ = try stmt.step();
+    return stmt.columnInt64(0);
+}
+
+fn testingExpectEveryReadPath(db: *Database, id: ObjectId, bytes: []const u8) !void {
+    const allocator = std.testing.allocator;
+    try testingExpectObjectBytes(db, id, bytes);
+
+    const full = try allocator.alloc(u8, bytes.len);
+    defer allocator.free(full);
+    try std.testing.expectEqual(bytes.len, try db.readObjectRange(id, 0, full));
+    try std.testing.expectEqualSlices(u8, bytes, full);
+
+    // Partial ranges inside one chunk and across chunk boundaries.
+    var window: [70_000]u8 = undefined;
+    for ([_]u64{ 1, 65_000, fixed_chunks.chunk_size - 33, bytes.len - 10 }) |offset| {
+        const want = @min(window.len, bytes.len - @as(usize, @intCast(offset)));
+        try std.testing.expectEqual(want, try db.readObjectRange(id, offset, window[0..want]));
+        try std.testing.expectEqualSlices(u8, bytes[@intCast(offset)..][0..want], window[0..want]);
+    }
+
+    var reader = try db.objectReader(id);
+    defer reader.deinit();
+    var streamed: usize = 0;
+    while (true) {
+        const count = try reader.read(&window);
+        if (count == 0) break;
+        try std.testing.expectEqualSlices(u8, bytes[streamed..][0..count], window[0..count]);
+        streamed += count;
+    }
+    try std.testing.expectEqual(bytes.len, streamed);
+
+    var seekable = try db.objectSeekableReader(allocator, id);
+    defer seekable.deinit();
+    seekable.seekTo(bytes.len / 2);
+    const count = try seekable.read(&window);
+    try std.testing.expect(count > 0);
+    try std.testing.expectEqualSlices(u8, bytes[bytes.len / 2 ..][0..count], window[0..count]);
+
+    var manifest = try db.objectManifest(allocator, id);
+    defer manifest.deinit(allocator);
+    for (manifest.chunks) |chunk| {
+        // `getObjectChunk` serves transfer-sized chunks only.
+        if (chunk.size_bytes > fastcdc.max_size) continue;
+        var data = try db.getObjectChunk(allocator, chunk.hash);
+        defer data.deinit(allocator);
+        try std.testing.expectEqualSlices(u8, bytes[@intCast(chunk.offset)..][0..@intCast(chunk.size_bytes)], data.bytes);
+    }
+}
+
+test "lz4 compression stores smaller chunks with identical ids manifests and reads" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffers: [2][std.fs.max_path_bytes]u8 = undefined;
+    const plain_path = try test_support.testingDbPath(&buffers[0], tmp.sub_path[0..], "plain.zova");
+    const packed_path = try test_support.testingDbPath(&buffers[1], tmp.sub_path[0..], "packed.zova");
+
+    const allocator = std.testing.allocator;
+    const text = try testingCompressibleBytes(allocator, fixed_chunks.chunk_size * 2 + 12_345);
+    defer allocator.free(text);
+    const noise = try allocator.alloc(u8, fixed_chunks.chunk_size + 777);
+    defer allocator.free(noise);
+    var prng = std.Random.DefaultPrng.init(0x227);
+    prng.random().bytes(noise);
+
+    var plain = try Database.create(plain_path);
+    defer plain.deinit();
+    var db = try Database.create(packed_path);
+    defer db.deinit();
+    try std.testing.expectEqual(zova.ObjectCompression.none, db.objectCompression());
+    db.setObjectCompression(.lz4);
+    try std.testing.expectEqual(zova.ObjectCompression.lz4, db.objectCompression());
+
+    for ([_]object_impl.ObjectStorageProfile{ .deduplication, .streaming }) |profile| {
+        const id = try db.putObjectWithOptions(text, .{ .profile = profile });
+        try std.testing.expectEqualSlices(u8, &objectId(text), &id);
+        try std.testing.expectEqual(@as(i64, 0), try testingChunkEncodingCount(&db, id, 0));
+        try std.testing.expect(try testingChunkEncodingCount(&db, id, 1) > 0);
+        try testingExpectEveryReadPath(&db, id, text);
+
+        // Incompressible chunks stay raw.
+        const noise_id = try db.putObjectWithOptions(noise, .{ .profile = profile });
+        try std.testing.expectEqual(@as(i64, 0), try testingChunkEncodingCount(&db, noise_id, 1));
+        try testingExpectEveryReadPath(&db, noise_id, noise);
+
+        const plain_id = try plain.putObjectWithOptions(text, .{ .profile = profile });
+        try std.testing.expectEqualSlices(u8, &id, &plain_id);
+        var left = try db.objectManifest(allocator, id);
+        defer left.deinit(allocator);
+        var right = try plain.objectManifest(allocator, plain_id);
+        defer right.deinit(allocator);
+        try test_support.testingExpectManifestsEqual(left, right);
+
+        try db.deleteObject(id);
+        try db.deleteObject(noise_id);
+        try plain.deleteObject(plain_id);
+    }
+
+    // The streaming writer and loose-chunk transfer encode as well.
+    const streamed_id = try test_support.testingStreamObject(&db, text, &.{ 1, 4096, 300_000, text.len });
+    try std.testing.expectEqualSlices(u8, &objectId(text), &streamed_id);
+    try std.testing.expect(try testingChunkEncodingCount(&db, streamed_id, 1) > 0);
+    try testingExpectEveryReadPath(&db, streamed_id, text);
+
+    const loose = text[0..fastcdc.max_size];
+    try db.putObjectChunk(objectChunkId(loose), loose);
+    {
+        var stmt = try db.prepare("select encoding, size_bytes, length(data) from _zova_chunks where chunk_hash = ?");
+        defer stmt.deinit();
+        try stmt.bindBlob(1, &objectChunkId(loose));
+        try std.testing.expectEqual(sqlite.Step.row, try stmt.step());
+        try std.testing.expectEqual(@as(i64, 1), stmt.columnInt64(0));
+        try std.testing.expect(stmt.columnInt64(2) < stmt.columnInt64(1));
+    }
+    var loose_data = try db.getObjectChunk(allocator, objectChunkId(loose));
+    defer loose_data.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, loose, loose_data.bytes);
+
+    // A handle without compression still reads encoded chunks.
+    db.setObjectCompression(.none);
+    try testingExpectEveryReadPath(&db, streamed_id, text);
+    try std.testing.expect(try testingCount(&db, "select sum(length(data)) < sum(size_bytes) from _zova_chunks") == 1);
+}
+
+test "corrupt lz4 chunks are reported as object corruption on every read path" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try test_support.testingDbPath(&buffer, tmp.sub_path[0..], "corrupt.zova");
+    const allocator = std.testing.allocator;
+    const text = try testingCompressibleBytes(allocator, fixed_chunks.chunk_size + 5000);
+    defer allocator.free(text);
+
+    var db = try Database.create(path);
+    defer db.deinit();
+    db.setObjectCompression(.lz4);
+    const id = try db.putObject(text);
+    var manifest = try db.objectManifest(allocator, id);
+    defer manifest.deinit(allocator);
+    const first = manifest.chunks[0].hash;
+    try std.testing.expect(try testingChunkEncodingCount(&db, id, 1) == @as(i64, @intCast(manifest.chunks.len)));
+
+    // A valid block that decodes to other bytes of the same size (caught only
+    // by the plaintext hash), then one that is not valid LZ4 at all.
+    const first_size: usize = @intCast(manifest.chunks[0].size_bytes);
+    const altered = try allocator.dupe(u8, text[0..first_size]);
+    defer allocator.free(altered);
+    altered[first_size / 2] +%= 1;
+    const wrong_block = try allocator.alloc(u8, first_size);
+    defer allocator.free(wrong_block);
+    const wrong_len = @import("object_lz4.zig").compress(wrong_block, altered).?;
+    const bad_blocks = [_][]const u8{ wrong_block[0..wrong_len], "\xff" };
+    for (bad_blocks) |block| {
+        {
+            var stmt = try db.prepare("update _zova_chunks set data = ?1 where chunk_hash = ?2");
+            defer stmt.deinit();
+            try stmt.bindBlob(1, block);
+            try stmt.bindBlob(2, &first);
+            try stmt.expectDone();
+        }
+        var out: [4096]u8 = undefined;
+        try std.testing.expectError(error.ObjectCorrupt, db.getObject(allocator, id));
+        try std.testing.expectError(error.ObjectCorrupt, db.readObjectRange(id, 10, &out));
+        try std.testing.expectError(error.ObjectCorrupt, db.getObjectChunk(allocator, first));
+        // The sequential reader decodes the first chunk on open and checks
+        // its hash once that chunk has been read through.
+        if (db.objectReader(id)) |opened| {
+            var reader = opened;
+            defer reader.deinit();
+            const failure = while (true) {
+                const count = reader.read(&out) catch |err| break err;
+                try std.testing.expect(count > 0);
+            };
+            try std.testing.expectEqual(error.ObjectCorrupt, failure);
+        } else |err| try std.testing.expectEqual(error.ObjectCorrupt, err);
+        var seekable = try db.objectSeekableReader(allocator, id);
+        defer seekable.deinit();
+        try std.testing.expectError(error.ObjectCorrupt, seekable.read(&out));
+    }
+    try std.testing.expectError(error.ObjectCorrupt, zova.verifyOperationalCopy(path, zova.bundledExtensionRegistry()));
+}
+
+test "compressed chunks survive backup compact split and verification" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffers: [4][std.fs.max_path_bytes]u8 = undefined;
+    const path = try test_support.testingDbPath(&buffers[0], tmp.sub_path[0..], "source.zova");
+    const backup_path = try test_support.testingDbPath(&buffers[1], tmp.sub_path[0..], "backup.zova");
+    const compact_path = try test_support.testingDbPath(&buffers[2], tmp.sub_path[0..], "compact.zova");
+    const store_path = try test_support.testingDbPath(&buffers[3], tmp.sub_path[0..], "compact.objects.zova");
+    const allocator = std.testing.allocator;
+    const text = try testingCompressibleBytes(allocator, fixed_chunks.chunk_size + 9000);
+    defer allocator.free(text);
+
+    var id: ObjectId = undefined;
+    var encoded: i64 = 0;
+    {
+        var db = try Database.create(path);
+        defer db.deinit();
+        db.setObjectCompression(.lz4);
+        id = try db.putObject(text);
+        encoded = try testingChunkEncodingCount(&db, id, 1);
+        try std.testing.expect(encoded > 0);
+        try db.backupTo(backup_path, .{ .verify = true });
+        try db.compactTo(compact_path, .{});
+    }
+    try zova.verifyOperationalCopy(path, zova.bundledExtensionRegistry());
+
+    for ([_][:0]const u8{ backup_path, compact_path }) |copy_path| {
+        var copy = try Database.open(copy_path);
+        defer copy.deinit();
+        try std.testing.expectEqual(encoded, try testingChunkEncodingCount(&copy, id, 1));
+        try testingExpectObjectBytes(&copy, id, text);
+    }
+
+    // Splitting moves the encoded rows into the bound object store as is.
+    {
+        var db = try Database.open(compact_path);
+        defer db.deinit();
+        _ = try db.splitObjectStore(store_path);
+        try testingExpectEveryReadPath(&db, id, text);
+    }
+    {
+        var store = try sqlite.Database.open(store_path);
+        defer store.deinit();
+        try std.testing.expectEqual(encoded, try testingCount(&store, "select count(*) from _zova_chunks where encoding = 1"));
+    }
+    try zova.verifyOperationalCopy(compact_path, zova.bundledExtensionRegistry());
 }

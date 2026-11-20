@@ -245,3 +245,36 @@ def test_object_methods_reject_wrong_id_types(tmp_path):
             db.get_object_chunk(b"not an ObjectChunkId")
         with pytest.raises(TypeError):
             db.assemble_object_from_chunks(zova.object_id(b""), 0, [object()])
+
+
+def test_lz4_object_compression_is_opt_in_and_keeps_ids_and_bytes(tmp_path):
+    path = tmp_path / "compressed.zova"
+    data = b"".join(b"%d: compressible object line\n" % line for line in range(60_000))
+
+    def encoded_chunks(db):
+        # The chunk table is private; this test inspects it with plain SQLite.
+        db.close()
+        with sqlite3.connect(path) as raw:
+            return raw.execute("select count(*) from _zova_chunks where encoding = 1").fetchone()[0]
+
+    db = zova.Database.create(str(path))
+    with pytest.raises(ValueError):
+        db.set_object_compression(2)
+    plain_id = db.put_object(data)
+    assert encoded_chunks(db) == 0
+
+    with zova.Database.open(str(path)) as db:
+        db.delete_object(plain_id)
+        db.set_object_compression(zova.ObjectCompression.LZ4)
+        for profile in zova.ObjectStorageProfile:
+            object_id = db.put_object_with_options(data, zova.ObjectPutOptions(profile))
+            assert object_id == zova.object_id(data)
+            assert db.get_object(object_id) == data
+            assert db.read_object_range(object_id, 1_000_000, 70_000) == data[1_000_000:1_070_000]
+            db.delete_object(object_id)
+        object_id = db.put_object(data)
+
+    with zova.Database.open(str(path)) as db:
+        assert db.get_object(object_id) == data
+    db = zova.Database.open(str(path))
+    assert encoded_chunks(db) > 0

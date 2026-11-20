@@ -68,12 +68,12 @@ users still need:
 
 Zova 1.0.0 established the stable native 1.x contract described in
 [API_STABILITY.md](../../API_STABILITY.md).
-The current `.zova` `format_version` is `13`.
+The current development `.zova` `format_version` is `14`.
 Zova does not migrate older format databases in place. Format-9,
-format-10, format-11 and format-12 databases can be probed and migrated forward with the crate-level
+format-10, format-11, format-12 and format-13 databases can be probed and migrated forward with the crate-level
 `probe_format(path)` and `migrate_database(source, destination, options)`
 functions: migration is explicit, copy-forward, publishes a separately
-validated format-13 destination, and never mutates the source.
+validated format-14 destination, and never mutates the source.
 `migrate_database_with_extensions(source, destination, options, &extensions)`
 takes the same `ExtensionOptions` as `Database::open_with_extensions` for
 databases with a non-bundled extension installed.
@@ -425,6 +425,12 @@ Writer operations serialize through their parent database handle at the C ABI
 boundary. Single-file object writes keep the existing object transaction policy;
 when an object store is bound, object writes participate in the same Zova
 transaction/savepoint scope through SQLite `ATTACH`.
+
+`Database::set_object_compression(ObjectCompression::Lz4)` (also on
+`SharedDatabase`) makes that handle store each new chunk as an LZ4 block when
+that is smaller than the chunk. The setting is per handle, defaults to
+`ObjectCompression::None`, and is not stored in the file. Object IDs, chunk
+hashes and manifests are unchanged, and every read decodes compressed chunks.
 
 Vectors follow Zova's SQL-metadata model: store labels, document ids, and other
 metadata in ordinary tables, and store numeric vectors in a named collection.

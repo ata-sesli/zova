@@ -36,9 +36,9 @@ pub use graph::{
 pub use kv::{KvEntry, KvScanEntry, KvScanOptions, KvScanPage};
 pub use notification::{Notification, Subscription};
 pub use object::{
-    object_chunk_id, object_id, ObjectChunkId, ObjectId, ObjectManifest, ObjectManifestChunk,
-    ObjectPutOptions, ObjectReader, ObjectStorageProfile, ObjectWriter, OwnedObjectReader,
-    OwnedObjectWriter,
+    object_chunk_id, object_id, ObjectChunkId, ObjectCompression, ObjectId, ObjectManifest,
+    ObjectManifestChunk, ObjectPutOptions, ObjectReader, ObjectStorageProfile, ObjectWriter,
+    OwnedObjectReader, OwnedObjectWriter,
 };
 pub use object::{ObjectSeekableReader, OwnedObjectSeekableReader};
 pub use progress::{Progress, ProgressMember, ProgressPhase};

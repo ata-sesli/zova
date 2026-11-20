@@ -17,6 +17,7 @@ import {
   ObjectReader,
   ObjectSeekableReader,
   ObjectWriter,
+  type ObjectCompression,
   type ObjectManifest,
   type ObjectManifestChunkInput,
   type ObjectPutOptions,
@@ -350,6 +351,11 @@ export class Database {
 
   notify(channel: string, payload: string): void {
     callNative(() => this.#native.notify(channel, payload));
+  }
+
+  /** Select chunk compression for objects written through this handle. */
+  setObjectCompression(compression: ObjectCompression): void {
+    callNative(() => this.#native.setObjectCompression(compression));
   }
 
   putObject(data: Uint8Array): Uint8Array {

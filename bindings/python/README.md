@@ -63,11 +63,11 @@ interpreter fails without attempting a native build.
 The release workflow builds Linux/macOS x86_64/arm64 and Windows x86_64
 stable-ABI wheels.
 
-The current release uses `.zova` format 13, and Zova does not migrate older
-format databases in place. Format-9, format-10, format-11 and format-12 databases can be probed and
+The current development `.zova` format is 14, and Zova does not migrate older
+format databases in place. Format-9, format-10, format-11, format-12 and format-13 databases can be probed and
 migrated forward with the module-level `probe_format(path)` and
 `migrate_database(source, destination, *, verify=True)` functions: migration is
-explicit, copy-forward, publishes a separately validated format-13 destination,
+explicit, copy-forward, publishes a separately validated format-14 destination,
 and never mutates the source. Like `Database.open`, `migrate_database` accepts
 `extension_bundles` and `trust_store_path` for databases with a non-bundled
 extension installed.
@@ -311,6 +311,12 @@ unreferenced chunks written by that writer are cleaned up. Writer operations
 follow Zova's object transaction policy in single-file mode. When an object
 store is bound, object writes participate in the same Zova transaction/savepoint
 scope through SQLite `ATTACH`.
+
+`db.set_object_compression(zova.ObjectCompression.LZ4)` makes that handle store
+each new chunk as an LZ4 block when that is smaller than the chunk. The setting
+is per handle, defaults to `ObjectCompression.NONE`, and is not stored in the
+file. Object IDs, chunk hashes and manifests are unchanged, and every read
+decodes compressed chunks.
 
 To serve large objects with seeking, such as HTTP range requests, open an
 `ObjectSeekableReader`. It is a file-like object (`read`, `readinto`, `seek`,

@@ -17,6 +17,8 @@ const fromChunkId = @import("values.zig").fromChunkId;
 const fromObjectId = @import("values.zig").fromObjectId;
 const manifestChunks = @import("values.zig").manifestChunks;
 const objectOptionsFromAbi = @import("values.zig").objectOptionsFromAbi;
+const objectCompressionFromAbi = @import("values.zig").objectCompressionFromAbi;
+const zova_object_set_compression_request = @import("types.zig").zova_object_set_compression_request;
 const okDb = @import("errors.zig").okDb;
 const readerHandle = @import("handles.zig").readerHandle;
 const seekableReaderHandle = @import("handles.zig").seekableReaderHandle;
@@ -97,6 +99,17 @@ pub fn zova_object_put_with_options(
     const bytes = bytesConst(req.data, req.len) orelse return failDb(handle, error.InvalidArgument);
     const id = handle.db.putObjectWithOptions(bytes, options) catch |err| return failDb(handle, err);
     out.* = fromObjectId(id);
+    return okDb(handle);
+}
+
+pub fn zova_object_set_compression(
+    request: ?*const zova_object_set_compression_request,
+) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    defer handle.mutex.unlock();
+    const compression = objectCompressionFromAbi(req.compression) orelse return failDb(handle, error.InvalidArgument);
+    handle.db.setObjectCompression(compression);
     return okDb(handle);
 }
 

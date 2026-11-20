@@ -47,7 +47,7 @@ export async function testMigration(context, base, formats) {
       }, format);
       assert(result.openStatus === "ZOVA_MIGRATION_REQUIRED", `format ${format}: open did not refuse: ${result.openStatus}`);
       assert(result.before.formatVersion === format && result.before.compatibility === "migratable", `format ${format}: probe ${JSON.stringify(result.before)}`);
-      assert(result.after.formatVersion === 13 && result.after.compatibility === "current", `format ${format}: after ${JSON.stringify(result.after)}`);
+      assert(result.after.formatVersion === 14 && result.after.compatibility === "current", `format ${format}: after ${JSON.stringify(result.after)}`);
       assert(result.sameRows, `format ${format}: rows differ from native migration at ${result.firstDifference}`);
       assert(result.sameApi, `format ${format}: API reads differ from native migration`);
       assert(JSON.parse(result.summary).objects.length > 0 && JSON.parse(result.summary).vectors.length > 0 && JSON.parse(result.summary).graphs.length > 0, "fixture contents missing");
@@ -130,7 +130,7 @@ export async function testMigration(context, base, formats) {
       await stopped.waitForFunction(() => globalThis.testStopped === true);
       await stopped.close();
       const result = await outcome(name);
-      const state = result.info.formatVersion === 13 ? "migrated" : result.original ? "original" : "neither";
+      const state = result.info.formatVersion === 14 ? "migrated" : result.original ? "original" : "neither";
       assert(state !== "neither", `${at}: stored database is neither the original nor migrated`);
       assert(result.rows === nativeDumps[12], `${at}: resumed migration differs from native`);
       if (at === "publish-0") assert(state === "original", "stop before replacement changed the database");

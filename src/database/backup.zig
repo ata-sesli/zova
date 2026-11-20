@@ -31,15 +31,15 @@ pub fn copyObjectStorage(
     };
 
     var chunks = try prepareObjectSchemaSql(source, source_schema,
-        \\select chunk_hash, size_bytes, data
+        \\select chunk_hash, size_bytes, data, encoding
         \\from {s}_zova_chunks
         \\order by hex(chunk_hash)
     , .{source_schema.prefix()});
     defer chunks.deinit();
 
     var insert_chunk = try prepareObjectSchemaSql(destination, destination_schema,
-        \\insert into {s}_zova_chunks (chunk_hash, size_bytes, data)
-        \\values (?, ?, ?)
+        \\insert into {s}_zova_chunks (chunk_hash, size_bytes, data, encoding)
+        \\values (?, ?, ?, ?)
     , .{destination_schema.prefix()});
     defer insert_chunk.deinit();
 
@@ -55,7 +55,10 @@ pub fn copyObjectStorage(
 
         try insert_chunk.bindBlob(1, raw_hash);
         try insert_chunk.bindInt64(2, chunks.columnInt64(1));
+        // Chunks keep their stored encoding; `getObjectChunk` above decoded
+        // and verified this row.
         try insert_chunk.bindBlob(3, chunks.columnBlob(2));
+        try insert_chunk.bindInt64(4, chunks.columnInt64(3));
         try insert_chunk.expectDone();
         try insert_chunk.reset();
         try insert_chunk.clearBindings();

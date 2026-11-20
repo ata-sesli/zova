@@ -5,3 +5,7 @@ test "object_tests suite" {
 test "object_sha256 suite" {
     _ = @import("object_sha256.zig");
 }
+
+test "object_lz4 suite" {
+    _ = @import("object_lz4.zig");
+}

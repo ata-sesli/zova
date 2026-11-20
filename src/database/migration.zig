@@ -66,7 +66,49 @@ pub const migration_steps = [_]MigrationStep{
     .{ .from_version = 10, .to_version = 11, .apply = migrateFormat10To11 },
     .{ .from_version = 11, .to_version = 12, .apply = migrateFormat11To12 },
     .{ .from_version = 12, .to_version = 13, .apply = migrateFormat12To13 },
+    .{ .from_version = 13, .to_version = 14, .apply = migrateFormat13To14 },
 };
+
+/// `_zova_chunks` text exactly as SQLite stores it for a newly created table:
+/// SQLite rewrites the leading keywords to `CREATE TABLE`. `VACUUM` (and so
+/// `compactTo`) only replays schema rows that start with uppercase `CRE`.
+pub const migrated_chunks_schema_sql = blk: {
+    const keyword = "create table";
+    if (!std.mem.startsWith(u8, object_impl.chunks_schema_sql, keyword)) @compileError("chunks_schema_sql must start with create table");
+    break :blk "CREATE TABLE" ++ object_impl.chunks_schema_sql[keyword.len..];
+};
+
+fn migrateFormat13To14(db: *sqlite.Database) Error!void {
+    // Existing chunks stay raw (`encoding = 0`), so no chunk data is
+    // rewritten. The step appends the column, then relaxes the `data` length
+    // check in place with SQLite's documented `writable_schema` procedure
+    // for CHECK changes that every existing row already satisfies. The
+    // stored text becomes exactly what a new table stores, and the schema
+    // version bump makes every connection reparse it.
+    if (!try tableExists(db, object_impl.chunks_table)) return;
+    try db.exec("alter table _zova_chunks add column encoding integer not null default 0");
+
+    var schema_version: i64 = undefined;
+    {
+        var read = try db.prepare("pragma schema_version");
+        defer read.deinit();
+        if (try read.step() != .row) return error.SqliteError;
+        schema_version = read.columnInt64(0);
+    }
+
+    try db.exec("pragma writable_schema = on");
+    defer db.exec("pragma writable_schema = off") catch {};
+    {
+        var update = try db.prepare("update sqlite_schema set sql = ?1 where type = 'table' and name = '_zova_chunks'");
+        defer update.deinit();
+        try update.bindTextBorrowed(1, migrated_chunks_schema_sql);
+        try update.expectDone();
+        if (db.changes() != 1) return error.NotZovaDatabase;
+    }
+    var buffer: [64]u8 = undefined;
+    const bump = std.fmt.bufPrintSentinel(&buffer, "pragma schema_version = {d}", .{schema_version + 1}, 0) catch unreachable;
+    try db.exec(bump);
+}
 
 fn migrateFormat12To13(db: *sqlite.Database) Error!void {
     // Every Zova file role carries the object tables. The step only adds the
@@ -108,7 +150,7 @@ fn migrateFormat10To11(db: *sqlite.Database) Error!void {
     );
 
     try db.exec(object_impl.objects_schema_sql);
-    try db.exec(object_impl.chunks_schema_sql);
+    try db.exec(object_impl.format13_chunks_schema_sql);
     try db.exec(object_impl.object_chunks_schema_sql);
 
     try db.exec(

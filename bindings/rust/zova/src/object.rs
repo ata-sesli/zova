@@ -59,6 +59,29 @@ impl ObjectStorageProfile {
     }
 }
 
+/// Compression applied to object chunks written through one handle.
+///
+/// The setting is not persisted. Chunks are stored compressed only when that
+/// makes them smaller, and reads decode every stored encoding regardless of
+/// the setting. Object and chunk ids always hash the uncompressed bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ObjectCompression {
+    /// Store chunks uncompressed (the default).
+    #[default]
+    None,
+    /// Store chunks as LZ4 blocks when that is smaller. Requires format 14.
+    Lz4,
+}
+
+impl ObjectCompression {
+    pub(crate) fn to_raw(self) -> zova_sys::zova_object_compression {
+        match self {
+            Self::None => zova_sys::ZOVA_OBJECT_COMPRESSION_NONE,
+            Self::Lz4 => zova_sys::ZOVA_OBJECT_COMPRESSION_LZ4,
+        }
+    }
+}
+
 /// Options for profile-aware object operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObjectPutOptions {
@@ -231,6 +254,19 @@ pub fn object_chunk_id(bytes: &[u8]) -> Result<ObjectChunkId> {
 }
 
 impl Database {
+    /// Select the compression for object chunks written through this handle.
+    ///
+    /// Applies to `put_object`, `put_object_with_options`, object writers,
+    /// and `put_object_chunk`. The setting is not persisted; a reopened handle
+    /// starts with `ObjectCompression::None`.
+    pub fn set_object_compression(&mut self, compression: ObjectCompression) -> Result<()> {
+        let request = zova_sys::zova_object_set_compression_request {
+            db: self.raw_ptr(),
+            compression: compression.to_raw(),
+        };
+        self.status(unsafe { zova_sys::zova_object_set_compression(&request) })
+    }
+
     /// Store full object bytes and return their content-addressed id.
     pub fn put_object(&mut self, bytes: &[u8]) -> Result<ObjectId> {
         let mut out = zova_sys::zova_object_id { bytes: [0; 32] };

@@ -15,15 +15,15 @@ host foundation.
 Current package version: `1.4.0`.
 
 Zova `1.0.0` established the stable native 1.x contract. The current
-development `.zova` file `format_version` is `13`, and the
+development `.zova` file `format_version` is `14`, and the
 earliest migratable format is `9`. Open never migrates silently: format-9,
-format-10, format-11 and format-12 databases are reported as migration-required and left byte-identical,
+format-10, format-11, format-12 and format-13 databases are reported as migration-required and left byte-identical,
 and downgrades are unsupported. Older databases migrate forward with the
 explicit, copy-forward probe and migration surfaces (`zova format` and
 `zova migrate` on the CLI, `zova_database_probe_format` and
 `zova_database_migrate` on the C ABI, and aligned APIs in the Rust, Python, Go,
 and JavaScript bindings). Migration writes only to a new, separately validated
-format-13 destination and never mutates the source.
+format-14 destination and never mutates the source.
 
 [API stability](API_STABILITY.md) defines the stable 1.x public
 contract. [Storage compatibility](docs/storage-compatibility.md) is the normative 1.x
@@ -46,9 +46,11 @@ Browser APIs remain experimental and do not promise full native compatibility.
 Rust packages now select target-specific generated-C companion crates without
 requiring consumer-side Zig or native-source downloads. Python wheels retain
 CPython 3.13 stable-ABI coverage for Python 3.13 and 3.14. Storage
-is format 13 with explicit 12→13 migration, which adds a chunk-reference
-index for fast object deletes; new files use incremental auto-vacuum and
-`zova reclaim` releases free pages in place. Zova 1.3.0 used format 12.
+is format 14 with explicit 13→14 migration, which adds opt-in per-chunk LZ4
+compression for objects; migrated chunks stay uncompressed. Format 13 added a
+chunk-reference index for fast object deletes; new files use incremental
+auto-vacuum and `zova reclaim` releases free pages in place. Zova 1.4.0 used
+format 13 and Zova 1.3.0 used format 12.
 See the
 [browser package guide](bindings/wasm/README.md) for lifecycle and storage limits.
 
@@ -394,6 +396,15 @@ which sharply reduces manifest rows for large low-deduplication payloads. Both
 profiles keep the same full-object identity and verified chunk model. Existing
 objects retain their first valid physical representation when replayed through
 another profile.
+
+Chunk compression is opt-in and set per database handle; it is not stored in
+the file. After `db.setObjectCompression(.lz4)`, each new chunk the handle
+writes is stored as an LZ4 block when that is smaller than the chunk, and raw
+otherwise. Object IDs, chunk hashes, manifests and deduplication are computed
+from the uncompressed bytes, so they do not change, and every read path decodes
+chunks before verifying them. Existing chunks are not re-encoded. The C ABI
+exposes `zova_object_set_compression`; see
+[Per-chunk compression](docs/storage-compatibility.md#per-chunk-compression-format-14).
 
 You can put/get whole objects, range-read object bytes, inspect manifests,
 fetch verified chunks, store loose chunks, assemble complete objects, or use a
@@ -1270,9 +1281,9 @@ the bundled SQLite version, and the Zova storage format recorded in
 
 For the 1.x series, every release can migrate databases created by every earlier
 1.x release. Format 9, used by released Zova 0.26.1, is the only pre-1.0 format
-guaranteed a migration into 1.0. The current format is 13, reached
-through the sequential 9 → 10 → 11 → 12 → 13 registry; format-10, format-11 and
-format-12 databases migrate through the remaining steps. Older formats are rejected rather than migrated. Open never
+guaranteed a migration into 1.0. The current format is 14, reached
+through the sequential 9 → 10 → 11 → 12 → 13 → 14 registry; format-10, format-11,
+format-12 and format-13 databases migrate through the remaining steps. Older formats are rejected rather than migrated. Open never
 migrates silently, and downgrades are unsupported.
 
 Migration is explicit and copy-forward. Probe with `zova format`, then migrate
@@ -1280,7 +1291,7 @@ with `zova migrate`:
 
 ```sh
 zova format app.zova
-zova migrate app.zova app-format-13.zova
+zova migrate app.zova app-format-14.zova
 ```
 
 The same workflow is available through `zova_database_probe_format` and
@@ -1303,7 +1314,7 @@ locking, and PRAGMAs remain application policy.
 
 Zova enables `PRAGMA foreign_keys = ON` on its owned connections so format-11
 private graph and vector cascades remain enforced. Files Zova creates use
-`PRAGMA auto_vacuum = INCREMENTAL` (format 13), so `zova reclaim` can release
+`PRAGMA auto_vacuum = INCREMENTAL` (since format 13), so `zova reclaim` can release
 free pages in place; Zova never vacuums automatically and does not change
 journal and synchronous settings.
 

@@ -2,8 +2,8 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 use std::ptr;
 use zova::{
-    object_chunk_id, object_id, Database, ObjectChunkId, ObjectId, ObjectManifestChunk,
-    ObjectPutOptions, ObjectStorageProfile, Status, Step,
+    object_chunk_id, object_id, Database, ObjectChunkId, ObjectCompression, ObjectId,
+    ObjectManifestChunk, ObjectPutOptions, ObjectStorageProfile, SharedDatabase, Status, Step,
 };
 
 #[repr(C)]
@@ -584,4 +584,86 @@ fn owned_seekable_reader_keeps_database_handle_alive() {
     assert!(reader.read(&mut [0_u8; 1]).is_err());
 
     let _ = std::fs::remove_file(path);
+}
+
+fn compressible_bytes(len: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(len);
+    let mut line = 0usize;
+    while bytes.len() < len {
+        bytes.extend_from_slice(format!("{line}: compressible object line\n").as_bytes());
+        line += 1;
+    }
+    bytes.truncate(len);
+    bytes
+}
+
+fn encoded_chunk_count(db: &mut Database) -> i64 {
+    let mut select = db
+        .prepare("select count(*) from _zova_chunks where encoding = 1")
+        .unwrap();
+    assert_eq!(select.step().unwrap(), Step::Row);
+    select.column_i64(0).unwrap()
+}
+
+#[test]
+fn lz4_object_compression_is_opt_in_and_keeps_ids_and_bytes() {
+    let path = temp_path("lz4");
+    let mut db = Database::create(&path).unwrap();
+    assert_eq!(ObjectCompression::default(), ObjectCompression::None);
+    let bytes = compressible_bytes(1_500_000);
+    let expected = object_id(&bytes).unwrap();
+
+    let plain = db.put_object(&bytes).unwrap();
+    assert_eq!(plain, expected);
+    assert_eq!(encoded_chunk_count(&mut db), 0);
+    db.delete_object(plain).unwrap();
+
+    db.set_object_compression(ObjectCompression::Lz4).unwrap();
+    for profile in [
+        ObjectStorageProfile::Deduplication,
+        ObjectStorageProfile::Streaming,
+    ] {
+        let id = db
+            .put_object_with_options(&bytes, ObjectPutOptions { profile })
+            .unwrap();
+        assert_eq!(id, expected);
+        assert!(encoded_chunk_count(&mut db) > 0);
+        assert_eq!(db.get_object(id).unwrap(), bytes);
+        let mut window = vec![0; 70_000];
+        assert_eq!(
+            db.read_object_range(id, 1_000_000, &mut window).unwrap(),
+            window.len()
+        );
+        assert_eq!(window, bytes[1_000_000..1_070_000]);
+        db.delete_object(id).unwrap();
+    }
+
+    let mut writer = db.object_writer().unwrap();
+    writer.write(&bytes[..12_345]).unwrap();
+    writer.write(&bytes[12_345..]).unwrap();
+    let streamed = writer.finish().unwrap();
+    assert_eq!(streamed, expected);
+    assert!(encoded_chunk_count(&mut db) > 0);
+
+    let chunk = &bytes[..65_536];
+    let chunk_id = object_chunk_id(chunk).unwrap();
+    db.put_object_chunk(chunk_id, chunk).unwrap();
+    assert_eq!(db.get_object_chunk(chunk_id).unwrap(), chunk);
+
+    // Reads decode regardless of the handle's setting; a reopened handle
+    // starts uncompressed.
+    db.set_object_compression(ObjectCompression::None).unwrap();
+    assert_eq!(db.get_object(streamed).unwrap(), bytes);
+    drop(db);
+
+    let shared = SharedDatabase::open(&path).unwrap();
+    assert_eq!(shared.get_object(streamed).unwrap(), bytes);
+    shared
+        .set_object_compression(ObjectCompression::Lz4)
+        .unwrap();
+    let other = compressible_bytes(200_000);
+    let other_id = shared.put_object(&other).unwrap();
+    assert_eq!(shared.get_object(other_id).unwrap(), other);
+    drop(shared);
+    let _ = std::fs::remove_file(&path);
 }

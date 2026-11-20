@@ -17,6 +17,7 @@ pub type zova_vector_element_type = c_int;
 pub type zova_graph_target_type = c_int;
 pub type zova_graph_neighbor_direction = c_int;
 pub type zova_object_storage_profile = c_int;
+pub type zova_object_compression = c_int;
 
 pub const ZOVA_OK: zova_status = 0;
 pub const ZOVA_INVALID_ARGUMENT: zova_status = 1;
@@ -112,6 +113,8 @@ pub const ZOVA_GRAPH_NEIGHBOR_OUTGOING: zova_graph_neighbor_direction = 0;
 pub const ZOVA_GRAPH_NEIGHBOR_INCOMING: zova_graph_neighbor_direction = 1;
 pub const ZOVA_OBJECT_PROFILE_DEDUPLICATION: zova_object_storage_profile = 0;
 pub const ZOVA_OBJECT_PROFILE_STREAMING: zova_object_storage_profile = 1;
+pub const ZOVA_OBJECT_COMPRESSION_NONE: zova_object_compression = 0;
+pub const ZOVA_OBJECT_COMPRESSION_LZ4: zova_object_compression = 1;
 pub const ZOVA_FRESH_VALUE_NULL: c_int = 0;
 pub const ZOVA_FRESH_VALUE_INT64: c_int = 1;
 pub const ZOVA_FRESH_VALUE_FLOAT64: c_int = 2;
@@ -1184,6 +1187,13 @@ pub struct zova_object_put_with_options_request {
 }
 
 #[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct zova_object_set_compression_request {
+    pub db: *mut zova_database,
+    pub compression: c_int,
+}
+
+#[repr(C)]
 pub struct zova_object_get_request {
     pub db: *mut zova_database,
     pub id: zova_object_id,
@@ -2095,6 +2105,9 @@ extern "C" {
     pub fn zova_object_put(request: *const zova_object_put_request) -> zova_status;
     pub fn zova_object_put_with_options(
         request: *const zova_object_put_with_options_request,
+    ) -> zova_status;
+    pub fn zova_object_set_compression(
+        request: *const zova_object_set_compression_request,
     ) -> zova_status;
     pub fn zova_object_get(request: *const zova_object_get_request) -> zova_status;
     pub fn zova_object_read_range(request: *const zova_object_read_range_request) -> zova_status;

@@ -39,6 +39,8 @@ pub const zova_object_manifest_chunk = internal.zova_object_manifest_chunk;
 pub const zova_object_manifest = internal.zova_object_manifest;
 pub const zova_object_storage_profile = internal.zova_object_storage_profile;
 pub const zova_object_put_options = internal.zova_object_put_options;
+pub const zova_object_compression = internal.zova_object_compression;
+pub const zova_object_set_compression_request = internal.zova_object_set_compression_request;
 pub const zova_vector_metric = internal.zova_vector_metric;
 pub const zova_vector_element_type = internal.zova_vector_element_type;
 pub const zova_vector_multi_i8_search_mode = internal.zova_vector_multi_i8_search_mode;
@@ -671,6 +673,12 @@ pub fn zova_object_put_with_options(
     request: ?*const zova_object_put_with_options_request,
 ) callconv(.c) zova_status {
     return internal.zova_object_put_with_options(request);
+}
+
+pub fn zova_object_set_compression(
+    request: ?*const zova_object_set_compression_request,
+) callconv(.c) zova_status {
+    return internal.zova_object_set_compression(request);
 }
 
 pub fn zova_object_get(request: ?*const zova_object_get_request) callconv(.c) zova_status {

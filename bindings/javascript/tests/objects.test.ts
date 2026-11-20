@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  AsyncDatabase,
   Database,
   objectChunkId,
   objectId,
@@ -215,5 +216,48 @@ describe("objects", () => {
     expect(() => db.getObject(new Uint8Array(31))).toThrow(ZovaError);
     expect(() => objectIdFromHex("00")).toThrow(ZovaError);
     db.close();
+  });
+
+  test("stores lz4-compressed chunks only after opting in and reads them back", async () => {
+    const text = new TextEncoder().encode(
+      Array.from({ length: 60_000 }, (_, line) => `${line}: compressible object line\n`).join(""),
+    );
+    const encodedChunks = (db: Database): bigint => {
+      const statement = db.prepare("SELECT count(*) FROM _zova_chunks WHERE encoding = 1");
+      expect(statement.step()).toBe("row");
+      const count = statement.columnInteger(0);
+      statement.close();
+      return BigInt(count);
+    };
+
+    const db = database();
+    expect(() => db.setObjectCompression("zstd" as never)).toThrow(ZovaError);
+    const plainId = db.putObject(text);
+    expect(encodedChunks(db)).toBe(0n);
+    db.deleteObject(plainId);
+
+    db.setObjectCompression("lz4");
+    for (const profile of ["deduplication", "streaming"] as const) {
+      const id = db.putObjectWithOptions(text, { profile });
+      expect(objectIdToHex(id)).toBe(objectIdToHex(objectId(text)));
+      expect(encodedChunks(db)).toBeGreaterThan(0n);
+      expect(db.getObject(id)).toEqual(text);
+      expect(db.readObjectRange(id, 1_000_000n, 70_000)).toEqual(text.subarray(1_000_000, 1_070_000));
+      db.deleteObject(id);
+    }
+    db.setObjectCompression("none");
+    db.close();
+
+    const directory = mkdtempSync(join(tmpdir(), "zova-javascript-objects-"));
+    temporaryDirectories.push(directory);
+    const asyncDb = AsyncDatabase.create(join(directory, "async.zova"));
+    await expect(asyncDb.setObjectCompression("zstd" as never)).rejects.toBeInstanceOf(ZovaError);
+    await asyncDb.setObjectCompression("lz4");
+    const asyncId = await asyncDb.putObject(text);
+    expect(await asyncDb.getObject(asyncId)).toEqual(text);
+    await asyncDb.close();
+    const reopened = Database.open(join(directory, "async.zova"));
+    expect(encodedChunks(reopened)).toBeGreaterThan(0n);
+    reopened.close();
   });
 });

@@ -37,6 +37,7 @@ require_symbol zova_extension_bundle_trust
 require_symbol zova_extension_bundle_untrust
 require_symbol zova_database_register_function
 require_symbol zova_object_put
+require_symbol zova_object_set_compression
 require_symbol zova_object_get
 require_symbol zova_object_read_range
 require_symbol zova_object_manifest_get

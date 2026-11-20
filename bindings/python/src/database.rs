@@ -278,6 +278,23 @@ impl PyDatabase {
         self.db_mut()?.total_changes().map_err(zova_error)
     }
 
+    /// Select chunk compression for objects written through this handle:
+    /// 0 stores chunks uncompressed, 1 stores LZ4 when that is smaller.
+    pub(crate) fn set_object_compression(&mut self, compression: i32) -> PyResult<()> {
+        let compression = match compression {
+            0 => zova_rust::ObjectCompression::None,
+            1 => zova_rust::ObjectCompression::Lz4,
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown object compression: {other}"
+                )))
+            }
+        };
+        self.db_mut()?
+            .set_object_compression(compression)
+            .map_err(zova_error)
+    }
+
     pub(crate) fn put_object(&mut self, data: Vec<u8>) -> PyResult<PyObjectId> {
         Ok(PyObjectId::from_rust(
             self.db_mut()?.put_object(&data).map_err(zova_error)?,
