@@ -48,14 +48,15 @@ idiomatic safe representation.
 | KV and notifications | Yes | Yes | Yes | Yes | Yes | Yes |
 | Objects and exact vectors | Yes | Yes | Yes | Yes | Yes | Yes |
 | Public graph CRUD and traversal | Yes | Yes | Yes | Yes | Yes | Yes |
-| Opaque-key topology, payloads, scans, fresh build | Yes | Yes | Yes | No | Yes | No |
+| Opaque-key topology, payloads, scans, fresh build | Yes | Yes | Yes | Yes | Yes | Yes |
 | Store create/bind/split management | Zig/CLI | Selected operations | No | No | No | No |
-| Application-authored callbacks/extensions | Selected surfaces | Selected surfaces | SQL functions, linked plugins | No safe wrapper | SQL functions, linked plugins | No safe wrapper |
+| Application-authored callbacks/extensions | Selected surfaces | Selected surfaces | SQL functions, linked plugins | SQL functions, linked plugins | SQL functions, linked plugins | SQL functions, linked plugins |
 
 The low-level opaque-key and fresh-build APIs are supported C ABI contracts,
-not private implementation hooks. The safe Rust crate and the Go package
-expose every C ABI function; the other high-level bindings do not yet expose
-these surfaces.
+not private implementation hooks. The safe Rust crate, the Python package,
+the Go package, and the native JavaScript/TypeScript package expose every C
+ABI function. In JavaScript the low-level surfaces are on the synchronous
+`Database`; `AsyncDatabase` remains a queued subset.
 
 ## Errors and statuses
 

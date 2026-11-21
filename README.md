@@ -1076,9 +1076,10 @@ lifecycle. A separate FIFO `AsyncDatabase` runs one-shot expensive work on
 native workers and does not expose async transaction callbacks.
 
 All SQL integers and counts are `bigint`; binary values use `Uint8Array`;
-vectors preserve `Float32Array`, `Uint16Array`, or `Int8Array`. Advanced
-opaque-key graph, payload, scan, and fresh-build APIs remain C ABI/raw
-`zova-sys` surfaces for this release. See `bindings/javascript/README.md` for
+vectors preserve `Float32Array`, `Uint16Array`, or `Int8Array`. The
+synchronous `Database` wraps every C ABI function, including the opaque-key
+graph, edge-payload, topology-scan and fresh-build session APIs, application
+SQL functions, and linked plugins. See `bindings/javascript/README.md` for
 ownership and runtime details.
 
 ### Rust
@@ -1142,9 +1143,10 @@ build.
 
 Existing Python object, vector, and graph APIs transparently use a bound store after the
 database is opened. Store create/bind/unbind/split management remains
-native-Zig/CLI-only in v0.25. The additive v0.25 opaque-key graph,
-edge-payload, topology-scan, and fresh-build session APIs remain C ABI/raw
-`zova-sys` surfaces and are not Python APIs yet.
+native-Zig/CLI-only in v0.25. The Python package wraps every C ABI function,
+including the opaque-key graph, edge-payload, topology-scan and fresh-build
+session APIs, application SQL functions, and linked plugins. See the
+[Python binding README](bindings/python/README.md#low-level-surfaces).
 
 ### Go
 
@@ -1211,8 +1213,8 @@ normal SQLite locking behavior.
 The v0.25 C ABI includes opaque-key graph batch mutation and lookup, keyed
 neighbors and topology scans, edge payload access, prepared fresh graph builds,
 and a generic fresh-build session for predeclared targets. These APIs are also
-declared by raw `zova-sys`; they are not yet mirrored by every high-level
-language binding.
+declared by raw `zova-sys` and wrapped by the safe Rust, Python, Go, and
+JavaScript packages; the experimental browser WASM package does not expose them.
 
 ### Zig
 
