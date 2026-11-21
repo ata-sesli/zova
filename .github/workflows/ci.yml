@@ -66,15 +66,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
+      # Formatting and the benchmark-runner script do not depend on the
+      # platform; a Windows checkout's CRLF line endings would fail zig fmt.
       - run: zig fmt --check build.zig build.zig.zon src tests
+        if: runner.os != 'Windows'
       - run: zig test bench/graph_index_ddl_95.zig
       - run: python3 -m unittest scripts/tests/test_graph_index_95_runner.py
+        if: runner.os != 'Windows'
       - run: zig build test
       - run: zig build check-storage-compat
       - run: zig build e2e
@@ -202,7 +206,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest"]' || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "macos-15-intel"]') }}
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest"]' || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "macos-15-intel", "windows-latest"]') }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
@@ -211,13 +218,28 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       - run: zig build c-abi -Doptimize=ReleaseSafe
+        if: runner.os != 'Windows'
       - run: sh scripts/repack-darwin-c-abi.sh
+        if: runner.os != 'Windows'
       - run: sh scripts/check-native-c-abi.sh zig-out
+        if: runner.os != 'Windows'
+      # cgo on Windows uses MinGW GCC, which cannot link the MSVC zova_c.lib.
+      - name: Build the MinGW C ABI archive
+        if: runner.os == 'Windows'
+        run: sh scripts/build-go-windows-archive.sh zig-out/lib
       - run: go test ./...
         working-directory: bindings/go
       - run: go vet ./...
         working-directory: bindings/go
+      - name: Build examples/basic against a release-layout module, without CGO flags
+        run: |
+          cp -R bindings/go "$RUNNER_TEMP/go-module"
+          python scripts/prepare-go-module.py "$RUNNER_TEMP/go-module" \
+            --lib "$(go env GOOS)_$(go env GOARCH)=zig-out/lib/libzova_c.a" --check
 
   python:
     name: Python ${{ matrix.python-version }} (${{ matrix.os }})

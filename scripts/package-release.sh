@@ -27,7 +27,6 @@ fi
 
 VERSION="${1#v}"
 TAG="v$VERSION"
-GO_TAG="bindings/go/v$VERSION"
 RELEASE_NOTES="$ROOT/.github/release-notes/$TAG.md"
 OUT_DIR="${2:-$ROOT/zig-out/release}"
 MANIFEST_VERSION="$(sed -n 's/^[[:space:]]*\.version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/build.zig.zon" | head -n 1)"
@@ -53,13 +52,9 @@ PKG="zova-$VERSION"
 ARCHIVE="$OUT_DIR/$PKG.tar.gz"
 TMP="${TMPDIR:-/tmp}/zova-release.$$"
 TAG_CREATED=0
-GO_TAG_CREATED=0
 
 cleanup() {
     status=$?
-    if [ "$status" -ne 0 ] && [ "$GO_TAG_CREATED" -eq 1 ]; then
-        git -C "$ROOT" tag -d "$GO_TAG" >/dev/null 2>&1 || true
-    fi
     if [ "$status" -ne 0 ] && [ "$TAG_CREATED" -eq 1 ]; then
         git -C "$ROOT" tag -d "$TAG" >/dev/null 2>&1 || true
     fi
@@ -104,17 +99,11 @@ fi
 
 HEAD_COMMIT="$(git rev-parse HEAD)"
 LOCAL_TAG_COMMIT=""
-LOCAL_GO_TAG_COMMIT=""
 REMOTE_TAG_COMMIT=""
-REMOTE_GO_TAG_COMMIT=""
 if [ "$DRY_RUN" -eq 0 ]; then
     REMOTE_TAG_COMMIT="$(git ls-remote --tags origin "refs/tags/$TAG^{}" | awk 'NR == 1 {print $1}')"
     if [ -z "$REMOTE_TAG_COMMIT" ]; then
         REMOTE_TAG_COMMIT="$(git ls-remote --tags origin "refs/tags/$TAG" | awk 'NR == 1 {print $1}')"
-    fi
-    REMOTE_GO_TAG_COMMIT="$(git ls-remote --tags origin "refs/tags/$GO_TAG^{}" | awk 'NR == 1 {print $1}')"
-    if [ -z "$REMOTE_GO_TAG_COMMIT" ]; then
-        REMOTE_GO_TAG_COMMIT="$(git ls-remote --tags origin "refs/tags/$GO_TAG" | awk 'NR == 1 {print $1}')"
     fi
 fi
 
@@ -126,21 +115,8 @@ if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
     fi
 fi
 
-if git rev-parse -q --verify "refs/tags/$GO_TAG" >/dev/null; then
-    LOCAL_GO_TAG_COMMIT="$(git rev-list -n 1 "$GO_TAG")"
-    if [ "$LOCAL_GO_TAG_COMMIT" != "$HEAD_COMMIT" ]; then
-        echo "local tag $GO_TAG does not point at HEAD" >&2
-        exit 1
-    fi
-fi
-
 if [ -n "$REMOTE_TAG_COMMIT" ] && [ "$REMOTE_TAG_COMMIT" != "$HEAD_COMMIT" ]; then
     echo "origin tag $TAG does not point at HEAD" >&2
-    exit 1
-fi
-
-if [ -n "$REMOTE_GO_TAG_COMMIT" ] && [ "$REMOTE_GO_TAG_COMMIT" != "$HEAD_COMMIT" ]; then
-    echo "origin tag $GO_TAG does not point at HEAD" >&2
     exit 1
 fi
 
@@ -560,23 +536,13 @@ if [ -z "$REMOTE_TAG_COMMIT" ]; then
 else
     echo "reusing origin tag: $TAG"
 fi
-if [ -z "$LOCAL_GO_TAG_COMMIT" ]; then
-    run git tag -a "$GO_TAG" -m "Zova Go bindings $VERSION"
-    GO_TAG_CREATED=1
-else
-    echo "reusing local tag: $GO_TAG"
-fi
-if [ -z "$REMOTE_GO_TAG_COMMIT" ]; then
-    run git push origin "$GO_TAG"
-else
-    echo "reusing origin tag: $GO_TAG"
-fi
 run gh release create "$TAG" "$ARCHIVE" --title "Zova $TAG" --notes-file "$RELEASE_NOTES" --verify-tag
 
-GO_TAG_CREATED=0
 TAG_CREATED=0
 echo "release source archive: $ARCHIVE"
 echo "release tag: $TAG"
-echo "Go module tag: $GO_TAG"
+# The Go module tag needs every platform's prebuilt library, so only the
+# Publish Release workflow creates it (scripts/prepare-go-module.py).
+echo "Go module tag: not created; run the Publish Release workflow"
 echo "pushed branch: $CURRENT_BRANCH"
 echo "GitHub Release: $TAG"
