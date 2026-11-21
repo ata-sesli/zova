@@ -60,12 +60,22 @@ try {
     const native = await Database.openPersistent(seeded);
     out.native = (await native.listExtensions()).map(item => item.name);
     await native.close();
+    // Extension maintenance with the linked code: the descriptor declares no
+    // newer version and no rebuild hook, as in native zova-js.
+    const statusOf = async promise => { try { await promise; return "ZOVA_OK"; } catch (error) { return error.status; } };
+    const maintenance = await Database.openPersistentForExtensionUpgrade(seeded);
+    out.upgrade = await statusOf(maintenance.extensionUpgrade("c_test"));
+    out.rebuild = await statusOf(maintenance.extensionRebuild("c_test"));
+    await maintenance.close();
+    // Linked plugins go through the plugin open path, which has no page size.
+    out.pageSize = await statusOf(Database.createMemory({ pageSize: 8192 }));
     const imported = await Database.importPersistent("imported-" + crypto.randomUUID(), exported);
     out.imported = (await imported.listExtensions()).map(item => item.name);
     await imported.close();
     return out;
   });
-  const ok = result.memoryList.join() === "c_test" && result.reopened.join() === "c_test" && result.native.join() === "c_test" && result.imported.join() === "c_test";
+  const ok = result.memoryList.join() === "c_test" && result.reopened.join() === "c_test" && result.native.join() === "c_test" && result.imported.join() === "c_test"
+    && result.upgrade === "ZOVA_EXTENSION_INCOMPATIBLE" && result.rebuild === "ZOVA_EXTENSION_UNAVAILABLE" && result.pageSize === "ZOVA_INVALID_ARGUMENT";
   console.log("Linked plugin: " + JSON.stringify(result));
   if (!ok) throw new Error("Linked plugin checks failed");
 } finally {

@@ -58,7 +58,7 @@ deployment target; portable describes the C contract, not a universal binary.
 | Native Zig registry | Yes | Native SQL registration | On loader-capable builds | Yes |
 | C / raw Rust `zova-sys` | Yes | Yes | On loader-capable builds | Yes |
 | Safe Rust / Python / Go / `zova-js` | Yes | No wrapper | Explicit selection at create/open | No wrapper |
-| `zova-wasm` | Yes | No public API | No; statically linked plugins in custom builds | No |
+| `zova-wasm` | Yes | `registerFunction` with a worker module | No; statically linked plugins in custom builds | Yes |
 
 The CLI exposes lifecycle operations and, on loader-capable builds, bundle
 management, including the explicit `extension upgrade` command.

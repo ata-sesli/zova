@@ -79,6 +79,19 @@ journal to restore committed state after worker termination. This is transaction
 recovery, not a storage-format migration.
 Missing OPFS support rejects rather than silently opening a memory database.
 
+`openPersistent(name, options)` takes the native open and create options:
+`readOnly` opens an existing database without writing to it, `busyTimeoutMs`
+sets SQLite's busy timeout, and `pageSize` applies when the name is created.
+`createMemory({ pageSize })` takes the page size as well. A module with
+statically linked plugins rejects `pageSize`, because the native plugin open
+has no creation options. `openPersistentForExtensionUpgrade(name)` opens an
+existing database without running installed extension hooks, as native
+`openForExtensionUpgrade`. `convertSqliteToPersistent(name, data)` converts an
+ordinary SQLite database, given as a `Uint8Array` or a stream, into a new
+persistent Zova database and opens it, as native `convertSqliteToZova`; the
+SQLite bytes are staged in the name's storage only while it runs, and an
+existing name is never replaced.
+
 Persistent opening requires a secure context (HTTPS or localhost), dedicated
 workers, Web Locks, and OPFS synchronous access handles. Each name has one exclusive
 pool. An atomic, non-waiting Web Lock is acquired before storage initialization;
@@ -156,7 +169,12 @@ KV namespaces, keys, and values are Uint8Array values. Missing get returns null;
 an empty stored value returns an empty Uint8Array. Delete reports whether the
 key existed. `kv.getMany`, `kv.putMany` (entries `{ key, value }`),
 `kv.deleteMany`, `kv.count` (bigint) and `kv.clearNamespace` match native
-`kvGetMany` and friends; batches are atomic inside and outside transactions. Caller buffers remain attached and are copied when requests send.
+`kvGetMany` and friends; batches are atomic inside and outside transactions.
+`kv.scan(namespace, options)` returns one page `{ entries, hasMore }` in
+ascending key order with native `KvScanOptions` (`prefix`, `start`, `end`,
+`after`, `limit`, `keysOnly`). `kv.putIfAbsent`, `kv.compareAndPut` and
+`kv.compareAndDelete` resolve whether they wrote; a missing key never matches
+an expected value. Caller buffers remain attached and are copied when requests send.
 
 Each database owns one worker. Concurrent calls execute in request order.
 Close follows earlier work, is idempotent, and marks `closed` immediately.
@@ -272,6 +290,58 @@ number is still accepted. Graphs: create/has/info/list/delete, node and
 edge put/get/has/delete with batch forms, `graphNeighbors`, `graphDegree` and
 `graphWalk`. Counts and sizes are bigint. `getObject` and result lists cross
 the worker in one message; stream large objects instead.
+
+`setObjectCompression('lz4' | 'none')` selects how new object chunks are stored
+by this database; reads decode either. `searchVectorsMultiI8(collection,
+options)` scores i8 vectors against several query rows with native
+`VectorMultiI8SearchOptions`.
+
+The keyed graph calls match native `zova-js`: `putGraphNodesKeyed` and
+`putGraphEdgesKeyed` resolve `BigInt64Array` keys; `getGraphNodesKeyed`,
+`getGraphEdgesKeyed` and `getGraphEdgePayloads` take keys and resolve `null`
+for a missing one; `graphNeighborsKeyed`, `graphDegreesKeyed`
+(`BigUint64Array`), `replaceGraphEdgePayloads`, `graphScan` (pages continued
+by `{ createdOrder, key }` cursors), `graphWalkDirection` and
+`graphWalkDirectionProfiled`. `buildFreshGraphKeyed`,
+`buildFreshGraphPreparedKeyed` and `buildFreshGraphPreparedKeyedWithPayloads`
+create and load a new graph in one transaction.
+
+```ts
+const build = await db.beginFreshBuild();
+await build.tableRows('files', ['id', 'path'], [[1n, 'a.rs'], [2n, 'b.rs']]);
+await build.graph('code', nodes, edges);
+await build.vectors('embeddings', vectors);
+const { nodeKeys, edgeKeys, profile } = await build.finish();
+```
+
+`beginFreshBuild()` starts a native fresh-build session (`tableRows`,
+`ftsRows`, `graph`, `vectors`, `finish`, `abort`, `close`). While it is open
+other calls on the database reject. `abort`, `close`, any failure including
+invalid input, and closing the database roll the whole session back.
+
+## SQL functions
+
+```ts
+// /sql/functions.mjs, loaded by the database worker
+export const slug = text => text.toLowerCase().replaceAll(' ', '-');
+```
+
+```ts
+await db.registerFunction('slug', 1, { module: '/sql/functions.mjs', export: 'slug' }, { deterministic: true });
+const rows = await db.query("SELECT slug('Hello World')"); // [['hello-world']]
+```
+
+`registerFunction(name, arity, { module, export }, options)` registers a scalar
+SQL function, as native `registerFunction` does. A browser function cannot be a
+closure from the page: SQLite calls it synchronously inside the database
+worker, so the worker imports `module` (a URL resolved against the page) and
+calls its export `export` for each row. Arguments arrive as `SqlValue`s with
+integers as bigint. Return null or undefined, a bigint (integer), a number
+(float), a boolean (1 or 0), a string or a `Uint8Array`; a thrown exception or
+another result fails the statement with that message. The function cannot use
+page state, this database, or await. `arity` -1 accepts any number of
+arguments; `options` are `deterministic`, `directOnly` and `innocuous`.
+Closing the database releases its functions.
 
 ### Streaming objects, chunks and manifests
 
@@ -457,10 +527,14 @@ opens, creates, migrates and verifies imports with those plugins, as native
 `zova_database_open_with_plugins` does. `tests/linked-plugin-browser.mjs`
 checks such a build; the package gate does not build one.
 
+`extensionUpgrade(name)` and `extensionRebuild(name)` run an extension's data
+upgrade or rebuild hook, as natively; open the database with
+`openPersistentForExtensionUpgrade` when its extension check fails.
+
 ## Native API parity
 
-SQL, transaction, KV and notification methods of native `zova-js` and their
-browser form. Every browser method returns a promise.
+Every method of native `zova-js` and its browser form. Every browser method
+returns a promise.
 
 | Native `zova-js` | `zova-wasm` |
 | --- | --- |
@@ -476,8 +550,8 @@ browser form. Every browser method returns a promise.
 | `Statement.close()` | `finalize()` |
 | `kvGet`, `kvPut`, `kvDelete` | `kv.get`, `kv.put`, `kv.delete` |
 | `kvGetMany`, `kvPutMany`, `kvDeleteMany`, `kvCount`, `kvClearNamespace` | `kv.getMany`, `kv.putMany`, `kv.deleteMany`, `kv.count`, `kv.clearNamespace` |
-| `kvScan`, `kvPutIfAbsent`, `kvCompareAndPut`, `kvCompareAndDelete` | not available yet |
-| `setObjectCompression` | not available yet; browser databases store chunks raw and read compressed chunks |
+| `kvScan`, `kvPutIfAbsent`, `kvCompareAndPut`, `kvCompareAndDelete` | `kv.scan`, `kv.putIfAbsent`, `kv.compareAndPut`, `kv.compareAndDelete` |
+| `setObjectCompression` | same |
 | `notify`, `listen`, `Subscription.tryReceive`, `close` | same; within one worker only |
 | `Subscription.tryReceiveAsync` | `tryReceive()` is already asynchronous |
 | `objectWriter`, `objectWriterWithOptions` (`write`, `finish`, `cancel`) | same names; a `WritableStream` with `id` (close, abort) |
@@ -485,20 +559,29 @@ browser form. Every browser method returns a promise.
 | `objectSeekableReader` (`read`, `seek`, `position`, `size`) | same, asynchronous, plus `readAt(offset, length)` |
 | chunk, manifest and assemble calls; `objectId`, `objectChunkId` | same; the ID functions are asynchronous |
 | `searchVectors`, `searchVectorsById` with `VectorSearchOptions` | same; a bare `limit` is also accepted |
+| `searchVectorsMultiI8` | same |
+| graph CRUD, `graphNeighbors`, `graphDegree`, `graphWalk` | same |
+| keyed graph calls, payloads, `graphScan`, `graphWalkDirection(Profiled)` | same |
+| `buildFreshGraph*Keyed*`, `beginFreshBuild` and `FreshBuild` | same; closing the database aborts an open session |
+| `registerFunction(name, arity, fn, options)` | `fn` is `{ module, export }`, run in the worker |
 | `reclaimSpace`, `vacuum` | same |
 | `backupTo(path)`, `compactTo(path)` (async with progress) | `backupTo(name)`, `compactTo(name)` to a persistent name, with progress |
 | `restoreBackup(path, path)`, `restoreBackupToMemory(path)` | same with persistent names |
 | `installExtension`, `dropExtension`, `listExtensions`, `extensionInfo`, `checkExtension`, `checkExtensions` | same, for bundled and statically linked extensions |
+| `extensionUpgrade`, `extensionRebuild` | same |
 | `ExtensionOptions` (`bundlePaths`, `trustStorePath`) at open | not applicable; link plugins at build time |
+| `Database.open(path, { readOnly, busyTimeoutMs })`, `createWithOptions` | `openPersistent(name, options)`, `createMemory({ pageSize })` |
+| `Database.openForExtensionUpgrade` | `openPersistentForExtensionUpgrade` |
+| `convertSqliteToZova(path, path)` | `convertSqliteToPersistent(name, data)` |
+| `migrateDatabase(path, path)` | `migratePersistent(name)`, in place |
+| `abiVersion`, `abiVersionParts` | async functions |
 
 ## Current boundaries
 
-Not available here: keyed, payload, scan and fresh-build graph APIs;
-run-time extension loading; bound stores; shared access between workers. The
-native `zova-js` package is independent. There is no Node/CommonJS fallback.
-
-There is no application SQL callback API, `.zovaext` loader or extension-data
-upgrade API. See the
+Not available here: run-time extension loading (`.zovaext` bundles and their
+trust store); bound stores; shared access between workers. SQL functions are
+worker modules, not page closures. The native `zova-js` package is
+independent. There is no Node/CommonJS fallback. See the
 [extension capability matrix](../../docs/extensions.md#availability-and-binding-matrix).
 
 Memory databases use volatile storage; named databases use the bundled SQLite's

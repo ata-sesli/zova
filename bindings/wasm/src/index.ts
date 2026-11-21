@@ -67,6 +67,152 @@ export interface GraphWalkOptions {
   limit: number;
 }
 export interface GraphWalkItem { nodeId: string; kind: string; depth: number; predecessorNodeId?: string; edgeType?: string; }
+/** Graph node and edge keys: a `BigInt64Array` or an array of `bigint`. */
+export type GraphKeys = BigInt64Array | readonly bigint[];
+export interface GraphKeyedNode { nodeKey: bigint; nodeId: string; kind: string; createdOrder: bigint; }
+export interface GraphKeyedEdge { edgeKey: bigint; sourceNodeKey: bigint; edgeType: string; targetNodeKey: bigint; createdOrder: bigint; }
+export interface GraphKeyedNeighbor { edgeKey: bigint; neighborNodeKey: bigint; nodeId: string; kind: string; edgeType: string; }
+export interface GraphKeyedDegreeOptions { graphName: string; nodeKeys: GraphKeys; direction: GraphDirection; edgeType?: string; }
+export interface GraphEdgePayloadReplacement { edgeKey: bigint; payload: Uint8Array; }
+/** Scan position: continue after the last returned row's order and key. */
+export interface GraphScanCursor { createdOrder: bigint; key: bigint; }
+export interface GraphScanOptions {
+  graphName: string;
+  /** Omit to start at the first node. */
+  nodeAfter?: GraphScanCursor;
+  /** Omit to start at the first edge. */
+  edgeAfter?: GraphScanCursor;
+  nodeLimit: number;
+  edgeLimit: number;
+}
+export interface GraphScanPage { nodes: GraphKeyedNode[]; edges: GraphKeyedEdge[]; hasMoreNodes: boolean; hasMoreEdges: boolean; }
+export interface GraphWalkDirectionOptions extends GraphWalkOptions { direction: GraphDirection; }
+/** Where a directional walk spent its time; timings are milliseconds. */
+export interface GraphWalkProfile {
+  mutexWaitMs: number;
+  rootLookupMs: number;
+  adjacencyPrepareMs: number;
+  adjacencyExecuteMs: number;
+  bfsBookkeepingAllocationMs: number;
+  cAbiResultExportMs: number;
+  totalProfiledMs: number;
+  frontierExpansions: number;
+  adjacencyQueryBinds: number;
+  adjacencyRowsStepped: number;
+  resultCount: number;
+}
+export interface GraphWalkDirectionProfiled { items: GraphWalkItem[]; profile: GraphWalkProfile; }
+export interface GraphFreshNodeInput {
+  nodeId: string;
+  kind: string;
+  targetType: GraphTargetType;
+  targetNamespace?: string;
+  targetRef?: string;
+}
+/** An edge between two nodes of the same fresh build, by node position. */
+export interface GraphFreshEdgeInput {
+  fromNodeOrdinal: number;
+  edgeType: string;
+  toNodeOrdinal: number;
+  /** Only `buildFreshGraphPreparedKeyedWithPayloads` and `FreshBuild.graph` accept payloads. */
+  payload?: Uint8Array;
+}
+export interface GraphFreshKeys {
+  /** Node keys in input order. */
+  nodeKeys: BigInt64Array;
+  /** Edge keys in input order; deduplicated edges repeat a key. */
+  edgeKeys: BigInt64Array;
+}
+
+/**
+ * Multi-vector i8 search, as native `zova-js`. `global-min-cosine` scores
+ * every vector by its least similar query row; `cbm-prefilter-min-cosine`
+ * first keeps the `prefilterLimit` vectors closest to row
+ * `prefilterQueryIndex`, then scores those the same way.
+ */
+export type VectorMultiI8SearchMode = "global-min-cosine" | "cbm-prefilter-min-cosine";
+export type VectorMultiI8Aggregation = "min-cosine";
+export interface VectorMultiI8SearchOptions {
+  /** `queryCount` rows of `dimensions` values each, row after row. */
+  readonly queryValues: Int8Array;
+  readonly queryCount: number;
+  readonly dimensions: number;
+  /** Restrict the search to these vector IDs. */
+  readonly candidateIds?: readonly string[];
+  readonly mode?: VectorMultiI8SearchMode;
+  readonly aggregation?: VectorMultiI8Aggregation;
+  readonly prefilterQueryIndex?: number;
+  readonly prefilterLimit?: number;
+  readonly limit: number;
+}
+
+/** How new object chunks are stored; reads decode every stored encoding. */
+export type ObjectCompression = "none" | "lz4";
+
+/** One fresh-build cell: `null`, an integer `bigint`, a float `number`, text, or a blob. */
+export type FreshValue = null | bigint | number | string | Uint8Array;
+/** Where a fresh build spent its time; timings are milliseconds. */
+export interface FreshBuildProfile {
+  readonly validationMs: number;
+  readonly tableLoadMs: number;
+  readonly ftsLoadMs: number;
+  readonly graphLoadMs: number;
+  readonly graphValidationMs: number;
+  readonly graphKeyGenerationMs: number;
+  readonly graphNodeLoadMs: number;
+  readonly graphEdgeLoadMs: number;
+  readonly vectorLoadMs: number;
+  readonly indexBuildMs: number;
+  readonly commitMs: number;
+  readonly tableRows: number;
+  readonly ftsRows: number;
+  readonly vectorRows: number;
+  readonly payloadBytes: number;
+}
+export interface FreshBuildResult {
+  /** Keys of the session's graph nodes, in input order. */
+  readonly nodeKeys: BigInt64Array;
+  /** Keys of the session's graph edges, in input order. */
+  readonly edgeKeys: BigInt64Array;
+  readonly profile: FreshBuildProfile;
+}
+
+/**
+ * A browser SQL function: the URL of an ES module and the name of the
+ * function it exports. The database worker imports the module and calls the
+ * function synchronously for each row, so it cannot use page state or await.
+ */
+export interface SqlFunctionModule {
+  readonly module: string | URL;
+  readonly export: string;
+}
+export interface SqlFunctionOptions {
+  /** Same arguments always give the same result, so SQLite may reuse it. */
+  readonly deterministic?: boolean;
+  /** Callable only from top-level SQL, not from views, triggers, or schema. */
+  readonly directOnly?: boolean;
+  /** Has no side effects and leaks no information. */
+  readonly innocuous?: boolean;
+}
+
+/** Fresh-database options. `pageSize` 0 or omitted keeps SQLite's default. */
+export interface CreateOptions {
+  readonly pageSize?: number;
+}
+/**
+ * `pageSize` applies only when the name is created. `readOnly` opens an
+ * existing database without writing to it; `busyTimeoutMs` is SQLite's busy
+ * timeout, as native `Database.open` options.
+ */
+export interface OpenPersistentOptions extends CreateOptions {
+  readonly readOnly?: boolean;
+  readonly busyTimeoutMs?: number;
+}
+export interface AbiVersionParts {
+  readonly major: number;
+  readonly minor: number;
+  readonly patch: number;
+}
 
 /** The stage of a migration; fixes the unit of `done` and `total`. */
 export type ProgressPhase = "copy" | "migrate" | "verify" | "publish";
@@ -244,6 +390,50 @@ function edge(input: GraphEdgeInput): GraphEdgeInput {
   return {
     graphName: text(input?.graphName, "Graph name"), fromNodeId: text(input.fromNodeId, "Source node ID"),
     edgeType: text(input.edgeType, "Edge type"), toNodeId: text(input.toNodeId, "Destination node ID"),
+  };
+}
+function graphKeys(keys: GraphKeys): bigint[] {
+  const items: readonly unknown[] = keys instanceof BigInt64Array ? Array.from(keys) : Array.isArray(keys) ? keys
+    : invalid("Graph keys must be a BigInt64Array or an array of bigint");
+  return items.map(key => {
+    if (typeof key !== "bigint" || key < -(1n << 63n) || key >= (1n << 63n)) invalid("Graph keys must be signed 64-bit bigint values");
+    return key;
+  });
+}
+function freshNode(input: GraphFreshNodeInput): GraphFreshNodeInput {
+  return {
+    nodeId: text(input?.nodeId, "Node ID"), kind: text(input.kind, "Node kind"), targetType: text(input.targetType, "Target type"),
+    targetNamespace: optionalText(input.targetNamespace, "Target namespace"), targetRef: optionalText(input.targetRef, "Target reference"),
+  };
+}
+function freshEdges(edges: readonly GraphFreshEdgeInput[], payloads: boolean): GraphFreshEdgeInput[] {
+  return list(edges, input => {
+    if (input?.payload !== undefined && !payloads) {
+      invalid("Only buildFreshGraphPreparedKeyedWithPayloads and FreshBuild.graph accept payloads");
+    }
+    return {
+      fromNodeOrdinal: size(input?.fromNodeOrdinal, "Node ordinal"), edgeType: text(input.edgeType, "Edge type"),
+      toNodeOrdinal: size(input.toNodeOrdinal, "Node ordinal"), payload: input.payload === undefined ? undefined : kvBytes(input.payload),
+    };
+  });
+}
+function freshValue(value: FreshValue): FreshValue {
+  return value instanceof Uint8Array ? new Uint8Array(value) : value;
+}
+function walkOptions(options: GraphWalkOptions): GraphWalkOptions {
+  return {
+    graphName: text(options?.graphName, "Graph name"), startNodeId: text(options.startNodeId, "Start node ID"),
+    direction: text(options.direction ?? "outgoing", "Direction"), edgeType: optionalText(options.edgeType, "Edge type"),
+    maxDepth: size(options.maxDepth, "Maximum depth"), limit: size(options.limit, "Limit"),
+  };
+}
+function createOptions(options: OpenPersistentOptions | undefined): OpenPersistentOptions {
+  if (options === undefined) return {};
+  if (typeof options !== "object" || options === null) invalid("Options must be an object");
+  return {
+    pageSize: options.pageSize === undefined ? undefined : size(options.pageSize, "pageSize"),
+    readOnly: options.readOnly === undefined ? undefined : Boolean(options.readOnly),
+    busyTimeoutMs: options.busyTimeoutMs === undefined ? undefined : size(options.busyTimeoutMs, "busyTimeoutMs"),
   };
 }
 function edgeScope(options: GraphDegreeOptions): GraphDegreeOptions {
@@ -543,6 +733,21 @@ export function objectId(data: Uint8Array): Promise<Uint8Array> { return hashWit
 /** The hash a chunk with these bytes is stored under. */
 export function objectChunkId(data: Uint8Array): Promise<Uint8Array> { return hashWith("object_chunk_id", data); }
 
+let abi: Promise<{ major: number; minor: number; patch: number; version: string }> | undefined;
+function abiInfo() {
+  helper ??= Database.createMemory();
+  abi ??= helper.then(db => db.abiInfo());
+  abi.catch(() => { abi = undefined; });
+  return abi;
+}
+/** The C ABI version string of the bundled native code, as native `abiVersion`. */
+export async function abiVersion(): Promise<string> { return (await abiInfo()).version; }
+/** The C ABI version as numbers, as native `abiVersionParts`. */
+export async function abiVersionParts(): Promise<AbiVersionParts> {
+  const { major, minor, patch } = await abiInfo();
+  return Object.freeze({ major, minor, patch });
+}
+
 export type Step = "row" | "done";
 export type ColumnType = "integer" | "float" | "text" | "blob" | "null";
 
@@ -555,6 +760,26 @@ export interface Notification {
 export interface KvEntry {
   readonly key: Uint8Array;
   readonly value: Uint8Array;
+}
+/** As native `zova-js` `kvScan`. */
+export interface KvScanOptions {
+  /** Only keys that begin with these bytes. */
+  readonly prefix?: Uint8Array;
+  /** Inclusive lower bound. */
+  readonly start?: Uint8Array;
+  /** Exclusive upper bound. */
+  readonly end?: Uint8Array;
+  /** Continue strictly after this key. */
+  readonly after?: Uint8Array;
+  /** Most entries returned; must be a positive integer. */
+  readonly limit: number;
+  /** Return keys only; every value is then empty. */
+  readonly keysOnly?: boolean;
+}
+export interface KvScanPage {
+  readonly entries: KvEntry[];
+  /** True when at least one further entry matches the same options. */
+  readonly hasMore: boolean;
 }
 
 /**
@@ -591,6 +816,73 @@ function copyParameters(parameters: readonly SqlValue[]): SqlValue[] {
 }
 
 /** Experimental browser database. Each instance owns a dedicated worker. */
+/**
+ * A fresh-build session: bulk-load empty tables, FTS tables, one graph, and
+ * vector collections, then commit them together, as native `FreshBuild`.
+ *
+ * While the session is open other calls on its database fail. `finish`
+ * commits. `abort`, `close`, any failure including invalid input, and closing
+ * the database roll the whole session back.
+ */
+export class FreshBuild {
+  readonly #request: Request;
+  #closed = false;
+
+  constructor(request: Request, token: symbol) {
+    if (token !== constructionToken) invalid("Use Database.beginFreshBuild()");
+    this.#request = request;
+  }
+
+  get closed(): boolean { return this.#closed; }
+
+  /** Append rows to an empty ordinary table; each row has one value per column. */
+  tableRows(tableName: string, columns: readonly string[], rows: readonly (readonly FreshValue[])[]): Promise<void> {
+    return this.#rows(false, tableName, columns, rows);
+  }
+  /** Append rows to an empty FTS5 table; each row has one value per column. */
+  ftsRows(tableName: string, columns: readonly string[], rows: readonly (readonly FreshValue[])[]): Promise<void> {
+    return this.#rows(true, tableName, columns, rows);
+  }
+  #rows(fts: boolean, tableName: string, columns: readonly string[], rows: readonly (readonly FreshValue[])[]): Promise<void> {
+    return this.#step("fresh_build_rows", () => ({
+      fts, tableName: text(tableName, "Table name"), columns: list(columns, column => text(column, "Column name")),
+      rows: list(rows, row => list(row, freshValue)),
+    }));
+  }
+  /** Load one new graph. Edges name nodes by position and may carry payloads. */
+  graph(graphName: string, nodes: readonly GraphFreshNodeInput[], edges: readonly GraphFreshEdgeInput[]): Promise<void> {
+    return this.#step("fresh_build_graph", () => ({
+      graphName: text(graphName, "Graph name"), nodes: list(nodes, freshNode), edges: freshEdges(edges, true),
+    }));
+  }
+  /** Load vectors into an empty collection. */
+  vectors(collectionName: string, vectors: readonly VectorInput[]): Promise<void> {
+    return this.#step("fresh_build_vectors", () => ({
+      collection: text(collectionName, "Collection name"),
+      vectors: list(vectors, vector => ({ id: text(vector?.id, "Vector ID"), values: vectorValues(vector.values) })),
+    }));
+  }
+  /** Commit the session and close it. */
+  finish(): Promise<FreshBuildResult> { return this.#step("fresh_build_finish", () => ({}), true); }
+  /** Roll the session back and close it. */
+  abort(): Promise<void> { return this.#step("fresh_build_abort", () => ({}), true); }
+  /** Roll back an unfinished session. Closing a closed session does nothing. */
+  async close(): Promise<void> { if (!this.#closed) await this.abort(); }
+
+  async #step<T>(operation: string, prepare: () => object, last = false): Promise<T> {
+    if (this.#closed) throw new ZovaWasmError("Fresh build is closed", "ZOVA_MISUSE", 16);
+    let args: object;
+    try { args = prepare(); } catch (error) {
+      // Invalid input rolls the session back, as natively.
+      await this.abort().catch(() => undefined);
+      throw error;
+    }
+    try { return await this.#request<T>(operation, () => args); }
+    catch (error) { this.#closed = true; throw error; }
+    finally { if (last) this.#closed = true; }
+  }
+}
+
 export class Database {
   #shared: Shared;
   #scope?: Scope;
@@ -602,13 +894,44 @@ export class Database {
     this.#scope = scope;
   }
 
-  static async createMemory(): Promise<Database> {
-    return Database.#open({});
+  /** `pageSize` 0 or omitted keeps SQLite's default. */
+  static async createMemory(options: CreateOptions = {}): Promise<Database> {
+    return Database.#open({ pageSize: createOptions(options).pageSize });
   }
 
-  static async openPersistent(name: string): Promise<Database> {
+  /**
+   * Opens a persistent database, creating it when the name is new.
+   * `readOnly` requires an existing database; `pageSize` applies only when
+   * the name is created.
+   */
+  static async openPersistent(name: string, options: OpenPersistentOptions = {}): Promise<Database> {
     persistentName(name);
-    return Database.#open({ name });
+    return Database.#open({ name, ...createOptions(options) });
+  }
+
+  /**
+   * Opens an existing persistent database for extension maintenance without
+   * running installed extension hooks, so `extensionUpgrade` and
+   * `extensionRebuild` can repair a database whose extension check fails.
+   */
+  static async openPersistentForExtensionUpgrade(name: string, options: OpenPersistentOptions = {}): Promise<Database> {
+    persistentName(name);
+    const { readOnly, busyTimeoutMs } = createOptions(options);
+    return Database.#open({ name, upgrade: true, readOnly, busyTimeoutMs });
+  }
+
+  /**
+   * Converts an ordinary SQLite database file, given as bytes or a stream, into
+   * a new persistent Zova database and opens it, as native
+   * `convertSqliteToZova`. An existing name is never replaced, and the SQLite
+   * bytes are only staged while the conversion runs.
+   */
+  static async convertSqliteToPersistent(name: string, data: Uint8Array | ReadableStream<Uint8Array>): Promise<Database> {
+    persistentName(name);
+    if (typeof ReadableStream !== "undefined" && data instanceof ReadableStream) return Database.#importStream(name, data, true);
+    if (!(data instanceof Uint8Array)) invalid("SQLite database must be a Uint8Array or a ReadableStream");
+    const copy = new Uint8Array(data);
+    return Database.#importStream(name, new ReadableStream({ start(controller) { controller.enqueue(copy); controller.close(); } }), true);
   }
 
   /**
@@ -733,11 +1056,11 @@ export class Database {
     if (!(data instanceof Uint8Array)) invalid("Imported database must be a Uint8Array or a ReadableStream");
     return Database.#open({ name, data: new Uint8Array(data) });
   }
-  static async #importStream(name: string, stream: ReadableStream<Uint8Array>): Promise<Database> {
+  static async #importStream(name: string, stream: ReadableStream<Uint8Array>, convert = false): Promise<Database> {
     const reader = stream.getReader();
     const channel = Database.#spawn();
     try {
-      await channel.request("initialize", { name, importing: true });
+      await channel.request("initialize", { name, importing: true, convert });
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -775,7 +1098,10 @@ export class Database {
     finally { channel.terminate(); }
   }
 
-  static async #open(args: { name?: string; data?: Uint8Array; existing?: boolean; restoreFrom?: string; verify?: boolean }): Promise<Database> {
+  static async #open(args: {
+    name?: string; data?: Uint8Array; existing?: boolean; restoreFrom?: string; verify?: boolean;
+    pageSize?: number; readOnly?: boolean; busyTimeoutMs?: number; upgrade?: boolean;
+  }): Promise<Database> {
     let channel: WorkerChannel | undefined;
     try {
       channel = Database.#spawn();
@@ -1097,8 +1423,38 @@ export class Database {
       this.#request("kv_count", () => ({ namespace: kvBytes(namespace) })),
     clearNamespace: (namespace: Uint8Array): Promise<void> =>
       this.#request("kv_clear_namespace", () => ({ namespace: kvBytes(namespace) })),
+    /** One page of a namespace in ascending key byte order. */
+    scan: (namespace: Uint8Array, options: KvScanOptions): Promise<KvScanPage> =>
+      this.#request("kv_scan", () => {
+        const bound = (value: Uint8Array | undefined) => value === undefined ? undefined : kvBytes(value);
+        return {
+          namespace: kvBytes(namespace), prefix: bound(options?.prefix), start: bound(options.start), end: bound(options.end),
+          after: bound(options.after), limit: size(options.limit, "Limit"), keysOnly: Boolean(options.keysOnly),
+        };
+      }),
+    /** Inserts one entry only when its key is absent. Resolves whether it was written. */
+    putIfAbsent: (namespace: Uint8Array, key: Uint8Array, value: Uint8Array): Promise<boolean> =>
+      this.#request("kv_put_if_absent", () => ({ namespace: kvBytes(namespace), key: kvBytes(key), value: kvBytes(value) })),
+    /**
+     * Replaces one value only when the current value equals `expected` byte
+     * for byte. A missing key never matches. Resolves whether it was written.
+     */
+    compareAndPut: (namespace: Uint8Array, key: Uint8Array, expected: Uint8Array, value: Uint8Array): Promise<boolean> =>
+      this.#request("kv_compare_and_put", () => ({
+        namespace: kvBytes(namespace), key: kvBytes(key), expected: kvBytes(expected), value: kvBytes(value),
+      })),
+    /**
+     * Deletes one entry only when its current value equals `expected` byte for
+     * byte. A missing key never matches. Resolves whether it was deleted.
+     */
+    compareAndDelete: (namespace: Uint8Array, key: Uint8Array, expected: Uint8Array): Promise<boolean> =>
+      this.#request("kv_compare_and_delete", () => ({ namespace: kvBytes(namespace), key: kvBytes(key), expected: kvBytes(expected) })),
   });
 
+  /** Selects chunk compression for objects written through this database. */
+  setObjectCompression(compression: ObjectCompression): Promise<void> {
+    return this.#request("object_set_compression", () => ({ compression: text(compression, "Compression") }));
+  }
   putObject(data: Uint8Array): Promise<Uint8Array> {
     return this.#request("object_put", () => { validateBytes(data); return { data: new Uint8Array(data) }; });
   }
@@ -1285,6 +1641,22 @@ export class Database {
     }));
   }
 
+  /** Scores each stored i8 vector against several query rows at once. */
+  searchVectorsMultiI8(collectionName: string, options: VectorMultiI8SearchOptions): Promise<VectorSearchResult[]> {
+    return this.#request("vector_search_multi_i8", () => {
+      if (!(options?.queryValues instanceof Int8Array)) invalid("queryValues must be an Int8Array");
+      const optional = (value: number | undefined, label: string) => value === undefined ? undefined : size(value, label);
+      return {
+        collection: text(collectionName, "Collection name"), queryValues: options.queryValues.slice(),
+        queryCount: size(options.queryCount, "queryCount"), dimensions: size(options.dimensions, "dimensions"),
+        candidateIds: options.candidateIds === undefined ? undefined : list(options.candidateIds, id => text(id, "Vector ID")),
+        mode: optionalText(options.mode, "Mode"), aggregation: optionalText(options.aggregation, "Aggregation"),
+        prefilterQueryIndex: optional(options.prefilterQueryIndex, "prefilterQueryIndex"),
+        prefilterLimit: optional(options.prefilterLimit, "prefilterLimit"), limit: size(options.limit, "Limit"),
+      };
+    });
+  }
+
   createGraph(name: string): Promise<void> {
     return this.#request("graph_create", () => ({ name: text(name, "Graph name") }));
   }
@@ -1349,11 +1721,129 @@ export class Database {
   }
   /** Bounded breadth-first walk; the start node is returned at depth 0. */
   graphWalk(options: GraphWalkOptions): Promise<GraphWalkItem[]> {
-    return this.#request("graph_walk", () => ({
-      graphName: text(options?.graphName, "Graph name"), startNodeId: text(options.startNodeId, "Start node ID"),
-      direction: text(options.direction ?? "outgoing", "Direction"), edgeType: optionalText(options.edgeType, "Edge type"),
-      maxDepth: size(options.maxDepth, "Maximum depth"), limit: size(options.limit, "Limit"),
+    return this.#request("graph_walk", () => walkOptions(options));
+  }
+  /** Breadth-first walk along outgoing or incoming edges. */
+  graphWalkDirection(options: GraphWalkDirectionOptions): Promise<GraphWalkItem[]> {
+    return this.#request("graph_walk", () => walkOptions({ ...options, direction: text(options?.direction, "Direction") }));
+  }
+  graphWalkDirectionProfiled(options: GraphWalkDirectionOptions): Promise<GraphWalkDirectionProfiled> {
+    return this.#request("graph_walk_profiled", () => walkOptions({ ...options, direction: text(options?.direction, "Direction") }));
+  }
+
+  /** One atomic batch; resolves each node's key in input order. */
+  putGraphNodesKeyed(inputs: readonly GraphNodeInput[]): Promise<BigInt64Array> {
+    return this.#request("graph_node_put_many_keyed", () => ({ nodes: list(inputs, node) }));
+  }
+  /** One atomic batch; resolves each edge's key in input order. */
+  putGraphEdgesKeyed(inputs: readonly GraphEdgeInput[]): Promise<BigInt64Array> {
+    return this.#request("graph_edge_put_many_keyed", () => ({ edges: list(inputs, edge) }));
+  }
+  /** Nodes by key, in input order; `null` for a missing key. */
+  getGraphNodesKeyed(graphName: string, nodeKeys: GraphKeys): Promise<(GraphKeyedNode | null)[]> {
+    return this.#request("graph_nodes_get_keyed", () => ({ graphName: text(graphName, "Graph name"), keys: graphKeys(nodeKeys) }));
+  }
+  /** Edges by key, in input order; `null` for a missing key. */
+  getGraphEdgesKeyed(graphName: string, edgeKeys: GraphKeys): Promise<(GraphKeyedEdge | null)[]> {
+    return this.#request("graph_edges_get_keyed", () => ({ graphName: text(graphName, "Graph name"), keys: graphKeys(edgeKeys) }));
+  }
+  graphNeighborsKeyed(options: GraphNeighborsOptions): Promise<GraphKeyedNeighbor[]> {
+    return this.#request("graph_neighbors_keyed", () => ({ ...edgeScope(options), limit: size(options.limit, "Limit") }));
+  }
+  /** Degree of each node key, in input order. */
+  graphDegreesKeyed(options: GraphKeyedDegreeOptions): Promise<BigUint64Array> {
+    return this.#request("graph_degrees_keyed", () => ({
+      graphName: text(options?.graphName, "Graph name"), nodeKeys: graphKeys(options.nodeKeys),
+      direction: text(options.direction, "Direction"), edgeType: optionalText(options.edgeType, "Edge type"),
     }));
+  }
+  /** Edge payloads by key, in input order; `null` for a missing edge. */
+  getGraphEdgePayloads(graphName: string, edgeKeys: GraphKeys): Promise<(Uint8Array | null)[]> {
+    return this.#request("graph_edge_payloads_get", () => ({ graphName: text(graphName, "Graph name"), keys: graphKeys(edgeKeys) }));
+  }
+  /** One atomic batch. */
+  replaceGraphEdgePayloads(graphName: string, replacements: readonly GraphEdgePayloadReplacement[]): Promise<void> {
+    return this.#request("graph_edge_payloads_replace", () => ({
+      graphName: text(graphName, "Graph name"),
+      replacements: list(replacements, item => ({ edgeKey: graphKeys([item?.edgeKey])[0], payload: kvBytes(item.payload) })),
+    }));
+  }
+  /** One page of nodes and edges in creation order. */
+  graphScan(options: GraphScanOptions): Promise<GraphScanPage> {
+    return this.#request("graph_scan", () => {
+      const cursor = (value: GraphScanCursor | undefined) => value === undefined ? undefined
+        : { createdOrder: graphKeys([value?.createdOrder])[0], key: graphKeys([value.key])[0] };
+      return {
+        graphName: text(options?.graphName, "Graph name"), nodeAfter: cursor(options.nodeAfter), edgeAfter: cursor(options.edgeAfter),
+        nodeLimit: size(options.nodeLimit, "nodeLimit"), edgeLimit: size(options.edgeLimit, "edgeLimit"),
+      };
+    });
+  }
+  /**
+   * Creates and loads a new graph in one transaction. Duplicate edges are
+   * merged, so their inputs share one key.
+   */
+  buildFreshGraphKeyed(graphName: string, nodes: readonly GraphFreshNodeInput[], edges: readonly GraphFreshEdgeInput[]): Promise<GraphFreshKeys> {
+    return this.#freshGraph("normalized", graphName, nodes, edges);
+  }
+  /** Like `buildFreshGraphKeyed` for input that is already unique and valid. */
+  buildFreshGraphPreparedKeyed(graphName: string, nodes: readonly GraphFreshNodeInput[], edges: readonly GraphFreshEdgeInput[]): Promise<GraphFreshKeys> {
+    return this.#freshGraph("prepared", graphName, nodes, edges);
+  }
+  /** `buildFreshGraphPreparedKeyed` with edge payloads; an omitted payload is empty. */
+  buildFreshGraphPreparedKeyedWithPayloads(graphName: string, nodes: readonly GraphFreshNodeInput[],
+    edges: readonly GraphFreshEdgeInput[]): Promise<GraphFreshKeys> {
+    return this.#freshGraph("payloads", graphName, nodes, edges);
+  }
+  #freshGraph(variant: string, graphName: string, nodes: readonly GraphFreshNodeInput[], edges: readonly GraphFreshEdgeInput[]): Promise<GraphFreshKeys> {
+    return this.#request("graph_build_fresh", () => ({
+      variant, graphName: text(graphName, "Graph name"), nodes: list(nodes, freshNode), edges: freshEdges(edges, variant === "payloads"),
+    }));
+  }
+
+  /** Starts a fresh-build session; see `FreshBuild`. */
+  async beginFreshBuild(): Promise<FreshBuild> {
+    await this.#request("fresh_build_begin", () => ({}));
+    return new FreshBuild((operation, prepare) => this.#request(operation, prepare), constructionToken);
+  }
+
+  /**
+   * Registers a scalar SQL function on this database. `arity` is the number
+   * of arguments, or -1 for any number. The database worker imports
+   * `fn.module` (resolved against the page URL) and calls its export
+   * `fn.export` synchronously for each row. Arguments arrive as `SqlValue`s:
+   * integers are `bigint`, floats `number`. A thrown exception or an
+   * unsupported result fails the statement with that message. The function
+   * runs in the worker, so it cannot use page state, this database, or await.
+   */
+  registerFunction(name: string, arity: number, fn: SqlFunctionModule, options: SqlFunctionOptions = {}): Promise<void> {
+    return this.#request("register_function", () => {
+      if (typeof fn !== "object" || fn === null) invalid("A SQL function is a module URL and an export name");
+      const base = (globalThis as { location?: { href?: string } }).location?.href;
+      let module: string;
+      try { module = new URL(fn.module, base).href; }
+      catch { invalid("SQL function module must be a URL"); }
+      return {
+        name: text(name, "Function name"), arity, module, export: text(fn.export, "Export name"),
+        options: {
+          deterministic: Boolean(options?.deterministic), directOnly: Boolean(options?.directOnly), innocuous: Boolean(options?.innocuous),
+        },
+      };
+    });
+  }
+
+  /** Runs the named extension's upgrade hook. */
+  extensionUpgrade(name: string): Promise<void> {
+    return this.#request("extension_upgrade", () => ({ name: text(name, "Extension name") }));
+  }
+  /** Runs the named extension's rebuild hook. */
+  extensionRebuild(name: string): Promise<void> {
+    return this.#request("extension_rebuild", () => ({ name: text(name, "Extension name") }));
+  }
+
+  /** @internal Used by `abiVersion()`. */
+  abiInfo(): Promise<{ major: number; minor: number; patch: number; version: string }> {
+    return this.#request("abi_version", () => ({}));
   }
 
   close(): Promise<void> {

@@ -42,6 +42,8 @@ const setPending = async name => { await (await opfsRoot()).getFileHandle(pendin
 const clearPending = async name => { await (await opfsRoot()).removeEntry(pendingName(name)).catch(() => undefined); };
 const autoVacuumModes = ["none", "full", "incremental"];
 const copyStaging = ["/copy.zova-journal", "/copy.zova"];
+// A plain SQLite database imported for conversion, beside the converted /db.zova.
+const convertSource = "/convert-source.sqlite";
 
 const phases = ["copy", "migrate", "verify", "publish"];
 const members = [null, "main", "object_store", "vector_store", "graph_store"];
@@ -171,6 +173,53 @@ function objectId(id) {
   if (!(id instanceof Uint8Array) || id.length !== 32) throw invalid("Object IDs are 32-byte Uint8Array values");
   return id;
 }
+// Graph keys and scan positions are signed 64-bit; the encoding carries their bits.
+const signedKey = (value, label) => {
+  if (typeof value !== "bigint" || value < -(1n << 63n) || value >= (1n << 63n)) throw invalid(label + " must be a signed 64-bit bigint");
+  return BigInt.asUintN(64, value);
+};
+const writeGraphKey = (w, key) => w.u64(signedKey(key, "Graph key"));
+const readGraphKey = r => BigInt.asIntN(64, r.u64());
+const readKeys = r => BigInt64Array.from(r.list(readGraphKey));
+const writeOptionalBytes = (w, bytes) => bytes === undefined ? w.u32(0) : w.u32(1).bytes(bytes);
+const writeFreshNode = (w, node) => w.str(node?.nodeId).str(node.kind)
+  .u32(code(targetTypes, node.targetType, "graph target type")).str(node.targetNamespace).str(node.targetRef);
+const writeFreshEdge = (w, edge) => w.u32(count(edge?.fromNodeOrdinal, "Node ordinal")).str(edge.edgeType)
+  .u32(count(edge.toNodeOrdinal, "Node ordinal")).bytes(edge.payload ?? new Uint8Array());
+const writeScanCursor = (w, cursor) => cursor === undefined ? w.u64(0n).u64(0n)
+  : w.u64(signedKey(cursor.createdOrder, "Scan createdOrder")).u64(signedKey(cursor.key, "Scan key"));
+const readWalkItem = r => {
+  const item = { nodeId: r.str(), kind: r.str(), depth: r.u32() };
+  const predecessorNodeId = r.str();
+  const edgeType = r.str();
+  if (predecessorNodeId !== undefined) item.predecessorNodeId = predecessorNodeId;
+  if (edgeType !== undefined) item.edgeType = edgeType;
+  return item;
+};
+const readWalkProfile = r => ({
+  mutexWaitMs: r.f64(), rootLookupMs: r.f64(), adjacencyPrepareMs: r.f64(), adjacencyExecuteMs: r.f64(),
+  bfsBookkeepingAllocationMs: r.f64(), cAbiResultExportMs: r.f64(), totalProfiledMs: r.f64(),
+  frontierExpansions: Number(r.u64()), adjacencyQueryBinds: Number(r.u64()), adjacencyRowsStepped: Number(r.u64()),
+  resultCount: Number(r.u64()),
+});
+const readFreshProfile = r => ({
+  validationMs: r.f64(), tableLoadMs: r.f64(), ftsLoadMs: r.f64(), graphLoadMs: r.f64(), graphValidationMs: r.f64(),
+  graphKeyGenerationMs: r.f64(), graphNodeLoadMs: r.f64(), graphEdgeLoadMs: r.f64(), vectorLoadMs: r.f64(),
+  indexBuildMs: r.f64(), commitMs: r.f64(),
+  tableRows: Number(r.u64()), ftsRows: Number(r.u64()), vectorRows: Number(r.u64()), payloadBytes: Number(r.u64()),
+});
+const freshValue = (w, value) => {
+  if (value === null) return w.u32(0);
+  if (typeof value === "bigint") return w.u32(1).u64(signedKey(value, "Fresh build integer"));
+  if (typeof value === "number") return w.u32(2).f64(value);
+  if (typeof value === "string") return w.u32(3).bytes(encoder.encode(value));
+  if (value instanceof Uint8Array) return w.u32(4).bytes(value);
+  throw invalid("Unsupported fresh build value");
+};
+const multiI8Modes = ["global-min-cosine", "cbm-prefilter-min-cosine"];
+const multiI8Aggregations = ["min-cosine"];
+const compressions = ["none", "lz4"];
+const sqlFunctionFlags = { deterministic: 1, directOnly: 2, innocuous: 4 };
 
 function sqlText(sql) {
   if (typeof sql !== "string" || sql.includes("\0")) throw invalid("SQL must be a string without NUL bytes");
@@ -202,6 +251,17 @@ export function serveWorker(createModule, port = globalThis) {
   let queue = Promise.resolve();
   let pool;
   let releaseOwnership;
+  // Whether the streamed import is a plain SQLite database to convert.
+  let converting = false;
+  // Opens /db.zova: create (0), open (1) or open for extension upgrade (2).
+  // A read-only connection never writes, so it keeps the default journal.
+  // Native create has no busy-timeout option, so a created name sets it after.
+  const openFile = (mode, args = {}) => {
+    const busyTimeoutMs = count(args.busyTimeoutMs ?? 0, "busyTimeoutMs");
+    check(module._zw_open_file(mode, count(args.pageSize ?? 0, "pageSize"), args.readOnly ? 1 : 0, busyTimeoutMs));
+    if (mode === 0 && busyTimeoutMs !== 0) call(61, request().u32(busyTimeoutMs));
+    if (!args.readOnly) withBytes(sqlText("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;"), pointer => check(module._zw_exec(pointer)));
+  };
   const check = status => {
     if (status === 0) return;
     const pointer = module._zw_error();
@@ -284,6 +344,19 @@ export function serveWorker(createModule, port = globalThis) {
   const edgeScope = a => request().str(a.graphName).str(a.nodeId).u32(code(directions, a.direction, "graph direction")).str(a.edgeType);
   const signed = (op, input) => { call(op, input); return module._zw_integer(); };
   const writeKey = (w, key) => w.bytes(key);
+  const walkScope = a => edgeScope({ ...a, nodeId: a.startNodeId, direction: a.direction ?? "outgoing" })
+    .u32(count(a.maxDepth, "Maximum depth")).u32(count(a.limit, "Limit"));
+  // A fresh-build step whose input fails to encode rolls the session back,
+  // as a failed native step does.
+  const freshStep = (op, build) => {
+    let input;
+    try { input = build(); } catch (error) { try { call(135); } catch { /* already ended */ } throw error; }
+    return call(op, input);
+  };
+  // App-defined SQL functions by registration ID. The bridge calls them
+  // synchronously while a statement runs; see `answerSqlFunction`.
+  const sqlFunctions = new Map();
+  let lastSqlFunction = 0;
   // Operation numbers are shared with native/bridge.c.
   const calls = {
     object_put: a => call(1, request().bytes(a.data)).raw(32),
@@ -333,15 +406,7 @@ export function serveWorker(createModule, port = globalThis) {
     graph_neighbors: a => call(45, edgeScope(a).u32(count(a.limit, "Limit")))
       .list(r => ({ nodeId: r.str(), kind: r.str(), edgeType: r.str() })),
     graph_degree: a => unsigned(46, edgeScope(a)),
-    graph_walk: a => call(47, edgeScope({ ...a, nodeId: a.startNodeId, direction: a.direction ?? "outgoing" })
-      .u32(count(a.maxDepth, "Maximum depth")).u32(count(a.limit, "Limit"))).list(r => {
-        const item = { nodeId: r.str(), kind: r.str(), depth: r.u32() };
-        const predecessorNodeId = r.str();
-        const edgeType = r.str();
-        if (predecessorNodeId !== undefined) item.predecessorNodeId = predecessorNodeId;
-        if (edgeType !== undefined) item.edgeType = edgeType;
-        return item;
-      }),
+    graph_walk: a => call(47, walkScope(a)).list(readWalkItem),
     kv_get_many: a => call(50, request().bytes(a.namespace).each(a.keys, writeKey)).list(r => r.u32() ? r.raw(r.u32()) : null),
     kv_put_many: a => void call(51, request().bytes(a.namespace).each(a.entries, (w, entry) => w.bytes(entry?.key).bytes(entry.value))),
     kv_delete_many: a => void call(52, request().bytes(a.namespace).each(a.keys, writeKey)),
@@ -397,6 +462,131 @@ export function serveWorker(createModule, port = globalThis) {
     extensions_check_all: () => void call(107),
     object_id: a => call(88, request().bytes(a.data)).raw(32),
     object_chunk_id: a => call(89, request().bytes(a.data)).raw(32),
+    kv_scan: a => {
+      const w = request().bytes(a.namespace).bytes(a.prefix ?? new Uint8Array());
+      for (const bound of [a.start, a.end, a.after]) writeOptionalBytes(w, bound);
+      const r = call(110, w.u32(count(a.limit, "Limit")).u32(a.keysOnly ? 1 : 0));
+      const hasMore = r.u32() !== 0;
+      return { entries: r.list(r => ({ key: r.raw(r.u32()), value: r.raw(r.u32()) })), hasMore };
+    },
+    kv_put_if_absent: a => flag(111, request().bytes(a.namespace).bytes(a.key).bytes(a.value)),
+    kv_compare_and_put: a => flag(112, request().bytes(a.namespace).bytes(a.key).bytes(a.expected).bytes(a.value)),
+    kv_compare_and_delete: a => flag(113, request().bytes(a.namespace).bytes(a.key).bytes(a.expected)),
+    object_set_compression: a => void call(114, request().u32(code(compressions, a.compression, "object compression"))),
+    vector_search_multi_i8: a => {
+      if (!(a.queryValues instanceof Int8Array)) throw invalid("queryValues must be an Int8Array");
+      const w = request().str(a.collection).bytes(new Uint8Array(a.queryValues.buffer, a.queryValues.byteOffset, a.queryValues.byteLength))
+        .u32(count(a.queryCount, "queryCount")).u32(count(a.dimensions, "dimensions"));
+      if (a.candidateIds === undefined) w.u32(0); else w.u32(1).each(a.candidateIds, writeText);
+      return call(115, w.u32(code(multiI8Modes, a.mode ?? "global-min-cosine", "multi-vector search mode"))
+        .u32(code(multiI8Aggregations, a.aggregation ?? "min-cosine", "multi-vector aggregation"))
+        .u32(count(a.prefilterQueryIndex ?? 0, "prefilterQueryIndex")).u32(count(a.prefilterLimit ?? 0, "prefilterLimit"))
+        .u32(count(a.limit, "Limit"))).list(readSearch);
+    },
+    graph_node_put_many_keyed: a => readKeys(call(116, request().each(a.nodes, writeNode))),
+    graph_edge_put_many_keyed: a => readKeys(call(117, request().each(a.edges, writeEdge))),
+    graph_nodes_get_keyed: a => call(118, request().str(a.graphName).each(a.keys, writeGraphKey))
+      .list(r => r.u32() ? { nodeKey: readGraphKey(r), nodeId: r.str(), kind: r.str(), createdOrder: readGraphKey(r) } : null),
+    graph_edges_get_keyed: a => call(119, request().str(a.graphName).each(a.keys, writeGraphKey))
+      .list(r => r.u32() ? { edgeKey: readGraphKey(r), sourceNodeKey: readGraphKey(r), edgeType: r.str(),
+        targetNodeKey: readGraphKey(r), createdOrder: readGraphKey(r) } : null),
+    graph_neighbors_keyed: a => call(120, edgeScope(a).u32(count(a.limit, "Limit")))
+      .list(r => ({ edgeKey: readGraphKey(r), neighborNodeKey: readGraphKey(r), nodeId: r.str(), kind: r.str(), edgeType: r.str() })),
+    graph_degrees_keyed: a => BigUint64Array.from(call(121, request().str(a.graphName).each(a.nodeKeys, writeGraphKey)
+      .u32(code(directions, a.direction, "graph direction")).str(a.edgeType)).list(r => r.u64())),
+    graph_edge_payloads_get: a => call(122, request().str(a.graphName).each(a.keys, writeGraphKey))
+      .list(r => r.u32() ? r.raw(r.u32()) : null),
+    graph_edge_payloads_replace: a => void call(123, request().str(a.graphName)
+      .each(a.replacements, (w, item) => writeGraphKey(w, item?.edgeKey).bytes(item.payload))),
+    graph_scan: a => {
+      const r = call(124, writeScanCursor(writeScanCursor(request().str(a.graphName), a.nodeAfter), a.edgeAfter)
+        .u32(count(a.nodeLimit, "nodeLimit")).u32(count(a.edgeLimit, "edgeLimit")));
+      const hasMoreNodes = r.u32() !== 0;
+      const hasMoreEdges = r.u32() !== 0;
+      const nodes = r.list(r => ({ nodeKey: readGraphKey(r), nodeId: r.str(), kind: r.str(), createdOrder: readGraphKey(r) }));
+      const edges = r.list(r => ({ edgeKey: readGraphKey(r), sourceNodeKey: readGraphKey(r), edgeType: r.str(),
+        targetNodeKey: readGraphKey(r), createdOrder: readGraphKey(r) }));
+      return { nodes, edges, hasMoreNodes, hasMoreEdges };
+    },
+    graph_walk_profiled: a => {
+      const r = call(125, walkScope(a));
+      const items = r.list(readWalkItem);
+      return { items, profile: readWalkProfile(r) };
+    },
+    graph_build_fresh: a => {
+      const op = { normalized: 126, prepared: 127, payloads: 128 }[a.variant];
+      if (op === undefined) throw invalid("Unknown fresh graph builder");
+      const r = call(op, request().str(a.graphName).each(a.nodes, writeFreshNode).each(a.edges, writeFreshEdge));
+      return { nodeKeys: readKeys(r), edgeKeys: readKeys(r) };
+    },
+    fresh_build_begin: () => void call(129),
+    fresh_build_rows: a => void freshStep(a.fts ? 131 : 130, () => {
+      const w = request().str(a.tableName).each(a.columns, writeText);
+      if (!Array.isArray(a.rows)) throw invalid("Rows must be an array");
+      w.u32(count(a.rows.length, "Row count"));
+      for (const row of a.rows) {
+        if (!Array.isArray(row) || row.length !== a.columns.length) throw invalid("Each row needs one value per column");
+        for (const value of row) freshValue(w, value);
+      }
+      return w;
+    }),
+    fresh_build_graph: a => void freshStep(132, () => request().str(a.graphName).each(a.nodes, writeFreshNode).each(a.edges, writeFreshEdge)),
+    fresh_build_vectors: a => void freshStep(133, () => request().str(a.collection).each(a.vectors, (w, vector) => w.str(vector?.id).values(vector.values))),
+    fresh_build_finish: () => {
+      const r = call(134);
+      return { nodeKeys: readKeys(r), edgeKeys: readKeys(r), profile: readFreshProfile(r) };
+    },
+    fresh_build_abort: () => void call(135),
+    register_function: async a => {
+      if (!Number.isInteger(a.arity) || a.arity < -1 || a.arity > 0x7fffffff) throw invalid("Arity must be -1 or a non-negative integer");
+      if (typeof a.module !== "string" || typeof a.export !== "string") throw invalid("A SQL function is a module URL and an export name");
+      let flags = 0;
+      for (const [option, bit] of Object.entries(sqlFunctionFlags)) if (a.options?.[option]) flags |= bit;
+      const input = request().str(a.name).u32(a.arity >>> 0).u32(flags);
+      let loaded;
+      try { loaded = await import(a.module); }
+      catch (error) { throw invalid("Cannot load SQL function module " + a.module + ": " + String(error?.message ?? error)); }
+      const fn = loaded[a.export];
+      if (typeof fn !== "function") throw invalid("SQL function module " + a.module + " has no function export " + a.export);
+      const id = ++lastSqlFunction;
+      sqlFunctions.set(id, fn);
+      try { call(136, input.u32(id)); } catch (error) { sqlFunctions.delete(id); throw error; }
+    },
+    abi_version: () => { const r = call(137); return { major: r.u32(), minor: r.u32(), patch: r.u32(), version: r.str() }; },
+    extension_upgrade: a => void call(138, request().str(a.name)),
+    extension_rebuild: a => void call(139, request().str(a.name)),
+  };
+  // Runs one SQL function call for the bridge. Its arguments are borrowed
+  // WASM memory; the answer is copied by zw_sql_result before it returns.
+  const answerSqlFunction = (id, pointer, length) => {
+    const answer = (type, integer, real, bytes = new Uint8Array()) =>
+      withBytes(bytes, (data, size) => module._zw_sql_result(type, integer, real, data, size));
+    let value;
+    try {
+      const r = reply(module.HEAPU8.subarray(pointer, pointer + length));
+      const args = Array.from({ length: r.u32() }, () => {
+        switch (r.u32()) {
+          case 0: return null;
+          case 1: return BigInt.asIntN(64, r.u64());
+          case 2: return r.f64();
+          case 3: return decoder.decode(r.raw(r.u32()));
+          default: return r.raw(r.u32());
+        }
+      });
+      value = sqlFunctions.get(id)(...args);
+    } catch (error) { return answer(5, 0n, 0, encoder.encode(String(error))); }
+    if (value === null || value === undefined) return answer(0, 0n, 0);
+    switch (typeof value) {
+      case "bigint":
+        if (value < -(1n << 63n) || value >= (1n << 63n)) return answer(5, 0n, 0, encoder.encode("SQL function result is outside the signed 64-bit range"));
+        return answer(1, value, 0);
+      case "number": return answer(2, 0n, value);
+      case "boolean": return answer(1, value ? 1n : 0n, 0);
+      case "string": return answer(3, 0n, 0, encoder.encode(value));
+    }
+    if (value instanceof Uint8Array) return answer(4, 0n, 0, value);
+    const name = typeof value === "object" ? value.constructor?.name ?? "object" : typeof value;
+    return answer(5, 0n, 0, encoder.encode("unsupported SQL function result type " + name));
   };
   // Step-by-step statement use; each acts on the statement `handle`.
   const statementCall = (op, a, input) => { check(module._zw_select(a.handle)); return call(op, input); };
@@ -465,7 +655,7 @@ export function serveWorker(createModule, port = globalThis) {
   const abortImport = async () => {
     try { call(100, request().u32(0)); } catch { /* the file is removed below */ }
     module._zw_close();
-    ["/db.zova-journal", "/db.zova"].forEach(file => pool.unlink(file));
+    ["/db.zova-journal", "/db.zova", convertSource].forEach(file => pool.unlink(file));
     await clearPending(name);
     pool.pauseVfs();
     await releaseOwnership?.();
@@ -560,8 +750,10 @@ export function serveWorker(createModule, port = globalThis) {
           port.postMessage({ id: currentId, progress: { phase: phases[phase], member: members[member], done, total } });
           return 0;
         };
+        module.zovaSqlFunction = answerSqlFunction;
+        module.zovaSqlDestroy = id => sqlFunctions.delete(id);
         if (args.name === undefined) {
-          check(module._zw_create());
+          check(module._zw_create(count(args.pageSize ?? 0, "pageSize")));
         } else {
           if (!globalThis.navigator?.storage?.getDirectory || typeof FileSystemFileHandle === "undefined" || !FileSystemFileHandle.prototype.createSyncAccessHandle) {
             throw Object.assign(new Error("OPFS synchronous storage is unavailable"), {status:"ZOVA_CANT_OPEN",statusCode:13});
@@ -577,7 +769,7 @@ export function serveWorker(createModule, port = globalThis) {
             return;
           }
           created = !pool.getFileNames().includes("/db.zova");
-          if (args.existing && created) throw Object.assign(new Error("No stored database: " + args.name), { status: "ZOVA_NOT_ZOVA_DATABASE", statusCode: 31 });
+          if ((args.existing || args.readOnly || args.upgrade) && created) throw Object.assign(new Error("No stored database: " + args.name), { status: "ZOVA_NOT_ZOVA_DATABASE", statusCode: 31 });
           if (restoreFrom !== undefined) {
             call(94, request().str("/db.zova").u32(args.verify === false ? 0 : 1));
             pool.pauseVfs();
@@ -597,7 +789,8 @@ export function serveWorker(createModule, port = globalThis) {
             marked = true;
           }
           if (args.importing) {
-            call(98);
+            converting = Boolean(args.convert);
+            call(98, request().u32(converting ? 1 : 0));
             state = "importing";
             return;
           }
@@ -605,8 +798,7 @@ export function serveWorker(createModule, port = globalThis) {
             try { pool.importDb("/db.zova", args.data); }
             catch (error) { throw Object.assign(new Error(String(error.message ?? error)), { status: "ZOVA_NOT_ZOVA_DATABASE", statusCode: 31 }); }
           }
-          check(module._zw_open_file(created && args.data === undefined ? 0 : 1));
-          withBytes(sqlText("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;"), pointer => check(module._zw_exec(pointer)));
+          openFile(created && args.data === undefined ? 0 : args.upgrade ? 2 : 1, args);
           if (marked) {
             verifyImport();
             await clearPending(args.name);
@@ -639,8 +831,11 @@ export function serveWorker(createModule, port = globalThis) {
         case "import_finish":
           try {
             call(100, request().u32(1));
-            check(module._zw_open_file(1));
-            withBytes(sqlText("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;"), pointer => check(module._zw_exec(pointer)));
+            if (converting) {
+              check(module._zw_convert());
+              pool.unlink(convertSource);
+            }
+            openFile(1);
             verifyImport();
             await clearPending(name);
           } catch (error) { await abortImport(); throw error; }

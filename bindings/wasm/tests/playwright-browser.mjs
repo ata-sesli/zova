@@ -9,6 +9,7 @@ import { testMaintenance } from "./maintenance-browser.mjs";
 import { testTransfer } from "./transfer-browser.mjs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { Database as SQLite } from "bun:sqlite";
 
 const [installedPackage, helium = process.env.HELIUM_EXECUTABLE] = process.argv.slice(2);
 if (!installedPackage) throw new Error("usage: bun playwright-browser.mjs <installed-zova-wasm-directory> [helium-executable]");
@@ -26,6 +27,13 @@ for (const format of migrationFormats) {
   const migrated = Bun.spawnSync([nativeCli, "migrate", join(fixtures, `format-${format}.zova`), join(nativeMigrated, `format-${format}.zova`)], { stderr: "inherit" });
   if (migrated.exitCode !== 0) throw new Error(`Native migration of format ${format} failed`);
 }
+// An ordinary SQLite database for Database.convertSqliteToPersistent.
+const plainSqlite = join(nativeMigrated, "plain.sqlite");
+{
+  const plain = new SQLite(plainSqlite);
+  plain.exec("create table notes(id integer primary key, body text not null); insert into notes(body) values ('from sqlite')");
+  plain.close();
+}
 let resolveReport;
 const report = new Promise(resolve => { resolveReport = resolve; });
 const server = Bun.serve({
@@ -37,6 +45,8 @@ const server = Bun.serve({
     }
     if (path === "/") return new Response('<script type="module" src="/test.mjs"></script>', { headers: { "Content-Type": "text/html" } });
     if (path === "/extension-fixture.json" || path === "/extension-missing.zova") return new Response(Bun.file(new URL("." + path, import.meta.url)));
+    if (path === "/plain.sqlite") return new Response(Bun.file(plainSqlite));
+    if (path === "/sql-function-fixture.mjs") return new Response(Bun.file(new URL("./sql-function-fixture.mjs", import.meta.url)), { headers: { "Content-Type": "text/javascript" } });
     if (path === "/vector-fixture.json") return new Response(Bun.file(new URL("./vector-fixture.json", import.meta.url)));
     if (path === "/object-fixture.json") return new Response(Bun.file(new URL("./object-fixture.json", import.meta.url)));
     if (path === "/helpers.mjs") return new Response(Bun.file(new URL("./browser-helpers.mjs", import.meta.url)), { headers: { "Content-Type": "text/javascript" } });

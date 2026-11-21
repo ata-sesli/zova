@@ -41,6 +41,7 @@ static void streams_close(void);
 #ifdef ZOVA_WASM_OPFS
 static void export_end(void);
 static int import_end(int commit);
+static void fresh_end(void);
 #endif
 
 /* A module built with its own plugins (ZOVA_WASM_PLUGIN_SOURCES) defines this
@@ -55,33 +56,77 @@ extern zova_status zova_opfs_create(const zova_database_open_request *);
 extern zova_status zova_opfs_open(const zova_database_open_request *);
 extern zova_status zova_opfs_create_plugins(const zova_database_open_plugins_request *);
 extern zova_status zova_opfs_open_plugins(const zova_database_open_plugins_request *);
+extern zova_status zova_opfs_open_options(const zova_database_open_options_request *);
+extern zova_status zova_opfs_create_options(const zova_database_create_options_request *);
+extern zova_status zova_opfs_open_upgrade(const zova_database_open_extensions_request *);
+extern zova_status zova_opfs_open_upgrade_plugins(const zova_database_open_plugins_request *);
+extern zova_status zova_opfs_convert(const zova_convert_sqlite_to_zova_request *);
 
-/* Opens or creates `path` with the linked plugins, if the module has any. */
-static int open_with_plugins(const char *path, int create, int *used) {
+enum { OPEN_CREATE = 0, OPEN_EXISTING = 1, OPEN_UPGRADE = 2 };
+static char bridge_error[160];
+
+/* Opens or creates `path` with the linked plugins, if the module has any. The
+ * C ABI has no create call taking both plugins and a page size. */
+static int open_with_plugins(const char *path, int mode, uint32_t page_size, uint32_t flags, uint32_t busy_timeout_ms, int *used) {
     size_t count = 0;
     const struct zova_plugin_descriptor_v1 *const *plugins = zova_wasm_linked_plugins(&count);
     *used = count != 0;
     if (!count) return ZOVA_OK;
+    if (page_size) {
+        snprintf(bridge_error, sizeof(bridge_error), "pageSize is unavailable in a module with linked plugins");
+        return ZOVA_INVALID_ARGUMENT;
+    }
     zova_database_open_plugins_request request = {0};
     request.path = path;
+    request.flags = flags;
+    request.busy_timeout_ms = busy_timeout_ms;
     request.plugins = plugins;
     request.plugin_count = count;
     request.out_db = &db;
     request.out_error_message = &message;
-    return create ? zova_opfs_create_plugins(&request) : zova_opfs_open_plugins(&request);
+    return mode == OPEN_CREATE ? zova_opfs_create_plugins(&request) :
+        mode == OPEN_UPGRADE ? zova_opfs_open_upgrade_plugins(&request) : zova_opfs_open_plugins(&request);
 }
 
-EXPORTED int zw_open_file(int exists) {
+/* Creates, opens, or opens for extension upgrade, as `mode` selects. */
+EXPORTED int zw_open_file(int mode, uint32_t page_size, uint32_t flags, uint32_t busy_timeout_ms) {
     if (db) return ZOVA_INVALID_ARGUMENT;
     zova_message_free(&message);
+    bridge_error[0] = 0;
     /* Normal open validates without migration, but permits SQLite to recover
      * an abandoned rollback journal. A preliminary read-only open blocks that
      * recovery. Clean incompatible files are still rejected without mutation. */
     int used = 0;
-    int status = open_with_plugins("/db.zova", !exists, &used);
+    int status = open_with_plugins("/db.zova", mode, page_size, flags, busy_timeout_ms, &used);
     if (used) return status;
+    if (mode == OPEN_UPGRADE) {
+        zova_database_open_extensions_request request = {0};
+        request.path = "/db.zova";
+        request.flags = flags;
+        request.busy_timeout_ms = busy_timeout_ms;
+        request.out_db = &db;
+        request.out_error_message = &message;
+        return zova_opfs_open_upgrade(&request);
+    }
+    if (mode == OPEN_CREATE && page_size) {
+        zova_database_create_options_request request = {"/db.zova", page_size, &db, &message};
+        return zova_opfs_create_options(&request);
+    }
+    if (mode == OPEN_EXISTING && (flags || busy_timeout_ms)) {
+        zova_database_open_options_request request = {"/db.zova", flags, busy_timeout_ms, &db, &message};
+        return zova_opfs_open_options(&request);
+    }
     zova_database_open_request request = {"/db.zova", &db, &message};
-    return exists ? zova_opfs_open(&request) : zova_opfs_create(&request);
+    return mode == OPEN_EXISTING ? zova_opfs_open(&request) : zova_opfs_create(&request);
+}
+
+/* Converts an imported plain SQLite file to a new /db.zova; no database is open. */
+EXPORTED int zw_convert(void) {
+    if (db) return ZOVA_INVALID_ARGUMENT;
+    zova_message_free(&message);
+    bridge_error[0] = 0;
+    zova_convert_sqlite_to_zova_request request = {"/convert-source.sqlite", "/db.zova", &message};
+    return zova_opfs_convert(&request);
 }
 
 /* Maintenance calls run in a worker that holds the database's lock but has
@@ -93,7 +138,6 @@ static int32_t report_progress(void *context, const zova_progress *progress) {
     (void)context;
     return zw_progress_js((int)progress->phase, (int)progress->member, (double)progress->done, (double)progress->total);
 }
-static char bridge_error[160];
 static int sqlite_failure(sqlite3 *raw, int rc) {
     snprintf(bridge_error, sizeof(bridge_error), "%s", raw ? sqlite3_errmsg(raw) : sqlite3_errstr(rc));
     return rc == SQLITE_BUSY ? ZOVA_BUSY : rc == SQLITE_CANTOPEN ? ZOVA_CANT_OPEN : ZOVA_SQLITE_ERROR;
@@ -203,13 +247,20 @@ EXPORTED const char *zw_error(void) {
 }
 EXPORTED const char *zw_status_name(int status) { return zova_status_name(status); }
 
-EXPORTED int zw_create(void) {
+EXPORTED int zw_create(uint32_t page_size) {
     if (db) return ZOVA_INVALID_ARGUMENT;
     zova_message_free(&message);
 #ifdef ZOVA_WASM_OPFS
+    bridge_error[0] = 0;
     int used = 0;
-    int status = open_with_plugins(":memory:", 1, &used);
+    int status = open_with_plugins(":memory:", OPEN_CREATE, page_size, 0, 0, &used);
     if (used) return status;
+    if (page_size) {
+        zova_database_create_options_request request = {":memory:", page_size, &db, &message};
+        return zova_opfs_create_options(&request);
+    }
+#else
+    if (page_size) return ZOVA_INVALID_ARGUMENT;
 #endif
     zova_database_create_memory_request request = {&db, &message};
     return zova_database_create_memory(&request);
@@ -266,6 +317,7 @@ EXPORTED int zw_close(void) {
     subscription_count = 0;
     streams_close();
 #ifdef ZOVA_WASM_OPFS
+    fresh_end();
     export_end();
     import_end(0);
 #endif
@@ -1517,8 +1569,10 @@ static int export_read(uint64_t offset, uint32_t size) {
     return ZOVA_OK;
 }
 
-/* Streamed import: chunks are written in order straight into /db.zova of the
- * default VFS, which must not exist; the caller verifies and opens it. */
+/* Streamed import: chunks are written in order straight into /db.zova, or
+ * the conversion source, of the default VFS, which must not exist; the
+ * caller converts, verifies and opens it. SQLite keeps the name until close. */
+static const char convert_source[] = "/convert-source.sqlite";
 static sqlite3_file *import_file;
 static sqlite3_int64 import_offset;
 
@@ -1531,7 +1585,7 @@ static int import_end(int commit) {
     import_offset = 0;
     return rc == SQLITE_OK ? ZOVA_OK : sqlite_failure(NULL, rc);
 }
-static int import_begin(void) {
+static int import_begin(const char *path) {
     if (import_file || db) return ZOVA_MISUSE;
     sqlite3_vfs *vfs = sqlite3_vfs_find(NULL);
     if (!vfs) return ZOVA_CANT_OPEN;
@@ -1539,7 +1593,7 @@ static int import_begin(void) {
     if (!import_file) return ZOVA_OUT_OF_MEMORY;
     memset(import_file, 0, (size_t)vfs->szOsFile);
     int flags = 0;
-    int rc = vfs->xOpen(vfs, "/db.zova", import_file, SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_MAIN_DB, &flags);
+    int rc = vfs->xOpen(vfs, path, import_file, SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_MAIN_DB, &flags);
     if (rc != SQLITE_OK) {
         sqlite3_free(import_file);
         import_file = NULL;
@@ -1653,7 +1707,11 @@ static int call_maintenance(int op, reader *r) {
             return export_read(offset, size);
         }
         case 97: PARSED; export_end(); return ZOVA_OK;
-        case 98: PARSED; return import_begin();
+        case 98: {
+            uint32_t convert = rd_u32(r);
+            PARSED;
+            return import_begin(convert ? convert_source : "/db.zova");
+        }
         case 99: {
             zova_kv_bytes data = rd_bytes(r);
             PARSED;
@@ -1707,6 +1765,659 @@ static int call_maintenance(int op, reader *r) {
         default: return ZOVA_INVALID_ARGUMENT;
     }
 }
+
+/* App-defined SQL functions call into the worker runtime, which runs the
+ * function synchronously and answers through zw_sql_result. Arguments go in
+ * their own buffer: a function can run in the middle of another reply. */
+EM_JS(void, zw_sql_call_js, (int id, const uint8_t *args, size_t len), {
+    Module["zovaSqlFunction"](id, args, len);
+});
+EM_JS(void, zw_sql_destroy_js, (int id), {
+    if (Module["zovaSqlDestroy"]) Module["zovaSqlDestroy"](id);
+});
+static zova_sql_result *sql_result;
+static uint8_t *sql_data;
+static const uint8_t sql_empty[1];
+static const char sql_unanswered[] = "SQL function returned no result";
+static const char sql_no_memory[] = "out of memory";
+
+EXPORTED void zw_sql_result(int type, int64_t value, double floating, const uint8_t *data, size_t len) {
+    if (!sql_result) return;
+    free(sql_data);
+    sql_data = NULL;
+    const uint8_t *copy = sql_empty;
+    if (type >= ZOVA_SQL_RESULT_TEXT && len) {
+        sql_data = malloc(len);
+        if (!sql_data) {
+            sql_result->result_type = ZOVA_SQL_RESULT_ERROR;
+            sql_result->error_message = sql_no_memory;
+            sql_result->error_message_len = sizeof(sql_no_memory) - 1;
+            return;
+        }
+        memcpy(sql_data, data, len);
+        copy = sql_data;
+    }
+    sql_result->result_type = type;
+    sql_result->int64_value = value;
+    sql_result->double_value = floating;
+    if (type == ZOVA_SQL_RESULT_ERROR) {
+        sql_result->error_message = (const char *)copy;
+        sql_result->error_message_len = len;
+    } else if (type >= ZOVA_SQL_RESULT_TEXT) {
+        sql_result->data = copy;
+        sql_result->data_len = len;
+    }
+}
+static void sql_put(uint8_t *target, size_t *at, const void *data, size_t len) {
+    if (len) memcpy(target + *at, data, len);
+    size_t padded = (len + 3) & ~(size_t)3;
+    memset(target + *at + len, 0, padded - len);
+    *at += padded;
+}
+/* Arguments: u32 count, then per value u32 type and an i64, an f64, or u32
+ * length and bytes. */
+static void sql_call(void *user_data, const zova_sql_function_call *call, zova_sql_result *result) {
+    result->result_type = ZOVA_SQL_RESULT_ERROR;
+    result->error_message = sql_no_memory;
+    result->error_message_len = sizeof(sql_no_memory) - 1;
+    size_t size = 4;
+    for (size_t index = 0; index < call->argc; index++) {
+        const zova_sql_value *value = &call->argv[index];
+        if (value->value_type == ZOVA_SQL_VALUE_TEXT || value->value_type == ZOVA_SQL_VALUE_BLOB) {
+            if (value->data_len >= UINT32_MAX) return;
+            size += 8 + ((value->data_len + 3) & ~(size_t)3);
+        } else size += value->value_type == ZOVA_SQL_VALUE_NULL ? 4 : 12;
+    }
+    uint8_t *args = malloc(size);
+    if (!args) return;
+    size_t at = 0;
+    uint32_t argc = (uint32_t)call->argc;
+    sql_put(args, &at, &argc, 4);
+    for (size_t index = 0; index < call->argc; index++) {
+        const zova_sql_value *value = &call->argv[index];
+        uint32_t type = (uint32_t)value->value_type;
+        sql_put(args, &at, &type, 4);
+        if (type == ZOVA_SQL_VALUE_INTEGER) sql_put(args, &at, &value->int64_value, 8);
+        else if (type == ZOVA_SQL_VALUE_FLOAT) sql_put(args, &at, &value->double_value, 8);
+        else if (type != ZOVA_SQL_VALUE_NULL) {
+            uint32_t len = (uint32_t)value->data_len;
+            sql_put(args, &at, &len, 4);
+            sql_put(args, &at, value->data, len);
+        }
+    }
+    result->error_message = sql_unanswered;
+    result->error_message_len = sizeof(sql_unanswered) - 1;
+    zova_sql_result *previous = sql_result;
+    sql_result = result;
+    zw_sql_call_js((int)(intptr_t)user_data, args, at);
+    sql_result = previous;
+    free(args);
+}
+static void sql_destroy(void *user_data) { zw_sql_destroy_js((int)(intptr_t)user_data); }
+
+/* The one fresh-build session of this database, and the key counts its
+ * finish reports. A failed step has already rolled the session back. */
+static zova_fresh_build *fresh;
+static size_t fresh_nodes;
+static size_t fresh_edges;
+static void fresh_end(void) {
+    if (!fresh) return;
+    zova_fresh_build_abort(fresh);
+    zova_fresh_build_destroy(fresh);
+    fresh = NULL;
+    fresh_nodes = 0;
+    fresh_edges = 0;
+}
+static int fresh_step(int status) {
+    if (status != ZOVA_OK) fresh_end();
+    return status;
+}
+
+static double rd_f64(reader *r) {
+    double value = 0;
+    const uint8_t *data = rd_take(r, 8);
+    if (data) memcpy(&value, data, 8);
+    return value;
+}
+static int64_t *rd_keys(reader *r, uint32_t *count) {
+    *count = rd_u32(r);
+    int64_t *keys = rd_array(r, *count, sizeof(*keys));
+    for (uint32_t index = 0; keys && index < *count; index++) keys[index] = (int64_t)rd_u64(r);
+    return keys;
+}
+static void wr_keys(const int64_t *keys, size_t count) {
+    wr_u32((uint32_t)count);
+    for (size_t index = 0; index < count; index++) wr_u64((uint64_t)keys[index]);
+}
+/* Optional bytes: a presence flag, then the bytes. */
+static zova_kv_bytes rd_optional_bytes(reader *r, uint8_t *present) {
+    *present = rd_u32(r) != 0;
+    zova_kv_bytes value = {NULL, 0};
+    if (*present) value = rd_bytes(r);
+    return value;
+}
+static zova_graph_fresh_node_input rd_fresh_node(reader *r) {
+    zova_graph_fresh_node_input node = {0};
+    node.node_id = rd_str(r);
+    node.kind = rd_str(r);
+    node.target_type = (int)rd_u32(r);
+    node.target_namespace = rd_str(r);
+    node.target_ref = rd_str(r);
+    return node;
+}
+static zova_graph_fresh_edge_payload_input rd_fresh_edge(reader *r) {
+    zova_graph_fresh_edge_payload_input edge = {0};
+    edge.from_node_ordinal = rd_u32(r);
+    edge.edge_type = rd_str(r);
+    edge.to_node_ordinal = rd_u32(r);
+    zova_kv_bytes payload = rd_bytes(r);
+    edge.payload = payload.data;
+    edge.payload_len = payload.len;
+    return edge;
+}
+/* A fresh graph: name, nodes, then edges with payloads. */
+static int rd_fresh_graph(reader *r, const char **name, zova_graph_fresh_node_input **nodes, uint32_t *node_count,
+    zova_graph_fresh_edge_payload_input **edges, uint32_t *edge_count) {
+    *name = rd_str(r);
+    *node_count = rd_u32(r);
+    *nodes = rd_array(r, *node_count, sizeof(**nodes));
+    for (uint32_t index = 0; *nodes && index < *node_count; index++) (*nodes)[index] = rd_fresh_node(r);
+    *edge_count = rd_u32(r);
+    *edges = *nodes ? rd_array(r, *edge_count, sizeof(**edges)) : NULL;
+    for (uint32_t index = 0; *edges && index < *edge_count; index++) (*edges)[index] = rd_fresh_edge(r);
+    return *nodes && *edges && !r->bad && !r->left;
+}
+static void wr_walk_items(const zova_graph_walk_results *results) {
+    wr_u32((uint32_t)results->len);
+    for (size_t index = 0; index < results->len; index++) {
+        const zova_graph_walk_result *item = &results->items[index];
+        wr_blob(item->node_id, item->node_id_len);
+        wr_blob(item->kind, item->kind_len);
+        wr_u32(item->depth);
+        wr_optional(item->predecessor_node_id, item->predecessor_node_id_len, item->has_predecessor_node_id);
+        wr_optional(item->edge_type, item->edge_type_len, item->has_edge_type);
+    }
+}
+
+/* C ABI calls added for parity with the native bindings. */
+static int call_parity(int op, reader *r) {
+    switch (op) {
+        case 110: {
+            zova_kv_scan_results results = {0};
+            zova_kv_scan_request request = {0};
+            request.db = db;
+            request.ns = rd_bytes(r);
+            request.prefix = rd_bytes(r);
+            request.start = rd_optional_bytes(r, &request.has_start);
+            request.end = rd_optional_bytes(r, &request.has_end);
+            request.after = rd_optional_bytes(r, &request.has_after);
+            request.limit = rd_u32(r);
+            request.keys_only = rd_u32(r) != 0;
+            request.out_results = &results;
+            PARSED;
+            int status = zova_kv_scan(&request);
+            if (status == ZOVA_OK) {
+                wr_u32(results.has_more);
+                wr_u32((uint32_t)results.len);
+                for (size_t index = 0; index < results.len; index++) {
+                    wr_blob(results.items[index].key.data, results.items[index].key.len);
+                    wr_blob(results.items[index].value.data, results.items[index].value.len);
+                }
+            }
+            zova_kv_scan_results_free(&results);
+            return status;
+        }
+        case 111: case 112: case 113: {
+            /* Put if absent, compare and put, compare and delete. */
+            uint8_t applied = 0;
+            zova_kv_bytes ns = rd_bytes(r);
+            zova_kv_bytes key = rd_bytes(r);
+            zova_kv_bytes expected = op == 111 ? (zova_kv_bytes){NULL, 0} : rd_bytes(r);
+            zova_kv_bytes value = op == 113 ? (zova_kv_bytes){NULL, 0} : rd_bytes(r);
+            PARSED;
+            int status;
+            if (op == 111) {
+                zova_kv_put_if_absent_request request = {db, ns, key, value, &applied};
+                status = zova_kv_put_if_absent(&request);
+            } else if (op == 112) {
+                zova_kv_compare_and_put_request request = {db, ns, key, expected, value, &applied};
+                status = zova_kv_compare_and_put(&request);
+            } else {
+                zova_kv_compare_and_delete_request request = {db, ns, key, expected, &applied};
+                status = zova_kv_compare_and_delete(&request);
+            }
+            number = applied;
+            return status;
+        }
+        case 114: {
+            zova_object_set_compression_request request = {db, (int)rd_u32(r)};
+            PARSED;
+            return zova_object_set_compression(&request);
+        }
+        case 115: {
+            zova_vector_search_results results = {0};
+            zova_vector_search_multi_i8_request request = {0};
+            request.db = db;
+            request.collection_name = rd_str(r);
+            zova_kv_bytes query = rd_bytes(r);
+            request.query_values = (const int8_t *)query.data;
+            request.query_values_len = query.len;
+            request.query_count = rd_u32(r);
+            request.dimensions = rd_u32(r);
+            uint32_t has_candidates = rd_u32(r);
+            uint32_t count = has_candidates ? rd_u32(r) : 0;
+            const char **ids = has_candidates ? rd_array(r, count, sizeof(*ids)) : NULL;
+            for (uint32_t index = 0; ids && index < count; index++) {
+                ids[index] = rd_str(r);
+                if (!ids[index]) r->bad = 1;
+            }
+            request.candidate_ids = ids;
+            request.candidate_count = count;
+            request.mode = (int)rd_u32(r);
+            request.aggregation = (int)rd_u32(r);
+            request.prefilter_query_index = rd_u32(r);
+            request.prefilter_limit = rd_u32(r);
+            request.limit = rd_u32(r);
+            request.out_results = &results;
+            int status = ZOVA_INVALID_ARGUMENT;
+            if (!r->bad && !r->left && (!has_candidates || ids)) status = zova_vector_search_multi_i8(&request);
+            if (status == ZOVA_OK) wr_search(&results);
+            zova_vector_search_results_free(&results);
+            free(ids);
+            return status;
+        }
+        case 116: {
+            uint32_t count = rd_u32(r);
+            zova_graph_node_input *nodes = rd_array(r, count, sizeof(*nodes));
+            for (uint32_t index = 0; nodes && index < count; index++) nodes[index] = rd_node(r);
+            int64_t *keys = nodes ? calloc(count ? count : 1, sizeof(*keys)) : NULL;
+            int status = keys ? ZOVA_INVALID_ARGUMENT : ZOVA_OUT_OF_MEMORY;
+            if (keys && !r->bad && !r->left) {
+                zova_graph_node_put_many_keyed_request request = {db, nodes, count, keys, count};
+                status = zova_graph_node_put_many_keyed(&request);
+                if (status == ZOVA_OK) wr_keys(keys, count);
+            }
+            free(keys);
+            free(nodes);
+            return status;
+        }
+        case 117: {
+            uint32_t count = rd_u32(r);
+            zova_graph_edge_input *edges = rd_array(r, count, sizeof(*edges));
+            for (uint32_t index = 0; edges && index < count; index++) edges[index] = rd_edge(r);
+            int64_t *keys = edges ? calloc(count ? count : 1, sizeof(*keys)) : NULL;
+            int status = keys ? ZOVA_INVALID_ARGUMENT : ZOVA_OUT_OF_MEMORY;
+            if (keys && !r->bad && !r->left) {
+                zova_graph_edge_put_many_keyed_request request = {db, edges, count, keys, count};
+                status = zova_graph_edge_put_many_keyed(&request);
+                if (status == ZOVA_OK) wr_keys(keys, count);
+            }
+            free(keys);
+            free(edges);
+            return status;
+        }
+        case 118: case 119: case 122: {
+            /* Nodes, edges or edge payloads by key; missing keys report not found. */
+            const char *graph = rd_str(r);
+            uint32_t count = 0;
+            int64_t *keys = rd_keys(r, &count);
+            int status = ZOVA_INVALID_ARGUMENT;
+            if (keys && !r->bad && !r->left) {
+                if (op == 118) {
+                    zova_graph_keyed_node_results results = {0};
+                    zova_graph_nodes_get_many_keyed_request request = {db, graph, keys, count, &results};
+                    status = zova_graph_nodes_get_many_keyed(&request);
+                    if (status == ZOVA_OK) {
+                        wr_u32((uint32_t)results.len);
+                        for (size_t index = 0; index < results.len; index++) {
+                            const zova_graph_keyed_node_result *item = &results.items[index];
+                            wr_u32(item->found);
+                            if (!item->found) continue;
+                            wr_u64((uint64_t)item->node_key);
+                            wr_blob(item->node_id, item->node_id_len);
+                            wr_blob(item->kind, item->kind_len);
+                            wr_u64((uint64_t)item->created_order);
+                        }
+                    }
+                    zova_graph_keyed_node_results_free(&results);
+                } else if (op == 119) {
+                    zova_graph_keyed_edge_results results = {0};
+                    zova_graph_edges_get_many_keyed_request request = {db, graph, keys, count, &results};
+                    status = zova_graph_edges_get_many_keyed(&request);
+                    if (status == ZOVA_OK) {
+                        wr_u32((uint32_t)results.len);
+                        for (size_t index = 0; index < results.len; index++) {
+                            const zova_graph_keyed_edge_result *item = &results.items[index];
+                            wr_u32(item->found);
+                            if (!item->found) continue;
+                            wr_u64((uint64_t)item->edge_key);
+                            wr_u64((uint64_t)item->source_node_key);
+                            wr_blob(item->edge_type, item->edge_type_len);
+                            wr_u64((uint64_t)item->target_node_key);
+                            wr_u64((uint64_t)item->created_order);
+                        }
+                    }
+                    zova_graph_keyed_edge_results_free(&results);
+                } else {
+                    zova_graph_edge_payload_results results = {0};
+                    zova_graph_edge_payload_get_many_request request = {db, graph, keys, count, &results};
+                    status = zova_graph_edge_payload_get_many(&request);
+                    if (status == ZOVA_OK) {
+                        wr_u32((uint32_t)results.len);
+                        for (size_t index = 0; index < results.len; index++) {
+                            const zova_graph_edge_payload_result *item = &results.items[index];
+                            wr_u32(item->found);
+                            if (item->found) wr_blob(item->payload, item->payload_len);
+                        }
+                    }
+                    zova_graph_edge_payload_results_free(&results);
+                }
+            }
+            free(keys);
+            return status;
+        }
+        case 120: {
+            zova_graph_keyed_neighbor_results results = {0};
+            zova_graph_neighbors_keyed_request request = {db, NULL, NULL, 0, NULL, 0, &results};
+            request.graph_name = rd_str(r);
+            request.node_id = rd_str(r);
+            request.direction = (int)rd_u32(r);
+            request.edge_type = rd_str(r);
+            request.limit = rd_u32(r);
+            PARSED;
+            int status = zova_graph_neighbors_keyed(&request);
+            if (status == ZOVA_OK) {
+                wr_u32((uint32_t)results.len);
+                for (size_t index = 0; index < results.len; index++) {
+                    const zova_graph_keyed_neighbor_result *item = &results.items[index];
+                    wr_u64((uint64_t)item->edge_key);
+                    wr_u64((uint64_t)item->neighbor_node_key);
+                    wr_blob(item->node_id, item->node_id_len);
+                    wr_blob(item->kind, item->kind_len);
+                    wr_blob(item->edge_type, item->edge_type_len);
+                }
+            }
+            zova_graph_keyed_neighbor_results_free(&results);
+            return status;
+        }
+        case 121: {
+            const char *graph = rd_str(r);
+            uint32_t count = 0;
+            int64_t *keys = rd_keys(r, &count);
+            int direction = (int)rd_u32(r);
+            const char *edge_type = rd_str(r);
+            uint64_t *degrees = keys ? calloc(count ? count : 1, sizeof(*degrees)) : NULL;
+            int status = keys && !degrees ? ZOVA_OUT_OF_MEMORY : ZOVA_INVALID_ARGUMENT;
+            if (degrees && !r->bad && !r->left) {
+                zova_graph_degree_many_keyed_request request = {db, graph, keys, count, direction, edge_type, degrees, count};
+                status = zova_graph_degree_many_keyed(&request);
+                if (status == ZOVA_OK) {
+                    wr_u32(count);
+                    for (uint32_t index = 0; index < count; index++) wr_u64(degrees[index]);
+                }
+            }
+            free(degrees);
+            free(keys);
+            return status;
+        }
+        case 123: {
+            const char *graph = rd_str(r);
+            uint32_t count = rd_u32(r);
+            zova_graph_edge_payload_replacement *items = rd_array(r, count, sizeof(*items));
+            for (uint32_t index = 0; items && index < count; index++) {
+                items[index].edge_key = (int64_t)rd_u64(r);
+                zova_kv_bytes payload = rd_bytes(r);
+                items[index].payload = payload.data;
+                items[index].payload_len = payload.len;
+            }
+            int status = ZOVA_INVALID_ARGUMENT;
+            if (items && !r->bad && !r->left) {
+                zova_graph_edge_payload_replace_many_request request = {db, graph, items, count};
+                status = zova_graph_edge_payload_replace_many(&request);
+            }
+            free(items);
+            return status;
+        }
+        case 124: {
+            zova_graph_scan_results results = {0};
+            zova_graph_scan_request request = {0};
+            request.db = db;
+            request.graph_name = rd_str(r);
+            request.node_after.created_order = (int64_t)rd_u64(r);
+            request.node_after.key = (int64_t)rd_u64(r);
+            request.edge_after.created_order = (int64_t)rd_u64(r);
+            request.edge_after.key = (int64_t)rd_u64(r);
+            request.node_limit = rd_u32(r);
+            request.edge_limit = rd_u32(r);
+            request.out_results = &results;
+            PARSED;
+            int status = zova_graph_scan(&request);
+            if (status == ZOVA_OK) {
+                wr_u32(results.has_more_nodes);
+                wr_u32(results.has_more_edges);
+                wr_u32((uint32_t)results.nodes_len);
+                for (size_t index = 0; index < results.nodes_len; index++) {
+                    const zova_graph_scan_node *item = &results.nodes[index];
+                    wr_u64((uint64_t)item->node_key);
+                    wr_blob(item->node_id, item->node_id_len);
+                    wr_blob(item->kind, item->kind_len);
+                    wr_u64((uint64_t)item->created_order);
+                }
+                wr_u32((uint32_t)results.edges_len);
+                for (size_t index = 0; index < results.edges_len; index++) {
+                    const zova_graph_scan_edge *item = &results.edges[index];
+                    wr_u64((uint64_t)item->edge_key);
+                    wr_u64((uint64_t)item->source_node_key);
+                    wr_blob(item->edge_type, item->edge_type_len);
+                    wr_u64((uint64_t)item->target_node_key);
+                    wr_u64((uint64_t)item->created_order);
+                }
+            }
+            zova_graph_scan_results_free(&results);
+            return status;
+        }
+        case 125: {
+            zova_graph_walk_results results = {0};
+            zova_graph_walk_profile profile = {0};
+            zova_graph_walk_direction_profiled_request request = {db, NULL, NULL, 0, NULL, 0, 0, &results, &profile};
+            request.graph_name = rd_str(r);
+            request.start_node_id = rd_str(r);
+            request.direction = (int)rd_u32(r);
+            request.edge_type = rd_str(r);
+            request.max_depth = rd_u32(r);
+            request.limit = rd_u32(r);
+            PARSED;
+            int status = zova_graph_walk_direction_profiled(&request);
+            if (status == ZOVA_OK) {
+                wr_walk_items(&results);
+                const double timings[] = {profile.mutex_wait_ms, profile.root_lookup_ms, profile.adjacency_prepare_ms,
+                    profile.adjacency_execute_ms, profile.bfs_bookkeeping_allocation_ms, profile.c_abi_result_export_ms,
+                    profile.total_profiled_ms};
+                for (size_t index = 0; index < 7; index++) wr_f64(timings[index]);
+                wr_u64(profile.frontier_expansions);
+                wr_u64(profile.adjacency_query_binds);
+                wr_u64(profile.adjacency_rows_stepped);
+                wr_u64(profile.result_count);
+            }
+            zova_graph_walk_results_free(&results);
+            return status;
+        }
+        case 126: case 127: case 128: {
+            /* Fresh graph builders: normalizing, prepared, and prepared with
+             * payloads. Only the last one accepts payloads. */
+            const char *graph = NULL;
+            zova_graph_fresh_node_input *nodes = NULL;
+            zova_graph_fresh_edge_payload_input *edges = NULL;
+            uint32_t node_count = 0, edge_count = 0;
+            int parsed = rd_fresh_graph(r, &graph, &nodes, &node_count, &edges, &edge_count);
+            zova_graph_fresh_edge_input *plain = parsed ? calloc(edge_count ? edge_count : 1, sizeof(*plain)) : NULL;
+            int64_t *node_keys = parsed ? calloc(node_count ? node_count : 1, sizeof(*node_keys)) : NULL;
+            int64_t *edge_keys = parsed ? calloc(edge_count ? edge_count : 1, sizeof(*edge_keys)) : NULL;
+            int status = !parsed ? ZOVA_INVALID_ARGUMENT : !plain || !node_keys || !edge_keys ? ZOVA_OUT_OF_MEMORY : ZOVA_OK;
+            for (uint32_t index = 0; status == ZOVA_OK && index < edge_count; index++) {
+                if (op != 128 && edges[index].payload_len) status = ZOVA_INVALID_ARGUMENT;
+                plain[index] = (zova_graph_fresh_edge_input){edges[index].from_node_ordinal, edges[index].edge_type, edges[index].to_node_ordinal};
+            }
+            if (status == ZOVA_OK && op == 128) {
+                zova_graph_build_fresh_prepared_keyed_with_payloads_request request = {db, graph, nodes, node_count, edges, edge_count,
+                    node_keys, node_count, edge_keys, edge_count};
+                status = zova_graph_build_fresh_prepared_keyed_with_payloads(&request);
+            } else if (status == ZOVA_OK) {
+                zova_graph_build_fresh_keyed_request request = {db, graph, nodes, node_count, plain, edge_count,
+                    node_keys, node_count, edge_keys, edge_count};
+                status = op == 126 ? zova_graph_build_fresh_keyed(&request) : zova_graph_build_fresh_prepared_keyed(&request);
+            }
+            if (status == ZOVA_OK) {
+                wr_keys(node_keys, node_count);
+                wr_keys(edge_keys, edge_count);
+            }
+            free(edge_keys);
+            free(node_keys);
+            free(plain);
+            free(edges);
+            free(nodes);
+            return status;
+        }
+        case 129: {
+            PARSED;
+            if (fresh) {
+                snprintf(bridge_error, sizeof(bridge_error), "A fresh build is already active on this database");
+                return ZOVA_MISUSE;
+            }
+            zova_fresh_build_begin_request request = {db, &fresh};
+            return zova_fresh_build_begin(&request);
+        }
+        case 130: case 131: {
+            /* Table or FTS rows: table, columns, row count, then the values row by row. */
+            const char *table = rd_str(r);
+            uint32_t columns = rd_u32(r);
+            const char **names = rd_array(r, columns, sizeof(*names));
+            for (uint32_t index = 0; names && index < columns; index++) {
+                names[index] = rd_str(r);
+                if (!names[index]) r->bad = 1;
+            }
+            uint32_t rows = rd_u32(r);
+            uint64_t total = (uint64_t)rows * columns;
+            zova_fresh_value *values = names && total <= UINT32_MAX ? rd_array(r, (uint32_t)total, sizeof(*values)) : NULL;
+            for (uint64_t index = 0; values && index < total; index++) {
+                zova_fresh_value *value = &values[index];
+                value->value_type = (int)rd_u32(r);
+                if (value->value_type == ZOVA_FRESH_VALUE_INT64) value->int64_value = (int64_t)rd_u64(r);
+                else if (value->value_type == ZOVA_FRESH_VALUE_FLOAT64) value->float64_value = rd_f64(r);
+                else if (value->value_type == ZOVA_FRESH_VALUE_TEXT || value->value_type == ZOVA_FRESH_VALUE_BLOB) {
+                    zova_kv_bytes data = rd_bytes(r);
+                    value->bytes = data.data;
+                    value->bytes_len = data.len;
+                } else if (value->value_type != ZOVA_FRESH_VALUE_NULL) r->bad = 1;
+            }
+            int status = ZOVA_INVALID_ARGUMENT;
+            if (!fresh) status = ZOVA_MISUSE;
+            else if (values && !r->bad && !r->left) {
+                zova_fresh_build_rows_request request = {fresh, table, names, columns, values, rows};
+                status = op == 130 ? zova_fresh_build_table_rows(&request) : zova_fresh_build_fts_rows(&request);
+            }
+            free(values);
+            free(names);
+            return fresh_step(status);
+        }
+        case 132: {
+            const char *graph = NULL;
+            zova_graph_fresh_node_input *nodes = NULL;
+            zova_graph_fresh_edge_payload_input *edges = NULL;
+            uint32_t node_count = 0, edge_count = 0;
+            int status = ZOVA_INVALID_ARGUMENT;
+            if (!rd_fresh_graph(r, &graph, &nodes, &node_count, &edges, &edge_count)) status = ZOVA_INVALID_ARGUMENT;
+            else if (!fresh) status = ZOVA_MISUSE;
+            else {
+                zova_fresh_build_graph_request request = {fresh, graph, nodes, node_count, edges, edge_count, NULL, 0, NULL, 0};
+                status = zova_fresh_build_graph(&request);
+                if (status == ZOVA_OK) {
+                    fresh_nodes = node_count;
+                    fresh_edges = edge_count;
+                }
+            }
+            free(edges);
+            free(nodes);
+            return fresh_step(status);
+        }
+        case 133: {
+            const char *collection = rd_str(r);
+            uint32_t count = rd_u32(r);
+            zova_vector_input *inputs = rd_array(r, count, sizeof(*inputs));
+            for (uint32_t index = 0; inputs && index < count; index++) {
+                inputs[index].id = rd_str(r);
+                inputs[index].values = rd_values(r);
+            }
+            int status = ZOVA_INVALID_ARGUMENT;
+            if (!fresh) status = ZOVA_MISUSE;
+            else if (inputs && !r->bad && !r->left) {
+                zova_fresh_build_vectors_request request = {fresh, collection, inputs, count};
+                status = zova_fresh_build_vectors(&request);
+            }
+            free(inputs);
+            return fresh_step(status);
+        }
+        case 134: {
+            PARSED;
+            if (!fresh) return ZOVA_MISUSE;
+            zova_fresh_build_profile profile = {0};
+            int64_t *node_keys = calloc(fresh_nodes ? fresh_nodes : 1, sizeof(*node_keys));
+            int64_t *edge_keys = calloc(fresh_edges ? fresh_edges : 1, sizeof(*edge_keys));
+            int status = ZOVA_OUT_OF_MEMORY;
+            if (node_keys && edge_keys) {
+                zova_fresh_build_finish_request request = {fresh, node_keys, fresh_nodes, edge_keys, fresh_edges, &profile};
+                status = zova_fresh_build_finish(&request);
+            }
+            if (status == ZOVA_OK) {
+                wr_keys(node_keys, fresh_nodes);
+                wr_keys(edge_keys, fresh_edges);
+                const double timings[] = {profile.validation_ms, profile.table_load_ms, profile.fts_load_ms, profile.graph_load_ms,
+                    profile.graph_validation_ms, profile.graph_key_generation_ms, profile.graph_node_load_ms,
+                    profile.graph_edge_load_ms, profile.vector_load_ms, profile.index_build_ms, profile.commit_ms};
+                for (size_t index = 0; index < 11; index++) wr_f64(timings[index]);
+                wr_u64(profile.table_rows);
+                wr_u64(profile.fts_rows);
+                wr_u64(profile.vector_rows);
+                wr_u64(profile.payload_bytes);
+            }
+            free(node_keys);
+            free(edge_keys);
+            fresh_end();
+            return status;
+        }
+        case 135: {
+            PARSED;
+            if (!fresh) return ZOVA_OK;
+            int status = zova_fresh_build_abort(fresh);
+            fresh_end();
+            return status;
+        }
+        case 136: {
+            const char *name = rd_str(r);
+            int32_t arity = (int32_t)rd_u32(r);
+            uint32_t flags = rd_u32(r);
+            uint32_t id = rd_u32(r);
+            PARSED;
+            zova_sql_function_register_request request = {db, name, arity, flags, (void *)(intptr_t)id, sql_call, sql_destroy};
+            return zova_database_register_function(&request);
+        }
+        case 137: {
+            PARSED;
+            const char *version = zova_abi_version_string();
+            wr_u32(zova_abi_version_major());
+            wr_u32(zova_abi_version_minor());
+            wr_u32(zova_abi_version_patch());
+            wr_blob(version, strlen(version));
+            return ZOVA_OK;
+        }
+        case 138: case 139: {
+            zova_database_extension_request request = {db, rd_str(r)};
+            PARSED;
+            return op == 138 ? zova_database_extension_upgrade(&request) : zova_database_extension_rebuild(&request);
+        }
+        default: return ZOVA_INVALID_ARGUMENT;
+    }
+}
 #endif
 
 /* Operation numbers are shared with src/runtime.mjs. */
@@ -1716,7 +2427,7 @@ EXPORTED int zw_call(int op, const uint8_t *input, size_t input_len) {
     int status = op < 10 ? call_object(op, &r) : op < 30 ? call_vector(op, &r) : op < 50 ? call_graph(op, &r) :
         op < 70 ? call_database(op, &r) : op < 90 ? call_object_stream(op, &r) :
 #ifdef ZOVA_WASM_OPFS
-        call_maintenance(op, &r);
+        op < 110 ? call_maintenance(op, &r) : call_parity(op, &r);
 #else
         ZOVA_INVALID_ARGUMENT;
 #endif
