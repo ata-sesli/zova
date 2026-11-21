@@ -5437,19 +5437,19 @@ fn markerExtensionSourceFor(extension_name: []const u8, marker_path: []const u8)
         \\}}
         \\
         \\fn install(_: *zova.sqlite.Database, _: zova.ExtensionManifest) HookError!void {{
-        \\    const file = std.c.fopen("{s}", "wb") orelse return error.ExtensionInvalid;
+        \\    const file = std.c.fopen("{f}", "wb") orelse return error.ExtensionInvalid;
         \\    defer _ = std.c.fclose(file);
         \\    if (std.c.fwrite("installed", 1, "installed".len, file) != "installed".len) return error.ExtensionInvalid;
         \\}}
         \\
         \\fn check(_: *zova.sqlite.Database, _: zova.ExtensionManifest) HookError!void {{
-        \\    if (std.c.access("{s}", std.c.F_OK) != 0) return error.ExtensionInvalid;
+        \\    if (std.c.access("{f}", std.c.F_OK) != 0) return error.ExtensionInvalid;
         \\}}
         \\
         \\fn drop(_: *zova.sqlite.Database, _: zova.ExtensionManifest) HookError!void {{
         \\}}
         \\
-    , .{ extension_name, extension_name, marker_path, marker_path });
+    , .{ extension_name, extension_name, std.zig.fmtString(marker_path), std.zig.fmtString(marker_path) });
 }
 
 fn testBuilderManifest(
