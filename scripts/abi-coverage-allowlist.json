@@ -1,0 +1,22 @@
+{
+  "go": {
+    "zova_object_id_from_bytes": "ObjectIDFor computes the same SHA-256 identity in Go with crypto/sha256, without a cgo call",
+    "zova_object_chunk_id_from_bytes": "ObjectChunkIDFor computes the same SHA-256 identity in Go with crypto/sha256, without a cgo call"
+  },
+  "wasm": {
+    "zova_database_backup": "browsers use zova_database_backup_with_progress, which reports progress and can be cancelled",
+    "zova_database_compact": "browsers use zova_database_compact_with_progress, which reports progress and can be cancelled",
+    "zova_database_restore": "restoreBackup opens the stored source and copies it with zova_database_backup_with_progress; restoreBackupToMemory uses zova_database_restore_to_memory",
+    "zova_database_migrate": "migratePersistent stages and publishes through zova_database_migrate_with_progress",
+    "zova_database_migrate_with_extensions": "extension bundles are files loaded at run time, which browsers cannot do; linked plugins use the _with_plugins calls",
+    "zova_database_open_with_extensions": "extension bundles are files loaded at run time, which browsers cannot do; linked plugins use the _with_plugins calls",
+    "zova_database_create_with_extensions": "extension bundles are files loaded at run time, which browsers cannot do; linked plugins use the _with_plugins calls",
+    "zova_extension_bundle_verify": "browsers cannot load extension bundles, so there is no bundle to verify",
+    "zova_extension_bundle_trust": "browsers cannot load extension bundles, so there is no trust store",
+    "zova_extension_bundle_untrust": "browsers cannot load extension bundles, so there is no trust store",
+    "zova_vector_put": "putVector goes through zova_vector_put_many with one item",
+    "zova_graph_node_put": "putGraphNode goes through zova_graph_node_put_many with one item",
+    "zova_graph_edge_put": "putGraphEdge goes through zova_graph_edge_put_many with one item",
+    "zova_graph_walk": "graphWalk goes through zova_graph_walk_direction, which takes the default outgoing direction"
+  }
+}

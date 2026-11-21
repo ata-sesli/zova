@@ -62,6 +62,7 @@ sh bindings/rust/zova-sys/tools/check-native-source.sh
 sh bindings/python/tools/sync-rust-source.sh
 sh bindings/python/tools/check-rust-source.sh
 sh scripts/check-versions.sh
+python3 scripts/check-abi-coverage.py
 zig fmt --check build.zig build.zig.zon src tests
 zig build test
 # The 1.x storage compatibility promise is a release gate: every retained

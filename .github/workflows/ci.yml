@@ -84,6 +84,14 @@ jobs:
       # coverage. Never publish or performance-benchmark these artifacts.
       - run: zig build test c-abi-test check-storage-compat -Dsqlite-invariants=true -Doptimize=ReleaseSafe
 
+  abi-coverage:
+    name: C ABI binding coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest scripts/tests/test_abi_coverage.py
+      - run: python3 scripts/check-abi-coverage.py
+
   generated-c:
     name: Generated C (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
