@@ -180,3 +180,33 @@ fn shared_fresh_build_blocks_other_calls_until_finished() {
     assert_eq!(statement.step().unwrap(), Step::Row);
     assert_eq!(statement.column_i64(0).unwrap(), 1);
 }
+
+#[test]
+fn owned_fresh_build_outlives_its_database_borrow() {
+    let mut db = Database::create_memory().unwrap();
+    db.exec(SCHEMA).unwrap();
+    let mut build = db.begin_fresh_build_owned().unwrap();
+    // The owned session does not borrow `db`, but the handle stays blocked.
+    assert_eq!(
+        db.exec("select 1").unwrap_err().status(),
+        Some(Status::InvalidArgument)
+    );
+    build
+        .table_rows(
+            "files",
+            &["id", "path"],
+            &[FreshValue::Int64(1), FreshValue::Text("a.rs")],
+        )
+        .unwrap();
+    let result = build.finish().unwrap();
+    assert_eq!(result.profile.table_rows, 1);
+    assert_eq!(build.abort().unwrap_err().status(), Some(Status::Misuse));
+    assert_eq!(count(&mut db, "select count(*) from files"), 1);
+
+    let mut aborted = db.begin_fresh_build_owned().unwrap();
+    aborted.abort().unwrap();
+    let dropped = db.begin_fresh_build_owned().unwrap();
+    drop(db);
+    // The session keeps the native handle alive and rolls back on drop.
+    drop(dropped);
+}

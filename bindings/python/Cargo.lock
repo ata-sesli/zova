@@ -159,6 +159,7 @@ version = "1.4.0"
 dependencies = [
  "pyo3",
  "zova",
+ "zova-sys",
 ]
 
 [[package]]

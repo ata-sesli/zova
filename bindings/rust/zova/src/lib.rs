@@ -35,7 +35,9 @@ pub use database::{
 };
 pub use error::{Error, Result, Status};
 pub use extension::ExtensionInfo;
-pub use fresh_build::{FreshBuild, FreshBuildProfile, FreshBuildResult, FreshValue};
+pub use fresh_build::{
+    FreshBuild, FreshBuildProfile, FreshBuildResult, FreshValue, OwnedFreshBuild,
+};
 pub use graph::{
     GraphDegreeOptions, GraphEdge, GraphEdgeInput, GraphInfo, GraphNeighbor,
     GraphNeighborDirection, GraphNeighborsOptions, GraphNode, GraphNodeInput, GraphTargetType,

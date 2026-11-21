@@ -1,9 +1,19 @@
 use crate::error::{closed_error, zova_error};
-use crate::extension::{py_extension_info, py_extension_infos, PyExtensionInfo};
+use crate::extension::{
+    linked_plugins, py_extension_info, py_extension_infos, PyExtensionInfo, PyLinkedPlugin,
+};
+use crate::fresh_build::PyFreshBuild;
 use crate::graph::{
-    edge_input_from_py, neighbors_options_from_py, node_input_from_py, py_graph_edge,
-    py_graph_info, py_graph_neighbors, py_graph_node, py_graph_walk, walk_options_from_py,
-    PyGraphEdge, PyGraphInfo, PyGraphNeighbor, PyGraphNode, PyGraphWalkItem,
+    direction_from_i32, edge_input_from_py, edge_inputs_from_py, neighbors_options_from_py,
+    node_input_from_py, node_inputs_from_py, py_graph_edge, py_graph_info, py_graph_neighbors,
+    py_graph_node, py_graph_walk, walk_options_from_py, PyGraphEdge, PyGraphInfo, PyGraphNeighbor,
+    PyGraphNode, PyGraphWalkItem,
+};
+use crate::graph_keyed::{
+    fresh_edge_payload_refs, fresh_edge_refs, fresh_edges_from_py, fresh_node_refs,
+    fresh_nodes_from_py, py_keyed_edge, py_keyed_neighbors, py_keyed_node, py_scan_page,
+    py_walk_profile, walk_direction_options_from_py, PyGraphKeyedEdge, PyGraphKeyedNeighbor,
+    PyGraphKeyedNode, PyGraphScanPage, PyGraphWalkProfile,
 };
 use crate::notification::PySubscription;
 use crate::object::{
@@ -11,12 +21,14 @@ use crate::object::{
     PyObjectManifest, PyObjectReader, PyObjectWriter,
 };
 use crate::progress::ProgressHandler;
+use crate::sql_function;
 use crate::statement::PyStatement;
 use crate::vector::{
     candidate_refs, collection_options_from_py, py_collection_info, py_search_results, py_vector,
     vector_input_refs, vector_inputs_from_py, vector_values_from_py, PyVector,
     PyVectorCollectionInfo, PyVectorSearchResult,
 };
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes};
 
@@ -48,19 +60,42 @@ pub(crate) struct PySavepointContext {
 
 #[pymethods]
 impl PyDatabase {
+    /// Create a new `.zova` file. `plugins` adds `LinkedPlugin` descriptors
+    /// to the selected bundles. `page_size` sets SQLite's page size in bytes
+    /// and cannot be combined with bundles, a trust store, or plugins.
     #[staticmethod]
-    #[pyo3(signature = (path, *, extension_bundles = None, trust_store_path = None))]
+    #[pyo3(signature = (path, *, extension_bundles = None, trust_store_path = None, plugins = None, page_size = None))]
     pub(crate) fn create(
         path: &str,
         extension_bundles: Option<Vec<String>>,
         trust_store_path: Option<String>,
+        plugins: Option<Vec<PyRef<'_, PyLinkedPlugin>>>,
+        page_size: Option<u32>,
     ) -> PyResult<Self> {
+        if let Some(page_size) = page_size {
+            if extension_bundles.is_some() || trust_store_path.is_some() || plugins.is_some() {
+                return Err(PyValueError::new_err(
+                    "page_size cannot be combined with extension_bundles, trust_store_path, or plugins",
+                ));
+            }
+            let options = zova_rust::CreateOptions { page_size };
+            return Ok(Self {
+                inner: Some(
+                    zova_rust::Database::create_with_options(path, options).map_err(zova_error)?,
+                ),
+            });
+        }
         let extensions = extension_options(extension_bundles, trust_store_path);
-        Ok(Self {
-            inner: Some(
-                zova_rust::Database::create_with_extensions(path, &extensions)
-                    .map_err(zova_error)?,
+        let database = match plugins {
+            Some(plugins) => zova_rust::Database::create_with_plugins(
+                path,
+                &extensions,
+                &linked_plugins(Some(plugins)),
             ),
+            None => zova_rust::Database::create_with_extensions(path, &extensions),
+        };
+        Ok(Self {
+            inner: Some(database.map_err(zova_error)?),
         })
     }
 
@@ -75,28 +110,66 @@ impl PyDatabase {
         })
     }
 
+    /// Open an existing `.zova` file. `plugins` adds `LinkedPlugin`
+    /// descriptors to the selected bundles.
     #[staticmethod]
-    #[pyo3(signature = (path, *, read_only = false, busy_timeout_ms = 0, extension_bundles = None, trust_store_path = None))]
+    #[pyo3(signature = (path, *, read_only = false, busy_timeout_ms = 0, extension_bundles = None, trust_store_path = None, plugins = None))]
     pub(crate) fn open(
         path: &str,
         read_only: bool,
         busy_timeout_ms: u32,
         extension_bundles: Option<Vec<String>>,
         trust_store_path: Option<String>,
+        plugins: Option<Vec<PyRef<'_, PyLinkedPlugin>>>,
     ) -> PyResult<Self> {
         let extensions = extension_options(extension_bundles, trust_store_path);
-        Ok(Self {
-            inner: Some(
-                zova_rust::Database::open_with_extensions(
-                    path,
-                    zova_rust::OpenOptions {
-                        read_only,
-                        busy_timeout_ms,
-                    },
-                    &extensions,
-                )
-                .map_err(zova_error)?,
+        let options = zova_rust::OpenOptions {
+            read_only,
+            busy_timeout_ms,
+        };
+        let database = match plugins {
+            Some(plugins) => zova_rust::Database::open_with_plugins(
+                path,
+                options,
+                &extensions,
+                &linked_plugins(Some(plugins)),
             ),
+            None => zova_rust::Database::open_with_extensions(path, options, &extensions),
+        };
+        Ok(Self {
+            inner: Some(database.map_err(zova_error)?),
+        })
+    }
+
+    /// Open for `extension_upgrade` and `extension_rebuild`. Extension hooks
+    /// are not run at open, so this succeeds when an installed extension's
+    /// code is missing or outdated. Other arguments follow `open`.
+    #[staticmethod]
+    #[pyo3(signature = (path, *, read_only = false, busy_timeout_ms = 0, extension_bundles = None, trust_store_path = None, plugins = None))]
+    pub(crate) fn open_for_extension_upgrade(
+        path: &str,
+        read_only: bool,
+        busy_timeout_ms: u32,
+        extension_bundles: Option<Vec<String>>,
+        trust_store_path: Option<String>,
+        plugins: Option<Vec<PyRef<'_, PyLinkedPlugin>>>,
+    ) -> PyResult<Self> {
+        let extensions = extension_options(extension_bundles, trust_store_path);
+        let options = zova_rust::OpenOptions {
+            read_only,
+            busy_timeout_ms,
+        };
+        let database = match plugins {
+            Some(plugins) => zova_rust::Database::open_for_extension_upgrade_with_plugins(
+                path,
+                options,
+                &extensions,
+                &linked_plugins(Some(plugins)),
+            ),
+            None => zova_rust::Database::open_for_extension_upgrade(path, options, &extensions),
+        };
+        Ok(Self {
+            inner: Some(database.map_err(zova_error)?),
         })
     }
 
@@ -824,6 +897,438 @@ impl PyDatabase {
         Ok(py_graph_walk(items))
     }
 
+    /// Upgrade an installed extension to the linked or bundled code's newer
+    /// version. Open the database with `open_for_extension_upgrade` first.
+    pub(crate) fn extension_upgrade(&mut self, name: &str) -> PyResult<()> {
+        self.db_mut()?.extension_upgrade(name).map_err(zova_error)
+    }
+
+    /// Rebuild an extension's derived storage at its installed version.
+    pub(crate) fn extension_rebuild(&mut self, name: &str) -> PyResult<()> {
+        self.db_mut()?.extension_rebuild(name).map_err(zova_error)
+    }
+
+    /// Insert or replace `GraphNodeInput` values atomically.
+    pub(crate) fn put_graph_nodes(&mut self, inputs: &Bound<'_, PyAny>) -> PyResult<()> {
+        let owned = node_inputs_from_py(inputs)?;
+        let refs = owned
+            .iter()
+            .map(|input| input.as_rust())
+            .collect::<Vec<_>>();
+        self.db_mut()?.put_graph_nodes(&refs).map_err(zova_error)
+    }
+
+    /// Insert `GraphEdgeInput` values atomically.
+    pub(crate) fn put_graph_edges(&mut self, inputs: &Bound<'_, PyAny>) -> PyResult<()> {
+        let owned = edge_inputs_from_py(inputs)?;
+        let refs = owned
+            .iter()
+            .map(|input| input.as_rust())
+            .collect::<Vec<_>>();
+        self.db_mut()?.put_graph_edges(&refs).map_err(zova_error)
+    }
+
+    /// Delete nodes and their incident edges atomically.
+    pub(crate) fn delete_graph_nodes(
+        &mut self,
+        graph_name: &str,
+        node_ids: Vec<String>,
+    ) -> PyResult<()> {
+        let refs = node_ids.iter().map(String::as_str).collect::<Vec<_>>();
+        self.db_mut()?
+            .delete_graph_nodes(graph_name, &refs)
+            .map_err(zova_error)
+    }
+
+    /// Delete `GraphEdgeInput` edges atomically.
+    pub(crate) fn delete_graph_edges(&mut self, inputs: &Bound<'_, PyAny>) -> PyResult<()> {
+        let owned = edge_inputs_from_py(inputs)?;
+        let refs = owned
+            .iter()
+            .map(|input| input.as_rust())
+            .collect::<Vec<_>>();
+        self.db_mut()?.delete_graph_edges(&refs).map_err(zova_error)
+    }
+
+    /// Count a node's edges in `direction`, optionally of one edge type.
+    #[pyo3(signature = (graph_name, node_id, direction, edge_type = None))]
+    pub(crate) fn graph_degree(
+        &mut self,
+        graph_name: &str,
+        node_id: &str,
+        direction: i32,
+        edge_type: Option<String>,
+    ) -> PyResult<u64> {
+        let options = zova_rust::GraphDegreeOptions {
+            graph_name,
+            node_id,
+            direction: direction_from_i32(direction)?,
+            edge_type: edge_type.as_deref(),
+        };
+        self.db_mut()?.graph_degree(options).map_err(zova_error)
+    }
+
+    /// Insert or replace nodes atomically; returns their keys in input order.
+    pub(crate) fn put_graph_nodes_keyed(
+        &mut self,
+        inputs: &Bound<'_, PyAny>,
+    ) -> PyResult<Vec<i64>> {
+        let owned = node_inputs_from_py(inputs)?;
+        let refs = owned
+            .iter()
+            .map(|input| input.as_rust())
+            .collect::<Vec<_>>();
+        self.db_mut()?
+            .put_graph_nodes_keyed(&refs)
+            .map_err(zova_error)
+    }
+
+    /// Insert edges atomically; returns their keys in input order.
+    pub(crate) fn put_graph_edges_keyed(
+        &mut self,
+        inputs: &Bound<'_, PyAny>,
+    ) -> PyResult<Vec<i64>> {
+        let owned = edge_inputs_from_py(inputs)?;
+        let refs = owned
+            .iter()
+            .map(|input| input.as_rust())
+            .collect::<Vec<_>>();
+        self.db_mut()?
+            .put_graph_edges_keyed(&refs)
+            .map_err(zova_error)
+    }
+
+    /// Nodes by key, aligned with `node_keys`; missing keys yield None.
+    pub(crate) fn get_graph_nodes_keyed(
+        &mut self,
+        graph_name: &str,
+        node_keys: Vec<i64>,
+    ) -> PyResult<Vec<Option<PyGraphKeyedNode>>> {
+        let nodes = self
+            .db_mut()?
+            .get_graph_nodes_keyed(graph_name, &node_keys)
+            .map_err(zova_error)?;
+        Ok(nodes
+            .into_iter()
+            .map(|node| node.map(py_keyed_node))
+            .collect())
+    }
+
+    /// Edges by key, aligned with `edge_keys`; missing keys yield None.
+    pub(crate) fn get_graph_edges_keyed(
+        &mut self,
+        graph_name: &str,
+        edge_keys: Vec<i64>,
+    ) -> PyResult<Vec<Option<PyGraphKeyedEdge>>> {
+        let edges = self
+            .db_mut()?
+            .get_graph_edges_keyed(graph_name, &edge_keys)
+            .map_err(zova_error)?;
+        Ok(edges
+            .into_iter()
+            .map(|edge| edge.map(py_keyed_edge))
+            .collect())
+    }
+
+    /// `graph_neighbors` with edge and neighbor keys.
+    pub(crate) fn graph_neighbors_keyed(
+        &mut self,
+        options: &Bound<'_, PyAny>,
+    ) -> PyResult<Vec<PyGraphKeyedNeighbor>> {
+        let options = neighbors_options_from_py(options)?;
+        let neighbors = self
+            .db_mut()?
+            .graph_neighbors_keyed(options.as_rust())
+            .map_err(zova_error)?;
+        Ok(py_keyed_neighbors(neighbors))
+    }
+
+    /// Degrees aligned with `node_keys`.
+    #[pyo3(signature = (graph_name, node_keys, direction, edge_type = None))]
+    pub(crate) fn graph_degrees_keyed(
+        &mut self,
+        graph_name: &str,
+        node_keys: Vec<i64>,
+        direction: i32,
+        edge_type: Option<String>,
+    ) -> PyResult<Vec<u64>> {
+        let options = zova_rust::GraphKeyedDegreeOptions {
+            graph_name,
+            node_keys: &node_keys,
+            direction: direction_from_i32(direction)?,
+            edge_type: edge_type.as_deref(),
+        };
+        self.db_mut()?
+            .graph_degrees_keyed(options)
+            .map_err(zova_error)
+    }
+
+    /// Edge payloads aligned with `edge_keys`. A missing edge yields None and
+    /// an edge without a payload yields empty bytes.
+    pub(crate) fn get_graph_edge_payloads<'py>(
+        &mut self,
+        py: Python<'py>,
+        graph_name: &str,
+        edge_keys: Vec<i64>,
+    ) -> PyResult<Vec<Option<Bound<'py, PyBytes>>>> {
+        let payloads = self
+            .db_mut()?
+            .get_graph_edge_payloads(graph_name, &edge_keys)
+            .map_err(zova_error)?;
+        Ok(payloads
+            .into_iter()
+            .map(|payload| payload.map(|payload| PyBytes::new(py, &payload)))
+            .collect())
+    }
+
+    /// Replace edge payloads atomically from `(edge_key, payload)` pairs.
+    pub(crate) fn replace_graph_edge_payloads(
+        &mut self,
+        graph_name: &str,
+        replacements: Vec<(i64, Vec<u8>)>,
+    ) -> PyResult<()> {
+        let refs = replacements
+            .iter()
+            .map(
+                |(edge_key, payload)| zova_rust::GraphEdgePayloadReplacement {
+                    edge_key: *edge_key,
+                    payload,
+                },
+            )
+            .collect::<Vec<_>>();
+        self.db_mut()?
+            .replace_graph_edge_payloads(graph_name, &refs)
+            .map_err(zova_error)
+    }
+
+    /// Page through nodes and edges in creation order. Each cursor is a
+    /// `(created_order, key)` pair taken from the last item of the previous
+    /// page; `(0, 0)` starts from the beginning.
+    #[pyo3(signature = (graph_name, *, node_limit, edge_limit, node_after = (0, 0), edge_after = (0, 0)))]
+    pub(crate) fn graph_scan(
+        &mut self,
+        graph_name: &str,
+        node_limit: usize,
+        edge_limit: usize,
+        node_after: (i64, i64),
+        edge_after: (i64, i64),
+    ) -> PyResult<PyGraphScanPage> {
+        let options = zova_rust::GraphScanOptions {
+            graph_name,
+            node_after: zova_rust::GraphScanCursor {
+                created_order: node_after.0,
+                key: node_after.1,
+            },
+            edge_after: zova_rust::GraphScanCursor {
+                created_order: edge_after.0,
+                key: edge_after.1,
+            },
+            node_limit,
+            edge_limit,
+        };
+        let page = self.db_mut()?.graph_scan(options).map_err(zova_error)?;
+        Ok(py_scan_page(page))
+    }
+
+    /// Directional bounded breadth-first walk from `GraphWalkDirectionOptions`.
+    /// The start node is returned at depth 0 and counts toward `limit`.
+    pub(crate) fn graph_walk_direction(
+        &mut self,
+        options: &Bound<'_, PyAny>,
+    ) -> PyResult<Vec<PyGraphWalkItem>> {
+        let options = walk_direction_options_from_py(options)?;
+        let items = self
+            .db_mut()?
+            .graph_walk_direction(options.as_rust()?)
+            .map_err(zova_error)?;
+        Ok(py_graph_walk(items))
+    }
+
+    /// `graph_walk_direction` plus a `GraphWalkProfile`.
+    pub(crate) fn graph_walk_direction_profiled(
+        &mut self,
+        options: &Bound<'_, PyAny>,
+    ) -> PyResult<(Vec<PyGraphWalkItem>, PyGraphWalkProfile)> {
+        let options = walk_direction_options_from_py(options)?;
+        let (items, profile) = self
+            .db_mut()?
+            .graph_walk_direction_profiled(options.as_rust()?)
+            .map_err(zova_error)?;
+        Ok((py_graph_walk(items), py_walk_profile(profile)))
+    }
+
+    /// Build one graph into an empty graph store, normalizing the input.
+    /// Returns `(node_keys, edge_keys)`.
+    pub(crate) fn build_fresh_graph_keyed(
+        &mut self,
+        graph_name: &str,
+        nodes: &Bound<'_, PyAny>,
+        edges: &Bound<'_, PyAny>,
+    ) -> PyResult<(Vec<i64>, Vec<i64>)> {
+        let nodes = fresh_nodes_from_py(nodes)?;
+        let edges = fresh_edges_from_py(edges)?;
+        let keys = self
+            .db_mut()?
+            .build_fresh_graph_keyed(
+                graph_name,
+                &fresh_node_refs(&nodes)?,
+                &fresh_edge_refs(&edges)?,
+            )
+            .map_err(zova_error)?;
+        Ok((keys.node_keys, keys.edge_keys))
+    }
+
+    /// Trusted build: nodes must be unique final-order rows and edges
+    /// deduplicated final-order topology. Violations fail atomically.
+    pub(crate) fn build_fresh_graph_prepared_keyed(
+        &mut self,
+        graph_name: &str,
+        nodes: &Bound<'_, PyAny>,
+        edges: &Bound<'_, PyAny>,
+    ) -> PyResult<(Vec<i64>, Vec<i64>)> {
+        let nodes = fresh_nodes_from_py(nodes)?;
+        let edges = fresh_edges_from_py(edges)?;
+        let keys = self
+            .db_mut()?
+            .build_fresh_graph_prepared_keyed(
+                graph_name,
+                &fresh_node_refs(&nodes)?,
+                &fresh_edge_refs(&edges)?,
+            )
+            .map_err(zova_error)?;
+        Ok((keys.node_keys, keys.edge_keys))
+    }
+
+    /// `build_fresh_graph_prepared_keyed` with edge payloads.
+    pub(crate) fn build_fresh_graph_prepared_keyed_with_payloads(
+        &mut self,
+        graph_name: &str,
+        nodes: &Bound<'_, PyAny>,
+        edges: &Bound<'_, PyAny>,
+    ) -> PyResult<(Vec<i64>, Vec<i64>)> {
+        let nodes = fresh_nodes_from_py(nodes)?;
+        let edges = fresh_edges_from_py(edges)?;
+        let keys = self
+            .db_mut()?
+            .build_fresh_graph_prepared_keyed_with_payloads(
+                graph_name,
+                &fresh_node_refs(&nodes)?,
+                &fresh_edge_payload_refs(&edges),
+            )
+            .map_err(zova_error)?;
+        Ok((keys.node_keys, keys.edge_keys))
+    }
+
+    /// Delete vectors atomically. Missing ids are ignored.
+    pub(crate) fn delete_vectors(
+        &mut self,
+        collection_name: &str,
+        vector_ids: Vec<String>,
+    ) -> PyResult<()> {
+        let refs = candidate_refs(&vector_ids);
+        self.db_mut()?
+            .delete_vectors(collection_name, &refs)
+            .map_err(zova_error)
+    }
+
+    /// Raw-i8 cosine search with `query_count` contiguous query rows of
+    /// `dimensions` values each in `query_values`. Each vector is scored by
+    /// its least similar query row. `mode` and `aggregation` take
+    /// `VectorMultiI8SearchMode` and `VectorMultiI8Aggregation` values. Empty
+    /// `candidate_ids` searches the whole collection.
+    #[pyo3(signature = (collection_name, query_values, query_count, dimensions, *, limit, candidate_ids = Vec::new(), mode = 0, aggregation = 0, prefilter_query_index = 0, prefilter_limit = 0))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn search_vectors_multi_i8(
+        &mut self,
+        collection_name: &str,
+        query_values: Vec<i8>,
+        query_count: usize,
+        dimensions: usize,
+        limit: usize,
+        candidate_ids: Vec<String>,
+        mode: i32,
+        aggregation: i32,
+        prefilter_query_index: usize,
+        prefilter_limit: usize,
+    ) -> PyResult<Vec<PyVectorSearchResult>> {
+        let mode = match mode {
+            0 => zova_rust::VectorMultiI8SearchMode::GlobalMinCosine,
+            1 => zova_rust::VectorMultiI8SearchMode::CbmPrefilterMinCosine,
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "invalid multi-i8 search mode {mode}; expected 0 or 1"
+                )))
+            }
+        };
+        let aggregation = match aggregation {
+            0 => zova_rust::VectorMultiI8Aggregation::MinCosine,
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "invalid multi-i8 aggregation {aggregation}; expected 0"
+                )))
+            }
+        };
+        let candidates = candidate_refs(&candidate_ids);
+        let results = self
+            .db_mut()?
+            .search_vectors_multi_i8(zova_rust::VectorMultiI8SearchOptions {
+                collection_name,
+                query_values: &query_values,
+                query_count,
+                dimensions,
+                candidate_ids: &candidates,
+                mode,
+                aggregation,
+                prefilter_query_index,
+                prefilter_limit,
+                limit,
+            })
+            .map_err(zova_error)?;
+        Ok(py_search_results(results))
+    }
+
+    /// Start a `FreshBuild` session. Requires `PRAGMA foreign_keys=ON`, empty
+    /// object, vector, and graph stores, and no live statements or writers.
+    pub(crate) fn begin_fresh_build(&mut self) -> PyResult<PyFreshBuild> {
+        let build = self
+            .db_mut()?
+            .begin_fresh_build_owned()
+            .map_err(zova_error)?;
+        Ok(PyFreshBuild::new(build))
+    }
+
+    /// Register a scalar SQL function on this connection.
+    ///
+    /// `name` is an ASCII identifier of 1-64 bytes without a `zova_` or
+    /// `_zova_` prefix; `arity` is -1 for any argument count or 0-127. A name
+    /// and arity pair can be registered once per connection. `function`
+    /// receives None, int, float, str, or bytes arguments and returns one of
+    /// those types. An exception, or another return type, fails the SQL
+    /// statement with its message. The function runs while the connection is
+    /// busy and must not use this database or its statements, readers, or
+    /// writers; doing so deadlocks.
+    #[pyo3(signature = (name, arity, function, *, deterministic = false, direct_only = false, innocuous = false))]
+    pub(crate) fn register_function(
+        &mut self,
+        name: &str,
+        arity: i32,
+        function: Py<PyAny>,
+        deterministic: bool,
+        direct_only: bool,
+        innocuous: bool,
+    ) -> PyResult<()> {
+        let flags = zova_rust::SqlFunctionFlags {
+            deterministic,
+            direct_only,
+            innocuous,
+        };
+        self.db_mut()?
+            .register_function(name, arity, flags, move |args| {
+                sql_function::call(&function, args)
+            })
+            .map_err(zova_error)
+    }
+
     pub(crate) fn __enter__(slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
         slf
     }
@@ -1147,13 +1652,14 @@ pub(crate) fn probe_format(path: &str) -> PyResult<PyFormatInfo> {
 /// removes attempted output. When `verify` is true (the default), the migrated
 /// destination is verified after the copy. A database with a non-bundled
 /// extension installed needs that extension's trusted bundle in
-/// `extension_bundles`, exactly as `Database.open` does.
+/// `extension_bundles` or its `LinkedPlugin` in `plugins`, exactly as
+/// `Database.open` does.
 ///
 /// `progress`, when given, is called with a `Progress` event on this thread.
 /// An exception it raises cancels the migration, which leaves the source
 /// unchanged and creates no destination, and propagates.
 #[pyfunction]
-#[pyo3(signature = (source, destination, *, verify = true, extension_bundles = None, trust_store_path = None, progress = None))]
+#[pyo3(signature = (source, destination, *, verify = true, extension_bundles = None, trust_store_path = None, progress = None, plugins = None))]
 pub(crate) fn migrate_database(
     source: &str,
     destination: &str,
@@ -1161,23 +1667,43 @@ pub(crate) fn migrate_database(
     extension_bundles: Option<Vec<String>>,
     trust_store_path: Option<String>,
     progress: Option<Py<PyAny>>,
+    plugins: Option<Vec<PyRef<'_, PyLinkedPlugin>>>,
 ) -> PyResult<()> {
     let extensions = extension_options(extension_bundles, trust_store_path);
     let options = zova_rust::MigrateOptions { verify };
-    match progress {
-        None => {
+    let plugins = plugins.map(|plugins| linked_plugins(Some(plugins)));
+    match (progress, plugins) {
+        (None, None) => {
             zova_rust::migrate_database_with_extensions(source, destination, options, &extensions)
                 .map_err(zova_error)
         }
-        Some(callback) => {
+        (None, Some(plugins)) => zova_rust::migrate_database_with_plugins(
+            source,
+            destination,
+            options,
+            &extensions,
+            &plugins,
+        )
+        .map_err(zova_error),
+        (Some(callback), plugins) => {
             let mut handler = ProgressHandler::new(callback);
-            let result = zova_rust::migrate_database_with_progress(
-                source,
-                destination,
-                options,
-                &extensions,
-                |event| handler.call(event),
-            );
+            let result = match plugins {
+                None => zova_rust::migrate_database_with_progress(
+                    source,
+                    destination,
+                    options,
+                    &extensions,
+                    |event| handler.call(event),
+                ),
+                Some(plugins) => zova_rust::migrate_database_with_plugins_and_progress(
+                    source,
+                    destination,
+                    options,
+                    &extensions,
+                    &plugins,
+                    |event| handler.call(event),
+                ),
+            };
             handler.finish(result)
         }
     }

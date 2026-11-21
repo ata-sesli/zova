@@ -5,15 +5,27 @@ from ._native import (
     ClosedHandleError,
     Database,
     ExtensionInfo,
+    FreshBuild,
+    FreshBuildProfile,
+    FreshBuildResult,
     GraphEdge,
     GraphEdgeInput,
+    GraphFreshEdgeInput,
+    GraphFreshNodeInput,
     GraphInfo,
+    GraphKeyedEdge,
+    GraphKeyedNeighbor,
+    GraphKeyedNode,
     GraphNeighbor,
     GraphNeighborsOptions,
     GraphNode,
     GraphNodeInput,
+    GraphScanPage,
+    GraphWalkDirectionOptions,
     GraphWalkItem,
     GraphWalkOptions,
+    GraphWalkProfile,
+    LinkedPlugin,
     Notification,
     ObjectChunkId,
     ObjectId,
@@ -33,6 +45,8 @@ from ._native import (
     VectorInput,
     VectorSearchResult,
     ZovaError,
+    abi_version,
+    abi_version_string,
     convert_sqlite_to_zova,
     encode_f32_le,
     migrate_database,
@@ -41,6 +55,9 @@ from ._native import (
     probe_format as _probe_format,
     restore_backup,
     restore_backup_to_memory,
+    trust_extension_bundle,
+    untrust_extension_bundle,
+    verify_extension_bundle,
 )
 
 __version__ = "1.4.0"
@@ -69,6 +86,21 @@ class VectorElementType(IntEnum):
     F32 = 0
     F16 = 1
     I8 = 2
+
+
+class VectorMultiI8SearchMode(IntEnum):
+    """Candidate strategy for `Database.search_vectors_multi_i8`."""
+
+    GLOBAL_MIN_COSINE = 0
+    """Score every candidate against every query row."""
+    CBM_PREFILTER_MIN_COSINE = 1
+    """Shortlist with one query row, then score the shortlist with all rows."""
+
+
+class VectorMultiI8Aggregation(IntEnum):
+    """How per-query cosine distances combine into one score per vector."""
+
+    MIN_COSINE = 0
 
 
 class GraphTargetType(IntEnum):
@@ -159,17 +191,29 @@ __all__ = [
     "ExtensionInfo",
     "FormatCompatibility",
     "FormatInfo",
+    "FreshBuild",
+    "FreshBuildProfile",
+    "FreshBuildResult",
     "GraphEdge",
     "GraphEdgeInput",
+    "GraphFreshEdgeInput",
+    "GraphFreshNodeInput",
     "GraphInfo",
+    "GraphKeyedEdge",
+    "GraphKeyedNeighbor",
+    "GraphKeyedNode",
     "GraphNeighbor",
     "GraphNeighborDirection",
     "GraphNeighborsOptions",
     "GraphNode",
     "GraphNodeInput",
+    "GraphScanPage",
     "GraphTargetType",
+    "GraphWalkDirectionOptions",
     "GraphWalkItem",
     "GraphWalkOptions",
+    "GraphWalkProfile",
+    "LinkedPlugin",
     "Notification",
     "ObjectChunkId",
     "ObjectCompression",
@@ -192,9 +236,13 @@ __all__ = [
     "VectorElementType",
     "VectorInput",
     "VectorMetric",
+    "VectorMultiI8Aggregation",
+    "VectorMultiI8SearchMode",
     "VectorSearchResult",
     "ZovaError",
     "__version__",
+    "abi_version",
+    "abi_version_string",
     "convert_sqlite_to_zova",
     "encode_f32_le",
     "migrate_database",
@@ -203,4 +251,7 @@ __all__ = [
     "probe_format",
     "restore_backup",
     "restore_backup_to_memory",
+    "trust_extension_bundle",
+    "untrust_extension_bundle",
+    "verify_extension_bundle",
 ]
