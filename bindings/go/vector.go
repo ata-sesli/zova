@@ -803,3 +803,99 @@ func cStringN(value *C.char, length C.size_t) string {
 	bytes := unsafe.Slice((*byte)(unsafe.Pointer(value)), int(length))
 	return string(bytes)
 }
+
+// VectorMultiI8SearchMode selects how SearchVectorsMultiI8 picks candidates.
+type VectorMultiI8SearchMode int
+
+const (
+	// VectorMultiI8SearchGlobalMinCosine scores every candidate against all
+	// query rows.
+	VectorMultiI8SearchGlobalMinCosine VectorMultiI8SearchMode = C.ZOVA_VECTOR_MULTI_I8_SEARCH_GLOBAL_MIN_COSINE
+	// VectorMultiI8SearchCBMPrefilterMinCosine first keeps the PrefilterLimit
+	// candidates closest to query row PrefilterQueryIndex.
+	VectorMultiI8SearchCBMPrefilterMinCosine VectorMultiI8SearchMode = C.ZOVA_VECTOR_MULTI_I8_SEARCH_CBM_PREFILTER_MIN_COSINE
+)
+
+// VectorMultiI8Aggregation combines per-row distances into one score.
+type VectorMultiI8Aggregation int
+
+// VectorMultiI8AggregationMinCosine scores a vector by its least similar
+// query row.
+const VectorMultiI8AggregationMinCosine VectorMultiI8Aggregation = C.ZOVA_VECTOR_MULTI_I8_AGGREGATION_MIN_COSINE
+
+// VectorMultiI8SearchOptions configures a multi-row int8 cosine search.
+// QueryValues holds QueryCount rows of Dimensions values. Empty CandidateIDs
+// searches the whole collection.
+type VectorMultiI8SearchOptions struct {
+	QueryValues         []int8
+	QueryCount          uint
+	Dimensions          uint
+	CandidateIDs        []string
+	Mode                VectorMultiI8SearchMode
+	Aggregation         VectorMultiI8Aggregation
+	PrefilterQueryIndex uint
+	PrefilterLimit      uint
+	Limit               int
+}
+
+// SearchVectorsMultiI8 ranks int8 cosine vectors against several query rows.
+func (db *DB) SearchVectorsMultiI8(collectionName string, options VectorMultiI8SearchOptions) ([]VectorSearchResult, error) {
+	cLimit, err := checkedLimit(options.Limit)
+	if err != nil {
+		return nil, err
+	}
+	var arena cArena
+	defer arena.free()
+	cCollection, err := arena.str("vector collection name", collectionName)
+	if err != nil {
+		return nil, err
+	}
+	cCandidates, err := arena.strs("candidate vector id", options.CandidateIDs)
+	if err != nil {
+		return nil, err
+	}
+	cQuery, queryCleanup := cInt8Array(options.QueryValues)
+	defer queryCleanup()
+	return db.withSearchResults(func(out *C.zova_vector_search_results) error {
+		request := C.zova_vector_search_multi_i8_request{
+			db:                    db.ptr,
+			collection_name:       cCollection,
+			query_values:          cQuery,
+			query_values_len:      C.size_t(len(options.QueryValues)),
+			query_count:           C.size_t(options.QueryCount),
+			dimensions:            C.size_t(options.Dimensions),
+			candidate_ids:         cCandidates,
+			candidate_count:       C.size_t(len(options.CandidateIDs)),
+			mode:                  C.int(options.Mode),
+			aggregation:           C.int(options.Aggregation),
+			prefilter_query_index: C.size_t(options.PrefilterQueryIndex),
+			prefilter_limit:       C.size_t(options.PrefilterLimit),
+			limit:                 cLimit,
+			out_results:           out,
+		}
+		return statusFromDB(db, C.zova_vector_search_multi_i8(&request))
+	})
+}
+
+// DeleteVectors deletes many vector rows of one collection atomically.
+func (db *DB) DeleteVectors(collectionName string, vectorIDs []string) error {
+	var arena cArena
+	defer arena.free()
+	cCollection, err := arena.str("vector collection name", collectionName)
+	if err != nil {
+		return err
+	}
+	cIDs, err := arena.strs("vector id", vectorIDs)
+	if err != nil {
+		return err
+	}
+	return db.withLock(func() error {
+		request := C.zova_vector_delete_many_request{
+			db:              db.ptr,
+			collection_name: cCollection,
+			vector_ids:      cIDs,
+			vector_count:    C.size_t(len(vectorIDs)),
+		}
+		return statusFromDB(db, C.zova_vector_delete_many(&request))
+	})
+}
