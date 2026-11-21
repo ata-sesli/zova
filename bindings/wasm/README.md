@@ -144,10 +144,13 @@ backup, or protection from user deletion. `navigator.storage.estimate()` provide
 an estimate, not reserved space. See [browser quotas and eviction](https://developer.mozilla.org/en-US/docs/Web/API/Storage_API/Storage_quotas_and_eviction_criteria)
 and [persistent-storage permission](https://developer.mozilla.org/en-US/docs/Web/API/StorageManager/persist).
 
-Supported browsers are Chromium-based desktop browsers, version 149 or later.
-The local packed-artifact gate runs in Helium (Chromium 149); Linux CI runs
-Playwright Chromium (153). Firefox, Safari, mobile browsers and private-browsing
-modes have not been qualified. Do not infer support from API presence alone. Private
+Supported browser engines are Chromium-based desktop browsers, version 149 or
+later, and desktop Firefox, version 155 or later. The local packed-artifact gate
+runs in Helium (Chromium 149) and Playwright Firefox (155); Linux CI runs
+Playwright Chromium (153) and Playwright Firefox (155). The same suites pass in
+both engines, with no Firefox-specific code or behavior. Safari, WebKit, mobile
+browsers and private-browsing modes have not been qualified. Do not infer
+support from API presence alone. Private
 browsing can restrict storage and normally clears it when the private session
 ends; no private-mode persistence guarantee is made.
 
@@ -676,10 +679,20 @@ HELIUM_EXECUTABLE=/Applications/Helium.app/Contents/MacOS/Helium \
   sh bindings/wasm/tools/check-browser-package.sh /absolute/external/build-output
 ```
 
-Local runs require an explicit Helium executable and use a temporary profile
-under the build output directory. They do not download Playwright's browser.
-Linux CI installs Playwright's bundled Chromium, builds once,
-and tests the installed npm tarball before uploading it. Playwright is pinned
+Local Chromium runs require an explicit Helium executable and use a temporary
+profile under the build output directory. They do not download Playwright's
+browser. To run the same suites in Firefox, install Playwright's Firefox once
+with `bunx playwright install firefox` in `bindings/wasm`, then set
+`ZOVA_WASM_BROWSER=firefox`:
+
+```sh
+ZOVA_WASM_BROWSER=firefox \
+  sh bindings/wasm/tools/check-browser-package.sh /absolute/external/build-output
+```
+
+Linux CI installs Playwright's bundled Chromium and Firefox, builds once,
+and tests the installed npm tarball in Chromium before uploading it, then in
+Firefox. The Firefox step does not block the job yet. Playwright is pinned
 in the development lockfile. Native bindings remain independently tested.
 
 Release publication requires a successful Release Artifacts run at the exact

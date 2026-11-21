@@ -2,7 +2,8 @@
 
 The packed-artifact browser gate runs `durability-browser.mjs` through the
 existing `check-browser-package.sh` harness. Local runs use installed Helium;
-Linux CI uses Playwright Chromium. Native gates are unchanged.
+Linux CI uses Playwright Chromium. Both also run it in Playwright Firefox with
+`ZOVA_WASM_BROWSER=firefox`. Native gates are unchanged.
 
 The OPFS adapter reports the file's actual reserved-lock state, so a newly
 created worker can detect an abandoned rollback journal. Normal Zova opening
