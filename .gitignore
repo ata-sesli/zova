@@ -33,3 +33,6 @@ __pycache__
 bindings/python/python/zova/*.so
 bindings/python/python/zova/*.pyd
 bindings/python/python/zova/*.dylib
+
+# Prebuilt libraries that scripts/prepare-go-module.py adds to a release copy.
+bindings/go/native/

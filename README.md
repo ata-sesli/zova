@@ -144,7 +144,7 @@ Zova vendors SQLite. You do not need a system SQLite installation.
 | JavaScript / TypeScript | `bun add zova-js` / `npm install zova-js` | no | no | no | prebuilt Node-API 8 packages for Node 22/24 and Bun |
 | Rust | `cargo add zova` | no | yes | yes | `zova-sys` compiles the matching generated-C platform package with Clang |
 | Python | `uv add zova` / `pip install zova` | no | no | no | stable-ABI wheels are published for Linux/macOS x86_64/arm64 and Windows x86_64, and tested on CPython 3.13/3.14; PyPI source builds are not supported |
-| Go | `go get github.com/ata-sesli/zova/bindings/go@v1.4.0` | no, if using a release C ABI archive | no | yes, cgo | caller provides `zova.h` and `libzova_c.a` |
+| Go | `go get github.com/ata-sesli/zova/bindings/go@v1.4.0` | no | no | yes, cgo | releases after 1.4.0 carry prebuilt `libzova_c.a` for Linux/macOS x86_64/arm64 and Windows x86_64 (MinGW); 1.4.0 and earlier need a release C ABI archive |
 | C ABI | release archive or `zig build c-abi` | no, if using a release archive | no | no, if using a release archive | static C ABI library and `zova.h` |
 | Zig | package source | yes | no | yes | native API |
 | CLI | release archive or `zig build` | no, if using a release archive | no | no, if using a release archive | source-built or prebuilt command line tool |
@@ -1162,9 +1162,13 @@ Import:
 import zova "github.com/ata-sesli/zova/bindings/go"
 ```
 
-The Go package uses cgo over `include/zova.h` and links `libzova_c.a`. The
-GitHub Release includes prebuilt C ABI archives for Go/manual embedding. Point
-cgo at an unpacked archive:
+The Go package uses cgo over `include/zova.h` and links `libzova_c.a`.
+Release versions after 1.4.0 include `zova.h` and a prebuilt `libzova_c.a` for
+Linux and macOS x86_64/arm64 and Windows x86_64, so `go get` is enough to build
+on those platforms; cgo still needs a C compiler (MinGW GCC on Windows).
+
+Version 1.4.0 and earlier need a prebuilt C ABI archive from the GitHub Release.
+Point cgo at an unpacked archive:
 
 ```sh
 CGO_CFLAGS="-I/path/to/zova-c-abi/include" \
@@ -1185,12 +1189,14 @@ including the opaque-key graph, edge-payload, topology-scan and fresh-build
 session APIs, application SQL functions, and statically linked plugins. See
 the [Go binding README](bindings/go/README.md#low-level-surfaces).
 
-External Go projects should point cgo at an installed Zova C ABI:
+To link another Zova C ABI build, such as one with statically linked plugins,
+build with the `zova_external` tag, which drops the bundled search paths, and
+point cgo at it:
 
 ```sh
 CGO_CFLAGS="-I/path/to/zova/include" \
 CGO_LDFLAGS="-L/path/to/zova/lib -lzova_c" \
-go test ./...
+go test -tags zova_external ./...
 ```
 
 ### C ABI
@@ -1422,7 +1428,9 @@ Zova publishes several release artifact types:
 - A GitHub Release source archive.
 - Rust crates on crates.io: `zova-sys` and `zova`.
 - Python stable-ABI wheels on PyPI.
-- A Go module tag: `bindings/go/v1.4.0`.
+- A Go module tag: `bindings/go/v1.4.0`. From the next release, it points at
+  a child of the release commit that adds prebuilt `libzova_c.a` files under
+  `bindings/go/native/`.
 - JavaScript/TypeScript Node-API packages on npm as `zova-js`, with native
   packages for the supported platform matrix.
 
@@ -1489,7 +1497,9 @@ allows token-free subsequent releases.
 The local scripts remain useful for maintainer smoke tests. Do not run release
 or distribution commands until the exact commit is ready to tag and publish.
 
-The Go module tag is created by the protected publish workflow.
+The Go module tag is created only by the protected publish workflow, because the
+module it tags carries every platform's prebuilt library.
+`scripts/package-release.sh` creates the source tag, not the Go module tag.
 
 ## License
 

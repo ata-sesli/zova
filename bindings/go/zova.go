@@ -8,9 +8,9 @@
 package zova
 
 /*
-#cgo CFLAGS: -I../../include
-#cgo LDFLAGS: -L../../zig-out/lib -lzova_c
+#cgo LDFLAGS: -lzova_c
 #cgo linux LDFLAGS: -lpthread -ldl -lm
+#cgo windows LDFLAGS: -lntdll
 #include <stdlib.h>
 #include "zova.h"
 */
