@@ -4,34 +4,48 @@
 //! prepared SQL statements, transactions, explicit vacuum, free-page reclaim,
 //! backup/compact/restore, objects, chunks, manifests, range reads, assembly, `ObjectWriter`,
 //! vector collections, vector CRUD, exact vector search, and SQL-native vector
-//! queries through prepared statements, graphs, and graph traversal. Use
-//! `SharedDatabase` when one serialized handle should be shared across Rust
-//! threads.
+//! queries through prepared statements, graphs, graph traversal, opaque-key
+//! graph topology, fresh-build sessions, application SQL functions, and
+//! statically linked plugins. Use `SharedDatabase` when one serialized handle
+//! should be shared across Rust threads.
 
 mod database;
 mod error;
 mod extension;
+mod fresh_build;
 mod graph;
+mod graph_keyed;
 mod kv;
 mod notification;
 mod object;
 mod progress;
 mod shared;
+mod sql_function;
 mod statement;
 mod vector;
 
 pub use database::{
-    migrate_database, migrate_database_with_extensions, migrate_database_with_progress,
-    probe_format, restore_backup, restore_backup_to_memory, AutoVacuum, BackupOptions,
-    CompactOptions, Database, ExtensionOptions, FormatCompatibility, FormatInfo, MigrateOptions,
-    OpenOptions, ReclaimOptions, ReclaimedMember, RestoreOptions,
+    abi_version, abi_version_string, migrate_database, migrate_database_with_extensions,
+    migrate_database_with_plugins, migrate_database_with_plugins_and_progress,
+    migrate_database_with_progress, probe_format, restore_backup, restore_backup_to_memory,
+    trust_extension_bundle, untrust_extension_bundle, verify_extension_bundle, AbiVersion,
+    AutoVacuum, BackupOptions, CompactOptions, CreateOptions, Database, ExtensionOptions,
+    FormatCompatibility, FormatInfo, LinkedPlugin, MigrateOptions, OpenOptions, ReclaimOptions,
+    ReclaimedMember, RestoreOptions,
 };
 pub use error::{Error, Result, Status};
 pub use extension::ExtensionInfo;
+pub use fresh_build::{FreshBuild, FreshBuildProfile, FreshBuildResult, FreshValue};
 pub use graph::{
     GraphDegreeOptions, GraphEdge, GraphEdgeInput, GraphInfo, GraphNeighbor,
     GraphNeighborDirection, GraphNeighborsOptions, GraphNode, GraphNodeInput, GraphTargetType,
     GraphWalkItem, GraphWalkOptions, DEFAULT_GRAPH_NAME,
+};
+pub use graph_keyed::{
+    GraphEdgePayloadReplacement, GraphFreshEdgeInput, GraphFreshEdgePayloadInput, GraphFreshKeys,
+    GraphFreshNodeInput, GraphKeyedDegreeOptions, GraphKeyedEdge, GraphKeyedNeighbor,
+    GraphKeyedNode, GraphScanCursor, GraphScanOptions, GraphScanPage, GraphWalkDirectionOptions,
+    GraphWalkProfile,
 };
 pub use kv::{KvEntry, KvScanEntry, KvScanOptions, KvScanPage};
 pub use notification::{Notification, Subscription};
@@ -44,11 +58,13 @@ pub use object::{ObjectSeekableReader, OwnedObjectSeekableReader};
 pub use progress::{Progress, ProgressMember, ProgressPhase};
 pub use shared::SharedObjectSeekableReader;
 pub use shared::{
-    SharedDatabase, SharedDatabaseGuard, SharedObjectReader, SharedObjectWriter, SharedStatement,
-    SharedSubscription,
+    SharedDatabase, SharedDatabaseGuard, SharedFreshBuild, SharedObjectReader, SharedObjectWriter,
+    SharedStatement, SharedSubscription,
 };
+pub use sql_function::{SqlFunctionFlags, SqlFunctionResult, SqlValue};
 pub use statement::{ColumnType, OwnedStatement, Statement, Step};
 pub use vector::{
     Vector, VectorCollectionInfo, VectorCollectionOptions, VectorElementType, VectorInput,
-    VectorMetric, VectorSearchResult, VectorValues, VectorValuesOwned,
+    VectorMetric, VectorMultiI8Aggregation, VectorMultiI8SearchMode, VectorMultiI8SearchOptions,
+    VectorSearchResult, VectorValues, VectorValuesOwned,
 };

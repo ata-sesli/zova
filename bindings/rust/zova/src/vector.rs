@@ -66,7 +66,46 @@ pub struct VectorSearchResult {
     pub distance: f64,
 }
 
+/// Query strategy for [`Database::search_vectors_multi_i8`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorMultiI8SearchMode {
+    /// Score every candidate against every query row.
+    GlobalMinCosine,
+    /// Shortlist with one query row, then score the shortlist with all rows.
+    CbmPrefilterMinCosine,
+}
+
+/// How per-query cosine distances combine into one score per vector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorMultiI8Aggregation {
+    MinCosine,
+}
+
+/// Raw-i8 cosine search with `query_count` contiguous query rows of
+/// `dimensions` values each. Empty `candidate_ids` searches the collection.
+#[derive(Debug, Clone, Copy)]
+pub struct VectorMultiI8SearchOptions<'a> {
+    pub collection_name: &'a str,
+    pub query_values: &'a [i8],
+    pub query_count: usize,
+    pub dimensions: usize,
+    pub candidate_ids: &'a [&'a str],
+    pub mode: VectorMultiI8SearchMode,
+    pub aggregation: VectorMultiI8Aggregation,
+    pub prefilter_query_index: usize,
+    pub prefilter_limit: usize,
+    pub limit: usize,
+}
+
 impl Database {
+    pub fn search_vectors_multi_i8(
+        &mut self,
+        options: VectorMultiI8SearchOptions<'_>,
+    ) -> Result<Vec<VectorSearchResult>> {
+        let db = self.raw_ptr();
+        search_vectors_multi_i8_raw(db, |status| self.status(status), options)
+    }
+
     pub fn create_vector_collection(
         &mut self,
         name: &str,
@@ -512,6 +551,53 @@ pub(crate) fn i8_values_ptr(values: &[i8]) -> *const i8 {
     } else {
         values.as_ptr()
     }
+}
+
+pub(crate) fn search_vectors_multi_i8_raw(
+    db: *mut zova_sys::zova_database,
+    status: impl FnOnce(i32) -> Result<()>,
+    options: VectorMultiI8SearchOptions<'_>,
+) -> Result<Vec<VectorSearchResult>> {
+    let collection_name = cstring(options.collection_name, "vector collection name")?;
+    let (_candidates, candidate_ptrs) = candidate_ptrs(options.candidate_ids)?;
+    let mut results = empty_search_results();
+    let request = zova_sys::zova_vector_search_multi_i8_request {
+        db,
+        collection_name: collection_name.as_ptr(),
+        query_values: if options.query_values.is_empty() {
+            ptr::null()
+        } else {
+            options.query_values.as_ptr()
+        },
+        query_values_len: options.query_values.len(),
+        query_count: options.query_count,
+        dimensions: options.dimensions,
+        candidate_ids: if candidate_ptrs.is_empty() {
+            ptr::null()
+        } else {
+            candidate_ptrs.as_ptr()
+        },
+        candidate_count: candidate_ptrs.len(),
+        mode: match options.mode {
+            VectorMultiI8SearchMode::GlobalMinCosine => {
+                zova_sys::ZOVA_VECTOR_MULTI_I8_SEARCH_GLOBAL_MIN_COSINE
+            }
+            VectorMultiI8SearchMode::CbmPrefilterMinCosine => {
+                zova_sys::ZOVA_VECTOR_MULTI_I8_SEARCH_CBM_PREFILTER_MIN_COSINE
+            }
+        },
+        aggregation: match options.aggregation {
+            VectorMultiI8Aggregation::MinCosine => {
+                zova_sys::ZOVA_VECTOR_MULTI_I8_AGGREGATION_MIN_COSINE
+            }
+        },
+        prefilter_query_index: options.prefilter_query_index,
+        prefilter_limit: options.prefilter_limit,
+        limit: options.limit,
+        out_results: &mut results,
+    };
+    status(unsafe { zova_sys::zova_vector_search_multi_i8(&request) })?;
+    take_search_results(&mut results)
 }
 
 pub(crate) fn candidate_ptrs(
