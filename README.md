@@ -1178,9 +1178,10 @@ zig build c-abi
 
 Existing Go object, vector, and graph APIs transparently use a bound store after the
 database is opened. Store create/bind/unbind/split management remains
-native-Zig/CLI-only in v0.25. The additive v0.25 opaque-key graph,
-edge-payload, topology-scan, and fresh-build session APIs remain C ABI/raw
-`zova-sys` surfaces and are not Go APIs yet.
+native-Zig/CLI-only in v0.25. The Go package wraps every C ABI function,
+including the opaque-key graph, edge-payload, topology-scan and fresh-build
+session APIs, application SQL functions, and statically linked plugins. See
+the [Go binding README](bindings/go/README.md#low-level-surfaces).
 
 External Go projects should point cgo at an installed Zova C ABI:
 

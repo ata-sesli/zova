@@ -26,6 +26,8 @@ type DB struct {
 
 	// seekableReaders is created lazily by DB.ObjectSeekableReader.
 	seekableReaders map[*ObjectSeekableReader]struct{}
+	// freshBuilds is created lazily by DB.BeginFreshBuild.
+	freshBuilds map[*FreshBuild]struct{}
 }
 
 // OpenOptions controls optional behavior for opening an existing .zova file.
@@ -374,6 +376,9 @@ func (db *DB) Close() error {
 		return closedError("database")
 	}
 
+	for build := range db.freshBuilds {
+		build.destroyLocked(db)
+	}
 	for stmt := range db.statements {
 		if !stmt.closed && stmt.ptr != nil {
 			_ = C.zova_statement_finalize(stmt.ptr)

@@ -176,6 +176,12 @@ func (db *DB) CompactToWithProgress(destination string, options CompactOptions, 
 // creates no destination files. The last ProgressPublish event follows the
 // commit, so its return value is ignored.
 func MigrateDatabaseWithProgress(source, destination string, options MigrateOptions, extensions ExtensionOptions, fn ProgressFunc) error {
+	return MigrateDatabaseWithPluginsAndProgress(source, destination, options, extensions, nil, fn)
+}
+
+// MigrateDatabaseWithPluginsAndProgress is MigrateDatabaseWithProgress that
+// also verifies the destination with statically linked plugins.
+func MigrateDatabaseWithPluginsAndProgress(source, destination string, options MigrateOptions, extensions ExtensionOptions, plugins []LinkedPlugin, fn ProgressFunc) error {
 	cSource, err := cString("source path", source)
 	if err != nil {
 		return err
@@ -191,6 +197,9 @@ func MigrateDatabaseWithProgress(source, destination string, options MigrateOpti
 		return err
 	}
 	defer args.free()
+	var arena cArena
+	defer arena.free()
+	cPlugins := arena.plugins(plugins)
 	message := newCMessage()
 	defer freeCMessage(message)
 	bridge := newProgressBridge(fn)
@@ -201,6 +210,8 @@ func MigrateDatabaseWithProgress(source, destination string, options MigrateOpti
 		extension_bundle_paths: args.paths,
 		extension_bundle_count: args.count,
 		trust_store_path:       args.trust,
+		plugins:                cPlugins,
+		plugin_count:           C.size_t(len(plugins)),
 		progress:               bridge.callback(),
 		progress_user_data:     bridge.userData,
 		out_error_message:      message,

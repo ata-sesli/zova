@@ -35,7 +35,8 @@ It covers:
 11. [Vectors](#vectors)
 12. [Bound Stores](#bound-stores)
 13. [Graphs](#graphs)
-14. [Example](#example)
+14. [Low-Level Surfaces](#low-level-surfaces)
+15. [Example](#example)
 
 ## How It Fits
 
@@ -81,10 +82,8 @@ and never mutates the source. `MigrateDatabaseWithExtensions(source,
 destination, options, extensions)` takes the same `ExtensionOptions` as
 `OpenWithExtensions` for databases with a non-bundled extension installed.
 
-Opaque-key graph, edge-payload, topology-scan, prepared-build, and generic
-fresh-build session APIs are supported low-level C/raw `zova-sys` surfaces.
-The Go package deliberately exposes the established graph CRUD and traversal
-API instead of those specialized publication surfaces.
+`MigrateDatabaseWithPlugins` and `MigrateDatabaseWithPluginsAndProgress`
+also accept statically linked plugins.
 
 ## Build Requirements
 
@@ -617,6 +616,37 @@ order by g.rank`)
 
 Use `zova_graph_neighbors` for one-hop joins and `zova_graph_walk` for bounded
 directed walks with `depth`, `predecessor_node_id`, and `edge_type` columns.
+
+## Low-Level Surfaces
+
+The Go package wraps every function in the C ABI. Beyond the APIs above:
+
+- Batch graph writes: `PutGraphNodes`, `PutGraphEdges`, `DeleteGraphNodes`,
+  `DeleteGraphEdges`, and `GraphDegree`.
+- Opaque-key graph APIs: `PutGraphNodesKeyed`, `PutGraphEdgesKeyed`,
+  `GetGraphNodesKeyed`, `GetGraphEdgesKeyed`, `GraphNeighborsKeyed`,
+  `GraphDegreesKeyed`, `GetGraphEdgePayloads`, `ReplaceGraphEdgePayloads`,
+  `GraphScan` cursor pages, `GraphWalkDirection` (and its `Profiled` form),
+  and the `BuildFreshGraph*Keyed` builders. Keys are opaque `int64` values;
+  do not persist them across a graph rebuild.
+- `DB.BeginFreshBuild` returns a `FreshBuild` that loads tables, FTS tables,
+  one graph and vector collections into empty targets, then publishes them
+  together with `Finish`. `Close` rolls back an unfinished session. While it
+  is active, other calls on the same `DB` fail with `StatusInvalidArgument`.
+- `DeleteVectors` and `SearchVectorsMultiI8`.
+- `RegisterFunction` registers a scalar SQL function. Arguments arrive as
+  `nil`, `int64`, `float64`, `string`, or `[]byte`; returning an error or
+  panicking fails the statement. The function runs while the `DB` lock is
+  held, so it must not call methods on the same `DB`.
+- `LinkedPlugin` with `CreateWithPlugins`, `OpenWithPlugins`,
+  `OpenForExtensionUpgrade`, `ExtensionUpgrade`, and `ExtensionRebuild`. A
+  `LinkedPlugin.Descriptor` points at a static `zova_plugin_descriptor_v1` in
+  C memory, typically from a cgo-linked C library.
+- `CreateWithOptions`, and `VerifyExtensionBundle`, `TrustExtensionBundle`
+  and `UntrustExtensionBundle`.
+
+`ObjectIDFor` and `ObjectChunkIDFor` compute the same ids as
+`zova_object_id_from_bytes` and `zova_object_chunk_id_from_bytes` in Go.
 
 ## Example
 
