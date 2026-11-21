@@ -485,6 +485,44 @@ try {
     await db.close();
   }
 
+  // Keyed graph, edge payload, scan, directional walk, fresh-build and
+  // multi-vector calls replay native zova-js results step by step (#222).
+  {
+    const { encode, decode } = await import("/fixture-codec.mjs");
+    const fixture = await (await fetch("/graph-fixture.json")).json();
+    // Distances may differ in the last bits between native and WebAssembly.
+    const same = (actual, expected) => {
+      if (typeof actual === "number" && typeof expected === "number") {
+        return actual === expected || Math.abs(actual - expected) <= 1e-9 * Math.max(1, Math.abs(expected));
+      }
+      if (Array.isArray(actual) && Array.isArray(expected)) return actual.length === expected.length && actual.every((item, index) => same(item, expected[index]));
+      if (actual && expected && typeof actual === "object" && typeof expected === "object") {
+        const keys = Object.keys(expected);
+        return Object.keys(actual).length === keys.length && keys.every(key => key in actual && same(actual[key], expected[key]));
+      }
+      return actual === expected;
+    };
+    const targets = { db: await Database.createMemory() };
+    for (const sql of fixture.setup) await targets.db.exec(sql);
+    for (const [index, step] of fixture.steps.entries()) {
+      const args = decode(step.args);
+      let actual;
+      try {
+        const result = step.call === "$memory" ? await Database.createMemory()
+          : step.call === "$rows" ? (await targets[step.target].query(args[0])).rows
+          : await targets[step.target][step.call](...args);
+        if (step.store) targets[step.store] = result;
+        actual = step.store ? { stored: true } : { result: encode(result ?? null) };
+      } catch (error) {
+        if (!(error instanceof ZovaWasmError)) throw error;
+        actual = { error: error.status };
+      }
+      assert(same(actual, step.expected), `step ${index} ${step.target}.${step.call}: ${JSON.stringify(actual).slice(0, 400)} vs native ${JSON.stringify(step.expected).slice(0, 400)}`);
+    }
+    for (const target of Object.values(targets)) if (target instanceof Database) await target.close();
+    assert(fixture.steps.length > 100, `replayed ${fixture.steps.length} native steps`);
+  }
+
   // Bundled extensions match native results; a missing plugin fails as native (#221).
   {
     const h = await import("/helpers.mjs");

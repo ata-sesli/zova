@@ -319,6 +319,14 @@ const { nodeKeys, edgeKeys, profile } = await build.finish();
 other calls on the database reject. `abort`, `close`, any failure including
 invalid input, and closing the database roll the whole session back.
 
+Each of these batch calls, and `searchVectorsMultiI8`, sends one message to
+the worker. Keys, payloads, row blobs and vector values are copied into
+package-owned buffers that are transferred rather than cloned, so caller arrays
+stay usable; key, degree and payload results are transferred back.
+`tests/graph-fixture.json`, recorded from native `zova-js` by
+`tools/generate-graph-fixture.mjs`, holds the results the browser tests compare
+against.
+
 ## SQL functions
 
 ```ts

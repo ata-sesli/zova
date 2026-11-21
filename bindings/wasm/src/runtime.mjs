@@ -116,7 +116,7 @@ function request() {
       return self.u32(type).u32(count(data.length, "Vector length")).raw(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
     },
     each(items, write) {
-      if (!Array.isArray(items)) throw invalid("Expected an array");
+      if (!Array.isArray(items) && !(items instanceof BigInt64Array)) throw invalid("Expected an array");
       self.u32(count(items.length, "Item count"));
       for (const item of items) write(self, item);
       return self;
@@ -181,6 +181,15 @@ const signedKey = (value, label) => {
 const writeGraphKey = (w, key) => w.u64(signedKey(key, "Graph key"));
 const readGraphKey = r => BigInt.asIntN(64, r.u64());
 const readKeys = r => BigInt64Array.from(r.list(readGraphKey));
+// Batch calls whose results hold only typed arrays built for that reply.
+const batchResults = new Set(["graph_node_put_many_keyed", "graph_edge_put_many_keyed", "graph_degrees_keyed",
+  "graph_edge_payloads_get", "graph_build_fresh", "fresh_build_finish"]);
+function resultBuffers(value, found = new Set()) {
+  if (ArrayBuffer.isView(value)) found.add(value.buffer);
+  else if (Array.isArray(value)) for (const item of value) resultBuffers(item, found);
+  else if (value !== null && typeof value === "object") for (const item of Object.values(value)) resultBuffers(item, found);
+  return [...found];
+}
 const writeOptionalBytes = (w, bytes) => bytes === undefined ? w.u32(0) : w.u32(1).bytes(bytes);
 const writeFreshNode = (w, node) => w.str(node?.nodeId).str(node.kind)
   .u32(code(targetTypes, node.targetType, "graph target type")).str(node.targetNamespace).str(node.targetRef);
@@ -993,9 +1002,11 @@ export function serveWorker(createModule, port = globalThis) {
         lastId = request.id;
         currentId = request.id;
         const value = await dispatch(request.operation, request.args ?? {});
-        // Byte results are fresh copies out of WASM memory: move, do not clone.
+        // Byte results, and the typed arrays inside batch results, are fresh
+        // copies out of WASM memory: move them, do not clone.
         const whole = value instanceof Uint8Array && value.byteOffset === 0 && value.byteLength === value.buffer.byteLength;
-        port.postMessage({ id: request.id, ok: true, value }, whole ? [value.buffer] : []);
+        const transfer = batchResults.has(request.operation) ? resultBuffers(value) : whole ? [value.buffer] : [];
+        port.postMessage({ id: request.id, ok: true, value }, transfer);
       } catch (error) {
         fatal = state === "initializing" || error instanceof WebAssembly.RuntimeError;
         if (fatal) state = "failed";
