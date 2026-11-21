@@ -392,13 +392,23 @@ function edge(input: GraphEdgeInput): GraphEdgeInput {
     edgeType: text(input.edgeType, "Edge type"), toNodeId: text(input.toNodeId, "Destination node ID"),
   };
 }
-function graphKeys(keys: GraphKeys): bigint[] {
-  const items: readonly unknown[] = keys instanceof BigInt64Array ? Array.from(keys) : Array.isArray(keys) ? keys
-    : invalid("Graph keys must be a BigInt64Array or an array of bigint");
-  return items.map(key => {
+// A package-owned copy, so batch calls can transfer it to the worker.
+function graphKeys(keys: GraphKeys): BigInt64Array {
+  if (keys instanceof BigInt64Array) return keys.slice();
+  if (!Array.isArray(keys)) invalid("Graph keys must be a BigInt64Array or an array of bigint");
+  return BigInt64Array.from(keys, (key: unknown) => {
     if (typeof key !== "bigint" || key < -(1n << 63n) || key >= (1n << 63n)) invalid("Graph keys must be signed 64-bit bigint values");
     return key;
   });
+}
+// Buffers of the typed arrays in prepared arguments. Batch calls pass this as
+// `transfer`: their prepared arguments hold only package-owned copies, so the
+// buffers move to the worker instead of being cloned.
+function owned(args: unknown, found = new Set<ArrayBuffer>()): ArrayBuffer[] {
+  if (ArrayBuffer.isView(args)) { if (args.buffer instanceof ArrayBuffer) found.add(args.buffer); }
+  else if (Array.isArray(args)) for (const item of args) owned(item, found);
+  else if (args !== null && typeof args === "object") for (const item of Object.values(args)) owned(item, found);
+  return [...found];
 }
 function freshNode(input: GraphFreshNodeInput): GraphFreshNodeInput {
   return {
@@ -877,7 +887,7 @@ export class FreshBuild {
       await this.abort().catch(() => undefined);
       throw error;
     }
-    try { return await this.#request<T>(operation, () => args); }
+    try { return await this.#request<T>(operation, () => args, owned); }
     catch (error) { this.#closed = true; throw error; }
     finally { if (last) this.#closed = true; }
   }
@@ -1654,7 +1664,7 @@ export class Database {
         prefilterQueryIndex: optional(options.prefilterQueryIndex, "prefilterQueryIndex"),
         prefilterLimit: optional(options.prefilterLimit, "prefilterLimit"), limit: size(options.limit, "Limit"),
       };
-    });
+    }, false, owned);
   }
 
   createGraph(name: string): Promise<void> {
@@ -1741,11 +1751,11 @@ export class Database {
   }
   /** Nodes by key, in input order; `null` for a missing key. */
   getGraphNodesKeyed(graphName: string, nodeKeys: GraphKeys): Promise<(GraphKeyedNode | null)[]> {
-    return this.#request("graph_nodes_get_keyed", () => ({ graphName: text(graphName, "Graph name"), keys: graphKeys(nodeKeys) }));
+    return this.#request("graph_nodes_get_keyed", () => ({ graphName: text(graphName, "Graph name"), keys: graphKeys(nodeKeys) }), false, owned);
   }
   /** Edges by key, in input order; `null` for a missing key. */
   getGraphEdgesKeyed(graphName: string, edgeKeys: GraphKeys): Promise<(GraphKeyedEdge | null)[]> {
-    return this.#request("graph_edges_get_keyed", () => ({ graphName: text(graphName, "Graph name"), keys: graphKeys(edgeKeys) }));
+    return this.#request("graph_edges_get_keyed", () => ({ graphName: text(graphName, "Graph name"), keys: graphKeys(edgeKeys) }), false, owned);
   }
   graphNeighborsKeyed(options: GraphNeighborsOptions): Promise<GraphKeyedNeighbor[]> {
     return this.#request("graph_neighbors_keyed", () => ({ ...edgeScope(options), limit: size(options.limit, "Limit") }));
@@ -1755,18 +1765,18 @@ export class Database {
     return this.#request("graph_degrees_keyed", () => ({
       graphName: text(options?.graphName, "Graph name"), nodeKeys: graphKeys(options.nodeKeys),
       direction: text(options.direction, "Direction"), edgeType: optionalText(options.edgeType, "Edge type"),
-    }));
+    }), false, owned);
   }
   /** Edge payloads by key, in input order; `null` for a missing edge. */
   getGraphEdgePayloads(graphName: string, edgeKeys: GraphKeys): Promise<(Uint8Array | null)[]> {
-    return this.#request("graph_edge_payloads_get", () => ({ graphName: text(graphName, "Graph name"), keys: graphKeys(edgeKeys) }));
+    return this.#request("graph_edge_payloads_get", () => ({ graphName: text(graphName, "Graph name"), keys: graphKeys(edgeKeys) }), false, owned);
   }
   /** One atomic batch. */
   replaceGraphEdgePayloads(graphName: string, replacements: readonly GraphEdgePayloadReplacement[]): Promise<void> {
     return this.#request("graph_edge_payloads_replace", () => ({
       graphName: text(graphName, "Graph name"),
       replacements: list(replacements, item => ({ edgeKey: graphKeys([item?.edgeKey])[0], payload: kvBytes(item.payload) })),
-    }));
+    }), false, owned);
   }
   /** One page of nodes and edges in creation order. */
   graphScan(options: GraphScanOptions): Promise<GraphScanPage> {
@@ -1798,13 +1808,13 @@ export class Database {
   #freshGraph(variant: string, graphName: string, nodes: readonly GraphFreshNodeInput[], edges: readonly GraphFreshEdgeInput[]): Promise<GraphFreshKeys> {
     return this.#request("graph_build_fresh", () => ({
       variant, graphName: text(graphName, "Graph name"), nodes: list(nodes, freshNode), edges: freshEdges(edges, variant === "payloads"),
-    }));
+    }), false, owned);
   }
 
   /** Starts a fresh-build session; see `FreshBuild`. */
   async beginFreshBuild(): Promise<FreshBuild> {
     await this.#request("fresh_build_begin", () => ({}));
-    return new FreshBuild((operation, prepare) => this.#request(operation, prepare), constructionToken);
+    return new FreshBuild((operation, prepare, transfer) => this.#request(operation, prepare, false, transfer), constructionToken);
   }
 
   /**

@@ -48,6 +48,8 @@ const server = Bun.serve({
     if (path === "/plain.sqlite") return new Response(Bun.file(plainSqlite));
     if (path === "/sql-function-fixture.mjs") return new Response(Bun.file(new URL("./sql-function-fixture.mjs", import.meta.url)), { headers: { "Content-Type": "text/javascript" } });
     if (path === "/vector-fixture.json") return new Response(Bun.file(new URL("./vector-fixture.json", import.meta.url)));
+    if (path === "/graph-fixture.json") return new Response(Bun.file(new URL("./graph-fixture.json", import.meta.url)));
+    if (path === "/fixture-codec.mjs") return new Response(Bun.file(new URL("./fixture-codec.mjs", import.meta.url)), { headers: { "Content-Type": "text/javascript" } });
     if (path === "/object-fixture.json") return new Response(Bun.file(new URL("./object-fixture.json", import.meta.url)));
     if (path === "/helpers.mjs") return new Response(Bun.file(new URL("./browser-helpers.mjs", import.meta.url)), { headers: { "Content-Type": "text/javascript" } });
     if (path === "/previous") return new Response('<script type="module">import * as zova from "/previous/dist/index.js"; globalThis.previous = zova;</script>', { headers: { "Content-Type": "text/html" } });

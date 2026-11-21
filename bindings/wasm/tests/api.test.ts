@@ -5,9 +5,12 @@ const originalWorker = globalThis.Worker;
 class TestWorker extends EventTarget {
   static last: TestWorker;
   messages: Array<{ id: number; operation: string }> = [];
+  transfers: Transferable[][] = [];
   constructor(public url: URL, public options: WorkerOptions) { super(); TestWorker.last = this; }
-  postMessage(message: { id: number; operation: string }) {
-    this.messages.push(structuredClone(message));
+  postMessage(message: { id: number; operation: string }, transfer: Transferable[] = []) {
+    // Transfer as a real worker would, detaching the sender's buffers.
+    this.messages.push(structuredClone(message, { transfer }));
+    this.transfers.push(transfer);
     const progress = message.operation === "migrate_stage" ? { phase: "copy", member: "main", done: 1, total: 1 } : undefined;
     const value = message.operation === "prepare" ? { handle: 7, parameterCount: 1, columns: ["v"] }
       : message.operation === "migrate_stage" ? { staged: true } : undefined;
@@ -304,5 +307,39 @@ test("fresh builds roll back on invalid input and close once finished", async ()
   expect(TestWorker.last.messages.slice(1).map(x => x.operation)).toEqual([
     "fresh_build_begin", "fresh_build_rows", "fresh_build_abort", "fresh_build_begin", "fresh_build_finish",
   ]);
+  await db.close();
+});
+test("batch calls transfer their own copies of large inputs", async () => {
+  installWorker();
+  const db = await Database.createMemory();
+  const worker = TestWorker.last;
+  const keys = BigInt64Array.of(1n, 2n);
+  const payload = Uint8Array.of(1, 2);
+  const queryValues = Int8Array.of(1, 2);
+  const values = Float32Array.of(1);
+  const node = { nodeId: "a", kind: "k", targetType: "none" as const };
+  const sent = async (call: () => Promise<unknown>) => {
+    const before = worker.messages.length;
+    await call();
+    return worker.messages.slice(before).map((message, index) => [message, worker.transfers[before + index].length] as const);
+  };
+  const [[nodes, nodeBuffers]] = await sent(() => db.getGraphNodesKeyed("g", keys));
+  expect(nodes).toMatchObject({ operation: "graph_nodes_get_keyed", args: { keys: BigInt64Array.of(1n, 2n) } });
+  expect(nodeBuffers).toBe(1);
+  expect((await sent(() => db.getGraphEdgesKeyed("g", [1n])))[0][1]).toBe(1);
+  expect((await sent(() => db.getGraphEdgePayloads("g", keys)))[0][1]).toBe(1);
+  expect((await sent(() => db.graphDegreesKeyed({ graphName: "g", nodeKeys: keys, direction: "outgoing" })))[0][1]).toBe(1);
+  expect((await sent(() => db.replaceGraphEdgePayloads("g", [{ edgeKey: 1n, payload }, { edgeKey: 2n, payload }])))[0][1]).toBe(2);
+  expect((await sent(() => db.buildFreshGraphPreparedKeyedWithPayloads("g", [node, node],
+    [{ fromNodeOrdinal: 0, edgeType: "e", toNodeOrdinal: 1, payload }])))[0][1]).toBe(1);
+  expect((await sent(() => db.searchVectorsMultiI8("c", { queryValues, queryCount: 1, dimensions: 2, limit: 1 })))[0][1]).toBe(1);
+  const build = await db.beginFreshBuild();
+  expect((await sent(() => build.tableRows("t", ["b"], [[payload], [null]])))[0][1]).toBe(1);
+  expect((await sent(() => build.graph("g", [node], [{ fromNodeOrdinal: 0, edgeType: "e", toNodeOrdinal: 0, payload }])))[0][1]).toBe(1);
+  expect((await sent(() => build.vectors("v", [{ id: "a", values }, { id: "b", values }])))[0][1]).toBe(2);
+  // The caller's arrays stay usable; only the package's copies moved.
+  expect([keys.length, payload.length, queryValues.length, values.length]).toEqual([2, 2, 2, 1]);
+  // Calls that send no batch transfer nothing.
+  expect((await sent(() => db.graphScan({ graphName: "g", nodeLimit: 1, edgeLimit: 1 })))[0][1]).toBe(0);
   await db.close();
 });
