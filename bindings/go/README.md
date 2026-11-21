@@ -69,9 +69,22 @@ Import it as:
 import zova "github.com/ata-sesli/zova/bindings/go"
 ```
 
-The Go package is source-only and uses cgo. It does not download or build the
-native Zova C ABI automatically during `go get`; your build environment must
-provide `zova.h` and `libzova_c.a`.
+The Go package uses cgo. Release versions after 1.4.0 include `zova.h` and a
+prebuilt static `libzova_c.a` for each supported platform under `native/`, so
+`go get` is enough to build:
+
+| GOOS/GOARCH | Library |
+|---|---|
+| `linux/amd64`, `linux/arm64` | release C ABI archive |
+| `darwin/amd64`, `darwin/arm64` | release C ABI archive |
+| `windows/amd64` | MinGW build for cgo's GCC (the C ABI archive's `zova_c.lib` is MSVC) |
+
+cgo still needs a C compiler: GCC or Clang on Linux and macOS, MinGW GCC on
+Windows. On other platforms, or to link your own build, see
+[Build Requirements](#build-requirements).
+
+Version 1.4.0 and earlier do not include libraries; point cgo at a release C ABI
+archive as described below.
 
 The current development `.zova` format is 14, and Zova does not migrate older
 format databases in place. Format-9, format-10, format-11, format-12 and format-13 databases can be probed and
@@ -90,18 +103,31 @@ also accept statically linked plugins.
 The Go binding uses cgo over `include/zova.h` and links the local static C ABI
 library.
 
-For application builds, the easiest path is to download the matching prebuilt
-C ABI archive from the Zova GitHub Release, then point cgo at its `include` and
-`lib` directories:
+Which headers and library cgo uses depends on where the module comes from and
+on one build tag:
+
+| Build | Search paths |
+|---|---|
+| Released module after 1.4.0 | `native/include` and `native/<goos>_<goarch>` in the module (`cgo_prebuilt.go`) |
+| Repository checkout | `../../include` and `../../zig-out/lib` (`cgo_checkout.go`) |
+| Either, with `-tags zova_external` | none; `CGO_CFLAGS` and `CGO_LDFLAGS` supply them |
+
+Use `zova_external` to link a different Zova C ABI build, such as one with
+statically linked plugins, or a platform without a bundled library. With
+1.4.0 and earlier, download the matching prebuilt C ABI archive from the Zova
+GitHub Release and point cgo at its `include` and `lib` directories:
 
 ```sh
 CGO_CFLAGS="-I/path/to/zova-c-abi/include" \
 CGO_LDFLAGS="-L/path/to/zova-c-abi/lib -lzova_c" \
-go test ./...
+go test -tags zova_external ./...
 ```
 
-The prebuilt C ABI archives are built by Zova's release workflow from the Zig
-source. The Go module stays small and does not bundle generated C.
+The tag is optional for 1.4.0 and earlier, which have no bundled paths.
+
+The prebuilt libraries are built by Zova's release workflow from the Zig
+source. The module bundles static libraries, not generated C, so a first build
+does not compile Zova; the released module is about 33 MB to download.
 
 Linux and macOS C ABI builds bundle the required Zig compiler-runtime helpers
 so the archive can be linked by the system C toolchain. Release verification
@@ -125,13 +151,21 @@ The default cgo flags expect:
 - headers in `../../include`
 - `libzova_c.a` in `../../zig-out/lib`
 
-That default works inside this repository. When using the Go module from another
-project, point cgo at an installed or locally built Zova C ABI:
+That default works inside this repository. On Windows, cgo cannot link the
+MSVC `zova_c.lib` that `zig build c-abi` produces; build a MinGW archive into
+the same directory instead:
+
+```sh
+sh scripts/build-go-windows-archive.sh zig-out/lib
+```
+
+When using the Go module from another project, point cgo at an installed or
+locally built Zova C ABI:
 
 ```sh
 CGO_CFLAGS="-I/path/to/zova/include" \
 CGO_LDFLAGS="-L/path/to/zova/zig-out/lib -lzova_c" \
-go test ./...
+go test -tags zova_external ./...
 ```
 
 The C ABI build also installs its public headers into the selected prefix:
@@ -141,15 +175,7 @@ zig build c-abi -Doptimize=ReleaseSafe -p /path/to/zova-prefix
 
 CGO_CFLAGS="-I/path/to/zova-prefix/include" \
 CGO_LDFLAGS="-L/path/to/zova-prefix/lib -lzova_c" \
-go test ./...
-```
-
-For custom local builds, pass normal cgo flags:
-
-```sh
-CGO_CFLAGS="-I/path/to/include" \
-CGO_LDFLAGS="-L/path/to/lib -lzova_c" \
-go test ./...
+go test -tags zova_external ./...
 ```
 
 For local test runs, `test.sh` accepts `ZOVA_INCLUDE_DIR` and `ZOVA_LIB_DIR`
@@ -165,11 +191,23 @@ You need Zig `0.17.0` or newer, cgo enabled, and a working C compiler.
 
 Go modules are published by Git tags, not by uploading to a central registry.
 Because this module lives in the `bindings/go` subdirectory, the release tag
-must include that subdirectory prefix:
+must include that subdirectory prefix, such as `bindings/go/v1.4.0`.
+
+The **Publish Release** workflow creates the tag. It copies the release commit,
+runs `scripts/prepare-go-module.py` to add `native/` with every platform's
+library from the Release Artifacts run, makes `cgo_prebuilt.go` the default,
+builds `examples/basic` from a separate module against the result, and commits
+it as a child of the release commit. The Go tag points at that child; the
+release commit and `main` stay free of binaries. Do not create the Go tag by
+hand.
+
+To check the released layout locally for your platform:
 
 ```sh
-git tag -a bindings/go/v1.4.0 -m "Zova Go bindings v1.4.0"
-git push origin bindings/go/v1.4.0
+zig build c-abi -Doptimize=ReleaseSafe
+cp -R bindings/go /tmp/zova-go-module
+python3 scripts/prepare-go-module.py /tmp/zova-go-module \
+  --lib "$(go env GOOS)_$(go env GOARCH)=zig-out/lib/libzova_c.a" --check
 ```
 
 After pushing the tag, ask the public Go module proxy to resolve it:

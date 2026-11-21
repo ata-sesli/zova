@@ -40,6 +40,9 @@ jobs:
         with:
           python-version: "3.13"
       - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
@@ -137,6 +140,24 @@ jobs:
           test -f "$wasm_tarball"
           cp "$wasm_tarball" zig-out/release-assets/
 
+      # The Go module tag points at a child of the release commit that adds
+      # bindings/go/native/ with one prebuilt libzova_c.a per platform, so
+      # `go get` alone builds. The release commit and main stay source-only.
+      - name: Prepare the Go module with prebuilt native libraries
+        run: |
+          set -eu
+          version="${{ inputs.version }}"
+          download="$PWD/zig-out/release-download"
+          archive() { echo "$download/zova-$version-$1-native/zova-v$version-$1-$2.tar.gz"; }
+          git worktree add --detach "$RUNNER_TEMP/go-release" HEAD
+          python3 scripts/prepare-go-module.py "$RUNNER_TEMP/go-release/bindings/go" \
+            --lib "linux_amd64=$(archive linux-x86_64 c-abi)" \
+            --lib "linux_arm64=$(archive linux-arm64 c-abi)" \
+            --lib "darwin_amd64=$(archive macos-x86_64 c-abi)" \
+            --lib "darwin_arm64=$(archive macos-arm64 c-abi)" \
+            --lib "windows_amd64=$(archive windows-x86_64 go-c-abi)" \
+            --check
+
       - name: Create tags and GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -173,7 +194,16 @@ jobs:
           }
 
           create_or_verify_tag "$tag" "Zova $version"
-          create_or_verify_tag "$go_tag" "Zova Go bindings $version"
+
+          if git rev-parse -q --verify "refs/tags/$go_tag" >/dev/null; then
+            test "$(git rev-parse "$go_tag^{commit}^")" = "$head_commit"
+          else
+            go_release="$RUNNER_TEMP/go-release"
+            git -C "$go_release" add -A -f bindings/go
+            git -C "$go_release" commit -q -m "Zova Go bindings $version with prebuilt native libraries"
+            git tag -a "$go_tag" -m "Zova Go bindings $version" "$(git -C "$go_release" rev-parse HEAD)"
+          fi
+          git push origin "$go_tag"
 
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "GitHub Release already exists: $tag; uploading assets with --clobber"

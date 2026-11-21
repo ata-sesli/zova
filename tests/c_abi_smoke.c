@@ -9,6 +9,15 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#ifdef _WIN32
+#include <direct.h>
+/* MinGW's mkdir takes no mode. The dynamic bundle smoke that uses it does not
+   run on Windows, but the file must still compile there. */
+#define make_directory(path) _mkdir(path)
+#else
+#define make_directory(path) mkdir((path), 0700)
+#endif
+
 static void expect_status(zova_status actual, zova_status expected, const char *label) {
     if (actual != expected) {
         fprintf(stderr, "%s: expected %s, got %s\n", label, zova_status_name(expected), zova_status_name(actual));
@@ -207,7 +216,7 @@ static void make_dyn_test_bundle(const char *library_path, const char *bundle_pa
     remove(library_dest);
     remove(manifest_path);
     rmdir(bundle_path);
-    if (mkdir(bundle_path, 0700) != 0) {
+    if (make_directory(bundle_path) != 0) {
         fprintf(stderr, "make dyn bundle: mkdir failed\n");
         exit(1);
     }

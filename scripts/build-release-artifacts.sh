@@ -12,6 +12,7 @@ example: scripts/build-release-artifacts.sh 1.4.0 macos-arm64 zig-out/artifacts
 Builds host-platform release artifacts:
   - CLI archive
   - C ABI static-library archive
+  - on windows-x86_64, a MinGW C ABI archive for Go/cgo
   - generated-C source archive
   - SHA-256 checksum file
 
@@ -143,6 +144,22 @@ case "$(uname -s)" in
         ;;
 esac
 
+# cgo on Windows uses MinGW GCC, which cannot link zova_c.lib. The Go module
+# release (scripts/prepare-go-module.py) takes this archive instead.
+GO_CABI_ARCHIVE=""
+if [ "$ARTIFACT_ID" = "windows-x86_64" ]; then
+    echo "building Go/cgo C ABI artifact for $ARTIFACT_ID"
+    GO_CABI_DIR="$TMP/zova-v$VERSION-$ARTIFACT_ID-go-c-abi"
+    mkdir -p "$GO_CABI_DIR/include"
+    sh "$ROOT/scripts/build-go-windows-archive.sh" "$GO_CABI_DIR/lib"
+    cp "$ROOT/include/zova.h" "$GO_CABI_DIR/include/zova.h"
+    cp "$ROOT/include/zova_plugin.h" "$GO_CABI_DIR/include/zova_plugin.h"
+    cp "$ROOT/LICENSE" "$GO_CABI_DIR/LICENSE"
+    write_manifest "$GO_CABI_DIR" "zova-go-c-abi" "$VERSION" "$ARTIFACT_ID"
+    GO_CABI_ARCHIVE="$OUT_DIR/zova-v$VERSION-$ARTIFACT_ID-go-c-abi.tar.gz"
+    tar -czf "$GO_CABI_ARCHIVE" -C "$TMP" "$(basename "$GO_CABI_DIR")"
+fi
+
 echo "building generated-C source artifact"
 GENERATED_DIR="$TMP/zova-v$VERSION-$ARTIFACT_ID-generated-c"
 mkdir -p "$GENERATED_DIR"
@@ -157,6 +174,9 @@ CHECKSUMS="$OUT_DIR/zova-v$VERSION-$ARTIFACT_ID-checksums.txt"
 sha256_file "$CLI_ARCHIVE" >>"$CHECKSUMS"
 sha256_file "$CABI_ARCHIVE" >>"$CHECKSUMS"
 sha256_file "$GENERATED_ARCHIVE" >>"$CHECKSUMS"
+if [ -n "$GO_CABI_ARCHIVE" ]; then
+    sha256_file "$GO_CABI_ARCHIVE" >>"$CHECKSUMS"
+fi
 
 echo "release artifacts written to $OUT_DIR"
-ls -lh "$CLI_ARCHIVE" "$CABI_ARCHIVE" "$GENERATED_ARCHIVE" "$CHECKSUMS"
+ls -lh "$CLI_ARCHIVE" "$CABI_ARCHIVE" "$GENERATED_ARCHIVE" $GO_CABI_ARCHIVE "$CHECKSUMS"
