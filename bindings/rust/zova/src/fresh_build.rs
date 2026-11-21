@@ -6,13 +6,15 @@
 //! on the same native handle fails. A failed step rolls the whole session back
 //! and ends it; later steps then fail with [`Status::Misuse`](crate::Status).
 
-use crate::database::cstring;
+use crate::database::{cstring, db_status, DatabaseInner};
 use crate::error::{Error, Result};
 use crate::graph::slice_ptr;
 use crate::graph_keyed::{fresh_edge_payload_inputs, fresh_node_inputs, mut_slice_ptr};
 use crate::vector::vector_inputs;
 use crate::{Database, GraphFreshEdgePayloadInput, GraphFreshNodeInput, VectorInput};
+use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
+use std::rc::Rc;
 
 /// One typed cell of row-major fresh-build input.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -137,6 +139,100 @@ impl FreshBuild<'_> {
 }
 
 impl Drop for FreshBuild<'_> {
+    fn drop(&mut self) {
+        self.session.destroy();
+    }
+}
+
+/// Owned fresh-build session for language bindings that need the session
+/// independent of [`FreshBuild`]'s borrow of the [`Database`]. It keeps the
+/// native handle alive until it is finished, aborted, or dropped; dropping an
+/// unfinished session rolls it back.
+pub struct OwnedFreshBuild {
+    db: Rc<DatabaseInner>,
+    session: FreshSession,
+    _not_send_sync: PhantomData<Rc<()>>,
+}
+
+impl Database {
+    /// Start an owned fresh-build session; see [`Database::begin_fresh_build`].
+    pub fn begin_fresh_build_owned(&mut self) -> Result<OwnedFreshBuild> {
+        let db = self.raw_ptr();
+        let session = FreshSession::begin(db, |status| self.status(status))?;
+        Ok(OwnedFreshBuild {
+            db: Rc::clone(&self.inner),
+            session,
+            _not_send_sync: PhantomData,
+        })
+    }
+}
+
+impl OwnedFreshBuild {
+    pub fn table_rows(
+        &mut self,
+        table_name: &str,
+        columns: &[&str],
+        values: &[FreshValue<'_>],
+    ) -> Result<()> {
+        let db = self.db.raw_ptr();
+        self.session.rows(
+            |status| db_status(db, status),
+            table_name,
+            columns,
+            values,
+            false,
+        )
+    }
+
+    pub fn fts_rows(
+        &mut self,
+        table_name: &str,
+        columns: &[&str],
+        values: &[FreshValue<'_>],
+    ) -> Result<()> {
+        let db = self.db.raw_ptr();
+        self.session.rows(
+            |status| db_status(db, status),
+            table_name,
+            columns,
+            values,
+            true,
+        )
+    }
+
+    pub fn graph(
+        &mut self,
+        graph_name: &str,
+        nodes: &[GraphFreshNodeInput<'_>],
+        edges: &[GraphFreshEdgePayloadInput<'_>],
+    ) -> Result<()> {
+        let db = self.db.raw_ptr();
+        self.session
+            .graph(|status| db_status(db, status), graph_name, nodes, edges)
+    }
+
+    pub fn vectors(&mut self, collection_name: &str, vectors: &[VectorInput<'_>]) -> Result<()> {
+        let db = self.db.raw_ptr();
+        self.session
+            .vectors(|status| db_status(db, status), collection_name, vectors)
+    }
+
+    /// Build deferred indexes, validate foreign keys, and commit. Later
+    /// calls fail with [`Status::Misuse`](crate::Status).
+    pub fn finish(&mut self) -> Result<FreshBuildResult> {
+        let db = self.db.raw_ptr();
+        self.session.finish(|status| db_status(db, status))
+    }
+
+    /// Roll the session back. Later calls fail with
+    /// [`Status::Misuse`](crate::Status).
+    pub fn abort(&mut self) -> Result<()> {
+        let db = self.db.raw_ptr();
+        self.session.abort(|status| db_status(db, status))
+    }
+}
+
+impl Drop for OwnedFreshBuild {
     fn drop(&mut self) {
         self.session.destroy();
     }

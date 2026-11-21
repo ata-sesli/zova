@@ -1,10 +1,13 @@
 mod database;
 mod error;
 mod extension;
+mod fresh_build;
 mod graph;
+mod graph_keyed;
 mod notification;
 mod object;
 mod progress;
+mod sql_function;
 mod statement;
 mod vector;
 
@@ -13,10 +16,18 @@ use database::{
     restore_backup_to_memory, PyDatabase, PyFormatInfo, PyReclaimedMember, PySavepointContext,
 };
 use error::{ClosedHandleError, ZovaError};
-use extension::PyExtensionInfo;
+use extension::{
+    trust_extension_bundle, untrust_extension_bundle, verify_extension_bundle, PyExtensionInfo,
+    PyLinkedPlugin,
+};
+use fresh_build::{PyFreshBuild, PyFreshBuildProfile, PyFreshBuildResult};
 use graph::{
     PyGraphEdge, PyGraphEdgeInput, PyGraphInfo, PyGraphNeighbor, PyGraphNeighborsOptions,
     PyGraphNode, PyGraphNodeInput, PyGraphWalkItem, PyGraphWalkOptions,
+};
+use graph_keyed::{
+    PyGraphFreshEdgeInput, PyGraphFreshNodeInput, PyGraphKeyedEdge, PyGraphKeyedNeighbor,
+    PyGraphKeyedNode, PyGraphScanPage, PyGraphWalkDirectionOptions, PyGraphWalkProfile,
 };
 use notification::{PyNotification, PySubscription};
 use object::{
@@ -67,6 +78,18 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGraphNeighbor>()?;
     m.add_class::<PyGraphWalkOptions>()?;
     m.add_class::<PyGraphWalkItem>()?;
+    m.add_class::<PyGraphKeyedNode>()?;
+    m.add_class::<PyGraphKeyedEdge>()?;
+    m.add_class::<PyGraphKeyedNeighbor>()?;
+    m.add_class::<PyGraphScanPage>()?;
+    m.add_class::<PyGraphWalkDirectionOptions>()?;
+    m.add_class::<PyGraphWalkProfile>()?;
+    m.add_class::<PyGraphFreshNodeInput>()?;
+    m.add_class::<PyGraphFreshEdgeInput>()?;
+    m.add_class::<PyFreshBuild>()?;
+    m.add_class::<PyFreshBuildProfile>()?;
+    m.add_class::<PyFreshBuildResult>()?;
+    m.add_class::<PyLinkedPlugin>()?;
     m.add_function(wrap_pyfunction!(convert_sqlite_to_zova, m)?)?;
     m.add_function(wrap_pyfunction!(restore_backup, m)?)?;
     m.add_function(wrap_pyfunction!(restore_backup_to_memory, m)?)?;
@@ -75,5 +98,23 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(object_id, m)?)?;
     m.add_function(wrap_pyfunction!(object_chunk_id, m)?)?;
     m.add_function(wrap_pyfunction!(encode_f32_le, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_extension_bundle, m)?)?;
+    m.add_function(wrap_pyfunction!(trust_extension_bundle, m)?)?;
+    m.add_function(wrap_pyfunction!(untrust_extension_bundle, m)?)?;
+    m.add_function(wrap_pyfunction!(abi_version, m)?)?;
+    m.add_function(wrap_pyfunction!(abi_version_string, m)?)?;
     Ok(())
+}
+
+/// The C ABI version as `(major, minor, patch)`.
+#[pyfunction]
+fn abi_version() -> (u32, u32, u32) {
+    let version = zova_rust::abi_version();
+    (version.major, version.minor, version.patch)
+}
+
+/// The C ABI version string.
+#[pyfunction]
+fn abi_version_string() -> &'static str {
+    zova_rust::abi_version_string()
 }

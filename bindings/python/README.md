@@ -22,7 +22,8 @@ rules.
 10. [Vectors](#vectors)
 11. [Graphs](#graphs)
 12. [Bound Stores](#bound-stores)
-13. [SQL-Native Vector Search](#sql-native-vector-search)
+13. [Low-Level Surfaces](#low-level-surfaces)
+14. [SQL-Native Vector Search](#sql-native-vector-search)
 
 ## How It Fits
 
@@ -70,12 +71,8 @@ migrated forward with the module-level `probe_format(path)` and
 explicit, copy-forward, publishes a separately validated format-14 destination,
 and never mutates the source. Like `Database.open`, `migrate_database` accepts
 `extension_bundles` and `trust_store_path` for databases with a non-bundled
-extension installed.
-
-Opaque-key graph, edge-payload, topology-scan, prepared-build, and generic
-fresh-build session APIs are supported low-level C/raw `zova-sys` surfaces.
-The Python package deliberately exposes the established graph CRUD and
-traversal API instead of those specialized publication surfaces.
+extension installed. It also accepts `plugins` (see
+[Low-Level Surfaces](#low-level-surfaces)).
 
 ## Local Development
 
@@ -203,9 +200,10 @@ Both constructors accept `trust_store_path`; omit it for Zova's default store.
 First run `zova extension trust ./search.zovaext`. Opening never grants trust
 or loads paths from the database. Native code and dependencies must match the
 host. Owned statements retain their connection and libraries after `db.close()`.
-Published 1.1.0 wheels do not include this support. Python does not
-wrap extension authoring, application scalar callbacks or explicit data
-upgrades. See the
+Published 1.1.0 wheels do not include this support. Python does not wrap
+extension authoring; application SQL functions, linked plugins and explicit
+extension upgrades are described under
+[Low-Level Surfaces](#low-level-surfaces). See the
 [capability matrix](../../docs/extensions.md#availability-and-binding-matrix).
 
 See [../../docs/extensions.md](../../docs/extensions.md) for the current host
@@ -482,6 +480,46 @@ and one graph store through the native Zig API or CLI. The Python object,
 vector, and graph methods above transparently use those stores after
 `Database.open`. Store
 create/bind/unbind/split management is not exposed as a Python API yet.
+
+## Low-Level Surfaces
+
+The Python package wraps every function in the C ABI. Beyond the APIs above:
+
+- Batch graph writes: `put_graph_nodes`, `put_graph_edges`,
+  `delete_graph_nodes`, `delete_graph_edges`, and `graph_degree`.
+- Opaque-key graph APIs: `put_graph_nodes_keyed`, `put_graph_edges_keyed`,
+  `get_graph_nodes_keyed`, `get_graph_edges_keyed` (a missing key gives
+  `None`), `graph_neighbors_keyed`, `graph_degrees_keyed`,
+  `get_graph_edge_payloads`, `replace_graph_edge_payloads`, `graph_scan`
+  cursor pages, `graph_walk_direction` (and `graph_walk_direction_profiled`),
+  and the `build_fresh_graph*_keyed` builders, which take
+  `GraphFreshNodeInput` and `GraphFreshEdgeInput` values. Keys are opaque
+  integers; do not persist them across a graph rebuild.
+- `Database.begin_fresh_build()` returns a `FreshBuild` that loads tables, FTS
+  tables, one graph and vector collections into empty targets, then publishes
+  them together with `finish()`. `abort()`, `close()`, leaving a `with` block,
+  and any failure (including invalid row values) roll the session back. While
+  it is active, other calls on the same `Database` fail.
+- `delete_vectors` and `search_vectors_multi_i8`, with the
+  `VectorMultiI8SearchMode` and `VectorMultiI8Aggregation` enums.
+- `register_function(name, arity, function, *, deterministic=False,
+  direct_only=False, innocuous=False)` registers a scalar SQL function.
+  Arguments arrive as `None`, `int`, `float`, `str`, or `bytes`; an exception
+  or an unsupported result fails the statement. The function runs while the
+  database is busy with the calling statement, so it must not use the same
+  `Database` or its statements: that call never returns.
+- `LinkedPlugin.from_address(address)` wraps a `zova_plugin_descriptor_v1`
+  linked into the process, such as one exported by a library loaded with
+  `ctypes`. The descriptor must stay valid for the rest of the process; a
+  wrong address crashes it. Pass linked plugins as `plugins=[...]` to
+  `Database.create`, `Database.open`, `Database.open_for_extension_upgrade`,
+  and `migrate_database`.
+- `Database.open_for_extension_upgrade` opens without running installed
+  extension hooks, so `extension_upgrade` and `extension_rebuild` can repair a
+  database whose extension check fails.
+- `Database.create(path, page_size=...)`, `abi_version()`, and the
+  `verify_extension_bundle`, `trust_extension_bundle` and
+  `untrust_extension_bundle` functions.
 
 ## SQL-Native Vector Search
 

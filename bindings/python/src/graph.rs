@@ -590,3 +590,17 @@ pub(crate) fn direction_from_i32(value: i32) -> PyResult<zova_rust::GraphNeighbo
         ))),
     }
 }
+
+pub(crate) fn node_inputs_from_py(value: &Bound<'_, PyAny>) -> PyResult<Vec<OwnedGraphNodeInput>> {
+    value
+        .try_iter()?
+        .map(|item| node_input_from_py(&item?))
+        .collect()
+}
+
+pub(crate) fn edge_inputs_from_py(value: &Bound<'_, PyAny>) -> PyResult<Vec<OwnedGraphEdgeInput>> {
+    value
+        .try_iter()?
+        .map(|item| edge_input_from_py(&item?))
+        .collect()
+}
