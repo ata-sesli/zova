@@ -177,7 +177,7 @@ expect_contains "$ROOT/.github/workflows/publish-release.yml" 'release_flags="--
 expect_contains "$ROOT/.github/workflows/publish-release.yml" 'npm_tag="next"'
 expect_contains "$ROOT/.github/workflows/publish-release.yml" 'npm publish "$tarball" --access public --tag "$npm_tag"'
 expect_contains "$ROOT/.github/workflows/release-artifacts.yml" 'python_version="${version%%-rc.*}rc${version##*-rc.}"'
-expect_contains "$ROOT/.github/workflows/ci.yml" 'python-version: ["3.13", "3.14"]'
+expect_contains "$ROOT/.github/workflows/ci.yml" "'[\"3.13\", \"3.14\"]'"
 expect_not_contains "$ROOT/.github/workflows/release-artifacts.yml" 'python-sdist:'
 expect_not_contains "$ROOT/.github/workflows/release-artifacts.yml" 'maturin build --sdist'
 expect_contains "$ROOT/.github/workflows/release-artifacts.yml" 'manylinux: 2_28'
