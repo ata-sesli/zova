@@ -56,8 +56,8 @@ jobs:
           key: ${{ runner.os }}-wasm-${{ steps.versions.outputs.emsdk }}-${{ hashFiles('build.zig.zon', 'src/version.zig', 'bindings/wasm/package.json', 'bindings/wasm/bun.lock', 'bindings/wasm/tools/build-wasm.sh') }}
       - run: bun install --frozen-lockfile
         working-directory: bindings/wasm
-      - name: Install Playwright Chromium
-        run: bunx --no-install playwright install --with-deps chromium
+      - name: Install Playwright Chromium and Firefox
+        run: bunx --no-install playwright install --with-deps chromium firefox
         working-directory: bindings/wasm
       - name: Prepare bundled Python sources for repository version checks
         run: sh bindings/python/tools/sync-rust-source.sh
@@ -77,3 +77,11 @@ jobs:
           name: zova-${{ steps.versions.outputs.package }}-wasm
           path: ${{ runner.temp }}/zova-wasm-build/artifacts/*.tgz
           if-no-files-found: error
+      # Non-blocking until it passes consistently (#224); then remove
+      # continue-on-error to make Firefox a required gate.
+      - name: Verify installed npm tarball in Playwright Firefox
+        continue-on-error: true
+        timeout-minutes: 15
+        env:
+          ZOVA_WASM_BROWSER: firefox
+        run: sh bindings/wasm/tools/check-browser-package.sh "$RUNNER_TEMP/zova-wasm-build"

@@ -3,7 +3,7 @@ set -eu
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 OUT="${1:?usage: check-browser-package.sh <build-output-directory>}"
 OUT="$(cd "$OUT" && pwd)"
-if [ "${CI:-}" != "true" ]; then
+if [ "${CI:-}" != "true" ] && [ "${ZOVA_WASM_BROWSER:-chromium}" = "chromium" ]; then
   : "${HELIUM_EXECUTABLE:?Set HELIUM_EXECUTABLE to the installed Helium binary}"
 fi
 export npm_config_cache="${npm_config_cache:-$OUT/npm-cache}"

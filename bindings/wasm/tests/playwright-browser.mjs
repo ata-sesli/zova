@@ -1,4 +1,4 @@
-import { chromium } from "playwright";
+import { chromium, firefox } from "playwright";
 import { resolve, join } from "node:path";
 import { stat } from "node:fs/promises";
 import { testOwnership } from "./ownership-browser.mjs";
@@ -11,9 +11,14 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { Database as SQLite } from "bun:sqlite";
 
-const [installedPackage, helium = process.env.HELIUM_EXECUTABLE] = process.argv.slice(2);
+// ZOVA_WASM_BROWSER selects the engine: chromium (default) or firefox.
+const engine = process.env.ZOVA_WASM_BROWSER ?? "chromium";
+if (engine !== "chromium" && engine !== "firefox") throw new Error("ZOVA_WASM_BROWSER must be chromium or firefox");
+const [installedPackage, argumentHelium] = process.argv.slice(2);
+// Helium is a Chromium build; Firefox runs Playwright's bundled Firefox.
+const helium = engine === "chromium" ? argumentHelium ?? process.env.HELIUM_EXECUTABLE : undefined;
 if (!installedPackage) throw new Error("usage: bun playwright-browser.mjs <installed-zova-wasm-directory> [helium-executable]");
-if (!helium && process.env.CI !== "true") throw new Error("Local tests require HELIUM_EXECUTABLE pointing to installed Helium");
+if (engine === "chromium" && !helium && process.env.CI !== "true") throw new Error("Local tests require HELIUM_EXECUTABLE pointing to installed Helium");
 if (helium && !(await stat(helium)).isFile()) throw new Error("HELIUM_EXECUTABLE must name an installed Helium executable");
 // Migration is checked against the native CLI's result for the same fixtures,
 // and against a database written by the published previous-format package.
@@ -99,12 +104,14 @@ const server = Bun.serve({
 let browser;
 let deadline;
 try {
-  // Local runs use Helium; CI uses Playwright's bundled Chromium.
-  browser = await chromium.launch({ ...(helium ? { executablePath: resolve(helium) } : {}), headless: true });
+  // Local Chromium runs use Helium; CI uses Playwright's bundled browsers.
+  browser = engine === "firefox" ? await firefox.launch({ headless: true })
+    : await chromium.launch({ ...(helium ? { executablePath: resolve(helium) } : {}), headless: true });
   const context = await browser.newContext();
   const page = await context.newPage();
   page.on("pageerror", error => resolveReport({ ok: false, error: error.message }));
-  deadline = setTimeout(() => resolveReport({ ok: false, error: "Browser test timed out" }), 30000);
+  // The page test takes about 25 s in Chromium and 50 s in Firefox.
+  deadline = setTimeout(() => resolveReport({ ok: false, error: "Browser test timed out" }), 120000);
   const base = `http://127.0.0.1:${server.port}`;
   await page.goto(base);
   const result = await report;
@@ -218,7 +225,7 @@ try {
   await examplePage.evaluate(() => import('/readme-example.mjs'));
   if (!printed.includes('Keep this task') || !printed.includes('sage')) throw new Error('README example results differ');
   await testOwnership(browser, base);
-  console.log(JSON.stringify({ ...result, initializationFailure: true, runtimeFailure: true,
+  console.log(JSON.stringify({ ...result, browser: `${engine} ${browser.version()}`, initializationFailure: true, runtimeFailure: true,
     persistentReopen: true, rejectedOpenPreservesBytes: true, missingOpfs: true,
     poolInitializationFailurePreservesData: true, exclusiveOwnership: true,
     durabilityAndInjectedStorageFaults: true, migration: true, maintenance: true, transfer, objectStreaming, wasmBytes }));

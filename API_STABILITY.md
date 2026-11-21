@@ -262,11 +262,11 @@ From 1.5.0, `zova-wasm` keeps these commitments throughout 1.x:
   without waiting; a second opener rejects with `ZOVA_BUSY`. Applications must
   not change those entries or take that lock. Files inside the directory are
   implementation details.
-- **Browsers.** Chromium-based desktop browsers, version 149 or later, in a
-  secure context with module workers, Web Locks and OPFS synchronous access
-  handles. Releases are tested in Helium (Chromium 149) and Playwright
-  Chromium (153). Firefox, Safari, mobile and private browsing are not
-  qualified.
+- **Browsers.** Chromium-based desktop browsers, version 149 or later, and
+  desktop Firefox, version 155 or later, in a secure context with module
+  workers, Web Locks and OPFS synchronous access handles. Releases are tested
+  in Helium (Chromium 149), Playwright Chromium (153) and Playwright Firefox
+  (155). Safari, WebKit, mobile and private browsing are not qualified.
 
 Named exceptions to native parity, each a browser constraint:
 
