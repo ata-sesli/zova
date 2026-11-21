@@ -39,10 +39,11 @@ SQLite's C interface; enabling it does not add a high-level Zova array API.
 `dbstat` is available for storage diagnostics; it is not a portable guarantee
 for databases opened through an unrelated system SQLite build.
 
-Zova also provides an experimental browser subset (SQL, binary KV, objects,
-exact vectors and graphs) through `zova-wasm`, with worker-owned memory
-databases and named OPFS persistence.
-Browser APIs remain experimental and do not promise full native compatibility.
+Zova also runs in browsers through `zova-wasm`, with worker-owned memory
+databases and named OPFS persistence. It follows the native `zova-js` API,
+except where a browser makes that impossible. From 1.5.0 it is a stable 1.x
+surface; [API_STABILITY.md](API_STABILITY.md#browser-package-zova-wasm) names
+the exceptions.
 Rust packages now select target-specific generated-C companion crates without
 requiring consumer-side Zig or native-source downloads. Python wheels retain
 CPython 3.13 stable-ABI coverage for Python 3.13 and 3.14. Storage
@@ -1214,7 +1215,7 @@ The v0.25 C ABI includes opaque-key graph batch mutation and lookup, keyed
 neighbors and topology scans, edge payload access, prepared fresh graph builds,
 and a generic fresh-build session for predeclared targets. These APIs are also
 declared by raw `zova-sys` and wrapped by the safe Rust, Python, Go, and
-JavaScript packages, and by the experimental browser WASM package.
+JavaScript packages, and by the browser WASM package.
 
 ### Zig
 

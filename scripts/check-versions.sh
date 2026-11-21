@@ -195,6 +195,9 @@ expect_not_contains "$ROOT/.github/workflows/publish-release.yml" "NODE_AUTH_TOK
 
 expect_contains "$ROOT/bindings/wasm/package.json" "\"version\": \"${package_version}\""
 expect_contains "$ROOT/bindings/wasm/package.json" '"name": "zova-wasm"'
+expect_contains "$ROOT/bindings/wasm/src/index.ts" "export const packageVersion = \"${package_version}\";"
+expect_contains "$ROOT/bindings/wasm/src/index.ts" "export const formatVersion = \"${format_version}\";"
+expect_contains "$ROOT/bindings/wasm/src/index.ts" "export const sqliteVersion = \"${sqlite_version}\";"
 expect_contains "$ROOT/bindings/wasm/bun.lock" '"name": "zova-wasm"'
 expect_contains "$ROOT/.github/workflows/ci.yml" 'uses: ./.github/workflows/wasm.yml'
 expect_contains "$ROOT/.github/workflows/release-artifacts.yml" 'uses: ./.github/workflows/wasm.yml'

@@ -165,8 +165,8 @@ export async function testMigration(context, base, formats) {
         let error;
         try { await Database.migratePersistent(name, options(name)); } catch (caught) { error = caught; }
         const info = await h.retryBusy(() => Database.probePersistent(name));
-        results[label] = { status: error?.status, thrown: error instanceof RangeError, format: info.formatVersion,
-          unchanged: await h.snapshot(name) === fixtureHash, typed: error === undefined || error instanceof zova.ZovaWasmError || error instanceof RangeError };
+        results[label] = { status: error?.code, thrown: error instanceof RangeError, format: info.formatVersion,
+          unchanged: await h.snapshot(name) === fixtureHash, typed: error === undefined || error instanceof zova.ZovaError || error instanceof RangeError };
       };
       await run("pre-aborted", () => ({ signal: AbortSignal.abort() }));
       await run("abort-copy", () => {
@@ -197,7 +197,7 @@ export async function testMigration(context, base, formats) {
     const small = await faulted({ estimate: { quota: 4096, usage: 0 } });
     const space = await small.evaluate(async name => {
       try { await zova.Database.migratePersistent(name); return "migrated"; }
-      catch (error) { return error.status + ": " + error.message; }
+      catch (error) { return error.code + ": " + error.message; }
     }, spaceName);
     await small.close();
     assert(/^ZOVA_CANT_OPEN: Migration needs \d+ free bytes/.test(space), `space check: ${space}`);

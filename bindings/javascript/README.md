@@ -221,4 +221,4 @@ The binding preserves Zova's status name, numeric status, and native message.
 - async transaction callbacks
 - direct Bun FFI
 - zero-copy native output
-- browser builds of this native addon (the experimental `zova-wasm` is separate)
+- browser builds of this native addon (`zova-wasm` is separate)

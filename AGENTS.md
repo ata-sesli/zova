@@ -7,7 +7,7 @@ single database can combine ordinary SQL tables with content-addressed objects,
 exact vectors, graph topology, binary key-value namespaces, notifications,
 bound external stores, migrations, diagnostics, and trusted extensions. The
 repository ships a Zig API, stable C ABI and CLI, plus Rust, Python, Go,
-JavaScript/TypeScript, and experimental browser-WASM distributions.
+JavaScript/TypeScript, and browser-WASM distributions.
 
 The stable public contract is documented in `API_STABILITY.md`. Current package,
 ABI, SQLite, and storage-format identities live in `src/version.zig`.
@@ -68,7 +68,7 @@ ABI, SQLite, and storage-format identities live in `src/version.zig`.
   synchronized source snapshot, not an independent implementation.
 - `bindings/javascript/`: Node-API Rust addon plus TypeScript wrappers in `js/`.
 - `bindings/go/`: cgo wrapper over the public C ABI.
-- `bindings/wasm/`: experimental browser SQL/KV package, worker/runtime code,
+- `bindings/wasm/`: browser package, worker/runtime code,
   Emscripten bridge, OPFS integration, and browser durability tests.
 
 ### Tests, benchmarks, docs, and release automation
