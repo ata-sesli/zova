@@ -5160,6 +5160,9 @@ fn testingDbPath(buffer: []u8, sub_path: []const u8, name: []const u8) ![:0]u8 {
 }
 
 extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+// The Windows C runtime has no setenv; _putenv_s updates the environment that
+// its getenv, used by the CLI, reads.
+extern fn _putenv_s(name: [*:0]const u8, value: [*:0]const u8) c_int;
 
 fn setTestEnv(name: []const u8, value: []const u8) !void {
     const allocator = std.testing.allocator;
@@ -5167,7 +5170,11 @@ fn setTestEnv(name: []const u8, value: []const u8) !void {
     defer allocator.free(name_z);
     const value_z = try allocator.dupeSentinel(u8, value, 0);
     defer allocator.free(value_z);
-    if (setenv(name_z.ptr, value_z.ptr, 1) != 0) return error.SetEnvFailed;
+    const result = if (builtin.os.tag == .windows)
+        _putenv_s(name_z.ptr, value_z.ptr)
+    else
+        setenv(name_z.ptr, value_z.ptr, 1);
+    if (result != 0) return error.SetEnvFailed;
 }
 
 fn defaultIo() std.Io {

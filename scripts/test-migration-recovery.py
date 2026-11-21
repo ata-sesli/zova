@@ -83,7 +83,7 @@ for committed, stop_after in [(c, n) for c in (False, True) for n in range(1, 14
         dest = pathlib.Path(tmp) / "result.zova"
         recovery_dir = pathlib.Path(str(dest) + ".migration-recovery")
         recovery_dir.mkdir()
-        (recovery_dir / "owner").write_text("zova-migration-recovery-v1\n")
+        (recovery_dir / "owner").write_bytes(b"zova-migration-recovery-v1\n")
         finals = [dest] + [dest.with_name(f"result.{s}.zova") for s in ("objects", "vectors", "graphs")]
         for final in finals:
             reservation = recovery_dir / ("reserved-" + final.name)
