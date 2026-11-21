@@ -15,7 +15,7 @@ export async function testMaintenance(context, base) {
   try {
     const page = await plain();
     const result = await page.evaluate(async () => {
-      const { Database, ZovaWasmError } = zova;
+      const { Database } = zova;
       const out = {};
       const missing = async name => (await h.status(Database.probePersistent(name))) !== "ok";
       const fill = async db => {

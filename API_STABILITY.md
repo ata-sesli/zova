@@ -5,10 +5,11 @@ This document defines the stable public contract for Zova 1.x. The
 the release-candidate validation period. The current `1.4.0` release extends
 the implementation without weakening those commitments.
 
-The separate `zova-wasm` browser package introduced in rc.3 is experimental
-and excluded from this native compatibility commitment. Its API subset,
-worker lifecycle, and OPFS APIs do not promise stable browser APIs or full
-native parity. JavaScript/TypeScript below refers to the native `zova-js` package.
+The separate `zova-wasm` browser package was experimental from rc.3 through
+1.4.0 and excluded from this commitment. From 1.5.0 it is a stable 1.x surface
+with the exceptions named in [Browser package](#browser-package-zova-wasm).
+JavaScript/TypeScript elsewhere in this document refers to the native `zova-js`
+package.
 
 ## Supported public surfaces
 
@@ -238,6 +239,53 @@ output struct in place, or remove a profiling function. New incompatible
 measurement models require an additive interface or a major-version decision.
 Compare profiled runs with equivalent instrumentation; use unprofiled calls
 for authoritative application performance measurements.
+
+## Browser package (`zova-wasm`)
+
+From 1.5.0, `zova-wasm` keeps these commitments throughout 1.x:
+
+- **API.** The declarations in `bindings/wasm/api/index.d.ts` are the public
+  surface. They follow native `zova-js` names, argument shapes and results, as
+  mapped in the [parity table](bindings/wasm/README.md#native-api-parity).
+  Changes within 1.x are additions. CI fails when the emitted declarations
+  differ from that file, or when a `zova-js` name has no row in the table.
+- **Calls.** Every database method returns a promise. Each database owns one
+  dedicated worker, and its calls run in request order.
+- **Errors.** Failures reject with `ZovaError`: `code` is the status name and
+  `status` its number, the same values as the C ABI and `zova-js`.
+  `ZovaWasmError` and `statusCode` remain as deprecated aliases throughout 1.x.
+- **Storage and ownership.** A persistent name matches
+  `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`. Its database lives in the origin's
+  private file system (OPFS) in the directory `.zova-<name>`; a
+  `.zova-<name>.pending` entry marks an import or copy in progress. One owner
+  holds a name at a time through the Web Lock `zova:opfs:<name>`, requested
+  without waiting; a second opener rejects with `ZOVA_BUSY`. Applications must
+  not change those entries or take that lock. Files inside the directory are
+  implementation details.
+- **Browsers.** Chromium-based desktop browsers, version 149 or later, in a
+  secure context with module workers, Web Locks and OPFS synchronous access
+  handles. Releases are tested in Helium (Chromium 149) and Playwright
+  Chromium (153). Firefox, Safari, mobile and private browsing are not
+  qualified.
+
+Named exceptions to native parity, each a browser constraint:
+
+- Calls that take a file path in `zova-js` take a persistent name.
+- There are no run-time extension bundles, trust store or `LinkedPlugin`;
+  plugins are linked into a custom module at build time.
+- SQL functions are `{ module, export }` worker modules, because SQLite calls
+  them synchronously inside the worker.
+- One connection per name at a time; a database is not shared between
+  workers or tabs. Notifications stay within one worker.
+- Bound stores are created only by the Zig API and CLI, and a named browser
+  database is one file, so a database with bound stores cannot be migrated
+  (`ZOVA_BOUND_STORE_INVALID`).
+- `Step` is a constant object rather than a TypeScript enum,
+  `parameterCount` is a property, and `Statement.close()` is `finalize()`.
+
+The worker message protocol, the `channel`, `runtime` and `worker` modules,
+bridge operation numbers, and real quota, crash and performance behavior beyond
+the tested cases are not public contracts.
 
 ## Not public contracts
 

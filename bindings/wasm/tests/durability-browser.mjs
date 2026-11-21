@@ -23,7 +23,7 @@ export async function testDurability(context, base) {
       catch (error) {
         // Browser worker destruction releases locks asynchronously. Only retry
         // BUSY, only after termination, and never turn another error into success.
-        if (!afterTermination || error.status !== 'ZOVA_BUSY' || performance.now() >= deadline) throw error;
+        if (!afterTermination || error.code !== 'ZOVA_BUSY' || performance.now() >= deadline) throw error;
         await new Promise(resolve => setTimeout(resolve, 20));
       }
     }
@@ -97,7 +97,7 @@ export async function testDurability(context, base) {
       }, {method, errorName});
       const rejected = await page.evaluate(async () => {
         try { await db.exec("INSERT INTO records VALUES(2, zeroblob(8192))"); return false; }
-        catch (error) { return error instanceof globalThis.zova.ZovaWasmError; }
+        catch (error) { return error instanceof globalThis.zova.ZovaError; }
       });
       await worker.evaluate(() => globalThis.restoreFault());
       if (!rejected) throw new Error(`${method}/${errorName} silently succeeded`);

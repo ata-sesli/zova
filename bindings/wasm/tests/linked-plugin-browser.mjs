@@ -62,7 +62,7 @@ try {
     await native.close();
     // Extension maintenance with the linked code: the descriptor declares no
     // newer version and no rebuild hook, as in native zova-js.
-    const statusOf = async promise => { try { await promise; return "ZOVA_OK"; } catch (error) { return error.status; } };
+    const statusOf = async promise => { try { await promise; return "ZOVA_OK"; } catch (error) { return error.code; } };
     const maintenance = await Database.openPersistentForExtensionUpgrade(seeded);
     out.upgrade = await statusOf(maintenance.extensionUpgrade("c_test"));
     out.rebuild = await statusOf(maintenance.extensionRebuild("c_test"));

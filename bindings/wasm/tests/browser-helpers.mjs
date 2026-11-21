@@ -70,7 +70,7 @@ export async function fetchBytes(path) {
 }
 
 export async function status(promise) {
-  try { await promise; return "ok"; } catch (error) { return error?.status ?? String(error); }
+  try { await promise; return "ok"; } catch (error) { return error?.code ?? String(error); }
 }
 
 // Retries ZOVA_BUSY while a terminated worker's lock is released.
@@ -79,7 +79,7 @@ export async function retryBusy(operation) {
   for (;;) {
     try { return await operation(); }
     catch (error) {
-      if (error?.status !== "ZOVA_BUSY" || performance.now() >= deadline) throw error;
+      if (error?.code !== "ZOVA_BUSY" || performance.now() >= deadline) throw error;
       await new Promise(resolve => setTimeout(resolve, 20));
     }
   }

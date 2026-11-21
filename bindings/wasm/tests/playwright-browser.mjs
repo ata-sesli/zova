@@ -127,7 +127,7 @@ try {
   await failedPage.waitForFunction(() => Boolean(globalThis.zova));
   const initializationFailed = await failedPage.evaluate(async () => {
     try { await globalThis.zova.Database.createMemory(); return false; }
-    catch (error) { return error instanceof globalThis.zova.ZovaWasmError; }
+    catch (error) { return error instanceof globalThis.zova.ZovaError; }
   });
   if (!initializationFailed) throw new Error("Worker initialization failure was not typed");
 
@@ -141,7 +141,7 @@ try {
   await failurePage.waitForFunction(() => globalThis.db.closed);
   const runtimeFailed = await failurePage.evaluate(async () => {
     try { await globalThis.db.query("SELECT 1"); return false; }
-    catch (error) { return error instanceof globalThis.zova.ZovaWasmError; }
+    catch (error) { return error instanceof globalThis.zova.ZovaError; }
   });
   if (!runtimeFailed) throw new Error("Worker runtime failure was not typed");
   const persistencePage = await context.newPage();
@@ -163,7 +163,7 @@ try {
       for (let attempt = 0; attempt < 2; attempt++) {
         let rejected = false;
         try { const unexpected = await globalThis.zova.Database.openPersistent(name); await unexpected.close(); }
-        catch(error) { rejected = error instanceof globalThis.zova.ZovaWasmError; }
+        catch(error) { rejected = error instanceof globalThis.zova.ZovaError; }
         if (!rejected) throw new Error('Invalid format/schema accepted');
         if (before !== await snapshot(name)) throw new Error('Failed open changed stored database');
       }
@@ -178,7 +178,7 @@ try {
   await unavailablePage.waitForFunction(() => Boolean(globalThis.zova));
   const unavailable = await unavailablePage.evaluate(async () => {
     try { await globalThis.zova.Database.openPersistent('unavailable'); return false; }
-    catch(error) { return error instanceof globalThis.zova.ZovaWasmError && error.status === 'ZOVA_CANT_OPEN'; }
+    catch(error) { return error instanceof globalThis.zova.ZovaError && error.code === 'ZOVA_CANT_OPEN'; }
   });
   if (!unavailable) throw new Error('Missing OPFS did not reject without fallback');
   const preservedName = 'preserve-' + Date.now();

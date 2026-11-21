@@ -11,7 +11,7 @@ export async function testOwnership(browser, base) {
     try {
       globalThis.owned = await globalThis.zova.Database.openPersistent(name);
       return 'open';
-    } catch (error) { return error.status; }
+    } catch (error) { return error.code; }
   }, name);
   try {
     const a = await page();

@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { Database, ZovaWasmError } from "../src/index.ts";
+import { Database, ZovaError, ZovaWasmError } from "../src/index.ts";
 
 const originalWorker = globalThis.Worker;
 class TestWorker extends EventTarget {
@@ -27,7 +27,7 @@ function installWorker() { globalThis.Worker = TestWorker as unknown as typeof W
 test("persistent opening validates names before worker creation", async () => {
   installWorker();
   for (const name of ["", "../db", "a/b", "a.b", "a\\b", "\0", "a".repeat(65), null, 1]) {
-    await expect(Database.openPersistent(name as string)).rejects.toBeInstanceOf(ZovaWasmError);
+    await expect(Database.openPersistent(name as string)).rejects.toBeInstanceOf(ZovaError);
   }
   const db = await Database.openPersistent("notes-1");
   expect(TestWorker.last.messages[0]).toMatchObject({operation:"initialize", args:{name:"notes-1"}});
@@ -39,10 +39,10 @@ test("validates values before posting and returns typed errors", async () => {
   const db = await Database.createMemory();
   const count = TestWorker.last.messages.length;
   for (const value of [true, undefined, {}, NaN, Infinity, 1n << 63n]) {
-    await expect(db.query("SELECT ?", [value] as never)).rejects.toBeInstanceOf(ZovaWasmError);
+    await expect(db.query("SELECT ?", [value] as never)).rejects.toBeInstanceOf(ZovaError);
   }
-  await expect(db.exec("SELECT\0 1")).rejects.toBeInstanceOf(ZovaWasmError);
-  await expect(db.kv.get("bad" as never, new Uint8Array())).rejects.toBeInstanceOf(ZovaWasmError);
+  await expect(db.exec("SELECT\0 1")).rejects.toBeInstanceOf(ZovaError);
+  await expect(db.kv.get("bad" as never, new Uint8Array())).rejects.toBeInstanceOf(ZovaError);
   expect(TestWorker.last.messages.length).toBe(count);
   await db.close();
 });
@@ -53,7 +53,7 @@ test("close is immediately visible, idempotent, and rejects subsequent work", as
   const closing = db.close();
   expect(db.closed).toBe(true);
   expect(db.close()).toBe(closing);
-  await expect(db.query("SELECT 1")).rejects.toBeInstanceOf(ZovaWasmError);
+  await expect(db.query("SELECT 1")).rejects.toBeInstanceOf(ZovaError);
   await closing;
   expect(TestWorker.last.messages.filter(x => x.operation === "close").length).toBe(1);
 });
@@ -62,7 +62,7 @@ test("worker failure marks database closed and returns typed errors", async () =
   const db = await Database.createMemory();
   TestWorker.last.dispatchEvent(new Event("error"));
   expect(db.closed).toBe(true);
-  await expect(db.exec("SELECT 1")).rejects.toBeInstanceOf(ZovaWasmError);
+  await expect(db.exec("SELECT 1")).rejects.toBeInstanceOf(ZovaError);
 });
 test("copies shared-memory inputs before posting", async () => {
   installWorker();
@@ -82,8 +82,8 @@ test("transactions bracket their work and hold back outside requests", async () 
   const start = TestWorker.last.messages.length;
   const running = db.transaction(async tx => {
     await tx.exec("SELECT 1");
-    await expect(tx.transaction(async () => 1)).rejects.toBeInstanceOf(ZovaWasmError);
-    await expect(tx.close()).rejects.toBeInstanceOf(ZovaWasmError);
+    await expect(tx.transaction(async () => 1)).rejects.toBeInstanceOf(ZovaError);
+    await expect(tx.close()).rejects.toBeInstanceOf(ZovaError);
     return 5;
   });
   const outside = db.exec("SELECT 2");
@@ -92,7 +92,7 @@ test("transactions bracket their work and hold back outside requests", async () 
   await expect(db.transaction(async tx => { await tx.exec("SELECT 3"); throw new RangeError("stop"); })).rejects.toBeInstanceOf(RangeError);
   expect(TestWorker.last.messages.slice(start).map(x => x.operation))
     .toEqual(["begin", "exec", "commit", "exec", "begin", "exec", "rollback"]);
-  await expect(db.transaction("no" as never)).rejects.toBeInstanceOf(ZovaWasmError);
+  await expect(db.transaction("no" as never)).rejects.toBeInstanceOf(ZovaError);
   await db.close();
 });
 test("statements address their handle and finalize once", async () => {
@@ -104,20 +104,20 @@ test("statements address their handle and finalize once", async () => {
   await statement.query([1n]);
   expect(TestWorker.last.messages.at(-1)).toMatchObject({ operation: "statement_query", args: { handle: 7, parameters: [1n] } });
   const count = TestWorker.last.messages.length;
-  await expect(statement.query([true] as never)).rejects.toBeInstanceOf(ZovaWasmError);
+  await expect(statement.query([true] as never)).rejects.toBeInstanceOf(ZovaError);
   expect(TestWorker.last.messages.length).toBe(count);
   const finalizing = statement.finalize();
   expect(statement.finalized).toBe(true);
   expect(statement.finalize()).toBe(finalizing);
   await finalizing;
-  await expect(statement.query([1n])).rejects.toBeInstanceOf(ZovaWasmError);
+  await expect(statement.query([1n])).rejects.toBeInstanceOf(ZovaError);
   expect(TestWorker.last.messages.filter(x => x.operation === "statement_finalize").length).toBe(1);
   await db.close();
 });
 test("object, vector, graph and import arguments are validated before posting", async () => {
   installWorker();
-  await expect(Database.importPersistent("../db", new Uint8Array(1))).rejects.toBeInstanceOf(ZovaWasmError);
-  await expect(Database.importPersistent("ok", "bytes" as never)).rejects.toBeInstanceOf(ZovaWasmError);
+  await expect(Database.importPersistent("../db", new Uint8Array(1))).rejects.toBeInstanceOf(ZovaError);
+  await expect(Database.importPersistent("ok", "bytes" as never)).rejects.toBeInstanceOf(ZovaError);
   const db = await Database.createMemory();
   const count = TestWorker.last.messages.length;
   const rejected = [
@@ -132,7 +132,7 @@ test("object, vector, graph and import arguments are validated before posting", 
   ];
   for (const [index, promise] of rejected.entries()) {
     const error = await promise.then(() => null, (reason: unknown) => reason);
-    expect([index, error instanceof ZovaWasmError]).toEqual([index, true]);
+    expect([index, error instanceof ZovaError]).toEqual([index, true]);
   }
   expect(TestWorker.last.messages.length).toBe(count);
   await db.close();
@@ -141,11 +141,11 @@ test("probe and migrate validate before creating a worker", async () => {
   installWorker();
   const before = TestWorker.last;
   for (const name of ["", "../db", "a.b", null]) {
-    await expect(Database.probePersistent(name as string)).rejects.toBeInstanceOf(ZovaWasmError);
-    await expect(Database.migratePersistent(name as string)).rejects.toBeInstanceOf(ZovaWasmError);
+    await expect(Database.probePersistent(name as string)).rejects.toBeInstanceOf(ZovaError);
+    await expect(Database.migratePersistent(name as string)).rejects.toBeInstanceOf(ZovaError);
   }
-  await expect(Database.migratePersistent("notes", { progress: "no" as never })).rejects.toBeInstanceOf(ZovaWasmError);
-  await expect(Database.migratePersistent("notes", { signal: AbortSignal.abort() })).rejects.toMatchObject({ status: "ZOVA_INTERRUPTED" });
+  await expect(Database.migratePersistent("notes", { progress: "no" as never })).rejects.toBeInstanceOf(ZovaError);
+  await expect(Database.migratePersistent("notes", { signal: AbortSignal.abort() })).rejects.toMatchObject({ code: "ZOVA_INTERRUPTED" });
   expect(TestWorker.last).toBe(before);
 });
 test("migration stages, then publishes, in a maintenance worker", async () => {
@@ -163,10 +163,10 @@ test("explicit transactions, savepoints, KV batches and notifications post their
   await db.begin();
   await db.savepoint("s", async sp => { await sp.kv.putMany(new Uint8Array([1]), [{ key: new Uint8Array([2]), value: new Uint8Array() }]); });
   await db.commit();
-  await db.transaction(async tx => { await expect(tx.begin()).rejects.toMatchObject({ status: "ZOVA_MISUSE" }); });
-  await expect(db.kv.putMany(new Uint8Array([1]), [{ key: "k" as never, value: new Uint8Array() }])).rejects.toBeInstanceOf(ZovaWasmError);
-  await expect(db.notify("c", 1 as never)).rejects.toBeInstanceOf(ZovaWasmError);
-  await expect(db.savepoint("s\0")).rejects.toBeInstanceOf(ZovaWasmError);
+  await db.transaction(async tx => { await expect(tx.begin()).rejects.toMatchObject({ code: "ZOVA_MISUSE" }); });
+  await expect(db.kv.putMany(new Uint8Array([1]), [{ key: "k" as never, value: new Uint8Array() }])).rejects.toBeInstanceOf(ZovaError);
+  await expect(db.notify("c", 1 as never)).rejects.toBeInstanceOf(ZovaError);
+  await expect(db.savepoint("s\0")).rejects.toBeInstanceOf(ZovaError);
   expect(TestWorker.last.messages.slice(start).map(x => x.operation))
     .toEqual(["begin_deferred", "savepoint", "kv_put_many", "release_savepoint", "commit", "begin", "commit"]);
   await db.close();
@@ -175,8 +175,8 @@ test("object ID hex helpers and object arguments validate locally", async () => 
   const { objectIdToHex, objectIdFromHex } = await import("../src/index.ts");
   const id = Uint8Array.from({ length: 32 }, (_, index) => index * 7);
   expect(objectIdFromHex(objectIdToHex(id))).toEqual(id);
-  expect(() => objectIdFromHex("zz")).toThrow(ZovaWasmError);
-  expect(() => objectIdToHex(new Uint8Array(31))).toThrow(ZovaWasmError);
+  expect(() => objectIdFromHex("zz")).toThrow(ZovaError);
+  expect(() => objectIdToHex(new Uint8Array(31))).toThrow(ZovaError);
   installWorker();
   const db = await Database.createMemory();
   const count = TestWorker.last.messages.length;
@@ -186,7 +186,7 @@ test("object ID hex helpers and object arguments validate locally", async () => 
     db.assembleObjectFromChunks(new Uint8Array(32), 1n, [{ index: 0, hash: new Uint8Array(32), offset: 0n, sizeBytes: 1n } as never]),
     db.objectReader(new Uint8Array(32), 0),
     db.getObjectChunk(new Uint8Array(3)),
-  ]) await expect(promise).rejects.toBeInstanceOf(ZovaWasmError);
+  ]) await expect(promise).rejects.toBeInstanceOf(ZovaError);
   expect(TestWorker.last.messages.length).toBe(count);
   await db.close();
 });
@@ -200,7 +200,7 @@ test("filtered vector search selects its operation and validates options", async
   expect(TestWorker.last.messages.slice(start).map(x => x.operation)).toEqual(["vector_search", "vector_search_filtered", "vector_search_by_id_filtered"]);
   expect(TestWorker.last.messages.at(-2)).toMatchObject({ args: { limit: 3, candidateIds: ["a"], maxDistance: 0.5 } });
   for (const options of [{ limit: -1 }, { limit: 1, candidateIds: "a" }, { limit: 1, candidateIds: [1] }, { limit: 1, maxDistance: "1" }, null]) {
-    await expect(db.searchVectors("c", new Float32Array(2), options as never)).rejects.toBeInstanceOf(ZovaWasmError);
+    await expect(db.searchVectors("c", new Float32Array(2), options as never)).rejects.toBeInstanceOf(ZovaError);
   }
   await db.close();
 });
@@ -208,9 +208,9 @@ test("backup and compact stage, then publish, and stop at phase boundaries", asy
   installWorker();
   const db = await Database.createMemory();
   const start = TestWorker.last.messages.length;
-  await expect(db.backupTo("../x")).rejects.toBeInstanceOf(ZovaWasmError);
-  await expect(db.backupTo("x", { signal: AbortSignal.abort() })).rejects.toMatchObject({ status: "ZOVA_INTERRUPTED" });
-  await expect(db.reclaimSpace({ maxPages: -1 })).rejects.toBeInstanceOf(ZovaWasmError);
+  await expect(db.backupTo("../x")).rejects.toBeInstanceOf(ZovaError);
+  await expect(db.backupTo("x", { signal: AbortSignal.abort() })).rejects.toMatchObject({ code: "ZOVA_INTERRUPTED" });
+  await expect(db.reclaimSpace({ maxPages: -1 })).rejects.toBeInstanceOf(ZovaError);
   expect(TestWorker.last.messages.length).toBe(start);
   await db.compactTo("copy", { verify: false });
   expect(TestWorker.last.messages.slice(start).map(x => x.operation)).toEqual(["copy_begin", "copy_stage", "copy_publish"]);
@@ -222,24 +222,24 @@ test("backup and compact stage, then publish, and stop at phase boundaries", asy
 });
 test("import, list and delete validate before posting and stream imports chunk by chunk", async () => {
   installWorker();
-  await expect(Database.deletePersistent("../x")).rejects.toBeInstanceOf(ZovaWasmError);
-  await expect(Database.importPersistent("ok", 5 as never)).rejects.toBeInstanceOf(ZovaWasmError);
+  await expect(Database.deletePersistent("../x")).rejects.toBeInstanceOf(ZovaError);
+  await expect(Database.importPersistent("ok", 5 as never)).rejects.toBeInstanceOf(ZovaError);
   const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array([1, 2])); controller.enqueue(new Uint8Array([3])); controller.close(); } });
   const db = await Database.importPersistent("streamed", stream);
   expect(TestWorker.last.messages.map(x => x.operation)).toEqual(["initialize", "import_write", "import_write", "import_finish"]);
   expect(TestWorker.last.messages[0]).toMatchObject({ args: { name: "streamed", importing: true } });
   await db.close();
   const memory = await Database.createMemory();
-  await memory.transaction(async tx => { await expect(tx.exportStream()).rejects.toMatchObject({ status: "ZOVA_MISUSE" }); });
-  await expect(memory.exportStream(0)).rejects.toBeInstanceOf(ZovaWasmError);
+  await memory.transaction(async tx => { await expect(tx.exportStream()).rejects.toMatchObject({ code: "ZOVA_MISUSE" }); });
+  await expect(memory.exportStream(0)).rejects.toBeInstanceOf(ZovaError);
   await memory.close();
 });
 test("extension calls validate names before posting", async () => {
   installWorker();
   const db = await Database.createMemory();
   const start = TestWorker.last.messages.length;
-  await expect(db.installExtension("a\0b")).rejects.toBeInstanceOf(ZovaWasmError);
-  await expect(db.extensionInfo(5 as never)).rejects.toBeInstanceOf(ZovaWasmError);
+  await expect(db.installExtension("a\0b")).rejects.toBeInstanceOf(ZovaError);
+  await expect(db.extensionInfo(5 as never)).rejects.toBeInstanceOf(ZovaError);
   expect(TestWorker.last.messages.length).toBe(start);
   await db.installExtension("trgm");
   await db.checkExtensions();
@@ -248,9 +248,9 @@ test("extension calls validate names before posting", async () => {
 });
 test("open options and conversion validate locally and reach initialize", async () => {
   installWorker();
-  await expect(Database.createMemory({ pageSize: -1 })).rejects.toBeInstanceOf(ZovaWasmError);
-  await expect(Database.openPersistent("opts", { busyTimeoutMs: 1.5 })).rejects.toBeInstanceOf(ZovaWasmError);
-  await expect(Database.convertSqliteToPersistent("conv", "bytes" as never)).rejects.toBeInstanceOf(ZovaWasmError);
+  await expect(Database.createMemory({ pageSize: -1 })).rejects.toBeInstanceOf(ZovaError);
+  await expect(Database.openPersistent("opts", { busyTimeoutMs: 1.5 })).rejects.toBeInstanceOf(ZovaError);
+  await expect(Database.convertSqliteToPersistent("conv", "bytes" as never)).rejects.toBeInstanceOf(ZovaError);
   let db = await Database.createMemory({ pageSize: 8192 });
   expect(TestWorker.last.messages[0]).toMatchObject({ operation: "initialize", args: { pageSize: 8192 } });
   await db.close();
@@ -283,7 +283,7 @@ test("parity calls validate before posting", async () => {
     () => db.buildFreshGraphKeyed("g", [], [{ fromNodeOrdinal: 0, edgeType: "e", toNodeOrdinal: 0, payload: bytes }]),
     () => db.registerFunction("f", 0, "module" as never),
     () => db.registerFunction("f", 0, { module: "http://[", export: "f" }),
-  ]) await expect(call()).rejects.toBeInstanceOf(ZovaWasmError);
+  ]) await expect(call()).rejects.toBeInstanceOf(ZovaError);
   expect(TestWorker.last.messages.length).toBe(count);
   await db.registerFunction("f", 1, { module: "https://example.test/fn.mjs", export: "f" }, { deterministic: true });
   expect(TestWorker.last.messages.at(-1)).toMatchObject({ operation: "register_function",
@@ -297,9 +297,9 @@ test("fresh builds roll back on invalid input and close once finished", async ()
   const db = await Database.createMemory();
   let build = await db.beginFreshBuild();
   await build.tableRows("t", ["a"], [[1n]]);
-  await expect(build.tableRows("t", "a" as never, [])).rejects.toBeInstanceOf(ZovaWasmError);
+  await expect(build.tableRows("t", "a" as never, [])).rejects.toBeInstanceOf(ZovaError);
   expect(build.closed).toBe(true);
-  await expect(build.finish()).rejects.toBeInstanceOf(ZovaWasmError);
+  await expect(build.finish()).rejects.toBeInstanceOf(ZovaError);
   build = await db.beginFreshBuild();
   await build.finish();
   expect(build.closed).toBe(true);
@@ -341,5 +341,17 @@ test("batch calls transfer their own copies of large inputs", async () => {
   expect([keys.length, payload.length, queryValues.length, values.length]).toEqual([2, 2, 2, 1]);
   // Calls that send no batch transfer nothing.
   expect((await sent(() => db.graphScan({ graphName: "g", nodeLimit: 1, edgeLimit: 1 })))[0][1]).toBe(0);
+  await db.close();
+});
+test("errors carry native zova-js fields, with deprecated aliases", async () => {
+  installWorker();
+  const db = await Database.createMemory();
+  const error = await db.exec("SELECT\0 1").catch(error => error);
+  expect(error).toBeInstanceOf(ZovaError);
+  expect(error).toBeInstanceOf(ZovaWasmError);
+  expect(ZovaWasmError).toBe(ZovaError);
+  expect([error.name, error.code, error.status, error.statusCode]).toEqual(["ZovaError", "ZOVA_INVALID_ARGUMENT", 1, 1]);
+  const own = new ZovaError("ZOVA_BUSY", 10, "busy");
+  expect([own.code, own.status, own.message]).toEqual(["ZOVA_BUSY", 10, "busy"]);
   await db.close();
 });

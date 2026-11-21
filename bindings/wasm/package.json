@@ -1,7 +1,7 @@
 {
   "name": "zova-wasm",
   "version": "1.4.0",
-  "description": "Experimental Zova SQL and KV for browsers with memory and OPFS storage.",
+  "description": "Zova for browsers: SQL, KV, objects, vectors and graphs in memory or OPFS storage.",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -20,7 +20,7 @@
   "publishConfig": { "access": "public" },
   "scripts": {
     "build": "sh tools/build-package.sh",
-    "test": "bun test tests/api.test.ts tests/channel.test.mjs tests/release-gate.test.mjs",
+    "test": "bun test tests/api.test.ts tests/channel.test.mjs tests/release-gate.test.mjs && bun tools/check-api.mjs",
     "test:browser": "bun tests/playwright-browser.mjs"
   },
   "devDependencies": { "typescript": "5.9.3", "playwright": "1.63.0" }

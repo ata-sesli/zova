@@ -1,10 +1,11 @@
 import * as zova from "/package/dist/index.js";
-const { Database, ZovaWasmError } = zova;
+const { Database, ZovaError } = zova;
 const assert = (condition, message) => { if (!condition) throw new Error(message); };
 const rejects = async promise => {
   try { await promise; } catch (error) {
-    assert(error instanceof ZovaWasmError, "Expected ZovaWasmError");
-    assert(typeof error.status === "string" && typeof error.statusCode === "number", "Error status fields");
+    assert(error instanceof ZovaError && error.name === "ZovaError", "Expected ZovaError");
+    assert(typeof error.code === "string" && typeof error.status === "number" && error.statusCode === error.status, "Error status fields");
+    assert(zova.ZovaWasmError === ZovaError, "ZovaWasmError is a deprecated alias");
     return;
   }
   throw new Error("Expected rejection");
@@ -69,7 +70,7 @@ try {
   const same = (a, b) => a.length === b.length && a.every((value, index) => value === b[index]);
   const status = async (promise, expected) => {
     try { await promise; } catch (error) {
-      assert(error instanceof ZovaWasmError && error.status === expected, `Expected ${expected}, got ${error.status ?? error}`);
+      assert(error instanceof ZovaError && error.code === expected, `Expected ${expected}, got ${error.code ?? error}`);
       return;
     }
     throw new Error("Expected " + expected);
@@ -306,7 +307,7 @@ try {
   assert(stepper.columnFloat(0) === 7 && stepper.columnInteger(1) === 1n && stepper.columnInteger(4) === 0n, "numeric conversions");
   let mismatch;
   try { stepper.columnInteger(2); } catch (error) { mismatch = error; }
-  assert(mismatch instanceof ZovaWasmError && mismatch.status === "ZOVA_MISUSE", "text read as integer is refused");
+  assert(mismatch instanceof ZovaError && mismatch.code === "ZOVA_MISUSE", "text read as integer is refused");
   assert(await stepper.step() === "done", "step done");
   await stepper.reset();
   assert(await stepper.step() === "row" && stepper.columnInteger(0) === 7n, "reset keeps bindings");
@@ -444,7 +445,7 @@ try {
     await failedHandle.write(new Uint8Array(10));
     let wrongChunk;
     try { await failedHandle.write("text"); } catch (error) { wrongChunk = error; }
-    assert(wrongChunk instanceof ZovaWasmError && await counts() === before, "failed writer stores nothing");
+    assert(wrongChunk instanceof ZovaError && await counts() === before, "failed writer stores nothing");
     await status(db.objectReader(new Uint8Array(32)), "ZOVA_OBJECT_NOT_FOUND");
     await db.close();
   }
@@ -466,7 +467,7 @@ try {
             ? await db.searchVectors(name, typed(elementType, collection.query), testCase.options)
             : await db.searchVectorsById(name, testCase.by, testCase.options);
           actual = { results: results.map(item => [item.id, item.distance]) };
-        } catch (error) { actual = { error: error.status }; }
+        } catch (error) { actual = { error: error.code }; }
         const label = `${name} ${testCase.by} ${JSON.stringify(testCase.options)}`;
         assert(actual.error === testCase.expected.error, `${label}: status ${actual.error} vs native ${testCase.expected.error}`);
         if (actual.error === undefined) {
@@ -514,8 +515,8 @@ try {
         if (step.store) targets[step.store] = result;
         actual = step.store ? { stored: true } : { result: encode(result ?? null) };
       } catch (error) {
-        if (!(error instanceof ZovaWasmError)) throw error;
-        actual = { error: error.status };
+        if (!(error instanceof ZovaError)) throw error;
+        actual = { error: error.code };
       }
       assert(same(actual, step.expected), `step ${index} ${step.target}.${step.call}: ${JSON.stringify(actual).slice(0, 400)} vs native ${JSON.stringify(step.expected).slice(0, 400)}`);
     }
@@ -537,7 +538,7 @@ try {
     const listed = (await db.listExtensions()).map(strip);
     assert(JSON.stringify(listed) === JSON.stringify(fixture.installed), `extension list ${JSON.stringify(listed)}`);
     assert(JSON.stringify(strip(await db.extensionInfo("trgm"))) === JSON.stringify(fixture.installed[0]), "extension info");
-    const statusOf = async promise => { try { await promise; return "ZOVA_OK"; } catch (error) { return error.status; } };
+    const statusOf = async promise => { try { await promise; return "ZOVA_OK"; } catch (error) { return error.code; } };
     assert(await statusOf(db.checkExtension("trgm")) === fixture.check && await statusOf(db.checkExtensions()) === fixture.checkAll, "extension checks");
     assert(await statusOf(db.installExtension("trgm")) === fixture.installAgain && await statusOf(db.installExtension("nonexistent")) === fixture.installUnknown, "install errors");
     await db.dropExtension("trgm");
@@ -557,20 +558,31 @@ try {
     await h.seed(missingName, await h.fetchBytes("/extension-missing.zova"));
     let missing;
     try { await Database.openPersistent(missingName); } catch (error) { missing = error; }
-    assert(missing instanceof ZovaWasmError && missing.status === fixture.missingPlugin.status && missing.message === fixture.missingPlugin.message,
-      `missing plugin: ${missing?.status} ${missing?.message}, native ${fixture.missingPlugin.status} ${fixture.missingPlugin.message}`);
+    assert(missing instanceof ZovaError && missing.code === fixture.missingPlugin.status && missing.message === fixture.missingPlugin.message,
+      `missing plugin: ${missing?.code} ${missing?.message}, native ${fixture.missingPlugin.status} ${fixture.missingPlugin.message}`);
   }
 
   // Every C ABI call that applies in a browser, matching native zova-js (#228).
   {
     const bytes = value => new TextEncoder().encode(value);
     const text = value => new TextDecoder().decode(value);
-    const statusOf = async promise => { try { await promise; return "ZOVA_OK"; } catch (error) { return error.status; } };
+    const statusOf = async promise => { try { await promise; return "ZOVA_OK"; } catch (error) { return error.code; } };
 
     // ABI version.
     const abi = await zova.abiVersion();
     const parts = await zova.abiVersionParts();
     assert(abi === `${parts.major}.${parts.minor}.${parts.patch}` && Object.isFrozen(parts), `ABI version ${abi}`);
+    // The version constants describe the bundled module.
+    assert(zova.packageVersion === abi, `package version ${zova.packageVersion} vs ABI ${abi}`);
+    db = await Database.createMemory();
+    const [[sqlite]] = (await db.query("SELECT sqlite_version()")).rows;
+    assert(zova.sqliteVersion === sqlite, `SQLite version ${zova.sqliteVersion} vs ${sqlite}`);
+    await db.close();
+    const formatName = "format-" + crypto.randomUUID();
+    await (await Database.openPersistent(formatName)).close();
+    const created = await Database.probePersistent(formatName);
+    assert(zova.formatVersion === String(created.formatVersion), `format version ${zova.formatVersion} vs created ${created.formatVersion}`);
+    await Database.deletePersistent(formatName);
 
     // Creation and open options.
     db = await Database.createMemory({ pageSize: 8192 });
@@ -778,7 +790,7 @@ try {
       await db.registerFunction(name, 0, fn(name));
       let failed;
       try { await db.query(`select ${name}()`); } catch (error) { failed = error; }
-      assert(failed instanceof ZovaWasmError && failed.message.includes(message), `${name}: ${failed?.message}`);
+      assert(failed instanceof ZovaError && failed.message.includes(message), `${name}: ${failed?.message}`);
     }
     assert(await one("select 1") === 1n, "connection usable after SQL function errors");
     await status(db.registerFunction("bad", 0, fn("notAFunction")), "ZOVA_INVALID_ARGUMENT");

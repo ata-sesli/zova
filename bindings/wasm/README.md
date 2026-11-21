@@ -1,12 +1,14 @@
 # zova-wasm
 
-Experimental Zova for browsers, in memory or named OPFS storage: SQL, binary KV,
+Zova for browsers, in memory or named OPFS storage: SQL, binary KV,
 transactions, prepared statements, objects, exact vectors and graphs. The real Zova
 core and bundled SQLite run inside a dedicated worker as one WebAssembly module.
 
-This experimental package follows the repository release (`1.4.0`,
-format 13). Browser API stability
-and full native compatibility are not promised. Memory databases lose their
+This package follows the repository release (`1.4.0`, format 13) and the native
+`zova-js` API, except where a browser makes that impossible (see
+[Native API parity](#native-api-parity)). From 1.5.0 its API is a stable 1.x
+surface; [API_STABILITY.md](../../API_STABILITY.md#browser-package-zova-wasm)
+lists the commitments and the named exceptions. Memory databases lose their
 data when closed or when their worker/page terminates.
 
 ## Try a local package
@@ -19,7 +21,7 @@ Worker and WASM URLs resolve relative to the package; keep its files together
 when deploying. Bundler compatibility is not yet a tested guarantee.
 
 ```ts
-import { Database, ZovaWasmError } from 'zova-wasm';
+import { Database, ZovaError } from 'zova-wasm';
 
 const db = await Database.createMemory();
 try {
@@ -35,7 +37,7 @@ try {
   console.log(value === null ? 'missing' : new TextDecoder().decode(value));
   console.log(await db.kv.delete(encode('cache'), encode('greeting'))); // true
 } catch (error) {
-  if (error instanceof ZovaWasmError) console.error(error.status, error.message);
+  if (error instanceof ZovaError) console.error(error.code, error.status, error.message);
   else throw error;
 } finally {
   await db.close();
@@ -101,13 +103,16 @@ handles before ownership; failed initialization and worker/tab termination also
 release ownership. Retry opening after the owner has closed or terminated.
 Storage belongs to the origin and browser profile. Clearing site data or browser
 eviction can remove it. `export()`, `exportStream()` and `importPersistent()` copy
-databases in and out of that storage; nothing is exported automatically. Broader crash, quota,
-and multi-tab recovery guarantees remain experimental.
+databases in and out of that storage; nothing is exported automatically. Crash,
+quota and multi-tab recovery are promised only as far as the tests below cover.
 
 ### Errors and recovery
 
-Catch `ZovaWasmError` around opening and writes, inspecting `status` and
-`statusCode`. `ZOVA_BUSY` means another owner is active: wait for it to close,
+Catch `ZovaError` around opening and writes, inspecting `code` (the status
+name, such as `ZOVA_BUSY`) and `status` (its number), as with native `zova-js`.
+Before 1.5.0 the class was `ZovaWasmError`, with the name in `status` and the
+number in `statusCode`; `ZovaWasmError` and `statusCode` remain as deprecated
+aliases, but `status` is now the number. `ZOVA_BUSY` means another owner is active: wait for it to close,
 then retry with a bounded delay. Worker termination releases locks asynchronously;
 do not spin or try to steal them. `ZOVA_CANT_OPEN` can indicate missing storage or
 locking support. Invalid names produce `ZOVA_INVALID_ARGUMENT`.
@@ -139,9 +144,10 @@ backup, or protection from user deletion. `navigator.storage.estimate()` provide
 an estimate, not reserved space. See [browser quotas and eviction](https://developer.mozilla.org/en-US/docs/Web/API/Storage_API/Storage_quotas_and_eviction_criteria)
 and [persistent-storage permission](https://developer.mozilla.org/en-US/docs/Web/API/StorageManager/persist).
 
-The local packed-artifact gate is verified with Helium; Linux CI targets
-Playwright Chromium. Firefox, Safari, mobile browsers and private-browsing modes
-have not been qualified. Do not infer support from API presence alone. Private
+Supported browsers are Chromium-based desktop browsers, version 149 or later.
+The local packed-artifact gate runs in Helium (Chromium 149); Linux CI runs
+Playwright Chromium (153). Firefox, Safari, mobile browsers and private-browsing
+modes have not been qualified. Do not infer support from API presence alone. Private
 browsing can restrict storage and normally clears it when the private session
 ends; no private-mode persistence guarantee is made.
 
@@ -150,7 +156,12 @@ errors. Real quota exhaustion, browser-process crashes, OS crashes and power los
 remain unverified. There is no unload-time save requirement for completed commits,
 but these tests are not a general crash-durability or performance guarantee.
 
-### Experimental WASM capabilities (introduced in rc.3)
+### Named storage history (introduced in rc.3)
+
+rc.3 introduced named storage as experimental, with these limits; later
+releases added export/import and in-place migration, and 1.5.0 makes the API
+stable.
+
 
 - Adds experimental named OPFS SQL/KV storage alongside `createMemory()`.
 - Adds exclusive per-name ownership with explicit busy errors and cleanup.
@@ -179,7 +190,7 @@ an expected value. Caller buffers remain attached and are copied when requests s
 Each database owns one worker. Concurrent calls execute in request order.
 Close follows earlier work, is idempotent, and marks `closed` immediately.
 Operations after close reject. Worker failures reject outstanding work and
-mark the database closed. Errors include `status` and `statusCode`.
+mark the database closed. Errors include `code` and `status`.
 
 ## Transactions
 
@@ -541,11 +552,20 @@ upgrade or rebuild hook, as natively; open the database with
 
 ## Native API parity
 
-Every method of native `zova-js` and its browser form. Every browser method
-returns a promise.
+Every public name of native `zova-js` and its browser form. Every browser
+method returns a promise. `bun tools/check-api.mjs` fails CI when a `zova-js`
+name is missing from the first column.
 
 | Native `zova-js` | `zova-wasm` |
 | --- | --- |
+| `packageVersion`, `formatVersion`, `sqliteVersion` | same constants |
+| `abiVersion`, `abiVersionParts` | async functions |
+| `ZovaError` (`code`, `status`) | same; `ZovaWasmError` and `statusCode` are deprecated aliases |
+| `Database.create(path)`, `Database.open(path, { readOnly, busyTimeoutMs })`, `createWithOptions` | `openPersistent(name, options)` opens a name or creates it |
+| `createMemory` | same, with `{ pageSize }` |
+| `Database.openForExtensionUpgrade` | `openPersistentForExtensionUpgrade` |
+| `AsyncDatabase` | not needed: every `Database` method is already asynchronous |
+| `closed`, `close` | same on `Database`, `Subscription`, `ObjectSeekableReader` and `FreshBuild`; `Statement` has `finalized` and `finalize()`; object writers and readers are streams |
 | `exec`, `query`, `prepare` | same |
 | `begin`, `beginImmediate`, `commit`, `rollback` | same; reject on a `transaction()` handle |
 | `transaction(callback)` | same, immediate, async callback |
@@ -553,43 +573,66 @@ returns a promise.
 | `savepoint`, `releaseSavepoint`, `rollbackToSavepoint` | same, async callback form |
 | `changes`, `totalChanges`, `lastInsertRowid`, `setBusyTimeout` | same |
 | `Statement.parameterCount()` | `parameterCount` property, set by `prepare()` |
-| `Statement.parameterIndex`, `bind*`, `step`, `reset`, `clearBindings` | same |
-| `Statement.column*` | same, synchronous over the stepped row; see above |
+| `Statement.parameterIndex`, `bindNull`, `bindInteger`, `bindFloat`, `bindText`, `bindBlob` | same |
+| `step` (`Step`), `reset`, `clearBindings` | same; `Step` is a constant object with the same values |
+| `columnCount`, `columnName`, `columnType`, `columnInteger`, `columnFloat`, `columnText`, `columnBlob` | same, synchronous over the stepped row; see above |
 | `Statement.close()` | `finalize()` |
 | `kvGet`, `kvPut`, `kvDelete` | `kv.get`, `kv.put`, `kv.delete` |
 | `kvGetMany`, `kvPutMany`, `kvDeleteMany`, `kvCount`, `kvClearNamespace` | `kv.getMany`, `kv.putMany`, `kv.deleteMany`, `kv.count`, `kv.clearNamespace` |
 | `kvScan`, `kvPutIfAbsent`, `kvCompareAndPut`, `kvCompareAndDelete` | `kv.scan`, `kv.putIfAbsent`, `kv.compareAndPut`, `kv.compareAndDelete` |
-| `setObjectCompression` | same |
-| `notify`, `listen`, `Subscription.tryReceive`, `close` | same; within one worker only |
+| `notify`, `listen`, `Subscription.tryReceive` | same; within one worker only |
 | `Subscription.tryReceiveAsync` | `tryReceive()` is already asynchronous |
-| `objectWriter`, `objectWriterWithOptions` (`write`, `finish`, `cancel`) | same names; a `WritableStream` with `id` (close, abort) |
-| `objectReader` (`read(size)`) | a `ReadableStream` of reads up to `chunkSize` |
-| `objectSeekableReader` (`read`, `seek`, `position`, `size`) | same, asynchronous, plus `readAt(offset, length)` |
-| chunk, manifest and assemble calls; `objectId`, `objectChunkId` | same; the ID functions are asynchronous |
+| `Subscription.create` (wraps a native handle) | not applicable; `listen` creates subscriptions |
+| `setObjectCompression` | same |
+| `putObject`, `putObjectWithOptions`, `getObject`, `readObjectRange`, `hasObject`, `objectSize`, `objectChunkCount`, `deleteObject` | same |
+| `objectManifest`, `getObjectChunk`, `hasObjectChunk`, `putObjectChunk`, `putObjectChunkWithOptions`, `deleteObjectChunk` | same |
+| `assembleObjectFromChunks`, `assembleObjectFromChunksWithOptions` | same |
+| `objectId`, `objectChunkId` | same, asynchronous |
+| `objectIdToHex`, `objectIdFromHex` | same |
+| `objectWriter`, `objectWriterWithOptions` (`ObjectWriter`: `write`, `finish`, `cancel`) | same names; a `WritableStream` with `id` (close, abort) |
+| `objectReader` (`ObjectReader.read(size)`) | a `ReadableStream` of reads up to `chunkSize` |
+| `objectSeekableReader` (`ObjectSeekableReader`: `read`, `seek`, `position`, `size`) | same, asynchronous, plus `readAt(offset, length)` |
+| `ObjectSeekableReader.readAsync`, `seekAsync` | `read` and `seek` are already asynchronous |
+| `createVectorCollection`, `hasVectorCollection`, `vectorCollectionInfo`, `listVectorCollections`, `deleteVectorCollection` | same |
+| `putVector`, `putVectors`, `getVector`, `hasVector`, `deleteVector`, `deleteVectors` | same |
 | `searchVectors`, `searchVectorsById` with `VectorSearchOptions` | same; a bare `limit` is also accepted |
 | `searchVectorsMultiI8` | same |
-| graph CRUD, `graphNeighbors`, `graphDegree`, `graphWalk` | same |
-| keyed graph calls, payloads, `graphScan`, `graphWalkDirection(Profiled)` | same |
-| `buildFreshGraph*Keyed*`, `beginFreshBuild` and `FreshBuild` | same; closing the database aborts an open session |
+| `createGraph`, `hasGraph`, `graphInfo`, `listGraphs`, `deleteGraph` | same |
+| `putGraphNode`, `putGraphNodes`, `getGraphNode`, `hasGraphNode`, `deleteGraphNode`, `deleteGraphNodes` | same |
+| `putGraphEdge`, `putGraphEdges`, `getGraphEdge`, `hasGraphEdge`, `deleteGraphEdge`, `deleteGraphEdges` | same |
+| `graphNeighbors`, `graphDegree`, `graphWalk` | same |
+| `putGraphNodesKeyed`, `putGraphEdgesKeyed`, `getGraphNodesKeyed`, `getGraphEdgesKeyed`, `graphNeighborsKeyed`, `graphDegreesKeyed` | same |
+| `getGraphEdgePayloads`, `replaceGraphEdgePayloads`, `graphScan`, `graphWalkDirection`, `graphWalkDirectionProfiled` | same |
+| `buildFreshGraphKeyed`, `buildFreshGraphPreparedKeyed`, `buildFreshGraphPreparedKeyedWithPayloads` | same |
+| `beginFreshBuild` (`FreshBuild`: `tableRows`, `ftsRows`, `graph`, `vectors`, `finish`, `abort`) | same; closing the database aborts an open session |
 | `registerFunction(name, arity, fn, options)` | `fn` is `{ module, export }`, run in the worker |
 | `reclaimSpace`, `vacuum` | same |
 | `backupTo(path)`, `compactTo(path)` (async with progress) | `backupTo(name)`, `compactTo(name)` to a persistent name, with progress |
 | `restoreBackup(path, path)`, `restoreBackupToMemory(path)` | same with persistent names |
-| `installExtension`, `dropExtension`, `listExtensions`, `extensionInfo`, `checkExtension`, `checkExtensions` | same, for bundled and statically linked extensions |
-| `extensionUpgrade`, `extensionRebuild` | same |
-| `ExtensionOptions` (`bundlePaths`, `trustStorePath`) at open | not applicable; link plugins at build time |
-| `Database.open(path, { readOnly, busyTimeoutMs })`, `createWithOptions` | `openPersistent(name, options)`, `createMemory({ pageSize })` |
-| `Database.openForExtensionUpgrade` | `openPersistentForExtensionUpgrade` |
+| `probeFormat(path)` | `probePersistent(name)` |
 | `convertSqliteToZova(path, path)` | `convertSqliteToPersistent(name, data)` |
 | `migrateDatabase(path, path)` | `migratePersistent(name)`, in place |
-| `abiVersion`, `abiVersionParts` | async functions |
+| `installExtension`, `dropExtension`, `listExtensions`, `extensionInfo`, `checkExtension`, `checkExtensions` | same, for bundled and statically linked extensions |
+| `extensionUpgrade`, `extensionRebuild` | same |
+| `LinkedPlugin` (`fromAddress`, `address`) and `ExtensionOptions` (`bundlePaths`, `trustStorePath`) | not applicable: browsers cannot load code at run time; link plugins into the module at build time |
+| `verifyExtensionBundle`, `trustExtensionBundle`, `untrustExtensionBundle` | not applicable: there are no `.zovaext` bundles or trust store in a browser |
 
 ## Current boundaries
 
-Not available here: run-time extension loading (`.zovaext` bundles and their
-trust store); bound stores; shared access between workers. SQL functions are
-worker modules, not page closures. The native `zova-js` package is
-independent. There is no Node/CommonJS fallback. See the
+Each of these follows from running in a browser:
+
+- No run-time extension loading (`.zovaext` bundles and their trust store):
+  browsers cannot load native code at run time. Link plugins into a custom
+  module at build time instead.
+- SQL functions are worker modules, not page closures, because SQLite calls
+  them synchronously inside the worker.
+- One connection per name at a time; no sharing between workers or tabs.
+- A named database is one file. Bound stores, which only the Zig API and CLI
+  create, cannot come with it, so migrating a database that has them fails
+  with `ZOVA_BOUND_STORE_INVALID`.
+- There is no Node/CommonJS build; Node and Bun use native `zova-js`.
+
+See the
 [extension capability matrix](../../docs/extensions.md#availability-and-binding-matrix).
 
 Memory databases use volatile storage; named databases use the bundled SQLite's
@@ -620,6 +663,12 @@ bun bindings/wasm/tools/check-package.mjs /absolute/path/zova-wasm-1.4.0.tgz
 bun test bindings/wasm/tests/api.test.ts bindings/wasm/tests/channel.test.mjs
 ```
 
+`bun run test` in `bindings/wasm` also runs `tools/check-api.mjs`. It fails
+when the emitted `dist/index.d.ts` differs from the reviewed
+`api/index.d.ts`, or when a public `zova-js` name has no row in the
+[Native API parity](#native-api-parity) table. After reviewing an intended API
+change, accept it with `bun tools/check-api.mjs --update`.
+
 Test the actual packed and installed artifact with Playwright driving Helium:
 
 ```sh
@@ -636,8 +685,8 @@ in the development lockfile. Native bindings remain independently tested.
 Release publication requires a successful Release Artifacts run at the exact
 release commit, including the WASM browser job. WASM publication uses trusted
 publishing with npm's `next` tag for prereleases (such as `1.0.0-rc.3`) and
-`latest` for stable versions (such as `1.4.0`). The API's experimental status is
-independent of the package version or dist-tag. Publication remains independent
+`latest` for stable versions (such as `1.4.0`). The dist-tag does not change
+the API's stability contract. Publication remains independent
 of `zova-js`.
 
 Both paths publish the exact versioned WASM tarball from the verified artifact

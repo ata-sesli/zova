@@ -289,24 +289,41 @@ export interface FormatInfo {
   readonly compatibility: FormatCompatibilityName;
 }
 
-export class ZovaWasmError extends Error {
-  constructor(message: string, readonly status: string, readonly statusCode: number) {
-    super(message);
-    this.name = "ZovaWasmError";
-  }
-}
+/**
+ * A Zova failure, as native `zova-js`'s `ZovaError`: `code` is the status
+ * name (`"ZOVA_BUSY"`) and `status` its number (`10`).
+ */
+export class ZovaError extends Error {
+  readonly code: string;
+  readonly status: number;
 
-function failure(error: unknown): ZovaWasmError {
-  if (error instanceof ZovaWasmError) return error;
+  constructor(code: string, status: number, message: string) {
+    super(message);
+    this.name = "ZovaError";
+    this.code = code;
+    this.status = status;
+  }
+
+  /** @deprecated Use `status`. */
+  get statusCode(): number { return this.status; }
+}
+/** @deprecated Use `ZovaError`; this is the same class. */
+export const ZovaWasmError = ZovaError;
+/** @deprecated Use `ZovaError`. */
+export type ZovaWasmError = ZovaError;
+
+// Worker replies carry the status name as `status` and its number as `statusCode`.
+function failure(error: unknown): ZovaError {
+  if (error instanceof ZovaError) return error;
   const value = error as { message?: unknown; status?: unknown; statusCode?: unknown } | null;
-  return new ZovaWasmError(
-    String(value?.message ?? error),
+  return new ZovaError(
     typeof value?.status === "string" ? value.status : "ZOVA_MISUSE",
     typeof value?.statusCode === "number" ? value.statusCode : 16,
+    String(value?.message ?? error),
   );
 }
 function invalid(message: string): never {
-  throw new ZovaWasmError(message, "ZOVA_INVALID_ARGUMENT", 1);
+  throw new ZovaError("ZOVA_INVALID_ARGUMENT", 1, message);
 }
 function validateSql(sql: string): void {
   if (typeof sql !== "string" || sql.includes("\0")) invalid("SQL must be a string without NUL bytes");
@@ -459,7 +476,7 @@ interface Shared { channel: WorkerChannel; tail: Promise<void>; active: number; 
 interface Scope { done: boolean; }
 
 /**
- * Experimental prepared statement owned by its database. Run one query or
+ * A prepared statement owned by its database. Run one query or
  * iteration at a time; closing the database finalizes it.
  */
 export class Statement {
@@ -481,7 +498,7 @@ export class Statement {
   get finalized(): boolean { return this.#finalizing !== undefined; }
 
   #send<T>(operation: string, prepare: () => object = () => ({})): Promise<T> {
-    if (this.finalized) return Promise.reject(new ZovaWasmError("Statement is finalized", "ZOVA_MISUSE", 16));
+    if (this.finalized) return Promise.reject(new ZovaError("ZOVA_MISUSE", 16, "Statement is finalized"));
     return this.#request(operation, () => ({ handle: this.#handle, ...prepare() }));
   }
 
@@ -538,19 +555,19 @@ export class Statement {
   }
   bindNull(index: number): Promise<void> { return this.#bind(index, null); }
   bindInteger(index: number, value: bigint): Promise<void> {
-    if (typeof value !== "bigint") return Promise.reject(new ZovaWasmError("Integer values are bigint", "ZOVA_INVALID_ARGUMENT", 1));
+    if (typeof value !== "bigint") return Promise.reject(new ZovaError("ZOVA_INVALID_ARGUMENT", 1, "Integer values are bigint"));
     return this.#bind(index, value);
   }
   bindFloat(index: number, value: number): Promise<void> {
-    if (typeof value !== "number") return Promise.reject(new ZovaWasmError("Float values are numbers", "ZOVA_INVALID_ARGUMENT", 1));
+    if (typeof value !== "number") return Promise.reject(new ZovaError("ZOVA_INVALID_ARGUMENT", 1, "Float values are numbers"));
     return this.#bind(index, value);
   }
   bindText(index: number, value: string): Promise<void> {
-    if (typeof value !== "string") return Promise.reject(new ZovaWasmError("Text values are strings", "ZOVA_INVALID_ARGUMENT", 1));
+    if (typeof value !== "string") return Promise.reject(new ZovaError("ZOVA_INVALID_ARGUMENT", 1, "Text values are strings"));
     return this.#bind(index, value);
   }
   bindBlob(index: number, value: Uint8Array): Promise<void> {
-    if (!(value instanceof Uint8Array)) return Promise.reject(new ZovaWasmError("Blob values are Uint8Array", "ZOVA_INVALID_ARGUMENT", 1));
+    if (!(value instanceof Uint8Array)) return Promise.reject(new ZovaError("ZOVA_INVALID_ARGUMENT", 1, "Blob values are Uint8Array"));
     return this.#bind(index, value);
   }
   #bind(index: number, value: SqlValue): Promise<void> {
@@ -596,14 +613,14 @@ export class Statement {
     return this.#mismatch(index, "columnBlob");
   }
   #value(index: number): SqlValue {
-    if (!this.#row) throw new ZovaWasmError("No current row: step() must return \"row\" first", "ZOVA_MISUSE", 16);
+    if (!this.#row) throw new ZovaError("ZOVA_MISUSE", 16, "No current row: step() must return \"row\" first");
     if (!Number.isInteger(index) || index < 0 || index >= this.#row.length) invalid("Column index out of range");
     return this.#row[index];
   }
   // The row was converted once in the worker; text/number conversions would
   // not match SQLite's formatting, so they are refused instead of guessed.
   #mismatch(index: number, accessor: string): never {
-    throw new ZovaWasmError(`${accessor}: column ${index} holds ${this.columnType(index)}`, "ZOVA_MISUSE", 16);
+    throw new ZovaError("ZOVA_MISUSE", 16, `${accessor}: column ${index} holds ${this.columnType(index)}`);
   }
 }
 
@@ -647,7 +664,7 @@ export class ObjectWriter extends WritableStream<Uint8Array> {
     super({
       async write(chunk) {
         if (!(chunk instanceof Uint8Array)) {
-          const error = new ZovaWasmError("Object writers accept Uint8Array chunks", "ZOVA_INVALID_ARGUMENT", 1);
+          const error = new ZovaError("ZOVA_INVALID_ARGUMENT", 1, "Object writers accept Uint8Array chunks");
           await cancel(error);
           throw error;
         }
@@ -664,7 +681,7 @@ export class ObjectWriter extends WritableStream<Uint8Array> {
         try { settle.resolve(await request<Uint8Array>("object_writer_finish", () => ({ handle }))); }
         catch (error) { const typed = failure(error); settle.reject(typed); throw typed; }
       },
-      abort: reason => cancel(reason ?? new ZovaWasmError("Object writer was aborted", "ZOVA_INTERRUPTED", 18)),
+      abort: reason => cancel(reason ?? new ZovaError("ZOVA_INTERRUPTED", 18, "Object writer was aborted")),
     });
     this.id = id;
   }
@@ -710,7 +727,7 @@ export class ObjectSeekableReader {
   }
   /** Reads up to `length` bytes at `offset` in one worker call, then continues from there. */
   async readAt(offset: bigint, length: number): Promise<Uint8Array> {
-    if (this.closed) throw new ZovaWasmError("Reader is closed", "ZOVA_OBJECT_READER_CLOSED", 63);
+    if (this.closed) throw new ZovaError("ZOVA_OBJECT_READER_CLOSED", 63, "Reader is closed");
     if (typeof offset !== "bigint" || offset < 0n || offset >= (1n << 64n)) invalid("Offset must be an unsigned 64-bit bigint");
     const bytes = await this.#request<Uint8Array>("object_seekable_read_at", () => ({ handle: this.#handle, offset, size: size(length, "Length") }));
     this.#position = offset + BigInt(bytes.length);
@@ -743,6 +760,15 @@ export function objectId(data: Uint8Array): Promise<Uint8Array> { return hashWit
 /** The hash a chunk with these bytes is stored under. */
 export function objectChunkId(data: Uint8Array): Promise<Uint8Array> { return hashWith("object_chunk_id", data); }
 
+// As native `zova-js`, from src/version.zig; scripts/check-versions.sh keeps
+// these in step with it.
+/** The zova-wasm package version. */
+export const packageVersion = "1.4.0";
+/** The storage format this package creates. */
+export const formatVersion = "14";
+/** The bundled SQLite version. */
+export const sqliteVersion = "3.53.4";
+
 let abi: Promise<{ major: number; minor: number; patch: number; version: string }> | undefined;
 function abiInfo() {
   helper ??= Database.createMemory();
@@ -759,6 +785,8 @@ export async function abiVersionParts(): Promise<AbiVersionParts> {
 }
 
 export type Step = "row" | "done";
+/** `step()` results by name, as native `zova-js`'s `Step` enum. */
+export const Step = Object.freeze({ Row: "row", Done: "done" } as const);
 export type ColumnType = "integer" | "float" | "text" | "blob" | "null";
 
 export interface Notification {
@@ -812,7 +840,7 @@ export class Subscription {
   get closed(): boolean { return this.#closing !== undefined; }
   /** The next queued notification, or null when none is waiting. */
   tryReceive(): Promise<Notification | null> {
-    if (this.closed) return Promise.reject(new ZovaWasmError("Subscription is closed", "ZOVA_MISUSE", 16));
+    if (this.closed) return Promise.reject(new ZovaError("ZOVA_MISUSE", 16, "Subscription is closed"));
     return this.#request("subscription_receive", () => ({ handle: this.#handle }));
   }
   close(): Promise<void> {
@@ -825,7 +853,7 @@ function copyParameters(parameters: readonly SqlValue[]): SqlValue[] {
   return parameters.map(value => value instanceof Uint8Array ? new Uint8Array(value) : value);
 }
 
-/** Experimental browser database. Each instance owns a dedicated worker. */
+/** A browser database. Each instance owns a dedicated worker. */
 /**
  * A fresh-build session: bulk-load empty tables, FTS tables, one graph, and
  * vector collections, then commit them together, as native `FreshBuild`.
@@ -880,7 +908,7 @@ export class FreshBuild {
   async close(): Promise<void> { if (!this.#closed) await this.abort(); }
 
   async #step<T>(operation: string, prepare: () => object, last = false): Promise<T> {
-    if (this.#closed) throw new ZovaWasmError("Fresh build is closed", "ZOVA_MISUSE", 16);
+    if (this.#closed) throw new ZovaError("ZOVA_MISUSE", 16, "Fresh build is closed");
     let args: object;
     try { args = prepare(); } catch (error) {
       // Invalid input rolls the session back, as natively.
@@ -973,7 +1001,7 @@ export class Database {
     persistentName(name);
     const { progress: callback, signal } = options ?? {};
     if (callback !== undefined && typeof callback !== "function") invalid("progress must be a function");
-    const interrupted = () => new ZovaWasmError("Migration was cancelled", "ZOVA_INTERRUPTED", 18);
+    const interrupted = () => new ZovaError("ZOVA_INTERRUPTED", 18, "Migration was cancelled");
     if (signal?.aborted) throw interrupted();
     let thrown: { error: unknown } | undefined;
     // Set synchronously before the replacement is requested; later cancels are ignored.
@@ -1132,9 +1160,9 @@ export class Database {
   async #request<T>(operation: string, prepare: () => object, outlive = false, transfer?: (args: object) => Transferable[],
     progress?: (event: Progress) => void): Promise<T> {
     try {
-      if (this.closed) throw new ZovaWasmError("Database is closed", "ZOVA_MISUSE", 16);
+      if (this.closed) throw new ZovaError("ZOVA_MISUSE", 16, "Database is closed");
       const inTransaction = this.#scope !== undefined && !this.#scope.done;
-      if (this.#scope?.done && !outlive) throw new ZovaWasmError("Transaction has ended", "ZOVA_MISUSE", 16);
+      if (this.#scope?.done && !outlive) throw new ZovaError("ZOVA_MISUSE", 16, "Transaction has ended");
       // Validation and input copies happen here, before any await.
       const args = prepare();
       // Outside a transaction the request posts synchronously; while one is
@@ -1152,8 +1180,8 @@ export class Database {
    */
   async transaction<T>(callback: (tx: Database) => T | Promise<T>): Promise<T> {
     if (typeof callback !== "function") invalid("Transaction callback must be a function");
-    if (this.#scope) throw new ZovaWasmError("Transactions cannot be nested", "ZOVA_MISUSE", 16);
-    if (this.closed) throw new ZovaWasmError("Database is closed", "ZOVA_MISUSE", 16);
+    if (this.#scope) throw new ZovaError("ZOVA_MISUSE", 16, "Transactions cannot be nested");
+    if (this.closed) throw new ZovaError("ZOVA_MISUSE", 16, "Database is closed");
     const shared = this.#shared;
     const send = (operation: string): Promise<void> =>
       shared.channel.request(operation).catch((error: unknown) => { throw failure(error); });
@@ -1196,7 +1224,7 @@ export class Database {
   commit(): Promise<void> { return this.#control("commit"); }
   rollback(): Promise<void> { return this.#control("rollback"); }
   #control(operation: string): Promise<void> {
-    if (this.#scope) return Promise.reject(new ZovaWasmError("Use savepoints inside transaction()", "ZOVA_MISUSE", 16));
+    if (this.#scope) return Promise.reject(new ZovaError("ZOVA_MISUSE", 16, "Use savepoints inside transaction()"));
     return this.#request(operation, () => ({}));
   }
 
@@ -1306,7 +1334,7 @@ export class Database {
     persistentName(target);
     const { progress: callback, signal } = options ?? {};
     if (callback !== undefined && typeof callback !== "function") invalid("progress must be a function");
-    const interrupted = () => new ZovaWasmError("Copy was cancelled", "ZOVA_INTERRUPTED", 18);
+    const interrupted = () => new ZovaError("ZOVA_INTERRUPTED", 18, "Copy was cancelled");
     if (signal?.aborted) throw interrupted();
     // Set by `report` between awaits; read through a call so it is not narrowed.
     const stop: { thrown?: { error: unknown } } = {};
@@ -1342,8 +1370,8 @@ export class Database {
    * `importPersistent()`, which verifies them.
    */
   async exportStream(chunkSize = 1 << 20): Promise<ReadableStream<Uint8Array>> {
-    if (this.#scope) throw new ZovaWasmError("Export the database, not its transaction handle", "ZOVA_MISUSE", 16);
-    if (this.closed) throw new ZovaWasmError("Database is closed", "ZOVA_MISUSE", 16);
+    if (this.#scope) throw new ZovaError("ZOVA_MISUSE", 16, "Export the database, not its transaction handle");
+    if (this.closed) throw new ZovaError("ZOVA_MISUSE", 16, "Database is closed");
     size(chunkSize, "Chunk size");
     if (chunkSize === 0) invalid("Chunk size must be positive");
     // Hold the database like a transaction: other callers wait for the stream.
@@ -1375,7 +1403,7 @@ export class Database {
         try {
           if (offset >= total) { await finish(true); controller.close(); return; }
           const bytes = await held.#request<Uint8Array>("export_read", () => ({ offset, size: chunkSize }));
-          if (bytes.length === 0) throw new ZovaWasmError("Database file ended early", "ZOVA_CORRUPT", 15);
+          if (bytes.length === 0) throw new ZovaError("ZOVA_CORRUPT", 15, "Database file ended early");
           offset += BigInt(bytes.length);
           controller.enqueue(bytes);
         } catch (error) {
@@ -1857,7 +1885,7 @@ export class Database {
   }
 
   close(): Promise<void> {
-    if (this.#scope) return Promise.reject(new ZovaWasmError("Close the database, not its transaction handle", "ZOVA_MISUSE", 16));
+    if (this.#scope) return Promise.reject(new ZovaError("ZOVA_MISUSE", 16, "Close the database, not its transaction handle"));
     if (this.#closing) return this.#closing;
     const closing: Promise<void> = this.#shared.channel.close().then(
       () => undefined,
