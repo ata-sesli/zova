@@ -5,7 +5,7 @@
 
 int main(void) {
     for (int cycle = 0; cycle < 10; cycle++) {
-        assert(zw_create() == ZOVA_OK);
+        assert(zw_create(0) == ZOVA_OK);
         assert(zw_prepare("SELECT ?, ?, ?, ?, ?") == ZOVA_OK);
         assert(zw_bind(1, 0, 0, 0, NULL, 0) == ZOVA_OK);
         assert(zw_bind(2, 1, INT64_MIN, 0, NULL, 0) == ZOVA_OK);

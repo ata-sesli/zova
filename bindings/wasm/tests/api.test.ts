@@ -243,3 +243,66 @@ test("extension calls validate names before posting", async () => {
   expect(TestWorker.last.messages.slice(start).map(x => x.operation)).toEqual(["extension_install", "extensions_check_all"]);
   await db.close();
 });
+test("open options and conversion validate locally and reach initialize", async () => {
+  installWorker();
+  await expect(Database.createMemory({ pageSize: -1 })).rejects.toBeInstanceOf(ZovaWasmError);
+  await expect(Database.openPersistent("opts", { busyTimeoutMs: 1.5 })).rejects.toBeInstanceOf(ZovaWasmError);
+  await expect(Database.convertSqliteToPersistent("conv", "bytes" as never)).rejects.toBeInstanceOf(ZovaWasmError);
+  let db = await Database.createMemory({ pageSize: 8192 });
+  expect(TestWorker.last.messages[0]).toMatchObject({ operation: "initialize", args: { pageSize: 8192 } });
+  await db.close();
+  db = await Database.openPersistent("opts", { readOnly: true, busyTimeoutMs: 50 });
+  expect(TestWorker.last.messages[0]).toMatchObject({ args: { name: "opts", readOnly: true, busyTimeoutMs: 50 } });
+  await db.close();
+  db = await Database.openPersistentForExtensionUpgrade("opts");
+  expect(TestWorker.last.messages[0]).toMatchObject({ args: { name: "opts", upgrade: true } });
+  await db.close();
+  const data = Uint8Array.of(1, 2, 3);
+  db = await Database.convertSqliteToPersistent("conv", data);
+  expect(TestWorker.last.messages.map(x => x.operation)).toEqual(["initialize", "import_write", "import_finish"]);
+  expect(TestWorker.last.messages[0]).toMatchObject({ args: { name: "conv", importing: true, convert: true } });
+  await db.close();
+});
+test("parity calls validate before posting", async () => {
+  installWorker();
+  const db = await Database.createMemory();
+  const count = TestWorker.last.messages.length;
+  const bytes = new Uint8Array(1);
+  for (const call of [
+    () => db.kv.scan(bytes, { limit: -1 }),
+    () => db.kv.scan(bytes, { prefix: "a" as never, limit: 1 }),
+    () => db.kv.compareAndPut(bytes, bytes, "x" as never, bytes),
+    () => db.searchVectorsMultiI8("c", { queryValues: new Float32Array(2) as never, queryCount: 1, dimensions: 2, limit: 1 }),
+    () => db.getGraphNodesKeyed("g", [1n << 63n]),
+    () => db.getGraphEdgePayloads("g", [1 as never]),
+    () => db.graphWalkDirection({ graphName: "g", startNodeId: "a", maxDepth: 1, limit: 1 } as never),
+    () => db.graphScan({ graphName: "g", nodeLimit: 1, edgeLimit: 1, nodeAfter: { createdOrder: 1, key: 1n } as never }),
+    () => db.buildFreshGraphKeyed("g", [], [{ fromNodeOrdinal: 0, edgeType: "e", toNodeOrdinal: 0, payload: bytes }]),
+    () => db.registerFunction("f", 0, "module" as never),
+    () => db.registerFunction("f", 0, { module: "http://[", export: "f" }),
+  ]) await expect(call()).rejects.toBeInstanceOf(ZovaWasmError);
+  expect(TestWorker.last.messages.length).toBe(count);
+  await db.registerFunction("f", 1, { module: "https://example.test/fn.mjs", export: "f" }, { deterministic: true });
+  expect(TestWorker.last.messages.at(-1)).toMatchObject({ operation: "register_function",
+    args: { name: "f", arity: 1, module: "https://example.test/fn.mjs", export: "f", options: { deterministic: true, directOnly: false } } });
+  await db.graphWalkDirectionProfiled({ graphName: "g", startNodeId: "a", direction: "incoming", maxDepth: 1, limit: 1 });
+  expect(TestWorker.last.messages.at(-1)).toMatchObject({ operation: "graph_walk_profiled", args: { direction: "incoming" } });
+  await db.close();
+});
+test("fresh builds roll back on invalid input and close once finished", async () => {
+  installWorker();
+  const db = await Database.createMemory();
+  let build = await db.beginFreshBuild();
+  await build.tableRows("t", ["a"], [[1n]]);
+  await expect(build.tableRows("t", "a" as never, [])).rejects.toBeInstanceOf(ZovaWasmError);
+  expect(build.closed).toBe(true);
+  await expect(build.finish()).rejects.toBeInstanceOf(ZovaWasmError);
+  build = await db.beginFreshBuild();
+  await build.finish();
+  expect(build.closed).toBe(true);
+  await build.close();
+  expect(TestWorker.last.messages.slice(1).map(x => x.operation)).toEqual([
+    "fresh_build_begin", "fresh_build_rows", "fresh_build_abort", "fresh_build_begin", "fresh_build_finish",
+  ]);
+  await db.close();
+});

@@ -4,9 +4,11 @@
 #include <stdint.h>
 /* Private single-worker interface. Returned bytes remain owned by the bridge
  * until the next operation or close. Copy them before making another call. */
-int zw_create(void);
+int zw_create(uint32_t page_size);
 #ifdef ZOVA_WASM_OPFS
-int zw_open_file(int exists);
+int zw_open_file(int mode, uint32_t page_size, uint32_t flags, uint32_t busy_timeout_ms);
+int zw_convert(void);
+void zw_sql_result(int type, int64_t value, double floating, const uint8_t *data, size_t len);
 int zw_probe(void);
 int zw_migrate_stage(int verify);
 int zw_migrate_publish(void);

@@ -1214,7 +1214,7 @@ The v0.25 C ABI includes opaque-key graph batch mutation and lookup, keyed
 neighbors and topology scans, edge payload access, prepared fresh graph builds,
 and a generic fresh-build session for predeclared targets. These APIs are also
 declared by raw `zova-sys` and wrapped by the safe Rust, Python, Go, and
-JavaScript packages; the experimental browser WASM package does not expose them.
+JavaScript packages, and by the experimental browser WASM package.
 
 ### Zig
 

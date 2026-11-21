@@ -1,4 +1,5 @@
-import { Database, ZovaWasmError } from "/package/dist/index.js";
+import * as zova from "/package/dist/index.js";
+const { Database, ZovaWasmError } = zova;
 const assert = (condition, message) => { if (!condition) throw new Error(message); };
 const rejects = async promise => {
   try { await promise; } catch (error) {
@@ -520,6 +521,243 @@ try {
     try { await Database.openPersistent(missingName); } catch (error) { missing = error; }
     assert(missing instanceof ZovaWasmError && missing.status === fixture.missingPlugin.status && missing.message === fixture.missingPlugin.message,
       `missing plugin: ${missing?.status} ${missing?.message}, native ${fixture.missingPlugin.status} ${fixture.missingPlugin.message}`);
+  }
+
+  // Every C ABI call that applies in a browser, matching native zova-js (#228).
+  {
+    const bytes = value => new TextEncoder().encode(value);
+    const text = value => new TextDecoder().decode(value);
+    const statusOf = async promise => { try { await promise; return "ZOVA_OK"; } catch (error) { return error.status; } };
+
+    // ABI version.
+    const abi = await zova.abiVersion();
+    const parts = await zova.abiVersionParts();
+    assert(abi === `${parts.major}.${parts.minor}.${parts.patch}` && Object.isFrozen(parts), `ABI version ${abi}`);
+
+    // Creation and open options.
+    db = await Database.createMemory({ pageSize: 8192 });
+    assert((await db.query("PRAGMA page_size")).rows[0][0] === 8192n, "memory pageSize");
+    await db.close();
+    await status(Database.createMemory({ pageSize: 1000 }), "ZOVA_INVALID_ARGUMENT");
+    const optionsName = "options-" + crypto.randomUUID();
+    await status(Database.openPersistent(optionsName, { readOnly: true }), "ZOVA_NOT_ZOVA_DATABASE");
+    db = await Database.openPersistent(optionsName, { pageSize: 16384, busyTimeoutMs: 1234 });
+    assert((await db.query("PRAGMA page_size")).rows[0][0] === 16384n, "persistent pageSize");
+    assert((await db.query("PRAGMA busy_timeout")).rows[0][0] === 1234n, "busyTimeoutMs");
+    await db.exec("CREATE TABLE kept(v); INSERT INTO kept VALUES(5)");
+    await db.close();
+    db = await Database.openPersistent(optionsName, { readOnly: true });
+    assert((await db.query("SELECT v FROM kept")).rows[0][0] === 5n, "read-only read");
+    await rejects(db.exec("INSERT INTO kept VALUES(6)"));
+    await db.close();
+
+    // Conversion from an ordinary SQLite database.
+    const plain = new Uint8Array(await (await fetch("/plain.sqlite")).arrayBuffer());
+    const convertedName = "converted-" + crypto.randomUUID();
+    db = await Database.convertSqliteToPersistent(convertedName, plain);
+    assert((await db.query("SELECT body FROM notes WHERE id = 1")).rows[0][0] === "from sqlite", "converted rows");
+    await db.createGraph("after-convert");
+    await db.close();
+    db = await Database.openPersistent(convertedName);
+    assert(await db.hasGraph("after-convert"), "converted database reopens as Zova");
+    await db.close();
+    await rejects(Database.convertSqliteToPersistent(convertedName, plain));
+    const streamed = "converted-stream-" + crypto.randomUUID();
+    db = await Database.convertSqliteToPersistent(streamed, new Blob([plain]).stream());
+    assert((await db.query("SELECT count(*) FROM notes")).rows[0][0] === 1n, "streamed conversion");
+    await db.close();
+    await rejects(Database.convertSqliteToPersistent("not-sqlite-" + crypto.randomUUID(), bytes("not a database")));
+    assert(!(await Database.listPersistent()).some(item => item.name.startsWith("not-sqlite-")), "failed conversion leaves no database");
+
+    db = await Database.createMemory();
+    // KV scan and compare-and-set.
+    const ns = bytes("ns");
+    for (const key of ["a1", "a2", "a3", "b1"]) await db.kv.put(ns, bytes(key), bytes("v" + key));
+    const all = await db.kv.scan(ns, { limit: 100 });
+    assert(all.entries.map(entry => text(entry.key)).join() === "a1,a2,a3,b1" && !all.hasMore && text(all.entries[0].value) === "va1", "KV scan");
+    const first = await db.kv.scan(ns, { prefix: bytes("a"), limit: 2, keysOnly: true });
+    assert(first.entries.map(entry => text(entry.key)).join() === "a1,a2" && first.hasMore && first.entries[0].value.length === 0, "KV scan page");
+    const next = await db.kv.scan(ns, { prefix: bytes("a"), after: first.entries[1].key, limit: 2 });
+    assert(next.entries.map(entry => text(entry.key)).join() === "a3" && !next.hasMore, "KV scan continuation");
+    const bounded = await db.kv.scan(ns, { start: bytes("a2"), end: bytes("b"), limit: 10 });
+    assert(bounded.entries.map(entry => text(entry.key)).join() === "a2,a3", "KV scan bounds");
+    await status(db.kv.scan(ns, { limit: 0 }), "ZOVA_INVALID_ARGUMENT");
+    assert(await db.kv.putIfAbsent(ns, bytes("k"), bytes("v1")) && !await db.kv.putIfAbsent(ns, bytes("k"), bytes("other")), "putIfAbsent");
+    assert(!await db.kv.compareAndPut(ns, bytes("k"), bytes("stale"), bytes("v2")) && await db.kv.compareAndPut(ns, bytes("k"), bytes("v1"), bytes("v2")), "compareAndPut");
+    assert(!await db.kv.compareAndDelete(ns, bytes("k"), bytes("v1")) && await db.kv.compareAndDelete(ns, bytes("k"), bytes("v2")), "compareAndDelete");
+    assert(!await db.kv.compareAndPut(ns, bytes("missing"), new Uint8Array(), bytes("x")), "missing key never matches");
+
+    // Object compression.
+    await db.setObjectCompression("lz4");
+    const repetitive = new Uint8Array(1 << 16).fill(7);
+    const compressedId = await db.putObject(repetitive);
+    assert((await db.getObject(compressedId)).every(value => value === 7), "lz4 object round trip");
+    await db.setObjectCompression("none");
+    await status(db.setObjectCompression("zstd"), "ZOVA_INVALID_ARGUMENT");
+
+    // Multi-vector i8 search.
+    await db.createVectorCollection("codes", { dimensions: 2, metric: "cosine", elementType: "i8" });
+    await db.putVectors("codes", [
+      { id: "east", values: Int8Array.of(100, 0) }, { id: "north", values: Int8Array.of(0, 100) }, { id: "diag", values: Int8Array.of(70, 70) },
+    ]);
+    const queryValues = Int8Array.of(100, 0, 0, 100);
+    const multi = await db.searchVectorsMultiI8("codes", { queryValues, queryCount: 2, dimensions: 2, limit: 3 });
+    assert(multi[0].id === "diag" && multi.map(item => item.id).sort().join() === "diag,east,north", "multi-vector search");
+    const within = await db.searchVectorsMultiI8("codes", { queryValues, queryCount: 2, dimensions: 2, limit: 3, candidateIds: ["east", "north"] });
+    assert(within.map(item => item.id).sort().join() === "east,north", "multi-vector candidates");
+    const prefiltered = await db.searchVectorsMultiI8("codes", { queryValues, queryCount: 2, dimensions: 2, limit: 1,
+      mode: "cbm-prefilter-min-cosine", aggregation: "min-cosine", prefilterQueryIndex: 0, prefilterLimit: 2 });
+    assert(prefiltered.length === 1, "multi-vector prefilter");
+    await status(db.searchVectorsMultiI8("codes", { queryValues, queryCount: 2, dimensions: 2, limit: 1, mode: "nearest" }), "ZOVA_INVALID_ARGUMENT");
+
+    // Keyed graph calls.
+    const G = "code";
+    const gnode = (nodeId, kind = "file") => ({ graphName: G, nodeId, kind, targetType: "none" });
+    await db.createGraph(G);
+    const nodeKeys = await db.putGraphNodesKeyed([gnode("a"), gnode("b", "dir")]);
+    assert(nodeKeys instanceof BigInt64Array && nodeKeys.length === 2, "keyed node put");
+    const edgeKeys = await db.putGraphEdgesKeyed([{ graphName: G, fromNodeId: "a", edgeType: "imports", toNodeId: "b" }]);
+    assert(edgeKeys instanceof BigInt64Array && edgeKeys.length === 1, "keyed edge put");
+    const keyedNodes = await db.getGraphNodesKeyed(G, [nodeKeys[1], 999_999n, nodeKeys[0]]);
+    assert(keyedNodes[0].nodeId === "b" && keyedNodes[0].kind === "dir" && keyedNodes[0].nodeKey === nodeKeys[1]
+      && keyedNodes[1] === null && keyedNodes[2].nodeId === "a" && typeof keyedNodes[2].createdOrder === "bigint", "keyed node get");
+    const [foundEdge, missingEdge] = await db.getGraphEdgesKeyed(G, BigInt64Array.of(edgeKeys[0], 999_999n));
+    assert(missingEdge === null && foundEdge.sourceNodeKey === nodeKeys[0] && foundEdge.targetNodeKey === nodeKeys[1] && foundEdge.edgeType === "imports", "keyed edge get");
+    const keyedNeighbors = await db.graphNeighborsKeyed({ graphName: G, nodeId: "a", direction: "outgoing", limit: 10 });
+    assert(JSON.stringify(keyedNeighbors, (_, value) => typeof value === "bigint" ? String(value) : value)
+      === JSON.stringify([{ edgeKey: String(edgeKeys[0]), neighborNodeKey: String(nodeKeys[1]), nodeId: "b", kind: "dir", edgeType: "imports" }]), "keyed neighbors");
+    const degrees = await db.graphDegreesKeyed({ graphName: G, nodeKeys, direction: "outgoing" });
+    assert(degrees instanceof BigUint64Array && [...degrees].join() === "1,0", "keyed degrees");
+    assert([...await db.graphDegreesKeyed({ graphName: G, nodeKeys, direction: "incoming", edgeType: "imports" })].join() === "0,1", "keyed incoming degrees");
+    const payloads = await db.getGraphEdgePayloads(G, [edgeKeys[0], 999_999n]);
+    assert(payloads[0] instanceof Uint8Array && payloads[0].length === 0 && payloads[1] === null, "empty payloads");
+    await db.replaceGraphEdgePayloads(G, [{ edgeKey: edgeKeys[0], payload: Uint8Array.of(0, 7) }]);
+    assert((await db.getGraphEdgePayloads(G, edgeKeys))[0].join() === "0,7", "replaced payloads");
+    await rejects(db.getGraphNodesKeyed(G, [1n << 70n]));
+    const page1 = await db.graphScan({ graphName: G, nodeLimit: 1, edgeLimit: 5 });
+    assert(page1.nodes.map(item => item.nodeId).join() === "a" && page1.hasMoreNodes && page1.edges.length === 1 && !page1.hasMoreEdges, "graph scan");
+    const page2 = await db.graphScan({ graphName: G, nodeLimit: 5, edgeLimit: 5,
+      nodeAfter: { createdOrder: page1.nodes[0].createdOrder, key: page1.nodes[0].nodeKey },
+      edgeAfter: { createdOrder: page1.edges[0].createdOrder, key: page1.edges[0].edgeKey } });
+    assert(page2.nodes.map(item => item.nodeId).join() === "b" && !page2.hasMoreNodes && page2.edges.length === 0, "graph scan continuation");
+    await db.putGraphNodes([gnode("c")]);
+    await db.putGraphEdges([{ graphName: G, fromNodeId: "b", edgeType: "imports", toNodeId: "c" }]);
+    const walked = await db.graphWalkDirection({ graphName: G, startNodeId: "c", direction: "incoming", maxDepth: 2, limit: 10 });
+    assert(walked.map(item => item.nodeId + item.depth).join() === "c0,b1,a2", "directional walk");
+    const profiled = await db.graphWalkDirectionProfiled({ graphName: G, startNodeId: "a", direction: "outgoing", edgeType: "imports", maxDepth: 1, limit: 10 });
+    assert(profiled.items.map(item => item.nodeId).join() === "a,b" && profiled.profile.resultCount === 2 && profiled.profile.totalProfiledMs >= 0, "profiled walk");
+    await status(db.graphWalkDirection({ graphName: G, startNodeId: "a", direction: "sideways", maxDepth: 1, limit: 1 }), "ZOVA_INVALID_ARGUMENT");
+    await db.close();
+
+    // Fresh graph builders.
+    const freshNodes = [{ nodeId: "a", kind: "file", targetType: "none" }, { nodeId: "b", kind: "file", targetType: "none" }];
+    const imports = { fromNodeOrdinal: 0, edgeType: "imports", toNodeOrdinal: 1 };
+    db = await Database.createMemory();
+    const merged = await db.buildFreshGraphKeyed(G, freshNodes, [imports, imports]);
+    assert(merged.nodeKeys.length === 2 && merged.edgeKeys.length === 2 && merged.edgeKeys[0] === merged.edgeKeys[1]
+      && (await db.graphInfo(G)).edgeCount === 1n, "normalizing fresh graph");
+    await db.close();
+    db = await Database.createMemory();
+    await status(db.buildFreshGraphPreparedKeyed(G, freshNodes, [{ ...imports, payload: Uint8Array.of(1) }]), "ZOVA_INVALID_ARGUMENT");
+    const prepared = await db.buildFreshGraphPreparedKeyed(G, freshNodes, [imports]);
+    assert((await db.getGraphEdgesKeyed(G, prepared.edgeKeys))[0].targetNodeKey === prepared.nodeKeys[1], "prepared fresh graph");
+    await db.close();
+    db = await Database.createMemory();
+    const withPayloads = await db.buildFreshGraphPreparedKeyedWithPayloads(G, freshNodes, [{ ...imports, payload: bytes("w=1") }]);
+    assert(text((await db.getGraphEdgePayloads(G, withPayloads.edgeKeys))[0]) === "w=1", "fresh graph payloads");
+    await db.close();
+
+    // Fresh-build sessions.
+    const prepareFresh = async () => {
+      const fresh = await Database.createMemory();
+      await fresh.exec("create table files(id integer primary key, path text not null, size real, body blob); create virtual table bodies using fts5(body)");
+      await fresh.createVectorCollection("embeddings", { dimensions: 2, metric: "l2", elementType: "f32" });
+      return fresh;
+    };
+    const fileCount = async () => (await db.query("select count(*) from files")).rows[0][0];
+    db = await prepareFresh();
+    let build = await db.beginFreshBuild();
+    assert(build instanceof zova.FreshBuild && !build.closed, "fresh build begins");
+    await status(db.beginFreshBuild(), "ZOVA_MISUSE");
+    await build.tableRows("files", ["id", "path", "size", "body"], [[1n, "a.rs", 1.5, Uint8Array.of(0, 97)], [2n, "b.rs", null, Uint8Array.of(98)]]);
+    await build.ftsRows("bodies", ["body"], [["fn main"]]);
+    await build.graph(G, freshNodes, [{ ...imports, payload: Uint8Array.of(119) }]);
+    await build.vectors("embeddings", [{ id: "a.rs", values: Float32Array.of(1, 0) }]);
+    await rejects(db.exec("select 1"));
+    const built = await build.finish();
+    assert(build.closed && built.nodeKeys.length === 2 && built.edgeKeys.length === 1, "fresh build keys");
+    const { tableRows, ftsRows, vectorRows, payloadBytes } = built.profile;
+    assert(tableRows === 2 && ftsRows === 1 && vectorRows === 1 && payloadBytes === 1, `fresh build profile ${JSON.stringify(built.profile)}`);
+    assert(await fileCount() === 2n && (await db.query("select count(*) from bodies where bodies match 'main'")).rows[0][0] === 1n
+      && (await db.getGraphEdgePayloads(G, built.edgeKeys))[0][0] === 119 && await db.hasVector("embeddings", "a.rs"), "fresh build committed");
+    await status(build.abort(), "ZOVA_MISUSE");
+    await db.close();
+    db = await prepareFresh();
+    build = await db.beginFreshBuild();
+    await build.tableRows("files", ["id", "path"], [[1n, "a.rs"]]);
+    await status(build.tableRows("files", ["id", "path"], [[2n]]), "ZOVA_INVALID_ARGUMENT");
+    assert(build.closed && await fileCount() === 0n, "invalid rows roll back");
+    build = await db.beginFreshBuild();
+    await rejects(build.tableRows("files", ["id", "path"], [[1n, {}]]));
+    assert(build.closed, "unsupported value closes the session");
+    build = await db.beginFreshBuild();
+    await build.tableRows("files", ["id", "path"], [[1n, "a.rs"]]);
+    await build.abort();
+    assert(await fileCount() === 0n, "abort rolls back");
+    build = await db.beginFreshBuild();
+    await build.tableRows("files", ["id", "path"], [[1n, "a.rs"]]);
+    await build.close();
+    await build.close();
+    assert(await fileCount() === 0n, "close rolls back");
+    await status(build.finish(), "ZOVA_MISUSE");
+    build = await db.beginFreshBuild();
+    await rejects(build.tableRows("missing_table", ["id"], [[1n]]));
+    await rejects(build.finish());
+    build = await db.beginFreshBuild();
+    await build.tableRows("files", ["id", "path"], [[1n, "a.rs"]]);
+    await db.close();
+    // Closing the database ends an open session.
+    db = await prepareFresh();
+    await db.close();
+
+    // SQL functions run from a module the worker imports.
+    db = await Database.createMemory();
+    const fn = name => ({ module: "/sql-function-fixture.mjs", export: name });
+    const one = async sql => (await db.query(sql)).rows[0][0];
+    await db.registerFunction("echo", -1, fn("echo"), { deterministic: true });
+    await db.registerFunction("types", -1, fn("types"));
+    await db.registerFunction("plus", 2, fn("plus"), { innocuous: true });
+    await db.registerFunction("flag", 0, fn("flag"), { directOnly: true });
+    await db.registerFunction("half", 1, fn("half"));
+    await db.registerFunction("empty_value", 0, { module: new URL("/sql-function-fixture.mjs", location.href), export: "emptyValue" });
+    assert(await one("select types(42, 1.5, 'text', x'0001', null)") === "bigint:42,number:1.5,string:text,blob:0 1,null", "SQL function arguments");
+    assert(await one("select echo('héllo')") === "héllo" && (await one("select echo(x'ff')"))[0] === 255 && await one("select echo(null)") === null, "SQL function echo");
+    assert(await one("select plus(2, 3)") === 5n && await one("select flag()") === 1n && await one("select half(3)") === 1.5, "SQL function results");
+    assert(await one("select typeof(half(4))") === "real" && await one("select empty_value()") === null, "SQL function result types");
+    await db.exec("create table t(x integer); insert into t values (1), (2), (3)");
+    assert(await one("select sum(plus(x, 10)) from t") === 36n, "SQL function per row");
+    for (const [name, message] of [["boom", "RangeError: no luck"], ["weird", "unsupported SQL function result type Object"], ["huge", "outside the signed 64-bit range"]]) {
+      await db.registerFunction(name, 0, fn(name));
+      let failed;
+      try { await db.query(`select ${name}()`); } catch (error) { failed = error; }
+      assert(failed instanceof ZovaWasmError && failed.message.includes(message), `${name}: ${failed?.message}`);
+    }
+    assert(await one("select 1") === 1n, "connection usable after SQL function errors");
+    await status(db.registerFunction("bad", 0, fn("notAFunction")), "ZOVA_INVALID_ARGUMENT");
+    await status(db.registerFunction("bad", 0, { module: "/missing-module.mjs", export: "x" }), "ZOVA_INVALID_ARGUMENT");
+    for (const [name, arity] of [["", 0], ["ok", 200], ["bad name", 0]]) await status(db.registerFunction(name, arity, fn("echo")), "ZOVA_INVALID_ARGUMENT");
+    await rejects(db.query("select bad()"));
+    await db.close();
+
+    // Extension maintenance opens skip extension hooks.
+    const maintenanceName = "upgrade-" + crypto.randomUUID();
+    const h = await import("/helpers.mjs");
+    await h.seed(maintenanceName, await h.fetchBytes("/extension-missing.zova"));
+    await status(Database.openPersistentForExtensionUpgrade("missing-" + crypto.randomUUID()), "ZOVA_NOT_ZOVA_DATABASE");
+    db = await Database.openPersistentForExtensionUpgrade(maintenanceName);
+    assert(await statusOf(db.extensionUpgrade("c_test")) === "ZOVA_EXTENSION_UNAVAILABLE", "bare extension upgrade");
+    assert(await statusOf(db.extensionRebuild("c_test")) === "ZOVA_EXTENSION_UNAVAILABLE", "bare extension rebuild");
+    await db.close();
   }
 
   await fetch("/result", { method: "POST", body: JSON.stringify({ ok: true, packedPackage: true,
