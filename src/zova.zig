@@ -3257,5 +3257,6 @@ comptime {
         _ = @import("database_transactions_tests.zig");
         _ = @import("database_bound_stores_tests.zig");
         _ = @import("database_notifications_tests.zig");
+        _ = @import("database_concurrency_tests.zig");
     }
 }
