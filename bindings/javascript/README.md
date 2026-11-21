@@ -121,14 +121,46 @@ paths from database metadata. Native code/dependencies must match the host;
 close releases callback state before unloading libraries. Published 1.1.0 npm
 packages do not include this support.
 
-Extension authoring, application SQL callbacks, and explicit data upgrades
-remain unwrapped. See the
-[extension capability matrix](../../docs/extensions.md#availability-and-binding-matrix);
-the presence of low-level C declarations does not imply addon support.
+Extension authoring remains unwrapped. See the
+[extension capability matrix](../../docs/extensions.md#availability-and-binding-matrix).
 
-The advanced opaque-key, graph-scan, edge-payload, and fresh-build APIs are
-supported low-level C ABI/raw `zova-sys` surfaces. They are an intentional
-binding boundary and are not part of the JavaScript package's 1.x contract.
+## Low-level surfaces
+
+The synchronous `Database` wraps every function in the C ABI. Beyond the APIs
+above:
+
+- Opaque-key graph APIs: `putGraphNodesKeyed`, `putGraphEdgesKeyed`,
+  `getGraphNodesKeyed`, `getGraphEdgesKeyed` (a missing key gives `null`),
+  `graphNeighborsKeyed`, `graphDegreesKeyed`, `getGraphEdgePayloads`,
+  `replaceGraphEdgePayloads`, `graphScan` cursor pages, `graphWalkDirection`
+  (and `graphWalkDirectionProfiled`), and the `buildFreshGraph*Keyed`
+  builders. Keys are `bigint` values, returned as `BigInt64Array`; they are
+  opaque and do not survive a graph rebuild.
+- `beginFreshBuild()` returns a `FreshBuild` that loads tables, FTS tables,
+  one graph and vector collections into empty targets, then publishes them
+  together with `finish()`. `abort()`, `close()`, and any failure (including
+  invalid row values) roll the session back. While it is active, other calls
+  on the same `Database` fail and `close()` throws.
+- `searchVectorsMultiI8` scores i8 vectors against several query rows.
+- `registerFunction(name, arity, fn, options)` registers a scalar SQL
+  function. Arguments arrive as `null`, `bigint`, `number`, `string`, or
+  `Uint8Array`. A returned `number` is a SQL float, a `bigint` an integer, a
+  `boolean` 0 or 1. A thrown exception or an unsupported result fails the
+  statement. The function runs on the JavaScript thread while its statement
+  steps, so it must not use the same `Database` or its statements: that call
+  never returns.
+- `LinkedPlugin.fromAddress(address)` wraps a `zova_plugin_descriptor_v1`
+  linked into the process, for example from an FFI library. The descriptor
+  must stay valid for the rest of the process; a wrong address crashes it.
+  Pass linked plugins as `plugins` in `ExtensionOptions`, which
+  `Database.create/open`, `AsyncDatabase.create/open`, `migrateDatabase`, and
+  `AsyncDatabase.migrateDatabase` accept.
+- `Database.openForExtensionUpgrade` opens without running installed extension
+  hooks, so `extensionUpgrade` and `extensionRebuild` can repair a database
+  whose extension check fails.
+- `Database.createWithOptions(path, { pageSize })`, `abiVersionParts`, and the
+  `verifyExtensionBundle`, `trustExtensionBundle` and `untrustExtensionBundle`
+  functions.
 
 ## Queued async work
 
@@ -185,7 +217,6 @@ The binding preserves Zova's status name, numeric status, and native message.
 
 ## Deferred capabilities
 
-- JavaScript-authored SQLite callbacks
 - extension authoring
 - async transaction callbacks
 - direct Bun FFI

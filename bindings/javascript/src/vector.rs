@@ -33,6 +33,21 @@ pub struct NativeVector {
     pub values: Either3<Float32Array, Uint16Array, Int8Array>,
 }
 
+/// Options for `searchVectorsMultiI8`. `query_values` holds `query_count`
+/// rows of `dimensions` values each.
+#[napi(object)]
+pub struct NativeVectorMultiI8SearchOptions {
+    pub query_values: Int8Array,
+    pub query_count: u32,
+    pub dimensions: u32,
+    pub candidate_ids: Option<Vec<String>>,
+    pub mode: Option<String>,
+    pub aggregation: Option<String>,
+    pub prefilter_query_index: Option<u32>,
+    pub prefilter_limit: Option<u32>,
+    pub limit: u32,
+}
+
 #[napi(object)]
 pub struct NativeVectorSearchResult {
     pub id: String,
@@ -77,7 +92,28 @@ fn element_type_name(value: zova::VectorElementType) -> &'static str {
     }
 }
 
-fn values_ref(values: &Either3<Float32Array, Uint16Array, Int8Array>) -> zova::VectorValues<'_> {
+fn multi_i8_mode(value: Option<&str>) -> Result<zova::VectorMultiI8SearchMode> {
+    match value.unwrap_or("global-min-cosine") {
+        "global-min-cosine" => Ok(zova::VectorMultiI8SearchMode::GlobalMinCosine),
+        "cbm-prefilter-min-cosine" => Ok(zova::VectorMultiI8SearchMode::CbmPrefilterMinCosine),
+        value => Err(invalid_argument_error(format!(
+            "unsupported multi-vector search mode: {value}"
+        ))),
+    }
+}
+
+fn multi_i8_aggregation(value: Option<&str>) -> Result<zova::VectorMultiI8Aggregation> {
+    match value.unwrap_or("min-cosine") {
+        "min-cosine" => Ok(zova::VectorMultiI8Aggregation::MinCosine),
+        value => Err(invalid_argument_error(format!(
+            "unsupported multi-vector aggregation: {value}"
+        ))),
+    }
+}
+
+pub(crate) fn values_ref(
+    values: &Either3<Float32Array, Uint16Array, Int8Array>,
+) -> zova::VectorValues<'_> {
     match values {
         Either3::A(values) => zova::VectorValues::F32(values.as_ref()),
         Either3::B(values) => zova::VectorValues::F16(values.as_ref()),
@@ -282,6 +318,33 @@ impl NativeDatabase {
         }
         .map_err(zova_error)?;
         Ok(native_search_results(results))
+    }
+
+    /// Score each stored i8 vector against several query rows at once.
+    #[napi]
+    pub fn search_vectors_multi_i8(
+        &self,
+        collection_name: String,
+        options: NativeVectorMultiI8SearchOptions,
+    ) -> Result<Vec<NativeVectorSearchResult>> {
+        let candidates = options.candidate_ids.as_deref().unwrap_or_default();
+        let candidates = candidates.iter().map(String::as_str).collect::<Vec<_>>();
+        self.state
+            .database()?
+            .search_vectors_multi_i8(zova::VectorMultiI8SearchOptions {
+                collection_name: &collection_name,
+                query_values: options.query_values.as_ref(),
+                query_count: options.query_count as usize,
+                dimensions: options.dimensions as usize,
+                candidate_ids: &candidates,
+                mode: multi_i8_mode(options.mode.as_deref())?,
+                aggregation: multi_i8_aggregation(options.aggregation.as_deref())?,
+                prefilter_query_index: options.prefilter_query_index.unwrap_or(0) as usize,
+                prefilter_limit: options.prefilter_limit.unwrap_or(0) as usize,
+                limit: options.limit as usize,
+            })
+            .map(native_search_results)
+            .map_err(zova_error)
     }
 
     #[napi]

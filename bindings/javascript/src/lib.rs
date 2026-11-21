@@ -5,9 +5,12 @@ use napi_derive::napi;
 mod async_ops;
 mod database;
 mod error;
+mod fresh_build;
 mod graph;
+mod graph_keyed;
 mod object;
 mod progress;
+mod sql_function;
 mod statement;
 mod subscription;
 mod vector;
@@ -23,6 +26,23 @@ pub fn abi_version() -> String {
     unsafe { CStr::from_ptr(zova_sys::zova_abi_version_string()) }
         .to_string_lossy()
         .into_owned()
+}
+
+#[napi(object)]
+pub struct NativeAbiVersion {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+}
+
+#[napi]
+pub fn abi_version_parts() -> NativeAbiVersion {
+    let version = zova::abi_version();
+    NativeAbiVersion {
+        major: version.major,
+        minor: version.minor,
+        patch: version.patch,
+    }
 }
 
 #[napi]

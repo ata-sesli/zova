@@ -121,7 +121,7 @@ fn target_type_name(value: zova::GraphTargetType) -> &'static str {
     }
 }
 
-fn direction(value: &str) -> Result<zova::GraphNeighborDirection> {
+pub(crate) fn direction(value: &str) -> Result<zova::GraphNeighborDirection> {
     match value {
         "outgoing" => Ok(zova::GraphNeighborDirection::Outgoing),
         "incoming" => Ok(zova::GraphNeighborDirection::Incoming),
@@ -129,6 +129,49 @@ fn direction(value: &str) -> Result<zova::GraphNeighborDirection> {
             "unsupported graph direction: {value}"
         ))),
     }
+}
+
+pub(crate) fn graph_node_inputs(
+    inputs: &[NativeGraphNodeInput],
+) -> Result<Vec<zova::GraphNodeInput<'_>>> {
+    inputs
+        .iter()
+        .map(|input| {
+            Ok(zova::GraphNodeInput {
+                graph_name: &input.graph_name,
+                node_id: &input.node_id,
+                kind: &input.kind,
+                target_type: target_type(&input.target_type)?,
+                target_namespace: input.target_namespace.as_deref(),
+                target_ref: input.target_ref.as_deref(),
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn graph_edge_inputs(inputs: &[NativeGraphEdgeInput]) -> Vec<zova::GraphEdgeInput<'_>> {
+    inputs
+        .iter()
+        .map(|input| zova::GraphEdgeInput {
+            graph_name: &input.graph_name,
+            from_node_id: &input.from_node_id,
+            edge_type: &input.edge_type,
+            to_node_id: &input.to_node_id,
+        })
+        .collect()
+}
+
+pub(crate) fn native_walk_items(items: Vec<zova::GraphWalkItem>) -> Vec<NativeGraphWalkItem> {
+    items
+        .into_iter()
+        .map(|item| NativeGraphWalkItem {
+            node_id: item.node_id,
+            kind: item.kind,
+            depth: item.depth,
+            predecessor_node_id: item.predecessor_node_id,
+            edge_type: item.edge_type,
+        })
+        .collect()
 }
 
 fn graph_info(info: zova::GraphInfo) -> NativeGraphInfo {
@@ -217,19 +260,7 @@ impl NativeDatabase {
 
     #[napi]
     pub fn put_graph_nodes(&self, inputs: Vec<NativeGraphNodeInput>) -> Result<()> {
-        let inputs = inputs
-            .iter()
-            .map(|input| {
-                Ok(zova::GraphNodeInput {
-                    graph_name: &input.graph_name,
-                    node_id: &input.node_id,
-                    kind: &input.kind,
-                    target_type: target_type(&input.target_type)?,
-                    target_namespace: input.target_namespace.as_deref(),
-                    target_ref: input.target_ref.as_deref(),
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let inputs = graph_node_inputs(&inputs)?;
         self.state
             .database()?
             .put_graph_nodes(&inputs)
@@ -285,15 +316,7 @@ impl NativeDatabase {
 
     #[napi]
     pub fn put_graph_edges(&self, inputs: Vec<NativeGraphEdgeInput>) -> Result<()> {
-        let inputs = inputs
-            .iter()
-            .map(|input| zova::GraphEdgeInput {
-                graph_name: &input.graph_name,
-                from_node_id: &input.from_node_id,
-                edge_type: &input.edge_type,
-                to_node_id: &input.to_node_id,
-            })
-            .collect::<Vec<_>>();
+        let inputs = graph_edge_inputs(&inputs);
         self.state
             .database()?
             .put_graph_edges(&inputs)
@@ -411,18 +434,7 @@ impl NativeDatabase {
                 max_depth: options.max_depth,
                 limit: options.limit as usize,
             })
-            .map(|items| {
-                items
-                    .into_iter()
-                    .map(|item| NativeGraphWalkItem {
-                        node_id: item.node_id,
-                        kind: item.kind,
-                        depth: item.depth,
-                        predecessor_node_id: item.predecessor_node_id,
-                        edge_type: item.edge_type,
-                    })
-                    .collect()
-            })
+            .map(native_walk_items)
             .map_err(zova_error)
     }
 }

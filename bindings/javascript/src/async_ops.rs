@@ -7,9 +7,9 @@ use napi::{Env, Result, Task};
 use napi_derive::napi;
 
 use crate::database::{
-    native_kv_scan_page, reclaim_options, DatabaseState, NativeDatabase, NativeExtensionOptions,
-    NativeFormatInfo, NativeKvEntry, NativeKvScanOptions, NativeKvScanPage, NativeReclaimedMember,
-    OwnedKvScanOptions,
+    native_kv_scan_page, reclaim_options, DatabaseState, ExtensionSelection, NativeDatabase,
+    NativeExtensionOptions, NativeFormatInfo, NativeKvEntry, NativeKvScanOptions, NativeKvScanPage,
+    NativeReclaimedMember, OwnedKvScanOptions,
 };
 use crate::error::zova_error;
 use crate::graph::{
@@ -688,7 +688,7 @@ pub struct MigrateTask {
     source: String,
     destination: String,
     verify: bool,
-    extensions: zova::ExtensionOptions,
+    extensions: Result<ExtensionSelection>,
     progress: TaskProgress,
 }
 
@@ -701,20 +701,32 @@ impl Task for MigrateTask {
             verify: self.verify,
         };
         let progress = &self.progress;
+        let extensions = match std::mem::replace(
+            &mut self.extensions,
+            Err(napi::Error::from_reason("migration already ran")),
+        ) {
+            Ok(extensions) => extensions,
+            Err(error) => {
+                progress.finish();
+                return Err(error);
+            }
+        };
         let result = if progress.is_active() {
-            zova::migrate_database_with_progress(
+            zova::migrate_database_with_plugins_and_progress(
                 &self.source,
                 &self.destination,
                 options,
-                &self.extensions,
+                &extensions.options,
+                &extensions.plugins,
                 |event| progress.report(event),
             )
         } else {
-            zova::migrate_database_with_extensions(
+            zova::migrate_database_with_plugins(
                 &self.source,
                 &self.destination,
                 options,
-                &self.extensions,
+                &extensions.options,
+                &extensions.plugins,
             )
         };
         progress.finish();
@@ -748,7 +760,7 @@ pub fn async_migrate_database(
         source,
         destination,
         verify: verify.unwrap_or(true),
-        extensions: NativeExtensionOptions::options_or_default(extensions),
+        extensions: NativeExtensionOptions::selection(extensions),
         progress: TaskProgress::new(progress, cancel),
     })
 }

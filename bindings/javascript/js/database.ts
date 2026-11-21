@@ -1,15 +1,30 @@
 import native = require("../index.js");
 
 import { callNative, normalizeNativeError, ZovaError } from "./errors.js";
+import { FreshBuild } from "./fresh-build.js";
+import { graphKeys } from "./graph.js";
 import type {
   GraphDegreeOptions,
   GraphEdge,
   GraphEdgeInput,
+  GraphEdgePayloadReplacement,
+  GraphFreshEdgeInput,
+  GraphFreshKeys,
+  GraphFreshNodeInput,
   GraphInfo,
+  GraphKeyedDegreeOptions,
+  GraphKeyedEdge,
+  GraphKeyedNeighbor,
+  GraphKeyedNode,
+  GraphKeys,
   GraphNeighbor,
   GraphNeighborsOptions,
   GraphNode,
   GraphNodeInput,
+  GraphScanOptions,
+  GraphScanPage,
+  GraphWalkDirectionOptions,
+  GraphWalkDirectionProfiled,
   GraphWalkItem,
   GraphWalkOptions,
 } from "./graph.js";
@@ -22,11 +37,13 @@ import {
   type ObjectManifestChunkInput,
   type ObjectPutOptions,
 } from "./object.js";
+import { sqlFunctionTrampoline } from "./sql-function.js";
+import type { SqlFunction, SqlFunctionOptions } from "./sql-function.js";
 import { Statement } from "./statement.js";
 import { Subscription } from "./subscription.js";
 import { nativeExtensionOptions, reclaimedMember } from "./types.js";
 import type {
-  ExtensionInfo, ExtensionOptions, FormatInfo, KvEntry, KvScanOptions, KvScanPage, OpenOptions, ReclaimedMember,
+  CreateOptions, ExtensionInfo, ExtensionOptions, FormatInfo, KvEntry, KvScanOptions, KvScanPage, OpenOptions, ReclaimedMember,
   ReclaimOptions,
 } from "./types.js";
 import type {
@@ -34,6 +51,7 @@ import type {
   VectorCollectionInfo,
   VectorCollectionOptions,
   VectorInput,
+  VectorMultiI8SearchOptions,
   VectorSearchOptions,
   VectorSearchResult,
   VectorValues,
@@ -61,6 +79,13 @@ export class Database {
     );
   }
 
+  /** Create a new database with creation-time settings such as page size. */
+  static createWithOptions(path: string, options: CreateOptions = {}): Database {
+    return new Database(
+      callNative(() => native.NativeDatabase.createWithOptions(path, options.pageSize)),
+    );
+  }
+
   static createMemory(): Database {
     return new Database(callNative(() => native.NativeDatabase.createMemory()));
   }
@@ -75,6 +100,23 @@ export class Database {
     return new Database(
       callNative(() =>
         native.NativeDatabase.open(path, {
+          readOnly: options.readOnly,
+          busyTimeoutMs: options.busyTimeoutMs,
+          extensions: nativeExtensionOptions(options.extensions),
+        }),
+      ),
+    );
+  }
+
+  /**
+   * Open for extension maintenance without running installed extension hooks,
+   * so `extensionUpgrade` and `extensionRebuild` can repair a database whose
+   * extension check fails.
+   */
+  static openForExtensionUpgrade(path: string, options: OpenOptions = {}): Database {
+    return new Database(
+      callNative(() =>
+        native.NativeDatabase.openForExtensionUpgrade(path, {
           readOnly: options.readOnly,
           busyTimeoutMs: options.busyTimeoutMs,
           extensions: nativeExtensionOptions(options.extensions),
@@ -231,6 +273,51 @@ export class Database {
 
   dropExtension(name: string): void {
     callNative(() => this.#native.dropExtension(name));
+  }
+
+  /** Run an installed extension's upgrade hook to the loaded version. */
+  extensionUpgrade(name: string): void {
+    callNative(() => this.#native.extensionUpgrade(name));
+  }
+
+  /** Run an installed extension's rebuild hook to recreate derived state. */
+  extensionRebuild(name: string): void {
+    callNative(() => this.#native.extensionRebuild(name));
+  }
+
+  /**
+   * Register a scalar SQL function on this connection. `arity` -1 accepts any
+   * number of arguments. Arguments arrive as `SqlValue`s: integers are
+   * `bigint`, floats `number`. A thrown exception or an unsupported result
+   * fails the statement with that message.
+   *
+   * The function runs synchronously while a statement steps. It must not use
+   * this database or its statements: that call waits for the statement
+   * already running and never returns.
+   */
+  registerFunction(
+    name: string,
+    arity: number,
+    fn: SqlFunction,
+    options: SqlFunctionOptions = {},
+  ): void {
+    callNative(() =>
+      this.#native.registerFunction(
+        name,
+        arity,
+        {
+          deterministic: options.deterministic,
+          directOnly: options.directOnly,
+          innocuous: options.innocuous,
+        },
+        sqlFunctionTrampoline(fn),
+      ),
+    );
+  }
+
+  /** Start a fresh-build session; see `FreshBuild`. */
+  beginFreshBuild(): FreshBuild {
+    return new FreshBuild(callNative(() => this.#native.beginFreshBuild()));
   }
 
   backupTo(destination: string, verify = true): void {
@@ -649,6 +736,108 @@ export class Database {
     return callNative(() => this.#native.graphWalk(options));
   }
 
+  /** Insert or replace nodes atomically; returns their keys in input order. */
+  putGraphNodesKeyed(inputs: readonly GraphNodeInput[]): BigInt64Array {
+    return callNative(() => this.#native.putGraphNodesKeyed([...inputs]));
+  }
+
+  /** Insert edges atomically; returns their keys in input order. */
+  putGraphEdgesKeyed(inputs: readonly GraphEdgeInput[]): BigInt64Array {
+    return callNative(() => this.#native.putGraphEdgesKeyed([...inputs]));
+  }
+
+  /** Look nodes up by key; a missing key gives `null`. */
+  getGraphNodesKeyed(graphName: string, nodeKeys: GraphKeys): (GraphKeyedNode | null)[] {
+    return callNative(() =>
+      this.#native.getGraphNodesKeyed(graphName, graphKeys(nodeKeys)).map((node) => node ?? null),
+    );
+  }
+
+  /** Look edges up by key; a missing key gives `null`. */
+  getGraphEdgesKeyed(graphName: string, edgeKeys: GraphKeys): (GraphKeyedEdge | null)[] {
+    return callNative(() =>
+      this.#native.getGraphEdgesKeyed(graphName, graphKeys(edgeKeys)).map((edge) => edge ?? null),
+    );
+  }
+
+  graphNeighborsKeyed(options: GraphNeighborsOptions): GraphKeyedNeighbor[] {
+    return callNative(() => this.#native.graphNeighborsKeyed(options));
+  }
+
+  /** Degree of each node key, in input order. */
+  graphDegreesKeyed(options: GraphKeyedDegreeOptions): BigUint64Array {
+    return callNative(() =>
+      this.#native.graphDegreesKeyed({ ...options, nodeKeys: graphKeys(options.nodeKeys) }),
+    );
+  }
+
+  /** Payload of each edge key; a missing key gives `null`. */
+  getGraphEdgePayloads(graphName: string, edgeKeys: GraphKeys): (Uint8Array | null)[] {
+    return callNative(() =>
+      this.#native
+        .getGraphEdgePayloads(graphName, graphKeys(edgeKeys))
+        .map((payload) => payload ?? null),
+    );
+  }
+
+  /** Replace edge payloads atomically. */
+  replaceGraphEdgePayloads(
+    graphName: string,
+    replacements: readonly GraphEdgePayloadReplacement[],
+  ): void {
+    callNative(() => this.#native.replaceGraphEdgePayloads(graphName, [...replacements]));
+  }
+
+  /** One page of nodes and edges in creation order. */
+  graphScan(options: GraphScanOptions): GraphScanPage {
+    return callNative(() => this.#native.graphScan(options));
+  }
+
+  /** Breadth-first walk along outgoing or incoming edges. */
+  graphWalkDirection(options: GraphWalkDirectionOptions): GraphWalkItem[] {
+    return callNative(() => this.#native.graphWalkDirection(options));
+  }
+
+  graphWalkDirectionProfiled(options: GraphWalkDirectionOptions): GraphWalkDirectionProfiled {
+    return callNative(() => this.#native.graphWalkDirectionProfiled(options));
+  }
+
+  /**
+   * Create and load a new graph in one transaction. Duplicate edges are
+   * merged, so their inputs share one key.
+   */
+  buildFreshGraphKeyed(
+    graphName: string,
+    nodes: readonly GraphFreshNodeInput[],
+    edges: readonly GraphFreshEdgeInput[],
+  ): GraphFreshKeys {
+    return callNative(() =>
+      this.#native.buildFreshGraphKeyed(graphName, [...nodes], [...edges]),
+    );
+  }
+
+  /** Like `buildFreshGraphKeyed` for input that is already unique and valid. */
+  buildFreshGraphPreparedKeyed(
+    graphName: string,
+    nodes: readonly GraphFreshNodeInput[],
+    edges: readonly GraphFreshEdgeInput[],
+  ): GraphFreshKeys {
+    return callNative(() =>
+      this.#native.buildFreshGraphPreparedKeyed(graphName, [...nodes], [...edges]),
+    );
+  }
+
+  /** `buildFreshGraphPreparedKeyed` with edge payloads; an omitted payload is empty. */
+  buildFreshGraphPreparedKeyedWithPayloads(
+    graphName: string,
+    nodes: readonly GraphFreshNodeInput[],
+    edges: readonly GraphFreshEdgeInput[],
+  ): GraphFreshKeys {
+    return callNative(() =>
+      this.#native.buildFreshGraphPreparedKeyedWithPayloads(graphName, [...nodes], [...edges]),
+    );
+  }
+
   searchVectors(
     collectionName: string,
     query: VectorValues,
@@ -664,6 +853,20 @@ export class Database {
         options.maxDistance,
         options.limit,
       ),
+    );
+  }
+
+  /** Score each stored i8 vector against several query rows at once. */
+  searchVectorsMultiI8(
+    collectionName: string,
+    options: VectorMultiI8SearchOptions,
+  ): VectorSearchResult[] {
+    return callNative(() =>
+      this.#native.searchVectorsMultiI8(collectionName, {
+        ...options,
+        candidateIds:
+          options.candidateIds === undefined ? undefined : [...options.candidateIds],
+      }),
     );
   }
 

@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use napi::bindgen_prelude::{BigInt, Uint8Array};
@@ -78,6 +79,7 @@ impl DatabaseState {
 }
 
 #[napi(object)]
+#[derive(Default)]
 pub struct NativeOpenOptions {
     pub read_only: Option<bool>,
     pub busy_timeout_ms: Option<u32>,
@@ -88,18 +90,60 @@ pub struct NativeOpenOptions {
 pub struct NativeExtensionOptions {
     pub bundle_paths: Vec<String>,
     pub trust_store_path: Option<String>,
+    /// Addresses of `zova_plugin_descriptor_v1` values linked into this process.
+    pub plugins: Option<Vec<BigInt>>,
+}
+
+/// Bundle selection plus linked plugins, copied out of JavaScript memory.
+pub(crate) struct ExtensionSelection {
+    pub(crate) options: zova::ExtensionOptions,
+    pub(crate) plugins: Vec<zova::LinkedPlugin>,
 }
 
 impl NativeExtensionOptions {
-    pub(crate) fn options_or_default(options: Option<Self>) -> zova::ExtensionOptions {
-        options.map(Self::into_options).unwrap_or_default()
+    pub(crate) fn selection(options: Option<Self>) -> Result<ExtensionSelection> {
+        let Some(options) = options else {
+            return Ok(ExtensionSelection {
+                options: zova::ExtensionOptions::default(),
+                plugins: Vec::new(),
+            });
+        };
+        let plugins = options
+            .plugins
+            .unwrap_or_default()
+            .iter()
+            .map(linked_plugin)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(ExtensionSelection {
+            options: zova::ExtensionOptions {
+                bundle_paths: options.bundle_paths.into_iter().map(Into::into).collect(),
+                trust_store_path: options.trust_store_path.map(Into::into),
+            },
+            plugins,
+        })
     }
+}
 
-    fn into_options(self) -> zova::ExtensionOptions {
-        zova::ExtensionOptions {
-            bundle_paths: self.bundle_paths.into_iter().map(Into::into).collect(),
-            trust_store_path: self.trust_store_path.map(Into::into),
-        }
+/// Wrap a descriptor address received from `LinkedPlugin.fromAddress`.
+fn linked_plugin(address: &BigInt) -> Result<zova::LinkedPlugin> {
+    let (negative, value, lossless) = address.get_u64();
+    if negative || !lossless || value == 0 || usize::try_from(value).is_err() {
+        return Err(invalid_argument_error(
+            "linked plugin address must be a non-zero pointer",
+        ));
+    }
+    let descriptor = value as usize as *const zova_sys::plugin::zova_plugin_descriptor_v1;
+    // SAFETY: `LinkedPlugin.fromAddress` documents the caller's obligation: the
+    // address names a descriptor that, with everything it points to, stays
+    // valid and unchanged for the rest of the process and satisfies the
+    // `zova_plugin.h` contract.
+    Ok(unsafe { zova::LinkedPlugin::new(&*descriptor) })
+}
+
+fn open_options(options: &NativeOpenOptions) -> zova::OpenOptions {
+    zova::OpenOptions {
+        read_only: options.read_only.unwrap_or(false),
+        busy_timeout_ms: options.busy_timeout_ms.unwrap_or(0),
     }
 }
 
@@ -207,15 +251,47 @@ pub fn migrate_database(
     verify: Option<bool>,
     extensions: Option<NativeExtensionOptions>,
 ) -> Result<()> {
-    zova::migrate_database_with_extensions(
+    let selection = NativeExtensionOptions::selection(extensions)?;
+    zova::migrate_database_with_plugins(
         source,
         destination,
         zova::MigrateOptions {
             verify: verify.unwrap_or(true),
         },
-        &NativeExtensionOptions::options_or_default(extensions),
+        &selection.options,
+        &selection.plugins,
     )
     .map_err(zova_error)
+}
+
+/// Load a `.zovaext` bundle's entrypoint and validate it without trusting it.
+#[napi]
+#[cfg_attr(test, allow(dead_code))]
+pub fn verify_extension_bundle(
+    bundle_path: String,
+    trust_store_path: Option<String>,
+) -> Result<()> {
+    zova::verify_extension_bundle(bundle_path, trust_store_path.as_deref().map(Path::new))
+        .map_err(zova_error)
+}
+
+/// Record a bundle's manifest and library hash in the selected trust store.
+#[napi]
+#[cfg_attr(test, allow(dead_code))]
+pub fn trust_extension_bundle(bundle_path: String, trust_store_path: Option<String>) -> Result<()> {
+    zova::trust_extension_bundle(bundle_path, trust_store_path.as_deref().map(Path::new))
+        .map_err(zova_error)
+}
+
+/// Remove trust records matching a bundle path or extension name.
+#[napi]
+#[cfg_attr(test, allow(dead_code))]
+pub fn untrust_extension_bundle(
+    identifier: String,
+    trust_store_path: Option<String>,
+) -> Result<bool> {
+    zova::untrust_extension_bundle(&identifier, trust_store_path.as_deref().map(Path::new))
+        .map_err(zova_error)
 }
 
 #[napi]
@@ -257,51 +333,90 @@ pub struct NativeDatabase {
     pub(crate) state: Arc<DatabaseState>,
 }
 
+impl NativeDatabase {
+    fn from_shared(database: zova::SharedDatabase) -> Self {
+        Self {
+            state: Arc::new(DatabaseState::new(database)),
+        }
+    }
+}
+
 #[napi]
 impl NativeDatabase {
     #[napi(factory)]
     pub fn create(path: String, extensions: Option<NativeExtensionOptions>) -> Result<Self> {
-        let extensions = extensions
-            .map(NativeExtensionOptions::into_options)
-            .unwrap_or_default();
-        let database =
-            zova::SharedDatabase::create_with_extensions(path, &extensions).map_err(zova_error)?;
-        Ok(Self {
-            state: Arc::new(DatabaseState::new(database)),
-        })
+        let selection = NativeExtensionOptions::selection(extensions)?;
+        let database = if selection.plugins.is_empty() {
+            zova::SharedDatabase::create_with_extensions(path, &selection.options)
+        } else {
+            zova::SharedDatabase::create_with_plugins(path, &selection.options, &selection.plugins)
+        }
+        .map_err(zova_error)?;
+        Ok(Self::from_shared(database))
+    }
+
+    /// Create a database with creation-time settings. `page_size` 0 or absent
+    /// keeps SQLite's default.
+    #[napi(factory)]
+    pub fn create_with_options(path: String, page_size: Option<u32>) -> Result<Self> {
+        let database = zova::SharedDatabase::create_with_options(
+            path,
+            zova::CreateOptions {
+                page_size: page_size.unwrap_or(0),
+            },
+        )
+        .map_err(zova_error)?;
+        Ok(Self::from_shared(database))
     }
 
     #[napi(factory)]
     pub fn create_memory() -> Result<Self> {
         let database = zova::SharedDatabase::create_memory().map_err(zova_error)?;
-        Ok(Self {
-            state: Arc::new(DatabaseState::new(database)),
-        })
+        Ok(Self::from_shared(database))
     }
 
     #[napi(factory)]
     pub fn open(path: String, options: Option<NativeOpenOptions>) -> Result<Self> {
-        let options = options.unwrap_or(NativeOpenOptions {
-            read_only: None,
-            busy_timeout_ms: None,
-            extensions: None,
-        });
-        let extensions = options
-            .extensions
-            .map(NativeExtensionOptions::into_options)
-            .unwrap_or_default();
-        let database = zova::SharedDatabase::open_with_extensions(
-            path,
-            zova::OpenOptions {
-                read_only: options.read_only.unwrap_or(false),
-                busy_timeout_ms: options.busy_timeout_ms.unwrap_or(0),
-            },
-            &extensions,
-        )
+        let options = options.unwrap_or_default();
+        let open = open_options(&options);
+        let selection = NativeExtensionOptions::selection(options.extensions)?;
+        let database = if selection.plugins.is_empty() {
+            zova::SharedDatabase::open_with_extensions(path, open, &selection.options)
+        } else {
+            zova::SharedDatabase::open_with_plugins(
+                path,
+                open,
+                &selection.options,
+                &selection.plugins,
+            )
+        }
         .map_err(zova_error)?;
-        Ok(Self {
-            state: Arc::new(DatabaseState::new(database)),
-        })
+        Ok(Self::from_shared(database))
+    }
+
+    /// Open for extension maintenance without running installed extension
+    /// hooks, so `extensionUpgrade` and `extensionRebuild` can repair a
+    /// database whose extension check fails.
+    #[napi(factory)]
+    pub fn open_for_extension_upgrade(
+        path: String,
+        options: Option<NativeOpenOptions>,
+    ) -> Result<Self> {
+        let options = options.unwrap_or_default();
+        let open = open_options(&options);
+        let selection = NativeExtensionOptions::selection(options.extensions)?;
+        let database = if selection.plugins.is_empty() {
+            zova::SharedDatabase::open_for_extension_upgrade(path, open, &selection.options)
+        } else {
+            zova::SharedDatabase::open_for_extension_upgrade_with_plugins(
+                path,
+                open,
+                &selection.options,
+                &selection.plugins,
+            )
+        }
+        .map_err(zova_error)?;
+        Ok(Self::from_shared(database))
     }
 
     #[napi]
@@ -395,6 +510,24 @@ impl NativeDatabase {
         self.state
             .database()?
             .install_extension(&name)
+            .map_err(zova_error)
+    }
+
+    /// Run an installed extension's upgrade hook to the loaded version.
+    #[napi]
+    pub fn extension_upgrade(&self, name: String) -> Result<()> {
+        self.state
+            .database()?
+            .extension_upgrade(&name)
+            .map_err(zova_error)
+    }
+
+    /// Run an installed extension's rebuild hook to recreate derived state.
+    #[napi]
+    pub fn extension_rebuild(&self, name: String) -> Result<()> {
+        self.state
+            .database()?
+            .extension_rebuild(&name)
             .map_err(zova_error)
     }
 

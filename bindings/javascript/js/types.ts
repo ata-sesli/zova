@@ -1,3 +1,4 @@
+import type { LinkedPlugin } from "./extension.js";
 import type { ProgressMember } from "./progress.js";
 
 export enum Step {
@@ -13,17 +14,31 @@ export interface OpenOptions {
   readonly extensions?: ExtensionOptions;
 }
 
-/** Explicit native bundle selection, not a trust grant. Code must match the host. */
+/**
+ * Explicit native bundle selection, not a trust grant. Code must match the
+ * host. `plugins` adds descriptors linked into this process.
+ */
 export interface ExtensionOptions {
-  readonly bundlePaths: readonly string[];
+  readonly bundlePaths?: readonly string[];
   readonly trustStorePath?: string;
+  readonly plugins?: readonly LinkedPlugin[];
 }
 
-/** Copy only the array container for the synchronous native request. */
+/** Settings applied when a new database file is created. */
+export interface CreateOptions {
+  /** SQLite page size in bytes; omitted or 0 keeps SQLite's default. */
+  readonly pageSize?: number;
+}
+
+/** Copy only the array containers for the synchronous native request. */
 export function nativeExtensionOptions(options?: ExtensionOptions):
-  { bundlePaths: string[]; trustStorePath?: string } | undefined {
+  { bundlePaths: string[]; trustStorePath?: string; plugins?: bigint[] } | undefined {
   return options
-    ? { bundlePaths: [...options.bundlePaths], trustStorePath: options.trustStorePath }
+    ? {
+        bundlePaths: [...(options.bundlePaths ?? [])],
+        trustStorePath: options.trustStorePath,
+        plugins: options.plugins?.map((plugin) => plugin.address),
+      }
     : undefined;
 }
 
