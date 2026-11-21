@@ -46,6 +46,46 @@ impl Database {
         let db = self.raw_ptr();
         drop_extension_raw(db, |status| self.status(status), name)
     }
+
+    /// Run the installed extension's one declared forward upgrade path inside
+    /// an operation-atomic savepoint. Open with
+    /// [`Database::open_for_extension_upgrade`] first.
+    pub fn extension_upgrade(&mut self, name: &str) -> Result<()> {
+        let db = self.raw_ptr();
+        extension_upgrade_raw(db, |status| self.status(status), name)
+    }
+
+    /// Rebuild an extension's derived storage at its installed version.
+    pub fn extension_rebuild(&mut self, name: &str) -> Result<()> {
+        let db = self.raw_ptr();
+        extension_rebuild_raw(db, |status| self.status(status), name)
+    }
+}
+
+pub(crate) fn extension_upgrade_raw(
+    db: *mut zova_sys::zova_database,
+    status: impl FnOnce(i32) -> Result<()>,
+    name: &str,
+) -> Result<()> {
+    let name = cstring(name, "extension name")?;
+    let request = zova_sys::zova_database_extension_request {
+        db,
+        name: name.as_ptr(),
+    };
+    status(unsafe { zova_sys::zova_database_extension_upgrade(&request) })
+}
+
+pub(crate) fn extension_rebuild_raw(
+    db: *mut zova_sys::zova_database,
+    status: impl FnOnce(i32) -> Result<()>,
+    name: &str,
+) -> Result<()> {
+    let name = cstring(name, "extension name")?;
+    let request = zova_sys::zova_database_extension_request {
+        db,
+        name: name.as_ptr(),
+    };
+    status(unsafe { zova_sys::zova_database_extension_rebuild(&request) })
 }
 
 pub(crate) fn install_extension_raw(

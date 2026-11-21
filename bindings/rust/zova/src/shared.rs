@@ -1,13 +1,16 @@
 use crate::database::{
-    backup_flags, compact_flags, cstring, empty_message, path_to_cstring, reclaim_request,
-    reclaimed_members, restore_flags, take_message, BackupOptions, CompactOptions, ReclaimOptions,
-    ReclaimedMember, RestoreOptions,
+    backup_flags, compact_flags, create_with_options_raw, cstring, empty_message,
+    open_with_extensions_raw, open_with_plugins_raw, path_to_cstring, reclaim_request,
+    reclaimed_members, restore_flags, take_message, BackupOptions, CompactOptions, CreateOptions,
+    LinkedPlugin, OpenMode, ReclaimOptions, ReclaimedMember, RestoreOptions,
 };
 use crate::error::{Error, Result, Status};
 use crate::extension::{
     check_extension_raw, check_extensions_raw, drop_extension_raw, extension_info_raw,
-    install_extension_raw, list_extensions_raw, ExtensionInfo,
+    extension_rebuild_raw, extension_upgrade_raw, install_extension_raw, list_extensions_raw,
+    ExtensionInfo,
 };
+use crate::fresh_build::{FreshBuildResult, FreshSession, FreshValue};
 use crate::graph::{
     create_graph_raw, delete_graph_edge_raw, delete_graph_edges_raw, delete_graph_node_raw,
     delete_graph_nodes_raw, delete_graph_raw, get_graph_edge_raw, get_graph_node_raw,
@@ -16,6 +19,16 @@ use crate::graph::{
     put_graph_node_raw, put_graph_nodes_raw, GraphDegreeOptions, GraphEdge, GraphEdgeInput,
     GraphInfo, GraphNeighbor, GraphNeighborsOptions, GraphNode, GraphNodeInput, GraphWalkItem,
     GraphWalkOptions,
+};
+use crate::graph_keyed::{
+    build_fresh_graph_keyed_raw, build_fresh_graph_prepared_keyed_with_payloads_raw,
+    get_graph_edge_payloads_raw, get_graph_edges_keyed_raw, get_graph_nodes_keyed_raw,
+    graph_degrees_keyed_raw, graph_neighbors_keyed_raw, graph_scan_raw,
+    graph_walk_direction_profiled_raw, graph_walk_direction_raw, put_graph_edges_keyed_raw,
+    put_graph_nodes_keyed_raw, replace_graph_edge_payloads_raw, GraphEdgePayloadReplacement,
+    GraphFreshEdgeInput, GraphFreshEdgePayloadInput, GraphFreshKeys, GraphFreshNodeInput,
+    GraphKeyedDegreeOptions, GraphKeyedEdge, GraphKeyedNeighbor, GraphKeyedNode, GraphScanOptions,
+    GraphScanPage, GraphWalkDirectionOptions, GraphWalkProfile,
 };
 use crate::kv::{
     kv_clear_namespace_raw, kv_compare_and_delete_raw, kv_compare_and_put_raw, kv_count_raw,
@@ -30,14 +43,18 @@ use crate::object::{
     ObjectCompression, ObjectId, ObjectManifest, ObjectManifestChunk, ObjectPutOptions,
 };
 use crate::progress::{Progress, ProgressBridge};
+use crate::sql_function::{register_function_raw, SqlFunctionFlags, SqlFunctionResult, SqlValue};
 use crate::statement::{ColumnType, Step};
 use crate::vector::{
     candidate_ptrs, delete_vectors_raw, empty_collection_info, empty_search_results, empty_vector,
-    take_collection_info, take_collection_list, take_search_results, take_vector, vector_inputs,
-    Vector, VectorCollectionInfo, VectorCollectionOptions, VectorInput, VectorSearchResult,
-    VectorValues,
+    search_vectors_multi_i8_raw, take_collection_info, take_collection_list, take_search_results,
+    take_vector, vector_inputs, Vector, VectorCollectionInfo, VectorCollectionOptions, VectorInput,
+    VectorMultiI8SearchOptions, VectorSearchResult, VectorValues,
 };
-use crate::{ExtensionOptions, OpenOptions};
+use crate::{
+    ExtensionOptions, GraphFreshEdgePayloadInput as FreshEdgeInput,
+    GraphFreshNodeInput as FreshNodeInput, OpenOptions,
+};
 use std::cell::Cell;
 use std::ffi::CStr;
 use std::fmt;
@@ -47,6 +64,15 @@ use std::path::Path;
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+
+/// Active fresh-build session on a [`SharedDatabase`].
+///
+/// While it is active, every other call on the shared handle fails. Dropping
+/// an unfinished session rolls it back.
+pub struct SharedFreshBuild {
+    inner: Arc<SharedDatabaseInner>,
+    session: FreshSession,
+}
 
 /// Cloneable, thread-safe Rust wrapper for one serialized Zova database handle.
 ///
@@ -221,9 +247,9 @@ impl SharedDatabase {
         path: impl AsRef<Path>,
         extensions: &ExtensionOptions,
     ) -> Result<Self> {
-        Self::from_raw(crate::database::open_with_extensions_raw(
+        Self::from_raw(open_with_extensions_raw(
             path.as_ref(),
-            true,
+            OpenMode::Create,
             OpenOptions::default(),
             extensions,
         )?)
@@ -236,11 +262,77 @@ impl SharedDatabase {
         options: OpenOptions,
         extensions: &ExtensionOptions,
     ) -> Result<Self> {
-        Self::from_raw(crate::database::open_with_extensions_raw(
+        Self::from_raw(open_with_extensions_raw(
             path.as_ref(),
-            false,
+            OpenMode::Open,
             options,
             extensions,
+        )?)
+    }
+
+    /// Create a new database with creation-time settings such as page size.
+    pub fn create_with_options(path: impl AsRef<Path>, options: CreateOptions) -> Result<Self> {
+        Self::from_raw(create_with_options_raw(path.as_ref(), options)?)
+    }
+
+    /// Create with selected bundles plus plugins linked into this process.
+    pub fn create_with_plugins(
+        path: impl AsRef<Path>,
+        extensions: &ExtensionOptions,
+        plugins: &[LinkedPlugin],
+    ) -> Result<Self> {
+        Self::from_raw(open_with_plugins_raw(
+            path.as_ref(),
+            OpenMode::Create,
+            OpenOptions::default(),
+            extensions,
+            plugins,
+        )?)
+    }
+
+    /// Open with selected bundles plus plugins linked into this process.
+    pub fn open_with_plugins(
+        path: impl AsRef<Path>,
+        options: OpenOptions,
+        extensions: &ExtensionOptions,
+        plugins: &[LinkedPlugin],
+    ) -> Result<Self> {
+        Self::from_raw(open_with_plugins_raw(
+            path.as_ref(),
+            OpenMode::Open,
+            options,
+            extensions,
+            plugins,
+        )?)
+    }
+
+    /// Open for extension maintenance without running installed hooks; see
+    /// [`Database::open_for_extension_upgrade`](crate::Database::open_for_extension_upgrade).
+    pub fn open_for_extension_upgrade(
+        path: impl AsRef<Path>,
+        options: OpenOptions,
+        extensions: &ExtensionOptions,
+    ) -> Result<Self> {
+        Self::from_raw(open_with_extensions_raw(
+            path.as_ref(),
+            OpenMode::ExtensionUpgrade,
+            options,
+            extensions,
+        )?)
+    }
+
+    pub fn open_for_extension_upgrade_with_plugins(
+        path: impl AsRef<Path>,
+        options: OpenOptions,
+        extensions: &ExtensionOptions,
+        plugins: &[LinkedPlugin],
+    ) -> Result<Self> {
+        Self::from_raw(open_with_plugins_raw(
+            path.as_ref(),
+            OpenMode::ExtensionUpgrade,
+            options,
+            extensions,
+            plugins,
         )?)
     }
 
@@ -1607,6 +1699,250 @@ impl SharedDatabase {
         )
     }
 
+    pub fn put_graph_nodes_keyed(&self, inputs: &[GraphNodeInput<'_>]) -> Result<Vec<i64>> {
+        let _guard = self.inner.enter()?;
+        put_graph_nodes_keyed_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            inputs,
+        )
+    }
+
+    pub fn put_graph_edges_keyed(&self, inputs: &[GraphEdgeInput<'_>]) -> Result<Vec<i64>> {
+        let _guard = self.inner.enter()?;
+        put_graph_edges_keyed_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            inputs,
+        )
+    }
+
+    pub fn get_graph_nodes_keyed(
+        &self,
+        graph_name: &str,
+        node_keys: &[i64],
+    ) -> Result<Vec<Option<GraphKeyedNode>>> {
+        let _guard = self.inner.enter()?;
+        get_graph_nodes_keyed_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            node_keys,
+        )
+    }
+
+    pub fn get_graph_edges_keyed(
+        &self,
+        graph_name: &str,
+        edge_keys: &[i64],
+    ) -> Result<Vec<Option<GraphKeyedEdge>>> {
+        let _guard = self.inner.enter()?;
+        get_graph_edges_keyed_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            edge_keys,
+        )
+    }
+
+    pub fn graph_neighbors_keyed(
+        &self,
+        options: GraphNeighborsOptions<'_>,
+    ) -> Result<Vec<GraphKeyedNeighbor>> {
+        let _guard = self.inner.enter()?;
+        graph_neighbors_keyed_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            options,
+        )
+    }
+
+    pub fn graph_degrees_keyed(&self, options: GraphKeyedDegreeOptions<'_>) -> Result<Vec<u64>> {
+        let _guard = self.inner.enter()?;
+        graph_degrees_keyed_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            options,
+        )
+    }
+
+    pub fn get_graph_edge_payloads(
+        &self,
+        graph_name: &str,
+        edge_keys: &[i64],
+    ) -> Result<Vec<Option<Vec<u8>>>> {
+        let _guard = self.inner.enter()?;
+        get_graph_edge_payloads_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            edge_keys,
+        )
+    }
+
+    pub fn replace_graph_edge_payloads(
+        &self,
+        graph_name: &str,
+        replacements: &[GraphEdgePayloadReplacement<'_>],
+    ) -> Result<()> {
+        let _guard = self.inner.enter()?;
+        replace_graph_edge_payloads_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            replacements,
+        )
+    }
+
+    pub fn graph_scan(&self, options: GraphScanOptions<'_>) -> Result<GraphScanPage> {
+        let _guard = self.inner.enter()?;
+        graph_scan_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            options,
+        )
+    }
+
+    pub fn graph_walk_direction(
+        &self,
+        options: GraphWalkDirectionOptions<'_>,
+    ) -> Result<Vec<GraphWalkItem>> {
+        let _guard = self.inner.enter()?;
+        graph_walk_direction_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            options,
+        )
+    }
+
+    pub fn graph_walk_direction_profiled(
+        &self,
+        options: GraphWalkDirectionOptions<'_>,
+    ) -> Result<(Vec<GraphWalkItem>, GraphWalkProfile)> {
+        let _guard = self.inner.enter()?;
+        graph_walk_direction_profiled_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            options,
+        )
+    }
+
+    pub fn build_fresh_graph_keyed(
+        &self,
+        graph_name: &str,
+        nodes: &[GraphFreshNodeInput<'_>],
+        edges: &[GraphFreshEdgeInput<'_>],
+    ) -> Result<GraphFreshKeys> {
+        let _guard = self.inner.enter()?;
+        build_fresh_graph_keyed_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            nodes,
+            edges,
+            false,
+        )
+    }
+
+    pub fn build_fresh_graph_prepared_keyed(
+        &self,
+        graph_name: &str,
+        nodes: &[GraphFreshNodeInput<'_>],
+        edges: &[GraphFreshEdgeInput<'_>],
+    ) -> Result<GraphFreshKeys> {
+        let _guard = self.inner.enter()?;
+        build_fresh_graph_keyed_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            nodes,
+            edges,
+            true,
+        )
+    }
+
+    pub fn build_fresh_graph_prepared_keyed_with_payloads(
+        &self,
+        graph_name: &str,
+        nodes: &[GraphFreshNodeInput<'_>],
+        edges: &[GraphFreshEdgePayloadInput<'_>],
+    ) -> Result<GraphFreshKeys> {
+        let _guard = self.inner.enter()?;
+        build_fresh_graph_prepared_keyed_with_payloads_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            nodes,
+            edges,
+        )
+    }
+
+    pub fn search_vectors_multi_i8(
+        &self,
+        options: VectorMultiI8SearchOptions<'_>,
+    ) -> Result<Vec<VectorSearchResult>> {
+        let _guard = self.inner.enter()?;
+        search_vectors_multi_i8_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            options,
+        )
+    }
+
+    /// Start a fresh-build session; see [`Database::begin_fresh_build`](crate::Database::begin_fresh_build).
+    pub fn begin_fresh_build(&self) -> Result<SharedFreshBuild> {
+        let _guard = self.inner.enter()?;
+        let session = FreshSession::begin(self.inner.raw_ptr(), |status| {
+            self.inner.status_locked(status)
+        })?;
+        Ok(SharedFreshBuild {
+            inner: Arc::clone(&self.inner),
+            session,
+        })
+    }
+
+    pub fn extension_upgrade(&self, name: &str) -> Result<()> {
+        let _guard = self.inner.enter()?;
+        extension_upgrade_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            name,
+        )
+    }
+
+    pub fn extension_rebuild(&self, name: &str) -> Result<()> {
+        let _guard = self.inner.enter()?;
+        extension_rebuild_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            name,
+        )
+    }
+
+    /// Register a scalar SQL function on this connection. See
+    /// [`Database::register_function`]. The function runs on whichever thread
+    /// steps a statement, one call at a time.
+    pub fn register_function<F>(
+        &self,
+        name: &str,
+        arity: i32,
+        flags: SqlFunctionFlags,
+        function: F,
+    ) -> Result<()>
+    where
+        F: Fn(&[SqlValue<'_>]) -> SqlFunctionResult + Send + 'static,
+    {
+        let _guard = self.inner.enter()?;
+        register_function_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            name,
+            arity,
+            flags,
+            function,
+        )
+    }
+
     pub fn install_extension(&self, name: &str) -> Result<()> {
         let _guard = self.inner.enter()?;
         install_extension_raw(
@@ -2121,6 +2457,226 @@ impl SharedDatabaseGuard<'_> {
             self.inner.raw_ptr(),
             |status| self.inner.status_locked(status),
             options,
+        )
+    }
+
+    pub fn put_graph_nodes_keyed(&mut self, inputs: &[GraphNodeInput<'_>]) -> Result<Vec<i64>> {
+        self.inner.ensure_usable()?;
+        put_graph_nodes_keyed_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            inputs,
+        )
+    }
+
+    pub fn put_graph_edges_keyed(&mut self, inputs: &[GraphEdgeInput<'_>]) -> Result<Vec<i64>> {
+        self.inner.ensure_usable()?;
+        put_graph_edges_keyed_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            inputs,
+        )
+    }
+
+    pub fn get_graph_nodes_keyed(
+        &mut self,
+        graph_name: &str,
+        node_keys: &[i64],
+    ) -> Result<Vec<Option<GraphKeyedNode>>> {
+        self.inner.ensure_usable()?;
+        get_graph_nodes_keyed_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            node_keys,
+        )
+    }
+
+    pub fn get_graph_edges_keyed(
+        &mut self,
+        graph_name: &str,
+        edge_keys: &[i64],
+    ) -> Result<Vec<Option<GraphKeyedEdge>>> {
+        self.inner.ensure_usable()?;
+        get_graph_edges_keyed_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            edge_keys,
+        )
+    }
+
+    pub fn graph_neighbors_keyed(
+        &mut self,
+        options: GraphNeighborsOptions<'_>,
+    ) -> Result<Vec<GraphKeyedNeighbor>> {
+        self.inner.ensure_usable()?;
+        graph_neighbors_keyed_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            options,
+        )
+    }
+
+    pub fn graph_degrees_keyed(
+        &mut self,
+        options: GraphKeyedDegreeOptions<'_>,
+    ) -> Result<Vec<u64>> {
+        self.inner.ensure_usable()?;
+        graph_degrees_keyed_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            options,
+        )
+    }
+
+    pub fn get_graph_edge_payloads(
+        &mut self,
+        graph_name: &str,
+        edge_keys: &[i64],
+    ) -> Result<Vec<Option<Vec<u8>>>> {
+        self.inner.ensure_usable()?;
+        get_graph_edge_payloads_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            edge_keys,
+        )
+    }
+
+    pub fn replace_graph_edge_payloads(
+        &mut self,
+        graph_name: &str,
+        replacements: &[GraphEdgePayloadReplacement<'_>],
+    ) -> Result<()> {
+        self.inner.ensure_usable()?;
+        replace_graph_edge_payloads_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            replacements,
+        )
+    }
+
+    pub fn graph_scan(&mut self, options: GraphScanOptions<'_>) -> Result<GraphScanPage> {
+        self.inner.ensure_usable()?;
+        graph_scan_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            options,
+        )
+    }
+
+    pub fn graph_walk_direction(
+        &mut self,
+        options: GraphWalkDirectionOptions<'_>,
+    ) -> Result<Vec<GraphWalkItem>> {
+        self.inner.ensure_usable()?;
+        graph_walk_direction_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            options,
+        )
+    }
+
+    pub fn graph_walk_direction_profiled(
+        &mut self,
+        options: GraphWalkDirectionOptions<'_>,
+    ) -> Result<(Vec<GraphWalkItem>, GraphWalkProfile)> {
+        self.inner.ensure_usable()?;
+        graph_walk_direction_profiled_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            options,
+        )
+    }
+
+    pub fn build_fresh_graph_keyed(
+        &mut self,
+        graph_name: &str,
+        nodes: &[GraphFreshNodeInput<'_>],
+        edges: &[GraphFreshEdgeInput<'_>],
+    ) -> Result<GraphFreshKeys> {
+        self.inner.ensure_usable()?;
+        build_fresh_graph_keyed_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            nodes,
+            edges,
+            false,
+        )
+    }
+
+    pub fn build_fresh_graph_prepared_keyed(
+        &mut self,
+        graph_name: &str,
+        nodes: &[GraphFreshNodeInput<'_>],
+        edges: &[GraphFreshEdgeInput<'_>],
+    ) -> Result<GraphFreshKeys> {
+        self.inner.ensure_usable()?;
+        build_fresh_graph_keyed_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            nodes,
+            edges,
+            true,
+        )
+    }
+
+    pub fn build_fresh_graph_prepared_keyed_with_payloads(
+        &mut self,
+        graph_name: &str,
+        nodes: &[GraphFreshNodeInput<'_>],
+        edges: &[GraphFreshEdgePayloadInput<'_>],
+    ) -> Result<GraphFreshKeys> {
+        self.inner.ensure_usable()?;
+        build_fresh_graph_prepared_keyed_with_payloads_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            graph_name,
+            nodes,
+            edges,
+        )
+    }
+
+    pub fn extension_upgrade(&mut self, name: &str) -> Result<()> {
+        self.inner.ensure_usable()?;
+        extension_upgrade_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            name,
+        )
+    }
+
+    pub fn extension_rebuild(&mut self, name: &str) -> Result<()> {
+        self.inner.ensure_usable()?;
+        extension_rebuild_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            name,
+        )
+    }
+
+    pub fn register_function<F>(
+        &mut self,
+        name: &str,
+        arity: i32,
+        flags: SqlFunctionFlags,
+        function: F,
+    ) -> Result<()>
+    where
+        F: Fn(&[SqlValue<'_>]) -> SqlFunctionResult + Send + 'static,
+    {
+        self.inner.ensure_usable()?;
+        register_function_raw(
+            self.inner.raw_ptr(),
+            |status| self.inner.status_locked(status),
+            name,
+            arity,
+            flags,
+            function,
         )
     }
 
@@ -2761,6 +3317,92 @@ impl fmt::Debug for SharedDatabase {
 impl fmt::Debug for SharedStatement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SharedStatement").finish_non_exhaustive()
+    }
+}
+
+impl SharedFreshBuild {
+    pub fn table_rows(
+        &mut self,
+        table_name: &str,
+        columns: &[&str],
+        values: &[FreshValue<'_>],
+    ) -> Result<()> {
+        let _guard = self.inner.enter()?;
+        let inner = &self.inner;
+        self.session.rows(
+            |status| inner.status_locked(status),
+            table_name,
+            columns,
+            values,
+            false,
+        )
+    }
+
+    pub fn fts_rows(
+        &mut self,
+        table_name: &str,
+        columns: &[&str],
+        values: &[FreshValue<'_>],
+    ) -> Result<()> {
+        let _guard = self.inner.enter()?;
+        let inner = &self.inner;
+        self.session.rows(
+            |status| inner.status_locked(status),
+            table_name,
+            columns,
+            values,
+            true,
+        )
+    }
+
+    pub fn graph(
+        &mut self,
+        graph_name: &str,
+        nodes: &[FreshNodeInput<'_>],
+        edges: &[FreshEdgeInput<'_>],
+    ) -> Result<()> {
+        let _guard = self.inner.enter()?;
+        let inner = &self.inner;
+        self.session.graph(
+            |status| inner.status_locked(status),
+            graph_name,
+            nodes,
+            edges,
+        )
+    }
+
+    pub fn vectors(&mut self, collection_name: &str, vectors: &[VectorInput<'_>]) -> Result<()> {
+        let _guard = self.inner.enter()?;
+        let inner = &self.inner;
+        self.session.vectors(
+            |status| inner.status_locked(status),
+            collection_name,
+            vectors,
+        )
+    }
+
+    pub fn finish(mut self) -> Result<FreshBuildResult> {
+        let _guard = self.inner.enter()?;
+        let inner = &self.inner;
+        self.session.finish(|status| inner.status_locked(status))
+    }
+
+    pub fn abort(mut self) -> Result<()> {
+        let _guard = self.inner.enter()?;
+        let inner = &self.inner;
+        self.session.abort(|status| inner.status_locked(status))
+    }
+}
+
+impl Drop for SharedFreshBuild {
+    fn drop(&mut self) {
+        self.session.destroy();
+    }
+}
+
+impl fmt::Debug for SharedFreshBuild {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SharedFreshBuild").finish_non_exhaustive()
     }
 }
 

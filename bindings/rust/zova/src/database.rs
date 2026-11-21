@@ -39,6 +39,55 @@ pub struct ExtensionOptions {
     pub trust_store_path: Option<PathBuf>,
 }
 
+/// Settings applied when a new database file is created.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CreateOptions {
+    /// SQLite page size in bytes; 0 keeps SQLite's default.
+    pub page_size: u32,
+}
+
+/// A C-v1 plugin descriptor linked into the host process.
+///
+/// Linked plugins need no `.zovaext` bundle and no trust record: the host
+/// vouches for code it links. They compose with the bundled registry and any
+/// selected bundles exactly as bundle plugins do.
+#[derive(Clone, Copy)]
+pub struct LinkedPlugin {
+    descriptor: &'static zova_sys::plugin::zova_plugin_descriptor_v1,
+}
+
+impl LinkedPlugin {
+    /// Wrap a statically allocated descriptor.
+    ///
+    /// # Safety
+    ///
+    /// The descriptor and everything it points to must satisfy the
+    /// `zova_plugin.h` contract: valid NUL-terminated metadata strings, and
+    /// hooks that are safe to call on any thread that uses a database handle
+    /// opened with this plugin.
+    pub const unsafe fn new(
+        descriptor: &'static zova_sys::plugin::zova_plugin_descriptor_v1,
+    ) -> Self {
+        Self { descriptor }
+    }
+}
+
+// Safety: the descriptor is 'static and immutable; `LinkedPlugin::new` makes
+// the caller vouch that its hooks are safe to call from any thread.
+unsafe impl Send for LinkedPlugin {}
+unsafe impl Sync for LinkedPlugin {}
+
+impl fmt::Debug for LinkedPlugin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = if self.descriptor.name.is_null() {
+            None
+        } else {
+            Some(unsafe { CStr::from_ptr(self.descriptor.name) }.to_string_lossy())
+        };
+        f.debug_struct("LinkedPlugin").field("name", &name).finish()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BackupOptions {
     pub verify: bool,
@@ -269,9 +318,26 @@ impl ExtensionCArgs {
 
 /// Synchronous C request shared by both safe handle types. The C handle owns
 /// its registry/libraries after success, never these temporary C strings.
+/// Which native open entry point a request uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenMode {
+    Create,
+    Open,
+    /// Extension-maintenance open that skips installed hooks.
+    ExtensionUpgrade,
+}
+
+fn open_flags(options: OpenOptions) -> u32 {
+    if options.read_only {
+        zova_sys::ZOVA_OPEN_READ_ONLY
+    } else {
+        0
+    }
+}
+
 pub(crate) fn open_with_extensions_raw(
     path: &Path,
-    create: bool,
+    mode: OpenMode,
     options: OpenOptions,
     extensions: &ExtensionOptions,
 ) -> Result<*mut zova_sys::zova_database> {
@@ -281,11 +347,7 @@ pub(crate) fn open_with_extensions_raw(
     let mut message = empty_message();
     let request = zova_sys::zova_database_open_extensions_request {
         path: path.as_ptr(),
-        flags: if options.read_only {
-            zova_sys::ZOVA_OPEN_READ_ONLY
-        } else {
-            0
-        },
+        flags: open_flags(options),
         busy_timeout_ms: options.busy_timeout_ms,
         extension_bundle_paths: extension_args.bundle_paths(),
         extension_bundle_count: extension_args.bundle_count(),
@@ -295,16 +357,97 @@ pub(crate) fn open_with_extensions_raw(
     };
     // SAFETY: all inputs and outputs stay live throughout the synchronous call.
     let status = unsafe {
-        if create {
-            zova_sys::zova_database_create_with_extensions(&request)
-        } else {
-            zova_sys::zova_database_open_with_extensions(&request)
+        match mode {
+            OpenMode::Create => zova_sys::zova_database_create_with_extensions(&request),
+            OpenMode::Open => zova_sys::zova_database_open_with_extensions(&request),
+            OpenMode::ExtensionUpgrade => {
+                zova_sys::zova_database_open_for_extension_upgrade(&request)
+            }
         }
     };
     if status != zova_sys::ZOVA_OK {
         return Err(Error::from_status(status, take_message(&mut message)));
     }
     Ok(db)
+}
+
+/// [`open_with_extensions_raw`] that also composes host-linked plugins.
+pub(crate) fn open_with_plugins_raw(
+    path: &Path,
+    mode: OpenMode,
+    options: OpenOptions,
+    extensions: &ExtensionOptions,
+    plugins: &[LinkedPlugin],
+) -> Result<*mut zova_sys::zova_database> {
+    let path = path_to_cstring(path)?;
+    let extension_args = ExtensionCArgs::new(extensions)?;
+    let plugin_ptrs = plugin_pointers(plugins);
+    let mut db = ptr::null_mut();
+    let mut message = empty_message();
+    let request = zova_sys::zova_database_open_plugins_request {
+        path: path.as_ptr(),
+        flags: open_flags(options),
+        busy_timeout_ms: options.busy_timeout_ms,
+        extension_bundle_paths: extension_args.bundle_paths(),
+        extension_bundle_count: extension_args.bundle_count(),
+        trust_store_path: extension_args.trust_store_path(),
+        plugins: slice_or_null(&plugin_ptrs),
+        plugin_count: plugin_ptrs.len(),
+        out_db: &mut db,
+        out_error_message: &mut message,
+    };
+    // SAFETY: all inputs and outputs stay live throughout the synchronous call;
+    // `LinkedPlugin` descriptors are 'static, so they outlive the handle.
+    let status = unsafe {
+        match mode {
+            OpenMode::Create => zova_sys::zova_database_create_with_plugins(&request),
+            OpenMode::Open => zova_sys::zova_database_open_with_plugins(&request),
+            OpenMode::ExtensionUpgrade => {
+                zova_sys::zova_database_open_for_extension_upgrade_with_plugins(&request)
+            }
+        }
+    };
+    if status != zova_sys::ZOVA_OK {
+        return Err(Error::from_status(status, take_message(&mut message)));
+    }
+    Ok(db)
+}
+
+pub(crate) fn create_with_options_raw(
+    path: &Path,
+    options: CreateOptions,
+) -> Result<*mut zova_sys::zova_database> {
+    let path = path_to_cstring(path)?;
+    let mut db = ptr::null_mut();
+    let mut message = empty_message();
+    let request = zova_sys::zova_database_create_options_request {
+        path: path.as_ptr(),
+        page_size: options.page_size,
+        out_db: &mut db,
+        out_error_message: &mut message,
+    };
+    let status = unsafe { zova_sys::zova_database_create_with_options(&request) };
+    if status != zova_sys::ZOVA_OK {
+        return Err(Error::from_status(status, take_message(&mut message)));
+    }
+    Ok(db)
+}
+
+type PluginDescriptor = zova_sys::plugin::zova_plugin_descriptor_v1;
+
+fn plugin_pointers(plugins: &[LinkedPlugin]) -> Vec<*const PluginDescriptor> {
+    plugins
+        .iter()
+        .map(|plugin| plugin.descriptor as *const PluginDescriptor)
+        .collect()
+}
+
+fn slice_or_null<T>(values: &[T]) -> *const T {
+    if values.is_empty() {
+        ptr::null()
+    } else {
+        values.as_ptr()
+    }
 }
 
 pub(crate) struct DatabaseInner {
@@ -341,7 +484,87 @@ impl Database {
         options: OpenOptions,
         extensions: &ExtensionOptions,
     ) -> Result<Self> {
-        let db = open_with_extensions_raw(path, create, options, extensions)?;
+        let mode = if create {
+            OpenMode::Create
+        } else {
+            OpenMode::Open
+        };
+        Self::from_raw(open_with_extensions_raw(path, mode, options, extensions)?)
+    }
+
+    /// Create a new database with creation-time settings such as page size.
+    pub fn create_with_options(path: impl AsRef<Path>, options: CreateOptions) -> Result<Self> {
+        Self::from_raw(create_with_options_raw(path.as_ref(), options)?)
+    }
+
+    /// Create with selected bundles plus plugins linked into this process.
+    pub fn create_with_plugins(
+        path: impl AsRef<Path>,
+        extensions: &ExtensionOptions,
+        plugins: &[LinkedPlugin],
+    ) -> Result<Self> {
+        Self::from_raw(open_with_plugins_raw(
+            path.as_ref(),
+            OpenMode::Create,
+            OpenOptions::default(),
+            extensions,
+            plugins,
+        )?)
+    }
+
+    /// Open with selected bundles plus plugins linked into this process.
+    pub fn open_with_plugins(
+        path: impl AsRef<Path>,
+        options: OpenOptions,
+        extensions: &ExtensionOptions,
+        plugins: &[LinkedPlugin],
+    ) -> Result<Self> {
+        Self::from_raw(open_with_plugins_raw(
+            path.as_ref(),
+            OpenMode::Open,
+            options,
+            extensions,
+            plugins,
+        )?)
+    }
+
+    /// Open for extension maintenance without running installed hooks.
+    ///
+    /// Use it to [`upgrade`](Self::extension_upgrade) or
+    /// [`rebuild`](Self::extension_rebuild) an extension, then close and
+    /// reopen normally before application use. `options.read_only` must be
+    /// false.
+    pub fn open_for_extension_upgrade(
+        path: impl AsRef<Path>,
+        options: OpenOptions,
+        extensions: &ExtensionOptions,
+    ) -> Result<Self> {
+        Self::from_raw(open_with_extensions_raw(
+            path.as_ref(),
+            OpenMode::ExtensionUpgrade,
+            options,
+            extensions,
+        )?)
+    }
+
+    /// [`open_for_extension_upgrade`](Self::open_for_extension_upgrade) with
+    /// plugins linked into this process.
+    pub fn open_for_extension_upgrade_with_plugins(
+        path: impl AsRef<Path>,
+        options: OpenOptions,
+        extensions: &ExtensionOptions,
+        plugins: &[LinkedPlugin],
+    ) -> Result<Self> {
+        Self::from_raw(open_with_plugins_raw(
+            path.as_ref(),
+            OpenMode::ExtensionUpgrade,
+            options,
+            extensions,
+            plugins,
+        )?)
+    }
+
+    fn from_raw(db: *mut zova_sys::zova_database) -> Result<Self> {
         let raw = NonNull::new(db)
             .ok_or_else(|| Error::from_status(zova_sys::ZOVA_INVALID_ARGUMENT, None))?;
         Ok(Self {
@@ -1002,6 +1225,19 @@ pub fn migrate_database_with_extensions(
     options: MigrateOptions,
     extensions: &ExtensionOptions,
 ) -> Result<()> {
+    migrate_database_with_plugins(source, destination, options, extensions, &[])
+}
+
+/// [`migrate_database_with_extensions`] that also composes plugins linked into
+/// this process, for databases with a linked extension installed.
+pub fn migrate_database_with_plugins(
+    source: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+    options: MigrateOptions,
+    extensions: &ExtensionOptions,
+    plugins: &[LinkedPlugin],
+) -> Result<()> {
+    let plugin_ptrs = plugin_pointers(plugins);
     let source = path_to_cstring(source.as_ref())?;
     let destination = path_to_cstring(destination.as_ref())?;
     let extension_args = ExtensionCArgs::new(extensions)?;
@@ -1013,8 +1249,8 @@ pub fn migrate_database_with_extensions(
         extension_bundle_paths: extension_args.bundle_paths(),
         extension_bundle_count: extension_args.bundle_count(),
         trust_store_path: extension_args.trust_store_path(),
-        plugins: ptr::null(),
-        plugin_count: 0,
+        plugins: slice_or_null(&plugin_ptrs),
+        plugin_count: plugin_ptrs.len(),
         out_error_message: &mut message,
     };
     // SAFETY: all inputs and outputs stay live throughout the synchronous call.
@@ -1038,8 +1274,29 @@ pub fn migrate_database_with_progress(
     destination: impl AsRef<Path>,
     options: MigrateOptions,
     extensions: &ExtensionOptions,
+    progress: impl FnMut(Progress) -> ControlFlow<()>,
+) -> Result<()> {
+    migrate_database_with_plugins_and_progress(
+        source,
+        destination,
+        options,
+        extensions,
+        &[],
+        progress,
+    )
+}
+
+/// [`migrate_database_with_progress`] that also composes plugins linked into
+/// this process.
+pub fn migrate_database_with_plugins_and_progress(
+    source: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+    options: MigrateOptions,
+    extensions: &ExtensionOptions,
+    plugins: &[LinkedPlugin],
     mut progress: impl FnMut(Progress) -> ControlFlow<()>,
 ) -> Result<()> {
+    let plugin_ptrs = plugin_pointers(plugins);
     let source = path_to_cstring(source.as_ref())?;
     let destination = path_to_cstring(destination.as_ref())?;
     let extension_args = ExtensionCArgs::new(extensions)?;
@@ -1052,8 +1309,8 @@ pub fn migrate_database_with_progress(
         extension_bundle_paths: extension_args.bundle_paths(),
         extension_bundle_count: extension_args.bundle_count(),
         trust_store_path: extension_args.trust_store_path(),
-        plugins: ptr::null(),
-        plugin_count: 0,
+        plugins: slice_or_null(&plugin_ptrs),
+        plugin_count: plugin_ptrs.len(),
         progress: bridge.callback(),
         progress_user_data: bridge.user_data(),
         out_error_message: &mut message,
@@ -1102,4 +1359,90 @@ pub(crate) fn take_message(message: &mut zova_sys::zova_message) -> Option<Strin
         zova_sys::zova_message_free(message);
     }
     Some(text)
+}
+
+/// Numeric identity of the Zova C ABI linked into this binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AbiVersion {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+}
+
+/// Return the C ABI version reported by the linked Zova library.
+pub fn abi_version() -> AbiVersion {
+    unsafe {
+        AbiVersion {
+            major: zova_sys::zova_abi_version_major(),
+            minor: zova_sys::zova_abi_version_minor(),
+            patch: zova_sys::zova_abi_version_patch(),
+        }
+    }
+}
+
+/// Return the C ABI version string, such as `"1.4.0"`.
+pub fn abi_version_string() -> &'static str {
+    let value = unsafe { std::ffi::CStr::from_ptr(zova_sys::zova_abi_version_string()) };
+    value.to_str().expect("Zova ABI version string is ASCII")
+}
+
+/// Load a `.zovaext` bundle's entrypoint and validate it without trusting it.
+/// `None` selects Zova's default trust store.
+pub fn verify_extension_bundle(
+    bundle_path: impl AsRef<Path>,
+    trust_store_path: Option<&Path>,
+) -> Result<()> {
+    extension_bundle_call(bundle_path.as_ref(), trust_store_path, |request| unsafe {
+        zova_sys::zova_extension_bundle_verify(request)
+    })
+}
+
+/// Record a bundle's manifest and library hash in the selected trust store.
+pub fn trust_extension_bundle(
+    bundle_path: impl AsRef<Path>,
+    trust_store_path: Option<&Path>,
+) -> Result<()> {
+    extension_bundle_call(bundle_path.as_ref(), trust_store_path, |request| unsafe {
+        zova_sys::zova_extension_bundle_trust(request)
+    })
+}
+
+/// Remove trust records matching a bundle path or an extension name. Returns
+/// whether any record was removed.
+pub fn untrust_extension_bundle(identifier: &str, trust_store_path: Option<&Path>) -> Result<bool> {
+    let identifier = cstring(identifier, "extension bundle identifier")?;
+    let trust = trust_store_path.map(path_to_cstring).transpose()?;
+    let mut removed = 0u8;
+    let mut message = empty_message();
+    let request = zova_sys::zova_extension_bundle_untrust_request {
+        identifier: identifier.as_ptr(),
+        trust_store_path: trust.as_ref().map_or(ptr::null(), |path| path.as_ptr()),
+        out_removed: &mut removed,
+        out_error_message: &mut message,
+    };
+    let status = unsafe { zova_sys::zova_extension_bundle_untrust(&request) };
+    if status != zova_sys::ZOVA_OK {
+        return Err(Error::from_status(status, take_message(&mut message)));
+    }
+    Ok(removed != 0)
+}
+
+fn extension_bundle_call(
+    bundle_path: &Path,
+    trust_store_path: Option<&Path>,
+    call: impl FnOnce(*const zova_sys::zova_extension_bundle_request) -> i32,
+) -> Result<()> {
+    let bundle = path_to_cstring(bundle_path)?;
+    let trust = trust_store_path.map(path_to_cstring).transpose()?;
+    let mut message = empty_message();
+    let request = zova_sys::zova_extension_bundle_request {
+        bundle_path: bundle.as_ptr(),
+        trust_store_path: trust.as_ref().map_or(ptr::null(), |path| path.as_ptr()),
+        out_error_message: &mut message,
+    };
+    let status = call(&request);
+    if status != zova_sys::ZOVA_OK {
+        return Err(Error::from_status(status, take_message(&mut message)));
+    }
+    Ok(())
 }

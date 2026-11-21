@@ -380,33 +380,7 @@ pub(crate) fn put_graph_nodes_raw(
     status: impl FnOnce(i32) -> Result<()>,
     inputs: &[GraphNodeInput<'_>],
 ) -> Result<()> {
-    let strings = inputs
-        .iter()
-        .map(|input| {
-            Ok(GraphNodeInputStrings {
-                graph_name: cstring(input.graph_name, "graph name")?,
-                node_id: cstring(input.node_id, "graph node id")?,
-                kind: cstring(input.kind, "graph node kind")?,
-                target_namespace: optional_cstring(
-                    input.target_namespace,
-                    "graph target namespace",
-                )?,
-                target_ref: optional_cstring(input.target_ref, "graph target ref")?,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let raw = inputs
-        .iter()
-        .zip(strings.iter())
-        .map(|(input, strings)| zova_sys::zova_graph_node_input {
-            graph_name: strings.graph_name.as_ptr(),
-            node_id: strings.node_id.as_ptr(),
-            kind: strings.kind.as_ptr(),
-            target_type: input.target_type.to_c(),
-            target_namespace: optional_ptr(&strings.target_namespace),
-            target_ref: optional_ptr(&strings.target_ref),
-        })
-        .collect::<Vec<_>>();
+    let (_strings, raw) = graph_node_inputs(inputs)?;
     let request = zova_sys::zova_graph_node_put_many_request {
         db,
         nodes: slice_ptr(&raw),
@@ -876,15 +850,18 @@ pub(crate) fn take_graph_walk(
     out
 }
 
-fn optional_cstring(value: Option<&str>, context: &'static str) -> Result<Option<CString>> {
+pub(crate) fn optional_cstring(
+    value: Option<&str>,
+    context: &'static str,
+) -> Result<Option<CString>> {
     value.map(|value| cstring(value, context)).transpose()
 }
 
-fn optional_ptr(value: &Option<CString>) -> *const c_char {
+pub(crate) fn optional_ptr(value: &Option<CString>) -> *const c_char {
     value.as_ref().map_or(ptr::null(), |value| value.as_ptr())
 }
 
-struct GraphNodeInputStrings {
+pub(crate) struct GraphNodeInputStrings {
     graph_name: CString,
     node_id: CString,
     kind: CString,
@@ -892,14 +869,50 @@ struct GraphNodeInputStrings {
     target_ref: Option<CString>,
 }
 
-struct GraphEdgeInputStrings {
+pub(crate) struct GraphEdgeInputStrings {
     graph_name: CString,
     from_node_id: CString,
     edge_type: CString,
     to_node_id: CString,
 }
 
-fn graph_edge_inputs(
+pub(crate) fn graph_node_inputs(
+    inputs: &[GraphNodeInput<'_>],
+) -> Result<(
+    Vec<GraphNodeInputStrings>,
+    Vec<zova_sys::zova_graph_node_input>,
+)> {
+    let strings = inputs
+        .iter()
+        .map(|input| {
+            Ok(GraphNodeInputStrings {
+                graph_name: cstring(input.graph_name, "graph name")?,
+                node_id: cstring(input.node_id, "graph node id")?,
+                kind: cstring(input.kind, "graph node kind")?,
+                target_namespace: optional_cstring(
+                    input.target_namespace,
+                    "graph target namespace",
+                )?,
+                target_ref: optional_cstring(input.target_ref, "graph target ref")?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let raw = inputs
+        .iter()
+        .zip(strings.iter())
+        .map(|(input, strings)| zova_sys::zova_graph_node_input {
+            graph_name: strings.graph_name.as_ptr(),
+            node_id: strings.node_id.as_ptr(),
+            kind: strings.kind.as_ptr(),
+            target_type: input.target_type.to_c(),
+            target_namespace: optional_ptr(&strings.target_namespace),
+            target_ref: optional_ptr(&strings.target_ref),
+        })
+        .collect();
+    Ok((strings, raw))
+}
+
+pub(crate) fn graph_edge_inputs(
     inputs: &[GraphEdgeInput<'_>],
 ) -> Result<(
     Vec<GraphEdgeInputStrings>,
@@ -928,7 +941,7 @@ fn graph_edge_inputs(
     Ok((strings, raw))
 }
 
-fn slice_ptr<T>(values: &[T]) -> *const T {
+pub(crate) fn slice_ptr<T>(values: &[T]) -> *const T {
     if values.is_empty() {
         ptr::null()
     } else {
@@ -936,7 +949,7 @@ fn slice_ptr<T>(values: &[T]) -> *const T {
     }
 }
 
-fn string_from_parts(data: *const c_char, len: usize) -> Result<String> {
+pub(crate) fn string_from_parts(data: *const c_char, len: usize) -> Result<String> {
     if data.is_null() {
         return Ok(String::new());
     }

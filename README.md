@@ -1105,10 +1105,10 @@ Existing Rust object, vector, and graph APIs transparently use a bound store aft
 database is opened. Store create/bind/unbind/split management remains
 native-Zig/CLI-only in v0.25.
 
-The additive opaque-key graph, edge-payload, topology-scan, and fresh-build
-session APIs introduced for v0.25 are exposed through the C ABI and raw
-`zova-sys` declarations. The safe Rust crate does not yet wrap those low-level
-publication APIs.
+The safe Rust crate wraps every C ABI function, including the opaque-key
+graph, edge-payload, topology-scan and fresh-build session APIs, application
+SQL functions, and statically linked plugins. See the
+[Rust binding README](bindings/rust/README.md) for the method names.
 
 From crates.io, Rust builds compile the matching generated-C platform package.
 Install Clang and the platform linker/SDK; Zig is not required. A target-compatible

@@ -53,6 +53,26 @@ fn extension_upgrade_entrypoints_reject_null_requests() {
     }
 }
 
+#[test]
+fn directional_walk_and_multi_i8_entrypoints_reject_null_requests() {
+    assert_eq!(std::mem::size_of::<zova_sys::zova_graph_walk_profile>(), 88);
+    // SAFETY: these ABI entrypoints explicitly accept null for validation.
+    unsafe {
+        assert_eq!(
+            zova_sys::zova_graph_walk_direction(ptr::null()),
+            zova_sys::ZOVA_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            zova_sys::zova_graph_walk_direction_profiled(ptr::null()),
+            zova_sys::ZOVA_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            zova_sys::zova_vector_search_multi_i8(ptr::null()),
+            zova_sys::ZOVA_INVALID_ARGUMENT
+        );
+    }
+}
+
 fn temp_path(name: &str) -> String {
     let mut path = std::env::temp_dir();
     path.push(format!(

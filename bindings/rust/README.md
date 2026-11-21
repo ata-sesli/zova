@@ -78,10 +78,29 @@ validated format-14 destination, and never mutates the source.
 takes the same `ExtensionOptions` as `Database::open_with_extensions` for
 databases with a non-bundled extension installed.
 
-Opaque-key graph, payload, topology-scan, prepared-build, and generic
-fresh-build session APIs are supported low-level C ABI/raw `zova-sys` surfaces.
-The safe `zova` crate deliberately exposes the established graph CRUD and
-traversal API instead of those specialized publication surfaces.
+`migrate_database_with_plugins` and its progress variant also accept
+statically linked plugins.
+
+The safe `zova` crate covers every function in the C ABI:
+
+- Opaque-key graph APIs: `put_graph_nodes_keyed`, `get_graph_edges_keyed`,
+  `graph_neighbors_keyed`, `graph_degrees_keyed`, edge payloads, `graph_scan`
+  pages, directional walks with an optional profile, and keyed fresh graph
+  builds with or without edge payloads.
+- `Database::begin_fresh_build` returns a `FreshBuild` session that loads
+  tables, FTS tables, one graph and vector collections, then publishes them
+  together with `finish`. Dropping the session rolls it back.
+- `search_vectors_multi_i8` for multi-row int8 queries.
+- `register_function` for application-defined scalar SQL functions. Panics and
+  non-UTF-8 text arguments become SQL errors.
+- `LinkedPlugin` with `create_with_plugins`, `open_with_plugins`,
+  `open_for_extension_upgrade`, `extension_upgrade` and `extension_rebuild`.
+- `create_with_options`, `abi_version`, and the extension bundle
+  `verify_extension_bundle`, `trust_extension_bundle` and
+  `untrust_extension_bundle` functions.
+
+`SharedDatabase` exposes the same methods; its `register_function` requires a
+`Send` closure.
 
 ## Native Build
 

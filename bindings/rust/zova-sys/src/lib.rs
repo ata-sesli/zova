@@ -14,6 +14,8 @@ pub type zova_sql_value_type = c_int;
 pub type zova_sql_result_type = c_int;
 pub type zova_vector_metric = c_int;
 pub type zova_vector_element_type = c_int;
+pub type zova_vector_multi_i8_search_mode = c_int;
+pub type zova_vector_multi_i8_aggregation = c_int;
 pub type zova_graph_target_type = c_int;
 pub type zova_graph_neighbor_direction = c_int;
 pub type zova_object_storage_profile = c_int;
@@ -100,6 +102,10 @@ pub const ZOVA_VECTOR_METRIC_DOT: zova_vector_metric = 2;
 pub const ZOVA_VECTOR_ELEMENT_TYPE_F32: zova_vector_element_type = 0;
 pub const ZOVA_VECTOR_ELEMENT_TYPE_F16: zova_vector_element_type = 1;
 pub const ZOVA_VECTOR_ELEMENT_TYPE_I8: zova_vector_element_type = 2;
+pub const ZOVA_VECTOR_MULTI_I8_SEARCH_GLOBAL_MIN_COSINE: zova_vector_multi_i8_search_mode = 0;
+pub const ZOVA_VECTOR_MULTI_I8_SEARCH_CBM_PREFILTER_MIN_COSINE: zova_vector_multi_i8_search_mode =
+    1;
+pub const ZOVA_VECTOR_MULTI_I8_AGGREGATION_MIN_COSINE: zova_vector_multi_i8_aggregation = 0;
 pub const ZOVA_GRAPH_TARGET_NONE: zova_graph_target_type = 0;
 pub const ZOVA_GRAPH_TARGET_RECORD: zova_graph_target_type = 1;
 pub const ZOVA_GRAPH_TARGET_OBJECT: zova_graph_target_type = 2;
@@ -763,6 +769,23 @@ pub struct zova_graph_walk_result {
 pub struct zova_graph_walk_results {
     pub items: *mut zova_graph_walk_result,
     pub len: usize,
+}
+
+/// Diagnostic stages and counters for one profiled directional graph walk.
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone, PartialEq)]
+pub struct zova_graph_walk_profile {
+    pub mutex_wait_ms: f64,
+    pub root_lookup_ms: f64,
+    pub adjacency_prepare_ms: f64,
+    pub adjacency_execute_ms: f64,
+    pub bfs_bookkeeping_allocation_ms: f64,
+    pub c_abi_result_export_ms: f64,
+    pub total_profiled_ms: f64,
+    pub frontier_expansions: u64,
+    pub adjacency_query_binds: u64,
+    pub adjacency_rows_stepped: u64,
+    pub result_count: u64,
 }
 
 #[repr(C)]
@@ -1504,6 +1527,25 @@ pub struct zova_vector_search_in_within_request {
     pub out_results: *mut zova_vector_search_results,
 }
 
+/// Raw-i8 cosine search with one or more contiguous query rows.
+#[repr(C)]
+pub struct zova_vector_search_multi_i8_request {
+    pub db: *mut zova_database,
+    pub collection_name: *const c_char,
+    pub query_values: *const i8,
+    pub query_values_len: usize,
+    pub query_count: usize,
+    pub dimensions: usize,
+    pub candidate_ids: *const *const c_char,
+    pub candidate_count: usize,
+    pub mode: c_int,
+    pub aggregation: c_int,
+    pub prefilter_query_index: usize,
+    pub prefilter_limit: usize,
+    pub limit: usize,
+    pub out_results: *mut zova_vector_search_results,
+}
+
 #[repr(C)]
 pub struct zova_vector_search_by_id_request {
     pub db: *mut zova_database,
@@ -1938,6 +1980,33 @@ pub struct zova_graph_walk_request {
     pub out_results: *mut zova_graph_walk_results,
 }
 
+/// Directional bounded breadth-first walk.
+#[repr(C)]
+pub struct zova_graph_walk_direction_request {
+    pub db: *mut zova_database,
+    pub graph_name: *const c_char,
+    pub start_node_id: *const c_char,
+    pub direction: c_int,
+    pub edge_type: *const c_char,
+    pub max_depth: u32,
+    pub limit: usize,
+    pub out_results: *mut zova_graph_walk_results,
+}
+
+/// Diagnostic variant of [`zova_graph_walk_direction_request`].
+#[repr(C)]
+pub struct zova_graph_walk_direction_profiled_request {
+    pub db: *mut zova_database,
+    pub graph_name: *const c_char,
+    pub start_node_id: *const c_char,
+    pub direction: c_int,
+    pub edge_type: *const c_char,
+    pub max_depth: u32,
+    pub limit: usize,
+    pub out_results: *mut zova_graph_walk_results,
+    pub out_profile: *mut zova_graph_walk_profile,
+}
+
 extern "C" {
     pub fn zova_abi_version_major() -> u32;
     pub fn zova_abi_version_minor() -> u32;
@@ -2197,6 +2266,9 @@ extern "C" {
     pub fn zova_vector_search_in_within(
         request: *const zova_vector_search_in_within_request,
     ) -> zova_status;
+    pub fn zova_vector_search_multi_i8(
+        request: *const zova_vector_search_multi_i8_request,
+    ) -> zova_status;
     pub fn zova_vector_search_by_id(
         request: *const zova_vector_search_by_id_request,
     ) -> zova_status;
@@ -2334,6 +2406,12 @@ extern "C" {
     ) -> zova_status;
     pub fn zova_graph_scan(request: *const zova_graph_scan_request) -> zova_status;
     pub fn zova_graph_walk(request: *const zova_graph_walk_request) -> zova_status;
+    pub fn zova_graph_walk_direction(
+        request: *const zova_graph_walk_direction_request,
+    ) -> zova_status;
+    pub fn zova_graph_walk_direction_profiled(
+        request: *const zova_graph_walk_direction_profiled_request,
+    ) -> zova_status;
     pub fn zova_kv_get(request: *const zova_kv_get_request) -> zova_status;
     pub fn zova_kv_get_many(request: *const zova_kv_get_many_request) -> zova_status;
     pub fn zova_kv_put(request: *const zova_kv_put_request) -> zova_status;
