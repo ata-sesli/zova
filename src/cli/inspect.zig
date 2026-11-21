@@ -488,8 +488,10 @@ pub fn tablesCommand(
 }
 
 pub fn loadDatabaseSummary(allocator: std.mem.Allocator, db: *zova.Database, path: [:0]const u8) !DatabaseSummary {
+    const format_version = try scalarTextAlloc(allocator, db, "select value from _zova_meta where key = 'format_version'");
+    errdefer allocator.free(format_version);
     return .{
-        .format_version = try scalarTextAlloc(allocator, db, "select value from _zova_meta where key = 'format_version'"),
+        .format_version = format_version,
         .database_bytes = fileSize(path),
         .wal_bytes = try fileSizeWithSuffix(allocator, path, "-wal"),
         .journal_bytes = try fileSizeWithSuffix(allocator, path, "-journal"),
@@ -636,10 +638,12 @@ fn loadObjectList(allocator: std.mem.Allocator, db: *zova.Database, limit: usize
     }
 
     while ((try stmt.step()) == .row) {
+        const size_bytes = std.math.cast(u64, stmt.columnInt64(1)) orelse return error.ObjectCorrupt;
+        const chunk_count = std.math.cast(u64, stmt.columnInt64(2)) orelse return error.ObjectCorrupt;
         try items.append(allocator, .{
             .id_hex = try lowerHexAlloc(allocator, stmt.columnBlob(0)),
-            .size_bytes = @intCast(stmt.columnInt64(1)),
-            .chunk_count = @intCast(stmt.columnInt64(2)),
+            .size_bytes = size_bytes,
+            .chunk_count = chunk_count,
             .chunker = try allocator.dupe(u8, stmt.columnText(3)),
         });
     }
@@ -660,8 +664,8 @@ fn loadObjectDetail(allocator: std.mem.Allocator, db: *zova.Database, id: zova.O
 
     const id_hex = try lowerHexAlloc(allocator, metadata.columnBlob(0));
     errdefer allocator.free(id_hex);
-    const size_bytes: u64 = @intCast(metadata.columnInt64(1));
-    const chunk_count: u64 = @intCast(metadata.columnInt64(2));
+    const size_bytes: u64 = std.math.cast(u64, metadata.columnInt64(1)) orelse return error.ObjectCorrupt;
+    const chunk_count: u64 = std.math.cast(u64, metadata.columnInt64(2)) orelse return error.ObjectCorrupt;
     const chunker = try allocator.dupe(u8, metadata.columnText(3));
     errdefer allocator.free(chunker);
 
@@ -686,11 +690,14 @@ fn loadObjectDetail(allocator: std.mem.Allocator, db: *zova.Database, id: zova.O
         const raw_hash = manifest.columnBlob(1);
         if (raw_hash.len != @sizeOf(zova.ObjectChunkId)) return error.ObjectCorrupt;
 
+        const chunk_index = std.math.cast(u64, manifest.columnInt64(0)) orelse return error.ObjectCorrupt;
+        const chunk_offset = std.math.cast(u64, manifest.columnInt64(2)) orelse return error.ObjectCorrupt;
+        const chunk_size = std.math.cast(u64, manifest.columnInt64(3)) orelse return error.ObjectCorrupt;
         try rows.append(allocator, .{
-            .index = @intCast(manifest.columnInt64(0)),
+            .index = chunk_index,
             .chunk_hash_hex = try lowerHexAlloc(allocator, raw_hash),
-            .offset = @intCast(manifest.columnInt64(2)),
-            .size_bytes = @intCast(manifest.columnInt64(3)),
+            .offset = chunk_offset,
+            .size_bytes = chunk_size,
         });
     }
 
@@ -724,9 +731,10 @@ fn loadChunkList(allocator: std.mem.Allocator, db: *zova.Database, limit: usize)
 
     while ((try stmt.step()) == .row) {
         const reference_count: u64 = @intCast(stmt.columnInt64(2));
+        const size_bytes = std.math.cast(u64, stmt.columnInt64(1)) orelse return error.ObjectCorrupt;
         try items.append(allocator, .{
             .id_hex = try lowerHexAlloc(allocator, stmt.columnBlob(0)),
-            .size_bytes = @intCast(stmt.columnInt64(1)),
+            .size_bytes = size_bytes,
             .reference_count = reference_count,
             .loose = reference_count == 0,
         });
@@ -748,7 +756,7 @@ fn loadChunkDetail(allocator: std.mem.Allocator, db: *zova.Database, id: zova.Ob
 
     const id_hex = try lowerHexAlloc(allocator, metadata.columnBlob(0));
     errdefer allocator.free(id_hex);
-    const size_bytes: u64 = @intCast(metadata.columnInt64(1));
+    const size_bytes: u64 = std.math.cast(u64, metadata.columnInt64(1)) orelse return error.ObjectCorrupt;
     const reference_count = try chunkReferenceCount(db, id);
 
     const references = try loadChunkReferences(allocator, db, id, limit);
@@ -796,11 +804,14 @@ fn loadChunkReferences(allocator: std.mem.Allocator, db: *zova.Database, id: zov
     }
 
     while ((try stmt.step()) == .row) {
+        const chunk_index = std.math.cast(u64, stmt.columnInt64(1)) orelse return error.ObjectCorrupt;
+        const offset = std.math.cast(u64, stmt.columnInt64(2)) orelse return error.ObjectCorrupt;
+        const size_bytes = std.math.cast(u64, stmt.columnInt64(3)) orelse return error.ObjectCorrupt;
         try items.append(allocator, .{
             .object_id_hex = try lowerHexAlloc(allocator, stmt.columnBlob(0)),
-            .chunk_index = @intCast(stmt.columnInt64(1)),
-            .offset = @intCast(stmt.columnInt64(2)),
-            .size_bytes = @intCast(stmt.columnInt64(3)),
+            .chunk_index = chunk_index,
+            .offset = offset,
+            .size_bytes = size_bytes,
         });
     }
 
@@ -824,9 +835,10 @@ fn loadVectorCollectionStats(allocator: std.mem.Allocator, db: *zova.Database) !
     }
 
     while ((try stmt.step()) == .row) {
+        const dimensions = std.math.cast(u64, stmt.columnInt64(1)) orelse return error.VectorCorrupt;
         try items.append(allocator, .{
             .name = try allocator.dupe(u8, stmt.columnText(0)),
-            .dimensions = @intCast(stmt.columnInt64(1)),
+            .dimensions = dimensions,
             .metric = try allocator.dupe(u8, stmt.columnText(2)),
             .vector_count = @intCast(stmt.columnInt64(3)),
             .stored_bytes = @intCast(stmt.columnInt64(4)),
@@ -855,9 +867,10 @@ fn loadVectorCollectionList(allocator: std.mem.Allocator, db: *zova.Database, li
     }
 
     while ((try stmt.step()) == .row) {
+        const dimensions = std.math.cast(u64, stmt.columnInt64(1)) orelse return error.VectorCorrupt;
         try items.append(allocator, .{
             .name = try allocator.dupe(u8, stmt.columnText(0)),
-            .dimensions = @intCast(stmt.columnInt64(1)),
+            .dimensions = dimensions,
             .metric = try allocator.dupe(u8, stmt.columnText(2)),
             .vector_count = @intCast(stmt.columnInt64(3)),
             .stored_bytes = @intCast(stmt.columnInt64(4)),
@@ -898,7 +911,7 @@ fn loadVectorCollectionDetail(allocator: std.mem.Allocator, db: *zova.Database, 
 
     return .{
         .name = owned_name,
-        .dimensions = @intCast(stmt.columnInt64(1)),
+        .dimensions = std.math.cast(u64, stmt.columnInt64(1)) orelse return error.VectorCorrupt,
         .metric = metric,
         .vector_count = vector_count,
         .stored_bytes = @intCast(stmt.columnInt64(4)),
@@ -1020,10 +1033,12 @@ fn loadTopObjectStats(allocator: std.mem.Allocator, db: *zova.Database, limit: u
     }
 
     while ((try stmt.step()) == .row) {
+        const size_bytes = std.math.cast(u64, stmt.columnInt64(1)) orelse return error.ObjectCorrupt;
+        const chunk_count = std.math.cast(u64, stmt.columnInt64(2)) orelse return error.ObjectCorrupt;
         try items.append(allocator, .{
             .id_hex = try lowerHexAlloc(allocator, stmt.columnBlob(0)),
-            .size_bytes = @intCast(stmt.columnInt64(1)),
-            .chunk_count = @intCast(stmt.columnInt64(2)),
+            .size_bytes = size_bytes,
+            .chunk_count = chunk_count,
             .chunker = try allocator.dupe(u8, stmt.columnText(3)),
         });
     }
@@ -1051,9 +1066,10 @@ fn loadTopChunkStats(allocator: std.mem.Allocator, db: *zova.Database, limit: us
 
     while ((try stmt.step()) == .row) {
         const reference_count: u64 = @intCast(stmt.columnInt64(2));
+        const size_bytes = std.math.cast(u64, stmt.columnInt64(1)) orelse return error.ObjectCorrupt;
         try items.append(allocator, .{
             .id_hex = try lowerHexAlloc(allocator, stmt.columnBlob(0)),
-            .size_bytes = @intCast(stmt.columnInt64(1)),
+            .size_bytes = size_bytes,
             .reference_count = reference_count,
             .loose = reference_count == 0,
         });
@@ -1067,8 +1083,8 @@ fn numericStats(db: *zova.Database, sql: [:0]const u8) !NumericStats {
     defer stmt.deinit();
     return switch (try stmt.step()) {
         .row => .{
-            .min = @intCast(stmt.columnInt64(0)),
-            .max = @intCast(stmt.columnInt64(1)),
+            .min = std.math.cast(u64, stmt.columnInt64(0)) orelse return error.ObjectCorrupt,
+            .max = std.math.cast(u64, stmt.columnInt64(1)) orelse return error.ObjectCorrupt,
             .avg = stmt.columnDouble(2),
         },
         .done => .{ .min = 0, .max = 0, .avg = 0 },

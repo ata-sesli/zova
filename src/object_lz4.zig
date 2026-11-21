@@ -298,30 +298,40 @@ test "lz4 rejects malformed blocks" {
     try std.testing.expectError(error.Corrupt, decompress(&long, &block));
 }
 
-test "lz4 decoder survives random and mutated input" {
-    var prng = std.Random.DefaultPrng.init(0xdead_beef);
-    const random = prng.random();
+const fuzz_corpus = @import("fuzz_corpus.zig");
+
+test "fuzz: lz4 decoder rejects or decodes arbitrary blocks" {
+    try std.testing.fuzz({}, fuzzDecode, .{ .corpus = comptime &.{
+        fuzz_corpus.slice(&.{ 0x35, 'a', 'b', 'c', 0x03, 0x00, 0x50, 'x', 'y', 'z', '1', '2' }) ++ fuzz_corpus.int(17),
+        fuzz_corpus.slice(&.{ 0x1f, 'r', 0x01, 0x00, 0xff, 0x01, 0x50, 'e', 'n', 'd', '!', '!' }) ++ fuzz_corpus.int(281),
+        fuzz_corpus.slice("\xf0\x03" ++ "qqqqqqqqqqqqqqqqqq") ++ fuzz_corpus.int(18),
+    } });
+}
+
+fn fuzzDecode(_: void, smith: *std.testing.Smith) anyerror!void {
+    var input: [1024]u8 = undefined;
+    const input_len = smith.slice(&input);
     var out: [4096]u8 = undefined;
-    var input: [512]u8 = undefined;
+    const out_len = smith.valueRangeAtMost(u16, 0, out.len);
+    decompress(out[0..out_len], input[0..input_len]) catch |err| switch (err) {
+        error.Corrupt => {},
+    };
+}
 
-    var round: usize = 0;
-    while (round < 20_000) : (round += 1) {
-        const len = random.uintAtMost(usize, input.len);
-        random.bytes(input[0..len]);
-        const out_len = random.uintAtMost(usize, out.len);
-        decompress(out[0..out_len], input[0..len]) catch {};
-    }
+test "fuzz: lz4 round-trips arbitrary input" {
+    try std.testing.fuzz({}, fuzzRoundTrip, .{ .corpus = comptime &.{
+        fuzz_corpus.slice("abcdefghijklm"),
+        fuzz_corpus.slice("zova object chunk zova object chunk lz4 block lz4 block aaaaaaaaaaaaaaaaaaaa"),
+    } });
+}
 
+fn fuzzRoundTrip(_: void, smith: *std.testing.Smith) anyerror!void {
     var plain: [4096]u8 = undefined;
-    for (&plain, 0..) |*byte, index| byte.* = @intCast((index * 7) % 23);
-    var encoded: [4096]u8 = undefined;
-    const encoded_len = compress(&encoded, &plain) orelse return error.TestUnexpectedResult;
-    round = 0;
-    while (round < 20_000) : (round += 1) {
-        var mutated = encoded;
-        const flips = random.intRangeAtMost(usize, 1, 4);
-        for (0..flips) |_| mutated[random.uintLessThan(usize, encoded_len)] ^= random.int(u8) | 1;
-        const cut = random.uintAtMost(usize, encoded_len);
-        decompress(&out, mutated[0..cut]) catch {};
-    }
+    const plain_len = smith.slice(&plain);
+    // Worst-case LZ4 block size: every byte a literal, plus length bytes.
+    var encoded: [plain.len + plain.len / 255 + 16]u8 = undefined;
+    const encoded_len = compress(&encoded, plain[0..plain_len]) orelse return error.TestUnexpectedResult;
+    var decoded: [plain.len]u8 = undefined;
+    try decompress(decoded[0..plain_len], encoded[0..encoded_len]);
+    try std.testing.expectEqualSlices(u8, plain[0..plain_len], decoded[0..plain_len]);
 }

@@ -4124,6 +4124,235 @@ test "cli deep check covers writer-created object and sql-introduced corruption"
     try expectContains(corrupt.stderr, "object corruption");
 }
 
+/// Every command that reads a database a user may hand Zova after damage.
+/// `@db` stands for the database path. Each command must report an error or a
+/// result for any file: never crash, hang or leak.
+const damaged_database_commands = [_][]const []const u8{
+    &.{ "info", "@db" },
+    &.{ "stats", "--json", "@db" },
+    &.{ "objects", "--json", "@db" },
+    &.{ "chunks", "--json", "@db" },
+    &.{ "vectors", "--json", "@db" },
+    &.{ "vector-collection", "--json", "@db", "docs" },
+    &.{ "tables", "--json", "@db" },
+    &.{ "graphs", "--json", "@db" },
+    &.{ "graph-walk", "--json", "@db", "app", "message:1" },
+    &.{ "format", "--json", "@db" },
+    &.{ "extension", "check", "--json", "@db" },
+    &.{ "check", "--deep", "@db" },
+    &.{ "check", "--json", "--deep", "@db" },
+    &.{ "doctor", "--json", "@db" },
+    &.{ "salvage", "--dry-run", "--json", "@db" },
+};
+
+/// A small database with every store populated: user rows, raw and
+/// LZ4-compressed objects, a loose chunk, vectors and a graph.
+fn createDamageTemplate(path: [:0]const u8) !void {
+    try createHealthyDatabase(path);
+    var db = try zova.Database.open(path);
+    defer db.deinit();
+    db.setObjectCompression(.lz4);
+    _ = try db.putObject("compressible compressible compressible compressible compressible");
+    try db.createGraph("app");
+    try db.putGraphNode(.{ .graph_name = "app", .node_id = "message:1", .kind = "message", .target_type = .record, .target_ref = "messages:1" });
+    try db.putGraphNode(.{ .graph_name = "app", .node_id = "message:2", .kind = "message", .target_type = .record, .target_ref = "messages:2" });
+    try db.putGraphEdge(.{ .graph_name = "app", .from_node_id = "message:1", .edge_type = "replies_to", .to_node_id = "message:2" });
+}
+
+/// Run every damaged-database command on `db_path`, then a real salvage into
+/// `salvage_path`. An exit code and a returned error (which `main` prints as
+/// "unexpected error") are both reports; a panic or a leak fails the test.
+fn runDamagedDatabaseCommands(db_path: []const u8, salvage_path: []const u8) void {
+    for (damaged_database_commands) |command| {
+        var args: [8][]const u8 = undefined;
+        args[0] = "zova";
+        for (command, args[1..][0..command.len]) |arg, *slot| {
+            slot.* = if (std.mem.eql(u8, arg, "@db")) db_path else arg;
+        }
+        var result = runCli(args[0 .. command.len + 1]) catch continue;
+        result.deinit();
+    }
+    var salvage = runCli(&.{ "zova", "salvage", "--json", db_path, salvage_path }) catch return;
+    salvage.deinit();
+}
+
+const ByteDamage = union(enum) {
+    truncate: usize,
+    fill: struct { start: usize, len: usize, byte: u8 },
+    stride_xor: usize,
+};
+
+const byte_damages = [_]ByteDamage{
+    .{ .truncate = 0 },
+    .{ .truncate = 50 },
+    .{ .truncate = 100 },
+    .{ .truncate = 4096 },
+    .{ .truncate = 3 * 4096 + 17 },
+    // SQLite header: magic string, page size, page count and schema cookie.
+    .{ .fill = .{ .start = 0, .len = 16, .byte = 0 } },
+    .{ .fill = .{ .start = 16, .len = 2, .byte = 0x03 } },
+    .{ .fill = .{ .start = 28, .len = 4, .byte = 0xff } },
+    .{ .fill = .{ .start = 40, .len = 4, .byte = 0x7f } },
+    // The schema table and later b-tree pages.
+    .{ .fill = .{ .start = 100, .len = 4096 - 100, .byte = 0 } },
+    .{ .fill = .{ .start = 4096, .len = 4096, .byte = 0xff } },
+    .{ .fill = .{ .start = 2 * 4096 + 8, .len = 64, .byte = 0x41 } },
+    .{ .stride_xor = 997 },
+    .{ .stride_xor = 61 },
+};
+
+/// Private-row damage written with CHECK and foreign-key constraints off, the
+/// way a buggy tool or bit rot could leave a database.
+const row_damages = [_][:0]const u8{
+    "update _zova_chunks set encoding = 1, data = x'ff00ff00ff' where rowid = (select min(rowid) from _zova_chunks)",
+    "update _zova_chunks set encoding = 1, data = substr(data, 1, length(data) / 2) where encoding = 1",
+    "update _zova_chunks set encoding = 7",
+    "update _zova_chunks set size_bytes = -1",
+    "update _zova_chunks set size_bytes = 2000000000",
+    "update _zova_chunks set data = x''",
+    "update _zova_chunks set data = 'text, not a blob'",
+    "update _zova_chunks set chunk_hash = x'00' where rowid = (select min(rowid) from _zova_chunks)",
+    "delete from _zova_chunks",
+    "update _zova_object_chunks set offset = offset + 3",
+    "update _zova_object_chunks set chunk_index = chunk_index + 5",
+    "update _zova_object_chunks set size_bytes = 0",
+    "update _zova_object_chunks set size_bytes = 9223372036854775807",
+    "update _zova_object_chunks set chunk_hash = zeroblob(32)",
+    "insert into _zova_object_chunks select object_id, chunk_index + 1, chunk_hash, offset, size_bytes from _zova_object_chunks where rowid = (select min(rowid) from _zova_object_chunks)",
+    "update _zova_objects set size_bytes = size_bytes + 1, chunk_count = 99",
+    "update _zova_objects set size_bytes = -5, chunk_count = -1",
+    "update _zova_objects set chunker = 'unknown'",
+    "update _zova_objects set object_id = x'0102' where rowid = (select min(rowid) from _zova_objects)",
+    "update _zova_vectors set \"values\" = x'01'",
+    "update _zova_vectors set \"values\" = x'0000c07f0000c07f'",
+    "update _zova_vectors set norm_squared = -1",
+    "update _zova_vectors set collection_key = 999",
+    "update _zova_vector_collections set dimensions = 0",
+    "update _zova_vector_collections set dimensions = 100000, metric = 'bogus', element_type = 'f64'",
+    "update _zova_graph_edges set from_node_key = 12345",
+    "update _zova_graph_edges set payload = randomblob(64)",
+    "update _zova_graph_nodes set target_type = 'bogus', node_id = '' where node_key = (select min(node_key) from _zova_graph_nodes)",
+    "delete from _zova_graph_edge_types",
+    "update _zova_meta set value = 'not-a-number' where key = 'format_version'",
+    "update _zova_meta set value = '999' where key = 'format_version'",
+    "update _zova_meta set value = '1' where key = 'format_version'",
+    "update _zova_meta set value = '' where key = 'format_version'",
+    "delete from _zova_meta where key = 'magic'",
+    "drop table _zova_chunks",
+    "drop table _zova_object_chunks",
+    "drop table _zova_meta",
+    "drop table _zova_vectors",
+    "drop table _zova_graph_edges",
+    "create table _zova_rogue (x)",
+    "pragma user_version = 77",
+};
+
+test "cli inspection, doctor and salvage report damaged databases without crashing" {
+    const allocator = std.testing.allocator;
+    const io = defaultIo();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var template_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const template_path = try testingDbPath(&template_buffer, tmp.sub_path[0..], "template.zova");
+    try createDamageTemplate(template_path);
+    const template = try tmp.dir.readFileAlloc(io, "template.zova", allocator, .limited(64 * 1024 * 1024));
+    defer allocator.free(template);
+    // The byte damages assume the template spans several 4 KiB pages.
+    try std.testing.expect(template.len > 4 * 4096);
+
+    var name_buffer: [64]u8 = undefined;
+    var path_buffers: [2][std.fs.max_path_bytes]u8 = undefined;
+    for (byte_damages, 0..) |damage, index| {
+        const bytes = try allocator.dupe(u8, template);
+        defer allocator.free(bytes);
+        const damaged = switch (damage) {
+            .truncate => |len| bytes[0..len],
+            .fill => |fill| blk: {
+                @memset(bytes[fill.start..][0..fill.len], fill.byte);
+                break :blk bytes;
+            },
+            .stride_xor => |stride| blk: {
+                var offset: usize = stride;
+                while (offset < bytes.len) : (offset += stride) bytes[offset] ^= 0x5a;
+                break :blk bytes;
+            },
+        };
+        const name = try std.fmt.bufPrint(&name_buffer, "bytes-{d}.zova", .{index});
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = damaged });
+        const db_path = try testingDbPath(&path_buffers[0], tmp.sub_path[0..], name);
+        const salvage_name = try std.fmt.bufPrint(&name_buffer, "bytes-{d}-salvaged.zova", .{index});
+        const salvage_path = try testingDbPath(&path_buffers[1], tmp.sub_path[0..], salvage_name);
+        runDamagedDatabaseCommands(db_path, salvage_path);
+    }
+
+    for (row_damages, 0..) |sql, index| {
+        const name = try std.fmt.bufPrint(&name_buffer, "rows-{d}.zova", .{index});
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = template });
+        const db_path = try testingDbPath(&path_buffers[0], tmp.sub_path[0..], name);
+        {
+            var db = try zova.Database.open(db_path);
+            defer db.deinit();
+            try db.exec("pragma ignore_check_constraints = on");
+            try db.exec("pragma foreign_keys = off");
+            db.exec(sql) catch |err| {
+                std.debug.print("row damage {d} ({s}) could not be applied\n", .{ index, sql });
+                return err;
+            };
+        }
+        const salvage_name = try std.fmt.bufPrint(&name_buffer, "rows-{d}-salvaged.zova", .{index});
+        const salvage_path = try testingDbPath(&path_buffers[1], tmp.sub_path[0..], salvage_name);
+        runDamagedDatabaseCommands(db_path, salvage_path);
+    }
+}
+
+const DamageFuzzContext = struct {
+    template: []const u8,
+    dir: std.Io.Dir,
+    sub_path: []const u8,
+};
+
+test "fuzz: cli inspection, doctor and salvage survive arbitrary database bytes" {
+    const allocator = std.testing.allocator;
+    const io = defaultIo();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var template_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const template_path = try testingDbPath(&template_buffer, tmp.sub_path[0..], "template.zova");
+    try createDamageTemplate(template_path);
+    const template = try tmp.dir.readFileAlloc(io, "template.zova", allocator, .limited(64 * 1024 * 1024));
+    defer allocator.free(template);
+
+    const context: DamageFuzzContext = .{ .template = template, .dir = tmp.dir, .sub_path = tmp.sub_path[0..] };
+    try std.testing.fuzz(&context, fuzzDamagedDatabase, .{});
+}
+
+/// Overwrite, flip or truncate bytes of the template database, then run every
+/// damaged-database command on the result.
+fn fuzzDamagedDatabase(context: *const DamageFuzzContext, smith: *std.testing.Smith) anyerror!void {
+    const allocator = std.testing.allocator;
+    const io = defaultIo();
+    const bytes = try allocator.dupe(u8, context.template);
+    defer allocator.free(bytes);
+
+    var len = bytes.len;
+    const edits = smith.valueRangeAtMost(u8, 0, 16);
+    for (0..edits) |_| {
+        const offset = smith.index(bytes.len);
+        bytes[offset] = smith.value(u8);
+    }
+    if (smith.boolWeighted(7, 1)) len = smith.index(bytes.len + 1);
+
+    try context.dir.createDirPath(io, "fuzz");
+    defer context.dir.deleteTree(io, "fuzz") catch {};
+    try context.dir.writeFile(io, .{ .sub_path = "fuzz/damaged.zova", .data = bytes[0..len] });
+    var path_buffers: [2][std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try testingDbPath(&path_buffers[0], context.sub_path, "fuzz/damaged.zova");
+    const salvage_path = try testingDbPath(&path_buffers[1], context.sub_path, "fuzz/salvaged.zova");
+    runDamagedDatabaseCommands(db_path, salvage_path);
+}
+
 const CliResult = struct {
     code: u8,
     stdout: []u8,
