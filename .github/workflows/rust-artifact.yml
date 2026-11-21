@@ -30,7 +30,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15-intel, macos-latest, windows-latest]
+        # Pull requests from CI verify on Linux and Windows; pushes and the
+        # Release Artifacts workflow, which Publish Release checks for all
+        # five, verify on every platform.
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest", "windows-latest"]' || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-15-intel", "macos-latest", "windows-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/download-artifact@v4

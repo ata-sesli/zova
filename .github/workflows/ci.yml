@@ -11,18 +11,57 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Pull requests run a reduced matrix: no macOS Intel, packaging checks on Linux
+# and Windows only, fewer Node and Python versions, and only the jobs that the
+# changed paths need (scripts/ci-changed-areas.py). Pushes to main and
+# release/** run everything, as does the Release Artifacts workflow.
 jobs:
+  changes:
+    name: Changed areas
+    runs-on: ubuntu-latest
+    outputs:
+      native: ${{ steps.areas.outputs.native }}
+      rust: ${{ steps.areas.outputs.rust }}
+      rust_artifact: ${{ steps.areas.outputs.rust_artifact }}
+      python: ${{ steps.areas.outputs.python }}
+      javascript: ${{ steps.areas.outputs.javascript }}
+      go: ${{ steps.areas.outputs.go }}
+      plugin_packages: ${{ steps.areas.outputs.plugin_packages }}
+      wasm: ${{ steps.areas.outputs.wasm }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # A pull request checks out its merge commit; HEAD^1 is the base.
+          fetch-depth: 2
+      - id: areas
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = pull_request ]; then
+            git diff --name-only --no-renames HEAD^1 HEAD | python3 scripts/ci-changed-areas.py | tee -a "$GITHUB_OUTPUT"
+          else
+            python3 scripts/ci-changed-areas.py --all | tee -a "$GITHUB_OUTPUT"
+          fi
+
   rust-artifact:
+    needs: changes
+    if: needs.changes.outputs.rust_artifact == 'true'
     uses: ./.github/workflows/rust-artifact.yml
 
   plugin-packages:
+    needs: changes
+    if: needs.changes.outputs.plugin_packages == 'true'
     uses: ./.github/workflows/plugin-packages.yml
 
   wasm:
+    needs: changes
+    if: needs.changes.outputs.wasm == 'true'
     uses: ./.github/workflows/wasm.yml
 
   zig:
     name: Zig (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -51,6 +90,8 @@ jobs:
 
   windows-extensions:
     name: Windows dynamic extensions
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -63,11 +104,13 @@ jobs:
 
   sqlite-size:
     name: SQLite module size (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel, windows-latest]
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "macos-15-intel", "windows-latest"]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
@@ -78,6 +121,7 @@ jobs:
 
   sqlite-invariants:
     name: SQLite invariants (diagnostic only)
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -88,16 +132,28 @@ jobs:
       # coverage. Never publish or performance-benchmark these artifacts.
       - run: zig build test c-abi-test check-storage-compat -Dsqlite-invariants=true -Doptimize=ReleaseSafe
 
-  abi-coverage:
-    name: C ABI binding coverage
+  # Always runs. Checks that read documentation belong here, because a pull
+  # request that changes only documentation skips the other jobs.
+  repository:
+    name: Repository checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - run: python3 -m unittest scripts/tests/test_ci_changed_areas.py
+      - run: python3 -m unittest scripts/tests/test_python_platform_matrix.py
       - run: python3 -m unittest scripts/tests/test_abi_coverage.py
       - run: python3 scripts/check-abi-coverage.py
+      - name: Prepare bundled Python sources for repository version checks
+        run: sh bindings/python/tools/sync-rust-source.sh
+      - run: sh scripts/check-versions.sh
 
   generated-c:
     name: Generated C (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -115,6 +171,8 @@ jobs:
 
   rust:
     name: Rust (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -130,7 +188,6 @@ jobs:
           toolchain: stable
       - run: cargo fmt --all --manifest-path bindings/rust/Cargo.toml --check
       - run: python3 -m unittest scripts/tests/test_release_snapshot_order.py
-      - run: python3 -m unittest scripts/tests/test_python_platform_matrix.py
       - run: python3 -m unittest scripts/tests/test_object_ingestion_93_runner.py
       - run: sh bindings/rust/zova-sys/tools/sync-native-source.sh
       - run: sh bindings/rust/zova-sys/tools/check-native-source.sh
@@ -143,11 +200,13 @@ jobs:
 
   go:
     name: Go (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel, windows-latest]
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest"]' || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "macos-15-intel", "windows-latest"]') }}
     defaults:
       run:
         shell: bash
@@ -184,12 +243,19 @@ jobs:
 
   python:
     name: Python ${{ matrix.python-version }} (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
-        python-version: ["3.13", "3.14"]
+        python-version: ${{ fromJSON(github.event_name == 'pull_request' && '["3.14"]' || '["3.13", "3.14"]') }}
+        # Pull requests still test the 3.13 stable-ABI floor once; on pushes
+        # this entry is already in the matrix.
+        include:
+          - os: ubuntu-latest
+            python-version: "3.13"
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
@@ -212,28 +278,21 @@ jobs:
 
   javascript:
     name: JavaScript Node ${{ matrix.node-version }} (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
+    needs: changes
+    if: needs.changes.outputs.javascript == 'true'
+    # A map rather than matrix include entries: an include entry whose target
+    # a pull request drops would otherwise become a job of its own.
+    runs-on: ${{ fromJSON('{"linux-x86_64":"ubuntu-latest", "linux-arm64":"ubuntu-24.04-arm", "macos-x86_64":"macos-15-intel", "macos-arm64":"macos-latest", "windows-x86_64":"windows-latest"}')[matrix.target] }}
     strategy:
       fail-fast: false
       matrix:
-        node-version: ["22", "24"]
-        target:
-          - linux-x86_64
-          - linux-arm64
-          - macos-x86_64
-          - macos-arm64
-          - windows-x86_64
+        node-version: ${{ fromJSON(github.event_name == 'pull_request' && '["24"]' || '["22", "24"]') }}
+        target: ${{ fromJSON(github.event_name == 'pull_request' && '["linux-x86_64", "linux-arm64", "macos-arm64", "windows-x86_64"]' || '["linux-x86_64", "linux-arm64", "macos-x86_64", "macos-arm64", "windows-x86_64"]') }}
+        # Pull requests still test Node 22 once; on pushes this entry is
+        # already in the matrix.
         include:
-          - target: linux-x86_64
-            os: ubuntu-latest
-          - target: linux-arm64
-            os: ubuntu-24.04-arm
-          - target: macos-x86_64
-            os: macos-15-intel
-          - target: macos-arm64
-            os: macos-latest
-          - target: windows-x86_64
-            os: windows-latest
+          - node-version: "22"
+            target: linux-x86_64
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
