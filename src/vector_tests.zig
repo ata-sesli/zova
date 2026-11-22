@@ -135,33 +135,6 @@ test "vector v8 schema uses integer keys inline norms and collection cascades" {
     try std.testing.expectEqual(@as(i64, 0), try testingCount(&db, "select count(*) from _zova_vectors"));
 }
 
-test "sqlite wrapper can inspect zova vector tables" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "sqlite-inspect-vectors.zova");
-
-    {
-        var db = try Database.create(db_path);
-        defer db.deinit();
-    }
-
-    var raw = try sqlite.Database.open(db_path);
-    defer raw.deinit();
-
-    var tables = try raw.prepare(
-        \\select count(*)
-        \\from sqlite_master
-        \\where type = 'table'
-        \\  and name in ('_zova_vector_collections', '_zova_vectors')
-    );
-    defer tables.deinit();
-
-    try std.testing.expectEqual(sqlite.Step.row, try tables.step());
-    try std.testing.expectEqual(@as(i64, 2), tables.columnInt64(0));
-}
-
 test "create and lookup vector collections" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

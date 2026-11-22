@@ -1243,6 +1243,43 @@ fn defaultIo() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
 
+test "fuzz: bundle manifest parsing and validation reject or accept arbitrary bytes" {
+    const corpus = @import("fuzz_corpus.zig");
+    try std.testing.fuzz({}, fuzzBundleManifest, .{ .corpus = comptime &.{
+        corpus.slice(
+            \\{"name": "dyn_test", "version": "0.1.0", "storage_prefix": "_zova_ext_dyn_test_",
+            \\ "zova_abi_min": "1.0.0", "capabilities": "sql", "library": "libdyn_test.so",
+            \\ "entrypoint": "zova_extension_entry"}
+        ),
+        corpus.slice(
+            \\{"name": "dyn_test", "version": "0.1.0", "storage_prefix": "_zova_ext_dyn_test_",
+            \\ "zova_abi_min": "1.0.0", "capabilities": "sql", "library": "../escape.so", "entrypoint": null}
+        ),
+    } });
+}
+
+/// The manifest checks `loadBundleInfo` runs before it touches the library.
+fn fuzzBundleManifest(_: void, smith: *std.testing.Smith) anyerror!void {
+    const allocator = std.testing.allocator;
+    var bytes: [4096]u8 = undefined;
+    const len = smith.slice(&bytes);
+    var manifest = parseBundleManifest(allocator, bytes[0..len]) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return,
+    };
+    defer manifest.deinit(allocator);
+    extension.validateManifest(.{
+        .name = manifest.name,
+        .version = manifest.version,
+        .storage_prefix = manifest.storage_prefix,
+        .zova_abi_min = manifest.zova_abi_min,
+        .capabilities = manifest.capabilities,
+        .required = true,
+    }) catch return;
+    validateRelativeLibraryPath(manifest.library) catch return;
+    validateEntrypoint(manifest.entrypoint) catch return;
+}
+
 test "dynamic extension bundle validation rejects unsafe library paths" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});

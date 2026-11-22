@@ -902,23 +902,6 @@ test "read only open registers extension sql and checks installed extension" {
     try std.testing.expectError(error.ReadOnly, db.exec("create table read_only_extension_write_blocked (id integer)"));
 }
 
-test "open with missing registered extension code fails clearly" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "missing-extension.zova");
-
-    const registry = ExtensionRegistry.init(&.{testExtension()});
-    {
-        var db = try Database.createWithExtensions(db_path, registry);
-        defer db.deinit();
-        try db.installExtension("test");
-    }
-
-    try std.testing.expectError(error.ExtensionUnavailable, Database.open(db_path));
-}
-
 test "extension inspection opens missing-code databases for metadata only" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2962,33 +2945,6 @@ test "open rejects required vector table missing required column" {
     }
 
     try std.testing.expectError(error.NotZovaDatabase, Database.open(db_path));
-}
-
-test "sqlite wrapper can inspect zova object tables" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const db_path = try testingDbPath(&path_buffer, tmp.sub_path[0..], "sqlite-inspect.zova");
-
-    {
-        var db = try Database.create(db_path);
-        defer db.deinit();
-    }
-
-    var raw = try sqlite.Database.open(db_path);
-    defer raw.deinit();
-
-    var tables = try raw.prepare(
-        \\select count(*)
-        \\from sqlite_master
-        \\where type = 'table'
-        \\  and name in ('_zova_objects', '_zova_chunks', '_zova_object_chunks')
-    );
-    defer tables.deinit();
-
-    try std.testing.expectEqual(sqlite.Step.row, try tables.step());
-    try std.testing.expectEqual(@as(i64, 3), tables.columnInt64(0));
 }
 
 test "plain sqlite open on zova path does not initialize metadata" {

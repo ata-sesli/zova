@@ -169,6 +169,20 @@ jobs:
         env:
           ZOVA_GENERATED_C_REQUIRE_GCC: ${{ runner.os == 'Linux' && '1' || '0' }}
 
+  # Diagnostic builds only; production compiler flags are unchanged.
+  sanitizers:
+    name: Generated C under ASan and UBSan
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - run: scripts/check-generated-c-sanitizers.sh
+
   rust:
     name: Rust (${{ matrix.os }})
     needs: changes

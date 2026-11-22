@@ -1986,6 +1986,41 @@ fn unsignedMagnitudeToF64(sign: u64, magnitude: u64) f64 {
     return @bitCast(sign | (exponent64 << 52) | mantissa);
 }
 
+test "fuzz: encoded vector validation agrees with decoding and scoring" {
+    const corpus = @import("fuzz_corpus.zig");
+    const one_f32 = comptime std.mem.toBytes(std.mem.nativeToLittle(u32, @bitCast(@as(f32, 1.0))));
+    try std.testing.fuzz({}, fuzzEncodedVector, .{
+        .corpus = comptime &.{
+            // f32 cosine [1, 0]
+            corpus.int(0) ++ corpus.int(0) ++ corpus.int(2) ++ corpus.slice(&one_f32 ++ &[_]u8{ 0, 0, 0, 0 }),
+            // f16 l2 [1.0, -2.0]
+            corpus.int(1) ++ corpus.int(1) ++ corpus.int(2) ++ corpus.slice(&.{ 0x00, 0x3c, 0x00, 0xc0 }),
+            // i8 dot [127, -128, 0]
+            corpus.int(2) ++ corpus.int(2) ++ corpus.int(3) ++ corpus.slice(&.{ 0x7f, 0x80, 0x00 }),
+        },
+    });
+}
+
+fn fuzzEncodedVector(_: void, smith: *std.testing.Smith) anyerror!void {
+    const element_type = smith.value(VectorElementType);
+    const metric = smith.value(VectorMetric);
+    const dimensions = smith.valueRangeAtMost(u32, 0, 256);
+    var encoded: [256 * 4 + 1]u8 = undefined;
+    const encoded_len = smith.slice(&encoded);
+    const bytes = encoded[0..encoded_len];
+
+    validateEncodedValues(element_type, metric, dimensions, bytes) catch |err| switch (err) {
+        error.VectorCorrupt => return,
+        else => return err,
+    };
+    // A blob that passes validation must decode and score against itself.
+    const allocator = std.testing.allocator;
+    const values = try decodeValuesLe(allocator, element_type, bytes, dimensions);
+    defer values.deinit(allocator);
+    const distance = try vectorDistanceFromEncoded(element_type, metric, values.asConst(), bytes, dimensions);
+    try std.testing.expect(std.math.isFinite(distance));
+}
+
 test "f32ToF64 matches Zig float widening" {
     const values = [_]f32{
         0.0,

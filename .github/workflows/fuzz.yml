@@ -1,0 +1,26 @@
+name: Fuzz
+
+# Manual only. Pull requests replay every fuzz corpus once through the normal
+# test suites; this workflow searches for new inputs.
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: Runs per fuzz target (zig build fuzz --fuzz=<runs>)
+        type: string
+        default: 10K
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - run: zig build fuzz --fuzz=${{ inputs.runs }}
