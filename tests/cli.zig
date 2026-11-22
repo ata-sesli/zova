@@ -4662,9 +4662,7 @@ test "cli migrate --dry-run plans a bound set and creates nothing" {
         total += page_size * page_count;
     }
     try expectJsonInt(root, "copy_bytes", total);
-    // Free space is only measured on Linux and macOS; elsewhere it is null.
-    const free_bytes_tag: std.meta.Tag(std.json.Value) = if (builtin.os.tag == .windows) .null else .integer;
-    try std.testing.expectEqual(free_bytes_tag, std.meta.activeTag(root.get("destination_free_bytes") orelse return error.MissingJsonField));
+    try std.testing.expectEqual(std.json.Value.integer, std.meta.activeTag(root.get("destination_free_bytes") orelse return error.MissingJsonField));
     try expectJsonBool(root, "recovery_directory_exists", false);
     try expectJsonArray(root, "extensions");
 
