@@ -1,7 +1,8 @@
 //! Free space on the filesystem holding a path, for `migrate --dry-run`.
 //!
 //! Zig's standard library has no statvfs/statfs wrapper, so this declares the
-//! libc call per platform. Unsupported platforms report null ("unknown").
+//! libc call per platform, and the Win32 call on Windows. Unsupported
+//! platforms report null ("unknown").
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -12,8 +13,25 @@ pub fn availableBytes(path: [:0]const u8) ?u64 {
     switch (builtin.os.tag) {
         .macos, .ios, .tvos, .watchos, .visionos => return darwinAvailableBytes(path),
         .linux => if (@sizeOf(usize) == 8) return linuxAvailableBytes(path) else return null,
+        .windows => return windowsAvailableBytes(path),
         else => return null,
     }
+}
+
+fn windowsAvailableBytes(path: [:0]const u8) ?u64 {
+    const native = struct {
+        extern "kernel32" fn GetDiskFreeSpaceExW(
+            directory_name: [*:0]const u16,
+            free_bytes_available_to_caller: ?*u64,
+            total_number_of_bytes: ?*u64,
+            total_number_of_free_bytes: ?*u64,
+        ) callconv(.winapi) std.os.windows.BOOL;
+    };
+    const wide = std.unicode.wtf8ToWtf16LeAllocZ(std.heap.page_allocator, path) catch return null;
+    defer std.heap.page_allocator.free(wide);
+    var available: u64 = 0;
+    if (native.GetDiskFreeSpaceExW(wide.ptr, &available, null, null) == .FALSE) return null;
+    return available;
 }
 
 /// Darwin `struct statfs` (64-bit inode layout). Only the leading fields are

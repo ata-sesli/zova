@@ -1101,7 +1101,9 @@ zova-sys = "1.4.0"
 
 `zova` exposes `Database` for single-owner code and `SharedDatabase` for an
 opt-in cloneable `Send + Sync` handle. One shared handle is safe and internally
-serialized; open multiple handles for true SQLite concurrency.
+serialized; open multiple handles for true SQLite concurrency. See
+[Concurrency with multiple handles](docs/concurrency.md) for the recommended
+setup.
 
 Existing Rust object, vector, and graph APIs transparently use a bound store after the
 database is opened. Store create/bind/unbind/split management remains
@@ -1215,7 +1217,8 @@ must be freed with the matching `zova_*_free` function.
 
 One `zova_database *` handle is internally serialized. Calls on the same handle
 run one at a time. Multiple handles are the path for true concurrency and follow
-normal SQLite locking behavior.
+normal SQLite locking behavior; see
+[Concurrency with multiple handles](docs/concurrency.md).
 
 The v0.25 C ABI includes opaque-key graph batch mutation and lookup, keyed
 neighbors and topology scans, edge payload access, prepared fresh graph builds,
