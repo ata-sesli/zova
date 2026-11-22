@@ -1380,7 +1380,7 @@ pub fn abi_version() -> AbiVersion {
     }
 }
 
-/// Return the C ABI version string, such as `"1.4.0"`.
+/// Return the C ABI version string, such as `"1.5.0"`.
 pub fn abi_version_string() -> &'static str {
     let value = unsafe { std::ffi::CStr::from_ptr(zova_sys::zova_abi_version_string()) };
     value.to_str().expect("Zova ABI version string is ASCII")

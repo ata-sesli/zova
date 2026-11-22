@@ -12,10 +12,10 @@ traversal, transaction-aware app events, bound object/vector/graph stores,
 diagnostics, salvage, backup, compact copy, restore, and a trusted extension
 host foundation.
 
-Current package version: `1.4.0`.
+Current package version: `1.5.0`.
 
 Zova `1.0.0` established the stable native 1.x contract. The current
-development `.zova` file `format_version` is `14`, and the
+`.zova` file `format_version` is `14`, and the
 earliest migratable format is `9`. Open never migrates silently: format-9,
 format-10, format-11, format-12 and format-13 databases are reported as migration-required and left byte-identical,
 and downgrades are unsupported. Older databases migrate forward with the
@@ -95,7 +95,7 @@ or:
 
 ```toml
 [dependencies]
-zova = "1.4.0"
+zova = "1.5.0"
 ```
 
 Python:
@@ -113,7 +113,7 @@ python -m pip install zova
 Go:
 
 ```sh
-go get github.com/ata-sesli/zova/bindings/go@v1.4.0
+go get github.com/ata-sesli/zova/bindings/go@v1.5.0
 ```
 
 The Go binding uses cgo over Zova's C ABI. Build or provide the C ABI library
@@ -122,7 +122,7 @@ before using it from another project.
 C ABI:
 
 ```sh
-# Download a matching zova-v1.4.0-<platform>-c-abi archive
+# Download a matching zova-v1.5.0-<platform>-c-abi archive
 # from the GitHub Release, or build it locally:
 zig build c-abi
 ```
@@ -130,7 +130,7 @@ zig build c-abi
 CLI:
 
 ```sh
-# Download a matching zova-v1.4.0-<platform>-cli archive
+# Download a matching zova-v1.5.0-<platform>-cli archive
 # from the GitHub Release, or build it locally:
 zig build
 zig-out/bin/zova --help
@@ -145,7 +145,7 @@ Zova vendors SQLite. You do not need a system SQLite installation.
 | JavaScript / TypeScript | `bun add zova-js` / `npm install zova-js` | no | no | no | prebuilt Node-API 8 packages for Node 22/24 and Bun |
 | Rust | `cargo add zova` | no | yes | yes | `zova-sys` compiles the matching generated-C platform package with Clang |
 | Python | `uv add zova` / `pip install zova` | no | no | no | stable-ABI wheels are published for Linux/macOS x86_64/arm64 and Windows x86_64, and tested on CPython 3.13/3.14; PyPI source builds are not supported |
-| Go | `go get github.com/ata-sesli/zova/bindings/go@v1.4.0` | no | no | yes, cgo | releases after 1.4.0 carry prebuilt `libzova_c.a` for Linux/macOS x86_64/arm64 and Windows x86_64 (MinGW); 1.4.0 and earlier need a release C ABI archive |
+| Go | `go get github.com/ata-sesli/zova/bindings/go@v1.5.0` | no | no | yes, cgo | 1.5.0 and later carry prebuilt `libzova_c.a` for Linux/macOS x86_64/arm64 and Windows x86_64 (MinGW); 1.4.0 and earlier need a release C ABI archive |
 | C ABI | release archive or `zig build c-abi` | no, if using a release archive | no | no, if using a release archive | static C ABI library and `zova.h` |
 | Zig | package source | yes | no | yes | native API |
 | CLI | release archive or `zig build` | no, if using a release archive | no | no, if using a release archive | source-built or prebuilt command line tool |
@@ -554,7 +554,7 @@ Zova supports collection create/info/list/delete, vector CRUD, batch upsert,
 exact search, candidate-filtered search, search-by-id, and inclusive distance
 thresholds.
 
-Search is exact and flat-scan in `1.4.0`. It is good for local datasets,
+Search is exact and flat-scan in `1.5.0`. It is good for local datasets,
 offline ranking, deterministic tests, and SQL-filter-first workflows. It is not
 yet an ANN engine for million-scale low-latency search.
 
@@ -1089,14 +1089,14 @@ Rust users normally use the safe crate:
 
 ```toml
 [dependencies]
-zova = "1.4.0"
+zova = "1.5.0"
 ```
 
 The lower-level raw FFI crate is available as:
 
 ```toml
 [dependencies]
-zova-sys = "1.4.0"
+zova-sys = "1.5.0"
 ```
 
 `zova` exposes `Database` for single-owner code and `SharedDatabase` for an
@@ -1156,7 +1156,7 @@ session APIs, application SQL functions, and linked plugins. See the
 Install:
 
 ```sh
-go get github.com/ata-sesli/zova/bindings/go@v1.4.0
+go get github.com/ata-sesli/zova/bindings/go@v1.5.0
 ```
 
 Import:
@@ -1166,7 +1166,7 @@ import zova "github.com/ata-sesli/zova/bindings/go"
 ```
 
 The Go package uses cgo over `include/zova.h` and links `libzova_c.a`.
-Release versions after 1.4.0 include `zova.h` and a prebuilt `libzova_c.a` for
+Release versions 1.5.0 and later include `zova.h` and a prebuilt `libzova_c.a` for
 Linux and macOS x86_64/arm64 and Windows x86_64, so `go get` is enough to build
 on those platforms; cgo still needs a C compiler (MinGW GCC on Windows).
 
@@ -1333,12 +1333,9 @@ journal and synchronous settings.
 
 ## Current Boundaries
 
-Published Zova `1.4.0` does not include:
+Published Zova `1.5.0` does not include:
 
 - binding-level app-registered extension authoring APIs
-- binding-level dynamic `.zovaext` loading APIs
-- dynamic `.zovaext` loading from generated-C package artifacts
-- safe high-level Rust, Go, or Python SQL callback APIs
 - ANN indexes such as HNSW or IVFFlat
 - Zova-owned BM25 abstraction
 - vector SQL operators
@@ -1432,8 +1429,8 @@ Zova publishes several release artifact types:
 - A GitHub Release source archive.
 - Rust crates on crates.io: `zova-sys` and `zova`.
 - Python stable-ABI wheels on PyPI.
-- A Go module tag: `bindings/go/v1.4.0`. From the next release, it points at
-  a child of the release commit that adds prebuilt `libzova_c.a` files under
+- A Go module tag: `bindings/go/v1.5.0`. It points at a child of the release
+  commit that adds prebuilt `libzova_c.a` files under
   `bindings/go/native/`.
 - JavaScript/TypeScript Node-API packages on npm as `zova-js`, with native
   packages for the supported platform matrix.
@@ -1466,13 +1463,13 @@ Clang and a platform linker/SDK; only explicit `ZOVA_SOURCE_DIR` builds need Zig
 Maintainer source-package command:
 
 ```sh
-scripts/package-release.sh 1.4.0
+scripts/package-release.sh 1.5.0
 ```
 
 Maintainer local distribution command for crates.io:
 
 ```sh
-scripts/distribute-release.sh 1.4.0
+scripts/distribute-release.sh 1.5.0
 ```
 
 Python is wheel-only and is published through the **Publish Release** workflow,

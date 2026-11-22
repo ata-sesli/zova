@@ -60,7 +60,7 @@ flowchart LR
 After the Go module tag is pushed, applications can add the binding with:
 
 ```sh
-go get github.com/ata-sesli/zova/bindings/go@v1.4.0
+go get github.com/ata-sesli/zova/bindings/go@v1.5.0
 ```
 
 Import it as:
@@ -69,7 +69,7 @@ Import it as:
 import zova "github.com/ata-sesli/zova/bindings/go"
 ```
 
-The Go package uses cgo. Release versions after 1.4.0 include `zova.h` and a
+The Go package uses cgo. Release versions 1.5.0 and later include `zova.h` and a
 prebuilt static `libzova_c.a` for each supported platform under `native/`, so
 `go get` is enough to build:
 
@@ -86,7 +86,7 @@ Windows. On other platforms, or to link your own build, see
 Version 1.4.0 and earlier do not include libraries; point cgo at a release C ABI
 archive as described below.
 
-The current development `.zova` format is 14, and Zova does not migrate older
+The current `.zova` format is 14, and Zova does not migrate older
 format databases in place. Format-9, format-10, format-11, format-12 and format-13 databases can be probed and
 migrated forward with the package-level `ProbeFormat(path)` and
 `MigrateDatabase(source, destination, options...)` functions: migration is
@@ -108,7 +108,7 @@ on one build tag:
 
 | Build | Search paths |
 |---|---|
-| Released module after 1.4.0 | `native/include` and `native/<goos>_<goarch>` in the module (`cgo_prebuilt.go`) |
+| Released module, 1.5.0 and later | `native/include` and `native/<goos>_<goarch>` in the module (`cgo_prebuilt.go`) |
 | Repository checkout | `../../include` and `../../zig-out/lib` (`cgo_checkout.go`) |
 | Either, with `-tags zova_external` | none; `CGO_CFLAGS` and `CGO_LDFLAGS` supply them |
 
@@ -191,7 +191,7 @@ You need Zig `0.17.0` or newer, cgo enabled, and a working C compiler.
 
 Go modules are published by Git tags, not by uploading to a central registry.
 Because this module lives in the `bindings/go` subdirectory, the release tag
-must include that subdirectory prefix, such as `bindings/go/v1.4.0`.
+must include that subdirectory prefix, such as `bindings/go/v1.5.0`.
 
 The **Publish Release** workflow creates the tag. It copies the release commit,
 runs `scripts/prepare-go-module.py` to add `native/` with every platform's
@@ -213,7 +213,7 @@ python3 scripts/prepare-go-module.py /tmp/zova-go-module \
 After pushing the tag, ask the public Go module proxy to resolve it:
 
 ```sh
-GOPROXY=proxy.golang.org go list -m github.com/ata-sesli/zova/bindings/go@v1.4.0
+GOPROXY=proxy.golang.org go list -m github.com/ata-sesli/zova/bindings/go@v1.5.0
 ```
 
 The module path is:
