@@ -460,7 +460,9 @@ fn salvageOperationalError(err: Error) extension_impl.Error {
 fn stepInsertOrSkip(stmt: *sqlite.Statement) extension_impl.Error!bool {
     const step = stmt.step() catch |err| switch (err) {
         error.Constraint => {
-            try stmt.reset();
+            // sqlite3_reset repeats the failed step's error code; the
+            // statement is rewound either way.
+            stmt.reset() catch |reset_err| if (reset_err != error.Constraint) return reset_err;
             try stmt.clearBindings();
             return false;
         },
@@ -514,10 +516,18 @@ fn checkInternal(db: *sqlite.Database, manifest: extension_impl.Manifest) Error!
         .done => return error.ExtensionInvalid,
     }
 
+    // Count postings in one grouped pass: the postings key leads with term,
+    // so a per-document count would scan the whole index for each document.
     var documents = try db.prepare(
-        \\select index_name, document_id, target_type, target_namespace, target_ref, term_count
-        \\from _zova_ext_trgm_documents
-        \\order by index_name, document_id
+        \\select d.index_name, d.document_id, d.target_type, d.target_namespace, d.target_ref, d.term_count,
+        \\  coalesce(p.posting_count, 0)
+        \\from _zova_ext_trgm_documents d
+        \\left join (
+        \\  select index_name, document_id, count(*) as posting_count
+        \\  from _zova_ext_trgm_postings
+        \\  group by index_name, document_id
+        \\) p on p.index_name = d.index_name and p.document_id = d.document_id
+        \\order by d.index_name, d.document_id
     );
     defer documents.deinit();
     while (try documents.step() == .row) {
@@ -531,17 +541,7 @@ fn checkInternal(db: *sqlite.Database, manifest: extension_impl.Manifest) Error!
         const target_ref = if (documents.columnType(4) == .null) null else documents.columnText(4);
         try validateTarget(db, target_type, target_namespace, target_ref);
         if (documents.columnInt64(5) < 0) return error.ExtensionInvalid;
-
-        var postings_count = try db.prepare(
-            \\select count(*)
-            \\from _zova_ext_trgm_postings
-            \\where index_name = ? and document_id = ?
-        );
-        defer postings_count.deinit();
-        try postings_count.bindText(1, index_name);
-        try postings_count.bindText(2, document_id);
-        std.debug.assert((try postings_count.step()) == .row);
-        if (postings_count.columnInt64(0) != documents.columnInt64(5)) return error.ExtensionInvalid;
+        if (documents.columnInt64(6) != documents.columnInt64(5)) return error.ExtensionInvalid;
     }
 
     try expectNoRows(db,

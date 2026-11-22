@@ -421,6 +421,31 @@ test "trgm check reports private table and posting corruption" {
     try std.testing.expectError(error.ExtensionInvalid, db.checkExtension("trgm"));
 }
 
+test "trgm check compares each document term count with its postings" {
+    var db = try zova.Database.createMemory();
+    defer db.deinit();
+    try db.installExtension("trgm");
+    try execSql(&db, "select zova_trgm_create_index('docs')");
+    try execSql(&db, "select zova_trgm_put('docs', 'doc:1', 'record', 'messages', '1', 'hello world')");
+    try execSql(&db, "select zova_trgm_put('docs', 'doc:2', 'record', 'messages', '2', 'upload failed')");
+    try db.checkExtension("trgm");
+
+    try db.exec("update _zova_ext_trgm_documents set term_count = term_count + 1 where document_id = 'doc:2'");
+    try std.testing.expectError(error.ExtensionInvalid, db.checkExtension("trgm"));
+    try db.exec("update _zova_ext_trgm_documents set term_count = term_count - 1 where document_id = 'doc:2'");
+    try db.checkExtension("trgm");
+
+    // A document without postings is valid only when its term count is zero.
+    try db.exec(
+        \\insert into _zova_ext_trgm_documents
+        \\  (index_name, document_id, target_type, target_namespace, target_ref, normalized_len, text_hash, term_count, updated_at_unix)
+        \\values ('docs', 'doc:3', 'record', 'messages', '3', 0, zeroblob(32), 0, 0)
+    );
+    try db.checkExtension("trgm");
+    try db.exec("update _zova_ext_trgm_documents set term_count = 1 where document_id = 'doc:3'");
+    try std.testing.expectError(error.ExtensionInvalid, db.checkExtension("trgm"));
+}
+
 test "trgm is preserved by backup compact and restore" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -515,6 +540,47 @@ test "trgm salvage copies valid subset when one document is unrecoverable" {
     try std.testing.expectEqual(@as(i64, 1), try countSqlRows(&destination.sqlite_db, "select count(*) from _zova_ext_trgm_documents"));
     try expectSearchIds(&destination, "docs", "alpha attachment", 1, 0.0, &.{"doc:good"});
     try expectSearchIds(&destination, "docs", "zzzzzyyyyyxxxxx", 1, 0.80, &.{});
+}
+
+test "trgm salvage skips a source row that violates a destination constraint" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const source_path = try testingDbPath(&source_buffer, tmp.sub_path[0..], "trgm-salvage-duplicate-source.zova");
+    var destination_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const destination_path = try testingDbPath(&destination_buffer, tmp.sub_path[0..], "trgm-salvage-duplicate-destination.zova");
+
+    {
+        var db = try zova.Database.create(source_path);
+        defer db.deinit();
+        try db.installExtension("trgm");
+        try execSql(&db, "select zova_trgm_create_index('docs')");
+        try execSql(&db, "select zova_trgm_put('docs', 'doc:1', 'record', 'messages', '1', 'attachment upload failed')");
+    }
+    {
+        // A damaged source can hold rows its own constraints should have
+        // rejected. Rebuild the index table without them and add a second
+        // index that reuses created_order, which the destination rejects.
+        var raw = try sqlite.Database.open(source_path);
+        defer raw.deinit();
+        try raw.exec(
+            \\create table saved_indexes as select name, created_order from _zova_ext_trgm_indexes;
+            \\drop table _zova_ext_trgm_indexes;
+            \\create table _zova_ext_trgm_indexes (name text, created_order integer);
+            \\insert into _zova_ext_trgm_indexes select name, created_order from saved_indexes;
+            \\insert into _zova_ext_trgm_indexes select 'docs_copy', created_order from saved_indexes;
+            \\drop table saved_indexes;
+        );
+    }
+
+    try copyTrgmSalvage(source_path, destination_path, 1, 0);
+
+    var destination = try zova.Database.open(destination_path);
+    defer destination.deinit();
+    try destination.checkExtension("trgm");
+    try std.testing.expectEqual(@as(i64, 1), try countSqlRows(&destination.sqlite_db, "select count(*) from _zova_ext_trgm_indexes"));
+    try expectSearchIds(&destination, "docs", "attachement failed", 1, 0.0, &.{"doc:1"});
 }
 
 test "trgm salvage skips unrecoverable private storage without leaving tables" {

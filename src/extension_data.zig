@@ -23,15 +23,12 @@ fn text(value: api.Bytes, required: bool) Error![]const u8 {
 }
 
 /// Match the existing SQL graph/vector routing: an attached authoritative store
-/// replaces main storage. Preparation failure other than a missing attachment
-/// must not silently redirect a source to main.
+/// replaces main storage. The lookup prepares no statement because plugin
+/// operation calls resolve both stores on every call.
 pub fn schema(db: *sqlite.Database, comptime store: []const u8) sqlite.Error![]const u8 {
-    var stmt = try db.prepare("pragma database_list");
-    defer stmt.deinit();
-    while (try stmt.step() == .row) {
-        if (std.mem.eql(u8, stmt.columnText(1), store)) return store ++ ".";
-    }
-    return "main.";
+    // Null only when no database of that name is attached; in-memory and
+    // temporary databases report an empty file name instead.
+    return if (sqlite.c.sqlite3_db_filename(db.handle, std.fmt.comptimePrint("{s}", .{store})) != null) store ++ "." else "main.";
 }
 
 fn prepare(db: *sqlite.Database, buffer: []u8, comptime template: []const u8, args: anytype) Error!sqlite.Statement {
