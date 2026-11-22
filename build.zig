@@ -817,7 +817,8 @@ pub fn build(b: *std.Build) void {
         "test-c-api",
         "Run Zig C API tests",
         "src/c_api.zig",
-        &.{},
+        // The C API imports the whole core, whose tests test-core already runs.
+        &.{"c_api"},
         target,
         optimize,
         zova_build_options,
@@ -886,6 +887,30 @@ pub fn build(b: *std.Build) void {
     const test_cli_step = b.step("test-cli", "Run CLI tests");
     test_cli_step.dependOn(&cli_tests_cmd.step);
     test_step.dependOn(test_cli_step);
+
+    // Fuzz targets are the tests named "fuzz: ..." beside code that reads
+    // untrusted bytes. Their suites above already replay each corpus once;
+    // `zig build fuzz --fuzz=<runs>` searches for new inputs (not on Windows).
+    const fuzz_step = b.step("fuzz", "Run the fuzz targets; add --fuzz[=runs] to search for new inputs");
+    for ([_][2][]const u8{
+        .{ "fuzz-objects", "src/test_objects_root.zig" },
+        .{ "fuzz-vectors", "src/test_vectors_root.zig" },
+        .{ "fuzz-extensions", "src/test_extensions_root.zig" },
+    }) |suite| {
+        const fuzz_tests = b.addTest(.{
+            .name = suite[0],
+            .root_module = createZigTestModule(b, suite[1], target, optimize, zova_build_options, plugin_fixture_options, sqlite_lib),
+            // The suite roots import each file inside a "... suite" test, so
+            // those wrappers must pass the filter for the fuzz tests to exist.
+            .filters = &.{ "fuzz:", " suite" },
+            // The self-hosted backend emits no coverage PCs for the fuzzer.
+            .use_llvm = true,
+        });
+        fuzz_step.dependOn(&b.addRunArtifact(fuzz_tests).step);
+    }
+    const cli_fuzz_tests = b.addTest(.{ .name = "fuzz-cli", .root_module = cli_tests_module, .filters = &.{"fuzz:"}, .use_llvm = true });
+    cli_fuzz_tests.rdynamic = true;
+    fuzz_step.dependOn(&b.addRunArtifact(cli_fuzz_tests).step);
 
     const c_abi_lib = b.addLibrary(.{
         .name = "zova_c",
@@ -1015,6 +1040,25 @@ fn addZigTestSuite(
     sqlite_lib: *std.Build.Step.Compile,
 ) *std.Build.Step {
     const suite_step = b.step(name, description);
+    const tests = b.addTest(.{
+        .name = name,
+        .root_module = createZigTestModule(b, root_source, target, optimize, zova_build_options, plugin_fixture_options, sqlite_lib),
+        .filters = filters,
+    });
+    const test_cmd = b.addRunArtifact(tests);
+    suite_step.dependOn(&test_cmd.step);
+    return suite_step;
+}
+
+fn createZigTestModule(
+    b: *std.Build,
+    root_source: []const u8,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    zova_build_options: *std.Build.Step.Options,
+    plugin_fixture_options: *std.Build.Step.Options,
+    sqlite_lib: *std.Build.Step.Compile,
+) *std.Build.Module {
     const root_module = b.createModule(.{
         .root_source_file = b.path(root_source),
         .target = target,
@@ -1023,14 +1067,7 @@ fn addZigTestSuite(
     root_module.addOptions("zova_build_options", zova_build_options);
     root_module.addOptions("plugin_fixture_options", plugin_fixture_options);
     addSqlite(root_module, b, sqlite_lib);
-    const tests = b.addTest(.{
-        .name = name,
-        .root_module = root_module,
-        .filters = filters,
-    });
-    const test_cmd = b.addRunArtifact(tests);
-    suite_step.dependOn(&test_cmd.step);
-    return suite_step;
+    return root_module;
 }
 
 fn addSqlite(

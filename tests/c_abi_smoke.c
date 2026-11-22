@@ -1736,7 +1736,13 @@ static void run_dynamic_extension_bundle_smoke(
     zova_message_free(&message);
 }
 
-static void run_probe_migrate_smoke(void) {
+// Scratch files live beside the smoke database so the test runs on every
+// platform and never collides with another run.
+#define SMOKE_PATH(var, name) \
+    char var[1024]; \
+    snprintf(var, sizeof(var), "%s.%s", db_path, name)
+
+static void run_probe_migrate_smoke(const char *db_path) {
     // Null request validation
     expect_status(zova_database_probe_format(NULL), ZOVA_INVALID_ARGUMENT, "probe null request");
     expect_status(zova_database_migrate(NULL), ZOVA_INVALID_ARGUMENT, "migrate null request");
@@ -1750,8 +1756,9 @@ static void run_probe_migrate_smoke(void) {
     {
         zova_message msg = {0};
         zova_database_format_info out = {.format_version = 0xDEADBEEF, .compatibility = 0x7FFFFFFF};
+        SMOKE_PATH(dummy_path, "probe-dummy.zova");
         expect_status(zova_database_probe_format(&(zova_database_probe_format_request){
-                          .path = "/tmp/zova_probe_dummy.zova",
+                          .path = dummy_path,
                           .out_info = NULL,
                           .out_error_message = &msg,
                       }),
@@ -1780,8 +1787,9 @@ static void run_probe_migrate_smoke(void) {
     {
         zova_message msg = {0};
         zova_database_format_info out = {.format_version = 0xDEADBEEF, .compatibility = 0x7FFFFFFF};
+        SMOKE_PATH(bad_path, "probe-bad.txt");
         expect_status(zova_database_probe_format(&(zova_database_probe_format_request){
-                          .path = "/tmp/bad.txt",
+                          .path = bad_path,
                           .out_info = &out,
                           .out_error_message = &msg,
                       }),
@@ -1796,8 +1804,10 @@ static void run_probe_migrate_smoke(void) {
     {
         zova_message msg = {0};
         zova_database_format_info out = {0};
+        SMOKE_PATH(missing_path, "probe-nonexistent.zova");
+        remove(missing_path);
         expect_status(zova_database_probe_format(&(zova_database_probe_format_request){
-                          .path = "/tmp/zova_probe_nonexistent_xyz123.zova",
+                          .path = missing_path,
                           .out_info = &out,
                           .out_error_message = &msg,
                       }),
@@ -1810,7 +1820,7 @@ static void run_probe_migrate_smoke(void) {
     }
     // Probe: current format (fresh DB)
     {
-        const char *path = "/tmp/zova_probe_current.zova";
+        SMOKE_PATH(path, "probe-current.zova");
         remove(path);
         zova_database *db = NULL;
         zova_message msg = {0};
@@ -1829,7 +1839,7 @@ static void run_probe_migrate_smoke(void) {
     // Probe: migratable fixture
     {
         const char *src = "tests/fixtures/format-9.zova";
-        const char *dst = "/tmp/zova_probe_migratable.zova";
+        SMOKE_PATH(dst, "probe-migratable.zova");
         // copy fixture via file copy
         FILE *in = fopen(src, "rb");
         FILE *outf = fopen(dst, "wb");
@@ -1849,20 +1859,22 @@ static void run_probe_migrate_smoke(void) {
     // Migrate: null source/destination, invalid flags, destination exists, busy, unsupported, no-migration-path, success, immutability, no-verify, verification failure
     {
         // null source
+        SMOKE_PATH(args_src, "migrate-args-src.zova");
+        SMOKE_PATH(args_dst, "migrate-args-dst.zova");
         zova_message msg = {0};
-        expect_status(zova_database_migrate(&(zova_database_migrate_request){.source_path = NULL, .destination_path = "/tmp/dst.zova", .flags = 0, .out_error_message = &msg}), ZOVA_INVALID_ARGUMENT, "migrate null source");
+        expect_status(zova_database_migrate(&(zova_database_migrate_request){.source_path = NULL, .destination_path = args_dst, .flags = 0, .out_error_message = &msg}), ZOVA_INVALID_ARGUMENT, "migrate null source");
         zova_message_free(&msg);
         // null dest
-        expect_status(zova_database_migrate(&(zova_database_migrate_request){.source_path = "/tmp/src.zova", .destination_path = NULL, .flags = 0, .out_error_message = &msg}), ZOVA_INVALID_ARGUMENT, "migrate null dest");
+        expect_status(zova_database_migrate(&(zova_database_migrate_request){.source_path = args_src, .destination_path = NULL, .flags = 0, .out_error_message = &msg}), ZOVA_INVALID_ARGUMENT, "migrate null dest");
         zova_message_free(&msg);
         // invalid flags
-        expect_status(zova_database_migrate(&(zova_database_migrate_request){.source_path = "/tmp/src.zova", .destination_path = "/tmp/dst.zova", .flags = 0xDEADBEEF, .out_error_message = &msg}), ZOVA_INVALID_ARGUMENT, "migrate invalid flags");
+        expect_status(zova_database_migrate(&(zova_database_migrate_request){.source_path = args_src, .destination_path = args_dst, .flags = 0xDEADBEEF, .out_error_message = &msg}), ZOVA_INVALID_ARGUMENT, "migrate invalid flags");
         zova_message_free(&msg);
     }
     // Migrate: current format -> NO_MIGRATION_PATH
     {
-        const char *src = "/tmp/zova_migrate_current_src.zova";
-        const char *dst = "/tmp/zova_migrate_current_dst.zova";
+        SMOKE_PATH(src, "migrate-current-src.zova");
+        SMOKE_PATH(dst, "migrate-current-dst.zova");
         remove(src); remove(dst);
         zova_database *db = NULL; zova_message msg = {0};
         expect_status(zova_database_create(&(zova_database_open_request){.path = src, .out_db = &db, .out_error_message = &msg}), ZOVA_OK, "create current src");
@@ -1876,8 +1888,8 @@ static void run_probe_migrate_smoke(void) {
     }
     // Migrate: unsupported future/legacy
     {
-        const char *src = "/tmp/zova_migrate_future_src.zova";
-        const char *dst = "/tmp/zova_migrate_future_dst.zova";
+        SMOKE_PATH(src, "migrate-future-src.zova");
+        SMOKE_PATH(dst, "migrate-future-dst.zova");
         remove(src); remove(dst);
         zova_database *db = NULL; zova_message msg = {0};
         expect_status(zova_database_create(&(zova_database_open_request){.path = src, .out_db = &db, .out_error_message = &msg}), ZOVA_OK, "create future base");
@@ -1890,8 +1902,8 @@ static void run_probe_migrate_smoke(void) {
         if (access(dst, F_OK) == 0) { fprintf(stderr, "migrate future: dest should not exist\n"); exit(1); }
         remove(src);
         // legacy 8
-        const char *src2 = "/tmp/zova_migrate_legacy_src.zova";
-        const char *dst2 = "/tmp/zova_migrate_legacy_dst.zova";
+        SMOKE_PATH(src2, "migrate-legacy-src.zova");
+        SMOKE_PATH(dst2, "migrate-legacy-dst.zova");
         remove(src2); remove(dst2);
         zova_database *db2 = NULL; zova_message msg2 = {0};
         expect_status(zova_database_create(&(zova_database_open_request){.path = src2, .out_db = &db2, .out_error_message = &msg2}), ZOVA_OK, "create legacy base");
@@ -1906,8 +1918,8 @@ static void run_probe_migrate_smoke(void) {
     }
     // Migrate: success with source immutability and destination exists check, plus busy
     {
-        const char *src = "/tmp/zova_migrate_success_src.zova";
-        const char *dst = "/tmp/zova_migrate_success_dst.zova";
+        SMOKE_PATH(src, "migrate-success-src.zova");
+        SMOKE_PATH(dst, "migrate-success-dst.zova");
         remove(src); remove(dst);
         // copy fixture
         FILE *in = fopen("tests/fixtures/format-9.zova", "rb");
@@ -1938,7 +1950,7 @@ static void run_probe_migrate_smoke(void) {
         if (sqlite3_open(src, &lock_raw) != SQLITE_OK) { fprintf(stderr, "open lock raw failed: %s\n", sqlite3_errmsg(lock_raw)); exit(1); }
         char *lock_err = NULL;
         if (sqlite3_exec(lock_raw, "begin immediate", NULL, NULL, &lock_err) != SQLITE_OK) { fprintf(stderr, "begin immediate failed: %s\n", lock_err); sqlite3_free(lock_err); exit(1); }
-        const char *busy_dst = "/tmp/zova_migrate_busy_dst.zova";
+        SMOKE_PATH(busy_dst, "migrate-busy-dst.zova");
         remove(busy_dst);
         zova_message bmsg = {0};
         zova_status busy_st = zova_database_migrate(&(zova_database_migrate_request){.source_path = src, .destination_path = busy_dst, .flags = 0, .out_error_message = &bmsg});
@@ -1948,8 +1960,8 @@ static void run_probe_migrate_smoke(void) {
         if (sqlite3_exec(lock_raw, "rollback", NULL, NULL, &lock_err) != SQLITE_OK) { fprintf(stderr, "rollback failed: %s\n", lock_err); sqlite3_free(lock_err); exit(1); }
         sqlite3_close(lock_raw);
         // verification failure: corrupt _zova_chunks
-        const char *corrupt_src = "/tmp/zova_migrate_corrupt_src.zova";
-        const char *corrupt_dst = "/tmp/zova_migrate_corrupt_dst.zova";
+        SMOKE_PATH(corrupt_src, "migrate-corrupt-src.zova");
+        SMOKE_PATH(corrupt_dst, "migrate-corrupt-dst.zova");
         remove(corrupt_src); remove(corrupt_dst);
         in = fopen("tests/fixtures/format-9.zova", "rb"); outf = fopen(corrupt_src, "wb");
         if (!in || !outf) { fprintf(stderr, "copy corrupt src failed\n"); exit(1); }
@@ -1971,7 +1983,7 @@ static void run_probe_migrate_smoke(void) {
         if (csz != csz2 || memcmp(cdata, cdata2, csz) != 0) { fprintf(stderr, "corrupt source changed after failed migrate\n"); exit(1); }
         free(cdata); free(cdata2);
         // with NO_VERIFY it should succeed
-        const char *corrupt_dst2 = "/tmp/zova_migrate_corrupt_dst2.zova";
+        SMOKE_PATH(corrupt_dst2, "migrate-corrupt-dst2.zova");
         remove(corrupt_dst2);
         zova_message cmsg2 = {0};
         expect_status(zova_database_migrate(&(zova_database_migrate_request){.source_path = corrupt_src, .destination_path = corrupt_dst2, .flags = ZOVA_MIGRATE_NO_VERIFY, .out_error_message = &cmsg2}), ZOVA_OK, "migrate corrupt no-verify");
@@ -1998,7 +2010,6 @@ int main(int argc, char **argv) {
     expect_status(zova_fresh_build_finish(NULL), ZOVA_INVALID_ARGUMENT, "fresh builder null finish");
     expect_status(zova_fresh_build_abort(NULL), ZOVA_INVALID_ARGUMENT, "fresh builder null abort");
     zova_fresh_build_destroy(NULL);
-    run_probe_migrate_smoke();
     if (argc != 2 && argc != 5) {
         fprintf(stderr, "usage: %s <db-path> [dynamic-library bundle-path trust-store-path]\n", argv[0]);
         return 2;
@@ -2006,6 +2017,7 @@ int main(int argc, char **argv) {
 
     const char *db_path = argv[1];
     remove(db_path);
+    run_probe_migrate_smoke(db_path);
 
     char backup_path[1024];
     char compact_path[1024];

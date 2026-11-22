@@ -46,6 +46,15 @@ cargo test --manifest-path bindings/python/Cargo.toml
 uv run --isolated --with pytest --directory bindings/python python -m pytest
 ```
 
+Fuzz targets and the sanitized C build (Linux or macOS; the sanitizer script
+needs `clang`):
+
+```sh
+zig build fuzz               # replay every fuzz corpus once
+zig build fuzz --fuzz=10K    # search for new inputs, 10K runs per target
+scripts/check-generated-c-sanitizers.sh
+```
+
 Run the full release smoke path before release-facing changes:
 
 ```sh

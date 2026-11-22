@@ -380,19 +380,6 @@ test "statement binds values and reads a row" {
     try std.testing.expectEqual(Step.done, try select.step());
 }
 
-test "statement cleanup tolerates previous step error" {
-    var db = try Database.open(":memory:");
-    defer db.deinit();
-
-    try db.exec("create table users (email text not null unique)");
-    try db.exec("insert into users (email) values ('a@example.com')");
-
-    var duplicate = try db.prepare("insert into users (email) values (?)");
-    defer duplicate.deinit();
-    try duplicate.bindText(1, "a@example.com");
-    try std.testing.expectError(error.Constraint, duplicate.step());
-}
-
 test "constraint errors are recoverable" {
     var db = try Database.open(":memory:");
     defer db.deinit();
@@ -637,21 +624,6 @@ test "immediate transaction begin commits writes" {
     try db.commit();
 
     var count = try db.prepare("select count(*) from items where name = 'immediate'");
-    defer count.deinit();
-    try std.testing.expectEqual(Step.row, try count.step());
-    try std.testing.expectEqual(@as(i64, 1), count.columnInt64(0));
-}
-
-test "transaction commit keeps writes" {
-    var db = try Database.open(":memory:");
-    defer db.deinit();
-
-    try db.exec("create table items (id integer primary key, name text not null)");
-    try db.beginImmediate();
-    try db.exec("insert into items (name) values ('committed')");
-    try db.commit();
-
-    var count = try db.prepare("select count(*) from items");
     defer count.deinit();
     try std.testing.expectEqual(Step.row, try count.step());
     try std.testing.expectEqual(@as(i64, 1), count.columnInt64(0));

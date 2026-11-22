@@ -228,11 +228,13 @@ pub fn diagnosticGraphSchemaPrefix(db: *zova.Database) []const u8 {
     return if (hasAttachedSchema(db, "graph_store")) "graph_store." else "";
 }
 
+/// Read a non-negative count or sum. Only sums of stored object and chunk sizes
+/// can be negative, and only when those private rows are damaged.
 pub fn scalarU64(db: *zova.Database, sql: [:0]const u8) !u64 {
     var stmt = try db.prepare(sql);
     defer stmt.deinit();
     return switch (try stmt.step()) {
-        .row => @intCast(stmt.columnInt64(0)),
+        .row => std.math.cast(u64, stmt.columnInt64(0)) orelse error.ObjectCorrupt,
         .done => 0,
     };
 }
