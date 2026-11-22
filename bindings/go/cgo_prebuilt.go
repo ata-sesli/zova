@@ -1,4 +1,4 @@
-//go:build zova_prebuilt && !zova_external
+//go:build !zova_external
 
 package zova
 

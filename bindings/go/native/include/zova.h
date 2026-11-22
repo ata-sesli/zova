@@ -1,0 +1,2355 @@
+#ifndef ZOVA_H
+#define ZOVA_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+/*
+ * Zova C ABI, v1.5.0.
+ *
+ * This header exposes a C-compatible API over Zova's Zig
+ * implementation. The ABI is intentionally conservative: opaque handles,
+ * request structs, fixed-size ids, explicit status codes, and caller-visible
+ * ownership rules.
+ *
+ * Threading:
+ * - A single zova_database handle may be called from multiple threads. Calls
+ *   on the same handle are internally serialized and execute one at a time.
+ * - Statements, object writers, and notification subscriptions are child
+ *   handles of their parent database; their calls use the same parent
+ *   serialization boundary.
+ * - zova_database_close fails with ZOVA_MISUSE while live statements, object
+ *   writers, subscriptions, or a fresh-build session still exist. Finalize/destroy/close child
+ *   handles before closing.
+ * - After a successful close, statement finalize, or writer destroy, that C
+ *   pointer is invalid and must not be used again. Coordinate these terminal
+ *   calls so no other thread can still call through the same pointer.
+ * - Multiple database handles may point at the same file for true concurrency;
+ *   cross-handle locking follows normal SQLite behavior.
+ * - Serialization is not callback reentrancy. Do not call back into the same
+ *   handle from code that is already executing inside a Zova/SQLite callback.
+ *
+ * Strings and bytes:
+ * - Paths and SQL are null-terminated C strings.
+ * - Arbitrary object/chunk bytes and vector values use pointer + length.
+ * - Vector input/output floats are expected to be IEEE-754 single precision.
+ * - A null pointer with a non-zero length is invalid.
+ *
+ * Ownership:
+ * - Buffers/messages/manifests/vectors/search results returned by Zova are
+ *   library-owned and must be released with the matching zova_*_free function.
+ * - Input pointers are borrowed only for the duration of the call.
+ * - zova_database_last_error_message returns a borrowed pointer scoped to the
+ *   database handle; it is valid until the next call on that handle or close.
+ *   Another thread's next serialized call on the same handle may replace it, so
+ *   bindings should copy diagnostics immediately.
+ *
+ * Scope:
+ * - This ABI exposes database lifecycle, SQL exec, prepared statements,
+ *   explicit transactions, explicit vacuum, in-place free-page reclaim,
+ *   conversion, backup, compact copy, restore-to-new-file, in-memory
+ *   databases, objects, chunks, manifests, range reads, assembly,
+ *   ObjectWriter, native vectors, and native graph relationships.
+ * - Vector metadata remains application-owned in user SQL tables. Vector search
+ *   returns vector ids and distances only.
+ * - zova_database connections register read-only SQL vector helpers:
+ *   zova_vector_distance, zova_vector_distance_by_id, and zova_vector_search.
+ *   Query vector blobs for f32 collections are little-endian IEEE-754 f32
+ *   arrays. Typed collections use blobs matching their collection element type:
+ *   f16 blobs are little-endian uint16 bit patterns and i8 blobs are raw signed
+ *   bytes.
+ * - zova_database connections register read-only SQL graph virtual tables:
+ *   zova_graph_neighbors and zova_graph_walk. These are connection-local
+ *   helpers for joining returned graph node ids back to application SQL rows.
+ * - Zova does not automatically run VACUUM or change SQLite PRAGMAs.
+ * - App notifications are same-process, in-memory, local to one database
+ *   handle, non-persistent, and delivered only to subscription queues. They
+ *   are transaction-aware when callers use Zova transaction/savepoint helpers;
+ *   raw SQL transaction scopes that Zova cannot track are rejected for
+ *   zova_notify().
+ */
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Opaque handles. Callers must only pass them back to Zova functions. */
+typedef struct zova_database zova_database;
+typedef struct zova_object_writer zova_object_writer;
+typedef struct zova_object_reader zova_object_reader;
+typedef struct zova_object_seekable_reader zova_object_seekable_reader;
+typedef struct zova_statement zova_statement;
+typedef struct zova_subscription zova_subscription;
+typedef struct zova_fresh_build zova_fresh_build;
+
+enum {
+    ZOVA_FRESH_VALUE_NULL = 0,
+    ZOVA_FRESH_VALUE_INT64 = 1,
+    ZOVA_FRESH_VALUE_FLOAT64 = 2,
+    ZOVA_FRESH_VALUE_TEXT = 3,
+    ZOVA_FRESH_VALUE_BLOB = 4
+};
+
+/* Stable status values for the 1.x ABI surface. */
+typedef enum zova_status {
+    ZOVA_OK = 0,
+    ZOVA_INVALID_ARGUMENT = 1,
+    ZOVA_OUT_OF_MEMORY = 2,
+    ZOVA_BUSY = 10,
+    ZOVA_LOCKED = 11,
+    ZOVA_CONSTRAINT = 12,
+    ZOVA_CANT_OPEN = 13,
+    ZOVA_READ_ONLY = 14,
+    ZOVA_CORRUPT = 15,
+    ZOVA_MISUSE = 16,
+    ZOVA_SQLITE_ERROR = 17,
+    ZOVA_INTERRUPTED = 18,
+    ZOVA_NOT_ZOVA_PATH = 30,
+    ZOVA_NOT_ZOVA_DATABASE = 31,
+    ZOVA_UNSUPPORTED_ZOVA_VERSION = 32,
+    ZOVA_DESTINATION_EXISTS = 33,
+    ZOVA_ZOVA_NAME_CONFLICT = 34,
+    ZOVA_MIGRATION_REQUIRED = 35,
+    ZOVA_UNSUPPORTED_FUTURE_FORMAT = 36,
+    ZOVA_UNSUPPORTED_LEGACY_FORMAT = 37,
+    ZOVA_NO_MIGRATION_PATH = 38,
+    ZOVA_OBJECT_NOT_FOUND = 50,
+    ZOVA_OBJECT_ALREADY_EXISTS = 51,
+    ZOVA_OBJECT_CHUNK_NOT_FOUND = 52,
+    ZOVA_OBJECT_CHUNK_HASH_MISMATCH = 53,
+    ZOVA_OBJECT_CORRUPT = 54,
+    ZOVA_OBJECT_MANIFEST_INVALID = 55,
+    ZOVA_OBJECT_RANGE_INVALID = 56,
+    ZOVA_OBJECT_TOO_LARGE = 57,
+    ZOVA_OBJECT_TRANSACTION_ACTIVE = 58,
+    ZOVA_OBJECT_WRITER_CLOSED = 59,
+    ZOVA_OBJECT_READER_CLOSED = 63,
+    ZOVA_BOUND_STORE_EXISTS = 60,
+    ZOVA_BOUND_STORE_NOT_FOUND = 61,
+    ZOVA_BOUND_STORE_INVALID = 62,
+    ZOVA_VECTOR_COLLECTION_EXISTS = 70,
+    ZOVA_VECTOR_COLLECTION_NOT_FOUND = 71,
+    ZOVA_VECTOR_NOT_FOUND = 72,
+    ZOVA_VECTOR_DIMENSION_MISMATCH = 73,
+    ZOVA_VECTOR_CORRUPT = 74,
+    ZOVA_VECTOR_INVALID = 75,
+    ZOVA_GRAPH_EXISTS = 80,
+    ZOVA_GRAPH_NOT_FOUND = 81,
+    ZOVA_GRAPH_NODE_NOT_FOUND = 82,
+    ZOVA_GRAPH_EDGE_NOT_FOUND = 83,
+    ZOVA_GRAPH_INVALID = 84,
+    ZOVA_EXTENSION_NOT_FOUND = 90,
+    ZOVA_EXTENSION_EXISTS = 91,
+    ZOVA_EXTENSION_INVALID = 92,
+    ZOVA_EXTENSION_INCOMPATIBLE = 93,
+    ZOVA_EXTENSION_UNAVAILABLE = 94,
+    ZOVA_KV_TOO_LARGE = 95,
+    ZOVA_KV_CORRUPT = 96,
+} zova_status;
+
+typedef enum zova_vector_metric {
+    ZOVA_VECTOR_METRIC_COSINE = 0,
+    ZOVA_VECTOR_METRIC_L2 = 1,
+    ZOVA_VECTOR_METRIC_DOT = 2,
+} zova_vector_metric;
+
+typedef enum zova_vector_element_type {
+    ZOVA_VECTOR_ELEMENT_TYPE_F32 = 0,
+    ZOVA_VECTOR_ELEMENT_TYPE_F16 = 1,
+    ZOVA_VECTOR_ELEMENT_TYPE_I8 = 2,
+} zova_vector_element_type;
+
+typedef enum zova_vector_multi_i8_search_mode {
+    ZOVA_VECTOR_MULTI_I8_SEARCH_GLOBAL_MIN_COSINE = 0,
+    ZOVA_VECTOR_MULTI_I8_SEARCH_CBM_PREFILTER_MIN_COSINE = 1,
+} zova_vector_multi_i8_search_mode;
+
+typedef enum zova_vector_multi_i8_aggregation {
+    ZOVA_VECTOR_MULTI_I8_AGGREGATION_MIN_COSINE = 0,
+} zova_vector_multi_i8_aggregation;
+
+typedef enum zova_graph_target_type {
+    ZOVA_GRAPH_TARGET_NONE = 0,
+    ZOVA_GRAPH_TARGET_RECORD = 1,
+    ZOVA_GRAPH_TARGET_OBJECT = 2,
+    ZOVA_GRAPH_TARGET_OBJECT_CHUNK = 3,
+    ZOVA_GRAPH_TARGET_VECTOR = 4,
+    ZOVA_GRAPH_TARGET_ENTITY = 5,
+    ZOVA_GRAPH_TARGET_FACT = 6,
+    ZOVA_GRAPH_TARGET_CONCEPT = 7,
+    ZOVA_GRAPH_TARGET_EXTERNAL = 8,
+} zova_graph_target_type;
+
+typedef enum zova_graph_neighbor_direction {
+    ZOVA_GRAPH_NEIGHBOR_OUTGOING = 0,
+    ZOVA_GRAPH_NEIGHBOR_INCOMING = 1,
+} zova_graph_neighbor_direction;
+
+typedef enum zova_step_result {
+    ZOVA_STEP_ROW = 1,
+    ZOVA_STEP_DONE = 2,
+} zova_step_result;
+
+typedef enum zova_column_type {
+    ZOVA_COLUMN_INTEGER = 1,
+    ZOVA_COLUMN_FLOAT = 2,
+    ZOVA_COLUMN_TEXT = 3,
+    ZOVA_COLUMN_BLOB = 4,
+    ZOVA_COLUMN_NULL = 5,
+} zova_column_type;
+
+typedef enum zova_sql_value_type {
+    ZOVA_SQL_VALUE_NULL = 0,
+    ZOVA_SQL_VALUE_INTEGER = 1,
+    ZOVA_SQL_VALUE_FLOAT = 2,
+    ZOVA_SQL_VALUE_TEXT = 3,
+    ZOVA_SQL_VALUE_BLOB = 4,
+} zova_sql_value_type;
+
+typedef enum zova_sql_result_type {
+    ZOVA_SQL_RESULT_NULL = 0,
+    ZOVA_SQL_RESULT_INTEGER = 1,
+    ZOVA_SQL_RESULT_FLOAT = 2,
+    ZOVA_SQL_RESULT_TEXT = 3,
+    ZOVA_SQL_RESULT_BLOB = 4,
+    ZOVA_SQL_RESULT_ERROR = 5,
+} zova_sql_result_type;
+
+enum {
+    ZOVA_SQL_FUNCTION_DETERMINISTIC = 1u << 0,
+    ZOVA_SQL_FUNCTION_DIRECT_ONLY = 1u << 1,
+    ZOVA_SQL_FUNCTION_INNOCUOUS = 1u << 2
+};
+
+/* Borrowed SQLite argument value, valid only during the callback. */
+typedef struct zova_sql_value {
+    zova_sql_value_type value_type;
+    int64_t int64_value;
+    double double_value;
+    const void *data;
+    size_t data_len;
+} zova_sql_value;
+
+/*
+ * Callback result. Zova copies text/blob/error bytes before the callback result
+ * is applied. `result_type` is an int so invalid foreign values can be reported
+ * as SQLite callback errors.
+ */
+typedef struct zova_sql_result {
+    int result_type;
+    int64_t int64_value;
+    double double_value;
+    const void *data;
+    size_t data_len;
+    const char *error_message;
+    size_t error_message_len;
+} zova_sql_result;
+
+typedef struct zova_sql_function_call {
+    void *user_data;
+    size_t argc;
+    const zova_sql_value *argv;
+} zova_sql_function_call;
+
+typedef void (*zova_sql_scalar_callback)(void *user_data, const zova_sql_function_call *call, zova_sql_result *out_result);
+typedef void (*zova_sql_destroy_callback)(void *user_data);
+
+/* SHA-256 identity of full object bytes. */
+typedef struct zova_object_id {
+    uint8_t bytes[32];
+} zova_object_id;
+
+/* SHA-256 identity of one stored object chunk. */
+typedef struct zova_object_chunk_id {
+    uint8_t bytes[32];
+} zova_object_chunk_id;
+
+/* Owned byte buffer returned by Zova. Free with zova_buffer_free. */
+typedef struct zova_buffer {
+    uint8_t *data;
+    size_t len;
+} zova_buffer;
+
+/* Owned message returned by no-handle operations. Free with zova_message_free. */
+typedef struct zova_message {
+    char *data;
+    size_t len;
+} zova_message;
+
+/* Owned text returned by Zova. Free with zova_text_free. */
+typedef struct zova_text {
+    char *data;
+    size_t len;
+} zova_text;
+
+/* Owned app notification returned by Zova. Free with zova_notification_free. */
+typedef struct zova_notification {
+    char *channel;
+    size_t channel_len;
+    char *payload;
+    size_t payload_len;
+    uint64_t sequence;
+    uint64_t dropped_before;
+} zova_notification;
+
+/* One flat manifest row. Chunks are ordered by index. */
+typedef struct zova_object_manifest_chunk {
+    uint64_t index;
+    zova_object_chunk_id hash;
+    uint64_t offset;
+    uint64_t size_bytes;
+} zova_object_manifest_chunk;
+
+/* Owned flat object manifest. Free with zova_object_manifest_free. */
+typedef struct zova_object_manifest {
+    zova_object_id object_id;
+    uint64_t size_bytes;
+    uint64_t chunk_count;
+    const char *chunker;
+    zova_object_manifest_chunk *chunks;
+    size_t chunks_len;
+} zova_object_manifest;
+
+typedef enum zova_object_storage_profile {
+    ZOVA_OBJECT_PROFILE_DEDUPLICATION = 0,
+    ZOVA_OBJECT_PROFILE_STREAMING = 1,
+} zova_object_storage_profile;
+
+typedef struct zova_object_put_options {
+    int profile;
+} zova_object_put_options;
+
+/*
+ * Compression for object chunks a database handle writes. Request structs
+ * carry it as a raw C int, like zova_object_storage_profile.
+ */
+typedef enum zova_object_compression {
+    ZOVA_OBJECT_COMPRESSION_NONE = 0,
+    ZOVA_OBJECT_COMPRESSION_LZ4 = 1,
+} zova_object_compression;
+
+/*
+ * Selects the compression for object chunks this handle writes from now on:
+ * object_put*, object writers opened afterwards, and object_chunk_put*. With
+ * ZOVA_OBJECT_COMPRESSION_LZ4 a chunk is stored as an LZ4 block only when that
+ * is smaller. Object and chunk ids, manifests, sizes and deduplication do not
+ * change, and reads decode every stored encoding whatever this setting is.
+ * The setting belongs to the handle and is not persisted; the default is
+ * ZOVA_OBJECT_COMPRESSION_NONE. Unknown values return ZOVA_INVALID_ARGUMENT.
+ */
+typedef struct zova_object_set_compression_request {
+    zova_database *db;
+    int compression;
+} zova_object_set_compression_request;
+
+typedef struct zova_vector_collection_options {
+    uint32_t dimensions;
+    /*
+     * Raw C int for ABI layout stability. Use ZOVA_VECTOR_METRIC_* constants.
+     * This avoids enum-size differences from compiler options such as
+     * -fshort-enums while still keeping named metric values.
+     */
+    int metric;
+    int element_type;
+} zova_vector_collection_options;
+
+typedef struct zova_vector_values {
+    int element_type;
+    const float *f32_values;
+    const uint16_t *f16_values;
+    const int8_t *i8_values;
+    size_t values_len;
+} zova_vector_values;
+
+/* Owned vector returned by Zova. Free with zova_vector_free. */
+typedef struct zova_vector {
+    char *id;
+    size_t id_len;
+    int element_type;
+    float *f32_values;
+    uint16_t *f16_values;
+    int8_t *i8_values;
+    size_t values_len;
+} zova_vector;
+
+typedef struct zova_vector_search_result {
+    char *id;
+    size_t id_len;
+    double distance;
+} zova_vector_search_result;
+
+/* Owned vector search results. Free with zova_vector_search_results_free. */
+typedef struct zova_vector_search_results {
+    zova_vector_search_result *items;
+    size_t len;
+} zova_vector_search_results;
+
+/* Owned vector collection info. Free with zova_vector_collection_info_free. */
+typedef struct zova_vector_collection_info {
+    char *name;
+    size_t name_len;
+    uint32_t dimensions;
+    int metric;
+    int element_type;
+    uint64_t vector_count;
+} zova_vector_collection_info;
+
+/* Owned vector collection list. Free with zova_vector_collection_list_free. */
+typedef struct zova_vector_collection_list {
+    zova_vector_collection_info *items;
+    size_t len;
+} zova_vector_collection_list;
+
+/* Borrowed input row for zova_vector_put_many. */
+typedef struct zova_vector_input {
+    const char *id;
+    zova_vector_values values;
+} zova_vector_input;
+
+/* Owned graph info. Free with zova_graph_info_free. */
+typedef struct zova_graph_info {
+    char *name;
+    size_t name_len;
+    uint64_t node_count;
+    uint64_t edge_count;
+} zova_graph_info;
+
+/* Owned graph list. Free with zova_graph_list_free. */
+typedef struct zova_graph_list {
+    zova_graph_info *items;
+    size_t len;
+} zova_graph_list;
+
+/* Owned extension info. Free with zova_extension_info_free. */
+typedef struct zova_extension_info {
+    char *name;
+    size_t name_len;
+    char *version;
+    size_t version_len;
+    char *storage_prefix;
+    size_t storage_prefix_len;
+    char *zova_abi_min;
+    size_t zova_abi_min_len;
+    char *capabilities;
+    size_t capabilities_len;
+    uint8_t required;
+    int64_t installed_at_unix;
+    char *manifest_json;
+    size_t manifest_json_len;
+} zova_extension_info;
+
+/* Owned extension info list. Free with zova_extension_list_free. */
+typedef struct zova_extension_list {
+    zova_extension_info *items;
+    size_t len;
+} zova_extension_list;
+
+/* Owned graph node. Free with zova_graph_node_free. */
+typedef struct zova_graph_node {
+    char *graph_name;
+    size_t graph_name_len;
+    char *node_id;
+    size_t node_id_len;
+    char *kind;
+    size_t kind_len;
+    int target_type;
+    char *target_namespace;
+    size_t target_namespace_len;
+    uint8_t has_target_namespace;
+    char *target_ref;
+    size_t target_ref_len;
+    uint8_t has_target_ref;
+} zova_graph_node;
+
+/* Owned exact graph edge. Free with zova_graph_edge_free. */
+typedef struct zova_graph_edge {
+    char *graph_name;
+    size_t graph_name_len;
+    char *from_node_id;
+    size_t from_node_id_len;
+    char *edge_type;
+    size_t edge_type_len;
+    char *to_node_id;
+    size_t to_node_id_len;
+} zova_graph_edge;
+
+typedef struct zova_graph_neighbor_result {
+    char *node_id;
+    size_t node_id_len;
+    char *kind;
+    size_t kind_len;
+    char *edge_type;
+    size_t edge_type_len;
+} zova_graph_neighbor_result;
+
+/* Owned graph neighbor results. Free with zova_graph_neighbor_results_free. */
+typedef struct zova_graph_neighbor_results {
+    zova_graph_neighbor_result *items;
+    size_t len;
+} zova_graph_neighbor_results;
+
+typedef struct zova_graph_keyed_neighbor_result {
+    int64_t edge_key;
+    int64_t neighbor_node_key;
+    char *node_id;
+    size_t node_id_len;
+    char *kind;
+    size_t kind_len;
+    char *edge_type;
+    size_t edge_type_len;
+} zova_graph_keyed_neighbor_result;
+
+/* Owned keyed graph neighbor results. */
+typedef struct zova_graph_keyed_neighbor_results {
+    zova_graph_keyed_neighbor_result *items;
+    size_t len;
+} zova_graph_keyed_neighbor_results;
+
+typedef struct zova_graph_keyed_node_result {
+    uint8_t found; int64_t node_key; char *node_id; size_t node_id_len;
+    char *kind; size_t kind_len; int64_t created_order;
+} zova_graph_keyed_node_result;
+typedef struct zova_graph_keyed_node_results { zova_graph_keyed_node_result *items; size_t len; } zova_graph_keyed_node_results;
+typedef struct zova_graph_keyed_edge_result {
+    uint8_t found; int64_t edge_key; int64_t source_node_key;
+    char *edge_type; size_t edge_type_len; int64_t target_node_key; int64_t created_order;
+} zova_graph_keyed_edge_result;
+typedef struct zova_graph_keyed_edge_results { zova_graph_keyed_edge_result *items; size_t len; } zova_graph_keyed_edge_results;
+typedef struct zova_graph_edge_payload_result {
+    uint8_t found;
+    int64_t edge_key;
+    uint8_t *payload;
+    size_t payload_len;
+} zova_graph_edge_payload_result;
+typedef struct zova_graph_edge_payload_results { zova_graph_edge_payload_result *items; size_t len; } zova_graph_edge_payload_results;
+
+/* Public diagnostic ABI: elapsed *_ms values retain their named scopes/units.
+ * Graph subphases overlap graph totals; do not sum every timing field.
+ * A skipped stage contributes zero; timer resolution can also produce zero.
+ * There is no general unavailable/cache-hit marker. Interpret complete samples
+ * only after success. Preserve this layout; new incompatible measurements need
+ * an additive interface. See API_STABILITY.md, Public profiling contracts. */
+typedef struct zova_fresh_build_profile {
+    double validation_ms;
+    double table_load_ms;
+    double fts_load_ms;
+    double graph_load_ms;
+    double graph_validation_ms;
+    double graph_key_generation_ms;
+    double graph_node_load_ms;
+    double graph_edge_load_ms;
+    double vector_load_ms;
+    double index_build_ms;
+    double commit_ms;
+    uint64_t table_rows;
+    uint64_t fts_rows;
+    uint64_t vector_rows;
+    uint64_t payload_bytes;
+} zova_fresh_build_profile;
+
+typedef struct zova_fresh_value {
+    int value_type;
+    int64_t int64_value;
+    double float64_value;
+    const uint8_t *bytes;
+    size_t bytes_len;
+} zova_fresh_value;
+
+typedef struct zova_graph_scan_cursor {
+    int64_t created_order;
+    int64_t key;
+} zova_graph_scan_cursor;
+
+typedef struct zova_graph_scan_node {
+    int64_t node_key;
+    char *node_id;
+    size_t node_id_len;
+    char *kind;
+    size_t kind_len;
+    int64_t created_order;
+} zova_graph_scan_node;
+
+typedef struct zova_graph_scan_edge {
+    int64_t edge_key;
+    int64_t source_node_key;
+    char *edge_type;
+    size_t edge_type_len;
+    int64_t target_node_key;
+    int64_t created_order;
+} zova_graph_scan_edge;
+
+/* Owned independently paged node and edge topology rows. */
+typedef struct zova_graph_scan_results {
+    zova_graph_scan_node *nodes;
+    size_t nodes_len;
+    zova_graph_scan_edge *edges;
+    size_t edges_len;
+    uint8_t has_more_nodes;
+    uint8_t has_more_edges;
+} zova_graph_scan_results;
+
+typedef struct zova_graph_walk_result {
+    char *node_id;
+    size_t node_id_len;
+    char *kind;
+    size_t kind_len;
+    uint32_t depth;
+    char *predecessor_node_id;
+    size_t predecessor_node_id_len;
+    uint8_t has_predecessor_node_id;
+    char *edge_type;
+    size_t edge_type_len;
+    uint8_t has_edge_type;
+} zova_graph_walk_result;
+
+/* Owned graph walk results. Free with zova_graph_walk_results_free. */
+typedef struct zova_graph_walk_results {
+    zova_graph_walk_result *items;
+    size_t len;
+} zova_graph_walk_results;
+
+/* Diagnostic stages and counters for one profiled directional graph walk.
+ * Timings are elapsed milliseconds. Counters count named execution events,
+ * not estimates. adjacency_prepare_ms includes setup/constant binding;
+ * bfs_bookkeeping_allocation_ms includes residual traversal and cleanup.
+ * Zero is not an unavailable/cache-hit marker (skipped work and timer rounding
+ * can both produce zero). Complete samples require success. This public layout
+ * and field meanings remain ABI contracts; see API_STABILITY.md. */
+typedef struct zova_graph_walk_profile {
+    double mutex_wait_ms;
+    double root_lookup_ms;
+    double adjacency_prepare_ms;
+    double adjacency_execute_ms;
+    double bfs_bookkeeping_allocation_ms;
+    double c_abi_result_export_ms;
+    double total_profiled_ms;
+    uint64_t frontier_expansions;
+    uint64_t adjacency_query_binds;
+    uint64_t adjacency_rows_stepped;
+    uint64_t result_count;
+} zova_graph_walk_profile;
+
+enum {
+    ZOVA_OPEN_READ_ONLY = 1u << 0
+};
+
+enum {
+    ZOVA_BACKUP_NO_VERIFY = 1u << 0,
+    ZOVA_COMPACT_NO_VERIFY = 1u << 0,
+    ZOVA_RESTORE_NO_VERIFY = 1u << 0
+};
+
+enum {
+    ZOVA_MIGRATE_NO_VERIFY = 1u << 0
+};
+
+typedef enum zova_format_compatibility {
+    ZOVA_FORMAT_CURRENT = 0,
+    ZOVA_FORMAT_MIGRATABLE = 1,
+    ZOVA_FORMAT_UNSUPPORTED_LEGACY = 2,
+    ZOVA_FORMAT_UNSUPPORTED_FUTURE = 3
+} zova_format_compatibility;
+
+typedef struct zova_database_format_info {
+    uint32_t format_version;
+    int compatibility;
+} zova_database_format_info;
+
+typedef struct zova_database_probe_format_request {
+    const char *path;
+    zova_database_format_info *out_info;
+    zova_message *out_error_message;
+} zova_database_probe_format_request;
+
+typedef struct zova_database_migrate_request {
+    const char *source_path;
+    const char *destination_path;
+    uint32_t flags;
+    zova_message *out_error_message;
+} zova_database_migrate_request;
+
+/* Declared in zova_plugin.h; hosts that link plugins include that header. */
+struct zova_plugin_descriptor_v1;
+
+/*
+ * zova_database_migrate with host-supplied extension code. Migration verifies
+ * the destination with every installed extension, so a database that has a
+ * non-bundled extension installed needs that extension's code here: trusted
+ * .zovaext bundle paths, plugin descriptors linked into the process, or both.
+ * Both counts may be zero, which equals zova_database_migrate. Descriptors are
+ * borrowed for the duration of the call.
+ */
+typedef struct zova_database_migrate_extensions_request {
+    const char *source_path;
+    const char *destination_path;
+    uint32_t flags;
+    const char *const *extension_bundle_paths;
+    size_t extension_bundle_count;
+    const char *trust_store_path;
+    const struct zova_plugin_descriptor_v1 *const *plugins;
+    size_t plugin_count;
+    zova_message *out_error_message;
+} zova_database_migrate_extensions_request;
+
+/*
+ * Progress reporting for backup, compact and migrate.
+ *
+ * phase fixes the unit of done and total: COPY counts SQLite pages of the
+ * source member, MIGRATE counts format steps, VERIFY counts stored objects,
+ * chunks, vectors and KV entries together, and PUBLISH counts member files.
+ * member is ZOVA_PROGRESS_MEMBER_NONE for VERIFY and PUBLISH, which cover the
+ * whole set. Events for one phase and member keep total fixed, never decrease
+ * done, and end with done == total. Calls are throttled to whole-percent
+ * changes, plus the first and last event of each phase and member.
+ *
+ * The callback runs synchronously on the calling thread and must not call
+ * Zova functions on the same database handle. The progress pointer is
+ * borrowed for the call. A non-zero return cancels the operation through the
+ * same cleanup as any failure at that point and the call returns
+ * ZOVA_INTERRUPTED: a cancelled backup or compact removes its destination, and
+ * a cancelled migration leaves the source set unchanged and creates no
+ * destination files. The last migration event follows the commit of the
+ * destination set, so its return value is ignored.
+ */
+typedef enum zova_progress_phase {
+    ZOVA_PROGRESS_COPY = 0,
+    ZOVA_PROGRESS_MIGRATE = 1,
+    ZOVA_PROGRESS_VERIFY = 2,
+    ZOVA_PROGRESS_PUBLISH = 3
+} zova_progress_phase;
+
+typedef enum zova_progress_member {
+    ZOVA_PROGRESS_MEMBER_NONE = 0,
+    ZOVA_PROGRESS_MEMBER_MAIN = 1,
+    ZOVA_PROGRESS_MEMBER_OBJECT_STORE = 2,
+    ZOVA_PROGRESS_MEMBER_VECTOR_STORE = 3,
+    ZOVA_PROGRESS_MEMBER_GRAPH_STORE = 4
+} zova_progress_member;
+
+typedef struct zova_progress {
+    uint32_t phase;
+    uint32_t member;
+    uint64_t done;
+    uint64_t total;
+} zova_progress;
+
+typedef int32_t (*zova_progress_fn)(void *user_data, const zova_progress *progress);
+
+/*
+ * zova_database_migrate_with_extensions plus progress. progress may be NULL,
+ * which equals zova_database_migrate_with_extensions.
+ */
+typedef struct zova_database_migrate_progress_request {
+    const char *source_path;
+    const char *destination_path;
+    uint32_t flags;
+    const char *const *extension_bundle_paths;
+    size_t extension_bundle_count;
+    const char *trust_store_path;
+    const struct zova_plugin_descriptor_v1 *const *plugins;
+    size_t plugin_count;
+    zova_progress_fn progress;
+    void *progress_user_data;
+    zova_message *out_error_message;
+} zova_database_migrate_progress_request;
+
+/* Open/create requests use C strings and may return an owned error message. */
+typedef struct zova_database_open_request {
+    const char *path;
+    zova_database **out_db;
+    zova_message *out_error_message;
+} zova_database_open_request;
+
+/*
+ * Create a fully initialized volatile in-memory database. The database is
+ * isolated, never creates database/WAL/journal files, and is reclaimed when
+ * the returned handle is closed. The path-based zova_database_create also
+ * accepts ":memory:" as its path.
+ */
+typedef struct zova_database_create_memory_request {
+    zova_database **out_db;
+    zova_message *out_error_message;
+} zova_database_create_memory_request;
+
+/*
+ * Restore a valid .zova backup file into a new volatile in-memory database
+ * handle. flags uses ZOVA_RESTORE_NO_VERIFY; by default the in-memory copy is
+ * verified after the restore.
+ */
+typedef struct zova_database_restore_to_memory_request {
+    const char *source_path;
+    uint32_t flags;
+    zova_database **out_db;
+    zova_message *out_error_message;
+} zova_database_restore_to_memory_request;
+
+/* Fresh-database options. page_size = 0 preserves SQLite's default. */
+typedef struct zova_database_create_options_request {
+    const char *path;
+    uint32_t page_size;
+    zova_database **out_db;
+    zova_message *out_error_message;
+} zova_database_create_options_request;
+
+/*
+ * Additive open options for existing .zova files. flags = 0 opens read/write.
+ * ZOVA_OPEN_READ_ONLY opens the SQLite handle read-only. busy_timeout_ms = 0
+ * leaves SQLite's default busy handling unchanged.
+ */
+typedef struct zova_database_open_options_request {
+    const char *path;
+    uint32_t flags;
+    uint32_t busy_timeout_ms;
+    zova_database **out_db;
+    zova_message *out_error_message;
+} zova_database_open_options_request;
+
+/*
+ * Open/create while loading explicitly trusted local .zovaext bundles. The
+ * bundle code is kept loaded for the lifetime of the returned database handle.
+ * Passing extension_bundle_count = 0 is equivalent to the normal bundled
+ * registry path. create_with_extensions requires flags = 0 and
+ * busy_timeout_ms = 0; open_with_extensions accepts ZOVA_OPEN_READ_ONLY and a
+ * busy timeout like zova_database_open_with_options.
+ */
+typedef struct zova_database_open_extensions_request {
+    const char *path;
+    uint32_t flags;
+    uint32_t busy_timeout_ms;
+    const char *const *extension_bundle_paths;
+    size_t extension_bundle_count;
+    const char *trust_store_path;
+    zova_database **out_db;
+    zova_message *out_error_message;
+} zova_database_open_extensions_request;
+
+/*
+ * zova_database_open_extensions_request plus C-v1 plugin descriptors already
+ * linked into the host process. Linked plugins need no .zovaext bundle and no
+ * trust record: the host vouches for code it links. They are composed with the
+ * bundled registry and any listed bundles exactly as bundle plugins are. Every
+ * descriptor, and everything it points to, must stay valid until the returned
+ * handle is closed. NULL entries are INVALID_ARGUMENT. With both counts zero
+ * the calls behave like their _with_extensions counterparts.
+ */
+typedef struct zova_database_open_plugins_request {
+    const char *path;
+    uint32_t flags;
+    uint32_t busy_timeout_ms;
+    const char *const *extension_bundle_paths;
+    size_t extension_bundle_count;
+    const char *trust_store_path;
+    const struct zova_plugin_descriptor_v1 *const *plugins;
+    size_t plugin_count;
+    zova_database **out_db;
+    zova_message *out_error_message;
+} zova_database_open_plugins_request;
+
+/*
+ * Local extension bundle management. verify loads the entrypoint without
+ * trusting the bundle. trust records the manifest/library hash in the selected
+ * trust store. A NULL trust_store_path uses Zova's default trust store.
+ */
+typedef struct zova_extension_bundle_request {
+    const char *bundle_path;
+    const char *trust_store_path;
+    zova_message *out_error_message;
+} zova_extension_bundle_request;
+
+typedef struct zova_extension_bundle_untrust_request {
+    const char *identifier;
+    const char *trust_store_path;
+    uint8_t *out_removed;
+    zova_message *out_error_message;
+} zova_extension_bundle_untrust_request;
+
+/* Conversion never mutates the source and never overwrites the destination. */
+typedef struct zova_convert_sqlite_to_zova_request {
+    const char *source_path;
+    const char *dest_path;
+    zova_message *out_error_message;
+} zova_convert_sqlite_to_zova_request;
+
+/*
+ * Operational copy requests never overwrite destination files. By default Zova
+ * opens and verifies the destination after the copy. Use *_NO_VERIFY flags only
+ * when the caller will verify separately.
+ */
+typedef struct zova_database_backup_request {
+    zova_database *db;
+    const char *destination_path;
+    uint32_t flags;
+} zova_database_backup_request;
+
+typedef struct zova_database_compact_request {
+    zova_database *db;
+    const char *destination_path;
+    uint32_t flags;
+} zova_database_compact_request;
+
+/*
+ * zova_database_backup and zova_database_compact plus progress (see
+ * zova_progress_fn). progress may be NULL, which equals the plain call.
+ */
+typedef struct zova_database_backup_progress_request {
+    zova_database *db;
+    const char *destination_path;
+    uint32_t flags;
+    zova_progress_fn progress;
+    void *progress_user_data;
+} zova_database_backup_progress_request;
+
+typedef struct zova_database_compact_progress_request {
+    zova_database *db;
+    const char *destination_path;
+    uint32_t flags;
+    zova_progress_fn progress;
+    void *progress_user_data;
+} zova_database_compact_progress_request;
+
+/*
+ * zova_database_reclaim releases free pages of incremental auto-vacuum member
+ * files in place, in short write transactions of at most step_pages pages
+ * each (0 selects 1024), so other writers can run between steps. max_pages
+ * bounds the pages released by the whole call across members; 0 releases
+ * every free page. Members are reported in a fixed order: the main database,
+ * then each attached object, vector and graph store, with member set to a
+ * zova_progress_member value. A member whose auto_vacuum is
+ * ZOVA_AUTO_VACUUM_NONE releases nothing; zova_database_compact writes a copy
+ * without its free pages. The call fails with ZOVA_OBJECT_TRANSACTION_ACTIVE
+ * inside an explicit transaction; open object readers are allowed.
+ * out_result is required and is reset before any work.
+ */
+typedef enum zova_auto_vacuum_mode {
+    ZOVA_AUTO_VACUUM_NONE = 0,
+    ZOVA_AUTO_VACUUM_FULL = 1,
+    ZOVA_AUTO_VACUUM_INCREMENTAL = 2
+} zova_auto_vacuum_mode;
+
+enum {
+    ZOVA_RECLAIM_MAX_MEMBERS = 4
+};
+
+typedef struct zova_reclaimed_member {
+    uint32_t member;
+    uint32_t auto_vacuum;
+    uint32_t page_size;
+    uint64_t pages_released;
+    uint64_t free_pages_left;
+} zova_reclaimed_member;
+
+typedef struct zova_reclaim_result {
+    size_t member_count;
+    zova_reclaimed_member members[ZOVA_RECLAIM_MAX_MEMBERS];
+} zova_reclaim_result;
+
+typedef struct zova_database_reclaim_request {
+    zova_database *db;
+    uint64_t max_pages;
+    uint32_t step_pages;
+    zova_reclaim_result *out_result;
+} zova_database_reclaim_request;
+
+typedef struct zova_database_restore_request {
+    const char *source_path;
+    const char *destination_path;
+    uint32_t flags;
+    zova_message *out_error_message;
+} zova_database_restore_request;
+
+/* SQL is passed through to SQLite unchanged. */
+typedef struct zova_database_exec_request {
+    zova_database *db;
+    const char *sql;
+} zova_database_exec_request;
+
+/*
+ * Register an app-defined scalar SQL function on this Zova-owned connection.
+ * Function names are ASCII identifiers, 1-64 bytes, and may not use a zova_
+ * or _zova_ prefix. Arity is -1 for varargs or 0..127 for fixed arity.
+ *
+ * Callbacks run inside the database handle serialization boundary. They must
+ * not re-enter the same zova_database handle. Argument pointers are borrowed
+ * for the callback only. Text/blob/error result pointers are copied by Zova
+ * before SQLite observes the result.
+ */
+typedef struct zova_sql_function_register_request {
+    zova_database *db;
+    const char *name;
+    int arity;
+    uint32_t flags;
+    void *user_data;
+    zova_sql_scalar_callback callback;
+    zova_sql_destroy_callback destroy;
+} zova_sql_function_register_request;
+
+typedef struct zova_database_simple_request {
+    zova_database *db;
+} zova_database_simple_request;
+
+/*
+ * Savepoint names are strict ASCII identifiers: 1-64 bytes, first byte
+ * [A-Za-z_], remaining bytes [A-Za-z0-9_], and no case-insensitive _zova_
+ * prefix. ROLLBACK TO keeps the savepoint active; RELEASE removes it.
+ * Savepoint calls are serialized with the database handle, but they are not
+ * callback-reentrant and do not change child statement/writer lifetime rules.
+ */
+typedef struct zova_database_savepoint_request {
+    zova_database *db;
+    const char *name;
+} zova_database_savepoint_request;
+
+typedef struct zova_database_busy_timeout_request {
+    zova_database *db;
+    uint32_t milliseconds;
+} zova_database_busy_timeout_request;
+
+typedef struct zova_database_last_insert_rowid_request {
+    zova_database *db;
+    int64_t *out_rowid;
+} zova_database_last_insert_rowid_request;
+
+typedef struct zova_database_changes_request {
+    zova_database *db;
+    int64_t *out_changes;
+} zova_database_changes_request;
+
+typedef struct zova_database_total_changes_request {
+    zova_database *db;
+    int64_t *out_total_changes;
+} zova_database_total_changes_request;
+
+typedef struct zova_database_notify_request {
+    zova_database *db;
+    const char *channel;
+    const uint8_t *payload;
+    size_t payload_len;
+} zova_database_notify_request;
+
+typedef struct zova_database_listen_request {
+    zova_database *db;
+    const char *channel;
+    zova_subscription **out_subscription;
+} zova_database_listen_request;
+
+typedef struct zova_subscription_try_receive_request {
+    zova_subscription *subscription;
+    zova_notification *out_notification;
+    uint8_t *out_has_notification;
+} zova_subscription_try_receive_request;
+
+typedef struct zova_database_prepare_request {
+    zova_database *db;
+    const char *sql;
+    zova_statement **out_statement;
+} zova_database_prepare_request;
+
+typedef struct zova_statement_step_request {
+    zova_statement *statement;
+    zova_step_result *out_result;
+} zova_statement_step_request;
+
+typedef struct zova_statement_bind_null_request {
+    zova_statement *statement;
+    int index;
+} zova_statement_bind_null_request;
+
+typedef struct zova_statement_bind_int64_request {
+    zova_statement *statement;
+    int index;
+    int64_t value;
+} zova_statement_bind_int64_request;
+
+typedef struct zova_statement_bind_double_request {
+    zova_statement *statement;
+    int index;
+    double value;
+} zova_statement_bind_double_request;
+
+typedef struct zova_statement_bind_text_request {
+    zova_statement *statement;
+    int index;
+    const uint8_t *data;
+    size_t len;
+} zova_statement_bind_text_request;
+
+typedef struct zova_statement_bind_blob_request {
+    zova_statement *statement;
+    int index;
+    const uint8_t *data;
+    size_t len;
+} zova_statement_bind_blob_request;
+
+typedef struct zova_statement_parameter_count_request {
+    zova_statement *statement;
+    int *out_count;
+} zova_statement_parameter_count_request;
+
+typedef struct zova_statement_parameter_index_request {
+    zova_statement *statement;
+    const char *name;
+    int *out_index;
+} zova_statement_parameter_index_request;
+
+typedef struct zova_statement_column_count_request {
+    zova_statement *statement;
+    int *out_count;
+} zova_statement_column_count_request;
+
+typedef struct zova_statement_column_name_request {
+    zova_statement *statement;
+    int index;
+    zova_text *out_name;
+} zova_statement_column_name_request;
+
+typedef struct zova_statement_column_type_request {
+    zova_statement *statement;
+    int index;
+    zova_column_type *out_type;
+} zova_statement_column_type_request;
+
+typedef struct zova_statement_column_int64_request {
+    zova_statement *statement;
+    int index;
+    int64_t *out_value;
+} zova_statement_column_int64_request;
+
+typedef struct zova_statement_column_double_request {
+    zova_statement *statement;
+    int index;
+    double *out_value;
+} zova_statement_column_double_request;
+
+typedef struct zova_statement_column_text_request {
+    zova_statement *statement;
+    int index;
+    zova_text *out_text;
+} zova_statement_column_text_request;
+
+typedef struct zova_statement_column_blob_request {
+    zova_statement *statement;
+    int index;
+    zova_buffer *out_buffer;
+} zova_statement_column_blob_request;
+
+/* Stores caller bytes as a complete content-addressed object. */
+typedef struct zova_object_put_request {
+    zova_database *db;
+    const uint8_t *data;
+    size_t len;
+    zova_object_id *out_id;
+} zova_object_put_request;
+
+/* Stores bytes using an explicitly selected object storage profile. */
+typedef struct zova_object_put_with_options_request {
+    zova_database *db;
+    const uint8_t *data;
+    size_t len;
+    zova_object_put_options options;
+    zova_object_id *out_id;
+} zova_object_put_with_options_request;
+
+/* Returns full object bytes in an owned zova_buffer. */
+typedef struct zova_object_get_request {
+    zova_database *db;
+    zova_object_id id;
+    zova_buffer *out_buffer;
+} zova_object_get_request;
+
+/* Copies a byte range into caller-provided memory. */
+typedef struct zova_object_read_range_request {
+    zova_database *db;
+    zova_object_id id;
+    uint64_t offset;
+    uint8_t *buffer;
+    size_t buffer_len;
+    size_t *out_copied;
+} zova_object_read_range_request;
+
+typedef struct zova_object_exists_request {
+    zova_database *db;
+    zova_object_id id;
+    uint8_t *out_exists;
+} zova_object_exists_request;
+
+typedef struct zova_object_size_request {
+    zova_database *db;
+    zova_object_id id;
+    uint64_t *out_size;
+} zova_object_size_request;
+
+typedef struct zova_object_chunk_count_request {
+    zova_database *db;
+    zova_object_id id;
+    uint64_t *out_count;
+} zova_object_chunk_count_request;
+
+typedef struct zova_object_delete_request {
+    zova_database *db;
+    zova_object_id id;
+} zova_object_delete_request;
+
+typedef struct zova_object_manifest_get_request {
+    zova_database *db;
+    zova_object_id id;
+    zova_object_manifest *out_manifest;
+} zova_object_manifest_get_request;
+
+typedef struct zova_object_chunk_get_request {
+    zova_database *db;
+    zova_object_chunk_id hash;
+    zova_buffer *out_buffer;
+} zova_object_chunk_get_request;
+
+typedef struct zova_object_chunk_put_request {
+    zova_database *db;
+    zova_object_chunk_id expected_hash;
+    const uint8_t *data;
+    size_t len;
+} zova_object_chunk_put_request;
+
+typedef struct zova_object_chunk_put_with_options_request {
+    zova_database *db;
+    zova_object_chunk_id expected_hash;
+    const uint8_t *data;
+    size_t len;
+    zova_object_put_options options;
+} zova_object_chunk_put_with_options_request;
+
+typedef struct zova_object_chunk_delete_request {
+    zova_database *db;
+    zova_object_chunk_id hash;
+    uint8_t *out_deleted;
+} zova_object_chunk_delete_request;
+
+typedef struct zova_object_assemble_from_chunks_request {
+    zova_database *db;
+    zova_object_id id;
+    uint64_t size_bytes;
+    const zova_object_manifest_chunk *chunks;
+    size_t chunk_count;
+} zova_object_assemble_from_chunks_request;
+
+typedef struct zova_object_assemble_from_chunks_with_options_request {
+    zova_database *db;
+    zova_object_id id;
+    uint64_t size_bytes;
+    const zova_object_manifest_chunk *chunks;
+    size_t chunk_count;
+    zova_object_put_options options;
+} zova_object_assemble_from_chunks_with_options_request;
+
+/* Streaming writers are explicit resources; destroy them when finished. */
+typedef struct zova_object_writer_create_request {
+    zova_database *db;
+    zova_object_writer **out_writer;
+} zova_object_writer_create_request;
+
+typedef struct zova_object_writer_create_with_options_request {
+    zova_database *db;
+    zova_object_put_options options;
+    zova_object_writer **out_writer;
+} zova_object_writer_create_with_options_request;
+
+typedef struct zova_object_writer_write_request {
+    zova_object_writer *writer;
+    const uint8_t *data;
+    size_t len;
+} zova_object_writer_write_request;
+
+typedef struct zova_object_writer_finish_request {
+    zova_object_writer *writer;
+    zova_object_id *out_id;
+} zova_object_writer_finish_request;
+
+typedef struct zova_object_writer_cancel_request {
+    zova_object_writer *writer;
+} zova_object_writer_cancel_request;
+
+typedef struct zova_object_reader_create_request {
+    zova_database *db;
+    zova_object_id id;
+    zova_object_reader **out_reader;
+} zova_object_reader_create_request;
+
+typedef struct zova_object_reader_read_request {
+    zova_object_reader *reader;
+    uint8_t *buffer;
+    size_t buffer_len;
+    size_t *out_read;
+} zova_object_reader_read_request;
+
+/* Passing a null *reader makes destruction idempotent. */
+typedef struct zova_object_reader_destroy_request {
+    zova_object_reader **reader;
+} zova_object_reader_destroy_request;
+
+/* out_size is optional; when non-null it receives the object size. */
+typedef struct zova_object_seekable_reader_create_request {
+    zova_database *db;
+    zova_object_id id;
+    zova_object_seekable_reader **out_reader;
+    uint64_t *out_size;
+} zova_object_seekable_reader_create_request;
+
+typedef struct zova_object_seekable_reader_read_request {
+    zova_object_seekable_reader *reader;
+    uint8_t *buffer;
+    size_t buffer_len;
+    size_t *out_read;
+} zova_object_seekable_reader_read_request;
+
+/* offset is absolute; offsets at or past the end are allowed and read 0 bytes. */
+typedef struct zova_object_seekable_reader_seek_request {
+    zova_object_seekable_reader *reader;
+    uint64_t offset;
+} zova_object_seekable_reader_seek_request;
+
+/* Passing a null *reader makes destruction idempotent. */
+typedef struct zova_object_seekable_reader_destroy_request {
+    zova_object_seekable_reader **reader;
+} zova_object_seekable_reader_destroy_request;
+
+/* Borrowed byte slice for key-value operations. Zova copies caller input
+ * during the call and retains no caller memory. */
+typedef struct zova_kv_bytes {
+    const uint8_t *data;
+    size_t len;
+} zova_kv_bytes;
+
+/* Owned key-value get result. Free with zova_kv_get_result_free. */
+typedef struct zova_kv_get_result {
+    uint8_t found;
+    zova_buffer value;
+} zova_kv_get_result;
+
+/* Owned many-get results. Free with zova_kv_get_many_results_free. */
+typedef struct zova_kv_get_many_results {
+    zova_kv_get_result *items;
+    size_t len;
+} zova_kv_get_many_results;
+
+/* Borrowed batch put entry. */
+typedef struct zova_kv_put_entry {
+    zova_kv_bytes key;
+    zova_kv_bytes value;
+} zova_kv_put_entry;
+
+typedef struct zova_kv_get_request {
+    zova_database *db;
+    zova_kv_bytes ns;
+    zova_kv_bytes key;
+    zova_kv_get_result *out_result;
+} zova_kv_get_request;
+
+typedef struct zova_kv_get_many_request {
+    zova_database *db;
+    zova_kv_bytes ns;
+    const zova_kv_bytes *keys;
+    size_t keys_len;
+    zova_kv_get_many_results *out_results;
+} zova_kv_get_many_request;
+
+typedef struct zova_kv_put_request {
+    zova_database *db;
+    zova_kv_bytes ns;
+    zova_kv_bytes key;
+    zova_kv_bytes value;
+} zova_kv_put_request;
+
+typedef struct zova_kv_put_many_request {
+    zova_database *db;
+    zova_kv_bytes ns;
+    const zova_kv_put_entry *entries;
+    size_t entries_len;
+} zova_kv_put_many_request;
+
+typedef struct zova_kv_delete_request {
+    zova_database *db;
+    zova_kv_bytes ns;
+    zova_kv_bytes key;
+} zova_kv_delete_request;
+
+typedef struct zova_kv_delete_many_request {
+    zova_database *db;
+    zova_kv_bytes ns;
+    const zova_kv_bytes *keys;
+    size_t keys_len;
+} zova_kv_delete_many_request;
+
+typedef struct zova_kv_count_request {
+    zova_database *db;
+    zova_kv_bytes ns;
+    uint64_t *out_count;
+} zova_kv_count_request;
+
+typedef struct zova_kv_clear_namespace_request {
+    zova_database *db;
+    zova_kv_bytes ns;
+} zova_kv_clear_namespace_request;
+
+/* Owned scanned entry. value is empty for keys-only scans. */
+typedef struct zova_kv_entry {
+    zova_buffer key;
+    zova_buffer value;
+} zova_kv_entry;
+
+/* Owned scan page in ascending key byte order. has_more is 1 when at least
+ * one further entry matches the same request. Free with
+ * zova_kv_scan_results_free. */
+typedef struct zova_kv_scan_results {
+    zova_kv_entry *items;
+    size_t len;
+    uint8_t has_more;
+} zova_kv_scan_results;
+
+/*
+ * One page of a namespace. Keys compare as raw bytes; a shorter key sorts
+ * before every longer key it prefixes. prefix (empty matches every key),
+ * start (inclusive, when has_start), end (exclusive, when has_end) and after
+ * (strictly greater, when has_after) all apply together. Continue a scan by
+ * passing the last returned key as after. limit must be greater than zero.
+ * Each call holds no statement afterwards; writes between pages are visible
+ * to later pages.
+ */
+typedef struct zova_kv_scan_request {
+    zova_database *db;
+    zova_kv_bytes ns;
+    zova_kv_bytes prefix;
+    zova_kv_bytes start;
+    uint8_t has_start;
+    zova_kv_bytes end;
+    uint8_t has_end;
+    zova_kv_bytes after;
+    uint8_t has_after;
+    size_t limit;
+    uint8_t keys_only;
+    zova_kv_scan_results *out_results;
+} zova_kv_scan_request;
+
+/* Conditional writes set *out_applied to 1 when they wrote and 0 otherwise.
+ * expected must equal the current value byte for byte; a missing key never
+ * matches it. */
+typedef struct zova_kv_put_if_absent_request {
+    zova_database *db;
+    zova_kv_bytes ns;
+    zova_kv_bytes key;
+    zova_kv_bytes value;
+    uint8_t *out_applied;
+} zova_kv_put_if_absent_request;
+
+typedef struct zova_kv_compare_and_put_request {
+    zova_database *db;
+    zova_kv_bytes ns;
+    zova_kv_bytes key;
+    zova_kv_bytes expected;
+    zova_kv_bytes value;
+    uint8_t *out_applied;
+} zova_kv_compare_and_put_request;
+
+typedef struct zova_kv_compare_and_delete_request {
+    zova_database *db;
+    zova_kv_bytes ns;
+    zova_kv_bytes key;
+    zova_kv_bytes expected;
+    uint8_t *out_applied;
+} zova_kv_compare_and_delete_request;
+
+typedef struct zova_vector_collection_create_request {
+    zova_database *db;
+    const char *name;
+    zova_vector_collection_options options;
+} zova_vector_collection_create_request;
+
+typedef struct zova_vector_collection_exists_request {
+    zova_database *db;
+    const char *name;
+    uint8_t *out_exists;
+} zova_vector_collection_exists_request;
+
+typedef struct zova_vector_put_request {
+    zova_database *db;
+    const char *collection_name;
+    const char *vector_id;
+    zova_vector_values values;
+} zova_vector_put_request;
+
+typedef struct zova_vector_get_request {
+    zova_database *db;
+    const char *collection_name;
+    const char *vector_id;
+    zova_vector *out_vector;
+} zova_vector_get_request;
+
+typedef struct zova_vector_exists_request {
+    zova_database *db;
+    const char *collection_name;
+    const char *vector_id;
+    uint8_t *out_exists;
+} zova_vector_exists_request;
+
+typedef struct zova_vector_delete_request {
+    zova_database *db;
+    const char *collection_name;
+    const char *vector_id;
+} zova_vector_delete_request;
+
+typedef struct zova_vector_search_request {
+    zova_database *db;
+    const char *collection_name;
+    zova_vector_values query;
+    size_t limit;
+    zova_vector_search_results *out_results;
+} zova_vector_search_request;
+
+typedef struct zova_vector_search_in_request {
+    zova_database *db;
+    const char *collection_name;
+    zova_vector_values query;
+    const char *const *candidate_ids;
+    size_t candidate_count;
+    size_t limit;
+    zova_vector_search_results *out_results;
+} zova_vector_search_in_request;
+
+/*
+ * Search a raw-i8 cosine collection with one or more contiguous query rows.
+ * query_values_len must equal query_count * dimensions. Results use distance
+ * = 1 - min cosine similarity, sorted by distance and then vector id. With
+ * candidate_count == 0, the whole collection is searched.
+ */
+typedef struct zova_vector_search_multi_i8_request {
+    zova_database *db;
+    const char *collection_name;
+    const int8_t *query_values;
+    size_t query_values_len;
+    size_t query_count;
+    size_t dimensions;
+    const char *const *candidate_ids;
+    size_t candidate_count;
+    int mode;
+    int aggregation;
+    size_t prefilter_query_index;
+    size_t prefilter_limit;
+    size_t limit;
+    zova_vector_search_results *out_results;
+} zova_vector_search_multi_i8_request;
+
+typedef struct zova_vector_collection_info_get_request {
+    zova_database *db;
+    const char *name;
+    zova_vector_collection_info *out_info;
+} zova_vector_collection_info_get_request;
+
+typedef struct zova_vector_collections_list_request {
+    zova_database *db;
+    zova_vector_collection_list *out_list;
+} zova_vector_collections_list_request;
+
+typedef struct zova_vector_put_many_request {
+    zova_database *db;
+    const char *collection_name;
+    const zova_vector_input *vectors;
+    size_t vectors_len;
+} zova_vector_put_many_request;
+
+typedef struct zova_vector_delete_many_request {
+    zova_database *db;
+    const char *collection_name;
+    const char *const *vector_ids;
+    size_t vector_count;
+} zova_vector_delete_many_request;
+
+typedef struct zova_vector_collection_delete_request {
+    zova_database *db;
+    const char *name;
+} zova_vector_collection_delete_request;
+
+typedef struct zova_vector_search_within_request {
+    zova_database *db;
+    const char *collection_name;
+    zova_vector_values query;
+    double max_distance;
+    size_t limit;
+    zova_vector_search_results *out_results;
+} zova_vector_search_within_request;
+
+typedef struct zova_vector_search_in_within_request {
+    zova_database *db;
+    const char *collection_name;
+    zova_vector_values query;
+    const char *const *candidate_ids;
+    size_t candidate_count;
+    double max_distance;
+    size_t limit;
+    zova_vector_search_results *out_results;
+} zova_vector_search_in_within_request;
+
+typedef struct zova_vector_search_by_id_request {
+    zova_database *db;
+    const char *collection_name;
+    const char *source_vector_id;
+    size_t limit;
+    zova_vector_search_results *out_results;
+} zova_vector_search_by_id_request;
+
+typedef struct zova_vector_search_by_id_in_request {
+    zova_database *db;
+    const char *collection_name;
+    const char *source_vector_id;
+    const char *const *candidate_ids;
+    size_t candidate_count;
+    size_t limit;
+    zova_vector_search_results *out_results;
+} zova_vector_search_by_id_in_request;
+
+typedef struct zova_vector_search_by_id_within_request {
+    zova_database *db;
+    const char *collection_name;
+    const char *source_vector_id;
+    double max_distance;
+    size_t limit;
+    zova_vector_search_results *out_results;
+} zova_vector_search_by_id_within_request;
+
+typedef struct zova_vector_search_by_id_in_within_request {
+    zova_database *db;
+    const char *collection_name;
+    const char *source_vector_id;
+    const char *const *candidate_ids;
+    size_t candidate_count;
+    double max_distance;
+    size_t limit;
+    zova_vector_search_results *out_results;
+} zova_vector_search_by_id_in_within_request;
+
+typedef struct zova_graph_create_request {
+    zova_database *db;
+    const char *name;
+} zova_graph_create_request;
+
+typedef struct zova_graph_exists_request {
+    zova_database *db;
+    const char *name;
+    uint8_t *out_exists;
+} zova_graph_exists_request;
+
+typedef struct zova_graph_info_get_request {
+    zova_database *db;
+    const char *name;
+    zova_graph_info *out_info;
+} zova_graph_info_get_request;
+
+typedef struct zova_graph_list_request {
+    zova_database *db;
+    zova_graph_list *out_list;
+} zova_graph_list_request;
+
+typedef struct zova_database_extension_request {
+    zova_database *db;
+    const char *name;
+} zova_database_extension_request;
+
+typedef struct zova_database_extension_info_request {
+    zova_database *db;
+    const char *name;
+    zova_extension_info *out_info;
+} zova_database_extension_info_request;
+
+typedef struct zova_database_extension_list_request {
+    zova_database *db;
+    zova_extension_list *out_list;
+} zova_database_extension_list_request;
+
+typedef struct zova_graph_delete_request {
+    zova_database *db;
+    const char *name;
+} zova_graph_delete_request;
+
+typedef struct zova_graph_node_put_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *node_id;
+    const char *kind;
+    int target_type;
+    const char *target_namespace;
+    const char *target_ref;
+} zova_graph_node_put_request;
+
+/* Borrowed input row for zova_graph_node_put_many. */
+typedef struct zova_graph_node_input {
+    const char *graph_name;
+    const char *node_id;
+    const char *kind;
+    int target_type;
+    const char *target_namespace;
+    const char *target_ref;
+} zova_graph_node_input;
+
+/*
+ * All node inputs are validated before this atomic batch mutates the graph.
+ * It joins an active Zova transaction; otherwise Zova opens and commits one
+ * immediate transaction for the whole batch.
+ */
+typedef struct zova_graph_node_put_many_request {
+    zova_database *db;
+    const zova_graph_node_input *nodes;
+    size_t nodes_len;
+} zova_graph_node_put_many_request;
+
+typedef struct zova_graph_node_put_many_keyed_request {
+    zova_database *db;
+    const zova_graph_node_input *nodes;
+    size_t nodes_len;
+    int64_t *out_node_keys;
+    size_t out_node_keys_capacity;
+} zova_graph_node_put_many_keyed_request;
+
+typedef struct zova_graph_fresh_node_input {
+    const char *node_id;
+    const char *kind;
+    int target_type;
+    const char *target_namespace;
+    const char *target_ref;
+} zova_graph_fresh_node_input;
+
+typedef struct zova_graph_fresh_edge_input {
+    size_t from_node_ordinal;
+    const char *edge_type;
+    size_t to_node_ordinal;
+} zova_graph_fresh_edge_input;
+
+typedef struct zova_graph_fresh_edge_payload_input {
+    size_t from_node_ordinal;
+    const char *edge_type;
+    size_t to_node_ordinal;
+    const uint8_t *payload;
+    size_t payload_len;
+} zova_graph_fresh_edge_payload_input;
+
+typedef struct zova_graph_build_fresh_keyed_request {
+    zova_database *db;
+    const char *graph_name;
+    const zova_graph_fresh_node_input *nodes;
+    size_t nodes_len;
+    const zova_graph_fresh_edge_input *edges;
+    size_t edges_len;
+    int64_t *out_node_keys;
+    size_t out_node_keys_capacity;
+    int64_t *out_edge_keys;
+    size_t out_edge_keys_capacity;
+} zova_graph_build_fresh_keyed_request;
+
+typedef struct zova_graph_build_fresh_prepared_keyed_with_payloads_request {
+    zova_database *db;
+    const char *graph_name;
+    const zova_graph_fresh_node_input *nodes;
+    size_t nodes_len;
+    const zova_graph_fresh_edge_payload_input *edges;
+    size_t edges_len;
+    int64_t *out_node_keys;
+    size_t out_node_keys_capacity;
+    int64_t *out_edge_keys;
+    size_t out_edge_keys_capacity;
+} zova_graph_build_fresh_prepared_keyed_with_payloads_request;
+
+typedef struct zova_graph_node_get_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *node_id;
+    zova_graph_node *out_node;
+} zova_graph_node_get_request;
+
+typedef struct zova_graph_node_exists_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *node_id;
+    uint8_t *out_exists;
+} zova_graph_node_exists_request;
+
+typedef struct zova_graph_node_delete_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *node_id;
+} zova_graph_node_delete_request;
+
+/*
+ * Missing ids are ignored; every incident edge of an existing node is removed.
+ * It joins an active Zova transaction; otherwise Zova owns one transaction.
+ */
+typedef struct zova_graph_node_delete_many_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *const *node_ids;
+    size_t node_count;
+} zova_graph_node_delete_many_request;
+
+typedef struct zova_graph_edge_put_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *from_node_id;
+    const char *edge_type;
+    const char *to_node_id;
+} zova_graph_edge_put_request;
+
+/* Borrowed input row for zova_graph_edge_put_many. */
+typedef struct zova_graph_edge_input {
+    const char *graph_name;
+    const char *from_node_id;
+    const char *edge_type;
+    const char *to_node_id;
+} zova_graph_edge_input;
+
+/*
+ * All endpoints are validated before this atomic batch mutates the graph.
+ * Exact duplicate edges are idempotent. It joins an active Zova transaction;
+ * otherwise Zova opens and commits one immediate transaction for the batch.
+ */
+typedef struct zova_graph_edge_put_many_request {
+    zova_database *db;
+    const zova_graph_edge_input *edges;
+    size_t edges_len;
+} zova_graph_edge_put_many_request;
+
+typedef struct zova_graph_edge_put_many_keyed_request {
+    zova_database *db;
+    const zova_graph_edge_input *edges;
+    size_t edges_len;
+    int64_t *out_edge_keys;
+    size_t out_edge_keys_capacity;
+} zova_graph_edge_put_many_keyed_request;
+
+typedef struct zova_graph_edge_delete_many_request {
+    zova_database *db;
+    const zova_graph_edge_input *edges;
+    size_t edges_len;
+} zova_graph_edge_delete_many_request;
+
+typedef struct zova_graph_edge_get_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *from_node_id;
+    const char *edge_type;
+    const char *to_node_id;
+    zova_graph_edge *out_edge;
+} zova_graph_edge_get_request;
+
+typedef struct zova_graph_edge_exists_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *from_node_id;
+    const char *edge_type;
+    const char *to_node_id;
+    uint8_t *out_exists;
+} zova_graph_edge_exists_request;
+
+typedef struct zova_graph_edge_delete_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *from_node_id;
+    const char *edge_type;
+    const char *to_node_id;
+} zova_graph_edge_delete_request;
+
+/*
+ * Neighbors are emitted in edge insertion order, then neighbor node id. limit
+ * bounds emitted neighbor rows; an existing source node with limit 0 succeeds
+ * with an empty result.
+ */
+typedef struct zova_graph_neighbors_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *node_id;
+    int direction;
+    const char *edge_type;
+    size_t limit;
+    zova_graph_neighbor_results *out_results;
+} zova_graph_neighbors_request;
+
+typedef struct zova_graph_neighbors_keyed_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *node_id;
+    int direction;
+    const char *edge_type;
+    size_t limit;
+    zova_graph_keyed_neighbor_results *out_results;
+} zova_graph_neighbors_keyed_request;
+
+typedef struct zova_graph_nodes_get_many_keyed_request {
+    zova_database *db; const char *graph_name; const int64_t *node_keys;
+    size_t key_count; zova_graph_keyed_node_results *out_results;
+} zova_graph_nodes_get_many_keyed_request;
+typedef struct zova_graph_edges_get_many_keyed_request {
+    zova_database *db; const char *graph_name; const int64_t *edge_keys;
+    size_t key_count; zova_graph_keyed_edge_results *out_results;
+} zova_graph_edges_get_many_keyed_request;
+
+typedef struct zova_graph_edge_payload_get_many_request {
+    zova_database *db;
+    const char *graph_name;
+    const int64_t *edge_keys;
+    size_t key_count;
+    zova_graph_edge_payload_results *out_results;
+} zova_graph_edge_payload_get_many_request;
+
+typedef struct zova_graph_edge_payload_replacement {
+    int64_t edge_key;
+    const uint8_t *payload;
+    size_t payload_len;
+} zova_graph_edge_payload_replacement;
+
+typedef struct zova_graph_edge_payload_replace_many_request {
+    zova_database *db;
+    const char *graph_name;
+    const zova_graph_edge_payload_replacement *replacements;
+    size_t replacement_count;
+} zova_graph_edge_payload_replace_many_request;
+
+typedef struct zova_fresh_build_begin_request {
+    zova_database *db;
+    zova_fresh_build **out_build;
+} zova_fresh_build_begin_request;
+
+/* Typed row-major input for one predeclared, initially empty table or FTS target. */
+typedef struct zova_fresh_build_rows_request {
+    zova_fresh_build *build;
+    const char *table_name;
+    const char *const *column_names;
+    size_t column_count;
+    const zova_fresh_value *values;
+    size_t row_count;
+} zova_fresh_build_rows_request;
+
+typedef struct zova_fresh_build_graph_request {
+    zova_fresh_build *build;
+    const char *graph_name;
+    const zova_graph_fresh_node_input *nodes;
+    size_t nodes_len;
+    const zova_graph_fresh_edge_payload_input *edges;
+    size_t edges_len;
+    /*
+     * Optional immediate outputs. Keys remain provisional until finish succeeds;
+     * abort or a failed finish invalidates every key returned here.
+     */
+    int64_t *out_node_keys;
+    size_t out_node_keys_capacity;
+    int64_t *out_edge_keys;
+    size_t out_edge_keys_capacity;
+} zova_fresh_build_graph_request;
+
+typedef struct zova_fresh_build_vectors_request {
+    zova_fresh_build *build;
+    const char *collection_name;
+    const zova_vector_input *vectors;
+    size_t vectors_len;
+} zova_fresh_build_vectors_request;
+
+typedef struct zova_fresh_build_finish_request {
+    zova_fresh_build *build;
+    int64_t *out_node_keys;
+    size_t out_node_keys_capacity;
+    int64_t *out_edge_keys;
+    size_t out_edge_keys_capacity;
+    zova_fresh_build_profile *out_profile;
+} zova_fresh_build_finish_request;
+
+/* Count edges adjacent to one existing node, optionally filtered by type. */
+typedef struct zova_graph_degree_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *node_id;
+    int direction;
+    const char *edge_type;
+    uint64_t *out_degree;
+} zova_graph_degree_request;
+
+typedef struct zova_graph_degree_many_keyed_request {
+    zova_database *db;
+    const char *graph_name;
+    const int64_t *node_keys;
+    size_t node_count;
+    int direction;
+    const char *edge_type;
+    uint64_t *out_degrees;
+    size_t out_degrees_capacity;
+} zova_graph_degree_many_keyed_request;
+
+typedef struct zova_graph_scan_request {
+    zova_database *db;
+    const char *graph_name;
+    zova_graph_scan_cursor node_after;
+    zova_graph_scan_cursor edge_after;
+    size_t node_limit;
+    size_t edge_limit;
+    zova_graph_scan_results *out_results;
+} zova_graph_scan_request;
+
+/*
+ * Walk follows outgoing edges in breadth-first order. The start node is the
+ * first emitted row at depth 0; limit bounds emitted walk rows, including it.
+ */
+typedef struct zova_graph_walk_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *start_node_id;
+    const char *edge_type;
+    uint32_t max_depth;
+    size_t limit;
+    zova_graph_walk_results *out_results;
+} zova_graph_walk_request;
+
+/*
+ * Directional bounded BFS. The start node is emitted at depth 0 and limit
+ * counts emitted rows including it. Outgoing walks use edge insertion order
+ * then destination node ID; incoming walks use edge insertion order then
+ * source node ID.
+ */
+typedef struct zova_graph_walk_direction_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *start_node_id;
+    int direction;
+    const char *edge_type;
+    uint32_t max_depth;
+    size_t limit;
+    zova_graph_walk_results *out_results;
+} zova_graph_walk_direction_request;
+
+/* ABI-additive diagnostic variant of zova_graph_walk_direction. */
+typedef struct zova_graph_walk_direction_profiled_request {
+    zova_database *db;
+    const char *graph_name;
+    const char *start_node_id;
+    int direction;
+    const char *edge_type;
+    uint32_t max_depth;
+    size_t limit;
+    zova_graph_walk_results *out_results;
+    zova_graph_walk_profile *out_profile;
+} zova_graph_walk_direction_profiled_request;
+
+/* ABI version helpers describe this C boundary, not the .zova file format. */
+uint32_t zova_abi_version_major(void);
+uint32_t zova_abi_version_minor(void);
+uint32_t zova_abi_version_patch(void);
+const char *zova_abi_version_string(void);
+const char *zova_status_name(zova_status status);
+
+/* Free functions are null-safe and reset the passed container to empty. */
+void zova_buffer_free(zova_buffer *buffer);
+void zova_message_free(zova_message *message);
+void zova_text_free(zova_text *text);
+void zova_notification_free(zova_notification *notification);
+void zova_object_manifest_free(zova_object_manifest *manifest);
+void zova_vector_free(zova_vector *vector);
+void zova_vector_search_results_free(zova_vector_search_results *results);
+void zova_vector_collection_info_free(zova_vector_collection_info *info);
+void zova_vector_collection_list_free(zova_vector_collection_list *list);
+void zova_graph_info_free(zova_graph_info *info);
+void zova_graph_list_free(zova_graph_list *list);
+void zova_extension_info_free(zova_extension_info *info);
+void zova_extension_list_free(zova_extension_list *list);
+void zova_graph_node_free(zova_graph_node *node);
+void zova_graph_edge_free(zova_graph_edge *edge);
+void zova_graph_neighbor_results_free(zova_graph_neighbor_results *results);
+void zova_graph_keyed_neighbor_results_free(zova_graph_keyed_neighbor_results *results);
+void zova_graph_keyed_node_results_free(zova_graph_keyed_node_results *results);
+void zova_graph_keyed_edge_results_free(zova_graph_keyed_edge_results *results);
+void zova_graph_edge_payload_results_free(zova_graph_edge_payload_results *results);
+void zova_graph_scan_results_free(zova_graph_scan_results *results);
+void zova_graph_walk_results_free(zova_graph_walk_results *results);
+
+/* Atomic data loader for predeclared, initially empty targets. */
+zova_status zova_fresh_build_begin(const zova_fresh_build_begin_request *request);
+zova_status zova_fresh_build_table_rows(const zova_fresh_build_rows_request *request);
+zova_status zova_fresh_build_fts_rows(const zova_fresh_build_rows_request *request);
+zova_status zova_fresh_build_graph(const zova_fresh_build_graph_request *request);
+zova_status zova_fresh_build_vectors(const zova_fresh_build_vectors_request *request);
+zova_status zova_fresh_build_finish(const zova_fresh_build_finish_request *request);
+zova_status zova_fresh_build_abort(zova_fresh_build *build);
+void zova_fresh_build_destroy(zova_fresh_build *build);
+
+/* Database lifecycle, SQL passthrough, prepared statements, and conversion. */
+zova_status zova_database_create(const zova_database_open_request *request);
+zova_status zova_database_create_memory(const zova_database_create_memory_request *request);
+zova_status zova_database_create_with_options(const zova_database_create_options_request *request);
+zova_status zova_database_create_with_extensions(const zova_database_open_extensions_request *request);
+zova_status zova_database_open(const zova_database_open_request *request);
+zova_status zova_database_open_with_options(const zova_database_open_options_request *request);
+zova_status zova_database_open_with_extensions(const zova_database_open_extensions_request *request);
+zova_status zova_extension_bundle_verify(const zova_extension_bundle_request *request);
+zova_status zova_extension_bundle_trust(const zova_extension_bundle_request *request);
+zova_status zova_extension_bundle_untrust(const zova_extension_bundle_untrust_request *request);
+zova_status zova_database_close(zova_database *db);
+zova_status zova_database_exec(const zova_database_exec_request *request);
+zova_status zova_database_register_function(const zova_sql_function_register_request *request);
+zova_status zova_database_begin(const zova_database_simple_request *request);
+zova_status zova_database_begin_immediate(const zova_database_simple_request *request);
+zova_status zova_database_commit(const zova_database_simple_request *request);
+zova_status zova_database_rollback(const zova_database_simple_request *request);
+zova_status zova_database_savepoint(const zova_database_savepoint_request *request);
+zova_status zova_database_rollback_to_savepoint(const zova_database_savepoint_request *request);
+zova_status zova_database_release_savepoint(const zova_database_savepoint_request *request);
+zova_status zova_database_vacuum(const zova_database_simple_request *request);
+zova_status zova_database_backup(const zova_database_backup_request *request);
+zova_status zova_database_compact(const zova_database_compact_request *request);
+zova_status zova_database_backup_with_progress(const zova_database_backup_progress_request *request);
+zova_status zova_database_compact_with_progress(const zova_database_compact_progress_request *request);
+zova_status zova_database_reclaim(const zova_database_reclaim_request *request);
+zova_status zova_database_set_busy_timeout(const zova_database_busy_timeout_request *request);
+zova_status zova_database_last_insert_rowid(const zova_database_last_insert_rowid_request *request);
+zova_status zova_database_changes(const zova_database_changes_request *request);
+zova_status zova_database_total_changes(const zova_database_total_changes_request *request);
+zova_status zova_database_notify(const zova_database_notify_request *request);
+zova_status zova_database_listen(const zova_database_listen_request *request);
+zova_status zova_subscription_try_receive(const zova_subscription_try_receive_request *request);
+zova_status zova_subscription_close(zova_subscription *subscription);
+zova_status zova_database_prepare(const zova_database_prepare_request *request);
+const char *zova_database_last_error_message(zova_database *db);
+zova_status zova_convert_sqlite_to_zova(const zova_convert_sqlite_to_zova_request *request);
+zova_status zova_database_restore(const zova_database_restore_request *request);
+zova_status zova_database_restore_to_memory(const zova_database_restore_to_memory_request *request);
+zova_status zova_database_probe_format(const zova_database_probe_format_request *request);
+zova_status zova_database_migrate(const zova_database_migrate_request *request);
+zova_status zova_database_migrate_with_extensions(const zova_database_migrate_extensions_request *request);
+zova_status zova_database_migrate_with_progress(const zova_database_migrate_progress_request *request);
+
+/*
+ * Prepared statements.
+ *
+ * Parameter indexes are 1-based. Column indexes are 0-based. Text and blob
+ * bind inputs are borrowed for the call; column text/blob outputs are owned by
+ * Zova and must be freed with zova_text_free or zova_buffer_free.
+ */
+zova_status zova_statement_finalize(zova_statement *statement);
+zova_status zova_statement_step(const zova_statement_step_request *request);
+zova_status zova_statement_reset(zova_statement *statement);
+zova_status zova_statement_clear_bindings(zova_statement *statement);
+zova_status zova_statement_bind_null(const zova_statement_bind_null_request *request);
+zova_status zova_statement_bind_int64(const zova_statement_bind_int64_request *request);
+zova_status zova_statement_bind_double(const zova_statement_bind_double_request *request);
+zova_status zova_statement_bind_text(const zova_statement_bind_text_request *request);
+zova_status zova_statement_bind_blob(const zova_statement_bind_blob_request *request);
+zova_status zova_statement_parameter_count(const zova_statement_parameter_count_request *request);
+zova_status zova_statement_parameter_index(const zova_statement_parameter_index_request *request);
+zova_status zova_statement_column_count(const zova_statement_column_count_request *request);
+zova_status zova_statement_column_name(const zova_statement_column_name_request *request);
+zova_status zova_statement_column_type(const zova_statement_column_type_request *request);
+zova_status zova_statement_column_int64(const zova_statement_column_int64_request *request);
+zova_status zova_statement_column_double(const zova_statement_column_double_request *request);
+zova_status zova_statement_column_text(const zova_statement_column_text_request *request);
+zova_status zova_statement_column_blob(const zova_statement_column_blob_request *request);
+
+/*
+ * Object/chunk helpers and lifecycle operations.
+ *
+ * The id helpers use *_from_bytes names because C typedef names share the
+ * ordinary identifier namespace, so a function named zova_object_id would
+ * collide with the zova_object_id typedef.
+ */
+zova_status zova_object_id_from_bytes(const uint8_t *data, size_t len, zova_object_id *out_id);
+zova_status zova_object_chunk_id_from_bytes(const uint8_t *data, size_t len, zova_object_chunk_id *out_id);
+
+/* Synchronous object mutations are operation-atomic and join an active
+ * caller transaction through an internal savepoint. They never commit or roll
+ * back the caller's transaction, and a failure undoes only their own chunks,
+ * manifests, and metadata. This covers object_put, object_put_with_options,
+ * object_chunk_put, object_chunk_put_with_options, object_delete, and
+ * object_assemble_from_chunks.
+ */
+zova_status zova_object_put(const zova_object_put_request *request);
+zova_status zova_object_put_with_options(const zova_object_put_with_options_request *request);
+zova_status zova_object_set_compression(const zova_object_set_compression_request *request);
+zova_status zova_object_get(const zova_object_get_request *request);
+zova_status zova_object_read_range(const zova_object_read_range_request *request);
+zova_status zova_object_delete(const zova_object_delete_request *request);
+zova_status zova_object_exists(const zova_object_exists_request *request);
+zova_status zova_object_size(const zova_object_size_request *request);
+zova_status zova_object_chunk_count(const zova_object_chunk_count_request *request);
+zova_status zova_object_manifest_get(const zova_object_manifest_get_request *request);
+zova_status zova_object_chunk_get(const zova_object_chunk_get_request *request);
+zova_status zova_object_chunk_put(const zova_object_chunk_put_request *request);
+zova_status zova_object_chunk_put_with_options(const zova_object_chunk_put_with_options_request *request);
+zova_status zova_object_chunk_delete(const zova_object_chunk_delete_request *request);
+zova_status zova_object_assemble_from_chunks(const zova_object_assemble_from_chunks_request *request);
+zova_status zova_object_assemble_from_chunks_with_options(const zova_object_assemble_from_chunks_with_options_request *request);
+
+/* ObjectWriter streams bytes into verified chunks and finishes as one object.
+ * Unlike the synchronous object mutations above, a main-store writer rejects an
+ * active caller transaction with ZOVA_OBJECT_TRANSACTION_ACTIVE: it holds no
+ * transaction across write calls, so its loose chunks would otherwise sit
+ * outside the caller's atomic scope. A bound object store still allows it.
+ * The writer buffers chunks in memory and stores them in one transaction once
+ * about 64 MiB are pending, and at finish, so the write size does not decide
+ * the commit count. A failed commit drops the pending chunks and finish then
+ * reports them missing; cancel and destroy never store pending chunks.
+ */
+zova_status zova_object_writer_create(const zova_object_writer_create_request *request);
+zova_status zova_object_writer_create_with_options(const zova_object_writer_create_with_options_request *request);
+zova_status zova_object_writer_write(const zova_object_writer_write_request *request);
+zova_status zova_object_writer_finish(const zova_object_writer_finish_request *request);
+zova_status zova_object_writer_cancel(const zova_object_writer_cancel_request *request);
+zova_status zova_object_writer_destroy(zova_object_writer *writer);
+zova_status zova_object_reader_create(const zova_object_reader_create_request *request);
+zova_status zova_object_reader_read(const zova_object_reader_read_request *request);
+zova_status zova_object_reader_destroy(const zova_object_reader_destroy_request *request);
+
+/* The seekable reader serves verified reads at any offset, for HTTP range
+ * streaming. It loads the chunk that holds the position whole, checks it
+ * against its manifest SHA-256 before returning any of its bytes, and serves
+ * later reads inside that chunk from a per-reader buffer. Like a partial
+ * zova_object_read_range, it verifies chunks, not the whole-object hash. It
+ * pins no snapshot between calls: each chunk load is a short read transaction,
+ * so writers on other connections are not blocked while it stays open. A read
+ * returns 0 bytes at or past the end, and ZOVA_OBJECT_NOT_FOUND once the
+ * object was deleted and a new chunk is needed. A failed read leaves the
+ * position unchanged. Like other child handles it must be destroyed before
+ * the database is closed.
+ */
+zova_status zova_object_seekable_reader_create(const zova_object_seekable_reader_create_request *request);
+zova_status zova_object_seekable_reader_read(const zova_object_seekable_reader_read_request *request);
+zova_status zova_object_seekable_reader_seek(const zova_object_seekable_reader_seek_request *request);
+zova_status zova_object_seekable_reader_destroy(const zova_object_seekable_reader_destroy_request *request);
+
+/*
+ * Native transactional key-value operations.
+ *
+ * Namespaces, keys, and values are opaque byte strings; byte equality is
+ * exact. Batch requests validate completely before any mutation. Operations
+ * join an active Zova transaction or own one atomic transaction. Callers
+ * never retain Zova memory and Zova never retains caller input memory.
+ * Returned values are Zova-owned; free with zova_kv_get_result_free /
+ * zova_kv_get_many_results_free / zova_kv_scan_results_free.
+ */
+zova_status zova_kv_get(const zova_kv_get_request *request);
+zova_status zova_kv_get_many(const zova_kv_get_many_request *request);
+zova_status zova_kv_put(const zova_kv_put_request *request);
+zova_status zova_kv_put_many(const zova_kv_put_many_request *request);
+zova_status zova_kv_delete(const zova_kv_delete_request *request);
+zova_status zova_kv_delete_many(const zova_kv_delete_many_request *request);
+zova_status zova_kv_count(const zova_kv_count_request *request);
+zova_status zova_kv_clear_namespace(const zova_kv_clear_namespace_request *request);
+void zova_kv_get_result_free(zova_kv_get_result *result);
+void zova_kv_get_many_results_free(zova_kv_get_many_results *results);
+zova_status zova_kv_scan(const zova_kv_scan_request *request);
+void zova_kv_scan_results_free(zova_kv_scan_results *results);
+zova_status zova_kv_put_if_absent(const zova_kv_put_if_absent_request *request);
+zova_status zova_kv_compare_and_put(const zova_kv_compare_and_put_request *request);
+zova_status zova_kv_compare_and_delete(const zova_kv_compare_and_delete_request *request);
+
+/*
+ * Native vector operations.
+ *
+ * Collection names and vector ids are null-terminated UTF-8 C strings.
+ * Value APIs use zova_vector_values and support raw f32, f16 IEEE-754
+ * binary16 bits, and signed i8 values without quantization.
+ * Search returns vector ids and lower-is-better distances only; applications
+ * should query their own SQL tables for metadata.
+ */
+zova_status zova_vector_collection_create(const zova_vector_collection_create_request *request);
+zova_status zova_vector_collection_exists(const zova_vector_collection_exists_request *request);
+zova_status zova_vector_collection_info_get(const zova_vector_collection_info_get_request *request);
+zova_status zova_vector_collections_list(const zova_vector_collections_list_request *request);
+zova_status zova_vector_put(const zova_vector_put_request *request);
+zova_status zova_vector_put_many(const zova_vector_put_many_request *request);
+zova_status zova_vector_delete_many(const zova_vector_delete_many_request *request);
+zova_status zova_vector_get(const zova_vector_get_request *request);
+zova_status zova_vector_exists(const zova_vector_exists_request *request);
+zova_status zova_vector_delete(const zova_vector_delete_request *request);
+zova_status zova_vector_collection_delete(const zova_vector_collection_delete_request *request);
+zova_status zova_vector_search(const zova_vector_search_request *request);
+zova_status zova_vector_search_in(const zova_vector_search_in_request *request);
+zova_status zova_vector_search_multi_i8(const zova_vector_search_multi_i8_request *request);
+zova_status zova_vector_search_within(const zova_vector_search_within_request *request);
+zova_status zova_vector_search_in_within(const zova_vector_search_in_within_request *request);
+zova_status zova_vector_search_by_id(const zova_vector_search_by_id_request *request);
+zova_status zova_vector_search_by_id_in(const zova_vector_search_by_id_in_request *request);
+zova_status zova_vector_search_by_id_within(const zova_vector_search_by_id_within_request *request);
+zova_status zova_vector_search_by_id_in_within(const zova_vector_search_by_id_in_within_request *request);
+
+/*
+ * Native graph operations.
+ *
+ * Graph names, node ids, node kinds, and edge types are application-owned
+ * UTF-8 strings validated by Zova. Graph results contain topology and target
+ * references only; applications should query their own SQL tables for metadata.
+ * zova_graphs_list uses a plural name because zova_graph_list is the owned
+ * result container typedef.
+ */
+zova_status zova_graph_create(const zova_graph_create_request *request);
+zova_status zova_graph_exists(const zova_graph_exists_request *request);
+zova_status zova_graph_info_get(const zova_graph_info_get_request *request);
+zova_status zova_graphs_list(const zova_graph_list_request *request);
+
+/*
+ * Extension lifecycle helpers manage extensions already present in the process
+ * registry. Normal C-created handles use Zova's bundled registry, including
+ * bundled extensions such as trgm. The C ABI also exposes controlled scalar SQL
+ * callback registration and trusted .zovaext bundle loading; it does not expose
+ * raw sqlite3 handles as the normal extension path.
+ */
+zova_status zova_database_extension_install(const zova_database_extension_request *request);
+/* Open explicitly for extension maintenance without running installed hooks.
+ * Uses the same trusted-bundle request; flags must be zero. Upgrade, close and
+ * reopen normally before application use. No implicit data/file migration. */
+zova_status zova_database_open_for_extension_upgrade(const zova_database_open_extensions_request *request);
+/* The create, open and upgrade-open calls above, accepting linked plugins. */
+zova_status zova_database_create_with_plugins(const zova_database_open_plugins_request *request);
+zova_status zova_database_open_with_plugins(const zova_database_open_plugins_request *request);
+zova_status zova_database_open_for_extension_upgrade_with_plugins(const zova_database_open_plugins_request *request);
+/* One declared forward path; savepoint rollback preserves caller work.
+ * Unavailable code -> EXTENSION_UNAVAILABLE; unsupported/equal/backward version
+ * -> EXTENSION_INCOMPATIBLE. Caller transaction commit remains the caller's job. */
+zova_status zova_database_extension_upgrade(const zova_database_extension_request *request);
+/* Explicit repair at the installed data version. Join an existing transaction
+ * through an operation-atomic savepoint; no upgrade or metadata rewrite.
+ * Missing recovery hook -> EXTENSION_UNAVAILABLE. Read-only writes fail.
+ * For a damaged index use the explicit extension-maintenance open above, then
+ * rebuild, commit, close and reopen normally. */
+zova_status zova_database_extension_rebuild(const zova_database_extension_request *request);
+zova_status zova_database_extension_list(const zova_database_extension_list_request *request);
+zova_status zova_database_extension_info(const zova_database_extension_info_request *request);
+zova_status zova_database_extension_check(const zova_database_extension_request *request);
+zova_status zova_database_extension_check_all(const zova_database_simple_request *request);
+zova_status zova_database_extension_drop(const zova_database_extension_request *request);
+
+zova_status zova_graph_delete(const zova_graph_delete_request *request);
+zova_status zova_graph_node_put(const zova_graph_node_put_request *request);
+zova_status zova_graph_node_put_many(const zova_graph_node_put_many_request *request);
+zova_status zova_graph_node_put_many_keyed(const zova_graph_node_put_many_keyed_request *request);
+zova_status zova_graph_build_fresh_keyed(const zova_graph_build_fresh_keyed_request *request);
+/* Trusted single-graph build: nodes are final-order unique rows and edges are
+ * final-order, deduplicated ordinal topology. Contract violations fail
+ * atomically; input-aligned opaque keys are published only on success. */
+zova_status zova_graph_build_fresh_prepared_keyed(const zova_graph_build_fresh_keyed_request *request);
+zova_status zova_graph_build_fresh_prepared_keyed_with_payloads(const zova_graph_build_fresh_prepared_keyed_with_payloads_request *request);
+zova_status zova_graph_node_get(const zova_graph_node_get_request *request);
+zova_status zova_graph_node_exists(const zova_graph_node_exists_request *request);
+zova_status zova_graph_node_delete(const zova_graph_node_delete_request *request);
+zova_status zova_graph_node_delete_many(const zova_graph_node_delete_many_request *request);
+zova_status zova_graph_edge_put(const zova_graph_edge_put_request *request);
+zova_status zova_graph_edge_put_many(const zova_graph_edge_put_many_request *request);
+zova_status zova_graph_edge_put_many_keyed(const zova_graph_edge_put_many_keyed_request *request);
+zova_status zova_graph_edge_delete_many(const zova_graph_edge_delete_many_request *request);
+zova_status zova_graph_edge_get(const zova_graph_edge_get_request *request);
+zova_status zova_graph_edge_exists(const zova_graph_edge_exists_request *request);
+zova_status zova_graph_edge_delete(const zova_graph_edge_delete_request *request);
+zova_status zova_graph_neighbors(const zova_graph_neighbors_request *request);
+zova_status zova_graph_neighbors_keyed(const zova_graph_neighbors_keyed_request *request);
+zova_status zova_graph_nodes_get_many_keyed(const zova_graph_nodes_get_many_keyed_request *request);
+zova_status zova_graph_edges_get_many_keyed(const zova_graph_edges_get_many_keyed_request *request);
+zova_status zova_graph_edge_payload_get_many(const zova_graph_edge_payload_get_many_request *request);
+zova_status zova_graph_edge_payload_replace_many(const zova_graph_edge_payload_replace_many_request *request);
+zova_status zova_graph_degree(const zova_graph_degree_request *request);
+zova_status zova_graph_degree_many_keyed(const zova_graph_degree_many_keyed_request *request);
+zova_status zova_graph_scan(const zova_graph_scan_request *request);
+zova_status zova_graph_walk(const zova_graph_walk_request *request);
+zova_status zova_graph_walk_direction(const zova_graph_walk_direction_request *request);
+zova_status zova_graph_walk_direction_profiled(const zova_graph_walk_direction_profiled_request *request);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

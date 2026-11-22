@@ -1,0 +1,554 @@
+#ifndef ZOVA_PLUGIN_H
+#define ZOVA_PLUGIN_H
+
+#include <stdint.h>
+
+#if defined(_WIN32)
+#define ZOVA_PLUGIN_CALL __cdecl
+#define ZOVA_PLUGIN_EXPORT __declspec(dllexport)
+#else
+#define ZOVA_PLUGIN_CALL
+#define ZOVA_PLUGIN_EXPORT __attribute__((visibility("default")))
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define ZOVA_PLUGIN_ABI_V1 UINT32_C(1)
+#define ZOVA_PLUGIN_OK INT32_C(0)
+#define ZOVA_PLUGIN_ERROR INT32_C(1)
+#define ZOVA_PLUGIN_OUT_OF_MEMORY INT32_C(2)
+#define ZOVA_PLUGIN_INVALID_ARGUMENT INT32_C(3)
+#define ZOVA_PLUGIN_UNSUPPORTED INT32_C(4)
+#define ZOVA_PLUGIN_LIMIT INT32_C(5)
+#define ZOVA_PLUGIN_CANCELED INT32_C(6)
+#define ZOVA_PLUGIN_HAS_UPGRADE_V1 UINT64_C(1)
+#define ZOVA_PLUGIN_HAS_DATA_COMPATIBILITY_V1 UINT64_C(128)
+#define ZOVA_PLUGIN_HAS_RECOVERY_V1 UINT64_C(256)
+#define ZOVA_PLUGIN_SALVAGE_PLAN UINT32_C(1)
+#define ZOVA_PLUGIN_SALVAGE_COPY UINT32_C(2)
+#define ZOVA_PLUGIN_REQUIRES_QUERY_V1 UINT64_C(2)
+#define ZOVA_PLUGIN_REQUIRES_DIAGNOSTICS_V1 UINT64_C(4)
+#define ZOVA_PLUGIN_SERVICE_QUERY UINT32_C(1)
+#define ZOVA_PLUGIN_SERVICE_DIAGNOSTICS UINT32_C(2)
+#define ZOVA_PLUGIN_REQUIRES_DATA_V1 UINT64_C(8)
+#define ZOVA_PLUGIN_REQUIRES_STORAGE_V1 UINT64_C(16)
+#define ZOVA_PLUGIN_SERVICE_DATA UINT32_C(3)
+#define ZOVA_PLUGIN_SERVICE_STORAGE UINT32_C(4)
+#define ZOVA_PLUGIN_REQUIRES_OPERATIONS_V1 UINT64_C(32)
+#define ZOVA_PLUGIN_SERVICE_OPERATIONS UINT32_C(5)
+#define ZOVA_PLUGIN_REQUIRES_VECTOR_MAINTENANCE_V1 UINT64_C(64)
+#define ZOVA_PLUGIN_SERVICE_VECTOR_MAINTENANCE UINT32_C(6)
+#define ZOVA_PLUGIN_HISTORY_UNAVAILABLE INT32_C(7)
+#define ZOVA_PLUGIN_SOURCE_CHANGED INT32_C(8)
+
+/* Independent of the database format and Zova's application C ABI.
+ * All calls use the platform C calling convention; C++ exceptions must not
+ * cross this boundary. No structure packing overrides are permitted.
+ * The host and connection handles are borrowed only for the current hook or
+ * operation callback.
+ * Never retain them or call them from another thread. The host copies SQL;
+ * input bytes need remain valid only until exec_sql returns. No allocations
+ * cross the boundary except operation-state ownership explicitly described
+ * below. Hook-local allocations are released before returning.
+ * Hooks must not issue transaction/savepoint commands or reenter Zova APIs.
+ * Nonzero hook results fail the operation; unknown statuses are generic errors.
+ * Translate recoverable Zig errors into statuses. Rust panics and C++ exceptions
+ * must not unwind across C. A Zig panic, native crash or process abort is not
+ * recoverable by the host and cannot be made transaction-safe by this ABI.
+ */
+typedef struct zova_plugin_host_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    int32_t (ZOVA_PLUGIN_CALL *exec_sql)(void *connection, const char *sql, uint64_t sql_len);
+} zova_plugin_host_v1;
+
+/* Append-only host prefix: check base.struct_size before accessing get_service.
+ * Required services must also be declared in descriptor.flags so older hosts
+ * reject the plugin before any hook. Optional services may be probed at runtime.
+ * get_service clears *out_service on error; unsupported IDs, versions or minimum
+ * sizes return UNSUPPORTED. Service tables are immutable and host-owned. The
+ * connection is opaque, never a public SQLite handle. Use services only during
+ * the current hook/operation, on its thread; row callbacks must not reenter host
+ * services.
+ */
+typedef struct zova_plugin_service_host_v1 {
+    zova_plugin_host_v1 base;
+    int32_t (ZOVA_PLUGIN_CALL *get_service)(void *connection, uint32_t service_id,
+        uint32_t service_version, uint32_t min_struct_size, const void **out_service);
+} zova_plugin_service_host_v1;
+
+#define ZOVA_PLUGIN_VALUE_NULL UINT32_C(0)
+#define ZOVA_PLUGIN_VALUE_INTEGER UINT32_C(1)
+#define ZOVA_PLUGIN_VALUE_FLOAT UINT32_C(2)
+#define ZOVA_PLUGIN_VALUE_TEXT UINT32_C(3)
+#define ZOVA_PLUGIN_VALUE_BLOB UINT32_C(4)
+typedef struct zova_plugin_value_v1 {
+    uint32_t kind;
+    uint32_t reserved; /* Must be zero. Initialize all unused fields to zero. */
+    int64_t integer;
+    double real;
+    const uint8_t *bytes;
+    uint64_t bytes_len;
+} zova_plugin_value_v1;
+
+typedef int32_t (ZOVA_PLUGIN_CALL *zova_plugin_row_v1)(void *user_data,
+    const zova_plugin_value_v1 *values, uint64_t value_count);
+
+/* One read-only SELECT/WITH statement; no PRAGMAs or transaction/attachment
+ * commands. Exact parameter count, at most 256 parameters, 128 result columns,
+ * 4096 rows and 1 MiB SQL/input/result bytes. row_limit and byte_limit must be
+ * nonzero and within those maxima. byte_limit counts Value records plus text/
+ * blob bytes cumulatively. A row exceeding either budget is not delivered.
+ * Inputs stay valid/unchanged until query returns. Text is UTF-8 and may contain
+ * NUL; SQL cannot. Empty text/blob can have NULL bytes and zero bytes_len.
+ * Result values and bytes are borrowed only during each row callback. Copy what
+ * must survive it. Return OK, OUT_OF_MEMORY or CANCELED; other callback statuses
+ * become INVALID_ARGUMENT. row and user_data are plugin-owned and borrowed only
+ * until query returns; callbacks never run after that return. There is no state
+ * ownership transfer or destroy callback: the plugin releases its callback state
+ * on every return path, including failures. The library must stay loaded through
+ * the call. Hook-local state must not be confused with future persistent state.
+ * Failure can follow already delivered rows: plugins
+ * must discard partial results. All statements are finalized before return.
+ * This bounds delivery, not SQL CPU time or SQLite's internal working memory.
+ * Query functions must not perform side effects. Native plugins remain trusted,
+ * not sandboxed. No result allocation/free or CRT ownership crosses this ABI.
+ */
+typedef struct zova_plugin_query_request_v1 {
+    uint32_t struct_size;
+    uint32_t flags; /* Zero. Unknown flags are rejected. */
+    const char *sql;
+    uint64_t sql_len;
+    const zova_plugin_value_v1 *parameters;
+    uint64_t parameter_count;
+    uint64_t row_limit;
+    uint64_t byte_limit;
+    zova_plugin_row_v1 row;
+    void *user_data;
+} zova_plugin_query_request_v1;
+
+typedef struct zova_plugin_query_service_v1 {
+    uint32_t struct_size;
+    uint32_t version;
+    int32_t (ZOVA_PLUGIN_CALL *query)(void *connection,
+        const zova_plugin_query_request_v1 *request);
+} zova_plugin_query_service_v1;
+
+/* Copy SQLite's current connection diagnostic, not a retained error object.
+ * Capacity is at most 1024 bytes. No NUL terminator is added. *written is zeroed
+ * before validation. Truncation returns LIMIT with the copied length. A NULL
+ * buffer is valid only for zero capacity. Diagnostics may change after another
+ * host call; validation/limit/cancellation errors need not set SQLite's message.
+ */
+typedef struct zova_plugin_diagnostics_service_v1 {
+    uint32_t struct_size;
+    uint32_t version;
+    int32_t (ZOVA_PLUGIN_CALL *copy_sqlite_error)(void *connection,
+        uint8_t *buffer, uint64_t capacity, uint64_t *written);
+} zova_plugin_diagnostics_service_v1;
+
+typedef struct zova_plugin_bytes_v1 {
+    const uint8_t *data;
+    uint64_t len;
+} zova_plugin_bytes_v1;
+
+typedef struct zova_plugin_vector_view_v1 {
+    uint8_t incarnation[16];
+    uint8_t token[16];
+    int64_t revision;
+} zova_plugin_vector_view_v1;
+typedef struct zova_plugin_vector_changes_request_v1 {
+    uint32_t struct_size;
+    uint32_t reserved;
+    zova_plugin_bytes_v1 name;
+    zova_plugin_vector_view_v1 since;
+    int64_t after_revision;
+    uint64_t row_limit;
+    uint64_t byte_limit;
+    zova_plugin_row_v1 row;
+    void *user_data;
+} zova_plugin_vector_changes_request_v1;
+typedef struct zova_plugin_vector_changes_page_v1 {
+    zova_plugin_vector_view_v1 view;
+    uint64_t rows;
+    int64_t next_revision;
+    uint32_t has_more;
+    uint32_t reserved;
+} zova_plugin_vector_changes_page_v1;
+
+/* Read-only source-local maintenance; available in authorized hooks/operations.
+ * view identifies the caller-visible collection incarnation AND revision branch.
+ * Never validate a cache by public name or revision alone. Deletion/recreation
+ * creates a new incarnation. Savepoint/outer rollback also undoes history;
+ * a different write reusing a rolled-back revision receives a different token.
+ *
+ * read_changes checks since against that same snapshot, then emits rows:
+ * revision(INTEGER), public vector_id(TEXT), found(INTEGER), values(BLOB/NULL).
+ * Each changed ID resolves to its FINAL authoritative value in this snapshot,
+ * not its historical payload. Repeated IDs may appear; apply final values or
+ * remove missing IDs. Include visible additions in search, not only deletion
+ * filtering of stale ANN results. No full vector payload is stored in history.
+ *
+ * after_revision=0 starts at since.revision; otherwise it is exclusive and
+ * must be within [since.revision,view.revision]. Page within one hook/operation
+ * or caller transaction; outside it restart from the original coverage view.
+ * row/byte bounds and callback lifetimes match the data service. Discard partial
+ * delivery on error; outputs are zeroed on ALL errors. Reentry is rejected.
+ *
+ * At most 4351 changes per collection are retained (4096, retired every 256).
+ * HISTORY_UNAVAILABLE means since is older than retained coverage: reconstruct
+ * against this snapshot or fail clearly. SOURCE_CHANGED means the source was
+ * recreated or since belongs to a rolled-back/divergent/future branch. Never
+ * silently treat either as an empty delta. Retained WAL readers keep their
+ * own historical pages despite retirement by a newer writer.
+ *
+ * The journal commits with vectors in the same file, including bound stores.
+ * Plugin storage in main is NOT crash-atomic with bound WAL source files.
+ * Validate persisted generation coverage against this service before reuse;
+ * mismatch/missing history requires reconstruction or an explicit error.
+ * Keep immutable base generations and call-local deltas; do not mutate a
+ * shared newest cache for older readers or serialize/copy HNSW per source row.
+ */
+typedef struct zova_plugin_vector_maintenance_service_v1 {
+    uint32_t struct_size;
+    uint32_t version;
+    int32_t (ZOVA_PLUGIN_CALL *view)(void *connection, zova_plugin_bytes_v1 name,
+        zova_plugin_vector_view_v1 *out_view);
+    int32_t (ZOVA_PLUGIN_CALL *read_changes)(void *connection,
+        const zova_plugin_vector_changes_request_v1 *request,
+        zova_plugin_vector_changes_page_v1 *out_page);
+} zova_plugin_vector_maintenance_service_v1;
+
+#define ZOVA_PLUGIN_OPERATION_SCALAR UINT32_C(1)
+#define ZOVA_PLUGIN_OPERATION_TABLE UINT32_C(2)
+#define ZOVA_PLUGIN_OPERATION_EXACT UINT64_C(1)
+#define ZOVA_PLUGIN_OPERATION_APPROXIMATE UINT64_C(2)
+#define ZOVA_PLUGIN_OPERATION_MUTATING UINT64_C(4)
+#define ZOVA_PLUGIN_OPERATION_ORDERED UINT64_C(8)
+
+typedef struct zova_plugin_operation_column_v1 {
+    zova_plugin_bytes_v1 name;
+    uint32_t kind; /* INTEGER/FLOAT/TEXT/BLOB; no implicit argument conversion. */
+    uint32_t nullable; /* 0 or 1; NULL accepted only when 1. */
+} zova_plugin_operation_column_v1;
+typedef struct zova_plugin_operation_call_v1 {
+    uint32_t struct_size;
+    uint32_t reserved;
+    const zova_plugin_value_v1 *arguments;
+    uint64_t argument_count;
+    zova_plugin_row_v1 row;
+    void *user_data;
+} zova_plugin_operation_call_v1;
+typedef void (ZOVA_PLUGIN_CALL *zova_plugin_operation_close_v1)(void *state);
+typedef int32_t (ZOVA_PLUGIN_CALL *zova_plugin_scalar_v1)(
+    const zova_plugin_host_v1 *host, void *connection, void *state,
+    const zova_plugin_operation_call_v1 *call);
+typedef int32_t (ZOVA_PLUGIN_CALL *zova_plugin_operation_open_v1)(
+    const zova_plugin_host_v1 *host, void *connection, void *state,
+    const zova_plugin_value_v1 *arguments, uint64_t argument_count, void **out_cursor);
+typedef int32_t (ZOVA_PLUGIN_CALL *zova_plugin_operation_next_v1)(
+    const zova_plugin_host_v1 *host, void *connection, void *cursor,
+    zova_plugin_row_v1 row, void *row_context, uint32_t *out_has_row);
+
+/* Available only in register_sql. Names: 1..63 lowercase ASCII identifier bytes;
+ * SQL name = zova_<extension-name>_<name>. Quote SQL names if the extension name
+ * contains punctuation. Ownership covers functions AND modules; no overloads,
+ * replacement of other facilities or signature changes on a live connection.
+ * Registration copies names/types. On OK the host owns user_data and calls
+ * destroy exactly once; on error ownership stays with the plugin. Destroy/close
+ * must not access host services, reenter Zova, or throw/unwind. Library code must
+ * remain loaded until the connection and all its statements are closed.
+ * Failed lifecycle validation destroys new state; old callbacks remain usable.
+ * Old successful registrations are retained through connection close to support
+ * caller rollback of upgrades/drops (at most 64 retained revisions per operation).
+ * Reopen reruns register_sql; registrations are not persisted in the file.
+ *
+ * Exactly one of EXACT/APPROXIMATE is required. The plugin documents accuracy,
+ * metric, configuration and ordering; no existing core operation is replaced.
+ * <=32 arguments, 1..64 result columns; scalar requires exactly one column and
+ * one emitted row. Total argument bytes and each row <=1 MiB including Values.
+ * Row bytes borrow only during row(); the host copies what survives it. Always
+ * propagate a non-OK row() status. Unknown callback status => generic ERROR.
+ * SQL errors map ERROR/INVALID_ARGUMENT/UNSUPPORTED to SQLITE_ERROR, OOM to
+ * SQLITE_NOMEM, LIMIT to SQLITE_TOOBIG and CANCELED to SQLITE_INTERRUPT.
+ *
+ * Table operations are read-only eponymous-only tables with argument columns
+ * hidden, e.g. SELECT score FROM zova_rank_pagerank('graph'). All arguments are
+ * required. open receives arguments that stay valid until close, and must set
+ * *out_cursor even on a partially allocated error path. next sets *out_has_row
+ * to 0 (EOF, no row call) or 1 (exactly one row call). The host calls close once
+ * after any successful open, or a failed open returning non-NULL cursor. LIMIT,
+ * reset, finalization, errors and cancellation release the cursor. Pull rows
+ * remain in emitted order; ORDERED declares deterministic emission, not an SQL
+ * ORDER BY guarantee. For paging expose explicit cursor/limit arguments. Source
+ * reads share the SQL cursor's pinned snapshots, including bound stores.
+ *
+ * Read-only scalar/table callbacks may use data/query and read-only private SQL.
+ * MUTATING is scalar-only, invoked with SELECT (not inside an active DML
+ * statement), and permits private DML using the storage service;
+ * its invocation is savepoint-atomic, also inside a caller transaction. Separate
+ * successful calls in one SQL statement are not one application batch. Read-only
+ * connections reject mutation. Legacy exec_sql and operation registration are
+ * unavailable during calls. Recursive plugin operation invocation is rejected.
+ * Operations are DIRECTONLY: no use from persistent views/triggers. Delivery is
+ * bounded; plugin working memory and CPU are trusted, not sandboxed.
+ */
+typedef struct zova_plugin_operation_v1 {
+    uint32_t struct_size;
+    uint32_t kind;
+    uint64_t flags;
+    zova_plugin_bytes_v1 name;
+    const zova_plugin_operation_column_v1 *arguments;
+    uint32_t argument_count;
+    uint32_t column_count;
+    const zova_plugin_operation_column_v1 *columns;
+    void *user_data;
+    zova_plugin_operation_close_v1 destroy;
+    zova_plugin_scalar_v1 scalar;
+    zova_plugin_operation_open_v1 open;
+    zova_plugin_operation_next_v1 next;
+    zova_plugin_operation_close_v1 close;
+} zova_plugin_operation_v1;
+typedef struct zova_plugin_operation_service_v1 {
+    uint32_t struct_size;
+    uint32_t version;
+    int32_t (ZOVA_PLUGIN_CALL *register_operation)(void *connection,
+        const zova_plugin_operation_v1 *operation);
+} zova_plugin_operation_service_v1;
+typedef struct zova_plugin_cursor_v1 {
+    int64_t created_order;
+    int64_t key;
+} zova_plugin_cursor_v1;
+typedef struct zova_plugin_data_page_v1 {
+    uint64_t rows;
+    uint32_t has_more;
+    uint32_t reserved;
+    zova_plugin_cursor_v1 next;
+} zova_plugin_data_page_v1;
+
+#define ZOVA_PLUGIN_GRAPH_NODES_SCAN UINT32_C(1)
+#define ZOVA_PLUGIN_GRAPH_EDGES_SCAN UINT32_C(2)
+#define ZOVA_PLUGIN_GRAPH_NODES_GET UINT32_C(3)
+#define ZOVA_PLUGIN_GRAPH_EDGES_GET UINT32_C(4)
+#define ZOVA_PLUGIN_GRAPH_NEIGHBORS UINT32_C(5)
+#define ZOVA_PLUGIN_VECTOR_METADATA UINT32_C(6)
+#define ZOVA_PLUGIN_VECTORS_SCAN UINT32_C(7)
+#define ZOVA_PLUGIN_VECTORS_GET UINT32_C(8)
+/* Operations 9 and 10 require a Zova 1.3.0 or newer host; declare zova_abi_min
+ * accordingly. */
+#define ZOVA_PLUGIN_GRAPH_EDGE_PAYLOADS_GET UINT32_C(9)
+#define ZOVA_PLUGIN_GRAPH_NEIGHBORS_KEYED UINT32_C(10)
+#define ZOVA_PLUGIN_OUTGOING UINT32_C(0)
+#define ZOVA_PLUGIN_INCOMING UINT32_C(1)
+
+/* All inputs and the callback borrow only until read returns; Value row bytes
+ * borrow only during the callback. No allocations or cursors cross the ABI.
+ * 1..4096 row_limit, 1..1 MiB byte_limit (Value records plus variable bytes).
+ * Input names/vector IDs are UTF-8, at most 255 bytes each; graph node IDs
+ * at most 512 bytes. Aggregate vector IDs <=1 MiB. Vector IDs may contain NUL.
+ * Keys are positive opaque i64s. Batches <=row_limit preserve input ordinals,
+ * duplicates, and misses (found=0, unavailable fields=NULL), including keys
+ * from another graph. Missing graph/collection/node is ERROR, not an empty
+ * source. Empty batches still validate the source. Zero all unused fields.
+ *
+ * Row layouts (INTEGER unless noted):
+ * NODES_SCAN: node_key, node_id(TEXT), kind(TEXT), created_order.
+ * EDGES_SCAN: edge_key, source_node_key, edge_type(TEXT), target_node_key, order.
+ * NODES_GET: ordinal, found, input_key, node_id(TEXT), kind(TEXT), order.
+ * EDGES_GET: ordinal, found, input_key, source_key, edge_type(TEXT), target_key, order.
+ * NEIGHBORS: edge_key, neighbor_key, node_id(TEXT), kind(TEXT), edge_type(TEXT), order.
+ * EDGE_PAYLOADS_GET: ordinal, found, input_key, payload(BLOB or NULL). Payload
+ * bytes are the application's opaque edge payload, possibly empty; they count
+ * toward byte_limit, so an over-budget batch fails with LIMIT and is retried
+ * with fewer keys. A single payload above 1 MiB cannot be read here.
+ * NEIGHBORS_KEYED: ordinal, input_key, edge_key, neighbor_key, edge_type(TEXT),
+ * order. keys are node keys; direction and the optional edge-type filter apply
+ * to all of them. The filter is either edge_type or, for a set, ids holding 1..16
+ * edge-type names (not both); names the graph does not have match nothing. Rows
+ * are grouped by input ordinal, in adjacency order within each key. A key that is unknown, belongs to another graph, or has no matching
+ * edge produces no rows. When has_more is set, resume with the keys from the
+ * last row's ordinal onward and after=next; after applies to keys[0] only.
+ * VECTOR_METADATA: dimensions, element_type(TEXT: f32/f16/i8), metric(TEXT:
+ * cosine/l2/dot), vector_count. No private vector key is exposed.
+ * VECTORS_SCAN: vector_id(TEXT), values(BLOB).
+ * VECTORS_GET: ordinal, found, input_id(TEXT), values(BLOB or NULL).
+ * Vector bytes are exact little-endian IEEE754 f32/f16 or raw signed i8, not
+ * quantized or widened. Use collection metadata to decode; BLOB pointers need
+ * not be aligned. Consumers account for their own conversion/work memory.
+ *
+ * Graph scans/adjacency use exclusive (order,key) cursors: (0,0) starts; otherwise
+ * both fields must be positive. next advances only on complete success.
+ * Adjacency requires node_id, direction and optional edge_type (empty=all).
+ * Ordering matches existing APIs. Vectors scan by BINARY public ID; copy the
+ * last delivered ID and pass it as after_id. has_more uses one lookahead row.
+ * Output is zeroed on every error. Discard any already delivered partial rows.
+ * Return CANCELED from a callback to stop; statements/temporary memory finalize
+ * on all paths. Row/byte bounds do not sandbox plugin CPU or SQLite work.
+ *
+ * All source reads in one hook share the hook's transaction/savepoint snapshot,
+ * including bound stores and caller-visible earlier writes. Never interleave
+ * source mutation/reenter services from callbacks. This does not promise a
+ * simultaneous cross-file WAL snapshot or durable source incarnation tokens;
+ * persistent freshness/change tracking is a separate service contract.
+ */
+typedef struct zova_plugin_data_request_v1 {
+    uint32_t struct_size;
+    uint32_t operation;
+    zova_plugin_bytes_v1 name;
+    const int64_t *keys;
+    uint64_t key_count;
+    const zova_plugin_bytes_v1 *ids;
+    uint64_t id_count;
+    zova_plugin_cursor_v1 after;
+    zova_plugin_bytes_v1 after_id;
+    zova_plugin_bytes_v1 node_id;
+    zova_plugin_bytes_v1 edge_type;
+    uint32_t direction;
+    uint32_t reserved;
+    uint64_t row_limit;
+    uint64_t byte_limit;
+    zova_plugin_row_v1 row;
+    void *user_data;
+} zova_plugin_data_request_v1;
+typedef struct zova_plugin_data_service_v1 {
+    uint32_t struct_size;
+    uint32_t version;
+    int32_t (ZOVA_PLUGIN_CALL *read)(void *connection,
+        const zova_plugin_data_request_v1 *request, zova_plugin_data_page_v1 *out_page);
+} zova_plugin_data_service_v1;
+
+/* Parameterized SELECT/WITH/INSERT/UPDATE/DELETE on the calling plugin's main
+ * private tables only. QueryRequest budgets/lifetimes apply, including a row
+ * callback for commands without results. Supports RETURNING. Each call owns an
+ * internal savepoint; errors (including callback cancellation/limits) undo the
+ * whole statement, preserving earlier hook/caller work. The hook scope rolls
+ * back on hook failure and remains provisional inside a caller transaction.
+ * Read-only connections can read but mutations fail normally.
+ * Tables/indexes must be declared by the existing install/upgrade lifecycle.
+ * Qualify tables as main.<private_name>, particularly for count(*)/EXISTS where
+ * SQLite otherwise supplies no resolved schema to the authorizer.
+ * No DDL, transaction commands, PRAGMAs, attachments, triggers/views, core or
+ * another plugin's tables. Only documented built-in pure SQL functions are
+ * permitted; no user-defined functions. Native code remains trusted, not
+ * sandboxed. Old exec_sql/query behavior is unchanged.
+ */
+typedef struct zova_plugin_storage_service_v1 {
+    uint32_t struct_size;
+    uint32_t version;
+    int32_t (ZOVA_PLUGIN_CALL *execute)(void *connection,
+        const zova_plugin_query_request_v1 *request);
+} zova_plugin_storage_service_v1;
+
+typedef int32_t (ZOVA_PLUGIN_CALL *zova_plugin_hook_v1)(
+    const zova_plugin_host_v1 *host, void *connection);
+
+/* Return a static, immutable descriptor and NUL-terminated strings, valid until
+ * library unload. No ownership transfers. Query must be side-effect-free;
+ * return NULL for an unsupported host ABI. Host checks size/version/flags and
+ * identity before calling hooks. All hook pointers are optional (NULL=no-op).
+ * capabilities may be NULL (empty); other strings are required. flags must be
+ * a combination of HAS_UPGRADE_V1, REQUIRES_QUERY_V1 and
+ * REQUIRES_DIAGNOSTICS_V1, REQUIRES_DATA_V1, REQUIRES_STORAGE_V1,
+ * REQUIRES_OPERATIONS_V1, REQUIRES_VECTOR_MAINTENANCE_V1 and
+ * HAS_DATA_COMPATIBILITY_V1 and HAS_RECOVERY_V1; unknown bits
+ * fail negotiation. struct_size must be at
+ * least sizeof(zova_plugin_descriptor_v1); hosts
+ * ignore unflagged trailing fields. A new incompatible layout uses a new ABI/entrypoint.
+ */
+typedef struct zova_plugin_descriptor_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint64_t flags;
+    const char *name;
+    const char *version;
+    const char *storage_prefix;
+    const char *zova_abi_min;
+    const char *capabilities;
+    zova_plugin_hook_v1 install;
+    zova_plugin_hook_v1 check;
+    zova_plugin_hook_v1 drop;
+    zova_plugin_hook_v1 register_sql;
+} zova_plugin_descriptor_v1;
+
+/* Optional, explicitly flagged tail. Return &descriptor.base from the same
+ * v1 entrypoint. Set base.struct_size to sizeof(this structure) and base.flags
+ * to ZOVA_PLUGIN_HAS_UPGRADE_V1 plus any required-service flags. Older hosts
+ * reject unsupported flags, not reinterpret them.
+ * from_version and base.version declare one exact forward major.minor.patch
+ * path. The host rejects equal versions/downgrades. upgrade is required here;
+ * use a no-op hook for a code-only update. It changes data, never extension
+ * metadata or transaction boundaries. The host checks the target before
+ * atomically updating metadata. Normal opens never invoke this hook.
+ */
+typedef struct zova_plugin_upgrade_descriptor_v1 {
+    zova_plugin_descriptor_v1 base;
+    const char *from_version;
+    zova_plugin_hook_v1 upgrade;
+} zova_plugin_upgrade_descriptor_v1;
+
+/* Opt-in code/data separation. The nested base.base.version remains the code
+ * release identity, checked against the bundle manifest. Installed-info.version
+ * identifies stored data. data_version is the installation/upgrade target;
+ * accepted_data_versions is an exact comma-separated list of canonical
+ * major.minor.patch versions (no whitespace/ranges, at most 2048 bytes).
+ * The target must be listed. Compatible opens do not write metadata or upgrade.
+ * Set base.base.struct_size to sizeof(this structure) and include
+ * HAS_DATA_COMPATIBILITY_V1. Without HAS_UPGRADE_V1, base.from_version and
+ * base.upgrade must be NULL. With it, the path is from_version -> data_version,
+ * not -> code version. Equal data versions and downgrades are rejected.
+ * Legacy descriptors retain exact code/data matching. Old hosts reject this
+ * flag. All strings remain immutable and valid until the library is unloaded.
+ */
+typedef struct zova_plugin_compatibility_descriptor_v1 {
+    zova_plugin_upgrade_descriptor_v1 base;
+    const char *data_version;
+    const char *accepted_data_versions;
+} zova_plugin_compatibility_descriptor_v1;
+
+/* Recovery is explicitly requested, never run on ordinary open. Source is
+ * read-only; destination is NULL for plan. Hosts/contexts, request and output
+ * are borrowed for this call only. Use bounded services; retain no row bytes.
+ * A copy hook must report installed_in_destination=1 only for valid recovered
+ * private storage. Host owns metadata and savepoints. Failure discards the
+ * output and rolls back destination changes, preserving earlier caller work.
+ */
+typedef struct zova_plugin_salvage_request_v1 {
+    uint32_t struct_size;
+    uint32_t mode;
+    zova_plugin_bytes_v1 data_version;
+} zova_plugin_salvage_request_v1;
+typedef struct zova_plugin_salvage_result_v1 {
+    uint64_t copied_extensions;
+    uint64_t copied_private_objects;
+    uint64_t skipped_extensions;
+    uint64_t skipped_private_objects;
+    uint32_t installed_in_destination;
+    uint32_t reserved;
+} zova_plugin_salvage_result_v1;
+typedef int32_t (ZOVA_PLUGIN_CALL *zova_plugin_rebuild_v1)(
+    const zova_plugin_host_v1 *, void *, zova_plugin_bytes_v1 data_version);
+typedef int32_t (ZOVA_PLUGIN_CALL *zova_plugin_salvage_v1)(
+    const zova_plugin_host_v1 *source_host, void *source,
+    const zova_plugin_host_v1 *destination_host, void *destination,
+    const zova_plugin_salvage_request_v1 *, zova_plugin_salvage_result_v1 *);
+/* Flagged tail with fixed compatibility/upgrade prefixes. At least one hook
+ * is required. Unflagged prefix fields must be NULL. Rebuild repairs the
+ * installed data version, not the preferred target; it must not change the
+ * data contract. The host then registers/checks/validates before publication.
+ * Older hosts reject HAS_RECOVERY_V1. All callbacks live until library unload.
+ */
+typedef struct zova_plugin_recovery_descriptor_v1 {
+    zova_plugin_compatibility_descriptor_v1 base;
+    zova_plugin_rebuild_v1 rebuild;
+    zova_plugin_salvage_v1 salvage;
+} zova_plugin_recovery_descriptor_v1;
+
+ZOVA_PLUGIN_EXPORT const zova_plugin_descriptor_v1 *ZOVA_PLUGIN_CALL
+zova_plugin_entry_v1(uint32_t host_abi_version);
+
+#ifdef __cplusplus
+}
+#endif
+#endif
