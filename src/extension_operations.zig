@@ -425,7 +425,7 @@ fn scalar(raw: ?*c.sqlite3_context, argc: c_int, argv: [*c]?*c.sqlite3_value) ca
     defer slot.registry.invoking = false;
     var db: sqlite.Database = .{ .handle = slot.registry.handle };
     var call: ScalarCall = .{ .ctx = ctx, .d = stored.descriptor, .args = args[0..@intCast(argc)] };
-    const status = plugin.callOperation(&db, slot.prefix, stored.descriptor.flags & api.operation_mutating != 0, ScalarCall.run, &call);
+    const status = plugin.callOperation(&db, slot.prefix, stored.descriptor.flags & api.operation_mutating != 0, false, ScalarCall.run, &call);
     if (status != 0) {
         c.sqlite3_result_error(ctx, statusMessage(status), -1);
         c.sqlite3_result_error_code(ctx, statusCode(status));
@@ -676,7 +676,7 @@ fn tableFilter(raw: ?*c.sqlite3_vtab_cursor, _: c_int, _: [*c]const u8, argc: c_
     cursor.active = true;
     cursor.stored = stored;
     slot.registry.invoking = true;
-    const status = plugin.callOperation(&cursor.db, slot.prefix, false, TableCursor.openCall, cursor);
+    const status = plugin.callOperation(&cursor.db, slot.prefix, false, true, TableCursor.openCall, cursor);
     slot.registry.invoking = false;
     if (status != 0) return tableError(cursor, status);
     return tableNext(raw);
@@ -688,7 +688,7 @@ fn tableNext(raw: ?*c.sqlite3_vtab_cursor) callconv(.c) c_int {
     cursor.rows = 0;
     cursor.invalid = false;
     cursor.slot.registry.invoking = true;
-    const status = plugin.callOperation(&cursor.db, cursor.slot.prefix, false, TableCursor.nextCall, cursor);
+    const status = plugin.callOperation(&cursor.db, cursor.slot.prefix, false, true, TableCursor.nextCall, cursor);
     cursor.slot.registry.invoking = false;
     if (status != 0) return tableError(cursor, status);
     if (cursor.eof) {

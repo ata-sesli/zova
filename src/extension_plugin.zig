@@ -246,7 +246,10 @@ pub fn invokeSalvage(hook: api.SalvageHook, context: extension.SalvageContext, p
 pub const OperationRunner = *const fn (*const Host, ?*anyopaque, ?*anyopaque) callconv(.c) i32;
 /// Authorized callback scope, already inside the connection's SQL execution.
 /// Never reacquire public handle locks. Scalar writes roll back on all failures.
-pub fn callOperation(db: *sqlite.Database, prefix: []const u8, mutating: bool, runner: OperationRunner, state: ?*anyopaque) i32 {
+/// `source_pinned` means the caller already holds active snapshot pins on main
+/// and both store schemas for the whole call, as a table cursor does.
+pub fn callOperation(db: *sqlite.Database, prefix: []const u8, mutating: bool, source_pinned: bool, runner: OperationRunner, state: ?*anyopaque) i32 {
+    std.debug.assert(!(mutating and source_pinned));
     if (mutating) db.savepoint("zova_plugin_operation") catch |err| return serviceStatus(err);
     var success = false;
     defer if (mutating and !success) {
@@ -255,11 +258,13 @@ pub fn callOperation(db: *sqlite.Database, prefix: []const u8, mutating: bool, r
     };
     var pins: [3]?sqlite.Statement = @splat(null);
     defer for (&pins) |*pin| if (pin.*) |*stmt| stmt.deinit();
-    for ([_][]const u8{ "main.", data_access.schema(db, "graph_store") catch |err| return serviceStatus(err), data_access.schema(db, "vector_store") catch |err| return serviceStatus(err) }, 0..) |schema_prefix, i| {
-        var buffer: [128]u8 = undefined;
-        const sql = std.fmt.bufPrintSentinel(&buffer, "select 1 from {s}sqlite_schema limit 1", .{schema_prefix}, 0) catch return 3;
-        pins[i] = db.prepare(sql) catch |err| return serviceStatus(err);
-        _ = pins[i].?.step() catch |err| return serviceStatus(err);
+    if (!source_pinned) {
+        for ([_][]const u8{ "main.", data_access.schema(db, "graph_store") catch |err| return serviceStatus(err), data_access.schema(db, "vector_store") catch |err| return serviceStatus(err) }, 0..) |schema_prefix, i| {
+            var buffer: [128]u8 = undefined;
+            const sql = std.fmt.bufPrintSentinel(&buffer, "select 1 from {s}sqlite_schema limit 1", .{schema_prefix}, 0) catch return 3;
+            pins[i] = db.prepare(sql) catch |err| return serviceStatus(err);
+            _ = pins[i].?.step() catch |err| return serviceStatus(err);
+        }
     }
     if (mutating and sqlite.c.sqlite3_db_readonly(db.handle, "main") != 0) return 1;
     var context: Context = .{ .db = db, .storage_prefix = prefix, .operation = true, .read_only_operation = !mutating };

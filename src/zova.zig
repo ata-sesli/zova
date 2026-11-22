@@ -819,8 +819,9 @@ fn migrateOpfsStaging(
 
         var bindings: [3]MigrateBindingPlan = undefined;
         var binding_count: usize = 0;
+        // Free completed bindings even when collection fails partway.
+        defer for (bindings[0..binding_count]) |*binding| binding.deinit(allocator);
         try collectMigrationBindings(allocator, source_path, &bindings, &binding_count);
-        for (bindings[0..binding_count]) |*binding| binding.deinit(allocator);
         if (binding_count != 0) return error.BoundStoreInvalid;
         try preflightMigrationSet(source_path, source_format_version, bindings[0..0]);
 
