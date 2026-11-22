@@ -4,7 +4,7 @@ Zova for browsers, in memory or named OPFS storage: SQL, binary KV,
 transactions, prepared statements, objects, exact vectors and graphs. The real Zova
 core and bundled SQLite run inside a dedicated worker as one WebAssembly module.
 
-This package follows the repository release (`1.4.0`, format 13) and the native
+This package follows the repository release (`1.5.0`, format 14) and the native
 `zova-js` API, except where a browser makes that impossible (see
 [Native API parity](#native-api-parity)). From 1.5.0 its API is a stable 1.x
 surface; [API_STABILITY.md](../../API_STABILITY.md#browser-package-zova-wasm)
@@ -14,7 +14,7 @@ data when closed or when their worker/page terminates.
 ## Try a local package
 
 Build and pack using the instructions below, then install the resulting tarball
-with `bun add /absolute/path/zova-wasm-1.4.0.tgz` in your browser application.
+with `bun add /absolute/path/zova-wasm-1.5.0.tgz` in your browser application.
 The package exports browser ESM and TypeScript declarations, with no native
 addon dependency. Serve over HTTP(S), allowing module workers and WebAssembly.
 Worker and WASM URLs resolve relative to the package; keep its files together
@@ -662,7 +662,7 @@ the pool's stored files; the build rejects an unexpected upstream cleanup shape.
 Validate the tarball from the repository root:
 
 ```sh
-bun bindings/wasm/tools/check-package.mjs /absolute/path/zova-wasm-1.4.0.tgz
+bun bindings/wasm/tools/check-package.mjs /absolute/path/zova-wasm-1.5.0.tgz
 bun test bindings/wasm/tests/api.test.ts bindings/wasm/tests/channel.test.mjs
 ```
 
@@ -698,7 +698,7 @@ in the development lockfile. Native bindings remain independently tested.
 Release publication requires a successful Release Artifacts run at the exact
 release commit, including the WASM browser job. WASM publication uses trusted
 publishing with npm's `next` tag for prereleases (such as `1.0.0-rc.3`) and
-`latest` for stable versions (such as `1.4.0`). The dist-tag does not change
+`latest` for stable versions (such as `1.5.0`). The dist-tag does not change
 the API's stability contract. Publication remains independent
 of `zova-js`.
 

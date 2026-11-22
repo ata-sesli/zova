@@ -763,7 +763,7 @@ export function objectChunkId(data: Uint8Array): Promise<Uint8Array> { return ha
 // As native `zova-js`, from src/version.zig; scripts/check-versions.sh keeps
 // these in step with it.
 /** The zova-wasm package version. */
-export const packageVersion = "1.4.0";
+export const packageVersion = "1.5.0";
 /** The storage format this package creates. */
 export const formatVersion = "14";
 /** The bundled SQLite version. */

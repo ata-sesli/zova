@@ -33,12 +33,12 @@ versions, source revision and file hashes. The release pipeline packages all
 seven crates once, tests the same immutable set on five native runners, then
 publishes platform crates before this dispatcher and the safe crate.
 
-The current release uses `.zova` format 13, and the earliest
+The current release uses `.zova` format 14, and the earliest
 migratable format is 9. Open never migrates silently: format-9, format-10,
-format-11 and format-12 databases are reported as migration-required and left byte-identical. Migrate
+format-11, format-12 and format-13 databases are reported as migration-required and left byte-identical. Migrate
 them explicitly with `zova_database_probe_format` and `zova_database_migrate`,
 or with `zova format` and `zova migrate` on the CLI. Migration publishes a
-separately validated format-12 destination. Keep a backup before migrating, and
+separately validated format-14 destination. Keep a backup before migrating, and
 see `docs/storage-compatibility.md` in the Zova repository for the full
 compatibility contract.
 

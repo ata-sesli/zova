@@ -463,7 +463,7 @@ export declare function objectId(data: Uint8Array): Promise<Uint8Array>;
 /** The hash a chunk with these bytes is stored under. */
 export declare function objectChunkId(data: Uint8Array): Promise<Uint8Array>;
 /** The zova-wasm package version. */
-export declare const packageVersion = "1.4.0";
+export declare const packageVersion = "1.5.0";
 /** The storage format this package creates. */
 export declare const formatVersion = "14";
 /** The bundled SQLite version. */
