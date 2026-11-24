@@ -1563,6 +1563,8 @@ pub const Database = struct {
     }
 
     pub fn graphEdgePayloadsGetMany(self: *Database, allocator: std.mem.Allocator, graph_name: []const u8, keys: []const i64) Error!GraphEdgePayloadLookupList {
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var graphs = self.graphDatabase();
         return try graphs.graphEdgePayloadsGetMany(allocator, graph_name, keys);
     }
@@ -1617,40 +1619,38 @@ pub const Database = struct {
 
     /// Return bounded incoming or outgoing graph neighbors.
     pub fn graphNeighbors(self: *Database, allocator: std.mem.Allocator, options: GraphNeighborsOptions) Error!GraphNeighborList {
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var graphs = self.graphDatabase();
         return try graphs.graphNeighbors(allocator, options);
     }
 
     /// Return bounded incoming or outgoing neighbors with opaque row keys.
     pub fn graphNeighborsKeyed(self: *Database, allocator: std.mem.Allocator, options: GraphNeighborsOptions) Error!GraphKeyedNeighborList {
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var graphs = self.graphDatabase();
         return try graphs.graphNeighborsKeyed(allocator, options);
     }
 
     pub fn graphNodesGetManyKeyed(self: *Database, allocator: std.mem.Allocator, graph_name: []const u8, keys: []const i64) Error!GraphKeyedNodeLookupList {
-        const owns_transaction = !hasActiveTransaction(&self.sqlite_db);
-        if (owns_transaction) try self.sqlite_db.begin();
-        errdefer if (owns_transaction) self.sqlite_db.rollback() catch {};
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var graphs = self.graphDatabase();
-        var result = try graphs.graphNodesGetManyKeyed(allocator, graph_name, keys);
-        errdefer result.deinit(allocator);
-        if (owns_transaction) try self.sqlite_db.commit();
-        return result;
+        return try graphs.graphNodesGetManyKeyed(allocator, graph_name, keys);
     }
 
     pub fn graphEdgesGetManyKeyed(self: *Database, allocator: std.mem.Allocator, graph_name: []const u8, keys: []const i64) Error!GraphKeyedEdgeLookupList {
-        const owns_transaction = !hasActiveTransaction(&self.sqlite_db);
-        if (owns_transaction) try self.sqlite_db.begin();
-        errdefer if (owns_transaction) self.sqlite_db.rollback() catch {};
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var graphs = self.graphDatabase();
-        var result = try graphs.graphEdgesGetManyKeyed(allocator, graph_name, keys);
-        errdefer result.deinit(allocator);
-        if (owns_transaction) try self.sqlite_db.commit();
-        return result;
+        return try graphs.graphEdgesGetManyKeyed(allocator, graph_name, keys);
     }
 
     /// Count incoming or outgoing graph edges, optionally restricted by type.
     pub fn graphDegree(self: *Database, options: GraphDegreeOptions) Error!u64 {
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var graphs = self.graphDatabase();
         return try graphs.graphDegree(options);
     }
@@ -1664,24 +1664,32 @@ pub const Database = struct {
         edge_type: ?[]const u8,
         out_degrees: []u64,
     ) Error!void {
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var graphs = self.graphDatabase();
         return try graphs.graphDegreeManyKeyed(graph_name, node_keys, direction, edge_type, out_degrees);
     }
 
     /// Return independently bounded opaque-key node and edge topology pages.
     pub fn graphScan(self: *Database, allocator: std.mem.Allocator, options: GraphScanOptions) Error!GraphScanResult {
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var graphs = self.graphDatabase();
         return try graphs.graphScan(allocator, options);
     }
 
     /// Return a bounded directed walk from one graph node.
     pub fn graphWalk(self: *Database, allocator: std.mem.Allocator, options: GraphWalkOptions) Error!GraphWalk {
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var graphs = self.graphDatabase();
         return try graphs.graphWalk(allocator, options);
     }
 
     /// Return a bounded incoming or outgoing directed walk from one graph node.
     pub fn graphWalkDirection(self: *Database, allocator: std.mem.Allocator, options: GraphWalkDirectionOptions) Error!GraphWalk {
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var graphs = self.graphDatabase();
         return try graphs.graphWalkDirection(allocator, options);
     }
@@ -1693,6 +1701,8 @@ pub const Database = struct {
         options: GraphWalkDirectionOptions,
         profile: *GraphWalkScanProfile,
     ) Error!GraphWalk {
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var graphs = self.graphDatabase();
         return try graphs.graphWalkDirectionProfiled(allocator, options, profile);
     }
@@ -2020,6 +2030,8 @@ pub const Database = struct {
 
     /// Open a sequential reader over one stored object and pin its snapshot.
     pub fn objectReader(self: *Database, id: ObjectId) Error!ObjectReader {
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var objects = self.objectDatabase();
         return .{ .inner = try objects.objectReader(id) };
     }
@@ -2116,6 +2128,8 @@ pub const Database = struct {
         collection_name: []const u8,
         vector_id: []const u8,
     ) Error!Vector {
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var vectors = self.vectorDatabase();
         return vectors.getVector(allocator, collection_name, vector_id);
     }
@@ -2126,6 +2140,8 @@ pub const Database = struct {
         collection_name: []const u8,
         vector_id: []const u8,
     ) Error!bool {
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var vectors = self.vectorDatabase();
         return vectors.hasVector(collection_name, vector_id);
     }
@@ -2187,6 +2203,8 @@ pub const Database = struct {
         query: VectorValuesConst,
         limit: usize,
     ) Error!VectorSearchResults {
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var vectors = self.vectorDatabase();
         return vectors.searchVectors(allocator, collection_name, query, limit);
     }
@@ -2199,6 +2217,8 @@ pub const Database = struct {
         options: MultiI8CosineSearchOptions,
         limit: usize,
     ) Error!VectorSearchResults {
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var vectors = self.vectorDatabase();
         return vectors.searchMultiI8Cosine(allocator, collection_name, options, limit);
     }
@@ -2212,6 +2232,8 @@ pub const Database = struct {
         max_distance: f64,
         limit: usize,
     ) Error!VectorSearchResults {
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var vectors = self.vectorDatabase();
         return vectors.searchVectorsWithin(allocator, collection_name, query, max_distance, limit);
     }
@@ -2225,6 +2247,8 @@ pub const Database = struct {
         candidate_ids: []const []const u8,
         limit: usize,
     ) Error!VectorSearchResults {
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var vectors = self.vectorDatabase();
         return vectors.searchVectorsIn(allocator, collection_name, query, candidate_ids, limit);
     }
@@ -2239,6 +2263,8 @@ pub const Database = struct {
         max_distance: f64,
         limit: usize,
     ) Error!VectorSearchResults {
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var vectors = self.vectorDatabase();
         return vectors.searchVectorsInWithin(allocator, collection_name, query, candidate_ids, max_distance, limit);
     }
@@ -2251,6 +2277,8 @@ pub const Database = struct {
         source_vector_id: []const u8,
         limit: usize,
     ) Error!VectorSearchResults {
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var vectors = self.vectorDatabase();
         return vectors.searchVectorsById(allocator, collection_name, source_vector_id, limit);
     }
@@ -2264,6 +2292,8 @@ pub const Database = struct {
         candidate_ids: []const []const u8,
         limit: usize,
     ) Error!VectorSearchResults {
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var vectors = self.vectorDatabase();
         return vectors.searchVectorsByIdIn(allocator, collection_name, source_vector_id, candidate_ids, limit);
     }
@@ -2277,6 +2307,8 @@ pub const Database = struct {
         max_distance: f64,
         limit: usize,
     ) Error!VectorSearchResults {
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var vectors = self.vectorDatabase();
         return vectors.searchVectorsByIdWithin(allocator, collection_name, source_vector_id, max_distance, limit);
     }
@@ -2291,6 +2323,8 @@ pub const Database = struct {
         max_distance: f64,
         limit: usize,
     ) Error!VectorSearchResults {
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var vectors = self.vectorDatabase();
         return vectors.searchVectorsByIdInWithin(allocator, collection_name, source_vector_id, candidate_ids, max_distance, limit);
     }
@@ -2344,18 +2378,24 @@ pub const Database = struct {
 
     /// Load and verify an object by id.
     pub fn getObject(self: *Database, allocator: std.mem.Allocator, id: ObjectId) Error!Object {
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var objects = self.objectDatabase();
         return objects.getObject(allocator, id);
     }
 
     /// Read a byte range from a logical object into a caller-provided buffer.
     pub fn readObjectRange(self: *Database, id: ObjectId, offset: u64, buffer: []u8) Error!usize {
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var objects = self.objectDatabase();
         return objects.readObjectRange(id, offset, buffer);
     }
 
     /// Return the public manifest for one object.
     pub fn objectManifest(self: *Database, allocator: std.mem.Allocator, id: ObjectId) Error!ObjectManifest {
+        const read_scope = try self.beginRead();
+        defer self.endRead(read_scope);
         var objects = self.objectDatabase();
         return objects.objectManifest(allocator, id);
     }
@@ -2506,6 +2546,9 @@ pub const Database = struct {
     /// Results align with the input key order and preserve duplicate keys
     /// exactly. Missing keys return `found = false`.
     pub fn kvGetMany(self: *Database, allocator: std.mem.Allocator, namespace: []const u8, keys: []const []const u8) Error![]kv_impl.GetResult {
+        // One key is one statement, which already reads one committed state.
+        const read_scope = keys.len > 1 and try self.beginRead();
+        defer self.endRead(read_scope);
         var kv = self.kvDatabase();
         return kv.getMany(allocator, namespace, keys);
     }
@@ -2633,6 +2676,24 @@ pub const Database = struct {
         if (self.bound_graph_store == null or hasActiveTransaction(&self.sqlite_db)) return false;
         try self.sqlite_db.beginImmediate();
         return true;
+    }
+
+    /// Start an internal read transaction for a public read that issues more
+    /// than one statement, so every statement sees the same committed state
+    /// even while other handles commit (#259). Inside a caller transaction, or
+    /// while an open statement already holds this connection's snapshot, the
+    /// read joins that view and this returns false.
+    fn beginRead(self: *Database) Error!bool {
+        if (hasActiveTransaction(&self.sqlite_db)) return false;
+        try self.sqlite_db.begin();
+        return true;
+    }
+
+    /// End a read started by `beginRead`. The transaction only read, so a
+    /// failed commit loses nothing and falls back to a rollback.
+    fn endRead(self: *Database, owns_transaction: bool) void {
+        if (!owns_transaction) return;
+        self.sqlite_db.commit() catch self.sqlite_db.rollback() catch {};
     }
 
     fn beginBatchMutation(self: *Database) Error!BatchMutationScope {
@@ -3340,5 +3401,6 @@ comptime {
         _ = @import("database_notifications_tests.zig");
         _ = @import("database_concurrency_tests.zig");
         _ = @import("database_journal_tests.zig");
+        _ = @import("database_read_consistency_tests.zig");
     }
 }

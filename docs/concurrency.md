@@ -59,7 +59,8 @@ alike, because all of them are rows in the same SQLite files.
 - **Readers see only committed data.** Writes inside an open write transaction
   are visible to the writer handle only.
 - **A read outside a transaction sees the latest commit** at the moment that
-  call starts.
+  call starts, and keeps that view for the whole call (see
+  [One call, one view](#one-call-one-view)).
 - **A read transaction keeps one view.** After a reader begins a transaction
   and reads, later commits by the writer stay invisible to it until the reader
   ends the transaction. Bound stores add an exception, described below.
@@ -76,6 +77,35 @@ alike, because all of them are rows in the same SQLite files.
 
 In this mode long-running readers delay writes. That is the reason WAL is
 recommended for single-file databases.
+
+### One call, one view
+
+Every read call returns data from one committed state, in either journal mode,
+even when it runs several SQL statements: an object read loads the object's
+metadata, then its chunk list, then the chunks; a vector read or search loads
+the collection, then its rows; a graph walk runs one query per step; a
+multi-key KV read runs one lookup per key. Outside a transaction such a call
+runs in its own short read transaction; inside a caller's transaction it uses
+that transaction's view. Without this, a commit from another handle between
+two of those statements could return a mix of two states or a false
+corruption error.
+
+In rollback-journal mode the call holds its shared lock until it returns, so a
+commit from another handle waits for the whole call rather than for one
+statement. Holding the view also makes these calls cheaper: in a benchmark of
+single-row reads they took 4 to 42% less time, because SQLite opens and checks
+the files once per call instead of once per statement (see
+`bench/read_scope_259.md`).
+
+Handles that live across several calls follow these rules:
+
+| Handle | View |
+| --- | --- |
+| Sequential object reader | One view from open until it reaches the end or is closed. It keeps a statement open, so in rollback-journal mode another handle cannot commit, and in WAL mode a checkpoint cannot pass it, until it is closed. Other reads on the same handle share that view meanwhile. |
+| Seekable object reader | No view between calls. Each chunk it loads is read in one view. If another handle deletes the object, the next read that loads a chunk fails with an object-not-found error; the reader stays usable. Objects are content-addressed, so the same id always means the same bytes. |
+| Object writer | No view between calls. Each batch of chunks, and the final assembly, is its own atomic write. |
+| Prepared SQL statement | SQLite's rule: one view from the first step until the statement finishes or is reset. |
+| KV scan and graph scan pages | One view per page. Nothing is held between pages; the cursor is a key, so later pages show commits made in between. |
 
 ### Two writers
 

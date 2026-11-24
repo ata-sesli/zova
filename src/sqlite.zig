@@ -124,6 +124,19 @@ pub const OpenFlags = enum {
 /// `Database` is a thin owner around `sqlite3*`. It does not hide SQL, build
 /// queries, or manage schemas. Callers prepare and execute normal SQLite SQL,
 /// while Zova centralizes handle ownership and result-code mapping.
+/// Scheduling hook for deterministic concurrency tests only. It runs before
+/// every statement step on one connection, so a test can commit from another
+/// connection between the statements of one read. It is keyed by the SQLite
+/// connection, not by a `Database` value, because statements outlive moves of
+/// the wrapper.
+pub const StepHook = struct {
+    connection: *c.sqlite3,
+    context: ?*anyopaque,
+    run: *const fn (?*anyopaque) void,
+};
+
+pub var before_step_hook: if (@import("builtin").is_test) ?StepHook else void = if (@import("builtin").is_test) null else {};
+
 pub const Database = struct {
     handle: *c.sqlite3,
     // Engine-owned connection-local SQL facilities. Not a SQLite handle or
@@ -695,6 +708,9 @@ pub const Statement = struct {
     /// Returns `.row` when a result row is available and `.done` when the
     /// statement has completed.
     pub fn step(self: *Statement) Error!Step {
+        if (@import("builtin").is_test) if (before_step_hook) |hook| {
+            if (c.sqlite3_db_handle(self.handle) == hook.connection) hook.run(hook.context);
+        };
         const rc = c.sqlite3_step(self.handle);
         return switch (rc) {
             c.SQLITE_ROW => .row,
