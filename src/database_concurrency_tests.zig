@@ -255,3 +255,55 @@ test "notifications are delivered only on the handle that published them" {
     try std.testing.expectEqual(@as(i64, 2), try testingCount(&reader, "select count(*) from records"));
     try std.testing.expectEqual(@as(?Notification, null), try reader_sub.tryReceive(std.testing.allocator));
 }
+
+/// Create graph `h` with nodes a and b and one edge a -> b of `edge_type`.
+fn createTypedGraph(db: *Database, edge_type: []const u8) !void {
+    try db.createGraph("h");
+    try db.putGraphNode(.{ .graph_name = "h", .node_id = "a", .kind = "n" });
+    try db.putGraphNode(.{ .graph_name = "h", .node_id = "b", .kind = "n" });
+    try db.putGraphEdge(.{ .graph_name = "h", .from_node_id = "a", .edge_type = edge_type, .to_node_id = "b" });
+}
+
+test "graph reads see edge types another handle recreated under reused keys" {
+    for ([_]Journal{ .rollback, .wal }) |journal| for ([_]bool{ false, true }) |bound| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var paths: SetPaths = .{};
+        var writer = try createSeededSet(&paths, tmp.sub_path[0..], bound, journal);
+        defer writer.deinit();
+        try createTypedGraph(&writer, "calls");
+        var reader = try Database.open(paths.main);
+        defer reader.deinit();
+
+        // The reader learns the edge types of graph h.
+        {
+            var list = try reader.graphNeighbors(std.testing.allocator, .{ .graph_name = "h", .node_id = "a", .edge_type = "calls" });
+            defer list.deinit(std.testing.allocator);
+            try std.testing.expectEqual(@as(usize, 1), list.items.len);
+            try std.testing.expectEqualStrings("calls", list.items[0].edge_type);
+        }
+
+        // Another handle recreates h. Deleting it removes its edge types, so
+        // the new type can take the old type's key.
+        try writer.deleteGraph("h");
+        try createTypedGraph(&writer, "imports");
+
+        {
+            var list = try reader.graphNeighbors(std.testing.allocator, .{ .graph_name = "h", .node_id = "a" });
+            defer list.deinit(std.testing.allocator);
+            try std.testing.expectEqual(@as(usize, 1), list.items.len);
+            try std.testing.expectEqualStrings("imports", list.items[0].edge_type);
+        }
+        {
+            var list = try reader.graphNeighbors(std.testing.allocator, .{ .graph_name = "h", .node_id = "a", .edge_type = "calls" });
+            defer list.deinit(std.testing.allocator);
+            try std.testing.expectEqual(@as(usize, 0), list.items.len);
+        }
+        {
+            var walk = try reader.graphWalk(std.testing.allocator, .{ .graph_name = "h", .start_node_id = "a" });
+            defer walk.deinit(std.testing.allocator);
+            try std.testing.expectEqual(@as(usize, 2), walk.items.len);
+            try std.testing.expectEqualStrings("imports", walk.items[1].edge_type.?);
+        }
+    };
+}

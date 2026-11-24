@@ -31,6 +31,13 @@ pub const StorageSchema = enum {
             .graph_store => "graph_store.",
         };
     }
+
+    fn sqliteName(self: StorageSchema) [:0]const u8 {
+        return switch (self) {
+            .main => "main",
+            .graph_store => "graph_store",
+        };
+    }
 };
 
 const ResolvedGraphEndpoints = struct {
@@ -185,6 +192,10 @@ const GraphEdgeTypeKeyMapUnmanaged = std.HashMapUnmanaged(
 
 pub const GraphEdgeTypeCache = struct {
     loaded: bool = false,
+    /// SQLite data version of the file the rows were loaded from, or null when
+    /// it was unknown. Another connection can delete edge types and a later
+    /// insert can reuse their keys, so rows are trusted only at this version.
+    data_version: ?u32 = null,
     by_key: std.AutoHashMapUnmanaged(i64, []u8) = .empty,
     by_type: GraphEdgeTypeKeyMapUnmanaged = .empty,
 
@@ -194,6 +205,7 @@ pub const GraphEdgeTypeCache = struct {
         self.by_key.clearAndFree(std.heap.c_allocator);
         self.by_type.clearAndFree(std.heap.c_allocator);
         self.loaded = false;
+        self.data_version = null;
     }
 
     pub fn deinit(self: *GraphEdgeTypeCache) void {
@@ -723,7 +735,13 @@ pub const Database = struct {
 
     fn ensureEdgeTypeCache(self: *Database) Error!void {
         const cache = self.edge_type_cache orelse return;
-        if (cache.loaded) return;
+        const version = self.dataVersion();
+        if (cache.loaded) {
+            if (version != null and cache.data_version == version) return;
+            // Another connection committed to this file since the rows were
+            // loaded, or the version is unknown: reload.
+            cache.clear();
+        }
         errdefer cache.clear();
         var stmt = try self.prepareSchema("select graph_key,edge_type_key,name from {s}_zova_graph_edge_types order by edge_type_key");
         defer stmt.deinit();
@@ -742,7 +760,21 @@ pub const Database = struct {
                 return err;
             };
         }
+        cache.data_version = version;
         cache.loaded = true;
+    }
+
+    /// SQLite's data version for this store's file: it changes on every commit
+    /// to the file, from this or another connection. It is current only inside
+    /// a read transaction on the file, because SQLite checks the file for other
+    /// connections' commits when that transaction starts; outside one this
+    /// returns null. Graph reads that use the cache run in one.
+    fn dataVersion(self: *Database) ?u32 {
+        const schema = self.storage_schema.sqliteName();
+        if (sqlite.c.sqlite3_txn_state(self.sqlite_db.handle, schema) == sqlite.c.SQLITE_TXN_NONE) return null;
+        var version: c_uint = 0;
+        if (sqlite.c.sqlite3_file_control(self.sqlite_db.handle, schema, sqlite.c.SQLITE_FCNTL_DATA_VERSION, &version) != sqlite.c.SQLITE_OK) return null;
+        return version;
     }
 
     fn graphKeyForRead(self: *Database, name: []const u8) Error!i64 {
@@ -781,10 +813,13 @@ pub const Database = struct {
         };
     }
 
+    /// Called per row. Callers check the cache once per read with
+    /// ensureEdgeTypeCache before their row loop, not here, because each check
+    /// asks SQLite for the data version.
     fn dupeEdgeTypeNameForRead(self: *Database, allocator: std.mem.Allocator, edge_type_key: i64) Error![]u8 {
         if (edge_type_key <= 0) return error.GraphInvalid;
         if (self.edge_type_cache) |cache| {
-            try self.ensureEdgeTypeCache();
+            std.debug.assert(cache.loaded);
             if (cache.by_key.get(edge_type_key)) |name| return allocator.dupe(u8, name);
             var stmt = try self.prepareSchema("select graph_key,name from {s}_zova_graph_edge_types where edge_type_key=?");
             defer stmt.deinit();
@@ -2203,6 +2238,7 @@ pub const Database = struct {
             try stmt.bindInt64(3, sqlite_limit);
         }
 
+        if (self.edge_type_cache != null) try self.ensureEdgeTypeCache();
         var items: std.ArrayList(GraphNeighbor) = .empty;
         errdefer {
             for (items.items) |*item| item.deinit(allocator);
@@ -2270,6 +2306,7 @@ pub const Database = struct {
             try stmt.bindInt64(4, sqlite_limit);
         } else try stmt.bindInt64(3, sqlite_limit);
 
+        if (self.edge_type_cache != null) try self.ensureEdgeTypeCache();
         var items: std.ArrayList(GraphKeyedNeighbor) = .empty;
         errdefer {
             for (items.items) |*item| item.deinit(allocator);
@@ -2614,6 +2651,7 @@ pub const Database = struct {
             try stmt.bindInt64(2, options.edge_after.created_order);
             try stmt.bindInt64(3, options.edge_after.key);
             try stmt.bindInt64(4, try sqliteLimit(query_limit));
+            if (self.edge_type_cache != null) try self.ensureEdgeTypeCache();
             while ((try stmt.step()) == .row) {
                 if (edges.items.len == options.edge_limit) {
                     has_more_edges = true;
@@ -2746,6 +2784,9 @@ pub const Database = struct {
             value.adjacency_statement_prepares += 1;
         }
 
+        // One check per walk: the walk reads one view, so the cache cannot go
+        // stale between rows.
+        if (self.edge_type_cache != null) try self.ensureEdgeTypeCache();
         var frontier_index: usize = 0;
         while (frontier_index < frontier.items.len and frontier_index < options.limit) : (frontier_index += 1) {
             const current_node_key = frontier.items[frontier_index].node_key;
@@ -2780,7 +2821,6 @@ pub const Database = struct {
                 if (visited.contains(neighbor_node_key)) continue;
                 try visited.put(neighbor_node_key, {});
                 if (self.edge_type_cache) |cache| {
-                    try self.ensureEdgeTypeCache();
                     if (cache.by_key.get(neighbor_edge_type_key)) |neighbor_edge_type| {
                         try appendGraphWalkEntry(&frontier, scratch_allocator, neighbor_node_key, neighbor_node_id, neighbor_kind, current_depth + 1, current_node_id, neighbor_edge_type);
                     } else {
