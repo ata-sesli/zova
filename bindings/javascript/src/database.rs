@@ -201,6 +201,84 @@ impl From<zova::ReclaimedMember> for NativeReclaimedMember {
     }
 }
 
+/// Journal mode of one member of a database set.
+#[napi(object)]
+pub struct NativeJournalModeMember {
+    pub member: String,
+    pub journal_mode: String,
+}
+
+impl From<zova::JournalModeMember> for NativeJournalModeMember {
+    fn from(member: zova::JournalModeMember) -> Self {
+        Self {
+            member: progress_member_name(member.member).to_owned(),
+            journal_mode: member.journal_mode.name().to_owned(),
+        }
+    }
+}
+
+/// What `checkpoint` did for one member file.
+#[napi(object)]
+pub struct NativeCheckpointedMember {
+    pub member: String,
+    pub journal_mode: String,
+    pub busy: bool,
+    pub wal_frames: f64,
+    pub checkpointed_frames: f64,
+}
+
+impl From<zova::CheckpointedMember> for NativeCheckpointedMember {
+    fn from(member: zova::CheckpointedMember) -> Self {
+        Self {
+            member: progress_member_name(member.member).to_owned(),
+            journal_mode: member.journal_mode.name().to_owned(),
+            busy: member.busy,
+            wal_frames: member.wal_frames as f64,
+            checkpointed_frames: member.checkpointed_frames as f64,
+        }
+    }
+}
+
+fn progress_member_name(member: zova::ProgressMember) -> &'static str {
+    match member {
+        zova::ProgressMember::Main => "main",
+        zova::ProgressMember::ObjectStore => "object_store",
+        zova::ProgressMember::VectorStore => "vector_store",
+        zova::ProgressMember::GraphStore => "graph_store",
+        _ => "unknown",
+    }
+}
+
+pub(crate) fn parse_journal_mode(mode: &str) -> Result<zova::JournalMode> {
+    Ok(match mode {
+        "delete" => zova::JournalMode::Delete,
+        "truncate" => zova::JournalMode::Truncate,
+        "persist" => zova::JournalMode::Persist,
+        "memory" => zova::JournalMode::Memory,
+        "wal" => zova::JournalMode::Wal,
+        "off" => zova::JournalMode::Off,
+        _ => {
+            return Err(invalid_argument_error(
+                "journal mode must be \"delete\", \"truncate\", \"persist\" or \"wal\"",
+            ))
+        }
+    })
+}
+
+pub(crate) fn parse_checkpoint_mode(mode: Option<&str>) -> Result<zova::CheckpointMode> {
+    Ok(match mode.unwrap_or("passive") {
+        "passive" => zova::CheckpointMode::Passive,
+        "full" => zova::CheckpointMode::Full,
+        "restart" => zova::CheckpointMode::Restart,
+        "truncate" => zova::CheckpointMode::Truncate,
+        _ => {
+            return Err(invalid_argument_error(
+                "checkpoint mode must be \"passive\", \"full\", \"restart\" or \"truncate\"",
+            ))
+        }
+    })
+}
+
 /// `reclaimSpace` options from JavaScript numbers. `max_pages` must be a
 /// non-negative safe integer; omitted values select the Zova defaults.
 pub(crate) fn reclaim_options(
@@ -614,6 +692,43 @@ impl NativeDatabase {
         Ok(members
             .into_iter()
             .map(NativeReclaimedMember::from)
+            .collect())
+    }
+
+    #[napi]
+    pub fn set_journal_mode(&self, mode: String) -> Result<Vec<NativeJournalModeMember>> {
+        let mode = parse_journal_mode(&mode)?;
+        let members = self
+            .state
+            .database()?
+            .set_journal_mode(mode)
+            .map_err(zova_error)?;
+        Ok(members
+            .into_iter()
+            .map(NativeJournalModeMember::from)
+            .collect())
+    }
+
+    #[napi]
+    pub fn journal_modes(&self) -> Result<Vec<NativeJournalModeMember>> {
+        let members = self.state.database()?.journal_modes().map_err(zova_error)?;
+        Ok(members
+            .into_iter()
+            .map(NativeJournalModeMember::from)
+            .collect())
+    }
+
+    #[napi]
+    pub fn checkpoint(&self, mode: Option<String>) -> Result<Vec<NativeCheckpointedMember>> {
+        let mode = parse_checkpoint_mode(mode.as_deref())?;
+        let members = self
+            .state
+            .database()?
+            .checkpoint(mode)
+            .map_err(zova_error)?;
+        Ok(members
+            .into_iter()
+            .map(NativeCheckpointedMember::from)
             .collect())
     }
 

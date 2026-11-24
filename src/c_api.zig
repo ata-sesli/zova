@@ -118,6 +118,24 @@ pub const ZOVA_RECLAIM_MAX_MEMBERS = internal.ZOVA_RECLAIM_MAX_MEMBERS;
 pub const zova_reclaimed_member = internal.zova_reclaimed_member;
 pub const zova_reclaim_result = internal.zova_reclaim_result;
 pub const zova_database_reclaim_request = internal.zova_database_reclaim_request;
+pub const ZOVA_JOURNAL_MODE_DELETE = internal.ZOVA_JOURNAL_MODE_DELETE;
+pub const ZOVA_JOURNAL_MODE_TRUNCATE = internal.ZOVA_JOURNAL_MODE_TRUNCATE;
+pub const ZOVA_JOURNAL_MODE_PERSIST = internal.ZOVA_JOURNAL_MODE_PERSIST;
+pub const ZOVA_JOURNAL_MODE_MEMORY = internal.ZOVA_JOURNAL_MODE_MEMORY;
+pub const ZOVA_JOURNAL_MODE_WAL = internal.ZOVA_JOURNAL_MODE_WAL;
+pub const ZOVA_JOURNAL_MODE_OFF = internal.ZOVA_JOURNAL_MODE_OFF;
+pub const ZOVA_CHECKPOINT_PASSIVE = internal.ZOVA_CHECKPOINT_PASSIVE;
+pub const ZOVA_CHECKPOINT_FULL = internal.ZOVA_CHECKPOINT_FULL;
+pub const ZOVA_CHECKPOINT_RESTART = internal.ZOVA_CHECKPOINT_RESTART;
+pub const ZOVA_CHECKPOINT_TRUNCATE = internal.ZOVA_CHECKPOINT_TRUNCATE;
+pub const ZOVA_JOURNAL_MAX_MEMBERS = internal.ZOVA_JOURNAL_MAX_MEMBERS;
+pub const zova_journal_mode_member = internal.zova_journal_mode_member;
+pub const zova_journal_mode_report = internal.zova_journal_mode_report;
+pub const zova_database_set_journal_mode_request = internal.zova_database_set_journal_mode_request;
+pub const zova_database_journal_modes_request = internal.zova_database_journal_modes_request;
+pub const zova_checkpointed_member = internal.zova_checkpointed_member;
+pub const zova_checkpoint_result = internal.zova_checkpoint_result;
+pub const zova_database_checkpoint_request = internal.zova_database_checkpoint_request;
 pub const zova_database_restore_request = internal.zova_database_restore_request;
 pub const zova_database_exec_request = internal.zova_database_exec_request;
 pub const zova_sql_function_register_request = internal.zova_sql_function_register_request;
@@ -515,6 +533,18 @@ pub fn zova_database_compact_with_progress(request: ?*const zova_database_compac
 
 pub fn zova_database_reclaim(request: ?*const zova_database_reclaim_request) callconv(.c) zova_status {
     return internal.zova_database_reclaim(request);
+}
+
+pub fn zova_database_set_journal_mode(request: ?*const zova_database_set_journal_mode_request) callconv(.c) zova_status {
+    return internal.zova_database_set_journal_mode(request);
+}
+
+pub fn zova_database_journal_modes(request: ?*const zova_database_journal_modes_request) callconv(.c) zova_status {
+    return internal.zova_database_journal_modes(request);
+}
+
+pub fn zova_database_checkpoint(request: ?*const zova_database_checkpoint_request) callconv(.c) zova_status {
+    return internal.zova_database_checkpoint(request);
 }
 
 pub fn zova_database_set_busy_timeout(request: ?*const zova_database_busy_timeout_request) callconv(.c) zova_status {
@@ -1262,6 +1292,9 @@ comptime {
             "zova_vector_search_by_id_in_within",
             "zova_database_vacuum",
             "zova_database_reclaim",
+            "zova_database_set_journal_mode",
+            "zova_database_journal_modes",
+            "zova_database_checkpoint",
             "zova_database_backup_with_progress",
             "zova_database_compact_with_progress",
             "zova_database_restore_to_memory",

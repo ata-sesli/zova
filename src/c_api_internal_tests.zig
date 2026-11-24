@@ -3641,6 +3641,50 @@ test "c api reclaim releases free pages in bounded steps and reports each member
     try std.testing.expectEqual(zova_status.OK, zova_database_rollback(&.{ .db = db }));
 }
 
+test "c api journal mode and checkpoint cover the set and validate requests" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&path_buffer, ".zig-cache/tmp/{s}/journal.zova", .{tmp.sub_path[0..]}, 0);
+
+    var db: ?*zova_database = null;
+    try std.testing.expectEqual(zova_status.OK, zova_database_create(&.{ .path = db_path, .out_db = &db, .out_error_message = null }));
+    defer _ = zova_database_close(db);
+
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, c_api_internal.zova_database_set_journal_mode(null));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, c_api_internal.zova_database_journal_modes(&.{ .db = db }));
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, c_api_internal.zova_database_checkpoint(&.{ .db = db }));
+    var report: c_api_internal.zova_journal_mode_report = .{ .member_count = 9 };
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, c_api_internal.zova_database_set_journal_mode(&.{ .db = db, .out_report = &report }));
+    try std.testing.expectEqual(@as(usize, 0), report.member_count);
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, c_api_internal.zova_database_set_journal_mode(&.{ .db = db, .journal_mode = c_api_internal.ZOVA_JOURNAL_MODE_MEMORY }));
+    var checkpoint: c_api_internal.zova_checkpoint_result = .{};
+    try std.testing.expectEqual(zova_status.INVALID_ARGUMENT, c_api_internal.zova_database_checkpoint(&.{ .db = db, .mode = 9, .out_result = &checkpoint }));
+
+    try std.testing.expectEqual(zova_status.OK, c_api_internal.zova_database_journal_modes(&.{ .db = db, .out_report = &report }));
+    try std.testing.expectEqual(@as(usize, 1), report.member_count);
+    try std.testing.expectEqual(c_api_internal.ZOVA_PROGRESS_MEMBER_MAIN, report.members[0].member);
+    try std.testing.expectEqual(c_api_internal.ZOVA_JOURNAL_MODE_DELETE, report.members[0].journal_mode);
+
+    try std.testing.expectEqual(zova_status.OK, c_api_internal.zova_database_set_journal_mode(&.{ .db = db, .journal_mode = c_api_internal.ZOVA_JOURNAL_MODE_WAL, .out_report = &report }));
+    try std.testing.expectEqual(c_api_internal.ZOVA_JOURNAL_MODE_WAL, report.members[0].journal_mode);
+    try std.testing.expectEqual(zova_status.OK, zova_database_exec(&.{ .db = db, .sql = "create table rows(x); insert into rows values(1)" }));
+
+    try std.testing.expectEqual(zova_status.OK, c_api_internal.zova_database_checkpoint(&.{ .db = db, .out_result = &checkpoint }));
+    try std.testing.expectEqual(@as(usize, 1), checkpoint.member_count);
+    try std.testing.expectEqual(c_api_internal.ZOVA_JOURNAL_MODE_WAL, checkpoint.members[0].journal_mode);
+    try std.testing.expectEqual(@as(u32, 0), checkpoint.members[0].busy);
+    try std.testing.expect(checkpoint.members[0].wal_frames > 0);
+    try std.testing.expectEqual(checkpoint.members[0].wal_frames, checkpoint.members[0].checkpointed_frames);
+
+    try std.testing.expectEqual(zova_status.OK, zova_database_begin(&.{ .db = db }));
+    var during: c_api_internal.zova_checkpoint_result = .{ .member_count = 9 };
+    try std.testing.expectEqual(zova_status.OBJECT_TRANSACTION_ACTIVE, c_api_internal.zova_database_checkpoint(&.{ .db = db, .out_result = &during }));
+    try std.testing.expectEqual(@as(usize, 0), during.member_count);
+    try std.testing.expectEqual(zova_status.OBJECT_TRANSACTION_ACTIVE, c_api_internal.zova_database_set_journal_mode(&.{ .db = db, .journal_mode = c_api_internal.ZOVA_JOURNAL_MODE_DELETE }));
+    try std.testing.expectEqual(zova_status.OK, zova_database_rollback(&.{ .db = db }));
+}
+
 test "c abi object compression is a per-handle setting validated at the boundary" {
     var db: ?*zova_database = null;
     try std.testing.expectEqual(zova_status.OK, zova_database_create_memory(&.{

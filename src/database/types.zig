@@ -146,6 +146,13 @@ pub const CreateOptions = struct {
     /// SQLite page size selected before Zova creates its private schema.
     /// Zero preserves SQLite's default page size.
     page_size: u32 = 0,
+    /// Journal mode of the new file, applied after Zova creates its private
+    /// schema. Null keeps SQLite's default, `delete`. Only `delete`,
+    /// `truncate`, `persist` and `wal` are accepted. An in-memory database
+    /// always uses `memory` and rejects this option. Only WAL is stored in the
+    /// file; the other modes apply to this handle, and later handles open in
+    /// `delete` mode.
+    journal_mode: ?JournalMode = null,
 };
 
 pub const max_vector_dimensions = vector_impl.max_vector_dimensions;
@@ -499,6 +506,88 @@ pub const ReclaimResult = struct {
     count: usize = 0,
 
     pub fn members(self: *const ReclaimResult) []const ReclaimedMember {
+        return self.entries[0..self.count];
+    }
+};
+
+/// SQLite journal mode of one member file. SQLite stores it in the file, so
+/// every handle and process that opens the file uses it.
+pub const JournalMode = enum {
+    delete,
+    truncate,
+    persist,
+    memory,
+    wal,
+    off,
+
+    /// Modes `Database.setJournalMode` and `CreateOptions` accept. `memory`
+    /// and `off` can corrupt a file on a crash, so Zova never selects them.
+    pub fn selectable(self: JournalMode) bool {
+        return switch (self) {
+            .delete, .truncate, .persist, .wal => true,
+            .memory, .off => false,
+        };
+    }
+};
+
+/// Journal mode of one member file.
+pub const JournalModeMember = struct {
+    member: ProgressMember,
+    journal_mode: JournalMode,
+};
+
+/// Journal modes of a database set: the main database first, then each bound
+/// store (object, vector, graph) that is attached.
+pub const JournalModeReport = struct {
+    entries: [4]JournalModeMember = undefined,
+    count: usize = 0,
+
+    pub fn members(self: *const JournalModeReport) []const JournalModeMember {
+        return self.entries[0..self.count];
+    }
+
+    /// Whether every member uses the same journal mode.
+    pub fn uniform(self: *const JournalModeReport) bool {
+        for (self.members()) |entry| {
+            if (entry.journal_mode != self.entries[0].journal_mode) return false;
+        }
+        return true;
+    }
+};
+
+/// SQLite WAL checkpoint mode for `Database.checkpoint`.
+pub const CheckpointMode = enum {
+    /// Copy as many frames as possible without waiting for readers or writers.
+    passive,
+    /// Wait for writers, then copy every frame unless a reader still needs one.
+    full,
+    /// As `full`, then wait for readers so the next writer restarts the WAL.
+    restart,
+    /// As `restart`, then truncate the WAL file to zero bytes.
+    truncate,
+};
+
+/// What `Database.checkpoint` did for one member file.
+pub const CheckpointedMember = struct {
+    member: ProgressMember,
+    journal_mode: JournalMode,
+    /// The checkpoint could not finish because another handle held a lock it
+    /// waited for. Always false for `passive` and for members not in WAL mode.
+    busy: bool,
+    /// Frames in the WAL file after the checkpoint. Zero when the member is
+    /// not in WAL mode.
+    wal_frames: u64,
+    /// Frames of the WAL file now copied into the database file. Zero when the
+    /// member is not in WAL mode.
+    checkpointed_frames: u64,
+};
+
+/// Members visited by `Database.checkpoint`, in `JournalModeReport` order.
+pub const CheckpointResult = struct {
+    entries: [4]CheckpointedMember = undefined,
+    count: usize = 0,
+
+    pub fn members(self: *const CheckpointResult) []const CheckpointedMember {
         return self.entries[0..self.count];
     }
 };

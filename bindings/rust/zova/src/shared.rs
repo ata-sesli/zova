@@ -30,6 +30,10 @@ use crate::graph_keyed::{
     GraphKeyedDegreeOptions, GraphKeyedEdge, GraphKeyedNeighbor, GraphKeyedNode, GraphScanOptions,
     GraphScanPage, GraphWalkDirectionOptions, GraphWalkProfile,
 };
+use crate::journal::{
+    checkpointed_members, journal_mode_members, CheckpointMode, CheckpointedMember, JournalMode,
+    JournalModeMember,
+};
 use crate::kv::{
     kv_clear_namespace_raw, kv_compare_and_delete_raw, kv_compare_and_put_raw, kv_count_raw,
     kv_delete_many_raw, kv_delete_raw, kv_get_many_raw, kv_get_raw, kv_put_if_absent_raw,
@@ -552,6 +556,50 @@ impl SharedDatabase {
         self.inner
             .status_locked(unsafe { zova_sys::zova_database_reclaim(&request) })?;
         Ok(reclaimed_members(&out))
+    }
+
+    /// [`crate::Database::set_journal_mode`] for a shared handle.
+    pub fn set_journal_mode(&self, mode: JournalMode) -> Result<Vec<JournalModeMember>> {
+        let _guard = self.inner.enter()?;
+        let mut out = zova_sys::zova_journal_mode_report::default();
+        let request = zova_sys::zova_database_set_journal_mode_request {
+            db: self.inner.raw_ptr(),
+            journal_mode: mode.code(),
+            out_report: &mut out,
+        };
+        // SAFETY: the request and report outlive the synchronous call.
+        self.inner
+            .status_locked(unsafe { zova_sys::zova_database_set_journal_mode(&request) })?;
+        Ok(journal_mode_members(&out))
+    }
+
+    /// [`crate::Database::journal_modes`] for a shared handle.
+    pub fn journal_modes(&self) -> Result<Vec<JournalModeMember>> {
+        let _guard = self.inner.enter()?;
+        let mut out = zova_sys::zova_journal_mode_report::default();
+        let request = zova_sys::zova_database_journal_modes_request {
+            db: self.inner.raw_ptr(),
+            out_report: &mut out,
+        };
+        // SAFETY: the request and report outlive the synchronous call.
+        self.inner
+            .status_locked(unsafe { zova_sys::zova_database_journal_modes(&request) })?;
+        Ok(journal_mode_members(&out))
+    }
+
+    /// [`crate::Database::checkpoint`] for a shared handle.
+    pub fn checkpoint(&self, mode: CheckpointMode) -> Result<Vec<CheckpointedMember>> {
+        let _guard = self.inner.enter()?;
+        let mut out = zova_sys::zova_checkpoint_result::default();
+        let request = zova_sys::zova_database_checkpoint_request {
+            db: self.inner.raw_ptr(),
+            mode: mode.code(),
+            out_result: &mut out,
+        };
+        // SAFETY: the request and result outlive the synchronous call.
+        self.inner
+            .status_locked(unsafe { zova_sys::zova_database_checkpoint(&request) })?;
+        Ok(checkpointed_members(&out))
     }
 
     /// [`SharedDatabase::backup_to`] that reports [`Progress`]; see

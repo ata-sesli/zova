@@ -351,6 +351,22 @@ let members = db.reclaim_space(ReclaimOptions::default())?;
 println!("{} pages released", members[0].pages_released);
 ```
 
+`set_journal_mode` switches the main file and every attached store together:
+either every member ends in the requested mode, or the members already
+switched are restored and the call fails. `journal_modes` reports each
+member's mode, and `checkpoint` returns one `CheckpointedMember` per member
+with its WAL and checkpointed frame counts. Only WAL mode is stored in the
+file; set it right after `create`. See `docs/concurrency.md`.
+
+```rust
+use zova::{CheckpointMode, JournalMode};
+
+db.set_journal_mode(JournalMode::Wal)?;
+for member in db.checkpoint(CheckpointMode::Truncate)? {
+    println!("{:?} {} frames", member.member, member.wal_frames);
+}
+```
+
 Diagnostic recovery commands such as `zova doctor`, `zova salvage --dry-run`,
 and `zova salvage <source> <destination>` are CLI-first. In v0.25, CLI salvage
 copies valid core data and uses extension salvage hooks for extension-owned

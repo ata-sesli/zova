@@ -456,6 +456,15 @@ pub const ReclaimResult = @import("database/types.zig").ReclaimResult;
 pub const ReclaimedMember = @import("database/types.zig").ReclaimedMember;
 pub const AutoVacuumMode = @import("database/types.zig").AutoVacuumMode;
 
+/// Journal mode and checkpoint types for `Database.setJournalMode`,
+/// `Database.journalModes` and `Database.checkpoint`.
+pub const JournalMode = @import("database/types.zig").JournalMode;
+pub const JournalModeMember = @import("database/types.zig").JournalModeMember;
+pub const JournalModeReport = @import("database/types.zig").JournalModeReport;
+pub const CheckpointMode = @import("database/types.zig").CheckpointMode;
+pub const CheckpointedMember = @import("database/types.zig").CheckpointedMember;
+pub const CheckpointResult = @import("database/types.zig").CheckpointResult;
+
 /// Options for `restoreBackup`.
 pub const RestoreOptions = @import("database/types.zig").RestoreOptions;
 
@@ -896,6 +905,8 @@ pub fn salvageInstalledExtensions(
 const validateCreateOptions = @import("database/lifecycle.zig").validateCreateOptions;
 
 const applyCreateOptions = @import("database/lifecycle.zig").applyCreateOptions;
+const applyCreateJournalMode = @import("database/lifecycle.zig").applyCreateJournalMode;
+const journal = @import("database/journal.zig");
 const enableIncrementalAutoVacuum = @import("database/lifecycle.zig").enableIncrementalAutoVacuum;
 
 /// Owns one initialized `.zova` database.
@@ -982,6 +993,7 @@ pub const Database = struct {
         try enableIncrementalAutoVacuum(&raw);
         try enableForeignKeys(&raw);
         try initializeZovaSchema(&raw);
+        try applyCreateJournalMode(&raw, options);
         try vector_sql.register(&raw);
         try graph_sql.register(&raw);
         try extension_impl.registerSqlForInstalled(&raw, registry);
@@ -1790,6 +1802,74 @@ pub const Database = struct {
             result.count += 1;
         }
         return result;
+    }
+
+    /// Switch the journal mode of every member of this set: the main database
+    /// and each attached bound store. Either every member ends in `mode`, or
+    /// the call restores the members it already switched and fails.
+    ///
+    /// Only `delete`, `truncate`, `persist` and `wal` are accepted. Leaving WAL
+    /// mode needs the only open handle on each file and fails with `Busy`
+    /// otherwise. Fails with `ObjectTransactionActive` inside a transaction,
+    /// `ReadOnly` on a read-only handle, and `InvalidArgument` for `wal` on an
+    /// in-memory database. Returns the modes now in effect.
+    pub fn setJournalMode(self: *Database, mode: JournalMode) Error!JournalModeReport {
+        if (!mode.selectable()) return error.InvalidArgument;
+        if (sqlite.c.sqlite3_get_autocommit(self.sqlite_db.handle) == 0) return error.ObjectTransactionActive;
+        var buffer: [4]journal.Member = undefined;
+        const members = self.journalMembers(&buffer);
+        for (members) |member| {
+            if (sqlite.c.sqlite3_db_readonly(self.sqlite_db.handle, member.schema.ptr) == 1) return error.ReadOnly;
+        }
+        try journal.writeAll(&self.sqlite_db, members, mode);
+        return self.journalModes();
+    }
+
+    /// Journal mode of every member of this set, in the order the main
+    /// database, then each attached object, vector and graph store.
+    pub fn journalModes(self: *Database) Error!JournalModeReport {
+        var buffer: [4]journal.Member = undefined;
+        var report: JournalModeReport = .{};
+        for (self.journalMembers(&buffer)) |member| {
+            report.entries[report.count] = .{ .member = member.member, .journal_mode = try journal.read(&self.sqlite_db, member.schema) };
+            report.count += 1;
+        }
+        return report;
+    }
+
+    /// Run a WAL checkpoint on every member of this set, in `journalModes`
+    /// order. Members not in WAL mode report zero frames. A member whose
+    /// checkpoint could not finish because another handle held a lock reports
+    /// `busy` instead of failing the call. Fails with
+    /// `ObjectTransactionActive` inside a transaction.
+    pub fn checkpoint(self: *Database, mode: CheckpointMode) Error!CheckpointResult {
+        if (sqlite.c.sqlite3_get_autocommit(self.sqlite_db.handle) == 0) return error.ObjectTransactionActive;
+        var buffer: [4]journal.Member = undefined;
+        var result: CheckpointResult = .{};
+        for (self.journalMembers(&buffer)) |member| {
+            result.entries[result.count] = try journal.checkpoint(&self.sqlite_db, member, mode);
+            result.count += 1;
+        }
+        return result;
+    }
+
+    fn journalMembers(self: *const Database, buffer: *[4]journal.Member) []const journal.Member {
+        var count: usize = 0;
+        buffer[count] = .{ .member = .main, .schema = "main" };
+        count += 1;
+        if (self.bound_object_store != null) {
+            buffer[count] = .{ .member = .object_store, .schema = bound_object_store_schema_name };
+            count += 1;
+        }
+        if (self.bound_vector_store != null) {
+            buffer[count] = .{ .member = .vector_store, .schema = bound_vector_store_schema_name };
+            count += 1;
+        }
+        if (self.bound_graph_store != null) {
+            buffer[count] = .{ .member = .graph_store, .schema = bound_graph_store_schema_name };
+            count += 1;
+        }
+        return buffer[0..count];
     }
 
     /// Set SQLite's busy timeout in milliseconds for this connection.
@@ -3259,5 +3339,6 @@ comptime {
         _ = @import("database_bound_stores_tests.zig");
         _ = @import("database_notifications_tests.zig");
         _ = @import("database_concurrency_tests.zig");
+        _ = @import("database_journal_tests.zig");
     }
 }

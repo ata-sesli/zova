@@ -78,6 +78,26 @@ pub fn writeInfoText(stdout: *std.Io.Writer, path: []const u8, summary: Database
         summary.user_table_count,
         summary.private_table_count,
     });
+    try writeJournalModesText(stdout, summary.journal_modes);
+}
+
+/// `journal_modes: main=wal object_store=wal ...` and whether they agree.
+pub fn writeJournalModesText(writer: *std.Io.Writer, report: zova.JournalModeReport) !void {
+    try writer.writeAll("journal_modes:");
+    for (report.members()) |entry| {
+        try writer.print(" {s}={s}", .{ @tagName(entry.member), @tagName(entry.journal_mode) });
+    }
+    try writer.print("\njournal_modes_uniform: {}\n", .{report.uniform()});
+}
+
+/// `{"uniform": true, "members": [{"member": "main", "journal_mode": "wal"}]}`
+pub fn writeJournalModesJson(writer: *std.Io.Writer, report: zova.JournalModeReport) !void {
+    try writer.print("{{\"uniform\": {}, \"members\": [", .{report.uniform()});
+    for (report.members(), 0..) |entry, i| {
+        if (i != 0) try writer.writeAll(", ");
+        try writer.print("{{\"member\": \"{s}\", \"journal_mode\": \"{s}\"}}", .{ @tagName(entry.member), @tagName(entry.journal_mode) });
+    }
+    try writer.writeAll("]}");
 }
 
 pub fn writeInfoJson(stdout: *std.Io.Writer, summary: DatabaseSummary) !void {
@@ -91,6 +111,8 @@ pub fn writeInfoJson(stdout: *std.Io.Writer, summary: DatabaseSummary) !void {
     try writeJsonString(stdout, sqlite.version());
     try stdout.writeAll(",\n  \"format_version\": ");
     try writeJsonString(stdout, summary.format_version);
+    try stdout.writeAll(",\n  \"journal_modes\": ");
+    try writeJournalModesJson(stdout, summary.journal_modes);
     try stdout.writeAll(",\n");
     try stdout.print(
         \\  "files": {{

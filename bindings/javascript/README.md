@@ -90,6 +90,10 @@ The synchronous `Database` facade exposes:
 - `reclaimSpace({ maxPages, stepPages })`, which releases free pages in place
   from files in incremental auto-vacuum mode (the format-13 default) and
   returns one `ReclaimedMember` per member file
+- `setJournalMode(mode)`, which switches the main file and every attached
+  store together or restores them and fails, `journalModes()`, and
+  `checkpoint(mode = "passive")`, which returns WAL and checkpointed frame
+  counts per member (see `docs/concurrency.md`)
 - storage-format probing and explicit copy-forward migration (`probeFormat`,
   `migrateDatabase`, and their async `AsyncDatabase` counterparts), with the
   same optional `ExtensionOptions` as `Database.open` for databases with a

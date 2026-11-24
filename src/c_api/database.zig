@@ -40,9 +40,23 @@ const zova_database_changes_request = @import("types.zig").zova_database_changes
 const zova_database_compact_progress_request = @import("types.zig").zova_database_compact_progress_request;
 const zova_database_compact_request = @import("types.zig").zova_database_compact_request;
 const zova_database_reclaim_request = @import("types.zig").zova_database_reclaim_request;
+const zova_database_set_journal_mode_request = @import("types.zig").zova_database_set_journal_mode_request;
+const zova_database_journal_modes_request = @import("types.zig").zova_database_journal_modes_request;
+const zova_database_checkpoint_request = @import("types.zig").zova_database_checkpoint_request;
+const zova_journal_mode_report = @import("types.zig").zova_journal_mode_report;
 const ZOVA_AUTO_VACUUM_FULL = @import("types.zig").ZOVA_AUTO_VACUUM_FULL;
 const ZOVA_AUTO_VACUUM_INCREMENTAL = @import("types.zig").ZOVA_AUTO_VACUUM_INCREMENTAL;
 const ZOVA_AUTO_VACUUM_NONE = @import("types.zig").ZOVA_AUTO_VACUUM_NONE;
+const ZOVA_JOURNAL_MODE_DELETE = @import("types.zig").ZOVA_JOURNAL_MODE_DELETE;
+const ZOVA_JOURNAL_MODE_TRUNCATE = @import("types.zig").ZOVA_JOURNAL_MODE_TRUNCATE;
+const ZOVA_JOURNAL_MODE_PERSIST = @import("types.zig").ZOVA_JOURNAL_MODE_PERSIST;
+const ZOVA_JOURNAL_MODE_MEMORY = @import("types.zig").ZOVA_JOURNAL_MODE_MEMORY;
+const ZOVA_JOURNAL_MODE_WAL = @import("types.zig").ZOVA_JOURNAL_MODE_WAL;
+const ZOVA_JOURNAL_MODE_OFF = @import("types.zig").ZOVA_JOURNAL_MODE_OFF;
+const ZOVA_CHECKPOINT_PASSIVE = @import("types.zig").ZOVA_CHECKPOINT_PASSIVE;
+const ZOVA_CHECKPOINT_FULL = @import("types.zig").ZOVA_CHECKPOINT_FULL;
+const ZOVA_CHECKPOINT_RESTART = @import("types.zig").ZOVA_CHECKPOINT_RESTART;
+const ZOVA_CHECKPOINT_TRUNCATE = @import("types.zig").ZOVA_CHECKPOINT_TRUNCATE;
 const zova_database_create_memory_request = @import("types.zig").zova_database_create_memory_request;
 const zova_database_create_options_request = @import("types.zig").zova_database_create_options_request;
 const zova_database_exec_request = @import("types.zig").zova_database_exec_request;
@@ -292,6 +306,97 @@ pub fn zova_database_reclaim(request: ?*const zova_database_reclaim_request) cal
     }
     out.member_count = result.count;
     return okDb(handle);
+}
+
+pub fn zova_database_set_journal_mode(request: ?*const zova_database_set_journal_mode_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    defer handle.mutex.unlock();
+    if (req.out_report) |out| out.* = .{};
+    const mode = journalModeFromCode(req.journal_mode) orelse return failDb(handle, error.InvalidArgument);
+    const report = handle.db.setJournalMode(mode) catch |err| return failDb(handle, err);
+    if (req.out_report) |out| writeJournalModeReport(out, report);
+    return okDb(handle);
+}
+
+pub fn zova_database_journal_modes(request: ?*const zova_database_journal_modes_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    defer handle.mutex.unlock();
+    const out = req.out_report orelse return failDb(handle, error.InvalidArgument);
+    out.* = .{};
+    const report = handle.db.journalModes() catch |err| return failDb(handle, err);
+    writeJournalModeReport(out, report);
+    return okDb(handle);
+}
+
+pub fn zova_database_checkpoint(request: ?*const zova_database_checkpoint_request) callconv(.c) zova_status {
+    const req = request orelse return .INVALID_ARGUMENT;
+    const handle = lockDatabaseHandle(req.db) orelse return .INVALID_ARGUMENT;
+    defer handle.mutex.unlock();
+    const out = req.out_result orelse return failDb(handle, error.InvalidArgument);
+    out.* = .{};
+    const mode: zova.CheckpointMode = switch (req.mode) {
+        ZOVA_CHECKPOINT_PASSIVE => .passive,
+        ZOVA_CHECKPOINT_FULL => .full,
+        ZOVA_CHECKPOINT_RESTART => .restart,
+        ZOVA_CHECKPOINT_TRUNCATE => .truncate,
+        else => return failDb(handle, error.InvalidArgument),
+    };
+    const result = handle.db.checkpoint(mode) catch |err| return failDb(handle, err);
+    for (result.members(), out.members[0..result.count]) |member, *entry| {
+        entry.* = .{
+            .member = progressMemberCode(member.member),
+            .journal_mode = journalModeCode(member.journal_mode),
+            .busy = @intFromBool(member.busy),
+            .wal_frames = member.wal_frames,
+            .checkpointed_frames = member.checkpointed_frames,
+        };
+    }
+    out.member_count = result.count;
+    return okDb(handle);
+}
+
+fn writeJournalModeReport(out: *zova_journal_mode_report, report: zova.JournalModeReport) void {
+    for (report.members(), out.members[0..report.count]) |member, *entry| {
+        entry.* = .{
+            .member = progressMemberCode(member.member),
+            .journal_mode = journalModeCode(member.journal_mode),
+        };
+    }
+    out.member_count = report.count;
+}
+
+fn progressMemberCode(member: zova.ProgressMember) u32 {
+    return switch (member) {
+        .main => ZOVA_PROGRESS_MEMBER_MAIN,
+        .object_store => ZOVA_PROGRESS_MEMBER_OBJECT_STORE,
+        .vector_store => ZOVA_PROGRESS_MEMBER_VECTOR_STORE,
+        .graph_store => ZOVA_PROGRESS_MEMBER_GRAPH_STORE,
+    };
+}
+
+fn journalModeCode(mode: zova.JournalMode) u32 {
+    return switch (mode) {
+        .delete => ZOVA_JOURNAL_MODE_DELETE,
+        .truncate => ZOVA_JOURNAL_MODE_TRUNCATE,
+        .persist => ZOVA_JOURNAL_MODE_PERSIST,
+        .memory => ZOVA_JOURNAL_MODE_MEMORY,
+        .wal => ZOVA_JOURNAL_MODE_WAL,
+        .off => ZOVA_JOURNAL_MODE_OFF,
+    };
+}
+
+fn journalModeFromCode(code: u32) ?zova.JournalMode {
+    return switch (code) {
+        ZOVA_JOURNAL_MODE_DELETE => .delete,
+        ZOVA_JOURNAL_MODE_TRUNCATE => .truncate,
+        ZOVA_JOURNAL_MODE_PERSIST => .persist,
+        ZOVA_JOURNAL_MODE_MEMORY => .memory,
+        ZOVA_JOURNAL_MODE_WAL => .wal,
+        ZOVA_JOURNAL_MODE_OFF => .off,
+        else => null,
+    };
 }
 
 const interrupted_message = "operation cancelled by progress callback";

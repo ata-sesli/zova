@@ -5852,3 +5852,62 @@ fn expectJsonBool(object: std.json.ObjectMap, key: []const u8, expected: bool) !
     try std.testing.expectEqual(std.json.Value.bool, std.meta.activeTag(value));
     try std.testing.expectEqual(expected, value.bool);
 }
+
+test "cli info and doctor report each member's journal mode and flag a mixed set" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var main_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const main_path = try testingDbPath(&main_buffer, tmp.sub_path[0..], "journal-main.zova");
+    var store_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const store_path = try testingDbPath(&store_buffer, tmp.sub_path[0..], "journal-graphs.zova");
+
+    {
+        var db = try zova.Database.create(main_path);
+        defer db.deinit();
+        try zova.createGraphStore(store_path);
+        try db.bindGraphStore(store_path);
+        _ = try db.setJournalMode(.wal);
+    }
+
+    var info = try runCli(&.{ "zova", "info", main_path });
+    defer info.deinit();
+    try std.testing.expectEqual(@as(u8, 0), info.code);
+    try expectContains(info.stdout, "journal_modes: main=wal graph_store=wal\n");
+    try expectContains(info.stdout, "journal_modes_uniform: true\n");
+
+    // Only the graph store leaves WAL mode: the set's members now differ.
+    {
+        var store = try zova.sqlite.Database.open(store_path);
+        defer store.deinit();
+        try store.exec("pragma journal_mode=delete");
+    }
+
+    var info_json = try runCli(&.{ "zova", "info", "--json", main_path });
+    defer info_json.deinit();
+    try std.testing.expectEqual(@as(u8, 0), info_json.code);
+    var parsed_info = try parseJson(info_json.stdout);
+    defer parsed_info.deinit();
+    const info_modes = parsed_info.value.object.get("journal_modes") orelse return error.MissingJsonField;
+    try std.testing.expect(!(info_modes.object.get("uniform") orelse return error.MissingJsonField).bool);
+    const members = (info_modes.object.get("members") orelse return error.MissingJsonField).array.items;
+    try std.testing.expectEqual(@as(usize, 2), members.len);
+    try expectJsonString(members[0].object, "member", "main");
+    try expectJsonString(members[0].object, "journal_mode", "wal");
+    try expectJsonString(members[1].object, "member", "graph_store");
+    try expectJsonString(members[1].object, "journal_mode", "delete");
+
+    var doctor = try runCli(&.{ "zova", "doctor", main_path });
+    defer doctor.deinit();
+    try std.testing.expectEqual(@as(u8, 0), doctor.code);
+    try expectContains(doctor.stdout, "journal_modes: main=wal graph_store=delete\n");
+    try expectContains(doctor.stdout, "journal_modes_uniform: false\n");
+
+    var doctor_json = try runCli(&.{ "zova", "doctor", "--json", main_path });
+    defer doctor_json.deinit();
+    try std.testing.expectEqual(@as(u8, 0), doctor_json.code);
+    var parsed_doctor = try parseJson(doctor_json.stdout);
+    defer parsed_doctor.deinit();
+    const doctor_modes = parsed_doctor.value.object.get("journal_modes") orelse return error.MissingJsonField;
+    try std.testing.expect(!(doctor_modes.object.get("uniform") orelse return error.MissingJsonField).bool);
+}
