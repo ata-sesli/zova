@@ -497,6 +497,18 @@ pub fn build(b: *std.Build) void {
     const install_kv_benchmark = b.addInstallArtifact(kv_benchmark, .{});
     b.step("build-kv-calls", "Build bounded single-call KV benchmark").dependOn(&install_kv_benchmark.step);
 
+    const read_scope_benchmark = b.addExecutable(.{
+        .name = "zova_read_scope_259_benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/read_scope_259.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    read_scope_benchmark.root_module.addImport("zova", zova_module);
+    const install_read_scope_benchmark = b.addInstallArtifact(read_scope_benchmark, .{});
+    b.step("build-read-scope-259", "Build bounded issue-259 read-scope benchmark").dependOn(&install_read_scope_benchmark.step);
+
     const float_benchmark = b.addExecutable(.{
         .name = "zova_float_search_benchmark",
         .root_module = b.createModule(.{

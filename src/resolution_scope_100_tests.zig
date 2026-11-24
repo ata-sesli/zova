@@ -34,6 +34,9 @@ const Trace = struct {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         const handle: *sqlite.c.sqlite3_stmt = @ptrCast(@alignCast(statement.?));
         const sql = std.mem.span(sqlite.c.sqlite3_sql(handle));
+        // Multi-statement reads run in an internal read transaction (#259);
+        // its begin/commit are transaction control, not queries.
+        if (std.mem.eql(u8, sql, "begin") or std.mem.eql(u8, sql, "commit")) return 0;
         self.statements += 1;
         if (std.mem.indexOf(u8, sql, "zova_trace:graph_key") != null) self.graph_key += 1;
         if (std.mem.indexOf(u8, sql, "zova_trace:graph_node_resolve") != null) self.node_resolution += 1;
