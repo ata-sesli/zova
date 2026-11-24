@@ -47,6 +47,7 @@
  * Scope:
  * - This ABI exposes database lifecycle, SQL exec, prepared statements,
  *   explicit transactions, explicit vacuum, in-place free-page reclaim,
+ *   set-wide journal mode and WAL checkpoints,
  *   conversion, backup, compact copy, restore-to-new-file, in-memory
  *   databases, objects, chunks, manifests, range reads, assembly,
  *   ObjectWriter, native vectors, and native graph relationships.
@@ -949,6 +950,94 @@ typedef struct zova_database_reclaim_request {
     uint32_t step_pages;
     zova_reclaim_result *out_result;
 } zova_database_reclaim_request;
+
+/*
+ * Journal mode and WAL checkpoints for a whole database set: the main database
+ * and each attached bound store. Members are reported in a fixed order: the
+ * main database, then each attached object, vector and graph store, with
+ * member set to a zova_progress_member value.
+ *
+ * zova_database_set_journal_mode switches every member to journal_mode, which
+ * must be DELETE, TRUNCATE, PERSIST or WAL. Either every member ends in that
+ * mode, or the call restores the members it already switched and fails:
+ * ZOVA_BUSY when another handle keeps a member in WAL mode, and
+ * ZOVA_INVALID_ARGUMENT for an in-memory database, which always uses MEMORY.
+ * It fails with ZOVA_OBJECT_TRANSACTION_ACTIVE inside an explicit transaction
+ * and ZOVA_READ_ONLY on a read-only handle. Only WAL is stored in the file; to
+ * create a database in WAL mode, call it right after zova_database_create.
+ * out_report is optional and receives the modes now in effect.
+ *
+ * zova_database_journal_modes reports each member's mode. out_report is
+ * required.
+ *
+ * zova_database_checkpoint runs a WAL checkpoint of the given
+ * zova_checkpoint_mode on every member (PASSIVE is 0, so a zero-initialized
+ * request works). Members not in WAL mode report zero frames. busy is 1 when a
+ * member's checkpoint could not finish because another handle held a lock;
+ * the call still succeeds. It fails with ZOVA_OBJECT_TRANSACTION_ACTIVE inside
+ * an explicit transaction. out_result is required.
+ *
+ * Every out_report and out_result is reset before any work.
+ */
+typedef enum zova_journal_mode {
+    ZOVA_JOURNAL_MODE_DELETE = 1,
+    ZOVA_JOURNAL_MODE_TRUNCATE = 2,
+    ZOVA_JOURNAL_MODE_PERSIST = 3,
+    ZOVA_JOURNAL_MODE_MEMORY = 4,
+    ZOVA_JOURNAL_MODE_WAL = 5,
+    ZOVA_JOURNAL_MODE_OFF = 6
+} zova_journal_mode;
+
+typedef enum zova_checkpoint_mode {
+    ZOVA_CHECKPOINT_PASSIVE = 0,
+    ZOVA_CHECKPOINT_FULL = 1,
+    ZOVA_CHECKPOINT_RESTART = 2,
+    ZOVA_CHECKPOINT_TRUNCATE = 3
+} zova_checkpoint_mode;
+
+enum {
+    ZOVA_JOURNAL_MAX_MEMBERS = 4
+};
+
+typedef struct zova_journal_mode_member {
+    uint32_t member;
+    uint32_t journal_mode;
+} zova_journal_mode_member;
+
+typedef struct zova_journal_mode_report {
+    size_t member_count;
+    zova_journal_mode_member members[ZOVA_JOURNAL_MAX_MEMBERS];
+} zova_journal_mode_report;
+
+typedef struct zova_database_set_journal_mode_request {
+    zova_database *db;
+    uint32_t journal_mode;
+    zova_journal_mode_report *out_report;
+} zova_database_set_journal_mode_request;
+
+typedef struct zova_database_journal_modes_request {
+    zova_database *db;
+    zova_journal_mode_report *out_report;
+} zova_database_journal_modes_request;
+
+typedef struct zova_checkpointed_member {
+    uint32_t member;
+    uint32_t journal_mode;
+    uint32_t busy;
+    uint64_t wal_frames;
+    uint64_t checkpointed_frames;
+} zova_checkpointed_member;
+
+typedef struct zova_checkpoint_result {
+    size_t member_count;
+    zova_checkpointed_member members[ZOVA_JOURNAL_MAX_MEMBERS];
+} zova_checkpoint_result;
+
+typedef struct zova_database_checkpoint_request {
+    zova_database *db;
+    uint32_t mode;
+    zova_checkpoint_result *out_result;
+} zova_database_checkpoint_request;
 
 typedef struct zova_database_restore_request {
     const char *source_path;
@@ -2097,6 +2186,9 @@ zova_status zova_database_compact(const zova_database_compact_request *request);
 zova_status zova_database_backup_with_progress(const zova_database_backup_progress_request *request);
 zova_status zova_database_compact_with_progress(const zova_database_compact_progress_request *request);
 zova_status zova_database_reclaim(const zova_database_reclaim_request *request);
+zova_status zova_database_set_journal_mode(const zova_database_set_journal_mode_request *request);
+zova_status zova_database_journal_modes(const zova_database_journal_modes_request *request);
+zova_status zova_database_checkpoint(const zova_database_checkpoint_request *request);
 zova_status zova_database_set_busy_timeout(const zova_database_busy_timeout_request *request);
 zova_status zova_database_last_insert_rowid(const zova_database_last_insert_rowid_request *request);
 zova_status zova_database_changes(const zova_database_changes_request *request);

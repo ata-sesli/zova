@@ -23,16 +23,14 @@ Use one handle for all writes and one handle per concurrent reader.
 3. **Busy timeout.** Set a busy timeout on every handle. Without one, a handle
    that meets a lock fails at once with a busy error (`error.Busy`,
    `ZOVA_BUSY`). With one, it waits up to that long for the lock to clear.
-4. **Journal mode.** For a database without bound stores, switch the file to
-   WAL once, after creating it:
+4. **Journal mode.** For a database without bound stores, switch it to WAL
+   once, after creating it, with the set-wide journal-mode call (see
+   [Journal mode and checkpoint calls](#journal-mode-and-checkpoint-calls)).
+   In Zig, `CreateOptions.journal_mode = .wal` does it at create.
 
-   ```sql
-   pragma journal_mode=wal;
-   ```
-
-   The journal mode is stored in the file. Later opens, from any handle or
-   process, use it without setting it again. For a database with bound stores,
-   read [Bound stores](#bound-stores) before choosing.
+   WAL mode is stored in the file. Later opens, from any handle or process,
+   use it without setting it again. For a database with bound stores, read
+   [Bound stores](#bound-stores) before choosing.
 
 Zova leaves `synchronous` at SQLite's default. SQLite documents that
 `synchronous=NORMAL` in WAL mode keeps the file consistent but can lose the
@@ -89,15 +87,11 @@ to finish when it has one. Funnel writes through one handle to avoid this.
 ## Bound stores
 
 A bound object, vector or graph store is a separate file attached to the main
-database. Each file has its own journal mode, so each one is switched
-separately:
-
-```sql
-pragma main.journal_mode=wal;
-pragma object_store.journal_mode=wal;
-pragma vector_store.journal_mode=wal;
-pragma graph_store.journal_mode=wal;
-```
+database. Each file has its own journal mode. The journal-mode call switches
+the main file and every attached store together: either every member ends in
+the requested mode, or the call restores the members it already switched and
+fails. `zova info` and `zova doctor` list each member's mode and report
+`journal_modes_uniform: false` when they differ.
 
 With bound stores, WAL mode gives up two guarantees that rollback-journal mode
 keeps. Choose with these in mind.
@@ -164,7 +158,37 @@ handle and forward from there, or poll the reader.
 - **Long read transactions make the WAL file grow.** SQLite moves WAL content
   back into the database file in checkpoints, and a checkpoint cannot pass a
   point that an open read transaction still needs. Keep reader transactions
-  short.
+  short. The checkpoint call reports, per member, the frames in the WAL and
+  the frames copied back, so a WAL that keeps growing is visible; a
+  `truncate` checkpoint with no readers active resets the `-wal` file to zero
+  bytes.
+
+## Journal mode and checkpoint calls
+
+| Surface | Switch every member | Report each member | Checkpoint every member |
+| --- | --- | --- | --- |
+| Zig | `Database.setJournalMode` | `Database.journalModes` | `Database.checkpoint` |
+| C | `zova_database_set_journal_mode` | `zova_database_journal_modes` | `zova_database_checkpoint` |
+| Rust | `set_journal_mode` | `journal_modes` | `checkpoint` |
+| Python | `set_journal_mode` | `journal_modes` | `checkpoint` |
+| Go | `SetJournalMode` | `JournalModes` | `Checkpoint` |
+| JavaScript | `setJournalMode` | `journalModes` | `checkpoint` |
+
+- Members are reported in a fixed order: the main database, then each attached
+  object, vector and graph store.
+- Switching accepts `delete`, `truncate`, `persist` and `wal`. It fails inside
+  a transaction (`ObjectTransactionActive`), on a read-only handle
+  (`ReadOnly`), and with a busy error when another open handle keeps a member
+  in WAL mode, since leaving WAL needs the only handle on each file. An
+  in-memory database always uses `memory` and rejects every switch.
+- Only WAL is stored in the file. `delete`, `truncate` and `persist` apply to
+  the handle that set them; later handles open in `delete` mode.
+- Checkpoint modes are `passive` (the default), `full`, `restart` and
+  `truncate`. Members not in WAL mode report zero frames. A member whose
+  checkpoint another handle kept from finishing reports `busy` instead of
+  failing the call.
+- The browser package keeps every writable database in `delete` mode and does
+  not offer these calls.
 
 ## Not provided
 

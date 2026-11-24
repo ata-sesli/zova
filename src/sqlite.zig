@@ -295,6 +295,32 @@ pub const Database = struct {
         if (rc != c.SQLITE_OK) return mapResultCode(rc);
     }
 
+    pub const WalCheckpointMode = enum(c_int) {
+        passive = c.SQLITE_CHECKPOINT_PASSIVE,
+        full = c.SQLITE_CHECKPOINT_FULL,
+        restart = c.SQLITE_CHECKPOINT_RESTART,
+        truncate = c.SQLITE_CHECKPOINT_TRUNCATE,
+    };
+
+    /// Frame counts SQLite reports for one checkpointed schema. Both are -1
+    /// when the schema is not in WAL mode.
+    pub const WalCheckpoint = struct {
+        busy: bool,
+        log_frames: c_int,
+        checkpointed_frames: c_int,
+    };
+
+    /// Checkpoint the WAL file of one attached schema. A checkpoint that could
+    /// not finish because of a lock returns `busy` with the frame counts it
+    /// reached, rather than an error.
+    pub fn walCheckpoint(self: *Database, schema: [:0]const u8, mode: WalCheckpointMode) Error!WalCheckpoint {
+        var log_frames: c_int = -1;
+        var checkpointed_frames: c_int = -1;
+        const rc = c.sqlite3_wal_checkpoint_v2(self.handle, schema.ptr, @backingInt(mode), &log_frames, &checkpointed_frames);
+        if (rc != c.SQLITE_OK and rc != c.SQLITE_BUSY) return mapResultCode(rc);
+        return .{ .busy = rc == c.SQLITE_BUSY, .log_frames = log_frames, .checkpointed_frames = checkpointed_frames };
+    }
+
     /// Prepare SQL for repeated execution or bound parameters.
     ///
     /// The returned statement borrows this database connection. Finalize it

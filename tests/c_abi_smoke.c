@@ -3540,6 +3540,56 @@ int main(int argc, char **argv) {
     expect_status(zova_database_reclaim(&(zova_database_reclaim_request){.db = db}),
                   ZOVA_INVALID_ARGUMENT,
                   "reclaim without out_result");
+
+    zova_journal_mode_report journal_report = {.member_count = 99};
+    expect_status(zova_database_set_journal_mode(&(zova_database_set_journal_mode_request){
+                      .db = db,
+                      .journal_mode = ZOVA_JOURNAL_MODE_WAL,
+                      .out_report = &journal_report,
+                  }),
+                  ZOVA_OK,
+                  "switch the set to WAL");
+    if (journal_report.member_count != 1 || journal_report.members[0].member != ZOVA_PROGRESS_MEMBER_MAIN ||
+        journal_report.members[0].journal_mode != ZOVA_JOURNAL_MODE_WAL) {
+        fprintf(stderr, "switch the set to WAL: unexpected report\n");
+        return 1;
+    }
+    expect_status(zova_database_exec(&(zova_database_exec_request){.db = db, .sql = "create table wal_rows(x); insert into wal_rows values(1)"}),
+                  ZOVA_OK,
+                  "write in WAL mode");
+    zova_checkpoint_result checkpoint_result = {.member_count = 99};
+    expect_status(zova_database_checkpoint(&(zova_database_checkpoint_request){
+                      .db = db,
+                      .mode = ZOVA_CHECKPOINT_TRUNCATE,
+                      .out_result = &checkpoint_result,
+                  }),
+                  ZOVA_OK,
+                  "truncate checkpoint");
+    if (checkpoint_result.member_count != 1 || checkpoint_result.members[0].journal_mode != ZOVA_JOURNAL_MODE_WAL ||
+        checkpoint_result.members[0].busy != 0 || checkpoint_result.members[0].wal_frames != 0) {
+        fprintf(stderr, "truncate checkpoint: unexpected result\n");
+        return 1;
+    }
+    expect_status(zova_database_set_journal_mode(&(zova_database_set_journal_mode_request){
+                      .db = db,
+                      .journal_mode = ZOVA_JOURNAL_MODE_OFF,
+                  }),
+                  ZOVA_INVALID_ARGUMENT,
+                  "reject journal mode OFF");
+    expect_status(zova_database_set_journal_mode(&(zova_database_set_journal_mode_request){
+                      .db = db,
+                      .journal_mode = ZOVA_JOURNAL_MODE_DELETE,
+                  }),
+                  ZOVA_OK,
+                  "switch the set back to DELETE");
+    journal_report.member_count = 99;
+    expect_status(zova_database_journal_modes(&(zova_database_journal_modes_request){.db = db, .out_report = &journal_report}),
+                  ZOVA_OK,
+                  "report journal modes");
+    if (journal_report.member_count != 1 || journal_report.members[0].journal_mode != ZOVA_JOURNAL_MODE_DELETE) {
+        fprintf(stderr, "report journal modes: unexpected report\n");
+        return 1;
+    }
     expect_status(zova_database_vacuum(&(zova_database_simple_request){.db = db}), ZOVA_OK, "explicit vacuum");
     expect_status(zova_database_close(db), ZOVA_OK, "close database");
     if (!sql_state.destroyed) {

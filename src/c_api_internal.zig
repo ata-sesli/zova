@@ -309,6 +309,24 @@ pub const ZOVA_RECLAIM_MAX_MEMBERS = @import("c_api/types.zig").ZOVA_RECLAIM_MAX
 pub const zova_reclaimed_member = @import("c_api/types.zig").zova_reclaimed_member;
 pub const zova_reclaim_result = @import("c_api/types.zig").zova_reclaim_result;
 pub const zova_database_reclaim_request = @import("c_api/types.zig").zova_database_reclaim_request;
+pub const ZOVA_JOURNAL_MODE_DELETE = @import("c_api/types.zig").ZOVA_JOURNAL_MODE_DELETE;
+pub const ZOVA_JOURNAL_MODE_TRUNCATE = @import("c_api/types.zig").ZOVA_JOURNAL_MODE_TRUNCATE;
+pub const ZOVA_JOURNAL_MODE_PERSIST = @import("c_api/types.zig").ZOVA_JOURNAL_MODE_PERSIST;
+pub const ZOVA_JOURNAL_MODE_MEMORY = @import("c_api/types.zig").ZOVA_JOURNAL_MODE_MEMORY;
+pub const ZOVA_JOURNAL_MODE_WAL = @import("c_api/types.zig").ZOVA_JOURNAL_MODE_WAL;
+pub const ZOVA_JOURNAL_MODE_OFF = @import("c_api/types.zig").ZOVA_JOURNAL_MODE_OFF;
+pub const ZOVA_CHECKPOINT_PASSIVE = @import("c_api/types.zig").ZOVA_CHECKPOINT_PASSIVE;
+pub const ZOVA_CHECKPOINT_FULL = @import("c_api/types.zig").ZOVA_CHECKPOINT_FULL;
+pub const ZOVA_CHECKPOINT_RESTART = @import("c_api/types.zig").ZOVA_CHECKPOINT_RESTART;
+pub const ZOVA_CHECKPOINT_TRUNCATE = @import("c_api/types.zig").ZOVA_CHECKPOINT_TRUNCATE;
+pub const ZOVA_JOURNAL_MAX_MEMBERS = @import("c_api/types.zig").ZOVA_JOURNAL_MAX_MEMBERS;
+pub const zova_journal_mode_member = @import("c_api/types.zig").zova_journal_mode_member;
+pub const zova_journal_mode_report = @import("c_api/types.zig").zova_journal_mode_report;
+pub const zova_database_set_journal_mode_request = @import("c_api/types.zig").zova_database_set_journal_mode_request;
+pub const zova_database_journal_modes_request = @import("c_api/types.zig").zova_database_journal_modes_request;
+pub const zova_checkpointed_member = @import("c_api/types.zig").zova_checkpointed_member;
+pub const zova_checkpoint_result = @import("c_api/types.zig").zova_checkpoint_result;
+pub const zova_database_checkpoint_request = @import("c_api/types.zig").zova_database_checkpoint_request;
 
 pub const zova_database_restore_request = @import("c_api/types.zig").zova_database_restore_request;
 
@@ -705,6 +723,9 @@ pub const zova_database_backup_with_progress = @import("c_api/database.zig").zov
 pub const zova_database_compact = @import("c_api/database.zig").zova_database_compact;
 pub const zova_database_compact_with_progress = @import("c_api/database.zig").zova_database_compact_with_progress;
 pub const zova_database_reclaim = @import("c_api/database.zig").zova_database_reclaim;
+pub const zova_database_set_journal_mode = @import("c_api/database.zig").zova_database_set_journal_mode;
+pub const zova_database_journal_modes = @import("c_api/database.zig").zova_database_journal_modes;
+pub const zova_database_checkpoint = @import("c_api/database.zig").zova_database_checkpoint;
 
 pub const zova_database_set_busy_timeout = @import("c_api/database.zig").zova_database_set_busy_timeout;
 

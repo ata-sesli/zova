@@ -333,6 +333,50 @@ impl PyDatabase {
         Ok(members.into_iter().map(PyReclaimedMember::from).collect())
     }
 
+    /// Switch every member of this database set (the main database and each
+    /// attached bound store) to `mode` ("delete", "truncate", "persist" or
+    /// "wal") and return the modes now in effect. Either every member ends in
+    /// `mode`, or the members already switched are restored and `ZovaError`
+    /// is raised: `ZOVA_BUSY` when another handle keeps a member in WAL mode,
+    /// `ZOVA_INVALID_ARGUMENT` for "memory", "off" or an in-memory database,
+    /// `ZOVA_OBJECT_TRANSACTION_ACTIVE` inside a transaction, and
+    /// `ZOVA_READ_ONLY` on a read-only handle. Only WAL is stored in the file.
+    pub(crate) fn set_journal_mode(&mut self, mode: &str) -> PyResult<Vec<PyJournalModeMember>> {
+        let mode = parse_journal_mode(mode)?;
+        let members = self.db_mut()?.set_journal_mode(mode).map_err(zova_error)?;
+        Ok(members.into_iter().map(PyJournalModeMember::from).collect())
+    }
+
+    /// Journal mode of each member: the main database, then each attached
+    /// object, vector and graph store.
+    pub(crate) fn journal_modes(&mut self) -> PyResult<Vec<PyJournalModeMember>> {
+        let members = self.db_mut()?.journal_modes().map_err(zova_error)?;
+        Ok(members.into_iter().map(PyJournalModeMember::from).collect())
+    }
+
+    /// Run a WAL checkpoint ("passive", "full", "restart" or "truncate") on
+    /// every member. Members not in WAL mode report zero frames. Raises
+    /// `ZovaError` with `ZOVA_OBJECT_TRANSACTION_ACTIVE` inside a transaction.
+    #[pyo3(signature = (mode = "passive"))]
+    pub(crate) fn checkpoint(&mut self, mode: &str) -> PyResult<Vec<PyCheckpointedMember>> {
+        let mode = match mode {
+            "passive" => zova_rust::CheckpointMode::Passive,
+            "full" => zova_rust::CheckpointMode::Full,
+            "restart" => zova_rust::CheckpointMode::Restart,
+            "truncate" => zova_rust::CheckpointMode::Truncate,
+            _ => {
+                return Err(PyValueError::new_err(
+                    "checkpoint mode must be 'passive', 'full', 'restart' or 'truncate'",
+                ))
+            }
+        };
+        let members = self.db_mut()?.checkpoint(mode).map_err(zova_error)?;
+        Ok(members
+            .into_iter()
+            .map(PyCheckpointedMember::from)
+            .collect())
+    }
+
     pub(crate) fn set_busy_timeout(&mut self, milliseconds: u32) -> PyResult<()> {
         self.db_mut()?
             .set_busy_timeout(milliseconds)
@@ -1613,6 +1657,107 @@ impl From<zova_rust::ReclaimedMember> for PyReclaimedMember {
             page_size: member.page_size,
             pages_released: member.pages_released,
             free_pages_left: member.free_pages_left,
+        }
+    }
+}
+
+fn progress_member_name(member: zova_rust::ProgressMember) -> &'static str {
+    match member {
+        zova_rust::ProgressMember::Main => "main",
+        zova_rust::ProgressMember::ObjectStore => "object_store",
+        zova_rust::ProgressMember::VectorStore => "vector_store",
+        zova_rust::ProgressMember::GraphStore => "graph_store",
+        _ => "unknown",
+    }
+}
+
+fn parse_journal_mode(mode: &str) -> PyResult<zova_rust::JournalMode> {
+    Ok(match mode {
+        "delete" => zova_rust::JournalMode::Delete,
+        "truncate" => zova_rust::JournalMode::Truncate,
+        "persist" => zova_rust::JournalMode::Persist,
+        "memory" => zova_rust::JournalMode::Memory,
+        "wal" => zova_rust::JournalMode::Wal,
+        "off" => zova_rust::JournalMode::Off,
+        _ => {
+            return Err(PyValueError::new_err(
+                "journal mode must be 'delete', 'truncate', 'persist' or 'wal'",
+            ))
+        }
+    })
+}
+
+/// Journal mode of one member of a database set.
+///
+/// `member` is "main", "object_store", "vector_store", or "graph_store";
+/// `journal_mode` is "delete", "truncate", "persist", "memory", "wal" or "off".
+#[pyclass(name = "JournalModeMember", frozen, skip_from_py_object)]
+pub(crate) struct PyJournalModeMember {
+    #[pyo3(get)]
+    member: &'static str,
+    #[pyo3(get)]
+    journal_mode: &'static str,
+}
+
+#[pymethods]
+impl PyJournalModeMember {
+    fn __repr__(&self) -> String {
+        format!(
+            "JournalModeMember(member='{}', journal_mode='{}')",
+            self.member, self.journal_mode
+        )
+    }
+}
+
+impl From<zova_rust::JournalModeMember> for PyJournalModeMember {
+    fn from(member: zova_rust::JournalModeMember) -> Self {
+        Self {
+            member: progress_member_name(member.member),
+            journal_mode: member.journal_mode.name(),
+        }
+    }
+}
+
+/// What `Database.checkpoint` did for one member file. `busy` is true when
+/// another handle kept the checkpoint from finishing; the frame counts are 0
+/// when the member is not in WAL mode.
+#[pyclass(name = "CheckpointedMember", frozen, skip_from_py_object)]
+pub(crate) struct PyCheckpointedMember {
+    #[pyo3(get)]
+    member: &'static str,
+    #[pyo3(get)]
+    journal_mode: &'static str,
+    #[pyo3(get)]
+    busy: bool,
+    #[pyo3(get)]
+    wal_frames: u64,
+    #[pyo3(get)]
+    checkpointed_frames: u64,
+}
+
+#[pymethods]
+impl PyCheckpointedMember {
+    fn __repr__(&self) -> String {
+        format!(
+            "CheckpointedMember(member='{}', journal_mode='{}', busy={}, \
+             wal_frames={}, checkpointed_frames={})",
+            self.member,
+            self.journal_mode,
+            if self.busy { "True" } else { "False" },
+            self.wal_frames,
+            self.checkpointed_frames
+        )
+    }
+}
+
+impl From<zova_rust::CheckpointedMember> for PyCheckpointedMember {
+    fn from(member: zova_rust::CheckpointedMember) -> Self {
+        Self {
+            member: progress_member_name(member.member),
+            journal_mode: member.journal_mode.name(),
+            busy: member.busy,
+            wal_frames: member.wal_frames,
+            checkpointed_frames: member.checkpointed_frames,
         }
     }
 }

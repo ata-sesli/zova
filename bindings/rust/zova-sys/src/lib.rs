@@ -148,6 +148,20 @@ pub const ZOVA_AUTO_VACUUM_INCREMENTAL: u32 = 2;
 
 pub const ZOVA_RECLAIM_MAX_MEMBERS: usize = 4;
 
+pub const ZOVA_JOURNAL_MODE_DELETE: u32 = 1;
+pub const ZOVA_JOURNAL_MODE_TRUNCATE: u32 = 2;
+pub const ZOVA_JOURNAL_MODE_PERSIST: u32 = 3;
+pub const ZOVA_JOURNAL_MODE_MEMORY: u32 = 4;
+pub const ZOVA_JOURNAL_MODE_WAL: u32 = 5;
+pub const ZOVA_JOURNAL_MODE_OFF: u32 = 6;
+
+pub const ZOVA_CHECKPOINT_PASSIVE: u32 = 0;
+pub const ZOVA_CHECKPOINT_FULL: u32 = 1;
+pub const ZOVA_CHECKPOINT_RESTART: u32 = 2;
+pub const ZOVA_CHECKPOINT_TRUNCATE: u32 = 3;
+
+pub const ZOVA_JOURNAL_MAX_MEMBERS: usize = 4;
+
 pub const ZOVA_FORMAT_CURRENT: c_int = 0;
 pub const ZOVA_FORMAT_MIGRATABLE: c_int = 1;
 pub const ZOVA_FORMAT_UNSUPPORTED_LEGACY: c_int = 2;
@@ -942,6 +956,57 @@ pub struct zova_database_reclaim_request {
     pub max_pages: u64,
     pub step_pages: u32,
     pub out_result: *mut zova_reclaim_result,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct zova_journal_mode_member {
+    pub member: u32,
+    pub journal_mode: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct zova_journal_mode_report {
+    pub member_count: usize,
+    pub members: [zova_journal_mode_member; ZOVA_JOURNAL_MAX_MEMBERS],
+}
+
+#[repr(C)]
+pub struct zova_database_set_journal_mode_request {
+    pub db: *mut zova_database,
+    pub journal_mode: u32,
+    pub out_report: *mut zova_journal_mode_report,
+}
+
+#[repr(C)]
+pub struct zova_database_journal_modes_request {
+    pub db: *mut zova_database,
+    pub out_report: *mut zova_journal_mode_report,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct zova_checkpointed_member {
+    pub member: u32,
+    pub journal_mode: u32,
+    pub busy: u32,
+    pub wal_frames: u64,
+    pub checkpointed_frames: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct zova_checkpoint_result {
+    pub member_count: usize,
+    pub members: [zova_checkpointed_member; ZOVA_JOURNAL_MAX_MEMBERS],
+}
+
+#[repr(C)]
+pub struct zova_database_checkpoint_request {
+    pub db: *mut zova_database,
+    pub mode: u32,
+    pub out_result: *mut zova_checkpoint_result,
 }
 
 #[repr(C)]
@@ -2078,6 +2143,15 @@ extern "C" {
         request: *const zova_database_compact_progress_request,
     ) -> zova_status;
     pub fn zova_database_reclaim(request: *const zova_database_reclaim_request) -> zova_status;
+    pub fn zova_database_set_journal_mode(
+        request: *const zova_database_set_journal_mode_request,
+    ) -> zova_status;
+    pub fn zova_database_journal_modes(
+        request: *const zova_database_journal_modes_request,
+    ) -> zova_status;
+    pub fn zova_database_checkpoint(
+        request: *const zova_database_checkpoint_request,
+    ) -> zova_status;
     pub fn zova_database_set_busy_timeout(
         request: *const zova_database_busy_timeout_request,
     ) -> zova_status;

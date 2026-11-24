@@ -174,6 +174,21 @@ with zova.Database.open("app.zova") as db:
         print(member.member, member.pages_released, member.free_pages_left)
 ```
 
+`set_journal_mode("wal")` switches the main file and every attached store
+together: either every member ends in the requested mode, or the members
+already switched are restored and the call fails. `journal_modes()` returns one
+`zova.JournalModeMember` per member, and `checkpoint(mode="passive")` returns
+one `zova.CheckpointedMember` per member with its WAL and checkpointed frame
+counts. Only WAL mode is stored in the file; set it right after `create`. See
+`docs/concurrency.md`.
+
+```python
+with zova.Database.open("app.zova") as db:
+    db.set_journal_mode("wal")
+    for member in db.checkpoint("truncate"):
+        print(member.member, member.wal_frames, member.checkpointed_frames)
+```
+
 Diagnostic recovery commands such as `zova doctor`, `zova salvage --dry-run`,
 and `zova salvage <source> <destination>` are CLI-first. In v0.25, CLI salvage
 copies valid core data and uses extension salvage hooks for extension-owned

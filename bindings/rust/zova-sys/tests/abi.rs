@@ -43,6 +43,18 @@ fn extension_upgrade_entrypoints_reject_null_requests() {
             zova_sys::ZOVA_INVALID_ARGUMENT
         );
         assert_eq!(
+            zova_sys::zova_database_set_journal_mode(ptr::null()),
+            zova_sys::ZOVA_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            zova_sys::zova_database_journal_modes(ptr::null()),
+            zova_sys::ZOVA_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            zova_sys::zova_database_checkpoint(ptr::null()),
+            zova_sys::ZOVA_INVALID_ARGUMENT
+        );
+        assert_eq!(
             zova_sys::zova_database_extension_upgrade(ptr::null()),
             zova_sys::ZOVA_INVALID_ARGUMENT
         );
@@ -137,6 +149,33 @@ fn abi_version_and_status_names_are_available() {
         assert_eq!(
             std::mem::size_of::<zova_sys::zova_database_reclaim_request>(),
             32
+        );
+        assert_eq!(zova_sys::ZOVA_JOURNAL_MODE_WAL, 5);
+        assert_eq!(zova_sys::ZOVA_CHECKPOINT_TRUNCATE, 3);
+        assert_eq!(std::mem::size_of::<zova_sys::zova_journal_mode_member>(), 8);
+        assert_eq!(
+            std::mem::size_of::<zova_sys::zova_journal_mode_report>(),
+            std::mem::size_of::<usize>() + 4 * 8
+        );
+        assert_eq!(
+            std::mem::size_of::<zova_sys::zova_checkpointed_member>(),
+            32
+        );
+        assert_eq!(
+            std::mem::size_of::<zova_sys::zova_checkpoint_result>(),
+            std::mem::size_of::<usize>() + 4 * 32
+        );
+        assert_eq!(
+            std::mem::size_of::<zova_sys::zova_database_set_journal_mode_request>(),
+            24
+        );
+        assert_eq!(
+            std::mem::size_of::<zova_sys::zova_database_journal_modes_request>(),
+            16
+        );
+        assert_eq!(
+            std::mem::size_of::<zova_sys::zova_database_checkpoint_request>(),
+            24
         );
         assert_eq!(
             CStr::from_ptr(zova_sys::zova_status_name(zova_sys::ZOVA_GRAPH_INVALID))

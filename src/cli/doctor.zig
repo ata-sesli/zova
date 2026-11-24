@@ -18,6 +18,8 @@ const diagnosticIssueAreaText = @import("render.zig").diagnosticIssueAreaText;
 const doctorCheckErrorFormat = @import("render.zig").doctorCheckErrorFormat;
 const isExtensionHealthError = @import("common.zig").isExtensionHealthError;
 const loadDatabaseSummary = @import("inspect.zig").loadDatabaseSummary;
+const writeJournalModesJson = @import("inspect_render.zig").writeJournalModesJson;
+const writeJournalModesText = @import("inspect_render.zig").writeJournalModesText;
 const openDatabase = @import("common.zig").openDatabase;
 const openErrorFormat = @import("render.zig").openErrorFormat;
 const openManagementDatabase = @import("common.zig").openManagementDatabase;
@@ -533,6 +535,7 @@ fn writeDoctorText(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
         report.severity_counts.errors,
         report.issues_truncated,
     });
+    try writeJournalModesText(writer, summary.journal_modes);
 
     try writer.writeAll("issues:\n");
     if (report.issues.len == 0) {
@@ -644,6 +647,8 @@ fn writeDoctorJson(writer: *std.Io.Writer, source_path: []const u8, summary: Dat
     try writer.print(",\n  \"issues_truncated\": {},\n", .{report.issues_truncated});
     try writer.writeAll("  \"issues\": ");
     try writeDiagnosticIssuesJson(writer, report.issues);
+    try writer.writeAll(",\n  \"journal_modes\": ");
+    try writeJournalModesJson(writer, summary.journal_modes);
     try writer.writeAll(",\n  \"suggested_actions\": ");
     try writeSuggestedActionsJsonForIssues(writer, source_path, has_issues, report.issue_counts);
     try writer.writeAll("\n}\n");

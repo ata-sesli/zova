@@ -533,6 +533,7 @@ pub fn loadDatabaseSummary(allocator: std.mem.Allocator, db: *zova.Database, pat
             \\where type = 'table'
             \\  and substr(name, 1, 6) = '_zova_'
         ),
+        .journal_modes = try db.journalModes(),
     };
 }
 

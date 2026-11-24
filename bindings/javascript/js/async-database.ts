@@ -8,13 +8,22 @@ import type {
   GraphWalkOptions,
 } from "./graph.js";
 import type {
+  CheckpointedMember,
+  CheckpointModeName,
   ExtensionOptions,
   FormatInfo,
+  JournalModeMember,
+  JournalModeName,
   OpenOptions,
   ReclaimedMember,
   ReclaimOptions,
 } from "./types.js";
-import { nativeExtensionOptions, reclaimedMember } from "./types.js";
+import {
+  checkpointedMember,
+  journalModeMember,
+  nativeExtensionOptions,
+  reclaimedMember,
+} from "./types.js";
 import type { KvEntry, KvScanOptions, KvScanPage } from "./types.js";
 import type { ProgressOptions } from "./progress.js";
 import { withProgress } from "./progress.js";
@@ -163,6 +172,27 @@ export class AsyncDatabase {
   }
 
   /** `options` works as in `backupTo`. */
+  /** `Database.setJournalMode` on the worker thread pool. */
+  setJournalMode(mode: JournalModeName): Promise<JournalModeMember[]> {
+    return this.#enqueue(async () =>
+      (await this.#native.asyncSetJournalMode(mode)).map(journalModeMember),
+    );
+  }
+
+  /** `Database.journalModes` on the worker thread pool. */
+  journalModes(): Promise<JournalModeMember[]> {
+    return this.#enqueue(async () =>
+      (await this.#native.asyncJournalModes()).map(journalModeMember),
+    );
+  }
+
+  /** `Database.checkpoint` on the worker thread pool. */
+  checkpoint(mode: CheckpointModeName = "passive"): Promise<CheckpointedMember[]> {
+    return this.#enqueue(async () =>
+      (await this.#native.asyncCheckpoint(mode)).map(checkpointedMember),
+    );
+  }
+
   /** `Database.reclaimSpace` on the worker thread pool. */
   reclaimSpace(options: ReclaimOptions = {}): Promise<ReclaimedMember[]> {
     return this.#enqueue(async () =>

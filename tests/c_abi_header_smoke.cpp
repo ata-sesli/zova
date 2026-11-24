@@ -64,6 +64,28 @@ static_assert(sizeof(zova_reclaim_result) == sizeof(size_t) + 4 * sizeof(zova_re
 static_assert(offsetof(zova_database_reclaim_request, max_pages) == 8, "reclaim request layout is stable");
 static_assert(offsetof(zova_database_reclaim_request, step_pages) == 16, "reclaim request layout is stable");
 static_assert(offsetof(zova_database_reclaim_request, out_result) == 24, "reclaim request layout is stable");
+static_assert(ZOVA_JOURNAL_MODE_DELETE == 1 && ZOVA_JOURNAL_MODE_TRUNCATE == 2 && ZOVA_JOURNAL_MODE_PERSIST == 3 &&
+                  ZOVA_JOURNAL_MODE_MEMORY == 4 && ZOVA_JOURNAL_MODE_WAL == 5 && ZOVA_JOURNAL_MODE_OFF == 6,
+              "journal mode values are stable");
+static_assert(ZOVA_CHECKPOINT_PASSIVE == 0 && ZOVA_CHECKPOINT_FULL == 1 && ZOVA_CHECKPOINT_RESTART == 2 &&
+                  ZOVA_CHECKPOINT_TRUNCATE == 3,
+              "checkpoint mode values are stable");
+static_assert(ZOVA_JOURNAL_MAX_MEMBERS == 4, "journal member capacity is stable");
+static_assert(sizeof(zova_journal_mode_member) == 8, "journal mode member is fixed layout");
+static_assert(offsetof(zova_journal_mode_member, journal_mode) == 4, "journal mode member layout is stable");
+static_assert(offsetof(zova_journal_mode_report, members) == sizeof(size_t), "journal mode report layout is stable");
+static_assert(sizeof(zova_journal_mode_report) == sizeof(size_t) + 4 * sizeof(zova_journal_mode_member), "journal mode report is fixed layout");
+static_assert(offsetof(zova_database_set_journal_mode_request, journal_mode) == 8, "set journal mode request layout is stable");
+static_assert(offsetof(zova_database_set_journal_mode_request, out_report) == 16, "set journal mode request layout is stable");
+static_assert(offsetof(zova_database_journal_modes_request, out_report) == 8, "journal modes request layout is stable");
+static_assert(sizeof(zova_checkpointed_member) == 32, "checkpointed member is fixed layout");
+static_assert(offsetof(zova_checkpointed_member, journal_mode) == 4, "checkpointed member layout is stable");
+static_assert(offsetof(zova_checkpointed_member, busy) == 8, "checkpointed member layout is stable");
+static_assert(offsetof(zova_checkpointed_member, wal_frames) == 16, "checkpointed member layout is stable");
+static_assert(offsetof(zova_checkpointed_member, checkpointed_frames) == 24, "checkpointed member layout is stable");
+static_assert(sizeof(zova_checkpoint_result) == sizeof(size_t) + 4 * sizeof(zova_checkpointed_member), "checkpoint result is fixed layout");
+static_assert(offsetof(zova_database_checkpoint_request, mode) == 8, "checkpoint request layout is stable");
+static_assert(offsetof(zova_database_checkpoint_request, out_result) == 16, "checkpoint request layout is stable");
 static_assert(ZOVA_OBJECT_PROFILE_DEDUPLICATION == 0, "object profile values are stable");
 static_assert(ZOVA_OBJECT_PROFILE_STREAMING == 1, "object profile values are stable");
 static_assert(sizeof(zova_object_put_options) == sizeof(int), "object options use a C int");
@@ -78,6 +100,9 @@ int main() {
         zova_database_backup_with_progress(nullptr) != ZOVA_INVALID_ARGUMENT ||
         zova_database_compact_with_progress(nullptr) != ZOVA_INVALID_ARGUMENT ||
         zova_database_reclaim(nullptr) != ZOVA_INVALID_ARGUMENT ||
+        zova_database_set_journal_mode(nullptr) != ZOVA_INVALID_ARGUMENT ||
+        zova_database_journal_modes(nullptr) != ZOVA_INVALID_ARGUMENT ||
+        zova_database_checkpoint(nullptr) != ZOVA_INVALID_ARGUMENT ||
         zova_database_extension_upgrade(nullptr) != ZOVA_INVALID_ARGUMENT ||
         zova_database_extension_rebuild(nullptr) != ZOVA_INVALID_ARGUMENT) return 1;
     zova_database *db = nullptr;

@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 
 from ._native import (
+    CheckpointedMember,
     ClosedHandleError,
     Database,
     ExtensionInfo,
@@ -25,6 +26,7 @@ from ._native import (
     GraphWalkItem,
     GraphWalkOptions,
     GraphWalkProfile,
+    JournalModeMember,
     LinkedPlugin,
     Notification,
     ObjectChunkId,
@@ -184,6 +186,7 @@ def probe_format(path: str) -> FormatInfo:
 
 
 __all__ = [
+    "CheckpointedMember",
     "ClosedHandleError",
     "ColumnType",
     "Database",
@@ -213,6 +216,7 @@ __all__ = [
     "GraphWalkItem",
     "GraphWalkOptions",
     "GraphWalkProfile",
+    "JournalModeMember",
     "LinkedPlugin",
     "Notification",
     "ObjectChunkId",

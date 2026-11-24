@@ -232,6 +232,8 @@ pub const DatabaseSummary = struct {
     kv_allocated_bytes: u64,
     user_table_count: u64,
     private_table_count: u64,
+    /// Journal mode of the main file and of each attached bound store.
+    journal_modes: zova.JournalModeReport = .{},
 
     pub fn deinit(self: *DatabaseSummary, allocator: std.mem.Allocator) void {
         allocator.free(self.format_version);

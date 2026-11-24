@@ -736,6 +736,60 @@ pub const zova_database_reclaim_request = extern struct {
     out_result: ?*zova_reclaim_result = null,
 };
 
+pub const ZOVA_JOURNAL_MODE_DELETE: u32 = 1;
+pub const ZOVA_JOURNAL_MODE_TRUNCATE: u32 = 2;
+pub const ZOVA_JOURNAL_MODE_PERSIST: u32 = 3;
+pub const ZOVA_JOURNAL_MODE_MEMORY: u32 = 4;
+pub const ZOVA_JOURNAL_MODE_WAL: u32 = 5;
+pub const ZOVA_JOURNAL_MODE_OFF: u32 = 6;
+
+pub const ZOVA_CHECKPOINT_PASSIVE: u32 = 0;
+pub const ZOVA_CHECKPOINT_FULL: u32 = 1;
+pub const ZOVA_CHECKPOINT_RESTART: u32 = 2;
+pub const ZOVA_CHECKPOINT_TRUNCATE: u32 = 3;
+
+pub const ZOVA_JOURNAL_MAX_MEMBERS = 4;
+
+pub const zova_journal_mode_member = extern struct {
+    member: u32 = 0,
+    journal_mode: u32 = 0,
+};
+
+pub const zova_journal_mode_report = extern struct {
+    member_count: usize = 0,
+    members: [ZOVA_JOURNAL_MAX_MEMBERS]zova_journal_mode_member = @splat(.{}),
+};
+
+pub const zova_database_set_journal_mode_request = extern struct {
+    db: ?*zova_database = null,
+    journal_mode: u32 = 0,
+    out_report: ?*zova_journal_mode_report = null,
+};
+
+pub const zova_database_journal_modes_request = extern struct {
+    db: ?*zova_database = null,
+    out_report: ?*zova_journal_mode_report = null,
+};
+
+pub const zova_checkpointed_member = extern struct {
+    member: u32 = 0,
+    journal_mode: u32 = 0,
+    busy: u32 = 0,
+    wal_frames: u64 = 0,
+    checkpointed_frames: u64 = 0,
+};
+
+pub const zova_checkpoint_result = extern struct {
+    member_count: usize = 0,
+    members: [ZOVA_JOURNAL_MAX_MEMBERS]zova_checkpointed_member = @splat(.{}),
+};
+
+pub const zova_database_checkpoint_request = extern struct {
+    db: ?*zova_database = null,
+    mode: u32 = 0,
+    out_result: ?*zova_checkpoint_result = null,
+};
+
 pub const zova_database_restore_request = extern struct {
     source_path: ?[*:0]const u8,
     destination_path: ?[*:0]const u8,

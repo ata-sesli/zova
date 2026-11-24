@@ -13,7 +13,8 @@ mod vector;
 
 use database::{
     convert_sqlite_to_zova, migrate_database, probe_format, restore_backup,
-    restore_backup_to_memory, PyDatabase, PyFormatInfo, PyReclaimedMember, PySavepointContext,
+    restore_backup_to_memory, PyCheckpointedMember, PyDatabase, PyFormatInfo, PyJournalModeMember,
+    PyReclaimedMember, PySavepointContext,
 };
 use error::{ClosedHandleError, ZovaError};
 use extension::{
@@ -69,6 +70,8 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyFormatInfo>()?;
     m.add_class::<PyProgress>()?;
     m.add_class::<PyReclaimedMember>()?;
+    m.add_class::<PyJournalModeMember>()?;
+    m.add_class::<PyCheckpointedMember>()?;
     m.add_class::<PyGraphInfo>()?;
     m.add_class::<PyGraphNodeInput>()?;
     m.add_class::<PyGraphNode>()?;

@@ -7,9 +7,10 @@ use napi::{Env, Result, Task};
 use napi_derive::napi;
 
 use crate::database::{
-    native_kv_scan_page, reclaim_options, DatabaseState, ExtensionSelection, NativeDatabase,
-    NativeExtensionOptions, NativeFormatInfo, NativeKvEntry, NativeKvScanOptions, NativeKvScanPage,
-    NativeReclaimedMember, OwnedKvScanOptions,
+    native_kv_scan_page, parse_checkpoint_mode, parse_journal_mode, reclaim_options, DatabaseState,
+    ExtensionSelection, NativeCheckpointedMember, NativeDatabase, NativeExtensionOptions,
+    NativeFormatInfo, NativeJournalModeMember, NativeKvEntry, NativeKvScanOptions,
+    NativeKvScanPage, NativeReclaimedMember, OwnedKvScanOptions,
 };
 use crate::error::zova_error;
 use crate::graph::{
@@ -142,6 +143,69 @@ impl Task for ReclaimTask {
         Ok(output
             .into_iter()
             .map(NativeReclaimedMember::from)
+            .collect())
+    }
+
+    fn finally(mut self, _: Env) -> Result<()> {
+        self.state.take().expect("task state").finish();
+        Ok(())
+    }
+}
+
+pub struct JournalModeTask {
+    state: Option<DatabaseTaskState>,
+    /// `None` reports the modes; `Some` switches every member first.
+    mode: Option<zova::JournalMode>,
+}
+
+impl Task for JournalModeTask {
+    type Output = Vec<zova::JournalModeMember>;
+    type JsValue = Vec<NativeJournalModeMember>;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let database = &self.state.as_ref().expect("task state").database;
+        match self.mode {
+            Some(mode) => database.set_journal_mode(mode),
+            None => database.journal_modes(),
+        }
+        .map_err(zova_error)
+    }
+
+    fn resolve(&mut self, _: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output
+            .into_iter()
+            .map(NativeJournalModeMember::from)
+            .collect())
+    }
+
+    fn finally(mut self, _: Env) -> Result<()> {
+        self.state.take().expect("task state").finish();
+        Ok(())
+    }
+}
+
+pub struct CheckpointTask {
+    state: Option<DatabaseTaskState>,
+    mode: zova::CheckpointMode,
+}
+
+impl Task for CheckpointTask {
+    type Output = Vec<zova::CheckpointedMember>;
+    type JsValue = Vec<NativeCheckpointedMember>;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.state
+            .as_ref()
+            .expect("task state")
+            .database
+            .checkpoint(self.mode)
+            .map_err(zova_error)
+    }
+
+    fn resolve(&mut self, _: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output
+            .into_iter()
+            .map(NativeCheckpointedMember::from)
             .collect())
     }
 
@@ -847,6 +911,30 @@ impl NativeDatabase {
     ) -> Result<AsyncTask<ReclaimTask>> {
         Ok(AsyncTask::new(ReclaimTask {
             options: reclaim_options(max_pages, step_pages)?,
+            state: Some(DatabaseTaskState::new(self)?),
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<Array<NativeJournalModeMember>>")]
+    pub fn async_set_journal_mode(&self, mode: String) -> Result<AsyncTask<JournalModeTask>> {
+        Ok(AsyncTask::new(JournalModeTask {
+            mode: Some(parse_journal_mode(&mode)?),
+            state: Some(DatabaseTaskState::new(self)?),
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<Array<NativeJournalModeMember>>")]
+    pub fn async_journal_modes(&self) -> Result<AsyncTask<JournalModeTask>> {
+        Ok(AsyncTask::new(JournalModeTask {
+            mode: None,
+            state: Some(DatabaseTaskState::new(self)?),
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<Array<NativeCheckpointedMember>>")]
+    pub fn async_checkpoint(&self, mode: Option<String>) -> Result<AsyncTask<CheckpointTask>> {
+        Ok(AsyncTask::new(CheckpointTask {
+            mode: parse_checkpoint_mode(mode.as_deref())?,
             state: Some(DatabaseTaskState::new(self)?),
         }))
     }

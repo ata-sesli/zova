@@ -105,6 +105,54 @@ export function reclaimedMember(raw: {
   };
 }
 
+/** SQLite journal mode of one member file. */
+export type JournalModeName = "delete" | "truncate" | "persist" | "memory" | "wal" | "off";
+
+/** SQLite WAL checkpoint mode for `checkpoint`. */
+export type CheckpointModeName = "passive" | "full" | "restart" | "truncate";
+
+/** Journal mode of one member of a database set. */
+export interface JournalModeMember {
+  readonly member: ProgressMember;
+  readonly journalMode: JournalModeName;
+}
+
+/**
+ * What `checkpoint` did for one member file. `busy` is true when another
+ * handle kept the checkpoint from finishing; the frame counts are 0 when the
+ * member is not in WAL mode.
+ */
+export interface CheckpointedMember {
+  readonly member: ProgressMember;
+  readonly journalMode: JournalModeName;
+  readonly busy: boolean;
+  readonly walFrames: number;
+  readonly checkpointedFrames: number;
+}
+
+export function journalModeMember(raw: { member: string; journalMode: string }): JournalModeMember {
+  return {
+    member: raw.member as ProgressMember,
+    journalMode: raw.journalMode as JournalModeName,
+  };
+}
+
+export function checkpointedMember(raw: {
+  member: string;
+  journalMode: string;
+  busy: boolean;
+  walFrames: number;
+  checkpointedFrames: number;
+}): CheckpointedMember {
+  return {
+    member: raw.member as ProgressMember,
+    journalMode: raw.journalMode as JournalModeName,
+    busy: raw.busy,
+    walFrames: raw.walFrames,
+    checkpointedFrames: raw.checkpointedFrames,
+  };
+}
+
 export interface KvEntry {
   readonly key: Uint8Array;
   readonly value: Uint8Array;

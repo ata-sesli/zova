@@ -322,6 +322,20 @@ if err != nil {
 fmt.Println(members[0].PagesReleased, members[0].FreePagesLeft)
 ```
 
+`SetJournalMode` switches the main file and every attached store together:
+either every member ends in the requested mode, or the members already
+switched are restored and the call fails. `JournalModes` reports each member's
+mode, and `Checkpoint` returns one `CheckpointedMember` per member with its WAL
+and checkpointed frame counts. Only WAL mode is stored in the file; set it
+right after `Create`. See `docs/concurrency.md`.
+
+```go
+if _, err := db.SetJournalMode(zova.JournalModeWAL); err != nil {
+    log.Fatal(err)
+}
+members, err := db.Checkpoint(zova.CheckpointTruncate)
+```
+
 Diagnostic recovery commands such as `zova doctor`, `zova salvage --dry-run`,
 and `zova salvage <source> <destination>` are CLI-first. In v0.25, CLI salvage
 copies valid core data and uses extension salvage hooks for extension-owned

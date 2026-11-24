@@ -8,6 +8,8 @@ const object_impl = @import("../object.zig");
 const sqlite = @import("../sqlite.zig");
 const vector_impl = @import("../vector.zig");
 
+const journal = @import("journal.zig");
+
 const CreateOptions = @import("types.zig").CreateOptions;
 const Error = @import("types.zig").Error;
 const bound_graph_store_role = @import("types.zig").bound_graph_store_role;
@@ -98,6 +100,7 @@ pub fn createGraphStore(path: [:0]const u8) Error!void {
 }
 
 pub fn validateCreateOptions(options: CreateOptions) Error!void {
+    if (options.journal_mode) |mode| if (!mode.selectable()) return error.InvalidArgument;
     if (options.page_size == 0) return;
     if (options.page_size < 512 or options.page_size > 65536 or
         !std.math.isPowerOfTwo(options.page_size))
@@ -121,6 +124,15 @@ pub fn applyCreateOptions(db: *sqlite.Database, options: CreateOptions) Error!vo
     {
         return error.SqliteError;
     }
+}
+
+/// Switch a freshly created file to the requested journal mode. Runs after the
+/// private schema exists so the page size and auto-vacuum mode are already
+/// fixed when WAL mode writes the file header.
+pub fn applyCreateJournalMode(db: *sqlite.Database, options: CreateOptions) Error!void {
+    const mode = options.journal_mode orelse return;
+    const members = [_]journal.Member{.{ .member = .main, .schema = "main" }};
+    try journal.writeAll(db, &members, mode);
 }
 
 /// Format 13: every file Zova creates releases freed pages only through an

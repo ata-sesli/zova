@@ -17,6 +17,9 @@
     "zova_vector_put": "putVector goes through zova_vector_put_many with one item",
     "zova_graph_node_put": "putGraphNode goes through zova_graph_node_put_many with one item",
     "zova_graph_edge_put": "putGraphEdge goes through zova_graph_edge_put_many with one item",
-    "zova_graph_walk": "graphWalk goes through zova_graph_walk_direction, which takes the default outgoing direction"
+    "zova_graph_walk": "graphWalk goes through zova_graph_walk_direction, which takes the default outgoing direction",
+    "zova_database_set_journal_mode": "the browser runtime keeps every writable database in DELETE journal mode with one connection per persistent name, so there is no WAL to select or checkpoint",
+    "zova_database_journal_modes": "the browser runtime keeps every writable database in DELETE journal mode with one connection per persistent name, so there is no WAL to select or checkpoint",
+    "zova_database_checkpoint": "the browser runtime keeps every writable database in DELETE journal mode with one connection per persistent name, so there is no WAL to select or checkpoint"
   }
 }

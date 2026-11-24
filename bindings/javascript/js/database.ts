@@ -41,8 +41,11 @@ import { sqlFunctionTrampoline } from "./sql-function.js";
 import type { SqlFunction, SqlFunctionOptions } from "./sql-function.js";
 import { Statement } from "./statement.js";
 import { Subscription } from "./subscription.js";
-import { nativeExtensionOptions, reclaimedMember } from "./types.js";
+import {
+  checkpointedMember, journalModeMember, nativeExtensionOptions, reclaimedMember,
+} from "./types.js";
 import type {
+  CheckpointedMember, CheckpointModeName, JournalModeMember, JournalModeName,
   CreateOptions, ExtensionInfo, ExtensionOptions, FormatInfo, KvEntry, KvScanOptions, KvScanPage, OpenOptions, ReclaimedMember,
   ReclaimOptions,
 } from "./types.js";
@@ -339,6 +342,37 @@ export class Database {
     return callNative(() =>
       this.#native.reclaimSpace(options.maxPages, options.stepPages),
     ).map(reclaimedMember);
+  }
+
+  /**
+   * Switch every member of this database set (the main database and each
+   * attached bound store) to `mode` and return the modes now in effect.
+   * Either every member ends in `mode`, or the members already switched are
+   * restored and the call throws: `ZOVA_BUSY` when another handle keeps a
+   * member in WAL mode, `ZOVA_INVALID_ARGUMENT` for `"memory"`, `"off"` or an
+   * in-memory database, `ZOVA_OBJECT_TRANSACTION_ACTIVE` inside a transaction,
+   * and `ZOVA_READ_ONLY` on a read-only handle. Only WAL is stored in the
+   * file; to create a WAL database, call this right after `create`.
+   */
+  setJournalMode(mode: JournalModeName): JournalModeMember[] {
+    return callNative(() => this.#native.setJournalMode(mode)).map(journalModeMember);
+  }
+
+  /**
+   * Journal mode of each member: the main database, then each attached
+   * object, vector and graph store.
+   */
+  journalModes(): JournalModeMember[] {
+    return callNative(() => this.#native.journalModes()).map(journalModeMember);
+  }
+
+  /**
+   * Run a WAL checkpoint on every member, in `journalModes` order. Members
+   * not in WAL mode report zero frames. Throws
+   * `ZOVA_OBJECT_TRANSACTION_ACTIVE` inside a transaction.
+   */
+  checkpoint(mode: CheckpointModeName = "passive"): CheckpointedMember[] {
+    return callNative(() => this.#native.checkpoint(mode)).map(checkpointedMember);
   }
 
   lastInsertRowid(): bigint {
