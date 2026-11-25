@@ -293,6 +293,9 @@ const ReaderStats = struct {
     snapshot_reads: u64 = 0,
     seq_retries: u64 = 0,
     snapshot_waits: u64 = 0,
+    ckpt_races: u64 = 0,
+    ckpt_fallbacks: u64 = 0,
+    ckpt_violations: u64 = 0,
 };
 
 const ReaderJob = struct {
@@ -300,6 +303,8 @@ const ReaderJob = struct {
     mode: cwal.Mode,
     deadline_ns: u64,
     gap_us: u32,
+    /// Test: stay inside each read this long before checking it.
+    hold_us: u32,
     seed: u64,
     /// The writer has not crashed, so every solo commit on main.db is
     /// followed by one on store.db: a snapshot has solo_s == solo or
@@ -326,6 +331,8 @@ fn closeReader(job: *ReaderJob, conn: *Conn) void {
     job.stats.snapshot_reads += conn.stats.snapshot_reads;
     job.stats.seq_retries += conn.stats.seq_retries;
     job.stats.snapshot_waits += conn.stats.snapshot_waits;
+    job.stats.ckpt_races += conn.stats.ckpt_races;
+    job.stats.ckpt_fallbacks += conn.stats.ckpt_fallbacks;
     conn.close();
 }
 
@@ -348,6 +355,8 @@ fn readerThread(job: *ReaderJob) void {
         const bb = queryInt(conn, "select count(*) from bulk_s");
         const sa = queryInt(conn, "select count(*) from main.solo");
         const sb = queryInt(conn, "select count(*) from solo_s");
+        if (job.hold_us != 0) _ = c.usleep(job.hold_us);
+        if (!conn.snapshotIntact()) job.stats.ckpt_violations += 1;
         conn.exec("rollback") catch {};
         job.stats.reads += 1;
         if (a != b or ba != bb or (job.solo_order and sb != sa and sb + 1 != sa)) {
@@ -378,7 +387,7 @@ fn cmdReader(dir: []const u8, args: Args) void {
     var handles: [16]std.Thread = undefined;
     const deadline = cwal.monotonicNs() + duration_ms * 1_000_000;
     for (0..threads) |i| {
-        jobs[i] = .{ .dir = dir, .mode = args.mode(), .deadline_ns = deadline, .gap_us = @intCast(args.int("--gap-us", 0)), .seed = i * 7919 + @as(u64, @intCast(c.getpid())), .solo_order = args.int("--solo-order", 0) != 0 };
+        jobs[i] = .{ .dir = dir, .mode = args.mode(), .deadline_ns = deadline, .gap_us = @intCast(args.int("--gap-us", 0)), .hold_us = @intCast(args.int("--hold-us", 0)), .seed = i * 7919 + @as(u64, @intCast(c.getpid())), .solo_order = args.int("--solo-order", 0) != 0 };
         handles[i] = std.Thread.spawn(.{}, readerThread, .{&jobs[i]}) catch die("spawn", .{});
     }
     var total: ReaderStats = .{};
@@ -386,8 +395,8 @@ fn cmdReader(dir: []const u8, args: Args) void {
         handles[i].join();
         inline for (comptime std.meta.fieldNames(ReaderStats)) |name| @field(total, name) += @field(jobs[i].stats, name);
     }
-    out("reader reads={d} mixed={d} broken={d} reopen={d} ckpt_attempts={d} ckpt_denied={d} snapshot_reads={d} seq_retries={d} snapshot_waits={d}\n", .{ total.reads, total.mixed, total.broken, total.reopen, total.ckpt_attempts, total.ckpt_denied, total.snapshot_reads, total.seq_retries, total.snapshot_waits });
-    c.exit(if (total.mixed != 0) 1 else 0);
+    out("reader reads={d} mixed={d} broken={d} reopen={d} ckpt_attempts={d} ckpt_denied={d} snapshot_reads={d} seq_retries={d} snapshot_waits={d} ckpt_races={d} ckpt_fallbacks={d} ckpt_violations={d}\n", .{ total.reads, total.mixed, total.broken, total.reopen, total.ckpt_attempts, total.ckpt_denied, total.snapshot_reads, total.seq_retries, total.snapshot_waits, total.ckpt_races, total.ckpt_fallbacks, total.ckpt_violations });
+    c.exit(if (total.mixed != 0 or total.ckpt_violations != 0) 1 else 0);
 }
 
 // ---------------------------------------------------------------------------

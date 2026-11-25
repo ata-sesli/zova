@@ -100,7 +100,10 @@ miss an earlier one on another.
    `sqlite3_snapshot_open` each member at its saved header — the state
    before the commit that is being published. If SQLite cannot open the
    snapshot (rare; it could not keep a read mark there), roll back and wait
-   for the window to end.
+   for the window to end. The VFS grants SQLite's shared checkpoint lock
+   for these opens without a real lock and validates a checkpoint counter
+   instead (see [Snapshot read cost](#snapshot-read-cost)); if a checkpoint
+   started meanwhile, the read is retried.
 
 Each handle reads every member once at open, because
 `sqlite3_snapshot_open` needs the member's WAL to be open already.
@@ -246,6 +249,7 @@ clean journal.
 | Power loss | As above, but writes not yet fsynced are kept in memory; at the crash each is dropped, persisted, or torn at 512-byte granularity (3 seeds). Also during recovery. |
 | Concurrent snapshots | One writer process and two reader processes with two threads each. Readers pause between pinning members, attempt `PASSIVE` checkpoints, and close/reopen read-write connections (close-time checkpoints). Besides the pair and bulk counts, a reader also requires the single-file commits to be in order (`solo_s` equals `solo` or is one behind). The writer's window is widened by 300 µs, and the test runs twice: with all checkpoint modes (`RESTART`/`TRUNCATE` wait for readers, so the writer commits little while readers run) and with `PASSIVE` only. |
 | Surviving readers | Kill the writer at a random fsync or at the phase-two notification (inside the window) while reader processes keep running; restart a writer while they run; check afterwards. Half the trials use `PASSIVE` checkpoints only. |
+| Checkpoint race | The writer pauses 3 ms inside each `PASSIVE` checkpoint, after choosing how far to copy and before recording it; one reader thread pauses 1 ms inside each skipped checkpoint lock and stays in each read 5 ms. Every read checks that no checkpoint recorded an intent to copy past its snapshot (`nBackfillAttempted` ≤ the snapshot's `mxFrame`). |
 | Close-time checkpoint | One reader connection stays open while the writer is killed at each of its first 40 fsyncs; the reader then closes as the last connection, which makes SQLite try to checkpoint. |
 | Mutations | Rerun with each protocol piece disabled. |
 
@@ -428,11 +432,110 @@ outliers that put its mean at 18.5 ms.
   commits/s) and readers correspondingly faster.
 - No journal file; each member gains a one-row table (one 4 KiB page).
 
+### Snapshot read cost
+
+A read that starts inside a window used to cost about twice a normal read
+start. Per-phase timers in the VFS (temporary, ReleaseFast, markers variant,
+btrfs, 4 reader threads) showed where `sqlite3_snapshot_open` spent its
+time, for two members:
+
+| Step | Before | After |
+| --- | --- | --- |
+| Shared checkpoint lock, take (2 calls) | 9.0 µs | 0.27 µs |
+| Shared checkpoint lock, release (2 calls) | 4.8 µs | 0.22 µs |
+| Other VFS calls (read mark, barriers) | ~1 µs | 1.0–1.2 µs |
+| SQLite and shim CPU | 2.0 µs | 1.5–1.7 µs |
+| **Whole open** | **16.9 µs** | **2.7–3.2 µs** (2.2 µs with 1 reader) |
+
+The cost was the checkpoint lock: SQLite takes `WAL_CKPT_LOCK` shared
+around every snapshot open (`walBeginReadTransaction`), one `fcntl` to take
+and one to release per member, and they slow down as readers contend for the
+lock (7.3 µs per pair with 1 reader, 14.4 µs with 4).
+
+SQLite takes that lock only so that no checkpointer can choose to copy
+frames past the snapshot and record that choice (`nBackfillAttempted`) on
+both sides of the open's check. Every exclusive lock on that byte —
+checkpoints, snapshot recovery and wal-index recovery — goes through this
+VFS, so the VFS can enforce the same rule without the lock:
+
+- Before forwarding an exclusive lock on the checkpoint byte, the VFS adds
+  to a counter in the seqlock page (started checkpointers, high 32 bits;
+  active ones, low 32 bits). It retires the active count after the lock is
+  released, or at once if the lock was refused.
+- A snapshot open's shared lock is granted without a real lock if no
+  checkpointer is active, and the started count is remembered. At the
+  release, an unchanged count means any checkpointer either finished
+  before the open (its `nBackfillAttempted` is visible to the check) or
+  started after the reader held its read mark (and stops below it). A
+  changed count retries the whole read. If a checkpointer is active at the
+  start, the VFS takes the real lock, as before.
+
+Read tests after the change, default and markers variants: concurrent
+snapshots, surviving readers and close-time checkpoints all pass (0 mixed
+reads, 0 failed checks). In the checkpoint race test, 31 (default) and 21
+(markers) checkpoints started during a snapshot open; each read was retried
+and 0 violated its snapshot. Mutation `no-ckpt-validate` (accept the open
+without checking the counter) produced 31 violations in 31 races;
+`no-ckpt-skip` (always take the real lock) produced 0. The earlier read
+mutations (`no-seq-check`, `no-snapshot-open`, `no-solo-window`, `no-gate`)
+are still caught in both variants.
+
+Holding the real lock across reads instead (one `fcntl` pair per window)
+was also measured. It reached the same read throughput but starved
+checkpoints: a writer `PASSIVE` checkpoint after every commit returned
+`SQLITE_BUSY` 20,787 times against 2,767 successes on tmpfs. That change was
+dropped.
+
+Same-run comparison with dd64a15 (3 interleaved repetitions, medians, 4
+readers and one writer committing cross-file transactions back to back):
+
+| Filesystem | Plain WAL | `both` dd64a15 → now | `markers` dd64a15 → now |
+| --- | --- | --- | --- |
+| btrfs: reads/s | 197,178 | 150,824 → **184,920** | 129,332 → **217,055** |
+| btrfs: commits/s | 141 | 91 → 90 | 131 → 129 |
+| tmpfs: reads/s | 50,949 | 44,825 → **47,896** | 65,120 → **76,917** |
+| tmpfs: commits/s | 14,125 | 11,116 → 11,494 | 8,244 → 9,057 |
+
+Checkpoints are not held back. With a writer `PASSIVE` checkpoint after every
+commit (separate builds, one run of 3 s each), checkpoints refused with
+`SQLITE_BUSY` dropped: btrfs markers 20 → 2, tmpfs `both` 3,576 → 108, tmpfs
+markers 4,574 → 207. Successful checkpoints stayed level or rose.
+
+What a read now costs (same timers, 4 readers; 1 reader in brackets):
+
+| Read start | Time | Of which in the VFS |
+| --- | --- | --- |
+| Normal (sequence even): `BEGIN`, touch each member through `sqlite3_exec` | 8.1–9.5 µs (6.8) | 1.3–1.5 µs |
+| Window (sequence odd): `BEGIN`, `sqlite3_snapshot_open` × 2 | 2.7–3.2 µs (2.2) | 1.3–1.5 µs |
+| Two queries after a normal start | 10.3–11.9 µs (9.1) | — |
+| Two queries on a window snapshot | 10.6–12.4 µs (9.3) | — |
+
+- A window read is now cheaper to start than a normal one, which parses SQL
+  to touch each member. This is why `markers` (more window reads) reads
+  faster than plain WAL in this benchmark; plain WAL pays the same SQL
+  touch. Queries on an older snapshot cost 0.2–0.5 µs more.
+- The lower bound for the read path is therefore plain WAL's own read
+  start: the normal path adds two atomic loads of the sequence, and the
+  window path adds a 96-byte header copy, two counter loads and a retry if
+  a checkpoint starts during the open (31 retries in the race test; the
+  benchmark runs no checkpoints).
+- `both` stays 6% below plain on btrfs and tmpfs in the A/B. With timers
+  on, `both` and plain ran at the same rate (184,740 vs 182,937 reads/s), so
+  the remaining gap is not in the timed steps. The steps not timed are the
+  journal check (about half of reads in `both` read the journal; `markers`
+  has none) and sequence retries. Not profiled further.
+- Opening snapshots only for members that have already published was
+  considered and not built. SQLite takes the checkpoint lock for every
+  snapshot open, whether or not the member changed, so it would have saved
+  one lock pair per unchanged member. With the lock skipped, an open costs
+  about 1.1–1.5 µs per member, less than touching that member normally.
+- Reusing a snapshot across reads (keep a read open while the window has not
+  moved) was tried earlier as window pins: under 1% of window reads could
+  use it, and an open now costs about 1.5 µs per member, so reuse has
+  little left to save.
+
 ### Possible further reductions (not implemented)
 
-- **Cheaper snapshot reads**: find out where `sqlite3_snapshot_open`
-  spends its 17 µs (likely read-mark and checkpoint-lock calls) and whether
-  a reader can avoid them.
 - **Cheaper markers**: prepare the marker `UPDATE`s once per handle; on
   tmpfs most of the markers' 23 µs per commit is statement overhead.
 - **Fewer retries under very frequent commits**: when a pin is overlapped by
@@ -456,6 +559,12 @@ outliers that put its mean at 18.5 ms.
   fsync) and runs single-process only. Process-crash tests are multi-process.
 - One writer per set, enforced with `flock`. Lock files assume a local
   filesystem.
+- The checkpoint counter in the seqlock page counts only exclusive locks
+  taken through this VFS (the same assumption as the checkpoint gate). A
+  process killed while holding the checkpoint lock leaves the active count
+  raised; readers then take the real lock on every snapshot open (correct,
+  at the earlier cost) until the seqlock page is recreated. The race test
+  reads `nBackfillAttempted` from the wal-index at a fixed offset.
 - The wal-index header layout is a documented file format
   (walformat.html), but reading it from a VFS is not a supported SQLite API.
 - Snapshot reads build a `sqlite3_snapshot` from a saved wal-index header.

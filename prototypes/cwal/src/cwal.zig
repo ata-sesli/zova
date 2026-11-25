@@ -26,7 +26,11 @@ const shm_region_size = 32768;
 // SQLite WAL constants (sqlite3.c: WAL_WRITE_LOCK, WAL_CKPT_LOCK, WAL_HDRSIZE,
 // WAL_FRAME_HDRSIZE).
 const wal_write_lock = 0;
+const native_endian = @import("builtin").cpu.arch.endian();
 const wal_ckpt_lock = 1;
+/// WAL_READ_LOCK(0): a checkpointer takes it after choosing how far to
+/// copy and before recording that choice (nBackfillAttempted).
+const wal_read_lock0 = 3;
 const wal_header_size = 32;
 const wal_frame_header_size = 24;
 
@@ -53,7 +57,9 @@ pub const fault = struct {
     /// "no-lock-gate", "no-ckpt-gate", "no-salt-check", "no-seq-check",
     /// "no-snapshot-open", "no-solo-window", "always-rollforward",
     /// "always-rollback"; with commit markers "no-markers",
-    /// "no-marker-rollback", "no-cross-flag".
+    /// "no-marker-rollback", "no-cross-flag"; "no-ckpt-validate" (accept a
+    /// skipped checkpoint lock without checking the counter), "no-ckpt-skip"
+    /// (always take the real lock).
     pub var mutate: []const u8 = "";
     pub var syncs: u64 = 0;
 
@@ -198,6 +204,8 @@ const File = extern struct {
     kind: Kind,
     member: u8,
     conn_id: u32,
+    /// The first wal-index region, once mapped (test checks only).
+    shm0: ?*anyopaque,
 };
 
 var unix_vfs: [*c]c.sqlite3_vfs = null;
@@ -223,6 +231,11 @@ pub const variant = struct {
     pub var commit_markers = false;
     /// Test-only: sleep inside the publication window to widen it.
     pub var window_delay_us: u32 = 0;
+    /// Test-only: sleep inside a snapshot open's checkpoint-lock region, and
+    /// inside a checkpoint between choosing its end frame and recording it,
+    /// to widen the race the checkpoint counter must catch.
+    pub var ckpt_open_delay_us: u32 = 0;
+    pub var ckpt_scan_delay_us: u32 = 0;
 };
 
 pub fn register() void {
@@ -231,6 +244,8 @@ pub fn register() void {
     variant.snapshot_reads = (envU64("CWAL_SNAPSHOT_READS") orelse 1) != 0;
     variant.commit_markers = (envU64("CWAL_COMMIT_MARKERS") orelse 0) != 0;
     variant.window_delay_us = @intCast(envU64("CWAL_WINDOW_DELAY_US") orelse 0);
+    variant.ckpt_open_delay_us = @intCast(envU64("CWAL_CKPT_OPEN_DELAY_US") orelse 0);
+    variant.ckpt_scan_delay_us = @intCast(envU64("CWAL_CKPT_SCAN_DELAY_US") orelse 0);
     unix_vfs = c.sqlite3_vfs_find("unix");
     std.debug.assert(unix_vfs != null);
     cwal_vfs = unix_vfs.*;
@@ -264,6 +279,7 @@ fn vfsOpen(vfs: [*c]c.sqlite3_vfs, name: c.sqlite3_filename, file: [*c]c.sqlite3
     f.kind = if (flags & c.SQLITE_OPEN_MAIN_DB != 0) .main_db else if (flags & c.SQLITE_OPEN_WAL != 0) .wal else .other;
     f.member = 0;
     f.conn_id = 0;
+    f.shm0 = null;
     if (name != null and f.kind != .other) {
         if (c.sqlite3_uri_parameter(name, "cwal")) |id| f.conn_id = std.fmt.parseInt(u32, std.mem.span(id), 10) catch 0;
         if (c.sqlite3_uri_parameter(name, "cwm")) |m| f.member = std.fmt.parseInt(u8, std.mem.span(m), 10) catch 0;
@@ -440,20 +456,44 @@ fn ioDeviceCharacteristics(file: [*c]c.sqlite3_file) callconv(.c) c_int {
 
 fn ioShmMap(file: [*c]c.sqlite3_file, page: c_int, size: c_int, extend: c_int, out: [*c]?*volatile anyopaque) callconv(.c) c_int {
     const f = asFile(file);
-    return realMethods(f).xShmMap.?(f.real, page, size, extend, out);
+    const rc = realMethods(f).xShmMap.?(f.real, page, size, extend, out);
+    if (rc == c.SQLITE_OK and page == 0 and out.* != null) f.shm0 = @volatileCast(out.*);
+    return rc;
 }
 
 fn ioShmLock(file: [*c]c.sqlite3_file, offset: c_int, n: c_int, flags: c_int) callconv(.c) c_int {
     const f = asFile(file);
     fault.event("shm-lock");
     const conn = connFor(f);
+    // Exclusive locks on the checkpoint byte: checkpoints, snapshot recovery
+    // and wal-index recovery (which locks 1..2).
+    const ckpt_exclusive = offset <= wal_ckpt_lock and wal_ckpt_lock < offset + n and flags & c.SQLITE_SHM_EXCLUSIVE != 0;
+    var counted = false;
     if (conn) |cn| {
+        if (cn.opening_seq != 0 and offset == wal_ckpt_lock and n == 1 and flags & c.SQLITE_SHM_SHARED != 0) {
+            if (cn.ckptLockShared(f.member, flags & c.SQLITE_SHM_LOCK != 0)) return c.SQLITE_OK;
+        }
         if (cn.mode == .cwal and offset == wal_ckpt_lock and n == 1 and flags == c.SQLITE_SHM_LOCK | c.SQLITE_SHM_EXCLUSIVE) {
             if (!fault.mutated("no-ckpt-gate") and !cn.checkpointAllowed()) return c.SQLITE_BUSY;
+        }
+        if (cn.mode == .cwal and ckpt_exclusive and flags & c.SQLITE_SHM_LOCK != 0) {
+            // Announce the checkpointer before it can look at read marks.
+            _ = @atomicRmw(u64, &cn.snap.?.ckpt, .Add, ckpt_started + 1, .seq_cst);
+            counted = true;
+        }
+        if (cn.ckpt_ex[f.member] and offset == wal_read_lock0 and n == 1 and flags == c.SQLITE_SHM_LOCK | c.SQLITE_SHM_EXCLUSIVE and variant.ckpt_scan_delay_us != 0) {
+            _ = c.usleep(variant.ckpt_scan_delay_us);
         }
     }
     const rc = realMethods(f).xShmLock.?(f.real, offset, n, flags);
     if (conn) |cn| {
+        if (counted) {
+            if (rc == c.SQLITE_OK) cn.ckpt_ex[f.member] = true else _ = @atomicRmw(u64, &cn.snap.?.ckpt, .Sub, 1, .seq_cst);
+        } else if (ckpt_exclusive and flags & c.SQLITE_SHM_UNLOCK != 0 and cn.ckpt_ex[f.member]) {
+            // Retire the checkpointer only after everything it wrote.
+            cn.ckpt_ex[f.member] = false;
+            _ = @atomicRmw(u64, &cn.snap.?.ckpt, .Sub, 1, .seq_cst);
+        }
         if (rc == c.SQLITE_OK and offset == wal_write_lock and n == 1) {
             if (flags == c.SQLITE_SHM_LOCK | c.SQLITE_SHM_EXCLUSIVE) cn.write_locked[f.member] = true;
             if (flags & c.SQLITE_SHM_UNLOCK != 0) cn.write_locked[f.member] = false;
@@ -658,10 +698,15 @@ const SnapPage = extern struct {
     cross: u32,
     /// Commit markers: a writer rolled back after a member published.
     broken: u32,
-    reserved: [48]u8,
+    /// Checkpoint counter: low 32 bits, checkpointers holding (or taking)
+    /// the exclusive checkpoint lock on any member; high 32 bits, how many
+    /// have started. See `Conn.ckptLockShared`.
+    ckpt: u64,
+    reserved: [40]u8,
     hdr: [max_members][48]u8,
 };
 const snap_page_size = 4096;
+const ckpt_started: u64 = 1 << 32;
 
 // ---------------------------------------------------------------------------
 // Connections
@@ -708,6 +753,11 @@ pub const Stats = struct {
     snapshot_waits: u64 = 0,
     /// Reads that skipped the journal check (sequence even and unchanged).
     journal_skips: u64 = 0,
+    /// Snapshot opens during which a checkpoint started (each is retried).
+    ckpt_races: u64 = 0,
+    /// Snapshot opens that took the real checkpoint lock because a
+    /// checkpoint was running.
+    ckpt_fallbacks: u64 = 0,
 };
 
 pub const Conn = struct {
@@ -747,6 +797,21 @@ pub const Conn = struct {
     /// The even sequence at which this reader last found the journal clean
     /// (odd: none).
     clean_seq: u64 = 1,
+    /// Snapshot reads: the window (odd sequence) whose snapshots are being
+    /// opened, 0 otherwise.
+    opening_seq: u64 = 0,
+    /// Per member, during a snapshot open: SQLite's shared checkpoint lock
+    /// was granted without a real lock, at checkpoint count `ckpt_start`.
+    ckpt_skipped: [max_members]bool = @splat(false),
+    ckpt_start: [max_members]u32 = @splat(0),
+    /// A checkpoint started while a skipped lock was "held".
+    ckpt_race: bool = false,
+    /// Per member: this handle holds an exclusive lock on the checkpoint
+    /// byte that the counter includes.
+    ckpt_ex: [max_members]bool = @splat(false),
+    /// The current read uses snapshots, with these mxFrame values.
+    snapshot_open: bool = false,
+    snapshot_mx: [max_members]u32 = @splat(0),
     stats: Stats = .{},
 
     const allocator = std.heap.c_allocator;
@@ -1369,11 +1434,62 @@ pub const Conn = struct {
         }
     }
 
+    /// SQLite takes a shared checkpoint lock around each snapshot open (two
+    /// fcntl calls per member and read) only so that no checkpoint can
+    /// choose to copy frames past the snapshot and record that choice
+    /// (nBackfillAttempted) on either side of the open's check. Every
+    /// exclusive lock on that byte goes through this VFS and moves the
+    /// checkpoint counter first, so the reader skips the real lock and
+    /// validates instead: no checkpointer active when the lock is "taken",
+    /// none started by the time it is "released". Either a checkpointer
+    /// finished before (the reader sees its nBackfillAttempted), or it
+    /// starts after the reader holds its read mark (and stops below it).
+    /// Otherwise the open is retried. Returns false to take the real lock.
+    fn ckptLockShared(conn: *Conn, member: u8, take: bool) bool {
+        const page = conn.snap.?;
+        if (take) {
+            const w = @atomicLoad(u64, &page.ckpt, .seq_cst);
+            if (fault.mutated("no-ckpt-skip") or @as(u32, @truncate(w)) != 0) {
+                conn.stats.ckpt_fallbacks += 1;
+                return false;
+            }
+            conn.ckpt_skipped[member] = true;
+            conn.ckpt_start[member] = @intCast(w >> 32);
+            if (variant.ckpt_open_delay_us != 0) _ = c.usleep(variant.ckpt_open_delay_us);
+            return true;
+        }
+        if (!conn.ckpt_skipped[member]) return false;
+        conn.ckpt_skipped[member] = false;
+        const w = @atomicLoad(u64, &page.ckpt, .seq_cst);
+        if (@as(u32, @intCast(w >> 32)) != conn.ckpt_start[member]) {
+            conn.stats.ckpt_races += 1;
+            if (!fault.mutated("no-ckpt-validate")) conn.ckpt_race = true;
+        }
+        return true;
+    }
+
+    /// Test check, during a read: no checkpoint has recorded an intent to
+    /// copy frames past a member's snapshot (nBackfillAttempted, in the
+    /// wal-index after the two headers and nBackfill, the read marks and the
+    /// lock bytes). That is what SQLite's checkpoint lock guarantees for a
+    /// snapshot open; afterwards the reader's read mark does.
+    pub fn snapshotIntact(conn: *Conn) bool {
+        if (!conn.snapshot_open) return true;
+        for (0..conn.nmembers) |m| {
+            const f = conn.member_db[m] orelse continue;
+            const shm: [*]u8 = @ptrCast(f.shm0 orelse continue);
+            const attempted = @atomicLoad(u32, @as(*u32, @ptrCast(@alignCast(shm + 128))), .seq_cst);
+            if (attempted > conn.snapshot_mx[m]) return false;
+        }
+        return true;
+    }
+
     /// Seqlock read. Outside a publication window, pin the members normally
     /// and retry if a window started meanwhile. Inside one, open each member
     /// at the header the writer saved before any member published.
     fn beginSnapshotRead(conn: *Conn, gap_us: u32) Error!void {
         const page = conn.snap.?;
+        conn.snapshot_open = false;
         while (true) {
             const s1 = @atomicLoad(u64, &page.seq, .seq_cst);
             // Read the journal after the sequence: a writer that rolls back
@@ -1412,6 +1528,8 @@ pub const Conn = struct {
                 return;
             }
             var opened = true;
+            conn.opening_seq = s1;
+            conn.ckpt_race = false;
             for (0..conn.nmembers) |m| {
                 if (m != 0 and gap_us != 0) _ = c.usleep(gap_us);
                 var snapshot: c.sqlite3_snapshot = .{ .hidden = hdrs[m] };
@@ -1420,7 +1538,15 @@ pub const Conn = struct {
                     break;
                 }
             }
+            conn.opening_seq = 0;
+            conn.ckpt_skipped = @splat(false);
+            if (conn.ckpt_race) {
+                conn.exec("rollback") catch {};
+                continue;
+            }
             if (opened) {
+                for (0..conn.nmembers) |m| conn.snapshot_mx[m] = std.mem.readInt(u32, hdrs[m][16..20], native_endian);
+                conn.snapshot_open = true;
                 conn.stats.snapshot_reads += 1;
                 return;
             }

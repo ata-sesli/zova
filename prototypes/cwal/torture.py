@@ -270,6 +270,35 @@ def close_checkpoint(work, tpl, mode, n_syncs=40):
     return fails
 
 
+def checkpoint_race(work, tpl, trials=3):
+    """Snapshot opens skip SQLite's shared checkpoint lock and check the
+    checkpoint counter instead. Widen the race: the writer pauses inside each
+    checkpoint after choosing its end frame and before recording it, and the
+    reader pauses inside the skipped lock. One reader thread, so no other
+    read mark holds the checkpoint back. Each read then checks that no
+    checkpoint recorded an intent to copy past its snapshot."""
+    stats = Counter()
+    errs = []
+    for t in range(trials):
+        d = os.path.join(work, f"cr-{t}")
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.copytree(tpl, d)
+        we = dict(WINDOW_ENV, CWAL_CKPT_SCAN_DELAY_US="3000")
+        w = subprocess.Popen([BIN, "writer", d, "--mode", "cwal", "--rounds", "3000", "--delay-us", "100", "--ckpt", "passive"], env=we, stdout=subprocess.PIPE, text=True)
+        time.sleep(0.1)
+        re_ = dict(os.environ, CWAL_CKPT_OPEN_DELAY_US="1000")
+        r = subprocess.run([BIN, "reader", d, "--mode", "cwal", "--threads", "1", "--duration-ms", "2500", "--hold-us", "5000"], env=re_, capture_output=True, text=True)
+        wout = w.communicate()[0]
+        m = re.search(r"reader (.*)$", r.stdout, re.M)
+        for kv in m.group(1).split():
+            k, v = kv.split("=")
+            stats[k] += int(v)
+        err = check(d, "cwal", acks(wout))
+        if err:
+            errs.append(err)
+    return stats, errs
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--work", default=os.environ.get("CWAL_WORK", "/tmp/cwal-torture"))
@@ -329,7 +358,7 @@ def main():
             for mode in ("plain", "cwal"):
                 stats, err = concurrent_readers(a.work, tpl, mode, ckpt)
                 print(f"{mode} ckpt={ckpt}: {dict(stats)} check={'ok' if not err else err}")
-                failed |= mode == "cwal" and (stats["mixed"] != 0 or bool(err))
+                failed |= mode == "cwal" and (stats["mixed"] != 0 or stats["ckpt_violations"] != 0 or bool(err))
 
     if want("survivors"):
         print("== writer killed while reader processes keep running", flush=True)
@@ -337,13 +366,19 @@ def main():
             res = surviving_readers(a.work, tpl, mode, a.survivor_trials)
             agg = Counter()
             for r in res:
-                for k in ("reads", "mixed", "broken", "ckpt_denied", "restart_broken", "snapshot_reads", "seq_retries", "snapshot_waits"):
+                for k in ("reads", "mixed", "broken", "ckpt_denied", "restart_broken", "snapshot_reads", "seq_retries", "snapshot_waits", "ckpt_races", "ckpt_violations"):
                     agg[k] += r[k]
             errs = [r for r in res if r["err"]]
             print(f"{mode}: trials={len(res)} crashed={sum(r['crashed'] for r in res)} restarted={sum(r['restarted'] for r in res)} {dict(agg)} check_failures={len(errs)}")
             for r in errs[:3]:
                 print("    ", r["k"], r["err"])
-            failed |= mode == "cwal" and (agg["mixed"] != 0 or bool(errs))
+            failed |= mode == "cwal" and (agg["mixed"] != 0 or agg["ckpt_violations"] != 0 or bool(errs))
+
+    if want("ckptrace"):
+        print("== checkpoint starts during a snapshot open (widened race)", flush=True)
+        stats, errs = checkpoint_race(a.work, tpl)
+        print(f"cwal: {dict(stats)} check_failures={len(errs)}")
+        failed |= stats["ckpt_violations"] != 0 or stats["mixed"] != 0 or bool(errs) or (stats["ckpt_races"] == 0 and os.environ.get("CWAL_MUTATE") != "no-ckpt-skip")
 
     if want("closeckpt"):
         print("== last reader closes after the writer is killed at each of its first 40 fsyncs", flush=True)
