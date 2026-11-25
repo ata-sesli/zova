@@ -12,7 +12,7 @@ while keeping WAL's concurrency (readers do not wait for fsyncs)?
 
 **Answer: yes, at a cost.** A cross-file commit needs one extra fsync
 (three instead of two). Readers almost never wait for the writer (16 ms in
-total for 4 readers over 3 s): on a real disk they reach about 60% of plain
+total for 4 readers over 3 s): on a real disk they reach about 76% of plain
 WAL read throughput under a saturating writer.
 Numbers are under [Results](#results).
 
@@ -82,7 +82,12 @@ miss an earlier one on another.
    while `-live` is held (the writer is alive); `PREPARED` without a live
    writer, or `BROKEN`, returns `error.Broken`. The journal is read after
    `s1` because a writer that rolls back marks the set `BROKEN` before it
-   closes the window.
+   closes the window. A reader skips this check when `s1` is even and equal
+   to the sequence at which it last found the journal `IDLE` or
+   `COMMITTED`: a clean journal becomes unreadable only through a window,
+   which moves the sequence. The one exception is a writer that dies after
+   writing `PREPARED` but before opening the window; it published nothing,
+   so every member still shows the last committed state.
 2. `s1` even (no publication in progress): `BEGIN`, touch every member
    (taking its WAL read lock), load the sequence again. If it is still `s1`,
    no publication happened while the members were pinned, so they show one
@@ -236,6 +241,17 @@ Mutations. Each test-only defect is caught by at least one test:
 | `no-lock-gate` (close-time checkpoints allowed) | 8 / 40 torn sets in the close test |
 | `no-ckpt-gate` (`WAL_CKPT_LOCK` not gated) | 2 / 40 torn sets in the close test; 16,492 mixed reads and 1 torn set in the survivor test |
 
+Rerun after readers started skipping the journal check (see Overhead):
+the crash, recovery and power-loss results are identical; concurrent
+snapshots 0 mixed of 2,355 (166 snapshot reads); survivors 0 mixed of
+313,430; close test 0 / 40. Every mutation is still caught (`no-gate` 71,
+`no-seq-check` 35, `no-snapshot-open` 95, `no-solo-window` 14 mixed reads;
+the others unchanged).
+
+No test produces `BROKEN` (a writer that rolls back after a member
+published). The reader's journal check for it, and the rule for skipping
+that check, are argued but not exercised.
+
 ### Overhead
 
 Medians of 3 interleaved repetitions, ReleaseFast. `base` is the first
@@ -270,17 +286,31 @@ point queries and a rollback, for 3 s.
 | btrfs / SSD | CWAL base | 32,235 | 58 | 3.5 s | — |
 | btrfs / SSD | CWAL lazy | 32,610 | 70 | 4.3 s | — |
 | btrfs / SSD | CWAL snap | 128,625 | 73 | 0 | 67,870 |
-| btrfs / SSD | CWAL both | **124,762** | **92** | 16 ms | 83,750 |
+| btrfs / SSD | CWAL both, journal checked on every read | 124,762 | 92 | 16 ms | 83,750 |
+| btrfs / SSD | CWAL both (current) ¹ | **148,880** | **100** | 16 ms | 87,658 |
 | tmpfs | plain | 51,396 | 14,181 | — | — |
 | tmpfs | CWAL base | 71,812 | 5,858 | 1.0 s (writer 1.4 s) | — |
 | tmpfs | CWAL snap | 41,698 | 11,046 | 0 | 30,036 |
-| tmpfs | CWAL both | 39,990 | 11,217 | 0 | 28,371 |
+| tmpfs | CWAL both, journal checked on every read | 39,990 | 11,217 | 0 | 28,371 |
+| tmpfs | CWAL both (current) ¹ | **45,174** | **10,906** | 0 | 36,697 |
+
+¹ Separate run (3 interleaved repetitions against plain). Plain WAL in that
+run: 194,922 reads/s and 140 commits/s on btrfs, 53,803 reads/s and 13,658
+commits/s on tmpfs.
 
 - On a real disk, snapshot reads raise reader throughput about 4× (32k →
   125k reads/s) and readers no longer wait. About 22% of reads started
-  inside a window and used snapshots. The remaining gap to plain WAL (60% of
-  its reads/s) is reader CPU, not waiting: each `beginRead` reads the
-  journal and runs one extra query per member to pin it.
+  inside a window and used snapshots.
+- Skipping the journal check while the sequence has not moved (and reading
+  both journal slots with one `pread`) raised reads from 60% to 76% of plain
+  WAL on btrfs (125k → 149k reads/s), and from 78% to 84% on tmpfs. On
+  btrfs about 70% of reads skip the journal. Before the change, a reader
+  spent about 17 µs starting a read against 8 µs for plain WAL; 6 µs of it
+  was the journal check.
+- The remaining gap is the snapshot path: a read that starts inside a
+  window spends about 17 µs in `sqlite3_snapshot_open`, against about 9 µs
+  to pin members normally (both measured with temporary timers), and about
+  20% of reads on btrfs start inside a window.
 - The writer also gains: 58 → 92 commits/s on btrfs (plain: 129), from the
   removed fsync and from no longer waiting for readers on the gate.
 - On tmpfs the gate favoured readers (72k reads/s, but the writer was held
@@ -294,10 +324,9 @@ point queries and a rollback, for 3 s.
 
 ### Possible further reductions (not implemented)
 
-- **Cheaper read start**: pin members without an extra query each (for
-  example by starting the read on the first real statement and checking the
-  sequence afterwards), and read the journal only when the sequence is odd
-  or has moved.
+- **Cheaper snapshot reads**: find out where `sqlite3_snapshot_open`
+  spends its 17 µs (likely read-mark and checkpoint-lock calls) and whether
+  a reader can avoid them.
 - **Fewer retries under very frequent commits**: when a pin is overlapped by
   a window, go straight to the snapshot path for that window instead of
   restarting.

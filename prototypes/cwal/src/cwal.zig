@@ -633,6 +633,8 @@ pub const Stats = struct {
     seq_retries: u64 = 0,
     /// Snapshot opens that failed, so the reader waited for the window.
     snapshot_waits: u64 = 0,
+    /// Reads that skipped the journal check (sequence even and unchanged).
+    journal_skips: u64 = 0,
 };
 
 pub const Conn = struct {
@@ -665,6 +667,9 @@ pub const Conn = struct {
     pending_parts: [max_members]Part = @splat(.{}),
     pending_nparts: u32 = 0,
     violation: bool = false,
+    /// The even sequence at which this reader last found the journal clean
+    /// (odd: none).
+    clean_seq: u64 = 1,
     stats: Stats = .{},
 
     const allocator = std.heap.c_allocator;
@@ -833,12 +838,14 @@ pub const Conn = struct {
 
     pub fn readJournal(conn: *Conn) Record {
         const j = conn.journal.?;
+        // Both slots in one read. A short read zero-fills the rest, which
+        // does not decode.
+        var b: [slot_stride + record_size]u8 = undefined;
+        const rc = j.base.pMethods.*.xRead.?(&j.base, &b, b.len, 0);
+        if (rc != c.SQLITE_OK and rc != c.SQLITE_IOERR_SHORT_READ) return .{};
         var best: Record = .{};
         for (0..2) |slot| {
-            var b: [record_size]u8 = undefined;
-            const rc = j.base.pMethods.*.xRead.?(&j.base, &b, record_size, @intCast(slot * slot_stride));
-            if (rc != c.SQLITE_OK) continue;
-            if (decode(&b)) |r| {
+            if (decode(b[slot * slot_stride ..][0..record_size])) |r| {
                 if (r.seq > best.seq) best = r;
             }
         }
@@ -1158,7 +1165,16 @@ pub const Conn = struct {
             const s1 = @atomicLoad(u64, &page.seq, .seq_cst);
             // Read the journal after the sequence: a writer that rolls back
             // after publishing marks the set broken before the window ends.
-            if (!conn.journalReadable(conn.readJournal().state)) return error.Broken;
+            // A clean journal can only become unreadable with a window
+            // (PREPARED, then a dead writer or BROKEN), which moves the
+            // sequence. The one exception, a writer that dies after writing
+            // PREPARED but before opening the window, published nothing, so
+            // every member still shows the last committed state.
+            if (s1 & 1 != 0 or s1 != conn.clean_seq) {
+                const state = conn.readJournal().state;
+                if (!conn.journalReadable(state)) return error.Broken;
+                if (s1 & 1 == 0 and (state == .idle or state == .committed)) conn.clean_seq = s1;
+            } else conn.stats.journal_skips += 1;
             if (s1 & 1 == 0) {
                 try conn.exec("begin");
                 try conn.pinMembers(gap_us);

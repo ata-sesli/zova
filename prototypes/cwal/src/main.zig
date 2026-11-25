@@ -441,6 +441,7 @@ const RwJob = struct {
     gate_wait_ns: u64 = 0,
     snapshot_reads: u64 = 0,
     seq_retries: u64 = 0,
+    journal_skips: u64 = 0,
 };
 
 fn rwWriter(job: *RwJob) void {
@@ -468,6 +469,7 @@ fn rwReader(job: *RwJob) void {
     job.gate_wait_ns = conn.stats.gate_wait_ns;
     job.snapshot_reads = conn.stats.snapshot_reads;
     job.seq_retries = conn.stats.seq_retries;
+    job.journal_skips = conn.stats.journal_skips;
     conn.close();
 }
 
@@ -490,19 +492,21 @@ fn cmdBenchRw(dir: []const u8, args: Args) void {
     var reader_wait: u64 = 0;
     var snapshot_reads: u64 = 0;
     var seq_retries: u64 = 0;
+    var journal_skips: u64 = 0;
     for (0..readers) |i| {
         handles[i].join();
         reads += jobs[i].count;
         reader_wait += jobs[i].gate_wait_ns;
         snapshot_reads += jobs[i].snapshot_reads;
         seq_retries += jobs[i].seq_retries;
+        journal_skips += jobs[i].journal_skips;
     }
     handles[16].join();
     const seconds = @as(f64, @floatFromInt(duration_ms)) / 1000.0;
-    out("benchrw mode={s} readers={d} reads_per_s={d:.0} commits_per_s={d:.0} reader_gate_wait_ms={d:.1} writer_gate_wait_ms={d:.1} snapshot_reads={d} seq_retries={d}\n", .{
+    out("benchrw mode={s} readers={d} reads_per_s={d:.0} commits_per_s={d:.0} reader_gate_wait_ms={d:.1} writer_gate_wait_ms={d:.1} snapshot_reads={d} seq_retries={d} journal_skips={d}\n", .{
         @tagName(mode),                                  readers,                                    @as(f64, @floatFromInt(reads)) / seconds,
         @as(f64, @floatFromInt(writer.count)) / seconds, @as(f64, @floatFromInt(reader_wait)) / 1e6, @as(f64, @floatFromInt(writer.gate_wait_ns)) / 1e6,
-        snapshot_reads,                                  seq_retries,
+        snapshot_reads,                                  seq_retries,                                journal_skips,
     });
 }
 
