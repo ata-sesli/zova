@@ -141,6 +141,12 @@ VFS, so the VFS enforces the same rule without the lock:
   checkpointer must be dead, so it zeroes the active count. If a live
   process keeps a lock past the deadline, the count stays, which only costs
   readers the real lock.
+- The two orderings that matter are a store followed by a load: the
+  checkpointer's increment before it reads the read marks, and the reader's
+  read mark before it re-reads the counter. A sequentially consistent
+  read-modify-write does not order a later plain load on ARM64, so the VFS
+  issues a full barrier (`xShmBarrier`) after the increment and before the
+  release-time load, instead of relying on barriers inside SQLite.
 
 ### Recovery
 
@@ -228,14 +234,20 @@ zig build -Doptimize=ReleaseFast
 
 `zig-out/bin/cwal` commands: `seed`, `writer`, `reader`, `check`, `recover`,
 `state` (prints the seqlock page), `bench`, `benchrw`, and for sets of 2 to
-32 files (`--files N`) `nseed`, `nwriter`, `nsem`, `nreader`, `ncheck`. Fault injection is
+32 files (`--files N`) `nseed`, `nwriter`, `nwriters` (competing writer
+threads), `nsem`, `nreader`, `ncheck`. Fault injection is
 controlled by environment: `CWAL_CRASH_AT=n` (SIGKILL at event n),
 `CWAL_CRASH_TAG=t[,t...]` (count only events with these tags), `CWAL_POWERLOSS=1` +
 `CWAL_SEED`, `CWAL_TRACE=1`, and `CWAL_MUTATE=…` (test-only defects, to show
 the tests catch them; see the mutation table). `CWAL_WINDOW_DELAY_US`,
 `CWAL_CKPT_OPEN_DELAY_US`, `CWAL_CKPT_SCAN_DELAY_US` and
-`CWAL_ALIVE_DELAY_US` widen races for tests. `CWAL_DEBUG=1` appends each
-handle's open, recovery, discard and commit decisions to `main.db-cwal-debug`. `bench.sh` takes `CWAL_BIN` to run a separate ReleaseFast build.
+`CWAL_ALIVE_DELAY_US` widen races for tests, and
+`CWAL_DELAY_POINTS=name=us[,...]` pauses at named checkpoint-counter points
+(`ckpt-pre-inc`, `ckpt-locked`, `ckpt-pre-dec`, `ckpt-post-dec`,
+`open-take`, `open-release`, `reset-held`), which are also fault events.
+`CWAL_DEBUG=1` appends each handle's open, recovery, discard and commit
+decisions to `main.db-cwal-debug`. `bench.sh` and `torture.py` take
+`CWAL_BIN` to run another build (for example an aarch64 binary under qemu).
 
 ## Tests
 
@@ -321,6 +333,21 @@ transaction 2 ms and read it again, and both reads must be the same.
 | nsem with long-lived readers | `nsem` (320 rounds, 3 ms apart, window widened 300 µs) with 2 reader processes × 2 threads; 2 seeds per file count. |
 | nsem process crash | The N-file crash matrix with `nsem` (32 rounds: every scenario twice) as the writer, at 2, 3, 8 and 32 files (32 sampled to 3,000); crash recovery itself for 8 torn states at 8 files. |
 | nsem power loss | As above with the power-loss model, 3 seeds, at 3 and 8 files (sampled to 3,000). |
+
+Concurrency tests (torture sections `scale`, `writers`, `longsnap`,
+`ckptpoints`, `ckptkill`). The writer runs without delay unless stated, and
+the harness reads every process's output as it arrives and timestamps each
+acknowledged commit, so it measures the writer's commit rate and its longest
+gap between commits. Every run ends with `ncheck`; the writer is stopped by
+`SIGKILL`.
+
+| Test | What it does |
+| --- | --- |
+| Reader scaling | 1, 4, 8, 16 and 32 readers (processes × threads: 1×1, 2×2, 2×4, 4×4, 4×8) for 2 s against a writer committing as fast as it can, at 3, 8 and 32 files, with `PASSIVE` or all checkpoint modes. Records reads by the slowest thread (reader starvation), commits per second and the longest gap between commits (writer starvation), and the peak WAL size. |
+| Competing writers | `nwriters` processes × threads (1×8, 4×1, 4×4) for 3 s, each thread repeatedly opening a writer handle, running 1–12 rounds and closing; `WriterBusy` and `Broken` are retried after 0.1–1 ms. 2×2 readers run throughout. Two of three seeds `SIGKILL` one writer process at a random time and start a replacement. At 2, 3, 8 and 32 files. |
+| Long-lived snapshot | One reader holds each snapshot 1.5 s while 1×2 other readers and a saturating writer run for 3 s, at 3 and 32 files, both checkpoint settings. |
+| Checkpoint-counter pauses | A 3 ms pause at each point around the counter's increment, decrement and reset, and 1 ms at a snapshot open's take and release; the writer checkpoints (`PASSIVE`, scan widened 3 ms) and one reader holds each read 5 ms and checks `nBackfillAttempted` as in the checkpoint race test. `reset-held` uses a chain of writers so the reset runs repeatedly. At 2 and 8 files. |
+| Checkpoint-counter kills | Kill the writer at the 1st, 2nd and 5th time it reaches each counter point, at the reset, and at six wal-index barriers. Then a new writer opens (pausing while it holds every checkpoint lock) while readers are either already running or start 5 ms before it. Requires the active count to be 0 after that writer, and `ncheck`. At 2 and 8 files. |
 
 ## Results
 
@@ -416,6 +443,56 @@ No mutation was run against `nsem`: with `no-markers` its own checks (the
 marker number of each commit, the refused autocommit) fail on every run.
 The plain-WAL baseline shows that the checker detects torn commits in this
 workload.
+
+### Concurrency
+
+Same machine, 2026-11-25, tmpfs, Debug build. All runs below passed `ncheck`
+with 0 mixed reads and 0 checkpoint violations for CWAL; the plain-WAL
+baseline had mixed reads in every `PASSIVE` run, and 5 of its runs failed
+`ncheck` with a torn transaction when the writer was killed at the end.
+
+Reader scaling, CWAL (plain WAL in parentheses), 2 s each:
+
+| Files | Checkpoints | Readers | Commits/s | Longest writer gap | Reads by slowest thread | Peak WAL |
+| --- | --- | --- | --- | --- | --- | --- |
+| 3 | `PASSIVE` | 1 / 32 | 7,651 / 1,813 (10,488 / 2,349) | 2 / 20 ms | 46 / 10 (33 / 12) | 195 / 46 MB |
+| 8 | `PASSIVE` | 1 / 32 | 4,834 / 1,084 (6,670 / 2,009) | 2 / 15 ms | 45 / 13 (37 / 10) | 114 / 51 MB |
+| 32 | `PASSIVE` | 1 / 32 | 1,593 / 508 (2,232 / 411) | 5 / 21 ms | 49 / 4 (37 / 12) | 185 / 78 MB |
+| 3 / 8 / 32 | all | 1–32 | 12–141 (18–380) | 0.2–2.0 s (0.1–2.0 s) | 23–339 (34–275) | under 2 MB |
+
+- No reader starved: at 32 readers every thread completed reads in every
+  configuration. Reads get slower as the WAL grows under `PASSIVE`
+  checkpoints, in both modes.
+- With all checkpoint modes, the writer waits up to the busy timeout in
+  each `RESTART`/`TRUNCATE` checkpoint while readers keep the WAL in use, so
+  writer gaps of about 2 s (the length of the run) occur in both modes.
+- With `PASSIVE` checkpoints the writer never waits more than 21 ms, but
+  the WAL reached 46–227 MB in 2 s.
+
+| Test | Files | Result |
+| --- | --- | --- |
+| Competing writers, 36 runs | 2 / 3 / 8 / 32 | **0 mixed**, all acked commits present; 31–637 writer opens and 470–4,171 commits per run; 3,249–39,968 `WriterBusy` retries. One 4×4 kill run saw 245 `Broken` opens and 11 broken reader opens while the killed writer's commit awaited recovery. |
+| Long-lived snapshot (1.5 s) | 3 / 32 | **0 mixed** in the held and the other readers. `PASSIVE`: writer gap 10–13 ms, WAL 309 and 357 MB after 3 s (plain 226 and 286 MB). All modes: writer gap 1.5–3.0 s in both modes. |
+| Checkpoint-counter pauses, 14 runs | 2 / 8 | **0 violations**, 0 mixed; 0–218 checkpoint races and 0–735 fallbacks to the real lock per run; active count 0 afterwards. |
+| Checkpoint-counter kills, 76 runs | 2 / 8 | **0 mixed**, all checks pass. 26 kills left the active count raised (inside the lock); the next writer cleared it in all 76. |
+| aarch64 build under qemu: reader scaling, competing writers, counter pauses and kills | 3 (2 for the counter tests) | **0 mixed**, 0 violations, all checks pass in 10 CWAL scaling runs, 9 writer runs, 7 pause runs and 38 kill runs. qemu runs on the x86_64 host's memory ordering, so this checks the build and logic, not ARM ordering. |
+
+Findings:
+
+- The counter reset never waited for a live checkpointer (`reset_waits=0`
+  in all 76 kill runs). Before the reset, the opening writer discards
+  unpublished frames while holding every member's WAL write lock. The only
+  other exclusive checkpoint-lock holder is wal-index recovery, which needs
+  the same write lock, and the first opener's recovery runs under the open
+  gate. So a reset concurrent with a counted checkpointer was not
+  produced; the kill test covers the nearest case (a reader's wal-index
+  recovery in progress when the writer died).
+- The first version of these tests read the writer's output only at the
+  end. The writer filled the 64 KB pipe and blocked, which looked like
+  writer starvation. The harness now reads output as it arrives. Earlier
+  live-reader tests (sections above) still read at the end; their writers
+  are throttled by a per-round delay, but may still pause once about 5,000
+  commits are buffered.
 
 ### Overhead
 
@@ -566,4 +643,10 @@ journal check on reads.
 - No test produces a rollback after a member published (the broken flag).
   The reader and checkpoint checks for it are argued but not exercised.
 - Tested on Linux x86_64 with SQLite 3.53.4 (the vendored copy), tmpfs and
-  btrfs.
+  btrfs. An aarch64 build ran a subset under qemu user emulation on the
+  same x86_64 host, which does not reproduce ARM's weaker memory ordering;
+  ARM64 ordering rests on review of the barriers, not on tests.
+- A reader holding one snapshot for a long time either stalls the writer
+  (`RESTART`/`TRUNCATE` checkpoints wait for it, up to the busy timeout) or
+  lets the WAL grow without bound (`PASSIVE`). This is SQLite WAL behavior
+  and the same with the protocol off.

@@ -302,7 +302,7 @@ fn cmdNWriter(dir: []const u8, args: Args) void {
         c.exit(if (err == error.Broken) 3 else 2);
     };
     var buf: [8192]u8 = undefined;
-    var k = queryInt(conn, unionSql(&buf, n, "select coalesce(max(k), 0) from u")) + 1;
+    const k = queryInt(conn, unionSql(&buf, n, "select coalesce(max(k), 0) from u")) + 1;
     var prng = std.Random.DefaultPrng.init(args.int("--seed", 1) *% 0x9e3779b97f4a7c15 +% @as(u64, @intCast(k)));
     const rand = prng.random();
     const delay_us = args.int("--delay-us", 0);
@@ -323,6 +323,19 @@ fn cmdNWriter(dir: []const u8, args: Args) void {
         }
         if (used == 0) die("empty --file-mask", .{});
     }
+    nRounds(conn, mode, k, rounds, rand, delay_us, passive_only, files[0..used]);
+    const reset_waits = conn.stats.reset_waits;
+    conn.close();
+    cwal.flushPending();
+    out("events={d} tagged={d} reset_waits={d}\n", .{ cwal.fault.count(), cwal.fault.taggedCount(), reset_waits });
+}
+
+/// nwriter's workload from transaction k on: odd k a single-file
+/// autocommit, even k a transaction over 2 or more of `files`, every 10th
+/// round a checkpoint.
+fn nRounds(conn: *Conn, mode: cwal.Mode, first_k: i64, rounds: u64, rand: std.Random, delay_us: u64, passive_only: bool, files: []const usize) void {
+    var k = first_k;
+    const used = files.len;
     var r: u64 = 0;
     while (r < rounds) : (r += 1) {
         if (delay_us != 0) _ = c.usleep(@intCast(delay_us));
@@ -359,9 +372,66 @@ fn cmdNWriter(dir: []const u8, args: Args) void {
         }
         k += 1;
     }
-    conn.close();
+}
+
+const WritersJob = struct {
+    dir: []const u8,
+    mode: cwal.Mode,
+    n: usize,
+    deadline_ns: u64,
+    rounds: u64,
+    seed: u64,
+    opens: u64 = 0,
+    busy: u64 = 0,
+    broken: u64 = 0,
+};
+
+/// One competitor: open the set as writer (WriterBusy: another thread or
+/// process is the writer; retry), run some rounds, close, repeat.
+fn writersThread(job: *WritersJob) void {
+    var prng = std.Random.DefaultPrng.init(job.seed);
+    const rand = prng.random();
+    var files: [cwal.max_members]usize = undefined;
+    for (0..job.n) |i| files[i] = i;
+    while (cwal.monotonicNs() < job.deadline_ns) {
+        const conn = openN(job.dir, job.n, .{ .mode = job.mode, .role = .writer, .cache_pages = 10 }) catch |err| {
+            switch (err) {
+                error.WriterBusy => job.busy += 1,
+                error.Broken => job.broken += 1,
+                else => die("writer open {s}", .{@errorName(err)}),
+            }
+            _ = c.usleep(100 + rand.uintLessThan(u32, 900));
+            continue;
+        };
+        job.opens += 1;
+        var buf: [8192]u8 = undefined;
+        const k = queryInt(conn, unionSql(&buf, job.n, "select coalesce(max(k), 0) from u")) + 1;
+        nRounds(conn, job.mode, k, 1 + rand.uintLessThan(u64, job.rounds), rand, 0, true, files[0..job.n]);
+        conn.close();
+    }
+}
+
+/// Competing writers: --threads threads in this process, each a writersThread.
+fn cmdNWriters(dir: []const u8, args: Args) void {
+    const threads = args.int("--threads", 4);
+    var jobs: [32]WritersJob = undefined;
+    var handles: [32]std.Thread = undefined;
+    const deadline = cwal.monotonicNs() + args.int("--duration-ms", 1000) * 1_000_000;
+    for (0..threads) |i| {
+        jobs[i] = .{ .dir = dir, .mode = args.mode(), .n = nFiles(args), .deadline_ns = deadline, .rounds = args.int("--rounds", 12), .seed = args.int("--seed", 1) *% 0x9e3779b97f4a7c15 +% i * 7919 +% @as(u64, @intCast(c.getpid())) };
+        handles[i] = std.Thread.spawn(.{}, writersThread, .{&jobs[i]}) catch die("spawn", .{});
+    }
+    var opens: u64 = 0;
+    var busy: u64 = 0;
+    var broken: u64 = 0;
+    for (0..threads) |i| {
+        handles[i].join();
+        opens += jobs[i].opens;
+        busy += jobs[i].busy;
+        broken += jobs[i].broken;
+    }
     cwal.flushPending();
-    out("events={d} tagged={d}\n", .{ cwal.fault.count(), cwal.fault.taggedCount() });
+    out("writers opens={d} busy={d} broken={d}\n", .{ opens, busy, broken });
 }
 
 // ---------------------------------------------------------------------------
@@ -806,10 +876,9 @@ fn readWhole(path: []const u8) []u8 {
     const fd = c.open(z.ptr, c.O_RDONLY);
     if (fd < 0) die("open {s}", .{path});
     defer _ = c.close(fd);
-    var st: c.struct_stat = undefined;
-    if (c.fstat(fd, &st) != 0) die("stat {s}", .{path});
-    if (st.st_size == 0) return &.{};
-    const data = std.heap.c_allocator.alloc(u8, @intCast(st.st_size)) catch die("oom", .{});
+    const size = cwal.fileSize(fd) orelse die("size {s}", .{path});
+    if (size == 0) return &.{};
+    const data = std.heap.c_allocator.alloc(u8, @intCast(size)) catch die("oom", .{});
     if (c.pread(fd, data.ptr, data.len, 0) != data.len) die("read {s}", .{path});
     return data;
 }
@@ -959,6 +1028,7 @@ const ReaderStats = struct {
     ckpt_races: u64 = 0,
     ckpt_fallbacks: u64 = 0,
     ckpt_violations: u64 = 0,
+    ckpt_locks: u64 = 0,
 };
 
 const ReaderJob = struct {
@@ -999,6 +1069,7 @@ fn closeReader(job: *ReaderJob, conn: *Conn) void {
     job.stats.snapshot_waits += conn.stats.snapshot_waits;
     job.stats.ckpt_races += conn.stats.ckpt_races;
     job.stats.ckpt_fallbacks += conn.stats.ckpt_fallbacks;
+    job.stats.ckpt_locks += conn.stats.ckpt_locks;
     conn.close();
 }
 
@@ -1074,11 +1145,13 @@ fn cmdReader(dir: []const u8, args: Args) void {
         handles[i] = std.Thread.spawn(.{}, readerThread, .{&jobs[i]}) catch die("spawn", .{});
     }
     var total: ReaderStats = .{};
+    var min_reads: u64 = std.math.maxInt(u64);
     for (0..threads) |i| {
         handles[i].join();
         inline for (comptime std.meta.fieldNames(ReaderStats)) |name| @field(total, name) += @field(jobs[i].stats, name);
+        min_reads = @min(min_reads, jobs[i].stats.reads);
     }
-    out("reader reads={d} mixed={d} broken={d} reopen={d} ckpt_attempts={d} ckpt_denied={d} snapshot_reads={d} seq_retries={d} snapshot_waits={d} ckpt_races={d} ckpt_fallbacks={d} ckpt_violations={d}\n", .{ total.reads, total.mixed, total.broken, total.reopen, total.ckpt_attempts, total.ckpt_denied, total.snapshot_reads, total.seq_retries, total.snapshot_waits, total.ckpt_races, total.ckpt_fallbacks, total.ckpt_violations });
+    out("reader reads={d} mixed={d} broken={d} reopen={d} ckpt_attempts={d} ckpt_denied={d} snapshot_reads={d} seq_retries={d} snapshot_waits={d} ckpt_races={d} ckpt_fallbacks={d} ckpt_violations={d} ckpt_locks={d} min_reads={d}\n", .{ total.reads, total.mixed, total.broken, total.reopen, total.ckpt_attempts, total.ckpt_denied, total.snapshot_reads, total.seq_retries, total.snapshot_waits, total.ckpt_races, total.ckpt_fallbacks, total.ckpt_violations, total.ckpt_locks, min_reads });
     c.exit(if (total.mixed != 0 or total.ckpt_violations != 0) 1 else 0);
 }
 
@@ -1202,5 +1275,5 @@ pub fn main(init: std.process.Init.Minimal) void {
     const args: Args = .{ .list = list };
     const cmd = list[1];
     const dir = list[2];
-    if (std.mem.eql(u8, cmd, "seed")) cmdSeed(dir) else if (std.mem.eql(u8, cmd, "writer")) cmdWriter(dir, args) else if (std.mem.eql(u8, cmd, "reader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "check")) cmdCheck(dir, args) else if (std.mem.eql(u8, cmd, "recover")) cmdRecover(dir, args) else if (std.mem.eql(u8, cmd, "state")) cmdState(dir) else if (std.mem.eql(u8, cmd, "bench")) cmdBench(dir, args) else if (std.mem.eql(u8, cmd, "benchrw")) cmdBenchRw(dir, args) else if (std.mem.eql(u8, cmd, "nseed")) cmdNSeed(dir, args) else if (std.mem.eql(u8, cmd, "nwriter")) cmdNWriter(dir, args) else if (std.mem.eql(u8, cmd, "nreader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "ncheck")) cmdNCheck(dir, args) else if (std.mem.eql(u8, cmd, "nsem")) cmdNSem(dir, args) else die("unknown command {s}", .{cmd});
+    if (std.mem.eql(u8, cmd, "seed")) cmdSeed(dir) else if (std.mem.eql(u8, cmd, "writer")) cmdWriter(dir, args) else if (std.mem.eql(u8, cmd, "reader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "check")) cmdCheck(dir, args) else if (std.mem.eql(u8, cmd, "recover")) cmdRecover(dir, args) else if (std.mem.eql(u8, cmd, "state")) cmdState(dir) else if (std.mem.eql(u8, cmd, "bench")) cmdBench(dir, args) else if (std.mem.eql(u8, cmd, "benchrw")) cmdBenchRw(dir, args) else if (std.mem.eql(u8, cmd, "nseed")) cmdNSeed(dir, args) else if (std.mem.eql(u8, cmd, "nwriter")) cmdNWriter(dir, args) else if (std.mem.eql(u8, cmd, "nreader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "ncheck")) cmdNCheck(dir, args) else if (std.mem.eql(u8, cmd, "nsem")) cmdNSem(dir, args) else if (std.mem.eql(u8, cmd, "nwriters")) cmdNWriters(dir, args) else die("unknown command {s}", .{cmd});
 }

@@ -20,7 +20,7 @@ import time
 from collections import Counter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-BIN = os.path.join(HERE, "zig-out", "bin", "cwal")
+BIN = os.environ.get("CWAL_BIN") or os.path.join(HERE, "zig-out", "bin", "cwal")
 ROUNDS = 20  # covers explicit, implicit, solo, spill, PASSIVE/RESTART/TRUNCATE
 
 
@@ -454,6 +454,27 @@ def reader_stats(text):
     return stats
 
 
+def reader_total(outputs):
+    """Sum reader process outputs; min_reads is the minimum over every
+    thread, and a process that printed nothing counts as a starved one."""
+    total = Counter()
+    mins = []
+    for text in outputs:
+        st = reader_stats(text)
+        mins.append(st.pop("min_reads", 0))
+        total.update(st)
+    total["min_reads"] = min(mins) if mins else 0
+    return total
+
+
+def start_readers(d, n, mode, procs, threads, ms, env=None, extra=()):
+    return [subprocess.Popen([BIN, "nreader", d, "--files", str(n), "--mode", mode, "--threads", str(threads), "--duration-ms", str(ms), *extra], env=env, stdout=subprocess.PIPE, text=True) for _ in range(procs)]
+
+
+def wal_bytes(d):
+    return sum(os.path.getsize(os.path.join(d, f)) for f in os.listdir(d) if f.endswith("-wal"))
+
+
 def n_restart_chain(work, n, seed, runs=15):
     """Reader processes keep the set open while a chain of writers is killed
     at random commit-boundary events and restarted, so most restarts run no
@@ -601,6 +622,203 @@ def n_readers(work, n, mode, ckpt):
     err, _ = ncheck(d, n, mode, nacks(wout))
     shutil.rmtree(d, ignore_errors=True)
     return stats, err
+
+
+# ---------------------------------------------------------------------------
+# Concurrency (section 3)
+# ---------------------------------------------------------------------------
+
+class Timed:
+    """Read a process's stdout on a thread, timestamping each line."""
+
+    def __init__(self, proc):
+        self.proc, self.lines = proc, []
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        for line in self.proc.stdout:
+            self.lines.append((time.time(), line))
+
+    def finish(self, stop=True):
+        if stop:
+            self.proc.terminate()
+        self.proc.wait()
+        self.thread.join()
+        return "".join(l for _, l in self.lines)
+
+    def longest_stall(self, t0, t1):
+        """The longest time without an acknowledged commit within [t0, t1]."""
+        ts = [t0] + [t for t, l in self.lines if l.startswith("ack ") and t0 <= t <= t1] + [t1]
+        return max(b - a for a, b in zip(ts, ts[1:]))
+
+
+READER_SPLIT = {1: (1, 1), 4: (2, 2), 8: (2, 4), 16: (4, 4), 32: (4, 8)}
+
+
+def reader_scale(work, n, mode, readers, ckpt):
+    """A saturating writer (no delay between commits, no widened window) and
+    `readers` reader threads split over processes. Reports reads, the
+    fewest reads any thread completed (reader starvation) and the writer's
+    commit rate (writer starvation)."""
+    d = os.path.join(work, f"scale-{n}-{mode}-{readers}-{ckpt}")
+    shutil.rmtree(d, ignore_errors=True)
+    shutil.copytree(ntemplate(work, n), d)
+    procs, threads = READER_SPLIT[readers]
+    w = Timed(subprocess.Popen([BIN, "nwriter", d, "--files", str(n), "--mode", mode, "--rounds", "100000000", "--ckpt", ckpt], stdout=subprocess.PIPE, text=True))
+    time.sleep(0.1)
+    t0 = time.time()
+    rs = start_readers(d, n, mode, procs, threads, 2000)
+    peak = 0
+    while any(r.poll() is None for r in rs):
+        peak = max(peak, wal_bytes(d))
+        time.sleep(0.05)
+    t1 = time.time()
+    stats = reader_total([r.communicate()[0] for r in rs])
+    wout = w.finish()
+    acked = nacks(wout)
+    during = sum(1 for t, l in w.lines if l.startswith("ack ") and t0 <= t <= t1)
+    stall = w.longest_stall(t0, t1)
+    err, _ = ncheck(d, n, mode, acked)
+    shutil.rmtree(d, ignore_errors=True)
+    return stats, err, during / (t1 - t0), peak, stall
+
+
+def competing_writers(work, n, procs, threads, seed, kill):
+    """procs writer processes x threads writer threads contend for the
+    writer lock for 3 s, each winner running 1-12 rounds and closing; 2
+    reader processes x 2 threads read throughout. With kill, one writer
+    process is SIGKILLed at a random time and replaced."""
+    d = os.path.join(work, f"cw-{n}-{procs}x{threads}-{seed}-{kill}")
+    shutil.rmtree(d, ignore_errors=True)
+    shutil.copytree(ntemplate(work, n), d)
+    rnd = random.Random(seed)
+    cmd = lambda ms, s: [BIN, "nwriters", d, "--files", str(n), "--threads", str(threads), "--duration-ms", str(ms), "--seed", str(s)]
+    ws = [Timed(subprocess.Popen(cmd(3000, seed * 100 + i), stdout=subprocess.PIPE, text=True)) for i in range(procs)]
+    rs = start_readers(d, n, "cwal", 2, 2, 3200)
+    killed = 0
+    if kill:
+        time.sleep(rnd.uniform(0.3, 2.0))
+        ws[0].proc.kill()
+        killed = 1
+        ws.append(Timed(subprocess.Popen(cmd(800, seed * 100 + 99), stdout=subprocess.PIPE, text=True)))
+    outs = [w.finish(stop=False) for w in ws]
+    stats = reader_total([r.communicate()[0] for r in rs])
+    acked = [a for o in outs for a in nacks(o)]
+    wst = Counter()
+    for o in outs:
+        m = re.search(r"^writers (.*)$", o, re.M)
+        if m:
+            wst.update({k: int(v) for k, v in (kv.split("=") for kv in m.group(1).split())})
+    err, _ = ncheck(d, n, "cwal", acked)
+    if not err and any(w.proc.returncode not in (0, -9) for w in ws):
+        err = f"writer exit codes {[w.proc.returncode for w in ws]}"
+    shutil.rmtree(d, ignore_errors=True)
+    return stats, wst, len(acked), killed, err
+
+
+def long_snapshot(work, n, mode, ckpt):
+    """One reader holds a single read transaction 1.5 s (and reads it again)
+    while a saturating writer commits and checkpoints; two ordinary reader
+    threads keep reading. Reports the WAL's peak and final size."""
+    d = os.path.join(work, f"long-{n}-{mode}-{ckpt}")
+    shutil.rmtree(d, ignore_errors=True)
+    shutil.copytree(ntemplate(work, n), d)
+    w = Timed(subprocess.Popen([BIN, "nwriter", d, "--files", str(n), "--mode", mode, "--rounds", "100000000", "--ckpt", ckpt], stdout=subprocess.PIPE, text=True))
+    time.sleep(0.1)
+    t0 = time.time()
+    held = start_readers(d, n, mode, 1, 1, 3000, extra=("--hold-us", "1500000"))
+    rs = start_readers(d, n, mode, 1, 2, 3000)
+    peak = 0
+    while any(r.poll() is None for r in held + rs):
+        peak = max(peak, wal_bytes(d))
+        time.sleep(0.05)
+    hstats = reader_total([r.communicate()[0] for r in held])
+    stats = reader_total([r.communicate()[0] for r in rs])
+    t1 = time.time()
+    # The writer keeps going 0.5 s after the long snapshot ends.
+    time.sleep(0.5)
+    wout = w.finish()
+    final = wal_bytes(d)
+    acked = nacks(wout)
+    during = sum(1 for t, l in w.lines if l.startswith("ack ") and t0 <= t <= t1)
+    stall = w.longest_stall(t0, t1)
+    err, _ = ncheck(d, n, mode, acked)
+    shutil.rmtree(d, ignore_errors=True)
+    return hstats, stats, err, during / (t1 - t0), stall, peak, final
+
+
+# Writer-side and reader-side points around the checkpoint counter.
+CKPT_POINTS = ("ckpt-pre-inc", "ckpt-locked", "ckpt-pre-dec", "ckpt-post-dec", "open-take", "open-release", "reset-held")
+
+
+def ckpt_point_race(work, n, point):
+    """The checkpoint race test (checkpoint pauses 3 ms after choosing its
+    end frame; one reader thread pauses 1 ms inside each skipped lock and
+    holds each read 5 ms), with an extra pause at one counter point in
+    every process. reset-held runs a chain of short writers instead, so
+    writers clear the counter while readers open snapshots."""
+    d = os.path.join(work, f"cp-{n}-{point}")
+    shutil.rmtree(d, ignore_errors=True)
+    shutil.copytree(ntemplate(work, n), d)
+    us = 1000 if point.startswith("open") else 3000
+    env = dict(WINDOW_ENV, CWAL_CKPT_SCAN_DELAY_US="3000", CWAL_CKPT_OPEN_DELAY_US="1000", CWAL_DELAY_POINTS=f"{point}={us}")
+    wcmd = lambda rounds: [BIN, "nwriter", d, "--files", str(n), "--rounds", str(rounds), "--delay-us", "100", "--ckpt", "passive"]
+    rs = start_readers(d, n, "cwal", 1, 1, 2500, env, ("--hold-us", "5000")) + start_readers(d, n, "cwal", 1, 2, 2500, env)
+    outs = []
+    if point == "reset-held":
+        while any(r.poll() is None for r in rs):
+            outs.append(subprocess.run(wcmd(30), env=env, capture_output=True, text=True).stdout)
+    else:
+        w = subprocess.Popen(wcmd(3000), env=env, stdout=subprocess.PIPE, text=True)
+        time.sleep(2.5)
+        w.terminate()
+        outs.append(w.communicate()[0])
+    stats = reader_total([r.communicate()[0] for r in rs])
+    err, _ = ncheck(d, n, "cwal", [a for o in outs for a in nacks(o)])
+    active = snap_state(d).get("ckpt_active", -1)
+    shutil.rmtree(d, ignore_errors=True)
+    return stats, len(outs), active, err
+
+
+# Crash points: every counter step, a writer's reset, and wal-index
+# publication (a torn wal-index makes the next reader run wal-index
+# recovery, which also takes the exclusive checkpoint lock).
+KILL_POINTS = (("ckpt-pre-inc", (1, 2, 5)), ("ckpt-locked", (1, 2, 5)), ("ckpt-pre-dec", (1, 2, 5)), ("ckpt-post-dec", (1, 2, 5)), ("ckpt-reset", (1,)), ("shm-barrier", (2, 17, 19, 28, 36, 37)))
+
+
+def ckpt_kill(work, n, tag, at, fresh):
+    """Writer A is killed at a counter point; writer B then opens (pausing
+    3 ms while it holds every checkpoint lock before clearing the counter)
+    while readers run. Readers either run throughout, or (fresh) start
+    together with B on a set no handle has open, so they rebuild the
+    wal-indexes (wal-index recovery takes the exclusive checkpoint lock,
+    paused 1 ms) while B clears the counter. Afterwards no checkpointer may
+    still be counted."""
+    d = os.path.join(work, f"ckk-{n}-{tag}-{at}-{fresh}")
+    shutil.rmtree(d, ignore_errors=True)
+    shutil.copytree(ntemplate(work, n), d)
+    env = dict(os.environ, CWAL_DELAY_POINTS="reset-held=3000,ckpt-pre-inc=1000,ckpt-locked=1000")
+    # Readers hold each exclusive checkpoint lock (wal-index recovery) 50
+    # ms, so B's reset can meet one in progress.
+    renv = dict(os.environ, CWAL_DELAY_POINTS="ckpt-pre-inc=1000,ckpt-locked=50000")
+    rs = [] if fresh else start_readers(d, n, "cwal", 2, 2, 2500, renv)
+    time.sleep(0.05)
+    a = run(["nwriter", d, "--files", n, "--rounds", 60, "--delay-us", 300, "--ckpt", "passive"], {"CWAL_CRASH_TAG": tag, "CWAL_CRASH_AT": at})
+    stuck = snap_state(d).get("ckpt_active", 0)
+    if fresh:
+        rs = start_readers(d, n, "cwal", 4, 2, 1500, renv)
+        time.sleep(0.005)
+    b = subprocess.run([BIN, "nwriter", d, "--files", str(n), "--rounds", "150", "--delay-us", "300", "--ckpt", "passive"], env=env, capture_output=True, text=True)
+    stats = reader_total([r.communicate()[0] for r in rs])
+    m = re.search(r"reset_waits=(\d+)", b.stdout)
+    stats["reset_waits"] = int(m.group(1)) if m else 0
+    after = snap_state(d).get("ckpt_active", -1)
+    err, _ = ncheck(d, n, "cwal", nacks(a.stdout) + nacks(b.stdout))
+    if not err and b.returncode != 0:
+        err = f"writer B exit {b.returncode}: {(b.stdout + b.stderr).strip().splitlines()[-1:]}"
+    shutil.rmtree(d, ignore_errors=True)
+    return dict(crashed=a.returncode == -9, stuck=stuck, after=after, stats=stats, err=err)
 
 
 SEM_ROUNDS = 32  # every nsem scenario twice, plus two checkpoints
@@ -829,6 +1047,53 @@ def main():
                 for r, cnt in Counter(reason(e) for _, _, e in fails).most_common(3):
                     print(f"    {cnt:5d}  {r}")
                 failed |= mode == "cwal" and bool(fails)
+
+    if want("scale"):
+        print("== readers 1/4/8/16/32 (processes x threads) with a saturating writer", flush=True)
+        for n in [x for x in a.files if x in (3, 8, 32)]:
+            for ckpt in ("passive", "all"):
+                for mode in ("plain", "cwal"):
+                    for readers in READER_SPLIT:
+                        st, err, rate, peak, stall = reader_scale(a.work, n, mode, readers, ckpt)
+                        print(f"{n} files {mode} ckpt={ckpt} readers={readers}: reads={st['reads']} min_per_thread={st['min_reads']} mixed={st['mixed']} snapshot_reads={st['snapshot_reads']} seq_retries={st['seq_retries']} violations={st['ckpt_violations']} commits_per_s={rate:.0f} longest_stall_ms={stall * 1000:.0f} wal_peak_kb={peak // 1024} check={'ok' if not err else err}", flush=True)
+                        failed |= mode == "cwal" and (st["mixed"] != 0 or st["ckpt_violations"] != 0 or bool(err))
+
+    if want("writers"):
+        print("== competing writers: processes x threads contend for the writer lock, readers running", flush=True)
+        for n in [x for x in a.files if x in (2, 3, 8, 32)]:
+            for procs, threads in ((1, 8), (4, 1), (4, 4)):
+                for seed, kill in ((1, False), (2, True), (3, True)):
+                    st, wst, nack, killed, err = competing_writers(a.work, n, procs, threads, seed, kill)
+                    print(f"{n} files {procs}x{threads} seed={seed} kill={killed}: writer_opens={wst['opens']} busy={wst['busy']} broken={wst['broken']} acked={nack} reads={st['reads']} min_per_thread={st['min_reads']} mixed={st['mixed']} violations={st['ckpt_violations']} reader_broken={st['broken']} check={'ok' if not err else err}", flush=True)
+                    failed |= st["mixed"] != 0 or st["ckpt_violations"] != 0 or bool(err) or wst["opens"] < 2
+
+    if want("longsnap"):
+        print("== long-lived snapshot (1.5 s) under a saturating writer", flush=True)
+        for n in [x for x in a.files if x in (3, 32)]:
+            for ckpt in ("passive", "all"):
+                for mode in ("plain", "cwal"):
+                    h, st, err, rate, stall, peak, final = long_snapshot(a.work, n, mode, ckpt)
+                    print(f"{n} files {mode} ckpt={ckpt}: held_reads={h['reads']} held_mixed={h['mixed']} other_reads={st['reads']} other_mixed={st['mixed']} violations={h['ckpt_violations'] + st['ckpt_violations']} commits_per_s={rate:.0f} longest_stall_ms={stall * 1000:.0f} wal_peak_kb={peak // 1024} wal_final_kb={final // 1024} check={'ok' if not err else err}", flush=True)
+                    failed |= mode == "cwal" and (h["mixed"] + st["mixed"] != 0 or h["reads"] == 0 or bool(err))
+
+    if want("ckptpoints"):
+        print("== checkpoint race with a pause at each checkpoint-counter point", flush=True)
+        for n in [x for x in a.files if x in (2, 8)]:
+            for point in CKPT_POINTS:
+                st, writers, active, err = ckpt_point_race(a.work, n, point)
+                print(f"{n} files {point}: writers={writers} reads={st['reads']} ckpt_races={st['ckpt_races']} fallbacks={st['ckpt_fallbacks']} reader_ckpt_locks={st['ckpt_locks']} violations={st['ckpt_violations']} mixed={st['mixed']} active_after={active} check={'ok' if not err else err}", flush=True)
+                failed |= st["ckpt_violations"] != 0 or st["mixed"] != 0 or active != 0 or bool(err)
+
+    if want("ckptkill"):
+        print("== writer killed at each checkpoint-counter point; next writer clears the counter while readers run", flush=True)
+        for n in [x for x in a.files if x in (2, 8)]:
+            for tag, ats in KILL_POINTS:
+                for at in ats:
+                  for fresh in (False, True):
+                    r = ckpt_kill(a.work, n, tag, at, fresh)
+                    st = r["stats"]
+                    print(f"{n} files {tag}#{at} {'fresh' if fresh else 'running'}: crashed={r['crashed']} active_after_crash={r['stuck']} after_next_writer={r['after']} reset_waits={st['reset_waits']} reads={st['reads']} reader_ckpt_locks={st['ckpt_locks']} fallbacks={st['ckpt_fallbacks']} reader_broken={st['broken']} violations={st['ckpt_violations']} mixed={st['mixed']} check={'ok' if not r['err'] else r['err']}", flush=True)
+                    failed |= r["after"] != 0 or st["ckpt_violations"] != 0 or st["mixed"] != 0 or bool(r["err"])
 
     print("RESULT", "FAIL" if failed else "PASS")
     sys.exit(1 if failed else 0)

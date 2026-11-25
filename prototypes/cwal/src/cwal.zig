@@ -243,6 +243,36 @@ pub const test_delay = struct {
     /// SQLite maps the wal-indexes: widens the window in which that handle
     /// can die (see aloneAfterMapping).
     pub var alive_delay_us: u32 = 0;
+    /// `CWAL_DELAY_POINTS=name=us[,name=us...]`: sleep at named points
+    /// around the checkpoint counter (see `point`).
+    var points: [8]struct { name: []const u8, us: u32 } = undefined;
+    var npoints: usize = 0;
+
+    fn parsePoints() void {
+        const value = c.getenv("CWAL_DELAY_POINTS");
+        if (value == null) return;
+        var it = std.mem.tokenizeScalar(u8, std.mem.span(value), ',');
+        while (it.next()) |item| {
+            const eq = std.mem.indexOfScalar(u8, item, '=') orelse continue;
+            if (npoints == points.len) break;
+            points[npoints] = .{ .name = item[0..eq], .us = std.fmt.parseInt(u32, item[eq + 1 ..], 10) catch continue };
+            npoints += 1;
+        }
+    }
+
+    /// A crash point (fault event) and an optional test delay. Points:
+    /// ckpt-pre-inc (exclusive checkpoint lock granted, counter not yet
+    /// raised), ckpt-locked (raised), ckpt-pre-dec (checkpoint done, count
+    /// not yet retired), ckpt-post-dec (retired, real lock not yet
+    /// released), open-take and open-release (a snapshot open's skipped
+    /// shared lock, before it reads the counter), reset-held (a writer
+    /// holds every member's checkpoint lock, before it clears the count).
+    pub fn point(name: []const u8) void {
+        fault.event(name);
+        for (points[0..npoints]) |p| {
+            if (std.mem.eql(u8, p.name, name)) _ = c.usleep(p.us);
+        }
+    }
 };
 
 pub fn register() void {
@@ -251,6 +281,7 @@ pub fn register() void {
     test_delay.ckpt_open_delay_us = @intCast(envU64("CWAL_CKPT_OPEN_DELAY_US") orelse 0);
     test_delay.ckpt_scan_delay_us = @intCast(envU64("CWAL_CKPT_SCAN_DELAY_US") orelse 0);
     test_delay.alive_delay_us = @intCast(envU64("CWAL_ALIVE_DELAY_US") orelse 0);
+    test_delay.parsePoints();
     unix_vfs = c.sqlite3_vfs_find("unix");
     std.debug.assert(unix_vfs != null);
     cwal_vfs = unix_vfs.*;
@@ -488,8 +519,10 @@ fn ioShmLock(file: [*c]c.sqlite3_file, offset: c_int, n: c_int, flags: c_int) ca
             // Retire the checkpointer after everything it wrote but before
             // it releases the lock: the counter includes a live process
             // exactly while it holds the lock (see resetCheckpointers).
+            test_delay.point("ckpt-pre-dec");
             cn.ckpt_ex[f.member] = false;
             _ = @atomicRmw(u64, &cn.snap.?.ckpt, .Sub, 1, .seq_cst);
+            test_delay.point("ckpt-post-dec");
         }
         if (cn.ckpt_ex[f.member] and offset == wal_read_lock0 and n == 1 and flags == c.SQLITE_SHM_LOCK | c.SQLITE_SHM_EXCLUSIVE and test_delay.ckpt_scan_delay_us != 0) {
             _ = c.usleep(test_delay.ckpt_scan_delay_us);
@@ -502,9 +535,17 @@ fn ioShmLock(file: [*c]c.sqlite3_file, offset: c_int, n: c_int, flags: c_int) ca
         if (cn.mode == .cwal and ckpt_exclusive and flags & c.SQLITE_SHM_LOCK != 0 and rc == c.SQLITE_OK) {
             // Announce the checkpointer before SQLite, holding the lock, can
             // look at read marks or write anything.
+            test_delay.point("ckpt-pre-inc");
             _ = @atomicRmw(u64, &cn.snap.?.ckpt, .Add, ckpt_started + 1, .seq_cst);
+            // Full barrier: the increment must be visible before this
+            // checkpointer loads any read mark (a reader stores its mark,
+            // then loads the counter). On ARM64 a seq_cst read-modify-write
+            // does not order later plain loads after its store. SQLite's
+            // walIndexReadHdr also issues one before the scan.
+            realMethods(f).xShmBarrier.?(f.real);
             cn.ckpt_ex[f.member] = true;
-            fault.event("ckpt-locked");
+            cn.stats.ckpt_locks += 1;
+            test_delay.point("ckpt-locked");
         }
         if (rc == c.SQLITE_OK and offset == wal_write_lock and n == 1) {
             if (flags == c.SQLITE_SHM_LOCK | c.SQLITE_SHM_EXCLUSIVE) cn.write_locked[f.member] = true;
@@ -671,6 +712,12 @@ pub const Stats = struct {
     /// Snapshot opens that took the real checkpoint lock because a
     /// checkpoint was running.
     ckpt_fallbacks: u64 = 0,
+    /// Exclusive checkpoint locks this handle was granted (checkpoints,
+    /// wal-index and snapshot recovery).
+    ckpt_locks: u64 = 0,
+    /// Times a writer's counter reset found another handle holding a
+    /// member's checkpoint lock and waited.
+    reset_waits: u64 = 0,
     /// WAL bytes past mxFrame that a writer dropped at open.
     discarded_bytes: u64 = 0,
 };
@@ -953,9 +1000,8 @@ pub const Conn = struct {
         conn.writer_fd = try conn.openLockFile("writer");
         conn.live_fd = try conn.openLockFile("live");
         conn.snap_fd = try conn.openLockFile("snap");
-        var st: c.struct_stat = undefined;
-        if (c.fstat(conn.snap_fd, &st) != 0) return error.Io;
-        if (st.st_size < snap_page_size and c.ftruncate(conn.snap_fd, snap_page_size) != 0) return error.Io;
+        const snap_size = fileSize(conn.snap_fd) orelse return error.Io;
+        if (snap_size < snap_page_size and c.ftruncate(conn.snap_fd, snap_page_size) != 0) return error.Io;
         const mapped = c.mmap(null, snap_page_size, c.PROT_READ | c.PROT_WRITE, c.MAP_SHARED, conn.snap_fd, 0);
         if (mapped == null or @intFromPtr(mapped) == std.math.maxInt(usize)) return error.Io;
         conn.snap = @ptrCast(@alignCast(mapped));
@@ -1101,11 +1147,14 @@ pub const Conn = struct {
         for (0..conn.nmembers) |m| {
             const f = conn.member_db[m] orelse return;
             while (realMethods(f).xShmLock.?(f.real, wal_ckpt_lock, 1, c.SQLITE_SHM_LOCK | c.SQLITE_SHM_EXCLUSIVE) != c.SQLITE_OK) {
+                conn.stats.reset_waits += 1;
                 if (monotonicNs() > deadline) return;
                 _ = c.usleep(100);
             }
             held[m] = true;
         }
+        test_delay.point("reset-held");
+        conn.log("checkpoint counter reset waits={d}", .{conn.stats.reset_waits});
         fault.event("ckpt-reset");
         _ = @atomicRmw(u64, &conn.snap.?.ckpt, .And, ~(ckpt_started - 1), .seq_cst);
     }
@@ -1152,15 +1201,14 @@ pub const Conn = struct {
             if (c.pread(fd, &file_hdr, file_hdr.len, 0) != file_hdr.len or !std.mem.eql(u8, file_hdr[16..24], hdr[32..40])) return error.ProtocolViolation;
             keep = wal_header_size + @as(i64, mx) * (wal_frame_header_size + page_size);
         }
-        var st: c.struct_stat = undefined;
-        if (c.fstat(fd, &st) != 0) return error.Io;
-        conn.log("discard member {d} mx={d} size={d} keep={d}", .{ m, mx, st.st_size, keep });
-        if (st.st_size <= keep) return;
+        const size = fileSize(fd) orelse return error.Io;
+        conn.log("discard member {d} mx={d} size={d} keep={d}", .{ m, mx, size, keep });
+        if (size <= keep) return;
         fault.event("discard-truncate");
         if (c.ftruncate(fd, keep) != 0) return error.Io;
         fault.event("discard-fsync");
         if (c.fsync(fd) != 0) return error.Io;
-        conn.stats.discarded_bytes += @intCast(st.st_size - keep);
+        conn.stats.discarded_bytes += @intCast(size - keep);
     }
 
     /// Copy a member's wal-index header (the first of its two copies).
@@ -1342,6 +1390,7 @@ pub const Conn = struct {
     fn ckptLockShared(conn: *Conn, member: u8, take: bool) bool {
         const page = conn.snap.?;
         if (take) {
+            test_delay.point("open-take");
             const w = @atomicLoad(u64, &page.ckpt, .seq_cst);
             if (fault.mutated("no-ckpt-skip") or @as(u32, @truncate(w)) != 0) {
                 conn.stats.ckpt_fallbacks += 1;
@@ -1354,6 +1403,11 @@ pub const Conn = struct {
         }
         if (!conn.ckpt_skipped[member]) return false;
         conn.ckpt_skipped[member] = false;
+        test_delay.point("open-release");
+        // Full barrier: the read mark SQLite stored during the open must be
+        // visible before the counter is loaded (see ioShmLock). SQLite's
+        // walTryBeginRead also issues one after setting the mark.
+        if (conn.member_db[member]) |f| realMethods(f).xShmBarrier.?(f.real);
         const w = @atomicLoad(u64, &page.ckpt, .seq_cst);
         if (@as(u32, @intCast(w >> 32)) != conn.ckpt_start[member]) {
             conn.stats.ckpt_races += 1;
@@ -1451,7 +1505,16 @@ pub const Conn = struct {
 pub var last_recovery: []const u8 = "none";
 
 pub fn monotonicNs() u64 {
-    var ts: c.struct_timespec = undefined;
-    _ = c.clock_gettime(c.CLOCK_MONOTONIC, &ts);
-    return @as(u64, @intCast(ts.tv_sec)) * 1_000_000_000 + @as(u64, @intCast(ts.tv_nsec));
+    // struct timespec as {tv_sec, tv_nsec} (64-bit Linux): musl's has
+    // padding bitfields that translate-c cannot represent.
+    var ts: [2]c_long = undefined;
+    _ = c.clock_gettime(c.CLOCK_MONOTONIC, @ptrCast(&ts));
+    return @as(u64, @intCast(ts[0])) * 1_000_000_000 + @as(u64, @intCast(ts[1]));
+}
+
+/// A file's size without struct stat (opaque under musl's translate-c).
+/// Moves the file offset; all I/O on these descriptors is positional.
+pub fn fileSize(fd: c_int) ?i64 {
+    const size = c.lseek(fd, 0, c.SEEK_END);
+    return if (size < 0) null else size;
 }
