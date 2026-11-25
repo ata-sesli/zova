@@ -364,6 +364,442 @@ fn cmdNWriter(dir: []const u8, args: Args) void {
     out("events={d} tagged={d}\n", .{ cwal.fault.count(), cwal.fault.taggedCount() });
 }
 
+// ---------------------------------------------------------------------------
+// Transaction semantics (nsem): one scenario per round on an N-file set.
+// Every committed transaction k still writes one row of t per file it
+// commits, with nwriter's (k, txn, mask, n) columns, so ncheck and the
+// crash matrices apply unchanged. The files a transaction commits are the
+// files SQLite write-locked, which can exceed the files the scenario wrote
+// (BEGIN IMMEDIATE, a statement that failed, a rolled-back savepoint):
+// `finish` adds the missing rows before committing.
+// ---------------------------------------------------------------------------
+
+const sem_names = [_][]const u8{ "explicit", "solo", "trigger", "trigger-direct", "savepoint", "savepoint-outer", "constraint", "or-rollback", "raise-abort", "raise-rollback", "deferred-fk", "busy", "spill", "immediate", "prepared" };
+
+const Sem = struct {
+    conn: *Conn,
+    mode: cwal.Mode,
+    n: usize,
+    k: i64,
+    rand: std.Random,
+    count: [sem_names.len]u64 = @splat(0),
+    /// Insert statements prepared once and reused across commits.
+    ins: [cwal.max_members]?*c.sqlite3_stmt = @splat(null),
+
+    /// sqlite3_exec without Conn.exec's error printing; the extended code.
+    fn raw(s: *Sem, sql: [:0]const u8) c_int {
+        if (c.sqlite3_exec(s.conn.db, sql.ptr, null, null, null) == c.SQLITE_OK) return c.SQLITE_OK;
+        return c.sqlite3_extended_errcode(s.conn.db);
+    }
+
+    fn rawFmt(s: *Sem, comptime fmt: []const u8, args: anytype) c_int {
+        var buf: [8192]u8 = undefined;
+        return s.raw(bufPrintZ(&buf, fmt, args) catch unreachable);
+    }
+
+    fn ok(s: *Sem, comptime fmt: []const u8, args: anytype) void {
+        const rc = s.rawFmt(fmt, args);
+        if (rc != c.SQLITE_OK) die("k={d}: " ++ fmt ++ ": {s}", .{s.k} ++ args ++ .{c.sqlite3_errmsg(s.conn.db)});
+    }
+
+    fn inTxn(s: *Sem) bool {
+        return c.sqlite3_get_autocommit(s.conn.db) == 0;
+    }
+
+    fn lockedMask(s: *Sem) u32 {
+        var mask: u32 = 0;
+        for (0..s.n) |m| {
+            if (s.conn.write_locked[m]) mask |= @as(u32, 1) << @intCast(m);
+        }
+        return mask;
+    }
+
+    /// Rows of k in the files of mask (all files: maxInt).
+    fn rowsOf(s: *Sem, mask: u32) i64 {
+        var total: i64 = 0;
+        for (0..s.n) |f| {
+            if (mask >> @intCast(f) & 1 == 0) continue;
+            var buf: [128]u8 = undefined;
+            total += queryInt(s.conn, bufPrintZ(&buf, "select count(*) from {s}.t where k = {d}", .{ Conn.schemaName(f), s.k }) catch unreachable);
+        }
+        return total;
+    }
+
+    fn all(s: *Sem) u32 {
+        return @intCast((@as(u64, 1) << @intCast(s.n)) - 1);
+    }
+
+    /// A random subset of `count` files (at least 1).
+    fn subset(s: *Sem, count: usize) u32 {
+        var idx: [cwal.max_members]usize = undefined;
+        for (0..s.n) |i| idx[i] = i;
+        var mask: u32 = 0;
+        for (0..count) |i| {
+            const j = i + s.rand.uintLessThan(usize, s.n - i);
+            std.mem.swap(usize, &idx[i], &idx[j]);
+            mask |= @as(u32, 1) << @intCast(idx[i]);
+        }
+        return mask;
+    }
+
+    fn multi(s: *Sem) u32 {
+        return s.subset(2 + s.rand.uintLessThan(usize, s.n - 1));
+    }
+
+    fn txnFor(s: *Sem, mask: u32) u64 {
+        if (@popCount(mask) < 2) return 0;
+        return if (s.mode == .cwal) s.conn.nextTxn() else @intCast(s.k);
+    }
+
+    fn insert(s: *Sem, mask: u32, size: u32) void {
+        for (0..s.n) |f| {
+            if (mask >> @intCast(f) & 1 == 0) continue;
+            s.ok("insert into {s}.t values ({d}, 0, 0, 0, randomblob({d}))", .{ Conn.schemaName(f), s.k, size });
+        }
+    }
+
+    /// Give every write-locked file its row of k with the final txn, mask
+    /// and file count, then commit. Returns the commit's error code.
+    fn finish(s: *Sem) c_int {
+        const mask = s.lockedMask();
+        if (mask == 0) die("k={d}: nothing write-locked", .{s.k});
+        const cnt = @popCount(mask);
+        const txn = s.txnFor(mask);
+        for (0..s.n) |f| {
+            if (mask >> @intCast(f) & 1 == 0) continue;
+            const schema = Conn.schemaName(f);
+            s.ok("insert or ignore into {s}.t values ({d}, 0, 0, 0, randomblob(64))", .{ schema, s.k });
+            s.ok("update {s}.t set txn = {d}, mask = {d}, n = {d} where k = {d}", .{ schema, txn, mask, cnt, s.k });
+        }
+        out("try {d} {d}\n", .{ s.k, txn });
+        s.conn.commit() catch return c.sqlite3_extended_errcode(s.conn.db);
+        if (s.mode == .cwal and txn != 0 and s.conn.txn != txn) die("k={d}: txn {d} committed as {d}", .{ s.k, txn, s.conn.txn });
+        out("ack {d} {d}\n", .{ s.k, txn });
+        s.k += 1;
+        return c.SQLITE_OK;
+    }
+
+    fn finishOk(s: *Sem) void {
+        const rc = s.finish();
+        if (rc != c.SQLITE_OK) die("k={d}: commit: {s}", .{ s.k, c.sqlite3_errstr(rc) });
+    }
+
+    /// TEMP trigger on temp.fan writing one row of k to each file of mask,
+    /// then optionally raising: fail = 1 aborts the statement, 2 rolls back
+    /// the transaction. Only the files it names are write-locked.
+    fn fanTrigger(s: *Sem, mask: u32) void {
+        var buf: [8192]u8 = undefined;
+        var len = (std.fmt.bufPrint(&buf, "create temp trigger fan_out after insert on temp.fan begin ", .{}) catch unreachable).len;
+        for (0..s.n) |f| {
+            if (mask >> @intCast(f) & 1 == 0) continue;
+            len += (std.fmt.bufPrint(buf[len..], "insert into {s}.t values (new.k, new.txn, new.mask, new.n, randomblob(new.size)); ", .{Conn.schemaName(f)}) catch unreachable).len;
+        }
+        const sql = bufPrintZ(buf[len..], "select raise(abort, 'fan abort') where new.fail = 1; select raise(rollback, 'fan rollback') where new.fail = 2; end", .{}) catch unreachable;
+        s.ok("drop trigger if exists temp.fan_out", .{});
+        if (s.raw(buf[0 .. len + sql.len :0]) != c.SQLITE_OK) die("fan trigger: {s}", .{c.sqlite3_errmsg(s.conn.db)});
+    }
+
+    fn fanSql(s: *Sem, buf: []u8, mask: u32, txn: u64, fail: u32) [:0]u8 {
+        return bufPrintZ(buf, "insert into temp.fan values ({d}, {d}, {d}, {d}, {d}, {d})", .{ s.k, txn, mask, @popCount(mask), 100 + s.rand.uintLessThan(u32, 300), fail }) catch unreachable;
+    }
+
+    fn expectNone(s: *Sem, what: []const u8) void {
+        if (s.inTxn()) die("k={d} {s}: transaction still open", .{ s.k, what });
+        const rows = s.rowsOf(s.all());
+        if (rows != 0) die("k={d} {s}: {d} rows left", .{ s.k, what, rows });
+    }
+
+    fn run(s: *Sem, scenario: usize) void {
+        s.count[scenario] += 1;
+        switch (scenario) {
+            // BEGIN, writes to a random subset, COMMIT.
+            0 => {
+                s.ok("begin", .{});
+                s.insert(s.multi(), 100 + s.rand.uintLessThan(u32, 300));
+                s.finishOk();
+            },
+            // Implicit single-file transaction (autocommit statement).
+            1 => {
+                const f = s.rand.uintLessThan(usize, s.n);
+                out("try {d} 0\n", .{s.k});
+                s.ok("insert into {s}.t values ({d}, 0, {d}, 1, randomblob(200))", .{ Conn.schemaName(f), s.k, @as(u32, 1) << @intCast(f) });
+                out("ack {d} 0\n", .{s.k});
+                s.k += 1;
+            },
+            // One statement whose TEMP trigger writes several files, run as
+            // its own transaction through Conn.autocommit.
+            2 => {
+                const mask = s.multi();
+                s.fanTrigger(mask);
+                const txn = s.txnFor(mask);
+                var buf: [256]u8 = undefined;
+                out("try {d} {d}\n", .{ s.k, txn });
+                s.conn.autocommit(s.fanSql(&buf, mask, txn, 0)) catch die("k={d}: trigger autocommit", .{s.k});
+                if (s.mode == .cwal and s.conn.txn != txn) die("k={d}: txn {d} committed as {d}", .{ s.k, txn, s.conn.txn });
+                out("ack {d} {d}\n", .{ s.k, txn });
+                s.k += 1;
+            },
+            // The same statement issued as a plain autocommit statement: it
+            // would commit several files without markers, so CWAL refuses it.
+            3 => {
+                const mask = s.multi();
+                s.fanTrigger(mask);
+                const txn: u64 = if (s.mode == .cwal) 0 else @intCast(s.k);
+                var buf: [256]u8 = undefined;
+                const rc = s.raw(s.fanSql(&buf, mask, txn, 0));
+                if (s.mode == .cwal) {
+                    if (rc != c.SQLITE_CONSTRAINT_COMMITHOOK) die("k={d}: cross-file autocommit not refused ({s})", .{ s.k, c.sqlite3_errstr(rc) });
+                    s.expectNone("refused autocommit");
+                } else {
+                    if (rc != c.SQLITE_OK) die("k={d}: plain autocommit: {s}", .{ s.k, c.sqlite3_errstr(rc) });
+                    out("ack {d} {d}\n", .{ s.k, txn });
+                    s.k += 1;
+                }
+            },
+            // Nested savepoints: roll back the inner one (its files stay
+            // write-locked), write elsewhere, release both, commit.
+            4 => {
+                const a = s.subset(1);
+                const b = s.subset(1 + s.rand.uintLessThan(usize, s.n - 1)) & ~a;
+                s.ok("begin", .{});
+                s.ok("savepoint a", .{});
+                s.insert(a, 150);
+                s.ok("savepoint b", .{});
+                s.insert(b, 150);
+                s.ok("rollback to b", .{});
+                if (s.rowsOf(b) != 0) die("k={d}: rollback to savepoint kept rows", .{s.k});
+                if (s.rowsOf(a) != @popCount(a)) die("k={d}: rollback to savepoint lost the outer rows", .{s.k});
+                const outer = s.rand.boolean();
+                if (outer) {
+                    // Roll back the outer savepoint too (which discards b)
+                    // and start over.
+                    s.ok("rollback to a", .{});
+                    if (s.rowsOf(s.all()) != 0) die("k={d}: rollback to outer savepoint kept rows", .{s.k});
+                }
+                s.insert(s.subset(1) & ~a, 150);
+                if (!outer) s.ok("release b", .{});
+                s.ok("release a", .{});
+                s.finishOk();
+            },
+            // A savepoint outside BEGIN starts the transaction; RELEASE would
+            // commit it without markers (refused in CWAL); COMMIT through
+            // Conn.commit works.
+            5 => {
+                const mask = s.multi();
+                s.ok("savepoint outer_sp", .{});
+                s.insert(mask, 120);
+                if (s.mode == .cwal) {
+                    const rc = s.raw("release outer_sp");
+                    if (rc != c.SQLITE_CONSTRAINT_COMMITHOOK) die("k={d}: cross-file release not refused ({s})", .{ s.k, c.sqlite3_errstr(rc) });
+                    // SQLite rolls the data back but leaves the connection in
+                    // an empty transaction after a refused RELEASE.
+                    if (s.rowsOf(s.all()) != 0) die("k={d}: refused release kept rows", .{s.k});
+                    if (s.inTxn()) s.ok("rollback", .{});
+                    s.expectNone("refused release");
+                    s.ok("savepoint outer_sp", .{});
+                    s.insert(mask, 120);
+                }
+                s.finishOk();
+            },
+            // A statement that fails a constraint rolls back only itself.
+            6 => {
+                const mask = s.multi();
+                s.ok("begin", .{});
+                s.insert(mask, 100);
+                const f = @ctz(mask);
+                const rc = s.rawFmt("insert into {s}.t values ({d}, 0, 0, 0, null)", .{ Conn.schemaName(f), s.k });
+                if (rc != c.SQLITE_CONSTRAINT_PRIMARYKEY) die("k={d}: duplicate key: {s}", .{ s.k, c.sqlite3_errstr(rc) });
+                if (!s.inTxn() or s.rowsOf(mask) != @popCount(mask)) die("k={d}: failed statement undid the transaction", .{s.k});
+                // A statement that fails after inserting a row, in a file the
+                // transaction had not written: the row is undone but the file
+                // stays write-locked, so the commit includes it.
+                if (mask != s.all()) {
+                    const x: usize = @ctz(~mask);
+                    const rc2 = s.rawFmt("insert into {s}.t values ({d}, 0, 0, 0, null), ({d}, 0, 0, 0, null)", .{ Conn.schemaName(x), s.k, s.k });
+                    if (rc2 != c.SQLITE_CONSTRAINT_PRIMARYKEY) die("k={d}: duplicate rows: {s}", .{ s.k, c.sqlite3_errstr(rc2) });
+                    if (s.rowsOf(@as(u32, 1) << @intCast(x)) != 0) die("k={d}: failed statement kept a row", .{s.k});
+                    if (s.lockedMask() & (@as(u32, 1) << @intCast(x)) == 0) die("k={d}: failed statement left no lock", .{s.k});
+                }
+                s.finishOk();
+            },
+            // ON CONFLICT ROLLBACK ends the whole transaction.
+            7 => {
+                const mask = s.multi();
+                s.ok("begin", .{});
+                s.insert(mask, 100);
+                const rc = s.rawFmt("insert or rollback into {s}.t values ({d}, 0, 0, 0, null)", .{ Conn.schemaName(@ctz(mask)), s.k });
+                if (rc != c.SQLITE_CONSTRAINT_PRIMARYKEY) die("k={d}: or rollback: {s}", .{ s.k, c.sqlite3_errstr(rc) });
+                s.expectNone("or rollback");
+            },
+            // A trigger raises ABORT after writing several files: the
+            // statement is undone in every file, the transaction continues.
+            8 => {
+                const mask = s.multi();
+                s.fanTrigger(mask);
+                var buf: [256]u8 = undefined;
+                s.ok("begin", .{});
+                const rc = s.raw(s.fanSql(&buf, mask, 0, 1));
+                if (rc & 0xff != c.SQLITE_CONSTRAINT) die("k={d}: raise abort: {s}", .{ s.k, c.sqlite3_errstr(rc) });
+                if (!s.inTxn() or s.rowsOf(s.all()) != 0) die("k={d}: raise(abort) left rows or ended the transaction", .{s.k});
+                s.ok("{s}", .{s.fanSql(&buf, mask, 0, 0)});
+                s.finishOk();
+            },
+            // A trigger raises ROLLBACK: the whole transaction ends.
+            9 => {
+                const mask = s.multi();
+                s.fanTrigger(mask);
+                var buf: [256]u8 = undefined;
+                s.ok("begin", .{});
+                s.insert(s.subset(1) & ~mask, 100);
+                const rc = s.raw(s.fanSql(&buf, mask, 0, 2));
+                if (rc & 0xff != c.SQLITE_CONSTRAINT) die("k={d}: raise rollback: {s}", .{ s.k, c.sqlite3_errstr(rc) });
+                s.expectNone("raise(rollback)");
+            },
+            // COMMIT fails on a deferred foreign key and leaves the
+            // transaction open; fix it and commit again (a new number).
+            10 => {
+                s.ok("begin", .{});
+                s.insert(s.multi() | 1, 100);
+                s.ok("insert into main.fkc values ({d}, {d})", .{ s.k, -s.k });
+                const rc = s.finish();
+                if (rc != c.SQLITE_CONSTRAINT_FOREIGNKEY) die("k={d}: deferred fk commit: {s}", .{ s.k, c.sqlite3_errstr(rc) });
+                if (!s.inTxn()) die("k={d}: failed commit ended the transaction", .{s.k});
+                s.ok("insert into main.fkp values ({d})", .{-s.k});
+                s.finishOk();
+            },
+            // SQLITE_BUSY: another connection holds one file's write lock;
+            // the statement fails, the transaction stays open; retry once the
+            // lock is free, or give up and roll back.
+            11 => {
+                const mask = s.multi();
+                const f: usize = @ctz(mask);
+                var blocker: ?*c.sqlite3 = null;
+                var path: [max_path]u8 = undefined;
+                const name = c.sqlite3_db_filename(s.conn.db, Conn.schemaName(f));
+                const z = bufPrintZ(&path, "{s}", .{std.mem.span(name)}) catch unreachable;
+                if (c.sqlite3_open_v2(z.ptr, &blocker, c.SQLITE_OPEN_READWRITE, "unix") != c.SQLITE_OK) die("blocker open", .{});
+                _ = c.sqlite3_db_config(blocker, c.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, @as(c_int, 1), @as(?*c_int, null));
+                if (c.sqlite3_exec(blocker, "begin immediate", null, null, null) != c.SQLITE_OK) die("blocker begin: {s}", .{c.sqlite3_errmsg(blocker)});
+                _ = c.sqlite3_busy_timeout(s.conn.db, 20);
+                s.ok("begin", .{});
+                s.insert(mask & ~(@as(u32, 1) << @intCast(f)), 100);
+                const rc = s.rawFmt("insert into {s}.t values ({d}, 0, 0, 0, randomblob(100))", .{ Conn.schemaName(f), s.k });
+                if (rc & 0xff != c.SQLITE_BUSY) die("k={d}: expected busy, got {s}", .{ s.k, c.sqlite3_errstr(rc) });
+                if (!s.inTxn()) die("k={d}: busy ended the transaction", .{s.k});
+                _ = c.sqlite3_exec(blocker, "rollback", null, null, null);
+                _ = c.sqlite3_close(blocker);
+                _ = c.sqlite3_busy_timeout(s.conn.db, 10_000);
+                if (s.rand.boolean()) {
+                    s.ok("rollback", .{});
+                    s.expectNone("rollback after busy");
+                } else {
+                    s.insert(@as(u32, 1) << @intCast(f), 100);
+                    s.finishOk();
+                }
+            },
+            // Larger than the page cache: SQLite spills uncommitted frames
+            // into every WAL before the commit.
+            12 => {
+                s.ok("begin", .{});
+                s.insert(s.multi(), 30_000 + s.rand.uintLessThan(u32, 20_000));
+                s.finishOk();
+            },
+            // BEGIN IMMEDIATE write-locks every file, so the transaction
+            // commits (a marker) in every file whatever it writes.
+            13 => {
+                s.ok("begin immediate", .{});
+                if (s.lockedMask() != s.all()) die("k={d}: begin immediate locked {d}", .{ s.k, s.lockedMask() });
+                s.insert(s.subset(1), 100);
+                s.finishOk();
+            },
+            // Prepared statements reused across commits, and a read
+            // statement left mid-step across the commit.
+            else => {
+                const mask = s.multi();
+                var sel: ?*c.sqlite3_stmt = null;
+                if (c.sqlite3_prepare_v2(s.conn.db, "select k from main.t", -1, &sel, null) != c.SQLITE_OK) die("prepare select", .{});
+                defer _ = c.sqlite3_finalize(sel);
+                s.ok("begin", .{});
+                _ = c.sqlite3_step(sel);
+                for (0..s.n) |f| {
+                    if (mask >> @intCast(f) & 1 == 0) continue;
+                    const st = s.ins[f].?;
+                    _ = c.sqlite3_bind_int64(st, 1, s.k);
+                    if (c.sqlite3_step(st) != c.SQLITE_DONE) die("k={d}: prepared insert: {s}", .{ s.k, c.sqlite3_errmsg(s.conn.db) });
+                    _ = c.sqlite3_reset(st);
+                }
+                s.finishOk();
+            },
+        }
+    }
+};
+
+/// Section 2 workload: --rounds rounds, round r runs scenario r % 16 (15 is
+/// a checkpoint). Prints try/ack lines like nwriter, then the per-scenario
+/// counts.
+fn cmdNSem(dir: []const u8, args: Args) void {
+    const mode = args.mode();
+    const n = nFiles(args);
+    const rounds = args.int("--rounds", 32);
+    const conn = openN(dir, n, .{ .mode = mode, .role = .writer, .cache_pages = 10 }) catch |err| {
+        out("writer-open-error {s}\n", .{@errorName(err)});
+        cwal.flushPending();
+        c.exit(if (err == error.Broken) 3 else 2);
+    };
+    var buf: [8192]u8 = undefined;
+    const k = queryInt(conn, unionSql(&buf, n, "select coalesce(max(k), 0) from u")) + 1;
+    var prng = std.Random.DefaultPrng.init(args.int("--seed", 1) *% 0x9e3779b97f4a7c15 +% @as(u64, @intCast(k)));
+    var s: Sem = .{ .conn = conn, .mode = mode, .n = n, .k = k, .rand = prng.random() };
+    // Per-file audit trigger (a trigger write inside each file's commit)
+    // and the deferred foreign key, created by one cross-file DDL
+    // transaction. It also commits a row of k to every file, like any other
+    // cross-file commit, so ncheck can match its marker to data.
+    s.ok("pragma foreign_keys = on", .{});
+    s.ok("begin immediate", .{});
+    for (0..n) |f| {
+        const schema = Conn.schemaName(f);
+        s.ok("create table if not exists {s}.audit(k integer primary key)", .{schema});
+        s.ok("create trigger if not exists {s}.t_audit after insert on t begin insert into audit values (new.k); end", .{schema});
+    }
+    s.ok("create table if not exists main.fkp(id integer primary key)", .{});
+    s.ok("create table if not exists main.fkc(id integer primary key, pid integer references fkp(id) deferrable initially deferred)", .{});
+    s.finishOk();
+    s.ok("create temp table fan(k, txn, mask, n, size, fail)", .{});
+    for (0..n) |f| {
+        const sql = bufPrintZ(&buf, "insert into {s}.t values (?1, 0, 0, 0, randomblob(80))", .{Conn.schemaName(f)}) catch unreachable;
+        if (c.sqlite3_prepare_v2(conn.db, sql.ptr, -1, &s.ins[f], null) != c.SQLITE_OK) die("prepare insert", .{});
+    }
+    const passive_only = std.mem.eql(u8, args.get("--ckpt") orelse "all", "passive");
+    const delay_us = args.int("--delay-us", 0);
+    var r: u64 = 0;
+    while (r < rounds) : (r += 1) {
+        if (delay_us != 0) _ = c.usleep(@intCast(delay_us));
+        const scenario = r % (sem_names.len + 1);
+        if (scenario == sem_names.len) {
+            // A commit that writes only TEMP reaches the commit hook but no
+            // member's phase two; it must not leave the writer unable to
+            // checkpoint.
+            s.ok("delete from temp.fan", .{});
+            const modes = [_]c_int{ c.SQLITE_CHECKPOINT_PASSIVE, c.SQLITE_CHECKPOINT_RESTART, c.SQLITE_CHECKPOINT_TRUNCATE };
+            const denied = conn.stats.checkpoint_denied;
+            _ = c.sqlite3_wal_checkpoint_v2(conn.db, null, if (passive_only) modes[0] else modes[(r / sem_names.len) % 3], null, null);
+            if (conn.stats.checkpoint_denied != denied) die("k={d}: writer checkpoint denied after a temp-only commit", .{s.k});
+            continue;
+        }
+        s.run(scenario);
+    }
+    for (s.ins[0..n]) |st| _ = c.sqlite3_finalize(st);
+    conn.close();
+    cwal.flushPending();
+    var line: [1024]u8 = undefined;
+    var len: usize = 0;
+    for (sem_names, s.count) |name, cnt| {
+        if (cnt != 0) len += (std.fmt.bufPrint(line[len..], " {s}={d}", .{ name, cnt }) catch unreachable).len;
+    }
+    out("sem ok{s}\n", .{line[0..len]});
+    out("events={d} tagged={d}\n", .{ cwal.fault.count(), cwal.fault.taggedCount() });
+}
+
 fn readWhole(path: []const u8) []u8 {
     var pbuf: [max_path]u8 = undefined;
     const z = bufPrintZ(&pbuf, "{s}", .{path}) catch die("path", .{});
@@ -405,6 +841,17 @@ fn cmdNCheck(dir: []const u8, args: Args) void {
             if (marker[0] != data[0] or marker[1] != data[1]) die("{s} marker {d}/{d} data {d}/{d}", .{ schema, marker[0], marker[1], data[0], data[1] });
         }
     }
+    // nsem's per-file audit trigger writes inside the same commit as t;
+    // one cross-file DDL transaction created every audit table.
+    var audits: usize = 0;
+    for (0..n) |i| {
+        const schema = Conn.schemaName(i);
+        if (queryInt(conn, bufPrintZ(&buf, "select count(*) from {s}.sqlite_schema where name = 'audit'", .{schema}) catch unreachable) == 0) continue;
+        audits += 1;
+        const diff = queryInt(conn, bufPrintZ(&buf, "select (select count(*) from (select k from {s}.t except select k from {s}.audit)) + (select count(*) from (select k from {s}.audit except select k from {s}.t))", .{ schema, schema, schema, schema }) catch unreachable);
+        if (diff != 0) die("{s} audit differs from t in {d} keys", .{ schema, diff });
+    }
+    if (audits != 0 and audits != n) die("torn schema: {d} of {d} files have audit", .{ audits, n });
     var acked: u64 = 0;
     if (args.get("--acked-file")) |path| {
         const data = readWhole(path);
@@ -574,6 +1021,16 @@ fn readerThread(job: *ReaderJob) void {
             const st = nState(conn, job.nfiles);
             mixed = st.bad != 0 or st.distinct != st.max_k or st.shared_txn != 0;
             if (mixed and job.stats.mixed < 3) out("MIXED torn={d} distinct={d} max={d} shared={d}\n", .{ st.bad, st.distinct, st.max_k, st.shared_txn });
+            if (job.hold_us != 0) {
+                // A long-lived read transaction must keep its snapshot
+                // while the writer commits and checkpoints.
+                _ = c.usleep(job.hold_us);
+                const again = nState(conn, job.nfiles);
+                if (!std.meta.eql(st, again)) {
+                    if (job.stats.mixed < 3) out("MIXED snapshot moved max {d}->{d} distinct {d}->{d}\n", .{ st.max_k, again.max_k, st.distinct, again.distinct });
+                    mixed = true;
+                }
+            }
         } else {
             const a = queryInt(conn, "select count(*) from main.pairs");
             const b = queryInt(conn, "select count(*) from pairs_s");
@@ -584,7 +1041,7 @@ fn readerThread(job: *ReaderJob) void {
             mixed = a != b or ba != bb or (job.solo_order and sb != sa and sb + 1 != sa);
             if (mixed and job.stats.mixed < 3) out("MIXED pairs {d}/{d} bulk {d}/{d} solo {d}/{d}\n", .{ a, b, ba, bb, sa, sb });
         }
-        if (job.hold_us != 0) _ = c.usleep(job.hold_us);
+        if (job.hold_us != 0 and job.nfiles == 0) _ = c.usleep(job.hold_us);
         if (!conn.snapshotIntact()) job.stats.ckpt_violations += 1;
         conn.exec("rollback") catch {};
         job.stats.reads += 1;
@@ -745,5 +1202,5 @@ pub fn main(init: std.process.Init.Minimal) void {
     const args: Args = .{ .list = list };
     const cmd = list[1];
     const dir = list[2];
-    if (std.mem.eql(u8, cmd, "seed")) cmdSeed(dir) else if (std.mem.eql(u8, cmd, "writer")) cmdWriter(dir, args) else if (std.mem.eql(u8, cmd, "reader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "check")) cmdCheck(dir, args) else if (std.mem.eql(u8, cmd, "recover")) cmdRecover(dir, args) else if (std.mem.eql(u8, cmd, "state")) cmdState(dir) else if (std.mem.eql(u8, cmd, "bench")) cmdBench(dir, args) else if (std.mem.eql(u8, cmd, "benchrw")) cmdBenchRw(dir, args) else if (std.mem.eql(u8, cmd, "nseed")) cmdNSeed(dir, args) else if (std.mem.eql(u8, cmd, "nwriter")) cmdNWriter(dir, args) else if (std.mem.eql(u8, cmd, "nreader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "ncheck")) cmdNCheck(dir, args) else die("unknown command {s}", .{cmd});
+    if (std.mem.eql(u8, cmd, "seed")) cmdSeed(dir) else if (std.mem.eql(u8, cmd, "writer")) cmdWriter(dir, args) else if (std.mem.eql(u8, cmd, "reader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "check")) cmdCheck(dir, args) else if (std.mem.eql(u8, cmd, "recover")) cmdRecover(dir, args) else if (std.mem.eql(u8, cmd, "state")) cmdState(dir) else if (std.mem.eql(u8, cmd, "bench")) cmdBench(dir, args) else if (std.mem.eql(u8, cmd, "benchrw")) cmdBenchRw(dir, args) else if (std.mem.eql(u8, cmd, "nseed")) cmdNSeed(dir, args) else if (std.mem.eql(u8, cmd, "nwriter")) cmdNWriter(dir, args) else if (std.mem.eql(u8, cmd, "nreader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "ncheck")) cmdNCheck(dir, args) else if (std.mem.eql(u8, cmd, "nsem")) cmdNSem(dir, args) else die("unknown command {s}", .{cmd});
 }

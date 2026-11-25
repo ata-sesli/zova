@@ -1199,6 +1199,12 @@ pub const Conn = struct {
         const marked = conn.marker_pending;
         conn.marker_pending = false;
         if (@atomicLoad(u32, &conn.snap.?.broken, .seq_cst) != 0) return 1;
+        // Only TEMP was written: no member commits, so no phase two or
+        // rollback hook would end this commit.
+        if (written == 0) {
+            conn.in_commit = false;
+            return 0;
+        }
         // A cross-file commit without markers could not be recovered.
         if (conn.cross and !marked and !fault.mutated("no-markers")) {
             conn.violation = true;

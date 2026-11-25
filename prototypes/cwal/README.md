@@ -228,7 +228,7 @@ zig build -Doptimize=ReleaseFast
 
 `zig-out/bin/cwal` commands: `seed`, `writer`, `reader`, `check`, `recover`,
 `state` (prints the seqlock page), `bench`, `benchrw`, and for sets of 2 to
-32 files (`--files N`) `nseed`, `nwriter`, `nreader`, `ncheck`. Fault injection is
+32 files (`--files N`) `nseed`, `nwriter`, `nsem`, `nreader`, `ncheck`. Fault injection is
 controlled by environment: `CWAL_CRASH_AT=n` (SIGKILL at event n),
 `CWAL_CRASH_TAG=t[,t...]` (count only events with these tags), `CWAL_POWERLOSS=1` +
 `CWAL_SEED`, `CWAL_TRACE=1`, and `CWAL_MUTATE=…` (test-only defects, to show
@@ -284,6 +284,43 @@ acknowledged `(k, txn)` survived.
 | Writer restart chain | 15 writers in a row on one set, 80% killed at a random event, with readers kept running and restarted; every 5th writer opens alone. Random working sets, `PASSIVE` checkpoints. Requires unique attempted marker numbers across the whole chain (writer restarts included) and 0 mixed reads. 4 seeds per file count. |
 | Unpublished frames | A reader keeps the set open (and sleeps 20 ms between finding the writer alive and mapping, `CWAL_ALIVE_DELAY_US`); the writer is killed at each of its first 60 fsyncs; a second writer runs 6 rounds without ever touching file x, for each x; then check. |
 | N-file live readers | A writer (window widened 200 µs) and 2 reader processes × 2 threads, all and `PASSIVE` checkpoints. |
+
+Transaction-semantics workload (`nsem`, torture sections `nsem` and
+`nsemcrash`). One writer connection (`foreign_keys=on`, a 10-page cache)
+cycles through 15 scenarios on the same `t` tables, and every 16th round
+checkpoints. Each file also has an `audit` table filled by an ordinary
+per-file trigger on `t`, so every commit includes trigger writes. One
+cross-file DDL transaction creates the triggers and tables.
+
+| Scenario | What it does and what it requires |
+| --- | --- |
+| `explicit` | `BEGIN`, inserts into 2 or more files, `COMMIT`. |
+| `solo` | Single-file autocommit (an implicit transaction). |
+| `trigger` | A TEMP trigger writes to a random subset of files; the statement runs through `Conn.autocommit`. |
+| `trigger-direct` | The same statement issued as a plain autocommit: CWAL must refuse it (`SQLITE_CONSTRAINT_COMMITHOOK`) and leave no rows. |
+| `savepoint` | Nested savepoints; `ROLLBACK TO` the inner one (its rows must be gone, the outer ones kept), sometimes also the outer one, then more writes and commit. |
+| `savepoint-outer` | `SAVEPOINT` as the outermost transaction, written to 2 or more files: CWAL refuses the `RELEASE` that would commit it without markers; it is then redone with markers. |
+| `constraint` | A primary-key violation inside a cross-file transaction, including a failed statement on a file the transaction had not written yet; the transaction continues and commits. |
+| `or-rollback` | `INSERT OR ROLLBACK` conflict: the whole cross-file transaction is gone. |
+| `raise-abort` | The TEMP trigger raises `ABORT` after its writes: the statement is undone, the transaction continues and commits. |
+| `raise-rollback` | The TEMP trigger raises `ROLLBACK`: nothing remains in any file. |
+| `deferred-fk` | A deferred foreign key fails at `COMMIT`: the transaction stays open, is fixed, and commits. |
+| `busy` | Another connection holds a write lock on one file: `SQLITE_BUSY` with the transaction still open, then a retry or rollback. |
+| `spill` | 30–50 KB rows in several files, more than the page cache, so SQLite writes uncommitted frames to the WALs before the commit. |
+| `immediate` | `BEGIN IMMEDIATE` locks every file; the commit covers all of them. |
+| `prepared` | Cached prepared inserts, and a `SELECT` stepped partway before the commit and finished after it. |
+
+Before each checkpoint the writer makes a commit that writes only TEMP
+tables, and the checkpoint must not be refused. `ncheck` also requires
+every file's `audit` keys to equal its `t` keys, and the `audit` table in
+all files or none. In the `nsem` section, readers hold each read
+transaction 2 ms and read it again, and both reads must be the same.
+
+| Test | What it does |
+| --- | --- |
+| nsem with long-lived readers | `nsem` (320 rounds, 3 ms apart, window widened 300 µs) with 2 reader processes × 2 threads; 2 seeds per file count. |
+| nsem process crash | The N-file crash matrix with `nsem` (32 rounds: every scenario twice) as the writer, at 2, 3, 8 and 32 files (32 sampled to 3,000); crash recovery itself for 8 torn states at 8 files. |
+| nsem power loss | As above with the power-loss model, 3 seeds, at 3 and 8 files (sampled to 3,000). |
 
 ## Results
 
@@ -345,6 +382,40 @@ completed only 4 reads in the test's time (751 sequence retries, 290 waits
 for a window): a read pins 32 members, which rarely fits between windows.
 That is a liveness cost under a saturating writer, not a correctness
 failure.
+
+### Transaction semantics
+
+Same machine, 2026-11-25, tmpfs, Debug build.
+
+| Test | Files | Plain WAL (baseline) | CWAL |
+| --- | --- | --- | --- |
+| nsem with long-lived readers, 2 seeds | 2 / 3 / 4 / 8 / 16 / 32 | 97, 115, 172, 166, 183, 103 mixed reads | **0 mixed** / 2,364, 2,022, 1,826, 1,313, 951, 528 reads; every scenario ran 20 times per run; all acked commits present |
+| nsem process crash | 2 / 3 / 8 / 32 | 228, 344, 739, 1,663 torn | **0** / 1,056, 1,259, 2,136, 3,000; 286–1,526 rollbacks per count |
+| Crash during recovery, 8 torn states | 8 | — | **0** / 6,228 |
+| nsem power loss, 3 seeds | 3 / 8 | 1,032, 1,352 torn | **0** / 3,000, 3,000 |
+
+SQLite behavior found while writing these tests:
+
+- A refused `RELEASE` of an outermost savepoint rolls the data back, but
+  SQLite then leaves the connection in an empty open transaction
+  (`OP_Savepoint` sets `autoCommit = 0` after the failed commit). The
+  caller must `ROLLBACK`.
+- A deferred foreign-key failure at `COMMIT` leaves the transaction open,
+  and the commit hook is not called.
+- `RAISE(ABORT)` and `RAISE(ROLLBACK)` return the base
+  `SQLITE_CONSTRAINT`, not an extended code.
+- A TEMP trigger can write any attached schema; a non-TEMP trigger only
+  its own.
+- A commit that writes only TEMP tables calls the commit hook, but no
+  member reaches phase two or the rollback hook. The prototype left
+  `in_commit` set and refused the writer's checkpoints until its next
+  member commit. Fixed: the commit hook ends a commit that write-locked no
+  member.
+
+No mutation was run against `nsem`: with `no-markers` its own checks (the
+marker number of each commit, the refused autocommit) fail on every run.
+The plain-WAL baseline shows that the checker detects torn commits in this
+workload.
 
 ### Overhead
 
@@ -467,7 +538,8 @@ journal check on reads.
   `NORMAL` would also not be power-safe across files.
 - Cross-file writes must commit through `Conn.commit` or `Conn.autocommit`; a
   cross-file autocommit statement issued directly is refused by the commit
-  hook. Each member holds a `cwal_marker` table, which a production version
+  hook, and so is a `RELEASE` that would commit a cross-file savepoint
+  transaction (which then leaves an empty transaction open). Each member holds a `cwal_marker` table, which a production version
   would hide from the public API.
 - After a writer crash in the middle of a cross-file commit, the set is
   unreadable until every handle has closed and one reopens (recovery needs

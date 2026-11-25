@@ -392,15 +392,17 @@ def ntemplate(work, n):
     return tpl
 
 
-def n_crash_matrix(work, n, mode, jobs, powerloss_seeds=(None,), cap=None):
+def n_crash_matrix(work, n, mode, jobs, powerloss_seeds=(None,), cap=None, writer=("nwriter", NROUNDS)):
     """Kill the writer at every commit-boundary event of every participating
     file (sampled down to cap), recover, and check atomicity, the prefix
-    property, marker agreement and acknowledged commits."""
+    property, marker agreement and acknowledged commits. writer is the
+    workload command and its round count."""
     tpl = ntemplate(work, n)
-    d0 = os.path.join(work, f"nfull-{n}-{mode}")
+    cmd, rounds = writer
+    d0 = os.path.join(work, f"nfull-{cmd}-{n}-{mode}")
     shutil.rmtree(d0, ignore_errors=True)
     shutil.copytree(tpl, d0)
-    total = tagged(run(["nwriter", d0, "--files", n, "--mode", mode, "--rounds", NROUNDS], {"CWAL_CRASH_TAG": NTAGS}).stdout)
+    total = tagged(run([cmd, d0, "--files", n, "--mode", mode, "--rounds", rounds], {"CWAL_CRASH_TAG": NTAGS}).stdout)
     shutil.rmtree(d0, ignore_errors=True)
     cases = [(t, seed) for seed in powerloss_seeds for t in range(1, total + 1)]
     if cap and len(cases) > cap:
@@ -408,13 +410,13 @@ def n_crash_matrix(work, n, mode, jobs, powerloss_seeds=(None,), cap=None):
 
     def one(case):
         t, seed = case
-        d = os.path.join(work, f"nc-{n}-{mode}-{seed}-{t}")
+        d = os.path.join(work, f"nc-{cmd}-{n}-{mode}-{seed}-{t}")
         shutil.rmtree(d, ignore_errors=True)
         shutil.copytree(tpl, d)
         env = {"CWAL_CRASH_TAG": NTAGS, "CWAL_CRASH_AT": t}
         if seed is not None:
             env.update(CWAL_POWERLOSS=1, CWAL_SEED=seed)
-        w = run(["nwriter", d, "--files", n, "--mode", mode, "--rounds", NROUNDS], env)
+        w = run([cmd, d, "--files", n, "--mode", mode, "--rounds", rounds], env)
         acked = nacks(w.stdout)
         snap = d + ".crashed"
         shutil.rmtree(snap, ignore_errors=True)
@@ -433,7 +435,7 @@ def n_crash_matrix(work, n, mode, jobs, powerloss_seeds=(None,), cap=None):
     # Keep at most 40 torn states for recovery_crash, which samples 8.
     kept, kept_lock = [], threading.Lock()
 
-    label = f"{n} files {mode} crash{' powerloss' if powerloss_seeds != (None,) else ''}"
+    label = f"{cmd} {n} files {mode} crash{' powerloss' if powerloss_seeds != (None,) else ''}"
     results = parallel(one, cases, jobs, label)
     fails = [(t, s, e) for t, s, _, e, _, _, _ in results if e]
     recoveries = Counter(rec for _, _, rec, _, _, _, _ in results)
@@ -601,6 +603,31 @@ def n_readers(work, n, mode, ckpt):
     return stats, err
 
 
+SEM_ROUNDS = 32  # every nsem scenario twice, plus two checkpoints
+
+
+def n_sem(work, n, mode, seed):
+    """The transaction-semantics workload (nsem) with 2 reader processes x
+    2 threads holding each read transaction open and re-reading it; then
+    check the set and every acknowledged commit."""
+    d = os.path.join(work, f"nsem-{n}-{mode}-{seed}")
+    shutil.rmtree(d, ignore_errors=True)
+    shutil.copytree(ntemplate(work, n), d)
+    w = subprocess.Popen([BIN, "nsem", d, "--files", str(n), "--mode", mode, "--rounds", "320", "--delay-us", "3000", "--seed", str(seed)], env=WINDOW_ENV, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    time.sleep(0.05)
+    rs = [subprocess.Popen([BIN, "nreader", d, "--files", str(n), "--mode", mode, "--threads", "2", "--duration-ms", "1500", "--gap-us", "300", "--hold-us", "2000"], stdout=subprocess.PIPE, text=True) for _ in range(2)]
+    stats = Counter()
+    for r in rs:
+        stats.update(reader_stats(r.communicate()[0]))
+    wout, werr = w.communicate()
+    m = re.search(r"^sem ok(.*)$", wout, re.M)
+    err = None if m and w.returncode == 0 else ((werr.strip().splitlines() or [f"exit {w.returncode}"])[-1])
+    if not err:
+        err, _ = ncheck(d, n, mode, nacks(wout))
+    shutil.rmtree(d, ignore_errors=True)
+    return stats, err, (m.group(1).strip() if m else "")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--work", default=os.environ.get("CWAL_WORK", "/tmp/cwal-torture"))
@@ -763,6 +790,45 @@ def main():
                     keys = ("reads", "mixed", "broken", "snapshot_reads", "seq_retries", "snapshot_waits", "ckpt_violations")
                     print(f"{n} files {mode} ckpt={ckpt}: {dict((k, stats[k]) for k in keys)} check={'ok' if not err else err}")
                     failed |= mode == "cwal" and (stats["mixed"] != 0 or stats["ckpt_violations"] != 0 or bool(err))
+
+    if want("nsem"):
+        print("== N files: transaction semantics (nsem) with long-lived readers", flush=True)
+        for n in a.files:
+            for mode in ("plain", "cwal"):
+                for seed in (1, 2):
+                    stats, err, counts = n_sem(a.work, n, mode, seed)
+                    keys = ("reads", "mixed", "broken", "snapshot_reads", "ckpt_violations")
+                    print(f"{n} files {mode} seed={seed}: {dict((k, stats[k]) for k in keys)} check={'ok' if not err else err}")
+                    if seed == 1 and n == a.files[0]:
+                        print(f"    scenarios: {counts}")
+                    failed |= bool(err) or (mode == "cwal" and (stats["mixed"] != 0 or stats["ckpt_violations"] != 0 or stats["reads"] == 0))
+
+    if want("nsemcrash"):
+        sem = ("nsem", SEM_ROUNDS)
+        print(f"== N files: nsem process crash at every commit-boundary event ({NTAGS})", flush=True)
+        for n in [x for x in a.files if x in (2, 3, 8, 32)]:
+            for mode in ("plain", "cwal"):
+                total, runs, crashed, fails, recoveries, snaps = n_crash_matrix(a.work, n, mode, a.jobs, cap=a.ncap, writer=sem)
+                print(f"{n} files {mode}: events={total} runs={runs} crashed={crashed} failures={len(fails)} recoveries={dict(recoveries)}")
+                for r, cnt in Counter(reason(e) for _, _, e in fails).most_common(3):
+                    print(f"    {cnt:5d}  {r}")
+                failed |= mode == "cwal" and (bool(fails) or crashed != runs)
+                if mode == "cwal" and n == 8 and snaps:
+                    nt, total_r, rfails = recovery_crash(a.work, snaps, a.jobs, cap=8, files=n)
+                    print(f"{n} files cwal recovery crash: torn states={nt} runs={total_r} failures={len(rfails)}")
+                    for f in rfails[:3]:
+                        print("    ", f)
+                    failed |= bool(rfails)
+                drop_snaps(snaps)
+        print("== N files: nsem power loss at every commit-boundary event (sampled)", flush=True)
+        for n in [x for x in a.files if x in (3, 8)]:
+            for mode in ("plain", "cwal"):
+                total, runs, crashed, fails, recoveries, snaps = n_crash_matrix(a.work, n, mode, a.jobs, pl, cap=a.ncap, writer=sem)
+                drop_snaps(snaps)
+                print(f"{n} files {mode} powerloss: events={total} runs={runs} failures={len(fails)} recoveries={dict(recoveries)}")
+                for r, cnt in Counter(reason(e) for _, _, e in fails).most_common(3):
+                    print(f"    {cnt:5d}  {r}")
+                failed |= mode == "cwal" and bool(fails)
 
     print("RESULT", "FAIL" if failed else "PASS")
     sys.exit(1 if failed else 0)
