@@ -21,7 +21,7 @@ fn bufPrintZ(buf: []u8, comptime fmt: []const u8, args: anytype) std.fmt.BufPrin
     return std.fmt.bufPrintSentinel(buf, fmt, args, 0);
 }
 
-pub const max_members = 4;
+pub const max_members = 32;
 const shm_region_size = 32768;
 
 // SQLite WAL constants (sqlite3.c: WAL_WRITE_LOCK, WAL_CKPT_LOCK, WAL_HDRSIZE,
@@ -59,17 +59,26 @@ pub const fault = struct {
     /// "no-marker-rollback", "no-cross-flag", "no-ckpt-validate" (accept a
     /// skipped checkpoint lock without checking the counter), "no-ckpt-skip"
     /// (always take the real lock), "no-ckpt-reset" (a writer does not clear
-    /// checkpointers left by dead processes).
+    /// checkpointers left by dead processes), "no-discard-unpublished" (a
+    /// writer keeps frames a dead writer wrote past mxFrame), "no-txn-epoch"
+    /// (marker numbers continue from the newest published one), "no-open-gate"
+    /// (opens and closes do not take the open/close gate), "no-late-alone"
+    /// (no `-alive` check after SQLite has mapped the wal-indexes).
     pub var mutate: []const u8 = "";
     pub var syncs: u64 = 0;
+    /// Test-only (CWAL_DEBUG=1): protocol decisions appended to
+    /// `<main>-cwal-debug`.
+    pub var debug: bool = false;
 
     pub fn init() void {
         crash_at = envU64("CWAL_CRASH_AT") orelse 0;
         powerloss = (envU64("CWAL_POWERLOSS") orelse 0) != 0;
         trace = (envU64("CWAL_TRACE") orelse 0) != 0;
-        // With CWAL_CRASH_TAG, CWAL_CRASH_AT counts only events with that tag.
+        // With CWAL_CRASH_TAG (a comma-separated list), CWAL_CRASH_AT counts
+        // only events with one of those tags.
         if (c.getenv("CWAL_CRASH_TAG")) |tag| crash_tag = std.mem.span(tag);
         if (c.getenv("CWAL_MUTATE")) |m| mutate = std.mem.span(m);
+        debug = (envU64("CWAL_DEBUG") orelse 0) != 0;
         rng ^= (envU64("CWAL_SEED") orelse 1) *% 0x2545f4914f6cdd1d;
     }
 
@@ -81,11 +90,21 @@ pub const fault = struct {
         return @atomicLoad(u64, &events, .seq_cst);
     }
 
+    /// Events matching CWAL_CRASH_TAG so far.
+    pub fn taggedCount() u64 {
+        return @atomicLoad(u64, &tagged, .seq_cst);
+    }
+
     pub fn event(tag: []const u8) void {
         const n = @atomicRmw(u64, &events, .Add, 1, .seq_cst) + 1;
         if (trace) std.debug.print("event {d} {s}\n", .{ n, tag });
         if (crash_tag) |want| {
-            if (std.mem.eql(u8, tag, want) and @atomicRmw(u64, &tagged, .Add, 1, .seq_cst) + 1 == crash_at) crash();
+            var it = std.mem.splitScalar(u8, want, ',');
+            while (it.next()) |w| {
+                if (!std.mem.eql(u8, tag, w)) continue;
+                if (@atomicRmw(u64, &tagged, .Add, 1, .seq_cst) + 1 == crash_at) crash();
+                break;
+            }
         } else if (crash_at != 0 and n == crash_at) crash();
     }
 
@@ -220,6 +239,10 @@ pub const test_delay = struct {
     /// to widen the race the checkpoint counter must catch.
     pub var ckpt_open_delay_us: u32 = 0;
     pub var ckpt_scan_delay_us: u32 = 0;
+    /// Sleep after an opener found another handle holding `-alive`, before
+    /// SQLite maps the wal-indexes: widens the window in which that handle
+    /// can die (see aloneAfterMapping).
+    pub var alive_delay_us: u32 = 0;
 };
 
 pub fn register() void {
@@ -227,6 +250,7 @@ pub fn register() void {
     test_delay.window_delay_us = @intCast(envU64("CWAL_WINDOW_DELAY_US") orelse 0);
     test_delay.ckpt_open_delay_us = @intCast(envU64("CWAL_CKPT_OPEN_DELAY_US") orelse 0);
     test_delay.ckpt_scan_delay_us = @intCast(envU64("CWAL_CKPT_SCAN_DELAY_US") orelse 0);
+    test_delay.alive_delay_us = @intCast(envU64("CWAL_ALIVE_DELAY_US") orelse 0);
     unix_vfs = c.sqlite3_vfs_find("unix");
     std.debug.assert(unix_vfs != null);
     cwal_vfs = unix_vfs.*;
@@ -378,7 +402,11 @@ fn ioSync(file: [*c]c.sqlite3_file, flags: c_int) callconv(.c) c_int {
         // With synchronous=FULL, SQLite syncs a member's WAL after writing
         // its commit frame and before publishing it in the wal-index. The
         // first such sync of a commit starts the publication window.
-        if (connFor(f)) |conn| conn.startPublication();
+        if (connFor(f)) |conn| {
+            conn.log("wal sync member {d} in_commit={} window_open={} cross={}", .{ f.member, conn.in_commit, conn.window_open, conn.cross });
+            // Fail the commit before this member publishes.
+            if (rc == c.SQLITE_OK and !conn.startPublication()) return c.SQLITE_IOERR_FSYNC;
+        }
     }
     return rc;
 }
@@ -469,6 +497,8 @@ fn ioShmLock(file: [*c]c.sqlite3_file, offset: c_int, n: c_int, flags: c_int) ca
     }
     const rc = realMethods(f).xShmLock.?(f.real, offset, n, flags);
     if (conn) |cn| {
+        if (offset == 1 and n >= 2 and flags & c.SQLITE_SHM_EXCLUSIVE != 0 and flags & c.SQLITE_SHM_LOCK != 0)
+            cn.log("wal-index recovery lock member {d} rc={d}", .{ f.member, rc });
         if (cn.mode == .cwal and ckpt_exclusive and flags & c.SQLITE_SHM_LOCK != 0 and rc == c.SQLITE_OK) {
             // Announce the checkpointer before SQLite, holding the lock, can
             // look at read marks or write anything.
@@ -486,6 +516,9 @@ fn ioShmLock(file: [*c]c.sqlite3_file, offset: c_int, n: c_int, flags: c_int) ca
 
 fn ioShmBarrier(file: [*c]c.sqlite3_file) callconv(.c) void {
     const f = asFile(file);
+    // SQLite issues barriers around wal-index header writes, so this marks
+    // the points where a member publishes a commit.
+    fault.event("shm-barrier");
     realMethods(f).xShmBarrier.?(f.real);
 }
 
@@ -638,6 +671,8 @@ pub const Stats = struct {
     /// Snapshot opens that took the real checkpoint lock because a
     /// checkpoint was running.
     ckpt_fallbacks: u64 = 0,
+    /// WAL bytes past mxFrame that a writer dropped at open.
+    discarded_bytes: u64 = 0,
 };
 
 pub const Conn = struct {
@@ -650,6 +685,12 @@ pub const Conn = struct {
     member_db: [max_members]?*File = @splat(null),
     write_locked: [max_members]bool = @splat(false),
     alive_fd: c_int = -1,
+    /// Open/close gate (`-gate`), held exclusively while this handle opens
+    /// (until SQLite has mapped every member's wal-index) or closes.
+    gate_fd: c_int = -1,
+    gate_held: bool = false,
+    /// This handle found `-alive` free at its open-time check.
+    opened_alone: bool = false,
     writer_fd: c_int = -1,
     live_fd: c_int = -1,
     snap_fd: c_int = -1,
@@ -702,11 +743,75 @@ pub const Conn = struct {
             if (!std.ascii.eqlIgnoreCase(options.synchronous, "FULL") and !std.ascii.eqlIgnoreCase(options.synchronous, "EXTRA")) return error.ProtocolViolation;
             try conn.openCoordination();
         }
+        try conn.openSqlite(paths, options);
+        if (options.mode == .cwal and try conn.aloneAfterMapping()) {
+            // Every other handle closed or died between the `-alive` check
+            // and SQLite mapping the wal-indexes, so this handle may have been
+            // the first to map one, and SQLite then rebuilt it from the WAL
+            // file, publishing any frames a dead writer left past mxFrame.
+            // Recover as the first handle would have. Close without a
+            // checkpoint: the rebuilt state may be torn.
+            conn.log("alone after mapping", .{});
+            _ = c.sqlite3_db_config(conn.db, c.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, @as(c_int, 1), @as(?*c_int, null));
+            _ = c.sqlite3_close_v2(conn.db);
+            conn.db = null;
+            try conn.recoverAlone();
+            try conn.openSqlite(paths, options);
+        }
+        if (options.mode == .cwal) {
+            _ = c.sqlite3_commit_hook(conn.db, &commitHook, conn);
+            _ = c.sqlite3_rollback_hook(conn.db, &rollbackHook, conn);
+            if (options.role == .writer) {
+                try conn.discardUnpublished();
+                conn.resetCheckpointers();
+                // One single-member commit per statement.
+                for (0..paths.len) |i| {
+                    var sql_buf: [160]u8 = undefined;
+                    const schema = schemaName(i);
+                    try conn.exec(bufPrintZ(&sql_buf, "create table if not exists {s}.cwal_marker(k integer primary key, txn integer not null, mask integer not null)", .{schema}) catch return error.Io);
+                    try conn.exec(bufPrintZ(&sql_buf, "insert or ignore into {s}.cwal_marker values (0, 0, 0)", .{schema}) catch return error.Io);
+                    const q = bufPrintZ(&sql_buf, "select txn from {s}.cwal_marker where k = 0", .{schema}) catch return error.Io;
+                    conn.txn = @max(conn.txn, try conn.queryU64(q));
+                }
+                if (!fault.mutated("no-txn-epoch")) {
+                    // Marker numbers identify one transaction for the life of
+                    // the set, also when a writer died with a number in flight
+                    // that recovery then removed: each writer takes a new epoch,
+                    // durably, before it numbers anything, and numbers its
+                    // transactions epoch << 32 | 1, 2, .... The epoch is in
+                    // main's marker table, row 1.
+                    try conn.exec("insert or ignore into main.cwal_marker values (1, 0, 0)");
+                    const stored = try conn.queryU64("select txn from main.cwal_marker where k = 1");
+                    const epoch = @max(stored, conn.txn >> 32) + 1;
+                    var sql_buf: [96]u8 = undefined;
+                    try conn.exec(bufPrintZ(&sql_buf, "update main.cwal_marker set txn = {d} where k = 1", .{epoch}) catch return error.Io);
+                    conn.txn = epoch << 32;
+                }
+            }
+            conn.releaseGate();
+        }
+        return conn;
+    }
 
+    /// After openSqlite, while the gate is held: whether no other handle has
+    /// the set open any more although one had at the `-alive` check.
+    fn aloneAfterMapping(conn: *Conn) Error!bool {
+        if (conn.opened_alone or fault.mutated("no-late-alone")) return false;
+        if (lock(conn.alive_fd, c.LOCK_EX | c.LOCK_NB)) return true;
+        // A failed conversion drops the shared lock (flock(2)). Take it back:
+        // only openers holding the gate take `-alive` exclusively.
+        if (!lock(conn.alive_fd, c.LOCK_SH)) return error.Io;
+        return false;
+    }
+
+    /// Open SQLite on every member and, in CWAL mode, map its wal-index.
+    fn openSqlite(conn: *Conn, paths: []const []const u8, options: Options) Error!void {
+        const id = conn.id;
         var uri_buf: [1024]u8 = undefined;
         const main_uri = bufPrintZ(&uri_buf, "file:{s}?cwal={d}&cwm=0", .{ conn.paths[0], id }) catch return error.Io;
         var db: ?*c.sqlite3 = null;
         if (c.sqlite3_open_v2(main_uri.ptr, &db, c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_URI, "cwal") != c.SQLITE_OK) {
+            std.debug.print("sqlite: open {s}: {s}\n", .{ conn.paths[0], c.sqlite3_errmsg(db) });
             if (db) |d| _ = c.sqlite3_close(d);
             return error.Sqlite;
         }
@@ -731,38 +836,36 @@ pub const Conn = struct {
                 var sql_buf: [96]u8 = undefined;
                 try conn.exec(bufPrintZ(&sql_buf, "select count(*) from {s}.sqlite_schema", .{schemaName(i)}) catch return error.Io);
             }
-            _ = c.sqlite3_commit_hook(db, &commitHook, conn);
-            _ = c.sqlite3_rollback_hook(db, &rollbackHook, conn);
-            if (options.role == .writer) {
-                conn.resetCheckpointers();
-                // One single-member commit per statement.
-                for (0..paths.len) |i| {
-                    var sql_buf: [160]u8 = undefined;
-                    const schema = schemaName(i);
-                    try conn.exec(bufPrintZ(&sql_buf, "create table if not exists {s}.cwal_marker(k integer primary key, txn integer not null, mask integer not null)", .{schema}) catch return error.Io);
-                    try conn.exec(bufPrintZ(&sql_buf, "insert or ignore into {s}.cwal_marker values (0, 0, 0)", .{schema}) catch return error.Io);
-                    var stmt: ?*c.sqlite3_stmt = null;
-                    const q = bufPrintZ(&sql_buf, "select txn from {s}.cwal_marker where k = 0", .{schema}) catch return error.Io;
-                    if (c.sqlite3_prepare_v2(db, q.ptr, -1, &stmt, null) != c.SQLITE_OK) return error.Sqlite;
-                    defer _ = c.sqlite3_finalize(stmt);
-                    if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return error.Sqlite;
-                    conn.txn = @max(conn.txn, @as(u64, @intCast(c.sqlite3_column_int64(stmt, 0))));
-                }
-            }
         }
-        return conn;
     }
 
+    fn releaseGate(conn: *Conn) void {
+        if (!conn.gate_held) return;
+        _ = c.flock(conn.gate_fd, c.LOCK_UN);
+        conn.gate_held = false;
+    }
+
+    const schema_names: [max_members][:0]const u8 = blk: {
+        @setEvalBranchQuota(100_000);
+        var names: [max_members][:0]const u8 = undefined;
+        names[0] = "main";
+        for (1..max_members) |i| names[i] = std.fmt.comptimePrint("m{d}", .{i});
+        break :blk names;
+    };
+
     pub fn schemaName(i: usize) [:0]const u8 {
-        return switch (i) {
-            0 => "main",
-            1 => "m1",
-            2 => "m2",
-            else => "m3",
-        };
+        return schema_names[i];
+    }
+
+    /// Number the next cross-file transaction's commit markers will carry.
+    pub fn nextTxn(conn: *const Conn) u64 {
+        return conn.txn + 1;
     }
 
     pub fn close(conn: *Conn) void {
+        // Unmap the wal-indexes and leave `-alive` under the gate (see
+        // openCoordination).
+        if (conn.gate_fd >= 0 and !conn.gate_held and !fault.mutated("no-open-gate")) conn.gate_held = lock(conn.gate_fd, c.LOCK_EX);
         if (conn.db) |db| _ = c.sqlite3_close_v2(db);
         conn.db = null;
         if (conn.snap) |page| _ = c.munmap(@ptrCast(page), snap_page_size);
@@ -771,7 +874,33 @@ pub const Conn = struct {
             if (fd.* >= 0) _ = c.close(fd.*);
             fd.* = -1;
         }
+        conn.releaseGate();
+        if (conn.gate_fd >= 0) _ = c.close(conn.gate_fd);
+        conn.gate_fd = -1;
         if (conn.id != 0) @atomicStore(?*Conn, &registry[conn.id], null, .seq_cst);
+    }
+
+    fn log(conn: *Conn, comptime fmt: []const u8, args: anytype) void {
+        if (!fault.debug) return;
+        var pbuf: [1100]u8 = undefined;
+        const path = bufPrintZ(&pbuf, "{s}-cwal-debug", .{conn.paths[0]}) catch return;
+        const fd = c.open(path.ptr, c.O_WRONLY | c.O_CREAT | c.O_APPEND | c.O_CLOEXEC, @as(c_uint, 0o644));
+        if (fd < 0) return;
+        defer _ = c.close(fd);
+        var buf: [512]u8 = undefined;
+        const head = std.fmt.bufPrint(&buf, "{d} {s} ev={d} ", .{ c.getpid(), @tagName(conn.role), fault.count() }) catch return;
+        const body = std.fmt.bufPrint(buf[head.len..], fmt ++ "\n", args) catch return;
+        _ = c.write(fd, &buf, head.len + body.len);
+    }
+
+    fn queryU64(conn: *Conn, sql: [:0]const u8) Error!u64 {
+        var stmt: ?*c.sqlite3_stmt = null;
+        defer _ = c.sqlite3_finalize(stmt);
+        if (c.sqlite3_prepare_v2(conn.db, sql.ptr, -1, &stmt, null) != c.SQLITE_OK or c.sqlite3_step(stmt) != c.SQLITE_ROW) {
+            std.debug.print("sqlite: {s}: {s}\n", .{ sql, c.sqlite3_errmsg(conn.db) });
+            return error.Sqlite;
+        }
+        return @intCast(c.sqlite3_column_int64(stmt, 0));
     }
 
     pub fn exec(conn: *Conn, sql: [:0]const u8) Error!void {
@@ -800,7 +929,26 @@ pub const Conn = struct {
         }
     }
 
+    /// `-alive` is held shared by every open handle and taken exclusively
+    /// by an opener that finds no other: that opener runs recovery. SQLite
+    /// itself rebuilds a member's wal-index from the WAL file, accepting
+    /// every valid frame, whenever a process maps it while no other process
+    /// has it mapped. Frames a dead writer wrote but never published would
+    /// then appear without recovery. The gate makes the two conditions the
+    /// same: a handle holds it from before it looks at `-alive` until
+    /// SQLite has mapped every member, and while it unmaps them and leaves
+    /// `-alive`. So whenever the gate is free, every holder of `-alive` has
+    /// every wal-index mapped. A holder can still die (dropping both) while
+    /// an opener holds the gate, so the opener checks `-alive` again once
+    /// SQLite has mapped every member (aloneAfterMapping): if a holder is
+    /// left, it had the wal-indexes mapped throughout, and the opener did
+    /// not rebuild one.
     fn openCoordination(conn: *Conn) Error!void {
+        conn.gate_fd = try conn.openLockFile("gate");
+        if (!fault.mutated("no-open-gate")) {
+            if (!lock(conn.gate_fd, c.LOCK_EX)) return error.Io;
+            conn.gate_held = true;
+        }
         conn.alive_fd = try conn.openLockFile("alive");
         conn.writer_fd = try conn.openLockFile("writer");
         conn.live_fd = try conn.openLockFile("live");
@@ -815,17 +963,13 @@ pub const Conn = struct {
         if (conn.role == .writer and !lock(conn.writer_fd, c.LOCK_EX | c.LOCK_NB)) return error.WriterBusy;
         fault.event("open-alive");
         if (lock(conn.alive_fd, c.LOCK_EX | c.LOCK_NB)) {
-            // No other handle has the set open: repair an interrupted commit
-            // before SQLite reads any WAL file.
-            try conn.recover();
-            // A writer that died inside a window left the seqlock odd.
-            @atomicStore(u64, &conn.snap.?.seq, 0, .seq_cst);
-            @atomicStore(u32, &conn.snap.?.cross, 0, .seq_cst);
-            @atomicStore(u32, &conn.snap.?.broken, 0, .seq_cst);
-            if (!lock(conn.alive_fd, c.LOCK_SH)) return error.Io;
+            conn.opened_alone = true;
+            try conn.recoverAlone();
         } else {
             if (!lock(conn.alive_fd, c.LOCK_SH)) return error.Io;
+            conn.log("shared seq={d} cross={d} broken={d}", .{ conn.snap.?.seq, conn.snap.?.cross, conn.snap.?.broken });
             if (!conn.markersReadable(@atomicLoad(u64, &conn.snap.?.seq, .seq_cst))) return error.Broken;
+            if (test_delay.alive_delay_us != 0) _ = c.usleep(test_delay.alive_delay_us);
         }
         if (conn.role == .writer) {
             // A writer that died inside a single-member commit's window left
@@ -837,6 +981,19 @@ pub const Conn = struct {
             // The set is readable: announce a live writer (see writerLive).
             if (!lock(conn.live_fd, c.LOCK_EX)) return error.Io;
         }
+    }
+
+    /// With `-alive` held exclusively (no other handle has the set open):
+    /// repair an interrupted commit before SQLite reads any WAL file, then
+    /// share `-alive`.
+    fn recoverAlone(conn: *Conn) Error!void {
+        conn.log("alone seq={d} cross={d} broken={d}", .{ conn.snap.?.seq, conn.snap.?.cross, conn.snap.?.broken });
+        try conn.recover();
+        // A writer that died inside a window left the seqlock odd.
+        @atomicStore(u64, &conn.snap.?.seq, 0, .seq_cst);
+        @atomicStore(u32, &conn.snap.?.cross, 0, .seq_cst);
+        @atomicStore(u32, &conn.snap.?.broken, 0, .seq_cst);
+        if (!lock(conn.alive_fd, c.LOCK_SH)) return error.Io;
     }
 
     /// Repair an interrupted cross-file commit. Runs only while this handle
@@ -853,10 +1010,16 @@ pub const Conn = struct {
         for (0..conn.nmembers) |i| {
             markers[i] = try readMarker(conn.paths[i]);
             if (markers[i].txn > newest.txn) newest = markers[i];
+            conn.log("recover member {d} txn={d} mask={d}", .{ i, markers[i].txn, markers[i].mask });
         }
+        // Marker numbers are unique, so every member with the newest number
+        // must carry the same member set and belong to it.
+        if (newest.txn != 0 and newest.mask >> @intCast(conn.nmembers - 1) >> 1 != 0) return error.ProtocolViolation;
         var torn = false;
         for (0..conn.nmembers) |i| {
-            if (newest.mask & (@as(u32, 1) << @intCast(i)) != 0 and markers[i].txn != newest.txn) torn = true;
+            const bit = @as(u32, 1) << @intCast(i);
+            if (newest.txn != 0 and markers[i].txn == newest.txn and (markers[i].mask != newest.mask or newest.mask & bit == 0)) return error.ProtocolViolation;
+            if (newest.mask & bit != 0 and markers[i].txn != newest.txn) torn = true;
         }
         if (torn and !fault.mutated("no-marker-rollback")) {
             last_recovery = "rollback";
@@ -947,6 +1110,59 @@ pub const Conn = struct {
         _ = @atomicRmw(u64, &conn.snap.?.ckpt, .And, ~(ckpt_started - 1), .seq_cst);
     }
 
+    /// A writer killed after writing a member's frames but before publishing
+    /// them leaves frames past that member's mxFrame. While other handles
+    /// keep the set open no recovery runs, and the next writer may never
+    /// overwrite them (it need not write that member), so SQLite's WAL
+    /// recovery would accept them once every handle has closed, reviving a
+    /// commit out of order or one that recovery should have removed. Drop
+    /// them before this writer commits anything, holding each member's WAL
+    /// write lock: only a writer appends frames (and a wal-index recovery,
+    /// which also takes that lock), and readers never read past mxFrame.
+    fn discardUnpublished(conn: *Conn) Error!void {
+        if (fault.mutated("no-discard-unpublished")) return;
+        for (0..conn.nmembers) |m| {
+            const f = conn.member_db[m] orelse return error.ProtocolViolation;
+            const deadline = monotonicNs() + 2_000_000_000;
+            while (realMethods(f).xShmLock.?(f.real, wal_write_lock, 1, c.SQLITE_SHM_LOCK | c.SQLITE_SHM_EXCLUSIVE) != c.SQLITE_OK) {
+                if (monotonicNs() > deadline) return error.Sqlite;
+                _ = c.usleep(100);
+            }
+            defer _ = realMethods(f).xShmLock.?(f.real, wal_write_lock, 1, c.SQLITE_SHM_UNLOCK | c.SQLITE_SHM_EXCLUSIVE);
+            try conn.truncateUnpublished(m);
+        }
+    }
+
+    fn truncateUnpublished(conn: *Conn, m: usize) Error!void {
+        var hdr: [48]u8 = undefined;
+        if (!conn.readHeader(m, &hdr)) return error.ProtocolViolation;
+        var buf: [1100]u8 = undefined;
+        const wal = bufPrintZ(&buf, "{s}-wal", .{conn.paths[m]}) catch return error.Io;
+        const fd = c.open(wal.ptr, c.O_RDWR | c.O_CLOEXEC);
+        if (fd < 0) return;
+        defer _ = c.close(fd);
+        // wal-index header (native byte order): szPage u16 @14, mxFrame
+        // u32 @16, salts @32 (copied from the WAL header's bytes 16..24).
+        const mx = std.mem.readInt(u32, hdr[16..20], native_endian);
+        var keep: i64 = 0;
+        if (mx != 0) {
+            const sz: u32 = std.mem.readInt(u16, hdr[14..16], native_endian);
+            const page_size = (sz & 0xfe00) + ((sz & 1) << 16);
+            var file_hdr: [wal_header_size]u8 = undefined;
+            if (c.pread(fd, &file_hdr, file_hdr.len, 0) != file_hdr.len or !std.mem.eql(u8, file_hdr[16..24], hdr[32..40])) return error.ProtocolViolation;
+            keep = wal_header_size + @as(i64, mx) * (wal_frame_header_size + page_size);
+        }
+        var st: c.struct_stat = undefined;
+        if (c.fstat(fd, &st) != 0) return error.Io;
+        conn.log("discard member {d} mx={d} size={d} keep={d}", .{ m, mx, st.st_size, keep });
+        if (st.st_size <= keep) return;
+        fault.event("discard-truncate");
+        if (c.ftruncate(fd, keep) != 0) return error.Io;
+        fault.event("discard-fsync");
+        if (c.fsync(fd) != 0) return error.Io;
+        conn.stats.discarded_bytes += @intCast(st.st_size - keep);
+    }
+
     /// Copy a member's wal-index header (the first of its two copies).
     fn readHeader(conn: *Conn, member: usize, out: *[48]u8) bool {
         const f = conn.member_db[member] orelse return false;
@@ -979,6 +1195,7 @@ pub const Conn = struct {
         var written: u32 = 0;
         for (0..conn.nmembers) |m| written += @intFromBool(conn.write_locked[m]);
         conn.cross = written >= 2;
+        conn.log("commit hook written={d}", .{written});
         const marked = conn.marker_pending;
         conn.marker_pending = false;
         if (@atomicLoad(u32, &conn.snap.?.broken, .seq_cst) != 0) return 1;
@@ -990,26 +1207,29 @@ pub const Conn = struct {
         return 0;
     }
 
-    fn startPublication(conn: *Conn) void {
-        if (conn.mode != .cwal or !conn.in_commit or conn.window_open or fault.mutated("no-gate")) return;
+    /// Returns false if the commit must fail: its window could not open.
+    fn startPublication(conn: *Conn) bool {
+        if (conn.mode != .cwal or !conn.in_commit or conn.window_open or fault.mutated("no-gate")) return true;
         // Single-member commits open the window too: otherwise a reader
         // pinning members in order could see a later solo commit on one
         // member but miss an earlier one on another.
-        if (!conn.cross and fault.mutated("no-solo-window")) return;
+        if (!conn.cross and fault.mutated("no-solo-window")) return true;
         // No member has published yet: their current headers are the last
         // committed state of the set.
         const page = conn.snap.?;
         for (0..conn.nmembers) |m| {
             if (!conn.readHeader(m, &page.hdr[m])) {
-                conn.violation = true;
-                return;
+                conn.log("window not opened: no header for member {d}", .{m});
+                return false;
             }
         }
+        conn.log("window open cross={}", .{conn.cross});
         @atomicStore(u32, &page.cross, @intFromBool(conn.cross), .seq_cst);
         fault.event("gate-acquire");
         _ = @atomicRmw(u64, &page.seq, .Add, 1, .seq_cst);
         conn.window_open = true;
         if (test_delay.window_delay_us != 0) _ = c.usleep(test_delay.window_delay_us);
+        return true;
     }
 
     fn commitPhaseTwo(conn: *Conn) void {
@@ -1018,6 +1238,7 @@ pub const Conn = struct {
         // member before phase two of any, so every member has published and
         // every commit frame is durable.
         fault.event("phase-two");
+        conn.log("phase two window_open={}", .{conn.window_open});
         if (conn.window_open) conn.closeWindow();
         conn.in_commit = false;
         conn.stats.commits += 1;
@@ -1054,8 +1275,9 @@ pub const Conn = struct {
                 }
                 conn.marker_pending = true;
                 defer conn.marker_pending = false;
-                try conn.exec("commit");
+                // Used even if the commit fails: never reuse a number.
                 conn.txn = t;
+                try conn.exec("commit");
                 return;
             }
         }

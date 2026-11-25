@@ -1,5 +1,6 @@
-//! CWAL prototype driver: seeds a two-file set, runs a crashable writer,
-//! concurrent readers, recovery and the consistency checker, and benchmarks.
+//! CWAL prototype driver: seeds a two-file set or an N-file set, runs a
+//! crashable writer, concurrent readers, recovery and the consistency
+//! checker, and benchmarks.
 const std = @import("std");
 const c = @import("c");
 
@@ -204,6 +205,232 @@ fn cmdWriter(dir: []const u8, args: Args) void {
 }
 
 // ---------------------------------------------------------------------------
+// N-file sets: main.db plus s1.db .. s{N-1}.db, each with table t. A
+// transaction k writes one row to each file of its mask; every row carries
+// k, the transaction's commit-marker number (0 for single-file
+// transactions), its mask and its file count.
+// ---------------------------------------------------------------------------
+
+const NSet = struct {
+    bufs: [cwal.max_members][max_path]u8 = undefined,
+    names: [cwal.max_members][]const u8 = undefined,
+    n: usize = 0,
+
+    fn fill(set: *NSet, dir: []const u8, n: usize) void {
+        if (n < 2 or n > cwal.max_members) die("--files must be 2..{d}", .{cwal.max_members});
+        set.n = n;
+        for (0..n) |i| {
+            set.names[i] = if (i == 0)
+                std.fmt.bufPrint(&set.bufs[i], "{s}/main.db", .{dir}) catch unreachable
+            else
+                std.fmt.bufPrint(&set.bufs[i], "{s}/s{d}.db", .{ dir, i }) catch unreachable;
+        }
+    }
+
+    fn list(set: *const NSet) []const []const u8 {
+        return set.names[0..set.n];
+    }
+};
+
+fn nFiles(args: Args) usize {
+    return @intCast(args.int("--files", 2));
+}
+
+fn openN(dir: []const u8, n: usize, options: cwal.Options) cwal.Error!*Conn {
+    var set: NSet = .{};
+    set.fill(dir, n);
+    return Conn.open(set.list(), options);
+}
+
+/// `with u(k, n, mask, txn, f) as (...) <tail>` over every file of the set.
+fn unionSql(buf: []u8, n: usize, comptime tail: []const u8) [:0]const u8 {
+    var len = (std.fmt.bufPrint(buf, "with u(k, n, mask, txn, f) as (", .{}) catch unreachable).len;
+    for (0..n) |i| {
+        len += (std.fmt.bufPrint(buf[len..], "{s}select k, n, mask, txn, {d} from {s}.t", .{ if (i == 0) "" else " union all ", i, Conn.schemaName(i) }) catch die("sql too long", .{})).len;
+    }
+    const rest = bufPrintZ(buf[len..], ") " ++ tail, .{}) catch die("sql too long", .{});
+    return buf[0 .. len + rest.len :0];
+}
+
+/// One read's consistency, as four counts: transactions whose rows
+/// disagree (count, file set, mask, number) or sit in a file outside their
+/// mask; distinct k; max k (with the previous, the prefix property); and
+/// marker numbers shared by two transactions.
+const n_check_tail =
+    "select (select count(*) from (select k from u group by k having count(*) != min(n) or min(n) != max(n) " ++
+    "or min(mask) != max(mask) or min(txn) != max(txn) or sum(1 << f) != min(mask))), " ++
+    "(select count(distinct k) from u), (select coalesce(max(k), 0) from u), " ++
+    "(select count(*) from (select txn from u where txn > 0 group by txn having min(k) != max(k)))";
+
+fn queryRow(conn: *Conn, sql: [:0]const u8, row: []i64) void {
+    var stmt: ?*c.sqlite3_stmt = null;
+    if (c.sqlite3_prepare_v2(conn.db, sql.ptr, -1, &stmt, null) != c.SQLITE_OK) die("prepare: {s}", .{c.sqlite3_errmsg(conn.db)});
+    defer _ = c.sqlite3_finalize(stmt);
+    if (c.sqlite3_step(stmt) != c.SQLITE_ROW) die("step: {s}", .{c.sqlite3_errmsg(conn.db)});
+    for (row, 0..) |*v, i| v.* = c.sqlite3_column_int64(stmt, @intCast(i));
+}
+
+const NState = struct { bad: i64, distinct: i64, max_k: i64, shared_txn: i64 };
+
+fn nState(conn: *Conn, n: usize) NState {
+    var buf: [8192]u8 = undefined;
+    var row: [4]i64 = undefined;
+    queryRow(conn, unionSql(&buf, n, n_check_tail), &row);
+    return .{ .bad = row[0], .distinct = row[1], .max_k = row[2], .shared_txn = row[3] };
+}
+
+fn cmdNSeed(dir: []const u8, args: Args) void {
+    var set: NSet = .{};
+    set.fill(dir, nFiles(args));
+    for (set.list()) |path| seedOne(path, "pragma journal_mode=wal; create table t(k integer primary key, txn integer not null, mask integer not null, n integer not null, v blob);");
+    out("seeded files={d}\n", .{set.n});
+}
+
+/// Transactions k = max + 1, ...: odd k writes one random file
+/// (autocommit), even k a random subset of 2..N files (explicit
+/// transaction with markers). Every tenth round checkpoints instead. Prints
+/// "try k txn" before and "ack k txn" after each commit. With --use-files M,
+/// the run writes only M randomly chosen files of the set; with --file-mask,
+/// only the files in that mask (one file: single-file commits only).
+fn cmdNWriter(dir: []const u8, args: Args) void {
+    const mode = args.mode();
+    const n = nFiles(args);
+    const rounds = args.int("--rounds", 30);
+    const conn = openN(dir, n, .{ .mode = mode, .role = .writer, .cache_pages = 10 }) catch |err| {
+        out("writer-open-error {s}\n", .{@errorName(err)});
+        cwal.flushPending();
+        c.exit(if (err == error.Broken) 3 else 2);
+    };
+    var buf: [8192]u8 = undefined;
+    var k = queryInt(conn, unionSql(&buf, n, "select coalesce(max(k), 0) from u")) + 1;
+    var prng = std.Random.DefaultPrng.init(args.int("--seed", 1) *% 0x9e3779b97f4a7c15 +% @as(u64, @intCast(k)));
+    const rand = prng.random();
+    const delay_us = args.int("--delay-us", 0);
+    const passive_only = std.mem.eql(u8, args.get("--ckpt") orelse "all", "passive");
+    // The run's working set: files[0..used].
+    var files: [cwal.max_members]usize = undefined;
+    for (0..n) |i| files[i] = i;
+    var used: usize = @intCast(@min(n, @max(2, args.int("--use-files", n))));
+    for (0..used) |i| std.mem.swap(usize, &files[i], &files[i + rand.uintLessThan(usize, n - i)]);
+    if (args.get("--file-mask") != null) {
+        const want = args.int("--file-mask", 0);
+        used = 0;
+        for (0..n) |i| {
+            if (want >> @intCast(i) & 1 != 0) {
+                files[used] = i;
+                used += 1;
+            }
+        }
+        if (used == 0) die("empty --file-mask", .{});
+    }
+    var r: u64 = 0;
+    while (r < rounds) : (r += 1) {
+        if (delay_us != 0) _ = c.usleep(@intCast(delay_us));
+        if (r % 10 == 9) {
+            const modes = [_]c_int{ c.SQLITE_CHECKPOINT_PASSIVE, c.SQLITE_CHECKPOINT_RESTART, c.SQLITE_CHECKPOINT_TRUNCATE };
+            _ = c.sqlite3_wal_checkpoint_v2(conn.db, null, if (passive_only) modes[0] else modes[(r / 10) % 3], null, null);
+            continue;
+        }
+        const size = 50 + rand.uintLessThan(u32, 400);
+        if (@mod(k, 2) == 1 or used == 1) {
+            const f = files[rand.uintLessThan(usize, used)];
+            out("try {d} 0\n", .{k});
+            autocommitFmt(conn, "insert into {s}.t values ({d}, 0, {d}, 1, randomblob({d}))", .{ Conn.schemaName(f), k, @as(u32, 1) << @intCast(f), size }) catch die("solo {d}", .{k});
+            out("ack {d} 0\n", .{k});
+        } else {
+            var idx: [cwal.max_members]usize = undefined;
+            @memcpy(idx[0..used], files[0..used]);
+            const count = 2 + rand.uintLessThan(usize, used - 1);
+            var mask: u32 = 0;
+            for (0..count) |i| {
+                const j = i + rand.uintLessThan(usize, used - i);
+                std.mem.swap(usize, &idx[i], &idx[j]);
+                mask |= @as(u32, 1) << @intCast(idx[i]);
+            }
+            const txn: u64 = if (mode == .cwal) conn.nextTxn() else @intCast(k);
+            out("try {d} {d}\n", .{ k, txn });
+            conn.exec("begin") catch die("begin {d}", .{k});
+            for (idx[0..count]) |f| {
+                execFmt(conn, "insert into {s}.t values ({d}, {d}, {d}, {d}, randomblob({d}))", .{ Conn.schemaName(f), k, txn, mask, count, size }) catch die("multi {d}", .{k});
+            }
+            conn.commit() catch die("commit {d}", .{k});
+            if (mode == .cwal and conn.txn != txn) die("txn {d} committed as {d}", .{ txn, conn.txn });
+            out("ack {d} {d}\n", .{ k, txn });
+        }
+        k += 1;
+    }
+    conn.close();
+    cwal.flushPending();
+    out("events={d} tagged={d}\n", .{ cwal.fault.count(), cwal.fault.taggedCount() });
+}
+
+fn readWhole(path: []const u8) []u8 {
+    var pbuf: [max_path]u8 = undefined;
+    const z = bufPrintZ(&pbuf, "{s}", .{path}) catch die("path", .{});
+    const fd = c.open(z.ptr, c.O_RDONLY);
+    if (fd < 0) die("open {s}", .{path});
+    defer _ = c.close(fd);
+    var st: c.struct_stat = undefined;
+    if (c.fstat(fd, &st) != 0) die("stat {s}", .{path});
+    if (st.st_size == 0) return &.{};
+    const data = std.heap.c_allocator.alloc(u8, @intCast(st.st_size)) catch die("oom", .{});
+    if (c.pread(fd, data.ptr, data.len, 0) != data.len) die("read {s}", .{path});
+    return data;
+}
+
+/// Integrity, per-transaction agreement across files, the prefix property,
+/// unique marker numbers, markers that match the data, and (with
+/// --acked-file, lines "k txn") that every acknowledged commit survived.
+fn cmdNCheck(dir: []const u8, args: Args) void {
+    const mode = args.mode();
+    const n = nFiles(args);
+    const conn = openN(dir, n, .{ .mode = mode, .role = .writer }) catch |err| die("open {s}", .{@errorName(err)});
+    var buf: [8192]u8 = undefined;
+    var text: [256]u8 = undefined;
+    for (0..n) |i| {
+        const result = queryText(conn, bufPrintZ(&buf, "pragma {s}.integrity_check", .{Conn.schemaName(i)}) catch unreachable, &text);
+        if (!std.mem.eql(u8, result, "ok")) die("integrity {s}: {s}", .{ Conn.schemaName(i), result });
+    }
+    const st = nState(conn, n);
+    if (st.bad != 0) die("torn transactions={d}", .{st.bad});
+    if (st.distinct != st.max_k) die("not a prefix distinct={d} max={d}", .{ st.distinct, st.max_k });
+    if (st.shared_txn != 0) die("marker numbers shared={d}", .{st.shared_txn});
+    if (mode == .cwal) {
+        for (0..n) |i| {
+            const schema = Conn.schemaName(i);
+            var marker: [2]i64 = undefined;
+            queryRow(conn, bufPrintZ(&buf, "select txn, mask from {s}.cwal_marker where k = 0", .{schema}) catch unreachable, &marker);
+            var data: [2]i64 = undefined;
+            queryRow(conn, bufPrintZ(&buf, "select coalesce(max(txn), 0), coalesce((select mask from {s}.t where txn > 0 order by txn desc limit 1), 0) from {s}.t", .{ schema, schema }) catch unreachable, &data);
+            if (marker[0] != data[0] or marker[1] != data[1]) die("{s} marker {d}/{d} data {d}/{d}", .{ schema, marker[0], marker[1], data[0], data[1] });
+        }
+    }
+    var acked: u64 = 0;
+    if (args.get("--acked-file")) |path| {
+        const data = readWhole(path);
+        var lines = std.mem.tokenizeScalar(u8, data, '\n');
+        while (lines.next()) |line| {
+            var fields = std.mem.tokenizeScalar(u8, line, ' ');
+            const k = std.fmt.parseInt(i64, fields.next() orelse continue, 10) catch die("acked line {s}", .{line});
+            const txn = std.fmt.parseInt(i64, fields.next() orelse die("acked line {s}", .{line}), 10) catch die("acked line {s}", .{line});
+            var q: [8192]u8 = undefined;
+            const sql = unionSql(&q, n, "select count(*) from u where k = ?1 and txn = ?2");
+            var stmt: ?*c.sqlite3_stmt = null;
+            if (c.sqlite3_prepare_v2(conn.db, sql.ptr, -1, &stmt, null) != c.SQLITE_OK) die("prepare acked", .{});
+            _ = c.sqlite3_bind_int64(stmt, 1, k);
+            _ = c.sqlite3_bind_int64(stmt, 2, txn);
+            if (c.sqlite3_step(stmt) != c.SQLITE_ROW) die("step acked", .{});
+            const found = c.sqlite3_column_int64(stmt, 0);
+            _ = c.sqlite3_finalize(stmt);
+            if (found == 0) die("lost acked k={d} txn={d}", .{ k, txn });
+            acked += 1;
+        }
+    }
+    conn.close();
+    out("check ok txns={d} acked={d} recovery={s}\n", .{ st.max_k, acked, cwal.last_recovery });
+}
+
+// ---------------------------------------------------------------------------
 // check / recover
 // ---------------------------------------------------------------------------
 
@@ -237,7 +464,9 @@ fn cmdCheck(dir: []const u8, args: Args) void {
 }
 
 fn cmdRecover(dir: []const u8, args: Args) void {
-    const conn = openSet(dir, .{ .mode = args.mode(), .role = .reader }) catch |err| {
+    const options: cwal.Options = .{ .mode = args.mode(), .role = .reader };
+    const opened = if (args.get("--files") != null) openN(dir, nFiles(args), options) else openSet(dir, options);
+    const conn = opened catch |err| {
         out("recover-open-error {s}\n", .{@errorName(err)});
         c.exit(2);
     };
@@ -297,12 +526,15 @@ const ReaderJob = struct {
     /// followed by one on store.db: a snapshot has solo_s == solo or
     /// solo_s + 1 == solo.
     solo_order: bool,
+    /// N-file set size, or 0 for the two-file set.
+    nfiles: usize = 0,
     stats: ReaderStats = .{},
 };
 
 fn openReader(job: *ReaderJob) ?*Conn {
     while (cwal.monotonicNs() < job.deadline_ns) {
-        if (openSet(job.dir, .{ .mode = job.mode, .role = .reader })) |conn| {
+        const options: cwal.Options = .{ .mode = job.mode, .role = .reader };
+        if (if (job.nfiles != 0) openN(job.dir, job.nfiles, options) else openSet(job.dir, options)) |conn| {
             return conn;
         } else |err| {
             if (err != error.Broken and err != error.Sqlite) die("reader open {s}", .{@errorName(err)});
@@ -336,20 +568,27 @@ fn readerThread(job: *ReaderJob) void {
             conn = openReader(job) orelse return;
             continue;
         };
-        const a = queryInt(conn, "select count(*) from main.pairs");
-        const b = queryInt(conn, "select count(*) from pairs_s");
-        const ba = queryInt(conn, "select count(*) from main.bulk");
-        const bb = queryInt(conn, "select count(*) from bulk_s");
-        const sa = queryInt(conn, "select count(*) from main.solo");
-        const sb = queryInt(conn, "select count(*) from solo_s");
+        // Read, hold the transaction (test), check the snapshot, end it.
+        var mixed = false;
+        if (job.nfiles != 0) {
+            const st = nState(conn, job.nfiles);
+            mixed = st.bad != 0 or st.distinct != st.max_k or st.shared_txn != 0;
+            if (mixed and job.stats.mixed < 3) out("MIXED torn={d} distinct={d} max={d} shared={d}\n", .{ st.bad, st.distinct, st.max_k, st.shared_txn });
+        } else {
+            const a = queryInt(conn, "select count(*) from main.pairs");
+            const b = queryInt(conn, "select count(*) from pairs_s");
+            const ba = queryInt(conn, "select count(*) from main.bulk");
+            const bb = queryInt(conn, "select count(*) from bulk_s");
+            const sa = queryInt(conn, "select count(*) from main.solo");
+            const sb = queryInt(conn, "select count(*) from solo_s");
+            mixed = a != b or ba != bb or (job.solo_order and sb != sa and sb + 1 != sa);
+            if (mixed and job.stats.mixed < 3) out("MIXED pairs {d}/{d} bulk {d}/{d} solo {d}/{d}\n", .{ a, b, ba, bb, sa, sb });
+        }
         if (job.hold_us != 0) _ = c.usleep(job.hold_us);
         if (!conn.snapshotIntact()) job.stats.ckpt_violations += 1;
         conn.exec("rollback") catch {};
         job.stats.reads += 1;
-        if (a != b or ba != bb or (job.solo_order and sb != sa and sb + 1 != sa)) {
-            job.stats.mixed += 1;
-            if (job.stats.mixed <= 3) out("MIXED pairs {d}/{d} bulk {d}/{d} solo {d}/{d}\n", .{ a, b, ba, bb, sa, sb });
-        }
+        if (mixed) job.stats.mixed += 1;
         if (iteration % 25 == 24) {
             // Readers must never copy frames into a database file.
             job.stats.ckpt_attempts += 1;
@@ -374,7 +613,7 @@ fn cmdReader(dir: []const u8, args: Args) void {
     var handles: [16]std.Thread = undefined;
     const deadline = cwal.monotonicNs() + duration_ms * 1_000_000;
     for (0..threads) |i| {
-        jobs[i] = .{ .dir = dir, .mode = args.mode(), .deadline_ns = deadline, .gap_us = @intCast(args.int("--gap-us", 0)), .hold_us = @intCast(args.int("--hold-us", 0)), .seed = i * 7919 + @as(u64, @intCast(c.getpid())), .solo_order = args.int("--solo-order", 0) != 0 };
+        jobs[i] = .{ .dir = dir, .mode = args.mode(), .deadline_ns = deadline, .gap_us = @intCast(args.int("--gap-us", 0)), .hold_us = @intCast(args.int("--hold-us", 0)), .seed = i * 7919 + @as(u64, @intCast(c.getpid())), .solo_order = args.int("--solo-order", 0) != 0, .nfiles = if (args.get("--files") != null) nFiles(args) else 0 };
         handles[i] = std.Thread.spawn(.{}, readerThread, .{&jobs[i]}) catch die("spawn", .{});
     }
     var total: ReaderStats = .{};
@@ -502,9 +741,9 @@ fn cmdBenchRw(dir: []const u8, args: Args) void {
 pub fn main(init: std.process.Init.Minimal) void {
     cwal.register();
     const list = init.args.toSlice(std.heap.c_allocator) catch die("args", .{});
-    if (list.len < 3) die("usage: cwal <seed|writer|reader|check|recover|state|bench|benchrw> <dir> [options]", .{});
+    if (list.len < 3) die("usage: cwal <seed|writer|reader|check|recover|state|bench|benchrw|nseed|nwriter|nreader|ncheck> <dir> [options]", .{});
     const args: Args = .{ .list = list };
     const cmd = list[1];
     const dir = list[2];
-    if (std.mem.eql(u8, cmd, "seed")) cmdSeed(dir) else if (std.mem.eql(u8, cmd, "writer")) cmdWriter(dir, args) else if (std.mem.eql(u8, cmd, "reader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "check")) cmdCheck(dir, args) else if (std.mem.eql(u8, cmd, "recover")) cmdRecover(dir, args) else if (std.mem.eql(u8, cmd, "state")) cmdState(dir) else if (std.mem.eql(u8, cmd, "bench")) cmdBench(dir, args) else if (std.mem.eql(u8, cmd, "benchrw")) cmdBenchRw(dir, args) else die("unknown command {s}", .{cmd});
+    if (std.mem.eql(u8, cmd, "seed")) cmdSeed(dir) else if (std.mem.eql(u8, cmd, "writer")) cmdWriter(dir, args) else if (std.mem.eql(u8, cmd, "reader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "check")) cmdCheck(dir, args) else if (std.mem.eql(u8, cmd, "recover")) cmdRecover(dir, args) else if (std.mem.eql(u8, cmd, "state")) cmdState(dir) else if (std.mem.eql(u8, cmd, "bench")) cmdBench(dir, args) else if (std.mem.eql(u8, cmd, "benchrw")) cmdBenchRw(dir, args) else if (std.mem.eql(u8, cmd, "nseed")) cmdNSeed(dir, args) else if (std.mem.eql(u8, cmd, "nwriter")) cmdNWriter(dir, args) else if (std.mem.eql(u8, cmd, "nreader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "ncheck")) cmdNCheck(dir, args) else die("unknown command {s}", .{cmd});
 }

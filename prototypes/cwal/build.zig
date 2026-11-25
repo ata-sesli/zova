@@ -21,9 +21,10 @@ pub fn build(b: *std.Build) void {
     module.addImport("c", c_headers.createModule());
     // The bundled SQLite, unmodified, with Zova's production threading flag.
     // SQLITE_ENABLE_SNAPSHOT is not in Zova's build; snapshot reads need it.
+    // SQLITE_MAX_ATTACHED=31 lets a set reach 32 files.
     module.addCSourceFile(.{
         .file = b.path("../../vendor/sqlite3.53.4/sqlite3.c"),
-        .flags = &.{ "-std=c99", "-fno-sanitize=undefined", "-DSQLITE_THREADSAFE=1", "-DSQLITE_ENABLE_SNAPSHOT" },
+        .flags = &.{ "-std=c99", "-fno-sanitize=undefined", "-DSQLITE_THREADSAFE=1", "-DSQLITE_ENABLE_SNAPSHOT", "-DSQLITE_MAX_ATTACHED=31" },
     });
     const exe = b.addExecutable(.{ .name = "cwal", .root_module = module });
     b.installArtifact(exe);

@@ -2,7 +2,7 @@
 
 Standalone Zig prototype for issue #260. It is not part of Zova's build and
 does not modify SQLite. It answers one question: can a set of SQLite files in
-WAL mode (a main database plus attached stores) get
+WAL mode (a main database plus up to 31 attached stores) get
 
 - cross-file crash atomicity: after any crash or power loss, a transaction is
   in every file or in none;
@@ -37,6 +37,7 @@ Files next to `main.db`:
 | `main.db-cwal-alive` | `flock`: every handle holds it shared; recovery needs it exclusively. |
 | `main.db-cwal-writer` | `flock`: single writer. |
 | `main.db-cwal-live` | `flock`: held by a writer that opened a readable set. |
+| `main.db-cwal-gate` | `flock`: held exclusively while a handle opens (until SQLite has mapped every wal-index) or closes. See [Unpublished frames](#unpublished-frames). |
 
 Each member also holds a one-row table `cwal_marker(k, txn, mask)`, created
 by the writer at open.
@@ -44,8 +45,8 @@ by the writer at open.
 ### Commit (writer)
 
 1. **Markers.** `Conn.commit` counts the members whose WAL write lock is
-   held. For two or more it numbers the transaction (`txn` = previous + 1),
-   updates the marker row in each of those members to `(txn, mask of
+   held. For two or more it numbers the transaction (see
+   [Transaction numbers](#transaction-numbers)), updates the marker row in each of those members to `(txn, mask of
    members)`, and runs `COMMIT`. The markers are ordinary rows, so they
    commit atomically with each member's data. The commit hook refuses a
    cross-file commit without markers, so a cross-file statement cannot
@@ -169,9 +170,51 @@ While other handles still have the set open, recovery cannot run:
   parity.
 - A writer that dies after writing frames but before opening the window
   leaves the members unpublished; readers and a new writer see the last
-  committed state, and SQLite overwrites the unpublished frames on the next
-  write. If the set is closed first, recovery finds the frames, sees the
-  marker missing elsewhere and removes them.
+  committed state. The new writer removes those frames at open (see
+  [Unpublished frames](#unpublished-frames)). If the set is closed first,
+  recovery finds the frames, sees the marker missing elsewhere and removes
+  them.
+
+### Transaction numbers
+
+A marker number must name one transaction for the life of the set, also
+after a writer died with a number in flight that was never published or that
+recovery removed: otherwise a later transaction with the same number but a
+different member set would look like the same transaction to recovery. Each
+writer, at open, durably increments an epoch kept in `main`'s marker table
+(row `k = 1`, taken as at least the newest published epoch) and numbers its
+cross-file transactions `epoch << 32 | 1, 2, ...`. A number is consumed
+before `COMMIT`, so a failed commit never reuses it. Recovery refuses
+(`ProtocolViolation`) members that share the newest number with different
+masks.
+
+### Unpublished frames
+
+A writer killed after writing a member's commit frames but before
+publishing them leaves valid frames past that member's `mxFrame`. SQLite
+ignores them while some process has the wal-index mapped, but whenever a
+process maps a wal-index that no other process has mapped, SQLite rebuilds
+it from the WAL file and accepts every valid frame. With more than two files
+a later writer may never write that member again, so the dead writer's frames
+would later appear as a committed, torn transaction. Three rules prevent it:
+
+- **Discard at writer open.** A writer, after mapping every member, takes
+  each member's WAL write lock and truncates its WAL to the published end
+  (`32 + mxFrame × (24 + page size)`, after checking the file's salts match
+  the wal-index), then fsyncs.
+- **Open/close gate.** A handle holds `-gate` from before it tests `-alive`
+  until SQLite has mapped every member, and while it unmaps them and
+  releases `-alive`. So while the gate is free, every `-alive` holder has
+  every wal-index mapped, and an opener that finds another holder cannot be
+  the process that rebuilds a wal-index.
+- **Second `-alive` test.** A holder can still die while an opener holds the
+  gate. After mapping, the opener tries `-alive` exclusively again; if no
+  holder is left, its mapping may have rebuilt a wal-index, so it closes
+  SQLite without a checkpoint, runs recovery as the first handle would, and
+  reopens.
+
+A commit whose WAL fsync cannot read a member's wal-index header to open the
+window fails that fsync (`SQLITE_IOERR_FSYNC`) before any member publishes.
 
 ## Running
 
@@ -184,13 +227,15 @@ zig build -Doptimize=ReleaseFast
 ```
 
 `zig-out/bin/cwal` commands: `seed`, `writer`, `reader`, `check`, `recover`,
-`state` (prints the seqlock page), `bench`, `benchrw`. Fault injection is
+`state` (prints the seqlock page), `bench`, `benchrw`, and for sets of 2 to
+32 files (`--files N`) `nseed`, `nwriter`, `nreader`, `ncheck`. Fault injection is
 controlled by environment: `CWAL_CRASH_AT=n` (SIGKILL at event n),
-`CWAL_CRASH_TAG=t` (count only events tagged t), `CWAL_POWERLOSS=1` +
+`CWAL_CRASH_TAG=t[,t...]` (count only events with these tags), `CWAL_POWERLOSS=1` +
 `CWAL_SEED`, `CWAL_TRACE=1`, and `CWAL_MUTATE=…` (test-only defects, to show
 the tests catch them; see the mutation table). `CWAL_WINDOW_DELAY_US`,
-`CWAL_CKPT_OPEN_DELAY_US` and `CWAL_CKPT_SCAN_DELAY_US` widen races for
-tests. `bench.sh` takes `CWAL_BIN` to run a separate ReleaseFast build.
+`CWAL_CKPT_OPEN_DELAY_US`, `CWAL_CKPT_SCAN_DELAY_US` and
+`CWAL_ALIVE_DELAY_US` widen races for tests. `CWAL_DEBUG=1` appends each
+handle's open, recovery, discard and commit decisions to `main.db-cwal-debug`. `bench.sh` takes `CWAL_BIN` to run a separate ReleaseFast build.
 
 ## Tests
 
@@ -222,6 +267,24 @@ The checker opens the set (running recovery), then requires
 | Close-time checkpoint | One reader connection stays open while the writer is killed at each of its first 40 fsyncs; the reader then closes as the last connection, which makes SQLite try to checkpoint. |
 | Mutations | Rerun with each protocol piece disabled. |
 
+N-file tests (`--files`, default 2 3 4 8 16 32) use one table `t(k, txn,
+mask, n, v)` per file. Odd rounds are single-file autocommits on a random
+file; even rounds are a transaction over a random subset of 2 or more files,
+each row recording the subset (`mask`) and the marker number (`txn`); every
+10th round is a checkpoint. The N-file checker requires `integrity_check`,
+that each `k` is in exactly the files of its mask with the same `txn`, that
+the `k` values form a prefix, that no two transactions share a number, that
+each file's marker equals its newest cross-file row, and that every
+acknowledged `(k, txn)` survived.
+
+| Test | What it does |
+| --- | --- |
+| N-file process crash | SIGKILL the writer at every commit-boundary event of every participating file (WAL write, fsync, wal-index barrier, commit hook, gate, phase two), capped at 3,000 sampled points; also crash recovery itself for 8 torn states at 3, 8 and 32 files. |
+| N-file power loss | As above with the power-loss model, 3 seeds, at 3, 8 and 32 files. |
+| Writer restart chain | 15 writers in a row on one set, 80% killed at a random event, with readers kept running and restarted; every 5th writer opens alone. Random working sets, `PASSIVE` checkpoints. Requires unique attempted marker numbers across the whole chain (writer restarts included) and 0 mixed reads. 4 seeds per file count. |
+| Unpublished frames | A reader keeps the set open (and sleeps 20 ms between finding the writer alive and mapping, `CWAL_ALIVE_DELAY_US`); the writer is killed at each of its first 60 fsyncs; a second writer runs 6 rounds without ever touching file x, for each x; then check. |
+| N-file live readers | A writer (window widened 200 µs) and 2 reader processes × 2 threads, all and `PASSIVE` checkpoints. |
+
 ## Results
 
 Linux 7.2, x86_64, 8 CPUs, SQLite 3.53.4 (vendored, built with
@@ -231,34 +294,57 @@ Linux 7.2, x86_64, 8 CPUs, SQLite 3.53.4 (vendored, built with
 
 | Test | Plain WAL (baseline) | CWAL |
 | --- | --- | --- |
-| Process crash at every writer event | 118 / 1,220 torn | **0 / 1,465**; 135 recoveries rolled back a torn transaction |
-| Crash during recovery, once and twice (40 torn states) | — | **0 / 6,400** |
-| Power loss at every writer event, 3 seeds | 354 / 3,660 torn | **0 / 4,395**; 405 rolled back |
-| Power loss during recovery (20 torn states, 3 seeds) | — | **0 / 9,600** |
-| Concurrent snapshots, 2 processes × 2 threads, both checkpoint workloads | 77 mixed reads | **0 mixed** / 2,341; 156 snapshot reads; 89/89 reader checkpoints denied |
-| Writer killed, readers survive (20 trials) | 94,032 mixed reads, 5 torn sets | **0 mixed** / 315,421; 2,288 snapshot reads; 81 `Broken` reopens; 0 torn |
-| Checkpoint race (widened) | — | 24 checkpoints started during a snapshot open; each read retried; **0** violated its snapshot |
+| Process crash at every writer event | 135 / 1,338 torn | **0 / 1,651**; 151 recoveries rolled back a torn transaction |
+| Crash during recovery, once and twice (40 torn states) | — | **0 / 8,000** |
+| Power loss at every writer event, 3 seeds | 405 / 4,014 torn | **0 / 4,953**; 453 rolled back |
+| Power loss during recovery (20 torn states, 3 seeds) | — | **0 / 12,000** |
+| Concurrent snapshots, 2 processes × 2 threads, both checkpoint workloads | 76 mixed reads | **0 mixed** / 1,586; 203 snapshot reads; 60/60 reader checkpoints denied |
+| Writer killed, readers survive (20 trials) | 85,221 mixed reads, 5 torn sets | **0 mixed** / 335,095; 2,463 snapshot reads; 51 `Broken` reopens; 0 torn |
+| Checkpoint race (widened) | — | 26 checkpoints started during a snapshot open; each read retried; **0** violated its snapshot |
 | Checkpoint counter reset (5 crash points) | — | active count 1 after each crash, **0** after the next writer; 0–1 real-lock fallbacks per run |
-| Last reader closes after writer killed at each of 40 fsyncs | 14 / 40 torn | **0 / 40** |
+| Last reader closes after writer killed at each of 40 fsyncs | 8 / 40 torn | **0 / 40** |
 
 Mutations. Each test-only defect is caught:
 
 | Mutation | Caught by |
 | --- | --- |
-| `no-markers` (cross-file commits write no markers) | 119 / 1,415 torn sets in the crash matrix |
-| `no-marker-rollback` (recovery detects a torn transaction but keeps it) | 135 / 1,465 torn sets under power loss |
-| `no-cross-flag` (a new writer closes a dead writer's cross-file window without recovery) | 52,505 mixed reads and 3 torn sets in the survivor test |
-| `no-gate` (no publication window) | 84 mixed reads |
-| `no-seq-check` (accept a read without rechecking the sequence) | 28 mixed reads |
-| `no-snapshot-open` (inside a window, pin current state instead of the saved headers) | 101 mixed reads |
-| `no-solo-window` (no window for single-file commits) | 9 out-of-order solo commits |
-| `no-lock-gate` (close-time checkpoints allowed) | 11 / 40 torn sets in the close test |
-| `no-ckpt-gate` (`WAL_CKPT_LOCK` not gated) | 5 / 40 torn sets in the close test |
-| `no-ckpt-validate` (accept a skipped checkpoint lock without checking the counter) | 27 violations in 27 races |
+| `no-markers` (cross-file commits write no markers) | 135 / 1,601 torn sets in the crash matrix |
+| `no-marker-rollback` (recovery detects a torn transaction but keeps it) | 151 / 1,651 torn sets under power loss (1 seed) |
+| `no-cross-flag` (a new writer closes a dead writer's cross-file window without recovery) | 72,495 mixed reads and 4 torn sets in the survivor test |
+| `no-gate` (no publication window) | 90 mixed reads |
+| `no-seq-check` (accept a read without rechecking the sequence) | 35 mixed reads |
+| `no-snapshot-open` (inside a window, pin current state instead of the saved headers) | 110 mixed reads |
+| `no-solo-window` (no window for single-file commits) | 18 mixed reads (out-of-order solo commits) |
+| `no-lock-gate` (close-time checkpoints allowed) | 10 / 40 sets refused by recovery (`ProtocolViolation`: a torn transaction reached a database file) in the close test |
+| `no-ckpt-gate` (`WAL_CKPT_LOCK` not gated) | 2 / 40 sets refused by recovery in the close test |
+| `no-ckpt-validate` (accept a skipped checkpoint lock without checking the counter) | 37 violations in 37 races |
 | `no-ckpt-reset` (a writer does not clear a dead checkpointer) | active count stays 1; every snapshot open takes the real lock (2 fallbacks per snapshot read) |
+| `no-discard-unpublished` (a writer keeps a dead writer's frames past `mxFrame`) | unpublished-frames test: 3 / 153 torn at 3 files, 7 / 480 at 8 files; 5,808 mixed reads |
+| `no-late-alone` (no second `-alive` test after mapping) | unpublished-frames test: 13 / 153 torn at 3 files, 10,445 mixed reads (0 at 8 files) |
+| `no-open-gate` (opens and closes do not take `-gate`) | unpublished-frames test: 4 / 153 torn at 3 files, 2,984 mixed reads (0 at 8 files) |
+| `no-txn-epoch` (marker numbers continue from the newest published one) | restart chains: all 8 chains (3 and 8 files) reuse 2–6 marker numbers |
 
 `no-ckpt-skip` (always take the real checkpoint lock) is a control: 0
 violations.
+
+### N-file atomicity
+
+Same machine, 2026-11-25, tmpfs, Debug build.
+
+| Test | Files | Plain WAL (baseline) | CWAL |
+| --- | --- | --- | --- |
+| Process crash at every commit-boundary event | 2 / 3 / 4 / 8 / 16 / 32 | 40, 67, 74, 175, 407, 729 torn | **0** / 347, 409, 451, 731, 1,355, 2,367; 66–1,008 rollbacks per count |
+| Crash during recovery, 8 torn states | 3 / 8 / 32 | — | **0** / 2,372, 6,256, 24,676 |
+| Power loss, 3 seeds (32 files sampled to 3,000) | 3 / 8 / 32 | 201, 525, 1,457 torn | **0** / 1,227, 2,193, 3,000 |
+| Writer restart chains, 4 × 15 writers | 2 … 32 | — | **0 mixed** / 181,561 reads; 278 writers killed; 2,457 acked commits all present; no marker number reused |
+| Unpublished frames, next writer skips a file | 2 / 3 / 4 / 8 / 16 / 32 | — | **0** / 80, 153, 232, 480, 960, 1,920; 0 mixed reads |
+| Live readers, 2 × 2 threads | 2 … 32 | 3 and 8 files: 26–264 mixed reads | **0 mixed**, 0 checkpoint violations |
+
+With 32 files, `PASSIVE` checkpoints and the widened window, readers
+completed only 4 reads in the test's time (751 sequence retries, 290 waits
+for a window): a read pins 32 members, which rarely fits between windows.
+That is a liveness cost under a saturating writer, not a correctness
+failure.
 
 ### Overhead
 
@@ -387,10 +473,9 @@ journal check on reads.
   unreadable until every handle has closed and one reopens (recovery needs
   exclusive access). Readers get `error.Broken` rather than a mixed view.
 - Recovery opens each member with a separate SQLite connection to read its
-  marker. A writer that reopens while readers are open (no recovery) takes
-  its transaction number from the published markers, so it may reuse the
-  number of an unpublished, abandoned transaction; that is harmless with two
-  members (every cross-file commit writes both) but needs care with more.
+  marker.
+- At most 32 files per set (`SQLITE_MAX_ATTACHED=31`, and the marker mask is
+  32 bits).
 - The power-loss model does not simulate directory-entry loss (no directory
   fsync) and runs single-process only. Process-crash tests are multi-process.
 - One writer per set, enforced with `flock`. Lock files assume a local
