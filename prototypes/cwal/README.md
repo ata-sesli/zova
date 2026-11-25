@@ -259,6 +259,12 @@ after a failed commit (printing `fail k txn`) and stops after 5 failures in a
 row; `ncheck --failed-file` accepts those keys as absent, and `nreader
 --allow-gaps 1` checks atomicity but not the prefix property. `bench.sh` and `torture.py` take
 `CWAL_BIN` to run another build (for example an aarch64 binary under qemu).
+`torture.py --split-dirs DIR...` places members of each N-file set in these
+directories as well, through symlinks from the set directory (member 1 in
+the first, and so on, round-robin with the set directory). `sudo
+./fs-setup.sh` mounts 3 GB loop-backed ext4, XFS and NTFS (`ntfs3`) images
+under `~/.cache/cwal-fs/mnt`, owned by the calling user; `--down` unmounts
+them.
 
 ## Tests
 
@@ -374,6 +380,16 @@ survive.
 | Crash at every event | The N-file crash matrix over every fault event of any kind (opens, lock files, WAL creation and deletion at close, checkpoints, closes), not only commit boundaries; process crash and power loss (3 seeds), sampled to 4,000 at 8 and 32 files. A metadata matrix crashes at every file creation, deletion, truncation and fsync of a 30-round run (round 29 is a `TRUNCATE` checkpoint), under power loss. |
 | Recovery chains | From 10 torn states per mode at 3 and 8 files, run recovery 5 times in a row, each crashed at a random recovery event (half with power loss), then check. |
 | Reader kills | A writer (`PASSIVE` checkpoints) and 2 × 2 surviving readers run 2.5 s while 6 victim readers die: 3 crash at a random event of their own (snapshot opens, counter steps, wal-index rebuilds), 3 are `SIGKILL`ed at random times. Survivors must see no mixed state, the writer must keep committing, and the next writer must clear any checkpoint count the victims left. At 2, 3, 8 and 32 files, 3 seeds. |
+
+Filesystem tests run torture sections on real filesystems with real fsyncs
+instead of tmpfs. The power-loss model is the same VFS model on every
+filesystem; no filesystem is cut off from power.
+
+| Test | What it does |
+| --- | --- |
+| Filesystem profile | `--files 3 8 --powerloss-seeds 1 --ncap 600 --restart-seeds 2`, sections `crash`, `recovery`, `nfiles`, `nrestart`, `ndangle`, `nreaders`, `nsem`, `writers`, `ckptkill`, `permissions`, `readerkill`. On btrfs (the root filesystem), ext4 and XFS. |
+| Short profile | `--files 3 --powerloss-seeds 1 --ncap 200`, sections `nfiles`, `nreaders`, `permissions`, `readerkill`. On NTFS, and on split sets. |
+| Split sets (several filesystems) | The set directory and `main.db` on btrfs, member 1 on tmpfs, member 2 on ext4 (`--split-dirs`), so one commit spans three filesystems with their own WALs, fsyncs and directory entries. |
 
 ## Results
 
@@ -567,6 +583,42 @@ The plain-WAL baseline tore transactions in 10 of its 13 error cases,
 including ENOSPC during a checkpoint and a failed database fsync, which
 show the oracle catches a partial multi-file commit.
 
+### Filesystems
+
+Same machine, 2026-11-26, ReleaseSafe build, one SATA SSD. ext4, XFS and
+NTFS are loop images stored on the btrfs root filesystem. **No CWAL
+failure.**
+
+| Filesystem | Profile | Time | CWAL crash, power-loss and recovery runs | Other CWAL checks | Plain WAL |
+| --- | --- | --- | --- | --- | --- |
+| btrfs | full | 36 min | **0** / 21,324 | **0** / 86 | 619 / 2,754 torn |
+| ext4 | full | 26 min | **0** / 21,324 | **0** / 86 | 619 / 2,754 torn |
+| XFS | full | 28 min | **0** / 21,324 | **0** / 86 | 619 / 2,754 torn |
+| NTFS (`ntfs3`) | short | 2 min | **0** / 2,924 | **0** / 21 | 107 / 400 torn |
+| btrfs + tmpfs + ext4 (split set) | short | 3.5 min | **0** / 2,924 | **0** / 21 | 107 / 400 torn |
+
+"Other CWAL checks" are the reader, transaction-semantics, competing-writer,
+checkpoint-counter, permission and reader-kill runs: 0 mixed reads, 0
+checkpoint violations, and every `ncheck` passed.
+
+- **Symlinked members (bug, fixed).** The first split-set run failed 102
+  of 1,227 CWAL power-loss runs with `open ProtocolViolation`. SQLite
+  resolves symlinks and keeps a database's `-wal` and `-shm` next to the
+  real file, but CWAL built those names from the path the caller passed.
+  Recovery could not open a symlinked member's WAL, and discarding
+  unpublished frames skipped it without an error. `Conn.open` now resolves
+  every path with the unix VFS's `xFullPathname`, as SQLite does; the same
+  run then passed (0 / 409 crashes, 0 / 1,227 power losses, 309 of them
+  rolled back).
+- **Writer gaps.** The longest gap between commits while readers were
+  killed was 59–118 ms on btrfs and XFS, 33–78 ms on NTFS, and up to 715 ms
+  on ext4 and 762 ms on the split set. Not investigated; the gaps include
+  fsyncs through a loop device onto btrfs.
+- **32-bit targets.** The prototype does not build for 32-bit x86: the
+  shared snapshot page uses 64-bit atomics (`seq`, `ckpt`), which Zig does
+  not provide there. Zova's native packages are all 64-bit (x64 and arm64),
+  so this was not pursued.
+
 ### Overhead
 
 Medians of 3 repetitions, ReleaseFast, same VFS and build for both modes.
@@ -715,10 +767,19 @@ journal check on reads.
   The two have the same contents in SQLite 3.53.4, but `sqlite3_snapshot` is
   documented as opaque, so this relies on an implementation detail. They
   also need `SQLITE_ENABLE_SNAPSHOT`, which Zova's build does not set.
-- Tested on Linux x86_64 with SQLite 3.53.4 (the vendored copy), tmpfs and
-  btrfs. An aarch64 build ran a subset under qemu user emulation on the
-  same x86_64 host, which does not reproduce ARM's weaker memory ordering;
-  ARM64 ordering rests on review of the barriers, not on tests.
+- Tested on Linux x86_64 with SQLite 3.53.4 (the vendored copy), on tmpfs,
+  btrfs, and loop-backed ext4, XFS and NTFS (the Linux `ntfs3` driver), one
+  SATA SSD. Not tested: APFS, Windows (the prototype has no Windows VFS;
+  NTFS under Windows has different locking and shared memory), network
+  filesystems, separate physical drives, and real power loss. An aarch64
+  build ran a subset under qemu user emulation on the same x86_64 host,
+  which does not reproduce ARM's weaker memory ordering; ARM64 ordering
+  rests on review of the barriers, not on tests.
+- Lock files are named after `main.db`'s resolved path. Two handles that
+  reach the same set through different names that SQLite does not resolve
+  to one path (hard links, bind mounts) would use different lock files.
+- The shared snapshot page uses 64-bit atomics, so 32-bit targets do not
+  build.
 - A reader holding one snapshot for a long time either stalls the writer
   (`RESTART`/`TRUNCATE` checkpoints wait for it, up to the busy timeout) or
   lets the WAL grow without bound (`PASSIVE`). This is SQLite WAL behavior

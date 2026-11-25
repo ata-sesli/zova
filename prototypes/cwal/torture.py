@@ -24,6 +24,48 @@ BIN = os.environ.get("CWAL_BIN") or os.path.join(HERE, "zig-out", "bin", "cwal")
 ROUNDS = 20  # covers explicit, implicit, solo, spill, PASSIVE/RESTART/TRUNCATE
 
 
+# --split-dirs: member files of N-file sets alternate between the set
+# directory and these directories (other filesystems), linked by symlinks.
+SPLIT_DIRS = []
+
+
+def _member_dir(root, d):
+    """Where set d keeps its members under split root."""
+    return os.path.join(root, os.path.abspath(d).strip("/").replace("/", "_"))
+
+
+def copyset(src, dst):
+    """copytree that gives dst its own copy of symlinked member files."""
+    shutil.copytree(src, dst, symlinks=True)
+    fresh = set()
+    for name in os.listdir(dst):
+        link = os.path.join(dst, name)
+        if not os.path.islink(link):
+            continue
+        target = os.readlink(link)
+        tdir, base = os.path.split(target)
+        ndir = _member_dir(os.path.dirname(tdir), dst)
+        if ndir not in fresh:  # drop files a previous run left there
+            shutil.rmtree(ndir, ignore_errors=True)
+            fresh.add(ndir)
+        os.makedirs(ndir, exist_ok=True)
+        for f in os.listdir(tdir):
+            if f == base or f.startswith(base + "-"):
+                shutil.copy2(os.path.join(tdir, f), os.path.join(ndir, f))
+        os.unlink(link)
+        os.symlink(os.path.join(ndir, base), link)
+
+
+def rmset(d, ignore_errors=True):
+    """rmtree that also removes symlinked member files."""
+    if os.path.isdir(d) and not os.path.islink(d):
+        for name in os.listdir(d):
+            link = os.path.join(d, name)
+            if os.path.islink(link):
+                shutil.rmtree(os.path.dirname(os.readlink(link)), ignore_errors=True)
+    shutil.rmtree(d, ignore_errors=ignore_errors)
+
+
 def run(args, env=None, timeout=60):
     e = dict(os.environ)
     for k in ("CWAL_CRASH_AT", "CWAL_POWERLOSS", "CWAL_SEED", "CWAL_TRACE"):
@@ -98,8 +140,8 @@ def crash_matrix(work, tpl, mode, jobs, powerloss_seeds=(None,)):
     """Kill the writer at every fault event (and, with power loss, drop or
     tear unsynced writes), then recover and check."""
     d0 = os.path.join(work, f"full-{mode}")
-    shutil.rmtree(d0, ignore_errors=True)
-    shutil.copytree(tpl, d0)
+    rmset(d0, ignore_errors=True)
+    copyset(tpl, d0)
     full = run(["writer", d0, "--mode", mode, "--rounds", ROUNDS])
     n = events(full.stdout)
     cases = [(k, seed) for seed in powerloss_seeds for k in range(1, n + 1)]
@@ -107,8 +149,8 @@ def crash_matrix(work, tpl, mode, jobs, powerloss_seeds=(None,)):
     def one(case):
         k, seed = case
         d = os.path.join(work, f"c-{mode}-{seed}-{k}")
-        shutil.rmtree(d, ignore_errors=True)
-        shutil.copytree(tpl, d)
+        rmset(d, ignore_errors=True)
+        copyset(tpl, d)
         env = {"CWAL_CRASH_AT": k}
         if seed is not None:
             env.update(CWAL_POWERLOSS=1, CWAL_SEED=seed)
@@ -117,12 +159,12 @@ def crash_matrix(work, tpl, mode, jobs, powerloss_seeds=(None,)):
         # Only recovery tells whether the set was torn, so keep a copy until
         # it has run.
         snap = d + ".crashed"
-        shutil.rmtree(snap, ignore_errors=True)
-        shutil.copytree(d, snap)
+        rmset(snap, ignore_errors=True)
+        copyset(d, snap)
         err, rec = check(d, mode, acked, with_recovery=True)
-        shutil.rmtree(d, ignore_errors=True)
+        rmset(d, ignore_errors=True)
         if rec != "rollback":
-            shutil.rmtree(snap, ignore_errors=True)
+            rmset(snap, ignore_errors=True)
             snap = None
         return k, seed, rec, err, snap, acked
 
@@ -144,10 +186,10 @@ def recovery_crash(work, snaps, jobs, powerloss_seeds=(None,), cap=40, files=Non
     cases = []
     for idx, (snap, acked) in enumerate(sample):
         d = snap + ".probe"
-        shutil.rmtree(d, ignore_errors=True)
-        shutil.copytree(snap, d)
+        rmset(d, ignore_errors=True)
+        copyset(snap, d)
         m = events(run(["recover", d, "--mode", "cwal"] + extra).stdout) or 0
-        shutil.rmtree(d, ignore_errors=True)
+        rmset(d, ignore_errors=True)
         for j in range(1, m + 1):
             for seed in powerloss_seeds:
                 for twice in (False, True):
@@ -156,8 +198,8 @@ def recovery_crash(work, snaps, jobs, powerloss_seeds=(None,), cap=40, files=Non
     def one(case):
         idx, snap, acked, j, seed, twice = case
         d = f"{snap}.r{j}-{seed}-{int(twice)}"
-        shutil.rmtree(d, ignore_errors=True)
-        shutil.copytree(snap, d)
+        rmset(d, ignore_errors=True)
+        copyset(snap, d)
         env = {"CWAL_CRASH_AT": j}
         if seed is not None:
             env.update(CWAL_POWERLOSS=1, CWAL_SEED=seed)
@@ -165,7 +207,7 @@ def recovery_crash(work, snaps, jobs, powerloss_seeds=(None,), cap=40, files=Non
         if twice:
             run(["recover", d, "--mode", "cwal"] + extra, env)
         err = verify(d, acked)
-        shutil.rmtree(d, ignore_errors=True)
+        rmset(d, ignore_errors=True)
         return idx, j, seed, twice, err
 
     results = parallel(one, cases, jobs, "recovery crash")
@@ -182,8 +224,8 @@ def concurrent_readers(work, tpl, mode, ckpt):
     ckpt=all includes RESTART/TRUNCATE checkpoints, which wait for readers;
     ckpt=passive keeps the writer committing while readers run."""
     d = os.path.join(work, f"rd-{mode}")
-    shutil.rmtree(d, ignore_errors=True)
-    shutil.copytree(tpl, d)
+    rmset(d, ignore_errors=True)
+    copyset(tpl, d)
     w = subprocess.Popen([BIN, "writer", d, "--mode", mode, "--rounds", "3000", "--delay-us", "200", "--ckpt", ckpt], env=WINDOW_ENV, stdout=subprocess.PIPE, text=True)
     time.sleep(0.1)
     rs = [subprocess.Popen([BIN, "reader", d, "--mode", mode, "--threads", "2", "--duration-ms", "2000", "--gap-us", "300", "--solo-order", "1"], stdout=subprocess.PIPE, text=True) for _ in range(2)]
@@ -207,8 +249,8 @@ def surviving_readers(work, tpl, mode, trials, seed=11):
     prog = Progress(f"{mode} surviving readers", trials)
     for t in range(trials):
         d = os.path.join(work, f"sv-{mode}-{t}")
-        shutil.rmtree(d, ignore_errors=True)
-        shutil.copytree(tpl, d)
+        rmset(d, ignore_errors=True)
+        copyset(tpl, d)
         # Kill at a random fsync, or (CWAL) at a random phase-two
         # notification: after every member's commit frame is durable and
         # visible to readers, before the window closes.
@@ -247,7 +289,7 @@ def surviving_readers(work, tpl, mode, trials, seed=11):
                 stats[kk] += int(v)
         err = check(d, mode, acked)
         out.append(dict(k=f"{tag}#{k}", crashed=crashed, restarted=restarted, restart_broken=restart_broken, err=err, **stats))
-        shutil.rmtree(d, ignore_errors=True)
+        rmset(d, ignore_errors=True)
         prog.tick()
     return out
 
@@ -260,8 +302,8 @@ def close_checkpoint(work, tpl, mode, n_syncs=40):
     prog = Progress(f"{mode} close checkpoint", n_syncs)
     for k in range(1, n_syncs + 1):
         d = os.path.join(work, f"cc-{mode}-{k}")
-        shutil.rmtree(d, ignore_errors=True)
-        shutil.copytree(tpl, d)
+        rmset(d, ignore_errors=True)
+        copyset(tpl, d)
         r = subprocess.Popen([BIN, "reader", d, "--mode", mode, "--threads", "1", "--duration-ms", "400"], stdout=subprocess.PIPE, text=True)
         time.sleep(0.05)
         e = dict(os.environ, CWAL_CRASH_AT=str(k), CWAL_CRASH_TAG="sync")
@@ -270,7 +312,7 @@ def close_checkpoint(work, tpl, mode, n_syncs=40):
         err = check(d, mode, acks(w.stdout))
         if err:
             fails.append((k, err))
-        shutil.rmtree(d, ignore_errors=True)
+        rmset(d, ignore_errors=True)
         prog.tick()
     return fails
 
@@ -286,8 +328,8 @@ def checkpoint_race(work, tpl, trials=3):
     errs = []
     for t in range(trials):
         d = os.path.join(work, f"cr-{t}")
-        shutil.rmtree(d, ignore_errors=True)
-        shutil.copytree(tpl, d)
+        rmset(d, ignore_errors=True)
+        copyset(tpl, d)
         we = dict(WINDOW_ENV, CWAL_CKPT_SCAN_DELAY_US="3000")
         w = subprocess.Popen([BIN, "writer", d, "--mode", "cwal", "--rounds", "3000", "--delay-us", "100", "--ckpt", "passive"], env=we, stdout=subprocess.PIPE, text=True)
         time.sleep(0.1)
@@ -312,8 +354,8 @@ def checkpoint_reset(work, tpl, trials=5):
     out = []
     for t in range(trials):
         d = os.path.join(work, f"ck-{t}")
-        shutil.rmtree(d, ignore_errors=True)
-        shutil.copytree(tpl, d)
+        rmset(d, ignore_errors=True)
+        copyset(tpl, d)
         w = run(["writer", d, "--mode", "cwal", "--rounds", ROUNDS], {"CWAL_CRASH_TAG": "ckpt-locked", "CWAL_CRASH_AT": t + 1})
         acked = acks(w.stdout)
         stuck = snap_state(d).get("ckpt_active", 0)
@@ -330,7 +372,7 @@ def checkpoint_reset(work, tpl, trials=5):
         if w.returncode != -9 or w2.returncode != 0 or r.returncode != 0:
             err = err or f"exit codes writer={w.returncode} writer2={w2.returncode} reader={r.returncode}"
         out.append(dict(crash=t + 1, stuck=stuck, after=after, snapshot_reads=stats.get("snapshot_reads", 0), ckpt_fallbacks=stats.get("ckpt_fallbacks", 0), err=err))
-        shutil.rmtree(d, ignore_errors=True)
+        rmset(d, ignore_errors=True)
     return out
 
 
@@ -382,7 +424,7 @@ def ncheck(d, n, mode, acked, with_recovery=True, failed=()):
 def drop_snaps(snaps):
     """Delete the torn states n_crash_matrix kept (32-file sets fill /tmp)."""
     for snap, _ in snaps:
-        shutil.rmtree(snap, ignore_errors=True)
+        rmset(snap, ignore_errors=True)
 
 
 _template_lock = threading.Lock()
@@ -395,6 +437,14 @@ def ntemplate(work, n):
     with _template_lock:
         if not os.path.isdir(tpl):
             os.makedirs(tpl)
+            for i in range(1, n):
+                roots = [None] + SPLIT_DIRS
+                root = roots[i % len(roots)]
+                if root:
+                    if i <= len(SPLIT_DIRS):
+                        shutil.rmtree(_member_dir(root, tpl), ignore_errors=True)
+                    os.makedirs(_member_dir(root, tpl), exist_ok=True)
+                    os.symlink(os.path.join(_member_dir(root, tpl), f"s{i}.db"), os.path.join(tpl, f"s{i}.db"))
             run(["nseed", tpl, "--files", n])
             run(["nwriter", tpl, "--files", n, "--rounds", 0])
     return tpl
@@ -426,12 +476,12 @@ def n_crash_matrix(work, n, mode, jobs, powerloss_seeds=(None,), cap=None, write
     tpl = ntemplate(work, n)
     cmd, rounds = writer
     d0 = os.path.join(work, f"nfull-{cmd}-{n}-{mode}")
-    shutil.rmtree(d0, ignore_errors=True)
-    shutil.copytree(tpl, d0)
+    rmset(d0, ignore_errors=True)
+    copyset(tpl, d0)
     tag_env = {"CWAL_CRASH_TAG": tags} if tags else {}
     full = run([cmd, d0, "--files", n, "--mode", mode, "--rounds", rounds], tag_env).stdout
     total = tagged(full) if tags else events(full)
-    shutil.rmtree(d0, ignore_errors=True)
+    rmset(d0, ignore_errors=True)
     cases = [(t, seed) for seed in powerloss_seeds for t in range(1, total + 1)]
     if cap and len(cases) > cap:
         cases = sorted(random.Random(n).sample(cases, cap))
@@ -439,8 +489,8 @@ def n_crash_matrix(work, n, mode, jobs, powerloss_seeds=(None,), cap=None, write
     def one(case):
         t, seed = case
         d = os.path.join(work, f"nc-{cmd}-{n}-{mode}-{seed}-{t}")
-        shutil.rmtree(d, ignore_errors=True)
-        shutil.copytree(tpl, d)
+        rmset(d, ignore_errors=True)
+        copyset(tpl, d)
         env = dict(tag_env, CWAL_CRASH_AT=t)
         if seed is not None:
             env.update(CWAL_POWERLOSS=1, CWAL_SEED=seed, CWAL_PL_LOG=d + ".pl")
@@ -448,16 +498,16 @@ def n_crash_matrix(work, n, mode, jobs, powerloss_seeds=(None,), cap=None, write
         pl_collect(d + ".pl")
         acked = nacks(w.stdout)
         snap = d + ".crashed"
-        shutil.rmtree(snap, ignore_errors=True)
-        shutil.copytree(d, snap)
+        rmset(snap, ignore_errors=True)
+        copyset(d, snap)
         err, rec = ncheck(d, n, mode, acked)
-        shutil.rmtree(d, ignore_errors=True)
+        rmset(d, ignore_errors=True)
         with kept_lock:
             keep = rec == "rollback" and len(kept) < 40
             if keep:
                 kept.append(t)
         if not keep:
-            shutil.rmtree(snap, ignore_errors=True)
+            rmset(snap, ignore_errors=True)
             snap = None
         return t, seed, rec, err, snap, acked, w.returncode
 
@@ -515,8 +565,8 @@ def n_restart_chain(work, n, seed, runs=15):
     acknowledged commit survived."""
     rng = random.Random(seed)
     d = os.path.join(work, f"nr-{n}-{seed}")
-    shutil.rmtree(d, ignore_errors=True)
-    shutil.copytree(ntemplate(work, n), d)
+    rmset(d, ignore_errors=True)
+    copyset(ntemplate(work, n), d)
     reader_cmd = [BIN, "nreader", d, "--files", str(n), "--threads", "2", "--duration-ms", "1500", "--gap-us", "100"]
     readers = [subprocess.Popen(reader_cmd, stdout=subprocess.PIPE, text=True) for _ in range(2)]
     stats = Counter()
@@ -573,7 +623,7 @@ def n_restart_chain(work, n, seed, runs=15):
         err = f"{dup_k} acknowledged k values reused"
     if not err and reader_fails:
         err = f"reader failed: {reader_fails[0]}"
-    shutil.rmtree(d, ignore_errors=True)
+    rmset(d, ignore_errors=True)
     return dict(n=n, seed=seed, err=err, crashed=crashed, open_broken=broken, acked=len(acked), **stats)
 
 
@@ -586,18 +636,18 @@ def n_dangling(work, n, jobs, max_syncs=60):
     writer's frames unless the second writer dropped them."""
     tpl = ntemplate(work, n)
     d0 = os.path.join(work, f"ndfull-{n}")
-    shutil.rmtree(d0, ignore_errors=True)
-    shutil.copytree(tpl, d0)
+    rmset(d0, ignore_errors=True)
+    copyset(tpl, d0)
     total = tagged(run(["nwriter", d0, "--files", n, "--rounds", NROUNDS], {"CWAL_CRASH_TAG": "sync"}).stdout)
-    shutil.rmtree(d0, ignore_errors=True)
+    rmset(d0, ignore_errors=True)
     cases = [(j, x) for j in range(1, min(total, max_syncs) + 1) for x in range(n)]
     every = (1 << n) - 1
 
     def one(case):
         j, x = case
         d = os.path.join(work, f"nd-{n}-{j}-{x}")
-        shutil.rmtree(d, ignore_errors=True)
-        shutil.copytree(tpl, d)
+        rmset(d, ignore_errors=True)
+        copyset(tpl, d)
         # The reader sleeps between finding W1 alive and mapping the
         # wal-indexes, so W1 often dies inside that gap (aloneAfterMapping).
         r = subprocess.Popen([BIN, "nreader", d, "--files", str(n), "--threads", "1", "--duration-ms", "700"], env=dict(os.environ, CWAL_ALIVE_DELAY_US="20000", **DEBUG_ENV), stdout=subprocess.PIPE, text=True)
@@ -608,8 +658,8 @@ def n_dangling(work, n, jobs, max_syncs=60):
         alive = "reader" in rout and r.returncode == 0
         acked = nacks(w1.stdout) + nacks(w2.stdout)
         kept = d + ".before-check"
-        shutil.rmtree(kept, ignore_errors=True)
-        shutil.copytree(d, kept)
+        rmset(kept, ignore_errors=True)
+        copyset(d, kept)
         err, rec = ncheck(d, n, "cwal", acked)
         if not err and w2.returncode not in (0, 3):
             err = f"second writer exit {w2.returncode}"
@@ -619,8 +669,8 @@ def n_dangling(work, n, jobs, max_syncs=60):
             with open(kept + ".log", "w") as f:
                 f.write(f"W1 {w1.returncode}\n{w1.stdout}{w1.stderr}\nW2 {w2.returncode}\n{w2.stdout}{w2.stderr}\nR {r.returncode}\n{rout}")
         else:
-            shutil.rmtree(kept, ignore_errors=True)
-        shutil.rmtree(d, ignore_errors=True)
+            rmset(kept, ignore_errors=True)
+        rmset(d, ignore_errors=True)
         return j, x, err, w1.returncode == -9, alive, reader_stats(rout)
 
     results = parallel(one, cases, jobs, f"{n} files dangling frames")
@@ -637,8 +687,8 @@ def n_readers(work, n, mode, ckpt):
     """A live writer with a widened window and 2 reader processes x 2
     threads; every read must see whole transactions and a prefix."""
     d = os.path.join(work, f"nrd-{n}-{mode}-{ckpt}")
-    shutil.rmtree(d, ignore_errors=True)
-    shutil.copytree(ntemplate(work, n), d)
+    rmset(d, ignore_errors=True)
+    copyset(ntemplate(work, n), d)
     w = subprocess.Popen([BIN, "nwriter", d, "--files", str(n), "--mode", mode, "--rounds", "100000", "--delay-us", "200", "--ckpt", ckpt], env=WINDOW_ENV, stdout=subprocess.PIPE, text=True)
     time.sleep(0.1)
     rs = [subprocess.Popen([BIN, "nreader", d, "--files", str(n), "--mode", mode, "--threads", "2", "--duration-ms", "2000", "--gap-us", "300"], stdout=subprocess.PIPE, text=True) for _ in range(2)]
@@ -649,7 +699,7 @@ def n_readers(work, n, mode, ckpt):
     wout = w.communicate()[0]
     # The writer was stopped (SIGTERM) mid-run: like a crash.
     err, _ = ncheck(d, n, mode, nacks(wout))
-    shutil.rmtree(d, ignore_errors=True)
+    rmset(d, ignore_errors=True)
     return stats, err
 
 
@@ -691,8 +741,8 @@ def reader_scale(work, n, mode, readers, ckpt):
     fewest reads any thread completed (reader starvation) and the writer's
     commit rate (writer starvation)."""
     d = os.path.join(work, f"scale-{n}-{mode}-{readers}-{ckpt}")
-    shutil.rmtree(d, ignore_errors=True)
-    shutil.copytree(ntemplate(work, n), d)
+    rmset(d, ignore_errors=True)
+    copyset(ntemplate(work, n), d)
     procs, threads = READER_SPLIT[readers]
     w = Timed(subprocess.Popen([BIN, "nwriter", d, "--files", str(n), "--mode", mode, "--rounds", "100000000", "--ckpt", ckpt], stdout=subprocess.PIPE, text=True))
     time.sleep(0.1)
@@ -709,7 +759,7 @@ def reader_scale(work, n, mode, readers, ckpt):
     during = sum(1 for t, l in w.lines if l.startswith("ack ") and t0 <= t <= t1)
     stall = w.longest_stall(t0, t1)
     err, _ = ncheck(d, n, mode, acked)
-    shutil.rmtree(d, ignore_errors=True)
+    rmset(d, ignore_errors=True)
     return stats, err, during / (t1 - t0), peak, stall
 
 
@@ -719,8 +769,8 @@ def competing_writers(work, n, procs, threads, seed, kill):
     reader processes x 2 threads read throughout. With kill, one writer
     process is SIGKILLed at a random time and replaced."""
     d = os.path.join(work, f"cw-{n}-{procs}x{threads}-{seed}-{kill}")
-    shutil.rmtree(d, ignore_errors=True)
-    shutil.copytree(ntemplate(work, n), d)
+    rmset(d, ignore_errors=True)
+    copyset(ntemplate(work, n), d)
     rnd = random.Random(seed)
     cmd = lambda ms, s: [BIN, "nwriters", d, "--files", str(n), "--threads", str(threads), "--duration-ms", str(ms), "--seed", str(s)]
     ws = [Timed(subprocess.Popen(cmd(3000, seed * 100 + i), stdout=subprocess.PIPE, text=True)) for i in range(procs)]
@@ -742,7 +792,7 @@ def competing_writers(work, n, procs, threads, seed, kill):
     err, _ = ncheck(d, n, "cwal", acked)
     if not err and any(w.proc.returncode not in (0, -9) for w in ws):
         err = f"writer exit codes {[w.proc.returncode for w in ws]}"
-    shutil.rmtree(d, ignore_errors=True)
+    rmset(d, ignore_errors=True)
     return stats, wst, len(acked), killed, err
 
 
@@ -751,8 +801,8 @@ def long_snapshot(work, n, mode, ckpt):
     while a saturating writer commits and checkpoints; two ordinary reader
     threads keep reading. Reports the WAL's peak and final size."""
     d = os.path.join(work, f"long-{n}-{mode}-{ckpt}")
-    shutil.rmtree(d, ignore_errors=True)
-    shutil.copytree(ntemplate(work, n), d)
+    rmset(d, ignore_errors=True)
+    copyset(ntemplate(work, n), d)
     w = Timed(subprocess.Popen([BIN, "nwriter", d, "--files", str(n), "--mode", mode, "--rounds", "100000000", "--ckpt", ckpt], stdout=subprocess.PIPE, text=True))
     time.sleep(0.1)
     t0 = time.time()
@@ -773,7 +823,7 @@ def long_snapshot(work, n, mode, ckpt):
     during = sum(1 for t, l in w.lines if l.startswith("ack ") and t0 <= t <= t1)
     stall = w.longest_stall(t0, t1)
     err, _ = ncheck(d, n, mode, acked)
-    shutil.rmtree(d, ignore_errors=True)
+    rmset(d, ignore_errors=True)
     return hstats, stats, err, during / (t1 - t0), stall, peak, final
 
 
@@ -788,8 +838,8 @@ def ckpt_point_race(work, n, point):
     every process. reset-held runs a chain of short writers instead, so
     writers clear the counter while readers open snapshots."""
     d = os.path.join(work, f"cp-{n}-{point}")
-    shutil.rmtree(d, ignore_errors=True)
-    shutil.copytree(ntemplate(work, n), d)
+    rmset(d, ignore_errors=True)
+    copyset(ntemplate(work, n), d)
     us = 1000 if point.startswith("open") else 3000
     env = dict(WINDOW_ENV, CWAL_CKPT_SCAN_DELAY_US="3000", CWAL_CKPT_OPEN_DELAY_US="1000", CWAL_DELAY_POINTS=f"{point}={us}")
     wcmd = lambda rounds: [BIN, "nwriter", d, "--files", str(n), "--rounds", str(rounds), "--delay-us", "100", "--ckpt", "passive"]
@@ -806,7 +856,7 @@ def ckpt_point_race(work, n, point):
     stats = reader_total([r.communicate()[0] for r in rs])
     err, _ = ncheck(d, n, "cwal", [a for o in outs for a in nacks(o)])
     active = snap_state(d).get("ckpt_active", -1)
-    shutil.rmtree(d, ignore_errors=True)
+    rmset(d, ignore_errors=True)
     return stats, len(outs), active, err
 
 
@@ -825,8 +875,8 @@ def ckpt_kill(work, n, tag, at, fresh):
     paused 1 ms) while B clears the counter. Afterwards no checkpointer may
     still be counted."""
     d = os.path.join(work, f"ckk-{n}-{tag}-{at}-{fresh}")
-    shutil.rmtree(d, ignore_errors=True)
-    shutil.copytree(ntemplate(work, n), d)
+    rmset(d, ignore_errors=True)
+    copyset(ntemplate(work, n), d)
     env = dict(os.environ, CWAL_DELAY_POINTS="reset-held=3000,ckpt-pre-inc=1000,ckpt-locked=1000")
     # Readers hold each exclusive checkpoint lock (wal-index recovery) 50
     # ms, so B's reset can meet one in progress.
@@ -846,7 +896,7 @@ def ckpt_kill(work, n, tag, at, fresh):
     err, _ = ncheck(d, n, "cwal", nacks(a.stdout) + nacks(b.stdout))
     if not err and b.returncode != 0:
         err = f"writer B exit {b.returncode}: {(b.stdout + b.stderr).strip().splitlines()[-1:]}"
-    shutil.rmtree(d, ignore_errors=True)
+    rmset(d, ignore_errors=True)
     return dict(crashed=a.returncode == -9, stuck=stuck, after=after, stats=stats, err=err)
 
 
@@ -858,8 +908,8 @@ def n_sem(work, n, mode, seed):
     2 threads holding each read transaction open and re-reading it; then
     check the set and every acknowledged commit."""
     d = os.path.join(work, f"nsem-{n}-{mode}-{seed}")
-    shutil.rmtree(d, ignore_errors=True)
-    shutil.copytree(ntemplate(work, n), d)
+    rmset(d, ignore_errors=True)
+    copyset(ntemplate(work, n), d)
     w = subprocess.Popen([BIN, "nsem", d, "--files", str(n), "--mode", mode, "--rounds", "320", "--delay-us", "3000", "--seed", str(seed)], env=WINDOW_ENV, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     time.sleep(0.05)
     rs = [subprocess.Popen([BIN, "nreader", d, "--files", str(n), "--mode", mode, "--threads", "2", "--duration-ms", "1500", "--gap-us", "300", "--hold-us", "2000"], stdout=subprocess.PIPE, text=True) for _ in range(2)]
@@ -871,7 +921,7 @@ def n_sem(work, n, mode, seed):
     err = None if m and w.returncode == 0 else ((werr.strip().splitlines() or [f"exit {w.returncode}"])[-1])
     if not err:
         err, _ = ncheck(d, n, mode, nacks(wout))
-    shutil.rmtree(d, ignore_errors=True)
+    rmset(d, ignore_errors=True)
     return stats, err, (m.group(1).strip() if m else "")
 
 
@@ -892,10 +942,10 @@ IOERR_ROUNDS = 40
 def fail_seen(work, n, mode, tags):
     """How many operations matching tags a fault-free run performs."""
     d = os.path.join(work, f"fs-{n}-{mode}-{tags}")
-    shutil.rmtree(d, ignore_errors=True)
-    shutil.copytree(ntemplate(work, n), d)
+    rmset(d, ignore_errors=True)
+    copyset(ntemplate(work, n), d)
     out = run(["nwriter", d, "--files", n, "--mode", mode, "--rounds", IOERR_ROUNDS], {"CWAL_FAIL_TAG": tags}).stdout
-    shutil.rmtree(d, ignore_errors=True)
+    rmset(d, ignore_errors=True)
     m = re.search(r"fail_seen=(\d+)", out)
     return int(m.group(1)) if m else 0
 
@@ -909,8 +959,8 @@ def ioerr_run(work, n, mode, case, at, crash_at):
     writer acknowledged must be there."""
     tags, kind, sticky = case
     d = os.path.join(work, f"io-{n}-{mode}-{tags}-{kind}-{sticky}-{at}-{crash_at}")
-    shutil.rmtree(d, ignore_errors=True)
-    shutil.copytree(ntemplate(work, n), d)
+    rmset(d, ignore_errors=True)
+    copyset(ntemplate(work, n), d)
     env = {"CWAL_FAIL_TAG": tags, "CWAL_FAIL_AT": at, "CWAL_FAIL_STICKY": sticky, "CWAL_FAIL_KIND": kind, "CWAL_POWERLOSS": 1, "CWAL_SEED": at * 31 + (crash_at or 0), "CWAL_PL_LOG": d + ".pl"}
     if crash_at:
         env.update(CWAL_CRASH_TAG=NTAGS, CWAL_CRASH_AT=crash_at)
@@ -923,7 +973,7 @@ def ioerr_run(work, n, mode, case, at, crash_at):
     driver_read = w.returncode == 1 and re.search(r"^FAIL (step|prepare) ", w.stdout + w.stderr, re.M)
     if w.returncode not in (0, 2, 3, 4, -9) and not driver_read:
         res["err"] = f"writer exit {w.returncode}: {(w.stdout + w.stderr).strip().splitlines()[-1:]}"
-        shutil.rmtree(d, ignore_errors=True)
+        rmset(d, ignore_errors=True)
         return res
     acked, failed = nacks(w.stdout), nacks(w.stdout, "fail")
     err, res["recovery"] = ncheck(d, n, mode, acked, failed=failed)
@@ -934,7 +984,7 @@ def ioerr_run(work, n, mode, case, at, crash_at):
         else:
             err, _ = ncheck(d, n, mode, acked + nacks(w2.stdout), failed=failed)
     res["err"] = err
-    shutil.rmtree(d, ignore_errors=True)
+    rmset(d, ignore_errors=True)
     return res
 
 
@@ -943,10 +993,10 @@ def ioerr_matrix(work, n, mode, jobs, positions):
     over the run, each ending cleanly or crashed at a random event."""
     tpl = ntemplate(work, n)
     d0 = os.path.join(work, f"iofull-{n}-{mode}")
-    shutil.rmtree(d0, ignore_errors=True)
-    shutil.copytree(tpl, d0)
+    rmset(d0, ignore_errors=True)
+    copyset(tpl, d0)
     total = tagged(run(["nwriter", d0, "--files", n, "--mode", mode, "--rounds", IOERR_ROUNDS], {"CWAL_CRASH_TAG": NTAGS}).stdout)
-    shutil.rmtree(d0, ignore_errors=True)
+    rmset(d0, ignore_errors=True)
     rng = random.Random(n * 7 + len(mode))
     cases = []
     for case in IOERR_CASES:
@@ -967,8 +1017,8 @@ def ioerr_readers(work, n, case, at):
     mixed state, broken or not."""
     tags, kind, sticky = case
     d = os.path.join(work, f"ior-{n}-{tags}-{at}")
-    shutil.rmtree(d, ignore_errors=True)
-    shutil.copytree(ntemplate(work, n), d)
+    rmset(d, ignore_errors=True)
+    copyset(ntemplate(work, n), d)
     env = dict(WINDOW_ENV, CWAL_FAIL_TAG=tags, CWAL_FAIL_AT=str(at), CWAL_FAIL_STICKY=str(sticky), CWAL_FAIL_KIND=kind)
     rs = start_readers(d, n, "cwal", 2, 2, 1500, WINDOW_ENV, ("--allow-gaps", "1"))
     time.sleep(0.05)
@@ -976,7 +1026,7 @@ def ioerr_readers(work, n, case, at):
     broken = snap_state(d).get("broken", 0)
     stats = reader_total([r.communicate()[0] for r in rs])
     err, rec = ncheck(d, n, "cwal", nacks(w.stdout), failed=nacks(w.stdout, "fail"))
-    shutil.rmtree(d, ignore_errors=True)
+    rmset(d, ignore_errors=True)
     return dict(stats=stats, rc=w.returncode, broken=broken, failed=len(nacks(w.stdout, "fail")), recovery=rec, err=err)
 
 
@@ -1007,13 +1057,13 @@ def permissions(work, n, torn, kind, name):
     never crash or commit a torn transaction. After the permissions are
     restored, every acknowledged commit must be there."""
     d = os.path.join(work, f"perm-{n}-{torn}-{kind}")
-    shutil.rmtree(d, ignore_errors=True)
-    shutil.copytree(ntemplate(work, n), d)
+    rmset(d, ignore_errors=True)
+    copyset(ntemplate(work, n), d)
     env = {"CWAL_CRASH_TAG": NTAGS, "CWAL_CRASH_AT": 150} if torn else {}
     w0 = run(["nwriter", d, "--files", n, "--rounds", NROUNDS], env)
     path = os.path.join(d, name)
     if not os.path.exists(path):
-        shutil.rmtree(d, ignore_errors=True)
+        rmset(d, ignore_errors=True)
         return None
     mode0 = os.stat(path).st_mode & 0o777
     os.chmod(path, 0o555 if kind == "dir" else 0o444)
@@ -1032,7 +1082,7 @@ def permissions(work, n, torn, kind, name):
     if not err:
         err, res["recovery"] = ncheck(d, n, "cwal", nacks(w0.stdout) + nacks(w.stdout), failed=nacks(w.stdout, "fail"))
     res["err"] = err
-    shutil.rmtree(d, ignore_errors=True)
+    rmset(d, ignore_errors=True)
     return res
 
 
@@ -1044,8 +1094,8 @@ def reader_kill(work, n, seed):
     Survivors must stay consistent, the writer must keep committing, and
     the next writer must clear any checkpoint count the victims left."""
     d = os.path.join(work, f"rk-{n}-{seed}")
-    shutil.rmtree(d, ignore_errors=True)
-    shutil.copytree(ntemplate(work, n), d)
+    rmset(d, ignore_errors=True)
+    copyset(ntemplate(work, n), d)
     rng = random.Random(seed)
     # Passive checkpoints: RESTART and TRUNCATE wait for readers to leave,
     # which 10 busy reader threads delay by seconds with or without kills.
@@ -1077,7 +1127,7 @@ def reader_kill(work, n, seed):
     err, _ = ncheck(d, n, "cwal", nacks(wout) + nacks(w2.stdout))
     if not err and w2.returncode != 0:
         err = f"next writer exit {w2.returncode}"
-    shutil.rmtree(d, ignore_errors=True)
+    rmset(d, ignore_errors=True)
     return dict(stats=stats, crashed=crashed, victims=len(victims), stall=stall, commits=during, left=left, after=after, err=err)
 
 
@@ -1089,10 +1139,10 @@ def recovery_chain(work, n, snaps, jobs, chains=3, length=5):
     cases = []
     for idx, (snap, acked) in enumerate(snaps):
         d = snap + ".probe"
-        shutil.rmtree(d, ignore_errors=True)
-        shutil.copytree(snap, d)
+        rmset(d, ignore_errors=True)
+        copyset(snap, d)
         m = events(run(["recover", d, "--mode", "cwal", "--files", n]).stdout) or 0
-        shutil.rmtree(d, ignore_errors=True)
+        rmset(d, ignore_errors=True)
         if m:
             for c in range(chains):
                 cases.append((idx, snap, acked, c % 2 == 1, [rng.randint(1, m) for _ in range(length)]))
@@ -1100,15 +1150,15 @@ def recovery_chain(work, n, snaps, jobs, chains=3, length=5):
     def one(case):
         idx, snap, acked, pl, points = case
         d = f"{snap}.chain{idx}-{int(pl)}-{'.'.join(map(str, points))}"
-        shutil.rmtree(d, ignore_errors=True)
-        shutil.copytree(snap, d)
+        rmset(d, ignore_errors=True)
+        copyset(snap, d)
         for i, j in enumerate(points):
             env = {"CWAL_CRASH_AT": j}
             if pl:
                 env.update(CWAL_POWERLOSS=1, CWAL_SEED=i + 1)
             run(["recover", d, "--mode", "cwal", "--files", n], env)
         err, _ = ncheck(d, n, "cwal", acked)
-        shutil.rmtree(d, ignore_errors=True)
+        rmset(d, ignore_errors=True)
         return idx, pl, points, err
 
     results = parallel(one, cases, jobs, f"{n} files recovery chains")
@@ -1127,8 +1177,10 @@ def main():
     ap.add_argument("--restart-seeds", type=int, default=4)
     ap.add_argument("--io-positions", type=int, default=12, help="failure points per I/O error case")
     ap.add_argument("--allcap", type=int, default=4000, help="max crash points per all-event matrix")
+    ap.add_argument("--split-dirs", nargs="*", default=[], help="put N-file set members on these directories too (other filesystems)")
     a = ap.parse_args()
-    shutil.rmtree(a.work, ignore_errors=True)
+    SPLIT_DIRS.extend(os.path.abspath(x) for x in a.split_dirs)
+    rmset(a.work, ignore_errors=True)
     os.makedirs(a.work)
     tpl = os.path.join(a.work, "tpl")
     os.makedirs(tpl)
@@ -1400,11 +1452,11 @@ def main():
         for n in [x for x in a.files if x in (3,)]:
             for torn in (False, True):
                 d = os.path.join(a.work, f"permprobe-{n}-{torn}")
-                shutil.rmtree(d, ignore_errors=True)
-                shutil.copytree(ntemplate(a.work, n), d)
+                rmset(d, ignore_errors=True)
+                copyset(ntemplate(a.work, n), d)
                 run(["nwriter", d, "--files", n, "--rounds", NROUNDS], {"CWAL_CRASH_TAG": NTAGS, "CWAL_CRASH_AT": 150} if torn else {})
                 targets = perm_targets(d)
-                shutil.rmtree(d, ignore_errors=True)
+                rmset(d, ignore_errors=True)
                 for kind, name in targets:
                     r = permissions(a.work, n, torn, kind, name)
                     if r is None:

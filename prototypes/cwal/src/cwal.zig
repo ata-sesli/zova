@@ -915,6 +915,20 @@ fn walLastCommitStart(fd: c_int) ?i64 {
 
 const Marker = struct { txn: u64 = 0, mask: u32 = 0 };
 
+/// The name SQLite gives a file: absolute, with symlinks resolved. SQLite
+/// puts a database's -wal and -shm next to this name, so recovery and the
+/// set's lock files must use it too.
+fn fullPath(p: []const u8) Error![:0]u8 {
+    const vfs = c.sqlite3_vfs_find("unix") orelse return error.Io;
+    var in: [1100]u8 = undefined;
+    const z = bufPrintZ(&in, "{s}", .{p}) catch return error.Io;
+    var out: [1024]u8 = @splat(0);
+    // SQLITE_OK_SYMLINK (SQLITE_OK with an extended code) means a symlink
+    // was followed.
+    if (vfs.*.xFullPathname.?(vfs, z.ptr, out.len, &out) & 0xff != c.SQLITE_OK) return error.Io;
+    return std.heap.c_allocator.dupeSentinel(u8, std.mem.sliceTo(&out, 0), 0) catch error.Io;
+}
+
 /// A member's commit marker as SQLite sees the file (database plus valid
 /// WAL frames). Opened through this VFS without a connection id, so the
 /// power-loss model applies but no protocol hook runs; the connection does
@@ -1072,7 +1086,7 @@ pub const Conn = struct {
     pub fn open(paths: []const []const u8, options: Options) Error!*Conn {
         const conn = allocator.create(Conn) catch return error.Io;
         conn.* = .{ .id = 0, .mode = options.mode, .role = options.role, .nmembers = @intCast(paths.len) };
-        for (paths, 0..) |p, i| conn.paths[i] = allocator.dupeSentinel(u8, p, 0) catch return error.Io;
+        for (paths, 0..) |p, i| conn.paths[i] = fullPath(p) catch return error.Io;
         const id = claimSlot(conn) orelse return error.Io;
         conn.id = id;
         errdefer conn.close();
