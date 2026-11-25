@@ -87,6 +87,11 @@ fn execFmt(conn: *Conn, comptime fmt: []const u8, args: anytype) cwal.Error!void
     try conn.exec(bufPrintZ(&buf, fmt, args) catch unreachable);
 }
 
+fn autocommitFmt(conn: *Conn, comptime fmt: []const u8, args: anytype) cwal.Error!void {
+    var buf: [1024]u8 = undefined;
+    try conn.autocommit(bufPrintZ(&buf, fmt, args) catch unreachable);
+}
+
 // ---------------------------------------------------------------------------
 // seed
 // ---------------------------------------------------------------------------
@@ -153,12 +158,14 @@ fn cmdWriter(dir: []const u8, args: Args) void {
         if (delay_us != 0) _ = c.usleep(@intCast(delay_us));
         switch (r % 6) {
             0 => {
-                execFmt(conn, "begin; insert into main.pairs values ({d}, randomblob(300)); commit", .{pair}) catch die("explicit pair", .{});
+                execFmt(conn, "begin; insert into main.pairs values ({d}, randomblob(300))", .{pair}) catch die("explicit pair", .{});
+                conn.commit() catch die("explicit pair commit", .{});
                 out("ack pair {d}\n", .{pair});
                 pair += 1;
             },
             1 => {
-                execFmt(conn, "insert into main.pairs values ({d}, randomblob(300))", .{pair}) catch die("implicit pair", .{});
+                // With commit markers this runs in an explicit transaction.
+                autocommitFmt(conn, "insert into main.pairs values ({d}, randomblob(300))", .{pair}) catch die("implicit pair", .{});
                 out("ack pair {d}\n", .{pair});
                 pair += 1;
             },
@@ -177,7 +184,8 @@ fn cmdWriter(dir: []const u8, args: Args) void {
                 // frames into both WAL files before the commit.
                 execFmt(conn, "begin; insert into main.pairs values ({d}, randomblob(300)); " ++
                     "with recursive s(x) as (select 1 union all select x + 1 from s where x < {d}) " ++
-                    "insert into main.bulk select {d}, randomblob(1500) from s; commit", .{ pair, bulk_rows, pair }) catch die("spill pair", .{});
+                    "insert into main.bulk select {d}, randomblob(1500) from s", .{ pair, bulk_rows, pair }) catch die("spill pair", .{});
+                conn.commit() catch die("spill pair commit", .{});
                 out("ack pair {d}\n", .{pair});
                 pair += 1;
             },
@@ -410,7 +418,7 @@ fn cmdBench(dir: []const u8, args: Args) void {
     for (samples) |*s| {
         const start = cwal.monotonicNs();
         if (pair) {
-            execFmt(conn, "insert into main.pairs values ({d}, randomblob(100))", .{id}) catch die("insert", .{});
+            autocommitFmt(conn, "insert into main.pairs values ({d}, randomblob(100))", .{id}) catch die("insert", .{});
             id += 1;
         } else {
             execFmt(conn, "insert into main.solo values ({d}, randomblob(100))", .{solo}) catch die("insert", .{});
@@ -449,7 +457,7 @@ fn rwWriter(job: *RwJob) void {
     installTriggers(conn) catch die("triggers", .{});
     var id = queryInt(conn, "select coalesce(max(id), 0) from main.pairs") + 1;
     while (cwal.monotonicNs() < job.deadline_ns) {
-        execFmt(conn, "insert into main.pairs values ({d}, randomblob(100))", .{id}) catch die("insert", .{});
+        autocommitFmt(conn, "insert into main.pairs values ({d}, randomblob(100))", .{id}) catch die("insert", .{});
         id += 1;
         job.count += 1;
     }

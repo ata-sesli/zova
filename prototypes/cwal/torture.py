@@ -112,14 +112,18 @@ def crash_matrix(work, tpl, mode, jobs, powerloss_seeds=(None,)):
         w = run(["writer", d, "--mode", mode, "--rounds", ROUNDS], env)
         acked = acks(w.stdout)
         st = state(d) if mode == "cwal" else "-"
-        snap = None
-        if st in ("prepared", "broken"):
-            snap = d + ".crashed"
-            shutil.rmtree(snap, ignore_errors=True)
-            shutil.copytree(d, snap)
+        # With commit markers the journal stays idle; only recovery tells
+        # whether the set was torn, so keep a copy until it has run.
+        snap = d + ".crashed"
+        shutil.rmtree(snap, ignore_errors=True)
+        shutil.copytree(d, snap)
         err, rec = check(d, mode, acked, with_recovery=True)
         shutil.rmtree(d, ignore_errors=True)
-        return k, seed, f"{st}/{rec}" if st in ("prepared", "broken") else st, err, snap, acked
+        needed = st in ("prepared", "broken") or rec == "rollback"
+        if not needed:
+            shutil.rmtree(snap, ignore_errors=True)
+            snap = None
+        return k, seed, f"{st}/{rec}" if needed else st, err, snap, acked
 
     results = parallel(one, cases, jobs, f"{mode} crash{' powerloss' if powerloss_seeds != (None,) else ''}")
     fails = [(k, s, e) for k, s, _, e, _, _ in results if e]

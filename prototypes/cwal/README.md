@@ -11,7 +11,11 @@ WAL mode (a main database plus attached stores) get
 while keeping WAL's concurrency (readers do not wait for fsyncs)?
 
 **Answer: yes, at a cost.** A cross-file commit needs one extra fsync
-(three instead of two). Readers almost never wait for the writer (16 ms in
+(three instead of two). The commit-markers variant removes it: a cross-file
+commit then costs the same as plain WAL on a real disk (2 fsyncs, 9.7 ms),
+at the price of an explicit-transaction requirement for cross-file writes
+and lower read throughput under a saturating writer (see
+[Commit markers](#commit-markers-results)). Readers almost never wait for the writer (16 ms in
 total for 4 readers over 3 s): on a real disk they reach about 76% of plain
 WAL read throughput under a saturating writer.
 Numbers are under [Results](#results).
@@ -38,7 +42,7 @@ Files next to `main.db`:
 | File | Purpose |
 | --- | --- |
 | `main.db-cwal` | Coordination journal: two 128-byte checksummed records (4 KiB apart), newest valid sequence wins. 4,224 bytes, never grows. |
-| `main.db-cwal-snap` | Seqlock page (4 KiB, `mmap` shared): a sequence number, odd during the publication window, and each member's wal-index header from before the window. Not durable; reset when a handle opens the set alone. |
+| `main.db-cwal-snap` | Seqlock page (4 KiB, `mmap` shared): a sequence number, odd during the publication window, and each member's wal-index header from before the window. With commit markers also a cross-file flag for the current window and a broken flag. Not durable; reset when a handle opens the set alone. |
 | `main.db-cwal-gate` | `flock`. With `CWAL_SNAPSHOT_READS=0`: readers hold it shared while pinning every member; the writer holds it exclusively during the publication window. Otherwise only used briefly at open. |
 | `main.db-cwal-alive` | `flock`: every handle holds it shared; recovery needs it exclusively. |
 | `main.db-cwal-writer` | `flock`: single writer. |
@@ -151,6 +155,50 @@ While other handles still have the set open, recovery cannot run; they get
 `error.Broken` on their next `beginRead`, close, and the last one to reopen
 recovers.
 
+### Commit markers (`CWAL_COMMIT_MARKERS=1`)
+
+A variant that drops the `PREPARED` record, and with it the journal and its
+fsync: a cross-file commit costs the same two fsyncs as plain WAL. It needs
+snapshot reads.
+
+**Commit.** Each member has a one-row table
+`cwal_marker(k, txn, mask)`, created by the writer at open. `Conn.commit`
+counts the members whose WAL write lock is held; for two or more it numbers
+the transaction (`txn` = previous + 1), updates the marker row in each of
+those members to `(txn, mask of members)`, and then runs `COMMIT`. The
+markers are ordinary rows, so they commit atomically with each member's
+data. The commit hook refuses a cross-file commit without markers, so a
+cross-file statement cannot autocommit: `Conn.autocommit` wraps it in an
+explicit transaction. The publication window works as before, and the
+seqlock page records whether the window belongs to a cross-file commit.
+
+**Recovery** (on exclusive open). Read each member's marker as SQLite sees
+the file (database plus valid WAL frames), through a connection that does not
+checkpoint on close. Take the newest marker. If a member in its mask has an
+older marker, that transaction is torn: for each member that has it, truncate
+the WAL to the start of its last commit (the end of the commit before it, or
+the WAL header if there is none) and fsync. Then delete every `-shm`.
+This works because only the newest cross-file transaction can be torn: the
+writer starts the next commit only after every member of this one is
+durable, so the torn transaction is the last commit in each member that has
+it, and it cannot have been checkpointed (the writer checkpoints only
+between commits). Truncating only removes frames, so recovery is
+idempotent.
+
+**Readers and open.** There is no journal to check:
+
+- `error.Broken` if the broken flag is set (a writer rolled back after a
+  member published), or if the sequence is odd, the window is cross-file
+  and no writer is alive (some members may have published).
+- A writer that opens while other handles are open refuses (`Broken`) an odd
+  sequence with the cross-file flag; that set needs recovery. An odd
+  sequence from a single-file window is closed as before.
+- A writer that dies after writing frames but before opening the window
+  leaves the members unpublished; readers and a new writer see the last
+  committed state, and SQLite overwrites the unpublished frames on the next
+  write. If the set is closed first, recovery finds the frames, sees the
+  marker missing elsewhere and removes them.
+
 ## Running
 
 ```bash
@@ -167,7 +215,7 @@ zig build -Doptimize=ReleaseFast
 tagged t), `CWAL_POWERLOSS=1` + `CWAL_SEED`, `CWAL_TRACE=1`, and
 `CWAL_MUTATE=…` (test-only defects, to show the tests catch them; see the
 mutation table). Protocol variants: `CWAL_LAZY_COMMIT`,
-`CWAL_SNAPSHOT_READS`; `CWAL_WINDOW_DELAY_US` widens the publication window
+`CWAL_SNAPSHOT_READS`, `CWAL_COMMIT_MARKERS`; `CWAL_WINDOW_DELAY_US` widens the publication window
 for tests. `bench.sh` takes `CWAL_BIN` to run a separate ReleaseFast build.
 
 ## Tests
@@ -182,7 +230,9 @@ through a TEMP trigger; single-file commits on each file; a cross-file
 transaction larger than the page cache (SQLite spills uncommitted frames into
 both WALs before the commit); and `PASSIVE`, `RESTART` and `TRUNCATE`
 checkpoints, so later commits reuse the WAL from frame 0 with new salts and
-old frames still in the file.
+old frames still in the file. With commit markers the implicit cross-file
+insert runs through `Conn.autocommit`, that is, inside an explicit
+transaction.
 
 The checker opens the set (running recovery), then requires
 `integrity_check = ok` on each file, identical pair-id sets forming a prefix
@@ -322,11 +372,69 @@ commits/s on tmpfs.
   52.8k in the run of 2026-11-24); the `both` runs stayed within
   115k–135k.
 
+### Commit markers results
+
+`CWAL_COMMIT_MARKERS=1` (with snapshot reads). Correctness, same suites as
+above:
+
+| Test | CWAL with commit markers |
+| --- | --- |
+| Process crash at every writer event | **0 / 1,458**; 135 recoveries rolled back a torn transaction |
+| Crash during recovery, once and twice (40 torn states) | **0 / 6,240** |
+| Power loss at every writer event, 3 seeds | **0 / 4,374**; 405 rolled back |
+| Power loss during recovery (20 torn states, 3 seeds) | **0 / 9,360** |
+| Concurrent snapshots, both checkpoint workloads | **0 mixed** / 1,505; 227 snapshot reads |
+| Writer killed, readers survive (20 trials) | **0 mixed** / 311,520; 67 `Broken` reopens; 0 torn |
+| Last reader closes after writer killed at each of 40 fsyncs | **0 / 40** |
+
+The writer opens with more events (it creates the marker tables), hence
+1,458 crash points instead of 1,379. The default variant was rerun in the
+same session with the results listed under Correctness.
+
+| Mutation (commit markers) | Caught by |
+| --- | --- |
+| `no-markers` (cross-file commits write no markers) | 119 / 1,408 torn sets in the crash matrix |
+| `no-marker-rollback` (recovery detects a torn transaction but keeps it) | 135 / 1,458 torn sets under power loss |
+| `no-cross-flag` (a new writer closes a dead writer's cross-file window without recovery) | 17,938 mixed reads and 1 torn set in the survivor test |
+| `no-gate`, `no-seq-check`, `no-snapshot-open`, `no-solo-window` | 77, 39, 102 and 10 mixed reads |
+| `no-lock-gate`, `no-ckpt-gate` | 8 / 40 and 4 / 40 torn sets in the close test |
+
+Overhead, one run of all variants (3 interleaved repetitions, medians,
+ReleaseFast). Commit latency is the median (p50); one `both` repetition had
+outliers that put its mean at 18.5 ms.
+
+| Measure | Plain FULL | CWAL both | CWAL markers |
+| --- | --- | --- | --- |
+| btrfs: cross-file commit, fsyncs | 2 | 3 | **2** |
+| btrfs: cross-file commit, p50 | 9.73 ms | 14.78 ms | **9.64 ms** |
+| btrfs: single-file commit, p50 | 5.06 ms | 5.00 ms | 4.59 ms |
+| btrfs: reads/s, 4 readers + writer | 204,291 | 149,538 | 132,326 |
+| btrfs: commits/s in that test | 136 | 93 | **133** |
+| btrfs: reads that used snapshots | — | 22% | 34% |
+| tmpfs: cross-file commit, p50 | 42.5 µs | 47.9 µs | 65.6 µs |
+| tmpfs: reads/s | 52,700 | 44,570 | 66,932 |
+| tmpfs: commits/s | 13,959 | 10,812 | 8,102 |
+
+- On a real disk the markers remove the third fsync: a cross-file commit
+  costs the same as plain WAL, and the writer under reader load runs at
+  plain speed (133 vs 136 commits/s, up from 93).
+- Readers lose some throughput (150k → 132k reads/s) because the faster
+  writer spends more of its time inside publication windows: 34% of reads
+  started in one and took the slower `sqlite3_snapshot_open` path. The
+  window still spans the second member's WAL write and fsync.
+- On tmpfs, where commits are CPU-bound, each cross-file commit costs about
+  23 µs more than with the journal: the marker `UPDATE`s (parsed each time)
+  and one extra WAL frame per member. The writer is slower (8.1k vs 10.8k
+  commits/s) and readers correspondingly faster.
+- No journal file; each member gains a one-row table (one 4 KiB page).
+
 ### Possible further reductions (not implemented)
 
 - **Cheaper snapshot reads**: find out where `sqlite3_snapshot_open`
   spends its 17 µs (likely read-mark and checkpoint-lock calls) and whether
   a reader can avoid them.
+- **Cheaper markers**: prepare the marker `UPDATE`s once per handle; on
+  tmpfs most of the markers' 23 µs per commit is statement overhead.
 - **Fewer retries under very frequent commits**: when a pin is overlapped by
   a window, go straight to the snapshot path for that window instead of
   restarting.
@@ -356,5 +464,14 @@ commits/s on tmpfs.
   also need `SQLITE_ENABLE_SNAPSHOT`, which Zova's build does not set.
 - Roll-forward recovery reads every frame of each recorded WAL once (only
   after a crash in a cross-file commit).
+- Commit markers: cross-file writes must commit through `Conn.commit` or
+  `Conn.autocommit`; a cross-file autocommit statement issued directly is
+  refused by the commit hook. Each member holds a `cwal_marker` table, which
+  a production version would hide from the public API. Recovery opens each
+  member with a separate SQLite connection to read its marker. A writer that
+  reopens while readers are open (no recovery) takes its transaction number
+  from the published markers, so it may reuse the number of an unpublished,
+  abandoned transaction; that is harmless with two members (every
+  cross-file commit writes both) but needs care with more.
 - Tested on Linux x86_64 with SQLite 3.53.4 (the vendored copy), tmpfs and
   btrfs.

@@ -52,7 +52,8 @@ pub const fault = struct {
     /// "no-gate" (no gate, or no seqlock window with snapshot reads),
     /// "no-lock-gate", "no-ckpt-gate", "no-salt-check", "no-seq-check",
     /// "no-snapshot-open", "no-solo-window", "always-rollforward",
-    /// "always-rollback".
+    /// "always-rollback"; with commit markers "no-markers",
+    /// "no-marker-rollback", "no-cross-flag".
     pub var mutate: []const u8 = "";
     pub var syncs: u64 = 0;
 
@@ -214,6 +215,12 @@ pub const variant = struct {
     /// pre-window wal-index headers with sqlite3_snapshot_open.
     /// (CWAL_SNAPSHOT_READS, default 1.)
     pub var snapshot_reads = true;
+    /// Commit markers replace the PREPARED record: every cross-file commit
+    /// writes its transaction number and member set into a one-row table in
+    /// each member it writes, and recovery compares the members' markers.
+    /// Needs snapshot reads, and cross-file commits must go through
+    /// `Conn.commit` or `Conn.autocommit`. (CWAL_COMMIT_MARKERS, default 0.)
+    pub var commit_markers = false;
     /// Test-only: sleep inside the publication window to widen it.
     pub var window_delay_us: u32 = 0;
 };
@@ -222,6 +229,7 @@ pub fn register() void {
     fault.init();
     variant.lazy_commit = (envU64("CWAL_LAZY_COMMIT") orelse 1) != 0;
     variant.snapshot_reads = (envU64("CWAL_SNAPSHOT_READS") orelse 1) != 0;
+    variant.commit_markers = (envU64("CWAL_COMMIT_MARKERS") orelse 0) != 0;
     variant.window_delay_us = @intCast(envU64("CWAL_WINDOW_DELAY_US") orelse 0);
     unix_vfs = c.sqlite3_vfs_find("unix");
     std.debug.assert(unix_vfs != null);
@@ -580,12 +588,77 @@ fn walHasCommitBeyond(fd: c_int, p: Part) bool {
     }
 }
 
+/// Offset at which the last commit in the WAL behind `fd` starts: the end of
+/// the commit before it, or the end of the header if it is the only one.
+/// Frames are accepted exactly as in `walHasCommitBeyond`. Null if the WAL
+/// holds no valid commit.
+fn walLastCommitStart(fd: c_int) ?i64 {
+    var header: [wal_header_size]u8 = undefined;
+    if (c.pread(fd, &header, header.len, 0) != header.len) return null;
+    const magic = std.mem.readInt(u32, header[0..4], .big);
+    if (magic & 0xffff_fffe != 0x377f_0682) return null;
+    const big = magic & 1 != 0;
+    const page_size = std.mem.readInt(u32, header[8..12], .big);
+    if (page_size < 512 or page_size > 65536 or page_size & (page_size - 1) != 0) return null;
+    var s: [2]u32 = .{ 0, 0 };
+    walChecksum(big, header[0..24], &s);
+    if (s[0] != std.mem.readInt(u32, header[24..28], .big) or s[1] != std.mem.readInt(u32, header[28..32], .big)) return null;
+    const frame_size: usize = wal_frame_header_size + page_size;
+    const frame = std.heap.c_allocator.alloc(u8, frame_size) catch return null;
+    defer std.heap.c_allocator.free(frame);
+    var last: ?i64 = null;
+    var prev: i64 = wal_header_size;
+    var offset: i64 = wal_header_size;
+    while (true) : (offset += @intCast(frame_size)) {
+        if (c.pread(fd, frame.ptr, frame_size, offset) != frame_size) break;
+        if (!std.mem.eql(u8, frame[8..16], header[16..24])) break;
+        if (std.mem.readInt(u32, frame[0..4], .big) == 0) break;
+        walChecksum(big, frame[0..8], &s);
+        walChecksum(big, frame[wal_frame_header_size..], &s);
+        if (s[0] != std.mem.readInt(u32, frame[16..20], .big) or s[1] != std.mem.readInt(u32, frame[20..24], .big)) break;
+        if (std.mem.readInt(u32, frame[4..8], .big) != 0) {
+            if (last) |end| prev = end;
+            last = offset + @as(i64, @intCast(frame_size));
+        }
+    }
+    return if (last != null) prev else null;
+}
+
+const Marker = struct { txn: u64 = 0, mask: u32 = 0 };
+
+/// A member's commit marker as SQLite sees the file (database plus valid
+/// WAL frames). Opened through this VFS without a connection id, so the
+/// power-loss model applies but no protocol hook runs; the connection does
+/// not checkpoint on close.
+fn readMarker(path: [:0]const u8) Error!Marker {
+    var db: ?*c.sqlite3 = null;
+    defer if (db) |d| {
+        _ = c.sqlite3_close(d);
+    };
+    if (c.sqlite3_open_v2(path.ptr, &db, c.SQLITE_OPEN_READWRITE, "cwal") != c.SQLITE_OK) return error.Sqlite;
+    _ = c.sqlite3_db_config(db, c.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, @as(c_int, 1), @as(?*c_int, null));
+    var stmt: ?*c.sqlite3_stmt = null;
+    // No table yet: no cross-file commit has happened.
+    if (c.sqlite3_prepare_v2(db, "select txn, mask from cwal_marker where k = 0", -1, &stmt, null) != c.SQLITE_OK) return .{};
+    defer _ = c.sqlite3_finalize(stmt);
+    return switch (c.sqlite3_step(stmt)) {
+        c.SQLITE_ROW => .{ .txn = @intCast(c.sqlite3_column_int64(stmt, 0)), .mask = @intCast(c.sqlite3_column_int64(stmt, 1)) },
+        c.SQLITE_DONE => .{},
+        else => error.Sqlite,
+    };
+}
+
 /// Seqlock page shared by every handle of a set (`main.db-cwal-snap`). The
 /// writer stores each member's wal-index header, then makes `seq` odd for
 /// the publication window, and even again after it.
 const SnapPage = extern struct {
     seq: u64,
-    reserved: [56]u8,
+    /// Commit markers: the current or last window belongs to a cross-file
+    /// commit.
+    cross: u32,
+    /// Commit markers: a writer rolled back after a member published.
+    broken: u32,
+    reserved: [48]u8,
     hdr: [max_members][48]u8,
 };
 const snap_page_size = 4096;
@@ -663,6 +736,10 @@ pub const Conn = struct {
     commit_unsynced: bool = false,
     in_commit: bool = false,
     prepared: bool = false,
+    /// The commit in progress writes two or more members.
+    cross: bool = false,
+    /// `commit` wrote the markers of the commit in progress.
+    marker_pending: bool = false,
     any_commit_frame: bool = false,
     pending_parts: [max_members]Part = @splat(.{}),
     pending_nparts: u32 = 0,
@@ -689,6 +766,9 @@ pub const Conn = struct {
             // The publication window starts at a commit-time WAL sync, which
             // SQLite issues only with synchronous=FULL or EXTRA.
             if (!std.ascii.eqlIgnoreCase(options.synchronous, "FULL") and !std.ascii.eqlIgnoreCase(options.synchronous, "EXTRA")) return error.ProtocolViolation;
+            // Without a journal record, only the seqlock page tells readers
+            // that a cross-file publication was interrupted.
+            if (variant.commit_markers and !variant.snapshot_reads) return error.ProtocolViolation;
             try conn.openCoordination();
         }
 
@@ -722,6 +802,21 @@ pub const Conn = struct {
             }
             _ = c.sqlite3_commit_hook(db, &commitHook, conn);
             _ = c.sqlite3_rollback_hook(db, &rollbackHook, conn);
+            if (variant.commit_markers and options.role == .writer) {
+                // One single-member commit per statement.
+                for (0..paths.len) |i| {
+                    var sql_buf: [160]u8 = undefined;
+                    const schema = schemaName(i);
+                    try conn.exec(bufPrintZ(&sql_buf, "create table if not exists {s}.cwal_marker(k integer primary key, txn integer not null, mask integer not null)", .{schema}) catch return error.Io);
+                    try conn.exec(bufPrintZ(&sql_buf, "insert or ignore into {s}.cwal_marker values (0, 0, 0)", .{schema}) catch return error.Io);
+                    var stmt: ?*c.sqlite3_stmt = null;
+                    const q = bufPrintZ(&sql_buf, "select txn from {s}.cwal_marker where k = 0", .{schema}) catch return error.Io;
+                    if (c.sqlite3_prepare_v2(db, q.ptr, -1, &stmt, null) != c.SQLITE_OK) return error.Sqlite;
+                    defer _ = c.sqlite3_finalize(stmt);
+                    if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return error.Sqlite;
+                    conn.txn = @max(conn.txn, @as(u64, @intCast(c.sqlite3_column_int64(stmt, 0))));
+                }
+            }
         }
         return conn;
     }
@@ -809,7 +904,12 @@ pub const Conn = struct {
             try conn.recover();
             // A writer that died inside a window left the seqlock odd.
             @atomicStore(u64, &conn.snap.?.seq, 0, .seq_cst);
+            @atomicStore(u32, &conn.snap.?.cross, 0, .seq_cst);
+            @atomicStore(u32, &conn.snap.?.broken, 0, .seq_cst);
             if (!lock(conn.alive_fd, c.LOCK_SH)) return error.Io;
+        } else if (variant.commit_markers) {
+            if (!lock(conn.alive_fd, c.LOCK_SH)) return error.Io;
+            if (!conn.markersReadable(@atomicLoad(u64, &conn.snap.?.seq, .seq_cst))) return error.Broken;
         } else {
             if (!lock(conn.alive_fd, c.LOCK_SH)) return error.Io;
             if (!lock(conn.gate_fd, c.LOCK_SH)) return error.Io;
@@ -895,6 +995,7 @@ pub const Conn = struct {
     /// Every step is idempotent, and the journal is marked idle last, so a
     /// crash during recovery leaves it to be run again.
     fn recover(conn: *Conn) Error!void {
+        if (variant.commit_markers) return conn.recoverMarkers();
         const r = conn.readJournal();
         conn.seq = r.seq;
         conn.txn = r.txn;
@@ -941,6 +1042,59 @@ pub const Conn = struct {
         try conn.writeJournal(.{ .state = .idle, .txn = r.txn }, true);
     }
 
+    /// Commit markers: only the newest cross-file transaction can be torn,
+    /// because the writer starts the next commit only after every member of
+    /// this one is durable. If a member it wrote lacks its marker, remove it
+    /// from the members that have it; it is their last commit. Idempotent.
+    fn recoverMarkers(conn: *Conn) Error!void {
+        fault.event("recover-begin");
+        var markers: [max_members]Marker = @splat(.{});
+        var newest: Marker = .{};
+        for (0..conn.nmembers) |i| {
+            markers[i] = try readMarker(conn.paths[i]);
+            if (markers[i].txn > newest.txn) newest = markers[i];
+        }
+        var torn = false;
+        for (0..conn.nmembers) |i| {
+            if (newest.mask & (@as(u32, 1) << @intCast(i)) != 0 and markers[i].txn != newest.txn) torn = true;
+        }
+        if (torn and !fault.mutated("no-marker-rollback")) {
+            last_recovery = "rollback";
+            for (0..conn.nmembers) |i| {
+                if (markers[i].txn != newest.txn) continue;
+                var buf: [1100]u8 = undefined;
+                const wal = bufPrintZ(&buf, "{s}-wal", .{conn.paths[i]}) catch return error.Io;
+                const fd = c.open(wal.ptr, c.O_RDWR | c.O_CLOEXEC);
+                if (fd < 0) return error.ProtocolViolation;
+                defer _ = c.close(fd);
+                // The torn commit cannot have been checkpointed: the writer
+                // checkpoints only between commits.
+                const keep = walLastCommitStart(fd) orelse return error.ProtocolViolation;
+                fault.event("recover-truncate");
+                if (c.ftruncate(fd, keep) != 0) return error.Io;
+                fault.event("recover-fsync");
+                if (c.fsync(fd) != 0) return error.Io;
+            }
+        }
+        // readMarker left wal-index files built before the truncation.
+        for (0..conn.nmembers) |i| {
+            var buf: [1100]u8 = undefined;
+            const shm = bufPrintZ(&buf, "{s}-shm", .{conn.paths[i]}) catch return error.Io;
+            fault.event("recover-unlink-shm");
+            _ = c.unlink(shm.ptr);
+        }
+    }
+
+    /// Commit markers: whether the members' published states form one
+    /// committed state. A writer that died inside a cross-file window may
+    /// have published some members only; it needs recovery.
+    fn markersReadable(conn: *Conn, seq: u64) bool {
+        const page = conn.snap.?;
+        if (@atomicLoad(u32, &page.broken, .seq_cst) != 0) return false;
+        if (seq & 1 == 0 or @atomicLoad(u32, &page.cross, .seq_cst) == 0 or fault.mutated("no-cross-flag")) return true;
+        return conn.role == .reader and conn.writerLive();
+    }
+
     /// Whether the members' published states form one committed state.
     /// PREPARED is fine while the writer that wrote it is alive: outside the
     /// publication window (which readers wait out on the gate) either no
@@ -968,7 +1122,8 @@ pub const Conn = struct {
     /// Whether this handle may copy WAL frames into a database file now.
     fn checkpointAllowed(conn: *Conn) bool {
         fault.event("checkpoint-check");
-        var allowed = conn.role == .writer and !conn.in_commit and !conn.window_open and switch (conn.readJournal().state) {
+        const broken = variant.commit_markers and @atomicLoad(u32, &conn.snap.?.broken, .seq_cst) != 0;
+        var allowed = conn.role == .writer and !conn.in_commit and !conn.window_open and !broken and switch (conn.readJournal().state) {
             .idle, .committed => true,
             .prepared, .broken => false,
         };
@@ -1050,6 +1205,18 @@ pub const Conn = struct {
             };
             conn.pending_nparts += 1;
         }
+        conn.cross = conn.pending_nparts >= 2;
+        if (variant.commit_markers) {
+            const marked = conn.marker_pending;
+            conn.marker_pending = false;
+            if (@atomicLoad(u32, &conn.snap.?.broken, .seq_cst) != 0) return 1;
+            // A cross-file commit without markers could not be recovered.
+            if (conn.cross and !marked and !fault.mutated("no-markers")) {
+                conn.violation = true;
+                return 1;
+            }
+            return 0;
+        }
         if (conn.pending_nparts >= 2) {
             conn.txn += 1;
             var r: Record = .{ .state = .prepared, .txn = conn.txn, .nparts = conn.pending_nparts };
@@ -1067,7 +1234,7 @@ pub const Conn = struct {
             // Single-member commits open the window too: otherwise a reader
             // pinning members in order could see a later solo commit on one
             // member but miss an earlier one on another.
-            if (!conn.prepared and fault.mutated("no-solo-window")) return;
+            if (!conn.cross and fault.mutated("no-solo-window")) return;
             // No member has published yet: their current headers are the
             // last committed state of the set.
             const page = conn.snap.?;
@@ -1077,6 +1244,7 @@ pub const Conn = struct {
                     return;
                 }
             }
+            @atomicStore(u32, &page.cross, @intFromBool(conn.cross), .seq_cst);
             fault.event("gate-acquire");
             _ = @atomicRmw(u64, &page.seq, .Add, 1, .seq_cst);
         } else {
@@ -1119,8 +1287,53 @@ pub const Conn = struct {
             conn.writeJournal(.{ .state = state, .txn = conn.txn }, true) catch {};
             conn.prepared = false;
         }
+        if (variant.commit_markers and conn.cross and conn.any_commit_frame) {
+            @atomicStore(u32, &conn.snap.?.broken, 1, .seq_cst);
+        }
         if (conn.window_open) conn.closeWindow();
         conn.in_commit = false;
+    }
+
+    /// Commit the open write transaction. With commit markers, a transaction
+    /// that writes two or more members first records its number and member
+    /// set in each of them.
+    pub fn commit(conn: *Conn) Error!void {
+        if (conn.mode == .cwal and variant.commit_markers and !fault.mutated("no-markers")) {
+            var mask: u32 = 0;
+            for (0..conn.nmembers) |m| {
+                if (conn.write_locked[m]) mask |= @as(u32, 1) << @intCast(m);
+            }
+            if (@popCount(mask) >= 2) {
+                const t = conn.txn + 1;
+                for (0..conn.nmembers) |m| {
+                    if (mask & (@as(u32, 1) << @intCast(m)) == 0) continue;
+                    var buf: [128]u8 = undefined;
+                    try conn.exec(bufPrintZ(&buf, "update {s}.cwal_marker set txn = {d}, mask = {d} where k = 0", .{ schemaName(m), t, mask }) catch return error.Io);
+                }
+                conn.marker_pending = true;
+                defer conn.marker_pending = false;
+                try conn.exec("commit");
+                conn.txn = t;
+                return;
+            }
+        }
+        try conn.exec("commit");
+    }
+
+    /// Run one statement as its own transaction. With commit markers a
+    /// statement that writes several members cannot autocommit (it would
+    /// carry no markers), so it runs inside an explicit transaction.
+    pub fn autocommit(conn: *Conn, sql: [:0]const u8) Error!void {
+        if (!(conn.mode == .cwal and variant.commit_markers)) return conn.exec(sql);
+        try conn.exec("begin");
+        conn.exec(sql) catch |err| {
+            conn.exec("rollback") catch {};
+            return err;
+        };
+        conn.commit() catch |err| {
+            conn.exec("rollback") catch {};
+            return err;
+        };
     }
 
     /// Begin a read transaction that sees every member at one point between
@@ -1170,7 +1383,9 @@ pub const Conn = struct {
             // sequence. The one exception, a writer that dies after writing
             // PREPARED but before opening the window, published nothing, so
             // every member still shows the last committed state.
-            if (s1 & 1 != 0 or s1 != conn.clean_seq) {
+            if (variant.commit_markers) {
+                if (!conn.markersReadable(s1)) return error.Broken;
+            } else if (s1 & 1 != 0 or s1 != conn.clean_seq) {
                 const state = conn.readJournal().state;
                 if (!conn.journalReadable(state)) return error.Broken;
                 if (s1 & 1 == 0 and (state == .idle or state == .committed)) conn.clean_seq = s1;
