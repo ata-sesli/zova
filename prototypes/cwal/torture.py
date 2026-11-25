@@ -356,13 +356,21 @@ def tagged(stdout):
     return int(m.group(1)) if m else None
 
 
-def ncheck(d, n, mode, acked, with_recovery=True):
-    """Return (failure line or None, recovery: none/rollback/-)."""
+def ncheck(d, n, mode, acked, with_recovery=True, failed=()):
+    """Return (failure line or None, recovery: none/rollback/-). failed
+    lists (k, txn) whose commit returned an error: each may be absent."""
     path = d.rstrip("/") + ".acked"
     with open(path, "w") as f:
         f.writelines(f"{k} {t}\n" for k, t in acked)
-    r = run(["ncheck", d, "--files", n, "--mode", mode, "--acked-file", path])
+    extra = []
+    if failed:
+        with open(d.rstrip("/") + ".failed", "w") as f:
+            f.writelines(f"{k} {t}\n" for k, t in failed)
+        extra = ["--failed-file", d.rstrip("/") + ".failed"]
+    r = run(["ncheck", d, "--files", n, "--mode", mode, "--acked-file", path] + extra)
     os.unlink(path)
+    if failed:
+        os.unlink(d.rstrip("/") + ".failed")
     m = re.search(r"recovery=(\w+)", r.stdout)
     rec = m.group(1) if m else "-"
     if r.returncode == 0 and "check ok" in r.stdout:
@@ -392,17 +400,37 @@ def ntemplate(work, n):
     return tpl
 
 
-def n_crash_matrix(work, n, mode, jobs, powerloss_seeds=(None,), cap=None, writer=("nwriter", NROUNDS)):
+# What the power-loss model did in n_crash_matrix runs (CWAL_PL_LOG).
+PL_TOTALS, _pl_lock = Counter(), threading.Lock()
+
+
+def pl_collect(log):
+    """Add a run's CWAL_PL_LOG lines to PL_TOTALS and delete the log."""
+    if not os.path.exists(log):
+        return
+    with open(log) as f:
+        text = f.read()
+    os.unlink(log)
+    with _pl_lock:
+        PL_TOTALS["crashes"] += text.count("pl ")
+        for k, v in re.findall(r"(\w+)=(\d+)", text):
+            PL_TOTALS[k] += int(v)
+
+
+def n_crash_matrix(work, n, mode, jobs, powerloss_seeds=(None,), cap=None, writer=("nwriter", NROUNDS), tags=NTAGS):
     """Kill the writer at every commit-boundary event of every participating
     file (sampled down to cap), recover, and check atomicity, the prefix
     property, marker agreement and acknowledged commits. writer is the
-    workload command and its round count."""
+    workload command and its round count. tags=None crashes at every event
+    of any kind (opens, checkpoints, WAL creation and deletion, closes)."""
     tpl = ntemplate(work, n)
     cmd, rounds = writer
     d0 = os.path.join(work, f"nfull-{cmd}-{n}-{mode}")
     shutil.rmtree(d0, ignore_errors=True)
     shutil.copytree(tpl, d0)
-    total = tagged(run([cmd, d0, "--files", n, "--mode", mode, "--rounds", rounds], {"CWAL_CRASH_TAG": NTAGS}).stdout)
+    tag_env = {"CWAL_CRASH_TAG": tags} if tags else {}
+    full = run([cmd, d0, "--files", n, "--mode", mode, "--rounds", rounds], tag_env).stdout
+    total = tagged(full) if tags else events(full)
     shutil.rmtree(d0, ignore_errors=True)
     cases = [(t, seed) for seed in powerloss_seeds for t in range(1, total + 1)]
     if cap and len(cases) > cap:
@@ -413,10 +441,11 @@ def n_crash_matrix(work, n, mode, jobs, powerloss_seeds=(None,), cap=None, write
         d = os.path.join(work, f"nc-{cmd}-{n}-{mode}-{seed}-{t}")
         shutil.rmtree(d, ignore_errors=True)
         shutil.copytree(tpl, d)
-        env = {"CWAL_CRASH_TAG": NTAGS, "CWAL_CRASH_AT": t}
+        env = dict(tag_env, CWAL_CRASH_AT=t)
         if seed is not None:
-            env.update(CWAL_POWERLOSS=1, CWAL_SEED=seed)
+            env.update(CWAL_POWERLOSS=1, CWAL_SEED=seed, CWAL_PL_LOG=d + ".pl")
         w = run([cmd, d, "--files", n, "--mode", mode, "--rounds", rounds], env)
+        pl_collect(d + ".pl")
         acked = nacks(w.stdout)
         snap = d + ".crashed"
         shutil.rmtree(snap, ignore_errors=True)
@@ -435,7 +464,7 @@ def n_crash_matrix(work, n, mode, jobs, powerloss_seeds=(None,), cap=None, write
     # Keep at most 40 torn states for recovery_crash, which samples 8.
     kept, kept_lock = [], threading.Lock()
 
-    label = f"{cmd} {n} files {mode} crash{' powerloss' if powerloss_seeds != (None,) else ''}"
+    label = f"{cmd} {n} files {mode} {'all-event ' if not tags else ''}crash{' powerloss' if powerloss_seeds != (None,) else ''}"
     results = parallel(one, cases, jobs, label)
     fails = [(t, s, e) for t, s, _, e, _, _, _ in results if e]
     recoveries = Counter(rec for _, _, rec, _, _, _, _ in results)
@@ -446,7 +475,7 @@ def n_crash_matrix(work, n, mode, jobs, powerloss_seeds=(None,), cap=None, write
 
 def reader_stats(text):
     stats = Counter()
-    m = re.search(r"reader (.*)$", text, re.M)
+    m = re.search(r"^reader (\w+=.*)$", text, re.M)
     if m:
         for kv in m.group(1).split():
             k, v = kv.split("=")
@@ -846,6 +875,246 @@ def n_sem(work, n, mode, seed):
     return stats, err, (m.group(1).strip() if m else "")
 
 
+# ---------------------------------------------------------------------------
+# Crash recovery and durability (section 4)
+# ---------------------------------------------------------------------------
+
+# (operation tags, kind, sticky): which operation fails, ENOSPC (full) or
+# EIO, and whether every later matching operation fails too.
+IOERR_CASES = (
+    ("write-wal", "eio", 0), ("write-wal", "eio", 1), ("write-wal", "full", 0), ("write-wal", "full", 1),
+    ("sync-wal", "eio", 0), ("sync-wal", "eio", 1), ("write-db", "full", 0), ("sync-db", "eio", 0), ("sync-db", "eio", 1),
+    ("truncate", "eio", 0), ("read-wal", "eio", 0), ("read-db", "eio", 0), ("open-wal", "eio", 0),
+)
+IOERR_ROUNDS = 40
+
+
+def fail_seen(work, n, mode, tags):
+    """How many operations matching tags a fault-free run performs."""
+    d = os.path.join(work, f"fs-{n}-{mode}-{tags}")
+    shutil.rmtree(d, ignore_errors=True)
+    shutil.copytree(ntemplate(work, n), d)
+    out = run(["nwriter", d, "--files", n, "--mode", mode, "--rounds", IOERR_ROUNDS], {"CWAL_FAIL_TAG": tags}).stdout
+    shutil.rmtree(d, ignore_errors=True)
+    m = re.search(r"fail_seen=(\d+)", out)
+    return int(m.group(1)) if m else 0
+
+
+def ioerr_run(work, n, mode, case, at, crash_at):
+    """The writer (power-loss model on, failed commits tolerated) meets an
+    injected I/O error at the at-th matching operation; crash_at, if set,
+    then crashes it at that commit-boundary event. A failed commit may be
+    present or absent, never torn. A fault-free writer then reopens the set
+    (recovering it) and must be able to commit; finally every commit either
+    writer acknowledged must be there."""
+    tags, kind, sticky = case
+    d = os.path.join(work, f"io-{n}-{mode}-{tags}-{kind}-{sticky}-{at}-{crash_at}")
+    shutil.rmtree(d, ignore_errors=True)
+    shutil.copytree(ntemplate(work, n), d)
+    env = {"CWAL_FAIL_TAG": tags, "CWAL_FAIL_AT": at, "CWAL_FAIL_STICKY": sticky, "CWAL_FAIL_KIND": kind, "CWAL_POWERLOSS": 1, "CWAL_SEED": at * 31 + (crash_at or 0), "CWAL_PL_LOG": d + ".pl"}
+    if crash_at:
+        env.update(CWAL_CRASH_TAG=NTAGS, CWAL_CRASH_AT=crash_at)
+    w = run(["nwriter", d, "--files", n, "--mode", mode, "--rounds", IOERR_ROUNDS, "--tolerate", 1], env)
+    pl_collect(d + ".pl")
+    m = re.search(r"failures=(\d+)", w.stdout)
+    res = dict(rc=w.returncode, failures=int(m.group(1)) if m else -1, broken=snap_state(d).get("broken", 0))
+    # Exit 1 is the driver's own startup query failing on an injected read
+    # error (it reads max(k) before the workload): an error exit, not a crash.
+    driver_read = w.returncode == 1 and re.search(r"^FAIL (step|prepare) ", w.stdout + w.stderr, re.M)
+    if w.returncode not in (0, 2, 3, 4, -9) and not driver_read:
+        res["err"] = f"writer exit {w.returncode}: {(w.stdout + w.stderr).strip().splitlines()[-1:]}"
+        shutil.rmtree(d, ignore_errors=True)
+        return res
+    acked, failed = nacks(w.stdout), nacks(w.stdout, "fail")
+    err, res["recovery"] = ncheck(d, n, mode, acked, failed=failed)
+    if not err:
+        w2 = run(["nwriter", d, "--files", n, "--mode", mode, "--rounds", 10])
+        if w2.returncode != 0:
+            err = f"next writer exit {w2.returncode}: {(w2.stdout + w2.stderr).strip().splitlines()[-1:]}"
+        else:
+            err, _ = ncheck(d, n, mode, acked + nacks(w2.stdout), failed=failed)
+    res["err"] = err
+    shutil.rmtree(d, ignore_errors=True)
+    return res
+
+
+def ioerr_matrix(work, n, mode, jobs, positions):
+    """Every IOERR_CASES case at up to `positions` failure points spread
+    over the run, each ending cleanly or crashed at a random event."""
+    tpl = ntemplate(work, n)
+    d0 = os.path.join(work, f"iofull-{n}-{mode}")
+    shutil.rmtree(d0, ignore_errors=True)
+    shutil.copytree(tpl, d0)
+    total = tagged(run(["nwriter", d0, "--files", n, "--mode", mode, "--rounds", IOERR_ROUNDS], {"CWAL_CRASH_TAG": NTAGS}).stdout)
+    shutil.rmtree(d0, ignore_errors=True)
+    rng = random.Random(n * 7 + len(mode))
+    cases = []
+    for case in IOERR_CASES:
+        seen = fail_seen(work, n, mode, case[0])
+        if seen == 0:
+            continue
+        ats = sorted(set(1 + (i * seen) // positions for i in range(positions))) if seen > positions else list(range(1, seen + 1))
+        for at in ats:
+            for crash in (None, rng.randint(1, total)):
+                cases.append((case, at, crash))
+    results = parallel(lambda c: (c, ioerr_run(work, n, mode, *c)), cases, jobs, f"{n} files {mode} io errors")
+    return results
+
+
+def ioerr_readers(work, n, case, at):
+    """An injected I/O error while 2 reader processes x 2 threads read (no
+    power loss: the model is single-process). Readers must never see a
+    mixed state, broken or not."""
+    tags, kind, sticky = case
+    d = os.path.join(work, f"ior-{n}-{tags}-{at}")
+    shutil.rmtree(d, ignore_errors=True)
+    shutil.copytree(ntemplate(work, n), d)
+    env = dict(WINDOW_ENV, CWAL_FAIL_TAG=tags, CWAL_FAIL_AT=str(at), CWAL_FAIL_STICKY=str(sticky), CWAL_FAIL_KIND=kind)
+    rs = start_readers(d, n, "cwal", 2, 2, 1500, WINDOW_ENV, ("--allow-gaps", "1"))
+    time.sleep(0.05)
+    w = subprocess.run([BIN, "nwriter", d, "--files", str(n), "--rounds", "300", "--delay-us", "300", "--tolerate", "1"], env=env, capture_output=True, text=True)
+    broken = snap_state(d).get("broken", 0)
+    stats = reader_total([r.communicate()[0] for r in rs])
+    err, rec = ncheck(d, n, "cwal", nacks(w.stdout), failed=nacks(w.stdout, "fail"))
+    shutil.rmtree(d, ignore_errors=True)
+    return dict(stats=stats, rc=w.returncode, broken=broken, failed=len(nacks(w.stdout, "fail")), recovery=rec, err=err)
+
+
+# Metadata operations whose durability the power-loss model tracks: file
+# creation, deletion and truncation, and the syncs that make them durable.
+# The matrix runs 30 rounds so that round 29 is a TRUNCATE checkpoint.
+META_TAGS = "open-create,delete,truncate,recover-unlink-shm,sync"
+
+LOCK_SUFFIXES = ("-cwal-gate", "-cwal-alive", "-cwal-writer", "-cwal-live", "-cwal-snap")
+
+
+def perm_targets(d):
+    """One file of each kind in the set: a member database, a WAL, a
+    wal-index, each lock file, and the directory itself."""
+    names = sorted(os.listdir(d))
+    out = [("db", "s1.db")]
+    for kind, suffix in (("wal", "-wal"), ("shm", "-shm")):
+        hits = [x for x in names if x.endswith(suffix)]
+        if hits:
+            out.append((kind, hits[0]))
+    out += [(suf[1:], "main.db" + suf) for suf in LOCK_SUFFIXES if "main.db" + suf in names]
+    return out + [("dir", ".")]
+
+
+def permissions(work, n, torn, kind, name):
+    """Make one file read-only (0444; the directory 0555), then run a
+    writer and a reader: each must fail with an error or work correctly,
+    never crash or commit a torn transaction. After the permissions are
+    restored, every acknowledged commit must be there."""
+    d = os.path.join(work, f"perm-{n}-{torn}-{kind}")
+    shutil.rmtree(d, ignore_errors=True)
+    shutil.copytree(ntemplate(work, n), d)
+    env = {"CWAL_CRASH_TAG": NTAGS, "CWAL_CRASH_AT": 150} if torn else {}
+    w0 = run(["nwriter", d, "--files", n, "--rounds", NROUNDS], env)
+    path = os.path.join(d, name)
+    if not os.path.exists(path):
+        shutil.rmtree(d, ignore_errors=True)
+        return None
+    mode0 = os.stat(path).st_mode & 0o777
+    os.chmod(path, 0o555 if kind == "dir" else 0o444)
+    try:
+        w = run(["nwriter", d, "--files", n, "--rounds", 10, "--tolerate", 1])
+        r = run(["nreader", d, "--files", n, "--threads", 2, "--duration-ms", 300])
+    finally:
+        os.chmod(path, mode0)
+    res = dict(writer_rc=w.returncode, acked=len(nacks(w.stdout)), failed=len(nacks(w.stdout, "fail")), reader_rc=r.returncode, stats=reader_stats(r.stdout))
+    res["writer_msg"] = (w.stdout + w.stderr).strip().splitlines()[-1:] if w.returncode else []
+    err = None
+    if w.returncode < 0 or r.returncode < 0:
+        err = f"killed by signal: writer {w.returncode} reader {r.returncode}"
+    elif res["stats"]["mixed"]:
+        err = f"mixed={res['stats']['mixed']}"
+    if not err:
+        err, res["recovery"] = ncheck(d, n, "cwal", nacks(w0.stdout) + nacks(w.stdout), failed=nacks(w.stdout, "fail"))
+    res["err"] = err
+    shutil.rmtree(d, ignore_errors=True)
+    return res
+
+
+def reader_kill(work, n, seed):
+    """A writer (checkpointing every 10th round) and 2 surviving reader
+    processes x 2 threads run for 2.5 s while 6 victim readers die: 3 crash
+    at a random event of their own (inside snapshot opens, checkpoint
+    counter steps, wal-index rebuilds), 3 are SIGKILLed at random times.
+    Survivors must stay consistent, the writer must keep committing, and
+    the next writer must clear any checkpoint count the victims left."""
+    d = os.path.join(work, f"rk-{n}-{seed}")
+    shutil.rmtree(d, ignore_errors=True)
+    shutil.copytree(ntemplate(work, n), d)
+    rng = random.Random(seed)
+    # Passive checkpoints: RESTART and TRUNCATE wait for readers to leave,
+    # which 10 busy reader threads delay by seconds with or without kills.
+    w = Timed(subprocess.Popen([BIN, "nwriter", d, "--files", str(n), "--rounds", "100000000", "--delay-us", "300", "--ckpt", "passive"], stdout=subprocess.PIPE, text=True))
+    time.sleep(0.1)
+    t0 = time.time()
+    survivors = start_readers(d, n, "cwal", 2, 2, 2500)
+    victims = []
+    for i in range(3):
+        victims += start_readers(d, n, "cwal", 1, 2, 2400, dict(os.environ, CWAL_CRASH_AT=str(rng.randint(1, 3000)), CWAL_CKPT_OPEN_DELAY_US="200"))
+    kills = sorted(rng.uniform(0.1, 2.0) for _ in range(3))
+    for at in kills:
+        time.sleep(max(0, t0 + at - time.time()))
+        p = start_readers(d, n, "cwal", 1, 2, 2400)[0]
+        time.sleep(rng.uniform(0.01, 0.2))
+        p.kill()
+        victims.append(p)
+    stats = reader_total([r.communicate()[0] for r in survivors])
+    t1 = time.time()
+    for v in victims:
+        v.communicate()
+    crashed = sum(v.returncode == -9 for v in victims)
+    wout = w.finish()
+    stall = w.longest_stall(t0, t1)
+    during = sum(1 for t, l in w.lines if l.startswith("ack ") and t0 <= t <= t1)
+    left = snap_state(d).get("ckpt_active", -1)
+    w2 = run(["nwriter", d, "--files", n, "--rounds", 5])
+    after = snap_state(d).get("ckpt_active", -1)
+    err, _ = ncheck(d, n, "cwal", nacks(wout) + nacks(w2.stdout))
+    if not err and w2.returncode != 0:
+        err = f"next writer exit {w2.returncode}"
+    shutil.rmtree(d, ignore_errors=True)
+    return dict(stats=stats, crashed=crashed, victims=len(victims), stall=stall, commits=during, left=left, after=after, err=err)
+
+
+def recovery_chain(work, n, snaps, jobs, chains=3, length=5):
+    """From torn states, run recovery `length` times in a row, each crashed
+    at a random recovery event (half of the chains with power loss), then
+    check."""
+    rng = random.Random(n)
+    cases = []
+    for idx, (snap, acked) in enumerate(snaps):
+        d = snap + ".probe"
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.copytree(snap, d)
+        m = events(run(["recover", d, "--mode", "cwal", "--files", n]).stdout) or 0
+        shutil.rmtree(d, ignore_errors=True)
+        if m:
+            for c in range(chains):
+                cases.append((idx, snap, acked, c % 2 == 1, [rng.randint(1, m) for _ in range(length)]))
+
+    def one(case):
+        idx, snap, acked, pl, points = case
+        d = f"{snap}.chain{idx}-{int(pl)}-{'.'.join(map(str, points))}"
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.copytree(snap, d)
+        for i, j in enumerate(points):
+            env = {"CWAL_CRASH_AT": j}
+            if pl:
+                env.update(CWAL_POWERLOSS=1, CWAL_SEED=i + 1)
+            run(["recover", d, "--mode", "cwal", "--files", n], env)
+        err, _ = ncheck(d, n, "cwal", acked)
+        shutil.rmtree(d, ignore_errors=True)
+        return idx, pl, points, err
+
+    results = parallel(one, cases, jobs, f"{n} files recovery chains")
+    return len(cases), [r for r in results if r[-1]]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--work", default=os.environ.get("CWAL_WORK", "/tmp/cwal-torture"))
@@ -856,6 +1125,8 @@ def main():
     ap.add_argument("--files", type=int, nargs="*", default=list(NFILES))
     ap.add_argument("--ncap", type=int, default=3000, help="max crash points per file count")
     ap.add_argument("--restart-seeds", type=int, default=4)
+    ap.add_argument("--io-positions", type=int, default=12, help="failure points per I/O error case")
+    ap.add_argument("--allcap", type=int, default=4000, help="max crash points per all-event matrix")
     a = ap.parse_args()
     shutil.rmtree(a.work, ignore_errors=True)
     os.makedirs(a.work)
@@ -1094,6 +1365,88 @@ def main():
                     st = r["stats"]
                     print(f"{n} files {tag}#{at} {'fresh' if fresh else 'running'}: crashed={r['crashed']} active_after_crash={r['stuck']} after_next_writer={r['after']} reset_waits={st['reset_waits']} reads={st['reads']} reader_ckpt_locks={st['ckpt_locks']} fallbacks={st['ckpt_fallbacks']} reader_broken={st['broken']} violations={st['ckpt_violations']} mixed={st['mixed']} check={'ok' if not r['err'] else r['err']}", flush=True)
                     failed |= r["after"] != 0 or st["ckpt_violations"] != 0 or st["mixed"] != 0 or bool(r["err"])
+
+    if want("ioerr"):
+        print("== injected I/O errors (ENOSPC, EIO, failed fsync; one-shot and sticky) under power loss, clean exit or crash", flush=True)
+        for n, mode in [(x, "cwal") for x in a.files if x in (2, 3, 8)] + [(x, "plain") for x in a.files if x == 3]:
+            PL_TOTALS.clear()
+            results = ioerr_matrix(a.work, n, mode, a.jobs, a.io_positions)
+            print(f"{n} files {mode} power-loss model: {dict(PL_TOTALS)}")
+            for case in IOERR_CASES:
+                rs = [r for (c, _, _), r in results if c == case]
+                if not rs:
+                    continue
+                errs = [r for r in rs if r["err"]]
+                rcs = Counter(r["rc"] for r in rs)
+                print(f"{n} files {mode} {case[0]} {case[1]}{' sticky' if case[2] else ''}: runs={len(rs)} failed_ops={sum(max(0, r['failures']) for r in rs)} broken={sum(r['broken'] > 0 for r in rs)} writer_exits={dict(rcs)} recoveries={dict(Counter(r.get('recovery') for r in rs))} failures={len(errs)}", flush=True)
+                for r, cnt in Counter(reason(e["err"]) for e in errs).most_common(3):
+                    print(f"    {cnt:5d}  {r}")
+                failed |= mode == "cwal" and bool(errs)
+
+    if want("ioerrreaders"):
+        print("== injected I/O errors with 2 reader processes x 2 threads", flush=True)
+        for n in [x for x in a.files if x in (3, 8)]:
+            for case in (("sync-wal", "eio", 0), ("write-wal", "eio", 0), ("write-wal", "full", 1), ("sync-db", "eio", 0)):
+                for at in (5, 20, 60):
+                    r = ioerr_readers(a.work, n, case, at)
+                    st = r["stats"]
+                    print(f"{n} files {case[0]} {case[1]}{' sticky' if case[2] else ''} at={at}: writer_exit={r['rc']} failed_commits={r['failed']} broken={r['broken']} reads={st['reads']} reader_broken={st['broken']} mixed={st['mixed']} violations={st['ckpt_violations']} recovery={r['recovery']} check={'ok' if not r['err'] else r['err']}", flush=True)
+                    failed |= st["mixed"] != 0 or st["ckpt_violations"] != 0 or bool(r["err"])
+
+    if want("permissions"):
+        print("== permission errors: one file read-only (directory 0555) on a clean and a torn set", flush=True)
+        if os.geteuid() == 0:
+            print("skipped: root ignores file permissions")
+        for n in [x for x in a.files if x in (3,)]:
+            for torn in (False, True):
+                d = os.path.join(a.work, f"permprobe-{n}-{torn}")
+                shutil.rmtree(d, ignore_errors=True)
+                shutil.copytree(ntemplate(a.work, n), d)
+                run(["nwriter", d, "--files", n, "--rounds", NROUNDS], {"CWAL_CRASH_TAG": NTAGS, "CWAL_CRASH_AT": 150} if torn else {})
+                targets = perm_targets(d)
+                shutil.rmtree(d, ignore_errors=True)
+                for kind, name in targets:
+                    r = permissions(a.work, n, torn, kind, name)
+                    if r is None:
+                        continue
+                    print(f"{n} files {'torn' if torn else 'clean'} {kind} ({name}) read-only: writer_exit={r['writer_rc']} acked={r['acked']} failed_commits={r['failed']} reader_exit={r['reader_rc']} reads={r['stats']['reads']} mixed={r['stats']['mixed']} recovery={r.get('recovery', '-')} check={'ok' if not r['err'] else r['err']} {r['writer_msg']}", flush=True)
+                    failed |= bool(r["err"])
+
+    if want("allevents"):
+        print("== N files: crash at every event of any kind (open, checkpoint, WAL create/delete, close), sampled", flush=True)
+        for n in [x for x in a.files if x in (3, 8, 32)]:
+            for seeds, label in (((None,), "crash"), (pl, "powerloss")):
+                PL_TOTALS.clear()
+                total, runs, crashed, fails, recoveries, snaps = n_crash_matrix(a.work, n, "cwal", a.jobs, seeds, cap=a.allcap, tags=None)
+                print(f"{n} files cwal {label}: events={total} runs={runs} crashed={crashed} failures={len(fails)} recoveries={dict(recoveries)}{' model=' + str(dict(PL_TOTALS)) if seeds != (None,) else ''}", flush=True)
+                for r, cnt in Counter(reason(e) for _, _, e in fails).most_common(3):
+                    print(f"    {cnt:5d}  {r}")
+                failed |= bool(fails)
+                if want("recchain") and snaps and n in (3, 8):
+                    total_c, cfails = recovery_chain(a.work, n, snaps[:10], a.jobs)
+                    print(f"{n} files {label} recovery chains (5 crashes each): runs={total_c} failures={len(cfails)}", flush=True)
+                    for f in cfails[:3]:
+                        print("    ", f)
+                    failed |= bool(cfails)
+                drop_snaps(snaps)
+        print(f"== N files: power loss at every metadata event ({META_TAGS})", flush=True)
+        for n in [x for x in a.files if x in (3, 8)]:
+            PL_TOTALS.clear()
+            total, runs, crashed, fails, recoveries, snaps = n_crash_matrix(a.work, n, "cwal", a.jobs, pl, cap=a.allcap, tags=META_TAGS, writer=("nwriter", 30))
+            drop_snaps(snaps)
+            print(f"{n} files cwal metadata powerloss: events={total} runs={runs} crashed={crashed} failures={len(fails)} recoveries={dict(recoveries)} model={dict(PL_TOTALS)}", flush=True)
+            for r, cnt in Counter(reason(e) for _, _, e in fails).most_common(3):
+                print(f"    {cnt:5d}  {r}")
+            failed |= bool(fails)
+
+    if want("readerkill"):
+        print("== reader processes killed (at random events and by SIGKILL) while a writer and other readers run", flush=True)
+        for n in [x for x in a.files if x in (2, 3, 8, 32)]:
+            for seed in (1, 2, 3):
+                r = reader_kill(a.work, n, seed)
+                st = r["stats"]
+                print(f"{n} files seed={seed}: victims={r['victims']} killed={r['crashed']} survivor_reads={st['reads']} min_per_thread={st['min_reads']} mixed={st['mixed']} violations={st['ckpt_violations']} commits_during={r['commits']} longest_stall_ms={r['stall'] * 1000:.0f} ckpt_active_left={r['left']} after_next_writer={r['after']} check={'ok' if not r['err'] else r['err']}", flush=True)
+                failed |= st["mixed"] != 0 or st["ckpt_violations"] != 0 or r["after"] != 0 or bool(r["err"]) or r["commits"] == 0
 
     print("RESULT", "FAIL" if failed else "PASS")
     sys.exit(1 if failed else 0)

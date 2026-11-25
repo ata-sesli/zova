@@ -246,7 +246,18 @@ the tests catch them; see the mutation table). `CWAL_WINDOW_DELAY_US`,
 (`ckpt-pre-inc`, `ckpt-locked`, `ckpt-pre-dec`, `ckpt-post-dec`,
 `open-take`, `open-release`, `reset-held`), which are also fault events.
 `CWAL_DEBUG=1` appends each handle's open, recovery, discard and commit
-decisions to `main.db-cwal-debug`. `bench.sh` and `torture.py` take
+decisions to `main.db-cwal-debug`. I/O errors are injected with
+`CWAL_FAIL_TAG=t[,t...]` and `CWAL_FAIL_AT=n` (the nth matching operation
+fails); `CWAL_FAIL_STICKY=1` fails every later one too, and
+`CWAL_FAIL_KIND=full` returns `SQLITE_FULL` (ENOSPC) for writes instead of
+`SQLITE_IOERR_WRITE` (EIO). Tags: `write-wal`, `write-db`, `sync-wal`,
+`sync-db`, `truncate`, `read-wal`, `read-db`, `open-wal`, `open-db`, and the
+protocol's own `recover-truncate`, `recover-fsync`, `discard-truncate`,
+`discard-fsync`. `CWAL_PL_LOG=path` appends a line per power loss saying what
+the model dropped, tore, revived or undid. `nwriter --tolerate 1` keeps going
+after a failed commit (printing `fail k txn`) and stops after 5 failures in a
+row; `ncheck --failed-file` accepts those keys as absent, and `nreader
+--allow-gaps 1` checks atomicity but not the prefix property. `bench.sh` and `torture.py` take
 `CWAL_BIN` to run another build (for example an aarch64 binary under qemu).
 
 ## Tests
@@ -271,7 +282,7 @@ The checker opens the set (running recovery), then requires
 | --- | --- |
 | Process crash | SIGKILL the writer at every fault event (each write, fsync, truncate, lock, shm lock, protocol step), recover, check. |
 | Crash during recovery | For up to 40 torn states, kill recovery at every one of its events, once and twice in a row, then check. |
-| Power loss | As above, but writes not yet fsynced are kept in memory; at the crash each is dropped, persisted, or torn at 512-byte granularity (3 seeds). Also during recovery. |
+| Power loss | As above, but writes not yet fsynced are kept in memory; at the crash each is dropped, persisted, torn to a prefix, or scattered (each 512-byte sector kept or not), so unsynced writes can be lost, reordered or torn (3 seeds). Metadata is volatile too: a new file's directory entry until its directory is synced, a deletion likewise, and a truncation until the file is synced. A failed fsync persists some pending writes and keeps the rest visible only to the failing process (Linux after a writeback error). Also during recovery. |
 | Concurrent snapshots | One writer process and two reader processes with two threads each. Readers pause between pinning members, attempt `PASSIVE` checkpoints, and close/reopen read-write connections (close-time checkpoints). Besides the pair and bulk counts, a reader also requires the single-file commits to be in order (`solo_s` equals `solo` or is one behind). The writer's window is widened by 300 µs, and the test runs twice: with all checkpoint modes (`RESTART`/`TRUNCATE` wait for readers, so the writer commits little while readers run) and with `PASSIVE` only. |
 | Surviving readers | Kill the writer at a random fsync or at the phase-two notification (inside the window) while reader processes keep running; restart a writer while they run; check afterwards. Half the trials use `PASSIVE` checkpoints only. |
 | Checkpoint race | The writer pauses 3 ms inside each `PASSIVE` checkpoint, after choosing how far to copy and before recording it; one reader thread pauses 1 ms inside each skipped checkpoint lock and stays in each read 5 ms. Every read checks that no checkpoint recorded an intent to copy past its snapshot (`nBackfillAttempted` ≤ the snapshot's `mxFrame`). |
@@ -348,6 +359,21 @@ gap between commits. Every run ends with `ncheck`; the writer is stopped by
 | Long-lived snapshot | One reader holds each snapshot 1.5 s while 1×2 other readers and a saturating writer run for 3 s, at 3 and 32 files, both checkpoint settings. |
 | Checkpoint-counter pauses | A 3 ms pause at each point around the counter's increment, decrement and reset, and 1 ms at a snapshot open's take and release; the writer checkpoints (`PASSIVE`, scan widened 3 ms) and one reader holds each read 5 ms and checks `nBackfillAttempted` as in the checkpoint race test. `reset-held` uses a chain of writers so the reset runs repeatedly. At 2 and 8 files. |
 | Checkpoint-counter kills | Kill the writer at the 1st, 2nd and 5th time it reaches each counter point, at the reset, and at six wal-index barriers. Then a new writer opens (pausing while it holds every checkpoint lock) while readers are either already running or start 5 ms before it. Requires the active count to be 0 after that writer, and `ncheck`. At 2 and 8 files. |
+
+Crash-recovery and durability tests (torture sections `ioerr`,
+`ioerrreaders`, `permissions`, `allevents`, `recchain`, `readerkill`). A
+failed commit's outcome is unknown to the application, so the checks accept
+it present or absent, but never torn, and every acknowledged commit must
+survive.
+
+| Test | What it does |
+| --- | --- |
+| Injected I/O errors | The writer (power-loss model on, `--tolerate`, 40 rounds) meets one error, or a sticky one: ENOSPC or EIO on a WAL write, ENOSPC on a database write (checkpoint), EIO on a WAL or database fsync, a truncate, a WAL or database read, or a WAL open. 12 failure points spread over each case's operations, each run either ending normally or crashing at a random commit-boundary event. Then `ncheck` (recovering the set), a fault-free writer that must commit 10 rounds, and `ncheck` again. At 2, 3 and 8 files, plus a plain-WAL baseline at 3. |
+| I/O errors with readers | WAL write, WAL fsync (EIO, ENOSPC sticky) and database fsync errors at the 5th, 20th and 60th operation while 2 reader processes × 2 threads read (no power loss: the model is single-process). At 3 and 8 files. |
+| Permission errors | One file made read-only (a member database, a WAL, the wal-index, each lock file; the directory 0555) on a clean set and on one left torn by a crash; a writer and a reader then run. Each must work or fail with an error, without a crash or a mixed read; after the mode is restored, `ncheck` with every acknowledged commit. At 3 files. |
+| Crash at every event | The N-file crash matrix over every fault event of any kind (opens, lock files, WAL creation and deletion at close, checkpoints, closes), not only commit boundaries; process crash and power loss (3 seeds), sampled to 4,000 at 8 and 32 files. A metadata matrix crashes at every file creation, deletion, truncation and fsync of a 30-round run (round 29 is a `TRUNCATE` checkpoint), under power loss. |
+| Recovery chains | From 10 torn states per mode at 3 and 8 files, run recovery 5 times in a row, each crashed at a random recovery event (half with power loss), then check. |
+| Reader kills | A writer (`PASSIVE` checkpoints) and 2 × 2 surviving readers run 2.5 s while 6 victim readers die: 3 crash at a random event of their own (snapshot opens, counter steps, wal-index rebuilds), 3 are `SIGKILL`ed at random times. Survivors must see no mixed state, the writer must keep committing, and the next writer must clear any checkpoint count the victims left. At 2, 3, 8 and 32 files, 3 seeds. |
 
 ## Results
 
@@ -494,6 +520,53 @@ Findings:
   are throttled by a per-round delay, but may still pause once about 5,000
   commits are buffered.
 
+### Crash recovery and durability
+
+Same machine, 2026-11-25, tmpfs, ReleaseSafe build. **No CWAL failure.**
+A failed commit's rows were present or absent, never torn, and no
+acknowledged commit was lost.
+The complete suite (sections 1–4, `python3 torture.py --jobs 8`) then
+passed in 63 minutes.
+
+| Test | Files | Plain WAL | CWAL |
+| --- | --- | --- | --- |
+| Injected I/O errors (13 cases × 12 points × clean or crash) | 2 / 3 / 8 | 67 / 294 failed at 3 files (torn transactions in 10 of 13 cases) | **0** / 276, 300, 312; the broken flag set in 49, 63, 89 runs, recovery rolled back 46, 69, 122 |
+| I/O errors with 2 × 2 readers, 24 runs | 3 / 8 | — | **0 mixed**, all checks pass; in 11 runs readers got `error.Broken` (7–10 times each) instead of a view |
+| Permission errors, 16 cases | 3 | — | **0** crashes, 0 mixed; every check passed once the mode was restored |
+| Crash at every event (process crash / power loss, 3 seeds) | 3 | — | **0** / 954 and 2,862 |
+| | 8 | — | **0** / 1,884 and 4,000 (sampled) |
+| | 32 | — | **0** / 4,000 and 4,000 (sampled from 6,502 events) |
+| Power loss at every metadata event, 3 seeds | 3 / 8 | — | **0** / 291, 591 |
+| Recovery chains, 5 crashes each | 3 / 8 | — | **0** / 60, 60 |
+| Reader kills, 6 victims per run | 2 / 3 / 8 / 32 | — | **0 mixed**, all checks pass in 12 runs; longest writer gap 4–10 ms |
+
+What the runs exercised:
+
+- **Rollback after a member published.** A WAL write or fsync error on a
+  later member of a cross-file commit, after an earlier member published,
+  set the broken flag in 201 of the 888 CWAL I/O-error runs. Later commits
+  were refused, readers got `error.Broken`, and the next alone opener rolled
+  the transaction back. Before section 4 no test reached this path.
+- **Power-loss model.** Over the all-event and metadata matrices: 11,744
+  power losses, 4,574 unsynced writes dropped, persisted, torn or scattered
+  (911 scattered), 14,581 directory entries of new files lost (WALs and lock
+  files), 825 deleted WALs brought back, and 257 truncations undone. In the
+  CWAL I/O-error runs, failed fsyncs left 9 writes visible only to the
+  failing process when it crashed.
+- **Errors the writer cannot continue after.** A failed read of a member
+  database or a failed WAL open usually fails the writer's open
+  (`writer-open-error`, or the test driver's first query); the set checks
+  afterwards. A read-only database, WAL or lock file, or a read-only
+  directory before the WALs exist, fails the open with an error; a read-only
+  `-shm` or directory after the WALs exist does not stop a writer.
+- **Readers.** The checkpoint count was left raised after 1 of the 12
+  reader-kill runs (by a victim, or by the writer stopped at the end); the
+  next writer cleared it.
+
+The plain-WAL baseline tore transactions in 10 of its 13 error cases,
+including ENOSPC during a checkpoint and a failed database fsync, which
+show the oracle catches a partial multi-file commit.
+
 ### Overhead
 
 Medians of 3 repetitions, ReleaseFast, same VFS and build for both modes.
@@ -625,8 +698,10 @@ journal check on reads.
   marker.
 - At most 32 files per set (`SQLITE_MAX_ATTACHED=31`, and the marker mask is
   32 bits).
-- The power-loss model does not simulate directory-entry loss (no directory
-  fsync) and runs single-process only. Process-crash tests are multi-process.
+- The power-loss model runs in one process: reader tests with I/O errors
+  run without it. Process-crash tests are multi-process. It does not model
+  the wal-index (`-shm`), which SQLite rebuilds after a crash. Injected
+  errors are returned by this VFS; real disks were not filled or failed.
 - One writer per set, enforced with `flock`. Lock files assume a local
   filesystem.
 - The checkpoint counter counts only exclusive locks taken through this VFS
@@ -640,8 +715,6 @@ journal check on reads.
   The two have the same contents in SQLite 3.53.4, but `sqlite3_snapshot` is
   documented as opaque, so this relies on an implementation detail. They
   also need `SQLITE_ENABLE_SNAPSHOT`, which Zova's build does not set.
-- No test produces a rollback after a member published (the broken flag).
-  The reader and checkpoint checks for it are argued but not exercised.
 - Tested on Linux x86_64 with SQLite 3.53.4 (the vendored copy), tmpfs and
   btrfs. An aarch64 build ran a subset under qemu user emulation on the
   same x86_64 host, which does not reproduce ARM's weaker memory ordering;

@@ -66,6 +66,17 @@ pub const fault = struct {
     /// (no `-alive` check after SQLite has mapped the wal-indexes).
     pub var mutate: []const u8 = "";
     pub var syncs: u64 = 0;
+    /// I/O error injection: with CWAL_FAIL_TAG (a comma-separated list of
+    /// operation tags, see `shouldFail`) and CWAL_FAIL_AT=n, the nth matching
+    /// operation fails; with CWAL_FAIL_STICKY=1 every later one fails too
+    /// (a full or dying disk). CWAL_FAIL_KIND=full makes writes fail with
+    /// SQLITE_FULL (ENOSPC) instead of SQLITE_IOERR_WRITE (EIO).
+    var fail_tag: ?[]const u8 = null;
+    var fail_at: u64 = 0;
+    var fail_sticky: bool = false;
+    pub var fail_full: bool = false;
+    var fail_seen: u64 = 0;
+    var failures: u64 = 0;
     /// Test-only (CWAL_DEBUG=1): protocol decisions appended to
     /// `<main>-cwal-debug`.
     pub var debug: bool = false;
@@ -80,6 +91,37 @@ pub const fault = struct {
         if (c.getenv("CWAL_MUTATE")) |m| mutate = std.mem.span(m);
         debug = (envU64("CWAL_DEBUG") orelse 0) != 0;
         rng ^= (envU64("CWAL_SEED") orelse 1) *% 0x2545f4914f6cdd1d;
+        if (c.getenv("CWAL_FAIL_TAG")) |tag| fail_tag = std.mem.span(tag);
+        fail_at = envU64("CWAL_FAIL_AT") orelse 0;
+        fail_sticky = (envU64("CWAL_FAIL_STICKY") orelse 0) != 0;
+        if (c.getenv("CWAL_FAIL_KIND")) |kind| fail_full = std.mem.eql(u8, std.mem.span(kind), "full");
+    }
+
+    /// Whether this operation must fail (see `fail_tag`). Tags: write-wal,
+    /// write-db, write-other, sync-wal, sync-db, sync-other, truncate,
+    /// read-wal, read-db, open-wal, open-db, recover-truncate, recover-fsync,
+    /// discard-truncate, discard-fsync.
+    pub fn shouldFail(tag: []const u8) bool {
+        const want = fail_tag orelse return false;
+        var it = std.mem.splitScalar(u8, want, ',');
+        while (it.next()) |w| {
+            if (!std.mem.eql(u8, tag, w)) continue;
+            const n = @atomicRmw(u64, &fail_seen, .Add, 1, .seq_cst) + 1;
+            if (fail_at == 0 or n < fail_at or (n > fail_at and !fail_sticky)) return false;
+            _ = @atomicRmw(u64, &failures, .Add, 1, .seq_cst);
+            if (trace) std.debug.print("fail {d} {s}\n", .{ n, tag });
+            return true;
+        }
+        return false;
+    }
+
+    /// Operations matching CWAL_FAIL_TAG so far, and how many were failed.
+    pub fn failSeen() u64 {
+        return @atomicLoad(u64, &fail_seen, .seq_cst);
+    }
+
+    pub fn failureCount() u64 {
+        return @atomicLoad(u64, &failures, .seq_cst);
     }
 
     pub fn mutated(name: []const u8) bool {
@@ -116,7 +158,7 @@ pub const fault = struct {
     }
 
     pub fn crash() noreturn {
-        if (powerloss) overlay.persistRandomSubset();
+        if (powerloss) overlay.powerLoss();
         _ = c.kill(c.getpid(), c.SIGKILL);
         while (true) _ = c.pause();
     }
@@ -124,13 +166,41 @@ pub const fault = struct {
 
 /// Power-loss model. While enabled, writes stay in memory until the file is
 /// synced, as if they sat in a volatile cache. A crash persists a random
-/// subset of them, some torn at 512-byte granularity. Single-threaded use
-/// only: power-loss runs use one writer process.
+/// subset of them: each is dropped, written, torn to a prefix at 512-byte
+/// granularity, or scattered (each 512-byte sector written or not), so
+/// unsynced writes can be lost, reordered or torn. Metadata is volatile
+/// too, until the operation SQLite or the protocol uses to make it durable:
+/// a truncation until the file is synced (a crash may restore the cut
+/// bytes); a new file's directory entry until its directory is synced (a
+/// crash may remove the file); a deletion likewise (a crash may bring the
+/// file back). SQLite syncs the directory at a new WAL's first sync and
+/// never when it deletes a WAL. A sync that fails (injected) persists some
+/// of the file's pending writes and keeps the rest only in this process's
+/// view, never on disk, as Linux may after a writeback error. Single-threaded
+/// use only: power-loss runs use one writer process.
 const overlay = struct {
     const Pending = struct { offset: i64, data: []u8 };
-    const Slot = struct { path: [:0]u8, pending: std.ArrayList(Pending) = .empty };
+    const Slot = struct {
+        path: [:0]u8,
+        pending: std.ArrayList(Pending) = .empty,
+        /// Writes a failed sync did not persist: visible here, never on disk.
+        ghosts: std.ArrayList(Pending) = .empty,
+        /// An unsynced truncation: the bytes it cut.
+        undo: ?Pending = null,
+        /// The directory entry was created and its directory not synced since.
+        created: bool = false,
+        /// Deleted without a directory sync: the file, renamed aside.
+        deleted: ?[:0]u8 = null,
+    };
     var slots: std.ArrayList(Slot) = .empty;
     const allocator = std.heap.c_allocator;
+    /// What the last power loss did, for CWAL_PL_LOG.
+    var lost_entries: u64 = 0;
+    var revived: u64 = 0;
+    var undone_truncates: u64 = 0;
+    var scattered: u64 = 0;
+    var ghost_writes: u64 = 0;
+    var unsynced_writes: u64 = 0;
 
     fn find(path: []const u8, create: bool) ?*Slot {
         for (slots.items) |*slot| if (std.mem.eql(u8, slot.path, path)) return slot;
@@ -146,19 +216,27 @@ const overlay = struct {
         slot.pending.append(allocator, .{ .offset = offset, .data = copy }) catch @panic("oom");
     }
 
+    fn hasWrites(slot: *Slot) bool {
+        return slot.pending.items.len != 0 or slot.ghosts.items.len != 0;
+    }
+
     fn maxEnd(slot: *Slot) i64 {
         var end: i64 = 0;
-        for (slot.pending.items) |p| end = @max(end, p.offset + @as(i64, @intCast(p.data.len)));
+        for ([_][]Pending{ slot.ghosts.items, slot.pending.items }) |list| {
+            for (list) |p| end = @max(end, p.offset + @as(i64, @intCast(p.data.len)));
+        }
         return end;
     }
 
     fn applyTo(slot: *Slot, buffer: []u8, offset: i64) void {
-        for (slot.pending.items) |p| {
-            const start = @max(offset, p.offset);
-            const end = @min(offset + @as(i64, @intCast(buffer.len)), p.offset + @as(i64, @intCast(p.data.len)));
-            if (start >= end) continue;
-            const dst = buffer[@intCast(start - offset)..@intCast(end - offset)];
-            @memcpy(dst, p.data[@intCast(start - p.offset)..@intCast(end - p.offset)]);
+        for ([_][]Pending{ slot.ghosts.items, slot.pending.items }) |list| {
+            for (list) |p| {
+                const start = @max(offset, p.offset);
+                const end = @min(offset + @as(i64, @intCast(buffer.len)), p.offset + @as(i64, @intCast(p.data.len)));
+                if (start >= end) continue;
+                const dst = buffer[@intCast(start - offset)..@intCast(end - offset)];
+                @memcpy(dst, p.data[@intCast(start - p.offset)..@intCast(end - p.offset)]);
+            }
         }
     }
 
@@ -169,37 +247,199 @@ const overlay = struct {
         _ = c.pwrite(fd, bytes.ptr, bytes.len, offset);
     }
 
+    fn freeList(list: *std.ArrayList(Pending)) void {
+        for (list.items) |p| allocator.free(p.data);
+        list.clearRetainingCapacity();
+    }
+
     fn flush(path: []const u8) void {
         const slot = find(path, false) orelse return;
-        for (slot.pending.items) |p| {
-            writeRaw(slot.path, p.offset, p.data);
-            allocator.free(p.data);
-        }
-        slot.pending.clearRetainingCapacity();
+        for (slot.pending.items) |p| writeRaw(slot.path, p.offset, p.data);
+        freeList(&slot.pending);
     }
 
     fn discard(path: []const u8) void {
         const slot = find(path, false) orelse return;
-        for (slot.pending.items) |p| allocator.free(p.data);
+        freeList(&slot.pending);
+        freeList(&slot.ghosts);
+    }
+
+    /// An injected sync failure: some pending writes reach the disk, the
+    /// rest stay visible to this process only.
+    fn failSync(path: []const u8) void {
+        const slot = find(path, false) orelse return;
+        for (slot.pending.items) |p| {
+            if (fault.random() % 2 == 0) {
+                writeRaw(slot.path, p.offset, p.data);
+                allocator.free(p.data);
+            } else {
+                slot.ghosts.append(allocator, p) catch @panic("oom");
+                ghost_writes += 1;
+            }
+        }
         slot.pending.clearRetainingCapacity();
     }
 
-    fn flushAll() void {
-        for (slots.items) |*slot| flush(slot.path);
+    /// A successful sync: the file's truncation is durable, and with
+    /// `dir_sync` so is every directory change in its directory.
+    fn synced(path: []const u8, dir_sync: bool) void {
+        if (find(path, false)) |slot| {
+            if (slot.undo) |u| allocator.free(u.data);
+            slot.undo = null;
+        }
+        if (dir_sync) dirSynced(path);
     }
 
-    fn persistRandomSubset() void {
+    fn dirName(path: []const u8) []const u8 {
+        const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return ".";
+        return path[0..slash];
+    }
+
+    fn dirSynced(path: []const u8) void {
+        const dir = dirName(path);
         for (slots.items) |*slot| {
+            if (!std.mem.eql(u8, dirName(slot.path), dir)) continue;
+            slot.created = false;
+            if (slot.deleted) |saved| {
+                _ = c.unlink(saved.ptr);
+                allocator.free(saved);
+                slot.deleted = null;
+            }
+        }
+    }
+
+    fn created(path: []const u8) void {
+        find(path, true).?.created = true;
+    }
+
+    /// Before truncating `path` to `size` (earlier writes already flushed):
+    /// keep the bytes a crash before the next sync may bring back. Two
+    /// unsynced truncations are lost or kept together.
+    fn truncating(path: []const u8, size: i64) void {
+        const slot = find(path, true).?;
+        var i: usize = 0;
+        while (i < slot.ghosts.items.len) {
+            const g = &slot.ghosts.items[i];
+            if (g.offset >= size) {
+                allocator.free(g.data);
+                _ = slot.ghosts.swapRemove(i);
+                continue;
+            }
+            const end = g.offset + @as(i64, @intCast(g.data.len));
+            if (end > size) g.data = g.data[0..@intCast(size - g.offset)];
+            i += 1;
+        }
+        const fd = c.open(slot.path.ptr, c.O_RDONLY | c.O_CLOEXEC);
+        if (fd < 0) return;
+        defer _ = c.close(fd);
+        var end = fileSize(fd) orelse return;
+        if (slot.undo) |u| {
+            if (size >= u.offset) return;
+            end = u.offset;
+        }
+        if (end <= size) return;
+        const cut = allocator.alloc(u8, @intCast(end - size)) catch @panic("oom");
+        if (c.pread(fd, cut.ptr, cut.len, size) != cut.len) {
+            allocator.free(cut);
+            return;
+        }
+        if (slot.undo) |u| {
+            const joined = std.mem.concat(allocator, u8, &.{ cut, u.data }) catch @panic("oom");
+            allocator.free(cut);
+            allocator.free(u.data);
+            slot.undo = .{ .offset = size, .data = joined };
+        } else slot.undo = .{ .offset = size, .data = cut };
+    }
+
+    /// Delete `path` as a file system without a directory sync would: the
+    /// file is renamed aside and may come back at a crash. Returns the
+    /// unix VFS result for a missing file.
+    fn delete(path: [:0]const u8, sync_dir: c_int) c_int {
+        if (c.access(path.ptr, c.F_OK) != 0) return unix_vfs.*.xDelete.?(unix_vfs, path.ptr, sync_dir);
+        const slot = find(path, true).?;
+        freeList(&slot.pending);
+        freeList(&slot.ghosts);
+        if (slot.undo) |u| allocator.free(u.data);
+        slot.undo = null;
+        if (slot.created or slot.deleted != null) {
+            // Its creation was never durable: at a crash the older file (if
+            // a deletion before it was not durable either) or nothing.
+            _ = c.unlink(path.ptr);
+            slot.created = false;
+        } else {
+            const saved = std.fmt.allocPrintSentinel(allocator, "{s}-cwal-deleted", .{path}, 0) catch @panic("oom");
+            if (c.rename(path.ptr, saved.ptr) != 0) {
+                allocator.free(saved);
+                return c.SQLITE_IOERR_DELETE;
+            }
+            slot.deleted = saved;
+        }
+        if (sync_dir & 1 != 0) dirSynced(path);
+        return c.SQLITE_OK;
+    }
+
+    fn flushAll() void {
+        for (slots.items) |*slot| {
+            flush(slot.path);
+            // A failed sync's writes never reach the disk.
+            freeList(&slot.ghosts);
+            if (slot.deleted) |saved| {
+                _ = c.unlink(saved.ptr);
+                allocator.free(saved);
+                slot.deleted = null;
+            }
+        }
+    }
+
+    fn powerLoss() void {
+        for (slots.items) |*slot| {
+            if (slot.deleted) |saved| {
+                if (fault.random() % 2 == 0) {
+                    // The deletion (and any re-creation) is lost.
+                    _ = c.rename(saved.ptr, slot.path.ptr);
+                    revived += 1;
+                    continue;
+                }
+                _ = c.unlink(saved.ptr);
+            }
+            if (slot.created and fault.random() % 3 == 0) {
+                _ = c.unlink(slot.path.ptr);
+                lost_entries += 1;
+                continue;
+            }
+            if (slot.undo) |u| {
+                if (fault.random() % 2 == 0) {
+                    writeRaw(slot.path, u.offset, u.data);
+                    undone_truncates += 1;
+                }
+            }
             for (slot.pending.items) |p| {
-                switch (fault.random() % 3) {
+                unsynced_writes += 1;
+                switch (fault.random() % 4) {
                     0 => {},
                     1 => writeRaw(slot.path, p.offset, p.data),
-                    else => {
+                    2 => {
                         const sectors = (p.data.len + 511) / 512;
                         const keep = @min(p.data.len, (fault.random() % (sectors + 1)) * 512);
                         writeRaw(slot.path, p.offset, p.data[0..keep]);
                     },
+                    else => {
+                        var s: usize = 0;
+                        while (s < p.data.len) : (s += 512) {
+                            if (fault.random() % 2 == 0) writeRaw(slot.path, p.offset + @as(i64, @intCast(s)), p.data[s..@min(p.data.len, s + 512)]);
+                        }
+                        scattered += 1;
+                    },
                 }
+            }
+        }
+        if (c.getenv("CWAL_PL_LOG")) |log_path| {
+            const fd = c.open(log_path, c.O_WRONLY | c.O_CREAT | c.O_APPEND | c.O_CLOEXEC, @as(c_uint, 0o644));
+            if (fd >= 0) {
+                var buf: [256]u8 = undefined;
+                const line = std.fmt.bufPrint(&buf, "pl unsynced_writes={d} lost_entries={d} revived={d} undone_truncates={d} scattered={d} ghosts={d} failures={d}\n", .{ unsynced_writes, lost_entries, revived, undone_truncates, scattered, ghost_writes, fault.failureCount() }) catch "";
+                _ = c.write(fd, line.ptr, line.len);
+                _ = c.close(fd);
             }
         }
     }
@@ -208,6 +448,20 @@ const overlay = struct {
 /// Persist writes held by the power-loss model. Call before a normal exit.
 pub fn flushPending() void {
     if (fault.powerloss) overlay.flushAll();
+}
+
+/// Truncate `fd` (the file at `path`) to `size` and sync it, with fault
+/// events, injectable failures and the power-loss model's volatile
+/// truncation.
+fn truncateDurably(fd: c_int, path: [:0]const u8, size: i64, comptime tag: []const u8) Error!void {
+    fault.event(tag ++ "-truncate");
+    if (fault.shouldFail(tag ++ "-truncate")) return error.Io;
+    if (fault.powerloss) overlay.truncating(path, size);
+    if (c.ftruncate(fd, size) != 0) return error.Io;
+    fault.event(tag ++ "-fsync");
+    if (fault.shouldFail(tag ++ "-fsync")) return error.Io;
+    if (c.fsync(fd) != 0) return error.Io;
+    if (fault.powerloss) overlay.synced(path, false);
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +479,9 @@ const File = extern struct {
     conn_id: u32,
     /// The first wal-index region, once mapped (test checks only).
     shm0: ?*anyopaque,
+    /// A WAL opened for creation: SQLite's unix VFS syncs the directory at
+    /// its first sync (power-loss model only).
+    dir_sync_pending: bool,
 };
 
 var unix_vfs: [*c]c.sqlite3_vfs = null;
@@ -316,16 +573,24 @@ fn vfsOpen(vfs: [*c]c.sqlite3_vfs, name: c.sqlite3_filename, file: [*c]c.sqlite3
     f.member = 0;
     f.conn_id = 0;
     f.shm0 = null;
+    f.dir_sync_pending = false;
     if (name != null and f.kind != .other) {
         if (c.sqlite3_uri_parameter(name, "cwal")) |id| f.conn_id = std.fmt.parseInt(u32, std.mem.span(id), 10) catch 0;
         if (c.sqlite3_uri_parameter(name, "cwm")) |m| f.member = std.fmt.parseInt(u8, std.mem.span(m), 10) catch 0;
     }
+    if (f.kind != .other and fault.shouldFail(if (f.kind == .wal) "open-wal" else "open-db")) return c.SQLITE_CANTOPEN;
+    const creating = name != null and flags & c.SQLITE_OPEN_CREATE != 0 and c.access(name, c.F_OK) != 0;
     const rc = unix_vfs.*.xOpen.?(unix_vfs, name, f.real, flags, out_flags);
     if (rc != c.SQLITE_OK) {
         if (f.real.*.pMethods != null) _ = f.real.*.pMethods.*.xClose.?(f.real);
         return rc;
     }
     f.base.pMethods = &io_methods;
+    if (creating) {
+        if (fault.powerloss) overlay.created(std.mem.span(name));
+        fault.event("open-create");
+    }
+    f.dir_sync_pending = f.kind == .wal and flags & c.SQLITE_OPEN_CREATE != 0;
     if (f.kind == .main_db) {
         if (connFor(f)) |conn| conn.member_db[f.member] = f;
     }
@@ -335,7 +600,7 @@ fn vfsOpen(vfs: [*c]c.sqlite3_vfs, name: c.sqlite3_filename, file: [*c]c.sqlite3
 fn vfsDelete(vfs: [*c]c.sqlite3_vfs, name: [*c]const u8, sync_dir: c_int) callconv(.c) c_int {
     _ = vfs;
     fault.event("delete");
-    if (fault.powerloss) overlay.discard(std.mem.span(name));
+    if (fault.powerloss) return overlay.delete(std.mem.span(name), sync_dir);
     return unix_vfs.*.xDelete.?(unix_vfs, name, sync_dir);
 }
 
@@ -379,9 +644,10 @@ fn realSize(f: *File) i64 {
 
 fn ioRead(file: [*c]c.sqlite3_file, buffer: ?*anyopaque, amount: c_int, offset: c.sqlite3_int64) callconv(.c) c_int {
     const f = asFile(file);
+    if (f.kind != .other and fault.shouldFail(if (f.kind == .wal) "read-wal" else "read-db")) return c.SQLITE_IOERR_READ;
     if (!fault.powerloss) return realMethods(f).xRead.?(f.real, buffer, amount, offset);
     const slot = overlay.find(pathSlice(f), false) orelse return realMethods(f).xRead.?(f.real, buffer, amount, offset);
-    if (slot.pending.items.len == 0) return realMethods(f).xRead.?(f.real, buffer, amount, offset);
+    if (!overlay.hasWrites(slot)) return realMethods(f).xRead.?(f.real, buffer, amount, offset);
     const bytes = @as([*]u8, @ptrCast(buffer.?))[0..@intCast(amount)];
     const logical = @max(realSize(f), overlay.maxEnd(slot));
     var rc = realMethods(f).xRead.?(f.real, buffer, amount, offset);
@@ -398,14 +664,24 @@ fn ioRead(file: [*c]c.sqlite3_file, buffer: ?*anyopaque, amount: c_int, offset: 
 
 fn ioWrite(file: [*c]c.sqlite3_file, buffer: ?*const anyopaque, amount: c_int, offset: c.sqlite3_int64) callconv(.c) c_int {
     const f = asFile(file);
-    fault.event(switch (f.kind) {
+    const tag = switch (f.kind) {
         .main_db => "write-db",
         .wal => "write-wal",
         .other => "write-other",
-    });
+    };
+    fault.event(tag);
     const bytes = @as([*]const u8, @ptrCast(buffer.?))[0..@intCast(amount)];
     if (f.kind == .wal) {
         if (connFor(f)) |conn| conn.observeWalWrite(bytes);
+    }
+    if (fault.shouldFail(tag)) {
+        // A failed write may have written a prefix of its sectors.
+        const sectors = (bytes.len + 511) / 512;
+        const keep = @min(bytes.len, (fault.random() % (sectors + 1)) * 512);
+        if (keep != 0) {
+            if (fault.powerloss) overlay.add(pathSlice(f), offset, bytes[0..keep]) else _ = realMethods(f).xWrite.?(f.real, bytes.ptr, @intCast(keep), offset);
+        }
+        return if (fault.fail_full) c.SQLITE_FULL else c.SQLITE_IOERR_WRITE;
     }
     if (fault.powerloss) {
         overlay.add(pathSlice(f), offset, bytes);
@@ -417,17 +693,34 @@ fn ioWrite(file: [*c]c.sqlite3_file, buffer: ?*const anyopaque, amount: c_int, o
 fn ioTruncate(file: [*c]c.sqlite3_file, size: c.sqlite3_int64) callconv(.c) c_int {
     const f = asFile(file);
     fault.event("truncate");
-    // Model truncation as ordered after earlier writes to the file.
-    if (fault.powerloss) overlay.flush(pathSlice(f));
+    if (fault.shouldFail("truncate")) return c.SQLITE_IOERR_TRUNCATE;
+    // Model truncation as ordered after earlier writes to the file, and
+    // lost if the file is not synced before a crash.
+    if (fault.powerloss) {
+        overlay.flush(pathSlice(f));
+        overlay.truncating(pathSlice(f), size);
+    }
     return realMethods(f).xTruncate.?(f.real, size);
 }
 
 fn ioSync(file: [*c]c.sqlite3_file, flags: c_int) callconv(.c) c_int {
     const f = asFile(file);
     fault.event("sync");
+    if (fault.shouldFail(switch (f.kind) {
+        .main_db => "sync-db",
+        .wal => "sync-wal",
+        .other => "sync-other",
+    })) {
+        if (fault.powerloss) overlay.failSync(pathSlice(f));
+        return c.SQLITE_IOERR_FSYNC;
+    }
     if (fault.powerloss) overlay.flush(pathSlice(f));
     _ = @atomicRmw(u64, &fault.syncs, .Add, 1, .seq_cst);
     const rc = realMethods(f).xSync.?(f.real, flags);
+    if (rc == c.SQLITE_OK and fault.powerloss) {
+        overlay.synced(pathSlice(f), f.dir_sync_pending);
+        f.dir_sync_pending = false;
+    }
     fault.event("sync-done");
     if (f.kind == .wal) {
         // With synchronous=FULL, SQLite syncs a member's WAL after writing
@@ -964,8 +1257,10 @@ pub const Conn = struct {
     fn openLockFile(conn: *Conn, suffix: []const u8) Error!c_int {
         var buf: [1100]u8 = undefined;
         const path = bufPrintZ(&buf, "{s}-cwal-{s}", .{ conn.paths[0], suffix }) catch return error.Io;
+        const creating = fault.powerloss and c.access(path.ptr, c.F_OK) != 0;
         const fd = c.open(path.ptr, c.O_RDWR | c.O_CREAT | c.O_CLOEXEC, @as(c_uint, 0o644));
         if (fd < 0) return error.Io;
+        if (creating) overlay.created(path);
         return fd;
     }
 
@@ -1079,10 +1374,7 @@ pub const Conn = struct {
                 // The torn commit cannot have been checkpointed: the writer
                 // checkpoints only between commits.
                 const keep = walLastCommitStart(fd) orelse return error.ProtocolViolation;
-                fault.event("recover-truncate");
-                if (c.ftruncate(fd, keep) != 0) return error.Io;
-                fault.event("recover-fsync");
-                if (c.fsync(fd) != 0) return error.Io;
+                try truncateDurably(fd, wal, keep, "recover");
             }
         }
         // readMarker left wal-index files built before the truncation.
@@ -1204,10 +1496,7 @@ pub const Conn = struct {
         const size = fileSize(fd) orelse return error.Io;
         conn.log("discard member {d} mx={d} size={d} keep={d}", .{ m, mx, size, keep });
         if (size <= keep) return;
-        fault.event("discard-truncate");
-        if (c.ftruncate(fd, keep) != 0) return error.Io;
-        fault.event("discard-fsync");
-        if (c.fsync(fd) != 0) return error.Io;
+        try truncateDurably(fd, wal, keep, "discard");
         conn.stats.discarded_bytes += @intCast(size - keep);
     }
 
@@ -1345,13 +1634,19 @@ pub const Conn = struct {
         if (conn.mode != .cwal) return conn.exec(sql);
         try conn.exec("begin");
         conn.exec(sql) catch |err| {
-            conn.exec("rollback") catch {};
+            conn.rollbackOpen();
             return err;
         };
         conn.commit() catch |err| {
-            conn.exec("rollback") catch {};
+            conn.rollbackOpen();
             return err;
         };
+    }
+
+    /// Roll back the transaction, if a failed statement or commit has not
+    /// already ended it (SQLite rolls back on I/O errors and full disks).
+    pub fn rollbackOpen(conn: *Conn) void {
+        if (c.sqlite3_get_autocommit(conn.db) == 0) conn.exec("rollback") catch {};
     }
 
     /// Begin a read transaction that sees every member at one point between

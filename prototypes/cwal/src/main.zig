@@ -323,19 +323,23 @@ fn cmdNWriter(dir: []const u8, args: Args) void {
         }
         if (used == 0) die("empty --file-mask", .{});
     }
-    nRounds(conn, mode, k, rounds, rand, delay_us, passive_only, files[0..used]);
+    const completed = nRounds(conn, mode, k, rounds, rand, delay_us, passive_only, files[0..used], args.int("--tolerate", 0) != 0);
     const reset_waits = conn.stats.reset_waits;
     conn.close();
     cwal.flushPending();
-    out("events={d} tagged={d} reset_waits={d}\n", .{ cwal.fault.count(), cwal.fault.taggedCount(), reset_waits });
+    out("events={d} tagged={d} reset_waits={d} fail_seen={d} failures={d}\n", .{ cwal.fault.count(), cwal.fault.taggedCount(), reset_waits, cwal.fault.failSeen(), cwal.fault.failureCount() });
+    if (!completed) c.exit(4);
 }
 
 /// nwriter's workload from transaction k on: odd k a single-file
 /// autocommit, even k a transaction over 2 or more of `files`, every 10th
-/// round a checkpoint.
-fn nRounds(conn: *Conn, mode: cwal.Mode, first_k: i64, rounds: u64, rand: std.Random, delay_us: u64, passive_only: bool, files: []const usize) void {
+/// round a checkpoint. With `tolerate`, a failed commit prints "fail k txn"
+/// (its outcome is unknown: present or absent, never torn) and the run
+/// goes on with k + 1; it stops after 5 failures in a row and returns false.
+fn nRounds(conn: *Conn, mode: cwal.Mode, first_k: i64, rounds: u64, rand: std.Random, delay_us: u64, passive_only: bool, files: []const usize, tolerate: bool) bool {
     var k = first_k;
     const used = files.len;
+    var fails: u32 = 0;
     var r: u64 = 0;
     while (r < rounds) : (r += 1) {
         if (delay_us != 0) _ = c.usleep(@intCast(delay_us));
@@ -348,8 +352,14 @@ fn nRounds(conn: *Conn, mode: cwal.Mode, first_k: i64, rounds: u64, rand: std.Ra
         if (@mod(k, 2) == 1 or used == 1) {
             const f = files[rand.uintLessThan(usize, used)];
             out("try {d} 0\n", .{k});
-            autocommitFmt(conn, "insert into {s}.t values ({d}, 0, {d}, 1, randomblob({d}))", .{ Conn.schemaName(f), k, @as(u32, 1) << @intCast(f), size }) catch die("solo {d}", .{k});
-            out("ack {d} 0\n", .{k});
+            if (autocommitFmt(conn, "insert into {s}.t values ({d}, 0, {d}, 1, randomblob({d}))", .{ Conn.schemaName(f), k, @as(u32, 1) << @intCast(f), size })) |_| {
+                out("ack {d} 0\n", .{k});
+                fails = 0;
+            } else |err| {
+                if (!tolerate) die("solo {d}: {s}", .{ k, @errorName(err) });
+                out("fail {d} 0\n", .{k});
+                fails += 1;
+            }
         } else {
             var idx: [cwal.max_members]usize = undefined;
             @memcpy(idx[0..used], files[0..used]);
@@ -362,16 +372,27 @@ fn nRounds(conn: *Conn, mode: cwal.Mode, first_k: i64, rounds: u64, rand: std.Ra
             }
             const txn: u64 = if (mode == .cwal) conn.nextTxn() else @intCast(k);
             out("try {d} {d}\n", .{ k, txn });
-            conn.exec("begin") catch die("begin {d}", .{k});
-            for (idx[0..count]) |f| {
-                execFmt(conn, "insert into {s}.t values ({d}, {d}, {d}, {d}, randomblob({d}))", .{ Conn.schemaName(f), k, txn, mask, count, size }) catch die("multi {d}", .{k});
+            if (multiCommit(conn, k, txn, mask, count, size, idx[0..count])) |_| {
+                if (mode == .cwal and conn.txn != txn) die("txn {d} committed as {d}", .{ txn, conn.txn });
+                out("ack {d} {d}\n", .{ k, txn });
+                fails = 0;
+            } else |err| {
+                if (!tolerate) die("commit {d}: {s}", .{ k, @errorName(err) });
+                out("fail {d} {d}\n", .{ k, txn });
+                fails += 1;
             }
-            conn.commit() catch die("commit {d}", .{k});
-            if (mode == .cwal and conn.txn != txn) die("txn {d} committed as {d}", .{ txn, conn.txn });
-            out("ack {d} {d}\n", .{ k, txn });
         }
         k += 1;
+        if (fails >= 5) return false;
     }
+    return true;
+}
+
+fn multiCommit(conn: *Conn, k: i64, txn: u64, mask: u32, count: usize, size: u32, files: []const usize) cwal.Error!void {
+    try conn.exec("begin");
+    errdefer conn.rollbackOpen();
+    for (files) |f| try execFmt(conn, "insert into {s}.t values ({d}, {d}, {d}, {d}, randomblob({d}))", .{ Conn.schemaName(f), k, txn, mask, count, size });
+    try conn.commit();
 }
 
 const WritersJob = struct {
@@ -406,7 +427,7 @@ fn writersThread(job: *WritersJob) void {
         job.opens += 1;
         var buf: [8192]u8 = undefined;
         const k = queryInt(conn, unionSql(&buf, job.n, "select coalesce(max(k), 0) from u")) + 1;
-        nRounds(conn, job.mode, k, 1 + rand.uintLessThan(u64, job.rounds), rand, 0, true, files[0..job.n]);
+        _ = nRounds(conn, job.mode, k, 1 + rand.uintLessThan(u64, job.rounds), rand, 0, true, files[0..job.n], false);
         conn.close();
     }
 }
@@ -886,6 +907,19 @@ fn readWhole(path: []const u8) []u8 {
 /// Integrity, per-transaction agreement across files, the prefix property,
 /// unique marker numbers, markers that match the data, and (with
 /// --acked-file, lines "k txn") that every acknowledged commit survived.
+/// Rows of transaction k (with marker number txn, if given) in the set.
+fn countK(conn: *Conn, n: usize, k: i64, txn: ?i64) i64 {
+    var q: [8192]u8 = undefined;
+    const sql = unionSql(&q, n, "select count(*) from u where k = ?1 and (?2 is null or txn = ?2)");
+    var stmt: ?*c.sqlite3_stmt = null;
+    if (c.sqlite3_prepare_v2(conn.db, sql.ptr, -1, &stmt, null) != c.SQLITE_OK) die("prepare count k", .{});
+    defer _ = c.sqlite3_finalize(stmt);
+    _ = c.sqlite3_bind_int64(stmt, 1, k);
+    if (txn) |t| _ = c.sqlite3_bind_int64(stmt, 2, t) else _ = c.sqlite3_bind_null(stmt, 2);
+    if (c.sqlite3_step(stmt) != c.SQLITE_ROW) die("step count k", .{});
+    return c.sqlite3_column_int64(stmt, 0);
+}
+
 fn cmdNCheck(dir: []const u8, args: Args) void {
     const mode = args.mode();
     const n = nFiles(args);
@@ -898,7 +932,17 @@ fn cmdNCheck(dir: []const u8, args: Args) void {
     }
     const st = nState(conn, n);
     if (st.bad != 0) die("torn transactions={d}", .{st.bad});
-    if (st.distinct != st.max_k) die("not a prefix distinct={d} max={d}", .{ st.distinct, st.max_k });
+    // A transaction whose commit failed may be missing; no other may.
+    var absent_failed: i64 = 0;
+    if (args.get("--failed-file")) |path| {
+        var lines = std.mem.tokenizeScalar(u8, readWhole(path), '\n');
+        while (lines.next()) |line| {
+            var fields = std.mem.tokenizeScalar(u8, line, ' ');
+            const k = std.fmt.parseInt(i64, fields.next() orelse continue, 10) catch die("failed line {s}", .{line});
+            if (k <= st.max_k and countK(conn, n, k, null) == 0) absent_failed += 1;
+        }
+    }
+    if (st.distinct + absent_failed != st.max_k) die("not a prefix distinct={d} max={d} absent_failed={d}", .{ st.distinct, st.max_k, absent_failed });
     if (st.shared_txn != 0) die("marker numbers shared={d}", .{st.shared_txn});
     if (mode == .cwal) {
         for (0..n) |i| {
@@ -929,16 +973,7 @@ fn cmdNCheck(dir: []const u8, args: Args) void {
             var fields = std.mem.tokenizeScalar(u8, line, ' ');
             const k = std.fmt.parseInt(i64, fields.next() orelse continue, 10) catch die("acked line {s}", .{line});
             const txn = std.fmt.parseInt(i64, fields.next() orelse die("acked line {s}", .{line}), 10) catch die("acked line {s}", .{line});
-            var q: [8192]u8 = undefined;
-            const sql = unionSql(&q, n, "select count(*) from u where k = ?1 and txn = ?2");
-            var stmt: ?*c.sqlite3_stmt = null;
-            if (c.sqlite3_prepare_v2(conn.db, sql.ptr, -1, &stmt, null) != c.SQLITE_OK) die("prepare acked", .{});
-            _ = c.sqlite3_bind_int64(stmt, 1, k);
-            _ = c.sqlite3_bind_int64(stmt, 2, txn);
-            if (c.sqlite3_step(stmt) != c.SQLITE_ROW) die("step acked", .{});
-            const found = c.sqlite3_column_int64(stmt, 0);
-            _ = c.sqlite3_finalize(stmt);
-            if (found == 0) die("lost acked k={d} txn={d}", .{ k, txn });
+            if (countK(conn, n, k, txn) == 0) die("lost acked k={d} txn={d}", .{ k, txn });
             acked += 1;
         }
     }
@@ -1043,6 +1078,9 @@ const ReaderJob = struct {
     /// followed by one on store.db: a snapshot has solo_s == solo or
     /// solo_s + 1 == solo.
     solo_order: bool,
+    /// Failed commits may leave keys missing (nwriter --tolerate): check
+    /// atomicity and marker numbers, not the prefix property.
+    allow_gaps: bool = false,
     /// N-file set size, or 0 for the two-file set.
     nfiles: usize = 0,
     stats: ReaderStats = .{},
@@ -1090,7 +1128,7 @@ fn readerThread(job: *ReaderJob) void {
         var mixed = false;
         if (job.nfiles != 0) {
             const st = nState(conn, job.nfiles);
-            mixed = st.bad != 0 or st.distinct != st.max_k or st.shared_txn != 0;
+            mixed = st.bad != 0 or (st.distinct != st.max_k and !job.allow_gaps) or st.shared_txn != 0;
             if (mixed and job.stats.mixed < 3) out("MIXED torn={d} distinct={d} max={d} shared={d}\n", .{ st.bad, st.distinct, st.max_k, st.shared_txn });
             if (job.hold_us != 0) {
                 // A long-lived read transaction must keep its snapshot
@@ -1141,7 +1179,7 @@ fn cmdReader(dir: []const u8, args: Args) void {
     var handles: [16]std.Thread = undefined;
     const deadline = cwal.monotonicNs() + duration_ms * 1_000_000;
     for (0..threads) |i| {
-        jobs[i] = .{ .dir = dir, .mode = args.mode(), .deadline_ns = deadline, .gap_us = @intCast(args.int("--gap-us", 0)), .hold_us = @intCast(args.int("--hold-us", 0)), .seed = i * 7919 + @as(u64, @intCast(c.getpid())), .solo_order = args.int("--solo-order", 0) != 0, .nfiles = if (args.get("--files") != null) nFiles(args) else 0 };
+        jobs[i] = .{ .dir = dir, .mode = args.mode(), .deadline_ns = deadline, .gap_us = @intCast(args.int("--gap-us", 0)), .hold_us = @intCast(args.int("--hold-us", 0)), .seed = i * 7919 + @as(u64, @intCast(c.getpid())), .solo_order = args.int("--solo-order", 0) != 0, .allow_gaps = args.int("--allow-gaps", 0) != 0, .nfiles = if (args.get("--files") != null) nFiles(args) else 0 };
         handles[i] = std.Thread.spawn(.{}, readerThread, .{&jobs[i]}) catch die("spawn", .{});
     }
     var total: ReaderStats = .{};

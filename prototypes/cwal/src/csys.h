@@ -9,4 +9,5 @@
 #include <time.h>
 #include <string.h>
 #include <errno.h>
+#include <stdio.h>
 #include <sys/mman.h>
