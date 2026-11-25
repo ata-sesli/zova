@@ -1,0 +1,7 @@
+.{
+    .name = .cwal_prototype,
+    .version = "0.0.0",
+    .fingerprint = 0x2c51efeb01dbd9b,
+    .minimum_zig_version = "0.17.0",
+    .paths = .{""},
+}
