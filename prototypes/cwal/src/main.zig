@@ -210,10 +210,6 @@ fn cmdWriter(dir: []const u8, args: Args) void {
 fn cmdCheck(dir: []const u8, args: Args) void {
     const mode = args.mode();
     const conn = openSet(dir, .{ .mode = mode, .role = .writer }) catch |err| die("open {s}", .{@errorName(err)});
-    if (mode == .cwal) {
-        const state = conn.readJournal().state;
-        if (state != .idle and state != .committed) die("journal {s} after open", .{@tagName(state)});
-    }
     var buf: [256]u8 = undefined;
     for ([_][:0]const u8{ "pragma main.integrity_check", "pragma m1.integrity_check" }) |sql| {
         const result = queryText(conn, sql, &buf);
@@ -251,32 +247,23 @@ fn cmdRecover(dir: []const u8, args: Args) void {
 }
 
 fn cmdState(dir: []const u8) void {
-    // Report the journal without opening the set (no recovery).
+    // Report the seqlock page without opening the set (no recovery).
     var buf: [max_path]u8 = undefined;
-    const path = bufPrintZ(&buf, "{s}/main.db-cwal", .{dir}) catch unreachable;
+    const path = bufPrintZ(&buf, "{s}/main.db-cwal-snap", .{dir}) catch unreachable;
     const fd = c.open(path.ptr, c.O_RDONLY);
     if (fd < 0) {
         out("state none\n", .{});
         return;
     }
     defer _ = c.close(fd);
-    var best_seq: u64 = 0;
-    var best_state: u32 = 0;
-    for (0..2) |slot| {
-        var b: [128]u8 = undefined;
-        if (c.pread(fd, &b, b.len, @intCast(slot * 4096)) != b.len) continue;
-        if (std.mem.readInt(u32, b[0..4], .little) != 0x4357_414c) continue;
-        var h: u64 = 0xcbf29ce484222325;
-        for (b[0..120]) |x| h = (h ^ x) *% 0x100000001b3;
-        if (h != std.mem.readInt(u64, b[120..128], .little)) continue;
-        const seq = std.mem.readInt(u64, b[4..12], .little);
-        if (seq > best_seq) {
-            best_seq = seq;
-            best_state = std.mem.readInt(u32, b[12..16], .little);
-        }
-    }
-    const names = [_][]const u8{ "idle", "prepared", "committed", "broken" };
-    out("state {s}\n", .{if (best_state < names.len) names[best_state] else "?"});
+    var b: [24]u8 = undefined;
+    if (c.pread(fd, &b, b.len, 0) != b.len) die("read {s}", .{path});
+    const ckpt = std.mem.readInt(u64, b[16..24], .native);
+    out("state seq={d} cross={d} broken={d} ckpt_active={d} ckpt_started={d}\n", .{
+        std.mem.readInt(u64, b[0..8], .native),   std.mem.readInt(u32, b[8..12], .native),
+        std.mem.readInt(u32, b[12..16], .native), @as(u32, @truncate(ckpt)),
+        ckpt >> 32,
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -403,14 +390,6 @@ fn cmdReader(dir: []const u8, args: Args) void {
 // benchmarks
 // ---------------------------------------------------------------------------
 
-fn fileSize(path: []const u8) i64 {
-    var buf: [max_path]u8 = undefined;
-    const z = bufPrintZ(&buf, "{s}", .{path}) catch unreachable;
-    var st: c.struct_stat = undefined;
-    if (c.stat(z.ptr, &st) != 0) return 0;
-    return st.st_size;
-}
-
 fn cmdBench(dir: []const u8, args: Args) void {
     const mode = args.mode();
     const commits = args.int("--commits", 500);
@@ -439,13 +418,9 @@ fn cmdBench(dir: []const u8, args: Args) void {
     std.mem.sort(u64, samples, {}, std.sort.asc(u64));
     var sum: u64 = 0;
     for (samples) |s| sum += s;
-    const p = Paths.init(dir);
-    var jbuf: [max_path]u8 = undefined;
-    const journal = std.fmt.bufPrint(&jbuf, "{s}-cwal", .{p.list()[0]}) catch unreachable;
-    out("bench mode={s} sync={s} kind={s} commits={d} mean_us={d:.1} p50_us={d:.1} p99_us={d:.1} syncs_per_commit={d:.2} journal_bytes={d}\n", .{
+    out("bench mode={s} sync={s} kind={s} commits={d} mean_us={d:.1} p50_us={d:.1} p99_us={d:.1} syncs_per_commit={d:.2}\n", .{
         @tagName(mode),                                                           sync,                                                   if (pair) "pair" else "solo",                                  commits,
         @as(f64, @floatFromInt(sum)) / @as(f64, @floatFromInt(commits)) / 1000.0, @as(f64, @floatFromInt(samples[commits / 2])) / 1000.0, @as(f64, @floatFromInt(samples[commits * 99 / 100])) / 1000.0, @as(f64, @floatFromInt(syncs)) / @as(f64, @floatFromInt(commits)),
-        fileSize(journal),
     });
     conn.close();
 }
@@ -455,10 +430,9 @@ const RwJob = struct {
     mode: cwal.Mode,
     deadline_ns: u64,
     count: u64 = 0,
-    gate_wait_ns: u64 = 0,
+    window_wait_ns: u64 = 0,
     snapshot_reads: u64 = 0,
     seq_retries: u64 = 0,
-    journal_skips: u64 = 0,
 };
 
 fn rwWriter(job: *RwJob) void {
@@ -470,7 +444,6 @@ fn rwWriter(job: *RwJob) void {
         id += 1;
         job.count += 1;
     }
-    job.gate_wait_ns = conn.stats.gate_wait_ns;
     conn.close();
 }
 
@@ -483,10 +456,9 @@ fn rwReader(job: *RwJob) void {
         conn.exec("rollback") catch {};
         job.count += 1;
     }
-    job.gate_wait_ns = conn.stats.gate_wait_ns;
+    job.window_wait_ns = conn.stats.window_wait_ns;
     job.snapshot_reads = conn.stats.snapshot_reads;
     job.seq_retries = conn.stats.seq_retries;
-    job.journal_skips = conn.stats.journal_skips;
     conn.close();
 }
 
@@ -509,21 +481,19 @@ fn cmdBenchRw(dir: []const u8, args: Args) void {
     var reader_wait: u64 = 0;
     var snapshot_reads: u64 = 0;
     var seq_retries: u64 = 0;
-    var journal_skips: u64 = 0;
     for (0..readers) |i| {
         handles[i].join();
         reads += jobs[i].count;
-        reader_wait += jobs[i].gate_wait_ns;
+        reader_wait += jobs[i].window_wait_ns;
         snapshot_reads += jobs[i].snapshot_reads;
         seq_retries += jobs[i].seq_retries;
-        journal_skips += jobs[i].journal_skips;
     }
     handles[16].join();
     const seconds = @as(f64, @floatFromInt(duration_ms)) / 1000.0;
-    out("benchrw mode={s} readers={d} reads_per_s={d:.0} commits_per_s={d:.0} reader_gate_wait_ms={d:.1} writer_gate_wait_ms={d:.1} snapshot_reads={d} seq_retries={d} journal_skips={d}\n", .{
+    out("benchrw mode={s} readers={d} reads_per_s={d:.0} commits_per_s={d:.0} reader_window_wait_ms={d:.1} snapshot_reads={d} seq_retries={d}\n", .{
         @tagName(mode),                                  readers,                                    @as(f64, @floatFromInt(reads)) / seconds,
-        @as(f64, @floatFromInt(writer.count)) / seconds, @as(f64, @floatFromInt(reader_wait)) / 1e6, @as(f64, @floatFromInt(writer.gate_wait_ns)) / 1e6,
-        snapshot_reads,                                  seq_retries,                                journal_skips,
+        @as(f64, @floatFromInt(writer.count)) / seconds, @as(f64, @floatFromInt(reader_wait)) / 1e6, snapshot_reads,
+        seq_retries,
     });
 }
 

@@ -46,7 +46,7 @@ def events(stdout):
 
 def check(d, mode, acked, with_recovery=False):
     """Return None or the failure line (and, if asked, the recovery the
-    check's open ran: none, forward or rollback)."""
+    check's open ran: none or rollback)."""
     r = run(["check", d, "--mode", mode, "--acked-pair", acked["pair"], "--acked-solo", acked["solo"], "--acked-solos", acked["solos"]])
     m = re.search(r"recovery=(\w+)", r.stdout)
     rec = m.group(1) if m else "-"
@@ -62,8 +62,10 @@ def reason(msg):
     return re.sub(r"[-\d]+", "#", msg)[:60]
 
 
-def state(d):
-    return run(["state", d]).stdout.split()[-1]
+def snap_state(d):
+    """The seqlock page's fields, read without opening the set."""
+    out = run(["state", d]).stdout
+    return {k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", out)}
 
 
 class Progress:
@@ -111,25 +113,23 @@ def crash_matrix(work, tpl, mode, jobs, powerloss_seeds=(None,)):
             env.update(CWAL_POWERLOSS=1, CWAL_SEED=seed)
         w = run(["writer", d, "--mode", mode, "--rounds", ROUNDS], env)
         acked = acks(w.stdout)
-        st = state(d) if mode == "cwal" else "-"
-        # With commit markers the journal stays idle; only recovery tells
-        # whether the set was torn, so keep a copy until it has run.
+        # Only recovery tells whether the set was torn, so keep a copy until
+        # it has run.
         snap = d + ".crashed"
         shutil.rmtree(snap, ignore_errors=True)
         shutil.copytree(d, snap)
         err, rec = check(d, mode, acked, with_recovery=True)
         shutil.rmtree(d, ignore_errors=True)
-        needed = st in ("prepared", "broken") or rec == "rollback"
-        if not needed:
+        if rec != "rollback":
             shutil.rmtree(snap, ignore_errors=True)
             snap = None
-        return k, seed, f"{st}/{rec}" if needed else st, err, snap, acked
+        return k, seed, rec, err, snap, acked
 
     results = parallel(one, cases, jobs, f"{mode} crash{' powerloss' if powerloss_seeds != (None,) else ''}")
     fails = [(k, s, e) for k, s, _, e, _, _ in results if e]
-    states = Counter(st for _, _, st, _, _, _ in results)
+    recoveries = Counter(rec for _, _, rec, _, _, _ in results)
     snaps = [(snap, acked) for _, _, _, _, snap, acked in results if snap]
-    return n, len(cases), fails, states, snaps
+    return n, len(cases), fails, recoveries, snaps
 
 
 def recovery_crash(work, snaps, jobs, powerloss_seeds=(None,), cap=40):
@@ -206,7 +206,7 @@ def surviving_readers(work, tpl, mode, trials, seed=11):
         shutil.copytree(tpl, d)
         # Kill at a random fsync, or (CWAL) at a random phase-two
         # notification: after every member's commit frame is durable and
-        # visible to readers, before the journal says committed.
+        # visible to readers, before the window closes.
         tag = "phase-two" if mode == "cwal" and t % 2 else "sync"
         k = rng.randint(5, 60)
         rs = [subprocess.Popen([BIN, "reader", d, "--mode", mode, "--threads", "2", "--duration-ms", "1500", "--gap-us", "100"], stdout=subprocess.PIPE, text=True) for _ in range(2)]
@@ -299,6 +299,36 @@ def checkpoint_race(work, tpl, trials=3):
     return stats, errs
 
 
+def checkpoint_reset(work, tpl, trials=5):
+    """A writer killed while it holds an exclusive checkpoint lock leaves
+    the checkpoint counter's active count raised, so every later snapshot
+    open would take the real lock. The next writer must clear it, also while
+    a reader keeps the set open."""
+    out = []
+    for t in range(trials):
+        d = os.path.join(work, f"ck-{t}")
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.copytree(tpl, d)
+        w = run(["writer", d, "--mode", "cwal", "--rounds", ROUNDS], {"CWAL_CRASH_TAG": "ckpt-locked", "CWAL_CRASH_AT": t + 1})
+        acked = acks(w.stdout)
+        stuck = snap_state(d).get("ckpt_active", 0)
+        r = subprocess.Popen([BIN, "reader", d, "--mode", "cwal", "--threads", "2", "--duration-ms", "1500"], stdout=subprocess.PIPE, text=True)
+        time.sleep(0.1)
+        w2 = subprocess.run([BIN, "writer", d, "--mode", "cwal", "--rounds", "300", "--delay-us", "300", "--ckpt", "passive"], env=WINDOW_ENV, capture_output=True, text=True)
+        a2 = acks(w2.stdout)
+        for key in acked:
+            acked[key] = max(acked[key], a2[key])
+        rout = r.communicate()[0]
+        stats = {k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", rout)}
+        after = snap_state(d).get("ckpt_active", -1)
+        err = check(d, "cwal", acked)
+        if w.returncode != -9 or w2.returncode != 0 or r.returncode != 0:
+            err = err or f"exit codes writer={w.returncode} writer2={w2.returncode} reader={r.returncode}"
+        out.append(dict(crash=t + 1, stuck=stuck, after=after, snapshot_reads=stats.get("snapshot_reads", 0), ckpt_fallbacks=stats.get("ckpt_fallbacks", 0), err=err))
+        shutil.rmtree(d, ignore_errors=True)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--work", default=os.environ.get("CWAL_WORK", "/tmp/cwal-torture"))
@@ -320,9 +350,9 @@ def main():
         print("== process crash at every writer event", flush=True)
         snaps = {}
         for mode in ("plain", "cwal"):
-            n, total, fails, states, s = crash_matrix(a.work, tpl, mode, a.jobs)
+            n, total, fails, recoveries, s = crash_matrix(a.work, tpl, mode, a.jobs)
             snaps[mode] = s
-            print(f"{mode}: events={n} runs={total} failures={len(fails)} journal_states={dict(states)}")
+            print(f"{mode}: events={n} runs={total} failures={len(fails)} recoveries={dict(recoveries)}")
             for r, cnt in Counter(reason(e) for _, _, e in fails).most_common(5):
                 print(f"    {cnt:5d}  {r}")
             failed |= mode == "cwal" and bool(fails)
@@ -338,10 +368,10 @@ def main():
         print(f"== power loss at every writer event, {len(pl)} seeds (unsynced writes dropped or torn)", flush=True)
         snaps = []
         for mode in ("plain", "cwal"):
-            n, total, fails, states, s = crash_matrix(a.work, tpl, mode, a.jobs, pl)
+            n, total, fails, recoveries, s = crash_matrix(a.work, tpl, mode, a.jobs, pl)
             if mode == "cwal":
                 snaps = s
-            print(f"{mode}: events={n} runs={total} failures={len(fails)} journal_states={dict(states)}")
+            print(f"{mode}: events={n} runs={total} failures={len(fails)} recoveries={dict(recoveries)}")
             for r, cnt in Counter(reason(e) for _, _, e in fails).most_common(5):
                 print(f"    {cnt:5d}  {r}")
             failed |= mode == "cwal" and bool(fails)
@@ -379,6 +409,13 @@ def main():
         stats, errs = checkpoint_race(a.work, tpl)
         print(f"cwal: {dict(stats)} check_failures={len(errs)}")
         failed |= stats["ckpt_violations"] != 0 or stats["mixed"] != 0 or bool(errs) or (stats["ckpt_races"] == 0 and os.environ.get("CWAL_MUTATE") != "no-ckpt-skip")
+
+    if want("ckptreset"):
+        print("== writer killed holding a checkpoint lock; the next writer clears the counter", flush=True)
+        res = checkpoint_reset(a.work, tpl)
+        for r in res:
+            print(f"    crash at ckpt-locked#{r['crash']}: active after crash={r['stuck']} after next writer={r['after']} snapshot_reads={r['snapshot_reads']} ckpt_fallbacks={r['ckpt_fallbacks']} check={'ok' if not r['err'] else r['err']}")
+        failed |= any(r["stuck"] == 0 or r["after"] != 0 or r["err"] for r in res)
 
     if want("closeckpt"):
         print("== last reader closes after the writer is killed at each of its first 40 fsyncs", flush=True)
