@@ -1,0 +1,183 @@
+== process crash at every writer event
+  [plain crash] 1/1340 (0s)
+  [plain crash] 928/1340 (5s)
+  [plain crash] 1340/1340 (7s)
+plain: events=1340 runs=1340 failures=135 recoveries={'none': 1205, '-': 135}
+      135  FAIL torn pairs main=# store=#
+  [cwal crash] 1/1678 (0s)
+  [cwal crash] 628/1678 (5s)
+  [cwal crash] 1219/1678 (10s)
+  [cwal crash] 1678/1678 (14s)
+cwal: events=1678 runs=1678 failures=0 recoveries={'none': 1527, 'rollback': 151}
+== concurrent snapshots: writer + 2 reader processes x 2 threads
+plain ckpt=all: {'reads': 1125, 'mixed': 5, 'broken': 0, 'reopen': 8, 'ckpt_attempts': 44, 'ckpt_denied': 0, 'snapshot_reads': 0, 'seq_retries': 0, 'snapshot_waits': 0, 'ckpt_races': 0, 'ckpt_fallbacks': 0, 'ckpt_violations': 0, 'ckpt_locks': 0, 'min_reads': 560} check=ok
+cwal ckpt=all: {'reads': 1899, 'mixed': 0, 'broken': 0, 'reopen': 16, 'ckpt_attempts': 74, 'ckpt_denied': 74, 'snapshot_reads': 6, 'seq_retries': 4, 'snapshot_waits': 0, 'ckpt_races': 0, 'ckpt_fallbacks': 0, 'ckpt_violations': 0, 'ckpt_locks': 0, 'min_reads': 948} check=ok
+plain ckpt=passive: {'reads': 233, 'mixed': 80, 'broken': 0, 'reopen': 0, 'ckpt_attempts': 8, 'ckpt_denied': 0, 'snapshot_reads': 0, 'seq_retries': 0, 'snapshot_waits': 0, 'ckpt_races': 0, 'ckpt_fallbacks': 0, 'ckpt_violations': 0, 'ckpt_locks': 0, 'min_reads': 113} check=ok
+cwal ckpt=passive: {'reads': 306, 'mixed': 0, 'broken': 0, 'reopen': 0, 'ckpt_attempts': 12, 'ckpt_denied': 12, 'snapshot_reads': 168, 'seq_retries': 161, 'snapshot_waits': 0, 'ckpt_races': 1, 'ckpt_fallbacks': 8, 'ckpt_violations': 0, 'ckpt_locks': 0, 'min_reads': 151} check=ok
+== writer killed while reader processes keep running
+  [plain surviving readers] 1/10 (2s)
+  [plain surviving readers] 5/10 (8s)
+  [plain surviving readers] 9/10 (14s)
+  [plain surviving readers] 10/10 (15s)
+plain: trials=10 crashed=10 restarted=10 {'reads': 233999, 'mixed': 241, 'broken': 0, 'ckpt_denied': 0, 'restart_broken': 0, 'snapshot_reads': 0, 'seq_retries': 0, 'snapshot_waits': 0, 'ckpt_races': 0, 'ckpt_violations': 0} check_failures=0
+  [cwal surviving readers] 1/10 (2s)
+  [cwal surviving readers] 5/10 (8s)
+  [cwal surviving readers] 9/10 (14s)
+  [cwal surviving readers] 10/10 (15s)
+cwal: trials=10 crashed=10 restarted=10 {'reads': 185473, 'mixed': 0, 'broken': 15, 'ckpt_denied': 7402, 'restart_broken': 2, 'snapshot_reads': 1401, 'seq_retries': 565, 'snapshot_waits': 47, 'ckpt_races': 0, 'ckpt_violations': 0} check_failures=0
+== checkpoint starts during a snapshot open (widened race)
+cwal: {'reads': 272, 'mixed': 0, 'broken': 0, 'reopen': 0, 'ckpt_attempts': 9, 'ckpt_denied': 9, 'snapshot_reads': 137, 'seq_retries': 66, 'snapshot_waits': 0, 'ckpt_races': 38, 'ckpt_fallbacks': 31, 'ckpt_violations': 0, 'ckpt_locks': 0, 'min_reads': 272} check_failures=0
+== writer killed holding a checkpoint lock; the next writer clears the counter
+    crash at ckpt-locked#1: active after crash=1 after next writer=0 snapshot_reads=392 ckpt_fallbacks=1 check=ok
+    crash at ckpt-locked#2: active after crash=1 after next writer=0 snapshot_reads=436 ckpt_fallbacks=3 check=ok
+    crash at ckpt-locked#3: active after crash=1 after next writer=0 snapshot_reads=264 ckpt_fallbacks=0 check=ok
+    crash at ckpt-locked#4: active after crash=1 after next writer=0 snapshot_reads=277 ckpt_fallbacks=1 check=ok
+    crash at ckpt-locked#5: active after crash=1 after next writer=0 snapshot_reads=108 ckpt_fallbacks=1 check=ok
+== last reader closes after the writer is killed at each of its first 40 fsyncs
+  [plain close checkpoint] 1/40 (0s)
+  [plain close checkpoint] 14/40 (6s)
+  [plain close checkpoint] 27/40 (11s)
+  [plain close checkpoint] 40/40 (16s)
+plain: runs=40 check_failures=11
+     sync#3 FAIL torn pairs main=1 store=0
+     sync#4 FAIL torn pairs main=1 store=0
+     sync#6 FAIL torn pairs main=2 store=1
+  [cwal close checkpoint] 1/40 (0s)
+  [cwal close checkpoint] 14/40 (6s)
+  [cwal close checkpoint] 27/40 (11s)
+  [cwal close checkpoint] 40/40 (16s)
+cwal: runs=40 check_failures=0
+== N files: writer chain killed and restarted while readers keep the set open
+  [restart chains] 1/4 (5s)
+  [restart chains] 4/4 (9s)
+3 files: chains=2 {'crashed': 23, 'open_broken': 0, 'acked': 192, 'reads': 36606, 'mixed': 0, 'broken': 14, 'snapshot_reads': 25, 'ckpt_violations': 0, 'exit_nonzero': 0} failures=0
+8 files: chains=2 {'crashed': 23, 'open_broken': 0, 'acked': 207, 'reads': 15225, 'mixed': 0, 'broken': 27, 'snapshot_reads': 3, 'ckpt_violations': 0, 'exit_nonzero': 0} failures=0
+== N files: frames a killed writer left unpublished, next writer skips that file
+  [3 files dangling frames] 1/153 (1s)
+  [3 files dangling frames] 57/153 (6s)
+  [3 files dangling frames] 113/153 (11s)
+  [3 files dangling frames] 153/153 (15s)
+3 files: syncs=51 runs=153 crashed=135 reader_ok=153 mixed=0 failures=0
+  [8 files dangling frames] 1/480 (1s)
+  [8 files dangling frames] 57/480 (6s)
+  [8 files dangling frames] 113/480 (11s)
+  [8 files dangling frames] 167/480 (16s)
+  [8 files dangling frames] 221/480 (21s)
+  [8 files dangling frames] 276/480 (26s)
+  [8 files dangling frames] 330/480 (31s)
+  [8 files dangling frames] 385/480 (36s)
+  [8 files dangling frames] 439/480 (42s)
+  [8 files dangling frames] 480/480 (45s)
+8 files: syncs=100 runs=480 crashed=480 reader_ok=480 mixed=0 failures=0
+== T2: deterministic delay points (R3, no-late-alone, no-cross-flag; 3 files)
+pass no-cross-flag: new writer after a dead cross window  | seq=7 cross=1 writer2_exit=3 reader_exit=0 mixed=0 check=ok recovery=rollback
+pass no-late-alone: last holder dies during open          | paused=True reader_exit=0 reads=5878 mixed=0 late_alone_path=True check=ok recovery=none
+pass R3: foreign checkpoint + late alone                  | outsider_ckpt=0/6/6 paused=True opener=open-error ProtocolViolation wal_unchanged=True late_alone_path=True backfill_seen=True
+pass R3: same, opener holds another set                   | outsider_ckpt=0/6/6 paused=True opener=open-error ProtocolViolation wal_unchanged=True late_alone_path=True backfill_seen=True
+== T3: exclusive member ownership (cross-process, same-process, races)
+pass B (reader) while A held, other process               | open-error MemberOwned
+pass B (writer) while A held, other process               | open-error MemberOwned
+pass A's main with 2 members while A held, other process  | open-error MemberOwned
+pass A again while A held, other process                  | ready ok
+pass A's WAL files unchanged by the refusals              | {'main.db': 0, 's1.db': 0, 's2.db': 0}
+pass A (writer) while B held, other process               | open-error MemberOwned
+pass B while A held, same process                         | open-error MemberOwned
+pass A while B held, same process                         | open-error MemberOwned
+pass A's main with 2 members while A held, same process   | open-error MemberOwned
+pass A twice in one process                               | ready ok
+pass B after A's holder was killed                        | ready ok
+pass A after B closed                                     | ready ok
+pass set listing one file twice (symlink)                 | open-error ProtocolViolation
+pass dp-own-a intact afterwards                           | check ok
+pass dp-own-b intact afterwards                           | check ok
+pass race: A vs B (shared member via symlink)             | overlaps=0 opened_a=898 opened_b=1083 refused=1603 errors=0 
+pass race: A vs A's main with 2 members                   | overlaps=0 opened_a=977 opened_b=1017 refused=1573 errors=0 
+== protocol enforcement: bypass statements, ordinary SQLite connections, journal modes, lost metadata (3 files)
+pass writer marker update                           | err Sqlite                               | ok      | recovery=none
+pass writer marker delete                           | err Sqlite                               | ok      | recovery=none
+pass writer marker insert                           | err Sqlite                               | ok      | recovery=none
+pass writer marker drop                             | err Sqlite                               | ok      | recovery=none
+pass writer marker alter                            | err Sqlite                               | ok      | recovery=none
+pass writer trigger on marker                       | err Sqlite                               | ok      | recovery=none
+pass writer trigger writes marker                   | ok err Sqlite                            | ok      | recovery=none
+pass writer cross via COMMIT                        | ok ok ok err Sqlite                      | ok      | recovery=none
+pass writer cross via END                           | ok ok ok err Sqlite                      | ok      | recovery=none
+pass writer cross via RELEASE                       | ok ok ok err Sqlite                      | ok      | recovery=none
+pass writer cross via temp trigger                  | ok err Sqlite                            | ok      | recovery=none
+pass writer journal_mode=delete                     | err Sqlite                               | ok      | recovery=none
+pass writer journal_mode=memory                     | err Sqlite                               | ok      | recovery=none
+pass writer journal_mode=off                        | err Sqlite                               | ok      | recovery=none
+pass writer locking_mode=exclusive                  | err Sqlite                               | ok      | recovery=none
+pass writer synchronous=off                         | err Sqlite                               | ok      | recovery=none
+pass writer synchronous=normal                      | err Sqlite                               | ok      | recovery=none
+pass writer writable_schema                         | err Sqlite                               | ok      | recovery=none
+pass writer attach                                  | err Sqlite                               | ok      | recovery=none
+pass writer detach                                  | err Sqlite                               | ok      | recovery=none
+pass writer vacuum                                  | err Sqlite                               | ok      | recovery=none
+pass writer vacuum, authorizer removed              | ok err Sqlite                            | ok      | recovery=none
+pass writer cross via !commit (allowed)             | ok ok ok ok                              | ok      | recovery=none
+pass writer checkpoint truncate (allowed)           | ok                                       | ok      | recovery=none
+pass writer read pragmas (allowed)                  | ok ok ok                                 | ok      | recovery=none
+pass reader marker update                           | err Sqlite                               | ok      | recovery=none
+pass reader marker delete                           | err Sqlite                               | ok      | recovery=none
+pass reader marker insert                           | err Sqlite                               | ok      | recovery=none
+pass reader marker drop                             | err Sqlite                               | ok      | recovery=none
+pass reader marker alter                            | err Sqlite                               | ok      | recovery=none
+pass reader trigger on marker                       | err Sqlite                               | ok      | recovery=none
+pass reader trigger writes marker                   | err Sqlite err Sqlite                    | ok      | recovery=none
+pass reader cross via COMMIT                        | ok ok ok err Sqlite                      | ok      | recovery=none
+pass reader cross via END                           | ok ok ok err Sqlite                      | ok      | recovery=none
+pass reader cross via RELEASE                       | ok ok ok err Sqlite                      | ok      | recovery=none
+pass reader cross via temp trigger                  | err Sqlite err Sqlite                    | ok      | recovery=none
+pass reader journal_mode=delete                     | err Sqlite                               | ok      | recovery=none
+pass reader journal_mode=memory                     | err Sqlite                               | ok      | recovery=none
+pass reader journal_mode=off                        | err Sqlite                               | ok      | recovery=none
+pass reader locking_mode=exclusive                  | err Sqlite                               | ok      | recovery=none
+pass reader synchronous=off                         | err Sqlite                               | ok      | recovery=none
+pass reader synchronous=normal                      | err Sqlite                               | ok      | recovery=none
+pass reader writable_schema                         | err Sqlite                               | ok      | recovery=none
+pass reader attach                                  | err Sqlite                               | ok      | recovery=none
+pass reader detach                                  | err Sqlite                               | ok      | recovery=none
+pass reader vacuum                                  | err Sqlite                               | ok      | recovery=none
+pass reader vacuum, authorizer removed              | ok err Sqlite                            | ok      | recovery=none
+pass reader cross via !commit (allowed)             | ok ok ok err Sqlite                      | ok      | recovery=none
+pass reader checkpoint truncate (allowed)           | ok                                       | ok      | recovery=none
+pass reader read pragmas (allowed)                  | ok ok ok                                 | ok      | recovery=none
+pass live plain read                                | writer_exit=0 plain={'ok': 78}           | ok      | recovery=none
+pass live plain passive ckpt                        | writer_exit=0 plain={'ok': 81}           | ok      | recovery=none
+pass live plain truncate ckpt                       | writer_exit=0 plain={'ok': 75}           | ok      | recovery=none
+pass live plain write                               | writer_exit=0 plain={'ok': 69}           | ok      | recovery=none
+pass main.db left in delete mode, then opened       | ok                                       | ok      | recovery=none
+pass s1.db left in delete mode, then opened         | ok                                       | ok      | recovery=none
+pass s2.db left in delete mode, then opened         | ok                                       | ok      | recovery=none
+pass s1 held open in delete mode                    | writer_exit=2 while held                 | ok      | recovery=none
+pass plain switches s1 to delete under a reader     | err database is locked                   | ok      | recovery=none
+pass clean set, -cwal-gate deleted                  |                                          | ok      | recovery=none
+pass clean set, -cwal-alive deleted                 |                                          | ok      | recovery=none
+pass clean set, -cwal-writer deleted                |                                          | ok      | recovery=none
+pass clean set, -cwal-live deleted                  |                                          | ok      | recovery=none
+pass clean set, -cwal-snap deleted                  |                                          | ok      | recovery=none
+pass main.db marker row changed by plain conn       | ok                                       | refused | writer-open-error ProtocolViolation
+pass main.db marker table dropped by plain conn     | ok                                       | refused | writer-open-error ProtocolViolation
+pass s1.db marker row changed by plain conn         | ok                                       | refused | writer-open-error ProtocolViolation
+pass s1.db marker table dropped by plain conn       | ok                                       | refused | writer-open-error ProtocolViolation
+pass s2.db marker row changed by plain conn         | ok                                       | refused | writer-open-error ProtocolViolation
+pass s2.db marker table dropped by plain conn       | ok                                       | ok      | recovery=none
+crashed sets (k = write-wal events 1..48): outcome counts per outsider
+  none (control)                 {'clean': 27, 'torn': 21}
+  plain open main.db             {'ok clean': 27, 'ok torn': 5, 'refused torn': 16}
+  plain open s1.db               {'ok clean': 27, 'refused torn': 13, 'ok torn': 8}
+  plain open s2.db               {'ok clean': 27, 'ok torn': 21}
+  plain truncate ckpt, closes    {'ok clean': 27, 'refused torn': 21}
+  plain write s1                 {'ok clean': 27, 'refused torn': 13, 'ok torn': 8}
+  plain passive ckpt, dies       {'ok clean': 27, 'refused torn': 21}
+  plain full ckpt, dies          {'ok clean': 27, 'refused torn': 21}
+  plain restart ckpt, dies       {'ok clean': 27, 'refused torn': 21}
+  plain ckpt+write s1, dies      {'ok clean': 27, 'refused torn': 13, 'ok torn': 8}
+  plain ckpt+write s1, no header {'ok clean': 27, 'refused torn': 13, 'ok torn': 8}
+  -cwal-snap deleted             {'ok clean': 27, 'ok torn': 21}
+  snap page junk                 {'ok clean': 27, 'ok torn': 21}
+  main.db-shm deleted            {'ok clean': 27, 'ok torn': 21}
+  s1.db-shm deleted              {'ok clean': 27, 'ok torn': 21}
+  s2.db-shm deleted              {'ok clean': 27, 'ok torn': 21}
+RESULT PASS

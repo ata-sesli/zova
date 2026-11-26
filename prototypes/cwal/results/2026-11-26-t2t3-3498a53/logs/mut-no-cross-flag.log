@@ -1,0 +1,16 @@
+== writer killed while reader processes keep running
+  [plain surviving readers] 1/10 (2s)
+  [plain surviving readers] 5/10 (8s)
+  [plain surviving readers] 9/10 (14s)
+  [plain surviving readers] 10/10 (15s)
+plain: trials=10 crashed=10 restarted=10 {'reads': 232924, 'mixed': 84231, 'broken': 0, 'ckpt_denied': 0, 'restart_broken': 0, 'snapshot_reads': 0, 'seq_retries': 0, 'snapshot_waits': 0, 'ckpt_races': 0, 'ckpt_violations': 0} check_failures=4
+     sync#60 FAIL pair ids not a prefix main=21/21 store=20/21
+     sync#59 FAIL pair ids not a prefix main=23/23 store=22/23
+     sync#54 FAIL pair ids not a prefix main=19/19 store=18/19
+  [cwal surviving readers] 1/10 (2s)
+  [cwal surviving readers] 5/10 (8s)
+  [cwal surviving readers] 9/10 (14s)
+  [cwal surviving readers] 10/10 (15s)
+cwal: trials=10 crashed=10 restarted=10 {'reads': 187173, 'mixed': 20440, 'broken': 0, 'ckpt_denied': 7467, 'restart_broken': 0, 'snapshot_reads': 1424, 'seq_retries': 523, 'snapshot_waits': 56, 'ckpt_races': 0, 'ckpt_violations': 0} check_failures=1
+     sync#59 FAIL pair ids not a prefix main=19/19 store=18/19
+RESULT FAIL

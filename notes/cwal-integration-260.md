@@ -17,7 +17,9 @@ hooks into Zova.
 
 The baseline is commit `77c5b5a` on `work/cwal-prototype`: the prototype as
 reviewed in section 8 plus the R1–R3 fixes. Integration starts by porting
-`prototypes/cwal/src/cwal.zig` from this commit, unchanged in behavior. Later
+`prototypes/cwal/src/cwal.zig` from this commit, unchanged in behavior,
+together with the T2/T3 additions (member ownership and the same-set
+heads check, §2). Later
 protocol changes need a concrete integration requirement, and must rerun the
 suites and mutation sweep below against the changed code.
 
@@ -90,8 +92,8 @@ area must report on it.
 | Id | Item | State | Closing evidence |
 |---|---|---|---|
 | T1 (R5) | Native ARM64 validation. The checkpoint counter relies on two `xShmBarrier` calls; qemu runs used x86 ordering. | Deferred | Torture `readers`, `ckptrace`, `ckptreset`, `closeckpt`, `nreaders` and the crash sections pass natively on ARM64 Linux (`ubuntu-24.04-arm` is already a CI runner) and on Apple Silicon macOS, plus a mutation run of `no-ckpt-validate` detected there. |
-| T2 (R3) | R3 timing case: a foreign checkpoint of a torn commit, combined with the last other handle closing during this handle's open. The fix is reviewed but the timing has never been reproduced. On the shared path the heads are read only when no other handle of the process is registered, so a handle of another set in the same process leaves this undetected. | Open | A deterministic test that pauses the opener between its `-alive` test and the mapping (a named delay point), kills the last other handle there, and lets an outsider checkpoint the torn commit, then shows the open refuses. The same harness makes `no-late-alone` and `no-cross-flag` deterministic. Today they are caught only when a race lines up (§1). |
-| T3 (R4) | Member ownership is decided per main file. | Addressed by design §3; open until its tests exist. | Tests in §3. |
+| T2 (R3) | R3 timing case: a foreign checkpoint of a torn commit, combined with the last other handle closing during this handle's open. On the shared path the heads were read only when no other handle of the process was registered, so a handle of another set in the same process left this undetected. | Closed in the prototype (2026-11-26) | Torture section `delaypoints`: a pause point (`CWAL_PAUSE_AT=open-shared`) and two crash probes (`commit-sync-first`, `commit-sync-next`) make R3, `no-late-alone` and `no-cross-flag` deterministic. The shared path now skips the heads only when another handle of the same set is open in the process; member ownership (T3) makes that safe. `no-cross-flag`, `no-late-alone`, `no-early-heads` and `heads-process-wide` are each detected. R3 needs a lost seqlock page to be reachable (REVIEW.md R3). Raw results: `prototypes/cwal/results/2026-11-26-t2t3-3498a53/`. |
+| T3 (R4) | Member ownership was decided per main file. | Closed in the prototype (2026-11-26) | Per-member `flock` ownership with a recorded set identity (§3). Torture section `ownership`: cross-process and same-process refusals (`MemberOwned`), same-set sharing, release on kill, and a two-set open/close race with no overlapping intervals; `no-ownership` is detected. Same raw results directory. |
 | T4 | Endurance: 12–24 h sustained workloads (deferred from section 7). | Deferred | Run against the integrated implementation, not the prototype. |
 | T5 | Windows: no Windows VFS or lock layer exists. | Deferred; out of scope for the experiment (§9). | — |
 
@@ -121,12 +123,19 @@ files on purpose.
    `bound_set_id` and `store_id`, read through the recovery connection,
    must match main's row. A mismatch refuses the open (`ProtocolViolation`),
    so recovery never repairs a file that belongs to another set.
-3. Truncation also requires that no other process has the member's
-   wal-index mapped: before truncating a member's WAL or deleting its
-   `-shm`, test its DMS byte with `fcntl(F_GETLK)`. A lock held by another
-   process means another set, or an outsider, has that file open, so the
-   open refuses. This is the guard REVIEW.md R4 proposes. It adds a check
-   to the recovery decision. The protocol is unchanged.
+3. Every open owns each member before it takes the set's gate or runs
+   recovery (implemented and tested in the prototype, T3). Per member,
+   `<member>-cwal-own` is held shared by every handle of the owning set
+   and records the set's identity (the members' resolved paths, in order).
+   An opener decides under `<member>-cwal-mgate` (exclusive, held
+   briefly): an exclusive non-blocking lock on `-cwal-own` means no owner,
+   so it records its identity and keeps the lock shared; otherwise it joins
+   only a matching identity and fails with `MemberOwned`. Locks are `flock`,
+   per open file description, so handles in one process exclude each other
+   too. This replaces the `fcntl(F_GETLK)` test first proposed for R4:
+   `F_GETLK` sees only other processes' POSIX locks, at one instant, so it
+   cannot serialise two openers. Ownership does not cover connections
+   outside the protocol (REVIEW.md R6). The protocol is unchanged.
 4. Lock-file names come from main's resolved path (as in the prototype).
    Store paths are stored verbatim and resolved against the process working
    directory (`src/database/paths.zig:111-125`), so two processes in
@@ -142,8 +151,9 @@ Tests:
 - a store bound to a second main file (the first then fails open, as today);
 - a hand-copied store with the same ids opened beside its original;
 - a relative store path opened from two working directories;
-- a member held open by a plain SQLite connection in another process during
-  recovery (refuses, and no WAL changes).
+- a store opened as a member of a second CWAL set while the first is open,
+  in another process and in the same process: refused with `MemberOwned`,
+  and no WAL changes (the prototype's `ownership` section, ported).
 
 ## 4. Transaction interception
 
@@ -384,8 +394,11 @@ optional within 15. The bump lands with the open-path phase, not before.
   every handle and reopen) and `error.CommitSetNeedsRepair`, as additive
   C ABI codes. This is an ABI extension and needs approval with the format
   decision.
-- **Late alone path.** Ported as-is, with the R3 restriction on the shared
-  path (T2).
+- **Late alone path.** Ported as-is, with the same-set heads check (T2).
+- **`MemberOwned`.** New in T3. It needs a Zova error and a C ABI result
+  code; the approved additive codes do not include it. Mapping it to an
+  existing busy code or adding a code is a decision for the integration
+  phase.
 - **Debug log.** `CWAL_DEBUG` becomes a test-only option. Production
   builds keep no per-open log file.
 
@@ -473,7 +486,8 @@ Each phase lands with its tests. Nothing ships outside
      the plain-WAL baseline oracle.
    - Rerun the crash, power-loss, readers, checkpoint, enforcement and
      N-file sections, plus the mutation sweep.
-   - Close T1 and T2. Run the 12–24 h endurance runs (T4).
+   - Close T1. Rerun the T2/T3 sections on the integrated build. Run the
+     12–24 h endurance runs (T4).
 
 ## 12. Decisions (approved 2026-11-26)
 

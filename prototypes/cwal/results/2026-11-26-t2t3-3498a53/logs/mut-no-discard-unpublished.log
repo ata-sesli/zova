@@ -1,0 +1,26 @@
+== N files: frames a killed writer left unpublished, next writer skips that file
+  [3 files dangling frames] 1/153 (1s)
+  [3 files dangling frames] 57/153 (6s)
+  [3 files dangling frames] 113/153 (11s)
+  [3 files dangling frames] 153/153 (15s)
+3 files: syncs=51 runs=153 crashed=139 reader_ok=147 mixed=7260 failures=6
+        6  FAIL torn transactions=# (writer exits #/#, kept /tmp/claude
+     sync#4 skip file 2: FAIL torn transactions=1 (writer exits -9/0, kept /tmp/claude-1000/-home-atawirtz-workspace-zova/daa0c463-140c-4b37-9672-84b77de94139/scratchpad/mut-w/nd-3-4-2.before-check)
+     sync#7 skip file 2: FAIL torn transactions=1 (writer exits -9/0, kept /tmp/claude-1000/-home-atawirtz-workspace-zova/daa0c463-140c-4b37-9672-84b77de94139/scratchpad/mut-w/nd-3-7-2.before-check)
+     sync#11 skip file 2: FAIL torn transactions=1 (writer exits -9/0, kept /tmp/claude-1000/-home-atawirtz-workspace-zova/daa0c463-140c-4b37-9672-84b77de94139/scratchpad/mut-w/nd-3-11-2.before-check)
+  [8 files dangling frames] 1/480 (1s)
+  [8 files dangling frames] 57/480 (6s)
+  [8 files dangling frames] 113/480 (11s)
+  [8 files dangling frames] 169/480 (17s)
+  [8 files dangling frames] 225/480 (22s)
+  [8 files dangling frames] 278/480 (27s)
+  [8 files dangling frames] 333/480 (32s)
+  [8 files dangling frames] 387/480 (37s)
+  [8 files dangling frames] 441/480 (42s)
+  [8 files dangling frames] 480/480 (46s)
+8 files: syncs=100 runs=480 crashed=480 reader_ok=476 mixed=2882 failures=4
+        4  FAIL torn transactions=# (writer exits #/#, kept /tmp/claude
+     sync#24 skip file 5: FAIL torn transactions=1 (writer exits -9/0, kept /tmp/claude-1000/-home-atawirtz-workspace-zova/daa0c463-140c-4b37-9672-84b77de94139/scratchpad/mut-w/nd-8-24-5.before-check)
+     sync#25 skip file 1: FAIL torn transactions=1 (writer exits -9/0, kept /tmp/claude-1000/-home-atawirtz-workspace-zova/daa0c463-140c-4b37-9672-84b77de94139/scratchpad/mut-w/nd-8-25-1.before-check)
+     sync#28 skip file 2: FAIL torn transactions=1 (writer exits -9/0, kept /tmp/claude-1000/-home-atawirtz-workspace-zova/daa0c463-140c-4b37-9672-84b77de94139/scratchpad/mut-w/nd-8-28-2.before-check)
+RESULT FAIL

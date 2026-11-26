@@ -1,0 +1,19 @@
+== T3: exclusive member ownership (cross-process, same-process, races)
+FAIL B (reader) while A held, other process               | ready ok
+FAIL B (writer) while A held, other process               | ready ok
+FAIL A's main with 2 members while A held, other process  | ready ok
+pass A again while A held, other process                  | ready ok
+pass A's WAL files unchanged by the refusals              | {'main.db': 0, 's1.db': 0, 's2.db': 0}
+FAIL A (writer) while B held, other process               | ready ok
+FAIL B while A held, same process                         | ready ok
+FAIL A while B held, same process                         | ready ok
+FAIL A's main with 2 members while A held, same process   | ready ok
+pass A twice in one process                               | ready ok
+pass B after A's holder was killed                        | ready ok
+pass A after B closed                                     | ready ok
+FAIL set listing one file twice (symlink)                 | ready ok
+pass dp-own-a intact afterwards                           | check ok
+pass dp-own-b intact afterwards                           | check ok
+FAIL race: A vs B (shared member via symlink)             | overlaps=369 opened_a=1118 opened_b=1164 refused=0 errors=0 
+FAIL race: A vs A's main with 2 members                   | overlaps=50 opened_a=868 opened_b=887 refused=0 errors=0 
+RESULT FAIL

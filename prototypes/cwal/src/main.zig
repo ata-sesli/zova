@@ -284,14 +284,24 @@ fn nState(conn: *Conn, n: usize) NState {
 /// writer or reader) and print "ok" or "err <error>" for each. "!commit"
 /// calls Conn.commit, "!autocommit <sql>" Conn.autocommit, "!rollback"
 /// Conn.rollbackOpen, "!noauth" removes the handle's authorizer (as an
-/// application that installs its own would).
+/// application that installs its own would). "$txn" in a statement becomes
+/// Conn.nextTxn(). With --hold DIR (and --hold-files N), a CWAL reader
+/// handle on that set is opened first and kept open until the end, so both
+/// handles share one process. With --ready 1, "ready" is printed once the
+/// handle is open, before stdin is read.
 fn cmdNExec(dir: []const u8, args: Args) void {
     const role = std.meta.stringToEnum(cwal.Role, args.get("--role") orelse "writer") orelse die("bad --role", .{});
+    const hold: ?*Conn = if (args.get("--hold")) |hold_dir| openN(hold_dir, @intCast(args.int("--hold-files", 2)), .{ .mode = .cwal, .role = .reader }) catch |err| {
+        out("hold-error {s}\n", .{@errorName(err)});
+        cwal.flushPending();
+        c.exit(2);
+    } else null;
     const conn = openN(dir, nFiles(args), .{ .mode = args.mode(), .role = role }) catch |err| {
         out("open-error {s}\n", .{@errorName(err)});
         cwal.flushPending();
         c.exit(2);
     };
+    if (args.int("--ready", 0) != 0) out("ready\n", .{});
     var input: std.ArrayList(u8) = .empty;
     var chunk: [4096]u8 = undefined;
     while (true) {
@@ -310,13 +320,91 @@ fn cmdNExec(dir: []const u8, args: Args) void {
         else if (std.mem.eql(u8, line, "!noauth"))
             if (c.sqlite3_set_authorizer(conn.db, null, null) != c.SQLITE_OK) error.Sqlite else {}
         else if (std.mem.startsWith(u8, line, "!autocommit "))
-            conn.autocommit(bufPrintZ(&sql_buf, "{s}", .{line["!autocommit ".len..]}) catch die("long line", .{}))
+            conn.autocommit(expandTxn(&sql_buf, line["!autocommit ".len..], conn.nextTxn()))
         else
-            conn.exec(bufPrintZ(&sql_buf, "{s}", .{line}) catch die("long line", .{}));
+            conn.exec(expandTxn(&sql_buf, line, conn.nextTxn()));
         if (result) |_| out("ok\n", .{}) else |err| out("err {s}\n", .{@errorName(err)});
     }
     conn.close();
+    if (hold) |h| h.close();
     cwal.flushPending();
+}
+
+/// `line` with every "$txn" replaced by `txn`.
+fn expandTxn(buf: []u8, line: []const u8, txn: u64) [:0]const u8 {
+    var len: usize = 0;
+    var rest = line;
+    while (std.mem.indexOf(u8, rest, "$txn")) |at| {
+        len += (std.fmt.bufPrint(buf[len..], "{s}{d}", .{ rest[0..at], txn }) catch die("long line", .{})).len;
+        rest = rest[at + "$txn".len ..];
+    }
+    len += (bufPrintZ(buf[len..], "{s}", .{rest}) catch die("long line", .{})).len;
+    return buf[0..len :0];
+}
+
+const OwnJob = struct {
+    dirs: [2][]const u8,
+    files: [2]usize,
+    deadline_ns: u64,
+    hold_us: u32,
+    gap_us: u32,
+    seed: u64,
+    opened: [2]u64 = .{ 0, 0 },
+    refused: u64 = 0,
+    errors: u64 = 0,
+};
+
+fn ownThread(job: *OwnJob) void {
+    var prng = std.Random.DefaultPrng.init(job.seed);
+    const rand = prng.random();
+    while (cwal.monotonicNs() < job.deadline_ns) {
+        const s = rand.uintLessThan(usize, 2);
+        const conn = openN(job.dirs[s], job.files[s], .{ .mode = .cwal, .role = .reader }) catch |err| {
+            if (err == error.MemberOwned) job.refused += 1 else {
+                job.errors += 1;
+                if (job.errors <= 3) out("open-error {s}\n", .{@errorName(err)});
+            }
+            continue;
+        };
+        const start = cwal.monotonicNs();
+        _ = c.usleep(rand.uintLessThan(u32, job.hold_us + 1));
+        const end = cwal.monotonicNs();
+        out("{c} {d} {d}\n", .{ "AB"[s], start, end });
+        conn.close();
+        job.opened[s] += 1;
+        _ = c.usleep(rand.uintLessThan(u32, job.gap_us + 1));
+    }
+}
+
+/// Member-ownership race: --threads threads each open and close, until
+/// --duration-ms, a CWAL reader handle on set A (<dir>, --files) or set B
+/// (--dir-b, --files-b), chosen at random, hold it up to --hold-us, and
+/// pause up to --gap-us after closing it.
+/// Each held handle prints "A|B <start> <end>" (CLOCK_MONOTONIC ns, taken
+/// after open returned and before close), so the intervals of several
+/// processes can be checked for overlap. The last line counts opens,
+/// MemberOwned refusals and other open errors.
+fn cmdNOwn(dir: []const u8, args: Args) void {
+    const threads = args.int("--threads", 4);
+    var jobs: [16]OwnJob = undefined;
+    var handles: [16]std.Thread = undefined;
+    const deadline = cwal.monotonicNs() + args.int("--duration-ms", 1000) * 1_000_000;
+    const dir_b = args.get("--dir-b") orelse die("--dir-b required", .{});
+    for (0..threads) |i| {
+        jobs[i] = .{ .dirs = .{ dir, dir_b }, .files = .{ nFiles(args), @intCast(args.int("--files-b", 2)) }, .deadline_ns = deadline, .hold_us = @intCast(args.int("--hold-us", 500)), .gap_us = @intCast(args.int("--gap-us", 500)), .seed = i * 7919 + @as(u64, @intCast(c.getpid())) };
+        handles[i] = std.Thread.spawn(.{}, ownThread, .{&jobs[i]}) catch die("spawn", .{});
+    }
+    var opened: [2]u64 = .{ 0, 0 };
+    var refused: u64 = 0;
+    var errors: u64 = 0;
+    for (0..threads) |i| {
+        handles[i].join();
+        opened[0] += jobs[i].opened[0];
+        opened[1] += jobs[i].opened[1];
+        refused += jobs[i].refused;
+        errors += jobs[i].errors;
+    }
+    out("own opened_a={d} opened_b={d} refused={d} errors={d}\n", .{ opened[0], opened[1], refused, errors });
 }
 
 fn cmdNSeed(dir: []const u8, args: Args) void {
@@ -1389,9 +1477,9 @@ fn cmdWCheck(dir: []const u8, args: Args) void {
 pub fn main(init: std.process.Init.Minimal) void {
     cwal.register();
     const list = init.args.toSlice(std.heap.c_allocator) catch die("args", .{});
-    if (list.len < 3) die("usage: cwal <seed|writer|reader|check|recover|state|bench|benchrw|nseed|nwriter|nreader|ncheck|nexec|wseed|wrun|wcheck> <dir> [options]", .{});
+    if (list.len < 3) die("usage: cwal <seed|writer|reader|check|recover|state|bench|benchrw|nseed|nwriter|nreader|ncheck|nexec|nown|wseed|wrun|wcheck> <dir> [options]", .{});
     const args: Args = .{ .list = list };
     const cmd = list[1];
     const dir = list[2];
-    if (std.mem.eql(u8, cmd, "seed")) cmdSeed(dir) else if (std.mem.eql(u8, cmd, "writer")) cmdWriter(dir, args) else if (std.mem.eql(u8, cmd, "reader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "check")) cmdCheck(dir, args) else if (std.mem.eql(u8, cmd, "recover")) cmdRecover(dir, args) else if (std.mem.eql(u8, cmd, "state")) cmdState(dir) else if (std.mem.eql(u8, cmd, "bench")) cmdBench(dir, args) else if (std.mem.eql(u8, cmd, "benchrw")) cmdBenchRw(dir, args) else if (std.mem.eql(u8, cmd, "nseed")) cmdNSeed(dir, args) else if (std.mem.eql(u8, cmd, "nwriter")) cmdNWriter(dir, args) else if (std.mem.eql(u8, cmd, "nreader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "ncheck")) cmdNCheck(dir, args) else if (std.mem.eql(u8, cmd, "nsem")) cmdNSem(dir, args) else if (std.mem.eql(u8, cmd, "nwriters")) cmdNWriters(dir, args) else if (std.mem.eql(u8, cmd, "nexec")) cmdNExec(dir, args) else if (std.mem.eql(u8, cmd, "wseed")) cmdWSeed(dir, args) else if (std.mem.eql(u8, cmd, "wrun")) cmdWRun(dir, args) else if (std.mem.eql(u8, cmd, "wcheck")) cmdWCheck(dir, args) else die("unknown command {s}", .{cmd});
+    if (std.mem.eql(u8, cmd, "seed")) cmdSeed(dir) else if (std.mem.eql(u8, cmd, "writer")) cmdWriter(dir, args) else if (std.mem.eql(u8, cmd, "reader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "check")) cmdCheck(dir, args) else if (std.mem.eql(u8, cmd, "recover")) cmdRecover(dir, args) else if (std.mem.eql(u8, cmd, "state")) cmdState(dir) else if (std.mem.eql(u8, cmd, "bench")) cmdBench(dir, args) else if (std.mem.eql(u8, cmd, "benchrw")) cmdBenchRw(dir, args) else if (std.mem.eql(u8, cmd, "nseed")) cmdNSeed(dir, args) else if (std.mem.eql(u8, cmd, "nwriter")) cmdNWriter(dir, args) else if (std.mem.eql(u8, cmd, "nreader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "ncheck")) cmdNCheck(dir, args) else if (std.mem.eql(u8, cmd, "nsem")) cmdNSem(dir, args) else if (std.mem.eql(u8, cmd, "nwriters")) cmdNWriters(dir, args) else if (std.mem.eql(u8, cmd, "nexec")) cmdNExec(dir, args) else if (std.mem.eql(u8, cmd, "nown")) cmdNOwn(dir, args) else if (std.mem.eql(u8, cmd, "wseed")) cmdWSeed(dir, args) else if (std.mem.eql(u8, cmd, "wrun")) cmdWRun(dir, args) else if (std.mem.eql(u8, cmd, "wcheck")) cmdWCheck(dir, args) else die("unknown command {s}", .{cmd});
 }

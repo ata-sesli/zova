@@ -36,6 +36,8 @@ are to `src/cwal.zig`.
 | `-alive` | flock | Shared by every open handle; exclusive for an opener that finds no other. |
 | `-writer` | flock | Exclusive: the one writer. |
 | `-live` | flock | Exclusive: a live writer whose open found the set readable. |
+| `<member>-cwal-own` | flock + contents, next to every member | Shared by every open handle of the set that owns the member; contains that set's identity (every member's resolved path, in order). |
+| `<member>-cwal-mgate` | flock, next to every member | Held exclusively, briefly, while an opener decides whether it may own the member. |
 
 ## Invariants
 
@@ -54,6 +56,7 @@ are to `src/cwal.zig`.
 | I11 | `-live` is held by the writer of the current window, if that writer is alive. A writer that finds an interrupted cross-file window fails open and never takes it. | `openCoordination` 1437, 1449 |
 | I12 | `broken = 1`, or `seq` odd with `cross = 1` and no live writer, makes the set unreadable until an alone opener recovers it. | `markersReadable` 1546 |
 | I13 | Application statements cannot write the marker tables, change journal mode, locking mode, sync level or writable schema, or attach/detach. A commit frame written outside an approved commit (VACUUM and other hook bypasses) is refused. | `authorize` 1214, `observeWalWrite` 1669 |
+| I14 | While any handle has a member open, every open handle that lists the member belongs to one set (same identity). So only handles of the set that owns a member recover, checkpoint or read its `-shm`. | `acquireMembers` 1596, `acquireMember` 1608, `close` 1379 |
 
 ## State transitions
 
@@ -105,10 +108,14 @@ are to `src/cwal.zig`.
 
 ### Open and recovery
 
+0. Own every member (I14), or fail with `MemberOwned`; a set that lists
+   one file twice fails with `ProtocolViolation`.
 1. Take `-gate`. Writer: take `-writer` or fail with `WriterBusy`.
 2. Try `-alive` exclusively.
    - Got it (alone): `recover()`, reset the page, share `-alive`.
-   - Otherwise share `-alive`; refuse an unreadable set.
+   - Otherwise share `-alive`; refuse an unreadable set; read the
+     wal-index heads unless another handle of this set is open in this
+     process.
 3. Writer: close a dead writer's single-member window (`seq` odd → even);
    take `-live`.
 4. Open SQLite on every member; require WAL mode; map every wal-index.
@@ -156,6 +163,9 @@ Each mutation removes one mechanism. The suite must fail with each one.
 | `no-late-alone` | Recheck of `-alive` after mapping (I8) |
 | `no-authorizer` | Authorizer (I13) |
 | `no-frame-guard` | Commit-frame guard (I13) |
+| `no-early-heads` | Heads read before mapping on the late-alone path (S5, R3) |
+| `heads-process-wide` | The pre-T2 condition for reading heads on the shared path (S5, R3) |
+| `no-ownership` | Member ownership (I14) |
 
 ## Review findings
 
@@ -219,16 +229,73 @@ checkpointed it and then wrote.**
   rules out the late-alone path anyway (closes take `-gate`); a handle of
   another set in the same process means this case stays undetected.
 - Evidence: code reading only; the timing is not reproduced by a test.
+- Follow-up (T2, closed): the shared path now reads the heads unless
+  another handle of *this set* is open in the process (`otherHandleOfSet`,
+  a per-slot set-identity hash). This is safe because of member ownership
+  (R4/I14): no handle of another set can have one of this set's members
+  open, so reading a member's `-shm` drops no other set's locks. The
+  `delaypoints` torture section reproduces the timing deterministically: a
+  reader holds the set; the writer is killed at `commit-sync-next` (main
+  published and checkpointed by an ordinary connection, `s1` durable but
+  unpublished, `s2` not written); the seqlock page is deleted; the opener
+  pauses at `open-shared` (`CWAL_PAUSE_AT`) while the holder is killed.
+  The opener must refuse with `ProtocolViolation` and leave every WAL
+  unchanged, with and without a handle on another set in its process.
+  `heads-process-wide` (the old condition) fails only the second case: the
+  opener truncates `main.db-wal` although the torn commit is already in
+  `main.db`.
+- Reachability: the case needs the seqlock page lost or reset. With the
+  page intact, the dead writer's open cross-file window makes every shared
+  opener fail with `Broken` before it reaches the late-alone path, and
+  frames that were never published cannot be checkpointed by an outside
+  connection while a CWAL handle keeps the wal-index mapped.
 
 ### Suspected / design limits
 
 **R4. "Alone" is decided per main database, not per member file.** `-alive`,
 `-gate` and the checkpoint counter live next to `paths[0]`. A member shared
 by two sets, or one main opened with different member lists, lets one set
-recover (truncate) a WAL another set's handles are reading. Possible
-guard: refuse to truncate or unlink a member's `-shm` while another process
-holds its DMS byte (`fcntl(F_GETLK)`). Not reproduced; Zova would own the
-member list, which makes this a configuration rule rather than a bug.
+recover (truncate) a WAL another set's handles are reading.
+- Fix (T3, applied): exclusive member ownership (I14, `acquireMembers`).
+  Before anything else, an opener takes each member's `-cwal-mgate`
+  exclusively and tries `-cwal-own` exclusively without blocking. Success
+  means no handle owns the member: it writes its set identity and keeps the
+  lock shared. Failure means owners hold it shared; the opener joins only if
+  the recorded identity equals its own, else fails with `MemberOwned`. The
+  record changes only under the exclusive lock, which needs every owner
+  gone, and every decision is made under the member gate, so two sets can
+  never hold one member at once. Locks are `flock`, which belongs to the
+  open file description, so threads and handles of one process exclude each
+  other too. `F_GETLK` is not used: it reports only other processes' POSIX
+  locks and only at the instant of the call, so it can't serialise two
+  openers.
+- Evidence: the `ownership` torture section. Static cases, in another
+  process and in the same process (`nexec --hold`): a set sharing a member
+  through a symlink, and A's main with a different member list, are refused
+  with `MemberOwned` in both roles; the owner's WALs are unchanged; the same
+  set opens twice in one process and from two processes; a killed owner
+  releases ownership; a set listing one file twice is refused. Race cases
+  (`nown`): 2 processes × 2 threads open and close the two overlapping sets
+  at random for 2 s; no interval in which a handle of one set was open
+  overlaps one of the other. `no-ownership` fails every static refusal and
+  both races.
+- Limit: identity is by resolved path. A hard link or bind mount gives one
+  file two paths and is not detected.
+
+**R6. An outside checkpoint during recovery is not detected.** Found while
+writing the T2 tests; code reading only, not reproduced.
+- Component: `openCoordination` → `recover`.
+- Bug: the foreign-checkpoint check uses wal-index heads read before
+  recovery starts. An ordinary connection that opens a member after that
+  read, checkpoints the torn commit and exits without closing leaves its
+  `nBackfill` only in a `-shm` that recovery's own connection then
+  rebuilds. Recovery truncates the WAL although the torn commit is in the
+  database file.
+- Impact: needs an outside connection racing recovery itself; the same
+  class as the undetected cases in README "Limits" (a dead checkpointer, a
+  lost `-shm`). CWAL handles cannot cause it.
+- Fix: not attempted (outside T2/T3 scope, and it would change recovery).
+  In Zova, raw access to members is not a supported path.
 
 **R5. ARM64 ordering is argued, not tested on hardware.** The counter's
 correctness on ARM64 depends on the two `xShmBarrier` calls (store-buffer
@@ -334,6 +401,7 @@ three full runs would take several hours.)
 | ReleaseSafe | 18.7 min | **PASS**: same (179 lines; 70/70) |
 | Debug | 19.5 min | **PASS**: same (179 lines; 70/70) |
 | ReleaseSafe, after the R1–R3 fixes | 18.8 min | **PASS**: 0 CWAL failures, mixed reads or violations; 70/70; crashed sets with the two R1 outsiders: 0 tears, 0 partial refusals |
+| Debug / ReleaseSafe / ReleaseFast, with T2/T3 | 21.9 / 21.3 / 21.3 min | **PASS** on each: 91/91 `pass` lines (70 enforcement, 4 delay-point, 17 ownership), 0 `FAIL`; the two new sections also pass 30 of 30 repeats per build (`results/2026-11-26-t2t3-3498a53/`) |
 
 No safety check fired in ReleaseSafe or Debug, and ReleaseFast, which has
 none, gave the same results.
@@ -375,7 +443,24 @@ it covers. Two weaknesses:
   the gap between the `-alive` check and the mapping with a 20 ms sleep,
   but the writer kill lands in it under the slower Debug build only. A
   deterministic test would pause the opener inside that gap and kill the
-  last other handle there.
+  last other handle there. (Done in T2; see below.)
 - `no-frame-guard` needed a test hook (`nexec !noauth`) because the
   authorizer refuses `VACUUM` first. That matches the real exposure: an
   application that installs its own authorizer removes CWAL's.
+
+### T2/T3 sweep
+
+2026-11-26, tmpfs, ReleaseSafe, `3498a53` plus the T2/T3 changes
+(`results/2026-11-26-t2t3-3498a53/`). Same options as above. The swept
+sections, now including `delaypoints` and `ownership`, pass with no
+mutation (237 s). All 18 earlier defect mutations are detected again,
+except `no-late-alone` by `ndangle` (0 / 153 and 0 / 480, as before); the
+`no-ckpt-skip` control passes.
+
+| Mutation | Sections | Result |
+|---|---|---|
+| `no-cross-flag` | delaypoints | detected (2 s): the new writer opens, 1,228 mixed reads, check finds a torn set |
+| `no-late-alone` | delaypoints | detected (2 s): 100 mixed reads; both R3 openers serve the set |
+| `no-early-heads` | delaypoints | detected: both R3 openers truncate `main.db-wal` past a checkpointed torn commit |
+| `heads-process-wide` | delaypoints | detected by the same-process R3 case only, as intended |
+| `no-ownership` | ownership | detected: 10 refusal cases open; 369 and 50 overlapping intervals in the races |

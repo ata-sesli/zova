@@ -1,0 +1,39 @@
+SOURCE 3498a53a39b848319b809a29d4a5587a304d8071 + working tree (source.patch sha256 71f6ab5e19dad284) 2026-11-26T21:56:16+03:00
+BUILT Debug e2be3be291a5009f
+BUILT ReleaseSafe 8ec575e187f1e2c3
+BUILT ReleaseFast 407200851dafefd0
+REPEAT Debug delaypoints+ownership pass=30 fail=0 186s
+REPEAT ReleaseSafe delaypoints+ownership pass=30 fail=0 185s
+REPEAT ReleaseFast delaypoints+ownership pass=30 fail=0 185s
+SUITE Debug start 22:06:58
+SUITE Debug rc=0 RESULT PASS 1314s
+SUITE ReleaseSafe start 22:28:52
+SUITE ReleaseSafe rc=0 RESULT PASS 1279s
+SUITE ReleaseFast start 22:50:12
+SUITE ReleaseFast rc=0 RESULT PASS 1279s
+MUT none [crash readers survivors ckptrace ckptreset closeckpt ndangle nrestart enforce delaypoints ownership] rc=0 pass (control) 237s
+MUT no-markers [crash] rc=1 detected 21s
+MUT no-marker-rollback [powerloss] rc=1 detected 22s
+MUT no-cross-flag [survivors] rc=1 detected 31s
+MUT no-cross-flag [delaypoints] rc=1 detected 2s
+MUT no-gate [readers] rc=1 detected 15s
+MUT no-seq-check [readers] rc=1 detected 18s
+MUT no-snapshot-open [readers] rc=1 detected 17s
+MUT no-solo-window [readers] rc=1 detected 16s
+MUT no-lock-gate [closeckpt] rc=1 detected 31s
+MUT no-ckpt-gate [closeckpt] rc=1 detected 31s
+MUT no-ckpt-validate [ckptrace] rc=1 detected 15s
+MUT no-ckpt-skip [ckptrace] rc=0 pass (control) 16s
+MUT no-ckpt-reset [ckptreset] rc=1 detected 8s
+MUT no-discard-unpublished [ndangle] rc=1 detected 60s
+MUT no-late-alone [ndangle] rc=0 NOT DETECTED 60s
+MUT no-late-alone [delaypoints] rc=1 detected 2s
+MUT no-early-heads [delaypoints] rc=1 detected 2s
+MUT heads-process-wide [delaypoints] rc=1 detected 2s
+MUT no-ownership [ownership] rc=1 detected 5s
+MUT no-open-gate [ndangle] rc=1 detected 60s
+MUT no-txn-epoch [nrestart] rc=1 detected 9s
+MUT no-authorizer [enforce] rc=1 detected 38s
+MUT no-frame-guard [enforce] rc=1 detected 38s
+MUT no-backfill-check [enforce] rc=1 detected 39s
+ALL-DONE 2026-11-26T23:24:46+03:00

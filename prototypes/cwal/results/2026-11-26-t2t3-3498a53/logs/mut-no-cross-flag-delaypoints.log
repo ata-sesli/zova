@@ -1,0 +1,6 @@
+== T2: deterministic delay points (R3, no-late-alone, no-cross-flag; 3 files)
+FAIL no-cross-flag: new writer after a dead cross window  | seq=7 cross=1 writer2_exit=0 reader_exit=1 mixed=1228 check=FAIL torn transactions=1 recovery=-
+pass no-late-alone: last holder dies during open          | paused=True reader_exit=0 reads=5927 mixed=0 late_alone_path=True check=ok recovery=none
+pass R3: foreign checkpoint + late alone                  | outsider_ckpt=0/6/6 paused=True opener=open-error ProtocolViolation wal_unchanged=True late_alone_path=True backfill_seen=True
+pass R3: same, opener holds another set                   | outsider_ckpt=0/6/6 paused=True opener=open-error ProtocolViolation wal_unchanged=True late_alone_path=True backfill_seen=True
+RESULT FAIL

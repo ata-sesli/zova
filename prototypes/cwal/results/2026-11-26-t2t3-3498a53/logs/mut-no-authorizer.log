@@ -1,0 +1,89 @@
+== protocol enforcement: bypass statements, ordinary SQLite connections, journal modes, lost metadata (3 files)
+FAIL writer marker update                           | ok                                       | refused | writer-open-error ProtocolViolation
+FAIL writer marker delete                           | ok                                       | refused | writer-open-error ProtocolViolation
+pass writer marker insert                           | err Sqlite                               | ok      | recovery=none
+FAIL writer marker drop                             | ok                                       | ok      | recovery=none
+FAIL writer marker alter                            | ok                                       | refused | sqlite: insert or ignore into m1.cwal_marker values (0, 0, 0): table m
+FAIL writer trigger on marker                       | ok                                       | ok      | recovery=none
+pass writer trigger writes marker                   | ok err Sqlite                            | ok      | recovery=none
+pass writer cross via COMMIT                        | ok ok ok err Sqlite                      | ok      | recovery=none
+pass writer cross via END                           | ok ok ok err Sqlite                      | ok      | recovery=none
+pass writer cross via RELEASE                       | ok ok ok err Sqlite                      | ok      | recovery=none
+pass writer cross via temp trigger                  | ok err Sqlite                            | ok      | recovery=none
+FAIL writer journal_mode=delete                     | ok                                       | ok      | recovery=none
+FAIL writer journal_mode=memory                     | ok                                       | ok      | recovery=none
+FAIL writer journal_mode=off                        | ok                                       | ok      | recovery=none
+FAIL writer locking_mode=exclusive                  | ok                                       | ok      | recovery=none
+FAIL writer synchronous=off                         | ok                                       | ok      | recovery=none
+FAIL writer synchronous=normal                      | ok                                       | ok      | recovery=none
+FAIL writer writable_schema                         | ok                                       | ok      | recovery=none
+FAIL writer attach                                  | ok                                       | ok      | recovery=none
+FAIL writer detach                                  | ok                                       | ok      | recovery=none
+pass writer vacuum                                  | err Sqlite                               | ok      | recovery=none
+pass writer vacuum, authorizer removed              | ok err Sqlite                            | ok      | recovery=none
+pass writer cross via !commit (allowed)             | ok ok ok ok                              | ok      | recovery=none
+pass writer checkpoint truncate (allowed)           | ok                                       | ok      | recovery=none
+pass writer read pragmas (allowed)                  | ok ok ok                                 | ok      | recovery=none
+pass reader marker update                           | err Sqlite                               | ok      | recovery=none
+pass reader marker delete                           | err Sqlite                               | ok      | recovery=none
+pass reader marker insert                           | err Sqlite                               | ok      | recovery=none
+pass reader marker drop                             | err Sqlite                               | ok      | recovery=none
+pass reader marker alter                            | err Sqlite                               | ok      | recovery=none
+pass reader trigger on marker                       | err Sqlite                               | ok      | recovery=none
+pass reader trigger writes marker                   | err Sqlite err Sqlite                    | ok      | recovery=none
+pass reader cross via COMMIT                        | ok ok ok err Sqlite                      | ok      | recovery=none
+pass reader cross via END                           | ok ok ok err Sqlite                      | ok      | recovery=none
+pass reader cross via RELEASE                       | ok ok ok err Sqlite                      | ok      | recovery=none
+pass reader cross via temp trigger                  | err Sqlite err Sqlite                    | ok      | recovery=none
+pass reader journal_mode=delete                     | err Sqlite                               | ok      | recovery=none
+pass reader journal_mode=memory                     | err Sqlite                               | ok      | recovery=none
+pass reader journal_mode=off                        | err Sqlite                               | ok      | recovery=none
+FAIL reader locking_mode=exclusive                  | ok                                       | ok      | recovery=none
+FAIL reader synchronous=off                         | ok                                       | ok      | recovery=none
+FAIL reader synchronous=normal                      | ok                                       | ok      | recovery=none
+FAIL reader writable_schema                         | ok                                       | ok      | recovery=none
+FAIL reader attach                                  | ok                                       | ok      | recovery=none
+FAIL reader detach                                  | ok                                       | ok      | recovery=none
+pass reader vacuum                                  | err Sqlite                               | ok      | recovery=none
+pass reader vacuum, authorizer removed              | ok err Sqlite                            | ok      | recovery=none
+pass reader cross via !commit (allowed)             | ok ok ok err Sqlite                      | ok      | recovery=none
+pass reader checkpoint truncate (allowed)           | ok                                       | ok      | recovery=none
+pass reader read pragmas (allowed)                  | ok ok ok                                 | ok      | recovery=none
+pass live plain read                                | writer_exit=0 plain={'ok': 81}           | ok      | recovery=none
+pass live plain passive ckpt                        | writer_exit=0 plain={'ok': 81}           | ok      | recovery=none
+pass live plain truncate ckpt                       | writer_exit=0 plain={'ok': 75}           | ok      | recovery=none
+pass live plain write                               | writer_exit=0 plain={'ok': 72}           | ok      | recovery=none
+pass main.db left in delete mode, then opened       | ok                                       | ok      | recovery=none
+pass s1.db left in delete mode, then opened         | ok                                       | ok      | recovery=none
+pass s2.db left in delete mode, then opened         | ok                                       | ok      | recovery=none
+pass s1 held open in delete mode                    | writer_exit=2 while held                 | ok      | recovery=none
+pass plain switches s1 to delete under a reader     | err database is locked                   | ok      | recovery=none
+pass clean set, -cwal-gate deleted                  |                                          | ok      | recovery=none
+pass clean set, -cwal-alive deleted                 |                                          | ok      | recovery=none
+pass clean set, -cwal-writer deleted                |                                          | ok      | recovery=none
+pass clean set, -cwal-live deleted                  |                                          | ok      | recovery=none
+pass clean set, -cwal-snap deleted                  |                                          | ok      | recovery=none
+pass main.db marker row changed by plain conn       | ok                                       | refused | writer-open-error ProtocolViolation
+pass main.db marker table dropped by plain conn     | ok                                       | refused | writer-open-error ProtocolViolation
+pass s1.db marker row changed by plain conn         | ok                                       | refused | writer-open-error ProtocolViolation
+pass s1.db marker table dropped by plain conn       | ok                                       | refused | writer-open-error ProtocolViolation
+pass s2.db marker row changed by plain conn         | ok                                       | refused | writer-open-error ProtocolViolation
+pass s2.db marker table dropped by plain conn       | ok                                       | ok      | recovery=none
+crashed sets (k = write-wal events 1..48): outcome counts per outsider
+  none (control)                 {'clean': 27, 'torn': 21}
+  plain open main.db             {'ok clean': 27, 'ok torn': 5, 'refused torn': 16}
+  plain open s1.db               {'ok clean': 27, 'refused torn': 13, 'ok torn': 8}
+  plain open s2.db               {'ok clean': 27, 'ok torn': 21}
+  plain truncate ckpt, closes    {'ok clean': 27, 'refused torn': 21}
+  plain write s1                 {'ok clean': 27, 'refused torn': 13, 'ok torn': 8}
+  plain passive ckpt, dies       {'ok clean': 27, 'refused torn': 21}
+  plain full ckpt, dies          {'ok clean': 27, 'refused torn': 21}
+  plain restart ckpt, dies       {'ok clean': 27, 'refused torn': 21}
+  plain ckpt+write s1, dies      {'ok clean': 27, 'refused torn': 13, 'ok torn': 8}
+  plain ckpt+write s1, no header {'ok clean': 27, 'refused torn': 13, 'ok torn': 8}
+  -cwal-snap deleted             {'ok clean': 27, 'ok torn': 21}
+  snap page junk                 {'ok clean': 27, 'ok torn': 21}
+  main.db-shm deleted            {'ok clean': 27, 'ok torn': 21}
+  s1.db-shm deleted              {'ok clean': 27, 'ok torn': 21}
+  s2.db-shm deleted              {'ok clean': 27, 'ok torn': 21}
+RESULT FAIL

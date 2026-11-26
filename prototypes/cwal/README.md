@@ -258,6 +258,25 @@ than repaired wrongly:
   CWAL never checkpoints a torn commit, so only an outside connection gets
   there. Every member is checked before any is truncated, so a refused set
   is left as the crash left it.
+- **Member ownership.** A member file belongs to one set at a time, so a
+  set's recovery and checkpoints never run on a member another set has
+  open (the set's own locks live next to its main file). Before anything
+  else, an opener takes each member's `<member>-cwal-mgate` exclusively and
+  tries `<member>-cwal-own` exclusively without blocking. If that works, no
+  handle owns the member: the opener writes its set identity (every
+  member's resolved path, in order) into the file and keeps the lock
+  shared. Otherwise it joins only if the recorded identity is its own, and
+  fails with `MemberOwned` if not. The record changes only under the
+  exclusive lock, which needs every owner gone. The locks are `flock`, so
+  handles and threads of one process exclude each other like processes do.
+  A set that lists one file twice is refused (`ProtocolViolation`).
+- **Wal-index heads on a shared open.** A shared opener reads every
+  member's `-shm` head before SQLite maps it, for the late-alone path
+  (R3). Opening and closing a `-shm` drops every POSIX lock the process
+  holds on it, so the heads are skipped when another handle of the same set
+  is open in the process. Such a handle keeps `-alive` held, which rules out
+  the late-alone path anyway. Member ownership guarantees that no handle of
+  another set has the file open.
 
 ## Running
 
@@ -292,6 +311,16 @@ the tests catch them; see the mutation table). `CWAL_WINDOW_DELAY_US`,
 `CWAL_DELAY_POINTS=name=us[,...]` pauses at named checkpoint-counter points
 (`ckpt-pre-inc`, `ckpt-locked`, `ckpt-pre-dec`, `ckpt-post-dec`,
 `open-take`, `open-release`, `reset-held`), which are also fault events.
+`CWAL_PAUSE_AT=open-shared` with `CWAL_PAUSE_FILE=path` stops a shared open
+after it has read the wal-index heads and before SQLite maps them: it
+creates `path.reached` and waits for `path.go`. Two crash probes, selected
+only by `CWAL_CRASH_TAG` and not counted as events, kill a writer at a WAL
+sync inside a cross-file commit: `commit-sync-first` (window not open,
+nothing published) and `commit-sync-next` (window open, earlier members
+published). `nexec` takes `--ready 1` (print `ready` once open), `--hold
+DIR --hold-files N` (first open another set in the same process), and
+replaces `$txn` in statements with the next marker number. `nown` runs the
+ownership race.
 `CWAL_DEBUG=1` appends each handle's open, recovery, discard and commit
 decisions to `main.db-cwal-debug`. I/O errors are injected with
 `CWAL_FAIL_TAG=t[,t...]` and `CWAL_FAIL_AT=n` (the nth matching operation
@@ -359,6 +388,8 @@ acknowledged `(k, txn)` survived.
 | N-file power loss | As above with the power-loss model, 3 seeds, at 3, 8 and 32 files. |
 | Writer restart chain | 15 writers in a row on one set, 80% killed at a random event, with readers kept running and restarted; every 5th writer opens alone. Random working sets, `PASSIVE` checkpoints. Requires unique attempted marker numbers across the whole chain (writer restarts included) and 0 mixed reads. 4 seeds per file count. |
 | Unpublished frames | A reader keeps the set open (and sleeps 20 ms between finding the writer alive and mapping, `CWAL_ALIVE_DELAY_US`); the writer is killed at each of its first 60 fsyncs; a second writer runs 6 rounds without ever touching file x, for each x; then check. |
+| Delay points (T2) | Deterministic, 3 files, a reader holding the set. `no-cross-flag`: the writer is killed at `commit-sync-next`; a new writer must exit `Broken`, readers must read nothing mixed, and recovery after the holder closes must roll back. `no-late-alone`: the writer is killed at `commit-sync-first`; an opener pauses at `open-shared` while the holder is killed, and must take the late-alone path and read nothing mixed. R3: as `no-cross-flag`, then an ordinary connection checkpoints main and the seqlock page is deleted; the paused opener must refuse (`ProtocolViolation`) with every WAL unchanged, also with a handle on another set in its process. |
+| Member ownership (T3) | Set A (3 files), set B (2 files) whose `s1.db` is a symlink to A's `s2.db`, and A's main with 2 members. Each overlapping open must fail with `MemberOwned` while the other set is held, in another process and in the same process, in both roles; the same set must open twice in one process and from two processes; a killed owner must release ownership; a set listing a file twice must be refused. Races: 2 processes × 2 threads open and close two overlapping sets at random for 2 s; the held intervals of the two sets must never overlap. |
 | N-file live readers | A writer (window widened 200 µs) and 2 reader processes × 2 threads, all and `PASSIVE` checkpoints. |
 
 Transaction-semantics workload (`nsem`, torture sections `nsem` and
@@ -474,7 +505,7 @@ Mutations. Each test-only defect is caught:
 | --- | --- |
 | `no-markers` (cross-file commits write no markers) | 135 / 1,601 torn sets in the crash matrix |
 | `no-marker-rollback` (recovery detects a torn transaction but keeps it) | 151 / 1,651 torn sets under power loss (1 seed) |
-| `no-cross-flag` (a new writer closes a dead writer's cross-file window without recovery) | 72,495 mixed reads and 4 torn sets in the survivor test |
+| `no-cross-flag` (a new writer closes a dead writer's cross-file window without recovery) | 72,495 mixed reads and 4 torn sets in the survivor test (only when a kill lands in a cross-file window); always in the delay-point test: the new writer opens, 1,228 mixed reads, a torn set |
 | `no-gate` (no publication window) | 90 mixed reads |
 | `no-seq-check` (accept a read without rechecking the sequence) | 35 mixed reads |
 | `no-snapshot-open` (inside a window, pin current state instead of the saved headers) | 110 mixed reads |
@@ -484,7 +515,10 @@ Mutations. Each test-only defect is caught:
 | `no-ckpt-validate` (accept a skipped checkpoint lock without checking the counter) | 37 violations in 37 races |
 | `no-ckpt-reset` (a writer does not clear a dead checkpointer) | active count stays 1; every snapshot open takes the real lock (2 fallbacks per snapshot read) |
 | `no-discard-unpublished` (a writer keeps a dead writer's frames past `mxFrame`) | unpublished-frames test: 3 / 153 torn at 3 files, 7 / 480 at 8 files; 5,808 mixed reads |
-| `no-late-alone` (no second `-alive` test after mapping) | unpublished-frames test: 13 / 153 torn at 3 files, 10,445 mixed reads (0 at 8 files) |
+| `no-late-alone` (no second `-alive` test after mapping) | unpublished-frames test: 13 / 153 torn at 3 files, 10,445 mixed reads (0 at 8 files), only when the race lines up; always in the delay-point test: 100 mixed reads, and the R3 opener serves the set |
+| `no-early-heads` (the late-alone path reads the wal-index heads after mapping) | delay-point R3 cases: the opener truncates `main.db-wal` although the torn commit is in `main.db` |
+| `heads-process-wide` (the pre-T2 condition: heads only when no other handle is in the process) | delay-point R3 case with a handle on another set in the opener's process: the same truncation |
+| `no-ownership` (no member ownership) | ownership: all 10 refusal cases open; the two races show 369 and 50 overlapping intervals |
 | `no-open-gate` (opens and closes do not take `-gate`) | unpublished-frames test: 4 / 153 torn at 3 files, 2,984 mixed reads (0 at 8 files) |
 | `no-txn-epoch` (marker numbers continue from the newest published one) | restart chains: all 8 chains (3 and 8 files) reuse 2–6 marker numbers |
 | `no-authorizer` (no authorizer) | enforcement: 20 bypass statements succeed (writer: marker writes, pragmas, `ATTACH`/`DETACH`; reader: pragmas, `ATTACH`/`DETACH`) |
@@ -1049,6 +1083,12 @@ journal check on reads.
   errors are returned by this VFS; real disks were not filled or failed.
 - One writer per set, enforced with `flock`. Lock files assume a local
   filesystem.
+- Member ownership compares resolved paths. A hard link or bind mount gives
+  one file two paths and is not detected. Each member gets two lock files
+  (`-cwal-own`, `-cwal-mgate`) next to it.
+- An outside connection that checkpoints a torn commit while recovery runs
+  (after recovery read the wal-index heads) is not detected (REVIEW.md R6,
+  from code reading).
 - The checkpoint counter counts only exclusive locks taken through this VFS
   (the same assumption as the checkpoint gate). A raised count left by a
   dead process is cleared only when a writer opens; until then readers take

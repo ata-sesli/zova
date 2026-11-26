@@ -1392,6 +1392,298 @@ def enforce_journal_and_meta(work):
     return out
 
 
+
+# ---------------------------------------------------------------------------
+# T2: deterministic delay-point tests (R3, no-late-alone, no-cross-flag)
+# T3: exclusive member ownership
+# ---------------------------------------------------------------------------
+
+def _env(extra=None):
+    e = dict(os.environ)
+    for k in ("CWAL_CRASH_AT", "CWAL_POWERLOSS", "CWAL_SEED", "CWAL_TRACE"):
+        e.pop(k, None)
+    e.update({k: str(v) for k, v in (extra or {}).items()})
+    return e
+
+
+def _first_line(p, timeout=20):
+    """The first stdout line of process p, or '' after timeout or exit."""
+    import select
+    ready, _, _ = select.select([p.stdout], [], [], timeout)
+    return p.stdout.readline().strip() if ready else ""
+
+
+def holder(d, n, extra=()):
+    """A CWAL reader handle (nexec) that keeps set d open until its stdin
+    closes or it is killed. Returns (process, first line: 'ready' or the
+    open error)."""
+    p = subprocess.Popen([BIN, "nexec", d, "--files", str(n), "--role", "reader", "--ready", "1"] + [str(x) for x in extra],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=_env())
+    return p, _first_line(p)
+
+
+def release(p):
+    """Close a holder normally; returns its stdout."""
+    out, _ = p.communicate(input="", timeout=30)
+    return out
+
+
+def kill(p):
+    p.kill()
+    p.communicate(timeout=30)
+
+
+def paused(args, d, point="open-shared", extra_env=None):
+    """Start `cwal args` with a pause at `point`. Returns (process, pause
+    file, whether it reached the point)."""
+    pf = d.rstrip("/") + ".pause"
+    for suf in (".reached", ".go"):
+        if os.path.exists(pf + suf):
+            os.unlink(pf + suf)
+    env = _env({"CWAL_PAUSE_AT": point, "CWAL_PAUSE_FILE": pf, **(extra_env or {})})
+    p = subprocess.Popen([BIN] + [str(x) for x in args], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    deadline = time.time() + 20
+    while not os.path.exists(pf + ".reached") and p.poll() is None and time.time() < deadline:
+        time.sleep(0.002)
+    return p, pf, os.path.exists(pf + ".reached")
+
+
+def go(pf):
+    open(pf + ".go", "w").close()
+
+
+def cross3(k):
+    """One transaction over all three members, with markers ($txn)."""
+    return "begin\n" + "".join(f"insert into {s}.t values ({k}, $txn, 7, 3, randomblob(300))\n" for s in ("main", "m1", "m2")) + "!commit\n"
+
+
+def dp_set(work, name, n=3):
+    d = os.path.join(work, "dp-" + name)
+    rmset(d, ignore_errors=True)
+    copyset(ntemplate(work, n), d)
+    return d
+
+
+def torn_under_holder(work, name, probe):
+    """Set `name` (3 files) held open by a reader, with transaction 1
+    committed and transaction 2's writer killed at crash probe `probe`#1.
+    Returns (dir, holder, error or None)."""
+    d = dp_set(work, name)
+    h, line = holder(d, 3)
+    if line != "ready":
+        return d, h, f"holder: {line}"
+    w0 = run(["nexec", d, "--files", 3], input=cross3(1))
+    if w0.returncode != 0 or w0.stdout.split() != ["ok"] * 5:
+        return d, h, f"setup commit: {' '.join(w0.stdout.split())}"
+    w1 = run(["nexec", d, "--files", 3], input=cross3(2), env={"CWAL_CRASH_TAG": probe, "CWAL_CRASH_AT": 1})
+    if w1.returncode != -9:
+        return d, h, f"writer not killed at {probe}: exit {w1.returncode}"
+    return d, h, None
+
+
+def debug_log(d):
+    path = os.path.join(d, "main.db-cwal-debug")
+    if not os.path.exists(path):
+        return ""
+    with open(path) as f:
+        return f.read()
+
+
+def dp_no_cross_flag(work):
+    """A writer killed inside a cross-file window, with another handle
+    keeping the set open (so no recovery runs): a new writer must refuse
+    (Broken, exit 3), readers must see no mixed state, and recovery after
+    the last handle closes must repair the set."""
+    d, h, err = torn_under_holder(work, "xflag", "commit-sync-next")
+    if err:
+        kill(h)
+        return False, err
+    st = snap_state(d)
+    w2 = run(["nwriter", d, "--files", 3, "--rounds", 5])
+    rd = run(["nreader", d, "--files", 3, "--threads", 2, "--duration-ms", 300])
+    m = re.search(r"mixed=(\d+)", rd.stdout)
+    mixed = int(m.group(1)) if m else -1
+    release(h)
+    cerr, rec = ncheck(d, 3, "cwal", [])
+    ok = st.get("seq", 0) % 2 == 1 and st.get("cross") == 1 and w2.returncode == 3 and rd.returncode == 0 and mixed == 0 and cerr is None and rec == "rollback"
+    return ok, f"seq={st.get('seq')} cross={st.get('cross')} writer2_exit={w2.returncode} reader_exit={rd.returncode} mixed={mixed} check={cerr or 'ok'} recovery={rec}"
+
+
+def dp_late_alone(work):
+    """The last other handle dies while an opener is between its -alive
+    test and SQLite mapping the wal-indexes, with a dead writer's frames on
+    main past mxFrame (synced, unpublished). SQLite rebuilds main's
+    wal-index and publishes them; the opener must notice it is alone and
+    recover, so its reads are never mixed."""
+    d, h, err = torn_under_holder(work, "late", "commit-sync-first")
+    if err:
+        kill(h)
+        return False, err
+    o, pf, reached = paused(["nreader", d, "--files", 3, "--threads", 1, "--duration-ms", 1500], d, extra_env={"CWAL_DEBUG": 1})
+    kill(h)
+    go(pf)
+    out, _ = o.communicate(timeout=60)
+    reads = int((re.search(r"reads=(\d+)", out) or [0, -1])[1])
+    mixed = int((re.search(r"mixed=(\d+)", out) or [0, -1])[1])
+    late = "alone after mapping" in debug_log(d)
+    cerr, rec = ncheck(d, 3, "cwal", [])
+    ok = reached and o.returncode == 0 and reads > 0 and mixed == 0 and late and cerr is None
+    return ok, f"paused={reached} reader_exit={o.returncode} reads={reads} mixed={mixed} late_alone_path={late} check={cerr or 'ok'} recovery={rec}"
+
+
+def dp_r3(work, same_process):
+    """R3. A dead writer's cross-file commit is published on main (window
+    open) and an ordinary connection checkpoints it into main.db. The
+    seqlock page is then lost (deleted), so an opener is not refused by the
+    open window. The opener reads the wal-index heads, then the last other
+    handle dies before SQLite maps them, so SQLite rebuilds main's wal-index
+    and forgets the checkpoint. Recovery must still see it (from the heads
+    read before mapping) and refuse, changing no WAL. With same_process,
+    the opener's process also holds a handle on an unrelated set."""
+    name = "r3-proc" if same_process else "r3"
+    d, h, err = torn_under_holder(work, name, "commit-sync-next")
+    if err:
+        kill(h)
+        return False, err
+    other = dp_set(work, name + "-other", 2) if same_process else None
+    code = ("import os,sqlite3,sys\n"
+            "r=sqlite3.connect(sys.argv[1]).execute('pragma wal_checkpoint(passive)').fetchone()\n"
+            "print(*r, flush=True)\n"
+            "os._exit(0)\n")
+    ck = subprocess.run([sys.executable, "-c", code, os.path.join(d, "main.db")], capture_output=True, text=True).stdout.split()
+    os.remove(os.path.join(d, "main.db-cwal-snap"))
+    before = wal_sizes(d)
+    args = ["nexec", d, "--files", 3, "--role", "reader", "--ready", 1] + (["--hold", other, "--hold-files", 2] if same_process else [])
+    o, pf, reached = paused(args, d, extra_env={"CWAL_DEBUG": 1})
+    kill(h)
+    go(pf)
+    out, _ = o.communicate(input="", timeout=60)
+    after = wal_sizes(d)
+    log = debug_log(d)
+    late = "alone after mapping" in log
+    seen = "torn commit already checkpointed" in log
+    ckpt_ok = len(ck) == 3 and ck[0] == "0" and int(ck[2]) > 0 and ck[1] == ck[2]
+    ok = ckpt_ok and reached and "open-error ProtocolViolation" in out and after == before and late and seen
+    if other:
+        rmset(other, ignore_errors=True)
+    return ok, f"outsider_ckpt={'/'.join(ck)} paused={reached} opener={' '.join(out.split())[:40]} wal_unchanged={after == before} late_alone_path={late} backfill_seen={seen}"
+
+
+def delay_point_tests(work):
+    return [("no-cross-flag: new writer after a dead cross window", *dp_no_cross_flag(work)),
+            ("no-late-alone: last holder dies during open", *dp_late_alone(work)),
+            ("R3: foreign checkpoint + late alone", *dp_r3(work, False)),
+            ("R3: same, opener holds another set", *dp_r3(work, True))]
+
+
+def _link_member(d, name, target):
+    """Replace member `name` of set d (and its side files) by a symlink."""
+    for f in os.listdir(d):
+        if f == name or f.startswith(name + "-"):
+            os.unlink(os.path.join(d, f))
+    os.symlink(target, os.path.join(d, name))
+
+
+def _unlink_links(d):
+    for f in os.listdir(d):
+        if os.path.islink(os.path.join(d, f)):
+            os.unlink(os.path.join(d, f))
+
+
+def own_open(d, n, role="reader", extra=()):
+    """First stdout line of a one-shot nexec open (stdin empty)."""
+    r = run(["nexec", d, "--files", n, "--role", role, "--ready", 1] + list(extra), input="select count(*) from main.t\n")
+    return " ".join(r.stdout.split())
+
+
+def ownership_static(work, da, db, dc):
+    rows = []
+
+    def case(name, ok, detail):
+        rows.append((name, ok, detail))
+
+    h, line = holder(da, 3)
+    before = wal_sizes(da)
+    for role in ("reader", "writer"):
+        r = own_open(db, 2, role)
+        case(f"B ({role}) while A held, other process", line == "ready" and r == "open-error MemberOwned", r)
+    r = own_open(da, 2)
+    case("A's main with 2 members while A held, other process", r == "open-error MemberOwned", r)
+    r = own_open(da, 3)
+    case("A again while A held, other process", r == "ready ok", r)
+    case("A's WAL files unchanged by the refusals", wal_sizes(da) == before, str(wal_sizes(da)))
+    release(h)
+    h, line = holder(db, 2)
+    r = own_open(da, 3, "writer")
+    case("A (writer) while B held, other process", line == "ready" and r == "open-error MemberOwned", r)
+    release(h)
+    r = own_open(db, 2, extra=["--hold", da, "--hold-files", 3])
+    case("B while A held, same process", r == "open-error MemberOwned", r)
+    r = own_open(da, 3, extra=["--hold", db, "--hold-files", 2])
+    case("A while B held, same process", r == "open-error MemberOwned", r)
+    r = own_open(da, 2, extra=["--hold", da, "--hold-files", 3])
+    case("A's main with 2 members while A held, same process", r == "open-error MemberOwned", r)
+    r = own_open(da, 3, extra=["--hold", da, "--hold-files", 3])
+    case("A twice in one process", r == "ready ok", r)
+    h, line = holder(da, 3)
+    kill(h)
+    r = own_open(db, 2)
+    case("B after A's holder was killed", line == "ready" and r == "ready ok", r)
+    r = own_open(da, 3)
+    case("A after B closed", r == "ready ok", r)
+    r = own_open(dc, 2)
+    case("set listing one file twice (symlink)", r == "open-error ProtocolViolation", r)
+    for d, n in ((da, 3), (db, 2)):
+        cerr, _ = ncheck(d, n, "cwal", [])
+        case(f"{os.path.basename(d)} intact afterwards", cerr is None, cerr or "check ok")
+    return rows
+
+
+def ownership_race(work, d1, n1, d2, n2, procs=2, threads=2, ms=2000):
+    """procs processes of `threads` threads open and close set 1 or set 2
+    at random. Returns (overlapping intervals, opened, refused, errors)."""
+    ps = [subprocess.Popen([BIN, "nown", d1, "--files", str(n1), "--dir-b", d2, "--files-b", str(n2), "--threads", str(threads), "--duration-ms", str(ms), "--hold-us", "500", "--gap-us", "2000"],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=_env()) for _ in range(procs)]
+    intervals, totals, samples = [], Counter(), []
+    for p in ps:
+        out, err = p.communicate(timeout=ms / 1000 + 60)
+        for line in out.splitlines():
+            f = line.split()
+            if len(f) == 3 and f[0] in ("A", "B"):
+                intervals.append((int(f[1]), int(f[2]), f[0]))
+            elif line.startswith("own "):
+                totals.update({k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", line)})
+            elif line.startswith("open-error"):
+                samples.append(line)
+        if p.returncode != 0:
+            totals["errors"] += 1
+            samples.append(f"exit {p.returncode}: {err.strip()[-80:]}")
+    intervals.sort()
+    end = {"A": 0, "B": 0}
+    overlaps = 0
+    for s, e, k in intervals:
+        if end["B" if k == "A" else "A"] > s:
+            overlaps += 1
+        end[k] = max(end[k], e)
+    return overlaps, totals, samples
+
+
+def ownership_tests(work):
+    da = dp_set(work, "own-a", 3)
+    db = dp_set(work, "own-b", 2)
+    _link_member(db, "s1.db", os.path.join(da, "s2.db"))
+    dc = dp_set(work, "own-c", 2)
+    _link_member(dc, "s1.db", os.path.join(dc, "main.db"))
+    rows = ownership_static(work, da, db, dc)
+    for label, (d1, n1, d2, n2) in (("race: A vs B (shared member via symlink)", (da, 3, db, 2)),
+                                    ("race: A vs A's main with 2 members", (da, 3, da, 2))):
+        overlaps, t, samples = ownership_race(work, d1, n1, d2, n2)
+        ok = overlaps == 0 and t["errors"] == 0 and t["opened_a"] > 0 and t["opened_b"] > 0 and t["refused"] > 0
+        rows.append((label, ok, f"overlaps={overlaps} opened_a={t['opened_a']} opened_b={t['opened_b']} refused={t['refused']} errors={t['errors']} {' '.join(samples[:2])}"))
+    _unlink_links(db)
+    _unlink_links(dc)
+    return rows
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--work", default=os.environ.get("CWAL_WORK", "/tmp/cwal-torture"))
@@ -1726,6 +2018,18 @@ def main():
                 st = r["stats"]
                 print(f"{n} files seed={seed}: victims={r['victims']} killed={r['crashed']} survivor_reads={st['reads']} min_per_thread={st['min_reads']} mixed={st['mixed']} violations={st['ckpt_violations']} commits_during={r['commits']} longest_stall_ms={r['stall'] * 1000:.0f} ckpt_active_left={r['left']} after_next_writer={r['after']} check={'ok' if not r['err'] else r['err']}", flush=True)
                 failed |= st["mixed"] != 0 or st["ckpt_violations"] != 0 or r["after"] != 0 or bool(r["err"]) or r["commits"] == 0
+
+    if want("delaypoints"):
+        print("== T2: deterministic delay points (R3, no-late-alone, no-cross-flag; 3 files)", flush=True)
+        for name, ok, detail in delay_point_tests(a.work):
+            print(f"{'pass' if ok else 'FAIL'} {name:52} | {detail}", flush=True)
+            failed |= not ok
+
+    if want("ownership"):
+        print("== T3: exclusive member ownership (cross-process, same-process, races)", flush=True)
+        for name, ok, detail in ownership_tests(a.work):
+            print(f"{'pass' if ok else 'FAIL'} {name:52} | {detail}", flush=True)
+            failed |= not ok
 
     if want("enforce"):
         print("== protocol enforcement: bypass statements, ordinary SQLite connections, journal modes, lost metadata (3 files)", flush=True)

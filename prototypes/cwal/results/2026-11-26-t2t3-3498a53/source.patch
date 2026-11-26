@@ -1,0 +1,775 @@
+diff --git a/prototypes/cwal/src/cwal.zig b/prototypes/cwal/src/cwal.zig
+index 8d35ddb..4183868 100644
+--- a/prototypes/cwal/src/cwal.zig
++++ b/prototypes/cwal/src/cwal.zig
+@@ -63,7 +63,11 @@ pub const fault = struct {
+     /// writer keeps frames a dead writer wrote past mxFrame), "no-txn-epoch"
+     /// (marker numbers continue from the newest published one), "no-open-gate"
+     /// (opens and closes do not take the open/close gate), "no-late-alone"
+-    /// (no `-alive` check after SQLite has mapped the wal-indexes).
++    /// (no `-alive` check after SQLite has mapped the wal-indexes),
++    /// "no-early-heads" (the late-alone path reads the wal-index heads after
++    /// SQLite has mapped them), "heads-process-wide" (a shared open reads
++    /// the heads only when no other handle of this process is registered,
++    /// the condition before T2), "no-ownership" (no member ownership).
+     pub var mutate: []const u8 = "";
+     pub var syncs: u64 = 0;
+     /// I/O error injection: with CWAL_FAIL_TAG (a comma-separated list of
+@@ -143,14 +147,28 @@ pub const fault = struct {
+     pub fn event(tag: []const u8) void {
+         const n = @atomicRmw(u64, &events, .Add, 1, .seq_cst) + 1;
+         if (trace) std.debug.print("event {d} {s}\n", .{ n, tag });
+-        if (crash_tag) |want| {
+-            var it = std.mem.splitScalar(u8, want, ',');
+-            while (it.next()) |w| {
+-                if (!std.mem.eql(u8, tag, w)) continue;
+-                if (@atomicRmw(u64, &tagged, .Add, 1, .seq_cst) + 1 == crash_at) crash();
+-                break;
+-            }
+-        } else if (crash_at != 0 and n == crash_at) crash();
++        if (crash_tag != null) crashTagged(tag) else if (crash_at != 0 and n == crash_at) crash();
++    }
++
++    /// A crash point that only CWAL_CRASH_TAG selects. It is not an event,
++    /// so untagged CWAL_CRASH_AT numbers stay as they were. Probes:
++    /// commit-sync-first (a WAL sync in a cross-file commit before its
++    /// window opens: no member has published), commit-sync-next (a WAL sync
++    /// with the window open: earlier members have published, this one is
++    /// durable but not published).
++    pub fn probe(tag: []const u8) void {
++        if (trace) std.debug.print("probe {s}\n", .{tag});
++        crashTagged(tag);
++    }
++
++    fn crashTagged(tag: []const u8) void {
++        const want = crash_tag orelse return;
++        var it = std.mem.splitScalar(u8, want, ',');
++        while (it.next()) |w| {
++            if (!std.mem.eql(u8, tag, w)) continue;
++            if (@atomicRmw(u64, &tagged, .Add, 1, .seq_cst) + 1 == crash_at) crash();
++            return;
++        }
+     }
+ 
+     pub fn random() u64 {
+@@ -533,6 +551,34 @@ pub const test_delay = struct {
+             if (std.mem.eql(u8, p.name, name)) _ = c.usleep(p.us);
+         }
+     }
++
++    /// `CWAL_PAUSE_AT=name` with `CWAL_PAUSE_FILE=path`: the first time this
++    /// process reaches pause point `name`, it creates `path.reached` and
++    /// waits until `path.go` exists (exit 5 after 30 s), so a test can act
++    /// at that exact point. Not an event. Points: open-shared (a shared open
++    /// has read the wal-index heads; SQLite has not mapped them yet).
++    var pause_at: ?[]const u8 = null;
++    var pause_file: ?[]const u8 = null;
++    var paused: bool = false;
++
++    pub fn pause(name: []const u8) void {
++        const want = pause_at orelse return;
++        const base = pause_file orelse return;
++        if (!std.mem.eql(u8, want, name) or @atomicRmw(bool, &paused, .Xchg, true, .seq_cst)) return;
++        var buf: [1100]u8 = undefined;
++        const reached = bufPrintZ(&buf, "{s}.reached", .{base}) catch return;
++        const fd = c.open(reached.ptr, c.O_WRONLY | c.O_CREAT | c.O_CLOEXEC, @as(c_uint, 0o644));
++        if (fd >= 0) _ = c.close(fd);
++        const go = bufPrintZ(&buf, "{s}.go", .{base}) catch return;
++        const deadline = monotonicNs() + 30 * std.time.ns_per_s;
++        while (c.access(go.ptr, c.F_OK) != 0) {
++            if (monotonicNs() > deadline) {
++                std.debug.print("pause {s}: timed out\n", .{name});
++                c._exit(5);
++            }
++            _ = c.usleep(1000);
++        }
++    }
+ };
+ 
+ pub fn register() void {
+@@ -542,6 +588,8 @@ pub fn register() void {
+     test_delay.ckpt_scan_delay_us = @intCast(envU64("CWAL_CKPT_SCAN_DELAY_US") orelse 0);
+     test_delay.alive_delay_us = @intCast(envU64("CWAL_ALIVE_DELAY_US") orelse 0);
+     test_delay.parsePoints();
++    if (c.getenv("CWAL_PAUSE_AT")) |v| test_delay.pause_at = std.mem.span(v);
++    if (c.getenv("CWAL_PAUSE_FILE")) |v| test_delay.pause_file = std.mem.span(v);
+     unix_vfs = c.sqlite3_vfs_find("unix");
+     std.debug.assert(unix_vfs != null);
+     cwal_vfs = unix_vfs.*;
+@@ -733,6 +781,7 @@ fn ioSync(file: [*c]c.sqlite3_file, flags: c_int) callconv(.c) c_int {
+         // first such sync of a commit starts the publication window.
+         if (connFor(f)) |conn| {
+             conn.log("wal sync member {d} in_commit={} window_open={} cross={}", .{ f.member, conn.in_commit, conn.window_open, conn.cross });
++            if (rc == c.SQLITE_OK and conn.in_commit and conn.cross) fault.probe(if (conn.window_open) "commit-sync-next" else "commit-sync-first");
+             // Fail the commit before this member publishes.
+             if (rc == c.SQLITE_OK and !conn.startPublication()) return c.SQLITE_IOERR_FSYNC;
+         }
+@@ -1030,7 +1079,7 @@ const ckpt_started: u64 = 1 << 32;
+ pub const Mode = enum { plain, cwal };
+ pub const Role = enum { writer, reader };
+ 
+-pub const Error = error{ Sqlite, Broken, WriterBusy, Io, ProtocolViolation };
++pub const Error = error{ Sqlite, Broken, WriterBusy, Io, ProtocolViolation, MemberOwned };
+ 
+ pub const Options = struct {
+     mode: Mode,
+@@ -1041,6 +1090,10 @@ pub const Options = struct {
+ };
+ 
+ var registry: [256]?*Conn = @splat(null);
++/// Per registry slot, the hash of its handle's set identity (`setHash`), 0
++/// when free. Read instead of the other handle's `Conn`, which its owner
++/// may be freeing.
++var registry_set: [256]u64 = @splat(0);
+ 
+ /// Claim a free registry slot (1..255). Slot 0 means "not a CWAL file".
+ fn claimSlot(conn: *Conn) ?u32 {
+@@ -1091,6 +1144,10 @@ pub const Conn = struct {
+     member_db: [max_members]?*File = @splat(null),
+     write_locked: [max_members]bool = @splat(false),
+     alive_fd: c_int = -1,
++    /// Per member, `-cwal-own`, held shared while this handle is open (see
++    /// `acquireMembers`).
++    own_fd: [max_members]c_int = @splat(-1),
++    set_hash: u64 = 0,
+     /// Open/close gate (`-gate`), held exclusively while this handle opens
+     /// (until SQLite has mapped every member's wal-index) or closes.
+     gate_fd: c_int = -1,
+@@ -1147,12 +1204,15 @@ pub const Conn = struct {
+         for (paths, 0..) |p, i| conn.paths[i] = fullPath(p) catch return error.Io;
+         const id = claimSlot(conn) orelse return error.Io;
+         conn.id = id;
++        conn.set_hash = conn.setHash();
++        @atomicStore(u64, &registry_set[id], conn.set_hash, .seq_cst);
+         errdefer conn.close();
+ 
+         if (options.mode == .cwal) {
+             // The publication window starts at a commit-time WAL sync, which
+             // SQLite issues only with synchronous=FULL or EXTRA.
+             if (!std.ascii.eqlIgnoreCase(options.synchronous, "FULL") and !std.ascii.eqlIgnoreCase(options.synchronous, "EXTRA")) return error.ProtocolViolation;
++            try conn.acquireMembers();
+             try conn.openCoordination();
+         }
+         try conn.openSqlite(paths, options);
+@@ -1167,6 +1227,7 @@ pub const Conn = struct {
+             _ = c.sqlite3_db_config(conn.db, c.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, @as(c_int, 1), @as(?*c_int, null));
+             _ = c.sqlite3_close_v2(conn.db);
+             conn.db = null;
++            if (fault.mutated("no-early-heads")) conn.readShmHeads();
+             try conn.recoverAlone();
+             try conn.openSqlite(paths, options);
+         }
+@@ -1330,7 +1391,15 @@ pub const Conn = struct {
+         conn.releaseGate();
+         if (conn.gate_fd >= 0) _ = c.close(conn.gate_fd);
+         conn.gate_fd = -1;
+-        if (conn.id != 0) @atomicStore(?*Conn, &registry[conn.id], null, .seq_cst);
++        // Give up the members last: until here this handle had them open.
++        for (&conn.own_fd) |*fd| {
++            if (fd.* >= 0) _ = c.close(fd.*);
++            fd.* = -1;
++        }
++        if (conn.id != 0) {
++            @atomicStore(u64, &registry_set[conn.id], 0, .seq_cst);
++            @atomicStore(?*Conn, &registry[conn.id], null, .seq_cst);
++        }
+     }
+ 
+     fn log(conn: *Conn, comptime fmt: []const u8, args: anytype) void {
+@@ -1379,8 +1448,13 @@ pub const Conn = struct {
+     }
+ 
+     fn openLockFile(conn: *Conn, suffix: []const u8) Error!c_int {
++        return openSideFile(conn.paths[0], suffix);
++    }
++
++    /// `<base>-cwal-<suffix>`, created if missing.
++    fn openSideFile(base: []const u8, suffix: []const u8) Error!c_int {
+         var buf: [1100]u8 = undefined;
+-        const path = bufPrintZ(&buf, "{s}-cwal-{s}", .{ conn.paths[0], suffix }) catch return error.Io;
++        const path = bufPrintZ(&buf, "{s}-cwal-{s}", .{ base, suffix }) catch return error.Io;
+         const creating = fault.powerloss and c.access(path.ptr, c.F_OK) != 0;
+         const fd = c.open(path.ptr, c.O_RDWR | c.O_CREAT | c.O_CLOEXEC, @as(c_uint, 0o644));
+         if (fd < 0) return error.Io;
+@@ -1435,12 +1509,18 @@ pub const Conn = struct {
+             if (!lock(conn.alive_fd, c.LOCK_SH)) return error.Io;
+             conn.log("shared seq={d} cross={d} broken={d}", .{ conn.snap.?.seq, conn.snap.?.cross, conn.snap.?.broken });
+             if (!conn.markersReadable(@atomicLoad(u64, &conn.snap.?.seq, .seq_cst))) return error.Broken;
+-            // Opening and closing a member's -shm would drop the POSIX locks
+-            // other connections of this process hold on it (close(2) releases
+-            // all of the process's locks on the file). Another handle of this
+-            // process with the set open also rules out the late-alone path
+-            // (closes take the gate).
+-            if (conn.onlyHandleInProcess()) conn.readShmHeads();
++            // Reading a member's -shm opens and closes it, and close(2)
++            // drops every POSIX lock this process holds on the file, which
++            // would break another connection of this process that has the
++            // member open. Member ownership (acquireMembers) leaves only
++            // handles of this same set with a member open, and such a handle
++            // also rules out the late-alone path (closes take the gate). So
++            // read the heads unless this process has another handle of this
++            // set.
++            if (fault.mutated("heads-process-wide")) {
++                if (conn.onlyHandleInProcess()) conn.readShmHeads();
++            } else if (!conn.otherHandleOfSet()) conn.readShmHeads();
++            test_delay.pause("open-shared");
+             if (test_delay.alive_delay_us != 0) _ = c.usleep(test_delay.alive_delay_us);
+         }
+         if (conn.role == .writer) {
+@@ -1463,6 +1543,96 @@ pub const Conn = struct {
+         for (0..conn.nmembers) |i| conn.shm_heads[i] = readShmHead(conn.paths[i]);
+     }
+ 
++    /// Whether another handle of this process has this set open (or is
++    /// opening it). A hash collision only skips reading the heads.
++    fn otherHandleOfSet(conn: *Conn) bool {
++        for (1..registry.len) |i| {
++            if (i != conn.id and @atomicLoad(u64, &registry_set[i], .seq_cst) == conn.set_hash) return true;
++        }
++        return false;
++    }
++
++    /// The set's identity: every member's resolved path, in order, each
++    /// followed by a newline.
++    fn identity(conn: *const Conn) Error![]u8 {
++        var len: usize = 0;
++        for (conn.paths[0..conn.nmembers]) |p| len += p.len + 1;
++        const id = allocator.alloc(u8, len) catch return error.Io;
++        var at: usize = 0;
++        for (conn.paths[0..conn.nmembers]) |p| {
++            @memcpy(id[at..][0..p.len], p);
++            id[at + p.len] = '\n';
++            at += p.len + 1;
++        }
++        return id;
++    }
++
++    /// Never 0, which marks a free registry slot.
++    fn setHash(conn: *const Conn) u64 {
++        var h = std.hash.Wyhash.init(0);
++        for (conn.paths[0..conn.nmembers]) |p| {
++            h.update(p);
++            h.update("\n");
++        }
++        return h.final() | 1;
++    }
++
++    /// Each member file belongs to one set at a time (REVIEW.md R4).
++    /// Recovery, the checkpoint counter and the open/close gate live next to
++    /// the main file, so two sets sharing a member, or one main opened with
++    /// two member lists, would recover and checkpoint that member under
++    /// different locks. Per member, `-cwal-own` is held shared by every
++    /// handle of the owning set and records the set's identity. An opener
++    /// decides under the member's `-cwal-mgate` (exclusive, held briefly):
++    /// if it can lock `-cwal-own` exclusively, no handle owns the member, so
++    /// it records its own identity and keeps the lock shared; otherwise it
++    /// joins only if the recorded identity is its own, and fails with
++    /// MemberOwned if not. The record is written only under the exclusive
++    /// lock, which needs every owner gone, so while any handle holds the
++    /// lock it names that handle's set. flock(2) locks belong to the open
++    /// file description, so handles of one process exclude each other like
++    /// handles of different processes. A hard link or bind mount gives one
++    /// file two resolved paths, and is not detected.
++    fn acquireMembers(conn: *Conn) Error!void {
++        if (fault.mutated("no-ownership")) return;
++        for (0..conn.nmembers) |i| {
++            for (0..i) |j| {
++                if (std.mem.eql(u8, conn.paths[i], conn.paths[j])) return error.ProtocolViolation;
++            }
++        }
++        const id = try conn.identity();
++        defer allocator.free(id);
++        for (0..conn.nmembers) |i| conn.own_fd[i] = try acquireMember(conn.paths[i], id);
++    }
++
++    fn acquireMember(path: []const u8, id: []const u8) Error!c_int {
++        const gate = try openSideFile(path, "mgate");
++        // Closing the descriptor releases the gate.
++        defer _ = c.close(gate);
++        if (!lock(gate, c.LOCK_EX)) return error.Io;
++        const fd = try openSideFile(path, "own");
++        errdefer _ = c.close(fd);
++        if (c.flock(fd, c.LOCK_EX | c.LOCK_NB) == 0) {
++            const wrote = c.pwrite(fd, id.ptr, id.len, 0);
++            if (wrote < 0 or @as(usize, @intCast(wrote)) != id.len or c.ftruncate(fd, @intCast(id.len)) != 0) return error.Io;
++            // flock(2) converts by unlocking first; openers wait at the gate.
++            if (!lock(fd, c.LOCK_SH)) return error.Io;
++            return fd;
++        }
++        if (c.__errno_location().* != c.EWOULDBLOCK) return error.Io;
++        // Owned: only by holders of shared locks, since the exclusive lock is
++        // taken only under the gate.
++        const size = fileSize(fd) orelse return error.Io;
++        if (size != id.len) return error.MemberOwned;
++        const recorded = allocator.alloc(u8, id.len) catch return error.Io;
++        defer allocator.free(recorded);
++        const got = c.pread(fd, recorded.ptr, recorded.len, 0);
++        if (got < 0 or @as(usize, @intCast(got)) != id.len) return error.Io;
++        if (!std.mem.eql(u8, recorded, id)) return error.MemberOwned;
++        if (!lock(fd, c.LOCK_SH | c.LOCK_NB)) return error.Io;
++        return fd;
++    }
++
+     fn onlyHandleInProcess(conn: *Conn) bool {
+         for (1..registry.len) |i| {
+             if (i != conn.id and @atomicLoad(?*Conn, &registry[i], .seq_cst) != null) return false;
+diff --git a/prototypes/cwal/src/main.zig b/prototypes/cwal/src/main.zig
+index 33a5c2a..e53f788 100644
+--- a/prototypes/cwal/src/main.zig
++++ b/prototypes/cwal/src/main.zig
+@@ -284,14 +284,24 @@ fn nState(conn: *Conn, n: usize) NState {
+ /// writer or reader) and print "ok" or "err <error>" for each. "!commit"
+ /// calls Conn.commit, "!autocommit <sql>" Conn.autocommit, "!rollback"
+ /// Conn.rollbackOpen, "!noauth" removes the handle's authorizer (as an
+-/// application that installs its own would).
++/// application that installs its own would). "$txn" in a statement becomes
++/// Conn.nextTxn(). With --hold DIR (and --hold-files N), a CWAL reader
++/// handle on that set is opened first and kept open until the end, so both
++/// handles share one process. With --ready 1, "ready" is printed once the
++/// handle is open, before stdin is read.
+ fn cmdNExec(dir: []const u8, args: Args) void {
+     const role = std.meta.stringToEnum(cwal.Role, args.get("--role") orelse "writer") orelse die("bad --role", .{});
++    const hold: ?*Conn = if (args.get("--hold")) |hold_dir| openN(hold_dir, @intCast(args.int("--hold-files", 2)), .{ .mode = .cwal, .role = .reader }) catch |err| {
++        out("hold-error {s}\n", .{@errorName(err)});
++        cwal.flushPending();
++        c.exit(2);
++    } else null;
+     const conn = openN(dir, nFiles(args), .{ .mode = args.mode(), .role = role }) catch |err| {
+         out("open-error {s}\n", .{@errorName(err)});
+         cwal.flushPending();
+         c.exit(2);
+     };
++    if (args.int("--ready", 0) != 0) out("ready\n", .{});
+     var input: std.ArrayList(u8) = .empty;
+     var chunk: [4096]u8 = undefined;
+     while (true) {
+@@ -310,15 +320,93 @@ fn cmdNExec(dir: []const u8, args: Args) void {
+         else if (std.mem.eql(u8, line, "!noauth"))
+             if (c.sqlite3_set_authorizer(conn.db, null, null) != c.SQLITE_OK) error.Sqlite else {}
+         else if (std.mem.startsWith(u8, line, "!autocommit "))
+-            conn.autocommit(bufPrintZ(&sql_buf, "{s}", .{line["!autocommit ".len..]}) catch die("long line", .{}))
++            conn.autocommit(expandTxn(&sql_buf, line["!autocommit ".len..], conn.nextTxn()))
+         else
+-            conn.exec(bufPrintZ(&sql_buf, "{s}", .{line}) catch die("long line", .{}));
++            conn.exec(expandTxn(&sql_buf, line, conn.nextTxn()));
+         if (result) |_| out("ok\n", .{}) else |err| out("err {s}\n", .{@errorName(err)});
+     }
+     conn.close();
++    if (hold) |h| h.close();
+     cwal.flushPending();
+ }
+ 
++/// `line` with every "$txn" replaced by `txn`.
++fn expandTxn(buf: []u8, line: []const u8, txn: u64) [:0]const u8 {
++    var len: usize = 0;
++    var rest = line;
++    while (std.mem.indexOf(u8, rest, "$txn")) |at| {
++        len += (std.fmt.bufPrint(buf[len..], "{s}{d}", .{ rest[0..at], txn }) catch die("long line", .{})).len;
++        rest = rest[at + "$txn".len ..];
++    }
++    len += (bufPrintZ(buf[len..], "{s}", .{rest}) catch die("long line", .{})).len;
++    return buf[0..len :0];
++}
++
++const OwnJob = struct {
++    dirs: [2][]const u8,
++    files: [2]usize,
++    deadline_ns: u64,
++    hold_us: u32,
++    gap_us: u32,
++    seed: u64,
++    opened: [2]u64 = .{ 0, 0 },
++    refused: u64 = 0,
++    errors: u64 = 0,
++};
++
++fn ownThread(job: *OwnJob) void {
++    var prng = std.Random.DefaultPrng.init(job.seed);
++    const rand = prng.random();
++    while (cwal.monotonicNs() < job.deadline_ns) {
++        const s = rand.uintLessThan(usize, 2);
++        const conn = openN(job.dirs[s], job.files[s], .{ .mode = .cwal, .role = .reader }) catch |err| {
++            if (err == error.MemberOwned) job.refused += 1 else {
++                job.errors += 1;
++                if (job.errors <= 3) out("open-error {s}\n", .{@errorName(err)});
++            }
++            continue;
++        };
++        const start = cwal.monotonicNs();
++        _ = c.usleep(rand.uintLessThan(u32, job.hold_us + 1));
++        const end = cwal.monotonicNs();
++        out("{c} {d} {d}\n", .{ "AB"[s], start, end });
++        conn.close();
++        job.opened[s] += 1;
++        _ = c.usleep(rand.uintLessThan(u32, job.gap_us + 1));
++    }
++}
++
++/// Member-ownership race: --threads threads each open and close, until
++/// --duration-ms, a CWAL reader handle on set A (<dir>, --files) or set B
++/// (--dir-b, --files-b), chosen at random, hold it up to --hold-us, and
++/// pause up to --gap-us after closing it.
++/// Each held handle prints "A|B <start> <end>" (CLOCK_MONOTONIC ns, taken
++/// after open returned and before close), so the intervals of several
++/// processes can be checked for overlap. The last line counts opens,
++/// MemberOwned refusals and other open errors.
++fn cmdNOwn(dir: []const u8, args: Args) void {
++    const threads = args.int("--threads", 4);
++    var jobs: [16]OwnJob = undefined;
++    var handles: [16]std.Thread = undefined;
++    const deadline = cwal.monotonicNs() + args.int("--duration-ms", 1000) * 1_000_000;
++    const dir_b = args.get("--dir-b") orelse die("--dir-b required", .{});
++    for (0..threads) |i| {
++        jobs[i] = .{ .dirs = .{ dir, dir_b }, .files = .{ nFiles(args), @intCast(args.int("--files-b", 2)) }, .deadline_ns = deadline, .hold_us = @intCast(args.int("--hold-us", 500)), .gap_us = @intCast(args.int("--gap-us", 500)), .seed = i * 7919 + @as(u64, @intCast(c.getpid())) };
++        handles[i] = std.Thread.spawn(.{}, ownThread, .{&jobs[i]}) catch die("spawn", .{});
++    }
++    var opened: [2]u64 = .{ 0, 0 };
++    var refused: u64 = 0;
++    var errors: u64 = 0;
++    for (0..threads) |i| {
++        handles[i].join();
++        opened[0] += jobs[i].opened[0];
++        opened[1] += jobs[i].opened[1];
++        refused += jobs[i].refused;
++        errors += jobs[i].errors;
++    }
++    out("own opened_a={d} opened_b={d} refused={d} errors={d}\n", .{ opened[0], opened[1], refused, errors });
++}
++
+ fn cmdNSeed(dir: []const u8, args: Args) void {
+     var set: NSet = .{};
+     set.fill(dir, nFiles(args));
+@@ -1389,9 +1477,9 @@ fn cmdWCheck(dir: []const u8, args: Args) void {
+ pub fn main(init: std.process.Init.Minimal) void {
+     cwal.register();
+     const list = init.args.toSlice(std.heap.c_allocator) catch die("args", .{});
+-    if (list.len < 3) die("usage: cwal <seed|writer|reader|check|recover|state|bench|benchrw|nseed|nwriter|nreader|ncheck|nexec|wseed|wrun|wcheck> <dir> [options]", .{});
++    if (list.len < 3) die("usage: cwal <seed|writer|reader|check|recover|state|bench|benchrw|nseed|nwriter|nreader|ncheck|nexec|nown|wseed|wrun|wcheck> <dir> [options]", .{});
+     const args: Args = .{ .list = list };
+     const cmd = list[1];
+     const dir = list[2];
+-    if (std.mem.eql(u8, cmd, "seed")) cmdSeed(dir) else if (std.mem.eql(u8, cmd, "writer")) cmdWriter(dir, args) else if (std.mem.eql(u8, cmd, "reader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "check")) cmdCheck(dir, args) else if (std.mem.eql(u8, cmd, "recover")) cmdRecover(dir, args) else if (std.mem.eql(u8, cmd, "state")) cmdState(dir) else if (std.mem.eql(u8, cmd, "bench")) cmdBench(dir, args) else if (std.mem.eql(u8, cmd, "benchrw")) cmdBenchRw(dir, args) else if (std.mem.eql(u8, cmd, "nseed")) cmdNSeed(dir, args) else if (std.mem.eql(u8, cmd, "nwriter")) cmdNWriter(dir, args) else if (std.mem.eql(u8, cmd, "nreader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "ncheck")) cmdNCheck(dir, args) else if (std.mem.eql(u8, cmd, "nsem")) cmdNSem(dir, args) else if (std.mem.eql(u8, cmd, "nwriters")) cmdNWriters(dir, args) else if (std.mem.eql(u8, cmd, "nexec")) cmdNExec(dir, args) else if (std.mem.eql(u8, cmd, "wseed")) cmdWSeed(dir, args) else if (std.mem.eql(u8, cmd, "wrun")) cmdWRun(dir, args) else if (std.mem.eql(u8, cmd, "wcheck")) cmdWCheck(dir, args) else die("unknown command {s}", .{cmd});
++    if (std.mem.eql(u8, cmd, "seed")) cmdSeed(dir) else if (std.mem.eql(u8, cmd, "writer")) cmdWriter(dir, args) else if (std.mem.eql(u8, cmd, "reader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "check")) cmdCheck(dir, args) else if (std.mem.eql(u8, cmd, "recover")) cmdRecover(dir, args) else if (std.mem.eql(u8, cmd, "state")) cmdState(dir) else if (std.mem.eql(u8, cmd, "bench")) cmdBench(dir, args) else if (std.mem.eql(u8, cmd, "benchrw")) cmdBenchRw(dir, args) else if (std.mem.eql(u8, cmd, "nseed")) cmdNSeed(dir, args) else if (std.mem.eql(u8, cmd, "nwriter")) cmdNWriter(dir, args) else if (std.mem.eql(u8, cmd, "nreader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "ncheck")) cmdNCheck(dir, args) else if (std.mem.eql(u8, cmd, "nsem")) cmdNSem(dir, args) else if (std.mem.eql(u8, cmd, "nwriters")) cmdNWriters(dir, args) else if (std.mem.eql(u8, cmd, "nexec")) cmdNExec(dir, args) else if (std.mem.eql(u8, cmd, "nown")) cmdNOwn(dir, args) else if (std.mem.eql(u8, cmd, "wseed")) cmdWSeed(dir, args) else if (std.mem.eql(u8, cmd, "wrun")) cmdWRun(dir, args) else if (std.mem.eql(u8, cmd, "wcheck")) cmdWCheck(dir, args) else die("unknown command {s}", .{cmd});
+ }
+diff --git a/prototypes/cwal/torture.py b/prototypes/cwal/torture.py
+index 006a499..c4dad44 100644
+--- a/prototypes/cwal/torture.py
++++ b/prototypes/cwal/torture.py
+@@ -1392,6 +1392,298 @@ def enforce_journal_and_meta(work):
+     return out
+ 
+ 
++
++# ---------------------------------------------------------------------------
++# T2: deterministic delay-point tests (R3, no-late-alone, no-cross-flag)
++# T3: exclusive member ownership
++# ---------------------------------------------------------------------------
++
++def _env(extra=None):
++    e = dict(os.environ)
++    for k in ("CWAL_CRASH_AT", "CWAL_POWERLOSS", "CWAL_SEED", "CWAL_TRACE"):
++        e.pop(k, None)
++    e.update({k: str(v) for k, v in (extra or {}).items()})
++    return e
++
++
++def _first_line(p, timeout=20):
++    """The first stdout line of process p, or '' after timeout or exit."""
++    import select
++    ready, _, _ = select.select([p.stdout], [], [], timeout)
++    return p.stdout.readline().strip() if ready else ""
++
++
++def holder(d, n, extra=()):
++    """A CWAL reader handle (nexec) that keeps set d open until its stdin
++    closes or it is killed. Returns (process, first line: 'ready' or the
++    open error)."""
++    p = subprocess.Popen([BIN, "nexec", d, "--files", str(n), "--role", "reader", "--ready", "1"] + [str(x) for x in extra],
++                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=_env())
++    return p, _first_line(p)
++
++
++def release(p):
++    """Close a holder normally; returns its stdout."""
++    out, _ = p.communicate(input="", timeout=30)
++    return out
++
++
++def kill(p):
++    p.kill()
++    p.communicate(timeout=30)
++
++
++def paused(args, d, point="open-shared", extra_env=None):
++    """Start `cwal args` with a pause at `point`. Returns (process, pause
++    file, whether it reached the point)."""
++    pf = d.rstrip("/") + ".pause"
++    for suf in (".reached", ".go"):
++        if os.path.exists(pf + suf):
++            os.unlink(pf + suf)
++    env = _env({"CWAL_PAUSE_AT": point, "CWAL_PAUSE_FILE": pf, **(extra_env or {})})
++    p = subprocess.Popen([BIN] + [str(x) for x in args], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
++    deadline = time.time() + 20
++    while not os.path.exists(pf + ".reached") and p.poll() is None and time.time() < deadline:
++        time.sleep(0.002)
++    return p, pf, os.path.exists(pf + ".reached")
++
++
++def go(pf):
++    open(pf + ".go", "w").close()
++
++
++def cross3(k):
++    """One transaction over all three members, with markers ($txn)."""
++    return "begin\n" + "".join(f"insert into {s}.t values ({k}, $txn, 7, 3, randomblob(300))\n" for s in ("main", "m1", "m2")) + "!commit\n"
++
++
++def dp_set(work, name, n=3):
++    d = os.path.join(work, "dp-" + name)
++    rmset(d, ignore_errors=True)
++    copyset(ntemplate(work, n), d)
++    return d
++
++
++def torn_under_holder(work, name, probe):
++    """Set `name` (3 files) held open by a reader, with transaction 1
++    committed and transaction 2's writer killed at crash probe `probe`#1.
++    Returns (dir, holder, error or None)."""
++    d = dp_set(work, name)
++    h, line = holder(d, 3)
++    if line != "ready":
++        return d, h, f"holder: {line}"
++    w0 = run(["nexec", d, "--files", 3], input=cross3(1))
++    if w0.returncode != 0 or w0.stdout.split() != ["ok"] * 5:
++        return d, h, f"setup commit: {' '.join(w0.stdout.split())}"
++    w1 = run(["nexec", d, "--files", 3], input=cross3(2), env={"CWAL_CRASH_TAG": probe, "CWAL_CRASH_AT": 1})
++    if w1.returncode != -9:
++        return d, h, f"writer not killed at {probe}: exit {w1.returncode}"
++    return d, h, None
++
++
++def debug_log(d):
++    path = os.path.join(d, "main.db-cwal-debug")
++    if not os.path.exists(path):
++        return ""
++    with open(path) as f:
++        return f.read()
++
++
++def dp_no_cross_flag(work):
++    """A writer killed inside a cross-file window, with another handle
++    keeping the set open (so no recovery runs): a new writer must refuse
++    (Broken, exit 3), readers must see no mixed state, and recovery after
++    the last handle closes must repair the set."""
++    d, h, err = torn_under_holder(work, "xflag", "commit-sync-next")
++    if err:
++        kill(h)
++        return False, err
++    st = snap_state(d)
++    w2 = run(["nwriter", d, "--files", 3, "--rounds", 5])
++    rd = run(["nreader", d, "--files", 3, "--threads", 2, "--duration-ms", 300])
++    m = re.search(r"mixed=(\d+)", rd.stdout)
++    mixed = int(m.group(1)) if m else -1
++    release(h)
++    cerr, rec = ncheck(d, 3, "cwal", [])
++    ok = st.get("seq", 0) % 2 == 1 and st.get("cross") == 1 and w2.returncode == 3 and rd.returncode == 0 and mixed == 0 and cerr is None and rec == "rollback"
++    return ok, f"seq={st.get('seq')} cross={st.get('cross')} writer2_exit={w2.returncode} reader_exit={rd.returncode} mixed={mixed} check={cerr or 'ok'} recovery={rec}"
++
++
++def dp_late_alone(work):
++    """The last other handle dies while an opener is between its -alive
++    test and SQLite mapping the wal-indexes, with a dead writer's frames on
++    main past mxFrame (synced, unpublished). SQLite rebuilds main's
++    wal-index and publishes them; the opener must notice it is alone and
++    recover, so its reads are never mixed."""
++    d, h, err = torn_under_holder(work, "late", "commit-sync-first")
++    if err:
++        kill(h)
++        return False, err
++    o, pf, reached = paused(["nreader", d, "--files", 3, "--threads", 1, "--duration-ms", 1500], d, extra_env={"CWAL_DEBUG": 1})
++    kill(h)
++    go(pf)
++    out, _ = o.communicate(timeout=60)
++    reads = int((re.search(r"reads=(\d+)", out) or [0, -1])[1])
++    mixed = int((re.search(r"mixed=(\d+)", out) or [0, -1])[1])
++    late = "alone after mapping" in debug_log(d)
++    cerr, rec = ncheck(d, 3, "cwal", [])
++    ok = reached and o.returncode == 0 and reads > 0 and mixed == 0 and late and cerr is None
++    return ok, f"paused={reached} reader_exit={o.returncode} reads={reads} mixed={mixed} late_alone_path={late} check={cerr or 'ok'} recovery={rec}"
++
++
++def dp_r3(work, same_process):
++    """R3. A dead writer's cross-file commit is published on main (window
++    open) and an ordinary connection checkpoints it into main.db. The
++    seqlock page is then lost (deleted), so an opener is not refused by the
++    open window. The opener reads the wal-index heads, then the last other
++    handle dies before SQLite maps them, so SQLite rebuilds main's wal-index
++    and forgets the checkpoint. Recovery must still see it (from the heads
++    read before mapping) and refuse, changing no WAL. With same_process,
++    the opener's process also holds a handle on an unrelated set."""
++    name = "r3-proc" if same_process else "r3"
++    d, h, err = torn_under_holder(work, name, "commit-sync-next")
++    if err:
++        kill(h)
++        return False, err
++    other = dp_set(work, name + "-other", 2) if same_process else None
++    code = ("import os,sqlite3,sys\n"
++            "r=sqlite3.connect(sys.argv[1]).execute('pragma wal_checkpoint(passive)').fetchone()\n"
++            "print(*r, flush=True)\n"
++            "os._exit(0)\n")
++    ck = subprocess.run([sys.executable, "-c", code, os.path.join(d, "main.db")], capture_output=True, text=True).stdout.split()
++    os.remove(os.path.join(d, "main.db-cwal-snap"))
++    before = wal_sizes(d)
++    args = ["nexec", d, "--files", 3, "--role", "reader", "--ready", 1] + (["--hold", other, "--hold-files", 2] if same_process else [])
++    o, pf, reached = paused(args, d, extra_env={"CWAL_DEBUG": 1})
++    kill(h)
++    go(pf)
++    out, _ = o.communicate(input="", timeout=60)
++    after = wal_sizes(d)
++    log = debug_log(d)
++    late = "alone after mapping" in log
++    seen = "torn commit already checkpointed" in log
++    ckpt_ok = len(ck) == 3 and ck[0] == "0" and int(ck[2]) > 0 and ck[1] == ck[2]
++    ok = ckpt_ok and reached and "open-error ProtocolViolation" in out and after == before and late and seen
++    if other:
++        rmset(other, ignore_errors=True)
++    return ok, f"outsider_ckpt={'/'.join(ck)} paused={reached} opener={' '.join(out.split())[:40]} wal_unchanged={after == before} late_alone_path={late} backfill_seen={seen}"
++
++
++def delay_point_tests(work):
++    return [("no-cross-flag: new writer after a dead cross window", *dp_no_cross_flag(work)),
++            ("no-late-alone: last holder dies during open", *dp_late_alone(work)),
++            ("R3: foreign checkpoint + late alone", *dp_r3(work, False)),
++            ("R3: same, opener holds another set", *dp_r3(work, True))]
++
++
++def _link_member(d, name, target):
++    """Replace member `name` of set d (and its side files) by a symlink."""
++    for f in os.listdir(d):
++        if f == name or f.startswith(name + "-"):
++            os.unlink(os.path.join(d, f))
++    os.symlink(target, os.path.join(d, name))
++
++
++def _unlink_links(d):
++    for f in os.listdir(d):
++        if os.path.islink(os.path.join(d, f)):
++            os.unlink(os.path.join(d, f))
++
++
++def own_open(d, n, role="reader", extra=()):
++    """First stdout line of a one-shot nexec open (stdin empty)."""
++    r = run(["nexec", d, "--files", n, "--role", role, "--ready", 1] + list(extra), input="select count(*) from main.t\n")
++    return " ".join(r.stdout.split())
++
++
++def ownership_static(work, da, db, dc):
++    rows = []
++
++    def case(name, ok, detail):
++        rows.append((name, ok, detail))
++
++    h, line = holder(da, 3)
++    before = wal_sizes(da)
++    for role in ("reader", "writer"):
++        r = own_open(db, 2, role)
++        case(f"B ({role}) while A held, other process", line == "ready" and r == "open-error MemberOwned", r)
++    r = own_open(da, 2)
++    case("A's main with 2 members while A held, other process", r == "open-error MemberOwned", r)
++    r = own_open(da, 3)
++    case("A again while A held, other process", r == "ready ok", r)
++    case("A's WAL files unchanged by the refusals", wal_sizes(da) == before, str(wal_sizes(da)))
++    release(h)
++    h, line = holder(db, 2)
++    r = own_open(da, 3, "writer")
++    case("A (writer) while B held, other process", line == "ready" and r == "open-error MemberOwned", r)
++    release(h)
++    r = own_open(db, 2, extra=["--hold", da, "--hold-files", 3])
++    case("B while A held, same process", r == "open-error MemberOwned", r)
++    r = own_open(da, 3, extra=["--hold", db, "--hold-files", 2])
++    case("A while B held, same process", r == "open-error MemberOwned", r)
++    r = own_open(da, 2, extra=["--hold", da, "--hold-files", 3])
++    case("A's main with 2 members while A held, same process", r == "open-error MemberOwned", r)
++    r = own_open(da, 3, extra=["--hold", da, "--hold-files", 3])
++    case("A twice in one process", r == "ready ok", r)
++    h, line = holder(da, 3)
++    kill(h)
++    r = own_open(db, 2)
++    case("B after A's holder was killed", line == "ready" and r == "ready ok", r)
++    r = own_open(da, 3)
++    case("A after B closed", r == "ready ok", r)
++    r = own_open(dc, 2)
++    case("set listing one file twice (symlink)", r == "open-error ProtocolViolation", r)
++    for d, n in ((da, 3), (db, 2)):
++        cerr, _ = ncheck(d, n, "cwal", [])
++        case(f"{os.path.basename(d)} intact afterwards", cerr is None, cerr or "check ok")
++    return rows
++
++
++def ownership_race(work, d1, n1, d2, n2, procs=2, threads=2, ms=2000):
++    """procs processes of `threads` threads open and close set 1 or set 2
++    at random. Returns (overlapping intervals, opened, refused, errors)."""
++    ps = [subprocess.Popen([BIN, "nown", d1, "--files", str(n1), "--dir-b", d2, "--files-b", str(n2), "--threads", str(threads), "--duration-ms", str(ms), "--hold-us", "500", "--gap-us", "2000"],
++                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=_env()) for _ in range(procs)]
++    intervals, totals, samples = [], Counter(), []
++    for p in ps:
++        out, err = p.communicate(timeout=ms / 1000 + 60)
++        for line in out.splitlines():
++            f = line.split()
++            if len(f) == 3 and f[0] in ("A", "B"):
++                intervals.append((int(f[1]), int(f[2]), f[0]))
++            elif line.startswith("own "):
++                totals.update({k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", line)})
++            elif line.startswith("open-error"):
++                samples.append(line)
++        if p.returncode != 0:
++            totals["errors"] += 1
++            samples.append(f"exit {p.returncode}: {err.strip()[-80:]}")
++    intervals.sort()
++    end = {"A": 0, "B": 0}
++    overlaps = 0
++    for s, e, k in intervals:
++        if end["B" if k == "A" else "A"] > s:
++            overlaps += 1
++        end[k] = max(end[k], e)
++    return overlaps, totals, samples
++
++
++def ownership_tests(work):
++    da = dp_set(work, "own-a", 3)
++    db = dp_set(work, "own-b", 2)
++    _link_member(db, "s1.db", os.path.join(da, "s2.db"))
++    dc = dp_set(work, "own-c", 2)
++    _link_member(dc, "s1.db", os.path.join(dc, "main.db"))
++    rows = ownership_static(work, da, db, dc)
++    for label, (d1, n1, d2, n2) in (("race: A vs B (shared member via symlink)", (da, 3, db, 2)),
++                                    ("race: A vs A's main with 2 members", (da, 3, da, 2))):
++        overlaps, t, samples = ownership_race(work, d1, n1, d2, n2)
++        ok = overlaps == 0 and t["errors"] == 0 and t["opened_a"] > 0 and t["opened_b"] > 0 and t["refused"] > 0
++        rows.append((label, ok, f"overlaps={overlaps} opened_a={t['opened_a']} opened_b={t['opened_b']} refused={t['refused']} errors={t['errors']} {' '.join(samples[:2])}"))
++    _unlink_links(db)
++    _unlink_links(dc)
++    return rows
++
+ def main():
+     ap = argparse.ArgumentParser()
+     ap.add_argument("--work", default=os.environ.get("CWAL_WORK", "/tmp/cwal-torture"))
+@@ -1727,6 +2019,18 @@ def main():
+                 print(f"{n} files seed={seed}: victims={r['victims']} killed={r['crashed']} survivor_reads={st['reads']} min_per_thread={st['min_reads']} mixed={st['mixed']} violations={st['ckpt_violations']} commits_during={r['commits']} longest_stall_ms={r['stall'] * 1000:.0f} ckpt_active_left={r['left']} after_next_writer={r['after']} check={'ok' if not r['err'] else r['err']}", flush=True)
+                 failed |= st["mixed"] != 0 or st["ckpt_violations"] != 0 or r["after"] != 0 or bool(r["err"]) or r["commits"] == 0
+ 
++    if want("delaypoints"):
++        print("== T2: deterministic delay points (R3, no-late-alone, no-cross-flag; 3 files)", flush=True)
++        for name, ok, detail in delay_point_tests(a.work):
++            print(f"{'pass' if ok else 'FAIL'} {name:52} | {detail}", flush=True)
++            failed |= not ok
++
++    if want("ownership"):
++        print("== T3: exclusive member ownership (cross-process, same-process, races)", flush=True)
++        for name, ok, detail in ownership_tests(a.work):
++            print(f"{'pass' if ok else 'FAIL'} {name:52} | {detail}", flush=True)
++            failed |= not ok
++
+     if want("enforce"):
+         print("== protocol enforcement: bypass statements, ordinary SQLite connections, journal modes, lost metadata (3 files)", flush=True)
+         rows = enforce_statements(a.work, "writer") + enforce_statements(a.work, "reader") + enforce_live(a.work) + enforce_journal_and_meta(a.work)

@@ -63,7 +63,11 @@ pub const fault = struct {
     /// writer keeps frames a dead writer wrote past mxFrame), "no-txn-epoch"
     /// (marker numbers continue from the newest published one), "no-open-gate"
     /// (opens and closes do not take the open/close gate), "no-late-alone"
-    /// (no `-alive` check after SQLite has mapped the wal-indexes).
+    /// (no `-alive` check after SQLite has mapped the wal-indexes),
+    /// "no-early-heads" (the late-alone path reads the wal-index heads after
+    /// SQLite has mapped them), "heads-process-wide" (a shared open reads
+    /// the heads only when no other handle of this process is registered,
+    /// the condition before T2), "no-ownership" (no member ownership).
     pub var mutate: []const u8 = "";
     pub var syncs: u64 = 0;
     /// I/O error injection: with CWAL_FAIL_TAG (a comma-separated list of
@@ -143,14 +147,28 @@ pub const fault = struct {
     pub fn event(tag: []const u8) void {
         const n = @atomicRmw(u64, &events, .Add, 1, .seq_cst) + 1;
         if (trace) std.debug.print("event {d} {s}\n", .{ n, tag });
-        if (crash_tag) |want| {
-            var it = std.mem.splitScalar(u8, want, ',');
-            while (it.next()) |w| {
-                if (!std.mem.eql(u8, tag, w)) continue;
-                if (@atomicRmw(u64, &tagged, .Add, 1, .seq_cst) + 1 == crash_at) crash();
-                break;
-            }
-        } else if (crash_at != 0 and n == crash_at) crash();
+        if (crash_tag != null) crashTagged(tag) else if (crash_at != 0 and n == crash_at) crash();
+    }
+
+    /// A crash point that only CWAL_CRASH_TAG selects. It is not an event,
+    /// so untagged CWAL_CRASH_AT numbers stay as they were. Probes:
+    /// commit-sync-first (a WAL sync in a cross-file commit before its
+    /// window opens: no member has published), commit-sync-next (a WAL sync
+    /// with the window open: earlier members have published, this one is
+    /// durable but not published).
+    pub fn probe(tag: []const u8) void {
+        if (trace) std.debug.print("probe {s}\n", .{tag});
+        crashTagged(tag);
+    }
+
+    fn crashTagged(tag: []const u8) void {
+        const want = crash_tag orelse return;
+        var it = std.mem.splitScalar(u8, want, ',');
+        while (it.next()) |w| {
+            if (!std.mem.eql(u8, tag, w)) continue;
+            if (@atomicRmw(u64, &tagged, .Add, 1, .seq_cst) + 1 == crash_at) crash();
+            return;
+        }
     }
 
     pub fn random() u64 {
@@ -533,6 +551,34 @@ pub const test_delay = struct {
             if (std.mem.eql(u8, p.name, name)) _ = c.usleep(p.us);
         }
     }
+
+    /// `CWAL_PAUSE_AT=name` with `CWAL_PAUSE_FILE=path`: the first time this
+    /// process reaches pause point `name`, it creates `path.reached` and
+    /// waits until `path.go` exists (exit 5 after 30 s), so a test can act
+    /// at that exact point. Not an event. Points: open-shared (a shared open
+    /// has read the wal-index heads; SQLite has not mapped them yet).
+    var pause_at: ?[]const u8 = null;
+    var pause_file: ?[]const u8 = null;
+    var paused: bool = false;
+
+    pub fn pause(name: []const u8) void {
+        const want = pause_at orelse return;
+        const base = pause_file orelse return;
+        if (!std.mem.eql(u8, want, name) or @atomicRmw(bool, &paused, .Xchg, true, .seq_cst)) return;
+        var buf: [1100]u8 = undefined;
+        const reached = bufPrintZ(&buf, "{s}.reached", .{base}) catch return;
+        const fd = c.open(reached.ptr, c.O_WRONLY | c.O_CREAT | c.O_CLOEXEC, @as(c_uint, 0o644));
+        if (fd >= 0) _ = c.close(fd);
+        const go = bufPrintZ(&buf, "{s}.go", .{base}) catch return;
+        const deadline = monotonicNs() + 30 * std.time.ns_per_s;
+        while (c.access(go.ptr, c.F_OK) != 0) {
+            if (monotonicNs() > deadline) {
+                std.debug.print("pause {s}: timed out\n", .{name});
+                c._exit(5);
+            }
+            _ = c.usleep(1000);
+        }
+    }
 };
 
 pub fn register() void {
@@ -542,6 +588,8 @@ pub fn register() void {
     test_delay.ckpt_scan_delay_us = @intCast(envU64("CWAL_CKPT_SCAN_DELAY_US") orelse 0);
     test_delay.alive_delay_us = @intCast(envU64("CWAL_ALIVE_DELAY_US") orelse 0);
     test_delay.parsePoints();
+    if (c.getenv("CWAL_PAUSE_AT")) |v| test_delay.pause_at = std.mem.span(v);
+    if (c.getenv("CWAL_PAUSE_FILE")) |v| test_delay.pause_file = std.mem.span(v);
     unix_vfs = c.sqlite3_vfs_find("unix");
     std.debug.assert(unix_vfs != null);
     cwal_vfs = unix_vfs.*;
@@ -733,6 +781,7 @@ fn ioSync(file: [*c]c.sqlite3_file, flags: c_int) callconv(.c) c_int {
         // first such sync of a commit starts the publication window.
         if (connFor(f)) |conn| {
             conn.log("wal sync member {d} in_commit={} window_open={} cross={}", .{ f.member, conn.in_commit, conn.window_open, conn.cross });
+            if (rc == c.SQLITE_OK and conn.in_commit and conn.cross) fault.probe(if (conn.window_open) "commit-sync-next" else "commit-sync-first");
             // Fail the commit before this member publishes.
             if (rc == c.SQLITE_OK and !conn.startPublication()) return c.SQLITE_IOERR_FSYNC;
         }
@@ -1030,7 +1079,7 @@ const ckpt_started: u64 = 1 << 32;
 pub const Mode = enum { plain, cwal };
 pub const Role = enum { writer, reader };
 
-pub const Error = error{ Sqlite, Broken, WriterBusy, Io, ProtocolViolation };
+pub const Error = error{ Sqlite, Broken, WriterBusy, Io, ProtocolViolation, MemberOwned };
 
 pub const Options = struct {
     mode: Mode,
@@ -1041,6 +1090,10 @@ pub const Options = struct {
 };
 
 var registry: [256]?*Conn = @splat(null);
+/// Per registry slot, the hash of its handle's set identity (`setHash`), 0
+/// when free. Read instead of the other handle's `Conn`, which its owner
+/// may be freeing.
+var registry_set: [256]u64 = @splat(0);
 
 /// Claim a free registry slot (1..255). Slot 0 means "not a CWAL file".
 fn claimSlot(conn: *Conn) ?u32 {
@@ -1091,6 +1144,10 @@ pub const Conn = struct {
     member_db: [max_members]?*File = @splat(null),
     write_locked: [max_members]bool = @splat(false),
     alive_fd: c_int = -1,
+    /// Per member, `-cwal-own`, held shared while this handle is open (see
+    /// `acquireMembers`).
+    own_fd: [max_members]c_int = @splat(-1),
+    set_hash: u64 = 0,
     /// Open/close gate (`-gate`), held exclusively while this handle opens
     /// (until SQLite has mapped every member's wal-index) or closes.
     gate_fd: c_int = -1,
@@ -1147,12 +1204,15 @@ pub const Conn = struct {
         for (paths, 0..) |p, i| conn.paths[i] = fullPath(p) catch return error.Io;
         const id = claimSlot(conn) orelse return error.Io;
         conn.id = id;
+        conn.set_hash = conn.setHash();
+        @atomicStore(u64, &registry_set[id], conn.set_hash, .seq_cst);
         errdefer conn.close();
 
         if (options.mode == .cwal) {
             // The publication window starts at a commit-time WAL sync, which
             // SQLite issues only with synchronous=FULL or EXTRA.
             if (!std.ascii.eqlIgnoreCase(options.synchronous, "FULL") and !std.ascii.eqlIgnoreCase(options.synchronous, "EXTRA")) return error.ProtocolViolation;
+            try conn.acquireMembers();
             try conn.openCoordination();
         }
         try conn.openSqlite(paths, options);
@@ -1167,6 +1227,7 @@ pub const Conn = struct {
             _ = c.sqlite3_db_config(conn.db, c.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, @as(c_int, 1), @as(?*c_int, null));
             _ = c.sqlite3_close_v2(conn.db);
             conn.db = null;
+            if (fault.mutated("no-early-heads")) conn.readShmHeads();
             try conn.recoverAlone();
             try conn.openSqlite(paths, options);
         }
@@ -1330,7 +1391,15 @@ pub const Conn = struct {
         conn.releaseGate();
         if (conn.gate_fd >= 0) _ = c.close(conn.gate_fd);
         conn.gate_fd = -1;
-        if (conn.id != 0) @atomicStore(?*Conn, &registry[conn.id], null, .seq_cst);
+        // Give up the members last: until here this handle had them open.
+        for (&conn.own_fd) |*fd| {
+            if (fd.* >= 0) _ = c.close(fd.*);
+            fd.* = -1;
+        }
+        if (conn.id != 0) {
+            @atomicStore(u64, &registry_set[conn.id], 0, .seq_cst);
+            @atomicStore(?*Conn, &registry[conn.id], null, .seq_cst);
+        }
     }
 
     fn log(conn: *Conn, comptime fmt: []const u8, args: anytype) void {
@@ -1379,8 +1448,13 @@ pub const Conn = struct {
     }
 
     fn openLockFile(conn: *Conn, suffix: []const u8) Error!c_int {
+        return openSideFile(conn.paths[0], suffix);
+    }
+
+    /// `<base>-cwal-<suffix>`, created if missing.
+    fn openSideFile(base: []const u8, suffix: []const u8) Error!c_int {
         var buf: [1100]u8 = undefined;
-        const path = bufPrintZ(&buf, "{s}-cwal-{s}", .{ conn.paths[0], suffix }) catch return error.Io;
+        const path = bufPrintZ(&buf, "{s}-cwal-{s}", .{ base, suffix }) catch return error.Io;
         const creating = fault.powerloss and c.access(path.ptr, c.F_OK) != 0;
         const fd = c.open(path.ptr, c.O_RDWR | c.O_CREAT | c.O_CLOEXEC, @as(c_uint, 0o644));
         if (fd < 0) return error.Io;
@@ -1435,12 +1509,18 @@ pub const Conn = struct {
             if (!lock(conn.alive_fd, c.LOCK_SH)) return error.Io;
             conn.log("shared seq={d} cross={d} broken={d}", .{ conn.snap.?.seq, conn.snap.?.cross, conn.snap.?.broken });
             if (!conn.markersReadable(@atomicLoad(u64, &conn.snap.?.seq, .seq_cst))) return error.Broken;
-            // Opening and closing a member's -shm would drop the POSIX locks
-            // other connections of this process hold on it (close(2) releases
-            // all of the process's locks on the file). Another handle of this
-            // process with the set open also rules out the late-alone path
-            // (closes take the gate).
-            if (conn.onlyHandleInProcess()) conn.readShmHeads();
+            // Reading a member's -shm opens and closes it, and close(2)
+            // drops every POSIX lock this process holds on the file, which
+            // would break another connection of this process that has the
+            // member open. Member ownership (acquireMembers) leaves only
+            // handles of this same set with a member open, and such a handle
+            // also rules out the late-alone path (closes take the gate). So
+            // read the heads unless this process has another handle of this
+            // set.
+            if (fault.mutated("heads-process-wide")) {
+                if (conn.onlyHandleInProcess()) conn.readShmHeads();
+            } else if (!conn.otherHandleOfSet()) conn.readShmHeads();
+            test_delay.pause("open-shared");
             if (test_delay.alive_delay_us != 0) _ = c.usleep(test_delay.alive_delay_us);
         }
         if (conn.role == .writer) {
@@ -1461,6 +1541,96 @@ pub const Conn = struct {
     /// heads read here, before `openSqlite`.
     fn readShmHeads(conn: *Conn) void {
         for (0..conn.nmembers) |i| conn.shm_heads[i] = readShmHead(conn.paths[i]);
+    }
+
+    /// Whether another handle of this process has this set open (or is
+    /// opening it). A hash collision only skips reading the heads.
+    fn otherHandleOfSet(conn: *Conn) bool {
+        for (1..registry.len) |i| {
+            if (i != conn.id and @atomicLoad(u64, &registry_set[i], .seq_cst) == conn.set_hash) return true;
+        }
+        return false;
+    }
+
+    /// The set's identity: every member's resolved path, in order, each
+    /// followed by a newline.
+    fn identity(conn: *const Conn) Error![]u8 {
+        var len: usize = 0;
+        for (conn.paths[0..conn.nmembers]) |p| len += p.len + 1;
+        const id = allocator.alloc(u8, len) catch return error.Io;
+        var at: usize = 0;
+        for (conn.paths[0..conn.nmembers]) |p| {
+            @memcpy(id[at..][0..p.len], p);
+            id[at + p.len] = '\n';
+            at += p.len + 1;
+        }
+        return id;
+    }
+
+    /// Never 0, which marks a free registry slot.
+    fn setHash(conn: *const Conn) u64 {
+        var h = std.hash.Wyhash.init(0);
+        for (conn.paths[0..conn.nmembers]) |p| {
+            h.update(p);
+            h.update("\n");
+        }
+        return h.final() | 1;
+    }
+
+    /// Each member file belongs to one set at a time (REVIEW.md R4).
+    /// Recovery, the checkpoint counter and the open/close gate live next to
+    /// the main file, so two sets sharing a member, or one main opened with
+    /// two member lists, would recover and checkpoint that member under
+    /// different locks. Per member, `-cwal-own` is held shared by every
+    /// handle of the owning set and records the set's identity. An opener
+    /// decides under the member's `-cwal-mgate` (exclusive, held briefly):
+    /// if it can lock `-cwal-own` exclusively, no handle owns the member, so
+    /// it records its own identity and keeps the lock shared; otherwise it
+    /// joins only if the recorded identity is its own, and fails with
+    /// MemberOwned if not. The record is written only under the exclusive
+    /// lock, which needs every owner gone, so while any handle holds the
+    /// lock it names that handle's set. flock(2) locks belong to the open
+    /// file description, so handles of one process exclude each other like
+    /// handles of different processes. A hard link or bind mount gives one
+    /// file two resolved paths, and is not detected.
+    fn acquireMembers(conn: *Conn) Error!void {
+        if (fault.mutated("no-ownership")) return;
+        for (0..conn.nmembers) |i| {
+            for (0..i) |j| {
+                if (std.mem.eql(u8, conn.paths[i], conn.paths[j])) return error.ProtocolViolation;
+            }
+        }
+        const id = try conn.identity();
+        defer allocator.free(id);
+        for (0..conn.nmembers) |i| conn.own_fd[i] = try acquireMember(conn.paths[i], id);
+    }
+
+    fn acquireMember(path: []const u8, id: []const u8) Error!c_int {
+        const gate = try openSideFile(path, "mgate");
+        // Closing the descriptor releases the gate.
+        defer _ = c.close(gate);
+        if (!lock(gate, c.LOCK_EX)) return error.Io;
+        const fd = try openSideFile(path, "own");
+        errdefer _ = c.close(fd);
+        if (c.flock(fd, c.LOCK_EX | c.LOCK_NB) == 0) {
+            const wrote = c.pwrite(fd, id.ptr, id.len, 0);
+            if (wrote < 0 or @as(usize, @intCast(wrote)) != id.len or c.ftruncate(fd, @intCast(id.len)) != 0) return error.Io;
+            // flock(2) converts by unlocking first; openers wait at the gate.
+            if (!lock(fd, c.LOCK_SH)) return error.Io;
+            return fd;
+        }
+        if (c.__errno_location().* != c.EWOULDBLOCK) return error.Io;
+        // Owned: only by holders of shared locks, since the exclusive lock is
+        // taken only under the gate.
+        const size = fileSize(fd) orelse return error.Io;
+        if (size != id.len) return error.MemberOwned;
+        const recorded = allocator.alloc(u8, id.len) catch return error.Io;
+        defer allocator.free(recorded);
+        const got = c.pread(fd, recorded.ptr, recorded.len, 0);
+        if (got < 0 or @as(usize, @intCast(got)) != id.len) return error.Io;
+        if (!std.mem.eql(u8, recorded, id)) return error.MemberOwned;
+        if (!lock(fd, c.LOCK_SH | c.LOCK_NB)) return error.Io;
+        return fd;
     }
 
     fn onlyHandleInProcess(conn: *Conn) bool {
