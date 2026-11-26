@@ -9,6 +9,7 @@ fn bufPrintZ(buf: []u8, comptime fmt: []const u8, args: anytype) std.fmt.BufPrin
 }
 const cwal = @import("cwal.zig");
 const Conn = cwal.Conn;
+const workload = @import("workload.zig");
 
 const max_path = 1024;
 
@@ -282,7 +283,8 @@ fn nState(conn: *Conn, n: usize) NState {
 /// Run statements from stdin, one per line, through one handle (--role
 /// writer or reader) and print "ok" or "err <error>" for each. "!commit"
 /// calls Conn.commit, "!autocommit <sql>" Conn.autocommit, "!rollback"
-/// Conn.rollbackOpen.
+/// Conn.rollbackOpen, "!noauth" removes the handle's authorizer (as an
+/// application that installs its own would).
 fn cmdNExec(dir: []const u8, args: Args) void {
     const role = std.meta.stringToEnum(cwal.Role, args.get("--role") orelse "writer") orelse die("bad --role", .{});
     const conn = openN(dir, nFiles(args), .{ .mode = args.mode(), .role = role }) catch |err| {
@@ -305,6 +307,8 @@ fn cmdNExec(dir: []const u8, args: Args) void {
             conn.commit()
         else if (std.mem.eql(u8, line, "!rollback"))
             conn.rollbackOpen()
+        else if (std.mem.eql(u8, line, "!noauth"))
+            if (c.sqlite3_set_authorizer(conn.db, null, null) != c.SQLITE_OK) error.Sqlite else {}
         else if (std.mem.startsWith(u8, line, "!autocommit "))
             conn.autocommit(bufPrintZ(&sql_buf, "{s}", .{line["!autocommit ".len..]}) catch die("long line", .{}))
         else
@@ -1340,14 +1344,54 @@ fn cmdBenchRw(dir: []const u8, args: Args) void {
     });
 }
 
+fn float(args: Args, name: []const u8, default: f64) f64 {
+    const v = args.get(name) orelse return default;
+    return std.fmt.parseFloat(f64, v) catch die("bad {s}", .{name});
+}
+
+/// wseed <dir> [--journal wal|delete] [--docs N] [--object-kib K] [--big N] [--big-mib M]
+fn cmdWSeed(dir: []const u8, args: Args) void {
+    workload.seed(dir, .{
+        .journal = args.get("--journal") orelse "wal",
+        .docs = args.int("--docs", 2000),
+        .object_kib = args.int("--object-kib", 16),
+        .big = args.int("--big", 4),
+        .big_mib = args.int("--big-mib", 16),
+    });
+}
+
+/// wrun <dir> --mode plain|journal|cwal --scenario mixed|objects|vectors|graph
+///   [--rate R] [--readers N] [--read-rate R] [--duration-s S] [--report-s S]
+///   [--ckpt-every N] [--object-kib K] [--big-mib M] [--batch N]
+fn cmdWRun(dir: []const u8, args: Args) void {
+    workload.run(dir, .{
+        .mode = std.meta.stringToEnum(workload.Mode, args.get("--mode") orelse "cwal") orelse die("bad --mode", .{}),
+        .scenario = std.meta.stringToEnum(workload.Scenario, args.get("--scenario") orelse "mixed") orelse die("bad --scenario", .{}),
+        .rate = float(args, "--rate", 0),
+        .readers = args.int("--readers", 2),
+        .read_rate = float(args, "--read-rate", 0),
+        .duration_s = float(args, "--duration-s", 10),
+        .report_s = float(args, "--report-s", 0),
+        .ckpt_every = args.int("--ckpt-every", 100),
+        .object_kib = args.int("--object-kib", 64),
+        .big_mib = args.int("--big-mib", 16),
+        .batch = args.int("--batch", 32),
+    });
+}
+
+/// wcheck <dir> --mode plain|journal|cwal: integrity and cross-file checks.
+fn cmdWCheck(dir: []const u8, args: Args) void {
+    workload.check(dir, std.meta.stringToEnum(workload.Mode, args.get("--mode") orelse "cwal") orelse die("bad --mode", .{}));
+}
+
 // ---------------------------------------------------------------------------
 
 pub fn main(init: std.process.Init.Minimal) void {
     cwal.register();
     const list = init.args.toSlice(std.heap.c_allocator) catch die("args", .{});
-    if (list.len < 3) die("usage: cwal <seed|writer|reader|check|recover|state|bench|benchrw|nseed|nwriter|nreader|ncheck|nexec> <dir> [options]", .{});
+    if (list.len < 3) die("usage: cwal <seed|writer|reader|check|recover|state|bench|benchrw|nseed|nwriter|nreader|ncheck|nexec|wseed|wrun|wcheck> <dir> [options]", .{});
     const args: Args = .{ .list = list };
     const cmd = list[1];
     const dir = list[2];
-    if (std.mem.eql(u8, cmd, "seed")) cmdSeed(dir) else if (std.mem.eql(u8, cmd, "writer")) cmdWriter(dir, args) else if (std.mem.eql(u8, cmd, "reader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "check")) cmdCheck(dir, args) else if (std.mem.eql(u8, cmd, "recover")) cmdRecover(dir, args) else if (std.mem.eql(u8, cmd, "state")) cmdState(dir) else if (std.mem.eql(u8, cmd, "bench")) cmdBench(dir, args) else if (std.mem.eql(u8, cmd, "benchrw")) cmdBenchRw(dir, args) else if (std.mem.eql(u8, cmd, "nseed")) cmdNSeed(dir, args) else if (std.mem.eql(u8, cmd, "nwriter")) cmdNWriter(dir, args) else if (std.mem.eql(u8, cmd, "nreader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "ncheck")) cmdNCheck(dir, args) else if (std.mem.eql(u8, cmd, "nsem")) cmdNSem(dir, args) else if (std.mem.eql(u8, cmd, "nwriters")) cmdNWriters(dir, args) else if (std.mem.eql(u8, cmd, "nexec")) cmdNExec(dir, args) else die("unknown command {s}", .{cmd});
+    if (std.mem.eql(u8, cmd, "seed")) cmdSeed(dir) else if (std.mem.eql(u8, cmd, "writer")) cmdWriter(dir, args) else if (std.mem.eql(u8, cmd, "reader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "check")) cmdCheck(dir, args) else if (std.mem.eql(u8, cmd, "recover")) cmdRecover(dir, args) else if (std.mem.eql(u8, cmd, "state")) cmdState(dir) else if (std.mem.eql(u8, cmd, "bench")) cmdBench(dir, args) else if (std.mem.eql(u8, cmd, "benchrw")) cmdBenchRw(dir, args) else if (std.mem.eql(u8, cmd, "nseed")) cmdNSeed(dir, args) else if (std.mem.eql(u8, cmd, "nwriter")) cmdNWriter(dir, args) else if (std.mem.eql(u8, cmd, "nreader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "ncheck")) cmdNCheck(dir, args) else if (std.mem.eql(u8, cmd, "nsem")) cmdNSem(dir, args) else if (std.mem.eql(u8, cmd, "nwriters")) cmdNWriters(dir, args) else if (std.mem.eql(u8, cmd, "nexec")) cmdNExec(dir, args) else if (std.mem.eql(u8, cmd, "wseed")) cmdWSeed(dir, args) else if (std.mem.eql(u8, cmd, "wrun")) cmdWRun(dir, args) else if (std.mem.eql(u8, cmd, "wcheck")) cmdWCheck(dir, args) else die("unknown command {s}", .{cmd});
 }

@@ -247,12 +247,17 @@ than repaired wrongly:
   a member that another connection holds open in another mode cannot be,
   and the open fails.
 - **Foreign checkpoints.** Recovery reads each member's `-shm` before
-  opening it (the first connection to open a member truncates it). If that
+  SQLite maps it (the first connection to open a member truncates it). It
+  refuses with `ProtocolViolation` if a torn commit is already in the
+  database file, where truncating the WAL would not remove it: the
   wal-index belongs to the member's WAL (same salts) and its `nBackfill`
-  (frames a completed checkpoint copied) reaches past where recovery would
-  truncate, the torn commit is already in the database file and truncating
-  would not remove it: recovery refuses with `ProtocolViolation`. CWAL never
-  checkpoints a torn commit, so only an outside connection gets there.
+  (frames a completed checkpoint copied) reaches past the truncation point;
+  or the wal-index is one WAL restart ahead of the WAL (SQLite restarts a
+  WAL only after checkpointing all of it); or the WAL's last commit does
+  not write the marker table's root page, so it is not the torn commit.
+  CWAL never checkpoints a torn commit, so only an outside connection gets
+  there. Every member is checked before any is truncated, so a refused set
+  is left as the crash left it.
 
 ## Running
 
@@ -262,6 +267,7 @@ zig build                      # Debug, for torture
 python3 torture.py --work /tmp/cwal-torture
 zig build -Doptimize=ReleaseFast
 ./bench.sh /tmp/cwal-bench     # filesystem chosen by the directory
+./workload.py --dir /tmp/cwal-wl   # realistic workloads, all modes
 ```
 
 `zig-out/bin/cwal` commands: `seed`, `writer`, `reader`, `check`, `recover`,
@@ -270,7 +276,13 @@ zig build -Doptimize=ReleaseFast
 threads), `nsem`, `nreader`, `ncheck`, and `nexec` (runs each stdin line as
 SQL on one handle, `--role writer|reader`; `!commit`, `!rollback` and
 `!autocommit <sql>` call the `Conn` methods; prints `ok` or `err <name>` per
-line). Fault injection is
+line), and the workload commands `wseed` (a five-file Zova-like set,
+`--journal wal|delete`) and `wrun` (`--mode plain|journal|cwal --scenario
+mixed|objects|vectors|graph --rate R --readers N --read-rate R --duration-s S
+--report-s S`). `workload.py` seeds once per journal mode, calibrates each
+mode's maximum writer rate, then runs every mode at `--fraction` (0.5) of the
+slowest, or at `--rate`; `--report` prints interval lines for long runs.
+Fault injection is
 controlled by environment: `CWAL_CRASH_AT=n` (SIGKILL at event n),
 `CWAL_CRASH_TAG=t[,t...]` (count only events with these tags), `CWAL_POWERLOSS=1` +
 `CWAL_SEED`, `CWAL_TRACE=1`, and `CWAL_MUTATE=…[,…]` (test-only defects, to show
@@ -433,7 +445,7 @@ Enforcement tests (`--only enforce`, 3 files) use Python's `sqlite3` module
 | --- | --- |
 | Bypass statements | 24 statements per role (writer, reader) on a CWAL handle through `nexec`: marker writes, drops, alters and triggers; cross-file commits through `COMMIT`, `END`, `RELEASE` and a TEMP trigger; journal, locking, sync and writable-schema pragmas; `ATTACH`, `DETACH`, `VACUUM`; and 3 allowed controls (`Conn.commit`, a checkpoint, reading pragmas). Each bypass must fail, and a writer must then open the set and `ncheck` must pass. |
 | Ordinary connections, live | An ordinary connection loops over the members (reads, `PASSIVE` or `TRUNCATE` checkpoints, or single-file writes) while a CWAL writer commits 200 rounds. |
-| Crashed sets | A writer is killed at each of its first 48 WAL writes (21 leave a torn set). Then an outsider acts: an ordinary connection opens a member (and checkpoints on close), checkpoints every member with `TRUNCATE`, writes one member, or checkpoints every member (`PASSIVE`, `FULL`, `RESTART`) and dies without closing; or `-cwal-snap` or a member's `-shm` is deleted, or the snapshot page overwritten. A silent tear fails, and so does a refused open where CWAL alone needs no rollback. |
+| Crashed sets | A writer is killed at each of its first 48 WAL writes (21 leave a torn set). Then an outsider acts: an ordinary connection opens a member (and checkpoints on close), checkpoints every member with `TRUNCATE`, writes one member, or checkpoints every member (`PASSIVE`, `FULL`, `RESTART`) and dies without closing, or checkpoints `s1.db`, writes it and dies (also with the old WAL bytes put back: died before writing the new WAL header); or `-cwal-snap` or a member's `-shm` is deleted, or the snapshot page overwritten. A silent tear fails, and so do a refused open where CWAL alone needs no rollback and a refused open that changed a WAL file. |
 | Journal modes | A member left in `DELETE` mode, then opened; a member held open in `DELETE` mode by an ordinary connection while CWAL opens; an ordinary connection switching a member to `DELETE` while a CWAL reader has the set open. |
 | Lost metadata | Each lock file deleted from a closed set; a marker row changed, or the marker table dropped, by an ordinary connection. |
 
@@ -475,14 +487,14 @@ Mutations. Each test-only defect is caught:
 | `no-late-alone` (no second `-alive` test after mapping) | unpublished-frames test: 13 / 153 torn at 3 files, 10,445 mixed reads (0 at 8 files) |
 | `no-open-gate` (opens and closes do not take `-gate`) | unpublished-frames test: 4 / 153 torn at 3 files, 2,984 mixed reads (0 at 8 files) |
 | `no-txn-epoch` (marker numbers continue from the newest published one) | restart chains: all 8 chains (3 and 8 files) reuse 2–6 marker numbers |
-
 | `no-authorizer` (no authorizer) | enforcement: 20 bypass statements succeed (writer: marker writes, pragmas, `ATTACH`/`DETACH`; reader: pragmas, `ATTACH`/`DETACH`) |
 | `no-authorizer,no-frame-guard` | the same, and `VACUUM` succeeds in both roles (22) |
-| `no-backfill-check` (recovery ignores foreign checkpoints) | enforcement: 5 / 48 crashed sets silently torn after an ordinary checkpoint that died |
+| `no-frame-guard` (commit frames accepted outside a commit) | enforcement: `VACUUM` succeeds in both roles once the handle's authorizer is removed (as an application installing its own would) |
+| `no-backfill-check` (recovery ignores foreign checkpoints) | enforcement: 5 / 48 crashed sets silently torn after an ordinary checkpoint that died, 13 / 48 after one that also wrote |
 
 `no-ckpt-skip` (always take the real checkpoint lock) is a control: 0
-violations. `no-frame-guard` alone is not caught: the authorizer refuses
-`VACUUM` first.
+violations. `REVIEW.md` has the section 8 review, model check and
+build-mode runs.
 
 ### N-file atomicity
 
@@ -694,7 +706,7 @@ fixes, probes found these bypasses (all now refused):
 | --- | --- |
 | Bypass statements, writer and reader | **42 / 42** refused (`VACUUM` by the authorizer); 6 / 6 controls allowed; the set opened and checked after each |
 | Ordinary connections while a writer commits (read, `PASSIVE`, `TRUNCATE`, write) | **4 / 4** pass; 63–75 ordinary operations each, all succeeded |
-| Crashed sets, 13 outsiders × 48 crash points (21 torn) | **0** silent tears, **0** refusals of a set CWAL alone recovers. Refused (`ProtocolViolation`) exactly when the outsider applied the torn commit: all 21 torn sets for each checkpointing outsider, 16 and 13 for an ordinary open of `main.db` and `s1.db`, 0 for `s2.db` (no torn commit reached its WAL at these crash points). Deleted `-shm`, `-cwal-snap` or a junk snapshot page: all 48 recover. |
+| Crashed sets, 15 outsiders × 48 crash points (21 torn) | **0** silent tears, **0** refusals of a set CWAL alone recovers, **0** refusals that changed a WAL file. Refused (`ProtocolViolation`) exactly when the outsider applied the torn commit: all 21 torn sets for each outsider that checkpoints every member, 16 and 13 for an ordinary open of `main.db` and `s1.db`, 0 for `s2.db` (no torn commit reached its WAL at these crash points), 13 for each outsider that checkpoints and writes `s1.db` (the two added in section 8; before the fix 13 and 5 of those were silent tears). Deleted `-shm`, `-cwal-snap` or a junk snapshot page: all 48 recover. |
 | Member left in `DELETE` mode | switched back to WAL at open, 3 / 3 |
 | Member held open in `DELETE` mode | open fails (`database is locked`); after release, opens and checks |
 | Ordinary connection switches a member to `DELETE` under a CWAL reader | refused by SQLite (`database is locked`) |
@@ -752,6 +764,185 @@ point queries and a rollback, for 3 s.
   window and retried (about 40k retries per run).
 - Storage: the 4 KiB seqlock page per set, and a one-row table (one page)
   per member.
+
+### Realistic workloads
+
+`workload.py`, ReleaseSafe, 10 s per run, each run from a fresh copy of a
+seeded set. The set is laid out like Zova's stores, with Zova's table and index
+definitions: relational `docs` rows in `main.db`, objects
+(`_zova_objects`, `_zova_chunks`, `_zova_object_chunks`, chunks SHA-256
+hashed) in `s1.db`, 384-dimension f32 vectors in `s2.db`, graph nodes and
+edges in `s3.db`, `_zova_kv` in `s4.db`. Seeded with 2,000 documents (16 KiB
+object, vector, node with 3 edges, metadata pair each) and four 16 MiB
+objects, about 105 MB.
+
+| Scenario | Writer transaction | Reader transaction |
+| --- | --- | --- |
+| mixed | 40% ingest a document into all five files (1 KiB row, 64 KiB object, vector, node + 3 edges, pair); 30% update a row + pair; 20% two edges + row touch; 10% one pair | 50% a document with its object, vector, node and pair; 10% exact top-10 vector search; 40% two-hop traversal |
+| objects | a 16 MiB object in 1 MiB chunks, row and pair | stream a random 16 MiB object |
+| vectors | 32 rows + 32 vectors | exact top-10 search over all vectors |
+| graph | node + 4 edges, pair, row touch | two-hop traversal |
+
+Modes: plain WAL (`Conn` plain mode), rollback journal (`journal_mode=DELETE`:
+SQLite's super-journal makes multi-file commits atomic, but readers and the
+writer block each other), and CWAL; `synchronous=FULL` in all three. The
+writer and 2 readers run open-loop at fixed rates. Latency is measured from
+each operation's scheduled time, so stalls are charged to the operations
+queued behind them. The WAL modes run a PASSIVE checkpoint every 100 writer
+operations, counted in that operation's latency. Journal-mode readers use a 5 ms busy timeout and retry.
+Otherwise a reader holding `main.db` and a writer that has spilled to
+`s1.db` would wait on each other until the 10 s timeout.
+
+Writer rate is half the slowest mode's calibrated maximum. Write
+amplification is bytes written by `write()` (and, on btrfs, the block
+layer's `write_bytes`) over logical payload bytes, including the final
+checkpoint that brings the WAL modes to the journal mode's end state.
+
+btrfs / SSD (writer 8 ops/s, objects 1.3 ops/s; 80 or 13 writer
+operations per run, so p99 is the maximum):
+
+| Scenario | Mode | Max writer ops/s | Write p50 / p99 | Read p50 / p99 | Read retries | Write amp (disk) | fsyncs / op |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| mixed | plain | 44 | 56 / 166 ms | 0.45 / 79 ms | 0 | 5.3 (15.5) | 3.1 |
+| mixed | journal | 16 | 63 / 228 ms | 33 / 273 ms | 1,569 | 7.0 (47.8) | 9.6 |
+| mixed | CWAL | 50 | 44 / 98 ms | 0.46 / 77 ms | 0 | 5.8 (12.9) | 3.0 |
+| objects | plain | 2.8 | 562 / 2,131 ms | 16 / 85 ms | 0 | 2.0 (2.1) | 3.7 |
+| objects | journal | 2.6 | 407 / 448 ms | 32 / 382 ms | 1,242 | 1.0 (1.1) | 12 |
+| objects | CWAL | 2.7 | 348 / 499 ms | 22 / 98 ms | 0 | 2.0 (2.0) | 3.8 |
+| vectors | plain | 80 | 70 / 95 ms | 15 / 24 ms | 0 | 3.4 (6.2) | 2.1 |
+| vectors | journal | 16 | 67 / 312 ms | 40 / 357 ms | 1,031 | 2.7 (14.7) | 7.0 |
+| vectors | CWAL | 95 | 48 / 68 ms | 16 / 28 ms | 0 | 3.5 (6.1) | 2.1 |
+| graph | plain | 62 | 45 / 57 ms | 0.37 / 0.57 ms | 0 | 562 (1,660) | 3.1 |
+| graph | journal | 15 | 68 / 121 ms | 7.3 / 79 ms | 1,437 | 1,148 (6,102) | 10 |
+| graph | CWAL | 57 | 68 / 85 ms | 0.36 / 0.66 ms | 0 | 636 (1,936) | 3.1 |
+
+tmpfs (writer at half the journal mode's maximum: mixed 372, objects 2.6,
+vectors 72, graph 666 ops/s):
+
+| Scenario | Mode | Max writer ops/s | Write p50 / p99 | Read p50 / p99 | Read retries | Write amp | Peak WAL |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| mixed | plain | 2,024 | 0.38 / 9.0 ms | 0.37 / 14 ms | 0 | 5.0 | 44 MB |
+| mixed | journal | 745 | 10 / 161 ms | 2.7 / 38 ms | 486 | 6.6 | — |
+| mixed | CWAL | 1,896 | 0.46 / 9.8 ms | 0.35 / 15 ms | 0 | 5.5 | 68 MB |
+| objects | plain | 5.2 | 229 / 237 ms | 11 / 35 ms | 0 | 2.0 | 423 MB |
+| objects | journal | 5.5 | 216 / 220 ms | 25 / 166 ms | 922 | 1.0 | — |
+| objects | CWAL | 5.1 | 229 / 237 ms | 12 / 39 ms | 0 | 2.0 | 424 MB |
+| vectors | plain | 1,463 | 0.88 / 4.5 ms | 24 / 42 ms | 0 | 3.4 | 69 MB |
+| vectors | journal | 144 | 61 / 1,694 ms (fell behind: 60 of 72 ops/s) | 46 / 365 ms | 833 | 2.7 | — |
+| vectors | CWAL | 1,387 | 1.1 / 5.2 ms | 25 / 44 ms | 0 | 3.5 | 73 MB |
+| graph | plain | 4,980 | 0.71 / 4.7 ms | 0.41 / 0.61 ms | 0 | 609 | 9.5 MB |
+| graph | journal | 1,332 | 0.88 / 9.6 ms | 0.30 / 3.4 ms | 4 | 1,194 | — |
+| graph | CWAL | 4,330 | 0.70 / 4.3 ms | 0.37 / 0.60 ms | 0 | 681 | 11 MB |
+
+- On btrfs, CWAL's latency, CPU, RSS (73–84 MB in every mode) and fsyncs
+  per operation match plain WAL's. Differences between the two are within
+  the run-to-run variance. Four repeated graph runs gave plain p50s of 34–63 ms and
+  CWAL p50s of 39–70 ms; paired, CWAL was 3–7 ms higher on graph.
+- The rollback journal, the other way to get atomic multi-file commits, costs 3–4 times the
+  fsyncs, a third of the maximum write rate, and blocks readers. On btrfs, readers wait 7–40 ms at p50 against under 1 ms with
+  WAL, and they retried 1,000–1,600 times per run.
+- Write amplification is about 10% higher with CWAL than plain WAL,
+  from the marker frame per member per cross-file commit. It is highest for
+  small graph transactions, where every commit writes whole pages in three
+  files. The journal mode writes less with `write()` for new data (no WAL
+  copy). On disk it writes 2–4 times more than either WAL mode, because each
+  commit writes a journal and a super-journal and fsyncs every file.
+- CWAL's peak WAL is up to 1.5 times plain's on tmpfs. The marker frames
+  account for part of it; checkpoints waiting at the gate may account for
+  the rest (not measured).
+- Readers on tmpfs are as fast with CWAL as with plain WAL at these rates;
+  the snapshot path's advantage shows only under heavier read load (see
+  [Overhead](#overhead)).
+
+#### Ten-minute runs
+
+Mixed scenario, 10 minutes per run on btrfs, with 2, 8 and 16 readers at 50
+reads/s each. The writer runs at 5.13 ops/s in every mode, half the journal
+mode's maximum with 16 readers (plain 64.5, journal 10.3, CWAL 61.7 ops/s).
+That gives 3,079 writer transactions per run and 30 checkpoint runs in each
+WAL mode. Interval reports every 30 s. `wcheck` ran after every run: SQLite's
+`integrity_check` and `foreign_key_check` on all five files, plus cross-file
+invariants. Every document with an object must have that object, with
+complete chunks, its vector and its pair. Every vector and pair must belong
+to an existing document. Every object must be referenced by a row.
+
+| Readers | Mode | Write p50 / p95 / p99 | Read p50 / p99 | Read retries | CPU s | RSS | Disk write amp | fsyncs / op | Peak WAL | Full checkpoints |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2 | plain | 54 / 83 / 136 ms | 0.50 / 18 ms | 0 | 120 | 86 MB | 12.6 | 3.3 | 12 MB | 29 / 30 |
+| 2 | journal | 95 / 166 / 1,191 ms | 15 / 2,181 ms | 81,608 | 175 | 86 MB | 38.5 | 10.2 | — | — |
+| 2 | CWAL | 54 / 83 / 145 ms | 0.53 / 18 ms | 0 | 122 | 86 MB | 13.1 | 3.3 | 26 MB | 23 / 30 |
+| 8 | plain | 54 / 81 / 141 ms | 0.46 / 18 ms | 0 | 396 | 108 MB | 12.6 | 3.3 | 12 MB | 26 / 30 |
+| 8 | journal | 98 / 174 / 1,359 ms | 20 / 2,919 ms | 336,513 | 539 | 112 MB | 38.0 | 10.2 | — | — |
+| 8 | CWAL | 55 / 85 / 141 ms | 0.46 / 18 ms | 0 | 399 | 109 MB | 13.2 | 3.2 | 30 MB | 15 / 30 |
+| 16 | plain | 52 / 81 / 133 ms | 0.36 / 17 ms | 0 | 630 | 136 MB | 12.6 | 3.3 | 12 MB | 28 / 30 |
+| 16 | journal | 123 / 289 / 1,460 ms | 85 / 4,899 ms | 801,955 | 1,451 | 143 MB | 38.0 | 10.2 | — | — |
+| 16 | CWAL | 52 / 83 / 149 ms | 0.35 / 16 ms | 0 | 627 | 136 MB | 13.1 | 3.2 | 30 MB | 16 / 30 |
+
+"Full checkpoints" counts PASSIVE checkpoint runs that copied every frame
+of every member.
+
+- **Integrity:** all 9 runs passed `wcheck`, and every mode ended with the
+  same row counts (3,244 documents, 10,864 edges, 3,555 pairs). The writer's
+  random stream is seeded, so all modes apply the same transactions.
+- **No progressive memory growth:** RSS stays within ±10 MB of one level
+  per reader count, from the first interval to the last, in every mode.
+- **No throughput degradation:** the writer completed all of its offered
+  transactions (3,079 of 3,078 scheduled) at 5.13 ops/s in every interval.
+  Write p99 per interval varies with btrfs (107–359 ms) but does not trend
+  upward in either WAL mode.
+- **Starvation:** WAL-mode readers completed all of their offered reads
+  (30,000 each) and never fell behind, and no WAL-mode writer retried.
+  - With 16 readers, the journal mode starved readers: they fell to 41
+    reads/s in the worst interval, completed 29,934–29,993 of 30,000 reads,
+    and their worst read took 7.2 s.
+  - Journal readers spent their CPU retrying (2.3 times the WAL modes' CPU
+    at 16 readers), and journal writes reached p99 1.2–1.5 s.
+- **Write amplification and fsyncs:** CWAL matches plain within 4% on disk
+  bytes (13.1–13.2 against 12.6) and fsyncs. The journal mode writes three
+  times the disk bytes and issues three times the fsyncs.
+- **WAL growth: the one difference between CWAL and plain WAL.** CWAL
+  completes fewer checkpoints (50–77% against 87–97%), and its WAL file
+  reaches 2–2.5 times plain's size. The file keeps its high-water size, and
+  it grew in steps through the first six or so minutes of each run.
+  - An accelerated run at 30 writer ops/s with 16 readers (18,001
+    transactions, 180 checkpoint runs, 10 minutes) showed where it levels
+    off. Plain's WAL levelled at 21 MB, CWAL's at 47 MB, flat for the last
+    4 minutes. 82% of plain's checkpoint runs completed, against 37% of
+    CWAL's.
+  - Both sets passed `wcheck`, with the same latency, CPU and disk bytes.
+  - Probable cause, not verified: a read that starts during a publication
+    window opens snapshots at the headers saved before that commit, so it
+    holds a read mark on older frames. A checkpoint then stops short of the
+    WAL end, and the next write cannot restart the WAL from the beginning.
+    The accelerated run had more snapshot reads and fewer full
+    checkpoints, which is consistent with this.
+  - The WAL is not unbounded in these runs, but a high-water mark can still
+    step up rarely over a longer run. A production version should cap it:
+    `journal_size_limit`, or a periodic RESTART or TRUNCATE checkpoint by
+    the writer.
+
+Shorter filesystem comparison: 2 minutes per mode, 8 readers, same writer
+rate (616 transactions and 6 checkpoint runs per WAL run). The ext4 and
+XFS images are loop-backed on the same SSD.
+
+| Filesystem | Mode | Write p50 / p99 | Read p50 / p99 | Read retries | Disk write amp | fsyncs / op | Peak WAL | Full checkpoints |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| ext4 | plain | 61 / 136 ms | 0.46 / 15 ms | 0 | 7.3 | 3.2 | 10 MB | 5 / 6 |
+| ext4 | journal | 112 / 1,015 ms | 40 / 2,919 ms | 80,035 | 26.8 | 9.9 | — | — |
+| ext4 | CWAL | 59 / 141 ms | 0.46 / 15 ms | 0 | 7.7 | 3.1 | 18 MB | 4 / 6 |
+| XFS | plain | 60 / 373 ms | 0.46 / 15 ms | 0 | 5.6 | 3.2 | 10 MB | 6 / 6 |
+| XFS | journal | 102 / 199 ms | 25 / 315 ms | 71,551 | 7.8 | 9.9 | — | — |
+| XFS | CWAL | 59 / 136 ms | 0.46 / 15 ms | 0 | 6.1 | 3.1 | 20 MB | 3 / 6 |
+
+The same picture holds on all three filesystems, and all 6 runs passed
+`wcheck`. CWAL matches plain WAL; the journal mode blocks readers and costs
+three times the fsyncs. CWAL's WAL is twice plain's here too.
+
+- **Not run: long-duration endurance.** The 12–24 h sustained runs are
+  reserved for the integrated Zova implementation. This prototype's
+  longest runs are 10 minutes, so slow leaks, WAL high-water creep and
+  fragmentation over hours or days are untested. `workload.py --duration
+  … --report …` runs them when wanted. NTFS was not compared.
 
 ### Snapshot read cost
 
@@ -823,7 +1014,8 @@ journal check on reads.
   checkpoint. If it checkpoints a torn commit, recovery refuses
   (`ProtocolViolation`) and the set needs manual repair. Not detected: a
   checkpointer that died before finishing (SQLite advances `nBackfill` only
-  after the database fsync), or one whose `-shm` was then deleted.
+  after the database fsync), or one whose `-shm` was then deleted (unless
+  it also wrote: the WAL's last commit is then not the torn one).
 - Recovery refuses whenever a foreign checkpoint reached past the truncation
   point, including when the kept frames happen to rewrite every page the
   torn commit wrote (then truncating would still be correct).
@@ -845,6 +1037,10 @@ journal check on reads.
   exclusive access). Readers get `error.Broken` rather than a mixed view.
 - Recovery opens each member with a separate SQLite connection to read its
   marker.
+- Tested for at most 10 minutes of sustained load per run (see
+  [Ten-minute runs](#ten-minute-runs)); long-duration endurance is left to
+  the integrated implementation. Under steady reads, CWAL's WAL file
+  reaches about twice plain WAL's size; nothing caps it yet.
 - At most 32 files per set (`SQLITE_MAX_ATTACHED=31`, and the marker mask is
   32 bits).
 - The power-loss model runs in one process: reader tests with I/O errors

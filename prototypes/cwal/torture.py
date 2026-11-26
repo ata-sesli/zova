@@ -1195,6 +1195,7 @@ ENFORCE_CASES = [
     ("attach", "attach ':memory:' as x9", 0),
     ("detach", "detach m1", 0),
     ("vacuum", "vacuum m1", 0),
+    ("vacuum, authorizer removed", "!noauth\nvacuum m1", 1),
     ("cross via !commit (allowed)", ENF_CROSS + "!commit", None),
     ("checkpoint truncate (allowed)", "pragma m1.wal_checkpoint(truncate)", None),
     ("read pragmas (allowed)", "pragma journal_mode\npragma m1.synchronous\npragma locking_mode", None),
@@ -1261,12 +1262,35 @@ def plain_ckpt_die(paths, mode):
     return "ok"
 
 
+def plain_ckpt_write_die(path, no_header):
+    """An ordinary connection checkpoints everything, writes (SQLite restarts
+    the WAL) and dies. With no_header, the old WAL bytes are put back: the
+    state of a writer that died after restarting the wal-index but before
+    writing the new WAL header."""
+    code = ("import os,sqlite3,sys\n"
+            "p=sys.argv[1]; c=sqlite3.connect(p); c.execute('pragma wal_checkpoint(full)').fetchall()\n"
+            "old=open(p+'-wal','rb').read() if os.path.exists(p+'-wal') else b''\n"
+            "c.execute('create table if not exists o(a)'); c.execute('insert into o values (1)'); c.commit()\n"
+            "if sys.argv[2]=='1':\n"
+            "    f=open(p+'-wal','r+b'); f.write(old); f.truncate(len(old)); f.close()\n"
+            "os._exit(0)\n")
+    subprocess.run([sys.executable, "-c", code, path, "1" if no_header else "0"])
+    return "ok"
+
+
+def wal_sizes(d):
+    """A missing WAL counts as empty: opening a member creates one."""
+    return {m: os.path.getsize(os.path.join(d, m + "-wal")) if os.path.exists(os.path.join(d, m + "-wal")) else 0 for m in ENF_MEMBERS}
+
+
 ENF_MEMBERS = ("main.db", "s1.db", "s2.db")
 ENF_OUTSIDERS = [("none (control)", lambda d: "ok")] + \
     [(f"plain open {m}", lambda d, m=m: plain_sql(os.path.join(d, m), "select count(*) from sqlite_schema")) for m in ENF_MEMBERS] + \
     [("plain truncate ckpt, closes", lambda d: [plain_sql(os.path.join(d, m), "pragma wal_checkpoint(truncate)") for m in ENF_MEMBERS][-1]),
      ("plain write s1", lambda d: plain_sql(os.path.join(d, "s1.db"), "create table if not exists o(a); insert into o values (1)"))] + \
     [(f"plain {mode} ckpt, dies", lambda d, mode=mode: plain_ckpt_die([os.path.join(d, m) for m in ENF_MEMBERS], mode)) for mode in ("passive", "full", "restart")] + \
+    [("plain ckpt+write s1, dies", lambda d: plain_ckpt_write_die(os.path.join(d, "s1.db"), False)),
+     ("plain ckpt+write s1, no header", lambda d: plain_ckpt_write_die(os.path.join(d, "s1.db"), True))] + \
     [("-cwal-snap deleted", lambda d: os.remove(os.path.join(d, "main.db-cwal-snap")) or "ok"),
      ("snap page junk", lambda d: open(os.path.join(d, "main.db-cwal-snap"), "r+b").write(os.urandom(64)) and "ok")] + \
     [(f"{m}-shm deleted", lambda d, m=m: (os.path.exists(os.path.join(d, m + "-shm")) and os.remove(os.path.join(d, m + "-shm"))) or "ok") for m in ENF_MEMBERS]
@@ -1274,8 +1298,10 @@ ENF_OUTSIDERS = [("none (control)", lambda d: "ok")] + \
 
 def enforce_crashed(work, ks):
     """Crash a writer at each write-wal event k (some leave a torn set),
-    let each outsider act, reopen. Fails on a silent tear, or on a refusal
-    where the control (CWAL reopens first) needs no rollback."""
+    let each outsider act, reopen. Fails on a silent tear, on a refusal
+    where the control (CWAL reopens first) needs no rollback, or on a
+    refusal that changed a WAL file (PARTIAL: recovery truncated some
+    members before refusing)."""
     out = {}
     for k in ks:
         torn = None
@@ -1287,12 +1313,15 @@ def enforce_crashed(work, ks):
                 # ncheck opens alone, so it runs (and reports) recovery.
                 torn = "recovery=rollback" in run(["ncheck", d, "--files", 3]).stdout
             act(d)
+            before = wal_sizes(d)
             outcome, detail = enforce_reopen(d, acked)
+            if outcome == "refused" and wal_sizes(d) != before:
+                outcome, detail = "PARTIAL", f"{before} -> {wal_sizes(d)}: {detail}"
             if oname.startswith("none") and outcome == "ok":
                 outcome = "torn" if torn else "clean"
             o = out.setdefault(oname, Counter())
             o[outcome if outcome not in ("ok", "refused") else f"{outcome} {'torn' if torn else 'clean'}"] += 1
-            if outcome == "TORN" or (outcome == "refused" and not torn):
+            if outcome in ("TORN", "PARTIAL") or (outcome == "refused" and not torn):
                 o.setdefault("examples", []).append(f"k={k} {outcome} {detail}")
             rmset(d, ignore_errors=True)
     return out
