@@ -1,0 +1,7 @@
+== writer killed holding a checkpoint lock; the next writer clears the counter
+    crash at ckpt-locked#1: active after crash=1 after next writer=1 snapshot_reads=238 ckpt_fallbacks=476 check=ok
+    crash at ckpt-locked#2: active after crash=1 after next writer=1 snapshot_reads=363 ckpt_fallbacks=729 check=ok
+    crash at ckpt-locked#3: active after crash=1 after next writer=1 snapshot_reads=214 ckpt_fallbacks=428 check=ok
+    crash at ckpt-locked#4: active after crash=1 after next writer=1 snapshot_reads=144 ckpt_fallbacks=288 check=ok
+    crash at ckpt-locked#5: active after crash=1 after next writer=1 snapshot_reads=87 ckpt_fallbacks=177 check=ok
+RESULT FAIL

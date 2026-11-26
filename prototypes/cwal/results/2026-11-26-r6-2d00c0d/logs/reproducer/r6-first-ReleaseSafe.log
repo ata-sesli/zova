@@ -1,0 +1,8 @@
+dies trial=0 FAIL | outsider_ckpt=0/3/3 paused=True opener=ready wal_unchanged=False wal={'main.db': 12392, 's1.db': 32, 's2.db': 0}->{'main.db': 4152, 's1.db': 32, 's2.db': 0} backfill_seen=False check=FAIL torn transactions=1 recovery=-
+dies trial=1 FAIL | outsider_ckpt=0/3/3 paused=True opener=ready wal_unchanged=False wal={'main.db': 12392, 's1.db': 32, 's2.db': 0}->{'main.db': 4152, 's1.db': 32, 's2.db': 0} backfill_seen=False check=FAIL torn transactions=1 recovery=-
+dies trial=2 FAIL | outsider_ckpt=0/3/3 paused=True opener=ready wal_unchanged=False wal={'main.db': 12392, 's1.db': 32, 's2.db': 0}->{'main.db': 4152, 's1.db': 32, 's2.db': 0} backfill_seen=False check=FAIL torn transactions=1 recovery=-
+SUMMARY dies pass=0/3
+open trial=0 FAIL | outsider_ckpt=0/3/3 paused=True opener=ready wal_unchanged=False wal={'main.db': 12392, 's1.db': 32, 's2.db': 0}->{'main.db': 0, 's1.db': 32, 's2.db': 0} backfill_seen=False check=FAIL open ProtocolViolation recovery=-
+open trial=1 FAIL | outsider_ckpt=0/3/3 paused=True opener=ready wal_unchanged=False wal={'main.db': 12392, 's1.db': 32, 's2.db': 0}->{'main.db': 0, 's1.db': 32, 's2.db': 0} backfill_seen=False check=FAIL open ProtocolViolation recovery=-
+open trial=2 FAIL | outsider_ckpt=0/3/3 paused=True opener=ready wal_unchanged=False wal={'main.db': 12392, 's1.db': 32, 's2.db': 0}->{'main.db': 0, 's1.db': 32, 's2.db': 0} backfill_seen=False check=FAIL open ProtocolViolation recovery=-
+SUMMARY open pass=0/3

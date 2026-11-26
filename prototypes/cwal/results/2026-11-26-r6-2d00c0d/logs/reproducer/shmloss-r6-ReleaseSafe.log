@@ -1,0 +1,4 @@
+trial=0 FAIL | opener=ready wal={'main.db': 12392, 's1.db': 32, 's2.db': 0}->{'main.db': 4152, 's1.db': 32, 's2.db': 0} check=FAIL torn transactions=1
+trial=1 FAIL | opener=ready wal={'main.db': 12392, 's1.db': 32, 's2.db': 0}->{'main.db': 4152, 's1.db': 32, 's2.db': 0} check=FAIL torn transactions=1
+trial=2 FAIL | opener=ready wal={'main.db': 12392, 's1.db': 32, 's2.db': 0}->{'main.db': 4152, 's1.db': 32, 's2.db': 0} check=FAIL torn transactions=1
+SUMMARY shm-loss pass=0/3

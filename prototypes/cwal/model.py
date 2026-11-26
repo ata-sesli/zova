@@ -18,7 +18,14 @@ crashes on a small set of members. Two models:
               copy, release). Checks that no checkpoint records an intent
               past an open snapshot (what Conn.snapshotIntact tests).
 
-  ./model.py                       # both models, then every mutation
+  own         member ownership (acquireMember) and its interaction with
+              recovery: handles of two sets that share a member, plus a
+              second handle of one set, open, close and are killed at any
+              step. Checks O1 (no two sets have a member open at once) and
+              O2 (alone recovery never truncates a member that another
+              handle has open).
+
+  ./model.py                       # all models, then every mutation
   ./model.py --model protocol --mutation no-seq-check --trace
 
 Each mutation removes the same mechanism as the prototype's mutation of the
@@ -128,7 +135,12 @@ class Protocol:
                     if not wal[m]:
                         return None, "no commit to remove"
                     keep = len(wal[m]) - 1
-                    if s.shm_ok and len(s.db[m]) > keep and not self.m("no-backfill-check"):
+                    # backfilledPast needs the -shm; the marker-root-page
+                    # comparison (pageCheckpointed) reads the database file.
+                    # The repair lock keeps checkpoints out until truncation,
+                    # so this step is atomic.
+                    seen = s.shm_ok or not self.m("no-root-check")
+                    if seen and len(s.db[m]) > keep and not self.m("no-backfill-check"):
                         return None, "torn commit already checkpointed"
                     wal = setm(wal, m, wal[m][:keep])
         mx = tuple(len(w) for w in wal)
@@ -360,6 +372,152 @@ class Ckpt:
 
 
 # ---------------------------------------------------------------------------
+# Member-ownership model
+# ---------------------------------------------------------------------------
+
+# Per member m: own[m], the flock holders of m's -cwal-own as (handle, "EX"
+# or "SH"); ident[m], its recorded identity (None, ("partial", set) or a
+# set); gate[m], the handle holding m's -cwal-mgate. alive[x]: holders of
+# set x's -cwal-alive. A handle is (pc, i, owned, opens): pc its step, i the
+# member it is acquiring, owned the members whose -cwal-own it holds.
+O = collections.namedtuple("O", "own ident gate alive h kills")
+
+
+class Own:
+    """acquireMember, per member in set order:
+      gate:   take -cwal-mgate (blocking)
+      try:    flock EX|NB on -cwal-own; free -> write, else cmp
+      write:  pwrite the identity (a kill leaves it partial)
+      trunc:  ftruncate to its length
+      unlock: flock(SH) on an EX lock first unlocks (not atomic)
+      sh:     ... then takes SH (blocking); release the gate
+      cmp:    recorded identity != ours -> MemberOwned (refused)
+      shnb:   flock SH|NB; failure -> refused; release the gate
+    A refused open releases everything it holds. Then openCoordination:
+    -alive EX|NB -> recover (alone) -> SH; else SH (blocking). close():
+    unmap and leave -alive, then give up the members. A kill drops every
+    flock at once; the identity files stay."""
+    SETS = {"A": (0, 1), "B": (1, 2)}
+    # Steps in which a handle has its members open: mapped, and (own-early)
+    # still mapped after giving up the members.
+    OPEN = ("mapped", "unmap")
+    HANDLES = (("A1", "A"), ("A2", "A"), ("B1", "B"))
+
+    def __init__(self, mut, opens=2, kills=2):
+        self.mut, self.opens, self.kills = mut, opens, kills
+
+    def init(self):
+        n = 3
+        return O((frozenset(),) * n, (None,) * n, (None,) * n, (("A", frozenset()), ("B", frozenset())),
+                 tuple(("idle", 0, frozenset(), self.opens) for _ in self.HANDLES), self.kills)
+
+    def alive_of(self, s, x):
+        return dict(s.alive)[x]
+
+    def set_alive(self, s, x, v):
+        return s._replace(alive=tuple((k, v if k == x else w) for k, w in s.alive))
+
+    def seth(self, s, k, v):
+        return s._replace(h=setm(s.h, k, v))
+
+    def release(self, s, k):
+        """Handle k drops every flock it holds (refusal, kill)."""
+        own = tuple(frozenset(e for e in o if e[0] != k) for o in s.own)
+        gate = tuple(None if g == k else g for g in s.gate)
+        s = s._replace(own=own, gate=gate)
+        for x, w in s.alive:
+            s = self.set_alive(s, x, frozenset(e for e in w if e[0] != k))
+        return s
+
+    def mapped(self, s):
+        return [(k, self.HANDLES[k][1]) for k, hs in enumerate(s.h) if hs[0] in self.OPEN]
+
+    def next(self, s):
+        maps = self.mapped(s)
+        for m in range(3):
+            sets = {x for k, x in maps if m in self.SETS[x]}
+            if len(sets) > 1:
+                yield "violation", None, ("O1", f"member m{m} open in sets {sorted(sets)}")
+                return
+        for k, (name, x) in enumerate(self.HANDLES):
+            pc, i, owned, opens = s.h[k]
+            ms = self.SETS[x]
+            if pc != "idle" and s.kills:
+                yield f"kill {name}", self.seth(self.release(s, k), k, ("idle", 0, frozenset(), opens))._replace(kills=s.kills - 1), None
+            yield from self.step(s, k, name, x, ms, pc, i, owned, opens)
+
+    def step(self, s, k, name, x, ms, pc, i, owned, opens):
+        m = ms[i] if i < len(ms) else None
+        others = lambda o: [e for e in o if e[0] != k]
+        go = lambda pc2, i2=i, owned2=owned, st=s: self.seth(st, k, (pc2, i2, owned2, opens))
+        refuse = lambda why: (f"{name} refused at m{m}: {why}",
+                              self.seth(self.release(s, k), k, ("idle", 0, frozenset(), opens)), None)
+        def acquired(st):
+            # Member m is owned; release its gate, go to the next member.
+            st = st._replace(gate=setm(st.gate, m, None))
+            return go("gate" if i + 1 < len(ms) else "alive", i + 1, owned | {m}, st)
+        if pc == "idle":
+            if opens:
+                start = "alive" if "no-ownership" in self.mut else "gate"
+                yield f"{name} opens", self.seth(s, k, (start, 0, frozenset(), opens - 1)), None
+        elif pc == "gate":
+            if "no-mgate" in self.mut:
+                yield f"{name} m{m}: (no gate)", go("try"), None
+            elif s.gate[m] is None:
+                yield f"{name} m{m}: takes gate", go("try", st=s._replace(gate=setm(s.gate, m, k))), None
+        elif pc == "try":
+            if not others(s.own[m]):
+                yield f"{name} m{m}: EX", go("write", st=s._replace(own=setm(s.own, m, s.own[m] | {(k, "EX")}))), None
+            else:
+                yield f"{name} m{m}: owned, compare", go("cmp"), None
+        elif pc == "write":
+            yield f"{name} m{m}: pwrite identity", go("trunc", st=s._replace(ident=setm(s.ident, m, ("partial", x)))), None
+        elif pc == "trunc":
+            yield f"{name} m{m}: ftruncate", go("unlock", st=s._replace(ident=setm(s.ident, m, x))), None
+        elif pc == "unlock":
+            yield f"{name} m{m}: EX released for SH", go("sh", st=s._replace(own=setm(s.own, m, frozenset(others(s.own[m]))))), None
+        elif pc == "sh":
+            if not any(e[1] == "EX" for e in others(s.own[m])):
+                yield f"{name} m{m}: SH", acquired(s._replace(own=setm(s.own, m, s.own[m] | {(k, "SH")}))), None
+        elif pc == "cmp":
+            if s.ident[m] == x or "no-identity-check" in self.mut:
+                yield f"{name} m{m}: identity matches", go("shnb"), None
+            else:
+                yield refuse("MemberOwned")
+        elif pc == "shnb":
+            if any(e[1] == "EX" for e in others(s.own[m])):
+                yield refuse("SH|NB failed")
+            else:
+                yield f"{name} m{m}: SH|NB", acquired(s._replace(own=setm(s.own, m, s.own[m] | {(k, "SH")}))), None
+        elif pc == "alive":
+            w = self.alive_of(s, x)
+            if not w:
+                yield f"{name} -alive EX (alone)", go("recover", st=self.set_alive(s, x, frozenset({(k, "EX")}))), None
+            elif not any(e[1] == "EX" for e in w):
+                yield f"{name} -alive SH", go("mapped", st=self.set_alive(s, x, w | {(k, "SH")})), None
+        elif pc == "recover":
+            for j, hs in enumerate(s.h):
+                if j != k and hs[0] in self.OPEN and set(self.SETS[self.HANDLES[j][1]]) & set(ms):
+                    yield f"{name} recovers", None, ("O2", f"{name} truncates members of {x} while {self.HANDLES[j][0]} has "
+                                                      f"m{sorted(set(self.SETS[self.HANDLES[j][1]]) & set(ms))[0]} open")
+                    return
+            w = frozenset(e for e in self.alive_of(s, x) if e[0] != k) | {(k, "SH")}
+            yield f"{name} recovers, -alive SH", go("mapped", st=self.set_alive(s, x, w)), None
+        elif pc == "mapped":
+            if "own-early" in self.mut:
+                own = tuple(frozenset(e for e in o if e[0] != k) for o in s.own)
+                yield f"{name} closes: members first", go("unmap", owned2=frozenset(), st=s._replace(own=own)), None
+            else:
+                yield f"{name} closes: unmap, leave -alive", go("unmapped", st=self.set_alive(s, x, frozenset(e for e in self.alive_of(s, x) if e[0] != k))), None
+        elif pc == "unmapped":
+            own = tuple(frozenset(e for e in o if e[0] != k) for o in s.own)
+            yield f"{name} closes: gives up members", self.seth(s._replace(own=own), k, ("idle", 0, frozenset(), opens)), None
+        elif pc == "unmap":
+            st = self.set_alive(s, x, frozenset(e for e in self.alive_of(s, x) if e[0] != k))
+            yield f"{name} closes: unmap, leave -alive", self.seth(st, k, ("idle", 0, frozenset(), opens)), None
+
+
+# ---------------------------------------------------------------------------
 # Search
 # ---------------------------------------------------------------------------
 
@@ -392,8 +550,9 @@ def search(model, trace=False, limit=5_000_000):
 
 PROTOCOL_MUTATIONS = ["no-gate", "no-solo-window", "no-seq-check", "no-snapshot-open", "no-markers",
                       "no-marker-rollback", "no-cross-flag", "no-discard-unpublished", "no-txn-epoch",
-                      "no-ckpt-gate", "no-backfill-check"]
+                      "no-ckpt-gate", "no-backfill-check", "no-root-check"]
 CKPT_MUTATIONS = ["no-ckpt-validate", "no-ckpt-skip", "ckpt-inc-late", "ckpt-dec-early"]
+OWN_MUTATIONS = ["no-ownership", "no-mgate", "no-identity-check", "own-early"]
 
 
 def run(name, model, trace):
@@ -410,7 +569,7 @@ def run(name, model, trace):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", choices=["protocol", "ckpt", "all"], default="all")
+    ap.add_argument("--model", choices=["protocol", "ckpt", "own", "all"], default="all")
     ap.add_argument("--mutation", default="", help="comma list; default: none, then each in turn")
     ap.add_argument("--txns", type=int, default=3)
     ap.add_argument("--trace", action="store_true")
@@ -422,9 +581,14 @@ def main():
         else:
             bad += run("protocol", Protocol(set(), txns=a.txns), a.trace)["violation"] is not None
             bad += run("protocol, foreign checkpoints, no power loss", Protocol(set(), txns=a.txns, foreign=True, power=False), a.trace)["violation"] is not None
+            bad += run("protocol, foreign checkpoints and power loss", Protocol(set(), txns=a.txns, foreign=True), a.trace)["violation"] is not None
             for mu in PROTOCOL_MUTATIONS:
-                kw = {"foreign": True, "power": False} if mu == "no-backfill-check" else {}
-                r = run(f"protocol {mu}" + (" (foreign)" if kw else ""), Protocol({mu}, txns=a.txns, **kw), a.trace)
+                kw = {"foreign": True, "power": False} if mu == "no-backfill-check" else {"foreign": True} if mu == "no-root-check" else {}
+                # The root-page check refuses a reader's checkpoint of a torn
+                # commit, which hides a missing gate; test the gate without it.
+                muts = {mu, "no-root-check"} if mu == "no-ckpt-gate" else {mu}
+                label = f"protocol {mu}" + (" (foreign)" if kw else "") + (" (with no-root-check)" if len(muts) > 1 else "")
+                r = run(label, Protocol(muts, txns=a.txns, **kw), a.trace)
                 bad += r["violation"] is None
     if a.model in ("ckpt", "all"):
         if a.mutation and a.model == "ckpt":
@@ -434,6 +598,13 @@ def main():
             for mu in CKPT_MUTATIONS:
                 r = run(f"ckpt {mu}", Ckpt({mu}), a.trace)
                 bad += (r["violation"] is None) != (mu == "no-ckpt-skip")
+    if a.model in ("own", "all"):
+        if a.mutation and a.model == "own":
+            run(f"own {a.mutation}", Own(set(a.mutation.split(","))), a.trace)
+        elif not a.mutation:
+            bad += run("own", Own(set()), a.trace)["violation"] is not None
+            for mu in OWN_MUTATIONS:
+                bad += run(f"own {mu}", Own({mu}), a.trace)["violation"] is None
     sys.exit(1 if bad else 0)
 
 

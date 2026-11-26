@@ -1,0 +1,9 @@
+== T2: deterministic delay points (R3, R6, no-late-alone, no-cross-flag; 3 files)
+pass no-cross-flag: new writer after a dead cross window  | seq=7 cross=1 writer2_exit=3 reader_exit=0 mixed=0 check=ok recovery=rollback
+pass no-late-alone: last holder dies during open          | paused=True reader_exit=0 reads=5947 mixed=0 late_alone_path=True check=ok recovery=none
+pass R3: foreign checkpoint + late alone                  | outsider_ckpt=0/6/6 paused=True opener=open-error ProtocolViolation wal_unchanged=True late_alone_path=True backfill_seen=True
+pass R3: same, opener holds another set                   | outsider_ckpt=0/6/6 paused=True opener=open-error ProtocolViolation wal_unchanged=True late_alone_path=True backfill_seen=True
+pass R6: foreign ckpt during recovery, outsider dies      | outsider_ckpt=0/3/3 paused=True opener=open-error ProtocolViolation wal_unchanged=True wal={'main.db': 12392, 's1.db': 32, 's2.db': 0}->{'main.db': 12392, 's1.db': 32, 's2.db': 0} refusal=checkpointed check=FAIL open ProtocolViolation recovery=-
+pass R6: same, outsider stays open                        | outsider_ckpt=0/3/3 paused=True opener=open-error ProtocolViolation wal_unchanged=True wal={'main.db': 12392, 's1.db': 32, 's2.db': 0}->{'main.db': 12392, 's1.db': 32, 's2.db': 0} refusal=locked-out check=FAIL open ProtocolViolation recovery=-
+pass R6: foreign ckpt attempt before truncation           | outsider_ckpt=err/database_is_locked/- paused=True opener=ready wal_unchanged=False wal={'main.db': 12392, 's1.db': 32, 's2.db': 0}->{'main.db': 4152, 's1.db': 32, 's2.db': 0} refusal=- check=ok recovery=none
+RESULT PASS

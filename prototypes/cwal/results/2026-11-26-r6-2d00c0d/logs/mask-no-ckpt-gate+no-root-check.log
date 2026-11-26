@@ -1,0 +1,2 @@
+protocol no-ckpt-gate,no-root-check        states=     2084    0.0s  VIOLATION S2/S3: transaction 1 on members [0] of [0, 1] refused=1
+0.08 s 17204 KB

@@ -1,0 +1,18 @@
+== last reader closes after the writer is killed at each of its first 40 fsyncs
+  [plain close checkpoint] 1/40 (0s)
+  [plain close checkpoint] 14/40 (6s)
+  [plain close checkpoint] 27/40 (11s)
+  [plain close checkpoint] 40/40 (16s)
+plain: runs=40 check_failures=14
+     sync#3 FAIL torn pairs main=1 store=0
+     sync#4 FAIL torn pairs main=1 store=0
+     sync#6 FAIL torn pairs main=2 store=1
+  [cwal close checkpoint] 1/40 (0s)
+  [cwal close checkpoint] 16/40 (5s)
+  [cwal close checkpoint] 31/40 (11s)
+  [cwal close checkpoint] 40/40 (13s)
+cwal: runs=40 check_failures=10
+     sync#10 FAIL open ProtocolViolation
+     sync#12 FAIL open ProtocolViolation
+     sync#16 FAIL open ProtocolViolation
+RESULT FAIL

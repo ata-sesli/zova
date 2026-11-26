@@ -1,0 +1,4 @@
+trial=0 pass | opener=open-error ProtocolViolation wal={'main.db': 12392, 's1.db': 32, 's2.db': 0}->{'main.db': 12392, 's1.db': 32, 's2.db': 0} check=FAIL open ProtocolViolation
+trial=1 pass | opener=open-error ProtocolViolation wal={'main.db': 12392, 's1.db': 32, 's2.db': 0}->{'main.db': 12392, 's1.db': 32, 's2.db': 0} check=FAIL open ProtocolViolation
+trial=2 pass | opener=open-error ProtocolViolation wal={'main.db': 12392, 's1.db': 32, 's2.db': 0}->{'main.db': 12392, 's1.db': 32, 's2.db': 0} check=FAIL open ProtocolViolation
+SUMMARY shm-loss pass=3/3

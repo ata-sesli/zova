@@ -1,0 +1,25 @@
+protocol                                   states=  1388569   31.2s  ok
+protocol, foreign checkpoints, no power loss states=  3756700   87.1s  ok refused=706
+protocol, foreign checkpoints and power loss states=  3809327   97.7s  ok refused=2159
+protocol no-gate                           states=     7347    0.1s  VIOLATION S1: transaction 1 on members [0] of [0, 1]
+protocol no-solo-window                    states=    62595    0.9s  VIOLATION S1: transaction 2 visible without earlier committed 1
+protocol no-seq-check                      states=     8372    0.1s  VIOLATION S1: transaction 1 on members [0] of [0, 1]
+protocol no-snapshot-open                  states=     8765    0.1s  VIOLATION S1: transaction 1 on members [0] of [0, 1]
+protocol no-markers                        states=      172    0.0s  VIOLATION S2/S3: transaction 1 on members [0] of [0, 1]
+protocol no-marker-rollback                states=      172    0.0s  VIOLATION S2/S3: transaction 1 on members [0] of [0, 1]
+protocol no-cross-flag                     states=    16781    0.2s  VIOLATION S2/S3: transaction 1 on members [0] of [0, 1] refused=4
+protocol no-discard-unpublished            states=     4557    0.1s  VIOLATION S2/S3: transaction 1 on members [0] of [0, 1]
+protocol no-txn-epoch                      states=      177    0.0s  VIOLATION S4: marker number 1 reused by t2
+protocol no-ckpt-gate (with no-root-check) states=     2084    0.0s  VIOLATION S2/S3: transaction 1 on members [0] of [0, 1] refused=1
+protocol no-backfill-check (foreign)       states=     1843    0.0s  VIOLATION S2/S3: transaction 1 on members [0] of [0, 1]
+protocol no-root-check (foreign)           states=     2084    0.0s  VIOLATION S2/S3: transaction 1 on members [0] of [0, 1] refused=1
+ckpt                                       states=      137    0.0s  ok
+ckpt no-ckpt-validate                      states=       51    0.0s  VIOLATION snapshot: nBackfillAttempted 3 past open snapshot 1
+ckpt no-ckpt-skip                          states=       33    0.0s  ok
+ckpt ckpt-inc-late                         states=       56    0.0s  VIOLATION snapshot: nBackfillAttempted 3 past open snapshot 1
+ckpt ckpt-dec-early                        states=       78    0.0s  VIOLATION snapshot: nBackfillAttempted 3 past open snapshot 1
+own                                        states=    85876    3.9s  ok
+own no-ownership                           states=      179    0.0s  VIOLATION O2: B1 truncates members of B while A1 has m1 open
+own no-mgate                               states=   121906    5.0s  VIOLATION O2: B1 truncates members of B while A1 has m1 open
+own no-identity-check                      states=    30783    1.1s  VIOLATION O2: B1 truncates members of B while A1 has m1 open
+own own-early                              states=    40088    1.5s  VIOLATION O2: B1 truncates members of B while A1 has m1 open

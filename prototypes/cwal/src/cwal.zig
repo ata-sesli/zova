@@ -67,7 +67,10 @@ pub const fault = struct {
     /// "no-early-heads" (the late-alone path reads the wal-index heads after
     /// SQLite has mapped them), "heads-process-wide" (a shared open reads
     /// the heads only when no other handle of this process is registered,
-    /// the condition before T2), "no-ownership" (no member ownership).
+    /// the condition before T2), "no-ownership" (no member ownership),
+    /// "no-repair-lock" (recovery does not lock out other connections
+    /// before truncating), "no-root-check" (recovery does not compare the
+    /// marker root page with the torn commit's copy).
     pub var mutate: []const u8 = "";
     pub var syncs: u64 = 0;
     /// I/O error injection: with CWAL_FAIL_TAG (a comma-separated list of
@@ -556,7 +559,10 @@ pub const test_delay = struct {
     /// process reaches pause point `name`, it creates `path.reached` and
     /// waits until `path.go` exists (exit 5 after 30 s), so a test can act
     /// at that exact point. Not an event. Points: open-shared (a shared open
-    /// has read the wal-index heads; SQLite has not mapped them yet).
+    /// has read the wal-index heads; SQLite has not mapped them yet),
+    /// recover-begin (an alone open has read the heads; recovery has not
+    /// read any marker yet), recover-truncate (recovery has checked every
+    /// torn member and not truncated any).
     var pause_at: ?[]const u8 = null;
     var pause_file: ?[]const u8 = null;
     var paused: bool = false;
@@ -930,7 +936,8 @@ fn walChecksum(big: bool, bytes: []const u8, s: *[2]u32) void {
     }
 }
 
-const LastCommit = struct { start: i64, writes_page: bool };
+/// `page_frame` is the offset of the commit's last frame for `page`.
+const LastCommit = struct { start: i64, writes_page: bool, page_frame: i64 = 0 };
 
 /// The last commit in the WAL behind `fd`: the offset at which it starts (the
 /// end of the commit before it, or the end of the header if it is the only
@@ -956,6 +963,8 @@ fn walLastCommit(fd: c_int, page: u32) ?LastCommit {
     var prev: i64 = wal_header_size;
     var group_writes = false;
     var last_writes = false;
+    var group_frame: i64 = 0;
+    var last_frame: i64 = 0;
     var offset: i64 = wal_header_size;
     while (true) : (offset += @intCast(frame_size)) {
         if (c.pread(fd, frame.ptr, frame_size, offset) != frame_size) break;
@@ -964,15 +973,19 @@ fn walLastCommit(fd: c_int, page: u32) ?LastCommit {
         walChecksum(big, frame[0..8], &s);
         walChecksum(big, frame[wal_frame_header_size..], &s);
         if (s[0] != std.mem.readInt(u32, frame[16..20], .big) or s[1] != std.mem.readInt(u32, frame[20..24], .big)) break;
-        if (std.mem.readInt(u32, frame[0..4], .big) == page) group_writes = true;
+        if (std.mem.readInt(u32, frame[0..4], .big) == page) {
+            group_writes = true;
+            group_frame = offset;
+        }
         if (std.mem.readInt(u32, frame[4..8], .big) != 0) {
             if (last) |end| prev = end;
             last = offset + @as(i64, @intCast(frame_size));
             last_writes = group_writes;
+            last_frame = group_frame;
             group_writes = false;
         }
     }
-    return if (last != null) .{ .start = prev, .writes_page = last_writes } else null;
+    return if (last != null) .{ .start = prev, .writes_page = last_writes, .page_frame = last_frame } else null;
 }
 
 /// `root` is the marker table's root page, which every marker update writes.
@@ -1041,6 +1054,62 @@ fn readMarker(path: [:0]const u8) Error!Marker {
     };
     if (c.sqlite3_open_v2(path.ptr, &db, c.SQLITE_OPEN_READWRITE, "cwal") != c.SQLITE_OK) return error.Sqlite;
     _ = c.sqlite3_db_config(db, c.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, @as(c_int, 1), @as(?*c_int, null));
+    return markerOf(db);
+}
+
+/// Open a member for recovery's repair step so that no other connection can
+/// checkpoint it until the returned handle closes. In exclusive locking mode
+/// SQLite takes an EXCLUSIVE database-file lock before it opens the WAL and
+/// keeps the wal-index in heap memory, so it neither reads nor rebuilds the
+/// member's -shm. Every other connection needs a SHARED lock to read or
+/// checkpoint, and holds it while it has the member open in WAL mode, so an
+/// open outside connection makes this fail with ProtocolViolation (after a
+/// short busy wait), and a later one gets SQLITE_BUSY. Close it with
+/// sqlite3_close; it never checkpoints.
+fn lockForRepair(path: [:0]const u8) Error!*c.sqlite3 {
+    var db: ?*c.sqlite3 = null;
+    errdefer if (db) |d| {
+        _ = c.sqlite3_close(d);
+    };
+    if (c.sqlite3_open_v2(path.ptr, &db, c.SQLITE_OPEN_READWRITE, "cwal") != c.SQLITE_OK) return error.Sqlite;
+    _ = c.sqlite3_db_config(db, c.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, @as(c_int, 1), @as(?*c_int, null));
+    _ = c.sqlite3_busy_timeout(db, 1000);
+    if (c.sqlite3_exec(db, "pragma locking_mode=exclusive", null, null, null) != c.SQLITE_OK) return error.Sqlite;
+    return switch (c.sqlite3_exec(db, "select count(*) from sqlite_schema", null, null, null) & 0xff) {
+        c.SQLITE_OK => db.?,
+        c.SQLITE_BUSY => error.ProtocolViolation,
+        else => error.Sqlite,
+    };
+}
+
+/// Whether database page `page` in the file at `path` equals the WAL frame
+/// at `frame` (a page image the last commit wrote): a checkpoint copied that
+/// commit's version of the page. Independent of the wal-index, so it holds
+/// when a later connection rebuilt the -shm and lost nBackfill. With `db`
+/// (a lockForRepair handle) it reads through that handle's file: closing
+/// another descriptor of the file would drop the handle's POSIX locks.
+fn pageCheckpointed(db: ?*c.sqlite3, path: [:0]const u8, wal_fd: c_int, page: u32, frame: i64) Error!bool {
+    var header: [wal_header_size]u8 = undefined;
+    if (c.pread(wal_fd, &header, header.len, 0) != header.len) return error.Io;
+    const page_size: usize = std.mem.readInt(u32, header[8..12], .big);
+    const buf = std.heap.c_allocator.alloc(u8, 2 * page_size) catch return error.Io;
+    defer std.heap.c_allocator.free(buf);
+    if (c.pread(wal_fd, buf.ptr, page_size, frame + wal_frame_header_size) != page_size) return error.Io;
+    const at: i64 = @as(i64, page - 1) * @as(i64, @intCast(page_size));
+    if (db) |d| {
+        var file: ?*c.sqlite3_file = null;
+        if (c.sqlite3_file_control(d, "main", c.SQLITE_FCNTL_FILE_POINTER, @ptrCast(&file)) != c.SQLITE_OK or file == null) return error.Io;
+        if (file.?.pMethods.*.xRead.?(file, buf[page_size..].ptr, @intCast(page_size), at) != c.SQLITE_OK) return false;
+    } else {
+        const fd = c.open(path.ptr, c.O_RDONLY | c.O_CLOEXEC);
+        if (fd < 0) return error.Io;
+        defer _ = c.close(fd);
+        if (c.pread(fd, buf[page_size..].ptr, page_size, at) != page_size) return false;
+    }
+    return std.mem.eql(u8, buf[0..page_size], buf[page_size..]);
+}
+
+fn markerOf(db: ?*c.sqlite3) Error!Marker {
     var stmt: ?*c.sqlite3_stmt = null;
     // No table yet: no cross-file commit has happened.
     if (c.sqlite3_prepare_v2(db, "select txn, mask, (select rootpage from sqlite_schema where name = 'cwal_marker') from cwal_marker where k = 0", -1, &stmt, null) != c.SQLITE_OK) return .{};
@@ -1662,6 +1731,7 @@ pub const Conn = struct {
     /// during recovery leaves it to be run again.
     fn recover(conn: *Conn) Error!void {
         fault.event("recover-begin");
+        test_delay.pause("recover-begin");
         var markers: [max_members]Marker = @splat(.{});
         var newest: Marker = .{};
         for (0..conn.nmembers) |i| {
@@ -1686,9 +1756,23 @@ pub const Conn = struct {
             defer for (fds) |fd| {
                 if (fd >= 0) _ = c.close(fd);
             };
+            // Until the truncation, no other connection may checkpoint a
+            // member about to be truncated (lockForRepair).
+            var locks: [max_members]?*c.sqlite3 = @splat(null);
+            defer for (locks) |l| {
+                if (l) |d| _ = c.sqlite3_close(d);
+            };
             var keep: [max_members]i64 = @splat(0);
             for (0..conn.nmembers) |i| {
                 if (markers[i].txn != newest.txn) continue;
+                if (!fault.mutated("no-repair-lock")) {
+                    locks[i] = lockForRepair(conn.paths[i]) catch |err| {
+                        conn.log("recover member {d}: cannot lock out other connections: {s}", .{ i, @errorName(err) });
+                        return err;
+                    };
+                    const again = try markerOf(locks[i]);
+                    if (again.txn != markers[i].txn or again.mask != markers[i].mask) return error.ProtocolViolation;
+                }
                 var buf: [1100]u8 = undefined;
                 const wal = bufPrintZ(&buf, "{s}-wal", .{conn.paths[i]}) catch return error.Io;
                 fds[i] = c.open(wal.ptr, c.O_RDWR | c.O_CLOEXEC);
@@ -1698,12 +1782,21 @@ pub const Conn = struct {
                 // checkpoints only between commits. A connection outside the
                 // protocol may have checkpointed it, and may then have written
                 // a commit of its own, which the marker update is not part of.
-                if (!fault.mutated("no-backfill-check") and (!last.writes_page or backfilledPast(conn.shm_heads[i], fds[i], last.start))) {
+                // The heads read at open miss a checkpoint made after it, and
+                // the -shm read now has lost nBackfill if a marker read above
+                // rebuilt it; comparing the marker root page does not depend
+                // on the wal-index.
+                if (!fault.mutated("no-backfill-check") and (!last.writes_page or
+                    backfilledPast(conn.shm_heads[i], fds[i], last.start) or
+                    backfilledPast(readShmHead(conn.paths[i]), fds[i], last.start) or
+                    (!fault.mutated("no-root-check") and try pageCheckpointed(locks[i], conn.paths[i], fds[i], markers[i].root, last.page_frame))))
+                {
                     conn.log("recover member {d}: torn commit already checkpointed", .{i});
                     return error.ProtocolViolation;
                 }
                 keep[i] = last.start;
             }
+            test_delay.pause("recover-truncate");
             for (0..conn.nmembers) |i| {
                 if (fds[i] < 0) continue;
                 var buf: [1100]u8 = undefined;

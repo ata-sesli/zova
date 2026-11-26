@@ -1,0 +1,8 @@
+dies trial=0 FAIL | outsider_ckpt=0/3/3 paused=True opener=ready wal_unchanged=False wal={'main.db': 12392, 's1.db': 32, 's2.db': 0}->{'main.db': 4152, 's1.db': 32, 's2.db': 0} refusal=- check=ok recovery=-
+dies trial=1 FAIL | outsider_ckpt=0/3/3 paused=True opener=ready wal_unchanged=False wal={'main.db': 12392, 's1.db': 32, 's2.db': 0}->{'main.db': 4152, 's1.db': 32, 's2.db': 0} refusal=- check=ok recovery=-
+dies trial=2 FAIL | outsider_ckpt=0/3/3 paused=True opener=ready wal_unchanged=False wal={'main.db': 12392, 's1.db': 32, 's2.db': 0}->{'main.db': 4152, 's1.db': 32, 's2.db': 0} refusal=- check=ok recovery=-
+SUMMARY dies pass=0/3
+open trial=0 FAIL | outsider_ckpt=0/3/3 paused=True opener=ready wal_unchanged=False wal={'main.db': 12392, 's1.db': 32, 's2.db': 0}->{'main.db': 4152, 's1.db': 32, 's2.db': 0} refusal=- check=ok recovery=-
+open trial=1 FAIL | outsider_ckpt=0/3/3 paused=True opener=ready wal_unchanged=False wal={'main.db': 12392, 's1.db': 32, 's2.db': 0}->{'main.db': 4152, 's1.db': 32, 's2.db': 0} refusal=- check=ok recovery=-
+open trial=2 FAIL | outsider_ckpt=0/3/3 paused=True opener=ready wal_unchanged=False wal={'main.db': 12392, 's1.db': 32, 's2.db': 0}->{'main.db': 4152, 's1.db': 32, 's2.db': 0} refusal=- check=ok recovery=-
+SUMMARY open pass=0/3

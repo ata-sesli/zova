@@ -133,7 +133,7 @@ are to `src/cwal.zig`.
 | Newest marker's mask names a member outside the set | `ProtocolViolation` |
 | A member has the newest number with a different mask, or is not in the mask | `ProtocolViolation` |
 | Every member in the newest mask has the newest number | Complete: keep it. |
-| Some member in the newest mask lacks the newest number | Torn: on each member that has it, truncate the WAL at the start of its last commit. First every such member is checked, and any failure refuses with `ProtocolViolation` before anything is truncated: the WAL must exist and end in a commit that writes the marker table's root page, and the member's wal-index (read before SQLite mapped it) must not show that commit checkpointed (`nBackfill` past its start, or the wal-index one WAL restart ahead). |
+| Some member in the newest mask lacks the newest number | Torn: on each member that has it, truncate the WAL at the start of its last commit. First every such member is checked, and any failure refuses with `ProtocolViolation` before anything is truncated: the member is opened in exclusive locking mode (EXCLUSIVE database-file lock, heap wal-index; held until the truncation, so no other connection can checkpoint it, and one that has it open makes the open fail), its marker must be unchanged, the WAL must exist and end in a commit that writes the marker table's root page, neither the wal-index read before SQLite mapped the member nor the one read now may show that commit checkpointed (`nBackfill` past its start, or the wal-index one WAL restart ahead), and the database file's marker root page must differ from the torn commit's copy. |
 
 Then every `-shm` is unlinked so SQLite rebuilds the wal-indexes from the
 truncated WALs. Recovery is idempotent; a crash during it reruns it.
@@ -166,6 +166,8 @@ Each mutation removes one mechanism. The suite must fail with each one.
 | `no-early-heads` | Heads read before mapping on the late-alone path (S5, R3) |
 | `heads-process-wide` | The pre-T2 condition for reading heads on the shared path (S5, R3) |
 | `no-ownership` | Member ownership (I14) |
+| `no-root-check` | Marker-root-page comparison in recovery (S5, R6) |
+| `no-repair-lock` | Recovery's database-file lock on members it truncates (S5, R6) |
 
 ## Review findings
 
@@ -282,20 +284,40 @@ recover (truncate) a WAL another set's handles are reading.
 - Limit: identity is by resolved path. A hard link or bind mount gives one
   file two paths and is not detected.
 
-**R6. An outside checkpoint during recovery is not detected.** Found while
-writing the T2 tests; code reading only, not reproduced.
-- Component: `openCoordination` → `recover`.
-- Bug: the foreign-checkpoint check uses wal-index heads read before
-  recovery starts. An ordinary connection that opens a member after that
-  read, checkpoints the torn commit and exits without closing leaves its
-  `nBackfill` only in a `-shm` that recovery's own connection then
-  rebuilds. Recovery truncates the WAL although the torn commit is in the
-  database file.
-- Impact: needs an outside connection racing recovery itself; the same
-  class as the undetected cases in README "Limits" (a dead checkpointer, a
-  lost `-shm`). CWAL handles cannot cause it.
-- Fix: not attempted (outside T2/T3 scope, and it would change recovery).
-  In Zova, raw access to members is not a supported path.
+**R6. An outside checkpoint during recovery was not detected (fixed).**
+Found while writing the T2 tests, then reproduced deterministically.
+- Component: CWAL prototype, `recover`.
+- Bug: an ordinary connection that checkpointed a torn commit after the
+  opener read the wal-index heads was not seen, and recovery truncated the
+  WAL: the torn commit stayed in `main.db` only. 3 / 3 trials each, with
+  the outsider dying without closing (recovery's marker read then rebuilt
+  the `-shm` and lost `nBackfill`) and with it staying open.
+- Cause: the foreign-checkpoint check used heads read before recovery
+  started, and nothing kept other connections out until the truncation.
+- Impact: a silent tear, but only with an outside connection racing
+  recovery; CWAL handles cannot cause it.
+- Fix (recovery only, no steady-state cost; clean opens unchanged): for a
+  torn set, each member about to be truncated is opened in exclusive
+  locking mode, which takes an EXCLUSIVE database-file lock before SQLite
+  opens the WAL and keeps the wal-index in heap memory. Until the
+  truncation no other connection can read or checkpoint it; one that has
+  it open makes the open fail with `ProtocolViolation` after a 1 s busy
+  wait. Under the lock recovery rereads the marker and the `-shm`, and
+  compares the database file's marker root page with the torn commit's
+  copy, which does not depend on the wal-index. The page is read through
+  the lock's own file handle: an extra descriptor's `close` would drop the
+  process's POSIX lock (the first fix attempt did exactly that, and the
+  `recover-truncate` test caught it).
+- Side effect: the comparison also detects a completed outside checkpoint
+  whose `-shm` was then lost, which `backfilledPast` could not (the model's
+  known limit below; 3 / 3 refused with every WAL unchanged, 0 / 3 before).
+- Remaining limit: a checkpointer that died after copying some of the torn
+  commit's pages but not the marker root page, before advancing
+  `nBackfill`.
+- Evidence: `results/2026-11-26-r6-2d00c0d/`. Delay-point cases
+  `recover-begin` (outsider dies; outsider stays open) and
+  `recover-truncate` (outsider's checkpoint must fail). `no-root-check` is
+  caught by the first, `no-repair-lock` by the last.
 
 **R5. ARM64 ordering is argued, not tested on hardware.** The counter's
 correctness on ARM64 depends on the two `xShmBarrier` calls (store-buffer
@@ -327,8 +349,8 @@ pattern; SQLite's own atomics are relaxed). The qemu runs used x86 ordering.
 ## Model check
 
 `model.py` is an explicit-state breadth-first search over every
-interleaving of two small models (no TLA+ toolchain is installed; Python
-keeps it next to the prototype). `./model.py` runs both models, then each
+interleaving of three small models (no TLA+ toolchain is installed; Python
+keeps it next to the prototype). `./model.py` runs every model, then each
 mutation; it exits non-zero if the correct protocol violates a property or
 a mutation goes undetected.
 
@@ -339,7 +361,10 @@ publish, phase two, writer checkpoint, reader seqlock read (pin path,
 snapshot path, failed snapshot open), one writer kill followed by a writer
 reopen (seq repair, discard, numbering) while the reader stays, one crash
 of every process (kill, or power loss that drops unsynced frames and the
-`-shm`), and alone recovery. Checks S1 on every completed read, S2 and S3
+`-shm`), and alone recovery. Recovery of a torn set is one atomic step,
+because the repair lock keeps checkpoints out until the truncation; it
+sees a checkpoint of the torn commit through the `-shm` or, if that file
+was lost, through the root page. Checks S1 on every completed read, S2 and S3
 after recovery, S4 at every number assignment, and that the correct
 protocol is never refused.
 
@@ -352,40 +377,67 @@ Checks that no open snapshot has `nBackfillAttempted` past it. The model
 is sequentially consistent; the prototype issues full barriers at the two
 points where that matters (`ioShmLock` 843, `ckptLockShared` 1868).
 
-Results (2026-11-26, Python 3, 1.8 GB peak):
+**Member-ownership model.** Sets A = {0, 1} and B = {1, 2} share member 1.
+Handles A1, A2 (set A) and B1 (set B), each opening up to twice, with up to
+two kills; a kill drops every flock at once and leaves the identity files.
+Per member, in set order: take the `-cwal-mgate` gate, then `flock EX|NB`
+on `-cwal-own`; if free, write the identity (a kill can leave it partial),
+truncate it, and downgrade to SH (unlock then lock, not atomic); if held,
+compare the recorded identity (`MemberOwned` on a mismatch) and take
+`SH|NB`. Then the `-alive` step: alone recovery or SH. Close unmaps and
+leaves `-alive` before giving up the members. Checks O1 (no member is open
+in two sets at once) and O2 (alone recovery never truncates a member that
+another handle has open, counting a handle that is still mapped).
+
+Results (2026-11-26, after the R6 fix, Python 3, 1.8 GB peak, 3 min 49 s;
+`results/2026-11-26-r6-2d00c0d/logs/model.log`):
 
 | Run | States | Result |
 |---|---|---|
 | Protocol, correct | 1,388,569 | **No violation, no refusal** |
 | Protocol, foreign checkpoints at any time, process kills only | 3,756,700 | **No violation**; 706 recoveries refused (`torn commit already checkpointed`) |
-| Protocol, foreign checkpoints and power loss | 2,084 | Violation: a lost `-shm` hides the checkpoint (known limit, see below) |
+| Protocol, foreign checkpoints and power loss | 3,809,327 | **No violation**; 2,159 recoveries refused. Before the R6 fix: violation at 2,084 states, a lost `-shm` hid the checkpoint |
 | `no-gate`, `no-seq-check`, `no-snapshot-open` | 7k–9k | S1: a read sees a cross-file commit on one member only |
 | `no-solo-window` | 62,595 | S1: a read sees t2 without the earlier committed t1 |
 | `no-markers`, `no-marker-rollback` | 172 | S2: a torn commit survives recovery |
-| `no-cross-flag` | 8,760 | S2: a new writer closes a dead cross-file window and checkpoints half of it |
+| `no-cross-flag` | 16,781 | S2: a new writer closes a dead cross-file window and checkpoints half of it (8,760 before the R6 fix, whose root check refuses the shorter path) |
 | `no-discard-unpublished` | 4,557 | S2: a dead writer's unpublished frame on member 0 is revived by recovery |
 | `no-txn-epoch` | 177 | S4: the reopened writer reuses marker number 1 |
-| `no-ckpt-gate` | 2,084 | S2: a reader checkpoints a published half-commit, then power loss |
-| `no-backfill-check` (foreign checkpoints) | 1,843 | S2: recovery truncates a WAL whose torn commit is already in the database |
+| `no-ckpt-gate` with `no-root-check` | 2,084 | S2: a reader checkpoints a published half-commit, then power loss |
+| `no-backfill-check` (foreign checkpoints, process kills only) | 1,843 | S2: recovery truncates a WAL whose torn commit is already in the database |
+| `no-root-check` (foreign checkpoints and power loss) | 2,084 | S2: the same tear as before the fix |
 | Counter, correct | 137 | **No violation** |
 | `no-ckpt-skip` (control: always the real lock) | 33 | No violation |
 | `no-ckpt-validate` | 51 | Violation |
 | `ckpt-inc-late` (increment after the read-mark scan) | 56 | Violation |
 | `ckpt-dec-early` (decrement before `nBackfillAttempted`) | 78 | Violation |
+| Ownership, correct | 85,876 | **No violation** |
+| `no-ownership` (no member locks) | 179 | O2: B1 recovers set B while A1 has member 1 open |
+| `no-mgate` | 121,906 | O2, same |
+| `no-identity-check` | 30,783 | O2, same |
+| `own-early` (give up the members before unmapping) | 40,088 | O2, same |
 
-The last two are not prototype mutations: they confirm that both orderings
-in `ioShmLock` are needed.
+`ckpt-inc-late` and `ckpt-dec-early` are not prototype mutations: they
+confirm that both orderings in `ioShmLock` are needed.
+
+`no-ckpt-gate` alone is no longer detected: in the model it is a reader's
+checkpoint at any time, which is exactly a foreign checkpoint, and the root
+check refuses it (3,809,327 states, 2,159 refusals, the same numbers as the
+correct foreign run). The model therefore tests the gate with the root
+check removed. A missing gate still costs availability: those recoveries
+are refused instead of repaired.
 
 What the model does not cover: SQLite internals below its API (wal-index
 rebuild timing, which the open gate and the late `-alive` check handle; the
 authorizer; the frame guard), WAL restarts, more than one reader, and the
 checkpoint lock's own fairness. The torture suite covers those.
 
-Known limit confirmed by the model: recovery detects a foreign checkpoint
-of a torn commit from the `-shm` (`backfilledPast` 970). After power loss
-that file may be gone, and the tear is then silent. This needs an outside
-connection to checkpoint during a window, which the protocol forbids but
-cannot prevent.
+Known limit found by the model, closed by the R6 fix: recovery saw a
+foreign checkpoint of a torn commit only through the `-shm`
+(`backfilledPast`). After power loss that file may be gone, and the tear
+was then silent. The root-page comparison does not depend on the `-shm`.
+The model treats a checkpoint as one step, so it does not cover the
+remaining limit in R6 (a checkpointer that died after a partial copy).
 
 ## Build modes
 
@@ -464,3 +516,25 @@ except `no-late-alone` by `ndangle` (0 / 153 and 0 / 480, as before); the
 | `no-early-heads` | delaypoints | detected: both R3 openers truncate `main.db-wal` past a checkpointed torn commit |
 | `heads-process-wide` | delaypoints | detected by the same-process R3 case only, as intended |
 | `no-ownership` | ownership | detected: 10 refusal cases open; 369 and 50 overlapping intervals in the races |
+
+### R6 sweep
+
+2026-11-26, tmpfs, ReleaseSafe, `2d00c0d` plus the R6 changes
+(`results/2026-11-26-r6-2d00c0d/`). Same options as above. The swept
+sections pass with no mutation (239 s), and the `no-ckpt-skip` control
+passes. All other mutations are detected, except the four below.
+
+| Mutation | Sections | Result |
+|---|---|---|
+| `no-root-check` | delaypoints | detected: the "outsider dies" R6 case leaves the torn commit in `main.db` only |
+| `no-repair-lock` | delaypoints | detected: the `recover-truncate` case's outside checkpoint succeeds during recovery |
+| `no-cross-flag` | survivors | **not detected** in this run; `survivors` catches it in about 1 of 10 trials. `delaypoints` catches it (4 s) |
+| `no-late-alone` | ndangle | not detected, as before; `delaypoints` catches it |
+| `no-early-heads` | delaypoints | **not detected**: both R3 cases still refuse, now through the root check |
+| `heads-process-wide` | delaypoints | **not detected**: the same-process R3 case still refuses, through the root check |
+
+The last two are hidden by redundancy, not lost: with `no-root-check` added,
+`no-early-heads` fails both R3 cases and `heads-process-wide` fails the
+same-process one, as in the T2/T3 sweep; `no-root-check` alone fails only
+the R6 case. The heads checks stay as a second path that does not read
+`main.db`; these tests show no case that only they catch.

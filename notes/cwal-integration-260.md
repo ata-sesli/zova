@@ -96,6 +96,8 @@ area must report on it.
 | T3 (R4) | Member ownership was decided per main file. | Closed in the prototype (2026-11-26) | Per-member `flock` ownership with a recorded set identity (§3). Torture section `ownership`: cross-process and same-process refusals (`MemberOwned`), same-set sharing, release on kill, and a two-set open/close race with no overlapping intervals; `no-ownership` is detected. Same raw results directory. |
 | T4 | Endurance: 12–24 h sustained workloads (deferred from section 7). | Deferred | Run against the integrated implementation, not the prototype. |
 | T5 | Windows: no Windows VFS or lock layer exists. | Deferred; out of scope for the experiment (§9). | — |
+| T6 (R6) | Suspected from code reading: an outside connection that opens a member after recovery read its wal-index heads, checkpoints the torn commit and exits without closing can leave recovery with stale heads, so the torn commit stays in the database file. | Confirmed and fixed in the prototype (2026-11-26) | Reproduced deterministically with pause points `recover-begin` and `recover-truncate` (0 / 3 before the fix, outsider dying and staying open). Fix, recovery only and only for a torn set: each member to truncate is opened in exclusive locking mode, which keeps every other connection from reading or checkpointing it until the truncation; under that lock recovery rereads the marker and the `-shm` and compares the database file's root page with the torn commit's copy. An outsider holding the member open makes the open fail with `ProtocolViolation`. Clean opens and steady state are unchanged. Mutations `no-root-check` and `no-repair-lock` are each detected; the model's foreign-checkpoint-with-power-loss run now passes. Remaining limit: a checkpointer that died after a partial copy, before copying the root page and before advancing `nBackfill`. Raw results: `prototypes/cwal/results/2026-11-26-r6-2d00c0d/`. |
+| T7 | Alias-safe ownership. Ownership is keyed by resolved path, so a hard link or a bind mount of a member gives a second path to the same file and is not detected. | Open; must close before production release | Identity-based ownership using device and inode, with torture cases for a hard-linked member and a bind-mounted member directory. |
 
 ## 3. Exclusive member ownership
 
@@ -135,7 +137,8 @@ files on purpose.
    too. This replaces the `fcntl(F_GETLK)` test first proposed for R4:
    `F_GETLK` sees only other processes' POSIX locks, at one instant, so it
    cannot serialise two openers. Ownership does not cover connections
-   outside the protocol (REVIEW.md R6). The protocol is unchanged.
+   outside the protocol; recovery's repair lock (§8, T6) does. The
+   protocol is unchanged.
 4. Lock-file names come from main's resolved path (as in the prototype).
    Store paths are stored verbatim and resolved against the process working
    directory (`src/database/paths.zig:111-125`), so two processes in
@@ -388,6 +391,16 @@ optional within 15. The bump lands with the open-path phase, not before.
   open refuses with `ProtocolViolation` when the torn commit was already
   checkpointed by an outsider, or when markers are inconsistent. §3 adds
   the ownership and mapped-member checks, run before any truncation.
+- **Repair lock (T6).** For a torn set, each member to truncate is
+  opened in exclusive locking mode before the decision, and the lock is
+  held until the truncation. Under it recovery rereads the marker and the
+  `-shm` and compares the database file's root page with the torn commit's
+  copy; a match means an outsider checkpointed it, and the open refuses
+  with `ProtocolViolation`. An outsider holding the member open also makes
+  the open fail with `ProtocolViolation` after a 1 s busy wait. Reads under
+  the lock go through the lock connection's file handle, because closing
+  any other descriptor of the file drops the process's POSIX locks. Clean
+  opens skip this step.
 - **Errors.** CWAL's `Broken` (a crash mid-commit while other handles have
   the set open) and `ProtocolViolation` (cannot repair safely) need Zova
   errors and C ABI result codes. Proposal: `error.CommitSetBroken` (close
@@ -395,10 +408,9 @@ optional within 15. The bump lands with the open-path phase, not before.
   C ABI codes. This is an ABI extension and needs approval with the format
   decision.
 - **Late alone path.** Ported as-is, with the same-set heads check (T2).
-- **`MemberOwned`.** New in T3. It needs a Zova error and a C ABI result
-  code; the approved additive codes do not include it. Mapping it to an
-  existing busy code or adding a code is a decision for the integration
-  phase.
+- **`MemberOwned`.** New in T3. It gets its own Zova error and a
+  dedicated additive C ABI result code, exposed the same way in every
+  native binding (approved 2026-11-26, §12).
 - **Debug log.** `CWAL_DEBUG` becomes a test-only option. Production
   builds keep no per-open log file.
 
@@ -501,6 +513,16 @@ Each phase lands with its tests. Nothing ships outside
 4. **SQLite build.** `SQLITE_ENABLE_SNAPSHOT` is enabled in all native
    builds (§9).
 5. **Baseline tag.** `cwal-prototype-baseline` at `77c5b5a` (§1).
+6. **`MemberOwned` ABI code** (2026-11-26, after T2/T3). A dedicated
+   additive C ABI result code, exposed consistently across the native
+   bindings (§8).
+7. **Tracking** (2026-11-26, after T2/T3). Alias-safe ownership (T7) must
+   close before production release. R6 (T6) is investigated with a
+   deterministic reproducer before any fix. The explicit-state model
+   covers member ownership and its interaction with recovery. Raw
+   artifacts of every run are kept. Integration continues while T1, T4,
+   T6 and T7 stay tracked. Windows (T5) stays deferred. Production release
+   is not authorized.
 
 Scope now: T2 and T3 only, closed with implementation and test evidence in
 the prototype before the broader integration starts. T1, T4 and T5 stay

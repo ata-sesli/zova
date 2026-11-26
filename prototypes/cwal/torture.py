@@ -1569,11 +1569,70 @@ def dp_r3(work, same_process):
     return ok, f"outsider_ckpt={'/'.join(ck)} paused={reached} opener={' '.join(out.split())[:40]} wal_unchanged={after == before} late_alone_path={late} backfill_seen={seen}"
 
 
+def dp_r6(work, mode):
+    """R6. A writer dies inside a cross-file window with no other handle
+    open, so the next open is alone and recovers. An ordinary connection
+    checkpoints main while that opener is paused:
+    - dies: at recover-begin (heads read, no marker read yet); the
+      outsider copies the torn commit into main.db and dies without
+      closing, so the opener's marker read rebuilds main's wal-index and
+      loses nBackfill. Recovery must refuse and change no WAL.
+    - open: the same, but the outsider stays open. Recovery must refuse
+      and change no WAL.
+    - truncate: at recover-truncate (every torn member checked, none
+      truncated); the outsider's checkpoint must fail, and recovery must
+      roll the set back consistently.
+    Truncating main's WAL after a checkpoint of the torn commit would
+    leave that commit in main.db only."""
+    d = dp_set(work, "r6-" + mode)
+    w0 = run(["nexec", d, "--files", 3], input=cross3(1))
+    if w0.returncode != 0 or w0.stdout.split() != ["ok"] * 5:
+        return False, f"setup commit: {' '.join(w0.stdout.split())}"
+    w1 = run(["nexec", d, "--files", 3], input=cross3(2), env={"CWAL_CRASH_TAG": "commit-sync-next", "CWAL_CRASH_AT": 1})
+    if w1.returncode != -9:
+        return False, f"writer not killed at commit-sync-next: exit {w1.returncode}"
+    before = wal_sizes(d)
+    point = "recover-truncate" if mode == "truncate" else "recover-begin"
+    o, pf, reached = paused(["nexec", d, "--files", 3, "--role", "reader", "--ready", 1], d, point=point, extra_env={"CWAL_DEBUG": 1})
+    code = ("import os,sqlite3,sys\n"
+            "try:\n"
+            "    c=sqlite3.connect(sys.argv[1], timeout=0.2); r=c.execute('pragma wal_checkpoint(passive)').fetchone()\n"
+            "except sqlite3.Error as e:\n"
+            "    r=('err', str(e).replace(' ', '_'), '-')\n"
+            "print(*r, flush=True)\n"
+            "if sys.argv[2]=='1': os._exit(0)\n"
+            "sys.stdin.read()\n")
+    outsider = subprocess.Popen([sys.executable, "-c", code, os.path.join(d, "main.db"), "0" if mode == "open" else "1"],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    ck = outsider.stdout.readline().split()
+    if mode != "open":
+        outsider.wait(timeout=30)
+    go(pf)
+    out, _ = o.communicate(input="", timeout=60)
+    after = wal_sizes(d)
+    if mode == "open":
+        outsider.communicate(input="", timeout=30)
+    log = debug_log(d)
+    reason = ("checkpointed" if "torn commit already checkpointed" in log else
+              "locked-out" if "cannot lock out other connections" in log else "-")
+    ckpt_done = len(ck) == 3 and ck[0] == "0" and ck[1] != "-" and int(ck[2]) > 0 and ck[1] == ck[2]
+    cerr, rec = ncheck(d, 3, "cwal", [])
+    if mode == "truncate":
+        ok = reached and ck[:1] == ["err"] and out.split()[:1] == ["ready"] and cerr is None and after["main.db"] < before["main.db"]
+    else:
+        ok = ckpt_done and reached and "open-error ProtocolViolation" in out and after == before and reason != "-"
+    return ok, (f"outsider_ckpt={'/'.join(ck)} paused={reached} opener={' '.join(out.split())[:40]} "
+                f"wal_unchanged={after == before} wal={before}->{after} refusal={reason} check={cerr or 'ok'} recovery={rec}")
+
+
 def delay_point_tests(work):
     return [("no-cross-flag: new writer after a dead cross window", *dp_no_cross_flag(work)),
             ("no-late-alone: last holder dies during open", *dp_late_alone(work)),
             ("R3: foreign checkpoint + late alone", *dp_r3(work, False)),
-            ("R3: same, opener holds another set", *dp_r3(work, True))]
+            ("R3: same, opener holds another set", *dp_r3(work, True)),
+            ("R6: foreign ckpt during recovery, outsider dies", *dp_r6(work, "dies")),
+            ("R6: same, outsider stays open", *dp_r6(work, "open")),
+            ("R6: foreign ckpt attempt before truncation", *dp_r6(work, "truncate"))]
 
 
 def _link_member(d, name, target):
@@ -2020,7 +2079,7 @@ def main():
                 failed |= st["mixed"] != 0 or st["ckpt_violations"] != 0 or r["after"] != 0 or bool(r["err"]) or r["commits"] == 0
 
     if want("delaypoints"):
-        print("== T2: deterministic delay points (R3, no-late-alone, no-cross-flag; 3 files)", flush=True)
+        print("== T2: deterministic delay points (R3, R6, no-late-alone, no-cross-flag; 3 files)", flush=True)
         for name, ok, detail in delay_point_tests(a.work):
             print(f"{'pass' if ok else 'FAIL'} {name:52} | {detail}", flush=True)
             failed |= not ok

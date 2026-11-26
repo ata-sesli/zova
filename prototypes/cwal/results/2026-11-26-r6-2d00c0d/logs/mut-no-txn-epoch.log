@@ -1,0 +1,10 @@
+== N files: writer chain killed and restarted while readers keep the set open
+  [restart chains] 1/4 (5s)
+  [restart chains] 4/4 (9s)
+3 files: chains=2 {'crashed': 23, 'open_broken': 0, 'acked': 198, 'reads': 35533, 'mixed': 0, 'broken': 22, 'snapshot_reads': 20, 'ckpt_violations': 0, 'exit_nonzero': 0} failures=2
+     seed 1: 5 marker numbers attempted twice
+     seed 2: 4 marker numbers attempted twice
+8 files: chains=2 {'crashed': 23, 'open_broken': 1, 'acked': 212, 'reads': 14993, 'mixed': 0, 'broken': 21, 'snapshot_reads': 8, 'ckpt_violations': 0, 'exit_nonzero': 0} failures=2
+     seed 1: 6 marker numbers attempted twice
+     seed 2: 2 marker numbers attempted twice
+RESULT FAIL

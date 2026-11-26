@@ -1,0 +1,18 @@
+== N files: frames a killed writer left unpublished, next writer skips that file
+  [3 files dangling frames] 1/153 (1s)
+  [3 files dangling frames] 57/153 (6s)
+  [3 files dangling frames] 113/153 (11s)
+  [3 files dangling frames] 153/153 (15s)
+3 files: syncs=51 runs=153 crashed=138 reader_ok=153 mixed=0 failures=0
+  [8 files dangling frames] 1/480 (1s)
+  [8 files dangling frames] 57/480 (6s)
+  [8 files dangling frames] 113/480 (11s)
+  [8 files dangling frames] 167/480 (16s)
+  [8 files dangling frames] 222/480 (22s)
+  [8 files dangling frames] 276/480 (27s)
+  [8 files dangling frames] 330/480 (32s)
+  [8 files dangling frames] 384/480 (37s)
+  [8 files dangling frames] 438/480 (42s)
+  [8 files dangling frames] 480/480 (45s)
+8 files: syncs=100 runs=480 crashed=480 reader_ok=480 mixed=0 failures=0
+RESULT PASS

@@ -254,7 +254,15 @@ than repaired wrongly:
   (frames a completed checkpoint copied) reaches past the truncation point;
   or the wal-index is one WAL restart ahead of the WAL (SQLite restarts a
   WAL only after checkpointing all of it); or the WAL's last commit does
-  not write the marker table's root page, so it is not the torn commit.
+  not write the marker table's root page, so it is not the torn commit;
+  or the database file's copy of that root page equals the torn commit's
+  (a checkpoint copied it, whatever happened to the `-shm`). Before these
+  checks, recovery opens each member it will truncate in exclusive locking
+  mode, which takes an EXCLUSIVE database-file lock and keeps the
+  wal-index in heap memory: no other connection can read or checkpoint the
+  member until the truncation is done, and one that has it open makes the
+  open fail with `ProtocolViolation` (after a 1 s busy wait). It then reads
+  the `-shm` again and compares the root page. Clean opens skip this step.
   CWAL never checkpoints a torn commit, so only an outside connection gets
   there. Every member is checked before any is truncated, so a refused set
   is left as the crash left it.
@@ -313,7 +321,10 @@ the tests catch them; see the mutation table). `CWAL_WINDOW_DELAY_US`,
 `open-take`, `open-release`, `reset-held`), which are also fault events.
 `CWAL_PAUSE_AT=open-shared` with `CWAL_PAUSE_FILE=path` stops a shared open
 after it has read the wal-index heads and before SQLite maps them: it
-creates `path.reached` and waits for `path.go`. Two crash probes, selected
+creates `path.reached` and waits for `path.go`. `recover-begin` (an alone
+open has read the heads; recovery has read no marker) and
+`recover-truncate` (every torn member checked, none truncated) stop
+recovery the same way. Two crash probes, selected
 only by `CWAL_CRASH_TAG` and not counted as events, kill a writer at a WAL
 sync inside a cross-file commit: `commit-sync-first` (window not open,
 nothing published) and `commit-sync-next` (window open, earlier members
@@ -388,7 +399,7 @@ acknowledged `(k, txn)` survived.
 | N-file power loss | As above with the power-loss model, 3 seeds, at 3, 8 and 32 files. |
 | Writer restart chain | 15 writers in a row on one set, 80% killed at a random event, with readers kept running and restarted; every 5th writer opens alone. Random working sets, `PASSIVE` checkpoints. Requires unique attempted marker numbers across the whole chain (writer restarts included) and 0 mixed reads. 4 seeds per file count. |
 | Unpublished frames | A reader keeps the set open (and sleeps 20 ms between finding the writer alive and mapping, `CWAL_ALIVE_DELAY_US`); the writer is killed at each of its first 60 fsyncs; a second writer runs 6 rounds without ever touching file x, for each x; then check. |
-| Delay points (T2) | Deterministic, 3 files, a reader holding the set. `no-cross-flag`: the writer is killed at `commit-sync-next`; a new writer must exit `Broken`, readers must read nothing mixed, and recovery after the holder closes must roll back. `no-late-alone`: the writer is killed at `commit-sync-first`; an opener pauses at `open-shared` while the holder is killed, and must take the late-alone path and read nothing mixed. R3: as `no-cross-flag`, then an ordinary connection checkpoints main and the seqlock page is deleted; the paused opener must refuse (`ProtocolViolation`) with every WAL unchanged, also with a handle on another set in its process. |
+| Delay points (T2) | Deterministic, 3 files, a reader holding the set. `no-cross-flag`: the writer is killed at `commit-sync-next`; a new writer must exit `Broken`, readers must read nothing mixed, and recovery after the holder closes must roll back. `no-late-alone`: the writer is killed at `commit-sync-first`; an opener pauses at `open-shared` while the holder is killed, and must take the late-alone path and read nothing mixed. R3: as `no-cross-flag`, then an ordinary connection checkpoints main and the seqlock page is deleted; the paused opener must refuse (`ProtocolViolation`) with every WAL unchanged, also with a handle on another set in its process. R6, with no holder (the next open recovers): an ordinary connection checkpoints main while the opener pauses at `recover-begin`, then dies without closing or stays open; the opener must refuse with every WAL unchanged. At `recover-truncate` the ordinary connection's checkpoint must fail (`database is locked`) and recovery must roll the set back consistently. |
 | Member ownership (T3) | Set A (3 files), set B (2 files) whose `s1.db` is a symlink to A's `s2.db`, and A's main with 2 members. Each overlapping open must fail with `MemberOwned` while the other set is held, in another process and in the same process, in both roles; the same set must open twice in one process and from two processes; a killed owner must release ownership; a set listing a file twice must be refused. Races: 2 processes × 2 threads open and close two overlapping sets at random for 2 s; the held intervals of the two sets must never overlap. |
 | N-file live readers | A writer (window widened 200 µs) and 2 reader processes × 2 threads, all and `PASSIVE` checkpoints. |
 
@@ -525,6 +536,8 @@ Mutations. Each test-only defect is caught:
 | `no-authorizer,no-frame-guard` | the same, and `VACUUM` succeeds in both roles (22) |
 | `no-frame-guard` (commit frames accepted outside a commit) | enforcement: `VACUUM` succeeds in both roles once the handle's authorizer is removed (as an application installing its own would) |
 | `no-backfill-check` (recovery ignores foreign checkpoints) | enforcement: 5 / 48 crashed sets silently torn after an ordinary checkpoint that died, 13 / 48 after one that also wrote |
+| `no-root-check` (recovery does not compare the marker root page) | delay-point R6 case whose outsider dies: the opener truncates `main.db-wal` although the torn commit is in `main.db` |
+| `no-repair-lock` (recovery does not lock members before truncating) | delay-point R6 case at `recover-truncate`: the ordinary connection checkpoints the torn commit and the set is left torn |
 
 `no-ckpt-skip` (always take the real checkpoint lock) is a control: 0
 violations. `REVIEW.md` has the section 8 review, model check and
@@ -1048,8 +1061,9 @@ journal check on reads.
   checkpoint. If it checkpoints a torn commit, recovery refuses
   (`ProtocolViolation`) and the set needs manual repair. Not detected: a
   checkpointer that died before finishing (SQLite advances `nBackfill` only
-  after the database fsync), or one whose `-shm` was then deleted (unless
-  it also wrote: the WAL's last commit is then not the torn one).
+  after the database fsync) and before it copied the marker table's root
+  page. A completed checkpoint is detected even if the `-shm` was then
+  lost (root-page comparison, since R6).
 - Recovery refuses whenever a foreign checkpoint reached past the truncation
   point, including when the kept frames happen to rewrite every page the
   torn commit wrote (then truncating would still be correct).
@@ -1086,9 +1100,8 @@ journal check on reads.
 - Member ownership compares resolved paths. A hard link or bind mount gives
   one file two paths and is not detected. Each member gets two lock files
   (`-cwal-own`, `-cwal-mgate`) next to it.
-- An outside connection that checkpoints a torn commit while recovery runs
-  (after recovery read the wal-index heads) is not detected (REVIEW.md R6,
-  from code reading).
+- An outside connection that has a member open while recovery must repair
+  that member makes the open fail with `ProtocolViolation` (REVIEW.md R6).
 - The checkpoint counter counts only exclusive locks taken through this VFS
   (the same assumption as the checkpoint gate). A raised count left by a
   dead process is cleared only when a writer opens; until then readers take
