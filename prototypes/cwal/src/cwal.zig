@@ -124,8 +124,11 @@ pub const fault = struct {
         return @atomicLoad(u64, &failures, .seq_cst);
     }
 
+    /// CWAL_MUTATE is a comma-separated list of test-only defects.
     pub fn mutated(name: []const u8) bool {
-        return std.mem.eql(u8, mutate, name);
+        var it = std.mem.tokenizeScalar(u8, mutate, ',');
+        while (it.next()) |m| if (std.mem.eql(u8, m, name)) return true;
+        return false;
     }
 
     pub fn count() u64 {
@@ -672,7 +675,9 @@ fn ioWrite(file: [*c]c.sqlite3_file, buffer: ?*const anyopaque, amount: c_int, o
     fault.event(tag);
     const bytes = @as([*]const u8, @ptrCast(buffer.?))[0..@intCast(amount)];
     if (f.kind == .wal) {
-        if (connFor(f)) |conn| conn.observeWalWrite(bytes);
+        if (connFor(f)) |conn| {
+            if (!conn.observeWalWrite(bytes)) return c.SQLITE_IOERR_WRITE;
+        }
     }
     if (fault.shouldFail(tag)) {
         // A failed write may have written a prefix of its sectors.
@@ -929,6 +934,39 @@ fn fullPath(p: []const u8) Error![:0]u8 {
     return std.heap.c_allocator.dupeSentinel(u8, std.mem.sliceTo(&out, 0), 0) catch error.Io;
 }
 
+/// Header and checkpoint info of a member's wal-index (`-shm`), read raw:
+/// the first connection to open the member truncates it.
+const ShmHead = [136]u8;
+
+fn readShmHead(path: [:0]const u8) ?ShmHead {
+    var buf: [1100]u8 = undefined;
+    const shm_path = bufPrintZ(&buf, "{s}-shm", .{path}) catch return null;
+    const fd = c.open(shm_path.ptr, c.O_RDONLY | c.O_CLOEXEC);
+    if (fd < 0) return null;
+    defer _ = c.close(fd);
+    var shm: ShmHead = undefined;
+    if (c.pread(fd, &shm, shm.len, 0) != shm.len) return null;
+    return shm;
+}
+
+/// Whether a completed checkpoint copied WAL frames past byte offset keep
+/// into the database file, according to the wal-index, if it belongs to
+/// this WAL. CWAL checkpoints only between commits, so this means a
+/// connection outside the protocol checkpointed a torn commit; truncating
+/// the WAL would no longer remove it. A checkpointer that died before
+/// finishing (nBackfill not yet advanced), or a lost -shm, is not detected.
+fn backfilledPast(head: ?ShmHead, wal_fd: c_int, keep: i64) bool {
+    const shm = head orelse return false;
+    // Two equal, initialised copies of the header, with this WAL's salt.
+    if (!std.mem.eql(u8, shm[0..48], shm[48..96]) or shm[12] == 0) return false;
+    var header: [wal_header_size]u8 = undefined;
+    if (c.pread(wal_fd, &header, header.len, 0) != header.len) return false;
+    if (!std.mem.eql(u8, shm[32..40], header[16..24])) return false;
+    const frame_size: i64 = wal_frame_header_size + @as(i64, std.mem.readInt(u32, header[8..12], .big));
+    const kept_frames = @divTrunc(keep - wal_header_size, frame_size);
+    return std.mem.readInt(u32, shm[96..100], native_endian) > kept_frames;
+}
+
 /// A member's commit marker as SQLite sees the file (database plus valid
 /// WAL frames). Opened through this VFS without a connection id, so the
 /// power-loss model applies but no protocol hook runs; the connection does
@@ -1061,6 +1099,9 @@ pub const Conn = struct {
     /// The commit in progress has written a commit frame to some member.
     any_commit_frame: bool = false,
     violation: bool = false,
+    /// A statement of this handle's own is running: the authorizer lets it
+    /// write the marker tables.
+    internal: bool = false,
     /// Snapshot reads: the window (odd sequence) whose snapshots are being
     /// opened, 0 otherwise.
     opening_seq: u64 = 0,
@@ -1143,8 +1184,38 @@ pub const Conn = struct {
                 }
             }
             conn.releaseGate();
+            _ = c.sqlite3_set_authorizer(conn.db, &authorize, conn);
         }
         return conn;
+    }
+
+    /// Statements the application may not run on a CWAL handle: writes to
+    /// the marker tables, dropping or altering them or putting triggers on
+    /// them, pragmas that would take a member out of the protocol (journal
+    /// mode, locking mode, sync level, writable schema), and ATTACH or
+    /// DETACH, which would change the set this handle commits.
+    fn authorize(arg: ?*anyopaque, action: c_int, a1: [*c]const u8, a2: [*c]const u8, db_name: [*c]const u8, trigger: [*c]const u8) callconv(.c) c_int {
+        _ = db_name;
+        _ = trigger;
+        const conn: *Conn = @ptrCast(@alignCast(arg.?));
+        if (conn.internal or fault.mutated("no-authorizer")) return c.SQLITE_OK;
+        const deny = switch (action) {
+            c.SQLITE_INSERT, c.SQLITE_UPDATE, c.SQLITE_DELETE, c.SQLITE_DROP_TABLE, c.SQLITE_DROP_TEMP_TABLE => isMarker(a1),
+            c.SQLITE_ALTER_TABLE, c.SQLITE_CREATE_TRIGGER, c.SQLITE_CREATE_TEMP_TRIGGER => isMarker(a2),
+            c.SQLITE_PRAGMA => a2 != null and (isName(a1, "journal_mode") or isName(a1, "locking_mode") or isName(a1, "synchronous") or isName(a1, "writable_schema")),
+            c.SQLITE_ATTACH, c.SQLITE_DETACH => true,
+            else => false,
+        };
+        if (deny) conn.log("authorizer denied action {d} {s}", .{ action, if (a1 != null) std.mem.span(a1) else "" });
+        return if (deny) c.SQLITE_DENY else c.SQLITE_OK;
+    }
+
+    fn isName(name: [*c]const u8, want: []const u8) bool {
+        return name != null and std.ascii.eqlIgnoreCase(std.mem.span(name), want);
+    }
+
+    fn isMarker(name: [*c]const u8) bool {
+        return isName(name, "cwal_marker");
     }
 
     /// After openSqlite, while the gate is held: whether no other handle has
@@ -1184,6 +1255,17 @@ pub const Conn = struct {
         }
         _ = c.sqlite3_wal_autocheckpoint(db, 0);
         if (options.mode == .cwal) {
+            // Every member must be in WAL mode. Switch one that is not (WAL
+            // mode persists); this fails while another connection has it
+            // open in another mode.
+            for (0..paths.len) |i| {
+                var sql_buf: [64]u8 = undefined;
+                const sql = bufPrintZ(&sql_buf, "pragma {s}.journal_mode=wal", .{schemaName(i)}) catch return error.Io;
+                if (!try conn.queryIs(sql, "wal")) {
+                    conn.log("member {d} is not in WAL mode", .{i});
+                    return error.ProtocolViolation;
+                }
+            }
             // Read every member once, so each pager has its WAL open (which
             // sqlite3_snapshot_open requires) and its wal-index mapped.
             for (0..paths.len) |i| {
@@ -1245,6 +1327,17 @@ pub const Conn = struct {
         const head = std.fmt.bufPrint(&buf, "{d} {s} ev={d} ", .{ c.getpid(), @tagName(conn.role), fault.count() }) catch return;
         const body = std.fmt.bufPrint(buf[head.len..], fmt ++ "\n", args) catch return;
         _ = c.write(fd, &buf, head.len + body.len);
+    }
+
+    fn queryIs(conn: *Conn, sql: [:0]const u8, want: []const u8) Error!bool {
+        var stmt: ?*c.sqlite3_stmt = null;
+        defer _ = c.sqlite3_finalize(stmt);
+        if (c.sqlite3_prepare_v2(conn.db, sql.ptr, -1, &stmt, null) != c.SQLITE_OK or c.sqlite3_step(stmt) != c.SQLITE_ROW) {
+            std.debug.print("sqlite: {s}: {s}\n", .{ sql, c.sqlite3_errmsg(conn.db) });
+            return error.Sqlite;
+        }
+        const text = c.sqlite3_column_text(stmt, 0) orelse return false;
+        return std.ascii.eqlIgnoreCase(std.mem.span(text), want);
     }
 
     fn queryU64(conn: *Conn, sql: [:0]const u8) Error!u64 {
@@ -1361,6 +1454,8 @@ pub const Conn = struct {
     fn recover(conn: *Conn) Error!void {
         fault.event("recover-begin");
         var markers: [max_members]Marker = @splat(.{});
+        var shm_heads: [max_members]?ShmHead = @splat(null);
+        for (0..conn.nmembers) |i| shm_heads[i] = readShmHead(conn.paths[i]);
         var newest: Marker = .{};
         for (0..conn.nmembers) |i| {
             markers[i] = try readMarker(conn.paths[i]);
@@ -1388,6 +1483,10 @@ pub const Conn = struct {
                 // The torn commit cannot have been checkpointed: the writer
                 // checkpoints only between commits.
                 const keep = walLastCommitStart(fd) orelse return error.ProtocolViolation;
+                if (backfilledPast(shm_heads[i], fd, keep) and !fault.mutated("no-backfill-check")) {
+                    conn.log("recover member {d}: torn commit already checkpointed", .{i});
+                    return error.ProtocolViolation;
+                }
                 try truncateDurably(fd, wal, keep, "recover");
             }
         }
@@ -1525,9 +1624,18 @@ pub const Conn = struct {
         return true;
     }
 
-    fn observeWalWrite(conn: *Conn, bytes: []const u8) void {
-        if (conn.mode != .cwal or !conn.in_commit) return;
-        if (bytes.len == wal_frame_header_size and std.mem.readInt(u32, bytes[4..8], .big) != 0) conn.any_commit_frame = true;
+    /// Returns false for a commit frame written outside a commit the hook
+    /// approved: a path that bypasses the commit hook (VACUUM) would publish
+    /// it without a window, and from a reader handle.
+    fn observeWalWrite(conn: *Conn, bytes: []const u8) bool {
+        if (conn.mode != .cwal) return true;
+        if (bytes.len != wal_frame_header_size or std.mem.readInt(u32, bytes[4..8], .big) == 0) return true;
+        if (!conn.in_commit) {
+            conn.log("refused commit frame outside a commit", .{});
+            return fault.mutated("no-frame-guard");
+        }
+        conn.any_commit_frame = true;
+        return true;
     }
 
     /// End the publication window: make the seqlock even again.
@@ -1625,6 +1733,8 @@ pub const Conn = struct {
             }
             if (@popCount(mask) >= 2) {
                 const t = conn.txn + 1;
+                conn.internal = true;
+                defer conn.internal = false;
                 for (0..conn.nmembers) |m| {
                     if (mask & (@as(u32, 1) << @intCast(m)) == 0) continue;
                     var buf: [128]u8 = undefined;

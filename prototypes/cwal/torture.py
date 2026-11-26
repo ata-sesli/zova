@@ -13,6 +13,7 @@ import os
 import random
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -66,13 +67,13 @@ def rmset(d, ignore_errors=True):
     shutil.rmtree(d, ignore_errors=ignore_errors)
 
 
-def run(args, env=None, timeout=60):
+def run(args, env=None, timeout=60, input=None):
     e = dict(os.environ)
     for k in ("CWAL_CRASH_AT", "CWAL_POWERLOSS", "CWAL_SEED", "CWAL_TRACE"):
         e.pop(k, None)
     if env:
         e.update({k: str(v) for k, v in env.items()})
-    return subprocess.run([BIN] + [str(a) for a in args], env=e, capture_output=True, text=True, timeout=timeout)
+    return subprocess.run([BIN] + [str(a) for a in args], env=e, capture_output=True, text=True, timeout=timeout, input=input)
 
 
 def acks(stdout):
@@ -1165,6 +1166,203 @@ def recovery_chain(work, n, snaps, jobs, chains=3, length=5):
     return len(cases), [r for r in results if r[-1]]
 
 
+# --- Section 6: protocol enforcement --------------------------------------
+
+# Statements an application may run on a CWAL handle, and the index of the
+# line that must fail (None: nothing must fail). Bypasses either write the
+# marker tables, take a member out of WAL/FULL sync, change the attached
+# set, or commit across members without markers.
+ENF_CROSS = "begin\ninsert into main.x values (1)\ninsert into m1.x values (1)\n"
+ENFORCE_CASES = [
+    ("marker update", "update m1.cwal_marker set txn = 99999999999, mask = 3 where k = 0", 0),
+    ("marker delete", "delete from main.cwal_marker", 0),
+    ("marker insert", "insert into main.cwal_marker values (1, 5, 5)", 0),
+    ("marker drop", "drop table m2.cwal_marker", 0),
+    ("marker alter", "alter table m1.cwal_marker add column z", 0),
+    ("trigger on marker", "create temp trigger tm after update on m1.cwal_marker begin insert into m2.x values (9); end", 0),
+    ("trigger writes marker", "create temp trigger tw after insert on main.x begin update m1.cwal_marker set txn = 1; end\ninsert into main.x values (8)", 1),
+    ("cross via COMMIT", ENF_CROSS + "commit", 3),
+    ("cross via END", ENF_CROSS + "end", 3),
+    ("cross via RELEASE", "savepoint a\ninsert into main.x values (2)\ninsert into m1.x values (2)\nrelease a", 3),
+    ("cross via temp trigger", "create temp trigger tt after insert on main.x begin insert into m1.x values (new.a); end\ninsert into main.x values (3)", 1),
+    ("journal_mode=delete", "pragma m1.journal_mode=delete", 0),
+    ("journal_mode=memory", "pragma journal_mode=memory", 0),
+    ("journal_mode=off", "pragma m2.journal_mode=off", 0),
+    ("locking_mode=exclusive", "pragma m1.locking_mode=exclusive", 0),
+    ("synchronous=off", "pragma synchronous=off", 0),
+    ("synchronous=normal", "pragma m1.synchronous=normal", 0),
+    ("writable_schema", "pragma writable_schema=1", 0),
+    ("attach", "attach ':memory:' as x9", 0),
+    ("detach", "detach m1", 0),
+    ("vacuum", "vacuum m1", 0),
+    ("cross via !commit (allowed)", ENF_CROSS + "!commit", None),
+    ("checkpoint truncate (allowed)", "pragma m1.wal_checkpoint(truncate)", None),
+    ("read pragmas (allowed)", "pragma journal_mode\npragma m1.synchronous\npragma locking_mode", None),
+]
+
+
+def enforce_set(work, name, rounds=4):
+    d = os.path.join(work, "enf-" + re.sub(r"\W+", "_", name))
+    rmset(d, ignore_errors=True)
+    copyset(ntemplate(work, 3), d)
+    acked = nacks(run(["nwriter", d, "--files", 3, "--rounds", rounds]).stdout)
+    run(["nexec", d, "--files", 3], input="create table if not exists main.x(a)\ncreate table if not exists m1.x(a)\ncreate table if not exists m2.x(a)\n")
+    return d, acked
+
+
+def enforce_reopen(d, acked):
+    """('ok'|'refused'|'TORN', detail): reopen with a writer, then check.
+    ncheck matches the newest marker to nwriter's data, so after a cross
+    commit of the application's own the writer must make one (6 rounds do)."""
+    w = run(["nwriter", d, "--files", 3, "--rounds", 6])
+    if w.returncode != 0:
+        lines = (w.stdout + w.stderr).strip().splitlines()
+        return "refused", lines[-1] if lines else f"exit {w.returncode}"
+    err, rec = ncheck(d, 3, "cwal", acked + nacks(w.stdout))
+    return ("TORN", err) if err else ("ok", f"recovery={rec}")
+
+
+def enforce_statements(work, role):
+    out = []
+    for name, sql, must_fail in ENFORCE_CASES:
+        d, acked = enforce_set(work, f"{role}-{name}")
+        r = run(["nexec", d, "--files", 3, "--role", role], input=sql + "\n")
+        res = r.stdout.split("\n")
+        refused = must_fail is None or (must_fail < len(res) and res[must_fail].startswith("err"))
+        if role == "reader" and must_fail is None and name.startswith("cross"):
+            refused = True  # a reader's commit fails anyway
+        outcome, detail = enforce_reopen(d, acked)
+        out.append((f"{role} {name}", refused and outcome == "ok", " ".join(r.stdout.split()), outcome, detail))
+        rmset(d, ignore_errors=True)
+    return out
+
+
+def plain_sql(path, sql):
+    """An ordinary SQLite connection (Python's sqlite3): runs sql, closes."""
+    con = sqlite3.connect(path, timeout=2)
+    try:
+        for s in sql.split(";"):
+            if s.strip():
+                con.execute(s).fetchall()
+        con.commit()
+        return "ok"
+    except sqlite3.Error as e:
+        return f"err {e}"
+    finally:
+        con.close()
+
+
+def plain_ckpt_die(paths, mode):
+    code = ("import os,sqlite3,sys\n"
+            "for p in sys.argv[1:]:\n"
+            f"    sqlite3.connect(p).execute('pragma wal_checkpoint({mode})').fetchall()\n"
+            "os._exit(0)\n")
+    subprocess.run([sys.executable, "-c", code] + paths)
+    return "ok"
+
+
+ENF_MEMBERS = ("main.db", "s1.db", "s2.db")
+ENF_OUTSIDERS = [("none (control)", lambda d: "ok")] + \
+    [(f"plain open {m}", lambda d, m=m: plain_sql(os.path.join(d, m), "select count(*) from sqlite_schema")) for m in ENF_MEMBERS] + \
+    [("plain truncate ckpt, closes", lambda d: [plain_sql(os.path.join(d, m), "pragma wal_checkpoint(truncate)") for m in ENF_MEMBERS][-1]),
+     ("plain write s1", lambda d: plain_sql(os.path.join(d, "s1.db"), "create table if not exists o(a); insert into o values (1)"))] + \
+    [(f"plain {mode} ckpt, dies", lambda d, mode=mode: plain_ckpt_die([os.path.join(d, m) for m in ENF_MEMBERS], mode)) for mode in ("passive", "full", "restart")] + \
+    [("-cwal-snap deleted", lambda d: os.remove(os.path.join(d, "main.db-cwal-snap")) or "ok"),
+     ("snap page junk", lambda d: open(os.path.join(d, "main.db-cwal-snap"), "r+b").write(os.urandom(64)) and "ok")] + \
+    [(f"{m}-shm deleted", lambda d, m=m: (os.path.exists(os.path.join(d, m + "-shm")) and os.remove(os.path.join(d, m + "-shm"))) or "ok") for m in ENF_MEMBERS]
+
+
+def enforce_crashed(work, ks):
+    """Crash a writer at each write-wal event k (some leave a torn set),
+    let each outsider act, reopen. Fails on a silent tear, or on a refusal
+    where the control (CWAL reopens first) needs no rollback."""
+    out = {}
+    for k in ks:
+        torn = None
+        for oname, act in ENF_OUTSIDERS:
+            d, acked = enforce_set(work, f"crash-{k}-{oname}")
+            w = run(["nwriter", d, "--files", 3, "--rounds", 6], {"CWAL_CRASH_TAG": "write-wal", "CWAL_CRASH_AT": k})
+            acked += nacks(w.stdout)
+            if oname.startswith("none"):
+                # ncheck opens alone, so it runs (and reports) recovery.
+                torn = "recovery=rollback" in run(["ncheck", d, "--files", 3]).stdout
+            act(d)
+            outcome, detail = enforce_reopen(d, acked)
+            if oname.startswith("none") and outcome == "ok":
+                outcome = "torn" if torn else "clean"
+            o = out.setdefault(oname, Counter())
+            o[outcome if outcome not in ("ok", "refused") else f"{outcome} {'torn' if torn else 'clean'}"] += 1
+            if outcome == "TORN" or (outcome == "refused" and not torn):
+                o.setdefault("examples", []).append(f"k={k} {outcome} {detail}")
+            rmset(d, ignore_errors=True)
+    return out
+
+
+def enforce_live(work):
+    """Ordinary connections loop over the members while a CWAL writer runs."""
+    out = []
+    for case, sql in (("read", "select count(*) from sqlite_schema"), ("passive ckpt", "pragma wal_checkpoint(passive)"),
+                      ("truncate ckpt", "pragma wal_checkpoint(truncate)"), ("write", "create table if not exists o(a); insert into o values (1)")):
+        d, acked = enforce_set(work, f"live-{case}")
+        stop, outs = threading.Event(), Counter()
+
+        def loop():
+            while not stop.is_set():
+                for m in ENF_MEMBERS:
+                    outs[plain_sql(os.path.join(d, m), sql)[:3]] += 1
+                time.sleep(0.002)
+        t = threading.Thread(target=loop)
+        t.start()
+        w = run(["nwriter", d, "--files", 3, "--rounds", 200, "--delay-us", 200])
+        stop.set()
+        t.join()
+        outcome, detail = enforce_reopen(d, acked + nacks(w.stdout)) if w.returncode == 0 else ("refused", w.stdout[-80:])
+        out.append((f"live plain {case}", outcome == "ok", f"writer_exit={w.returncode} plain={dict(outs)}", outcome, detail))
+        rmset(d, ignore_errors=True)
+    return out
+
+
+def enforce_journal_and_meta(work):
+    out = []
+    for m in ENF_MEMBERS:
+        d, acked = enforce_set(work, f"jm-{m}")
+        r = plain_sql(os.path.join(d, m), "pragma journal_mode=delete")
+        outcome, detail = enforce_reopen(d, acked)
+        out.append((f"{m} left in delete mode, then opened", outcome == "ok", r, outcome, detail))
+    d, acked = enforce_set(work, "jm-held")
+    con = sqlite3.connect(os.path.join(d, "s1.db"), isolation_level=None)
+    con.execute("pragma journal_mode=delete").fetchall()
+    con.execute("begin")
+    con.execute("select count(*) from sqlite_schema").fetchall()
+    w = run(["nwriter", d, "--files", 3, "--rounds", 2])
+    con.execute("commit")
+    con.close()
+    outcome, detail = enforce_reopen(d, acked)
+    out.append(("s1 held open in delete mode", w.returncode != 0 and outcome == "ok", f"writer_exit={w.returncode} while held", outcome, detail))
+    d, acked = enforce_set(work, "jm-live")
+    rd = subprocess.Popen([BIN, "nexec", d, "--files", "3", "--role", "reader"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    rd.stdin.write("select count(*) from main.cwal_marker\n")
+    rd.stdin.flush()
+    time.sleep(0.3)
+    r = plain_sql(os.path.join(d, "s1.db"), "pragma journal_mode=delete")
+    rd.stdin.close()
+    rd.wait()
+    outcome, detail = enforce_reopen(d, acked)
+    out.append(("plain switches s1 to delete under a reader", r.startswith("err") and outcome == "ok", r, outcome, detail))
+    for suffix in ("-cwal-gate", "-cwal-alive", "-cwal-writer", "-cwal-live", "-cwal-snap"):
+        d, acked = enforce_set(work, f"rm{suffix}")
+        os.remove(os.path.join(d, "main.db" + suffix))
+        outcome, detail = enforce_reopen(d, acked)
+        out.append((f"clean set, {suffix} deleted", outcome == "ok", "", outcome, detail))
+    for m in ENF_MEMBERS:
+        for what, sql in (("marker row changed", "update cwal_marker set txn = txn + 1000 where k = 0"), ("marker table dropped", "drop table cwal_marker")):
+            d, acked = enforce_set(work, f"mk-{m}-{what}")
+            r = plain_sql(os.path.join(d, m), sql)
+            outcome, detail = enforce_reopen(d, acked)
+            out.append((f"{m} {what} by plain conn", outcome != "TORN", r, outcome, detail))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--work", default=os.environ.get("CWAL_WORK", "/tmp/cwal-torture"))
@@ -1499,6 +1697,20 @@ def main():
                 st = r["stats"]
                 print(f"{n} files seed={seed}: victims={r['victims']} killed={r['crashed']} survivor_reads={st['reads']} min_per_thread={st['min_reads']} mixed={st['mixed']} violations={st['ckpt_violations']} commits_during={r['commits']} longest_stall_ms={r['stall'] * 1000:.0f} ckpt_active_left={r['left']} after_next_writer={r['after']} check={'ok' if not r['err'] else r['err']}", flush=True)
                 failed |= st["mixed"] != 0 or st["ckpt_violations"] != 0 or r["after"] != 0 or bool(r["err"]) or r["commits"] == 0
+
+    if want("enforce"):
+        print("== protocol enforcement: bypass statements, ordinary SQLite connections, journal modes, lost metadata (3 files)", flush=True)
+        rows = enforce_statements(a.work, "writer") + enforce_statements(a.work, "reader") + enforce_live(a.work) + enforce_journal_and_meta(a.work)
+        for name, ok, res, outcome, detail in rows:
+            print(f"{'pass' if ok else 'FAIL'} {name:46} | {res[:40]:40} | {outcome:7} | {detail[:70]}", flush=True)
+            failed |= not ok
+        print("crashed sets (k = write-wal events 1..48): outcome counts per outsider", flush=True)
+        for oname, cnt in enforce_crashed(a.work, range(1, 49)).items():
+            ex = cnt.pop("examples", [])
+            print(f"  {oname:30} {dict(cnt)}", flush=True)
+            for e in ex[:3]:
+                print(f"      {e}")
+            failed |= bool(ex)
 
     print("RESULT", "FAIL" if failed else "PASS")
     sys.exit(1 if failed else 0)

@@ -163,7 +163,8 @@ This works because only the newest cross-file transaction can be torn: the
 writer starts the next commit only after every member of this one is
 durable, so the torn transaction is the last commit in each member that has
 it, and it cannot have been checkpointed (the writer checkpoints only
-between commits). Truncating only removes frames, so recovery is idempotent
+between commits). A connection outside the protocol can checkpoint it;
+recovery detects that and refuses (see [Enforcement](#enforcement)). Truncating only removes frames, so recovery is idempotent
 and a crash during it just reruns it.
 
 While other handles still have the set open, recovery cannot run:
@@ -222,6 +223,37 @@ would later appear as a committed, torn transaction. Three rules prevent it:
 A commit whose WAL fsync cannot read a member's wal-index header to open the
 window fails that fsync (`SQLITE_IOERR_FSYNC`) before any member publishes.
 
+### Enforcement
+
+Statements on a CWAL handle that would bypass the protocol are refused, and
+a set that a connection outside the protocol has damaged is refused rather
+than repaired wrongly:
+
+- **Authorizer.** Every CWAL handle installs an authorizer
+  (`sqlite3_set_authorizer`) that denies writing, dropping or altering
+  `cwal_marker`, triggers on it, `PRAGMA journal_mode`, `locking_mode`,
+  `synchronous` and `writable_schema` with a value, and `ATTACH`/`DETACH`.
+  `Conn.commit` turns it off for its own marker updates. `VACUUM` is denied
+  too, because SQLite runs it through an internal `ATTACH`. Reading these
+  pragmas is allowed.
+- **Commit-frame guard.** The VFS fails (`SQLITE_IOERR_WRITE`) a WAL commit
+  frame written outside a commit the commit hook approved. A path that skips
+  the commit hook (`VACUUM` does) would otherwise publish a member with no
+  window, or write from a reader handle. It is a second layer behind the
+  authorizer.
+- **WAL mode at open.** Opening runs `PRAGMA journal_mode=WAL` on every
+  member and requires the result `wal` (`ProtocolViolation` otherwise). A
+  member left in rollback-journal mode is switched back (WAL mode persists);
+  a member that another connection holds open in another mode cannot be,
+  and the open fails.
+- **Foreign checkpoints.** Recovery reads each member's `-shm` before
+  opening it (the first connection to open a member truncates it). If that
+  wal-index belongs to the member's WAL (same salts) and its `nBackfill`
+  (frames a completed checkpoint copied) reaches past where recovery would
+  truncate, the torn commit is already in the database file and truncating
+  would not remove it: recovery refuses with `ProtocolViolation`. CWAL never
+  checkpoints a torn commit, so only an outside connection gets there.
+
 ## Running
 
 ```bash
@@ -235,10 +267,13 @@ zig build -Doptimize=ReleaseFast
 `zig-out/bin/cwal` commands: `seed`, `writer`, `reader`, `check`, `recover`,
 `state` (prints the seqlock page), `bench`, `benchrw`, and for sets of 2 to
 32 files (`--files N`) `nseed`, `nwriter`, `nwriters` (competing writer
-threads), `nsem`, `nreader`, `ncheck`. Fault injection is
+threads), `nsem`, `nreader`, `ncheck`, and `nexec` (runs each stdin line as
+SQL on one handle, `--role writer|reader`; `!commit`, `!rollback` and
+`!autocommit <sql>` call the `Conn` methods; prints `ok` or `err <name>` per
+line). Fault injection is
 controlled by environment: `CWAL_CRASH_AT=n` (SIGKILL at event n),
 `CWAL_CRASH_TAG=t[,t...]` (count only events with these tags), `CWAL_POWERLOSS=1` +
-`CWAL_SEED`, `CWAL_TRACE=1`, and `CWAL_MUTATE=…` (test-only defects, to show
+`CWAL_SEED`, `CWAL_TRACE=1`, and `CWAL_MUTATE=…[,…]` (test-only defects, to show
 the tests catch them; see the mutation table). `CWAL_WINDOW_DELAY_US`,
 `CWAL_CKPT_OPEN_DELAY_US`, `CWAL_CKPT_SCAN_DELAY_US` and
 `CWAL_ALIVE_DELAY_US` widen races for tests, and
@@ -391,6 +426,17 @@ filesystem; no filesystem is cut off from power.
 | Short profile | `--files 3 --powerloss-seeds 1 --ncap 200`, sections `nfiles`, `nreaders`, `permissions`, `readerkill`. On NTFS, and on split sets. |
 | Split sets (several filesystems) | The set directory and `main.db` on btrfs, member 1 on tmpfs, member 2 on ext4 (`--split-dirs`), so one commit spans three filesystems with their own WALs, fsyncs and directory entries. |
 
+Enforcement tests (`--only enforce`, 3 files) use Python's `sqlite3` module
+(the system SQLite) as the connection outside the protocol.
+
+| Test | What it does |
+| --- | --- |
+| Bypass statements | 24 statements per role (writer, reader) on a CWAL handle through `nexec`: marker writes, drops, alters and triggers; cross-file commits through `COMMIT`, `END`, `RELEASE` and a TEMP trigger; journal, locking, sync and writable-schema pragmas; `ATTACH`, `DETACH`, `VACUUM`; and 3 allowed controls (`Conn.commit`, a checkpoint, reading pragmas). Each bypass must fail, and a writer must then open the set and `ncheck` must pass. |
+| Ordinary connections, live | An ordinary connection loops over the members (reads, `PASSIVE` or `TRUNCATE` checkpoints, or single-file writes) while a CWAL writer commits 200 rounds. |
+| Crashed sets | A writer is killed at each of its first 48 WAL writes (21 leave a torn set). Then an outsider acts: an ordinary connection opens a member (and checkpoints on close), checkpoints every member with `TRUNCATE`, writes one member, or checkpoints every member (`PASSIVE`, `FULL`, `RESTART`) and dies without closing; or `-cwal-snap` or a member's `-shm` is deleted, or the snapshot page overwritten. A silent tear fails, and so does a refused open where CWAL alone needs no rollback. |
+| Journal modes | A member left in `DELETE` mode, then opened; a member held open in `DELETE` mode by an ordinary connection while CWAL opens; an ordinary connection switching a member to `DELETE` while a CWAL reader has the set open. |
+| Lost metadata | Each lock file deleted from a closed set; a marker row changed, or the marker table dropped, by an ordinary connection. |
+
 ## Results
 
 Linux 7.2, x86_64, 8 CPUs, SQLite 3.53.4 (vendored, built with
@@ -430,8 +476,13 @@ Mutations. Each test-only defect is caught:
 | `no-open-gate` (opens and closes do not take `-gate`) | unpublished-frames test: 4 / 153 torn at 3 files, 2,984 mixed reads (0 at 8 files) |
 | `no-txn-epoch` (marker numbers continue from the newest published one) | restart chains: all 8 chains (3 and 8 files) reuse 2–6 marker numbers |
 
+| `no-authorizer` (no authorizer) | enforcement: 20 bypass statements succeed (writer: marker writes, pragmas, `ATTACH`/`DETACH`; reader: pragmas, `ATTACH`/`DETACH`) |
+| `no-authorizer,no-frame-guard` | the same, and `VACUUM` succeeds in both roles (22) |
+| `no-backfill-check` (recovery ignores foreign checkpoints) | enforcement: 5 / 48 crashed sets silently torn after an ordinary checkpoint that died |
+
 `no-ckpt-skip` (always take the real checkpoint lock) is a control: 0
-violations.
+violations. `no-frame-guard` alone is not caught: the authorizer refuses
+`VACUUM` first.
 
 ### N-file atomicity
 
@@ -619,6 +670,43 @@ checkpoint violations, and every `ncheck` passed.
   not provide there. Zova's native packages are all 64-bit (x64 and arm64),
   so this was not pursued.
 
+### Protocol enforcement
+
+Same machine, 2026-11-26, tmpfs, ReleaseSafe build, 3 files. Before the
+fixes, probes found these bypasses (all now refused):
+
+- A writer handle could update or delete `cwal_marker`; the set then failed
+  every open with `ProtocolViolation`. Dropping it lost the marker history.
+- `PRAGMA synchronous=OFF`/`NORMAL` and `locking_mode=EXCLUSIVE` let
+  cross-file commits succeed without a publication window (with no WAL
+  fsync, the window never opened). `journal_mode=DELETE`/`MEMORY`/`OFF` made
+  the set unopenable. `DETACH` made the next cross-file commit fail with an
+  I/O error.
+- `VACUUM` skips the commit hook, so a reader handle could write, and a
+  writer's `VACUUM` published with no window.
+- **Recovery could tear silently (bug, fixed).** When an ordinary
+  connection checkpointed a torn member and died before deleting its WAL,
+  recovery truncated frames that were already in the database file: 9 of 48
+  crashed sets per checkpoint mode ended torn. Recovery now checks the
+  wal-index first (see [Enforcement](#enforcement)).
+
+| Test | Result |
+| --- | --- |
+| Bypass statements, writer and reader | **42 / 42** refused (`VACUUM` by the authorizer); 6 / 6 controls allowed; the set opened and checked after each |
+| Ordinary connections while a writer commits (read, `PASSIVE`, `TRUNCATE`, write) | **4 / 4** pass; 63–75 ordinary operations each, all succeeded |
+| Crashed sets, 13 outsiders × 48 crash points (21 torn) | **0** silent tears, **0** refusals of a set CWAL alone recovers. Refused (`ProtocolViolation`) exactly when the outsider applied the torn commit: all 21 torn sets for each checkpointing outsider, 16 and 13 for an ordinary open of `main.db` and `s1.db`, 0 for `s2.db` (no torn commit reached its WAL at these crash points). Deleted `-shm`, `-cwal-snap` or a junk snapshot page: all 48 recover. |
+| Member left in `DELETE` mode | switched back to WAL at open, 3 / 3 |
+| Member held open in `DELETE` mode | open fails (`database is locked`); after release, opens and checks |
+| Ordinary connection switches a member to `DELETE` under a CWAL reader | refused by SQLite (`database is locked`) |
+| Lock files deleted from a closed set | recreated, 5 / 5 |
+| Marker row changed or table dropped by an ordinary connection | 5 / 6 refused; the sixth (dropped in a member outside the newest cross-file transaction) opens and checks: that marker is not needed |
+
+The short profile (`nfiles`, `nreaders`, `permissions`, `readerkill`) and the
+checkpoint and recovery sections (`ckptkill`, `ckptpoints`, `ckptreset`,
+`closeckpt`, `ndangle`, `recchain`, `nrestart`) at 3 files passed with the
+changes: 0 failures in 200 crash, 200 power-loss and 2,524 recovery-crash
+runs, 45 and 47 rollbacks.
+
 ### Overhead
 
 Medians of 3 repetitions, ReleaseFast, same VFS and build for both modes.
@@ -731,8 +819,14 @@ journal check on reads.
 ## Limits
 
 - Only handles that go through this protocol are coordinated. Any other
-  SQLite connection to a member (CLI, backup tool) can checkpoint or read
-  mixed states.
+  SQLite connection to a member (CLI, backup tool) can read mixed states and
+  checkpoint. If it checkpoints a torn commit, recovery refuses
+  (`ProtocolViolation`) and the set needs manual repair. Not detected: a
+  checkpointer that died before finishing (SQLite advances `nBackfill` only
+  after the database fsync), or one whose `-shm` was then deleted.
+- Recovery refuses whenever a foreign checkpoint reached past the truncation
+  point, including when the kept frames happen to rewrite every page the
+  torn commit wrote (then truncating would still be correct).
 - Readers must start transactions with `beginRead`; a plain `BEGIN` gets no
   cross-file snapshot.
 - Requires `synchronous=FULL` (or `EXTRA`) on every member; the publication
@@ -743,6 +837,9 @@ journal check on reads.
   hook, and so is a `RELEASE` that would commit a cross-file savepoint
   transaction (which then leaves an empty transaction open). Each member holds a `cwal_marker` table, which a production version
   would hide from the public API.
+- The authorizer occupies `sqlite3_set_authorizer`; an application that
+  installs its own replaces it. `VACUUM`, `ATTACH` and `DETACH` are
+  unavailable on CWAL handles.
 - After a writer crash in the middle of a cross-file commit, the set is
   unreadable until every handle has closed and one reopens (recovery needs
   exclusive access). Readers get `error.Broken` rather than a mixed view.

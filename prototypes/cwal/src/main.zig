@@ -279,6 +279,42 @@ fn nState(conn: *Conn, n: usize) NState {
     return .{ .bad = row[0], .distinct = row[1], .max_k = row[2], .shared_txn = row[3] };
 }
 
+/// Run statements from stdin, one per line, through one handle (--role
+/// writer or reader) and print "ok" or "err <error>" for each. "!commit"
+/// calls Conn.commit, "!autocommit <sql>" Conn.autocommit, "!rollback"
+/// Conn.rollbackOpen.
+fn cmdNExec(dir: []const u8, args: Args) void {
+    const role = std.meta.stringToEnum(cwal.Role, args.get("--role") orelse "writer") orelse die("bad --role", .{});
+    const conn = openN(dir, nFiles(args), .{ .mode = args.mode(), .role = role }) catch |err| {
+        out("open-error {s}\n", .{@errorName(err)});
+        cwal.flushPending();
+        c.exit(2);
+    };
+    var input: std.ArrayList(u8) = .empty;
+    var chunk: [4096]u8 = undefined;
+    while (true) {
+        const got = c.read(0, &chunk, chunk.len);
+        if (got <= 0) break;
+        input.appendSlice(std.heap.c_allocator, chunk[0..@intCast(got)]) catch die("oom", .{});
+    }
+    var it = std.mem.splitScalar(u8, input.items, '\n');
+    var sql_buf: [4096]u8 = undefined;
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        const result = if (std.mem.eql(u8, line, "!commit"))
+            conn.commit()
+        else if (std.mem.eql(u8, line, "!rollback"))
+            conn.rollbackOpen()
+        else if (std.mem.startsWith(u8, line, "!autocommit "))
+            conn.autocommit(bufPrintZ(&sql_buf, "{s}", .{line["!autocommit ".len..]}) catch die("long line", .{}))
+        else
+            conn.exec(bufPrintZ(&sql_buf, "{s}", .{line}) catch die("long line", .{}));
+        if (result) |_| out("ok\n", .{}) else |err| out("err {s}\n", .{@errorName(err)});
+    }
+    conn.close();
+    cwal.flushPending();
+}
+
 fn cmdNSeed(dir: []const u8, args: Args) void {
     var set: NSet = .{};
     set.fill(dir, nFiles(args));
@@ -1309,9 +1345,9 @@ fn cmdBenchRw(dir: []const u8, args: Args) void {
 pub fn main(init: std.process.Init.Minimal) void {
     cwal.register();
     const list = init.args.toSlice(std.heap.c_allocator) catch die("args", .{});
-    if (list.len < 3) die("usage: cwal <seed|writer|reader|check|recover|state|bench|benchrw|nseed|nwriter|nreader|ncheck> <dir> [options]", .{});
+    if (list.len < 3) die("usage: cwal <seed|writer|reader|check|recover|state|bench|benchrw|nseed|nwriter|nreader|ncheck|nexec> <dir> [options]", .{});
     const args: Args = .{ .list = list };
     const cmd = list[1];
     const dir = list[2];
-    if (std.mem.eql(u8, cmd, "seed")) cmdSeed(dir) else if (std.mem.eql(u8, cmd, "writer")) cmdWriter(dir, args) else if (std.mem.eql(u8, cmd, "reader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "check")) cmdCheck(dir, args) else if (std.mem.eql(u8, cmd, "recover")) cmdRecover(dir, args) else if (std.mem.eql(u8, cmd, "state")) cmdState(dir) else if (std.mem.eql(u8, cmd, "bench")) cmdBench(dir, args) else if (std.mem.eql(u8, cmd, "benchrw")) cmdBenchRw(dir, args) else if (std.mem.eql(u8, cmd, "nseed")) cmdNSeed(dir, args) else if (std.mem.eql(u8, cmd, "nwriter")) cmdNWriter(dir, args) else if (std.mem.eql(u8, cmd, "nreader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "ncheck")) cmdNCheck(dir, args) else if (std.mem.eql(u8, cmd, "nsem")) cmdNSem(dir, args) else if (std.mem.eql(u8, cmd, "nwriters")) cmdNWriters(dir, args) else die("unknown command {s}", .{cmd});
+    if (std.mem.eql(u8, cmd, "seed")) cmdSeed(dir) else if (std.mem.eql(u8, cmd, "writer")) cmdWriter(dir, args) else if (std.mem.eql(u8, cmd, "reader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "check")) cmdCheck(dir, args) else if (std.mem.eql(u8, cmd, "recover")) cmdRecover(dir, args) else if (std.mem.eql(u8, cmd, "state")) cmdState(dir) else if (std.mem.eql(u8, cmd, "bench")) cmdBench(dir, args) else if (std.mem.eql(u8, cmd, "benchrw")) cmdBenchRw(dir, args) else if (std.mem.eql(u8, cmd, "nseed")) cmdNSeed(dir, args) else if (std.mem.eql(u8, cmd, "nwriter")) cmdNWriter(dir, args) else if (std.mem.eql(u8, cmd, "nreader")) cmdReader(dir, args) else if (std.mem.eql(u8, cmd, "ncheck")) cmdNCheck(dir, args) else if (std.mem.eql(u8, cmd, "nsem")) cmdNSem(dir, args) else if (std.mem.eql(u8, cmd, "nwriters")) cmdNWriters(dir, args) else if (std.mem.eql(u8, cmd, "nexec")) cmdNExec(dir, args) else die("unknown command {s}", .{cmd});
 }
