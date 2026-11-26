@@ -1,0 +1,24 @@
+== N files: frames a killed writer left unpublished, next writer skips that file
+  [3 files dangling frames] 1/153 (1s)
+  [3 files dangling frames] 57/153 (6s)
+  [3 files dangling frames] 113/153 (11s)
+  [3 files dangling frames] 153/153 (14s)
+3 files: syncs=51 runs=153 crashed=137 reader_ok=152 mixed=1300 failures=1
+        1  FAIL torn transactions=# (writer exits #/#, kept /tmp/claude
+     sync#16 skip file 2: FAIL torn transactions=1 (writer exits -9/0, kept /tmp/claude-1000/-home-atawirtz-workspace-zova/daa0c463-140c-4b37-9672-84b77de94139/scratchpad/mut-w/nd-3-16-2.before-check)
+  [8 files dangling frames] 1/480 (1s)
+  [8 files dangling frames] 57/480 (6s)
+  [8 files dangling frames] 113/480 (11s)
+  [8 files dangling frames] 169/480 (16s)
+  [8 files dangling frames] 225/480 (21s)
+  [8 files dangling frames] 281/480 (26s)
+  [8 files dangling frames] 336/480 (31s)
+  [8 files dangling frames] 390/480 (36s)
+  [8 files dangling frames] 445/480 (41s)
+  [8 files dangling frames] 480/480 (45s)
+8 files: syncs=100 runs=480 crashed=480 reader_ok=477 mixed=2132 failures=3
+        3  FAIL torn transactions=# (writer exits #/#, kept /tmp/claude
+     sync#28 skip file 4: FAIL torn transactions=1 (writer exits -9/0, kept /tmp/claude-1000/-home-atawirtz-workspace-zova/daa0c463-140c-4b37-9672-84b77de94139/scratchpad/mut-w/nd-8-28-4.before-check)
+     sync#44 skip file 5: FAIL torn transactions=1 (writer exits -9/0, kept /tmp/claude-1000/-home-atawirtz-workspace-zova/daa0c463-140c-4b37-9672-84b77de94139/scratchpad/mut-w/nd-8-44-5.before-check)
+     sync#52 skip file 5: FAIL torn transactions=1 (writer exits -9/0, kept /tmp/claude-1000/-home-atawirtz-workspace-zova/daa0c463-140c-4b37-9672-84b77de94139/scratchpad/mut-w/nd-8-52-5.before-check)
+RESULT FAIL

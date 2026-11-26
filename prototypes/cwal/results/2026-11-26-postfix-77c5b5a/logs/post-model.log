@@ -1,0 +1,18 @@
+protocol                                   states=  1388569   29.3s  ok
+protocol, foreign checkpoints, no power loss states=  3756700   82.5s  ok refused=706
+protocol no-gate                           states=     7347    0.1s  VIOLATION S1: transaction 1 on members [0] of [0, 1]
+protocol no-solo-window                    states=    62595    0.9s  VIOLATION S1: transaction 2 visible without earlier committed 1
+protocol no-seq-check                      states=     8372    0.1s  VIOLATION S1: transaction 1 on members [0] of [0, 1]
+protocol no-snapshot-open                  states=     8765    0.1s  VIOLATION S1: transaction 1 on members [0] of [0, 1]
+protocol no-markers                        states=      172    0.0s  VIOLATION S2/S3: transaction 1 on members [0] of [0, 1]
+protocol no-marker-rollback                states=      172    0.0s  VIOLATION S2/S3: transaction 1 on members [0] of [0, 1]
+protocol no-cross-flag                     states=     8760    0.1s  VIOLATION S2/S3: transaction 1 on members [0] of [0, 1] refused=1
+protocol no-discard-unpublished            states=     4557    0.1s  VIOLATION S2/S3: transaction 1 on members [0] of [0, 1]
+protocol no-txn-epoch                      states=      177    0.0s  VIOLATION S4: marker number 1 reused by t2
+protocol no-ckpt-gate                      states=     2084    0.0s  VIOLATION S2/S3: transaction 1 on members [0] of [0, 1] refused=1
+protocol no-backfill-check (foreign)       states=     1843    0.0s  VIOLATION S2/S3: transaction 1 on members [0] of [0, 1]
+ckpt                                       states=      137    0.0s  ok
+ckpt no-ckpt-validate                      states=       51    0.0s  VIOLATION snapshot: nBackfillAttempted 3 past open snapshot 1
+ckpt no-ckpt-skip                          states=       33    0.0s  ok
+ckpt ckpt-inc-late                         states=       56    0.0s  VIOLATION snapshot: nBackfillAttempted 3 past open snapshot 1
+ckpt ckpt-dec-early                        states=       78    0.0s  VIOLATION snapshot: nBackfillAttempted 3 past open snapshot 1

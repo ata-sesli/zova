@@ -1,0 +1,34 @@
+BASELINE 77c5b5aba1f341c388b288b63316caa863275873 2026-11-26T19:06:41+03:00
+BUILT Debug fae20388412b758a
+BUILT ReleaseSafe 24bfbf761ed838b3
+BUILT ReleaseFast 0dbb0ed97df94063
+SUITE Debug start 19:07:31
+SUITE Debug rc=0 RESULT PASS 1178s
+SUITE ReleaseSafe start 19:27:09
+SUITE ReleaseSafe rc=0 RESULT PASS 1137s
+SUITE ReleaseFast start 19:46:07
+SUITE ReleaseFast rc=0 RESULT PASS 1136s
+MUT none [crash readers survivors ckptrace ckptreset closeckpt ndangle nrestart enforce] rc=0 NOT DETECTED 228s
+MUT no-markers [crash] rc=1 detected 19s
+MUT no-marker-rollback [powerloss] rc=1 detected 20s
+MUT no-cross-flag [survivors] rc=0 NOT DETECTED 30s
+MUT no-gate [readers] rc=1 detected 15s
+MUT no-seq-check [readers] rc=1 detected 17s
+MUT no-snapshot-open [readers] rc=1 detected 18s
+MUT no-solo-window [readers] rc=1 detected 16s
+MUT no-lock-gate [closeckpt] rc=1 detected 30s
+MUT no-ckpt-gate [closeckpt] rc=1 detected 32s
+MUT no-ckpt-validate [ckptrace] rc=1 detected 14s
+MUT no-ckpt-skip [ckptrace] rc=0 pass (control) 15s
+MUT no-ckpt-reset [ckptreset] rc=1 detected 8s
+MUT no-discard-unpublished [ndangle] rc=1 detected 59s
+MUT no-late-alone [ndangle] rc=1 detected 60s
+MUT no-open-gate [ndangle] rc=1 detected 59s
+MUT no-txn-epoch [nrestart] rc=1 detected 9s
+MUT no-authorizer [enforce] rc=1 detected 37s
+MUT no-frame-guard [enforce] rc=1 detected 37s
+MUT no-backfill-check [enforce] rc=1 detected 38s
+SWEEP-DONE
+MUT no-late-alone [ndangle, Debug] rc=1 59s
+MODEL rc=0 114s
+ALL-DONE 2026-11-26T20:20:37+03:00

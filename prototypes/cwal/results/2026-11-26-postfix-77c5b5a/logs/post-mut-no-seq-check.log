@@ -1,0 +1,6 @@
+== concurrent snapshots: writer + 2 reader processes x 2 threads
+plain ckpt=all: {'reads': 1062, 'mixed': 6, 'broken': 0, 'reopen': 8, 'ckpt_attempts': 40, 'ckpt_denied': 0, 'snapshot_reads': 0, 'seq_retries': 0, 'snapshot_waits': 0, 'ckpt_races': 0, 'ckpt_fallbacks': 0, 'ckpt_violations': 0, 'ckpt_locks': 0, 'min_reads': 520} check=ok
+cwal ckpt=all: {'reads': 1263, 'mixed': 2, 'broken': 0, 'reopen': 12, 'ckpt_attempts': 48, 'ckpt_denied': 48, 'snapshot_reads': 14, 'seq_retries': 0, 'snapshot_waits': 3, 'ckpt_races': 0, 'ckpt_fallbacks': 2, 'ckpt_violations': 0, 'ckpt_locks': 0, 'min_reads': 630} check=ok
+plain ckpt=passive: {'reads': 200, 'mixed': 81, 'broken': 0, 'reopen': 0, 'ckpt_attempts': 6, 'ckpt_denied': 0, 'snapshot_reads': 0, 'seq_retries': 0, 'snapshot_waits': 0, 'ckpt_races': 0, 'ckpt_fallbacks': 0, 'ckpt_violations': 0, 'ckpt_locks': 0, 'min_reads': 95} check=ok
+cwal ckpt=passive: {'reads': 298, 'mixed': 33, 'broken': 0, 'reopen': 0, 'ckpt_attempts': 10, 'ckpt_denied': 10, 'snapshot_reads': 76, 'seq_retries': 0, 'snapshot_waits': 1, 'ckpt_races': 0, 'ckpt_fallbacks': 11, 'ckpt_violations': 0, 'ckpt_locks': 0, 'min_reads': 148} check=ok
+RESULT FAIL

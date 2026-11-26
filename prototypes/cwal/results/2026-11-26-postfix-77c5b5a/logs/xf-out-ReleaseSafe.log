@@ -1,0 +1,32 @@
+== writer killed while reader processes keep running
+  [plain surviving readers] 1/40 (2s)
+  [plain surviving readers] 5/40 (8s)
+  [plain surviving readers] 9/40 (14s)
+  [plain surviving readers] 13/40 (20s)
+  [plain surviving readers] 17/40 (26s)
+  [plain surviving readers] 21/40 (32s)
+  [plain surviving readers] 25/40 (38s)
+  [plain surviving readers] 29/40 (44s)
+  [plain surviving readers] 33/40 (50s)
+  [plain surviving readers] 37/40 (56s)
+  [plain surviving readers] 40/40 (61s)
+plain: trials=40 crashed=40 restarted=40 {'reads': 964773, 'mixed': 247371, 'broken': 0, 'ckpt_denied': 0, 'restart_broken': 0, 'snapshot_reads': 0, 'seq_retries': 0, 'snapshot_waits': 0, 'ckpt_races': 0, 'ckpt_violations': 0} check_failures=11
+     sync#54 FAIL pair ids not a prefix main=19/19 store=18/19
+     sync#34 FAIL pair ids not a prefix main=13/13 store=12/13
+     sync#56 FAIL pair ids not a prefix main=19/19 store=18/19
+  [cwal surviving readers] 1/40 (2s)
+  [cwal surviving readers] 5/40 (8s)
+  [cwal surviving readers] 9/40 (14s)
+  [cwal surviving readers] 13/40 (20s)
+  [cwal surviving readers] 17/40 (26s)
+  [cwal surviving readers] 21/40 (32s)
+  [cwal surviving readers] 25/40 (38s)
+  [cwal surviving readers] 29/40 (44s)
+  [cwal surviving readers] 33/40 (50s)
+  [cwal surviving readers] 37/40 (57s)
+  [cwal surviving readers] 40/40 (61s)
+cwal: trials=40 crashed=40 restarted=40 {'reads': 878047, 'mixed': 69790, 'broken': 0, 'ckpt_denied': 35056, 'restart_broken': 0, 'snapshot_reads': 5235, 'seq_retries': 2006, 'snapshot_waits': 179, 'ckpt_races': 0, 'ckpt_violations': 0} check_failures=3
+     sync#56 FAIL pair ids not a prefix main=18/18 store=17/18
+     sync#35 FAIL pair ids not a prefix main=13/13 store=12/13
+     sync#16 FAIL pair ids not a prefix main=9/9 store=8/9
+RESULT FAIL

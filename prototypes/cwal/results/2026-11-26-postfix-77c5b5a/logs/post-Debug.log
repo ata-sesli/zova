@@ -1,0 +1,667 @@
+== process crash at every writer event
+  [plain crash] 1/1340 (0s)
+  [plain crash] 892/1340 (5s)
+  [plain crash] 1340/1340 (8s)
+plain: events=1340 runs=1340 failures=135 recoveries={'none': 1205, '-': 135}
+      135  FAIL torn pairs main=# store=#
+  [cwal crash] 1/1678 (0s)
+  [cwal crash] 721/1678 (5s)
+  [cwal crash] 1358/1678 (10s)
+  [cwal crash] 1678/1678 (13s)
+cwal: events=1678 runs=1678 failures=0 recoveries={'none': 1527, 'rollback': 151}
+== crash during recovery (every recovery event, once and twice)
+  [recovery crash] 1/8480 (0s)
+  [recovery crash] 826/8480 (5s)
+  [recovery crash] 1648/8480 (10s)
+  [recovery crash] 2475/8480 (15s)
+  [recovery crash] 3296/8480 (20s)
+  [recovery crash] 4124/8480 (25s)
+  [recovery crash] 4950/8480 (30s)
+  [recovery crash] 5775/8480 (35s)
+  [recovery crash] 6600/8480 (40s)
+  [recovery crash] 7420/8480 (45s)
+  [recovery crash] 8236/8480 (50s)
+  [recovery crash] 8480/8480 (52s)
+cwal: torn states=40 runs=8480 failures=0
+== power loss at every writer event, 1 seeds (unsynced writes dropped or torn)
+  [plain crash powerloss] 1/1340 (0s)
+  [plain crash powerloss] 888/1340 (5s)
+  [plain crash powerloss] 1340/1340 (8s)
+plain: events=1340 runs=1340 failures=135 recoveries={'none': 1205, '-': 135}
+      135  FAIL torn pairs main=# store=#
+  [cwal crash powerloss] 1/1678 (0s)
+  [cwal crash powerloss] 723/1678 (5s)
+  [cwal crash powerloss] 1375/1678 (10s)
+  [cwal crash powerloss] 1678/1678 (13s)
+cwal: events=1678 runs=1678 failures=0 recoveries={'none': 1527, 'rollback': 151}
+== power loss during recovery
+  [recovery crash] 1/4240 (0s)
+  [recovery crash] 828/4240 (5s)
+  [recovery crash] 1652/4240 (10s)
+  [recovery crash] 2472/4240 (15s)
+  [recovery crash] 3302/4240 (20s)
+  [recovery crash] 4126/4240 (25s)
+  [recovery crash] 4240/4240 (26s)
+cwal: torn states=20 runs=4240 failures=0
+== concurrent snapshots: writer + 2 reader processes x 2 threads
+plain ckpt=all: {'reads': 1074, 'mixed': 16, 'broken': 0, 'reopen': 8, 'ckpt_attempts': 41, 'ckpt_denied': 0, 'snapshot_reads': 0, 'seq_retries': 0, 'snapshot_waits': 0, 'ckpt_races': 0, 'ckpt_fallbacks': 0, 'ckpt_violations': 0, 'ckpt_locks': 0, 'min_reads': 528} check=ok
+cwal ckpt=all: {'reads': 1019, 'mixed': 0, 'broken': 0, 'reopen': 8, 'ckpt_attempts': 39, 'ckpt_denied': 39, 'snapshot_reads': 67, 'seq_retries': 69, 'snapshot_waits': 7, 'ckpt_races': 0, 'ckpt_fallbacks': 6, 'ckpt_violations': 0, 'ckpt_locks': 0, 'min_reads': 497} check=ok
+plain ckpt=passive: {'reads': 321, 'mixed': 54, 'broken': 0, 'reopen': 0, 'ckpt_attempts': 12, 'ckpt_denied': 0, 'snapshot_reads': 0, 'seq_retries': 0, 'snapshot_waits': 0, 'ckpt_races': 0, 'ckpt_fallbacks': 0, 'ckpt_violations': 0, 'ckpt_locks': 0, 'min_reads': 156} check=ok
+cwal ckpt=passive: {'reads': 369, 'mixed': 0, 'broken': 0, 'reopen': 0, 'ckpt_attempts': 12, 'ckpt_denied': 12, 'snapshot_reads': 133, 'seq_retries': 149, 'snapshot_waits': 0, 'ckpt_races': 0, 'ckpt_fallbacks': 4, 'ckpt_violations': 0, 'ckpt_locks': 0, 'min_reads': 178} check=ok
+== writer killed while reader processes keep running
+  [plain surviving readers] 1/5 (2s)
+  [plain surviving readers] 5/5 (8s)
+plain: trials=5 crashed=5 restarted=5 {'reads': 88155, 'mixed': 51558, 'broken': 0, 'ckpt_denied': 0, 'restart_broken': 0, 'snapshot_reads': 0, 'seq_retries': 0, 'snapshot_waits': 0, 'ckpt_races': 0, 'ckpt_violations': 0} check_failures=3
+     sync#33 FAIL pair ids not a prefix main=14/14 store=13/14
+     sync#40 FAIL pair ids not a prefix main=17/17 store=16/17
+     sync#54 FAIL pair ids not a prefix main=17/17 store=16/17
+  [cwal surviving readers] 1/5 (2s)
+  [cwal surviving readers] 5/5 (8s)
+cwal: trials=5 crashed=5 restarted=5 {'reads': 62423, 'mixed': 0, 'broken': 0, 'ckpt_denied': 2487, 'restart_broken': 0, 'snapshot_reads': 618, 'seq_retries': 291, 'snapshot_waits': 20, 'ckpt_races': 0, 'ckpt_violations': 0} check_failures=0
+== checkpoint starts during a snapshot open (widened race)
+cwal: {'reads': 331, 'mixed': 0, 'broken': 0, 'reopen': 3, 'ckpt_attempts': 12, 'ckpt_denied': 12, 'snapshot_reads': 104, 'seq_retries': 57, 'snapshot_waits': 0, 'ckpt_races': 26, 'ckpt_fallbacks': 26, 'ckpt_violations': 0, 'ckpt_locks': 0, 'min_reads': 331} check_failures=0
+== writer killed holding a checkpoint lock; the next writer clears the counter
+    crash at ckpt-locked#1: active after crash=1 after next writer=0 snapshot_reads=284 ckpt_fallbacks=1 check=ok
+    crash at ckpt-locked#2: active after crash=1 after next writer=0 snapshot_reads=240 ckpt_fallbacks=0 check=ok
+    crash at ckpt-locked#3: active after crash=1 after next writer=0 snapshot_reads=164 ckpt_fallbacks=0 check=ok
+    crash at ckpt-locked#4: active after crash=1 after next writer=0 snapshot_reads=160 ckpt_fallbacks=0 check=ok
+    crash at ckpt-locked#5: active after crash=1 after next writer=0 snapshot_reads=69 ckpt_fallbacks=3 check=ok
+== last reader closes after the writer is killed at each of its first 40 fsyncs
+  [plain close checkpoint] 1/40 (0s)
+  [plain close checkpoint] 14/40 (6s)
+  [plain close checkpoint] 27/40 (11s)
+  [plain close checkpoint] 40/40 (16s)
+plain: runs=40 check_failures=13
+     sync#3 FAIL torn pairs main=1 store=0
+     sync#4 FAIL torn pairs main=1 store=0
+     sync#6 FAIL torn pairs main=2 store=1
+  [cwal close checkpoint] 1/40 (0s)
+  [cwal close checkpoint] 14/40 (6s)
+  [cwal close checkpoint] 27/40 (11s)
+  [cwal close checkpoint] 40/40 (16s)
+cwal: runs=40 check_failures=0
+== N files: process crash at every commit-boundary event (write-wal,sync,shm-barrier,commit-hook,gate-acquire,phase-two)
+  [nwriter 2 files plain crash] 1/212 (0s)
+  [nwriter 2 files plain crash] 212/212 (2s)
+2 files plain: events=212 runs=212 crashed=212 failures=40 recoveries={'none': 172, '-': 40}
+       40  FAIL torn transactions=#
+  [nwriter 2 files cwal crash] 1/300 (0s)
+  [nwriter 2 files cwal crash] 300/300 (3s)
+2 files cwal: events=347 runs=300 crashed=300 failures=0 recoveries={'none': 245, 'rollback': 55}
+  [nwriter 3 files plain crash] 1/249 (0s)
+  [nwriter 3 files plain crash] 249/249 (2s)
+3 files plain: events=249 runs=249 crashed=249 failures=67 recoveries={'none': 182, '-': 67}
+       67  FAIL torn transactions=#
+  [nwriter 3 files cwal crash] 1/300 (0s)
+  [nwriter 3 files cwal crash] 300/300 (3s)
+3 files cwal: events=409 runs=300 crashed=300 failures=0 recoveries={'none': 224, 'rollback': 76}
+  [recovery crash] 1/2516 (0s)
+  [recovery crash] 722/2516 (5s)
+  [recovery crash] 1446/2516 (10s)
+  [recovery crash] 2164/2516 (15s)
+  [recovery crash] 2516/2516 (18s)
+3 files cwal recovery crash: torn states=8 runs=2516 failures=0
+  [nwriter 8 files plain crash] 1/300 (0s)
+  [nwriter 8 files plain crash] 300/300 (5s)
+8 files plain: events=458 runs=300 crashed=300 failures=114 recoveries={'none': 186, '-': 114}
+      114  FAIL torn transactions=#
+  [nwriter 8 files cwal crash] 1/300 (0s)
+  [nwriter 8 files cwal crash] 300/300 (5s)
+8 files cwal: events=731 runs=300 crashed=300 failures=0 recoveries={'none': 205, 'rollback': 95}
+  [recovery crash] 1/6652 (0s)
+  [recovery crash] 454/6652 (5s)
+  [recovery crash] 893/6652 (10s)
+  [recovery crash] 1342/6652 (15s)
+  [recovery crash] 1780/6652 (20s)
+  [recovery crash] 2228/6652 (25s)
+  [recovery crash] 2672/6652 (30s)
+  [recovery crash] 3120/6652 (35s)
+  [recovery crash] 3568/6652 (40s)
+  [recovery crash] 4014/6652 (45s)
+  [recovery crash] 4459/6652 (50s)
+  [recovery crash] 4898/6652 (55s)
+  [recovery crash] 5349/6652 (60s)
+  [recovery crash] 5792/6652 (65s)
+  [recovery crash] 6242/6652 (70s)
+  [recovery crash] 6652/6652 (75s)
+8 files cwal recovery crash: torn states=8 runs=6652 failures=0
+== N files: power loss at every commit-boundary event (sampled)
+  [nwriter 3 files plain crash powerloss] 1/249 (0s)
+  [nwriter 3 files plain crash powerloss] 249/249 (2s)
+3 files plain powerloss: events=249 runs=249 failures=67 recoveries={'none': 182, '-': 67}
+       67  FAIL torn transactions=#
+  [nwriter 3 files cwal crash powerloss] 1/300 (0s)
+  [nwriter 3 files cwal crash powerloss] 300/300 (3s)
+3 files cwal powerloss: events=409 runs=300 failures=0 recoveries={'none': 221, 'rollback': 79}
+  [nwriter 8 files plain crash powerloss] 1/300 (0s)
+  [nwriter 8 files plain crash powerloss] 300/300 (5s)
+8 files plain powerloss: events=458 runs=300 failures=115 recoveries={'none': 185, '-': 115}
+      115  FAIL torn transactions=#
+  [nwriter 8 files cwal crash powerloss] 1/300 (0s)
+  [nwriter 8 files cwal crash powerloss] 300/300 (5s)
+8 files cwal powerloss: events=731 runs=300 failures=0 recoveries={'none': 204, 'rollback': 96}
+== N files: writer chain killed and restarted while readers keep the set open
+  [restart chains] 1/3 (5s)
+  [restart chains] 3/3 (9s)
+2 files: chains=1 {'crashed': 13, 'open_broken': 0, 'acked': 54, 'reads': 16535, 'mixed': 0, 'broken': 0, 'snapshot_reads': 12, 'ckpt_violations': 0, 'exit_nonzero': 0} failures=0
+3 files: chains=1 {'crashed': 11, 'open_broken': 0, 'acked': 109, 'reads': 11956, 'mixed': 0, 'broken': 4, 'snapshot_reads': 9, 'ckpt_violations': 0, 'exit_nonzero': 0} failures=0
+8 files: chains=1 {'crashed': 15, 'open_broken': 0, 'acked': 12, 'reads': 7754, 'mixed': 0, 'broken': 23, 'snapshot_reads': 2, 'ckpt_violations': 0, 'exit_nonzero': 0} failures=0
+== N files: frames a killed writer left unpublished, next writer skips that file
+  [2 files dangling frames] 1/80 (1s)
+  [2 files dangling frames] 57/80 (6s)
+  [2 files dangling frames] 80/80 (7s)
+2 files: syncs=40 runs=80 crashed=76 reader_ok=80 mixed=0 failures=0
+  [3 files dangling frames] 1/153 (1s)
+  [3 files dangling frames] 57/153 (6s)
+  [3 files dangling frames] 113/153 (11s)
+  [3 files dangling frames] 153/153 (14s)
+3 files: syncs=51 runs=153 crashed=143 reader_ok=153 mixed=0 failures=0
+  [8 files dangling frames] 1/480 (1s)
+  [8 files dangling frames] 57/480 (6s)
+  [8 files dangling frames] 113/480 (11s)
+  [8 files dangling frames] 169/480 (16s)
+  [8 files dangling frames] 225/480 (21s)
+  [8 files dangling frames] 281/480 (27s)
+  [8 files dangling frames] 337/480 (32s)
+  [8 files dangling frames] 392/480 (37s)
+  [8 files dangling frames] 446/480 (42s)
+  [8 files dangling frames] 480/480 (45s)
+8 files: syncs=100 runs=480 crashed=480 reader_ok=480 mixed=0 failures=0
+== N files: live writer + 2 reader processes x 2 threads
+2 files cwal ckpt=all: {'reads': 3414, 'mixed': 0, 'broken': 0, 'snapshot_reads': 128, 'seq_retries': 74, 'snapshot_waits': 6, 'ckpt_violations': 0} check=ok
+2 files cwal ckpt=passive: {'reads': 908, 'mixed': 0, 'broken': 0, 'snapshot_reads': 763, 'seq_retries': 532, 'snapshot_waits': 1, 'ckpt_violations': 0} check=ok
+3 files plain ckpt=all: {'reads': 2575, 'mixed': 5, 'broken': 0, 'snapshot_reads': 0, 'seq_retries': 0, 'snapshot_waits': 0, 'ckpt_violations': 0} check=ok
+3 files plain ckpt=passive: {'reads': 505, 'mixed': 267, 'broken': 0, 'snapshot_reads': 0, 'seq_retries': 0, 'snapshot_waits': 0, 'ckpt_violations': 0} check=ok
+3 files cwal ckpt=all: {'reads': 2498, 'mixed': 0, 'broken': 0, 'snapshot_reads': 78, 'seq_retries': 220, 'snapshot_waits': 7, 'ckpt_violations': 0} check=ok
+3 files cwal ckpt=passive: {'reads': 650, 'mixed': 0, 'broken': 0, 'snapshot_reads': 596, 'seq_retries': 1203, 'snapshot_waits': 9, 'ckpt_violations': 0} check=ok
+8 files plain ckpt=all: {'reads': 1053, 'mixed': 51, 'broken': 0, 'snapshot_reads': 0, 'seq_retries': 0, 'snapshot_waits': 0, 'ckpt_violations': 0} check=ok
+8 files plain ckpt=passive: {'reads': 332, 'mixed': 261, 'broken': 0, 'snapshot_reads': 0, 'seq_retries': 0, 'snapshot_waits': 0, 'ckpt_violations': 0} check=ok
+8 files cwal ckpt=all: {'reads': 1354, 'mixed': 0, 'broken': 0, 'snapshot_reads': 39, 'seq_retries': 57, 'snapshot_waits': 15, 'ckpt_violations': 0} check=ok
+8 files cwal ckpt=passive: {'reads': 355, 'mixed': 0, 'broken': 0, 'snapshot_reads': 355, 'seq_retries': 480, 'snapshot_waits': 15, 'ckpt_violations': 0} check=ok
+== N files: transaction semantics (nsem) with long-lived readers
+2 files plain seed=1: {'reads': 1158, 'mixed': 43, 'broken': 0, 'snapshot_reads': 0, 'ckpt_violations': 0} check=ok
+    scenarios: explicit=20 solo=20 trigger=20 trigger-direct=20 savepoint=20 savepoint-outer=20 constraint=20 or-rollback=20 raise-abort=20 raise-rollback=20 deferred-fk=20 busy=20 spill=20 immediate=20 prepared=20
+2 files plain seed=2: {'reads': 1154, 'mixed': 52, 'broken': 0, 'snapshot_reads': 0, 'ckpt_violations': 0} check=ok
+2 files cwal seed=1: {'reads': 1206, 'mixed': 0, 'broken': 0, 'snapshot_reads': 120, 'ckpt_violations': 0} check=ok
+    scenarios: explicit=20 solo=20 trigger=20 trigger-direct=20 savepoint=20 savepoint-outer=20 constraint=20 or-rollback=20 raise-abort=20 raise-rollback=20 deferred-fk=20 busy=20 spill=20 immediate=20 prepared=20
+2 files cwal seed=2: {'reads': 1194, 'mixed': 0, 'broken': 0, 'snapshot_reads': 95, 'ckpt_violations': 0} check=ok
+3 files plain seed=1: {'reads': 1019, 'mixed': 65, 'broken': 0, 'snapshot_reads': 0, 'ckpt_violations': 0} check=ok
+3 files plain seed=2: {'reads': 1014, 'mixed': 72, 'broken': 0, 'snapshot_reads': 0, 'ckpt_violations': 0} check=ok
+3 files cwal seed=1: {'reads': 1028, 'mixed': 0, 'broken': 0, 'snapshot_reads': 91, 'ckpt_violations': 0} check=ok
+3 files cwal seed=2: {'reads': 1007, 'mixed': 0, 'broken': 0, 'snapshot_reads': 65, 'ckpt_violations': 0} check=ok
+8 files plain seed=1: {'reads': 665, 'mixed': 105, 'broken': 0, 'snapshot_reads': 0, 'ckpt_violations': 0} check=ok
+8 files plain seed=2: {'reads': 702, 'mixed': 46, 'broken': 0, 'snapshot_reads': 0, 'ckpt_violations': 0} check=ok
+8 files cwal seed=1: {'reads': 685, 'mixed': 0, 'broken': 0, 'snapshot_reads': 40, 'ckpt_violations': 0} check=ok
+8 files cwal seed=2: {'reads': 680, 'mixed': 0, 'broken': 0, 'snapshot_reads': 38, 'ckpt_violations': 0} check=ok
+== N files: nsem process crash at every commit-boundary event (write-wal,sync,shm-barrier,commit-hook,gate-acquire,phase-two)
+  [nsem 2 files plain crash] 1/300 (0s)
+  [nsem 2 files plain crash] 300/300 (3s)
+2 files plain: events=810 runs=300 crashed=300 failures=85 recoveries={'none': 215, '-': 85}
+       85  FAIL torn transactions=#
+  [nsem 2 files cwal crash] 1/300 (0s)
+  [nsem 2 files cwal crash] 300/300 (3s)
+2 files cwal: events=1056 runs=300 crashed=300 failures=0 recoveries={'none': 233, 'rollback': 67}
+  [nsem 3 files plain crash] 1/300 (0s)
+  [nsem 3 files plain crash] 300/300 (4s)
+3 files plain: events=970 runs=300 crashed=300 failures=101 recoveries={'none': 199, '-': 101}
+      101  FAIL torn transactions=#
+  [nsem 3 files cwal crash] 1/300 (0s)
+  [nsem 3 files cwal crash] 300/300 (4s)
+3 files cwal: events=1259 runs=300 crashed=300 failures=0 recoveries={'none': 201, 'rollback': 99}
+  [nsem 8 files plain crash] 1/300 (0s)
+  [nsem 8 files plain crash] 273/300 (5s)
+  [nsem 8 files plain crash] 300/300 (6s)
+8 files plain: events=1624 runs=300 crashed=300 failures=144 recoveries={'none': 156, '-': 144}
+      144  FAIL torn transactions=#
+  [nsem 8 files cwal crash] 1/300 (0s)
+  [nsem 8 files cwal crash] 293/300 (5s)
+  [nsem 8 files cwal crash] 300/300 (5s)
+8 files cwal: events=2136 runs=300 crashed=300 failures=0 recoveries={'none': 155, 'rollback': 145}
+  [recovery crash] 1/6684 (0s)
+  [recovery crash] 453/6684 (5s)
+  [recovery crash] 890/6684 (10s)
+  [recovery crash] 1342/6684 (15s)
+  [recovery crash] 1786/6684 (20s)
+  [recovery crash] 2232/6684 (25s)
+  [recovery crash] 2674/6684 (30s)
+  [recovery crash] 3123/6684 (35s)
+  [recovery crash] 3570/6684 (40s)
+  [recovery crash] 4018/6684 (45s)
+  [recovery crash] 4464/6684 (50s)
+  [recovery crash] 4902/6684 (55s)
+  [recovery crash] 5349/6684 (60s)
+  [recovery crash] 5792/6684 (65s)
+  [recovery crash] 6240/6684 (70s)
+  [recovery crash] 6678/6684 (75s)
+  [recovery crash] 6684/6684 (75s)
+8 files cwal recovery crash: torn states=8 runs=6684 failures=0
+== N files: nsem power loss at every commit-boundary event (sampled)
+  [nsem 3 files plain crash powerloss] 1/300 (0s)
+  [nsem 3 files plain crash powerloss] 300/300 (3s)
+3 files plain powerloss: events=970 runs=300 failures=99 recoveries={'none': 201, '-': 99}
+       99  FAIL torn transactions=#
+  [nsem 3 files cwal crash powerloss] 1/300 (0s)
+  [nsem 3 files cwal crash powerloss] 300/300 (4s)
+3 files cwal powerloss: events=1259 runs=300 failures=0 recoveries={'none': 200, 'rollback': 100}
+  [nsem 8 files plain crash powerloss] 1/300 (0s)
+  [nsem 8 files plain crash powerloss] 257/300 (5s)
+  [nsem 8 files plain crash powerloss] 300/300 (6s)
+8 files plain powerloss: events=1624 runs=300 failures=143 recoveries={'none': 157, '-': 143}
+      143  FAIL torn transactions=#
+  [nsem 8 files cwal crash powerloss] 1/300 (0s)
+  [nsem 8 files cwal crash powerloss] 286/300 (5s)
+  [nsem 8 files cwal crash powerloss] 300/300 (5s)
+8 files cwal powerloss: events=2136 runs=300 failures=0 recoveries={'none': 156, 'rollback': 144}
+== readers 1/4/8/16/32 (processes x threads) with a saturating writer
+3 files plain ckpt=passive readers=1: reads=37 min_per_thread=37 mixed=10 snapshot_reads=0 seq_retries=0 violations=0 commits_per_s=10710 longest_stall_ms=2 wal_peak_kb=114619 check=ok
+3 files plain ckpt=passive readers=4: reads=119 min_per_thread=27 mixed=58 snapshot_reads=0 seq_retries=0 violations=0 commits_per_s=8754 longest_stall_ms=2 wal_peak_kb=143841 check=ok
+3 files plain ckpt=passive readers=8: reads=216 min_per_thread=26 mixed=110 snapshot_reads=0 seq_retries=0 violations=0 commits_per_s=6737 longest_stall_ms=6 wal_peak_kb=112358 check=ok
+3 files plain ckpt=passive readers=16: reads=283 min_per_thread=14 mixed=102 snapshot_reads=0 seq_retries=0 violations=0 commits_per_s=4343 longest_stall_ms=12 wal_peak_kb=72707 check=ok
+3 files plain ckpt=passive readers=32: reads=432 min_per_thread=12 mixed=78 snapshot_reads=0 seq_retries=0 violations=0 commits_per_s=2089 longest_stall_ms=21 wal_peak_kb=32493 check=ok
+3 files cwal ckpt=passive readers=1: reads=47 min_per_thread=47 mixed=0 snapshot_reads=17 seq_retries=50 violations=0 commits_per_s=7812 longest_stall_ms=2 wal_peak_kb=204696 check=ok
+3 files cwal ckpt=passive readers=4: reads=156 min_per_thread=32 mixed=0 snapshot_reads=57 seq_retries=185 violations=0 commits_per_s=6846 longest_stall_ms=2 wal_peak_kb=187866 check=ok
+3 files cwal ckpt=passive readers=8: reads=264 min_per_thread=31 mixed=0 snapshot_reads=85 seq_retries=297 violations=0 commits_per_s=5062 longest_stall_ms=6 wal_peak_kb=138181 check=ok
+3 files cwal ckpt=passive readers=16: reads=357 min_per_thread=20 mixed=0 snapshot_reads=54 seq_retries=289 violations=0 commits_per_s=2858 longest_stall_ms=9 wal_peak_kb=74200 check=ok
+3 files cwal ckpt=passive readers=32: reads=455 min_per_thread=11 mixed=0 snapshot_reads=103 seq_retries=269 violations=0 commits_per_s=2022 longest_stall_ms=36 wal_peak_kb=53990 check=ok
+3 files plain ckpt=all readers=1: reads=268 min_per_thread=268 mixed=0 snapshot_reads=0 seq_retries=0 violations=0 commits_per_s=19 longest_stall_ms=2005 wal_peak_kb=144 check=ok
+3 files plain ckpt=all readers=4: reads=833 min_per_thread=205 mixed=4 snapshot_reads=0 seq_retries=0 violations=0 commits_per_s=411 longest_stall_ms=79 wal_peak_kb=161 check=ok
+3 files plain ckpt=all readers=8: reads=1063 min_per_thread=131 mixed=3 snapshot_reads=0 seq_retries=0 violations=0 commits_per_s=370 longest_stall_ms=107 wal_peak_kb=148 check=ok
+3 files plain ckpt=all readers=16: reads=1159 min_per_thread=61 mixed=9 snapshot_reads=0 seq_retries=0 violations=0 commits_per_s=125 longest_stall_ms=189 wal_peak_kb=148 check=ok
+3 files plain ckpt=all readers=32: reads=1202 min_per_thread=32 mixed=1 snapshot_reads=0 seq_retries=0 violations=0 commits_per_s=252 longest_stall_ms=439 wal_peak_kb=144 check=ok
+3 files cwal ckpt=all readers=1: reads=364 min_per_thread=364 mixed=0 snapshot_reads=0 seq_retries=1 violations=0 commits_per_s=13 longest_stall_ms=2004 wal_peak_kb=128 check=ok
+3 files cwal ckpt=all readers=4: reads=1208 min_per_thread=299 mixed=0 snapshot_reads=4 seq_retries=7 violations=0 commits_per_s=53 longest_stall_ms=1669 wal_peak_kb=245 check=ok
+3 files cwal ckpt=all readers=8: reads=1567 min_per_thread=191 mixed=0 snapshot_reads=0 seq_retries=1 violations=0 commits_per_s=17 longest_stall_ms=2007 wal_peak_kb=148 check=ok
+3 files cwal ckpt=all readers=16: reads=1459 min_per_thread=82 mixed=0 snapshot_reads=6 seq_retries=17 violations=0 commits_per_s=106 longest_stall_ms=237 wal_peak_kb=245 check=ok
+3 files cwal ckpt=all readers=32: reads=1535 min_per_thread=40 mixed=0 snapshot_reads=1 seq_retries=8 violations=0 commits_per_s=54 longest_stall_ms=349 wal_peak_kb=245 check=ok
+8 files plain ckpt=passive readers=1: reads=36 min_per_thread=36 mixed=15 snapshot_reads=0 seq_retries=0 violations=0 commits_per_s=6539 longest_stall_ms=3 wal_peak_kb=122731 check=ok
+8 files plain ckpt=passive readers=4: reads=144 min_per_thread=30 mixed=63 snapshot_reads=0 seq_retries=0 violations=0 commits_per_s=5091 longest_stall_ms=4 wal_peak_kb=149623 check=ok
+8 files plain ckpt=passive readers=8: reads=207 min_per_thread=25 mixed=109 snapshot_reads=0 seq_retries=0 violations=0 commits_per_s=4061 longest_stall_ms=4 wal_peak_kb=116120 check=ok
+8 files plain ckpt=passive readers=16: reads=287 min_per_thread=14 mixed=106 snapshot_reads=0 seq_retries=0 violations=0 commits_per_s=2693 longest_stall_ms=9 wal_peak_kb=76743 check=ok
+8 files plain ckpt=passive readers=32: reads=437 min_per_thread=12 mixed=141 snapshot_reads=0 seq_retries=0 violations=0 commits_per_s=1640 longest_stall_ms=20 wal_peak_kb=45336 check=ok
+8 files cwal ckpt=passive readers=1: reads=47 min_per_thread=47 mixed=0 snapshot_reads=16 seq_retries=47 violations=0 commits_per_s=4664 longest_stall_ms=2 wal_peak_kb=133996 check=ok
+8 files cwal ckpt=passive readers=4: reads=158 min_per_thread=33 mixed=0 snapshot_reads=72 seq_retries=195 violations=0 commits_per_s=4056 longest_stall_ms=3 wal_peak_kb=202841 check=ok
+8 files cwal ckpt=passive readers=8: reads=260 min_per_thread=28 mixed=0 snapshot_reads=117 seq_retries=282 violations=0 commits_per_s=2831 longest_stall_ms=5 wal_peak_kb=139871 check=ok
+8 files cwal ckpt=passive readers=16: reads=354 min_per_thread=16 mixed=0 snapshot_reads=91 seq_retries=328 violations=0 commits_per_s=1864 longest_stall_ms=11 wal_peak_kb=89570 check=ok
+8 files cwal ckpt=passive readers=32: reads=429 min_per_thread=9 mixed=0 snapshot_reads=94 seq_retries=310 violations=0 commits_per_s=1417 longest_stall_ms=16 wal_peak_kb=68201 check=ok
+8 files plain ckpt=all readers=1: reads=277 min_per_thread=277 mixed=0 snapshot_reads=0 seq_retries=0 violations=0 commits_per_s=12 longest_stall_ms=2004 wal_peak_kb=201 check=ok
+8 files plain ckpt=all readers=4: reads=914 min_per_thread=226 mixed=4 snapshot_reads=0 seq_retries=0 violations=0 commits_per_s=209 longest_stall_ms=230 wal_peak_kb=306 check=ok
+8 files plain ckpt=all readers=8: reads=1154 min_per_thread=142 mixed=0 snapshot_reads=0 seq_retries=0 violations=0 commits_per_s=55 longest_stall_ms=335 wal_peak_kb=306 check=ok
+8 files plain ckpt=all readers=16: reads=1245 min_per_thread=71 mixed=1 snapshot_reads=0 seq_retries=0 violations=0 commits_per_s=70 longest_stall_ms=444 wal_peak_kb=314 check=ok
+8 files plain ckpt=all readers=32: reads=1244 min_per_thread=36 mixed=1 snapshot_reads=0 seq_retries=0 violations=0 commits_per_s=37 longest_stall_ms=745 wal_peak_kb=237 check=ok
+8 files cwal ckpt=all readers=1: reads=325 min_per_thread=325 mixed=0 snapshot_reads=2 seq_retries=3 violations=0 commits_per_s=40 longest_stall_ms=619 wal_peak_kb=446 check=ok
+8 files cwal ckpt=all readers=4: reads=1244 min_per_thread=307 mixed=0 snapshot_reads=3 seq_retries=14 violations=0 commits_per_s=37 longest_stall_ms=1002 wal_peak_kb=446 check=ok
+8 files cwal ckpt=all readers=8: reads=1428 min_per_thread=173 mixed=0 snapshot_reads=8 seq_retries=13 violations=0 commits_per_s=52 longest_stall_ms=335 wal_peak_kb=511 check=ok
+8 files cwal ckpt=all readers=16: reads=1552 min_per_thread=91 mixed=0 snapshot_reads=4 seq_retries=7 violations=0 commits_per_s=65 longest_stall_ms=540 wal_peak_kb=446 check=ok
+8 files cwal ckpt=all readers=32: reads=1598 min_per_thread=43 mixed=0 snapshot_reads=6 seq_retries=12 violations=0 commits_per_s=27 longest_stall_ms=841 wal_peak_kb=446 check=ok
+== competing writers: processes x threads contend for the writer lock, readers running
+2 files 1x8 seed=1 kill=0: writer_opens=596 busy=20967 broken=0 acked=3701 reads=890 min_per_thread=219 mixed=0 violations=0 reader_broken=0 check=ok
+2 files 1x8 seed=2 kill=1: writer_opens=122 busy=5816 broken=0 acked=3470 reads=895 min_per_thread=214 mixed=0 violations=0 reader_broken=0 check=ok
+2 files 1x8 seed=3 kill=1: writer_opens=163 busy=5641 broken=0 acked=2255 reads=1152 min_per_thread=285 mixed=0 violations=0 reader_broken=0 check=ok
+2 files 4x1 seed=1 kill=0: writer_opens=628 busy=9524 broken=0 acked=3825 reads=977 min_per_thread=224 mixed=0 violations=0 reader_broken=0 check=ok
+2 files 4x1 seed=2 kill=1: writer_opens=513 busy=7955 broken=0 acked=4040 reads=903 min_per_thread=214 mixed=0 violations=0 reader_broken=0 check=ok
+2 files 4x1 seed=3 kill=1: writer_opens=581 busy=7491 broken=0 acked=4027 reads=892 min_per_thread=201 mixed=0 violations=0 reader_broken=0 check=ok
+2 files 4x4 seed=1 kill=0: writer_opens=531 busy=31149 broken=0 acked=3282 reads=940 min_per_thread=231 mixed=0 violations=0 reader_broken=0 check=ok
+2 files 4x4 seed=2 kill=1: writer_opens=440 busy=26049 broken=0 acked=3332 reads=935 min_per_thread=223 mixed=0 violations=0 reader_broken=0 check=ok
+2 files 4x4 seed=3 kill=1: writer_opens=490 busy=27423 broken=0 acked=3366 reads=993 min_per_thread=243 mixed=0 violations=0 reader_broken=0 check=ok
+3 files 1x8 seed=1 kill=0: writer_opens=509 busy=18877 broken=0 acked=3214 reads=897 min_per_thread=222 mixed=0 violations=0 reader_broken=0 check=ok
+3 files 1x8 seed=2 kill=1: writer_opens=99 busy=5519 broken=0 acked=3045 reads=899 min_per_thread=215 mixed=0 violations=0 reader_broken=0 check=ok
+3 files 1x8 seed=3 kill=1: writer_opens=139 busy=4937 broken=0 acked=2011 reads=1052 min_per_thread=260 mixed=0 violations=0 reader_broken=0 check=ok
+3 files 4x1 seed=1 kill=0: writer_opens=560 busy=8704 broken=0 acked=3434 reads=921 min_per_thread=199 mixed=0 violations=0 reader_broken=0 check=ok
+3 files 4x1 seed=2 kill=1: writer_opens=430 busy=7160 broken=0 acked=3367 reads=848 min_per_thread=207 mixed=0 violations=0 reader_broken=0 check=ok
+3 files 4x1 seed=3 kill=1: writer_opens=511 busy=6719 broken=0 acked=3336 reads=997 min_per_thread=233 mixed=0 violations=0 reader_broken=0 check=ok
+3 files 4x4 seed=1 kill=0: writer_opens=453 busy=27515 broken=0 acked=2894 reads=975 min_per_thread=240 mixed=0 violations=0 reader_broken=0 check=ok
+3 files 4x4 seed=2 kill=1: writer_opens=377 busy=23288 broken=0 acked=2859 reads=967 min_per_thread=237 mixed=0 violations=0 reader_broken=0 check=ok
+3 files 4x4 seed=3 kill=1: writer_opens=441 busy=24505 broken=0 acked=2872 reads=1002 min_per_thread=246 mixed=0 violations=0 reader_broken=0 check=ok
+8 files 1x8 seed=1 kill=0: writer_opens=317 busy=12565 broken=0 acked=2036 reads=802 min_per_thread=181 mixed=0 violations=0 reader_broken=0 check=ok
+8 files 1x8 seed=2 kill=1: writer_opens=70 busy=3656 broken=0 acked=1892 reads=910 min_per_thread=218 mixed=0 violations=0 reader_broken=0 check=ok
+8 files 1x8 seed=3 kill=1: writer_opens=94 busy=3223 broken=0 acked=1176 reads=1097 min_per_thread=250 mixed=0 violations=0 reader_broken=0 check=ok
+8 files 4x1 seed=1 kill=0: writer_opens=350 busy=6267 broken=0 acked=2223 reads=725 min_per_thread=159 mixed=0 violations=0 reader_broken=0 check=ok
+8 files 4x1 seed=2 kill=1: writer_opens=294 busy=4979 broken=0 acked=2176 reads=816 min_per_thread=159 mixed=0 violations=0 reader_broken=0 check=ok
+8 files 4x1 seed=3 kill=1: writer_opens=323 busy=4795 broken=0 acked=2309 reads=800 min_per_thread=157 mixed=0 violations=0 reader_broken=0 check=ok
+8 files 4x4 seed=1 kill=0: writer_opens=286 busy=17568 broken=0 acked=1729 reads=971 min_per_thread=238 mixed=0 violations=0 reader_broken=0 check=ok
+8 files 4x4 seed=2 kill=1: writer_opens=239 busy=14847 broken=0 acked=1740 reads=942 min_per_thread=219 mixed=0 violations=0 reader_broken=0 check=ok
+8 files 4x4 seed=3 kill=1: writer_opens=268 busy=15855 broken=0 acked=1846 reads=872 min_per_thread=214 mixed=0 violations=0 reader_broken=0 check=ok
+== long-lived snapshot (1.5 s) under a saturating writer
+3 files plain ckpt=passive: held_reads=2 held_mixed=1 other_reads=81 other_mixed=51 violations=0 commits_per_s=9636 longest_stall_ms=11 wal_peak_kb=252321 wal_final_kb=255351 check=ok
+3 files cwal ckpt=passive: held_reads=2 held_mixed=0 other_reads=102 other_mixed=0 violations=0 commits_per_s=7328 longest_stall_ms=11 wal_peak_kb=307744 wal_final_kb=310617 check=ok
+3 files plain ckpt=all: held_reads=2 held_mixed=0 other_reads=809 other_mixed=0 violations=0 commits_per_s=15 longest_stall_ms=1531 wal_peak_kb=144 wal_final_kb=52 check=ok
+3 files cwal ckpt=all: held_reads=2 held_mixed=0 other_reads=1024 other_mixed=0 violations=0 commits_per_s=68 longest_stall_ms=3033 wal_peak_kb=128 wal_final_kb=128 check=ok
+== checkpoint race with a pause at each checkpoint-counter point
+2 files ckpt-pre-inc: writers=1 reads=1743 ckpt_races=0 fallbacks=0 reader_ckpt_locks=2 violations=0 mixed=0 active_after=0 check=ok
+2 files ckpt-locked: writers=1 reads=1768 ckpt_races=89 fallbacks=44 reader_ckpt_locks=2 violations=0 mixed=0 active_after=0 check=ok
+2 files ckpt-pre-dec: writers=1 reads=1769 ckpt_races=97 fallbacks=51 reader_ckpt_locks=2 violations=0 mixed=0 active_after=0 check=ok
+2 files ckpt-post-dec: writers=1 reads=1792 ckpt_races=94 fallbacks=55 reader_ckpt_locks=2 violations=0 mixed=0 active_after=0 check=ok
+2 files open-take: writers=1 reads=957 ckpt_races=103 fallbacks=221 reader_ckpt_locks=2 violations=0 mixed=0 active_after=0 check=ok
+2 files open-release: writers=1 reads=1084 ckpt_races=205 fallbacks=95 reader_ckpt_locks=2 violations=0 mixed=0 active_after=0 check=ok
+2 files reset-held: writers=59 reads=1431 ckpt_races=98 fallbacks=55 reader_ckpt_locks=2 violations=0 mixed=0 active_after=0 check=ok
+8 files ckpt-pre-inc: writers=1 reads=1729 ckpt_races=78 fallbacks=159 reader_ckpt_locks=8 violations=0 mixed=0 active_after=0 check=ok
+8 files ckpt-locked: writers=1 reads=1842 ckpt_races=95 fallbacks=406 reader_ckpt_locks=8 violations=0 mixed=0 active_after=0 check=ok
+8 files ckpt-pre-dec: writers=1 reads=1878 ckpt_races=92 fallbacks=381 reader_ckpt_locks=8 violations=0 mixed=0 active_after=0 check=ok
+8 files ckpt-post-dec: writers=1 reads=1810 ckpt_races=97 fallbacks=404 reader_ckpt_locks=8 violations=0 mixed=0 active_after=0 check=ok
+8 files open-take: writers=1 reads=1017 ckpt_races=76 fallbacks=818 reader_ckpt_locks=8 violations=0 mixed=0 active_after=0 check=ok
+8 files open-release: writers=1 reads=1281 ckpt_races=148 fallbacks=705 reader_ckpt_locks=8 violations=0 mixed=0 active_after=0 check=ok
+8 files reset-held: writers=24 reads=1408 ckpt_races=137 fallbacks=554 reader_ckpt_locks=8 violations=0 mixed=0 active_after=0 check=ok
+== writer killed at each checkpoint-counter point; next writer clears the counter while readers run
+2 files ckpt-pre-inc#1 running: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=7405 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files ckpt-pre-inc#1 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=5496 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files ckpt-pre-inc#2 running: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=7207 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files ckpt-pre-inc#2 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=5741 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files ckpt-pre-inc#5 running: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=6578 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files ckpt-pre-inc#5 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=5082 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files ckpt-locked#1 running: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=6990 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files ckpt-locked#1 fresh: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=5649 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files ckpt-locked#2 running: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=7386 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files ckpt-locked#2 fresh: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=5664 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files ckpt-locked#5 running: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=6716 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files ckpt-locked#5 fresh: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=5233 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files ckpt-pre-dec#1 running: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=7272 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files ckpt-pre-dec#1 fresh: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=5614 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files ckpt-pre-dec#2 running: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=7263 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files ckpt-pre-dec#2 fresh: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=5496 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files ckpt-pre-dec#5 running: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=6654 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files ckpt-pre-dec#5 fresh: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=5199 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files ckpt-post-dec#1 running: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=7429 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files ckpt-post-dec#1 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=5514 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files ckpt-post-dec#2 running: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=7368 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files ckpt-post-dec#2 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=5302 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files ckpt-post-dec#5 running: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=6724 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files ckpt-post-dec#5 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=5180 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files ckpt-reset#1 running: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=7425 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files ckpt-reset#1 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=5437 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files shm-barrier#2 running: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=7408 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files shm-barrier#2 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=5182 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files shm-barrier#17 running: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=7430 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files shm-barrier#17 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=5574 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files shm-barrier#19 running: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=7437 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files shm-barrier#19 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=5186 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files shm-barrier#28 running: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=7192 reader_ckpt_locks=3 fallbacks=15 reader_broken=0 violations=0 mixed=0 check=ok
+2 files shm-barrier#28 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=5359 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files shm-barrier#36 running: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=7246 reader_ckpt_locks=3 fallbacks=15 reader_broken=0 violations=0 mixed=0 check=ok
+2 files shm-barrier#36 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=5511 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files shm-barrier#37 running: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=7413 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+2 files shm-barrier#37 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=5614 reader_ckpt_locks=2 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-pre-inc#1 running: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=3281 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-pre-inc#1 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=2438 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-pre-inc#2 running: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=3280 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-pre-inc#2 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=2323 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-pre-inc#5 running: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=3292 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-pre-inc#5 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=2200 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-locked#1 running: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=3439 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-locked#1 fresh: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=2197 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-locked#2 running: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=3449 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-locked#2 fresh: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=2302 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-locked#5 running: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=3275 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-locked#5 fresh: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=2267 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-pre-dec#1 running: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=3306 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-pre-dec#1 fresh: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=2334 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-pre-dec#2 running: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=3108 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-pre-dec#2 fresh: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=2316 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-pre-dec#5 running: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=3302 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-pre-dec#5 fresh: crashed=True active_after_crash=1 after_next_writer=0 reset_waits=0 reads=2287 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-post-dec#1 running: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=3259 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-post-dec#1 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=2383 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-post-dec#2 running: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=3231 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-post-dec#2 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=2345 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-post-dec#5 running: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=3196 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-post-dec#5 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=2275 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-reset#1 running: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=3426 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files ckpt-reset#1 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=2525 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files shm-barrier#2 running: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=3414 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files shm-barrier#2 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=2269 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files shm-barrier#17 running: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=3489 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files shm-barrier#17 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=2182 reader_ckpt_locks=8 fallbacks=1 reader_broken=0 violations=0 mixed=0 check=ok
+8 files shm-barrier#19 running: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=3458 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files shm-barrier#19 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=2306 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files shm-barrier#28 running: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=3623 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files shm-barrier#28 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=2244 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files shm-barrier#36 running: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=3293 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files shm-barrier#36 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=2157 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files shm-barrier#37 running: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=3426 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+8 files shm-barrier#37 fresh: crashed=True active_after_crash=0 after_next_writer=0 reset_waits=0 reads=2400 reader_ckpt_locks=8 fallbacks=0 reader_broken=0 violations=0 mixed=0 check=ok
+== injected I/O errors (ENOSPC, EIO, failed fsync; one-shot and sticky) under power loss, clean exit or crash
+  [2 files cwal io errors] 1/104 (0s)
+  [2 files cwal io errors] 104/104 (1s)
+2 files cwal power-loss model: {'crashes': 36, 'unsynced_writes': 47, 'lost_entries': 1, 'revived': 0, 'undone_truncates': 1, 'scattered': 8, 'ghosts': 0, 'failures': 18}
+2 files cwal write-wal eio: runs=8 failed_ops=3 broken=1 writer_exits={2: 2, 4: 1, -9: 3, 0: 2} recoveries={'none': 8} failures=0
+2 files cwal write-wal eio sticky: runs=8 failed_ops=21 broken=2 writer_exits={2: 2, 4: 5, -9: 1} recoveries={'none': 8} failures=0
+2 files cwal write-wal full: runs=8 failed_ops=4 broken=2 writer_exits={2: 2, 4: 2, 0: 2, -9: 2} recoveries={'none': 7, 'rollback': 1} failures=0
+2 files cwal write-wal full sticky: runs=8 failed_ops=11 broken=1 writer_exits={2: 2, 4: 3, -9: 3} recoveries={'none': 8} failures=0
+2 files cwal sync-wal eio: runs=8 failed_ops=3 broken=0 writer_exits={2: 2, 0: 3, -9: 3} recoveries={'none': 7, 'rollback': 1} failures=0
+2 files cwal sync-wal eio sticky: runs=8 failed_ops=26 broken=0 writer_exits={2: 2, 4: 4, -9: 2} recoveries={'none': 6, 'rollback': 2} failures=0
+2 files cwal write-db full: runs=8 failed_ops=4 broken=0 writer_exits={0: 4, -9: 4} recoveries={'none': 6, 'rollback': 2} failures=0
+2 files cwal sync-db eio: runs=8 failed_ops=4 broken=0 writer_exits={0: 4, -9: 4} recoveries={'none': 8} failures=0
+2 files cwal sync-db eio sticky: runs=8 failed_ops=18 broken=0 writer_exits={0: 4, -9: 4} recoveries={'none': 7, 'rollback': 1} failures=0
+2 files cwal truncate eio: runs=8 failed_ops=4 broken=0 writer_exits={0: 4, -9: 4} recoveries={'none': 6, 'rollback': 2} failures=0
+2 files cwal read-wal eio: runs=8 failed_ops=4 broken=0 writer_exits={0: 4, -9: 4} recoveries={'none': 8} failures=0
+2 files cwal read-db eio: runs=8 failed_ops=0 broken=0 writer_exits={2: 8} recoveries={'none': 8} failures=0
+2 files cwal open-wal eio: runs=8 failed_ops=2 broken=0 writer_exits={0: 2, -9: 2, 2: 4} recoveries={'none': 7, 'rollback': 1} failures=0
+  [3 files cwal io errors] 1/104 (0s)
+  [3 files cwal io errors] 104/104 (1s)
+3 files cwal power-loss model: {'crashes': 36, 'unsynced_writes': 41, 'lost_entries': 2, 'revived': 0, 'undone_truncates': 0, 'scattered': 13, 'ghosts': 0, 'failures': 16}
+3 files cwal write-wal eio: runs=8 failed_ops=3 broken=2 writer_exits={2: 2, 4: 2, -9: 3, 0: 1} recoveries={'none': 6, 'rollback': 2} failures=0
+3 files cwal write-wal eio sticky: runs=8 failed_ops=8 broken=3 writer_exits={2: 2, 4: 4, -9: 2} recoveries={'none': 4, 'rollback': 4} failures=0
+3 files cwal write-wal full: runs=8 failed_ops=5 broken=4 writer_exits={2: 1, -9: 2, 4: 4, 0: 1} recoveries={'none': 4, 'rollback': 4} failures=0
+3 files cwal write-wal full sticky: runs=8 failed_ops=8 broken=3 writer_exits={2: 2, 4: 4, -9: 2} recoveries={'none': 5, 'rollback': 3} failures=0
+3 files cwal sync-wal eio: runs=8 failed_ops=4 broken=0 writer_exits={2: 2, 0: 4, -9: 2} recoveries={'none': 6, 'rollback': 2} failures=0
+3 files cwal sync-wal eio sticky: runs=8 failed_ops=24 broken=0 writer_exits={2: 2, 4: 4, -9: 2} recoveries={'none': 7, 'rollback': 1} failures=0
+3 files cwal write-db full: runs=8 failed_ops=4 broken=0 writer_exits={0: 4, -9: 4} recoveries={'none': 7, 'rollback': 1} failures=0
+3 files cwal sync-db eio: runs=8 failed_ops=4 broken=0 writer_exits={0: 4, -9: 4} recoveries={'none': 5, 'rollback': 3} failures=0
+3 files cwal sync-db eio sticky: runs=8 failed_ops=22 broken=0 writer_exits={0: 4, -9: 4} recoveries={'none': 7, 'rollback': 1} failures=0
+3 files cwal truncate eio: runs=8 failed_ops=4 broken=0 writer_exits={0: 4, -9: 4} recoveries={'none': 7, 'rollback': 1} failures=0
+3 files cwal read-wal eio: runs=8 failed_ops=4 broken=0 writer_exits={0: 4, -9: 4} recoveries={'none': 6, 'rollback': 2} failures=0
+3 files cwal read-db eio: runs=8 failed_ops=1 broken=0 writer_exits={2: 6, 0: 1, -9: 1} recoveries={'none': 8} failures=0
+3 files cwal open-wal eio: runs=8 failed_ops=2 broken=0 writer_exits={0: 2, -9: 2, 2: 4} recoveries={'none': 7, 'rollback': 1} failures=0
+  [8 files cwal io errors] 1/104 (0s)
+  [8 files cwal io errors] 104/104 (2s)
+8 files cwal power-loss model: {'crashes': 35, 'unsynced_writes': 36, 'lost_entries': 13, 'revived': 0, 'undone_truncates': 4, 'scattered': 9, 'ghosts': 0, 'failures': 20}
+8 files cwal write-wal eio: runs=8 failed_ops=5 broken=5 writer_exits={2: 2, 4: 5, -9: 1} recoveries={'none': 2, 'rollback': 6} failures=0
+8 files cwal write-wal eio sticky: runs=8 failed_ops=4 broken=5 writer_exits={2: 2, 4: 4, -9: 2} recoveries={'none': 3, 'rollback': 5} failures=0
+8 files cwal write-wal full: runs=8 failed_ops=3 broken=3 writer_exits={2: 2, 4: 3, -9: 3} recoveries={'none': 4, 'rollback': 4} failures=0
+8 files cwal write-wal full sticky: runs=8 failed_ops=4 broken=4 writer_exits={2: 2, 4: 4, -9: 2} recoveries={'none': 3, 'rollback': 5} failures=0
+8 files cwal sync-wal eio: runs=8 failed_ops=4 broken=3 writer_exits={2: 1, -9: 3, 4: 3, 0: 1} recoveries={'none': 6, 'rollback': 2} failures=0
+8 files cwal sync-wal eio sticky: runs=8 failed_ops=19 broken=3 writer_exits={2: 2, 4: 5, -9: 1} recoveries={'none': 5, 'rollback': 3} failures=0
+8 files cwal write-db full: runs=8 failed_ops=4 broken=0 writer_exits={0: 4, -9: 4} recoveries={'none': 6, 'rollback': 2} failures=0
+8 files cwal sync-db eio: runs=8 failed_ops=4 broken=0 writer_exits={0: 4, -9: 4} recoveries={'none': 5, 'rollback': 3} failures=0
+8 files cwal sync-db eio sticky: runs=8 failed_ops=44 broken=0 writer_exits={0: 4, -9: 4} recoveries={'none': 7, 'rollback': 1} failures=0
+8 files cwal truncate eio: runs=8 failed_ops=4 broken=0 writer_exits={0: 4, -9: 4} recoveries={'none': 5, 'rollback': 3} failures=0
+8 files cwal read-wal eio: runs=8 failed_ops=4 broken=0 writer_exits={0: 4, -9: 4} recoveries={'none': 8} failures=0
+8 files cwal read-db eio: runs=8 failed_ops=1 broken=0 writer_exits={2: 6, 0: 1, -9: 1} recoveries={'none': 8} failures=0
+8 files cwal open-wal eio: runs=8 failed_ops=2 broken=0 writer_exits={0: 2, -9: 2, 2: 4} recoveries={'none': 6, 'rollback': 2} failures=0
+  [3 files plain io errors] 1/102 (0s)
+  [3 files plain io errors] 102/102 (1s)
+3 files plain power-loss model: {'crashes': 36, 'unsynced_writes': 18, 'lost_entries': 2, 'revived': 1, 'undone_truncates': 3, 'scattered': 4, 'ghosts': 1, 'failures': 17}
+3 files plain write-wal eio: runs=8 failed_ops=4 broken=0 writer_exits={0: 4, -9: 4} recoveries={'none': 4, '-': 4} failures=4
+        4  FAIL torn transactions=#
+3 files plain write-wal eio sticky: runs=8 failed_ops=35 broken=0 writer_exits={4: 7, -9: 1} recoveries={'none': 3, '-': 5} failures=5
+        5  FAIL torn transactions=#
+3 files plain write-wal full: runs=8 failed_ops=4 broken=0 writer_exits={0: 4, -9: 4} recoveries={'none': 4, '-': 4} failures=4
+        4  FAIL torn transactions=#
+3 files plain write-wal full sticky: runs=8 failed_ops=30 broken=0 writer_exits={4: 6, -9: 2} recoveries={'none': 5, '-': 3} failures=3
+        3  FAIL torn transactions=#
+3 files plain sync-wal eio: runs=8 failed_ops=4 broken=0 writer_exits={0: 4, -9: 4} recoveries={'none': 7, '-': 1} failures=1
+        1  FAIL torn transactions=#
+3 files plain sync-wal eio sticky: runs=8 failed_ops=35 broken=0 writer_exits={4: 7, -9: 1} recoveries={'none': 8} failures=0
+3 files plain write-db full: runs=8 failed_ops=4 broken=0 writer_exits={0: 4, -9: 4} recoveries={'none': 7, '-': 1} failures=1
+        1  FAIL torn transactions=#
+3 files plain sync-db eio: runs=8 failed_ops=4 broken=0 writer_exits={0: 4, -9: 4} recoveries={'none': 6, '-': 2} failures=2
+        2  FAIL torn transactions=#
+3 files plain sync-db eio sticky: runs=8 failed_ops=22 broken=0 writer_exits={0: 4, -9: 4} recoveries={'none': 8} failures=0
+3 files plain truncate eio: runs=8 failed_ops=4 broken=0 writer_exits={0: 4, -9: 4} recoveries={'none': 8} failures=0
+3 files plain read-wal eio: runs=8 failed_ops=4 broken=0 writer_exits={0: 4, -9: 4} recoveries={'none': 8} failures=0
+3 files plain read-db eio: runs=8 failed_ops=0 broken=0 writer_exits={2: 6, 1: 2} recoveries={'none': 8} failures=0
+3 files plain open-wal eio: runs=6 failed_ops=0 broken=0 writer_exits={2: 6} recoveries={'none': 6} failures=0
+== injected I/O errors with 2 reader processes x 2 threads
+3 files sync-wal eio at=5: writer_exit=4 failed_commits=5 broken=0 reads=8411 reader_broken=9 mixed=0 violations=0 recovery=none check=ok
+3 files sync-wal eio at=20: writer_exit=0 failed_commits=0 broken=0 reads=3373 reader_broken=0 mixed=0 violations=0 recovery=none check=ok
+3 files sync-wal eio at=60: writer_exit=0 failed_commits=1 broken=0 reads=3474 reader_broken=0 mixed=0 violations=0 recovery=none check=ok
+3 files write-wal eio at=5: writer_exit=0 failed_commits=1 broken=0 reads=3274 reader_broken=0 mixed=0 violations=0 recovery=none check=ok
+3 files write-wal eio at=20: writer_exit=4 failed_commits=5 broken=0 reads=8673 reader_broken=9 mixed=0 violations=0 recovery=none check=ok
+3 files write-wal eio at=60: writer_exit=4 failed_commits=5 broken=0 reads=8309 reader_broken=10 mixed=0 violations=0 recovery=none check=ok
+3 files write-wal full sticky at=5: writer_exit=4 failed_commits=5 broken=0 reads=8821 reader_broken=0 mixed=0 violations=0 recovery=none check=ok
+3 files write-wal full sticky at=20: writer_exit=4 failed_commits=5 broken=0 reads=8078 reader_broken=9 mixed=0 violations=0 recovery=none check=ok
+3 files write-wal full sticky at=60: writer_exit=4 failed_commits=5 broken=0 reads=8294 reader_broken=9 mixed=0 violations=0 recovery=none check=ok
+3 files sync-db eio at=5: writer_exit=0 failed_commits=0 broken=0 reads=3596 reader_broken=0 mixed=0 violations=0 recovery=none check=ok
+3 files sync-db eio at=20: writer_exit=0 failed_commits=0 broken=0 reads=3345 reader_broken=0 mixed=0 violations=0 recovery=none check=ok
+3 files sync-db eio at=60: writer_exit=0 failed_commits=0 broken=0 reads=3198 reader_broken=0 mixed=0 violations=0 recovery=none check=ok
+8 files sync-wal eio at=5: writer_exit=0 failed_commits=1 broken=0 reads=3286 reader_broken=0 mixed=0 violations=0 recovery=none check=ok
+8 files sync-wal eio at=20: writer_exit=4 failed_commits=5 broken=1 reads=5002 reader_broken=8 mixed=0 violations=0 recovery=none check=ok
+8 files sync-wal eio at=60: writer_exit=4 failed_commits=5 broken=1 reads=4495 reader_broken=8 mixed=0 violations=0 recovery=none check=ok
+8 files write-wal eio at=5: writer_exit=0 failed_commits=1 broken=0 reads=3434 reader_broken=0 mixed=0 violations=0 recovery=none check=ok
+8 files write-wal eio at=20: writer_exit=4 failed_commits=5 broken=1 reads=5019 reader_broken=8 mixed=0 violations=0 recovery=none check=ok
+8 files write-wal eio at=60: writer_exit=4 failed_commits=5 broken=1 reads=5207 reader_broken=8 mixed=0 violations=0 recovery=none check=ok
+8 files write-wal full sticky at=5: writer_exit=4 failed_commits=5 broken=0 reads=5233 reader_broken=0 mixed=0 violations=0 recovery=none check=ok
+8 files write-wal full sticky at=20: writer_exit=4 failed_commits=5 broken=1 reads=5056 reader_broken=8 mixed=0 violations=0 recovery=none check=ok
+8 files write-wal full sticky at=60: writer_exit=4 failed_commits=5 broken=1 reads=5277 reader_broken=8 mixed=0 violations=0 recovery=none check=ok
+8 files sync-db eio at=5: writer_exit=0 failed_commits=0 broken=0 reads=3361 reader_broken=0 mixed=0 violations=0 recovery=none check=ok
+8 files sync-db eio at=20: writer_exit=0 failed_commits=0 broken=0 reads=3329 reader_broken=0 mixed=0 violations=0 recovery=none check=ok
+8 files sync-db eio at=60: writer_exit=0 failed_commits=0 broken=0 reads=3212 reader_broken=0 mixed=0 violations=0 recovery=none check=ok
+== permission errors: one file read-only (directory 0555) on a clean and a torn set
+3 files clean db (s1.db) read-only: writer_exit=2 acked=0 failed_commits=0 reader_exit=0 reads=795 mixed=0 recovery=none check=ok ['sqlite: insert or ignore into m1.cwal_marker values (0, 0, 0): attempt to write a readonly database']
+3 files clean cwal-gate (main.db-cwal-gate) read-only: writer_exit=2 acked=0 failed_commits=0 reader_exit=1 reads=0 mixed=0 recovery=none check=ok ['writer-open-error Io']
+3 files clean cwal-alive (main.db-cwal-alive) read-only: writer_exit=2 acked=0 failed_commits=0 reader_exit=1 reads=0 mixed=0 recovery=none check=ok ['writer-open-error Io']
+3 files clean cwal-writer (main.db-cwal-writer) read-only: writer_exit=2 acked=0 failed_commits=0 reader_exit=1 reads=0 mixed=0 recovery=none check=ok ['writer-open-error Io']
+3 files clean cwal-live (main.db-cwal-live) read-only: writer_exit=2 acked=0 failed_commits=0 reader_exit=1 reads=0 mixed=0 recovery=none check=ok ['writer-open-error Io']
+3 files clean cwal-snap (main.db-cwal-snap) read-only: writer_exit=2 acked=0 failed_commits=0 reader_exit=1 reads=0 mixed=0 recovery=none check=ok ['writer-open-error Io']
+3 files clean dir (.) read-only: writer_exit=2 acked=0 failed_commits=0 reader_exit=0 reads=0 mixed=0 recovery=none check=ok ["sqlite: attach 'file:/tmp/claude-1000/-home-atawirtz-workspace-zova/daa0c463-140c-4b37-9672-84b77de94139/scratchpad/reg-w/perm-3-False-dir/s1.db?cwal=1&cwm=1' as m1: attempt to write a readonly database"]
+3 files torn db (s1.db) read-only: writer_exit=2 acked=0 failed_commits=0 reader_exit=0 reads=893 mixed=0 recovery=none check=ok ['sqlite: insert or ignore into m1.cwal_marker values (0, 0, 0): attempt to write a readonly database']
+3 files torn wal (main.db-wal) read-only: writer_exit=2 acked=0 failed_commits=0 reader_exit=0 reads=878 mixed=0 recovery=none check=ok ['sqlite: insert or ignore into main.cwal_marker values (0, 0, 0): attempt to write a readonly database']
+3 files torn shm (main.db-shm) read-only: writer_exit=0 acked=9 failed_commits=0 reader_exit=0 reads=850 mixed=0 recovery=none check=ok []
+3 files torn cwal-gate (main.db-cwal-gate) read-only: writer_exit=2 acked=0 failed_commits=0 reader_exit=1 reads=0 mixed=0 recovery=none check=ok ['writer-open-error Io']
+3 files torn cwal-alive (main.db-cwal-alive) read-only: writer_exit=2 acked=0 failed_commits=0 reader_exit=1 reads=0 mixed=0 recovery=none check=ok ['writer-open-error Io']
+3 files torn cwal-writer (main.db-cwal-writer) read-only: writer_exit=2 acked=0 failed_commits=0 reader_exit=1 reads=0 mixed=0 recovery=none check=ok ['writer-open-error Io']
+3 files torn cwal-live (main.db-cwal-live) read-only: writer_exit=2 acked=0 failed_commits=0 reader_exit=1 reads=0 mixed=0 recovery=none check=ok ['writer-open-error Io']
+3 files torn cwal-snap (main.db-cwal-snap) read-only: writer_exit=2 acked=0 failed_commits=0 reader_exit=1 reads=0 mixed=0 recovery=none check=ok ['writer-open-error Io']
+3 files torn dir (.) read-only: writer_exit=0 acked=9 failed_commits=0 reader_exit=0 reads=868 mixed=0 recovery=none check=ok []
+== N files: crash at every event of any kind (open, checkpoint, WAL create/delete, close), sampled
+  [nwriter 3 files cwal all-event crash] 1/400 (0s)
+  [nwriter 3 files cwal all-event crash] 400/400 (4s)
+3 files cwal crash: events=954 runs=400 crashed=400 failures=0 recoveries={'none': 345, 'rollback': 55}
+  [3 files recovery chains] 1/30 (0s)
+  [3 files recovery chains] 30/30 (0s)
+3 files crash recovery chains (5 crashes each): runs=30 failures=0
+  [nwriter 3 files cwal all-event crash powerloss] 1/400 (0s)
+  [nwriter 3 files cwal all-event crash powerloss] 400/400 (4s)
+3 files cwal powerloss: events=954 runs=400 crashed=400 failures=0 recoveries={'none': 341, 'rollback': 59} model={'crashes': 400, 'unsynced_writes': 129, 'lost_entries': 0, 'revived': 5, 'undone_truncates': 0, 'scattered': 0, 'ghosts': 0, 'failures': 0}
+  [3 files recovery chains] 1/30 (0s)
+  [3 files recovery chains] 30/30 (0s)
+3 files powerloss recovery chains (5 crashes each): runs=30 failures=0
+  [nwriter 8 files cwal all-event crash] 1/400 (0s)
+  [nwriter 8 files cwal all-event crash] 334/400 (5s)
+  [nwriter 8 files cwal all-event crash] 400/400 (6s)
+8 files cwal crash: events=1884 runs=400 crashed=400 failures=0 recoveries={'none': 338, 'rollback': 62}
+  [8 files recovery chains] 1/30 (0s)
+  [8 files recovery chains] 30/30 (0s)
+8 files crash recovery chains (5 crashes each): runs=30 failures=0
+  [nwriter 8 files cwal all-event crash powerloss] 1/400 (0s)
+  [nwriter 8 files cwal all-event crash powerloss] 333/400 (5s)
+  [nwriter 8 files cwal all-event crash powerloss] 400/400 (6s)
+8 files cwal powerloss: events=1884 runs=400 crashed=400 failures=0 recoveries={'none': 336, 'rollback': 64} model={'crashes': 400, 'unsynced_writes': 78, 'lost_entries': 176, 'revived': 21, 'undone_truncates': 0, 'scattered': 0, 'ghosts': 0, 'failures': 0}
+  [8 files recovery chains] 1/30 (0s)
+  [8 files recovery chains] 30/30 (0s)
+8 files powerloss recovery chains (5 crashes each): runs=30 failures=0
+== N files: power loss at every metadata event (open-create,delete,truncate,recover-unlink-shm,sync)
+  [nwriter 3 files cwal crash powerloss] 1/97 (0s)
+  [nwriter 3 files cwal crash powerloss] 97/97 (1s)
+3 files cwal metadata powerloss: events=97 runs=97 crashed=97 failures=0 recoveries={'none': 72, 'rollback': 25} model={'crashes': 97, 'unsynced_writes': 211, 'lost_entries': 0, 'revived': 3, 'undone_truncates': 15, 'scattered': 7, 'ghosts': 0, 'failures': 0}
+  [nwriter 8 files cwal crash powerloss] 1/197 (0s)
+  [nwriter 8 files cwal crash powerloss] 197/197 (3s)
+8 files cwal metadata powerloss: events=197 runs=197 crashed=197 failures=0 recoveries={'none': 136, 'rollback': 61} model={'crashes': 197, 'unsynced_writes': 331, 'lost_entries': 22, 'revived': 22, 'undone_truncates': 91, 'scattered': 3, 'ghosts': 0, 'failures': 0}
+== reader processes killed (at random events and by SIGKILL) while a writer and other readers run
+2 files seed=1: victims=6 killed=6 survivor_reads=756 min_per_thread=184 mixed=0 violations=0 commits_during=4191 longest_stall_ms=7 ckpt_active_left=0 after_next_writer=0 check=ok
+2 files seed=2: victims=6 killed=6 survivor_reads=831 min_per_thread=192 mixed=0 violations=0 commits_during=4273 longest_stall_ms=5 ckpt_active_left=0 after_next_writer=0 check=ok
+2 files seed=3: victims=6 killed=6 survivor_reads=876 min_per_thread=211 mixed=0 violations=0 commits_during=3980 longest_stall_ms=7 ckpt_active_left=0 after_next_writer=0 check=ok
+3 files seed=1: victims=6 killed=6 survivor_reads=754 min_per_thread=184 mixed=0 violations=0 commits_during=3976 longest_stall_ms=6 ckpt_active_left=0 after_next_writer=0 check=ok
+3 files seed=2: victims=6 killed=6 survivor_reads=728 min_per_thread=177 mixed=0 violations=0 commits_during=4023 longest_stall_ms=4 ckpt_active_left=0 after_next_writer=0 check=ok
+3 files seed=3: victims=6 killed=6 survivor_reads=769 min_per_thread=186 mixed=0 violations=0 commits_during=3829 longest_stall_ms=6 ckpt_active_left=0 after_next_writer=0 check=ok
+8 files seed=1: victims=6 killed=6 survivor_reads=551 min_per_thread=134 mixed=0 violations=0 commits_during=3349 longest_stall_ms=3 ckpt_active_left=0 after_next_writer=0 check=ok
+8 files seed=2: victims=6 killed=6 survivor_reads=516 min_per_thread=124 mixed=0 violations=0 commits_during=3379 longest_stall_ms=3 ckpt_active_left=0 after_next_writer=0 check=ok
+8 files seed=3: victims=6 killed=6 survivor_reads=573 min_per_thread=139 mixed=0 violations=0 commits_during=3297 longest_stall_ms=7 ckpt_active_left=0 after_next_writer=0 check=ok
+== protocol enforcement: bypass statements, ordinary SQLite connections, journal modes, lost metadata (3 files)
+pass writer marker update                           | err Sqlite                               | ok      | recovery=none
+pass writer marker delete                           | err Sqlite                               | ok      | recovery=none
+pass writer marker insert                           | err Sqlite                               | ok      | recovery=none
+pass writer marker drop                             | err Sqlite                               | ok      | recovery=none
+pass writer marker alter                            | err Sqlite                               | ok      | recovery=none
+pass writer trigger on marker                       | err Sqlite                               | ok      | recovery=none
+pass writer trigger writes marker                   | ok err Sqlite                            | ok      | recovery=none
+pass writer cross via COMMIT                        | ok ok ok err Sqlite                      | ok      | recovery=none
+pass writer cross via END                           | ok ok ok err Sqlite                      | ok      | recovery=none
+pass writer cross via RELEASE                       | ok ok ok err Sqlite                      | ok      | recovery=none
+pass writer cross via temp trigger                  | ok err Sqlite                            | ok      | recovery=none
+pass writer journal_mode=delete                     | err Sqlite                               | ok      | recovery=none
+pass writer journal_mode=memory                     | err Sqlite                               | ok      | recovery=none
+pass writer journal_mode=off                        | err Sqlite                               | ok      | recovery=none
+pass writer locking_mode=exclusive                  | err Sqlite                               | ok      | recovery=none
+pass writer synchronous=off                         | err Sqlite                               | ok      | recovery=none
+pass writer synchronous=normal                      | err Sqlite                               | ok      | recovery=none
+pass writer writable_schema                         | err Sqlite                               | ok      | recovery=none
+pass writer attach                                  | err Sqlite                               | ok      | recovery=none
+pass writer detach                                  | err Sqlite                               | ok      | recovery=none
+pass writer vacuum                                  | err Sqlite                               | ok      | recovery=none
+pass writer vacuum, authorizer removed              | ok err Sqlite                            | ok      | recovery=none
+pass writer cross via !commit (allowed)             | ok ok ok ok                              | ok      | recovery=none
+pass writer checkpoint truncate (allowed)           | ok                                       | ok      | recovery=none
+pass writer read pragmas (allowed)                  | ok ok ok                                 | ok      | recovery=none
+pass reader marker update                           | err Sqlite                               | ok      | recovery=none
+pass reader marker delete                           | err Sqlite                               | ok      | recovery=none
+pass reader marker insert                           | err Sqlite                               | ok      | recovery=none
+pass reader marker drop                             | err Sqlite                               | ok      | recovery=none
+pass reader marker alter                            | err Sqlite                               | ok      | recovery=none
+pass reader trigger on marker                       | err Sqlite                               | ok      | recovery=none
+pass reader trigger writes marker                   | err Sqlite err Sqlite                    | ok      | recovery=none
+pass reader cross via COMMIT                        | ok ok ok err Sqlite                      | ok      | recovery=none
+pass reader cross via END                           | ok ok ok err Sqlite                      | ok      | recovery=none
+pass reader cross via RELEASE                       | ok ok ok err Sqlite                      | ok      | recovery=none
+pass reader cross via temp trigger                  | err Sqlite err Sqlite                    | ok      | recovery=none
+pass reader journal_mode=delete                     | err Sqlite                               | ok      | recovery=none
+pass reader journal_mode=memory                     | err Sqlite                               | ok      | recovery=none
+pass reader journal_mode=off                        | err Sqlite                               | ok      | recovery=none
+pass reader locking_mode=exclusive                  | err Sqlite                               | ok      | recovery=none
+pass reader synchronous=off                         | err Sqlite                               | ok      | recovery=none
+pass reader synchronous=normal                      | err Sqlite                               | ok      | recovery=none
+pass reader writable_schema                         | err Sqlite                               | ok      | recovery=none
+pass reader attach                                  | err Sqlite                               | ok      | recovery=none
+pass reader detach                                  | err Sqlite                               | ok      | recovery=none
+pass reader vacuum                                  | err Sqlite                               | ok      | recovery=none
+pass reader vacuum, authorizer removed              | ok err Sqlite                            | ok      | recovery=none
+pass reader cross via !commit (allowed)             | ok ok ok err Sqlite                      | ok      | recovery=none
+pass reader checkpoint truncate (allowed)           | ok                                       | ok      | recovery=none
+pass reader read pragmas (allowed)                  | ok ok ok                                 | ok      | recovery=none
+pass live plain read                                | writer_exit=0 plain={'ok': 96}           | ok      | recovery=none
+pass live plain passive ckpt                        | writer_exit=0 plain={'ok': 90}           | ok      | recovery=none
+pass live plain truncate ckpt                       | writer_exit=0 plain={'ok': 84}           | ok      | recovery=none
+pass live plain write                               | writer_exit=0 plain={'ok': 81}           | ok      | recovery=none
+pass main.db left in delete mode, then opened       | ok                                       | ok      | recovery=none
+pass s1.db left in delete mode, then opened         | ok                                       | ok      | recovery=none
+pass s2.db left in delete mode, then opened         | ok                                       | ok      | recovery=none
+pass s1 held open in delete mode                    | writer_exit=2 while held                 | ok      | recovery=none
+pass plain switches s1 to delete under a reader     | err database is locked                   | ok      | recovery=none
+pass clean set, -cwal-gate deleted                  |                                          | ok      | recovery=none
+pass clean set, -cwal-alive deleted                 |                                          | ok      | recovery=none
+pass clean set, -cwal-writer deleted                |                                          | ok      | recovery=none
+pass clean set, -cwal-live deleted                  |                                          | ok      | recovery=none
+pass clean set, -cwal-snap deleted                  |                                          | ok      | recovery=none
+pass main.db marker row changed by plain conn       | ok                                       | refused | writer-open-error ProtocolViolation
+pass main.db marker table dropped by plain conn     | ok                                       | refused | writer-open-error ProtocolViolation
+pass s1.db marker row changed by plain conn         | ok                                       | refused | writer-open-error ProtocolViolation
+pass s1.db marker table dropped by plain conn       | ok                                       | refused | writer-open-error ProtocolViolation
+pass s2.db marker row changed by plain conn         | ok                                       | refused | writer-open-error ProtocolViolation
+pass s2.db marker table dropped by plain conn       | ok                                       | ok      | recovery=none
+crashed sets (k = write-wal events 1..48): outcome counts per outsider
+  none (control)                 {'clean': 27, 'torn': 21}
+  plain open main.db             {'ok clean': 27, 'ok torn': 5, 'refused torn': 16}
+  plain open s1.db               {'ok clean': 27, 'refused torn': 13, 'ok torn': 8}
+  plain open s2.db               {'ok clean': 27, 'ok torn': 21}
+  plain truncate ckpt, closes    {'ok clean': 27, 'refused torn': 21}
+  plain write s1                 {'ok clean': 27, 'refused torn': 13, 'ok torn': 8}
+  plain passive ckpt, dies       {'ok clean': 27, 'refused torn': 21}
+  plain full ckpt, dies          {'ok clean': 27, 'refused torn': 21}
+  plain restart ckpt, dies       {'ok clean': 27, 'refused torn': 21}
+  plain ckpt+write s1, dies      {'ok clean': 27, 'refused torn': 13, 'ok torn': 8}
+  plain ckpt+write s1, no header {'ok clean': 27, 'refused torn': 13, 'ok torn': 8}
+  -cwal-snap deleted             {'ok clean': 27, 'ok torn': 21}
+  snap page junk                 {'ok clean': 27, 'ok torn': 21}
+  main.db-shm deleted            {'ok clean': 27, 'ok torn': 21}
+  s1.db-shm deleted              {'ok clean': 27, 'ok torn': 21}
+  s2.db-shm deleted              {'ok clean': 27, 'ok torn': 21}
+RESULT PASS
