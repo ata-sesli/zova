@@ -1644,7 +1644,7 @@ pub const Conn = struct {
     fn lock(fd: c_int, op: c_int) bool {
         while (true) {
             if (sys.flock(fd, op) == 0) return true;
-            if (sys.__errno_location().* != sys.EINTR) return false;
+            if (std.c._errno().* != sys.EINTR) return false;
         }
     }
 
@@ -1798,7 +1798,7 @@ pub const Conn = struct {
             if (!lock(fd, sys.LOCK_SH)) return error.Io;
             return fd;
         }
-        if (sys.__errno_location().* != sys.EWOULDBLOCK) return error.Io;
+        if (std.c._errno().* != sys.EWOULDBLOCK) return error.Io;
         // Owned: only by holders of shared locks, since the exclusive lock is
         // taken only under the gate.
         const size = fileSize(fd) orelse return error.Io;
